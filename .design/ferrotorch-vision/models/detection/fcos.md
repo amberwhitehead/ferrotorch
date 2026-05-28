@@ -213,5 +213,5 @@ Expected: 12 tests passed.
 | REQ-9 | SHIPPED | impl: `fn fcos_anchors_per_level` in `fcos.rs`; non-test consumer: `Fcos::forward` calls `fcos_anchors_per_level::<T>(&fm_sizes, (img_h, img_w))?`. |
 | REQ-10 | SHIPPED | impl: `pub struct Fcos<T>` + `Self::new` in `fcos.rs`; non-test consumer: `register_model("fcos_resnet50_fpn", ...)` at `ferrotorch-vision/src/models/registry.rs:362`. |
 | REQ-11 | SHIPPED | impl: `pub fn Fcos::forward` in `fcos.rs`; non-test consumer: `impl<T> Module<T> for Fcos<T>::forward` invokes it; the registry closure at `ferrotorch-vision/src/models/registry.rs:362` reaches it via `Module::forward`. |
-| REQ-12 | SHIPPED | impl: `impl<T> Module<T> for Fcos<T>::forward` in `fcos.rs` returns first-image scores; non-test consumer: registered as `ModelConstructor<f32>` at `ferrotorch-vision/src/models/registry.rs:362`. |
+| REQ-12 | SHIPPED | impl: `impl<T> Module<T> for Fcos<T>::forward` in `fcos.rs` returns first-image scores; non-test consumer: registered as `ModelConstructor<f32>` at `ModelConstructor in ferrotorch-vision/src/models/registry.rs`. |
 | REQ-13 | SHIPPED | impl: `pub fn fcos_resnet50_fpn` in `fcos.rs`; non-test consumer: `register_model("fcos_resnet50_fpn", ...)` at `ferrotorch-vision/src/models/registry.rs:362` calls it inside the closure. |

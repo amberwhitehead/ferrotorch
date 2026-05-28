@@ -69,7 +69,7 @@ distribution and does not support reparameterized sampling.
 - REQ-9: NOT-STARTED — `entropy` uses a Stirling-based
   approximation rather than the exact formula upstream computes
   via `Binomial.enumerate_support` + `Binomial.log_prob`. The
-  current `multinomial.rs:277-322` is a closed-form approximation
+  current `multinomial.rs` is a closed-form approximation
   (`H ≈ n * H_cat + correction(lgamma)`) good for large `n` but
   not exact. Upstream `multinomial.py:126-137` does the exact
   enumeration. Blocker #1391 tracks the exact-entropy fill-in.
@@ -112,35 +112,35 @@ pub struct Multinomial<T: Float> {
 }
 ```
 
-Defined at `multinomial.rs:30-39`. Constructor at
-`multinomial.rs:50-103` performs all validation, normalisation,
+Defined at `multinomial.rs`. Constructor at
+`multinomial.rs` performs all validation, normalisation,
 CDF construction, and log-probs precomputation. Accessors at
-`multinomial.rs:105-118`.
+`multinomial.rs`.
 
 ### The Distribution impl (REQ-4, REQ-5, REQ-6, REQ-7, REQ-8)
 
-`sample` (`multinomial.rs:122-167`) draws `n * total_count` uniform
+`sample` (`sample in multinomial.rs`) draws `n * total_count` uniform
 samples and bucket-counts them via binary search on the precomputed
 CDF. Output shape is `shape ++ [K]`.
 
-`log_prob` (`multinomial.rs:177-232`) iterates per-batch
+`log_prob` (`log_prob in multinomial.rs`) iterates per-batch
 computing `lgamma(n+1) - sum lgamma(x_k+1) + sum x_k * log_p_k`.
 Output shape is `shape[..-1]` (the `K` dim is collapsed).
 
-`mean` (`multinomial.rs:234-250`) returns
+`mean` (`mean in multinomial.rs`) returns
 `total_count * probs / sum(probs)` (normalising on the fly).
 
-`variance` (`multinomial.rs:252-275`) returns
+`variance` (`variance in multinomial.rs`) returns
 `total_count * p_k * (1 - p_k)`.
 
-`entropy` (`multinomial.rs:277-322`) uses the Stirling-based
+`entropy` (`entropy in multinomial.rs`) uses the Stirling-based
 approximation (REQ-9 divergence).
 
-`rsample` (`multinomial.rs:169-175`) returns `InvalidArgument`.
+`rsample` (`rsample in multinomial.rs`) returns `InvalidArgument`.
 
 ### Non-test production consumers
 
-- `pub use multinomial::Multinomial` at `lib.rs:112` —
+- `pub use multinomial::Multinomial` at `lib.rs` —
   grandfathered public API. Downstream language-model / topic-model
   / RL discrete-action code constructs
   `Multinomial::new(total_count, probs)?`.
@@ -196,13 +196,13 @@ Expected: `13 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct Multinomial<T: Float>` with the 5 fields at `multinomial.rs:30-39`, mirroring `torch/distributions/multinomial.py:54-79`; non-test consumer: `pub use multinomial::Multinomial` at `lib.rs:112`. |
-| REQ-2 | SHIPPED | impl: the constructor at `multinomial.rs:50-103` with 3 preconditions + normalisation + CDF + log-probs precompute, mirroring `multinomial.py:64-79`; non-test consumer: invoked via `::new` through the re-export. |
-| REQ-3 | SHIPPED | impl: `total_count()`/`probs()`/`num_categories()` accessors at `multinomial.rs:105-118`, mirroring `multinomial.py:100-110`; non-test consumer: re-export at `lib.rs:112`. |
-| REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for Multinomial<T>` at `multinomial.rs:121-323` with 6 methods, mirroring `multinomial.py:112-148`; non-test consumer: re-export at `lib.rs:112`. Tests pin behaviour. |
-| REQ-5 | SHIPPED | impl: the binary-search-on-CDF body in `sample` at `multinomial.rs:133-156`, mirroring `_categorical.sample + scatter_add_` at `multinomial.py:112-124`; non-test consumer: re-export at `lib.rs:112` + `Distribution::sample` external invocation. Test `test_multinomial_sample_sums_to_total_count` pins the invariant. |
-| REQ-6 | SHIPPED | impl: `lgamma(n+1) - sum lgamma(x_k+1) + sum x_k * log_p_k` body of `log_prob` at `multinomial.rs:199-217` using `lgamma_scalar`, mirroring `multinomial.py:139-148`; non-test consumer: re-export at `lib.rs:112` + `Distribution::log_prob` invocation. |
-| REQ-7 | SHIPPED | impl: `mean` and `variance` at `multinomial.rs:234-275` returning `total_count * p_k` and `total_count * p_k * (1 - p_k)`, mirroring `multinomial.py:56-62`; non-test consumer: re-export at `lib.rs:112` exposes them through `Distribution::mean` / `Distribution::variance`. |
-| REQ-8 | SHIPPED | impl: rsample returns `InvalidArgument("does not support reparameterized sampling")` at `multinomial.rs:169-175`; non-test consumer: re-export at `lib.rs:112`; test `test_multinomial_rsample_errors` pins it. |
-| REQ-9 | NOT-STARTED | blocker #1391 — `entropy` at `multinomial.rs:277-322` is a Stirling-based approximation, not the exact `Binomial.enumerate_support` + `Binomial.log_prob` enumeration from `multinomial.py:126-137`. |
+| REQ-1 | SHIPPED | impl: `pub struct Multinomial<T: Float>` with the 5 fields at `Multinomial in multinomial.rs`, mirroring `torch/distributions/multinomial.py:54-79`; non-test consumer: `pub use multinomial::Multinomial` at `lib.rs`. |
+| REQ-2 | SHIPPED | impl: the constructor at `new in multinomial.rs` with 3 preconditions + normalisation + CDF + log-probs precompute, mirroring `multinomial.py:64-79`; non-test consumer: invoked via `::new` through the re-export. |
+| REQ-3 | SHIPPED | impl: `total_count()`/`probs()`/`num_categories()` accessors at `num_categories in multinomial.rs`, mirroring `multinomial.py:100-110`; non-test consumer: re-export at `lib.rs`. |
+| REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for Multinomial<T>` at `multinomial.rs` with 6 methods, mirroring `multinomial.py:112-148`; non-test consumer: re-export at `lib.rs`. Tests pin behaviour. |
+| REQ-5 | SHIPPED | impl: the binary-search-on-CDF body in `sample in multinomial.rs`, mirroring `_categorical.sample + scatter_add_` at `multinomial.py:112-124`; non-test consumer: re-export at `lib.rs` + `Distribution::sample` external invocation. Test `test_multinomial_sample_sums_to_total_count` pins the invariant. |
+| REQ-6 | SHIPPED | impl: `lgamma(n+1) - sum lgamma(x_k+1) + sum x_k * log_p_k` body of `log_prob in multinomial.rs` using `lgamma_scalar`, mirroring `multinomial.py:139-148`; non-test consumer: re-export at `lib.rs` + `Distribution::log_prob` invocation. |
+| REQ-7 | SHIPPED | impl: `mean` and `variance in multinomial.rs` returning `total_count * p_k` and `total_count * p_k * (1 - p_k)`, mirroring `multinomial.py:56-62`; non-test consumer: re-export at `lib.rs` exposes them through `Distribution::mean` / `Distribution::variance`. |
+| REQ-8 | SHIPPED | impl: rsample returns `InvalidArgument("does not support reparameterized sampling")` at `test_multinomial_rsample_errors in multinomial.rs`; non-test consumer: re-export at `lib.rs`; test `test_multinomial_rsample_errors` pins it. |
+| REQ-9 | NOT-STARTED | blocker #1391 — `entropy in multinomial.rs` is a Stirling-based approximation, not the exact `Binomial.enumerate_support` + `Binomial.log_prob` enumeration from `multinomial.py:126-137`. |
 | REQ-10 | NOT-STARTED | blocker #1392 — `logits` parameterisation at `multinomial.py:101-102` not supported; `Multinomial::new` only accepts `probs`. |

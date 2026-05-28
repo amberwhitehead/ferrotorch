@@ -154,7 +154,7 @@ upstream).
 
 ### Non-test production consumers
 
-- `pub use buffer::Buffer` in `lib.rs:223` and `lib.rs:273` (prelude).
+- `pub use buffer::Buffer` in `lib.rs` and `lib.rs` (prelude).
 - `ferrotorch-nn/src/module.rs` lines 5, 374, 543:
   - line 5: `use crate::buffer::Buffer`
   - line 374: `*buf = Buffer::new(tensor.clone())` inside the
@@ -221,7 +221,7 @@ Expected: `5 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct Buffer<T: Float> { data: Tensor<T> }` with `#[derive(Debug, Clone)]` in `buffer.rs` mirroring `torch/nn/parameter.py:249-279` (R-DEV-7 newtype replacing the Tensor subclass); non-test consumer: `pub use buffer::Buffer` in `lib.rs:223` + `lib.rs:273` prelude; `ferrotorch-nn/src/module.rs:5` `use crate::buffer::Buffer`; `module.rs:374` `*buf = Buffer::new(tensor.clone())` inside the default `load_state_dict`. |
+| REQ-1 | SHIPPED | impl: `pub struct Buffer<T: Float> { data: Tensor<T> }` with `#[derive(Debug, Clone)]` in `buffer.rs` mirroring `torch/nn/parameter.py:249-279` (R-DEV-7 newtype replacing the Tensor subclass); non-test consumer: `pub use buffer::Buffer` in `lib.rs` + `lib.rs` prelude; `buffer in ferrotorch-nn/src/module.rs` `use crate::buffer::Buffer`; `module in module.rs` `*buf = Buffer::new(tensor.clone())` inside the default `load_state_dict`. |
 | REQ-2 | SHIPPED | impl: `Buffer::new(tensor)` enforces `requires_grad = false` via `tensor.requires_grad_(false)` in `buffer.rs` mirroring `torch/nn/parameter.py:266-275`; non-test consumer: `ferrotorch-nn/src/module.rs:374` calls `Buffer::new(tensor.clone())` during state-dict load — every buffer that's reloaded gets the autograd-flag downgrade. |
 | REQ-3 | SHIPPED | impl: `Buffer::zeros` / `::ones` / `::from_slice` factories in `buffer.rs`; non-test consumer: `ferrotorch-nn/src/module.rs:543` `running_mean: Buffer::zeros(&[2])?` inside the `ParentModule` test helper (matches BatchNorm's canonical init pattern that downstream `norm.rs` layers also use). |
 | REQ-4 | SHIPPED | impl: `tensor(&self) -> &Tensor<T>` and `into_tensor(self) -> Tensor<T>` accessors in `buffer.rs`; non-test consumer: `ferrotorch-nn/src/module.rs:75` `buffer.tensor().clone()` inside `Module::state_dict` default impl — every `state_dict()` call walks buffers via this accessor. |

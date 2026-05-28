@@ -95,7 +95,7 @@ The file is structured as four sections: type definitions
 
 ### `MnistSample` (REQ-1)
 
-`#[non_exhaustive]` (`mnist.rs:33`) reserves room for
+`#[non_exhaustive]` (`mnist.rs`) reserves room for
 future-per-sample metadata (e.g. `path: PathBuf` for traceability
 when sampling from a sharded loader). External code can pattern-match
 the `image` and `label` fields but cannot construct via struct
@@ -104,7 +104,7 @@ literal — the only constructors are `Mnist::synthetic` /
 
 ### `Split` (REQ-2)
 
-`Split::Train` and `Split::Test` (`mnist.rs:43-48`). `#[derive(Debug,
+`Split::Train` and `Split::Test` (`mnist.rs`). `#[derive(Debug,
 Clone, Copy, PartialEq, Eq)]` so callers can use the enum as a
 match scrutinee and compare via `==`. The `Copy` derive is load-bearing
 — the enum is taken by value in `synthetic` / `from_dir` /
@@ -113,45 +113,45 @@ match scrutinee and compare via `==`. The `Copy` derive is load-bearing
 ### `Mnist<T: Float>` (REQ-3)
 
 Fields are private: `images: Vec<Tensor<T>>`, `labels: Vec<u8>`,
-`split: Split` (`mnist.rs:58-62`). Constants `HEIGHT = 28`, `WIDTH =
+`split: Split` (`split in mnist.rs`). Constants `HEIGHT = 28`, `WIDTH =
 28`, `CHANNELS = 1`, `NUM_CLASSES = 10` are `pub const` so users can
 allocate output buffers without hard-coding dimensions
-(`mnist.rs:65-72`).
+(`mnist.rs`).
 
 ### `synthetic` (REQ-4)
 
-xorshift64 PRNG seeded from `Split` (`mnist.rs:91-94`):
+xorshift64 PRNG seeded from `Split` (`Split in mnist.rs`):
 - `Train` → `0xdead_beef_cafe_0001`
 - `Test` → `0xdead_beef_cafe_0002`
 
 The state is advanced once per pixel for the image data and once for
 the label. The label is `(state % 10) as u8`. Determinism is
-load-bearing — `test_train_test_different_data` (`mnist.rs:406-415`)
+load-bearing — `test_train_test_different_data` (`test_train_test_different_data in mnist.rs`)
 relies on the seed difference; production training pipelines that
 use `Mnist::synthetic` for smoke testing get reproducible epochs.
 
 ### `from_dir` (REQ-5, REQ-6, REQ-7)
 
-The IDX-file reader at `mnist.rs:138-276` performs:
+The IDX-file reader at `mnist.rs` performs:
 
-1. **File-existence check** (`mnist.rs:148-161`): returns an
+1. **File-existence check** (`mnist.rs`): returns an
    `InvalidArgument` referencing both filenames + the download URL
    if either file is missing. Mirrors `MNIST._check_exists`
    (`mnist.py:168-172`) but as a single error rather than a
    `RuntimeError("Dataset not found")`.
-2. **Header validation** (`mnist.rs:173-247`): minimum-length
+2. **Header validation** (`mnist.rs`): minimum-length
    checks for both files, then magic-number checks (`2051` for
    images = `0x00000803`, `2049` for labels = `0x00000801` — these
    are the IDX type codes upstream encodes in
    `SN3_PASCALVINCENT_TYPEMAP[8]` for `torch.uint8`,
    `mnist.py:498-505`).
-3. **Per-image tensor construction** (`mnist.rs:251-269`): each
+3. **Per-image tensor construction** (`mnist.rs`): each
    `pixels_per_image`-byte slab is mapped to `[T]` via
    `cast::<f64, T>(b as f64 * inv_255)` where `inv_255 = 1.0/255.0`
    is precomputed once.
 
 The IDX format is big-endian for header fields; `read_u32_be`
-(`mnist.rs:317-323`) handles the byte-swap. This is the
+(`mnist.rs`) handles the byte-swap. This is the
 ferrotorch-side equivalent of upstream's
 `if sys.byteorder == 'little' and parsed.element_size() > 1:
 parsed = _flip_byte_order(parsed)` byte-reorder at `mnist.py:538-
@@ -160,7 +160,7 @@ omits it.
 
 ### `impl Dataset for Mnist<T>` (REQ-8)
 
-`mnist.rs:284-304`: forwards `len()` to `self.images.len()` and
+`len in mnist.rs`: forwards `len()` to `self.images.len()` and
 returns `IndexOutOfBounds` for `get(index)` when `index >=
 self.images.len()`. The `Send + Sync` bound on the trait is satisfied
 because `Tensor<T>: Send + Sync` and `Vec<...>: Send + Sync`.
@@ -172,11 +172,11 @@ because `Tensor<T>: Send + Sync` and `Vec<...>: Send + Sync`.
   `let train_dataset = Mnist::<f32>::synthetic(Split::Train,
   num_samples)?;` is the canonical non-test consumer (a runnable
   training-loop example).
-- `ferrotorch-vision/src/datasets/mod.rs:12` — `pub use mnist::{Mnist,
+- `ferrotorch-vision/src/datasets/mod.rs` — `pub use mnist::{Mnist,
   MnistSample, Split};` is the re-export that propagates the type
   surface; without this re-export the `train_mnist` example would
   not compile.
-- `ferrotorch-vision/src/lib.rs:99` — `pub use datasets::{... Mnist,
+- `ferrotorch-vision/src/lib.rs` — `pub use datasets::{... Mnist,
   MnistSample, Split};` is the crate-root re-export.
 
 ## Parity contract
@@ -194,7 +194,7 @@ Edge cases preserved:
 - **Pixel normalization boundaries**: `0u8 → 0.0` exactly, `255u8 →
   1.0` exactly under IEEE 754 with rounding-to-nearest (since `255 *
   (1.0/255.0)` rounds back to `1.0`). Verified by
-  `test_from_dir_pixel_normalization_boundaries` (`mnist.rs:571-584`).
+  `test_from_dir_pixel_normalization_boundaries` (`test_from_dir_pixel_normalization_boundaries in mnist.rs`).
 - **Bad magic number**: any header field that doesn't match `2051`
   (images) or `2049` (labels) returns `InvalidArgument` with
   "magic" in the message. Tests
@@ -210,7 +210,7 @@ Edge cases preserved:
 - **Endianness**: `read_u32_be` always uses big-endian regardless of
   host byteorder, matching the IDX file format (R-DEV-3 — on-disk
   format).
-- **`Send + Sync`**: `test_is_send_sync` (`mnist.rs:424-428`)
+- **`Send + Sync`**: `test_is_send_sync` (`test_is_send_sync in mnist.rs`)
   statically asserts via `fn assert_send_sync<T: Send + Sync>() {}`.
 
 Divergences from upstream (deliberate):
@@ -230,7 +230,7 @@ Divergences from upstream (deliberate):
 ## Verification
 
 Unit tests in `mod tests` of `ferrotorch-vision/src/datasets/mnist.rs`
-(`mnist.rs:326-764`):
+(`mnist.rs`):
 
 - `test_synthetic_train_len` / `test_synthetic_test_len` /
   `test_synthetic_empty` — basic length contract.
@@ -266,11 +266,11 @@ Expected: ~22 passed.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `#[non_exhaustive] pub struct MnistSample<T: Float>` at `ferrotorch-vision/src/datasets/mnist.rs:32-39` (image + label fields) per upstream `torchvision/datasets/mnist.py:131-151` `__getitem__` returning `(img, target)`; non-test consumer: `Mnist::get` at `ferrotorch-vision/src/datasets/mnist.rs:291-303` constructs `MnistSample` and the type is re-exported at `ferrotorch-vision/src/datasets/mod.rs:12` for downstream training pipelines. |
+| REQ-1 | SHIPPED | impl: `#[non_exhaustive] pub struct MnistSample<T: Float>` at `MnistSample in ferrotorch-vision/src/datasets/mnist.rs` (image + label fields) per upstream `torchvision/datasets/mnist.py:131-151` `__getitem__` returning `(img, target)`; non-test consumer: `Mnist::get` at `get in ferrotorch-vision/src/datasets/mnist.rs` constructs `MnistSample` and the type is re-exported at `ferrotorch-vision/src/datasets/mod.rs` for downstream training pipelines. |
 | REQ-2 | SHIPPED | impl: `pub enum Split { Train, Test }` at `ferrotorch-vision/src/datasets/mnist.rs:43-48` per upstream `torchvision/datasets/mnist.py:87` `train: bool = True` kwarg (R-DEV-5 typestate replacement of bool); non-test consumer: `Split::Train` is matched in `Mnist::synthetic` at `ferrotorch-vision/src/datasets/mnist.rs:91-94`, `from_dir` at `ferrotorch-vision/src/datasets/mnist.rs:140-143`, and `use ferrotorch_vision::{Mnist, Split};` at `ferrotorch/examples/train_mnist.rs:22` is the binary-target consumer. |
-| REQ-3 | SHIPPED | impl: `#[derive(Debug)] pub struct Mnist<T: Float>` at `ferrotorch-vision/src/datasets/mnist.rs:57-62` per upstream `class MNIST(VisionDataset)` at `torchvision/datasets/mnist.py:20`; non-test consumer: `let train_dataset = Mnist::<f32>::synthetic(...)` at `ferrotorch/examples/train_mnist.rs:60` constructs the struct. |
-| REQ-4 | SHIPPED | impl: `pub fn synthetic(split: Split, num_samples: usize) -> FerrotorchResult<Self>` at `ferrotorch-vision/src/datasets/mnist.rs:86-124` using xorshift64 + per-split seeds; non-test consumer: `Mnist::<f32>::synthetic(Split::Train, num_samples)?` at `ferrotorch/examples/train_mnist.rs:60` is the runnable example consumer. |
-| REQ-5 | SHIPPED | impl: `pub fn from_dir<P: AsRef<Path>>(root: P, split: Split) -> FerrotorchResult<Self>` at `ferrotorch-vision/src/datasets/mnist.rs:138-276` reading the four canonical IDX files per upstream `torchvision/datasets/mnist.py:122-129` `MNIST._load_data`; non-test consumer: re-exported via `ferrotorch-vision/src/datasets/mod.rs:12` + `ferrotorch-vision/src/lib.rs:99` for use in training-driver scripts (the train_mnist example consumes the constructor surface; switching the example from synthetic to from_dir is a one-line change). |
+| REQ-3 | SHIPPED | impl: `#[derive(Debug)] pub struct Mnist<T: Float>` at `Mnist in ferrotorch-vision/src/datasets/mnist.rs` per upstream `class MNIST(VisionDataset)` at `torchvision/datasets/mnist.py:20`; non-test consumer: `let train_dataset = Mnist::<f32>::synthetic(...)` at `synthetic in ferrotorch/examples/train_mnist.rs` constructs the struct. |
+| REQ-4 | SHIPPED | impl: `pub fn synthetic(split: Split, num_samples: usize) -> FerrotorchResult<Self>` at `synthetic in ferrotorch-vision/src/datasets/mnist.rs` using xorshift64 + per-split seeds; non-test consumer: `Mnist::<f32>::synthetic(Split::Train, num_samples)?` at `ferrotorch/examples/train_mnist.rs` is the runnable example consumer. |
+| REQ-5 | SHIPPED | impl: `pub fn from_dir<P: AsRef<Path>>(root: P, split: Split) -> FerrotorchResult<Self>` at `MNIST in ferrotorch-vision/src/datasets/mnist.rs` reading the four canonical IDX files per upstream `torchvision/datasets/mnist.py:122-129` `MNIST._load_data`; non-test consumer: re-exported via `ferrotorch-vision/src/datasets/mod.rs` + `ferrotorch-vision/src/lib.rs` for use in training-driver scripts (the train_mnist example consumes the constructor surface; switching the example from synthetic to from_dir is a one-line change). |
 | REQ-6 | SHIPPED | impl: IDX header validation at `ferrotorch-vision/src/datasets/mnist.rs:173-247` with magic checks (`2051` for images, `2049` for labels), length checks, and count-match check per upstream `torchvision/datasets/mnist.py:508-560` `read_sn3_pascalvincent_tensor` + `read_image_file` + `read_label_file`; non-test consumer: `Mnist::from_dir` at `ferrotorch-vision/src/datasets/mnist.rs:138-276` is the in-crate caller of the validation logic (the validation is inlined, so the function itself is the consumer). |
 | REQ-7 | SHIPPED | impl: pixel normalization at `ferrotorch-vision/src/datasets/mnist.rs:250-261` with `inv_255 = 1.0_f64 / 255.0` and `cast::<f64, T>(b as f64 * inv_255)` per upstream `torchvision.transforms.functional.to_tensor` chain; non-test consumer: `Mnist::from_dir` at `ferrotorch-vision/src/datasets/mnist.rs:138-276` invokes this normalization on every loaded image. |
 | REQ-8 | SHIPPED | impl: `impl<T: Float + 'static> Dataset for Mnist<T>` at `ferrotorch-vision/src/datasets/mnist.rs:284-304` with `len`/`is_empty`/`get` per `ferrotorch_data::Dataset` trait, returning `IndexOutOfBounds` on OOB access; non-test consumer: `let train_dataset = Mnist::<f32>::synthetic(...)?;` at `ferrotorch/examples/train_mnist.rs:60` followed by trait-driven iteration is the production consumer of the `Dataset` impl (the example uses `Mnist` through the dataset trait via the loader pipeline). |

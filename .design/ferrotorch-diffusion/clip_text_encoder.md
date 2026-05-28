@@ -53,64 +53,64 @@ directly into the UNet's cross-attention (no pooling).
 
 - [x] AC-1: `ClipTextConfig::default()` equals `sd_v1_5()` and
   `validate()` passes (see config block at
-  `clip_text_encoder.rs:122..184`).
+  `clip_text_encoder.rs`).
 - [x] AC-2: `ClipSelfAttention` carries q/k/v/out projections, each
-  with bias (`clip_text_encoder.rs:470..504`).
+  with bias (`clip_text_encoder.rs`).
 - [x] AC-3: `ClipMlp` instantiates `GELU` with
-  `GeluApproximate::Sigmoid` (`clip_text_encoder.rs:645..670`).
+  `GeluApproximate::Sigmoid` (`clip_text_encoder.rs`).
 - [x] AC-4: `ClipTextEncoder::forward_from_ids` returns the
-  `[1, S, hidden_size]` shape (`clip_text_encoder.rs:1063..1067`).
+  `[1, S, hidden_size]` shape (`clip_text_encoder.rs`).
 - [x] AC-5: `load_hf_state_dict` strips the `text_model.` prefix
   and drops `embeddings.position_ids`
-  (`clip_text_encoder.rs:1138..1181`).
+  (`clip_text_encoder.rs`).
 
 ## Architecture
 
-- `ClipTextConfig` (`clip_text_encoder.rs:104..120`) — seven fields
+- `ClipTextConfig` (`ClipTextConfig in clip_text_encoder.rs`) — seven fields
   mirroring the HF `CLIPTextConfig`. `head_dim()` is derived
   (`hidden_size / num_attention_heads`).
-- `ClipTextEmbeddings<T>` (`clip_text_encoder.rs:298..305`) — two
+- `ClipTextEmbeddings<T>` (`ClipTextEmbeddings in clip_text_encoder.rs`) — two
   `Embedding<T>` fields (token + position). `forward_from_ids`
   builds the float-encoded id tensor (matching the
   `BertEmbeddings::float_index_tensor` trick) and sums the two
   lookups.
-- `ClipSelfAttention<T>` (`clip_text_encoder.rs:470..483`) — four
+- `ClipSelfAttention<T>` (`ClipSelfAttention in clip_text_encoder.rs`) — four
   `Linear<T>` projections, all with bias.
-  Forward at `clip_text_encoder.rs:506..` uses
+  Forward at `clip_text_encoder.rs` uses
   `reshape_to_heads` + `standard_attention(..., causal=true)` +
   `transpose_heads_to_2d` from `ferrotorch-nn`. The
   `standard_attention(q, k, v, causal=true)` call is what enforces
   the upper-triangular `-inf` mask.
-- `ClipMlp<T>` (`clip_text_encoder.rs:645..652`) — two `Linear<T>`
+- `ClipMlp<T>` (`ClipMlp in clip_text_encoder.rs`) — two `Linear<T>`
   + `GELU::with_approximate(GeluApproximate::Sigmoid)`. Forward at
-  `clip_text_encoder.rs:672..` applies the standard
+  `clip_text_encoder.rs` applies the standard
   `fc1 → quick_gelu → fc2` recipe.
-- `ClipEncoderLayer<T>` (`clip_text_encoder.rs:759..769`) — two
+- `ClipEncoderLayer<T>` (`ClipEncoderLayer in clip_text_encoder.rs`) — two
   `LayerNorm` + one `ClipSelfAttention` + one `ClipMlp`. Forward at
-  `clip_text_encoder.rs:788..`.
-- `ClipEncoder<T>` (`clip_text_encoder.rs:891..895`) holds a
+  `clip_text_encoder.rs`.
+- `ClipEncoder<T>` (`ClipEncoder in clip_text_encoder.rs`) holds a
   `Vec<ClipEncoderLayer<T>>` of length
   `num_hidden_layers` (12 for SD-1.5).
-- `ClipTextEncoder<T>` (`clip_text_encoder.rs:1017..1028`) — top
+- `ClipTextEncoder<T>` (`ClipTextEncoder in clip_text_encoder.rs`) — top
   composite: `embeddings`, `encoder`, `final_layer_norm`, plus a
   frozen copy of the config. `forward_from_ids`
-  (`clip_text_encoder.rs:1063..1067`) is the canonical entry point.
-- `load_hf_state_dict` (`clip_text_encoder.rs:1138..1181`) handles
+  (`clip_text_encoder.rs`) is the canonical entry point.
+- `load_hf_state_dict` (`load_hf_state_dict in clip_text_encoder.rs`) handles
   the HF prefix-strip + position_ids drop.
 
 Non-test production consumers:
 
-- `ferrotorch-diffusion/src/pipeline.rs:29` imports
-  `ClipTextEncoder` and `pipeline.rs:101..103`'s `encode_prompt`
+- `ferrotorch-diffusion/src/pipeline.rs` imports
+  `ClipTextEncoder` and `pipeline in pipeline.rs`'s `encode_prompt`
   calls `self.text_encoder.forward_from_ids(input_ids)`.
-- `ferrotorch-diffusion/src/safetensors_loader.rs:17` imports
+- `ferrotorch-diffusion/src/safetensors_loader.rs` imports
   `ClipTextConfig` and `ClipTextEncoder`;
-  `load_clip_text_encoder` at `safetensors_loader.rs:248+` builds
+  `load_clip_text_encoder` at `safetensors_loader.rs` builds
   the encoder from the HF checkpoint.
-- `ferrotorch-diffusion/src/gpu/clip.rs:68` imports
+- `ferrotorch-diffusion/src/gpu/clip.rs` imports
   `ClipTextConfig` and `ClipTextEncoder`;
   `GpuClipTextEncoder::from_module(cpu, device)` at
-  `gpu/clip.rs:343` builds the GPU mirror from a CPU
+  `gpu in gpu/clip.rs` builds the GPU mirror from a CPU
   `ClipTextEncoder`.
 - `ferrotorch-hub/src/registry.rs` re-references the encoder
   through `ferrotorch_diffusion::ClipTextEncoder`.
@@ -154,11 +154,11 @@ No parity-sweep ops apply.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `ClipTextConfig` at `ferrotorch-diffusion/src/clip_text_encoder.rs:104..184`; non-test consumer: `ferrotorch-diffusion/src/safetensors_loader.rs:17` imports `ClipTextConfig` and `load_clip_text_encoder` at `safetensors_loader.rs:272` consumes it to construct the encoder |
-| REQ-2 | SHIPPED | impl: `ClipTextEmbeddings` at `ferrotorch-diffusion/src/clip_text_encoder.rs:298..453`; non-test consumer: `ClipTextEncoder::forward_from_ids` at `ferrotorch-diffusion/src/clip_text_encoder.rs:1064` calls `self.embeddings.forward_from_ids(input_ids)?`, which `pipeline.rs:101..103` invokes |
-| REQ-3 | SHIPPED | impl: `ClipSelfAttention` at `ferrotorch-diffusion/src/clip_text_encoder.rs:470..636` with `standard_attention(..., causal=true)` at `clip_text_encoder.rs:543`; non-test consumer: `ClipEncoderLayer` at `ferrotorch-diffusion/src/clip_text_encoder.rs:759..887` consumes it and `pipeline.rs:101..103` reaches it transitively |
-| REQ-4 | SHIPPED | impl: `ClipMlp` at `ferrotorch-diffusion/src/clip_text_encoder.rs:645..748` using `GELU::with_approximate(GeluApproximate::Sigmoid)`; non-test consumer: `ClipEncoderLayer` consumes it and the encode path reaches it transitively from `pipeline.rs:101..103` |
-| REQ-5 | SHIPPED | impl: `ClipEncoderLayer` at `ferrotorch-diffusion/src/clip_text_encoder.rs:759..887`; non-test consumer: `ClipEncoder` at `ferrotorch-diffusion/src/clip_text_encoder.rs:891..998` chains `Vec<ClipEncoderLayer>` and is reached from `pipeline.rs:101..103` |
-| REQ-6 | SHIPPED | impl: `ClipEncoder::new` at `ferrotorch-diffusion/src/clip_text_encoder.rs:897..914` and forward at `clip_text_encoder.rs:916..998`; non-test consumer: `ClipTextEncoder::forward_from_ids` at `ferrotorch-diffusion/src/clip_text_encoder.rs:1065` calls `self.encoder.forward(&h)?` |
-| REQ-7 | SHIPPED | impl: `ClipTextEncoder::forward_from_ids` at `ferrotorch-diffusion/src/clip_text_encoder.rs:1063..1067`; non-test consumer: `ferrotorch-diffusion/src/pipeline.rs:102` calls `self.text_encoder.forward_from_ids(input_ids)` inside `encode_prompt` |
+| REQ-1 | SHIPPED | impl: `ClipTextConfig in ferrotorch-diffusion/src/clip_text_encoder.rs`; non-test consumer: `load_clip_text_encoder in ferrotorch-diffusion/src/safetensors_loader.rs` imports `ClipTextConfig` and `load_clip_text_encoder` at `safetensors_loader.rs` consumes it to construct the encoder |
+| REQ-2 | SHIPPED | impl: `ClipTextEmbeddings in ferrotorch-diffusion/src/clip_text_encoder.rs`; non-test consumer: `ClipTextEncoder::forward_from_ids` at `forward_from_ids in ferrotorch-diffusion/src/clip_text_encoder.rs` calls `self.embeddings.forward_from_ids(input_ids)?`, which `pipeline in pipeline.rs` invokes |
+| REQ-3 | SHIPPED | impl: `ClipSelfAttention in ferrotorch-diffusion/src/clip_text_encoder.rs` with `standard_attention(..., causal=true)` at `standard_attention in clip_text_encoder.rs`; non-test consumer: `ClipEncoderLayer in ferrotorch-diffusion/src/clip_text_encoder.rs` consumes it and `pipeline in pipeline.rs` reaches it transitively |
+| REQ-4 | SHIPPED | impl: `ClipMlp in ferrotorch-diffusion/src/clip_text_encoder.rs` using `GELU::with_approximate(GeluApproximate::Sigmoid)`; non-test consumer: `ClipEncoderLayer` consumes it and the encode path reaches it transitively from `pipeline in pipeline.rs` |
+| REQ-5 | SHIPPED | impl: `ClipEncoderLayer in ferrotorch-diffusion/src/clip_text_encoder.rs`; non-test consumer: `ClipEncoder in ferrotorch-diffusion/src/clip_text_encoder.rs` chains `Vec<ClipEncoderLayer>` and is reached from `pipeline in pipeline.rs` |
+| REQ-6 | SHIPPED | impl: `ClipEncoder::new` at `new in ferrotorch-diffusion/src/clip_text_encoder.rs` and forward at `new in clip_text_encoder.rs`; non-test consumer: `ClipTextEncoder::forward_from_ids` at `forward_from_ids in ferrotorch-diffusion/src/clip_text_encoder.rs` calls `self.encoder.forward(&h)?` |
+| REQ-7 | SHIPPED | impl: `ClipTextEncoder::forward_from_ids` at `forward_from_ids in ferrotorch-diffusion/src/clip_text_encoder.rs`; non-test consumer: `forward_from_ids in ferrotorch-diffusion/src/pipeline.rs` calls `self.text_encoder.forward_from_ids(input_ids)` inside `encode_prompt` |
 | REQ-8 | SHIPPED | impl: `load_hf_state_dict` at `ferrotorch-diffusion/src/clip_text_encoder.rs:1138..1181`; non-test consumer: `ferrotorch-diffusion/src/safetensors_loader.rs:272..` `load_clip_text_encoder` calls it to wire the HF checkpoint into the encoder |

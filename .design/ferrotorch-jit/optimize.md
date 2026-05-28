@@ -179,15 +179,15 @@ a single tensor.
 
 - `pub use optimize::{OptimizationConfig, optimize}` at
   `ferrotorch-jit/src/lib.rs:112` — grandfathered public API.
-- `ferrotorch-jit/src/module.rs:17` `use crate::optimize::
+- `ferrotorch-jit/src/module.rs` `use crate::optimize::
   {OptimizationConfig, optimize};` — `pub fn compile_with_config`
   calls `optimize(&mut graph, &config.optimization)?` before
   codegen.
-- `ferrotorch-jit/src/aot_autograd.rs:19` `use
+- `ferrotorch-jit/src/aot_autograd.rs` `use
   crate::optimize::{OptimizationConfig, optimize};` —
   `pub fn compile_aot` runs optimization on the decomposed
   forward + backward graphs.
-- `ferrotorch-jit/src/symbolic.rs:65` `use
+- `ferrotorch-jit/src/symbolic.rs` `use
   crate::optimize::{OptimizationConfig, optimize};` —
   `compile_symbolic` reruns optimization for each symbolic shape
   specialisation.
@@ -239,8 +239,8 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct OptimizationConfig` + `impl Default for OptimizationConfig` in `optimize.rs`; non-test consumer: re-export at `ferrotorch-jit/src/lib.rs:112` + `ferrotorch-jit/src/module.rs:17` `use crate::optimize::{OptimizationConfig, optimize};` + `ferrotorch-jit/src/aot_autograd.rs:19` + `ferrotorch-jit/src/symbolic.rs:65`. |
-| REQ-2 | SHIPPED | impl: `pub fn optimize` in `optimize.rs`; non-test consumer: `ferrotorch-jit/src/module.rs::compile_with_config` calls `optimize(&mut graph, &config.optimization)?` + `aot_autograd.rs` calls `optimize(&mut forward, &config)?` on the decomposed graphs + `symbolic.rs::compile_symbolic` + `graph_break.rs:27`. |
+| REQ-1 | SHIPPED | impl: `pub struct OptimizationConfig` + `impl Default for OptimizationConfig` in `optimize.rs`; non-test consumer: re-export at `optimize in ferrotorch-jit/src/lib.rs` + `optimize in ferrotorch-jit/src/module.rs` `use crate::optimize::{OptimizationConfig, optimize};` + `optimize in ferrotorch-jit/src/aot_autograd.rs` + `optimize in ferrotorch-jit/src/symbolic.rs`. |
+| REQ-2 | SHIPPED | impl: `pub fn optimize` in `optimize.rs`; non-test consumer: `ferrotorch-jit/src/module.rs::compile_with_config` calls `optimize(&mut graph, &config.optimization)?` + `aot_autograd.rs` calls `optimize(&mut forward, &config)?` on the decomposed graphs + `symbolic.rs::compile_symbolic` + `graph_break in graph_break.rs`. |
 | REQ-3 | SHIPPED | impl: `pub fn constant_fold` in `optimize.rs`; non-test consumer: invoked by `pub fn optimize` when `config.constant_folding` is true; that public fn is called from all four downstream modules (module / aot_autograd / symbolic / graph_break). |
 | REQ-4 | SHIPPED | impl: `pub fn dead_code_eliminate` in `optimize.rs`; non-test consumer: invoked by `pub fn optimize` when `config.dead_code_elimination` is true + also chained at the tail of `constant_fold` per #885 (so it runs at least once whenever CF runs). |
 | REQ-5 | SHIPPED | impl: `pub fn pattern_fuse` delegating to `fn fuse_linear_activation` + `fn fuse_attention_pattern` in `optimize.rs`; non-test consumer: invoked by `pub fn optimize` when `config.operator_fusion` is true. |

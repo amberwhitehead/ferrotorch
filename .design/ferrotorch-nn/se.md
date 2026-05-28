@@ -163,12 +163,12 @@ The test `se_is_send_sync` pins this.
 ### Non-test production consumers
 
 - `pub use se::SqueezeExcitation` at
-  `ferrotorch-nn/src/lib.rs:247` — grandfathered public API
+  `ferrotorch-nn/src/lib.rs` — grandfathered public API
   surface.
-- `ferrotorch-vision/src/models/mobilenet.rs:56` — `use
+- `ferrotorch-vision/src/models/mobilenet.rs` — `use
   ferrotorch_nn::se::SqueezeExcitation` in the MobileNet V3 build
   path (with `ReLU + HardSigmoid`).
-- `ferrotorch-vision/src/models/efficientnet.rs:39` — `use
+- `ferrotorch-vision/src/models/efficientnet.rs` — `use
   ferrotorch_nn::se::SqueezeExcitation` in the EfficientNet build
   path (with `SiLU + Sigmoid`).
 
@@ -219,13 +219,13 @@ Expected: 9 tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct SqueezeExcitation<T: Float>` in `se.rs`; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:247` + `ferrotorch-vision/src/models/mobilenet.rs:56` + `ferrotorch-vision/src/models/efficientnet.rs:39`. |
-| REQ-2 | SHIPPED | impl: `pub fn new` on `SqueezeExcitation` in `se.rs` (delegates to `new_with_activations`); non-test consumer: re-export at `lib.rs:247` + the two vision-side consumers from REQ-1. |
-| REQ-3 | SHIPPED | impl: `pub fn new_with_activations` on `SqueezeExcitation` in `se.rs`; non-test consumer: `ferrotorch-vision/src/models/mobilenet.rs:56` uses `HardSigmoid` scale; `efficientnet.rs:39` uses `Sigmoid`. |
-| REQ-4 | SHIPPED | impl: `pub fn forward` on `SqueezeExcitation` in `se.rs`; non-test consumer: re-export at `lib.rs:247` + MobileNetV3 and EfficientNet forward paths. |
-| REQ-5 | SHIPPED | impl: `impl<T: Float> Module<T> for SqueezeExcitation<T>` with `parameters`, `parameters_mut`, `named_parameters` in `se.rs`; non-test consumer: re-export at `lib.rs:247` + state-dict loading in `mobilenet.rs:56` / `efficientnet.rs:39`. |
-| REQ-6 | SHIPPED | impl: `fn children` and `fn named_children` inside the Module impl in `se.rs`; non-test consumer: re-export at `lib.rs:247`. |
-| REQ-7 | SHIPPED | impl: `fn train` / `fn eval` inside the Module impl in `se.rs` (forwards to both boxed activations); non-test consumer: re-export at `lib.rs:247`. |
-| REQ-8 | SHIPPED | impl: `impl<T: Float> std::fmt::Debug for SqueezeExcitation<T>` in `se.rs`; non-test consumer: re-export at `lib.rs:247`. |
-| REQ-9 | SHIPPED | impl: forward body composes only differentiable primitives (Conv2d, AdaptiveAvgPool2d, dyn Module activations, mul) in `se.rs`; non-test consumer: re-export at `lib.rs:247` — autograd traces through the composition without a custom GradFn. |
-| REQ-10 | SHIPPED | impl: `Send + Sync` bound is automatic from Conv2d + boxed activation bounds; pinned by `se_is_send_sync` in `mod tests`; non-test consumer: re-export at `lib.rs:247`. |
+| REQ-1 | SHIPPED | impl: `pub struct SqueezeExcitation<T: Float>` in `se.rs`; non-test consumer: re-export at `se in ferrotorch-nn/src/lib.rs` + `se in ferrotorch-vision/src/models/mobilenet.rs` + `se in ferrotorch-vision/src/models/efficientnet.rs`. |
+| REQ-2 | SHIPPED | impl: `pub fn new` on `SqueezeExcitation` in `se.rs` (delegates to `new_with_activations`); non-test consumer: re-export at `lib.rs` + the two vision-side consumers from REQ-1. |
+| REQ-3 | SHIPPED | impl: `pub fn new_with_activations` on `SqueezeExcitation` in `se.rs`; non-test consumer: `new_with_activations in ferrotorch-vision/src/models/mobilenet.rs` uses `HardSigmoid` scale; `efficientnet in efficientnet.rs` uses `Sigmoid`. |
+| REQ-4 | SHIPPED | impl: `pub fn forward` on `SqueezeExcitation` in `se.rs`; non-test consumer: re-export at `lib.rs` + MobileNetV3 and EfficientNet forward paths. |
+| REQ-5 | SHIPPED | impl: `impl<T: Float> Module<T> for SqueezeExcitation<T>` with `parameters`, `parameters_mut`, `named_parameters` in `se.rs`; non-test consumer: re-export at `lib.rs` + state-dict loading in `mobilenet in mobilenet.rs` / `efficientnet in efficientnet.rs`. |
+| REQ-6 | SHIPPED | impl: `fn children` and `fn named_children` inside the Module impl in `se.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-7 | SHIPPED | impl: `fn train` / `fn eval` inside the Module impl in `se.rs` (forwards to both boxed activations); non-test consumer: re-export at `lib.rs`. |
+| REQ-8 | SHIPPED | impl: `impl<T: Float> std::fmt::Debug for SqueezeExcitation<T>` in `se.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-9 | SHIPPED | impl: forward body composes only differentiable primitives (Conv2d, AdaptiveAvgPool2d, dyn Module activations, mul) in `se.rs`; non-test consumer: re-export at `lib.rs` — autograd traces through the composition without a custom GradFn. |
+| REQ-10 | SHIPPED | impl: `Send + Sync` bound is automatic from Conv2d + boxed activation bounds; pinned by `se_is_send_sync` in `mod tests`; non-test consumer: re-export at `lib.rs`. |

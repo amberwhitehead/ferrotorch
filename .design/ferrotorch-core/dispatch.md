@@ -74,7 +74,7 @@ CL-397.
 
 - [x] AC-1: `DispatchKey` priority ordering: `Tracer > Autograd >
   Autocast > Cpu` (verified by `dispatch_key_priority_ordering` at
-  `dispatch.rs:422`).
+  `dispatch in dispatch.rs`).
 - [x] AC-2: `DispatchKey::ALL` has 11 keys, no duplicates (verified by
   `dispatch_key_all_contains_every_key` at `dispatch.rs:431`).
 - [x] AC-3: `DispatchKeySet::from([Cpu, Autograd])` contains both
@@ -95,7 +95,7 @@ CL-397.
   and `dispatcher_full_three_layer_stack` at `:691` — `Tracer → Autograd
   → Cpu`).
 - [x] AC-10: `Dispatcher::call_direct` bypasses priority
-  (`dispatcher_call_direct_bypasses_priority` at `:648`).
+  (`dispatcher_call_direct_bypasses_priority in dispatch.rs`).
 - [x] AC-11: The set / union / intersection / remove laws hold (
   `dispatch_key_set_union_and_intersection` at `:501`,
   `dispatch_key_set_remove` at `:462`).
@@ -222,7 +222,7 @@ the autograd-as-a-key migration lands, a tensor with
 Autograd-registered kernel first (which records a backward node), then
 redispatch with `{Cpu}` only, which fires the CPU `add_f32` kernel. The
 two-test characterization at `dispatcher_full_three_layer_stack`
-(`:691`) is the explicit pinning of this protocol.
+(`ferrotorch-core/src/lib.rs`) is the explicit pinning of this protocol.
 
 ## Verification
 
@@ -246,8 +246,8 @@ Expected: 15 tests pass, 0 failed. Tests cover:
 | REQ-2 | SHIPPED | impl: `pub struct DispatchKeySet { bits: u16 }` at `ferrotorch-core/src/dispatch.rs:137-251` with O(1) membership / insert / remove / union / intersection. Non-test production consumer: `Dispatcher::call` at `dispatch.rs:344` walks `keyset.iter_desc()`; `Dispatcher::call_direct` at `:374` takes the same `keyset`; both are the production lookup paths. |
 | REQ-3 | SHIPPED | impl: `DispatchKey::priority(self) -> u8` at `ferrotorch-core/src/dispatch.rs:113` via `self as u8`. Non-test production consumer: `DispatchKeySet::insert` at `dispatch.rs:172` shifts by `key.priority()` to compute the bit position; `iter_desc` at `:235` walks the priority bits descendingly. |
 | REQ-4 | SHIPPED | impl: `DispatchKeySet::highest` at `ferrotorch-core/src/dispatch.rs:220` and `iter_desc` at `:235`. Non-test production consumer: `Dispatcher::call` at `dispatch.rs:357` iterates `keyset.iter_desc()` to resolve the next key in descending priority — this IS the dispatch resolution algorithm. |
-| REQ-5 | SHIPPED | impl: `pub struct Dispatcher<T: Float>` at `ferrotorch-core/src/dispatch.rs:298` and `Dispatcher::register` at `:312`, `Dispatcher::call` at `:344`. The HashMap-based kernel table with priority-walking is the upstream `c10::Dispatcher::callBoxedForDispatchKey` analog (`aten/src/ATen/core/dispatch/Dispatcher.h`). Non-test production consumer: `ferrotorch-core/src/lib.rs:152` re-exports `Dispatcher` and `Kernel` for downstream registering crates; R-DEFER-1 S5 grandfathering applies — the boundary IS the public API; registering-crate follow-up tracked at #1530. |
+| REQ-5 | SHIPPED | impl: `pub struct Dispatcher<T: Float>` at `Dispatcher in ferrotorch-core/src/dispatch.rs` and `Dispatcher::register` at `register in ferrotorch-core/src/dispatch.rs`, `Dispatcher::call` at `call in ferrotorch-core/src/dispatch.rs`. The HashMap-based kernel table with priority-walking is the upstream `c10::Dispatcher::callBoxedForDispatchKey` analog (`aten/src/ATen/core/dispatch/Dispatcher.h`). Non-test production consumer: `ferrotorch-core/src/lib.rs` re-exports `Dispatcher` and `Kernel` for downstream registering crates; R-DEFER-1 S5 grandfathering applies — the boundary IS the public API; registering-crate follow-up tracked at #1530. |
 | REQ-6 | SHIPPED | impl: `Dispatcher::call_direct` at `ferrotorch-core/src/dispatch.rs:374-390`. Non-test production consumer: re-exported via `lib.rs:152` for downstream callers that want to bypass priority resolution; the in-tree contract is pinned by the 10-test integration suite. |
 | REQ-7 | SHIPPED | impl: `Err(FerrotorchError::InvalidArgument { message: format!("Dispatcher::call({op_name}): ...") })` at `ferrotorch-core/src/dispatch.rs:351` (empty keyset) and `:362` (no kernel). R-CODE-2 compliant: no `panic!`, no `unwrap()`, no `expect()` in the production path. Non-test production consumer: `FerrotorchResult<Tensor<T>>` propagates the structured error through any caller of `Dispatcher::call`. |
-| REQ-8 | SHIPPED | impl: `pub type Kernel<T> = Box<dyn Fn(...) -> FerrotorchResult<Tensor<T>> + Send + Sync>` at `ferrotorch-core/src/dispatch.rs:287-291`. Non-test production consumer: every `register(...)` call in the test suite + `lib.rs:152` re-export uses the type alias as the kernel-shape contract. The `Send + Sync` bound is what makes the dispatcher safe to share across threads. |
-| REQ-9 | SHIPPED | impl: `pub struct Dispatcher<T: Float>` at `ferrotorch-core/src/dispatch.rs:298` is generic over the tensor element type. R-DEV-7 deviation from upstream's runtime `ScalarType` tag. Non-test production consumer: `lib.rs:152` re-exports both `Dispatcher` and `Kernel` parameterized on `T`, so downstream crates instantiate `Dispatcher<f32>`, `Dispatcher<f64>`, … one per dtype. |
+| REQ-8 | SHIPPED | impl: `pub type Kernel<T> = Box<dyn Fn(...) -> FerrotorchResult<Tensor<T>> + Send + Sync>` at `register in ferrotorch-core/src/dispatch.rs`. Non-test production consumer: every `register(...)` call in the test suite + `lib.rs` re-export uses the type alias as the kernel-shape contract. The `Send + Sync` bound is what makes the dispatcher safe to share across threads. |
+| REQ-9 | SHIPPED | impl: `pub struct Dispatcher<T: Float>` at `Dispatcher in ferrotorch-core/src/dispatch.rs` is generic over the tensor element type. R-DEV-7 deviation from upstream's runtime `ScalarType` tag. Non-test production consumer: `lib.rs` re-exports both `Dispatcher` and `Kernel` parameterized on `T`, so downstream crates instantiate `Dispatcher<f32>`, `Dispatcher<f64>`, … one per dtype. |

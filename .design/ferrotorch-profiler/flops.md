@@ -88,7 +88,7 @@ certainly a bug.
 
 ### Match table (REQ-2, REQ-3, REQ-4, REQ-5, REQ-6)
 
-The `match op_name` block at `flops.rs:42` is the dispatch table.
+The `match op_name` block at `flops in flops.rs` is the dispatch table.
 Each arm calls one of five private helpers:
 
 - `elementwise_binary(shapes)` — broadcast-aware numel max.
@@ -112,12 +112,12 @@ PyTorch convention.
 
 ### Non-test production consumers
 
-- `ferrotorch-profiler/src/profiler.rs:6` `use crate::flops;` —
+- `ferrotorch-profiler/src/profiler.rs` `use crate::flops;` —
   imported at module scope so `profiler::Profiler::record` (line 113)
   and `OpProfiler::record_op` (line 384) can call
   `flops::estimate(name, &input_shapes_vec)` to populate the
   `ProfileEvent::flops` field when shapes are recorded.
-- `ferrotorch-profiler/src/lib.rs:30` `pub mod flops;` — re-exported
+- `pub in ferrotorch-profiler/src/lib.rs` `pub mod flops;` — re-exported
   at the crate root so user code can call
   `ferrotorch_profiler::flops::estimate(...)` directly when building
   custom rollup logic outside the standard `with_profiler` flow.
@@ -177,10 +177,10 @@ Expected: `13 passed; 0 failed` for `flops::tests`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `#[must_use] pub fn estimate` at `ferrotorch-profiler/src/flops.rs:41` mirroring `torch/autograd/profiler.py:219` `with_flops=True` contract; non-test consumer: `ferrotorch-profiler/src/profiler.rs:113` `flops::estimate(name, &input_shapes_vec)` inside `Profiler::record` and `ferrotorch-profiler/src/profiler.rs:381` inside `OpProfiler::record_op` (called from `ferrotorch-core/src/grad_fns/arithmetic.rs:388` etc. on every tensor op when a profiler is active). |
+| REQ-1 | SHIPPED | impl: `#[must_use] pub fn estimate` at `estimate in ferrotorch-profiler/src/flops.rs` mirroring `torch/autograd/profiler.py:219` `with_flops=True` contract; non-test consumer: `estimate in ferrotorch-profiler/src/profiler.rs` `flops::estimate(name, &input_shapes_vec)` inside `Profiler::record` and `record in ferrotorch-profiler/src/profiler.rs` inside `OpProfiler::record_op` (called from `ferrotorch-core/src/grad_fns/arithmetic.rs` etc. on every tensor op when a profiler is active). |
 | REQ-2 | SHIPPED | impl: `elementwise_binary` at `ferrotorch-profiler/src/flops.rs:91`, `elementwise_unary` at line 102, match arms for the 4 binary ops + 5 unary + 6 activation ops at lines 44-52; non-test consumer: same path as REQ-1 — `Profiler::record("add", ...)` populates `flops: Some(numel)` on every recorded `add` event. |
 | REQ-3 | SHIPPED | impl: softmax/log_softmax arm at `ferrotorch-profiler/src/flops.rs:55-58`, reduction arm at line 61-64; non-test consumer: same `Profiler::record` path; `softmax` / `log_softmax` recorded via the dispatch hook in `ferrotorch-core/src/grad_fns/transcendental.rs` populates the FLOP estimate. |
 | REQ-4 | SHIPPED | impl: `matmul_flops` at `ferrotorch-profiler/src/flops.rs:109` with 1D/2D/ND + batch broadcasting, match arm at line 73; non-test consumer: `Profiler::record("matmul", &[a_shape, b_shape])` flows through `flops::estimate` → `matmul_flops`; `bmm` / `mm` / `linear` likewise. |
 | REQ-5 | SHIPPED | impl: `conv_nd_flops` at `ferrotorch-profiler/src/flops.rs:149` with rank-strict input/weight checks, conv1d/conv2d/conv3d arms at lines 75-77; non-test consumer: `Profiler::record("conv2d", ...)` populates `flops` via the same hook path. |
 | REQ-6 | SHIPPED | impl: norm-family arm at `ferrotorch-profiler/src/flops.rs:79-82` (8 FLOPs/element approx), pow arm at line 68-71; non-test consumer: `Profiler::record("layer_norm", ...)` and `Profiler::record("pow", ...)` route through `flops::estimate`. |
-| REQ-7 | SHIPPED | impl: every arm uses `?` on `shapes.first()` and length checks at `flops.rs:92`, `103`, `110`, `150` — no panics, `None` on bad shapes; non-test consumer: `ferrotorch-profiler/src/profiler.rs:113` consumes `Option<u64>` and stores it directly in `ProfileEvent::flops`, so the `None` return surfaces without crashing the recording path. |
+| REQ-7 | SHIPPED | impl: every arm uses `?` on `shapes.first()` and length checks at `flops in flops.rs`, `103`, `110`, `150` — no panics, `None` on bad shapes; non-test consumer: `ferrotorch-profiler/src/profiler.rs` consumes `Option<u64>` and stores it directly in `ProfileEvent::flops`, so the `None` return surfaces without crashing the recording path. |

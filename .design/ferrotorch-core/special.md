@@ -116,7 +116,7 @@ The scalar evaluators live in this module:
 - `erf_scalar` at `special.rs:400` is `pub(crate)` so
   `grad_fns::activation` can reuse it (the gelu derivative path
   calls `crate::special::erf_scalar`).
-- `erfc_scalar` (private, referenced at `:685`): for f64, directly
+- `erfc_scalar` (private, referenced at `erfc_scalar in special.rs`): for f64, directly
   evaluates `erfc_f64_hi`; for f32/bf16, returns `1 - erf_scalar(x)`.
 - `erfinv_scalar`, `lgamma_scalar`, `digamma_scalar`, `sinc_scalar`,
   `xlogy_scalar`: each private, dispatched through
@@ -171,8 +171,8 @@ recurrence-identity checks (`H_n(x) - 2x*H_{n-1}(x) + 2(n-1)*H_{n-2}(x) =
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `erf` at `special.rs:675` mirrors `torch.special.erf`; non-test consumer: `crate::grad_fns::activation::erf_for_gelu` at `grad_fns/activation.rs:413` invokes `crate::special::erf_scalar` (the per-element evaluator that `erf` uses internally) — this is the gelu-derivative path's direct dependency |
 | REQ-2 | SHIPPED | impl: `erfc` at `special.rs:684`; non-test consumer: re-exported as `ferrotorch_core::erfc` at `lib.rs:187` |
-| REQ-3 | SHIPPED | impl: `erfinv` at `special.rs:692`; non-test consumer: re-exported as `ferrotorch_core::erfinv` at `lib.rs:187` |
-| REQ-4 | SHIPPED | impl: `lgamma` at `special.rs:699`; non-test consumer: re-exported as `ferrotorch_core::lgamma` at `lib.rs:187` |
+| REQ-3 | SHIPPED | impl: `erfinv in special.rs`; non-test consumer: re-exported as `ferrotorch_core::erfinv` at `special in lib.rs` |
+| REQ-4 | SHIPPED | impl: `lgamma in special.rs`; non-test consumer: re-exported as `ferrotorch_core::lgamma` at `special in lib.rs` |
 | REQ-5 | SHIPPED | impl: `digamma` at `special.rs:707`; non-test consumer: re-exported as `ferrotorch_core::digamma` at `lib.rs:187` |
 | REQ-6 | SHIPPED | impl: `log1p`/`expm1` at `special.rs:714,721`; non-test consumer: re-exported as `ferrotorch_core::log1p`/`expm1` at `lib.rs:187` |
 | REQ-7 | SHIPPED | impl: `sinc` at `special.rs:726`; non-test consumer: re-exported as `ferrotorch_core::sinc` at `lib.rs:187` |

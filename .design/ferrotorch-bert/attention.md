@@ -102,7 +102,7 @@ boundary is 3-D `[1, S, hidden]`.
 - `pub use attention::{BertAttention, BertSelfAttention,
   BertSelfOutput}` at `ferrotorch-bert/src/lib.rs:86`.
 - `pub attention: BertAttention<T>` field of `pub struct BertLayer`
-  at `ferrotorch-bert/src/layer.rs:243`; `BertLayer::new` at
+  at `BertLayer in ferrotorch-bert/src/layer.rs`; `BertLayer::new` at
   `ferrotorch-bert/src/layer.rs:259` constructs it; `BertLayer`'s
   `Module::forward` at `ferrotorch-bert/src/layer.rs:269` invokes
   `self.attention.forward(input)`.
@@ -148,10 +148,10 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct BertSelfAttention<T: Float>` in `attention.rs`; non-test consumer: field `self_attn` of `pub struct BertAttention` in `attention.rs` (the post-norm wrapper), grandfathered re-export at `ferrotorch-bert/src/lib.rs:86`. |
+| REQ-1 | SHIPPED | impl: `pub struct BertSelfAttention<T: Float>` in `attention.rs`; non-test consumer: field `self_attn` of `pub struct BertAttention` in `attention.rs` (the post-norm wrapper), grandfathered re-export at `attention in ferrotorch-bert/src/lib.rs`. |
 | REQ-2 | SHIPPED | impl: `Module::forward` for `BertSelfAttention` in `attention.rs`; non-test consumer: `BertAttention`'s `Module::forward` in `attention.rs` calls `self.self_attn.forward(input)`. |
 | REQ-3 | SHIPPED | impl: `BertSelfOutput::forward_residual` in `attention.rs`; non-test consumer: `BertAttention`'s `Module::forward` in `attention.rs` calls `self.output.forward_residual(&ctx, input)`. |
-| REQ-4 | SHIPPED | impl: `pub struct BertAttention<T: Float>` + its `Module<T>` impl in `attention.rs`; non-test consumer: field `attention` of `pub struct BertLayer` at `ferrotorch-bert/src/layer.rs:243`; `BertLayer::Module::forward` at `ferrotorch-bert/src/layer.rs:269` invokes `self.attention.forward(input)`. |
+| REQ-4 | SHIPPED | impl: `pub struct BertAttention<T: Float>` + its `Module<T>` impl in `attention.rs`; non-test consumer: field `attention` of `pub struct BertLayer` at `BertLayer in ferrotorch-bert/src/layer.rs`; `BertLayer::Module::forward` at `forward in ferrotorch-bert/src/layer.rs` invokes `self.attention.forward(input)`. |
 | REQ-5 | SHIPPED | impl: `named_parameters` / `load_state_dict` for `BertSelfAttention` / `BertSelfOutput` / `BertAttention` in `attention.rs`; non-test consumer: `BertLayer::load_state_dict` at `ferrotorch-bert/src/layer.rs:344` recurses through `attention.{self,output}.*`. |
 | REQ-6 | SHIPPED | impl: rank/shape checks at the top of `BertSelfAttention::Module::forward` in `attention.rs`; non-test consumer: propagated up through `BertAttention::Module::forward` then `BertLayer::Module::forward` at `ferrotorch-bert/src/layer.rs:269`. |
-| REQ-7 | SHIPPED | impl: `BertSelfOutput::Module::forward` (dense-only) in `attention.rs`; non-test consumer: kept reachable through the `pub use` at `ferrotorch-bert/src/lib.rs:86` (the trait surface is required for the `Module` blanket). Real-application path goes through `forward_residual`; this `Module::forward` shim keeps `Module` satisfied. |
+| REQ-7 | SHIPPED | impl: `BertSelfOutput::Module::forward` (dense-only) in `attention.rs`; non-test consumer: kept reachable through the `pub use` at `attention in ferrotorch-bert/src/lib.rs` (the trait surface is required for the `Module` blanket). Real-application path goes through `forward_residual`; this `Module::forward` shim keeps `Module` satisfied. |

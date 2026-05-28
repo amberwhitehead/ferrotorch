@@ -184,18 +184,18 @@ chain rule.
   adaptive_max_pool3d, avg_pool1d, avg_pool2d, avg_pool3d,
   lp_pool1d, lp_pool2d, max_pool1d, max_pool2d, max_pool3d,
   max_unpool2d}` at `ferrotorch-nn/src/lib.rs:237-243`.
-- `ferrotorch-vision/src/models/resnet.rs:23`, `densenet.rs:43`,
-  `inception.rs:61`, `vgg.rs:24`, `yolo.rs:36`,
-  `unet.rs:34`, `convnext.rs:35`, `efficientnet.rs:38`,
-  `mobilenet.rs:55`, `detection/fpn.rs:35`,
-  `segmentation/aspp.rs:38`, `segmentation/lraspp.rs:49` — every
+- `ferrotorch-vision/src/models/resnet.rs`, `densenet in densenet.rs`,
+  `inception in inception.rs`, `vgg in vgg.rs`, `yolo in yolo.rs`,
+  `unet in unet.rs`, `convnext in convnext.rs`, `efficientnet in efficientnet.rs`,
+  `mobilenet in mobilenet.rs`, `detection/fpn.rs`,
+  `segmentation/aspp.rs`, `segmentation/lraspp.rs` — every
   major torchvision-mirror model consumes `MaxPool2d` and / or
   `AdaptiveAvgPool2d` and / or `AvgPool2d`.
 - `ferrotorch-nn/src/se.rs` (SqueezeExcitation) uses
   `AdaptiveAvgPool2d::new((1, 1))` for the squeeze stage.
 - `ferrotorch-nn/src/prelude` re-exports
   `AdaptiveAvgPool2d, MaxPool2d` at
-  `ferrotorch-nn/src/lib.rs:286`.
+  `ferrotorch-nn/src/lib.rs`.
 
 ## Parity contract
 
@@ -273,15 +273,15 @@ returns `0`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct MaxPool2d` plus `impl<T: Float> Module<T> for MaxPool2d` in `pooling.rs`; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:237` + `ferrotorch-vision/src/models/resnet.rs:23` + many other vision models. |
-| REQ-2 | SHIPPED | impl: `pub struct AvgPool2d` plus `impl<T: Float> Module<T> for AvgPool2d` in `pooling.rs`; non-test consumer: `ferrotorch-vision/src/models/densenet.rs:43` + `inception.rs:61` + re-export at `lib.rs:237`. |
-| REQ-3 | SHIPPED | impl: `pub struct AdaptiveAvgPool2d` plus `impl<T: Float> Module<T> for AdaptiveAvgPool2d` in `pooling.rs`; non-test consumer: `ferrotorch-vision/src/models/resnet.rs:23` + `convnext.rs:35` + `efficientnet.rs:38` + `mobilenet.rs:55` + `segmentation/aspp.rs:38` + re-export at `lib.rs:237` + the prelude re-export at `lib.rs:286` + `ferrotorch-nn/src/se.rs` (SqueezeExcitation squeeze stage). |
-| REQ-4 | SHIPPED | impl: `pub struct MaxPool1d` / `MaxPool3d` / `AvgPool1d` / `AvgPool3d` plus `impl<T: Float> Module<T> for *` in `pooling.rs`; non-test consumer: re-export at `lib.rs:237`. |
-| REQ-5 | SHIPPED | impl: `pub struct AdaptiveAvgPool1d` / `AdaptiveAvgPool3d` / `AdaptiveMaxPool1d` / `AdaptiveMaxPool2d` / `AdaptiveMaxPool3d` plus their `impl Module<T> for *` blocks in `pooling.rs`; non-test consumer: re-export at `lib.rs:237`. |
-| REQ-6 | SHIPPED | impl: `pub struct FractionalMaxPool2d` plus `impl<T: Float> Module<T>` in `pooling.rs`; non-test consumer: re-export at `lib.rs:237`. |
-| REQ-7 | SHIPPED | impl: `pub struct LPPool1d` / `pub struct LPPool2d` plus their `impl Module<T>` blocks in `pooling.rs`; non-test consumer: re-export at `lib.rs:237`. |
-| REQ-8 | SHIPPED | impl: `pub struct MaxUnpool2d` plus `pub fn max_unpool2d` in `pooling.rs`; non-test consumer: re-export at `lib.rs:237`. |
-| REQ-9 | SHIPPED | impl: 14 `pub fn *_pool*<T: Float>` functional entries in `pooling.rs`; non-test consumer: re-export at `lib.rs:237`. |
-| REQ-10 | SHIPPED | impl: `fn validate_4d`, `fn validate_pool_params`, etc. in `pooling.rs`; non-test consumer: invoked from every pool forward (re-exported at `lib.rs:237`). |
-| REQ-11 | SHIPPED | impl: per-pool `GradFn<T>` types plus `Tensor::from_operation` calls in `pooling.rs`; non-test consumer: re-export at `lib.rs:237` — autograd engine traverses these GradFns on `backward()`. |
+| REQ-1 | SHIPPED | impl: `pub struct MaxPool2d` plus `impl<T: Float> Module<T> for MaxPool2d` in `pooling.rs`; non-test consumer: re-export at `pooling in ferrotorch-nn/src/lib.rs` + `ferrotorch-vision/src/models/resnet.rs` + many other vision models. |
+| REQ-2 | SHIPPED | impl: `pub struct AvgPool2d` plus `impl<T: Float> Module<T> for AvgPool2d` in `pooling.rs`; non-test consumer: `ferrotorch-vision/src/models/densenet.rs` + `inception in inception.rs` + re-export at `lib.rs`. |
+| REQ-3 | SHIPPED | impl: `pub struct AdaptiveAvgPool2d` plus `impl<T: Float> Module<T> for AdaptiveAvgPool2d` in `pooling.rs`; non-test consumer: `ferrotorch-vision/src/models/resnet.rs` + `convnext in convnext.rs` + `efficientnet in efficientnet.rs` + `mobilenet in mobilenet.rs` + `segmentation/aspp.rs` + re-export at `lib.rs` + the prelude re-export at `lib.rs` + `ferrotorch-nn/src/se.rs` (SqueezeExcitation squeeze stage). |
+| REQ-4 | SHIPPED | impl: `pub struct MaxPool1d` / `MaxPool3d` / `AvgPool1d` / `AvgPool3d` plus `impl<T: Float> Module<T> for *` in `pooling.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-5 | SHIPPED | impl: `pub struct AdaptiveAvgPool1d` / `AdaptiveAvgPool3d` / `AdaptiveMaxPool1d` / `AdaptiveMaxPool2d` / `AdaptiveMaxPool3d` plus their `impl Module<T> for *` blocks in `pooling.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-6 | SHIPPED | impl: `pub struct FractionalMaxPool2d` plus `impl<T: Float> Module<T>` in `pooling.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-7 | SHIPPED | impl: `pub struct LPPool1d` / `pub struct LPPool2d` plus their `impl Module<T>` blocks in `pooling.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-8 | SHIPPED | impl: `pub struct MaxUnpool2d` plus `pub fn max_unpool2d` in `pooling.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-9 | SHIPPED | impl: 14 `pub fn *_pool*<T: Float>` functional entries in `pooling.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-10 | SHIPPED | impl: `fn validate_4d`, `fn validate_pool_params`, etc. in `pooling.rs`; non-test consumer: invoked from every pool forward (re-exported at `lib.rs`). |
+| REQ-11 | SHIPPED | impl: per-pool `GradFn<T>` types plus `Tensor::from_operation` calls in `pooling.rs`; non-test consumer: re-export at `lib.rs` — autograd engine traverses these GradFns on `backward()`. |
 | REQ-12 | NOT-STARTED | parity-sweep runner arms for the 10 declared pooling ops (`max_pool1d/2d/3d`, `avg_pool1d/2d/3d`, `adaptive_avg_pool1d/2d`, `adaptive_max_pool1d/2d`) not wired — blocker #1458. |

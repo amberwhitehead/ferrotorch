@@ -155,7 +155,7 @@ forward — that's never acceptable.
 - `ferrotorch-rl/examples/ppo_policy_dump.rs:203-206` —
   `eprintln!("[ppo_policy_dump] loaded weights: unmapped={:?}", report.unmapped);`
   consumes the `DropReport` for diagnostic output.
-- `ferrotorch-rl/src/lib.rs:81` re-exports `DropReport, load_ppo_policy`
+- `ferrotorch-rl/src/lib.rs` re-exports `DropReport, load_ppo_policy`
   as the crate's public API.
 - `ferrotorch-rl/README.md:48` documents the canonical
   user-facing import.
@@ -228,7 +228,7 @@ Expected: `3 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct DropReport { pub unmapped: Vec<String> }` at `ferrotorch-rl/src/safetensors_loader.rs:46-50` with `#[derive(Debug, Default, Clone)]`; non-test consumer: `ferrotorch-rl/examples/ppo_policy_dump.rs:202,261` `let (policy, report) = load_ppo_policy(...)?; ... format!(... "\"unmapped\":{}", report.unmapped.len())` — the production binary consumes the report for diagnostic output and final JSON verdict. Re-exported as `ferrotorch_rl::DropReport`. |
+| REQ-1 | SHIPPED | impl: `pub struct DropReport { pub unmapped: Vec<String> }` at `DropReport in ferrotorch-rl/src/safetensors_loader.rs` with `#[derive(Debug, Default, Clone)]`; non-test consumer: `ferrotorch-rl/examples/ppo_policy_dump.rs,261` `let (policy, report) = load_ppo_policy(...)?; ... format!(... "\"unmapped\":{}", report.unmapped.len())` — the production binary consumes the report for diagnostic output and final JSON verdict. Re-exported as `ferrotorch_rl::DropReport`. |
 | REQ-2 | SHIPPED | impl: `pub fn load_ppo_policy(weights_path: &Path, cfg: MlpPolicyConfig, strict: bool) -> FerrotorchResult<(MlpPolicy, DropReport)>` at `ferrotorch-rl/src/safetensors_loader.rs:66-107`; non-test consumer: `ferrotorch-rl/examples/ppo_policy_dump.rs:202` `let (policy, report) = load_ppo_policy(&weights_path, cfg, /* strict = */ true)?;` invokes the loader in the production parity-harness binary. Re-exported as `ferrotorch_rl::load_ppo_policy`. |
 | REQ-3 | SHIPPED | impl: `ferrotorch-rl/src/safetensors_loader.rs:71-77` `let state = load_safetensors::<f32>(weights_path).map_err(|e| FerrotorchError::InvalidArgument { message: format!("load_ppo_policy: failed to decode safetensors {}: {e}", weights_path.display()) })?;`; non-test consumer: the only call-site of the loader is `ferrotorch-rl/examples/ppo_policy_dump.rs:202`, which depends on the path-embedded error message for the user-facing diagnostic. |
 | REQ-4 | SHIPPED | impl: `ferrotorch-rl/src/safetensors_loader.rs:79-91` builds `policy = MlpPolicy::new(cfg)?`, computes `expected: HashSet<String>` from `policy.named_parameters()`, walks `state.keys()` to identify unmapped keys, sorts them; non-test consumer: `ferrotorch-rl/examples/ppo_policy_dump.rs:202` invokes this path; the in-file test `unmapped_keys_strict_errors` documents the contract (the production binary's `--strict=true` invocation depends on this branch). |

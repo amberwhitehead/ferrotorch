@@ -62,12 +62,12 @@ per the upstream validator at `c10/core/Device.h:181`).
   returns `false` (mechanical check via `matches!` in `is_cuda` /
   `is_cpu`).
 - [x] AC-3: `format!("{}", Device::Cuda(3))` produces `"cuda:3"` per the
-  `Display` impl at `device.rs:66-76`.
+  `Display` impl at `device in device.rs`.
 - [x] AC-4: `Device::Cpu == Device::Cpu` and `Device::Cuda(0) !=
   Device::Cuda(1)` (verified by `PartialEq` derive).
 - [x] AC-5: `Device::Cpu` and `Device::Cuda(0)` are both `Copy` — passing
   a `Device` to a function does not move it. (Mechanical: the derive at
-  `device.rs:12` includes `Copy`.)
+  `device in device.rs` includes `Copy`.)
 - [x] AC-6: `Device` is `Hash` — `HashMap<Device, _>` compiles. Used by
   `gpu_dispatch::gpu_backend()` registry and the autograd graph's
   per-device shadow.
@@ -132,7 +132,7 @@ Direct callers (production): every op in `ferrotorch-core/src/grad_fns/*`
 that branches CPU vs GPU. Concrete: `tensor.rs:1130` checks
 `mask.device().is_cuda()` inside `masked_fill`.
 
-### `Display` impl (`device.rs:66-76`)
+### `Display` impl (`device in device.rs`)
 
 ```rust
 match self {
@@ -148,7 +148,7 @@ Mirrors `c10::Device::str()` at `c10/core/Device.h:167`. The "cuda:N"
 spelling is the format every log scraper, error message, and pickle/safe-
 tensors metadata field expects. `FerrotorchError::DeviceMismatch` and
 `FerrotorchError::DeviceUnavailable` rely on this Display in their `#[error]`
-attributes (`error.rs:11, :39`).
+attributes (`error in error.rs, `).
 
 ### Production consumers
 
@@ -167,7 +167,7 @@ attributes (`error.rs:11, :39`).
   are the dispatch-key terminal-backend keys that correspond to `Device`
   variants. The mapping `Device -> DispatchKey` is the bridge between the
   tensor's runtime location and the dispatcher's keyset.
-- `ferrotorch-core/src/error.rs:11, :39` — `DeviceMismatch { expected:
+- `ferrotorch-core/src/error.rs, ` — `DeviceMismatch { expected:
   Device, got: Device }` and `DeviceUnavailable` carry / surface device
   values in error messages.
 
@@ -210,11 +210,11 @@ Functional verification lands in the consumer-file tests:
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `Device::Cpu` variant at `ferrotorch-core/src/device.rs:15` with `#[default]`; predicate `is_cpu` at `:36`. Non-test production consumer: `ferrotorch-core/src/storage.rs` `TensorStorage::cpu(...).device() == Device::Cpu`; also `ferrotorch-core/src/bool_tensor.rs:152` returns `Device::Cpu` for any `TensorStorage::cpu(...)`-backed `BoolTensor`. |
-| REQ-2 | SHIPPED | impl: `Device::Cuda(usize)` variant at `ferrotorch-core/src/device.rs:18`; predicate `is_cuda` at `:43`. R-DEV-4 deviation from upstream's `int8_t DeviceIndex` to `usize`. Non-test production consumer: `ferrotorch-core/src/int_tensor.rs:268-323` `IntTensor::to` matches `(Device::Cpu, Device::Cuda(_))` / `(Device::Cuda(_), Device::Cpu)` arms for H2D / D2H transfer; also `ferrotorch-core/src/tensor.rs::to` (the float-tensor mirror). |
-| REQ-3 | SHIPPED | impl: `Device::Xpu(usize)` variant at `ferrotorch-core/src/device.rs:22`; predicate `is_xpu` at `:49`. Non-test production consumer: `ferrotorch-core/src/error.rs:259-265` `FerrotorchError::DeviceMismatch { expected, got }` and `ferrotorch-core/src/int_tensor.rs:336` (`IntTensor::to` errors when the destination is `Xpu` since the integer-on-XPU kernel set is not yet wired — the `Xpu` variant is the discriminator that drives the structured-error path). |
-| REQ-4 | SHIPPED | impl: `Device::Mps(usize)` variant at `ferrotorch-core/src/device.rs:26`; predicate `is_mps` at `:55`. Same structured-error-discriminator role as Xpu; not yet wired to a backend (the `ferrotorch-mps` crate is the active prereq), so the consumer site is the `(from, to) => Err(InvalidArgument { ... unsupported })` arm at `bool_tensor.rs:261-266` that pattern-matches on `Mps(_)`. |
-| REQ-5 | SHIPPED | impl: `Device::Meta` variant at `ferrotorch-core/src/device.rs:31`; predicate `is_meta` at `:61`. Non-test production consumer: `ferrotorch-core/src/storage.rs` `TensorStorage::Meta { shape, .. }` arm — `try_as_slice` returns `Err(GpuTensorNotAccessible)` for the Meta variant (mirrors upstream's "meta tensor has no data" semantics at `aten/src/ATen/`). |
+| REQ-1 | SHIPPED | impl: `Device::Cpu` variant at `is_cpu in ferrotorch-core/src/device.rs` with `#[default]`; predicate `is_cpu in ferrotorch-core/src/device.rs`. Non-test production consumer: `ferrotorch-core/src/storage.rs` `TensorStorage::cpu(...).device() == Device::Cpu`; also `cpu in ferrotorch-core/src/bool_tensor.rs` returns `Device::Cpu` for any `TensorStorage::cpu(...)`-backed `BoolTensor`. |
+| REQ-2 | SHIPPED | impl: `Device::Cuda(usize)` variant at `Cuda in ferrotorch-core/src/device.rs`; predicate `is_cuda in ferrotorch-core/src/device.rs`. R-DEV-4 deviation from upstream's `int8_t DeviceIndex` to `usize`. Non-test production consumer: `is_cuda in ferrotorch-core/src/int_tensor.rs` `IntTensor::to` matches `(Device::Cpu, Device::Cuda(_))` / `(Device::Cuda(_), Device::Cpu)` arms for H2D / D2H transfer; also `ferrotorch-core/src/tensor.rs::to` (the float-tensor mirror). |
+| REQ-3 | SHIPPED | impl: `Device::Xpu(usize)` variant at `Xpu in ferrotorch-core/src/device.rs`; predicate `is_xpu in ferrotorch-core/src/device.rs`. Non-test production consumer: `ferrotorch-core/src/error.rs` `FerrotorchError::DeviceMismatch { expected, got }` and `ferrotorch-core/src/int_tensor.rs` (`IntTensor::to` errors when the destination is `Xpu` since the integer-on-XPU kernel set is not yet wired — the `Xpu` variant is the discriminator that drives the structured-error path). |
+| REQ-4 | SHIPPED | impl: `Device::Mps(usize)` variant at `Mps in ferrotorch-core/src/device.rs`; predicate `is_mps in ferrotorch-core/src/device.rs`. Same structured-error-discriminator role as Xpu; not yet wired to a backend (the `ferrotorch-mps` crate is the active prereq), so the consumer site is the `(from, to) => Err(InvalidArgument { ... unsupported })` arm at `bool_tensor.rs` that pattern-matches on `Mps(_)`. |
+| REQ-5 | SHIPPED | impl: `Device::Meta` variant at `is_meta in ferrotorch-core/src/device.rs`; predicate `is_meta in ferrotorch-core/src/device.rs`. Non-test production consumer: `ferrotorch-core/src/storage.rs` `TensorStorage::Meta { shape, .. }` arm — `try_as_slice` returns `Err(GpuTensorNotAccessible)` for the Meta variant (mirrors upstream's "meta tensor has no data" semantics at `aten/src/ATen/`). |
 | REQ-6 | SHIPPED | impl: `is_cpu` / `is_cuda` / `is_xpu` / `is_mps` / `is_meta` at `ferrotorch-core/src/device.rs:36-64`. Non-test production consumer: `ferrotorch-core/src/bool_tensor.rs:158` (`BoolTensor::is_cuda(&self) { self.device().is_cuda() }`), `ferrotorch-core/src/int_tensor.rs:205` (`IntTensor::is_cuda`), and every `if a.device().is_cuda() { ... GPU path }` branch across `grad_fns/*.rs`. |
-| REQ-7 | SHIPPED | impl: `Display` impl at `ferrotorch-core/src/device.rs:66-76` matching `c10::Device::str()` at `c10/core/Device.h:167`. Non-test production consumer: `ferrotorch-core/src/error.rs:11` `#[error("device mismatch: expected {expected}, got {got}")]` — the error variant relies on `Display` for its formatted message; every device-mismatch propagation path passes through this Display. |
-| REQ-8 | SHIPPED | impl: `#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]` at `ferrotorch-core/src/device.rs:12`. Non-test production consumer: `ferrotorch-core/src/gpu_dispatch.rs` (the `gpu_backend()` registry indirectly keys on device ordinal); also `Tensor<T>` operations `if self.device() == other.device()` comparison shape (PartialEq usage in `bool_tensor.rs:333`, `int_tensor.rs:436`, …). |
+| REQ-7 | SHIPPED | impl: `Display` impl at `str in ferrotorch-core/src/device.rs` matching `c10::Device::str()` at `c10/core/Device.h:167`. Non-test production consumer: `str in ferrotorch-core/src/error.rs` `#[error("device mismatch: expected {expected}, got {got}")]` — the error variant relies on `Display` for its formatted message; every device-mismatch propagation path passes through this Display. |
+| REQ-8 | SHIPPED | impl: `#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]` at `ferrotorch-core/src/device.rs`. Non-test production consumer: `ferrotorch-core/src/gpu_dispatch.rs` (the `gpu_backend()` registry indirectly keys on device ordinal); also `Tensor<T>` operations `if self.device() == other.device()` comparison shape (PartialEq usage in `gpu_backend in bool_tensor.rs`, `gpu_backend in int_tensor.rs`, …). |

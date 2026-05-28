@@ -105,10 +105,10 @@ correct for all finite inputs.
 
 ### Non-test production consumers
 
-- `ferrotorch-optim/src/adam.rs:19` `use crate::foreach_utils::elemwise_max;` — AMSGrad branch (around line 325).
-- `ferrotorch-optim/src/adamax.rs:17` `use crate::foreach_utils::{elemwise_max, f64_scalar_on};` — running-max `u` and hyperparameter promotion.
-- `ferrotorch-optim/src/adadelta.rs:22` `use crate::foreach_utils::f64_scalar_on;` — `rho`, `eps`, `lr`, `wd` scalars in the foreach step.
-- `ferrotorch-optim/src/asgd.rs:19` `use crate::foreach_utils::f64_scalar_on;` — `eta`, `lambda * eta`, `wd` scalars in the foreach step.
+- `elemwise_max in ferrotorch-optim/src/adam.rs` `use crate::foreach_utils::elemwise_max;` — AMSGrad branch (around line 325).
+- `u in ferrotorch-optim/src/adamax.rs` `use crate::foreach_utils::{elemwise_max, f64_scalar_on};` — running-max `u` and hyperparameter promotion.
+- `rho in ferrotorch-optim/src/adadelta.rs` `use crate::foreach_utils::f64_scalar_on;` — `rho`, `eps`, `lr`, `wd` scalars in the foreach step.
+- `ferrotorch-optim/src/asgd.rs` `use crate::foreach_utils::f64_scalar_on;` — `eta`, `lambda * eta`, `wd` scalars in the foreach step.
 
 ## Parity contract
 
@@ -152,7 +152,7 @@ Expected: `327 passed; 0 failed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub fn elemwise_max` in `ferrotorch-optim/src/foreach_utils.rs:15` mirroring the `max(a,b)` identity (PyTorch's `torch.maximum` upstream `aten/src/ATen/native/BinaryOps.cpp` `maximum_kernel`); non-test consumer: `ferrotorch-optim/src/adam.rs:325` invokes it from the AMSGrad branch of `Adam::step_foreach`, `ferrotorch-optim/src/adamax.rs:221` invokes it for `u_new = max(beta2 * u, |g| + eps)`. |
-| REQ-2 | SHIPPED | impl: `pub fn scalar_on` in `ferrotorch-optim/src/foreach_utils.rs:31`; non-test consumer: `pub fn f64_scalar_on` immediately below (line 37) calls it; transitively every `f64_scalar_on` consumer (`adadelta.rs:204-237`, `adamax.rs:199-227`, `asgd.rs:223-235`) consumes `scalar_on` underneath. |
-| REQ-3 | SHIPPED | impl: `pub fn f64_scalar_on` in `ferrotorch-optim/src/foreach_utils.rs:37`; non-test consumer: `ferrotorch-optim/src/adadelta.rs:204` `let wd_t = f64_scalar_on::<T>(group_wd, device)?;` and four further uses on lines 209-237; `ferrotorch-optim/src/adamax.rs:199-227` (six uses); `ferrotorch-optim/src/asgd.rs:223-235` (three uses). |
+| REQ-1 | SHIPPED | impl: `pub fn elemwise_max` in `elemwise_max in ferrotorch-optim/src/foreach_utils.rs` mirroring the `max(a,b)` identity (PyTorch's `torch.maximum` upstream `aten/src/ATen/native/BinaryOps.cpp` `maximum_kernel`); non-test consumer: `max in ferrotorch-optim/src/adam.rs` invokes it from the AMSGrad branch of `Adam::step_foreach`, `step_foreach in ferrotorch-optim/src/adamax.rs` invokes it for `u_new = max(beta2 * u, |g| + eps)`. |
+| REQ-2 | SHIPPED | impl: `pub fn scalar_on` in `scalar_on in ferrotorch-optim/src/foreach_utils.rs`; non-test consumer: `pub fn f64_scalar_on` immediately below (line 37) calls it; transitively every `f64_scalar_on` consumer (`adadelta.rs`, `adamax in adamax.rs`, `asgd.rs`) consumes `scalar_on` underneath. |
+| REQ-3 | SHIPPED | impl: `pub fn f64_scalar_on` in `f64_scalar_on in ferrotorch-optim/src/foreach_utils.rs`; non-test consumer: `ferrotorch-optim/src/adadelta.rs` `let wd_t = f64_scalar_on::<T>(group_wd, device)?;` and four further uses on lines 209-237; `ferrotorch-optim/src/adamax.rs` (six uses); `ferrotorch-optim/src/asgd.rs` (three uses). |
 | REQ-4 | SHIPPED | impl: scalar tensors built via `ferrotorch_core::creation::scalar` are leaf constants (`requires_grad=false`) per `ferrotorch-core/src/creation.rs`; non-test consumer: same call sites as REQ-1 / REQ-3 — Adam/Adamax/Adadelta/Asgd `step_foreach` paths rely on the scalars NOT introducing autograd edges so that the optimizer step itself stays inside `no_grad()`. |

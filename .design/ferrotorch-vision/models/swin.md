@@ -133,7 +133,7 @@ flat `features.<i>` layout matching torchvision exactly.
 - `pub use swin::{SwinBlock, SwinTransformer, swin_tiny}` re-export at
   `ferrotorch-vision/src/models/mod.rs`.
 - `default_registry()` registers `"swin_tiny"` via
-  `maybe_load_pretrained` at `registry.rs:197`.
+  `maybe_load_pretrained` at `registry.rs`.
 
 ## Parity contract
 
@@ -186,8 +186,8 @@ Expected: all tests pass; no parity-sweep ops.
 | REQ-3 | SHIPPED | impl: `struct Mlp<T: Float>` + `Module<T>` impl in `swin.rs`; non-test consumer: every `SwinBlock::new` constructs one in `swin.rs`. |
 | REQ-4 | SHIPPED | impl: `pub struct SwinBlock<T: Float>` + `Module<T>` impl in `swin.rs`; non-test consumer: `SwinTransformer::new` builds 4 stages of SwinBlocks in `swin.rs`. |
 | REQ-5 | SHIPPED | impl: `struct PatchMerging<T: Float>` + `Module<T>` impl in `swin.rs`; non-test consumer: `SwinTransformer::new` constructs 3 PatchMergings as `features.{2,4,6}` in `swin.rs`. |
-| REQ-6 | SHIPPED | impl: `pub struct SwinTransformer<T: Float>` + `SwinTransformer::new` in `swin.rs`; non-test consumer: `default_registry()` constructs it via `maybe_load_pretrained` at `registry.rs:197`. |
+| REQ-6 | SHIPPED | impl: `pub struct SwinTransformer<T: Float>` + `SwinTransformer::new` in `swin.rs`; non-test consumer: `default_registry()` constructs it via `maybe_load_pretrained` at `registry.rs`. |
 | REQ-7 | SHIPPED | impl: `Module::forward` for `SwinTransformer<T>` in `swin.rs`; non-test consumer: trait method invoked through `Box<dyn Module<T>>` returned from `registry.rs::get_model`. |
-| REQ-8 | SHIPPED | impl: the `effective_shift = if ws >= height || ws >= width { 0 } else { self.shift_size }` guard inside `ShiftedWindowAttention::forward` in `swin.rs`; non-test consumer: the final 7×7 stage of swin_tiny (constructed by `default_registry()` at `registry.rs:197`) runs through this guard at inference time. |
-| REQ-9 | SHIPPED | impl: `named_parameters` for `PatchEmbed`, `ShiftedWindowAttention`, `Mlp`, `SwinBlock`, `PatchMerging`, `SwinTransformer` in `swin.rs`; non-test consumer: `load_state_dict(&state_dict, false)` at `registry.rs:53` walks the result. |
-| REQ-10 | SHIPPED | impl: `pub fn swin_tiny` in `swin.rs`; non-test consumer: `default_registry()` invokes it at `registry.rs:200`. |
+| REQ-8 | SHIPPED | impl: the `effective_shift = if ws >= height || ws >= width { 0 } else { self.shift_size }` guard inside `ShiftedWindowAttention::forward` in `swin.rs`; non-test consumer: the final 7×7 stage of swin_tiny (constructed by `default_registry()` at `registry.rs`) runs through this guard at inference time. |
+| REQ-9 | SHIPPED | impl: `named_parameters` for `PatchEmbed`, `ShiftedWindowAttention`, `Mlp`, `SwinBlock`, `PatchMerging`, `SwinTransformer` in `swin.rs`; non-test consumer: `load_state_dict(&state_dict, false)` at `named_parameters in registry.rs` walks the result. |
+| REQ-10 | SHIPPED | impl: `pub fn swin_tiny` in `swin.rs`; non-test consumer: `default_registry()` invokes it at `registry.rs`. |

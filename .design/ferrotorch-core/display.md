@@ -52,7 +52,7 @@ and 3-D+ tensors with the same elision-by-`...` pattern, the same
   (`test_display_scalar`).
 - [x] AC-3: `format!("{}", t)` for `t` with `requires_grad=true`
   contains `"grad_fn=<AddBackward>"` when produced by `&a + &b`
-  (`test_display_with_grad_fn` at `:169`).
+  (`test_display_with_grad_fn in display.rs`).
 - [x] AC-4: 1-D tensors of length > 6 contain `"..."`
   (`test_display_large_1d_truncated`).
 - [x] AC-5: 3-D tensors display `"24 elements"` and `"shape=[2, 3, 4]"`
@@ -74,7 +74,7 @@ the tensor's shape and dispatches on dimensionality:
 - `shape.len() >= 3` branch (`:118-128`): summary form
   `tensor(<{numel} elements>, shape={shape:?}{suffix})`.
 
-The data fetch at `:12` uses `self.data_vec()` (NOT `self.data()`).
+The data fetch at `display.rs` uses `self.data_vec()` (NOT `self.data()`).
 This is intentional: `data_vec` resolves non-contiguous CPU views
 (returns a materialised copy) and downloads CUDA tensors through the
 host bounce. For meta tensors `data_vec` errors; the `match Err` arm
@@ -116,5 +116,5 @@ suffix, and 1-D-truncation paths.
 | REQ-3 | SHIPPED | impl: 2-D branch at `display.rs:62-116`; non-test consumer: top-level `Display` impl is the production consumer for every `format!("{t}")` |
 | REQ-4 | SHIPPED | impl: 3-D+ summary branch at `display.rs:118-128`; non-test consumer: top-level `Display` impl. NB: this is an R-DEV-7 deviation — PyTorch recursively renders all dims; ferrotorch summarises |
 | REQ-5 | SHIPPED | impl: suffix logic at `display.rs:24-28` (scalar) and `:131-135` (1D/2D); non-test consumer: every autograd-graph test's printed tensor goes through this; the `test_display_with_grad_fn` test pins the exact `grad_fn=<AddBackward>` format |
-| REQ-6 | SHIPPED | impl: `self.data_vec()` call at `display.rs:12`; non-test consumer: implicit — every non-contiguous and CUDA tensor printed in production hits this path |
-| REQ-7 | SHIPPED | impl: `Err` arm at `display.rs:14`; non-test consumer: every meta-tensor printed in shape-inference code (e.g. `creation::zeros_meta` outputs in dry-run model construction) |
+| REQ-6 | SHIPPED | impl: `self.data_vec()` call at `display.rs`; non-test consumer: implicit — every non-contiguous and CUDA tensor printed in production hits this path |
+| REQ-7 | SHIPPED | impl: `Err` arm at `Err in display.rs`; non-test consumer: every meta-tensor printed in shape-inference code (e.g. `creation::zeros_meta` outputs in dry-run model construction) |

@@ -110,11 +110,11 @@ formula.
 
 - `use crate::models::detection::roi_heads_postprocess::{
   PostprocessedDetections, postprocess_detections}` at
-  `ferrotorch-vision/src/models/detection/faster_rcnn.rs:34`.
+  `ferrotorch-vision/src/models/detection/faster_rcnn.rs`.
   `FasterRcnn::forward` invokes `postprocess_detections(...)` at
   `ferrotorch-vision/src/models/detection/faster_rcnn.rs:434`.
 - `use crate::models::detection::roi_heads_postprocess::postprocess_masks`
-  at `ferrotorch-vision/src/models/detection/mask_rcnn.rs:31`.
+  at `ferrotorch-vision/src/models/detection/mask_rcnn.rs`.
 
 ## Parity contract
 
@@ -198,5 +198,5 @@ Expected: 3 tests passed.
 | REQ-6 | SHIPPED | impl: `pub const ROI_BBOX_XFORM_CLIP: f64 = 4.135_166_556_742_356;` in `roi_heads_postprocess.rs`; non-test consumer: passed by `postprocess_detections` to `decode_per_class`, invoked by `FasterRcnn::forward`. |
 | REQ-7 | SHIPPED | impl: `pub fn decode_per_class` in `roi_heads_postprocess.rs`; non-test consumer: `postprocess_detections` calls it; that function is called by `FasterRcnn::forward` at `ferrotorch-vision/src/models/detection/faster_rcnn.rs:434`. |
 | REQ-8 | SHIPPED | impl: `pub fn postprocess_detections` in `roi_heads_postprocess.rs`; non-test consumer: `FasterRcnn::forward` at `ferrotorch-vision/src/models/detection/faster_rcnn.rs:434` calls it once per image. |
-| REQ-9 | SHIPPED | impl: `pub fn postprocess_masks` in `roi_heads_postprocess.rs`; non-test consumer: `MaskRcnn::forward` at `ferrotorch-vision/src/models/detection/mask_rcnn.rs:31` imports it; the call site is `postprocess_masks::<T>(...)` inside `MaskRcnn::forward`. |
+| REQ-9 | SHIPPED | impl: `pub fn postprocess_masks` in `roi_heads_postprocess.rs`; non-test consumer: `MaskRcnn::forward` at `forward in ferrotorch-vision/src/models/detection/mask_rcnn.rs` imports it; the call site is `postprocess_masks::<T>(...)` inside `MaskRcnn::forward`. |
 | REQ-10 | SHIPPED | impl: `paste=false` short-circuit branch in `postprocess_masks` in `roi_heads_postprocess.rs`; non-test consumer: same import path — `MaskRcnn::forward` (and the #1139 verification harness which calls `postprocess_masks(..., paste=false)`). |

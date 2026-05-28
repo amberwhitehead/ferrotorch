@@ -124,31 +124,31 @@ pub struct OneHotCategorical<T: Float> {
 }
 ```
 
-Defined at `one_hot_categorical.rs:23-30`. Constructor at
-`one_hot_categorical.rs:37-81`. Accessors at
-`one_hot_categorical.rs:84-91`.
+Defined at `one_hot_categorical.rs`. Constructor at
+`one_hot_categorical.rs`. Accessors at
+`one_hot_categorical.rs`.
 
 ### The Distribution impl (REQ-4, REQ-5, REQ-6, REQ-7, REQ-8)
 
-`sample` (`one_hot_categorical.rs:95-132`) draws `n = prod(shape)`
+`sample` (`sample in one_hot_categorical.rs`) draws `n = prod(shape)`
 uniform samples, binary-searches the CDF for each, and writes a
 `1.0` at the selected one-hot position in a `[n, K]` zero buffer.
 Output reshape is `shape ++ [K]`.
 
-`log_prob` (`one_hot_categorical.rs:142-186`) validates that
+`log_prob` (`log_prob in one_hot_categorical.rs`) validates that
 `value.shape[-1] == K`, precomputes `log(normalized + eps)`, then
 computes `sum_k value[k] * log_p[k]` per row, returning shape
 `value.shape[..-1]`.
 
-`entropy` (`one_hot_categorical.rs:188-205`) returns
+`entropy` (`entropy in one_hot_categorical.rs`) returns
 `-sum p_k * log(p_k)` as a 0-D scalar tensor.
 
-`rsample` (`one_hot_categorical.rs:134-140`) returns
+`rsample` (`rsample in one_hot_categorical.rs`) returns
 `InvalidArgument` with a pointer to `RelaxedOneHotCategorical`.
 
 ### Non-test production consumers
 
-- `pub use one_hot_categorical::OneHotCategorical` at `lib.rs:115`
+- `pub use one_hot_categorical::OneHotCategorical` at `lib.rs`
   — grandfathered public API. Downstream code (Gumbel-softmax
   baselines, discrete-action policy networks, structured
   prediction layers) constructs
@@ -198,14 +198,14 @@ Expected: `6 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct OneHotCategorical<T: Float>` with `probs`/`normalized`/`cdf`/`num_categories` at `one_hot_categorical.rs:23-30`, mirroring `torch/distributions/one_hot_categorical.py:49-72`; non-test consumer: `pub use one_hot_categorical::OneHotCategorical` at `lib.rs:115`. |
-| REQ-2 | SHIPPED | impl: the constructor at `one_hot_categorical.rs:37-81` with the 3 preconditions + normalisation + CDF precompute, mirroring `one_hot_categorical.py:49-59`; non-test consumer: invoked via `::new` through the re-export. |
-| REQ-3 | SHIPPED | impl: `probs()` and `num_categories()` accessors at `one_hot_categorical.rs:84-91`; non-test consumer: re-export at `lib.rs:115`. |
-| REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for OneHotCategorical<T>` at `one_hot_categorical.rs:94-206` with the 4 trait methods, mirroring `one_hot_categorical.py:104-118`; non-test consumer: re-export at `lib.rs:115`. 6 tests pin behaviour. |
-| REQ-5 | SHIPPED | impl: inverse-CDF + scatter body in `sample` at `one_hot_categorical.rs:102-132`, mirroring `one_hot_categorical.py:104-109`; non-test consumer: re-export + `Distribution::sample` invocation. Test `test_one_hot_categorical_sample_shape` validates one-hotness. |
-| REQ-6 | SHIPPED | impl: `sum_k value[k] * log_p[k]` body of `log_prob` at `one_hot_categorical.rs:160-175`, generalising upstream's `value.max(-1)[1]` indexing at `one_hot_categorical.py:111-115`; non-test consumer: re-export + `Distribution::log_prob` invocation. Test `test_one_hot_categorical_log_prob_pure_one_hot` validates `log(0.3)` value. |
-| REQ-7 | SHIPPED | impl: `-sum p * log(p)` body of `entropy` at `one_hot_categorical.rs:188-205`, mirroring `one_hot_categorical.py:117-118`; non-test consumer: re-export + `Distribution::entropy` invocation. Test `test_one_hot_categorical_entropy` validates uniform case. |
-| REQ-8 | SHIPPED | impl: rsample returns `InvalidArgument("not supported -- discrete distribution")` at `one_hot_categorical.rs:134-140`; non-test consumer: re-export at `lib.rs:115`. Test `test_one_hot_categorical_rsample_errors` pins it. |
+| REQ-1 | SHIPPED | impl: `pub struct OneHotCategorical<T: Float>` with `probs`/`normalized`/`cdf`/`num_categories in one_hot_categorical.rs`, mirroring `torch/distributions/one_hot_categorical.py:49-72`; non-test consumer: `pub use one_hot_categorical::OneHotCategorical` at `lib.rs`. |
+| REQ-2 | SHIPPED | impl: the constructor at `new in one_hot_categorical.rs` with the 3 preconditions + normalisation + CDF precompute, mirroring `one_hot_categorical.py:49-59`; non-test consumer: invoked via `::new` through the re-export. |
+| REQ-3 | SHIPPED | impl: `probs()` and `num_categories()` accessors at `num_categories in one_hot_categorical.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for OneHotCategorical<T>` at `one_hot_categorical.rs` with the 4 trait methods, mirroring `one_hot_categorical.py:104-118`; non-test consumer: re-export at `lib.rs`. 6 tests pin behaviour. |
+| REQ-5 | SHIPPED | impl: inverse-CDF + scatter body in `sample in one_hot_categorical.rs`, mirroring `one_hot_categorical.py:104-109`; non-test consumer: re-export + `Distribution::sample` invocation. Test `test_one_hot_categorical_sample_shape` validates one-hotness. |
+| REQ-6 | SHIPPED | impl: `sum_k value[k] * log_p[k]` body of `log_prob in one_hot_categorical.rs`, generalising upstream's `value.max(-1)[1]` indexing at `one_hot_categorical.py:111-115`; non-test consumer: re-export + `Distribution::log_prob` invocation. Test `test_one_hot_categorical_log_prob_pure_one_hot` validates `log(0.3)` value. |
+| REQ-7 | SHIPPED | impl: `-sum p * log(p)` body of `entropy in one_hot_categorical.rs`, mirroring `one_hot_categorical.py:117-118`; non-test consumer: re-export + `Distribution::entropy` invocation. Test `test_one_hot_categorical_entropy` validates uniform case. |
+| REQ-8 | SHIPPED | impl: rsample returns `InvalidArgument("not supported -- discrete distribution")` at `test_one_hot_categorical_rsample_errors in one_hot_categorical.rs`; non-test consumer: re-export at `lib.rs`. Test `test_one_hot_categorical_rsample_errors` pins it. |
 | REQ-9 | NOT-STARTED | blocker #1413 — `mean` / `mode` / `variance` overrides at `one_hot_categorical.py:87-98` not implemented; default trait impls at `lib.rs:209-227` return `InvalidArgument`. |
 | REQ-10 | NOT-STARTED | blocker #1417 — `enumerate_support` at `one_hot_categorical.py:120-126` not implemented; the `Distribution` trait has no `enumerate_support` method (cross-cutting with the trait-fill-out task). |
 | REQ-11 | NOT-STARTED | blocker #1418 — `OneHotCategoricalStraightThrough` straight-through-estimator variant at `one_hot_categorical.py:129-143` not exposed as a separate type. |

@@ -153,10 +153,10 @@ when the input came from a pooled float op (cf. the pool-rounded
 allocs in `crate::buffer` and `crate::backend_impl`'s float arenas).
 
 Non-test production consumer: `crate::backend_impl::CudaBackendImpl`'s
-dtype-cast dispatcher; see `backend_impl.rs:6329` (`use
+dtype-cast dispatcher; see `backend_impl.rs` (`use
 crate::cast_kernels as ck` followed by float→int casts at `:6334`),
-`:6381` (int→float at `:6386`), `:6433` (int↔int at `:6438..:6452`),
-`:6616` (bool→float at `:6630`).
+`backend_impl.rs` (int→float at `backend_impl.rs`), `backend_impl.rs` (int↔int at `backend_impl.rs`),
+`backend_impl.rs` (bool→float at `backend_impl.rs`).
 
 ## Parity contract
 
@@ -209,9 +209,9 @@ device.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub fn cast_{f32,f64,f16,bf16}_to_{i32,i64} in cast_kernels.rs` (eight wrappers around `fn launch_cast`, each with its own `*_PTX` const using `cvt.rzi`). Non-test consumer: `ferrotorch-gpu/src/backend_impl.rs:6334` (`ck::cast_f32_to_i32`) plus seven sibling float→int dispatch arms in the same `to_dtype` handler. |
-| REQ-2 | SHIPPED | impl: `pub fn cast_{i32,i64}_to_{f32,f64,f16,bf16} in cast_kernels.rs` (eight wrappers using `cvt.rn`). Non-test consumer: `backend_impl.rs:6386` (`ck::cast_i32_to_f32`) plus seven sibling int→float dispatch arms. |
-| REQ-3 | SHIPPED | impl: `pub fn cast_i32_to_i64` (sign-extend `cvt.s64.s32`) and `pub fn cast_i64_to_i32` (truncate `cvt.s32.s64`, wrapping) in `cast_kernels.rs`. Non-test consumer: `backend_impl.rs:6438` (`ck::cast_i32_to_i64`), `:6443` (`ck::cast_i64_to_i32`). |
-| REQ-4 | SHIPPED | impl: `pub fn cast_i32_copy / cast_i64_copy in cast_kernels.rs` (plain `ld.global.b{32,64}; st.global.b{32,64}` element copies). Non-test consumer: `backend_impl.rs:6452` (`ck::cast_i32_copy`) plus the i64-copy sibling in the same handler. |
-| REQ-5 | SHIPPED | impl: `pub fn cast_bool_to_{f32,f64,f16,bf16} in cast_kernels.rs` (each normalises via `setp.ne %nz, %bv, 0; selp 1, 0, %nz` then `cvt.rn.f*.u32`). Non-test consumer: `backend_impl.rs:6630` (`ck::cast_bool_to_f32`) plus three sibling bool→float arms in the `to_dtype` handler. |
+| REQ-2 | SHIPPED | impl: `pub fn cast_{i32,i64}_to_{f32,f64,f16,bf16} in cast_kernels.rs` (eight wrappers using `cvt.rn`). Non-test consumer: `cast_i32_to_f32 in backend_impl.rs` (`ck::cast_i32_to_f32`) plus seven sibling int→float dispatch arms. |
+| REQ-3 | SHIPPED | impl: `pub fn cast_i32_to_i64` (sign-extend `cvt.s64.s32`) and `pub fn cast_i64_to_i32` (truncate `cvt.s32.s64`, wrapping) in `cast_kernels.rs`. Non-test consumer: `cast_i32_to_i64 in backend_impl.rs` (`ck::cast_i32_to_i64`), `cast_i32_to_i64 in backend_impl.rs` (`ck::cast_i64_to_i32`). |
+| REQ-4 | SHIPPED | impl: `pub fn cast_i32_copy / cast_i64_copy in cast_kernels.rs` (plain `ld.global.b{32,64}; st.global.b{32,64}` element copies). Non-test consumer: `cast_i32_copy in backend_impl.rs` (`ck::cast_i32_copy`) plus the i64-copy sibling in the same handler. |
+| REQ-5 | SHIPPED | impl: `pub fn cast_bool_to_{f32,f64,f16,bf16} in cast_kernels.rs` (each normalises via `setp.ne %nz, %bv, 0; selp 1, 0, %nz` then `cvt.rn.f*.u32`). Non-test consumer: `cast_bool_to_f32 in backend_impl.rs` (`ck::cast_bool_to_f32`) plus three sibling bool→float arms in the `to_dtype` handler. |
 | REQ-6 | SHIPPED | impl: the single `unsafe { stream.launch_builder(&f)...launch(cfg)? }` block in `fn launch_cast` is preceded by a multi-line SAFETY comment naming entry signature, alloc, bound check, and `n as u32` non-truncation. Non-test consumer inherits the SAFETY contract via every `pub fn cast_*` wrapper called from backend_impl. |
 | REQ-7 | SHIPPED | impl: `fn launch_cast in cast_kernels.rs` opens with `if n == 0 { return Ok(stream.alloc_zeros::<OUT>(0)?); }` and a `debug_assert!(input.len() >= n)` for the pool-rounded-input case. Non-test consumer relies on this no-launch short circuit for empty dtype casts via the backend `to_dtype` op. |

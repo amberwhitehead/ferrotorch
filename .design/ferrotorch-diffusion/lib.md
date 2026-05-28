@@ -102,7 +102,7 @@ Smoke: `cargo check -p ferrotorch-diffusion 2>&1 | tail -3` returns
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub mod` block at `ferrotorch-diffusion/src/lib.rs:100..114`; non-test consumer: `ferrotorch-diffusion/src/safetensors_loader.rs:17..21` imports six of the modules to wire the loaders |
+| REQ-1 | SHIPPED | impl: `pub mod` block at `ferrotorch-diffusion/src/lib.rs`; non-test consumer: `ferrotorch-diffusion/src/safetensors_loader.rs` imports six of the modules to wire the loaders |
 | REQ-2 | SHIPPED | impl: `pub use` re-export block at `ferrotorch-diffusion/src/lib.rs:116..139`; non-test consumer: `ferrotorch-hub/src/registry.rs` references `ClipTextEncoder` through the re-export |
 | REQ-3 | SHIPPED | impl: `#![deny(...)]` and `#![allow(...)]` attribute block at `ferrotorch-diffusion/src/lib.rs:6..59`; non-test consumer: `cargo clippy -p ferrotorch-diffusion --lib -- -D warnings` enforces it on every build of every downstream crate |
-| REQ-4 | SHIPPED | impl: `//!` doc-comment at `ferrotorch-diffusion/src/lib.rs:61..98`; non-test consumer: `cargo doc -p ferrotorch-diffusion` renders this docstring as the published crate landing page |
+| REQ-4 | SHIPPED | impl: `//!` doc-comment at `ferrotorch-diffusion/src/lib.rs`; non-test consumer: `cargo doc -p ferrotorch-diffusion` renders this docstring as the published crate landing page |

@@ -63,22 +63,22 @@ then resize the region to `(height, width)`. Mirrors
 - [x] AC-2: Invalid scale or ratio bounds return `Err`.
 - [x] AC-3: Output shape is `[C, height, width]` (verified by
   `test_random_resized_crop_output_shape` at
-  `random_resized_crop.rs:196`).
+  `test_random_resized_crop_output_shape in random_resized_crop.rs`).
 - [x] AC-4: `scale=(1.0,1.0), ratio=(1.0,1.0)` resizes the full
   image (verified by `test_random_resized_crop_full_scale` at
-  `random_resized_crop.rs:205`).
+  `test_random_resized_crop_full_scale in random_resized_crop.rs`).
 - [x] AC-5: Output values are a subset of input values (no
   interpolation in the NEAREST path) (verified by
   `test_random_resized_crop_values_from_input` at
-  `random_resized_crop.rs:216`).
+  `test_random_resized_crop_values_from_input in random_resized_crop.rs`).
 - [x] AC-6: Non-3-D input returns `Err` (verified at
-  `random_resized_crop.rs:233`).
+  `random_resized_crop.rs`).
 - [x] AC-7: Multichannel input is handled per-channel (verified at
-  `random_resized_crop.rs:241`).
+  `random_resized_crop.rs`).
 - [x] AC-8: `nn_resize_channel` identity (verified at
-  `random_resized_crop.rs:251`).
+  `random_resized_crop.rs`).
 - [x] AC-9: `nn_resize_channel` upscale replicates pixels (verified
-  at `random_resized_crop.rs:259`).
+  at `random_resized_crop.rs`).
 - [x] AC-10: bilinear interpolation + optional antialias (verified
   by `test_random_resized_crop_bilinear_output_shape`,
   `test_random_resized_crop_bilinear_uniform_input_stays_uniform`, and
@@ -101,8 +101,8 @@ pub struct RandomResizedCrop<T: Float> {
 }
 ```
 
-at `random_resized_crop.rs:15-23`. Constructor at
-`random_resized_crop.rs:25-70` performs both range checks.
+at `random_resized_crop.rs`. Constructor at
+`random_resized_crop.rs` performs both range checks.
 
 ### Nearest-neighbor resize helper (REQ-3)
 
@@ -120,13 +120,13 @@ pub(crate) fn nn_resize_channel<T: Float>(
 }
 ```
 
-at `random_resized_crop.rs:74-89`. `pub(crate)` visibility so other
+at `pub in random_resized_crop.rs`. `pub(crate)` visibility so other
 crate-internal transforms can reuse this primitive without going
 through the full `Resize` transform machinery.
 
 ### Transform impl (REQ-4)
 
-`fn apply` at `random_resized_crop.rs:91-190`:
+`fn apply` at `apply in random_resized_crop.rs`:
 
 1. 3-D check.
 2. 10-iteration sample-and-validate loop:
@@ -176,13 +176,13 @@ blocky-looking outputs at large size jumps. Blocker #1520.
 
 Tests in `mod tests in random_resized_crop.rs` (7 tests):
 
-- `test_random_resized_crop_output_shape` at `random_resized_crop.rs:196`
-- `test_random_resized_crop_full_scale` at `random_resized_crop.rs:205`
-- `test_random_resized_crop_values_from_input` at `random_resized_crop.rs:216`
-- `test_random_resized_crop_rejects_non_3d` at `random_resized_crop.rs:233`
-- `test_random_resized_crop_multichannel` at `random_resized_crop.rs:241`
-- `test_nn_resize_channel_identity` at `random_resized_crop.rs:251`
-- `test_nn_resize_channel_upscale` at `random_resized_crop.rs:259`
+- `test_random_resized_crop_output_shape in random_resized_crop.rs`
+- `test_random_resized_crop_full_scale in random_resized_crop.rs`
+- `test_random_resized_crop_values_from_input in random_resized_crop.rs`
+- `test_random_resized_crop_rejects_non_3d in random_resized_crop.rs`
+- `test_random_resized_crop_multichannel in random_resized_crop.rs`
+- `test_nn_resize_channel_identity in random_resized_crop.rs`
+- `test_nn_resize_channel_upscale in random_resized_crop.rs`
 
 Smoke:
 
@@ -196,8 +196,8 @@ Expected: `7 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct RandomResizedCrop<T: Float>` with 6 fields + `_marker` at `ferrotorch-vision/src/transforms/random_resized_crop.rs:15-23`, mirroring `torchvision/transforms/v2/_geometry.py:197` `class RandomResizedCrop`; non-test consumer: `pub use random_resized_crop::RandomResizedCrop;` at `mod.rs:28` AND `RandomResizedCrop` in the crate-root re-export at `ferrotorch-vision/src/lib.rs:114`. |
-| REQ-2 | SHIPPED | impl: `pub fn RandomResizedCrop::new(height, width, scale, ratio) -> FerrotorchResult<Self>` with scale/ratio range checks at `random_resized_crop.rs:38-69`; non-test consumer: reachable via the crate-root re-export at `lib.rs:114`. |
-| REQ-3 | SHIPPED | impl: `pub(crate) fn nn_resize_channel<T: Float>(...)` at `random_resized_crop.rs:74-89`; non-test consumer: called from `fn apply` in this same file at `random_resized_crop.rs:177` (within the per-channel loop). |
-| REQ-4 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomResizedCrop<T>` with 10-attempt sampling, center-crop fallback, per-channel crop + nn-resize at `random_resized_crop.rs:91-190`; non-test consumer: any `Box<dyn Transform<T>>` slot — typically the first stage of an Inception/ResNet ImageNet `Compose` training pipeline. |
-| REQ-5 | SHIPPED | impl: `with_interpolation` + `with_antialias` builders + `bilinear_resize_channel` separable antialias-prefilter sampler at `ferrotorch-vision/src/transforms/random_resized_crop.rs:48-100,165-260`; non-test consumer: `pub use random_resized_crop::RandomResizedCrop;` at `mod.rs:36` AND in the `lib.rs` re-export — ImageNet pipelines call `RandomResizedCrop::new(224, 224, ...)?.with_interpolation(InterpolationMode::Bilinear).with_antialias(true)`. |
+| REQ-1 | SHIPPED | impl: `pub struct RandomResizedCrop<T: Float>` with 6 fields + `_marker` at `RandomResizedCrop in ferrotorch-vision/src/transforms/random_resized_crop.rs`, mirroring `torchvision/transforms/v2/_geometry.py:197` `class RandomResizedCrop`; non-test consumer: `pub use random_resized_crop::RandomResizedCrop;` at `mod.rs` AND `RandomResizedCrop` in the crate-root re-export at `ferrotorch-vision/src/lib.rs`. |
+| REQ-2 | SHIPPED | impl: `pub fn RandomResizedCrop::new(height, width, scale, ratio) -> FerrotorchResult<Self>` with scale/ratio range checks at `new in random_resized_crop.rs`; non-test consumer: reachable via the crate-root re-export at `lib.rs`. |
+| REQ-3 | SHIPPED | impl: `pub(crate) fn nn_resize_channel<T: Float>(...)` at `nn_resize_channel in random_resized_crop.rs`; non-test consumer: called from `fn apply` in this same file at `apply in random_resized_crop.rs` (within the per-channel loop). |
+| REQ-4 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomResizedCrop<T>` with 10-attempt sampling, center-crop fallback, per-channel crop + nn-resize at `random_resized_crop.rs`; non-test consumer: any `Box<dyn Transform<T>>` slot — typically the first stage of an Inception/ResNet ImageNet `Compose` training pipeline. |
+| REQ-5 | SHIPPED | impl: `with_interpolation` + `with_antialias` builders + `bilinear_resize_channel` separable antialias-prefilter sampler at `bilinear_resize_channel in ferrotorch-vision/src/transforms/random_resized_crop.rs,165-260`; non-test consumer: `pub use random_resized_crop::RandomResizedCrop;` at `mod.rs` AND in the `lib.rs` re-export — ImageNet pipelines call `RandomResizedCrop::new(224, 224, ...)?.with_interpolation(InterpolationMode::Bilinear).with_antialias(true)`. |

@@ -156,7 +156,7 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct WhisperConfig` in `config.rs`; non-test consumer: `pub use` at `ferrotorch-whisper/src/lib.rs:107` plus `WhisperEncoder::new` at `ferrotorch-whisper/src/encoder.rs:165`. |
+| REQ-1 | SHIPPED | impl: `pub struct WhisperConfig` in `config.rs`; non-test consumer: `pub use` at `config in ferrotorch-whisper/src/lib.rs` plus `WhisperEncoder::new` at `new in ferrotorch-whisper/src/encoder.rs`. |
 | REQ-2 | SHIPPED | impl: `pub struct HfWhisperConfig` (with `#[derive(Deserialize)]`) in `config.rs`; non-test consumer: `pub use` at `ferrotorch-whisper/src/lib.rs:107`. |
 | REQ-3 | SHIPPED | impl: `WhisperConfig::validate` in `config.rs`; non-test consumer: invoked by `WhisperConvStem::new` at `ferrotorch-whisper/src/encoder.rs:50` and `WhisperEncoderSelfAttention::new` at `ferrotorch-whisper/src/attention.rs:59`. |
 | REQ-4 | SHIPPED | impl: `HfWhisperConfig::validate` in `config.rs`; non-test consumer: invoked by `WhisperConfig::from_hf` in `config.rs`. |

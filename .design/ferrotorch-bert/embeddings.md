@@ -94,9 +94,9 @@ silently land into a parameter.
 ### Non-test production consumers
 
 - `pub use embeddings::BertEmbeddings` at
-  `ferrotorch-bert/src/lib.rs:88`.
+  `ferrotorch-bert/src/lib.rs`.
 - `BertModel { embeddings: BertEmbeddings<T>, ... }` field at
-  `ferrotorch-bert/src/model.rs:144`; `BertModel::new` at
+  `BertModel in ferrotorch-bert/src/model.rs`; `BertModel::new` at
   `ferrotorch-bert/src/model.rs:161` constructs the embeddings;
   `BertModel::forward_from_ids` at
   `ferrotorch-bert/src/model.rs:185` calls
@@ -144,10 +144,10 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct BertEmbeddings<T: Float>` in `embeddings.rs`; non-test consumer: field of `pub struct BertModel` at `ferrotorch-bert/src/model.rs:144`. |
+| REQ-1 | SHIPPED | impl: `pub struct BertEmbeddings<T: Float>` in `embeddings.rs`; non-test consumer: field of `pub struct BertModel` at `BertModel in ferrotorch-bert/src/model.rs`. |
 | REQ-2 | SHIPPED | impl: `BertEmbeddings::new` in `embeddings.rs`; non-test consumer: `BertModel::new` at `ferrotorch-bert/src/model.rs:161` calls it. |
 | REQ-3 | SHIPPED | impl: `BertEmbeddings::forward_from_ids` in `embeddings.rs`; non-test consumer: `BertModel::forward_from_ids` at `ferrotorch-bert/src/model.rs:185` calls it. |
 | REQ-4 | SHIPPED | impl: input-validation branches at the top of `forward_from_ids` in `embeddings.rs`; non-test consumer: same call path as REQ-3 — `BertModel::forward_from_ids` at `ferrotorch-bert/src/model.rs:185` propagates the error. |
-| REQ-5 | SHIPPED | impl: `impl<T: Float> Module<T> for BertEmbeddings<T>` in `embeddings.rs`; non-test consumer: `Module` blanket calls from `BertModel`'s `Module` impl at `ferrotorch-bert/src/model.rs:262` (parameters / state_dict / load_state_dict). |
+| REQ-5 | SHIPPED | impl: `impl<T: Float> Module<T> for BertEmbeddings<T>` in `embeddings.rs`; non-test consumer: `Module` blanket calls from `BertModel`'s `Module` impl at `BertModel in ferrotorch-bert/src/model.rs` (parameters / state_dict / load_state_dict). |
 | REQ-6 | SHIPPED | impl: `Module::forward` for `BertEmbeddings` in `embeddings.rs`; non-test consumer: `BertModel::forward` at `ferrotorch-bert/src/model.rs:263` calls `self.embeddings.forward(input)`. |
 | REQ-7 | SHIPPED | impl: `reshape_to_3d` call inside `forward_from_ids` in `embeddings.rs`; non-test consumer: `BertModel::forward_from_ids` at `ferrotorch-bert/src/model.rs:185`, which feeds the resulting `[1, S, hidden]` into `BertEncoder::forward`. |

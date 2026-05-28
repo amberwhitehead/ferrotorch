@@ -246,8 +246,8 @@ validate `bytes.len() >= 4` (or 8) before decoding via
 ### Non-test production consumers
 
 - `pub use utils::{clip_grad_norm_, clip_grad_value_}` in
-  `lib.rs:257`; prelude re-export at `lib.rs:292`.
-- `ferrotorch-train/src/grad_utils.rs:23` —
+  `lib.rs`; prelude re-export at `lib.rs`.
+- `ferrotorch-train/src/grad_utils.rs` —
   `pub use ferrotorch_nn::utils::{clip_grad_norm_, clip_grad_value_}`.
   `ferrotorch-train` is the canonical production consumer; it
   re-exports the helpers under its own name so training drivers
@@ -318,11 +318,11 @@ Expected: all CPU tests pass; CUDA tests pass when the feature is enabled.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub fn clip_grad_norm_<T: Float>(params: &[&Parameter<T>], max_norm: f64, norm_type: f64) -> FerrotorchResult<f64>` in `utils.rs` mirroring `torch/nn/utils/clip_grad.py:184-232`; non-test consumer: `ferrotorch-train/src/grad_utils.rs:23` `pub use ferrotorch_nn::utils::{clip_grad_norm_, clip_grad_value_}` — the canonical production re-export, used by every training driver. |
+| REQ-1 | SHIPPED | impl: `pub fn clip_grad_norm_<T: Float>(params: &[&Parameter<T>], max_norm: f64, norm_type: f64) -> FerrotorchResult<f64>` in `utils.rs` mirroring `torch/nn/utils/clip_grad.py:184-232`; non-test consumer: `ferrotorch-train/src/grad_utils.rs` `pub use ferrotorch_nn::utils::{clip_grad_norm_, clip_grad_value_}` — the canonical production re-export, used by every training driver. |
 | REQ-2 | SHIPPED | impl: device-classification preamble in `clip_grad_norm_` body (collect grads, check empty, determine common device, error on mismatch) in `utils.rs`; non-test consumer: every external invocation hits this preamble first — the production training-driver path. |
 | REQ-3 | SHIPPED | impl: `fn clip_grad_norm_cpu` with `INFINITY` max-abs branch + general `^norm_type` accumulator + post-clip scaling in `utils.rs`, using the workspace `cast::<T, f64>` helper to avoid panicking on bf16/f16 range issues; non-test consumer: every CPU-resident-gradient training loop in downstream code. |
 | REQ-4 | SHIPPED | impl: `fn clip_grad_norm_cuda` with `backend.mul_f32`/`mul_f64` + `sum_f32`/`sum_f64` + per-tensor scalar readback + `scale_f32`/`scale_f64` in `utils.rs`; non-test consumer: every CUDA-resident-gradient training loop — invoked via the same public `clip_grad_norm_` entry point. The per-tensor scalar boundary (N scalars transferred, not N tensors) matches PyTorch's `_get_total_norm` shape from `torch/nn/utils/clip_grad.py:48-117`. |
-| REQ-5 | SHIPPED | impl: `pub fn clip_grad_value_<T: Float>(params: &[&Parameter<T>], clip_value: f64) -> FerrotorchResult<()>` in `utils.rs` mirroring `torch/nn/utils/clip_grad.py:256-298`; non-test consumer: `ferrotorch-train/src/grad_utils.rs:23` re-exports it; downstream training drivers consume it after backward. |
+| REQ-5 | SHIPPED | impl: `pub fn clip_grad_value_<T: Float>(params: &[&Parameter<T>], clip_value: f64) -> FerrotorchResult<()>` in `utils.rs` mirroring `torch/nn/utils/clip_grad.py:256-298`; non-test consumer: `ferrotorch-train/src/grad_utils.rs` re-exports it; downstream training drivers consume it after backward. |
 | REQ-6 | SHIPPED | impl: `fn clip_grad_value_cpu` with element-wise clamp via Vec map + `cast::<f64, T>` for the lo/hi bounds in `utils.rs`; non-test consumer: every CPU-resident-gradient clamp call. |
 | REQ-7 | SHIPPED | impl: `fn clip_grad_value_cuda` invoking `backend.clamp_f32(g_handle, -clip_value, clip_value)` / `clamp_f64` and replacing the gradient with the clamped GPU handle in `utils.rs`; non-test consumer: every CUDA-resident-gradient clamp call — invoked via the same public `clip_grad_value_` entry point. |
 | REQ-8 | SHIPPED | impl: layered error returns in `utils.rs`: `DeviceMismatch` on heterogeneous grads, `DeviceUnavailable` on unsupported single backends (MPS, XPU), `NotImplementedOnCuda` for non-f32/f64 dtypes and for non-L2 norms on CUDA; non-test consumer: every external invocation that hits one of these conditions surfaces the appropriate error to the caller — matches R-CODE-4 (no silent CPU↔GPU round-trips) and the R-DEV-1 numerical-contract-match with upstream's GPU-kernel constraint. |

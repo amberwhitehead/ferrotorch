@@ -49,17 +49,17 @@ at `_misc.py:142-175`.
   canonical ImageNet normalizer (verified by every
   `vision_normalize.rs` test).
 - [x] AC-3: Normalizing the per-channel mean gives 0 (verified by
-  `test_vision_normalize_known_values` at `vision_normalize.rs:64`).
+  `test_vision_normalize_known_values in vision_normalize.rs`).
 - [x] AC-4: Channel-wise math is `(v - μ) / σ` (verified by
-  `test_vision_normalize_non_zero_result` at `vision_normalize.rs:79`).
+  `test_vision_normalize_non_zero_result in vision_normalize.rs`).
 - [x] AC-5: Custom `[mean, std]` arrays work (verified by
-  `test_vision_normalize_custom_stats` at `vision_normalize.rs:111`).
+  `test_vision_normalize_custom_stats in vision_normalize.rs`).
 - [x] AC-6: Spatial broadcasting — normalizing a `[3, 2, 2]` tensor
   with all zeros yields `[3, 2, 2]` output with channel-specific
   values `-μ/σ` (verified by `test_vision_normalize_spatial` at
-  `vision_normalize.rs:126`).
+  `test_vision_normalize_spatial in vision_normalize.rs`).
 - [x] AC-7: Works for `f32` (verified by `test_vision_normalize_f32`
-  at `vision_normalize.rs:167`).
+  at `test_vision_normalize_f32 in vision_normalize.rs`).
 
 ## Architecture
 
@@ -71,7 +71,7 @@ pub struct VisionNormalize<T: Float> {
 }
 ```
 
-at `vision_normalize.rs:18-20`. The wrapper exists for two reasons:
+at `vision_normalize.rs`. The wrapper exists for two reasons:
 1. Type-level encoding that mean/std are length-3 (RGB), via `[f64; 3]`.
 2. The `imagenet()` shortcut keeps the canonical constants
    discoverable in IDE autocomplete on `VisionNormalize::`.
@@ -88,7 +88,7 @@ pub fn imagenet() -> Self {
 }
 ```
 
-at `vision_normalize.rs:23-50`. The `.expect` is not a runtime panic
+at `vision_normalize.rs`. The `.expect` is not a runtime panic
 path; `ImageNet_MEAN ⊂ [0.4, 0.5]` and `IMAGENET_STD ⊂ [0.22, 0.23]`
 are representable in every `Float` (`f32`, `f64`).
 
@@ -102,7 +102,7 @@ impl<T: Float> Transform<T> for VisionNormalize<T> {
 }
 ```
 
-at `vision_normalize.rs:52-56`. Single-line delegation; the math lives
+at `vision_normalize.rs`. Single-line delegation; the math lives
 in `ferrotorch_data::Normalize`. Treating the wrapper as a vision-side
 configuration façade keeps the math centralised — `Normalize` is also
 used by non-vision code paths.
@@ -143,11 +143,11 @@ used by non-vision code paths.
 
 Tests in `mod tests in vision_normalize.rs` (5 tests):
 
-- `test_vision_normalize_known_values` at `vision_normalize.rs:64`
-- `test_vision_normalize_non_zero_result` at `vision_normalize.rs:79`
-- `test_vision_normalize_custom_stats` at `vision_normalize.rs:111`
-- `test_vision_normalize_spatial` at `vision_normalize.rs:126`
-- `test_vision_normalize_f32` at `vision_normalize.rs:167`
+- `test_vision_normalize_known_values in vision_normalize.rs`
+- `test_vision_normalize_non_zero_result in vision_normalize.rs`
+- `test_vision_normalize_custom_stats in vision_normalize.rs`
+- `test_vision_normalize_spatial in vision_normalize.rs`
+- `test_vision_normalize_f32 in vision_normalize.rs`
 
 Smoke:
 
@@ -161,7 +161,7 @@ Expected: `5 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct VisionNormalize<T: Float>` wrapping `inner: Normalize<T>` at `ferrotorch-vision/src/transforms/vision_normalize.rs:18-20`, mirroring `torchvision/transforms/v2/_misc.py:142` `class Normalize(Transform)`; non-test consumer: `pub use vision_normalize::VisionNormalize;` at `mod.rs:35` AND `VisionNormalize` in the crate-root re-export at `ferrotorch-vision/src/lib.rs:115`. |
-| REQ-2 | SHIPPED | impl: `pub fn VisionNormalize::new(mean: [f64; 3], std: [f64; 3]) -> FerrotorchResult<Self>` at `vision_normalize.rs:30-34`; non-test consumer: registered in `ferrotorch-vision/tests/conformance/_surface_inventory.toml:109` as `ferrotorch_vision::VisionNormalize::new`; reachable via the crate-root re-export. |
-| REQ-3 | SHIPPED | impl: `pub fn VisionNormalize::imagenet() -> Self` at `vision_normalize.rs:46-49` reading `IMAGENET_MEAN`/`IMAGENET_STD` from the parent module; non-test consumer: registered in `ferrotorch-vision/tests/conformance/_surface_inventory.toml:115` as `ferrotorch_vision::VisionNormalize::imagenet`; this is the canonical-ImageNet entry point that downstream pretrained-classifier preprocessing pipelines invoke. |
-| REQ-4 | SHIPPED | impl: `impl<T: Float> Transform<T> for VisionNormalize<T>` at `vision_normalize.rs:52-56` delegating to `self.inner.apply(input)`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this — typically the final stage of an ImageNet `Compose` pipeline. |
+| REQ-1 | SHIPPED | impl: `pub struct VisionNormalize<T: Float>` wrapping `inner: Normalize<T>` at `VisionNormalize in ferrotorch-vision/src/transforms/vision_normalize.rs`, mirroring `torchvision/transforms/v2/_misc.py:142` `class Normalize(Transform)`; non-test consumer: `pub use vision_normalize::VisionNormalize;` at `mod.rs` AND `VisionNormalize` in the crate-root re-export at `ferrotorch-vision/src/lib.rs`. |
+| REQ-2 | SHIPPED | impl: `pub fn VisionNormalize::new(mean: [f64; 3], std: [f64; 3]) -> FerrotorchResult<Self>` at `new in vision_normalize.rs`; non-test consumer: registered in `ferrotorch-vision/tests/conformance/_surface_inventory.toml:109` as `ferrotorch_vision::VisionNormalize::new`; reachable via the crate-root re-export. |
+| REQ-3 | SHIPPED | impl: `pub fn VisionNormalize::imagenet() -> Self` at `VisionNormalize in vision_normalize.rs` reading `IMAGENET_MEAN`/`IMAGENET_STD` from the parent module; non-test consumer: registered in `ferrotorch-vision/tests/conformance/_surface_inventory.toml:115` as `ferrotorch_vision::VisionNormalize::imagenet`; this is the canonical-ImageNet entry point that downstream pretrained-classifier preprocessing pipelines invoke. |
+| REQ-4 | SHIPPED | impl: `impl<T: Float> Transform<T> for VisionNormalize<T>` at `vision_normalize.rs` delegating to `self.inner.apply(input)`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this — typically the final stage of an ImageNet `Compose` pipeline. |

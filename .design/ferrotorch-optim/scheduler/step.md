@@ -98,7 +98,7 @@ why upstream prefers it for the epoch-jump case.
   `ferrotorch-train/src/learner.rs:306-308` is the production
   consumer.
 - `cosine_warmup_scheduler` in `scheduler/mod.rs` does NOT use
-  `StepLR`, but the example block in `mod.rs` docs (`scheduler/mod.rs:99-112`)
+  `StepLR`, but the example block in `mod.rs` docs (`scheduler in scheduler/mod.rs`)
   documents the `SequentialLr::new(vec![(Box::new(warmup), 1000),
   (Box::new(StepLR::new(0.1, 5000, 0.5)), usize::MAX)])` idiom.
 
@@ -148,6 +148,6 @@ Expected: `5 passed`.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub struct StepLR` with `base_lr`, `step_size`, `gamma`, `current_step`, `current_lr` fields in `scheduler/step.rs` mirrors `torch/optim/lr_scheduler.py:592-630`; non-test consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; user code constructs `StepLR::new(...)` and hands `Box::new(...)` to `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |
-| REQ-2 | SHIPPED | impl: `pub fn StepLR::new(base_lr, step_size, gamma) -> Self` in `scheduler/step.rs` mirrors `torch/optim/lr_scheduler.py:621-630`; non-test consumer: `cosine_warmup_scheduler` example in `scheduler/mod.rs:99-112` shows the canonical `StepLR::new(0.1, 5000, 0.5)` call pattern; the `pub use` at `lib.rs:47-52` is the API surface user-code calls. |
+| REQ-2 | SHIPPED | impl: `pub fn StepLR::new(base_lr, step_size, gamma) -> Self` in `scheduler/step.rs` mirrors `torch/optim/lr_scheduler.py:621-630`; non-test consumer: `cosine_warmup_scheduler` example in `scheduler in scheduler/mod.rs` shows the canonical `StepLR::new(0.1, 5000, 0.5)` call pattern; the `pub use` at `lib.rs` is the API surface user-code calls. |
 | REQ-3 | SHIPPED | impl: `impl<T: Float> LrScheduler<T> for StepLR` in `scheduler/step.rs` mirrors the closed-form schedule from `torch/optim/lr_scheduler.py:660-676`; non-test consumer: `Learner` invokes `sched.step(self.optimizer.as_mut())` once per epoch at `ferrotorch-train/src/learner.rs:306-308`, dispatching to this impl when the boxed scheduler is a `StepLR`. |
-| REQ-4 | SHIPPED | impl: `pub fn StepLR::get_lr(&self) -> f64` inherent method + trait impl in `scheduler/step.rs` both return `self.current_lr`; non-test consumer: `Learner` does not currently call `get_lr` directly, but the inherent method is on the public re-export at `lib.rs:47-52` and the trait method is invoked through the `Box<dyn LrScheduler<T>>` interface for user-code that wants to log the current LR. The trait `get_lr` is exercised through dynamic dispatch in `SequentialLr::get_lr` at `scheduler/mod.rs:155-161`, which IS a non-test consumer (production-code in the same crate). |
+| REQ-4 | SHIPPED | impl: `pub fn StepLR::get_lr(&self) -> f64` inherent method + trait impl in `scheduler/step.rs` both return `self.current_lr`; non-test consumer: `Learner` does not currently call `get_lr` directly, but the inherent method is on the public re-export at `lib.rs` and the trait method is invoked through the `Box<dyn LrScheduler<T>>` interface for user-code that wants to log the current LR. The trait `get_lr` is exercised through dynamic dispatch in `SequentialLr::get_lr` at `scheduler in scheduler/mod.rs`, which IS a non-test consumer (production-code in the same crate). |

@@ -53,10 +53,10 @@ Normalize -> ...` in user training pipelines.
 - [x] AC-2: `Compose::new(vec![])` constructs successfully (empty
   pipeline = identity).
 - [x] AC-3: `compose.apply(input)` returns `input` unchanged for an
-  empty pipeline (verified by `test_compose_empty` at `compose.rs:71`).
+  empty pipeline (verified by `test_compose_empty in compose.rs`).
 - [x] AC-4: A two-transform pipeline (Double + AddOne) produces
   `3 * 2 + 1 = 7` for input `[3.0]` (verified by `test_compose_chains`
-  at `compose.rs:62`).
+  at `test_compose_chains in compose.rs`).
 
 ## Architecture
 
@@ -68,7 +68,7 @@ pub struct Compose<T: Float> {
 }
 ```
 
-at `compose.rs:9-11`. The `Box<dyn Transform<T>>` trait object is the
+at `compose.rs`. The `Box<dyn Transform<T>>` trait object is the
 Rust analog of Python's "list of any callable" — the price is one
 indirection per child, which is negligible compared to the per-tensor
 work each child does. No `PhantomData` needed because `T` is bounded by
@@ -82,7 +82,7 @@ pub fn new(transforms: Vec<Box<dyn Transform<T>>>) -> Self {
 }
 ```
 
-at `compose.rs:14-16`. No validation — empty composition is allowed.
+at `compose.rs`. No validation — empty composition is allowed.
 This is R-DEV-7 deviation from upstream which raises
 `ValueError("Pass at least one transform")` (`_container.py:36-37`).
 The Rust contract is "an empty pipeline is the identity"; defensive
@@ -95,7 +95,7 @@ pub fn len(&self) -> usize { self.transforms.len() }
 pub fn is_empty(&self) -> bool { self.transforms.is_empty() }
 ```
 
-at `compose.rs:20-27`. `is_empty` is paired with `len` per
+at `is_empty in compose.rs`. `is_empty` is paired with `len` per
 clippy::len_without_is_empty.
 
 ### Transform impl (REQ-4)
@@ -112,7 +112,7 @@ impl<T: Float> Transform<T> for Compose<T> {
 }
 ```
 
-at `compose.rs:30-38`. The `?` operator short-circuits on the first
+at `compose.rs`. The `?` operator short-circuits on the first
 error — the partial pipeline result is discarded, matching upstream's
 Python exception propagation through the chain.
 
@@ -148,9 +148,9 @@ order but performs no math itself. Edge cases:
 
 Tests in `mod tests in compose.rs` (2 tests):
 
-- `test_compose_chains` at `compose.rs:62-68` — verifies
+- `test_compose_chains in compose.rs` — verifies
   `Double` then `AddOne` produces `7.0` from `[3.0]`.
-- `test_compose_empty` at `compose.rs:70-77` — verifies an empty
+- `test_compose_empty in compose.rs` — verifies an empty
   pipeline returns input unchanged.
 
 Smoke command:
@@ -165,7 +165,7 @@ Expected: `2 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct Compose<T: Float>` with `transforms: Vec<Box<dyn Transform<T>>>` field at `ferrotorch-vision/src/transforms/compose.rs:9-11`, mirroring `torchvision/transforms/v2/_container.py:11` `class Compose`; non-test consumer: `pub use compose::Compose;` at `ferrotorch-vision/src/transforms/mod.rs:21` re-exports the struct as part of the `transforms` module's public surface. |
+| REQ-1 | SHIPPED | impl: `pub struct Compose<T: Float>` with `transforms: Vec<Box<dyn Transform<T>>>` field at `Compose in ferrotorch-vision/src/transforms/compose.rs`, mirroring `torchvision/transforms/v2/_container.py:11` `class Compose`; non-test consumer: `pub use compose::Compose;` at `transforms in ferrotorch-vision/src/transforms/mod.rs` re-exports the struct as part of the `transforms` module's public surface. |
 | REQ-2 | SHIPPED | impl: `pub fn Compose::new(transforms: Vec<Box<dyn Transform<T>>>) -> Self` at `ferrotorch-vision/src/transforms/compose.rs:14-16`; non-test consumer: end-user training driver code constructs `Compose::new(vec![Box::new(Resize::new(224, 224)), Box::new(VisionNormalize::imagenet())])` — the boxed-vector input shape is the production API contract. The `pub use` at `mod.rs:21` makes the constructor reachable. |
-| REQ-3 | SHIPPED | impl: `pub fn Compose::len(&self) -> usize` at `compose.rs:20-22` and `pub fn Compose::is_empty(&self) -> bool` at `compose.rs:25-27`; non-test consumer: reachable via the `pub use Compose` re-export at `mod.rs:21`. (Note: these accessors are inspected by downstream pipeline-introspection code; they have no internal `ferrotorch-vision/src/` callers because the crate itself does not own any composed pipeline.) |
-| REQ-4 | SHIPPED | impl: `impl<T: Float> Transform<T> for Compose<T>` with `fn apply` looping `t.apply(x)?` at `compose.rs:30-38`; non-test consumer: any external `Box<dyn Transform<T>>` slot (e.g. inside another `Compose`, `RandomApply::new(...)`, or a data-loader's `apply_transforms` field) accepts a `Compose<T>` because it implements the `Transform<T>` trait — that's the production dispatch surface. |
+| REQ-3 | SHIPPED | impl: `pub fn Compose::len(&self) -> usize` at `Compose in compose.rs` and `pub fn Compose::is_empty(&self) -> bool` at `Compose in compose.rs`; non-test consumer: reachable via the `pub use Compose` re-export at `mod.rs`. (Note: these accessors are inspected by downstream pipeline-introspection code; they have no internal `ferrotorch-vision/src/` callers because the crate itself does not own any composed pipeline.) |
+| REQ-4 | SHIPPED | impl: `impl<T: Float> Transform<T> for Compose<T>` with `fn apply` looping `t.apply(x)?` at `apply in compose.rs`; non-test consumer: any external `Box<dyn Transform<T>>` slot (e.g. inside another `Compose`, `RandomApply::new(...)`, or a data-loader's `apply_transforms` field) accepts a `Compose<T>` because it implements the `Transform<T>` trait — that's the production dispatch surface. |

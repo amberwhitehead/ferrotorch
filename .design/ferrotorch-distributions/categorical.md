@@ -191,11 +191,11 @@ for `eps = 1e-7`).
   public surface (S5).
 - **`MixtureSameFamily<T, D>` in mixture_same_family.rs** — the
   `MixtureSameFamily` struct has a field `mixing: Categorical<T>`
-  at `mixture_same_family.rs:40`. Its constructor `pub fn
+  at `mixture_same_family.rs`. Its constructor `pub fn
   MixtureSameFamily::new(mixing: Categorical<T>, ...)` at
-  `mixture_same_family.rs:54` takes a `Categorical<T>` by value;
+  `mixture_same_family.rs` takes a `Categorical<T>` by value;
   its accessor `pub fn mixing(&self) -> &Categorical<T>` at
-  `mixture_same_family.rs:71` hands the reference back. Every
+  `mixing in mixture_same_family.rs` hands the reference back. Every
   internal `MixtureSameFamily` instantiation across ferrotorch
   flows through the `Categorical` type — this is a non-test
   production consumer of both the struct and its `Distribution`

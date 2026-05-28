@@ -122,7 +122,7 @@ test for this autograd path.
 - `pub use vit::{PatchEmbed, TransformerBlock, VisionTransformer, vit_b_16}` re-export at
   `ferrotorch-vision/src/models/mod.rs`.
 - `default_registry()` registers `"vit_b_16"` via
-  `maybe_load_pretrained` at `registry.rs:179`.
+  `maybe_load_pretrained` at `registry.rs`.
 
 ## Parity contract
 
@@ -171,9 +171,9 @@ Expected: all tests pass; no parity-sweep ops.
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub struct PatchEmbed<T: Float>` + `Module<T>` impl in `vit.rs`; non-test consumer: field of `pub struct VisionTransformer` in `vit.rs`; `VisionTransformer::forward` calls `self.patch_embed.forward(...)`. |
 | REQ-2 | SHIPPED | impl: `pub struct TransformerBlock<T: Float>` + `Module<T>` impl in `vit.rs`; non-test consumer: `VisionTransformer::new` builds `Vec<TransformerBlock<T>>` in `vit.rs`. |
-| REQ-3 | SHIPPED | impl: `pub struct VisionTransformer<T: Float>` + `VisionTransformer::new` in `vit.rs`; non-test consumer: `default_registry()` constructs `vit_b_16` via `maybe_load_pretrained` at `registry.rs:179`. |
+| REQ-3 | SHIPPED | impl: `pub struct VisionTransformer<T: Float>` + `VisionTransformer::new` in `vit.rs`; non-test consumer: `default_registry()` constructs `vit_b_16` via `maybe_load_pretrained` at `vit_b_16 in registry.rs`. |
 | REQ-4 | SHIPPED | impl: `Module::forward` for `VisionTransformer<T>` in `vit.rs`; non-test consumer: trait method invoked through `Box<dyn Module<T>>` returned from `registry.rs::get_model`. |
-| REQ-5 | SHIPPED | impl: `Module::named_parameters` for `VisionTransformer<T>` in `vit.rs`; non-test consumer: `load_state_dict(&state_dict, false)` at `registry.rs:53` walks the result. |
-| REQ-6 | SHIPPED | impl: `children` / `named_children` overrides on `PatchEmbed`, `TransformerBlock`, `VisionTransformer` in `vit.rs`; non-test consumer: `apply_bn_buffers_from_state_dict` at `registry.rs:62` walks `named_descendants_dyn()` (no BN buffers for ViT, but the consumer site is real). |
+| REQ-5 | SHIPPED | impl: `Module::named_parameters` for `VisionTransformer<T>` in `vit.rs`; non-test consumer: `load_state_dict(&state_dict, false)` at `named_parameters in registry.rs` walks the result. |
+| REQ-6 | SHIPPED | impl: `children` / `named_children` overrides on `PatchEmbed`, `TransformerBlock`, `VisionTransformer` in `vit.rs`; non-test consumer: `apply_bn_buffers_from_state_dict` at `registry.rs` walks `named_descendants_dyn()` (no BN buffers for ViT, but the consumer site is real). |
 | REQ-7 | SHIPPED | impl: `impl IntermediateFeatures<T> for VisionTransformer<T>` in `vit.rs`; non-test consumer: `pub use feature_extractor::IntermediateFeatures` at `mod.rs`. |
-| REQ-8 | SHIPPED | impl: `pub fn vit_b_16` in `vit.rs`; non-test consumer: `default_registry()` invokes it at `registry.rs:182`. |
+| REQ-8 | SHIPPED | impl: `pub fn vit_b_16` in `vit.rs`; non-test consumer: `default_registry()` invokes it at `registry.rs`. |

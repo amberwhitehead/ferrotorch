@@ -129,7 +129,7 @@ test-side remap is the only place the two schemas connect.
 - `pub use convnext::{ConvNeXt, ConvNeXtBlock, convnext_tiny}` re-export
   at `ferrotorch-vision/src/models/mod.rs`.
 - `default_registry()` registers `"convnext_tiny"` via
-  `maybe_load_pretrained` at `registry.rs:213`.
+  `maybe_load_pretrained` at `registry.rs`.
 
 ## Parity contract
 
@@ -185,10 +185,10 @@ Expected: all tests pass; no parity-sweep ops.
 | REQ-1 | SHIPPED | impl: `pub struct ConvNeXtBlock<T: Float>` + `Module<T>` impl in `convnext.rs` mirrors torchvision `CNBlock` at `convnext.py:39`; non-test consumer: `ConvNeXt::new` builds `Vec<Vec<ConvNeXtBlock<T>>>` for the 4 stages in `convnext.rs`. |
 | REQ-2 | SHIPPED | impl: `fn channel_layer_norm` + `nhwc_from_nchw` / `nchw_from_nhwc` in `convnext.rs`; non-test consumer: `ConvNeXtBlock::forward` and `Downsample::forward` and `ConvNeXt::forward` all call it in `convnext.rs`. |
 | REQ-3 | SHIPPED | impl: `struct Downsample<T: Float>` + `Module<T>` impl in `convnext.rs`; non-test consumer: `ConvNeXt::new` constructs the three inter-stage downsamples in `convnext.rs`. |
-| REQ-4 | SHIPPED | impl: `pub struct ConvNeXt<T: Float>` + `ConvNeXt::new` in `convnext.rs`; non-test consumer: `default_registry()` constructs it via `maybe_load_pretrained` at `registry.rs:213`. |
+| REQ-4 | SHIPPED | impl: `pub struct ConvNeXt<T: Float>` + `ConvNeXt::new` in `convnext.rs`; non-test consumer: `default_registry()` constructs it via `maybe_load_pretrained` at `registry.rs`. |
 | REQ-5 | SHIPPED | impl: `Module::forward` for `ConvNeXt<T>` in `convnext.rs`; non-test consumer: trait method invoked through `Box<dyn Module<T>>` returned from `registry.rs::get_model`. |
 | REQ-6 | SHIPPED | impl: argument validation in `ConvNeXt::new` returns `FerrotorchError::InvalidArgument` on bad depths/dims (`convnext.rs`); non-test consumer: `convnext_tiny` passes the validated `&[3,3,9,3]` / `&[96,192,384,768]`. |
-| REQ-7 | SHIPPED | impl: `Module::named_parameters` for `ConvNeXt<T>` in `convnext.rs`; non-test consumer: `load_state_dict(&state_dict, false)` at `registry.rs:53` walks the result. |
-| REQ-8 | SHIPPED | impl: `children` / `named_children` overrides on `ConvNeXtBlock`, `Downsample`, `ConvNeXt` in `convnext.rs`; non-test consumer: `apply_bn_buffers_from_state_dict` at `registry.rs:62` walks `named_descendants_dyn()` (ConvNeXt is BN-free, but the consumer site is real). |
+| REQ-7 | SHIPPED | impl: `Module::named_parameters` for `ConvNeXt<T>` in `convnext.rs`; non-test consumer: `load_state_dict(&state_dict, false)` at `named_parameters in registry.rs` walks the result. |
+| REQ-8 | SHIPPED | impl: `children` / `named_children` overrides on `ConvNeXtBlock`, `Downsample`, `ConvNeXt` in `convnext.rs`; non-test consumer: `apply_bn_buffers_from_state_dict` at `registry.rs` walks `named_descendants_dyn()` (ConvNeXt is BN-free, but the consumer site is real). |
 | REQ-9 | SHIPPED | impl: `impl IntermediateFeatures<T> for ConvNeXt<T>` in `convnext.rs`; non-test consumer: `pub use feature_extractor::IntermediateFeatures` at `mod.rs`. |
-| REQ-10 | SHIPPED | impl: `pub fn convnext_tiny` in `convnext.rs`; non-test consumer: `default_registry()` invokes it at `registry.rs:216`. |
+| REQ-10 | SHIPPED | impl: `pub fn convnext_tiny` in `convnext.rs`; non-test consumer: `default_registry()` invokes it at `registry.rs`. |

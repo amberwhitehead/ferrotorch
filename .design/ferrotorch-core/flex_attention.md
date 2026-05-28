@@ -56,17 +56,17 @@ backward node.
 - [x] AC-1: `cargo test -p ferrotorch-core --lib flex_attention::tests`
   passes (7 tests at `flex_attention.rs:266-487`).
 - [x] AC-2: Basic 4-D attention round-trip — `test_flex_attention_basic`
-  at `:280` returns shape `[1,1,2,2]`.
+  at `test_flex_attention_basic in flex_attention.rs` returns shape `[1,1,2,2]`.
 - [x] AC-3: Score-mod additive-constant invariance — adding `+1.0` to
   all scores doesn't change softmax output
-  (`test_flex_attention_score_mod_additive_bias` at `:399`).
+  (`test_flex_attention_score_mod_additive_bias in flex_attention.rs`).
 - [x] AC-4: Backward propagates to Q/K/V — gradients exist after
   `loss.backward()` (`test_flex_attention_grad_propagates_to_qkv`
-  at `:440`).
+  at `test_flex_attention_grad_propagates_to_qkv in flex_attention.rs`).
 - [x] AC-5: `d == 0` → `InvalidArgument`
-  (`test_flex_attention_d_zero` at `:328`).
+  (`test_flex_attention_d_zero in flex_attention.rs`).
 - [x] AC-6: Hand-computed numerical reference — `test_flex_attention_numerical_value`
-  at `:368` checks against `[1.6603, 2.6602, 2.3399, 3.3399]` within
+  at `test_flex_attention_numerical_value in flex_attention.rs` checks against `[1.6603, 2.6602, 2.3399, 3.3399]` within
   `1e-3`.
 - [ ] AC-7: Parity-sweep `nn.functional.scaled_dot_product_attention`
   at `--seeds 8` returns ≥1 passed sample — NOT-STARTED, blocked on
@@ -81,14 +81,14 @@ usize, usize) -> Result<Tensor<T>> + Send + Sync + 'static`.
 Shape + device validation runs at `:91-141`. The implementation:
 
 1. Reshape Q/K/V from `[B,H,N,D]` to `[B*H, N, D]` via
-   `grad_fns::shape::reshape` (`:167-169`) — differentiable to
+   `grad_fns::shape::reshape` (`reshape in flex_attention.rs`) — differentiable to
    preserve grad flow to Q/K/V.
-2. Transpose K to `[B*H, D, NK]` via `transpose(1, 2)` (`:175`),
+2. Transpose K to `[B*H, D, NK]` via `transpose(1, 2)` (`transpose in flex_attention.rs`),
    a zero-copy stride view.
 3. Q@K^T via `grad_fns::linalg::bmm_differentiable` → `[B*H, NQ, NK]`
    (`:179`). cuBLAS on CUDA.
 4. Multiply by `1/sqrt(d)` scalar lifted to the input device
-   (`:183-184`).
+   (`flex_attention.rs`).
 5. Reshape to `[B, H, NQ, NK]` (`:188-191`) for score_mod and softmax.
 6. If `score_mod` is provided, walk each (b, h), `narrow → narrow →
    squeeze → squeeze` to extract `[NQ, NK]`, invoke the callback,

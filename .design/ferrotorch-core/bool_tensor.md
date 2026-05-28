@@ -69,7 +69,7 @@ awareness + GPU kernels) + #615 (comparison constructors).
 
 - [x] AC-1: `zeros_and_ones` at `bool_tensor.rs:647` — `zeros / ones`
   build the right size and content.
-- [x] AC-2: `from_vec_shape_mismatch_errors` at `bool_tensor.rs:658`.
+- [x] AC-2: `from_vec_shape_mismatch_errors in bool_tensor.rs`.
 - [x] AC-3: `from_predicate_builds_mask` at `bool_tensor.rs:664`.
 - [x] AC-4: `pointwise_not` at `bool_tensor.rs:671`,
   `pointwise_and_or_xor` at `:678`.
@@ -87,7 +87,7 @@ awareness + GPU kernels) + #615 (comparison constructors).
 
 ## Architecture
 
-### Data layout (`bool_tensor.rs:47-50`)
+### Data layout (`bool_tensor.rs`)
 
 ```rust
 pub struct BoolTensor {
@@ -193,7 +193,7 @@ GPU-kernel paths are exercised by the integration probe
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct BoolTensor` at `ferrotorch-core/src/bool_tensor.rs:47` and constructors `from_vec` at `:66`, `from_slice` at `:92`, `zeros` at `:97`, `ones` at `:111`, `from_predicate` at `:126`. Non-test production consumer: `ferrotorch-core/src/grad_fns/comparison.rs:165` invokes `BoolTensor::from_vec` to build the condition mask consumed by `where_cond`; `ferrotorch-core/src/grad_fns/indexing.rs:407` invokes `BoolTensor::from_slice` for the masked-fill mask. |
+| REQ-1 | SHIPPED | impl: `pub struct BoolTensor` at `BoolTensor in ferrotorch-core/src/bool_tensor.rs` and constructors `from_vec in ferrotorch-core/src/bool_tensor.rs`, `from_slice in ferrotorch-core/src/bool_tensor.rs`, `zeros in ferrotorch-core/src/bool_tensor.rs`, `ones in ferrotorch-core/src/bool_tensor.rs`, `from_predicate in ferrotorch-core/src/bool_tensor.rs`. Non-test production consumer: `from_vec in ferrotorch-core/src/grad_fns/comparison.rs` invokes `BoolTensor::from_vec` to build the condition mask consumed by `where_cond`; `where_cond in ferrotorch-core/src/grad_fns/indexing.rs` invokes `BoolTensor::from_slice` for the masked-fill mask. |
 | REQ-2 | SHIPPED | impl: `device` at `ferrotorch-core/src/bool_tensor.rs:152`, `is_cuda` at `:158`, `to` at `:224`. Non-test production consumer: `ferrotorch-core/src/ops/indexing.rs:398` `where_cond` reads `cond.device()` to dispatch GPU vs CPU; the `to` method is the user-explicit transfer surface (mirrors `torch.Tensor.to(device)` from `torch/_C/__init__.pyi`). |
 | REQ-3 | SHIPPED | impl: `not` at `ferrotorch-core/src/bool_tensor.rs:271`, `and` at `:293`, `or` at `:298`, `xor` at `:303`; binary helper `binary_op` at `:322`, unary helper `unary_gpu` at `:308`. Non-test production consumer: `ferrotorch-core/src/grad_fns/indexing.rs` consumes `BoolTensor` masks; the GPU PTX kernels for `bool_and` / `bool_or` / `bool_xor` / `bool_not` are invoked from the `binary_op` / `unary_gpu` helpers. |
 | REQ-4 | SHIPPED | impl: `count_true` at `ferrotorch-core/src/bool_tensor.rs:396` (errors on CUDA), `any` at `:405` (GPU-resident OR-reduction), `all` at `:416` (GPU-resident AND-reduction), `reduce_gpu` helper at `:425`. Non-test production consumer: `ferrotorch-core/src/grad_fns/indexing.rs` uses `BoolTensor::any` to detect "no elements selected" before launching dependent kernels. |
@@ -203,4 +203,4 @@ GPU-kernel paths are exercised by the integration probe
 | REQ-8 | SHIPPED | impl: `reshape` at `ferrotorch-core/src/bool_tensor.rs:367`. Non-test production consumer: `ferrotorch-core/src/grad_fns/indexing.rs` reshapes mask buffers to match the broadcast shape of the operand tensors. Test: `reshape_preserves_data` at `:722`. |
 | REQ-9 | SHIPPED | impl: `from_gpu_handle` at `ferrotorch-core/src/bool_tensor.rs:195`, `gpu_handle` at `:182`. Non-test production consumer: every GPU comparison-op return path (`compare_float` at `:501-505` invokes `Self::from_gpu_handle(h, a.shape().to_vec())`); every GPU `binary_op`/`unary_gpu` at `:347-351 / :317-319` invokes `from_gpu_handle`. |
 | REQ-10 | SHIPPED | impl: the `shape.is_empty() { 1 } else { shape.iter().product() }` pattern at `ferrotorch-core/src/bool_tensor.rs:70`, `:99`, `:113`, `:369` distinguishes 0-D scalar (numel 1) from `[0]` empty (numel 0). Non-test production consumer: `ferrotorch-core/src/grad_fns/indexing.rs` masked operations rely on this convention to handle 0-D mask correctly; #805 regression pin. |
-| REQ-11 | SHIPPED | impl: `FerrotorchError::ShapeMismatch` at `bool_tensor.rs:77, :340, :377, :486`; `DeviceMismatch` at `:334, :497`; `InvalidArgument` at `:108, :186, :261-266`; no `panic!` / `unwrap` / `expect` in production paths (the `.expect()` at `:278, :282` are inside the `not()` infallible-shape path documented as `// SAFETY: BoolTensor::not GPU kernel`-style assertions — they remain SHIPPED for now per R-DEFER-1 S5 grandfathering of pre-existing pub API surface). Non-test production consumer: the same `grad_fns/indexing.rs` and `grad_fns/comparison.rs` paths propagate the structured errors via `?`. |
+| REQ-11 | SHIPPED | impl: `FerrotorchError::ShapeMismatch` at `unwrap in bool_tensor.rs, , , `; `DeviceMismatch` at `, `; `InvalidArgument` at `, , `; no `panic!` / `unwrap` / `expect` in production paths (the `.expect()` at `, ` are inside the `not()` infallible-shape path documented as `// SAFETY: BoolTensor::not GPU kernel`-style assertions — they remain SHIPPED for now per R-DEFER-1 S5 grandfathering of pre-existing pub API surface). Non-test production consumer: the same `grad_fns/indexing.rs` and `grad_fns/comparison.rs` paths propagate the structured errors via `?`. |

@@ -149,7 +149,7 @@ Same pattern as Adagrad/Adadelta/Adamax.
 
 - `ferrotorch-optim/src/lib.rs:33` — `pub use asgd::{Asgd, AsgdConfig};`
 - `ferrotorch/src/lib.rs:61` — `pub use ferrotorch_optim::*;`
-- `ferrotorch-train/src/learner.rs:28` — `use
+- `ferrotorch-train/src/learner.rs` — `use
   ferrotorch_optim::Optimizer;`
 
 ## Parity contract
@@ -195,11 +195,11 @@ Expected: `12 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct AsgdConfig` + `impl Default` in `asgd.rs` mirroring `torch/optim/asgd.py:30-124`; non-test consumer: `ferrotorch-optim/src/lib.rs:33` re-exports `AsgdConfig`; `ferrotorch/src/lib.rs:61` re-exports the optim surface. |
-| REQ-2 | SHIPPED | impl: `impl<T: Float> Optimizer<T> for Asgd<T>` block in `asgd.rs`; non-test consumer: `ferrotorch-train/src/learner.rs:28` consumes the `Optimizer` trait. |
+| REQ-1 | SHIPPED | impl: `pub struct AsgdConfig` + `impl Default` in `asgd.rs` mirroring `torch/optim/asgd.py:30-124`; non-test consumer: `asgd in ferrotorch-optim/src/lib.rs` re-exports `AsgdConfig`; `ferrotorch/src/lib.rs` re-exports the optim surface. |
+| REQ-2 | SHIPPED | impl: `impl<T: Float> Optimizer<T> for Asgd<T>` block in `asgd.rs`; non-test consumer: `ferrotorch-train/src/learner.rs` consumes the `Optimizer` trait. |
 | REQ-3 | SHIPPED | impl: legacy CPU `step` (else branch after `any_cuda` check) in `asgd.rs` mirroring `_single_tensor_asgd` in `torch/optim/asgd.py:197-275`; non-test consumer: `ferrotorch/src/lib.rs:61` re-exports `Asgd`. |
 | REQ-4 | SHIPPED | impl: `Asgd::step_foreach` method in `asgd.rs` mirroring `_multi_tensor_asgd` in `torch/optim/asgd.py:277-422`; non-test consumer: `ferrotorch/src/lib.rs:61` re-exports `AsgdConfig::with_foreach(true)`. |
-| REQ-5 | SHIPPED | impl: `let any_cuda = ...; if self.config.foreach || any_cuda { return self.step_foreach(); }` in `step` in `asgd.rs` (CL-1105); non-test consumer: `ferrotorch-train/src/learner.rs:28` propagates the auto-routed path via the Optimizer trait. |
+| REQ-5 | SHIPPED | impl: `let any_cuda = ...; if self.config.foreach || any_cuda { return self.step_foreach(); }` in `step` in `asgd.rs` (CL-1105); non-test consumer: `step in ferrotorch-train/src/learner.rs` propagates the auto-routed path via the Optimizer trait. |
 | REQ-6 | SHIPPED | impl: `state_dict` / `load_state_dict` methods in `asgd.rs` keyed by `ParamKey::Display`; non-test consumer: `ferrotorch-serialize/src/checkpoint.rs:48` `use ferrotorch_optim::OptimizerState;`. |
 | REQ-7 | SHIPPED | impl: `pub fn averaged_param(&self, group_idx: usize, param_idx: usize) -> Option<&[f64]>` method on `Asgd<T>` in `asgd.rs`; non-test consumer: `ferrotorch/src/lib.rs:61` re-exports `Asgd` so downstream evaluation code can swap the averaged params in for inference. |
 | REQ-8 | SHIPPED | impl: `match grad_opt { Some(g) => g, None => continue };` in both `step` and `step_foreach` in `asgd.rs`; non-test consumer: `ferrotorch-train/src/learner.rs` exercises this skip. |

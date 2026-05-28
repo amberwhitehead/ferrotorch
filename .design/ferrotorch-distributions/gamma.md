@@ -90,7 +90,7 @@ Closed-form `log_prob` / `entropy` / `mean` / `mode` /
   reparameterization) per-sample gradient
   `d(standard_gamma)/dα = -(∂_α P(α, x)) / pdf(x; α)`,
   computed by `pub(crate) fn standard_gamma_grad_one` in
-  `ferrotorch-distributions/src/special_fns.rs:134` (a port of
+  `standard_gamma_grad_one in ferrotorch-distributions/src/special_fns.rs` (a port of
   `torch._standard_gamma_grad` /
   `aten/src/ATen/native/Distributions.h:302`), then chained
   through `1/rate`. This replaced the prior high-variance
@@ -206,7 +206,7 @@ The concentration term is the PATHWISE implicit-
 reparameterization gradient
 `d(standard_gamma)/dα = -(∂_α cdf(x; α)) / pdf(x; α)`
 evaluated by `pub(crate) fn standard_gamma_grad_one` at
-`ferrotorch-distributions/src/special_fns.rs:134` (the
+`standard_gamma_grad_one in ferrotorch-distributions/src/special_fns.rs` (the
 direct port of `torch._standard_gamma_grad` with the three
 upstream branches: Taylor series for small `x`, Rice
 saddle-point for large α, and a bivariate rational
@@ -292,5 +292,5 @@ Expected: `12 passed; 0 failed`.
 | REQ-8 | SHIPPED | impl: `fn Gamma::log_prob` in `gamma.rs` with `α*ln(β) + (α-1)*ln(x) - β*x - lgamma(α)` formula mirroring `gamma.py:89-98`; non-test consumer: external `dist.log_prob(value)` calls. |
 | REQ-9 | SHIPPED | impl: `fn Gamma::entropy` in `gamma.rs` mirroring `gamma.py:100-106`; non-test consumer: external `dist.entropy()` calls. |
 | REQ-10 | SHIPPED | impl: `fn Gamma::{mean, mode, variance}` overrides in `gamma.rs` mirroring `gamma.py:45-55`; non-test consumer: external `dist.{mean, mode, variance}` calls; `test_gamma_mean_variance` pins all three. |
-| REQ-11 | SHIPPED | impl: `struct GammaRsampleBackward<T: Float>` at `ferrotorch-distributions/src/gamma.rs:527` whose `GradFn::backward` computes the concentration gradient via `pub(crate) fn standard_gamma_grad_one` at `ferrotorch-distributions/src/special_fns.rs:134` — the PATHWISE implicit-reparameterization gradient `d(standard_gamma)/dα` (port of `torch._standard_gamma_grad`, `aten/src/ATen/native/Distributions.h:302`), chained through `1/rate`; this replaced the prior score-function form `standard_gamma*(ln(standard_gamma)-ψ(α))` in commit fae8ca185 (#1555). `standard_gamma_grad_one` is pinned to torch + finite-difference by `special_fns.rs::standard_gamma_grad_one_matches_torch` / `_matches_finite_difference_implicit`. Non-test consumer: invoked by `fn Gamma::rsample` whenever either parameter requires grad — and that `rsample` is reached transitively by `fn Beta::rsample` (which uses the Gamma trait surface), so `BetaRsampleBackward`'s grad path also depends on `GammaRsampleBackward` indirectly via the autograd graph. |
+| REQ-11 | SHIPPED | impl: `struct GammaRsampleBackward<T: Float>` at `GammaRsampleBackward in ferrotorch-distributions/src/gamma.rs` whose `GradFn::backward` computes the concentration gradient via `pub(crate) fn standard_gamma_grad_one` at `standard_gamma_grad_one in ferrotorch-distributions/src/special_fns.rs` — the PATHWISE implicit-reparameterization gradient `d(standard_gamma)/dα` (port of `torch._standard_gamma_grad`, `aten/src/ATen/native/Distributions.h:302`), chained through `1/rate`; this replaced the prior score-function form `standard_gamma*(ln(standard_gamma)-ψ(α))` in commit fae8ca185 (#1555). `standard_gamma_grad_one` is pinned to torch + finite-difference by `special_fns.rs::standard_gamma_grad_one_matches_torch` / `_matches_finite_difference_implicit`. Non-test consumer: invoked by `fn Gamma::rsample` whenever either parameter requires grad — and that `rsample` is reached transitively by `fn Beta::rsample` (which uses the Gamma trait surface), so `BetaRsampleBackward`'s grad path also depends on `GammaRsampleBackward` indirectly via the autograd graph. |
 | REQ-12 | PARTIAL | impl: `has_rsample` / `support` (NonNegative) / `arg_constraints` (concentration:Positive, rate:Positive) / `event_shape` / `expand` (broadcasts both parameters) / `cdf` trait overrides at the tail of `impl Distribution<T> for Gamma<T>` in `gamma.rs` mirroring `torch/distributions/gamma.py:18-119`; `cdf` = regularized lower incomplete gamma `P(conc, rate*x)` via `fn lower_incomplete_gamma_regularized` / `fn gammp_f64` (Numerical-Recipes `gammp`: power series for `x<s+1`, Lentz continued fraction for `x≥s+1`) mirroring `gamma.py:116-119 torch.special.gammainc`, verified to 1e-12 against `scipy.special.gammainc` by `gamma.rs::test_gamma_cdf_*` (7 tests); non-test consumer: `pub use gamma::Gamma` at `lib.rs` + external `dist.cdf(value)` calls. Closes #1416, #1397 — STILL NOT-STARTED: `validate_args`, `_natural_params` / `_log_normalizer` (orthogonal trackers). |

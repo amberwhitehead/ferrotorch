@@ -224,7 +224,7 @@ Expected: all tests pass.
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub fn flex_attention<T: Float>` in `flex_attention.rs` mirroring upstream `torch/nn/attention/flex_attention.py:1867-1980`; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:200`. |
 | REQ-2 | SHIPPED | impl: `pub struct BlockMask` plus the four constructors (`new`, `full_mask`, `causal_mask`, `sliding_window_mask`) in `flex_attention.rs`; non-test consumer: re-export at `lib.rs:200`. |
-| REQ-3 | SHIPPED | impl: `pub fn is_active`, `pub fn allows_position`, `pub fn num_q_blocks`, `pub fn num_k_blocks` in `flex_attention.rs`; non-test consumer: re-export at `lib.rs:200`. |
+| REQ-3 | SHIPPED | impl: `pub fn is_active`, `pub fn allows_position`, `pub fn num_q_blocks`, `pub fn num_k_blocks` in `flex_attention.rs`; non-test consumer: re-export at `flex_attention in lib.rs`. |
 | REQ-4 | SHIPPED | impl: `type ScoreModFn<T>` and per-element evaluation inside `flex_attention` in `flex_attention.rs`; non-test consumer: re-export at `lib.rs:200`. |
 | REQ-5 | SHIPPED | impl: `pub fn causal_score_mod`, `pub fn alibi_score_mod`, `pub fn relative_position_bias_score_mod` in `flex_attention.rs`; non-test consumer: re-export at `lib.rs:200-202`. |
 | REQ-6 | SHIPPED | impl: block-mask skip logic inside `flex_attention` using `block_mask.allows_position`; non-test consumer: re-export at `lib.rs:200`. |

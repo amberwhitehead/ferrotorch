@@ -74,7 +74,7 @@ summaries); this module canonicalises that shape into Rust structs that
 
 ### `EpochResult` (REQ-1, REQ-2, REQ-3)
 
-The struct lives at `ferrotorch-train/src/history.rs:23-36`. Each field
+The struct lives at `ferrotorch-train/src/history.rs`. Each field
 is `pub` so external callers reading the result (a logger, a
 checkpoint writer, a user notebook) can name them directly; the
 `#[non_exhaustive]` attribute prevents external struct-literal
@@ -83,7 +83,7 @@ construction, forcing them through `EpochResult::new_with_defaults`
 because the crate that defines the type can construct it without the
 exhaustiveness check). The `Default` impl at lines 38-49 zeros
 everything; the `Display` impl at lines 72-83 is the canonical
-serializer for `ProgressLogger::on_epoch_end` (`callback.rs:182`)
+serializer for `ProgressLogger::on_epoch_end` (`callback in callback.rs`)
 which writes the result with `tracing::info!`.
 
 The conditional `val_loss` printing (`if let Some(vl) = self.val_loss`)
@@ -101,7 +101,7 @@ That consumer is the open prereq blocker #1498.
 `EvalResult` at lines 97-102 is the structurally symmetric type for the
 evaluation pass — `Learner::evaluate` returns it. The `Display` impl
 at lines 117-125 writes `eval_loss={:.6}[, {name}={:.6}]*`. The
-struct-literal construction at `learner.rs:444` is the production
+struct-literal construction at `learner.rs` is the production
 consumer; `new_with_defaults` is reserved for the same reloader path
 as `EpochResult::new_with_defaults`.
 
@@ -129,10 +129,10 @@ exercises this).
 - `ferrotorch-train/src/learner.rs:237` `let mut history =
   TrainingHistory::new();`, `learner.rs:352-359` constructs an
   `EpochResult` literal per epoch (the `non_exhaustive` attribute
-  does not apply inside the defining crate), `learner.rs:366`
-  `history.push(epoch_result)`, `learner.rs:444` returns
+  does not apply inside the defining crate), `learner.rs`
+  `history.push(epoch_result)`, `learner.rs` returns
   `Ok(EvalResult { loss, metrics })` from `evaluate_iter`.
-- `ferrotorch-train/src/callback.rs:20` `use crate::history::{EpochResult,
+- `ferrotorch-train/src/callback.rs` `use crate::history::{EpochResult,
   TrainingHistory};` — `Callback::on_epoch_end` takes `&EpochResult`,
   `Callback::on_train_end` takes `&TrainingHistory`.
 - `ferrotorch-train/src/callback.rs:201-218` reads
@@ -187,9 +187,9 @@ Expected: > 0 passed, 0 failed.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct EpochResult` with `#[non_exhaustive] #[derive(Debug, Clone)]` and the 6 documented fields at `ferrotorch-train/src/history.rs:23-36`; non-test consumer: `ferrotorch-train/src/learner.rs:352-359` constructs an `EpochResult` literal per epoch in `Learner::fit`, then `learner.rs:366` pushes it into `TrainingHistory`. |
+| REQ-1 | SHIPPED | impl: `pub struct EpochResult` with `#[non_exhaustive] #[derive(Debug, Clone)]` and the 6 documented fields at `EpochResult in ferrotorch-train/src/history.rs`; non-test consumer: `fit in ferrotorch-train/src/learner.rs` constructs an `EpochResult` literal per epoch in `Learner::fit`, then `fit in learner.rs` pushes it into `TrainingHistory`. |
 | REQ-2 | NOT-STARTED | open prereq blocker #1498 — `EpochResult::Default` impl (line 38) and `new_with_defaults` (line 55) plus `EvalResult::new_with_defaults` (line 109) exist on the public surface but no production caller invokes them. Production code in `Learner::fit` constructs `EpochResult` via struct literal (line 352) and `EvalResult` via struct literal (line 444), bypassing both helpers. The consumer-wiring (a checkpoint reloader / JSON deserializer that calls `new_with_defaults`) is the open work. |
-| REQ-3 | SHIPPED | impl: `Display` impl at `ferrotorch-train/src/history.rs:72-83`; non-test consumer: `ferrotorch-train/src/callback.rs:182` `tracing::info!(..., "{result}")` writes the formatted `EpochResult` from `ProgressLogger::on_epoch_end`. |
-| REQ-4 | SHIPPED | impl: `pub struct EvalResult` at `ferrotorch-train/src/history.rs:97-102` and `Display` at lines 117-125; non-test consumer: `ferrotorch-train/src/learner.rs:444` returns `Ok(EvalResult { loss, metrics })` from `evaluate_iter` (called by `evaluate` at line 403 and `fit` at line 323). The `new_with_defaults` helper (line 109) is the unwired bit covered by blocker #1498. |
-| REQ-5 | SHIPPED | impl: `pub struct TrainingHistory` at `ferrotorch-train/src/history.rs:140-143` with `new`/`push`/`len`/`is_empty`/`best_train_loss`/`best_val_loss`/`train_losses`/`val_losses` at lines 147-194, plus `Default` (line 197) and `Display` (line 203); non-test consumer: `ferrotorch-train/src/learner.rs:237` `let mut history = TrainingHistory::new();` and `history.push(epoch_result)` at line 366; `ferrotorch-train/src/callback.rs:201-218` reads `history.best_train_loss()` / `history.best_val_loss()` in `ProgressLogger::on_train_end`. |
-| REQ-6 | SHIPPED | impl: `min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))` at `ferrotorch-train/src/history.rs:173` and `:183` — NaN safe via the `unwrap_or(Equal)` fallback; non-test consumer: same `ProgressLogger::on_train_end` site at `callback.rs:203` / `:211` invokes `best_*` on training-run histories that may contain non-finite values (the trainer does not pre-filter). |
+| REQ-3 | SHIPPED | impl: `Display` impl at `EpochResult in ferrotorch-train/src/history.rs`; non-test consumer: `on_epoch_end in ferrotorch-train/src/callback.rs` `tracing::info!(..., "{result}")` writes the formatted `EpochResult` from `ProgressLogger::on_epoch_end`. |
+| REQ-4 | SHIPPED | impl: `pub struct EvalResult` at `EvalResult in ferrotorch-train/src/history.rs` and `Display` at lines 117-125; non-test consumer: `Ok in ferrotorch-train/src/learner.rs` returns `Ok(EvalResult { loss, metrics })` from `evaluate_iter` (called by `evaluate` at line 403 and `fit` at line 323). The `new_with_defaults` helper (line 109) is the unwired bit covered by blocker #1498. |
+| REQ-5 | SHIPPED | impl: `pub struct TrainingHistory` at `TrainingHistory in ferrotorch-train/src/history.rs` with `new`/`push`/`len`/`is_empty`/`best_train_loss`/`best_val_loss`/`train_losses`/`val_losses` at lines 147-194, plus `Default` (line 197) and `Display` (line 203); non-test consumer: `len in ferrotorch-train/src/learner.rs` `let mut history = TrainingHistory::new();` and `history.push(epoch_result)` at line 366; `new in ferrotorch-train/src/callback.rs` reads `history.best_train_loss()` / `history.best_val_loss()` in `ProgressLogger::on_train_end`. |
+| REQ-6 | SHIPPED | impl: `min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))` at `unwrap_or in ferrotorch-train/src/history.rs` and `unwrap_or in ferrotorch-train/src/history.rs` — NaN safe via the `unwrap_or(Equal)` fallback; non-test consumer: same `ProgressLogger::on_train_end` site at `callback in callback.rs` / `callback in callback.rs` invokes `best_*` on training-run histories that may contain non-finite values (the trainer does not pre-filter). |

@@ -79,7 +79,7 @@ decomposes the flat output index `out_idx` into `(o, k_new, i)`,
 computes `k_src` via the documented modulo, builds the source flat
 index, then issues one `ld.global.f32` / `st.global.f32` pair.
 
-Non-test production consumer: `backend_impl.rs:3618` —
+Non-test production consumer: `backend_impl.rs` —
 `CudaBackendImpl::roll_f32` is the GPU-side trait method that
 ferrotorch-core's `ops::tensor_ops::roll` dispatches into when the
 tensor is CUDA-resident. The backward path
@@ -149,5 +149,5 @@ without CUDA).
 | REQ-1 | SHIPPED | impl: `pub fn gpu_roll_f32 in ferrotorch-gpu/src/roll.rs` (line 176) mirrors upstream `roll_cuda_kernel` at `aten/src/ATen/native/cuda/TensorTransformations.cu:84`; non-test consumer: `CudaBackendImpl::roll_f32` body at `ferrotorch-gpu/src/backend_impl.rs:3618` invokes `crate::roll::gpu_roll_f32`. |
 | REQ-2 | SHIPPED | impl: `pub(crate) const ROLL_F32_PTX in roll.rs` (line 63) carries the documented ABI; the launch site at line 291 binds args in the matching order. |
 | REQ-3 | SHIPPED | impl: precondition checks at `roll.rs` lines 200-213 (`dim_size == 0` rejection, `shift_norm >= dim_size` rejection); negative-shift normalisation contract documented at lines 162-165 and exercised by `roll_negative_shift_via_normalization_matches_cpu`. |
-| REQ-4 | SHIPPED | impl: device-ordinal check at `roll.rs:184`, length check at line 192, u32-overflow check at line 221. |
-| REQ-5 | SHIPPED | impl: `pub use roll::gpu_roll_f32` at `ferrotorch-gpu/src/lib.rs:244`; non-test consumer: `backend_impl.rs:3618` (the trait method `CudaBackendImpl::roll_f32` registered via `init_cuda_backend` is what ferrotorch-core dispatches GPU rolls through). |
+| REQ-4 | SHIPPED | impl: device-ordinal check at `roll in roll.rs`, length check at line 192, u32-overflow check at line 221. |
+| REQ-5 | SHIPPED | impl: `pub use roll::gpu_roll_f32` at `backend_impl in ferrotorch-gpu/src/lib.rs`; non-test consumer: `gpu_roll_f32 in backend_impl.rs` (the trait method `CudaBackendImpl::roll_f32` registered via `init_cuda_backend` is what ferrotorch-core dispatches GPU rolls through). |

@@ -51,42 +51,42 @@ latency without changing arithmetic precision.
 
 - [x] AC-1: CFG blend uses
   `ferrotorch_core::grad_fns::arithmetic::{add, mul, sub}` for the
-  host arithmetic (`gpu/pipeline.rs:146..148`).
+  host arithmetic (`gpu/pipeline.rs`).
 - [x] AC-2: `init_latent` is multiplied by
   `scheduler.init_noise_sigma()` before the first step (kept
   explicit even though DDIM SD-1.5 sigma is 1.0) at
-  `gpu/pipeline.rs:206..208`.
+  `gpu/pipeline.rs`.
 - [x] AC-3: VAE decode is `self.vae.decode(&latent)` (decode
   applies the `1 / scaling_factor` divide internally) at
-  `gpu/pipeline.rs:230`.
+  `gpu/pipeline.rs`.
 
 ## Architecture
 
-- `GpuStableDiffusionPipeline` at `gpu/pipeline.rs:62..76` holds
+- `GpuStableDiffusionPipeline in gpu/pipeline.rs` holds
   `text_encoder: GpuClipTextEncoder`, `unet: GpuUNet2DConditional`,
   `vae: GpuVaeDecoder`, `scheduler: DDIMScheduler`, `_device:
   GpuDevice` (kept for completeness; per-call ops route through the
   sub-models' own device clones).
-- `new` at `gpu/pipeline.rs:86..100` is a field-pack returning
+- `new in gpu/pipeline.rs` is a field-pack returning
   `FerrotorchResult<Self>`.
-- `encode_prompt` at `gpu/pipeline.rs:107..109` delegates to
+- `encode_prompt in gpu/pipeline.rs` delegates to
   `text_encoder.encode`.
-- `timestep_tensor` at `gpu/pipeline.rs:114..120` builds the
+- `timestep_tensor in gpu/pipeline.rs` builds the
   `[B]` host f32 timestep tensor the UNet sinusoidal projection
   consumes.
-- `cfg_eval` at `gpu/pipeline.rs:128..150` is the per-step inner
+- `cfg_eval in gpu/pipeline.rs` is the per-step inner
   loop: builds the timestep tensor, calls
   `scheduler.scale_model_input` (identity for DDIM), runs two GPU
   UNet forwards, then computes `guided = uncond + gs * (cond -
   uncond)` via `add` / `sub` / `mul` from
   `grad_fns::arithmetic`. Returns the three host tensors.
-- `generate` at `gpu/pipeline.rs:170..232` is the outer loop:
+- `generate in gpu/pipeline.rs` is the outer loop:
   validates shapes, snapshots `set_timesteps(...)` to a `Vec`
   (so the loop body can call `&mut self` for `step`), multiplies
   `init_latent` by `scheduler.init_noise_sigma()`, iterates the
   timesteps running `cfg_eval` + `scheduler.step` per step,
   collects the per-step dumps. After the loop: `vae.decode`.
-- Module docstring at `gpu/pipeline.rs:2..40` documents
+- Module docstring at `gpu/pipeline.rs` documents
   determinism (init_latent comes from the caller; rust's PRNG ≠
   `torch.Generator`), the host-side scheduler choice, and the
   download-once-per-forward residency model of the sub-models.
@@ -95,7 +95,7 @@ Non-test production consumers:
 
 - `ferrotorch-diffusion/src/gpu/mod.rs:35` re-exports
   `GpuStableDiffusionPipeline`.
-- `ferrotorch-diffusion/examples/sd_pipeline_dump.rs:482..` imports
+- `ferrotorch-diffusion/examples/sd_pipeline_dump.rs` imports
   `GpuClipTextEncoder, GpuStableDiffusionPipeline,
   GpuUNet2DConditional, GpuVaeDecoder` and constructs the pipeline
   for the end-to-end SD-1.5 GPU dump binary.
@@ -119,7 +119,7 @@ latent — typically read from the pinned
 
 The CFG blend formula `guided = uncond + scale * (cond - uncond)`
 is the standard diffusers convention; the module docstring at
-`gpu/pipeline.rs:21..24` documents it explicitly.
+`gpu/pipeline.rs` documents it explicitly.
 
 ## Verification
 
@@ -139,6 +139,6 @@ No parity-sweep ops apply.
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `GpuStableDiffusionPipeline::new` at `ferrotorch-diffusion/src/gpu/pipeline.rs:86..100`; non-test consumer: `ferrotorch-diffusion/examples/sd_pipeline_dump.rs` constructs the pipeline via this constructor for the dump binary |
 | REQ-2 | SHIPPED | impl: `encode_prompt` at `ferrotorch-diffusion/src/gpu/pipeline.rs:107..109`; non-test consumer: same example calls `pipeline.encode_prompt(...)` before invoking `generate` |
-| REQ-3 | SHIPPED | impl: `generate` at `ferrotorch-diffusion/src/gpu/pipeline.rs:170..232` (full loop) and `cfg_eval` at `gpu/pipeline.rs:128..150`; non-test consumer: `ferrotorch-diffusion/examples/sd_pipeline_dump.rs` invokes `generate(...)` to produce the dump artifact |
-| REQ-4 | SHIPPED | impl: shape checks at `ferrotorch-diffusion/src/gpu/pipeline.rs:178..196`; non-test consumer: same `generate` consumes them on every dump call; the validation contract mirrors the CPU `StableDiffusionPipeline::generate` shape check at `pipeline.rs:175..191` |
+| REQ-3 | SHIPPED | impl: `generate in ferrotorch-diffusion/src/gpu/pipeline.rs` (full loop) and `cfg_eval in gpu/pipeline.rs`; non-test consumer: `ferrotorch-diffusion/examples/sd_pipeline_dump.rs` invokes `generate(...)` to produce the dump artifact |
+| REQ-4 | SHIPPED | impl: shape checks at `generate in ferrotorch-diffusion/src/gpu/pipeline.rs`; non-test consumer: same `generate` consumes them on every dump call; the validation contract mirrors the CPU `StableDiffusionPipeline::generate` shape check at `pipeline in pipeline.rs` |
 | REQ-5 | SHIPPED | impl: `PipelineStepDump` is constructed at `ferrotorch-diffusion/src/gpu/pipeline.rs:215..222`; non-test consumer: the dump example writes each `PipelineStepDump` to disk for diffusion-trajectory audit |

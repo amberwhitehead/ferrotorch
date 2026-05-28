@@ -125,7 +125,7 @@ permutes to `[B, H*W*A, 4]`. Output is **not** ReLU-gated.
 - `register_model("retinanet_resnet50_fpn", ...)` at
   `ferrotorch-vision/src/models/registry.rs:348`.
 - `use crate::models::detection::retinanet::RetinaFpn` at
-  `ferrotorch-vision/src/models/detection/fcos.rs:55` (FCOS reuses
+  `ferrotorch-vision/src/models/detection/fcos.rs` (FCOS reuses
   the P3..P7 FPN structure).
 
 ## Parity contract
@@ -173,12 +173,12 @@ Expected: all `detection::retinanet::tests` pass.
 | REQ-1 | SHIPPED | impl: `pub const RETINANET_NUM_ANCHORS_PER_LOC: usize = 9;` in `retinanet.rs`; non-test consumer: `RetinaNet::new` in same file passes it to both head constructors. |
 | REQ-2 | SHIPPED | impl: `pub const RETINANET_ASPECT_RATIOS` + `pub const RETINANET_BASE_SIZES` in `retinanet.rs`; non-test consumer: `retinanet_cell_anchors` in same file reads them inside `RetinaNet::forward` via `retinanet_anchors_per_level`. |
 | REQ-3 | SHIPPED | impl: `pub const RETINANET_SCORE_THRESH` / `_NMS_THRESH` / `_TOPK_CANDIDATES` / `_DETECTIONS_PER_IMG` in `retinanet.rs`; non-test consumer: `RetinaNet::forward` body uses each — invoked by `register_model("retinanet_resnet50_fpn", ...)` at `ferrotorch-vision/src/models/registry.rs:348`. |
-| REQ-4 | SHIPPED | impl: `pub struct RetinaFpn<T>` + `Self::new` + `Self::forward` in `retinanet.rs`; non-test consumer: `RetinaNet::new` calls `RetinaFpn::new()?`; `Fcos::new` at `ferrotorch-vision/src/models/detection/fcos.rs:478` also instantiates `RetinaFpn::new()?` and reuses it. |
+| REQ-4 | SHIPPED | impl: `pub struct RetinaFpn<T>` + `Self::new` + `Self::forward` in `retinanet.rs`; non-test consumer: `RetinaNet::new` calls `RetinaFpn::new()?`; `Fcos::new` at `new in ferrotorch-vision/src/models/detection/fcos.rs` also instantiates `RetinaFpn::new()?` and reuses it. |
 | REQ-5 | SHIPPED | impl: `pub struct RetinaNetClassificationHead<T>` + `Self::new` + `Self::forward_level` in `retinanet.rs`; non-test consumer: `RetinaNet::new` calls `RetinaNetClassificationHead::new(FPN_OUT_CHANNELS, RETINANET_NUM_ANCHORS_PER_LOC, num_classes)?`. |
 | REQ-6 | SHIPPED | impl: `pub struct RetinaNetRegressionHead<T>` + `Self::new` + `Self::forward_level` in `retinanet.rs`; non-test consumer: `RetinaNet::new` calls `RetinaNetRegressionHead::new(FPN_OUT_CHANNELS, RETINANET_NUM_ANCHORS_PER_LOC)?`. |
 | REQ-7 | SHIPPED | impl: `fn retinanet_cell_anchors` + `fn retinanet_anchors_per_level` in `retinanet.rs`; non-test consumer: `RetinaNet::forward` calls `retinanet_anchors_per_level::<T>(&fm_sizes, (img_h, img_w))?`. |
 | REQ-8 | SHIPPED | impl: `pub struct RetinaNet<T>` + `Self::new` in `retinanet.rs`; non-test consumer: `register_model("retinanet_resnet50_fpn", ...)` at `ferrotorch-vision/src/models/registry.rs:348`. |
 | REQ-9 | SHIPPED | impl: `pub fn RetinaNet::forward` in `retinanet.rs`; non-test consumer: `impl<T> Module<T> for RetinaNet<T>::forward` calls it; the registry closure at `ferrotorch-vision/src/models/registry.rs:348` reaches it via `Module::forward`. |
-| REQ-10 | SHIPPED | impl: anchor-decode block inside `RetinaNet::forward` in `retinanet.rs` (effectively `decode_boxes` semantics inline; the import `use crate::models::detection::anchor_utils::decode_boxes` at `ferrotorch-vision/src/models/detection/retinanet.rs:40` makes the helper available); non-test consumer: same `Self::forward` path consumed by the registry closure. |
-| REQ-11 | SHIPPED | impl: `impl<T> Module<T> for RetinaNet<T>::forward` in `retinanet.rs` returns first-image scores; non-test consumer: registered as `ModelConstructor<f32>` at `ferrotorch-vision/src/models/registry.rs:348`. |
+| REQ-10 | SHIPPED | impl: anchor-decode block inside `RetinaNet::forward` in `retinanet.rs` (effectively `decode_boxes` semantics inline; the import `use crate::models::detection::anchor_utils::decode_boxes` at `retinanet in ferrotorch-vision/src/models/detection/retinanet.rs` makes the helper available); non-test consumer: same `Self::forward` path consumed by the registry closure. |
+| REQ-11 | SHIPPED | impl: `impl<T> Module<T> for RetinaNet<T>::forward` in `retinanet.rs` returns first-image scores; non-test consumer: registered as `ModelConstructor<f32>` at `ModelConstructor in ferrotorch-vision/src/models/registry.rs`. |
 | REQ-12 | SHIPPED | impl: `pub fn retinanet_resnet50_fpn` in `retinanet.rs`; non-test consumer: `register_model("retinanet_resnet50_fpn", ...)` at `ferrotorch-vision/src/models/registry.rs:348` calls it inside the closure. |

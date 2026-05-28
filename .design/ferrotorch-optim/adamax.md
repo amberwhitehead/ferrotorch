@@ -127,7 +127,7 @@ Same pattern as Adagrad/Adadelta/Asgd.
 - `ferrotorch-optim/src/lib.rs:31` — `pub use adamax::{Adamax,
   AdamaxConfig};`
 - `ferrotorch/src/lib.rs:61` — `pub use ferrotorch_optim::*;`
-- `ferrotorch-train/src/learner.rs:28` — `use
+- `ferrotorch-train/src/learner.rs` — `use
   ferrotorch_optim::Optimizer;`
 
 ## Parity contract
@@ -170,10 +170,10 @@ Expected: `9 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct AdamaxConfig` + `impl Default` in `adamax.rs` mirroring `torch/optim/adamax.py:29-121`; non-test consumer: `ferrotorch-optim/src/lib.rs:31` re-exports `AdamaxConfig`; `ferrotorch/src/lib.rs:61` re-exports the optim surface. |
-| REQ-2 | SHIPPED | impl: `impl<T: Float> Optimizer<T> for Adamax<T>` block in `adamax.rs`; non-test consumer: `ferrotorch-train/src/learner.rs:28` consumes the `Optimizer` trait. |
+| REQ-1 | SHIPPED | impl: `pub struct AdamaxConfig` + `impl Default` in `adamax.rs` mirroring `torch/optim/adamax.py:29-121`; non-test consumer: `adamax in ferrotorch-optim/src/lib.rs` re-exports `AdamaxConfig`; `ferrotorch/src/lib.rs` re-exports the optim surface. |
+| REQ-2 | SHIPPED | impl: `impl<T: Float> Optimizer<T> for Adamax<T>` block in `adamax.rs`; non-test consumer: `ferrotorch-train/src/learner.rs` consumes the `Optimizer` trait. |
 | REQ-3 | SHIPPED | impl: legacy CPU `step` (else branch after `any_cuda` check) in `adamax.rs` mirroring `_single_tensor_adamax` in `torch/optim/adamax.py:226-304`; non-test consumer: `ferrotorch/src/lib.rs:61` re-exports `Adamax`. |
 | REQ-4 | SHIPPED | impl: `Adamax::step_foreach` method in `adamax.rs` mirroring `_multi_tensor_adamax` in `torch/optim/adamax.py:306-423`; non-test consumer: `ferrotorch/src/lib.rs:61` re-exports `AdamaxConfig::with_foreach(true)`. |
-| REQ-5 | SHIPPED | impl: `let any_cuda = ...; if self.config.foreach || any_cuda { return self.step_foreach(); }` at the top of `step()` in `adamax.rs` (CL-1105); non-test consumer: `ferrotorch-train/src/learner.rs:28` Optimizer trait drives the auto-routed path. |
+| REQ-5 | SHIPPED | impl: `let any_cuda = ...; if self.config.foreach || any_cuda { return self.step_foreach(); }` at the top of `step()` in `adamax.rs` (CL-1105); non-test consumer: `step in ferrotorch-train/src/learner.rs` Optimizer trait drives the auto-routed path. |
 | REQ-6 | SHIPPED | impl: `state_dict` / `load_state_dict` methods in `adamax.rs` keyed by `ParamKey::Display`; non-test consumer: `ferrotorch-serialize/src/checkpoint.rs:48` `use ferrotorch_optim::OptimizerState;`. |
 | REQ-7 | SHIPPED | impl: `match grad_opt { Some(g) => g, None => continue };` in both `step` and `step_foreach` in `adamax.rs`; non-test consumer: `ferrotorch-train/src/learner.rs` exercises this skip for frozen layers. |

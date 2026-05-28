@@ -138,16 +138,16 @@ visible to the first `random_f64()` call without any prior
 
 ### Non-test production consumers
 
-- `random_f64` is consumed by `random_horizontal_flip.rs:54`,
-  `random_vertical_flip.rs:58`, `random_apply.rs:39`,
-  `random_apply.rs:78` (RandomChoice's selector),
-  `gaussian_noise.rs:49-50` (Box-Muller pair),
-  `random_resized_crop.rs:119,122,135,140`,
-  `random_rotation.rs:106`, `random_gaussian_blur.rs:135`,
-  `color_jitter.rs:83,93,163`, `elastic_transform.rs:166-167`.
-- `random_usize` is consumed by `random_crop.rs:62,67`,
-  `trivial_augment_wide.rs:117,349`.
-- `vision_manual_seed` is re-exported at `mod.rs:32` and
+- `random_f64` is consumed by `random_f64 in random_horizontal_flip.rs`,
+  `random_vertical_flip.rs`, `random_apply.rs`,
+  `random_apply.rs` (RandomChoice's selector),
+  `gaussian_noise.rs` (Box-Muller pair),
+  `random_resized_crop.rs,122,135,140`,
+  `random_rotation.rs`, `random_gaussian_blur.rs`,
+  `color_jitter.rs,93,163`, `elastic_transform.rs`.
+- `random_usize` is consumed by `random_usize in random_crop.rs,67`,
+  `trivial_augment_wide.rs,349`.
+- `vision_manual_seed` is re-exported at `mod.rs` and
   `lib.rs:115`, making it the externally-callable seed setter. End-users
   call it from training driver code at the top of an epoch to make a
   data-augmentation pass reproducible.
@@ -171,7 +171,7 @@ here so future audits don't flag it as drift.
 via every randomized-transform test using `vision_manual_seed` to pin a
 reproducible draw sequence — e.g.
 `crate::transforms::rng::vision_manual_seed(12345);` in
-`gaussian_noise.rs:132`, `elastic_transform.rs:226`, etc. Run:
+`gaussian_noise.rs`, `elastic_transform.rs`, etc. Run:
 
 ```bash
 cargo test -p ferrotorch-vision --lib transforms:: 2>&1 | tail -3
@@ -186,6 +186,6 @@ design).
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub fn vision_manual_seed(seed: u64)` at `ferrotorch-vision/src/transforms/rng.rs:31-37` records seed + epoch baseline; non-test consumer: `pub use rng::vision_manual_seed;` at `ferrotorch-vision/src/transforms/mod.rs:32` re-exports it, and `ferrotorch-vision/src/lib.rs:115` re-exports at crate root — end-user training drivers call `ferrotorch_vision::vision_manual_seed(42)` at epoch start. |
-| REQ-2 | SHIPPED | impl: `pub(crate) fn random_f64() -> f64` at `ferrotorch-vision/src/transforms/rng.rs:46-58` with splitmix64 constants; non-test consumer: `super::rng::random_f64` imported and called from `random_horizontal_flip.rs:54`, `random_vertical_flip.rs:58`, `random_apply.rs:39`, `gaussian_noise.rs:49`, `random_resized_crop.rs:119`, `random_rotation.rs:106`, `random_gaussian_blur.rs:135`, `color_jitter.rs:83`, `elastic_transform.rs:166`. |
-| REQ-3 | SHIPPED | impl: `pub(crate) fn random_usize(upper: usize) -> usize` at `ferrotorch-vision/src/transforms/rng.rs:61-63`; non-test consumer: `super::rng::random_usize` imported and called from `random_crop.rs:62,67` (top-left corner sampling) and `trivial_augment_wide.rs:117,349` (magnitude-bin and op-index sampling). |
-| REQ-4 | SHIPPED | impl: three `static AtomicU64` at `ferrotorch-vision/src/transforms/rng.rs:18-23` (`VISION_SEED`, `VISION_COUNTER`, `VISION_EPOCH_BASE`); non-test consumer: every load/store path in `vision_manual_seed` (REQ-1) and `random_f64` (REQ-2) touches these atomics. |
+| REQ-2 | SHIPPED | impl: `pub(crate) fn random_f64() -> f64` at `random_f64 in ferrotorch-vision/src/transforms/rng.rs` with splitmix64 constants; non-test consumer: `super::rng::random_f64` imported and called from `random_f64 in random_horizontal_flip.rs`, `random_f64 in random_vertical_flip.rs`, `random_f64 in random_apply.rs`, `random_f64 in gaussian_noise.rs`, `random_f64 in random_resized_crop.rs`, `random_f64 in random_rotation.rs`, `random_f64 in random_gaussian_blur.rs`, `random_f64 in color_jitter.rs`, `random_f64 in elastic_transform.rs`. |
+| REQ-3 | SHIPPED | impl: `pub(crate) fn random_usize(upper: usize) -> usize` at `random_usize in ferrotorch-vision/src/transforms/rng.rs`; non-test consumer: `super::rng::random_usize` imported and called from `random_usize in random_crop.rs,67` (top-left corner sampling) and `random_usize in trivial_augment_wide.rs,349` (magnitude-bin and op-index sampling). |
+| REQ-4 | SHIPPED | impl: three `static AtomicU64` at `VISION_SEED in ferrotorch-vision/src/transforms/rng.rs` (`VISION_SEED`, `VISION_COUNTER`, `VISION_EPOCH_BASE`); non-test consumer: every load/store path in `vision_manual_seed` (REQ-1) and `random_f64` (REQ-2) touches these atomics. |

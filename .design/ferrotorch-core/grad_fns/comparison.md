@@ -28,7 +28,7 @@ logical_or, logical_xor, logical_not, max, min, maximum, minimum, isnan,
 isinf, isfinite`), **the implementations of those 17 comparison ops do
 not live in this file**. They live in `ferrotorch-core/src/bool_tensor.rs`
 (see `pub fn gt`, `pub fn lt`, `pub fn ge`, `pub fn le`, `pub fn eq_t`,
-`pub fn ne` in `BoolTensor` at `bool_tensor.rs:450-475`). Discrepancy
+`pub fn ne` in `BoolTensor` at `ne in bool_tensor.rs`). Discrepancy
 tracked by blocker #1293.
 
 ## Requirements
@@ -96,7 +96,7 @@ tracked by blocker #1293.
   `where_bt_picks_correctly` in `first_class_tests` mod of
   `grad_fns/comparison.rs` and by `cpu_where` /
   `run_where_for_device("cpu", Device::Cpu)` at
-  `ferrotorch-core/tests/conformance_elementwise.rs:1024-1026` (forward
+  `ferrotorch-core/tests/conformance_elementwise.rs` (forward
   parity for float32 and float64 against pre-recorded fixtures).
 - [x] AC-2: `where_` backward routes `grad_output` to `grad_x` on
   true positions and `grad_y` on false positions, with zeros on the
@@ -121,7 +121,7 @@ tracked by blocker #1293.
   `if device.is_cuda()` branch in `WhereBackward::backward` of
   `grad_fns/comparison.rs`) — exercised by `cuda_where` /
   `run_where_for_device("cuda:0", Device::Cuda(0))` at
-  `ferrotorch-core/tests/conformance_elementwise.rs:2395`.
+  `Cuda in ferrotorch-core/tests/conformance_elementwise.rs`.
 - [ ] AC-6: All 17 routed parity-sweep ops (`eq, ne, lt, le, gt, ge,
   logical_and, logical_or, logical_xor, logical_not, max, min, maximum,
   minimum, isnan, isinf, isfinite`) return `passed (0 skipped, 0 failed)`
@@ -228,7 +228,7 @@ They are implemented in `ferrotorch-core/src/bool_tensor.rs`:
 - `BoolTensor::le<T>` (`pub fn le` in `bool_tensor.rs`).
 - `BoolTensor::eq_t<T>` (`pub fn eq_t` in `bool_tensor.rs`).
 - `BoolTensor::ne<T>` (`pub fn ne` in `bool_tensor.rs`).
-- Their `_int` variants at `bool_tensor.rs:524-571`.
+- Their `_int` variants at `ne in bool_tensor.rs`.
 
 `logical_and / logical_or / logical_xor / logical_not / max / min /
 maximum / minimum / isnan / isinf / isfinite` are not located in this
@@ -281,12 +281,12 @@ route table all return `0/N passed (N skipped)` — none are wired.
 
 ### Conformance tests (in `ferrotorch-core/tests/conformance_elementwise.rs`)
 
-- `cpu_where` (at `conformance_elementwise.rs:1024-1027`) — calls
+- `cpu_where` (at `cpu_where in conformance_elementwise.rs`) — calls
   `run_where_for_device("cpu", Device::Cpu)`.
-- `cuda_where` (at `conformance_elementwise.rs:2395` inside the
+- `cuda_where` (at `conformance_elementwise.rs` inside the
   `#[cfg(feature = "cuda-pytorch-parity")]` block) — calls
   `run_where_for_device("cuda:0", Device::Cuda(0))`.
-- `run_where_for_device` (at `conformance_elementwise.rs:899-1022`)
+- `run_where_for_device` (at `run_where_for_device in conformance_elementwise.rs`)
   runs forward and backward parity for both `float32` and `float64`
   against pre-recorded fixtures, exercising AC-1, AC-2, and AC-5.
 
@@ -333,7 +333,7 @@ returning no matches in the dispatch table.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 (where_ forward + backward) | NOT-STARTED | impl exists: `pub fn where_` in `grad_fns/comparison.rs` mirroring `aten/src/ATen/native/TensorCompare.cpp:642 Tensor where(...)` and `WhereBackward<T>` in `grad_fns/comparison.rs` mirroring `tools/autograd/derivatives.yaml:1955-1959`. Tests pass (`test_where_forward`, `test_where_backward`, `test_where_no_grad` in the `tests` mod + `cpu_where` / `cuda_where` in `conformance_elementwise.rs`). **However**, no non-test production consumer of `grad_fns::comparison::where_` exists in the workspace (`grep -rn "grad_fns::comparison\|where_(\|where_bt(" ferrotorch-*/src/ ferrotorch/src/` returns matches only inside `grad_fns/comparison.rs` itself; production-style callers in `ferrotorch-core/src/lib.rs` re-export `where_cond` / `where_cond_bt` from `grad_fns::indexing`, not from `grad_fns::comparison`). Open prereq blocker #1295 (wire `Tensor::where_t` method-style boundary or migrate to `grad_fns::indexing` variant). |
-| REQ-2 (where_bt BoolTensor variant) | NOT-STARTED | impl exists: `pub fn where_bt` in `grad_fns/comparison.rs` delegating to `where_` with shape validation, no direct upstream counterpart (PyTorch uses a `Tensor` with `kBool` for the condition; `TensorCompare.cpp:626-629`). Tests pass (`where_bt_picks_correctly`, `where_bt_rejects_shape_mismatch` in `first_class_tests`; `where_bt` lane in `run_where_for_device` of `conformance_elementwise.rs`). No non-test production consumer of `grad_fns::comparison::where_bt` outside `comparison.rs` test mods (the workspace's only production BoolTensor-`where` path is `ferrotorch-core/src/ops/indexing.rs:397 pub fn where_cond_bt` exported from `lib.rs:174 pub use ops::indexing::{...where_cond_bt}`, which is a DIFFERENT function in a DIFFERENT module). Open prereq blocker #1297. |
+| REQ-2 (where_bt BoolTensor variant) | NOT-STARTED | impl exists: `pub fn where_bt` in `grad_fns/comparison.rs` delegating to `where_` with shape validation, no direct upstream counterpart (PyTorch uses a `Tensor` with `kBool` for the condition; `TensorCompare.cpp:626-629`). Tests pass (`where_bt_picks_correctly`, `where_bt_rejects_shape_mismatch` in `first_class_tests`; `where_bt` lane in `run_where_for_device` of `conformance_elementwise.rs`). No non-test production consumer of `grad_fns::comparison::where_bt` outside `comparison.rs` test mods (the workspace's only production BoolTensor-`where` path is `where in ferrotorch-core/src/ops/indexing.rs pub fn where_cond_bt` exported from `grad_fns in lib.rs pub use ops::indexing::{...where_cond_bt}`, which is a DIFFERENT function in a DIFFERENT module). Open prereq blocker #1297. |
 | REQ-3 (device handling + NaN/Inf passthrough) | NOT-STARTED | partial: CPU and GPU forward both work (the `is_cuda()` upload branch in `where_` and the symmetric branch in `WhereBackward::backward` of `grad_fns/comparison.rs`). NaN / Inf trivially pass through because no arithmetic occurs (the impl is `if c { xv } else { yv }`). But the implementation diverges from upstream by materializing `x.data_vec()?` / `y.data_vec()?` / `grad_output.data_vec()?` on CPU before selecting — a silent CPU round trip that upstream's `where_kernel` at `TensorCompare.cpp:306, 638` avoids on the GPU path. Per R-CODE-4 this round trip is a bug that should be eliminated by a GPU-resident `where_` kernel. **No production consumer is using this code path** (REQ-1 blocker #1295 dominates); when a consumer lands, R-CODE-4 must be re-audited. Open prereq blocker #1295 (consumer) gates this REQ in turn. |
 | REQ-4 (17 comparison parity ops the route declares) | NOT-STARTED | The 17 ops named in `tooling/translate-routes.toml` for this file (`eq, ne, lt, le, gt, ge, logical_and, logical_or, logical_xor, logical_not, max, min, maximum, minimum, isnan, isinf, isfinite`) are not implemented in `grad_fns/comparison.rs`. They are implemented elsewhere (eq/ne/lt/le/gt/ge in `bool_tensor.rs:450-475`; logical_*/max/min/maximum/minimum/isnan/isinf/isfinite either elsewhere or absent). The parity-sweep runner has no dispatch arms for them (every op returns `0/N passed (N skipped, 0 failed)`). Open prereq blocker #1293 (retarget the route or relocate the ops). |
 

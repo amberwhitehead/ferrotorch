@@ -57,26 +57,26 @@ latent (matching `AutoencoderKL.decode(z).sample`).
 
 ## Architecture
 
-- Per-component bundles at `gpu/vae.rs:50..127`:
+- Per-component bundles at `gpu in gpu/vae.rs`:
   `GpuConv2d`, `GpuGroupNorm`, `GpuLinear` (kept in `[out, in]`
   PyTorch layout — VAE's Linear footprint is small and the
   transpose-on-host trick used by UNet/CLIP wasn't applied here),
   `GpuResnet` (VAE flavour, no temb), `GpuAttn` (single-head
   GroupNorm + Linear q/k/v + Linear to_out.0), `GpuUpsample`,
   `GpuUpDecoderBlock`, `GpuMidBlock`.
-- `GpuVaeDecoder` at `gpu/vae.rs:150..159` holds
+- `GpuVaeDecoder in gpu/vae.rs` holds
   `post_quant_conv`, `conv_in`, `mid_block`, four
   `up_blocks`, `conv_norm_out`, `conv_out`, frozen config, device
   handle.
-- `new` at `gpu/vae.rs:182..` validates the config, pops every
+- `new` at `gpu in gpu/vae.rs` validates the config, pops every
   state-dict key by name (matching the CPU `VaeDecoder.state_dict()`
   layout: `post_quant_conv.*`, `decoder.conv_in.*`,
   `decoder.mid_block.*`, `decoder.up_blocks.{i}.*`,
   `decoder.conv_norm_out.*`, `decoder.conv_out.*`), enforces
   per-key length, uploads.
-- `from_module` at `gpu/vae.rs:344..351`: extracts CPU
+- `from_module` at `gpu in gpu/vae.rs`: extracts CPU
   `state_dict()` and delegates to `new`.
-- `decode` at `gpu/vae.rs:367..423`:
+- `decode` at `gpu in gpu/vae.rs`:
   - shape check;
   - `inv = 1.0 / config.scaling_factor` (f64 → f32);
   - upload latent and `gpu_scale(latent, inv)`;
@@ -95,9 +95,9 @@ Non-test production consumers:
 
 - `ferrotorch-diffusion/src/gpu/mod.rs:37` re-exports
   `GpuVaeDecoder`.
-- `ferrotorch-diffusion/src/gpu/pipeline.rs:48,68,89` holds
+- `ferrotorch-diffusion/src/gpu/pipeline.rs,68,89` holds
   `vae: GpuVaeDecoder` as a pipeline field; `generate` at
-  `gpu/pipeline.rs:230` calls `self.vae.decode(&latent)` as the
+  `gpu/pipeline.rs` calls `self.vae.decode(&latent)` as the
   final step.
 - `ferrotorch-diffusion/examples/vae_decode_dump.rs:307,315`
   imports and constructs `GpuVaeDecoder` via `from_module` for the
@@ -124,7 +124,7 @@ Critical invariants:
 - **Single-head mid-block attention** — the VAE attention is
   spatial-flatten + one Linear-projection of q/k/v + Linear-out,
   with channels playing the role of the head dim. The
-  `GpuAttn::channels` field at `gpu/vae.rs:99..106` records the
+  `GpuAttn::channels` field at `gpu in gpu/vae.rs` records the
   channel count for the per-call reshape.
 - **Resnet shortcut**: present iff `in_channels != out_channels`.
   `pop_resnet` builds the shortcut conv lazily.
@@ -150,5 +150,5 @@ No parity-sweep ops apply.
 | REQ-1 | SHIPPED | impl: `GpuVaeDecoder::new` at `ferrotorch-diffusion/src/gpu/vae.rs:182..`; non-test consumer: `ferrotorch-diffusion/src/gpu/vae.rs:350` `from_module` calls `Self::new(cpu.config.clone(), state, device_clone)`; production binary `ferrotorch-diffusion/examples/vae_decode_dump.rs:315` constructs the decoder via `from_module` |
 | REQ-2 | SHIPPED | impl: `from_module` at `ferrotorch-diffusion/src/gpu/vae.rs:344..351`; non-test consumer: `ferrotorch-diffusion/examples/vae_decode_dump.rs:315` `GpuVaeDecoder::from_module(decoder, &device)?`; `ferrotorch-diffusion/examples/sd_pipeline_dump.rs:501` `GpuVaeDecoder::from_module(vae, &device)?` |
 | REQ-3 | SHIPPED | impl: `decode` at `ferrotorch-diffusion/src/gpu/vae.rs:367..423`; non-test consumer: `ferrotorch-diffusion/src/gpu/pipeline.rs:230` `self.vae.decode(&latent)?` is the canonical final decode call in the SD-1.5 GPU pipeline |
-| REQ-4 | SHIPPED | impl: shape check at `ferrotorch-diffusion/src/gpu/vae.rs:369..376`; non-test consumer: the pipeline's `generate` exercises the shape contract on every dump call (`gpu/pipeline.rs:230`) |
-| REQ-5 | SHIPPED | impl: `GpuAttn` struct at `ferrotorch-diffusion/src/gpu/vae.rs:99..106` with single-head `GroupNorm` + four `GpuLinear` (q/k/v/out), and `attn_forward` helper invoked from `decode` at `gpu/vae.rs:402`; non-test consumer: `decode` (and thus the SD-1.5 GPU pipeline) runs the mid-block attention exactly once per inference |
+| REQ-4 | SHIPPED | impl: shape check at `gpu in ferrotorch-diffusion/src/gpu/vae.rs`; non-test consumer: the pipeline's `generate` exercises the shape contract on every dump call (`generate in gpu/pipeline.rs`) |
+| REQ-5 | SHIPPED | impl: `GpuAttn` struct at `GpuAttn in ferrotorch-diffusion/src/gpu/vae.rs` with single-head `GroupNorm` + four `GpuLinear` (q/k/v/out), and `attn_forward` helper invoked from `decode` at `gpu in gpu/vae.rs`; non-test consumer: `decode` (and thus the SD-1.5 GPU pipeline) runs the mid-block attention exactly once per inference |

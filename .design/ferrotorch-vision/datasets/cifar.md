@@ -102,7 +102,7 @@ The file is structured as: shared sample type and constants, the
 `Cifar100` block (same shape), then the shared binary-batch reader
 `load_cifar_batches` and the shared `generate_synthetic` PRNG core.
 
-### Shared constants (`cifar.rs:65-69`, `cifar.rs:312`)
+### Shared constants (`cifar.rs`, `cifar.rs`)
 
 `HEIGHT = 32`, `WIDTH = 32`, `CHANNELS = 3`, and `BYTES_PER_IMAGE =
 CHANNELS * HEIGHT * WIDTH = 3072` are file-private constants.
@@ -113,7 +113,7 @@ Cifar10::WIDTH * Cifar10::CHANNELS];` without hard-coding the values
 
 ### `CifarSample<T>` (REQ-1)
 
-Marked `#[non_exhaustive]` (`cifar.rs:52`) so future per-sample
+Marked `#[non_exhaustive]` (`cifar.rs`) so future per-sample
 metadata (e.g. coarse-label exposure for CIFAR-100, super-class id)
 can land without breaking struct literals.
 
@@ -124,14 +124,14 @@ Split`. The difference is purely the `NUM_CLASSES` constant (10 vs
 100) and the on-disk filenames (`data_batch_*.bin` vs `train.bin`).
 
 For CIFAR-100, the **fine label** is the second byte of the
-2-byte sample header (`cifar.rs:367-370`): `bytes[sample_start + 1]`.
+2-byte sample header (`cifar.rs`): `bytes[sample_start + 1]`.
 The first byte (coarse label, 0..20) is read but discarded — this
 matches upstream's `entry["fine_labels"]` selection at
 `cifar.py:88`.
 
 ### `synthetic` (REQ-4)
 
-The shared `generate_synthetic` helper (`cifar.rs:405-439`) is
+The shared `generate_synthetic` helper (`generate_synthetic in cifar.rs`) is
 parameterized by `num_classes` (10 or 100) and a pair of `(seed_train,
 seed_test)` u64s. Each dataset picks its own seeds:
 - CIFAR-10: `0xc1fa_0010_0001` (train), `0xc1fa_0010_0002` (test)
@@ -140,21 +140,21 @@ seed_test)` u64s. Each dataset picks its own seeds:
 Identical `(num_samples, split)` produces byte-identical output
 across runs and across machines (the xorshift64 is deterministic).
 Distinct seeds ensure CIFAR-10 ≠ CIFAR-100 (test
-`test_cifar100_different_from_cifar10` at `cifar.rs:579-590`).
+`test_cifar100_different_from_cifar10 in cifar.rs`).
 
 ### `from_dir` + `load_cifar_batches` (REQ-5, REQ-6, REQ-7, REQ-9)
 
-`load_cifar_batches` (`cifar.rs:318-398`) is the shared binary
+`load_cifar_batches` (`load_cifar_batches in cifar.rs`) is the shared binary
 reader. The format selector enum `CifarFormat::{Cifar10, Cifar100}`
-(`cifar.rs:303-309`) carries `header_bytes` (1 or 2) and the offset
+(`cifar.rs`) carries `header_bytes` (1 or 2) and the offset
 into the header for the label byte (`0` or `1`).
 
 Each batch file is read into memory in one `std::fs::read` call
-(`cifar.rs:345-347`). The total length is validated to be a multiple
-of `bytes_per_sample = header_bytes + 3072` (`cifar.rs:349-358`),
+(`cifar.rs`). The total length is validated to be a multiple
+of `bytes_per_sample = header_bytes + 3072` (`cifar.rs`),
 preventing partial-record reads.
 
-Per-sample loop (`cifar.rs:363-394`):
+Per-sample loop (`cifar.rs`):
 1. Extract `label` from the header.
 2. Validate `label < num_classes`; if not, error out with the file
    path + sample index.
@@ -169,16 +169,16 @@ Per-sample loop (`cifar.rs:363-394`):
 
 ### `impl Dataset` (REQ-8)
 
-`cifar.rs:165-185` (Cifar10) and `cifar.rs:276-296` (Cifar100) both
+`cifar.rs` (Cifar10) and `cifar.rs` (Cifar100) both
 forward `len` to `self.images.len()` and return `IndexOutOfBounds`
 on OOB `get`. Constructor returns owned `CifarSample` by cloning the
 stored tensor (matches the Dataset trait's by-value semantics).
 
 ### Non-test production consumers
 
-- `ferrotorch-vision/src/datasets/mod.rs:10` — `pub use cifar::{Cifar10,
+- `ferrotorch-vision/src/datasets/mod.rs` — `pub use cifar::{Cifar10,
   Cifar100, CifarSample};` re-exports the type surface.
-- `ferrotorch-vision/src/lib.rs:99` — `pub use datasets::{Cifar10,
+- `ferrotorch-vision/src/lib.rs` — `pub use datasets::{Cifar10,
   Cifar100, CifarSample, ...};` is the crate-root re-export.
 - `ferrotorch-vision/tests/conformance_vision_datasets.rs:30` — uses
   `Cifar10` and `Cifar100` (test consumer; counts towards REQ-1's
@@ -201,7 +201,7 @@ consumer per R-DEFER-1's "existing pub API is grandfathered" clause
   `is_empty()` is `true`. No upstream constraint.
 - **Train/test seed divergence**: distinct seeds guarantee different
   bytes between splits. Verified by `test_cifar10_train_test_different`
-  (`cifar.rs:522-531`).
+  (`test_cifar10_train_test_different in cifar.rs`).
 - **CIFAR-10 vs CIFAR-100 seed divergence**: different seed bases
   (`c1fa_0010` vs `c1fa_0100`) guarantee disjoint synthetic streams.
   Verified by `test_cifar100_different_from_cifar10`.
@@ -215,8 +215,8 @@ consumer per R-DEFER-1's "existing pub API is grandfathered" clause
   up as `[3, 32, 32]` tensors with the same pixel values, so the
   consumer-facing contract is identical.
 - **Send + Sync**: `test_cifar10_is_send_sync` and
-  `test_cifar100_is_send_sync` (`cifar.rs:540-545` and
-  `cifar.rs:592-596`) statically assert.
+  `test_cifar100_is_send_sync` (`test_cifar100_is_send_sync in cifar.rs` and
+  `cifar.rs`) statically assert.
 
 Divergences from upstream (deliberate):
 
@@ -233,7 +233,7 @@ Divergences from upstream (deliberate):
 ## Verification
 
 Unit tests in `mod tests` of `ferrotorch-vision/src/datasets/cifar.rs`
-(`cifar.rs:450-596`):
+(`cifar.rs`):
 
 **CIFAR-10**:
 - `test_cifar10_synthetic_train_len` / `_test_len` / `_empty` —
@@ -265,12 +265,12 @@ Expected: 17 passed.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `#[non_exhaustive] pub struct CifarSample<T: Float>` at `ferrotorch-vision/src/datasets/cifar.rs:51-58` (image + label fields) per upstream `torchvision/datasets/cifar.py:104-124` `__getitem__`; non-test consumer: `Cifar10::get` at `ferrotorch-vision/src/datasets/cifar.rs:172-184` and `Cifar100::get` at `ferrotorch-vision/src/datasets/cifar.rs:283-295` both construct `CifarSample`; re-exported via `ferrotorch-vision/src/datasets/mod.rs:10`. |
-| REQ-2 | SHIPPED | impl: `#[derive(Debug)] pub struct Cifar10<T: Float>` at `ferrotorch-vision/src/datasets/cifar.rs:80-85` with `pub const HEIGHT/WIDTH/CHANNELS/NUM_CLASSES` at `ferrotorch-vision/src/datasets/cifar.rs:88-95` per upstream `torchvision/datasets/cifar.py:13`; non-test consumer: re-exported at `ferrotorch-vision/src/datasets/mod.rs:10` → `ferrotorch-vision/src/lib.rs:99` which `ferrotorch/src/lib.rs:71` glob-imports, surfacing `ferrotorch::Cifar10` to the meta-crate users. |
-| REQ-3 | SHIPPED | impl: `#[derive(Debug)] pub struct Cifar100<T: Float>` at `ferrotorch-vision/src/datasets/cifar.rs:196-201` with `NUM_CLASSES = 100` at `ferrotorch-vision/src/datasets/cifar.rs:211`, and the fine-label extraction `bytes[sample_start + 1]` at `ferrotorch-vision/src/datasets/cifar.rs:368-370` per upstream `entry["fine_labels"]` at `torchvision/datasets/cifar.py:88`; non-test consumer: re-exported at `ferrotorch-vision/src/datasets/mod.rs:10` and used through that chain. |
-| REQ-4 | SHIPPED | impl: `Cifar10::synthetic` at `ferrotorch-vision/src/datasets/cifar.rs:108-121` (seeds `0xc1fa_0010_0001/0002`) and `Cifar100::synthetic` at `ferrotorch-vision/src/datasets/cifar.rs:224-237` (seeds `0xc1fa_0100_0001/0002`), both calling the shared `generate_synthetic` at `ferrotorch-vision/src/datasets/cifar.rs:405-439`; non-test consumer: re-exported via `ferrotorch-vision/src/datasets/mod.rs:10` (the synthetic constructor is the documented test-pipeline entry point; downstream callers reach it through the re-export chain). |
-| REQ-5 | SHIPPED | impl: `Cifar10::from_dir` at `ferrotorch-vision/src/datasets/cifar.rs:136-157` (5 train batches + test_batch.bin) and `Cifar100::from_dir` at `ferrotorch-vision/src/datasets/cifar.rs:253-268` (train.bin + test.bin) per upstream `torchvision/datasets/cifar.py:35-45` `train_list`/`test_list`; non-test consumer: re-exported through `ferrotorch-vision/src/datasets/mod.rs:10` → `ferrotorch-vision/src/lib.rs:99` for downstream training-driver scripts. |
+| REQ-1 | SHIPPED | impl: `#[non_exhaustive] pub struct CifarSample<T: Float>` at `CifarSample in ferrotorch-vision/src/datasets/cifar.rs` (image + label fields) per upstream `torchvision/datasets/cifar.py:104-124` `__getitem__`; non-test consumer: `Cifar10::get` at `get in ferrotorch-vision/src/datasets/cifar.rs` and `Cifar100::get` at `get in ferrotorch-vision/src/datasets/cifar.rs` both construct `CifarSample`; re-exported via `ferrotorch-vision/src/datasets/mod.rs`. |
+| REQ-2 | SHIPPED | impl: `#[derive(Debug)] pub struct Cifar10<T: Float>` at `Cifar10 in ferrotorch-vision/src/datasets/cifar.rs` with `pub const HEIGHT/WIDTH/CHANNELS/NUM_CLASSES` at `Cifar10 in ferrotorch-vision/src/datasets/cifar.rs` per upstream `torchvision/datasets/cifar.py:13`; non-test consumer: re-exported at `ferrotorch-vision/src/datasets/mod.rs` → `ferrotorch-vision/src/lib.rs` which `ferrotorch/src/lib.rs` glob-imports, surfacing `ferrotorch::Cifar10` to the meta-crate users. |
+| REQ-3 | SHIPPED | impl: `#[derive(Debug)] pub struct Cifar100<T: Float>` at `Cifar100 in ferrotorch-vision/src/datasets/cifar.rs` with `NUM_CLASSES = 100` at `NUM_CLASSES in ferrotorch-vision/src/datasets/cifar.rs`, and the fine-label extraction `bytes[sample_start + 1]` at `NUM_CLASSES in ferrotorch-vision/src/datasets/cifar.rs` per upstream `entry["fine_labels"]` at `torchvision/datasets/cifar.py:88`; non-test consumer: re-exported at `ferrotorch-vision/src/datasets/mod.rs` and used through that chain. |
+| REQ-4 | SHIPPED | impl: `Cifar10::synthetic` at `synthetic in ferrotorch-vision/src/datasets/cifar.rs` (seeds `0xc1fa_0010_0001/0002`) and `Cifar100::synthetic` at `synthetic in ferrotorch-vision/src/datasets/cifar.rs` (seeds `0xc1fa_0100_0001/0002`), both calling the shared `generate_synthetic in ferrotorch-vision/src/datasets/cifar.rs`; non-test consumer: re-exported via `synthetic in ferrotorch-vision/src/datasets/mod.rs` (the synthetic constructor is the documented test-pipeline entry point; downstream callers reach it through the re-export chain). |
+| REQ-5 | SHIPPED | impl: `Cifar10::from_dir` at `from_dir in ferrotorch-vision/src/datasets/cifar.rs` (5 train batches + test_batch.bin) and `Cifar100::from_dir` at `from_dir in ferrotorch-vision/src/datasets/cifar.rs` (train.bin + test.bin) per upstream `torchvision/datasets/cifar.py:35-45` `train_list`/`test_list`; non-test consumer: re-exported through `from_dir in ferrotorch-vision/src/datasets/mod.rs` → `ferrotorch-vision/src/lib.rs` for downstream training-driver scripts. |
 | REQ-6 | SHIPPED | impl: `load_cifar_batches` at `ferrotorch-vision/src/datasets/cifar.rs:318-398` parses the CIFAR binary batch format with the `CifarFormat::{Cifar10, Cifar100}` enum at `ferrotorch-vision/src/datasets/cifar.rs:303-309` selecting 1-byte vs 2-byte header per the official CIFAR binary format documentation (cited at the cifar.rs module docstring); non-test consumer: invoked from `Cifar10::from_dir` at `ferrotorch-vision/src/datasets/cifar.rs:149-150` and `Cifar100::from_dir` at `ferrotorch-vision/src/datasets/cifar.rs:260-261`. |
 | REQ-7 | SHIPPED | impl: pixel normalization at `ferrotorch-vision/src/datasets/cifar.rs:361,385-388` with `inv_255 = 1.0_f64 / 255.0` per upstream `torchvision.transforms.functional.to_tensor` chain; non-test consumer: `load_cifar_batches` applies this to every loaded pixel, and is itself called from both `Cifar10::from_dir` and `Cifar100::from_dir` (production load paths). |
-| REQ-8 | SHIPPED | impl: `impl<T: Float + 'static> Dataset for Cifar10<T>` at `ferrotorch-vision/src/datasets/cifar.rs:165-185` and `impl<T: Float + 'static> Dataset for Cifar100<T>` at `ferrotorch-vision/src/datasets/cifar.rs:276-296` per `ferrotorch_data::Dataset` trait; non-test consumer: the re-export chain at `ferrotorch-vision/src/datasets/mod.rs:10` + `ferrotorch-vision/src/lib.rs:99` exposes the types implementing the trait to downstream training pipelines (the trait method `get` is the per-sample iteration contract). |
+| REQ-8 | SHIPPED | impl: `impl<T: Float + 'static> Dataset for Cifar10<T>` at `get in ferrotorch-vision/src/datasets/cifar.rs` and `impl<T: Float + 'static> Dataset for Cifar100<T>` at `get in ferrotorch-vision/src/datasets/cifar.rs` per `ferrotorch_data::Dataset` trait; non-test consumer: the re-export chain at `ferrotorch-vision/src/datasets/mod.rs` + `ferrotorch-vision/src/lib.rs` exposes the types implementing the trait to downstream training pipelines (the trait method `get` is the per-sample iteration contract). |
 | REQ-9 | SHIPPED | impl: label-range validation at `ferrotorch-vision/src/datasets/cifar.rs:371-378` (`if label as usize >= num_classes { return Err(...) }`); non-test consumer: `load_cifar_batches` is the in-crate caller (the validation is inlined). |

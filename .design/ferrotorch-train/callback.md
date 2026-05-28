@@ -132,13 +132,13 @@ intentionally does not provide.
 
 ### Non-test production consumers
 
-- `ferrotorch-train/src/learner.rs:33` `use crate::callback::Callback;`
+- `ferrotorch-train/src/learner.rs` `use crate::callback::Callback;`
   — `Learner` holds `callbacks: Vec<Box<dyn Callback<T>>>` (line 69)
   and invokes the trait at `learner.rs:245-247, 262-265, 299-302,
   362-364, 376-378` (epoch/batch/train-end hook dispatch) plus the
   early-stopping check at line 370 (`if self.callbacks.iter().any(|cb|
   cb.should_stop())`).
-- `ferrotorch-train/src/tensorboard.rs:38` `use crate::callback::Callback;`
+- `ferrotorch-train/src/tensorboard.rs` `use crate::callback::Callback;`
   — `TensorBoardCallback` implements `Callback<T>` (line 458) and is
   the cross-module production consumer of the trait.
 - `ferrotorch-train/src/learner.rs:716` `use crate::callback::EarlyStopping;`
@@ -187,9 +187,9 @@ Expected: > 18 passed, 0 failed.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub trait Callback<T: Float>: Send + Sync` at `ferrotorch-train/src/callback.rs:30-53` with 5 default-no-op methods + `should_stop`; non-test consumer: `ferrotorch-train/src/learner.rs:69` `callbacks: Vec<Box<dyn Callback<T>>>` plus the hook dispatch sites at `learner.rs:245-247, 262-265, 299-302, 362-364, 370, 376-378`. |
-| REQ-2 | SHIPPED | impl: `pub struct EarlyStopping` at `ferrotorch-train/src/callback.rs:74-113`, `Callback<T> for EarlyStopping` at lines 115-139; non-test consumer: production attachment surface is `Learner::with_callback(Box::new(EarlyStopping::new(...)))`; the trait dispatch through `learner.rs:69` invokes `EarlyStopping::on_epoch_end` and `should_stop` per epoch. |
-| REQ-3 | SHIPPED | impl: `pub struct ProgressLogger` at `ferrotorch-train/src/callback.rs:152-174`, `Callback<T> for ProgressLogger` at lines 176-220 — all 4 hooks emit `tracing::info!` events with target `"ferrotorch::progress"`; non-test consumer: same `Learner::with_callback` attachment path through `learner.rs:69` invokes `ProgressLogger::on_epoch_start` / `on_epoch_end` / `on_batch_end` / `on_train_end` from the fit loop. |
+| REQ-1 | SHIPPED | impl: `pub trait Callback<T: Float>: Send + Sync` at `should_stop in ferrotorch-train/src/callback.rs` with 5 default-no-op methods + `should_stop`; non-test consumer: `should_stop in ferrotorch-train/src/learner.rs` `callbacks: Vec<Box<dyn Callback<T>>>` plus the hook dispatch sites at `should_stop in learner.rs, 262-265, 299-302, 362-364, 370, 376-378`. |
+| REQ-2 | SHIPPED | impl: `pub struct EarlyStopping` at `EarlyStopping in ferrotorch-train/src/callback.rs`, `Callback<T> for EarlyStopping` at lines 115-139; non-test consumer: production attachment surface is `Learner::with_callback(Box::new(EarlyStopping::new(...)))`; the trait dispatch through `new in learner.rs` invokes `EarlyStopping::on_epoch_end` and `should_stop` per epoch. |
+| REQ-3 | SHIPPED | impl: `pub struct ProgressLogger` at `ProgressLogger in ferrotorch-train/src/callback.rs`, `Callback<T> for ProgressLogger` at lines 176-220 — all 4 hooks emit `tracing::info!` events with target `"ferrotorch::progress"`; non-test consumer: same `Learner::with_callback` attachment path through `with_callback in learner.rs` invokes `ProgressLogger::on_epoch_start` / `on_epoch_end` / `on_batch_end` / `on_train_end` from the fit loop. |
 | REQ-4 | NOT-STARTED | open prereq blocker #1497 — `EmaCallback::init_from_params` and `update_from_params` take `&[Vec<T>]` but the `Callback::on_batch_end` hook does not surface parameter tensors, so no production caller drives the EMA update end-to-end. The implementation is shipped; the consumer-wiring (a `Learner` extension that calls `update_from_params` after every batch with the model's parameter view) is the open work. |
-| REQ-5 | SHIPPED | impl: `Callback<T>::on_batch_end` no-op at `ferrotorch-train/src/callback.rs:366-378` with the documented rationale comment; `shadow_params()` at line 314, `num_updates()` at line 301, `is_initialized()` at line 306; non-test consumer: the trait dispatch path through `learner.rs:69` invokes the no-op `on_batch_end` on any attached `EmaCallback` — the no-op IS the documented contract, and the trait-dispatch site IS the production consumer of the no-op behavior. The shadow-state observer methods are public API surface awaiting an external driver (blocker #1497). |
-| REQ-6 | SHIPPED | impl: `Send + Sync` enforced by the trait bound at `ferrotorch-train/src/callback.rs:30` + per-impl test at line 618; non-test consumer: `learner.rs:69` `callbacks: Vec<Box<dyn Callback<T>>>` requires the dyn trait object to be `Send + Sync`; that field-type bound IS the production consumer of the auto-trait. |
+| REQ-5 | SHIPPED | impl: `Callback<T>::on_batch_end` no-op at `on_batch_end in ferrotorch-train/src/callback.rs` with the documented rationale comment; `shadow_params()` at line 314, `num_updates()` at line 301, `is_initialized()` at line 306; non-test consumer: the trait dispatch path through `is_initialized in learner.rs` invokes the no-op `on_batch_end` on any attached `EmaCallback` — the no-op IS the documented contract, and the trait-dispatch site IS the production consumer of the no-op behavior. The shadow-state observer methods are public API surface awaiting an external driver (blocker #1497). |
+| REQ-6 | SHIPPED | impl: `Send + Sync` enforced by the trait bound at `ferrotorch-train/src/callback.rs` + per-impl test at line 618; non-test consumer: `learner.rs` `callbacks: Vec<Box<dyn Callback<T>>>` requires the dyn trait object to be `Send + Sync`; that field-type bound IS the production consumer of the auto-trait. |

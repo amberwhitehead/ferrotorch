@@ -110,14 +110,14 @@ cosine phase here, which is a footgun this helper closes.
 
 ### Non-test production consumers
 
-- `LrScheduler` trait — `Learner` in `ferrotorch-train/src/learner.rs:61`
+- `LrScheduler` trait — `Learner in ferrotorch-train/src/learner.rs`
   stores `scheduler: Option<Box<dyn LrScheduler<T>>>` and at
   `ferrotorch-train/src/learner.rs:306-308` invokes
   `sched.step(self.optimizer.as_mut())` once per epoch. The
   `with_scheduler` builder at
   `ferrotorch-train/src/learner.rs:105` is the public hook.
 - `LrScheduler` trait — `Swalr` in
-  `ferrotorch-optim/src/swa.rs:460` provides another
+  `Swalr in ferrotorch-optim/src/swa.rs` provides another
   trait implementation, which the SWA training driver consumes.
 - `SequentialLr` — re-exported at
   `ferrotorch-optim/src/lib.rs:47-52` as a public type;
@@ -178,8 +178,8 @@ Expected: all scheduler unit tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub trait LrScheduler<T: Float>` in `scheduler/mod.rs` mirrors `torch/optim/lr_scheduler.py:95-303`; non-test consumer: `Learner.scheduler: Option<Box<dyn LrScheduler<T>>>` field at `ferrotorch-train/src/learner.rs:61` plus the per-epoch `sched.step(self.optimizer.as_mut())` invocation at `ferrotorch-train/src/learner.rs:306-308`; additional consumer impl `impl<T: Float> LrScheduler<T> for Swalr` at `ferrotorch-optim/src/swa.rs:460`. |
+| REQ-1 | SHIPPED | impl: `pub trait LrScheduler<T: Float>` in `scheduler/mod.rs` mirrors `torch/optim/lr_scheduler.py:95-303`; non-test consumer: `Learner.scheduler: Option<Box<dyn LrScheduler<T>>>` field at `Learner in ferrotorch-train/src/learner.rs` plus the per-epoch `sched.step(self.optimizer.as_mut())` invocation at `Learner in ferrotorch-train/src/learner.rs`; additional consumer impl `impl<T: Float> LrScheduler<T> for Swalr` at `ferrotorch-optim/src/swa.rs`. |
 | REQ-2 | SHIPPED | impl: `pub struct SequentialLr<T: Float>` with `schedulers: Vec<(Box<dyn LrScheduler<T>>, usize)>` + `current_step: usize` fields in `scheduler/mod.rs` mirrors `torch/optim/lr_scheduler.py:1082-1170`; non-test consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; instantiated by `cosine_warmup_scheduler` (same module) and handed to `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |
 | REQ-3 | SHIPPED | impl: `pub fn SequentialLr::new` in `scheduler/mod.rs` constructs the wrapper with `current_step: 0` mirrors `torch/optim/lr_scheduler.py:1119-1170` (R-DEV-4 deviation: no optimizer-aliasing check because optimizer is passed per-step); non-test consumer: invoked from `cosine_warmup_scheduler` in the same file. |
-| REQ-4 | SHIPPED | impl: `impl<T: Float> LrScheduler<T> for SequentialLr<T>` in `scheduler/mod.rs` mirrors `torch/optim/lr_scheduler.py:1185-1195`; non-test consumer: `Learner` calls `sched.step(...)` on any `Box<dyn LrScheduler<T>>` including `SequentialLr` boxes at `ferrotorch-train/src/learner.rs:306-308`. |
+| REQ-4 | SHIPPED | impl: `impl<T: Float> LrScheduler<T> for SequentialLr<T>` in `scheduler/mod.rs` mirrors `torch/optim/lr_scheduler.py:1185-1195`; non-test consumer: `Learner` calls `sched.step(...)` on any `Box<dyn LrScheduler<T>>` including `SequentialLr` boxes at `Learner in ferrotorch-train/src/learner.rs`. |
 | REQ-5 | SHIPPED | impl: `pub fn cosine_warmup_scheduler<T: Float>` in `scheduler/mod.rs` builds a `LinearWarmup` + `CosineAnnealingLR` `SequentialLr`; non-test consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; the canonical user-call pattern is `learner.with_scheduler(Box::new(cosine_warmup_scheduler(lr, w, t, m)))` consumed by `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |

@@ -61,20 +61,20 @@ sampling — upstream's class is also random in sigma when given a
 - [x] AC-2: Even `kernel_size` returns `Err`.
 - [x] AC-3: `sigma.0 <= 0` or `sigma.0 > sigma.1` returns `Err`.
 - [x] AC-4: Output shape equals input shape (verified by
-  `test_gaussian_blur_output_shape` at `random_gaussian_blur.rs:165`).
+  `test_gaussian_blur_output_shape in random_gaussian_blur.rs`).
 - [x] AC-5: Uniform-value image is unchanged in the interior after
   blur (border pixels see zero-padding effect) (verified by
-  `test_gaussian_blur_uniform_image` at `random_gaussian_blur.rs:174`).
+  `test_gaussian_blur_uniform_image in random_gaussian_blur.rs`).
 - [x] AC-6: An impulse pixel spreads to its neighbors but stays
   brightest at center (verified by `test_gaussian_blur_smooths_impulse`
-  at `random_gaussian_blur.rs:198`).
+  at `test_gaussian_blur_smooths_impulse in random_gaussian_blur.rs`).
 - [x] AC-7: `gaussian_kernel_1d` sums to 1 within `1e-10` (verified
-  at `random_gaussian_blur.rs:217`).
+  at `random_gaussian_blur.rs`).
 - [x] AC-8: `gaussian_kernel_1d` is symmetric (verified at
-  `random_gaussian_blur.rs:227`).
+  `random_gaussian_blur.rs`).
 - [x] AC-9: Non-3-D input returns `Err` (verified at
-  `random_gaussian_blur.rs:242`).
-- [x] AC-10: f32 works (verified at `random_gaussian_blur.rs:250`).
+  `random_gaussian_blur.rs`).
+- [x] AC-10: f32 works (verified at `random_gaussian_blur.rs`).
 - [x] AC-11: reflection padding (verified by
   `test_reflect_index_canonical_cases` and
   `test_gaussian_blur_border_pixels_not_dimmed` in
@@ -93,15 +93,15 @@ pub struct RandomGaussianBlur<T: Float> {
 }
 ```
 
-at `random_gaussian_blur.rs:15-20`. Constructor at
-`random_gaussian_blur.rs:31-55` enforces:
+at `random_gaussian_blur.rs`. Constructor at
+`random_gaussian_blur.rs` enforces:
 - `kernel_size >= 1 && kernel_size % 2 == 1` (single combined check).
 - `sigma.0 > 0.0 && sigma.0 <= sigma.1`.
 
 ### Gaussian kernel (REQ-3)
 
 `fn gaussian_kernel_1d(size, sigma) -> Vec<f64>` at
-`random_gaussian_blur.rs:59-75`:
+`gaussian_kernel_1d in random_gaussian_blur.rs`:
 
 ```rust
 let half = (size / 2) as i64;
@@ -121,15 +121,15 @@ the per-pixel intensity scale (no DC gain shift).
 
 ### Separable convolution (REQ-4)
 
-`fn blur_rows` at `random_gaussian_blur.rs:78-96` and `fn blur_cols` at
-`random_gaussian_blur.rs:99-116`. Both walk the source index
+`fn blur_rows` at `blur_rows in random_gaussian_blur.rs` and `fn blur_cols` at
+`blur_cols in random_gaussian_blur.rs`. Both walk the source index
 `col + (ki - half)` (or row equivalent), reading only positions
 inside `[0, w)` (or `[0, h)`). Out-of-bounds indices contribute 0 to
 the accumulator — zero-padding semantics.
 
 ### Transform impl (REQ-5)
 
-`fn apply` at `random_gaussian_blur.rs:118-159`:
+`fn apply` at `apply in random_gaussian_blur.rs`:
 
 1. 3-D check.
 2. Sample sigma uniformly in `[lo, hi]`.
@@ -173,13 +173,13 @@ but is worth its own blocker. Blocker #1519.
 
 Tests in `mod tests in random_gaussian_blur.rs` (7 tests):
 
-- `test_gaussian_blur_output_shape` at `random_gaussian_blur.rs:165`
-- `test_gaussian_blur_uniform_image` at `random_gaussian_blur.rs:174`
-- `test_gaussian_blur_smooths_impulse` at `random_gaussian_blur.rs:198`
-- `test_gaussian_kernel_1d_sums_to_one` at `random_gaussian_blur.rs:217`
-- `test_gaussian_kernel_1d_symmetry` at `random_gaussian_blur.rs:227`
-- `test_gaussian_blur_rejects_non_3d` at `random_gaussian_blur.rs:242`
-- `test_gaussian_blur_f32` at `random_gaussian_blur.rs:250`
+- `test_gaussian_blur_output_shape in random_gaussian_blur.rs`
+- `test_gaussian_blur_uniform_image in random_gaussian_blur.rs`
+- `test_gaussian_blur_smooths_impulse in random_gaussian_blur.rs`
+- `test_gaussian_kernel_1d_sums_to_one in random_gaussian_blur.rs`
+- `test_gaussian_kernel_1d_symmetry in random_gaussian_blur.rs`
+- `test_gaussian_blur_rejects_non_3d in random_gaussian_blur.rs`
+- `test_gaussian_blur_f32 in random_gaussian_blur.rs`
 
 Smoke:
 
@@ -194,8 +194,8 @@ Expected: `7 passed`.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub struct RandomGaussianBlur<T: Float>` with `kernel_size, sigma_lo, sigma_hi, _marker` at `ferrotorch-vision/src/transforms/random_gaussian_blur.rs:15-20`, mirroring `torchvision/transforms/v2/_misc.py:177` `class GaussianBlur`; non-test consumer: `pub use random_gaussian_blur::RandomGaussianBlur;` at `mod.rs:26` AND `RandomGaussianBlur` in the crate-root re-export at `ferrotorch-vision/src/lib.rs:114`. |
-| REQ-2 | SHIPPED | impl: `pub fn RandomGaussianBlur::new(kernel_size: usize, sigma: (f64, f64)) -> FerrotorchResult<Self>` with odd-positive kernel and sigma-ordering checks at `random_gaussian_blur.rs:31-55`; non-test consumer: registered as public surface (the conformance inventory listing for `RandomGaussianBlur::new` is at `ferrotorch-vision/tests/conformance/_surface_inventory.toml` — `RandomGaussianBlur` block); reachable via the crate-root re-export at `lib.rs:114`. |
-| REQ-3 | SHIPPED | impl: `fn gaussian_kernel_1d(size: usize, sigma: f64) -> Vec<f64>` at `random_gaussian_blur.rs:59-75`; non-test consumer: `fn apply` in this same file calls `gaussian_kernel_1d(self.kernel_size, sigma)` at `random_gaussian_blur.rs:136`. |
-| REQ-4 | SHIPPED | impl: `fn blur_rows(data, h, w, kernel) -> Vec<f64>` at `random_gaussian_blur.rs:78-96` and `fn blur_cols(...)` at `random_gaussian_blur.rs:99-116`; non-test consumer: `fn apply` chains `blur_cols(blur_rows(...))` at `random_gaussian_blur.rs:148-149`. |
-| REQ-5 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomGaussianBlur<T>` at `random_gaussian_blur.rs:118-159`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this — composes into augmentation `Compose` pipelines. The crate-root re-export at `lib.rs:114` is the production-facing handle. |
-| REQ-6 | SHIPPED | impl: `fn reflect_index` + reflection-padded `blur_rows` / `blur_cols` in `ferrotorch-vision/src/transforms/random_gaussian_blur.rs:88-127`; non-test consumer: `pub use random_gaussian_blur::RandomGaussianBlur;` at `mod.rs:34` — the `impl<T: Float> Transform<T>` body in the same file calls `blur_cols(blur_rows(...))` per channel. |
+| REQ-2 | SHIPPED | impl: `pub fn RandomGaussianBlur::new(kernel_size: usize, sigma: (f64, f64)) -> FerrotorchResult<Self>` with odd-positive kernel and sigma-ordering checks at `new in random_gaussian_blur.rs`; non-test consumer: registered as public surface (the conformance inventory listing for `RandomGaussianBlur::new` is at `ferrotorch-vision/tests/conformance/_surface_inventory.toml` — `RandomGaussianBlur` block); reachable via the crate-root re-export at `lib.rs`. |
+| REQ-3 | SHIPPED | impl: `fn gaussian_kernel_1d(size: usize, sigma: f64) -> Vec<f64>` at `gaussian_kernel_1d in random_gaussian_blur.rs`; non-test consumer: `fn apply` in this same file calls `gaussian_kernel_1d(self.kernel_size, sigma)` at `gaussian_kernel_1d in random_gaussian_blur.rs`. |
+| REQ-4 | SHIPPED | impl: `fn blur_rows(data, h, w, kernel) -> Vec<f64>` at `blur_rows in random_gaussian_blur.rs` and `fn blur_cols(...)` at `blur_cols in random_gaussian_blur.rs`; non-test consumer: `fn apply` chains `blur_cols(blur_rows(...))` at `apply in random_gaussian_blur.rs`. |
+| REQ-5 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomGaussianBlur<T>` at `random_gaussian_blur.rs`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this — composes into augmentation `Compose` pipelines. The crate-root re-export at `lib.rs` is the production-facing handle. |
+| REQ-6 | SHIPPED | impl: `fn reflect_index` + reflection-padded `blur_rows` / `blur_cols` in `reflect_index in ferrotorch-vision/src/transforms/random_gaussian_blur.rs`; non-test consumer: `pub use random_gaussian_blur::RandomGaussianBlur;` at `mod.rs` — the `impl<T: Float> Transform<T>` body in the same file calls `blur_cols(blur_rows(...))` per channel. |

@@ -60,24 +60,24 @@ only the final `last_hidden_state` `[1, S, hidden_size]` at
 
 ## Architecture
 
-- Per-component bundles at `gpu/clip.rs:75..130`:
+- Per-component bundles at `gpu in gpu/clip.rs`:
   `GpuLayerNorm`, `GpuLinearT` (stores `[in, out]` row-major =
   transpose of PyTorch `[out, in]`), `GpuClipAttn`, `GpuClipMlp`,
   `GpuClipLayer`.
-- `GpuClipTextEncoder` at `gpu/clip.rs:154..168` holds
+- `GpuClipTextEncoder in gpu/clip.rs` holds
   `token_embedding`, `position_embedding`, twelve `GpuClipLayer`,
   `final_layer_norm`, pre-computed `causal_mask_full`, config,
   and a `GpuDevice` handle.
-- `new` at `gpu/clip.rs:193..` pops every required state-dict key
+- `new` at `gpu in gpu/clip.rs` pops every required state-dict key
   by name (matching the CPU `ClipTextEncoder` layout:
   `embeddings.{token,position}_embedding.weight`,
   `encoder.layers.{i}.{layer_norm1,self_attn,layer_norm2,mlp}.*`,
   `final_layer_norm.{weight,bias}`); enforces per-key length;
   uploads via `cpu_to_gpu`. Linear weights are transposed on host
   before upload (the `to_transposed_*` helper).
-- `from_module` at `gpu/clip.rs:343..349` extracts the CPU
+- `from_module` at `gpu in gpu/clip.rs` extracts the CPU
   module's `state_dict()` and delegates to `new`.
-- `encode` at `gpu/clip.rs:363..` runs the seven-stage forward.
+- `encode` at `gpu in gpu/clip.rs` runs the seven-stage forward.
   Token + position embeddings via `gpu_embed_lookup_batch` (with
   a `[0..S)` index tensor for positions). Causal-mask slice is the
   full pre-computed buffer when `S == max_pos`; otherwise downloads,
@@ -89,13 +89,13 @@ only the final `last_hidden_state` `[1, S, hidden_size]` at
 
 Non-test production consumers:
 
-- `ferrotorch-diffusion/src/gpu/mod.rs:34,38` re-exports
+- `ferrotorch-diffusion/src/gpu/mod.rs,38` re-exports
   `GpuClipTextEncoder`; the prelude is `use
   ferrotorch_diffusion::gpu::GpuClipTextEncoder`.
-- `ferrotorch-diffusion/src/gpu/pipeline.rs:46,64,87` uses
+- `ferrotorch-diffusion/src/gpu/pipeline.rs,64,87` uses
   `GpuClipTextEncoder` as the `text_encoder` field of
   `GpuStableDiffusionPipeline`; `encode_prompt` at
-  `gpu/pipeline.rs:107..109` calls `self.text_encoder.encode(...)`.
+  `gpu/pipeline.rs` calls `self.text_encoder.encode(...)`.
 - `ferrotorch-diffusion/examples/clip_text_encode_dump.rs:362,370`
   imports and constructs `GpuClipTextEncoder` for the SD-1.5 CLIP
   inference-dump binary.
@@ -115,7 +115,7 @@ Critical-not-to-regress invariants:
 - **Causal mask** (mandatory): `[S, S]` buffer with `0.0` at/below
   diagonal and `-INF` strictly above, broadcast-added to per-head
   attention scores BEFORE the softmax. Module rustdoc at
-  `gpu/clip.rs:46..50` states this explicitly.
+  `gpu in gpu/clip.rs` states this explicitly.
 - **QuickGELU not GELU**: `x * sigmoid(1.702 * x)`. The
   `ferrotorch_gpu::kernels::gpu_gelu` kernel is the QuickGELU
   variant (a separate `gpu_gelu_erf` exists for the UNet GEGLU).
@@ -147,4 +147,4 @@ checked at the op layer).
 | REQ-2 | SHIPPED | impl: `from_module` at `ferrotorch-diffusion/src/gpu/clip.rs:343..349`; non-test consumer: `ferrotorch-diffusion/examples/clip_text_encode_dump.rs:370` `GpuClipTextEncoder::from_module(encoder, &device)?`; `ferrotorch-diffusion/examples/sd_pipeline_dump.rs` similarly invokes it for the pipeline build |
 | REQ-3 | SHIPPED | impl: `encode` at `ferrotorch-diffusion/src/gpu/clip.rs:363..`; non-test consumer: `ferrotorch-diffusion/src/gpu/pipeline.rs:108` `self.text_encoder.encode(input_ids)` is the canonical text-tower call in the SD-1.5 GPU pipeline; `encode_prompt` is itself called from the dump example |
 | REQ-4 | SHIPPED | impl: pre-LN layer body at `ferrotorch-diffusion/src/gpu/clip.rs:447..505` (LN1, Q/K/V, heads, bmm, scale, causal mask add, softmax, weighted bmm, out-proj, residual; LN2 + MLP + residual; final `final_layer_norm`); non-test consumer: `encode` at `ferrotorch-diffusion/src/gpu/clip.rs:447` iterates over `self.layers` invoking the full body for every forward |
-| REQ-5 | SHIPPED | impl: q/k/v/out bias upload (`GpuClipAttn` four `GpuLinearT` fields at `gpu/clip.rs:108..113`, each carrying `bias: CudaBuffer<f32>` per `gpu/clip.rs:93..96`); QuickGELU dispatched via `ferrotorch_gpu::kernels::gpu_gelu` import at `ferrotorch-diffusion/src/gpu/clip.rs:63`; non-test consumer: `encode`'s per-layer forward uses both surfaces (`linear_forward` for each proj at `gpu/clip.rs:453..455,491..492` and `gpu_gelu` for the MLP at `gpu/clip.rs:497..`) |
+| REQ-5 | SHIPPED | impl: q/k/v/out bias upload (`GpuClipAttn` four `GpuLinearT` fields at `GpuLinearT in gpu/clip.rs`, each carrying `bias: CudaBuffer<f32>` per `gpu in gpu/clip.rs`); QuickGELU dispatched via `ferrotorch_gpu::kernels::gpu_gelu` import at `gpu_gelu in ferrotorch-diffusion/src/gpu/clip.rs`; non-test consumer: `encode`'s per-layer forward uses both surfaces (`linear_forward` for each proj at `gpu in gpu/clip.rs,491..492` and `gpu_gelu` for the MLP at `gpu in gpu/clip.rs`) |

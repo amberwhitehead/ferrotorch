@@ -171,7 +171,7 @@ to CPU.
 - `ferrotorch/src/lib.rs:61` — `pub use ferrotorch_optim::*;`
   exposes `Adagrad` and `AdagradConfig` through the umbrella
   crate's `optim` module.
-- `ferrotorch-train/src/learner.rs:28` — `use
+- `ferrotorch-train/src/learner.rs` — `use
   ferrotorch_optim::Optimizer;` drives any `Optimizer<T>`
   implementor in the training loop (covers `Adagrad<f32>`).
 
@@ -219,11 +219,11 @@ Expected: `12 passed` (CUDA-gated test runs only with `--features cuda`).
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct AdagradConfig` + `impl Default` in `adagrad.rs` mirroring `torch/optim/adagrad.py:29-187`; non-test consumer: `ferrotorch-optim/src/lib.rs:29` re-exports `AdagradConfig`; `ferrotorch/src/lib.rs:61` re-exports the optim surface. |
-| REQ-2 | SHIPPED | impl: `impl<T: Float> Optimizer<T> for Adagrad<T>` block in `adagrad.rs`; non-test consumer: `ferrotorch-train/src/learner.rs:28` consumes the `Optimizer` trait. |
+| REQ-1 | SHIPPED | impl: `pub struct AdagradConfig` + `impl Default` in `adagrad.rs` mirroring `torch/optim/adagrad.py:29-187`; non-test consumer: `adagrad in ferrotorch-optim/src/lib.rs` re-exports `AdagradConfig`; `ferrotorch/src/lib.rs` re-exports the optim surface. |
+| REQ-2 | SHIPPED | impl: `impl<T: Float> Optimizer<T> for Adagrad<T>` block in `adagrad.rs`; non-test consumer: `ferrotorch-train/src/learner.rs` consumes the `Optimizer` trait. |
 | REQ-3 | SHIPPED | impl: legacy CPU `step` (else branch after `any_cuda` check) in `adagrad.rs` mirroring `_single_tensor_adagrad` in `torch/optim/adagrad.py:364-431`; non-test consumer: `ferrotorch/src/lib.rs:61` re-exports `Adagrad` so downstream training code can instantiate it. |
 | REQ-4 | SHIPPED | impl: `struct AdagradParamState<T> { sum: Tensor<T>, step_count: u64 }` in `adagrad.rs`; non-test consumer: `ferrotorch-serialize/src/checkpoint.rs:48` reads/writes the resulting `OptimizerState` map which includes the `sum` Vec<f64>. |
 | REQ-5 | SHIPPED | impl: `Adagrad::step_foreach` method in `adagrad.rs` mirroring `_multi_tensor_adagrad` in `torch/optim/adagrad.py:432-555`; non-test consumer: `ferrotorch/src/lib.rs:61` re-exports `AdagradConfig` so `with_foreach(true)` is reachable from downstream training code. |
-| REQ-6 | SHIPPED | impl: `let any_cuda = ...; if self.config.foreach || any_cuda { return self.step_foreach(); }` at the top of `step()` in `adagrad.rs` (CL-1105); non-test consumer: `ferrotorch-train/src/learner.rs:28` propagates the GPU-residence preserving `step_foreach` choice via the `Optimizer::step` trait method. |
+| REQ-6 | SHIPPED | impl: `let any_cuda = ...; if self.config.foreach || any_cuda { return self.step_foreach(); }` at the top of `step()` in `adagrad.rs` (CL-1105); non-test consumer: `step in ferrotorch-train/src/learner.rs` propagates the GPU-residence preserving `step_foreach` choice via the `Optimizer::step` trait method. |
 | REQ-7 | SHIPPED | impl: `state_dict` / `load_state_dict` methods in `adagrad.rs` keyed by `"group{gi}_param{pi}"`; non-test consumer: `ferrotorch-serialize/src/checkpoint.rs:48` `use ferrotorch_optim::OptimizerState;`. |
 | REQ-8 | SHIPPED | impl: `let grad_tensor = match grad_opt { Some(g) => g, None => continue };` in both `step` and `step_foreach` in `adagrad.rs`; non-test consumer: training-loop callers in `ferrotorch-train/src/learner.rs` exercise this skip for frozen parameters. |

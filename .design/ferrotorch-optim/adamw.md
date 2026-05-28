@@ -166,7 +166,7 @@ Two constructors:
 - `ferrotorch-optim/src/lib.rs:32` — `pub use adamw::{AdamW, AdamWConfig};`
 - `ferrotorch/src/lib.rs:51` — `pub use ferrotorch_optim::{Adam,
   AdamW, Optimizer, Sgd};` re-exports `AdamW` in the prelude.
-- `ferrotorch-train/src/learner.rs:28` — `use
+- `ferrotorch-train/src/learner.rs` — `use
   ferrotorch_optim::Optimizer;` drives `AdamW::step` indirectly via
   the trait.
 - `ferrotorch-train/examples/multi_epoch_train_dump.rs` — uses
@@ -227,8 +227,8 @@ Expected: `22 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct AdamWConfig` + `impl Default { weight_decay: 0.01, ... }` in `adamw.rs` mirroring `torch/optim/adamw.py:21-128`; non-test consumer: `ferrotorch-optim/src/lib.rs:32` re-exports `AdamWConfig`; `ferrotorch/src/lib.rs:51` re-exports `AdamW` in the prelude. |
-| REQ-2 | SHIPPED | impl: `impl<T: Float> Optimizer<T> for AdamW<T>` block in `adamw.rs`; non-test consumer: `ferrotorch-train/src/learner.rs:28` consumes the `Optimizer` trait. |
+| REQ-1 | SHIPPED | impl: `pub struct AdamWConfig` + `impl Default { weight_decay: 0.01, ... }` in `adamw.rs` mirroring `torch/optim/adamw.py:21-128`; non-test consumer: `adamw in ferrotorch-optim/src/lib.rs` re-exports `AdamWConfig`; `ferrotorch/src/lib.rs` re-exports `AdamW` in the prelude. |
+| REQ-2 | SHIPPED | impl: `impl<T: Float> Optimizer<T> for AdamW<T>` block in `adamw.rs`; non-test consumer: `ferrotorch-train/src/learner.rs` consumes the `Optimizer` trait. |
 | REQ-3 | SHIPPED | impl: legacy CPU `step` method computes `decayed = param * (1 - lr*wd)` then `updated = decayed - lr * m_hat / (sqrt(v_hat) + eps)` in `adamw.rs` mirroring `torch/optim/adamw.py:130-180`; non-test consumer: `ferrotorch/src/lib.rs:51` `pub use ferrotorch_optim::{AdamW, ...};` exposes the type for use as the default transformer optimiser. |
 | REQ-4 | SHIPPED | impl: `AdamW::step_foreach` method in `adamw.rs` performing decoupled decay via `mul(param, scalar(decay_factor))`; non-test consumer: `ferrotorch/src/lib.rs:61` re-exports `AdamWConfig::with_foreach(true)`. |
 | REQ-5 | SHIPPED | impl: `state_dict` / `load_state_dict` methods in `adamw.rs` keying by `ParamKey::Display` to `"g{}_p{}"`; non-test consumer: `ferrotorch-serialize/src/checkpoint.rs:48` `use ferrotorch_optim::OptimizerState;` is the on-disk checkpoint reader/writer. |

@@ -66,7 +66,7 @@ Per goal.md R-CODE-3 these crate-root allows are documented; per-item
 `#[allow]` is preferred where feasible, but a crate-wide allow with a
 rationale comment is acceptable for ML-numeric noise.
 
-`ferrotorch-bert/src/lib.rs:79-84` declares the six modules.
+`ferrotorch-bert/src/lib.rs` declares the six modules.
 
 `ferrotorch-bert/src/lib.rs:86-91` re-exports the public types. The
 re-export list is the de-facto API surface contract; callers of
@@ -107,5 +107,5 @@ Expected: both succeed.
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `#![deny(...)]` / `#![allow(...)]` block at `lib.rs:5-40`; non-test consumer: enforced by every other file in the crate (their compiles are gated by the crate-level lint deny). |
 | REQ-2 | SHIPPED | impl: `pub mod` declarations in `lib.rs`; non-test consumer: every test module + every other `.rs` file in the crate uses `crate::<mod>::...` paths. |
-| REQ-3 | SHIPPED | impl: `pub use` block at `lib.rs:86-91`; non-test consumer: downstream binaries (Hub-load helpers, pin scripts in `ferrotorch-bert/tests/`, sentence-embedding integrations) import these names directly. |
+| REQ-3 | SHIPPED | impl: `pub use` block at `lib.rs`; non-test consumer: downstream binaries (Hub-load helpers, pin scripts in `ferrotorch-bert/tests/`, sentence-embedding integrations) import these names directly. |
 | REQ-4 | SHIPPED | impl: `//!` doc-comment block at `lib.rs:42-77` (encoder composition tree, `load_hf_state_dict` contract, `DropReport` audit trail, `load_sentence_transformer` entry point); non-test consumer: published via `cargo doc -p ferrotorch-bert` and visible at the crate root. |

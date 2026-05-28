@@ -132,9 +132,9 @@ to `compile`.
   — grandfathered public surface.
 - `ferrotorch-jit/src/graph_break.rs:26` imports
   `crate::module::{CompileConfig, TracedModule}`, then
-  `graph_break.rs:472` and `graph_break.rs:507` invoke
+  `graph_break in graph_break.rs` and `graph_break in graph_break.rs` invoke
   `TracedModule::new(optimized)` to wrap segments of a graph break.
-- `ferrotorch-jit/src/symbolic.rs:64` imports
+- `ferrotorch-jit/src/symbolic.rs` imports
   `crate::module::TracedModule` and uses it as the inner module of
   `SymbolicTracedModule`.
 
@@ -196,12 +196,12 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct CompileConfig` in `module.rs`; non-test consumer: re-export at `ferrotorch-jit/src/lib.rs:111`. |
-| REQ-2 | SHIPPED | impl: `pub struct TracedModule<T: Float>` + `impl<T: Float> Module<T> for TracedModule<T>` in `module.rs`; non-test consumer: `ferrotorch-jit/src/graph_break.rs:472` constructs `TracedModule::new(optimized)` per segment, `ferrotorch-jit/src/symbolic.rs:64` wraps it. |
+| REQ-1 | SHIPPED | impl: `pub struct CompileConfig` in `module.rs`; non-test consumer: re-export at `module in ferrotorch-jit/src/lib.rs`. |
+| REQ-2 | SHIPPED | impl: `pub struct TracedModule<T: Float>` + `impl<T: Float> Module<T> for TracedModule<T>` in `module.rs`; non-test consumer: `new in ferrotorch-jit/src/graph_break.rs` constructs `TracedModule::new(optimized)` per segment, `new in ferrotorch-jit/src/symbolic.rs` wraps it. |
 | REQ-3 | SHIPPED | impl: `pub fn forward_multi` and `impl<T: Float> Module<T> for TracedModule<T>::forward` in `module.rs`; non-test consumer: `ferrotorch-jit/src/symbolic.rs:312` `forward_symbolic` invokes `interpret(self.inner.graph(), inputs)` on the wrapped traced module. |
 | REQ-4 | SHIPPED | impl: `pub struct AotCompiledModule<T: Float>` + `new` in `module.rs`; non-test consumer: re-export at `ferrotorch-jit/src/lib.rs:111` — public surface returned by `aot_autograd::compile_aot` at `ferrotorch-jit/src/aot_autograd.rs:455`. |
 | REQ-5 | SHIPPED | impl: `pub fn forward_with_ctx` in `module.rs` (calls `interpret_multi_with_captures`); non-test consumer: re-export at `ferrotorch-jit/src/lib.rs:111`. |
-| REQ-6 | SHIPPED | impl: `pub fn backward` in `module.rs`; non-test consumer: re-export at `ferrotorch-jit/src/lib.rs:111`. |
-| REQ-7 | SHIPPED | impl: `pub fn compile<T, F>` in `module.rs`; non-test consumer: re-export at `ferrotorch-jit/src/lib.rs:111`. |
-| REQ-8 | SHIPPED | impl: `pub fn compile_with_config<T, F>` in `module.rs`; non-test consumer: re-export at `ferrotorch-jit/src/lib.rs:111`. |
-| REQ-9 | SHIPPED | impl: `pub fn to_bytes`, `pub fn from_bytes`, `pub fn save`, `pub fn load` in `module.rs`; non-test consumer: re-export at `ferrotorch-jit/src/lib.rs:111`; uses `IrGraph::serialize` / `IrGraph::deserialize` from `ferrotorch-jit/src/serialize.rs:431-491`. |
+| REQ-6 | SHIPPED | impl: `pub fn backward` in `module.rs`; non-test consumer: re-export at `module in ferrotorch-jit/src/lib.rs`. |
+| REQ-7 | SHIPPED | impl: `pub fn compile<T, F>` in `module.rs`; non-test consumer: re-export at `module in ferrotorch-jit/src/lib.rs`. |
+| REQ-8 | SHIPPED | impl: `pub fn compile_with_config<T, F>` in `module.rs`; non-test consumer: re-export at `module in ferrotorch-jit/src/lib.rs`. |
+| REQ-9 | SHIPPED | impl: `pub fn to_bytes`, `pub fn from_bytes`, `pub fn save`, `pub fn load` in `module.rs`; non-test consumer: re-export at `module in ferrotorch-jit/src/lib.rs`; uses `IrGraph::serialize` / `IrGraph::deserialize` from `deserialize in ferrotorch-jit/src/serialize.rs`. |

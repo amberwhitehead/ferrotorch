@@ -68,7 +68,7 @@ version takes a 1-D `index` over E edges mapping into a pre-decided
 The single `pub fn scatter_add_segments<T: Float>` at
 `ops/scatter.rs:74-128`:
 
-1. Reject CUDA src with `NotImplementedOnCuda` (`:79-83`).
+1. Reject CUDA src with `NotImplementedOnCuda` (`ops/scatter.rs`).
 2. Validate `src` is 2-D `[E, D]` (`:84-89`).
 3. Validate `index.len() == src.shape()[0] == E` (`:90-99`).
 4. Allocate `out = vec![T::zero(); dim_size * d]` (`:101-102`).
@@ -115,5 +115,5 @@ in `ferrotorch-graph/tests/`.
 | REQ-2 | SHIPPED | impl: shape validation at `ops/scatter.rs:84-99`; non-test consumer: `scatter_add_segments` entry — every public call runs through this validator |
 | REQ-3 | SHIPPED | impl: per-edge validation at `ops/scatter.rs:107-119`; non-test consumer: `scatter_add_segments` entry |
 | REQ-4 | SHIPPED | impl: zero-initialised `out` at `ops/scatter.rs:101-102`; non-test consumer: `scatter_add_segments` entry; tested by `segments_empty_rows_are_zero` |
-| REQ-5 | SHIPPED | impl: `NotImplementedOnCuda` at `ops/scatter.rs:79-83`; non-test consumer: `scatter_add_segments` entry. GPU lowering NOT-STARTED, blocked on #1545 — does NOT block CPU SHIPPED |
-| REQ-6 | SHIPPED | impl: documented in module-level `//!` comment at `ops/scatter.rs:24-30`; non-test consumer: explicit `no_grad` invocation by the `ferrotorch-graph` inference harness |
+| REQ-5 | SHIPPED | impl: `NotImplementedOnCuda` at `scatter_add_segments in ops/scatter.rs`; non-test consumer: `scatter_add_segments` entry. GPU lowering NOT-STARTED, blocked on #1545 — does NOT block CPU SHIPPED |
+| REQ-6 | SHIPPED | impl: documented in module-level `//!` comment at `ops/scatter.rs`; non-test consumer: explicit `no_grad` invocation by the `ferrotorch-graph` inference harness |

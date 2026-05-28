@@ -113,7 +113,7 @@ contract is the eval-mode `inception_v3(aux_logits=False)` path).
   InceptionB, InceptionC, InceptionD, InceptionE, InceptionV3,
   inception_v3}` re-export at `ferrotorch-vision/src/models/mod.rs`.
 - `default_registry()` registers `"inception_v3"` via
-  `maybe_load_pretrained` at `registry.rs:257`.
+  `maybe_load_pretrained` at `registry.rs`.
 
 ## Parity contract
 
@@ -166,7 +166,7 @@ Expected: all tests pass; no parity-sweep ops.
 | REQ-4 | SHIPPED | impl: `pub struct InceptionC<T: Float>` + `Module<T>` impl in `inception.rs`; non-test consumer: `InceptionV3::new` constructs `Mixed_6b/6c/6d/6e` from it in `inception.rs`. |
 | REQ-5 | SHIPPED | impl: `pub struct InceptionD<T: Float>` + `Module<T>` impl in `inception.rs`; non-test consumer: `InceptionV3::new` constructs `Mixed_7a` from it in `inception.rs`. |
 | REQ-6 | SHIPPED | impl: `pub struct InceptionE<T: Float>` + `Module<T>` impl in `inception.rs`; non-test consumer: `InceptionV3::new` constructs `Mixed_7b/7c` from it in `inception.rs`. |
-| REQ-7 | SHIPPED | impl: `pub struct InceptionV3<T: Float>` + `InceptionV3::new` in `inception.rs`; non-test consumer: `default_registry()` constructs it via `maybe_load_pretrained` at `registry.rs:257`. |
+| REQ-7 | SHIPPED | impl: `pub struct InceptionV3<T: Float>` + `InceptionV3::new` in `inception.rs`; non-test consumer: `default_registry()` constructs it via `maybe_load_pretrained` at `registry.rs`. |
 | REQ-8 | SHIPPED | impl: `Module::forward` for `InceptionV3<T>` in `inception.rs`; non-test consumer: trait method invoked through `Box<dyn Module<T>>` returned from `registry.rs::get_model`. |
-| REQ-9 | SHIPPED | impl: `named_parameters` for every Mixed type + `InceptionV3` in `inception.rs`; non-test consumer: `load_state_dict(&state_dict, false)` at `registry.rs:53` walks the result. |
-| REQ-10 | SHIPPED | impl: `pub fn inception_v3` in `inception.rs`; non-test consumer: `default_registry()` invokes it at `registry.rs:260`. |
+| REQ-9 | SHIPPED | impl: `named_parameters` for every Mixed type + `InceptionV3` in `inception.rs`; non-test consumer: `load_state_dict(&state_dict, false)` at `named_parameters in registry.rs` walks the result. |
+| REQ-10 | SHIPPED | impl: `pub fn inception_v3` in `inception.rs`; non-test consumer: `default_registry()` invokes it at `registry.rs`. |

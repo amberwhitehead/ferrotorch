@@ -35,11 +35,11 @@ from `torch/signal/windows/__init__.py`).
 ## Acceptance Criteria
 
 - [x] AC-1: `use ferrotorch_core::signal::windows;` resolves
-  (mod declaration at `signal/mod.rs:7`).
+  (mod declaration at `signal/mod.rs`).
 - [x] AC-2: `use ferrotorch_core::signal::hann;` resolves
-  (re-export at `signal/mod.rs:9-12`).
+  (re-export at `signal/mod.rs`).
 - [x] AC-3: All 15 window names are exposed
-  (`signal/mod.rs:10-11` lists the 15 names).
+  (`signal/mod.rs` lists the 15 names).
 
 ## Architecture
 
@@ -88,5 +88,5 @@ exposing the underlying functions, whose contracts live in
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub mod windows;` at `ferrotorch-core/src/signal/mod.rs:7`; non-test consumer: `ferrotorch-core/src/signal/windows.rs` is the module body; downstream callers reach `ferrotorch_core::signal::windows::hann(N)` via this declaration. The signal module is also re-exported at `ferrotorch-core/src/lib.rs` (`pub mod signal;` registration). |
-| REQ-2 | SHIPPED | impl: `pub use windows::{...}` at `ferrotorch-core/src/signal/mod.rs:9-12` lists all 15 window-function names; non-test consumer: the windows are reachable as `ferrotorch_core::signal::hann(N)` etc.; the test at `ferrotorch-core/src/signal/windows.rs:343-366` exercises all 15 names from the top-level path (production call surface). |
+| REQ-1 | SHIPPED | impl: `pub mod windows;` at `ferrotorch-core/src/signal/mod.rs`; non-test consumer: `ferrotorch-core/src/signal/windows.rs` is the module body; downstream callers reach `ferrotorch_core::signal::windows::hann(N)` via this declaration. The signal module is also re-exported at `ferrotorch-core/src/lib.rs` (`pub mod signal;` registration). |
+| REQ-2 | SHIPPED | impl: `pub use windows::{...}` at `ferrotorch-core/src/signal/mod.rs` lists all 15 window-function names; non-test consumer: the windows are reachable as `ferrotorch_core::signal::hann(N)` etc.; the test at `hann in ferrotorch-core/src/signal/windows.rs` exercises all 15 names from the top-level path (production call surface). |

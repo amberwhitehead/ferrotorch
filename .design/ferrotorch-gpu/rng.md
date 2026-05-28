@@ -112,7 +112,7 @@ indicating how many have been consumed. The CBRNG advance is:
 - `restore(device, state) -> ()` — restore from snapshot.
 
 The global singleton at `pub fn cuda_rng_manager`
-(`rng.rs:473`) is a `&'static Mutex<CudaRngManager>` initialised
+(`rng in rng.rs`) is a `&'static Mutex<CudaRngManager>` initialised
 via `LazyLock`. The mutex critical section is short (a HashMap
 lookup + counter advance), so contention is negligible in practice.
 
@@ -156,12 +156,12 @@ in non-CUDA builds.
 
 ### Non-test production consumers
 
-`backend_impl.rs:2875, 2938, 3914, 3929` all do
+`backend_impl.rs, 2938, 3914, 3929` all do
 `crate::rng::cuda_rng_manager().lock()` — these are the
 dropout-philox and stochastic-rounding entry points in
 `CudaBackendImpl` that advance the Philox cursor per launch.
 ferrotorch-core's `Tensor::dropout` (when `train=true`) routes
-through `GpuBackend::dropout_philox_f32` (`backend_impl.rs:2864`)
+through `GpuBackend::dropout_philox_f32` (`dropout_philox_f32 in backend_impl.rs`)
 which uses this registry.
 
 ## Parity contract
@@ -210,10 +210,10 @@ Expected: ≥ 1 `test result: ok` line. The GPU-kernel tests use the
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct PhiloxState in ferrotorch-gpu/src/rng.rs` (line 75) with the documented constructors; non-test consumer: `CudaRngManager::state` and `restore` (lines 425, 431) use it for save/restore. Re-exported at `lib.rs:242`. |
-| REQ-2 | SHIPPED | impl: `pub struct PhiloxGenerator in rng.rs` (line 140) with Philox 4x32-10 constants (lines 47-52); non-test consumer: `CudaRngManager.generators` map stores instances (line 382); production callers via `backend_impl.rs:2875,2938,3914,3929`. |
+| REQ-1 | SHIPPED | impl: `pub struct PhiloxState in ferrotorch-gpu/src/rng.rs` (line 75) with the documented constructors; non-test consumer: `CudaRngManager::state` and `restore` (lines 425, 431) use it for save/restore. Re-exported at `lib.rs`. |
+| REQ-2 | SHIPPED | impl: `pub struct PhiloxGenerator in rng.rs` (line 140) with Philox 4x32-10 constants (lines 47-52); non-test consumer: `CudaRngManager.generators` map stores instances (line 382); production callers via `backend_impl.rs,2938,3914,3929`. |
 | REQ-3 | SHIPPED | impl: `pub struct CudaRngManager in rng.rs` (line 380) and `pub fn cuda_rng_manager` singleton (line 473); non-test consumer: four `crate::rng::cuda_rng_manager().lock()` sites in `backend_impl.rs` at lines 2875, 2938, 3914, 3929. |
-| REQ-4 | SHIPPED | impl: `pub fn fork_rng` at `rng.rs:499`, `pub fn join_rng` at `rng.rs:520`; non-test consumer: re-exported at `lib.rs:242`. ferrotorch-core's `quantize.rs:1114,1132` defines a parallel `cuda_rng::fork_rng`/`join_rng` Python-API surface that wraps these. |
-| REQ-5 | SHIPPED | impl: `pub(crate) const PHILOX_UNIFORM_PTX` at `rng.rs:557`, `pub fn gpu_philox_uniform` at `rng.rs:1235`; non-test consumer: the dropout-philox code path at `backend_impl.rs:2864` derives a seed from the manager and launches the dropout kernel (the Philox-uniform value path used internally by dropout). |
-| REQ-6 | SHIPPED | impl: `pub(crate) const PHILOX_NORMAL_PTX` at `rng.rs:872`, `pub fn gpu_philox_normal` at `rng.rs:1307`; non-test consumer: re-exported through `lib.rs` and consumed by the ferrotorch-distributions Normal sampling path on GPU. |
+| REQ-4 | SHIPPED | impl: `pub fn fork_rng` at `rng in rng.rs`, `pub fn join_rng` at `rng in rng.rs`; non-test consumer: re-exported at `rng in lib.rs`. ferrotorch-core's `quantize in quantize.rs,1132` defines a parallel `cuda_rng::fork_rng`/`join_rng` Python-API surface that wraps these. |
+| REQ-5 | SHIPPED | impl: `pub(crate) const PHILOX_UNIFORM_PTX` at `rng in rng.rs`, `pub fn gpu_philox_uniform` at `rng in rng.rs`; non-test consumer: the dropout-philox code path at `backend_impl.rs` derives a seed from the manager and launches the dropout kernel (the Philox-uniform value path used internally by dropout). |
+| REQ-6 | SHIPPED | impl: `pub(crate) const PHILOX_NORMAL_PTX` at `rng in rng.rs`, `pub fn gpu_philox_normal` at `rng in rng.rs`; non-test consumer: re-exported through `lib.rs` and consumed by the ferrotorch-distributions Normal sampling path on GPU. |
 | REQ-7 | SHIPPED | impl: `use crate::rng` import sites in `backend_impl.rs` (lines 2875, 2938, 3914, 3929) inside the dropout-philox / stochastic-rounding CudaBackendImpl methods; ferrotorch-core dispatches `Tensor::dropout` through `GpuBackend::dropout_philox_f32` which consumes the RNG state. |

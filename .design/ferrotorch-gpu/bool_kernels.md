@@ -116,15 +116,15 @@ each to a predicate (`setp.ne.u16 %pa, %va, 0`), applies the
 via `selp.u16 %res, 1, 0, %pr`. Public entry points:
 `pub fn gpu_{and,or,xor}_bool in bool_kernels.rs`. Non-test consumer:
 `crate::backend_impl::CudaBackendImpl` at
-`backend_impl.rs:6545` (`gpu_and_bool`), `:6561` (`gpu_or_bool`),
-`:6577` (`gpu_xor_bool`).
+`CudaBackendImpl in backend_impl.rs` (`gpu_and_bool`), `gpu_and_bool in backend_impl.rs` (`gpu_or_bool`),
+`gpu_xor_bool in backend_impl.rs` (`gpu_xor_bool`).
 
 ### Logical unary kernel (REQ-3)
 
 `const NOT_BOOL_PTX in bool_kernels.rs` is a hand-rolled NOT kernel:
 load `va`, `setp.eq.u16 %pa, %va, 0`, `selp.u16 %res, 1, 0, %pa`.
 Public entry point: `pub fn gpu_not_bool in bool_kernels.rs`. Non-test
-consumer: `backend_impl.rs:6589`.
+consumer: `gpu_not_bool in backend_impl.rs`.
 
 ### Reductions (REQ-4, REQ-8)
 
@@ -137,7 +137,7 @@ reference bit-for-bit). The host guards `n == 0` before launching and
 returns the empty-identity (0 for `any`, 1 for `all`) via a single
 `clone_htod`. Public entry points: `pub fn gpu_any_bool` and
 `pub fn gpu_all_bool in bool_kernels.rs`. Non-test consumer:
-`backend_impl.rs:6597` (`gpu_any_bool`), `:6605` (`gpu_all_bool`).
+`gpu_all_bool in backend_impl.rs` (`gpu_any_bool`), `gpu_any_bool in backend_impl.rs` (`gpu_all_bool`).
 
 ### SAFETY discipline (REQ-7)
 
@@ -196,9 +196,9 @@ Expected: `test result: ok` on a host with a CUDA device. The
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub fn gpu_cmp_{f32,f64,i32,i64,bf16,f16} in bool_kernels.rs` (six wrappers around `fn launch_cmp` / `launch_cmp_half`, each templating the PTX per (dtype, op)). Non-test consumer: the bool-result arms of the comparison ops in `ferrotorch-gpu/src/backend_impl.rs` dispatch into these wrappers from `eq/ne/lt/le/gt/ge` op handlers (the same backend that calls `gpu_and_bool` at line 6545). |
-| REQ-2 | SHIPPED | impl: `pub fn gpu_{and,or,xor}_bool in bool_kernels.rs` (each thin-wraps `launch_logic_bin` with the matching PTX). Non-test consumer: `backend_impl.rs:6545` (`gpu_and_bool`), `:6561` (`gpu_or_bool`), `:6577` (`gpu_xor_bool`). |
-| REQ-3 | SHIPPED | impl: `pub fn gpu_not_bool in bool_kernels.rs`. Non-test consumer: `backend_impl.rs:6589`. |
-| REQ-4 | SHIPPED | impl: `pub fn gpu_any_bool / gpu_all_bool in bool_kernels.rs`. Non-test consumer: `backend_impl.rs:6597` (`gpu_any_bool`), `:6605` (`gpu_all_bool`). |
+| REQ-2 | SHIPPED | impl: `pub fn gpu_{and,or,xor}_bool in bool_kernels.rs` (each thin-wraps `launch_logic_bin` with the matching PTX). Non-test consumer: `gpu_and_bool in backend_impl.rs` (`gpu_and_bool`), `gpu_and_bool in backend_impl.rs` (`gpu_or_bool`), `gpu_or_bool in backend_impl.rs` (`gpu_xor_bool`). |
+| REQ-3 | SHIPPED | impl: `pub fn gpu_not_bool in bool_kernels.rs`. Non-test consumer: `gpu_not_bool in backend_impl.rs`. |
+| REQ-4 | SHIPPED | impl: `pub fn gpu_any_bool / gpu_all_bool in bool_kernels.rs`. Non-test consumer: `gpu_any_bool in backend_impl.rs` (`gpu_any_bool`), `gpu_any_bool in backend_impl.rs` (`gpu_all_bool`). |
 | REQ-5 | SHIPPED | impl: comparison kernels use PTX `setp.{eq,lt,le,gt,ge}.f32` (unordered-false on NaN) and `setp.ne.f32` (unordered-true on NaN) per the module doc-comment "NaN comparisons follow IEEE: `eq/lt/le/gt/ge` involving NaN are false, `ne` involving NaN is true". Non-test consumer: the bool-comparison ops in `backend_impl.rs` rely on this for IEEE-NaN parity. |
 | REQ-6 | SHIPPED | impl: `fn cmp_half_ptx in bool_kernels.rs` decodes bf16 via `mov.b32 %ua, {%zero16, %ha}` (BF16_DECODE constant) and f16 via `cvt.f32.f16 %fa, %ha` (F16_DECODE), then `setp.{op}.f32`. Result is always u8 0/1 (`selp.u16 %res, 1, 0, %c`). Non-test consumer: `pub fn gpu_cmp_{bf16,f16}` invoke `launch_cmp_half` with the right decode, called from the bool-comparison arms of the backend. |
 | REQ-7 | SHIPPED | impl: every `unsafe { stream.launch_builder(&f)... }` in `bool_kernels.rs` (in `launch_cmp`, `launch_not`, `launch_reduce_bool`) is preceded by a multi-line SAFETY comment naming entry signature, length binding, alloc, bound check, and `n as u32` non-truncation. Non-test consumer inherits the contract via each public wrapper. |

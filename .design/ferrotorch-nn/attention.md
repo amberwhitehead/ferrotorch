@@ -206,7 +206,7 @@ inference.
 - `pub use attention::{MultiheadAttention, repeat_kv,
   reshape_to_heads, transpose_heads_to_2d}` at
   `ferrotorch-nn/src/lib.rs:194` — grandfathered public API surface.
-- `ferrotorch-vision/src/models/vit.rs:20` —
+- `ferrotorch-vision/src/models/vit.rs` —
   `use ferrotorch_nn::attention::MultiheadAttention` in the
   Vision Transformer build path.
 - `ferrotorch-llama/src/attention.rs:23` — Llama 3 attention layer
@@ -296,15 +296,15 @@ returns `0` (runner arm missing).
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct MultiheadAttention<T: Float>` in `attention.rs` mirroring upstream `activation.py:1089-1200`; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:194` + `ferrotorch-vision/src/models/vit.rs:20`. |
-| REQ-2 | SHIPPED | impl: `pub fn new` in `attention.rs` (delegates to `with_gqa`) mirroring upstream `activation.py:1153-1188`; non-test consumer: re-export at `lib.rs:194` + `vit.rs:20`. |
+| REQ-1 | SHIPPED | impl: `pub struct MultiheadAttention<T: Float>` in `attention.rs` mirroring upstream `activation.py:1089-1200`; non-test consumer: re-export at `activation in ferrotorch-nn/src/lib.rs` + `ferrotorch-vision/src/models/vit.rs`. |
+| REQ-2 | SHIPPED | impl: `pub fn new` in `attention.rs` (delegates to `with_gqa`) mirroring upstream `activation.py:1153-1188`; non-test consumer: re-export at `lib.rs` + `vit in vit.rs`. |
 | REQ-3 | SHIPPED | impl: `pub fn with_gqa` in `attention.rs` with `num_heads % num_kv_heads` validation; non-test consumer: re-export at `lib.rs:194` and Llama GQA path at `ferrotorch-llama/src/attention.rs:23` (constructs `with_gqa` for Llama-3-8B layout). |
-| REQ-4 | SHIPPED | impl: `pub fn forward_qkv` in `attention.rs` with 3-D / batch / seq shape validation; non-test consumer: re-export at `lib.rs:194` + `vit.rs:20`. |
-| REQ-5 | SHIPPED | impl: general-path attention body inside `forward_qkv` using `mm_differentiable`, `bmm_differentiable`, `softmax`, `mul`, `add` from `ferrotorch_core::grad_fns`; non-test consumer: `vit.rs:20` invocation, `ferrotorch-llama/src/attention.rs:23` GQA path. |
-| REQ-6 | SHIPPED | impl: causal-mask construction inside `forward_qkv` (additive `-1e9` matrix `[1, seq_q, seq_k]` moved to device); non-test consumer: `vit.rs:20`, `ferrotorch-llama/src/attention.rs:23`. |
+| REQ-4 | SHIPPED | impl: `pub fn forward_qkv` in `attention.rs` with 3-D / batch / seq shape validation; non-test consumer: re-export at `lib.rs` + `vit in vit.rs`. |
+| REQ-5 | SHIPPED | impl: general-path attention body inside `forward_qkv` using `mm_differentiable`, `bmm_differentiable`, `softmax`, `mul`, `add` from `ferrotorch_core::grad_fns`; non-test consumer: `vit in vit.rs` invocation, `ferrotorch-llama/src/attention.rs` GQA path. |
+| REQ-6 | SHIPPED | impl: causal-mask construction inside `forward_qkv` (additive `-1e9` matrix `[1, seq_q, seq_k]` moved to device); non-test consumer: `vit in vit.rs`, `ferrotorch-llama/src/attention.rs`. |
 | REQ-7 | SHIPPED | impl: `group_size > 1` branch inside `forward_qkv` using `expand` from `ferrotorch_core::grad_fns::shape`; non-test consumer: `ferrotorch-llama/src/attention.rs:23`. |
 | REQ-8 | SHIPPED | impl: `impl<T: Float> Module<T> for MultiheadAttention<T>` in `attention.rs`; non-test consumer: re-export at `lib.rs:194` plus every model that boxes the MHA as a `Module<T>`. |
 | REQ-9 | SHIPPED | impl: `pub fn forward_2d` in `attention.rs` (GQA-rejection + fused-linear short circuit); non-test consumer: re-export at `lib.rs:194` available to downstream inference loops; Llama autoregressive forward in `ferrotorch-llama/src/attention.rs:23` consumes the `seq_len=1` self-attention shortcut inside `forward_qkv`. |
-| REQ-10 | SHIPPED | impl: `pub fn reshape_to_heads`, `pub fn transpose_heads_to_2d`, `pub fn repeat_kv` in `attention.rs`; non-test consumer: `ferrotorch-llama/src/attention.rs:23` imports `repeat_kv` and `reshape_to_heads`. |
+| REQ-10 | SHIPPED | impl: `pub fn reshape_to_heads`, `pub fn transpose_heads_to_2d`, `pub fn repeat_kv` in `attention.rs`; non-test consumer: `repeat_kv in ferrotorch-llama/src/attention.rs` imports `repeat_kv` and `reshape_to_heads`. |
 | REQ-11 | NOT-STARTED | parity-sweep runner arm for `nn.functional.scaled_dot_product_attention` not wired — blocker #1455. |
 | REQ-12 | NOT-STARTED | parity-sweep runner arm for `nn.functional.multi_head_attention_forward` not wired — blocker #1455. |

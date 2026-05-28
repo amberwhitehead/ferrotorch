@@ -97,14 +97,14 @@ where the caller can guarantee the canonical stride.
 ### Non-test production consumers
 
 - `pub use AnchorGenerator` at
-  `ferrotorch-vision/src/models/detection/mod.rs:27` and
+  `ferrotorch-vision/src/models/detection/mod.rs` and
   `ferrotorch-vision/src/lib.rs:21`.
 - `use crate::models::detection::anchor_utils::{AnchorGenerator,
   decode_boxes}` at `ferrotorch-vision/src/models/detection/rpn.rs:28`:
   RPN's `Self::new` instantiates the default generator and
   `Self::forward` calls `decode_boxes` after the per-level top-K.
 - `use crate::models::detection::anchor_utils::decode_boxes` at
-  `ferrotorch-vision/src/models/detection/retinanet.rs:40`.
+  `ferrotorch-vision/src/models/detection/retinanet.rs`.
 
 ## Parity contract
 
@@ -148,10 +148,10 @@ Expected: 4 tests passed.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct AnchorGenerator` + `Self::cell_anchors` in `anchor_utils.rs`; non-test consumer: `Rpn::new` at `ferrotorch-vision/src/models/detection/rpn.rs:160` calls `AnchorGenerator::default_fasterrcnn()` and stores the generator as the `anchor_gen` field. |
+| REQ-1 | SHIPPED | impl: `pub struct AnchorGenerator` + `Self::cell_anchors` in `anchor_utils.rs`; non-test consumer: `Rpn::new` at `new in ferrotorch-vision/src/models/detection/rpn.rs` calls `AnchorGenerator::default_fasterrcnn()` and stores the generator as the `anchor_gen` field. |
 | REQ-2 | SHIPPED | impl: `pub fn AnchorGenerator::default_fasterrcnn` in `anchor_utils.rs`; non-test consumer: `Rpn::new` at `ferrotorch-vision/src/models/detection/rpn.rs:162`. |
 | REQ-3 | SHIPPED | impl: `pub fn AnchorGenerator::generate_anchors_for_image` in `anchor_utils.rs`; non-test consumer: `Rpn::forward` at `ferrotorch-vision/src/models/detection/rpn.rs:193` calls `self.anchor_gen.generate_anchors_for_image(&fm_sizes, (img_h, img_w))`. |
-| REQ-4 | SHIPPED | impl: `pub fn AnchorGenerator::generate_anchors` in `anchor_utils.rs`; non-test consumer: `pub use AnchorGenerator` at `ferrotorch-vision/src/models/detection/mod.rs:27` exposes the method via the crate's public API. The same `AnchorGenerator::generate_anchors_with_strides` core is invoked by `generate_anchors_for_image` (REQ-3). |
+| REQ-4 | SHIPPED | impl: `pub fn AnchorGenerator::generate_anchors` in `anchor_utils.rs`; non-test consumer: `pub use AnchorGenerator` at `anchor_utils in ferrotorch-vision/src/models/detection/mod.rs` exposes the method via the crate's public API. The same `AnchorGenerator::generate_anchors_with_strides` core is invoked by `generate_anchors_for_image` (REQ-3). |
 | REQ-5 | SHIPPED | impl: nested `for fy / for fx` loops in `Self::generate_anchors_with_strides` in `anchor_utils.rs` (matches `arange(grid_w) * stride_w`, no `+0.5`); non-test consumer: `Rpn::forward` at `ferrotorch-vision/src/models/detection/rpn.rs:193` consumes the resulting `[N_total, 4]` tensor. |
-| REQ-6 | SHIPPED | impl: `pub fn AnchorGenerator::num_anchors_per_location` in `anchor_utils.rs`; non-test consumer: `pub use AnchorGenerator` at `ferrotorch-vision/src/models/detection/mod.rs:27` exposes the method via the crate's public API for downstream RPN/per-level head configuration. |
-| REQ-7 | SHIPPED | impl: `pub fn decode_boxes` in `anchor_utils.rs`; non-test consumer: `Rpn::forward` at `ferrotorch-vision/src/models/detection/rpn.rs:287` calls `decode_boxes::<f64>(&anc_t, &del_t, (1.0, 1.0, 1.0, 1.0))`. RetinaNet uses the same module-private decoder via `use crate::models::detection::anchor_utils::decode_boxes` at `ferrotorch-vision/src/models/detection/retinanet.rs:40`. |
+| REQ-6 | SHIPPED | impl: `pub fn AnchorGenerator::num_anchors_per_location` in `anchor_utils.rs`; non-test consumer: `pub use AnchorGenerator` at `anchor_utils in ferrotorch-vision/src/models/detection/mod.rs` exposes the method via the crate's public API for downstream RPN/per-level head configuration. |
+| REQ-7 | SHIPPED | impl: `pub fn decode_boxes` in `anchor_utils.rs`; non-test consumer: `Rpn::forward` at `forward in ferrotorch-vision/src/models/detection/rpn.rs` calls `decode_boxes::<f64>(&anc_t, &del_t, (1.0, 1.0, 1.0, 1.0))`. RetinaNet uses the same module-private decoder via `use crate::models::detection::anchor_utils::decode_boxes` at `forward in ferrotorch-vision/src/models/detection/retinanet.rs`. |

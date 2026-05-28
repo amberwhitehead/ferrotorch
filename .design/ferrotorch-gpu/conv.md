@@ -153,7 +153,7 @@ Edge cases mirrored from upstream:
 - **Asymmetric stride / padding / dilation**: each is a per-dim 2-tuple;
   the formula handles each spatial dim independently.
 - **Bias of wrong shape**: caller is responsible — the consumer in
-  `backend_impl.rs:2521` validates `bias.shape == [C_out]` before
+  `backend_impl.rs` validates `bias.shape == [C_out]` before
   dispatch, matching PyTorch's `addmm_check_bias_shape` semantics.
 
 ## Verification
@@ -188,15 +188,15 @@ this dispatcher.
 ## REQ status table
 
 Per S5 (existing pub-API grandfather): `gpu_conv2d_f32` is the public
-boundary API consumed by `backend_impl.rs:2521` (the cuda backend's
+boundary API consumed by `backend_impl.rs` (the cuda backend's
 conv2d arm). That arm is reached from `ferrotorch-core::gpu_dispatch`
 when `Tensor::conv2d` routes to GPU.
 
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub fn gpu_conv2d_f32 in conv.rs` mirrors `cudnn_convolution` user-API per upstream `aten/src/ATen/native/cudnn/ConvShared.cpp:243`. Non-test consumer: `ferrotorch-gpu/src/backend_impl.rs:2521` (cuda backend's conv2d dispatch arm). |
-| REQ-2 | SHIPPED | impl: in-line output-shape computation in `gpu_conv2d_f32 in conv.rs` mirroring `aten/src/ATen/native/Convolution.cpp::conv_output_size`. Non-test consumer: same call site at `backend_impl.rs:2521`. |
-| REQ-3 | SHIPPED | impl: groups partitioning loop in `gpu_conv2d_f32 in conv.rs` matching upstream groups semantics. Non-test consumer: `backend_impl.rs:2521` passes the user-supplied groups arg through. |
-| REQ-4 | SHIPPED | impl: bias broadcast kernel launch in `gpu_conv2d_f32 in conv.rs` (Option<&CudaBuffer<f32>> branch). Non-test consumer: `backend_impl.rs:2521` passes `bias` through unwrapped. |
-| REQ-5 | SHIPPED | impl: all three phases (im2col, GEMM, bias) launch on-device; the result `CudaBuffer<f32>` never touches host. Non-test consumer: `backend_impl.rs:2521` keeps the resulting buffer on-device for the downstream cuda backend ops. |
+| REQ-2 | SHIPPED | impl: in-line output-shape computation in `gpu_conv2d_f32 in conv.rs` mirroring `aten/src/ATen/native/Convolution.cpp::conv_output_size`. Non-test consumer: same call site at `gpu_conv2d_f32 in backend_impl.rs`. |
+| REQ-3 | SHIPPED | impl: groups partitioning loop in `gpu_conv2d_f32 in conv.rs` matching upstream groups semantics. Non-test consumer: `gpu_conv2d_f32 in backend_impl.rs` passes the user-supplied groups arg through. |
+| REQ-4 | SHIPPED | impl: bias broadcast kernel launch in `gpu_conv2d_f32 in conv.rs` (Option<&CudaBuffer<f32>> branch). Non-test consumer: `gpu_conv2d_f32 in backend_impl.rs` passes `bias` through unwrapped. |
+| REQ-5 | SHIPPED | impl: all three phases (im2col, GEMM, bias) launch on-device; the result `CudaBuffer<f32>` never touches host. Non-test consumer: `CudaBuffer in backend_impl.rs` keeps the resulting buffer on-device for the downstream cuda backend ops. |
 | REQ-6 | SHIPPED | impl: `#[cfg(not(feature = "cuda"))] pub fn gpu_conv2d_f32 in conv.rs` returns `Err(GpuError::NoCudaFeature)`. Non-test consumer: the same `backend_impl.rs` arm under the no-cuda compile path. |

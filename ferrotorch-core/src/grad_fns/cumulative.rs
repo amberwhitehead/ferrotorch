@@ -16,8 +16,8 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (cumsum) | SHIPPED | `cumsum` at `cumulative.rs:104` + `CumsumBackward` at `:51` (0-D fast path mirrors `ReduceOps.cpp:501-504`); consumer `Tensor::cumsum_t` at `methods.rs:282`; parity `[cumsum] 32/32` (grep=1) |
-//! | REQ-2 (cumprod) | SHIPPED | `cumprod` at `cumulative.rs:354` + `CumprodBackward` at `:242` (O(n^3) zeros-path); consumer `Tensor::cumprod_t` at `methods.rs:311`; parity `[cumprod] 80/80` (grep=1) |
+//! | REQ-1 (cumsum) | SHIPPED | `cumsum` at `cumulative.rs:104` + `CumsumBackward` at `:51` (0-D fast path mirrors `ReduceOps.cpp:501-504`); consumer `Tensor::cumsum_t` in `methods.rs`; parity `[cumsum] 32/32` (grep=1) |
+//! | REQ-2 (cumprod) | SHIPPED | `cumprod` at `cumulative.rs:354` + `CumprodBackward` at `:242` (O(n^3) zeros-path); consumer `Tensor::cumprod_t` in `methods.rs`; parity `[cumprod] 80/80` (grep=1) |
 //! | REQ-3 (cummax) | SHIPPED | `cummax` at `cumulative.rs:524` + `CummaxBackward` at `:413` via private helper `cummaxmin_backward_impl` (scatter_add VJP per `derivatives.yaml:533-535`); consumer `einops.rs:796` (`EinopsReduction::Max`); parity `[cummax] 24/24` (grep=1) |
 //! | REQ-4 (cummin) | SHIPPED | `cummin` at `cumulative.rs:556` + `CumminBackward` at `:447` shares the private `cummaxmin_backward_impl` helper; consumer `einops.rs:802` (`EinopsReduction::Min`); parity `[cummin] 24/24` (grep=1) |
 //! | REQ-5 (logcumsumexp) | SHIPPED | `logcumsumexp` at `cumulative.rs:712` + `LogcumsumexpBackward` at `:641` (`exp(input) * reverse_cumsum(grad * exp(-output))` per `derivatives.yaml:521-523`); consumer `Tensor::logcumsumexp_t` at `methods.rs:342`; parity `[logcumsumexp] 48/48` (grep=1) |

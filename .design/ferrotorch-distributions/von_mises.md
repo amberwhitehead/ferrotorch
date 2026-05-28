@@ -221,7 +221,7 @@ exact `entropy` (using `_log_modified_bessel_fn(order=1)`).
 
 ### Non-test production consumers
 
-- `pub use von_mises::VonMises` in `lib.rs:123` — grandfathered
+- `pub use von_mises::VonMises` in `lib.rs` — grandfathered
   public API re-export. Downstream circular-data / directional-statistics
   code (e.g. orientation estimation, periodic gene expression
   models) constructs `VonMises::new(loc, concentration)?` directly.
@@ -272,7 +272,7 @@ Expected: `3 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct VonMises<T: Float>` with `loc`, `concentration` fields in `von_mises.rs`, mirroring `torch/distributions/von_mises.py:133-142`; non-test consumer: `pub use von_mises::VonMises` in `lib.rs:123` — grandfathered public API; downstream directional-statistics code constructs it directly. |
+| REQ-1 | SHIPPED | impl: `pub struct VonMises<T: Float>` with `loc`, `concentration` fields in `von_mises.rs`, mirroring `torch/distributions/von_mises.py:133-142`; non-test consumer: `pub use von_mises::VonMises` in `lib.rs` — grandfathered public API; downstream directional-statistics code constructs it directly. |
 | REQ-2 | SHIPPED | impl: `pub fn VonMises::new(loc, concentration) -> FerrotorchResult<Self>` with shape-match validation in `von_mises.rs`; non-test consumer: registered in `tests/conformance/_surface_inventory.toml:497`; `pub use VonMises` re-export. |
 | REQ-3 | SHIPPED | impl: `pub fn loc(&self) -> &Tensor<T>` and `pub fn concentration(&self) -> &Tensor<T>` accessors in `von_mises.rs`, mirroring `VonMises.loc` / `VonMises.concentration` attribute access; non-test consumer: `pub use VonMises` re-export exposes both. |
 | REQ-4 | SHIPPED | impl: private `fn log_bessel_i0<T: Float>(x: T) -> T` two-branch approximation in `von_mises.rs` (small `x < 3.75` polynomial + large `x >= 3.75` asymptotic), mirroring `_log_modified_bessel_fn(order=0)` in `von_mises.py:68-89` with byte-identical Abramowitz-Stegun coefficients matching `_I0_COEF_SMALL`/`_I0_COEF_LARGE` in `von_mises.py:23-42`; non-test consumer: `fn VonMises::log_prob` calls `log_bessel_i0(k[ki])` and `fn VonMises::entropy` calls `log_bessel_i0(k[i])` — 2 production sites. |

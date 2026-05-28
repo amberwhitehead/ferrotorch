@@ -201,7 +201,7 @@ gives `log_prob ≈ -0.7893` matching PyTorch.
 
 ### Non-test production consumers
 
-- `pub use relaxed_bernoulli::RelaxedBernoulli` in `lib.rs:118` —
+- `pub use relaxed_bernoulli::RelaxedBernoulli` in `lib.rs` —
   grandfathered public API re-export. Downstream Concrete-VAE
   training code constructs `RelaxedBernoulli::new(temp, probs)?`
   directly.
@@ -268,7 +268,7 @@ Expected: `7 passed` (six listed above plus the entropy-errors test).
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct RelaxedBernoulli<T: Float>` with `temperature: T`, `probs: Tensor<T>` fields in `relaxed_bernoulli.rs`, mirroring `torch/distributions/relaxed_bernoulli.py:122-148` (which uses `base_dist: LogitRelaxedBernoulli`); non-test consumer: `pub use relaxed_bernoulli::RelaxedBernoulli` in `lib.rs:118` — grandfathered public API; downstream Concrete-VAE training code constructs it directly. R-DEV-7: scalar `temperature: T` (vs upstream `Tensor`) for cleaner API surface in non-broadcasting cases. |
+| REQ-1 | SHIPPED | impl: `pub struct RelaxedBernoulli<T: Float>` with `temperature: T`, `probs: Tensor<T>` fields in `relaxed_bernoulli.rs`, mirroring `torch/distributions/relaxed_bernoulli.py:122-148` (which uses `base_dist: LogitRelaxedBernoulli`); non-test consumer: `pub use relaxed_bernoulli::RelaxedBernoulli` in `lib.rs` — grandfathered public API; downstream Concrete-VAE training code constructs it directly. R-DEV-7: scalar `temperature: T` (vs upstream `Tensor`) for cleaner API surface in non-broadcasting cases. |
 | REQ-2 | SHIPPED | impl: `pub fn RelaxedBernoulli::new(temperature, probs) -> FerrotorchResult<Self>` with `temperature > 0` and `probs[i] in (0, 1)` validation in `relaxed_bernoulli.rs`; non-test consumer: registered in `tests/conformance/_surface_inventory.toml:441` as conformance surface inventory; `pub use RelaxedBernoulli` re-export for downstream callers; tests pin both validation branches. R-DEV-7: stricter open-interval probs check vs upstream's closed `[0,1]` to avoid `log(0)`. |
 | REQ-3 | SHIPPED | impl: `pub fn temperature(&self) -> T` (by value) and `pub fn probs(&self) -> &Tensor<T>` (by reference) accessors in `relaxed_bernoulli.rs`, mirroring `RelaxedBernoulli.temperature` and `RelaxedBernoulli.probs` @property delegations in `relaxed_bernoulli.py:164-174`; non-test consumer: `pub use RelaxedBernoulli` re-export exposes both accessors. |
 | REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for RelaxedBernoulli<T>` with `sample` and `rsample` invoking `fn relaxed_bernoulli_sample` (the Concrete forward `z = sigmoid((L + logits) / temperature)` for `L ~ Logistic`) in `relaxed_bernoulli.rs`, mirroring `LogitRelaxedBernoulli.rsample` (`relaxed_bernoulli.py:104-112`) + `SigmoidTransform` composition; non-test consumer: the trait impl is the production dispatch any external caller hits; test `test_relaxed_bernoulli_sample_in_closed_unit_interval` pins. |

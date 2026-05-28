@@ -58,7 +58,7 @@ the same "out-of-range index is UB on device" contract.
   a half-precision (u16-backed) flow.
 - [x] AC-4: `CudaBackendImpl::gather_or_select` dispatches all 20
   (vty, ity, op) cells via the `match src.dtype()` + `run!` macro
-  expansion at `backend_impl.rs:515-567`.
+  expansion at `backend_impl.rs`.
 - [x] AC-5: Out-of-range UB contract documented in the module `//!`
   block at lines 33-39, matching upstream.
 
@@ -93,7 +93,7 @@ table.
 (byte-width, index-width) pair to its `(PTX_CONST, "kernel_name")`
 tuple.
 
-Non-test production consumer: `backend_impl.rs:442-568` —
+Non-test production consumer: `backend_impl.rs` —
 `fn gather_or_select` is the unified entry point on
 `CudaBackendImpl`. It:
 
@@ -158,7 +158,7 @@ The fuller integration tests live at
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: 20 `pub fn isel_*`/`gather_*` entries in `ferrotorch-gpu/src/gather_int.rs` (`select_entry!` invocations at lines 492-653); non-test consumer: `CudaBackendImpl::gather_or_select` body at `ferrotorch-gpu/src/backend_impl.rs:442-568` dispatches all 20 cells through the `run!` macro. |
-| REQ-2 | SHIPPED | impl: `index_select_ptx!` and `gather_ptx!` macros at `gather_int.rs:74-456` expand 12 PTX entries (6 select × {W2,W4,W8} × {I32,I64} + 6 gather × ditto), resolved by `isel_ptx`/`gathr_ptx` at lines 449-470. |
-| REQ-3 | SHIPPED | impl: layout contract documented at `gather_int.rs:22-31` (the module `//!` block) and reflected in the PTX address math; verified by the unit tests' expected-output construction. |
-| REQ-4 | SHIPPED | impl: out-of-range UB contract documented at `gather_int.rs:33-39`; the PTX templates omit any bounds check on the loaded index, matching upstream `at::native::index_select_cuda` in `aten/src/ATen/native/cuda/Indexing.cu`. |
-| REQ-5 | SHIPPED | impl: `CudaBackendImpl::gather_or_select` at `backend_impl.rs:442` is the production consumer; ferrotorch-core's `Tensor::index_select` / `Tensor::gather` dispatch through it via the `GpuBackend::gather_or_select` trait method when the source is CUDA-resident. |
+| REQ-2 | SHIPPED | impl: `index_select_ptx!` and `gather_ptx!` macros at `isel_ptx in gather_int.rs` expand 12 PTX entries (6 select × {W2,W4,W8} × {I32,I64} + 6 gather × ditto), resolved by `isel_ptx`/`gathr_ptx` at lines 449-470. |
+| REQ-3 | SHIPPED | impl: layout contract documented at `gather_int.rs` (the module `//!` block) and reflected in the PTX address math; verified by the unit tests' expected-output construction. |
+| REQ-4 | SHIPPED | impl: out-of-range UB contract documented at `gather_int.rs`; the PTX templates omit any bounds check on the loaded index, matching upstream `at::native::index_select_cuda` in `aten/src/ATen/native/cuda/Indexing.cu`. |
+| REQ-5 | SHIPPED | impl: `CudaBackendImpl::gather_or_select` at `gather_or_select in backend_impl.rs` is the production consumer; ferrotorch-core's `Tensor::index_select` / `Tensor::gather` dispatch through it via the `GpuBackend::gather_or_select` trait method when the source is CUDA-resident. |

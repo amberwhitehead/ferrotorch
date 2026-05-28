@@ -133,14 +133,14 @@ current rustc.
 
 - `pub use ferrotorch_jit::IrGraph` (re-exported transitively via
   multiple modules' re-exports of types that hold `IrGraph`).
-- `ferrotorch-jit/src/module.rs:15` — `use crate::graph::IrGraph;`
-- `ferrotorch-jit/src/optimize.rs:10` —
+- `ferrotorch-jit/src/module.rs` — `use crate::graph::IrGraph;`
+- `ferrotorch-jit/src/optimize.rs` —
   `use crate::graph::{IrGraph, IrNode, IrNodeId, IrOpKind, IrValue, IrValueId};`
-- `ferrotorch-jit/src/autotune.rs:57` —
+- `ferrotorch-jit/src/autotune.rs` —
   `use crate::graph::IrGraph;`
-- `ferrotorch-jit/src/aot_autograd.rs:18` —
+- `ferrotorch-jit/src/aot_autograd.rs` —
   `use crate::graph::{IrGraph, IrNodeId, IrOpKind, IrValueId};`
-- `ferrotorch-jit/src/trace.rs:15` —
+- `ferrotorch-jit/src/trace.rs` —
   `use crate::graph::{Dtype, IrGraph, IrOpKind, IrValueId};`
 - `ferrotorch-jit/src/symbolic.rs` — uses
   `IrGraph::output_values` via the wrapped `TracedModule`.
@@ -189,12 +189,12 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct IrValueId(pub usize)` and `pub struct IrNodeId(pub usize)` in `graph.rs`; non-test consumer: `optimize.rs:10` and 7 other modules import these ids. |
-| REQ-2 | SHIPPED | impl: `pub enum IrOpKind` in `graph.rs`; non-test consumer: `trace.rs:15`, `optimize.rs:10`, `aot_autograd.rs:18` import it; `graph_break.rs`, `interpreter.rs` match on its variants. |
-| REQ-3 | SHIPPED | impl: `pub enum Dtype` with `name` and `from_type_name` in `graph.rs`; non-test consumer: `trace.rs:237-245` resolves the trace dtype from `std::any::type_name::<T>()`. |
+| REQ-1 | SHIPPED | impl: `pub struct IrValueId(pub usize)` and `pub struct IrNodeId(pub usize)` in `graph.rs`; non-test consumer: `optimize in optimize.rs` and 7 other modules import these ids. |
+| REQ-2 | SHIPPED | impl: `pub enum IrOpKind` in `graph.rs`; non-test consumer: `trace in trace.rs`, `optimize in optimize.rs`, `optimize in aot_autograd.rs` import it; `graph_break.rs`, `interpreter.rs` match on its variants. |
+| REQ-3 | SHIPPED | impl: `pub enum Dtype` with `name` and `from_type_name` in `graph.rs`; non-test consumer: `trace in trace.rs` resolves the trace dtype from `std::any::type_name::<T>()`. |
 | REQ-4 | SHIPPED | impl: `#[non_exhaustive] pub struct IrValue { id, shape, producer, dtype }` in `graph.rs`; non-test consumer: `optimize.rs`, `interpreter.rs`, `codegen_*.rs` all read `.shape` and `.dtype` off `IrValue`s. |
 | REQ-5 | SHIPPED | impl: `#[non_exhaustive] pub struct IrNode { id, op, inputs, outputs }` in `graph.rs`; non-test consumer: `optimize.rs`, `interpreter.rs`, `codegen.rs` traverse `IrGraph::nodes`. |
-| REQ-6 | SHIPPED | impl: `pub struct IrGraph` + builder methods in `graph.rs`; non-test consumer: `module.rs:485-565` constructs graphs via these methods (also production code paths in `trace.rs`, `graph_break.rs`, `aot_autograd.rs` rely on them). |
+| REQ-6 | SHIPPED | impl: `pub struct IrGraph` + builder methods in `graph.rs`; non-test consumer: `module in module.rs` constructs graphs via these methods (also production code paths in `trace.rs`, `graph_break.rs`, `aot_autograd.rs` rely on them). |
 | REQ-7 | SHIPPED | impl: `pub fn topological_order` in `graph.rs`; non-test consumer: `interpreter.rs` walks nodes in topo order; `optimize.rs` and `fusion.rs` use the order to schedule passes. |
-| REQ-8 | SHIPPED | impl: `pub fn fingerprint` in `graph.rs` with `cached_fingerprint: OnceLock<u64>`; non-test consumer: `autotune.rs:57` imports `IrGraph` and keys the autotune cache by `fingerprint()` (audit #1128). |
+| REQ-8 | SHIPPED | impl: `pub fn fingerprint` in `graph.rs` with `cached_fingerprint: OnceLock<u64>`; non-test consumer: `cached_fingerprint in autotune.rs` imports `IrGraph` and keys the autotune cache by `fingerprint()` (audit #1128). |
 | REQ-9 | SHIPPED | impl: `pub fn add_input`, `pub fn add_input_with_dtype`, `pub fn add_constant`, `pub fn add_constant_with_dtype`, `pub fn add_node`, `pub fn add_node_with_dtype` in `graph.rs`; non-test consumer: `trace.rs` builds graphs through the dtype-aware constructors. |

@@ -84,10 +84,10 @@ consumes a 2-D tensor while the boundary is 3-D
 ### Non-test production consumers
 
 - `pub use attention::WhisperEncoderSelfAttention` at
-  `ferrotorch-whisper/src/lib.rs:105`.
+  `ferrotorch-whisper/src/lib.rs`.
 - `pub self_attn: WhisperEncoderSelfAttention<T>` field of
   `pub struct WhisperEncoderLayer` at
-  `ferrotorch-whisper/src/layer.rs:23`; `WhisperEncoderLayer::new`
+  `WhisperEncoderLayer in ferrotorch-whisper/src/layer.rs`; `WhisperEncoderLayer::new`
   at `ferrotorch-whisper/src/layer.rs:48` constructs it;
   `WhisperEncoderLayer::Module::forward` at
   `ferrotorch-whisper/src/layer.rs:62` invokes
@@ -135,8 +135,8 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct WhisperEncoderSelfAttention<T: Float>` + `WhisperEncoderSelfAttention::new` (with `k_proj: Linear::new(.., .., false)`) at `ferrotorch-whisper/src/attention.rs:58`; non-test consumer: field `self_attn` of `pub struct WhisperEncoderLayer` at `ferrotorch-whisper/src/layer.rs:23`. |
-| REQ-2 | SHIPPED | impl: `Module::forward` for `WhisperEncoderSelfAttention` at `ferrotorch-whisper/src/attention.rs:78`; non-test consumer: `WhisperEncoderLayer::Module::forward` at `ferrotorch-whisper/src/layer.rs:62` calls `self.self_attn.forward(&normed)`. |
+| REQ-1 | SHIPPED | impl: `pub struct WhisperEncoderSelfAttention<T: Float>` + `WhisperEncoderSelfAttention::new` (with `k_proj: Linear::new(.., .., false)`) at `new in ferrotorch-whisper/src/attention.rs`; non-test consumer: field `self_attn` of `pub struct WhisperEncoderLayer` at `WhisperEncoderLayer in ferrotorch-whisper/src/layer.rs`. |
+| REQ-2 | SHIPPED | impl: `Module::forward` for `WhisperEncoderSelfAttention in ferrotorch-whisper/src/attention.rs`; non-test consumer: `WhisperEncoderLayer::Module::forward` at `forward in ferrotorch-whisper/src/layer.rs` calls `self.self_attn.forward(&normed)`. |
 | REQ-3 | SHIPPED | impl: `named_parameters` / `load_state_dict` for `WhisperEncoderSelfAttention` in `attention.rs`; non-test consumer: `WhisperEncoderLayer::load_state_dict` at `ferrotorch-whisper/src/layer.rs:163` recurses through `self_attn.*`. |
-| REQ-4 | SHIPPED | impl: rank/shape check at the top of `Module::forward` for `WhisperEncoderSelfAttention` at `ferrotorch-whisper/src/attention.rs:79`; non-test consumer: propagated up through `WhisperEncoderLayer::Module::forward` at `ferrotorch-whisper/src/layer.rs:62`. |
-| REQ-5 | SHIPPED | impl: `impl<T: Float> Module<T> for WhisperEncoderSelfAttention<T>` in `attention.rs`; non-test consumer: `Module` blanket calls from `WhisperEncoderLayer`'s `Module` impl at `ferrotorch-whisper/src/layer.rs:58` (parameters / state_dict / load_state_dict). |
+| REQ-4 | SHIPPED | impl: rank/shape check at the top of `Module::forward` for `WhisperEncoderSelfAttention in ferrotorch-whisper/src/attention.rs`; non-test consumer: propagated up through `WhisperEncoderLayer::Module::forward` at `forward in ferrotorch-whisper/src/layer.rs`. |
+| REQ-5 | SHIPPED | impl: `impl<T: Float> Module<T> for WhisperEncoderSelfAttention<T>` in `attention.rs`; non-test consumer: `Module` blanket calls from `WhisperEncoderLayer`'s `Module` impl at `WhisperEncoderLayer in ferrotorch-whisper/src/layer.rs` (parameters / state_dict / load_state_dict). |

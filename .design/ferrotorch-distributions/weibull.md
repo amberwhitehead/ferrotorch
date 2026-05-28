@@ -186,7 +186,7 @@ All `lgamma` calls go to `special_fns.rs::lgamma_scalar`.
 
 ### Non-test production consumers
 
-- `pub use weibull::Weibull` in `lib.rs:124` — grandfathered public
+- `pub use weibull::Weibull` in `lib.rs` — grandfathered public
   API re-export. Downstream reliability / survival-analysis code
   (e.g. Cox proportional-hazards baseline modeling) constructs
   `Weibull::new(scale, concentration)?` directly.
@@ -250,7 +250,7 @@ Expected: `8 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct Weibull<T: Float>` with `scale`, `concentration` fields in `weibull.rs`, mirroring `torch/distributions/weibull.py:40-56`; non-test consumer: `pub use weibull::Weibull` in `lib.rs:124` — grandfathered public API; downstream reliability/survival-analysis code constructs it directly. |
+| REQ-1 | SHIPPED | impl: `pub struct Weibull<T: Float>` with `scale`, `concentration` fields in `weibull.rs`, mirroring `torch/distributions/weibull.py:40-56`; non-test consumer: `pub use weibull::Weibull` in `lib.rs` — grandfathered public API; downstream reliability/survival-analysis code constructs it directly. |
 | REQ-2 | SHIPPED | impl: `pub fn Weibull::new(scale, concentration) -> FerrotorchResult<Self>` with shape-match validation in `weibull.rs`; non-test consumer: registered in `tests/conformance/_surface_inventory.toml:511`; `pub use Weibull` re-export. |
 | REQ-3 | SHIPPED | impl: `pub fn scale(&self) -> &Tensor<T>` and `pub fn concentration(&self) -> &Tensor<T>` accessors in `weibull.rs`, mirroring `Weibull.scale` / `Weibull.concentration` attribute access; non-test consumer: `pub use Weibull` re-export exposes both. |
 | REQ-4 | SHIPPED | impl: `Distribution::sample` in `weibull.rs` via inverse-CDF `scale * (-log(1-u))^(1/k)`, mirroring the `TransformedDistribution(Exponential, [Power(1/k), Affine(scale)])` chain in `weibull.py:48-56`; non-test consumer: `pub use Weibull` re-export plus impl dispatch; test `test_weibull_sample_shape` pins non-negativity. |
@@ -262,4 +262,4 @@ Expected: `8 passed`.
 | REQ-10 | SHIPPED | impl: `Distribution::mode` in `weibull.rs` returns `lambda * ((k-1)/k)^(1/k)` for `k > 1` else `0`; R-DEV-6 deviation from upstream `weibull.py:76-82` which gives NaN for `k <= 1`; non-test consumer: `pub use Weibull` re-export; test `test_weibull_mode_k_below_one_is_zero` pins. |
 | REQ-11 | SHIPPED | impl: `Distribution::variance` in `weibull.rs` returns `lambda^2 * (exp(lgamma(1+2/k)) - exp(lgamma(1+1/k))^2)`, algebraically equivalent to `weibull.py:85-89`'s `scale^2 * (exp(lgamma(1+2/k)) - exp(2*lgamma(1+1/k)))`; non-test consumer: `pub use Weibull` re-export; test `test_weibull_variance_k_one_equals_lambda_sq` pins. |
 | REQ-12 | NOT-STARTED | blocker #1435 — `rsample` returns `InvalidArgument`; upstream `Weibull.rsample` works via the `TransformedDistribution` chain (`weibull.py:48-56` `PowerTransform` + `AffineTransform` both autograd-aware), but ferrotorch's direct inverse-CDF path does not build the autograd graph. |
-| REQ-13 | SHIPPED | impl: `has_rsample`(=false; tracked under #1435) / `batch_shape` / `support`(`Positive` per `weibull.py:38`) / `arg_constraints`(`{scale: Positive, concentration: Positive}` per `weibull.py:33-37`) / `expand` overrides at the tail of `impl Distribution for Weibull` in `weibull.rs`; non-test consumer: trait dispatch through `pub use Weibull` re-export at `lib.rs:124`; `test_weibull_surface_overrides` and `test_weibull_expand` pin the overrides. Closes #1436 — `concentration_reciprocal` Python-only convenience attribute is intentionally omitted (recomputing `1/k` per call is negligible on CPU). |
+| REQ-13 | SHIPPED | impl: `has_rsample`(=false; tracked under #1435) / `batch_shape` / `support`(`Positive` per `weibull.py:38`) / `arg_constraints`(`{scale: Positive, concentration: Positive}` per `weibull.py:33-37`) / `expand` overrides at the tail of `impl Distribution for Weibull` in `weibull.rs`; non-test consumer: trait dispatch through `pub use Weibull` re-export at `lib.rs`; `test_weibull_surface_overrides` and `test_weibull_expand` pin the overrides. Closes #1436 — `concentration_reciprocal` Python-only convenience attribute is intentionally omitted (recomputing `1/k` per call is negligible on CPU). |

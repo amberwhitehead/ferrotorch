@@ -58,7 +58,7 @@ upstream) with a custom backward node that flows gradients into
   `device=self.loc.device` policy.
 
 - REQ-8: Numerical-stability constant — the clamp
-  `u_abs = u.abs().min(one - 1e-7)` at `laplace.rs:73` prevents
+  `u_abs = u.abs().min(one - 1e-7)` at `laplace in laplace.rs` prevents
   `log(0) = -infinity` propagation. Upstream uses
   `finfo.tiny` / `finfo.eps - 1` (`laplace.py:75-83`) for the same
   purpose; ferrotorch's `1e-7` is a slight R-DEV-7 simplification
@@ -96,43 +96,43 @@ pub struct Laplace<T: Float> {
 }
 ```
 
-Defined at `laplace.rs:29-32`. Constructor at `laplace.rs:40-51`
-with shape-equality check. Accessors at `laplace.rs:53-61`.
+Defined at `laplace in laplace.rs`. Constructor at `laplace in laplace.rs`
+with shape-equality check. Accessors at `laplace in laplace.rs`.
 
 ### The Distribution impl (REQ-4, REQ-5, REQ-7)
 
-`sample` (`laplace.rs:85-106`) draws `u ~ U(0, 1)` then invokes
-the private `laplace_icdf_sample` helper (`laplace.rs:66-82`)
+`sample` (`laplace in laplace.rs`) draws `u ~ U(0, 1)` then invokes
+the private `laplace_icdf_sample` helper (`laplace in laplace.rs`)
 which maps to `U(-1, 1)` and applies the inverse CDF. Cyclic
 parameter zip supports scalar broadcast.
 
-`rsample` (`laplace.rs:108-142`) follows the same closed-form
+`rsample` (`laplace in laplace.rs`) follows the same closed-form
 pipeline but attaches `LaplaceRsampleBackward` when either
 parameter has `requires_grad`. The grad fn is registered through
 `Tensor::from_operation`, which makes the resulting tensor a
 graph node.
 
-`log_prob` (`laplace.rs:144-169`) computes
+`log_prob` (`laplace in laplace.rs`) computes
 `-log(2*scale) - |x - loc| / scale`. Matches upstream `laplace.py:87-90`.
 
-`cdf` (`laplace.rs:193-222`) uses the closed form
+`cdf` (`laplace in laplace.rs`) uses the closed form
 `0.5 + 0.5 * sign(x-loc) * (1 - exp(-|x-loc|/scale))`. Matches
 `laplace.py:92-97` (which uses `torch.expm1`; ferrotorch uses the
 algebraically equivalent `1 - exp(-|d|/s)` form).
 
-`icdf` (`laplace.rs:224-251`) uses
+`icdf` (`laplace in laplace.rs`) uses
 `loc - scale * sign(p - 0.5) * ln(1 - 2|p - 0.5|)`. Mirrors
 `laplace.py:99-101`.
 
-`mean`/`mode`/`variance` (`laplace.rs:253-272`) return `loc`,
+`mean`/`mode`/`variance` (`laplace in laplace.rs`) return `loc`,
 `loc`, and `2*scale^2`. Mirror `laplace.py:35-45` properties.
 
-`entropy` (`laplace.rs:171-191`) returns `1 + log(2*scale)`.
+`entropy` (`laplace in laplace.rs`) returns `1 + log(2*scale)`.
 Mirrors `laplace.py:103-104`.
 
 ### LaplaceRsampleBackward (REQ-6)
 
-Defined at `laplace.rs:286-355`. Holds `loc`, `scale`, `u`
+Defined at `laplace in laplace.rs`. Holds `loc`, `scale`, `u`
 (uniform draw before the icdf). On `backward(grad_output)` it
 computes:
 
@@ -152,7 +152,7 @@ loss.backward().unwrap();
 
 ### Non-test production consumers
 
-- `pub use laplace::Laplace` at `lib.rs:108` — grandfathered
+- `pub use laplace::Laplace` at `lib.rs` — grandfathered
   public API. Downstream model code (robust-regression layers,
   VI Laplace posteriors) constructs `Laplace::new(loc, scale)?`.
 - `LaplaceRsampleBackward` is consumed by the autograd engine
@@ -209,12 +209,12 @@ Expected: `13 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct Laplace<T: Float>` with `loc`/`scale` `Tensor<T>` fields at `laplace.rs:29-32`, mirroring `torch/distributions/laplace.py:14-62`; non-test consumer: `pub use laplace::Laplace` at `lib.rs:108` exposes the type as grandfathered public API for downstream robust-regression / VI posterior code. |
-| REQ-2 | SHIPPED | impl: the constructor at `laplace.rs:40-51` with shape-equality precondition + `ShapeMismatch` error path, mirroring `laplace.py:51-62` (`broadcast_all`); non-test consumer: `pub use Laplace::new` accessible via the re-export at `lib.rs:108`. |
-| REQ-3 | SHIPPED | impl: `loc()`/`scale()` accessors at `laplace.rs:53-61`, mirroring upstream property access; non-test consumer: the re-export at `lib.rs:108` exposes them as the parameter-introspection surface. |
-| REQ-4 | SHIPPED | impl: full `impl<T: Float> Distribution<T> for Laplace<T>` at `laplace.rs:84-273` with the 9 methods, mirroring `laplace.py:35-104`; non-test consumer: `pub use Laplace` re-export means external `Distribution` trait callers hit this impl. 13 tests pin behaviour. |
-| REQ-5 | SHIPPED | impl: `laplace_icdf_sample` helper at `laplace.rs:66-82` invoked from `sample` at `laplace.rs:97` and `rsample` at `laplace.rs:120`, mirroring `laplace.py:73-85`; non-test consumer: `Distribution::sample` / `Distribution::rsample` via `pub use Laplace`. |
-| REQ-6 | SHIPPED | impl: `LaplaceRsampleBackward` at `laplace.rs:286-355` with `backward` computing `grad_loc = sum(go)` and `grad_scale = sum(go * (-sign(u) * log(1 - \|u\|)))`, attached via `Tensor::from_operation` at `laplace.rs:131-133`; non-test consumer: the autograd engine's `backward()` traversal in `ferrotorch_core::tensor` invokes this `GradFn<T>` impl on any rsample with grad-requiring params. |
-| REQ-7 | SHIPPED | impl: `out.to(device)` if `device.is_cuda()` at the tail of every method (e.g. `laplace.rs:101-105`), mirroring upstream's `device=self.loc.device` implicit policy; non-test consumer: every external caller invoking the methods receives a device-correct tensor. |
-| REQ-8 | SHIPPED | impl: `u_abs = u.abs().min(one - eps)` clamp at `laplace.rs:73` with `eps = 1e-7`, mirroring upstream's `finfo.tiny` / `finfo.eps - 1` guard at `laplace.py:75-83`; non-test consumer: invoked from `sample`/`rsample` via `laplace_icdf_sample` on every draw. |
-| REQ-9 | SHIPPED | impl: `has_rsample`(=true) / `batch_shape` / `support`(`Real` per `laplace.py:32`) / `arg_constraints`(`{loc: Real, scale: Positive}` per `laplace.py:31`) / `expand` overrides at the tail of `impl Distribution for Laplace` in `laplace.rs` mirroring `torch/distributions/laplace.py:31-33`; non-test consumer: trait dispatch through `pub use laplace::Laplace` re-export at `lib.rs:108`; `test_laplace_surface_overrides` and `test_laplace_expand` pin the overrides. |
+| REQ-1 | SHIPPED | impl: `pub struct Laplace<T: Float>` with `loc`/`scale` `Tensor<T>` fields at `Laplace in laplace.rs`, mirroring `torch/distributions/laplace.py:14-62`; non-test consumer: `pub use laplace::Laplace` at `lib.rs` exposes the type as grandfathered public API for downstream robust-regression / VI posterior code. |
+| REQ-2 | SHIPPED | impl: the constructor at `laplace in laplace.rs` with shape-equality precondition + `ShapeMismatch` error path, mirroring `laplace.py:51-62` (`broadcast_all`); non-test consumer: `pub use Laplace::new` accessible via the re-export at `lib.rs`. |
+| REQ-3 | SHIPPED | impl: `loc()`/`scale()` accessors at `laplace in laplace.rs`, mirroring upstream property access; non-test consumer: the re-export at `lib.rs` exposes them as the parameter-introspection surface. |
+| REQ-4 | SHIPPED | impl: full `impl<T: Float> Distribution<T> for Laplace<T>` at `laplace in laplace.rs` with the 9 methods, mirroring `laplace.py:35-104`; non-test consumer: `pub use Laplace` re-export means external `Distribution` trait callers hit this impl. 13 tests pin behaviour. |
+| REQ-5 | SHIPPED | impl: `laplace_icdf_sample` helper at `laplace in laplace.rs` invoked from `sample` at `laplace in laplace.rs` and `rsample` at `laplace in laplace.rs`, mirroring `laplace.py:73-85`; non-test consumer: `Distribution::sample` / `Distribution::rsample` via `pub use Laplace`. |
+| REQ-6 | SHIPPED | impl: `LaplaceRsampleBackward in laplace.rs` with `backward` computing `grad_loc = sum(go)` and `grad_scale = sum(go * (-sign(u) * log(1 - \|u\|)))`, attached via `Tensor::from_operation` at `laplace in laplace.rs`; non-test consumer: the autograd engine's `backward()` traversal in `ferrotorch_core::tensor` invokes this `GradFn<T>` impl on any rsample with grad-requiring params. |
+| REQ-7 | SHIPPED | impl: `out.to(device)` if `device.is_cuda()` at the tail of every method (e.g. `laplace in laplace.rs`), mirroring upstream's `device=self.loc.device` implicit policy; non-test consumer: every external caller invoking the methods receives a device-correct tensor. |
+| REQ-8 | SHIPPED | impl: `u_abs = u.abs().min(one - eps)` clamp at `laplace in laplace.rs` with `eps = 1e-7`, mirroring upstream's `finfo.tiny` / `finfo.eps - 1` guard at `laplace.py:75-83`; non-test consumer: invoked from `sample`/`rsample` via `laplace_icdf_sample` on every draw. |
+| REQ-9 | SHIPPED | impl: `has_rsample`(=true) / `batch_shape` / `support`(`Real` per `laplace.py:32`) / `arg_constraints`(`{loc: Real, scale: Positive}` per `laplace.py:31`) / `expand` overrides at the tail of `impl Distribution for Laplace` in `laplace.rs` mirroring `torch/distributions/laplace.py:31-33`; non-test consumer: trait dispatch through `pub use laplace::Laplace` re-export at `lib.rs`; `test_laplace_surface_overrides` and `test_laplace_expand` pin the overrides. |

@@ -157,7 +157,7 @@ a checkpoint cold-starts the optimizer state.
 - `ferrotorch/src/lib.rs:61` — `pub use ferrotorch_optim::*;`
   re-exports `Adafactor` through the umbrella crate's `optim`
   module.
-- `ferrotorch-train/src/learner.rs:28` — `use
+- `ferrotorch-train/src/learner.rs` — `use
   ferrotorch_optim::Optimizer;` consumes the trait; Adafactor is
   drop-in for any `Optimizer<T>` slot.
 
@@ -208,12 +208,12 @@ Expected: `5 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct AdafactorConfig` + `impl Default` in `adafactor.rs` mirroring `torch/optim/_adafactor.py:24-120`; non-test consumer: `ferrotorch-optim/src/lib.rs:28` re-exports `AdafactorConfig`; `ferrotorch/src/lib.rs:61` re-exports the optim surface. |
-| REQ-2 | SHIPPED | impl: `impl<T: Float> Optimizer<T> for Adafactor<T>` block in `adafactor.rs`; non-test consumer: `ferrotorch-train/src/learner.rs:28` consumes the `Optimizer` trait. |
+| REQ-1 | SHIPPED | impl: `pub struct AdafactorConfig` + `impl Default` in `adafactor.rs` mirroring `torch/optim/_adafactor.py:24-120`; non-test consumer: `adafactor in ferrotorch-optim/src/lib.rs` re-exports `AdafactorConfig`; `ferrotorch/src/lib.rs` re-exports the optim surface. |
+| REQ-2 | SHIPPED | impl: `impl<T: Float> Optimizer<T> for Adafactor<T>` block in `adafactor.rs`; non-test consumer: `ferrotorch-train/src/learner.rs` consumes the `Optimizer` trait. |
 | REQ-3 | SHIPPED | impl: `use_factored` branch in `step` updating `row_factor` and `col_factor` then reconstructing `v_est = row * col / mean(row)` in `adafactor.rs` mirroring `_single_tensor_adafactor` in `torch/optim/_adafactor.py:330-450`; non-test consumer: `ferrotorch/src/lib.rs:61` re-exports `Adafactor` for downstream large-model training code (where factored memory savings are required). |
 | REQ-4 | SHIPPED | impl: `else` branch of `use_factored` in `step` updating `full_sq = rho * full_sq + (1 - rho) * grad_sq` in `adafactor.rs`; non-test consumer: `ferrotorch/src/lib.rs:61` re-exports `Adafactor`. |
 | REQ-5 | SHIPPED | impl: optional first-moment branch `if let Some(beta1) = config.beta1 { state.exp_avg[i] = beta1 * state.exp_avg[i] + (1 - beta1) * g; ... }` in `adafactor.rs`; non-test consumer: `ferrotorch/src/lib.rs:61` re-exports `AdafactorConfig::with_beta1(Some(0.9))`. |
 | REQ-6 | SHIPPED | impl: `if config.relative_step { let rel = step.powf(-0.5)... lr = rel * rms_val; }` branch in `step` in `adafactor.rs` mirroring `torch/optim/_adafactor.py:200-220`; non-test consumer: `ferrotorch/src/lib.rs:61` re-exports `AdafactorConfig::with_relative_step(true)`. |
 | REQ-7 | SHIPPED | impl: `if config.weight_decay != 0.0 { *slot = cast::<f64, T>(p * (1.0 - lr * config.weight_decay))?; }` branch in `adafactor.rs` mirroring `torch/optim/_adafactor.py:411-414`; non-test consumer: `ferrotorch/src/lib.rs:61` re-exports `AdafactorConfig::with_weight_decay`. |
-| REQ-8 | SHIPPED | impl: `if tensor.is_cuda() { return Err(FerrotorchError::NotImplementedOnCuda { op: "Adafactor" }); }` in `step` in `adafactor.rs`; non-test consumer: `ferrotorch-train/src/learner.rs:28` Optimizer-trait callers receive the `Err` and surface it to the user via the training loop's `?` propagation. |
+| REQ-8 | SHIPPED | impl: `if tensor.is_cuda() { return Err(FerrotorchError::NotImplementedOnCuda { op: "Adafactor" }); }` in `step` in `adafactor.rs`; non-test consumer: `step in ferrotorch-train/src/learner.rs` Optimizer-trait callers receive the `Err` and surface it to the user via the training loop's `?` propagation. |
 | REQ-9 | SHIPPED | impl: `match tensor.grad()? { Some(g) => g, None => continue };` in `step` in `adafactor.rs`; non-test consumer: `ferrotorch-train/src/learner.rs` exercises the skip for frozen layers. |

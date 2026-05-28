@@ -133,13 +133,13 @@ skips every block's running statistics.
   `ferrotorch-vision/src/lib.rs` for downstream-crate callers.
 - `default_registry()` in `ferrotorch-vision/src/models/registry.rs`
   constructs all three variants via `maybe_load_pretrained`
-  (`registry.rs:133`, `:142`, `:151`) and binds them in the global
+  (`registry.rs`, `registry.rs`, `registry.rs`) and binds them in the global
   `REGISTRY`.
-- `ferrotorch-vision/src/models/segmentation/fcn.rs:40` and
-  `segmentation/deeplabv3.rs:56` import `resnet50_dilated` for the
+- `ferrotorch-vision/src/models/segmentation/fcn.rs` and
+  `segmentation/deeplabv3.rs` import `resnet50_dilated` for the
   dilated-backbone path used by FCN-ResNet50 / DeepLabV3-ResNet50.
 - `ferrotorch-vision/src/models/detection/faster_rcnn.rs:39`,
-  `detection/retinanet.rs:43`, and `detection/fcos.rs:57` import
+  `detection/retinanet.rs`, and `detection/fcos.rs` import
   `resnet50` for the FPN backbone in those detection heads.
 - `ferrotorch-vision/src/models/feature_extractor.rs:146` (production
   helper, not gated by `#[cfg(test)]`) re-uses `resnet18` to demonstrate
@@ -193,11 +193,11 @@ Expected: all tests pass; no `parity-sweep` ops to run.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub struct BasicBlock<T: Float>` + `Module<T>` impl in `resnet.rs` mirrors torchvision `BasicBlock` at `resnet.py:59`; non-test consumer: `pub use BasicBlock` at `ferrotorch-vision/src/models/mod.rs:39` + invoked inside `ResNet::make_basic_layer` in `resnet.rs`. |
-| REQ-2 | SHIPPED | impl: `pub struct Bottleneck<T: Float>` + `Module<T>` impl in `resnet.rs` mirrors torchvision `Bottleneck` at `resnet.py:108`; non-test consumer: `pub use Bottleneck` at `mod.rs:39` + invoked inside `ResNet::make_bottleneck_layer` in `resnet.rs`. |
-| REQ-3 | SHIPPED | impl: `pub struct ResNet<T: Float>` + `Module<T>` impl in `resnet.rs`; non-test consumer: registry constructors at `registry.rs:133`, `:142`, `:151` construct `ResNet` via `super::resnet::resnet{18,34,50}::<f32>(num_classes)`. |
+| REQ-2 | SHIPPED | impl: `pub struct Bottleneck<T: Float>` + `Module<T>` impl in `resnet.rs` mirrors torchvision `Bottleneck` at `resnet.py:108`; non-test consumer: `pub use Bottleneck` at `mod.rs` + invoked inside `ResNet::make_bottleneck_layer` in `resnet.rs`. |
+| REQ-3 | SHIPPED | impl: `pub struct ResNet<T: Float>` + `Module<T>` impl in `resnet.rs`; non-test consumer: registry constructors at `registry.rs`, `registry.rs`, `registry.rs` construct `ResNet` via `super::resnet::resnet{18,34,50}::<f32>(num_classes)`. |
 | REQ-4 | SHIPPED | impl: `pub fn resnet18`, `pub fn resnet34`, `pub fn resnet50` in `resnet.rs`; non-test consumer: `default_registry()` in `registry.rs` binds all three. |
-| REQ-5 | SHIPPED | impl: `pub fn resnet50_dilated` + dilation-threading helpers `make_basic_layer` / `make_bottleneck_layer` in `resnet.rs`; non-test consumer: `use crate::models::resnet::{ResNet, resnet50_dilated}` at `segmentation/fcn.rs:40` and `segmentation/deeplabv3.rs:56`. |
-| REQ-6 | SHIPPED | impl: `Module::named_parameters` for `BasicBlock`, `Bottleneck`, `ResNet` in `resnet.rs`; non-test consumer: `default_registry()` builds models then `load_state_dict(&state_dict, false)` (`registry.rs:53`) walks `named_parameters` in production. |
-| REQ-7 | SHIPPED | impl: `children` / `named_children` overrides in `resnet.rs`; non-test consumer: `apply_bn_buffers_from_state_dict(&model as &dyn Module<T>, &state_dict)` at `registry.rs:62` walks `named_descendants_dyn()` on the live model. |
+| REQ-5 | SHIPPED | impl: `pub fn resnet50_dilated` + dilation-threading helpers `make_basic_layer` / `make_bottleneck_layer` in `resnet.rs`; non-test consumer: `use crate::models::resnet::{ResNet, resnet50_dilated}` at `segmentation/fcn.rs` and `segmentation/deeplabv3.rs`. |
+| REQ-6 | SHIPPED | impl: `Module::named_parameters` for `BasicBlock`, `Bottleneck`, `ResNet` in `resnet.rs`; non-test consumer: `default_registry()` builds models then `load_state_dict(&state_dict, false)` (`named_parameters in registry.rs`) walks `named_parameters` in production. |
+| REQ-7 | SHIPPED | impl: `children` / `named_children` overrides in `resnet.rs`; non-test consumer: `apply_bn_buffers_from_state_dict(&model as &dyn Module<T>, &state_dict)` at `registry.rs` walks `named_descendants_dyn()` on the live model. |
 | REQ-8 | SHIPPED | impl: `impl IntermediateFeatures<T> for ResNet<T>` in `resnet.rs`; non-test consumer: `pub use feature_extractor::{FeatureExtractor, IntermediateFeatures, create_feature_extractor}` at `ferrotorch-vision/src/models/mod.rs` exposes the trait, and `feature_extractor.rs` re-uses ResNet's impl. |
 | REQ-9 | SHIPPED | impl: `Module::train` / `Module::eval` in `resnet.rs` (recursive into every BN); non-test consumer: `Module::train` is a trait method on `Box<dyn Module<T>>`, exposed via `registry.rs::get_model` which returns boxed models whose train/eval the caller drives. |

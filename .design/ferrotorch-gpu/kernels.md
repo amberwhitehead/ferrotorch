@@ -286,13 +286,13 @@ the category boundaries.
 forwarding the type-erased `GpuBufferHandle` arguments to the
 corresponding typed launcher in this file. Selected sites:
 
-- `backend_impl.rs:1330` — `CudaBackendImpl::add_f32` → `kernels::gpu_add`.
-- `backend_impl.rs:1445` — `add_f64` → `kernels::gpu_add_f64`.
-- `backend_impl.rs:2037` — `softmax_f64` → `kernels::gpu_softmax_f64`.
-- `backend_impl.rs:2846` — `softmax_f32` → `kernels::gpu_softmax`.
-- `backend_impl.rs:2859` — `dropout_f32` → `kernels::gpu_dropout`.
-- `backend_impl.rs:3136` — `softmax_bf16_f32` → `kernels::gpu_softmax_bf16_f32`.
-- `backend_impl.rs:3852` — `softmax_backward_f32` → `kernels::gpu_softmax_backward`.
+- `add_f32 in backend_impl.rs` — `CudaBackendImpl::add_f32` → `kernels::gpu_add`.
+- `add_f64 in backend_impl.rs` — `add_f64` → `kernels::gpu_add_f64`.
+- `softmax_f64 in backend_impl.rs` — `softmax_f64` → `kernels::gpu_softmax_f64`.
+- `softmax_f32 in backend_impl.rs` — `softmax_f32` → `kernels::gpu_softmax`.
+- `dropout_f32 in backend_impl.rs` — `dropout_f32` → `kernels::gpu_dropout`.
+- `softmax_bf16_f32 in backend_impl.rs` — `softmax_bf16_f32` → `kernels::gpu_softmax_bf16_f32`.
+- `softmax_backward_f32 in backend_impl.rs` — `softmax_backward_f32` → `kernels::gpu_softmax_backward`.
 
 Through `CudaBackendImpl`, every GPU-resident tensor op in
 ferrotorch-core (`Tensor::add`, `Tensor::matmul`, `Tensor::softmax`,
@@ -377,21 +377,21 @@ conformance tests).
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub(crate) fn ptx_f32_to_f64 in ferrotorch-gpu/src/kernels.rs` (line 39), `pub(crate) fn get_f64_ptx` (line 173). Non-test consumer: every f64 op in this file that delegates to an f32 template (e.g., the f64 versions of layernorm_backward / rmsnorm_backward / broadcast_add at the line ranges noted in the auto-converter's documenting comments). |
-| REQ-2 | SHIPPED | impl: `pub fn gpu_add` (line 13114), `gpu_sub` (13146), `gpu_mul` (13168); non-test consumer: `backend_impl.rs:1330` (`add_f32`), 1346 (`mul_f32`), 1334 (`sub_f32`), 1372 (`div_f32`). |
+| REQ-2 | SHIPPED | impl: `pub fn gpu_add` (line 13114), `gpu_sub`, `gpu_mul`; non-test consumer: `gpu_mul in backend_impl.rs` (`add_f32`), 1346 (`mul_f32`), 1334 (`sub_f32`), 1372 (`div_f32`). |
 | REQ-3 | SHIPPED | impl: `gpu_broadcast_add/sub/mul/div` at lines 13200-13284; non-test consumer: trait methods in `backend_impl.rs` lines 1322-1395 forward to these for broadcast inputs. |
-| REQ-4 | SHIPPED | impl: 10 unary `pub fn gpu_*` at lines 13325-13412 (neg, relu, abs, exp, log, sqrt, pow, sigmoid, tanh) plus the broader transcendental section at 17768; non-test consumer: trait methods at `backend_impl.rs:1358-1437` (relu, neg, exp, log, sqrt, pow, abs, sigmoid, tanh f32 + f64 variants). |
-| REQ-5 | SHIPPED | impl: GELU / SiLU / ELU / Mish + backward sections (1354, 2295-3555, 4763-4870); non-test consumer: `backend_impl.rs:1612-1740` trait methods (gelu, gelu_tanh, gelu_erf, silu, elu, mish, clamp + backwards). |
+| REQ-4 | SHIPPED | impl: 10 unary `pub fn gpu_*` at lines 13325-13412 (neg, relu, abs, exp, log, sqrt, pow, sigmoid, tanh) plus the broader transcendental section at 17768; non-test consumer: trait methods at `backend_impl.rs` (relu, neg, exp, log, sqrt, pow, abs, sigmoid, tanh f32 + f64 variants). |
+| REQ-5 | SHIPPED | impl: GELU / SiLU / ELU / Mish + backward sections (1354, 2295-3555, 4763-4870); non-test consumer: `backend_impl.rs` trait methods (gelu, gelu_tanh, gelu_erf, silu, elu, mish, clamp + backwards). |
 | REQ-6 | SHIPPED | impl: reductions at lines 14191-14982 + cumulative-scan ops at 15158+; non-test consumer: `backend_impl.rs` reduce / sum / prod / min / max trait methods. |
 | REQ-7 | SHIPPED | impl: `gpu_cumsum/cumprod/cummax/cummin/logcumsumexp` at lines 15174-15598; non-test consumer: `backend_impl.rs` `cumsum_f32`/`cumprod_f32`/etc. trait methods routed through `CudaBackendImpl`. |
-| REQ-8 | SHIPPED | impl: `gpu_softmax` / `gpu_log_softmax` + backwards at lines 13885-14191; non-test consumer: `backend_impl.rs:2837, 2028, 3852, 3136` (softmax_f32, softmax_f64, softmax_backward_f32, softmax_bf16_f32). |
+| REQ-8 | SHIPPED | impl: `gpu_softmax` / `gpu_log_softmax` + backwards at lines 13885-14191; non-test consumer: `gpu_log_softmax in backend_impl.rs, 2028, 3852, 3136` (softmax_f32, softmax_f64, softmax_backward_f32, softmax_bf16_f32). |
 | REQ-9 | SHIPPED | impl: LayerNorm / RMSNorm + backwards at lines 21424-21744; non-test consumer: `backend_impl.rs` `layernorm_f32` / `layernorm_backward_f32` / `rmsnorm_f32` / `rmsnorm_backward_f32` trait methods + f64 variants. |
-| REQ-10 | SHIPPED | impl: `gpu_index_select_1d` (13427), `gpu_scatter_add_1d` (13506), `gpu_index_select_dim` (13596), `gpu_index_select_dim_f64` (13692); non-test consumer: `backend_impl.rs` `index_select_*` / `scatter_add_*` trait methods (the legacy f32-encoded path; the modern integer-index path is in `gather_int.rs`). |
-| REQ-11 | SHIPPED | impl: `gpu_masked_fill` (13789), `gpu_masked_zero` (13867); non-test consumer: `backend_impl.rs` `masked_fill_f32` / `masked_zero_f32` trait methods (the legacy f32-mask path; the modern u8-mask path is in `masked_kernels.rs`). |
+| REQ-10 | SHIPPED | impl: `gpu_index_select_1d`, `gpu_scatter_add_1d`, `gpu_index_select_dim`, `gpu_index_select_dim_f64`; non-test consumer: `backend_impl.rs` `index_select_*` / `scatter_add_*` trait methods (the legacy f32-encoded path; the modern integer-index path is in `gather_int.rs`). |
+| REQ-11 | SHIPPED | impl: `gpu_masked_fill`, `gpu_masked_zero`; non-test consumer: `backend_impl.rs` `masked_fill_f32` / `masked_zero_f32` trait methods (the legacy f32-mask path; the modern u8-mask path is in `masked_kernels.rs`). |
 | REQ-12 | SHIPPED | impl: strided ops at lines 15615-16678; non-test consumer: `backend_impl.rs` `strided_split` / `strided_cat` / `transpose_2d` / `permute_0213` trait methods. |
 | REQ-13 | SHIPPED | impl: embedding / KV-cache section at 16948-17171; non-test consumer: `backend_impl.rs` `embed_lookup_*` / `slice_write_*` / `slice_read_*` trait methods (f32 + f64). |
-| REQ-14 | SHIPPED | impl: `gpu_small_matmul` (16837 section), MaxPool2d / AvgPool2d (21030 section), BatchNorm2d (21286 section); non-test consumer: `backend_impl.rs` `matmul_f32` (2578), `conv2d_f32` (2502), pooling and batchnorm trait methods. |
-| REQ-15 | SHIPPED | impl: `gpu_dropout` (16503 section); non-test consumer: `backend_impl.rs:2859` (`dropout_f32`), `2864` (`dropout_philox_f32`). |
-| REQ-16 | SHIPPED | impl: bf16 binary / axis-reduction / activation PTX at lines 9448-9866, dispatch functions at 26477-26884; non-test consumer: `backend_impl.rs:3161` (`add_bf16_f32`) and the broader bf16 trait method block. |
+| REQ-14 | SHIPPED | impl: `gpu_small_matmul` (16837 section), MaxPool2d / AvgPool2d (21030 section), BatchNorm2d (21286 section); non-test consumer: `backend_impl.rs` `matmul_f32`, `conv2d_f32`, pooling and batchnorm trait methods. |
+| REQ-15 | SHIPPED | impl: `gpu_dropout` (16503 section); non-test consumer: `gpu_dropout in backend_impl.rs` (`dropout_f32`), `2864` (`dropout_philox_f32`). |
+| REQ-16 | SHIPPED | impl: bf16 binary / axis-reduction / activation PTX at lines 9448-9866, dispatch functions at 26477-26884; non-test consumer: `add_bf16_f32 in backend_impl.rs` (`add_bf16_f32`) and the broader bf16 trait method block. |
 | REQ-17 | SHIPPED | impl: `gpu_fused_adam_step` (20776 section), fused GRU cell (20905 section); non-test consumer: `ferrotorch-optim` Adam optimizer routes through the fused Adam trait method on `GpuBackend` for the CUDA case. |
 | REQ-18 | SHIPPED | impl: `_into` helpers section at line 12603 covering 10+ ops; non-test consumer: `ferrotorch-core` `inplace.rs` op dispatch + graph-capture-safe variants in `backend_impl.rs` use the `_into` shape to avoid mid-op allocations. |
 | REQ-19 | SHIPPED | impl: f32-to-f16 conversion section at line 23835; non-test consumer: `backend_impl.rs` dtype-cast paths route through this for f32 ↔ f16. |

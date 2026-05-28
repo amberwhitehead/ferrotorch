@@ -60,19 +60,19 @@ container transforms:
 - [x] AC-1: `RandomApply::new(vec![...], 0.5)` constructs.
 - [x] AC-2: `RandomApply::new(vec![], 1.5)` returns `Err`.
 - [x] AC-3: `p = 1.0` always applies (verified by
-  `test_random_apply_always` at `random_apply.rs:91`).
+  `test_random_apply_always in random_apply.rs`).
 - [x] AC-4: `p = 0.0` never applies (verified by
-  `test_random_apply_never` at `random_apply.rs:109`).
+  `test_random_apply_never in random_apply.rs`).
 - [x] AC-5: Empty `transforms` with `p = 1.0` is identity (verified by
-  `test_random_apply_empty_transforms` at `random_apply.rs:126`).
+  `test_random_apply_empty_transforms in random_apply.rs`).
 - [x] AC-6: `RandomChoice::new(vec![])` returns `Err`.
 - [x] AC-7: `RandomChoice` selects at least both transforms over many
   trials (verified by `test_random_choice_selects_one` at
-  `random_apply.rs:136`).
+  `test_random_choice_selects_one in random_apply.rs`).
 - [x] AC-8: Single-transform `RandomChoice` always applies that one
-  (verified at `random_apply.rs:165`).
+  (verified at `random_apply.rs`).
 - [x] AC-9: Both types are `Send + Sync` (verified at
-  `random_apply.rs:178`).
+  `random_apply.rs`).
 - [ ] AC-10: NOT-STARTED — per-transform probability vector for
   `RandomChoice`. Blocker #1517.
 
@@ -95,7 +95,7 @@ impl<T: Float> RandomApply<T> {
 }
 ```
 
-at `random_apply.rs:13-35`. Unlike upstream, an empty `transforms`
+at `transforms in random_apply.rs`. Unlike upstream, an empty `transforms`
 vector is accepted — it makes the apply path identity, which is
 consistent with `Compose::new(vec![])`.
 
@@ -116,7 +116,7 @@ impl<T: Float> Transform<T> for RandomApply<T> {
 }
 ```
 
-at `random_apply.rs:37-48`. One `random_f64()` draw per `apply` call
+at `random_f64 in random_apply.rs`. One `random_f64()` draw per `apply` call
 to gate the whole list (not per-transform — that would be `Compose +
 RandomApply` per child).
 
@@ -136,7 +136,7 @@ impl<T: Float> RandomChoice<T> {
 }
 ```
 
-at `random_apply.rs:55-73`. Empty vector is rejected because
+at `random_apply.rs`. Empty vector is rejected because
 `(random_f64() * 0) as usize % 0` is undefined.
 
 ### `RandomChoice` Transform impl (REQ-6)
@@ -152,7 +152,7 @@ impl<T: Float> Transform<T> for RandomChoice<T> {
 }
 ```
 
-at `random_apply.rs:75-82`. The `.min(n - 1)` clamp defends against
+at `random_apply.rs`. The `.min(n - 1)` clamp defends against
 `random_f64()` returning exactly 1.0 — extremely rare but
 deterministically possible.
 
@@ -193,12 +193,12 @@ combinators; numerics are delegated to the wrapped children.
 
 Tests in `mod tests in random_apply.rs` (6 tests):
 
-- `test_random_apply_always` at `random_apply.rs:91`
-- `test_random_apply_never` at `random_apply.rs:109`
-- `test_random_apply_empty_transforms` at `random_apply.rs:126`
-- `test_random_choice_selects_one` at `random_apply.rs:136`
-- `test_random_choice_single_transform` at `random_apply.rs:165`
-- `test_random_apply_is_send_sync` at `random_apply.rs:178`
+- `test_random_apply_always in random_apply.rs`
+- `test_random_apply_never in random_apply.rs`
+- `test_random_apply_empty_transforms in random_apply.rs`
+- `test_random_choice_selects_one in random_apply.rs`
+- `test_random_choice_single_transform in random_apply.rs`
+- `test_random_apply_is_send_sync in random_apply.rs`
 
 Smoke:
 
@@ -213,9 +213,9 @@ Expected: `6 passed`.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub struct RandomApply<T: Float>` with `transforms: Vec<Box<dyn Transform<T>>>` + `p: f64` at `ferrotorch-vision/src/transforms/random_apply.rs:13-16`, mirroring `torchvision/transforms/v2/_container.py:63` `class RandomApply`; non-test consumer: `pub use random_apply::{RandomApply, RandomChoice};` at `mod.rs:24` AND `RandomApply` in the crate-root re-export at `ferrotorch-vision/src/lib.rs:113`. |
-| REQ-2 | SHIPPED | impl: `pub fn RandomApply::new(transforms, p) -> FerrotorchResult<Self>` with range check at `random_apply.rs:27-34`; non-test consumer: registered in `ferrotorch-vision/tests/conformance/_surface_inventory.toml:157` as `ferrotorch_vision::RandomApply::new`; reachable via the crate-root re-export. |
-| REQ-3 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomApply<T>` with random gate + chained-apply at `random_apply.rs:37-48`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this — composes into nested `Compose` / `RandomApply` pipelines. |
-| REQ-4 | SHIPPED | impl: `pub struct RandomChoice<T: Float>` with `transforms: Vec<Box<dyn Transform<T>>>` at `random_apply.rs:55-57`, mirroring `_container.py:119` `class RandomChoice`; non-test consumer: same `pub use` at `mod.rs:24` AND `RandomChoice` in the crate-root re-export at `lib.rs:113`. |
-| REQ-5 | SHIPPED | impl: `pub fn RandomChoice::new(transforms) -> FerrotorchResult<Self>` with non-empty check at `random_apply.rs:65-72`; non-test consumer: registered in `ferrotorch-vision/tests/conformance/_surface_inventory.toml:171` as `ferrotorch_vision::RandomChoice::new`; reachable via the crate-root re-export. |
-| REQ-6 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomChoice<T>` with uniform index sampling + `.min(n - 1)` clamp at `random_apply.rs:75-82`; non-test consumer: same `Box<dyn Transform<T>>` slot access via the crate-root re-export. |
-| REQ-7 | SHIPPED | impl: `RandomChoice::with_p(Vec<f64>)` builder + cumulative-weight sampling in `apply` at `ferrotorch-vision/src/transforms/random_apply.rs:65-130,140-165`; non-test consumer: `pub use random_apply::{RandomApply, RandomChoice};` at `mod.rs:32` AND `RandomChoice` in the crate-root re-export at `lib.rs` — augmentation pipelines compose `RandomChoice::new(ts)?.with_p(vec![0.5, 0.25, 0.25])?` per upstream `_container.py:138-141`. |
+| REQ-2 | SHIPPED | impl: `pub fn RandomApply::new(transforms, p) -> FerrotorchResult<Self>` with range check at `new in random_apply.rs`; non-test consumer: registered in `ferrotorch-vision/tests/conformance/_surface_inventory.toml:157` as `ferrotorch_vision::RandomApply::new`; reachable via the crate-root re-export. |
+| REQ-3 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomApply<T>` with random gate + chained-apply at `RandomApply in random_apply.rs`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this — composes into nested `Compose` / `RandomApply` pipelines. |
+| REQ-4 | SHIPPED | impl: `pub struct RandomChoice<T: Float>` with `transforms: Vec<Box<dyn Transform<T>>>` at `transforms in random_apply.rs`, mirroring `_container.py:119` `class RandomChoice`; non-test consumer: same `pub use` at `mod.rs` AND `RandomChoice` in the crate-root re-export at `lib.rs`. |
+| REQ-5 | SHIPPED | impl: `pub fn RandomChoice::new(transforms) -> FerrotorchResult<Self>` with non-empty check at `new in random_apply.rs`; non-test consumer: registered in `ferrotorch-vision/tests/conformance/_surface_inventory.toml:171` as `ferrotorch_vision::RandomChoice::new`; reachable via the crate-root re-export. |
+| REQ-6 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomChoice<T>` with uniform index sampling + `.min(n - 1)` clamp at `random_apply.rs`; non-test consumer: same `Box<dyn Transform<T>>` slot access via the crate-root re-export. |
+| REQ-7 | SHIPPED | impl: `RandomChoice::with_p(Vec<f64>)` builder + cumulative-weight sampling in `apply in ferrotorch-vision/src/transforms/random_apply.rs,140-165`; non-test consumer: `pub use random_apply::{RandomApply, RandomChoice};` at `mod.rs` AND `RandomChoice` in the crate-root re-export at `lib.rs` — augmentation pipelines compose `RandomChoice::new(ts)?.with_p(vec![0.5, 0.25, 0.25])?` per upstream `_container.py:138-141`. |

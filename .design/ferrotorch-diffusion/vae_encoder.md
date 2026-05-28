@@ -53,55 +53,55 @@ parameters into clamped (`logvar ∈ [-30, 20]`) mean / logvar.
 ## Acceptance Criteria
 
 - [x] AC-1: `encoder_forward_shape` runs `[1, 3, 8, 8]` →
-  `[1, 2L, 1, 1]` on the tiny 4-block config (`vae_encoder.rs:609..625`).
+  `[1, 2L, 1, 1]` on the tiny 4-block config (`vae_encoder in vae_encoder.rs`).
 - [x] AC-2: `vae_encoder_forward_shape` exercises the full
-  `VaeEncoder.forward` (`vae_encoder.rs:628..639`).
+  `VaeEncoder.forward` (`VaeEncoder in vae_encoder.rs`).
 - [x] AC-3: `vae_encoder_named_parameters_include_quant_conv`
-  enumerates canonical keys (`vae_encoder.rs:642..657`).
+  enumerates canonical keys (`vae_encoder in vae_encoder.rs`).
 - [x] AC-4: `diag_gauss_split_and_mode_shapes` proves the
   `[B, 2L, h, w] → mean[B, L, h, w], logvar[B, L, h, w]` split
-  (`vae_encoder.rs:660..683`).
+  (`vae_encoder in vae_encoder.rs`).
 - [x] AC-5: `diag_gauss_logvar_is_clamped` pins `logvar ≤ 20.0`
-  (`vae_encoder.rs:686..703`).
+  (`vae_encoder in vae_encoder.rs`).
 - [x] AC-6: `diag_gauss_sample_with_seed_is_deterministic` pins
   determinism per seed and difference across seeds
-  (`vae_encoder.rs:706..738`).
+  (`vae_encoder in vae_encoder.rs`).
 - [x] AC-7: `encode_with_scaling_applies_scaling_factor` proves
-  the `* scaling_factor` multiplier (`vae_encoder.rs:761..787`).
+  the `* scaling_factor` multiplier (`vae_encoder in vae_encoder.rs`).
 - [x] AC-8: `vae_encoder_round_trip_state_dict` proves
-  state_dict / load round-trip (`vae_encoder.rs:741..758`).
+  state_dict / load round-trip (`vae_encoder in vae_encoder.rs`).
 
 ## Architecture
 
-- `Encoder<T>` at `vae_encoder.rs:51..79` is the conv pipeline.
-  `new` at `vae_encoder.rs:81..153` builds: `conv_in (k=3, pad=1)`,
+- `Encoder<T>` at `Encoder in vae_encoder.rs` is the conv pipeline.
+  `new` at `vae_encoder in vae_encoder.rs` builds: `conv_in (k=3, pad=1)`,
   N down-blocks (`DownEncoderBlock2D::new(prev, c, layers,
   groups, 1e-6, !is_final)`), `UNetMidBlock2D` at top channels with
   eps=1e-6, `conv_norm_out (GroupNorm(groups, top, 1e-6))`, and
   `conv_out (k=3, pad=1, top → 2 * latent_channels)`.
-- `VaeEncoder<T>` at `vae_encoder.rs:288..297` wraps `Encoder<T>`
+- `VaeEncoder<T>` at `VaeEncoder in vae_encoder.rs` wraps `Encoder<T>`
   with a 1×1 `quant_conv` over `2 * latent_channels`. `new` at
-  `vae_encoder.rs:299..316` builds both.
-- `Module<T>::forward` at `vae_encoder.rs:369..382` validates
+  `vae_encoder in vae_encoder.rs` builds both.
+- `Module<T>::forward` at `vae_encoder in vae_encoder.rs` validates
   `[B, out_channels, H, W]`, runs `encoder` then `quant_conv`.
-- `encode` at `vae_encoder.rs:325..328` calls `forward` then hands
+- `encode` at `vae_encoder in vae_encoder.rs` calls `forward` then hands
   the `[B, 2L, h, w]` parameters to
   `DiagonalGaussianDistribution::from_parameters`.
-- `DiagonalGaussianDistribution<T>` at `vae_encoder.rs:454..460`
+- `DiagonalGaussianDistribution<T>` at `DiagonalGaussianDistribution in vae_encoder.rs`
   holds `mean` and clamped `logvar`. `from_parameters` at
-  `vae_encoder.rs:462..501` splits via `chunk(2, dim=1)` and
+  `vae_encoder in vae_encoder.rs` splits via `chunk(2, dim=1)` and
   clamps `logvar` to `[LOGVAR_CLAMP_MIN, LOGVAR_CLAMP_MAX] =
   [-30, 20]` via `clamp_t`.
-- `mode` at `vae_encoder.rs:506..508` returns `&self.mean`.
-- `sample_with_seed` at `vae_encoder.rs:527..539` computes
+- `mode` at `clamp_t in vae_encoder.rs` returns `&self.mean`.
+- `sample_with_seed` at `vae_encoder in vae_encoder.rs` computes
   `std = exp(0.5 * logvar)`, then `mean + std * eps` where `eps` is
   `randn_with_seed(self.mean.shape(), seed)`.
-- `randn_with_seed` at `vae_encoder.rs:548..587` is a local xorshift64
+- `randn_with_seed` at `vae_encoder in vae_encoder.rs` is a local xorshift64
   + Box-Muller generator (mirroring `ferrotorch_core::randn`'s CPU
   path but using `seed` as the state).
-- `encode_with_scaling` at `vae_encoder.rs:348..361` composes
+- `encode_with_scaling` at `vae_encoder in vae_encoder.rs` composes
   `encode` → `sample_with_seed` → `* scaling_factor`.
-- `Module<T>::load_state_dict` at `vae_encoder.rs:421..444` splits
+- `Module<T>::load_state_dict` at `vae_encoder in vae_encoder.rs` splits
   keys into `encoder.*` / `quant_conv.*`; strict mode rejects
   unknown prefixes.
 
@@ -136,19 +136,19 @@ encoder against the pinned reference dump for the `.mode()` path.
 
 ## Verification
 
-Lib tests at `vae_encoder.rs:589..788`:
+Lib tests at `vae_encoder in vae_encoder.rs`:
 
-- `encoder_forward_shape` (`vae_encoder.rs:609..625`)
-- `vae_encoder_forward_shape` (`vae_encoder.rs:628..639`)
+- `encoder_forward_shape` (`vae_encoder in vae_encoder.rs`)
+- `vae_encoder_forward_shape` (`vae_encoder in vae_encoder.rs`)
 - `vae_encoder_named_parameters_include_quant_conv`
-  (`vae_encoder.rs:642..657`)
-- `diag_gauss_split_and_mode_shapes` (`vae_encoder.rs:660..683`)
-- `diag_gauss_logvar_is_clamped` (`vae_encoder.rs:686..703`)
+  (`vae_encoder in vae_encoder.rs`)
+- `diag_gauss_split_and_mode_shapes` (`vae_encoder in vae_encoder.rs`)
+- `diag_gauss_logvar_is_clamped` (`vae_encoder in vae_encoder.rs`)
 - `diag_gauss_sample_with_seed_is_deterministic`
-  (`vae_encoder.rs:706..738`)
-- `vae_encoder_round_trip_state_dict` (`vae_encoder.rs:741..758`)
+  (`vae_encoder in vae_encoder.rs`)
+- `vae_encoder_round_trip_state_dict` (`vae_encoder in vae_encoder.rs`)
 - `encode_with_scaling_applies_scaling_factor`
-  (`vae_encoder.rs:761..787`)
+  (`vae_encoder in vae_encoder.rs`)
 
 Integration: `tests/conformance_vae_encoder.rs`.
 
@@ -158,10 +158,10 @@ No parity-sweep ops apply (composition module).
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `Encoder<T>` at `ferrotorch-diffusion/src/vae_encoder.rs:51..79`, `Encoder::new` at `ferrotorch-diffusion/src/vae_encoder.rs:81..153`; non-test consumer: `ferrotorch-diffusion/src/vae_encoder.rs:307` `VaeEncoder::new` builds it; itself consumed by `ferrotorch-diffusion/src/safetensors_loader.rs:425` `load_vae_encoder` |
-| REQ-2 | SHIPPED | impl: `VaeEncoder<T>` at `ferrotorch-diffusion/src/vae_encoder.rs:288..297` and `VaeEncoder::new` at `ferrotorch-diffusion/src/vae_encoder.rs:299..316`; non-test consumer: `ferrotorch-diffusion/src/safetensors_loader.rs:425` `load_vae_encoder` instantiates and loads it; `ferrotorch-diffusion/src/gpu/vae_encoder.rs:317` `GpuVaeEncoder::from_module` consumes its `state_dict()` |
+| REQ-1 | SHIPPED | impl: `Encoder<T>` at `Encoder in ferrotorch-diffusion/src/vae_encoder.rs`, `Encoder::new` at `new in ferrotorch-diffusion/src/vae_encoder.rs`; non-test consumer: `new in ferrotorch-diffusion/src/vae_encoder.rs` `VaeEncoder::new` builds it; itself consumed by `new in ferrotorch-diffusion/src/safetensors_loader.rs` `load_vae_encoder` |
+| REQ-2 | SHIPPED | impl: `VaeEncoder<T>` at `VaeEncoder in ferrotorch-diffusion/src/vae_encoder.rs` and `VaeEncoder::new` at `new in ferrotorch-diffusion/src/vae_encoder.rs`; non-test consumer: `new in ferrotorch-diffusion/src/safetensors_loader.rs` `load_vae_encoder` instantiates and loads it; `new in ferrotorch-diffusion/src/gpu/vae_encoder.rs` `GpuVaeEncoder::from_module` consumes its `state_dict()` |
 | REQ-3 | SHIPPED | impl: `VaeEncoder::encode` at `ferrotorch-diffusion/src/vae_encoder.rs:325..328` and `DiagonalGaussianDistribution::from_parameters` (with clamp) at `ferrotorch-diffusion/src/vae_encoder.rs:471..501`; non-test consumer: `ferrotorch-diffusion/src/vae_encoder.rs:349` `encode_with_scaling` invokes it; `load_vae_encoder` returns a `VaeEncoder` whose `encode` is the canonical production entry |
 | REQ-4 | SHIPPED | impl: `DiagonalGaussianDistribution::sample_with_seed` at `ferrotorch-diffusion/src/vae_encoder.rs:527..539`, `mode` at `ferrotorch-diffusion/src/vae_encoder.rs:506..508`, `randn_with_seed` at `ferrotorch-diffusion/src/vae_encoder.rs:548..587`; non-test consumer: `ferrotorch-diffusion/src/vae_encoder.rs:350` `encode_with_scaling` calls `dist.sample_with_seed(seed)` on the production path |
 | REQ-5 | SHIPPED | impl: `encode_with_scaling` at `ferrotorch-diffusion/src/vae_encoder.rs:348..361`; non-test consumer: re-exported via `ferrotorch-diffusion/src/lib.rs:148` `pub use vae_encoder::VaeEncoder` (which carries `encode_with_scaling` as an inherent method on the public type); the canonical SD pipeline call `latent = vae.encode(image).latent_dist.sample() * scaling_factor` is realised through this one function |
-| REQ-6 | SHIPPED | impl: `Module<T>::forward` at `ferrotorch-diffusion/src/vae_encoder.rs:369..382` (shape check at `vae_encoder.rs:371..379`); non-test consumer: `ferrotorch-diffusion/src/vae_encoder.rs:326` `encode` calls `self.forward(image)?` to produce the `[B, 2L, h, w]` parameters |
+| REQ-6 | SHIPPED | impl: `Module<T>::forward` at `forward in ferrotorch-diffusion/src/vae_encoder.rs` (shape check at `vae_encoder in vae_encoder.rs`); non-test consumer: `vae_encoder in ferrotorch-diffusion/src/vae_encoder.rs` `encode` calls `self.forward(image)?` to produce the `[B, 2L, h, w]` parameters |
 | REQ-7 | SHIPPED | impl: `Module<T>::load_state_dict` at `ferrotorch-diffusion/src/vae_encoder.rs:421..444`; non-test consumer: `ferrotorch-diffusion/src/safetensors_loader.rs:394` `VaeEncoder::load_hf_state_dict` calls `self.load_state_dict(&remapped, strict)` after stripping the `vae.` prefix |

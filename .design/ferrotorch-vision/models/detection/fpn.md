@@ -100,12 +100,12 @@ handled by the pin script's key remapping in
   `ferrotorch-vision/src/models/detection/mod.rs:34` and
   `ferrotorch-vision/src/lib.rs:21`.
 - `pub use FPN_OUT_CHANNELS` at the same paths; consumed by
-  `ferrotorch-vision/src/models/detection/retinanet.rs:41` (sizing
+  `ferrotorch-vision/src/models/detection/retinanet.rs` (sizing
   the RetinaNet head trunk) and
-  `ferrotorch-vision/src/models/detection/fcos.rs:54` (sizing the
+  `ferrotorch-vision/src/models/detection/fcos.rs` (sizing the
   FCOS head trunk).
 - `use crate::models::detection::fpn::FeaturePyramidNetwork` at
-  `ferrotorch-vision/src/models/detection/faster_rcnn.rs:33`:
+  `ferrotorch-vision/src/models/detection/faster_rcnn.rs`:
   `FasterRcnn::new` calls `FeaturePyramidNetwork::new()?` and
   stores it as the `fpn` field; `FasterRcnn::forward_fpn` (a public
   helper consumed by Mask R-CNN and Keypoint R-CNN) delegates to
@@ -160,7 +160,7 @@ Expected: 6 tests passed.
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub struct FeaturePyramidNetwork<T>` + `Self::new` in `fpn.rs`; non-test consumer: `FasterRcnn::new` at `ferrotorch-vision/src/models/detection/faster_rcnn.rs:232` calls `FeaturePyramidNetwork::new()?` and stores the result. |
 | REQ-2 | SHIPPED | impl: `Conv2d::new(..., true)` calls (bias=true) in `Self::new` in `fpn.rs`; non-test consumer: same `FasterRcnn::new` path; the bias parameters are loaded by `scripts/pin_pretrained_weights.py` and consumed during the pretrained-weight-loading test at `ferrotorch-hub/tests/pretrained_loading.rs::test_pretrained_fasterrcnn_resnet50_fpn`. |
-| REQ-3 | SHIPPED | impl: `pub const FPN_OUT_CHANNELS: usize = 256;` in `fpn.rs`; non-test consumer: `RetinaNet::new` at `ferrotorch-vision/src/models/detection/retinanet.rs:642` passes it as the head trunk input channels. |
+| REQ-3 | SHIPPED | impl: `pub const FPN_OUT_CHANNELS: usize = 256;` in `fpn.rs`; non-test consumer: `RetinaNet::new` at `new in ferrotorch-vision/src/models/detection/retinanet.rs` passes it as the head trunk input channels. |
 | REQ-4 | SHIPPED | impl: `Self::new` in `fpn.rs` (`in_channels = [256, 512, 1024, 2048]`); non-test consumer: `FasterRcnn::new` at `ferrotorch-vision/src/models/detection/faster_rcnn.rs:232`. |
 | REQ-5 | SHIPPED | impl: `pub fn forward` in `fpn.rs` (reads `"layer1".."layer4"`, writes `"p2".."p6"`); non-test consumer: `FasterRcnn::forward` at `ferrotorch-vision/src/models/detection/faster_rcnn.rs:305` calls `self.fpn.forward(&backbone_features)`. |
 | REQ-6 | SHIPPED | impl: top-down body (`lat5 → upsample → add lat4 → output4`) in `Self::forward` in `fpn.rs`; non-test consumer: `FasterRcnn::forward_fpn` at `ferrotorch-vision/src/models/detection/faster_rcnn.rs:279` delegates to `self.fpn.forward(backbone_features)`. |

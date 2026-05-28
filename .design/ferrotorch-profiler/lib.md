@@ -113,7 +113,7 @@ re-export set breaks the build — the doc and the API stay in sync.
   every item in REQ-3 a production consumer of the
   `pub use` lines in `lib.rs:38-43`.
 - Internal cross-file consumption: each submodule's `pub use`
-  collapses through this file, so when `profiler.rs:7` writes
+  collapses through this file, so when `profiler in profiler.rs` writes
   `use crate::report::ProfileReport;`, the corresponding re-export
   on `lib.rs:42` is what the meta-crate sees.
 
@@ -149,7 +149,7 @@ returns 0 warnings.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: lint pin at `ferrotorch-profiler/src/lib.rs:1-4` with the `clippy::module_name_repetitions` allowance justified inline; non-test consumer: `cargo clippy -p ferrotorch-profiler --lib -- -D warnings` passes (verified during this iter's gauntlet); the workspace-wide `cargo clippy --all-targets --all-features -- -D warnings` step in CI consumes this pin. |
-| REQ-2 | SHIPPED | impl: submodule decls at `ferrotorch-profiler/src/lib.rs:27-33` with `#[cfg(feature = "cuda")] pub mod cuda_timing;` at line 27-28; non-test consumer: `ferrotorch-profiler/src/profiler.rs:5-7` consumes `crate::event`, `crate::flops`, `crate::report`; `ferrotorch-profiler/src/cuda_timing.rs:46` consumes `crate::profiler::Profiler` only when the cuda feature is on. |
+| REQ-2 | SHIPPED | impl: submodule decls at `event in ferrotorch-profiler/src/lib.rs` with `#[cfg(feature = "cuda")] pub mod cuda_timing;` at line 27-28; non-test consumer: `event in ferrotorch-profiler/src/profiler.rs` consumes `crate::event`, `crate::flops`, `crate::report`; `event in ferrotorch-profiler/src/cuda_timing.rs` consumes `crate::profiler::Profiler` only when the cuda feature is on. |
 | REQ-3 | SHIPPED | impl: `pub use` block at `ferrotorch-profiler/src/lib.rs:38-43` re-exporting `CudaKernelScope` (cuda-gated), `DeviceType`, `GpuTimingPair`, `MemoryCategory`, `ProfileEvent`, `ProfileConfig`, `Profiler`, `with_profiler`, `OpSummary`, `ProfileReport`, `ProfileSchedule`, `SchedulePhase`; non-test consumer: `ferrotorch/src/lib.rs:107` `pub use ferrotorch_profiler::*;` propagates every name to the meta-crate prelude. |
-| REQ-4 | SHIPPED | impl: doctest at `ferrotorch-profiler/src/lib.rs:12-25` exercising `with_profiler` + `ProfileConfig::default` + `profiler.record` + `report.table(10)`, mirroring the example pattern at `torch/profiler/profiler.py:651-712`; non-test consumer: `cargo test --doc` runs the example as part of CI. |
-| REQ-5 | SHIPPED | impl: `pub(crate) struct PendingCudaScope` at `ferrotorch-profiler/src/cuda_timing.rs:132` is intentionally absent from the `pub use` block at `lib.rs:38-43`; non-test consumer: `ferrotorch-profiler/tests/conformance_surface_coverage.rs:66-` enumerates every re-exported symbol — adding or removing a `pub use` line forces a test update, pinning the surface. |
+| REQ-4 | SHIPPED | impl: doctest at `with_profiler in ferrotorch-profiler/src/lib.rs` exercising `with_profiler` + `ProfileConfig::default` + `profiler.record` + `report.table(10)`, mirroring the example pattern at `torch/profiler/profiler.py:651-712`; non-test consumer: `cargo test --doc` runs the example as part of CI. |
+| REQ-5 | SHIPPED | impl: `pub(crate) struct PendingCudaScope` at `PendingCudaScope in ferrotorch-profiler/src/cuda_timing.rs` is intentionally absent from the `pub use` block at `lib.rs`; non-test consumer: `ferrotorch-profiler/tests/conformance_surface_coverage.rs` enumerates every re-exported symbol — adding or removing a `pub use` line forces a test update, pinning the surface. |

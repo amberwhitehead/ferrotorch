@@ -42,43 +42,43 @@ the `Linear → SiLU → Linear` MLP that follows it inside the UNet.
 
 - [x] AC-1: `timesteps_shape_flip_true` returns `[3, 8]` for input
   `[3]` and at `t=0` the cos-half is all ones, sin-half all zeros
-  (`time_embedding.rs:298..317`).
+  (`time_embedding.rs`).
 - [x] AC-2: `timesteps_rejects_odd_channels` returns Err for
-  `num_channels = 7` (`time_embedding.rs:319..322`).
+  `num_channels = 7` (`time_embedding.rs`).
 - [x] AC-3: `timestep_embedding_shapes` produces `[1, 16]` from
-  `[1, 8]` (`time_embedding.rs:324..330`).
+  `[1, 8]` (`time_embedding.rs`).
 - [x] AC-4: `timestep_embedding_named_parameters` lists all four
   parameter names with the diffusers layout
-  (`time_embedding.rs:332..344`).
+  (`time_embedding.rs`).
 
 ## Architecture
 
-- `Timesteps` (`time_embedding.rs:37..48`) — public-field struct
+- `Timesteps` (`Timesteps in time_embedding.rs`) — public-field struct
   carrying `num_channels`, `flip_sin_to_cos`, `downscale_freq_shift`,
   `max_period`. No parameters.
-- `Timesteps::new` (`time_embedding.rs:57..75`) validates that
+- `Timesteps::new` (`new in time_embedding.rs`) validates that
   `num_channels` is positive and even, then hard-codes
   `max_period = 10000.0`.
-- `Timesteps::forward_t` (`time_embedding.rs:87..152`) operates
+- `Timesteps::forward_t` (`forward_t in time_embedding.rs`) operates
   entirely in `f64` for the per-frequency products, then casts back
   to `T` via `T::from(...)`. The output is allocated as a flat
   `Vec<T>` of size `B * num_channels` and shaped into a CPU tensor
   via `Tensor::from_storage`.
-- `Module<T>` impl (`time_embedding.rs:156..186`) routes `forward`
+- `Module<T>` impl (`forward in time_embedding.rs`) routes `forward`
   through `forward_t`, returns empty parameter lists, and
   `is_training` is always `false` (the encoding is deterministic).
-- `TimestepEmbedding<T: Float>` (`time_embedding.rs:201..209`)
+- `TimestepEmbedding<T: Float>` (`TimestepEmbedding in time_embedding.rs`)
   carries two `Linear<T>` layers + a `SiLU` activation.
-- `TimestepEmbedding::new` (`time_embedding.rs:217..226`) calls
+- `TimestepEmbedding::new` (`new in time_embedding.rs`) calls
   `Linear::<T>::new` twice with bias = true.
-- `Module<T>` impl for `TimestepEmbedding` (`time_embedding.rs:229..291`)
+- `Module<T>` impl for `TimestepEmbedding` (`TimestepEmbedding in time_embedding.rs`)
   composes the forward pass, exposes the two-linear parameter set
   under the diffusers prefixes (`linear_1.*`, `linear_2.*`), and
   routes `load_state_dict` through a per-prefix extract helper.
 
 Non-test production consumers:
 
-- `ferrotorch-diffusion/src/unet.rs:50` imports both
+- `ferrotorch-diffusion/src/unet.rs` imports both
   `TimestepEmbedding` and `Timesteps`. The
   `UNet2DConditionModel::new` constructor instantiates them
   (`unet.rs` near line 1100+) and the `forward_t` path runs them
@@ -97,7 +97,7 @@ the SD-1.5 settings. Edge cases:
 
 ## Verification
 
-Four lib tests in `time_embedding.rs:294..346`:
+Four lib tests in `time_embedding.rs`:
 
 - `timesteps_shape_flip_true` — shape `[3, 8]`, `t=0` boundary check.
 - `timesteps_rejects_odd_channels` — `num_channels = 7` is rejected.
@@ -111,8 +111,8 @@ No parity-sweep ops apply.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `Timesteps::new` at `ferrotorch-diffusion/src/time_embedding.rs:57..75`; non-test consumer: `ferrotorch-diffusion/src/unet.rs:50` imports `Timesteps` and instantiates it inside `UNet2DConditionModel::new` |
-| REQ-2 | SHIPPED | impl: `Timesteps::forward_t` at `ferrotorch-diffusion/src/time_embedding.rs:87..152`; non-test consumer: `ferrotorch-diffusion/src/unet.rs` calls `self.time_proj.forward_t(timesteps)` inside the UNet forward path |
-| REQ-3 | SHIPPED | impl: `TimestepEmbedding::new` at `ferrotorch-diffusion/src/time_embedding.rs:217..226`; non-test consumer: `ferrotorch-diffusion/src/unet.rs:50` constructs a `TimestepEmbedding` field inside `UNet2DConditionModel::new` |
+| REQ-1 | SHIPPED | impl: `Timesteps::new` at `new in ferrotorch-diffusion/src/time_embedding.rs`; non-test consumer: `new in ferrotorch-diffusion/src/unet.rs` imports `Timesteps` and instantiates it inside `UNet2DConditionModel::new` |
+| REQ-2 | SHIPPED | impl: `Timesteps::forward_t` at `forward_t in ferrotorch-diffusion/src/time_embedding.rs`; non-test consumer: `ferrotorch-diffusion/src/unet.rs` calls `self.time_proj.forward_t(timesteps)` inside the UNet forward path |
+| REQ-3 | SHIPPED | impl: `TimestepEmbedding::new` at `new in ferrotorch-diffusion/src/time_embedding.rs`; non-test consumer: `new in ferrotorch-diffusion/src/unet.rs` constructs a `TimestepEmbedding` field inside `UNet2DConditionModel::new` |
 | REQ-4 | SHIPPED | impl: `TimestepEmbedding::named_parameters` at `ferrotorch-diffusion/src/time_embedding.rs:248..257`; non-test consumer: `ferrotorch-diffusion/src/safetensors_loader.rs` (via `UNet2DConditionModel::load_state_dict`) routes HF checkpoint keys through this layout |
 | REQ-5 | SHIPPED | impl: `Module<T> for Timesteps` empty-parameter and no-op `train`/`eval` at `ferrotorch-diffusion/src/time_embedding.rs:156..186`; non-test consumer: `ferrotorch-diffusion/src/unet.rs` includes `Timesteps` in its module graph and `parameters()` enumeration without any parameter contribution |

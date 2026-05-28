@@ -53,19 +53,19 @@ augmentation. Mirrors `torchvision.transforms.v2.GaussianNoise` at
 - [x] AC-1: `GaussianNoise::new(0.0, 0.1)` constructs successfully.
 - [x] AC-2: `GaussianNoise::new(0.0, -1.0)` returns `Err(InvalidArgument)`
   (verified by `test_gaussian_noise_negative_std_errors` at
-  `gaussian_noise.rs:157`).
+  `test_gaussian_noise_negative_std_errors in gaussian_noise.rs`).
 - [x] AC-3: Output shape equals input shape (verified by
-  `test_gaussian_noise_output_shape_preserved` at `gaussian_noise.rs:91`).
+  `test_gaussian_noise_output_shape_preserved in gaussian_noise.rs`).
 - [x] AC-4: `std == 0` produces output `= input + mean` exactly
   (verified by `test_gaussian_noise_zero_std_is_constant_shift` at
-  `gaussian_noise.rs:100`).
+  `test_gaussian_noise_zero_std_is_constant_shift in gaussian_noise.rs`).
 - [x] AC-5: `std == 0, mean == 0` is identity (verified at
-  `gaussian_noise.rs:115`).
+  `gaussian_noise.rs`).
 - [x] AC-6: Over 10 000 samples, empirical mean ≈ 0 and std ≈ 0.5
   for `N(0, 0.25)` (verified by
   `test_gaussian_noise_has_approximate_mean_and_std` at
-  `gaussian_noise.rs:128`).
-- [x] AC-7: Non-3-D input returns `Err` (verified at `gaussian_noise.rs:149`).
+  `test_gaussian_noise_has_approximate_mean_and_std in gaussian_noise.rs`).
+- [x] AC-7: Non-3-D input returns `Err` (verified at `Err in gaussian_noise.rs`).
 - [x] AC-8: `clip` parameter (verified by
   `test_gaussian_noise_clip_bounds_output_to_unit_interval` and
   `test_gaussian_noise_clip_off_by_default_can_exceed_range` in
@@ -83,7 +83,7 @@ pub struct GaussianNoise<T: Float> {
 }
 ```
 
-at `gaussian_noise.rs:17-21`. Constructor at `gaussian_noise.rs:31-43`
+at `gaussian_noise.rs`. Constructor at `gaussian_noise.rs`
 returns `Err` if `std < 0`.
 
 ### Box-Muller sampler (REQ-4)
@@ -98,13 +98,13 @@ fn standard_normal_sample() -> f64 {
 }
 ```
 
-at `gaussian_noise.rs:46-53`. The `1e-12` clamp protects against the
+at `gaussian_noise.rs`. The `1e-12` clamp protects against the
 zero-probability `random_f64() == 0` case which would otherwise return
 NaN through `ln(0)`.
 
 ### Transform impl (REQ-3)
 
-`fn apply` at `gaussian_noise.rs:55-83`:
+`fn apply` at `apply in gaussian_noise.rs`:
 
 - 3-D shape check.
 - Degenerate path (`std == 0`): `for &v in data { out.push(v + mean); }`
@@ -150,12 +150,12 @@ unbiased estimators for the produced noise. Edge cases:
 
 Tests in `mod tests in gaussian_noise.rs` (6 tests):
 
-- `test_gaussian_noise_output_shape_preserved` at `gaussian_noise.rs:91`
-- `test_gaussian_noise_zero_std_is_constant_shift` at `gaussian_noise.rs:100`
-- `test_gaussian_noise_std_zero_mean_zero_is_identity` at `gaussian_noise.rs:115`
-- `test_gaussian_noise_has_approximate_mean_and_std` at `gaussian_noise.rs:128`
-- `test_gaussian_noise_rejects_non_3d` at `gaussian_noise.rs:149`
-- `test_gaussian_noise_negative_std_errors` at `gaussian_noise.rs:157`
+- `test_gaussian_noise_output_shape_preserved in gaussian_noise.rs`
+- `test_gaussian_noise_zero_std_is_constant_shift in gaussian_noise.rs`
+- `test_gaussian_noise_std_zero_mean_zero_is_identity in gaussian_noise.rs`
+- `test_gaussian_noise_has_approximate_mean_and_std in gaussian_noise.rs`
+- `test_gaussian_noise_rejects_non_3d in gaussian_noise.rs`
+- `test_gaussian_noise_negative_std_errors in gaussian_noise.rs`
 
 Smoke:
 
@@ -169,8 +169,8 @@ Expected: `6 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct GaussianNoise<T: Float>` with `mean, std, _marker` at `ferrotorch-vision/src/transforms/gaussian_noise.rs:17-21`, mirroring `torchvision/transforms/v2/_misc.py:217` `class GaussianNoise(Transform)`; non-test consumer: `pub use gaussian_noise::GaussianNoise;` at `ferrotorch-vision/src/transforms/mod.rs:23` exposes it through the public transforms namespace. |
-| REQ-2 | SHIPPED | impl: `pub fn GaussianNoise::new(mean: f64, std: f64) -> FerrotorchResult<Self>` with `std >= 0` validation at `gaussian_noise.rs:31-43`; non-test consumer: reachable via `mod.rs:23` re-export. |
-| REQ-3 | SHIPPED | impl: `impl<T: Float> Transform<T> for GaussianNoise<T>` with shape check + degenerate-std shortcut + per-element noise loop at `gaussian_noise.rs:55-83`; non-test consumer: any `Box<dyn Transform<T>>` slot — typically inserted into a robustness-training `Compose` pipeline. |
-| REQ-4 | SHIPPED | impl: `fn standard_normal_sample() -> f64` Box-Muller helper at `gaussian_noise.rs:46-53`; non-test consumer: `fn apply` in this same file calls `self.std * standard_normal_sample()` at `gaussian_noise.rs:77`. |
-| REQ-5 | SHIPPED | impl: `GaussianNoise::with_clip(bool)` builder + per-element `[0, 1]` clamp in `apply` at `ferrotorch-vision/src/transforms/gaussian_noise.rs:42-66,80-120`; non-test consumer: `pub use gaussian_noise::GaussianNoise;` at `mod.rs:31` — robustness pipelines call `GaussianNoise::new(0.0, 0.1)?.with_clip(true)`. |
+| REQ-1 | SHIPPED | impl: `pub struct GaussianNoise<T: Float>` with `mean, std, _marker` at `GaussianNoise in ferrotorch-vision/src/transforms/gaussian_noise.rs`, mirroring `torchvision/transforms/v2/_misc.py:217` `class GaussianNoise(Transform)`; non-test consumer: `pub use gaussian_noise::GaussianNoise;` at `ferrotorch-vision/src/transforms/mod.rs` exposes it through the public transforms namespace. |
+| REQ-2 | SHIPPED | impl: `pub fn GaussianNoise::new(mean: f64, std: f64) -> FerrotorchResult<Self>` with `std >= 0` validation at `std in gaussian_noise.rs`; non-test consumer: reachable via `mod.rs` re-export. |
+| REQ-3 | SHIPPED | impl: `impl<T: Float> Transform<T> for GaussianNoise<T>` with shape check + degenerate-std shortcut + per-element noise loop at `gaussian_noise.rs`; non-test consumer: any `Box<dyn Transform<T>>` slot — typically inserted into a robustness-training `Compose` pipeline. |
+| REQ-4 | SHIPPED | impl: `fn standard_normal_sample() -> f64` Box-Muller helper at `standard_normal_sample in gaussian_noise.rs`; non-test consumer: `fn apply` in this same file calls `self.std * standard_normal_sample()` at `apply in gaussian_noise.rs`. |
+| REQ-5 | SHIPPED | impl: `GaussianNoise::with_clip(bool)` builder + per-element `[0, 1]` clamp in `apply in ferrotorch-vision/src/transforms/gaussian_noise.rs,80-120`; non-test consumer: `pub use gaussian_noise::GaussianNoise;` at `mod.rs` — robustness pipelines call `GaussianNoise::new(0.0, 0.1)?.with_clip(true)`. |

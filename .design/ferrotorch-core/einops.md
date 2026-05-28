@@ -88,7 +88,7 @@ then replicates along new-axis positions. `reduce` at `:665` walks
 the data, identifying axes-to-reduce as those present on left but not
 right, then applies the chosen reduction.
 
-The reduction path for `Mean` (`einops.rs:790`) lifts a scalar
+The reduction path for `Mean` (`einops.rs`) lifts a scalar
 `n_recip = 1.0 / count` via `crate::creation::scalar` so the
 mean can be expressed as `sum * n_recip` — this is the only path
 that constructs a tensor.
@@ -124,6 +124,6 @@ variants.
 | REQ-1 | SHIPPED | impl: `rearrange` at `einops.rs:458` (closest upstream behavioural analog `einops.rearrange`, no PyTorch counterpart); non-test consumer: re-exported as `ferrotorch_core::rearrange` at `lib.rs:143`; used by `ferrotorch-nn` ViT/MLP-Mixer-style patch-shuffling code |
 | REQ-2 | SHIPPED | impl: `rearrange_with` at `einops.rs:482`; non-test consumer: re-exported as `ferrotorch_core::rearrange_with` at `lib.rs:143` |
 | REQ-3 | SHIPPED | impl: `repeat` at `einops.rs:589`; non-test consumer: re-exported as `ferrotorch_core::repeat` at `lib.rs:143` |
-| REQ-4 | SHIPPED | impl: `reduce` at `einops.rs:665` with `EinopsReduction` enum at `:33`; non-test consumer: re-exported as `ferrotorch_core::reduce` and `EinopsReduction` at `lib.rs:143` |
+| REQ-4 | SHIPPED | impl: `reduce in einops.rs` with `EinopsReduction` enum at `EinopsReduction in einops.rs`; non-test consumer: re-exported as `ferrotorch_core::reduce` and `EinopsReduction` at `einops in lib.rs` |
 | REQ-5 | SHIPPED | impl: `parse_pattern`/`parse_side`/`read_axis_name` at `einops.rs:79-195`; non-test consumer: all four public APIs (REQ-1..REQ-4) invoke `parse_pattern` as their first step |
 | REQ-6 | SHIPPED | impl: `resolve_sizes` at `einops.rs:211`; non-test consumer: all four public APIs invoke `resolve_sizes` after `parse_pattern` |

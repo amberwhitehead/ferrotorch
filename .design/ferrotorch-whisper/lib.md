@@ -69,7 +69,7 @@ explaining why the lint is wrong for the kernel-code substrate.
 starts with `Whisper` to match HF naming — the lint would force
 renames that lose the upstream-1:1 mapping.
 
-`ferrotorch-whisper/src/lib.rs:98-103` declares the six modules.
+`ferrotorch-whisper/src/lib.rs` declares the six modules.
 
 `ferrotorch-whisper/src/lib.rs:105-110` re-exports the public types.
 

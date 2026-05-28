@@ -103,11 +103,11 @@ silently desynced (audit #1110 finding-A).
 - `pub use interpreter::{interpret, interpret_multi,
   interpret_multi_with_captures}` at
   `ferrotorch-jit/src/lib.rs:109`.
-- `ferrotorch-jit/src/module.rs:16, 125, 198, 363, 397` —
+- `ferrotorch-jit/src/module.rs, 125, 198, 363, 397` —
   `TracedModule::forward` / `forward_multi` and
   `AotCompiledModule::forward_with_ctx` / `backward` all dispatch
   through `interpret` and `interpret_multi_with_captures`.
-- `ferrotorch-jit/src/symbolic.rs:63, 315` —
+- `ferrotorch-jit/src/symbolic.rs, 315` —
   `SymbolicTracedModule::forward_symbolic` calls
   `interpret(self.inner.graph(), inputs)` after the shape guard
   fires.
@@ -115,7 +115,7 @@ silently desynced (audit #1110 finding-A).
   threads tensor outputs through `interpret` (when the segment is
   `GraphSegment::Compiled`) or through the eager closure (when the
   segment is `GraphSegment::Eager`).
-- `ferrotorch-jit/src/export.rs:162` — `ExportedProgram::run`
+- `run in ferrotorch-jit/src/export.rs` — `ExportedProgram::run`
   delegates to `crate::interpret(&self.graph, inputs)`.
 
 ## Parity contract
@@ -154,7 +154,7 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub fn interpret<T: Float>` in `interpreter.rs`; non-test consumer: `ferrotorch-jit/src/module.rs:125` (`TracedModule::forward_multi`), `module.rs:198` (`TracedModule::forward`), `module.rs:397` (`AotCompiledModule::backward`), `symbolic.rs:315`, `export.rs:162`. |
+| REQ-1 | SHIPPED | impl: `pub fn interpret<T: Float>` in `interpreter.rs`; non-test consumer: `interpret in ferrotorch-jit/src/module.rs` (`TracedModule::forward_multi`), `module in module.rs` (`TracedModule::forward`), `module in module.rs` (`AotCompiledModule::backward`), `symbolic in symbolic.rs`, `export in export.rs`. |
 | REQ-2 | SHIPPED | impl: `pub fn interpret_multi<T: Float>` in `interpreter.rs`; non-test consumer: re-export at `lib.rs:109`. |
 | REQ-3 | SHIPPED | impl: `pub fn interpret_multi_with_captures<T: Float>` in `interpreter.rs`; non-test consumer: `ferrotorch-jit/src/module.rs:363` `AotCompiledModule::forward_with_ctx` (the fix for audit #1110 finding-A). |
 | REQ-4 | SHIPPED | impl: the `match node.op { ... }` dispatch arm-set in `interpreter.rs` covers every `IrOpKind` variant except the higher-order `Cond`/`Scan` which surface `JitError::UnsupportedOp`; non-test consumer: every interpreter call site listed above. |

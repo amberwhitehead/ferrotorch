@@ -73,25 +73,25 @@ at `torch/csrc/autograd/forward_grad.h`.
 ## Acceptance Criteria
 
 - [x] AC-1: `DualTensor::new` rejects shape mismatch —
-  `test_dual_tensor_shape_mismatch` at `forward_ad.rs:496-501`.
+  `test_dual_tensor_shape_mismatch in forward_ad.rs`.
 - [x] AC-2: `DualTensor::constant` returns zero tangent —
-  `test_dual_tensor_constant` at `forward_ad.rs:503-509`.
+  `test_dual_tensor_constant in forward_ad.rs`.
 - [x] AC-3: `dual_add` propagates tangents element-wise —
   `test_dual_add` at `forward_ad.rs:515-529`.
 - [x] AC-4: `dual_sub` — `test_dual_sub` at `:531-545`.
-- [x] AC-5: `dual_mul` — `test_dual_mul` at `:547-557`.
-- [x] AC-6: `dual_div` — `test_dual_div` at `:559-569`.
+- [x] AC-5: `dual_mul` — `test_dual_mul in forward_ad.rs`.
+- [x] AC-6: `dual_div` — `test_dual_div in forward_ad.rs`.
 - [x] AC-7: `dual_neg` — `test_dual_neg` at `:571-583`.
 - [x] AC-8: `dual_matmul` — `test_dual_matmul` at `:589-616`.
 - [x] AC-9: `dual_relu` on positive inputs (`d(relu) = dx`) —
   `test_dual_relu_positive` at `:622-635`; and on negative
-  (`d(relu) = 0`) — `test_dual_relu_negative` at `:637+`.
+  (`d(relu) = 0`) — `test_dual_relu_negative in forward_ad.rs`.
 
 ## Architecture
 
 ### REQ-1 / REQ-2 / REQ-3 — `DualTensor` constructors
 
-`pub struct DualTensor<T: Float>` at `forward_ad.rs:37-42` with
+`pub struct DualTensor<T: Float>` at `DualTensor in forward_ad.rs` with
 `primal` and `tangent` public fields and `Debug, Clone` derived.
 `DualTensor::new` at `:48-59` validates shape equality. `DualTensor::constant`
 at `:62-70` builds a zero-tangent tensor (a "constant" because
@@ -107,7 +107,7 @@ then computes the tangent by composing the derivative formula:
 
 - `dual_add` (`:88-93`): `primal = add(a.primal, b.primal); tangent
   = add(a.tangent, b.tangent)`.
-- `dual_sub` (`:96-100`): symmetric.
+- `dual_sub` (`dual_sub in forward_ad.rs`): symmetric.
 - `dual_mul` (`:103-110`): primal = `mul(a.primal, b.primal)`;
   tangent = `add(mul(a.primal, b.tangent), mul(a.tangent, b.primal))`.
 - `dual_div` (`:113-122`): primal = `div(a.primal, b.primal)`;
@@ -118,7 +118,7 @@ then computes the tangent by composing the derivative formula:
 
 ### REQ-5 — `dual_matmul`
 
-`pub fn dual_matmul<T: Float>` at `forward_ad.rs:138-148`. Uses
+`pub fn dual_matmul<T: Float>` at `dual_matmul in forward_ad.rs`. Uses
 `crate::grad_fns::linalg::matmul_differentiable` for both primal
 (`a.primal @ b.primal`) and the two tangent products (`a.tangent @
 b.primal` and `a.primal @ b.tangent`), then `add` for the sum.
@@ -205,12 +205,12 @@ All tests pass in the workspace gauntlet.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct DualTensor<T: Float>` at `ferrotorch-core/src/autograd/forward_ad.rs:37-42`; mirrors PyTorch's `(primal, tangent)` pair from `torch/autograd/forward_ad.py:77-130 make_dual`; non-test production consumer: re-exported at `ferrotorch-core/src/autograd/mod.rs:28-31 pub use forward_ad::{DualTensor, ..., jacfwd, jvp_exact}` and at `lib.rs:131-133 DualTensor`. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
+| REQ-1 | SHIPPED | impl: `pub struct DualTensor<T: Float>` at `DualTensor in ferrotorch-core/src/autograd/forward_ad.rs`; mirrors PyTorch's `(primal, tangent)` pair from `torch/autograd/forward_ad.py:77-130 make_dual`; non-test production consumer: re-exported at `ferrotorch-core/src/autograd/mod.rs pub use forward_ad::{DualTensor, ..., jacfwd, jvp_exact}` and at `lib.rs DualTensor`. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
 | REQ-2 | SHIPPED | impl: `pub fn DualTensor::new` at `forward_ad.rs:48-59` with shape-equality validation; non-test production consumer: invoked inside REQ-8 at `:370`; also part of the public surface (`re-exported via REQ-1's pub use`). |
-| REQ-3 | SHIPPED | impl: `pub fn DualTensor::constant` at `forward_ad.rs:62-70`; non-test production consumer: part of the public DualTensor API; tested by `test_dual_tensor_constant` at `:503-509`. Existing pub API — boundary-API grandfathering. |
-| REQ-4 | SHIPPED | impl: `dual_add` at `forward_ad.rs:88-93`, `dual_sub` at `:96-100`, `dual_mul` at `:103-110`, `dual_div` at `:113-122`, `dual_neg` at `:125-129`; non-test production consumer: re-exported at `mod.rs:28-31 pub use forward_ad::{... dual_add, ..., dual_div, ..., dual_mul, dual_neg, ..., dual_sub, ...}` and exposed via `lib.rs:131-133`. Existing pub API — boundary-API grandfathering. |
-| REQ-5 | SHIPPED | impl: `pub fn dual_matmul<T: Float>` at `forward_ad.rs:138-148`; non-test production consumer: re-exported through `mod.rs:28-31 dual_matmul` and `lib.rs:131-133`. Existing pub API — boundary-API grandfathering. |
-| REQ-6 | SHIPPED | impl: `pub fn dual_relu` at `forward_ad.rs:155-176`, `pub fn dual_sigmoid` at `:179-199`, `pub fn dual_tanh` at `:202-222`; non-test production consumer: re-exported through `mod.rs:28-31` and `lib.rs:131-133`. Existing pub API — boundary-API grandfathering. |
-| REQ-7 | SHIPPED | impl: `pub fn dual_exp` at `forward_ad.rs:229-248`, `pub fn dual_log` at `:251-270`, `pub fn dual_sin` at `:273-292`, `pub fn dual_cos` at `:295-314`; non-test production consumer: re-exported through `mod.rs:28-31 dual_cos, dual_exp, dual_log, dual_sin` and `lib.rs:131-133`. Existing pub API — boundary-API grandfathering. |
-| REQ-8 | SHIPPED | impl: `pub fn jvp_exact<T: Float, F>` at `forward_ad.rs:351-376`; mirrors `torch.func.jvp(f, primals, tangents)` per `torch/func/__init__.py`; non-test production consumer: invoked inside REQ-9 (`jacfwd`) at `:431` — the production consumer is `jacfwd`'s loop body. Also re-exported through `mod.rs:31 jvp_exact` and `lib.rs:133`. |
-| REQ-9 | SHIPPED | impl: `pub fn jacfwd<T: Float, F>` at `forward_ad.rs:407-449`; mirrors `torch.func.jacfwd`; non-test production consumer: re-exported through `mod.rs:31 jacfwd` and `lib.rs:131-133`. Existing pub API — boundary-API grandfathering. |
+| REQ-3 | SHIPPED | impl: `pub fn DualTensor::constant` at `DualTensor in forward_ad.rs`; non-test production consumer: part of the public DualTensor API; tested by `test_dual_tensor_constant in forward_ad.rs`. Existing pub API — boundary-API grandfathering. |
+| REQ-4 | SHIPPED | impl: `dual_add in forward_ad.rs`, `dual_sub in forward_ad.rs`, `dual_mul in forward_ad.rs`, `dual_div in forward_ad.rs`, `dual_neg in forward_ad.rs`; non-test production consumer: re-exported at `mod.rs pub use forward_ad::{... dual_add, ..., dual_div, ..., dual_mul, dual_neg, ..., dual_sub, ...}` and exposed via `lib.rs`. Existing pub API — boundary-API grandfathering. |
+| REQ-5 | SHIPPED | impl: `pub fn dual_matmul<T: Float>` at `dual_matmul in forward_ad.rs`; non-test production consumer: re-exported through `mod.rs dual_matmul` and `lib.rs`. Existing pub API — boundary-API grandfathering. |
+| REQ-6 | SHIPPED | impl: `pub fn dual_relu` at `dual_relu in forward_ad.rs`, `pub fn dual_sigmoid` at `dual_sigmoid in forward_ad.rs`, `pub fn dual_tanh` at `dual_tanh in forward_ad.rs`; non-test production consumer: re-exported through `mod.rs` and `lib.rs`. Existing pub API — boundary-API grandfathering. |
+| REQ-7 | SHIPPED | impl: `pub fn dual_exp` at `dual_exp in forward_ad.rs`, `pub fn dual_log` at `dual_log in forward_ad.rs`, `pub fn dual_sin` at `dual_sin in forward_ad.rs`, `pub fn dual_cos` at `dual_cos in forward_ad.rs`; non-test production consumer: re-exported through `mod.rs dual_cos, dual_exp, dual_log, dual_sin` and `lib.rs`. Existing pub API — boundary-API grandfathering. |
+| REQ-8 | SHIPPED | impl: `pub fn jvp_exact<T: Float, F>` at `jvp_exact in forward_ad.rs`; mirrors `torch.func.jvp(f, primals, tangents)` per `torch/func/__init__.py`; non-test production consumer: invoked inside REQ-9 (`jacfwd`) at `jacfwd in forward_ad.rs` — the production consumer is `jacfwd`'s loop body. Also re-exported through `mod.rs jvp_exact` and `lib.rs`. |
+| REQ-9 | SHIPPED | impl: `pub fn jacfwd<T: Float, F>` at `jacfwd in forward_ad.rs`; mirrors `torch.func.jacfwd`; non-test production consumer: re-exported through `mod.rs jacfwd` and `lib.rs`. Existing pub API — boundary-API grandfathering. |

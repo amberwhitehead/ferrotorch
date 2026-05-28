@@ -249,13 +249,13 @@ Expected: all tests pass.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub enum FusedOp` in `fusion.rs`; non-test consumer: re-export at `ferrotorch-jit/src/lib.rs:103-107` + `ferrotorch-jit/src/fusion_gpu.rs:38` `use crate::fusion::FusedChain;` (FusedChain is `Vec<FusedOp>`, so FusedOp is consumed every dispatch). |
-| REQ-2 | SHIPPED | impl: `pub struct FusedChain` in `fusion.rs`; non-test consumer: re-export at `lib.rs:103-107` + `fusion_gpu.rs:38` (every `apply_fused_gpu` call takes `&FusedChain`). |
+| REQ-2 | SHIPPED | impl: `pub struct FusedChain` in `fusion.rs`; non-test consumer: re-export at `lib.rs` + `apply_fused_gpu in fusion_gpu.rs` (every `apply_fused_gpu` call takes `&FusedChain`). |
 | REQ-3 | SHIPPED | impl: `pub fn execute_cpu` on `impl FusedChain` in `fusion.rs`; non-test consumer: `fusion.rs::apply_fused` at the same file calls `chain.execute_cpu(data)?` in the CPU dispatch arm. |
-| REQ-4 | SHIPPED | impl: `pub fn generate_ptx` + `pub fn generate_ptx_named` on `impl FusedChain` in `fusion.rs`; non-test consumer: `fusion_gpu.rs:117` `let ptx = chain.generate_ptx_named(FUSED_F32_KERNEL_NAME)?;` in the f32 GPU dispatch path. |
-| REQ-5 | SHIPPED | impl: `pub fn generate_cuda_source_f64_named` on `impl FusedChain` in `fusion.rs`; non-test consumer: `fusion_gpu.rs:196` `let cuda_source = chain.generate_cuda_source_f64_named(FUSED_F64_KERNEL_NAME)?;` in the f64 GPU dispatch path. |
+| REQ-4 | SHIPPED | impl: `pub fn generate_ptx` + `pub fn generate_ptx_named` on `impl FusedChain` in `fusion.rs`; non-test consumer: `generate_ptx_named in fusion_gpu.rs` `let ptx = chain.generate_ptx_named(FUSED_F32_KERNEL_NAME)?;` in the f32 GPU dispatch path. |
+| REQ-5 | SHIPPED | impl: `pub fn generate_cuda_source_f64_named` on `impl FusedChain` in `fusion.rs`; non-test consumer: `fusion_gpu.rs` `let cuda_source = chain.generate_cuda_source_f64_named(FUSED_F64_KERNEL_NAME)?;` in the f64 GPU dispatch path. |
 | REQ-6 | SHIPPED | impl: `pub fn generate_c` on `impl FusedChain` in `fusion.rs`; non-test consumer: re-export at `lib.rs:103-107` makes it part of the grandfathered public API surface (boundary public API per S5 of goal.md). |
-| REQ-7 | SHIPPED | impl: `pub fn apply_fused` in `fusion.rs`; non-test consumer: re-export at `lib.rs:103-107` — this is the canonical tensor-level entry point for the fusion subsystem. |
+| REQ-7 | SHIPPED | impl: `pub fn apply_fused` in `fusion.rs`; non-test consumer: re-export at `lib.rs` — this is the canonical tensor-level entry point for the fusion subsystem. |
 | REQ-8 | SHIPPED | impl: `pub fn with_fusion` + `pub fn is_fusion_enabled` + `thread_local! { static FUSION_ENABLED }` in `fusion.rs`; non-test consumer: re-export at `lib.rs:103-107`. |
-| REQ-9 | SHIPPED | impl: `pub enum ReductionKind` + `pub fn generate_reduction_c` + `pub fn generate_reduction_ptx` in `fusion.rs`; non-test consumer: re-export at `lib.rs:103-107`. |
+| REQ-9 | SHIPPED | impl: `pub enum ReductionKind` + `pub fn generate_reduction_c` + `pub fn generate_reduction_ptx` in `fusion.rs`; non-test consumer: re-export at `lib.rs`. |
 | REQ-10 | SHIPPED | impl: `fn validate_identifier` in `fusion.rs`; non-test consumer: invoked by every kernel-name-taking public emitter in this file (`generate_ptx_named`, `generate_cuda_source_f64_named`, `generate_c`, `generate_reduction_c`, `generate_reduction_ptx`), all of which flow to the public `lib.rs:103-107` re-export or to `fusion_gpu.rs`. |
-| REQ-11 | SHIPPED | impl: `pub fn estimate_numel_for_inputs` + `pub fn estimate_matmul_dims` in `fusion.rs`; non-test consumer: re-export at `lib.rs:103-107`. |
+| REQ-11 | SHIPPED | impl: `pub fn estimate_numel_for_inputs` + `pub fn estimate_matmul_dims` in `fusion.rs`; non-test consumer: re-export at `lib.rs`. |

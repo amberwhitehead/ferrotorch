@@ -69,7 +69,7 @@ and `torch.utils.checkpoint.checkpoint_sequential`
 
 ### `checkpoint` re-export (REQ-1)
 
-At `ferrotorch-train/src/checkpoint.rs:61` `pub use
+At `ferrotorch-train/src/checkpoint.rs` `pub use
 ferrotorch_core::autograd::checkpoint::checkpoint;`. The function is
 defined in `ferrotorch-core` because the autograd graph it builds
 requires `Tensor<T>` + autograd internals that live there. The
@@ -182,7 +182,7 @@ Expected: > 7 passed, 0 failed.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub use ferrotorch_core::autograd::checkpoint::checkpoint;` at `ferrotorch-train/src/checkpoint.rs:61`; non-test consumer: same-file `checkpoint_sequential` at `ferrotorch-train/src/checkpoint.rs:140` invokes `checkpoint(move |x| { ... }, &current)` — production consumer in the same module. |
+| REQ-1 | SHIPPED | impl: `pub use ferrotorch_core::autograd::checkpoint::checkpoint;` at `checkpoint in ferrotorch-train/src/checkpoint.rs`; non-test consumer: same-file `checkpoint_sequential in ferrotorch-train/src/checkpoint.rs` invokes `checkpoint(move |x| { ... }, &current)` — production consumer in the same module. |
 | REQ-2 | NOT-STARTED | open prereq blocker #1502 — `pub fn checkpoint_sequential` at `ferrotorch-train/src/checkpoint.rs:102-153` is shipped on the public surface but no in-tree caller invokes it outside the unit-test module. A large-model example (ResNet block or Transformer layer) is the open consumer-wiring work. |
 | REQ-3 | NOT-STARTED | open prereq blocker #1502 — no-grad shortcut at `ferrotorch-train/src/checkpoint.rs:126-134` is shipped but only exercised by `test_checkpoint_sequential_no_grad_skips_checkpoint`. No production caller triggers the no-grad input branch end-to-end. |
 | REQ-4 | NOT-STARTED | open prereq blocker #1502 — `checkpoint(move |x| { ... }, &current)` at `ferrotorch-train/src/checkpoint.rs:140-149` is the production-side wiring for the segment wrap, but reachable only through `checkpoint_sequential` which has no production caller today. |

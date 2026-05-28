@@ -117,7 +117,7 @@ final `named_parameters` walks are byte-identical to torchvision's.
 
 - `pub use densenet::{DenseBlock, DenseLayer, DenseNet, TransitionLayer, densenet121}` at
   `ferrotorch-vision/src/models/mod.rs`.
-- `default_registry()` in `registry.rs:248` binds `"densenet121"` to
+- `default_registry()` in `registry.rs` binds `"densenet121"` to
   `super::densenet::densenet121::<f32>(num_classes)` via
   `maybe_load_pretrained`.
 
@@ -166,9 +166,9 @@ Expected: all tests pass; no parity-sweep ops.
 | REQ-1 | SHIPPED | impl: `pub struct DenseLayer<T: Float>` + `Module<T>` impl in `densenet.rs` mirrors torchvision `_DenseLayer` at `densenet.py:31`; non-test consumer: `pub use DenseLayer` at `ferrotorch-vision/src/models/mod.rs` + `DenseBlock::new` constructs them in `densenet.rs`. |
 | REQ-2 | SHIPPED | impl: `pub struct DenseBlock<T: Float>` + `Module<T>` impl in `densenet.rs`; non-test consumer: `DenseNet::new` constructs four DenseBlocks in `densenet.rs` (`denseblock1..denseblock4`). |
 | REQ-3 | SHIPPED | impl: `pub struct TransitionLayer<T: Float>` + `Module<T>` impl in `densenet.rs` mirrors torchvision `_Transition`; non-test consumer: `DenseNet::new` constructs three transitions in `densenet.rs`. |
-| REQ-4 | SHIPPED | impl: `pub struct DenseNet<T: Float>` + `DenseNet::new` in `densenet.rs`; non-test consumer: `default_registry()` constructs `densenet121` via `maybe_load_pretrained` at `registry.rs:248`. |
+| REQ-4 | SHIPPED | impl: `pub struct DenseNet<T: Float>` + `DenseNet::new` in `densenet.rs`; non-test consumer: `default_registry()` constructs `densenet121` via `maybe_load_pretrained` at `registry.rs`. |
 | REQ-5 | SHIPPED | impl: `Module::forward` for `DenseNet<T>` in `densenet.rs` mirrors torchvision `DenseNet.forward`; non-test consumer: `Module::forward` is a trait method called by `Box<dyn Module<T>>` returned from `registry.rs::get_model`. |
-| REQ-6 | SHIPPED | impl: `Module::named_parameters` for `DenseNet<T>` in `densenet.rs` (prefixes with `features.`); non-test consumer: `load_state_dict(&state_dict, false)` at `registry.rs:53` walks the result. |
-| REQ-7 | SHIPPED | impl: `children` / `named_children` overrides on `DenseLayer`, `DenseBlock`, `TransitionLayer`, `DenseNet` in `densenet.rs`; non-test consumer: `apply_bn_buffers_from_state_dict` at `registry.rs:62` walks `named_descendants_dyn()` to apply BN running stats. |
+| REQ-6 | SHIPPED | impl: `Module::named_parameters` for `DenseNet<T>` in `densenet.rs` (prefixes with `features.`); non-test consumer: `load_state_dict(&state_dict, false)` at `named_parameters in registry.rs` walks the result. |
+| REQ-7 | SHIPPED | impl: `children` / `named_children` overrides on `DenseLayer`, `DenseBlock`, `TransitionLayer`, `DenseNet` in `densenet.rs`; non-test consumer: `apply_bn_buffers_from_state_dict` at `registry.rs` walks `named_descendants_dyn()` to apply BN running stats. |
 | REQ-8 | SHIPPED | impl: `impl IntermediateFeatures<T> for DenseNet<T>` in `densenet.rs`; non-test consumer: `pub use feature_extractor::IntermediateFeatures` exposes the trait at `mod.rs`; `feature_extractor.rs` is the production composition site. |
-| REQ-9 | SHIPPED | impl: `pub fn densenet121` in `densenet.rs`; non-test consumer: `default_registry()` invokes it at `registry.rs:251`. |
+| REQ-9 | SHIPPED | impl: `pub fn densenet121` in `densenet.rs`; non-test consumer: `default_registry()` invokes it at `registry.rs`. |

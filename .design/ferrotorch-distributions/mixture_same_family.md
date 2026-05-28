@@ -118,40 +118,40 @@ pub struct MixtureSameFamily<T: Float, D: Distribution<T>> {
 }
 ```
 
-Defined at `mixture_same_family.rs:39-45`. Generic over the
+Defined at `mixture_same_family.rs`. Generic over the
 component type so the compiler can monomorphise; users who need
 a trait-object wrapper can box explicitly.
 
-Constructor at `mixture_same_family.rs:54-68` validates that
+Constructor at `mixture_same_family.rs` validates that
 `mixing.num_categories() > 0`. The `_phantom: PhantomData<T>`
 satisfies the `D: Distribution<T>` bound without storing `T`
 directly.
 
 ### The Distribution impl (REQ-4, REQ-5, REQ-6, REQ-7, REQ-8)
 
-`sample` (`mixture_same_family.rs:87-141`) executes the two-step
+`sample` (`sample in mixture_same_family.rs`) executes the two-step
 ancestor sampling — get component indices, draw all-K samples per
 output, gather per-element. The convention is that
 `components.sample(shape ++ [K])` produces a tensor with the
 component axis as the last dim.
 
-`log_prob` (`mixture_same_family.rs:152-219`) tiles the input
+`log_prob` (`log_prob in mixture_same_family.rs`) tiles the input
 value `K` times along a new last axis, calls
 `components.log_prob` once (yielding `[..., K]` log-probs), then
 performs manual log-sum-exp by computing the per-row max and the
 sum-of-exps relative to the max. This avoids overflow.
 
-`rsample` (`mixture_same_family.rs:143-150`) returns
+`rsample` (`rsample in mixture_same_family.rs`) returns
 `InvalidArgument` with a pointer to `RelaxedOneHotCategorical`.
 Same contract as upstream.
 
-`entropy` (`mixture_same_family.rs:221-227`) returns
+`entropy` (`entropy in mixture_same_family.rs`) returns
 `InvalidArgument` since closed-form entropy is intractable.
 
 ### Non-test production consumers
 
 - `pub use mixture_same_family::MixtureSameFamily` at
-  `lib.rs:111` — grandfathered public API. Downstream code (GMM
+  `lib.rs` — grandfathered public API. Downstream code (GMM
   fitting, mixture-density-network outputs) constructs
   `MixtureSameFamily::new(Categorical::new(...)?, Normal::new(...)?)?`.
 - `Categorical<T>` and the generic `D: Distribution<T>` are both
@@ -197,14 +197,14 @@ Expected: `5 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct MixtureSameFamily<T: Float, D: Distribution<T>>` at `mixture_same_family.rs:39-45`, mirroring `torch/distributions/mixture_same_family.py:13-109`; non-test consumer: `pub use mixture_same_family::MixtureSameFamily` at `lib.rs:111`. |
-| REQ-2 | SHIPPED | impl: the constructor at `mixture_same_family.rs:54-68` rejecting zero-K mixing, mirroring upstream's `Categorical`-instance check at `mixture_same_family.py:67-72`; non-test consumer: invoked via the re-export's `::new`. |
-| REQ-3 | SHIPPED | impl: `mixing()`/`components()`/`num_components()` accessors at `mixture_same_family.rs:71-83`, mirroring `mixture_same_family.py:133-140`; non-test consumer: re-export at `lib.rs:111`. |
-| REQ-4 | SHIPPED | impl: `impl<T: Float, D: Distribution<T>> Distribution<T> for MixtureSameFamily<T, D>` at `mixture_same_family.rs:86-228`, mirroring `mixture_same_family.py:168-201`; non-test consumer: re-export at `lib.rs:111` exposes Distribution-trait surface. |
-| REQ-5 | SHIPPED | impl: two-step ancestor sampling in the `sample` body at `mixture_same_family.rs:113-132` (mixing.sample → components.sample with `[..., K]` shape → gather per-element by chosen index), mirroring `mixture_same_family.py:178-201`; non-test consumer: re-export + `Distribution::sample` external invocation. |
-| REQ-6 | SHIPPED | impl: manual logsumexp in `log_prob` at `mixture_same_family.rs:193-211` (compute max, then sum of `exp(lp - max)`, then `max + ln(sum)`), mirroring `mixture_same_family.py:168-176`; non-test consumer: re-export at `lib.rs:111`. Test `test_mixture_basic_log_prob` validates numeric symmetry case. |
-| REQ-7 | SHIPPED | impl: rsample returns `InvalidArgument("rsample is not supported -- mixture sampling is not reparameterizable")` at `mixture_same_family.rs:143-150`, mirroring upstream `has_rsample = False` at `mixture_same_family.py:57`; non-test consumer: re-export exposes the error path; test `test_mixture_rsample_errors` pins it. |
-| REQ-8 | SHIPPED | impl: entropy returns `InvalidArgument("entropy has no closed form for general mixtures")` at `mixture_same_family.rs:221-227`, matching upstream's deliberate omission (no `entropy` method on `MixtureSameFamily`); non-test consumer: re-export at `lib.rs:111`; test `test_mixture_entropy_errors` pins it. |
+| REQ-1 | SHIPPED | impl: `pub struct MixtureSameFamily<T: Float, D: Distribution<T>>` at `MixtureSameFamily in mixture_same_family.rs`, mirroring `torch/distributions/mixture_same_family.py:13-109`; non-test consumer: `pub use mixture_same_family::MixtureSameFamily` at `lib.rs`. |
+| REQ-2 | SHIPPED | impl: the constructor at `new in mixture_same_family.rs` rejecting zero-K mixing, mirroring upstream's `Categorical`-instance check at `mixture_same_family.py:67-72`; non-test consumer: invoked via the re-export's `::new`. |
+| REQ-3 | SHIPPED | impl: `mixing()`/`components()`/`num_components()` accessors at `num_components in mixture_same_family.rs`, mirroring `mixture_same_family.py:133-140`; non-test consumer: re-export at `lib.rs`. |
+| REQ-4 | SHIPPED | impl: `impl<T: Float, D: Distribution<T>> Distribution<T> for MixtureSameFamily<T, D>` at `mixture_same_family.rs`, mirroring `mixture_same_family.py:168-201`; non-test consumer: re-export at `lib.rs` exposes Distribution-trait surface. |
+| REQ-5 | SHIPPED | impl: two-step ancestor sampling in the `sample` body at `sample in mixture_same_family.rs` (mixing.sample → components.sample with `[..., K]` shape → gather per-element by chosen index), mirroring `mixture_same_family.py:178-201`; non-test consumer: re-export + `Distribution::sample` external invocation. |
+| REQ-6 | SHIPPED | impl: manual logsumexp in `log_prob in mixture_same_family.rs` (compute max, then sum of `exp(lp - max)`, then `max + ln(sum)`), mirroring `mixture_same_family.py:168-176`; non-test consumer: re-export at `lib.rs`. Test `test_mixture_basic_log_prob` validates numeric symmetry case. |
+| REQ-7 | SHIPPED | impl: rsample returns `InvalidArgument("rsample is not supported -- mixture sampling is not reparameterizable")` at `test_mixture_rsample_errors in mixture_same_family.rs`, mirroring upstream `has_rsample = False` at `mixture_same_family.py:57`; non-test consumer: re-export exposes the error path; test `test_mixture_rsample_errors` pins it. |
+| REQ-8 | SHIPPED | impl: entropy returns `InvalidArgument("entropy has no closed form for general mixtures")` at `entropy in mixture_same_family.rs`, matching upstream's deliberate omission (no `entropy` method on `MixtureSameFamily`); non-test consumer: re-export at `lib.rs`; test `test_mixture_entropy_errors` pins it. |
 | REQ-9 | NOT-STARTED | blocker #1388 — `mean` / `variance` law-of-total-variance overrides at `mixture_same_family.py:142-159` not implemented; default trait impls at `lib.rs:209-227` return `InvalidArgument`. |
 | REQ-10 | NOT-STARTED | blocker #1389 — `cdf` summation at `mixture_same_family.py:161-166` not implemented; default trait `cdf` at `lib.rs:194-198` errors. |
 | REQ-11 | SHIPPED | impl: `event_ndims` / `event_size` captured from `components.event_shape()` in `MixtureSameFamily::new`; `log_prob` inserts the K axis before the event dims (event-block tiling), reduces the component event dims via `components.log_prob`, then logsumexps over K; `sample` gathers the chosen component's full event block; `event_shape()` forwards the component event_shape; `mean`/`variance` weight over K per event element — all in `mixture_same_family.rs`, mirroring `mixture_same_family.py:100-109,168-217` (`_pad`/`_event_ndims`). Non-test consumer: `pub use mixture_same_family::MixtureSameFamily` re-export — GMM / mixture-density code pairing a `Categorical` with `Independent<Normal>` (event_shape `[E]`) hits this path. Tests `test_mixture_multivariate_log_prob` (hand-computed bivariate logsumexp), `test_mixture_multivariate_sample_shape`, `test_mixture_multivariate_event_shape`, `test_mixture_multivariate_mean` pin. Closes #1390. |

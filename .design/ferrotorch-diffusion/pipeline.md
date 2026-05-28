@@ -41,35 +41,35 @@ sequence is not reproducible between Rust's `StdRng` and
 ## Acceptance Criteria
 
 - [x] AC-1: `pipeline_constructs` test builds a tiny pipeline end to
-  end (`pipeline.rs:259..270`).
+  end (`pipeline in pipeline.rs`).
 - [x] AC-2: Per-step CFG math `guided = uncond + scale * (cond -
   uncond)` is expressed via `add`/`sub`/`mul` from
-  `grad_fns::arithmetic` (`pipeline.rs:142..145`).
+  `grad_fns::arithmetic` (`pipeline in pipeline.rs`).
 - [x] AC-3: VAE decode applies the scaling factor by calling
-  `vae.decode_with_scaling(latent)` (`pipeline.rs:227`).
+  `vae.decode_with_scaling(latent)` (`pipeline in pipeline.rs`).
 
 ## Architecture
 
 Composition only — no new tensor math beyond the CFG blend.
 
-- `StableDiffusionPipeline<T: Float>` at `pipeline.rs:58..69` is a
+- `StableDiffusionPipeline<T: Float>` at `StableDiffusionPipeline in pipeline.rs` is a
   plain struct holding the four sub-models. `text_encoder`, `unet`,
   `vae` are `&self`-callable; `scheduler` requires `&mut self`
   because `set_timesteps` mutates the cached timesteps vector.
-- `PipelineStepDump<T: Float>` at `pipeline.rs:37..52` is the
+- `PipelineStepDump<T: Float>` at `PipelineStepDump in pipeline.rs` is the
   per-step diagnostic record.
-- `new` at `pipeline.rs:80..92` is currently a plain field-pack;
+- `new` at `pipeline in pipeline.rs` is currently a plain field-pack;
   per-scheduler validation is deferred to the call sites that need
   it (epsilon prediction is implicit because `DDIMScheduler` only
   ships that path today).
-- `encode_prompt` at `pipeline.rs:101..103` thinly delegates to
+- `encode_prompt` at `pipeline in pipeline.rs` thinly delegates to
   `ClipTextEncoder::forward_from_ids`.
-- `cfg_eval` at `pipeline.rs:120..146` is the per-step inner loop:
+- `cfg_eval` at `pipeline in pipeline.rs` is the per-step inner loop:
   builds the `[B]` timestep tensor, calls
   `scheduler.scale_model_input` (identity for DDIM), runs two UNet
   forwards, computes `guided = uncond + gs * (cond - uncond)` via
   `add`/`sub`/`mul`.
-- `generate` at `pipeline.rs:167..229` is the outer loop:
+- `generate` at `pipeline in pipeline.rs` is the outer loop:
   validates shapes, scales `init_latent` by
   `scheduler.init_noise_sigma()` (1.0 for SD-1.5 DDIM, but the
   multiplication is kept for forward-compat), iterates the timesteps,
@@ -80,7 +80,7 @@ Non-test production consumers:
 
 - `ferrotorch-diffusion/examples/sd_pipeline_dump.rs` constructs the
   pipeline and calls `generate`.
-- `ferrotorch-diffusion/src/gpu/pipeline.rs:49` imports
+- `ferrotorch-diffusion/src/gpu/pipeline.rs` imports
   `PipelineStepDump` for the GPU mirror's dump compatibility.
 - `ferrotorch-diffusion/tests/conformance_sd_pipeline.rs` exercises
   the full pipeline against pinned reference dumps (test, but the
@@ -96,7 +96,7 @@ exactly for the no-img2img / deterministic-DDIM path.
 
 ## Verification
 
-- `pipeline_constructs` (`pipeline.rs:259..270`) — builds a tiny
+- `pipeline_constructs` (`pipeline in pipeline.rs`) — builds a tiny
   pipeline end-to-end on a `sample_size=8` config.
 - `conformance_sd_pipeline.rs` integration test runs the pipeline on
   the pinned 4-step recipe and compares the per-step latent + final
@@ -108,8 +108,8 @@ No parity-sweep ops (composition-only).
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `StableDiffusionPipeline::new` at `ferrotorch-diffusion/src/pipeline.rs:80..92`; non-test consumer: `ferrotorch-diffusion/src/gpu/pipeline.rs:49` re-uses the `PipelineStepDump` produced by this constructor's `generate` method |
+| REQ-1 | SHIPPED | impl: `StableDiffusionPipeline::new` at `new in ferrotorch-diffusion/src/pipeline.rs`; non-test consumer: `new in ferrotorch-diffusion/src/gpu/pipeline.rs` re-uses the `PipelineStepDump` produced by this constructor's `generate` method |
 | REQ-2 | SHIPPED | impl: `encode_prompt` at `ferrotorch-diffusion/src/pipeline.rs:101..103`; non-test consumer: `ferrotorch-diffusion/examples/sd_pipeline_dump.rs` invokes it as the first stage of the dump pipeline |
 | REQ-3 | SHIPPED | impl: `generate` at `ferrotorch-diffusion/src/pipeline.rs:167..229`; non-test consumer: `ferrotorch-diffusion/examples/sd_pipeline_dump.rs` calls `generate(...)` to produce the dump artifact |
-| REQ-4 | SHIPPED | impl: `PipelineStepDump<T>` at `ferrotorch-diffusion/src/pipeline.rs:37..52`; non-test consumer: `ferrotorch-diffusion/src/gpu/pipeline.rs:210` constructs `PipelineStepDump` values for the GPU dump |
+| REQ-4 | SHIPPED | impl: `PipelineStepDump<T>` at `PipelineStepDump in ferrotorch-diffusion/src/pipeline.rs`; non-test consumer: `ferrotorch-diffusion/src/gpu/pipeline.rs` constructs `PipelineStepDump` values for the GPU dump |
 | REQ-5 | SHIPPED | impl: shape checks at `ferrotorch-diffusion/src/pipeline.rs:175..191`; non-test consumer: `ferrotorch-diffusion/src/gpu/pipeline.rs:181..193` mirrors the same shape contract for the GPU pipeline |

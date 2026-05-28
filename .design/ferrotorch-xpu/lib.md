@@ -264,7 +264,7 @@ on every host regardless of whether the wgpu feature is active.
 `"xpu:{ordinal}"`, matching:
 
 - `ferrotorch_core::Device::Xpu(_)` Display
-  (`ferrotorch-core/src/device.rs:71` — `Device::Xpu(id) => write!(f,
+  (`Xpu in ferrotorch-core/src/device.rs` — `Device::Xpu(id) => write!(f,
   "xpu:{id}")`).
 - Upstream `torch.device('xpu:0').__str__()`.
 

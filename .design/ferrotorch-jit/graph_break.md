@@ -49,7 +49,7 @@ plus the user-facing `fullgraph=True` enforcement.
 - REQ-6: A canonical `KNOWN_OP_NAMES` set inside the module
   controls which `GradFn` names map to recognised ops. Must stay in
   sync with `trace::map_name_to_op` (documented at
-  `graph_break.rs:35` and `:600`).
+  `graph_break in graph_break.rs` and `graph_break in graph_break.rs`).
 
 ## Acceptance Criteria
 
@@ -92,7 +92,7 @@ caller dispatches on the result.
 
 1. Run the forward to build the autograd graph.
 2. Walk the autograd graph, mapping each grad_fn name to a known op
-   via `KNOWN_OP_NAMES` (`graph_break.rs:600`).
+   via `KNOWN_OP_NAMES` (`name in graph_break.rs`).
 3. On unknown op:
    - If `config.fullgraph == true`, surface `JitError::GraphBreak`.
    - Otherwise: cut the graph at this op, build a `TracedModule` for
@@ -130,7 +130,7 @@ Edge cases:
   returns input).
 - **`KNOWN_OP_NAMES` drift vs `trace::map_name_to_op`** — both
   tables must list the same op-name set. The comment at
-  `graph_break.rs:35` pins this contract; drift is a defect.
+  `graph_break in graph_break.rs` pins this contract; drift is a defect.
 
 ## Verification
 
@@ -153,9 +153,9 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub enum GraphSegment<T: Float>` in `graph_break.rs`; non-test consumer: `pub struct SegmentedModule<T>` (`graph_break.rs:120`) holds `Vec<GraphSegment<T>>`; `forward` dispatches on the variant. |
-| REQ-2 | SHIPPED | impl: `pub struct SegmentedModule<T: Float>` + `pub fn new` + `pub fn forward` in `graph_break.rs`; non-test consumer: re-export at `lib.rs:108`; `pub fn trace_with_breaks` returns it inside `TraceResult::Segmented`. |
-| REQ-3 | SHIPPED | impl: `pub fn segment_count`, `pub fn segments`, `pub fn is_fully_compiled` in `graph_break.rs`; non-test consumer: re-export at `lib.rs:108`. |
+| REQ-1 | SHIPPED | impl: `pub enum GraphSegment<T: Float>` in `graph_break.rs`; non-test consumer: `pub struct SegmentedModule<T>` (`SegmentedModule in graph_break.rs`) holds `Vec<GraphSegment<T>>`; `forward` dispatches on the variant. |
+| REQ-2 | SHIPPED | impl: `pub struct SegmentedModule<T: Float>` + `pub fn new` + `pub fn forward` in `graph_break.rs`; non-test consumer: re-export at `lib.rs`; `pub fn trace_with_breaks` returns it inside `TraceResult::Segmented`. |
+| REQ-3 | SHIPPED | impl: `pub fn segment_count`, `pub fn segments`, `pub fn is_fully_compiled` in `graph_break.rs`; non-test consumer: re-export at `lib.rs`. |
 | REQ-4 | SHIPPED | impl: `pub enum TraceResult<T: Float>` in `graph_break.rs`; non-test consumer: `pub fn trace_with_breaks` returns this type. |
 | REQ-5 | SHIPPED | impl: `pub fn trace_with_breaks<T, F>` in `graph_break.rs`; non-test consumer: re-export at `lib.rs:108`. |
-| REQ-6 | SHIPPED | impl: `KNOWN_OP_NAMES` set / `map_name_to_op_kind` inside `graph_break.rs` (mirrors `trace::map_name_to_op` per the comment at `:35` and `:600`); non-test consumer: `pub fn trace_with_breaks` consults it during the autograd-graph walk. |
+| REQ-6 | SHIPPED | impl: `KNOWN_OP_NAMES` set / `map_name_to_op_kind` inside `graph_break.rs` (mirrors `trace::map_name_to_op` per the comment at `lib.rs` and `lib.rs`); non-test consumer: `pub fn trace_with_breaks` consults it during the autograd-graph walk. |

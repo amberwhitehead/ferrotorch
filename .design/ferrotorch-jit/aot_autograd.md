@@ -77,7 +77,7 @@ relies on.
 `decompose_forward_backward` walks the forward graph in topo order:
 
 1. **Build a node-id map** so each node can be looked up by its
-   `IrNodeId` (`aot_autograd.rs:186`).
+   `IrNodeId` (`aot_autograd.rs`).
 2. **Per-op gradient rules** — for each forward op (`Add`,
    `Sub`, `Mul`, `Sum`, `Relu`, `Sigmoid`, `Tanh`, `Matmul`,
    `Linear`, etc.), emit the matching backward IR nodes into the
@@ -96,7 +96,7 @@ known set covers the ops that appear in tested forwards
 "add a new op" path is "extend the match arm + add a test".
 
 `compile_aot<T, F>` is the integrated entry point: call
-`crate::trace::trace(f, example_inputs)?` (`aot_autograd.rs:466`),
+`crate::trace::trace(f, example_inputs)?` (`trace in aot_autograd.rs`),
 call `decompose_forward_backward`, wrap the pair with
 `AotCompiledModule::new(pair.forward, pair.backward,
 pair.saved_tensor_indices)`.
@@ -149,8 +149,8 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct AotGraphPair { forward, backward, saved_tensor_indices }` in `aot_autograd.rs`; non-test consumer: `ferrotorch-jit/src/module.rs:998-1014` `AotCompiledModule::new(pair.forward.clone(), pair.backward.clone(), pair.saved_tensor_indices.clone())` (test sites) AND production `pub fn compile_aot` returns this pair internally (`aot_autograd.rs:466-470`). |
+| REQ-1 | SHIPPED | impl: `pub struct AotGraphPair { forward, backward, saved_tensor_indices }` in `aot_autograd.rs`; non-test consumer: `new in ferrotorch-jit/src/module.rs` `AotCompiledModule::new(pair.forward.clone(), pair.backward.clone(), pair.saved_tensor_indices.clone())` (test sites) AND production `pub fn compile_aot` returns this pair internally (`compile_aot in aot_autograd.rs`). |
 | REQ-2 | SHIPPED | impl: `pub fn decompose_forward_backward` in `aot_autograd.rs`; non-test consumer: `pub fn compile_aot` invokes it as the second step. |
 | REQ-3 | SHIPPED | impl: the per-op-rule `match` body inside `decompose_forward_backward` augments the forward graph with saved-intermediate outputs aligned to `saved_tensor_indices`; non-test consumer: `module.rs:355-380` `AotCompiledModule::forward_with_ctx` calls `interpret_multi_with_captures(&self.forward_graph, inputs, &self.saved_tensor_indices)`. |
 | REQ-4 | SHIPPED | impl: the input-binding logic inside `decompose_forward_backward` (backward inputs = saved intermediates then grad_output); non-test consumer: `module.rs:392-398` `AotCompiledModule::backward` builds `backward_inputs = self.saved_tensors.clone(); backward_inputs.push(grad_output.clone());`. |
-| REQ-5 | SHIPPED | impl: `pub fn compile_aot<T, F>` in `aot_autograd.rs`; non-test consumer: re-export at `lib.rs:87`. |
+| REQ-5 | SHIPPED | impl: `pub fn compile_aot<T, F>` in `aot_autograd.rs`; non-test consumer: re-export at `lib.rs`. |

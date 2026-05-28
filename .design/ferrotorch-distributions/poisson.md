@@ -109,7 +109,7 @@ accessor (since for Poisson `E[X] = lambda` directly), distinct from
 the trait method `Distribution::mean(&self) -> FerrotorchResult<Tensor<T>>`
 which returns by value (cloning). Tests disambiguate via
 `Distribution::mean(&dist)` fully-qualified syntax
-(`poisson.rs:347-349`). The inherent accessors are convenience
+(`poisson in poisson.rs`). The inherent accessors are convenience
 methods predating the trait; both surfaces are
 grandfathered public API.
 
@@ -174,11 +174,11 @@ The enumeration truncates when `log p(k) < -40` (i.e. `p(k) < e^-40`).
 
 ### Non-test production consumers
 
-- `pub use poisson::Poisson` in `lib.rs:117` — grandfathered public
+- `pub use poisson::Poisson` in `lib.rs` — grandfathered public
   API re-export. Downstream count-data Bayesian code constructs
   `Poisson::new(rate)` directly.
-- `kl_poisson_poisson(p: &Poisson<T>, q: &Poisson<T>)` in `kl.rs:528`
-  is invoked by the `kl_dispatch` chain (`kl.rs:169`) — a non-test
+- `kl_poisson_poisson(p: &Poisson<T>, q: &Poisson<T>)` in `kl in kl.rs`
+  is invoked by the `kl_dispatch` chain (`kl in kl.rs`) — a non-test
   production consumer that reads `Poisson::rate` from both sides.
 - `Poisson::new` is registered in
   `tests/conformance/_surface_inventory.toml:301` as part of the
@@ -249,7 +249,7 @@ Expected: `10 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct Poisson<T: Float>` with `rate` field in `poisson.rs`, mirroring `torch/distributions/poisson.py:50-60`; non-test consumer: `pub use poisson::Poisson` in `lib.rs:117` plus `kl_poisson_poisson(p: &Poisson<T>, q: &Poisson<T>)` in `kl.rs:528` reads `Poisson::rate` from both sides. |
+| REQ-1 | SHIPPED | impl: `pub struct Poisson<T: Float>` with `rate` field in `poisson.rs`, mirroring `torch/distributions/poisson.py:50-60`; non-test consumer: `pub use poisson::Poisson` in `lib.rs` plus `kl_poisson_poisson(p: &Poisson<T>, q: &Poisson<T>)` in `kl in kl.rs` reads `Poisson::rate` from both sides. |
 | REQ-2 | SHIPPED | impl: `pub fn Poisson::new(rate) -> FerrotorchResult<Self>` in `poisson.rs`; non-test consumer: registered in `tests/conformance/_surface_inventory.toml:301` as part of the conformance surface contract; `pub use Poisson` re-exports it for downstream callers. |
 | REQ-3 | SHIPPED | impl: inherent `pub fn rate(&self) -> &Tensor<T>` + inherent `mean` / `variance` borrow-returners in `poisson.rs`, mirroring the `Poisson.rate` attribute and `@property mean` / `@property variance` (which both return `rate`) at `poisson.py:38-48`; non-test consumer: `pub use Poisson` re-export makes the inherent accessors part of the public API. |
 | REQ-4 | SHIPPED | impl: `Distribution::sample` in `poisson.rs` via Knuth's algorithm with a pre-allocated uniform batch buffer + auto-refill, equivalent to the small-lambda branch of `aten::poisson` (which `torch.poisson(rate)` at `poisson.py:70-73` dispatches to); non-test consumer: `impl Distribution::sample` is the dispatch site any external `dist.sample(...)` hits. |
@@ -258,6 +258,6 @@ Expected: `10 passed`.
 | REQ-7 | SHIPPED | impl: `Distribution::entropy` in `poisson.rs` with dual-branch (enumeration for `lambda<1`, Stirling for `lambda>=1`); non-test consumer: `pub use Poisson` re-export — upstream Poisson does NOT have closed-form entropy so this is a R-DEV-7 enhancement ferrotorch ships ahead of upstream; test `test_poisson_entropy_positive` pins finite output. |
 | REQ-8 | SHIPPED | impl: `Distribution::mean` in `poisson.rs` returns `rate.clone()`, mirroring `poisson.py:38-40`; non-test consumer: `pub use Poisson` re-export; test `test_poisson_mean_eq_variance_eq_rate` pins. |
 | REQ-9 | SHIPPED | impl: `Distribution::mode` in `poisson.rs` returns `floor(rate)`, mirroring `poisson.py:42-44`; non-test consumer: `pub use Poisson` re-export. |
-| REQ-10 | SHIPPED | impl: `Distribution::variance` in `poisson.rs` returns `rate.clone()`, mirroring `poisson.py:46-48`; non-test consumer: `pub use Poisson` re-export; `kl_poisson_poisson` in `kl.rs:528` reads both distributions' rates which are also their variances by `Var[X] = lambda` identity. |
+| REQ-10 | SHIPPED | impl: `Distribution::variance` in `poisson.rs` returns `rate.clone()`, mirroring `poisson.py:46-48`; non-test consumer: `pub use Poisson` re-export; `kl_poisson_poisson` in `kl in kl.rs` reads both distributions' rates which are also their variances by `Var[X] = lambda` identity. |
 | REQ-11 | PARTIAL | blocker #1407 — `ExponentialFamily` machinery (`_natural_params`, `_log_normalizer` in `poisson.py:81-87`) not implemented. `expand` / `support` / `arg_constraints` now SHIPPED below as REQ-12. |
-| REQ-12 | SHIPPED | impl: `has_rsample`(=false) / `batch_shape` / `support`(`NonNegative` — closest port until `IntegerInterval` lands under #1372) / `arg_constraints`(`{rate: NonNegative}` per `poisson.py:35`) / `expand` overrides at the tail of `impl Distribution for Poisson` in `poisson.rs` mirroring `torch/distributions/poisson.py:35-36`; non-test consumer: trait dispatch through `pub use Poisson` re-export at `lib.rs:117`; `test_poisson_surface_overrides` and `test_poisson_expand` pin the overrides. |
+| REQ-12 | SHIPPED | impl: `has_rsample`(=false) / `batch_shape` / `support`(`NonNegative` — closest port until `IntegerInterval` lands under #1372) / `arg_constraints`(`{rate: NonNegative}` per `poisson.py:35`) / `expand` overrides at the tail of `impl Distribution for Poisson` in `poisson.rs` mirroring `torch/distributions/poisson.py:35-36`; non-test consumer: trait dispatch through `pub use Poisson` re-export at `lib.rs`; `test_poisson_surface_overrides` and `test_poisson_expand` pin the overrides. |

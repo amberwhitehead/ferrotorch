@@ -75,7 +75,7 @@ constructors + a `to_ferray` bridge.
 
 ## Architecture
 
-`MaskedTensor<T: Float>` (`masked.rs:43-50`) holds `data: Tensor<T>`,
+`MaskedTensor<T: Float>` (`MaskedTensor in masked.rs`) holds `data: Tensor<T>`,
 `mask: Vec<bool>` (flat, length `data.numel()`), and
 `fill_value: T`. Constructors at `:52-85`. Accessors at `:87-118`.
 
@@ -85,7 +85,7 @@ CPU — masked tensors don't have a CUDA storage representation today
 (`masked_tensor` itself can wrap a CUDA `data` field but the mask is
 host-side).
 
-`masked_sum` at `:200` branches on `is_cuda() && (is_f32 || is_f64)`
+`masked_sum in masked.rs` branches on `is_cuda() && (is_f32 || is_f64)`
 to the GPU lowering: `mask_as_float_tensor` lifts the bool mask onto
 the device as a `[0/1]` float tensor, then `backend.mul_{f32,f64}` +
 `backend.sum_{f32,f64}` produce the result on-device. CPU fallback
@@ -145,10 +145,10 @@ unit file).
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `MaskedTensor::new` at `masked.rs:60` mirrors `torch.masked.MaskedTensor.__init__` (`torch/masked/__init__.py`); non-test consumer: re-exported as `ferrotorch_core::MaskedTensor` at `lib.rs:167`. The constructor IS the entry-point public API |
+| REQ-1 | SHIPPED | impl: `MaskedTensor::new` at `masked in masked.rs` mirrors `torch.masked.MaskedTensor.__init__` (`torch/masked/__init__.py`); non-test consumer: re-exported as `ferrotorch_core::MaskedTensor` at `masked in lib.rs`. The constructor IS the entry-point public API |
 | REQ-2 | SHIPPED | impl: `MaskedTensor::from_data` at `masked.rs:78`; non-test consumer: re-exported as `MaskedTensor::from_data` via `lib.rs:167` |
-| REQ-3 | SHIPPED | impl: `with_fill_value` at `masked.rs:84`; non-test consumer: re-exported via `MaskedTensor` builder at `lib.rs:167` |
-| REQ-4 | SHIPPED | impl: `filled` / `to_tensor` at `masked.rs:131,143`; non-test consumer: re-exported method on `MaskedTensor` at `lib.rs:167` |
-| REQ-5 | SHIPPED | impl: `masked_sum`/`masked_mean`/`masked_min`/`masked_max`/`masked_count` at `masked.rs:200,275,322,330,419`; non-test consumer: re-exported at `lib.rs:167-170` |
+| REQ-3 | SHIPPED | impl: `with_fill_value` at `masked in masked.rs`; non-test consumer: re-exported via `MaskedTensor` builder at `masked in lib.rs` |
+| REQ-4 | SHIPPED | impl: `filled` / `to_tensor` at `masked in masked.rs,143`; non-test consumer: re-exported method on `MaskedTensor` at `masked in lib.rs` |
+| REQ-5 | SHIPPED | impl: `masked_sum`/`masked_mean`/`masked_min`/`masked_max`/`masked_count` at `masked in masked.rs,275,322,330,419`; non-test consumer: re-exported at `masked in lib.rs` |
 | REQ-6 | SHIPPED | impl: `masked_where`/`masked_invalid`/`masked_equal` at `masked.rs:435,453,472`; non-test consumer: re-exported at `lib.rs:167-170`. GPU paths NOT-STARTED, blocked on #1545 — does NOT block CPU-path SHIPPED for the constructor itself |
-| REQ-7 | SHIPPED | impl: `to_ferray` at `masked.rs:165`; non-test consumer: the bridge enables ferray-ma's wider op surface; `to_ferray_round_trip_mean_matches_inhouse` test pins the cross-check |
+| REQ-7 | SHIPPED | impl: `to_ferray` at `masked in masked.rs`; non-test consumer: the bridge enables ferray-ma's wider op surface; `to_ferray_round_trip_mean_matches_inhouse` test pins the cross-check |

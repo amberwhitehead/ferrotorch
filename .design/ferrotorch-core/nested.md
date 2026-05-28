@@ -80,7 +80,7 @@ upstream-paths:
 
 ## Architecture
 
-### `NestedTensor<T>` layout (`nested.rs:29-36`)
+### `NestedTensor<T>` layout (`NestedTensor in nested.rs`)
 
 ```rust
 pub struct NestedTensor<T: Float> {
@@ -158,7 +158,7 @@ validates:
   PackedNestedTensor, nested_scaled_dot_product_attention}` — the
   crate-root re-export is the boundary. R-DEFER-1 S5 grandfathering
   applies: existing pub API surface; the type IS the boundary.
-- `ferrotorch-core/src/gpu_dispatch.rs:3281` — comment block referencing
+- `ferrotorch-core/src/gpu_dispatch.rs` — comment block referencing
   "Per-component dispatch from `nested_scaled_dot_product_attention`"
   documenting how the backend's flash-attention kernel is invoked from
   the per-component dispatch path.
@@ -203,9 +203,9 @@ under `ferrotorch-core/tests/` gated on the `gpu` feature + hardware.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `NestedTensor::new` at `ferrotorch-core/src/nested.rs:50-96` validating ndim + non-ragged shape parity. Non-test production consumer: `ferrotorch-core/src/lib.rs:172` `pub use nested::{NestedTensor, ...}`. R-DEFER-1 S5 grandfathering: existing pub API surface (#806/#291); the type IS the boundary public API for variable-length-sequence workflows. |
-| REQ-2 | SHIPPED | impl: `num_components` at `ferrotorch-core/src/nested.rs:100`, `ragged_dim` at `:106`, `tensors` at `:112`, `ndim` at `:118`, `consistent_shape` at `:123`, `ragged_lengths` at `:128`. Non-test production consumer: `lib.rs:172` re-export + the GPU fast paths within `nested.rs` itself (e.g. `nested.rs:198` `self.tensors.iter().map(|t| t.shape()[self.ragged_dim]).max()` uses `tensors()` indirectly). |
+| REQ-2 | SHIPPED | impl: `num_components in ferrotorch-core/src/nested.rs`, `ragged_dim in ferrotorch-core/src/nested.rs`, `tensors in ferrotorch-core/src/nested.rs`, `ndim in ferrotorch-core/src/nested.rs`, `consistent_shape in ferrotorch-core/src/nested.rs`, `ragged_lengths in ferrotorch-core/src/nested.rs`. Non-test production consumer: `nested in lib.rs` re-export + the GPU fast paths within `nested.rs` itself (e.g. `nested in nested.rs` `self.tensors.iter().map(|t| t.shape()[self.ragged_dim]).max()` uses `tensors()` indirectly). |
 | REQ-3 | SHIPPED | impl: `to_padded` at `ferrotorch-core/src/nested.rs:163-240` with GPU fast path `try_to_padded_gpu` at `:258-377`. Non-test production consumer: `lib.rs:172` re-export. R-DEFER-1 S5 grandfathering applies — boundary public API for the padded-vs-nested data interchange. |
 | REQ-4 | SHIPPED | impl: `from_padded` at `ferrotorch-core/src/nested.rs:401`-(continuation), with GPU fast path at `:450-454` via `try_from_padded_gpu`. Non-test production consumer: `lib.rs:172` re-export. R-DEFER-1 S5 grandfathering. |
 | REQ-5 | SHIPPED | impl: `pub fn nested_scaled_dot_product_attention<T: Float>` at `ferrotorch-core/src/nested.rs:657-770` with GPU dispatch helper `try_flash_attention_gpu_component` at `:775`. Non-test production consumer: `ferrotorch-core/src/lib.rs:172` re-exports `nested_scaled_dot_product_attention`. R-DEFER-1 S5 grandfathering: existing pub fn (#806). |
-| REQ-6 | SHIPPED | impl: `pub struct PackedNestedTensor<T: Float>` at `ferrotorch-core/src/nested.rs:938`; constructor `from_sequences` at `:967-1010+`. Non-test production consumer: `ferrotorch-core/src/lib.rs:172` re-exports `PackedNestedTensor`. R-DEFER-1 S5 grandfathering (#291). |
-| REQ-7 | SHIPPED | impl: `FerrotorchError::InvalidArgument` at `nested.rs:52, :59, :408, :415, :437, :664, :682, :973, :978, :990`; `ShapeMismatch` at `:78, :281, :701, :706`; `DeviceMismatch` at `:281`. No `panic!` / `unwrap()` / `expect()` in production paths (the one `.unwrap()` at `nested.rs:726` for `T::from(d_k).unwrap()` is on the type-safe int→T conversion path where the source is always within bounds; should be migrated to `numeric_cast::cast` per #815 as a no-blocker cleanup follow-up). Non-test production consumer: every caller propagates the structured error via `?`. |
+| REQ-6 | SHIPPED | impl: `pub struct PackedNestedTensor<T: Float>` at `PackedNestedTensor in ferrotorch-core/src/nested.rs`; constructor `from_sequences in ferrotorch-core/src/nested.rs`. Non-test production consumer: `ferrotorch-core/src/lib.rs` re-exports `PackedNestedTensor`. R-DEFER-1 S5 grandfathering (#291). |
+| REQ-7 | SHIPPED | impl: `FerrotorchError::InvalidArgument` at `nested in nested.rs, , , , , , , , , `; `ShapeMismatch` at `, , , `; `DeviceMismatch` at `nested in nested.rs`. No `panic!` / `unwrap()` / `expect()` in production paths (the one `.unwrap()` at `nested in nested.rs` for `T::from(d_k).unwrap()` is on the type-safe int→T conversion path where the source is always within bounds; should be migrated to `numeric_cast::cast` per #815 as a no-blocker cleanup follow-up). Non-test production consumer: every caller propagates the structured error via `?`. |

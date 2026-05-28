@@ -104,7 +104,7 @@ contract.
 ### `pub(crate)` visibility (REQ-3)
 
 `pub(crate) fn check_gpu_fallback_opt_in` + `pub(crate) mod fallback`
-in `lib.rs:58` together mean the function is invisible to consumers
+in `lib.rs` together mean the function is invisible to consumers
 outside the crate. This is intentional: the fallback policy is a
 crate-internal implementation detail every distribution
 participates in, not a public extension point. If a downstream user

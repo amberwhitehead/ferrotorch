@@ -85,7 +85,7 @@ upstream uses in its newer Kineto path.
 
 ### Async-first timing (REQ-1, REQ-2, REQ-3)
 
-The motivation block at the top of `cuda_timing.rs:1-37` explains why
+The motivation block at the top of `cuda_timing in cuda_timing.rs` explains why
 CUDA events beat CPU wall-clock for GPU kernels: an asynchronous
 kernel launch returns immediately to the CPU, so `Instant::now`
 captures only the dispatch latency, not the GPU work. CUDA events
@@ -113,7 +113,7 @@ until the GPU reaches the event, serialising the dispatch pipeline.
 Doing this inline in `stop` would defeat the point of async
 kernels. So `stop` queues the pair without syncing.
 
-`flush_cuda_kernels` (in `profiler.rs:280`) drains the queue at
+`flush_cuda_kernels` (in `profiler in profiler.rs`) drains the queue at
 report-export time: it walks every `PendingCudaScope`, calls
 `finalize(epoch_us)` on each, and pushes the resulting
 `ProfileEvent` into the profiler's main event list. By that point
@@ -143,11 +143,11 @@ because no caller outside this crate has any way to construct one")
 documents the invariant.
 
 The hand-off goes through `Profiler::push_pending_cuda_scope`
-(`profiler.rs:259`), also `pub(crate)`. The signature
+(`profiler in profiler.rs`), also `pub(crate)`. The signature
 `pub(crate) fn push_pending_cuda_scope(&self, scope: PendingCudaScope)`
 is one of the two reasons that method is `pub(crate)` (the type
 itself being the other) — see the comment block at
-`profiler.rs:255-258`.
+`profiler in profiler.rs`.
 
 ### `cudarc` deviation (REQ-6)
 
@@ -226,10 +226,10 @@ Expected: `cargo check` clean on the CPU host;
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct CudaKernelScope` at `ferrotorch-profiler/src/cuda_timing.rs:59` carrying name/category/start/stream, mirroring PyTorch's CUDA-event timing in `torch/autograd/profiler.py:126-131`; non-test consumer: `ferrotorch-profiler/src/lib.rs:39` re-exports it under the cuda feature; `ferrotorch/src/lib.rs:107` propagates to the meta-crate prelude — user code on a CUDA host constructs scopes via this re-export. |
-| REQ-2 | SHIPPED | impl: `pub fn new` at `ferrotorch-profiler/src/cuda_timing.rs:77` calling `ctx.new_event(Some(CU_EVENT_DEFAULT))` + `start.record(stream)`; non-test consumer: re-exported via `CudaKernelScope`, the surface-coverage contract pins it (note: under cuda feature only). |
-| REQ-3 | SHIPPED | impl: `pub fn stop(self, profiler) -> Result<(), DriverError>` at `ferrotorch-profiler/src/cuda_timing.rs:107` consuming `self`, recording the end event, and calling `profiler.push_pending_cuda_scope(...)` at line 112; non-test consumer: `ferrotorch-profiler/src/profiler.rs:259` `pub(crate) fn push_pending_cuda_scope` is the matching profiler entry point — `CudaKernelScope::stop` is the only production caller. |
-| REQ-4 | SHIPPED | impl: `pub(crate) struct PendingCudaScope` at `ferrotorch-profiler/src/cuda_timing.rs:132` with `pub(crate)` fields, intentionally absent from the `lib.rs:38-43` re-export block per the comment at line 130-131; non-test consumer: `ferrotorch-profiler/src/profiler.rs:61` `pending_cuda: Mutex<Vec<PendingCudaScope>>` field stores them; `profiler.rs:259` accepts them via `push_pending_cuda_scope`; `profiler.rs:293` calls `scope.finalize(epoch_us)` to drain. |
-| REQ-5 | SHIPPED | impl: `pub(crate) fn finalize(self, profiler_epoch_us: u64) -> ProfileEvent` at `ferrotorch-profiler/src/cuda_timing.rs:148` with the synchronise + `elapsed_ms` + `" [timing_error]"` failure path; non-test consumer: `ferrotorch-profiler/src/profiler.rs:293` `let event = scope.finalize(epoch_us);` inside `flush_cuda_kernels` — the only call site. |
+| REQ-1 | SHIPPED | impl: `pub struct CudaKernelScope` at `CudaKernelScope in ferrotorch-profiler/src/cuda_timing.rs` carrying name/category/start/stream, mirroring PyTorch's CUDA-event timing in `torch/autograd/profiler.py:126-131`; non-test consumer: `pub in ferrotorch-profiler/src/lib.rs` re-exports it under the cuda feature; `ferrotorch/src/lib.rs` propagates to the meta-crate prelude — user code on a CUDA host constructs scopes via this re-export. |
+| REQ-2 | SHIPPED | impl: `pub fn new` at `new in ferrotorch-profiler/src/cuda_timing.rs` calling `ctx.new_event(Some(CU_EVENT_DEFAULT))` + `start.record(stream)`; non-test consumer: re-exported via `CudaKernelScope`, the surface-coverage contract pins it (note: under cuda feature only). |
+| REQ-3 | SHIPPED | impl: `pub fn stop(self, profiler) -> Result<(), DriverError>` at `stop in ferrotorch-profiler/src/cuda_timing.rs` consuming `self`, recording the end event, and calling `profiler.push_pending_cuda_scope(...)` at line 112; non-test consumer: `profiler in ferrotorch-profiler/src/profiler.rs` `pub(crate) fn push_pending_cuda_scope` is the matching profiler entry point — `CudaKernelScope::stop` is the only production caller. |
+| REQ-4 | SHIPPED | impl: `pub(crate) struct PendingCudaScope` at `PendingCudaScope in ferrotorch-profiler/src/cuda_timing.rs` with `pub(crate)` fields, intentionally absent from the `lib.rs` re-export block per the comment at line 130-131; non-test consumer: `pub in ferrotorch-profiler/src/profiler.rs` `pending_cuda: Mutex<Vec<PendingCudaScope>>` field stores them; `profiler in profiler.rs` accepts them via `push_pending_cuda_scope`; `profiler in profiler.rs` calls `scope.finalize(epoch_us)` to drain. |
+| REQ-5 | SHIPPED | impl: `pub(crate) fn finalize(self, profiler_epoch_us: u64) -> ProfileEvent` at `finalize in ferrotorch-profiler/src/cuda_timing.rs` with the synchronise + `elapsed_ms` + `" [timing_error]"` failure path; non-test consumer: `pub in ferrotorch-profiler/src/profiler.rs` `let event = scope.finalize(epoch_us);` inside `flush_cuda_kernels` — the only call site. |
 | REQ-6 | SHIPPED | impl: `ferrotorch-profiler/src/lib.rs:3` `#![deny(unsafe_code)]` enforces the no-unsafe rule; `cuda_timing.rs` contains zero `unsafe` blocks (verified by `grep -n unsafe ferrotorch-profiler/src/cuda_timing.rs` returning empty); the `cudarc` calls (`new_event`, `record`, `synchronize`, `elapsed_ms`) encapsulate the FFI; non-test consumer: the deny-attribute is workspace-enforced via `cargo clippy --lib -- -D warnings` and the crate compiles clean. |
-| REQ-7 | SHIPPED | impl: `#![cfg(feature = "cuda")]` at `ferrotorch-profiler/src/cuda_timing.rs:39` skipping the module when the feature is off; non-test consumer: `ferrotorch-profiler/src/lib.rs:27-28` also gates `pub mod cuda_timing` on the same feature, so the no-cuda dependency graph compiles without `cudarc`. Verified by `cargo check -p ferrotorch-profiler` (no features) succeeding without a `cudarc` linker error. |
+| REQ-7 | SHIPPED | impl: `#![cfg(feature = "cuda")]` at `pub in ferrotorch-profiler/src/cuda_timing.rs` skipping the module when the feature is off; non-test consumer: `pub in ferrotorch-profiler/src/lib.rs` also gates `pub mod cuda_timing` on the same feature, so the no-cuda dependency graph compiles without `cudarc`. Verified by `cargo check -p ferrotorch-profiler` (no features) succeeding without a `cudarc` linker error. |

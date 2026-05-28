@@ -57,12 +57,12 @@ NOT-STARTED here).
 - [x] AC-2: `RandomCrop::square(5)` constructs a square crop.
 - [x] AC-3: Applying to a `[3, 5, 7]` input with `(2, 3)` crop produces
   a `[3, 2, 3]` output (verified by `test_random_crop_shape` at
-  `random_crop.rs:94`).
+  `test_random_crop_shape in random_crop.rs`).
 - [x] AC-4: When input dims exactly match crop dims, output equals
   input data (verified by `test_random_crop_exact_size` at
-  `random_crop.rs:106`).
+  `test_random_crop_exact_size in random_crop.rs`).
 - [x] AC-5: When input is smaller than crop, `apply` returns `Err`
-  (verified by `test_random_crop_too_small` at `random_crop.rs:118`).
+  (verified by `test_random_crop_too_small in random_crop.rs`).
 - [x] AC-6: `padding`, `pad_if_needed`, and constant-`fill` support
   (verified by `test_random_crop_with_padding_shape`,
   `test_random_crop_pad_if_needed_handles_small_input`, and
@@ -86,14 +86,14 @@ impl<T: Float> RandomCrop<T> {
 }
 ```
 
-at `random_crop.rs:13-32`. The `square` helper exists because the
+at `square in random_crop.rs`. The `square` helper exists because the
 common ImageNet pipeline uses a single integer (e.g. `RandomCrop(224)`)
 to mean a square crop; upstream Python handles this with a
 `_setup_size` shim and a sequence-of-1 fallback.
 
 ### Transform impl (REQ-4)
 
-`fn apply` at `random_crop.rs:34-87`:
+`fn apply` at `apply in random_crop.rs`:
 
 1. Shape check: `shape.len() == 3` else `InvalidArgument`.
 2. Bounds check: `h >= crop_h && w >= crop_w` else `InvalidArgument`.
@@ -147,9 +147,9 @@ pad_if_needed / fill / padding_mode to RandomCrop".
 
 Tests in `mod tests in random_crop.rs` (3 tests):
 
-- `test_random_crop_shape` at `random_crop.rs:94-104`
-- `test_random_crop_exact_size` at `random_crop.rs:106-116`
-- `test_random_crop_too_small` at `random_crop.rs:118-128`
+- `test_random_crop_shape in random_crop.rs`
+- `test_random_crop_exact_size in random_crop.rs`
+- `test_random_crop_too_small in random_crop.rs`
 
 Smoke:
 
@@ -163,8 +163,8 @@ Expected: `3 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct RandomCrop<T: Float>` with `crop_h, crop_w, _marker` at `ferrotorch-vision/src/transforms/random_crop.rs:13-17`, mirroring `torchvision/transforms/v2/_geometry.py:759` `class RandomCrop(Transform)`; non-test consumer: `pub use random_crop::RandomCrop;` at `ferrotorch-vision/src/transforms/mod.rs:25`. |
-| REQ-2 | SHIPPED | impl: `pub fn RandomCrop::new(crop_h: usize, crop_w: usize) -> Self` at `random_crop.rs:20-26`; non-test consumer: reachable via `mod.rs:25` re-export. |
-| REQ-3 | SHIPPED | impl: `pub fn RandomCrop::square(size: usize) -> Self` at `random_crop.rs:29-31`; non-test consumer: reachable via `mod.rs:25` re-export; called by user code wanting the canonical `RandomCrop(224)` square-crop ergonomics. |
-| REQ-4 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomCrop<T>` with shape + bounds + random-corner + region-copy at `random_crop.rs:34-87`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this type — the `mod.rs:25` re-export makes it composable into `Compose<T>` pipelines. |
+| REQ-1 | SHIPPED | impl: `pub struct RandomCrop<T: Float>` with `crop_h, crop_w, _marker` at `RandomCrop in ferrotorch-vision/src/transforms/random_crop.rs`, mirroring `torchvision/transforms/v2/_geometry.py:759` `class RandomCrop(Transform)`; non-test consumer: `pub use random_crop::RandomCrop;` at `ferrotorch-vision/src/transforms/mod.rs`. |
+| REQ-2 | SHIPPED | impl: `pub fn RandomCrop::new(crop_h: usize, crop_w: usize) -> Self` at `RandomCrop in random_crop.rs`; non-test consumer: reachable via `mod.rs` re-export. |
+| REQ-3 | SHIPPED | impl: `pub fn RandomCrop::square(size: usize) -> Self` at `RandomCrop in random_crop.rs`; non-test consumer: reachable via `mod.rs` re-export; called by user code wanting the canonical `RandomCrop(224)` square-crop ergonomics. |
+| REQ-4 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomCrop<T>` with shape + bounds + random-corner + region-copy at `random_crop.rs`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this type — the `mod.rs` re-export makes it composable into `Compose<T>` pipelines. |
 | REQ-5 | SHIPPED | impl: `with_padding / with_padding_hw / with_fill / with_pad_if_needed` builders and pad-then-crop dispatch at `ferrotorch-vision/src/transforms/random_crop.rs:42-95,98-201`; non-test production consumer: `pub use random_crop::RandomCrop;` at `ferrotorch-vision/src/transforms/mod.rs:33` — augmentation pipelines compose `RandomCrop::new(h, w).with_padding(4).with_fill(0.0)` into `Compose<T>` for the canonical CIFAR-10 preset. |

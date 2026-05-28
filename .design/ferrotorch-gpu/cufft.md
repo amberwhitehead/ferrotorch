@@ -136,8 +136,8 @@ upstream consumer at `ferrotorch-core/src/fft.rs:745` notes the
 3. Apply `1/n_out` normalisation kernel.
 4. Return.
 
-Consumers at `backend_impl.rs:4555` (R2C f32), `:4568` (R2C f64),
-`:4581` (C2R f32), `:4594` (C2R f64).
+Consumers at `backend_impl.rs` (R2C f32), `backend_impl.rs` (R2C f64),
+`backend_impl.rs` (C2R f32), `backend_impl.rs` (C2R f64).
 
 ### Hermitian FFT pair (REQ-7)
 
@@ -149,8 +149,8 @@ modulo normalisation; see torch.fft docs).
 `pub fn gpu_ihfft_f32 in cufft.rs`: real → Hermitian-half. Computed
 as R2C + sign-conjugation kernel.
 
-Consumers at `backend_impl.rs:4609` (hfft f32), `:4623` (hfft f64),
-`:4636` (ihfft f32), `:4648` (ihfft f64). The `ferrotorch-core/src/fft.rs:998,1046`
+Consumers at `backend_impl.rs` (hfft f32), `backend_impl.rs` (hfft f64),
+`backend_impl.rs` (ihfft f32), `backend_impl.rs` (ihfft f64). The `ferrotorch-core/src/fft.rs,1046`
 doc-comments explicitly call out the dispatch as "via cuFFT C2R + conj PTX".
 
 ### Inverse normalisation (REQ-8)
@@ -221,12 +221,12 @@ backend's FFT dispatch arms). Those arms are reached from
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub fn gpu_fft_c2c_f32 in cufft.rs` and `pub fn gpu_fft_c2c_f64 in cufft.rs` per upstream `aten/src/ATen/native/cuda/SpectralOps.cpp:445`. Non-test consumer: `backend_impl.rs:4443` (f32) and `:4457` (f64). |
-| REQ-2 | SHIPPED | impl: `pub fn gpu_fft2_c2c_f32 in cufft.rs` and `pub fn gpu_fft2_c2c_f64 in cufft.rs`. Non-test consumer: `backend_impl.rs:4500` (f32) and `:4514` (f64). |
-| REQ-3 | SHIPPED | impl: `pub fn gpu_fftn3d_c2c_f32 in cufft.rs` and `pub fn gpu_fftn3d_c2c_f64 in cufft.rs`. Non-test consumer: `backend_impl.rs:4664` (f32) and `:4679` (f64). |
-| REQ-4 | SHIPPED | impl: `pub fn gpu_fftn2d_c2c_f32 in cufft.rs`, `pub fn gpu_fftn_axes_c2c_f32 in cufft.rs`, plus f64 mirrors. Non-test consumer: `backend_impl.rs:4695` (fftn2d_c2c_f32) and the axes-selected path called from `ferrotorch-core/src/fft.rs:745` ("gpu_fftn_axes_c2c_f32/f64" fallback). |
-| REQ-5 | SHIPPED | impl: `pub fn gpu_rfft_r2c_f32 in cufft.rs` and `pub fn gpu_rfft_r2c_f64 in cufft.rs` per upstream `aten/src/ATen/native/cuda/SpectralOps.cpp:318`. Non-test consumer: `backend_impl.rs:4555` (f32) and `:4568` (f64). |
-| REQ-6 | SHIPPED | impl: `pub fn gpu_irfft_c2r_f32 in cufft.rs` and `pub fn gpu_irfft_c2r_f64 in cufft.rs` per upstream `aten/src/ATen/native/cuda/SpectralOps.cpp:405`. Non-test consumer: `backend_impl.rs:4581` (f32) and `:4594` (f64). |
-| REQ-7 | SHIPPED | impl: `pub fn gpu_hfft_f32 in cufft.rs`, `gpu_hfft_f64 in cufft.rs`, `gpu_ihfft_f32 in cufft.rs`, `gpu_ihfft_f64 in cufft.rs`. Non-test consumer: `backend_impl.rs:4609,4623,4636,4648`. `ferrotorch-core/src/fft.rs:998,1046` documents the dispatch path. |
+| REQ-1 | SHIPPED | impl: `pub fn gpu_fft_c2c_f32 in cufft.rs` and `pub fn gpu_fft_c2c_f64 in cufft.rs` per upstream `aten/src/ATen/native/cuda/SpectralOps.cpp:445`. Non-test consumer: `backend_impl.rs` (f32) and `backend_impl.rs` (f64). |
+| REQ-2 | SHIPPED | impl: `pub fn gpu_fft2_c2c_f32 in cufft.rs` and `pub fn gpu_fft2_c2c_f64 in cufft.rs`. Non-test consumer: `gpu_fft2_c2c_f64 in backend_impl.rs` (f32) and `backend_impl.rs` (f64). |
+| REQ-3 | SHIPPED | impl: `pub fn gpu_fftn3d_c2c_f32 in cufft.rs` and `pub fn gpu_fftn3d_c2c_f64 in cufft.rs`. Non-test consumer: `gpu_fftn3d_c2c_f64 in backend_impl.rs` (f32) and `backend_impl.rs` (f64). |
+| REQ-4 | SHIPPED | impl: `pub fn gpu_fftn2d_c2c_f32 in cufft.rs`, `pub fn gpu_fftn_axes_c2c_f32 in cufft.rs`, plus f64 mirrors. Non-test consumer: `gpu_fftn_axes_c2c_f32 in backend_impl.rs` (fftn2d_c2c_f32) and the axes-selected path called from `ferrotorch-core/src/fft.rs` ("gpu_fftn_axes_c2c_f32/f64" fallback). |
+| REQ-5 | SHIPPED | impl: `pub fn gpu_rfft_r2c_f32 in cufft.rs` and `pub fn gpu_rfft_r2c_f64 in cufft.rs` per upstream `aten/src/ATen/native/cuda/SpectralOps.cpp:318`. Non-test consumer: `backend_impl.rs` (f32) and `backend_impl.rs` (f64). |
+| REQ-6 | SHIPPED | impl: `pub fn gpu_irfft_c2r_f32 in cufft.rs` and `pub fn gpu_irfft_c2r_f64 in cufft.rs` per upstream `aten/src/ATen/native/cuda/SpectralOps.cpp:405`. Non-test consumer: `backend_impl.rs` (f32) and `backend_impl.rs` (f64). |
+| REQ-7 | SHIPPED | impl: `pub fn gpu_hfft_f32 in cufft.rs`, `gpu_hfft_f64 in cufft.rs`, `gpu_ihfft_f32 in cufft.rs`, `gpu_ihfft_f64 in cufft.rs`. Non-test consumer: `gpu_ihfft_f64 in backend_impl.rs,4623,4636,4648`. `ferrotorch-core/src/fft.rs,1046` documents the dispatch path. |
 | REQ-8 | SHIPPED | impl: every inverse path in `cufft.rs` issues a follow-up `1/n` normalisation kernel launch matching `aten/src/ATen/native/cuda/SpectralOps.cpp:298::_fft_apply_normalization_out`. Non-test consumer: every inverse-direction consumer in `backend_impl.rs` (e.g. `:4443` with `inverse = true`). |
 | REQ-9 | SHIPPED | impl: every cuda function has a matching `#[cfg(not(feature = "cuda"))]` stub returning `Err(GpuError::NoCudaFeature)`. Non-test consumer: `backend_impl.rs` no-cuda compile path. |

@@ -156,7 +156,7 @@ calls `kernel.execute(...)`.
   InductorCompileStatus, InductorTarget, InterpreterBackend,
   NativeBackend}` at `ferrotorch-jit/src/lib.rs:89-92` — grandfathered
   public API surface.
-- `ferrotorch-jit/src/autotune.rs:56` consumes `Codegen` and
+- `ferrotorch-jit/src/autotune.rs` consumes `Codegen` and
   `CompiledGraph` via `use crate::codegen::{Codegen, CompiledGraph};`
   to dispatch candidate backends.
 
@@ -199,11 +199,11 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub trait Codegen` in `codegen.rs`; non-test consumer: `ferrotorch-jit/src/autotune.rs:56` `use crate::codegen::{Codegen, CompiledGraph};` + the `AutotuneCandidate` field `backend: Box<dyn Codegen>`. |
-| REQ-2 | SHIPPED | impl: `pub struct CompiledGraph` in `codegen.rs`; non-test consumer: re-export at `ferrotorch-jit/src/lib.rs:89-92` + `autotune.rs:56` (Autotuner returns `CompiledGraph` for the winning candidate). |
-| REQ-3 | SHIPPED | impl: `pub struct InterpreterBackend` + `impl Codegen for InterpreterBackend` in `codegen.rs`; non-test consumer: re-export at `lib.rs:89-92` + used internally as the fallback target inside `NativeBackend::compile` and `InductorBackend::compile_with_status`. |
-| REQ-4 | SHIPPED | impl: `pub struct NativeBackend` + `impl Codegen for NativeBackend` + `fn try_compile_native` in `codegen.rs`; non-test consumer: re-export at `lib.rs:89-92`. |
-| REQ-5 | SHIPPED | impl: `pub enum InductorTarget { CpuRust, GpuCuda, GpuPtx }` in `codegen.rs`; non-test consumer: re-export at `lib.rs:89-92` + used by every `InductorBackend` constructor. |
-| REQ-6 | SHIPPED | impl: `pub struct InductorBackend` + `impl Codegen` + `InductorBackend::generate` in `codegen.rs`; non-test consumer: re-export at `lib.rs:89-92`. Internal: `InductorBackend::compile` calls `crate::codegen_jit::compile_loop_ir_kernel` (the cranelift JIT path) for `CpuRust` and `crate::codegen_gpu::GpuCodegen::generate_{cuda,ptx}_source` for GPU targets. |
-| REQ-7 | SHIPPED | impl: `pub enum InductorCompileStatus` + `impl InductorBackend::compile_with_status` in `codegen.rs`; non-test consumer: re-export at `lib.rs:89-92`. |
+| REQ-1 | SHIPPED | impl: `pub trait Codegen` in `codegen.rs`; non-test consumer: `AutotuneCandidate in ferrotorch-jit/src/autotune.rs` `use crate::codegen::{Codegen, CompiledGraph};` + the `AutotuneCandidate` field `backend: Box<dyn Codegen>`. |
+| REQ-2 | SHIPPED | impl: `pub struct CompiledGraph` in `codegen.rs`; non-test consumer: re-export at `codegen in ferrotorch-jit/src/lib.rs` + `autotune.rs` (Autotuner returns `CompiledGraph` for the winning candidate). |
+| REQ-3 | SHIPPED | impl: `pub struct InterpreterBackend` + `impl Codegen for InterpreterBackend` in `codegen.rs`; non-test consumer: re-export at `lib.rs` + used internally as the fallback target inside `NativeBackend::compile` and `InductorBackend::compile_with_status`. |
+| REQ-4 | SHIPPED | impl: `pub struct NativeBackend` + `impl Codegen for NativeBackend` + `fn try_compile_native` in `codegen.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-5 | SHIPPED | impl: `pub enum InductorTarget { CpuRust, GpuCuda, GpuPtx }` in `codegen.rs`; non-test consumer: re-export at `lib.rs` + used by every `InductorBackend` constructor. |
+| REQ-6 | SHIPPED | impl: `pub struct InductorBackend` + `impl Codegen` + `InductorBackend::generate` in `codegen.rs`; non-test consumer: re-export at `lib.rs`. Internal: `InductorBackend::compile` calls `crate::codegen_jit::compile_loop_ir_kernel` (the cranelift JIT path) for `CpuRust` and `crate::codegen_gpu::GpuCodegen::generate_{cuda,ptx}_source` for GPU targets. |
+| REQ-7 | SHIPPED | impl: `pub enum InductorCompileStatus` + `impl InductorBackend::compile_with_status` in `codegen.rs`; non-test consumer: re-export at `lib.rs`. |
 | REQ-8 | SHIPPED | impl: `fn resolve_group_dtype` in `codegen.rs` returning `Err(JitError::CodegenError)` on dtype mismatch; non-test consumer: `InductorBackend::generate` calls it for every GPU group before lowering. |

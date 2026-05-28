@@ -182,9 +182,9 @@ Expected: 2 tests pass.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub enum ObserverType` in `qat.rs`; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:244`. |
-| REQ-2 | SHIPPED | impl: `pub struct QatConfig` with six fields in `qat.rs`; non-test consumer: re-export at `lib.rs:244`. |
-| REQ-3 | SHIPPED | impl: `pub fn default_symmetric_int8`, `pub fn per_channel_int8`, `pub fn int4_weight_int8_activation` on `QatConfig` in `qat.rs`; non-test consumer: re-export at `lib.rs:244`. |
-| REQ-4 | SHIPPED | impl: `pub struct QuantizedModel` in `qat.rs`; non-test consumer: re-export at `lib.rs:244`. |
-| REQ-5 | SHIPPED | impl: `pub fn weight`, `pub fn weight_qparams`, `pub fn weight_names`, `pub fn num_weights`, `pub fn dequantize_weight`, `pub fn quantized_size_bytes`, `pub fn compression_ratio`, `pub fn config` on `QuantizedModel` in `qat.rs`; non-test consumer: re-export at `lib.rs:244`. |
-| REQ-6 | SHIPPED | impl: `pub fn prepare_qat` in `qat.rs` (calls `module.named_parameters()` then `core_prepare_qat`); non-test consumer: re-export at `lib.rs:244`. |
-| REQ-7 | SHIPPED | impl: `pub use ferrotorch_core::quantize::{QatLayer, QatModel, prepare_qat as core_prepare_qat}` near the top of `qat.rs`; non-test consumer: re-export at `lib.rs:244` exposes the flattened surface. |
+| REQ-2 | SHIPPED | impl: `pub struct QatConfig` with six fields in `qat.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-3 | SHIPPED | impl: `pub fn default_symmetric_int8`, `pub fn per_channel_int8`, `pub fn int4_weight_int8_activation` on `QatConfig` in `qat.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-4 | SHIPPED | impl: `pub struct QuantizedModel` in `qat.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-5 | SHIPPED | impl: `pub fn weight`, `pub fn weight_qparams`, `pub fn weight_names`, `pub fn num_weights`, `pub fn dequantize_weight`, `pub fn quantized_size_bytes`, `pub fn compression_ratio`, `pub fn config` on `QuantizedModel` in `qat.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-6 | SHIPPED | impl: `pub fn prepare_qat` in `qat.rs` (calls `module.named_parameters()` then `core_prepare_qat`); non-test consumer: re-export at `lib.rs`. |
+| REQ-7 | SHIPPED | impl: `pub use ferrotorch_core::quantize::{QatLayer, QatModel, prepare_qat as core_prepare_qat}` near the top of `qat.rs`; non-test consumer: re-export at `lib.rs` exposes the flattened surface. |

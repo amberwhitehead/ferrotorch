@@ -117,7 +117,7 @@ is `features.8.<n>` regardless of how the stages count is configured.
 - `pub use efficientnet::{EfficientNet, efficientnet_b0}` re-export at
   `ferrotorch-vision/src/models/mod.rs`.
 - `default_registry()` registers `"efficientnet_b0"` via
-  `maybe_load_pretrained` at `registry.rs:188`.
+  `maybe_load_pretrained` at `registry.rs`.
 
 ## Parity contract
 
@@ -169,10 +169,10 @@ Expected: all tests pass; no parity-sweep ops.
 | REQ-1 | SHIPPED | impl: `struct ConvBnSiLU<T: Float>` + `Module<T>` impl in `efficientnet.rs` mirrors torchvision's `Conv2dNormActivation` (SiLU variant) used by `_efficientnet`; non-test consumer: every `MBConv::new` constructs `ConvBnSiLU::new(...)` in `efficientnet.rs`; `EfficientNet::new` uses it for stem and head. |
 | REQ-2 | SHIPPED | impl: `struct MBConv<T: Float>` + `Module<T>` impl in `efficientnet.rs` mirrors torchvision `MBConv` at `efficientnet.py:82`; non-test consumer: `EfficientNet::new` builds the seven stages of MBConvs in `efficientnet.rs`. |
 | REQ-3 | SHIPPED | impl: `const EFFICIENTNET_B0_STAGES: [Stage; 7]` in `efficientnet.rs` mirrors torchvision's B0 stage table at `efficientnet.py:_efficientnet_b0_setup`; non-test consumer: `EfficientNet::new` iterates `&EFFICIENTNET_B0_STAGES` to build the model. |
-| REQ-4 | SHIPPED | impl: `pub struct EfficientNet<T: Float>` + `EfficientNet::new` in `efficientnet.rs`; non-test consumer: `default_registry()` constructs it via `maybe_load_pretrained` at `registry.rs:188`. |
+| REQ-4 | SHIPPED | impl: `pub struct EfficientNet<T: Float>` + `EfficientNet::new` in `efficientnet.rs`; non-test consumer: `default_registry()` constructs it via `maybe_load_pretrained` at `registry.rs`. |
 | REQ-5 | SHIPPED | impl: `Module::forward` for `EfficientNet<T>` in `efficientnet.rs`; non-test consumer: trait method invoked through `Box<dyn Module<T>>` returned by `registry.rs::get_model`. |
-| REQ-6 | SHIPPED | impl: `Module::named_parameters` for `EfficientNet<T>` in `efficientnet.rs` (dynamic `head_index`); non-test consumer: `load_state_dict(&state_dict, false)` at `registry.rs:53` walks the result. |
-| REQ-7 | SHIPPED | impl: `children` / `named_children` overrides on `ConvBnSiLU`, `MBConv`, `EfficientNet` in `efficientnet.rs`; non-test consumer: `apply_bn_buffers_from_state_dict` at `registry.rs:62` walks `named_descendants_dyn()` for BN running stats. |
+| REQ-6 | SHIPPED | impl: `Module::named_parameters` for `EfficientNet<T>` in `efficientnet.rs` (dynamic `head_index`); non-test consumer: `load_state_dict(&state_dict, false)` at `named_parameters in registry.rs` walks the result. |
+| REQ-7 | SHIPPED | impl: `children` / `named_children` overrides on `ConvBnSiLU`, `MBConv`, `EfficientNet` in `efficientnet.rs`; non-test consumer: `apply_bn_buffers_from_state_dict` at `registry.rs` walks `named_descendants_dyn()` for BN running stats. |
 | REQ-8 | SHIPPED | impl: `impl IntermediateFeatures<T> for EfficientNet<T>` in `efficientnet.rs`; non-test consumer: `pub use feature_extractor::IntermediateFeatures` at `mod.rs`; `feature_extractor.rs` re-uses it. |
-| REQ-9 | SHIPPED | impl: `pub fn efficientnet_b0` in `efficientnet.rs`; non-test consumer: `default_registry()` invokes it at `registry.rs:191`. |
-| REQ-10 | SHIPPED | impl: `MBConv::forward` skips `StochasticDepth` and applies a plain `add(&x, input)` when `use_residual`; non-test consumer: same model returned by `default_registry()` runs through `Box<dyn Module<T>>::forward` with `.eval()` in the registry pretrained-weight verify path (`registry.rs:62` via the loader). |
+| REQ-9 | SHIPPED | impl: `pub fn efficientnet_b0` in `efficientnet.rs`; non-test consumer: `default_registry()` invokes it at `registry.rs`. |
+| REQ-10 | SHIPPED | impl: `MBConv::forward` skips `StochasticDepth` and applies a plain `add(&x, input)` when `use_residual`; non-test consumer: same model returned by `default_registry()` runs through `Box<dyn Module<T>>::forward` with `.eval()` in the registry pretrained-weight verify path (`registry.rs` via the loader). |

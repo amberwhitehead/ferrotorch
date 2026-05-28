@@ -71,10 +71,10 @@ et al. 2017 paper.
   `grad_penalty.rs:349-372`.
 - [x] AC-2: Shape mismatch between `real` and `fake` errors —
   `test_gradient_penalty_shape_mismatch` at
-  `grad_penalty.rs:374-380`.
+  `test_gradient_penalty_shape_mismatch in grad_penalty.rs`.
 - [x] AC-3: Scalar-input `gradient_penalty` with quadratic
   discriminator computes correctly —
-  `test_gradient_penalty_scalar_input` at `grad_penalty.rs:382+`.
+  `test_gradient_penalty_scalar_input in grad_penalty.rs`.
 
 ## Architecture
 
@@ -165,9 +165,9 @@ finite-difference fallback alongside the exact `jvp_exact` in
 
 Tests in `grad_penalty.rs:315-708`. Key tests:
 
-- `test_gradient_penalty_linear_discriminator` (`:349`)
-- `test_gradient_penalty_shape_mismatch` (`:374`)
-- `test_gradient_penalty_scalar_input` (`:382+`)
+- `test_gradient_penalty_linear_discriminator` (`test_gradient_penalty_linear_discriminator in grad_penalty.rs`)
+- `test_gradient_penalty_shape_mismatch` (`test_gradient_penalty_shape_mismatch in grad_penalty.rs`)
+- `test_gradient_penalty_scalar_input` (`test_gradient_penalty_scalar_input in grad_penalty.rs`)
 - Additional `grad_norm`, `jvp`, `vjp` tests in the rest of the
   module.
 
@@ -181,7 +181,7 @@ All tests pass in the workspace gauntlet.
 | REQ-2 | SHIPPED | impl: alpha-uniform interpolation at `grad_penalty.rs:81-90`; non-test consumer: inside REQ-1's `gradient_penalty` body. |
 | REQ-3 | SHIPPED | impl: `let grads = grad(&d_interp, &[&x_interp], false, true)?` at `grad_penalty.rs:100`; non-test consumer: inside REQ-1's body — every `gradient_penalty` call. |
 | REQ-4 | SHIPPED | impl: penalty composition at `grad_penalty.rs:111-122` using `crate::grad_fns::arithmetic::{pow, sub, mul, sqrt}` and `crate::grad_fns::reduction::sum`; non-test consumer: inside REQ-1's body. |
-| REQ-5 | SHIPPED | impl: `pub fn grad_norm<T: Float>` at `grad_penalty.rs:146-165`; mirrors PyTorch's L2-norm computation pattern; non-test production consumer: re-exported at `mod.rs:32 grad_norm` and `lib.rs:127 grad_norm`. Existing pub API — boundary-API grandfathering. |
-| REQ-6 | SHIPPED | impl: `pub fn jvp<T: Float, F>` at `grad_penalty.rs:188-241`; the finite-difference variant; non-test production consumer: re-exported at `mod.rs:32 jvp` and `lib.rs:128 jvp`. Existing pub API — boundary-API grandfathering. |
-| REQ-7 | SHIPPED | impl: `pub fn vjp<T: Float, F>` at `grad_penalty.rs:264-308`; mirrors `torch.autograd.functional.vjp` at `torch/autograd/functional.py:271-345`; non-test production consumer: re-exported at `mod.rs:32 vjp` and `lib.rs:129 vjp`. Existing pub API — boundary-API grandfathering. |
-| REQ-8 | SHIPPED | impl: shape-validation branches at `grad_penalty.rs:67-76` (`gradient_penalty`), `:192-200` (`jvp`), `:283-291` (`vjp`); non-test consumer: inside REQ-1/REQ-6/REQ-7 bodies; tested by `test_gradient_penalty_shape_mismatch` at `:374-380`. |
+| REQ-5 | SHIPPED | impl: `pub fn grad_norm<T: Float>` at `grad_norm in grad_penalty.rs`; mirrors PyTorch's L2-norm computation pattern; non-test production consumer: re-exported at `mod.rs grad_norm` and `lib.rs grad_norm`. Existing pub API — boundary-API grandfathering. |
+| REQ-6 | SHIPPED | impl: `pub fn jvp<T: Float, F>` at `jvp in grad_penalty.rs`; the finite-difference variant; non-test production consumer: re-exported at `mod.rs jvp` and `lib.rs jvp`. Existing pub API — boundary-API grandfathering. |
+| REQ-7 | SHIPPED | impl: `pub fn vjp<T: Float, F>` at `vjp in grad_penalty.rs`; mirrors `torch.autograd.functional.vjp` at `torch/autograd/functional.py:271-345`; non-test production consumer: re-exported at `mod.rs vjp` and `lib.rs vjp`. Existing pub API — boundary-API grandfathering. |
+| REQ-8 | SHIPPED | impl: shape-validation branches at `gradient_penalty in grad_penalty.rs` (`gradient_penalty`), `gradient_penalty in grad_penalty.rs` (`jvp`), `jvp in grad_penalty.rs` (`vjp`); non-test consumer: inside REQ-1/REQ-6/REQ-7 bodies; tested by `test_gradient_penalty_shape_mismatch in grad_penalty.rs`. |

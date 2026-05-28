@@ -31,7 +31,7 @@ between `JsonGrammar` and the CubeCL kernel
    through to the CPU `JsonSchemaProcessor::compute_mask` loop.
 
 The module is gated on the `cuda` feature
-(`#[cfg(feature = "cuda")] pub mod gpu_dispatch;` in `lib.rs:16-17`).
+(`#[cfg(feature = "cuda")] pub mod gpu_dispatch;` in `lib.rs`).
 
 ## Requirements
 
@@ -318,9 +318,9 @@ levels.
 
 - `pub struct PackedVocab` and `pub fn compute_mask_gpu` are reachable
   via `ferrotorch_grammar::{PackedVocab, compute_mask_gpu}`
-  (re-exported in `lib.rs:23-24` under the `cuda` feature).
+  (re-exported in `lib.rs` under the `cuda` feature).
 - The `ferrotorch_cubecl::compute_token_mask_dfa_to_gpu` kernel-API
-  contract is the upstream — see `ferrotorch-cubecl/src/grammar.rs:33`
+  contract is the upstream — see `ferrotorch-cubecl/src/grammar.rs`
   (`//! JsonSchemaProcessor::compute_mask` doc reference).
 - The boundary-API consumer per goal.md S5 is the `pub use
   ferrotorch_grammar as grammar;` re-export in

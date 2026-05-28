@@ -88,7 +88,7 @@ unknown HF schema field cannot silently land into a parameter.
 - `pub use layer::{BertIntermediate, BertLayer, BertOutput}` at
   `ferrotorch-bert/src/lib.rs:89`.
 - `pub layer: Vec<BertLayer<T>>` field of `pub struct BertEncoder`
-  at `ferrotorch-bert/src/model.rs:22`; `BertEncoder::new` at
+  at `BertEncoder in ferrotorch-bert/src/model.rs`; `BertEncoder::new` at
   `ferrotorch-bert/src/model.rs:35` constructs them in a loop;
   `BertEncoder`'s `Module::forward` at
   `ferrotorch-bert/src/model.rs:46` iterates through them.

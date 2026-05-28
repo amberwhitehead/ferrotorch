@@ -152,7 +152,7 @@ conditions (`alpha > 1` for mean, `alpha > 2` for variance, all
 
 ### Non-test production consumers
 
-- `pub use pareto::Pareto` in `lib.rs:116` — grandfathered public API
+- `pub use pareto::Pareto` in `lib.rs` — grandfathered public API
   re-export. Downstream Bayesian / heavy-tailed-prior code calls
   `ferrotorch_distributions::Pareto::new(scale, alpha)` directly.
 - `ferrotorch_distributions::Pareto::new` is registered in
@@ -218,7 +218,7 @@ Expected: `3 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct Pareto<T: Float>` with `scale`, `alpha` fields in `pareto.rs`, mirroring `torch/distributions/pareto.py:33-43`; non-test consumer: `pub use pareto::Pareto` in `lib.rs:116` — grandfathered public API; downstream heavy-tailed prior code constructs `Pareto::new(scale, alpha)` directly. |
+| REQ-1 | SHIPPED | impl: `pub struct Pareto<T: Float>` with `scale`, `alpha` fields in `pareto.rs`, mirroring `torch/distributions/pareto.py:33-43`; non-test consumer: `pub use pareto::Pareto` in `lib.rs` — grandfathered public API; downstream heavy-tailed prior code constructs `Pareto::new(scale, alpha)` directly. |
 | REQ-2 | SHIPPED | impl: `pub fn Pareto::new(scale, alpha) -> FerrotorchResult<Self>` with shape-match validation in `pareto.rs`; non-test consumer: `Pareto::new` registered in `tests/conformance/_surface_inventory.toml:483` as part of the conformance surface contract — that registration is structural inventory, not a test, and downstream callers go through the `pub use Pareto` re-export to invoke `Pareto::new`. |
 | REQ-3 | SHIPPED | impl: `pub fn scale(&self) -> &Tensor<T>` and `pub fn alpha(&self) -> &Tensor<T>` accessors in `pareto.rs`, mirroring `Pareto.scale` / `Pareto.alpha` attribute access in `pareto.py:39`; non-test consumer: `pub use Pareto` re-export exposes both accessors as part of the public API surface for downstream introspection / diagnostic code. |
 | REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for Pareto<T>` with `Distribution::sample` in `pareto.rs` using inverse-CDF `scale / u^(1/alpha)`, mirroring the `TransformedDistribution(Exponential, [Exp, Affine])` composition in `pareto.py:39-43`; non-test consumer: every external caller of the `Distribution` trait on a `Pareto` value hits this impl — that is the production consumer; tests `test_pareto_samples_above_scale` pin the boundary. |
@@ -227,4 +227,4 @@ Expected: `3 passed`.
 | REQ-7 | SHIPPED | impl: `Distribution::variance` in `pareto.rs` with `alpha > 2` → `scale^2*alpha/((alpha-1)^2*(alpha-2))` else `inf`, mirroring `pareto.py:63-67`; non-test consumer: `pub use Pareto` re-export. |
 | REQ-8 | SHIPPED | impl: `Distribution::entropy` in `pareto.rs` returns `log(scale/alpha) + 1 + 1/alpha`, mirroring `pareto.py:73-74`; non-test consumer: `pub use Pareto` re-export plus the trait-method dispatch path. |
 | REQ-9 | NOT-STARTED | blocker #1395 — `rsample` returns `InvalidArgument`. Upstream `Pareto.rsample` works via the `TransformedDistribution` chain (`pareto.py:43`) but ferrotorch's direct scalar-CPU sampling path does not build the autograd graph through inverse-CDF; rsample wiring requires either `TransformedDistribution` integration for Pareto or a hand-rolled backward node. |
-| REQ-10 | SHIPPED | impl: `mode` (= scale, `pareto.py:60-61`) + `cdf` (`1 - (scale/x)^alpha`) + `icdf` (`scale / (1-p)^(1/alpha)`) + `support` (`GreaterThanEq{lower_bound: min(scale)}` per `pareto.py:69-71`) + `arg_constraints` (`{alpha: Positive, scale: Positive}` per `pareto.py:31`) + `expand` overrides at the tail of `impl Distribution for Pareto` in `pareto.rs`; non-test consumer: trait dispatch through `pub use Pareto` re-export at `lib.rs:116`; `test_pareto_mode_equals_scale` / `test_pareto_cdf_at_scale_is_zero` / `test_pareto_cdf_icdf_roundtrip` / `test_pareto_surface_overrides` / `test_pareto_expand` pin the overrides. Closes #1405. |
+| REQ-10 | SHIPPED | impl: `mode` (= scale, `pareto.py:60-61`) + `cdf` (`1 - (scale/x)^alpha`) + `icdf` (`scale / (1-p)^(1/alpha)`) + `support` (`GreaterThanEq{lower_bound: min(scale)}` per `pareto.py:69-71`) + `arg_constraints` (`{alpha: Positive, scale: Positive}` per `pareto.py:31`) + `expand` overrides at the tail of `impl Distribution for Pareto` in `pareto.rs`; non-test consumer: trait dispatch through `pub use Pareto` re-export at `lib.rs`; `test_pareto_mode_equals_scale` / `test_pareto_cdf_at_scale_is_zero` / `test_pareto_cdf_icdf_roundtrip` / `test_pareto_surface_overrides` / `test_pareto_expand` pin the overrides. Closes #1405. |

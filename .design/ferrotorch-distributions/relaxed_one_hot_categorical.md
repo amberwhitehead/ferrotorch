@@ -206,7 +206,7 @@ to upstream's
 ### Non-test production consumers
 
 - `pub use relaxed_one_hot_categorical::RelaxedOneHotCategorical` in
-  `lib.rs:119` — grandfathered public API re-export. Downstream
+  `lib.rs` — grandfathered public API re-export. Downstream
   Gumbel-softmax VAE / discrete-variable training code constructs
   `RelaxedOneHotCategorical::new(temp, probs)?` directly.
 - `RelaxedOneHotCategorical::new` is registered in
@@ -264,7 +264,7 @@ Expected: `8 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct RelaxedOneHotCategorical<T: Float>` with `temperature: T`, `probs: Tensor<T>`, `normalized: Vec<T>`, `num_categories: usize` fields in `relaxed_one_hot_categorical.rs`, mirroring `torch/distributions/relaxed_categorical.py:109-135` (which uses `base_dist: ExpRelaxedCategorical` wrapping `Categorical(probs)`); non-test consumer: `pub use relaxed_one_hot_categorical::RelaxedOneHotCategorical` in `lib.rs:119` — grandfathered public API. |
+| REQ-1 | SHIPPED | impl: `pub struct RelaxedOneHotCategorical<T: Float>` with `temperature: T`, `probs: Tensor<T>`, `normalized: Vec<T>`, `num_categories: usize` fields in `relaxed_one_hot_categorical.rs`, mirroring `torch/distributions/relaxed_categorical.py:109-135` (which uses `base_dist: ExpRelaxedCategorical` wrapping `Categorical(probs)`); non-test consumer: `pub use relaxed_one_hot_categorical::RelaxedOneHotCategorical` in `lib.rs` — grandfathered public API. |
 | REQ-2 | SHIPPED | impl: `pub fn RelaxedOneHotCategorical::new(temperature, probs) -> FerrotorchResult<Self>` with `temperature > 0`, `probs.ndim() == 1`, `K >= 1`, `probs[i] > 0` validation + pre-cached normalization in `relaxed_one_hot_categorical.rs`; non-test consumer: registered in `tests/conformance/_surface_inventory.toml:455`; `pub use RelaxedOneHotCategorical` re-export. |
 | REQ-3 | SHIPPED | impl: `pub fn temperature(&self) -> T`, `pub fn probs(&self) -> &Tensor<T>`, `pub fn num_categories(&self) -> usize` accessors in `relaxed_one_hot_categorical.rs`, mirroring `RelaxedOneHotCategorical.temperature` / `RelaxedOneHotCategorical.probs` @property delegations in `relaxed_categorical.py:153-163`; non-test consumer: `pub use RelaxedOneHotCategorical` re-export exposes all three. |
 | REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for RelaxedOneHotCategorical<T>` with `sample` / `rsample` invoking `fn relaxed_one_hot_sample` (Gumbel-softmax forward `z = softmax((log_alpha + Gumbel) / temperature)`) in `relaxed_one_hot_categorical.rs`, mirroring `ExpRelaxedCategorical.rsample` (`relaxed_categorical.py:87-94`) + `ExpTransform` composition; non-test consumer: the trait impl is the production dispatch. Test `test_relaxed_one_hot_sample_shape_and_simplex` pins. |

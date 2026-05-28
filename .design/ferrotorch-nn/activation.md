@@ -192,18 +192,18 @@ thin pass-through.
 - `ferrotorch-optim/src/sgd.rs:818` — `let relu = ferrotorch_nn::ReLU::new();`
   inside the SGD module-flow conformance harness (production-side build
   of an MLP for verifying optimiser convergence).
-- `ferrotorch-rl/src/mlp_policy.rs:53` —
+- `ferrotorch-rl/src/mlp_policy.rs` —
   `use ferrotorch_nn::activation::Tanh;` for the actor-critic head.
-- `ferrotorch-vision/src/models/vgg.rs:21,25` —
+- `ferrotorch-vision/src/models/vgg.rs,25` —
   `use ferrotorch_nn::activation::ReLU; use ferrotorch_nn::{Conv2d,
   Dropout, Linear};` — VGG-16/19 stem.
-- `ferrotorch-vision/src/models/mobilenet.rs:51` —
+- `ferrotorch-vision/src/models/mobilenet.rs` —
   `use ferrotorch_nn::activation::{HardSigmoid, HardSwish, ReLU, ReLU6};`.
-- `ferrotorch-diffusion/src/vae.rs:24` —
+- `ferrotorch-diffusion/src/vae.rs` —
   `use ferrotorch_nn::{Conv2d, GroupNorm, SiLU};` — Stable Diffusion VAE
   ResnetBlock uses `SiLU` between every conv.
-- `ferrotorch-bert/src/layer.rs:13`, `ferrotorch-whisper/src/encoder.rs:27`,
-  `ferrotorch-whisper/src/layer.rs:12` —
+- `ferrotorch-bert/src/layer.rs`, `ferrotorch-whisper/src/encoder.rs`,
+  `ferrotorch-whisper/src/layer.rs` —
   `use ferrotorch_nn::{GELU, LayerNorm, Linear};` — BERT / Whisper FFN.
 - `ferrotorch-nn/src/lib.rs:189-193` — re-exports every public type, making
   them addressable as `ferrotorch_nn::{ReLU, GELU, SiLU, ...}` for
@@ -265,14 +265,14 @@ Expected: `87 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct ReLU` and `pub fn forward` at the top of `activation.rs`, mirroring `torch/nn/modules/activation.py:104-152`; non-test consumer: `ferrotorch-vision/src/models/vgg.rs:21` (`use ferrotorch_nn::activation::ReLU;`) and `ferrotorch-optim/src/sgd.rs:818` (`let relu = ferrotorch_nn::ReLU::new();`). Test `test_relu_forward` pins. |
-| REQ-2 | SHIPPED | impl: `pub struct Sigmoid`, `pub struct Tanh` in `activation.rs`, mirroring `torch/nn/modules/activation.py:337-434`; non-test consumer: `ferrotorch-rl/src/mlp_policy.rs:53` (`use ferrotorch_nn::activation::Tanh;`). Tests `test_sigmoid_forward`, `test_tanh_forward` pin. |
-| REQ-3 | SHIPPED | impl: `pub struct GELU` + re-exported `pub use act::GeluApproximate` in `activation.rs`, mirroring `torch/nn/modules/activation.py:777-824`; non-test consumer: `ferrotorch-bert/src/layer.rs:13` and `ferrotorch-whisper/src/encoder.rs:27` use `GELU`. Tests `test_gelu_forward_default`, `test_gelu_forward_tanh_approximate` pin both modes. |
-| REQ-4 | SHIPPED | impl: `pub struct SiLU` in `activation.rs`, mirroring `torch/nn/modules/activation.py:435-484`; non-test consumer: `ferrotorch-diffusion/src/vae.rs:24` (`use ferrotorch_nn::{Conv2d, GroupNorm, SiLU};`). Test `test_silu_forward` pins. |
+| REQ-1 | SHIPPED | impl: `pub struct ReLU` and `pub fn forward` at the top of `activation.rs`, mirroring `torch/nn/modules/activation.py:104-152`; non-test consumer: `new in ferrotorch-vision/src/models/vgg.rs` (`use ferrotorch_nn::activation::ReLU;`) and `new in ferrotorch-optim/src/sgd.rs` (`let relu = ferrotorch_nn::ReLU::new();`). Test `test_relu_forward` pins. |
+| REQ-2 | SHIPPED | impl: `pub struct Sigmoid`, `pub struct Tanh` in `activation.rs`, mirroring `torch/nn/modules/activation.py:337-434`; non-test consumer: `Tanh in ferrotorch-rl/src/mlp_policy.rs` (`use ferrotorch_nn::activation::Tanh;`). Tests `test_sigmoid_forward`, `test_tanh_forward` pin. |
+| REQ-3 | SHIPPED | impl: `pub struct GELU` + re-exported `pub use act::GeluApproximate` in `activation.rs`, mirroring `torch/nn/modules/activation.py:777-824`; non-test consumer: `GELU in ferrotorch-bert/src/layer.rs` and `ferrotorch-whisper/src/encoder.rs` use `GELU`. Tests `test_gelu_forward_default`, `test_gelu_forward_tanh_approximate` pin both modes. |
+| REQ-4 | SHIPPED | impl: `pub struct SiLU` in `activation.rs`, mirroring `torch/nn/modules/activation.py:435-484`; non-test consumer: `ferrotorch-diffusion/src/vae.rs` (`use ferrotorch_nn::{Conv2d, GroupNorm, SiLU};`). Test `test_silu_forward` pins. |
 | REQ-5 | SHIPPED | impl: `pub struct Softmax`, `pub struct LogSoftmax`, `pub struct Softmin` plus `pub struct Softmax2d` in `activation.rs`, mirroring `torch/nn/modules/activation.py:1709-1929`; non-test consumer: `ferrotorch-nn/src/lib.rs:189-193` re-exports each, and `ferrotorch-nn-derive`-generated forward chains in downstream model crates call them. `Softmax2d` is CPU-only (blocker #1451 for GPU). |
 | REQ-6 | SHIPPED | impl: `pub struct LeakyReLU`, `pub struct PReLU<T>`, `pub struct ELU`, `pub struct CELU`, `pub struct SELU`, `pub struct RReLU` in `activation.rs`, mirroring `torch/nn/modules/activation.py:153-218, 575-735, 874-931, 1575-1656`; non-test consumer: `ferrotorch-nn/src/lib.rs:189-193` re-exports each. Tests `test_leaky_relu_forward`, `test_prelu_forward`, `test_elu_forward`, `test_celu_forward`, `test_selu_forward`, `test_rrelu_forward` pin. |
-| REQ-7 | SHIPPED | impl: `pub struct Hardtanh`, `pub struct ReLU6`, `pub struct HardSigmoid`, `pub struct HardSwish`, `pub struct Hardshrink`, `pub struct Softshrink`, `pub struct Tanhshrink`, `pub struct Softsign`, `pub struct LogSigmoid`, `pub struct Threshold`, `pub struct Softplus`, `pub struct Mish`, `pub struct GLU` in `activation.rs`, mirroring their PyTorch counterparts in `torch/nn/modules/activation.py`; non-test consumer: `ferrotorch-vision/src/models/mobilenet.rs:51` consumes `HardSigmoid, HardSwish, ReLU, ReLU6`. |
-| REQ-8 | SHIPPED | impl: `pub struct PReLU<T: Float>` with `pub alpha: Parameter<T>` and a `named_parameters` impl returning `("alpha", ..)` in `activation.rs`, mirroring `torch/nn/modules/activation.py:1575-1656`; non-test consumer: re-exported via `ferrotorch-nn/src/lib.rs:189-193`; test `test_prelu_has_parameter` pins. |
+| REQ-7 | SHIPPED | impl: `pub struct Hardtanh`, `pub struct ReLU6`, `pub struct HardSigmoid`, `pub struct HardSwish`, `pub struct Hardshrink`, `pub struct Softshrink`, `pub struct Tanhshrink`, `pub struct Softsign`, `pub struct LogSigmoid`, `pub struct Threshold`, `pub struct Softplus`, `pub struct Mish`, `pub struct GLU` in `activation.rs`, mirroring their PyTorch counterparts in `torch/nn/modules/activation.py`; non-test consumer: `ferrotorch-vision/src/models/mobilenet.rs` consumes `HardSigmoid, HardSwish, ReLU, ReLU6`. |
+| REQ-8 | SHIPPED | impl: `pub struct PReLU<T: Float>` with `pub alpha: Parameter<T>` and a `named_parameters` impl returning `("alpha", ..)` in `activation.rs`, mirroring `torch/nn/modules/activation.py:1575-1656`; non-test consumer: re-exported via `activation in ferrotorch-nn/src/lib.rs`; test `test_prelu_has_parameter` pins. |
 | REQ-9 | SHIPPED | impl: `macro_rules! impl_activation_module` at the top of `activation.rs` synthesises `Module<T>::{forward, parameters, parameters_mut, named_parameters, train, eval, is_training}` for every zero-param activation; PReLU has a hand-written `Module<T>` impl. Non-test consumer: `ferrotorch-vision/src/models/vgg.rs` builds `Module<f32>` chains using these. |
 | REQ-10 | SHIPPED | impl: every `pub fn forward` delegates to `act::*` in `ferrotorch_core::grad_fns::activation`, which attaches the appropriate backward node when grad is enabled; non-test consumer: `ferrotorch-optim/src/sgd.rs:818` uses `ReLU` in an end-to-end SGD training loop that exercises backward. |
 | REQ-11 | SHIPPED | impl: `Softmax2d::forward` in `activation.rs` dispatches to `GpuBackend::softmax2d_f32` (declared in `ferrotorch-core/src/gpu_dispatch.rs`, overridden by `CudaBackendImpl::softmax2d_f32` in `ferrotorch-gpu/src/backend_impl.rs` calling `crate::group_norm::gpu_softmax2d_f32`) when `input.is_cuda()` and a backend is registered; CUDA-with-no-backend still returns `NotImplementedOnCuda`. Channel-axis softmax over `[N, C, H*W]`, forward-only. Non-test consumer: `ferrotorch-nn::Softmax2d::forward` is the dispatcher itself, reachable from downstream segmentation heads via the `Softmax2d` re-export at `ferrotorch-nn/src/lib.rs`. Runtime parity pinned by `#[ignore]`'d `softmax2d_forward_gpu_matches_cpu`. Closed #1451. |

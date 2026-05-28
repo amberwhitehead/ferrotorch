@@ -68,7 +68,7 @@ mirrors:
 
 - `torch.autograd.{backward, grad, no_grad, enable_grad,
   set_grad_enabled, inference_mode, gradcheck}` → re-exported
-  through `pub use` declarations at `mod.rs:15-38`.
+  through `pub use` declarations at `mod.rs`.
 - `torch.amp.autocast` / `torch.autograd.forward_ad` → re-exported
   via `pub use autocast::*` and `pub use forward_ad::*` (R-DEV-2 API
   shape match — Python users writing
@@ -128,7 +128,7 @@ implementation).
 
 The 38-line module file is a declaration file; verification is
 transitive through the sibling submodules' tests. Compile-time
-verification: every `pub use` and `pub mod` at `mod.rs:1-38` must
+verification: every `pub use` and `pub mod` at `mod.rs` must
 resolve, enforced by `cargo check -p ferrotorch-core`. The four
 clusters' tests live in their respective `#[cfg(test)] mod tests`
 blocks (35+ tests in `graph.rs`, 14 in `no_grad.rs`, 16 in
@@ -140,5 +140,5 @@ blocks (35+ tests in `graph.rs`, 14 in `no_grad.rs`, 16 in
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub mod` declarations at `ferrotorch-core/src/autograd/mod.rs:1-13` declare 13 submodules; non-test production consumer: `ferrotorch-core/src/lib.rs:121-133` `pub use autograd::*` chain re-exports the surface to the crate root, then downstream callers like `ferrotorch-core/src/tensor.rs:87 hooks: Mutex<crate::autograd::hooks::HookStorage<T>>` and `ferrotorch-nn/src/transformer.rs:41 use ferrotorch_core::autograd::no_grad::is_grad_enabled` reach into the namespace. |
-| REQ-2 | SHIPPED | impl: `pub use` chain at `mod.rs:15-38` re-exports `backward`, `grad`, `no_grad`, `autocast`, `gradcheck`, `fixed_point`, `grad_norm`, `gradient_penalty`, `jvp`, `vjp`, `DualTensor`, `jacfwd`, `jvp_exact`, `hessian`, `jacobian`, `enable_grad`, `inference_mode`, `set_grad_enabled`, `is_grad_enabled`, `is_inference_mode`, `AutocastDtype`, `AutocastCategory`, `AutocastEvent`, `autocast_category`, `autocast_guard`, `autocast_log`, `drain_autocast_events`, `should_cast_to_reduced`, `should_keep_full_precision`, `is_autocast_debug`, `set_autocast_debug`, `autocast_dtype`; non-test production consumer: `ferrotorch-core/src/lib.rs:125-133` `pub use autograd::{...}` cascade exposes the same identifiers at the crate root for use by every downstream model crate (ferrotorch-nn, ferrotorch-vision, ferrotorch-train, the 28 model crates). |
+| REQ-2 | SHIPPED | impl: `pub use` chain at `mod.rs` re-exports `backward`, `grad`, `no_grad`, `autocast`, `gradcheck`, `fixed_point`, `grad_norm`, `gradient_penalty`, `jvp`, `vjp`, `DualTensor`, `jacfwd`, `jvp_exact`, `hessian`, `jacobian`, `enable_grad`, `inference_mode`, `set_grad_enabled`, `is_grad_enabled`, `is_inference_mode`, `AutocastDtype`, `AutocastCategory`, `AutocastEvent`, `autocast_category`, `autocast_guard`, `autocast_log`, `drain_autocast_events`, `should_cast_to_reduced`, `should_keep_full_precision`, `is_autocast_debug`, `set_autocast_debug`, `autocast_dtype`; non-test production consumer: `ferrotorch-core/src/lib.rs` `pub use autograd::{...}` cascade exposes the same identifiers at the crate root for use by every downstream model crate (ferrotorch-nn, ferrotorch-vision, ferrotorch-train, the 28 model crates). |
 | REQ-3 | SHIPPED | impl: `pub use crate::ops::higher_order::{cond, scan, validate_cond_branches}` at `ferrotorch-core/src/autograd/mod.rs:26` keeps the legacy `autograd::cond` / `autograd::scan` import path alive; non-test production consumer: `ferrotorch-core/src/lib.rs:127` `pub use autograd::{... cond, ..., scan, ..., validate_cond_branches, ...}` flows the same identifiers up to the crate root and out to every downstream consumer that imports via `ferrotorch_core::cond` etc. |

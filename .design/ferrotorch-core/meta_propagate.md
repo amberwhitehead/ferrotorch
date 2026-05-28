@@ -131,7 +131,7 @@ Expected: 22 tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `unary_same_shape` at `ferrotorch-core/src/meta_propagate.rs:36` mirrors `torch._meta_registrations.meta_unary_inplace`; non-test consumers: `grad_fns/activation.rs:695` (`relu`), `:737` (`sigmoid`), `:792` (`tanh`), `:853` (`gelu`), `:938` (`silu`), `:992` (`softmax`). |
+| REQ-1 | SHIPPED | impl: `unary_same_shape in ferrotorch-core/src/meta_propagate.rs` mirrors `torch._meta_registrations.meta_unary_inplace`; non-test consumers: `unary_same_shape in grad_fns/activation.rs` (`relu`), `relu in grad_fns/activation.rs` (`sigmoid`), `sigmoid in grad_fns/activation.rs` (`tanh`), `tanh in grad_fns/activation.rs` (`gelu`), `gelu in grad_fns/activation.rs` (`silu`), `silu in grad_fns/activation.rs` (`softmax`). |
 | REQ-2 | SHIPPED | impl: `binary_broadcast` at `ferrotorch-core/src/meta_propagate.rs:50` mirrors `torch._meta_registrations.meta_binary_op_with_broadcast`; non-test consumer: `grad_fns/arithmetic.rs:380` (called from `add`'s forward and via dispatch from `sub`/`mul`/`div`/... — every binary broadcast op routes through this guard). |
 | REQ-3 | SHIPPED | impl: `reduce_dim` at `ferrotorch-core/src/meta_propagate.rs:72` mirrors `meta_sum_dim` shape rule; non-test consumer: `grad_fns/reduction.rs:772` (`sum_dim`) and the e2e test at `meta_propagate.rs:466-481` pins it for `sum_dim`/`mean_dim` via production callsites. |
 | REQ-4 | SHIPPED | impl: `reduce_all` at `ferrotorch-core/src/meta_propagate.rs:109`; non-test consumer: `grad_fns/reduction.rs:107` (`sum_all`), `:234` (`mean_all`), `:414` (`prod_all`). |

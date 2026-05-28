@@ -63,7 +63,7 @@ module mirrors PyTorch's `torch.nn.utils.clip_grad_norm_` /
 
 ### Re-exports (REQ-1, REQ-2, REQ-6)
 
-At `ferrotorch-train/src/grad_utils.rs:23` `pub use
+At `ferrotorch-train/src/grad_utils.rs` `pub use
 ferrotorch_nn::utils::{clip_grad_norm_, clip_grad_value_};`. This is
 the entire production surface of the module — there is no extra
 wrapping, no extra parameter, no extra error handling. The function
@@ -151,9 +151,9 @@ Expected: 12 passed, 0 failed.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub use ferrotorch_nn::utils::{clip_grad_norm_, clip_grad_value_};` at `ferrotorch-train/src/grad_utils.rs:23`; non-test consumer: `ferrotorch-train/src/lib.rs:179` `pub use grad_utils::{clip_grad_norm_, clip_grad_value_};` re-exports the names at the crate root for external callers — the re-export ladder IS the production consumer of the inner re-export. |
-| REQ-2 | SHIPPED | impl: structural — there is no wrapping; the `pub use` IS the deduplication; non-test consumer: the test guards at `ferrotorch-train/src/grad_utils.rs:277, 295` use `std::ptr::fn_addr_eq` to assert the symbol identity; the production usage at `lib.rs:179` consumes the deduplicated re-export. |
+| REQ-1 | SHIPPED | impl: `pub use ferrotorch_nn::utils::{clip_grad_norm_, clip_grad_value_};` at `ferrotorch-train/src/grad_utils.rs`; non-test consumer: `ferrotorch-train/src/lib.rs` `pub use grad_utils::{clip_grad_norm_, clip_grad_value_};` re-exports the names at the crate root for external callers — the re-export ladder IS the production consumer of the inner re-export. |
+| REQ-2 | SHIPPED | impl: structural — there is no wrapping; the `pub use` IS the deduplication; non-test consumer: the test guards at `fn_addr_eq in ferrotorch-train/src/grad_utils.rs, 295` use `std::ptr::fn_addr_eq` to assert the symbol identity; the production usage at `lib.rs` consumes the deduplicated re-export. |
 | REQ-3 | SHIPPED | impl: behavioral contract is owned by `ferrotorch_nn::utils::clip_grad_norm_`; this module is a re-export. Non-test consumer: same `lib.rs:179` re-export ladder. NOTE: the production-fit-loop consumer (a `Learner::fit` body that calls `clip_grad_norm_` between backward and step) is the open prereq covered by blocker #1503. |
 | REQ-4 | SHIPPED | impl: `clip_grad_value_` re-exported from `ferrotorch_nn::utils`; non-test consumer: same `lib.rs:179` ladder; same production-fit-loop gap covered by blocker #1503. |
-| REQ-5 | SHIPPED | impl: no-grad handling is owned by `ferrotorch_nn::utils`; non-test consumer: same `lib.rs:179` ladder; behavior pinned by the test at `grad_utils.rs:166`. |
+| REQ-5 | SHIPPED | impl: no-grad handling is owned by `ferrotorch_nn::utils`; non-test consumer: same `lib.rs` ladder; behavior pinned by the test at `grad_utils.rs`. |
 | REQ-6 | SHIPPED | impl: device dispatch is owned by `ferrotorch_nn::utils`; non-test consumer: same `lib.rs:179` ladder. The dispatch policy itself has its own design doc + tests in `ferrotorch_nn`. |

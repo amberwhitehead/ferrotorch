@@ -254,16 +254,16 @@ returns `0` (runner arm missing).
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub struct LSTM<T: Float>` plus the private `LSTMLayerParams<T>` in `rnn.rs`; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:245` + `ferrotorch/src/lib.rs:50`. |
-| REQ-2 | SHIPPED | impl: `pub fn forward` on `LSTM` in `rnn.rs` with the four-gate update; non-test consumer: re-export at `lib.rs:245` + meta-crate prelude `ferrotorch/src/lib.rs:50` + benchmark consumer `benchmarks/ferrotorch_bench.rs:178`. |
-| REQ-3 | SHIPPED | impl: `pub struct GRU<T: Float>` in `rnn.rs`; non-test consumer: re-export at `lib.rs:245` + meta-crate prelude `ferrotorch/src/lib.rs:50` + `benchmarks/ferrotorch_bench.rs:178`. |
+| REQ-2 | SHIPPED | impl: `pub fn forward` on `LSTM` in `rnn.rs` with the four-gate update; non-test consumer: re-export at `lib.rs` + meta-crate prelude `ferrotorch/src/lib.rs` + benchmark consumer `benchmarks/ferrotorch_bench.rs`. |
+| REQ-3 | SHIPPED | impl: `pub struct GRU<T: Float>` in `rnn.rs`; non-test consumer: re-export at `lib.rs` + meta-crate prelude `ferrotorch/src/lib.rs` + `benchmarks/ferrotorch_bench.rs`. |
 | REQ-4 | SHIPPED | impl: `pub fn forward` on `GRU` in `rnn.rs` with the three-gate update; non-test consumer: as REQ-3. |
-| REQ-5 | SHIPPED | impl: `pub enum RNNNonlinearity` in `rnn.rs`; non-test consumer: re-export at `lib.rs:245`. |
-| REQ-6 | SHIPPED | impl: `pub struct RNN<T: Float>` in `rnn.rs`; non-test consumer: re-export at `lib.rs:245`. |
-| REQ-7 | SHIPPED | impl: `pub fn forward` on `RNN` in `rnn.rs` dispatching on `RNNNonlinearity`; non-test consumer: re-export at `lib.rs:245`. |
-| REQ-8 | SHIPPED | impl: `pub struct LSTMCell<T: Float>`, `pub struct GRUCell<T: Float>`, `pub struct RNNCell<T: Float>` in `rnn.rs`; non-test consumer: re-export at `lib.rs:245`. |
-| REQ-9 | SHIPPED | impl: `init::uniform_` and `init::zeros_` calls in the constructors of `LSTM`/`GRU`/`RNN`/cells; non-test consumer: re-export at `lib.rs:245`. |
-| REQ-10 | SHIPPED | impl: `impl<T: Float> Module<T> for ...` blocks for every public struct in `rnn.rs`; non-test consumer: re-export at `lib.rs:245`. |
-| REQ-11 | SHIPPED | impl: `use ferrotorch_core::grad_fns::linalg::mm_differentiable as mm` import in `rnn.rs` plus its use in every forward path; non-test consumer: re-export at `lib.rs:245`. |
+| REQ-5 | SHIPPED | impl: `pub enum RNNNonlinearity` in `rnn.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-6 | SHIPPED | impl: `pub struct RNN<T: Float>` in `rnn.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-7 | SHIPPED | impl: `pub fn forward` on `RNN` in `rnn.rs` dispatching on `RNNNonlinearity`; non-test consumer: re-export at `lib.rs`. |
+| REQ-8 | SHIPPED | impl: `pub struct LSTMCell<T: Float>`, `pub struct GRUCell<T: Float>`, `pub struct RNNCell<T: Float>` in `rnn.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-9 | SHIPPED | impl: `init::uniform_` and `init::zeros_` calls in the constructors of `LSTM`/`GRU`/`RNN`/cells; non-test consumer: re-export at `lib.rs`. |
+| REQ-10 | SHIPPED | impl: `impl<T: Float> Module<T> for ...` blocks for every public struct in `rnn.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-11 | SHIPPED | impl: `use ferrotorch_core::grad_fns::linalg::mm_differentiable as mm` import in `rnn.rs` plus its use in every forward path; non-test consumer: re-export at `lib.rs`. |
 | REQ-12 | NOT-STARTED | parity-sweep runner arm for `nn.functional.lstm_cell` not wired — blocker #1456. |
 | REQ-13 | NOT-STARTED | parity-sweep runner arm for `nn.functional.gru_cell` not wired — blocker #1456. |
 | REQ-14 | NOT-STARTED | parity-sweep runner arm for `nn.functional.rnn_relu_cell` not wired — blocker #1456. |

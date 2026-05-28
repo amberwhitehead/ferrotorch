@@ -179,7 +179,7 @@ REQ in the table below is therefore NOT-STARTED.
 - [x] AC-6: `zero_` accepts empty tensors. Covered by
   `fn test_zero_empty_tensor in inplace.rs`.
 - [x] AC-7: `clamp_(min, max)` returns an error when `min > max`. Covered
-  by `test_clamp_invalid_range` at `ferrotorch-core/src/inplace.rs:617-624`.
+  by `test_clamp_invalid_range in ferrotorch-core/src/inplace.rs`.
 - [x] AC-8: `add_scaled_` same-shape `alpha != 1.0` path mutates `self` to
   `self + alpha * other`. Covered by the conformance-sweep
   `inplace_add_scaled` arm in

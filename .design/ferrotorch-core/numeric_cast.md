@@ -50,7 +50,7 @@ boilerplate.
 
 ## Acceptance Criteria
 
-- [x] AC-1: `cast_f64_to_f32_succeeds_for_finite` at `numeric_cast.rs:120`
+- [x] AC-1: `cast_f64_to_f32_succeeds_for_finite in numeric_cast.rs`
   — finite `f64 -> f32` cast happy path.
 - [x] AC-2: `cast_f64_inf_to_i32_fails` at `numeric_cast.rs:126` —
   `Infinity` to `i32` returns `Err` (mirroring `c10::checked_convert`'s
@@ -58,9 +58,9 @@ boilerplate.
 - [x] AC-3: `cast_usize_to_f32_succeeds` at `numeric_cast.rs:137`.
 - [x] AC-4: `cast_to_bf16_round_trip` at `numeric_cast.rs:144`.
 - [x] AC-5: `cast_negative_to_unsigned_fails` at `numeric_cast.rs:149`.
-- [x] AC-6: `cast_huge_f64_to_bf16_returns_err` at `numeric_cast.rs:166`
+- [x] AC-6: `cast_huge_f64_to_bf16_returns_err in numeric_cast.rs`
   — `1e300_f64` to `bf16` returns `Err` (issue #815 regression pin).
-- [x] AC-7: `cast_huge_f32_to_bf16_returns_err` at `numeric_cast.rs:180`.
+- [x] AC-7: `cast_huge_f32_to_bf16_returns_err in numeric_cast.rs`.
 - [x] AC-8: `cast_f64_inf_to_bf16_passes_through` at `numeric_cast.rs:188`
   — genuine `Infinity` passthrough (cast did not saturate; result is
   `bf16::INFINITY`).
@@ -128,7 +128,7 @@ float + finite/infinite combination.
 
 ### Production consumers
 
-- `ferrotorch-core/src/fft.rs:30` — `use crate::numeric_cast::cast;` and
+- `cast in ferrotorch-core/src/fft.rs` — `use crate::numeric_cast::cast;` and
   uses `cast::<T, f64>(...)` / `cast::<f64, T>(...)` inside the FFT
   scale-factor computation. This is the in-tree non-test consumer that
   ferrotorch-core's `cargo test` exercises end-to-end.
@@ -165,8 +165,8 @@ if the saturation guard is removed.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub fn cast<T, U>` at `ferrotorch-core/src/numeric_cast.rs:71-114` with structured `FerrotorchError::InvalidArgument` on failure (`:77` and `:100`). Non-test production consumer: `ferrotorch-core/src/fft.rs:30` `use crate::numeric_cast::cast;` and downstream callsites in the FFT scale-factor computation. |
-| REQ-2 | SHIPPED | impl: saturation-guard block at `ferrotorch-core/src/numeric_cast.rs:96-110` — compares `v.to_f64().is_finite()` against `result.to_f64().is_finite()`; if source finite & result non-finite → `Err`. Tests: 4 narrow-float saturation tests at `:166-220` (`cast_huge_f64_to_bf16`, `cast_huge_f32_to_bf16`, `cast_huge_f64_to_f16`, `cast_huge_f64_to_f32`); 5 passthrough tests at `:188-235` (`Inf`/`-Inf`/`NaN` cast preserves non-finite-ness). Non-test production consumer: `ferrotorch-core/src/fft.rs:30` callsite — narrow-float FFTs are exactly the case where this guard matters. |
+| REQ-1 | SHIPPED | impl: `pub fn cast<T, U>` at `cast in ferrotorch-core/src/numeric_cast.rs` with structured `FerrotorchError::InvalidArgument` on failure (`cast in ferrotorch-core/src/numeric_cast.rs` and `cast in ferrotorch-core/src/numeric_cast.rs`). Non-test production consumer: `cast in ferrotorch-core/src/fft.rs` `use crate::numeric_cast::cast;` and downstream callsites in the FFT scale-factor computation. |
+| REQ-2 | SHIPPED | impl: saturation-guard block at `Err in ferrotorch-core/src/numeric_cast.rs` — compares `v.to_f64().is_finite()` against `result.to_f64().is_finite()`; if source finite & result non-finite → `Err`. Tests: 4 narrow-float saturation tests at `Err in ferrotorch-core/src/numeric_cast.rs` (`cast_huge_f64_to_bf16`, `cast_huge_f32_to_bf16`, `cast_huge_f64_to_f16`, `cast_huge_f64_to_f32`); 5 passthrough tests at `cast_huge_f64_to_f32 in ferrotorch-core/src/numeric_cast.rs` (`Inf`/`-Inf`/`NaN` cast preserves non-finite-ness). Non-test production consumer: `Err in ferrotorch-core/src/fft.rs` callsite — narrow-float FFTs are exactly the case where this guard matters. |
 | REQ-3 | SHIPPED | impl: the guard at `numeric_cast.rs:96-110` is a no-op cost for integer targets because `r.to_f64()` always returns a finite value for finite integers (integers project losslessly to f64 within the i64 range). Test: `cast_f64_inf_to_i32_fails` at `:126` exercises the integer-target path. Non-test production consumer: any caller using `cast::<f64, i32>(...)` (none in ferrotorch-core today; the helper is dtype-agnostic by construction). |
-| REQ-4 | SHIPPED | impl: the error message at `ferrotorch-core/src/numeric_cast.rs:78-83` and `:101-108` includes `type_name::<T>()`, `type_name::<U>()`, and `{:?}` of the source value. Verified by the post-fix message assertion in `cast_huge_f64_to_bf16_returns_err` at `:172` which checks for the substring `"saturates to non-finite"` or `"not representable"`. Non-test production consumer: any code that propagates a cast error via `?` — the error message reaches the user / log scraper untouched. |
+| REQ-4 | SHIPPED | impl: the error message at `cast_huge_f64_to_bf16_returns_err in ferrotorch-core/src/numeric_cast.rs` and `cast_huge_f64_to_bf16_returns_err in ferrotorch-core/src/numeric_cast.rs` includes `type_name::<T>()`, `type_name::<U>()`, and `{:?}` of the source value. Verified by the post-fix message assertion in `cast_huge_f64_to_bf16_returns_err in ferrotorch-core/src/numeric_cast.rs` which checks for the substring `"saturates to non-finite"` or `"not representable"`. Non-test production consumer: any code that propagates a cast error via `?` — the error message reaches the user / log scraper untouched. |
 | REQ-5 | SHIPPED | impl: `#[inline]` attribute at `ferrotorch-core/src/numeric_cast.rs:70`. Non-test production consumer: `ferrotorch-core/src/fft.rs` callsites — the `#[inline]` ensures the cast collapses into the surrounding FFT scale-factor pipeline at compile time. |

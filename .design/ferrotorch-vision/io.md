@@ -150,7 +150,7 @@ to single precision; `f64` users get full double precision.
 
 The `image` crate's `ImageBuffer::from_raw` validates the buffer
 length against `width × height × channels`; mismatched lengths
-surface as `InvalidArgument` (`io.rs:140-148`).
+surface as `InvalidArgument` (`io.rs`).
 
 `write_tensor_as_image` (`io.rs:192-198`) is the CHW→write shortcut:
 delegate to `tensor_to_raw_image` then `write_image`.
@@ -209,7 +209,7 @@ parity-sweep audit sense. Edge cases preserved:
   rounding-to-nearest). Verified by
   `test_mnist::test_from_dir_pixel_normalization_boundaries`.
 - **Non-3-D tensor write**: rejected with `InvalidArgument`. Test:
-  `test_write_tensor_rejects_non_3d` (`io.rs:446-453`).
+  `test_write_tensor_rejects_non_3d` (`test_write_tensor_rejects_non_3d in io.rs`).
 - **Bad channel count**: rejected with `InvalidArgument` (e.g.
   `C == 2` for a grayscale-plus-alpha layout — unsupported by the
   `image` crate's RGB/RGBA encoders).
@@ -251,11 +251,11 @@ Expected: 9 passed.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct RawImage` with `#[non_exhaustive]` at `ferrotorch-vision/src/io.rs:23-32` (data/width/height/channels fields) per upstream `torchvision/datasets/folder.py:260-264` (PIL.Image.Image as the intermediate representation); non-test consumer: `tensor_to_raw_image` at `ferrotorch-vision/src/io.rs:203-249` constructs `RawImage` and `write_image` at `ferrotorch-vision/src/io.rs:135-181` consumes its fields. |
+| REQ-1 | SHIPPED | impl: `pub struct RawImage` with `#[non_exhaustive]` at `RawImage in ferrotorch-vision/src/io.rs` (data/width/height/channels fields) per upstream `torchvision/datasets/folder.py:260-264` (PIL.Image.Image as the intermediate representation); non-test consumer: `tensor_to_raw_image in ferrotorch-vision/src/io.rs` constructs `RawImage` and `write_image in ferrotorch-vision/src/io.rs` consumes its fields. |
 | REQ-2 | SHIPPED | impl: `pub fn read_image` at `ferrotorch-vision/src/io.rs:43-54` calling `image::open(path)?.to_rgb8()` per upstream `torchvision/io/image.py:154-187`; non-test consumer: `read_image_as_tensor` at `ferrotorch-vision/src/io.rs:98-101` chains `read_image(path)?` and is itself consumed by `ImageFolder::get` at `ferrotorch-vision/src/datasets/folder.rs:145`. |
-| REQ-3 | SHIPPED | impl: `pub fn read_image_rgba` at `ferrotorch-vision/src/io.rs:62-73` calling `image::open(path)?.to_rgba8()` per upstream `torchvision/io/image.py` `ImageReadMode.RGB_ALPHA`; non-test consumer: re-exported at `ferrotorch-vision/src/lib.rs:101` via `pub use io::{... read_image_rgba ...}`. (Honest underclaim: external alpha-aware consumers are limited; the re-export surface is the documented binding for downstream model crates that need alpha.) |
+| REQ-3 | SHIPPED | impl: `pub fn read_image_rgba` at `read_image_rgba in ferrotorch-vision/src/io.rs` calling `image::open(path)?.to_rgba8()` per upstream `torchvision/io/image.py` `ImageReadMode.RGB_ALPHA`; non-test consumer: re-exported at `ferrotorch-vision/src/lib.rs` via `pub use io::{... read_image_rgba ...}`. (Honest underclaim: external alpha-aware consumers are limited; the re-export surface is the documented binding for downstream model crates that need alpha.) |
 | REQ-4 | SHIPPED | impl: `pub fn read_image_as_tensor<T: Float>` at `ferrotorch-vision/src/io.rs:98-101` per upstream `torchvision.transforms.functional.to_tensor`; non-test consumer: `ImageFolder::get` at `ferrotorch-vision/src/datasets/folder.rs:145` calls `crate::io::read_image_as_tensor::<T>(path)?`; binary-target consumers at `ferrotorch-vision/examples/inference_dump.rs:34,610` and `ferrotorch-vision/examples/probe_rpn_stages_1141.rs:38,182`. |
-| REQ-5 | SHIPPED | impl: `pub fn raw_image_to_tensor<T: Float>` at `ferrotorch-vision/src/io.rs:106-126` performing HWC→CHW with `1/255` scaling per upstream `torchvision.transforms.functional.to_tensor`; non-test consumer: `read_image_as_tensor` at `ferrotorch-vision/src/io.rs:99-100` calls it, and the function is re-exported at `ferrotorch-vision/src/lib.rs:101` for direct use by callers that already have bytes (e.g. network responses). |
+| REQ-5 | SHIPPED | impl: `pub fn raw_image_to_tensor<T: Float>` at `raw_image_to_tensor in ferrotorch-vision/src/io.rs` performing HWC→CHW with `1/255` scaling per upstream `torchvision.transforms.functional.to_tensor`; non-test consumer: `read_image_as_tensor in ferrotorch-vision/src/io.rs` calls it, and the function is re-exported at `ferrotorch-vision/src/lib.rs` for direct use by callers that already have bytes (e.g. network responses). |
 | REQ-6 | SHIPPED | impl: `pub fn write_image` at `ferrotorch-vision/src/io.rs:135-181` with the 3/4-channel dispatch per upstream `torchvision/io/image.py:213-296`; non-test consumer: `write_tensor_as_image` at `ferrotorch-vision/src/io.rs:192-198` calls it. (Honest underclaim: external binary-target consumers of `write_image` are limited to test fixtures; the re-export at `lib.rs:102` is the documented binding for downstream serialization code.) |
-| REQ-7 | SHIPPED | impl: `pub fn write_tensor_as_image<T: Float>` at `ferrotorch-vision/src/io.rs:192-198` chaining `tensor_to_raw_image` + `write_image` per upstream `torchvision.utils.save_image`; non-test consumer: re-exported at `ferrotorch-vision/src/lib.rs:102` (the symmetric of the read path which `ImageFolder::get` consumes; downstream training pipelines that dump augmented samples reach this via the re-export). |
+| REQ-7 | SHIPPED | impl: `pub fn write_tensor_as_image<T: Float>` at `write_tensor_as_image in ferrotorch-vision/src/io.rs` chaining `tensor_to_raw_image` + `write_image` per upstream `torchvision.utils.save_image`; non-test consumer: re-exported at `ferrotorch-vision/src/lib.rs` (the symmetric of the read path which `ImageFolder::get` consumes; downstream training pipelines that dump augmented samples reach this via the re-export). |
 | REQ-8 | SHIPPED | impl: `pub fn tensor_to_raw_image<T: Float>` at `ferrotorch-vision/src/io.rs:203-249` with the shape/channel validation + clamp-and-round per upstream `make_grid`/`save_image` clamping convention; non-test consumer: `write_tensor_as_image` at `ferrotorch-vision/src/io.rs:196-197` invokes it. |

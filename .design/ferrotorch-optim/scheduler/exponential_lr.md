@@ -70,7 +70,7 @@ typically faster + more accurate at integer exponents than `powf`
   per-epoch `sched.step(self.optimizer.as_mut())` at
   `ferrotorch-train/src/learner.rs:306-308` is the production
   consumer.
-- `ChainedScheduler` example in `scheduler/chained_scheduler.rs:29-40`
+- `ChainedScheduler` example in `ChainedScheduler in scheduler/chained_scheduler.rs`
   documents the canonical pattern of chaining an
   `ExponentialLR` with another scheduler.
 

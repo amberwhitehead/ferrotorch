@@ -91,7 +91,7 @@ fills the gap.
   `LinearWarmup::new(base_lr, warmup_steps)` and boxes it as the
   first phase of a `SequentialLr`. This is the primary in-crate
   production consumer.
-- Module doc-example in `scheduler/mod.rs:99-112` shows the
+- Module doc-example in `scheduler in scheduler/mod.rs` shows the
   manual composition pattern users might write to combine
   `LinearWarmup` with a different decay scheduler.
 

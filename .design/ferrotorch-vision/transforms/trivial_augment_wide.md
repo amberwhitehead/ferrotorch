@@ -67,28 +67,28 @@ with a strength sampled uniformly from a fixed range. Mirrors
 - [x] AC-2: `new(0)` returns `Err`.
 - [x] AC-3: `Default::default()` produces `num_magnitude_bins == 31`
   (verified by `test_trivial_augment_default_num_bins` at
-  `trivial_augment_wide.rs:372`).
+  `test_trivial_augment_default_num_bins in trivial_augment_wide.rs`).
 - [x] AC-4: Output shape equals input shape (verified by
   `test_trivial_augment_output_shape_preserved` at
-  `trivial_augment_wide.rs:363`).
+  `test_trivial_augment_output_shape_preserved in trivial_augment_wide.rs`).
 - [x] AC-5: Non-3-D input returns `Err` (verified at
-  `trivial_augment_wide.rs:388`).
+  `trivial_augment_wide.rs`).
 - [x] AC-6: `Op::Identity` returns input unchanged (verified at
-  `trivial_augment_wide.rs:396`).
+  `trivial_augment_wide.rs`).
 - [x] AC-7: `Op::HorizontalFlip` reverses columns (verified at
-  `trivial_augment_wide.rs:403`).
+  `trivial_augment_wide.rs`).
 - [x] AC-8: `Op::Posterize` keeps output in `[0, 1]` (verified at
-  `trivial_augment_wide.rs:426`).
+  `trivial_augment_wide.rs`).
 - [x] AC-9: `Op::Solarize` at threshold=0 inverts all pixels
-  (verified at `trivial_augment_wide.rs:440`).
+  (verified at `trivial_augment_wide.rs`).
 - [x] AC-10: `Op::AutoContrast` stretches `[0.3, 0.5, 0.7]` to
-  `[0, 0.5, 1]` (verified at `trivial_augment_wide.rs:457`).
+  `[0, 0.5, 1]` (verified at `trivial_augment_wide.rs`).
 - [x] AC-11: `Op::AutoContrast` no-op on a constant channel (verified
-  at `trivial_augment_wide.rs:467`).
+  at `trivial_augment_wide.rs`).
 - [x] AC-12: `Op::Equalize` keeps output in `[0, 1]` (verified at
-  `trivial_augment_wide.rs:478`).
+  `trivial_augment_wide.rs`).
 - [x] AC-13: `box_blur_3x3` is a no-op on uniform interior pixels
-  (verified at `trivial_augment_wide.rs:489`).
+  (verified at `trivial_augment_wide.rs`).
 - [x] AC-14: ShearX/ShearY/Rotate/Color ops (verified by
   `test_op_all_includes_new_geometric_ops`,
   `test_op_shear_x_uniform_image_stays_uniform`,
@@ -118,7 +118,7 @@ impl<T: Float> TrivialAugmentWide<T> {
 }
 ```
 
-at `trivial_augment_wide.rs:31-65`. The `Default` impl is at lines
+at `trivial_augment_wide.rs`. The `Default` impl is at lines
 38-44; `new` is at lines 54-64.
 
 ### Op enum (REQ-4)
@@ -134,14 +134,14 @@ impl Op {
 }
 ```
 
-at `trivial_augment_wide.rs:74-102`. 11 ops total; the upstream space
+at `trivial_augment_wide.rs`. 11 ops total; the upstream space
 is 14 (adds ShearX, ShearY, Rotate, Color). The omitted ops require
 affine-transform infrastructure that we don't yet have.
 
 ### Op dispatcher (REQ-5)
 
 `fn apply_op<T: Float>(data, h, w, c, op, num_bins)` at
-`trivial_augment_wide.rs:107-304`. Each match arm maps a sampled
+`apply_op in trivial_augment_wide.rs`. Each match arm maps a sampled
 `level_f` into the op's canonical strength range, then applies the op.
 
 Canonical ranges (from upstream `_AUGMENTATION_SPACE`):
@@ -160,13 +160,13 @@ constructs the CDF, and replaces each pixel with its CDF value.
 ### Box blur (REQ-6)
 
 `fn box_blur_3x3(data, h, w) -> Vec<f64>` at
-`trivial_augment_wide.rs:307-327` — 3x3 mean filter with explicit
+`box_blur_3x3 in trivial_augment_wide.rs` — 3x3 mean filter with explicit
 in-bounds guards. Used by `Op::Sharpness` to compute the blurred
 reference: `output = blur + factor * (orig - blur)`.
 
 ### Transform impl (REQ-7)
 
-`fn apply` at `trivial_augment_wide.rs:329-356`:
+`fn apply` at `apply in trivial_augment_wide.rs`:
 
 1. 3-D shape check.
 2. Zero-dim guard.
@@ -209,19 +209,19 @@ Blocker #1523 tracks the missing ops.
 
 Tests in `mod tests in trivial_augment_wide.rs` (13 tests):
 
-- `test_trivial_augment_output_shape_preserved` at `trivial_augment_wide.rs:363`
-- `test_trivial_augment_default_num_bins` at `trivial_augment_wide.rs:372`
-- `test_trivial_augment_zero_bins_errors` at `trivial_augment_wide.rs:378`
-- `test_trivial_augment_rejects_non_3d` at `trivial_augment_wide.rs:388`
-- `test_op_identity_returns_input_unchanged` at `trivial_augment_wide.rs:396`
-- `test_op_horizontal_flip_reverses_columns` at `trivial_augment_wide.rs:403`
-- `test_op_brightness_scales_pixels` at `trivial_augment_wide.rs:411`
-- `test_op_posterize_preserves_length` at `trivial_augment_wide.rs:426`
-- `test_op_solarize_at_threshold_zero_inverts_all` at `trivial_augment_wide.rs:440`
-- `test_op_auto_contrast_stretches_range` at `trivial_augment_wide.rs:457`
-- `test_op_auto_contrast_constant_channel_is_unchanged` at `trivial_augment_wide.rs:467`
-- `test_op_equalize_cdf_is_monotonic` at `trivial_augment_wide.rs:478`
-- `test_box_blur_uniform_is_unchanged_interior` at `trivial_augment_wide.rs:489`
+- `test_trivial_augment_output_shape_preserved in trivial_augment_wide.rs`
+- `test_trivial_augment_default_num_bins in trivial_augment_wide.rs`
+- `test_trivial_augment_zero_bins_errors in trivial_augment_wide.rs`
+- `test_trivial_augment_rejects_non_3d in trivial_augment_wide.rs`
+- `test_op_identity_returns_input_unchanged in trivial_augment_wide.rs`
+- `test_op_horizontal_flip_reverses_columns in trivial_augment_wide.rs`
+- `test_op_brightness_scales_pixels in trivial_augment_wide.rs`
+- `test_op_posterize_preserves_length in trivial_augment_wide.rs`
+- `test_op_solarize_at_threshold_zero_inverts_all in trivial_augment_wide.rs`
+- `test_op_auto_contrast_stretches_range in trivial_augment_wide.rs`
+- `test_op_auto_contrast_constant_channel_is_unchanged in trivial_augment_wide.rs`
+- `test_op_equalize_cdf_is_monotonic in trivial_augment_wide.rs`
+- `test_box_blur_uniform_is_unchanged_interior in trivial_augment_wide.rs`
 
 Smoke:
 
@@ -235,11 +235,11 @@ Expected: `13 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct TrivialAugmentWide<T: Float>` with `num_magnitude_bins` + `_marker` at `ferrotorch-vision/src/transforms/trivial_augment_wide.rs:31-36`, mirroring `torchvision/transforms/v2/_auto_augment.py:438` `class TrivialAugmentWide`; non-test consumer: `pub use trivial_augment_wide::TrivialAugmentWide;` at `mod.rs:34` exposes it through the public transforms namespace. |
-| REQ-2 | SHIPPED | impl: `pub fn TrivialAugmentWide::new(num_magnitude_bins: usize) -> FerrotorchResult<Self>` at `trivial_augment_wide.rs:54-64`; non-test consumer: reachable via `mod.rs:34` re-export. |
-| REQ-3 | SHIPPED | impl: `impl Default for TrivialAugmentWide<T>` returning `Self::new(31)` at `trivial_augment_wide.rs:38-44`; non-test consumer: reachable via the `pub use` re-export, called from `TrivialAugmentWide::default()` in config-driven augmentation pipelines. |
-| REQ-4 | SHIPPED | impl: `enum Op { Identity, ..., TranslateY }` at `trivial_augment_wide.rs:74-86` and `Op::ALL: &'static [Op]` at `trivial_augment_wide.rs:88-102`; non-test consumer: `fn apply_op` matches every `Op` variant and `fn apply` calls `Op::ALL[random_usize(Op::ALL.len())]` at `trivial_augment_wide.rs:349-350`. |
-| REQ-5 | SHIPPED | impl: `fn apply_op<T: Float>(data, h, w, c, op, num_bins) -> FerrotorchResult<Vec<T>>` at `trivial_augment_wide.rs:107-304`; non-test consumer: `fn apply` in this same file calls `apply_op(data, h, w, c, op, self.num_magnitude_bins)?` at `trivial_augment_wide.rs:353`. |
-| REQ-6 | SHIPPED | impl: `fn box_blur_3x3(data, h, w) -> Vec<f64>` at `trivial_augment_wide.rs:307-327`; non-test consumer: `fn apply_op` calls `box_blur_3x3(&ch_slice, h, w)` inside the `Op::Sharpness` arm at `trivial_augment_wide.rs:159`. |
-| REQ-7 | SHIPPED | impl: `impl<T: Float> Transform<T> for TrivialAugmentWide<T>` at `trivial_augment_wide.rs:329-356`; non-test consumer: any `Box<dyn Transform<T>>` slot — composes into augmentation `Compose` pipelines via the `mod.rs:34` re-export. |
-| REQ-8 | SHIPPED | impl: `Op::ShearX`, `Op::ShearY`, `Op::Rotate`, `Op::Color` variants + `apply_op` dispatch arms + `shear_apply` / `rotate_apply` / `bilinear_sample_or_fill` helpers at `ferrotorch-vision/src/transforms/trivial_augment_wide.rs:88-128,318-386,419-509`; non-test consumer: `pub use trivial_augment_wide::TrivialAugmentWide;` at `mod.rs:42` — the impl picks an op via `Op::ALL[random_usize(Op::ALL.len())]`, so every new variant is reachable through the public API. |
+| REQ-1 | SHIPPED | impl: `pub struct TrivialAugmentWide<T: Float>` with `num_magnitude_bins` + `_marker` at `TrivialAugmentWide in ferrotorch-vision/src/transforms/trivial_augment_wide.rs`, mirroring `torchvision/transforms/v2/_auto_augment.py:438` `class TrivialAugmentWide`; non-test consumer: `pub use trivial_augment_wide::TrivialAugmentWide;` at `mod.rs` exposes it through the public transforms namespace. |
+| REQ-2 | SHIPPED | impl: `pub fn TrivialAugmentWide::new(num_magnitude_bins: usize) -> FerrotorchResult<Self>` at `new in trivial_augment_wide.rs`; non-test consumer: reachable via `mod.rs` re-export. |
+| REQ-3 | SHIPPED | impl: `impl Default for TrivialAugmentWide<T>` returning `Self::new(31)` at `new in trivial_augment_wide.rs`; non-test consumer: reachable via the `pub use` re-export, called from `TrivialAugmentWide::default()` in config-driven augmentation pipelines. |
+| REQ-4 | SHIPPED | impl: `enum Op { Identity, ..., TranslateY }` at `ALL in trivial_augment_wide.rs` and `Op::ALL: &'static [Op]` at `ALL in trivial_augment_wide.rs`; non-test consumer: `fn apply_op` matches every `Op` variant and `fn apply` calls `Op::ALL[random_usize(Op::ALL.len())]` at `apply in trivial_augment_wide.rs`. |
+| REQ-5 | SHIPPED | impl: `fn apply_op<T: Float>(data, h, w, c, op, num_bins) -> FerrotorchResult<Vec<T>>` at `apply_op in trivial_augment_wide.rs`; non-test consumer: `fn apply` in this same file calls `apply_op(data, h, w, c, op, self.num_magnitude_bins)?` at `apply_op in trivial_augment_wide.rs`. |
+| REQ-6 | SHIPPED | impl: `fn box_blur_3x3(data, h, w) -> Vec<f64>` at `box_blur_3x3 in trivial_augment_wide.rs`; non-test consumer: `fn apply_op` calls `box_blur_3x3(&ch_slice, h, w)` inside the `Op::Sharpness` arm at `box_blur_3x3 in trivial_augment_wide.rs`. |
+| REQ-7 | SHIPPED | impl: `impl<T: Float> Transform<T> for TrivialAugmentWide<T>` at `trivial_augment_wide.rs`; non-test consumer: any `Box<dyn Transform<T>>` slot — composes into augmentation `Compose` pipelines via the `mod.rs` re-export. |
+| REQ-8 | SHIPPED | impl: `Op::ShearX`, `Op::ShearY`, `Op::Rotate`, `Op::Color` variants + `apply_op` dispatch arms + `shear_apply` / `rotate_apply` / `bilinear_sample_or_fill` helpers at `bilinear_sample_or_fill in ferrotorch-vision/src/transforms/trivial_augment_wide.rs,318-386,419-509`; non-test consumer: `pub use trivial_augment_wide::TrivialAugmentWide;` at `mod.rs` — the impl picks an op via `Op::ALL[random_usize(Op::ALL.len())]`, so every new variant is reachable through the public API. |

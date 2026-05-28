@@ -127,10 +127,10 @@ Expected: a handful of tests covering select / stack / vmap1-2 pass.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `select` at `ferrotorch-core/src/vmap.rs:25` mirrors `torch.select`; non-test consumer: re-exported at `ferrotorch-core/src/lib.rs:191` and called inside `vmap` at `:195` as the per-batch-element extractor. |
-| REQ-2 | SHIPPED | impl: `stack` at `ferrotorch-core/src/vmap.rs:85` mirrors `torch.stack`; non-test consumer: re-exported at `ferrotorch-core/src/lib.rs:191` and called inside `vmap` at `:200`. |
+| REQ-2 | SHIPPED | impl: `stack in ferrotorch-core/src/vmap.rs` mirrors `torch.stack`; non-test consumer: re-exported at `vmap in ferrotorch-core/src/lib.rs` and called inside `vmap in ferrotorch-core/src/lib.rs`. |
 | REQ-3 | SHIPPED | impl: `vmap` at `ferrotorch-core/src/vmap.rs:169`; non-test consumer: re-exported at `ferrotorch-core/src/lib.rs:191`, reachable by downstream callers via `ferrotorch_core::vmap(_, _, _)`. The vmap(jvp) pattern is documented at `autograd/forward_ad.rs:379` as the production use case. |
 | REQ-4 | SHIPPED | impl: `vmap2` at `ferrotorch-core/src/vmap.rs:213`; non-test consumer: re-exported at `ferrotorch-core/src/lib.rs:191` alongside the single-arg variant. |
-| REQ-5 | SHIPPED | impl: `vmap3` at `ferrotorch-core/src/vmap.rs:284`; non-test consumer: pub API surface (grandfathered per S5) — three-arg function transform is a documented `torch.vmap` use case. |
-| REQ-6 | SHIPPED | impl: `vmap_many` at `ferrotorch-core/src/vmap.rs:362`; non-test consumer: pub API surface for arbitrary-arity vmap; grandfathered per S5. |
-| REQ-7 | SHIPPED | impl: `vmap_multi_output` at `ferrotorch-core/src/vmap.rs:440`; non-test consumer: pub API surface used for `torch.func.vmap(f)` parity when `f` returns a tuple; grandfathered per S5. |
+| REQ-5 | SHIPPED | impl: `vmap3 in ferrotorch-core/src/vmap.rs`; non-test consumer: pub API surface (grandfathered per S5) — three-arg function transform is a documented `torch.vmap` use case. |
+| REQ-6 | SHIPPED | impl: `vmap_many in ferrotorch-core/src/vmap.rs`; non-test consumer: pub API surface for arbitrary-arity vmap; grandfathered per S5. |
+| REQ-7 | SHIPPED | impl: `vmap_multi_output in ferrotorch-core/src/vmap.rs`; non-test consumer: pub API surface used for `torch.func.vmap(f)` parity when `f` returns a tuple; grandfathered per S5. |
 | REQ-8 | SHIPPED | impl: `per_sample_grad` at `ferrotorch-core/src/vmap.rs:519`; non-test consumer: pub API surface for the privacy / influence-function workflow that needs per-sample gradients; grandfathered per S5. |

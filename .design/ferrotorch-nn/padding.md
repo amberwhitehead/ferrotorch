@@ -109,7 +109,7 @@ The first constant helper `pad_1d_constant` is declared at
 
 ### Functional entrypoints (REQ-2)
 
-The 1-D entrypoint `functional_pad_1d` is at `padding.rs:615`.
+The 1-D entrypoint `functional_pad_1d` is at `functional_pad_1d in padding.rs`.
 
 The 2-D entrypoint `functional_pad_2d` is at `padding.rs:779`.
 
@@ -227,7 +227,7 @@ Expected grep count after blocker #1441 closes: `>= 1` for each.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub enum PaddingMode` in `padding.rs` with 4 variants `Zeros`/`Reflect`/`Replicate`/`Circular`; non-test consumer: `ferrotorch-nn/src/conv.rs` imports `PaddingMode` as the field type the conv layers (currently inertly) carry — the wiring to use it is blocker #1443. |
-| REQ-2 | SHIPPED | impl: the 1-D entrypoint `functional_pad_1d` at `padding.rs:615` dispatches on `PaddingMode`; the 2-D entrypoint `functional_pad_2d` at `padding.rs:779` and the 3-D entrypoint `functional_pad_3d` at `padding.rs:829` follow the same shape. The `Zeros`/constant arm threads the caller's `value: T` into `pad_Nd_constant` (the fill is the caller-supplied value, default `0` only when `T::zero()` is passed), matching `torch.nn.functional.pad(mode="constant", value=...)` — fixed in #1553 (commit 276f740bd), where the path previously hardcoded `T::zero()`. Non-test consumer: `Conv2d::forward` calls the 2-D pad helper at `conv.rs:577` for non-`Zeros` `padding_mode`, and `ferrotorch-nn/src/functional.rs` re-exposes it as `nn::functional::pad`. |
+| REQ-2 | SHIPPED | impl: the 1-D entrypoint `functional_pad_1d in padding.rs` dispatches on `PaddingMode`; the 2-D entrypoint `functional_pad_2d in padding.rs` and the 3-D entrypoint `functional_pad_3d in padding.rs` follow the same shape. The `Zeros`/constant arm threads the caller's `value: T` into `pad_Nd_constant` (the fill is the caller-supplied value, default `0` only when `T::zero()` is passed), matching `torch.nn.functional.pad(mode="constant", value=...)` — fixed in #1553 (commit 276f740bd), where the path previously hardcoded `T::zero()`. Non-test consumer: `Conv2d::forward` calls the 2-D pad helper at `conv in conv.rs` for non-`Zeros` `padding_mode`, and `ferrotorch-nn/src/functional.rs` re-exposes it as `nn::functional::pad`. |
 | REQ-3 | SHIPPED | impl: `pub struct ConstantPad{1,2,3}d<T: Float>` in `padding.rs` mirroring `torch/nn/modules/padding.py` constant-pad family; non-test consumer: `pub use` in `lib.rs` exposes them to external crates. The vision-model code uses `ConstantPad2d` via the `lib.rs` re-export for padding non-square inputs. |
 | REQ-4 | SHIPPED | impl: `pub struct ZeroPad{1,2,3}d<T: Float>` in `padding.rs`; non-test consumer: `pub use` in `lib.rs` exposes them. |
 | REQ-5 | SHIPPED | impl: `pub struct ReflectionPad{1,2,3}d<T: Float>` in `padding.rs` with reflect-overflow check inside `pad_*d_reflect`; non-test consumer: `pub use` in `lib.rs` exposes them; reflection padding is the standard for unets and image-translation models. |

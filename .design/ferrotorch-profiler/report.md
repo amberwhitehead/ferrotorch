@@ -184,17 +184,17 @@ largest absolute movement shows first.
 
 ### Non-test production consumers
 
-- `ferrotorch-profiler/src/profiler.rs:7` `use crate::report::ProfileReport;` —
+- `ferrotorch-profiler/src/profiler.rs` `use crate::report::ProfileReport;` —
   imported so `Profiler::into_report` (line 358) can return one.
 - `ferrotorch-profiler/src/profiler.rs:437` `with_profiler` signature
   returns `(R, ProfileReport)` — every caller of the public
   lifecycle entry point consumes a `ProfileReport`.
-- `ferrotorch-profiler/src/lib.rs:42` `pub use report::{OpSummary, ProfileReport};`
+- `ferrotorch-profiler/src/lib.rs` `pub use report::{OpSummary, ProfileReport};`
   re-exports.
 - `ferrotorch/src/lib.rs:107` `pub use ferrotorch_profiler::*;`
   propagates to the meta-crate so user code calls
   `report.table(10)` / `report.save_chrome_trace(path)`.
-- `ferrotorch-profiler/src/lib.rs:14-25` doc-test exercises
+- `ferrotorch-profiler/src/lib.rs` doc-test exercises
   `report.table(10)` as part of `cargo test --doc`.
 
 ## Parity contract
@@ -248,12 +248,12 @@ Expected: `7 passed; 0 failed` for `report::tests`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct ProfileReport` at `ferrotorch-profiler/src/report.rs:58` with `pub(crate) fn new` at line 64 and the 4 accessors (`events` at line 70, `total_time_us` at line 76, `has_gpu_events` at line 82, `has_stack_traces` at line 137), mirroring PyTorch's post-`__exit__` profile object; non-test consumer: `ferrotorch-profiler/src/profiler.rs:358` `fn into_report(self) -> ProfileReport` builds one via `ProfileReport::new(events)`, returned by `with_profiler` at line 462 — every caller of the lifecycle entry point consumes one. |
-| REQ-2 | SHIPPED | impl: `pub struct OpSummary` at `ferrotorch-profiler/src/report.rs:11` with 13 public fields (4 CPU rollup, 4 GPU rollup, total + legacy avg/max), mirroring `torch/autograd/profiler_util.py` `FunctionEventAvg`; non-test consumer: `ferrotorch-profiler/src/lib.rs:42` re-exports it, `top_ops` at line 143 returns `Vec<OpSummary>`. `tests/conformance_surface_coverage.rs:87` pins `OpSummary` in the surface contract — user code reaching for per-op rollups consumes it. |
-| REQ-3 | SHIPPED | impl: `pub fn top_ops` at `ferrotorch-profiler/src/report.rs:143` with the `HashMap<&str, OpAccum>` rollup loop, mirroring `key_averages().table(sort_by=...)`; non-test consumer: `table` at line 235 calls `self.top_ops(top_n)` directly — every user-rendered table flows through this method. |
-| REQ-4 | SHIPPED | impl: `pub fn table` at `ferrotorch-profiler/src/report.rs:235` dispatching to `table_cpu_only` (line 251) and `table_with_gpu` (line 328); non-test consumer: the crate-root doctest at `ferrotorch-profiler/src/lib.rs:24` calls `report.table(10)`, so `cargo test --doc` consumes it as production code. |
-| REQ-5 | SHIPPED | impl: `pub fn chrome_trace_json` at `ferrotorch-profiler/src/report.rs:422` building the `traceEvents` array manually, mirroring `torch/autograd/profiler.py:519`; non-test consumer: `save_chrome_trace` (line 454) and `save_tensorboard_trace` (line 500) both call it; the surface-coverage test pins it. |
-| REQ-6 | SHIPPED | impl: `pub fn save_chrome_trace` at `ferrotorch-profiler/src/report.rs:454` wrapping `std::fs::write` with `FerrotorchError::InvalidArgument`; non-test consumer: re-exported via `ProfileReport` at `lib.rs:42` and meta-crate prelude; the surface contract pins it. |
-| REQ-7 | SHIPPED | impl: `pub fn save_tensorboard_trace` at `ferrotorch-profiler/src/report.rs:500` building `{logdir}/plugins/profile/{run_id}/{hostname}.pt.trace.json`, mirroring `torch/profiler/profiler.py:621` `tensorboard_trace_handler`; non-test consumer: re-exported via `ProfileReport` at `lib.rs:42` and meta-crate prelude; `detect_hostname` at line 544 is the private helper consumed only by this method. |
-| REQ-8 | SHIPPED | impl: `pub fn total_flops` at `ferrotorch-profiler/src/report.rs:92`, `pub fn flops_per_second` at line 102; non-test consumer: re-exported via `ProfileReport`; the surface contract pins both. |
-| REQ-9 | SHIPPED | impl: `pub fn memory_by_category` at `ferrotorch-profiler/src/report.rs:122` building `HashMap<MemoryCategory, i64>` and sorting by `Reverse(abs)`, mirroring `torch/profiler/_memory_profiler.py:37-44` Category aggregation; non-test consumer: re-exported via `ProfileReport`; the surface contract pins it. |
+| REQ-1 | SHIPPED | impl: `pub struct ProfileReport` at `ProfileReport in ferrotorch-profiler/src/report.rs` with `pub(crate) fn new` at line 64 and the 4 accessors (`events` at line 70, `total_time_us` at line 76, `has_gpu_events` at line 82, `has_stack_traces` at line 137), mirroring PyTorch's post-`__exit__` profile object; non-test consumer: `events in ferrotorch-profiler/src/profiler.rs` `fn into_report(self) -> ProfileReport` builds one via `ProfileReport::new(events)`, returned by `with_profiler` at line 462 — every caller of the lifecycle entry point consumes one. |
+| REQ-2 | SHIPPED | impl: `pub struct OpSummary` at `OpSummary in ferrotorch-profiler/src/report.rs` with 13 public fields (4 CPU rollup, 4 GPU rollup, total + legacy avg/max), mirroring `torch/autograd/profiler_util.py` `FunctionEventAvg`; non-test consumer: `pub in ferrotorch-profiler/src/lib.rs` re-exports it, `top_ops` at line 143 returns `Vec<OpSummary>`. `tests/conformance_surface_coverage.rs` pins `OpSummary` in the surface contract — user code reaching for per-op rollups consumes it. |
+| REQ-3 | SHIPPED | impl: `pub fn top_ops` at `top_ops in ferrotorch-profiler/src/report.rs` with the `HashMap<&str, OpAccum>` rollup loop, mirroring `key_averages().table(sort_by=...)`; non-test consumer: `table` at line 235 calls `self.top_ops(top_n)` directly — every user-rendered table flows through this method. |
+| REQ-4 | SHIPPED | impl: `pub fn table` at `table in ferrotorch-profiler/src/report.rs` dispatching to `table_cpu_only` (line 251) and `table_with_gpu` (line 328); non-test consumer: the crate-root doctest at `pub in ferrotorch-profiler/src/lib.rs` calls `report.table(10)`, so `cargo test --doc` consumes it as production code. |
+| REQ-5 | SHIPPED | impl: `pub fn chrome_trace_json` at `chrome_trace_json in ferrotorch-profiler/src/report.rs` building the `traceEvents` array manually, mirroring `torch/autograd/profiler.py:519`; non-test consumer: `save_chrome_trace` (line 454) and `save_tensorboard_trace` (line 500) both call it; the surface-coverage test pins it. |
+| REQ-6 | SHIPPED | impl: `pub fn save_chrome_trace` at `save_chrome_trace in ferrotorch-profiler/src/report.rs` wrapping `std::fs::write` with `FerrotorchError::InvalidArgument`; non-test consumer: re-exported via `ProfileReport` at `lib.rs` and meta-crate prelude; the surface contract pins it. |
+| REQ-7 | SHIPPED | impl: `pub fn save_tensorboard_trace` at `save_tensorboard_trace in ferrotorch-profiler/src/report.rs` building `{logdir}/plugins/profile/{run_id}/{hostname}.pt.trace.json`, mirroring `torch/profiler/profiler.py:621` `tensorboard_trace_handler`; non-test consumer: re-exported via `ProfileReport` at `lib.rs` and meta-crate prelude; `detect_hostname` at line 544 is the private helper consumed only by this method. |
+| REQ-8 | SHIPPED | impl: `pub fn total_flops` at `total_flops in ferrotorch-profiler/src/report.rs`, `pub fn flops_per_second` at line 102; non-test consumer: re-exported via `ProfileReport`; the surface contract pins both. |
+| REQ-9 | SHIPPED | impl: `pub fn memory_by_category` at `memory_by_category in ferrotorch-profiler/src/report.rs` building `HashMap<MemoryCategory, i64>` and sorting by `Reverse(abs)`, mirroring `torch/profiler/_memory_profiler.py:37-44` Category aggregation; non-test consumer: re-exported via `ProfileReport`; the surface contract pins it. |

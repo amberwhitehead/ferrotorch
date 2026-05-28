@@ -99,7 +99,7 @@ detector's per-batch loop.
   `ferrotorch-vision/src/models/detection/mod.rs:48` and
   `ferrotorch-vision/src/lib.rs:22`.
 - `use crate::models::detection::rpn::{Rpn, RpnConfig}` at
-  `ferrotorch-vision/src/models/detection/faster_rcnn.rs:37`.
+  `ferrotorch-vision/src/models/detection/faster_rcnn.rs`.
   `FasterRcnn::new` calls `Rpn::new(256)?` (storing it as the `rpn`
   field) and `FasterRcnn::forward` invokes
   `self.rpn.forward(&single_refs, &rpn_cfg)` in the per-image loop.
@@ -147,8 +147,8 @@ Expected: 3 tests passed.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct RpnHead` + `Self::new` in `rpn.rs`; non-test consumer: `Rpn::new` at `ferrotorch-vision/src/models/detection/rpn.rs:163` calls `RpnHead::new(in_channels, 3)?` and stores it as the `head` field, which is then exercised by `FasterRcnn::forward` via `self.rpn.forward(...)` at `ferrotorch-vision/src/models/detection/faster_rcnn.rs:325`. |
-| REQ-2 | SHIPPED | impl: `pub fn RpnHead::forward_level` in `rpn.rs`; non-test consumer: `Rpn::forward` at `ferrotorch-vision/src/models/detection/rpn.rs:203` invokes `self.head.forward_level(feat)` per FPN level. |
+| REQ-1 | SHIPPED | impl: `pub struct RpnHead` + `Self::new` in `rpn.rs`; non-test consumer: `Rpn::new` at `RpnHead in ferrotorch-vision/src/models/detection/rpn.rs` calls `RpnHead::new(in_channels, 3)?` and stores it as the `head` field, which is then exercised by `FasterRcnn::forward` via `self.rpn.forward(...)` at `forward in ferrotorch-vision/src/models/detection/faster_rcnn.rs`. |
+| REQ-2 | SHIPPED | impl: `pub fn RpnHead::forward_level` in `rpn.rs`; non-test consumer: `Rpn::forward` at `RpnHead in ferrotorch-vision/src/models/detection/rpn.rs` invokes `self.head.forward_level(feat)` per FPN level. |
 | REQ-3 | SHIPPED | impl: `pub struct RpnConfig` + `RpnConfig::default_eval` in `rpn.rs`; non-test consumer: `FasterRcnn::forward` at `ferrotorch-vision/src/models/detection/faster_rcnn.rs:324` calls `RpnConfig::default_eval([img_h, img_w])`. |
 | REQ-4 | SHIPPED | impl: `pub struct Rpn<T>` + `Self::new` in `rpn.rs`; non-test consumer: `FasterRcnn::new` at `ferrotorch-vision/src/models/detection/faster_rcnn.rs:233` calls `Rpn::new(256)?` and stores the result. |
 | REQ-5 | SHIPPED | impl: `pub fn Rpn::forward` body in `rpn.rs` (top-K → decode → clip → filter → NMS → post-NMS); non-test consumer: `FasterRcnn::forward` at `ferrotorch-vision/src/models/detection/faster_rcnn.rs:325` calls `self.rpn.forward(&single_refs, &rpn_cfg)`. |

@@ -134,10 +134,10 @@ use them.
 - The crate does not currently re-export `CpuCodegen` from `lib.rs`
   (`grep -n "CpuCodegen" ferrotorch-jit/src/lib.rs` returns
   `pub use codegen_cpu::CpuCodegen;` at line 93).
-- `ferrotorch-jit/src/codegen.rs:851` calls
+- `ferrotorch-jit/src/codegen.rs` calls
   `crate::codegen_cpu::CpuCodegen::generate_rust_source(loops, &fn_name)`
   from the `InductorBackend::generate` `CpuRust` arm.
-- `ferrotorch-jit/src/codegen.rs:884` calls the same emitter from the
+- `ferrotorch-jit/src/codegen.rs` calls the same emitter from the
   identity-graph fallback.
 
 ## Parity contract
@@ -178,10 +178,10 @@ Expected: all 14 tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct CpuCodegen` in `codegen_cpu.rs`; non-test consumer: `ferrotorch-jit/src/codegen.rs:851` `crate::codegen_cpu::CpuCodegen::generate_rust_source(loops, &fn_name)` from `InductorBackend::generate` (CpuRust arm). |
-| REQ-2 | SHIPPED | impl: `pub fn generate_rust_source` in `codegen_cpu.rs`; non-test consumer: `codegen.rs:851` (main InductorBackend path) and `codegen.rs:884` (identity-graph fallback). |
-| REQ-3 | SHIPPED | impl: SIMD-comment + parallel-hint emission in `fn emit_rust_stmt` (`codegen_cpu.rs`); non-test consumer: transitively via `codegen.rs:851`. Hints are emitted into every inner loop / large outer loop emitted by the InductorBackend pipeline. |
+| REQ-1 | SHIPPED | impl: `pub struct CpuCodegen` in `codegen_cpu.rs`; non-test consumer: `generate_rust_source in ferrotorch-jit/src/codegen.rs` `crate::codegen_cpu::CpuCodegen::generate_rust_source(loops, &fn_name)` from `InductorBackend::generate` (CpuRust arm). |
+| REQ-2 | SHIPPED | impl: `pub fn generate_rust_source` in `codegen_cpu.rs`; non-test consumer: `generate_rust_source in codegen.rs` (main InductorBackend path) and `codegen in codegen.rs` (identity-graph fallback). |
+| REQ-3 | SHIPPED | impl: SIMD-comment + parallel-hint emission in `fn emit_rust_stmt` (`codegen_cpu.rs`); non-test consumer: transitively via `codegen in codegen.rs`. Hints are emitted into every inner loop / large outer loop emitted by the InductorBackend pipeline. |
 | REQ-4 | SHIPPED | impl: `fn rust_buffer_access` in `codegen_cpu.rs`; non-test consumer: invoked by both `emit_rust_stmt` (Store / Let) and `emit_rust_expr` (Index) in the generated kernel for every `IrOpKind` lowered through `InductorBackend::generate`. |
 | REQ-5 | SHIPPED | impl: `fn format_f64_rust` in `codegen_cpu.rs`; non-test consumer: called inside `emit_rust_expr` for every `Expr::Const` emitted by the InductorBackend pipeline. |
-| REQ-6 | SHIPPED | impl: `fn emit_rust_expr` UnaryOp arm in `codegen_cpu.rs` with one match arm per `UnaryOpKind` variant; non-test consumer: transitively via `codegen.rs:851`. |
-| REQ-7 | SHIPPED | impl: `fn emit_rust_stmt` in `codegen_cpu.rs` with one arm per `LoopIR` variant; non-test consumer: transitively via `codegen.rs:851`. |
+| REQ-6 | SHIPPED | impl: `fn emit_rust_expr` UnaryOp arm in `codegen_cpu.rs` with one match arm per `UnaryOpKind` variant; non-test consumer: transitively via `codegen in codegen.rs`. |
+| REQ-7 | SHIPPED | impl: `fn emit_rust_stmt` in `codegen_cpu.rs` with one arm per `LoopIR` variant; non-test consumer: transitively via `codegen in codegen.rs`. |

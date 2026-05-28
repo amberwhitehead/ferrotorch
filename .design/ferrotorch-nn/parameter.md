@@ -175,7 +175,7 @@ analog of Python's class-subclass method inheritance.
 
 ### Non-test production consumers
 
-- `pub use parameter::Parameter` in `lib.rs:235`.
+- `pub use parameter::Parameter` in `lib.rs`.
 - `ferrotorch-nn/src/lib.rs` prelude re-exports `Parameter`.
 - `ferrotorch-nn/src/linear.rs` lines 22, 46, 48, 83, 88 —
   `use crate::parameter::Parameter`, `pub weight: Parameter<T>`,

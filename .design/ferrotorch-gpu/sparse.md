@@ -113,35 +113,35 @@ manual destroy callsites.
 7. Return output as `CudaBuffer<f32>`.
 
 Mirrors `aten/src/ATen/native/sparse/cuda/SparseBlasImpl.cpp:528-600`.
-Consumer at `backend_impl.rs:4764` (f32) and `:4792` (f64).
+Consumer at `backend_impl.rs` (f32) and `backend_impl.rs` (f64).
 
 ### Sparse↔dense conversions (REQ-3, REQ-4)
 
 `pub fn gpu_sparse_to_dense_csr_f32 in sparse.rs` (line 593) calls
 `cusparseSparseToDense` with `CUSPARSE_SPARSETODENSE_ALG_DEFAULT`.
-Consumer at `backend_impl.rs:4824` (f32) and `:4848` (f64).
+Consumer at `backend_impl.rs` (f32) and `backend_impl.rs` (f64).
 
 `pub fn gpu_dense_to_sparse_csr_f32 in sparse.rs` (line 924) calls
 `cusparseDenseToSparse_analysis` + `cusparseDenseToSparse_convert`.
-Consumer at `backend_impl.rs:4870` (f32) and `:4883` (f64).
+Consumer at `backend_impl.rs` (f32) and `backend_impl.rs` (f64).
 
 ### Format conversions (REQ-5, REQ-6, REQ-7)
 
 `pub fn gpu_csc_to_dense_f32 in sparse.rs` (line 1374): CSC dense
 materialisation via the cuSPARSE generic API. Consumer at
-`backend_impl.rs:4906` (f32) and `:4923` (f64).
+`backend_impl.rs` (f32) and `backend_impl.rs` (f64).
 
 `pub fn gpu_csr_to_csc_f32 in sparse.rs` (line 1700): wraps
-`cusparseCsr2cscEx2`. Consumer at `backend_impl.rs:4939` (f32) and
-`:4954` (f64).
+`cusparseCsr2cscEx2`. Consumer at `backend_impl.rs` (f32) and
+`backend_impl.rs` (f64).
 
 `pub fn gpu_coo_to_csr_f32 in sparse.rs` (line 2067): wraps
-`cusparseXcoo2csr`. Consumer at `backend_impl.rs:4969` (f32) and
-`:4984` (f64).
+`cusparseXcoo2csr`. Consumer at `backend_impl.rs` (f32) and
+`backend_impl.rs` (f64).
 
 `pub fn gpu_csr_to_coo_f32 in sparse.rs` (line 2164): wraps
-`cusparseXcsr2coo`. Consumer at `backend_impl.rs:4999` (f32) and
-`:5014` (f64).
+`cusparseXcsr2coo`. Consumer at `backend_impl.rs` (f32) and
+`backend_impl.rs` (f64).
 
 ### Error policy (REQ-8)
 
@@ -183,7 +183,7 @@ Edge cases mirrored from upstream:
 ## Verification
 
 This file has **0** in-module `#[test]` units. Integration coverage
-is at the backend_impl level (`backend_impl.rs:4764-5014` dispatch
+is at the backend_impl level (`backend_impl.rs` dispatch
 arms) plus op-level coverage in `ferrotorch-core/src/sparse.rs`. The
 sparse path requires the `cuda` feature + a CUDA device, so it
 cannot be exercised by default-feature CI.
@@ -208,12 +208,12 @@ routes to GPU.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct CusparseHandle in sparse.rs` (line 48), `impl CusparseHandle in sparse.rs` (line 65), `impl Drop for CusparseHandle in sparse.rs` (line 81). Non-test consumer: every SpMM / conversion entry point in this file takes `handle: &CusparseHandle` as the first parameter; the cuda backend at `backend_impl.rs:4764,4824,4870,4906,4939,4969,4999` etc. passes the cached device-level handle through. |
-| REQ-2 | SHIPPED | impl: `pub fn gpu_spmm_csr_f32 in sparse.rs` (line 137) and `pub fn gpu_spmm_csr_f64 in sparse.rs` (line 377) per upstream `aten/src/ATen/native/sparse/cuda/SparseBlasImpl.cpp:528::spmm`. Non-test consumer: `backend_impl.rs:4764` (f32) and `:4792` (f64). |
-| REQ-3 | SHIPPED | impl: `pub fn gpu_sparse_to_dense_csr_f32 in sparse.rs` (line 593) and `pub fn gpu_sparse_to_dense_csr_f64 in sparse.rs` (line 763). Non-test consumer: `backend_impl.rs:4824` (f32) and `:4848` (f64) — the `SparseTensor::to_dense_on` GPU arm. |
-| REQ-4 | SHIPPED | impl: `pub fn gpu_dense_to_sparse_csr_f32 in sparse.rs` (line 924) and `pub fn gpu_dense_to_sparse_csr_f64 in sparse.rs` (line 1148). Non-test consumer: `backend_impl.rs:4870` (f32) and `:4883` (f64) — the `SparseTensor::from_dense` GPU arm. |
-| REQ-5 | SHIPPED | impl: `pub fn gpu_csc_to_dense_f32 in sparse.rs` (line 1374) and `pub fn gpu_csc_to_dense_f64 in sparse.rs` (line 1537). Non-test consumer: `backend_impl.rs:4906` (f32) and `:4923` (f64). |
-| REQ-6 | SHIPPED | impl: `pub fn gpu_csr_to_csc_f32 in sparse.rs` (line 1700) and `pub fn gpu_csr_to_csc_f64 in sparse.rs` (line 1854). Non-test consumer: `backend_impl.rs:4939` (f32) and `:4954` (f64). |
-| REQ-7 | SHIPPED | impl: `pub fn gpu_coo_to_csr_f32 in sparse.rs` (line 2067), `pub fn gpu_coo_to_csr_f64 in sparse.rs` (line 2088), `pub fn gpu_csr_to_coo_f32 in sparse.rs` (line 2164), `pub fn gpu_csr_to_coo_f64 in sparse.rs` (line 2192). Non-test consumer: `backend_impl.rs:4969,4984,4999,5014`. |
-| REQ-8 | SHIPPED | impl: every cuSPARSE call in `sparse.rs` is wrapped to return `Err(GpuError::Sparse(...))` on non-success; no unwrap/expect in production code outside `#[cfg(test)]`. Non-test consumer: every caller in `backend_impl.rs:4764-5014` uses `.map_err(Self::map_gpu_err)?` to propagate the structured error. |
+| REQ-1 | SHIPPED | impl: `pub struct CusparseHandle in sparse.rs` (line 48), `impl CusparseHandle in sparse.rs` (line 65), `impl Drop for CusparseHandle in sparse.rs` (line 81). Non-test consumer: every SpMM / conversion entry point in this file takes `handle: &CusparseHandle` as the first parameter; the cuda backend at `backend_impl.rs,4824,4870,4906,4939,4969,4999` etc. passes the cached device-level handle through. |
+| REQ-2 | SHIPPED | impl: `pub fn gpu_spmm_csr_f32 in sparse.rs` (line 137) and `pub fn gpu_spmm_csr_f64 in sparse.rs` (line 377) per upstream `aten/src/ATen/native/sparse/cuda/SparseBlasImpl.cpp:528::spmm`. Non-test consumer: `spmm in backend_impl.rs` (f32) and `spmm in backend_impl.rs` (f64). |
+| REQ-3 | SHIPPED | impl: `pub fn gpu_sparse_to_dense_csr_f32 in sparse.rs` (line 593) and `pub fn gpu_sparse_to_dense_csr_f64 in sparse.rs` (line 763). Non-test consumer: `gpu_sparse_to_dense_csr_f64 in backend_impl.rs` (f32) and `backend_impl.rs` (f64) — the `SparseTensor::to_dense_on` GPU arm. |
+| REQ-4 | SHIPPED | impl: `pub fn gpu_dense_to_sparse_csr_f32 in sparse.rs` (line 924) and `pub fn gpu_dense_to_sparse_csr_f64 in sparse.rs` (line 1148). Non-test consumer: `gpu_dense_to_sparse_csr_f64 in backend_impl.rs` (f32) and `backend_impl.rs` (f64) — the `SparseTensor::from_dense` GPU arm. |
+| REQ-5 | SHIPPED | impl: `pub fn gpu_csc_to_dense_f32 in sparse.rs` (line 1374) and `pub fn gpu_csc_to_dense_f64 in sparse.rs` (line 1537). Non-test consumer: `gpu_csc_to_dense_f64 in backend_impl.rs` (f32) and `backend_impl.rs` (f64). |
+| REQ-6 | SHIPPED | impl: `pub fn gpu_csr_to_csc_f32 in sparse.rs` (line 1700) and `pub fn gpu_csr_to_csc_f64 in sparse.rs` (line 1854). Non-test consumer: `gpu_csr_to_csc_f64 in backend_impl.rs` (f32) and `backend_impl.rs` (f64). |
+| REQ-7 | SHIPPED | impl: `pub fn gpu_coo_to_csr_f32 in sparse.rs` (line 2067), `pub fn gpu_coo_to_csr_f64 in sparse.rs` (line 2088), `pub fn gpu_csr_to_coo_f32 in sparse.rs` (line 2164), `pub fn gpu_csr_to_coo_f64 in sparse.rs` (line 2192). Non-test consumer: `gpu_csr_to_coo_f64 in backend_impl.rs,4984,4999,5014`. |
+| REQ-8 | SHIPPED | impl: every cuSPARSE call in `sparse.rs` is wrapped to return `Err(GpuError::Sparse(...))` on non-success; no unwrap/expect in production code outside `#[cfg(test)]`. Non-test consumer: every caller in `sparse in backend_impl.rs` uses `.map_err(Self::map_gpu_err)?` to propagate the structured error. |
 | REQ-9 | SHIPPED | impl: `#[cfg(not(feature = "cuda"))]` stubs for every cuda function in `sparse.rs` return `Err(GpuError::NoCudaFeature)`. Non-test consumer: the same `backend_impl.rs` sparse arms under the no-cuda compile path. |

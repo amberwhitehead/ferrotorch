@@ -85,7 +85,7 @@ recomputes `current_lr`, then `optimizer.set_lr`.
 - `LinearLR` re-exported at
   `ferrotorch-optim/src/lib.rs:47-52`.
 - `ChainedScheduler` doc example in
-  `scheduler/chained_scheduler.rs:29-40` uses `LinearLR` as one
+  `scheduler in scheduler/chained_scheduler.rs` uses `LinearLR` as one
   of two chained schedulers, demonstrating the canonical pattern.
 - Production consumer: `Learner::with_scheduler` at
   `ferrotorch-train/src/learner.rs:105` accepts the boxed
@@ -136,4 +136,4 @@ Expected: `7 passed`.
 | REQ-1 | SHIPPED | impl: `pub struct LinearLR` with `base_lr`, `start_factor`, `end_factor`, `total_iters`, `current_step`, `current_lr` fields in `scheduler/linear_lr.rs` mirrors `torch/optim/lr_scheduler.py:917-940`; non-test consumer: re-exported at `ferrotorch-optim/src/lib.rs:47-52`; user code boxes it for `Learner::with_scheduler` at `ferrotorch-train/src/learner.rs:105`. |
 | REQ-2 | SHIPPED | impl: `pub fn LinearLR::new(base_lr, start_factor, end_factor, total_iters) -> Self` with `assert!` preconditions in `scheduler/linear_lr.rs` mirrors `torch/optim/lr_scheduler.py:917-934`; non-test consumer: the `pub use` at `lib.rs:47-52` is the user-call surface. |
 | REQ-3 | SHIPPED | impl: `impl<T: Float> LrScheduler<T> for LinearLR` using closed-form in `scheduler/linear_lr.rs` mirrors `torch/optim/lr_scheduler.py:982-1005`; non-test consumer: `Learner` invokes `sched.step(self.optimizer.as_mut())` at `ferrotorch-train/src/learner.rs:306-308`, dispatching to this impl when the boxed scheduler is a `LinearLR`. |
-| REQ-4 | SHIPPED | impl: `step.min(total_iters)` clamp in `compute_lr` (`scheduler/linear_lr.rs`) freezes LR at `base_lr * end_factor` after `total_iters`; non-test consumer: `Learner` driving training past `total_iters` epochs observes the frozen LR via the same `sched.step(...)` invocation at `ferrotorch-train/src/learner.rs:306-308`. Tests `test_linear_lr_ramp_to_end` and `test_linear_lr_stays_after_total_iters` pin the boundary. |
+| REQ-4 | SHIPPED | impl: `step.min(total_iters)` clamp in `compute_lr` (`scheduler/linear_lr.rs`) freezes LR at `base_lr * end_factor` after `total_iters`; non-test consumer: `Learner` driving training past `total_iters` epochs observes the frozen LR via the same `sched.step(...)` invocation at `Learner in ferrotorch-train/src/learner.rs`. Tests `test_linear_lr_ramp_to_end` and `test_linear_lr_stays_after_total_iters` pin the boundary. |

@@ -155,7 +155,7 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct BertConfig` in `config.rs`; non-test consumer: `pub use` at `ferrotorch-bert/src/lib.rs:87` plus `BertEmbeddings::new` at `ferrotorch-bert/src/embeddings.rs:49`. |
+| REQ-1 | SHIPPED | impl: `pub struct BertConfig` in `config.rs`; non-test consumer: `pub use` at `config in ferrotorch-bert/src/lib.rs` plus `BertEmbeddings::new` at `new in ferrotorch-bert/src/embeddings.rs`. |
 | REQ-2 | SHIPPED | impl: `pub struct HfBertConfig` (with `#[derive(Deserialize)]`) in `config.rs`; non-test consumer: `pub use` at `ferrotorch-bert/src/lib.rs:87`. |
 | REQ-3 | SHIPPED | impl: `BertConfig::validate` in `config.rs`; non-test consumer: invoked by `BertEmbeddings::new` at `ferrotorch-bert/src/embeddings.rs:49` and `BertSelfAttention::new` at `ferrotorch-bert/src/attention.rs:46`. |
 | REQ-4 | SHIPPED | impl: `HfBertConfig::validate` in `config.rs`; non-test consumer: invoked by `BertConfig::from_hf` in `config.rs` (the only construction path through the HF JSON). |

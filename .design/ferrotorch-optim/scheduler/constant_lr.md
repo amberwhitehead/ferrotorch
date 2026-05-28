@@ -80,7 +80,7 @@ optimizer.
 - `ConstantLR` re-exported at
   `ferrotorch-optim/src/lib.rs:47-52`.
 - `ChainedScheduler` test code in
-  `scheduler/chained_scheduler.rs:173-180` and `:235-240`
+  `scheduler in scheduler/chained_scheduler.rs` and `scheduler in scheduler/chained_scheduler.rs`
   demonstrates the canonical chaining pattern, but the real
   production consumer is `Learner::with_scheduler` at
   `ferrotorch-train/src/learner.rs:105`, which accepts the boxed

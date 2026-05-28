@@ -56,7 +56,7 @@ Mirrors `class ReduceLROnPlateau(LRScheduler)` at
   `lr_scheduler.py:1695-1742`.
 
 - REQ-6: NOT-STARTED — non-test production consumer. The
-  `Learner` in `ferrotorch-train/src/learner.rs:61, 306-308` only
+  `Learner in ferrotorch-train/src/learner.rs, 306-308` only
   accepts `Box<dyn LrScheduler<T>>`, not `Box<dyn
   MetricScheduler<T>>`. There is currently no
   metric-aware training driver in ferrotorch consuming this

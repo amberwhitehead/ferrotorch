@@ -53,20 +53,20 @@ interpolation, with out-of-image samples filled with zero. Mirrors
 - [x] AC-1: `RandomRotation::new(30.0)` constructs successfully;
   `new(-1.0)` returns `Err`.
 - [x] AC-2: Output shape equals input shape (verified by
-  `test_random_rotation_output_shape` at `random_rotation.rs:141`).
+  `test_random_rotation_output_shape in random_rotation.rs`).
 - [x] AC-3: `degrees == 0` returns input unchanged (verified at
-  `random_rotation.rs:151`).
+  `random_rotation.rs`).
 - [x] AC-4: Center pixel approximately preserved across any rotation
   angle (verified by `test_random_rotation_preserves_center_pixel`
-  at `random_rotation.rs:161`).
+  at `test_random_rotation_preserves_center_pixel in random_rotation.rs`).
 - [x] AC-5: Non-3-D input returns `Err` (verified at
-  `random_rotation.rs:180`).
+  `random_rotation.rs`).
 - [x] AC-6: `bilinear_sample` returns the exact pixel value at integer
-  coordinates (verified at `random_rotation.rs:188`).
+  coordinates (verified at `random_rotation.rs`).
 - [x] AC-7: `bilinear_sample` returns the average of all 4 corners at
-  `(0.5, 0.5)` (verified at `random_rotation.rs:200`).
+  `(0.5, 0.5)` (verified at `random_rotation.rs`).
 - [x] AC-8: `bilinear_sample` returns zero for out-of-bounds coords
-  (verified at `random_rotation.rs:208`).
+  (verified at `random_rotation.rs`).
 - [ ] AC-9: NOT-STARTED — interpolation/expand/center/fill. Blocker #1518.
 
 ## Architecture
@@ -88,11 +88,11 @@ impl<T: Float> RandomRotation<T> {
 }
 ```
 
-at `random_rotation.rs:14-39`.
+at `random_rotation.rs`.
 
 ### Bilinear sampler (REQ-4)
 
-`fn bilinear_sample` at `random_rotation.rs:43-83`:
+`fn bilinear_sample` at `bilinear_sample in random_rotation.rs`:
 
 1. Negative-x/y short-circuit → zero (anti-borders).
 2. Floor to `(x0, y0)`; bounds-check `x0 >= w || y0 >= h` → zero.
@@ -105,7 +105,7 @@ at `random_rotation.rs:14-39`.
 
 ### Transform impl (REQ-3)
 
-`fn apply` at `random_rotation.rs:85-135`:
+`fn apply` at `apply in random_rotation.rs`:
 
 ```rust
 let angle_deg = self.degrees * (2.0 * random_f64() - 1.0);
@@ -162,13 +162,13 @@ follow-up.
 
 Tests in `mod tests in random_rotation.rs` (6 tests):
 
-- `test_random_rotation_output_shape` at `random_rotation.rs:141`
-- `test_random_rotation_zero_degrees` at `random_rotation.rs:151`
-- `test_random_rotation_preserves_center_pixel` at `random_rotation.rs:161`
-- `test_random_rotation_rejects_non_3d` at `random_rotation.rs:180`
-- `test_bilinear_sample_exact_pixel` at `random_rotation.rs:188`
-- `test_bilinear_sample_midpoint` at `random_rotation.rs:200`
-- `test_bilinear_sample_out_of_bounds` at `random_rotation.rs:208`
+- `test_random_rotation_output_shape in random_rotation.rs`
+- `test_random_rotation_zero_degrees in random_rotation.rs`
+- `test_random_rotation_preserves_center_pixel in random_rotation.rs`
+- `test_random_rotation_rejects_non_3d in random_rotation.rs`
+- `test_bilinear_sample_exact_pixel in random_rotation.rs`
+- `test_bilinear_sample_midpoint in random_rotation.rs`
+- `test_bilinear_sample_out_of_bounds in random_rotation.rs`
 
 Smoke:
 
@@ -182,8 +182,8 @@ Expected: `7 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct RandomRotation<T: Float>` with `degrees, _marker` at `ferrotorch-vision/src/transforms/random_rotation.rs:14-17`, mirroring `torchvision/transforms/v2/_geometry.py:560` `class RandomRotation`; non-test consumer: `pub use random_rotation::RandomRotation;` at `mod.rs:29` AND `RandomRotation` in the crate-root re-export at `ferrotorch-vision/src/lib.rs:114`. |
-| REQ-2 | SHIPPED | impl: `pub fn RandomRotation::new(degrees: f64) -> FerrotorchResult<Self>` with `degrees >= 0` check at `random_rotation.rs:28-38`; non-test consumer: reachable via the crate-root re-export at `lib.rs:114`. |
-| REQ-3 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomRotation<T>` with shape check, zero-shortcut, inverse-rotation per-pixel + bilinear sample at `random_rotation.rs:85-135`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this — composes into augmentation `Compose` pipelines. |
-| REQ-4 | SHIPPED | impl: `fn bilinear_sample<T: Float>(data, h, w, y, x) -> FerrotorchResult<T>` at `random_rotation.rs:43-83`; non-test consumer: `fn apply` in this same file calls `bilinear_sample(ch_data, h, w, sy, sx)?` at `random_rotation.rs:127`. |
-| REQ-5 | SHIPPED | impl: `with_interpolation / with_expand / with_center / with_fill` builders + nearest+bilinear+expand+fill dispatch at `ferrotorch-vision/src/transforms/random_rotation.rs:25-95,150-230`; non-test consumer: `pub use random_rotation::RandomRotation;` at `mod.rs:37` AND in the crate-root `lib.rs` re-export — pipelines call `RandomRotation::new(30.0)?.with_interpolation(InterpolationMode::Nearest).with_fill(0.5).with_expand(true)`. |
+| REQ-1 | SHIPPED | impl: `pub struct RandomRotation<T: Float>` with `degrees, _marker` at `RandomRotation in ferrotorch-vision/src/transforms/random_rotation.rs`, mirroring `torchvision/transforms/v2/_geometry.py:560` `class RandomRotation`; non-test consumer: `pub use random_rotation::RandomRotation;` at `mod.rs` AND `RandomRotation` in the crate-root re-export at `ferrotorch-vision/src/lib.rs`. |
+| REQ-2 | SHIPPED | impl: `pub fn RandomRotation::new(degrees: f64) -> FerrotorchResult<Self>` with `degrees >= 0` check at `degrees in random_rotation.rs`; non-test consumer: reachable via the crate-root re-export at `lib.rs`. |
+| REQ-3 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomRotation<T>` with shape check, zero-shortcut, inverse-rotation per-pixel + bilinear sample at `random_rotation.rs`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this — composes into augmentation `Compose` pipelines. |
+| REQ-4 | SHIPPED | impl: `fn bilinear_sample<T: Float>(data, h, w, y, x) -> FerrotorchResult<T>` at `bilinear_sample in random_rotation.rs`; non-test consumer: `fn apply` in this same file calls `bilinear_sample(ch_data, h, w, sy, sx)?` at `apply in random_rotation.rs`. |
+| REQ-5 | SHIPPED | impl: `with_interpolation / with_expand / with_center / with_fill` builders + nearest+bilinear+expand+fill dispatch at `with_interpolation in ferrotorch-vision/src/transforms/random_rotation.rs,150-230`; non-test consumer: `pub use random_rotation::RandomRotation;` at `mod.rs` AND in the crate-root `lib.rs` re-export — pipelines call `RandomRotation::new(30.0)?.with_interpolation(InterpolationMode::Nearest).with_fill(0.5).with_expand(true)`. |

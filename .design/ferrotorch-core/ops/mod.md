@@ -121,7 +121,7 @@ Mirrors upstream's `_<op>` private-helper convention at
 non-test consumers:
 - `ferrotorch-core/src/grad_fns/cumulative.rs:32` `use
   crate::ops::cumulative::{...};` and downstream forward-kernel calls.
-- `ferrotorch-core/src/grad_fns/transcendental.rs:15` `use
+- `ferrotorch-core/src/grad_fns/transcendental.rs` `use
   crate::ops::elementwise::{fast_cos, fast_sin, unary_map};`
 - `ferrotorch-core/src/tensor.rs:1146`
   `crate::ops::indexing::masked_select(self, mask)` — the boundary
@@ -155,6 +155,6 @@ mechanical (compilation) + delegated (sub-module tests).
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: 9 `pub mod <name>;` declarations at `ferrotorch-core/src/ops/mod.rs:1-9` exposing the kernel-layer sub-modules. Each declared module resolves to a `<name>.rs` file under `ferrotorch-core/src/ops/`. Non-test production consumer: `ferrotorch-core/src/grad_fns/cumulative.rs:32` (`use crate::ops::cumulative::{...}`), `ferrotorch-core/src/grad_fns/transcendental.rs:15` (`use crate::ops::elementwise::{fast_cos, fast_sin, unary_map}`), `ferrotorch-core/src/tensor.rs:1146` (`crate::ops::indexing::masked_select`). |
+| REQ-1 | SHIPPED | impl: 9 `pub mod <name>;` declarations at `ferrotorch-core/src/ops/mod.rs` exposing the kernel-layer sub-modules. Each declared module resolves to a `<name>.rs` file under `ferrotorch-core/src/ops/`. Non-test production consumer: `ferrotorch-core/src/grad_fns/cumulative.rs` (`use crate::ops::cumulative::{...}`), `ferrotorch-core/src/grad_fns/transcendental.rs` (`use crate::ops::elementwise::{fast_cos, fast_sin, unary_map}`), `pub in ferrotorch-core/src/tensor.rs` (`crate::ops::indexing::masked_select`). |
 | REQ-2 | SHIPPED | impl: the split is **the** organizational primitive — each sub-module file is the kernel layer, and the corresponding `ferrotorch-core/src/grad_fns/<family>.rs` is the autograd wrapper. Non-test production consumer: `ferrotorch-core/src/grad_fns/cumulative.rs:32-35` imports from `crate::ops::cumulative` and the body of `pub fn cumsum` (`grad_fns/cumulative.rs:104`) delegates the forward to `ops::cumulative::cumsum_forward(...)`. This is the upstream `aten::cummax` (user) vs `_cummax_helper` (private) split mirrored 1:1. |
 | REQ-3 | SHIPPED | impl: this file has no `pub use` (mechanical: only nine `pub mod` lines). Non-test production consumer: `ferrotorch-core/src/lib.rs:173-177` `pub use ops::indexing::{gather, masked_select, scatter, ...}` etc. lifts specific symbols — the picking-by-symbol pattern requires the sub-modules to NOT pre-re-export, which mod.rs preserves by being a pure-declaration file. |

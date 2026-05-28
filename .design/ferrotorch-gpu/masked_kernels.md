@@ -167,10 +167,10 @@ Expected: ≥ 1 `test result: ok` line.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: six `pub fn masked_fill_*` at `ferrotorch-gpu/src/masked_kernels.rs:731-833`; non-test consumer: `backend_impl.rs:6660` (`use crate::masked_kernels as mk`) dispatches per-dtype calls. |
-| REQ-2 | SHIPPED | impl: `pub fn where_32`/`where_64`/`where_16` at `masked_kernels.rs:833-877`; non-test consumer: `backend_impl.rs:6735`. |
-| REQ-3 | SHIPPED | impl: `pub fn count_true` at `masked_kernels.rs:570`; `masked_select_32/64/16` at lines 877-936; non-test consumer: `backend_impl.rs:6834`. |
-| REQ-4 | SHIPPED | impl: `masked_scatter_32/64/16` at `masked_kernels.rs:936-1000`; non-test consumer: `backend_impl.rs:6903`. |
+| REQ-1 | SHIPPED | impl: six `pub fn masked_fill_*` at `masked_fill_ in ferrotorch-gpu/src/masked_kernels.rs`; non-test consumer: `backend_impl.rs` (`use crate::masked_kernels as mk`) dispatches per-dtype calls. |
+| REQ-2 | SHIPPED | impl: `pub fn where_32`/`where_64`/`where_16` at `where_32 in masked_kernels.rs`; non-test consumer: `where_16 in backend_impl.rs`. |
+| REQ-3 | SHIPPED | impl: `pub fn count_true` at `count_true in masked_kernels.rs`; `masked_select_32/64/16` at lines 877-936; non-test consumer: `backend_impl.rs`. |
+| REQ-4 | SHIPPED | impl: `masked_scatter_32/64/16` at `masked_scatter_32 in masked_kernels.rs`; non-test consumer: `backend_impl.rs`. |
 | REQ-5 | SHIPPED | impl: every kernel launch in this file routes through `module_cache::get_or_compile`. The file's `use crate::module_cache::get_or_compile` import at line 44 binds the single PTX load path; the file has no `cudarc::nvrtc` import. |
 | REQ-6 | SHIPPED | impl: per-dtype `pub fn` entries mean the (op, dtype) coverage is structurally surfaced — a missing combination is a missing function symbol that the `backend_impl` dispatcher converts to `FerrotorchError::NotImplementedOnCuda` (the policy documented in the module `//!` block at line 36). |
 | REQ-7 | SHIPPED | impl: four `use crate::masked_kernels as mk` sites in `backend_impl.rs` at lines 6660, 6735, 6834, 6903 — each is the body of a `CudaBackendImpl` trait method. ferrotorch-core dispatches `Tensor::masked_fill`/etc. through the `GpuBackend` trait when the input is CUDA-resident. |

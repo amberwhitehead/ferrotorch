@@ -106,7 +106,7 @@ version that captures per-layer activations.
   `maybe_load_pretrained` in `registry.rs` (around lines 160 and 169).
 - `ferrotorch-vision/src/models/detection/ssd.rs` uses `VGG` (via the
   factory `super::vgg::vgg16`) as the SSD300 backbone (registered as
-  `"ssd300_vgg16"` at `registry.rs:335`).
+  `"ssd300_vgg16"` at `registry.rs`).
 
 ## Parity contract
 
@@ -159,6 +159,6 @@ Expected: all tests pass; no parity-sweep ops.
 | REQ-3 | SHIPPED | impl: `make_features` in `vgg.rs` (flat-entries layout) mirrors torchvision `make_layers` at `vgg.py:73`; non-test consumer: `VGG::from_cfg` calls it in `vgg.rs`. |
 | REQ-4 | SHIPPED | impl: `make_classifier` in `vgg.rs` (flat 7-entry classifier) mirrors torchvision `nn.Sequential(Linear, ReLU, Dropout, ...)` at `vgg.py:43`; non-test consumer: `VGG::from_cfg` in `vgg.rs` calls it. |
 | REQ-5 | SHIPPED | impl: `pub fn vgg11` / `pub fn vgg16` in `vgg.rs`; non-test consumer: `default_registry()` in `registry.rs` binds both via `maybe_load_pretrained`. |
-| REQ-6 | SHIPPED | impl: `Module::named_parameters` for `VGG<T>` in `vgg.rs`; non-test consumer: `load_state_dict(&state_dict, false)` at `registry.rs:53` walks the result in production. |
-| REQ-7 | SHIPPED | impl: `children` / `named_children` for `VGG<T>` in `vgg.rs`; non-test consumer: `apply_bn_buffers_from_state_dict(&model as &dyn Module<T>, &state_dict)` at `registry.rs:62` walks the tree (the call is a no-op for VGG since there are no BNs, but the consumer site is real). |
+| REQ-6 | SHIPPED | impl: `Module::named_parameters` for `VGG<T>` in `vgg.rs`; non-test consumer: `load_state_dict(&state_dict, false)` at `named_parameters in registry.rs` walks the result in production. |
+| REQ-7 | SHIPPED | impl: `children` / `named_children` for `VGG<T>` in `vgg.rs`; non-test consumer: `apply_bn_buffers_from_state_dict(&model as &dyn Module<T>, &state_dict)` at `registry.rs` walks the tree (the call is a no-op for VGG since there are no BNs, but the consumer site is real). |
 | REQ-8 | SHIPPED | impl: `impl IntermediateFeatures<T> for VGG<T>` in `vgg.rs`; non-test consumer: `pub use feature_extractor::{IntermediateFeatures, create_feature_extractor}` exposes the trait via `mod.rs`; `feature_extractor.rs` is the production helper. |

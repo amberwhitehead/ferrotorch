@@ -68,11 +68,11 @@ convention.
 ### Flat re-exports (REQ-2)
 
 `pub use center_crop::CenterCrop;` through
-`pub use vision_normalize::VisionNormalize;` at `mod.rs:19-35`. Note the
+`pub use vision_normalize::VisionNormalize;` at `mod.rs`. Note the
 `random_apply` re-export brings BOTH `RandomApply` and `RandomChoice` into
 scope (they share a file because they share the runtime branching pattern).
 The `vision_manual_seed` function (not a transform; a global PRNG seed
-setter) is also re-exported at `mod.rs:32`.
+setter) is also re-exported at `mod.rs`.
 
 ### ImageNet constants (REQ-3)
 
@@ -81,7 +81,7 @@ pub const IMAGENET_MEAN: [f64; 3] = [0.485, 0.456, 0.406];
 pub const IMAGENET_STD: [f64; 3] = [0.229, 0.224, 0.225];
 ```
 
-at `mod.rs:38-41`. The values are RGB-ordered, matching torchvision's
+at `mod.rs`. The values are RGB-ordered, matching torchvision's
 `torchvision/models/_meta.py` and the ResNet weight-loading documentation.
 These are used as default arguments by `VisionNormalize::imagenet` in
 `vision_normalize.rs`.
@@ -94,7 +94,7 @@ These are used as default arguments by `VisionNormalize::imagenet` in
   `use ferrotorch_vision::transforms::ColorJitter`. This is the crate's
   public API surface; per goal.md S5 it is grandfathered.
 - `vision_normalize::VisionNormalize::imagenet`
-  (`vision_normalize.rs:46-49`) reads `IMAGENET_MEAN` / `IMAGENET_STD`
+  (`vision_normalize.rs`) reads `IMAGENET_MEAN` / `IMAGENET_STD`
   to build the canonical ImageNet normalizer — production-side consumer
   of REQ-3.
 
@@ -122,6 +122,6 @@ build.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: 17 `pub mod` declarations at `ferrotorch-vision/src/transforms/mod.rs:1-17` mirroring the `torchvision.transforms.v2` flat namespace; non-test consumer: `ferrotorch-vision/src/lib.rs:97` `pub mod transforms;` exposes the module at the crate root. |
+| REQ-1 | SHIPPED | impl: 17 `pub mod` declarations at `ferrotorch-vision/src/transforms/mod.rs` mirroring the `torchvision.transforms.v2` flat namespace; non-test consumer: `ferrotorch-vision/src/lib.rs` `pub mod transforms;` exposes the module at the crate root. |
 | REQ-2 | SHIPPED | impl: `pub use` re-exports at `ferrotorch-vision/src/transforms/mod.rs:19-35` for `CenterCrop`, `ColorJitter`, `Compose`, `ElasticTransform`, `GaussianNoise`, `{RandomApply, RandomChoice}`, `RandomCrop`, `RandomGaussianBlur`, `RandomHorizontalFlip`, `RandomResizedCrop`, `RandomRotation`, `RandomVerticalFlip`, `Resize`, `VisionToTensor`, `TrivialAugmentWide`, `VisionNormalize`, `vision_manual_seed`; non-test consumer: `ferrotorch-vision/src/lib.rs:112-116` re-exports these to the crate root for `use ferrotorch_vision::Foo` ergonomics. |
-| REQ-3 | SHIPPED | impl: `pub const IMAGENET_MEAN: [f64; 3] = [0.485, 0.456, 0.406];` at `ferrotorch-vision/src/transforms/mod.rs:38` and `pub const IMAGENET_STD: [f64; 3] = [0.229, 0.224, 0.225];` at `mod.rs:41`; non-test consumer: `VisionNormalize::imagenet` in `vision_normalize.rs:46-49` reads both constants via `Self::new(IMAGENET_MEAN, IMAGENET_STD)`, AND `ferrotorch-vision/src/lib.rs:113` re-exports both at the crate root. |
+| REQ-3 | SHIPPED | impl: `pub const IMAGENET_MEAN: [f64; 3] = [0.485, 0.456, 0.406];` at `vision_normalize in ferrotorch-vision/src/transforms/mod.rs` and `pub const IMAGENET_STD: [f64; 3] = [0.229, 0.224, 0.225];` at `mod.rs`; non-test consumer: `VisionNormalize::imagenet` in `imagenet in vision_normalize.rs` reads both constants via `Self::new(IMAGENET_MEAN, IMAGENET_STD)`, AND `ferrotorch-vision/src/lib.rs` re-exports both at the crate root. |

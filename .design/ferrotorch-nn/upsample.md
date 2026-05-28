@@ -181,7 +181,7 @@ shuffle / fold call.
   pixel_unshuffle, unfold}` at
   `ferrotorch-nn/src/lib.rs:252-256`.
 - `ferrotorch-vision/src/models/segmentation/deeplabv3.rs:52`,
-  `aspp.rs:39`, `lraspp.rs:50`, `fcn.rs:36` consume
+  `aspp.rs`, `lraspp in lraspp.rs`, `fcn in fcn.rs` consume
   `InterpolateMode` and `interpolate` for the segmentation
   upsample tails.
 
@@ -224,15 +224,15 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub enum InterpolateMode` in `upsample.rs`; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:252` + `ferrotorch-vision/src/models/segmentation/deeplabv3.rs:52` + `aspp.rs:39` + `lraspp.rs:50` + `fcn.rs:36`. |
-| REQ-2 | SHIPPED | impl: `pub enum GridSamplePaddingMode` and `pub enum GridSampleMode` in `upsample.rs`; non-test consumer: re-export at `lib.rs:252`. |
-| REQ-3 | SHIPPED | impl: `pub fn interpolate<T: Float>` in `upsample.rs`; non-test consumer: re-export at `lib.rs:252` + every segmentation model in `ferrotorch-vision` (see REQ-1 list). |
-| REQ-4 | SHIPPED | impl: `pub struct Upsample` plus `impl<T: Float> Module<T> for Upsample` in `upsample.rs`; non-test consumer: re-export at `lib.rs:252`. |
-| REQ-5 | SHIPPED | impl: `pub fn grid_sample<T: Float>` in `upsample.rs`; non-test consumer: re-export at `lib.rs:252`. |
-| REQ-6 | SHIPPED | impl: `pub fn affine_grid<T: Float>` in `upsample.rs`; non-test consumer: re-export at `lib.rs:252`. |
-| REQ-7 | SHIPPED | impl: `pub struct PixelShuffle` and `pub struct PixelUnshuffle` plus their `impl<T: Float> Module<T>` blocks in `upsample.rs`; non-test consumer: re-export at `lib.rs:252`. |
-| REQ-8 | SHIPPED | impl: `pub fn pixel_shuffle<T: Float>` and `pub fn pixel_unshuffle<T: Float>` in `upsample.rs`; non-test consumer: re-export at `lib.rs:252`. |
-| REQ-9 | SHIPPED | impl: `pub struct Unfold`, `pub struct Fold` plus their `impl<T: Float> Module<T>` blocks and `pub fn unfold`, `pub fn fold` in `upsample.rs`; non-test consumer: re-export at `lib.rs:252`. |
-| REQ-10 | SHIPPED | impl: `fn cubic_weight in upsample.rs`; non-test consumer: invoked from the bicubic branch of `interpolate` (re-exported at `lib.rs:252`). |
-| REQ-11 | SHIPPED | impl: `align_corners`-aware source-coordinate formulas inside the interpolate / grid_sample bodies in `upsample.rs`; non-test consumer: re-export at `lib.rs:252`. |
-| REQ-12 | SHIPPED | impl: per-op `GradFn<T>` types plus `Tensor::from_operation` calls in `upsample.rs`; non-test consumer: re-export at `lib.rs:252` — autograd engine traverses each GradFn on `backward()`. |
+| REQ-1 | SHIPPED | impl: `pub enum InterpolateMode` in `upsample.rs`; non-test consumer: re-export at `upsample in ferrotorch-nn/src/lib.rs` + `ferrotorch-vision/src/models/segmentation/deeplabv3.rs` + `aspp.rs` + `lraspp in lraspp.rs` + `fcn in fcn.rs`. |
+| REQ-2 | SHIPPED | impl: `pub enum GridSamplePaddingMode` and `pub enum GridSampleMode` in `upsample.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-3 | SHIPPED | impl: `pub fn interpolate<T: Float>` in `upsample.rs`; non-test consumer: re-export at `lib.rs` + every segmentation model in `ferrotorch-vision` (see REQ-1 list). |
+| REQ-4 | SHIPPED | impl: `pub struct Upsample` plus `impl<T: Float> Module<T> for Upsample` in `upsample.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-5 | SHIPPED | impl: `pub fn grid_sample<T: Float>` in `upsample.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-6 | SHIPPED | impl: `pub fn affine_grid<T: Float>` in `upsample.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-7 | SHIPPED | impl: `pub struct PixelShuffle` and `pub struct PixelUnshuffle` plus their `impl<T: Float> Module<T>` blocks in `upsample.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-8 | SHIPPED | impl: `pub fn pixel_shuffle<T: Float>` and `pub fn pixel_unshuffle<T: Float>` in `upsample.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-9 | SHIPPED | impl: `pub struct Unfold`, `pub struct Fold` plus their `impl<T: Float> Module<T>` blocks and `pub fn unfold`, `pub fn fold` in `upsample.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-10 | SHIPPED | impl: `fn cubic_weight in upsample.rs`; non-test consumer: invoked from the bicubic branch of `interpolate` (re-exported at `lib.rs`). |
+| REQ-11 | SHIPPED | impl: `align_corners`-aware source-coordinate formulas inside the interpolate / grid_sample bodies in `upsample.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-12 | SHIPPED | impl: per-op `GradFn<T>` types plus `Tensor::from_operation` calls in `upsample.rs`; non-test consumer: re-export at `lib.rs` — autograd engine traverses each GradFn on `backward()`. |

@@ -91,7 +91,7 @@ FMA).
 
 The `#[cfg(not(feature = "cuda"))]` stub matches the public
 signature so downstream callers can `cfg`-gate at the dispatch
-site (e.g. `codegen_gpu.rs:1237`) without conditional re-imports.
+site (e.g. `codegen_gpu.rs`) without conditional re-imports.
 
 ### Non-test production consumers
 
@@ -104,7 +104,7 @@ site (e.g. `codegen_gpu.rs:1237`) without conditional re-imports.
   `crate::nvrtc::compile_cuda_source_to_ptx(&cuda_source,
   FUSED_F64_KERNEL_NAME)` is the f64-fusion path. The PTX is
   loaded by cudarc and dispatched at apply time
-  (`fusion.rs:522`).
+  (`fusion in fusion.rs`).
 
 ## Parity contract
 
@@ -130,7 +130,7 @@ Tests for this module live inside the CUDA-feature-gated paths in
 `codegen_gpu.rs` and `fusion_gpu.rs`, since the function is only
 meaningful with the runtime present. The non-CUDA stub is
 exercised by every default-feature `cargo test -p ferrotorch-jit`
-that goes through `codegen_gpu.rs:1237` and gets the explicit
+that goes through `codegen_gpu.rs` and gets the explicit
 `JitError::CodegenError` back.
 
 Smoke command:
@@ -149,7 +149,7 @@ f64-transcendental and fused-f64 GPU paths exercise NVRTC.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub fn compile_cuda_source_to_ptx` in `nvrtc.rs` (both `#[cfg(feature = "cuda")]` and the stub); non-test consumer: `ferrotorch-jit/src/codegen_gpu.rs:1237` `crate::nvrtc::compile_cuda_source_to_ptx(&cuda_source, fn_name)`; `ferrotorch-jit/src/fusion_gpu.rs:197` `crate::nvrtc::compile_cuda_source_to_ptx(&cuda_source, FUSED_F64_KERNEL_NAME)`. |
-| REQ-2 | SHIPPED | impl: `.lines().filter(\|l\| !l.trim().starts_with("#include <math.h>"))` chain in `nvrtc.rs::compile_cuda_source_to_ptx`; non-test consumer: every NVRTC invocation from `codegen_gpu.rs:1237` and `fusion_gpu.rs:197` benefits from this strip. |
+| REQ-2 | SHIPPED | impl: `.lines().filter(\|l\| !l.trim().starts_with("#include <math.h>"))` chain in `nvrtc.rs::compile_cuda_source_to_ptx`; non-test consumer: every NVRTC invocation from `compile_cuda_source_to_ptx in codegen_gpu.rs` and `compile_cuda_source_to_ptx in fusion_gpu.rs` benefits from this strip. |
 | REQ-3 | SHIPPED | impl: the `if l.starts_with("__global__ void ")` rewrite in `nvrtc.rs::compile_cuda_source_to_ptx`; non-test consumer: same call sites — cudarc's `cuModuleGetFunction` keys on the unmangled name post-rewrite. |
 | REQ-4 | SHIPPED | impl: `CompileOptions { arch: Some("compute_75"), ..Default::default() }` in `nvrtc.rs::compile_cuda_source_to_ptx`; non-test consumer: every PTX produced for `codegen_gpu` and `fusion_gpu` targets sm_75+. |
-| REQ-5 | SHIPPED | impl: `#[cfg(not(feature = "cuda"))] pub fn compile_cuda_source_to_ptx(...) -> Err(JitError::CodegenError { ... })` in `nvrtc.rs`; non-test consumer: `codegen_gpu.rs:1237` compiles under both feature configurations and receives the structured error in the no-CUDA build. |
+| REQ-5 | SHIPPED | impl: `#[cfg(not(feature = "cuda"))] pub fn compile_cuda_source_to_ptx(...) -> Err(JitError::CodegenError { ... })` in `nvrtc.rs`; non-test consumer: `codegen_gpu.rs` compiles under both feature configurations and receives the structured error in the no-CUDA build. |

@@ -62,7 +62,7 @@ down/up sampling.
 - [x] AC-1: `unet_forward_shape` runs a tiny config (`bocs=[16, 32,
   64, 64]`, `S=7`, `cross_attention_dim=24`) end-to-end on a
   `[1, 4, 8, 8]` sample and gets `[1, 4, 8, 8]` back
-  (`unet.rs:1512..1532`).
+  (`unet in unet.rs`).
 - [x] AC-2: `unet_named_parameters_includes_canonical_keys`
   enumerates eleven canonical key patterns
   (`time_embedding.linear_1.weight`,
@@ -70,26 +70,26 @@ down/up sampling.
   `down_blocks.0.attentions.0.transformer_blocks.0.attn1.to_q.weight`,
   `mid_block.attentions.0.transformer_blocks.0.attn2.to_v.weight`,
   `up_blocks.1.attentions.0.transformer_blocks.0.ff.net.0.proj.weight`,
-  `conv_out.bias`, …) (`unet.rs:1534..1558`).
+  `conv_out.bias`, …) (`unet in unet.rs`).
 
 ## Architecture
 
-- `CrossAttnDownBlock2D<T>` at `unet.rs:67..76`, `new` at
-  `unet.rs:78..136` (heads=`attention_head_dim`, `dim_head =
+- `CrossAttnDownBlock2D<T>` at `CrossAttnDownBlock2D in unet.rs`, `new` at
+  `unet in unet.rs` (heads=`attention_head_dim`, `dim_head =
   out_channels / heads`), `forward_t` at `unet.rs:147..165`.
-- `DownBlock2D<T>` at `unet.rs:277..285`, `new` at
-  `unet.rs:289..325`, `forward_t` at `unet.rs:327..343`.
-- `UNetMidBlock2DCrossAttn<T>` at `unet.rs:442..450`, `new` at
-  `unet.rs:454..489`, `forward_t` at `unet.rs:491..504`.
-- `CrossAttnUpBlock2D<T>` at `unet.rs:600..610`, `new` at
-  `unet.rs:614..689`, `forward_t` at `unet.rs:691..722`.
-- `UpBlock2D<T>` at `unet.rs:829..836`, `new` at
-  `unet.rs:840..888`, `forward_t` at `unet.rs:890..914`.
-- `AnyDownBlock<T>` at `unet.rs:1000..1046` (enum + `forward_t` /
+- `DownBlock2D<T>` at `DownBlock2D in unet.rs`, `new` at
+  `unet in unet.rs`, `forward_t in unet.rs`.
+- `UNetMidBlock2DCrossAttn<T>` at `UNetMidBlock2DCrossAttn in unet.rs`, `new` at
+  `unet in unet.rs`, `forward_t in unet.rs`.
+- `CrossAttnUpBlock2D<T>` at `CrossAttnUpBlock2D in unet.rs`, `new` at
+  `unet in unet.rs`, `forward_t in unet.rs`.
+- `UpBlock2D<T>` at `UpBlock2D in unet.rs`, `new` at
+  `unet in unet.rs`, `forward_t in unet.rs`.
+- `AnyDownBlock<T>` at `AnyDownBlock in unet.rs` (enum + `forward_t` /
   parameters / named_parameters / load dispatch).
-- `AnyUpBlock<T>` at `unet.rs:1048..1099` (mirror enum).
-- `UNet2DConditionModel<T>` at `unet.rs:1105..1129`. `new` at
-  `unet.rs:1138..1260` builds:
+- `AnyUpBlock<T>` at `AnyUpBlock in unet.rs` (mirror enum).
+- `UNet2DConditionModel<T>` at `UNet2DConditionModel in unet.rs`. `new` at
+  `unet in unet.rs` builds:
   - `Timesteps::new(bocs[0], flip_sin_to_cos, freq_shift)` (the
     parameter-free sinusoidal encoding);
   - `TimestepEmbedding::<T>::new(bocs[0], temb_channels)` (the
@@ -105,15 +105,15 @@ down/up sampling.
     `layers_per_block + 1` resnets per block);
   - `conv_norm_out (GroupNorm(groups, bocs[0], eps=1e-5))` and
     `conv_out (bocs[0] → out_channels)`.
-- `forward_t` at `unet.rs:1274..1362` runs the six-stage forward.
+- `forward_t in unet.rs` runs the six-stage forward.
   Skip handling: `skips = [conv_in_output]`; each down-block
   appends; each up-block pops its trailing N resnet count, reverses
   the popped list, and hands them to `block.forward_t`. The reversal
   is the diffusers convention (most-recent skip first).
-- `Module<T>::forward` at `unet.rs:1366..1372` returns an
+- `Module<T>::forward` at `unet in unet.rs` returns an
   `InvalidArgument` error pointing callers at `forward_t`; the
   multi-argument signature is the only valid forward path.
-- `load_state_dict` at `unet.rs:1444..1486` splits by the seven
+- `load_state_dict` at `unet in unet.rs` splits by the seven
   diffusers prefixes; strict mode rejects others.
 
 Non-test production consumers:
@@ -142,26 +142,26 @@ similarity ≥ 0.99 against the pinned reference UNet output).
 The diffusers footguns that must NOT regress:
 
 - `attention_head_dim` is the COUNT of heads, not the dim — the
-  comment at `unet.rs:96..103` documents this. The actual per-head
+  comment at `unet in unet.rs` documents this. The actual per-head
   dim is `out_channels / heads`.
 - Up-block skip order is most-recent-first (the loop at
-  `unet.rs:1344..1355` reverses `popped` before handing to
+  `unet in unet.rs` reverses `popped` before handing to
   `block.forward_t`).
 - `(layers_per_block + 1)` resnets per up-block (vs
   `layers_per_block` on the down side) — explicit at
-  `unet.rs:1222`, `unet.rs:1235`.
+  `unet in unet.rs`, `unet in unet.rs`.
 - Mid-block channels = `bocs[-1]` (deepest).
 - `flip_sin_to_cos = true` and `freq_shift = 0` are SD-1.5 defaults
-  consumed at `unet.rs:1148`.
+  consumed at `unet in unet.rs`.
 
 ## Verification
 
-Lib tests at `unet.rs:1489..1559`:
+Lib tests at `unet in unet.rs`:
 
 - `unet_forward_shape` — full forward through the four-block stack
-  (`unet.rs:1512..1532`).
+  (`unet in unet.rs`).
 - `unet_named_parameters_includes_canonical_keys` — eleven canonical
-  diffusers keys exposed (`unet.rs:1534..1558`).
+  diffusers keys exposed (`unet in unet.rs`).
 
 Integration: `tests/conformance_pretrained_diffusion.rs` runs the
 pinned SD-1.5 UNet against the reference outputs.
@@ -172,11 +172,11 @@ No parity-sweep ops apply (composition module).
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `CrossAttnDownBlock2D<T>` at `ferrotorch-diffusion/src/unet.rs:67..76` and `forward_t` at `ferrotorch-diffusion/src/unet.rs:147..165`; non-test consumer: `AnyDownBlock::CrossAttn` variant at `ferrotorch-diffusion/src/unet.rs:1162` is built by `UNet2DConditionModel::new` for every attn down-block |
-| REQ-2 | SHIPPED | impl: `DownBlock2D<T>` at `ferrotorch-diffusion/src/unet.rs:277..285` and `forward_t` at `ferrotorch-diffusion/src/unet.rs:327..343`; non-test consumer: `AnyDownBlock::Plain` variant at `ferrotorch-diffusion/src/unet.rs:1174` is built by `UNet2DConditionModel::new` for the final attn-free down-block |
-| REQ-3 | SHIPPED | impl: `UNetMidBlock2DCrossAttn<T>` at `ferrotorch-diffusion/src/unet.rs:442..450` and `forward_t` at `ferrotorch-diffusion/src/unet.rs:491..504`; non-test consumer: `UNet2DConditionModel::new` at `ferrotorch-diffusion/src/unet.rs:1189..1196` constructs the mid block; `forward_t` at `unet.rs:1330` invokes it per forward |
-| REQ-4 | SHIPPED | impl: `CrossAttnUpBlock2D<T>` at `ferrotorch-diffusion/src/unet.rs:600..610` and `forward_t` at `ferrotorch-diffusion/src/unet.rs:691..722`; non-test consumer: `AnyUpBlock::CrossAttn` variant at `ferrotorch-diffusion/src/unet.rs:1217` is built by `UNet2DConditionModel::new` for every attn up-block |
-| REQ-5 | SHIPPED | impl: `UpBlock2D<T>` at `ferrotorch-diffusion/src/unet.rs:829..836` and `forward_t` at `ferrotorch-diffusion/src/unet.rs:890..914`; non-test consumer: `AnyUpBlock::Plain` variant at `ferrotorch-diffusion/src/unet.rs:1230` is built for the first up-block (attn-free) |
-| REQ-6 | SHIPPED | impl: `AnyDownBlock<T>` at `ferrotorch-diffusion/src/unet.rs:1000..1046` and `AnyUpBlock<T>` at `ferrotorch-diffusion/src/unet.rs:1048..1099`; non-test consumer: `UNet2DConditionModel::new` at `ferrotorch-diffusion/src/unet.rs:1161,1216` dispatches by `cfg.down_block_has_attn[i]` / `cfg.up_block_has_attn[i]` |
-| REQ-7 | SHIPPED | impl: `UNet2DConditionModel::forward_t` at `ferrotorch-diffusion/src/unet.rs:1274..1362`; non-test consumer: `ferrotorch-diffusion/src/pipeline.rs:142..143` in `cfg_eval` calls `self.unet.forward_t(&model_input, &t, ...)` twice per diffusion step |
+| REQ-1 | SHIPPED | impl: `CrossAttnDownBlock2D<T>` at `CrossAttnDownBlock2D in ferrotorch-diffusion/src/unet.rs` and `forward_t in ferrotorch-diffusion/src/unet.rs`; non-test consumer: `AnyDownBlock::CrossAttn` variant at `CrossAttn in ferrotorch-diffusion/src/unet.rs` is built by `UNet2DConditionModel::new` for every attn down-block |
+| REQ-2 | SHIPPED | impl: `DownBlock2D<T>` at `DownBlock2D in ferrotorch-diffusion/src/unet.rs` and `forward_t in ferrotorch-diffusion/src/unet.rs`; non-test consumer: `AnyDownBlock::Plain` variant at `Plain in ferrotorch-diffusion/src/unet.rs` is built by `UNet2DConditionModel::new` for the final attn-free down-block |
+| REQ-3 | SHIPPED | impl: `UNetMidBlock2DCrossAttn<T>` at `UNetMidBlock2DCrossAttn in ferrotorch-diffusion/src/unet.rs` and `forward_t in ferrotorch-diffusion/src/unet.rs`; non-test consumer: `UNet2DConditionModel::new` at `new in ferrotorch-diffusion/src/unet.rs` constructs the mid block; `forward_t in unet.rs` invokes it per forward |
+| REQ-4 | SHIPPED | impl: `CrossAttnUpBlock2D<T>` at `CrossAttnUpBlock2D in ferrotorch-diffusion/src/unet.rs` and `forward_t in ferrotorch-diffusion/src/unet.rs`; non-test consumer: `AnyUpBlock::CrossAttn` variant at `CrossAttn in ferrotorch-diffusion/src/unet.rs` is built by `UNet2DConditionModel::new` for every attn up-block |
+| REQ-5 | SHIPPED | impl: `UpBlock2D<T>` at `UpBlock2D in ferrotorch-diffusion/src/unet.rs` and `forward_t in ferrotorch-diffusion/src/unet.rs`; non-test consumer: `AnyUpBlock::Plain` variant at `Plain in ferrotorch-diffusion/src/unet.rs` is built for the first up-block (attn-free) |
+| REQ-6 | SHIPPED | impl: `AnyDownBlock<T>` at `AnyDownBlock in ferrotorch-diffusion/src/unet.rs` and `AnyUpBlock<T>` at `AnyUpBlock in ferrotorch-diffusion/src/unet.rs`; non-test consumer: `UNet2DConditionModel::new` at `new in ferrotorch-diffusion/src/unet.rs,1216` dispatches by `cfg.down_block_has_attn[i]` / `cfg.up_block_has_attn[i]` |
+| REQ-7 | SHIPPED | impl: `UNet2DConditionModel::forward_t` at `forward_t in ferrotorch-diffusion/src/unet.rs`; non-test consumer: `forward_t in ferrotorch-diffusion/src/pipeline.rs` in `cfg_eval` calls `self.unet.forward_t(&model_input, &t, ...)` twice per diffusion step |
 | REQ-8 | SHIPPED | impl: `Module<T>::load_state_dict` at `ferrotorch-diffusion/src/unet.rs:1444..1486`; non-test consumer: `ferrotorch-diffusion/src/safetensors_loader.rs:146` `UNet2DConditionModel::load_hf_state_dict` calls `self.load_state_dict(&remapped, strict)` after stripping the `unet.` prefix |

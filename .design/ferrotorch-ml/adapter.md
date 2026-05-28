@@ -129,11 +129,11 @@ the check fails.
 
 ### Non-test production consumers
 
-- `ferrotorch-ml/src/datasets.rs:34` —
+- `ferrotorch-ml/src/datasets.rs` —
   `use crate::adapter::{array1_to_tensor, array1_usize_to_tensor, array2_to_tensor}`
   consumes the inverse adapters to pack ferrolearn dataset output
   back into tensor pairs.
-- `ferrotorch-ml/src/metrics.rs:33` —
+- `ferrotorch-ml/src/metrics.rs` —
   `use crate::adapter::{tensor_to_array1, tensor_to_array1_usize}`
   consumes the forward adapters in every metric wrapper.
 - `ferrotorch-ml/src/metrics.rs:292` — the internal
@@ -202,9 +202,9 @@ Expected: `8 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub fn tensor_to_array1<T: Float + Clone>` in `ferrotorch-ml/src/adapter.rs:52` mirroring upstream `Tensor.numpy()` (`/home/doll/pytorch/torch/_tensor.py` `numpy` method); non-test consumer: `ferrotorch-ml/src/metrics.rs:67` `let yt = tensor_to_array1(y_true)?` inside `r2_score` (consumed by every regression metric wrapper). |
-| REQ-2 | SHIPPED | impl: `pub fn tensor_to_array2<T: Float + Clone>` in `ferrotorch-ml/src/adapter.rs:92` mirroring upstream `Tensor.numpy()` for the 2-D case; non-test consumer: `ferrotorch-ml/src/datasets.rs:49` `Ok((array2_to_tensor(x_arr)?, ...))` inside `pack_xy_classify` (consumed by every dataset generator) — reverse direction; forward direction available for downstream pipelines. |
-| REQ-3 | SHIPPED | impl: `pub fn array1_to_tensor<T: Float>` in `ferrotorch-ml/src/adapter.rs:126`; non-test consumer: `ferrotorch-ml/src/datasets.rs:58` `Ok((array2_to_tensor(x_arr)?, array1_to_tensor(y_arr)?))` inside `pack_xy_regress` (consumed by `make_regression`). |
-| REQ-4 | SHIPPED | impl: `pub fn array2_to_tensor<T: Float>` in `ferrotorch-ml/src/adapter.rs:150` with the contiguous-vs-non-contiguous branch; non-test consumer: `ferrotorch-ml/src/datasets.rs:49` inside `pack_xy_classify` and `pack_xy_regress` packing ferrolearn dataset feature matrices into tensors. |
+| REQ-1 | SHIPPED | impl: `pub fn tensor_to_array1<T: Float + Clone>` in `tensor_to_array1 in ferrotorch-ml/src/adapter.rs` mirroring upstream `Tensor.numpy()` (`/home/doll/pytorch/torch/_tensor.py` `numpy` method); non-test consumer: `r2_score in ferrotorch-ml/src/metrics.rs` `let yt = tensor_to_array1(y_true)?` inside `r2_score` (consumed by every regression metric wrapper). |
+| REQ-2 | SHIPPED | impl: `pub fn tensor_to_array2<T: Float + Clone>` in `tensor_to_array2 in ferrotorch-ml/src/adapter.rs` mirroring upstream `Tensor.numpy()` for the 2-D case; non-test consumer: `Ok in ferrotorch-ml/src/datasets.rs` `Ok((array2_to_tensor(x_arr)?, ...))` inside `pack_xy_classify` (consumed by every dataset generator) — reverse direction; forward direction available for downstream pipelines. |
+| REQ-3 | SHIPPED | impl: `pub fn array1_to_tensor<T: Float>` in `array1_to_tensor in ferrotorch-ml/src/adapter.rs`; non-test consumer: `Ok in ferrotorch-ml/src/datasets.rs` `Ok((array2_to_tensor(x_arr)?, array1_to_tensor(y_arr)?))` inside `pack_xy_regress` (consumed by `make_regression`). |
+| REQ-4 | SHIPPED | impl: `pub fn array2_to_tensor<T: Float>` in `array2_to_tensor in ferrotorch-ml/src/adapter.rs` with the contiguous-vs-non-contiguous branch; non-test consumer: `pack_xy_classify in ferrotorch-ml/src/datasets.rs` inside `pack_xy_classify` and `pack_xy_regress` packing ferrolearn dataset feature matrices into tensors. |
 | REQ-5 | SHIPPED | impl: `pub fn array1_usize_to_tensor<T: Float>` in `ferrotorch-ml/src/adapter.rs:185` using `ferrotorch_core::numeric_cast::cast`; non-test consumer: `ferrotorch-ml/src/datasets.rs:49` inside `pack_xy_classify` converts the `Array1<usize>` class-label output of every classification generator (`make_classification`, `make_blobs`, `make_moons`, `make_circles`, `load_iris`, `load_wine`, `load_breast_cancer`) back into a float tensor. |
 | REQ-6 | SHIPPED | impl: `pub fn tensor_to_array1_usize<T: Float>` in `ferrotorch-ml/src/adapter.rs:218` with the finite + non-negative check; non-test consumer: `ferrotorch-ml/src/metrics.rs:265` `let yt = tensor_to_array1_usize(y_true)?` inside `accuracy_score` (consumed by every classification metric: `precision_score`, `recall_score`, `f1_score`, `confusion_matrix`, `hamming_loss`, `balanced_accuracy_score`, `matthews_corrcoef`, `cohen_kappa_score`, `zero_one_loss`, `top_k_accuracy_score`, `log_loss`, `brier_score_loss`, `d2_brier_score`, `average_precision_score`, `roc_auc_score`). |

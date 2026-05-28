@@ -107,36 +107,36 @@ pub struct LogNormal<T: Float> {
 }
 ```
 
-Defined at `lognormal.rs:30-33`. Constructor at `lognormal.rs:41-52`.
-Accessors at `lognormal.rs:55-62`. The `mean_value()` /
-`variance_value()` helpers at `lognormal.rs:65-91` return `Vec<T>`
+Defined at `lognormal.rs`. Constructor at `lognormal.rs`.
+Accessors at `mean_value in lognormal.rs`. The `mean_value()` /
+`variance_value()` helpers at `variance_value in lognormal.rs` return `Vec<T>`
 directly for old call sites.
 
 ### The Distribution impl (REQ-4, REQ-5, REQ-7, REQ-8, REQ-9, REQ-10)
 
-`sample` (`lognormal.rs:95-116`) draws `eps ~ N(0, 1)` via
+`sample` (`sample in lognormal.rs`) draws `eps ~ N(0, 1)` via
 `creation::randn` then computes `(loc + scale * eps).exp()`
 element-wise with cyclic broadcasting.
 
-`rsample` (`lognormal.rs:118-155`) follows the same closed form
+`rsample` (`rsample in lognormal.rs`) follows the same closed form
 and attaches `LogNormalRsampleBackward` when either parameter
 has `requires_grad`.
 
-`log_prob` (`lognormal.rs:157-190`) computes
+`log_prob` (`log_prob in lognormal.rs`) computes
 `-0.5 * z^2 - ln(scale) - 0.5*ln(2*pi) - ln(x)` where
 `z = (ln(x) - loc) / scale`. The trailing `- ln(x)` is the
 log-det-Jacobian of the `ExpTransform`.
 
-`entropy` (`lognormal.rs:192-222`) computes
+`entropy` (`entropy in lognormal.rs`) computes
 `mu + 0.5 + ln(sigma) + 0.5*ln(2*pi)`. Mirrors upstream
 `base_dist.entropy() + loc`.
 
-`mean`/`mode`/`variance` (`lognormal.rs:224-250`) use the closed
+`mean`/`mode`/`variance` (`variance in lognormal.rs`) use the closed
 forms enumerated in REQ-8.
 
 ### LogNormalRsampleBackward (REQ-6)
 
-Defined at `lognormal.rs:261-341`. Holds `loc`, `scale`, and the
+Defined at `loc in lognormal.rs`. Holds `loc`, `scale`, and the
 saved `eps`. On `backward(grad_output)`:
 
 - `grad_loc = sum(grad_output * z)` where `z = exp(loc + scale*eps)`
@@ -147,7 +147,7 @@ Both follow directly from `d/d(loc) exp(loc + scale*eps) = z` and
 
 ### Non-test production consumers
 
-- `pub use lognormal::LogNormal` at `lib.rs:109` — grandfathered
+- `pub use lognormal::LogNormal` at `lib.rs` — grandfathered
   public API. Downstream VAE / financial-modelling / Bayesian
   inference code constructs `LogNormal::new(mu, sigma)?`.
 - `LogNormalRsampleBackward` is consumed by the autograd engine
@@ -202,15 +202,15 @@ Expected: `10 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct LogNormal<T: Float>` with `loc`/`scale` `Tensor<T>` fields at `lognormal.rs:30-33`, mirroring `torch/distributions/log_normal.py:13-59`; non-test consumer: `pub use lognormal::LogNormal` at `lib.rs:109`. |
-| REQ-2 | SHIPPED | impl: the constructor at `lognormal.rs:41-52` with shape-equality precondition, mirroring `log_normal.py:40-47`; non-test consumer: the re-export at `lib.rs:109` exposes `::new` as part of the public API. |
-| REQ-3 | SHIPPED | impl: `loc()`/`scale()` accessors at `lognormal.rs:55-62`, mirroring `log_normal.py:53-59`; non-test consumer: re-export at `lib.rs:109`. |
-| REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for LogNormal<T>` at `lognormal.rs:94-251` with `sample`/`rsample`/`log_prob`/`entropy`/`mean`/`mode`/`variance`, mirroring `log_normal.py:46-75`; non-test consumer: re-export at `lib.rs:109` means external Distribution trait callers hit this impl. 10 tests pin behaviour. |
-| REQ-5 | SHIPPED | impl: `(l + s * e).exp()` body in `sample` at `lognormal.rs:108`, mirroring `ExpTransform(Normal)` chain at `log_normal.py:46-47`; non-test consumer: `Distribution::sample` invocation through the re-export. |
-| REQ-6 | SHIPPED | impl: `LogNormalRsampleBackward` at `lognormal.rs:261-341` attached via `Tensor::from_operation` at `lognormal.rs:141-146`; non-test consumer: the autograd engine in `ferrotorch_core::tensor` traverses this `GradFn<T>` on `backward()`. |
-| REQ-7 | SHIPPED | impl: `-(half * z * z) - scale.ln() - half * log_2pi - ln_x` body of `log_prob` at `lognormal.rs:180`, mirroring upstream's `TransformedDistribution.log_prob` reduction; non-test consumer: `Distribution::log_prob` via re-export. Tests pin numeric value at `x=1` and `x=e`. |
-| REQ-8 | SHIPPED | impl: closed-form `mean`/`mode`/`variance` at `lognormal.rs:224-250` using `(mu + 0.5*sigma^2).exp()` / `(mu - sigma^2).exp()` / `(exp(sigma^2) - 1) * exp(2*mu + sigma^2)`, mirroring `log_normal.py:61-72`; non-test consumer: re-export at `lib.rs:109` exposes them via the `Distribution` trait. |
-| REQ-9 | SHIPPED | impl: `mu + half + sigma.ln() + half * log_2pi` body of `entropy` at `lognormal.rs:209`, mirroring upstream's `base_dist.entropy() + self.loc` at `log_normal.py:74-75`; non-test consumer: re-export + `Distribution::entropy` external invocation. |
-| REQ-10 | SHIPPED | impl: `out.to(device)` at the tail of every method (e.g. `lognormal.rs:111-115`); non-test consumer: every external caller receives device-correct tensors. |
-| REQ-11 | SHIPPED | impl: `pub fn mean_value`/`pub fn variance_value` at `lognormal.rs:65-91` returning `Vec<T>`; non-test consumer: `fn LogNormal::mean` at `lognormal.rs:226` calls `self.mean_value()?`, and `fn LogNormal::variance` at `lognormal.rs:235` calls `self.variance_value()?` — both are production sites in the same module. |
-| REQ-12 | SHIPPED | impl: `has_rsample`(=true) / `batch_shape` / `support`(`Positive` per `log_normal.py:35`) / `arg_constraints`(`{loc: Real, scale: Positive}` per `log_normal.py:33`) / `expand` overrides at the tail of `impl Distribution for LogNormal` in `lognormal.rs` mirroring `torch/distributions/log_normal.py:33-36`; non-test consumer: trait dispatch through `pub use lognormal::LogNormal` re-export at `lib.rs:109`; `test_lognormal_surface_overrides` and `test_lognormal_expand` pin the overrides. |
+| REQ-1 | SHIPPED | impl: `pub struct LogNormal<T: Float>` with `loc`/`scale` `Tensor<T>` fields at `LogNormal in lognormal.rs`, mirroring `torch/distributions/log_normal.py:13-59`; non-test consumer: `pub use lognormal::LogNormal` at `lib.rs`. |
+| REQ-2 | SHIPPED | impl: the constructor at `new in lognormal.rs` with shape-equality precondition, mirroring `log_normal.py:40-47`; non-test consumer: the re-export at `lib.rs` exposes `::new` as part of the public API. |
+| REQ-3 | SHIPPED | impl: `loc()`/`scale()` accessors at `scale in lognormal.rs`, mirroring `log_normal.py:53-59`; non-test consumer: re-export at `lib.rs`. |
+| REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for LogNormal<T>` at `sample in lognormal.rs` with `sample`/`rsample`/`log_prob`/`entropy`/`mean`/`mode`/`variance`, mirroring `log_normal.py:46-75`; non-test consumer: re-export at `lib.rs` means external Distribution trait callers hit this impl. 10 tests pin behaviour. |
+| REQ-5 | SHIPPED | impl: `(l + s * e).exp()` body in `sample in lognormal.rs`, mirroring `ExpTransform(Normal)` chain at `log_normal.py:46-47`; non-test consumer: `Distribution::sample` invocation through the re-export. |
+| REQ-6 | SHIPPED | impl: `LogNormalRsampleBackward in lognormal.rs` attached via `Tensor::from_operation` at `from_operation in lognormal.rs`; non-test consumer: the autograd engine in `ferrotorch_core::tensor` traverses this `GradFn<T>` on `backward()`. |
+| REQ-7 | SHIPPED | impl: `-(half * z * z) - scale.ln() - half * log_2pi - ln_x` body of `log_prob in lognormal.rs`, mirroring upstream's `TransformedDistribution.log_prob` reduction; non-test consumer: `Distribution::log_prob` via re-export. Tests pin numeric value at `x=1` and `x=e`. |
+| REQ-8 | SHIPPED | impl: closed-form `mean`/`mode`/`variance in lognormal.rs` using `(mu + 0.5*sigma^2).exp()` / `(mu - sigma^2).exp()` / `(exp(sigma^2) - 1) * exp(2*mu + sigma^2)`, mirroring `log_normal.py:61-72`; non-test consumer: re-export at `lib.rs` exposes them via the `Distribution` trait. |
+| REQ-9 | SHIPPED | impl: `mu + half + sigma.ln() + half * log_2pi` body of `entropy in lognormal.rs`, mirroring upstream's `base_dist.entropy() + self.loc` at `log_normal.py:74-75`; non-test consumer: re-export + `Distribution::entropy` external invocation. |
+| REQ-10 | SHIPPED | impl: `out.to(device)` at the tail of every method (e.g. `lognormal.rs`); non-test consumer: every external caller receives device-correct tensors. |
+| REQ-11 | SHIPPED | impl: `pub fn mean_value`/`pub fn variance_value` at `variance_value in lognormal.rs` returning `Vec<T>`; non-test consumer: `fn LogNormal::mean` at `LogNormal in lognormal.rs` calls `self.mean_value()?`, and `fn LogNormal::variance` at `LogNormal in lognormal.rs` calls `self.variance_value()?` — both are production sites in the same module. |
+| REQ-12 | SHIPPED | impl: `has_rsample`(=true) / `batch_shape` / `support`(`Positive` per `log_normal.py:35`) / `arg_constraints`(`{loc: Real, scale: Positive}` per `log_normal.py:33`) / `expand` overrides at the tail of `impl Distribution for LogNormal` in `lognormal.rs` mirroring `torch/distributions/log_normal.py:33-36`; non-test consumer: trait dispatch through `pub use lognormal::LogNormal` re-export at `lib.rs`; `test_lognormal_surface_overrides` and `test_lognormal_expand` pin the overrides. |

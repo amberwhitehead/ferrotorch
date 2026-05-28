@@ -120,12 +120,12 @@ features 12, 13, 14 (per torchvision's
   mobilenet_v2, mobilenet_v3_large, mobilenet_v3_large_dilated,
   mobilenet_v3_small}` at `ferrotorch-vision/src/models/mod.rs`.
 - `default_registry()` registers `"mobilenet_v2"` and
-  `"mobilenet_v3_small"` via `maybe_load_pretrained` at `registry.rs:231`
-  and `:240`.
+  `"mobilenet_v3_small"` via `maybe_load_pretrained` at `registry.rs`
+  and `registry.rs`.
 - `ferrotorch-vision/src/models/segmentation/lraspp.rs:52` imports
   `MobileNetV3Large, MobileNetV3LargeStaged` for the dilated LRASPP
   backbone (`lraspp_mobilenet_v3_large` registered at
-  `registry.rs:322`).
+  `registry.rs`).
 
 ## Parity contract
 
@@ -172,10 +172,10 @@ Expected: all tests pass; no parity-sweep ops.
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `struct ConvBnAct<T: Float>` + `Module<T>` impl + `new_with_dilation` in `mobilenet.rs`; non-test consumer: every `V2InvertedResidual::new` / `V3InvertedResidual::new` / `MobileNetV{2,3Small,3Large}::new` builds them in `mobilenet.rs`. |
 | REQ-2 | SHIPPED | impl: `struct V2InvertedResidual<T: Float>` + `Module<T>` impl in `mobilenet.rs`; non-test consumer: `MobileNetV2::new` builds the 17 inverted-residual blocks in `mobilenet.rs`. |
-| REQ-3 | SHIPPED | impl: `pub struct MobileNetV2<T: Float>` + `Module<T>` impl in `mobilenet.rs`; non-test consumer: `default_registry()` constructs it via `maybe_load_pretrained` at `registry.rs:231`. |
+| REQ-3 | SHIPPED | impl: `pub struct MobileNetV2<T: Float>` + `Module<T>` impl in `mobilenet.rs`; non-test consumer: `default_registry()` constructs it via `maybe_load_pretrained` at `registry.rs`. |
 | REQ-4 | SHIPPED | impl: `struct V3InvertedResidual<T: Float>` + `Module<T>` impl in `mobilenet.rs`; non-test consumer: `MobileNetV3Small::new` / `MobileNetV3Large::new` build them in `mobilenet.rs`. |
-| REQ-5 | SHIPPED | impl: `pub struct MobileNetV3Small<T: Float>` and `pub struct MobileNetV3Large<T: Float>` in `mobilenet.rs`; non-test consumer: `default_registry()` constructs `mobilenet_v3_small` at `registry.rs:240`; `MobileNetV3Large` is constructed by `MobileNetV3LargeStaged` for the LRASPP backbone in `segmentation/lraspp.rs`. |
-| REQ-6 | SHIPPED | impl: `pub fn mobilenet_v2`, `pub fn mobilenet_v3_small`, `pub fn mobilenet_v3_large` in `mobilenet.rs`; non-test consumer: `default_registry()` invokes V2/V3-small (`registry.rs:233`, `:243`); V3-large flows through `lraspp_mobilenet_v3_large` (`registry.rs:325`). |
-| REQ-7 | SHIPPED | impl: `pub fn mobilenet_v3_large_dilated` + `pub struct MobileNetV3LargeStaged<T: Float>` in `mobilenet.rs`; non-test consumer: `segmentation/lraspp.rs:52` imports `MobileNetV3LargeStaged` and `super::lraspp_mobilenet_v3_large` flows through `default_registry()` at `registry.rs:322`. |
-| REQ-8 | SHIPPED | impl: `named_parameters` / `named_children` for `ConvBnAct`, `V2InvertedResidual`, `V3InvertedResidual`, and each top-level model in `mobilenet.rs`; non-test consumer: `load_state_dict(&state_dict, false)` + `apply_bn_buffers_from_state_dict(&model, &state_dict)` at `registry.rs:53` and `:62`. |
-| REQ-9 | SHIPPED | impl: `impl IntermediateFeatures<T> for MobileNetV2<T>` and `for MobileNetV3Small<T>` in `mobilenet.rs`; non-test consumer: `feature_extractor.rs:232` imports `mobilenet_v2` for the production helper composition. |
+| REQ-5 | SHIPPED | impl: `pub struct MobileNetV3Small<T: Float>` and `pub struct MobileNetV3Large<T: Float>` in `mobilenet.rs`; non-test consumer: `default_registry()` constructs `mobilenet_v3_small` at `registry.rs`; `MobileNetV3Large` is constructed by `MobileNetV3LargeStaged` for the LRASPP backbone in `segmentation/lraspp.rs`. |
+| REQ-6 | SHIPPED | impl: `pub fn mobilenet_v2`, `pub fn mobilenet_v3_small`, `pub fn mobilenet_v3_large` in `mobilenet.rs`; non-test consumer: `default_registry()` invokes V2/V3-small (`registry.rs`, `registry.rs`); V3-large flows through `lraspp_mobilenet_v3_large` (`registry.rs`). |
+| REQ-7 | SHIPPED | impl: `pub fn mobilenet_v3_large_dilated` + `pub struct MobileNetV3LargeStaged<T: Float>` in `mobilenet.rs`; non-test consumer: `lraspp_mobilenet_v3_large in segmentation/lraspp.rs` imports `MobileNetV3LargeStaged` and `super::lraspp_mobilenet_v3_large` flows through `default_registry()` at `registry.rs`. |
+| REQ-8 | SHIPPED | impl: `named_parameters` / `named_children` for `ConvBnAct`, `V2InvertedResidual`, `V3InvertedResidual`, and each top-level model in `mobilenet.rs`; non-test consumer: `load_state_dict(&state_dict, false)` + `apply_bn_buffers_from_state_dict(&model, &state_dict)` at `named_parameters in registry.rs` and `named_parameters in registry.rs`. |
+| REQ-9 | SHIPPED | impl: `impl IntermediateFeatures<T> for MobileNetV2<T>` and `for MobileNetV3Small<T>` in `mobilenet.rs`; non-test consumer: `mobilenet_v2 in feature_extractor.rs` imports `mobilenet_v2` for the production helper composition. |

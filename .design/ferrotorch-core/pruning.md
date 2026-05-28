@@ -49,7 +49,7 @@ new `Tensor<T>` with `requires_grad` propagated.
 - [x] AC-2: `magnitude_prune([1,2,3,4], 0.0)` returns the input
   unchanged (`pruning.rs:157-162`).
 - [x] AC-3: `magnitude_prune(_, 1.0)` and `_, -0.1` return
-  `InvalidArgument` (`pruning.rs:165-169`).
+  `InvalidArgument` (`pruning.rs`).
 - [x] AC-4: NaN inputs do not panic in `magnitude_prune` or
   `apply_2_4_mask` (`pruning.rs:174-190`).
 - [x] AC-5: `apply_2_4_mask` keeps exactly 2 of every 4 contiguous

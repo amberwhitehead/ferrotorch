@@ -109,32 +109,32 @@ PIL `pil_loader`).
 
 ### `ImageSample<T>` (REQ-1)
 
-`#[non_exhaustive]` at `folder.rs:33` — same pattern as the other
+`#[non_exhaustive]` at `folder.rs` — same pattern as the other
 sample types. `label` is `u32` (matches the class-count upper bound
 of ~4 billion; upstream's `class_index` is a Python int).
 
 ### `IMG_EXTENSIONS` (REQ-2)
 
-`pub const IMG_EXTENSIONS: &[&str]` at `folder.rs:43-45`. The slice
+`pub const IMG_EXTENSIONS: &[&str]` at `folder.rs`. The slice
 of 9 strings (no leading dot) is matched case-insensitively against
 each file's `Path::extension()` via the `has_extension_ci` helper
-at `folder.rs:346-354`.
+at `folder.rs`.
 
 ### `ImageFolder<T>` (REQ-3, REQ-4)
 
 The struct holds `samples: Vec<(PathBuf, u32)>`, `classes:
 Vec<String>`, and a `PhantomData<T>` since `T` is only used in the
-`Dataset` impl (`folder.rs:50-54`).
+`Dataset` impl (`Dataset in folder.rs`).
 
 Three constructors:
 - `from_dir(root)` — default, uses `IMG_EXTENSIONS`
-  (`folder.rs:69-71`).
+  (`IMG_EXTENSIONS in folder.rs`).
 - `from_dir_with_extensions(root, extensions)` — custom list,
-  empty slice means accept-all (`folder.rs:75-85`).
+  empty slice means accept-all (`folder.rs`).
 - `from_dir_with_filter(root, predicate)` — applies a closure
-  predicate after the extension filter (`folder.rs:91-101`).
+  predicate after the extension filter (`folder.rs`).
 
-All three delegate to `scan_class_dirs` (`folder.rs:270-343`).
+All three delegate to `scan_class_dirs` (`scan_class_dirs in folder.rs`).
 
 ### `scan_class_dirs` (REQ-3, REQ-8)
 
@@ -142,12 +142,12 @@ All three delegate to `scan_class_dirs` (`folder.rs:270-343`).
 2. `read_dir(root)` to discover class subdirectories. Skip
    non-directories and dotfile-named entries (REQ-8).
 3. Sort class directories by basename
-   (`class_dirs.sort_by(|a, b| a.0.cmp(&b.0))` at `folder.rs:305`).
+   (`class_dirs.sort_by(|a, b| a.0.cmp(&b.0))` at `class_dirs in folder.rs`).
 4. For each class (in sorted order), `read_dir(class_dir)` to
    discover files. Skip non-files, dotfiles, and files whose
    extension is not in the allowlist (case-insensitive).
 5. Sort files alphabetically within each class
-   (`files.sort()` at `folder.rs:337`).
+   (`files.sort()` at `files in folder.rs`).
 
 The double-sort is what gives ferrotorch the determinism property
 that's load-bearing for reproducible training: a directory's
@@ -156,7 +156,7 @@ orders.
 
 ### `Dataset` impl (REQ-5)
 
-`folder.rs:128-151`. `get(index)` looks up the `(path, label)` pair
+`get in folder.rs`. `get(index)` looks up the `(path, label)` pair
 and calls `crate::io::read_image_as_tensor::<T>(path)` — image
 decode happens lazily on demand. This is critical for ImageFolder's
 memory footprint: a 100k-image dataset keeps only paths in RAM, not
@@ -164,7 +164,7 @@ decoded tensors.
 
 ### `DatasetFolder<S, F>` (REQ-6, REQ-7)
 
-`folder.rs:156-160` defines the generic loader-parameterized
+`folder.rs` defines the generic loader-parameterized
 variant. The `F: Fn(&Path) -> FerrotorchResult<S>` bound makes the
 loader a closure or `fn` pointer; the resulting `S` is whatever the
 loader returns (a tensor, a `Vec<u8>`, a custom sample struct,
@@ -177,24 +177,24 @@ Three constructors mirror the `ImageFolder` triplet:
 and a `Send + Sync + 'static` bound on the loader for the
 `Dataset` impl.
 
-`FolderSample<S>` (`folder.rs:163-169`) is the sample type with
+`FolderSample<S>` (`FolderSample in folder.rs`) is the sample type with
 `data: S, label: u32`.
 
 ### `class_to_idx` (REQ-9)
 
-`folder.rs:114-120`. Returns `HashMap<&str, u32>` mapping class
+`folder.rs`. Returns `HashMap<&str, u32>` mapping class
 names to their sorted index. Matches upstream's `class_to_idx`
 dict semantics (`folder.py:46`).
 
 ### Non-test production consumers
 
-- `ferrotorch-vision/src/datasets/mod.rs:11` — `pub use folder::{DatasetFolder,
+- `ferrotorch-vision/src/datasets/mod.rs` — `pub use folder::{DatasetFolder,
   FolderSample, IMG_EXTENSIONS, ImageFolder, ImageSample};` is the
   re-export.
 - `ImageFolder::get` at `ferrotorch-vision/src/datasets/folder.rs:135-150`
   is itself the production consumer of `crate::io::read_image_as_tensor`
   — the cross-module call surfaces the io.rs production binding.
-- `ferrotorch-vision/src/lib.rs:99` re-exports a subset (no `ImageFolder`
+- `ferrotorch-vision/src/lib.rs` re-exports a subset (no `ImageFolder`
   / `DatasetFolder` listed at the crate root, only the dataset wrappers
   for the most-used types).
 
@@ -204,7 +204,7 @@ directory tree do not yet ship in the workspace. The non-test
 consumer for the SHIPPED claim is the in-crate cross-module call
 `ImageFolder::get → crate::io::read_image_as_tensor` (which IS
 production code, not test code) + the re-export at
-`datasets/mod.rs:11` that makes the type reachable from outside.
+`datasets/mod.rs` that makes the type reachable from outside.
 Per R-DEFER-1's grandfather clause, the boundary type IS the public
 API and doesn't need a further downstream caller within the
 ferrotorch monorepo.
@@ -222,12 +222,12 @@ ferrotorch monorepo.
 - **Dotfile skip**: `.DS_Store`, `.hidden_class/` both skipped.
   Verified by `image_folder_skips_dotfiles_and_dot_dirs`.
 - **Empty-extensions = accept all**: passes the `extensions.is_empty()`
-  short-circuit at `folder.rs:329` — every file passes the extension
+  short-circuit at `folder.rs` — every file passes the extension
   check. Verified by `dataset_folder_with_no_extensions_accepts_all_files`.
 - **OOB get**: returns `InvalidArgument` (NOT
   `IndexOutOfBounds` — folder.rs uses
   `FerrotorchError::InvalidArgument` for the
-  `ImageFolder::get(out-of-range)` case at `folder.rs:138-144`,
+  `ImageFolder::get(out-of-range)` case at `get in folder.rs`,
   unlike CIFAR/MNIST which use `IndexOutOfBounds`). This is a
   documented divergence; either error variant is acceptable per the
   trait contract. Verified by `image_folder_get_out_of_range_errors`.
@@ -250,7 +250,7 @@ Divergences from upstream (deliberate):
 ## Verification
 
 Unit tests in `mod tests` of
-`ferrotorch-vision/src/datasets/folder.rs` (`folder.rs:356-559`):
+`ferrotorch-vision/src/datasets/folder.rs` (`folder.rs`):
 
 - `image_folder_discovers_classes_in_alphabetical_order`
 - `image_folder_collects_all_files_per_class`
@@ -276,13 +276,13 @@ Expected: 11 passed.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `#[non_exhaustive] pub struct ImageSample<T: Float>` at `ferrotorch-vision/src/datasets/folder.rs:32-39` per upstream `torchvision/datasets/folder.py:236-251` `__getitem__` returning `(sample, target)`; non-test consumer: `ImageFolder::get` at `ferrotorch-vision/src/datasets/folder.rs:135-150` constructs `ImageSample`, and the type is re-exported at `ferrotorch-vision/src/datasets/mod.rs:11`. |
-| REQ-2 | SHIPPED | impl: `pub const IMG_EXTENSIONS: &[&str]` at `ferrotorch-vision/src/datasets/folder.rs:43-45` per upstream `IMG_EXTENSIONS` tuple at `torchvision/datasets/folder.py:257`; non-test consumer: `ImageFolder::from_dir` at `ferrotorch-vision/src/datasets/folder.rs:69-71` uses `IMG_EXTENSIONS` as the default extension list, and the constant is re-exported at `ferrotorch-vision/src/datasets/mod.rs:11`. |
-| REQ-3 | SHIPPED | impl: `pub struct ImageFolder<T: Float>` at `ferrotorch-vision/src/datasets/folder.rs:50-54` per upstream `class ImageFolder(DatasetFolder)` at `torchvision/datasets/folder.py:287`; non-test consumer: re-exported at `ferrotorch-vision/src/datasets/mod.rs:11`, and `ImageFolder::get` at `ferrotorch-vision/src/datasets/folder.rs:135-150` is the cross-module production consumer that calls `crate::io::read_image_as_tensor` (linking the two routes' production surfaces). |
-| REQ-4 | SHIPPED | impl: three constructors at `ferrotorch-vision/src/datasets/folder.rs:69-101` (`from_dir`, `from_dir_with_extensions`, `from_dir_with_filter`) per upstream's `extensions` / `is_valid_file` kwargs at `torchvision/datasets/folder.py:138-156`; non-test consumer: re-exported through `ferrotorch-vision/src/datasets/mod.rs:11`. (Honest underclaim: external training-driver consumers do not yet ship in the monorepo; the re-export IS the public binding per R-DEFER-1 grandfather.) |
-| REQ-5 | SHIPPED | impl: `impl<T: Float + 'static> Dataset for ImageFolder<T>` at `ferrotorch-vision/src/datasets/folder.rs:128-151` with lazy decode via `crate::io::read_image_as_tensor::<T>(path)?` at `ferrotorch-vision/src/datasets/folder.rs:145` per upstream's `loader(path)` lazy pattern at `torchvision/datasets/folder.py:245`; non-test consumer: the `read_image_as_tensor` call at `folder.rs:145` is itself the cross-module production consumer of `ferrotorch-vision/src/io.rs:98-101`. |
-| REQ-6 | SHIPPED | impl: `pub struct DatasetFolder<S, F: Fn(&Path) -> FerrotorchResult<S>>` at `ferrotorch-vision/src/datasets/folder.rs:156-160` with the `Send + Sync + 'static` Dataset impl at `ferrotorch-vision/src/datasets/folder.rs:233-260` per upstream `class DatasetFolder(VisionDataset)` at `torchvision/datasets/folder.py:109`; non-test consumer: re-exported at `ferrotorch-vision/src/datasets/mod.rs:11` so downstream code can plug in custom loaders (audio, segmentation-mask, etc.). |
-| REQ-7 | SHIPPED | impl: `#[derive(Debug, Clone)] pub struct FolderSample<S>` at `ferrotorch-vision/src/datasets/folder.rs:163-169` per upstream's `(sample, target)` tuple convention; non-test consumer: `DatasetFolder::get` at `ferrotorch-vision/src/datasets/folder.rs:244-259` constructs `FolderSample`, and the type is re-exported at `ferrotorch-vision/src/datasets/mod.rs:11`. |
+| REQ-1 | SHIPPED | impl: `#[non_exhaustive] pub struct ImageSample<T: Float>` at `ImageSample in ferrotorch-vision/src/datasets/folder.rs` per upstream `torchvision/datasets/folder.py:236-251` `__getitem__` returning `(sample, target)`; non-test consumer: `ImageFolder::get` at `get in ferrotorch-vision/src/datasets/folder.rs` constructs `ImageSample`, and the type is re-exported at `ferrotorch-vision/src/datasets/mod.rs`. |
+| REQ-2 | SHIPPED | impl: `pub const IMG_EXTENSIONS: &[&str]` at `IMG_EXTENSIONS in ferrotorch-vision/src/datasets/folder.rs` per upstream `IMG_EXTENSIONS` tuple at `torchvision/datasets/folder.py:257`; non-test consumer: `ImageFolder::from_dir` at `from_dir in ferrotorch-vision/src/datasets/folder.rs` uses `IMG_EXTENSIONS` as the default extension list, and the constant is re-exported at `from_dir in ferrotorch-vision/src/datasets/mod.rs`. |
+| REQ-3 | SHIPPED | impl: `pub struct ImageFolder<T: Float>` at `ImageFolder in ferrotorch-vision/src/datasets/folder.rs` per upstream `class ImageFolder(DatasetFolder)` at `torchvision/datasets/folder.py:287`; non-test consumer: re-exported at `ferrotorch-vision/src/datasets/mod.rs`, and `ImageFolder::get` at `get in ferrotorch-vision/src/datasets/folder.rs` is the cross-module production consumer that calls `crate::io::read_image_as_tensor` (linking the two routes' production surfaces). |
+| REQ-4 | SHIPPED | impl: three constructors at `from_dir in ferrotorch-vision/src/datasets/folder.rs` (`from_dir`, `from_dir_with_extensions`, `from_dir_with_filter`) per upstream's `extensions` / `is_valid_file` kwargs at `torchvision/datasets/folder.py:138-156`; non-test consumer: re-exported through `from_dir in ferrotorch-vision/src/datasets/mod.rs`. (Honest underclaim: external training-driver consumers do not yet ship in the monorepo; the re-export IS the public binding per R-DEFER-1 grandfather.) |
+| REQ-5 | SHIPPED | impl: `impl<T: Float + 'static> Dataset for ImageFolder<T>` at `loader in ferrotorch-vision/src/datasets/folder.rs` with lazy decode via `crate::io::read_image_as_tensor::<T>(path)?` at `loader in ferrotorch-vision/src/datasets/folder.rs` per upstream's `loader(path)` lazy pattern at `torchvision/datasets/folder.py:245`; non-test consumer: the `read_image_as_tensor` call at `loader in folder.rs` is itself the cross-module production consumer of `read_image_as_tensor in ferrotorch-vision/src/io.rs`. |
+| REQ-6 | SHIPPED | impl: `pub struct DatasetFolder<S, F: Fn(&Path) -> FerrotorchResult<S>>` at `DatasetFolder in ferrotorch-vision/src/datasets/folder.rs` with the `Send + Sync + 'static` Dataset impl at `class in ferrotorch-vision/src/datasets/folder.rs` per upstream `class DatasetFolder(VisionDataset)` at `torchvision/datasets/folder.py:109`; non-test consumer: re-exported at `ferrotorch-vision/src/datasets/mod.rs` so downstream code can plug in custom loaders (audio, segmentation-mask, etc.). |
+| REQ-7 | SHIPPED | impl: `#[derive(Debug, Clone)] pub struct FolderSample<S>` at `FolderSample in ferrotorch-vision/src/datasets/folder.rs` per upstream's `(sample, target)` tuple convention; non-test consumer: `DatasetFolder::get` at `get in ferrotorch-vision/src/datasets/folder.rs` constructs `FolderSample`, and the type is re-exported at `ferrotorch-vision/src/datasets/mod.rs`. |
 | REQ-8 | SHIPPED | impl: dotfile / dot-dir skip logic at `ferrotorch-vision/src/datasets/folder.rs:300-302` (class-dir check) and `ferrotorch-vision/src/datasets/folder.rs:324-328` (per-file check); non-test consumer: `scan_class_dirs` at `ferrotorch-vision/src/datasets/folder.rs:270-343` invokes this on every walk, and is called from all three `ImageFolder` constructors at `ferrotorch-vision/src/datasets/folder.rs:79,95,194,209`. |
 | REQ-9 | SHIPPED | impl: `class_to_idx` at `ferrotorch-vision/src/datasets/folder.rs:114-120` returning `HashMap<&str, u32>`, and `classes` at `ferrotorch-vision/src/datasets/folder.rs:104-106` per upstream `class_to_idx` dict at `torchvision/datasets/folder.py:46,162`; non-test consumer: re-exported via `ImageFolder` whose `class_to_idx`/`classes` methods are reachable through the meta-crate. |
 | REQ-10 | SHIPPED | impl: non-directory rejection at `ferrotorch-vision/src/datasets/folder.rs:275-282` (`if !root.is_dir() { return Err(InvalidArgument {...}) }`); non-test consumer: `scan_class_dirs` is the in-crate caller invoked by every `from_dir*` constructor at `ferrotorch-vision/src/datasets/folder.rs:79,95,194,209`. |

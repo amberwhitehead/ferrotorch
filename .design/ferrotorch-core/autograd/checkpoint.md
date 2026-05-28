@@ -113,7 +113,7 @@ requires grad at `:129-132`.
 ### REQ-3 autocast state preservation
 
 `saved_autocast: AutocastSnapshot` field on both `CheckpointBackward`
-(`:200`) and `CheckpointMultiBackward` (`:280`). The backward
+(`CheckpointBackward in checkpoint.rs`) and `CheckpointMultiBackward` (`CheckpointMultiBackward in checkpoint.rs`). The backward
 implementations at `:240` and `:312` wrap the recompute closure in
 `with_autocast_state(self.saved_autocast, || ...)`. The
 `with_autocast_state` RAII drop guard restores the caller's autocast
@@ -134,7 +134,7 @@ Each backward impl at `:224-234` (single-input) and `:299-307`
 
 ### REQ-5 RNG guard
 
-`struct GpuRngGuard { previous: GpuRngState }` at `checkpoint.rs:167-177`
+`struct GpuRngGuard { previous: GpuRngState }` at `GpuRngGuard in checkpoint.rs`
 with `impl Drop` that restores `previous` on scope exit. The
 `current_state` (the caller's pre-backward state) is saved at
 `:226` (single) / `:300` (multi), used as the `previous` field of
@@ -143,8 +143,8 @@ at the end of the backward function.
 
 ### REQ-6 `TensorId` aliasing
 
-`CheckpointBackward.input: Tensor<T>` at `checkpoint.rs:192` is
-populated by `input.clone()` at `:93`. The doc comment at
+`CheckpointBackward.input: Tensor<T>` at `CheckpointBackward in checkpoint.rs` is
+populated by `input.clone()` at `input in checkpoint.rs`. The doc comment at
 `:182-188` documents the invariant: `Tensor::clone()` is an `Arc`
 clone, so `TensorId` is preserved. Autograd's gradient accumulation
 keys by `TensorId`, so the cloned `input` and the user's original
@@ -166,7 +166,7 @@ let input_grad = input_with_grad.grad()?;
 Ok(vec![input_grad])
 ```
 
-The `detach()` on `grad_output` (at `:252`) is essential — without
+The `detach()` on `grad_output` (at `detach in checkpoint.rs`) is essential — without
 it, the autograd engine would walk back through the grad_output's
 own grad_fn and double-process the chain rule. The `requires_grad_(true)`
 on the cloned input enables the freshly-recomputed graph to record
@@ -206,15 +206,15 @@ args).
 
 Tests in `checkpoint.rs:362-754` (~390 LOC of test code). Key tests:
 
-- `test_checkpoint_single_input_basic` (`:381`)
-- `test_checkpoint_no_grad_input_returns_output_only` (`:406`)
-- `test_checkpoint_multi_two_inputs_both_grad` (`:430`)
-- `test_checkpoint_multi_partial_grad` (`:461`)
+- `test_checkpoint_single_input_basic` (`test_checkpoint_single_input_basic in checkpoint.rs`)
+- `test_checkpoint_no_grad_input_returns_output_only` (`test_checkpoint_no_grad_input_returns_output_only in checkpoint.rs`)
+- `test_checkpoint_multi_two_inputs_both_grad` (`test_checkpoint_multi_two_inputs_both_grad in checkpoint.rs`)
+- `test_checkpoint_multi_partial_grad` (`test_checkpoint_multi_partial_grad in checkpoint.rs`)
 - Autocast preservation tests verify the snapshot round-trip across
   the forward/backward boundary using `is_autocast_enabled()`
   / `autocast_dtype()` assertions inside the closure (see test mod's
   use of `AutocastDtype, autocast, is_autocast_enabled` at
-  `:367`).
+  `checkpoint.rs`).
 
 All tests pass in the workspace gauntlet.
 
@@ -222,11 +222,11 @@ All tests pass in the workspace gauntlet.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub fn checkpoint<T, F>` at `ferrotorch-core/src/autograd/checkpoint.rs:64-102` + `struct CheckpointBackward<T: Float>` at `:190-201` + `impl<T: Float> crate::tensor::GradFn<T> for CheckpointBackward<T>` at `:216-269`; mirrors `torch.utils.checkpoint.checkpoint` at `torch/utils/checkpoint.py:339-540`; non-test production consumer: `pub mod checkpoint` is the public sub-module of `autograd` (via `ferrotorch-core/src/autograd/mod.rs:4`); callers reach it as `crate::autograd::checkpoint::checkpoint` from any user code that wants to memory-trade. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
-| REQ-2 | SHIPPED | impl: `pub fn checkpoint_multi<T, F>` at `checkpoint.rs:110-145` + `struct CheckpointMultiBackward<T: Float>` at `:275-281` + `impl GradFn` at `:296-358`; non-test production consumer: same as REQ-1 — exposed via `crate::autograd::checkpoint` sub-module. Existing pub API — boundary-API grandfathering. |
+| REQ-1 | SHIPPED | impl: `pub fn checkpoint<T, F>` at `checkpoint in ferrotorch-core/src/autograd/checkpoint.rs` + `struct CheckpointBackward<T: Float>` at `CheckpointBackward in ferrotorch-core/src/autograd/checkpoint.rs` + `impl<T: Float> crate::tensor::GradFn<T> for CheckpointBackward<T>` at `struct in ferrotorch-core/src/autograd/checkpoint.rs`; mirrors `torch.utils.checkpoint.checkpoint` at `torch/utils/checkpoint.py:339-540`; non-test production consumer: `pub mod checkpoint` is the public sub-module of `autograd` (via `checkpoint in ferrotorch-core/src/autograd/mod.rs`); callers reach it as `crate::autograd::checkpoint::checkpoint` from any user code that wants to memory-trade. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
+| REQ-2 | SHIPPED | impl: `pub fn checkpoint_multi<T, F>` at `checkpoint_multi in checkpoint.rs` + `struct CheckpointMultiBackward<T: Float>` at `CheckpointMultiBackward in checkpoint.rs` + `impl GradFn` at `CheckpointMultiBackward in checkpoint.rs`; non-test production consumer: same as REQ-1 — exposed via `crate::autograd::checkpoint` sub-module. Existing pub API — boundary-API grandfathering. |
 | REQ-3 | SHIPPED | impl: `saved_autocast: AutocastSnapshot` fields at `checkpoint.rs:200, :280`; `current_autocast_snapshot()` calls at `:81, :125`; `with_autocast_state(self.saved_autocast, || ...)` recompute wraps at `:240, :312`; non-test production consumer: every `checkpoint` / `checkpoint_multi` call (the autocast preservation is unconditional, not opt-in). |
-| REQ-4 | SHIPPED | impl: `fn save_gpu_rng_state` at `checkpoint.rs:150-163`; `saved_gpu_rng: Option<GpuRngState>` fields at `:196, :279`; RNG-restore calls at `:228, :302`; non-test production consumer: every checkpoint of a CUDA-resident tensor when a GPU backend is registered. |
-| REQ-5 | SHIPPED | impl: `struct GpuRngGuard { previous: GpuRngState }` at `checkpoint.rs:167-177` with `Drop` impl restoring `previous`; non-test production consumer: instantiated inside both backward impls at `:231, :305` (the `let _rng_guard = ...` pattern); production callers are every backward of a checkpointed CUDA op. |
-| REQ-6 | SHIPPED | impl: `CheckpointBackward.input: Tensor<T>` field at `checkpoint.rs:192` populated by `input.clone()` at `:93` — Arc-clone preserves `TensorId`; the doc-comment at `:182-188` documents the invariant; non-test production consumer: every `checkpoint(f, &input)` call where the input requires grad — the `input_with_grad.grad()` read at `:257` relies on the `TensorId` aliasing to project the recompute's gradient back to the user's input tensor. |
+| REQ-4 | SHIPPED | impl: `fn save_gpu_rng_state` at `save_gpu_rng_state in checkpoint.rs`; `saved_gpu_rng: Option<GpuRngState>` fields at `, `; RNG-restore calls at `, `; non-test production consumer: every checkpoint of a CUDA-resident tensor when a GPU backend is registered. |
+| REQ-5 | SHIPPED | impl: `struct GpuRngGuard { previous: GpuRngState }` at `GpuRngGuard in checkpoint.rs` with `Drop` impl restoring `previous`; non-test production consumer: instantiated inside both backward impls at `, ` (the `let _rng_guard = ...` pattern); production callers are every backward of a checkpointed CUDA op. |
+| REQ-6 | SHIPPED | impl: `CheckpointBackward.input: Tensor<T>` field at `CheckpointBackward in checkpoint.rs` populated by `input.clone()` at `input in checkpoint.rs` — Arc-clone preserves `TensorId`; the doc-comment at `input in checkpoint.rs` documents the invariant; non-test production consumer: every `checkpoint(f, &input)` call where the input requires grad — the `input_with_grad.grad()` read at `checkpoint in checkpoint.rs` relies on the `TensorId` aliasing to project the recompute's gradient back to the user's input tensor. |
 | REQ-7 | SHIPPED | impl: weighted-sum trick at `checkpoint.rs:248-256` (`mul(&recomputed, &grad_output.detach())` + `sum(&weighted)` + `scalar.backward()` + `input_with_grad.grad()`); non-test production consumer: every backward call on a checkpointed output — invoked from `Tensor::backward` (REQ-1 of graph.md) → `CheckpointBackward::backward`. |
 | REQ-8 | SHIPPED | impl: `if !input.requires_grad() { return Ok(output); }` at `checkpoint.rs:86-88` (single-input) and `if !any_requires_grad { return Ok(output); }` at `:129-132` (multi-input); non-test production consumer: any inference-time checkpoint call (a model whose forward path uses `checkpoint` for memory but whose inputs do not require grad). |

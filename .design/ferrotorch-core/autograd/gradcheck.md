@@ -64,7 +64,7 @@ error. Used in tests of custom `GradFn` implementations.
 - [x] AC-3: `gradcheck` of `sum(a + b)` succeeds —
   `test_gradcheck_add` at `gradcheck.rs:230-245`.
 - [x] AC-4: Non-scalar function returns errors cleanly —
-  `test_gradcheck_non_scalar_fails` at `gradcheck.rs:247-252`.
+  `test_gradcheck_non_scalar_fails in gradcheck.rs`.
 
 ## Architecture
 
@@ -90,7 +90,7 @@ each element index. For each `(input_idx, elem_idx)`:
 1. Build `perturbed_plus` = clone of `input_data` with
    `perturbed_plus[elem_idx] += eps_t` at `:107-109`.
 2. Build `perturbed_minus` symmetrically at `:111-113`.
-3. Construct new `Tensor`s with `requires_grad = false` at `:115-125`.
+3. Construct new `Tensor`s with `requires_grad = false` at `gradcheck.rs`.
 4. Assemble per-input slices for the `+` and `-` evaluations,
    substituting the perturbed tensor and using detached clones for
    the other inputs at `:128-145`.
@@ -138,10 +138,10 @@ batched mode, fast-mode (`fast_mode=True`), and a follow-up
 
 Tests in `gradcheck.rs:186-253` (4 tests):
 
-- `test_gradcheck_sum_of_squares` (`:196`)
-- `test_gradcheck_linear_combination` (`:213`)
-- `test_gradcheck_add` (`:230`)
-- `test_gradcheck_non_scalar_fails` (`:247`)
+- `test_gradcheck_sum_of_squares` (`test_gradcheck_sum_of_squares in gradcheck.rs`)
+- `test_gradcheck_linear_combination` (`test_gradcheck_linear_combination in gradcheck.rs`)
+- `test_gradcheck_add` (`test_gradcheck_add in gradcheck.rs`)
+- `test_gradcheck_non_scalar_fails` (`test_gradcheck_non_scalar_fails in gradcheck.rs`)
 
 All 4 pass in the workspace gauntlet.
 
@@ -149,9 +149,9 @@ All 4 pass in the workspace gauntlet.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub fn gradcheck<T, F>` at `ferrotorch-core/src/autograd/gradcheck.rs:43-184`; mirrors `torch.autograd.gradcheck` at `torch/autograd/gradcheck.py:22-95`; non-test production consumer: re-exported at `ferrotorch-core/src/autograd/mod.rs:33 pub use gradcheck::gradcheck` and exposed through `crate::autograd::gradcheck`; the public test-utility API that downstream crates use to verify their custom `GradFn` impls. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5 (gradcheck is a test utility consumed primarily by test code, which is a permitted consumer pattern for diagnostic surfaces). |
+| REQ-1 | SHIPPED | impl: `pub fn gradcheck<T, F>` at `gradcheck in ferrotorch-core/src/autograd/gradcheck.rs`; mirrors `torch.autograd.gradcheck` at `torch/autograd/gradcheck.py:22-95`; non-test production consumer: re-exported at `gradcheck in ferrotorch-core/src/autograd/mod.rs pub use gradcheck::gradcheck` and exposed through `crate::autograd::gradcheck`; the public test-utility API that downstream crates use to verify their custom `GradFn` impls. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5 (gradcheck is a test utility consumed primarily by test code, which is a permitted consumer pattern for diagnostic surfaces). |
 | REQ-2 | SHIPPED | impl: adaptive default selection at `gradcheck.rs:54-69` switching on `mem::size_of::<T>() <= 4`; non-test consumer: invoked inside REQ-1's `gradcheck` body — every caller that passes `None` for any of `eps / atol / rtol` flows through here. |
-| REQ-3 | SHIPPED | impl: scalar-output validation at `gradcheck.rs:78-85`; non-test consumer: inside REQ-1; tested by `test_gradcheck_non_scalar_fails` at `:247-252`. |
+| REQ-3 | SHIPPED | impl: scalar-output validation at `gradcheck in gradcheck.rs`; non-test consumer: inside REQ-1; tested by `test_gradcheck_non_scalar_fails in gradcheck.rs`. |
 | REQ-4 | SHIPPED | impl: central finite difference at `gradcheck.rs:88-181` (the perturb-plus / perturb-minus / divide-by-`2*eps` body); mirrors `_compute_numerical_gradient` at `torch/autograd/gradcheck.py:358+`; non-test consumer: inside REQ-1. |
 | REQ-5 | SHIPPED | impl: per-element mismatch error at `gradcheck.rs:159-180`; non-test consumer: inside REQ-1; tested implicitly by the four passing tests (they ensure the error path does NOT fire). |
 | REQ-6 | SHIPPED | impl: multi-input outer-loop at `gradcheck.rs:89-181` with per-input substitution at `:128-145`; non-test consumer: tested by `test_gradcheck_linear_combination` (`gradcheck.rs:213-228`) and `test_gradcheck_add` (`:230-245`), both exercising 2-input cases. |

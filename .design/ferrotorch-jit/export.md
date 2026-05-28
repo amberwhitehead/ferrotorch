@@ -132,11 +132,11 @@ symbolic dim becomes `-1` (infer-this-dim sentinel).
   ExportedProgramMetadata, InputSpec, export,
   export_with_dynamic_shapes}` at
   `ferrotorch-jit/src/lib.rs:100`.
-- `ferrotorch-serialize/src/onnx_export.rs:1150` is the
+- `ferrotorch-serialize/src/onnx_export.rs` is the
   cross-crate consumer that consumes an `ExportedProgram` and
   emits ONNX — the `OnnxDimSpec` enum at
-  `onnx_export.rs:345` and the `encode_value_info_dynamic`
-  function at `onnx_export.rs:364` translate the JIT's
+  `OnnxDimSpec in onnx_export.rs` and the `encode_value_info_dynamic`
+  function at `onnx_export.rs` translate the JIT's
   `DimSpec::Dynamic` into ONNX's `dim_param` entries (CL-396).
 
 ## Parity contract
@@ -178,11 +178,11 @@ Expected: all tests pass.
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub enum DimSpec` with `Static` / `Dynamic` variants + `dynamic` / `dynamic_range` / `is_dynamic` constructors in `export.rs`; non-test consumer: `ferrotorch-serialize/src/onnx_export.rs:805` matches on `DimSpec::Dynamic` to emit `OnnxDimSpec::Dynamic` in the ONNX export path. |
 | REQ-2 | SHIPPED | impl: `pub struct InputSpec` + `new` / `all_static` / `has_dynamic_dims` / `rank` in `export.rs`; non-test consumer: `ExportedProgram::input_specs: Vec<InputSpec>` field consumed by `run_with_guards` and by `ferrotorch-serialize`. |
-| REQ-3 | SHIPPED | impl: `pub struct ExportedProgram { graph, state_dict, input_shapes, input_specs, output_shape }` in `export.rs`; non-test consumer: `ferrotorch-serialize/src/onnx_export.rs:1150` `// ExportedProgram -> ONNX` section. |
+| REQ-3 | SHIPPED | impl: `pub struct ExportedProgram { graph, state_dict, input_shapes, input_specs, output_shape }` in `export.rs`; non-test consumer: `export in ferrotorch-serialize/src/onnx_export.rs` `// ExportedProgram -> ONNX` section. |
 | REQ-4 | SHIPPED | impl: `pub fn run`, `pub fn run_with_guards` on `ExportedProgram` in `export.rs`; non-test consumer: re-export at `lib.rs:100`; ONNX export path round-trips through `.run` for end-to-end validation. |
 | REQ-5 | SHIPPED | impl: `pub fn check_inputs` in `export.rs`; non-test consumer: `pub fn run_with_guards` invokes it (`self.check_inputs(inputs)?`). |
 | REQ-6 | SHIPPED | impl: `pub fn serialize`, `pub fn deserialize` on `ExportedProgram` in `export.rs`; non-test consumer: `pub fn save` / `pub fn load` invoke them. |
-| REQ-7 | SHIPPED | impl: `pub fn save`, `pub fn load` in `export.rs`; non-test consumer: re-export at `lib.rs:100`. |
-| REQ-8 | SHIPPED | impl: `pub fn to_json`, `pub fn parse_json_metadata` in `export.rs`; non-test consumer: re-export at `lib.rs:100` plus `pub struct ExportedProgramMetadata` returned by the parser. |
-| REQ-9 | SHIPPED | impl: `pub fn export<T, M: Module<T>>` in `export.rs`; non-test consumer: re-export at `lib.rs:100`; `ferrotorch-serialize::export_from_program` documented as consuming this path (`export.rs:82`, `:146`). |
+| REQ-7 | SHIPPED | impl: `pub fn save`, `pub fn load` in `export.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-8 | SHIPPED | impl: `pub fn to_json`, `pub fn parse_json_metadata` in `export.rs`; non-test consumer: re-export at `lib.rs` plus `pub struct ExportedProgramMetadata` returned by the parser. |
+| REQ-9 | SHIPPED | impl: `pub fn export<T, M: Module<T>>` in `export.rs`; non-test consumer: re-export at `lib.rs`; `ferrotorch-serialize::export_from_program` documented as consuming this path (`export in export.rs`, `export in export.rs`). |
 | REQ-10 | SHIPPED | impl: `pub fn export_with_dynamic_shapes<T, M: Module<T>>` in `export.rs`; non-test consumer: re-export at `lib.rs:100`; `ferrotorch-serialize/src/onnx_export.rs:800-807` constructs `OnnxDimSpec::Dynamic` from the `ExportedProgram::input_specs` produced by this path. |

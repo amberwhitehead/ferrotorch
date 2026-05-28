@@ -92,7 +92,7 @@ For f16 / bf16 the comparison value is decoded to f32 in-register
 (`cvt.f32.f16` after a bf16 hi-half splat, or an f16 widening cvt);
 the index update logic is identical.
 
-Non-test production consumer: `backend_impl.rs:6186-6285` —
+Non-test production consumer: `backend_impl.rs` —
 `CudaBackendImpl::argmax_f32`/`argmax_f64`/`argmax_f16`/`argmax_bf16`/
 `argmax_i32`/`argmax_i64` and the matching `argmin_*` methods each
 dispatch on the input handle's dtype tag and forward to the
@@ -149,5 +149,5 @@ Expected: ≥ 1 `test result: ok` line.
 | REQ-1 | SHIPPED | impl: 12 `pub fn gpu_arg{max,min}_*` symbols in `ferrotorch-gpu/src/reduce_arg.rs` (macro-stamped at lines 686-741, hand-written at lines 744-818); non-test consumer: `ferrotorch-gpu/src/backend_impl.rs:6186-6285` dispatches all 12 dtype × {max,min} combinations through `match dtype` arms. |
 | REQ-2 | SHIPPED | impl: six `ARGREDUCE_*_PTX` constants in `reduce_arg.rs` (search for `ARGREDUCE_` to locate; first is `ARGREDUCE_F32_PTX` near line 85) carry the documented 7-arg ABI; loaded via `module_cache::get_or_compile` in `fn launch_argreduce`. |
 | REQ-3 | SHIPPED | impl: strict `setp.gt.f32` / `setp.lt.f32` (and dtype counterparts) in the PTX templates; verified by `argmax_f32_tie_first_index` unit test which constructs `[5.0, 1.0, 2.0, 5.0]` and asserts the result is index 0. |
-| REQ-4 | SHIPPED | impl: NaN divergence documented at `reduce_arg.rs:40-47` (the module `//!` block). The strict-compare semantics in the PTX naturally produce this behaviour. |
-| REQ-5 | SHIPPED | impl: `CudaBackendImpl::argmax_f32` body at `backend_impl.rs:6186` dispatches `match dtype { F32 => gpu_argmax_f32, F64 => gpu_argmax_f64, F16 => gpu_argmax_f16, BF16 => gpu_argmax_bf16, I32 => gpu_argmax_i32, I64 => gpu_argmax_i64 }`; mirror block at line 6249 for argmin. ferrotorch-core dispatches through the `GpuBackend` trait. |
+| REQ-4 | SHIPPED | impl: NaN divergence documented at `reduce_arg.rs` (the module `//!` block). The strict-compare semantics in the PTX naturally produce this behaviour. |
+| REQ-5 | SHIPPED | impl: `CudaBackendImpl::argmax_f32` body at `argmax_f32 in backend_impl.rs` dispatches `match dtype { F32 => gpu_argmax_f32, F64 => gpu_argmax_f64, F16 => gpu_argmax_f16, BF16 => gpu_argmax_bf16, I32 => gpu_argmax_i32, I64 => gpu_argmax_i64 }`; mirror block at line 6249 for argmin. ferrotorch-core dispatches through the `GpuBackend` trait. |

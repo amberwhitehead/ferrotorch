@@ -134,7 +134,7 @@ values).
 
 - `pub use memory_plan::{MemoryPlan, plan_memory}` at
   `ferrotorch-jit/src/lib.rs:110` — grandfathered public API.
-- `ferrotorch-jit/src/optimize.rs:11` `use crate::memory_plan::
+- `ferrotorch-jit/src/optimize.rs` `use crate::memory_plan::
   {self, MemoryPlan};` — `pub fn optimize` returns
   `Some(memory_plan::plan_memory(graph))` when
   `config.memory_planning` is enabled.
@@ -178,9 +178,9 @@ Expected: all 7 tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct MemoryPlan` in `memory_plan.rs`; non-test consumer: re-export at `ferrotorch-jit/src/lib.rs:110` + `ferrotorch-jit/src/optimize.rs:60` `Some(memory_plan::plan_memory(graph))` returns `Option<MemoryPlan>` from `pub fn optimize` which is consumed by `module.rs:17`, `aot_autograd.rs:19`, `symbolic.rs:65`, `graph_break.rs:27` (all `use crate::optimize::{OptimizationConfig, optimize};`). |
+| REQ-1 | SHIPPED | impl: `pub struct MemoryPlan` in `memory_plan.rs`; non-test consumer: re-export at `memory_plan in ferrotorch-jit/src/lib.rs` + `plan_memory in ferrotorch-jit/src/optimize.rs` `Some(memory_plan::plan_memory(graph))` returns `Option<MemoryPlan>` from `pub fn optimize` which is consumed by `module in module.rs`, `optimize in aot_autograd.rs`, `optimize in symbolic.rs`, `graph_break in graph_break.rs` (all `use crate::optimize::{OptimizationConfig, optimize};`). |
 | REQ-2 | SHIPPED | impl: `pub fn savings_percent` on `impl MemoryPlan` in `memory_plan.rs`; non-test consumer: re-export at `lib.rs:110` makes this accessible to any downstream consumer of the `MemoryPlan` produced by `optimize` — including the JIT module's compile path. |
-| REQ-3 | SHIPPED | impl: `pub fn plan_memory` in `memory_plan.rs`; non-test consumer: `optimize.rs:60` `Some(memory_plan::plan_memory(graph))` inside `pub fn optimize`, which is called from `module.rs`, `aot_autograd.rs`, `symbolic.rs`, `graph_break.rs`. |
-| REQ-4 | SHIPPED | impl: the graph-output `last_use = max_topo` pin in `pub fn plan_memory` (`memory_plan.rs`); non-test consumer: invoked transitively from `optimize.rs:60` for every plan whose graph has output values. |
+| REQ-3 | SHIPPED | impl: `pub fn plan_memory` in `memory_plan.rs`; non-test consumer: `plan_memory in optimize.rs` `Some(memory_plan::plan_memory(graph))` inside `pub fn optimize`, which is called from `module.rs`, `aot_autograd.rs`, `symbolic.rs`, `graph_break.rs`. |
+| REQ-4 | SHIPPED | impl: the graph-output `last_use = max_topo` pin in `pub fn plan_memory` (`memory_plan.rs`); non-test consumer: invoked transitively from `optimize in optimize.rs` for every plan whose graph has output values. |
 | REQ-5 | SHIPPED | impl: empty-graph early return inside `pub fn plan_memory` (`memory_plan.rs`); non-test consumer: same as REQ-3. |
 | REQ-6 | SHIPPED | impl: `values_by_birth.sort_by(\|a, b\| ia.born.cmp(&ib.born).then_with(\|\| a.0.cmp(&b.0)))` in `pub fn plan_memory` (`memory_plan.rs`); non-test consumer: same as REQ-3. |

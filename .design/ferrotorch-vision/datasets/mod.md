@@ -50,7 +50,7 @@ DatasetFolder, ImageFolder`, `from .mnist import MNIST, ...` into the
 ## Architecture
 
 `datasets/mod.rs` is a 12-line file — three `pub mod` declarations
-and three `pub use` re-export blocks (`datasets/mod.rs:6-12`).
+and three `pub use` re-export blocks (`datasets/mod.rs`).
 
 The structural decision here is: torchvision's `datasets` namespace
 is flat (`torchvision.datasets.MNIST`, `torchvision.datasets.CIFAR10`,
@@ -61,22 +61,22 @@ ferrotorch matches that surface via re-exports: end users write
 user-API ABI).
 
 `Split` ownership is mildly unusual: it lives in `mnist.rs` because
-MNIST was the first dataset added; CIFAR's `cifar.rs:44` reads
+MNIST was the first dataset added; CIFAR's `cifar.rs` reads
 `use super::mnist::Split;` rather than duplicating the enum. The
-re-export at `datasets/mod.rs:12` (`pub use mnist::{Mnist, MnistSample,
+re-export at `datasets/mod.rs` (`pub use mnist::{Mnist, MnistSample,
 Split};`) makes `Split` a citizen of the `datasets` namespace —
 internally it's a `mnist::Split` but externally it's the canonical
 `ferrotorch_vision::datasets::Split` used by both CIFAR and MNIST.
 
 ### Non-test production consumers
 
-- `ferrotorch-vision/src/lib.rs:99` — `pub use datasets::{Cifar10,
+- `ferrotorch-vision/src/lib.rs` — `pub use datasets::{Cifar10,
   Cifar100, CifarSample, Mnist, MnistSample, Split};` re-exports the
   surface at the crate root, reaching through THIS module's
   re-exports.
 - `ferrotorch/examples/train_mnist.rs:22` — `use
   ferrotorch_vision::{Mnist, Split};` reaches transitively through
-  `ferrotorch-vision/src/lib.rs:99` ← `datasets/mod.rs:12`.
+  `datasets in ferrotorch-vision/src/lib.rs` ← `datasets/mod.rs`.
 
 ## Parity contract
 
@@ -107,7 +107,7 @@ re-exports are verified indirectly by:
   these symbols.
 - `ferrotorch/examples/train_mnist.rs:22` — `use
   ferrotorch_vision::{Mnist, Split};` compiles only if the chain
-  `datasets/mod.rs:12` → `ferrotorch-vision/src/lib.rs:99` is
+  `datasets/mod.rs` → `datasets in ferrotorch-vision/src/lib.rs` is
   intact.
 
 Smoke command (no parity ops):
@@ -123,6 +123,6 @@ import`. The check is the verification.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub mod cifar; pub mod folder; pub mod mnist;` at `ferrotorch-vision/src/datasets/mod.rs:6-8` per upstream torchvision per-file layout (`torchvision/datasets/cifar.py`, `folder.py`, `mnist.py`); non-test consumer: the conformance integration test `ferrotorch-vision/tests/conformance_vision_datasets.rs:30` reaches these modules through the re-exports, and the crate-root re-exports at `ferrotorch-vision/src/lib.rs:99` consume them as well. |
-| REQ-2 | SHIPPED | impl: `pub use cifar::{Cifar10, Cifar100, CifarSample};` at `ferrotorch-vision/src/datasets/mod.rs:10`, `pub use folder::{DatasetFolder, FolderSample, IMG_EXTENSIONS, ImageFolder, ImageSample};` at `ferrotorch-vision/src/datasets/mod.rs:11`, and `pub use mnist::{Mnist, MnistSample, Split};` at `ferrotorch-vision/src/datasets/mod.rs:12` per upstream `torchvision/datasets/__init__.py`'s flat namespace; non-test consumer: `pub use datasets::{Cifar10, Cifar100, CifarSample, Mnist, MnistSample, Split};` at `ferrotorch-vision/src/lib.rs:99` reaches through these re-exports. |
-| REQ-3 | SHIPPED | impl: `Split` is defined in `ferrotorch-vision/src/datasets/mnist.rs:43-48` and re-exported at `ferrotorch-vision/src/datasets/mod.rs:12` via `pub use mnist::{Mnist, MnistSample, Split};`; cross-dataset consumer: `use super::mnist::Split;` at `ferrotorch-vision/src/datasets/cifar.rs:44` is the production consumer of the shared enum within the crate, and `use ferrotorch_vision::{Mnist, Split};` at `ferrotorch/examples/train_mnist.rs:22` is the cross-crate consumer. |
+| REQ-1 | SHIPPED | impl: `pub mod cifar; pub mod folder; pub mod mnist;` at `folder in ferrotorch-vision/src/datasets/mod.rs` per upstream torchvision per-file layout (`torchvision/datasets/cifar.py`, `folder.py`, `mnist.py`); non-test consumer: the conformance integration test `mnist in ferrotorch-vision/tests/conformance_vision_datasets.rs` reaches these modules through the re-exports, and the crate-root re-exports at `ferrotorch-vision/src/lib.rs` consume them as well. |
+| REQ-2 | SHIPPED | impl: `pub use cifar::{Cifar10, Cifar100, CifarSample};` at `ferrotorch-vision/src/datasets/mod.rs`, `pub use folder::{DatasetFolder, FolderSample, IMG_EXTENSIONS, ImageFolder, ImageSample};` at `ferrotorch-vision/src/datasets/mod.rs`, and `pub use mnist::{Mnist, MnistSample, Split};` at `ferrotorch-vision/src/datasets/mod.rs` per upstream `torchvision/datasets/__init__.py`'s flat namespace; non-test consumer: `pub use datasets::{Cifar10, Cifar100, CifarSample, Mnist, MnistSample, Split};` at `ferrotorch-vision/src/lib.rs` reaches through these re-exports. |
+| REQ-3 | SHIPPED | impl: `Split` is defined in `Split in ferrotorch-vision/src/datasets/mnist.rs` and re-exported at `ferrotorch-vision/src/datasets/mod.rs` via `pub use mnist::{Mnist, MnistSample, Split};`; cross-dataset consumer: `use super::mnist::Split;` at `ferrotorch-vision/src/datasets/cifar.rs` is the production consumer of the shared enum within the crate, and `use ferrotorch_vision::{Mnist, Split};` at `ferrotorch/examples/train_mnist.rs` is the cross-crate consumer. |

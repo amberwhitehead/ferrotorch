@@ -142,7 +142,7 @@ errors (see `cuSPARSELtOps.cpp` `TORCH_CUDASPARSE_CHECK` usage).
 When the `cusparselt` feature is off, `gpu_sparse_matmul_24`
 returns `Err(GpuError::NoCusparseLt)`. When `cuda` is off, it
 returns `Err(GpuError::NoCudaFeature)`. Either way the crate
-compiles and `backend_impl.rs:5087` propagates the structured
+compiles and `backend_impl.rs` propagates the structured
 error to the core-side `Result`.
 
 ## Parity contract
@@ -174,7 +174,7 @@ Edge cases mirrored from upstream:
 ## Verification
 
 This file has **0** in-module `#[test]` units. Integration coverage
-is at the backend_impl level (`backend_impl.rs:5087`'s
+is at the backend_impl level (`backend_impl.rs`'s
 `sparse_matmul_24_*` test arms) plus op-level coverage in
 `ferrotorch-core/src/sparse.rs`. The cuSPARSELt path requires the
 `cusparselt` feature + `libcusparseLt.so` at runtime, so it cannot
@@ -195,16 +195,16 @@ dispatcher.
 ## REQ status table
 
 Per S5 (existing pub-API grandfather): both `CusparseLtHandle` and
-`gpu_sparse_matmul_24` are consumed by `backend_impl.rs:5087` (the
+`gpu_sparse_matmul_24` are consumed by `backend_impl.rs` (the
 cuda backend's `sparse_matmul_24` arm). That arm is reached from
 the user-facing `SemiStructuredSparseTensor::sparse_matmul_24` API
 on the GPU dispatch path.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct CusparseLtHandle in cusparselt.rs` (line 87), `impl CusparseLtHandle in cusparselt.rs` (line 104), `impl Drop for CusparseLtHandle in cusparselt.rs` (line 132). Non-test consumer: `gpu_sparse_matmul_24 in cusparselt.rs` constructs and uses a handle on every call (the cuSPARSELt-side counterpart of upstream's `thread_local cusparseLtHandle_t handle` at `cuSPARSELtOps.cpp:17`); the handle ultimately propagates from `backend_impl.rs:5087` via the cached-on-device wiring. |
-| REQ-2 | SHIPPED | impl: `pub enum CuSpLtDType in cusparselt.rs` (line 150) and `impl CuSpLtDType in cusparselt.rs` (line 156). Non-test consumer: `gpu_sparse_matmul_24 in cusparselt.rs` uses `CuSpLtDType::cuda_dtype()` and `CuSpLtDType::compute_type()` to populate the descriptor init calls; the consumer at `backend_impl.rs:5087` chooses the dtype based on the input tensor type. |
-| REQ-3 | SHIPPED | impl: `pub fn gpu_sparse_matmul_24<T> in cusparselt.rs` (line 216) mirrors upstream `cuSPARSELtOps.cpp:155,320` (handle init / plan / matmul). Non-test consumer: `backend_impl.rs:5087` calls `crate::cusparselt::gpu_sparse_matmul_24::<f32>(...)`. |
-| REQ-4 | SHIPPED | impl: ROW-order descriptors + sparse-as-B convention encoded in `gpu_sparse_matmul_24 in cusparselt.rs`. Non-test consumer: `backend_impl.rs:5087` passes the user's `b` as the sparse operand per the documented `sparse_matmul_24(a, b)` contract. |
-| REQ-5 | SHIPPED | impl: every cuSPARSELt API call in `cusparselt.rs` is wrapped to return `Err(GpuError::SparseLt(...))` on failure; no unwrap/expect in production code. Non-test consumer: `backend_impl.rs:5087` uses `.map_err(Self::map_gpu_err)?` to propagate. |
-| REQ-6 | SHIPPED | impl: feature-gated cfg branches at the top of `cusparselt.rs` provide stubs returning `NoCusparseLt` / `NoCudaFeature`. Non-test consumer: the same `backend_impl.rs:5087` arm under the no-cusparselt / no-cuda compile paths. |
+| REQ-1 | SHIPPED | impl: `pub struct CusparseLtHandle in cusparselt.rs` (line 87), `impl CusparseLtHandle in cusparselt.rs` (line 104), `impl Drop for CusparseLtHandle in cusparselt.rs` (line 132). Non-test consumer: `gpu_sparse_matmul_24 in cusparselt.rs` constructs and uses a handle on every call (the cuSPARSELt-side counterpart of upstream's `thread_local cusparseLtHandle_t handle` at `cuSPARSELtOps.cpp:17`); the handle ultimately propagates from `backend_impl.rs` via the cached-on-device wiring. |
+| REQ-2 | SHIPPED | impl: `pub enum CuSpLtDType in cusparselt.rs` (line 150) and `impl CuSpLtDType in cusparselt.rs` (line 156). Non-test consumer: `gpu_sparse_matmul_24 in cusparselt.rs` uses `CuSpLtDType::cuda_dtype()` and `CuSpLtDType::compute_type()` to populate the descriptor init calls; the consumer at `backend_impl.rs` chooses the dtype based on the input tensor type. |
+| REQ-3 | SHIPPED | impl: `pub fn gpu_sparse_matmul_24<T> in cusparselt.rs` (line 216) mirrors upstream `cuSPARSELtOps.cpp:155,320` (handle init / plan / matmul). Non-test consumer: `backend_impl.rs` calls `crate::cusparselt::gpu_sparse_matmul_24::<f32>(...)`. |
+| REQ-4 | SHIPPED | impl: ROW-order descriptors + sparse-as-B convention encoded in `gpu_sparse_matmul_24 in cusparselt.rs`. Non-test consumer: `b in backend_impl.rs` passes the user's `b` as the sparse operand per the documented `sparse_matmul_24(a, b)` contract. |
+| REQ-5 | SHIPPED | impl: every cuSPARSELt API call in `cusparselt.rs` is wrapped to return `Err(GpuError::SparseLt(...))` on failure; no unwrap/expect in production code. Non-test consumer: `cusparselt in backend_impl.rs` uses `.map_err(Self::map_gpu_err)?` to propagate. |
+| REQ-6 | SHIPPED | impl: feature-gated cfg branches at the top of `cusparselt.rs` provide stubs returning `NoCusparseLt` / `NoCudaFeature`. Non-test consumer: the same `cusparselt in backend_impl.rs` arm under the no-cusparselt / no-cuda compile paths. |

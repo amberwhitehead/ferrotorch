@@ -68,7 +68,7 @@ that exists because diffusers wraps these in `Sequential`s.
 
 ## Architecture
 
-- `Attention<T>` (`attention.rs:58..78`): five `Linear<T>` fields
+- `Attention<T>` (`attention.rs`): five `Linear<T>` fields
   (q/k/v + out) plus `dim_head`, `heads`, `inner_dim`, `query_dim`,
   `kv_dim`, and a cached `scale = 1/sqrt(dim_head)`.
 - `Attention::new` (`attention.rs:94..121`): allocates the four
@@ -78,18 +78,18 @@ that exists because diffusers wraps these in `Sequential`s.
   multi-head attention recipe. Reshapes `q` to `[B*H, N, D]`,
   `k`/`v` to `[B*H, S, D]`, computes `q @ k^T * scale → softmax →
   @ v`, then merges heads back to `[B, N, inner]` and projects out.
-- `FeedForward<T>` (`attention.rs:314..323`): two `Linear<T>` +
+- `FeedForward<T>` (`attention.rs`): two `Linear<T>` +
   `GELU`. The `GEGLU` decomposition lives inside `forward`
   (`attention.rs:346..365`): `chunk(2, dim=-1)` to split into `(x,
   gate)`, then `net.2(x * gelu(gate))`.
-- `BasicTransformerBlock<T>` (`attention.rs:441..457`): three
+- `BasicTransformerBlock<T>` (`attention.rs`): three
   `LayerNorm`s, two `Attention`s, one `FeedForward`. Constructor
   (`attention.rs:465..490`) wires the SD-1.5 contract: self-attn has
   `cross_attention_dim = None`, cross-attn has `Some(cad)`, both
   have `bias=false` on q/k/v.
 - `BasicTransformerBlock::forward_xattn` (`attention.rs:499..525`):
   pre-LN + sub-block + residual, three times.
-- `Transformer2DModel<T>` (`attention.rs:644..657`): one
+- `Transformer2DModel<T>` (`attention.rs`): one
   `GroupNorm`, one `proj_in` Conv2d (k=1), `Vec<BasicTransformerBlock>`,
   one `proj_out` Conv2d (k=1). SD-1.5 v1 uses
   `use_linear_projection=False` so both projections are Convs.
@@ -106,9 +106,9 @@ the keys to load HF checkpoints directly.
 
 Non-test production consumers:
 
-- `ferrotorch-diffusion/src/unet.rs:47` imports
-  `Transformer2DModel`; `unet.rs:116` (CrossAttnDownBlock2D),
-  `unet.rs:469` (UNetMidBlock2DCrossAttn), and `unet.rs:664`
+- `ferrotorch-diffusion/src/unet.rs` imports
+  `Transformer2DModel`; `unet in unet.rs` (CrossAttnDownBlock2D),
+  `unet in unet.rs` (UNetMidBlock2DCrossAttn), and `unet in unet.rs`
   (CrossAttnUpBlock2D) all call `Transformer2DModel::<T>::new` for
   each cross-attn level.
 - `Attention`, `BasicTransformerBlock`, and `FeedForward` are
@@ -152,5 +152,5 @@ No parity-sweep ops apply.
 | REQ-2 | SHIPPED | impl: `Attention::forward_xattn` at `ferrotorch-diffusion/src/attention.rs:133..209`; non-test consumer: `BasicTransformerBlock::forward_xattn` at `ferrotorch-diffusion/src/attention.rs:515` and `519` calls `self.attn1.forward_xattn` / `self.attn2.forward_xattn` |
 | REQ-3 | SHIPPED | impl: `FeedForward::new` at `ferrotorch-diffusion/src/attention.rs:331..342`; non-test consumer: `BasicTransformerBlock::new` at `ferrotorch-diffusion/src/attention.rs:479` calls `FeedForward::<T>::new(dim, 4)?` |
 | REQ-4 | SHIPPED | impl: `BasicTransformerBlock::new` at `ferrotorch-diffusion/src/attention.rs:465..490` and `forward_xattn` at `ferrotorch-diffusion/src/attention.rs:499..525`; non-test consumer: `Transformer2DModel::new` at `ferrotorch-diffusion/src/attention.rs:683..688` constructs `BasicTransformerBlock` instances and the forward pass at `attention.rs:740` invokes them |
-| REQ-5 | SHIPPED | impl: `Transformer2DModel::new` at `ferrotorch-diffusion/src/attention.rs:669..699` and `forward_xattn` at `ferrotorch-diffusion/src/attention.rs:709..751`; non-test consumer: `ferrotorch-diffusion/src/unet.rs:116`, `unet.rs:469`, and `unet.rs:664` all call `Transformer2DModel::<T>::new` to build cross-attn levels |
+| REQ-5 | SHIPPED | impl: `Transformer2DModel::new` at `new in ferrotorch-diffusion/src/attention.rs` and `forward_xattn in ferrotorch-diffusion/src/attention.rs`; non-test consumer: `forward_xattn in ferrotorch-diffusion/src/unet.rs`, `unet in unet.rs`, and `unet in unet.rs` all call `Transformer2DModel::<T>::new` to build cross-attn levels |
 | REQ-6 | SHIPPED | impl: error returns at `ferrotorch-diffusion/src/attention.rs:529..535` (`BasicTransformerBlock::forward`) and `attention.rs:755..761` (`Transformer2DModel::forward`); non-test consumer: the strict-typestate-style guard surfaces a clear error to any production caller that forgets to supply `encoder_hidden_states` |

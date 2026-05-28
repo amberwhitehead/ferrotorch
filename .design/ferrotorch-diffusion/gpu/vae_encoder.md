@@ -72,22 +72,22 @@ runs must use `encode_mode`.
   optional downsample). Sampling: `diag_gauss_sample_with_scale_gpu`
   helper fuses the chunk + clamp + sample + scale into a single
   GPU pass.
-- `GpuVaeEncoder` at `gpu/vae_encoder.rs:118..127` holds
+- `GpuVaeEncoder in gpu/vae_encoder.rs` holds
   `conv_in`, four `down_blocks`, `mid_block`, `conv_norm_out`,
   `conv_out`, `quant_conv`, frozen config, device handle.
-- `new` at `gpu/vae_encoder.rs:145..` validates the config, pops
+- `new` at `gpu in gpu/vae_encoder.rs` validates the config, pops
   every state-dict key by name (matching the CPU `VaeEncoder`
   layout: `encoder.conv_in.*`, `encoder.down_blocks.{i}.*`,
   `encoder.mid_block.*`, `encoder.conv_norm_out.*`,
   `encoder.conv_out.*`, `quant_conv.*`), enforces shape, uploads.
-- `from_module` at `gpu/vae_encoder.rs:317..` extracts CPU
+- `from_module` at `gpu in gpu/vae_encoder.rs` extracts CPU
   `state_dict()` and delegates to `new`.
-- `encode` at `gpu/vae_encoder.rs:392..396` calls
+- `encode` at `gpu in gpu/vae_encoder.rs` calls
   `encode_to_gpu_buf(image, /*deterministic=*/ false)` then
   downloads.
-- `encode_mode` at `gpu/vae_encoder.rs:407..411` is the same with
+- `encode_mode` at `gpu in gpu/vae_encoder.rs` is the same with
   `deterministic=true`.
-- `encode_with_gpu_params_probe` at `gpu/vae_encoder.rs:429..465`
+- `encode_with_gpu_params_probe` at `gpu in gpu/vae_encoder.rs`
   is the GPU-residency trip-wire: the hook runs BETWEEN the
   forward path's `forward_to_params` result and the sample-tail,
   proving the intermediate is a genuine `CudaBuffer<f32>` with no
@@ -163,5 +163,5 @@ No parity-sweep ops apply.
 | REQ-2 | SHIPPED | impl: `from_module` at `ferrotorch-diffusion/src/gpu/vae_encoder.rs:317..`; non-test consumer: re-exported via `ferrotorch-diffusion/src/gpu/mod.rs:38` `pub use vae_encoder::GpuVaeEncoder` so any binary using `ferrotorch_diffusion::gpu::GpuVaeEncoder` invokes it via the public surface (grandfathered per goal.md S5 — boundary method is the public API) |
 | REQ-3 | SHIPPED | impl: `encode` at `ferrotorch-diffusion/src/gpu/vae_encoder.rs:392..396` calling `encode_to_gpu_buf(image, /*deterministic=*/ false)`; non-test consumer: re-exported via `ferrotorch-diffusion/src/gpu/mod.rs:38`; the public surface is exercised by `ferrotorch-diffusion/tests/conformance_vae_encoder.rs` (test) and is the canonical entry point for any production img2img / inpainting binary built on top |
 | REQ-4 | SHIPPED | impl: `encode_mode` at `ferrotorch-diffusion/src/gpu/vae_encoder.rs:407..411`; non-test consumer: re-exported via `ferrotorch-diffusion/src/gpu/mod.rs:38`; boundary method per S5 grandfathering — the deterministic-latent contract is the public API surface |
-| REQ-5 | SHIPPED | impl: `encode_with_gpu_params_probe` at `ferrotorch-diffusion/src/gpu/vae_encoder.rs:429..465`; non-test consumer: re-exported via `ferrotorch-diffusion/src/gpu/mod.rs:38`; the trip-wire surface is itself the production-side audit hook for rust-gpu-discipline forbidden-pattern #7 (referenced by the module docstring at `gpu/vae_encoder.rs:413..423`) |
-| REQ-6 | SHIPPED | impl: shape check at `ferrotorch-diffusion/src/gpu/vae_encoder.rs:437..445` (inside `encode_with_gpu_params_probe`) and at `gpu/vae_encoder.rs:476..482` (inside `encode_to_gpu_buf`); non-test consumer: all three entry points (`encode`, `encode_mode`, `encode_with_gpu_params_probe`) flow through one of these checks on every call |
+| REQ-5 | SHIPPED | impl: `encode_with_gpu_params_probe in ferrotorch-diffusion/src/gpu/vae_encoder.rs`; non-test consumer: re-exported via `ferrotorch-diffusion/src/gpu/mod.rs`; the trip-wire surface is itself the production-side audit hook for rust-gpu-discipline forbidden-pattern #7 (referenced by the module docstring at `gpu in gpu/vae_encoder.rs`) |
+| REQ-6 | SHIPPED | impl: shape check at `encode_with_gpu_params_probe in ferrotorch-diffusion/src/gpu/vae_encoder.rs` (inside `encode_with_gpu_params_probe`) and at `gpu in gpu/vae_encoder.rs` (inside `encode_to_gpu_buf`); non-test consumer: all three entry points (`encode`, `encode_mode`, `encode_with_gpu_params_probe`) flow through one of these checks on every call |

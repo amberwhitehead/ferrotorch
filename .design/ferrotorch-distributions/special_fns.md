@@ -173,7 +173,7 @@ f32 conversion is always defined.
 ### `pub(crate)` visibility (REQ-4)
 
 `pub(crate) fn lgamma_scalar` and `pub(crate) fn digamma_scalar`
-+ `pub(crate) mod special_fns;` in `lib.rs:77` make the module
++ `pub(crate) mod special_fns;` in `lib.rs` make the module
 crate-internal. The public tensor-level analogs live in
 `ferrotorch_core::special::{lgamma, digamma}` (a separate module
 in a separate crate). This separation matches the upstream
@@ -189,19 +189,19 @@ crate-internal scalar helper.
 Confirmed via `grep -rn "special_fns::"
 ferrotorch-distributions/src/`:
 
-- `multinomial.rs:19` — `use crate::special_fns::lgamma_scalar;`
-- `student_t.rs:16` — `use crate::special_fns::{digamma_scalar,
+- `lgamma_scalar in multinomial.rs` — `use crate::special_fns::lgamma_scalar;`
+- `student_t.rs` — `use crate::special_fns::{digamma_scalar,
   lgamma_scalar};`
-- `weibull.rs:13` — `use crate::special_fns::lgamma_scalar;`
-- `dirichlet.rs:39` — `use crate::special_fns::digamma_scalar;`
-- `gamma.rs:18` — `use crate::special_fns::{digamma_scalar,
+- `lgamma_scalar in weibull.rs` — `use crate::special_fns::lgamma_scalar;`
+- `digamma_scalar in dirichlet.rs` — `use crate::special_fns::digamma_scalar;`
+- `gamma in gamma.rs` — `use crate::special_fns::{digamma_scalar,
   lgamma_scalar};`
-- `beta.rs:18` — `use crate::special_fns::{digamma_scalar,
+- `beta in beta.rs` — `use crate::special_fns::{digamma_scalar,
   lgamma_scalar};`
-- `poisson.rs:14` — `use crate::special_fns::lgamma_scalar;`
-- `kumaraswamy.rs:13` — `use crate::special_fns::{digamma_scalar,
+- `poisson in poisson.rs` — `use crate::special_fns::lgamma_scalar;`
+- `kumaraswamy.rs` — `use crate::special_fns::{digamma_scalar,
   lgamma_scalar};`
-- `kl.rs:15` — `use crate::special_fns::{digamma_scalar,
+- `kl in kl.rs` — `use crate::special_fns::{digamma_scalar,
   lgamma_scalar};`
 
 9 production callers across the crate. Every formula that needs
@@ -220,7 +220,7 @@ preserved:
 - **`lgamma(negative integer) = +inf`**: same reflection-branch
   zero-sine check. Matches scipy / PyTorch.
 - **`lgamma(1) == 0` and `lgamma(2) == 0`**: tested by
-  `test_ln_gamma_known_values` in `kl.rs:1086` to f64 tolerance
+  `test_ln_gamma_known_values in kl.rs` to f64 tolerance
   `1e-12`.
 - **`lgamma(-0.5) ≈ 1.265512` and `lgamma(-1.5) ≈ 0.860047`**:
   reflection branch hit; tested by
@@ -266,5 +266,5 @@ Expected: `4 passed`.
 | REQ-1 | SHIPPED | impl: `pub(crate) fn lgamma_scalar<T: Float>(x: T) -> T` with 9-coefficient Lanczos + reflection branch in `special_fns.rs`, matching scipy reference values to 1e-11 f64; non-test consumer: `kl_gamma_scalar` in `kl.rs` calls `lgamma_scalar(pa)`, `lgamma_scalar(qa)` on every Gamma-Gamma KL evaluation; `fn Gamma::log_prob in gamma.rs` calls it for the normalising constant; `fn Beta::log_prob in beta.rs` calls it 3 times for `lnB(α,β) = lnΓ(α) + lnΓ(β) - lnΓ(α+β)`. 9 production callers total. |
 | REQ-2 | SHIPPED | impl: `pub(crate) fn digamma_scalar<T: Float>(x: T) -> T` with recurrence + Abramowitz-Stegun asymptotic + reflection branch in `special_fns.rs`, matching scipy reference values to 1e-9 f64; non-test consumer: `kl_gamma_scalar` in `kl.rs` calls `digamma_scalar(pa)`; `fn Beta::entropy in beta.rs` calls `digamma_scalar` on each concentration; `fn Dirichlet::entropy in dirichlet.rs` similarly. 5 production callers. |
 | REQ-3 | SHIPPED | impl: both functions are `<T: Float>` generic with f64 constants promoted via `T::from(<f64>).unwrap()` in `special_fns.rs` — the `LANCZOS_COEFFICIENTS: [f64; 9]` const is f64 to preserve precision; non-test consumer: `lgamma_f32_round_trip` test exercises the f32-promotion path with 15 reference cases; in production `fn Beta::log_prob` operates on `T = f32` AND `T = f64` (both tested by `_f64` variants) routing through the same generic body. |
-| REQ-4 | SHIPPED | impl: `pub(crate) fn lgamma_scalar`, `pub(crate) fn digamma_scalar`, and `pub(crate) mod special_fns;` in `lib.rs:77` together make the module crate-internal; non-test consumer: 9 production sites within `ferrotorch-distributions/src/` (`gamma.rs`, `beta.rs`, `dirichlet.rs`, `kumaraswamy.rs`, `multinomial.rs`, `poisson.rs`, `student_t.rs`, `weibull.rs`, `kl.rs`); `cargo doc -p ferrotorch-distributions` omits these from public docs by virtue of `pub(crate)`. |
+| REQ-4 | SHIPPED | impl: `pub(crate) fn lgamma_scalar`, `pub(crate) fn digamma_scalar`, and `pub(crate) mod special_fns;` in `lib.rs` together make the module crate-internal; non-test consumer: 9 production sites within `ferrotorch-distributions/src/` (`gamma.rs`, `beta.rs`, `dirichlet.rs`, `kumaraswamy.rs`, `multinomial.rs`, `poisson.rs`, `student_t.rs`, `weibull.rs`, `kl.rs`); `cargo doc -p ferrotorch-distributions` omits these from public docs by virtue of `pub(crate)`. |
 | REQ-5 | SHIPPED (#1379) | impl: `pub(crate) fn trigamma_scalar<T: Float>` (recurrence + A&S 6.4.12 asymptotic + reflection) and `pub(crate) fn polygamma_scalar<T: Float>(n: u32, x: T)` (n=0 digamma kernel, n=1 trigamma, n≥2 Hurwitz-zeta) in `special_fns.rs`, matching `scipy.special.polygamma` to 1e-9 (trigamma) / 1e-7 (n≥2) f64; non-test consumer: `polygamma_scalar` calls `trigamma_scalar` from its `n == 1` arm (production caller of trigamma), and `digamma_scalar` now delegates to `polygamma_scalar(0, x)` — so the 5 existing digamma callers (`kl_gamma_scalar` in `kl.rs`, `kl_dirichlet_dirichlet` in `kl.rs`, `Beta::entropy` in `beta.rs`, `Dirichlet::entropy` in `dirichlet.rs`, `StudentT::entropy` in `student_t.rs`) transitively consume `polygamma_scalar`. Pinned by `trigamma_matches_scipy_reference`, `trigamma_negative_reflection_matches_scipy`, `trigamma_finite_difference_of_digamma`, `polygamma_general_matches_scipy_reference`, `polygamma_order0_is_digamma_order1_is_trigamma`. (Public tensor-level `multigammaln`/`mvlgamma` now SHIPPED in `ferrotorch_core::special` — REQ-15 of `.design/ferrotorch-core/special.md`; no crate-internal scalar copy needed here, no Wishart consumer required per goal.md S5.) |

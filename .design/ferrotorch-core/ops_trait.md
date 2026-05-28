@@ -64,21 +64,21 @@ needed.
 
 ## Acceptance Criteria
 
-- [x] AC-1: `test_add_refs` at `ops_trait.rs:158` — `(&a + &b)?` produces
+- [x] AC-1: `test_add_refs in ops_trait.rs` — `(&a + &b)?` produces
   a tensor with value `5.0` and post-backward `a.grad() == 1.0`.
-- [x] AC-2: `test_sub_refs` at `ops_trait.rs:171` — `(&a - &b)?` produces
+- [x] AC-2: `test_sub_refs in ops_trait.rs` — `(&a - &b)?` produces
   the expected difference.
-- [x] AC-3: `test_mul_with_autograd` at `ops_trait.rs:181` — `(&a * &b)?`
+- [x] AC-3: `test_mul_with_autograd in ops_trait.rs` — `(&a * &b)?`
   with autograd: `c.item() == 12.0`, `a.grad() == 3.0`, `b.grad() == 4.0`
   (chain-rule via the inner operand).
-- [x] AC-4: `test_div_refs` at `ops_trait.rs:194`.
-- [x] AC-5: `test_neg` at `ops_trait.rs:204` — `(-&a)?` and `(-a)?` both
+- [x] AC-4: `test_div_refs in ops_trait.rs`.
+- [x] AC-5: `test_neg in ops_trait.rs` — `(-&a)?` and `(-a)?` both
   produce `-5.0`.
-- [x] AC-6: `test_owned_add` at `ops_trait.rs:213` — `(a + b)?` (owned)
+- [x] AC-6: `test_owned_add in ops_trait.rs` — `(a + b)?` (owned)
   works.
-- [x] AC-7: `test_mixed_ownership` at `ops_trait.rs:222` — `(a + &b)?`
+- [x] AC-7: `test_mixed_ownership in ops_trait.rs` — `(a + &b)?`
   works (one owned, one borrowed).
-- [x] AC-8: `test_chained_expression` at `ops_trait.rs:231` — `(&(&a +
+- [x] AC-8: `test_chained_expression in ops_trait.rs` — `(&(&a +
   &b)? * &(&a - &b)?)?` computes `(2+3)*(2-3) = -5`. Pins the
   expression-tree composition contract.
 
@@ -96,13 +96,13 @@ impl<T: Float> ops::Add<&Tensor<T>> for Tensor<T> { … }       // T + &T
 impl<T: Float> ops::Add<Tensor<T>> for Tensor<T> { … }        // T + T
 ```
 
-(`ops_trait.rs:16-42` for `Add`, `:46-72` for `Sub`, `:76-102` for
+(`ops_trait.rs` for `Add`, `ops_trait.rs` for `Sub`, `ops_trait.rs` for
 `Mul`, `:106-132` for `Div`.) Each body is one line:
 `arithmetic::add(self, rhs)` (or `&self, &rhs` depending on ownership)
 — there is no logic in the impl itself, all the work happens in the
 delegated `grad_fns::arithmetic::*` function.
 
-### Unary `Neg` (`ops_trait.rs:136-148`)
+### Unary `Neg` (`ops_trait.rs`)
 
 Two variants for `Neg`: `-&T` and `-T`. Both delegate to
 `arithmetic::neg(&t)`.
@@ -124,7 +124,7 @@ let c = (&(&a + &b)? * &(&a - &b)?)?;  // (a+b) * (a-b)
 ```
 
 This is the chained-expression case tested by `test_chained_expression`
-at `ops_trait.rs:231`.
+at `test_chained_expression in ops_trait.rs`.
 
 ### Autograd transparency (REQ-7)
 
@@ -185,11 +185,11 @@ The 8 tests at `ops_trait.rs:154-237` cover:
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: 4 `impl ops::Add` blocks at `ferrotorch-core/src/ops_trait.rs:16-42` mirroring `torch.Tensor.__add__` → `aten::add.Tensor` at `aten/src/ATen/native/BinaryOps.cpp:218`. Non-test production consumer: `ferrotorch-core/src/special.rs` (e.g. `log1p` impl composes via `&x + &one`); also indirect through every downstream model crate's attention/MLP code that uses `+`. Test: `test_add_refs` at `ops_trait.rs:158` exercises the full backward path. |
-| REQ-2 | SHIPPED | impl: 4 `impl ops::Sub` blocks at `ferrotorch-core/src/ops_trait.rs:46-72` mirroring `aten::sub.Tensor` at `aten/src/ATen/native/BinaryOps.cpp:280`. Non-test production consumer: same downstream model-crate path as REQ-1; the operator-overload impl is the chained-expression primitive (`test_chained_expression` uses `&a - &b`). |
-| REQ-3 | SHIPPED | impl: 4 `impl ops::Mul` blocks at `ferrotorch-core/src/ops_trait.rs:76-102` mirroring `aten::mul.Tensor` at `aten/src/ATen/native/BinaryOps.cpp:342`. Non-test production consumer: `ferrotorch-core/src/special.rs` and downstream attention scaling (`q * scale`). Test: `test_mul_with_autograd` at `ops_trait.rs:181` validates the autograd chain. |
-| REQ-4 | SHIPPED | impl: 4 `impl ops::Div` blocks at `ferrotorch-core/src/ops_trait.rs:106-132` mirroring `aten::div.Tensor` at `aten/src/ATen/native/BinaryOps.cpp:400`. Non-test production consumer: downstream normalization (`x / norm`) and softmax (`exp_x / sum_exp`). Test: `test_div_refs` at `ops_trait.rs:194`. |
-| REQ-5 | SHIPPED | impl: `impl ops::Neg for &Tensor<T>` and `impl ops::Neg for Tensor<T>` at `ferrotorch-core/src/ops_trait.rs:136-148` delegating to `arithmetic::neg`. Non-test production consumer: `ferrotorch-core/src/grad_fns/transcendental.rs` (`exp(-x)` patterns); also downstream loss-function code (`-log_prob`). Test: `test_neg` at `ops_trait.rs:204`. |
-| REQ-6 | SHIPPED | impl: `type Output = FerrotorchResult<Tensor<T>>` at every impl block (e.g. `ops_trait.rs:17, :47, :77, :107, :137`). Non-test production consumer: every chained-expression site like `let c = (&a + &b)?` — the `?` operator works because the Output type IS `Result`. Test: `test_chained_expression` at `ops_trait.rs:231` pins the chained-`?` pattern. |
-| REQ-7 | SHIPPED | impl: each impl block calls `arithmetic::add/sub/mul/div/neg` directly (e.g. `ops_trait.rs:19, :49, :79, :109, :139`); the called functions are the same ones that attach the `*Backward` grad-fn. Non-test production consumer: every autograd-tracking caller (downstream model crates' loss-and-backward path). Test: `test_add_refs` at `ops_trait.rs:158` calls `c.backward()` after `(&a + &b)?` and verifies `a.grad() == 1.0` — autograd flowed through the operator-overload. |
-| REQ-8 | SHIPPED | impl: four reference variants per binary op (e.g. `ops_trait.rs:16-42` for `Add`) cover all four `{owned, borrowed} × {owned, borrowed}` ownership permutations; `Neg` has two (`&T`, `T`). Non-test production consumer: `test_mixed_ownership` at `ops_trait.rs:222` and `test_owned_add` at `:213` pin the value/reference variant interop; downstream code mixes ownership freely (e.g. `(a + &b)?` is the typical "consume the LHS, borrow the parameter" pattern in optimizers). |
+| REQ-1 | SHIPPED | impl: 4 `impl ops::Add` blocks at `add in ferrotorch-core/src/ops_trait.rs` mirroring `torch.Tensor.__add__` → `aten::add.Tensor` at `aten/src/ATen/native/BinaryOps.cpp:218`. Non-test production consumer: `ferrotorch-core/src/special.rs` (e.g. `log1p` impl composes via `&x + &one`); also indirect through every downstream model crate's attention/MLP code that uses `+`. Test: `test_add_refs in ops_trait.rs` exercises the full backward path. |
+| REQ-2 | SHIPPED | impl: 4 `impl ops::Sub` blocks at `sub in ferrotorch-core/src/ops_trait.rs` mirroring `aten::sub.Tensor` at `aten/src/ATen/native/BinaryOps.cpp:280`. Non-test production consumer: same downstream model-crate path as REQ-1; the operator-overload impl is the chained-expression primitive (`test_chained_expression` uses `&a - &b`). |
+| REQ-3 | SHIPPED | impl: 4 `impl ops::Mul` blocks at `mul in ferrotorch-core/src/ops_trait.rs` mirroring `aten::mul.Tensor` at `aten/src/ATen/native/BinaryOps.cpp:342`. Non-test production consumer: `ferrotorch-core/src/special.rs` and downstream attention scaling (`q * scale`). Test: `test_mul_with_autograd in ops_trait.rs` validates the autograd chain. |
+| REQ-4 | SHIPPED | impl: 4 `impl ops::Div` blocks at `div in ferrotorch-core/src/ops_trait.rs` mirroring `aten::div.Tensor` at `aten/src/ATen/native/BinaryOps.cpp:400`. Non-test production consumer: downstream normalization (`x / norm`) and softmax (`exp_x / sum_exp`). Test: `test_div_refs in ops_trait.rs`. |
+| REQ-5 | SHIPPED | impl: `impl ops::Neg for &Tensor<T>` and `impl ops::Neg for Tensor<T>` at `neg in ferrotorch-core/src/ops_trait.rs` delegating to `arithmetic::neg`. Non-test production consumer: `ferrotorch-core/src/grad_fns/transcendental.rs` (`exp(-x)` patterns); also downstream loss-function code (`-log_prob`). Test: `test_neg in ops_trait.rs`. |
+| REQ-6 | SHIPPED | impl: `type Output = FerrotorchResult<Tensor<T>>` at every impl block (e.g. `test_chained_expression in ops_trait.rs, , , , `). Non-test production consumer: every chained-expression site like `let c = (&a + &b)?` — the `?` operator works because the Output type IS `Result`. Test: `test_chained_expression in ops_trait.rs` pins the chained-`?` pattern. |
+| REQ-7 | SHIPPED | impl: each impl block calls `arithmetic::add/sub/mul/div/neg` directly (e.g. `add in ops_trait.rs, , , , `); the called functions are the same ones that attach the `*Backward` grad-fn. Non-test production consumer: every autograd-tracking caller (downstream model crates' loss-and-backward path). Test: `test_add_refs in ops_trait.rs` calls `c.backward()` after `(&a + &b)?` and verifies `a.grad() == 1.0` — autograd flowed through the operator-overload. |
+| REQ-8 | SHIPPED | impl: four reference variants per binary op (e.g. `test_mixed_ownership in ops_trait.rs` for `Add`) cover all four `{owned, borrowed} × {owned, borrowed}` ownership permutations; `Neg` has two (`&T`, `T`). Non-test production consumer: `test_mixed_ownership in ops_trait.rs` and `test_owned_add in ops_trait.rs` pin the value/reference variant interop; downstream code mixes ownership freely (e.g. `(a + &b)?` is the typical "consume the LHS, borrow the parameter" pattern in optimizers). |

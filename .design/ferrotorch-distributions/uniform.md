@@ -182,15 +182,15 @@ All five are scalar arithmetic over the per-element `low`, `high`:
 
 ### Non-test production consumers
 
-- `pub use uniform::Uniform` in `lib.rs:122` — grandfathered public
+- `pub use uniform::Uniform` in `lib.rs` — grandfathered public
   API re-export. Downstream code that needs a uniform-prior random
   layer constructs `Uniform::new(low, high)?` directly.
-- `kl_uniform_uniform(p: &Uniform<T>, q: &Uniform<T>)` in `kl.rs:271`
-  is invoked by `kl_dispatch` (`kl.rs:123`).
-- `kl_normal_uniform(p: &Normal<T>, q: &Uniform<T>)` in `kl.rs:350`
-  is invoked by `kl_dispatch` (`kl.rs:137`).
-- `kl_uniform_normal(p: &Uniform<T>, q: &Normal<T>)` in `kl.rs:383`
-  is invoked by `kl_dispatch` (`kl.rs:144`).
+- `kl_uniform_uniform(p: &Uniform<T>, q: &Uniform<T>)` in `kl in kl.rs`
+  is invoked by `kl_dispatch` (`kl in kl.rs`).
+- `kl_normal_uniform(p: &Normal<T>, q: &Uniform<T>)` in `kl in kl.rs`
+  is invoked by `kl_dispatch` (`kl in kl.rs`).
+- `kl_uniform_normal(p: &Uniform<T>, q: &Normal<T>)` in `kl in kl.rs`
+  is invoked by `kl_dispatch` (`kl in kl.rs`).
 - Three non-test KL-divergence production consumers makes Uniform
   the most-consumed distribution in batch C.
 - `Uniform::new` is registered in
@@ -270,9 +270,9 @@ Expected: `17 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct Uniform<T: Float>` with `low`, `high` fields in `uniform.rs`, mirroring `torch/distributions/uniform.py:57-69`; non-test consumer: `pub use uniform::Uniform` in `lib.rs:122` PLUS `kl_uniform_uniform`/`kl_normal_uniform`/`kl_uniform_normal` in `kl.rs:{271, 350, 383}` all read `p.low()`/`p.high()` — three non-test KL-divergence production consumers. |
+| REQ-1 | SHIPPED | impl: `pub struct Uniform<T: Float>` with `low`, `high` fields in `uniform.rs`, mirroring `torch/distributions/uniform.py:57-69`; non-test consumer: `pub use uniform::Uniform` in `low in lib.rs` PLUS `kl_uniform_uniform`/`kl_normal_uniform`/`kl_uniform_normal` in `kl.rs:{271, 350, 383}` all read `p.low()`/`p.high()` — three non-test KL-divergence production consumers. |
 | REQ-2 | SHIPPED | impl: `pub fn Uniform::new(low, high) -> FerrotorchResult<Self>` with shape-match validation in `uniform.rs`; non-test consumer: registered in `tests/conformance/_surface_inventory.toml:329`; `pub use Uniform` re-export; `kl_*` consumers in `kl.rs` call sites. Test `test_uniform_shape_mismatch` pins. |
-| REQ-3 | SHIPPED | impl: `pub fn low(&self) -> &Tensor<T>` and `pub fn high(&self) -> &Tensor<T>` accessors in `uniform.rs`, mirroring `Uniform.low`/`Uniform.high` attribute access; non-test consumer: `kl_uniform_uniform` in `kl.rs:271` reads `p.low()`, `p.high()`, `q.low()`, `q.high()` for the closed-form KL formula. |
+| REQ-3 | SHIPPED | impl: `pub fn low(&self) -> &Tensor<T>` and `pub fn high(&self) -> &Tensor<T>` accessors in `uniform.rs`, mirroring `Uniform.low`/`Uniform.high` attribute access; non-test consumer: `kl_uniform_uniform` in `kl in kl.rs` reads `p.low()`, `p.high()`, `q.low()`, `q.high()` for the closed-form KL formula. |
 | REQ-4 | SHIPPED | impl: `Distribution::sample` in `uniform.rs` via `low + (high - low) * U`, mirroring `uniform.py:85-88` `rsample` formula (upstream uses identical formula for both); non-test consumer: `pub use Uniform` re-export plus impl dispatch; test `test_uniform_sample_in_range` pins range. |
 | REQ-5 | SHIPPED | impl: `Distribution::rsample` in `uniform.rs` builds `Tensor::from_operation` with `Arc<UniformRsampleBackward { low, high, u }>` autograd node; backward computes `grad_low = sum(go * (1-u))`, `grad_high = sum(go * u)`; non-test consumer: `pub use Uniform` re-export — Bayesian neural network code with uniform-prior random layers constructs `Uniform` and calls `.rsample(...).backward()`; tests `test_uniform_rsample_{has_grad, no_grad_when_detached, backward}` pin all three paths. |
 | REQ-6 | SHIPPED | impl: `Distribution::log_prob` in `uniform.rs` returns `-log(high-low)` in-range else `-inf`, with `UniformLogProbBackward` autograd path when any of `low`/`high`/`value` requires grad; non-test consumer: `pub use Uniform` re-export + impl dispatch; tests `test_uniform_log_prob_{in_range, out_of_range, batch}` pin all three. |

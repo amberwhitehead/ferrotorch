@@ -95,7 +95,7 @@ symmetric with `c <= r + diagonal`.
 4. GPU f32 fast path at `:209-234`: if `input.is_cuda()` and `T ==
    f32`, call `backend.roll_f32(handle, outer, dim_size, inner,
    shift_norm)`. Other GPU dtypes return `NotImplementedOnCuda`.
-5. CPU path at `:237-238`: call `roll_cpu_inner(&data, shape,
+5. CPU path at `ops/tensor_ops.rs`: call `roll_cpu_inner(&data, shape,
    shift_norm, dim)`.
 6. Autograd at `:240-249`: when `requires_grad() && is_grad_enabled`,
    attach `RollBackward { input, shifts, dim }` via
@@ -120,7 +120,7 @@ dim_size`.
   for the backward shift. This is the REQ-7 production consumer of
   the shared inner kernel.
 - `crate::grad_fns::shape::RollBackward` documentation at
-  `grad_fns/shape.rs:921` references calling back into
+  `grad_fns/shape.rs` references calling back into
   `crate::ops::tensor_ops::roll` for the in-graph backward path.
 - Re-exported at `lib.rs:177` as
   `ferrotorch_core::{cdist, diag, diagflat, roll, tril, triu}`.
@@ -131,7 +131,7 @@ dim_size`.
 is byte-for-byte parity with `torch.{triu, tril, diag, diagflat,
 roll, cdist}`. Verified through unit tests + the autograd
 correctness of `roll` (covered by `RollBackward` tests in
-`grad_fns/shape.rs:1551-1670`).
+`RollBackward in grad_fns/shape.rs`).
 
 ## Verification
 

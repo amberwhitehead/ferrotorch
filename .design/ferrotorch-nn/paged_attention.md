@@ -193,11 +193,11 @@ Expected: all tests pass.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub struct KVPage<T: Float>` in `paged_attention.rs`; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:234`. |
-| REQ-2 | SHIPPED | impl: `pub struct PagePool<T: Float>` with `alloc_page` / `free_page` / `num_free` / `num_used` / `num_total` in `paged_attention.rs`; non-test consumer: re-export at `lib.rs:234`. |
-| REQ-3 | SHIPPED | impl: `pub struct PagedKVCache<T: Float>` in `paged_attention.rs`; non-test consumer: re-export at `lib.rs:234`. |
-| REQ-4 | SHIPPED | impl: `pub fn append` on `PagedKVCache` in `paged_attention.rs` (length validation + iterative page-fill loop); non-test consumer: re-export at `lib.rs:234`. |
-| REQ-5 | SHIPPED | impl: `pub fn get_keys` / `pub fn get_values` on `PagedKVCache` in `paged_attention.rs` (using the private `fn gather_data`); non-test consumer: re-export at `lib.rs:234`. |
-| REQ-6 | SHIPPED | impl: `pub fn free_all` on `PagedKVCache` in `paged_attention.rs`; non-test consumer: re-export at `lib.rs:234`. |
-| REQ-7 | SHIPPED | impl: `pub struct PagedAttentionManager<T: Float>` with `add_sequence` / `append_kv` / `get_kv` / `remove_sequence` in `paged_attention.rs`; non-test consumer: re-export at `lib.rs:234`. |
-| REQ-8 | SHIPPED | impl: `Vec::pop` / `Vec::push` for `alloc_page` / `free_page` in `paged_attention.rs`; non-test consumer: re-export at `lib.rs:234`. |
-| REQ-9 | SHIPPED | impl: `#[derive(Debug, Clone)]` on `KVPage`, `PagedKVCache` and `#[derive(Debug)]` on `PagePool`, `PagedAttentionManager` in `paged_attention.rs`; non-test consumer: re-export at `lib.rs:234`. |
+| REQ-2 | SHIPPED | impl: `pub struct PagePool<T: Float>` with `alloc_page` / `free_page` / `num_free` / `num_used` / `num_total` in `paged_attention.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-3 | SHIPPED | impl: `pub struct PagedKVCache<T: Float>` in `paged_attention.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-4 | SHIPPED | impl: `pub fn append` on `PagedKVCache` in `paged_attention.rs` (length validation + iterative page-fill loop); non-test consumer: re-export at `lib.rs`. |
+| REQ-5 | SHIPPED | impl: `pub fn get_keys` / `pub fn get_values` on `PagedKVCache` in `paged_attention.rs` (using the private `fn gather_data`); non-test consumer: re-export at `lib.rs`. |
+| REQ-6 | SHIPPED | impl: `pub fn free_all` on `PagedKVCache` in `paged_attention.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-7 | SHIPPED | impl: `pub struct PagedAttentionManager<T: Float>` with `add_sequence` / `append_kv` / `get_kv` / `remove_sequence` in `paged_attention.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-8 | SHIPPED | impl: `Vec::pop` / `Vec::push` for `alloc_page` / `free_page` in `paged_attention.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-9 | SHIPPED | impl: `#[derive(Debug, Clone)]` on `KVPage`, `PagedKVCache` and `#[derive(Debug)]` on `PagePool`, `PagedAttentionManager` in `paged_attention.rs`; non-test consumer: re-export at `lib.rs`. |

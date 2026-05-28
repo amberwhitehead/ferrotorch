@@ -151,7 +151,7 @@ Expected: all tests pass.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub const SAMPLE_RATE: u32 = 16_000;` (and siblings) at the top of `audio.rs`; non-test consumer: `pub use` at `ferrotorch-whisper/src/lib.rs:106` re-exports `N_FRAMES`, `N_MELS`, `SAMPLE_RATE`. |
-| REQ-2 | SHIPPED | impl: `pub fn log_mel_spectrogram` in `audio.rs`; non-test consumer: `pub use` at `ferrotorch-whisper/src/lib.rs:106` (the canonical public API for the speech-to-text pipeline). |
+| REQ-2 | SHIPPED | impl: `pub fn log_mel_spectrogram` in `audio.rs`; non-test consumer: `pub use` at `audio in ferrotorch-whisper/src/lib.rs` (the canonical public API for the speech-to-text pipeline). |
 | REQ-3 | SHIPPED | impl: `MEL_FILTERS_BYTES` `include_bytes!` + `mel_filters` decoder in `audio.rs`; non-test consumer: `log_mel_spectrogram` in `audio.rs` calls `mel_filters()`. |
 | REQ-4 | SHIPPED | impl: `hann_window` in `audio.rs`; non-test consumer: `log_mel_spectrogram` in `audio.rs` calls `hann_window()`. |
 | REQ-5 | SHIPPED | impl: `reflect_pad` in `audio.rs`; non-test consumer: `log_mel_spectrogram` in `audio.rs` calls `reflect_pad(&padded, N_FFT / 2)`. |

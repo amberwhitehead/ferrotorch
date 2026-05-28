@@ -192,8 +192,8 @@ as passing when it panics).
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct GradientAccumulator` at `ferrotorch-optim/src/grad_accumulator.rs:28` with `#[derive(Debug, Clone)]`; non-test consumer: `pub use grad_accumulator::GradientAccumulator` at `ferrotorch-optim/src/lib.rs:36` — boundary-method public API per goal.md S5. |
-| REQ-2 | SHIPPED | impl: `pub fn new` at `ferrotorch-optim/src/grad_accumulator.rs:42` with `assert!(steps > 0, ...)`; non-test consumer: same `pub use` re-export at `lib.rs:36`; pinned by `test_zero_steps_panics` (`#[should_panic]`). |
-| REQ-3 | SHIPPED | impl: `pub fn should_step` at `ferrotorch-optim/src/grad_accumulator.rs:54`; non-test consumer: same `pub use` re-export at `lib.rs:36`; pinned by `test_should_step_cycles` and `test_should_step_one`. |
-| REQ-4 | SHIPPED | impl: `pub fn scale_loss` at `ferrotorch-optim/src/grad_accumulator.rs:68` invoking `arithmetic::mul(loss, scalar(1.0/steps))`; non-test consumer: same `pub use` re-export at `lib.rs:36`; pinned by `test_scale_loss_divides_by_steps` and `test_scale_loss_vector`. |
+| REQ-1 | SHIPPED | impl: `pub struct GradientAccumulator` at `GradientAccumulator in ferrotorch-optim/src/grad_accumulator.rs` with `#[derive(Debug, Clone)]`; non-test consumer: `pub use grad_accumulator::GradientAccumulator` at `ferrotorch-optim/src/lib.rs` — boundary-method public API per goal.md S5. |
+| REQ-2 | SHIPPED | impl: `pub fn new` at `new in ferrotorch-optim/src/grad_accumulator.rs` with `assert!(steps > 0, ...)`; non-test consumer: same `pub use` re-export at `lib.rs`; pinned by `test_zero_steps_panics` (`#[should_panic]`). |
+| REQ-3 | SHIPPED | impl: `pub fn should_step` at `should_step in ferrotorch-optim/src/grad_accumulator.rs`; non-test consumer: same `pub use` re-export at `lib.rs`; pinned by `test_should_step_cycles` and `test_should_step_one`. |
+| REQ-4 | SHIPPED | impl: `pub fn scale_loss` at `scale_loss in ferrotorch-optim/src/grad_accumulator.rs` invoking `arithmetic::mul(loss, scalar(1.0/steps))`; non-test consumer: same `pub use` re-export at `lib.rs`; pinned by `test_scale_loss_divides_by_steps` and `test_scale_loss_vector`. |
 | REQ-5 | SHIPPED | impl: `accumulation_steps` at `ferrotorch-optim/src/grad_accumulator.rs:74`, `current_step` at line 79, `reset` at line 84; non-test consumer: same `pub use` re-export at `lib.rs:36`; `current_step` + `reset` pinned by `test_reset`. |

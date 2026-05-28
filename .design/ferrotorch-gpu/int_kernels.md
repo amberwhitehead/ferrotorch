@@ -101,8 +101,8 @@ of the 64-bit product, i.e. wrapping multiplication), stores `out[i]`.
 `off = i << 2` (4 bytes per i32). i64 mirrors with `shl by 3` and
 `.s64` / `mul.lo.s64`. Non-test production consumer:
 `crate::backend_impl::CudaBackendImpl`'s integer dtype arm at
-`backend_impl.rs:5800` (i32 add), `:5807` (i64 add), `:5826/5833`
-(sub), `:5852/5859` (mul).
+`backend_impl.rs` (i32 add), `backend_impl.rs` (i64 add), `backend_impl.rs`
+(sub), `backend_impl.rs` (mul).
 
 ### Integer division semantics (REQ-2)
 
@@ -122,16 +122,16 @@ the sign of the divisor (Python / `torch.remainder`), which is exactly
 adjust pattern for floats; the integer arm in PyTorch is the same
 shape, in `c10/util/safe_numerics.h`'s integer remainder helpers).
 
-Non-test production consumer: `backend_impl.rs:5898/5905` (floor_div),
-`:5926/5933` (remainder).
+Non-test production consumer: `backend_impl.rs` (floor_div),
+`backend_impl.rs` (remainder).
 
 ### Bitwise binary (REQ-3)
 
 `pub fn gpu_bitand_i32/i64 / gpu_bitor_i32/i64 / gpu_bitxor_i32/i64 in
 int_kernels.rs` each thin-wrap `launch_binary` with the matching PTX
 `and.b{32,64} / or.b{32,64} / xor.b{32,64}`. Non-test consumer:
-`backend_impl.rs:5954/5961` (bitand), `:5980/5987` (bitor),
-`:6006/6013` (bitxor).
+`backend_impl.rs` (bitand), `backend_impl.rs` (bitor),
+`backend_impl.rs` (bitxor).
 
 ### Shifts (REQ-4)
 
@@ -140,15 +140,15 @@ via PTX `shl.b{32,64}`. `pub fn gpu_shr_i32/i64` performs ARITHMETIC
 right shift via PTX `shr.s{32,64}` — sign-extending, matching PyTorch
 `__rshift__` on signed dtypes. Shift count for the i64 variants is
 taken from the low 32 bits of the i64 in `b[i]` (PyTorch shift amounts
-are small). Non-test consumer: `backend_impl.rs:6052/6059` (shl),
-`:6078/6085` (shr).
+are small). Non-test consumer: `backend_impl.rs` (shl),
+`backend_impl.rs` (shr).
 
 ### Unary (REQ-5)
 
 `pub fn gpu_neg_i32/i64 in int_kernels.rs` negates via `mov.s* %zero,
 0; sub.s* %vr, %zero, %va`. `pub fn gpu_bitnot_i32/i64` invokes PTX
-`not.b{32,64}`. Non-test consumer: `backend_impl.rs:5874/5880` (neg),
-`:6027/6033` (bitnot).
+`not.b{32,64}`. Non-test consumer: `gpu_bitnot_i32 in backend_impl.rs` (neg),
+`backend_impl.rs` (bitnot).
 
 ### Reductions (REQ-6, REQ-9)
 
@@ -165,8 +165,8 @@ Empty-input identity (REQ-9): `fn launch_reduce in int_kernels.rs`
 short-circuits `n == 0` via `let host = [empty_identity]; return
 Ok(stream.clone_htod(&host)?);` — `0` for sum, `1` for prod, `T::MAX`
 for min, `T::MIN` for max. Non-test consumer:
-`backend_impl.rs:6100/6106` (sum), `:6120/6126` (prod),
-`:6140/6146` (min), max sibling arms.
+`backend_impl.rs` (sum), `backend_impl.rs` (prod),
+`backend_impl.rs` (min), max sibling arms.
 
 ### Div/mod by zero (REQ-7)
 
@@ -249,11 +249,11 @@ Expected: `test result: ok` on a host with a CUDA device. The
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub fn gpu_{add,sub,mul}_{i32,i64} in int_kernels.rs` (six wrappers around `fn launch_binary` with the matching `*_I32_PTX` / `*_I64_PTX` consts using `add.s* / sub.s* / mul.lo.s*`). Non-test consumer: `ferrotorch-gpu/src/backend_impl.rs:5800` (gpu_add_i32), `:5807` (gpu_add_i64), `:5826/5833` (sub), `:5852/5859` (mul). |
-| REQ-2 | SHIPPED | impl: `pub fn gpu_floor_div_{i32,i64}` (PTX trunc-then-floor-correct in `FLOORDIV_I32_PTX/FLOORDIV_I64_PTX`) and `pub fn gpu_remainder_{i32,i64}` (PTX rem-then-sign-adjust in `REMAINDER_I32_PTX/REMAINDER_I64_PTX`) in `int_kernels.rs`. Non-test consumer: `backend_impl.rs:5898` (floor_div i32), `:5905` (floor_div i64), `:5926` (remainder i32), `:5933` (remainder i64). |
-| REQ-3 | SHIPPED | impl: `pub fn gpu_{bitand,bitor,bitxor}_{i32,i64} in int_kernels.rs` (six wrappers, each using PTX `and.b* / or.b* / xor.b*`). Non-test consumer: `backend_impl.rs:5954/5961` (bitand), `:5980/5987` (bitor), `:6006/6013` (bitxor). |
-| REQ-4 | SHIPPED | impl: `pub fn gpu_shl_{i32,i64}` (PTX `shl.b{32,64}`) and `pub fn gpu_shr_{i32,i64}` (PTX `shr.s{32,64}`, arithmetic/sign-extending) in `int_kernels.rs`. Non-test consumer: `backend_impl.rs:6052/6059` (shl), `:6078/6085` (shr). |
-| REQ-5 | SHIPPED | impl: `pub fn gpu_neg_{i32,i64}` (PTX `sub.s* 0, %va`) and `pub fn gpu_bitnot_{i32,i64}` (PTX `not.b{32,64}`) in `int_kernels.rs`. Non-test consumer: `backend_impl.rs:5874/5880` (neg), `:6027/6033` (bitnot). |
-| REQ-6 | SHIPPED | impl: `pub fn gpu_{sum,prod,min,max}_{i32,i64} in int_kernels.rs` (eight wrappers around `fn launch_reduce` with `REDUCE_I32_PTX/REDUCE_I64_PTX` and `REDUCE_SUM/PROD/MIN/MAX` op codes). Single-thread serial fold keeps result equal to left-fold over the buffer. Non-test consumer: `backend_impl.rs:6100/6106` (sum), `:6120/6126` (prod), `:6140/6146` (min) and sibling max arms. |
+| REQ-2 | SHIPPED | impl: `pub fn gpu_floor_div_{i32,i64}` (PTX trunc-then-floor-correct in `FLOORDIV_I32_PTX/FLOORDIV_I64_PTX`) and `pub fn gpu_remainder_{i32,i64}` (PTX rem-then-sign-adjust in `REMAINDER_I32_PTX/REMAINDER_I64_PTX`) in `int_kernels.rs`. Non-test consumer: `backend_impl.rs` (floor_div i32), `backend_impl.rs` (floor_div i64), `backend_impl.rs` (remainder i32), `backend_impl.rs` (remainder i64). |
+| REQ-3 | SHIPPED | impl: `pub fn gpu_{bitand,bitor,bitxor}_{i32,i64} in int_kernels.rs` (six wrappers, each using PTX `and.b* / or.b* / xor.b*`). Non-test consumer: `backend_impl.rs` (bitand), `backend_impl.rs` (bitor), `backend_impl.rs` (bitxor). |
+| REQ-4 | SHIPPED | impl: `pub fn gpu_shl_{i32,i64}` (PTX `shl.b{32,64}`) and `pub fn gpu_shr_{i32,i64}` (PTX `shr.s{32,64}`, arithmetic/sign-extending) in `int_kernels.rs`. Non-test consumer: `shr in backend_impl.rs` (shl), `shr in backend_impl.rs` (shr). |
+| REQ-5 | SHIPPED | impl: `pub fn gpu_neg_{i32,i64}` (PTX `sub.s* 0, %va`) and `pub fn gpu_bitnot_{i32,i64}` (PTX `not.b{32,64}`) in `int_kernels.rs`. Non-test consumer: `not in backend_impl.rs` (neg), `not in backend_impl.rs` (bitnot). |
+| REQ-6 | SHIPPED | impl: `pub fn gpu_{sum,prod,min,max}_{i32,i64} in int_kernels.rs` (eight wrappers around `fn launch_reduce` with `REDUCE_I32_PTX/REDUCE_I64_PTX` and `REDUCE_SUM/PROD/MIN/MAX` op codes). Single-thread serial fold keeps result equal to left-fold over the buffer. Non-test consumer: `backend_impl.rs` (sum), `backend_impl.rs` (prod), `backend_impl.rs` (min) and sibling max arms. |
 | REQ-7 | SHIPPED | impl: the module doc-comment in `int_kernels.rs` states "Integer division / remainder by zero is NOT trapped: PTX `div.s` / `rem.s` by zero returns an implementation-defined value (PyTorch on CUDA likewise does not trap). No host round-trip is taken to special-case it." The `FLOORDIV_*_PTX / REMAINDER_*_PTX` kernels do not include a zero-check branch. Non-test consumer relies on the documented no-trap contract via the backend's integer arm. |
 | REQ-8 | SHIPPED | impl: the three `unsafe { stream.launch_builder(&f)...launch(cfg)? }` blocks in `fn launch_binary / launch_unary / launch_reduce` (in `int_kernels.rs`) are each preceded by a multi-line SAFETY comment naming entry signature, length binding, alloc, bound check, and `n as u32` non-truncation. Non-test consumer inherits the SAFETY contract via every `pub fn gpu_*_i{32,64}` wrapper called from backend_impl. |
 | REQ-9 | SHIPPED | impl: `fn launch_binary / launch_unary` open with `if n == 0 { return Ok(stream.alloc_zeros::<T>(0)?); }`; `fn launch_reduce` short-circuits `n == 0` with `let host = [empty_identity]; return Ok(stream.clone_htod(&host)?);` using `0`/`1`/`T::MAX`/`T::MIN` for sum/prod/min/max respectively. Non-test consumer relies on the no-launch short circuit via the backend's empty-int handling. |

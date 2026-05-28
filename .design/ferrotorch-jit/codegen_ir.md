@@ -162,16 +162,16 @@ instead of `0.0`.
 
 - `pub use codegen_ir::{BinOpKind, Expr, LoopIR, UnaryOpKind}` at
   `ferrotorch-jit/src/lib.rs:95` — grandfathered public API.
-- `ferrotorch-jit/src/codegen_cpu.rs:12` `use crate::codegen_ir::
+- `ferrotorch-jit/src/codegen_cpu.rs` `use crate::codegen_ir::
   {Expr, LoopIR, UnaryOpKind};` consumed by every Rust emission
   helper.
-- `ferrotorch-jit/src/codegen_gpu.rs:43` `use crate::codegen_ir::
+- `ferrotorch-jit/src/codegen_gpu.rs` `use crate::codegen_ir::
   {BinOpKind, Expr, LoopIR, UnaryOpKind};` consumed by every CUDA
   / PTX emission helper.
 - `ferrotorch-jit/src/codegen_jit.rs:73` `use crate::codegen_ir::
   {BinOpKind, Expr, LoopIR, UnaryOpKind};` consumed by the
   cranelift JIT lowering pipeline.
-- `ferrotorch-jit/src/dag_fusion.rs:32` `use crate::codegen_ir::
+- `ferrotorch-jit/src/dag_fusion.rs` `use crate::codegen_ir::
   {self, LoopIR};` calls `lower_to_loops` and `lower_matmul` for
   every fusion group via the `fuse_dag` lowering pipeline.
 
@@ -215,12 +215,12 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub enum Expr` in `codegen_ir.rs`; non-test consumer: re-export at `ferrotorch-jit/src/lib.rs:95` + `ferrotorch-jit/src/codegen_gpu.rs:43` + `ferrotorch-jit/src/codegen_cpu.rs:12` + `ferrotorch-jit/src/codegen_jit.rs:73`. |
-| REQ-2 | SHIPPED | impl: `pub enum BinOpKind` in `codegen_ir.rs`; non-test consumer: re-export at `lib.rs:95` + `codegen_gpu.rs:43` + `codegen_jit.rs:73`. |
-| REQ-3 | SHIPPED | impl: `pub enum UnaryOpKind` in `codegen_ir.rs`; non-test consumer: re-export at `lib.rs:95` + `codegen_cpu.rs:12` + `codegen_gpu.rs:43` + `codegen_jit.rs:73`. |
-| REQ-4 | SHIPPED | impl: `pub enum LoopIR` in `codegen_ir.rs`; non-test consumer: re-export at `lib.rs:95` + `codegen_cpu.rs:12` + `codegen_gpu.rs:43` + `codegen_jit.rs:73`. |
-| REQ-5 | SHIPPED | impl: builder methods on `impl Expr` (`var`, `constant`, `int`, `bin`, `unary`, `index`, `call`, `sum`, `prod`) in `codegen_ir.rs`; non-test consumer: every `lower_*` helper in this file builds expression trees via these helpers, which then flow through `codegen.rs:823` `crate::dag_fusion::find_fusion_groups` → `crate::dag_fusion::fuse_dag` → the per-target emitters. |
+| REQ-1 | SHIPPED | impl: `pub enum Expr` in `codegen_ir.rs`; non-test consumer: re-export at `codegen_ir in ferrotorch-jit/src/lib.rs` + `ferrotorch-jit/src/codegen_gpu.rs` + `ferrotorch-jit/src/codegen_cpu.rs` + `ferrotorch in ferrotorch-jit/src/codegen_jit.rs`. |
+| REQ-2 | SHIPPED | impl: `pub enum BinOpKind` in `codegen_ir.rs`; non-test consumer: re-export at `lib.rs` + `codegen_gpu.rs` + `codegen_jit.rs`. |
+| REQ-3 | SHIPPED | impl: `pub enum UnaryOpKind` in `codegen_ir.rs`; non-test consumer: re-export at `lib.rs` + `codegen_cpu.rs` + `codegen_gpu.rs` + `codegen_jit.rs`. |
+| REQ-4 | SHIPPED | impl: `pub enum LoopIR` in `codegen_ir.rs`; non-test consumer: re-export at `lib.rs` + `codegen_cpu.rs` + `codegen_gpu.rs` + `codegen_jit.rs`. |
+| REQ-5 | SHIPPED | impl: builder methods on `impl Expr` (`var`, `constant`, `int`, `bin`, `unary`, `index`, `call`, `sum`, `prod`) in `codegen_ir.rs`; non-test consumer: every `lower_*` helper in this file builds expression trees via these helpers, which then flow through `codegen in codegen.rs` `crate::dag_fusion::find_fusion_groups` → `crate::dag_fusion::fuse_dag` → the per-target emitters. |
 | REQ-6 | SHIPPED | impl: `pub fn ir_op_to_unary`, `pub fn ir_op_to_binary`, `pub fn is_unary_elementwise`, `pub fn is_binary_elementwise`, `pub fn is_elementwise`, `pub fn is_reduction` in `codegen_ir.rs`; non-test consumer: `lower_to_loops` calls `is_elementwise` to choose the fused-elementwise path; `lower_single_op` calls `is_unary_elementwise` / `is_binary_elementwise`. |
-| REQ-7 | SHIPPED | impl: `pub fn lower_to_loops` in `codegen_ir.rs`; non-test consumer: `ferrotorch-jit/src/dag_fusion.rs:405` `codegen_ir::lower_to_loops(&group.ops, &in_refs, "out", numel)` from `fn lower_group`, which `InductorBackend::generate` drives for every fusion group. |
-| REQ-8 | SHIPPED | impl: `lower_single_op`, `lower_unary_elementwise`, `lower_binary_elementwise`, `lower_sum_reduction`, `lower_mean_reduction`, `lower_prod_reduction`, `pub fn lower_matmul`, `lower_fused_elementwise` in `codegen_ir.rs`; non-test consumer: `dag_fusion.rs:416` calls `codegen_ir::lower_matmul("in0", "in1", "out", m, k, n)` from the MatMul arm of `lower_group`. |
-| REQ-9 | SHIPPED | impl: `fn emit_chunked_reduction_prelude` + `REDUCTION_CHUNK_WIDTH (8)` + `REDUCTION_CHUNK_THRESHOLD (64)` constants in `codegen_ir.rs`; non-test consumer: `lower_sum_reduction` / `lower_mean_reduction` / `lower_prod_reduction` invoke it for every reduction lowered through `dag_fusion::fuse_dag` (transitively via `codegen.rs:823`). |
+| REQ-7 | SHIPPED | impl: `pub fn lower_to_loops` in `codegen_ir.rs`; non-test consumer: `lower_to_loops in ferrotorch-jit/src/dag_fusion.rs` `codegen_ir::lower_to_loops(&group.ops, &in_refs, "out", numel)` from `fn lower_group`, which `InductorBackend::generate` drives for every fusion group. |
+| REQ-8 | SHIPPED | impl: `lower_single_op`, `lower_unary_elementwise`, `lower_binary_elementwise`, `lower_sum_reduction`, `lower_mean_reduction`, `lower_prod_reduction`, `pub fn lower_matmul`, `lower_fused_elementwise` in `codegen_ir.rs`; non-test consumer: `lower_matmul in dag_fusion.rs` calls `codegen_ir::lower_matmul("in0", "in1", "out", m, k, n)` from the MatMul arm of `lower_group`. |
+| REQ-9 | SHIPPED | impl: `fn emit_chunked_reduction_prelude` + `REDUCTION_CHUNK_WIDTH (8)` + `REDUCTION_CHUNK_THRESHOLD (64)` constants in `codegen_ir.rs`; non-test consumer: `lower_sum_reduction` / `lower_mean_reduction` / `lower_prod_reduction` invoke it for every reduction lowered through `dag_fusion::fuse_dag` (transitively via `codegen in codegen.rs`). |

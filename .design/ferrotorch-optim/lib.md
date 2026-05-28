@@ -110,8 +110,8 @@ contract is identical.
 
 ### Non-test production consumers
 
-- `ferrotorch-train/src/learner.rs:28-30` `use ferrotorch_optim::Optimizer; use ferrotorch_optim::grad_scaler::GradScaler; use ferrotorch_optim::scheduler::LrScheduler;` — the central training loop holds these as fields.
-- `ferrotorch-train/src/amp.rs:55-58` `pub use ferrotorch_optim::{GradScaler, GradScalerConfig, GradScalerState}; use ferrotorch_optim::Optimizer;` — the AMP context re-exports the GradScaler family.
+- `ferrotorch-train/src/learner.rs` `use ferrotorch_optim::Optimizer; use ferrotorch_optim::grad_scaler::GradScaler; use ferrotorch_optim::scheduler::LrScheduler;` — the central training loop holds these as fields.
+- `ferrotorch-train/src/amp.rs` `pub use ferrotorch_optim::{GradScaler, GradScalerConfig, GradScalerState}; use ferrotorch_optim::Optimizer;` — the AMP context re-exports the GradScaler family.
 - `ferrotorch-train/examples/multi_epoch_train_dump.rs:63` `use ferrotorch_optim::{Adam, AdamConfig, Optimizer};` — example consumer.
 - `benchmarks/ferrotorch_bench.rs` — benchmark consumer.
 
@@ -141,10 +141,10 @@ tests across all 25 submodules.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: 25 `pub mod` lines at `ferrotorch-optim/src/lib.rs:1-25` mirroring `torch/optim/__init__.py:1-30` flat submodule layout; non-test consumer: the crate compiles — every leaf module is reachable from the crate root, exercised by `ferrotorch-train/src/learner.rs:28` `use ferrotorch_optim::Optimizer;`. |
+| REQ-1 | SHIPPED | impl: 25 `pub mod` lines at `ferrotorch-optim/src/lib.rs` mirroring `torch/optim/__init__.py:1-30` flat submodule layout; non-test consumer: the crate compiles — every leaf module is reachable from the crate root, exercised by `ferrotorch-train/src/learner.rs` `use ferrotorch_optim::Optimizer;`. |
 | REQ-2 | SHIPPED | impl: `pub use adam::{Adam, AdamConfig}` etc. at `ferrotorch-optim/src/lib.rs:27-55` mirroring `torch/optim/__init__.py`'s flat re-exports; non-test consumer: `ferrotorch-train/examples/multi_epoch_train_dump.rs:63` `use ferrotorch_optim::{Adam, AdamConfig, Optimizer};` consumes the `Adam` / `AdamConfig` re-exports. |
-| REQ-3 | SHIPPED | impl: `pub use optimizer::{Optimizer, OptimizerState, ParamGroup}` at `ferrotorch-optim/src/lib.rs:42`; non-test consumer: `ferrotorch-train/src/learner.rs:28` `use ferrotorch_optim::Optimizer;` plus line 59 `optimizer: Box<dyn Optimizer<T>>` holds the trait dynamically. |
-| REQ-4 | SHIPPED | impl: `pub use scheduler::{...}` block at `ferrotorch-optim/src/lib.rs:47-52`; non-test consumer: `ferrotorch-train/src/learner.rs:30` `use ferrotorch_optim::scheduler::LrScheduler;` — the learner consumes the scheduler surface to drive LR updates. |
-| REQ-5 | SHIPPED | impl: `pub use grad_scaler::{GradScaler, GradScalerConfig, GradScalerState}` at `ferrotorch-optim/src/lib.rs:37`; non-test consumer: `ferrotorch-train/src/amp.rs:55` `pub use ferrotorch_optim::{GradScaler, GradScalerConfig, GradScalerState};` re-exports them through the `AmpContext` surface. |
-| REQ-6 | SHIPPED | impl: `pub use grad_accumulator::GradientAccumulator` at `ferrotorch-optim/src/lib.rs:36` and `pub use differentiable::{diff_sgd_momentum_step, diff_sgd_step}` at line 34; non-test consumer: the public surface is consumed via the `pub use` chain — boundary-method per goal.md S5 ("Boundary methods ARE the public API; they don't need further downstream callers to be SHIPPED"). |
-| REQ-7 | SHIPPED | impl: `pub use param_key::ParamKey` at `ferrotorch-optim/src/lib.rs:43`; non-test consumer: in-crate consumers `ferrotorch-optim/src/radam.rs:23`, `asgd.rs:21`, `adamax.rs:19`, `adamw.rs:22`, `sparse_adam.rs:16` all `use crate::param_key::ParamKey;` (re-exporting via lib makes the same type available to external custom optimizers). |
+| REQ-3 | SHIPPED | impl: `pub use optimizer::{Optimizer, OptimizerState, ParamGroup}` at `optimizer in ferrotorch-optim/src/lib.rs`; non-test consumer: `ferrotorch-train/src/learner.rs` `use ferrotorch_optim::Optimizer;` plus line 59 `optimizer: Box<dyn Optimizer<T>>` holds the trait dynamically. |
+| REQ-4 | SHIPPED | impl: `pub use scheduler::{...}` block at `ferrotorch-optim/src/lib.rs`; non-test consumer: `ferrotorch-train/src/learner.rs` `use ferrotorch_optim::scheduler::LrScheduler;` — the learner consumes the scheduler surface to drive LR updates. |
+| REQ-5 | SHIPPED | impl: `pub use grad_scaler::{GradScaler, GradScalerConfig, GradScalerState}` at `ferrotorch-optim/src/lib.rs`; non-test consumer: `AmpContext in ferrotorch-train/src/amp.rs` `pub use ferrotorch_optim::{GradScaler, GradScalerConfig, GradScalerState};` re-exports them through the `AmpContext` surface. |
+| REQ-6 | SHIPPED | impl: `pub use grad_accumulator::GradientAccumulator` at `ferrotorch-optim/src/lib.rs` and `pub use differentiable::{diff_sgd_momentum_step, diff_sgd_step}` at line 34; non-test consumer: the public surface is consumed via the `pub use` chain — boundary-method per goal.md S5 ("Boundary methods ARE the public API; they don't need further downstream callers to be SHIPPED"). |
+| REQ-7 | SHIPPED | impl: `pub use param_key::ParamKey` at `asgd in ferrotorch-optim/src/lib.rs`; non-test consumer: in-crate consumers `ferrotorch-optim/src/radam.rs`, `asgd.rs`, `adamax in adamax.rs`, `adamw.rs`, `sparse_adam in sparse_adam.rs` all `use crate::param_key::ParamKey;` (re-exporting via lib makes the same type available to external custom optimizers). |

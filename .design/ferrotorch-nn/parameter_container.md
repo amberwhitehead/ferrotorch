@@ -136,7 +136,7 @@ struct doc-comment ("Parameters are stored in sorted key order
 ### Non-test production consumers
 
 - `pub use parameter_container::{ParameterDict, ParameterList}` in
-  `lib.rs:236`.
+  `lib.rs`.
 - Downstream model code constructs `ParameterList` for layers that
   hold a variable-length sequence of parameters (e.g. mixture
   weights, per-head biases in MoE / multi-head attention variants).
@@ -196,12 +196,12 @@ Expected: `7 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct ParameterList<T: Float>` with `params: Vec<Parameter<T>>` in `parameter_container.rs` mirroring `torch.nn.ParameterList` from `torch/nn/modules/container.py`; non-test consumer: `pub use parameter_container::{ParameterDict, ParameterList}` in `lib.rs:236` (grandfathered public API per S5; downstream MoE / variable-length-head model authors consume the container directly). |
+| REQ-1 | SHIPPED | impl: `pub struct ParameterList<T: Float>` with `params: Vec<Parameter<T>>` in `parameter_container.rs` mirroring `torch.nn.ParameterList` from `torch/nn/modules/container.py`; non-test consumer: `pub use parameter_container::{ParameterDict, ParameterList}` in `lib.rs` (grandfathered public API per S5; downstream MoE / variable-length-head model authors consume the container directly). |
 | REQ-2 | SHIPPED | impl: `::new`, `::from_vec`, `append`, `extend`, `len`, `is_empty`, `get`, `get_mut`, `iter`, `iter_mut` inherent methods in `parameter_container.rs`; non-test consumer: builder-pattern model construction in downstream code via the re-export. |
 | REQ-3 | SHIPPED | impl: `parameters` / `parameters_mut` / `named_parameters` (keys `"0"`, `"1"`, …) methods on `ParameterList` in `parameter_container.rs`; non-test consumer: parent `Module<T>` impls in downstream crates flat-map `param_list.parameters()` into their own `parameters()` return — the documented integration shape. |
 | REQ-4 | SHIPPED | impl: `Index<usize>` + `IndexMut<usize>` blanket impls returning `Parameter<T>` in `parameter_container.rs` mirroring upstream `ParameterList[i]`; non-test consumer: the `list[0]` syntax used in downstream model construction. |
 | REQ-5 | SHIPPED | impl: `impl<T: Float> Default for ParameterList<T>` in `parameter_container.rs`; non-test consumer: parent modules that derive `Default` over a `ParameterList<T>` field. |
-| REQ-6 | SHIPPED | impl: `pub struct ParameterDict<T: Float>` with `BTreeMap<String, Parameter<T>>` in `parameter_container.rs` (R-DEV-7 deviation from upstream's insertion-ordered dict for deterministic ordering); non-test consumer: `pub use` in `lib.rs:236`; downstream code that needs named-parameter groups with sorted-key checkpointing semantics. |
+| REQ-6 | SHIPPED | impl: `pub struct ParameterDict<T: Float>` with `BTreeMap<String, Parameter<T>>` in `parameter_container.rs` (R-DEV-7 deviation from upstream's insertion-ordered dict for deterministic ordering); non-test consumer: `pub use` in `lib.rs`; downstream code that needs named-parameter groups with sorted-key checkpointing semantics. |
 | REQ-7 | SHIPPED | impl: `new`, `insert` (returns prior value), `get`, `get_mut`, `remove`, `contains_key`, `len`, `is_empty`, `keys` on `ParameterDict` in `parameter_container.rs`; non-test consumer: parent modules constructing per-layer named parameter groups via the re-export. |
 | REQ-8 | SHIPPED | impl: `parameters` / `parameters_mut` / `named_parameters` on `ParameterDict` returning sorted-key order in `parameter_container.rs`; non-test consumer: parent `Module<T>` impls in downstream crates that flat-map `param_dict.parameters()` into their `parameters()`. |
 | REQ-9 | SHIPPED | impl: `impl<T: Float> Default for ParameterDict<T>` in `parameter_container.rs`; non-test consumer: parent modules deriving `Default` over a `ParameterDict<T>` field. |

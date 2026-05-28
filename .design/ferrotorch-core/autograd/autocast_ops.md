@@ -64,7 +64,7 @@ on, for test inspection.
 - [x] AC-1: Matmul family classifies as `ReducedPrecision` —
   `test_mm_is_reduced_precision`, `test_matmul_is_reduced_precision`,
   `test_bmm_is_reduced_precision`, `test_linear_is_reduced_precision`,
-  `test_conv2d_is_reduced_precision` (`autocast_ops.rs:132-165`).
+  `test_conv2d_is_reduced_precision` (`test_conv2d_is_reduced_precision in autocast_ops.rs`).
 - [x] AC-2: Reduction / norm / loss family classifies as
   `FullPrecision` — `test_softmax_is_full_precision`,
   `test_log_softmax_is_full_precision`,
@@ -72,17 +72,17 @@ on, for test inspection.
   `test_batch_norm_is_full_precision`,
   `test_cross_entropy_is_full_precision`,
   `test_mse_loss_is_full_precision`, `test_sum_is_full_precision`,
-  `test_mean_is_full_precision` (`autocast_ops.rs:167-222`).
+  `test_mean_is_full_precision` (`test_mean_is_full_precision in autocast_ops.rs`).
 - [x] AC-3: Elementwise / unknown ops classify as `Passthrough` —
   `test_add_is_passthrough`, `test_mul_is_passthrough`,
   `test_relu_is_passthrough`, `test_unknown_op_is_passthrough`
-  (`autocast_ops.rs:225-245`).
+  (`test_unknown_op_is_passthrough in autocast_ops.rs`).
 - [x] AC-4: `should_cast_to_reduced` returns false when autocast is
   off — `test_should_cast_to_reduced_false_when_disabled` at
-  `autocast_ops.rs:252-257`.
+  `test_should_cast_to_reduced_false_when_disabled in autocast_ops.rs`.
 - [x] AC-5: `should_cast_to_reduced` returns true inside an `autocast`
   scope for matmul-family ops — `test_should_cast_to_reduced_true_for_mm_when_enabled`
-  at `autocast_ops.rs:259-267`.
+  at `test_should_cast_to_reduced_true_for_mm_when_enabled in autocast_ops.rs`.
 - [x] AC-6: `should_keep_full_precision` is symmetric — false outside
   autocast, true inside for reduction ops —
   `test_should_keep_full_precision_*` at `autocast_ops.rs:289-310`.
@@ -115,7 +115,7 @@ PartialEq, Eq` derived.
 - FullPrecision arm: `sum`, `mean`, `prod`, `softmax`, `log_softmax`,
   `layer_norm`, `batch_norm`, `group_norm`, `rms_norm`,
   `cross_entropy`, `mse_loss`, `bce_with_logits` at `:38-40`.
-- Default `Passthrough` arm at `:42-44`.
+- Default `Passthrough` arm at `autocast_ops.rs`.
 
 Each arm matches the corresponding upstream kernel-registration list
 in `aten/src/ATen/autocast_mode.cpp`'s `TORCH_LIBRARY_IMPL(aten,
@@ -126,8 +126,8 @@ GPU kernels.
 
 ### REQ-3 / REQ-4 op-side predicates
 
-`pub fn should_cast_to_reduced` at `autocast_ops.rs:48-50` and
-`pub fn should_keep_full_precision` at `:57-59` are 3-line composites:
+`pub fn should_cast_to_reduced` at `should_cast_to_reduced in autocast_ops.rs` and
+`pub fn should_keep_full_precision` at `should_keep_full_precision in autocast_ops.rs` are 3-line composites:
 `is_autocast_enabled() && autocast_category(op_name) == <expected>`.
 
 ### REQ-5 `autocast_guard` (primary entry point)
@@ -140,7 +140,7 @@ when debug is on, return `Some(category)`.
 
 ### REQ-6 `autocast_log` (backward-compat alias)
 
-`pub fn autocast_log(op_name: &str)` at `autocast_ops.rs:95-97` is a
+`pub fn autocast_log(op_name: &str)` at `autocast_log in autocast_ops.rs` is a
 1-line delegation to `autocast_guard`. New code should call
 `autocast_guard`; this alias exists for callers written before the
 unified entry point.
@@ -148,9 +148,9 @@ unified entry point.
 ### REQ-7 / REQ-8 event log + drain
 
 `pub struct AutocastEvent { op: String, category: AutocastCategory }`
-at `autocast_ops.rs:105-108` with `Debug, Clone, PartialEq, Eq`.
+at `AutocastEvent in autocast_ops.rs` with `Debug, Clone, PartialEq, Eq`.
 Stored in `thread_local! AUTOCAST_EVENTS: RefCell<Vec<AutocastEvent>>`
-at `:110-113`. `pub fn drain_autocast_events` at `:119-121` is a
+at `autocast_ops.rs`. `pub fn drain_autocast_events` at `drain_autocast_events in autocast_ops.rs` is a
 single `RefCell::borrow_mut().drain(..).collect()`.
 
 ## Parity contract
@@ -184,11 +184,11 @@ All 33 tests pass in the workspace gauntlet.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub enum AutocastCategory { ReducedPrecision, FullPrecision, Passthrough }` at `ferrotorch-core/src/autograd/autocast_ops.rs:19-26`; mirrors upstream's three kernel-classification labels in `aten/src/ATen/autocast_mode.cpp`; non-test production consumer: `ferrotorch-core/src/grad_fns/linalg.rs:9 use crate::autograd::autocast_ops::{AutocastCategory, autocast_guard}` (the matmul-family backward path branches on the category); `ferrotorch-core/src/einsum.rs:53 use crate::autograd::autocast_ops::autocast_guard` (einsum forward branches on the category). Re-exported at `lib.rs:125-131`. |
+| REQ-1 | SHIPPED | impl: `pub enum AutocastCategory { ReducedPrecision, FullPrecision, Passthrough }` at `autocast_guard in ferrotorch-core/src/autograd/autocast_ops.rs`; mirrors upstream's three kernel-classification labels in `aten/src/ATen/autocast_mode.cpp`; non-test production consumer: `autocast_guard in ferrotorch-core/src/grad_fns/linalg.rs use crate::autograd::autocast_ops::{AutocastCategory, autocast_guard}` (the matmul-family backward path branches on the category); `autocast_guard in ferrotorch-core/src/einsum.rs use crate::autograd::autocast_ops::autocast_guard` (einsum forward branches on the category). Re-exported at `lib.rs`. |
 | REQ-2 | SHIPPED | impl: `pub fn autocast_category(op_name: &str) -> AutocastCategory` at `autocast_ops.rs:29-45`; mirrors upstream's per-kernel autocast registration lists in `aten/src/ATen/autocast_mode.cpp`; non-test production consumer: invoked from inside `autocast_guard` (REQ-5) at `:77`; re-exported at `lib.rs:125-127 autocast_category`. |
-| REQ-3 | SHIPPED | impl: `pub fn should_cast_to_reduced(op_name: &str) -> bool` at `autocast_ops.rs:48-50`; non-test production consumer: re-exported at `lib.rs:125-129` (boundary API for op-implementation code to branch on). Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
-| REQ-4 | SHIPPED | impl: `pub fn should_keep_full_precision(op_name: &str) -> bool` at `autocast_ops.rs:57-59`; non-test production consumer: re-exported at `lib.rs:125-129`. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
-| REQ-5 | SHIPPED | impl: `pub fn autocast_guard(op_name: &str) -> Option<AutocastCategory>` at `autocast_ops.rs:73-87`; non-test production consumer: `ferrotorch-core/src/grad_fns/linalg.rs:9 use crate::autograd::autocast_ops::{AutocastCategory, autocast_guard}` and call sites inside `matmul_differentiable` / `bmm_differentiable` / `linear_fused` that branch their forward dispatch on `autocast_guard("mm")` → `Some(ReducedPrecision)`; `ferrotorch-core/src/einsum.rs:53 use ... autocast_guard` similarly inside `pub fn einsum`. |
-| REQ-6 | SHIPPED | impl: `pub fn autocast_log(op_name: &str)` at `autocast_ops.rs:95-97`; non-test production consumer: re-exported as part of the autocast surface and held for prior callers; new code uses REQ-5 directly. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
-| REQ-7 | SHIPPED | impl: `pub struct AutocastEvent { op: String, category: AutocastCategory }` at `autocast_ops.rs:105-108`; non-test production consumer: pushed into `AUTOCAST_EVENTS` log inside `autocast_guard` at `:79-84`; drained by REQ-8. Re-exported at `lib.rs:125-131 AutocastEvent`. |
-| REQ-8 | SHIPPED | impl: `pub fn drain_autocast_events() -> Vec<AutocastEvent>` at `autocast_ops.rs:119-121` plus the `AUTOCAST_EVENTS: RefCell<Vec<AutocastEvent>>` thread-local at `:110-113`; non-test production consumer: re-exported at `lib.rs:125-127 drain_autocast_events` — the public diagnostic-drain API for tooling code (and the conformance harness in `ferrotorch-core/src/einsum.rs:2217 use crate::autograd::autocast_ops::{AutocastCategory, drain_autocast_events}` etc.). Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
+| REQ-3 | SHIPPED | impl: `pub fn should_cast_to_reduced(op_name: &str) -> bool` at `should_cast_to_reduced in autocast_ops.rs`; non-test production consumer: re-exported at `lib.rs` (boundary API for op-implementation code to branch on). Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
+| REQ-4 | SHIPPED | impl: `pub fn should_keep_full_precision(op_name: &str) -> bool` at `should_keep_full_precision in autocast_ops.rs`; non-test production consumer: re-exported at `lib.rs`. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
+| REQ-5 | SHIPPED | impl: `pub fn autocast_guard(op_name: &str) -> Option<AutocastCategory>` at `autocast_guard in autocast_ops.rs`; non-test production consumer: `matmul_differentiable in ferrotorch-core/src/grad_fns/linalg.rs use crate::autograd::autocast_ops::{AutocastCategory, autocast_guard}` and call sites inside `matmul_differentiable` / `bmm_differentiable` / `linear_fused` that branch their forward dispatch on `autocast_guard("mm")` → `Some(ReducedPrecision)`; `Some in ferrotorch-core/src/einsum.rs use ... autocast_guard` similarly inside `pub fn einsum`. |
+| REQ-6 | SHIPPED | impl: `pub fn autocast_log(op_name: &str)` at `autocast_log in autocast_ops.rs`; non-test production consumer: re-exported as part of the autocast surface and held for prior callers; new code uses REQ-5 directly. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
+| REQ-7 | SHIPPED | impl: `pub struct AutocastEvent { op: String, category: AutocastCategory }` at `AutocastEvent in autocast_ops.rs`; non-test production consumer: pushed into `AUTOCAST_EVENTS` log inside `autocast_guard in autocast_ops.rs`; drained by REQ-8. Re-exported at `lib.rs AutocastEvent`. |
+| REQ-8 | SHIPPED | impl: `pub fn drain_autocast_events() -> Vec<AutocastEvent>` at `drain_autocast_events in autocast_ops.rs` plus the `AUTOCAST_EVENTS: RefCell<Vec<AutocastEvent>>` thread-local at `AUTOCAST_EVENTS in autocast_ops.rs`; non-test production consumer: re-exported at `lib.rs drain_autocast_events` — the public diagnostic-drain API for tooling code (and the conformance harness in `ferrotorch-core/src/einsum.rs use crate::autograd::autocast_ops::{AutocastCategory, drain_autocast_events}` etc.). Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |

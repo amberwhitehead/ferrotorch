@@ -56,58 +56,58 @@ loading a full `AutoencoderKL` checkpoint into a decoder-only model).
 - [x] AC-1: `round_trip_safetensors_into_decoder` saves a fresh
   `VaeDecoder.state_dict()` to a temp file, loads it back, and
   proves the forward outputs match to 1e-5
-  (`safetensors_loader.rs:460..482`).
+  (`safetensors_loader.rs`).
 - [x] AC-2: `load_hf_drops_encoder_keys_nonstrict` proves
   `encoder.*` and `quant_conv.*` are dropped (not loaded) when
   loading a full checkpoint into a decoder-only model
-  (`safetensors_loader.rs:484..507`).
+  (`safetensors_loader.rs`).
 - [x] AC-3: `load_hf_strict_rejects_encoder_keys` proves strict
-  mode rejects them (`safetensors_loader.rs:509..519`).
+  mode rejects them (`safetensors_loader.rs`).
 - [x] AC-4: `load_hf_strips_vae_prefix` proves the `vae.<rest>`
-  layout is accepted (`safetensors_loader.rs:521..545`).
+  layout is accepted (`safetensors_loader.rs`).
 - [x] AC-5: `round_trip_safetensors_into_encoder` mirrors AC-1 for
-  the encoder side (`safetensors_loader.rs:555..577`).
+  the encoder side (`safetensors_loader.rs`).
 - [x] AC-6: `encoder_load_hf_drops_decoder_keys_nonstrict`,
   `encoder_load_hf_strict_rejects_decoder_keys`,
   `encoder_load_hf_strips_vae_prefix`
-  (`safetensors_loader.rs:579..638`).
+  (`safetensors_loader.rs`).
 - [x] AC-7: `full_vae_checkpoint_loadable_by_both_halves` proves a
   single combined state-dict is loadable by both encoder and
   decoder with the right drop set on each side
-  (`safetensors_loader.rs:640..685`).
+  (`safetensors_loader.rs`).
 
 ## Architecture
 
-- `DropReport` at `safetensors_loader.rs:31..36` is a small struct
+- `DropReport in safetensors_loader.rs` is a small struct
   carrying a sorted `Vec<String>` of dropped keys.
 - `VaeDecoder::load_hf_state_dict` at
-  `safetensors_loader.rs:58..91`: per-key, strip optional `vae.`
+  `safetensors_loader.rs`: per-key, strip optional `vae.`
   prefix, keep iff `post_quant_conv.` / `decoder.` prefix; strict
   mode raises `InvalidArgument` on unmapped keys; otherwise records
   in `dropped`. After the filter, delegates to
   `self.load_state_dict(&remapped, strict)`.
 - `UNet2DConditionModel::load_hf_state_dict` at
-  `safetensors_loader.rs:113..148`: same pattern with the seven UNet
+  `safetensors_loader.rs`: same pattern with the seven UNet
   prefixes (`time_embedding.`, `conv_in.`, `down_blocks.`,
   `mid_block.`, `up_blocks.`, `conv_norm_out.`, `conv_out.`).
 - `VaeEncoder::load_hf_state_dict` at
-  `safetensors_loader.rs:363..396`: same pattern with `encoder.` /
+  `safetensors_loader.rs`: same pattern with `encoder.` /
   `quant_conv.` prefixes.
-- `load_unet` at `safetensors_loader.rs:163..178`:
+- `load_unet` at `safetensors_loader.rs`:
   `load_safetensors::<T>` → `UNet2DConditionModel::new(cfg)` →
   `load_hf_state_dict`.
 - `load_safetensors_clip_filtered` at
-  `safetensors_loader.rs:191..246` is the CLIP-specific helper:
+  `safetensors_loader.rs` is the CLIP-specific helper:
   parses the safetensors file, drops the int64 `position_ids`
   buffer, re-serializes the remaining tensors into a temp file, then
   delegates to the generic `load_safetensors::<T>`. The
   `had_position_ids` flag is propagated for the `DropReport`.
-- `load_clip_text_encoder` at `safetensors_loader.rs:270..302` calls
+- `load_clip_text_encoder` at `safetensors_loader.rs` calls
   the filtered loader, optionally re-inserts a placeholder
   `position_ids` entry (so `DropReport` captures the upstream key),
   constructs the encoder, and runs `load_hf_state_dict`.
-- `load_vae_decoder` at `safetensors_loader.rs:318..333` and
-  `load_vae_encoder` at `safetensors_loader.rs:413..428` are the
+- `load_vae_decoder` at `safetensors_loader.rs` and
+  `load_vae_encoder` at `safetensors_loader.rs` are the
   obvious mirror loaders.
 
 Non-test production consumers:
@@ -142,7 +142,7 @@ prefixed. This loader handles both via prefix-strip.
 
 ## Verification
 
-Lib tests at `safetensors_loader.rs:430..686`:
+Lib tests at `safetensors_loader.rs`:
 
 - VAE decoder: `round_trip_safetensors_into_decoder`,
   `load_hf_drops_encoder_keys_nonstrict`,
@@ -163,9 +163,9 @@ No parity-sweep ops apply.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `DropReport` at `ferrotorch-diffusion/src/safetensors_loader.rs:31..36`; non-test consumer: `ferrotorch-diffusion/src/safetensors_loader.rs:88..90` sorts and returns the populated `dropped` set; `ferrotorch-diffusion/src/lib.rs:138` re-exports it for external pin-script auditing |
+| REQ-1 | SHIPPED | impl: `DropReport in ferrotorch-diffusion/src/safetensors_loader.rs`; non-test consumer: `DropReport in ferrotorch-diffusion/src/safetensors_loader.rs` sorts and returns the populated `dropped` set; `ferrotorch-diffusion/src/lib.rs` re-exports it for external pin-script auditing |
 | REQ-2 | SHIPPED | impl: `VaeDecoder::load_hf_state_dict` at `ferrotorch-diffusion/src/safetensors_loader.rs:58..91`; non-test consumer: `load_vae_decoder` at `ferrotorch-diffusion/src/safetensors_loader.rs:331` invokes it on every checkpoint load |
 | REQ-3 | SHIPPED | impl: `VaeEncoder::load_hf_state_dict` at `ferrotorch-diffusion/src/safetensors_loader.rs:363..396`; non-test consumer: `load_vae_encoder` at `ferrotorch-diffusion/src/safetensors_loader.rs:426` invokes it |
 | REQ-4 | SHIPPED | impl: `UNet2DConditionModel::load_hf_state_dict` at `ferrotorch-diffusion/src/safetensors_loader.rs:113..148`; non-test consumer: `load_unet` at `ferrotorch-diffusion/src/safetensors_loader.rs:176` invokes it |
-| REQ-5 | SHIPPED | impl: `load_safetensors_clip_filtered` at `ferrotorch-diffusion/src/safetensors_loader.rs:191..246` (position_ids filter) and `load_clip_text_encoder` at `ferrotorch-diffusion/src/safetensors_loader.rs:270..302`; non-test consumer: `ferrotorch-diffusion/examples/clip_text_encode_dump.rs:265` invokes `load_clip_text_encoder` on the SD-1.5 mirror |
-| REQ-6 | SHIPPED | impl: `load_unet` at `ferrotorch-diffusion/src/safetensors_loader.rs:163..178`, `load_vae_decoder` at `safetensors_loader.rs:318..333`, `load_vae_encoder` at `safetensors_loader.rs:413..428`, `load_clip_text_encoder` at `safetensors_loader.rs:270..302`; non-test consumer: all four examples (`unet_predict_dump.rs`, `vae_decode_dump.rs`, `clip_text_encode_dump.rs`, `sd_pipeline_dump.rs`) import and call them |
+| REQ-5 | SHIPPED | impl: `load_safetensors_clip_filtered in ferrotorch-diffusion/src/safetensors_loader.rs` (position_ids filter) and `load_clip_text_encoder in ferrotorch-diffusion/src/safetensors_loader.rs`; non-test consumer: `ferrotorch-diffusion/examples/clip_text_encode_dump.rs` invokes `load_clip_text_encoder` on the SD-1.5 mirror |
+| REQ-6 | SHIPPED | impl: `load_unet in ferrotorch-diffusion/src/safetensors_loader.rs`, `load_vae_decoder` at `safetensors_loader.rs`, `load_vae_encoder` at `safetensors_loader.rs`, `load_clip_text_encoder` at `safetensors_loader.rs`; non-test consumer: all four examples (`unet_predict_dump.rs`, `vae_decode_dump.rs`, `clip_text_encode_dump.rs`, `sd_pipeline_dump.rs`) import and call them |

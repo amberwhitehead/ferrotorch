@@ -103,7 +103,7 @@ are the CPU references — both walk the `[outer, in_dim/out_dim,
 inner]` layout reading from `data` at the per-element source index.
 
 The public methods on `Tensor` at `:212-350` and on `IntTensor` at
-`:366-500` dispatch through the helpers + `gpu_dispatch::gpu_backend()`
+`gpu_backend in ops/phase2c.rs` dispatch through the helpers + `gpu_dispatch::gpu_backend()`
 on the CUDA branch.
 
 `float_to_i64_trunc` at `:354-360` is the helper for `to_int`:
@@ -152,9 +152,9 @@ conformance lives in `ferrotorch-core/tests/conformance_phase2c.rs`
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `Tensor::argmax` at `ops/phase2c.rs:218`; non-test consumer: `crate::methods::Tensor::argmax_t` at `methods.rs:670` (the autograd-wrapper) and `crate::grad_fns::reduction::argmax` at `grad_fns/reduction.rs:1541` route through `Tensor::argmax` |
-| REQ-2 | SHIPPED | impl: `Tensor::argmin` at `ops/phase2c.rs:223`; non-test consumer: `Tensor::argmin_t` at `methods.rs:684` |
-| REQ-3 | SHIPPED | impl: `Tensor::index_select` at `ops/phase2c.rs:232`; non-test consumer: `crate::grad_fns::indexing::index_select_differentiable` at `grad_fns/indexing.rs:1217` invokes `Tensor::index_select` for its forward |
+| REQ-1 | SHIPPED | impl: `Tensor::argmax` at `argmax in ops/phase2c.rs`; non-test consumer: `crate::methods::Tensor::argmax_t` at `argmax_t in methods.rs` (the autograd-wrapper) and `crate::grad_fns::reduction::argmax` at `argmax in grad_fns/reduction.rs` route through `Tensor::argmax` |
+| REQ-2 | SHIPPED | impl: `Tensor::argmin` at `argmin in ops/phase2c.rs`; non-test consumer: `Tensor::argmin_t` at `argmin_t in methods.rs` |
+| REQ-3 | SHIPPED | impl: `Tensor::index_select` at `index_select in ops/phase2c.rs`; non-test consumer: `crate::grad_fns::indexing::index_select_differentiable` at `index_select in grad_fns/indexing.rs` invokes `Tensor::index_select` for its forward |
 | REQ-4 | SHIPPED | impl: `Tensor::gather` at `ops/phase2c.rs:283`; non-test consumer: `crate::grad_fns::indexing::GatherBackward::backward` recurses through `Tensor::gather` for the VJP construction |
 | REQ-5 | SHIPPED | impl: `Tensor::to_int` at `ops/phase2c.rs:326`; non-test consumer: `crate::int_tensor::Tensor::to_int` re-export path used by quantization / discretization paths in `ferrotorch-llama` and `ferrotorch-quant` |
 | REQ-6 | SHIPPED | impl: `IntTensor::argmax`/`argmin` at `ops/phase2c.rs:369,374`; non-test consumer: every downstream caller that argmax's a logit-index tensor goes through this |

@@ -121,12 +121,12 @@ pub struct LowRankMultivariateNormal<T: Float> {
 }
 ```
 
-Defined at `low_rank_multivariate_normal.rs:34-43`. The five
-accessors live at `low_rank_multivariate_normal.rs:140-162`.
+Defined at `low_rank_multivariate_normal.rs`. The five
+accessors live at `low_rank_multivariate_normal.rs`.
 
 ### Constructor (REQ-2)
 
-`low_rank_multivariate_normal.rs:54-137`. After the shape checks
+`low_rank_multivariate_normal.rs`. After the shape checks
 it walks the factor data directly (not via `matmul`) to build
 the dense `Sigma = W*W^T + diag(D)`. The result is uploaded to
 the same device as `loc` if `loc.is_cuda()`, then handed to
@@ -138,10 +138,10 @@ dependencies.
 
 ### The Distribution impl (REQ-4, REQ-5)
 
-`low_rank_multivariate_normal.rs:165-187`. All four methods —
+`low_rank_multivariate_normal.rs`. All four methods —
 `sample`, `rsample`, `log_prob`, `entropy` — delegate verbatim
 to `self.inner.<method>(...)`. The `mean` override returns
-`self.loc.clone()` at `low_rank_multivariate_normal.rs:178-182`
+`self.loc.clone()` at `low_rank_multivariate_normal.rs`
 to match upstream's `loc` property (this is faster than
 delegating to `self.inner.mean()`, which would also return
 `loc` but go through an extra clone).
@@ -149,14 +149,14 @@ delegating to `self.inner.mean()`, which would also return
 ### Non-test production consumers
 
 - `pub use low_rank_multivariate_normal::LowRankMultivariateNormal`
-  at `lib.rs:110` — grandfathered public API. Downstream code
+  at `lib.rs` — grandfathered public API. Downstream code
   (factor analysis, probabilistic PCA, variational inference with
   low-rank Gaussian posteriors) constructs
   `LowRankMultivariateNormal::new(loc, W, D)?`.
 - `MultivariateNormal` is the production consumer of the inner-
   state — `LowRankMultivariateNormal::new` invokes
   `MultivariateNormal::from_covariance` at
-  `low_rank_multivariate_normal.rs:127`.
+  `low_rank_multivariate_normal.rs`.
 
 ## Parity contract
 
@@ -207,11 +207,11 @@ Expected: `6 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct LowRankMultivariateNormal<T: Float>` with `loc`/`cov_factor`/`cov_diag`/`inner`/`d`/`r` fields at `low_rank_multivariate_normal.rs:34-43`, mirroring `torch/distributions/lowrank_multivariate_normal.py:54-139`; non-test consumer: `pub use low_rank_multivariate_normal::LowRankMultivariateNormal` at `lib.rs:110`. |
-| REQ-2 | SHIPPED | impl: the constructor at `low_rank_multivariate_normal.rs:54-137` validating loc-1D / factor-`[d, r]` / diag-`[d]` / `diag > 0`, mirroring `lowrank_multivariate_normal.py:104-130`; non-test consumer: invoked from `pub use ...::new` via the re-export at `lib.rs:110`. |
-| REQ-3 | SHIPPED | impl: `loc()`/`cov_factor()`/`cov_diag()`/`dim()`/`rank()` accessors at `low_rank_multivariate_normal.rs:140-162`; non-test consumer: re-export at `lib.rs:110` exposes them as the introspection surface. |
-| REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for LowRankMultivariateNormal<T>` at `low_rank_multivariate_normal.rs:165-187` delegating to inner `MultivariateNormal`, mirroring upstream surface at `lowrank_multivariate_normal.py:214-252`; non-test consumer: re-export means external Distribution-trait calls hit this impl. |
-| REQ-5 | SHIPPED | impl: `mean()` override returning `self.loc.clone()` at `low_rank_multivariate_normal.rs:178-182`, mirroring `lowrank_multivariate_normal.py:157-159`; non-test consumer: re-export at `lib.rs:110` exposes the override via the `Distribution` trait. |
+| REQ-1 | SHIPPED | impl: `pub struct LowRankMultivariateNormal<T: Float>` with `loc`/`cov_factor`/`cov_diag`/`inner`/`d`/`r` fields at `r in low_rank_multivariate_normal.rs`, mirroring `torch/distributions/lowrank_multivariate_normal.py:54-139`; non-test consumer: `pub use low_rank_multivariate_normal::LowRankMultivariateNormal` at `r in lib.rs`. |
+| REQ-2 | SHIPPED | impl: the constructor at `diag in low_rank_multivariate_normal.rs` validating loc-1D / factor-`[d, r]` / diag-`[d]` / `diag > 0`, mirroring `lowrank_multivariate_normal.py:104-130`; non-test consumer: invoked from `pub use ...::new` via the re-export at `lib.rs`. |
+| REQ-3 | SHIPPED | impl: `loc()`/`cov_factor()`/`cov_diag()`/`dim()`/`rank()` accessors at `rank in low_rank_multivariate_normal.rs`; non-test consumer: re-export at `lib.rs` exposes them as the introspection surface. |
+| REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for LowRankMultivariateNormal<T>` at `MultivariateNormal in low_rank_multivariate_normal.rs` delegating to inner `MultivariateNormal`, mirroring upstream surface at `lowrank_multivariate_normal.py:214-252`; non-test consumer: re-export means external Distribution-trait calls hit this impl. |
+| REQ-5 | SHIPPED | impl: `mean()` override returning `self.loc.clone()` at `mean in low_rank_multivariate_normal.rs`, mirroring `lowrank_multivariate_normal.py:157-159`; non-test consumer: re-export at `lib.rs` exposes the override via the `Distribution` trait. |
 | REQ-6 | SHIPPED | impl: `fn LowRankMultivariateNormal::woodbury_log_prob` + `fn capacitance_tril` in `low_rank_multivariate_normal.rs` evaluate the Mahalanobis distance via the Woodbury identity and `log|Σ|` via the matrix-determinant lemma over the `r×r` capacitance matrix `C = I_r + Wᵀ D⁻¹ W` (`O(d·r²+r³)`, no dense `[d, d]` Σ⁻¹), mirroring `lowrank_multivariate_normal.py:16-51,225-240`; non-test consumer: the `impl Distribution::log_prob` override calls `woodbury_log_prob` and is reached on every `dist.log_prob(value)` via the `pub use low_rank_multivariate_normal::LowRankMultivariateNormal` re-export at `lib.rs:111`. Dense-oracle-verified by `test_low_rank_woodbury_matches_dense_path_{rank1,rank2}` + `divergence_wave_l_audit::audit_1385_*`. Closes #1385. |
 | REQ-7 | NOT-STARTED | blocker #1386 — `variance` override not implemented; the inherited trait default at `lib.rs:223-227` returns `InvalidArgument`. Upstream computes `cov_factor.pow(2).sum(-1) + cov_diag` at `lowrank_multivariate_normal.py:165-169`. |
 | REQ-8 | NOT-STARTED | blocker #1387 — `scale_tril` / `covariance_matrix` / `precision_matrix` accessors at `lowrank_multivariate_normal.py:171-212` not exposed; the inner `MultivariateNormal::scale_tril` is private to `LowRankMultivariateNormal`. |

@@ -93,7 +93,7 @@ implementation.)
 `pub fn gpu_flash_attention_f64 in flash_attention.rs` (line 1023)
 is the f64 mirror with the f64 PTX kernel.
 
-Non-test consumer at `backend_impl.rs:5035` (f32) and `:5058` (f64)
+Non-test consumer at `backend_impl.rs` (f32) and `backend_impl.rs` (f64)
 — the cuda backend's `scaled_dot_product_attention` arm. The
 public re-export is at `lib.rs:212` (`pub use
 flash_attention::{gpu_flash_attention_f32, gpu_flash_attention_f64}`).
@@ -204,18 +204,18 @@ Expected: 8 tests pass under cuda; no-cuda compile succeeds.
 
 Per S5 (existing pub-API grandfather): `gpu_flash_attention_f32` and
 `gpu_flash_attention_f64` are exported from `lib.rs:212` and
-consumed by `backend_impl.rs:5035-5058` (the cuda backend's
+consumed by `backend_impl.rs` (the cuda backend's
 SDPA dispatch arm). That arm is reached from
 `ferrotorch-nn::scaled_dot_product_attention` when the dispatch
 routes to GPU.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub fn gpu_flash_attention_f32 in flash_attention.rs` (line 460). Non-test consumer: `backend_impl.rs:5035` (cuda backend's SDPA f32 arm). Also re-exported at `lib.rs:212`. |
-| REQ-2 | SHIPPED | impl: `pub fn gpu_flash_attention_f64 in flash_attention.rs` (line 1023). Non-test consumer: `backend_impl.rs:5058` (cuda backend's SDPA f64 arm). Also re-exported at `lib.rs:212`. |
-| REQ-3 | SHIPPED | impl: PTX kernel string in `flash_attention.rs` documents `TILE_K = 32`, `d_max = 128`, 32 KiB shared-mem budget; the module `//!` doc-comment at lines 19-29 pins the layout. Non-test consumer: both `gpu_flash_attention_f32` (line 460) and `_f64` (line 1023) launch this kernel; downstream consumers at `backend_impl.rs:5035,5058`. |
-| REQ-4 | SHIPPED | impl: online-softmax `m`/`l` accumulator + rescale logic is in the PTX kernel string; documented in the module `//!` doc-comment at lines 8-17. Non-test consumer: every call through `gpu_flash_attention_f32/f64` exercises the online-softmax path; `backend_impl.rs:5035` is the production consumer. |
-| REQ-5 | SHIPPED | impl: causal-mask predicate inside the PTX kernel, activated by the `causal: bool` parameter on `gpu_flash_attention_f32/f64`. Non-test consumer: `backend_impl.rs:5035-5058` passes through the user's `causal` flag from `ferrotorch-nn::scaled_dot_product_attention`. |
-| REQ-6 | SHIPPED | impl: optional `attn_mask: Option<&CudaBuffer<f32/f64>>` parameter on `gpu_flash_attention_f32/f64`; PTX kernel branches on a mask-pointer-not-null check. Non-test consumer: `backend_impl.rs:5035-5058` passes the optional mask through from `ferrotorch-nn`. |
-| REQ-7 | SHIPPED | impl: both `gpu_flash_attention_f32/f64` allocate output on device via `CudaBuffer::empty` and return without host pull. Non-test consumer: `backend_impl.rs:5035-5058` keeps the buffer on-device for downstream GPU consumers. |
-| REQ-8 | SHIPPED | impl: `#[cfg(not(feature = "cuda"))] pub fn gpu_flash_attention_f32 in flash_attention.rs` (line 653) and `_f64` (line 1189) return `Err(GpuError::NoCudaFeature)`. Non-test consumer: the same `backend_impl.rs:5035-5058` SDPA arm under the no-cuda compile path. |
+| REQ-1 | SHIPPED | impl: `pub fn gpu_flash_attention_f32 in flash_attention.rs` (line 460). Non-test consumer: `backend_impl.rs` (cuda backend's SDPA f32 arm). Also re-exported at `lib.rs`. |
+| REQ-2 | SHIPPED | impl: `pub fn gpu_flash_attention_f64 in flash_attention.rs` (line 1023). Non-test consumer: `backend_impl.rs` (cuda backend's SDPA f64 arm). Also re-exported at `lib.rs`. |
+| REQ-3 | SHIPPED | impl: PTX kernel string in `flash_attention.rs` documents `TILE_K = 32`, `d_max = 128`, 32 KiB shared-mem budget; the module `//!` doc-comment at lines 19-29 pins the layout. Non-test consumer: both `gpu_flash_attention_f32` (line 460) and `_f64` (line 1023) launch this kernel; downstream consumers at `_f64 in backend_impl.rs,5058`. |
+| REQ-4 | SHIPPED | impl: online-softmax `m`/`l` accumulator + rescale logic is in the PTX kernel string; documented in the module `//!` doc-comment at lines 8-17. Non-test consumer: every call through `gpu_flash_attention_f32/f64` exercises the online-softmax path; `gpu_flash_attention_f32 in backend_impl.rs` is the production consumer. |
+| REQ-5 | SHIPPED | impl: causal-mask predicate inside the PTX kernel, activated by the `causal: bool` parameter on `gpu_flash_attention_f32/f64`. Non-test consumer: `gpu_flash_attention_f32 in backend_impl.rs` passes through the user's `causal` flag from `ferrotorch-nn::scaled_dot_product_attention`. |
+| REQ-6 | SHIPPED | impl: optional `attn_mask: Option<&CudaBuffer<f32/f64>>` parameter on `gpu_flash_attention_f32/f64`; PTX kernel branches on a mask-pointer-not-null check. Non-test consumer: `gpu_flash_attention_f32 in backend_impl.rs` passes the optional mask through from `ferrotorch-nn`. |
+| REQ-7 | SHIPPED | impl: both `gpu_flash_attention_f32/f64` allocate output on device via `CudaBuffer::empty` and return without host pull. Non-test consumer: `empty in backend_impl.rs` keeps the buffer on-device for downstream GPU consumers. |
+| REQ-8 | SHIPPED | impl: `#[cfg(not(feature = "cuda"))] pub fn gpu_flash_attention_f32 in flash_attention.rs` (line 653) and `_f64` (line 1189) return `Err(GpuError::NoCudaFeature)`. Non-test consumer: the same `_f64 in backend_impl.rs` SDPA arm under the no-cuda compile path. |

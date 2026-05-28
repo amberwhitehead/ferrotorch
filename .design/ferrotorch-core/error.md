@@ -57,7 +57,7 @@ universal return type.
 ## Acceptance Criteria
 
 - [x] AC-1: `FerrotorchError` is `#[non_exhaustive]` (verified at
-  `error.rs:5`). New variants can be added without breaking pattern matches
+  `error in error.rs`). New variants can be added without breaking pattern matches
   in downstream crates.
 - [x] AC-2: `FerrotorchError: Send + Sync + 'static` — verified by the
   `Box<dyn Error + Send + Sync + 'static>` source bound at `error.rs:82` and
@@ -84,28 +84,28 @@ The enum has 13 variants today, each carrying structured fields rather than
 opaque strings. The categorization mirrors `c10/util/Exception.h:31-100`'s
 `c10::Error` extras (`error_msg_` + `context_` + `backtrace_`):
 
-- **Shape / structural errors** — `ShapeMismatch` (`error.rs:8`),
-  `BackwardNonScalar` (`error.rs:14`), `IndexOutOfBounds` (`error.rs:23`).
+- **Shape / structural errors** — `ShapeMismatch` (`error in error.rs`),
+  `BackwardNonScalar` (`error in error.rs`), `IndexOutOfBounds` (`error in error.rs`).
   Mirrors `TORCH_CHECK(self.dim() == ...)` shape-validation sites scattered
   across `aten/src/ATen/native/*`.
 - **Type / device errors** — `DtypeMismatch` (`error.rs:19`),
-  `DeviceMismatch` (`error.rs:10`). Mirrors
+  `DeviceMismatch` (`error in error.rs`). Mirrors
   `TORCH_CHECK_TYPE(t.scalar_type() == kFloat, ...)` and the
   `c10::DeviceTypeName` mismatch checks at `c10/core/Device.h`.
-- **Autograd-specific** — `NoGradFn` (`error.rs:16`) for leaf-tensor
+- **Autograd-specific** — `NoGradFn` (`error in error.rs`) for leaf-tensor
   backward calls, mirroring upstream's
   `RuntimeError: element 0 of tensors does not require grad` at
   `torch/autograd/__init__.py`.
-- **Backend / device-availability** — `DeviceUnavailable` (`error.rs:39`),
-  `GpuTensorNotAccessible` (`error.rs:41`), `NotImplementedOnCuda`
-  (`error.rs:44`), `Gpu { source }` (`error.rs:75`).
-- **Concurrency** — `LockPoisoned` (`error.rs:32`) for `Mutex` poisoning
+- **Backend / device-availability** — `DeviceUnavailable` (`error in error.rs`),
+  `GpuTensorNotAccessible` (`error in error.rs`), `NotImplementedOnCuda`
+  (`error in error.rs`), `Gpu { source }` (`error in error.rs`).
+- **Concurrency** — `LockPoisoned` (`error in error.rs`) for `Mutex` poisoning
   (e.g. when an autograd hook panics inside a `lock()`).
 - **External-crate passthrough** — `Ferray(#[from] FerrayError)`
-  (`error.rs:88`).
-- **Catch-all** — `InvalidArgument { message: String }` (`error.rs:29`),
-  `Internal { message: String }` (`error.rs:35`), `WorkerPanic { message }`
-  (`error.rs:85`).
+  (`Ferray in error.rs`).
+- **Catch-all** — `InvalidArgument { message: String }` (`error in error.rs`),
+  `Internal { message: String }` (`error in error.rs`), `WorkerPanic { message }`
+  (`error in error.rs`).
 
 ### `Gpu` variant — type-erased cross-crate error propagation
 
@@ -170,7 +170,7 @@ messages to upstream's; that's the negative-path parity surface.
 Every `cargo test -p ferrotorch-core` test that constructs a tensor with a
 mismatched shape exercises `FerrotorchError::ShapeMismatch`'s discriminator
 and message format. Examples:
-- `bool_tensor::tests::from_vec_shape_mismatch_errors` at `bool_tensor.rs:658`
+- `bool_tensor::tests::from_vec_shape_mismatch_errors` at `from_vec_shape_mismatch_errors in bool_tensor.rs`
 - `int_tensor::tests::from_vec_shape_mismatch_errors` at `int_tensor.rs:800`
 - `named_tensor::tests::named_tensor_rejects_length_mismatch` at
   `named_tensor.rs:213`
@@ -190,10 +190,10 @@ block has 2 tests; both are listed above.)
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: enum `FerrotorchError` at `ferrotorch-core/src/error.rs:6` with 13 variants mirroring `c10/util/Exception.h:31` `c10::Error` taxonomy under R-DEV-4 (Rust `Result` deviation from C++ exceptions). Non-test production consumer: `ferrotorch-core/src/tensor.rs:1146` (`masked_select` returns `FerrotorchResult<Tensor<T>>` and propagates `ShapeMismatch` / `DeviceMismatch` via `?`); also `ferrotorch-core/src/grad_fns/arithmetic.rs:413` (`dispatch_floating_dtype!` arm returns the same `FerrotorchResult`). 1336+ direct uses across `ferrotorch-core/src/**/*.rs`. |
+| REQ-1 | SHIPPED | impl: enum `FerrotorchError` at `Error in ferrotorch-core/src/error.rs` with 13 variants mirroring `c10/util/Exception.h:31` `c10::Error` taxonomy under R-DEV-4 (Rust `Result` deviation from C++ exceptions). Non-test production consumer: `masked_select in ferrotorch-core/src/tensor.rs` (`masked_select` returns `FerrotorchResult<Tensor<T>>` and propagates `ShapeMismatch` / `DeviceMismatch` via `?`); also `ferrotorch-core/src/grad_fns/arithmetic.rs` (`dispatch_floating_dtype!` arm returns the same `FerrotorchResult`). 1336+ direct uses across `ferrotorch-core/src/**/*.rs`. |
 | REQ-2 | SHIPPED | impl: `#[error("...")]` attributes on every variant from `error.rs:7-89` produce stable Display output. Each variant's prefix encodes its tag (`"shape mismatch: "`, `"device mismatch: "`, `"gpu error: "`, …). Test: `gpu_variant_display` at `error.rs:117` pins the schema. Non-test production consumer: `ferrotorch-core/src/tensor.rs` — every Display invocation via `?`-propagated error formatting in the public API. |
 | REQ-3 | SHIPPED | impl: the `Box<dyn Error + Send + Sync + 'static>` source bound at `error.rs:82` propagates `Send + Sync` through the `Gpu` variant; every other variant carries only `Send + Sync` fields. Non-test production consumer: `ferrotorch-core/src/cpu_pool.rs` (worker-pool threads return `FerrotorchResult<T>` across thread boundaries; the `Send + Sync` bound is what makes `JoinHandle<FerrotorchResult<T>>` viable). |
-| REQ-4 | SHIPPED | impl: variant `Gpu { source: Box<dyn Error + Send + Sync + 'static> }` at `error.rs:75-83` with `#[source]` attribute exposing the inner error. Documented downcast pattern at `error.rs:46-69`. Test: `gpu_variant_preserves_source_chain` at `error.rs:104`. Non-test production consumer: `ferrotorch-core/src/gpu_dispatch.rs` (the `?` propagation path for `GpuBackend::*` results — every backend error is wrapped into `FerrotorchError::Gpu` before crossing the public API surface). |
+| REQ-4 | SHIPPED | impl: variant `Gpu { source: Box<dyn Error + Send + Sync + 'static> }` at `error in error.rs` with `#[source]` attribute exposing the inner error. Documented downcast pattern at `error in error.rs`. Test: `gpu_variant_preserves_source_chain` at `error in error.rs`. Non-test production consumer: `ferrotorch-core/src/gpu_dispatch.rs` (the `?` propagation path for `GpuBackend::*` results — every backend error is wrapped into `FerrotorchError::Gpu` before crossing the public API surface). |
 | REQ-5 | SHIPPED | impl: `pub type FerrotorchResult<T> = Result<T, FerrotorchError>` at `error.rs:93`. Re-exported at `ferrotorch-core/src/lib.rs:145`. Non-test production consumer: every fallible public fn in the workspace; concrete cite `ferrotorch-core/src/tensor.rs:1144` (`pub fn masked_fill -> FerrotorchResult<Tensor<T>>`). |
-| REQ-6 | SHIPPED | impl: `NotImplementedOnCuda { op: &'static str }` variant at `error.rs:44`. Non-test production consumer: `ferrotorch-core/src/dtype_dispatch.rs:114` (`dispatch_floating_dtype!` macro emits `FerrotorchError::NotImplementedOnCuda` for unsupported dtypes); also `ferrotorch-core/src/int_tensor.rs:355` (`IntTensor::cast` errors cross-width casts on CUDA). |
-| REQ-7 | SHIPPED | impl: `Ferray(#[from] ferray_core::FerrayError)` at `error.rs:88` — `#[from]` derives `From<FerrayError> for FerrotorchError`. Non-test production consumer: `ferrotorch-core/src/storage.rs` and `ferrotorch-core/src/tensor.rs` — wherever ferray returns its own error and `?` propagates it into a `FerrotorchResult`; concrete grep returns 30+ ferray callsites in the storage layer. |
+| REQ-6 | SHIPPED | impl: `NotImplementedOnCuda { op: &'static str }` variant at `error in error.rs`. Non-test production consumer: `ferrotorch-core/src/dtype_dispatch.rs` (`dispatch_floating_dtype!` macro emits `FerrotorchError::NotImplementedOnCuda` for unsupported dtypes); also `cast in ferrotorch-core/src/int_tensor.rs` (`IntTensor::cast` errors cross-width casts on CUDA). |
+| REQ-7 | SHIPPED | impl: `Ferray(#[from] ferray_core::FerrayError)` at `error in error.rs` — `#[from]` derives `From<FerrayError> for FerrotorchError`. Non-test production consumer: `ferrotorch-core/src/storage.rs` and `ferrotorch-core/src/tensor.rs` — wherever ferray returns its own error and `?` propagates it into a `FerrotorchResult`; concrete grep returns 30+ ferray callsites in the storage layer. |

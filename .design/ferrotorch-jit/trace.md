@@ -74,7 +74,7 @@ body in `trace.rs`):
 4. **`IrNode` emission** — for each visited grad_fn, look up its
    name in `map_name_to_op` (a hand-maintained `&str ->
    IrOpKind` map; the canonical source must stay in sync with
-   `graph_break.rs` per the comment at `graph_break.rs:35`). On
+   `graph_break.rs` per the comment at `graph_break in graph_break.rs`). On
    miss, return `JitError::UnsupportedOp` converted to
    `FerrotorchError`. Build the `IrNode` via
    `IrGraph::add_node_with_dtype`, threading the resolved dtype.
@@ -91,15 +91,15 @@ captures node-by-node.
 
 - `pub use trace::trace` at `ferrotorch-jit/src/lib.rs:117` —
   public surface.
-- `ferrotorch-jit/src/module.rs:18` — `use crate::trace::trace;`
+- `trace in ferrotorch-jit/src/module.rs` — `use crate::trace::trace;`
   then `compile` calls `trace(f, example_inputs)?`.
-- `ferrotorch-jit/src/symbolic.rs:66` —
+- `ferrotorch-jit/src/symbolic.rs` —
   `use crate::trace::trace;` then `compile_symbolic` calls
   `trace(f, example_inputs)?`.
 - `ferrotorch-jit/src/aot_autograd.rs:466` —
   `let mut graph = crate::trace::trace(f, example_inputs)?;` is
   the first step of `compile_aot`.
-- `ferrotorch-jit/src/export.rs:21` — `use crate::trace;` then
+- `trace in ferrotorch-jit/src/export.rs` — `use crate::trace;` then
   `export` calls into the tracer.
 
 ## Parity contract
@@ -118,7 +118,7 @@ Edge cases pinned in the test suite:
   `f32` / `f64` as the supported set.
 - **`map_name_to_op` drift** — the op-name table must match
   `graph_break.rs`'s `KNOWN_OP_NAMES`. Drift is caught by the
-  full-graph fail-fast in `graph_break.rs:600`.
+  full-graph fail-fast in `graph_break in graph_break.rs`.
 
 ## Verification
 
@@ -141,7 +141,7 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub fn trace<T, F>` in `trace.rs`; non-test consumer: `ferrotorch-jit/src/module.rs:18, 276` (`compile` calls `trace(f, example_inputs)?`), `symbolic.rs:66`, `aot_autograd.rs:466`, `export.rs:21`. |
+| REQ-1 | SHIPPED | impl: `pub fn trace<T, F>` in `trace.rs`; non-test consumer: `trace in ferrotorch-jit/src/module.rs, 276` (`compile` calls `trace(f, example_inputs)?`), `symbolic in symbolic.rs`, `trace in aot_autograd.rs`, `export in export.rs`. |
 | REQ-2 | SHIPPED | impl: `Dtype::from_type_name(std::any::type_name::<T>())` check in `trace.rs` (~line 237); non-test consumer: every call site that monomorphises `T` on a non-`f32`/`f64` type. Pinned by `test_dtype_from_actual_type_name` in `graph.rs`. |
-| REQ-3 | SHIPPED | impl: `output.grad_fn().ok_or_else(...)` guard in `trace.rs`; non-test consumer: `module.rs:276` and `symbolic.rs:404` rely on the error surface. |
-| REQ-4 | SHIPPED | impl: `map_name_to_op` in `trace.rs`; non-test consumer: `graph_break.rs:35-600` comments pin that this table is the canonical source kept in sync with `KNOWN_OP_NAMES`. |
+| REQ-3 | SHIPPED | impl: `output.grad_fn().ok_or_else(...)` guard in `trace.rs`; non-test consumer: `module in module.rs` and `symbolic in symbolic.rs` rely on the error surface. |
+| REQ-4 | SHIPPED | impl: `map_name_to_op` in `trace.rs`; non-test consumer: `graph_break in graph_break.rs` comments pin that this table is the canonical source kept in sync with `KNOWN_OP_NAMES`. |

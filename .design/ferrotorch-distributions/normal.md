@@ -118,56 +118,56 @@ pub struct Normal<T: Float> {
 }
 ```
 
-Defined at `normal.rs:26-29`. Constructor at `normal.rs:37-48`.
-Accessors at `normal.rs:50-58`.
+Defined at `normal.rs`. Constructor at `normal.rs`.
+Accessors at `normal.rs`.
 
 ### The Distribution impl (REQ-4, REQ-5, REQ-6, REQ-9, REQ-10, REQ-11, REQ-12)
 
-`batch_shape` (`normal.rs:62-65`) returns `loc.shape().to_vec()`.
+`batch_shape` (`batch_shape in normal.rs`) returns `loc.shape().to_vec()`.
 
-`sample` (`normal.rs:67-87`) draws `eps ~ N(0, 1)` then computes
+`sample` (`sample in normal.rs`) draws `eps ~ N(0, 1)` then computes
 `loc + scale * eps` element-wise with cyclic broadcast.
 
-`rsample` (`normal.rs:89-122`) follows the same closed form and
+`rsample` (`rsample in normal.rs`) follows the same closed form and
 attaches `NormalRsampleBackward` when either parameter has
 `requires_grad`.
 
-`log_prob` (`normal.rs:124-167`) computes
+`log_prob` (`log_prob in normal.rs`) computes
 `-(half * z^2) - ln(scale) - half * ln(2*pi)` where
 `z = (x - loc) / scale`, and attaches `NormalLogProbBackward`
 when any input has `requires_grad`.
 
-`entropy` (`normal.rs:169-193`) returns
+`entropy` (`entropy in normal.rs`) returns
 `0.5 + 0.5 * ln(2*pi) + ln(scale)`. Note that this is
 algebraically equivalent to `0.5 * ln(2*pi*e*scale^2)`.
 
-`cdf` (`normal.rs:195-219`) and `icdf` (`normal.rs:221-241`)
+`cdf` (`cdf in normal.rs`) and `icdf` (`icdf in normal.rs`)
 dispatch to `ferrotorch_core::special::{erf, erfinv}`.
 
-`mean` / `mode` (`normal.rs:243-249`) clone `loc`.
+`mean` / `mode` (`mode in normal.rs`) clone `loc`.
 
-`variance` (`normal.rs:251-256`) returns `scale^2`.
+`variance` (`variance in normal.rs`) returns `scale^2`.
 
-`stddev` (`normal.rs:258-260`) clones `scale`.
+`stddev` (`stddev in normal.rs`) clones `scale`.
 
 ### NormalRsampleBackward (REQ-7)
 
-Defined at `normal.rs:272-337`. Holds `loc`, `scale`, saved `eps`.
+Defined at `loc in normal.rs`. Holds `loc`, `scale`, saved `eps`.
 - `grad_loc = sum(grad_output)` — `d(z)/d(loc) = 1`.
 - `grad_scale = sum(grad_output * eps)` — `d(z)/d(scale) = eps`.
 
 ### NormalLogProbBackward (REQ-8)
 
-Defined at `normal.rs:347-452`. Holds `loc`, `scale`, `value`. The
+Defined at `loc in normal.rs`. Holds `loc`, `scale`, `value`. The
 3 partial derivatives are computed elementwise then folded across
 batch dims for the scalar parameters.
 
 ### Non-test production consumers
 
-- `pub use normal::Normal` at `lib.rs:114` — grandfathered
+- `pub use normal::Normal` at `lib.rs` — grandfathered
   public API. Downstream code (VAE encoders, BNN priors,
   diffusion models) constructs `Normal::new(loc, scale)?`.
-- **`mixture_same_family.rs:233-273` tests** — these are TEST-side
+- **`mixture_same_family.rs` tests** — these are TEST-side
   but the production-side consumer is `pub use Normal` plus the
   generic `D: Distribution<T>` bound in `MixtureSameFamily<T, D>`
   which the compiler instantiates with `D = Normal<T>` whenever
@@ -235,17 +235,17 @@ Expected: `15 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct Normal<T: Float>` with `loc`/`scale` fields at `normal.rs:26-29`, mirroring `torch/distributions/normal.py:15-66`; non-test consumer: `pub use normal::Normal` at `lib.rs:114`. |
-| REQ-2 | SHIPPED | impl: the constructor at `normal.rs:37-48` with shape-equality precondition, mirroring `normal.py:55-66`; non-test consumer: re-export at `lib.rs:114` exposes `::new`. |
-| REQ-3 | SHIPPED | impl: `loc()`/`scale()` accessors at `normal.rs:50-58`; non-test consumer: re-export at `lib.rs:114`. |
-| REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for Normal<T>` at `normal.rs:61-261` with 10 methods; non-test consumer: re-export at `lib.rs:114` + generic instantiation `MixtureSameFamily<T, Normal<T>>` in downstream composition. 15 tests pin behaviour. |
-| REQ-5 | SHIPPED | impl: `batch_shape` override at `normal.rs:62-65` returning `self.loc.shape().to_vec()`, mirroring `normal.py:62-66`; non-test consumer: `independent.rs` (the `Independent` wrapper) reads `base.batch_shape()` to compute its `event_dims` forwarding. |
-| REQ-6 | SHIPPED | impl: `loc + scale * eps` body in `sample` at `normal.rs:79`, mirroring `normal.py:82-85`; non-test consumer: re-export at `lib.rs:114`. |
-| REQ-7 | SHIPPED | impl: `NormalRsampleBackward` at `normal.rs:272-337` attached via `Tensor::from_operation` at `normal.rs:108-113`; non-test consumer: autograd engine traversal in `ferrotorch_core::tensor` invokes `backward()` on this `GradFn<T>`. Test `test_normal_rsample_backward` pins. |
-| REQ-8 | SHIPPED | impl: `NormalLogProbBackward` at `normal.rs:347-452` attached via `Tensor::from_operation` at `normal.rs:152-158`; non-test consumer: autograd engine in `ferrotorch_core::tensor` traverses this GradFn on `backward()` of any `log_prob` with grad-requiring inputs. |
-| REQ-9 | SHIPPED | impl: `cdf` body at `normal.rs:195-219` dispatching to `ferrotorch_core::special::erf` at `normal.rs:215`, mirroring `normal.py:103-108`; non-test consumer: re-export at `lib.rs:114` + `Distribution::cdf` external invocation. Test `test_normal_cdf_at_mean_is_half` pins. |
-| REQ-10 | SHIPPED | impl: `icdf` body at `normal.rs:221-241` dispatching to `ferrotorch_core::special::erfinv` at `normal.rs:229`, mirroring `normal.py:110-111`; non-test consumer: re-export at `lib.rs:114` + `Distribution::icdf` external invocation. Test `test_normal_cdf_icdf_roundtrip` pins. |
-| REQ-11 | SHIPPED | impl: `mean`/`mode`/`variance`/`stddev`/`entropy` at `normal.rs:243-261` and `normal.rs:169-193`, mirroring `normal.py:39-53, 113-114`; non-test consumer: re-export at `lib.rs:114` + `Distribution` trait surface external invocation. |
-| REQ-12 | SHIPPED | impl: `out.to(device)` at the tail of every method (e.g. `normal.rs:82-86`); non-test consumer: every external caller receives device-correct tensors. |
+| REQ-1 | SHIPPED | impl: `pub struct Normal<T: Float>` with `loc`/`scale` fields at `Normal in normal.rs`, mirroring `torch/distributions/normal.py:15-66`; non-test consumer: `pub use normal::Normal` at `lib.rs`. |
+| REQ-2 | SHIPPED | impl: the constructor at `new in normal.rs` with shape-equality precondition, mirroring `normal.py:55-66`; non-test consumer: re-export at `lib.rs` exposes `::new`. |
+| REQ-3 | SHIPPED | impl: `loc()`/`scale()` accessors at `scale in normal.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for Normal<T>` at `normal.rs` with 10 methods; non-test consumer: re-export at `lib.rs` + generic instantiation `MixtureSameFamily<T, Normal<T>>` in downstream composition. 15 tests pin behaviour. |
+| REQ-5 | SHIPPED | impl: `batch_shape` override at `batch_shape in normal.rs` returning `self.loc.shape().to_vec()`, mirroring `normal.py:62-66`; non-test consumer: `independent.rs` (the `Independent` wrapper) reads `base.batch_shape()` to compute its `event_dims` forwarding. |
+| REQ-6 | SHIPPED | impl: `loc + scale * eps` body in `sample in normal.rs`, mirroring `normal.py:82-85`; non-test consumer: re-export at `lib.rs`. |
+| REQ-7 | SHIPPED | impl: `NormalRsampleBackward in normal.rs` attached via `Tensor::from_operation` at `from_operation in normal.rs`; non-test consumer: autograd engine traversal in `ferrotorch_core::tensor` invokes `backward()` on this `GradFn<T>`. Test `test_normal_rsample_backward` pins. |
+| REQ-8 | SHIPPED | impl: `NormalLogProbBackward in normal.rs` attached via `Tensor::from_operation` at `from_operation in normal.rs`; non-test consumer: autograd engine in `ferrotorch_core::tensor` traverses this GradFn on `backward()` of any `log_prob` with grad-requiring inputs. |
+| REQ-9 | SHIPPED | impl: `cdf` body at `cdf in normal.rs` dispatching to `ferrotorch_core::special::erf` at `erf in normal.rs`, mirroring `normal.py:103-108`; non-test consumer: re-export at `lib.rs` + `Distribution::cdf` external invocation. Test `test_normal_cdf_at_mean_is_half` pins. |
+| REQ-10 | SHIPPED | impl: `icdf` body at `icdf in normal.rs` dispatching to `ferrotorch_core::special::erfinv` at `erfinv in normal.rs`, mirroring `normal.py:110-111`; non-test consumer: re-export at `lib.rs` + `Distribution::icdf` external invocation. Test `test_normal_cdf_icdf_roundtrip` pins. |
+| REQ-11 | SHIPPED | impl: `mean`/`mode`/`variance`/`stddev`/`entropy in normal.rs` and `entropy in normal.rs`, mirroring `normal.py:39-53, 113-114`; non-test consumer: re-export at `lib.rs` + `Distribution` trait surface external invocation. |
+| REQ-12 | SHIPPED | impl: `out.to(device)` at the tail of every method (e.g. `normal.rs`); non-test consumer: every external caller receives device-correct tensors. |
 | REQ-14 | SHIPPED | impl: `has_rsample` / `support` / `arg_constraints` / `event_shape` / `expand` trait overrides at the tail of `impl Distribution<T> for Normal<T>` in `normal.rs` mirroring `torch/distributions/normal.py:15-58`; non-test consumer: `pub use normal::Normal` at `lib.rs` exposes the trait surface; `tests/divergence_distribution_trait_surface.rs::normal_has_rsample_true / normal_support_is_real / normal_arg_constraints_loc_real_scale_positive / normal_expand_broadcasts_loc_and_scale / normal_expand_from_batched_params` pin every override. Closes #1376 partial. |
 | REQ-13 | NOT-STARTED | blocker #1404 — `ExponentialFamily` interface (`_natural_params`/`_log_normalizer`/`_mean_carrier_measure` from `normal.py:116-122`) not implemented; ferrotorch's `Normal` is a plain `Distribution`. |

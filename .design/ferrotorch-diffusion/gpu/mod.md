@@ -45,18 +45,18 @@ referring to per-sub-module paths.
 
 This is a one-liner-per-sub-module re-export hub. No tensor math.
 
-- `#![cfg(feature = "cuda")]` at `gpu/mod.rs:1` gates the entire
+- `#![cfg(feature = "cuda")]` at `gpu/mod.rs` gates the entire
   module so CPU-only builds drop the GPU code at compile time.
-- `pub mod` declarations at `gpu/mod.rs:28..32` register the five
+- `pub mod` declarations at `gpu/mod.rs` register the five
   sub-modules (alphabetical).
-- `pub use` block at `gpu/mod.rs:34..38` re-exports each
+- `pub use` block at `gpu/mod.rs` re-exports each
   sub-module's top-level public type.
-- Module rustdoc at `gpu/mod.rs:3..27` describes per-sub-model
+- Module rustdoc at `gpu/mod.rs` describes per-sub-model
   scope, gating, and the in-VRAM-residency contract.
 
 Non-test production consumers:
 
-- `ferrotorch-diffusion/src/gpu/pipeline.rs:46..48` imports
+- `ferrotorch-diffusion/src/gpu/pipeline.rs` imports
   `GpuClipTextEncoder`, `GpuUNet2DConditional`, and `GpuVaeDecoder`
   through these re-exports.
 - `ferrotorch-diffusion/examples/sd_pipeline_dump.rs:482` imports
@@ -92,6 +92,6 @@ No parity-sweep ops apply.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub mod` block at `ferrotorch-diffusion/src/gpu/mod.rs:28..32`; non-test consumer: `ferrotorch-diffusion/src/gpu/pipeline.rs:46..48` resolves `crate::gpu::clip::GpuClipTextEncoder` / `unet::GpuUNet2DConditional` / `vae::GpuVaeDecoder` through these declarations |
-| REQ-2 | SHIPPED | impl: `pub use` block at `ferrotorch-diffusion/src/gpu/mod.rs:34..38`; non-test consumer: `ferrotorch-diffusion/examples/sd_pipeline_dump.rs:482` uses the re-exports to construct the full GPU pipeline |
-| REQ-3 | SHIPPED | impl: module rustdoc at `ferrotorch-diffusion/src/gpu/mod.rs:3..27`; non-test consumer: `cargo doc -p ferrotorch-diffusion --features cuda` renders the module landing page and the five sub-modules link back through this rustdoc |
+| REQ-1 | SHIPPED | impl: `pub mod` block at `ferrotorch-diffusion/src/gpu/mod.rs`; non-test consumer: `ferrotorch-diffusion/src/gpu/pipeline.rs` resolves `crate::gpu::clip::GpuClipTextEncoder` / `unet::GpuUNet2DConditional` / `vae::GpuVaeDecoder` through these declarations |
+| REQ-2 | SHIPPED | impl: `pub use` block at `ferrotorch-diffusion/src/gpu/mod.rs`; non-test consumer: `ferrotorch-diffusion/examples/sd_pipeline_dump.rs` uses the re-exports to construct the full GPU pipeline |
+| REQ-3 | SHIPPED | impl: module rustdoc at `ferrotorch-diffusion/src/gpu/mod.rs`; non-test consumer: `cargo doc -p ferrotorch-diffusion --features cuda` renders the module landing page and the five sub-modules link back through this rustdoc |

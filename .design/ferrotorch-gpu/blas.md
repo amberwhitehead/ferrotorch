@@ -134,35 +134,35 @@ the outer index passed as `batch_count`.
 
 The non-test production consumer is `ferrotorch-core/src/gpu_dispatch.rs`
 which dispatches the core-tensor matmul path to the GPU backend; the GPU
-backend's `backend_impl.rs:2590` calls `gpu_matmul_f32`, and `:2679`
+backend's `gpu_matmul_f32 in backend_impl.rs` calls `gpu_matmul_f32`, and `gpu_matmul_f32 in backend_impl.rs`
 calls `gpu_matmul_f64`. The `gpu_bmm` family is consumed at
-`backend_impl.rs:3006` (f32) and `:2388` (f64). The broadcast
-bmm pair lands at `:3025` (f32) and `:2407` (f64).
+`backend_impl.rs` (f32) and `backend_impl.rs` (f64). The broadcast
+bmm pair lands at `backend_impl.rs` (f32) and `backend_impl.rs` (f64).
 
 ### Dot / matvec (REQ-4, REQ-5)
 
 `pub fn gpu_dot_f32 in blas.rs` / `gpu_dot_f64 in blas.rs` wrap
 `cublasSdot` / `cublasDdot` for the 1-D dot product. Consumers in
-`backend_impl.rs:2694` and the f64 mirror. `gpu_mv_f32` /
+`gpu_mv_f32 in backend_impl.rs` and the f64 mirror. `gpu_mv_f32` /
 `gpu_mv_f64` / `gpu_vm_f32` / `gpu_vm_f64` wrap `cublasSgemv` /
-`cublasDgemv`; the consumer arms are at `backend_impl.rs:2721`
-(`mv_f32`), `:2749` (`vm_f32`), and the f64 mirrors.
+`cublasDgemv`; the consumer arms are at `backend_impl.rs`
+(`mv_f32`), `mv_f32 in backend_impl.rs` (`vm_f32`), and the f64 mirrors.
 
 ### f16 / bf16 paths (REQ-6, REQ-7)
 
 `pub fn gpu_matmul_f16 in blas.rs` calls `cublasGemmEx` with
 `CUDA_R_16F` input type and `CUBLAS_COMPUTE_32F` compute type. Mirrors
 PyTorch's `bgemm_internal_cublas<at::Half>` at
-`aten/src/ATen/cuda/CUDABlas.cpp:758`. Consumer at `backend_impl.rs:3909`.
+`aten/src/ATen/cuda/CUDABlas.cpp:758`. Consumer at `backend_impl.rs`.
 
 `pub fn gpu_matmul_bf16 in blas.rs` / `gpu_matmul_bf16_bf16 in blas.rs`
 / `gpu_matmul_bf16_bf16_nt in blas.rs` mirror PyTorch's
 `bgemm_internal_cublas<at::BFloat16>` at
 `aten/src/ATen/cuda/CUDABlas.cpp:768`. The `_nt` variant takes B
 already transposed (an optimisation for back-prop weight grads).
-Consumers at `backend_impl.rs:3063`, `:3095`, `:5132`. The strided-
+Consumers at `backend_impl.rs`, `backend_impl.rs`, `backend_impl.rs`. The strided-
 batched variants `gpu_matmul_bf16_bf16_strided_batched` and
-`_strided_batched_nt` land at `backend_impl.rs:3115`.
+`_strided_batched_nt` land at `backend_impl.rs`.
 
 ### Device-return `_into` (REQ-8)
 
@@ -249,12 +249,12 @@ path that user-facing `Tensor::matmul` / `Tensor::bmm` resolve to.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub fn gpu_matmul_f32 in blas.rs` and `pub fn gpu_matmul_f64 in blas.rs` mirror cuBLAS SGEMM / DGEMM per upstream `aten/src/ATen/cuda/CUDABlas.cpp:798,780`. Non-test consumer: `ferrotorch-gpu/src/backend_impl.rs:2590` (f32) and `:2679` (f64) — the cuda backend's matmul dispatch arm, reached from `ferrotorch-core/src/gpu_dispatch.rs` when `Tensor::matmul` routes to GPU. |
-| REQ-2 | SHIPPED | impl: `pub fn gpu_bmm_f32 in blas.rs` and `pub fn gpu_bmm_f64 in blas.rs` per upstream `aten/src/ATen/cuda/CUDABlas.cpp:975,964` (cublasSgemmStridedBatched / cublasDgemmStridedBatched). Non-test consumer: `backend_impl.rs:3006` (f32) and `:2388` (f64). |
-| REQ-3 | SHIPPED | impl: `pub fn gpu_broadcast_bmm_f32 in blas.rs` and `pub fn gpu_broadcast_bmm_f64 in blas.rs`. Non-test consumer: `backend_impl.rs:3025` (f32) and `:2407` (f64). |
-| REQ-4 | SHIPPED | impl: `pub fn gpu_dot_f32 in blas.rs` and `pub fn gpu_dot_f64 in blas.rs` wrap `cublasSdot` / `cublasDdot`. Non-test consumer: `backend_impl.rs:2694` (f32). |
-| REQ-5 | SHIPPED | impl: `pub fn gpu_mv_f32` / `gpu_mv_f64` / `gpu_vm_f32` / `gpu_vm_f64 in blas.rs` wrap cublasSgemv/Dgemv. Non-test consumer: `backend_impl.rs:2721` (mv_f32) and `:2749` (vm_f32). |
-| REQ-6 | SHIPPED | impl: `pub fn gpu_matmul_f16 in blas.rs` and `gpu_matmul_f16_f16 in blas.rs` and `gpu_bmm_f16 in blas.rs` per upstream `aten/src/ATen/cuda/CUDABlas.cpp:758`. Non-test consumer: `backend_impl.rs:3909` (f16 matmul) and `:5773` (f16 matmul f16_f16). |
-| REQ-7 | SHIPPED | impl: `pub fn gpu_matmul_bf16 in blas.rs`, `gpu_matmul_bf16_bf16 in blas.rs`, `gpu_matmul_bf16_bf16_nt in blas.rs`, `gpu_bmm_bf16 in blas.rs`, `gpu_matmul_bf16_bf16_strided_batched in blas.rs`, `gpu_matmul_bf16_bf16_strided_batched_nt in blas.rs` per upstream `aten/src/ATen/cuda/CUDABlas.cpp:768`. Non-test consumer: `backend_impl.rs:3063` (matmul_bf16), `:3095` (matmul_bf16_bf16), `:3115` (strided_batched), `:5132` (_nt variant). |
+| REQ-2 | SHIPPED | impl: `pub fn gpu_bmm_f32 in blas.rs` and `pub fn gpu_bmm_f64 in blas.rs` per upstream `aten/src/ATen/cuda/CUDABlas.cpp:975,964` (cublasSgemmStridedBatched / cublasDgemmStridedBatched). Non-test consumer: `backend_impl.rs` (f32) and `backend_impl.rs` (f64). |
+| REQ-3 | SHIPPED | impl: `pub fn gpu_broadcast_bmm_f32 in blas.rs` and `pub fn gpu_broadcast_bmm_f64 in blas.rs`. Non-test consumer: `gpu_broadcast_bmm_f64 in backend_impl.rs` (f32) and `backend_impl.rs` (f64). |
+| REQ-4 | SHIPPED | impl: `pub fn gpu_dot_f32 in blas.rs` and `pub fn gpu_dot_f64 in blas.rs` wrap `cublasSdot` / `cublasDdot`. Non-test consumer: `backend_impl.rs` (f32). |
+| REQ-5 | SHIPPED | impl: `pub fn gpu_mv_f32` / `gpu_mv_f64` / `gpu_vm_f32` / `gpu_vm_f64 in blas.rs` wrap cublasSgemv/Dgemv. Non-test consumer: `gpu_vm_f64 in backend_impl.rs` (mv_f32) and `gpu_vm_f64 in backend_impl.rs` (vm_f32). |
+| REQ-6 | SHIPPED | impl: `pub fn gpu_matmul_f16 in blas.rs` and `gpu_matmul_f16_f16 in blas.rs` and `gpu_bmm_f16 in blas.rs` per upstream `aten/src/ATen/cuda/CUDABlas.cpp:758`. Non-test consumer: `gpu_bmm_f16 in backend_impl.rs` (f16 matmul) and `gpu_bmm_f16 in backend_impl.rs` (f16 matmul f16_f16). |
+| REQ-7 | SHIPPED | impl: `pub fn gpu_matmul_bf16 in blas.rs`, `gpu_matmul_bf16_bf16 in blas.rs`, `gpu_matmul_bf16_bf16_nt in blas.rs`, `gpu_bmm_bf16 in blas.rs`, `gpu_matmul_bf16_bf16_strided_batched in blas.rs`, `gpu_matmul_bf16_bf16_strided_batched_nt in blas.rs` per upstream `aten/src/ATen/cuda/CUDABlas.cpp:768`. Non-test consumer: `gpu_matmul_bf16_bf16_strided_batched in backend_impl.rs` (matmul_bf16), `gpu_matmul_bf16_bf16_strided_batched in backend_impl.rs` (matmul_bf16_bf16), `gpu_matmul_bf16_bf16_strided_batched in backend_impl.rs` (strided_batched), `gpu_matmul_bf16_bf16_strided_batched in backend_impl.rs` (_nt variant). |
 | REQ-8 | NOT-STARTED | impl: `pub fn gpu_matmul_f32_into in blas.rs` and `pub fn gpu_bmm_f32_into in blas.rs` exist as vocabulary, but workspace-wide audit (divergence test `ferrotorch-gpu/tests/divergence_blas_req8_into_consumers.rs`) finds ZERO non-test, non-definition, non-re-export consumers — both symbols are also listed in `ferrotorch-gpu/tests/conformance/_surface_exclusions.toml` (lines 430,435) with `reason = "deferred"`. Per goal.md R-DEFER-2 a vocab-only `pub fn` is NOT-STARTED, not SHIPPED. Blocked on #1360 (wire `_into` variants into the zero-host-bounce matmul/bmm dispatch path). |
 | REQ-9 | SHIPPED | impl: every `cfg(feature = "cuda")` entry point has a `cfg(not(feature = "cuda"))` stub at the bottom of `blas.rs` (e.g. `gpu_matmul_f32 in blas.rs` lines 3230, 3243, 1500, 1510, etc. for the stub block). Non-test consumer: the no-cuda compile path of the same backend_impl dispatch arms uses these stubs — `cargo build -p ferrotorch-gpu --no-default-features` succeeds because every cuda-only function has a matching stub. |
-| REQ-10 | SHIPPED | impl: every cuBLAS call is wrapped to surface `GpuError::Blas(...)` or `GpuError::Driver(...)`; no `unwrap` / `expect` in production code outside `#[cfg(test)]`. The module-level `//!` doc-comment at `blas.rs:26-37` explicitly documents the no-silent-CPU-fallback policy. Non-test consumer: every caller in `backend_impl.rs` uses `.map_err(Self::map_gpu_err)?` to thread the structured error to the core-side `Result`. |
+| REQ-10 | SHIPPED | impl: every cuBLAS call is wrapped to surface `GpuError::Blas(...)` or `GpuError::Driver(...)`; no `unwrap` / `expect` in production code outside `#[cfg(test)]`. The module-level `//!` doc-comment at `blas in blas.rs` explicitly documents the no-silent-CPU-fallback policy. Non-test consumer: every caller in `backend_impl.rs` uses `.map_err(Self::map_gpu_err)?` to thread the structured error to the core-side `Result`. |

@@ -81,10 +81,10 @@ unknown HF schema field cannot silently land into a parameter.
 ### Non-test production consumers
 
 - `pub use layer::WhisperEncoderLayer` at
-  `ferrotorch-whisper/src/lib.rs:109`.
+  `ferrotorch-whisper/src/lib.rs`.
 - `pub layers: Vec<WhisperEncoderLayer<T>>` field of
   `pub struct WhisperEncoder` at
-  `ferrotorch-whisper/src/encoder.rs:150`; `WhisperEncoder::new` at
+  `WhisperEncoder in ferrotorch-whisper/src/encoder.rs`; `WhisperEncoder::new` at
   `ferrotorch-whisper/src/encoder.rs:170` constructs them in a
   loop; `WhisperEncoder::forward_from_mel` at
   `ferrotorch-whisper/src/encoder.rs:232` iterates through them.

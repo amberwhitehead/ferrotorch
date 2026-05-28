@@ -100,38 +100,38 @@ pub struct Kumaraswamy<T: Float> {
 }
 ```
 
-Constructor (`kumaraswamy.rs:28-40`) takes ownership of both
+Constructor (`kumaraswamy.rs`) takes ownership of both
 parameter tensors and checks `a.shape() == b.shape()`. The accessors
 `a()` and `b()` return shared borrows for downstream introspection.
 
 ### The Distribution impl (REQ-4, REQ-5)
 
-`sample` (`kumaraswamy.rs:50-82`) draws `u ~ Uniform(0,1)` then
+`sample` (`sample in kumaraswamy.rs`) draws `u ~ Uniform(0,1)` then
 applies the inverse CDF element-wise. The cyclic indexing
 (`ai = i % a_data.len()`) supports scalar parameters broadcast
 against any sample shape — matches PyTorch's broadcasting rule
 implicitly. The `.max(T::from(1e-30))` clamp before `powf(1/a)`
 prevents `log(0)` cascades when `u` is at the boundary.
 
-`log_prob` (`kumaraswamy.rs:90-120`) computes
+`log_prob` (`log_prob in kumaraswamy.rs`) computes
 `log(a) + log(b) + (a-1)*log(x) + (b-1)*log(1 - x^a)` and returns
 `-infinity` outside `(0, 1)`. Matches the analytic PDF derived
 from the upstream `TransformedDistribution.log_prob` reduction.
 
-`cdf` / `icdf` (`kumaraswamy.rs:153-191`) use the closed forms
+`cdf` / `icdf` (`icdf in kumaraswamy.rs`) use the closed forms
 `F(x) = 1 - (1 - x^a)^b` and
 `F^{-1}(p) = (1 - (1 - p)^(1/b))^(1/a)`.
 
-`mean` / `variance` (`kumaraswamy.rs:193-256`) use the
+`mean` / `variance` (`variance in kumaraswamy.rs`) use the
 moment formula `E[X^n] = b * B(1 + n/a, b)` evaluated via
 `lgamma_scalar` to avoid overflow. Mirrors upstream's `_moments`
 helper at `kumaraswamy.py:15-21`.
 
-`mode` (`kumaraswamy.rs:210-234`) returns
+`mode` (`mode in kumaraswamy.rs`) returns
 `((a-1) / (a*b - 1))^(1/a)` when `a > 1` and `b >= 1`, else `0`
 defensively (see REQ-7 divergence).
 
-`entropy` (`kumaraswamy.rs:122-151`) uses the closed form
+`entropy` (`entropy in kumaraswamy.rs`) uses the closed form
 `(1 - 1/a)*(γ + ψ(b+1)) + (1 - 1/b) - ln(a) - ln(b)` where
 `γ` is Euler-Mascheroni and `ψ` is digamma, dispatched via
 `special_fns::digamma_scalar`. Mirrors upstream
@@ -139,7 +139,7 @@ defensively (see REQ-7 divergence).
 
 ### Non-test production consumers
 
-- `pub use kumaraswamy::Kumaraswamy` at `lib.rs:107` — grandfathered
+- `pub use kumaraswamy::Kumaraswamy` at `lib.rs` — grandfathered
   public API. Downstream code (Bayesian inference layers, VAE
   prior modules) constructs `Kumaraswamy::new(a, b)?` directly.
 - `special_fns::{digamma_scalar, lgamma_scalar}` are the production
@@ -202,11 +202,11 @@ Expected: `8 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct Kumaraswamy<T: Float>` with `a` and `b` `Tensor<T>` fields in `kumaraswamy.rs:23-26`, mirroring `torch/distributions/kumaraswamy.py:24-70`; non-test consumer: `pub use kumaraswamy::Kumaraswamy` at `lib.rs:107` exposes the type as grandfathered public API for downstream Bayesian-inference / VAE-prior modules. |
-| REQ-2 | SHIPPED | impl: the constructor at `kumaraswamy.rs:29-40` with `shape(a) == shape(b)` precondition + `ShapeMismatch` error path, mirroring `kumaraswamy.py:56` (`broadcast_all`); non-test consumer: `pub use Kumaraswamy::new` via the re-export at `lib.rs:107`. |
-| REQ-3 | SHIPPED | impl: the `a()` and `b()` accessors at `kumaraswamy.rs:42-47`, mirroring upstream property access at `kumaraswamy.py:56-58`; non-test consumer: `pub use` re-export at `lib.rs:107` makes the accessors part of the public surface for parameter introspection. |
-| REQ-4 | SHIPPED | impl: the full `impl<T: Float> Distribution<T> for Kumaraswamy<T>` block at `kumaraswamy.rs:50-257` with `sample`/`log_prob`/`entropy`/`cdf`/`icdf`/`mean`/`mode`/`variance`, mirroring `torch/distributions/kumaraswamy.py:78-107`; non-test consumer: `pub use Kumaraswamy` re-export at `lib.rs:107` means any external Distribution-trait caller hits this impl. Tests pin all 8 methods. |
-| REQ-5 | SHIPPED | impl: the inverse-CDF body in `sample` at `kumaraswamy.rs:73-78` (`inner = (one - u)^(1/b); val = (1 - inner)^(1/a)`), mirroring the chained PowerTransform + AffineTransform at `kumaraswamy.py:64-68`; non-test consumer: `pub use Kumaraswamy` re-export + Distribution-trait `sample` invocation. Test `test_kumaraswamy_sample_range` pins the `(0, 1)` support. |
-| REQ-6 | NOT-STARTED | blocker #1383 — `rsample` returns `InvalidArgument("not yet implemented")` at `kumaraswamy.rs:84-88` instead of the closed-form differentiable expression upstream provides via `has_rsample = True` (`kumaraswamy.py:48`). |
-| REQ-7 | NOT-STARTED | blocker #1384 — mode boundary semantics divergence: ferrotorch returns `0` at `kumaraswamy.rs:228-231` for `a <= 1` or `b < 1`, upstream returns `NaN` (`kumaraswamy.py:89`). |
-| REQ-8 | SHIPPED | impl: `digamma_b1 = digamma_scalar(b[i] + one)` at `kumaraswamy.rs:143` using the shifted-asymptotic expansion from `special_fns`, mirroring upstream `torch.digamma(self.concentration0 + 1)` at `kumaraswamy.py:101`; non-test consumer: invoked by `entropy()` at `kumaraswamy.rs:144`. |
+| REQ-1 | SHIPPED | impl: `pub struct Kumaraswamy<T: Float>` with `a` and `b` `Tensor<T>` fields in `Kumaraswamy in kumaraswamy.rs`, mirroring `torch/distributions/kumaraswamy.py:24-70`; non-test consumer: `pub use kumaraswamy::Kumaraswamy` at `lib.rs` exposes the type as grandfathered public API for downstream Bayesian-inference / VAE-prior modules. |
+| REQ-2 | SHIPPED | impl: the constructor at `shape in kumaraswamy.rs` with `shape(a) == shape(b)` precondition + `ShapeMismatch` error path, mirroring `kumaraswamy.py:56` (`broadcast_all`); non-test consumer: `pub use Kumaraswamy::new` via the re-export at `shape in lib.rs`. |
+| REQ-3 | SHIPPED | impl: the `a()` and `b()` accessors at `b in kumaraswamy.rs`, mirroring upstream property access at `kumaraswamy.py:56-58`; non-test consumer: `pub use` re-export at `lib.rs` makes the accessors part of the public surface for parameter introspection. |
+| REQ-4 | SHIPPED | impl: the full `impl<T: Float> Distribution<T> for Kumaraswamy<T>` block at `sample in kumaraswamy.rs` with `sample`/`log_prob`/`entropy`/`cdf`/`icdf`/`mean`/`mode`/`variance`, mirroring `torch/distributions/kumaraswamy.py:78-107`; non-test consumer: `pub use Kumaraswamy` re-export at `lib.rs` means any external Distribution-trait caller hits this impl. Tests pin all 8 methods. |
+| REQ-5 | SHIPPED | impl: the inverse-CDF body in `sample in kumaraswamy.rs` (`inner = (one - u)^(1/b); val = (1 - inner)^(1/a)`), mirroring the chained PowerTransform + AffineTransform at `kumaraswamy.py:64-68`; non-test consumer: `pub use Kumaraswamy` re-export + Distribution-trait `sample` invocation. Test `test_kumaraswamy_sample_range` pins the `(0, 1)` support. |
+| REQ-6 | NOT-STARTED | blocker #1383 — `rsample` returns `InvalidArgument("not yet implemented")` at `rsample in kumaraswamy.rs` instead of the closed-form differentiable expression upstream provides via `has_rsample = True` (`kumaraswamy.py:48`). |
+| REQ-7 | NOT-STARTED | blocker #1384 — mode boundary semantics divergence: ferrotorch returns `0` at `b in kumaraswamy.rs` for `a <= 1` or `b < 1`, upstream returns `NaN` (`kumaraswamy.py:89`). |
+| REQ-8 | SHIPPED | impl: `digamma_b1 = digamma_scalar(b[i] + one)` at `entropy in kumaraswamy.rs` using the shifted-asymptotic expansion from `special_fns`, mirroring upstream `torch.digamma(self.concentration0 + 1)` at `kumaraswamy.py:101`; non-test consumer: invoked by `entropy()` at `entropy in kumaraswamy.rs`. |

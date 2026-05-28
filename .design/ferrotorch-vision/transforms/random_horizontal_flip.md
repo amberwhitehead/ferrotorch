@@ -46,9 +46,9 @@ tensor along the W (width) axis with probability `p`. Mirrors
 - [x] AC-1: `RandomHorizontalFlip::new(0.5)` succeeds; `new(-0.1)` and
   `new(1.5)` return `Err(InvalidArgument)`.
 - [x] AC-2: With `p = 1.0`, applying to row `[1,2,3]` yields `[3,2,1]`
-  (verified by `test_horizontal_flip_shape` at `random_horizontal_flip.rs:80`).
+  (verified by `test_horizontal_flip_shape in random_horizontal_flip.rs`).
 - [x] AC-3: With `p = 0.0`, output equals input (verified by
-  `test_horizontal_flip_zero_prob` at `random_horizontal_flip.rs:96`).
+  `test_horizontal_flip_zero_prob in random_horizontal_flip.rs`).
 - [x] AC-4: Non-3-D input returns `Err(InvalidArgument)`.
 
 ## Architecture
@@ -62,7 +62,7 @@ pub struct RandomHorizontalFlip<T: Float> {
 }
 ```
 
-at `random_horizontal_flip.rs:11-14`. `p` is `f64` because the
+at `p in random_horizontal_flip.rs`. `p` is `f64` because the
 upstream API takes a Python float; `PhantomData<T>` lets the generic
 parameter flow into the `Transform<T>` impl without storing it.
 
@@ -79,7 +79,7 @@ pub fn new(p: f64) -> FerrotorchResult<Self> {
 }
 ```
 
-at `random_horizontal_flip.rs:22-32`. Range-rejection matches upstream
+at `random_horizontal_flip.rs`. Range-rejection matches upstream
 behaviour.
 
 ### Default impl (REQ-3)
@@ -92,13 +92,13 @@ impl<T: Float> Default for RandomHorizontalFlip<T> {
 }
 ```
 
-at `random_horizontal_flip.rs:35-40`. The `.expect` documents the
+at `random_horizontal_flip.rs`. The `.expect` documents the
 construction invariant; `0.5` is in `[0, 1]` so `new` cannot return
 `Err`. The `.expect` is not a panic path in practice.
 
 ### Transform impl (REQ-4)
 
-`fn apply` at `random_horizontal_flip.rs:42-73`:
+`fn apply` at `apply in random_horizontal_flip.rs`:
 
 1. Check `shape.len() == 3` else return `InvalidArgument`.
 2. Draw `random_f64()`; if `>= p`, return input unchanged.
@@ -115,7 +115,7 @@ torch-level slice-reverse, no SIMD lowering yet.
   `ferrotorch-vision/src/transforms/mod.rs:27` — submodule re-export.
 - (Note: `RandomHorizontalFlip` is NOT re-exported at the crate root
   in `lib.rs:113-115` — the crate-root re-export list omits it,
-  inconsistent with `RandomVerticalFlip` which IS in `lib.rs:114`.
+  inconsistent with `RandomVerticalFlip` which IS in `lib.rs`.
   Callers reach it via `ferrotorch_vision::transforms::RandomHorizontalFlip`.
   Logged as cleanup; not a blocker for this REQ since the `transforms::`
   path is a valid public surface.)
@@ -138,10 +138,10 @@ gate; numerical contract:
 
 Tests in `mod tests in random_horizontal_flip.rs` (2 tests):
 
-- `test_horizontal_flip_shape` at `random_horizontal_flip.rs:80-93`
+- `test_horizontal_flip_shape in random_horizontal_flip.rs`
   verifies the `[3,2,1] / [6,5,4]` column-reverse for a `[1,2,3]`
   tensor with `p = 1.0`.
-- `test_horizontal_flip_zero_prob` at `random_horizontal_flip.rs:96-106`
+- `test_horizontal_flip_zero_prob in random_horizontal_flip.rs`
   verifies identity at `p = 0.0`.
 
 Smoke:
@@ -157,6 +157,6 @@ Expected: `2 passed`.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub struct RandomHorizontalFlip<T: Float>` with `p: f64` and `_marker: PhantomData<T>` at `ferrotorch-vision/src/transforms/random_horizontal_flip.rs:11-14`, mirroring `torchvision/transforms/v2/_geometry.py:34` `class RandomHorizontalFlip(_RandomApplyTransform)`; non-test consumer: `pub use random_horizontal_flip::RandomHorizontalFlip;` at `ferrotorch-vision/src/transforms/mod.rs:27` exposes it through the public `transforms` namespace. |
-| REQ-2 | SHIPPED | impl: `pub fn RandomHorizontalFlip::new(p: f64) -> FerrotorchResult<Self>` with `(0.0..=1.0).contains(&p)` validation at `random_horizontal_flip.rs:22-32`; non-test consumer: reachable via the `pub use` at `mod.rs:27`; user code calls `RandomHorizontalFlip::new(0.5)?` to construct the transform. |
-| REQ-3 | SHIPPED | impl: `impl Default for RandomHorizontalFlip<T>` returning `Self::new(0.5).expect(...)` at `random_horizontal_flip.rs:35-40`; non-test consumer: the `Default` trait is reachable via the `pub use` re-export; downstream code uses `RandomHorizontalFlip::default()` when no custom probability is needed. |
-| REQ-4 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomHorizontalFlip<T>` with shape check, random gate, and column-reverse loop at `random_horizontal_flip.rs:42-73`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this type, so it composes into `Compose<T>` or `RandomApply<T>` pipelines — that's the production surface. The `pub use` at `mod.rs:27` makes the impl reachable. |
+| REQ-2 | SHIPPED | impl: `pub fn RandomHorizontalFlip::new(p: f64) -> FerrotorchResult<Self>` with `(0.0..=1.0).contains(&p)` validation at `new in random_horizontal_flip.rs`; non-test consumer: reachable via the `pub use` at `mod.rs`; user code calls `RandomHorizontalFlip::new(0.5)?` to construct the transform. |
+| REQ-3 | SHIPPED | impl: `impl Default for RandomHorizontalFlip<T>` returning `Self::new(0.5).expect(...)` at `new in random_horizontal_flip.rs`; non-test consumer: the `Default` trait is reachable via the `pub use` re-export; downstream code uses `RandomHorizontalFlip::default()` when no custom probability is needed. |
+| REQ-4 | SHIPPED | impl: `impl<T: Float> Transform<T> for RandomHorizontalFlip<T>` with shape check, random gate, and column-reverse loop at `random_horizontal_flip.rs`; non-test consumer: any `Box<dyn Transform<T>>` slot accepts this type, so it composes into `Compose<T>` or `RandomApply<T>` pipelines — that's the production surface. The `pub use` at `mod.rs` makes the impl reachable. |

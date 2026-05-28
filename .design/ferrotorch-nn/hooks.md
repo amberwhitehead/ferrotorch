@@ -241,7 +241,7 @@ Mutex from outside the wrapper, defeating the point of the
 ### Non-test production consumers
 
 - `pub use hooks::{BackwardHook, ForwardHook, ForwardPreHook, HookHandle, HookedModule}` in `lib.rs:203`.
-- `ferrotorch-nn/src/module.rs:6` — `use crate::hooks::{BackwardHook, ForwardHook, ForwardPreHook, HookHandle, HookedModule}`. The `Module` trait's `with_*_hook` methods (REQ-13 of `module.md`) wrap `Self` into a `HookedModule` and register a hook in one call.
+- `Module in ferrotorch-nn/src/module.rs` — `use crate::hooks::{BackwardHook, ForwardHook, ForwardPreHook, HookHandle, HookedModule}`. The `Module` trait's `with_*_hook` methods (REQ-13 of `module.md`) wrap `Self` into a `HookedModule` and register a hook in one call.
 - Downstream observability code that wraps any layer for activation logging / gradient inspection invokes `layer.with_forward_hook(...)`.
 
 The `with_*_hook` methods on the `Module` trait are the
@@ -302,7 +302,7 @@ Expected: `12 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub type ForwardHook<T>` / `ForwardPreHook<T>` / `BackwardHook<T>` with `Send + Sync` bounds in `hooks.rs` mirroring PyTorch's hook closure signatures from `torch/nn/modules/module.py:1340-1660`; non-test consumer: `ferrotorch-nn/src/module.rs:6` `use crate::hooks::{BackwardHook, ForwardHook, ForwardPreHook, HookHandle, HookedModule}` — the trait's `with_*_hook` methods consume the type aliases. |
+| REQ-1 | SHIPPED | impl: `pub type ForwardHook<T>` / `ForwardPreHook<T>` / `BackwardHook<T>` with `Send + Sync` bounds in `hooks.rs` mirroring PyTorch's hook closure signatures from `torch/nn/modules/module.py:1340-1660`; non-test consumer: `with_ in ferrotorch-nn/src/module.rs` `use crate::hooks::{BackwardHook, ForwardHook, ForwardPreHook, HookHandle, HookedModule}` — the trait's `with_*_hook` methods consume the type aliases. |
 | REQ-2 | SHIPPED | impl: `pub struct HookHandle { id: usize, removed: Arc<AtomicBool> }` with `remove(self)` consuming method in `hooks.rs`, mirroring `torch.utils.hooks.RemovableHandle`; non-test consumer: `ferrotorch-nn/src/module.rs` `Module::with_forward_hook` returns the handle as half of the tuple — every consumer of the `with_*_hook` API gets one. |
 | REQ-3 | SHIPPED | impl: `pub struct HookedModule<M, T: Float>` with three `Mutex<Vec<...>>` hook stores + `AtomicUsize` id counter in `hooks.rs`; non-test consumer: `ferrotorch-nn/src/module.rs` `Module::with_forward_hook` constructs `HookedModule::new(self)` and registers a hook on it — every layer that's wrapped via the trait method becomes a HookedModule in production. |
 | REQ-4 | SHIPPED | impl: `::new`, `inner`, `inner_mut`, `into_inner` inherent methods on `HookedModule` in `hooks.rs`; non-test consumer: `ferrotorch-nn/src/module.rs` `with_*_hook` methods call `HookedModule::new(self)`; downstream observability code unwraps via `into_inner` after removing all hooks. |

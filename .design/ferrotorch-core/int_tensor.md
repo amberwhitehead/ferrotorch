@@ -27,7 +27,7 @@ Phase 2b (CPU + GPU compute kernels), Phase 2c (cross-width casts).
 ## Requirements
 
 - REQ-1: `pub struct IntTensor<I: IntElement>` parameterized over the
-  integer element type. The `IntElement` trait (`int_tensor.rs:44`) is the
+  integer element type. The `IntElement` trait (`IntElement in int_tensor.rs`) is the
   bound — `Element + Copy + Send + Sync + 'static + Debug + Display + BITS
   + dtype_name + try_from_i64 + to_i64`. Implementors: `i32` (BITS=32),
   `i64` (BITS=64).
@@ -89,7 +89,7 @@ Phase 2b (CPU + GPU compute kernels), Phase 2c (cross-width casts).
 
 ## Architecture
 
-### `IntElement` trait (`int_tensor.rs:44-85`)
+### `IntElement` trait (`IntElement in int_tensor.rs`)
 
 ```rust
 pub trait IntElement: Element + Copy + Send + Sync + 'static + Debug + Display {
@@ -119,7 +119,7 @@ pub struct IntTensor<I: IntElement> {
 }
 ```
 
-`Clone` (`int_tensor.rs:98`) delegates to `TensorStorage::clone` — cheap
+`Clone` (`clone in int_tensor.rs`) delegates to `TensorStorage::clone` — cheap
 for CPU `Vec<I>`, allocates a fresh device buffer for GPU (via
 `clone_buffer`).
 
@@ -152,18 +152,18 @@ the helper. The CPU reference is a wrapping-by-width fn for arithmetic
 - `ferrotorch-core/src/grad_fns/quantize_grad.rs:139, :152, :472` —
   `zero_point: &IntTensor<i64>` is the canonical "must be integer"
   carrier for quantization params.
-- `ferrotorch-core/src/grad_fns/reduction.rs:1431, :1463, :1471` —
+- `ferrotorch-core/src/grad_fns/reduction.rs, , ` —
   `argmax` / `argmin` return `IntTensor<i64>` (the index tensor, a
   PyTorch convention from `torch.argmax(x).dtype == torch.int64`).
 - `ferrotorch-core/src/ops/indexing.rs:115` — `gather` / `scatter`
   index tensors are `IntTensor<I>`.
-- `ferrotorch-core/src/ops/phase2c.rs:16, :75, :115` — the kernel-layer
+- `ferrotorch-core/src/ops/phase2c.rs, , ` — the kernel-layer
   module that owns the cross-width cast + the argmax/argmin
   per-axis-reduction GPU kernels (#1185 Phase 2c).
 - `ferrotorch-core/src/bool_tensor.rs:524-569` — integer comparison
   constructors `gt_int` / `eq_int` / etc. take `&IntTensor<I>` and
   produce a `BoolTensor`.
-- `ferrotorch-core/src/lib.rs:146` — `pub use int_tensor::{IntElement,
+- `ferrotorch-core/src/lib.rs` — `pub use int_tensor::{IntElement,
   IntTensor}` re-exports.
 
 ## Parity contract
@@ -196,15 +196,15 @@ Cross-width cast GPU path is exercised by
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: trait `IntElement` at `ferrotorch-core/src/int_tensor.rs:44`; `impl IntElement for i32` at `:57`, `for i64` at `:74`. `pub struct IntTensor<I: IntElement>` at `:93`. Non-test production consumer: `ferrotorch-core/src/grad_fns/quantize_grad.rs:139` (`zero_point: &IntTensor<i64>`); `ferrotorch-core/src/ops/phase2c.rs:115` (`input: &IntTensor<I>` generic parameter on the argmax kernel). |
+| REQ-1 | SHIPPED | impl: trait `IntElement in ferrotorch-core/src/int_tensor.rs`; `impl IntElement for i32` at `IntElement in ferrotorch-core/src/int_tensor.rs`, `for i64` at `IntElement in ferrotorch-core/src/int_tensor.rs`. `pub struct IntTensor<I: IntElement>` at `IntTensor in ferrotorch-core/src/int_tensor.rs`. Non-test production consumer: `zero_point in ferrotorch-core/src/grad_fns/quantize_grad.rs` (`zero_point: &IntTensor<i64>`); `pub in ferrotorch-core/src/ops/phase2c.rs` (`input: &IntTensor<I>` generic parameter on the argmax kernel). |
 | REQ-2 | SHIPPED | impl: `from_vec` at `ferrotorch-core/src/int_tensor.rs:113`, `from_slice` at `:139`, `zeros` at `:144`, `arange` at `:159`, `scalar` at `:175`. Non-test production consumer: `ferrotorch-core/src/grad_fns/reduction.rs:1463` invokes `IntTensor::<i64>::scalar(best_idx)` for the argmax return; `ferrotorch-core/src/ops/phase2c.rs:101, :109` invokes `IntTensor::from_gpu_handle` / `IntTensor::<i64>::from_vec` for the argmax output. |
-| REQ-3 | SHIPPED | impl: `device` at `ferrotorch-core/src/int_tensor.rs:199`, `is_cuda` at `:205`, `to` at `:260`. Non-test production consumer: `ferrotorch-core/src/ops/phase2c.rs` accesses `input.device()` and `input.gpu_handle()` before launching argmax kernels; the H2D upload at `:268-278` and the documented-`SAFETY` D2H reinterpret at `:313-318` are the round-trip pair. |
+| REQ-3 | SHIPPED | impl: `device in ferrotorch-core/src/int_tensor.rs`, `is_cuda in ferrotorch-core/src/int_tensor.rs`, `to` at `is_cuda in ferrotorch-core/src/int_tensor.rs`. Non-test production consumer: `ferrotorch-core/src/ops/phase2c.rs` accesses `input.device()` and `input.gpu_handle()` before launching argmax kernels; the H2D upload at `is_cuda in ferrotorch-core/src/int_tensor.rs` and the documented-`SAFETY` D2H reinterpret at `is_cuda in ferrotorch-core/src/int_tensor.rs` are the round-trip pair. |
 | REQ-4 | SHIPPED | impl: `cast<J: IntElement>` at `ferrotorch-core/src/int_tensor.rs:355` with `cast_gpu` GPU fast-path delegation. Non-test production consumer: `ferrotorch-core/src/ops/phase2c.rs` (the i32↔i64 cast kernel that the `cast_gpu` branch dispatches to). Test: `cast_i64_to_i32_out_of_range_errors` at `:836` pins the `try_from_i64` overflow path. |
 | REQ-5 | SHIPPED | impl: `reshape` at `ferrotorch-core/src/int_tensor.rs:384`. Non-test production consumer: `ferrotorch-core/src/grad_fns/reduction.rs` reshape paths after argmax materialization. Test: `reshape_preserves_data` at `:843`. |
-| REQ-6 | SHIPPED | impl: `add` at `ferrotorch-core/src/int_tensor.rs:551`, `sub` at `:561`, `mul` at `:571`, `neg` at `:581`. CPU references at `int_wrapping_mul` at `:696`. Non-test production consumer: re-exported via `lib.rs:146` `pub use int_tensor::IntTensor`; the integer-add/sub/mul GPU kernels are the underlying compute primitives that `bool_tensor.rs`'s integer comparison constructors at `:524-569` route through (the bool-int compare path needs integer compute to compute the predicate on device). R-DEFER-1 S5 grandfathering: existing pub API surface; runner-side parity-sweep arms tracked under #1530. |
+| REQ-6 | SHIPPED | impl: `add in ferrotorch-core/src/int_tensor.rs`, `sub in ferrotorch-core/src/int_tensor.rs`, `mul in ferrotorch-core/src/int_tensor.rs`, `neg in ferrotorch-core/src/int_tensor.rs`. CPU references at `int_wrapping_mul in ferrotorch-core/src/int_tensor.rs`. Non-test production consumer: re-exported via `bool_tensor in lib.rs` `pub use int_tensor::IntTensor`; the integer-add/sub/mul GPU kernels are the underlying compute primitives that `bool_tensor.rs`'s integer comparison constructors at `bool_tensor in lib.rs` route through (the bool-int compare path needs integer compute to compute the predicate on device). R-DEFER-1 S5 grandfathering: existing pub API surface; runner-side parity-sweep arms tracked under #1530. |
 | REQ-7 | SHIPPED | impl: `floor_div` at `ferrotorch-core/src/int_tensor.rs:589`, `remainder` at `:599`; CPU references `int_floor_div_ref` at `:709`, `int_remainder_ref` at `:728`. Non-test production consumer: `int_tensor.rs`'s public `floor_div` / `remainder` ARE the boundary surface re-exported via `lib.rs:146`. R-DEFER-1 S5 grandfathering. |
 | REQ-8 | SHIPPED | impl: `bitand` at `ferrotorch-core/src/int_tensor.rs:609`, `bitor` at `:619`, `bitxor` at `:629`, `bitnot` at `:639`, `shl` at `:644`, `shr` at `:649`; CPU references `int_bitnot_ref` at `:744`, `int_shl_ref` at `:754`, `int_shr_ref` at `:765`. Non-test production consumer: re-exported via `lib.rs:146`. R-DEFER-1 S5 grandfathering applies; these are the public bitwise-op API surface on `IntTensor`. |
 | REQ-9 | SHIPPED | impl: `sum` at `ferrotorch-core/src/int_tensor.rs:654`, `prod` at `:664`, `min` at `:674`, `max` at `:684`. Empty-tensor handling (sum/prod identity, min/max error) at `reduce_op` `:502-548`. Non-test production consumer: re-exported via `lib.rs:146`; `IntTensor::sum` etc. are the reductions used by quantization-statistics calculations elsewhere. R-DEFER-1 S5 grandfathering. |
-| REQ-10 | SHIPPED | impl: `gpu_handle` at `ferrotorch-core/src/int_tensor.rs:236`, `from_gpu_handle` at `:421` with `debug_assert_eq!(handle.dtype(), I::dtype())`. Non-test production consumer: `ferrotorch-core/src/ops/phase2c.rs:101` invokes `IntTensor::from_gpu_handle`; `ferrotorch-core/src/bool_tensor.rs:596` invokes `a.gpu_handle()?` on an `IntTensor` for the integer comparison GPU path. |
-| REQ-11 | SHIPPED | impl: the `shape.is_empty() { 1 } else { shape.iter().product() }` pattern at `int_tensor.rs:117, :146, :386`. Non-test production consumer: `ferrotorch-core/src/grad_fns/reduction.rs` argmax returns a 0-D `IntTensor` via `scalar(best_idx)` at `:1463` — relies on the 0-D-is-numel-1 convention. #805 regression pin. |
-| REQ-12 | SHIPPED | impl: `FerrotorchError::ShapeMismatch` at `int_tensor.rs:124, :393, :442`; `DeviceMismatch` at `:436`; `InvalidArgument` at `:163, :240, :288, :336, :367, :518`; `NotImplementedOnCuda` not used (the cast path errors via `InvalidArgument` instead). No `panic!` / `unwrap()` / `expect()` in production paths. Non-test production consumer: every caller propagates the structured error via `?`. |
+| REQ-10 | SHIPPED | impl: `gpu_handle in ferrotorch-core/src/int_tensor.rs`, `from_gpu_handle in ferrotorch-core/src/int_tensor.rs` with `debug_assert_eq!(handle.dtype(), I::dtype())`. Non-test production consumer: `dtype in ferrotorch-core/src/ops/phase2c.rs` invokes `IntTensor::from_gpu_handle`; `from_gpu_handle in ferrotorch-core/src/bool_tensor.rs` invokes `a.gpu_handle()?` on an `IntTensor` for the integer comparison GPU path. |
+| REQ-11 | SHIPPED | impl: the `shape.is_empty() { 1 } else { shape.iter().product() }` pattern at `shape in int_tensor.rs, , `. Non-test production consumer: `ferrotorch-core/src/grad_fns/reduction.rs` argmax returns a 0-D `IntTensor` via `scalar(best_idx)` at `scalar in int_tensor.rs` — relies on the 0-D-is-numel-1 convention. #805 regression pin. |
+| REQ-12 | SHIPPED | impl: `FerrotorchError::ShapeMismatch` at `unwrap in int_tensor.rs, , `; `DeviceMismatch` at `unwrap in int_tensor.rs`; `InvalidArgument` at `, , , , , `; `NotImplementedOnCuda` not used (the cast path errors via `InvalidArgument` instead). No `panic!` / `unwrap()` / `expect()` in production paths. Non-test production consumer: every caller propagates the structured error via `?`. |

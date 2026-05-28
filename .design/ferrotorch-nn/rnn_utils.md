@@ -249,12 +249,12 @@ round-trip arm (the unpad half), so it is not a standalone runner op.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub struct PackedSequence<T: Float>` with `data`/`batch_sizes`/`sorted_indices`/`unsorted_indices` in `rnn_utils.rs`; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:263`. |
-| REQ-2 | SHIPPED | impl: `pub fn pack_padded_sequence<T: Float>` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:263`. |
-| REQ-3 | SHIPPED | impl: `pub fn pad_packed_sequence<T: Float>` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:263`. |
-| REQ-4 | SHIPPED | impl: validation guards at the head of `pack_padded_sequence` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:263`. |
-| REQ-5 | SHIPPED | impl: `batch_first` axis-swap logic inside `pack_padded_sequence` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:263`. |
-| REQ-6 | SHIPPED | impl: stable sort + `sorted_indices` / `unsorted_indices` capture inside `pack_padded_sequence` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:263`. |
-| REQ-7 | SHIPPED | impl: per-timestep batch-size accumulation inside `pack_padded_sequence` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs:263`. |
+| REQ-2 | SHIPPED | impl: `pub fn pack_padded_sequence<T: Float>` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-3 | SHIPPED | impl: `pub fn pad_packed_sequence<T: Float>` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-4 | SHIPPED | impl: validation guards at the head of `pack_padded_sequence` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-5 | SHIPPED | impl: `batch_first` axis-swap logic inside `pack_padded_sequence` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-6 | SHIPPED | impl: stable sort + `sorted_indices` / `unsorted_indices` capture inside `pack_padded_sequence` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-7 | SHIPPED | impl: per-timestep batch-size accumulation inside `pack_padded_sequence` in `rnn_utils.rs`; non-test consumer: re-export at `lib.rs`. |
 | REQ-8 | SHIPPED | impl: pack/pad round-trip arm `dispatch_pack_unpack_roundtrip` at `tools/parity-sweep/runner/src/main.rs` (registered in `dispatch_f32` + `dispatch_ops`); oracle round-trip `_pack_unpack_roundtrip_torch_call` at `tools/parity-sweep/oracle.py`; non-test consumer: the runner's `dispatch_f32` match arm `"pack_padded_sequence" => dispatch_pack_unpack_roundtrip(args)` calls `ferrotorch_nn::pack_padded_sequence`. 48/48 pass at seeds 0..8. Closed by #1457. |
 | REQ-9 | SHIPPED | covered by the same round-trip arm (the unpad half calls `ferrotorch_nn::pad_packed_sequence` in `dispatch_pack_unpack_roundtrip` at `main.rs`); recovered padded output equals input. 48/48 pass. Closed by #1457. |
-| REQ-10 | SHIPPED | impl: `pub fn pad_sequence<T: Float>` in `rnn_utils.rs`; runner arm `dispatch_pad_sequence` at `main.rs`; oracle `_pad_sequence_torch_call` at `oracle.py`; non-test consumer: re-export at `lib.rs:263` AND the runner match arm `"pad_sequence" => dispatch_pad_sequence(args)`. 48/48 pass at seeds 0..8. Closed by #1457. |
+| REQ-10 | SHIPPED | impl: `pub fn pad_sequence<T: Float>` in `rnn_utils.rs`; runner arm `dispatch_pad_sequence` at `main.rs`; oracle `_pad_sequence_torch_call` at `oracle.py`; non-test consumer: re-export at `lib.rs` AND the runner match arm `"pad_sequence" => dispatch_pad_sequence(args)`. 48/48 pass at seeds 0..8. Closed by #1457. |

@@ -121,7 +121,7 @@ fused kernel is active.
    GPU kernel branch (REQ-5).
 3. Otherwise, fill the `param_workspace` / `grad_workspace`
    `Vec<f64>` reusable buffers via `fill_f64_workspace`
-   (`optimizer.rs:129-152`). This is the CL-1125 amortisation
+   (`optimizer.rs`). This is the CL-1125 amortisation
    pattern: zero per-step allocation in steady state.
 4. Apply maximize negation.
 5. Apply L2 weight decay: `g += wd * p`.
@@ -188,7 +188,7 @@ amortised allocation is zero.
   training loop using `Adam::new(params, AdamConfig::default())`.
 - `ferrotorch-train/examples/multi_epoch_train_dump.rs:63,368` —
   multi-epoch training reproducibility harness uses `Adam`.
-- `ferrotorch/examples/ferrotorch_bench.rs:89,176` — benchmark
+- `ferrotorch/examples/ferrotorch_bench.rs,176` — benchmark
   full-training-step harness instantiates `Adam::new(...)`.
 
 ## Parity contract
@@ -242,11 +242,11 @@ Expected: `11 passed`.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub struct AdamConfig` + `impl Default` in `adam.rs` mirroring `torch/optim/adam.py:35-200`; non-test consumer: `ferrotorch/examples/train_mnist.rs:78` `Adam::new(model.parameters().to_vec(), AdamConfig::default())`. |
-| REQ-2 | SHIPPED | impl: `impl<T: Float> Optimizer<T> for Adam<T>` block in `adam.rs`; non-test consumer: `ferrotorch-train/src/learner.rs:28` `use ferrotorch_optim::Optimizer;` drives every training step. |
+| REQ-2 | SHIPPED | impl: `impl<T: Float> Optimizer<T> for Adam<T>` block in `adam.rs`; non-test consumer: `ferrotorch-train/src/learner.rs` `use ferrotorch_optim::Optimizer;` drives every training step. |
 | REQ-3 | SHIPPED | impl: legacy CPU `step` (else branch after the GPU fast-path) in `adam.rs` mirroring `_single_tensor_adam` in `torch/optim/adam.py:347-552`; non-test consumer: `ferrotorch/examples/train_mnist.rs:76-78` drives MNIST training entirely through this path on CPU. |
 | REQ-4 | SHIPPED | impl: AMSGrad branch `if config.amsgrad { ... max_sq[i] = ea; ... }` inside the CPU `step` in `adam.rs` mirroring `torch/optim/adam.py:445-470`; non-test consumer: `ferrotorch-optim/src/lib.rs:30` re-exports `AdamConfig` so `with_amsgrad(true)` is reachable from downstream training code. |
 | REQ-5 | SHIPPED | impl: GPU fused-kernel branch (`if use_gpu { backend.fused_adam_f32(...) }`) in `adam.rs`; non-test consumer: `ferrotorch/examples/train_mnist.rs:76-78` becomes GPU-resident once the model is moved to CUDA — the fused kernel activates automatically on the same call. |
 | REQ-6 | SHIPPED | impl: `Adam::step_foreach` method in `adam.rs` mirroring `_multi_tensor_adam` in `torch/optim/adam.py:553-901`; non-test consumer: `ferrotorch/src/lib.rs:61` re-exports `AdamConfig` so `with_foreach(true)` is reachable from downstream training code. |
 | REQ-7 | SHIPPED | impl: `state_dict` / `load_state_dict` methods in `adam.rs` keying by `ParamKey::Display`; non-test consumer: `ferrotorch-serialize/src/checkpoint.rs:48` `use ferrotorch_optim::OptimizerState;` writes/reads this map on checkpoint save/load. |
 | REQ-8 | SHIPPED | impl: `let grad_tensor = match tensor.grad()? { Some(g) => g, None => continue };` in both `step` and `step_foreach` mirroring `torch/optim/adam.py:362-365`; non-test consumer: same training-loop path in `ferrotorch-train/src/learner.rs` exercising frozen parameters via the same skip. |
-| REQ-9 | SHIPPED | impl: `if std::env::var("FERROTORCH_ENABLE_GPU_FALLBACK").is_ok() { tracing::warn!(...) } else { return Err(...) }` branch inside the GPU fast-path in `adam.rs`; non-test consumer: `ferrotorch-train/src/learner.rs:28` propagates the resulting `FerrotorchResult` so the training script sees an `Err` instead of a silent CPU fallback. |
+| REQ-9 | SHIPPED | impl: `if std::env::var("FERROTORCH_ENABLE_GPU_FALLBACK").is_ok() { tracing::warn!(...) } else { return Err(...) }` branch inside the GPU fast-path in `adam.rs`; non-test consumer: `Err in ferrotorch-train/src/learner.rs` propagates the resulting `FerrotorchResult` so the training script sees an `Err` instead of a silent CPU fallback. |

@@ -259,14 +259,14 @@ Expected: all tests pass.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub enum RoPEConvention` in `transformer.rs`; non-test consumer: re-export at `ferrotorch-nn/src/lib.rs:248` + `ferrotorch-llama/src/attention.rs:23`. |
-| REQ-2 | SHIPPED | impl: `pub struct RotaryPositionEmbedding<T: Float>` with `apply_rope` in `transformer.rs`; non-test consumer: re-export at `lib.rs:248` + `ferrotorch-llama/src/attention.rs:23`. |
-| REQ-3 | SHIPPED | impl: `pub enum RoPEScaling` in `transformer.rs`; non-test consumer: re-export at `lib.rs:248` + `ferrotorch-llama/src/attention.rs:23` (Llama-3 long-context scaling). |
-| REQ-4 | SHIPPED | impl: `pub struct SwiGLU<T: Float>` plus `impl Module<T> for SwiGLU<T>` in `transformer.rs`; non-test consumer: re-export at `lib.rs:248`. (Llama's MLP composes the three projections directly per `ferrotorch-llama/src/mlp.rs:3` doc-comment.) |
-| REQ-5 | SHIPPED | impl: `pub struct KVCache<T: Float>` with `append_kv` / `clear` in `transformer.rs`; non-test consumer: re-export at `lib.rs:248`. |
-| REQ-6 | SHIPPED | impl: `pub struct TransformerEncoderLayer<T: Float>` mirroring upstream `transformer.py:659-980` in `transformer.rs`; non-test consumer: re-export at `lib.rs:248`. |
-| REQ-7 | SHIPPED | impl: `pub struct TransformerDecoderLayer<T: Float>` mirroring upstream `transformer.py:981-1100` in `transformer.rs`; non-test consumer: re-export at `lib.rs:248`. |
-| REQ-8 | SHIPPED | impl: `pub struct TransformerEncoder<T: Float>` mirroring upstream `transformer.py:318-553` in `transformer.rs`; non-test consumer: re-export at `lib.rs:248`. |
-| REQ-9 | SHIPPED | impl: `pub struct TransformerDecoder<T: Float>` mirroring upstream `transformer.py:554-658` in `transformer.rs`; non-test consumer: re-export at `lib.rs:248`. |
-| REQ-10 | SHIPPED | impl: `pub struct Transformer<T: Float>` mirroring upstream `transformer.py:58-317` in `transformer.rs`; non-test consumer: re-export at `lib.rs:248`. |
-| REQ-11 | SHIPPED | impl: `impl<T: Float> Module<T> for ...` blocks for every transformer struct in `transformer.rs`; non-test consumer: re-export at `lib.rs:248`. |
-| REQ-12 | SHIPPED | impl: `struct RoPEBackward<T>` plus `impl GradFn<T>` in `transformer.rs`; non-test consumer: re-export at `lib.rs:248` — the autograd engine traverses this GradFn on `backward()` of any RoPE-wrapped tensor. |
+| REQ-2 | SHIPPED | impl: `pub struct RotaryPositionEmbedding<T: Float>` with `apply_rope` in `transformer.rs`; non-test consumer: re-export at `lib.rs` + `ferrotorch-llama/src/attention.rs`. |
+| REQ-3 | SHIPPED | impl: `pub enum RoPEScaling` in `transformer.rs`; non-test consumer: re-export at `lib.rs` + `ferrotorch-llama/src/attention.rs` (Llama-3 long-context scaling). |
+| REQ-4 | SHIPPED | impl: `pub struct SwiGLU<T: Float>` plus `impl Module<T> for SwiGLU<T>` in `transformer.rs`; non-test consumer: re-export at `lib.rs`. (Llama's MLP composes the three projections directly per `ferrotorch-llama/src/mlp.rs` doc-comment.) |
+| REQ-5 | SHIPPED | impl: `pub struct KVCache<T: Float>` with `append_kv` / `clear` in `transformer.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-6 | SHIPPED | impl: `pub struct TransformerEncoderLayer<T: Float>` mirroring upstream `transformer.py:659-980` in `transformer.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-7 | SHIPPED | impl: `pub struct TransformerDecoderLayer<T: Float>` mirroring upstream `transformer.py:981-1100` in `transformer.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-8 | SHIPPED | impl: `pub struct TransformerEncoder<T: Float>` mirroring upstream `transformer.py:318-553` in `transformer.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-9 | SHIPPED | impl: `pub struct TransformerDecoder<T: Float>` mirroring upstream `transformer.py:554-658` in `transformer.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-10 | SHIPPED | impl: `pub struct Transformer<T: Float>` mirroring upstream `transformer.py:58-317` in `transformer.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-11 | SHIPPED | impl: `impl<T: Float> Module<T> for ...` blocks for every transformer struct in `transformer.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-12 | SHIPPED | impl: `struct RoPEBackward<T>` plus `impl GradFn<T>` in `transformer.rs`; non-test consumer: re-export at `lib.rs` — the autograd engine traverses this GradFn on `backward()` of any RoPE-wrapped tensor. |

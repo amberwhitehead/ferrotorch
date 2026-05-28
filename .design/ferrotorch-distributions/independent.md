@@ -239,7 +239,7 @@ The test `test_independent_sample_shape` pins this exact case.
 
 ### Non-test production consumers
 
-- `pub use independent::Independent` in `lib.rs:93` — grandfathered
+- `pub use independent::Independent` in `lib.rs` — grandfathered
   public API. Users construct
   `Independent::new(Normal::new(loc, scale)?, 1)?` directly to
   create diagonal-Gaussian-style distributions for VAE latent
@@ -316,7 +316,7 @@ Expected: `4 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct Independent<T: Float, D: Distribution<T>>` with `base`, `reinterpreted_batch_ndims`, `_phantom: PhantomData<T>` fields in `independent.rs`, mirroring `torch/distributions/independent.py:18-69`; non-test consumer: `pub use independent::Independent` in `lib.rs:93` — grandfathered public API; downstream VAE / Bayesian-NN training drivers construct `Independent::new(Normal::new(...)?, 1)?` for diagonal-Gaussian latents. |
+| REQ-1 | SHIPPED | impl: `pub struct Independent<T: Float, D: Distribution<T>>` with `base`, `reinterpreted_batch_ndims`, `_phantom: PhantomData<T>` fields in `independent.rs`, mirroring `torch/distributions/independent.py:18-69`; non-test consumer: `pub use independent::Independent` in `lib.rs` — grandfathered public API; downstream VAE / Bayesian-NN training drivers construct `Independent::new(Normal::new(...)?, 1)?` for diagonal-Gaussian latents. |
 | REQ-2 | SHIPPED | impl: `pub fn Independent::new(base, reinterpreted_batch_ndims) -> FerrotorchResult<Self>` with zero-arg rejection in `independent.rs`, mirroring `torch/distributions/independent.py:51-69` (which uses `raise ValueError`); non-test consumer: `pub use Independent::new` accessible via the re-export; test `test_independent_zero_ndims_errors` pins the rejection. |
 | REQ-3 | SHIPPED | impl: `pub fn base(&self) -> &D` and `pub fn reinterpreted_batch_ndims(&self) -> usize` accessors in `independent.rs`, mirroring `Independent.base_dist` / `.reinterpreted_batch_ndims` attribute access in upstream; non-test consumer: `pub use Independent` re-exports both accessors as part of the public API; introspection-driven downstream code (e.g. diagnostic logging in training loops) uses these. |
 | REQ-4 | SHIPPED | impl: `impl<T: Float, D: Distribution<T>> Distribution<T> for Independent<T, D>` with `batch_shape` override, `sample` / `rsample` shape-forwarding, `log_prob` / `entropy` via `sum_rightmost` in `independent.rs`, mirroring `torch/distributions/independent.py:84-126`; non-test consumer: `pub use Independent` re-export means any external caller of the `Distribution` trait on an `Independent` value hits this impl — that's the production consumer surface. Tests `test_independent_{log_prob_sums_event_dims, entropy_sums_event_dims, sample_shape}` pin the four method bodies. |

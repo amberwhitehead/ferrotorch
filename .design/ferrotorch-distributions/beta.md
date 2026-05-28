@@ -97,7 +97,7 @@ concentration tensors.
   Each per-Gamma term is the PATHWISE implicit-reparameterization
   gradient `d(γ)/d(conc) = -(∂_conc P(conc, γ)) / pdf(γ; conc)`
   computed by `pub(crate) fn standard_gamma_grad_one` in
-  `ferrotorch-distributions/src/special_fns.rs:134` (port of
+  `standard_gamma_grad_one in ferrotorch-distributions/src/special_fns.rs` (port of
   PyTorch's `_standard_gamma_grad`). This replaced the prior
   score-function form `γ * (ln(γ) - ψ(conc))`, which is unbiased
   only in expectation and flips sign per-sample (fixed by commit
@@ -276,5 +276,5 @@ Expected: `12 passed; 0 failed`.
 | REQ-7 | SHIPPED | impl: `fn Beta::log_prob` in `beta.rs` with `(α-1)*ln(x) + (β-1)*ln(1-x) - lbeta(α,β)` formula via `lgamma_scalar`, mirroring `beta.py:87-91`; non-test consumer: external `dist.log_prob(value)` calls. |
 | REQ-8 | SHIPPED | impl: `fn Beta::entropy` in `beta.rs` with closed-form using `digamma_scalar`, mirroring `beta.py:93-94`; non-test consumer: external `dist.entropy()` calls. |
 | REQ-9 | SHIPPED | impl: `fn Beta::{mean, mode, variance}` overrides in `beta.rs` mirroring `beta.py:71-82`; non-test consumer: external `dist.{mean, mode, variance}()` calls exercise the overrides; `test_beta_mean_variance_mode` and `test_beta_mode_undefined_for_alpha_le_one` pin the closed-forms. |
-| REQ-10 | SHIPPED | impl: `struct BetaRsampleBackward<T: Float>` at `ferrotorch-distributions/src/beta.rs:362` whose `GradFn::backward` chains the ratio Jacobian with the per-Gamma PATHWISE implicit-reparam gradient `pub(crate) fn standard_gamma_grad_one` at `ferrotorch-distributions/src/special_fns.rs:134` (port of `torch._standard_gamma_grad`) — replacing the prior score-function form `γ·(ln γ - ψ(conc))` in commit fae8ca185 (#1555); non-test consumer: invoked by `fn Beta::rsample` (REQ-6) whenever either parameter requires grad. |
+| REQ-10 | SHIPPED | impl: `struct BetaRsampleBackward<T: Float>` at `BetaRsampleBackward in ferrotorch-distributions/src/beta.rs` whose `GradFn::backward` chains the ratio Jacobian with the per-Gamma PATHWISE implicit-reparam gradient `pub(crate) fn standard_gamma_grad_one` at `standard_gamma_grad_one in ferrotorch-distributions/src/special_fns.rs` (port of `torch._standard_gamma_grad`) — replacing the prior score-function form `γ·(ln γ - ψ(conc))` in commit fae8ca185 (#1555); non-test consumer: invoked by `fn Beta::rsample` (REQ-6) whenever either parameter requires grad. |
 | REQ-11 | NOT-STARTED | blocker #1408 — `expand`, `arg_constraints`, `support`, `validate_args`, scalar-broadcast `__init__` branch, `_natural_params` / `_log_normalizer` (from `beta.py:63-69, 113-118`) not implemented. Cross-cutting with `lib.md` REQ-5 (Distribution-trait-surface blocker #1376). |

@@ -78,7 +78,7 @@ The file is ~4.3k LOC and exposes:
   overwrite specified positions (scatter). The strided_copy kernels
   are the substrate for `as_strided_copy` on CUDA
   (`stride_tricks.rs:406-414`), for non-contiguous CUDA→CPU
-  materialise (`tensor.rs:872-880`), and for memory-format permute
+  materialise (`tensor.rs`), and for memory-format permute
   (`tensor.rs:1585-1602`).
 - REQ-9: Reductions — `sum_axis_*`, `mean_axis_*`, `max_axis_*`,
   `min_axis_*`, `prod_axis_*`, plus full-tensor variants. Carry the
@@ -126,7 +126,7 @@ The file is ~4.3k LOC and exposes:
 - [x] AC-1: `GpuBufferHandle::new(_, _, _, dtype)` carries the dtype
   tag through `dtype()` accessor (`gpu_dispatch.rs:168-171`).
 - [x] AC-2: `CompareOp::Lt.suffix() == "lt"`
-  (`gpu_dispatch.rs:41-50`).
+  (`gpu_dispatch.rs`).
 - [x] AC-3: `GpuRngState::new(counter, seed, offset, device)`
   preserves all four fields through getters
   (`gpu_dispatch.rs:84-119`).
@@ -166,8 +166,8 @@ Non-test production consumers:
   CudaBackendImpl` + the `register_gpu_backend(...)` call at
   `:7011`) is the canonical concrete implementation.
 - Inside `ferrotorch-core`, every CUDA-dispatched op routes through
-  `gpu_backend()` — see e.g. `tensor.rs:803`, `tensor.rs:834`,
-  `tensor.rs:1213`, `tensor.rs:1576`, `stride_tricks.rs:397`,
+  `gpu_backend()` — see e.g. `gpu_backend in tensor.rs`, `gpu_backend in tensor.rs`,
+  `tensor.rs`, `tensor.rs`, `tensor in stride_tricks.rs`,
   `stride_tricks.rs:440`, `storage.rs:153`, `storage.rs:404`,
   `storage.rs:451`, `grad_fns/arithmetic.rs` CUDA branches.
 
@@ -205,22 +205,22 @@ indirectly exercises every backend method through the per-op sweeps.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `enum CompareOp` at `ferrotorch-core/src/gpu_dispatch.rs:22-35` with `suffix()` at `:41-50`; non-test consumer: `GpuBackend::compare(_, _, CompareOp)` method slot dispatches to the suffix-named PTX kernel; the concrete impl in `ferrotorch-gpu/src/backend_impl.rs` reads `op.suffix()` to pick the kernel. |
-| REQ-2 | SHIPPED | impl: `GpuRngState` at `ferrotorch-core/src/gpu_dispatch.rs:69` with accessors at `:84-119`; non-test consumer: `GpuBackend::save_rng_state` / `restore_rng_state` at `:2268, :2275` produce / consume this struct; `ferrotorch-core::checkpoint` (downstream) serialises it. |
-| REQ-3 | SHIPPED | impl: `GpuBufferHandle` at `ferrotorch-core/src/gpu_dispatch.rs:137` with `new` at `:145`, accessors at `:160-194`; non-test consumer: `TensorStorage::Gpu(GpuBufferHandle)` variant at `storage.rs:67` plus every CUDA op that reads / writes the handle. |
+| REQ-2 | SHIPPED | impl: `GpuRngState in ferrotorch-core/src/gpu_dispatch.rs` with accessors at `GpuRngState in ferrotorch-core/src/gpu_dispatch.rs`; non-test consumer: `GpuBackend::save_rng_state` / `restore_rng_state` at `, ` produce / consume this struct; `ferrotorch-core::checkpoint` (downstream) serialises it. |
+| REQ-3 | SHIPPED | impl: `GpuBufferHandle in ferrotorch-core/src/gpu_dispatch.rs` with `new in ferrotorch-core/src/gpu_dispatch.rs`, accessors at `new in ferrotorch-core/src/gpu_dispatch.rs`; non-test consumer: `TensorStorage::Gpu(GpuBufferHandle)` variant at `Gpu in storage.rs` plus every CUDA op that reads / writes the handle. |
 | REQ-4 | SHIPPED | impl: `trait GpuBackend` at `ferrotorch-core/src/gpu_dispatch.rs:211`; non-test consumer: `ferrotorch-gpu/src/backend_impl.rs:7037`'s `impl GpuBackend for CudaBackendImpl` registers via `register_gpu_backend(...)`. |
 | REQ-5 | SHIPPED | impl: elementwise method slots `add_f32` at `gpu_dispatch.rs:274`, `sub_f32` at `:279`, `mul_f32` at `:284`, `neg_f32` at `:289`, `relu_f32` at `:290` (plus the rest of the elementwise zoo throughout the file); non-test consumer: `Tensor::accumulate_grad` GPU path at `tensor.rs:588-592` calls `backend.add_f32` / `add_f64`; `grad_fns/arithmetic.rs::add_inner` dispatches the CUDA branches. |
 | REQ-6 | SHIPPED | impl: broadcast variants are sibling slots on the trait alongside the non-broadcast methods (e.g. `broadcast_add_f32`); non-test consumer: `grad_fns/arithmetic.rs::add_inner` picks the broadcast variant via the dispatch macro when input shapes differ. |
 | REQ-7 | SHIPPED | impl: `scale_*` trait slots in the same elementwise section; non-test consumer: `grad_fns/arithmetic.rs::scale_tensor` (`:547-578`) dispatches `backend.scale_f32` / `scale_f64` for the `alpha`-kwarg path in `add_scaled` / `sub_scaled`. |
-| REQ-8 | SHIPPED | impl: `strided_copy_f32` / `strided_copy_f64` slots, `strided_scatter_f32` / `strided_scatter_f64` slots on the trait; non-test consumer: `stride_tricks.rs:407-409, 470-472`, `tensor.rs:874-876, 1586-1597` route through these for materialise + CUDA→CPU readback + memory-format permute. |
+| REQ-8 | SHIPPED | impl: `strided_copy_f32` / `strided_copy_f64` slots, `strided_scatter_f32` / `strided_scatter_f64` slots on the trait; non-test consumer: `strided_scatter_f64 in stride_tricks.rs, 470-472`, `strided_copy_f64 in tensor.rs, 1586-1597` route through these for materialise + CUDA→CPU readback + memory-format permute. |
 | REQ-9 | SHIPPED | impl: `sum_axis_f32` / `sum_axis_f64` plus full-reduction variants on the trait; non-test consumer: `grad_fns/arithmetic.rs::reduce_grad_to_shape` (around `:178-336`) calls `backend.sum_axis_f32` / `sum_axis_f64` for the GPU-resident gradient reduction path. |
-| REQ-10 | SHIPPED | impl: `matmul_f32` at `gpu_dispatch.rs:293`, `bmm_*`, `gemm_*`, `syevd_*` (cuSOLVER), `getrf_*`, `geqrf_*`, `potrf_*`, `gesdd_*`, `inverse_*` slots; non-test consumer: `ops/linalg.rs::matmul` dispatches `backend.matmul_f32` on CUDA; `linalg.rs::eigh` (`:569`) routes through `backend.syevd_*` per the CUDA fast path. |
+| REQ-10 | SHIPPED | impl: `matmul_f32 in gpu_dispatch.rs`, `bmm_*`, `gemm_*`, `syevd_*` (cuSOLVER), `getrf_*`, `geqrf_*`, `potrf_*`, `gesdd_*`, `inverse_*` slots; non-test consumer: `ops/linalg.rs::matmul` dispatches `backend.matmul_f32` on CUDA; `linalg.rs::eigh` (`eigh in gpu_dispatch.rs`) routes through `backend.syevd_*` per the CUDA fast path. |
 | REQ-11 | SHIPPED | impl: convolution + pooling trait slots; non-test consumer: `ferrotorch-nn::Conv2d::forward` (downstream) dispatches via these slots. |
 | REQ-12 | SHIPPED | impl: recurrent-layer trait slots; non-test consumer: `ferrotorch-nn::LSTM` / `GRU` / `RNN` forward dispatches. |
 | REQ-13 | SHIPPED | impl: FFT trait slots; non-test consumer: `ferrotorch-core::fft` dispatches `backend.fft_*` on CUDA. |
 | REQ-14 | SHIPPED | impl: `dropout_*`, `normal_*`, `uniform_*`, etc. trait slots; `save_rng_state` at `gpu_dispatch.rs:2268`, `restore_rng_state` at `:2275`; non-test consumer: `nn::Dropout::forward` for dropout; `creation::randn` / `randn_like` for normal/uniform sampling. |
 | REQ-15 | SHIPPED | impl: `masked_fill_dt` at `gpu_dispatch.rs:1867`, `where_cond` at `:1883`, `masked_select` at `:1900`, `masked_scatter` at `:1917`, `argmax` at `:4088`, `argmin` at `:4099`, `index_select_intidx` at `:4116`, `gather_intidx` at `:4137`; non-test consumer: `Tensor::masked_fill` / `masked_select` at `tensor.rs:1126, 1142` dispatch via these slots; `grad_fns/indexing.rs` consumes them in production. |
-| REQ-16 | SHIPPED | impl: cuSPARSE dispatch slots in the `sparse.rs:2960-3334` documented region of the trait; non-test consumer: `SparseTensor::from_dense` at `sparse.rs:178-195` dispatches `backend.dense_to_sparse_csr_*` for the CUDA path. |
-| REQ-17 | SHIPPED | impl: `int_add` at `gpu_dispatch.rs:3947`, `int_sub` at `:3956`, `int_mul` at `:3965`, `int_neg` at `:3974`, `int_floor_div` at `:3980`, `int_remainder` at `:3992`, `int_bitand` at `:4003`, `int_bitor` at `:4012`, `int_bitxor` at `:4021`, `int_bitnot` at `:4030`, `int_shl` at `:4035`, `int_shr` at `:4045`, `int_sum` at `:4055`, `int_prod` at `:4060`, `int_min` at `:4065`, `int_max` at `:4070`, `cast_f_to_i` at `:4154`, `cast_i_to_f` at `:4164`, `cast_i_to_i` at `:4175`; non-test consumer: `int_tensor.rs` int-tensor op forwarders. |
-| REQ-18 | SHIPPED | impl: `compare` at `gpu_dispatch.rs:4198`, `bool_and` at `:4208`, `bool_or` at `:4217`, `bool_xor` at `:4226`, `bool_not` at `:4235`, `bool_any` at `:4241`, `bool_all` at `:4247`, `cast_bool_to_f` at `:4254`; non-test consumer: `bool_tensor.rs` bool-tensor op forwarders. |
+| REQ-16 | SHIPPED | impl: cuSPARSE dispatch slots in the `sparse in sparse.rs` documented region of the trait; non-test consumer: `SparseTensor::from_dense` at `sparse in sparse.rs` dispatches `backend.dense_to_sparse_csr_*` for the CUDA path. |
+| REQ-17 | SHIPPED | impl: `int_add in gpu_dispatch.rs`, `int_sub in gpu_dispatch.rs`, `int_mul in gpu_dispatch.rs`, `int_neg in gpu_dispatch.rs`, `int_floor_div in gpu_dispatch.rs`, `int_remainder in gpu_dispatch.rs`, `int_bitand in gpu_dispatch.rs`, `int_bitor in gpu_dispatch.rs`, `int_bitxor in gpu_dispatch.rs`, `int_bitnot in gpu_dispatch.rs`, `int_shl in gpu_dispatch.rs`, `int_shr in gpu_dispatch.rs`, `int_sum in gpu_dispatch.rs`, `int_prod in gpu_dispatch.rs`, `int_min in gpu_dispatch.rs`, `int_max in gpu_dispatch.rs`, `cast_f_to_i in gpu_dispatch.rs`, `cast_i_to_f in gpu_dispatch.rs`, `cast_i_to_i in gpu_dispatch.rs`; non-test consumer: `int_tensor.rs` int-tensor op forwarders. |
+| REQ-18 | SHIPPED | impl: `compare in gpu_dispatch.rs`, `bool_and in gpu_dispatch.rs`, `bool_or in gpu_dispatch.rs`, `bool_xor in gpu_dispatch.rs`, `bool_not in gpu_dispatch.rs`, `bool_any in gpu_dispatch.rs`, `bool_all in gpu_dispatch.rs`, `cast_bool_to_f in gpu_dispatch.rs`; non-test consumer: `bool_tensor.rs` bool-tensor op forwarders. |
 | REQ-19 | SHIPPED | impl: `synchronize` at `gpu_dispatch.rs:3269`, `stream_count` at `:3274`, `strided_cat` at `:2237`; non-test consumer: `ferrotorch-gpu::CudaBackendImpl` overrides `synchronize` to call `cudaDeviceSynchronize`. |
-| REQ-20 | SHIPPED | impl: `register_gpu_backend` at `gpu_dispatch.rs:4268`, `gpu_backend` at `:4273`, `has_gpu_backend` at `:4278`; non-test consumer: `ferrotorch-gpu/src/backend_impl.rs:7037` (`if has_gpu_backend()`) checks before registering, and every CUDA op in core calls `gpu_backend().ok_or(DeviceUnavailable)?` to obtain `&dyn GpuBackend`. |
+| REQ-20 | SHIPPED | impl: `register_gpu_backend in gpu_dispatch.rs`, `gpu_backend in gpu_dispatch.rs`, `has_gpu_backend in gpu_dispatch.rs`; non-test consumer: `has_gpu_backend in ferrotorch-gpu/src/backend_impl.rs` (`if has_gpu_backend()`) checks before registering, and every CUDA op in core calls `gpu_backend().ok_or(DeviceUnavailable)?` to obtain `&dyn GpuBackend`. |

@@ -69,7 +69,7 @@ PyTorch's `torch.amp` namespace: `torch.amp.autocast`,
 
 ### Re-exports (REQ-1, REQ-2)
 
-At `ferrotorch-train/src/amp.rs:48-55`. The re-exports are
+At `ferrotorch-train/src/amp.rs`. The re-exports are
 `pub use` lines that surface the autocast primitives + scaler types at
 `ferrotorch_train::amp::*`. This keeps `torch.amp`-using PyTorch code
 translatable to `use ferrotorch_train::amp::*;` with the same names.
@@ -125,7 +125,7 @@ ferrotorch's `AmpContext` consolidates the boilerplate into
 
 - The `AmpContext` is a self-contained convenience wrapper. The
   `GradScaler` re-exports it surfaces are themselves consumed by
-  `ferrotorch-train/src/learner.rs:29` (`use ferrotorch_optim::
+  `ferrotorch-train/src/learner.rs` (`use ferrotorch_optim::
   grad_scaler::GradScaler;`) and `:122` (`Learner::with_grad_scaler`).
   The autocast re-exports (`AutocastDtype`, `autocast`) are consumed
   by `ferrotorch-train/src/amp.rs:89, 105` themselves — the
@@ -181,10 +181,10 @@ Expected: > 7 passed, 0 failed.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub use ferrotorch_core::autograd::autocast::{AutocastDtype, autocast};` etc. at `ferrotorch-train/src/amp.rs:49-54`; non-test consumer: `ferrotorch-train/src/amp.rs:89, 105` constructs `AmpContext` with `AutocastDtype` and invokes `autocast(self.dtype, f)` — same-file production consumer. |
-| REQ-2 | SHIPPED | impl: `pub use ferrotorch_optim::{GradScaler, GradScalerConfig, GradScalerState};` at `ferrotorch-train/src/amp.rs:55`; non-test consumer: `ferrotorch-train/src/amp.rs:79, 92, 162, 167` use `GradScaler` / `GradScalerConfig` / `GradScalerState` as struct field type, constructor arg, return type, and parameter type respectively. The same names are independently used by `ferrotorch-train/src/learner.rs:29` (`use ferrotorch_optim::grad_scaler::GradScaler;`) at the `Learner::with_grad_scaler` attachment surface. |
-| REQ-3 | SHIPPED | impl: `pub struct AmpContext<T: Float>` at `ferrotorch-train/src/amp.rs:86-94` and `new` at `:100-106`; non-test consumer: `ferrotorch-train/examples/multi_epoch_train_dump.rs:577` constructs `AmpContext::<f32>::new(AutocastDtype::F16, scaler_cfg)` and attaches it to a `Learner` via `Learner::with_amp_context` at `:593` for the smoke fit (closes #1501). |
-| REQ-4 | SHIPPED | impl: `autocast_forward` at `ferrotorch-train/src/amp.rs:112-121`; non-test consumer: `ferrotorch-train/src/learner.rs:405-410` wraps the per-batch `model.forward(&input) + (self.loss_fn)(&out, &target)` inside `ctx.autocast_forward(...)` whenever an `AmpContext` is attached — reached from `examples/multi_epoch_train_dump.rs:653` via `learner.fit(...)` (closes #1501). |
-| REQ-5 | SHIPPED | impl: `backward_step` at `ferrotorch-train/src/amp.rs:130-146`; non-test consumer: `ferrotorch-train/src/learner.rs:431` invokes `ctx.backward_step(&loss, self.optimizer.as_mut())?` on the AMP branch of `Learner::fit`, reached from `examples/multi_epoch_train_dump.rs:653` (closes #1501). |
+| REQ-1 | SHIPPED | impl: `pub use ferrotorch_core::autograd::autocast::{AutocastDtype, autocast};` etc. at `AmpContext in ferrotorch-train/src/amp.rs`; non-test consumer: `AmpContext in ferrotorch-train/src/amp.rs, 105` constructs `AmpContext` with `AutocastDtype` and invokes `autocast(self.dtype, f)` — same-file production consumer. |
+| REQ-2 | SHIPPED | impl: `pub use ferrotorch_optim::{GradScaler, GradScalerConfig, GradScalerState};` at `ferrotorch-train/src/amp.rs`; non-test consumer: `ferrotorch-train/src/amp.rs, 92, 162, 167` use `GradScaler` / `GradScalerConfig` / `GradScalerState` as struct field type, constructor arg, return type, and parameter type respectively. The same names are independently used by `with_grad_scaler in ferrotorch-train/src/learner.rs` (`use ferrotorch_optim::grad_scaler::GradScaler;`) at the `Learner::with_grad_scaler` attachment surface. |
+| REQ-3 | SHIPPED | impl: `pub struct AmpContext<T: Float>` at `AmpContext in ferrotorch-train/src/amp.rs` and `new in ferrotorch-train/src/amp.rs`; non-test consumer: `new in ferrotorch-train/examples/multi_epoch_train_dump.rs` constructs `AmpContext::<f32>::new(AutocastDtype::F16, scaler_cfg)` and attaches it to a `Learner` via `Learner::with_amp_context` at `with_amp_context in ferrotorch-train/examples/multi_epoch_train_dump.rs` for the smoke fit (closes #1501). |
+| REQ-4 | SHIPPED | impl: `autocast_forward in ferrotorch-train/src/amp.rs`; non-test consumer: `autocast_forward in ferrotorch-train/src/learner.rs` wraps the per-batch `model.forward(&input) + (self.loss_fn)(&out, &target)` inside `ctx.autocast_forward(...)` whenever an `AmpContext` is attached — reached from `model in examples/multi_epoch_train_dump.rs` via `learner.fit(...)` (closes #1501). |
+| REQ-5 | SHIPPED | impl: `backward_step in ferrotorch-train/src/amp.rs`; non-test consumer: `backward_step in ferrotorch-train/src/learner.rs` invokes `ctx.backward_step(&loss, self.optimizer.as_mut())?` on the AMP branch of `Learner::fit`, reached from `fit in examples/multi_epoch_train_dump.rs` (closes #1501). |
 | REQ-6 | SHIPPED | impl: 7 accessors at `ferrotorch-train/src/amp.rs:148-180`; non-test consumer: `ferrotorch-train/src/learner.rs:282` exposes `amp_context()` which is consumed by `ferrotorch-train/examples/multi_epoch_train_dump.rs` via the `Learner::amp_context()` accessor; `AmpContext::dtype()` is read by `learner::tests::test_learner_with_amp_context_attaches_and_clears_scaler` and the accessor is part of the Learner surface (closes #1501). |
 

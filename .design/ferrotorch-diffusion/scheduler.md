@@ -46,14 +46,14 @@ the inference subset and `step` performs one denoising step.
 ## Acceptance Criteria
 
 - [x] AC-1: `beta_schedule_scaled_linear_matches_diffusers_sd15`
-  (`scheduler.rs:422..445`).
+  (`scheduler.rs`).
 - [x] AC-2: `timesteps_leading_4_steps_sd15` returns
-  `[751, 501, 251, 1]` (`scheduler.rs:465..472`).
+  `[751, 501, 251, 1]` (`scheduler.rs`).
 - [x] AC-3: `alphas_cumprod_is_monotone_decreasing` and the final
-  value lies in `[0.001, 0.01]` for SD-1.5 (`scheduler.rs:447..462`).
+  value lies in `[0.001, 0.01]` for SD-1.5 (`scheduler.rs`).
 - [x] AC-4: `step_recovers_zero_for_identity_noise` preserves shape
-  and yields only finite values (`scheduler.rs:496..524`).
-- [x] AC-5: `init_noise_sigma_is_one` passes (`scheduler.rs:484..488`).
+  and yields only finite values (`scheduler.rs`).
+- [x] AC-5: `init_noise_sigma_is_one` passes (`init_noise_sigma_is_one in scheduler.rs`).
 
 ## Architecture
 
@@ -61,39 +61,39 @@ Pure Rust state machine; tensor work goes through
 `ferrotorch_core::grad_fns::arithmetic::{add, mul, sub}` and
 `ferrotorch_core::scalar` for broadcastable scalar multiplies.
 
-- `BetaSchedule` (`scheduler.rs:24..30`) — enum with
+- `BetaSchedule` (`BetaSchedule in scheduler.rs`) — enum with
   `ScaledLinear` (SD default) and `Linear` variants.
-- `TimestepSpacing` (`scheduler.rs:33..42`) — enum with `Leading`
+- `TimestepSpacing` (`TimestepSpacing in scheduler.rs`) — enum with `Leading`
   (SD default) and `Linspace` variants.
-- `PredictionType` (`scheduler.rs:73..77`) — `Epsilon` only today;
+- `PredictionType` (`PredictionType in scheduler.rs`) — `Epsilon` only today;
   the enum exists so future `VPrediction` work can land additively.
-- `DDIMConfig` (`scheduler.rs:45..70`) carries every diffusers
+- `DDIMConfig` (`DDIMConfig in scheduler.rs`) carries every diffusers
   configuration knob that affects forward math. `Default` (SD-1.5
-  defaults) at `scheduler.rs:79..93`.
-- `DDIMScheduler` (`scheduler.rs:108..121`) holds the precomputed
+  defaults) at `scheduler.rs`.
+- `DDIMScheduler` (`DDIMScheduler in scheduler.rs`) holds the precomputed
   `alphas_cumprod`, the `final_alpha_cumprod`, and the inference
   timesteps cache.
-- `new` (`scheduler.rs:131..167`) precomputes the betas via
-  `compute_betas` (`scheduler.rs:366..395`), then accumulates
+- `new` (`new in scheduler.rs`) precomputes the betas via
+  `compute_betas` (`compute_betas in scheduler.rs`), then accumulates
   `alphas_cumprod`. The `final_alpha_cumprod` falls back to
   `alphas_cumprod[0]` when `set_alpha_to_one=false`.
-- `set_timesteps` (`scheduler.rs:191..248`) implements the
+- `set_timesteps` (`set_timesteps in scheduler.rs`) implements the
   diffusers `leading` and `linspace` paths; for SD-1.5 with
   `steps_offset=1` and `N=4` this returns `[751, 501, 251, 1]`.
-- `step` (`scheduler.rs:295..361`) is the η=0 DDIM update. Builds
+- `step` (`step in scheduler.rs`) is the η=0 DDIM update. Builds
   four broadcast-scalar tensors (`sqrt(beta_t)`,
   `1/sqrt(alpha_t)`, `sqrt(1-alpha_t_prev)`, `sqrt(alpha_t_prev)`)
   and combines them with `mul` / `sub` / `add`. Optional
   `clip_sample` clamps `pred_x0` to `[-1, 1]` (off for SD-1.5).
-- `scale_model_input` (`scheduler.rs:265..271`) is the identity for
+- `scale_model_input` (`scale_model_input in scheduler.rs`) is the identity for
   DDIM, kept for forward-compat with non-DDIM schedulers.
 
 Non-test production consumers:
 
-- `ferrotorch-diffusion/src/pipeline.rs:30` imports
-  `DDIMScheduler`; `pipeline.rs:132` calls `scale_model_input`,
-  `pipeline.rs:194` calls `set_timesteps`, `pipeline.rs:199` calls
-  `init_noise_sigma`, `pipeline.rs:212` calls `step`.
+- `ferrotorch-diffusion/src/pipeline.rs` imports
+  `DDIMScheduler`; `pipeline in pipeline.rs` calls `scale_model_input`,
+  `pipeline in pipeline.rs` calls `set_timesteps`, `pipeline in pipeline.rs` calls
+  `init_noise_sigma`, `pipeline in pipeline.rs` calls `step`.
 - `ferrotorch-diffusion/src/gpu/pipeline.rs` mirrors the same call
   sequence for the GPU pipeline.
 
@@ -113,7 +113,7 @@ cases:
 
 ## Verification
 
-Six lib tests in `scheduler.rs:417..525`:
+Six lib tests in `scheduler.rs`:
 
 - `beta_schedule_scaled_linear_matches_diffusers_sd15` — spot-checks
   `betas[0]`, `betas[999]`, and the midpoint within `5e-3`.
@@ -137,9 +137,9 @@ a wrapped PyTorch op.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `DDIMScheduler::new` at `ferrotorch-diffusion/src/scheduler.rs:131..167`; non-test consumer: `ferrotorch-diffusion/src/pipeline.rs:255` (test helper) and `examples/sd_pipeline_dump.rs` construct the scheduler from a `DDIMConfig::sd_v1_5()` |
+| REQ-1 | SHIPPED | impl: `DDIMScheduler::new` at `new in ferrotorch-diffusion/src/scheduler.rs`; non-test consumer: `new in ferrotorch-diffusion/src/pipeline.rs` (test helper) and `examples/sd_pipeline_dump.rs` construct the scheduler from a `DDIMConfig::sd_v1_5()` |
 | REQ-2 | SHIPPED | impl: `set_timesteps` at `ferrotorch-diffusion/src/scheduler.rs:191..248`; non-test consumer: `ferrotorch-diffusion/src/pipeline.rs:194` calls `self.scheduler.set_timesteps(num_inference_steps)?` |
 | REQ-3 | SHIPPED | impl: `step` at `ferrotorch-diffusion/src/scheduler.rs:295..361`; non-test consumer: `ferrotorch-diffusion/src/pipeline.rs:212` calls `self.scheduler.step(&guided, t, &latent)?` |
-| REQ-4 | SHIPPED | impl: `init_noise_sigma` at `ferrotorch-diffusion/src/scheduler.rs:177..179` and `scale_model_input` at `ferrotorch-diffusion/src/scheduler.rs:265..271`; non-test consumer: `ferrotorch-diffusion/src/pipeline.rs:199` and `pipeline.rs:132` invoke both |
-| REQ-5 | SHIPPED | impl: `compute_betas` (`ScaledLinear` arm) at `ferrotorch-diffusion/src/scheduler.rs:383..392`; non-test consumer: `DDIMScheduler::new` at `ferrotorch-diffusion/src/scheduler.rs:146` calls `compute_betas(...)` during construction |
+| REQ-4 | SHIPPED | impl: `init_noise_sigma in ferrotorch-diffusion/src/scheduler.rs` and `scale_model_input in ferrotorch-diffusion/src/scheduler.rs`; non-test consumer: `scale_model_input in ferrotorch-diffusion/src/pipeline.rs` and `pipeline in pipeline.rs` invoke both |
+| REQ-5 | SHIPPED | impl: `compute_betas` (`ScaledLinear` arm) at `compute_betas in ferrotorch-diffusion/src/scheduler.rs`; non-test consumer: `DDIMScheduler::new` at `new in ferrotorch-diffusion/src/scheduler.rs` calls `compute_betas(...)` during construction |
 | REQ-6 | SHIPPED | impl: prediction-type guard at `ferrotorch-diffusion/src/scheduler.rs:206..212`; non-test consumer: `set_timesteps` is called from `ferrotorch-diffusion/src/pipeline.rs:194` and surfaces this error before the diffusion loop runs |

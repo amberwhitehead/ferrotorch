@@ -60,7 +60,7 @@ a struct over upstream's closure capturing `step` from the outer
 - REQ-6: `Clone` impl carries config + runtime state but
   intentionally drops the `on_trace_ready` callback (a
   `Box<dyn FnMut + Send>` is not `Clone`). The doc-comment at
-  `schedule.rs:42-52` explains the rationale: re-attaching the
+  `schedule in schedule.rs` explains the rationale: re-attaching the
   callback would alias state the original owner did not consent
   to share. This is the type-system enforced version of the
   "callback per profile" invariant PyTorch documents informally.
@@ -107,7 +107,7 @@ non-callback fields are `u64`; the callback is a
 `Box<dyn FnMut(u64) + Send>` (Send so the schedule can move
 between threads, no `Sync` because `FnMut` requires `&mut`).
 
-Construction (`schedule.rs:117`) is a one-shot panic point:
+Construction (`schedule in schedule.rs`) is a one-shot panic point:
 `active == 0` or `repeat == 0` is a programming error caught at
 profile-config time, not a runtime condition.
 
@@ -145,7 +145,7 @@ record now?" check the host integration layer calls.
 
 ### Non-test production consumers
 
-- `ferrotorch-profiler/src/lib.rs:33` `pub mod schedule;`
+- `pub in ferrotorch-profiler/src/lib.rs` `pub mod schedule;`
   exposes the module at the crate root, with line 43
   `pub use schedule::{ProfileSchedule, SchedulePhase};` lifting
   the types into the prelude.
@@ -207,10 +207,10 @@ Expected: `8 passed; 0 failed` for `schedule::tests`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub enum SchedulePhase` at `ferrotorch-profiler/src/schedule.rs:5` with `Display` at line 17, mirroring `torch.profiler.profiler.ProfilerAction` at `torch/profiler/profiler.py:540`; non-test consumer: `ferrotorch-profiler/src/schedule.rs:69` `ProfileSchedule::phase` field carries it, line 148 `pub fn phase(&self) -> SchedulePhase` exposes it to callers (re-exported at `lib.rs:43`); the surface-coverage test consumes the variant set. |
-| REQ-2 | SHIPPED | impl: `pub struct ProfileSchedule` at `ferrotorch-profiler/src/schedule.rs:53` with the 8 fields (config + runtime + callback) and manual `Debug` at line 92; non-test consumer: the type is re-exported at `lib.rs:43` and propagated to the meta-crate at `ferrotorch/src/lib.rs:107`; `tests/conformance_surface_coverage.rs:83-84` pins it in the surface contract. |
-| REQ-3 | SHIPPED | impl: `pub fn new` at `ferrotorch-profiler/src/schedule.rs:117` with `assert!(active > 0)` and `assert!(repeat > 0)`, mirroring `torch/profiler/profiler.py:600-604`; non-test consumer: the constructor is the only entry point — every `ProfileSchedule` instance flows through it. Re-exported at `lib.rs:43` → `ferrotorch/src/lib.rs:107`. |
-| REQ-4 | SHIPPED | impl: `pub fn step` at `ferrotorch-profiler/src/schedule.rs:179` advancing position + phase, firing callback at end-of-cycle, mirroring the schedule_fn closure at `torch/profiler/profiler.py:575-598`; non-test consumer: same prelude path; the surface contract at `tests/conformance_surface_coverage.rs:85` pins `ProfileSchedule::step`. |
-| REQ-5 | SHIPPED | impl: `pub fn set_on_trace_ready` at `ferrotorch-profiler/src/schedule.rs:142` taking `impl FnMut(u64) + Send + 'static`; non-test consumer: re-exported at `lib.rs:43` and meta-crate prelude; the surface contract pins it. |
+| REQ-1 | SHIPPED | impl: `pub enum SchedulePhase` at `phase in ferrotorch-profiler/src/schedule.rs` with `Display` at line 17, mirroring `torch.profiler.profiler.ProfilerAction` at `torch/profiler/profiler.py:540`; non-test consumer: `phase in ferrotorch-profiler/src/schedule.rs` `ProfileSchedule::phase` field carries it, line 148 `pub fn phase(&self) -> SchedulePhase` exposes it to callers (re-exported at `lib.rs`); the surface-coverage test consumes the variant set. |
+| REQ-2 | SHIPPED | impl: `pub struct ProfileSchedule` at `ProfileSchedule in ferrotorch-profiler/src/schedule.rs` with the 8 fields (config + runtime + callback) and manual `Debug` at line 92; non-test consumer: the type is re-exported at `lib.rs` and propagated to the meta-crate at `ferrotorch/src/lib.rs`; `tests/conformance_surface_coverage.rs` pins it in the surface contract. |
+| REQ-3 | SHIPPED | impl: `pub fn new` at `new in ferrotorch-profiler/src/schedule.rs` with `assert!(active > 0)` and `assert!(repeat > 0)`, mirroring `torch/profiler/profiler.py:600-604`; non-test consumer: the constructor is the only entry point — every `ProfileSchedule` instance flows through it. Re-exported at `lib.rs` → `ferrotorch/src/lib.rs`. |
+| REQ-4 | SHIPPED | impl: `pub fn step` at `step in ferrotorch-profiler/src/schedule.rs` advancing position + phase, firing callback at end-of-cycle, mirroring the schedule_fn closure at `torch/profiler/profiler.py:575-598`; non-test consumer: same prelude path; the surface contract at `tests/conformance_surface_coverage.rs` pins `ProfileSchedule::step`. |
+| REQ-5 | SHIPPED | impl: `pub fn set_on_trace_ready` at `set_on_trace_ready in ferrotorch-profiler/src/schedule.rs` taking `impl FnMut(u64) + Send + 'static`; non-test consumer: re-exported at `lib.rs` and meta-crate prelude; the surface contract pins it. |
 | REQ-6 | SHIPPED | impl: manual `impl Clone for ProfileSchedule` at `ferrotorch-profiler/src/schedule.rs:74` with explicit `on_trace_ready: None` on the clone and rationale comment at lines 42-52; non-test consumer: the `Clone` derive is required by the `pub use` propagation chain — any caller cloning a schedule transitively consumes this impl. The behavior is verified by the lib test `clone_preserves_config_and_position_drops_callback` at line 327. |
 | REQ-7 | SHIPPED | impl: `phase` at line 148, `is_active` at line 154, `current_step` at line 160, `current_cycle` at line 166, all `#[must_use]`; non-test consumer: the accessors are part of the surface contract pinned by `tests/conformance_surface_coverage.rs:85-` and reachable through the meta-crate prelude — user code that drives a schedule outside `Profiler` flows through these getters. |

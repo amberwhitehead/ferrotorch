@@ -107,7 +107,7 @@ implementation recursively builds the partner-input einsum needed
 for the VJP: for two-input contractions, `dL/dA = einsum("dL/dC, B
 indices on conjugate side", grad_output, b)` and symmetric for `B`.
 
-The storage transfer uses `into_storage_and_shape()` at `:1566` /
+The storage transfer uses `into_storage_and_shape()` at `into_storage_and_shape in einsum.rs` /
 `:1575` to keep the forward's GPU-resident output GPU-resident
 through the autograd wrap (avoids the host bounce that an earlier
 implementation triggered via `data_vec()`).
@@ -147,9 +147,9 @@ whitespace); no divergences.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `einsum` at `einsum.rs:1517` mirrors `torch.einsum` (`torch/functional.py:einsum`); non-test consumer: `Tensor::einsum` at `methods.rs:638` invokes `einsum_differentiable` which routes to `einsum` |
-| REQ-2 | SHIPPED | impl: `parse_equation` at `einsum.rs:72`; non-test consumer: every call into `einsum_differentiable` → `einsum` triggers `parse_equation` first |
-| REQ-3 | SHIPPED | impl: `einsum_single` (referenced at `:1531`), repeated-index decomposition through `crate::stride_tricks::as_strided_copy` (#821 path) inside `einsum_single`; non-test consumer: `Tensor::einsum` at `methods.rs:638` |
+| REQ-2 | SHIPPED | impl: `parse_equation` at `einsum in einsum.rs`; non-test consumer: every call into `einsum_differentiable` → `einsum` triggers `parse_equation` first |
+| REQ-3 | SHIPPED | impl: `einsum_single` (referenced at `einsum_single in einsum.rs`), repeated-index decomposition through `crate::stride_tricks::as_strided_copy` (#821 path) inside `einsum_single`; non-test consumer: `Tensor::einsum` at `einsum in methods.rs` |
 | REQ-4 | SHIPPED | impl: `einsum_two` (referenced at `:1532`); non-test consumer: `Tensor::einsum` at `methods.rs:638` |
 | REQ-5 | SHIPPED | impl: `einsum_differentiable` at `einsum.rs:1543` with `EinsumBackwardSingle`/`EinsumBackwardTwo` wrap; non-test consumer: `Tensor::einsum` at `methods.rs:641` invokes `einsum_differentiable` (the method-surface boundary IS the public API per goal.md S5) |
 | REQ-6 | SHIPPED | impl: `build_dim_map` at `einsum.rs:149`; non-test consumer: every call into `einsum_differentiable` → `einsum` → `build_dim_map` |
-| REQ-7 | SHIPPED | impl: documented in the module-level `//!` comment at `einsum.rs:8-24` and the `Err(NotImplementedOnCuda)` returns inside `einsum_two` for non-decomposable equations; non-test consumer: `Tensor::einsum` |
+| REQ-7 | SHIPPED | impl: documented in the module-level `//!` comment at `einsum in einsum.rs` and the `Err(NotImplementedOnCuda)` returns inside `einsum_two` for non-decomposable equations; non-test consumer: `Tensor::einsum` |

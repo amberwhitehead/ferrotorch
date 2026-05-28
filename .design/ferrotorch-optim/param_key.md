@@ -110,11 +110,11 @@ to propagate it.
 - `ferrotorch-optim/src/adamw.rs:163` `state: HashMap<ParamKey, AdamWParamState>` + line 166 `foreach_state: HashMap<ParamKey, AdamWForeachState<T>>`.
 - `ferrotorch-optim/src/adamax.rs:134` — same pattern.
 - `ferrotorch-optim/src/asgd.rs:151` — same.
-- `ferrotorch-optim/src/radam.rs:139` — same.
+- `ferrotorch-optim/src/radam.rs` — same.
 - `ferrotorch-optim/src/sparse_adam.rs:88` — same.
 - Each optimizer's `load_state_dict` calls `key.parse::<ParamKey>()?`
   to convert the wire-format string back to a typed key (e.g.
-  `ferrotorch-optim/src/adamw.rs:571`, `radam.rs:503`).
+  `ferrotorch-optim/src/adamw.rs`, `radam in radam.rs`).
 
 ## Parity contract
 
@@ -159,7 +159,7 @@ Expected: `5 passed; 0 failed`.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub struct ParamKey { pub group: u32, pub param: u32 }` with the full derive list at `ferrotorch-optim/src/param_key.rs:43`; non-test consumer: `ferrotorch-optim/src/adamw.rs:163` `state: HashMap<ParamKey, AdamWParamState>` plus 5 other optimizer state-maps. |
-| REQ-2 | SHIPPED | impl: `pub const fn new` at `ferrotorch-optim/src/param_key.rs:62` with `debug_assert!` bounds; non-test consumer: `ferrotorch-optim/src/adamw.rs:220` `ParamKey::new(group_idx, param_idx)` (called from `AdamW::param_key`), same pattern at `radam.rs:161`, `asgd.rs:181`, `adamax.rs:156`, `sparse_adam.rs:114`. |
-| REQ-3 | SHIPPED | impl: `impl fmt::Display for ParamKey` at `ferrotorch-optim/src/param_key.rs:72` writing `"g{g}_p{p}"` matching `format!("g{}_p{}", g, p)`; non-test consumer: `ferrotorch-optim/src/adamw.rs:556` `// CL-1122: render typed ParamKey to the "g{}_p{}" wire format` (used in `state_dict` serialization); same pattern at `radam.rs:489`, `asgd.rs:441`, `adamax.rs:415`. |
-| REQ-4 | SHIPPED | impl: `impl FromStr for ParamKey` at `ferrotorch-optim/src/param_key.rs:85` returning `FerrotorchError::InvalidArgument` on malformed input; non-test consumer: `ferrotorch-optim/src/adamw.rs:571` `let key: ParamKey = key.parse()?;` inside `AdamW::load_state_dict`; same pattern at `radam.rs:503`, `asgd.rs:456`, `adamax.rs:429`. |
-| REQ-5 | SHIPPED | impl: `impl From<ParamKey> for String` at `ferrotorch-optim/src/param_key.rs:78` and `impl TryFrom<&str>` at line 100; non-test consumer: `From<ParamKey> for String` is used by the `to_string()` path inside every `state_dict` serializer (e.g. `adamw.rs:556`); `TryFrom<&str>` is the ergonomic conversion exposed at the crate boundary for external optimizer authors. |
+| REQ-2 | SHIPPED | impl: `pub const fn new` at `new in ferrotorch-optim/src/param_key.rs` with `debug_assert!` bounds; non-test consumer: `new in ferrotorch-optim/src/adamw.rs` `ParamKey::new(group_idx, param_idx)` (called from `AdamW::param_key`), same pattern at `radam in radam.rs`, `param_key in asgd.rs`, `adamax in adamax.rs`, `sparse_adam in sparse_adam.rs`. |
+| REQ-3 | SHIPPED | impl: `impl fmt::Display for ParamKey` at `format in ferrotorch-optim/src/param_key.rs` writing `"g{g}_p{p}"` matching `format!("g{}_p{}", g, p)`; non-test consumer: `state_dict in ferrotorch-optim/src/adamw.rs` `// CL-1122: render typed ParamKey to the "g{}_p{}" wire format` (used in `state_dict` serialization); same pattern at `radam in radam.rs`, `state_dict in asgd.rs`, `adamax in adamax.rs`. |
+| REQ-4 | SHIPPED | impl: `impl FromStr for ParamKey` at `ferrotorch-optim/src/param_key.rs` returning `FerrotorchError::InvalidArgument` on malformed input; non-test consumer: `load_state_dict in ferrotorch-optim/src/adamw.rs` `let key: ParamKey = key.parse()?;` inside `AdamW::load_state_dict`; same pattern at `radam in radam.rs`, `load_state_dict in asgd.rs`, `adamax in adamax.rs`. |
+| REQ-5 | SHIPPED | impl: `impl From<ParamKey> for String` at `to_string in ferrotorch-optim/src/param_key.rs` and `impl TryFrom<&str>` at line 100; non-test consumer: `From<ParamKey> for String` is used by the `to_string()` path inside every `state_dict` serializer (e.g. `state_dict in adamw.rs`); `TryFrom<&str>` is the ergonomic conversion exposed at the crate boundary for external optimizer authors. |

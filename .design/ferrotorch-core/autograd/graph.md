@@ -96,17 +96,17 @@ PyTorch ships under the same `Engine` class.
   `test_backward_chain` at `graph.rs:790-836`.
 - [x] AC-5: `backward()` on a non-scalar tensor errors with
   `FerrotorchError::BackwardNonScalar` — `test_backward_non_scalar_error`
-  at `graph.rs:838-844`.
+  at `test_backward_non_scalar_error in graph.rs`.
 - [x] AC-6: Single-element `[1]`-shape tensor through `mul` then
   `backward` works without integer underflow — CL-498 regression test
   `test_backward_one_element_tensor_seed_has_same_shape` at
-  `graph.rs:854-867`.
+  `test_backward_one_element_tensor_seed_has_same_shape in graph.rs`.
 - [x] AC-7: `pow` + `add` chain on `[1]`-shape produces correct
   partials — `test_backward_one_element_through_pow_and_add` at
   `graph.rs:869-886`.
 - [x] AC-8: `reduce_grad_to_shape` reshapes `[] -> [1]` when the
   numel matches — `test_reduce_grad_to_shape_reshape_when_same_numel`
-  at `graph.rs:888-900`.
+  at `test_reduce_grad_to_shape_reshape_when_same_numel in graph.rs`.
 - [x] AC-9: `reduce_grad_to_shape` errors cleanly (does NOT panic) on
   `[] -> [2]` numel mismatch — `test_reduce_grad_to_shape_returns_error_on_numel_mismatch_underflow`
   at `graph.rs:902-919`.
@@ -115,7 +115,7 @@ PyTorch ships under the same `Engine` class.
 
 ### REQ-1 / REQ-2 — public entry points
 
-`pub fn backward` at `graph.rs:20-22` is a 3-line delegation to
+`pub fn backward` at `backward in graph.rs` is a 3-line delegation to
 `backward_with_grad`. The latter at `graph.rs:30-206` is the real
 engine. It builds the seed gradient (REQ-10: shape-preserving for
 single-element non-scalars at `:50-65`), then runs the three-phase
@@ -195,19 +195,19 @@ flow.
 Located at `ferrotorch-core/src/autograd/graph.rs:652-936` (the
 `#[cfg(test)] mod tests` block; ~285 LOC of test code). Key tests:
 
-- `test_backward_simple_add` (`graph.rs:715`)
-- `test_backward_mul` (`graph.rs:741`)
-- `test_backward_shared_input` (`graph.rs:767`)
-- `test_backward_chain` (`graph.rs:790`)
-- `test_backward_non_scalar_error` (`graph.rs:838`)
+- `test_backward_simple_add` (`test_backward_simple_add in graph.rs`)
+- `test_backward_mul` (`test_backward_mul in graph.rs`)
+- `test_backward_shared_input` (`test_backward_shared_input in graph.rs`)
+- `test_backward_chain` (`test_backward_chain in graph.rs`)
+- `test_backward_non_scalar_error` (`test_backward_non_scalar_error in graph.rs`)
 - `test_backward_one_element_tensor_seed_has_same_shape`
-  (`graph.rs:854`)
-- `test_backward_one_element_through_pow_and_add` (`graph.rs:869`)
-- `test_reduce_grad_to_shape_reshape_when_same_numel` (`graph.rs:888`)
+  (`test_backward_one_element_tensor_seed_has_same_shape in graph.rs`)
+- `test_backward_one_element_through_pow_and_add` (`test_backward_one_element_through_pow_and_add in graph.rs`)
+- `test_reduce_grad_to_shape_reshape_when_same_numel` (`test_reduce_grad_to_shape_reshape_when_same_numel in graph.rs`)
 - `test_reduce_grad_to_shape_returns_error_on_numel_mismatch_underflow`
-  (`graph.rs:902`)
+  (`test_reduce_grad_to_shape_returns_error_on_numel_mismatch_underflow in graph.rs`)
 - `test_reduce_grad_to_shape_reshape_branch_does_not_swallow_numel_mismatch`
-  (`graph.rs:921`)
+  (`test_reduce_grad_to_shape_reshape_branch_does_not_swallow_numel_mismatch in graph.rs`)
 
 All ten tests pass in the workspace gauntlet.
 
@@ -215,8 +215,8 @@ All ten tests pass in the workspace gauntlet.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub fn backward<T: Float>` at `ferrotorch-core/src/autograd/graph.rs:20-22`; mirrors `torch.autograd.backward` at `torch/autograd/__init__.py:240`; non-test production consumer: `Tensor::backward(&self)` convenience method at `graph.rs:637-639` is the user-facing API; downstream consumer `ferrotorch-core/src/stride_tricks.rs:671 use crate::autograd::backward; backward(&loss)?` invokes it from the slogdet backward path. |
-| REQ-2 | SHIPPED | impl: `pub fn backward_with_grad<T: Float>` at `graph.rs:30-206`; mirrors `torch.autograd.backward(tensors, grad_tensors=...)` per `torch/autograd/__init__.py:91 _make_grads`; non-test production consumer: `Tensor::backward_with_gradient(&self, gradient)` at `graph.rs:647-649` is the public method form; called from internal grad_fn backward paths e.g. `ferrotorch-core/src/grad_fns/shape.rs:1112 use crate::autograd::backward`. |
+| REQ-1 | SHIPPED | impl: `pub fn backward<T: Float>` at `backward in ferrotorch-core/src/autograd/graph.rs`; mirrors `torch.autograd.backward` at `torch/autograd/__init__.py:240`; non-test production consumer: `Tensor::backward(&self)` convenience method at `backward in graph.rs` is the user-facing API; downstream consumer `backward in ferrotorch-core/src/stride_tricks.rs use crate::autograd::backward; backward(&loss)?` invokes it from the slogdet backward path. |
+| REQ-2 | SHIPPED | impl: `pub fn backward_with_grad<T: Float>` at `backward_with_grad in graph.rs`; mirrors `torch.autograd.backward(tensors, grad_tensors=...)` per `torch/autograd/__init__.py:91 _make_grads`; non-test production consumer: `Tensor::backward_with_gradient(&self, gradient)` at `backward_with_gradient in graph.rs` is the public method form; called from internal grad_fn backward paths e.g. `backward in ferrotorch-core/src/grad_fns/shape.rs use crate::autograd::backward`. |
 | REQ-3 | SHIPPED | impl: three-phase Kahn algorithm at `graph.rs:67-205` mirroring `torch/csrc/autograd/engine.cpp` `compute_dependencies` + `evaluate_function`; non-test consumer: this is the dispatcher inside REQ-1/REQ-2 so its production consumer is the same one (`Tensor::backward`). |
 | REQ-4 | SHIPPED | impl: `accumulate_non_leaf_grad` at `graph.rs:530-629` (sequential) and `accumulate_non_leaf_grad_locked` at `:460-514` (parallel); non-test consumer: invoked from inside REQ-1/REQ-2 dispatch; the parallel variant invoked from REQ-9's parallel engine; production path: `Tensor::backward` and `Tensor::backward_with_gradient`. |
 | REQ-5 | SHIPPED | impl: `run_grad_hooks` + `run_post_accumulate_hooks` calls at `graph.rs:175-193` (sequential) and `:385-407` (parallel); mirrors PyTorch's hook chain in `torch/utils/hooks.py:93+`; non-test production consumer: every leaf tensor with `register_hook` registered via `Tensor::register_hook` at `ferrotorch-core/src/tensor.rs:460` flows through this path during user `loss.backward()` calls. |
@@ -225,4 +225,4 @@ All ten tests pass in the workspace gauntlet.
 | REQ-8 | SHIPPED | impl: gradient-count sanity check at `graph.rs:160-168` and `:372-380`; production consumer: same as REQ-3 (this is a defensive guard inside the dispatcher). Test coverage: every `GradFn` implementation in the workspace returns the correct count thanks to this guard catching mismatches at runtime (would surface as `InvalidArgument { message }`). |
 | REQ-9 | SHIPPED | impl: `pub fn backward_parallel<T: Float>` at `graph.rs:220-457`; mirrors PyTorch's multi-thread engine in `torch/csrc/autograd/engine.cpp` (`ReadyQueue` / worker threads); non-test consumer: this is the existing public API surface; **note** the small-graph fallback at `:276-278` (re-dispatches to sequential) is the primary consumer for graphs <8 nodes. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
 | REQ-10 | SHIPPED | impl: shape-preserving seed at `graph.rs:50-65`; CL-498 fix; non-test consumer: every user call to `Tensor::backward()` on a 1-D `[1]`-shape loss (e.g. AdamW convergence with single-element loss); regression-tested by `test_backward_one_element_tensor_seed_has_same_shape` (production path is the same `Tensor::backward` entry). |
-| REQ-11 | SHIPPED | impl: `impl<T: Float> Tensor<T>` with `pub fn backward(&self)` at `graph.rs:637-639` and `pub fn backward_with_gradient(&self, gradient)` at `:647-649`; mirrors `tensor.backward()` per `torch/_tensor.py:594` Python tensor method; non-test consumer: `ferrotorch-core/src/stride_tricks.rs:672 backward(&loss)`, `ferrotorch-core/src/grad_fns/quantize_grad.rs:793` etc. — every production backward call site uses these convenience methods. |
+| REQ-11 | SHIPPED | impl: `impl<T: Float> Tensor<T>` with `pub fn backward(&self)` at `backward in graph.rs` and `pub fn backward_with_gradient(&self, gradient)` at `backward_with_gradient in graph.rs`; mirrors `tensor.backward()` per `torch/_tensor.py:594` Python tensor method; non-test consumer: `tensor in ferrotorch-core/src/stride_tricks.rs backward(&loss)`, `tensor in ferrotorch-core/src/grad_fns/quantize_grad.rs` etc. — every production backward call site uses these convenience methods. |

@@ -73,18 +73,18 @@ at `_color.py:72`.
 - [x] AC-2: Negative `brightness` returns `Err`.
 - [x] AC-3: `hue > 0.5` returns `Err`.
 - [x] AC-4: All-zero params returns identity (verified by
-  `test_color_jitter_zero_params` at `color_jitter.rs:258`).
+  `test_color_jitter_zero_params in color_jitter.rs`).
 - [x] AC-5: Output shape equals input shape (verified by
-  `test_color_jitter_output_shape` at `color_jitter.rs:249`).
+  `test_color_jitter_output_shape in color_jitter.rs`).
 - [x] AC-6: Output values are clamped to `[0, 1]` (verified by
-  `test_color_jitter_output_clamped` at `color_jitter.rs:272`).
+  `test_color_jitter_output_clamped in color_jitter.rs`).
 - [x] AC-7: Non-RGB input returns `Err` (verified by
-  `test_color_jitter_rejects_non_rgb` at `color_jitter.rs:286`).
+  `test_color_jitter_rejects_non_rgb in color_jitter.rs`).
 - [x] AC-8: RGB↔HSV roundtrip is exact for canonical colors (verified
-  by `test_rgb_hsv_roundtrip` at `color_jitter.rs:296`).
+  by `test_rgb_hsv_roundtrip in color_jitter.rs`).
 - [x] AC-9: Brightness-only mode scales all pixels uniformly (verified
-  by `test_color_jitter_brightness_only` at `color_jitter.rs:318`).
-- [x] AC-10: f32 works (verified at `color_jitter.rs:334`).
+  by `test_color_jitter_brightness_only in color_jitter.rs`).
+- [x] AC-10: f32 works (verified at `color_jitter.rs`).
 - [x] AC-11: `(min, max)` tuple input form (verified by
   `test_color_jitter_from_ranges_identity`,
   `test_color_jitter_from_ranges_asymmetric_brightness`, and
@@ -101,20 +101,20 @@ pub struct ColorJitter<T: Float> {
 }
 ```
 
-at `color_jitter.rs:22-28`. Constructor at `color_jitter.rs:43-76`
+at `color_jitter.rs`. Constructor at `color_jitter.rs`
 applies four separate range checks.
 
 ### Helpers (REQ-3, REQ-4)
 
-`fn shuffle_order` at `color_jitter.rs:80-88` — Fisher-Yates over the
+`fn shuffle_order` at `shuffle_order in color_jitter.rs` — Fisher-Yates over the
 global PRNG.
 
-`fn uniform_factor` at `color_jitter.rs:91-95` — `[max(0, 1-v), 1+v]`
+`fn uniform_factor` at `uniform_factor in color_jitter.rs` — `[max(0, 1-v), 1+v]`
 uniform sample.
 
 ### Transform impl (REQ-5)
 
-`fn apply` at `color_jitter.rs:97-187`:
+`fn apply` at `apply in color_jitter.rs`:
 
 ```rust
 // 1. Split into f64 channel buffers.
@@ -140,11 +140,11 @@ Hue's HSV roundtrip is per-pixel — the most expensive op.
 
 ### Color-space conversion (REQ-6)
 
-`fn rgb_to_hsv` at `color_jitter.rs:193-212`: standard
+`fn rgb_to_hsv` at `rgb_to_hsv in color_jitter.rs`: standard
 max/min/delta-based formula, with the hue sector chosen by which
 channel equals `max`.
 
-`fn hsv_to_rgb` at `color_jitter.rs:214-234`: standard sector-based
+`fn hsv_to_rgb` at `hsv_to_rgb in color_jitter.rs`: standard sector-based
 inverse.
 
 The roundtrip preserves the canonical primary/secondary/grayscale
@@ -189,13 +189,13 @@ explicit range form. Blocker #1522.
 
 Tests in `mod tests in color_jitter.rs` (7 tests):
 
-- `test_color_jitter_output_shape` at `color_jitter.rs:249`
-- `test_color_jitter_zero_params` at `color_jitter.rs:258`
-- `test_color_jitter_output_clamped` at `color_jitter.rs:272`
-- `test_color_jitter_rejects_non_rgb` at `color_jitter.rs:286`
-- `test_rgb_hsv_roundtrip` at `color_jitter.rs:296`
-- `test_color_jitter_brightness_only` at `color_jitter.rs:318`
-- `test_color_jitter_f32` at `color_jitter.rs:334`
+- `test_color_jitter_output_shape in color_jitter.rs`
+- `test_color_jitter_zero_params in color_jitter.rs`
+- `test_color_jitter_output_clamped in color_jitter.rs`
+- `test_color_jitter_rejects_non_rgb in color_jitter.rs`
+- `test_rgb_hsv_roundtrip in color_jitter.rs`
+- `test_color_jitter_brightness_only in color_jitter.rs`
+- `test_color_jitter_f32 in color_jitter.rs`
 
 Smoke:
 
@@ -209,10 +209,10 @@ Expected: `7 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct ColorJitter<T: Float>` with four float params + `_marker` at `ferrotorch-vision/src/transforms/color_jitter.rs:22-28`, mirroring `torchvision/transforms/v2/_color.py:72` `class ColorJitter`; non-test consumer: `pub use color_jitter::ColorJitter;` at `mod.rs:20` AND `ColorJitter` in the crate-root re-export at `ferrotorch-vision/src/lib.rs:113`. |
-| REQ-2 | SHIPPED | impl: `pub fn ColorJitter::new(b, c, s, h) -> FerrotorchResult<Self>` with four range checks at `color_jitter.rs:43-76`; non-test consumer: registered in `ferrotorch-vision/tests/conformance/_surface_inventory.toml:143` as `ferrotorch_vision::ColorJitter::new`; reachable via the crate-root re-export. |
-| REQ-3 | SHIPPED | impl: `fn shuffle_order(n: usize) -> Vec<usize>` Fisher-Yates at `color_jitter.rs:80-88`; non-test consumer: `fn apply` calls `let order = shuffle_order(4);` at `color_jitter.rs:128`. |
-| REQ-4 | SHIPPED | impl: `fn uniform_factor(v: f64) -> f64` at `color_jitter.rs:91-95`; non-test consumer: `fn apply` calls `uniform_factor(self.brightness)`, `uniform_factor(self.contrast)`, `uniform_factor(self.saturation)` at `color_jitter.rs:133, 141, 153`. |
-| REQ-5 | SHIPPED | impl: `impl<T: Float> Transform<T> for ColorJitter<T>` at `color_jitter.rs:97-187`; non-test consumer: any `Box<dyn Transform<T>>` slot — typically near the start of an augmentation `Compose` pipeline. The `lib.rs:113` re-export is the production-facing handle. |
-| REQ-6 | SHIPPED | impl: `fn rgb_to_hsv(r, g, b) -> (f64, f64, f64)` at `color_jitter.rs:193-212` and `fn hsv_to_rgb(h, s, v)` at `color_jitter.rs:214-234`; non-test consumer: `fn apply` calls `rgb_to_hsv` and `hsv_to_rgb` per-pixel inside the hue branch at `color_jitter.rs:165-167`. |
-| REQ-7 | SHIPPED | impl: `pub fn ColorJitter::from_ranges(brightness, contrast, saturation, hue)` + tuple field storage at `ferrotorch-vision/src/transforms/color_jitter.rs:34-46,104-146`; non-test consumer: `pub use color_jitter::ColorJitter;` at `mod.rs:28` AND in the `lib.rs` re-export — pipelines call `ColorJitter::from_ranges((0.8, 1.2), (0.8, 1.2), (0.8, 1.2), (-0.05, 0.05))?` per upstream `_color.py:100-122`. |
+| REQ-1 | SHIPPED | impl: `pub struct ColorJitter<T: Float>` with four float params + `_marker` at `ColorJitter in ferrotorch-vision/src/transforms/color_jitter.rs`, mirroring `torchvision/transforms/v2/_color.py:72` `class ColorJitter`; non-test consumer: `pub use color_jitter::ColorJitter;` at `mod.rs` AND `ColorJitter` in the crate-root re-export at `ferrotorch-vision/src/lib.rs`. |
+| REQ-2 | SHIPPED | impl: `pub fn ColorJitter::new(b, c, s, h) -> FerrotorchResult<Self>` with four range checks at `new in color_jitter.rs`; non-test consumer: registered in `ferrotorch-vision/tests/conformance/_surface_inventory.toml:143` as `ferrotorch_vision::ColorJitter::new`; reachable via the crate-root re-export. |
+| REQ-3 | SHIPPED | impl: `fn shuffle_order(n: usize) -> Vec<usize>` Fisher-Yates at `shuffle_order in color_jitter.rs`; non-test consumer: `fn apply` calls `let order = shuffle_order(4);` at `apply in color_jitter.rs`. |
+| REQ-4 | SHIPPED | impl: `fn uniform_factor(v: f64) -> f64` at `uniform_factor in color_jitter.rs`; non-test consumer: `fn apply` calls `uniform_factor(self.brightness)`, `uniform_factor(self.contrast)`, `uniform_factor(self.saturation)` at `uniform_factor in color_jitter.rs, 141, 153`. |
+| REQ-5 | SHIPPED | impl: `impl<T: Float> Transform<T> for ColorJitter<T>` at `color_jitter.rs`; non-test consumer: any `Box<dyn Transform<T>>` slot — typically near the start of an augmentation `Compose` pipeline. The `lib.rs` re-export is the production-facing handle. |
+| REQ-6 | SHIPPED | impl: `fn rgb_to_hsv(r, g, b) -> (f64, f64, f64)` at `rgb_to_hsv in color_jitter.rs` and `fn hsv_to_rgb(h, s, v)` at `hsv_to_rgb in color_jitter.rs`; non-test consumer: `fn apply` calls `rgb_to_hsv` and `hsv_to_rgb` per-pixel inside the hue branch at `hsv_to_rgb in color_jitter.rs`. |
+| REQ-7 | SHIPPED | impl: `pub fn ColorJitter::from_ranges(brightness, contrast, saturation, hue)` + tuple field storage at `from_ranges in ferrotorch-vision/src/transforms/color_jitter.rs,104-146`; non-test consumer: `pub use color_jitter::ColorJitter;` at `mod.rs` AND in the `lib.rs` re-export — pipelines call `ColorJitter::from_ranges((0.8, 1.2), (0.8, 1.2), (0.8, 1.2), (-0.05, 0.05))?` per upstream `_color.py:100-122`. |

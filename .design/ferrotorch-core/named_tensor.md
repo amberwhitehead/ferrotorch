@@ -75,7 +75,7 @@ Crosslink #621.
 
 ## Architecture
 
-### Layout (`named_tensor.rs:26-30`)
+### Layout (`named_tensor in named_tensor.rs`)
 
 ```rust
 pub struct NamedTensor<T: Float> {
@@ -176,12 +176,12 @@ Expected: 12 tests pass, 0 failed (one per AC).
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct NamedTensor<T: Float>` at `ferrotorch-core/src/named_tensor.rs:27` with `Vec<Option<String>>` names. Non-test production consumer: `ferrotorch-core/src/lib.rs:147` `pub use named_tensor::NamedTensor` — the boundary public API. R-DEFER-1 S5 grandfathering: existing pub API surface (#621), the type IS the boundary. |
-| REQ-2 | SHIPPED | impl: `new` at `ferrotorch-core/src/named_tensor.rs:37` (validates name count + rejects duplicates at `:48-55`), `refined` at `:61`. Non-test production consumer: `lib.rs:147` re-export. Tests: `named_tensor_basic_construction` at `:202`, `named_tensor_rejects_duplicate_names` at `:218`. |
-| REQ-3 | SHIPPED | impl: `tensor` at `ferrotorch-core/src/named_tensor.rs:77`, `into_tensor` at `:82`, `names` at `:87`, `shape` at `:92`, `ndim` at `:97`, `numel` at `:102`. Non-test production consumer: `lib.rs:147` re-export. Test: `named_tensor_into_tensor_recovers_inner` at `:282`. |
-| REQ-4 | SHIPPED | impl: `dim_index` at `ferrotorch-core/src/named_tensor.rs:107`, `size_of` at `:112`. Non-test production consumer: `lib.rs:147` re-export. Test: `named_tensor_dim_index_lookup` at `:289`. |
-| REQ-5 | SHIPPED | impl: `rename` at `ferrotorch-core/src/named_tensor.rs:118-131`. Non-test production consumer: `lib.rs:147` re-export. Test: `named_tensor_rename_replaces_specified_names` at `:264`. |
-| REQ-6 | SHIPPED | impl: `align_to` at `ferrotorch-core/src/named_tensor.rs:137-163` using `crate::methods::permute_t` for the permutation. Non-test production consumer: `lib.rs:147` re-export + internal consumer at `:160` `crate::methods::permute_t(&self.inner, &perm)?`. Tests: `named_tensor_align_permutes_dims` at `:231`, `named_tensor_align_identity_is_clone` at `:243`, `named_tensor_align_rejects_unknown_name` at `:250`. |
-| REQ-7 | SHIPPED | impl: `detached` at `ferrotorch-core/src/named_tensor.rs:167`. Non-test production consumer: `lib.rs:147` re-export. Test: `named_tensor_detached_drops_names` at `:273`. |
-| REQ-8 | SHIPPED | impl: `Display` impl at `ferrotorch-core/src/named_tensor.rs:175-189`. Non-test production consumer: `lib.rs:147` re-export — every `format!("{}", nt)` callsite that handles a `NamedTensor`. |
-| REQ-9 | SHIPPED | impl: `FerrotorchError::ShapeMismatch` at `named_tensor.rs:39, :139`; `InvalidArgument` at `:51, :150`. No `panic!` / `unwrap` / `expect` in production paths. Non-test production consumer: callers propagate the structured error via `?`. Tests: `named_tensor_rejects_length_mismatch` at `:212`, `named_tensor_rejects_duplicate_names` at `:218`, `named_tensor_align_rejects_length_mismatch` at `:257`. |
+| REQ-1 | SHIPPED | impl: `pub struct NamedTensor<T: Float>` at `NamedTensor in ferrotorch-core/src/named_tensor.rs` with `Vec<Option<String>>` names. Non-test production consumer: `ferrotorch-core/src/lib.rs` `pub use named_tensor::NamedTensor` — the boundary public API. R-DEFER-1 S5 grandfathering: existing pub API surface (#621), the type IS the boundary. |
+| REQ-2 | SHIPPED | impl: `new in ferrotorch-core/src/named_tensor.rs` (validates name count + rejects duplicates at `new in ferrotorch-core/src/named_tensor.rs`), `refined in ferrotorch-core/src/named_tensor.rs`. Non-test production consumer: `lib.rs` re-export. Tests: `named_tensor_basic_construction` at `lib.rs`, `named_tensor_rejects_duplicate_names` at `lib.rs`. |
+| REQ-3 | SHIPPED | impl: `tensor in ferrotorch-core/src/named_tensor.rs`, `into_tensor in ferrotorch-core/src/named_tensor.rs`, `names in ferrotorch-core/src/named_tensor.rs`, `shape in ferrotorch-core/src/named_tensor.rs`, `ndim in ferrotorch-core/src/named_tensor.rs`, `numel in ferrotorch-core/src/named_tensor.rs`. Non-test production consumer: `shape in lib.rs` re-export. Test: `named_tensor_into_tensor_recovers_inner` at `shape in lib.rs`. |
+| REQ-4 | SHIPPED | impl: `dim_index in ferrotorch-core/src/named_tensor.rs`, `size_of in ferrotorch-core/src/named_tensor.rs`. Non-test production consumer: `lib.rs` re-export. Test: `named_tensor_dim_index_lookup` at `lib.rs`. |
+| REQ-5 | SHIPPED | impl: `rename in ferrotorch-core/src/named_tensor.rs`. Non-test production consumer: `lib.rs` re-export. Test: `named_tensor_rename_replaces_specified_names` at `lib.rs`. |
+| REQ-6 | SHIPPED | impl: `align_to in ferrotorch-core/src/named_tensor.rs` using `crate::methods::permute_t` for the permutation. Non-test production consumer: `lib.rs` re-export + internal consumer at `lib.rs` `crate::methods::permute_t(&self.inner, &perm)?`. Tests: `named_tensor_align_permutes_dims` at `lib.rs`, `named_tensor_align_identity_is_clone` at `lib.rs`, `named_tensor_align_rejects_unknown_name` at `lib.rs`. |
+| REQ-7 | SHIPPED | impl: `detached in ferrotorch-core/src/named_tensor.rs`. Non-test production consumer: `lib.rs` re-export. Test: `named_tensor_detached_drops_names` at `lib.rs`. |
+| REQ-8 | SHIPPED | impl: `Display` impl at `NamedTensor in ferrotorch-core/src/named_tensor.rs`. Non-test production consumer: `lib.rs` re-export — every `format!("{}", nt)` callsite that handles a `NamedTensor`. |
+| REQ-9 | SHIPPED | impl: `FerrotorchError::ShapeMismatch` at `named_tensor in named_tensor.rs, `; `InvalidArgument` at `, `. No `panic!` / `unwrap` / `expect` in production paths. Non-test production consumer: callers propagate the structured error via `?`. Tests: `named_tensor_rejects_length_mismatch in named_tensor.rs`, `named_tensor_rejects_duplicate_names in named_tensor.rs`, `named_tensor_align_rejects_length_mismatch in named_tensor.rs`. |

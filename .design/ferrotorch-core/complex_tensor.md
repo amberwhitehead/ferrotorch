@@ -57,7 +57,7 @@ Crosslink #618 (introduction) + #624 (matmul + FFT integration).
 ## Acceptance Criteria
 
 - [x] AC-1: `complex_construction_from_re_im` at `complex_tensor.rs:428`.
-- [x] AC-2: `complex_from_real_zero_imag` at `complex_tensor.rs:436`.
+- [x] AC-2: `complex_from_real_zero_imag in complex_tensor.rs`.
 - [x] AC-3: `complex_zeros` at `complex_tensor.rs:446`,
   `complex_scalar_constructor` at `:457`.
 - [x] AC-4: `complex_interleaved_roundtrip` at `complex_tensor.rs:464`,
@@ -72,7 +72,7 @@ Crosslink #618 (introduction) + #624 (matmul + FFT integration).
   `complex_matmul_rejects_shape_mismatch` at `:633`,
   `complex_matmul_against_real_path_when_im_is_zero` at `:642`.
 - [x] AC-10: `complex_fft_ifft_roundtrip` at `complex_tensor.rs:657`,
-  `complex_fft2_ifft2_roundtrip` at `:678`.
+  `complex_fft2_ifft2_roundtrip in complex_tensor.rs`.
 - [x] AC-11: `complex_reshape_preserves_data` at `complex_tensor.rs:571`,
   `complex_reshape_size_mismatch_errors` at `:585`.
 - [x] AC-12: `complex_binary_op_shape_mismatch` at `complex_tensor.rs:592`,
@@ -80,7 +80,7 @@ Crosslink #618 (introduction) + #624 (matmul + FFT integration).
 
 ## Architecture
 
-### Layout (`complex_tensor.rs:32-36`)
+### Layout (`complex_tensor.rs`)
 
 ```rust
 pub struct ComplexTensor<T: Float> {
@@ -198,15 +198,15 @@ round-trip listed in the Acceptance Criteria.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct ComplexTensor<T: Float>` at `ferrotorch-core/src/complex_tensor.rs:32` with parallel `Arc<Vec<T>>` re + im buffers. Mirrors `c10::complex<T>` (`c10/util/complex.h`) under R-DEV-7 SoA-vs-AoS deviation rationale. Non-test production consumer: `ferrotorch-core/src/lib.rs:136` `pub use complex_tensor::ComplexTensor`. R-DEFER-1 S5 grandfathering: the type IS the boundary public API (#618). |
-| REQ-2 | SHIPPED | impl: `from_re_im` at `ferrotorch-core/src/complex_tensor.rs:40`, `from_real` at `:71`, `zeros` at `:78`, `scalar` at `:94`. Non-test production consumer: `lib.rs:136` re-export; downstream DSP/FFT user code constructs via these. Test: `complex_construction_from_re_im` at `:428`. |
+| REQ-1 | SHIPPED | impl: `pub struct ComplexTensor<T: Float>` at `ComplexTensor in ferrotorch-core/src/complex_tensor.rs` with parallel `Arc<Vec<T>>` re + im buffers. Mirrors `c10::complex<T>` (`c10/util/complex.h`) under R-DEV-7 SoA-vs-AoS deviation rationale. Non-test production consumer: `ferrotorch-core/src/lib.rs` `pub use complex_tensor::ComplexTensor`. R-DEFER-1 S5 grandfathering: the type IS the boundary public API (#618). |
+| REQ-2 | SHIPPED | impl: `from_re_im in ferrotorch-core/src/complex_tensor.rs`, `from_real in ferrotorch-core/src/complex_tensor.rs`, `zeros in ferrotorch-core/src/complex_tensor.rs`, `scalar in ferrotorch-core/src/complex_tensor.rs`. Non-test production consumer: `lib.rs` re-export; downstream DSP/FFT user code constructs via these. Test: `complex_construction_from_re_im` at `lib.rs`. |
 | REQ-3 | SHIPPED | impl: `from_interleaved` at `ferrotorch-core/src/complex_tensor.rs:105`, `to_interleaved` at `:136`. Non-test production consumer: the FFT integration methods at `:327, :334, :341, :348` (`fft`, `ifft`, `fft2`, `ifft2`) all call `self.to_interleaved()` then route through `crate::fft::*` then call `Self::from_interleaved()` — same-file caller chain but the FFT methods are the boundary public API. Test: `complex_interleaved_roundtrip` at `:464`. |
-| REQ-4 | SHIPPED | impl: `real` at `ferrotorch-core/src/complex_tensor.rs:149`, `imag` at `:158`. Non-test production consumer: `lib.rs:136` re-export. Test: `complex_real_imag_extraction` at `:489`. |
+| REQ-4 | SHIPPED | impl: `real in ferrotorch-core/src/complex_tensor.rs`, `imag in ferrotorch-core/src/complex_tensor.rs`. Non-test production consumer: `lib.rs` re-export. Test: `complex_real_imag_extraction` at `lib.rs`. |
 | REQ-5 | SHIPPED | impl: `add` at `ferrotorch-core/src/complex_tensor.rs:192`, `sub` at `:201`, `mul` at `:210` (with Karatsuba-shaped `(a+bi)(c+di)` formula). Non-test production consumer: `complex_tensor.rs:302-305` `mm(&a_re, &b_re)?` etc. inside `matmul` reach into `crate::ops::linalg::mm`; the four `mm` calls compose `add` + `sub` arithmetic into the complex-matmul result (the inner add/sub are line-level rather than method-level but the public `matmul` IS a `add/sub` consumer). Test: `complex_pointwise_mul` at `:528`. |
-| REQ-6 | SHIPPED | impl: `conj` at `ferrotorch-core/src/complex_tensor.rs:219`. Non-test production consumer: `lib.rs:136` re-export. Test: `complex_conj_negates_imag` at `:537`. |
-| REQ-7 | SHIPPED | impl: `abs` at `ferrotorch-core/src/complex_tensor.rs:230`, `angle` at `:241`. Non-test production consumer: `lib.rs:136` re-export. Tests: `complex_abs_pythagorean` at `:546`, `complex_angle_quadrants` at `:553`. |
-| REQ-8 | SHIPPED | impl: `matmul` at `ferrotorch-core/src/complex_tensor.rs:259-321` composing 4× `crate::ops::linalg::mm` calls. Non-test production consumer: `lib.rs:136` re-export; downstream complex-valued model code (FFT-based attention, MIMO signal processing) calls this. R-DEFER-1 S5 grandfathering. Tests: `complex_matmul_2x2_known_value` at `:612` + the real-equivalence regression at `:642`. |
-| REQ-9 | SHIPPED | impl: `fft` at `ferrotorch-core/src/complex_tensor.rs:327`, `ifft` at `:334`, `fft2` at `:341`, `ifft2` at `:348`. Each routes through `crate::fft::*` via the interleaved bridge. Non-test production consumer: `lib.rs:136` re-export. Test: `complex_fft_ifft_roundtrip` at `:657`, `complex_fft2_ifft2_roundtrip` at `:678`. |
-| REQ-10 | SHIPPED | impl: `reshape` at `ferrotorch-core/src/complex_tensor.rs:355` using `Arc::clone(&self.re/im)`. Non-test production consumer: `lib.rs:136` re-export. Test: `complex_reshape_preserves_data` at `:571`; the `Arc`-sharing semantics is pinned by `complex_clone_shares_arc_buffers` at `:600`. |
+| REQ-6 | SHIPPED | impl: `conj in ferrotorch-core/src/complex_tensor.rs`. Non-test production consumer: `lib.rs` re-export. Test: `complex_conj_negates_imag` at `lib.rs`. |
+| REQ-7 | SHIPPED | impl: `abs in ferrotorch-core/src/complex_tensor.rs`, `angle in ferrotorch-core/src/complex_tensor.rs`. Non-test production consumer: `lib.rs` re-export. Tests: `complex_abs_pythagorean` at `lib.rs`, `complex_angle_quadrants` at `lib.rs`. |
+| REQ-8 | SHIPPED | impl: `matmul in ferrotorch-core/src/complex_tensor.rs` composing 4× `crate::ops::linalg::mm` calls. Non-test production consumer: `lib.rs` re-export; downstream complex-valued model code (FFT-based attention, MIMO signal processing) calls this. R-DEFER-1 S5 grandfathering. Tests: `complex_matmul_2x2_known_value` at `lib.rs` + the real-equivalence regression at `lib.rs`. |
+| REQ-9 | SHIPPED | impl: `fft in ferrotorch-core/src/complex_tensor.rs`, `ifft in ferrotorch-core/src/complex_tensor.rs`, `fft2 in ferrotorch-core/src/complex_tensor.rs`, `ifft2 in ferrotorch-core/src/complex_tensor.rs`. Each routes through `crate::fft::*` via the interleaved bridge. Non-test production consumer: `fft in lib.rs` re-export. Test: `complex_fft_ifft_roundtrip` at `fft in lib.rs`, `complex_fft2_ifft2_roundtrip` at `fft in lib.rs`. |
+| REQ-10 | SHIPPED | impl: `reshape in ferrotorch-core/src/complex_tensor.rs` using `Arc::clone(&self.re/im)`. Non-test production consumer: `lib.rs` re-export. Test: `complex_reshape_preserves_data` at `lib.rs`; the `Arc`-sharing semantics is pinned by `complex_clone_shares_arc_buffers` at `lib.rs`. |
 | REQ-11 | SHIPPED | impl: `shape.is_empty() { 1 } else { shape.iter().product() }` at `ferrotorch-core/src/complex_tensor.rs:42, :81, :117, :357`. Non-test production consumer: `complex_tensor.rs:94` `scalar(re, im)` returns a 0-D tensor (numel 1) via `shape: Vec::new()`. #805 regression pin. |
-| REQ-12 | SHIPPED | impl: `FerrotorchError::ShapeMismatch` at `complex_tensor.rs:48, :59, :261, :268, :363, :385`; `InvalidArgument` at `:108`; no `panic!` / `unwrap()` / `expect()` in production paths (the `unwrap()` calls at `:107` inside `*shape.last().unwrap()` are unreachable on the success branch — the empty-check happens before; for safety the auditor should still consider migrating to a `let-else`, tracked as a no-op cleanup follow-up). Non-test production consumer: every caller propagates the structured error via `?`. |
+| REQ-12 | SHIPPED | impl: `FerrotorchError::ShapeMismatch` at `unwrap in complex_tensor.rs, , , , , `; `InvalidArgument` at `unwrap in complex_tensor.rs`; no `panic!` / `unwrap()` / `expect()` in production paths (the `unwrap()` calls at `unwrap in complex_tensor.rs` inside `*shape.last().unwrap()` are unreachable on the success branch — the empty-check happens before; for safety the auditor should still consider migrating to a `let-else`, tracked as a no-op cleanup follow-up). Non-test production consumer: every caller propagates the structured error via `?`. |

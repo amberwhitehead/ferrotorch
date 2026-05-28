@@ -77,7 +77,7 @@ final result download.
 
 ## Architecture
 
-- Per-component bundles at `gpu/unet.rs:60..199`:
+- Per-component bundles at `gpu in gpu/unet.rs`:
   `GpuConv2d`, `GpuGroupNorm`, `GpuLayerNorm`, `GpuLinearT`,
   `GpuResnetTime` (resnet with `time_emb_proj`), `GpuAttention`
   (multi-head with optional bias on q/k/v), `GpuFeedForwardGEGLU`
@@ -86,23 +86,23 @@ final result download.
   `GpuTransformer2D`, `GpuUpsample2D`, `GpuDownsample2D`,
   `GpuCrossAttnDownBlock`, `GpuDownBlock`, `AnyGpuDown`,
   `GpuCrossAttnUpBlock`, `GpuUpBlock`, `AnyGpuUp`, `GpuMidBlock`.
-- `GpuUNet2DConditional` at `gpu/unet.rs:262..274` holds:
+- `GpuUNet2DConditional in gpu/unet.rs` holds:
   `time_proj` (host-side `Timesteps`), `time_emb_lin1` /
   `time_emb_lin2`, `conv_in`, four down-blocks, mid-block, four
   up-blocks, `conv_norm_out`, `conv_out`, frozen config, device
   handle.
-- `new` at `gpu/unet.rs:296..` pops every state-dict key in CPU
+- `new` at `gpu in gpu/unet.rs` pops every state-dict key in CPU
   layout (`time_embedding.linear_{1,2}.*`, `conv_in.*`,
   `down_blocks.{i}.{resnets,attentions,downsamplers}.*`, …),
   enforces shapes, uploads to VRAM. The `heads = config.attention_head_dim`
   + `dim_head = out_c / heads` footgun is propagated at
-  `gpu/unet.rs:307`.
-- `from_module` at `gpu/unet.rs:625..631`: extracts the CPU
+  `gpu in gpu/unet.rs`.
+- `from_module` at `gpu in gpu/unet.rs`: extracts the CPU
   state-dict and delegates to `new`.
-- `forward` at `gpu/unet.rs:647..`: validates shapes, runs the
-  full topology. Time-embedding stage at `gpu/unet.rs:691..697`
+- `forward` at `gpu in gpu/unet.rs`: validates shapes, runs the
+  full topology. Time-embedding stage at `gpu in gpu/unet.rs`
   uses CPU `time_proj.forward_t` then `cpu_to_gpu` + two GPU
-  Linear + SiLU. Conv_in at `gpu/unet.rs:702..707`. Skips
+  Linear + SiLU. Conv_in at `gpu in gpu/unet.rs`. Skips
   managed as `Vec<(CudaBuffer<f32>, [usize; 4])>` so cat() knows
   the channel count for each up-block.
 
@@ -110,9 +110,9 @@ Non-test production consumers:
 
 - `ferrotorch-diffusion/src/gpu/mod.rs:36` re-exports
   `GpuUNet2DConditional`.
-- `ferrotorch-diffusion/src/gpu/pipeline.rs:47,66,88` holds
+- `ferrotorch-diffusion/src/gpu/pipeline.rs,66,88` holds
   `unet: GpuUNet2DConditional` as a pipeline field; `cfg_eval` at
-  `gpu/pipeline.rs:142..143` calls `self.unet.forward(...)` twice
+  `gpu/pipeline.rs` calls `self.unet.forward(...)` twice
   per inference step.
 - `ferrotorch-diffusion/examples/unet_predict_dump.rs:385,393`
   imports and constructs `GpuUNet2DConditional` via `from_module`
@@ -130,16 +130,16 @@ diffusers is checked by `tests/conformance_pretrained_diffusion.rs`
 Critical-not-to-regress invariants (re-stated for GPU):
 
 - **`attention_head_dim` is COUNT of heads**, not per-head dim.
-  Module rustdoc at `gpu/unet.rs:32..36` documents this; the
-  `new` body at `gpu/unet.rs:307` propagates it.
+  Module rustdoc at `gpu in gpu/unet.rs` documents this; the
+  `new` body at `gpu in gpu/unet.rs` propagates it.
 - **Two GELU variants** in the same crate: QuickGELU (`gpu_gelu`)
   for the CLIP MLP in `gpu/clip.rs`; exact-erf GELU
   (`gpu_gelu_erf`) for the GEGLU FF inside the UNet's
   `BasicTransformerBlock`. The module rustdoc at
-  `gpu/unet.rs:39..42` calls this out.
+  `gpu in gpu/unet.rs` calls this out.
 - **GroupNorm eps**: `1e-5` for resnet / final-conv GroupNorm,
   `1e-6` for the GroupNorm-after-attention inside the
-  `Transformer2DModel`. Encoded at `gpu/unet.rs:313..314`.
+  `Transformer2DModel`. Encoded at `gpu in gpu/unet.rs`.
 - **`(layers_per_block + 1)` resnets per up-block**, vs
   `layers_per_block` on the down side. Up-side iteration consumes
   the trailing N skips (most-recent first).
@@ -167,6 +167,6 @@ No parity-sweep ops apply.
 | REQ-1 | SHIPPED | impl: `GpuUNet2DConditional::new` at `ferrotorch-diffusion/src/gpu/unet.rs:296..`; non-test consumer: `ferrotorch-diffusion/src/gpu/unet.rs:630` `from_module` calls `Self::new(cpu.config.clone(), state, device.clone())`; production binary `ferrotorch-diffusion/examples/unet_predict_dump.rs:393` constructs the UNet via `from_module` |
 | REQ-2 | SHIPPED | impl: `from_module` at `ferrotorch-diffusion/src/gpu/unet.rs:625..631`; non-test consumer: `ferrotorch-diffusion/examples/unet_predict_dump.rs:393` `GpuUNet2DConditional::from_module(unet, &device)?`; `ferrotorch-diffusion/examples/sd_pipeline_dump.rs` uses the same call |
 | REQ-3 | SHIPPED | impl: `forward` at `ferrotorch-diffusion/src/gpu/unet.rs:647..` (full six-stage topology); non-test consumer: `ferrotorch-diffusion/src/gpu/pipeline.rs:142..143` in `cfg_eval` calls `self.unet.forward(&model_input, &t, ...)` twice per diffusion step |
-| REQ-4 | SHIPPED | impl: footgun-aware constructor at `ferrotorch-diffusion/src/gpu/unet.rs:307` `let heads = config.attention_head_dim;`; rustdoc at `gpu/unet.rs:32..36`; non-test consumer: `new` itself is invoked by `from_module` on every production build (e.g. `ferrotorch-diffusion/examples/unet_predict_dump.rs:393`) |
-| REQ-5 | SHIPPED | impl: `gpu_silu` + `gpu_gelu_erf` imports at `ferrotorch-diffusion/src/gpu/unet.rs:47..48` and rustdoc at `gpu/unet.rs:39..42`; non-test consumer: per-layer forward at `gpu/unet.rs:695..` (SiLU for time embedding) and the FeedForward path in the `Transformer2DModel` body apply both kernels on every forward; `ferrotorch-diffusion/examples/unet_predict_dump.rs:393` exercises both via the dump pipeline |
+| REQ-4 | SHIPPED | impl: footgun-aware constructor at `gpu in ferrotorch-diffusion/src/gpu/unet.rs` `let heads = config.attention_head_dim;`; rustdoc at `gpu in gpu/unet.rs`; non-test consumer: `new` itself is invoked by `from_module` on every production build (e.g. `from_module in ferrotorch-diffusion/examples/unet_predict_dump.rs`) |
+| REQ-5 | SHIPPED | impl: `gpu_silu` + `gpu_gelu_erf` imports at `gpu_gelu_erf in ferrotorch-diffusion/src/gpu/unet.rs` and rustdoc at `gpu in gpu/unet.rs`; non-test consumer: per-layer forward at `gpu in gpu/unet.rs` (SiLU for time embedding) and the FeedForward path in the `Transformer2DModel` body apply both kernels on every forward; `gpu in ferrotorch-diffusion/examples/unet_predict_dump.rs` exercises both via the dump pipeline |
 | REQ-6 | SHIPPED | impl: shape checks at `ferrotorch-diffusion/src/gpu/unet.rs:653..680`; non-test consumer: `ferrotorch-diffusion/src/gpu/pipeline.rs:142..143` invokes `forward` on the pipeline's typed `Tensor<f32>` per step, exercising the contract on every dump call |

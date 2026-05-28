@@ -94,7 +94,7 @@ exactly, symbolic dims are validated against the declared range.
 
 `SymbolicTracedModule<T>` holds the inner `TracedModule<T>` plus a
 `Guard`. `forward_symbolic(inputs)` calls `guard.check(...)` then
-`interpret(self.inner.graph(), inputs)` (`symbolic.rs:312-315`).
+`interpret(self.inner.graph(), inputs)` (`symbolic in symbolic.rs`).
 The `inner()` accessor exposes the wrapped traced module for
 serialisation and diagnostics; `guard()` exposes the guard.
 
@@ -158,9 +158,9 @@ Expected: all tests pass.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub struct ShapeSignature` + `symbolic_dim` / `symbolic_dim_with_range` in `symbolic.rs`; non-test consumer: re-export at `lib.rs:113-115`; `pub fn compile_symbolic` accepts it as the third arg. |
-| REQ-2 | SHIPPED | impl: `pub struct SymbolicDim` in `symbolic.rs`; non-test consumer: re-export at `lib.rs:113-115`; consumed by `ShapeSignature` internals. |
-| REQ-3 | SHIPPED | impl: `pub struct Guard` + `Guard::new` + `Guard::check` in `symbolic.rs`; non-test consumer: `SymbolicTracedModule::forward_symbolic` invokes `self.guard.check(...)` at `symbolic.rs:312`. |
+| REQ-2 | SHIPPED | impl: `pub struct SymbolicDim` in `symbolic.rs`; non-test consumer: re-export at `lib.rs`; consumed by `ShapeSignature` internals. |
+| REQ-3 | SHIPPED | impl: `pub struct Guard` + `Guard::new` + `Guard::check` in `symbolic.rs`; non-test consumer: `SymbolicTracedModule::forward_symbolic` invokes `self.guard.check(...)` at `symbolic in symbolic.rs`. |
 | REQ-4 | SHIPPED | impl: the four-clause match inside `Guard::check` in `symbolic.rs` (input count, rank, static match, range); non-test consumer: `SymbolicTracedModule::forward_symbolic` is the production caller. |
-| REQ-5 | SHIPPED | impl: `pub struct SymbolicTracedModule<T: Float>` + `pub fn new` + `pub fn forward_symbolic` in `symbolic.rs`; non-test consumer: re-export at `lib.rs:113-115`. |
+| REQ-5 | SHIPPED | impl: `pub struct SymbolicTracedModule<T: Float>` + `pub fn new` + `pub fn forward_symbolic` in `symbolic.rs`; non-test consumer: re-export at `lib.rs`. |
 | REQ-6 | SHIPPED | impl: `pub fn patch_reshape_for_symbolic_dims` in `symbolic.rs`; non-test consumer: `pub fn compile_symbolic` invokes it as the second step. |
-| REQ-7 | SHIPPED | impl: `pub fn compile_symbolic<T, F>` in `symbolic.rs`; non-test consumer: re-export at `lib.rs:113-115`. |
+| REQ-7 | SHIPPED | impl: `pub fn compile_symbolic<T, F>` in `symbolic.rs`; non-test consumer: re-export at `lib.rs`. |

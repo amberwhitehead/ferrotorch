@@ -140,7 +140,7 @@ if self.config.foreach || any_cuda {
 - `ferrotorch/src/lib.rs:61` — `pub use ferrotorch_optim::*;`
   re-exports `Adadelta` and `AdadeltaConfig` through the umbrella
   crate's `optim` module.
-- `ferrotorch-train/src/learner.rs:28` — `use
+- `ferrotorch-train/src/learner.rs` — `use
   ferrotorch_optim::Optimizer;` drives `Adadelta::step` via the
   trait.
 
@@ -180,10 +180,10 @@ Expected: `9 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct AdadeltaConfig` + `impl Default { lr: 1.0, rho: 0.9, eps: 1e-6, ... }` in `adadelta.rs` mirroring `torch/optim/adadelta.py:29-126`; non-test consumer: `ferrotorch-optim/src/lib.rs:27` re-exports `AdadeltaConfig`; `ferrotorch/src/lib.rs:61` re-exports the optim surface. |
-| REQ-2 | SHIPPED | impl: `impl<T: Float> Optimizer<T> for Adadelta<T>` block in `adadelta.rs`; non-test consumer: `ferrotorch-train/src/learner.rs:28` consumes the `Optimizer` trait. |
+| REQ-1 | SHIPPED | impl: `pub struct AdadeltaConfig` + `impl Default { lr: 1.0, rho: 0.9, eps: 1e-6, ... }` in `adadelta.rs` mirroring `torch/optim/adadelta.py:29-126`; non-test consumer: `adadelta in ferrotorch-optim/src/lib.rs` re-exports `AdadeltaConfig`; `ferrotorch/src/lib.rs` re-exports the optim surface. |
+| REQ-2 | SHIPPED | impl: `impl<T: Float> Optimizer<T> for Adadelta<T>` block in `adadelta.rs`; non-test consumer: `ferrotorch-train/src/learner.rs` consumes the `Optimizer` trait. |
 | REQ-3 | SHIPPED | impl: legacy CPU `step` (else branch after `any_cuda` check) in `adadelta.rs` mirroring `_single_tensor_adadelta` in `torch/optim/adadelta.py:245-303`; non-test consumer: `ferrotorch/src/lib.rs:61` re-exports `Adadelta` for downstream training code. |
 | REQ-4 | SHIPPED | impl: `Adadelta::step_foreach` method in `adadelta.rs` mirroring `_multi_tensor_adadelta` in `torch/optim/adadelta.py:305-410`; non-test consumer: `ferrotorch/src/lib.rs:61` re-exports `AdadeltaConfig::with_foreach(true)`. |
-| REQ-5 | SHIPPED | impl: `let any_cuda = ...; if self.config.foreach || any_cuda { return self.step_foreach(); }` at the top of `step()` in `adadelta.rs` (CL-1105); non-test consumer: `ferrotorch-train/src/learner.rs:28` propagates the GPU-residence preserving choice via the `Optimizer::step` trait. |
+| REQ-5 | SHIPPED | impl: `let any_cuda = ...; if self.config.foreach || any_cuda { return self.step_foreach(); }` at the top of `step()` in `adadelta.rs` (CL-1105); non-test consumer: `step in ferrotorch-train/src/learner.rs` propagates the GPU-residence preserving choice via the `Optimizer::step` trait. |
 | REQ-6 | SHIPPED | impl: `state_dict` / `load_state_dict` methods in `adadelta.rs` keyed by `ParamKey::Display`; non-test consumer: `ferrotorch-serialize/src/checkpoint.rs:48` `use ferrotorch_optim::OptimizerState;`. |
 | REQ-7 | SHIPPED | impl: `match grad_opt { Some(g) => g, None => continue };` in both `step` and `step_foreach` in `adadelta.rs`; non-test consumer: training-loop path in `ferrotorch-train/src/learner.rs` exercises this skip. |

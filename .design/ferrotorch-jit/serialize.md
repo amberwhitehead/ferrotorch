@@ -107,7 +107,7 @@ matches on the tag and reads the matching payload.
 - `ferrotorch-jit/src/export.rs:260-407` —
   `ExportedProgram::serialize` uses `IrGraph::serialize` for the
   IR-graph payload inside its outer header;
-  `ExportedProgram::deserialize` at `export.rs:407` calls
+  `ExportedProgram::deserialize` at `export in export.rs` calls
   `IrGraph::deserialize(graph_bytes)?`.
 
 ## Parity contract
@@ -147,9 +147,9 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `impl IrGraph { pub fn serialize, pub fn deserialize }` in `serialize.rs`; non-test consumer: `ferrotorch-jit/src/module.rs:146` `pub fn to_bytes` calls `self.graph.serialize()` and `module.rs:152` `from_bytes` calls `IrGraph::deserialize(data)?`. |
+| REQ-1 | SHIPPED | impl: `impl IrGraph { pub fn serialize, pub fn deserialize }` in `serialize.rs`; non-test consumer: `deserialize in ferrotorch-jit/src/module.rs` `pub fn to_bytes` calls `self.graph.serialize()` and `module in module.rs` `from_bytes` calls `IrGraph::deserialize(data)?`. |
 | REQ-2 | SHIPPED | impl: `b"FTIR"` magic write + version `u32` LE in `serialize.rs::serialize`; magic/version check in `serialize.rs::deserialize` with `JitError::SerializationError`; non-test consumer: every `TracedModule::to_bytes` call writes through this path. |
-| REQ-3 | SHIPPED | impl: the `Writer` helper sequence in `serialize.rs::serialize` writes value records then node records then input/output ids; non-test consumer: `module.rs:146` and `export.rs:260-407` are production callers. |
+| REQ-3 | SHIPPED | impl: the `Writer` helper sequence in `serialize.rs::serialize` writes value records then node records then input/output ids; non-test consumer: `module in module.rs` and `export in export.rs` are production callers. |
 | REQ-4 | SHIPPED | impl: v2 dtype tag byte after each value's `producer` field; v1-compat path inside `serialize.rs::deserialize` (defaults to `Dtype::F32`); non-test consumer: every `IrGraph::deserialize` call in `module.rs` and `export.rs`. |
 | REQ-5 | SHIPPED | impl: little-endian writes throughout `serialize.rs`; deterministic walk over `self.values` and `self.nodes`; non-test consumer: the format contract is the same one `module.rs:146` depends on. |
-| REQ-6 | SHIPPED | impl: private `Writer` and `Reader<'a>` structs in `serialize.rs:120-180`; non-test consumer: `serialize` and `deserialize` use these internally. |
+| REQ-6 | SHIPPED | impl: private `Writer` and `Reader<'a>` structs in `Reader in serialize.rs`; non-test consumer: `serialize` and `deserialize` use these internally. |

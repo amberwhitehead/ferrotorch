@@ -123,16 +123,16 @@ pub struct MultivariateNormal<T: Float> {
 }
 ```
 
-Defined at `multivariate_normal.rs:50-56`. Accessors at
-`multivariate_normal.rs:163-176`.
+Defined at `multivariate_normal.rs`. Accessors at
+`multivariate_normal.rs`.
 
 ### Constructors (REQ-2)
 
-- `from_scale_tril` at `multivariate_normal.rs:63-88` — validates
+- `from_scale_tril in multivariate_normal.rs` — validates
   shapes, device equality, returns directly.
-- `from_covariance` at `multivariate_normal.rs:96-124` — same
+- `from_covariance in multivariate_normal.rs` — same
   validation, then `scale_tril = no_grad(linalg::cholesky(cov))`.
-- `from_precision` at `multivariate_normal.rs:130-161` — same
+- `from_precision in multivariate_normal.rs` — same
   validation, then `covariance = no_grad(linalg::solve(P, I))`
   followed by `linalg::cholesky`.
 
@@ -141,7 +141,7 @@ don't leak into the autograd graph of subsequent ops.
 
 ### half_log_det_of_tril helper (REQ-7)
 
-`multivariate_normal.rs:196-209` builds an `eye(d)` mask on the same
+`eye in multivariate_normal.rs` builds an `eye(d)` mask on the same
 device as `L`, computes `L_safe = L * mask + (1 - mask)` so the
 diagonal carries `L_ii` and off-diagonals are 1, then `log` makes
 off-diagonals 0 and diagonals `log(L_ii)`, and `sum_all` collapses
@@ -150,34 +150,34 @@ through `scale_tril` works.
 
 ### The Distribution impl (REQ-4, REQ-5, REQ-6, REQ-8, REQ-9)
 
-`sample` (`multivariate_normal.rs:212-246`) uploads `eps` to the
+`sample` (`sample in multivariate_normal.rs`) uploads `eps` to the
 parameter device, computes `eps @ L^T + loc` in a `no_grad`
 context (sampling is detached per trait contract), and reshapes
 to `shape ++ [d]`.
 
-`rsample` (`multivariate_normal.rs:248-274`) follows the same
+`rsample` (`rsample in multivariate_normal.rs`) follows the same
 pipeline but WITHOUT `no_grad`, so the autograd engine sees
 `scale_tril` and `loc` as upstream nodes through `matmul` and
 broadcast-add.
 
-`log_prob` (`multivariate_normal.rs:276-371`) builds `Sigma`,
+`log_prob` (`log_prob in multivariate_normal.rs`) builds `Sigma`,
 inverts it via `linalg::solve(Sigma, I)`, computes Mahalanobis as
 `sum(diff * (diff @ Sigma^{-1}), dim=-1)`, adds `half_log_det`,
 then combines into the final scalar.
 
-`mean` (`multivariate_normal.rs:373-377`) returns `loc.clone()`.
+`mean` (`mean in multivariate_normal.rs`) returns `loc.clone()`.
 
-`entropy` (`multivariate_normal.rs:379-394`) computes
+`entropy` (`entropy in multivariate_normal.rs`) computes
 `half * d * (1 + log(2*pi)) + half_log_det_of_tril(L, d)` on the
 parameter device.
 
 ### Non-test production consumers
 
-- `pub use multivariate_normal::MultivariateNormal` at `lib.rs:113`
+- `pub use multivariate_normal::MultivariateNormal` at `lib.rs`
   — grandfathered public API. Downstream code (Bayesian linear
   regression, VI multivariate posteriors, GP samplers) constructs
   via one of the three `from_*` constructors.
-- **`low_rank_multivariate_normal.rs:127`** invokes
+- **`low_rank_multivariate_normal.rs`** invokes
   `MultivariateNormal::from_covariance(loc.clone(), cov_t)?` to
   build its inner distribution. This is the only intra-crate
   production consumer.
@@ -243,14 +243,14 @@ Expected: `15 passed`.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct MultivariateNormal<T: Float>` with `loc`/`scale_tril`/`d` at `multivariate_normal.rs:50-56`, mirroring `torch/distributions/multivariate_normal.py:88-196`; non-test consumer: `pub use multivariate_normal::MultivariateNormal` at `lib.rs:113` exposes it as public API and `low_rank_multivariate_normal.rs:127` constructs an inner instance. |
-| REQ-2 | SHIPPED | impl: 3 constructors (`from_scale_tril` at `multivariate_normal.rs:63-88`, `from_covariance` at `multivariate_normal.rs:96-124`, `from_precision` at `multivariate_normal.rs:130-161`) each with shape + device validation, mirroring `multivariate_normal.py:135-196`; non-test consumer: `low_rank_multivariate_normal.rs:127` invokes `from_covariance` to build the inner MVN — direct production consumer of constructor mode 2. |
-| REQ-3 | SHIPPED | impl: `loc()`/`scale_tril()`/`dim()` accessors at `multivariate_normal.rs:163-176`; non-test consumer: re-export at `lib.rs:113`. |
-| REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for MultivariateNormal<T>` at `multivariate_normal.rs:211-395` with `sample`/`rsample`/`log_prob`/`mean`/`entropy`; non-test consumer: `low_rank_multivariate_normal.rs:166-177` delegates all 4 trait methods (`sample`, `rsample`, `log_prob`, `entropy`) to `self.inner.<method>()` — direct production consumer. |
-| REQ-5 | SHIPPED | impl: `eps @ L^T + loc` device-resident composition in `sample` at `multivariate_normal.rs:228-235`, mirroring `multivariate_normal.py:251-254`; non-test consumer: `low_rank_multivariate_normal.rs:167` delegates to `self.inner.sample(shape)`. |
-| REQ-6 | SHIPPED | impl: precision-matrix reformulation in `log_prob` at `multivariate_normal.rs:294-350` (`Sigma = L*L^T; Sigma^{-1} = solve(Sigma, I); mahal = sum(diff * (diff @ Sigma^{-1}), dim=-1)`), mirroring `multivariate_normal.py:256-264`; non-test consumer: `low_rank_multivariate_normal.rs:174` delegates `log_prob` to `self.inner.log_prob(value)`. |
-| REQ-7 | SHIPPED | impl: `half_log_det_of_tril` helper at `multivariate_normal.rs:196-209` using eye-mask composition; non-test consumer: invoked by `MultivariateNormal::log_prob` at `multivariate_normal.rs:326` and `MultivariateNormal::entropy` at `multivariate_normal.rs:391` — both inside production code paths in the same file. |
-| REQ-8 | SHIPPED | impl: `entropy` body at `multivariate_normal.rs:379-394` computing `0.5 * d * (1 + ln(2*pi)) + half_log_det`, mirroring `multivariate_normal.py:266-274`; non-test consumer: `low_rank_multivariate_normal.rs:185-186` delegates entropy to `self.inner.entropy()`. |
-| REQ-9 | SHIPPED | impl: `rsample` at `multivariate_normal.rs:248-274` uses raw grad-aware `matmul` + `add` (no `no_grad`), so the autograd engine traces back through `scale_tril` and `loc`; non-test consumer: `low_rank_multivariate_normal.rs:170-172` delegates `rsample` to `self.inner.rsample(shape)`. Test `test_mvn_rsample_backward` pins finite grads. |
-| REQ-10 | NOT-STARTED | blocker #1393 — `covariance_matrix` / `precision_matrix` lazy properties at `multivariate_normal.py:223-233` not exposed; only the constructor-mode `scale_tril` accessor at `multivariate_normal.rs:170-172` is public. |
+| REQ-1 | SHIPPED | impl: `pub struct MultivariateNormal<T: Float>` with `loc`/`scale_tril`/`d` at `MultivariateNormal in multivariate_normal.rs`, mirroring `torch/distributions/multivariate_normal.py:88-196`; non-test consumer: `pub use multivariate_normal::MultivariateNormal` at `d in lib.rs` exposes it as public API and `MultivariateNormal in low_rank_multivariate_normal.rs` constructs an inner instance. |
+| REQ-2 | SHIPPED | impl: 3 constructors (`from_scale_tril in multivariate_normal.rs`, `from_covariance in multivariate_normal.rs`, `from_precision in multivariate_normal.rs`) each with shape + device validation, mirroring `multivariate_normal.py:135-196`; non-test consumer: `from_covariance in low_rank_multivariate_normal.rs` invokes `from_covariance` to build the inner MVN — direct production consumer of constructor mode 2. |
+| REQ-3 | SHIPPED | impl: `loc()`/`scale_tril()`/`dim()` accessors at `dim in multivariate_normal.rs`; non-test consumer: re-export at `lib.rs`. |
+| REQ-4 | SHIPPED | impl: `impl<T: Float> Distribution<T> for MultivariateNormal<T>` at `sample in multivariate_normal.rs` with `sample`/`rsample`/`log_prob`/`mean`/`entropy`; non-test consumer: `entropy in low_rank_multivariate_normal.rs` delegates all 4 trait methods (`sample`, `rsample`, `log_prob`, `entropy`) to `self.inner.<method>()` — direct production consumer. |
+| REQ-5 | SHIPPED | impl: `eps @ L^T + loc` device-resident composition in `sample in multivariate_normal.rs`, mirroring `multivariate_normal.py:251-254`; non-test consumer: `sample in low_rank_multivariate_normal.rs` delegates to `self.inner.sample(shape)`. |
+| REQ-6 | SHIPPED | impl: precision-matrix reformulation in `log_prob in multivariate_normal.rs` (`Sigma = L*L^T; Sigma^{-1} = solve(Sigma, I); mahal = sum(diff * (diff @ Sigma^{-1}), dim=-1)`), mirroring `multivariate_normal.py:256-264`; non-test consumer: `log_prob in low_rank_multivariate_normal.rs` delegates `log_prob` to `self.inner.log_prob(value)`. |
+| REQ-7 | SHIPPED | impl: `half_log_det_of_tril` helper at `half_log_det_of_tril in multivariate_normal.rs` using eye-mask composition; non-test consumer: invoked by `MultivariateNormal::log_prob` at `log_prob in multivariate_normal.rs` and `MultivariateNormal::entropy` at `entropy in multivariate_normal.rs` — both inside production code paths in the same file. |
+| REQ-8 | SHIPPED | impl: `entropy` body at `entropy in multivariate_normal.rs` computing `0.5 * d * (1 + ln(2*pi)) + half_log_det`, mirroring `multivariate_normal.py:266-274`; non-test consumer: `entropy in low_rank_multivariate_normal.rs` delegates entropy to `self.inner.entropy()`. |
+| REQ-9 | SHIPPED | impl: `rsample in multivariate_normal.rs` uses raw grad-aware `matmul` + `add` (no `no_grad`), so the autograd engine traces back through `scale_tril` and `loc`; non-test consumer: `loc in low_rank_multivariate_normal.rs` delegates `rsample` to `self.inner.rsample(shape)`. Test `test_mvn_rsample_backward` pins finite grads. |
+| REQ-10 | NOT-STARTED | blocker #1393 — `covariance_matrix` / `precision_matrix` lazy properties at `multivariate_normal.py:223-233` not exposed; only the constructor-mode `scale_tril` accessor at `scale_tril in multivariate_normal.rs` is public. |
 | REQ-11 | NOT-STARTED | blocker #1394 — `mode` (trivially `loc`) and `variance` (`scale_tril.pow(2).sum(-1)`) properties at `multivariate_normal.py:239-249` not implemented; the default trait impls at `lib.rs:216-227` return `InvalidArgument`. |

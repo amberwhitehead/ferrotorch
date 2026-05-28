@@ -78,7 +78,7 @@ return is `O(1)` after the cap checks. Total byte accounting lives in
   to defensively restore the length the bucket key advertises. The
   `unsafe` block has a 9-line SAFETY comment documenting why the
   length is always `≤ v.capacity()` (R-CODE-1).
-- `Drop for TensorStorage<T>` at `storage.rs:517-528` is the universal
+- `Drop for TensorStorage<T>` at `storage.rs` is the universal
   non-test production consumer: every CPU storage routes through
   `pool_return_cpu` when it goes out of scope, so the pool fills up
   naturally during training without any explicit caller wiring.
@@ -107,9 +107,9 @@ pool is a performance optimisation, not a correctness contract.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pool_alloc_cpu` at `ferrotorch-core/src/cpu_pool.rs:89` mirrors `c10::CPUAllocator::allocate` semantics in `c10/core/CPUAllocator.cpp`; non-test consumer: `ferrotorch-core/src/storage.rs:524` (TensorStorage Drop returns Vecs that are subsequently popped here on the next CPU allocation in any tensor op). |
+| REQ-1 | SHIPPED | impl: `pool_alloc_cpu in ferrotorch-core/src/cpu_pool.rs` mirrors `c10::CPUAllocator::allocate` semantics in `c10/core/CPUAllocator.cpp`; non-test consumer: `ferrotorch-core/src/storage.rs` (TensorStorage Drop returns Vecs that are subsequently popped here on the next CPU allocation in any tensor op). |
 | REQ-2 | SHIPPED | impl: `pool_alloc_cpu_uninit_f32` at `ferrotorch-core/src/cpu_pool.rs:128`, `pool_alloc_cpu_uninit_f64` at `:159`; non-test consumer: re-exported via `pub fn` and called by SIMD elementwise kernels that overwrite every output element (uninit semantics are sound only under that callee contract). The functions are also a direct pub-surface of the crate, which under S5 grandfathers them. |
-| REQ-3 | SHIPPED | impl: `pool_return_cpu` at `ferrotorch-core/src/cpu_pool.rs:192`; non-test consumer: `Drop for TensorStorage<T>` at `ferrotorch-core/src/storage.rs:517-528` calls this for every CPU storage that goes out of scope. |
+| REQ-3 | SHIPPED | impl: `pool_return_cpu in ferrotorch-core/src/cpu_pool.rs`; non-test consumer: `Drop for TensorStorage<T>` at `pool_return_cpu in ferrotorch-core/src/storage.rs` calls this for every CPU storage that goes out of scope. |
 | REQ-4 | SHIPPED | impl: `cpu_pool_stats` at `ferrotorch-core/src/cpu_pool.rs:46`, `reset_cpu_pool_stats` at `:55`; non-test consumer: the pair is exported and used by diagnostics callers; the tests at `:255, :267` exercise it directly. Per S5 the existing pub API surface is grandfathered. |
-| REQ-5 | SHIPPED | impl: `empty_cpu_pool` at `ferrotorch-core/src/cpu_pool.rs:235`; non-test consumer: invoked by test setup (`:307, :329`) and exported as crate-public API; per S5 the pub-API is grandfathered. |
+| REQ-5 | SHIPPED | impl: `empty_cpu_pool in ferrotorch-core/src/cpu_pool.rs`; non-test consumer: invoked by test setup (`, `) and exported as crate-public API; per S5 the pub-API is grandfathered. |
 | REQ-6 | SHIPPED | impl: `thread_local!` block at `ferrotorch-core/src/cpu_pool.rs:72-77` plus `.with(|pool| ...)` discipline at every entry point (`:97-106`, `:135-144`, `:166-175`, `:202-231`) gives strict per-thread isolation; non-test consumer: any rayon worker that touches `pool_alloc_cpu` (e.g. via parallel elementwise ops) inherits the pattern transparently. The tests at `cpu_pool.rs:248-303` use fresh threads to demonstrate isolation. |

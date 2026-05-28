@@ -147,12 +147,12 @@ launch-shape-agnostic; `block_size` informs the launch config).
 ### Non-test production consumers
 
 - `pub use codegen_gpu::GpuCodegen` at
-  `ferrotorch-jit/src/lib.rs:94` — grandfathered public API.
-- `ferrotorch-jit/src/codegen.rs:853` calls
+  `ferrotorch-jit/src/lib.rs` — grandfathered public API.
+- `ferrotorch-jit/src/codegen.rs` calls
   `crate::codegen_gpu::GpuCodegen::generate_cuda_source(loops,
   &fn_name, num_inputs, dtype)` from
   `InductorBackend::generate` `GpuCuda` arm.
-- `ferrotorch-jit/src/codegen.rs:857` calls
+- `ferrotorch-jit/src/codegen.rs` calls
   `crate::codegen_gpu::GpuCodegen::generate_ptx_source(loops,
   &fn_name, self.block_size, num_inputs, dtype)` from the `GpuPtx`
   arm.
@@ -198,11 +198,11 @@ Expected: all tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct GpuCodegen` in `codegen_gpu.rs`; non-test consumer: re-export at `ferrotorch-jit/src/lib.rs:94` + `ferrotorch-jit/src/codegen.rs:853` `crate::codegen_gpu::GpuCodegen::generate_cuda_source(loops, &fn_name, num_inputs, dtype)`. |
-| REQ-2 | SHIPPED | impl: `pub fn generate_cuda_source` in `codegen_gpu.rs`; non-test consumer: `codegen.rs:853` (`GpuCuda` arm of `InductorBackend::generate`) + `codegen.rs:886` (identity-graph `GpuCuda` fallback). |
-| REQ-3 | SHIPPED | impl: `pub fn generate_ptx_source` in `codegen_gpu.rs`; non-test consumer: `codegen.rs:857` (`GpuPtx` arm of `InductorBackend::generate`) + `codegen.rs:893` (identity-graph `GpuPtx` fallback). |
-| REQ-4 | SHIPPED | impl: `cuda_scalar_name` + `cuda_zero_literal` + `ptx_dtype_suffix` helpers in `codegen_gpu.rs` switched on the `Dtype` parameter; non-test consumer: every emission path through `codegen.rs:853` / `codegen.rs:857` passes the resolved group `dtype` from `resolve_group_dtype`. |
-| REQ-5 | SHIPPED | impl: f64 transcendental check inside `pub fn generate_ptx_source` returning `Err(JitError::Unsupported { ... })` in `codegen_gpu.rs`; non-test consumer: `codegen.rs:857` propagates the error via `.map_err(FerrotorchError::from)` so callers see the structured Unsupported diagnosis. |
-| REQ-6 | SHIPPED | impl: `fn emit_cuda_reduction` (CUDA path) + the PTX `.shared` + `bar.sync 0;` block inside `pub fn generate_ptx_source` in `codegen_gpu.rs`; non-test consumer: transitively via `codegen.rs:853` / `codegen.rs:857` for any fusion group containing Sum/Mean/Prod. |
-| REQ-7 | SHIPPED | impl: `tid = blockIdx.x * blockDim.x + threadIdx.x;` + sequential `output[tid]` write pattern in `fn emit_cuda_elementwise` (`codegen_gpu.rs`); non-test consumer: transitively via `codegen.rs:853`. |
-| REQ-8 | SHIPPED | impl: `pub fn generate_ptx_source(..., block_size, ...)` parameter in `codegen_gpu.rs`; non-test consumer: `codegen.rs:857` passes `self.block_size` from `InductorBackend::with_block_size`. |
+| REQ-1 | SHIPPED | impl: `pub struct GpuCodegen` in `codegen_gpu.rs`; non-test consumer: re-export at `codegen_gpu in ferrotorch-jit/src/lib.rs` + `generate_cuda_source in ferrotorch-jit/src/codegen.rs` `crate::codegen_gpu::GpuCodegen::generate_cuda_source(loops, &fn_name, num_inputs, dtype)`. |
+| REQ-2 | SHIPPED | impl: `pub fn generate_cuda_source` in `codegen_gpu.rs`; non-test consumer: `generate_cuda_source in codegen.rs` (`GpuCuda` arm of `InductorBackend::generate`) + `codegen in codegen.rs` (identity-graph `GpuCuda` fallback). |
+| REQ-3 | SHIPPED | impl: `pub fn generate_ptx_source` in `codegen_gpu.rs`; non-test consumer: `generate_ptx_source in codegen.rs` (`GpuPtx` arm of `InductorBackend::generate`) + `codegen in codegen.rs` (identity-graph `GpuPtx` fallback). |
+| REQ-4 | SHIPPED | impl: `cuda_scalar_name` + `cuda_zero_literal` + `ptx_dtype_suffix` helpers in `codegen_gpu.rs` switched on the `Dtype` parameter; non-test consumer: every emission path through `codegen in codegen.rs` / `codegen in codegen.rs` passes the resolved group `dtype` from `resolve_group_dtype`. |
+| REQ-5 | SHIPPED | impl: f64 transcendental check inside `pub fn generate_ptx_source` returning `Err(JitError::Unsupported { ... })` in `codegen_gpu.rs`; non-test consumer: `codegen in codegen.rs` propagates the error via `.map_err(FerrotorchError::from)` so callers see the structured Unsupported diagnosis. |
+| REQ-6 | SHIPPED | impl: `fn emit_cuda_reduction` (CUDA path) + the PTX `.shared` + `bar.sync 0;` block inside `pub fn generate_ptx_source` in `codegen_gpu.rs`; non-test consumer: transitively via `codegen in codegen.rs` / `codegen in codegen.rs` for any fusion group containing Sum/Mean/Prod. |
+| REQ-7 | SHIPPED | impl: `tid = blockIdx.x * blockDim.x + threadIdx.x;` + sequential `output[tid]` write pattern in `fn emit_cuda_elementwise` (`codegen_gpu.rs`); non-test consumer: transitively via `codegen in codegen.rs`. |
+| REQ-8 | SHIPPED | impl: `pub fn generate_ptx_source(..., block_size, ...)` parameter in `codegen_gpu.rs`; non-test consumer: `codegen in codegen.rs` passes `self.block_size` from `InductorBackend::with_block_size`. |

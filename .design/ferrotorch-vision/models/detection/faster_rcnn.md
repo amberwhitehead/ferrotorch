@@ -111,7 +111,7 @@ image as a 1-D `[N_det]` tensor. This matches the
 ### Non-test production consumers
 
 - `pub use FasterRcnn, TwoMlpHead, fasterrcnn_resnet50_fpn` at
-  `ferrotorch-vision/src/models/detection/mod.rs:28` and
+  `ferrotorch-vision/src/models/detection/mod.rs` and
   `ferrotorch-vision/src/lib.rs:21`.
 - `register_model("fasterrcnn_resnet50_fpn", ...)` at
   `ferrotorch-vision/src/models/registry.rs:270`.

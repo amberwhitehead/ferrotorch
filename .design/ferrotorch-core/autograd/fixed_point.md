@@ -113,9 +113,9 @@ without attaching a backward node at `:132-134`.
 `fixed_point.rs:172-322`. Step 1 at `:177-245`:
 
 For each Neumann iteration:
-1. Construct fresh `x_fresh` with `requires_grad=true` at `:193-197`.
+1. Construct fresh `x_fresh` with `requires_grad=true` at `requires_grad in fixed_point.rs`.
 2. Construct detached params (gradients aren't needed in this
-   sub-call) at `:200-211`.
+   sub-call) at `fixed_point.rs`.
 3. Evaluate `y = f(x_fresh, params_detached)` at `:215`.
 4. Compute `yv = elementwise_mul_sum(y, v)` at `:222` — scalarize.
 5. Call `grad(yv, [x_fresh], false, false)` at `:224` → returns
@@ -142,7 +142,7 @@ Step 2 at `fixed_point.rs:247-313`:
 ### REQ-7 — `elementwise_mul_sum` helper
 
 `fn elementwise_mul_sum<T: Float>(a, b) -> FerrotorchResult<Tensor<T>>`
-at `fixed_point.rs:328-331`: `prod = mul(a, b)?; sum(&prod)`. Used
+at `elementwise_mul_sum in fixed_point.rs`: `prod = mul(a, b)?; sum(&prod)`. Used
 twice (REQ-5 step 4 and REQ-6 step 4) to scalarize a vector for `grad`
 consumption.
 
@@ -169,9 +169,9 @@ contract.
 
 Tests in `fixed_point.rs:337-551`. Key tests:
 
-- `test_fixed_point_affine` (`:361`)
-- `test_fixed_point_contractive_to_zero` (`:386`)
-- `test_fixed_point_tolerance` (`:404`)
+- `test_fixed_point_affine` (`test_fixed_point_affine in fixed_point.rs`)
+- `test_fixed_point_contractive_to_zero` (`test_fixed_point_contractive_to_zero in fixed_point.rs`)
+- `test_fixed_point_tolerance` (`test_fixed_point_tolerance in fixed_point.rs`)
 - Backward / gradient verification tests further down in the test
   module.
 
@@ -187,4 +187,4 @@ All tests pass in the workspace gauntlet.
 | REQ-4 | SHIPPED | impl: `struct FixedPointBackward<T: Float>` at `fixed_point.rs:147-158` + `impl Debug` at `:160-170` + `impl GradFn` at `:172-322`; non-test consumer: instantiated inside REQ-1 at `:124-130` and dispatched from `Tensor::backward` whenever a `fixed_point`-produced output is differentiated. |
 | REQ-5 | SHIPPED | impl: Neumann series solve at `fixed_point.rs:177-245`; non-test consumer: inside REQ-4's `backward` impl — invoked on every backward of a `fixed_point`-produced tensor. |
 | REQ-6 | SHIPPED | impl: per-parameter gradient distribution at `fixed_point.rs:247-313`; non-test consumer: inside REQ-4's `backward` impl. |
-| REQ-7 | SHIPPED | impl: `fn elementwise_mul_sum<T: Float>` at `fixed_point.rs:328-331`; non-test consumer: called twice inside REQ-5 (at `:222`) and REQ-6 (at `:282`) — the scalarization step every Neumann iteration and every parameter gradient pass relies on. |
+| REQ-7 | SHIPPED | impl: `fn elementwise_mul_sum<T: Float>` at `elementwise_mul_sum in fixed_point.rs`; non-test consumer: called twice inside REQ-5 (at `fixed_point in fixed_point.rs`) and REQ-6 (at `fixed_point in fixed_point.rs`) — the scalarization step every Neumann iteration and every parameter gradient pass relies on. |
