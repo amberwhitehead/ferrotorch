@@ -1989,6 +1989,196 @@ fn circular_slicecopy_block<T: Float>(
     Ok(out)
 }
 
+/// One `copy_` operation in torch's circular forward sequence, recorded as the
+/// list of `(dst_offset, src_offset)` cell pairs it touches over the inner
+/// (padded-region) flat buffer. `from_input` distinguishes the center copy
+/// (source is the ORIGINAL input buffer, `PadNd.cpp:154-161`) from a wrap copy
+/// (source is the LIVE `out` buffer, `:169-187`) — the two backprop into
+/// different grad buffers.
+struct CircularCopyOp {
+    from_input: bool,
+    pairs: Vec<(usize, usize)>,
+}
+
+/// BACKWARD of torch's circular slice-copy forward, computed as the exact
+/// autograd TRANSPOSE of the forward `copy_` sequence over ONE outer batch
+/// block. `_pad_circular` (`PadNd.cpp:148-187`) is a differentiable composition
+/// of `new_empty` + `slice` + `copy_`, so torch autograd differentiates it
+/// directly: there is no hand-written backward. Each `out_slice.copy_(in_slice)`
+/// (`:161`, `:179`, `:185`) backprops as `grad_src += grad_dst` over its copied
+/// cells AND then ZEROS `grad_dst` (a `copy_` OVERWRITES the destination, so the
+/// dst's pre-copy value did not flow forward). Processing the recorded ops in
+/// REVERSE order with this accumulate-then-zero rule reproduces torch's grad
+/// byte-for-byte (R-DEV-1) — including the over-crop wrap-propagation cases
+/// (#1629/#1631) where the OLD per-axis `circular_axis_src` gather returned an
+/// out-of-range source index and PANICKED (#1631, R-CODE-2). A center copy's
+/// source is the ORIGINAL input (its grad accumulates into `grad_in`); a wrap's
+/// source is a LIVE `out` cell (its grad accumulates back into the working
+/// `grad_out`). For an empty / net-zero output every op has zero pairs ⇒ zero
+/// grad contribution (no OOB). `go_block` is this block's output grad; the
+/// returned vector is this block's input grad.
+fn circular_slicecopy_backward_block<T: Float>(
+    go_block: &[T],
+    in_inner_shape: &[usize],
+    out_inner_shape: &[usize],
+    pads: &[(isize, isize)],
+) -> Vec<T> {
+    let npad = pads.len();
+    let ninner = in_inner_shape.len();
+    let in_total: usize = in_inner_shape.iter().product();
+
+    let mut in_strides = vec![1usize; ninner];
+    let mut out_strides = vec![1usize; ninner];
+    for d in (0..ninner.saturating_sub(1)).rev() {
+        in_strides[d] = in_strides[d + 1] * in_inner_shape[d + 1];
+        out_strides[d] = out_strides[d + 1] * out_inner_shape[d + 1];
+    }
+
+    let pad_for_inner_dim = |d: usize| -> (isize, isize) { pads[ninner - 1 - d] };
+
+    // Enumerate the `(dst_off, src_off)` pairs of one `copy_`, mirroring
+    // `circular_slicecopy_block`'s `copy_block` iteration 1:1 (same windows,
+    // same row-major dst order, same broadcast rule). `src_strides` indexes the
+    // input for the center copy and `out` for a live wrap.
+    let enum_pairs = |dst_win: &[(usize, usize)],
+                      src_win: &[(usize, usize)],
+                      src_strides: &[usize]|
+     -> Vec<(usize, usize)> {
+        let mut dst_ext = vec![0usize; ninner];
+        let mut src_ext = vec![0usize; ninner];
+        for d in 0..ninner {
+            dst_ext[d] = dst_win[d].1 - dst_win[d].0;
+            src_ext[d] = src_win[d].1 - src_win[d].0;
+        }
+        let total: usize = dst_ext.iter().product();
+        let mut pairs = Vec::with_capacity(total);
+        if total == 0 {
+            return pairs;
+        }
+        let mut coord = vec![0usize; ninner];
+        for _ in 0..total {
+            let mut dst_off = 0usize;
+            let mut src_off = 0usize;
+            for d in 0..ninner {
+                dst_off += (dst_win[d].0 + coord[d]) * out_strides[d];
+                let sc = if src_ext[d] == 1 {
+                    src_win[d].0
+                } else {
+                    src_win[d].0 + coord[d]
+                };
+                src_off += sc * src_strides[d];
+            }
+            pairs.push((dst_off, src_off));
+            let mut d = ninner;
+            while d > 0 {
+                d -= 1;
+                coord[d] += 1;
+                if coord[d] < dst_ext[d] {
+                    break;
+                }
+                coord[d] = 0;
+            }
+        }
+        pairs
+    };
+
+    let mut ops: Vec<CircularCopyOp> = Vec::new();
+
+    // `:154-161` — the single CENTER copy (source = original input window).
+    let mut dst_win = vec![(0usize, 0usize); ninner];
+    let mut src_win = vec![(0usize, 0usize); ninner];
+    for d in 0..ninner {
+        let out_len = out_inner_shape[d] as isize;
+        let in_len = in_inner_shape[d] as isize;
+        if d < ninner - npad {
+            dst_win[d] = (0, out_inner_shape[d]);
+            src_win[d] = (0, in_inner_shape[d]);
+        } else {
+            let (pl, pr) = pad_for_inner_dim(d);
+            dst_win[d] = circular_slice_range(out_len, pl.max(0), out_len - pr.max(0));
+            src_win[d] = circular_slice_range(in_len, (-pl).max(0), in_len - (-pr).max(0));
+        }
+    }
+    ops.push(CircularCopyOp {
+        from_input: true,
+        pairs: enum_pairs(&dst_win, &src_win, &in_strides),
+    });
+
+    // `:169-187` — the left/right wrap copies (source = LIVE `out`), recorded in
+    // the SAME order as the forward.
+    for (k, &(pl, pr)) in pads.iter().enumerate() {
+        let dim = ninner - 1 - k;
+        let out_len = out_inner_shape[dim] as isize;
+        if pl > 0 {
+            let mut dwin = vec![(0usize, 0usize); ninner];
+            let mut swin = vec![(0usize, 0usize); ninner];
+            for d in 0..ninner {
+                dwin[d] = (0, out_inner_shape[d]);
+                swin[d] = (0, out_inner_shape[d]);
+            }
+            dwin[dim] = circular_slice_range(out_len, 0, pl);
+            swin[dim] =
+                circular_slice_range(out_len, out_len - pl - pr.max(0), out_len - pr.max(0));
+            ops.push(CircularCopyOp {
+                from_input: false,
+                pairs: enum_pairs(&dwin, &swin, &out_strides),
+            });
+        }
+        if pr > 0 {
+            let mut dwin = vec![(0usize, 0usize); ninner];
+            let mut swin = vec![(0usize, 0usize); ninner];
+            for d in 0..ninner {
+                dwin[d] = (0, out_inner_shape[d]);
+                swin[d] = (0, out_inner_shape[d]);
+            }
+            dwin[dim] = circular_slice_range(out_len, out_len - pr, out_len);
+            swin[dim] = circular_slice_range(out_len, pl.max(0), pl.max(0) + pr);
+            ops.push(CircularCopyOp {
+                from_input: false,
+                pairs: enum_pairs(&dwin, &swin, &out_strides),
+            });
+        }
+    }
+
+    // Reverse transpose: working `grad_out` starts as the incoming output grad;
+    // `grad_in` accumulates the input grad. For each op (reverse order) add
+    // `grad_out[dst]` into its source, THEN zero `grad_out[dst]` (the `copy_`
+    // overwrote `dst`, so its pre-copy value contributed nothing). A wrap's
+    // source is a live `out` cell ⇒ accumulate back into `grad_out`; the center
+    // copy's source is an input cell ⇒ accumulate into `grad_in`. We accumulate
+    // every contribution for the op BEFORE zeroing so distinct dst cells reading
+    // distinct (or broadcast-shared) sources all land correctly.
+    let zero = <T as num_traits::Zero>::zero();
+    let mut grad_out = go_block.to_vec();
+    let mut grad_in = vec![zero; in_total];
+    for op in ops.iter().rev() {
+        if op.from_input {
+            for &(d, s) in &op.pairs {
+                grad_in[s] += grad_out[d];
+                grad_out[d] = zero;
+            }
+        } else {
+            // Accumulate into a scratch keyed by source `out` cell first, then
+            // zero the dst cells, then fold the scratch back into `grad_out`.
+            // (A dst cell may also be a source cell of another pair in the SAME
+            // op only for an identity self-copy, which the forward overlap gate
+            // rejects; for legal wraps dst and src windows are disjoint, so the
+            // ordering is moot — but the scratch keeps it correct regardless.)
+            let mut contrib: Vec<(usize, T)> = Vec::with_capacity(op.pairs.len());
+            for &(d, s) in &op.pairs {
+                contrib.push((s, grad_out[d]));
+            }
+            for &(d, _) in &op.pairs {
+                grad_out[d] = zero;
+            }
+            for (s, v) in contrib {
+                grad_out[s] += v;
+            }
+        }
+    }
+    grad_in
+}
+
 /// Resolve, for one axis, the source index a reflect/circular output index
 /// reads from the ORIGINAL input window. Both modes always read a real element
 /// (never a fill), so this returns a bare `usize`. `(lo, hi)` are the signed
@@ -2209,6 +2399,41 @@ impl<T: Float> GradFn<T> for PadNdSignedModeBackward<T> {
         let go = grad_output.data_vec()?;
         let zero = <T as num_traits::Zero>::zero();
         let mut grad_in = vec![zero; outer * in_inner];
+
+        if self.mode == PaddingMode::Circular {
+            // CIRCULAR backward is the scatter-add TRANSPOSE of the #1629
+            // holistic forward `circular_slicecopy_block` (live-wrap slice-copy),
+            // NOT the old per-axis `circular_axis_src` gather (which returned an
+            // out-of-range source index for an over-cropped axis → index OOB
+            // panic, #1631). We replay the SAME forward output→source mapping via
+            // `circular_slicecopy_src_map` (center copy + live wraps), then for
+            // each forward write `out[o] = in[src_map[o]]` scatter-add
+            // `grad_out[o]` into `grad_in[src_map[o]]`. Cells the forward read
+            // more than once accumulate their grads, matching torch's
+            // `_pad_circular` backward (the transpose of `PadNd.cpp:176-179`
+            // `out_slice.copy_(in_slice)` aliasing reads). Over-cropped /
+            // net-zero-empty outputs produce zero forward writes ⇒ zero grad
+            // contribution (no OOB, no panic — R-CODE-2).
+            let in_inner_shape = &self.input_shape[first_padded..];
+            let out_inner_shape = &go_shape[first_padded..];
+            for o in 0..outer {
+                let in_base = o * in_inner;
+                let out_base = o * out_inner;
+                let go_block = &go[out_base..out_base + out_inner];
+                let gi_block = circular_slicecopy_backward_block(
+                    go_block,
+                    in_inner_shape,
+                    out_inner_shape,
+                    &self.pads,
+                );
+                for (i, &v) in gi_block.iter().enumerate() {
+                    grad_in[in_base + i] += v;
+                }
+            }
+            let grad_input =
+                Tensor::from_storage(TensorStorage::cpu(grad_in), self.input_shape.clone(), false)?;
+            return Ok(vec![Some(grad_input)]);
+        }
 
         for o in 0..outer {
             let in_base = o * in_inner;

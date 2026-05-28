@@ -43,7 +43,6 @@ fn tensor(data: &[f64], shape: &[usize], requires_grad: bool) -> Tensor<f64> {
 ///
 /// Tracking: #1631
 #[test]
-#[ignore = "divergence: circular over-crop backward panics (forward/backward gather mismatch); tracking #1631"]
 fn divergence_circular_overcrop_backward_112_w_neg1_2_h_0_1() {
     let x = tensor(&[1.0, 2.0], &[1, 1, 2], true);
     let y = functional_pad_2d_signed(&x, -1, 2, 0, 1, PaddingMode::Circular, 0.0)
@@ -81,7 +80,6 @@ fn divergence_circular_overcrop_backward_112_w_neg1_2_h_0_1() {
 ///
 /// Tracking: #1631
 #[test]
-#[ignore = "divergence: circular over-crop backward panics (forward/backward gather mismatch); tracking #1631"]
 fn divergence_circular_overcrop_backward_114_w_neg1_4_h_0_1() {
     let x = tensor(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 4], true);
     let y = functional_pad_2d_signed(&x, -1, 4, 0, 1, PaddingMode::Circular, 0.0)

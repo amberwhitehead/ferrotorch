@@ -28,11 +28,11 @@
 //! torch's clean value (R-CODE-2). 66 such 1-D grid points + 22 2-D points
 //! (all where torch ACCEPTS a finite reproducible value). Tracking: #1625.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::Tensor;
-use ferrotorch_nn::padding::{functional_pad_1d_signed, functional_pad_2d_signed, PaddingMode};
+use ferrotorch_core::storage::TensorStorage;
+use ferrotorch_nn::padding::{PaddingMode, functional_pad_1d_signed, functional_pad_2d_signed};
 
 fn tensor(data: &[f64], shape: &[usize]) -> Tensor<f64> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false).unwrap()

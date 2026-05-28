@@ -415,7 +415,6 @@ fn grad_of(
 /// and pinned by `divergence_1631_circular_overcrop_backward_panic.rs`; run via
 /// `--ignored`. The constant/reflect/replicate/circular NON-over-crop rows pass.
 #[test]
-#[ignore = "divergence: circular over-crop backward panics (R-CODE-2); tracking #1631"]
 fn definitive_negpad_det_backward_sample_all_modes() {
     type Row = (
         usize,
