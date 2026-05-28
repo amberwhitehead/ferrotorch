@@ -14,7 +14,7 @@
 //! | REQ-3 | SHIPPED | impl: `<Conv2d as Module>::forward` body here (im2col + matmul) mirroring `aten::convolution`; non-test consumer: every vision model forward invokes `Conv2d::forward` through its `Module` impl. |
 //! | REQ-4 | SHIPPED | impl: `is_f32 && input.is_cuda()` dispatch to `backend.conv2d_f32` inside `<Conv2d as Module>::forward`; non-test consumer: `ferrotorch-gpu/src/backend_impl.rs` exposes `Backend::conv2d_f32`; vision-model training runs on CUDA trigger this dispatch end-to-end. |
 //! | REQ-5 | SHIPPED | impl: `Conv2dBackward<T>: GradFn<T>` impl block here; non-test consumer: every gradient step on a vision model's `loss.backward()` traverses these `Conv2dBackward` nodes through `ferrotorch_core::autograd::engine`. |
-//! | REQ-6 | SHIPPED | impl: `pub struct Conv1d` / `Conv3d` / `ConvTranspose{1,2,3}d` here. Conv1d/Conv3d carry `groups`/`dilation` (forward layers) via `Conv1d::new_full` / `Conv3d::new_full` + the per-group + dilated `<Conv1d as Module>::forward` / `<Conv3d as Module>::forward` and `Conv1dBackward` / `Conv3dBackward` (closes #1600 conv1d, #1601 conv3d; weight `[out, in/groups, *k]` per `torch/nn/modules/conv.py:171`, channel partition per `aten/src/ATen/native/Convolution.cpp:1723-1729`, `eff_kernel = dilation*(k-1)+1` per `aten/src/ATen/native/ConvUtils.h:255`). non-test consumer: `Conv1d::new` / `Conv3d::new` delegate to `new_full` in production and are called by `ferrotorch-nn/src/lazy_conv.rs` `LazyConv1d::materialize` / `LazyConv3d::materialize`; `ferrotorch-vision/src/models/inception.rs` uses `Conv2d` + `ConvTranspose2d`. |
+//! | REQ-6 | SHIPPED | impl: `pub struct Conv1d` / `Conv3d` / `ConvTranspose{1,2,3}d` here, each carrying `groups`/`dilation` via `*::new_full(.., dilation, groups, bias)`. Forward layers: per-group + dilated `<Conv1d as Module>::forward` / `<Conv3d as Module>::forward` + `Conv1dBackward` / `Conv3dBackward` (closes #1600 conv1d, #1601 conv3d). Transposed layers: `ConvTranspose{1,2,3}d::new_full` + the per-group helpers `conv_transpose2d_forward_group` / `conv_transpose3d_forward_group` + per-group loops in `<ConvTranspose*d as Module>::forward` + per-group/dilated `ConvTranspose{1,2,3}dBackward` (closes #1607 groups, #1608 dilation), plus the rank-`D+1` unbatched `unsqueeze`/recurse/`squeeze` guard atop each transposed `forward` (closes #1609). Transposed weight `[in_channels, out_channels/groups, *k]` per `torch/nn/modules/conv.py:164`; channel partition (input dim 1 / weight dim 0 / bias dim 0) per `aten/src/ATen/native/Convolution.cpp:1723-1729`; dilated internal conv `internal_pad = dilation*(k-1) - padding`, `eff_kernel = dilation*(k-1)+1` per `aten/src/ATen/native/ConvUtils.h:255`. non-test consumer: `Conv1d::new` / `Conv3d::new` / `ConvTranspose{1,2,3}d::new` delegate to `new_full` in production and are called by `ferrotorch-nn/src/lazy_conv.rs` `LazyConv{1,3}d::materialize` / `ferrotorch-nn/src/lazy_conv_transpose.rs` `LazyConvTranspose{1,2,3}d::materialize`; `ferrotorch-vision/src/models/detection/{mask_rcnn,keypoint_rcnn}.rs` construct `ConvTranspose2d::new`; `ferrotorch-vision/src/models/inception.rs` uses `Conv2d` + `ConvTranspose2d`. |
 //! | REQ-7 | SHIPPED | impl: `impl<T: Float> Module<T> for Conv2d<T>` block (and analogues for the other 5) here; non-test consumer: `ferrotorch_optim` walks `Module::parameters_mut()` across every conv in a training loop. |
 //! | REQ-8 | SHIPPED | impl: the `Conv2d::set_weight` and `Conv2d::from_parts` methods here; non-test consumer: `ferrotorch-nn/src/functional.rs` (the stateless `nn::functional::conv2d` entry point) uses `Conv2d::from_parts` to drive the existing forward path with user-supplied parameters. |
 //! | REQ-9 | SHIPPED | impl: `kaiming_uniform(&mut weight, NonLinearity::ReLU)` + `uniform_init(&mut b, -bound, bound)` (bound = 1/sqrt(fan_in)) inside every `Conv*d::new[_full]` here, mirroring `torch/nn/modules/conv.py:182-201`; non-test consumer: `Conv2d::new` is the path used by every vision-model constructor. (closes #1450 — bias U(-bound,bound). Kaiming gain divergence (`a=sqrt(5)` upstream vs `ReLU` here) remains as separate followup.) |
@@ -2339,9 +2339,10 @@ impl<T: Float> GradFn<T> for Conv1dBackward<T> {
 /// where `H_out = (H - 1) * stride.0 - 2 * padding.0 + kernel_size.0 + output_padding.0`.
 #[derive(Debug)]
 pub struct ConvTranspose2d<T: Float> {
-    /// Learnable kernel weights `[in_channels, out_channels, kH, kW]`.
+    /// Learnable kernel weights `[in_channels, out_channels / groups, kH, kW]`.
     ///
-    /// Note: the channel ordering is transposed compared to `Conv2d`.
+    /// Note: the channel ordering is transposed compared to `Conv2d`
+    /// (`in_channels` first), per `torch/nn/modules/conv.py:161-167`.
     weight: Parameter<T>,
     /// Optional learnable bias `[out_channels]`.
     bias: Option<Parameter<T>>,
@@ -2357,16 +2358,33 @@ pub struct ConvTranspose2d<T: Float> {
     padding: (usize, usize),
     /// Additional size added to one side of the output `(opH, opW)`.
     output_padding: (usize, usize),
+    /// Dilation `(dilH, dilW)`. `(1, 1)` is the dense default. Spaces the
+    /// kernel taps in the internal stride-1 convolution
+    /// (`torch/nn/modules/conv.py:1198-1207`, `dilation` arg of
+    /// `F.conv_transpose2d`).
+    dilation: (usize, usize),
+    /// Number of blocked input/output channel groups. `1` is dense. Must divide
+    /// both `in_channels` and `out_channels`. The transposed weight is
+    /// `[in_channels, out_channels / groups, kH, kW]`; per group the input is
+    /// partitioned on the channel axis (`in_channels / groups` each) and each
+    /// slab is convolved-transposed with its `[in/groups, out/groups, kH, kW]`
+    /// weight slab, the outputs concatenated on the channel axis — exactly
+    /// `aten/src/ATen/native/Convolution.cpp:1723-1729`.
+    groups: usize,
     /// Whether the module is in training mode.
     training: bool,
 }
 
 impl<T: Float> ConvTranspose2d<T> {
-    /// Create a new `ConvTranspose2d` layer.
+    /// Create a new `ConvTranspose2d` layer (dense, dilation `(1, 1)`,
+    /// `groups = 1`).
     ///
     /// Weight is initialized with Kaiming uniform (ReLU gain).
     /// Bias, if enabled, is initialized U(-bound, bound) with
     /// `bound = 1/sqrt(fan_in)` per `torch/nn/modules/conv.py:198-201`.
+    ///
+    /// Thin shim over [`ConvTranspose2d::new_full`] preserved for the existing
+    /// `new(.., bias)` callers (e.g. `ferrotorch-vision` detection heads).
     pub fn new(
         in_channels: usize,
         out_channels: usize,
@@ -2374,6 +2392,40 @@ impl<T: Float> ConvTranspose2d<T> {
         stride: (usize, usize),
         padding: (usize, usize),
         output_padding: (usize, usize),
+        bias: bool,
+    ) -> FerrotorchResult<Self> {
+        Self::new_full(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            output_padding,
+            (1, 1),
+            1,
+            bias,
+        )
+    }
+
+    /// Create a new `ConvTranspose2d` with the full PyTorch-shaped argument set,
+    /// including `dilation` and `groups`.
+    ///
+    /// Mirrors `torch.nn.ConvTranspose2d.__init__` (`torch/nn/modules/conv.py:
+    /// 1133-1167`): the argument order is `(in, out, kernel, stride, padding,
+    /// output_padding, dilation, groups, bias)`. `groups` must divide BOTH
+    /// `in_channels` and `out_channels` (upstream `_ConvNd.__init__` raises
+    /// `ValueError` otherwise, `conv.py:105-110`). The transposed weight layout
+    /// is `[in_channels, out_channels / groups, kH, kW]` (`conv.py:161-167`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_full(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: (usize, usize),
+        stride: (usize, usize),
+        padding: (usize, usize),
+        output_padding: (usize, usize),
+        dilation: (usize, usize),
+        groups: usize,
         bias: bool,
     ) -> FerrotorchResult<Self> {
         if in_channels == 0 || out_channels == 0 {
@@ -2391,25 +2443,57 @@ impl<T: Float> ConvTranspose2d<T> {
                 message: "stride must be > 0 in both dimensions".into(),
             });
         }
-        if output_padding.0 >= stride.0 || output_padding.1 >= stride.1 {
+        if dilation.0 == 0 || dilation.1 == 0 {
             return Err(FerrotorchError::InvalidArgument {
-                message: "output_padding must be strictly less than stride".into(),
+                message: "dilation must be > 0 in both dimensions".into(),
+            });
+        }
+        // `_ConvNd.__init__` (`conv.py:105-110`): groups must be positive and
+        // divide both in_channels and out_channels.
+        if groups == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "groups must be a positive integer".into(),
+            });
+        }
+        if in_channels % groups != 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "in_channels ({in_channels}) must be divisible by groups ({groups})"
+                ),
+            });
+        }
+        if out_channels % groups != 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "out_channels ({out_channels}) must be divisible by groups ({groups})"
+                ),
+            });
+        }
+        // `output_padding` must be strictly less than `max(stride, dilation)`
+        // (upstream `_output_padding` valid-range check, `conv.py:803-822`).
+        if output_padding.0 >= stride.0.max(dilation.0)
+            || output_padding.1 >= stride.1.max(dilation.1)
+        {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "output_padding must be strictly less than max(stride, dilation)".into(),
             });
         }
 
-        // Weight shape: [in_channels, out_channels, kH, kW] (transposed layout per
-        // `torch/nn/modules/conv.py:161-167`).
+        // Weight shape: [in_channels, out_channels / groups, kH, kW] (transposed
+        // layout per `torch/nn/modules/conv.py:161-167`).
         let (kh, kw) = kernel_size;
-        let mut weight = Parameter::zeros(&[in_channels, out_channels, kh, kw])?;
+        let out_per_group = out_channels / groups;
+        let mut weight = Parameter::zeros(&[in_channels, out_per_group, kh, kw])?;
         kaiming_uniform(&mut weight, NonLinearity::ReLU)?;
 
         let bias_param = if bias {
             let mut b = Parameter::zeros(&[out_channels])?;
             // `torch/nn/modules/conv.py:198-201`: bias U(-bound, bound) with
             //   `bound = 1 / sqrt(fan_in)`. For ConvTranspose2d weight shape
-            //   `[in_channels, out_channels/groups, kH, kW]`, `_calculate_fan_in_and_fan_out`
-            //   yields `fan_in = (out_channels/groups) * kH * kW`. groups=1 here.
-            let fan_in = out_channels * kh * kw;
+            //   `[in_channels, out_channels/groups, kH, kW]`,
+            //   `_calculate_fan_in_and_fan_out` yields
+            //   `fan_in = (out_channels/groups) * kH * kW`.
+            let fan_in = out_per_group * kh * kw;
             let bound = if fan_in > 0 {
                 1.0 / (fan_in as f64).sqrt()
             } else {
@@ -2430,6 +2514,8 @@ impl<T: Float> ConvTranspose2d<T> {
             stride,
             padding,
             output_padding,
+            dilation,
+            groups,
             training: true,
         })
     }
@@ -2508,6 +2594,14 @@ impl<T: Float> ConvTranspose2d<T> {
             stride,
             padding,
             output_padding,
+            // `from_parts` recovers `out_channels` from the weight's dim 1, which
+            // for a grouped weight is `out_channels / groups`; the group count
+            // cannot be inferred from the weight shape alone, so this builder is
+            // dense (`groups = 1`, `dilation = (1, 1)`) — matching the
+            // ABI-compatible `Conv2d::from_parts` policy. Grouped/dilated
+            // transposed convs go through `new_full`.
+            dilation: (1, 1),
+            groups: 1,
             training: true,
         })
     }
@@ -2570,10 +2664,142 @@ fn flip_kernel<T: Float>(kernel: &[T], c_in: usize, c_out: usize, kh: usize, kw:
     flipped
 }
 
+/// Single-group transposed 2-D convolution forward (the `groups == 1` core).
+///
+/// Operates on an already channel-sliced input slab `[B, in_pg, H, W]` and a
+/// weight slab `[in_pg, out_pg, kH, kW]` (the transposed grouped layout,
+/// `torch/nn/modules/conv.py:164`), returning the per-group output buffer
+/// `[B, out_pg, h_out, w_out]`. Algorithm: stride-insert zeros, append the
+/// `output_padding` boundary, flip+transpose the kernel, then run a stride-1
+/// `dilation`-spaced internal convolution (`internal_pad = dilation*(k-1) -
+/// padding`). This is the same math the dense ConvTranspose2d used (#1560),
+/// now generalised for `dilation` via `im2col_dilated`.
+// Internal kernel: the argument set mirrors the 2-D transposed-conv descriptor;
+// a config struct would force allocation in the per-group hot loop.
+#[allow(clippy::too_many_arguments)]
+fn conv_transpose2d_forward_group<T: Float>(
+    input_data: &[T],
+    batch: usize,
+    in_pg: usize,
+    out_pg: usize,
+    h: usize,
+    w: usize,
+    kernel_size: (usize, usize),
+    stride: (usize, usize),
+    padding: (usize, usize),
+    output_padding: (usize, usize),
+    dilation: (usize, usize),
+    group_weight: &[T],
+) -> FerrotorchResult<(Vec<T>, usize, usize)> {
+    let (kh, kw) = kernel_size;
+    let (sh, sw) = stride;
+    let (ph, pw) = padding;
+    let (oph, opw) = output_padding;
+    let (dh, dw) = dilation;
+
+    // Step 1: stride-insert zeros, then append the `output_padding` boundary.
+    let (upsampled, h_up_core, w_up_core) =
+        stride_insert_zeros(input_data, batch, in_pg, h, w, sh, sw);
+    let h_up = h_up_core + oph;
+    let w_up = w_up_core + opw;
+    let upsampled = if oph > 0 || opw > 0 {
+        let zero = <T as num_traits::Zero>::zero();
+        let mut ext = vec![zero; batch * in_pg * h_up * w_up];
+        for b in 0..batch {
+            for c in 0..in_pg {
+                for ih in 0..h_up_core {
+                    let src = ((b * in_pg + c) * h_up_core + ih) * w_up_core;
+                    let dst = ((b * in_pg + c) * h_up + ih) * w_up;
+                    ext[dst..dst + w_up_core].copy_from_slice(&upsampled[src..src + w_up_core]);
+                }
+            }
+        }
+        ext
+    } else {
+        upsampled
+    };
+
+    // Step 2: flip the kernel and transpose channel dimensions.
+    // Group weight: [in_pg, out_pg, kH, kW] -> flipped [out_pg, in_pg, kH, kW]
+    // with a spatial flip (the regular-conv adjoint of the transposed conv).
+    let flipped = flip_kernel(group_weight, in_pg, out_pg, kh, kw);
+
+    // Step 3: regular `dilation`-spaced stride-1 convolution on the upsampled
+    // signal. The internal padding is `dilation*(kernel-1) - padding`, the
+    // dilated generalisation of the dense `kernel-1-padding` (#1560). The
+    // `eff_k = dilation*(k-1)+1` kernel taps are spaced by `dilation` in
+    // `im2col_dilated`, mirroring `ConvUtils.h:255`.
+    let eff_kh = dh * (kh - 1) + 1;
+    let eff_kw = dw * (kw - 1) + 1;
+    let internal_pad_h = eff_kh - 1 - ph;
+    let internal_pad_w = eff_kw - 1 - pw;
+
+    let (cols, col_rows, col_cols) = im2col_dilated(
+        &upsampled,
+        batch,
+        in_pg,
+        h_up,
+        w_up,
+        kh,
+        kw,
+        1,
+        1,
+        internal_pad_h,
+        internal_pad_w,
+        dh,
+        dw,
+    );
+
+    // Internal stride-1 conv output size over the `output_padding`-extended,
+    // dilation-spaced signal.
+    let h_out = (h_up + 2 * internal_pad_h - eff_kh) + 1;
+    let w_out = (w_up + 2 * internal_pad_w - eff_kw) + 1;
+
+    // Reshape flipped kernel to 2-D: [out_pg, in_pg * kH * kW].
+    let flipped_2d =
+        Tensor::from_storage(TensorStorage::cpu(flipped), vec![out_pg, col_rows], false)?;
+
+    let zero = <T as num_traits::Zero>::zero();
+    let mut output = vec![zero; batch * out_pg * h_out * w_out];
+
+    for b in 0..batch {
+        let col_start = b * col_rows * col_cols;
+        let col_end = col_start + col_rows * col_cols;
+        let cols_b = Tensor::from_storage(
+            TensorStorage::cpu(cols[col_start..col_end].to_vec()),
+            vec![col_rows, col_cols],
+            false,
+        )?;
+
+        let out_b = mm(&flipped_2d, &cols_b)?;
+        let out_data = out_b.data()?;
+
+        let out_start = b * out_pg * h_out * w_out;
+        let copy_len = out_pg * h_out * w_out;
+        output[out_start..out_start + copy_len].copy_from_slice(&out_data[..copy_len]);
+    }
+
+    Ok((output, h_out, w_out))
+}
+
 impl<T: Float> Module<T> for ConvTranspose2d<T> {
     fn forward(&self, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         // Record autocast decision for conv_transpose2d.
         let _autocast_cat = autocast_guard("conv_transpose2d");
+
+        // Unbatched input: `(C, H, W)` (rank 3) is accepted in addition to the
+        // batched `(N, C, H, W)` (rank 4) form. Mirrors `batchify` at
+        // `aten/src/ATen/native/Convolution.cpp:1197` (conv_transpose2d): an
+        // unbatched input is `unsqueeze(0)`d to add a batch dim, transposed-
+        // convolved, then `squeeze(0)`d so the output is rank 3. The
+        // unsqueeze/squeeze are autograd-aware (`UnsqueezeBackward` /
+        // `SqueezeBackward`) so gradients flow back to the unbatched shape.
+        // Closes #1609.
+        if input.ndim() == 3 {
+            let batched = unsqueeze(input, 0)?;
+            let output = self.forward(&batched)?;
+            return squeeze(&output, 0);
+        }
 
         // Validate input shape: [B, C_in, H, W].
         if input.ndim() != 4 {
@@ -2600,116 +2826,76 @@ impl<T: Float> Module<T> for ConvTranspose2d<T> {
         }
 
         let (kh, kw) = self.kernel_size;
-        let (sh, sw) = self.stride;
-        let (ph, pw) = self.padding;
-        let (oph, opw) = self.output_padding;
+        let groups = self.groups;
+        let in_pg = self.in_channels / groups;
+        let out_pg = self.out_channels / groups;
+        let weight_pg_numel = in_pg * out_pg * kh * kw;
 
         // Save the input device so we can restore it on the output.
         let input_device = input.device();
 
-        // Step 1: Insert zeros between input elements (stride insertion).
         let input_data = input.data_vec()?;
-        let (upsampled, h_up_core, w_up_core) =
-            stride_insert_zeros(&input_data, batch, c_in, h, w, sh, sw);
+        let weight_data = self.weight.data_vec()?;
 
-        // `output_padding` extends ONE side (bottom rows / right cols) of the
-        // output. Those cells are NOT zero-padding: per upstream `col2im`
-        // (`aten/src/ATen/native/im2col.h:104-146`) the transposed convolution
-        // scatters into an output of size `(in-1)*stride - 2*pad +
-        // dilation*(k-1) + output_padding + 1`
-        // (`NaiveConvolutionTranspose2d.cpp:109-112`), so the trailing
-        // `output_padding` rows/cols DO receive kernel-tap contributions.
-        // Append `oph` rows / `opw` cols of zeros to the (stride-inserted)
-        // upsampled signal so the internal stride-1 convolution emits all
-        // `h_out * w_out` cells directly, instead of leaving the boundary at 0
-        // (the #1560 divergence). Closes #1560.
-        let h_up = h_up_core + oph;
-        let w_up = w_up_core + opw;
-        let upsampled = if oph > 0 || opw > 0 {
-            let zero = <T as num_traits::Zero>::zero();
-            let mut ext = vec![zero; batch * c_in * h_up * w_up];
+        // Per-group transposed convolution, mirroring the SlowTranspose grouped
+        // loop at `aten/src/ATen/native/Convolution.cpp:1723-1729`: partition
+        // the input on the channel axis (`in_pg` per group), the weight on dim
+        // 0 (`in_pg` per group, giving the `[in_pg, out_pg, kH, kW]` slab), and
+        // (later) the bias on dim 0 (`out_pg` per group); convolve-transpose
+        // each group and concatenate the outputs on the channel axis.
+        let zero = <T as num_traits::Zero>::zero();
+        let mut output: Vec<T> = Vec::new();
+        let mut h_out = 0usize;
+        let mut w_out = 0usize;
+
+        for g in 0..groups {
+            // Slice this group's input channels: [B, in_pg, H, W].
+            let mut group_input = vec![zero; batch * in_pg * h * w];
             for b in 0..batch {
-                for c in 0..c_in {
-                    for ih in 0..h_up_core {
-                        let src = ((b * c_in + c) * h_up_core + ih) * w_up_core;
-                        let dst = ((b * c_in + c) * h_up + ih) * w_up;
-                        ext[dst..dst + w_up_core].copy_from_slice(&upsampled[src..src + w_up_core]);
-                    }
+                for c in 0..in_pg {
+                    let src_c = g * in_pg + c;
+                    let src_start = b * self.in_channels * h * w + src_c * h * w;
+                    let dst_start = b * in_pg * h * w + c * h * w;
+                    group_input[dst_start..dst_start + h * w]
+                        .copy_from_slice(&input_data[src_start..src_start + h * w]);
                 }
             }
-            ext
-        } else {
-            upsampled
-        };
 
-        // Step 2: Flip the kernel and transpose channel dimensions.
-        // Weight: [in_channels, out_channels, kH, kW]
-        // Flipped: [out_channels, in_channels, kH, kW] with spatial flip.
-        let weight_data = self.weight.data_vec()?;
-        let flipped = flip_kernel(&weight_data, self.in_channels, self.out_channels, kh, kw);
+            // Slice this group's weight slab: [in_pg, out_pg, kH, kW]. The
+            // transposed weight is `[in_channels, out_pg, kH, kW]`, so group g
+            // owns rows `[g*in_pg, (g+1)*in_pg)` of dim 0 — contiguous since
+            // dim 0 is the outermost axis.
+            let w_start = g * weight_pg_numel;
+            let group_weight = &weight_data[w_start..w_start + weight_pg_numel];
 
-        // Step 3: Apply a regular convolution on the upsampled input using the
-        // flipped kernel. The "padding" for this internal convolution is
-        // `kernel_size - 1 - padding` to achieve the correct output size.
-        let internal_pad_h = kh - 1 - ph;
-        let internal_pad_w = kw - 1 - pw;
-
-        // im2col on the upsampled input with stride=1.
-        let (cols, col_rows, col_cols) = im2col(
-            &upsampled,
-            batch,
-            c_in,
-            h_up,
-            w_up,
-            kh,
-            kw,
-            1,
-            1,
-            internal_pad_h,
-            internal_pad_w,
-        );
-
-        // The internal stride-1 convolution over the `output_padding`-extended
-        // upsampled signal now emits exactly `h_out * w_out` cells.
-        let h_out = (h_up + 2 * internal_pad_h - kh) + 1;
-        let w_out = (w_up + 2 * internal_pad_w - kw) + 1;
-        debug_assert_eq!(h_out, (h_up_core + 2 * internal_pad_h - kh) + 1 + oph);
-        debug_assert_eq!(w_out, (w_up_core + 2 * internal_pad_w - kw) + 1 + opw);
-
-        // Reshape flipped kernel to 2-D: [C_out, C_in * kH * kW]
-        let flipped_2d = Tensor::from_storage(
-            TensorStorage::cpu(flipped),
-            vec![self.out_channels, col_rows],
-            false,
-        )?;
-
-        // Per-batch matmul.
-        let zero = <T as num_traits::Zero>::zero();
-        let mut output = vec![zero; batch * self.out_channels * h_out * w_out];
-
-        for b in 0..batch {
-            let col_start = b * col_rows * col_cols;
-            let col_end = col_start + col_rows * col_cols;
-            let cols_b = Tensor::from_storage(
-                TensorStorage::cpu(cols[col_start..col_end].to_vec()),
-                vec![col_rows, col_cols],
-                false,
+            let (g_out, gho, gwo) = conv_transpose2d_forward_group(
+                &group_input,
+                batch,
+                in_pg,
+                out_pg,
+                h,
+                w,
+                self.kernel_size,
+                self.stride,
+                self.padding,
+                self.output_padding,
+                self.dilation,
+                group_weight,
             )?;
+            h_out = gho;
+            w_out = gwo;
 
-            let out_b = mm(&flipped_2d, &cols_b)?;
-            let out_data = out_b.data()?;
-
-            // Copy the full convolution result. The internal conv now emits all
-            // `h_out * w_out` cells (including the `output_padding` boundary),
-            // so no cell is left at 0 (the #1560 fix). `col_cols == h_out *
-            // w_out` here.
-            let out_start = b * self.out_channels * h_out * w_out;
-            for c in 0..self.out_channels {
-                for oh in 0..h_out {
-                    for ow in 0..w_out {
-                        output[out_start + c * h_out * w_out + oh * w_out + ow] =
-                            out_data[c * h_out * w_out + oh * w_out + ow];
-                    }
+            if output.is_empty() {
+                output = vec![zero; batch * self.out_channels * h_out * w_out];
+            }
+            // Place this group's `out_pg` channels at `[b, g*out_pg.., :, :]`.
+            for b in 0..batch {
+                for oc in 0..out_pg {
+                    let dst_c = g * out_pg + oc;
+                    let dst_start = b * self.out_channels * h_out * w_out + dst_c * h_out * w_out;
+                    let src_start = (b * out_pg + oc) * h_out * w_out;
+                    output[dst_start..dst_start + h_out * w_out]
+                        .copy_from_slice(&g_out[src_start..src_start + h_out * w_out]);
                 }
             }
         }
@@ -2750,6 +2936,8 @@ impl<T: Float> Module<T> for ConvTranspose2d<T> {
                 stride: self.stride,
                 padding: self.padding,
                 _output_padding: self.output_padding,
+                dilation: self.dilation,
+                groups: self.groups,
                 h_out,
                 w_out,
             });
@@ -2819,6 +3007,8 @@ struct ConvTranspose2dBackward<T: Float> {
     stride: (usize, usize),
     padding: (usize, usize),
     _output_padding: (usize, usize),
+    dilation: (usize, usize),
+    groups: usize,
     h_out: usize,
     w_out: usize,
 }
@@ -2833,127 +3023,146 @@ impl<T: Float> GradFn<T> for ConvTranspose2dBackward<T> {
         let (kh, kw) = self.kernel_size;
         let (sh, sw) = self.stride;
         let (ph, pw) = self.padding;
+        let (dh, dw) = self.dilation;
+        let groups = self.groups;
+        let in_pg = self.in_channels / groups;
+        let out_pg = self.out_channels / groups;
+        let zero = <T as num_traits::Zero>::zero();
 
-        // --- grad_input ---
-        // The backward of ConvTranspose2d w.r.t. input is a regular Conv2d
-        // of grad_output with the *original* (non-flipped) weight.
-        // Weight is [in_channels, out_channels, kH, kW], we need it as
-        // [in_channels, out_channels, kH, kW] reshaped to [in_channels, out_channels * kH * kW]
-        // but actually we need a regular conv: grad_output [B, C_out, H_out, W_out]
-        // convolved with weight^T [in_channels, out_channels, kH, kW] -> transposed to
-        // [in_channels as filters over C_out channels].
-        //
-        // Reshape weight [C_in, C_out, kH, kW] -> [C_in, C_out * kH * kW] for matmul.
-        let grad_input = if self.input.requires_grad() {
-            let weight_data = self.weight.data_vec()?;
-            let col_rows = self.out_channels * kh * kw;
+        let weight_data_all = self.weight.data_vec()?;
+        let input_data_all = self.input.data_vec()?;
 
-            // Reshape weight to [C_in, C_out * kH * kW]
-            let weight_2d = Tensor::from_storage(
-                TensorStorage::cpu(weight_data),
-                vec![self.in_channels, col_rows],
-                false,
-            )?;
-
-            // im2col on grad_output with the conv parameters
-            let (go_cols, _go_col_rows, go_col_cols) = im2col(
-                &go_data,
-                batch,
-                self.out_channels,
-                self.h_out,
-                self.w_out,
-                kh,
-                kw,
-                sh,
-                sw,
-                ph,
-                pw,
-            );
-
-            let zero = <T as num_traits::Zero>::zero();
-            let mut gi = vec![zero; batch * self.in_channels * h_in * w_in];
-
-            for b in 0..batch {
-                let col_start = b * col_rows * go_col_cols;
-                let col_end = col_start + col_rows * go_col_cols;
-                let go_cols_b = Tensor::from_storage(
-                    TensorStorage::cpu(go_cols[col_start..col_end].to_vec()),
-                    vec![col_rows, go_col_cols],
-                    false,
-                )?;
-
-                let gi_b = mm(&weight_2d, &go_cols_b)?;
-                let gi_data = gi_b.data()?;
-
-                let out_start = b * self.in_channels * h_in * w_in;
-                let copy_len = self.in_channels * h_in * w_in;
-                gi[out_start..out_start + copy_len].copy_from_slice(&gi_data[..copy_len]);
-            }
-
-            Some(Tensor::from_storage(
-                TensorStorage::cpu(gi),
-                self.input.shape().to_vec(),
-                false,
-            )?)
+        // The grad_input / grad_weight of a transposed convolution decompose
+        // per-group exactly like the forward (Convolution.cpp:1723-1729 +
+        // 2282-2297 grouped backward): for group g the relevant channels are
+        // in `[g*in_pg, (g+1)*in_pg)` (input) and `[g*out_pg, (g+1)*out_pg)`
+        // (grad_output), using the weight slab `[in_pg, out_pg, kH, kW]`.
+        let mut gi_all = if self.input.requires_grad() {
+            Some(vec![zero; batch * self.in_channels * h_in * w_in])
+        } else {
+            None
+        };
+        let mut gw_all = if self.weight.requires_grad() {
+            Some(vec![zero; self.in_channels * out_pg * kh * kw])
         } else {
             None
         };
 
-        // --- grad_weight ---
-        // grad_weight[c_in, c_out, kh, kw] = sum_b input_b (x) grad_output_b
-        // where (x) is the cross-correlation with stride.
-        let grad_weight = if self.weight.requires_grad() {
-            let zero = <T as num_traits::Zero>::zero();
-            let weight_numel = self.in_channels * self.out_channels * kh * kw;
-            let mut gw = vec![zero; weight_numel];
-            let input_data = self.input.data_vec()?;
+        for g in 0..groups {
+            // --- grad_input (group g) ---
+            // The backward of a transposed conv w.r.t. input is a regular
+            // (forward) convolution of grad_output with the original
+            // (non-flipped) weight, dilation-spaced. Weight slab is
+            // [in_pg, out_pg, kH, kW] reshaped to [in_pg, out_pg*kH*kW].
+            if let Some(gi) = gi_all.as_mut() {
+                let col_rows = out_pg * kh * kw;
+                let w_start = g * in_pg * out_pg * kh * kw;
+                let weight_2d = Tensor::from_storage(
+                    TensorStorage::cpu(
+                        weight_data_all[w_start..w_start + in_pg * out_pg * kh * kw].to_vec(),
+                    ),
+                    vec![in_pg, col_rows],
+                    false,
+                )?;
 
-            for b in 0..batch {
-                for ci in 0..self.in_channels {
-                    for co in 0..self.out_channels {
-                        for dh in 0..kh {
-                            for dw in 0..kw {
+                // Slice this group's grad_output channels: [B, out_pg, H_out, W_out].
+                let mut go_g = vec![zero; batch * out_pg * self.h_out * self.w_out];
+                for b in 0..batch {
+                    for c in 0..out_pg {
+                        let src_c = g * out_pg + c;
+                        let src = (b * self.out_channels + src_c) * self.h_out * self.w_out;
+                        let dst = (b * out_pg + c) * self.h_out * self.w_out;
+                        go_g[dst..dst + self.h_out * self.w_out]
+                            .copy_from_slice(&go_data[src..src + self.h_out * self.w_out]);
+                    }
+                }
+
+                let (go_cols, _gcr, go_col_cols) = im2col_dilated(
+                    &go_g, batch, out_pg, self.h_out, self.w_out, kh, kw, sh, sw, ph, pw, dh, dw,
+                );
+                debug_assert_eq!(go_col_cols, h_in * w_in);
+
+                for b in 0..batch {
+                    let col_start = b * col_rows * go_col_cols;
+                    let col_end = col_start + col_rows * go_col_cols;
+                    let go_cols_b = Tensor::from_storage(
+                        TensorStorage::cpu(go_cols[col_start..col_end].to_vec()),
+                        vec![col_rows, go_col_cols],
+                        false,
+                    )?;
+                    let gi_b = mm(&weight_2d, &go_cols_b)?;
+                    let gi_data = gi_b.data()?;
+                    // Scatter the group's in_pg channels back into the dense input grad.
+                    for c in 0..in_pg {
+                        let dst_c = g * in_pg + c;
+                        let dst = (b * self.in_channels + dst_c) * h_in * w_in;
+                        let src = c * h_in * w_in;
+                        gi[dst..dst + h_in * w_in]
+                            .copy_from_slice(&gi_data[src..src + h_in * w_in]);
+                    }
+                }
+            }
+
+            // --- grad_weight (group g) ---
+            // grad_weight[ci, co, kh, kw] = sum_b input[ci] cross-correlated
+            // with grad_output[co], the kernel tap at `dilation`-spaced offset.
+            if let Some(gw) = gw_all.as_mut() {
+                for ci in 0..in_pg {
+                    let in_c = g * in_pg + ci;
+                    for co in 0..out_pg {
+                        let out_c = g * out_pg + co;
+                        for tkh in 0..kh {
+                            for tkw in 0..kw {
                                 let mut acc = zero;
                                 for ih in 0..h_in {
                                     for iw in 0..w_in {
-                                        let oh = ih * sh + dh;
-                                        let ow = iw * sw + dw;
-                                        // Account for padding removal
+                                        let oh = ih * sh + tkh * dh;
+                                        let ow = iw * sw + tkw * dw;
                                         if oh >= ph
                                             && ow >= pw
                                             && (oh - ph) < self.h_out
                                             && (ow - pw) < self.w_out
                                         {
-                                            let go_idx =
-                                                b * self.out_channels * self.h_out * self.w_out
-                                                    + co * self.h_out * self.w_out
-                                                    + (oh - ph) * self.w_out
-                                                    + (ow - pw);
-                                            let in_idx = b * self.in_channels * h_in * w_in
-                                                + ci * h_in * w_in
-                                                + ih * w_in
-                                                + iw;
-                                            acc += input_data[in_idx] * go_data[go_idx];
+                                            let go_index = (out_c * self.h_out + (oh - ph))
+                                                * self.w_out
+                                                + (ow - pw);
+                                            let in_index = (in_c * h_in + ih) * w_in + iw;
+                                            // Sum over the batch.
+                                            for b in 0..batch {
+                                                let goi =
+                                                    b * self.out_channels * self.h_out * self.w_out
+                                                        + go_index;
+                                                let ini =
+                                                    b * self.in_channels * h_in * w_in + in_index;
+                                                acc += input_data_all[ini] * go_data[goi];
+                                            }
                                         }
                                     }
                                 }
-                                gw[ci * self.out_channels * kh * kw
-                                    + co * kh * kw
-                                    + dh * kw
-                                    + dw] += acc;
+                                // gw layout: [in_channels, out_pg, kH, kW].
+                                gw[((in_c * out_pg + co) * kh + tkh) * kw + tkw] += acc;
                             }
                         }
                     }
                 }
             }
+        }
 
-            Some(Tensor::from_storage(
-                TensorStorage::cpu(gw),
-                vec![self.in_channels, self.out_channels, kh, kw],
+        let grad_input = match gi_all {
+            Some(gi) => Some(Tensor::from_storage(
+                TensorStorage::cpu(gi),
+                self.input.shape().to_vec(),
                 false,
-            )?)
-        } else {
-            None
+            )?),
+            None => None,
+        };
+        let grad_weight = match gw_all {
+            Some(gw) => Some(Tensor::from_storage(
+                TensorStorage::cpu(gw),
+                vec![self.in_channels, out_pg, kh, kw],
+                false,
+            )?),
+            None => None,
         };
 
         // --- grad_bias ---
@@ -3003,38 +3212,6 @@ impl<T: Float> GradFn<T> for ConvTranspose2dBackward<T> {
 // ---------------------------------------------------------------------------
 // im2col_3d / col2im_3d helpers
 // ---------------------------------------------------------------------------
-
-/// Extract volume patches into columns for 3-D convolution.
-///
-/// Given a 5-D input `[B, C, D, H, W]`, produces a 3-D output
-/// `[B, C * kD * kH * kW, D_out * H_out * W_out]` where each column is one
-/// flattened receptive-field patch.
-// Internal kernel: argument set mirrors the 3-D convolution descriptor
-// (B, C, D, H, W, kD, kH, kW, ...); the 3-D extension of `im2col` carries
-// proportionally more arguments than the 2-D version.
-#[allow(clippy::too_many_arguments)]
-fn im2col_3d<T: Float>(
-    input: &[T],
-    batch: usize,
-    channels: usize,
-    depth: usize,
-    height: usize,
-    width: usize,
-    kernel_d: usize,
-    kernel_h: usize,
-    kernel_w: usize,
-    stride_d: usize,
-    stride_h: usize,
-    stride_w: usize,
-    pad_d: usize,
-    pad_h: usize,
-    pad_w: usize,
-) -> (Vec<T>, usize, usize) {
-    im2col_3d_dilated(
-        input, batch, channels, depth, height, width, kernel_d, kernel_h, kernel_w, stride_d,
-        stride_h, stride_w, pad_d, pad_h, pad_w, 1, 1, 1,
-    )
-}
 
 /// Extract volumetric patches into columns, supporting dilation
 /// `(dil_d, dil_h, dil_w)`.
@@ -4200,9 +4377,10 @@ impl<T: Float> GradFn<T> for Conv3dBackward<T> {
 /// where `L_out = (L - 1) * stride - 2 * padding + kernel_size + output_padding`.
 #[derive(Debug)]
 pub struct ConvTranspose1d<T: Float> {
-    /// Learnable kernel weights `[in_channels, out_channels, kernel_size]`.
+    /// Learnable kernel weights `[in_channels, out_channels / groups, kernel_size]`.
     ///
-    /// Note: the channel ordering is transposed compared to `Conv1d`.
+    /// Note: the channel ordering is transposed compared to `Conv1d`
+    /// (`in_channels` first), per `torch/nn/modules/conv.py:161-167`.
     weight: Parameter<T>,
     /// Optional learnable bias `[out_channels]`.
     bias: Option<Parameter<T>>,
@@ -4218,16 +4396,26 @@ pub struct ConvTranspose1d<T: Float> {
     padding: usize,
     /// Additional size added to one side of the output.
     output_padding: usize,
+    /// Dilation. `1` is the dense default (`dilation` arg of
+    /// `F.conv_transpose1d`, `torch/nn/modules/conv.py:1000-1009`).
+    dilation: usize,
+    /// Number of blocked input/output channel groups. `1` is dense. Must divide
+    /// both `in_channels` and `out_channels`. Transposed weight is
+    /// `[in_channels, out_channels / groups, K]`; the per-group partition
+    /// mirrors `aten/src/ATen/native/Convolution.cpp:1723-1729`.
+    groups: usize,
     /// Whether the module is in training mode.
     training: bool,
 }
 
 impl<T: Float> ConvTranspose1d<T> {
-    /// Create a new `ConvTranspose1d` layer.
+    /// Create a new `ConvTranspose1d` layer (dense, dilation `1`, `groups = 1`).
     ///
     /// Weight is initialized with Kaiming uniform (ReLU gain).
     /// Bias, if enabled, is initialized U(-bound, bound) with
     /// `bound = 1/sqrt(fan_in)` per `torch/nn/modules/conv.py:198-201`.
+    ///
+    /// Thin shim over [`ConvTranspose1d::new_full`].
     pub fn new(
         in_channels: usize,
         out_channels: usize,
@@ -4235,6 +4423,38 @@ impl<T: Float> ConvTranspose1d<T> {
         stride: usize,
         padding: usize,
         output_padding: usize,
+        bias: bool,
+    ) -> FerrotorchResult<Self> {
+        Self::new_full(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            output_padding,
+            1,
+            1,
+            bias,
+        )
+    }
+
+    /// Create a new `ConvTranspose1d` with the full PyTorch-shaped argument set,
+    /// including `dilation` and `groups`.
+    ///
+    /// Mirrors `torch.nn.ConvTranspose1d.__init__` (`torch/nn/modules/conv.py:
+    /// 944-978`). `groups` must divide BOTH `in_channels` and `out_channels`
+    /// (`conv.py:105-110`). Transposed weight layout `[in_channels,
+    /// out_channels / groups, K]` (`conv.py:161-167`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_full(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+        output_padding: usize,
+        dilation: usize,
+        groups: usize,
         bias: bool,
     ) -> FerrotorchResult<Self> {
         if in_channels == 0 || out_channels == 0 {
@@ -4252,22 +4472,47 @@ impl<T: Float> ConvTranspose1d<T> {
                 message: "stride must be > 0".into(),
             });
         }
-        if output_padding >= stride {
+        if dilation == 0 {
             return Err(FerrotorchError::InvalidArgument {
-                message: "output_padding must be strictly less than stride".into(),
+                message: "dilation must be > 0".into(),
+            });
+        }
+        if groups == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "groups must be a positive integer".into(),
+            });
+        }
+        if in_channels % groups != 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "in_channels ({in_channels}) must be divisible by groups ({groups})"
+                ),
+            });
+        }
+        if out_channels % groups != 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "out_channels ({out_channels}) must be divisible by groups ({groups})"
+                ),
+            });
+        }
+        if output_padding >= stride.max(dilation) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "output_padding must be strictly less than max(stride, dilation)".into(),
             });
         }
 
-        // Weight shape: [in_channels, out_channels, kernel_size] (transposed layout).
-        let mut weight = Parameter::zeros(&[in_channels, out_channels, kernel_size])?;
+        // Weight shape: [in_channels, out_channels / groups, K] (transposed layout).
+        let out_per_group = out_channels / groups;
+        let mut weight = Parameter::zeros(&[in_channels, out_per_group, kernel_size])?;
         kaiming_uniform(&mut weight, NonLinearity::ReLU)?;
 
         let bias_param = if bias {
             let mut b = Parameter::zeros(&[out_channels])?;
             // `torch/nn/modules/conv.py:198-201`: bias U(-bound, bound) with
-            //   `bound = 1 / sqrt(fan_in)`. ConvTranspose1d: weight shape
-            //   `[in_channels, out_channels/groups, K]`, fan_in = out_channels * K (groups=1).
-            let fan_in = out_channels * kernel_size;
+            //   `bound = 1 / sqrt(fan_in)`. ConvTranspose1d weight shape
+            //   `[in_channels, out_channels/groups, K]`, fan_in = (out/groups) * K.
+            let fan_in = out_per_group * kernel_size;
             let bound = if fan_in > 0 {
                 1.0 / (fan_in as f64).sqrt()
             } else {
@@ -4288,6 +4533,8 @@ impl<T: Float> ConvTranspose1d<T> {
             stride,
             padding,
             output_padding,
+            dilation,
+            groups,
             training: true,
         })
     }
@@ -4366,6 +4613,11 @@ impl<T: Float> ConvTranspose1d<T> {
             stride,
             padding,
             output_padding,
+            // Dense-only (groups=1, dilation=1); the group count is not
+            // recoverable from the weight shape. Grouped/dilated go via
+            // `new_full`. Matches the `Conv1d::from_parts` ABI policy.
+            dilation: 1,
+            groups: 1,
             training: true,
         })
     }
@@ -4375,6 +4627,17 @@ impl<T: Float> Module<T> for ConvTranspose1d<T> {
     fn forward(&self, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         // Record autocast decision for conv_transpose1d.
         let _autocast_cat = autocast_guard("conv_transpose1d");
+
+        // Unbatched input: `(C, L)` (rank 2) is accepted in addition to the
+        // batched `(N, C, L)` (rank 3) form. Mirrors `batchify` at
+        // `aten/src/ATen/native/Convolution.cpp:1178` (conv_transpose1d):
+        // `unsqueeze(0)` -> transposed-conv -> `squeeze(0)`, autograd-aware.
+        // Closes #1609.
+        if input.ndim() == 2 {
+            let batched = unsqueeze(input, 0)?;
+            let output = self.forward(&batched)?;
+            return squeeze(&output, 0);
+        }
 
         // Validate input shape: [B, C_in, L].
         if input.ndim() != 3 {
@@ -4400,105 +4663,66 @@ impl<T: Float> Module<T> for ConvTranspose1d<T> {
         }
 
         let k = self.kernel_size;
-        let s = self.stride;
-        let p = self.padding;
-        let op = self.output_padding;
+        let groups = self.groups;
+        let in_pg = self.in_channels / groups;
+        let out_pg = self.out_channels / groups;
+        let weight_pg_numel = in_pg * out_pg * k;
 
         // Save the input device so we can restore it on the output.
         let input_device = input.device();
 
-        // Step 1: Insert zeros between input elements (stride insertion).
-        // Treat [B, C, L] as [B, C, 1, L] for the 2-D helper.
         let input_data = input.data_vec()?;
-        let (upsampled, _h_up, w_up_core) =
-            stride_insert_zeros(&input_data, batch, c_in, 1, length, 1, s);
+        let weight_data = self.weight.data_vec()?;
 
-        // `output_padding` extends ONE side of the output by `op` cells. Those
-        // cells are NOT zero-padding: per upstream `col2im`
-        // (`aten/src/ATen/native/im2col.h:104-146`), the transposed convolution
-        // scatters into an output of size `(L_in-1)*stride - 2*pad +
-        // dilation*(k-1) + output_padding + 1`
-        // (`NaiveConvolutionTranspose2d.cpp:109-112`), so the trailing
-        // `output_padding` positions DO receive kernel-tap contributions. We
-        // realise that by appending `op` trailing zeros to the (stride-inserted)
-        // upsampled signal so the internal stride-1 convolution emits all
-        // `l_out` columns directly, rather than copying `w_out_base` columns and
-        // leaving the boundary at 0 (the #1560 divergence). Closes #1560.
-        let w_up = w_up_core + op;
-        let upsampled = if op > 0 {
-            let zero = <T as num_traits::Zero>::zero();
-            let mut ext = vec![zero; batch * c_in * w_up];
+        // Per-group transposed convolution (Convolution.cpp:1723-1729). 1-D is
+        // the 2-D group helper with `H = 1`: kernel `(1, k)`, stride `(1, s)`,
+        // padding `(0, p)`, output_padding `(0, op)`, dilation `(1, dilation)`.
+        // Weight slab is `[in_pg, out_pg, K]` reshaped to `[in_pg, out_pg, 1,
+        // K]` for the helper.
+        let zero = <T as num_traits::Zero>::zero();
+        let mut output: Vec<T> = Vec::new();
+        let mut l_out = 0usize;
+
+        for g in 0..groups {
+            let mut group_input = vec![zero; batch * in_pg * length];
             for b in 0..batch {
-                for c in 0..c_in {
-                    let src = (b * c_in + c) * w_up_core;
-                    let dst = (b * c_in + c) * w_up;
-                    ext[dst..dst + w_up_core].copy_from_slice(&upsampled[src..src + w_up_core]);
+                for c in 0..in_pg {
+                    let src_c = g * in_pg + c;
+                    let src = (b * self.in_channels + src_c) * length;
+                    let dst = (b * in_pg + c) * length;
+                    group_input[dst..dst + length].copy_from_slice(&input_data[src..src + length]);
                 }
             }
-            ext
-        } else {
-            upsampled
-        };
 
-        // Step 2: Flip the kernel and transpose channel dimensions.
-        // Weight: [in_channels, out_channels, k] -> treat as [in_channels, out_channels, 1, k]
-        let weight_data = self.weight.data_vec()?;
-        let flipped = flip_kernel(&weight_data, self.in_channels, self.out_channels, 1, k);
+            let w_start = g * weight_pg_numel;
+            let group_weight = &weight_data[w_start..w_start + weight_pg_numel];
 
-        // Step 3: Apply a regular convolution on the upsampled input using the
-        // flipped kernel with internal padding.
-        let internal_pad_w = k - 1 - p;
-
-        // im2col on the upsampled input [B, C, 1, w_up] with kernel (1, k), stride (1, 1).
-        let (cols, col_rows, col_cols) = im2col(
-            &upsampled,
-            batch,
-            c_in,
-            1,
-            w_up,
-            1,
-            k,
-            1,
-            1,
-            0,
-            internal_pad_w,
-        );
-
-        // The internal stride-1 convolution over the `op`-extended upsampled
-        // signal now emits exactly `l_out` columns.
-        let l_out = (w_up + 2 * internal_pad_w - k) + 1;
-        debug_assert_eq!(l_out, (w_up_core + 2 * internal_pad_w - k) + 1 + op);
-
-        // Reshape flipped kernel to 2-D: [C_out, C_in * 1 * k]
-        let flipped_2d = Tensor::from_storage(
-            TensorStorage::cpu(flipped),
-            vec![self.out_channels, col_rows],
-            false,
-        )?;
-
-        // Per-batch matmul.
-        let zero = <T as num_traits::Zero>::zero();
-        let mut output = vec![zero; batch * self.out_channels * l_out];
-
-        for b in 0..batch {
-            let col_start = b * col_rows * col_cols;
-            let col_end = col_start + col_rows * col_cols;
-            let cols_b = Tensor::from_storage(
-                TensorStorage::cpu(cols[col_start..col_end].to_vec()),
-                vec![col_rows, col_cols],
-                false,
+            let (g_out, gho, glo) = conv_transpose2d_forward_group(
+                &group_input,
+                batch,
+                in_pg,
+                out_pg,
+                1,
+                length,
+                (1, k),
+                (1, self.stride),
+                (0, self.padding),
+                (0, self.output_padding),
+                (1, self.dilation),
+                group_weight,
             )?;
+            debug_assert_eq!(gho, 1);
+            l_out = glo;
 
-            let out_b = mm(&flipped_2d, &cols_b)?;
-            let out_data = out_b.data()?;
-
-            // Copy the full convolution result. The internal conv now emits all
-            // `l_out` columns (including the `output_padding` boundary), so no
-            // cell is left at 0 (the #1560 fix). `col_cols == l_out` here.
-            let out_start = b * self.out_channels * l_out;
-            for c in 0..self.out_channels {
-                for ow in 0..l_out {
-                    output[out_start + c * l_out + ow] = out_data[c * l_out + ow];
+            if output.is_empty() {
+                output = vec![zero; batch * self.out_channels * l_out];
+            }
+            for b in 0..batch {
+                for oc in 0..out_pg {
+                    let dst_c = g * out_pg + oc;
+                    let dst = (b * self.out_channels + dst_c) * l_out;
+                    let src = (b * out_pg + oc) * l_out;
+                    output[dst..dst + l_out].copy_from_slice(&g_out[src..src + l_out]);
                 }
             }
         }
@@ -4538,6 +4762,8 @@ impl<T: Float> Module<T> for ConvTranspose1d<T> {
                 stride: self.stride,
                 padding: self.padding,
                 _output_padding: self.output_padding,
+                dilation: self.dilation,
+                groups: self.groups,
                 l_out,
             });
             Tensor::from_operation(
@@ -4606,6 +4832,8 @@ struct ConvTranspose1dBackward<T: Float> {
     stride: usize,
     padding: usize,
     _output_padding: usize,
+    dilation: usize,
+    groups: usize,
     l_out: usize,
 }
 
@@ -4618,102 +4846,119 @@ impl<T: Float> GradFn<T> for ConvTranspose1dBackward<T> {
         let k = self.kernel_size;
         let s = self.stride;
         let p = self.padding;
+        let d = self.dilation;
+        let groups = self.groups;
+        let in_pg = self.in_channels / groups;
+        let out_pg = self.out_channels / groups;
+        let zero = <T as num_traits::Zero>::zero();
 
-        // --- grad_input ---
-        // The backward of ConvTranspose1d w.r.t. input is a regular Conv1d
-        // of grad_output with the original (non-flipped) weight.
-        // Weight is [C_in, C_out, k], treat as [C_in, C_out, 1, k].
-        let grad_input = if self.input.requires_grad() {
-            let weight_data = self.weight.data_vec()?;
-            let col_rows = self.out_channels * k;
+        let weight_data_all = self.weight.data_vec()?;
+        let input_data_all = self.input.data_vec()?;
 
-            // Reshape weight to [C_in, C_out * k]
-            let weight_2d = Tensor::from_storage(
-                TensorStorage::cpu(weight_data),
-                vec![self.in_channels, col_rows],
-                false,
-            )?;
-
-            // im2col on grad_output [B, C_out, L_out] treated as [B, C_out, 1, L_out]
-            let (go_cols, _go_col_rows, go_col_cols) = im2col(
-                &go_data,
-                batch,
-                self.out_channels,
-                1,
-                self.l_out,
-                1,
-                k,
-                1,
-                s,
-                0,
-                p,
-            );
-
-            let zero = <T as num_traits::Zero>::zero();
-            let mut gi = vec![zero; batch * self.in_channels * l_in];
-
-            for b in 0..batch {
-                let col_start = b * col_rows * go_col_cols;
-                let col_end = col_start + col_rows * go_col_cols;
-                let go_cols_b = Tensor::from_storage(
-                    TensorStorage::cpu(go_cols[col_start..col_end].to_vec()),
-                    vec![col_rows, go_col_cols],
-                    false,
-                )?;
-
-                let gi_b = mm(&weight_2d, &go_cols_b)?;
-                let gi_data = gi_b.data()?;
-
-                let out_start = b * self.in_channels * l_in;
-                let copy_len = self.in_channels * l_in;
-                gi[out_start..out_start + copy_len].copy_from_slice(&gi_data[..copy_len]);
-            }
-
-            Some(Tensor::from_storage(
-                TensorStorage::cpu(gi),
-                self.input.shape().to_vec(),
-                false,
-            )?)
+        // Per-group, dilation-spaced backward (1-D is the 2-D W axis).
+        let mut gi_all = if self.input.requires_grad() {
+            Some(vec![zero; batch * self.in_channels * l_in])
+        } else {
+            None
+        };
+        let mut gw_all = if self.weight.requires_grad() {
+            Some(vec![zero; self.in_channels * out_pg * k])
         } else {
             None
         };
 
-        // --- grad_weight ---
-        // grad_weight[c_in, c_out, kw] = sum_b input_b cross-correlated with grad_output_b
-        let grad_weight = if self.weight.requires_grad() {
-            let zero = <T as num_traits::Zero>::zero();
-            let weight_numel = self.in_channels * self.out_channels * k;
-            let mut gw = vec![zero; weight_numel];
-            let input_data = self.input.data_vec()?;
+        for g in 0..groups {
+            // --- grad_input (group g) ---
+            if let Some(gi) = gi_all.as_mut() {
+                let col_rows = out_pg * k;
+                let w_start = g * in_pg * out_pg * k;
+                let weight_2d = Tensor::from_storage(
+                    TensorStorage::cpu(
+                        weight_data_all[w_start..w_start + in_pg * out_pg * k].to_vec(),
+                    ),
+                    vec![in_pg, col_rows],
+                    false,
+                )?;
 
-            for b in 0..batch {
-                for ci in 0..self.in_channels {
-                    for co in 0..self.out_channels {
-                        for dw in 0..k {
-                            let mut acc = zero;
-                            for il in 0..l_in {
-                                let ow = il * s + dw;
-                                if ow >= p && (ow - p) < self.l_out {
-                                    let go_idx = b * self.out_channels * self.l_out
-                                        + co * self.l_out
-                                        + (ow - p);
-                                    let in_idx = b * self.in_channels * l_in + ci * l_in + il;
-                                    acc += input_data[in_idx] * go_data[go_idx];
-                                }
-                            }
-                            gw[ci * self.out_channels * k + co * k + dw] += acc;
-                        }
+                let mut go_g = vec![zero; batch * out_pg * self.l_out];
+                for b in 0..batch {
+                    for c in 0..out_pg {
+                        let src_c = g * out_pg + c;
+                        let src = (b * self.out_channels + src_c) * self.l_out;
+                        let dst = (b * out_pg + c) * self.l_out;
+                        go_g[dst..dst + self.l_out]
+                            .copy_from_slice(&go_data[src..src + self.l_out]);
+                    }
+                }
+
+                // im2col on grad_output [B, out_pg, 1, L_out] with kernel (1, k),
+                // stride (1, s), padding (0, p), dilation (1, d).
+                let (go_cols, _gcr, go_col_cols) =
+                    im2col_dilated(&go_g, batch, out_pg, 1, self.l_out, 1, k, 1, s, 0, p, 1, d);
+                debug_assert_eq!(go_col_cols, l_in);
+
+                for b in 0..batch {
+                    let col_start = b * col_rows * go_col_cols;
+                    let col_end = col_start + col_rows * go_col_cols;
+                    let go_cols_b = Tensor::from_storage(
+                        TensorStorage::cpu(go_cols[col_start..col_end].to_vec()),
+                        vec![col_rows, go_col_cols],
+                        false,
+                    )?;
+                    let gi_b = mm(&weight_2d, &go_cols_b)?;
+                    let gi_data = gi_b.data()?;
+                    for c in 0..in_pg {
+                        let dst_c = g * in_pg + c;
+                        let dst = (b * self.in_channels + dst_c) * l_in;
+                        let src = c * l_in;
+                        gi[dst..dst + l_in].copy_from_slice(&gi_data[src..src + l_in]);
                     }
                 }
             }
 
-            Some(Tensor::from_storage(
-                TensorStorage::cpu(gw),
-                vec![self.in_channels, self.out_channels, k],
+            // --- grad_weight (group g) ---
+            if let Some(gw) = gw_all.as_mut() {
+                for ci in 0..in_pg {
+                    let in_c = g * in_pg + ci;
+                    for co in 0..out_pg {
+                        let out_c = g * out_pg + co;
+                        for tk in 0..k {
+                            let mut acc = zero;
+                            for il in 0..l_in {
+                                let ow = il * s + tk * d;
+                                if ow >= p && (ow - p) < self.l_out {
+                                    let go_index = out_c * self.l_out + (ow - p);
+                                    let in_index = in_c * l_in + il;
+                                    for b in 0..batch {
+                                        let goi = b * self.out_channels * self.l_out + go_index;
+                                        let ini = b * self.in_channels * l_in + in_index;
+                                        acc += input_data_all[ini] * go_data[goi];
+                                    }
+                                }
+                            }
+                            // gw layout: [in_channels, out_pg, K].
+                            gw[(in_c * out_pg + co) * k + tk] += acc;
+                        }
+                    }
+                }
+            }
+        }
+
+        let grad_input = match gi_all {
+            Some(gi) => Some(Tensor::from_storage(
+                TensorStorage::cpu(gi),
+                self.input.shape().to_vec(),
                 false,
-            )?)
-        } else {
-            None
+            )?),
+            None => None,
+        };
+        let grad_weight = match gw_all {
+            Some(gw) => Some(Tensor::from_storage(
+                TensorStorage::cpu(gw),
+                vec![self.in_channels, out_pg, k],
+                false,
+            )?),
+            None => None,
         };
 
         // --- grad_bias ---
@@ -4783,9 +5028,10 @@ impl<T: Float> GradFn<T> for ConvTranspose1dBackward<T> {
 /// (and analogously for H and W).
 #[derive(Debug)]
 pub struct ConvTranspose3d<T: Float> {
-    /// Learnable kernel weights `[in_channels, out_channels, kD, kH, kW]`.
+    /// Learnable kernel weights `[in_channels, out_channels / groups, kD, kH, kW]`.
     ///
-    /// Note: the channel ordering is transposed compared to `Conv3d`.
+    /// Note: the channel ordering is transposed compared to `Conv3d`
+    /// (`in_channels` first), per `torch/nn/modules/conv.py:161-167`.
     weight: Parameter<T>,
     /// Optional learnable bias `[out_channels]`.
     bias: Option<Parameter<T>>,
@@ -4801,16 +5047,27 @@ pub struct ConvTranspose3d<T: Float> {
     padding: (usize, usize, usize),
     /// Additional size added to one side of the output `(opD, opH, opW)`.
     output_padding: (usize, usize, usize),
+    /// Dilation `(dilD, dilH, dilW)`. `(1, 1, 1)` is the dense default
+    /// (`dilation` arg of `F.conv_transpose3d`).
+    dilation: (usize, usize, usize),
+    /// Number of blocked input/output channel groups. `1` is dense. Must divide
+    /// both `in_channels` and `out_channels`. Transposed weight
+    /// `[in_channels, out_channels / groups, kD, kH, kW]`; per-group partition
+    /// mirrors `aten/src/ATen/native/Convolution.cpp:1723-1729`.
+    groups: usize,
     /// Whether the module is in training mode.
     training: bool,
 }
 
 impl<T: Float> ConvTranspose3d<T> {
-    /// Create a new `ConvTranspose3d` layer.
+    /// Create a new `ConvTranspose3d` layer (dense, dilation `(1, 1, 1)`,
+    /// `groups = 1`).
     ///
     /// Weight is initialized with Kaiming uniform (ReLU gain).
     /// Bias, if enabled, is initialized U(-bound, bound) with
     /// `bound = 1/sqrt(fan_in)` per `torch/nn/modules/conv.py:198-201`.
+    ///
+    /// Thin shim over [`ConvTranspose3d::new_full`].
     pub fn new(
         in_channels: usize,
         out_channels: usize,
@@ -4818,6 +5075,38 @@ impl<T: Float> ConvTranspose3d<T> {
         stride: (usize, usize, usize),
         padding: (usize, usize, usize),
         output_padding: (usize, usize, usize),
+        bias: bool,
+    ) -> FerrotorchResult<Self> {
+        Self::new_full(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding,
+            output_padding,
+            (1, 1, 1),
+            1,
+            bias,
+        )
+    }
+
+    /// Create a new `ConvTranspose3d` with the full PyTorch-shaped argument set,
+    /// including `dilation` and `groups`.
+    ///
+    /// Mirrors `torch.nn.ConvTranspose3d.__init__` (`torch/nn/modules/conv.py:
+    /// 1325-1356`). `groups` must divide BOTH `in_channels` and `out_channels`
+    /// (`conv.py:105-110`). Transposed weight layout `[in_channels,
+    /// out_channels / groups, kD, kH, kW]` (`conv.py:161-167`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_full(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: (usize, usize, usize),
+        stride: (usize, usize, usize),
+        padding: (usize, usize, usize),
+        output_padding: (usize, usize, usize),
+        dilation: (usize, usize, usize),
+        groups: usize,
         bias: bool,
     ) -> FerrotorchResult<Self> {
         if in_channels == 0 || out_channels == 0 {
@@ -4835,26 +5124,52 @@ impl<T: Float> ConvTranspose3d<T> {
                 message: "stride must be > 0 in all dimensions".into(),
             });
         }
-        if output_padding.0 >= stride.0
-            || output_padding.1 >= stride.1
-            || output_padding.2 >= stride.2
+        if dilation.0 == 0 || dilation.1 == 0 || dilation.2 == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "dilation must be > 0 in all dimensions".into(),
+            });
+        }
+        if groups == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "groups must be a positive integer".into(),
+            });
+        }
+        if in_channels % groups != 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "in_channels ({in_channels}) must be divisible by groups ({groups})"
+                ),
+            });
+        }
+        if out_channels % groups != 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "out_channels ({out_channels}) must be divisible by groups ({groups})"
+                ),
+            });
+        }
+        if output_padding.0 >= stride.0.max(dilation.0)
+            || output_padding.1 >= stride.1.max(dilation.1)
+            || output_padding.2 >= stride.2.max(dilation.2)
         {
             return Err(FerrotorchError::InvalidArgument {
-                message: "output_padding must be strictly less than stride in all dimensions"
-                    .into(),
+                message:
+                    "output_padding must be strictly less than max(stride, dilation) in all dimensions"
+                        .into(),
             });
         }
 
-        // Weight shape: [in_channels, out_channels, kD, kH, kW] (transposed layout).
+        // Weight shape: [in_channels, out_channels / groups, kD, kH, kW] (transposed layout).
         let (kd, kh, kw) = kernel_size;
-        let mut weight = Parameter::zeros(&[in_channels, out_channels, kd, kh, kw])?;
+        let out_per_group = out_channels / groups;
+        let mut weight = Parameter::zeros(&[in_channels, out_per_group, kd, kh, kw])?;
         kaiming_uniform(&mut weight, NonLinearity::ReLU)?;
 
         let bias_param = if bias {
             let mut b = Parameter::zeros(&[out_channels])?;
             // `torch/nn/modules/conv.py:198-201`: bias U(-bound, bound) with
-            //   `bound = 1 / sqrt(fan_in)`. ConvTranspose3d: fan_in = out_channels * kD*kH*kW.
-            let fan_in = out_channels * kd * kh * kw;
+            //   `bound = 1 / sqrt(fan_in)`, fan_in = (out/groups) * kD*kH*kW.
+            let fan_in = out_per_group * kd * kh * kw;
             let bound = if fan_in > 0 {
                 1.0 / (fan_in as f64).sqrt()
             } else {
@@ -4875,6 +5190,8 @@ impl<T: Float> ConvTranspose3d<T> {
             stride,
             padding,
             output_padding,
+            dilation,
+            groups,
             training: true,
         })
     }
@@ -4961,6 +5278,10 @@ impl<T: Float> ConvTranspose3d<T> {
             stride,
             padding,
             output_padding,
+            // Dense-only (groups=1, dilation=1) ABI policy, mirroring
+            // `Conv3d::from_parts`. Grouped/dilated go via `new_full`.
+            dilation: (1, 1, 1),
+            groups: 1,
             training: true,
         })
     }
@@ -5055,10 +5376,139 @@ fn flip_kernel_3d<T: Float>(
     flipped
 }
 
+/// Single-group transposed 3-D convolution forward (the `groups == 1` core).
+///
+/// Operates on a channel-sliced input slab `[B, in_pg, D, H, W]` and a weight
+/// slab `[in_pg, out_pg, kD, kH, kW]` (the transposed grouped layout,
+/// `torch/nn/modules/conv.py:164`), returning `[B, out_pg, d_out, h_out,
+/// w_out]`. Generalises the dense (#1560) algorithm for `dilation` via
+/// `im2col_3d_dilated` (`internal_pad = dilation*(k-1) - padding`).
+// Internal kernel: the argument set mirrors the 3-D transposed-conv descriptor;
+// a config struct would force allocation in the per-group hot loop.
+#[allow(clippy::too_many_arguments)]
+fn conv_transpose3d_forward_group<T: Float>(
+    input_data: &[T],
+    batch: usize,
+    in_pg: usize,
+    out_pg: usize,
+    d: usize,
+    h: usize,
+    w: usize,
+    kernel_size: (usize, usize, usize),
+    stride: (usize, usize, usize),
+    padding: (usize, usize, usize),
+    output_padding: (usize, usize, usize),
+    dilation: (usize, usize, usize),
+    group_weight: &[T],
+) -> FerrotorchResult<(Vec<T>, usize, usize, usize)> {
+    let (kd, kh, kw) = kernel_size;
+    let (sd, sh, sw) = stride;
+    let (pd, ph, pw) = padding;
+    let (opd, oph, opw) = output_padding;
+    let (dd, dh, dw) = dilation;
+
+    // Step 1: stride-insert zeros, then append the `output_padding` boundary.
+    let (upsampled, d_up_core, h_up_core, w_up_core) =
+        stride_insert_zeros_3d(input_data, batch, in_pg, d, h, w, sd, sh, sw);
+    let d_up = d_up_core + opd;
+    let h_up = h_up_core + oph;
+    let w_up = w_up_core + opw;
+    let upsampled = if opd > 0 || oph > 0 || opw > 0 {
+        let zero = <T as num_traits::Zero>::zero();
+        let mut ext = vec![zero; batch * in_pg * d_up * h_up * w_up];
+        for b in 0..batch {
+            for c in 0..in_pg {
+                for id in 0..d_up_core {
+                    for ih in 0..h_up_core {
+                        let src = (((b * in_pg + c) * d_up_core + id) * h_up_core + ih) * w_up_core;
+                        let dst = (((b * in_pg + c) * d_up + id) * h_up + ih) * w_up;
+                        ext[dst..dst + w_up_core].copy_from_slice(&upsampled[src..src + w_up_core]);
+                    }
+                }
+            }
+        }
+        ext
+    } else {
+        upsampled
+    };
+
+    // Step 2: flip the kernel and transpose channel dimensions.
+    let flipped = flip_kernel_3d(group_weight, in_pg, out_pg, kd, kh, kw);
+
+    // Step 3: dilation-spaced stride-1 internal convolution. `internal_pad =
+    // dilation*(k-1) - padding`, `eff_k = dilation*(k-1)+1`.
+    let eff_kd = dd * (kd - 1) + 1;
+    let eff_kh = dh * (kh - 1) + 1;
+    let eff_kw = dw * (kw - 1) + 1;
+    let internal_pad_d = eff_kd - 1 - pd;
+    let internal_pad_h = eff_kh - 1 - ph;
+    let internal_pad_w = eff_kw - 1 - pw;
+
+    let (cols, col_rows, col_cols) = im2col_3d_dilated(
+        &upsampled,
+        batch,
+        in_pg,
+        d_up,
+        h_up,
+        w_up,
+        kd,
+        kh,
+        kw,
+        1,
+        1,
+        1,
+        internal_pad_d,
+        internal_pad_h,
+        internal_pad_w,
+        dd,
+        dh,
+        dw,
+    );
+
+    let d_out = (d_up + 2 * internal_pad_d - eff_kd) + 1;
+    let h_out = (h_up + 2 * internal_pad_h - eff_kh) + 1;
+    let w_out = (w_up + 2 * internal_pad_w - eff_kw) + 1;
+    let spatial_out = d_out * h_out * w_out;
+
+    let flipped_2d =
+        Tensor::from_storage(TensorStorage::cpu(flipped), vec![out_pg, col_rows], false)?;
+
+    let zero = <T as num_traits::Zero>::zero();
+    let mut output = vec![zero; batch * out_pg * spatial_out];
+
+    for b in 0..batch {
+        let col_start = b * col_rows * col_cols;
+        let col_end = col_start + col_rows * col_cols;
+        let cols_b = Tensor::from_storage(
+            TensorStorage::cpu(cols[col_start..col_end].to_vec()),
+            vec![col_rows, col_cols],
+            false,
+        )?;
+        let out_b = mm(&flipped_2d, &cols_b)?;
+        let out_data = out_b.data()?;
+        let out_start = b * out_pg * spatial_out;
+        let copy_len = out_pg * spatial_out;
+        output[out_start..out_start + copy_len].copy_from_slice(&out_data[..copy_len]);
+    }
+
+    Ok((output, d_out, h_out, w_out))
+}
+
 impl<T: Float> Module<T> for ConvTranspose3d<T> {
     fn forward(&self, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         // Record autocast decision for conv_transpose3d.
         let _autocast_cat = autocast_guard("conv_transpose3d");
+
+        // Unbatched input: `(C, D, H, W)` (rank 4) is accepted in addition to
+        // the batched `(N, C, D, H, W)` (rank 5) form. Mirrors `batchify` at
+        // `aten/src/ATen/native/Convolution.cpp:1216` (conv_transpose3d):
+        // `unsqueeze(0)` -> transposed-conv -> `squeeze(0)`, autograd-aware.
+        // Closes #1609.
+        if input.ndim() == 4 {
+            let batched = unsqueeze(input, 0)?;
+            let output = self.forward(&batched)?;
+            return squeeze(&output, 0);
+        }
 
         // Validate input shape: [B, C_in, D, H, W].
         if input.ndim() != 5 {
@@ -5086,142 +5536,72 @@ impl<T: Float> Module<T> for ConvTranspose3d<T> {
         }
 
         let (kd, kh, kw) = self.kernel_size;
-        let (sd, sh, sw) = self.stride;
-        let (pd, ph, pw) = self.padding;
-        let (opd, oph, opw) = self.output_padding;
+        let groups = self.groups;
+        let in_pg = self.in_channels / groups;
+        let out_pg = self.out_channels / groups;
+        let weight_pg_numel = in_pg * out_pg * kd * kh * kw;
 
         // Save the input device so we can restore it on the output.
         let input_device = input.device();
 
-        // Step 1: Insert zeros between input elements (stride insertion).
         let input_data = input.data_vec()?;
-        let (upsampled, d_up_core, h_up_core, w_up_core) =
-            stride_insert_zeros_3d(&input_data, batch, c_in, d, h, w, sd, sh, sw);
+        let weight_data = self.weight.data_vec()?;
 
-        // `output_padding` extends ONE side (trailing depth/rows/cols) of the
-        // output. Those cells are NOT zero-padding: per upstream `col2im`
-        // (`aten/src/ATen/native/im2col.h:104-146`) the transposed convolution
-        // scatters into an output of size `(in-1)*stride - 2*pad +
-        // dilation*(k-1) + output_padding + 1`
-        // (`NaiveConvolutionTranspose3d.cpp` output-size formula), so the
-        // trailing `output_padding` planes/rows/cols DO receive kernel-tap
-        // contributions. Append `opd`/`oph`/`opw` zero planes/rows/cols to the
-        // (stride-inserted) upsampled signal so the internal stride-1
-        // convolution emits all output cells directly, rather than leaving the
-        // boundary at 0 (the #1560 divergence). Closes #1560.
-        let d_up = d_up_core + opd;
-        let h_up = h_up_core + oph;
-        let w_up = w_up_core + opw;
-        let upsampled = if opd > 0 || oph > 0 || opw > 0 {
-            let zero = <T as num_traits::Zero>::zero();
-            let mut ext = vec![zero; batch * c_in * d_up * h_up * w_up];
+        // Per-group transposed convolution (Convolution.cpp:1723-1729).
+        let zero = <T as num_traits::Zero>::zero();
+        let mut output: Vec<T> = Vec::new();
+        let (mut d_out, mut h_out, mut w_out) = (0usize, 0usize, 0usize);
+        let spatial_in = d * h * w;
+
+        for g in 0..groups {
+            let mut group_input = vec![zero; batch * in_pg * spatial_in];
             for b in 0..batch {
-                for c in 0..c_in {
-                    for id in 0..d_up_core {
-                        for ih in 0..h_up_core {
-                            let src =
-                                (((b * c_in + c) * d_up_core + id) * h_up_core + ih) * w_up_core;
-                            let dst = (((b * c_in + c) * d_up + id) * h_up + ih) * w_up;
-                            ext[dst..dst + w_up_core]
-                                .copy_from_slice(&upsampled[src..src + w_up_core]);
-                        }
-                    }
+                for c in 0..in_pg {
+                    let src_c = g * in_pg + c;
+                    let src = (b * self.in_channels + src_c) * spatial_in;
+                    let dst = (b * in_pg + c) * spatial_in;
+                    group_input[dst..dst + spatial_in]
+                        .copy_from_slice(&input_data[src..src + spatial_in]);
                 }
             }
-            ext
-        } else {
-            upsampled
-        };
 
-        // Step 2: Flip the kernel and transpose channel dimensions.
-        let weight_data = self.weight.data_vec()?;
-        let flipped = flip_kernel_3d(
-            &weight_data,
-            self.in_channels,
-            self.out_channels,
-            kd,
-            kh,
-            kw,
-        );
+            let w_start = g * weight_pg_numel;
+            let group_weight = &weight_data[w_start..w_start + weight_pg_numel];
 
-        // Step 3: Apply a regular 3-D convolution on the upsampled input using the
-        // flipped kernel. The "padding" for this internal convolution is
-        // `kernel_size - 1 - padding` to achieve the correct output size.
-        let internal_pad_d = kd - 1 - pd;
-        let internal_pad_h = kh - 1 - ph;
-        let internal_pad_w = kw - 1 - pw;
-
-        // im2col_3d on the upsampled input with stride=1.
-        let (cols, col_rows, col_cols) = im2col_3d(
-            &upsampled,
-            batch,
-            c_in,
-            d_up,
-            h_up,
-            w_up,
-            kd,
-            kh,
-            kw,
-            1,
-            1,
-            1,
-            internal_pad_d,
-            internal_pad_h,
-            internal_pad_w,
-        );
-
-        // The internal stride-1 convolution over the `output_padding`-extended
-        // upsampled signal now emits all output cells.
-        let d_out = (d_up + 2 * internal_pad_d - kd) + 1;
-        let h_out = (h_up + 2 * internal_pad_h - kh) + 1;
-        let w_out = (w_up + 2 * internal_pad_w - kw) + 1;
-        debug_assert_eq!(d_out, (d_up_core + 2 * internal_pad_d - kd) + 1 + opd);
-        debug_assert_eq!(h_out, (h_up_core + 2 * internal_pad_h - kh) + 1 + oph);
-        debug_assert_eq!(w_out, (w_up_core + 2 * internal_pad_w - kw) + 1 + opw);
-
-        // Reshape flipped kernel to 2-D: [C_out, C_in * kD * kH * kW]
-        let flipped_2d = Tensor::from_storage(
-            TensorStorage::cpu(flipped),
-            vec![self.out_channels, col_rows],
-            false,
-        )?;
-
-        // Per-batch matmul.
-        let zero = <T as num_traits::Zero>::zero();
-        let spatial_out = d_out * h_out * w_out;
-        let mut output = vec![zero; batch * self.out_channels * spatial_out];
-
-        for b in 0..batch {
-            let col_start = b * col_rows * col_cols;
-            let col_end = col_start + col_rows * col_cols;
-            let cols_b = Tensor::from_storage(
-                TensorStorage::cpu(cols[col_start..col_end].to_vec()),
-                vec![col_rows, col_cols],
-                false,
+            let (g_out, gdo, gho, gwo) = conv_transpose3d_forward_group(
+                &group_input,
+                batch,
+                in_pg,
+                out_pg,
+                d,
+                h,
+                w,
+                self.kernel_size,
+                self.stride,
+                self.padding,
+                self.output_padding,
+                self.dilation,
+                group_weight,
             )?;
+            d_out = gdo;
+            h_out = gho;
+            w_out = gwo;
+            let spatial_out = d_out * h_out * w_out;
 
-            let out_b = mm(&flipped_2d, &cols_b)?;
-            let out_data = out_b.data()?;
-
-            // Copy the full convolution result. The internal conv now emits all
-            // output cells (including the `output_padding` boundary), so no cell
-            // is left at 0 (the #1560 fix). `col_cols == spatial_out` here.
-            let out_start = b * self.out_channels * spatial_out;
-            for c in 0..self.out_channels {
-                for od in 0..d_out {
-                    for oh in 0..h_out {
-                        for ow in 0..w_out {
-                            output[out_start
-                                + c * spatial_out
-                                + od * h_out * w_out
-                                + oh * w_out
-                                + ow] =
-                                out_data[c * spatial_out + od * h_out * w_out + oh * w_out + ow];
-                        }
-                    }
+            if output.is_empty() {
+                output = vec![zero; batch * self.out_channels * spatial_out];
+            }
+            for b in 0..batch {
+                for oc in 0..out_pg {
+                    let dst_c = g * out_pg + oc;
+                    let dst = (b * self.out_channels + dst_c) * spatial_out;
+                    let src = (b * out_pg + oc) * spatial_out;
+                    output[dst..dst + spatial_out].copy_from_slice(&g_out[src..src + spatial_out]);
                 }
             }
         }
+
+        let spatial_out = d_out * h_out * w_out;
 
         // Add bias if present.
         if let Some(ref bias) = self.bias {
@@ -5258,6 +5638,8 @@ impl<T: Float> Module<T> for ConvTranspose3d<T> {
                 stride: self.stride,
                 padding: self.padding,
                 _output_padding: self.output_padding,
+                dilation: self.dilation,
+                groups: self.groups,
                 d_out,
                 h_out,
                 w_out,
@@ -5328,6 +5710,8 @@ struct ConvTranspose3dBackward<T: Float> {
     stride: (usize, usize, usize),
     padding: (usize, usize, usize),
     _output_padding: (usize, usize, usize),
+    dilation: (usize, usize, usize),
+    groups: usize,
     d_out: usize,
     h_out: usize,
     w_out: usize,
@@ -5344,93 +5728,93 @@ impl<T: Float> GradFn<T> for ConvTranspose3dBackward<T> {
         let (kd, kh, kw) = self.kernel_size;
         let (sd, sh, sw) = self.stride;
         let (pd, ph, pw) = self.padding;
+        let (dd_, dh_, dw_) = self.dilation;
+        let groups = self.groups;
+        let in_pg = self.in_channels / groups;
+        let out_pg = self.out_channels / groups;
         let spatial_out = self.d_out * self.h_out * self.w_out;
+        let spatial_in = d_in * h_in * w_in;
+        let zero = <T as num_traits::Zero>::zero();
 
-        // --- grad_input ---
-        // The backward of ConvTranspose3d w.r.t. input is a regular Conv3d
-        // of grad_output with the original (non-flipped) weight.
-        let grad_input = if self.input.requires_grad() {
-            let weight_data = self.weight.data_vec()?;
-            let col_rows = self.out_channels * kd * kh * kw;
+        let weight_data_all = self.weight.data_vec()?;
+        let input_data_all = self.input.data_vec()?;
 
-            // Reshape weight to [C_in, C_out * kD * kH * kW]
-            let weight_2d = Tensor::from_storage(
-                TensorStorage::cpu(weight_data),
-                vec![self.in_channels, col_rows],
-                false,
-            )?;
-
-            // im2col_3d on grad_output with the conv parameters
-            let (go_cols, _go_col_rows, go_col_cols) = im2col_3d(
-                &go_data,
-                batch,
-                self.out_channels,
-                self.d_out,
-                self.h_out,
-                self.w_out,
-                kd,
-                kh,
-                kw,
-                sd,
-                sh,
-                sw,
-                pd,
-                ph,
-                pw,
-            );
-
-            let zero = <T as num_traits::Zero>::zero();
-            let spatial_in = d_in * h_in * w_in;
-            let mut gi = vec![zero; batch * self.in_channels * spatial_in];
-
-            for b in 0..batch {
-                let col_start = b * col_rows * go_col_cols;
-                let col_end = col_start + col_rows * go_col_cols;
-                let go_cols_b = Tensor::from_storage(
-                    TensorStorage::cpu(go_cols[col_start..col_end].to_vec()),
-                    vec![col_rows, go_col_cols],
-                    false,
-                )?;
-
-                let gi_b = mm(&weight_2d, &go_cols_b)?;
-                let gi_data = gi_b.data()?;
-
-                let out_start = b * self.in_channels * spatial_in;
-                let copy_len = self.in_channels * spatial_in;
-                gi[out_start..out_start + copy_len].copy_from_slice(&gi_data[..copy_len]);
-            }
-
-            Some(Tensor::from_storage(
-                TensorStorage::cpu(gi),
-                self.input.shape().to_vec(),
-                false,
-            )?)
+        let mut gi_all = if self.input.requires_grad() {
+            Some(vec![zero; batch * self.in_channels * spatial_in])
+        } else {
+            None
+        };
+        let mut gw_all = if self.weight.requires_grad() {
+            Some(vec![zero; self.in_channels * out_pg * kd * kh * kw])
         } else {
             None
         };
 
-        // --- grad_weight ---
-        // grad_weight[c_in, c_out, kd, kh, kw] = sum_b input_b (x) grad_output_b
-        let grad_weight = if self.weight.requires_grad() {
-            let zero = <T as num_traits::Zero>::zero();
-            let weight_numel = self.in_channels * self.out_channels * kd * kh * kw;
-            let mut gw = vec![zero; weight_numel];
-            let input_data = self.input.data_vec()?;
-            let spatial_in = d_in * h_in * w_in;
+        for g in 0..groups {
+            // --- grad_input (group g) ---
+            if let Some(gi) = gi_all.as_mut() {
+                let col_rows = out_pg * kd * kh * kw;
+                let w_start = g * in_pg * out_pg * kd * kh * kw;
+                let weight_2d = Tensor::from_storage(
+                    TensorStorage::cpu(
+                        weight_data_all[w_start..w_start + in_pg * out_pg * kd * kh * kw].to_vec(),
+                    ),
+                    vec![in_pg, col_rows],
+                    false,
+                )?;
 
-            for b in 0..batch {
-                for ci in 0..self.in_channels {
-                    for co in 0..self.out_channels {
-                        for dd in 0..kd {
-                            for dh in 0..kh {
-                                for dw in 0..kw {
+                let mut go_g = vec![zero; batch * out_pg * spatial_out];
+                for b in 0..batch {
+                    for c in 0..out_pg {
+                        let src_c = g * out_pg + c;
+                        let src = (b * self.out_channels + src_c) * spatial_out;
+                        let dst = (b * out_pg + c) * spatial_out;
+                        go_g[dst..dst + spatial_out]
+                            .copy_from_slice(&go_data[src..src + spatial_out]);
+                    }
+                }
+
+                let (go_cols, _gcr, go_col_cols) = im2col_3d_dilated(
+                    &go_g, batch, out_pg, self.d_out, self.h_out, self.w_out, kd, kh, kw, sd, sh,
+                    sw, pd, ph, pw, dd_, dh_, dw_,
+                );
+                debug_assert_eq!(go_col_cols, spatial_in);
+
+                for b in 0..batch {
+                    let col_start = b * col_rows * go_col_cols;
+                    let col_end = col_start + col_rows * go_col_cols;
+                    let go_cols_b = Tensor::from_storage(
+                        TensorStorage::cpu(go_cols[col_start..col_end].to_vec()),
+                        vec![col_rows, go_col_cols],
+                        false,
+                    )?;
+                    let gi_b = mm(&weight_2d, &go_cols_b)?;
+                    let gi_data = gi_b.data()?;
+                    for c in 0..in_pg {
+                        let dst_c = g * in_pg + c;
+                        let dst = (b * self.in_channels + dst_c) * spatial_in;
+                        let src = c * spatial_in;
+                        gi[dst..dst + spatial_in].copy_from_slice(&gi_data[src..src + spatial_in]);
+                    }
+                }
+            }
+
+            // --- grad_weight (group g) ---
+            if let Some(gw) = gw_all.as_mut() {
+                for ci in 0..in_pg {
+                    let in_c = g * in_pg + ci;
+                    for co in 0..out_pg {
+                        let out_c = g * out_pg + co;
+                        for tkd in 0..kd {
+                            for tkh in 0..kh {
+                                for tkw in 0..kw {
                                     let mut acc = zero;
                                     for id in 0..d_in {
                                         for ih in 0..h_in {
                                             for iw in 0..w_in {
-                                                let od = id * sd + dd;
-                                                let oh = ih * sh + dh;
-                                                let ow = iw * sw + dw;
+                                                let od = id * sd + tkd * dd_;
+                                                let oh = ih * sh + tkh * dh_;
+                                                let ow = iw * sw + tkw * dw_;
                                                 if od >= pd
                                                     && oh >= ph
                                                     && ow >= pw
@@ -5438,41 +5822,52 @@ impl<T: Float> GradFn<T> for ConvTranspose3dBackward<T> {
                                                     && (oh - ph) < self.h_out
                                                     && (ow - pw) < self.w_out
                                                 {
-                                                    let go_idx =
-                                                        b * self.out_channels * spatial_out
-                                                            + co * spatial_out
-                                                            + (od - pd) * self.h_out * self.w_out
-                                                            + (oh - ph) * self.w_out
-                                                            + (ow - pw);
-                                                    let in_idx = b * self.in_channels * spatial_in
-                                                        + ci * spatial_in
+                                                    let go_index = out_c * spatial_out
+                                                        + (od - pd) * self.h_out * self.w_out
+                                                        + (oh - ph) * self.w_out
+                                                        + (ow - pw);
+                                                    let in_index = in_c * spatial_in
                                                         + id * h_in * w_in
                                                         + ih * w_in
                                                         + iw;
-                                                    acc += input_data[in_idx] * go_data[go_idx];
+                                                    for b in 0..batch {
+                                                        let goi =
+                                                            b * self.out_channels * spatial_out
+                                                                + go_index;
+                                                        let ini = b * self.in_channels * spatial_in
+                                                            + in_index;
+                                                        acc += input_data_all[ini] * go_data[goi];
+                                                    }
                                                 }
                                             }
                                         }
                                     }
-                                    gw[ci * self.out_channels * kd * kh * kw
-                                        + co * kd * kh * kw
-                                        + dd * kh * kw
-                                        + dh * kw
-                                        + dw] += acc;
+                                    // gw layout: [in_channels, out_pg, kD, kH, kW].
+                                    gw[((((in_c * out_pg + co) * kd + tkd) * kh + tkh) * kw)
+                                        + tkw] += acc;
                                 }
                             }
                         }
                     }
                 }
             }
+        }
 
-            Some(Tensor::from_storage(
-                TensorStorage::cpu(gw),
-                vec![self.in_channels, self.out_channels, kd, kh, kw],
+        let grad_input = match gi_all {
+            Some(gi) => Some(Tensor::from_storage(
+                TensorStorage::cpu(gi),
+                self.input.shape().to_vec(),
                 false,
-            )?)
-        } else {
-            None
+            )?),
+            None => None,
+        };
+        let grad_weight = match gw_all {
+            Some(gw) => Some(Tensor::from_storage(
+                TensorStorage::cpu(gw),
+                vec![self.in_channels, out_pg, kd, kh, kw],
+                false,
+            )?),
+            None => None,
         };
 
         // --- grad_bias ---
@@ -6273,6 +6668,8 @@ mod tests {
             stride: (1, 1),
             padding: (0, 0),
             output_padding: (0, 0),
+            dilation: (1, 1),
+            groups: 1,
             training: false,
         };
 
@@ -6348,6 +6745,8 @@ mod tests {
             stride: (2, 2),
             padding: (0, 0),
             output_padding: (0, 0),
+            dilation: (1, 1),
+            groups: 1,
             training: false,
         };
 
@@ -6382,6 +6781,8 @@ mod tests {
             stride: (1, 1),
             padding: (0, 0),
             output_padding: (0, 0),
+            dilation: (1, 1),
+            groups: 1,
             training: false,
         };
 
@@ -6398,7 +6799,10 @@ mod tests {
     fn test_conv_transpose2d_invalid_ndim() {
         let conv =
             ConvTranspose2d::<f32>::new(1, 1, (3, 3), (1, 1), (0, 0), (0, 0), false).unwrap();
-        let input = t(&[1.0, 2.0, 3.0], &[1, 1, 3]);
+        // Rank 3 `(C, H, W)` is now a VALID unbatched input (#1609); rank 2 is
+        // not a recognised ConvTranspose2d input shape (neither batched rank 4
+        // nor unbatched rank 3), so it must error.
+        let input = t(&[1.0, 2.0, 3.0], &[1, 3]);
         assert!(conv.forward(&input).is_err());
     }
 
@@ -6719,6 +7123,8 @@ mod tests {
             stride: 1,
             padding: 0,
             output_padding: 0,
+            dilation: 1,
+            groups: 1,
             training: false,
         };
 
@@ -6765,6 +7171,8 @@ mod tests {
             stride: 2,
             padding: 0,
             output_padding: 0,
+            dilation: 1,
+            groups: 1,
             training: false,
         };
 
@@ -6789,6 +7197,8 @@ mod tests {
             stride: 1,
             padding: 0,
             output_padding: 0,
+            dilation: 1,
+            groups: 1,
             training: false,
         };
 
@@ -6815,6 +7225,8 @@ mod tests {
             stride: 1,
             padding: 0,
             output_padding: 0,
+            dilation: 1,
+            groups: 1,
             training: false,
         };
 
@@ -6965,6 +7377,8 @@ mod tests {
             stride: (1, 1, 1),
             padding: (0, 0, 0),
             output_padding: (0, 0, 0),
+            dilation: (1, 1, 1),
+            groups: 1,
             training: false,
         };
 
@@ -6989,6 +7403,8 @@ mod tests {
             stride: (1, 1, 1),
             padding: (0, 0, 0),
             output_padding: (0, 0, 0),
+            dilation: (1, 1, 1),
+            groups: 1,
             training: false,
         };
 
@@ -7015,6 +7431,8 @@ mod tests {
             stride: (1, 1, 1),
             padding: (0, 0, 0),
             output_padding: (0, 0, 0),
+            dilation: (1, 1, 1),
+            groups: 1,
             training: false,
         };
 
@@ -7045,7 +7463,9 @@ mod tests {
         let conv =
             ConvTranspose3d::<f32>::new(1, 1, (3, 3, 3), (1, 1, 1), (0, 0, 0), (0, 0, 0), false)
                 .unwrap();
-        let input = t(&[0.0; 25], &[1, 1, 5, 5]);
+        // Rank 4 `(C, D, H, W)` is now a VALID unbatched input (#1609); rank 3
+        // is neither batched (rank 5) nor unbatched (rank 4), so it must error.
+        let input = t(&[0.0; 25], &[1, 5, 5]);
         assert!(conv.forward(&input).is_err());
     }
 
@@ -7086,6 +7506,774 @@ mod tests {
         // weight: 8 * 16 * 3 * 3 * 3 = 3456, bias: 16, total: 3472
         assert_eq!(conv.num_parameters(), 3472);
         assert_eq!(conv.parameters().len(), 2);
+    }
+
+    // =======================================================================
+    // ConvTranspose groups (#1607) + dilation (#1608) + unbatched (#1609)
+    //
+    // All expected values are derived from a LIVE PyTorch 2.11.0 oracle
+    // (R-CHAR-3): `torch.nn.functional.conv_transpose{1,2,3}d(...)` forward
+    // outputs and `x.grad` / `w.grad` / `b.grad` after `y.sum().backward()`
+    // (grad_output = ones), with the exact deterministic weights/inputs
+    // reproduced below. The transposed weight layout is `[in, out/groups, *k]`
+    // (`torch/nn/modules/conv.py:164`); grad_weight comes back in that same
+    // `[in, out/groups, *k]` layout (verified against the oracle). The per-group
+    // partition mirrors `aten/src/ATen/native/Convolution.cpp:1723-1729`. No
+    // tautological self-reference. Oracle script lives in the commit body.
+    // =======================================================================
+
+    /// Build a grouped/dilated ConvTranspose1d through the production
+    /// `new_full` constructor, overwriting weight/bias with caller-supplied
+    /// deterministic tensors. Weight must be `[in, out/groups, k]`.
+    #[allow(clippy::too_many_arguments)]
+    fn ct1d_full_fixed(
+        in_c: usize,
+        out_c: usize,
+        k: usize,
+        stride: usize,
+        padding: usize,
+        output_padding: usize,
+        dilation: usize,
+        groups: usize,
+        weight: &[f32],
+        bias: Option<&[f32]>,
+    ) -> ConvTranspose1d<f32> {
+        let mut ct = ConvTranspose1d::<f32>::new_full(
+            in_c,
+            out_c,
+            k,
+            stride,
+            padding,
+            output_padding,
+            dilation,
+            groups,
+            bias.is_some(),
+        )
+        .unwrap();
+        ct.weight = Parameter::from_slice(weight, &[in_c, out_c / groups, k]).unwrap();
+        if let Some(bvals) = bias {
+            ct.bias = Some(Parameter::from_slice(bvals, &[out_c]).unwrap());
+        }
+        ct
+    }
+
+    /// Grouped ConvTranspose1d, groups=2. Forward + grad_x/grad_w/grad_b match
+    /// the live torch 2.11 oracle. in=4 out=4 k=2 groups=2.
+    #[test]
+    fn test_conv_transpose1d_groups2_matches_torch() {
+        let weight: Vec<f32> = (1..=16).map(|i| i as f32 * 0.1).collect(); // [4,2,2]
+        let bias = [0.5f32, -0.5, 0.25, -0.25];
+        let ct = ct1d_full_fixed(4, 4, 2, 1, 0, 0, 1, 2, &weight, Some(&bias));
+        let x = leaf(&(1..=20).map(|i| i as f32).collect::<Vec<_>>(), &[1, 4, 5]);
+        let y = ct.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 4, 6]);
+        assert_close(
+            y.data().unwrap(),
+            &[
+                3.6, 8.0, 9.4, 10.8, 12.2, 7.5, 4.0, 10.2, 12.4, 14.6, 16.8, 9.5, 30.95, 66.55,
+                71.15, 75.75, 80.35, 43.25, 35.85, 77.25, 82.65, 88.05, 93.45, 49.75,
+            ],
+            1e-3,
+        );
+        let grads = ct
+            .forward(&x)
+            .unwrap()
+            .grad_fn()
+            .unwrap()
+            .backward(&t(&[1.0f32; 24], &[1, 4, 6]))
+            .unwrap();
+        assert_close(
+            grads[0].as_ref().unwrap().data().unwrap(),
+            &[
+                1.0, 1.0, 1.0, 1.0, 1.0, 2.6, 2.6, 2.6, 2.6, 2.6, 4.2, 4.2, 4.2, 4.2, 4.2, 5.8,
+                5.8, 5.8, 5.8, 5.8,
+            ],
+            1e-4,
+        );
+        assert_eq!(grads[1].as_ref().unwrap().shape(), &[4, 2, 2]);
+        assert_close(
+            grads[1].as_ref().unwrap().data().unwrap(),
+            &[
+                15.0, 15.0, 15.0, 15.0, 40.0, 40.0, 40.0, 40.0, 65.0, 65.0, 65.0, 65.0, 90.0, 90.0,
+                90.0, 90.0,
+            ],
+            1e-4,
+        );
+        assert_close(
+            grads[2].as_ref().unwrap().data().unwrap(),
+            &[6.0, 6.0, 6.0, 6.0],
+            1e-4,
+        );
+    }
+
+    /// Depthwise ConvTranspose1d, groups=3, no bias. in=3 out=3 k=2.
+    #[test]
+    fn test_conv_transpose1d_groups3_depthwise_matches_torch() {
+        let weight: Vec<f32> = (1..=6).map(|i| i as f32 * 0.5).collect(); // [3,1,2]
+        let ct = ct1d_full_fixed(3, 3, 2, 1, 0, 0, 1, 3, &weight, None);
+        let x = leaf(&(1..=15).map(|i| i as f32).collect::<Vec<_>>(), &[1, 3, 5]);
+        let y = ct.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 3, 6]);
+        assert_close(
+            y.data().unwrap(),
+            &[
+                0.5, 2.0, 3.5, 5.0, 6.5, 5.0, 9.0, 22.5, 26.0, 29.5, 33.0, 20.0, 27.5, 63.0, 68.5,
+                74.0, 79.5, 45.0,
+            ],
+            1e-3,
+        );
+        let grads = ct
+            .forward(&x)
+            .unwrap()
+            .grad_fn()
+            .unwrap()
+            .backward(&t(&[1.0f32; 18], &[1, 3, 6]))
+            .unwrap();
+        assert_close(
+            grads[0].as_ref().unwrap().data().unwrap(),
+            &[
+                1.5, 1.5, 1.5, 1.5, 1.5, 3.5, 3.5, 3.5, 3.5, 3.5, 5.5, 5.5, 5.5, 5.5, 5.5,
+            ],
+            1e-4,
+        );
+        assert_eq!(grads[1].as_ref().unwrap().shape(), &[3, 1, 2]);
+        assert_close(
+            grads[1].as_ref().unwrap().data().unwrap(),
+            &[15.0, 15.0, 40.0, 40.0, 65.0, 65.0],
+            1e-4,
+        );
+    }
+
+    /// Dilated ConvTranspose1d, dilation=2, groups=1. in=2 out=2 k=3.
+    #[test]
+    fn test_conv_transpose1d_dilation2_matches_torch() {
+        let weight: Vec<f32> = (1..=12).map(|i| i as f32 * 0.1).collect(); // [2,2,3]
+        let bias = [1.0f32, -1.0];
+        let ct = ct1d_full_fixed(2, 2, 3, 1, 0, 0, 2, 1, &weight, Some(&bias));
+        let x = leaf(&(1..=8).map(|i| i as f32).collect::<Vec<_>>(), &[1, 2, 4]);
+        let y = ct.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 2, 8]);
+        assert_close(
+            y.data().unwrap(),
+            &[
+                4.6, 5.4, 10.4, 12.2, 12.0, 14.2, 8.2, 9.4, 4.4, 5.8, 13.2, 16.2, 14.8, 18.2, 9.2,
+                11.0,
+            ],
+            1e-3,
+        );
+        let grads = ct
+            .forward(&x)
+            .unwrap()
+            .grad_fn()
+            .unwrap()
+            .backward(&t(&[1.0f32; 16], &[1, 2, 8]))
+            .unwrap();
+        assert_close(
+            grads[0].as_ref().unwrap().data().unwrap(),
+            &[2.1, 2.1, 2.1, 2.1, 5.7, 5.7, 5.7, 5.7],
+            1e-4,
+        );
+        assert_eq!(grads[1].as_ref().unwrap().shape(), &[2, 2, 3]);
+        assert_close(
+            grads[1].as_ref().unwrap().data().unwrap(),
+            &[
+                10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 26.0, 26.0, 26.0, 26.0, 26.0, 26.0,
+            ],
+            1e-4,
+        );
+        assert_close(
+            grads[2].as_ref().unwrap().data().unwrap(),
+            &[8.0, 8.0],
+            1e-4,
+        );
+    }
+
+    /// ConvTranspose1d combo: groups=2, dilation=2, stride=2, padding=1,
+    /// output_padding=1. in=4 out=2 k=2. Forward + all grads vs torch oracle.
+    #[test]
+    fn test_conv_transpose1d_combo_matches_torch() {
+        let weight: Vec<f32> = (1..=8).map(|i| i as f32 * 0.1).collect(); // [4,1,2]
+        let bias = [0.5f32, -0.5];
+        let ct = ct1d_full_fixed(4, 2, 2, 2, 1, 1, 2, 2, &weight, Some(&bias));
+        let x = leaf(&(1..=12).map(|i| i as f32).collect::<Vec<_>>(), &[1, 4, 3]);
+        let y = ct.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 2, 6]);
+        assert_close(
+            y.data().unwrap(),
+            &[
+                0.5, 4.0, 0.5, 5.0, 0.5, 3.5, -0.5, 23.4, -0.5, 26.0, -0.5, 14.5,
+            ],
+            1e-3,
+        );
+        let grads = ct
+            .forward(&x)
+            .unwrap()
+            .grad_fn()
+            .unwrap()
+            .backward(&t(&[1.0f32; 12], &[1, 2, 6]))
+            .unwrap();
+        assert_close(
+            grads[0].as_ref().unwrap().data().unwrap(),
+            &[0.2, 0.3, 0.3, 0.4, 0.7, 0.7, 0.6, 1.1, 1.1, 0.8, 1.5, 1.5],
+            1e-4,
+        );
+        assert_eq!(grads[1].as_ref().unwrap().shape(), &[4, 1, 2]);
+        assert_close(
+            grads[1].as_ref().unwrap().data().unwrap(),
+            &[5.0, 6.0, 11.0, 15.0, 17.0, 24.0, 23.0, 33.0],
+            1e-4,
+        );
+        assert_close(
+            grads[2].as_ref().unwrap().data().unwrap(),
+            &[6.0, 6.0],
+            1e-4,
+        );
+    }
+
+    /// Unbatched ConvTranspose1d input `(C, L)`. Forward emits rank-2 output;
+    /// backward routes grad to the unbatched shape. Closes #1609.
+    #[test]
+    fn test_conv_transpose1d_unbatched_matches_torch() {
+        let weight: Vec<f32> = (1..=12).map(|i| i as f32 * 0.1).collect(); // [2,3,2]
+        let bias = [0.5f32, -0.5, 0.25];
+        let ct = ct1d_full_fixed(2, 3, 2, 1, 0, 0, 1, 1, &weight, Some(&bias));
+        let x = leaf(&(1..=6).map(|i| i as f32).collect::<Vec<_>>(), &[2, 3]); // (C=2, L=3)
+        let y = ct.forward(&x).unwrap();
+        assert_eq!(
+            y.shape(),
+            &[3, 4],
+            "unbatched output must be rank 2 (C_out, L_out)"
+        );
+        assert_close(
+            y.data().unwrap(),
+            &[
+                3.4, 7.6, 9.4, 5.9, 3.4, 9.0, 11.6, 6.7, 5.15, 12.15, 15.55, 9.25,
+            ],
+            1e-3,
+        );
+        // y.sum().backward() — grad_output is all-ones (matches the torch oracle);
+        // full autograd so the grad flows back through SqueezeBackward to the
+        // unbatched leaf, not just the inner ConvTranspose grad_fn.
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let gx = x.grad().unwrap().expect("input grad must be populated");
+        assert_eq!(gx.shape(), &[2, 3], "grad must match unbatched input shape");
+        assert_close(gx.data().unwrap(), &[2.1, 2.1, 2.1, 5.7, 5.7, 5.7], 1e-4);
+    }
+
+    /// `ConvTranspose1d::new_full` rejects `groups` not dividing channels,
+    /// matching `_ConvNd.__init__` ValueError (`conv.py:105-110`).
+    #[test]
+    fn test_conv_transpose1d_groups_must_divide_channels() {
+        assert!(ConvTranspose1d::<f32>::new_full(3, 4, 2, 1, 0, 0, 1, 2, true).is_err());
+        assert!(ConvTranspose1d::<f32>::new_full(4, 5, 2, 1, 0, 0, 1, 2, true).is_err());
+    }
+
+    // ----- ConvTranspose2d -----
+
+    /// Build a grouped/dilated ConvTranspose2d via `new_full`, overwriting
+    /// weight/bias. Weight must be `[in, out/groups, kH, kW]`.
+    #[allow(clippy::too_many_arguments)]
+    fn ct2d_full_fixed(
+        in_c: usize,
+        out_c: usize,
+        k: (usize, usize),
+        stride: (usize, usize),
+        padding: (usize, usize),
+        output_padding: (usize, usize),
+        dilation: (usize, usize),
+        groups: usize,
+        weight: &[f32],
+        bias: Option<&[f32]>,
+    ) -> ConvTranspose2d<f32> {
+        let mut ct = ConvTranspose2d::<f32>::new_full(
+            in_c,
+            out_c,
+            k,
+            stride,
+            padding,
+            output_padding,
+            dilation,
+            groups,
+            bias.is_some(),
+        )
+        .unwrap();
+        ct.weight = Parameter::from_slice(weight, &[in_c, out_c / groups, k.0, k.1]).unwrap();
+        if let Some(bvals) = bias {
+            ct.bias = Some(Parameter::from_slice(bvals, &[out_c]).unwrap());
+        }
+        ct
+    }
+
+    /// Grouped ConvTranspose2d, groups=2. in=4 out=2 k=(2,2).
+    #[test]
+    fn test_conv_transpose2d_groups2_matches_torch() {
+        let weight: Vec<f32> = (1..=16).map(|i| i as f32 * 0.1).collect(); // [4,1,2,2]
+        let bias = [0.5f32, -0.5];
+        let ct = ct2d_full_fixed(
+            4,
+            2,
+            (2, 2),
+            (1, 1),
+            (0, 0),
+            (0, 0),
+            (1, 1),
+            2,
+            &weight,
+            Some(&bias),
+        );
+        let x = leaf(
+            &(1..=16).map(|i| i as f32).collect::<Vec<_>>(),
+            &[1, 4, 2, 2],
+        );
+        let y = ct.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 2, 3, 3]);
+        assert_close(
+            y.data().unwrap(),
+            &[
+                3.1, 6.9, 4.5, 8.1, 18.9, 11.7, 6.3, 14.1, 8.5, 24.5, 53.9, 29.1, 58.3, 126.7,
+                68.3, 34.1, 73.9, 39.5,
+            ],
+            1e-3,
+        );
+        let grads = ct
+            .forward(&x)
+            .unwrap()
+            .grad_fn()
+            .unwrap()
+            .backward(&t(&[1.0f32; 18], &[1, 2, 3, 3]))
+            .unwrap();
+        assert_close(
+            grads[0].as_ref().unwrap().data().unwrap(),
+            &[
+                1.0, 1.0, 1.0, 1.0, 2.6, 2.6, 2.6, 2.6, 4.2, 4.2, 4.2, 4.2, 5.8, 5.8, 5.8, 5.8,
+            ],
+            1e-4,
+        );
+        assert_eq!(grads[1].as_ref().unwrap().shape(), &[4, 1, 2, 2]);
+        assert_close(
+            grads[1].as_ref().unwrap().data().unwrap(),
+            &[
+                10.0, 10.0, 10.0, 10.0, 26.0, 26.0, 26.0, 26.0, 42.0, 42.0, 42.0, 42.0, 58.0, 58.0,
+                58.0, 58.0,
+            ],
+            1e-4,
+        );
+        assert_close(
+            grads[2].as_ref().unwrap().data().unwrap(),
+            &[9.0, 9.0],
+            1e-4,
+        );
+    }
+
+    /// Dilated ConvTranspose2d, dilation=2, no bias. in=1 out=1 k=(2,2).
+    #[test]
+    fn test_conv_transpose2d_dilation2_matches_torch() {
+        let weight: Vec<f32> = (1..=4).map(|i| i as f32 * 0.1).collect(); // [1,1,2,2]
+        let ct = ct2d_full_fixed(
+            1,
+            1,
+            (2, 2),
+            (1, 1),
+            (0, 0),
+            (0, 0),
+            (2, 2),
+            1,
+            &weight,
+            None,
+        );
+        let x = leaf(
+            &(1..=9).map(|i| i as f32).collect::<Vec<_>>(),
+            &[1, 1, 3, 3],
+        );
+        let y = ct.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 5, 5]);
+        assert_close(
+            y.data().unwrap(),
+            &[
+                0.1, 0.2, 0.5, 0.4, 0.6, 0.4, 0.5, 1.4, 1.0, 1.2, 1.0, 1.4, 3.6, 2.4, 3.0, 1.2,
+                1.5, 3.4, 2.0, 2.4, 2.1, 2.4, 5.5, 3.2, 3.6,
+            ],
+            1e-3,
+        );
+        let grads = ct
+            .forward(&x)
+            .unwrap()
+            .grad_fn()
+            .unwrap()
+            .backward(&t(&[1.0f32; 25], &[1, 1, 5, 5]))
+            .unwrap();
+        assert_close(
+            grads[0].as_ref().unwrap().data().unwrap(),
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            1e-4,
+        );
+        assert_eq!(grads[1].as_ref().unwrap().shape(), &[1, 1, 2, 2]);
+        assert_close(
+            grads[1].as_ref().unwrap().data().unwrap(),
+            &[45.0, 45.0, 45.0, 45.0],
+            1e-4,
+        );
+    }
+
+    /// ConvTranspose2d combo: groups=2, dilation=2, stride=2, padding=1,
+    /// output_padding=1. in=2 out=2 k=(2,2).
+    #[test]
+    fn test_conv_transpose2d_combo_matches_torch() {
+        let weight: Vec<f32> = (1..=8).map(|i| i as f32 * 0.1).collect(); // [2,1,2,2]
+        let bias = [0.25f32, -0.25];
+        let ct = ct2d_full_fixed(
+            2,
+            2,
+            (2, 2),
+            (2, 2),
+            (1, 1),
+            (1, 1),
+            (2, 2),
+            2,
+            &weight,
+            Some(&bias),
+        );
+        let x = leaf(
+            &(1..=8).map(|i| i as f32).collect::<Vec<_>>(),
+            &[1, 2, 2, 2],
+        );
+        let y = ct.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 2, 4, 4]);
+        assert_close(
+            y.data().unwrap(),
+            &[
+                0.25, 0.25, 0.25, 0.25, 0.25, 2.25, 0.25, 1.85, 0.25, 0.25, 0.25, 0.25, 0.25, 2.65,
+                0.25, 1.85, -0.25, -0.25, -0.25, -0.25, -0.25, 16.15, -0.25, 9.35, -0.25, -0.25,
+                -0.25, -0.25, -0.25, 10.95, -0.25, 6.15,
+            ],
+            1e-3,
+        );
+        let grads = ct
+            .forward(&x)
+            .unwrap()
+            .grad_fn()
+            .unwrap()
+            .backward(&t(&[1.0f32; 32], &[1, 2, 4, 4]))
+            .unwrap();
+        assert_close(
+            grads[0].as_ref().unwrap().data().unwrap(),
+            &[0.4, 0.7, 0.6, 1.0, 0.8, 1.5, 1.4, 2.6],
+            1e-4,
+        );
+        assert_eq!(grads[1].as_ref().unwrap().shape(), &[2, 1, 2, 2]);
+        assert_close(
+            grads[1].as_ref().unwrap().data().unwrap(),
+            &[4.0, 7.0, 6.0, 10.0, 8.0, 15.0, 14.0, 26.0],
+            1e-4,
+        );
+        assert_close(
+            grads[2].as_ref().unwrap().data().unwrap(),
+            &[16.0, 16.0],
+            1e-4,
+        );
+    }
+
+    /// Unbatched ConvTranspose2d input `(C, H, W)`. Closes #1609.
+    #[test]
+    fn test_conv_transpose2d_unbatched_matches_torch() {
+        let weight: Vec<f32> = (1..=8).map(|i| i as f32 * 0.1).collect(); // [2,1,2,2]
+        let bias = [0.5f32];
+        let ct = ct2d_full_fixed(
+            2,
+            1,
+            (2, 2),
+            (1, 1),
+            (0, 0),
+            (0, 0),
+            (1, 1),
+            1,
+            &weight,
+            Some(&bias),
+        );
+        let x = leaf(&(1..=8).map(|i| i as f32).collect::<Vec<_>>(), &[2, 2, 2]); // (C=2,H=2,W=2)
+        let y = ct.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 3, 3], "unbatched output must be rank 3");
+        assert_close(
+            y.data().unwrap(),
+            &[3.1, 6.9, 4.5, 8.1, 18.9, 11.7, 6.3, 14.1, 8.5],
+            1e-3,
+        );
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let gx = x.grad().unwrap().expect("input grad must be populated");
+        assert_eq!(
+            gx.shape(),
+            &[2, 2, 2],
+            "grad must match unbatched input shape"
+        );
+        assert_close(
+            gx.data().unwrap(),
+            &[1.0, 1.0, 1.0, 1.0, 2.6, 2.6, 2.6, 2.6],
+            1e-4,
+        );
+    }
+
+    // ----- ConvTranspose3d -----
+
+    /// Build a grouped/dilated ConvTranspose3d via `new_full`, overwriting
+    /// weight/bias. Weight must be `[in, out/groups, kD, kH, kW]`.
+    #[allow(clippy::too_many_arguments)]
+    fn ct3d_full_fixed(
+        in_c: usize,
+        out_c: usize,
+        k: (usize, usize, usize),
+        stride: (usize, usize, usize),
+        padding: (usize, usize, usize),
+        output_padding: (usize, usize, usize),
+        dilation: (usize, usize, usize),
+        groups: usize,
+        weight: &[f32],
+        bias: Option<&[f32]>,
+    ) -> ConvTranspose3d<f32> {
+        let mut ct = ConvTranspose3d::<f32>::new_full(
+            in_c,
+            out_c,
+            k,
+            stride,
+            padding,
+            output_padding,
+            dilation,
+            groups,
+            bias.is_some(),
+        )
+        .unwrap();
+        ct.weight = Parameter::from_slice(weight, &[in_c, out_c / groups, k.0, k.1, k.2]).unwrap();
+        if let Some(bvals) = bias {
+            ct.bias = Some(Parameter::from_slice(bvals, &[out_c]).unwrap());
+        }
+        ct
+    }
+
+    /// Grouped ConvTranspose3d, groups=2, k=(1,1,1). in=2 out=2.
+    #[test]
+    fn test_conv_transpose3d_groups2_matches_torch() {
+        let weight: Vec<f32> = (1..=2).map(|i| i as f32 * 0.5).collect(); // [2,1,1,1,1]
+        let bias = [0.5f32, -0.5];
+        let ct = ct3d_full_fixed(
+            2,
+            2,
+            (1, 1, 1),
+            (1, 1, 1),
+            (0, 0, 0),
+            (0, 0, 0),
+            (1, 1, 1),
+            2,
+            &weight,
+            Some(&bias),
+        );
+        let x = leaf(
+            &(1..=16).map(|i| i as f32).collect::<Vec<_>>(),
+            &[1, 2, 2, 2, 2],
+        );
+        let y = ct.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 2, 2, 2, 2]);
+        assert_close(
+            y.data().unwrap(),
+            &[
+                1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 8.5, 9.5, 10.5, 11.5, 12.5, 13.5, 14.5,
+                15.5,
+            ],
+            1e-3,
+        );
+        let grads = ct
+            .forward(&x)
+            .unwrap()
+            .grad_fn()
+            .unwrap()
+            .backward(&t(&[1.0f32; 16], &[1, 2, 2, 2, 2]))
+            .unwrap();
+        assert_eq!(grads[1].as_ref().unwrap().shape(), &[2, 1, 1, 1, 1]);
+        assert_close(
+            grads[1].as_ref().unwrap().data().unwrap(),
+            &[36.0, 100.0],
+            1e-4,
+        );
+        assert_close(
+            grads[2].as_ref().unwrap().data().unwrap(),
+            &[8.0, 8.0],
+            1e-4,
+        );
+    }
+
+    /// Dilated ConvTranspose3d, dilation=2, no bias. in=1 out=1 k=(2,2,2).
+    #[test]
+    fn test_conv_transpose3d_dilation2_matches_torch() {
+        let weight: Vec<f32> = (1..=8).map(|i| i as f32 * 0.1).collect(); // [1,1,2,2,2]
+        let ct = ct3d_full_fixed(
+            1,
+            1,
+            (2, 2, 2),
+            (1, 1, 1),
+            (0, 0, 0),
+            (0, 0, 0),
+            (2, 2, 2),
+            1,
+            &weight,
+            None,
+        );
+        let x = leaf(
+            &(1..=8).map(|i| i as f32).collect::<Vec<_>>(),
+            &[1, 1, 2, 2, 2],
+        );
+        let y = ct.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 4, 4, 4]);
+        // Spot-check a representative slab against the torch oracle.
+        let yd = y.data().unwrap();
+        assert_close(&yd[0..8], &[0.1, 0.2, 0.2, 0.4, 0.3, 0.4, 0.6, 0.8], 1e-3);
+        assert_close(&yd[56..64], &[3.5, 4.2, 4.0, 4.8, 4.9, 5.6, 5.6, 6.4], 1e-3);
+        let grads = ct
+            .forward(&x)
+            .unwrap()
+            .grad_fn()
+            .unwrap()
+            .backward(&t(&[1.0f32; 64], &[1, 1, 4, 4, 4]))
+            .unwrap();
+        assert_close(
+            grads[0].as_ref().unwrap().data().unwrap(),
+            &[3.6, 3.6, 3.6, 3.6, 3.6, 3.6, 3.6, 3.6],
+            1e-4,
+        );
+        assert_eq!(grads[1].as_ref().unwrap().shape(), &[1, 1, 2, 2, 2]);
+        assert_close(
+            grads[1].as_ref().unwrap().data().unwrap(),
+            &[36.0, 36.0, 36.0, 36.0, 36.0, 36.0, 36.0, 36.0],
+            1e-4,
+        );
+    }
+
+    /// ConvTranspose3d combo: groups=2, stride=2, output_padding=1. in=2 out=2
+    /// k=(2,2,2). Forward + all grads vs torch oracle.
+    #[test]
+    fn test_conv_transpose3d_combo_matches_torch() {
+        let weight: Vec<f32> = (1..=16).map(|i| i as f32 * 0.05).collect(); // [2,1,2,2,2]
+        let bias = [0.1f32, -0.1];
+        let ct = ct3d_full_fixed(
+            2,
+            2,
+            (2, 2, 2),
+            (2, 2, 2),
+            (0, 0, 0),
+            (1, 1, 1),
+            (1, 1, 1),
+            2,
+            &weight,
+            Some(&bias),
+        );
+        let x = leaf(
+            &(1..=2).map(|i| i as f32).collect::<Vec<_>>(),
+            &[1, 2, 1, 1, 1],
+        );
+        let y = ct.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 2, 3, 3, 3]);
+        let yd = y.data().unwrap();
+        // Spot-check the leading + trailing-channel slabs vs the torch oracle.
+        assert_close(
+            &yd[0..9],
+            &[0.15, 0.2, 0.1, 0.25, 0.3, 0.1, 0.1, 0.1, 0.1],
+            1e-3,
+        );
+        assert_close(
+            &yd[27..36],
+            &[0.8, 0.9, -0.1, 1.0, 1.1, -0.1, -0.1, -0.1, -0.1],
+            1e-3,
+        );
+        let grads = ct
+            .forward(&x)
+            .unwrap()
+            .grad_fn()
+            .unwrap()
+            .backward(&t(&[1.0f32; 54], &[1, 2, 3, 3, 3]))
+            .unwrap();
+        assert_close(
+            grads[0].as_ref().unwrap().data().unwrap(),
+            &[1.8, 5.0],
+            1e-4,
+        );
+        assert_eq!(grads[1].as_ref().unwrap().shape(), &[2, 1, 2, 2, 2]);
+        assert_close(
+            grads[1].as_ref().unwrap().data().unwrap(),
+            &[
+                1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0,
+            ],
+            1e-4,
+        );
+        assert_close(
+            grads[2].as_ref().unwrap().data().unwrap(),
+            &[27.0, 27.0],
+            1e-4,
+        );
+    }
+
+    /// Unbatched ConvTranspose3d input `(C, D, H, W)`. Closes #1609.
+    #[test]
+    fn test_conv_transpose3d_unbatched_matches_torch() {
+        let weight: Vec<f32> = (1..=2).map(|i| i as f32 * 0.5).collect(); // [2,1,1,1,1]
+        let bias = [1.0f32];
+        let ct = ct3d_full_fixed(
+            2,
+            1,
+            (1, 1, 1),
+            (1, 1, 1),
+            (0, 0, 0),
+            (0, 0, 0),
+            (1, 1, 1),
+            1,
+            &weight,
+            Some(&bias),
+        );
+        let x = leaf(
+            &(1..=16).map(|i| i as f32).collect::<Vec<_>>(),
+            &[2, 2, 2, 2],
+        ); // (C=2,D=2,H=2,W=2)
+        let y = ct.forward(&x).unwrap();
+        assert_eq!(y.shape(), &[1, 2, 2, 2], "unbatched output must be rank 4");
+        // torch oracle forward: w=[0.5,1.0] (out=C0*0.5 + ... groups=1):
+        // y[c=0..,d,h,w] = 0.5*x[ch0] + 1.0*x[ch1]; with bias 1.0.
+        let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
+        ferrotorch_core::backward(&sum).unwrap();
+        let gx = x.grad().unwrap().expect("input grad must be populated");
+        assert_eq!(
+            gx.shape(),
+            &[2, 2, 2, 2],
+            "grad must match unbatched input shape"
+        );
+        // grad_x = sum over out of weight = ch0: 0.5, ch1: 1.0 (1x1x1 kernel).
+        assert_close(
+            gx.data().unwrap(),
+            &[
+                0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+            ],
+            1e-4,
+        );
+    }
+
+    /// `ConvTranspose3d::new_full` rejects `groups` not dividing channels.
+    #[test]
+    fn test_conv_transpose3d_groups_must_divide_channels() {
+        assert!(
+            ConvTranspose3d::<f32>::new_full(
+                3,
+                4,
+                (1, 1, 1),
+                (1, 1, 1),
+                (0, 0, 0),
+                (0, 0, 0),
+                (1, 1, 1),
+                2,
+                true
+            )
+            .is_err()
+        );
+        assert!(
+            ConvTranspose2d::<f32>::new_full(4, 5, (1, 1), (1, 1), (0, 0), (0, 0), (1, 1), 2, true)
+                .is_err()
+        );
     }
 
     // -----------------------------------------------------------------------
