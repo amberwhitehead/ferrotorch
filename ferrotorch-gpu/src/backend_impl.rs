@@ -6798,6 +6798,53 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
+    fn searchsorted_1d(
+        &self,
+        values: &GpuBufferHandle,
+        boundaries: &GpuBufferHandle,
+        right: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        if values.dtype() != boundaries.dtype() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "searchsorted_1d: values ({}) and boundaries ({}) must share a dtype",
+                    values.dtype(),
+                    boundaries.dtype()
+                ),
+            });
+        }
+        let dev = self.device(values.device_ordinal())?;
+        let ord = values.device_ordinal();
+        let n_vals = values.len();
+        let n_bounds = boundaries.len();
+        let r = match values.dtype() {
+            DType::F32 => crate::search::gpu_searchsorted_f32(
+                Self::unwrap_buffer(values)?.inner(),
+                Self::unwrap_buffer(boundaries)?.inner(),
+                n_vals,
+                n_bounds,
+                right,
+                dev,
+            ),
+            DType::F64 => crate::search::gpu_searchsorted_f64(
+                Self::unwrap_buffer_f64(values)?.inner(),
+                Self::unwrap_buffer_f64(boundaries)?.inner(),
+                n_vals,
+                n_bounds,
+                right,
+                dev,
+            ),
+            other => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("searchsorted_1d: unsupported value dtype {other}"),
+                });
+            }
+        }
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_slice_i64(r, ord))
+    }
+
+    #[cfg(feature = "cuda")]
     fn index_select_intidx(
         &self,
         src: &GpuBufferHandle,

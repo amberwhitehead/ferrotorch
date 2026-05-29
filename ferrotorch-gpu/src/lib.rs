@@ -193,6 +193,8 @@ pub mod rng;
 #[cfg(feature = "cuda")]
 pub mod roll;
 #[cfg(feature = "cuda")]
+pub mod search;
+#[cfg(feature = "cuda")]
 pub mod sparse;
 #[cfg(feature = "cuda")]
 pub mod special;
@@ -264,6 +266,8 @@ pub use pool::{cached_bytes, empty_cache, empty_cache_all, round_len};
 pub use rng::{CudaRngManager, PhiloxGenerator, PhiloxState, cuda_rng_manager, fork_rng, join_rng};
 #[cfg(feature = "cuda")]
 pub use roll::gpu_roll_f32;
+#[cfg(feature = "cuda")]
+pub use search::{gpu_searchsorted_f32, gpu_searchsorted_f64};
 #[cfg(feature = "cuda")]
 pub use special::{
     gpu_chebyshev_poly_f32, gpu_chebyshev_poly_f64, gpu_hermite_h_poly_f32, gpu_hermite_h_poly_f64,

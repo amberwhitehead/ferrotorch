@@ -60,7 +60,12 @@ under #1545).
 - [x] AC-6: `histc` clamps out-of-range to boundary bins
   (`test_histc_clamps`).
 - [x] AC-7: `topk(input, k>last_dim)` errors with `InvalidArgument`.
-- [ ] AC-8: GPU paths — NOT-STARTED, blocked on #1545.
+- [x] AC-8: GPU paths for `searchsorted` / `bucketize` (f32/f64) — SHIPPED
+  (#1545). CUDA inputs lower the binary search on-device via
+  `GpuBackend::searchsorted_1d` (`ferrotorch-gpu/src/search.rs`); only the
+  int64 result indices are read back. `unique`, `unique_consecutive`,
+  `histc`, `meshgrid`, `topk` remain CPU-only (sort/dedup/index-arithmetic
+  GPU lowerings tracked as a follow-up under #1545).
 
 ## Architecture
 
@@ -135,8 +140,8 @@ clamping) paths.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `searchsorted` at `ops/search.rs:20`; non-test consumer: re-exported as `ferrotorch_core::searchsorted` at `lib.rs:176` (boundary public API per goal.md S5) |
-| REQ-2 | SHIPPED | impl: `bucketize` at `ops/search.rs:63`; non-test consumer: re-exported as `ferrotorch_core::bucketize` at `lib.rs:176` |
+| REQ-1 | SHIPPED | impl: `searchsorted in ops/search.rs`; non-test consumer: re-exported as `ferrotorch_core::searchsorted` (boundary public API per goal.md S5). CUDA f32/f64 lower on-device via `GpuBackend::searchsorted_1d` (`gpu_searchsorted_f32`/`_f64 in ferrotorch-gpu/src/search.rs`); #1545. |
+| REQ-2 | SHIPPED | impl: `bucketize in ops/search.rs`; non-test consumer: re-exported as `ferrotorch_core::bucketize`. Inherits the CUDA GPU path through its delegation to `searchsorted`. |
 | REQ-3 | SHIPPED | impl: `unique` at `ops/search.rs:79`; non-test consumer: re-exported as `ferrotorch_core::unique` at `lib.rs:176` |
 | REQ-4 | SHIPPED | impl: `unique_consecutive` at `ops/search.rs:140`; non-test consumer: re-exported as `ferrotorch_core::unique_consecutive` at `lib.rs:176` |
 | REQ-5 | SHIPPED | impl: `histc` at `ops/search.rs:186`; non-test consumer: re-exported as `ferrotorch_core::histc` at `lib.rs:176` |

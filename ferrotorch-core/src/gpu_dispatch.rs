@@ -4559,6 +4559,32 @@ pub trait GpuBackend: Send + Sync {
         Err(FerrotorchError::NotImplementedOnCuda { op: "argmin" })
     }
 
+    /// On-device `searchsorted` / `bucketize` over a sorted 1-D `boundaries`
+    /// buffer (#1545). For each element of `values`, returns the insertion
+    /// index into `boundaries`:
+    ///
+    /// - `right == false` (PyTorch `side="left"`): first `i` with
+    ///   `boundaries[i] >= v` (lower_bound).
+    /// - `right == true` (PyTorch `side="right"`): first `i` with
+    ///   `boundaries[i] > v` (upper_bound).
+    ///
+    /// Both `values` and `boundaries` are GPU-resident value buffers of the
+    /// same `DType` (∈ {F32, F64}); the result is an `I64`-tagged handle of
+    /// `values.len()` indices (PyTorch returns `ScalarType::Long`). Mirrors
+    /// `searchsorted_cuda_kernel` (`is_1d_boundaries == true`) in
+    /// `aten/src/ATen/native/cuda/Bucketization.cu`. The default impl errors;
+    /// the CUDA backend overrides it with the `gpu_searchsorted_*` PTX kernel.
+    fn searchsorted_1d(
+        &self,
+        _values: &GpuBufferHandle,
+        _boundaries: &GpuBufferHandle,
+        _right: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "searchsorted_1d",
+        })
+    }
+
     /// `index_select(dim)` driven by a GPU-resident integer index handle.
     ///
     /// `src` is the value buffer (layout `[outer, in_dim, inner]`); `index` is

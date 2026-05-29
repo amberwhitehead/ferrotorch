@@ -9,8 +9,8 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `searchsorted` at `ops/search.rs:20`; consumer: re-export `ferrotorch_core::searchsorted` at `lib.rs:176` |
-//! | REQ-2 | SHIPPED | `bucketize` at `ops/search.rs:63`; consumer: re-export at `lib.rs:176` |
+//! | REQ-1 | SHIPPED | `searchsorted` at `ops/search.rs:20`; consumer: re-export `ferrotorch_core::searchsorted` at `lib.rs:176`. CUDA f32/f64 lower on-device via `GpuBackend::searchsorted_1d` (#1545). |
+//! | REQ-2 | SHIPPED | `bucketize` at `ops/search.rs:63`; consumer: re-export at `lib.rs:176`. Inherits the CUDA GPU path through its delegation to `searchsorted`. |
 //! | REQ-3 | SHIPPED | `unique` at `ops/search.rs:79`; consumer: re-export at `lib.rs:176` |
 //! | REQ-4 | SHIPPED | `unique_consecutive` at `ops/search.rs:140`; consumer: re-export at `lib.rs:176` |
 //! | REQ-5 | SHIPPED | `histc` at `ops/search.rs:186`; consumer: re-export at `lib.rs:176` |
@@ -18,6 +18,7 @@
 //! | REQ-7 | SHIPPED | `topk` at `ops/search.rs:287`; consumer: re-export at `lib.rs:176` |
 
 use crate::dtype::Float;
+use crate::dtype_dispatch::{is_f32, is_f64};
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
@@ -41,6 +42,42 @@ pub fn searchsorted<T: Float>(
                 boundaries.shape()
             ),
         });
+    }
+
+    // GPU fast path (#1545): when both tensors are CUDA-resident f32/f64, run
+    // the binary search on-device via `GpuBackend::searchsorted_1d` and read
+    // back ONLY the int64 result indices. The value/boundary data never leaves
+    // the device, so this is not a CPU<->GPU round trip (R-CODE-4): only the
+    // freshly-computed indices are copied to host to satisfy this function's
+    // `Vec<usize>` contract.
+    if boundaries.is_cuda() && values.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let idx_handle =
+            backend.searchsorted_1d(values.gpu_handle()?, boundaries.gpu_handle()?, right)?;
+        let bytes = backend.gpu_to_cpu(&idx_handle)?;
+        // The handle is int64 (PyTorch `ScalarType::Long`); decode 8-byte
+        // little-endian chunks into `usize` insertion indices.
+        let n = values.numel();
+        if bytes.len() < n * 8 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "searchsorted: GPU returned {} bytes, expected >= {} (8 per index)",
+                    bytes.len(),
+                    n * 8
+                ),
+            });
+        }
+        let result: Vec<usize> = bytes
+            .chunks_exact(8)
+            .take(n)
+            .map(|c| {
+                let mut buf = [0u8; 8];
+                buf.copy_from_slice(c);
+                i64::from_le_bytes(buf) as usize
+            })
+            .collect();
+        return Ok(result);
     }
 
     if boundaries.is_cuda() || values.is_cuda() {
