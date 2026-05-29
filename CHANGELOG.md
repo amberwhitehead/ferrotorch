@@ -45,6 +45,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- GPU complex transpose (cusolver eig) dead on hardware: %tid JIT-death (f32+f64) + f64 byte-stride bug (#1685)
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
