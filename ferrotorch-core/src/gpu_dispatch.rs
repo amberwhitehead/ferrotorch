@@ -4771,6 +4771,53 @@ pub trait GpuBackend: Send + Sync {
         Err(FerrotorchError::NotImplementedOnCuda { op: "topk_1d" })
     }
 
+    /// On-device `histc` over a GPU-resident value buffer (#1545). Counts the
+    /// `input` elements falling in each of `bins` equal-width bins spanning the
+    /// inclusive range `[min_val, max_val]`, returning a value handle of `bins`
+    /// counts with the SAME `DType` as `input` (∈ {F32, F64}) — PyTorch's
+    /// `_histc_cuda` allocates the output with `self.scalar_type()`.
+    ///
+    /// Bin semantics mirror `getBin` + `kernelHistogram1D` in
+    /// `aten/src/ATen/native/cuda/SummaryOps.cu`: `bin = (int)((v - min) *
+    /// bins / (max - min))`, the last bin is closed at both ends (a value `==
+    /// max` lands in `bins-1`), and values outside `[min, max]` (and NaN) are
+    /// not counted. The caller guarantees `bins > 0` and `min_val < max_val`.
+    /// The default impl errors; the CUDA backend overrides it with the
+    /// `gpu_histc_*` PTX kernel.
+    fn histc_1d(
+        &self,
+        _input: &GpuBufferHandle,
+        _bins: usize,
+        _min_val: f64,
+        _max_val: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "histc_1d" })
+    }
+
+    /// On-device `meshgrid` grid for ONE axis over a GPU-resident 1-D
+    /// coordinate buffer (#1545, `indexing='ij'`). `input` is the axis's
+    /// coordinate vector (length `axis_len`); the result is a value handle of
+    /// `total` elements with the same `DType` as `input` (∈ {F32, F64}) where
+    /// `out[flat] = input[(flat / inner) % axis_len]`, `inner =
+    /// product(shapes[axis+1..])`, `total = product(shapes)`.
+    ///
+    /// This is the `view(view_shape).expand(shape)` decomposition that upstream
+    /// `meshgrid` uses (`aten/src/ATen/native/TensorShape.cpp:4462-4467`) lowered
+    /// to a single gather — no intermediate strided `expand` is materialised.
+    /// The default impl errors; the CUDA backend overrides it with the
+    /// `gpu_meshgrid_*` PTX kernel.
+    fn meshgrid_grid(
+        &self,
+        _input: &GpuBufferHandle,
+        _total: usize,
+        _inner: usize,
+        _axis_len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "meshgrid_grid",
+        })
+    }
+
     /// `index_select(dim)` driven by a GPU-resident integer index handle.
     ///
     /// `src` is the value buffer (layout `[outer, in_dim, inner]`); `index` is

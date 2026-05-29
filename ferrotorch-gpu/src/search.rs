@@ -52,6 +52,14 @@
 //! | REQ-8 (topk trait surface) | SHIPPED | `fn topk_1d in gpu_dispatch.rs`; consumer `ops::search::topk` GPU branch |
 //! | REQ-9 (topk dispatch wiring) | SHIPPED | `CudaBackendImpl::topk_1d in backend_impl.rs` dispatches `match dtype { F32, F64 }` |
 //! | REQ-10 (topk re-export + consumer) | SHIPPED | `pub use search::{gpu_topk_f32, gpu_topk_f64} in lib.rs`; consumer `ferrotorch_core::ops::search::topk` CUDA branch (values stay GPU-resident) |
+//! | REQ-11 (`gpu_histc_f32`/`_f64`) | SHIPPED | `pub fn gpu_histc_f32`/`_f64 in search.rs` mirror getBin + last-bin clamp + range guard at `aten/src/ATen/native/cuda/SummaryOps.cu:41,47,92`; consumer `CudaBackendImpl::histc_1d in backend_impl.rs` |
+//! | REQ-12 (histc PTX + ABI) | SHIPPED | `HISTC_F32_PTX`/`HISTC_F64_PTX in search.rs` carry the 6-arg ABI `(in,out,n,nbins,minv,maxv)`; f32 uses `red.global.add.f32`, f64 `red.global.add.f64` (sm_60) |
+//! | REQ-13 (histc trait surface) | SHIPPED | `fn histc_1d in gpu_dispatch.rs`; consumer `ops::search::histc` GPU branch |
+//! | REQ-14 (histc dispatch + consumer) | SHIPPED | `CudaBackendImpl::histc_1d in backend_impl.rs` dispatches `match dtype { F32, F64 }`; non-test consumer `ferrotorch_core::ops::search::histc` CUDA branch keeps counts GPU-resident (`TensorStorage::gpu`) |
+//! | REQ-15 (`gpu_meshgrid_f32`/`_f64`) | SHIPPED | `pub fn gpu_meshgrid_f32`/`_f64 in search.rs` mirror `view(view_shape).expand(shape)` at `aten/src/ATen/native/TensorShape.cpp:4462`; consumer `CudaBackendImpl::meshgrid_grid in backend_impl.rs` |
+//! | REQ-16 (meshgrid PTX + ABI) | SHIPPED | `MESHGRID_F32_PTX`/`MESHGRID_F64_PTX in search.rs` carry the 5-arg ABI `(in,out,total,inner,axis_len)`; one thread per output element gathers `in[(flat/inner)%axis_len]` |
+//! | REQ-17 (meshgrid trait surface) | SHIPPED | `fn meshgrid_grid in gpu_dispatch.rs`; consumer `ops::search::meshgrid` GPU branch |
+//! | REQ-18 (meshgrid dispatch + consumer) | SHIPPED | `CudaBackendImpl::meshgrid_grid in backend_impl.rs` dispatches `match dtype { F32, F64 }`; non-test consumer `ferrotorch_core::ops::search::meshgrid` CUDA branch keeps each grid GPU-resident (`TensorStorage::gpu`) |
 
 #![cfg(feature = "cuda")]
 
@@ -860,6 +868,584 @@ pub fn gpu_topk_f64(
     )
 }
 
+// ===========================================================================
+// histc — fixed-bin histogram with parallel atomic-add (#1545)
+//
+// One CUDA thread per input element. Each thread reads its value `v`, computes
+// the destination bin, and `atom.global.add`s `1` into the bin counter. The
+// output buffer is pre-zeroed by the launcher (`alloc_zeros`).
+//
+// Bin / range semantics are byte-for-byte from upstream
+// `aten/src/ATen/native/cuda/SummaryOps.cu`:
+//   getBin (SummaryOps.cu:41): bin = (int)((v - min) * nbins / (max - min))
+//   SummaryOps.cu:47-48:       if (bin == nbins) bin -= 1;  // last bin [min,max]
+//   kernelHistogram1D guard (SummaryOps.cu:92,118):
+//                              only count when (v >= min && v <= max)
+// The `(int)` cast truncates toward zero (matches C++ `(int)`); since the guard
+// already forces `v >= min`, `(v - min) >= 0` so truncation == floor here. NaN
+// values fail BOTH `v >= min` and `v <= max` (ordered compares are false for
+// NaN), so they are skipped — matching torch (NaN is not counted).
+//
+// The counts are accumulated in the SAME float dtype as the input (PyTorch's
+// `_histc_cuda` allocates the output with `self.scalar_type()`), so the f32
+// kernel uses `atom.global.add.f32` (sm_20+) and the f64 kernel uses
+// `atom.global.add.f64` (sm_60+ — the RTX 3090 is sm_86). Integer counts up to
+// 2^24 (f32) / 2^53 (f64) are represented exactly, matching the CPU path which
+// accumulates `T::one()` per element.
+//
+// ABI: (in_ptr, out_ptr, n, nbins, minv, maxv)
+//   in   : V[n]
+//   out  : V[nbins]   (pre-zeroed by the launcher)
+//   n    : u32        (number of input elements)
+//   nbins: u32
+//   minv : V          (range lower bound, inclusive)
+//   maxv : V          (range upper bound, inclusive)
+// ===========================================================================
+
+// f32 histogram. One thread per input value; `red.global.add.f32` (sm_20+)
+// bumps the destination bin. `0f3F800000` is the f32 bit pattern for `1.0`.
+const HISTC_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry histc_f32_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n,
+    .param .u32 nbins,
+    .param .f32 minv,
+    .param .f32 maxv
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %t, %nn, %nb, %bin, %bin1;
+    .reg .u64 %in_p, %out_p, %off, %addr;
+    .reg .f32 %v, %minv, %maxv, %range, %rel, %scaled, %nbf, %binf, %one;
+    .reg .pred %p_oob, %p_lo, %p_hi, %p_in, %p_last;
+
+    ld.param.u64 %in_p,  [in_ptr];
+    ld.param.u64 %out_p, [out_ptr];
+    ld.param.u32 %nn,    [n];
+    ld.param.u32 %nb,    [nbins];
+    ld.param.f32 %minv,  [minv];
+    ld.param.f32 %maxv,  [maxv];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %t, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %p_oob, %t, %nn;
+    @%p_oob bra DONE;
+
+    // v = in[t]
+    cvt.u64.u32 %off, %t;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in_p, %off;
+    ld.global.f32 %v, [%addr];
+
+    // guard (SummaryOps.cu:92): count only when (v >= min && v <= max).
+    // setp.ge/le are ORDERED (false for NaN) -> NaN skipped, matching torch.
+    setp.ge.f32 %p_lo, %v, %minv;
+    setp.le.f32 %p_hi, %v, %maxv;
+    and.pred %p_in, %p_lo, %p_hi;
+    @!%p_in bra DONE;
+
+    // bin = (int)((v - min) * nbins / (max - min))   (SummaryOps.cu:41)
+    sub.f32 %rel, %v, %minv;
+    sub.f32 %range, %maxv, %minv;
+    cvt.rn.f32.u32 %nbf, %nb;
+    mul.f32 %scaled, %rel, %nbf;
+    div.rn.f32 %binf, %scaled, %range;
+    // truncate toward zero -> u32 bin. rel >= 0 here so trunc == floor.
+    cvt.rzi.u32.f32 %bin, %binf;
+    // if (bin == nbins) bin -= 1;  (SummaryOps.cu:47-48, last bin [min,max])
+    setp.eq.u32 %p_last, %bin, %nb;
+    sub.u32 %bin1, %bin, 1;
+    @%p_last mov.u32 %bin, %bin1;
+
+    // atomicAdd(&out[bin], 1.0f)
+    cvt.u64.u32 %off, %bin;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out_p, %off;
+    mov.f32 %one, 0f3F800000;
+    red.global.add.f32 [%addr], %one;
+
+DONE:
+    ret;
+}
+";
+
+// f64 histogram. Identical structure; 8-byte stride, .f64 compares, sm_60
+// `red.global.add.f64`. `0d3FF0000000000000` is the f64 bit pattern for `1.0`.
+const HISTC_F64_PTX: &str = "\
+.version 7.0
+.target sm_60
+.address_size 64
+
+.visible .entry histc_f64_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n,
+    .param .u32 nbins,
+    .param .f64 minv,
+    .param .f64 maxv
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %t, %nn, %nb, %bin, %bin1;
+    .reg .u64 %in_p, %out_p, %off, %addr;
+    .reg .f64 %v, %minv, %maxv, %range, %rel, %scaled, %nbf, %binf, %one;
+    .reg .pred %p_oob, %p_lo, %p_hi, %p_in, %p_last;
+
+    ld.param.u64 %in_p,  [in_ptr];
+    ld.param.u64 %out_p, [out_ptr];
+    ld.param.u32 %nn,    [n];
+    ld.param.u32 %nb,    [nbins];
+    ld.param.f64 %minv,  [minv];
+    ld.param.f64 %maxv,  [maxv];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %t, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %p_oob, %t, %nn;
+    @%p_oob bra DONE;
+
+    cvt.u64.u32 %off, %t;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %in_p, %off;
+    ld.global.f64 %v, [%addr];
+
+    setp.ge.f64 %p_lo, %v, %minv;
+    setp.le.f64 %p_hi, %v, %maxv;
+    and.pred %p_in, %p_lo, %p_hi;
+    @!%p_in bra DONE;
+
+    sub.f64 %rel, %v, %minv;
+    sub.f64 %range, %maxv, %minv;
+    cvt.rn.f64.u32 %nbf, %nb;
+    mul.f64 %scaled, %rel, %nbf;
+    div.rn.f64 %binf, %scaled, %range;
+    cvt.rzi.u32.f64 %bin, %binf;
+    setp.eq.u32 %p_last, %bin, %nb;
+    sub.u32 %bin1, %bin, 1;
+    @%p_last mov.u32 %bin, %bin1;
+
+    cvt.u64.u32 %off, %bin;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %out_p, %off;
+    mov.f64 %one, 0d3FF0000000000000;
+    red.global.add.f64 [%addr], %one;
+
+DONE:
+    ret;
+}
+";
+
+fn launch_histc_config(n: usize) -> LaunchConfig {
+    launch_1d(n)
+}
+
+/// Launch a histc kernel over a device-resident value buffer of `n` elements,
+/// returning a fresh pre-zeroed `CudaSlice<V>` of `bins` counts. Each thread
+/// `atom.global.add`s `1` into its element's bin.
+///
+/// `min_val`/`max_val` are the (inclusive) range bounds in the value dtype.
+/// The caller guarantees `bins > 0` and `min_val < max_val` (the production
+/// consumer rejects the degenerate cases before lowering to the GPU).
+fn launch_histc<V>(
+    input: &CudaSlice<V>,
+    n: usize,
+    bins: usize,
+    min_val: V,
+    max_val: V,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<CudaSlice<V>>
+where
+    V: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits + Copy,
+{
+    if input.len() < n {
+        return Err(GpuError::LengthMismatch {
+            a: input.len(),
+            b: n,
+        });
+    }
+    if n > u32::MAX as usize || bins > u32::MAX as usize {
+        return Err(GpuError::LengthMismatch {
+            a: n.max(bins),
+            b: u32::MAX as usize,
+        });
+    }
+
+    let stream = device.stream();
+    // Output is always `bins` long, pre-zeroed (the kernel only ever adds).
+    let mut out = stream.alloc_zeros::<V>(bins)?;
+    if n == 0 {
+        // No values to bin — an all-zero `bins`-length buffer is the answer.
+        return Ok(out);
+    }
+
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        }
+    })?;
+
+    let cfg = launch_histc_config(n);
+    let n_u = n as u32;
+    let bins_u = bins as u32;
+
+    // SAFETY:
+    // - `f` is the PTX entry `kernel_name`; its 6-arg signature
+    //   (in_ptr, out_ptr, n, nbins, minv, maxv) matches the args pushed below
+    //   in order.
+    // - `input` holds at least `n` `V`-elements (checked above); thread
+    //   `t in [0, n)` reads `in[t]`, strictly in range.
+    // - `out` is a fresh pre-zeroed `bins`-element buffer (just allocated), the
+    //   only `&mut` arg; the kernel writes only `out[bin]` for
+    //   `bin in [0, bins)` (the `bin == nbins -> nbins-1` clamp keeps it in
+    //   range), via `red.global.add` which needs no read-back. It cannot alias
+    //   `input` (distinct cudarc allocation).
+    // - Threads with `t >= n` exit via the leading `setp.ge.u32 %p_oob`.
+    // - `n`/`bins` are range-checked against `u32::MAX`, so the kernel's u32
+    //   index arithmetic cannot overflow.
+    // - cudarc copies the by-reference scalar params into the launch parameter
+    //   buffer; their lifetime spans this synchronous frame. Stream sync is the
+    //   caller's responsibility (matches the other kernel modules).
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(&mut out)
+            .arg(&n_u)
+            .arg(&bins_u)
+            .arg(&min_val)
+            .arg(&max_val)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
+/// On-device `histc` over an f32 value buffer (#1545).
+///
+/// Returns a fresh device `CudaSlice<f32>` of `bins` counts. `out[b]` is the
+/// number of `input` elements falling in bin `b`, where the half-open bins
+/// `[min + b·w, min + (b+1)·w)` partition `[min, max]` and the LAST bin is
+/// closed at both ends (so a value exactly `== max` lands in `bins-1`). Values
+/// outside `[min, max]` (and NaN) are not counted. Mirrors `getBin` +
+/// `kernelHistogram1D` in `aten/src/ATen/native/cuda/SummaryOps.cu:41-48,92`.
+///
+/// # Errors
+///
+/// - [`GpuError::LengthMismatch`] when the slice is shorter than `n` or a count
+///   exceeds `u32::MAX`.
+/// - [`GpuError::PtxCompileFailed`] if the PTX module fails to compile.
+/// - [`GpuError::Driver`] on launch failure.
+pub fn gpu_histc_f32(
+    input: &CudaSlice<f32>,
+    n: usize,
+    bins: usize,
+    min_val: f32,
+    max_val: f32,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<f32>> {
+    launch_histc(
+        input,
+        n,
+        bins,
+        min_val,
+        max_val,
+        device,
+        HISTC_F32_PTX,
+        "histc_f32_kernel",
+    )
+}
+
+/// On-device `histc` over an f64 value buffer. f64 counterpart of
+/// [`gpu_histc_f32`]; uses the sm_60 `red.global.add.f64` atomic.
+///
+/// # Errors
+///
+/// See [`gpu_histc_f32`].
+pub fn gpu_histc_f64(
+    input: &CudaSlice<f64>,
+    n: usize,
+    bins: usize,
+    min_val: f64,
+    max_val: f64,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<f64>> {
+    launch_histc(
+        input,
+        n,
+        bins,
+        min_val,
+        max_val,
+        device,
+        HISTC_F64_PTX,
+        "histc_f64_kernel",
+    )
+}
+
+// ===========================================================================
+// meshgrid — pure index broadcast (`indexing='ij'`) (#1545)
+//
+// For N input 1-D coordinate vectors of lengths `shapes[0..N]`, output grid `d`
+// has shape `shapes` (total = product) and `out[flat] = input_d[coord]` where
+//   coord = (flat / inner_d) % shapes[d],   inner_d = product(shapes[d+1..N])
+// This is exactly the `view(view_shape).expand(shape)` decomposition that
+// upstream `meshgrid` uses (`aten/src/ATen/native/TensorShape.cpp:4462-4467`):
+// axis `d`'s vector is reshaped to put its length at position `d` and broadcast
+// (stride 0) along every other axis. One CUDA thread per output element does
+// the index arithmetic and a single gather load — no `expand` materialisation
+// of an intermediate strided tensor.
+//
+// ABI: (in_ptr, out_ptr, total, inner, axis_len)
+//   in       : V[axis_len]        (the d-th coordinate vector)
+//   out      : V[total]           (grid for axis d)
+//   total    : u32                (product of all shapes)
+//   inner    : u32                (product of shapes[d+1..N])
+//   axis_len : u32                (shapes[d])
+// ===========================================================================
+
+// f32 meshgrid gather. One thread per output element.
+const MESHGRID_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry meshgrid_f32_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total,
+    .param .u32 inner,
+    .param .u32 axis_len
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %t, %tot, %inr, %al, %q, %coord;
+    .reg .u64 %in_p, %out_p, %off, %addr;
+    .reg .f32 %v;
+    .reg .pred %p_oob;
+
+    ld.param.u64 %in_p,  [in_ptr];
+    ld.param.u64 %out_p, [out_ptr];
+    ld.param.u32 %tot,   [total];
+    ld.param.u32 %inr,   [inner];
+    ld.param.u32 %al,    [axis_len];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %t, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %p_oob, %t, %tot;
+    @%p_oob bra DONE;
+
+    // coord = (flat / inner) % axis_len
+    div.u32 %q, %t, %inr;
+    rem.u32 %coord, %q, %al;
+
+    // v = in[coord]; out[flat] = v
+    cvt.u64.u32 %off, %coord;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in_p, %off;
+    ld.global.f32 %v, [%addr];
+
+    cvt.u64.u32 %off, %t;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out_p, %off;
+    st.global.f32 [%addr], %v;
+
+DONE:
+    ret;
+}
+";
+
+// f64 meshgrid gather. Identical structure; 8-byte stride.
+const MESHGRID_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry meshgrid_f64_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total,
+    .param .u32 inner,
+    .param .u32 axis_len
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %t, %tot, %inr, %al, %q, %coord;
+    .reg .u64 %in_p, %out_p, %off, %addr;
+    .reg .f64 %v;
+    .reg .pred %p_oob;
+
+    ld.param.u64 %in_p,  [in_ptr];
+    ld.param.u64 %out_p, [out_ptr];
+    ld.param.u32 %tot,   [total];
+    ld.param.u32 %inr,   [inner];
+    ld.param.u32 %al,    [axis_len];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %t, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %p_oob, %t, %tot;
+    @%p_oob bra DONE;
+
+    div.u32 %q, %t, %inr;
+    rem.u32 %coord, %q, %al;
+
+    cvt.u64.u32 %off, %coord;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %in_p, %off;
+    ld.global.f64 %v, [%addr];
+
+    cvt.u64.u32 %off, %t;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %out_p, %off;
+    st.global.f64 [%addr], %v;
+
+DONE:
+    ret;
+}
+";
+
+/// Launch a meshgrid gather kernel producing the grid for ONE axis.
+///
+/// `input` is the axis's 1-D coordinate vector (length `axis_len`); the output
+/// is a fresh `CudaSlice<V>` of `total` elements where
+/// `out[flat] = input[(flat / inner) % axis_len]`. One thread per output
+/// element.
+fn launch_meshgrid<V>(
+    input: &CudaSlice<V>,
+    total: usize,
+    inner: usize,
+    axis_len: usize,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<CudaSlice<V>>
+where
+    V: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits,
+{
+    if input.len() < axis_len {
+        return Err(GpuError::LengthMismatch {
+            a: input.len(),
+            b: axis_len,
+        });
+    }
+    if total > u32::MAX as usize || inner > u32::MAX as usize || axis_len > u32::MAX as usize {
+        return Err(GpuError::LengthMismatch {
+            a: total.max(inner).max(axis_len),
+            b: u32::MAX as usize,
+        });
+    }
+
+    let stream = device.stream();
+    let mut out = stream.alloc_zeros::<V>(total)?;
+    if total == 0 {
+        return Ok(out);
+    }
+
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        }
+    })?;
+
+    let cfg = launch_1d(total);
+    let total_u = total as u32;
+    let inner_u = inner.max(1) as u32;
+    let axis_u = axis_len as u32;
+
+    // SAFETY:
+    // - `f` is the PTX entry `kernel_name`; its 5-arg signature
+    //   (in_ptr, out_ptr, total, inner, axis_len) matches the args pushed below.
+    // - `input` holds at least `axis_len` `V`-elements (checked above); the
+    //   kernel reads `in[coord]` where `coord = (flat / inner) % axis_len`, so
+    //   `coord in [0, axis_len)`, strictly in range.
+    // - `out` is a fresh `total`-element buffer (just allocated), the only `&mut`
+    //   arg; the kernel writes `out[flat]` for `flat in [0, total)`, in range,
+    //   and cannot alias `input` (distinct cudarc allocation).
+    // - Threads with `flat >= total` exit via the leading `setp.ge.u32 %p_oob`.
+    // - `total`/`inner`/`axis_len` are range-checked against `u32::MAX`. `inner`
+    //   is forced `>= 1` so the `div.u32` divisor is never zero.
+    // - cudarc copies the by-reference `u32` params into the launch parameter
+    //   buffer; their lifetime spans this synchronous frame. Stream sync is the
+    //   caller's responsibility.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(&mut out)
+            .arg(&total_u)
+            .arg(&inner_u)
+            .arg(&axis_u)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
+/// On-device `meshgrid` grid for one axis over an f32 coordinate vector (#1545).
+///
+/// `input` is the axis's 1-D coordinate vector (length `axis_len`). Returns a
+/// fresh device `CudaSlice<f32>` of `total` elements forming the broadcast grid
+/// for this axis (`indexing='ij'`): `out[flat] = input[(flat / inner) %
+/// axis_len]`, where `inner = product(shapes[axis+1..])` and `total =
+/// product(shapes)`. Mirrors the `view(view_shape).expand(shape)` decomposition
+/// of upstream `meshgrid` in `aten/src/ATen/native/TensorShape.cpp:4462-4467`.
+///
+/// # Errors
+///
+/// - [`GpuError::LengthMismatch`] when `input` is shorter than `axis_len` or a
+///   count exceeds `u32::MAX`.
+/// - [`GpuError::PtxCompileFailed`] if the PTX module fails to compile.
+/// - [`GpuError::Driver`] on launch failure.
+pub fn gpu_meshgrid_f32(
+    input: &CudaSlice<f32>,
+    total: usize,
+    inner: usize,
+    axis_len: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<f32>> {
+    launch_meshgrid(
+        input,
+        total,
+        inner,
+        axis_len,
+        device,
+        MESHGRID_F32_PTX,
+        "meshgrid_f32_kernel",
+    )
+}
+
+/// On-device `meshgrid` grid for one axis over an f64 coordinate vector. f64
+/// counterpart of [`gpu_meshgrid_f32`].
+///
+/// # Errors
+///
+/// See [`gpu_meshgrid_f32`].
+pub fn gpu_meshgrid_f64(
+    input: &CudaSlice<f64>,
+    total: usize,
+    inner: usize,
+    axis_len: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<f64>> {
+    launch_meshgrid(
+        input,
+        total,
+        inner,
+        axis_len,
+        device,
+        MESHGRID_F64_PTX,
+        "meshgrid_f64_kernel",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1171,5 +1757,160 @@ mod tests {
             assert_eq!(gv, rv);
             assert_eq!(gi, ri);
         }
+    }
+
+    // --- histc ---
+
+    /// CPU reference for `torch.histc` bin assignment, byte-for-byte from
+    /// `aten/src/ATen/native/cuda/SummaryOps.cu` getBin (`SummaryOps.cu:41`) +
+    /// the last-bin clamp (`:47-48`) + the `[min,max]` guard (`:92`). Counts are
+    /// `f64` so the comparison is exact for the integer counts in these tests.
+    fn cpu_histc_ref(data: &[f64], bins: usize, min: f64, max: f64) -> Vec<f64> {
+        let mut counts = vec![0.0f64; bins];
+        let range = max - min;
+        for &v in data {
+            if !(v >= min && v <= max) {
+                continue; // out-of-range / NaN -> skipped (torch)
+            }
+            let mut bin = ((v - min) * bins as f64 / range) as i64;
+            if bin == bins as i64 {
+                bin -= 1;
+            }
+            counts[bin as usize] += 1.0;
+        }
+        counts
+    }
+
+    #[test]
+    fn histc_f32_matches_torch_bins() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        // torch.histc(tensor([0,1,2,3,4,5,6,7,8,9,10.]), bins=5, min=0, max=10)
+        //   live torch 2.x: [2., 2., 2., 2., 3.]  (10 lands in the last bin,
+        //   which is closed at both ends -> bins-1).
+        let data = [0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let g = cpu_to_gpu(&data, &device).unwrap();
+        let out = gpu_histc_f32(g.inner(), data.len(), 5, 0.0, 10.0, &device).unwrap();
+        // result lives on device — this IS the GPU buffer.
+        assert_eq!(out.len(), 5);
+        let got = read_f32(&out, &device);
+        assert_eq!(got, vec![2.0, 2.0, 2.0, 2.0, 3.0]);
+        // and matches the upstream-getBin CPU reference bit-for-bit.
+        let data64: Vec<f64> = data.iter().map(|&x| x as f64).collect();
+        let want = cpu_histc_ref(&data64, 5, 0.0, 10.0);
+        assert_eq!(got.iter().map(|&x| x as f64).collect::<Vec<_>>(), want);
+    }
+
+    #[test]
+    fn histc_f32_skips_out_of_range_and_nan() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        // Values below min, above max, and NaN are all dropped (torch).
+        // In-range [0,4]: 0.5->bin0, 1.5->bin1, 2.5->bin2, 4.0->bin3 (last,
+        // closed). torch.histc(tensor([-1,0.5,1.5,2.5,4.0,5.0,nan]),4,0,4)
+        //   = [1., 1., 1., 1.].
+        let data = [-1.0f32, 0.5, 1.5, 2.5, 4.0, 5.0, f32::NAN];
+        let g = cpu_to_gpu(&data, &device).unwrap();
+        let out = gpu_histc_f32(g.inner(), data.len(), 4, 0.0, 4.0, &device).unwrap();
+        let got = read_f32(&out, &device);
+        assert_eq!(got, vec![1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn histc_f64_matches_torch_bins() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let data = [0.0f64, 0.25, 0.5, 0.75, 1.0];
+        let g = cpu_to_gpu(&data, &device).unwrap();
+        // torch.histc(tensor([0,.25,.5,.75,1.],dtype=float64),bins=4,min=0,max=1)
+        //   = [1., 1., 1., 2.]  (1.0 in the closed last bin).
+        let out = gpu_histc_f64(g.inner(), data.len(), 4, 0.0, 1.0, &device).unwrap();
+        let got = read_f64(&out, &device);
+        assert_eq!(got, vec![1.0, 1.0, 1.0, 2.0]);
+        assert_eq!(got, cpu_histc_ref(&data, 4, 0.0, 1.0));
+    }
+
+    // --- meshgrid ---
+
+    /// CPU reference for the per-axis `meshgrid` grid (`indexing='ij'`):
+    /// `out[flat] = vec[(flat / inner) % axis_len]`, matching the
+    /// `view(view_shape).expand(shape)` decomposition of upstream `meshgrid`
+    /// (`aten/src/ATen/native/TensorShape.cpp:4462-4467`).
+    fn cpu_meshgrid_axis(vec: &[f64], shapes: &[usize], axis: usize) -> Vec<f64> {
+        let total: usize = shapes.iter().product();
+        let inner: usize = shapes[axis + 1..].iter().product();
+        (0..total)
+            .map(|flat| vec[(flat / inner.max(1)) % shapes[axis]])
+            .collect()
+    }
+
+    #[test]
+    fn meshgrid_f32_two_axis_ij() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        // meshgrid([1,2,3],[4,5], indexing='ij'):
+        //   grid0 (shape [3,2]) = [[1,1],[2,2],[3,3]] flat [1,1,2,2,3,3]
+        //   grid1 (shape [3,2]) = [[4,5],[4,5],[4,5]] flat [4,5,4,5,4,5]
+        let a = [1.0f32, 2.0, 3.0];
+        let b = [4.0f32, 5.0];
+        let shapes = [3usize, 2];
+        let ga = cpu_to_gpu(&a, &device).unwrap();
+        let gb = cpu_to_gpu(&b, &device).unwrap();
+        let total = 6;
+
+        // axis 0: inner = shapes[1] = 2
+        let g0 = gpu_meshgrid_f32(ga.inner(), total, 2, 3, &device).unwrap();
+        assert_eq!(g0.len(), total);
+        let h0 = read_f32(&g0, &device);
+        assert_eq!(h0, vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
+
+        // axis 1: inner = 1 (last axis)
+        let g1 = gpu_meshgrid_f32(gb.inner(), total, 1, 2, &device).unwrap();
+        let h1 = read_f32(&g1, &device);
+        assert_eq!(h1, vec![4.0, 5.0, 4.0, 5.0, 4.0, 5.0]);
+
+        // matches the upstream-decomposition CPU reference bit-for-bit.
+        let a64: Vec<f64> = a.iter().map(|&x| x as f64).collect();
+        let b64: Vec<f64> = b.iter().map(|&x| x as f64).collect();
+        assert_eq!(
+            h0.iter().map(|&x| x as f64).collect::<Vec<_>>(),
+            cpu_meshgrid_axis(&a64, &shapes, 0)
+        );
+        assert_eq!(
+            h1.iter().map(|&x| x as f64).collect::<Vec<_>>(),
+            cpu_meshgrid_axis(&b64, &shapes, 1)
+        );
+    }
+
+    #[test]
+    fn meshgrid_f64_three_axis_ij() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        // shapes [2,3,2], total = 12.
+        let a = [10.0f64, 20.0];
+        let shapes = [2usize, 3, 2];
+        let total = 12;
+        let ga = cpu_to_gpu(&a, &device).unwrap();
+        // axis 0: inner = shapes[1]*shapes[2] = 6.
+        let g0 = gpu_meshgrid_f64(ga.inner(), total, 6, 2, &device).unwrap();
+        let h0 = read_f64(&g0, &device);
+        assert_eq!(h0, cpu_meshgrid_axis(&a, &shapes, 0));
+        // first 6 elements come from a[0]=10, next 6 from a[1]=20.
+        assert_eq!(
+            h0,
+            vec![
+                10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0
+            ]
+        );
     }
 }

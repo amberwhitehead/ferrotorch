@@ -1,4 +1,4 @@
-# GPU `searchsorted` / `bucketize` / `topk` kernels
+# GPU `searchsorted` / `bucketize` / `topk` / `histc` / `meshgrid` kernels
 
 <!--
 tier: 3-component
@@ -10,6 +10,8 @@ upstream-paths:
   - aten/src/ATen/native/cuda/TensorTopK.cpp
   - aten/src/ATen/native/cuda/TensorTopK.cu
   - aten/src/ATen/native/TopKImpl.h
+  - aten/src/ATen/native/cuda/SummaryOps.cu
+  - aten/src/ATen/native/TensorShape.cpp
 -->
 
 ## Summary
@@ -119,6 +121,51 @@ against torch 2.11 CUDA (values exact in all cases; gathered values exact).
   CUDA f32/f64 dispatches through `GpuBackend::topk_1d`, keeps the VALUES
   tensor GPU-resident (`TensorStorage::gpu`), and reads back ONLY the i64
   indices (no R-CODE-4 round trip of the value data).
+- REQ-11: `gpu_histc_f32` / `gpu_histc_f64` — given a device value buffer of
+  `n` elements, `bins`, and inclusive range bounds `(min_val, max_val)`,
+  return a fresh pre-zeroed device `CudaSlice<V>` of `bins` counts (same dtype
+  as the input — PyTorch's `_histc_cuda` allocates the output with
+  `self.scalar_type()`). One thread per input element; each thread computes its
+  bin and `atom.global.add`s `1`. Bin semantics mirror `getBin` +
+  `kernelHistogram1D` in `aten/src/ATen/native/cuda/SummaryOps.cu`:
+  `bin = (int)((v - min) * bins / (max - min))`, the last bin is closed at both
+  ends (`bin == bins -> bins-1`), and values outside `[min, max]` (and NaN) are
+  skipped.
+- REQ-12: histc PTX + ABI. `HISTC_F32_PTX` / `HISTC_F64_PTX` carry the 6-arg
+  ABI `(in_ptr, out_ptr, n, nbins, minv, maxv)`. f32 uses `red.global.add.f32`
+  (sm_20+); f64 targets `sm_60` for `red.global.add.f64`. Integer counts are
+  exact in f32 up to 2^24 / f64 up to 2^53, matching the CPU path which
+  accumulates `T::one()` per element.
+- REQ-13: `GpuBackend::histc_1d` trait surface in
+  `ferrotorch-core/src/gpu_dispatch.rs` — `(input, bins, min_val, max_val)` →
+  same-dtype `GpuBufferHandle` of `bins` counts. Default impl returns
+  `NotImplementedOnCuda`; the CUDA backend overrides.
+- REQ-14: Dispatch wiring + non-test consumer. `CudaBackendImpl::histc_1d`
+  (`ferrotorch-gpu/src/backend_impl.rs`) — `match dtype { F32, F64 }`, wrapping
+  via `wrap_slice_{f32,f64}`. The production consumer is
+  `ferrotorch-core/src/ops/search.rs::histc`, which on CUDA f32/f64 dispatches
+  through `GpuBackend::histc_1d` and keeps the counts GPU-resident
+  (`TensorStorage::gpu`) — no R-CODE-4 round trip.
+- REQ-15: `gpu_meshgrid_f32` / `gpu_meshgrid_f64` — given an axis's 1-D
+  coordinate buffer (length `axis_len`), `total = product(shapes)`, and
+  `inner = product(shapes[axis+1..])`, return a fresh device `CudaSlice<V>` of
+  `total` elements with `out[flat] = input[(flat / inner) % axis_len]`. One
+  thread per output element does the index arithmetic and a single gather load —
+  no `expand` materialisation. Mirrors the `view(view_shape).expand(shape)`
+  decomposition of upstream `meshgrid` (`indexing='ij'`).
+- REQ-16: meshgrid PTX + ABI. `MESHGRID_F32_PTX` / `MESHGRID_F64_PTX` carry the
+  5-arg ABI `(in_ptr, out_ptr, total, inner, axis_len)`. The launcher forces
+  `inner >= 1` so the `div.u32` divisor is never zero (last axis).
+- REQ-17: `GpuBackend::meshgrid_grid` trait surface in
+  `ferrotorch-core/src/gpu_dispatch.rs` — `(input, total, inner, axis_len)` →
+  same-dtype `GpuBufferHandle` of `total` elements. Default impl returns
+  `NotImplementedOnCuda`; the CUDA backend overrides.
+- REQ-18: Dispatch wiring + non-test consumer. `CudaBackendImpl::meshgrid_grid`
+  (`ferrotorch-gpu/src/backend_impl.rs`) — `match dtype { F32, F64 }`, wrapping
+  via `wrap_slice_{f32,f64}`. The production consumer is
+  `ferrotorch-core/src/ops/search.rs::meshgrid`, which when ALL inputs are CUDA
+  f32/f64 produces each axis grid through `GpuBackend::meshgrid_grid` and keeps
+  every grid GPU-resident (`TensorStorage::gpu`) — no R-CODE-4 round trip.
 
 ## Acceptance Criteria
 
@@ -144,6 +191,22 @@ against torch 2.11 CUDA (values exact in all cases; gathered values exact).
   CPU reference per row.
 - [x] AC-10: f64 topk (`gpu_topk_f64`) matches the CPU reference for both
   `largest=true` and `largest=false`.
+- [x] AC-11: `gpu_histc_f32(arange(0,11.), bins=5, min=0, max=10)` →
+  `[2,2,2,2,3]` (the value `10 == max` lands in the closed last bin), matching
+  live `torch.histc` (torch 2.11 CUDA) and the upstream-getBin CPU reference.
+- [x] AC-12: `gpu_histc_f32([-1,.5,1.5,2.5,4,5,nan], 4, 0, 4)` →
+  `[1,1,1,1]` — values below min, above max, and NaN are all skipped (torch).
+- [x] AC-13: `gpu_histc_f64([0,.25,.5,.75,1.], 4, 0, 1)` → `[1,1,1,2]` (f64
+  atomic path; `1.0 == max` in the closed last bin), matching live torch.
+- [x] AC-14: the histc result buffer `is_cuda()` (lives on device); the
+  consumer `ferrotorch_core::histc` returns a CUDA tensor (no value round trip).
+- [x] AC-15: `gpu_meshgrid_f32([1,2,3],[4,5], indexing='ij')` → grid0
+  `[1,1,2,2,3,3]`, grid1 `[4,5,4,5,4,5]` (shape `[3,2]`), matching live
+  `torch.meshgrid(..., indexing='ij')`.
+- [x] AC-16: `gpu_meshgrid_f64` 3-axis grid matches the
+  `view(view_shape).expand(shape)` CPU reference per axis.
+- [x] AC-17: the meshgrid result grids `is_cuda()`; the consumer
+  `ferrotorch_core::meshgrid` returns CUDA tensors when all inputs are CUDA.
 
 ## Architecture
 
@@ -168,20 +231,32 @@ delegation to `searchsorted`.
 
 ## Parity contract
 
-`parity_ops = []` — the `searchsorted` / `bucketize` / `topk` route family
-has no parity-sweep runner arm (a TEST-INFRASTRUCTURE gap tracked separately
-per goal.md S5, not a REQ blocker). The numeric contract is byte-for-byte
-parity with the CPU path: `partition_point` for searchsorted (right=true/false
-tie cases) and the stable-sort selection for topk (largest/smallest, ties,
-multi-row, k==dim, f64). The topk contract was additionally validated live
-against the torch 2.11 CUDA oracle (`torch.topk` values exact; gathered
-values exact within tie groups).
+`parity_ops = []` — the `searchsorted` / `bucketize` / `topk` / `histc` /
+`meshgrid` route family has no parity-sweep runner arm (a TEST-INFRASTRUCTURE
+gap tracked separately per goal.md S5, not a REQ blocker). The numeric
+contract is byte-for-byte parity with the CPU path: `partition_point` for
+searchsorted (right=true/false tie cases), the stable-sort selection for topk
+(largest/smallest, ties, multi-row, k==dim, f64), the upstream-getBin
+assignment for histc (interior bins + closed last bin + skipped oob/NaN), and
+the `view().expand()` index map for meshgrid. The topk, histc, and meshgrid
+contracts were additionally validated live against the torch 2.11 CUDA oracle
+(`torch.topk` / `torch.histc` / `torch.meshgrid` outputs exact).
+
+NOTE (spillover, NOT fixed here): the CPU `histc` path
+(`ferrotorch-core/src/ops/search.rs::histc`) CLAMPS out-of-range values into
+the boundary bins (`clamp(v, min, max-1e-30)`), whereas `torch.histc` (and this
+GPU path) SKIP out-of-range values. The two agree for in-range data (which all
+parity tests use) but diverge when the input contains values outside
+`[min, max]`. This is a pre-existing CPU-only divergence from torch, filed as a
+separate blocker for a single-file acto-fixer dispatch.
 
 ## Verification
 
-`cargo test -p ferrotorch-gpu --features cuda search` exercises the kernel
-live on the device (skips cleanly when no GPU is present), asserting both
-the index values and that the output buffer is device-resident.
+`cargo test -p ferrotorch-gpu --features cuda --lib search::` exercises the
+kernels live on the device (skips cleanly when no GPU is present), asserting
+both the values and that the output buffer is device-resident. The end-to-end
+consumer path (result `is_cuda()` + torch value-match) is pinned by
+`ferrotorch-core/tests/divergence_histc_meshgrid_gpu.rs` (5 GPU-gated tests).
 
 ## REQ status table
 
@@ -197,3 +272,11 @@ the index values and that the output buffer is device-resident.
 | REQ-8 | SHIPPED | `fn topk_1d in gpu_dispatch.rs` (`GpuBackend` trait method, `(values, I64 indices)` output); consumer `ops::search::topk` GPU branch |
 | REQ-9 | SHIPPED | `CudaBackendImpl::topk_1d in backend_impl.rs` dispatches `match dtype { F32, F64 }`, wraps values via `wrap_slice_{f32,f64}` and indices via `wrap_slice_i64` |
 | REQ-10 | SHIPPED | `pub use search::{gpu_topk_f32, gpu_topk_f64} in lib.rs`; non-test consumer `ferrotorch_core::ops::search::topk` CUDA f32/f64 branch keeps VALUES GPU-resident (`TensorStorage::gpu`), reads back only i64 indices (`topk in ops/search.rs`) |
+| REQ-11 | SHIPPED | `pub fn gpu_histc_f32` / `gpu_histc_f64 in search.rs` mirror getBin + last-bin clamp + range guard at `aten/src/ATen/native/cuda/SummaryOps.cu:41,47,92`; consumer `CudaBackendImpl::histc_1d in backend_impl.rs` |
+| REQ-12 | SHIPPED | `HISTC_F32_PTX` / `HISTC_F64_PTX in search.rs` carry the 6-arg ABI `(in,out,n,nbins,minv,maxv)`; f32 `red.global.add.f32` (sm_52), f64 `red.global.add.f64` (sm_60) |
+| REQ-13 | SHIPPED | `fn histc_1d in gpu_dispatch.rs` (`GpuBackend` trait method, same-dtype counts output); consumer `ops::search::histc` GPU branch |
+| REQ-14 | SHIPPED | `CudaBackendImpl::histc_1d in backend_impl.rs` dispatches `match dtype { F32, F64 }`, wraps via `wrap_slice_{f32,f64}`; non-test consumer `ferrotorch_core::ops::search::histc` CUDA f32/f64 branch keeps counts GPU-resident (`TensorStorage::gpu`, `histc in ops/search.rs`) |
+| REQ-15 | SHIPPED | `pub fn gpu_meshgrid_f32` / `gpu_meshgrid_f64 in search.rs` mirror `view(view_shape).expand(shape)` at `aten/src/ATen/native/TensorShape.cpp:4462`; consumer `CudaBackendImpl::meshgrid_grid in backend_impl.rs` |
+| REQ-16 | SHIPPED | `MESHGRID_F32_PTX` / `MESHGRID_F64_PTX in search.rs` carry the 5-arg ABI `(in,out,total,inner,axis_len)`; launcher forces `inner >= 1` (no zero-divisor) |
+| REQ-17 | SHIPPED | `fn meshgrid_grid in gpu_dispatch.rs` (`GpuBackend` trait method, same-dtype grid output); consumer `ops::search::meshgrid` GPU branch |
+| REQ-18 | SHIPPED | `CudaBackendImpl::meshgrid_grid in backend_impl.rs` dispatches `match dtype { F32, F64 }`, wraps via `wrap_slice_{f32,f64}`; non-test consumer `ferrotorch_core::ops::search::meshgrid` CUDA f32/f64 branch keeps each grid GPU-resident (`TensorStorage::gpu`, `meshgrid in ops/search.rs`) |

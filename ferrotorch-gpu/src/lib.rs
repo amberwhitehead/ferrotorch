@@ -269,7 +269,10 @@ pub use rng::{CudaRngManager, PhiloxGenerator, PhiloxState, cuda_rng_manager, fo
 #[cfg(feature = "cuda")]
 pub use roll::gpu_roll_f32;
 #[cfg(feature = "cuda")]
-pub use search::{gpu_searchsorted_f32, gpu_searchsorted_f64, gpu_topk_f32, gpu_topk_f64};
+pub use search::{
+    gpu_histc_f32, gpu_histc_f64, gpu_meshgrid_f32, gpu_meshgrid_f64, gpu_searchsorted_f32,
+    gpu_searchsorted_f64, gpu_topk_f32, gpu_topk_f64,
+};
 #[cfg(feature = "cuda")]
 pub use special::{
     gpu_chebyshev_poly_f32, gpu_chebyshev_poly_f64, gpu_hermite_h_poly_f32, gpu_hermite_h_poly_f64,

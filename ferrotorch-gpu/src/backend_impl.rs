@@ -7004,6 +7004,87 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
+    fn histc_1d(
+        &self,
+        input: &GpuBufferHandle,
+        bins: usize,
+        min_val: f64,
+        max_val: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let n = input.len();
+        match input.dtype() {
+            DType::F32 => {
+                let out = crate::search::gpu_histc_f32(
+                    Self::unwrap_buffer(input)?.inner(),
+                    n,
+                    bins,
+                    min_val as f32,
+                    max_val as f32,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_f32(out, ord))
+            }
+            DType::F64 => {
+                let out = crate::search::gpu_histc_f64(
+                    Self::unwrap_buffer_f64(input)?.inner(),
+                    n,
+                    bins,
+                    min_val,
+                    max_val,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_f64(out, ord))
+            }
+            other => Err(FerrotorchError::InvalidArgument {
+                message: format!("histc_1d: unsupported value dtype {other}"),
+            }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn meshgrid_grid(
+        &self,
+        input: &GpuBufferHandle,
+        total: usize,
+        inner: usize,
+        axis_len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        match input.dtype() {
+            DType::F32 => {
+                let out = crate::search::gpu_meshgrid_f32(
+                    Self::unwrap_buffer(input)?.inner(),
+                    total,
+                    inner,
+                    axis_len,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_f32(out, ord))
+            }
+            DType::F64 => {
+                let out = crate::search::gpu_meshgrid_f64(
+                    Self::unwrap_buffer_f64(input)?.inner(),
+                    total,
+                    inner,
+                    axis_len,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_f64(out, ord))
+            }
+            other => Err(FerrotorchError::InvalidArgument {
+                message: format!("meshgrid_grid: unsupported value dtype {other}"),
+            }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
     fn index_select_intidx(
         &self,
         src: &GpuBufferHandle,

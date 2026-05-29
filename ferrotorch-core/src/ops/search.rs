@@ -13,8 +13,8 @@
 //! | REQ-2 | SHIPPED | `bucketize` at `ops/search.rs:63`; consumer: re-export at `lib.rs:176`. Inherits the CUDA GPU path through its delegation to `searchsorted`. |
 //! | REQ-3 | SHIPPED | `unique` at `ops/search.rs:79`; consumer: re-export at `lib.rs:176` |
 //! | REQ-4 | SHIPPED | `unique_consecutive` at `ops/search.rs:140`; consumer: re-export at `lib.rs:176` |
-//! | REQ-5 | SHIPPED | `histc` at `ops/search.rs:186`; consumer: re-export at `lib.rs:176` |
-//! | REQ-6 | SHIPPED | `meshgrid` at `ops/search.rs:228`; consumer: re-export at `lib.rs:176` |
+//! | REQ-5 | SHIPPED | `histc` at `ops/search.rs:186`; consumer: re-export at `lib.rs:176`. CUDA f32/f64 accumulate the histogram on-device via `GpuBackend::histc_1d` (#1545); counts stay GPU-resident. |
+//! | REQ-6 | SHIPPED | `meshgrid` at `ops/search.rs:228`; consumer: re-export at `lib.rs:176`. CUDA f32/f64 produce each axis grid on-device via `GpuBackend::meshgrid_grid` (#1545); grids stay GPU-resident. |
 //! | REQ-7 | SHIPPED | `topk` at `ops/search.rs:287`; consumer: re-export `ferrotorch_core::topk` at `lib.rs:176`. CUDA f32/f64 lower the k-selection on-device via `GpuBackend::topk_1d` (#1545); values stay GPU-resident, only int64 indices read back. |
 
 use crate::dtype::Float;
@@ -269,6 +269,20 @@ pub fn histc<T: Float>(
             message: format!("histc: min ({min_val}) must be < max ({max_val})"),
         });
     }
+    // GPU fast path (#1545): for CUDA-resident f32/f64 inputs the histogram is
+    // accumulated on-device via `GpuBackend::histc_1d` (one thread per input
+    // element, `atomicAdd` into the bin). The resulting counts buffer stays
+    // GPU-resident — it is wrapped straight back into a CUDA `Tensor` with no
+    // host crossing (R-CODE-4: no CPU<->GPU round trip). Bin / range semantics
+    // mirror `aten/src/ATen/native/cuda/SummaryOps.cu` getBin (`:41`), the
+    // last-bin clamp (`:47-48`), and the `[min,max]` guard (`:92`).
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let counts_handle = backend.histc_1d(input.gpu_handle()?, bins, min_val, max_val)?;
+        return Tensor::from_storage(TensorStorage::gpu(counts_handle), vec![bins], false);
+    }
+
     if input.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "histc" });
     }
@@ -300,6 +314,7 @@ pub fn meshgrid<T: Float>(tensors: &[Tensor<T>]) -> FerrotorchResult<Vec<Tensor<
         return Ok(vec![]);
     }
 
+    let all_cuda = tensors.iter().all(|t| t.is_cuda());
     for t in tensors {
         if t.ndim() != 1 {
             return Err(FerrotorchError::InvalidArgument {
@@ -309,14 +324,46 @@ pub fn meshgrid<T: Float>(tensors: &[Tensor<T>]) -> FerrotorchResult<Vec<Tensor<
                 ),
             });
         }
-        if t.is_cuda() {
-            return Err(FerrotorchError::NotImplementedOnCuda { op: "meshgrid" });
+        // Mixed CPU/CUDA inputs are rejected (matches upstream meshgrid's
+        // "all tensors to have the same device" check at
+        // `aten/src/ATen/native/TensorShape.cpp:4396-4398`).
+        if t.is_cuda() != all_cuda {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "meshgrid: all inputs must be on the same device".into(),
+            });
         }
     }
 
     let shapes: Vec<usize> = tensors.iter().map(|t| t.shape()[0]).collect();
     let ndim = shapes.len();
     let total: usize = shapes.iter().product();
+
+    // GPU fast path (#1545): when every input is CUDA-resident f32/f64, each
+    // axis's broadcast grid is produced on-device via `GpuBackend::meshgrid_grid`
+    // (a single gather `out[flat] = input[(flat/inner)%axis_len]`). Each grid
+    // stays GPU-resident — wrapped straight back into a CUDA `Tensor` with no
+    // host crossing (R-CODE-4: no CPU<->GPU round trip). Mirrors the
+    // `view(view_shape).expand(shape)` decomposition at
+    // `aten/src/ATen/native/TensorShape.cpp:4462-4467` (`indexing='ij'`).
+    if all_cuda && (is_f32::<T>() || is_f64::<T>()) {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let mut result = Vec::with_capacity(ndim);
+        for (dim, t) in tensors.iter().enumerate() {
+            let inner: usize = shapes[dim + 1..].iter().product();
+            let grid_handle = backend.meshgrid_grid(t.gpu_handle()?, total, inner, shapes[dim])?;
+            result.push(Tensor::from_storage(
+                TensorStorage::gpu(grid_handle),
+                shapes.clone(),
+                false,
+            )?);
+        }
+        return Ok(result);
+    }
+
+    if all_cuda {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "meshgrid" });
+    }
 
     let mut result = Vec::with_capacity(ndim);
 
