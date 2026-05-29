@@ -13,8 +13,8 @@
 //! | REQ-2 | SHIPPED | `bucketize` at `ops/search.rs:63`; consumer: re-export at `lib.rs:176`. Inherits the CUDA GPU path through its delegation to `searchsorted`. |
 //! | REQ-3 | SHIPPED | `unique` at `ops/search.rs:79`; consumer: re-export at `lib.rs:176` |
 //! | REQ-4 | SHIPPED | `unique_consecutive` at `ops/search.rs:140`; consumer: re-export at `lib.rs:176` |
-//! | REQ-5 | SHIPPED | `histc` at `ops/search.rs:186`; consumer: re-export at `lib.rs:176`. CUDA f32/f64 accumulate the histogram on-device via `GpuBackend::histc_1d` (#1545); counts stay GPU-resident. |
-//! | REQ-6 | SHIPPED | `meshgrid` at `ops/search.rs:228`; consumer: re-export at `lib.rs:176`. CUDA f32/f64 produce each axis grid on-device via `GpuBackend::meshgrid_grid` (#1545); grids stay GPU-resident. |
+//! | REQ-5 | SHIPPED | `histc`; consumer: re-export `ferrotorch_core::histc`. Out-of-range/NaN values are SKIPPED (not clamped), matching torch `SummaryOps.cu:92` (#1650); default `min==max` infers the range from data `aminmax`, widening all-equal data to `[v-1,v+1]` per `SummaryOps.cu:328-336` (#1652). CUDA f32/f64 accumulate the histogram on-device via `GpuBackend::histc_1d` (#1545); counts stay GPU-resident. |
+//! | REQ-6 | SHIPPED | `meshgrid` (= `meshgrid_indexing(.., Ij)`) + `meshgrid_indexing(tensors, MeshIndexing)`; consumer: `meshgrid` delegates to `meshgrid_indexing`, both re-exported. `MeshIndexing::Xy` swaps the first two inputs+output grids per torch `TensorShape.cpp:4433-4438,4470-4472` (#1652). CUDA f32/f64 produce each axis grid on-device via `GpuBackend::meshgrid_grid` (#1545); grids stay GPU-resident. |
 //! | REQ-7 | SHIPPED | `topk` at `ops/search.rs:287`; consumer: re-export `ferrotorch_core::topk` at `lib.rs:176`. CUDA f32/f64 lower the k-selection on-device via `GpuBackend::topk_1d` (#1545); values stay GPU-resident, only int64 indices read back. |
 
 use crate::dtype::Float;
@@ -250,9 +250,23 @@ pub fn unique_consecutive<T: Float>(
 /// Histogram — count elements in equal-width bins.
 ///
 /// `input` is flattened. Returns a 1-D tensor of `bins` counts.
-/// Elements outside `[min, max]` are clamped to the boundary bins.
+///
+/// When `min == max` (the default `torch.histc(x, bins)` call form passes
+/// `min=0, max=0`) the range is inferred from the data's `aminmax()`; if the
+/// inferred range is still degenerate (all-equal data) it is widened to
+/// `[v-1, v+1]`. Mirrors `aten/src/ATen/native/cuda/SummaryOps.cu:328-336`.
+///
+/// Elements outside `[min, max]` (and `NaN`) are SKIPPED, not clamped, matching
+/// torch's `if (bVal >= minvalue && bVal <= maxvalue)` guard
+/// (`aten/src/ATen/native/cuda/SummaryOps.cu:92`).
 ///
 /// Matches PyTorch's `torch.histc`.
+#[allow(
+    clippy::float_cmp,
+    reason = "exact `==` mirrors upstream's `min == max` / `minvalue == maxvalue` \
+              degenerate-range checks (aten/src/ATen/native/cuda/SummaryOps.cu:328,333); \
+              the bit-exact comparison IS the upstream contract for range inference"
+)]
 pub fn histc<T: Float>(
     input: &Tensor<T>,
     bins: usize,
@@ -264,11 +278,60 @@ pub fn histc<T: Float>(
             message: "histc: bins must be > 0".into(),
         });
     }
-    if min_val >= max_val {
+
+    // Default-range inference (#1652a): `torch.histc(x, bins)` defaults to
+    // `min=max=0`. Upstream `_histc_*_template` recomputes the range from the
+    // data's `aminmax()` when `min == max && numel > 0`, then — if the inferred
+    // range is still degenerate (all-equal data) — widens it to `[v-1, v+1]`.
+    // Mirrors `aten/src/ATen/native/cuda/SummaryOps.cu:328-336`:
+    //   if (min == max && self.numel() > 0) { auto [mn,mx]=self.aminmax(); .. }
+    //   if (minvalue == maxvalue) { minvalue -= 1; maxvalue += 1; }
+    // This runs BEFORE the device branch so the CPU and GPU paths agree.
+    let (min_val, max_val) = if min_val == max_val {
+        let numel = input.numel();
+        if numel > 0 {
+            // `data_vec()` transparently materialises CUDA data to host; here we
+            // only derive the two scalar bounds from it (NOT a value round trip
+            // back to device — the histogram itself still runs on whichever
+            // device the input lives on).
+            let data = input.data_vec()?;
+            let mut mn = f64::INFINITY;
+            let mut mx = f64::NEG_INFINITY;
+            for &v in &data {
+                if let Some(f) = num_traits::ToPrimitive::to_f64(&v) {
+                    if f < mn {
+                        mn = f;
+                    }
+                    if f > mx {
+                        mx = f;
+                    }
+                }
+            }
+            // All-NaN (or empty after the numel guard) leaves the sentinels
+            // untouched; fall back to the requested (equal) bounds so the
+            // widen-by-1 below produces a valid finite range.
+            if !mn.is_finite() || !mx.is_finite() {
+                mn = min_val;
+                mx = max_val;
+            }
+            if mn == mx {
+                (mn - 1.0, mx + 1.0)
+            } else {
+                (mn, mx)
+            }
+        } else {
+            // numel == 0: widen the equal bounds to a valid range (every bin
+            // stays empty regardless).
+            (min_val - 1.0, max_val + 1.0)
+        }
+    } else if min_val > max_val {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!("histc: min ({min_val}) must be < max ({max_val})"),
+            message: format!("histc: min ({min_val}) must be <= max ({max_val})"),
         });
-    }
+    } else {
+        (min_val, max_val)
+    };
+
     // GPU fast path (#1545): for CUDA-resident f32/f64 inputs the histogram is
     // accumulated on-device via `GpuBackend::histc_1d` (one thread per input
     // element, `atomicAdd` into the bin). The resulting counts buffer stays
@@ -292,10 +355,24 @@ pub fn histc<T: Float>(
     let range = max_val - min_val;
     let bin_width = range / bins as f64;
 
+    // SKIP out-of-range and NaN values, mirroring torch's
+    // `if (bVal >= minvalue && bVal <= maxvalue)` guard
+    // (`aten/src/ATen/native/cuda/SummaryOps.cu:92`). The previous code CLAMPED
+    // out-of-range values into the boundary bins (counting them), which
+    // diverged from torch and from ferrotorch's own GPU path (#1650). For an
+    // in-range value the bin is `floor((v - min) / bin_width)` with the
+    // top-edge value `v == max` falling in the last bin (getBin clamp,
+    // `SummaryOps.cu:41,47-48`).
     for &v in &data {
-        let f = num_traits::ToPrimitive::to_f64(&v).unwrap();
-        let clamped = f.clamp(min_val, max_val - 1e-30);
-        let idx = ((clamped - min_val) / bin_width) as usize;
+        let f = match num_traits::ToPrimitive::to_f64(&v) {
+            Some(f) => f,
+            None => continue,
+        };
+        // NaN fails both comparisons -> skipped, matching torch.
+        if !(f >= min_val && f <= max_val) {
+            continue;
+        }
+        let idx = ((f - min_val) / bin_width) as usize;
         let idx = idx.min(bins - 1);
         counts[idx] += <T as num_traits::One>::one();
     }
@@ -303,15 +380,68 @@ pub fn histc<T: Float>(
     Tensor::from_storage(TensorStorage::cpu(counts), vec![bins], false)
 }
 
+/// Cartesian-indexing convention for [`meshgrid_indexing`].
+///
+/// Mirrors `torch.meshgrid`'s `indexing` keyword
+/// (`aten/src/ATen/native/TensorShape.cpp:4433-4447`): only `"ij"` (matrix
+/// indexing, the default) and `"xy"` (Cartesian indexing) are valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshIndexing {
+    /// Matrix indexing — the default. Output grid `i` varies along input axis
+    /// `i`; grids have shape `[len0, len1, ..., lenN-1]`.
+    Ij,
+    /// Cartesian indexing — swaps the first two input tensors before building
+    /// the grids and swaps the first two output grids back, exactly as
+    /// `torch.meshgrid(*t, indexing='xy')`
+    /// (`aten/src/ATen/native/TensorShape.cpp:4433-4438,4470-4472`).
+    Xy,
+}
+
 /// Create coordinate grids from 1-D coordinate vectors.
 ///
 /// Given N 1-D tensors, returns N tensors of shape `[len0, len1, ..., lenN-1]`
 /// where each output tensor contains the coordinates for one axis.
 ///
-/// Matches PyTorch's `torch.meshgrid` with `indexing='ij'`.
+/// Matches PyTorch's `torch.meshgrid` with `indexing='ij'` (the default). For
+/// `indexing='xy'` use [`meshgrid_indexing`].
 pub fn meshgrid<T: Float>(tensors: &[Tensor<T>]) -> FerrotorchResult<Vec<Tensor<T>>> {
+    meshgrid_indexing(tensors, MeshIndexing::Ij)
+}
+
+/// Create coordinate grids from 1-D coordinate vectors with an explicit
+/// [`MeshIndexing`] convention.
+///
+/// For [`MeshIndexing::Ij`] this is identical to [`meshgrid`]. For
+/// [`MeshIndexing::Xy`] the first two input tensors are swapped before the
+/// grids are built and the first two output grids are swapped back, matching
+/// `torch.meshgrid(*tensors, indexing='xy')`
+/// (`aten/src/ATen/native/TensorShape.cpp:4433-4438` swap-in,
+/// `:4470-4472` swap-out). The swap only happens when there are >= 2 inputs.
+///
+/// Matches PyTorch's `torch.meshgrid` with the `indexing` keyword.
+pub fn meshgrid_indexing<T: Float>(
+    tensors: &[Tensor<T>],
+    indexing: MeshIndexing,
+) -> FerrotorchResult<Vec<Tensor<T>>> {
     if tensors.is_empty() {
         return Ok(vec![]);
+    }
+
+    // 'xy' indexing swaps the first two tensors, builds the grids, then swaps
+    // the first two output grids back. We can only swap when there are >= 2
+    // tensors (`aten/src/ATen/native/TensorShape.cpp:4434-4438`). Building a
+    // swapped slice and recursing through the 'ij' path keeps a single grid
+    // implementation; the recursion uses `MeshIndexing::Ij` so it is one level
+    // deep only.
+    if indexing == MeshIndexing::Xy && tensors.len() >= 2 {
+        let mut swapped: Vec<Tensor<T>> = Vec::with_capacity(tensors.len());
+        swapped.push(tensors[1].clone());
+        swapped.push(tensors[0].clone());
+        swapped.extend(tensors[2..].iter().cloned());
+        let mut grids = meshgrid_indexing(&swapped, MeshIndexing::Ij)?;
+        // Swap the first two output grids back (`:4470-4472`).
+        grids.swap(0, 1);
+        return Ok(grids);
     }
 
     let all_cuda = tensors.iter().all(|t| t.is_cuda());
@@ -644,12 +774,72 @@ mod tests {
     }
 
     #[test]
-    fn test_histc_clamps() {
+    fn test_histc_skips_out_of_range() {
+        // torch.histc(tensor([-1, 5, 0.5]), bins=2, min=0, max=2) -> [1, 0]:
+        // -1 (< min) and 5 (> max) are SKIPPED (not clamped); only 0.5 lands
+        // in bin 0. Matches torch's `if (bVal >= minvalue && bVal <= maxvalue)`
+        // guard (aten/src/ATen/native/cuda/SummaryOps.cu:92) and ferrotorch's
+        // GPU histc path (#1650). Previously this asserted the wrong clamp
+        // behavior ([2, 1]).
         let input = tensor_1d(&[-1.0, 5.0, 0.5]);
         let hist = histc(&input, 2, 0.0, 2.0).unwrap();
         let data = hist.data().unwrap();
-        // -1.0 clamps to bin 0, 5.0 clamps to bin 1, 0.5 is bin 0
-        assert_eq!(data, &[2.0, 1.0]);
+        assert_eq!(data, &[1.0, 0.0]);
+    }
+
+    #[test]
+    fn test_histc_skips_nan() {
+        // NaN fails both `>= min` and `<= max`, so it is skipped like torch.
+        let input = tensor_1d(&[0.5, f32::NAN, 1.5]);
+        let hist = histc(&input, 2, 0.0, 2.0).unwrap();
+        assert_eq!(hist.data().unwrap(), &[1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_histc_default_minmax_infers_range() {
+        // torch.histc(tensor([1,2,3,4,5]), bins=4) passes min=max=0 -> range
+        // inferred [1,5] -> [1,1,1,2] (SummaryOps.cu:328-331).
+        let input = tensor_1d(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let hist = histc(&input, 4, 0.0, 0.0).unwrap();
+        assert_eq!(hist.data().unwrap(), &[1.0, 1.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_histc_default_minmax_all_equal_widens() {
+        // torch.histc(tensor([3,3,3]), bins=4) -> aminmax = [3,3], widened to
+        // [2,4] (SummaryOps.cu:333-335) -> the three 3.0s land in bin 2.
+        let input = tensor_1d(&[3.0, 3.0, 3.0]);
+        let hist = histc(&input, 4, 0.0, 0.0).unwrap();
+        assert_eq!(hist.data().unwrap(), &[0.0, 0.0, 3.0, 0.0]);
+    }
+
+    // --- meshgrid 'xy' ---
+
+    #[test]
+    fn test_meshgrid_xy() {
+        // torch.meshgrid([1,2,3],[4,5], indexing='xy') -> grids of shape [2,3]
+        // with grid0 = [1,2,3,1,2,3], grid1 = [4,4,4,5,5,5]
+        // (TensorShape.cpp:4433-4438,4470-4472).
+        let x = tensor_1d(&[1.0, 2.0, 3.0]);
+        let y = tensor_1d(&[4.0, 5.0]);
+        let grids = meshgrid_indexing(&[x, y], MeshIndexing::Xy).unwrap();
+        assert_eq!(grids.len(), 2);
+        assert_eq!(grids[0].shape(), &[2, 3]);
+        assert_eq!(grids[1].shape(), &[2, 3]);
+        assert_eq!(grids[0].data().unwrap(), &[1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
+        assert_eq!(grids[1].data().unwrap(), &[4.0, 4.0, 4.0, 5.0, 5.0, 5.0]);
+    }
+
+    #[test]
+    fn test_meshgrid_ij_default_unchanged() {
+        // meshgrid(..) and meshgrid_indexing(.., Ij) agree (default preserved).
+        let x = tensor_1d(&[1.0, 2.0, 3.0]);
+        let y = tensor_1d(&[4.0, 5.0]);
+        let a = meshgrid(&[x.clone(), y.clone()]).unwrap();
+        let b = meshgrid_indexing(&[x, y], MeshIndexing::Ij).unwrap();
+        assert_eq!(a[0].data().unwrap(), b[0].data().unwrap());
+        assert_eq!(a[1].data().unwrap(), b[1].data().unwrap());
+        assert_eq!(a[0].shape(), &[3, 2]);
     }
 
     // --- meshgrid ---

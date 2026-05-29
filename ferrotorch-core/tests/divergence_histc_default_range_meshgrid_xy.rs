@@ -39,7 +39,7 @@
 //! These are CPU-host tests (the `min>=max` guard and the `meshgrid` signature
 //! are device-agnostic — the divergence reproduces without a GPU).
 
-use ferrotorch_core::{Tensor, TensorStorage, histc, meshgrid};
+use ferrotorch_core::{MeshIndexing, Tensor, TensorStorage, histc, meshgrid_indexing};
 
 fn cpu_f32(data: &[f32]) -> Tensor<f32> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), vec![data.len()], false)
@@ -56,9 +56,8 @@ fn data_f32(t: &Tensor<f32>) -> Vec<f32> {
 /// Upstream `torch.histc(tensor([1,2,3,4,5]), bins=4, min=0, max=0)` returns
 /// `[1,1,1,2]` (range inferred as `[1,5]`); ferrotorch returns
 /// `Err(InvalidArgument { "histc: min (0) must be < max (0)" })`.
-/// Tracking: #1652
+/// Tracking: #1652 (fixed)
 #[test]
-#[ignore = "divergence: histc(min==max==0) must infer range from data (torch SummaryOps.cu:328); ferrotorch errors; tracking #1652"]
 fn divergence_histc_default_minmax_infers_data_range() {
     let input = cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0]);
     // torch.histc(tensor([1,2,3,4,5]), bins=4) == torch.histc(..., min=0, max=0)
@@ -73,9 +72,8 @@ fn divergence_histc_default_minmax_infers_data_range() {
 /// (`SummaryOps.cu:333-335`), giving range `[v-1, v+1]`.
 /// `torch.histc(tensor([3,3,3]), bins=4)` returns `[0,0,3,0]` (range `[2,4]`,
 /// the three `3.0`s land in bin 2). ferrotorch errors at the `min>=max` guard.
-/// Tracking: #1652
+/// Tracking: #1652 (fixed)
 #[test]
-#[ignore = "divergence: histc(min==max==0) all-equal data -> range [v-1,v+1] (torch SummaryOps.cu:333); ferrotorch errors; tracking #1652"]
 fn divergence_histc_default_minmax_all_equal_widens_range() {
     let input = cpu_f32(&[3.0, 3.0, 3.0]);
     // torch.histc(tensor([3,3,3]), bins=4) -> range [2,4] -> [0,0,3,0].
@@ -93,22 +91,20 @@ fn divergence_histc_default_minmax_all_equal_widens_range() {
 /// (shape `[3,2]`, `grid0=[1,1,2,2,3,3]`), so its output cannot equal torch's
 /// `'xy'` output — this test asserts the `'xy'` contract and fails because the
 /// only available API path yields `'ij'`.
-/// Tracking: #1652
+/// Tracking: #1652 (fixed). `meshgrid_indexing(.., MeshIndexing::Xy)` now
+/// reproduces torch's `indexing='xy'` by swapping the first two inputs and the
+/// first two output grids (`pytorch aten/src/ATen/native/TensorShape.cpp:4433-4438,4470-4472`).
 #[test]
-#[ignore = "divergence: meshgrid has no indexing='xy' (torch TensorShape.cpp:4433); ferrotorch hard-codes 'ij'; tracking #1652"]
 fn divergence_meshgrid_xy_indexing_unsupported() {
     let a = cpu_f32(&[1.0, 2.0, 3.0]);
     let b = cpu_f32(&[4.0, 5.0]);
-    // The ferrotorch API offers only the default 'ij' meshgrid — there is no
-    // way to request 'xy'. We compute what ferrotorch CAN produce and assert it
-    // equals torch's 'xy' result; it does not, pinning the missing-API gap.
-    let grids = meshgrid(&[a, b]).expect("meshgrid 'ij' (only available mode)");
+    let grids = meshgrid_indexing(&[a, b], MeshIndexing::Xy).expect("meshgrid indexing='xy'");
     assert_eq!(grids.len(), 2);
     // torch.meshgrid([1,2,3],[4,5], indexing='xy') -> grids of shape [2,3].
     assert_eq!(
         grids[0].shape(),
         &[2, 3],
-        "torch 'xy' grids are shape [2,3]; ferrotorch produces 'ij' shape [3,2]"
+        "torch 'xy' grids are shape [2,3]"
     );
     // torch 'xy' grid0 = [1,2,3,1,2,3]; grid1 = [4,4,4,5,5,5].
     assert_eq!(data_f32(&grids[0]), vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);

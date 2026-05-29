@@ -206,7 +206,10 @@ pub use nested::{NestedTensor, PackedNestedTensor, nested_scaled_dot_product_att
 pub use ops::cumulative::CumExtremeResult;
 pub use ops::indexing::{gather, masked_select, scatter, scatter_add, where_cond, where_cond_bt};
 pub use ops::scatter::scatter_add_segments;
-pub use ops::search::{bucketize, histc, meshgrid, searchsorted, topk, unique, unique_consecutive};
+pub use ops::search::{
+    MeshIndexing, bucketize, histc, meshgrid, meshgrid_indexing, searchsorted, topk, unique,
+    unique_consecutive,
+};
 pub use ops::tensor_ops::{cdist, diag, diagflat, roll, tril, triu};
 pub use pruning::{apply_2_4_mask, magnitude_prune, sparsity_ratio};
 pub use quantize::{

@@ -76,7 +76,8 @@ use ferrotorch_core::grad_fns::shape::{
 };
 use ferrotorch_core::ops::indexing::{gather, scatter, scatter_add, where_cond};
 use ferrotorch_core::ops::search::{
-    bucketize, histc, meshgrid, searchsorted, topk, unique, unique_consecutive,
+    MeshIndexing, bucketize, histc, meshgrid, meshgrid_indexing, searchsorted, topk, unique,
+    unique_consecutive,
 };
 use ferrotorch_core::ops::tensor_ops::{cdist, diag, diagflat, roll, tril, triu};
 use ferrotorch_core::shape::{
@@ -2881,6 +2882,42 @@ fn cpu_meshgrid() {
         count += 1;
     }
     assert!(count > 0, "no meshgrid fixtures executed");
+}
+
+/// `meshgrid_indexing(.., MeshIndexing::Xy)` mirrors `torch.meshgrid(*t,
+/// indexing='xy')` (`aten/src/ATen/native/TensorShape.cpp:4433-4438,4470-4472`):
+/// the first two inputs and the first two output grids are swapped. Live torch
+/// 2.11.0+cu130 oracle (R-CHAR-3, named reference — not copied from ferrotorch):
+///   torch.meshgrid([1,2,3],[4,5], indexing='xy')[0] -> [1,2,3,1,2,3] (shape [2,3])
+///   torch.meshgrid([1,2,3],[4,5], indexing='xy')[1] -> [4,4,4,5,5,5]
+/// `MeshIndexing::Ij` reproduces the default `meshgrid` result unchanged.
+#[test]
+fn cpu_meshgrid_indexing_xy() {
+    let x = make_cpu_f32(&[1.0, 2.0, 3.0], &[3], false);
+    let y = make_cpu_f32(&[4.0, 5.0], &[2], false);
+
+    let xy = meshgrid_indexing(&[x.clone(), y.clone()], MeshIndexing::Xy).expect("xy");
+    assert_eq!(xy.len(), 2);
+    assert_eq!(xy[0].shape(), &[2, 3]);
+    assert_eq!(xy[1].shape(), &[2, 3]);
+    check_f32(
+        "meshgrid xy grid[0]",
+        &read_back_f32(&xy[0]),
+        &[1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
+        tolerance::F32_BITEXACT,
+    );
+    check_f32(
+        "meshgrid xy grid[1]",
+        &read_back_f32(&xy[1]),
+        &[4.0, 4.0, 4.0, 5.0, 5.0, 5.0],
+        tolerance::F32_BITEXACT,
+    );
+
+    // Ij convention matches the default `meshgrid`.
+    let ij = meshgrid_indexing(&[x.clone(), y.clone()], MeshIndexing::Ij).expect("ij");
+    let def = meshgrid(&[x, y]).expect("default ij");
+    assert_eq!(read_back_f32(&ij[0]), read_back_f32(&def[0]));
+    assert_eq!(read_back_f32(&ij[1]), read_back_f32(&def[1]));
 }
 
 #[test]
