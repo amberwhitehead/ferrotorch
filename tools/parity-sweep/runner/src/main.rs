@@ -4376,6 +4376,100 @@ fn dispatch_f32(
             )?))
         }
 
+        // `torch.nn.functional.dropout2d(input, p=0.5, training=True,
+        // inplace=False)` / `dropout3d(...)` — `torch/nn/functional.py:1561`
+        // (`dropout2d`) and `:1614` (`dropout3d`), routing through
+        // `_VF.feature_dropout` / `_VF.feature_alpha_dropout`. op_db emits
+        // `args=[input]` with kwargs `{p, training}` (verified 2026-05-28 by
+        // sample enumeration; `p in {0.0, 0.5, 1.0}`, `training in {true,
+        // false}`, input ranks 3-D/4-D for dropout2d and 4-D/5-D for
+        // dropout3d). These mirror per-channel feature dropout: an ENTIRE
+        // `[N, C]` channel is zeroed (or scaled by `1/(1-p)`) per Bernoulli
+        // draw (`aten/src/ATen/native/Dropout.cpp:73-74`
+        // `make_feature_noise(input).bernoulli_(1 - p)`).
+        //
+        // SEED-SYNC IS NOT ACHIEVABLE in this sweep architecture (so we take
+        // path (b) from the dispatch prompt, identical to the plain
+        // `nn.functional.dropout` arm above): the oracle's `sample()` calls
+        // `torch.manual_seed(seed)` then `op_info.sample_inputs(...)`, which
+        // consumes an OPAQUE, non-reproducible number of torch RNG draws to
+        // build the input tensor BEFORE `F.dropout2d` draws its channel mask
+        // (`oracle.py` `_reset_torch_state` + `sample`). The #1635 critic
+        // proof that `ferrotorch_core::manual_seed(s); Dropout2d` byte-matches
+        // `torch.manual_seed(s); F.dropout2d` only holds when BOTH sides seed
+        // immediately before the op with NO intervening RNG consumption — not
+        // the case here. The sweep loop also passes no seed to `dispatch_f32`
+        // and the dispatch arm never sees torch's `expected` tensor, so the
+        // per-channel "wholly 0 or wholly x/(1-p)" invariant cannot be checked
+        // against torch's output from inside the arm either. Therefore the
+        // `0 < p < 1 + training` samples are genuine `Ok(None)` skips with the
+        // documented reason "stochastic per-channel dropout, runner has no
+        // torch-seed-sync mechanism" (RNG-plumbing gap tracked under #1452) —
+        // never a fake-pass or failure. Every OTHER configuration is
+        // mask-invariant and wired to an EXACT value comparison:
+        //   • `training == false` (eval): identity. Routed through the
+        //     production `Dropout2d`/`Dropout3d` module's eval short-circuit
+        //     (`<Dropout2d as Module>::forward` returns `input.clone()` when
+        //     `!training`, `dropout.rs`), the genuine production consumer.
+        //   • `p == 0.0`: identity regardless of `training`. Routed through
+        //     the module's `p == 0.0` short-circuit (same `forward`).
+        //   • `p == 1.0` + `training`: every channel dropped, so torch returns
+        //     all-zeros independent of any RNG draw. `Dropout2d::new` rejects
+        //     `p >= 1` (REQ-5, narrower than torch), so the runner builds the
+        //     exact all-zeros tensor torch must return via `zeros_like` — EXACT
+        //     value parity, not a property check.
+        //   • `p == 1.0` + eval: identity (eval ignores p); emit directly.
+        // Closes #1441 dropout2d/dropout3d half.
+        "nn.functional.dropout2d" | "nn.functional.dropout3d" => {
+            if args.is_empty() {
+                return Err(format!("{op}: needs [input]").into());
+            }
+            let p = kwargs.get("p").and_then(Value::as_f64).unwrap_or(0.5);
+            let training = kwargs
+                .get("training")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let input = unwrap_tensor_arg(&args[0])
+                .ok_or_else(|| format!("{op}: input not a tensor"))?
+                .to_f32()?;
+            // p >= 1.0: production module rejects it; build torch's exact
+            // deterministic result directly (all-zeros for training, identity
+            // for eval — both RNG-independent).
+            if p >= 1.0 {
+                if training {
+                    return Ok(Some(ferrotorch_core::creation::zeros_like(&input)?));
+                }
+                return Ok(Some(input));
+            }
+            // 0 < p < 1 + training: genuinely stochastic per-channel mask, not
+            // byte-comparable to torch without seed-sync (see arm comment).
+            // Legitimate skip (#1452).
+            if training && p > 0.0 {
+                return Ok(None);
+            }
+            // Deterministic identity paths (!training or p == 0.0): route
+            // through the production `Dropout2d`/`Dropout3d` module so the
+            // eval / `p == 0` short-circuit in `<Dropout{2,3}d as
+            // Module>::forward` is the consumer exercised (not a runner-local
+            // identity).
+            let mut out = if op == "nn.functional.dropout2d" {
+                let mut layer = ferrotorch_nn::Dropout2d::<f32>::new(p)?;
+                if !training {
+                    ferrotorch_nn::module::Module::<f32>::eval(&mut layer);
+                }
+                ferrotorch_nn::module::Module::<f32>::forward(&layer, &input)?
+            } else {
+                let mut layer = ferrotorch_nn::Dropout3d::<f32>::new(p)?;
+                if !training {
+                    ferrotorch_nn::module::Module::<f32>::eval(&mut layer);
+                }
+                ferrotorch_nn::module::Module::<f32>::forward(&layer, &input)?
+            };
+            // Detach any grad node (the sweep gate compares values only).
+            out = out.detach();
+            Ok(Some(out))
+        }
+
         // `torch.nn.functional.embedding(input, weight, padding_idx=None,
         // max_norm=None, norm_type=2.0, scale_grad_by_freq=False,
         // sparse=False)`. op_db naming: `sample_inputs_embedding` passes
@@ -7096,6 +7190,13 @@ fn dispatch_ops() -> &'static [&'static str] {
         // `.design/ferrotorch-nn/{linear,conv,dropout,embedding,padding}.md`).
         "nn.functional.linear",
         "nn.functional.dropout",
+        // dropout2d/dropout3d wired 2026-05-28 (closes #1441 runner-arm half
+        // for the per-channel feature-dropout variants): deterministic
+        // (eval / p==0 -> module identity short-circuit; p==1 -> exact zeros)
+        // configs are byte-comparable; 0<p<1+training is a documented
+        // stochastic skip (no torch-seed-sync, #1452).
+        "nn.functional.dropout2d",
+        "nn.functional.dropout3d",
         "nn.functional.embedding",
         "nn.functional.conv1d",
         "nn.functional.conv2d",

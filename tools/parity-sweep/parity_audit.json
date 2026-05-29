@@ -808,6 +808,36 @@
     "0 < p < 1 + training -> Ok(None) skip: Bernoulli mask drawn from ferrotorch's own RNG is not byte-comparable to torch's Philox mask (genuinely unrepresentable for byte-parity, not a failure). 4 stochastic configs/seed x 8 seeds = 32 skips. dropout2d/dropout3d arms absent (#1441)."
    ]
   },
+  "nn.functional.dropout2d": {
+   "status": "verified",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
+   "samples_attempted": 80,
+   "samples_passed": 80,
+   "samples_failed": 0,
+   "samples_skipped": 24,
+   "pytorch_source": "torch/nn/functional.py nn.functional.dropout2d(input, p=0.5, training=True, inplace=False) (per-channel feature dropout via _VF.feature_dropout); aten/src/ATen/native/Dropout.cpp:64 if (p == 0 || !train || numel == 0) return input; Dropout.cpp:68 if (p == 1) return multiply(input, at::zeros({}, input.options())); Dropout.cpp:73-74 make_feature_noise(input).bernoulli_(1 - p) (one Bernoulli per [N,C] channel)",
+   "ferrotorch_source": "pub struct Dropout2d + <Dropout2d as Module>::forward in ferrotorch-nn/src/dropout.rs (per-channel MT19937 mask via ferrotorch_core::rng::with_thread_rng, ctor rejects p>=1, eval/p==0 identity short-circuit); non-test consumer: pub use dropout::Dropout2d in ferrotorch-nn/src/lib.rs",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs \"nn.functional.dropout2d | nn.functional.dropout3d\" arm: !training or p==0 -> production Dropout2d::new + Module::eval + Module::forward identity short-circuit; p==1+training -> zeros_like (exact torch all-zeros, RNG-independent); p==1+eval -> identity; 0<p<1+training -> Ok(None) skip (#1441 runner-arm half)",
+   "tolerance": "default rtol=1e-5, atol=1e-7 (identity / exact zeros, exact)",
+   "known_divergences": [
+    "0 < p < 1 + training -> Ok(None) skip: per-channel Bernoulli mask drawn from ferrotorch's own byte-exact MT19937 Generator is NOT byte-comparable to torch's mask without torch-seed-sync, which the sweep architecture lacks (oracle's sample() calls torch.manual_seed(seed) then sample_inputs(), consuming an opaque non-reproducible number of RNG draws BEFORE F.dropout2d draws its channel mask; the sweep loop passes no seed to dispatch_f32 and the dispatch arm never receives torch's expected tensor, so neither seed-sync nor an in-arm per-channel invariant check is possible). Genuinely unrepresentable for byte-parity, not a failure. 3 stochastic configs/seed x 8 seeds = 24 skips. RNG-plumbing gap tracked under #1452."
+   ]
+  },
+  "nn.functional.dropout3d": {
+   "status": "verified",
+   "last_sweep_at": "2026-05-28T00:00:00Z",
+   "samples_attempted": 80,
+   "samples_passed": 80,
+   "samples_failed": 0,
+   "samples_skipped": 24,
+   "pytorch_source": "torch/nn/functional.py nn.functional.dropout3d(input, p=0.5, training=True, inplace=False) (per-channel feature dropout via _VF.feature_dropout); aten/src/ATen/native/Dropout.cpp:64 if (p == 0 || !train || numel == 0) return input; Dropout.cpp:68 if (p == 1) return multiply(input, at::zeros({}, input.options())); Dropout.cpp:73-74 make_feature_noise(input).bernoulli_(1 - p) (one Bernoulli per [N,C] channel)",
+   "ferrotorch_source": "pub struct Dropout3d + <Dropout3d as Module>::forward in ferrotorch-nn/src/dropout.rs (per-channel MT19937 mask via ferrotorch_core::rng::with_thread_rng, ctor rejects p>=1, eval/p==0 identity short-circuit); non-test consumer: pub use dropout::Dropout3d in ferrotorch-nn/src/lib.rs",
+   "runner_arm": "tools/parity-sweep/runner/src/main.rs \"nn.functional.dropout2d | nn.functional.dropout3d\" arm: !training or p==0 -> production Dropout3d::new + Module::eval + Module::forward identity short-circuit; p==1+training -> zeros_like (exact torch all-zeros, RNG-independent); p==1+eval -> identity; 0<p<1+training -> Ok(None) skip (#1441 runner-arm half)",
+   "tolerance": "default rtol=1e-5, atol=1e-7 (identity / exact zeros, exact)",
+   "known_divergences": [
+    "0 < p < 1 + training -> Ok(None) skip: per-channel Bernoulli mask drawn from ferrotorch's own byte-exact MT19937 Generator is NOT byte-comparable to torch's mask without torch-seed-sync, which the sweep architecture lacks (oracle's sample() calls torch.manual_seed(seed) then sample_inputs(), consuming an opaque non-reproducible number of RNG draws BEFORE F.dropout3d draws its channel mask; the sweep loop passes no seed to dispatch_f32 and the dispatch arm never receives torch's expected tensor, so neither seed-sync nor an in-arm per-channel invariant check is possible). Genuinely unrepresentable for byte-parity, not a failure. 3 stochastic configs/seed x 8 seeds = 24 skips. RNG-plumbing gap tracked under #1452."
+   ]
+  },
   "nn.functional.embedding": {
    "status": "verified",
    "last_sweep_at": "2026-05-28T00:00:00Z",

@@ -179,11 +179,18 @@ the upstream contract being deviated from is
   EXACT alpha affine (`Dropout.cpp:73-79`). Seed-reproducible vs torch
   (#1636). Closes #1448.
 - REQ-14: NOT-STARTED — `Dropout2d/1d/3d` GPU forward is missing;
-  CUDA inputs return `NotImplementedOnCuda`. Blocker #1441
-  (umbrella runner-arm gap also tracks the GPU fast path; both
-  resolve once `dropout2d` and friends are wired through
-  `parity-sweep` runner + GPU kernel registration). The CPU paths
-  are end-to-end functional and tested.
+  CUDA inputs return `NotImplementedOnCuda`. The parity-sweep
+  runner-arm half of umbrella #1441 is now CLOSED: the
+  `nn.functional.dropout2d` / `nn.functional.dropout3d` arms in
+  `tools/parity-sweep/runner/src/main.rs` route every
+  mask-invariant configuration to an EXACT value comparison
+  (`!training` / `p == 0` through the `Dropout2d`/`Dropout3d` module
+  identity short-circuit; `p == 1` through `zeros_like` / identity
+  since the ctor rejects `p >= 1`), sweeping 80/104 passed, 24
+  stochastic-mask skips, 0 failed at `--seeds 8`. REQ-14 remains
+  NOT-STARTED solely because the GPU forward kernel is still absent;
+  that GPU-kernel work is the remaining open item (the CPU paths are
+  end-to-end functional, tested, and now parity-swept).
 
 ## Acceptance Criteria
 
@@ -218,11 +225,17 @@ the upstream contract being deviated from is
 - [x] AC-10: `FeatureAlphaDropout` — implemented, per-channel MT19937
   mask + torch alpha affine, seed-reproducible vs live torch
   (`feature_alpha_dropout_seed42_matches_torch`). Closes #1448.
-- [ ] AC-11: Dropout2d / 1d / 3d GPU forward — blocker #1441 +
-  internal GPU-kernel work.
-- [ ] AC-12: parity-sweep arms wired — #1441. `nn.functional.dropout`
-  is wired (120/152, 0 failed; 32 legitimate stochastic-mask skips);
-  `dropout2d` / `dropout3d` remain unwired, so AC-12 stays open.
+- [ ] AC-11: Dropout2d / 1d / 3d GPU forward — internal GPU-kernel
+  work (the runner-arm half of #1441 is closed; only the GPU forward
+  kernel remains).
+- [x] AC-12: parity-sweep arms wired — #1441 runner-arm half closed.
+  `nn.functional.dropout` is wired (120/152, 0 failed; 32 legitimate
+  stochastic-mask skips); `nn.functional.dropout2d` (80/104, 0 failed;
+  24 stochastic-mask skips) and `nn.functional.dropout3d` (80/104, 0
+  failed; 24 skips) are now wired in
+  `tools/parity-sweep/runner/src/main.rs` via the production
+  `Dropout2d`/`Dropout3d` module identity short-circuit + the
+  `zeros_like` `p == 1` exact result.
 
 ## Architecture
 
@@ -348,8 +361,35 @@ stochastic configs/seed × 8 seeds): these draw a Bernoulli mask from
 ferrotorch's own RNG, which is NOT byte-comparable to torch's Philox
 mask, so they are genuinely unrepresentable for byte-parity — a
 LEGITIMATE `Ok(None)` skip, never a fake-pass or failure (the
-RNG-equivalence question is tracked separately). `dropout2d` /
-`dropout3d` still have NO runner arm.
+RNG-equivalence question is tracked separately).
+
+The `nn.functional.dropout2d` / `nn.functional.dropout3d` arms are
+ALSO wired in `tools/parity-sweep/runner/src/main.rs` (#1441
+runner-arm half). They mirror the plain-`dropout` strategy for the
+per-channel feature variants: `!training` and `p == 0` route through
+the production `Dropout2d`/`Dropout3d` module's eval / `p == 0`
+identity short-circuit (`<Dropout2d as Module>::forward` returns
+`input.clone()`, `dropout.rs`); `p == 1` + `training` builds the exact
+all-zeros tensor torch returns via `zeros_like` (the ctor rejects
+`p >= 1`); `p == 1` + eval is identity. Sweep `--seeds 8`: **80/104
+passed, 24 skipped, 0 failed** for EACH of dropout2d / dropout3d.
+The 24 skips are the `0 < p < 1` + `training` samples (3 stochastic
+configs/seed × 8 seeds): a per-channel Bernoulli mask drawn from
+ferrotorch's own MT19937 that is NOT byte-comparable to torch without
+torch-seed-sync. Seed-sync is genuinely unavailable in this sweep
+architecture: the oracle's `sample()` calls `torch.manual_seed(seed)`
+then `op_info.sample_inputs(...)`, consuming an opaque, non-reproducible
+number of torch RNG draws BEFORE `F.dropout2d` draws its channel mask,
+so the #1635 byte-match proof (which requires both sides to seed
+immediately before the op with no intervening consumption) does not
+apply; additionally the sweep loop passes no seed to `dispatch_f32`
+and the dispatch arm never receives torch's `expected` tensor, so
+neither seed-sync nor an in-arm per-channel invariant check is
+possible. These are therefore LEGITIMATE `Ok(None)` skips (RNG-plumbing
+gap tracked under #1452), never a fake-pass or failure. Audit entries
+`nn.functional.dropout2d` / `nn.functional.dropout3d` in
+`parity_audit.json` record `status: verified` (80/80 attempted passed,
+0 failed).
 
 ## Verification
 
@@ -365,9 +405,10 @@ Tests in `mod tests` of `dropout.rs` (~25 tests):
 - `test_alpha_dropout_preserves_mean_and_variance`.
 - `test_alpha_dropout_eval_identity`.
 
-Parity-sweep smoke commands (`nn.functional.dropout` now 120/152
-passed, 32 stochastic-mask skips, 0 failed; `dropout2d`/`dropout3d`
-still unwired):
+Parity-sweep smoke commands (`nn.functional.dropout` 120/152 passed,
+32 stochastic-mask skips, 0 failed; `nn.functional.dropout2d` 80/104
+passed, 24 skips, 0 failed; `nn.functional.dropout3d` 80/104 passed,
+24 skips, 0 failed — all wired #1441):
 
 ```bash
 for OP in nn.functional.dropout nn.functional.dropout2d nn.functional.dropout3d; do
@@ -394,4 +435,4 @@ Expected grep count after blocker #1441 closes: `>= 1` for each.
 | REQ-11 | SHIPPED | impl: 5 `Module<T> for <DropoutKind><T>` impl blocks in `dropout.rs`, each returning `vec![]` for parameters; non-test consumer: `ferrotorch_optim::Optimizer` walks `Module::parameters_mut()` of containers; dropout returns an empty list (correct: dropout has no trainable parameters). |
 | REQ-12 | SHIPPED | impl: `with_inplace` builder + `inplace` getter + `inplace` field on all six dropout structs, plus the autograd-safe `apply_inplace_dropout` helper (errors on grad-requiring leaf, out-of-place fallback on grad-requiring non-leaf, raw `write_inplace`/`Tensor::update_data` only on the non-grad-tracked path) and the `if self.inplace { apply_inplace_dropout(input, &output_data)? }` branch inside `<Dropout/Dropout1d/Dropout2d/Dropout3d as Module>::forward` in `dropout.rs`, mirroring `_VF.dropout_`/`_VF.feature_dropout_` at `torch/nn/functional.py:1449,1516,1579,1629` on the memory-opt path and deviating (R-DEV-7) where ferrotorch lacks torch's leaf guard (`VariableTypeUtils.h:80-84`) and version counter (`saved_variable.cpp:170-186`); `AlphaDropout`/`FeatureAlphaDropout` carry the field for ABI parity but match torch's module forward which never forwards `inplace` (`dropout.py:265-269,319-323`). Non-test production consumer: the `if self.inplace` branch is on the live forward path of `<Dropout as Module>::forward` in `dropout.rs`, exercised by every model that constructs a dropout via `crate::dropout::Dropout` — `ferrotorch-nn/src/lora.rs` (LoRA input dropout), `ferrotorch-vision/src/models/vgg.rs` / `inception.rs` (classifier head), `ferrotorch-graph/src/gcn.rs` (inter-layer dropout). The `inplace` field defaults `false`, so existing consumers see unchanged behavior. Closes #1446, #1580, #1581. |
 | REQ-13 | SHIPPED | impl: `pub struct FeatureAlphaDropout<T: Float>` + `FeatureAlphaDropoutBackward<T>` + `Module<T>` impl in `dropout.rs` — per-channel MT19937 keep-mask (`make_feature_noise` flat `[N,C]` Bernoulli, keep iff `u < 1-p`) broadcast over `[N, C, *]`, torch's EXACT alpha affine (`alpha = 1.7580993408473766`, kept = `a*x+alpha*a*p`, dropped = `-alpha*a+alpha*a*p`, `Dropout.cpp:73-79`), reproducing `torch.manual_seed(s); nn.FeatureAlphaDropout(p)` byte-for-byte (#1636, pinned by `divergence_dropout_seed_extended_and_feature_1634.rs::feature_alpha_dropout_seed42_matches_torch` vs live torch 2.11); closes #1448; non-test consumer: `pub use dropout::FeatureAlphaDropout` in `lib.rs` exposes the layer to downstream self-normalising-network model code. |
-| REQ-14 | NOT-STARTED | blocker #1441 (umbrella) — `Dropout2d/1d/3d` GPU forward absent (CUDA inputs return `NotImplementedOnCuda`). Parity-sweep runner arms also absent. |
+| REQ-14 | NOT-STARTED | `Dropout2d/1d/3d` GPU forward absent (CUDA inputs return `NotImplementedOnCuda` in `<Dropout2d as Module>::forward` in `dropout.rs`) — remaining open item is the GPU forward kernel. The parity-sweep runner-arm half of umbrella #1441 is CLOSED: `nn.functional.dropout2d` / `nn.functional.dropout3d` arms wired in `tools/parity-sweep/runner/src/main.rs` (deterministic configs route through the production `Dropout2d`/`Dropout3d` module identity short-circuit + `zeros_like` for `p == 1`; sweep 80/104 passed, 24 stochastic skips, 0 failed each at `--seeds 8`; audit entries `verified`). |
