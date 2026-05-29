@@ -276,14 +276,37 @@ impl<T: Float> LSTM<T> {
             let mut c = layer_c[l].clone();
             let mut next_layer_outputs: Vec<Tensor<T>> = Vec::with_capacity(seq_len);
 
+            // Hoist weight transposes outside the timestep loop — the recurrent
+            // weights are constant across timesteps, so transposing once and
+            // reusing the result across all steps eliminates seq_len-1 redundant
+            // transposes per layer (the #1679 redundant-constant-transpose class
+            // multiplied by sequence length, #1680).
+            //
+            // Autograd correctness: one transpose node now feeds every per-step
+            // matmul instead of seq_len separate transpose nodes. This is value-
+            // and gradient-identical to the per-step version: transpose_2d is a
+            // differentiable view/permute, and the autograd engine accumulates
+            // the contributions from all consuming matmuls back through the
+            // single transpose node into the weight Parameter exactly as it would
+            // have summed across the per-step transpose nodes.
+            //
+            // W_ih: [4*hs, layer_input_size], need x_t @ W_ih^T => [batch, 4*hs]
+            // W_hh: [4*hs, hs], need h @ W_hh^T => [batch, 4*hs]
+            //
+            // `transpose_2d` is a zero-copy stride swap producing a NON-
+            // contiguous view. `mm_differentiable` materializes a contiguous
+            // copy of any non-contiguous operand on every call, so the
+            // per-step loop would re-copy the (constant) transposed weight
+            // seq_len times. Materialize the contiguous transpose ONCE here so
+            // the per-step `mm` sees an already-contiguous operand and skips
+            // that copy. `contiguous()` is a differentiable identity-on-values
+            // op (ContiguousBackward), so this is value- and gradient-
+            // preserving (#1680).
+            let wih_t = transpose_2d(params.weight_ih.tensor())?.contiguous()?;
+            let whh_t = transpose_2d(params.weight_hh.tensor())?.contiguous()?;
+
             for x_t in &layer_outputs {
                 // gates = x_t @ W_ih^T + bias_ih + h @ W_hh^T + bias_hh
-                //
-                // W_ih: [4*hs, layer_input_size], need x_t @ W_ih^T => [batch, 4*hs]
-                // W_hh: [4*hs, hs], need h @ W_hh^T => [batch, 4*hs]
-                let wih_t = transpose_2d(params.weight_ih.tensor())?;
-                let whh_t = transpose_2d(params.weight_hh.tensor())?;
-
                 let xw = mm(x_t, &wih_t)?; // [batch, 4*hs]
                 let hw = mm(&h, &whh_t)?; // [batch, 4*hs]
 
@@ -699,9 +722,15 @@ impl<T: Float> GRU<T> {
             let mut next_layer_outputs: Vec<Tensor<T>> = Vec::with_capacity(seq_len);
 
             // Hoist weight transposes outside the timestep loop — these are
-            // constant across timesteps.
-            let wih_t = ferrotorch_core::grad_fns::shape::transpose_2d(params.weight_ih.tensor())?;
-            let whh_t = ferrotorch_core::grad_fns::shape::transpose_2d(params.weight_hh.tensor())?;
+            // constant across timesteps. Materialize the contiguous transpose
+            // once so the per-step `mm` skips re-copying the non-contiguous
+            // stride-swapped view every timestep (#1680). `contiguous()` is a
+            // differentiable identity-on-values op, so this is value- and
+            // gradient-preserving.
+            let wih_t = ferrotorch_core::grad_fns::shape::transpose_2d(params.weight_ih.tensor())?
+                .contiguous()?;
+            let whh_t = ferrotorch_core::grad_fns::shape::transpose_2d(params.weight_hh.tensor())?
+                .contiguous()?;
 
             // Check if we can use the fused GPU kernel.
             let use_fused_gpu =
@@ -1738,8 +1767,12 @@ impl<T: Float> RNN<T> {
             let mut h = layer_h[l].clone();
             let mut next_layer_outputs: Vec<Tensor<T>> = Vec::with_capacity(seq_len);
 
-            let wih_t = transpose_2d(params.weight_ih.tensor())?;
-            let whh_t = transpose_2d(params.weight_hh.tensor())?;
+            // Hoist + materialize the contiguous transpose once per layer so
+            // the per-step `mm` does not re-copy the constant non-contiguous
+            // transposed weight each timestep (#1680). `contiguous()` is a
+            // differentiable identity-on-values op — value/grad preserving.
+            let wih_t = transpose_2d(params.weight_ih.tensor())?.contiguous()?;
+            let whh_t = transpose_2d(params.weight_hh.tensor())?.contiguous()?;
 
             for x_t in &layer_outputs {
                 let xw = mm(x_t, &wih_t)?; // [batch, hs]
