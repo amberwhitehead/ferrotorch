@@ -1,13 +1,16 @@
-//! Divergence audit for `ferrotorch_nn::functional::dropout`'s torch-seed
-//! reproducibility claim (re-audit of commit 8af6a065e / #1441 dropout arm).
+//! Regression coverage for `ferrotorch_nn::functional::dropout`'s torch-seed
+//! reproducibility (closes #1634; originally a re-audit of commit 8af6a065e /
+//! #1441 dropout arm).
 //!
-//! `ferrotorch-nn/src/functional.rs:20` (REQ-3 "SHIPPED" row) and
-//! `:269-273` / `:349-352` claim functional dropout "mirrors / matches
-//! `torch.manual_seed(s); F.dropout(...)`" and "closes #1452". The mask is
+//! These tests WERE failing-pinned divergences (#1634): the CPU dropout mask
 //! drawn from `ferrotorch_core::rng` (MT19937) via `with_thread_rng` /
-//! `next_uniform_f64`. PyTorch's CPU dropout consumes its RNG stream
-//! differently (and uses Philox on CUDA), so the per-element mask is NOT
-//! byte-reproducible against torch under a shared seed.
+//! `next_uniform_f64` used the WRONG Bernoulli comparison (`u < p`, keep on
+//! `u >= p`) instead of torch's `noise.bernoulli_(1 - p)` semantics
+//! (keep iff `u < (1 - p)`, `aten/src/ATen/native/Dropout.cpp:74`,
+//! `aten/src/ATen/native/cpu/DistributionTemplates.h:388-399`,
+//! `TransformationHelper.h:171-173`). With the comparison corrected the mask
+//! is byte-identical to torch under a shared seed, so the `#[ignore]` is
+//! removed and these now serve as permanent regression coverage.
 //!
 //! Reference values produced by LIVE torch 2.11.0+cu130 (R-CHAR-3 — NOT copied
 //! from the ferrotorch side):
@@ -24,14 +27,10 @@ fn ones(n: usize) -> Tensor<f32> {
     Tensor::<f32>::from_storage(TensorStorage::cpu(vec![1.0f32; n]), vec![n], false).unwrap()
 }
 
-/// Divergence: ferrotorch's `functional::dropout` mask diverges from
-/// `torch.manual_seed(s); F.dropout(...)` despite the
-/// `ferrotorch-nn/src/functional.rs:351` claim that ferrotorch
-/// "matches `torch.manual_seed(s); F.dropout(...)`'s contract".
-/// Under a shared seed, upstream and ferrotorch zero DIFFERENT elements.
-/// Tracking: #1634
+/// Regression (#1634): ferrotorch's `functional::dropout` mask is byte-identical
+/// to `torch.manual_seed(s); F.dropout(...)` under a shared seed — same elements
+/// zeroed, same `1/(1-p)` scale on survivors.
 #[test]
-#[ignore = "divergence: dropout mask not torch-seed-reproducible (MT19937 stream consumed differently than torch CPU dropout / Philox); tracking #1634"]
 fn divergence_dropout_seed0_mask_matches_torch() {
     // Live-torch reference for manual_seed(0); F.dropout(ones(10),0.5,True).
     let torch_seed0: [f32; 10] = [0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0, 2.0, 0.0, 2.0];
@@ -47,9 +46,8 @@ fn divergence_dropout_seed0_mask_matches_torch() {
     );
 }
 
-/// Divergence: same as above for seed=1. Tracking: #1634
+/// Regression (#1634): same as above for seed=1.
 #[test]
-#[ignore = "divergence: dropout mask not torch-seed-reproducible; tracking #1634"]
 fn divergence_dropout_seed1_mask_matches_torch() {
     let torch_seed1: [f32; 10] = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0, 2.0, 0.0, 0.0, 2.0];
 
@@ -60,6 +58,29 @@ fn divergence_dropout_seed1_mask_matches_torch() {
     assert_eq!(
         got, torch_seed1,
         "dropout mask under manual_seed(1) must match torch's seeded mask"
+    );
+}
+
+/// Regression (#1634): the `Dropout` MODULE (struct) CPU forward path — which
+/// the fix rewired from xorshift64 to the byte-exact MT19937 generator — also
+/// reproduces `torch.manual_seed(0); F.dropout(ones(10), 0.5, True)`
+/// byte-for-byte. Guards the `<Dropout as Module>::forward` CPU branch, not just
+/// the stateless `functional::dropout`.
+#[test]
+fn dropout_module_seed0_mask_matches_torch() {
+    use ferrotorch_nn::Module;
+
+    let torch_seed0: [f32; 10] = [0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0, 2.0, 0.0, 2.0];
+
+    ferrotorch_core::rng::manual_seed(0);
+    let layer = ferrotorch_nn::Dropout::<f32>::new(0.5).unwrap();
+    let y = layer.forward(&ones(10)).unwrap();
+    let got = y.data_vec().unwrap();
+
+    assert_eq!(
+        got, torch_seed0,
+        "Dropout module forward under manual_seed(0) must match torch's seeded mask \
+         (CPU path rewired to MT19937 generator, #1634)"
     );
 }
 

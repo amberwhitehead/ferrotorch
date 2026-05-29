@@ -17,7 +17,7 @@
 //! |---|---|---|
 //! | REQ-1 | SHIPPED | `pub fn linear<T>` composes `transpose_2d` + `mm_differentiable` + bias broadcast mirroring `torch.nn.functional.linear`; consumed by `ferrotorch-train/examples/multi_epoch_train_dump.rs:61` (via the `use ferrotorch_nn::functional::{...}` import) and the public namespace re-export at `ferrotorch-nn/src/lib.rs:163`. |
 //! | REQ-2 | SHIPPED | `pub fn relu / sigmoid / tanh / gelu / gelu_with / silu / softmax / log_softmax / leaky_relu / hardtanh / hardtanh_with / relu6 / hardsigmoid / hardswish / log_sigmoid / softmin / softsign / tanhshrink / selu / softplus / softplus_with / elu / elu_with / mish / glu / prelu` each delegating to `ferrotorch_core::grad_fns::activation::*` (or composed from `arithmetic`/`trans`) mirror the matching `torch.nn.functional.*`; consumed by `ferrotorch-train/examples/multi_epoch_train_dump.rs:61` (`use ferrotorch_nn::functional::{mse_loss, relu};`). |
-//! | REQ-3 | SHIPPED | `pub fn dropout` + `struct DropoutBackward<T>` (stateless inverted dropout with mask sampled via `ferrotorch_core::rng::with_thread_rng`) mirrors `torch.nn.functional.dropout` and respects `ferrotorch_core::manual_seed` (closes #1452); consumed via the `ferrotorch-nn/src/lib.rs:163` `pub mod functional;` re-export plus `ferrotorch-train/examples/multi_epoch_train_dump.rs`-style consumers that need deterministic mask streams. |
+//! | REQ-3 | SHIPPED | `pub fn dropout` + `struct DropoutBackward<T>` (stateless inverted dropout, mask drawn from the byte-exact MT19937 `Generator` via `ferrotorch_core::rng::with_thread_rng` using torch's exact CPU bernoulli consumption — one `next_uniform_f64` per element in flat order, keep iff `u < 1-p`, survivors `× 1/(1-p)`) reproduces `torch.manual_seed(s); F.dropout(...)` BYTE-FOR-BYTE (closes #1452, #1634; pinned by `ferrotorch-nn/tests/divergence_dropout_seed_reproducibility.rs` vs live torch 2.11); consumed via the `ferrotorch-nn/src/lib.rs:163` `pub mod functional;` re-export plus `ferrotorch-train/examples/multi_epoch_train_dump.rs`-style consumers that need deterministic mask streams. |
 //! | REQ-4 | SHIPPED | `pub fn sum`, `pub fn mean` delegating to `ferrotorch_core::grad_fns::reduction::{sum, mean}` mirror `torch.sum` / `torch.mean`; consumed via `ferrotorch-nn/src/lib.rs:163` namespace re-export. |
 //! | REQ-5 | SHIPPED | `pub fn mse_loss`, `pub fn cross_entropy`, `pub fn l1_loss`, `pub fn binary_cross_entropy`, `pub fn binary_cross_entropy_with_logits`, `pub fn kl_div` mirror `torch.nn.functional.*`; consumed by `ferrotorch-train/examples/multi_epoch_train_dump.rs:61` (`use ferrotorch_nn::functional::{mse_loss, relu};`) driving a multi-epoch training loop. |
 //! | REQ-6 | SHIPPED | `pub fn normalize`, `pub fn cosine_similarity`, `pub fn pairwise_distance` mirror `torch.nn.functional.{normalize, cosine_similarity, pairwise_distance}`; consumed via `lib.rs:163` namespace re-export (Llama positional embeddings and triplet-loss training callsites). |
@@ -266,11 +266,20 @@ pub fn mean<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 // Dropout
 // ===========================================================================
 //
-// Mask sampling routes through `ferrotorch_core::rng::with_thread_rng` so the
-// global `manual_seed` controls every functional dropout draw (closes #1452 —
-// mirrors `torch.manual_seed(0); F.dropout(...)` determinism). Pre-fix, this
-// file kept a local xorshift64 seeded from system time + thread id, ignoring
-// `ferrotorch_core::manual_seed` entirely.
+// Mask sampling routes through `ferrotorch_core::rng::with_thread_rng` (the
+// byte-exact MT19937 `Generator`) using torch's EXACT CPU dropout consumption
+// — one `next_uniform_f64` draw per element in flat order, keep iff
+// `u < (1 - p)` — so `ferrotorch_core::manual_seed(s); functional::dropout(...)`
+// reproduces `torch.manual_seed(s); F.dropout(...)` BYTE-FOR-BYTE (closes
+// #1452, #1634; verified vs live torch 2.11 in
+// `ferrotorch-nn/tests/divergence_dropout_seed_reproducibility.rs`).
+//
+// History: the pre-#1452 code used a system-time xorshift64 that ignored
+// `manual_seed`. #1452's fix wired the MT19937 generator but used the WRONG
+// Bernoulli comparison (`u < p`, i.e. keep on `u >= p`), so the mask was
+// deterministic-but-NOT-torch-matching (#1634). The fix here is the correct
+// `keep iff u < (1 - p)` matching `noise.bernoulli_(1 - p)` at
+// `aten/src/ATen/native/Dropout.cpp:74`.
 
 /// Backward node for functional dropout.
 #[derive(Debug)]
@@ -346,15 +355,29 @@ pub fn dropout<T: Float>(input: &Tensor<T>, p: f64, training: bool) -> Ferrotorc
     let scale = T::from(1.0 / (1.0 - p)).unwrap();
     let zero = <T as num_traits::Zero>::zero();
 
-    // Route Bernoulli draws through the global manual_seed-controlled
-    // generator so `ferrotorch_core::manual_seed(s); functional::dropout(...)`
-    // is deterministic and matches `torch.manual_seed(s); F.dropout(...)`'s
-    // contract that user-set seeds drive every randomness source.
+    // Draw the Bernoulli keep-mask through the global manual_seed-controlled
+    // MT19937 generator using torch's EXACT CPU dropout consumption, so that
+    // `ferrotorch_core::manual_seed(s); functional::dropout(...)` reproduces
+    // `torch.manual_seed(s); F.dropout(...)` byte-for-byte.
+    //
+    // torch CPU dropout draws the mask via `noise.bernoulli_(1 - p)`
+    // (`aten/src/ATen/native/Dropout.cpp:74`), where the scalar bernoulli
+    // kernel (`aten/src/ATen/native/cpu/DistributionTemplates.h:388-399`)
+    // evaluates, per element in flat order:
+    //   `bernoulli_distribution<double>(1 - p)(gen)`
+    //     = `transformation::bernoulli<double>(uniform_real<double>(gen->random64(), 0, 1), 1 - p)`
+    //     = `uniform64 < (1 - p)`          (keep == 1)
+    // (`DistributionsHelper.h:107-113,219-222`, `TransformationHelper.h:84-89,171-173`).
+    // `uniform_real<double>(random64(), 0, 1)` is exactly
+    // `Generator::next_uniform_f64` (already byte-exact, rng.rs REQ-5), so the
+    // mask matches torch as long as we keep iff `u < (1 - p)` and scale
+    // survivors by `1/(1-p)` (`Dropout.cpp:81` `noise.div_(1 - p)`).
+    let keep_prob = 1.0 - p;
     let scaled_mask: Vec<T> = ferrotorch_core::rng::with_thread_rng(|g| {
         (0..numel)
             .map(|_| {
                 let u = g.next_uniform_f64();
-                if u < p { zero } else { scale }
+                if u < keep_prob { scale } else { zero }
             })
             .collect()
     });

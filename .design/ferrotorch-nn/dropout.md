@@ -20,7 +20,30 @@ AlphaDropout}` at `torch/nn/modules/dropout.py`. Element-wise
 the affine correction described in Klambauer et al. 2017. The GPU
 fast path uses Philox 4x32-10 CBRNG for reproducible mask
 generation. `FeatureAlphaDropout` is implemented (per-channel
-alpha-dropout). The `inplace` kwarg is threaded through all six
+alpha-dropout).
+
+The element-wise `Dropout` CPU forward path and the stateless
+`ferrotorch_nn::functional::dropout` draw their keep-mask from the
+byte-exact MT19937 `Generator` (`ferrotorch-core/src/rng.rs`) using
+torch's EXACT CPU dropout consumption: one `Generator::next_uniform_f64`
+draw per element in flat order, keep iff `u < (1 - p)`, survivors
+scaled by `1/(1-p)`. This mirrors `noise.bernoulli_(1 - p)` +
+`noise.div_(1 - p)` at `aten/src/ATen/native/Dropout.cpp:74,81`
+(scalar bernoulli kernel
+`aten/src/ATen/native/cpu/DistributionTemplates.h:388-399`,
+`bernoulli_distribution<double>` /
+`uniform_real_distribution<double>` at
+`aten/src/ATen/core/DistributionsHelper.h:107-113,219-222`,
+`transformation::bernoulli(val,p)=val<p` at
+`aten/src/ATen/core/TransformationHelper.h:171-173`). Result:
+`ferrotorch_core::manual_seed(s); dropout(...)` reproduces
+`torch.manual_seed(s); F.dropout(...)` BYTE-FOR-BYTE (closes #1634;
+pinned vs live torch 2.11 by
+`ferrotorch-nn/tests/divergence_dropout_seed_reproducibility.rs`).
+The per-channel feature variants (`Dropout{1,2,3}d`, `AlphaDropout`,
+`FeatureAlphaDropout`) draw per-channel (not per-element) decisions;
+byte-parity with torch's element-wise stream for those is tracked
+separately and is not covered here. The `inplace` kwarg is threaded through all six
 layers: the four standard dropouts (`Dropout`, `Dropout{1,2,3}d`)
 honor `inplace=true` in training via an **autograd-safe policy**
 (`apply_inplace_dropout`), mirroring torch's `_VF.dropout_` /
@@ -80,7 +103,10 @@ the upstream contract being deviated from is
   identity short-circuit. Training-mode applies a Bernoulli mask
   scaled by `1/(1-p)`. Mirrors upstream's
   `F.dropout(input, self.p, self.training, self.inplace)` call at
-  `dropout.py:Dropout.forward`.
+  `dropout.py:Dropout.forward`. The CPU keep-mask is drawn from the
+  byte-exact MT19937 `Generator` (`rng.rs`) with torch's exact
+  consumption (keep iff `next_uniform_f64() < (1 - p)`), so a shared
+  `manual_seed` reproduces torch's mask byte-for-byte (#1634).
 - REQ-3: GPU fast path — when `input.is_cuda()` and the GPU backend
   is registered, dispatches to `backend.dropout_philox_f32` which
   generates the mask on-device using Philox 4x32-10 and applies it
@@ -180,8 +206,13 @@ the upstream contract being deviated from is
 
 ### PRNG primitives
 
-`xorshift_seed` and `xorshift_next` in `dropout.rs` — the CPU PRNG
-used to generate per-element drop decisions on CPU. `philox_round`,
+The element-wise `Dropout` CPU forward draws its per-element keep
+decisions from the byte-exact MT19937 `Generator`
+(`ferrotorch_core::rng::with_thread_rng` + `next_uniform_f64`), NOT
+from xorshift — this is what makes it torch-seed-reproducible
+(#1634). `xorshift_seed` and `xorshift_next` in `dropout.rs` remain
+the CPU PRNG for the per-channel feature variants
+(`Dropout{1,2,3}d`, `AlphaDropout`). `philox_round`,
 `philox_4x32_10`, and `philox_dropout_mask` in `dropout.rs` — the
 GPU-compatible Philox CBRNG used so backward can deterministically
 regenerate the forward mask after a checkpoint restore.
@@ -196,8 +227,10 @@ regenerate the forward mask after a checkpoint restore.
    regenerates the mask CPU-side via `philox_dropout_mask` using
    the saved RNG state, uploads it to the input's device, and
    attaches `DropoutBackward { input, scaled_mask }`.
-3. CPU branch — `xorshift_next` per element + element-wise multiply
-   into the output buffer. Grad-aware via `DropoutBackward`.
+3. CPU branch — `with_thread_rng` + `next_uniform_f64` per element
+   (keep iff `u < (1 - p)`, the exact torch bernoulli consumption) +
+   element-wise multiply into the output buffer. Grad-aware via
+   `DropoutBackward`. Torch-seed-reproducible (#1634).
 
 ### `DropoutBackward` (REQ-4)
 
@@ -319,7 +352,7 @@ Expected grep count after blocker #1441 closes: `>= 1` for each.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub struct Dropout<T: Float>` in `dropout.rs` with `p`/`training` fields + ctor rejecting `p` outside `[0,1)`; non-test consumer: `Dropout::<T>::new(0.5)?` invoked in `ferrotorch-vision/src/models/vgg.rs` (the VGG classifier head dropout). |
-| REQ-2 | SHIPPED | impl: `<Dropout as Module>::forward` body with eval/`p==0` short-circuit + Bernoulli + scale in `dropout.rs`; non-test consumer: `Dropout::forward` is called on every forward pass through the VGG / Inception classifier (constructed in `vgg.rs` and `inception.rs`). |
+| REQ-2 | SHIPPED | impl: `<Dropout as Module>::forward` body with eval/`p==0` short-circuit + Bernoulli + scale in `dropout.rs`, CPU keep-mask drawn from the byte-exact MT19937 `Generator` via `ferrotorch_core::rng::with_thread_rng` + `next_uniform_f64` (keep iff `u < 1-p`, survivors `× 1/(1-p)`) reproducing `torch.manual_seed(s); F.dropout` byte-for-byte (#1634, pinned by `ferrotorch-nn/tests/divergence_dropout_seed_reproducibility.rs::dropout_module_seed0_mask_matches_torch` vs live torch 2.11); non-test consumer: `Dropout::forward` is called on every forward pass through the VGG / Inception classifier (constructed in `vgg.rs` and `inception.rs`). |
 | REQ-3 | SHIPPED | impl: `input.is_cuda() && backend = ferrotorch_core::gpu_dispatch::gpu_backend()` GPU branch in `<Dropout as Module>::forward` in `dropout.rs`; non-test consumer: any vision model run on CUDA (e.g. VGG/Inception fine-tuning with parameters on GPU) triggers this on every forward step. |
 | REQ-4 | SHIPPED | impl: `struct DropoutBackward<T>` + `GradFn` impl in `dropout.rs`; non-test consumer: every `loss.backward()` over a model containing `Dropout` traverses these nodes via the autograd engine. |
 | REQ-5 | SHIPPED | impl: `pub struct Dropout2d<T: Float>` + `Module` impl in `dropout.rs`; non-test consumer: `pub use dropout::Dropout2d` in `lib.rs` exposes for downstream vision/segmentation code. |

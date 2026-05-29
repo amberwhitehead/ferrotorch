@@ -470,17 +470,33 @@ impl<T: Float> Module<T> for Dropout<T> {
             }
         }
 
-        // CPU path.
-        let mut state = xorshift_seed();
-        let scaled_mask_vec: Vec<T> = (0..numel)
-            .map(|_| {
-                if xorshift_next(&mut state) < self.p {
-                    zero
-                } else {
-                    scale
-                }
-            })
-            .collect();
+        // CPU path — draw the keep-mask from the byte-exact MT19937
+        // `Generator` (`ferrotorch_core::rng`) using torch's EXACT CPU dropout
+        // consumption, so `ferrotorch_core::manual_seed(s); Dropout::forward`
+        // reproduces `torch.manual_seed(s); F.dropout(...)` byte-for-byte
+        // (#1634). torch draws the mask via `noise.bernoulli_(1 - p)`
+        // (`aten/src/ATen/native/Dropout.cpp:74`); the scalar bernoulli kernel
+        // (`aten/src/ATen/native/cpu/DistributionTemplates.h:388-399`)
+        // evaluates per element in flat order
+        // `transformation::bernoulli<double>(uniform_real<double>(gen->random64(), 0, 1), 1 - p)`
+        // = `uniform64 < (1 - p)` (keep == 1)
+        // (`DistributionsHelper.h:107-113,219-222`,
+        // `TransformationHelper.h:84-89,171-173`).
+        // `uniform_real<double>(random64(), 0, 1)` is exactly
+        // `Generator::next_uniform_f64` (rng.rs REQ-5, byte-exact); survivors
+        // are scaled by `1/(1-p)` (`Dropout.cpp:81` `noise.div_(1 - p)`).
+        let keep_prob = 1.0 - self.p;
+        let scaled_mask_vec: Vec<T> = ferrotorch_core::rng::with_thread_rng(|g| {
+            (0..numel)
+                .map(|_| {
+                    if g.next_uniform_f64() < keep_prob {
+                        scale
+                    } else {
+                        zero
+                    }
+                })
+                .collect()
+        });
 
         let input_data = input.data()?;
         let output_data: Vec<T> = input_data
