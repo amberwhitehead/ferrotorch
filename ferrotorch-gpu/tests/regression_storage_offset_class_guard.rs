@@ -100,7 +100,11 @@ fn arithmetic_mul_neg_abs_narrowed_offset_view_gpu_safe() {
     let n = narrowed_cuda_view().neg_t().expect("neg_t");
     assert_close(&host_f32(&n), &TORCH_NEG, "neg_t narrowed");
 
-    let a = narrowed_cuda_view().neg_t().unwrap().abs_t().expect("abs_t");
+    let a = narrowed_cuda_view()
+        .neg_t()
+        .unwrap()
+        .abs_t()
+        .expect("abs_t");
     assert_close(&host_f32(&a), &TORCH_ABS, "abs_t(neg) narrowed");
 }
 
@@ -119,7 +123,11 @@ fn prod_backward_through_contiguous_gpu_grads_intact() {
     let y = prod(&x).expect("prod");
     y.backward().expect("backward");
     let g = x.grad().expect("grad result").expect("grad present");
-    assert_close(&host_f32(&g), &TORCH_PROD_GRAD, "prod backward through contiguous");
+    assert_close(
+        &host_f32(&g),
+        &TORCH_PROD_GRAD,
+        "prod backward through contiguous",
+    );
 }
 
 #[test]
@@ -132,7 +140,11 @@ fn amax_backward_through_contiguous_gpu_grads_intact() {
     let y = amax(&x).expect("amax");
     y.backward().expect("backward");
     let g = x.grad().expect("grad result").expect("grad present");
-    assert_close(&host_f32(&g), &TORCH_AMAX_GRAD, "amax backward through contiguous");
+    assert_close(
+        &host_f32(&g),
+        &TORCH_AMAX_GRAD,
+        "amax backward through contiguous",
+    );
 }
 
 #[test]
@@ -145,5 +157,9 @@ fn sum_backward_through_contiguous_gpu_grads_intact() {
     let y = sum(&x).expect("sum");
     y.backward().expect("backward");
     let g = x.grad().expect("grad result").expect("grad present");
-    assert_close(&host_f32(&g), &TORCH_SUM_GRAD, "sum backward through contiguous");
+    assert_close(
+        &host_f32(&g),
+        &TORCH_SUM_GRAD,
+        "sum backward through contiguous",
+    );
 }

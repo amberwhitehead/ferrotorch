@@ -78,9 +78,18 @@ fn reaudit_1659_masked_invalid_gpu_transposed_values() {
     ensure_cuda_backend();
 
     // [2,3] row-major: [ [n0, +inf, n2], [-inf, nan, n5] ]
-    let base = [1.0_f32, f32::INFINITY, 3.0, f32::NEG_INFINITY, f32::NAN, 6.0];
+    let base = [
+        1.0_f32,
+        f32::INFINITY,
+        3.0,
+        f32::NEG_INFINITY,
+        f32::NAN,
+        6.0,
+    ];
 
-    let cpu_t = cpu_f32(&base, &[2, 3]).transpose(0, 1).expect("cpu transpose");
+    let cpu_t = cpu_f32(&base, &[2, 3])
+        .transpose(0, 1)
+        .expect("cpu transpose");
     assert!(!cpu_t.is_contiguous());
     assert_eq!(cpu_t.numel(), 6);
     let expected: Vec<bool> = masked_invalid(cpu_t).expect("cpu ref").mask().to_vec();
@@ -139,7 +148,10 @@ fn reaudit_1659_masked_invalid_gpu_contiguous_values() {
         .expect("cpu ref")
         .mask()
         .to_vec();
-    assert_eq!(cpu_mask, expected, "CPU masked.rs path agrees with reference");
+    assert_eq!(
+        cpu_mask, expected,
+        "CPU masked.rs path agrees with reference"
+    );
 
     let gpu = cpu_f32(&base, &[7]).to(Device::Cuda(0)).expect("upload");
     assert!(gpu.is_cuda() && gpu.is_contiguous());
@@ -169,7 +181,9 @@ fn reaudit_1659_masked_equal_gpu_signed_zero_and_nan() {
     let value = 0.0_f32;
 
     // --- transposed layout ---
-    let cpu_t = cpu_f32(&base, &[2, 3]).transpose(0, 1).expect("cpu transpose");
+    let cpu_t = cpu_f32(&base, &[2, 3])
+        .transpose(0, 1)
+        .expect("cpu transpose");
     let expected_t: Vec<bool> = masked_equal(cpu_t, value).expect("cpu ref").mask().to_vec();
     // Transposed logical order [-0.0, 1.0, +0.0, 0.0, nan, 2.0];
     // valid = (v != 0.0): [-0.0->F, 1.0->T, +0.0->F, 0.0->F, nan->T, 2.0->T].
@@ -248,7 +262,9 @@ fn reaudit_1659_masked_invalid_gpu_size_straddle_256() {
             "CPU masked.rs path matches reference at numel={numel}"
         );
 
-        let gpu = cpu_f32(&data, &[numel]).to(Device::Cuda(0)).expect("upload");
+        let gpu = cpu_f32(&data, &[numel])
+            .to(Device::Cuda(0))
+            .expect("upload");
         let mt = masked_invalid(gpu).unwrap_or_else(|e| {
             panic!("gpu masked_invalid must not error at numel={numel}: {e:?}")
         });
@@ -290,7 +306,9 @@ fn reaudit_1659_masked_equal_gpu_size_straddle_256() {
             "CPU masked_equal path matches reference at numel={numel}"
         );
 
-        let gpu = cpu_f32(&data, &[numel]).to(Device::Cuda(0)).expect("upload");
+        let gpu = cpu_f32(&data, &[numel])
+            .to(Device::Cuda(0))
+            .expect("upload");
         let mt = masked_equal(gpu, value)
             .unwrap_or_else(|e| panic!("gpu masked_equal must not error at numel={numel}: {e:?}"));
         assert_eq!(
@@ -328,7 +346,9 @@ fn reaudit_1659_masked_invalid_f64_gpu_size_straddle_256() {
             .collect();
         let expected: Vec<bool> = data.iter().map(|v| v.is_finite()).collect();
 
-        let gpu = cpu_f64(&data, &[numel]).to(Device::Cuda(0)).expect("upload f64");
+        let gpu = cpu_f64(&data, &[numel])
+            .to(Device::Cuda(0))
+            .expect("upload f64");
         let mt = masked_invalid(gpu)
             .unwrap_or_else(|e| panic!("gpu f64 masked_invalid at numel={numel}: {e:?}"));
         assert_eq!(mt.mask().len(), numel, "f64 mask length numel={numel}");

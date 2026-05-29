@@ -154,12 +154,7 @@ const TORCH_I0: [f32; 6] = [
 const TORCH_NDTR: [f32; 6] = [0.998_650_07, 0.999_968_3, 0.999_999_7, 1.0, 1.0, 1.0];
 // torch.exp(full[1:4]) — live torch CPU reference.
 const TORCH_EXP: [f32; 6] = [
-    20.085_537,
-    54.598_15,
-    148.413_16,
-    403.428_8,
-    1096.633_2,
-    2980.958,
+    20.085_537, 54.598_15, 148.413_16, 403.428_8, 1096.633_2, 2980.958,
 ];
 // torch.triu(fullsq[1:4]) — live torch CPU reference (3x3, offset 3).
 const TORCH_TRIU: [f32; 9] = [4.0, 5.0, 6.0, 0.0, 8.0, 9.0, 0.0, 0.0, 12.0];
@@ -304,10 +299,7 @@ fn triu_narrowed_offset_view_gpu_matches_torch() {
     assert!(vsq.is_contiguous());
     assert_ne!(vsq.storage_offset(), 0);
 
-    let cpu_view = cpu_f32(
-        &[4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
-        &[3, 3],
-    );
+    let cpu_view = cpu_f32(&[4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0], &[3, 3]);
     let cpu_out = triu(&cpu_view, 0).expect("cpu triu");
     assert_close(
         &cpu_out.data().unwrap().to_vec(),
