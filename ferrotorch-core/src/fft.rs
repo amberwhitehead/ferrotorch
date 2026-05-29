@@ -4,10 +4,21 @@
 //! where `[..., 0]` is the real part and `[..., 1]` is the imaginary part.
 //! This matches PyTorch's convention for `torch.fft.*` operations.
 //!
-//! All functions work on f32, f64, and bf16 tensors via an f64 round-trip:
-//! the CPU path upcasts the input to f64, runs the transform in double
+//! The CPU transform path accepts **f32 and f64** only, matching
+//! `torch.fft.*`'s dtype contract: PyTorch's `promote_type_fft`
+//! (`aten/src/ATen/native/SpectralOps.cpp:82-90`) does
+//! `TORCH_CHECK(type == kFloat || type == kDouble, "Unsupported dtype ", type)`
+//! on non-CUDA devices, so `torch.fft.fft(x.half())` / `.bfloat16()` on CPU
+//! raise `RuntimeError: Unsupported dtype` (verified live against torch 2.11).
+//! `half` FFT is supported *only* on CUDA, where it runs as a native
+//! `complex_half` transform (`torch/fft/__init__.py:49`), NOT by upcasting to
+//! f32. ferrotorch's CPU transforms therefore reject `f16`/`bf16` via
+//! [`reject_half_cpu_fft`] rather than silently upcasting (#1545 / #1536); the
+//! non-transform helpers (`fftshift`/`ifftshift`) stay dtype-permissive because
+//! `torch.fft.fftshift` accepts `half`/`bfloat16` (a pure roll, verified live).
+//! For the accepted f32/f64 dtypes the CPU path runs the transform in double
 //! precision through [`ferray_fft`] (which carries numpy's direction-dependent
-//! `norm` scaling and arbitrary-axis transforms), and casts the result back to
+//! `norm` scaling and arbitrary-axis transforms) and casts the result back to
 //! the input dtype. Every transform accepts `norm` ([`FftNorm`],
 //! `backward`/`forward`/`ortho` — matching `torch.fft.*`'s `norm` kwarg) and
 //! `dim` / `s` via the `*_norm` sibling of each public fn (#1294). The
@@ -36,14 +47,14 @@
 //! | REQ-6 | SHIPPED | `hfft`/`ihfft` (+ `*_norm`); consumer: re-export in `lib.rs` |
 //! | REQ-7 | SHIPPED | `fftfreq`/`rfftfreq`; consumer: re-export in `lib.rs` |
 //! | REQ-8 | SHIPPED | `fftshift`/`ifftshift`; consumer: re-export in `lib.rs` |
-//! | REQ-9 | SHIPPED | cuFFT dispatch in `fft_norm`/`ifft_norm` (default norm/dim); consumer: `ComplexTensor::fft`. bf16/f16 GPU lowering tracked under #1545 |
+//! | REQ-9 | SHIPPED | cuFFT dispatch in `fft_norm`/`ifft_norm` (default norm/dim); consumer: `ComplexTensor::fft`. CPU `f16`/`bf16` are rejected by `reject_half_cpu_fft` to match torch's `Unsupported dtype` error (`SpectralOps.cpp:88-90`, #1545/#1536); native CUDA complex-half lowering remains tracked under #1545 |
 
 use ferray_core::Array as FerrayArray;
 use ferray_core::IxDyn as FerrayIxDyn;
 pub use ferray_fft::FftNorm;
 use rustfft::num_complex::Complex;
 
-use crate::dtype::Float;
+use crate::dtype::{DType, Element, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::numeric_cast::cast;
 use crate::storage::TensorStorage;
@@ -100,6 +111,39 @@ fn is_f64<T: Float>() -> bool {
     std::mem::size_of::<T>() == 8
 }
 
+/// Reject half-precision (`f16` / `bf16`) inputs on the CPU transform path,
+/// mirroring PyTorch's `promote_type_fft`
+/// (`aten/src/ATen/native/SpectralOps.cpp:82-91`): on non-CUDA/XPU/meta
+/// devices the FFT dtype check is
+/// `TORCH_CHECK(type == kFloat || type == kDouble, "Unsupported dtype ", type)`
+/// (`SpectralOps.cpp:90`), so `torch.fft.*` of a `half`/`bfloat16` tensor on
+/// CPU raises `RuntimeError: Unsupported dtype Half|BFloat16` (verified live
+/// against torch 2.11). Half FFT is supported *only* on CUDA, where it runs
+/// as a native `complex_half` transform (`torch/fft/__init__.py:49` —
+/// "Supports torch.half and torch.chalf on CUDA"), NOT by upcasting to f32.
+///
+/// `bf16` is rejected on every device upstream (`kBFloat16` is absent from the
+/// accepted set at `SpectralOps.cpp:88` even when `maybe_support_half`).
+///
+/// This guard is applied to the spectral *transforms* only. `fftshift` /
+/// `ifftshift` are pure axis rolls (not transforms) and `torch.fft.fftshift`
+/// accepts `half`/`bfloat16` returning the same dtype (verified live), so they
+/// deliberately do not call this guard.
+#[inline]
+fn reject_half_cpu_fft<T: Float>(op: &'static str) -> FerrotorchResult<()> {
+    match <T as Element>::dtype() {
+        DType::F16 | DType::BF16 => Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: Unsupported dtype {:?} — torch.fft.* does not support \
+                 half/bfloat16 on CPU (half is CUDA-only as a native complex-half \
+                 transform; see SpectralOps.cpp:88-90)",
+                <T as Element>::dtype(),
+            ),
+        }),
+        _ => Ok(()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -131,6 +175,7 @@ pub fn fft_norm<T: Float>(
     dim: Option<isize>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("fft")?;
     let shape = input.shape();
 
     // Input must end with a dim of 2 (complex representation).
@@ -243,6 +288,7 @@ pub fn ifft_norm<T: Float>(
     dim: Option<isize>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("ifft")?;
     let shape = input.shape();
 
     if shape.is_empty() || *shape.last().unwrap() != 2 {
@@ -331,6 +377,7 @@ pub fn rfft_norm<T: Float>(
     dim: Option<isize>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("rfft")?;
     let shape = input.shape();
     if shape.is_empty() {
         return Err(FerrotorchError::InvalidArgument {
@@ -398,6 +445,7 @@ pub fn irfft_norm<T: Float>(
     dim: Option<isize>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("irfft")?;
     let shape = input.shape();
 
     if shape.is_empty() || *shape.last().unwrap() != 2 {
@@ -480,6 +528,7 @@ pub fn fft2_norm<T: Float>(
     dim: Option<&[isize]>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("fft2")?;
     let shape = input.shape();
 
     if shape.is_empty() || *shape.last().unwrap() != 2 {
@@ -546,6 +595,7 @@ pub fn ifft2_norm<T: Float>(
     dim: Option<&[isize]>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("ifft2")?;
     let shape = input.shape();
 
     if shape.is_empty() || *shape.last().unwrap() != 2 {
@@ -720,6 +770,7 @@ pub fn fftn_norm<T: Float>(
     axes: Option<&[isize]>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("fftn")?;
     // GPU fast paths (#636, #966):
     // - axes=None, s=None: dispatch by rank (rank-2 -> cufftPlanMany rank=2,
     //   rank-3 -> cufftPlan3d).
@@ -849,6 +900,7 @@ pub fn ifftn_norm<T: Float>(
     axes: Option<&[isize]>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("ifftn")?;
     // GPU fast paths (#636, #966): mirrors fftn dispatch logic exactly,
     // with inverse=true for all cuFFT calls.
     if input.is_cuda()
@@ -964,6 +1016,7 @@ pub fn rfftn_norm<T: Float>(
     axes: Option<&[isize]>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("rfftn")?;
     let arr = tensor_to_real_array(input, "rfftn")?;
     let result =
         ferray_fft::rfftn(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
@@ -994,6 +1047,7 @@ pub fn irfftn_norm<T: Float>(
     axes: Option<&[isize]>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("irfftn")?;
     let arr = tensor_to_complex_array(input, "irfftn")?;
     // #808: ferray-fft 0.3.8 now performs the Hermitian projection
     // internally inside its c2r path (matches PyTorch's `aten::_fft_c2r`
@@ -1032,6 +1086,7 @@ pub fn rfft2_norm<T: Float>(
     axes: Option<&[isize]>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("rfft2")?;
     let arr = tensor_to_real_array(input, "rfft2")?;
     let result =
         ferray_fft::rfft2(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
@@ -1063,6 +1118,7 @@ pub fn irfft2_norm<T: Float>(
     axes: Option<&[isize]>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("irfft2")?;
     let arr = tensor_to_complex_array(input, "irfft2")?;
     let result =
         ferray_fft::irfft2(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
@@ -1100,6 +1156,7 @@ pub fn hfft_norm<T: Float>(
     dim: Option<isize>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("hfft")?;
     // GPU fast path (#636): hfft = conj + irfft, fully on-device. Restricted
     // to default last-axis / backward-norm (cuFFT can't honour dim/norm here).
     if input.is_cuda()
@@ -1165,6 +1222,7 @@ pub fn ihfft_norm<T: Float>(
     dim: Option<isize>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("ihfft")?;
     // GPU fast path (#636): ihfft = rfft + scale(1/n) + conj, fully on-device.
     if input.is_cuda()
         && (is_f32::<T>() || is_f64::<T>())
@@ -1227,6 +1285,7 @@ pub fn hfft2_norm<T: Float>(
     axes: Option<&[isize]>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("hfft2")?;
     let arr = tensor_to_complex_array(input, "hfft2")?;
     let result =
         ferray_fft::hfft2(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
@@ -1258,6 +1317,7 @@ pub fn ihfft2_norm<T: Float>(
     axes: Option<&[isize]>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("ihfft2")?;
     let arr = tensor_to_real_array(input, "ihfft2")?;
     let result =
         ferray_fft::ihfft2(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
@@ -1290,6 +1350,7 @@ pub fn hfftn_norm<T: Float>(
     axes: Option<&[isize]>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("hfftn")?;
     let arr = tensor_to_complex_array(input, "hfftn")?;
     let result =
         ferray_fft::hfftn(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
@@ -1321,6 +1382,7 @@ pub fn ihfftn_norm<T: Float>(
     axes: Option<&[isize]>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
+    reject_half_cpu_fft::<T>("ihfftn")?;
     let arr = tensor_to_real_array(input, "ihfftn")?;
     let result =
         ferray_fft::ihfftn(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
@@ -1727,6 +1789,126 @@ mod tests {
             assert!((d[i * 2] - 1.0).abs() < 1e-5, "bin {i} re = {}", d[i * 2]);
             assert!(d[i * 2 + 1].abs() < 1e-5, "bin {i} im = {}", d[i * 2 + 1]);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Half-precision dtype rejection (#1545 / #1536)
+    //
+    // Oracle (R-CHAR-3): live torch 2.11 + `SpectralOps.cpp:88-90`. On CPU,
+    // `promote_type_fft` does `TORCH_CHECK(type == kFloat || type == kDouble,
+    // "Unsupported dtype ", type)`, so BOTH of these raise on CPU:
+    //   >>> torch.fft.fft(torch.tensor([1.,2.,3.,4.], dtype=torch.float16))
+    //   RuntimeError: Unsupported dtype Half
+    //   >>> torch.fft.fft(torch.tensor([1.,2.,3.,4.], dtype=torch.bfloat16))
+    //   RuntimeError: Unsupported dtype BFloat16
+    //   >>> torch.fft.rfft(...float16/bfloat16...)  ->  same RuntimeError
+    // `half` FFT is CUDA-only (`torch/fft/__init__.py:49`), as a native
+    // complex-half transform — NOT a CPU upcast to f32. ferrotorch's CPU
+    // transforms therefore return Err for f16/bf16 instead of silently
+    // upcasting. These tests pin that the divergence (prior: silent Ok) is
+    // closed.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fft_f16_cpu_rejects_matching_torch_unsupported_dtype() {
+        use half::f16;
+        // [2, 2] interleaved complex f16 (one complex value per row).
+        let data: Vec<f16> = vec![
+            f16::from_f32(1.0),
+            f16::from_f32(0.0),
+            f16::from_f32(2.0),
+            f16::from_f32(0.0),
+        ];
+        let input = Tensor::from_storage(TensorStorage::cpu(data), vec![2, 2], false).unwrap();
+        let r = fft(&input, None);
+        assert!(
+            r.is_err(),
+            "torch.fft.fft(half) raises RuntimeError: Unsupported dtype Half on CPU; \
+             ferrotorch must Err too, not silently upcast"
+        );
+        let msg = format!("{}", r.unwrap_err());
+        assert!(
+            msg.contains("Unsupported dtype"),
+            "expected 'Unsupported dtype' (mirrors SpectralOps.cpp:90), got: {msg}"
+        );
+    }
+
+    #[test]
+    fn fft_bf16_cpu_rejects_matching_torch_unsupported_dtype() {
+        use half::bf16;
+        let data: Vec<bf16> = vec![
+            bf16::from_f32(1.0),
+            bf16::from_f32(0.0),
+            bf16::from_f32(2.0),
+            bf16::from_f32(0.0),
+        ];
+        let input = Tensor::from_storage(TensorStorage::cpu(data), vec![2, 2], false).unwrap();
+        let r = fft(&input, None);
+        assert!(
+            r.is_err(),
+            "torch.fft.fft(bfloat16) raises RuntimeError: Unsupported dtype BFloat16 on CPU"
+        );
+        assert!(format!("{}", r.unwrap_err()).contains("Unsupported dtype"));
+    }
+
+    #[test]
+    fn rfft_f16_and_bf16_cpu_reject() {
+        use half::{bf16, f16};
+        let f16_real: Vec<f16> = vec![
+            f16::from_f32(1.0),
+            f16::from_f32(2.0),
+            f16::from_f32(3.0),
+            f16::from_f32(4.0),
+        ];
+        let f16_in = Tensor::from_storage(TensorStorage::cpu(f16_real), vec![4], false).unwrap();
+        assert!(
+            rfft(&f16_in, None).is_err(),
+            "torch.fft.rfft(half) raises Unsupported dtype Half on CPU"
+        );
+
+        let bf16_real: Vec<bf16> = vec![
+            bf16::from_f32(1.0),
+            bf16::from_f32(2.0),
+            bf16::from_f32(3.0),
+            bf16::from_f32(4.0),
+        ];
+        let bf16_in = Tensor::from_storage(TensorStorage::cpu(bf16_real), vec![4], false).unwrap();
+        assert!(
+            rfft(&bf16_in, None).is_err(),
+            "torch.fft.rfft(bfloat16) raises Unsupported dtype BFloat16 on CPU"
+        );
+    }
+
+    #[test]
+    fn nd_and_hermitian_transforms_reject_half() {
+        use half::f16;
+        // fftn / fft2 over a [2, 2, 2] interleaved-complex f16 grid.
+        let cdata: Vec<f16> = (0..8).map(|i| f16::from_f32(i as f32)).collect();
+        let c_in = Tensor::from_storage(TensorStorage::cpu(cdata), vec![2, 2, 2], false).unwrap();
+        assert!(fft2(&c_in).is_err(), "fft2 must reject f16");
+        assert!(fftn(&c_in, None, None).is_err(), "fftn must reject f16");
+        assert!(ifftn(&c_in, None, None).is_err(), "ifftn must reject f16");
+
+        // Real-input transforms: rfftn / ihfftn / ihfft over a [4] real f16.
+        let rdata: Vec<f16> = (1..=4).map(|i| f16::from_f32(i as f32)).collect();
+        let r_in = Tensor::from_storage(TensorStorage::cpu(rdata), vec![4], false).unwrap();
+        assert!(ihfft(&r_in, None).is_err(), "ihfft must reject f16");
+        assert!(rfftn(&r_in, None, None).is_err(), "rfftn must reject f16");
+    }
+
+    #[test]
+    fn fftshift_stays_dtype_permissive_for_half() {
+        // Oracle (R-CHAR-3): torch.fft.fftshift accepts half/bfloat16 and
+        // returns the same dtype (a pure axis roll, NOT a transform):
+        //   >>> torch.fft.fftshift(torch.arange(8).to(torch.float16))
+        //   tensor([4,5,6,7,0,1,2,3], dtype=torch.float16)   # OK, no raise
+        // So the half-rejection guard must NOT apply to fftshift/ifftshift.
+        use half::f16;
+        let data: Vec<f16> = (0..8).map(|i| f16::from_f32(i as f32)).collect();
+        let input = Tensor::from_storage(TensorStorage::cpu(data), vec![8], false).unwrap();
+        let shifted = fftshift(&input, None).expect("fftshift(half) must succeed like torch");
+        let got: Vec<f32> = shifted.data().unwrap().iter().map(|v| v.to_f32()).collect();
+        assert_eq!(got, vec![4.0, 5.0, 6.0, 7.0, 0.0, 1.0, 2.0, 3.0]);
     }
 
     // -----------------------------------------------------------------------

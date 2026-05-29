@@ -21,7 +21,15 @@ the frequency helpers (`fftfreq`, `rfftfreq`) and the spectrum
 shifters (`fftshift`, `ifftshift`). The CPU path for every transform
 delegates to [ferray_fft](https://crates.io/crates/ferray-fft), which
 carries numpy's direction-dependent `norm` scaling and arbitrary-axis
-transforms. As of #1294 every transform accepts `norm`
+transforms. The CPU transform path accepts **f32/f64 only** — `f16`/`bf16`
+inputs are rejected to match `torch.fft.*`'s dtype contract (`promote_type_fft`
+in `SpectralOps.cpp:82-90` does
+`TORCH_CHECK(type == kFloat || type == kDouble, "Unsupported dtype ", type)`
+on non-CUDA devices, so `torch.fft.fft(x.half())`/`.bfloat16()` on CPU raise
+`RuntimeError: Unsupported dtype`; verified live vs torch 2.11). `half` FFT is
+CUDA-only as a native complex-half transform (`torch/fft/__init__.py:49`), never
+a CPU upcast to f32. The non-transform shifters (`fftshift`/`ifftshift`) stay
+dtype-permissive, matching `torch.fft.fftshift`'s acceptance of half/bfloat16. As of #1294 every transform accepts `norm`
 (`backward`/`forward`/`ortho` via the re-exported `FftNorm`) and `dim` / `s`
 through the `*_norm` sibling of each public fn (e.g. `fft_norm(input, n, dim,
 norm)`); the historical `fft(input, n)` / `fft2(input)` / `fftn(input, s,
@@ -60,8 +68,11 @@ exist for f32/f64 via cuFFT on the default last-axis / `norm="backward"` case
 - REQ-9: GPU dispatch — `fft`/`ifft` route to cuFFT for f32/f64 on
   CUDA (`backend.fft_c2c_*` and `pad_truncate_complex_*` from #579 /
   #605) on the default last-axis / `norm="backward"` case; explicit
-  `dim`/`norm`/`s` fall through to the ferray_fft CPU path. bf16/f16 take
-  the CPU path via f64 round-trip (open prereq blocker #1545).
+  `dim`/`norm`/`s` fall through to the ferray_fft CPU path. `f16`/`bf16`
+  inputs are **rejected** on the CPU transform path (`reject_half_cpu_fft`),
+  mirroring torch's `Unsupported dtype` `TORCH_CHECK`
+  (`SpectralOps.cpp:88-90`); native CUDA complex-half lowering
+  (`torch/fft/__init__.py:49`) remains an open prereq blocker (#1545).
 - REQ-10: `norm` / `dim` / `s` parameters (#1294) — every transform exposes a
   `*_norm` sibling honouring `torch.fft.*`'s `norm`
   (`backward`/`forward`/`ortho`), `dim`, and (for 2-D/N-D) `s` kwargs. The
@@ -84,9 +95,18 @@ exist for f32/f64 via cuFFT on the default last-axis / `norm="backward"` case
 - [x] AC-4: CUDA f32/f64 `fft` paths route through `backend.fft_c2c_*`
   on the default last-axis / `norm="backward"` case (the cuFFT branch in
   `fft_norm` / `ifft_norm`, cuFFT, no host bounce).
-- [ ] AC-5: bf16/f16 GPU fft path — NOT-STARTED, blocked on #1545
-  (cuFFT only supports f32/f64; the implementation currently
-  upcasts via `data_vec()` → CPU round-trip).
+- [x] AC-5: `f16`/`bf16` CPU dtype contract — the CPU transforms reject
+  half-precision inputs with an `Unsupported dtype` error mirroring
+  `SpectralOps.cpp:88-90` (verified live vs torch 2.11, which raises
+  `RuntimeError: Unsupported dtype Half|BFloat16` on CPU), instead of the
+  prior silent f64 upcast (#1545/#1536). Pinned by `fft.rs`
+  `fft_f16_cpu_rejects_matching_torch_unsupported_dtype`,
+  `fft_bf16_cpu_rejects_matching_torch_unsupported_dtype`,
+  `rfft_f16_and_bf16_cpu_reject`, `nd_and_hermitian_transforms_reject_half`,
+  and `fftshift_stays_dtype_permissive_for_half`.
+- [ ] AC-5b: native CUDA complex-half (`chalf`) fft lowering — NOT-STARTED,
+  blocked on #1545 (cuFFT complex-half kernels not yet wired; the CPU path
+  rejects half by design, matching torch's CPU contract).
 - [x] AC-6: `norm` / `dim` / `s` (#1294) — `fft_norm`/`ifft_norm`/… honour
   `ortho`/`forward` norm and arbitrary `dim`/`s`; verified by the host-side
   tests (`fft_ortho_norm_scales_dc_by_sqrt_n`, `fft_dim_transforms_named_axis`,
@@ -171,4 +191,4 @@ correctness.
 | REQ-6 | SHIPPED | impl: `hfft`/`ihfft` at `fft.rs:1000,1048`; non-test consumer: re-exported as `ferrotorch_core::hfft`/`ihfft` at `lib.rs:154` |
 | REQ-7 | SHIPPED | impl: `fftfreq`/`rfftfreq` at `fft.rs:1093,1105`; non-test consumer: re-exported as `ferrotorch_core::fftfreq`/`rfftfreq` at `lib.rs:153-155` |
 | REQ-8 | SHIPPED | impl: `fftshift`/`ifftshift` at `fft.rs:1122,1141`; non-test consumer: re-exported as `ferrotorch_core::fftshift`/`ifftshift` at `lib.rs:153-155` |
-| REQ-9 | SHIPPED | impl: cuFFT dispatch at `fft.rs:139-169` (`fft`) and `fft.rs:229-258` (`ifft`); non-test consumer: `ComplexTensor::fft` at `complex_tensor.rs:329`. NB: bf16/f16 GPU path is blocked on #1545 — the f32/f64 SHIPPED claim does NOT cover those dtypes |
+| REQ-9 | SHIPPED | impl: cuFFT dispatch in `fft_norm`/`ifft_norm` + the CPU half-rejection guard `reject_half_cpu_fft` in `fft.rs` (mirrors `SpectralOps.cpp:88-90`); non-test consumer: `ComplexTensor::fft` in `complex_tensor.rs` (the f32/f64 cuFFT path) and the 18 `*_norm` transform entry points calling `reject_half_cpu_fft` (the CPU f16/bf16 rejection path). NB: native CUDA complex-half (`chalf`) lowering remains blocked on #1545; the CPU contract is now SHIPPED (rejects half like torch) |
