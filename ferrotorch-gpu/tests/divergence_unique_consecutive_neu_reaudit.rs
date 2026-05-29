@@ -65,11 +65,17 @@ fn cuda_f64(data: &[f64]) -> Tensor<f64> {
 }
 
 fn read_back_f32(t: &Tensor<f32>) -> Vec<f32> {
-    t.to(Device::Cpu).expect("download").data_vec().expect("data")
+    t.to(Device::Cpu)
+        .expect("download")
+        .data_vec()
+        .expect("data")
 }
 
 fn read_back_f64(t: &Tensor<f64>) -> Vec<f64> {
-    t.to(Device::Cpu).expect("download").data_vec().expect("data")
+    t.to(Device::Cpu)
+        .expect("download")
+        .data_vec()
+        .expect("data")
 }
 
 // Compare a GPU value vector to torch, treating NaN-vs-NaN as equal (torch
@@ -81,7 +87,11 @@ fn assert_vals_f32(got: &[f32], expect_nan_mask: &[bool], expect_finite: &[f32])
         if expect_nan_mask[i] {
             assert!(g.is_nan(), "out[{i}] expected NaN, got {g}");
         } else {
-            assert_eq!(g.to_bits(), expect_finite[i].to_bits(), "out[{i}] bit mismatch");
+            assert_eq!(
+                g.to_bits(),
+                expect_finite[i].to_bits(),
+                "out[{i}] bit mismatch"
+            );
         }
     }
 }
@@ -92,7 +102,11 @@ fn assert_vals_f64(got: &[f64], expect_nan_mask: &[bool], expect_finite: &[f64])
         if expect_nan_mask[i] {
             assert!(g.is_nan(), "out[{i}] expected NaN, got {g}");
         } else {
-            assert_eq!(g.to_bits(), expect_finite[i].to_bits(), "out[{i}] bit mismatch");
+            assert_eq!(
+                g.to_bits(),
+                expect_finite[i].to_bits(),
+                "out[{i}] bit mismatch"
+            );
         }
     }
 }
@@ -130,7 +144,10 @@ fn unique_consecutive_f32_mixed_nan_finite_dup_runflag_compact_agree() {
     let torch_counts = vec![1usize, 1, 3, 1, 1];
 
     assert_vals_f32(&got, &torch_nan_mask, &torch_finite);
-    assert_eq!(inverse, torch_inverse, "inverse desync (RUN_FLAG vs COMPACT)");
+    assert_eq!(
+        inverse, torch_inverse,
+        "inverse desync (RUN_FLAG vs COMPACT)"
+    );
     assert_eq!(counts, torch_counts, "counts desync (RUN_FLAG vs COMPACT)");
     // counts must sum to n (no run dropped or double-counted).
     assert_eq!(counts.iter().sum::<usize>(), x.len());
@@ -162,8 +179,14 @@ fn unique_consecutive_f64_mixed_nan_finite_dup_runflag_compact_agree() {
     let torch_counts = vec![1usize, 1, 3, 1, 1];
 
     assert_vals_f64(&got, &torch_nan_mask, &torch_finite);
-    assert_eq!(inverse, torch_inverse, "inverse desync (RUN_FLAG_F64 vs COMPACT_F64)");
-    assert_eq!(counts, torch_counts, "counts desync (RUN_FLAG_F64 vs COMPACT_F64)");
+    assert_eq!(
+        inverse, torch_inverse,
+        "inverse desync (RUN_FLAG_F64 vs COMPACT_F64)"
+    );
+    assert_eq!(
+        counts, torch_counts,
+        "counts desync (RUN_FLAG_F64 vs COMPACT_F64)"
+    );
     assert_eq!(counts.iter().sum::<usize>(), x.len());
 
     let xc = Tensor::from_storage(TensorStorage::cpu(x.clone()), vec![x.len()], false).unwrap();
@@ -190,7 +213,11 @@ fn unique_consecutive_f32_signed_zero_is_one_run() {
     let got = read_back_f32(&vals);
     assert_eq!(got.len(), 1, "torch collapses +0.0/-0.0 into one run");
     // torch keeps the FIRST element's bits (+0.0 = 0x00000000).
-    assert_eq!(got[0].to_bits(), 0x0000_0000u32, "run-start value must be +0.0");
+    assert_eq!(
+        got[0].to_bits(),
+        0x0000_0000u32,
+        "run-start value must be +0.0"
+    );
     assert_eq!(inverse, vec![0, 0]);
     assert_eq!(counts, vec![2]);
 }
@@ -205,7 +232,11 @@ fn unique_consecutive_f64_signed_zero_is_one_run() {
     assert!(vals.is_cuda());
     let got = read_back_f64(&vals);
     assert_eq!(got.len(), 1);
-    assert_eq!(got[0].to_bits(), 0x0000_0000_0000_0000u64, "run-start value must be +0.0");
+    assert_eq!(
+        got[0].to_bits(),
+        0x0000_0000_0000_0000u64,
+        "run-start value must be +0.0"
+    );
     assert_eq!(inverse, vec![0, 0]);
     assert_eq!(counts, vec![2]);
 }

@@ -47,6 +47,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- Divergence: ferrotorch-gpu::gpu_unique_consecutive_f{32,64} collapses consecutive NaNs (run-flag setp.ne ordered) — diverges from CPU + torch (#1656)
+- Divergence: ferrotorch-core::ops::indexing {gather,scatter,scatter_add,scatter_value} CUDA fast path ignores strides on non-contiguous (transposed) input — diverges from torch (indexing.rs:175/333/480/620) (#1655)
 - Divergence: ferrotorch_core::special::zeta broadcast/mixed-device CUDA leaks GpuTensorNotAccessible instead of staying on-device (torch) or NotImplementedOnCuda (#1654)
 - Wire parity-sweep runner arms for torch.special transcendentals (entr/ndtr/ndtri + i0-family + zeta/airy/bessel-k as they land under #1651) (#1653)
 - ConvTranspose3d dilated forward divergence: output_padding+dilation drops contributions (conv_transpose3d sample 4/5) (#1619)
