@@ -137,7 +137,7 @@ The file is ~4.3k LOC and exposes:
   (`gpu_dispatch.rs:84-119`).
 - [x] AC-4: `register_gpu_backend(b1)` succeeds; a second
   `register_gpu_backend(b2)` returns `Err(b2)`
-  (`gpu_dispatch.rs:4268-4271`).
+  (`gpu_dispatch.rs` (GpuBackend trait methods)).
 - [x] AC-5: `has_gpu_backend()` toggles with registration
   (`gpu_dispatch.rs:4278-4280`).
 - [x] AC-6: A concrete backend implementing the trait (i.e.

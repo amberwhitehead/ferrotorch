@@ -248,7 +248,7 @@ Expected: `test result: ok` on a host with a CUDA device. The
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub fn gpu_{add,sub,mul}_{i32,i64} in int_kernels.rs` (six wrappers around `fn launch_binary` with the matching `*_I32_PTX` / `*_I64_PTX` consts using `add.s* / sub.s* / mul.lo.s*`). Non-test consumer: `ferrotorch-gpu/src/backend_impl.rs:5800` (gpu_add_i32), `:5807` (gpu_add_i64), `:5826/5833` (sub), `:5852/5859` (mul). |
+| REQ-1 | SHIPPED | impl: `pub fn gpu_{add,sub,mul}_{i32,i64} in int_kernels.rs` (six wrappers around `fn launch_binary` with the matching `*_I32_PTX` / `*_I64_PTX` consts using `add.s* / sub.s* / mul.lo.s*`). Non-test consumer: `gpu_add_i32` in `ferrotorch-gpu/src/backend_impl.rs`, `gpu_add_i64`, `gpu_sub_i32`/`gpu_sub_i64`, `gpu_mul_i32`/`gpu_mul_i64`. |
 | REQ-2 | SHIPPED | impl: `pub fn gpu_floor_div_{i32,i64}` (PTX trunc-then-floor-correct in `FLOORDIV_I32_PTX/FLOORDIV_I64_PTX`) and `pub fn gpu_remainder_{i32,i64}` (PTX rem-then-sign-adjust in `REMAINDER_I32_PTX/REMAINDER_I64_PTX`) in `int_kernels.rs`. Non-test consumer: `backend_impl.rs` (floor_div i32), `backend_impl.rs` (floor_div i64), `backend_impl.rs` (remainder i32), `backend_impl.rs` (remainder i64). |
 | REQ-3 | SHIPPED | impl: `pub fn gpu_{bitand,bitor,bitxor}_{i32,i64} in int_kernels.rs` (six wrappers, each using PTX `and.b* / or.b* / xor.b*`). Non-test consumer: `backend_impl.rs` (bitand), `backend_impl.rs` (bitor), `backend_impl.rs` (bitxor). |
 | REQ-4 | SHIPPED | impl: `pub fn gpu_shl_{i32,i64}` (PTX `shl.b{32,64}`) and `pub fn gpu_shr_{i32,i64}` (PTX `shr.s{32,64}`, arithmetic/sign-extending) in `int_kernels.rs`. Non-test consumer: `shr in backend_impl.rs` (shl), `shr in backend_impl.rs` (shr). |

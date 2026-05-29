@@ -129,7 +129,7 @@ The scalar evaluators live in this module:
   `xlogy_scalar`: each private, dispatched through
   `unary_map` / `binary_map` from `crate::ops::elementwise`.
 - `hermite_h`, `hermite_he`, `chebyshev_{t,u,v,w}`, `laguerre_l`,
-  `legendre_p` (`:918-...`): private three-term-recurrence loops in
+  `legendre_p` (`legendre_p` in `special.rs`): private three-term-recurrence loops in
   f64. The polynomial public APIs all delegate to a private
   `elementwise_f64` helper at `special.rs:770` that asserts CPU,
   reads `data_vec`, maps each element through the recurrence, and
