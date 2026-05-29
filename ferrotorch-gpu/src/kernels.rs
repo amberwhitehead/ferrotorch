@@ -2161,7 +2161,7 @@ pub(crate) const GELU_BACKWARD_TANH_PTX: &str = "\
     // 3 * 0.044715 = 0.134145 = 0x3E096B8C
     mov.f32 %c3, 0f3E096B8C;
 
-    // u = sqrt(2/π) * (x + 0.044715 * x³)
+    // u = sqrt(2/pi) * (x + 0.044715 * x^3)
     mul.f32 %x2, %x, %x;
     mul.f32 %x3, %x2, %x;
     mul.f32 %x3, %c, %x3;
@@ -2177,21 +2177,21 @@ pub(crate) const GELU_BACKWARD_TANH_PTX: &str = "\
     rcp.approx.f32 %e2y_p1, %e2y_p1;
     mul.f32 %th, %e2y_m1, %e2y_p1;
 
-    // d/dx = 0.5*(1+tanh) + 0.5*x*(1-tanh²)*sqrt(2/π)*(1+3*0.044715*x²)
+    // d/dx = 0.5*(1+tanh) + 0.5*x*(1-tanh^2)*sqrt(2/pi)*(1+3*0.044715*x^2)
     // term1 = 0.5 * (1 + th)
     add.f32 %term1, %one, %th;
     mul.f32 %term1, %half, %term1;
 
-    // (1 - th²)
+    // (1 - th^2)
     mul.f32 %th2, %th, %th;
     sub.f32 %one_m_th2, %one, %th2;
 
-    // d_inner = sqrt(2/π) * (1 + 3*0.044715*x²)
+    // d_inner = sqrt(2/pi) * (1 + 3*0.044715*x^2)
     mul.f32 %d_inner, %c3, %x2;
     add.f32 %d_inner, %one, %d_inner;
     mul.f32 %d_inner, %sqrt2pi, %d_inner;
 
-    // term2 = 0.5 * x * (1-th²) * d_inner
+    // term2 = 0.5 * x * (1-th^2) * d_inner
     mul.f32 %term2, %half, %x;
     mul.f32 %term2, %term2, %one_m_th2;
     mul.f32 %term2, %term2, %d_inner;
