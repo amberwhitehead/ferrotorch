@@ -52,6 +52,10 @@
 //!   torch.special.zeta(zx,zq) -> [1.644934058, 1.202056885, 1.082323194]
 
 #![cfg(feature = "cuda")]
+#![allow(
+    clippy::excessive_precision,
+    reason = "oracle expected values copied verbatim from live torch 2.11 / mpmath; full precision intentional (rounds to dtype at compile time)"
+)]
 
 use std::sync::Once;
 

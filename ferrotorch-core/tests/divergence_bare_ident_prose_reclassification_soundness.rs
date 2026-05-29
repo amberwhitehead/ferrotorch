@@ -224,9 +224,12 @@ fn the_three_maximal_risk_prose_anchors_are_not_declaration_drift() {
     );
 
     // -- shifted_chebyshev_polynomial_w_f64: declared NOWHERE (illustrative) --
-    let chebyshev_methods_exist = ["ferrotorch-gpu/src/backend_impl.rs", "ferrotorch-gpu/src/special.rs"]
-        .iter()
-        .any(|f| ident_declared(&read(&root, f), "shifted_chebyshev_polynomial_w_f64"));
+    let chebyshev_methods_exist = [
+        "ferrotorch-gpu/src/backend_impl.rs",
+        "ferrotorch-gpu/src/special.rs",
+    ]
+    .iter()
+    .any(|f| ident_declared(&read(&root, f), "shifted_chebyshev_polynomial_w_f64"));
     assert!(
         !chebyshev_methods_exist,
         "shifted_chebyshev_polynomial_w_f64 is declared NOWHERE — it is an \
@@ -235,18 +238,27 @@ fn the_three_maximal_risk_prose_anchors_are_not_declaration_drift() {
     );
     // The REAL chebyshev dispatch method that DOES exist (parameterized form):
     assert!(
-        ident_declared(&read(&root, "ferrotorch-gpu/src/backend_impl.rs"), "chebyshev_poly_f32"),
+        ident_declared(
+            &read(&root, "ferrotorch-gpu/src/backend_impl.rs"),
+            "chebyshev_poly_f32"
+        ),
         "the real GPU chebyshev dispatch is the parameterized `chebyshev_poly_f32` \
          in backend_impl.rs (confirming backend_impl.rs IS the genuine consumer file)"
     );
 
     // -- hermite_polynomial_he: cross-crate basename collision --
     assert!(
-        ident_declared(&read(&root, "ferrotorch-core/src/special.rs"), "hermite_polynomial_he"),
+        ident_declared(
+            &read(&root, "ferrotorch-core/src/special.rs"),
+            "hermite_polynomial_he"
+        ),
         "hermite_polynomial_he is declared in CORE's special.rs (the dispatch origin)"
     );
     assert!(
-        !ident_declared(&read(&root, "ferrotorch-gpu/src/special.rs"), "hermite_polynomial_he"),
+        !ident_declared(
+            &read(&root, "ferrotorch-gpu/src/special.rs"),
+            "hermite_polynomial_he"
+        ),
         "GPU's special.rs does NOT declare hermite_polynomial_he — the GPU-doc \
          `hermite_polynomial_he in special.rs` anchor is a cross-crate-basename \
          usage reference to core's dispatch, not declaration drift in the GPU file"

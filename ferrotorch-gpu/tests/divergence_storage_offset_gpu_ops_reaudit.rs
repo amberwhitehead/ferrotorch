@@ -78,6 +78,10 @@
 //! Tracking: #1658 (NEW blocker, separate from #1657).
 
 #![cfg(feature = "cuda")]
+#![allow(
+    clippy::excessive_precision,
+    reason = "oracle expected values copied verbatim from live torch 2.11; full precision intentional (rounds to dtype at compile time)"
+)]
 
 use ferrotorch_core::{Device, Tensor, TensorStorage, entr, exp, i0, ndtr, triu};
 use ferrotorch_gpu::init_cuda_backend;
