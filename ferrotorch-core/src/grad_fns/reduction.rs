@@ -136,6 +136,9 @@ fn sum_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the full reduction reads element 0.
+        let input = input.contiguous()?;
         // #23: bf16 now has a real GPU sum kernel (f32 accumulator,
         // bf16 RNE store back).
         let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
@@ -263,6 +266,9 @@ fn mean_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     // GPU path: use GPU sum kernel + scalar divide (avoids CPU round-trip).
     let result = if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the full reduction reads element 0.
+            let input = input.contiguous()?;
             let device = input.device();
             let ordinal = match device {
                 crate::device::Device::Cuda(o) => o,
@@ -447,6 +453,11 @@ fn prod_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() && (t_is_f32 || t_is_f64) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the reduction reads element 0. Shadowing here also makes
+        // the `ProdBackward` capture the packed buffer (the VJP reads input
+        // values, so the stored input must honour the offset too).
+        let input = input.contiguous()?;
         let handle = if t_is_f32 {
             backend.prod_f32(input.gpu_handle()?, input.numel())?
         } else {
@@ -593,6 +604,10 @@ pub fn amin<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() && (is_f32 || is_f64) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the reduction reads element 0 (and so the AminBackward
+        // subgradient compares against the correct logical input values).
+        let input = input.contiguous()?;
         let handle = if is_f32 {
             backend.min_f32(input.gpu_handle()?, input.numel())?
         } else {
@@ -636,6 +651,10 @@ pub fn amax<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() && (is_f32 || is_f64) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the reduction reads element 0 (and so the AmaxBackward
+        // subgradient compares against the correct logical input values).
+        let input = input.contiguous()?;
         let handle = if is_f32 {
             backend.max_f32(input.gpu_handle()?, input.numel())?
         } else {
@@ -836,6 +855,9 @@ fn sum_dim_inner<T: Float>(
     // GPU path: use sum_axis kernel (no CPU round-trip).
     if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the strided sum_axis kernel reads element 0.
+            let input = input.contiguous()?;
             // #23: bf16 routes through `sum_axis_bf16_bf16` (f32 accumulator,
             // bf16 RNE store-back). The shape+axis signature is identical
             // across all three dtypes.
@@ -1109,6 +1131,9 @@ fn mean_dim_inner<T: Float>(
     // (`scale_f32(1/dim_size)`) so the result stays on-device end-to-end.
     if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the strided sum_axis kernel reads element 0.
+            let input = input.contiguous()?;
             // #23: bf16 routes through `mean_axis_bf16_bf16` (f32 accumulator,
             // divide-by-axis-size + bf16 RNE store-back in the same kernel —
             // no separate `scale` op needed). f32/f64 keep the

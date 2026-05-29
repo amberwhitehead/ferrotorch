@@ -84,6 +84,9 @@ pub fn cumsum_forward<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult
     // GPU fast path for f32/f64
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the strided cumulative kernel reads element 0.
+            let input = input.contiguous()?;
             let handle = if is_f32::<T>() {
                 backend.cumsum_f32(input.gpu_handle()?, outer, dim_size, inner)?
             } else {
@@ -153,6 +156,9 @@ pub fn cumprod_forward<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResul
     // GPU fast path for f32/f64
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the strided cumulative kernel reads element 0.
+            let input = input.contiguous()?;
             let handle = if is_f32::<T>() {
                 backend.cumprod_f32(input.gpu_handle()?, outer, dim_size, inner)?
             } else {
@@ -220,6 +226,9 @@ pub fn cummax_forward<T: Float>(
     // GPU fast path for f32/f64 — kernel returns both values and indices
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the strided cumulative kernel reads element 0.
+            let input = input.contiguous()?;
             let values;
             let indices: Vec<usize>;
             if is_f32::<T>() {
@@ -330,6 +339,9 @@ pub fn cummin_forward<T: Float>(
     // GPU fast path for f32/f64 — kernel returns both values and indices
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the strided cumulative kernel reads element 0.
+            let input = input.contiguous()?;
             let values;
             let indices: Vec<usize>;
             if is_f32::<T>() {
@@ -417,6 +429,9 @@ pub fn logcumsumexp_forward<T: Float>(input: &Tensor<T>, dim: i64) -> Ferrotorch
     // GPU fast path for f32/f64
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the strided cumulative kernel reads element 0.
+            let input = input.contiguous()?;
             let handle = if is_f32::<T>() {
                 backend.logcumsumexp_f32(input.gpu_handle()?, outer, dim_size, inner)?
             } else {

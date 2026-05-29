@@ -732,6 +732,9 @@ fn relu_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the elementwise kernel reads element 0.
+        let input = input.contiguous()?;
         let handle = if is_f32::<T>() {
             backend.relu_f32(input.gpu_handle()?)?
         } else {
@@ -773,6 +776,9 @@ pub fn sigmoid<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 fn sigmoid_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()) {
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the elementwise kernel reads element 0.
+        let input = input.contiguous()?;
         // #23: bf16 dispatch via `dispatch_floating_dtype!` — no silent CPU
         // fallback for GPU bf16 inputs.
         let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
@@ -828,6 +834,9 @@ pub fn tanh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 fn tanh_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()) {
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the elementwise kernel reads element 0.
+        let input = input.contiguous()?;
         // #23: bf16 routes through `tanh_bf16_bf16` (f32 internal via the
         // `(e^(2x)-1)/(e^(2x)+1)` PTX kernel).
         let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
@@ -885,6 +894,9 @@ pub fn gelu_with<T: Float>(
     // GPU fast path for all approximation modes (f32/f64).
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the elementwise kernel reads element 0.
+            let input = input.contiguous()?;
             let handle = if is_f32::<T>() {
                 match approximate {
                     GeluApproximate::Sigmoid => backend.gelu_f32(input.gpu_handle()?)?,
@@ -975,6 +987,9 @@ fn silu_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     // GPU fast path for f32/f64
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the elementwise kernel reads element 0.
+            let input = input.contiguous()?;
             let handle = if is_f32::<T>() {
                 backend.silu_f32(input.gpu_handle()?)?
             } else {
@@ -1031,6 +1046,9 @@ fn softmax_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     // GPU fast path: dispatch to native softmax kernel.
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()) {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the row-major softmax kernel reads element 0.
+            let input = input.contiguous()?;
             let last_dim = *shape.last().unwrap_or(&1);
             let rows = input.numel() / last_dim.max(1);
             // #23: bf16 routes through `softmax_bf16_bf16` (existing kernel
@@ -1156,6 +1174,9 @@ fn log_softmax_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>>
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) && !shape.is_empty() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
             let cols = *shape.last().unwrap();
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the row-major log_softmax kernel reads element 0.
+            let input = input.contiguous()?;
             let handle = if is_f32::<T>() {
                 backend.log_softmax_f32(input.gpu_handle()?, cols)?
             } else {
@@ -1471,6 +1492,9 @@ pub fn elu<T: Float>(input: &Tensor<T>, alpha: f64) -> FerrotorchResult<Tensor<T
     // GPU fast path for f32/f64
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the elementwise kernel reads element 0.
+            let input = input.contiguous()?;
             let handle = if is_f32::<T>() {
                 backend.elu_f32(input.gpu_handle()?, alpha as f32)?
             } else {
@@ -1602,6 +1626,9 @@ pub fn mish<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     // GPU fast path for f32/f64
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the elementwise kernel reads element 0.
+            let input = input.contiguous()?;
             let handle = if is_f32::<T>() {
                 backend.mish_f32(input.gpu_handle()?)?
             } else {

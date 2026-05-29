@@ -2502,6 +2502,13 @@ fn poly_gpu_simple<T: Float>(
         return Err(FerrotorchError::NotImplementedOnCuda { op });
     }
     let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    // #1658: normalise a possibly-narrowed CUDA view (non-zero storage_offset,
+    // row-major strides that `is_contiguous()` cannot distinguish) into a packed
+    // offset-0 buffer ON-DEVICE before the kernel reads `gpu_handle()`. The
+    // `(in,out,total)` kernel ABI indexes from element 0 and drops the offset
+    // otherwise. After #1657 `.contiguous()` is a cheap clone for already-packed
+    // offset-0 tensors and a strided_copy materialisation for offset views.
+    let input = input.contiguous()?;
     let handle = input.gpu_handle()?;
     let out_handle = if poly_is_f32::<T>() {
         f32_call(backend, handle)?
@@ -2541,6 +2548,9 @@ fn special_gpu_simple<T: Float>(
         return Err(FerrotorchError::NotImplementedOnCuda { op });
     }
     let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    // #1658: normalise a narrowed-offset CUDA view to a packed offset-0 buffer
+    // before the `(in,out,total)` kernel reads element 0 (see `poly_gpu_simple`).
+    let input = input.contiguous()?;
     let handle = input.gpu_handle()?;
     let out_handle = if poly_is_f32::<T>() {
         f32_call(backend, handle)?
@@ -2603,6 +2613,10 @@ fn special_gpu_binary<T: Float>(
         return Err(FerrotorchError::NotImplementedOnCuda { op });
     }
     let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    // #1658: normalise BOTH narrowed-offset CUDA operands to packed offset-0
+    // buffers before the one-thread-per-element kernel reads element 0.
+    let x = x.contiguous()?;
+    let q = q.contiguous()?;
     let xh = x.gpu_handle()?;
     let qh = q.gpu_handle()?;
     let out_handle = if poly_is_f32::<T>() {
@@ -2631,6 +2645,9 @@ fn poly_gpu_chebyshev<T: Float>(
         return Err(FerrotorchError::NotImplementedOnCuda { op });
     }
     let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    // #1658: normalise a narrowed-offset CUDA view to a packed offset-0 buffer
+    // before the chebyshev recurrence kernel reads element 0.
+    let input = input.contiguous()?;
     let handle = input.gpu_handle()?;
     let out_handle = if poly_is_f32::<T>() {
         backend.chebyshev_poly_f32(handle, n, seed_a as f32, seed_b as f32, shift)?

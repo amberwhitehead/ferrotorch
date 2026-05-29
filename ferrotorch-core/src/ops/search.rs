@@ -53,6 +53,10 @@ pub fn searchsorted<T: Float>(
     if boundaries.is_cuda() && values.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        // #1658: normalise BOTH narrowed-offset CUDA operands to packed offset-0
+        // buffers before the on-device binary search reads element 0.
+        let values = values.contiguous()?;
+        let boundaries = boundaries.contiguous()?;
         let idx_handle =
             backend.searchsorted_1d(values.gpu_handle()?, boundaries.gpu_handle()?, right)?;
         let bytes = backend.gpu_to_cpu(&idx_handle)?;
@@ -222,6 +226,9 @@ pub fn unique_consecutive<T: Float>(
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the on-device run compaction reads element 0.
+        let input = input.contiguous()?;
         let n = input.numel();
         let (values_handle, inverse, counts) =
             backend.unique_consecutive_1d(input.gpu_handle()?, n)?;
@@ -363,6 +370,9 @@ pub fn histc<T: Float>(
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the on-device histogram reads element 0.
+        let input = input.contiguous()?;
         let counts_handle = backend.histc_1d(input.gpu_handle()?, bins, min_val, max_val)?;
         return Tensor::from_storage(TensorStorage::gpu(counts_handle), vec![bins], false);
     }
@@ -502,6 +512,9 @@ pub fn meshgrid_indexing<T: Float>(
         let mut result = Vec::with_capacity(ndim);
         for (dim, t) in tensors.iter().enumerate() {
             let inner: usize = shapes[dim + 1..].iter().product();
+            // #1658: normalise a possibly narrowed-offset CUDA input to a packed
+            // offset-0 buffer before the per-axis gather reads element 0.
+            let t = t.contiguous()?;
             let grid_handle = backend.meshgrid_grid(t.gpu_handle()?, total, inner, shapes[dim])?;
             result.push(Tensor::from_storage(
                 TensorStorage::gpu(grid_handle),
@@ -599,6 +612,10 @@ pub fn topk<T: Float>(
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the on-device k-selection reads element 0 (the
+        // `[outer, last_dim]` layout assumption now also guarantees offset 0).
+        let input = input.contiguous()?;
         let outer = input.numel() / last_dim;
         let (val_handle, idx_handle) =
             backend.topk_1d(input.gpu_handle()?, outer, last_dim, k, largest)?;

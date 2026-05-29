@@ -238,10 +238,14 @@ fn masked_sum_gpu<T: Float>(mt: &MaskedTensor<T>) -> FerrotorchResult<Tensor<T>>
     let mask_t: Tensor<T> = mask_as_float_tensor(&mt.mask, mt.data.shape(), device)?;
     let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
     let numel = mt.data.numel();
+    // #1658: normalise a narrowed-offset CUDA data tensor to a packed offset-0
+    // buffer before the elementwise mul reads element 0. The mask tensor is
+    // freshly built offset-0, so only the data side needs it.
+    let data = mt.data.contiguous()?;
     let prod_h = if is_f32::<T>() {
-        backend.mul_f32(mt.data.gpu_handle()?, mask_t.gpu_handle()?)?
+        backend.mul_f32(data.gpu_handle()?, mask_t.gpu_handle()?)?
     } else {
-        backend.mul_f64(mt.data.gpu_handle()?, mask_t.gpu_handle()?)?
+        backend.mul_f64(data.gpu_handle()?, mask_t.gpu_handle()?)?
     };
     let sum_h = if is_f32::<T>() {
         backend.sum_f32(&prod_h, numel)?
@@ -417,16 +421,20 @@ fn masked_extremum_gpu<T: Float>(
     // reads it directly and folds the sentinel-fill into the reduce.
     let mask_t: Tensor<T> = mask_as_float_tensor(&mt.mask, mt.data.shape(), device)?;
 
+    // #1658: normalise a narrowed-offset CUDA data tensor to a packed offset-0
+    // buffer before the fused masked reduce reads element 0. The mask tensor is
+    // freshly built offset-0, so only the data side needs it.
+    let data = mt.data.contiguous()?;
     let result_h = if pick_min {
         if is_f32::<T>() {
-            backend.masked_min_f32(mt.data.gpu_handle()?, mask_t.gpu_handle()?, numel)?
+            backend.masked_min_f32(data.gpu_handle()?, mask_t.gpu_handle()?, numel)?
         } else {
-            backend.masked_min_f64(mt.data.gpu_handle()?, mask_t.gpu_handle()?, numel)?
+            backend.masked_min_f64(data.gpu_handle()?, mask_t.gpu_handle()?, numel)?
         }
     } else if is_f32::<T>() {
-        backend.masked_max_f32(mt.data.gpu_handle()?, mask_t.gpu_handle()?, numel)?
+        backend.masked_max_f32(data.gpu_handle()?, mask_t.gpu_handle()?, numel)?
     } else {
-        backend.masked_max_f64(mt.data.gpu_handle()?, mask_t.gpu_handle()?, numel)?
+        backend.masked_max_f64(data.gpu_handle()?, mask_t.gpu_handle()?, numel)?
     };
 
     Tensor::from_storage(TensorStorage::gpu(result_h), vec![], false)
@@ -478,7 +486,12 @@ pub fn masked_invalid<T: Float>(data: Tensor<T>) -> FerrotorchResult<MaskedTenso
     if data.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let mask_h = backend.isfinite_mask(data.gpu_handle()?)?;
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the isfinite predicate reads element 0. The mask is in
+        // logical (offset-honouring) order, matching `data`'s own `data_vec`
+        // order, so the original `data` is stored unchanged in the result.
+        let data_c = data.contiguous()?;
+        let mask_h = backend.isfinite_mask(data_c.gpu_handle()?)?;
         let mask = predicate_mask_gpu(backend, &mask_h)?;
         return MaskedTensor::new(data, mask);
     }
@@ -516,7 +529,12 @@ pub fn masked_equal<T: Float + PartialEq>(
             .ok_or_else(|| FerrotorchError::InvalidArgument {
                 message: "masked_equal: value not representable as f64".into(),
             })?;
-        let mask_h = backend.ne_scalar_mask(data.gpu_handle()?, value_f)?;
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the `!= value` predicate reads element 0. The mask is in
+        // logical order, matching `data`'s `data_vec` order, so the original
+        // `data` is stored unchanged.
+        let data_c = data.contiguous()?;
+        let mask_h = backend.ne_scalar_mask(data_c.gpu_handle()?, value_f)?;
         let mask = predicate_mask_gpu(backend, &mask_h)?;
         return MaskedTensor::new(data, mask);
     }

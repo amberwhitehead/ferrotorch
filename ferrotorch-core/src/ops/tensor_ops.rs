@@ -85,6 +85,9 @@ pub fn triu<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     // round-trip. Other GPU dtypes keep the `NotImplementedOnCuda` contract.
     if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the per-element kernel reads element 0.
+            let input = input.contiguous()?;
             let handle = if is_f32::<T>() {
                 Some(backend.triu_f32(input.gpu_handle()?, batch, rows, cols, diagonal)?)
             } else if is_f64::<T>() {
@@ -168,6 +171,9 @@ pub fn tril<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     // round-trip.
     if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the per-element kernel reads element 0.
+            let input = input.contiguous()?;
             let handle = if is_f32::<T>() {
                 Some(backend.tril_f32(input.gpu_handle()?, batch, rows, cols, diagonal)?)
             } else if is_f64::<T>() {
@@ -244,6 +250,9 @@ pub fn diag<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     // `NotImplementedOnCuda` contract.
     if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the gather/scatter kernel reads element 0.
+            let input = input.contiguous()?;
             let result = if ndim == 1 {
                 let n = input.shape()[0];
                 let size = n + diagonal.unsigned_abs() as usize;
@@ -553,6 +562,10 @@ pub fn cdist<T: Float>(x1: &Tensor<T>, x2: &Tensor<T>, p: f64) -> FerrotorchResu
             });
         }
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise BOTH narrowed-offset CUDA operands to packed
+            // offset-0 buffers before the distance kernel reads element 0.
+            let x1 = x1.contiguous()?;
+            let x2 = x2.contiguous()?;
             let handle = if is_f32::<T>() && crate::gpu_dispatch::cdist_supported_f32(p) {
                 Some(backend.cdist_f32(
                     x1.gpu_handle()?,

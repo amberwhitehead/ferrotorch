@@ -153,6 +153,9 @@ pub fn exp<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 fn exp_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()) {
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the elementwise kernel reads `gpu_handle()` (element 0).
+        let input = input.contiguous()?;
         // #23: bf16 routes through `exp_bf16_bf16` (PTX ex2.approx.f32 with
         // f32 internal accumulator, bf16 RNE store-back).
         let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
@@ -166,7 +169,7 @@ fn exp_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         let storage = TensorStorage::gpu(handle);
         let shape = input.shape().to_vec();
 
-        if needs_grad_unary(input) {
+        if needs_grad_unary(&input) {
             // We need the output for the backward pass (dx = grad * exp(x)).
             // Build output tensor first, then clone to attach grad_fn.
             let output = Tensor::from_storage(storage, shape.clone(), false)?;
@@ -255,6 +258,9 @@ pub fn log<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 fn log_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()) {
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the elementwise kernel reads `gpu_handle()` (element 0).
+        let input = input.contiguous()?;
         // #23: bf16 routes through `log_bf16_bf16` (PTX lg2.approx.f32 *
         // ln(2), bf16 RNE store-back).
         let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
@@ -268,7 +274,7 @@ fn log_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         let storage = TensorStorage::gpu(handle);
         let shape = input.shape().to_vec();
 
-        if needs_grad_unary(input) {
+        if needs_grad_unary(&input) {
             Tensor::from_operation(
                 storage,
                 shape,
@@ -552,6 +558,9 @@ pub fn clamp<T: Float>(input: &Tensor<T>, min: T, max: T) -> FerrotorchResult<Te
     // GPU fast path for f32/f64
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+            // buffer before the elementwise kernel reads element 0.
+            let input = input.contiguous()?;
             let handle = if is_f32::<T>() {
                 let min_f32 = min.to_f32().unwrap_or(f32::MIN);
                 let max_f32 = max.to_f32().unwrap_or(f32::MAX);
@@ -561,7 +570,7 @@ pub fn clamp<T: Float>(input: &Tensor<T>, min: T, max: T) -> FerrotorchResult<Te
                 let max_f64 = max.to_f64().unwrap_or(f64::MAX);
                 backend.clamp_f64(input.gpu_handle()?, min_f64, max_f64)?
             };
-            return if needs_grad_unary(input) {
+            return if needs_grad_unary(&input) {
                 Tensor::from_operation(
                     TensorStorage::gpu(handle),
                     input.shape().to_vec(),
