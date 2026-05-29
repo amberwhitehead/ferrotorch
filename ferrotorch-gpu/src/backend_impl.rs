@@ -8041,13 +8041,21 @@ impl GpuBackend for CudaBackendImpl {
                 ),
             });
         }
-        if input.len() != mask.len() {
+        // #1661: validate the LOGICAL element counts here (the dispatch
+        // contract). A `.contiguous()`-materialised input (a row-narrowed view
+        // packed on-device, ferrotorch-core indexing.rs) is backed by a POOLED
+        // `CudaSlice` rounded up to a multiple of `ROUND_ELEMENTS`, so its raw
+        // slice len (e.g. 256) exceeds its logical numel (6) while the mask is
+        // exact-length 6. We pass this logical `n` down so `launch_masked_fill`
+        // treats the input slice as a backing store that need only be `>= n` and
+        // launches exactly `n` threads, EXACTLY like launch_where/launch_cmp
+        // (#1660). Comparing the raw input slice len to the mask len would
+        // spuriously reject `256 vs 6`.
+        let n = input.len();
+        let mask_n = mask.len();
+        if n != mask_n {
             return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "masked_fill: input numel {} != mask numel {}",
-                    input.len(),
-                    mask.len()
-                ),
+                message: format!("masked_fill: input numel {n} != mask numel {mask_n}"),
             });
         }
         let dev = self.device(input.device_ordinal())?;
@@ -8055,22 +8063,28 @@ impl GpuBackend for CudaBackendImpl {
         let mb = Self::unwrap_buffer_bool(mask)?.inner();
         match input.dtype() {
             DType::F32 => Ok(Self::wrap_slice_f32(
-                mk::masked_fill_f32(Self::unwrap_buffer(input)?.inner(), mb, value as f32, dev)
-                    .map_err(Self::map_gpu_err)?,
+                mk::masked_fill_f32(
+                    Self::unwrap_buffer(input)?.inner(),
+                    mb,
+                    value as f32,
+                    n,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
                 ord,
             )),
             DType::F64 => Ok(Self::wrap_slice_f64(
-                mk::masked_fill_f64(Self::unwrap_buffer_f64(input)?.inner(), mb, value, dev)
+                mk::masked_fill_f64(Self::unwrap_buffer_f64(input)?.inner(), mb, value, n, dev)
                     .map_err(Self::map_gpu_err)?,
                 ord,
             )),
             DType::F16 => Ok(Self::wrap_buffer_f16(
-                mk::masked_fill_f16(Self::unwrap_buffer_f16(input)?, mb, value as f32, dev)
+                mk::masked_fill_f16(Self::unwrap_buffer_f16(input)?, mb, value as f32, n, dev)
                     .map_err(Self::map_gpu_err)?,
                 ord,
             )),
             DType::BF16 => Ok(Self::wrap_buffer_bf16(
-                mk::masked_fill_bf16(Self::unwrap_buffer_bf16(input)?, mb, value as f32, dev)
+                mk::masked_fill_bf16(Self::unwrap_buffer_bf16(input)?, mb, value as f32, n, dev)
                     .map_err(Self::map_gpu_err)?,
                 ord,
             )),
@@ -8079,6 +8093,7 @@ impl GpuBackend for CudaBackendImpl {
                     Self::unwrap_buffer_i32(input)?.inner(),
                     mb,
                     value as i32,
+                    n,
                     dev,
                 )
                 .map_err(Self::map_gpu_err)?,
@@ -8089,6 +8104,7 @@ impl GpuBackend for CudaBackendImpl {
                     Self::unwrap_buffer_i64(input)?.inner(),
                     mb,
                     value as i64,
+                    n,
                     dev,
                 )
                 .map_err(Self::map_gpu_err)?,

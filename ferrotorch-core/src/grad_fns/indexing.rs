@@ -414,6 +414,13 @@ pub fn masked_fill<T: Float>(
         let mask_handle = upload_f32_to_gpu(&mask_f32, ordinal)?;
         // value must be f32 for the GPU kernel.
         let value_f32: f32 = num_traits::ToPrimitive::to_f32(&value).unwrap_or(0.0);
+        // #1661: a row-narrowed CUDA view reports its logical numel but is backed
+        // by a larger base buffer carrying `storage_offset`; the GPU kernel would
+        // otherwise read the wrong window (or the dispatch would reject the
+        // `input numel 8 != mask numel 6` mismatch). `.contiguous()` materialises
+        // the logical view on-device via strided_copy (#1657), so the handle's
+        // logical len matches the mask len and the kernel reads `[0, n)`.
+        let input = input.contiguous()?;
         let result_handle =
             backend.masked_fill_f32(input.gpu_handle()?, &mask_handle, value_f32)?;
         let storage = TensorStorage::gpu(result_handle);
@@ -1043,6 +1050,14 @@ pub fn masked_fill_bt<T: Float>(
         }
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let value_f64 = num_traits::ToPrimitive::to_f64(&value).unwrap_or(0.0);
+        // #1661: a row-narrowed CUDA view (e.g. `.narrow(0,1,3)`) reports its
+        // logical numel but is backed by a larger base buffer carrying a non-zero
+        // `storage_offset`. Reading `input.gpu_handle()` raw makes `masked_fill_dt`
+        // see the base-buffer len (8) and reject it against the mask len (6), or
+        // (post-#1660 logical-len launch) read the wrong window. `.contiguous()`
+        // materialises the logical view on-device via strided_copy (#1657), so the
+        // handle's logical len matches the mask numel and the kernel reads `[0, n)`.
+        let input = input.contiguous()?;
         let result_handle =
             backend.masked_fill_dt(input.gpu_handle()?, mask.gpu_handle()?, value_f64)?;
         let storage = TensorStorage::gpu(result_handle);

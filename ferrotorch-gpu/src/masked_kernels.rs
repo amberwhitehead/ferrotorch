@@ -467,11 +467,22 @@ DONE: ret;
 /// returning a fresh resident `CudaSlice<T>` of `n` elements.
 /// `value` is pushed as the scalar argument `S` (f32 / f64 / i-as-bits) the PTX
 /// declares.
+///
+/// `n` is the LOGICAL element count of the operands (`CudaBuffer::len()`), not
+/// the raw `CudaSlice::len()`. The raw `input`/`mask` slices may be
+/// OVER-ALLOCATED past `n`: a `.contiguous()`-materialised row-narrowed view is
+/// backed by a pooled buffer rounded up to a multiple of `ROUND_ELEMENTS`
+/// (#1661), while the mask is exact-length. We therefore validate and launch on
+/// the logical `n`, treating each raw slice as a backing store that need only be
+/// `>= n`; comparing raw lens would spuriously reject `256 vs 6`. The caller
+/// (dispatch site) supplies `n` from the logical buffer len and owns the
+/// input/mask numel equality check.
 #[allow(clippy::too_many_arguments)]
 fn launch_masked_fill<T, S>(
     input: &CudaSlice<T>,
     mask: &CudaSlice<u8>,
     value: S,
+    n: usize,
     device: &GpuDevice,
     ptx: &'static str,
     kernel_name: &'static str,
@@ -480,13 +491,12 @@ where
     T: DeviceRepr + ValidAsZeroBits,
     S: DeviceRepr,
 {
-    if input.len() != mask.len() {
+    if input.len() < n || mask.len() < n {
         return Err(GpuError::LengthMismatch {
-            a: input.len(),
-            b: mask.len(),
+            a: input.len().min(mask.len()),
+            b: n,
         });
     }
-    let n = input.len();
     let stream = device.stream();
     if n == 0 {
         return Ok(stream.alloc_zeros::<T>(0)?);
@@ -504,9 +514,11 @@ where
     // SAFETY:
     // - `f` is the PTX entry `kernel_name`; signature
     //   (in_ptr, mask_ptr, out_ptr, value, n) matches the five args below.
-    // - `input` (n `T`-elements) and `mask` (n u8) are length-equal (checked
-    //   above); `out` is a fresh n-element `T` buffer, the only `&mut`, not
-    //   aliased with the inputs.
+    // - `input` (`T`) and `mask` (u8) each back AT LEAST `n` elements
+    //   (`*.len() >= n` checked above; the input may be a pooled, over-allocated
+    //   `.contiguous()` materialisation of a row-narrowed view, #1661); the
+    //   kernel reads only `[0, n)`. `out` is a fresh n-element `T` buffer, the
+    //   only `&mut`, not aliased with the inputs.
     // - Each thread reads input[i]/mask[i] and writes out[i] only for i in
     //   [0,n) (PTX bound check `setp.ge.u32 %p, %idx, %nr`).
     // - `value` is a scalar passed by reference, living for the launch.
@@ -1029,12 +1041,14 @@ pub fn masked_fill_f32(
     input: &CudaSlice<f32>,
     mask: &CudaSlice<u8>,
     value: f32,
+    n: usize,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<f32>> {
     launch_masked_fill(
         input,
         mask,
         value,
+        n,
         d,
         MASKED_FILL_F32_PTX,
         "masked_fill_f32_kernel",
@@ -1046,12 +1060,14 @@ pub fn masked_fill_f64(
     input: &CudaSlice<f64>,
     mask: &CudaSlice<u8>,
     value: f64,
+    n: usize,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<f64>> {
     launch_masked_fill(
         input,
         mask,
         value,
+        n,
         d,
         MASKED_FILL_F64_PTX,
         "masked_fill_f64_kernel",
@@ -1063,12 +1079,14 @@ pub fn masked_fill_f16(
     input: &CudaSlice<u16>,
     mask: &CudaSlice<u8>,
     value: f32,
+    n: usize,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<u16>> {
     launch_masked_fill(
         input,
         mask,
         value,
+        n,
         d,
         MASKED_FILL_F16_PTX,
         "masked_fill_f16_kernel",
@@ -1080,12 +1098,14 @@ pub fn masked_fill_bf16(
     input: &CudaSlice<u16>,
     mask: &CudaSlice<u8>,
     value: f32,
+    n: usize,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<u16>> {
     launch_masked_fill(
         input,
         mask,
         value,
+        n,
         d,
         MASKED_FILL_BF16_PTX,
         "masked_fill_bf16_kernel",
@@ -1097,12 +1117,14 @@ pub fn masked_fill_i32(
     input: &CudaSlice<i32>,
     mask: &CudaSlice<u8>,
     value: i32,
+    n: usize,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<i32>> {
     launch_masked_fill(
         input,
         mask,
         value,
+        n,
         d,
         MASKED_FILL_I32_PTX,
         "masked_fill_i32_kernel",
@@ -1114,12 +1136,14 @@ pub fn masked_fill_i64(
     input: &CudaSlice<i64>,
     mask: &CudaSlice<u8>,
     value: i64,
+    n: usize,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<i64>> {
     launch_masked_fill(
         input,
         mask,
         value,
+        n,
         d,
         MASKED_FILL_I64_PTX,
         "masked_fill_i64_kernel",
@@ -1310,7 +1334,7 @@ mod tests {
         let d = dev();
         let input = d.stream().clone_htod(&vec![1.0f32, 2.0, 3.0, 4.0]).unwrap();
         let mask = d.stream().clone_htod(&vec![0u8, 1, 0, 1]).unwrap();
-        let r = masked_fill_f32(&input, &mask, -9.0, &d).unwrap();
+        let r = masked_fill_f32(&input, &mask, -9.0, 4, &d).unwrap();
         assert_eq!(
             d.stream().clone_dtoh(&r).unwrap(),
             vec![1.0f32, -9.0, 3.0, -9.0]

@@ -154,18 +154,20 @@ Edge cases preserved:
 - **Empty input / empty mask**: the standard `BLOCK_SIZE = 256`
   launch is sized with `.max(1)` for the grid and the kernel uses
   `setp.ge.u32` to short-circuit out-of-bounds threads.
-- **Logical-length launch for `where` (#1660)**: `where_32` /
-  `where_64` / `where_16` (and `launch_where`) take an explicit LOGICAL
-  element count `n: usize` and validate/launch on it, NOT on the raw
-  `CudaSlice::len()`. A `.contiguous()`-materialised operand (a packed
-  row-narrowed CUDA view, #1658 storage-offset class) is backed by a
-  POOLED buffer rounded up to a multiple of `ROUND_ELEMENTS = 256`
-  (`pool.md` REQ-2), while a `clone_htod` operand is exact-length; the
-  kernel guard is therefore `cond/x/y.len() >= n` and the launch
-  reads/writes only `[0, n)`. The dispatch site
-  (`CudaBackendImpl::where_cond in backend_impl.rs`) owns the logical
-  operand-shape equality check and threads `n` down. (`launch_masked_fill`
-  / `launch_scatter` still validate raw lens — see bug note in REQ-2.)
+- **Logical-length launch for `where` (#1660) and `masked_fill`
+  (#1661)**: `where_32` / `where_64` / `where_16` (and `launch_where`),
+  and the six `masked_fill_*` entries (and `launch_masked_fill`), take an
+  explicit LOGICAL element count `n: usize` and validate/launch on it,
+  NOT on the raw `CudaSlice::len()`. A `.contiguous()`-materialised
+  operand (a packed row-narrowed CUDA view, #1658 storage-offset class) is
+  backed by a POOLED buffer rounded up to a multiple of
+  `ROUND_ELEMENTS = 256` (`pool.md` REQ-2), while a `clone_htod` operand
+  is exact-length; the kernel guard is therefore `cond/x/y.len() >= n`
+  (`where`) / `input/mask.len() >= n` (`masked_fill`) and the launch
+  reads/writes only `[0, n)`. The dispatch sites
+  (`CudaBackendImpl::where_cond` / `masked_fill_dt` in `backend_impl.rs`)
+  own the logical operand-shape equality check and thread `n` down.
+  (`launch_scatter` still validates raw lens — see bug note in REQ-2.)
 
 ## Verification
 
@@ -189,8 +191,8 @@ Expected: ≥ 1 `test result: ok` line.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: six `pub fn masked_fill_*` at `masked_fill_ in ferrotorch-gpu/src/masked_kernels.rs`; non-test consumer: `backend_impl.rs` (`use crate::masked_kernels as mk`) dispatches per-dtype calls. |
-| REQ-2 | SHIPPED | impl: `pub fn where_32`/`where_64`/`where_16` at `where_32 in masked_kernels.rs`; non-test consumer: `where_16 in backend_impl.rs`. `launch_where` validates+launches on the LOGICAL `n` (#1660), tolerating pooled over-allocated `.contiguous()` operands (regression test `compare_gt_both_narrowed_views_pooled_logical_len_gpu_matches_torch` / `where_cond_bt_narrowed_offset_view_gpu_matches_torch` in `tests/divergence_storage_offset_class_completeness.rs`). KNOWN LATENT (spillover, not fixed here): `launch_masked_fill` (`input.len() != mask.len()`) and `launch_scatter` (`mask.len() != out_numel`) still compare RAW lens — same class, but their core-layer `.contiguous()` normalisation + tests are out of #1660's pinned scope and need a separate dispatch. |
+| REQ-1 | SHIPPED | impl: six `pub fn masked_fill_*` at `masked_fill_ in ferrotorch-gpu/src/masked_kernels.rs`; non-test consumer: `backend_impl.rs` (`use crate::masked_kernels as mk`) dispatches per-dtype calls. `launch_masked_fill` validates+launches on the LOGICAL `n` (#1661), tolerating pooled over-allocated `.contiguous()` inputs (regression test `masked_fill_narrowed_offset_view_gpu_matches_torch` + `masked_fill_normal_offset0_above_round_elements_gpu_matches_torch` in `tests/divergence_masked_fill_storage_offset_gpu.rs`); core-layer `.contiguous()` normalisation in `ferrotorch_core::grad_fns::indexing::masked_fill` + `masked_fill_bt`. |
+| REQ-2 | SHIPPED | impl: `pub fn where_32`/`where_64`/`where_16` at `where_32 in masked_kernels.rs`; non-test consumer: `where_16 in backend_impl.rs`. `launch_where` validates+launches on the LOGICAL `n` (#1660), tolerating pooled over-allocated `.contiguous()` operands (regression test `compare_gt_both_narrowed_views_pooled_logical_len_gpu_matches_torch` / `where_cond_bt_narrowed_offset_view_gpu_matches_torch` in `tests/divergence_storage_offset_class_completeness.rs`). KNOWN LATENT (spillover, not fixed here): `launch_scatter` (`mask.len() != out_numel`) still compares RAW lens — same class, but its core-layer `.contiguous()` normalisation + tests need a separate dispatch. (`launch_masked_fill` was fixed in #1661, see REQ-1.) |
 | REQ-3 | SHIPPED | impl: `pub fn count_true` at `count_true in masked_kernels.rs`; `masked_select_32/64/16` at lines 877-936; non-test consumer: `backend_impl.rs`. |
 | REQ-4 | SHIPPED | impl: `masked_scatter_32/64/16` at `masked_scatter_32 in masked_kernels.rs`; non-test consumer: `backend_impl.rs`. |
 | REQ-5 | SHIPPED | impl: every kernel launch in this file routes through `module_cache::get_or_compile`. The file's `use crate::module_cache::get_or_compile` import at line 44 binds the single PTX load path; the file has no `cudarc::nvrtc` import. |
