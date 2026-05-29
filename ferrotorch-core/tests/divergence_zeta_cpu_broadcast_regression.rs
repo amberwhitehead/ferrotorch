@@ -106,7 +106,11 @@ fn cpu_broadcast_3_1_not_over_rejected() {
 
     let out = special::zeta(&x, &q)
         .expect("all-CPU [3]+[1] broadcast zeta must NOT be rejected with NotImplementedOnCuda");
-    assert_eq!(out.shape(), &[3], "zeta [3]+[1] broadcast -> [3] like torch");
+    assert_eq!(
+        out.shape(),
+        &[3],
+        "zeta [3]+[1] broadcast -> [3] like torch"
+    );
     assert!(!out.is_cuda());
 
     let d = out.data().unwrap();

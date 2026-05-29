@@ -229,7 +229,10 @@ fn guard_airy_ai_region_boundaries_on_device() {
         -2.09, -2.10, -2.08, 8.3203353, 8.32, 8.33, -7.95, 103.892, 103.9, 0.0,
     ];
     let out = special::airy_ai(&cuda_f32(&xs, vec![10])).expect("airy_ai GPU dispatch");
-    assert!(out.is_cuda(), "airy_ai must stay on device (no host round trip)");
+    assert!(
+        out.is_cuda(),
+        "airy_ai must stay on device (no host round trip)"
+    );
     let got = out.to(Device::Cpu).unwrap().data().unwrap().to_vec();
     let want: [f32; 10] = [
         0.17005064,
@@ -291,10 +294,22 @@ fn guard_zeta_edge_ladder_on_device() {
         special::zeta(&cuda_f32(&xs, vec![5]), &cuda_f32(&qs, vec![5])).expect("zeta GPU dispatch");
     assert!(out.is_cuda());
     let d = out.to(Device::Cpu).unwrap().data().unwrap().to_vec();
-    assert!(d[0].is_infinite() && d[0] > 0.0, "zeta(1,2)==+inf: {}", d[0]);
+    assert!(
+        d[0].is_infinite() && d[0] > 0.0,
+        "zeta(1,2)==+inf: {}",
+        d[0]
+    );
     assert!(d[1].is_nan(), "zeta(0.5,1)==NaN: {}", d[1]);
-    assert!(d[2].is_infinite() && d[2] > 0.0, "zeta(2,0)==+inf: {}", d[2]);
-    assert!(d[3].is_infinite() && d[3] > 0.0, "zeta(3,-2)==+inf: {}", d[3]);
+    assert!(
+        d[2].is_infinite() && d[2] > 0.0,
+        "zeta(2,0)==+inf: {}",
+        d[2]
+    );
+    assert!(
+        d[3].is_infinite() && d[3] > 0.0,
+        "zeta(3,-2)==+inf: {}",
+        d[3]
+    );
     assert!(d[4].is_nan(), "zeta(2.5,-1.5)==NaN: {}", d[4]);
 }
 
