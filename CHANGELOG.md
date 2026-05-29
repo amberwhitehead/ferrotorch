@@ -47,6 +47,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- Divergence: masked_fill drops storage_offset on row-narrowed CUDA input (ferrotorch-core indexing.rs:418/1047 -> masked_fill_dt/launch_masked_fill raw-len check) (#1661)
+- Divergence: GPU comparison/where_cond_bt/masked_select drop storage_offset on narrowed CUDA views (missed members of #1658 class) (#1660)
+- Divergence: special/transcendental/structured GPU ops drop storage_offset (raw gpu_handle, NOT covered by #1657 contiguous fix) (#1658)
+- Divergence: scatter_add_segments CUDA ignores storage_offset for row-narrowed src views (#1657)
 - Divergence: ferrotorch-gpu::gpu_unique_consecutive_f{32,64} collapses consecutive NaNs (run-flag setp.ne ordered) — diverges from CPU + torch (#1656)
 - Divergence: ferrotorch-core::ops::indexing {gather,scatter,scatter_add,scatter_value} CUDA fast path ignores strides on non-contiguous (transposed) input — diverges from torch (indexing.rs:175/333/480/620) (#1655)
 - Divergence: ferrotorch_core::special::zeta broadcast/mixed-device CUDA leaks GpuTensorNotAccessible instead of staying on-device (torch) or NotImplementedOnCuda (#1654)
