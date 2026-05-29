@@ -57,10 +57,16 @@ fn cuda_f64(data: &[f64]) -> Tensor<f64> {
 }
 
 fn read_back_f32(t: &Tensor<f32>) -> Vec<f32> {
-    t.to(Device::Cpu).expect("download").data_vec().expect("data")
+    t.to(Device::Cpu)
+        .expect("download")
+        .data_vec()
+        .expect("data")
 }
 fn read_back_f64(t: &Tensor<f64>) -> Vec<f64> {
-    t.to(Device::Cpu).expect("download").data_vec().expect("data")
+    t.to(Device::Cpu)
+        .expect("download")
+        .data_vec()
+        .expect("data")
 }
 
 /// Build `x[i] = ((i*7+3) % m) as f32`.
@@ -87,7 +93,10 @@ fn check_formula(size: usize, m: usize, expected_counts: &[usize]) {
     assert_eq!(inverse, want_inv, "inverse vs torch (size={size}, m={m})");
 
     // counts: live-torch record; also must sum to size.
-    assert_eq!(counts, expected_counts, "counts vs torch (size={size}, m={m})");
+    assert_eq!(
+        counts, expected_counts,
+        "counts vs torch (size={size}, m={m})"
+    );
     assert_eq!(counts.iter().sum::<usize>(), size, "counts sum to n");
 }
 
@@ -125,7 +134,9 @@ fn unique_f32_pow2_plus_one_1025() {
     check_formula(
         1025,
         17,
-        &[61, 60, 60, 61, 60, 60, 60, 61, 60, 60, 61, 60, 60, 60, 61, 60, 60],
+        &[
+            61, 60, 60, 61, 60, 60, 60, 61, 60, 60, 61, 60, 60, 60, 61, 60, 60,
+        ],
     );
 }
 
@@ -134,7 +145,11 @@ fn unique_f32_pow2_plus_one_1025() {
 #[test]
 fn unique_f32_pow2_minus_one_255() {
     ensure_cuda();
-    check_formula(255, 13, &[20, 19, 19, 20, 20, 20, 20, 19, 19, 19, 20, 20, 20]);
+    check_formula(
+        255,
+        13,
+        &[20, 19, 19, 20, 20, 20, 20, 19, 19, 19, 20, 20, 20],
+    );
 }
 
 // --- LARGE sizes crossing many bitonic stages ---
@@ -175,7 +190,11 @@ fn unique_f32_scattered_inverse() {
     let xg = cuda_f32(&[5.0, 1.0, 3.0, 1.0, 5.0, 3.0, 1.0]);
     let (vals, inverse, counts) = unique(&xg).unwrap();
     assert_eq!(read_back_f32(&vals), vec![1.0, 3.0, 5.0]);
-    assert_eq!(inverse, vec![2, 0, 1, 0, 2, 1, 0], "scatter inverse vs torch");
+    assert_eq!(
+        inverse,
+        vec![2, 0, 1, 0, 2, 1, 0],
+        "scatter inverse vs torch"
+    );
     assert_eq!(counts, vec![3, 2, 2]);
 }
 
@@ -219,7 +238,10 @@ fn unique_f64_exact_pow2_256() {
     let data: Vec<f64> = (0..256).map(|i| ((i * 7 + 3) % 9) as f64).collect();
     let xg = cuda_f64(&data);
     let (vals, inverse, counts) = unique(&xg).unwrap();
-    assert_eq!(read_back_f64(&vals), (0..9).map(|k| k as f64).collect::<Vec<_>>());
+    assert_eq!(
+        read_back_f64(&vals),
+        (0..9).map(|k| k as f64).collect::<Vec<_>>()
+    );
     let want_inv: Vec<usize> = (0..256).map(|i| (i * 7 + 3) % 9).collect();
     assert_eq!(inverse, want_inv, "f64 pow2 inverse vs torch");
     assert_eq!(counts, vec![28, 29, 28, 29, 28, 28, 29, 28, 29]);
@@ -231,7 +253,10 @@ fn unique_f64_large_5000() {
     let data: Vec<f64> = (0..5000).map(|i| ((i * 7 + 3) % 19) as f64).collect();
     let xg = cuda_f64(&data);
     let (vals, inverse, counts) = unique(&xg).unwrap();
-    assert_eq!(read_back_f64(&vals), (0..19).map(|k| k as f64).collect::<Vec<_>>());
+    assert_eq!(
+        read_back_f64(&vals),
+        (0..19).map(|k| k as f64).collect::<Vec<_>>()
+    );
     let want_inv: Vec<usize> = (0..5000).map(|i| (i * 7 + 3) % 19).collect();
     assert_eq!(inverse, want_inv, "f64 large inverse vs torch");
     assert_eq!(counts.iter().sum::<usize>(), 5000);

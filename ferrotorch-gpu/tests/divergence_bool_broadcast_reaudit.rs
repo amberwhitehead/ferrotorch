@@ -95,7 +95,10 @@ fn gpu_broadcast(bits: &[bool], in_shape: &[usize], out_shape: &[usize]) -> Vec<
         .broadcast_bool(mask.gpu_handle().unwrap(), in_shape, out_shape)
         .expect("broadcast_bool on device");
     let bt = BoolTensor::from_gpu_handle(handle, out_shape.to_vec());
-    assert!(bt.is_cuda(), "broadcast_bool result must stay CUDA-resident");
+    assert!(
+        bt.is_cuda(),
+        "broadcast_bool result must stay CUDA-resident"
+    );
     bt.to(Device::Cpu).unwrap().data().unwrap().to_vec()
 }
 
@@ -240,7 +243,10 @@ fn where_cond_bcast_cuda_cond_matches_cpu() {
     let cond_cuda = cuda_mask(&[true, false, true], &[3]);
     let gpu_out = where_cond_bcast(&cond_cuda, &inp_cuda, &oth_cuda)
         .expect("where_cond_bcast with broadcast CUDA cond (torch supports this)");
-    assert!(gpu_out.is_cuda(), "where on CUDA cond must keep result on device");
+    assert!(
+        gpu_out.is_cuda(),
+        "where on CUDA cond must keep result on device"
+    );
     assert_eq!(
         host_f32(&gpu_out),
         cpu_vec,

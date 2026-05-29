@@ -91,7 +91,11 @@ fn convergence_f64_single_finite() {
 fn convergence_f32_single_nan() {
     let (vals, inv, counts) = unique(&cpu_f32(&[f32::NAN])).unwrap();
     let v = vals.data_vec().unwrap();
-    assert_eq!(v.len(), 1, "exactly one entry, not a leading count-0 ghost: {v:?}");
+    assert_eq!(
+        v.len(),
+        1,
+        "exactly one entry, not a leading count-0 ghost: {v:?}"
+    );
     assert!(v[0].is_nan(), "the lone value is NaN: {v:?}");
     assert_eq!(inv, vec![0]);
     assert_eq!(counts, vec![1]);
@@ -181,7 +185,10 @@ fn convergence_f32_mixed_full() {
     // -0.0/+0.0 collapse to ONE entry; representative is the sorted-first
     // occurrence (-0.0). Check sign bit, since 0.0 == -0.0 numerically.
     assert_eq!(v[1], 0.0, "v[1] numerically zero: {v:?}");
-    assert!(v[1].is_sign_negative(), "v[1] is -0.0 (negative sign): {v:?}");
+    assert!(
+        v[1].is_sign_negative(),
+        "v[1] is -0.0 (negative sign): {v:?}"
+    );
     assert_eq!(v[2], 3.0, "v[2]=3: {v:?}");
     assert_eq!(v[3], f32::INFINITY, "v[3]=+inf: {v:?}");
     assert!(v[4].is_nan() && v[5].is_nan(), "v[4..]=nan tail: {v:?}");
@@ -199,7 +206,10 @@ fn convergence_f64_mixed_full() {
     assert_eq!(v.len(), 6, "six unique entries: {v:?}");
     assert_eq!(v[0], f64::NEG_INFINITY, "v[0]=-inf: {v:?}");
     assert_eq!(v[1], 0.0, "v[1] numerically zero: {v:?}");
-    assert!(v[1].is_sign_negative(), "v[1] is -0.0 (negative sign): {v:?}");
+    assert!(
+        v[1].is_sign_negative(),
+        "v[1] is -0.0 (negative sign): {v:?}"
+    );
     assert_eq!(v[2], 3.0, "v[2]=3: {v:?}");
     assert_eq!(v[3], f64::INFINITY, "v[3]=+inf: {v:?}");
     assert!(v[4].is_nan() && v[5].is_nan(), "v[4..]=nan tail: {v:?}");
