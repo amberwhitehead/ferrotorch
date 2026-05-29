@@ -58,7 +58,7 @@ Reproduce: `cargo run --release --features gpu --example ferrotorch_bench` · `p
 |---|--:|--:|
 | **Creation** | | |
 | zeros [1000,1000] | 334 | 55 |
-| rand [1000,1000] | 3,494 | 60 |
+| rand [1000,1000] | 15 | 60 |
 | **Elementwise** | | |
 | add [1000,1000] | 53 | 42 |
 | mul [1000,1000] | 53 | 42 |
