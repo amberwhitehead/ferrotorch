@@ -404,5 +404,9 @@ fn scatter_add_segments_gpu_f32_empty_src() {
     let out = scatter_add_segments(&gpu, &index, 4).expect("gpu empty src");
     assert!(out.is_cuda());
     assert_eq!(out.shape(), &[4, 3]);
-    assert_eq!(host_f32(&out), vec![0.0f32; 12], "empty src -> all-zero output");
+    assert_eq!(
+        host_f32(&out),
+        vec![0.0f32; 12],
+        "empty src -> all-zero output"
+    );
 }
