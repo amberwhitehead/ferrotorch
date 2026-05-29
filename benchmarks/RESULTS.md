@@ -77,7 +77,7 @@ Reproduce: `cargo run --release --features gpu --example ferrotorch_bench` · `p
 | **Reductions** | | |
 | sum_all [1000,1000] | 342 | — |
 | sum dim=0 [1000,1000] | 143 | — |
-| mean [1000,1000] | 483 | — |
+| mean [1000,1000] | 462 | — |
 | **Normalization** | | |
 | softmax [64,256] | 117 | — |
 | **Networks** | | |
