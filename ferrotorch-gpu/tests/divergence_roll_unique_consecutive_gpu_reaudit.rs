@@ -62,11 +62,17 @@ fn cuda_f64(data: &[f64]) -> Tensor<f64> {
 }
 
 fn read_back_f32(t: &Tensor<f32>) -> Vec<f32> {
-    t.to(Device::Cpu).expect("download").data_vec().expect("data")
+    t.to(Device::Cpu)
+        .expect("download")
+        .data_vec()
+        .expect("data")
 }
 
 fn read_back_f64(t: &Tensor<f64>) -> Vec<f64> {
-    t.to(Device::Cpu).expect("download").data_vec().expect("data")
+    t.to(Device::Cpu)
+        .expect("download")
+        .data_vec()
+        .expect("data")
 }
 
 // ===========================================================================
@@ -97,11 +103,19 @@ fn unique_consecutive_f32_consecutive_nan_each_own_run() {
     assert!(vals.is_cuda(), "unique values must stay on device");
     let got = read_back_f32(&vals);
     // torch: 3 outputs — two NaN run-starts then 1.0.
-    assert_eq!(got.len(), 3, "torch keeps each NaN as its own run -> 3 outputs");
+    assert_eq!(
+        got.len(),
+        3,
+        "torch keeps each NaN as its own run -> 3 outputs"
+    );
     assert!(got[0].is_nan(), "out[0] is the first NaN run-start");
     assert!(got[1].is_nan(), "out[1] is the second NaN run-start");
     assert_eq!(got[2], 1.0);
-    assert_eq!(inverse, vec![0, 1, 2], "inverse maps each elem to its own run");
+    assert_eq!(
+        inverse,
+        vec![0, 1, 2],
+        "inverse maps each elem to its own run"
+    );
     assert_eq!(counts, vec![1, 1, 1], "every run length 1");
 }
 
@@ -209,9 +223,16 @@ fn unique_consecutive_f32_block_boundary_scan() {
     let got = read_back_f32(&vals);
 
     // torch oracle: out_len == 1026, values are exactly 0..=1025.
-    assert_eq!(got.len(), 1026, "block-boundary scan produced wrong run count");
+    assert_eq!(
+        got.len(),
+        1026,
+        "block-boundary scan produced wrong run count"
+    );
     let expected: Vec<f32> = (0..1026).map(|i| i as f32).collect();
-    assert_eq!(got, expected, "compacted values diverge across the scan boundary");
+    assert_eq!(
+        got, expected,
+        "compacted values diverge across the scan boundary"
+    );
 
     // counts must sum back to the input length (no run dropped/double-counted).
     assert_eq!(counts.iter().sum::<usize>(), 2050);

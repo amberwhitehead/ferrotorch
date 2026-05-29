@@ -903,7 +903,9 @@ fn launch_scatter_add_segments<V: DeviceRepr + ValidAsZeroBits>(
     ptx: &'static str,
     kernel_name: &'static str,
 ) -> GpuResult<()> {
-    let total = e.checked_mul(d).ok_or(GpuError::LengthMismatch { a: e, b: d })?;
+    let total = e
+        .checked_mul(d)
+        .ok_or(GpuError::LengthMismatch { a: e, b: d })?;
     if total == 0 {
         return Ok(());
     }
