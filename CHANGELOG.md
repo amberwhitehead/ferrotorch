@@ -49,6 +49,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- GPU non-symmetric eig (gpu_eig_f32/f64 + _dev) returned CUSOLVER_STATUS_INVALID_VALUE on every call — cusolverDnXgeev requires a homogeneous datatype set but ferrotorch passed real dataTypeA/computeType with complex W/V; promote the real input to a complex buffer (new gpu_real_to_complex_f32/f64 kernel) and use all-complex datatypes (mirrors torch.linalg.eig). GPU general-eig now matches torch (eigenvalues + Av=λv), unblocking the #1685 complex-transpose consumer (#1687)
 - GPU Philox kernels (PHILOX_UNIFORM_PTX / PHILOX_NORMAL_PTX) never JIT-compiled on real hardware — a declared `.reg .u32 %tid` shadowed the builtin special register, failing every call with CUDA_ERROR_INVALID_PTX and silently CPU-falling-back (also affected dropout + distributions GPU sampling); rename %tid→%ltid makes them run on-device for the first time: rand[1000,1000] 3,494us→15us, raw uniform(1M) 23,517us→14.2us (now beats torch GPU rand 60us) (#1684)
 - CPU Conv2d im2col is single-threaded — parallelize the batch loop (rayon) like fast_add (~12x gap vs torch cuDNN) (#1681)
 - RNN/GRU/LSTM sequence forward re-transposes constant weights every timestep (2*seq_len redundant transposes) — hoist out of the per-step loop (#1680)
