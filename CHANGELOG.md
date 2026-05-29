@@ -48,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- GPU Philox kernels (PHILOX_UNIFORM_PTX / PHILOX_NORMAL_PTX) never JIT-compiled on real hardware — a declared `.reg .u32 %tid` shadowed the builtin special register, failing every call with CUDA_ERROR_INVALID_PTX and silently CPU-falling-back (also affected dropout + distributions GPU sampling); rename %tid→%ltid makes them run on-device for the first time: rand[1000,1000] 3,494us→15us, raw uniform(1M) 23,517us→14.2us (now beats torch GPU rand 60us) (#1684)
 - CPU Conv2d im2col is single-threaded — parallelize the batch loop (rayon) like fast_add (~12x gap vs torch cuDNN) (#1681)
 - RNN/GRU/LSTM sequence forward re-transposes constant weights every timestep (2*seq_len redundant transposes) — hoist out of the per-step loop (#1680)
 - GPU linear_fused transposes the constant weight via a separate kernel every forward — use cuBLAS transpose-B matmul (matmul_f32_nt) to drop a launch+transpose per Linear (GPU MLP 5x gap) (#1679)

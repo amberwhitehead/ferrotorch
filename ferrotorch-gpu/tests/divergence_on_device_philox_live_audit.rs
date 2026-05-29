@@ -74,7 +74,10 @@ fn uniform_gpu_strict_unit_interval() {
         to_host(&rand_on_device::<f32>(&[1_000_000], Device::Cuda(0)).expect("gpu uniform"))
     };
     for &x in &v {
-        assert!(x >= 0.0 && x < 1.0, "on-device uniform produced {x} outside [0,1)");
+        assert!(
+            x >= 0.0 && x < 1.0,
+            "on-device uniform produced {x} outside [0,1)"
+        );
     }
 }
 
@@ -118,7 +121,10 @@ fn normal_gpu_odd_length_finite_count() {
         };
         assert_eq!(gpu.len(), n, "gpu normal wrong length at n={n}");
         for (i, &x) in gpu.iter().enumerate() {
-            assert!(x.is_finite(), "on-device normal value[{i}]={x} not finite at n={n}");
+            assert!(
+                x.is_finite(),
+                "on-device normal value[{i}]={x} not finite at n={n}"
+            );
         }
     }
 }
