@@ -275,9 +275,10 @@ fn main() -> FerrotorchResult<()> {
             let t = zeros::<f32>(&[1000, 1000]).unwrap();
             t.cuda().unwrap()
         });
+        // On-device generation (no CPU-gen + upload): rand_on_device dispatches
+        // to the Philox uniform kernel and wraps the result as a CUDA tensor.
         bench_gpu("GPU rand [1000,1000]", 5, 100, || {
-            let t = rand::<f32>(&[1000, 1000]).unwrap();
-            t.cuda().unwrap()
+            rand_on_device::<f32>(&[1000, 1000], Device::Cuda(0)).unwrap()
         });
 
         // Elementwise on GPU

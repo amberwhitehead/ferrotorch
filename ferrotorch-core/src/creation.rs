@@ -181,6 +181,82 @@ pub fn randn<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
     Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)
 }
 
+/// Device-aware uniform-`[0, 1)` random tensor creation.
+///
+/// PyTorch parity: `torch.rand(size, device=...)` lowers to
+/// `at::empty(size, options).uniform_(0, 1)`
+/// (`aten/src/ATen/native/TensorFactories.cpp:1075-1076`). The tensor is
+/// created ON the requested device and filled in place — for a CUDA device
+/// the fill runs as an on-device curand/Philox kernel, with NO CPU
+/// generate-then-upload.
+///
+/// # Behaviour by device / dtype
+///
+/// - `Device::Cuda(_)` + f32: generated entirely on-device via
+///   [`crate::gpu_dispatch::GpuBackend::rand_uniform_f32`], wrapped as an
+///   `is_cuda()` tensor with no host round trip (R-CODE-4). Reproducible after
+///   [`crate::manual_seed`] (which seeds the GPU generator too).
+/// - `Device::Cpu`: identical to [`rand`] (byte-exact with `torch.rand` for
+///   f32 via the thread-local MT19937).
+/// - `Device::Cuda(_)` + non-f32 (e.g. f64): the on-device Philox kernel is
+///   f32-only, so this falls back to the CPU `rand` path then transfers to the
+///   device via [`Tensor::to`]. The values are still correct; only the
+///   generation site (CPU vs GPU) differs. f64 on-device RNG is a documented
+///   follow-up.
+/// - `Device::Meta`: falls back to the CPU path then `.to(Meta)`.
+pub fn rand_on_device<T: Float>(
+    shape: &[usize],
+    device: crate::device::Device,
+) -> FerrotorchResult<Tensor<T>> {
+    use crate::device::Device;
+
+    let is_f32 = std::mem::size_of::<T>() == 4;
+    match device {
+        Device::Cuda(_) if is_f32 => {
+            let numel: usize = shape.iter().product();
+            let backend = crate::gpu_dispatch::gpu_backend()
+                .ok_or(crate::error::FerrotorchError::DeviceUnavailable)?;
+            let handle = backend.rand_uniform_f32(numel)?;
+            let storage = TensorStorage::gpu(handle);
+            Tensor::from_storage(storage, shape.to_vec(), false)
+        }
+        Device::Cpu => rand::<T>(shape),
+        // f64-on-CUDA and Meta: generate on CPU (byte-exact / correct
+        // distribution) then move to the target device.
+        other => rand::<T>(shape)?.to(other),
+    }
+}
+
+/// Device-aware standard-normal random tensor creation.
+///
+/// Standard-normal counterpart of [`rand_on_device`]. PyTorch parity:
+/// `torch.randn(size, device=...)` = `at::empty(...).normal_(0, 1)`
+/// (`aten/src/ATen/native/TensorFactories.cpp:1379`). For `Device::Cuda(_)` +
+/// f32 the values are generated on-device via the Box-Muller Philox normal
+/// kernel ([`crate::gpu_dispatch::GpuBackend::randn_normal_f32`]); other
+/// device/dtype combinations follow the same CPU-then-transfer fall-back as
+/// [`rand_on_device`].
+pub fn randn_on_device<T: Float>(
+    shape: &[usize],
+    device: crate::device::Device,
+) -> FerrotorchResult<Tensor<T>> {
+    use crate::device::Device;
+
+    let is_f32 = std::mem::size_of::<T>() == 4;
+    match device {
+        Device::Cuda(_) if is_f32 => {
+            let numel: usize = shape.iter().product();
+            let backend = crate::gpu_dispatch::gpu_backend()
+                .ok_or(crate::error::FerrotorchError::DeviceUnavailable)?;
+            let handle = backend.randn_normal_f32(numel)?;
+            let storage = TensorStorage::gpu(handle);
+            Tensor::from_storage(storage, shape.to_vec(), false)
+        }
+        Device::Cpu => randn::<T>(shape),
+        other => randn::<T>(shape)?.to(other),
+    }
+}
+
 /// Create a meta (no-data) tensor with the given shape. Carries shape and
 /// dtype information but allocates no backing memory. Useful for shape
 /// inference, dry-run model construction, and inspecting parameter counts

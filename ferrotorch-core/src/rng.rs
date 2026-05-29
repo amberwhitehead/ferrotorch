@@ -270,6 +270,16 @@ pub fn manual_seed(seed: u64) {
     THREAD_RNG.with(|rng| {
         rng.borrow_mut().manual_seed(seed);
     });
+    // Mirror `torch.manual_seed`, which seeds BOTH the CPU and all CUDA
+    // generators: `torch/random.py:67` calls `torch.cuda.manual_seed_all(seed)`
+    // (`torch/cuda/random.py:112`). When a GPU backend is registered, forward
+    // the seed to its per-device Philox manager so that
+    // `creation::rand_on_device(.., Cuda)` after `manual_seed` is reproducible.
+    // No-op (and no error surfaced) when CUDA is unavailable, matching torch's
+    // "silently ignored if CUDA is not available" contract.
+    if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+        let _ = backend.manual_seed_gpu(seed);
+    }
 }
 
 /// Run a closure with mutable access to the current thread's default

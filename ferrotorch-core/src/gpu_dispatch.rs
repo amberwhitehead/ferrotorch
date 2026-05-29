@@ -3267,6 +3267,52 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// Generate `numel` uniform-`[0, 1)` f32 values directly on the GPU.
+    ///
+    /// PyTorch parity: `torch.rand(size, device='cuda')` lowers to
+    /// `at::empty(size, options).uniform_(0, 1)`
+    /// (`aten/src/ATen/native/TensorFactories.cpp:1075-1076`); the tensor is
+    /// created ON the CUDA device and filled by the on-device curand/Philox
+    /// kernel — there is no CPU generate-then-upload. This trait slot is the
+    /// on-device equivalent: the backend produces a `DType::F32` GPU buffer of
+    /// `numel` uniform values without any host round trip (R-CODE-4).
+    ///
+    /// The backend snapshots and advances its per-device Philox counter (the
+    /// `torch.cuda` default generator analog), so output is reproducible after
+    /// [`Self::manual_seed_gpu`].
+    ///
+    /// Default returns `NotImplementedOnCuda` so non-CUDA backends compile
+    /// unchanged and the caller falls back to the CPU `rand` path.
+    fn rand_uniform_f32(&self, _numel: usize) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "rand_uniform_f32",
+        })
+    }
+
+    /// Generate `numel` standard-normal f32 values directly on the GPU.
+    ///
+    /// PyTorch parity: `torch.randn(size, device='cuda')` lowers to
+    /// `at::empty(size, options).normal_(0, 1)`
+    /// (`aten/src/ATen/native/TensorFactories.cpp:1379`). f32 counterpart of
+    /// [`Self::rand_uniform_f32`] using the Box-Muller Philox normal kernel.
+    fn randn_normal_f32(&self, _numel: usize) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "randn_normal_f32",
+        })
+    }
+
+    /// Seed every GPU device's RNG generator (`torch.cuda.manual_seed_all`
+    /// analog at `torch/cuda/random.py:112`).
+    ///
+    /// `ferrotorch_core::manual_seed` calls this after seeding the CPU
+    /// MT19937 generator, mirroring `torch.manual_seed` which seeds both the
+    /// CPU and all CUDA generators (`torch/random.py:67` —
+    /// `torch.cuda.manual_seed_all(seed)`). Default is a no-op so non-CUDA
+    /// backends compile unchanged.
+    fn manual_seed_gpu(&self, _seed: u64) -> FerrotorchResult<()> {
+        Ok(())
+    }
+
     // GPU linear algebra via cuSOLVER
     fn svd_f32(
         &self,

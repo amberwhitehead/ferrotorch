@@ -4811,6 +4811,41 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
+    fn rand_uniform_f32(&self, numel: usize) -> FerrotorchResult<GpuBufferHandle> {
+        // On-device generation: `gpu_philox_uniform` snapshots and advances the
+        // per-device Philox counter inside the CudaRngManager (same pattern as
+        // `dropout_philox_f32`), launches the PHILOX_UNIFORM_PTX kernel, and
+        // returns a `CudaBuffer<f32>` filled on the GPU — no CPU round trip.
+        // Mirrors `torch.rand(size, device='cuda')` =
+        // `at::empty(...).uniform_(0,1)` at TensorFactories.cpp:1075-1076.
+        let dev = self.default_device()?;
+        let buf = crate::rng::gpu_philox_uniform(numel, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(buf, dev.ordinal()))
+    }
+
+    fn randn_normal_f32(&self, numel: usize) -> FerrotorchResult<GpuBufferHandle> {
+        // f32 standard-normal counterpart of `rand_uniform_f32`, via the
+        // Box-Muller PHILOX_NORMAL_PTX kernel. Mirrors
+        // `torch.randn(size, device='cuda')` = `at::empty(...).normal_(0,1)`.
+        let dev = self.default_device()?;
+        let buf = crate::rng::gpu_philox_normal(numel, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(buf, dev.ordinal()))
+    }
+
+    fn manual_seed_gpu(&self, seed: u64) -> FerrotorchResult<()> {
+        // `torch.cuda.manual_seed_all` analog (torch/cuda/random.py:112).
+        // Called by `ferrotorch_core::manual_seed` after seeding the CPU
+        // generator, mirroring `torch.manual_seed` -> `cuda.manual_seed_all`
+        // (torch/random.py:67).
+        let mut mgr = crate::rng::cuda_rng_manager().lock().map_err(|_| {
+            FerrotorchError::InvalidArgument {
+                message: "failed to lock CUDA RNG manager".into(),
+            }
+        })?;
+        mgr.manual_seed_all(seed);
+        Ok(())
+    }
+
     fn save_rng_state(&self, device: usize) -> FerrotorchResult<GpuRngState> {
         let mut mgr = crate::rng::cuda_rng_manager().lock().map_err(|_| {
             FerrotorchError::InvalidArgument {

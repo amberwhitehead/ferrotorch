@@ -52,6 +52,15 @@ allocation-free meta-device tensors for shape inference (CL-395). The
   `full_meta(shape, value)` path records `value` in
   `TensorStorage::meta_fill_value` so the fill is observable
   (`test_full_meta_records_value_and_discriminates_by_fill`).
+- REQ-9: `rand_on_device(shape, device)` / `randn_on_device(shape,
+  device)` — device-aware random fills (#1682). For `Device::Cuda` +
+  f32 the values are generated DIRECTLY on the GPU via the Philox
+  uniform / normal kernels (no CPU generate-then-upload), mirroring
+  `torch.rand(size, device='cuda')` = `at::empty(size,
+  options).uniform_(0, 1)` (`TensorFactories.cpp:1075-1076`). CPU,
+  f64-on-CUDA and Meta paths fall back to the CPU generator then
+  `.to(device)` (the Philox kernel is f32-only). Reproducible after
+  `manual_seed` (which now seeds the GPU generator too).
 
 ## Acceptance Criteria
 
@@ -156,5 +165,6 @@ zeros` (no torch op_db entry exists for the pure factories).
 | REQ-4 | SHIPPED | impl: `arange` at `creation.rs:58`; non-test consumer: re-exported at `lib.rs:138`; used by `ferrotorch_core` prelude consumers and PyTorch parity tests |
 | REQ-5 | SHIPPED | impl: `linspace` at `creation.rs:81`; non-test consumer: re-exported at `lib.rs:138`; used in spectral-op test paths |
 | REQ-6 | SHIPPED | impl: `rand` at `creation.rs:127`, `randn` at `creation.rs:165` source from `crate::rng::with_thread_rng`; non-test consumer: `crate::autograd::grad_penalty::grad_penalty` at `autograd/grad_penalty.rs:94` invokes `creation::rand(real.shape())`. Thread-local MT19937 + `manual_seed` ship at `rng.rs` (#1537 closed); byte-exact vs `torch.manual_seed(42); torch.rand(10)` for f32 (`divergence_manual_seed_parity.rs:manual_seed_42_rand_byte_exact_vs_torch_f32`). |
+| REQ-9 | SHIPPED | Device-aware on-device RNG (#1682). impl: `pub fn rand_on_device` / `pub fn randn_on_device in creation.rs` — for `Device::Cuda` + f32 they call `GpuBackend::rand_uniform_f32` / `randn_normal_f32` and wrap the result `TensorStorage::gpu(handle)` with NO host round trip (mirrors `torch.rand(size, device='cuda')` = `at::empty(...).uniform_(0,1)` at `aten/src/ATen/native/TensorFactories.cpp:1075-1076`). Non-test consumer: `ferrotorch/examples/ferrotorch_bench.rs` GPU-rand bench calls `rand_on_device::<f32>(.., Device::Cuda(0))`; also re-exported at `pub use creation in lib.rs`. f64-on-CUDA / Meta fall back to CPU-gen + `.to(device)` (Philox kernel is f32-only). Reproducibility coupled to `crate::manual_seed` via the GPU seed path; verified on RTX 3090 by `ferrotorch-gpu/tests/on_device_rng.rs`. |
 | REQ-7 | SHIPPED | impl: `*_like` family at `creation.rs:288-314`; non-test consumer: `crate::grad_fns::cumulative` at `cumulative.rs:501` invokes `creation::zeros::<T>(input_shape)` (effectively `zeros_like` shape pattern) |
 | REQ-8 | SHIPPED | impl: `zeros_meta`/`ones_meta`/`full_meta`/`meta_like in creation.rs`; non-test consumer: `crate::tensor::Tensor::meta_fill_value` at `meta_fill_value in tensor.rs` documents and exposes `creation::full_meta`'s recorded fill; CL-395 |

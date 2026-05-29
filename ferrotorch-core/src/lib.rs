@@ -152,7 +152,7 @@ pub use bool_tensor::BoolTensor;
 pub use complex_tensor::ComplexTensor;
 pub use creation::{
     arange, eye, from_slice, from_vec, full, full_like, linspace, ones, ones_like, rand, rand_like,
-    randn, randn_like, scalar, tensor, zeros, zeros_like,
+    rand_on_device, randn, randn_like, randn_on_device, scalar, tensor, zeros, zeros_like,
 };
 pub use device::Device;
 pub use dtype::{DType, Element, Float};
