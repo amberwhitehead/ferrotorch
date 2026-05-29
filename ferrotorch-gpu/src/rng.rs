@@ -583,7 +583,7 @@ pub(crate) const PHILOX_UNIFORM_PTX: &str = "\
     .param .u32 counter_lo,
     .param .u32 counter_hi
 ) {
-    .reg .u32 %tid, %bid, %bdim, %gid, %n_reg;
+    .reg .u32 %ltid, %bid, %bdim, %gid, %n_reg;
     .reg .u32 %slo, %shi, %clo, %chi;
     .reg .u32 %group, %sub, %rem;
     .reg .u32 %c0, %c1, %c2, %c3, %k0, %k1;
@@ -603,8 +603,8 @@ pub(crate) const PHILOX_UNIFORM_PTX: &str = "\
     // Global thread index
     mov.u32 %bid, %ctaid.x;
     mov.u32 %bdim, %ntid.x;
-    mov.u32 %tid, %tid.x;
-    mad.lo.u32 %gid, %bid, %bdim, %tid;
+    mov.u32 %ltid, %tid.x;
+    mad.lo.u32 %gid, %bid, %bdim, %ltid;
 
     setp.ge.u32 %p, %gid, %n_reg;
     @%p bra DONE;
@@ -898,7 +898,7 @@ pub(crate) const PHILOX_NORMAL_PTX: &str = "\
     .param .u32 counter_lo,
     .param .u32 counter_hi
 ) {
-    .reg .u32 %tid, %bid, %bdim, %gid, %n_reg;
+    .reg .u32 %ltid, %bid, %bdim, %gid, %n_reg;
     .reg .u32 %slo, %shi, %clo, %chi;
     .reg .u32 %c0, %c1, %c2, %c3, %k0, %k1;
     .reg .u32 %hi_val, %lo_val, %t0, %t1, %t2, %t3;
@@ -918,8 +918,8 @@ pub(crate) const PHILOX_NORMAL_PTX: &str = "\
     // Global thread index (each thread handles 2 output elements)
     mov.u32 %bid, %ctaid.x;
     mov.u32 %bdim, %ntid.x;
-    mov.u32 %tid, %tid.x;
-    mad.lo.u32 %gid, %bid, %bdim, %tid;
+    mov.u32 %ltid, %tid.x;
+    mad.lo.u32 %gid, %bid, %bdim, %ltid;
 
     // Each thread produces elements at idx0 = 2*gid and idx1 = 2*gid+1
     shl.b32 %idx0, %gid, 1;
