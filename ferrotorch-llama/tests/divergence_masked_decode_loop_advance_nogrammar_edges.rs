@@ -58,7 +58,10 @@ fn forbidden_max_source<'a>(
 ) -> impl FnMut(&[u32]) -> ferrotorch_core::FerrotorchResult<Vec<f32>> + 'a {
     let vocab_len = vocab.len();
     let forbidden_id = id_of(vocab, forbidden) as usize;
-    let pref: Vec<usize> = preferred.iter().map(|&c| id_of(vocab, c) as usize).collect();
+    let pref: Vec<usize> = preferred
+        .iter()
+        .map(|&c| id_of(vocab, c) as usize)
+        .collect();
     move |_ids: &[u32]| {
         let mut logits = vec![-10.0f32; vocab_len];
         logits[forbidden_id] = 1000.0;
@@ -111,7 +114,9 @@ fn masked_decode_loop_grammar_state_advances_per_step() {
             .filter_map(|(i, &b)| (b == 1).then_some(i))
             .collect();
         allowed_sets.push(allowed);
-        replay.step_token(tok).expect("emitted token must be allowed");
+        replay
+            .step_token(tok)
+            .expect("emitted token must be allowed");
     }
 
     // The allowed set at the very first step (start of `true`) must include
@@ -178,7 +183,10 @@ fn masked_decode_loop_zero_max_new_tokens_is_empty() {
     // No grammar.
     let src = forbidden_max_source(&vocab, ' ', &[]);
     let g_none = masked_decode_loop(src, None, &[], 0, 0).expect("zero-budget no-grammar");
-    assert!(g_none.is_empty(), "max_new_tokens=0 must yield empty output");
+    assert!(
+        g_none.is_empty(),
+        "max_new_tokens=0 must yield empty output"
+    );
 
     // With grammar (the completion guard / mask path must not run either).
     let mut proc = JsonSchemaProcessor::new(&json!({"type": "boolean"}), vocab.clone()).unwrap();

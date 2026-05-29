@@ -9,6 +9,11 @@
 //! values are the live `Quantizer.dequantize` output (R-CHAR-3), so this
 //! fails if the consumer drops the dequant, loads zeros, or mismatches keys.
 
+#![allow(
+    clippy::excessive_precision,
+    reason = "oracle expected values copied verbatim from the live mobiusml/hqq Quantizer.dequantize reference; full precision is intentional (rounds to dtype at compile time)"
+)]
+
 use ferrotorch_core::{Tensor, TensorStorage};
 use ferrotorch_llama::{LlamaActivation, LlamaConfig, LlamaForCausalLM};
 use ferrotorch_nn::module::{Module, StateDict};

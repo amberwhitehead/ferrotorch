@@ -9,6 +9,11 @@
 //! where the two group-axis halves are deliberately distinct (so an
 //! adjacent-pair unpack would visibly diverge from split-half).
 
+#![allow(
+    clippy::excessive_precision,
+    reason = "oracle expected values copied verbatim from the live mobiusml/hqq v0.2.1 + torch reference; full precision is intentional (rounds to dtype at compile time)"
+)]
+
 use ferrotorch_llama::{HqqQ4Axis1, dequantize_hqq_q4_axis1};
 
 /// Divergence probe: ferrotorch `dequantize_hqq_q4_axis1` vs the live

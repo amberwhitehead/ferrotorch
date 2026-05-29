@@ -77,8 +77,7 @@ fn build_single_tensor_gguf(name: &str, dims: &[u64], ggml_type: u32, data: &[u8
 fn host_reference_bf16_bits(dims: &[u64], ggml_type: u32, raw: &[u8]) -> Vec<u16> {
     let bytes = build_single_tensor_gguf("w", dims, ggml_type, raw);
     let file = parse_gguf_bytes(&bytes).expect("synthetic GGUF must parse");
-    let tensor =
-        dequantize_gguf_tensor(&file, "w").expect("host reference dequant must succeed");
+    let tensor = dequantize_gguf_tensor(&file, "w").expect("host reference dequant must succeed");
     tensor
         .data()
         .expect("cpu tensor data")
