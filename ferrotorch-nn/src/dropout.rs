@@ -7,6 +7,17 @@
 //! respectively. [`AlphaDropout`] preserves mean and variance for use
 //! with SELU activations.
 //!
+//! All six CPU forward paths draw their keep-mask from the byte-exact
+//! MT19937 `Generator` (`ferrotorch_core::rng`) with torch's exact
+//! consumption — per element ([`Dropout`], [`AlphaDropout`]) or per `[N, C]`
+//! channel ([`Dropout1d`]/[`Dropout2d`]/[`Dropout3d`],
+//! [`FeatureAlphaDropout`]) in flat order, keep iff `next_uniform_f64() <
+//! (1 - p)` — so `ferrotorch_core::manual_seed(s)` reproduces
+//! `torch.manual_seed(s); F.dropout{,1d,2d,3d}` / `nn.AlphaDropout` /
+//! `nn.FeatureAlphaDropout` byte-for-byte (#1634, #1635, #1636). The alpha
+//! variants use torch's hardcoded `alpha = 1.7580993408473766` affine
+//! (`aten/src/ATen/native/Dropout.cpp:76`).
+//!
 //! All modules are identity in eval mode and have zero learnable parameters.
 //!
 //! ## REQ status (per `.design/ferrotorch-nn/dropout.md`)
@@ -17,15 +28,15 @@
 //! | REQ-2 | SHIPPED | impl: `<Dropout as Module>::forward` body with eval / `p==0` short-circuit + Bernoulli + scale here; non-test consumer: `Dropout::forward` is called on every forward pass through the VGG / Inception classifier (constructed in `vgg.rs` and `inception.rs`). |
 //! | REQ-3 | SHIPPED | impl: `input.is_cuda() && backend = ferrotorch_core::gpu_dispatch::gpu_backend()` GPU branch inside `<Dropout as Module>::forward` here; non-test consumer: any vision model run on CUDA (e.g. VGG / Inception fine-tuning with parameters on GPU) triggers this on every forward step. |
 //! | REQ-4 | SHIPPED | impl: `struct DropoutBackward<T>` + `GradFn` impl here; non-test consumer: every `loss.backward()` over a model containing `Dropout` traverses these nodes via the autograd engine. |
-//! | REQ-5 | SHIPPED | impl: `pub struct Dropout2d<T: Float>` + `Module` impl here; non-test consumer: `pub use dropout::Dropout2d` in `lib.rs` exposes for downstream vision / segmentation code. |
-//! | REQ-6 | SHIPPED | impl: `pub struct Dropout1d<T: Float>` + `Module` impl here; non-test consumer: `pub use dropout::Dropout1d` in `lib.rs`. |
-//! | REQ-7 | SHIPPED | impl: `pub struct Dropout3d<T: Float>` + `Module` impl here; non-test consumer: `pub use dropout::Dropout3d` in `lib.rs`. |
+//! | REQ-5 | SHIPPED | impl: `pub struct Dropout2d<T: Float>` + `Module` impl here; per-channel keep-mask drawn from the byte-exact MT19937 `Generator` (`make_feature_noise(input).bernoulli_(1-p)`, `Dropout.cpp:73-74`, keep iff `u < 1-p`), reproducing `torch.manual_seed(s); F.dropout2d` byte-for-byte (#1635, pinned by `divergence_dropout_seed_extended_and_feature_1634.rs::dropout2d_seed42_per_channel_matches_torch` vs live torch 2.11); non-test consumer: `pub use dropout::Dropout2d` in `lib.rs` exposes for downstream vision / segmentation code. |
+//! | REQ-6 | SHIPPED | impl: `pub struct Dropout1d<T: Float>` + `Module` impl here; per-channel MT19937 mask (#1635, pinned by `dropout1d_seed42_per_channel_matches_torch`); non-test consumer: `pub use dropout::Dropout1d` in `lib.rs`. |
+//! | REQ-7 | SHIPPED | impl: `pub struct Dropout3d<T: Float>` + `Module` impl here; per-channel MT19937 mask (#1635, pinned by `dropout3d_seed42_per_channel_matches_torch`); non-test consumer: `pub use dropout::Dropout3d` in `lib.rs`. |
 //! | REQ-8 | SHIPPED | impl: `struct Dropout2dBackward<T>` + `GradFn` impl here; non-test consumer: autograd engine traversal on any model using `Dropout2d` in training. |
-//! | REQ-9 | SHIPPED | impl: `pub struct AlphaDropout<T: Float>` + SELU affine correction body inside `<AlphaDropout as Module>::forward` here; non-test consumer: `pub use dropout::AlphaDropout` in `lib.rs`. |
+//! | REQ-9 | SHIPPED | impl: `pub struct AlphaDropout<T: Float>` + torch's EXACT alpha affine inside `<AlphaDropout as Module>::forward` here — per-element MT19937 keep-mask (keep iff `u < 1-p`) + `alpha = 1.7580993408473766` (`ALPHA_DROPOUT_ALPHA`, torch's hardcoded literal at `Dropout.cpp:76`, NOT recomputed `SELU_LAMBDA*SELU_ALPHA`), `a = 1/sqrt((alpha^2*p+1)*(1-p))`, kept = `a*x+alpha*a*p`, dropped = `-alpha*a+alpha*a*p` (`Dropout.cpp:74-79`), reproducing `torch.manual_seed(s); nn.AlphaDropout(p)` byte-for-byte (#1636, pinned by `divergence_dropout_seed_extended_and_feature_1634.rs::alpha_dropout_seed42_matches_torch` vs live torch 2.11); non-test consumer: `pub use dropout::AlphaDropout` in `lib.rs`. |
 //! | REQ-10 | SHIPPED | impl: `struct AlphaDropoutBackward<T>` + `GradFn` impl here; non-test consumer: autograd engine traversal on models using `AlphaDropout`. |
 //! | REQ-11 | SHIPPED | impl: 5 `Module<T> for <DropoutKind><T>` impl blocks here, each returning `vec![]` for parameters; non-test consumer: `ferrotorch_optim::Optimizer` walks `Module::parameters_mut()` of containers; dropout returns an empty list (correct: dropout has no trainable parameters). |
 //! | REQ-12 | SHIPPED | impl: `with_inplace` builder + `inplace` getter + `inplace` field on all six dropout structs, the autograd-safe `apply_inplace_dropout` helper (errors on grad-requiring leaf per torch `VariableTypeUtils.h:80-84`; out-of-place fallback on grad-requiring non-leaf — R-DEV-7, ferrotorch lacks torch's version counter `saved_variable.cpp:170-186`; raw `write_inplace`/`Tensor::update_data` only on the non-grad-tracked path), and the `if self.inplace { apply_inplace_dropout(input, &output_data)? }` branch in `<Dropout/Dropout1d/Dropout2d/Dropout3d as Module>::forward` here, mirroring `_VF.dropout_`/`_VF.feature_dropout_` at `torch/nn/functional.py:1449,1516,1579,1629` on the memory-opt path; `AlphaDropout`/`FeatureAlphaDropout` carry the field for ABI parity but match torch's module forward which never forwards `inplace` (`dropout.py:265-269,319-323`). Non-test production consumer: the `if self.inplace` branch is on the live forward path of `<Dropout as Module>::forward` here, exercised by `ferrotorch-nn/src/lora.rs` (LoRA input dropout), `ferrotorch-vision/src/models/vgg.rs` / `inception.rs` (classifier head), and `ferrotorch-graph/src/gcn.rs` (inter-layer dropout). Default `inplace=false` preserves existing behavior. Closes #1446, #1580, #1581. |
-//! | REQ-13 | SHIPPED | impl: `pub struct FeatureAlphaDropout<T: Float>` + `FeatureAlphaDropoutBackward<T>` + `Module<T>` impl here (per-channel alpha-dropout mask broadcast over `[N, C, *]`), closes #1448; non-test consumer: `pub use dropout::FeatureAlphaDropout` in `lib.rs` (re-export) exposes the layer to downstream self-normalising-network model code in `ferrotorch-vision` / `ferrotorch-llama`. |
+//! | REQ-13 | SHIPPED | impl: `pub struct FeatureAlphaDropout<T: Float>` + `FeatureAlphaDropoutBackward<T>` + `Module<T>` impl here — per-channel MT19937 keep-mask (`make_feature_noise` flat `[N,C]` Bernoulli, keep iff `u < 1-p`) broadcast over `[N, C, *]`, torch's EXACT alpha affine (`alpha = 1.7580993408473766`, kept = `a*x+alpha*a*p`, dropped = `-alpha*a+alpha*a*p`, `Dropout.cpp:73-79`), reproducing `torch.manual_seed(s); nn.FeatureAlphaDropout(p)` byte-for-byte (#1636, pinned by `divergence_dropout_seed_extended_and_feature_1634.rs::feature_alpha_dropout_seed42_matches_torch` vs live torch 2.11); closes #1448; non-test consumer: `pub use dropout::FeatureAlphaDropout` in `lib.rs` (re-export) exposes the layer to downstream self-normalising-network model code in `ferrotorch-vision` / `ferrotorch-llama`. |
 //! | REQ-14 | NOT-STARTED | blocker #1441 (umbrella) — `Dropout2d` / `Dropout1d` / `Dropout3d` GPU forward absent (CUDA inputs return `NotImplementedOnCuda`). Parity-sweep runner arms also absent. |
 
 use std::sync::Arc;
@@ -37,35 +48,6 @@ use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorSt
 
 use crate::module::Module;
 use crate::parameter::Parameter;
-
-// ---------------------------------------------------------------------------
-// Internal xorshift PRNG (matches ferrotorch_core::creation::rand)
-// ---------------------------------------------------------------------------
-
-/// Seed a xorshift64 state from system time and thread id.
-fn xorshift_seed() -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::SystemTime;
-
-    let mut hasher = DefaultHasher::new();
-    SystemTime::now().hash(&mut hasher);
-    std::thread::current().id().hash(&mut hasher);
-    let mut state = hasher.finish();
-    if state == 0 {
-        state = 0xdeadbeefcafe;
-    }
-    state
-}
-
-/// Advance xorshift64 state and return a uniform value in [0, 1).
-#[inline]
-fn xorshift_next(state: &mut u64) -> f64 {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
-    (*state as f64) / (u64::MAX as f64)
-}
 
 // ---------------------------------------------------------------------------
 // Philox 4x32-10 for CPU-side mask regeneration
@@ -655,12 +637,23 @@ impl<T: Float> Module<T> for Dropout2d<T> {
             return Err(FerrotorchError::NotImplementedOnCuda { op: "Dropout2d" });
         }
 
-        // CPU path.
-        // Generate per-channel keep/drop decisions.
-        let mut state = xorshift_seed();
-        let channel_mask: Vec<bool> = (0..batch * channels)
-            .map(|_| xorshift_next(&mut state) >= self.p)
-            .collect();
+        // CPU path — draw the per-channel keep mask from the byte-exact
+        // MT19937 `Generator` (`ferrotorch_core::rng`), matching torch's
+        // `make_feature_noise(input).bernoulli_(1 - p)`
+        // (`aten/src/ATen/native/Dropout.cpp:73-74`). torch reduces the input
+        // to a `[N, C, 1, 1...]` noise tensor and draws ONE Bernoulli per
+        // `[N, C]` entry in flat order, then broadcasts over the spatial dims
+        // and scales survivors by `1/(1-p)` (`Dropout.cpp:81` `noise.div_(1-p)`).
+        // The scalar bernoulli kernel keeps iff `next_uniform_f64() < (1 - p)`
+        // (`DistributionTemplates.h` / `TransformationHelper.h:171-173`), so a
+        // shared `ferrotorch_core::manual_seed(s)` reproduces
+        // `torch.manual_seed(s); F.dropout2d(...)` byte-for-byte (#1635).
+        let keep_prob = 1.0 - self.p;
+        let channel_mask: Vec<bool> = ferrotorch_core::rng::with_thread_rng(|g| {
+            (0..batch * channels)
+                .map(|_| g.next_uniform_f64() < keep_prob)
+                .collect()
+        });
 
         // Expand channel mask to full element mask.
         let scaled_mask: Vec<T> = {
@@ -820,10 +813,18 @@ impl<T: Float> Module<T> for Dropout1d<T> {
             return Err(FerrotorchError::NotImplementedOnCuda { op: "Dropout1d" });
         }
 
-        let mut state = xorshift_seed();
-        let channel_mask: Vec<bool> = (0..batch * channels)
-            .map(|_| xorshift_next(&mut state) >= self.p)
-            .collect();
+        // Per-channel keep mask from the byte-exact MT19937 `Generator`,
+        // matching torch's `make_feature_noise(input).bernoulli_(1 - p)`
+        // (`aten/src/ATen/native/Dropout.cpp:73-74`): one Bernoulli draw per
+        // `[N, C]` channel in flat order, keep iff `next_uniform_f64() < (1-p)`,
+        // broadcast over the length-`L` dim, survivors scaled by `1/(1-p)`.
+        // Reproducible under `ferrotorch_core::manual_seed` (#1635).
+        let keep_prob = 1.0 - self.p;
+        let channel_mask: Vec<bool> = ferrotorch_core::rng::with_thread_rng(|g| {
+            (0..batch * channels)
+                .map(|_| g.next_uniform_f64() < keep_prob)
+                .collect()
+        });
 
         let scaled_mask: Vec<T> = {
             let mut mask = Vec::with_capacity(numel);
@@ -980,10 +981,18 @@ impl<T: Float> Module<T> for Dropout3d<T> {
             return Err(FerrotorchError::NotImplementedOnCuda { op: "Dropout3d" });
         }
 
-        let mut state = xorshift_seed();
-        let channel_mask: Vec<bool> = (0..batch * channels)
-            .map(|_| xorshift_next(&mut state) >= self.p)
-            .collect();
+        // Per-channel keep mask from the byte-exact MT19937 `Generator`,
+        // matching torch's `make_feature_noise(input).bernoulli_(1 - p)`
+        // (`aten/src/ATen/native/Dropout.cpp:73-74`): one Bernoulli draw per
+        // `[N, C]` channel in flat order, keep iff `next_uniform_f64() < (1-p)`,
+        // broadcast over the `D*H*W` volume, survivors scaled by `1/(1-p)`.
+        // Reproducible under `ferrotorch_core::manual_seed` (#1635).
+        let keep_prob = 1.0 - self.p;
+        let channel_mask: Vec<bool> = ferrotorch_core::rng::with_thread_rng(|g| {
+            (0..batch * channels)
+                .map(|_| g.next_uniform_f64() < keep_prob)
+                .collect()
+        });
 
         let scaled_mask: Vec<T> = {
             let mut mask = Vec::with_capacity(numel);
@@ -1068,16 +1077,18 @@ impl<T: Float> Module<T> for Dropout3d<T> {
 /// and the output is affinely transformed to restore the original mean and
 /// variance.
 ///
-/// During training:
-/// 1. Elements are dropped with probability `p`.
-/// 2. Dropped elements are set to `alpha' = -lambda * alpha` (the SELU
-///    saturation value).
-/// 3. The result is affinely transformed: `output = a * (masked + alpha' * drop_mask) + b`
-///    where `a` and `b` are chosen to preserve the input's mean and variance.
+/// During training, mirroring `aten/src/ATen/native/Dropout.cpp:74-79`:
+/// 1. A per-element Bernoulli keep-mask is drawn at probability `1 - p` from
+///    the byte-exact MT19937 `Generator` (keep iff `next_uniform_f64() < 1-p`).
+/// 2. With `alpha = 1.7580993408473766` and
+///    `a = 1/sqrt((alpha^2 * p + 1) * (1 - p))`:
+///    - kept elements map to `a*x + alpha*a*p`,
+///    - dropped elements map to the constant `-alpha*a + alpha*a*p`.
 ///
 /// During evaluation, the input is returned unchanged.
 ///
-/// Matches `torch.nn.AlphaDropout`.
+/// Matches `torch.nn.AlphaDropout`. Reproducible under
+/// `ferrotorch_core::manual_seed` (#1636).
 #[derive(Debug)]
 pub struct AlphaDropout<T: Float> {
     p: f64,
@@ -1099,9 +1110,13 @@ pub struct AlphaDropout<T: Float> {
     _marker: std::marker::PhantomData<T>,
 }
 
-// SELU constants (from PyTorch / Klambauer et al. 2017).
-const SELU_ALPHA: f64 = 1.6732632423543772;
-const SELU_LAMBDA: f64 = 1.0507009873554805;
+/// The alpha-dropout affine constant torch hardcodes at
+/// `aten/src/ATen/native/Dropout.cpp:76`
+/// (`constexpr double alpha = 1.7580993408473766;`). This is the SELU-derived
+/// `lambda * alpha` magnitude, but used VERBATIM as torch's literal — NOT
+/// recomputed as `SELU_LAMBDA * SELU_ALPHA`, which differs in the last ULPs and
+/// would shift the affine away from torch byte-for-byte (#1636).
+const ALPHA_DROPOUT_ALPHA: f64 = 1.7580993408473766;
 
 impl<T: Float> AlphaDropout<T> {
     /// Create a new `AlphaDropout` layer.
@@ -1200,24 +1215,40 @@ impl<T: Float> Module<T> for AlphaDropout<T> {
         let numel = input.numel();
         let p = self.p;
 
-        // The SELU saturation value for dropped elements.
-        let alpha_prime = -SELU_LAMBDA * SELU_ALPHA;
-
-        // Affine correction factors to preserve mean and variance.
-        // a = (1 / sqrt(q + alpha'^2 * p * q))  where q = 1 - p
-        // b = -a * (p * alpha')
-        let q = 1.0 - p;
-        let a_f64 = 1.0 / (q + alpha_prime * alpha_prime * p * q).sqrt();
-        let b_f64 = -a_f64 * p * alpha_prime;
+        // torch's EXACT alpha affine, `aten/src/ATen/native/Dropout.cpp:74-79`:
+        //   noise.bernoulli_(1 - p)                 // 1.0 kept, 0.0 dropped
+        //   constexpr double alpha = 1.7580993408473766;
+        //   double a = 1. / sqrt((alpha*alpha*p + 1) * (1 - p));
+        //   b = noise.add(-1).mul_(alpha*a).add_(alpha*a*p);
+        //   noise.mul_(a);                          // a kept, 0 dropped
+        //   out = input * noise + b
+        // Folding the per-element `b = (noise-1)*alpha*a + alpha*a*p`:
+        //   kept  (noise=1): out = a*x + alpha*a*p
+        //   dropped(noise=0): out = -alpha*a + alpha*a*p   (constant in x)
+        // We use torch's hardcoded `alpha` constant verbatim — NOT a recomputed
+        // `-SELU_LAMBDA*SELU_ALPHA` (= -1.7580993..., same magnitude but the
+        // recomputed value diverges in the last ULPs and changes the affine).
+        let alpha = ALPHA_DROPOUT_ALPHA;
+        let a_f64 = 1.0 / ((alpha * alpha * p + 1.0) * (1.0 - p)).sqrt();
+        let dropped_f64 = -alpha * a_f64 + alpha * a_f64 * p;
+        let kept_b_f64 = alpha * a_f64 * p;
 
         let a = T::from(a_f64).unwrap();
-        let b = T::from(b_f64).unwrap();
-        let alpha_prime_t = T::from(alpha_prime).unwrap();
+        let kept_b = T::from(kept_b_f64).unwrap();
+        let dropped_v = T::from(dropped_f64).unwrap();
         let zero = <T as num_traits::Zero>::zero();
 
-        // Generate drop mask.
-        let mut state = xorshift_seed();
-        let keep: Vec<bool> = (0..numel).map(|_| xorshift_next(&mut state) >= p).collect();
+        // Per-element keep mask from the byte-exact MT19937 `Generator`,
+        // matching `at::empty_like(input).bernoulli_(1 - p)` (alpha_dropout is
+        // element-wise, NOT feature noise; `Dropout.cpp:73`). Keep iff
+        // `next_uniform_f64() < (1 - p)`; reproducible under
+        // `ferrotorch_core::manual_seed` (#1636).
+        let keep_prob = 1.0 - p;
+        let keep: Vec<bool> = ferrotorch_core::rng::with_thread_rng(|g| {
+            (0..numel)
+                .map(|_| g.next_uniform_f64() < keep_prob)
+                .collect()
+        });
 
         let input_data = input.data()?;
         let mut output_data = Vec::with_capacity(numel);
@@ -1225,12 +1256,12 @@ impl<T: Float> Module<T> for AlphaDropout<T> {
 
         for (i, &x) in input_data.iter().enumerate() {
             if keep[i] {
-                // Kept element: a * x + b
-                output_data.push(a * x + b);
+                // Kept element: a * x + alpha*a*p
+                output_data.push(a * x + kept_b);
                 grad_mask.push(a);
             } else {
-                // Dropped element: a * alpha' + b
-                output_data.push(a * alpha_prime_t + b);
+                // Dropped element: -alpha*a + alpha*a*p (independent of x).
+                output_data.push(dropped_v);
                 grad_mask.push(zero);
             }
         }
@@ -1293,17 +1324,20 @@ impl<T: Float> Module<T> for AlphaDropout<T> {
 /// networks where per-feature decorrelation must be preserved while
 /// maintaining mean/variance.
 ///
-/// During training:
-/// 1. Per-channel keep mask is sampled at probability `1 - p`.
-/// 2. Dropped channels are set to `alpha' = -lambda * alpha` (SELU
-///    saturation value).
-/// 3. The output is affinely rescaled so input mean / variance are
-///    preserved: `output = a * masked + b` where `a`, `b` depend on `p`
-///    and `alpha'`.
+/// During training, mirroring `aten/src/ATen/native/Dropout.cpp:73-79`
+/// (`_dropout_impl<feature=true, alpha=true>`):
+/// 1. A per-channel Bernoulli keep-mask is drawn over the reduced
+///    `[N, C, 1, 1...]` noise tensor at probability `1 - p` from the
+///    byte-exact MT19937 `Generator` (keep iff `next_uniform_f64() < 1-p`),
+///    in flat `[N, C]` order, then broadcast over the spatial volume.
+/// 2. With `alpha = 1.7580993408473766` and
+///    `a = 1/sqrt((alpha^2 * p + 1) * (1 - p))`, kept channels map to
+///    `a*x + alpha*a*p` and dropped channels to `-alpha*a + alpha*a*p`.
 ///
 /// During evaluation, the input is returned unchanged.
 ///
-/// Expects input of shape `[N, C, *]` (at least 2-D).
+/// Expects input of shape `[N, C, *]` (at least 2-D). Reproducible under
+/// `ferrotorch_core::manual_seed` (#1636).
 #[derive(Debug)]
 pub struct FeatureAlphaDropout<T: Float> {
     p: f64,
@@ -1437,29 +1471,32 @@ impl<T: Float> Module<T> for FeatureAlphaDropout<T> {
         let numel = input.numel();
         let p = self.p;
 
-        // SELU saturation value (Klambauer et al. 2017).
-        let alpha_prime = -SELU_LAMBDA * SELU_ALPHA;
-
-        // Affine correction factors: preserve mean and variance under the
-        // mixture of `a*x + b` (kept) and `a*alpha' + b` (dropped).
-        //   a = 1 / sqrt(q + alpha'^2 * p * q),  q = 1 - p
-        //   b = -a * p * alpha'
-        let q = 1.0 - p;
-        let a_f64 = 1.0 / (q + alpha_prime * alpha_prime * p * q).sqrt();
-        let b_f64 = -a_f64 * p * alpha_prime;
+        // torch's EXACT feature-alpha affine: `feature_alpha_dropout` calls
+        // `_dropout_impl<feature=true, alpha=true>`, so the noise is a
+        // PER-CHANNEL `make_feature_noise` tensor (`Dropout.cpp:73`) drawn with
+        // `bernoulli_(1 - p)`, then the alpha affine
+        // (`Dropout.cpp:76-79`): `alpha = 1.7580993408473766`,
+        // `a = 1/sqrt((alpha^2*p + 1)*(1-p))`,
+        // kept (noise=1) -> `a*x + alpha*a*p`,
+        // dropped (noise=0) -> `-alpha*a + alpha*a*p` (constant in x).
+        let alpha = ALPHA_DROPOUT_ALPHA;
+        let a_f64 = 1.0 / ((alpha * alpha * p + 1.0) * (1.0 - p)).sqrt();
+        let dropped_f64 = -alpha * a_f64 + alpha * a_f64 * p;
+        let kept_b_f64 = alpha * a_f64 * p;
 
         let a = T::from(a_f64).unwrap();
-        let b = T::from(b_f64).unwrap();
-        let alpha_prime_t = T::from(alpha_prime).unwrap();
+        let kept_b = T::from(kept_b_f64).unwrap();
+        let dropped_v = T::from(dropped_f64).unwrap();
         let zero = <T as num_traits::Zero>::zero();
 
-        // Per-channel keep mask: one Bernoulli draw per `(b, c)`, broadcast
-        // over the trailing spatial volume. Bits come from ferrotorch's
-        // global manual_seed-controlled generator so the channel pattern is
-        // reproducible under `ferrotorch_core::manual_seed`.
+        // Per-channel keep mask: one Bernoulli draw per `[N, C]` entry in flat
+        // order from the byte-exact MT19937 `Generator`, keep iff
+        // `next_uniform_f64() < (1 - p)`, broadcast over the trailing spatial
+        // volume. Reproducible under `ferrotorch_core::manual_seed` (#1636).
+        let keep_prob = 1.0 - p;
         let keep_channel: Vec<bool> = ferrotorch_core::rng::with_thread_rng(|g| {
             (0..batch * channels)
-                .map(|_| g.next_uniform_f64() >= p)
+                .map(|_| g.next_uniform_f64() < keep_prob)
                 .collect()
         });
 
@@ -1474,10 +1511,10 @@ impl<T: Float> Module<T> for FeatureAlphaDropout<T> {
             for s in 0..spatial {
                 let x = input_data[base + s];
                 if keep {
-                    output_data.push(a * x + b);
+                    output_data.push(a * x + kept_b);
                     grad_mask.push(a);
                 } else {
-                    output_data.push(a * alpha_prime_t + b);
+                    output_data.push(dropped_v);
                     grad_mask.push(zero);
                 }
             }
@@ -2467,5 +2504,102 @@ mod tests {
             input.data().unwrap().iter().all(|&x| x == 1.0),
             "FeatureAlphaDropout module forward must not mutate in place (matches torch dropout.py:319-323)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Seed-reproducible byte-match vs LIVE torch 2.11 (#1635 / #1636).
+    //
+    // Reference values produced by live torch under `torch.manual_seed(42)`
+    // — NOT copied from the ferrotorch side (R-CHAR-3). The per-channel /
+    // per-element masks come from the byte-exact MT19937 `Generator`, so a
+    // shared `ferrotorch_core::manual_seed(42)` reproduces torch's stream.
+    // -----------------------------------------------------------------------
+
+    fn ones_shape_t(shape: &[usize]) -> Tensor<f32> {
+        let n: usize = shape.iter().product();
+        Tensor::from_storage(TensorStorage::cpu(vec![1.0f32; n]), shape.to_vec(), false).unwrap()
+    }
+
+    /// `torch.manual_seed(42); F.dropout2d(ones(1,8,1,1),0.5,True)` per-channel
+    /// -> survivors scaled by 1/(1-0.5)=2 in the MT19937 keep pattern
+    /// [keep,keep,keep,keep,DROP,keep,DROP,DROP].
+    #[test]
+    fn test_dropout2d_seed42_matches_torch() {
+        let want = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0, 0.0, 0.0];
+        ferrotorch_core::rng::manual_seed(42);
+        let d = Dropout2d::<f32>::new(0.5).unwrap();
+        let y = d.forward(&ones_shape_t(&[1, 8, 1, 1])).unwrap();
+        assert_eq!(y.data().unwrap(), &want);
+    }
+
+    /// `torch.manual_seed(42); F.dropout1d(ones(1,6,3),0.5,True)` per-channel
+    /// -> [2,2,2,2,0,2], broadcast over the length-3 dim.
+    #[test]
+    fn test_dropout1d_seed42_matches_torch() {
+        let want = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0];
+        ferrotorch_core::rng::manual_seed(42);
+        let d = Dropout1d::<f32>::new(0.5).unwrap();
+        let y = d.forward(&ones_shape_t(&[1, 6, 3])).unwrap();
+        let data = y.data().unwrap();
+        let per_chan: Vec<f32> = (0..6).map(|c| data[c * 3]).collect();
+        assert_eq!(per_chan.as_slice(), &want);
+    }
+
+    /// `torch.manual_seed(42); F.dropout3d(ones(1,6,1,1,1),0.5,True)` per-channel
+    /// -> [2,2,2,2,0,2].
+    #[test]
+    fn test_dropout3d_seed42_matches_torch() {
+        let want = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0];
+        ferrotorch_core::rng::manual_seed(42);
+        let d = Dropout3d::<f32>::new(0.5).unwrap();
+        let y = d.forward(&ones_shape_t(&[1, 6, 1, 1, 1])).unwrap();
+        assert_eq!(y.data().unwrap(), &want);
+    }
+
+    /// Two seeded `Dropout2d` forwards under the SAME `manual_seed(42)` produce
+    /// the SAME mask (MT19937 reset on manual_seed; no system-time entropy).
+    #[test]
+    fn test_dropout2d_reproducible_under_manual_seed() {
+        let d = Dropout2d::<f32>::new(0.5).unwrap();
+        ferrotorch_core::rng::manual_seed(42);
+        let y1 = d.forward(&ones_shape_t(&[1, 64, 1, 1])).unwrap();
+        ferrotorch_core::rng::manual_seed(42);
+        let y2 = d.forward(&ones_shape_t(&[1, 64, 1, 1])).unwrap();
+        assert_eq!(y1.data().unwrap(), y2.data().unwrap());
+    }
+
+    /// `torch.manual_seed(42); nn.AlphaDropout(0.5).train()(ones(10))`
+    /// -> kept = 1.6655989, dropped = -0.7791939 in the MT19937 keep pattern.
+    /// kept/dropped values from torch's exact affine (`Dropout.cpp:74-79`),
+    /// alpha = 1.7580993408473766.
+    #[test]
+    fn test_alpha_dropout_seed42_matches_torch() {
+        let want = [
+            1.6655989, 1.6655989, 1.6655989, 1.6655989, -0.7791939, 1.6655989, -0.7791939,
+            -0.7791939, 1.6655989, 1.6655989,
+        ];
+        ferrotorch_core::rng::manual_seed(42);
+        let d = AlphaDropout::<f32>::new(0.5).unwrap();
+        let y = d.forward(&ones_shape_t(&[10])).unwrap();
+        let got = y.data().unwrap();
+        for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+            assert!((g - w).abs() < 1e-4, "elem {i}: got {g} want {w}");
+        }
+    }
+
+    /// `torch.manual_seed(42); nn.FeatureAlphaDropout(0.5).train()(ones(1,6,1,1))`
+    /// per-channel -> [1.6655989 ×4, -0.7791939, 1.6655989].
+    #[test]
+    fn test_feature_alpha_dropout_seed42_matches_torch() {
+        let want = [
+            1.6655989, 1.6655989, 1.6655989, 1.6655989, -0.7791939, 1.6655989,
+        ];
+        ferrotorch_core::rng::manual_seed(42);
+        let d = FeatureAlphaDropout::<f32>::new(0.5).unwrap();
+        let y = d.forward(&ones_shape_t(&[1, 6, 1, 1])).unwrap();
+        let got = y.data().unwrap();
+        for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+            assert!((g - w).abs() < 1e-4, "elem {i}: got {g} want {w}");
+        }
     }
 }

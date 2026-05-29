@@ -40,10 +40,24 @@ scaled by `1/(1-p)`. This mirrors `noise.bernoulli_(1 - p)` +
 `torch.manual_seed(s); F.dropout(...)` BYTE-FOR-BYTE (closes #1634;
 pinned vs live torch 2.11 by
 `ferrotorch-nn/tests/divergence_dropout_seed_reproducibility.rs`).
-The per-channel feature variants (`Dropout{1,2,3}d`, `AlphaDropout`,
-`FeatureAlphaDropout`) draw per-channel (not per-element) decisions;
-byte-parity with torch's element-wise stream for those is tracked
-separately and is not covered here. The `inplace` kwarg is threaded through all six
+The per-channel feature variants (`Dropout{1,2,3}d`,
+`FeatureAlphaDropout`) and the element-wise `AlphaDropout` now ALSO
+draw from the same byte-exact MT19937 `Generator` (#1635/#1636):
+`Dropout{1,2,3}d` and `FeatureAlphaDropout` draw one
+`next_uniform_f64` per `[N, C]` channel in flat order
+(`make_feature_noise(input).bernoulli_(1 - p)`,
+`aten/src/ATen/native/Dropout.cpp:73-74`); `AlphaDropout` draws one
+per element (`at::empty_like(input).bernoulli_(1 - p)`). All keep iff
+`u < (1 - p)`. The alpha variants apply torch's EXACT affine
+(`Dropout.cpp:74-79`): `alpha = 1.7580993408473766` (torch's
+hardcoded literal, NOT a recomputed `SELU_LAMBDA*SELU_ALPHA`),
+`a = 1/sqrt((alpha^2*p + 1)*(1 - p))`, kept `-> a*x + alpha*a*p`,
+dropped `-> -alpha*a + alpha*a*p`. Result:
+`ferrotorch_core::manual_seed(s); F.dropout{1,2,3}d / nn.AlphaDropout
+/ nn.FeatureAlphaDropout` reproduce torch BYTE-FOR-BYTE (pinned vs
+live torch 2.11 by
+`ferrotorch-nn/tests/divergence_dropout_seed_extended_and_feature_1634.rs`).
+The `inplace` kwarg is threaded through all six
 layers: the four standard dropouts (`Dropout`, `Dropout{1,2,3}d`)
 honor `inplace=true` in training via an **autograd-safe policy**
 (`apply_inplace_dropout`), mirroring torch's `_VF.dropout_` /
@@ -127,9 +141,12 @@ the upstream contract being deviated from is
   `grad_output`. CPU-only currently
   (`NotImplementedOnCuda` for the backward when input is on GPU).
 - REQ-9: `pub struct AlphaDropout<T: Float>` — SELU-compatible
-  dropout that preserves mean and variance via affine correction
-  `(a, b)` with `a = 1/sqrt(q + alpha'^2 * p * q)`. Mirror
-  `torch.nn.AlphaDropout` at `dropout.py`.
+  dropout that preserves mean and variance via torch's EXACT affine
+  (`aten/src/ATen/native/Dropout.cpp:74-79`): per-element MT19937
+  keep-mask, `alpha = 1.7580993408473766`,
+  `a = 1/sqrt((alpha^2*p + 1)*(1 - p))`, kept `-> a*x + alpha*a*p`,
+  dropped `-> -alpha*a + alpha*a*p`. Seed-reproducible vs torch
+  (#1636). Mirror `torch.nn.AlphaDropout` at `dropout.py`.
 - REQ-10: `AlphaDropoutBackward` GradFn — backward routes gradient
   via `grad_mask` where surviving elements get `a` and dropped
   elements get `0`. CPU-only.
@@ -155,9 +172,12 @@ the upstream contract being deviated from is
   `forward` (`dropout.py:265-269,319-323`, which never pass
   `self.inplace`), do NOT mutate in place. Closes #1446, #1580,
   #1581.
-- REQ-13: NOT-STARTED — `FeatureAlphaDropout` from upstream
-  (`dropout.py:FeatureAlphaDropout`) is not implemented. Blocker
-  #1448.
+- REQ-13: SHIPPED — `pub struct FeatureAlphaDropout<T: Float>` +
+  `FeatureAlphaDropoutBackward` + `Module<T>` impl in `dropout.rs`:
+  per-channel MT19937 keep-mask (`make_feature_noise` flat `[N, C]`
+  Bernoulli, keep iff `u < 1-p`) broadcast over `[N, C, *]`, torch's
+  EXACT alpha affine (`Dropout.cpp:73-79`). Seed-reproducible vs torch
+  (#1636). Closes #1448.
 - REQ-14: NOT-STARTED — `Dropout2d/1d/3d` GPU forward is missing;
   CUDA inputs return `NotImplementedOnCuda`. Blocker #1441
   (umbrella runner-arm gap also tracks the GPU fast path; both
@@ -195,7 +215,9 @@ the upstream contract being deviated from is
   and the divergence probes
   `divergence_1446_dropout_inplace_shared_input_graph` (#1580) +
   `divergence_1446_dropout_inplace_leaf_requires_grad` (#1581).
-- [ ] AC-10: `FeatureAlphaDropout` — blocker #1448.
+- [x] AC-10: `FeatureAlphaDropout` — implemented, per-channel MT19937
+  mask + torch alpha affine, seed-reproducible vs live torch
+  (`feature_alpha_dropout_seed42_matches_torch`). Closes #1448.
 - [ ] AC-11: Dropout2d / 1d / 3d GPU forward — blocker #1441 +
   internal GPU-kernel work.
 - [ ] AC-12: parity-sweep arms wired — #1441. `nn.functional.dropout`
@@ -206,16 +228,18 @@ the upstream contract being deviated from is
 
 ### PRNG primitives
 
-The element-wise `Dropout` CPU forward draws its per-element keep
-decisions from the byte-exact MT19937 `Generator`
-(`ferrotorch_core::rng::with_thread_rng` + `next_uniform_f64`), NOT
-from xorshift — this is what makes it torch-seed-reproducible
-(#1634). `xorshift_seed` and `xorshift_next` in `dropout.rs` remain
-the CPU PRNG for the per-channel feature variants
-(`Dropout{1,2,3}d`, `AlphaDropout`). `philox_round`,
-`philox_4x32_10`, and `philox_dropout_mask` in `dropout.rs` — the
-GPU-compatible Philox CBRNG used so backward can deterministically
-regenerate the forward mask after a checkpoint restore.
+All six dropout CPU forward paths draw their keep decisions from the
+byte-exact MT19937 `Generator`
+(`ferrotorch_core::rng::with_thread_rng` + `next_uniform_f64`) — this
+is what makes them torch-seed-reproducible (#1634 for plain
+`Dropout`; #1635 for `Dropout{1,2,3}d`; #1636 for `AlphaDropout` /
+`FeatureAlphaDropout`). The system-time `xorshift64` PRNG that the
+feature/alpha variants used previously has been REMOVED (it ignored
+`manual_seed` and drew `xorshift_next(..) >= p`, both wrong).
+`philox_round`, `philox_4x32_10`, and `philox_dropout_mask` in
+`dropout.rs` — the GPU-compatible Philox CBRNG used so backward can
+deterministically regenerate the forward mask after a checkpoint
+restore.
 
 ### `Dropout` forward (REQ-2, REQ-3)
 
@@ -253,13 +277,19 @@ ndim 5 expectations respectively.
 
 ### `AlphaDropout` (REQ-9, REQ-10)
 
-`pub struct AlphaDropout<T: Float>` in `dropout.rs`. Constants
-`SELU_ALPHA = 1.6732632...` and `SELU_LAMBDA = 1.0507009...`.
-Forward computes the affine correction `(a, b)` then for each
-surviving element returns `a*x + b`, and for each dropped element
-returns `a*alpha' + b` where `alpha' = -lambda*alpha`. The grad
-mask is `a` on survivors, `0` on dropped — applied in
-`AlphaDropoutBackward`.
+`pub struct AlphaDropout<T: Float>` in `dropout.rs`. Uses torch's
+hardcoded `ALPHA_DROPOUT_ALPHA = 1.7580993408473766`
+(`Dropout.cpp:76`, NOT a recomputed `SELU_LAMBDA*SELU_ALPHA` — the
+recomputed value diverges in the last ULPs). Forward draws a
+per-element MT19937 keep-mask (keep iff `next_uniform_f64() < 1-p`),
+computes `a = 1/sqrt((alpha^2*p + 1)*(1 - p))`, then for each
+surviving element returns `a*x + alpha*a*p` and for each dropped
+element returns the constant `-alpha*a + alpha*a*p`. The grad mask
+is `a` on survivors, `0` on dropped — applied in
+`AlphaDropoutBackward`. `FeatureAlphaDropout` (REQ-13) is the
+per-channel analog: one keep decision per `[N, C]` channel
+(`make_feature_noise`) broadcast over the spatial volume, same alpha
+affine.
 
 ### Non-test production consumers
 
@@ -355,13 +385,13 @@ Expected grep count after blocker #1441 closes: `>= 1` for each.
 | REQ-2 | SHIPPED | impl: `<Dropout as Module>::forward` body with eval/`p==0` short-circuit + Bernoulli + scale in `dropout.rs`, CPU keep-mask drawn from the byte-exact MT19937 `Generator` via `ferrotorch_core::rng::with_thread_rng` + `next_uniform_f64` (keep iff `u < 1-p`, survivors `× 1/(1-p)`) reproducing `torch.manual_seed(s); F.dropout` byte-for-byte (#1634, pinned by `ferrotorch-nn/tests/divergence_dropout_seed_reproducibility.rs::dropout_module_seed0_mask_matches_torch` vs live torch 2.11); non-test consumer: `Dropout::forward` is called on every forward pass through the VGG / Inception classifier (constructed in `vgg.rs` and `inception.rs`). |
 | REQ-3 | SHIPPED | impl: `input.is_cuda() && backend = ferrotorch_core::gpu_dispatch::gpu_backend()` GPU branch in `<Dropout as Module>::forward` in `dropout.rs`; non-test consumer: any vision model run on CUDA (e.g. VGG/Inception fine-tuning with parameters on GPU) triggers this on every forward step. |
 | REQ-4 | SHIPPED | impl: `struct DropoutBackward<T>` + `GradFn` impl in `dropout.rs`; non-test consumer: every `loss.backward()` over a model containing `Dropout` traverses these nodes via the autograd engine. |
-| REQ-5 | SHIPPED | impl: `pub struct Dropout2d<T: Float>` + `Module` impl in `dropout.rs`; non-test consumer: `pub use dropout::Dropout2d` in `lib.rs` exposes for downstream vision/segmentation code. |
-| REQ-6 | SHIPPED | impl: `pub struct Dropout1d<T: Float>` + `Module` impl in `dropout.rs`; non-test consumer: `pub use dropout::Dropout1d` in `lib.rs`. |
-| REQ-7 | SHIPPED | impl: `pub struct Dropout3d<T: Float>` + `Module` impl in `dropout.rs`; non-test consumer: `pub use dropout::Dropout3d` in `lib.rs`. |
+| REQ-5 | SHIPPED | impl: `pub struct Dropout2d<T: Float>` + `Module` impl in `dropout.rs`, per-channel keep-mask from the byte-exact MT19937 `Generator` (`make_feature_noise(input).bernoulli_(1-p)`, `Dropout.cpp:73-74`, keep iff `u < 1-p`) reproducing `torch.manual_seed(s); F.dropout2d` byte-for-byte (#1635, pinned by `divergence_dropout_seed_extended_and_feature_1634.rs::dropout2d_seed42_per_channel_matches_torch` vs live torch 2.11); non-test consumer: `pub use dropout::Dropout2d` in `lib.rs` exposes for downstream vision/segmentation code. |
+| REQ-6 | SHIPPED | impl: `pub struct Dropout1d<T: Float>` + `Module` impl in `dropout.rs`, per-channel MT19937 mask (#1635, pinned by `dropout1d_seed42_per_channel_matches_torch`); non-test consumer: `pub use dropout::Dropout1d` in `lib.rs`. |
+| REQ-7 | SHIPPED | impl: `pub struct Dropout3d<T: Float>` + `Module` impl in `dropout.rs`, per-channel MT19937 mask (#1635, pinned by `dropout3d_seed42_per_channel_matches_torch`); non-test consumer: `pub use dropout::Dropout3d` in `lib.rs`. |
 | REQ-8 | SHIPPED | impl: `struct Dropout2dBackward<T>` + `GradFn` impl in `dropout.rs`; non-test consumer: autograd engine traversal on any model using `Dropout2d` in training. |
-| REQ-9 | SHIPPED | impl: `pub struct AlphaDropout<T: Float>` + SELU affine correction body in `<AlphaDropout as Module>::forward` in `dropout.rs`; non-test consumer: `pub use dropout::AlphaDropout` in `lib.rs`. |
+| REQ-9 | SHIPPED | impl: `pub struct AlphaDropout<T: Float>` + torch's EXACT alpha affine in `<AlphaDropout as Module>::forward` in `dropout.rs` — per-element MT19937 keep-mask (keep iff `u < 1-p`) + `ALPHA_DROPOUT_ALPHA = 1.7580993408473766` (torch's hardcoded literal, `Dropout.cpp:76`), `a = 1/sqrt((alpha^2*p+1)*(1-p))`, kept = `a*x+alpha*a*p`, dropped = `-alpha*a+alpha*a*p` (`Dropout.cpp:74-79`), reproducing `torch.manual_seed(s); nn.AlphaDropout(p)` byte-for-byte (#1636, pinned by `divergence_dropout_seed_extended_and_feature_1634.rs::alpha_dropout_seed42_matches_torch` vs live torch 2.11); non-test consumer: `pub use dropout::AlphaDropout` in `lib.rs`. |
 | REQ-10 | SHIPPED | impl: `struct AlphaDropoutBackward<T>` + `GradFn` impl in `dropout.rs`; non-test consumer: autograd engine traversal on models using `AlphaDropout`. |
 | REQ-11 | SHIPPED | impl: 5 `Module<T> for <DropoutKind><T>` impl blocks in `dropout.rs`, each returning `vec![]` for parameters; non-test consumer: `ferrotorch_optim::Optimizer` walks `Module::parameters_mut()` of containers; dropout returns an empty list (correct: dropout has no trainable parameters). |
 | REQ-12 | SHIPPED | impl: `with_inplace` builder + `inplace` getter + `inplace` field on all six dropout structs, plus the autograd-safe `apply_inplace_dropout` helper (errors on grad-requiring leaf, out-of-place fallback on grad-requiring non-leaf, raw `write_inplace`/`Tensor::update_data` only on the non-grad-tracked path) and the `if self.inplace { apply_inplace_dropout(input, &output_data)? }` branch inside `<Dropout/Dropout1d/Dropout2d/Dropout3d as Module>::forward` in `dropout.rs`, mirroring `_VF.dropout_`/`_VF.feature_dropout_` at `torch/nn/functional.py:1449,1516,1579,1629` on the memory-opt path and deviating (R-DEV-7) where ferrotorch lacks torch's leaf guard (`VariableTypeUtils.h:80-84`) and version counter (`saved_variable.cpp:170-186`); `AlphaDropout`/`FeatureAlphaDropout` carry the field for ABI parity but match torch's module forward which never forwards `inplace` (`dropout.py:265-269,319-323`). Non-test production consumer: the `if self.inplace` branch is on the live forward path of `<Dropout as Module>::forward` in `dropout.rs`, exercised by every model that constructs a dropout via `crate::dropout::Dropout` — `ferrotorch-nn/src/lora.rs` (LoRA input dropout), `ferrotorch-vision/src/models/vgg.rs` / `inception.rs` (classifier head), `ferrotorch-graph/src/gcn.rs` (inter-layer dropout). The `inplace` field defaults `false`, so existing consumers see unchanged behavior. Closes #1446, #1580, #1581. |
-| REQ-13 | NOT-STARTED | blocker #1448 — `FeatureAlphaDropout` not implemented. |
+| REQ-13 | SHIPPED | impl: `pub struct FeatureAlphaDropout<T: Float>` + `FeatureAlphaDropoutBackward<T>` + `Module<T>` impl in `dropout.rs` — per-channel MT19937 keep-mask (`make_feature_noise` flat `[N,C]` Bernoulli, keep iff `u < 1-p`) broadcast over `[N, C, *]`, torch's EXACT alpha affine (`alpha = 1.7580993408473766`, kept = `a*x+alpha*a*p`, dropped = `-alpha*a+alpha*a*p`, `Dropout.cpp:73-79`), reproducing `torch.manual_seed(s); nn.FeatureAlphaDropout(p)` byte-for-byte (#1636, pinned by `divergence_dropout_seed_extended_and_feature_1634.rs::feature_alpha_dropout_seed42_matches_torch` vs live torch 2.11); closes #1448; non-test consumer: `pub use dropout::FeatureAlphaDropout` in `lib.rs` exposes the layer to downstream self-normalising-network model code. |
 | REQ-14 | NOT-STARTED | blocker #1441 (umbrella) — `Dropout2d/1d/3d` GPU forward absent (CUDA inputs return `NotImplementedOnCuda`). Parity-sweep runner arms also absent. |

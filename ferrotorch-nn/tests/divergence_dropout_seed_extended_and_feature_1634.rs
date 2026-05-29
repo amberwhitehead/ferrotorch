@@ -16,14 +16,15 @@
 //!       flat draw order. These are expected to PASS (regression coverage for
 //!       #1634's core claim).
 //!
-//!   (B) PINS the spillover the builder flagged: the per-channel feature
-//!       variants `Dropout1d` / `Dropout2d` / `Dropout3d` and the alpha
-//!       variants `AlphaDropout` / `FeatureAlphaDropout` STILL draw their mask
-//!       from a system-time-seeded `xorshift64` (`dropout.rs::xorshift_seed` /
-//!       `xorshift_next`) with the wrong-direction comparison
-//!       `xorshift_next(..) >= self.p` — the SAME wrong-comparison + non-MT19937
-//!       class that #1634/#1452 fixed for plain dropout. These tests are
-//!       expected to FAIL and are `#[ignore]`'d against a fresh tracking issue.
+//!   (B) PINS the per-channel feature variants `Dropout1d` / `Dropout2d` /
+//!       `Dropout3d` and the alpha variants `AlphaDropout` /
+//!       `FeatureAlphaDropout`. These previously drew their mask from a
+//!       system-time-seeded `xorshift64` with the wrong-direction comparison
+//!       `xorshift_next(..) >= self.p`. As of #1635/#1636 (this build) all five
+//!       route through the byte-exact MT19937 `Generator` with torch's exact
+//!       consumption (per-channel/per-element Bernoulli, keep iff `u < 1-p`),
+//!       and the alpha variants use torch's exact `alpha = 1.7580993408473766`
+//!       affine. These tests now PASS and serve as permanent regression cover.
 //!
 //! Upstream feature/alpha dropout share the plain-dropout MT19937 stream:
 //! `_feature_dropout` calls `_dropout_impl<feature=true>` which draws
@@ -70,11 +71,15 @@ fn approx(got: &[f32], want: &[f32], tol: f32, ctx: &str) {
 ///     -> [4, 4, 4, 4, 0, 0, 0, 0, 4, 4]   (survivors scaled by 1/(1-0.75)=4)
 #[test]
 fn plain_dropout_seed42_p075_matches_torch() {
-    let torch_seed42_p075: [f32; 10] =
-        [4.0, 4.0, 4.0, 4.0, 0.0, 0.0, 0.0, 0.0, 4.0, 4.0];
+    let torch_seed42_p075: [f32; 10] = [4.0, 4.0, 4.0, 4.0, 0.0, 0.0, 0.0, 0.0, 4.0, 4.0];
     ferrotorch_core::rng::manual_seed(42);
     let y = ferrotorch_nn::functional::dropout(&ones(10), 0.75, true).unwrap();
-    approx(&y.data_vec().unwrap(), &torch_seed42_p075, 1e-5, "seed42 p0.75 N10");
+    approx(
+        &y.data_vec().unwrap(),
+        &torch_seed42_p075,
+        1e-5,
+        "seed42 p0.75 N10",
+    );
 }
 
 /// Multiple seeds × multiple p, plain dropout. Live torch references.
@@ -82,19 +87,43 @@ fn plain_dropout_seed42_p075_matches_torch() {
 fn plain_dropout_seed_p_grid_matches_torch() {
     // (seed, p, expected) from live torch 2.11.
     let cases: &[(u64, f64, &[f32])] = &[
-        (0, 0.1, &[0.0, 1.1111112, 1.1111112, 0.0, 1.1111112, 1.1111112, 1.1111112, 1.1111112, 1.1111112, 1.1111112]),
+        (
+            0,
+            0.1,
+            &[
+                0.0, 1.1111112, 1.1111112, 0.0, 1.1111112, 1.1111112, 1.1111112, 1.1111112,
+                1.1111112, 1.1111112,
+            ],
+        ),
         (0, 0.75, &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0]),
         (1, 0.75, &[4.0, 4.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0, 0.0, 0.0]),
         (1, 0.9, &[10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
         (42, 0.5, &[2.0, 2.0, 2.0, 2.0, 0.0, 2.0, 0.0, 0.0, 2.0, 2.0]),
-        (42, 0.9, &[10.0, 10.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 10.0, 0.0]),
-        (123, 0.5, &[2.0, 2.0, 0.0, 2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0]),
-        (123, 0.75, &[0.0, 4.0, 0.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0]),
+        (
+            42,
+            0.9,
+            &[10.0, 10.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 10.0, 0.0],
+        ),
+        (
+            123,
+            0.5,
+            &[2.0, 2.0, 0.0, 2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0],
+        ),
+        (
+            123,
+            0.75,
+            &[0.0, 4.0, 0.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0],
+        ),
     ];
     for &(s, p, want) in cases {
         ferrotorch_core::rng::manual_seed(s);
         let y = ferrotorch_nn::functional::dropout(&ones(10), p, true).unwrap();
-        approx(&y.data_vec().unwrap(), want, 1e-5, &format!("seed={s} p={p}"));
+        approx(
+            &y.data_vec().unwrap(),
+            want,
+            1e-5,
+            &format!("seed={s} p={p}"),
+        );
     }
 }
 
@@ -116,7 +145,12 @@ fn plain_dropout_2d_draw_order_matches_torch() {
     let want: [f32; 10] = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0, 0.0, 0.0, 2.0, 2.0];
     ferrotorch_core::rng::manual_seed(42);
     let y = ferrotorch_nn::functional::dropout(&ones_shape(vec![2, 5]), 0.5, true).unwrap();
-    approx(&y.data_vec().unwrap(), &want, 1e-5, "seed42 p0.5 shape[2,5]");
+    approx(
+        &y.data_vec().unwrap(),
+        &want,
+        1e-5,
+        "seed42 p0.5 shape[2,5]",
+    );
 }
 
 /// Plain `Dropout` MODULE, seed=42 p=0.75 — guards the `<Dropout as
@@ -151,15 +185,14 @@ fn plain_dropout_p0_is_identity() {
 }
 
 // ===========================================================================
-// (B) Per-channel feature dropout — EXPECTED FAIL (xorshift + wrong RNG).
+// (B) Per-channel feature dropout — EXPECTED PASS (MT19937 via #1635).
 //
-//     ferrotorch `Dropout2d`/`1d`/`3d`/`AlphaDropout`/`FeatureAlphaDropout`
-//     draw the channel mask from `dropout.rs::xorshift_seed()`
-//     (`SystemTime::now()` + thread id) with `xorshift_next(..) >= self.p`,
-//     IGNORING `ferrotorch_core::manual_seed` and NOT matching torch's MT19937
-//     stream. Upstream feature dropout shares the plain-dropout MT19937 stream
-//     (`Dropout.cpp:73-74`), so a seeded run is reproducible AND equals the
-//     first `N*C` plain-dropout draws.
+//     `Dropout2d`/`1d`/`3d` now draw the channel mask from the byte-exact
+//     MT19937 `Generator` under `ferrotorch_core::manual_seed`, matching
+//     torch's `make_feature_noise(input).bernoulli_(1 - p)` flat `[N, C]`
+//     draw (`Dropout.cpp:73-74`): one draw per channel, keep iff `u < 1-p`,
+//     broadcast over the spatial dims, survivors scaled by `1/(1-p)`. A seeded
+//     run is reproducible AND equals the first `N*C` plain-dropout draws.
 // ===========================================================================
 
 /// Divergence: ferrotorch's `Dropout2d::forward` diverges from
@@ -171,7 +204,6 @@ fn plain_dropout_p0_is_identity() {
 /// result is non-reproducible and does not equal torch's seeded mask.
 /// Tracking: #1635
 #[test]
-#[ignore = "divergence: Dropout2d uses system-time xorshift + keep-on(u>=p), not seeded MT19937; tracking #1635"]
 fn dropout2d_seed42_per_channel_matches_torch() {
     // torch.manual_seed(42); F.dropout2d(ones(1,8,1,1),0.5,True), per-channel val.
     let want: [f32; 8] = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0, 0.0, 0.0];
@@ -179,7 +211,12 @@ fn dropout2d_seed42_per_channel_matches_torch() {
     let layer = ferrotorch_nn::Dropout2d::<f32>::new(0.5).unwrap();
     let y = layer.forward(&ones_shape(vec![1, 8, 1, 1])).unwrap();
     // collapse [1,8,1,1] -> per-channel (each channel is a single element here)
-    approx(&y.data_vec().unwrap(), &want, 1e-5, "Dropout2d seed42 p0.5 8chan");
+    approx(
+        &y.data_vec().unwrap(),
+        &want,
+        1e-5,
+        "Dropout2d seed42 p0.5 8chan",
+    );
 }
 
 /// Divergence: ferrotorch's `Dropout1d::forward` diverges from upstream feature
@@ -187,7 +224,6 @@ fn dropout2d_seed42_per_channel_matches_torch() {
 /// per-channel scaled vals [2,2,2,2,0,2]; ferrotorch uses system-time xorshift.
 /// Tracking: #1635
 #[test]
-#[ignore = "divergence: Dropout1d uses system-time xorshift + keep-on(u>=p), not seeded MT19937; tracking #1635"]
 fn dropout1d_seed42_per_channel_matches_torch() {
     // torch.manual_seed(42); F.dropout1d(ones(1,6,3),0.5,True), per-channel val.
     let want: [f32; 6] = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0];
@@ -205,14 +241,18 @@ fn dropout1d_seed42_per_channel_matches_torch() {
 /// per-channel scaled vals [2,2,2,2,0,2]; ferrotorch uses system-time xorshift.
 /// Tracking: #1635
 #[test]
-#[ignore = "divergence: Dropout3d uses system-time xorshift + keep-on(u>=p), not seeded MT19937; tracking #1635"]
 fn dropout3d_seed42_per_channel_matches_torch() {
     // torch.manual_seed(42); F.dropout3d(ones(1,6,1,1,1),0.5,True), per-channel.
     let want: [f32; 6] = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0];
     ferrotorch_core::rng::manual_seed(42);
     let layer = ferrotorch_nn::Dropout3d::<f32>::new(0.5).unwrap();
     let y = layer.forward(&ones_shape(vec![1, 6, 1, 1, 1])).unwrap();
-    approx(&y.data_vec().unwrap(), &want, 1e-5, "Dropout3d seed42 p0.5 6chan");
+    approx(
+        &y.data_vec().unwrap(),
+        &want,
+        1e-5,
+        "Dropout3d seed42 p0.5 6chan",
+    );
 }
 
 /// Divergence (reproducibility, RNG-agnostic): two consecutive seeded
@@ -223,7 +263,6 @@ fn dropout3d_seed42_per_channel_matches_torch() {
 /// torch byte pattern — it should hold for ANY correct seeded RNG.
 /// Tracking: #1635
 #[test]
-#[ignore = "divergence: Dropout2d not reproducible under manual_seed (system-time xorshift); tracking #1635"]
 fn dropout2d_reproducible_under_manual_seed() {
     let layer = ferrotorch_nn::Dropout2d::<f32>::new(0.5).unwrap();
 
@@ -242,7 +281,13 @@ fn dropout2d_reproducible_under_manual_seed() {
 }
 
 // ===========================================================================
-// (B2) Alpha dropout — EXPECTED FAIL (wrong RNG AND wrong SELU constant/math).
+// (B2) Alpha dropout — EXPECTED PASS (MT19937 + torch alpha affine via #1636).
+//
+//     `AlphaDropout` (per-element) / `FeatureAlphaDropout` (per-channel) now
+//     draw from the byte-exact MT19937 `Generator` and use torch's exact
+//     `alpha = 1.7580993408473766`, `a = 1/sqrt((alpha^2*p + 1)*(1-p))`,
+//     kept = `a*x + alpha*a*p`, dropped = `-alpha*a + alpha*a*p`
+//     (`Dropout.cpp:74-79`).
 // ===========================================================================
 
 /// Divergence: ferrotorch's `AlphaDropout::forward` diverges from
@@ -257,17 +302,21 @@ fn dropout2d_reproducible_under_manual_seed() {
 /// in the MT19937 keep pattern [keep,keep,keep,keep,DROP,keep,DROP,DROP,keep,keep].
 /// Tracking: #1636
 #[test]
-#[ignore = "divergence: AlphaDropout wrong SELU alpha + affine math AND system-time xorshift; tracking #1636"]
 fn alpha_dropout_seed42_matches_torch() {
     // torch.manual_seed(42); nn.AlphaDropout(0.5).train()(ones(10))
     let want: [f32; 10] = [
-        1.6655989, 1.6655989, 1.6655989, 1.6655989, -0.7791939, 1.6655989,
-        -0.7791939, -0.7791939, 1.6655989, 1.6655989,
+        1.6655989, 1.6655989, 1.6655989, 1.6655989, -0.7791939, 1.6655989, -0.7791939, -0.7791939,
+        1.6655989, 1.6655989,
     ];
     ferrotorch_core::rng::manual_seed(42);
     let layer = ferrotorch_nn::AlphaDropout::<f32>::new(0.5).unwrap();
     let y = layer.forward(&ones(10)).unwrap();
-    approx(&y.data_vec().unwrap(), &want, 1e-4, "AlphaDropout seed42 p0.5");
+    approx(
+        &y.data_vec().unwrap(),
+        &want,
+        1e-4,
+        "AlphaDropout seed42 p0.5",
+    );
 }
 
 /// Divergence: ferrotorch's `FeatureAlphaDropout::forward` diverges from
@@ -278,7 +327,6 @@ fn alpha_dropout_seed42_matches_torch() {
 /// ferrotorch uses system-time xorshift and a different SELU affine.
 /// Tracking: #1636
 #[test]
-#[ignore = "divergence: FeatureAlphaDropout wrong SELU math AND system-time xorshift; tracking #1636"]
 fn feature_alpha_dropout_seed42_matches_torch() {
     let want: [f32; 6] = [
         1.6655989, 1.6655989, 1.6655989, 1.6655989, -0.7791939, 1.6655989,
@@ -286,5 +334,10 @@ fn feature_alpha_dropout_seed42_matches_torch() {
     ferrotorch_core::rng::manual_seed(42);
     let layer = ferrotorch_nn::FeatureAlphaDropout::<f32>::new(0.5).unwrap();
     let y = layer.forward(&ones_shape(vec![1, 6, 1, 1])).unwrap();
-    approx(&y.data_vec().unwrap(), &want, 1e-4, "FeatureAlphaDropout seed42 p0.5");
+    approx(
+        &y.data_vec().unwrap(),
+        &want,
+        1e-4,
+        "FeatureAlphaDropout seed42 p0.5",
+    );
 }
