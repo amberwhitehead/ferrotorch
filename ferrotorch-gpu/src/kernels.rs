@@ -19700,7 +19700,7 @@ pub(crate) const TRANSPOSE_COMPLEX_F32_PTX: &str = "\
     .param .u32 N,\n\
     .param .u32 total\n\
 ) {\n\
-    .reg .u32 %tid, %bid, %bdim, %total_reg, %N_reg;\n\
+    .reg .u32 %ltid, %bid, %bdim, %total_reg, %N_reg;\n\
     .reg .u32 %out_row, %out_col, %in_idx;\n\
     .reg .u32 %in_off, %out_off;\n\
     .reg .u64 %in, %out;\n\
@@ -19715,21 +19715,21 @@ pub(crate) const TRANSPOSE_COMPLEX_F32_PTX: &str = "\
 \n\
     mov.u32 %bid, %ctaid.x;\n\
     mov.u32 %bdim, %ntid.x;\n\
-    mov.u32 %tid, %tid.x;\n\
-    mad.lo.u32 %tid, %bid, %bdim, %tid;\n\
+    mov.u32 %ltid, %tid.x;\n\
+    mad.lo.u32 %ltid, %bid, %bdim, %ltid;\n\
 \n\
-    setp.ge.u32 %p, %tid, %total_reg;\n\
+    setp.ge.u32 %p, %ltid, %total_reg;\n\
     @%p bra DONE;\n\
 \n\
-    // Output element: out_row = tid / N, out_col = tid % N.\n\
-    div.u32 %out_row, %tid, %N_reg;\n\
-    rem.u32 %out_col, %tid, %N_reg;\n\
+    // Output element: out_row = ltid / N, out_col = ltid % N.\n\
+    div.u32 %out_row, %ltid, %N_reg;\n\
+    rem.u32 %out_col, %ltid, %N_reg;\n\
     // Input element in column-major: (out_col, out_row) = out_col*N + out_row.\n\
     mad.lo.u32 %in_idx, %out_col, %N_reg, %out_row;\n\
 \n\
     // Byte offsets: each complex element is 2 f32 = 8 bytes.\n\
     shl.b32 %in_off, %in_idx, 3;\n\
-    shl.b32 %out_off, %tid, 3;\n\
+    shl.b32 %out_off, %ltid, 3;\n\
 \n\
     cvt.u64.u32 %p_in_re, %in_off;\n\
     add.u64 %p_in_re, %in, %p_in_re;\n\
@@ -19743,6 +19743,74 @@ pub(crate) const TRANSPOSE_COMPLEX_F32_PTX: &str = "\
     ld.global.f32 %im, [%p_in_im];\n\
     st.global.f32 [%p_out_re], %re;\n\
     st.global.f32 [%p_out_im], %im;\n\
+\n\
+DONE:\n\
+    ret;\n\
+}\n\
+";
+
+/// PTX for `transpose_complex_f64_kernel`: the f64 sibling of
+/// [`TRANSPOSE_COMPLEX_F32_PTX`]. Hand-written rather than produced by
+/// [`get_f64_ptx`] because the f32->f64 textual converter does not rescale this
+/// kernel's hardcoded byte strides: a complex f64 element is 16 bytes (2 x 8),
+/// so the element offset shift is `4` (x16, not x8) and the imaginary-part
+/// offset is `+8` (not `+4`). Reusing the f32 PTX produced misaligned 16-byte
+/// accesses (CUDA_ERROR_MISALIGNED_ADDRESS). (#1685)
+#[cfg(feature = "cuda")]
+pub(crate) const TRANSPOSE_COMPLEX_F64_PTX: &str = "\
+.version 7.0\n\
+.target sm_60\n\
+.address_size 64\n\
+\n\
+.visible .entry transpose_complex_f64_kernel(\n\
+    .param .u64 in_ptr,\n\
+    .param .u64 out_ptr,\n\
+    .param .u32 N,\n\
+    .param .u32 total\n\
+) {\n\
+    .reg .u32 %ltid, %bid, %bdim, %total_reg, %N_reg;\n\
+    .reg .u32 %out_row, %out_col, %in_idx;\n\
+    .reg .u32 %in_off, %out_off;\n\
+    .reg .u64 %in, %out;\n\
+    .reg .u64 %p_in_re, %p_in_im, %p_out_re, %p_out_im;\n\
+    .reg .f64 %re, %im;\n\
+    .reg .pred %p;\n\
+\n\
+    ld.param.u64 %in, [in_ptr];\n\
+    ld.param.u64 %out, [out_ptr];\n\
+    ld.param.u32 %N_reg, [N];\n\
+    ld.param.u32 %total_reg, [total];\n\
+\n\
+    mov.u32 %bid, %ctaid.x;\n\
+    mov.u32 %bdim, %ntid.x;\n\
+    mov.u32 %ltid, %tid.x;\n\
+    mad.lo.u32 %ltid, %bid, %bdim, %ltid;\n\
+\n\
+    setp.ge.u32 %p, %ltid, %total_reg;\n\
+    @%p bra DONE;\n\
+\n\
+    // Output element: out_row = ltid / N, out_col = ltid % N.\n\
+    div.u32 %out_row, %ltid, %N_reg;\n\
+    rem.u32 %out_col, %ltid, %N_reg;\n\
+    // Input element in column-major: (out_col, out_row) = out_col*N + out_row.\n\
+    mad.lo.u32 %in_idx, %out_col, %N_reg, %out_row;\n\
+\n\
+    // Byte offsets: each complex element is 2 f64 = 16 bytes.\n\
+    shl.b32 %in_off, %in_idx, 4;\n\
+    shl.b32 %out_off, %ltid, 4;\n\
+\n\
+    cvt.u64.u32 %p_in_re, %in_off;\n\
+    add.u64 %p_in_re, %in, %p_in_re;\n\
+    add.u64 %p_in_im, %p_in_re, 8;\n\
+\n\
+    cvt.u64.u32 %p_out_re, %out_off;\n\
+    add.u64 %p_out_re, %out, %p_out_re;\n\
+    add.u64 %p_out_im, %p_out_re, 8;\n\
+\n\
+    ld.global.f64 %re, [%p_in_re];\n\
+    ld.global.f64 %im, [%p_in_im];\n\
+    st.global.f64 [%p_out_re], %re;\n\
+    st.global.f64 [%p_out_im], %im;\n\
 \n\
 DONE:\n\
     ret;\n\
@@ -19924,7 +19992,6 @@ pub fn gpu_transpose_complex_f64(
     device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<f64>> {
     use cudarc::driver::PushKernelArg;
-    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
     let n_elems = n * n;
     if input.len() != 2 * n_elems {
@@ -19941,17 +20008,12 @@ pub fn gpu_transpose_complex_f64(
     let ctx = device.context();
     let stream = device.stream();
 
-    // Reuse TRANSPOSE_COMPLEX_F32_PTX re-typed to f64 via the same
-    // ptx_f32_to_f64 mechanism used for all other f64 transpose variants.
-    let ptx = get_f64_ptx(
-        &CACHE,
-        TRANSPOSE_COMPLEX_F32_PTX,
-        "transpose_complex_f32_kernel",
-        "transpose_complex_f64_kernel",
-    );
+    // Dedicated f64 PTX: the generic f32->f64 converter cannot rescale this
+    // kernel's hardcoded complex byte strides (8B->16B), so a hand-written
+    // const with shl-4 / imag-offset-8 is required. (#1685)
     let f = match crate::module_cache::get_or_compile(
         ctx,
-        ptx,
+        TRANSPOSE_COMPLEX_F64_PTX,
         "transpose_complex_f64_kernel",
         device.ordinal() as u32,
     ) {
