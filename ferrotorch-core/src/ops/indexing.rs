@@ -859,11 +859,20 @@ pub fn where_cond_bt<T: Float>(
         }
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        // #1660: normalise the narrowed-offset CUDA x/y operands to packed
+        // offset-0 buffers before the select kernel reads element 0 (#1658
+        // class). A row-narrowed view's BASE buffer is longer than `numel`, so
+        // the kernel rejected the call ("where_cond: numel mismatch (cond 6,
+        // x 8, y 6)"); `.contiguous()` materialises the logical view on-device
+        // (strided_copy; cheap clone when already offset-0). The autograd
+        // capture below stores the packed operands so the backward agrees.
+        let x = x.contiguous()?;
+        let y = y.contiguous()?;
         let h = backend.where_cond(cond.gpu_handle()?, x.gpu_handle()?, y.gpu_handle()?)?;
         let storage = TensorStorage::gpu(h);
         let output_shape = x.shape().to_vec();
 
-        if needs_grad(x, y) {
+        if needs_grad(&x, &y) {
             // Store the resident cond directly (cheap Arc/clone-on-storage) — the
             // backward routes through the resident `where_cond` VJP with NO host
             // crossing (crosslink #1187 Phase 3d). No `cond.to(Cpu)`.
@@ -923,6 +932,14 @@ pub fn masked_select<T: Float>(
         }
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        // #1660: normalise the narrowed-offset CUDA input to a packed offset-0
+        // buffer before the compaction kernel reads element 0 (#1658 class). A
+        // row-narrowed view's BASE buffer is longer than `numel`, which the
+        // kernel rejected ("input numel 8 != mask numel 6"); `.contiguous()`
+        // materialises the logical view on-device (strided_copy; cheap clone
+        // when already offset-0). The backward capture below stores the packed
+        // input so the scatter agrees.
+        let input = input.contiguous()?;
         let (handle, len) = backend.masked_select(input.gpu_handle()?, mask.gpu_handle()?)?;
         let storage = TensorStorage::gpu(handle);
 

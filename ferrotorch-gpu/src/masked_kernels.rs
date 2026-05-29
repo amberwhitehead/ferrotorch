@@ -527,21 +527,31 @@ where
 /// Launch a `where` (ternary select) kernel over two value buffers of native
 /// element type `T` + a u8 cond buffer, returning a fresh resident
 /// `CudaSlice<T>` of `n` elements.
+///
+/// `n` is the LOGICAL element count of the operands (`CudaBuffer::len()`), not
+/// the raw `CudaSlice::len()`. The raw `cond`/`x`/`y` slices may be
+/// OVER-ALLOCATED past `n`: a `.contiguous()`-materialised view is backed by a
+/// pooled buffer rounded up to a multiple of `ROUND_ELEMENTS` (#1660), while a
+/// `clone_htod` operand is exact-length. We therefore validate and launch on
+/// the logical `n`, treating each raw slice as a backing store that need only be
+/// `>= n`; comparing raw lens would spuriously reject `256 vs 6`. The caller
+/// (dispatch site) supplies `n` from the logical buffer len and owns the
+/// operand-shape equality check.
 fn launch_where<T: DeviceRepr + ValidAsZeroBits>(
     cond: &CudaSlice<u8>,
     x: &CudaSlice<T>,
     y: &CudaSlice<T>,
+    n: usize,
     device: &GpuDevice,
     ptx: &'static str,
     kernel_name: &'static str,
 ) -> GpuResult<CudaSlice<T>> {
-    if x.len() != y.len() || x.len() != cond.len() {
+    if x.len() < n || y.len() < n || cond.len() < n {
         return Err(GpuError::LengthMismatch {
-            a: x.len(),
-            b: y.len(),
+            a: x.len().min(y.len()).min(cond.len()),
+            b: n,
         });
     }
-    let n = x.len();
     let stream = device.stream();
     if n == 0 {
         return Ok(stream.alloc_zeros::<T>(0)?);
@@ -559,7 +569,9 @@ fn launch_where<T: DeviceRepr + ValidAsZeroBits>(
     // SAFETY:
     // - `f` is the PTX entry `kernel_name`; signature
     //   (cond_ptr, x_ptr, y_ptr, out_ptr, n) matches the five args below.
-    // - `cond` (n u8), `x`, `y` (n `T` each) are length-equal (checked above);
+    // - `cond` (u8), `x`, `y` (`T`) each back AT LEAST `n` elements
+    //   (`*.len() >= n` checked above; any may be a pooled, over-allocated
+    //   `.contiguous()` materialisation, #1660); the kernel reads only `[0, n)`.
     //   `out` is a fresh n-element `T` buffer, the only `&mut`, not aliased.
     // - Each thread reads cond[i]/x[i]/y[i] and writes out[i] only for i in
     //   [0,n) (PTX bound check).
@@ -1119,6 +1131,7 @@ pub fn where_32<T: DeviceRepr + ValidAsZeroBits>(
     cond: &CudaSlice<u8>,
     x: &CudaSlice<T>,
     y: &CudaSlice<T>,
+    n: usize,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<T>> {
     debug_assert_eq!(
@@ -1126,7 +1139,7 @@ pub fn where_32<T: DeviceRepr + ValidAsZeroBits>(
         4,
         "where_32 requires a 4-byte element"
     );
-    launch_where(cond, x, y, d, WHERE_32_PTX, "where_32_kernel")
+    launch_where(cond, x, y, n, d, WHERE_32_PTX, "where_32_kernel")
 }
 
 /// where (ternary select) for a 64-bit value dtype (f64 / i64).
@@ -1134,6 +1147,7 @@ pub fn where_64<T: DeviceRepr + ValidAsZeroBits>(
     cond: &CudaSlice<u8>,
     x: &CudaSlice<T>,
     y: &CudaSlice<T>,
+    n: usize,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<T>> {
     debug_assert_eq!(
@@ -1141,7 +1155,7 @@ pub fn where_64<T: DeviceRepr + ValidAsZeroBits>(
         8,
         "where_64 requires an 8-byte element"
     );
-    launch_where(cond, x, y, d, WHERE_64_PTX, "where_64_kernel")
+    launch_where(cond, x, y, n, d, WHERE_64_PTX, "where_64_kernel")
 }
 
 /// where (ternary select) for a 16-bit value dtype (f16 / bf16; pure bit
@@ -1150,9 +1164,10 @@ pub fn where_16(
     cond: &CudaSlice<u8>,
     x: &CudaSlice<u16>,
     y: &CudaSlice<u16>,
+    n: usize,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<u16>> {
-    launch_where(cond, x, y, d, WHERE_16_PTX, "where_16_kernel")
+    launch_where(cond, x, y, n, d, WHERE_16_PTX, "where_16_kernel")
 }
 
 /// masked_select for a 32-bit value dtype (f32 / i32): returns `(out, len)`
@@ -1314,7 +1329,7 @@ mod tests {
             .stream()
             .clone_htod(&vec![-1.0f32, -2.0, -3.0, -4.0])
             .unwrap();
-        let r = where_32::<f32>(&cond, &x, &y, &d).unwrap();
+        let r = where_32::<f32>(&cond, &x, &y, 4, &d).unwrap();
         assert_eq!(
             d.stream().clone_dtoh(&r).unwrap(),
             vec![10.0f32, -2.0, 30.0, -4.0]

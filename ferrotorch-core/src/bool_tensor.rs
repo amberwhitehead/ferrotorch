@@ -518,6 +518,15 @@ impl BoolTensor {
         if a.is_cuda() {
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            // #1660: normalise BOTH narrowed-offset CUDA operands to packed
+            // offset-0 buffers before the value-typed comparison kernel reads
+            // element 0 (#1658 class). A row-narrowed view's BASE buffer is
+            // longer than `numel`, which the kernel rejects ("buffer length
+            // mismatch: 8 vs 6"); `.contiguous()` materialises the logical view
+            // on-device (strided_copy; cheap clone when already offset-0). The
+            // BoolTensor result stays GPU-resident.
+            let a = a.contiguous()?;
+            let b = b.contiguous()?;
             let h = backend.compare(a.gpu_handle()?, b.gpu_handle()?, op)?;
             return Ok(Self::from_gpu_handle(h, a.shape().to_vec()));
         }

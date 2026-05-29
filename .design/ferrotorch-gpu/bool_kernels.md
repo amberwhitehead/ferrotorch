@@ -139,6 +139,25 @@ returns the empty-identity (0 for `any`, 1 for `all`) via a single
 `pub fn gpu_all_bool in bool_kernels.rs`. Non-test consumer:
 `gpu_all_bool in backend_impl.rs` (`gpu_any_bool`), `gpu_any_bool in backend_impl.rs` (`gpu_all_bool`).
 
+### Logical-length launch contract (#1660)
+
+`launch_cmp` (and its forwarders `launch_cmp_half` / the `gpu_cmp_*`
+wrappers) take an explicit LOGICAL element count `n: usize` — the
+operands' `CudaBuffer::len()` — and validate/launch on that, NOT on the
+raw `CudaSlice::len()`. The raw slice may be OVER-ALLOCATED past `n`: a
+`.contiguous()`-materialised view (e.g. a row-narrowed CUDA view packed
+on-device for the #1658 storage-offset class) is backed by a POOLED
+buffer whose raw len is rounded up to a multiple of `ROUND_ELEMENTS = 256`
+(see `pool.md` REQ-2), while a `clone_htod` operand is exact-length. The
+kernel-level check is therefore a backing-store sufficiency guard
+(`a.len() >= n && b.len() >= n`), and the launch reads/writes only
+`[0, n)`. Comparing raw lens would spuriously reject pairings such as
+`256 vs 6`. The dispatch site (`CudaBackendImpl::compare in
+backend_impl.rs`) owns the operand-shape equality check on the logical
+`GpuBufferHandle::len()` and threads `n` down. `launch_logic_bin`
+consumes only exact-length compare-result bool buffers, so it keeps the
+strict raw-len equality guard (logical == raw there).
+
 ### SAFETY discipline (REQ-7)
 
 `fn launch_cmp / launch_cmp_half / launch_logic_bin / launch_not /
@@ -146,9 +165,11 @@ launch_reduce_bool in bool_kernels.rs` each wrap a single `unsafe {
 stream.launch_builder(&f)...launch(cfg)? }` block. Every such block is
 preceded by a multi-line SAFETY comment naming: (a) the PTX entry's
 parameter signature matching argument push order, (b) the input buffer
-length binding to `n`, (c) the fresh `out` allocation, (d) the PTX
-bound check, (e) the `n as u32` non-truncation. R-CODE-1 grandfathers
-raw CUDA kernel launches.
+backing AT LEAST `n` elements (`*.len() >= n`, tolerating a pooled
+over-allocated `.contiguous()` materialisation per #1660), (c) the fresh
+`out` allocation, (d) the PTX bound check confining access to `[0, n)`,
+(e) the `n as u32` non-truncation. R-CODE-1 grandfathers raw CUDA kernel
+launches.
 
 ## Parity contract
 

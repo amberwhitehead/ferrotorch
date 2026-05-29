@@ -365,21 +365,31 @@ const REDUCE_ALL: u32 = 1;
 /// Launch a comparison `(a_ptr, b_ptr, out_ptr, n)` kernel over a value buffer
 /// of native element type `T` (`f32`/`f64`/`i32`/`i64`), producing a fresh
 /// `CudaSlice<u8>` of `n` 0/1 bytes resident on `device`.
+///
+/// `n` is the LOGICAL element count of the operands (`CudaBuffer::len()`), not
+/// the raw `CudaSlice::len()`. The raw slices may be OVER-ALLOCATED past `n`:
+/// a `.contiguous()`-materialised view is backed by a pooled buffer whose raw
+/// `CudaSlice::len()` is rounded up to a multiple of `ROUND_ELEMENTS` (#1660),
+/// whereas a `clone_htod` operand is backed by an exact-length slice. We must
+/// therefore validate and launch on the logical `n`, treating each raw slice as
+/// a backing store that need only be `>= n`; comparing raw lens would spuriously
+/// reject `256 vs 6`. The caller (dispatch site) supplies `n` from the logical
+/// buffer len and is responsible for the operand-shape equality check.
 fn launch_cmp<T: DeviceRepr + ValidAsZeroBits>(
     a: &CudaSlice<T>,
     b: &CudaSlice<T>,
+    n: usize,
     device: &GpuDevice,
     ptx: String,
     kernel_name: String,
     err_label: &'static str,
 ) -> GpuResult<CudaSlice<u8>> {
-    if a.len() != b.len() {
+    if a.len() < n || b.len() < n {
         return Err(GpuError::LengthMismatch {
-            a: a.len(),
-            b: b.len(),
+            a: a.len().min(b.len()),
+            b: n,
         });
     }
-    let n = a.len();
     let stream = device.stream();
     if n == 0 {
         return Ok(stream.alloc_zeros::<u8>(0)?);
@@ -402,8 +412,10 @@ fn launch_cmp<T: DeviceRepr + ValidAsZeroBits>(
     // - `f` is the PTX entry `kernel_name` just compiled; its signature is
     //   (a_ptr: u64, b_ptr: u64, out_ptr: u64, n: u32), matching the four args
     //   pushed below in order.
-    // - `a`, `b` are immutable input buffers of `n` `T`-elements each (length
-    //   equality enforced above); `n` is bound to `a.len()`.
+    // - `a`, `b` are immutable input buffers backing AT LEAST `n` `T`-elements
+    //   each (`a.len() >= n` / `b.len() >= n` enforced above; either may be a
+    //   pooled, over-allocated `.contiguous()` materialisation, #1660); the
+    //   kernel reads only `[0, n)`.
     // - `out` was alloc'd `n` `u8`-elements from `stream` and is the only `&mut`
     //   here, non-aliased with the immutable inputs (distinct allocations).
     // - The kernel reads `a[i]`/`b[i]` and writes `out[i]` only within `[0, n)`
@@ -427,11 +439,12 @@ fn launch_cmp<T: DeviceRepr + ValidAsZeroBits>(
 fn launch_cmp_half(
     a: &CudaSlice<u16>,
     b: &CudaSlice<u16>,
+    n: usize,
     device: &GpuDevice,
     ptx: String,
     kernel_name: String,
 ) -> GpuResult<CudaSlice<u8>> {
-    launch_cmp::<u16>(a, b, device, ptx, kernel_name, "cmp_half")
+    launch_cmp::<u16>(a, b, n, device, ptx, kernel_name, "cmp_half")
 }
 
 /// Launch a logical binary `(a_ptr, b_ptr, out_ptr, n)` kernel over two u8 bool
@@ -443,7 +456,25 @@ fn launch_logic_bin(
     ptx: String,
     kernel_name: &'static str,
 ) -> GpuResult<CudaSlice<u8>> {
-    launch_cmp::<u8>(a, b, device, ptx, kernel_name.to_string(), kernel_name)
+    // Logical binary ops consume compare-result bool buffers, which are always
+    // exact-length (no `.contiguous()` pooled over-allocation reaches here), so
+    // logical len == raw len. Preserve the strict operand-equality guard here
+    // and pass that shared length as the logical `n`.
+    if a.len() != b.len() {
+        return Err(GpuError::LengthMismatch {
+            a: a.len(),
+            b: b.len(),
+        });
+    }
+    launch_cmp::<u8>(
+        a,
+        b,
+        a.len(),
+        device,
+        ptx,
+        kernel_name.to_string(),
+        kernel_name,
+    )
 }
 
 /// Launch the unary NOT `(a_ptr, out_ptr, n)` kernel over a u8 bool buffer.
@@ -554,74 +585,80 @@ fn setp_for(op: &str, ty: &str) -> String {
 pub fn gpu_cmp_f32(
     a: &CudaSlice<f32>,
     b: &CudaSlice<f32>,
+    n: usize,
     op: &str,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<u8>> {
     let name = format!("cmp_{op}_f32_kernel");
     let ptx = cmp_ptx(&name, 2, "f32", ".reg .f32 %va, %vb;", &setp_for(op, "f32"));
-    launch_cmp::<f32>(a, b, d, ptx, name, "cmp_f32")
+    launch_cmp::<f32>(a, b, n, d, ptx, name, "cmp_f32")
 }
 
 /// f64 comparison → u8 0/1 buffer.
 pub fn gpu_cmp_f64(
     a: &CudaSlice<f64>,
     b: &CudaSlice<f64>,
+    n: usize,
     op: &str,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<u8>> {
     let name = format!("cmp_{op}_f64_kernel");
     let ptx = cmp_ptx(&name, 3, "f64", ".reg .f64 %va, %vb;", &setp_for(op, "f64"));
-    launch_cmp::<f64>(a, b, d, ptx, name, "cmp_f64")
+    launch_cmp::<f64>(a, b, n, d, ptx, name, "cmp_f64")
 }
 
 /// i32 comparison → u8 0/1 buffer (signed compare).
 pub fn gpu_cmp_i32(
     a: &CudaSlice<i32>,
     b: &CudaSlice<i32>,
+    n: usize,
     op: &str,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<u8>> {
     let name = format!("cmp_{op}_i32_kernel");
     let ptx = cmp_ptx(&name, 2, "s32", ".reg .s32 %va, %vb;", &setp_for(op, "s32"));
-    launch_cmp::<i32>(a, b, d, ptx, name, "cmp_i32")
+    launch_cmp::<i32>(a, b, n, d, ptx, name, "cmp_i32")
 }
 
 /// i64 comparison → u8 0/1 buffer (signed compare).
 pub fn gpu_cmp_i64(
     a: &CudaSlice<i64>,
     b: &CudaSlice<i64>,
+    n: usize,
     op: &str,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<u8>> {
     let name = format!("cmp_{op}_i64_kernel");
     let ptx = cmp_ptx(&name, 3, "s64", ".reg .s64 %va, %vb;", &setp_for(op, "s64"));
-    launch_cmp::<i64>(a, b, d, ptx, name, "cmp_i64")
+    launch_cmp::<i64>(a, b, n, d, ptx, name, "cmp_i64")
 }
 
 /// bf16 comparison (u16 bit patterns decoded to f32) → u8 0/1 buffer.
 pub fn gpu_cmp_bf16(
     a: &CudaSlice<u16>,
     b: &CudaSlice<u16>,
+    n: usize,
     op: &str,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<u8>> {
     let name = format!("cmp_{op}_bf16_kernel");
     let setp = format!("setp.{op}.f32 %c, %fa, %fb;");
     let ptx = cmp_half_ptx(&name, "sm_52", BF16_DECODE, &setp);
-    launch_cmp_half(a, b, d, ptx, name)
+    launch_cmp_half(a, b, n, d, ptx, name)
 }
 
 /// f16 comparison (u16 bit patterns decoded to f32) → u8 0/1 buffer.
 pub fn gpu_cmp_f16(
     a: &CudaSlice<u16>,
     b: &CudaSlice<u16>,
+    n: usize,
     op: &str,
     d: &GpuDevice,
 ) -> GpuResult<CudaSlice<u8>> {
     let name = format!("cmp_{op}_f16_kernel");
     let setp = format!("setp.{op}.f32 %c, %fa, %fb;");
     let ptx = cmp_half_ptx(&name, "sm_53", F16_DECODE, &setp);
-    launch_cmp_half(a, b, d, ptx, name)
+    launch_cmp_half(a, b, n, d, ptx, name)
 }
 
 /// Logical AND of two u8 bool buffers → u8 0/1 buffer.

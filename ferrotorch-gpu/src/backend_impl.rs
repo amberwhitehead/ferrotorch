@@ -7803,40 +7803,61 @@ impl GpuBackend for CudaBackendImpl {
         let dev = self.device(a.device_ordinal())?;
         let ord = a.device_ordinal();
         let suffix = op.suffix();
+        // #1660: the comparison kernels launch on the LOGICAL element count, not
+        // the raw `CudaSlice::len()`. A `.contiguous()`-materialised operand is
+        // backed by a POOLED buffer whose raw slice is rounded up to a multiple
+        // of `ROUND_ELEMENTS`, while a `clone_htod` operand is exact-length; the
+        // two raw lens (e.g. 256 vs 6) then differ even though the logical numels
+        // match. We validate the LOGICAL lens here (the dispatch contract) and
+        // pass that `n` down so the kernel treats each raw slice as a backing
+        // store that need only be `>= n`.
+        let n = a.len();
+        let n_b = b.len();
+        if n != n_b {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("compare: operand numel differs ({n} vs {n_b})"),
+            });
+        }
         let r = match a.dtype() {
             DType::F32 => bk::gpu_cmp_f32(
                 Self::unwrap_buffer(a)?.inner(),
                 Self::unwrap_buffer(b)?.inner(),
+                n,
                 suffix,
                 dev,
             ),
             DType::F64 => bk::gpu_cmp_f64(
                 Self::unwrap_buffer_f64(a)?.inner(),
                 Self::unwrap_buffer_f64(b)?.inner(),
+                n,
                 suffix,
                 dev,
             ),
             DType::I32 => bk::gpu_cmp_i32(
                 Self::unwrap_buffer_i32(a)?.inner(),
                 Self::unwrap_buffer_i32(b)?.inner(),
+                n,
                 suffix,
                 dev,
             ),
             DType::I64 => bk::gpu_cmp_i64(
                 Self::unwrap_buffer_i64(a)?.inner(),
                 Self::unwrap_buffer_i64(b)?.inner(),
+                n,
                 suffix,
                 dev,
             ),
             DType::BF16 => bk::gpu_cmp_bf16(
                 Self::unwrap_buffer_bf16(a)?,
                 Self::unwrap_buffer_bf16(b)?,
+                n,
                 suffix,
                 dev,
             ),
             DType::F16 => bk::gpu_cmp_f16(
                 Self::unwrap_buffer_f16(a)?,
                 Self::unwrap_buffer_f16(b)?,
+                n,
                 suffix,
                 dev,
             ),
@@ -8114,12 +8135,19 @@ impl GpuBackend for CudaBackendImpl {
         let dev = self.device(x.device_ordinal())?;
         let ord = x.device_ordinal();
         let cb = Self::unwrap_buffer_bool(cond)?.inner();
+        // #1660: launch on the LOGICAL element count (already validated equal to
+        // cond/y above), not the raw `CudaSlice::len()`. A `.contiguous()`
+        // operand is backed by a pooled, over-allocated slice (rounded to
+        // `ROUND_ELEMENTS`) while a `clone_htod` operand is exact-length; the
+        // kernel treats each raw slice as a backing store of `>= n` elements.
+        let n = x.len();
         match x.dtype() {
             DType::F32 => Ok(Self::wrap_slice_f32(
                 mk::where_32::<f32>(
                     cb,
                     Self::unwrap_buffer(x)?.inner(),
                     Self::unwrap_buffer(y)?.inner(),
+                    n,
                     dev,
                 )
                 .map_err(Self::map_gpu_err)?,
@@ -8130,6 +8158,7 @@ impl GpuBackend for CudaBackendImpl {
                     cb,
                     Self::unwrap_buffer_f64(x)?.inner(),
                     Self::unwrap_buffer_f64(y)?.inner(),
+                    n,
                     dev,
                 )
                 .map_err(Self::map_gpu_err)?,
@@ -8140,6 +8169,7 @@ impl GpuBackend for CudaBackendImpl {
                     cb,
                     Self::unwrap_buffer_f16(x)?,
                     Self::unwrap_buffer_f16(y)?,
+                    n,
                     dev,
                 )
                 .map_err(Self::map_gpu_err)?,
@@ -8150,6 +8180,7 @@ impl GpuBackend for CudaBackendImpl {
                     cb,
                     Self::unwrap_buffer_bf16(x)?,
                     Self::unwrap_buffer_bf16(y)?,
+                    n,
                     dev,
                 )
                 .map_err(Self::map_gpu_err)?,
@@ -8160,6 +8191,7 @@ impl GpuBackend for CudaBackendImpl {
                     cb,
                     Self::unwrap_buffer_i32(x)?.inner(),
                     Self::unwrap_buffer_i32(y)?.inner(),
+                    n,
                     dev,
                 )
                 .map_err(Self::map_gpu_err)?,
@@ -8170,6 +8202,7 @@ impl GpuBackend for CudaBackendImpl {
                     cb,
                     Self::unwrap_buffer_i64(x)?.inner(),
                     Self::unwrap_buffer_i64(y)?.inner(),
+                    n,
                     dev,
                 )
                 .map_err(Self::map_gpu_err)?,

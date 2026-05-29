@@ -72,6 +72,17 @@ fn host_f32(t: &Tensor<f32>) -> Vec<f32> {
     t.cpu().expect("cpu()").data().unwrap().to_vec()
 }
 
+// A CUDA-resident BoolTensor returns `GpuTensorNotAccessible` from `.data()` by
+// device-error policy (a host count needs an explicit D2H copy). Move to CPU
+// first, then read — this compares the GPU-computed result against live torch.
+fn host_bool(b: &BoolTensor) -> Vec<bool> {
+    b.to(Device::Cpu)
+        .expect("bool to cpu")
+        .data()
+        .expect("bool data")
+        .to_vec()
+}
+
 /// CUDA [4,2] = [[1,2],[3,4],[5,6],[7,8]], narrow rows 1..4 -> logical [3,2] =
 /// [[3,4],[5,6],[7,8]] with storage_offset 2 and `is_contiguous() == true`.
 fn narrowed_cuda_view() -> Tensor<f32> {
@@ -113,10 +124,12 @@ const TORCH_MASKED: [f32; 4] = [5.0, 6.0, 7.0, 8.0];
 fn compare_gt_narrowed_offset_view_gpu_matches_torch() {
     ensure_cuda();
     let view = narrowed_cuda_view();
-    let b = cpu_f32(&[4.5; 6], &[3, 2]).to(Device::Cuda(0)).expect("b cuda");
+    let b = cpu_f32(&[4.5; 6], &[3, 2])
+        .to(Device::Cuda(0))
+        .expect("b cuda");
     let got = BoolTensor::gt(&view, &b)
         .expect("BoolTensor::gt on narrowed CUDA view must honour storage_offset (not error)");
-    let got: Vec<bool> = got.data().expect("bool data").to_vec();
+    let got: Vec<bool> = host_bool(&got);
     assert_eq!(
         got,
         TORCH_GT_GT45.to_vec(),
@@ -142,6 +155,56 @@ fn where_cond_bt_narrowed_offset_view_gpu_matches_torch() {
         TORCH_WHERE.to_vec(),
         "where_cond_bt on narrowed-offset CUDA x: ferrotorch dropped storage_offset"
     );
+}
+
+// ===========================================================================
+// #1660 regression: BOTH compare operands are narrowed views, so BOTH are
+// materialised by `.contiguous()` into POOLED buffers whose raw `CudaSlice`
+// len is rounded up (>= 256) while the logical numel is 6. The kernel-level
+// validation must compare LOGICAL lens (6 == 6) and launch exactly 6 threads,
+// reading only the first 6 elements of each over-allocated backing slice. A
+// raw-len equality check would PASS here (both 256) but a raw-len LAUNCH would
+// read 256 elements of garbage; this pins logical-len LAUNCH dimensions too.
+//
+// Live torch: full[1:4] > full2[1:4] where full2 = arange(1,9)+1 reshaped,
+// view2 = [[4,5],[6,7],[8,9]]; (view > view2) = [F,F,F,F,F,F] (each lhs < rhs).
+const TORCH_GT_BOTH_VIEWS: [bool; 6] = [false, false, false, false, false, false];
+#[test]
+fn compare_gt_both_narrowed_views_pooled_logical_len_gpu_matches_torch() {
+    ensure_cuda();
+    let view = narrowed_cuda_view(); // [3,4],[5,6],[7,8]
+    let full2 = cpu_f32(&[2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], &[4, 2])
+        .to(Device::Cuda(0))
+        .expect("full2 cuda");
+    let view2 = full2.narrow(0, 1, 3).expect("narrow full2"); // [4,5],[6,7],[8,9]
+    assert_ne!(view2.storage_offset(), 0);
+    let got = BoolTensor::gt(&view, &view2).expect(
+        "gt with both narrowed (pooled, over-allocated) CUDA views must launch on logical n",
+    );
+    let got: Vec<bool> = host_bool(&got);
+    assert_eq!(
+        got,
+        TORCH_GT_BOTH_VIEWS.to_vec(),
+        "gt(view, view2): pooled over-allocated operands must be read only over logical numel"
+    );
+}
+
+// #1660 guard: the common EXACT-length case (offset-0 contiguous CUDA inputs)
+// must keep working after the logical-len change — both operands have raw len
+// == logical len, so the `>= n` backing-store check is trivially satisfied.
+const TORCH_GT_OFFSET0: [bool; 6] = [false, false, true, true, true, true];
+#[test]
+fn compare_gt_offset0_exact_len_gpu_unaffected() {
+    ensure_cuda();
+    let a = cpu_f32(&[3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[3, 2])
+        .to(Device::Cuda(0))
+        .expect("a cuda");
+    let b = cpu_f32(&[4.5; 6], &[3, 2])
+        .to(Device::Cuda(0))
+        .expect("b cuda");
+    let got: Vec<bool> =
+        host_bool(&BoolTensor::gt(&a, &b).expect("gt on exact-len offset-0 CUDA inputs"));
+    assert_eq!(got, TORCH_GT_OFFSET0.to_vec());
 }
 
 // ===========================================================================
