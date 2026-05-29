@@ -1859,6 +1859,63 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    // -- Triangular masks: triu / tril (#1545 / sub #1535) -------------------
+    //
+    // 2-D `[rows, cols]` C-contiguous masks. Element `(row, col)` is preserved
+    // when the predicate holds and zeroed otherwise:
+    //   - triu keeps `col - row >= k`
+    //   - tril keeps `col - row <= k`
+    // matching `aten/src/ATen/native/cuda/TriangularOps.cu:100` and the
+    // ferrotorch CPU `triu`/`tril`. `k` is the signed diagonal offset. The
+    // result stays GPU-resident (no host round-trip). Default bodies return
+    // `NotImplementedOnCuda` so non-CUDA backends compile unchanged; the CUDA
+    // backend overrides all four. Non-test consumer: the `input.is_cuda()`
+    // branch of `triu`/`tril` in `ferrotorch-core/src/ops/tensor_ops.rs`.
+
+    /// Upper-triangular mask over an f32 `[rows, cols]` buffer.
+    fn triu_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+        _k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "triu_f32" })
+    }
+
+    /// Lower-triangular mask over an f32 `[rows, cols]` buffer.
+    fn tril_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+        _k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "tril_f32" })
+    }
+
+    /// Upper-triangular mask over an f64 `[rows, cols]` buffer.
+    fn triu_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+        _k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "triu_f64" })
+    }
+
+    /// Lower-triangular mask over an f64 `[rows, cols]` buffer.
+    fn tril_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+        _k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "tril_f64" })
+    }
+
     // -- Orthogonal-polynomial special functions (#1545 / #1533) -------------
     //
     // Each evaluates the n-th degree basis polynomial pointwise on a CUDA

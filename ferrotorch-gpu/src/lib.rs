@@ -149,7 +149,7 @@
 //! |---|---|---|
 //! | REQ-1 (lint baseline) | SHIPPED | `#![warn(clippy::all, clippy::pedantic)] + #![deny(rust_2018_idioms, missing_docs)]` at top of `lib.rs` with per-item `#![allow(..)]` justifications; consumer: every `ferrotorch-gpu/src/*.rs` module compiles under this baseline |
 //! | REQ-2 (feature-flag matrix) | SHIPPED | cfg-gated `pub mod` declarations + matching cfg-gated `pub use` re-exports in `lib.rs`; consumer `ferrotorch-distributions/src/fallback.rs` invokes `ferrotorch_gpu::init_cuda_backend()` under host-only configurations |
-//! | REQ-3 (flat module taxonomy) | SHIPPED | 31 `pub mod X` lines in `lib.rs`, one-file-per-module; consumer `tooling/translate-routes.toml` enumerates one route per `ferrotorch-gpu/src/*.rs` matching the declarations |
+//! | REQ-3 (flat module taxonomy) | SHIPPED | 32 `pub mod X` lines in `lib.rs`, one-file-per-module; consumer `tooling/translate-routes.toml` enumerates one route per `ferrotorch-gpu/src/*.rs` matching the declarations |
 //! | REQ-4 (ergonomic re-exports) | SHIPPED | `pub use device::GpuDevice / error::{GpuError, GpuResult} / buffer::CudaBuffer / graph::{...} / memory_guard::{...}` etc. in `lib.rs`; consumer `ferrotorch-diffusion/src/gpu/clip.rs` imports `ferrotorch_gpu::{CudaBuffer, GpuDevice, GpuError, gpu_bmm_f32, gpu_layernorm, gpu_matmul_f32, gpu_softmax}` directly off the crate root |
 //! | REQ-5 (cuSPARSE symbol-resolution probe) | SHIPPED | `mod cusparse_smoke in lib.rs` binds `cudarc::cusparse::sys::cusparseHandle_t = std::ptr::null_mut()`; consumer `ferrotorch-gpu/src/sparse.rs` (the real cuSPARSE SpMM caller) requires the symbol to resolve at compile time |
 
@@ -199,6 +199,8 @@ pub mod special;
 pub mod stream;
 pub mod tensor_bridge;
 pub mod transfer;
+#[cfg(feature = "cuda")]
+pub mod triangular;
 #[cfg(feature = "cuda")]
 pub mod upsample;
 

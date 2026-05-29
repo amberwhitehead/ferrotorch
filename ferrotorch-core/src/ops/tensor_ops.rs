@@ -9,8 +9,8 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `triu` at `ops/tensor_ops.rs:28`; consumer: re-export `ferrotorch_core::triu` at `lib.rs:177` |
-//! | REQ-2 | SHIPPED | `tril` at `ops/tensor_ops.rs:62`; consumer: re-export at `lib.rs:177` |
+//! | REQ-1 | SHIPPED | `triu` in `ops/tensor_ops.rs` (CPU + GPU f32/f64 `is_cuda()` branch); GPU kernel `gpu_triu_f32`/`gpu_triu_f64` in `ferrotorch-gpu/src/triangular.rs`; consumer: re-export `ferrotorch_core::triu` in `lib.rs`; GPU consumer: `CudaBackendImpl::triu_f32`/`triu_f64` in `ferrotorch-gpu/src/backend_impl.rs` (crosslink #1545 / sub #1535) |
+//! | REQ-2 | SHIPPED | `tril` in `ops/tensor_ops.rs` (CPU + GPU f32/f64 `is_cuda()` branch); GPU kernel `gpu_tril_f32`/`gpu_tril_f64` in `ferrotorch-gpu/src/triangular.rs`; consumer: re-export in `lib.rs`; GPU consumer: `CudaBackendImpl::tril_f32`/`tril_f64` in `ferrotorch-gpu/src/backend_impl.rs` |
 //! | REQ-3 | SHIPPED | `diag` at `ops/tensor_ops.rs:98`; consumer: re-export at `lib.rs:177` |
 //! | REQ-4 | SHIPPED | `diagflat` at `ops/tensor_ops.rs:155`; consumer: re-export at `lib.rs:177` |
 //! | REQ-5 | SHIPPED | `roll` at `ops/tensor_ops.rs:181`; consumer: re-export at `lib.rs:177`; `RollBackward` autograd |
@@ -31,6 +31,11 @@ fn is_f32<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<f32>()
 }
 
+#[inline]
+fn is_f64<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<f64>()
+}
+
 /// Upper triangular part of a 2-D tensor.
 ///
 /// Elements below the `diagonal`-th diagonal are set to zero.
@@ -49,19 +54,40 @@ pub fn triu<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
             message: format!("triu: expected 2-D tensor, got shape {:?}", input.shape()),
         });
     }
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "triu" });
-    }
-
     // Autograd path: delegate to the differentiable wrapper, which computes
     // the forward inside `no_grad` (preventing re-entry here) and attaches
-    // `TriangularBackward`.
+    // `TriangularBackward`. The `no_grad` re-entry lands in the GPU/CPU
+    // forward branches below with grad disabled, so a CUDA input still runs
+    // the resident kernel for the forward value.
     if is_grad_enabled() && input.requires_grad() {
         return crate::grad_fns::linalg::triu_differentiable(input, diagonal);
     }
 
     let rows = input.shape()[0];
     let cols = input.shape()[1];
+
+    // GPU fast path: f32/f64 resident kernel (crosslink #1545 / sub #1535).
+    // One thread per element; predicate `col - row >= diagonal` mirrors
+    // `aten/src/ATen/native/cuda/TriangularOps.cu:100`. Result stays
+    // GPU-resident — NO host round-trip. Other GPU dtypes keep the
+    // `NotImplementedOnCuda` contract used by the rest of `tensor_ops`.
+    if input.is_cuda() {
+        if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            let handle = if is_f32::<T>() {
+                Some(backend.triu_f32(input.gpu_handle()?, rows, cols, diagonal)?)
+            } else if is_f64::<T>() {
+                Some(backend.triu_f64(input.gpu_handle()?, rows, cols, diagonal)?)
+            } else {
+                None
+            };
+            if let Some(handle) = handle {
+                let storage = TensorStorage::gpu(handle);
+                return Tensor::from_storage(storage, vec![rows, cols], false);
+            }
+        }
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "triu" });
+    }
+
     let data = input.data()?;
     let zero = <T as num_traits::Zero>::zero();
 
@@ -96,19 +122,38 @@ pub fn tril<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
             message: format!("tril: expected 2-D tensor, got shape {:?}", input.shape()),
         });
     }
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "tril" });
-    }
-
     // Autograd path: delegate to the differentiable wrapper, which computes
     // the forward inside `no_grad` (preventing re-entry here) and attaches
-    // `TriangularBackward`.
+    // `TriangularBackward`. The `no_grad` re-entry lands in the GPU/CPU
+    // forward branches below with grad disabled.
     if is_grad_enabled() && input.requires_grad() {
         return crate::grad_fns::linalg::tril_differentiable(input, diagonal);
     }
 
     let rows = input.shape()[0];
     let cols = input.shape()[1];
+
+    // GPU fast path: f32/f64 resident kernel (crosslink #1545 / sub #1535).
+    // Predicate `col - row <= diagonal` mirrors
+    // `aten/src/ATen/native/cuda/TriangularOps.cu:100`. Result stays
+    // GPU-resident — NO host round-trip.
+    if input.is_cuda() {
+        if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            let handle = if is_f32::<T>() {
+                Some(backend.tril_f32(input.gpu_handle()?, rows, cols, diagonal)?)
+            } else if is_f64::<T>() {
+                Some(backend.tril_f64(input.gpu_handle()?, rows, cols, diagonal)?)
+            } else {
+                None
+            };
+            if let Some(handle) = handle {
+                let storage = TensorStorage::gpu(handle);
+                return Tensor::from_storage(storage, vec![rows, cols], false);
+            }
+        }
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "tril" });
+    }
+
     let data = input.data()?;
     let zero = <T as num_traits::Zero>::zero();
 

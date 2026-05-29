@@ -18,19 +18,24 @@ manipulation primitives: `triu` / `tril` (triangular masks),
 `diag` / `diagflat` (diagonal extraction and construction), `roll`
 (circular shift), and `cdist` (pairwise distance matrix). Each
 mirrors the same-named `torch.*` function. `roll` has a GPU f32 fast
-path (cumulative-scan-style dispatch). `triu`/`tril`/`diag`/`diagflat`/
-`cdist` are CPU-only — CUDA inputs error with
-`NotImplementedOnCuda` (GPU lowerings tracked under #1545).
+path (cumulative-scan-style dispatch). `triu`/`tril` have GPU f32+f64
+fast paths (resident triangular-mask kernels in
+`ferrotorch-gpu/src/triangular.rs`, crosslink #1545 / sub #1535).
+`diag`/`diagflat`/`cdist` remain CPU-only — CUDA inputs error with
+`NotImplementedOnCuda` (those GPU lowerings still tracked under #1545).
 
 ## Requirements
 
 - REQ-1: `triu(input, diagonal)` — 2-D upper-triangular mask. Elements
   below the `diagonal`-th diagonal are zeroed. `diagonal=0` is the
   main diagonal; positive shifts above, negative below. Mirrors
-  `torch.triu`.
+  `torch.triu`. Has a GPU f32+f64 resident fast path via
+  `backend.triu_f32`/`triu_f64` (crosslink #1545 / sub #1535); other
+  GPU dtypes error with `NotImplementedOnCuda`.
 - REQ-2: `tril(input, diagonal)` — 2-D lower-triangular mask.
   Elements above the `diagonal`-th diagonal are zeroed. Mirrors
-  `torch.tril`.
+  `torch.tril`. Has a GPU f32+f64 resident fast path via
+  `backend.tril_f32`/`tril_f64` (crosslink #1545 / sub #1535).
 - REQ-3: `diag(input, diagonal)` — extract the `diagonal`-th diagonal
   of a 2-D input (returns 1-D), OR build a 2-D diagonal matrix from
   a 1-D input (returns 2-D). Mirrors `torch.diag`.
@@ -65,8 +70,12 @@ path (cumulative-scan-style dispatch). `triu`/`tril`/`diag`/`diagflat`/
   to `(1,1)` returns `[sqrt(2), 1, 1]`.
 - [x] AC-8: `roll` autograd — gradient flows back through
   `RollBackward` (the test in `grad_fns/shape.rs:1545+` pins this).
-- [ ] AC-9: GPU paths for `triu`/`tril`/`diag`/`diagflat`/`cdist` —
-  NOT-STARTED, blocked on #1545.
+- [x] AC-9a: GPU paths for `triu`/`tril` (f32+f64) — SHIPPED (crosslink
+  #1545 / sub #1535). LIVE GPU-vs-CPU value parity verified by
+  `ferrotorch-gpu/tests/test_gpu_triangular.rs` (asserts `is_cuda()` on
+  the result AND byte-identical to the CPU `triu`/`tril` reference).
+- [ ] AC-9b: GPU paths for `diag`/`diagflat`/`cdist` — NOT-STARTED, the
+  remaining #1545 follow-up for this file.
 
 ## Architecture
 
@@ -143,8 +152,8 @@ grad_fns::shape::tests::roll_*` covers the autograd path.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `triu` at `ops/tensor_ops.rs:28`; non-test consumer: re-exported as `ferrotorch_core::triu` at `lib.rs:177` (boundary public API per goal.md S5) |
-| REQ-2 | SHIPPED | impl: `tril` at `ops/tensor_ops.rs:62`; non-test consumer: re-exported as `ferrotorch_core::tril` at `lib.rs:177` |
+| REQ-1 | SHIPPED | impl: `triu` in `ops/tensor_ops.rs` (CPU + the `input.is_cuda()` GPU f32/f64 branch calling `backend.triu_f32`/`triu_f64`); GPU kernel `gpu_triu_f32`/`gpu_triu_f64` in `ferrotorch-gpu/src/triangular.rs`; non-test consumer: re-exported as `ferrotorch_core::triu` in `lib.rs` (boundary public API per goal.md S5); GPU consumer: the `is_cuda()` branch of `triu` in `ops/tensor_ops.rs` dispatches `CudaBackendImpl::triu_f32`/`triu_f64` in `ferrotorch-gpu/src/backend_impl.rs` |
+| REQ-2 | SHIPPED | impl: `tril` in `ops/tensor_ops.rs` (CPU + the `input.is_cuda()` GPU f32/f64 branch calling `backend.tril_f32`/`tril_f64`); GPU kernel `gpu_tril_f32`/`gpu_tril_f64` in `ferrotorch-gpu/src/triangular.rs`; non-test consumer: re-exported as `ferrotorch_core::tril` in `lib.rs`; GPU consumer: the `is_cuda()` branch of `tril` in `ops/tensor_ops.rs` dispatches `CudaBackendImpl::tril_f32`/`tril_f64` in `ferrotorch-gpu/src/backend_impl.rs` |
 | REQ-3 | SHIPPED | impl: `diag` at `ops/tensor_ops.rs:98`; non-test consumer: re-exported as `ferrotorch_core::diag` at `lib.rs:177` |
 | REQ-4 | SHIPPED | impl: `diagflat` at `ops/tensor_ops.rs:155`; non-test consumer: re-exported as `ferrotorch_core::diagflat` at `lib.rs:177` |
 | REQ-5 | SHIPPED | impl: `roll` at `ops/tensor_ops.rs:181`; non-test consumer: re-exported as `ferrotorch_core::roll` at `lib.rs:177`. The autograd-attached `RollBackward` is the consumer of REQ-7's shared inner kernel |

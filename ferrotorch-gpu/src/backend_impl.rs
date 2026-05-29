@@ -3925,6 +3925,72 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
+    // -- Triangular masks: triu / tril (#1545 / sub #1535) -------------------
+    //
+    // Gated `#[cfg(feature = "cuda")]` (the `triangular` module is cuda-only,
+    // mirroring `reduce_arg`); when the feature is off, the `GpuBackend`
+    // trait default `NotImplementedOnCuda` is used instead.
+
+    #[cfg(feature = "cuda")]
+    fn triu_f32(
+        &self,
+        a: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+        k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::triangular::gpu_triu_f32(a_buf, rows, cols, k, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn tril_f32(
+        &self,
+        a: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+        k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::triangular::gpu_tril_f32(a_buf, rows, cols, k, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn triu_f64(
+        &self,
+        a: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+        k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::triangular::gpu_triu_f64(a_buf, rows, cols, k, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn tril_f64(
+        &self,
+        a: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+        k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::triangular::gpu_tril_f64(a_buf, rows, cols, k, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
     // -- Orthogonal-polynomial special functions (#1545 / #1533) -------------
 
     fn chebyshev_poly_f32(

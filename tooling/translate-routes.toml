@@ -2419,6 +2419,17 @@ parity_ops = []
 
 
 [[route]]
+crate_pattern = "ferrotorch-gpu/src/triangular.rs"
+upstream = [
+  "/home/doll/pytorch/aten/src/ATen/native/cuda/TriangularOps.cu",
+  "/home/doll/pytorch/aten/src/ATen/native/TriangularOps.cpp",
+  "/home/doll/pytorch/aten/src/ATen/native/cuda/",
+]
+design = ".design/ferrotorch-gpu/triangular.md"
+parity_ops = []
+
+
+[[route]]
 crate_pattern = "ferrotorch-gpu/src/special.rs"
 upstream = [
   "/home/doll/pytorch/aten/src/ATen/native/Math.h",
