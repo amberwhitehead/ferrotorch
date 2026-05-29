@@ -48,6 +48,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- Divergence: ferrotorch-gpu gelu_backward_tanh c3 constant 0x3E096B8C=0.134199 should be 3*0.044715=0.134145 (kernels.rs:2162 f32, :2259 f64) — wrong GPU tanh-GELU gradient vs torch (rel 2e-4) (#1674)
+- Divergence: ferrotorch_gpu::kernels::gpu_gelu_backward_tanh JIT-fails (CUDA_ERROR_INVALID_PTX) — non-ASCII chars in GELU_BACKWARD_TANH_PTX (kernels.rs:2116) (#1673)
+- GPU full-reduction (sum_all/mean/min/max/prod) ~110x slower than axis-reduction — pass-2 combines block-partials via host readback+sync instead of on-device (#1672)
+- GPU add/sub ~270x slower than mul/div (1812us vs 6.7us) — additive vec4 fast-path recompiles/falls back per call (#1671)
+- Re-run full benchmark suite vs PyTorch/NumPy after 0.6.0 GPU work; refresh RESULTS.md (#1670)
 - Divergence: #1668 single-span anchor validator — resolver soundness hole (bare-basename cross-crate false-accept) + bare-lowercase coverage gap (~2/3 of anchors unvalidated) (#1669)
 - Cite-drift walker: validate single-span S3 symbol anchors (`<sym> in <file>.rs`) resolve at HEAD (#1668)
 - ferrotorch open-blocker closeout sweep — drive 220 open blockers to zero via builder/critic loop (#1542)
