@@ -255,6 +255,11 @@ fn reaudit_normal_domain_f64_1e12_cpu_gpu_torch() {
 // =====================================================================
 
 #[test]
+#[allow(
+    clippy::excessive_precision,
+    reason = "oracle-derived f32 expected values copied verbatim from live torch 2.11 — \
+              full precision is intentional (rounded to f32 at compile time)"
+)]
 fn reaudit_normal_domain_f32_cpu_gpu_torch() {
     if !ensure_cuda() {
         return;
