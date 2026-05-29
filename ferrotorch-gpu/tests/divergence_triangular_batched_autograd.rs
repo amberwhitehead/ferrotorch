@@ -41,7 +41,6 @@ fn arange_grad_f64(shape: Vec<usize>) -> Tensor<f64> {
 /// Upstream `x.grad` (LIVE torch) is the per-matrix triu mask of ones.
 /// Tracking: #1646
 #[test]
-#[ignore = "divergence: triu batched N-D backward returns grad shape [rows0,cols1] not input shape; tracking #1646"]
 fn divergence_triu_batched_3d_backward_shape_and_values() {
     let x = arange_grad_f64(vec![2, 3, 5]);
     let y = triu(&x, 0).expect("triu forward");
@@ -69,7 +68,6 @@ fn divergence_triu_batched_3d_backward_shape_and_values() {
 /// Divergence: `tril` backward on a batched `[2,3,5]` input.
 /// Tracking: #1646
 #[test]
-#[ignore = "divergence: tril batched N-D backward returns grad shape [rows0,cols1] not input shape; tracking #1646"]
 fn divergence_tril_batched_3d_backward_shape_and_values() {
     let x = arange_grad_f64(vec![2, 3, 5]);
     let y = tril(&x, 0).expect("tril forward");

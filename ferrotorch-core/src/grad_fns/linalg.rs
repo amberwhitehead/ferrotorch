@@ -5332,11 +5332,13 @@ pub fn diag_differentiable<T: Float>(a: &Tensor<T>, diagonal: i64) -> Ferrotorch
 ///
 /// VJP (`tools/autograd/derivatives.yaml:1805,1809`:
 /// `tril -> grad.tril_symint(diagonal)`, `triu -> grad.triu_symint(diagonal)`):
-/// the same triangular mask applied to the upstream gradient.
+/// the same triangular mask applied to the upstream gradient. The mask runs over
+/// the LAST TWO dims and is batched over all leading dims, so the gradient keeps
+/// the full input shape (matching the now-batched forward + torch).
 #[derive(Debug)]
 pub struct TriangularBackward<T: Float> {
-    rows: usize,
-    cols: usize,
+    /// Full input shape (N-D, last two dims are the matrix axes).
+    in_shape: Vec<usize>,
     diagonal: i64,
     /// `true` for `tril` (keep `c <= r + diag`), `false` for `triu`
     /// (keep `c >= r + diag`).
@@ -5347,21 +5349,33 @@ pub struct TriangularBackward<T: Float> {
 impl<T: Float> GradFn<T> for TriangularBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let g = grad_output.data()?;
+        let ndim = self.in_shape.len();
+        // Matrix axes are the last two dims; everything before is batch. For a
+        // 2-D input this collapses to a single matrix (batch == 1), reproducing
+        // the prior 2-D behaviour bit-for-bit.
+        let rows = self.in_shape[ndim - 2];
+        let cols = self.in_shape[ndim - 1];
+        let mat = rows * cols;
+        let batch: usize = self.in_shape[..ndim - 2].iter().product();
         let zero = <T as num_traits::Zero>::zero();
-        let mut out = vec![zero; self.rows * self.cols];
-        for r in 0..self.rows {
-            for c in 0..self.cols {
-                let keep = if self.lower {
-                    (c as i64) <= (r as i64) + self.diagonal
-                } else {
-                    (c as i64) >= (r as i64) + self.diagonal
-                };
-                if keep {
-                    out[r * self.cols + c] = g[r * self.cols + c];
+        let mut out = vec![zero; batch * mat];
+        for b in 0..batch {
+            let base = b * mat;
+            for r in 0..rows {
+                for c in 0..cols {
+                    let keep = if self.lower {
+                        (c as i64) <= (r as i64) + self.diagonal
+                    } else {
+                        (c as i64) >= (r as i64) + self.diagonal
+                    };
+                    if keep {
+                        let idx = base + r * cols + c;
+                        out[idx] = g[idx];
+                    }
                 }
             }
         }
-        Ok(vec![Some(from_cpu(out, vec![self.rows, self.cols])?)])
+        Ok(vec![Some(from_cpu(out, self.in_shape.clone())?)])
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -5403,12 +5417,10 @@ pub fn tril_differentiable<T: Float>(a: &Tensor<T>, diagonal: i64) -> Ferrotorch
     // here when grad is enabled, so the bare `no_grad` call prevents re-entry.
     let result = crate::autograd::no_grad::no_grad(|| crate::ops::tensor_ops::tril(a, diagonal))?;
     if is_grad_enabled() && a.requires_grad() {
-        let shape = a.shape();
         let grad_fn = Arc::new(TriangularForward {
             input: a.clone(),
             inner: TriangularBackward {
-                rows: shape[0],
-                cols: shape[1],
+                in_shape: a.shape().to_vec(),
                 diagonal,
                 lower: true,
                 _marker: std::marker::PhantomData,
@@ -5428,12 +5440,10 @@ pub fn triu_differentiable<T: Float>(a: &Tensor<T>, diagonal: i64) -> Ferrotorch
     // here when grad is enabled, so the bare `no_grad` call prevents re-entry.
     let result = crate::autograd::no_grad::no_grad(|| crate::ops::tensor_ops::triu(a, diagonal))?;
     if is_grad_enabled() && a.requires_grad() {
-        let shape = a.shape();
         let grad_fn = Arc::new(TriangularForward {
             input: a.clone(),
             inner: TriangularBackward {
-                rows: shape[0],
-                cols: shape[1],
+                in_shape: a.shape().to_vec(),
                 diagonal,
                 lower: false,
                 _marker: std::marker::PhantomData,
