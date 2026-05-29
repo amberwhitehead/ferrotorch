@@ -1282,18 +1282,21 @@ pub fn linear_fused<T: Float>(
         // just as the backward already does. Calling `*_f32` kernels on f64
         // handles surfaces "GPU handle does not contain a CudaBuffer<f32>".
         let mut result_handle = if is_f32::<T>() {
-            // C = input @ weight^T
-            let wt_handle = backend.transpose_2d_f32(weight.gpu_handle()?, n, k)?;
-            // When autocast says ReducedPrecision and inputs are f32 on GPU,
-            // use the f16-accumulate path (falls back to f32 if no kernel).
+            // C = input @ weight^T. weight is row-major [n=out, k=in], input is
+            // [m, k]. The fused-transpose matmul folds weight's transpose into
+            // the cuBLAS `transb` flag, so we drop the per-forward
+            // `transpose_2d_f32(weight)` kernel launch + buffer alloc (#1679).
             if autocast_guard("linear") == Some(AutocastCategory::ReducedPrecision) {
+                // ReducedPrecision keeps the explicit-transpose + f16-accumulate
+                // path: there is no f16 fused-transpose kernel, and the f16
+                // matmul takes a [k, n] right operand (the transposed weight).
+                let wt_handle = backend.transpose_2d_f32(weight.gpu_handle()?, n, k)?;
                 backend.matmul_f16_f32(input.gpu_handle()?, &wt_handle, m, k, n)?
             } else {
-                backend.matmul_f32(input.gpu_handle()?, &wt_handle, m, k, n)?
+                backend.matmul_f32_nt(input.gpu_handle()?, weight.gpu_handle()?, m, k, n)?
             }
         } else if is_f64::<T>() {
-            let wt_handle = backend.transpose_2d_f64(weight.gpu_handle()?, n, k)?;
-            backend.matmul_f64(input.gpu_handle()?, &wt_handle, m, k, n)?
+            backend.matmul_f64_nt(input.gpu_handle()?, weight.gpu_handle()?, m, k, n)?
         } else {
             return Err(FerrotorchError::NotImplementedOnCuda { op: "linear_fused" });
         };

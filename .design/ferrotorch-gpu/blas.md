@@ -33,7 +33,12 @@ device-return variants). The module honours rust-gpu-discipline §3:
   compute `C = A @ B` for row-major matrices stored in `CudaBuffer`s via
   cuBLAS SGEMM / DGEMM. Implementation uses the row-major trick (swap A
   and B in the column-major call) to avoid host-side transposes. Returns
-  `Vec<T>` for the legacy host-pull contract.
+  `Vec<T>` for the legacy host-pull contract. The fused-transpose variants
+  `pub fn gpu_matmul_f32_nt` / `gpu_matmul_f64_nt` compute `C = A @ B^T`
+  (A `[m,k]`, B `[n,k]`) by setting `transb = CUBLAS_OP_T` — the `nn.Linear`
+  forward `input @ weight^T` shape — so the weight transpose is folded into
+  the GEMM flag rather than a separate `transpose_2d` kernel launch + alloc
+  per forward (#1679).
 - REQ-2: f32 / f64 batched matmul — `pub fn gpu_bmm_f32` / `gpu_bmm_f64`
   dispatch `cublasSgemmStridedBatched` / `cublasDgemmStridedBatched` for
   `[B,m,k]@[B,k,n]` inputs.
@@ -248,7 +253,7 @@ path that user-facing `Tensor::matmul` / `Tensor::bmm` resolve to.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub fn gpu_matmul_f32 in blas.rs` and `pub fn gpu_matmul_f64 in blas.rs` mirror cuBLAS SGEMM / DGEMM per upstream `aten/src/ATen/cuda/CUDABlas.cpp:798,780`. Non-test consumer: `ferrotorch-gpu/src/backend_impl.rs:2590` (f32) and `:2679` (f64) — the cuda backend's matmul dispatch arm, reached from `ferrotorch-core/src/gpu_dispatch.rs` when `Tensor::matmul` routes to GPU. |
+| REQ-1 | SHIPPED | impl: `pub fn gpu_matmul_f32 in blas.rs` and `pub fn gpu_matmul_f64 in blas.rs` mirror cuBLAS SGEMM / DGEMM per upstream `aten/src/ATen/cuda/CUDABlas.cpp:798,780`. Non-test consumer: `ferrotorch-gpu/src/backend_impl.rs:2590` (f32) and `:2679` (f64) — the cuda backend's matmul dispatch arm, reached from `ferrotorch-core/src/gpu_dispatch.rs` when `Tensor::matmul` routes to GPU. Fused-transpose variants `pub fn gpu_matmul_f32_nt in blas.rs` / `gpu_matmul_f64_nt in blas.rs` compute `C = A @ B^T` via cuBLAS S/DGEMM with `transb = CUBLAS_OP_T` (same `at::linear = addmm(bias, input, weight.t())` shape, upstream `aten/src/ATen/native/Linear.cpp`), folding the transpose into the GEMM flag so `nn.Linear` forward drops its per-forward `transpose_2d` kernel launch + buffer alloc (#1679). Non-test consumer: `CudaBackendImpl::matmul_f32_nt / matmul_f64_nt in backend_impl.rs`, reached from `ferrotorch-core/src/grad_fns/linalg.rs` `linear_fused` GPU path (`backend.matmul_f32_nt(input, weight, m, k, n)` / `matmul_f64_nt`). |
 | REQ-2 | SHIPPED | impl: `pub fn gpu_bmm_f32 in blas.rs` and `pub fn gpu_bmm_f64 in blas.rs` per upstream `aten/src/ATen/cuda/CUDABlas.cpp:975,964` (cublasSgemmStridedBatched / cublasDgemmStridedBatched). Non-test consumer: `backend_impl.rs` (f32) and `backend_impl.rs` (f64). |
 | REQ-3 | SHIPPED | impl: `pub fn gpu_broadcast_bmm_f32 in blas.rs` and `pub fn gpu_broadcast_bmm_f64 in blas.rs`. Non-test consumer: `gpu_broadcast_bmm_f64 in backend_impl.rs` (f32) and `backend_impl.rs` (f64). |
 | REQ-4 | SHIPPED | impl: `pub fn gpu_dot_f32 in blas.rs` and `pub fn gpu_dot_f64 in blas.rs` wrap `cublasSdot` / `cublasDdot`. Non-test consumer: `backend_impl.rs` (f32). |

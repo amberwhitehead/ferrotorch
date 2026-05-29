@@ -228,7 +228,7 @@ pub use blas::{
     gpu_matmul_bf16_bf16, gpu_matmul_bf16_bf16_nt, gpu_matmul_bf16_bf16_strided_batched,
     gpu_matmul_bf16_bf16_strided_batched_nt,
 };
-pub use blas::{gpu_matmul_f32, gpu_matmul_f64};
+pub use blas::{gpu_matmul_f32, gpu_matmul_f32_nt, gpu_matmul_f64, gpu_matmul_f64_nt};
 pub use bool_kernels::gpu_broadcast_bool;
 pub use buffer::CudaBuffer;
 pub use conv::gpu_conv2d_f32;

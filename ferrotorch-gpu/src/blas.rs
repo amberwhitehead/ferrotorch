@@ -44,7 +44,7 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (`gpu_matmul_f32/f64`) | SHIPPED | `pub fn gpu_matmul_f32 / gpu_matmul_f64 in blas.rs` mirror cuBLAS SGEMM/DGEMM per upstream `aten/src/ATen/cuda/CUDABlas.cpp:798,780`; consumer `CudaBackendImpl::matmul_f32 / matmul_f64 in backend_impl.rs` (matmul dispatch arm reached from `ferrotorch-core::gpu_dispatch` for `Tensor::matmul`) |
+//! | REQ-1 (`gpu_matmul_f32/f64` + `_nt`) | SHIPPED | `pub fn gpu_matmul_f32 / gpu_matmul_f64 in blas.rs` mirror cuBLAS SGEMM/DGEMM per upstream `aten/src/ATen/cuda/CUDABlas.cpp:798,780`; consumer `CudaBackendImpl::matmul_f32 / matmul_f64 in backend_impl.rs` (matmul dispatch arm reached from `ferrotorch-core::gpu_dispatch` for `Tensor::matmul`). Fused-transpose `pub fn gpu_matmul_f32_nt / gpu_matmul_f64_nt in blas.rs` compute `C = A @ B^T` via `transb = CUBLAS_OP_T` (#1679); consumer `CudaBackendImpl::matmul_f32_nt / matmul_f64_nt in backend_impl.rs` reached from `grad_fns::linalg::linear_fused` GPU path |
 //! | REQ-2 (`gpu_bmm_f32/f64`) | SHIPPED | `pub fn gpu_bmm_f32 / gpu_bmm_f64 in blas.rs` per upstream `aten/src/ATen/cuda/CUDABlas.cpp:975,964`; consumer `CudaBackendImpl::bmm_f32 / bmm_f64 in backend_impl.rs` |
 //! | REQ-3 (broadcast bmm) | SHIPPED | `pub fn gpu_broadcast_bmm_f32 / gpu_broadcast_bmm_f64 in blas.rs`; consumer `CudaBackendImpl::broadcast_bmm_f32 / broadcast_bmm_f64 in backend_impl.rs` |
 //! | REQ-4 (`gpu_dot`) | SHIPPED | `pub fn gpu_dot_f32 / gpu_dot_f64 in blas.rs` wrap `cublasSdot / cublasDdot`; consumer `CudaBackendImpl::dot_f32 in backend_impl.rs` |
@@ -310,6 +310,248 @@ pub fn gpu_matmul_f64(
     //   allocated, so no aliasing between inputs and the destination.
     // - Device residency: `a` and `b` device-checked on lines 189-200; `c`
     //   allocated on `device`. All pointers valid on `blas`'s stream.
+    unsafe {
+        blas.gemm(cfg, b.inner(), a.inner(), c.inner_mut())?;
+    }
+
+    Ok(c)
+}
+
+// ---------------------------------------------------------------------------
+// GPU fused-transpose matmul -- f32 / f64 (SGEMM/DGEMM, transb = OP_T)
+// ---------------------------------------------------------------------------
+//
+// `C = A @ B^T` with A row-major `[m, k]` and B row-major `[n, k]` (so `B^T`
+// is `[k, n]`), result `C` row-major `[m, n]`. This is the natural layout for
+// `nn.Linear` forward: weight lives in `[out_features, in_features]` =
+// `[n, k]` and input is `[m, k]`, so `input @ weight^T` is exactly this op
+// with the transpose folded into the cuBLAS `transb` flag — no separate
+// `transpose_2d` kernel launch / buffer alloc per forward.
+//
+// Column-major derivation (mirrors the proven `gpu_matmul_bf16_bf16_nt`):
+// cuBLAS is column-major; our row-major `[m,n]` C is cuBLAS's column-major
+// `[n,m]`. We compute that column-major C as `op(A_cublas) @ op(B_cublas)`
+// where we pass our `B` as cuBLAS's first ("A") operand with `transa=OP_T`
+// (our row-major `B[n,k]` is cuBLAS column-major `[k,n]`; `OP_T` turns it
+// into `[n,k]`), and our `A` as cuBLAS's second ("B") operand with
+// `transb=OP_N` (our row-major `A[m,k]` is cuBLAS column-major `[k,m]`,
+// which is `A^T` in cuBLAS's view, exactly the right-hand factor of the
+// transposed product). Concretely: `m=n_i32, n=m_i32, k=k_i32,
+// lda=k_i32, ldb=k_i32, ldc=n_i32`. The safe `Gemm::gemm` takes the operands
+// in (A, B) order, so we pass `b` then `a` — same swap as `gpu_matmul_f32`.
+
+/// Compute `C = A @ B^T` on the GPU using cuBLAS SGEMM (`transb = OP_T`).
+///
+/// `a` contains `m * k` elements (matrix `[m, k]` row-major).
+/// `b` contains `n * k` elements (matrix `[n, k]` row-major, so `B^T` is
+/// `[k, n]`). Returns `m * n` elements (matrix `[m, n]` row-major).
+///
+/// This folds the transpose of `B` into the cuBLAS `transb` flag, so the
+/// `nn.Linear` forward `input @ weight^T` needs neither a separate
+/// `transpose_2d_f32` kernel launch nor a transposed-weight buffer.
+///
+/// # Errors
+///
+/// - [`GpuError::ShapeMismatch`] if buffer lengths don't match dimensions.
+/// - [`GpuError::DeviceMismatch`] if buffers are on different devices.
+/// - [`GpuError::Blas`] on cuBLAS runtime errors.
+#[cfg(feature = "cuda")]
+pub fn gpu_matmul_f32_nt(
+    a: &CudaBuffer<f32>,
+    b: &CudaBuffer<f32>,
+    m: usize,
+    k: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    if a.len() != m * k {
+        return Err(GpuError::ShapeMismatch {
+            op: "matmul_f32_nt",
+            expected: vec![m, k],
+            got: vec![a.len()],
+        });
+    }
+    if b.len() != n * k {
+        return Err(GpuError::ShapeMismatch {
+            op: "matmul_f32_nt",
+            expected: vec![n, k],
+            got: vec![b.len()],
+        });
+    }
+    if a.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: a.device_ordinal(),
+        });
+    }
+    if b.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: b.device_ordinal(),
+        });
+    }
+
+    if m == 0 || k == 0 || n == 0 {
+        return alloc_zeros_f32(m * n, device);
+    }
+
+    let m_i32 = i32::try_from(m).map_err(|_| GpuError::ShapeMismatch {
+        op: "matmul_f32_nt",
+        expected: vec![i32::MAX as usize],
+        got: vec![m],
+    })?;
+    let k_i32 = i32::try_from(k).map_err(|_| GpuError::ShapeMismatch {
+        op: "matmul_f32_nt",
+        expected: vec![i32::MAX as usize],
+        got: vec![k],
+    })?;
+    let n_i32 = i32::try_from(n).map_err(|_| GpuError::ShapeMismatch {
+        op: "matmul_f32_nt",
+        expected: vec![i32::MAX as usize],
+        got: vec![n],
+    })?;
+
+    let blas = device.blas();
+    let mut c = alloc_zeros_f32(m * n, device)?;
+
+    let cfg = GemmConfig {
+        transa: sys::cublasOperation_t::CUBLAS_OP_T,
+        transb: sys::cublasOperation_t::CUBLAS_OP_N,
+        m: n_i32,
+        n: m_i32,
+        k: k_i32,
+        alpha: 1.0f32,
+        lda: k_i32,
+        ldb: k_i32,
+        beta: 0.0f32,
+        ldc: n_i32,
+    };
+
+    // SAFETY:
+    // - `Gemm::gemm` (cudarc 0.19.4 src/cublas/safe/gemm.rs:36-39) is unsafe
+    //   because "improper arguments may lead to invalid memory accesses".
+    //   Each obligation is discharged below.
+    // - `blas` is a valid `Arc<CudaBlas>` from `device.blas()` above, bound
+    //   to this device's stream by `GpuDevice::new`; its lifetime exceeds
+    //   this call.
+    // - Buffer lengths: `a.len() == m*k` and `b.len() == n*k` (guards above);
+    //   `c` was just allocated as `m*n` zeros. cuBLAS reads `a`/`b` and
+    //   writes `c` within those bounds given the dims below.
+    // - Transpose-fold derivation (documented in the section comment above):
+    //   we pass `b` as cuBLAS's column-major "A" with `transa=OP_T` and `a`
+    //   as cuBLAS's column-major "B" with `transb=OP_N`; with `m=n_i32,
+    //   n=m_i32, k=k_i32, lda=k, ldb=k, ldc=n`, the column-major GEMM
+    //   produces row-major `C = A @ B^T`. This is the exact f32 analog of
+    //   the proven `gpu_matmul_bf16_bf16_nt` flag/dim layout.
+    // - Dimension typing: `m_i32, k_i32, n_i32` come from `i32::try_from`
+    //   guards above; no sign/overflow misuse.
+    // - Aliasing: `a`, `b` are shared `&CudaBuffer<f32>`; `c` is freshly
+    //   allocated and aliases neither input.
+    // - Device residency: `a`/`b` device-checked above; `c` allocated on
+    //   `device`. All three pointers valid on the handle's stream.
+    unsafe {
+        blas.gemm(cfg, b.inner(), a.inner(), c.inner_mut())?;
+    }
+
+    Ok(c)
+}
+
+/// Compute `C = A @ B^T` on the GPU using cuBLAS DGEMM (`transb = OP_T`).
+///
+/// f64 counterpart of [`gpu_matmul_f32_nt`]; `a` is `[m, k]`, `b` is `[n, k]`,
+/// result is `[m, n]`, all row-major. See [`gpu_matmul_f32_nt`] for the
+/// column-major transpose-fold derivation.
+///
+/// # Errors
+///
+/// Same as [`gpu_matmul_f32_nt`].
+#[cfg(feature = "cuda")]
+pub fn gpu_matmul_f64_nt(
+    a: &CudaBuffer<f64>,
+    b: &CudaBuffer<f64>,
+    m: usize,
+    k: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    if a.len() != m * k {
+        return Err(GpuError::ShapeMismatch {
+            op: "matmul_f64_nt",
+            expected: vec![m, k],
+            got: vec![a.len()],
+        });
+    }
+    if b.len() != n * k {
+        return Err(GpuError::ShapeMismatch {
+            op: "matmul_f64_nt",
+            expected: vec![n, k],
+            got: vec![b.len()],
+        });
+    }
+    if a.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: a.device_ordinal(),
+        });
+    }
+    if b.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: b.device_ordinal(),
+        });
+    }
+
+    if m == 0 || k == 0 || n == 0 {
+        return alloc_zeros_f64(m * n, device);
+    }
+
+    let m_i32 = i32::try_from(m).map_err(|_| GpuError::ShapeMismatch {
+        op: "matmul_f64_nt",
+        expected: vec![i32::MAX as usize],
+        got: vec![m],
+    })?;
+    let k_i32 = i32::try_from(k).map_err(|_| GpuError::ShapeMismatch {
+        op: "matmul_f64_nt",
+        expected: vec![i32::MAX as usize],
+        got: vec![k],
+    })?;
+    let n_i32 = i32::try_from(n).map_err(|_| GpuError::ShapeMismatch {
+        op: "matmul_f64_nt",
+        expected: vec![i32::MAX as usize],
+        got: vec![n],
+    })?;
+
+    let blas = device.blas();
+    let mut c = alloc_zeros_f64(m * n, device)?;
+
+    let cfg = GemmConfig {
+        transa: sys::cublasOperation_t::CUBLAS_OP_T,
+        transb: sys::cublasOperation_t::CUBLAS_OP_N,
+        m: n_i32,
+        n: m_i32,
+        k: k_i32,
+        alpha: 1.0f64,
+        lda: k_i32,
+        ldb: k_i32,
+        beta: 0.0f64,
+        ldc: n_i32,
+    };
+
+    // SAFETY:
+    // - `Gemm::gemm` for f64 (cudarc 0.19.4 src/cublas/safe/gemm.rs:289) is
+    //   unsafe per the trait contract: "improper arguments may lead to
+    //   invalid memory accesses". Obligations discharged below.
+    // - `blas` is a valid `Arc<CudaBlas>` from `device.blas()` above.
+    // - Buffer lengths: `a.len() == m*k`, `b.len() == n*k` (guards above);
+    //   `c` allocated as `m*n` f64 zeros. The DGEMM read/write footprint
+    //   matches.
+    // - Transpose-fold derivation: identical flag/dim layout to
+    //   `gpu_matmul_f32_nt` above — `b` as cuBLAS "A" with `OP_T`, `a` as
+    //   cuBLAS "B" with `OP_N`, `m=n, n=m, k=k, lda=k, ldb=k, ldc=n`,
+    //   yielding row-major `C = A @ B^T`.
+    // - Dimension typing: `m_i32, k_i32, n_i32` from `i32::try_from` guards.
+    // - Aliasing: `a`, `b` shared inputs; `c` freshly allocated.
+    // - Device residency: `a`/`b` device-checked; `c` allocated on `device`.
     unsafe {
         blas.gemm(cfg, b.inner(), a.inner(), c.inner_mut())?;
     }
@@ -3260,6 +3502,32 @@ pub fn gpu_matmul_f32(
 /// Stub -- always returns [`GpuError::NoCudaFeature`].
 #[cfg(not(feature = "cuda"))]
 pub fn gpu_matmul_f64(
+    _a: &CudaBuffer<f64>,
+    _b: &CudaBuffer<f64>,
+    _m: usize,
+    _k: usize,
+    _n: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+/// Stub -- always returns [`GpuError::NoCudaFeature`].
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_matmul_f32_nt(
+    _a: &CudaBuffer<f32>,
+    _b: &CudaBuffer<f32>,
+    _m: usize,
+    _k: usize,
+    _n: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+/// Stub -- always returns [`GpuError::NoCudaFeature`].
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_matmul_f64_nt(
     _a: &CudaBuffer<f64>,
     _b: &CudaBuffer<f64>,
     _m: usize,

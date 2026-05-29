@@ -17,7 +17,7 @@
 //! | REQ-7 | SHIPPED | impl `scale_*` trait slots; non-test consumer `grad_fns::arithmetic::scale_tensor`. |
 //! | REQ-8 | SHIPPED | impl `strided_copy_*`, `strided_scatter_*` trait slots; non-test consumer `stride_tricks` materialise, `Tensor::to(Cpu)` non-contiguous, `Tensor::materialize_format` GPU fast path. |
 //! | REQ-9 | SHIPPED | impl reduction trait slots; non-test consumer `grad_fns::arithmetic::reduce_grad_to_shape`. |
-//! | REQ-10 | SHIPPED | impl linalg trait slots (matmul, gemm, syevd, getrf, geqrf, potrf, gesdd, inverse); non-test consumer `ops::linalg::matmul`, `linalg::eigh`. |
+//! | REQ-10 | SHIPPED | impl linalg trait slots (matmul, `matmul_f32_nt`/`matmul_f64_nt` fused-transpose `A @ B^T` (#1679), gemm, syevd, getrf, geqrf, potrf, gesdd, inverse); non-test consumer `ops::linalg::matmul`, `linalg::eigh`, `grad_fns::linalg::linear_fused` GPU path (the `_nt` slots). |
 //! | REQ-11 | SHIPPED | impl conv2d/conv3d/pooling trait slots; non-test consumer `ferrotorch-nn::Conv2d`. |
 //! | REQ-12 | SHIPPED | impl recurrent trait slots; non-test consumer `ferrotorch-nn::LSTM`/`GRU`/`RNN`. |
 //! | REQ-13 | SHIPPED | impl FFT trait slots; non-test consumer `ferrotorch-core::fft`. |
@@ -521,6 +521,43 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::InvalidArgument {
             message: "f64 GPU ops not yet implemented".into(),
+        })
+    }
+
+    /// Fused-transpose matmul `C = A @ B^T` (f32).
+    ///
+    /// `a: [m, k]`, `b: [n, k]` (row-major; the transpose of `B` is folded
+    /// into the cuBLAS `transb` flag with no extra kernel launch or buffer
+    /// alloc). Returns a `[m, n]` f32 buffer. This is the `nn.Linear` forward
+    /// shape — weight is `[out, in] = [n, k]`, input is `[m, k]`, so
+    /// `input @ weight^T` lowers directly to this op (#1679). Default returns
+    /// `NotImplementedOnCuda` so non-CUDA backends compile unchanged and the
+    /// caller falls back to the `transpose_2d + matmul` path.
+    fn matmul_f32_nt(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _m: usize,
+        _k: usize,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "matmul_f32_nt",
+        })
+    }
+
+    /// Fused-transpose matmul `C = A @ B^T` (f64). f64 counterpart of
+    /// [`Self::matmul_f32_nt`]. (#1679)
+    fn matmul_f64_nt(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _m: usize,
+        _k: usize,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "matmul_f64_nt",
         })
     }
 
