@@ -2159,7 +2159,7 @@ pub(crate) const GELU_BACKWARD_TANH_PTX: &str = "\
     mov.f32 %sqrt2pi, 0f3F4C422A;
     mov.f32 %c, 0f3D372713;
     // 3 * 0.044715 = 0.134145 = 0x3E096B8C
-    mov.f32 %c3, 0f3E096B8C;
+    mov.f32 %c3, 0f3E095D4F;
 
     // u = sqrt(2/pi) * (x + 0.044715 * x^3)
     mul.f32 %x2, %x, %x;
@@ -2253,10 +2253,10 @@ pub(crate) const GELU_BACKWARD_TANH_F64_PTX: &str = "\
 
     mov.f64 %one, 0d3FF0000000000000;
     mov.f64 %half, 0d3FE0000000000000;
-    mov.f64 %sqrt2pi, 0d3FE9884540000000;
-    mov.f64 %c, 0d3FA6E4E260000000;
+    mov.f64 %sqrt2pi, 0d3FE9884533D43651;
+    mov.f64 %c, 0d3FA6E4E26D4801F7;
     // 3 * 0.044715 = 0.134145
-    mov.f64 %c3, 0d3FC12D7180000000;
+    mov.f64 %c3, 0d3FC12BA9D1F60179;
 
     mul.f64 %x2, %x, %x;
     mul.f64 %x3, %x2, %x;
