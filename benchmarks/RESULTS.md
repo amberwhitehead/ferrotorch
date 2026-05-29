@@ -55,11 +55,11 @@
 | relu / sigmoid / tanh | 7.0 / 7.2 / 7.4 | — | shipped this campaign |
 | exp / log / neg | 7.4 / 7.6 / 7.5 | — | |
 | **Elementwise** | | | |
-| mul / div [1000,1000] | **6.7 / 6.9** | 17.0 add (0.1.0 ref) | fast vec4 path |
-| add / sub [1000,1000] | **1,812 / 1,870** ⚠️ | — | ANOMALY — see findings (#1671) |
+| mul / div [1000,1000] | 7.1 / 7.2 | 17.0 add (0.1.0 ref) | fast vec4 path |
+| add / sub [1000,1000] | **5.8 / 12.8** ✅ | — | was 1,812/1,870 — fixed #1671 (non-ASCII PTX) |
 | **Reductions** | | | |
-| sum dim=0 [1000,1000] | 6.2 | — | on-device, fast |
-| sum_all / mean [1000,1000] | 681.7 / 686.4 ⚠️ | — | full-reduction path slow — see findings |
+| sum dim=0 [1000,1000] | 4.0 | — | on-device, fast |
+| sum_all / mean [1000,1000] | **58.4 / 41.9** ✅ | — | was 681/686 — fixed #1672 (on-device pass-2) |
 | **Normalization** | | | |
 | softmax [64,256] | 5.8 | 8.6 (CPU torch) | faster than torch CPU softmax |
 | **MLP fwd B=32** | 601.7 | 73.4 (0.1.0 ref) | dominated by small-matmul launch overhead |
@@ -73,11 +73,14 @@ At 0.1.0, `matmul [1024,1024]` took **2,106,087 us (2.1 s)** — 736x slower tha
 ### GPU is fast where the kernels are warm
 cuBLAS matmul (10–13 us), the new PTX unary kernels (relu/sigmoid/tanh/exp/log ~7 us), softmax (5.8 us), and on-device `sum dim=0` (6.2 us) are all in the single-digit-microsecond launch-bound regime — the 0.6.0 GPU kernel campaign landed.
 
-### Findings / anomalies surfaced by this run (tracked for follow-up)
-1. **GPU `add`/`sub` ~270x slower than `mul`/`div`** (1,812/1,870 us vs 6.7/6.9 us). All four dispatch identically (`CudaBackendImpl::{add,sub,mul,div}_f32` → `kernels::gpu_{op}`). `gpu_add`/`gpu_mul` both attempt a `vec4` fast path (`try_launch_binary_vec4`); the ~1.8 ms cost matches a **PTX JIT recompile per call** — the additive vec4 kernels (`ADD_VEC4_PTX`/`SUB_PTX`) appear to fail-and-recompile each call and fall back to scalar, while `MUL_VEC4`/`DIV` are module-cached. Filed as a performance blocker for the builder→critic→fixer loop. The result is numerically correct (only slow).
-2. **GPU `sum_all`/`mean` (~681 us) vs `sum dim=0` (6 us).** The full-reduction-to-scalar path is ~100x the on-device axis reduction — likely a per-call device sync / readback. Candidate for the same loop.
-3. **CPU axis reductions `sum dim=0`/`mean dim=1` ~10 ms** (~100x NumPy). The strided axis-reduction CPU loop is unvectorized and cache-unfriendly.
-4. **CPU elementwise / transcendental** (add/mul ~926 us, sin/cos/tanh ~4.9 ms) remain scalar `libm`-per-element — the long-standing SIMD gap (ferray-ufunc integration), not a regression.
+### Findings surfaced by this run — GPU items FIXED + re-benchmarked
+1. **GPU `add`/`sub` were ~270x slower than `mul`/`div`** (1,812/1,870 us). ROOT CAUSE: a non-ASCII `×` (U+00D7) in an `ADD_VEC4_PTX` comment made the vec4 add kernel JIT-fail (`CUDA_ERROR_INVALID_PTX`) on **every** call (the module cache only stores successes), wasting ~1.8 ms before falling back to scalar; `sub` routes through the add path so it was hit too. **Fixed #1671** (ASCII-ify the comment). Re-benchmarked: **add 5.8 us, sub 12.8 us** (matches mul/div). A regression guard now scans all PTX literals for non-ASCII so the class can't recur.
+2. **GPU `sum_all`/`mean` were ~681 us vs `sum dim=0` 6 us.** ROOT CAUSE: the full-reduction pass-2 combined the per-block partials via a **host readback** (`gpu_to_cpu` + CPU sum + re-upload) — a Device→Host sync every call. **Fixed #1672** (pass-2 now recurses on-device for sum/min/max/prod, f32+f64+masked). Re-benchmarked: **sum_all 58 us, mean 42 us**; data stays GPU-resident.
+3. **(Bonus, caught by the #1671 ASCII guard)** `GELU_BACKWARD_TANH_PTX` had the same non-ASCII defect — and with **no scalar fallback**, GPU tanh-GELU backward was fully broken (`CUDA_ERROR_INVALID_PTX`). **Fixed #1673**; exposing it then revealed wrong/truncated `c3` constants (`0.134199` vs `3·0.044715=0.134145`) and f32-precision f64 constants — **fixed #1674**. GPU tanh-GELU backward now matches torch (f32 ~1e-5, f64 ~1e-9).
+
+### Remaining (CPU SIMD/algorithm gaps — known, pre-existing, not regressions)
+4. **CPU axis reductions `sum dim=0`/`mean dim=1` ~10 ms** (~100x NumPy). Strided axis-reduction CPU loop is unvectorized/cache-unfriendly.
+5. **CPU elementwise / transcendental** (add/mul ~1,000 us, sin/cos/tanh ~7 ms) remain scalar `libm`-per-element — the long-standing SIMD gap (ferray-ufunc integration), not a regression.
 
 > Note: `pytorch_validate.py`'s two "FAIL" lines (10-step MLP loss, finite-difference gradient check) are PyTorch's OWN self-baselines under that seed/LR and an over-tight FD epsilon threshold — they are not ferrotorch comparisons. Its softmax/layernorm/conv/dropout correctness baselines all PASS.
 
