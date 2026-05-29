@@ -1208,6 +1208,479 @@ fn validate_struct_anchor(
     None
 }
 
+// ===========================================================================
+// #1668 — SINGLE-SPAN S3 SYMBOL ANCHORS
+//
+// The dominant S3 (goal.md) anchor form is a SINGLE backtick span that
+// contains BOTH the symbol declaration AND the file, joined by the literal
+// word " in ":
+//
+// ```text
+// `pub fn pack_padded_sequence in rnn_utils.rs`
+// `pub struct PagePool in paged_attention.rs`
+// `mod tests in cache.rs`
+// `reduce_all in meta_propagate.rs`            (bare Type::method assoc-fn)
+// `impl Drop for CusparseLtHandle in cusparselt.rs`
+// ```
+//
+// There are ~2900 of these across `.design/`, spanning every crate. Unlike
+// the #1643 CROSS-span `` `Sym` struct in `file.rs` `` form (two separate
+// backtick spans with a literal `` ` struct in ` `` connective between
+// them), here EVERYTHING is inside one backtick span. The line-number cite
+// machinery (`parse_any_named_cite`) never sees these — there is no `:N`
+// suffix — and the #1643 struct-anchor parser explicitly does NOT match the
+// single-span form (its `s3_struct_anchor_parser_is_precise_*` test pins
+// that `` `struct NarrowBackward in methods.rs` `` is skipped). So a
+// renamed/moved/deleted symbol behind one of these single-span anchors rots
+// silently. This parser + resolver + validator close that gap.
+//
+// DISAMBIGUATION RULE (basename collisions): many crates share basenames
+// like `lib.rs`, `mod.rs`, `model.rs`, `config.rs`, `gpu.rs`. The resolver
+// indexes every `*/src/**/*.rs` basename -> ALL full paths once. An anchor's
+// `<path>.rs` may be a bare basename (`rnn_utils.rs`) OR a prefixed suffix
+// (`ops/search.rs`, `ferrotorch-gpu/src/backend_impl.rs`). Resolution:
+//   1. If the written path contains `/`, accept any indexed file whose full
+//      workspace-relative path ENDS WITH the written path (suffix match).
+//   2. Otherwise (bare basename) take every indexed file with that basename.
+// The anchor is VALID iff the symbol is DECLARED in AT LEAST ONE candidate
+// file (the anchor asserts "this symbol lives in a file of this name"). If
+// no candidate declares it, the anchor is STALE. If the basename indexes to
+// ZERO files anywhere, the anchor is UNRESOLVABLE (typo / non-existent file).
+// This "found in ANY candidate" rule (rather than "found in THE one true
+// file") is the honest reading of the corpus: the anchors were authored as
+// "symbol X is in file-named-Y", not "in this exact path", and tightening to
+// a single canonical path would flag thousands of legitimately-ambiguous
+// basenames as drift. The cross-span #1643 test keeps the stricter
+// per-`resolve_cite_path` behavior for the struct family it owns.
+
+/// The declaration KIND of a single-span symbol anchor. Drives the needle
+/// set used to verify the symbol is genuinely declared (not just any
+/// substring) in the resolved file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeclKind {
+    Fn,
+    Struct,
+    Enum,
+    Trait,
+    Mod,
+    Const,
+    Type,
+    /// `impl <id>` or `impl <Trait> for <Type>` — validated against the
+    /// `<Type>` (the impl TARGET), which is what actually has to exist.
+    Impl,
+    /// `<Type>::<method>` associated-fn form (with or without a leading
+    /// `fn`/`pub fn`). Validated as a `fn <method>` declaration.
+    AssocFn,
+}
+
+/// A parsed single-span symbol anchor `` `<decl> in <path>.rs` ``.
+#[derive(Debug, Clone)]
+struct SymbolAnchor {
+    kind: DeclKind,
+    /// The bare identifier to look for (generics stripped). For `AssocFn`
+    /// this is the METHOD name (last `::` segment); for `Impl` it is the
+    /// impl TARGET type (the name after `for`, or after `impl` if no `for`).
+    ident: String,
+    /// The `.rs` path as written (bare basename or prefixed suffix).
+    file_as_written: String,
+}
+
+/// Strip a trailing `<...>` generic suffix and surrounding whitespace,
+/// returning the bare identifier stem. Returns `None` if the result is not a
+/// single identifier-shaped token (ascii alnum + `_`).
+fn ident_stem(s: &str) -> Option<String> {
+    let stem = match s.find('<') {
+        Some(lt) => &s[..lt],
+        None => s,
+    };
+    let stem = stem.trim();
+    if stem.is_empty() {
+        return None;
+    }
+    if !stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(stem.to_string())
+}
+
+/// Parse the DECL portion (everything before the literal " in ") of a
+/// candidate single-span anchor into a `(DeclKind, ident)`. Returns `None`
+/// if `decl` is not a recognizable symbol-declaration form (so arbitrary
+/// prose like "the model" is rejected).
+fn parse_decl(decl: &str) -> Option<(DeclKind, String)> {
+    let decl = decl.trim();
+    // Strip an optional leading visibility. We accept `pub` and
+    // `pub(crate)` / `pub(super)` etc. — anything of the shape `pub` or
+    // `pub(...)`.
+    let rest = if let Some(after) = decl.strip_prefix("pub") {
+        // strip_prefix removed only "pub"; handle an optional `(crate)` /
+        // `(super)` / `(in path)` visibility restriction.
+        if let Some(paren) = after.strip_prefix('(') {
+            match paren.find(')') {
+                Some(p) => paren[p + 1..].trim_start(),
+                None => return None,
+            }
+        } else {
+            after.trim_start()
+        }
+    } else {
+        decl
+    };
+
+    // Keyword-led forms.
+    for (kw, kind) in [
+        ("fn ", DeclKind::Fn),
+        ("struct ", DeclKind::Struct),
+        ("enum ", DeclKind::Enum),
+        ("trait ", DeclKind::Trait),
+        ("mod ", DeclKind::Mod),
+        ("const ", DeclKind::Const),
+        ("type ", DeclKind::Type),
+        ("impl ", DeclKind::Impl),
+    ] {
+        if let Some(after) = rest.strip_prefix(kw) {
+            let after = after.trim();
+            return parse_decl_body(kind, after);
+        }
+    }
+
+    // No keyword: only accept the bare `<Type>::<method>` associated-fn
+    // form. Anything else (bare prose word, lowercase identifier) is NOT a
+    // declaration — reject to stay precise.
+    if rest.contains("::") {
+        return parse_assoc_fn(rest);
+    }
+    None
+}
+
+/// Parse the body of a keyword-led decl (everything after `fn `/`struct `/
+/// …). Handles the `fn <Type>::<method>` mixed form (-> AssocFn), the
+/// `impl <Trait> for <Type>` / `impl <Type>` forms, and the plain
+/// `<kw> <ident>` form.
+fn parse_decl_body(kind: DeclKind, body: &str) -> Option<(DeclKind, String)> {
+    match kind {
+        DeclKind::Fn => {
+            // `fn Type::method` -> AssocFn (validate the method name).
+            if body.contains("::") {
+                return parse_assoc_fn(body);
+            }
+            let id = ident_stem(first_token(body))?;
+            Some((DeclKind::Fn, id))
+        }
+        DeclKind::Impl => {
+            // `impl <Trait> for <Type>` -> validate <Type>; `impl <Type>` ->
+            // validate <Type>.
+            let target = if let Some(idx) = body.find(" for ") {
+                &body[idx + " for ".len()..]
+            } else {
+                body
+            };
+            let id = ident_stem(first_token(target))?;
+            Some((DeclKind::Impl, id))
+        }
+        _ => {
+            let id = ident_stem(first_token(body))?;
+            Some((kind, id))
+        }
+    }
+}
+
+/// Parse a `<Type>::<method>` associated-fn form into `(AssocFn, method)`.
+/// Requires BOTH a `<Type>` (uppercase-leading, identifier-shaped) and a
+/// `<method>` (identifier-shaped) so plain prose with a stray `::` is not
+/// matched.
+fn parse_assoc_fn(s: &str) -> Option<(DeclKind, String)> {
+    let s = first_token(s);
+    let (ty, method) = s.split_once("::")?;
+    // The type segment may itself carry generics; strip them. Require the
+    // type to start uppercase (a real type name, not prose).
+    let ty_stem = ident_stem(ty)?;
+    if !ty_stem.chars().next()?.is_ascii_uppercase() {
+        return None;
+    }
+    let method_stem = ident_stem(method)?;
+    Some((DeclKind::AssocFn, method_stem))
+}
+
+/// Take the leading identifier-ish token (stop at the first space). Used so
+/// `mod tests` -> `tests` and `impl Drop for Foo` is handled by callers that
+/// split on " for " first.
+fn first_token(s: &str) -> &str {
+    s.split_whitespace().next().unwrap_or("").trim()
+}
+
+/// Parse every single-span symbol anchor `` `<decl> in <path>.rs` `` from one
+/// doc line.
+///
+/// PRECISION (this runs over ALL `.design/**/*.md`):
+///   1. Only the content of a SINGLE backtick span is examined.
+///   2. The span must contain the literal " in " separating a recognizable
+///      DECL (see [`parse_decl`]) from a `.rs` PATH ([`is_rs_path`]).
+///   3. Upstream paths (`/home/doll/pytorch/`, `aten/`) are excluded — those
+///      are read-only upstream cites, not workspace symbols.
+///   4. The CROSS-span `` `Sym` struct in `file.rs` `` form (#1643) is NOT
+///      matched here: in that form `struct` sits in a SEPARATE backtick span
+///      from the file, so this single-span content never contains a valid
+///      `<decl> in <path>.rs`. (`` `struct NarrowBackward in methods.rs` ``,
+///      where the connective is INSIDE one span, IS a legitimate single-span
+///      anchor and is matched.)
+fn parse_symbol_anchors(line: &str) -> Vec<SymbolAnchor> {
+    let mut out = Vec::new();
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'`' {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let end = match line[start..].find('`') {
+            Some(e) => start + e,
+            None => break,
+        };
+        let span = &line[start..end];
+        i = end + 1;
+        if let Some(anchor) = parse_single_span(span) {
+            out.push(anchor);
+        }
+    }
+    out
+}
+
+/// Parse the CONTENT of one backtick span as a single-span symbol anchor.
+fn parse_single_span(span: &str) -> Option<SymbolAnchor> {
+    let span = span.trim();
+    // Locate the LAST " in " that is followed by a `.rs` path (the file part
+    // is at the tail; the decl may itself contain " in " only inside a string
+    // which can't happen for our recognized forms, so taking the last is
+    // robust).
+    let in_idx = span.rfind(" in ")?;
+    let (decl, file_part) = span.split_at(in_idx);
+    let file_part = file_part[" in ".len()..].trim();
+    // Exclude upstream cites — those are read-only and resolved elsewhere.
+    if file_part.starts_with("/home/doll/pytorch/")
+        || file_part.starts_with("aten/")
+        || file_part.starts_with("torch/")
+        || file_part.starts_with("c10/")
+    {
+        return None;
+    }
+    if !is_rs_path(file_part) {
+        return None;
+    }
+    let (kind, ident) = parse_decl(decl)?;
+    Some(SymbolAnchor {
+        kind,
+        ident,
+        file_as_written: file_part.to_string(),
+    })
+}
+
+/// One-shot index of every `*/src/**/*.rs` file in the workspace, keyed by
+/// basename -> all matching workspace-relative paths. Built once per test.
+fn build_src_index(root: &Path) -> std::collections::HashMap<String, Vec<PathBuf>> {
+    let mut index: std::collections::HashMap<String, Vec<PathBuf>> =
+        std::collections::HashMap::new();
+    // Walk each `<crate>/src` directory recursively.
+    let mut crate_src_dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = fs::read_dir(root) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                let src = p.join("src");
+                if src.is_dir() {
+                    crate_src_dirs.push(src);
+                }
+            }
+        }
+    }
+    // Also include the parity-sweep runner src (a non-crate-root tool).
+    let runner_src = root.join("tools/parity-sweep/runner/src");
+    if runner_src.is_dir() {
+        crate_src_dirs.push(runner_src);
+    }
+    let mut stack: Vec<PathBuf> = crate_src_dirs;
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(it) => it,
+            Err(_) => continue,
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
+                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                    index.entry(name.to_string()).or_default().push(p.clone());
+                }
+            }
+        }
+    }
+    index
+}
+
+/// Resolve a single-span anchor's `file_as_written` to the candidate files
+/// it could refer to, per the documented disambiguation rule. Returns the
+/// (possibly multi-element) candidate list, or an empty Vec if no file of
+/// that basename exists anywhere (UNRESOLVABLE).
+fn resolve_symbol_anchor_files(
+    index: &std::collections::HashMap<String, Vec<PathBuf>>,
+    root: &Path,
+    file_as_written: &str,
+) -> Vec<PathBuf> {
+    let basename = file_as_written
+        .rsplit('/')
+        .next()
+        .unwrap_or(file_as_written);
+    let all = match index.get(basename) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    if file_as_written.contains('/') {
+        // Prefixed path: keep only candidates whose workspace-relative path
+        // ends with the written suffix. Tolerate a leading `ferrotorch-...`
+        // crate prefix mismatch by matching on the written suffix verbatim.
+        let mut matches: Vec<PathBuf> = all
+            .iter()
+            .filter(|p| {
+                let rel = p.strip_prefix(root).unwrap_or(p);
+                let rel_s = rel.to_string_lossy().replace('\\', "/");
+                rel_s.ends_with(file_as_written)
+            })
+            .cloned()
+            .collect();
+        // If the suffix match found nothing but the basename exists, fall
+        // back to all basename candidates (the prefix is advisory; the
+        // anchor is "valid" if the symbol exists in a file of that name).
+        if matches.is_empty() {
+            matches = all.clone();
+        }
+        matches
+    } else {
+        all.clone()
+    }
+}
+
+/// Does `src` genuinely DECLARE the anchor's symbol per its kind? Tolerant of
+/// visibility (`pub`/`pub(crate)`) and derive/attribute prefixes, but checks
+/// the real declaration keyword + identifier with a word boundary so
+/// `fn foo` does not match `fn foobar`.
+fn anchor_symbol_declared(src: &str, anchor: &SymbolAnchor) -> bool {
+    let needles: Vec<String> = match anchor.kind {
+        DeclKind::Fn | DeclKind::AssocFn => vec![format!("fn {}", anchor.ident)],
+        DeclKind::Struct => vec![format!("struct {}", anchor.ident)],
+        DeclKind::Enum => vec![format!("enum {}", anchor.ident)],
+        DeclKind::Trait => vec![format!("trait {}", anchor.ident)],
+        DeclKind::Mod => vec![format!("mod {}", anchor.ident)],
+        DeclKind::Const => vec![
+            format!("const {}", anchor.ident),
+            // `const fn foo` is a fn, but a `const FOO:` is the const form.
+        ],
+        DeclKind::Type => vec![format!("type {}", anchor.ident)],
+        // For an impl TARGET we accept the type being declared as a struct,
+        // enum, trait, type alias, OR appearing as an `impl ... <Type>` /
+        // `impl <Type>` target — the type must EXIST in the file. The most
+        // robust single check is `<Type>` appearing after `impl`, `struct`,
+        // `enum`, `trait`, or `type`.
+        DeclKind::Impl => vec![
+            format!("struct {}", anchor.ident),
+            format!("enum {}", anchor.ident),
+            format!("trait {}", anchor.ident),
+            format!("type {}", anchor.ident),
+            format!("impl {}", anchor.ident),
+            format!("for {}", anchor.ident),
+        ],
+    };
+    src.lines().any(|line| {
+        needles.iter().any(|needle| {
+            if let Some(idx) = line.find(needle.as_str()) {
+                let after = line[idx + needle.len()..].chars().next();
+                match after {
+                    None => true,
+                    Some(c) => !(c.is_ascii_alphanumeric() || c == '_'),
+                }
+            } else {
+                false
+            }
+        })
+    })
+}
+
+/// Outcome of validating a single-span anchor, for report-mode counting.
+#[derive(Debug, PartialEq, Eq)]
+enum AnchorOutcome {
+    Valid,
+    /// File(s) resolved but none declare the symbol.
+    Stale,
+    /// No file of that basename exists anywhere in the workspace.
+    Unresolvable,
+}
+
+/// Validate one single-span anchor, returning its outcome + (on
+/// failure) a human-readable diagnostic.
+fn validate_symbol_anchor(
+    anchor: &SymbolAnchor,
+    index: &std::collections::HashMap<String, Vec<PathBuf>>,
+    root: &Path,
+    doc_label: &str,
+    doc_line_no: usize,
+) -> (AnchorOutcome, Option<String>) {
+    let candidates = resolve_symbol_anchor_files(index, root, &anchor.file_as_written);
+    if candidates.is_empty() {
+        return (
+            AnchorOutcome::Unresolvable,
+            Some(format!(
+                "{doc_label}:{doc_line_no} single-span anchor `{decl}` names file `{file}` which does not exist anywhere under any `*/src/**` in the workspace (typo / deleted file?).",
+                decl = anchor_decl_repr(anchor),
+                file = anchor.file_as_written,
+            )),
+        );
+    }
+    for cand in &candidates {
+        if let Ok(src) = fs::read_to_string(cand) {
+            if anchor_symbol_declared(&src, anchor) {
+                return (AnchorOutcome::Valid, None);
+            }
+        }
+    }
+    (
+        AnchorOutcome::Stale,
+        Some(format!(
+            "{doc_label}:{doc_line_no} single-span anchor `{decl} in {file}` is STALE: the symbol `{ident}` ({kind:?}) is not declared in any of {n} candidate file(s) named `{file}` at HEAD (renamed/moved/deleted?). Candidates: {cands}",
+            decl = anchor_decl_repr(anchor),
+            file = anchor.file_as_written,
+            ident = anchor.ident,
+            kind = anchor.kind,
+            n = candidates.len(),
+            cands = candidates
+                .iter()
+                .map(|p| p
+                    .strip_prefix(root)
+                    .unwrap_or(p)
+                    .to_string_lossy()
+                    .into_owned())
+                .collect::<Vec<_>>()
+                .join(", "),
+        )),
+    )
+}
+
+/// A best-effort human-readable redisplay of an anchor's decl (for error
+/// messages only).
+fn anchor_decl_repr(anchor: &SymbolAnchor) -> String {
+    match anchor.kind {
+        DeclKind::Fn => format!("fn {}", anchor.ident),
+        DeclKind::AssocFn => format!("<Type>::{}", anchor.ident),
+        DeclKind::Struct => format!("struct {}", anchor.ident),
+        DeclKind::Enum => format!("enum {}", anchor.ident),
+        DeclKind::Trait => format!("trait {}", anchor.ident),
+        DeclKind::Mod => format!("mod {}", anchor.ident),
+        DeclKind::Const => format!("const {}", anchor.ident),
+        DeclKind::Type => format!("type {}", anchor.ident),
+        DeclKind::Impl => format!("impl ... {}", anchor.ident),
+    }
+}
+
 fn audit_doc(doc_label: &str, doc_text: &str, root: &Path) -> Vec<String> {
     let mut failures = Vec::new();
     // Doc-wide context: bare-parens `(NNNN)` and bare-colon `:NNN` on a later
@@ -1558,5 +2031,264 @@ fn s3_struct_anchor_parser_is_precise_and_catches_corruption() {
     assert!(
         validate_struct_anchor(&typo_file, &root, "synthetic", 4).is_some(),
         "typo'd file path in a struct anchor MUST be flagged, not silently skipped",
+    );
+}
+
+/// #1668 REPORT MODE: count single-span anchors total / valid / stale /
+/// unresolvable across `.design/`. `#[ignore]` so it does not gate CI; run
+/// with `--ignored -- --nocapture` to see the cleanup scope. Kept as a
+/// permanent diagnostic so the cleanup campaign can re-measure residual.
+#[test]
+#[ignore = "diagnostic — run with --ignored --nocapture to print single-span anchor counts"]
+fn report_single_span_anchor_counts() {
+    let root = workspace_root();
+    let index = build_src_index(&root);
+    let docs = collect_design_docs(&root);
+    let (mut total, mut valid, mut stale, mut unres) = (0usize, 0usize, 0usize, 0usize);
+    let mut stale_list: Vec<String> = Vec::new();
+    let mut unres_list: Vec<String> = Vec::new();
+    for doc in &docs {
+        let text = match fs::read_to_string(root.join(doc)) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        for (i, line) in text.lines().enumerate() {
+            for anchor in parse_symbol_anchors(line) {
+                total += 1;
+                let (outcome, msg) = validate_symbol_anchor(&anchor, &index, &root, doc, i + 1);
+                match outcome {
+                    AnchorOutcome::Valid => valid += 1,
+                    AnchorOutcome::Stale => {
+                        stale += 1;
+                        if let Some(m) = msg {
+                            stale_list.push(m);
+                        }
+                    }
+                    AnchorOutcome::Unresolvable => {
+                        unres += 1;
+                        if let Some(m) = msg {
+                            unres_list.push(m);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!("=== #1668 single-span anchor report ===");
+    println!("docs scanned: {}", docs.len());
+    println!("total parsed:  {total}");
+    println!("valid:         {valid}");
+    println!("STALE:         {stale}");
+    println!("UNRESOLVABLE:  {unres}");
+    println!("--- STALE ---");
+    for m in &stale_list {
+        println!("{m}");
+    }
+    println!("--- UNRESOLVABLE ---");
+    for m in &unres_list {
+        println!("{m}");
+    }
+}
+
+/// #1668 PRECISION unit test — the single-span anchor parser must match ONLY
+/// genuine `<decl> in <path>.rs` symbol anchors and skip prose, upstream
+/// cites, and the #1643 CROSS-span form. Pure in-memory; corpus-independent.
+#[test]
+fn single_span_anchor_parser_is_precise() {
+    // GENUINE anchors that MUST parse (one each).
+    let good: &[(&str, DeclKind, &str, &str)] = &[
+        (
+            "`pub fn pack_padded_sequence in rnn_utils.rs`",
+            DeclKind::Fn,
+            "pack_padded_sequence",
+            "rnn_utils.rs",
+        ),
+        (
+            "`pub struct PagePool in paged_attention.rs`",
+            DeclKind::Struct,
+            "PagePool",
+            "paged_attention.rs",
+        ),
+        (
+            "`mod tests in cache.rs`",
+            DeclKind::Mod,
+            "tests",
+            "cache.rs",
+        ),
+        (
+            "`pub enum InterpolateMode in upsample.rs`",
+            DeclKind::Enum,
+            "InterpolateMode",
+            "upsample.rs",
+        ),
+        (
+            "`pub trait Foo in lib.rs`",
+            DeclKind::Trait,
+            "Foo",
+            "lib.rs",
+        ),
+        (
+            "`pub const MAX_X in limits.rs`",
+            DeclKind::Const,
+            "MAX_X",
+            "limits.rs",
+        ),
+        (
+            "`pub type Handle in types.rs`",
+            DeclKind::Type,
+            "Handle",
+            "types.rs",
+        ),
+        (
+            "`fn cubic_weight in upsample.rs`",
+            DeclKind::Fn,
+            "cubic_weight",
+            "upsample.rs",
+        ),
+        // Type::method assoc-fn, bare (no leading kw).
+        (
+            "`CudaBackendImpl::group_norm_f32 in ferrotorch-gpu/src/backend_impl.rs`",
+            DeclKind::AssocFn,
+            "group_norm_f32",
+            "ferrotorch-gpu/src/backend_impl.rs",
+        ),
+        // Type::method assoc-fn with leading `pub fn`.
+        (
+            "`pub fn LlamaGpuInferencer::generate_masked in gpu_gguf.rs`",
+            DeclKind::AssocFn,
+            "generate_masked",
+            "gpu_gguf.rs",
+        ),
+        // impl <Type>.
+        (
+            "`impl CusparseLtHandle in cusparselt.rs`",
+            DeclKind::Impl,
+            "CusparseLtHandle",
+            "cusparselt.rs",
+        ),
+        // impl <Trait> for <Type> -> target is the Type.
+        (
+            "`impl Drop for CusparseLtHandle in cusparselt.rs`",
+            DeclKind::Impl,
+            "CusparseLtHandle",
+            "cusparselt.rs",
+        ),
+        // generics stripped on the symbol.
+        (
+            "`pub struct Foo<T> in widget.rs`",
+            DeclKind::Struct,
+            "Foo",
+            "widget.rs",
+        ),
+        // prefixed suffix path.
+        (
+            "`pub fn reduce_all in ops/meta_propagate.rs`",
+            DeclKind::Fn,
+            "reduce_all",
+            "ops/meta_propagate.rs",
+        ),
+    ];
+    for (line, kind, ident, file) in good {
+        let anchors = parse_symbol_anchors(line);
+        assert_eq!(
+            anchors.len(),
+            1,
+            "expected exactly 1 anchor from `{line}`, got {anchors:?}"
+        );
+        assert_eq!(&anchors[0].kind, kind, "kind mismatch for `{line}`");
+        assert_eq!(&anchors[0].ident, ident, "ident mismatch for `{line}`");
+        assert_eq!(
+            &anchors[0].file_as_written, file,
+            "file mismatch for `{line}`"
+        );
+    }
+
+    // Note: `reduce_all in meta_propagate.rs` (no `::`, no kw) is PROSE-shaped
+    // and intentionally NOT matched — a bare lowercase word with no decl
+    // keyword and no `::` is indistinguishable from prose. The corpus form
+    // that IS matched carries a kind keyword or `Type::method`.
+
+    // NON-anchors that MUST NOT parse.
+    let bad = [
+        // prose: "the model in foo.rs is ..." — `model` is no recognized decl.
+        "the model in foo.rs is loaded",
+        "`the model in foo.rs`",
+        // upstream cites must be excluded.
+        "`fn add in /home/doll/pytorch/aten/foo.rs`",
+        "`reduce_all in aten/src/ATen/native/foo.rs`",
+        "`fn x in torch/csrc/foo.rs`",
+        // the #1643 CROSS-span form: the `struct` connective lives in a
+        // SEPARATE backtick span, so the single-span content `RsqrtBackward`
+        // (alone) and the file (alone) never form a `<decl> in <path>.rs`.
+        "the `RsqrtBackward` struct in `grad_fns/arithmetic.rs` saving",
+        // bare lowercase word with no kw, no `::` -> prose, not an anchor.
+        "`add in arithmetic.rs`",
+        // non-.rs file.
+        "`pub fn foo in bar.py`",
+        "`pub fn foo in derivatives.yaml`",
+        // `::` but lowercase-leading "type" -> not a real Type::method.
+        "`foo::bar in x.rs`",
+        // no " in " separator at all.
+        "`pub fn foo bar.rs`",
+        // empty-ish.
+        "`in x.rs`",
+    ];
+    for line in bad {
+        let anchors = parse_symbol_anchors(line);
+        assert!(
+            anchors.is_empty(),
+            "PRECISION FAILURE: parser matched a non-anchor `{line}` -> {anchors:?}"
+        );
+    }
+}
+
+/// #1668 HARD CONTRACT: every single-span symbol anchor
+/// `` `<decl> in <path>.rs` `` across ALL `.design/**/*.md` resolves to a
+/// genuine declaration of that symbol in a file of the named basename at
+/// HEAD. A renamed/moved/deleted symbol (STALE) or a typo'd / nonexistent
+/// file (UNRESOLVABLE) fails this test.
+///
+/// Disambiguation: see the module-level note above
+/// [`resolve_symbol_anchor_files`] — an anchor is VALID iff the symbol is
+/// declared in AT LEAST ONE candidate file of the named basename.
+#[test]
+fn all_design_docs_single_span_anchors_resolve_at_head() {
+    let root = workspace_root();
+    let index = build_src_index(&root);
+    let docs = collect_design_docs(&root);
+    assert!(
+        !docs.is_empty(),
+        "expected at least one .md file under .design/"
+    );
+    let mut failures: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for doc in &docs {
+        let text = match fs::read_to_string(root.join(doc)) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        for (i, line) in text.lines().enumerate() {
+            for anchor in parse_symbol_anchors(line) {
+                total += 1;
+                let (outcome, msg) = validate_symbol_anchor(&anchor, &index, &root, doc, i + 1);
+                if outcome != AnchorOutcome::Valid {
+                    if let Some(m) = msg {
+                        failures.push(m);
+                    }
+                }
+            }
+        }
+    }
+    // Sanity floor: the corpus has thousands of these; if the count collapses
+    // the parser has silently stopped matching the single-span form.
+    assert!(
+        total >= 500,
+        "expected >=500 single-span symbol anchors across .design/, found {total} — has the parser stopped matching the `<decl> in <path>.rs` form?",
+    );
+    assert!(
+        failures.is_empty(),
+        "{n} single-span symbol anchor(s) are STALE/UNRESOLVABLE out of {total} scanned (#1668 / goal.md S3 R-CITE-2b):\n\n{body}",
+        n = failures.len(),
+        body = failures.join("\n\n"),
     );
 }
