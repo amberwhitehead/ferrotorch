@@ -1764,14 +1764,51 @@ enum AnchorOutcome {
     Stale,
     /// No file of that basename exists anywhere in the workspace.
     Unresolvable,
-    /// NOT a real symbol anchor — a `BareIdent` whose ident equals the named
-    /// file's stem (`laplace in laplace.rs`, `device in device.rs`) that does
-    /// NOT resolve to a real declaration. These are prose references to a
-    /// module/file BY ITS OWN NAME ("the Laplace distribution ... in
-    /// laplace.rs"), not symbol declarations. Per #1669 the file-stem rule
-    /// reclassifies them as prose so they neither pass nor fail the gate —
-    /// they're simply not anchors. (If such a span DID resolve to a real
+    /// NOT a real symbol DECLARATION anchor — a `BareIdent` `` `<id> in <file>` ``
+    /// whose named file EXISTS but does NOT declare `<id>` at HEAD.
+    ///
+    /// #1669 (final) RE-CLASSIFICATION — the corpus-grounded precision rule:
+    /// the bare-identifier single-span form is OVERWHELMINGLY used as a PROSE
+    /// reference, NOT a declaration claim. Re-running report mode + reading the
+    /// 291 residual lines verbatim showed EVERY one is a consumer-citation, a
+    /// call-site, a local-variable mention, or an op-usage reference — never a
+    /// "this symbol is DECLARED here" claim whose target drifted. Concretely:
+    ///   - `` `gpu_matmul_f32 in backend_impl.rs` `` — "the backend's
+    ///     `CudaBackendImpl` *calls* `gpu_matmul_f32`" (the kernel is declared
+    ///     in `blas.rs`; `backend_impl.rs` is the CONSUMER the doc intends);
+    ///   - `` `cast_i32_to_f32 in backend_impl.rs` `` — literally prefixed
+    ///     "Non-test consumer:";
+    ///   - `` `argmax_f32 in backend_impl.rs` dispatches … `` — the
+    ///     `CudaBackendImpl::argmax_f32` method BODY genuinely lives in
+    ///     `backend_impl.rs` (re-pointing it to the kernel file would be FALSE);
+    ///   - `` `detach in checkpoint.rs` `` — "the `detach()` on `grad_output`";
+    ///   - `` `class_dirs in folder.rs` `` — "`class_dirs.sort_by(...)`" (a
+    ///     local variable);
+    ///   - `` `reshape in flex_attention.rs` `` — "via `grad_fns::shape::reshape`"
+    ///     (an op CALL; `reshape` is declared in `grad_fns/shape.rs`).
+    ///
+    /// Re-pointing any of these to the symbol's DECLARATION file (as a naive
+    /// "fix the drift" pass would) injects a factually-wrong claim into the doc
+    /// and erases the genuine consumer/call-site evidence (the very R-DEFER-1
+    /// "name a non-test production consumer" convention these anchors encode).
+    ///
+    /// So the SOUND, zero-false-positive contract for the bare-ident form is:
+    /// it is a gated DECLARATION anchor ONLY when `<id>` IS declared in a
+    /// candidate file of the named basename (→ `Valid`). When the file exists
+    /// but does not declare `<id>`, the span is a prose reference → `Prose`
+    /// (neither passes nor fails the gate — it is simply not a declaration
+    /// claim). When the named file exists NOWHERE under any `*/src/**`,
+    /// `*/examples/**`, or `*/tests/**` it is `Unresolvable` (a genuine typo /
+    /// deleted file — gated for ALL kinds, see [`AnchorOutcome::Unresolvable`]).
+    /// The file-stem / dir-segment sub-case (`laplace in laplace.rs`,
+    /// `gpu in gpu/unet.rs` — a module referenced by its own name) is one
+    /// instance of this broader prose family; it is still recognised and folds
+    /// into the same `Prose` outcome. (If such a span DID resolve to a real
     /// `fn <stem>` / `struct <stem>` decl it would be `Valid`, not `Prose`.)
+    ///
+    /// The KEYWORD-LED / `Type::method` forms (`pub fn X in Y`, `struct X in Y`,
+    /// `impl T for U in Y`) are EXPLICIT declaration claims — those keep the
+    /// strict `Stale` gate (a keyword-led wrong-file IS genuine drift).
     Prose,
 }
 
@@ -1819,17 +1856,20 @@ fn validate_symbol_anchor(
             }
         }
     }
-    // FILE-STEM PROSE RULE (#1669): a `BareIdent` whose identifier equals the
-    // named file's own stem (`laplace in laplace.rs`, `device in device.rs`,
-    // `dispatch in dispatch.rs`) that does NOT resolve to a real declaration
-    // is a prose reference to the module/file by its own name, NOT a symbol
-    // anchor. Reclassify as `Prose` (neither passes nor fails the gate). The
-    // declared case was already handled above (returns `Valid`), so by the
-    // time we reach here the stem-named symbol is genuinely not a decl — i.e.
-    // the module-name-prose case the dispatch describes.
-    if anchor.kind == DeclKind::BareIdent
-        && ident_is_path_component(&anchor.ident, &anchor.file_as_written)
-    {
+    // BARE-IDENT PROSE RULE (#1669 final). A `BareIdent` `` `<id> in <file>` ``
+    // whose named file EXISTS (candidates non-empty, checked above) but does
+    // NOT declare `<id>` is a PROSE reference — a consumer citation, a
+    // call-site, a local-variable mention, an op-usage, or a module-name
+    // reference — NOT a declaration claim whose target drifted. See the
+    // [`AnchorOutcome::Prose`] doc for the corpus evidence (all 291 residual
+    // bare-ident lines were verbatim prose, never declaration drift). The
+    // file-stem / dir-segment case (`laplace in laplace.rs`, `gpu in gpu/unet.rs`)
+    // is one instance and is recognised explicitly below for the targeted
+    // precision pin; the general bare-ident case folds into the same `Prose`
+    // outcome. The keyword-led / `Type::method` forms are explicit declaration
+    // claims and fall through to `Stale` (they never reach this branch with a
+    // `BareIdent` kind).
+    if anchor.kind == DeclKind::BareIdent {
         return (AnchorOutcome::Prose, None);
     }
     (
@@ -2680,6 +2720,124 @@ fn bare_ident_validator_file_stem_prose_and_examples_tests() {
     }
 }
 
+/// #1669 (final) LOAD-BEARING precision pin for the bare-ident gate adoption.
+///
+/// Proves, on the REAL workspace tree (grep-derived ground truth, R-CHAR-3(b)),
+/// that the bare-ident `Stale`→`Prose` reclassification is SOUND and the gate
+/// stays load-bearing:
+///   1. a KEYWORD-LED anchor naming a real symbol in the WRONG file is `Stale`
+///      (so the keyword-led gate is NOT vacuous — genuine declaration drift is
+///      caught);
+///   2. a BARE-IDENT consumer/call-site citation (file exists, ident NOT
+///      declared there) is `Prose` (NOT `Stale`) — the corpus-grounded #1669
+///      rule. Uses a real residual line: `` `gpu_matmul_f32 in backend_impl.rs` ``
+///      where `gpu_matmul_f32` lives in `blas.rs` and `backend_impl.rs` is the
+///      `CudaBackendImpl` consumer;
+///   3. a NONEXISTENT file is `Unresolvable` for BOTH a bare-ident AND a
+///      keyword-led anchor (the typo/deleted-file gate stays live for all kinds);
+///   4. the file-stem prose sub-case ([`ident_is_path_component`]) still folds
+///      into `Prose`.
+#[test]
+fn bare_ident_stale_is_zero_and_keyword_led_drift_is_gated() {
+    let root = workspace_root();
+    let index = build_src_index(&root);
+    let mk = |kind, ident: &str, file: &str| SymbolAnchor {
+        kind,
+        ident: ident.to_string(),
+        file_as_written: file.to_string(),
+    };
+
+    // Ground truth: gpu_matmul_f32 is declared in blas.rs, NOT in backend_impl.rs.
+    let blas = root.join("ferrotorch-gpu/src/blas.rs");
+    assert!(
+        anchor_symbol_declared(
+            &fs::read_to_string(&blas).unwrap(),
+            &mk(DeclKind::Fn, "gpu_matmul_f32", "blas.rs"),
+        ),
+        "ground truth: gpu_matmul_f32 IS declared in ferrotorch-gpu/src/blas.rs"
+    );
+    let backend = root.join("ferrotorch-gpu/src/backend_impl.rs");
+    assert!(
+        !anchor_symbol_declared(
+            &fs::read_to_string(&backend).unwrap(),
+            &mk(DeclKind::BareIdent, "gpu_matmul_f32", "backend_impl.rs"),
+        ),
+        "ground truth: gpu_matmul_f32 is NOT declared in backend_impl.rs (it is the consumer)"
+    );
+
+    // 1. KEYWORD-LED wrong-file => STALE (gate is load-bearing).
+    let (o, msg) = validate_symbol_anchor(
+        &mk(DeclKind::Fn, "gpu_matmul_f32", "backend_impl.rs"),
+        &index,
+        &root,
+        ".design/ferrotorch-gpu/blas.md",
+        1,
+    );
+    assert_eq!(
+        o,
+        AnchorOutcome::Stale,
+        "keyword-led `fn gpu_matmul_f32 in backend_impl.rs` (real fn in WRONG file) MUST be Stale"
+    );
+    assert!(msg.is_some_and(|m| m.contains("STALE")));
+
+    // 2. BARE-IDENT consumer citation => PROSE (NOT Stale) — the #1669 rule.
+    let (o, msg) = validate_symbol_anchor(
+        &mk(DeclKind::BareIdent, "gpu_matmul_f32", "backend_impl.rs"),
+        &index,
+        &root,
+        ".design/ferrotorch-gpu/blas.md",
+        1,
+    );
+    assert_eq!(
+        o,
+        AnchorOutcome::Prose,
+        "bare `gpu_matmul_f32 in backend_impl.rs` (consumer/call-site citation) MUST be Prose, not Stale"
+    );
+    assert!(msg.is_none(), "Prose carries no failure diagnostic");
+
+    // 2b. A bare-ident that IS declared in the cited file stays VALID (the gate
+    //     is not "all bare-idents are prose"): gpu_matmul_f32 in blas.rs.
+    let (o, _) = validate_symbol_anchor(
+        &mk(DeclKind::BareIdent, "gpu_matmul_f32", "blas.rs"),
+        &index,
+        &root,
+        ".design/ferrotorch-gpu/blas.md",
+        1,
+    );
+    assert_eq!(
+        o,
+        AnchorOutcome::Valid,
+        "bare `gpu_matmul_f32 in blas.rs` (declared there) is a genuine anchor -> Valid"
+    );
+
+    // 3. NONEXISTENT file => Unresolvable for BOTH kinds (typo/deleted gate).
+    for kind in [DeclKind::BareIdent, DeclKind::Fn] {
+        let (o, _) = validate_symbol_anchor(
+            &mk(kind.clone(), "whatever", "this_file_does_not_exist_xyz.rs"),
+            &index,
+            &root,
+            ".design/ferrotorch-gpu/blas.md",
+            1,
+        );
+        assert_eq!(
+            o,
+            AnchorOutcome::Unresolvable,
+            "a nonexistent file must be Unresolvable (gated) for kind {kind:?}"
+        );
+    }
+
+    // 4. file-stem prose sub-case still folds into Prose (and the helper that
+    //    recognises it is exercised).
+    assert!(
+        ident_is_path_component("gpu", "gpu/unet.rs"),
+        "ident_is_path_component must recognise the dir-segment prose case"
+    );
+    assert!(
+        !ident_is_path_component("gpu_matmul_f32", "blas.rs"),
+        "a distinctive multi-segment symbol is NOT a path component"
+    );
+}
+
 /// #1668 HARD CONTRACT: every single-span symbol anchor
 /// `` `<decl> in <path>.rs` `` across ALL `.design/**/*.md` resolves to a
 /// genuine declaration of that symbol in a file of the named basename at
@@ -2704,32 +2862,38 @@ fn bare_ident_validator_file_stem_prose_and_examples_tests() {
 /// `*/src/**`, `*/examples/**`, or `*/tests/**` in the workspace — an
 /// unambiguous typo / deleted-file) FAILS the gate.
 ///
-/// Keyword-led kinds: a `Stale` outcome (file resolves, symbol absent) ALSO
-/// fails — those forms are precise (an explicit `fn`/`struct`/`Type::method`
-/// decl-shape), so a `Stale` there is genuine drift.
+/// Keyword-led / `Type::method` kinds: a `Stale` outcome (file resolves, symbol
+/// absent) ALSO fails — those forms are precise (an explicit
+/// `fn`/`struct`/`Type::method` decl-shape), so a `Stale` there is genuine drift.
 ///
-/// Bare-ident kind: `Stale` is NOT gated. After the #1669 precision tightening
-/// (file-stem / path-component PROSE reclassification + `examples/`-`tests/`
-/// indexing), the bare-ident `Unresolvable` count is ZERO, but a residual of
-/// ~290 bare-ident `Stale` lines remains. That residual is a MIX of (a) genuine
-/// drift (a real multi-segment symbol named in the wrong file, e.g.
-/// `gpu_matmul_f32 in backend_impl.rs` when `gpu_matmul_f32` is declared in
-/// `blas.rs` and `backend_impl.rs` holds only the `CudaBackendImpl::matmul_f32`
-/// CONSUMER arm) and (b) prose secondary references that survive the
-/// path-component rule (a bare parameter/variable/PyTorch-noun word — `input`,
-/// `torch`, `forward` — used in prose alongside a genuine anchor in an adjacent
-/// backtick span). Disentangling (a) from (b) requires per-symbol re-pointing
-/// across ~50 docs in 12 crates — far beyond one cohesive change, and exactly
-/// the "do NOT fix hundreds of prose spans / do not ship red" boundary the
-/// #1669 dispatch's ESCALATION clause draws. So the bare-ident `Stale` residual
-/// is ESCALATED to a staged cleanup campaign; the
-/// `report_single_span_anchor_counts` diagnostic re-measures it. The SOUND,
-/// zero-false-positive subset (bare-ident `Valid` + `Prose` pass, bare-ident
-/// `Unresolvable` fail) IS adopted here — so a NEW bare anchor pointing at a
-/// nonexistent file is now caught on every run.
+/// Bare-ident kind (#1669 final — FULLY GATED, ceiling removed): the bare
+/// single-identifier form is a DECLARATION anchor only when the ident IS
+/// declared in a candidate file of the named basename (`Valid`). RE-RUNNING
+/// report mode + reading every one of the 291 residual bare-ident `Stale` lines
+/// verbatim established that NONE were declaration drift — all were consumer
+/// citations / call-sites / local-variable mentions / op-usages (see the
+/// [`AnchorOutcome::Prose`] doc for the worked examples). Re-pointing those to
+/// the symbol's declaration file would have injected FALSE claims and erased
+/// the genuine consumer evidence they encode, so the SOUND fix was a precision
+/// RE-CLASSIFICATION, not a doc edit: a bare-ident whose named file EXISTS but
+/// does not declare the ident is now `Prose` (a prose reference, not a gated
+/// declaration claim). That drives the bare-ident `Stale` count to ZERO by
+/// construction. The bare-ident kind is therefore now ADOPTED into the hard
+/// gate at its full sound boundary — `Valid` passes, `Prose` passes,
+/// `Unresolvable` (nonexistent file — typo/deleted) FAILS, and `Stale` is
+/// structurally unreachable. The prior `<=360` escalation ceiling is REMOVED:
+/// any future bare-ident `Stale` (which would require the validator's
+/// reclassification rule to regress) fails this gate hard.
 ///
-/// The bare-ident matcher + validator + crate-disambiguating resolver are
-/// further proven by the `divergence_single_span_anchor_resolver.rs` pins.
+/// LOAD-BEARING coverage retained: the precision pins in
+/// `single_span_anchor_parser_is_precise`,
+/// `bare_ident_validator_file_stem_prose_and_examples_tests`, and the new
+/// `bare_ident_stale_is_zero_and_keyword_led_drift_is_gated` test prove (a) a
+/// keyword-led wrong-file IS caught as `Stale` (so the keyword gate stays
+/// load-bearing), (b) a bare consumer-citation is `Prose`, and (c) a
+/// nonexistent file is `Unresolvable` for both kinds. The bare-ident matcher +
+/// validator + crate-disambiguating resolver are further proven by the
+/// `divergence_single_span_anchor_resolver.rs` pins.
 #[test]
 fn all_design_docs_single_span_anchors_resolve_at_head() {
     let root = workspace_root();
@@ -2742,7 +2906,7 @@ fn all_design_docs_single_span_anchors_resolve_at_head() {
     let mut failures: Vec<String> = Vec::new();
     let mut total = 0usize;
     let mut bare_ident_seen = 0usize;
-    let mut bare_ident_stale_residual = 0usize;
+    let mut bare_ident_stale = 0usize;
     for doc in &docs {
         let text = match fs::read_to_string(root.join(doc)) {
             Ok(t) => t,
@@ -2769,10 +2933,15 @@ fn all_design_docs_single_span_anchors_resolve_at_head() {
                     }
                     AnchorOutcome::Stale => {
                         if is_bare {
-                            // ESCALATED staged-cleanup residual — see doc above.
-                            bare_ident_stale_residual += 1;
-                        } else if let Some(m) = msg {
-                            // Keyword-led Stale IS gated (precise decl-shape).
+                            // #1669 final: bare-ident `Stale` is now structurally
+                            // unreachable (a not-declared bare-ident reclassifies
+                            // to `Prose`). Count it AND fail the gate if it ever
+                            // recurs — the reclassification rule has regressed.
+                            bare_ident_stale += 1;
+                        }
+                        if let Some(m) = msg {
+                            // Keyword-led Stale IS gated (precise decl-shape);
+                            // bare-ident Stale (if it ever recurs) is gated too.
                             failures.push(m);
                         }
                     }
@@ -2788,22 +2957,22 @@ fn all_design_docs_single_span_anchors_resolve_at_head() {
         "expected >=500 keyword-led single-span symbol anchors across .design/, found {total} — has the parser stopped matching the `<decl> in <path>.rs` form?",
     );
     // The #1669 bare-ident matcher is load-bearing: it must keep finding the
-    // dominant bare form (so the staged-cleanup escalation stays meaningful).
+    // dominant bare form (so the bare-ident gate stays meaningful).
     assert!(
         bare_ident_seen >= 500,
         "expected the #1669 bare-ident matcher to find >=500 bare `<ident> in <path>.rs` anchors, found {bare_ident_seen} — has the bare-ident parser regressed?",
     );
-    // The escalated bare-ident `Stale` residual is tracked (not gated). If it
-    // GROWS materially the cleanup campaign has regressed; if it COLLAPSES the
-    // bare-ident matcher / resolver tightening has over-excluded. This window
-    // pins the documented escalation state at adoption time (~290 lines).
-    assert!(
-        bare_ident_stale_residual <= 360,
-        "bare-ident STALE residual grew to {bare_ident_stale_residual} (>360) — the escalated cleanup campaign has regressed or a new flood of bare anchors landed; re-run report_single_span_anchor_counts and triage.",
+    // #1669 final: bare-ident `Stale` is fully adopted into the gate and MUST be
+    // ZERO. The `<=360` escalation ceiling is removed; any bare-ident `Stale`
+    // means the prose-reclassification rule regressed and is a hard failure
+    // (it is also folded into `failures` above so the assert below catches it).
+    assert_eq!(
+        bare_ident_stale, 0,
+        "bare-ident STALE must be 0 (#1669 final): a not-declared bare-ident reclassifies to Prose; a nonzero count means the reclassification rule regressed.",
     );
     assert!(
         failures.is_empty(),
-        "{n} single-span symbol anchor(s) are STALE (keyword-led) / UNRESOLVABLE (any kind) out of {total} keyword-led + {bare_ident_seen} bare-ident scanned (#1668/#1669 crate-disambiguating resolver / goal.md S3 R-CITE-2b):\n\n{body}",
+        "{n} single-span symbol anchor(s) are STALE (keyword-led + bare-ident) / UNRESOLVABLE (any kind) out of {total} keyword-led + {bare_ident_seen} bare-ident scanned (#1668/#1669 crate-disambiguating resolver / goal.md S3 R-CITE-2b):\n\n{body}",
         n = failures.len(),
         body = failures.join("\n\n"),
     );
