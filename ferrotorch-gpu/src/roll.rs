@@ -44,6 +44,7 @@
 //! | REQ-3 (precondition / normalisation contract) | SHIPPED | precondition checks in `roll.rs` (`dim_size == 0` rejection, `shift_norm >= dim_size` rejection); negative-shift normalisation contract documented in module `//!` block and exercised by `roll_negative_shift_via_normalization_matches_cpu` |
 //! | REQ-4 (input validation) | SHIPPED | device-ordinal check, length check, u32-overflow check inside `pub fn gpu_roll_f32 in roll.rs` |
 //! | REQ-5 (re-export + consumer wiring) | SHIPPED | `pub use roll::gpu_roll_f32 in lib.rs`; consumer `CudaBackendImpl::roll_f32 in backend_impl.rs` (the trait method ferrotorch-core dispatches GPU rolls through, registered via `init_cuda_backend`) |
+//! | REQ-6 (f64 roll) | SHIPPED | `pub fn gpu_roll_f64` + `pub(crate) const ROLL_F64_PTX in roll.rs` are the f64 siblings of REQ-1/REQ-2 (identical index map, 8-byte element stride); consumer `CudaBackendImpl::roll_f64 in backend_impl.rs`, dispatched from `ops::tensor_ops::roll`'s f64 CUDA branch (#1545 / sub #1535) |
 
 #[cfg(feature = "cuda")]
 use cudarc::driver::{LaunchConfig, PushKernelArg};
@@ -55,7 +56,7 @@ use crate::device::GpuDevice;
 #[cfg(feature = "cuda")]
 use crate::error::{GpuError, GpuResult};
 #[cfg(feature = "cuda")]
-use crate::transfer::alloc_zeros_f32;
+use crate::transfer::{alloc_zeros_f32, alloc_zeros_f64};
 
 /// PTX source for the f32 roll forward kernel.
 ///
@@ -318,6 +319,222 @@ pub fn gpu_roll_f32(
     Ok(out)
 }
 
+/// PTX source for the f64 roll forward kernel.
+///
+/// Bit-for-bit the same index map as [`ROLL_F32_PTX`]; the only differences
+/// are the element register type (`.f64` instead of `.f32`) and the element
+/// stride used to convert a flat index into a byte offset (`shl.b64 .., 3`
+/// for 8-byte f64 elements instead of `.., 2` for 4-byte f32). `roll` is pure
+/// index movement (a circular shift / gather) with no arithmetic on the loaded
+/// values, so the f64 path is exact (a relocating memcpy).
+///
+/// ABI: `(in_ptr, out_ptr, outer, dim_size, inner, shift_norm, total)`
+/// where `total = outer * dim_size * inner` and `0 <= shift_norm < dim_size`.
+#[cfg(feature = "cuda")]
+pub(crate) const ROLL_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry roll_f64_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 outer,
+    .param .u32 dim_size,
+    .param .u32 inner,
+    .param .u32 shift_norm,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %out_idx, %total_r;
+    .reg .u32 %outer_r, %dim_r, %inner_r, %shift_r;
+    .reg .u32 %dim_inner, %o, %tmp, %rem, %k_new, %i_idx;
+    .reg .u32 %k_src, %src_idx, %sum;
+    .reg .u64 %in_p, %out_p, %off, %addr;
+    .reg .f64 %val;
+    .reg .pred %p_oob;
+
+    ld.param.u64 %in_p,    [in_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %outer_r, [outer];
+    ld.param.u32 %dim_r,   [dim_size];
+    ld.param.u32 %inner_r, [inner];
+    ld.param.u32 %shift_r, [shift_norm];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %out_idx, %bid_r, %bdim_r, %tid_r;
+
+    setp.ge.u32 %p_oob, %out_idx, %total_r;
+    @%p_oob bra DONE;
+
+    mul.lo.u32 %dim_inner, %dim_r, %inner_r;
+
+    div.u32 %o, %out_idx, %dim_inner;
+    mul.lo.u32 %tmp, %o, %dim_inner;
+    sub.u32 %rem, %out_idx, %tmp;
+
+    div.u32 %k_new, %rem, %inner_r;
+    mul.lo.u32 %tmp, %k_new, %inner_r;
+    sub.u32 %i_idx, %rem, %tmp;
+
+    sub.u32 %tmp, %dim_r, %shift_r;
+    add.u32 %sum, %k_new, %tmp;
+    rem.u32 %k_src, %sum, %dim_r;
+
+    mul.lo.u32 %src_idx, %o, %dim_r;
+    add.u32 %src_idx, %src_idx, %k_src;
+    mul.lo.u32 %src_idx, %src_idx, %inner_r;
+    add.u32 %src_idx, %src_idx, %i_idx;
+
+    cvt.u64.u32 %off, %src_idx;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %in_p, %off;
+    ld.global.f64 %val, [%addr];
+
+    cvt.u64.u32 %off, %out_idx;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %out_p, %off;
+    st.global.f64 [%addr], %val;
+
+DONE:
+    ret;
+}
+";
+
+/// GPU forward roll on a contiguous f64 buffer factored as
+/// `outer * dim_size * inner`.
+///
+/// The f64 sibling of [`gpu_roll_f32`] — same `(outer, dim_size, inner)`
+/// factorisation and same index map; only the element width differs. Because
+/// `roll` performs no arithmetic on the values (a pure relocating gather), the
+/// f64 result is bit-exact with the CPU `roll_cpu_inner` path. See
+/// [`gpu_roll_f32`] for the full argument / error / SAFETY contract.
+#[cfg(feature = "cuda")]
+pub fn gpu_roll_f64(
+    input: &CudaBuffer<f64>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    shift_norm: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    if input.device_ordinal() != device.ordinal() {
+        return Err(GpuError::DeviceMismatch {
+            expected: device.ordinal(),
+            got: input.device_ordinal(),
+        });
+    }
+
+    let expected_len = outer.saturating_mul(dim_size).saturating_mul(inner);
+    if input.len() != expected_len {
+        return Err(GpuError::ShapeMismatch {
+            op: "roll_f64",
+            expected: vec![outer, dim_size, inner],
+            got: vec![input.len()],
+        });
+    }
+
+    if dim_size == 0 {
+        return Err(GpuError::ShapeMismatch {
+            op: "roll_f64",
+            expected: vec![outer, 1, inner],
+            got: vec![outer, 0, inner],
+        });
+    }
+    if shift_norm >= dim_size {
+        return Err(GpuError::ShapeMismatch {
+            op: "roll_f64",
+            expected: vec![dim_size.saturating_sub(1)],
+            got: vec![shift_norm],
+        });
+    }
+
+    let total = expected_len;
+    if total == 0 {
+        return alloc_zeros_f64(0, device);
+    }
+    if total > u32::MAX as usize {
+        return Err(GpuError::ShapeMismatch {
+            op: "roll_f64",
+            expected: vec![u32::MAX as usize],
+            got: vec![total],
+        });
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        ROLL_F64_PTX,
+        "roll_f64_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "roll_f64_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = alloc_zeros_f64(total, device)?;
+
+    let outer_u32 = outer as u32;
+    let dim_size_u32 = dim_size as u32;
+    let inner_u32 = inner as u32;
+    let shift_norm_u32 = shift_norm as u32;
+    let total_u32 = total as u32;
+
+    let block_dim: u32 = 256;
+    let grid_x = total_u32.div_ceil(block_dim);
+    let cfg = LaunchConfig {
+        grid_dim: (grid_x.max(1), 1, 1),
+        block_dim: (block_dim, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    // SAFETY:
+    // - `f` is the `CudaFunction` for `roll_f64_kernel` resolved by
+    //   `module_cache::get_or_compile(ctx, ROLL_F64_PTX, ...)`; the launch
+    //   ABI `(in, out, outer, dim_size, inner, shift_norm, total)` matches
+    //   the PTX `.entry` signature one-for-one. This is the f64 analogue of
+    //   the `gpu_roll_f32` launch and carries the identical index-map proof;
+    //   the only difference is the 8-byte (`shl.b64 .., 3`) element stride.
+    // - `input` lives on `device` (validated above) and has exactly
+    //   `total = outer * dim_size * inner` f64 elements (validated against
+    //   `expected_len`).
+    // - `out` was just allocated to `total` f64 elements by `alloc_zeros_f64`;
+    //   it cannot alias `input` (fresh `CudaSlice`, exclusive `&mut` borrow).
+    // - Grid is sized so every thread either has `out_idx < total` or exits
+    //   early via the `setp.ge.u32` predicate at the top of the PTX. For each
+    //   in-bounds thread `src_idx = (o*dim_size + k_src)*inner + i_idx` lies in
+    //   `[0, total)` because `k_src in [0, dim_size)`, placing every load
+    //   inside `input` and every store inside `out`.
+    // - `total` is range-checked above against `u32::MAX`, so the kernel's u32
+    //   index arithmetic cannot overflow.
+    // - cudarc copies the by-reference `u32` params into the launch parameter
+    //   buffer; their lifetime is tied to this stack frame which outlives the
+    //   synchronous `launch` call.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&outer_u32)
+            .arg(&dim_size_u32)
+            .arg(&inner_u32)
+            .arg(&shift_norm_u32)
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
     use super::*;
@@ -498,6 +715,70 @@ mod tests {
         let x = vec![0.0f32; 10];
         let xg = cpu_to_gpu(&x, &device).unwrap();
         let err = gpu_roll_f32(&xg, 2, 3, 2, 1, &device);
+        assert!(matches!(err, Err(GpuError::ShapeMismatch { .. })));
+    }
+
+    /// f64 CPU reference mirroring the kernel's index map exactly.
+    fn cpu_roll_ref_f64(
+        data: &[f64],
+        outer: usize,
+        dim_size: usize,
+        inner: usize,
+        shift_norm: usize,
+    ) -> Vec<f64> {
+        let mut out = vec![0.0f64; data.len()];
+        for o in 0..outer {
+            for k_new in 0..dim_size {
+                let k_src = (k_new + dim_size - shift_norm) % dim_size;
+                for i in 0..inner {
+                    let src = (o * dim_size + k_src) * inner + i;
+                    let dst = (o * dim_size + k_new) * inner + i;
+                    out[dst] = data[src];
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn roll_f64_1d_positive_shift_matches_cpu() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let (outer, dim_size, inner, shift) = (1, 8, 1, 3);
+        let x: Vec<f64> = (0..8).map(|i| i as f64 * 0.5 - 1.0).collect();
+        let xg = cpu_to_gpu(&x, &device).unwrap();
+        let yg = gpu_roll_f64(&xg, outer, dim_size, inner, shift, &device).unwrap();
+        let got = gpu_to_cpu(&yg, &device).unwrap();
+        let expected = cpu_roll_ref_f64(&x, outer, dim_size, inner, shift);
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn roll_f64_2d_inner_axis_matches_cpu() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let (outer, dim_size, inner, shift) = (3, 5, 1, 2);
+        let x: Vec<f64> = (0..15).map(|i| (i as f64).sin()).collect();
+        let xg = cpu_to_gpu(&x, &device).unwrap();
+        let yg = gpu_roll_f64(&xg, outer, dim_size, inner, shift, &device).unwrap();
+        let got = gpu_to_cpu(&yg, &device).unwrap();
+        let expected = cpu_roll_ref_f64(&x, outer, dim_size, inner, shift);
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn roll_f64_rejects_shift_at_dim_size() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let x = vec![0.0f64; 8];
+        let xg = cpu_to_gpu(&x, &device).unwrap();
+        let err = gpu_roll_f64(&xg, 1, 8, 1, 8, &device);
         assert!(matches!(err, Err(GpuError::ShapeMismatch { .. })));
     }
 }

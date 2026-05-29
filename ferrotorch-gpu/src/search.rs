@@ -65,9 +65,12 @@
 
 use cudarc::driver::{CudaSlice, LaunchConfig, PushKernelArg};
 
+use crate::buffer::CudaBuffer;
 use crate::device::GpuDevice;
 use crate::error::{GpuError, GpuResult};
+use crate::kernels::gpu_cumsum;
 use crate::module_cache::get_or_compile;
+use crate::transfer::{alloc_zeros_f32, alloc_zeros_f64, gpu_to_cpu};
 
 const BLOCK_SIZE: u32 = 256;
 
@@ -1444,6 +1447,575 @@ pub fn gpu_meshgrid_f64(
         MESHGRID_F64_PTX,
         "meshgrid_f64_kernel",
     )
+}
+
+// ===========================================================================
+// unique_consecutive — data-dependent run compaction (#1545)
+//
+// `torch.unique_consecutive` collapses each maximal RUN of equal adjacent
+// elements into a single output element. The output length is DATA-DEPENDENT
+// (unknown until the adjacency scan runs), which is the hard part on GPU. The
+// pipeline keeps the VALUE DATA on-device end-to-end:
+//
+//   1. RUN_FLAG kernel: flag[i] = (i == 0 || in[i] != in[i-1]) ? 1 : 0 — a
+//      device f32 buffer marking each run-start. `!=` uses `setp.ne` so NaN
+//      (where NaN != NaN) starts its own run, matching the CPU path's
+//      `data[i] == data[i-1]` (PartialEq, false for NaN).
+//   2. INCLUSIVE PREFIX SUM over the flags via the existing `gpu_cumsum`
+//      primitive (one flat axis: outer=1, dim_size=n, inner=1). `incl[i]` is
+//      the number of run-starts in `[0, i]`, so a run-start at `i` writes to
+//      output slot `incl[i] - 1` and the total output length is `incl[n-1]`.
+//   3. COMPACT kernel: each run-start `i` scatters `in[i]` to
+//      `out[(u32)incl[i] - 1]` — the compacted values stay on-device.
+//
+// The launcher reads back ONLY the `incl` array (a length-`n` f32 buffer of
+// derived run-position INDICES) to (a) size the output allocation, (b) build
+// the host `inverse` vector (`inverse[i] = incl[i] - 1`), and (c) build the
+// host `counts` vector (run lengths). This is NOT an R-CODE-4 value round trip:
+// the VALUE data never leaves the device and returns — only the freshly
+// computed integer run-position metadata is copied to host, exactly as
+// `searchsorted_1d` reads back its i64 indices while the value/boundary data
+// stays device-resident. The `inverse` / `counts` outputs are host `Vec<usize>`
+// BY the CPU `ops::search::unique_consecutive` signature (they were never
+// device tensors); the deduplicated VALUE tensor is the only result that stays
+// GPU-resident.
+//
+// RUN_FLAG ABI: (in_ptr, flag_ptr, n)
+//   in   : V[n]    (input values)
+//   flag : f32[n]  (1.0 at run-starts, else 0.0)
+//   n    : u32
+// COMPACT ABI: (in_ptr, incl_ptr, out_ptr, n)
+//   in   : V[n]      (input values)
+//   incl : f32[n]    (inclusive prefix sum of the run-start flags)
+//   out  : V[out_len](compacted run-start values)
+//   n    : u32
+// ===========================================================================
+
+/// f32 run-start flag kernel. One thread per element.
+const RUN_FLAG_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry run_flag_f32_kernel(
+    .param .u64 in_ptr,
+    .param .u64 flag_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %n_r;
+    .reg .u64 %in_p, %flag_p, %off, %addr, %prev_addr;
+    .reg .f32 %cur, %prev, %one, %zero;
+    .reg .pred %p_oob, %p_first, %p_ne;
+
+    ld.param.u64 %in_p,   [in_ptr];
+    ld.param.u64 %flag_p, [flag_ptr];
+    ld.param.u32 %n_r,    [n];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+
+    setp.ge.u32 %p_oob, %idx, %n_r;
+    @%p_oob bra DONE;
+
+    mov.f32 %one,  0f3F800000;
+    mov.f32 %zero, 0f00000000;
+
+    // off = idx * 4 (f32 element stride)
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in_p, %off;
+    ld.global.f32 %cur, [%addr];
+
+    // idx == 0 is always a run-start.
+    setp.eq.u32 %p_first, %idx, 0;
+    @%p_first bra WRITE_ONE;
+
+    // prev = in[idx-1]
+    sub.u64 %prev_addr, %addr, 4;
+    ld.global.f32 %prev, [%prev_addr];
+
+    // run-start iff cur != prev (NaN != anything -> true, its own run).
+    setp.ne.f32 %p_ne, %cur, %prev;
+    @%p_ne bra WRITE_ONE;
+
+    // not a run-start
+    add.u64 %addr, %flag_p, %off;
+    st.global.f32 [%addr], %zero;
+    bra DONE;
+
+WRITE_ONE:
+    add.u64 %addr, %flag_p, %off;
+    st.global.f32 [%addr], %one;
+
+DONE:
+    ret;
+}
+";
+
+/// f64 run-start flag kernel. One thread per element. The input is f64 (8-byte
+/// stride) but the flag output is f32 (4-byte), identical to the f32 variant.
+const RUN_FLAG_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry run_flag_f64_kernel(
+    .param .u64 in_ptr,
+    .param .u64 flag_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %n_r;
+    .reg .u64 %in_p, %flag_p, %ioff, %foff, %addr, %prev_addr;
+    .reg .f64 %cur, %prev;
+    .reg .f32 %one, %zero;
+    .reg .pred %p_oob, %p_first, %p_ne;
+
+    ld.param.u64 %in_p,   [in_ptr];
+    ld.param.u64 %flag_p, [flag_ptr];
+    ld.param.u32 %n_r,    [n];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+
+    setp.ge.u32 %p_oob, %idx, %n_r;
+    @%p_oob bra DONE;
+
+    mov.f32 %one,  0f3F800000;
+    mov.f32 %zero, 0f00000000;
+
+    // ioff = idx * 8 (f64 input stride); foff = idx * 4 (f32 flag stride)
+    cvt.u64.u32 %ioff, %idx;
+    shl.b64 %ioff, %ioff, 3;
+    cvt.u64.u32 %foff, %idx;
+    shl.b64 %foff, %foff, 2;
+    add.u64 %addr, %in_p, %ioff;
+    ld.global.f64 %cur, [%addr];
+
+    setp.eq.u32 %p_first, %idx, 0;
+    @%p_first bra WRITE_ONE;
+
+    sub.u64 %prev_addr, %addr, 8;
+    ld.global.f64 %prev, [%prev_addr];
+
+    setp.ne.f64 %p_ne, %cur, %prev;
+    @%p_ne bra WRITE_ONE;
+
+    add.u64 %addr, %flag_p, %foff;
+    st.global.f32 [%addr], %zero;
+    bra DONE;
+
+WRITE_ONE:
+    add.u64 %addr, %flag_p, %foff;
+    st.global.f32 [%addr], %one;
+
+DONE:
+    ret;
+}
+";
+
+/// f32 compaction scatter kernel. One thread per element; only run-starts
+/// store. `out_pos = (u32)incl[idx] - 1`.
+const COMPACT_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry compact_f32_kernel(
+    .param .u64 in_ptr,
+    .param .u64 incl_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %n_r, %pos;
+    .reg .u64 %in_p, %incl_p, %out_p, %off, %addr, %prev_addr, %ooff;
+    .reg .f32 %cur, %prev, %incl;
+    .reg .pred %p_oob, %p_first, %p_ne;
+
+    ld.param.u64 %in_p,   [in_ptr];
+    ld.param.u64 %incl_p, [incl_ptr];
+    ld.param.u64 %out_p,  [out_ptr];
+    ld.param.u32 %n_r,    [n];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+
+    setp.ge.u32 %p_oob, %idx, %n_r;
+    @%p_oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in_p, %off;
+    ld.global.f32 %cur, [%addr];
+
+    // Re-derive run-start from the data (same predicate as RUN_FLAG).
+    setp.eq.u32 %p_first, %idx, 0;
+    @%p_first bra DO_STORE;
+    sub.u64 %prev_addr, %addr, 4;
+    ld.global.f32 %prev, [%prev_addr];
+    setp.ne.f32 %p_ne, %cur, %prev;
+    @%p_ne bra DO_STORE;
+    bra DONE;
+
+DO_STORE:
+    // pos = (u32)incl[idx] - 1
+    add.u64 %addr, %incl_p, %off;
+    ld.global.f32 %incl, [%addr];
+    cvt.rzi.u32.f32 %pos, %incl;
+    sub.u32 %pos, %pos, 1;
+    // out[pos] = cur
+    cvt.u64.u32 %ooff, %pos;
+    shl.b64 %ooff, %ooff, 2;
+    add.u64 %addr, %out_p, %ooff;
+    st.global.f32 [%addr], %cur;
+
+DONE:
+    ret;
+}
+";
+
+/// f64 compaction scatter kernel. f64 input/output (8-byte stride); `incl` is
+/// f32 (4-byte stride).
+const COMPACT_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry compact_f64_kernel(
+    .param .u64 in_ptr,
+    .param .u64 incl_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %n_r, %pos;
+    .reg .u64 %in_p, %incl_p, %out_p, %ioff, %foff, %addr, %prev_addr, %ooff;
+    .reg .f64 %cur, %prev;
+    .reg .f32 %incl;
+    .reg .pred %p_oob, %p_first, %p_ne;
+
+    ld.param.u64 %in_p,   [in_ptr];
+    ld.param.u64 %incl_p, [incl_ptr];
+    ld.param.u64 %out_p,  [out_ptr];
+    ld.param.u32 %n_r,    [n];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+
+    setp.ge.u32 %p_oob, %idx, %n_r;
+    @%p_oob bra DONE;
+
+    cvt.u64.u32 %ioff, %idx;
+    shl.b64 %ioff, %ioff, 3;
+    add.u64 %addr, %in_p, %ioff;
+    ld.global.f64 %cur, [%addr];
+
+    setp.eq.u32 %p_first, %idx, 0;
+    @%p_first bra DO_STORE;
+    sub.u64 %prev_addr, %addr, 8;
+    ld.global.f64 %prev, [%prev_addr];
+    setp.ne.f64 %p_ne, %cur, %prev;
+    @%p_ne bra DO_STORE;
+    bra DONE;
+
+DO_STORE:
+    cvt.u64.u32 %foff, %idx;
+    shl.b64 %foff, %foff, 2;
+    add.u64 %addr, %incl_p, %foff;
+    ld.global.f32 %incl, [%addr];
+    cvt.rzi.u32.f32 %pos, %incl;
+    sub.u32 %pos, %pos, 1;
+    cvt.u64.u32 %ooff, %pos;
+    shl.b64 %ooff, %ooff, 3;
+    add.u64 %addr, %out_p, %ooff;
+    st.global.f64 [%addr], %cur;
+
+DONE:
+    ret;
+}
+";
+
+/// Launch a run-flag kernel over `input` (`n` elements) into a fresh f32 flag
+/// buffer, then inclusive-prefix-sum the flags on-device.
+///
+/// Returns `(incl, out_len)` where `incl` is the device inclusive-scan buffer
+/// (`incl[i]` = number of run-starts in `[0, i]`) and `out_len = incl[n-1]`
+/// (the data-dependent number of unique consecutive runs). Caller guarantees
+/// `n > 0`.
+#[cfg(feature = "cuda")]
+fn run_flags_and_scan(
+    in_slice: &CudaSlice<impl cudarc::driver::DeviceRepr>,
+    n: usize,
+    device: &GpuDevice,
+    flag_ptx: &'static str,
+    flag_kernel: &'static str,
+) -> GpuResult<CudaBuffer<f32>> {
+    let stream = device.stream();
+    let ctx = device.context();
+
+    let mut flags = alloc_zeros_f32(n, device)?;
+    let n_u = n as u32;
+
+    let f = get_or_compile(ctx, flag_ptx, flag_kernel, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: flag_kernel,
+            source: e,
+        }
+    })?;
+    let block: u32 = 256;
+    let grid = (n as u32).div_ceil(block).max(1);
+    let cfg = LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (block, 1, 1),
+        shared_mem_bytes: 0,
+    };
+
+    // SAFETY:
+    // - `f` is the run-flag PTX entry `flag_kernel`; its 3-arg ABI
+    //   `(in_ptr, flag_ptr, n)` matches the args pushed below in order.
+    // - `in_slice` holds `n` value elements; thread `idx in [0, n)` reads
+    //   `in[idx]` (and, when `idx > 0`, `in[idx-1]`), strictly in range.
+    // - `flags` is a fresh `n`-element f32 buffer (just allocated), the only
+    //   `&mut` arg; the kernel writes exactly `flag[idx]` for `idx in [0, n)`.
+    //   It cannot alias `in_slice` (distinct cudarc allocation).
+    // - Threads with `idx >= n` exit via the leading `setp.ge.u32 %p_oob`.
+    // - `n` is bounded below (`n <= incl.len()`); the launcher's caller
+    //   range-checks `n` against `u32::MAX` before calling.
+    // - cudarc copies the by-reference `n_u` into the launch parameter buffer;
+    //   its lifetime spans this synchronous frame.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(in_slice)
+            .arg(flags.inner_mut())
+            .arg(&n_u)
+            .launch(cfg)?;
+    }
+
+    // Inclusive prefix-sum the run-start flags on-device (flat axis).
+    let incl = gpu_cumsum(&flags, 1, n, 1, device)?;
+    Ok(incl)
+}
+
+/// Build the host `inverse` and `counts` vectors from an inclusive run-start
+/// scan, and return the data-dependent output length.
+///
+/// `incl[i]` is the number of run-starts in `[0, i]`. The output index of
+/// element `i` is `inverse[i] = incl[i] - 1`. `counts[j]` is the run length of
+/// output run `j`, recovered by counting how many inputs map to each output
+/// slot. `out_len = incl[n-1]`.
+fn decode_runs(incl_host: &[f32]) -> (Vec<usize>, Vec<usize>, usize) {
+    let n = incl_host.len();
+    if n == 0 {
+        return (vec![], vec![], 0);
+    }
+    let out_len = incl_host[n - 1] as usize;
+    let mut inverse = vec![0usize; n];
+    let mut counts = vec![0usize; out_len];
+    for (i, &incl) in incl_host.iter().enumerate() {
+        // `incl >= 1` for every i (idx 0 is always a run-start, so the scan is
+        // monotone and starts at 1); `inv` is therefore in `[0, out_len)`.
+        let inv = (incl as usize) - 1;
+        inverse[i] = inv;
+        counts[inv] += 1;
+    }
+    (inverse, counts, out_len)
+}
+
+/// On-device `unique_consecutive` over an f32 value buffer (#1545).
+///
+/// Returns `(values, inverse, counts)`:
+/// - `values` — a fresh device `CudaBuffer<f32>` of `out_len` run-start values
+///   (the deduplicated output, GPU-resident).
+/// - `inverse` — host `Vec<usize>` of length `n`: each input's index in the
+///   output (`torch.unique_consecutive(return_inverse=True)`).
+/// - `counts` — host `Vec<usize>` of length `out_len`: the run length of each
+///   output element (`return_counts=True`).
+///
+/// Mirrors the CPU `ferrotorch_core::ops::search::unique_consecutive` run
+/// semantics exactly (NaN starts its own run because `NaN != NaN`). Only the
+/// derived run-position metadata is read back to host; the VALUE data stays
+/// on-device (no R-CODE-4 round trip).
+///
+/// # Errors
+///
+/// - [`GpuError::LengthMismatch`] when `n > u32::MAX`.
+/// - [`GpuError::PtxCompileFailed`] if a PTX module fails to compile.
+/// - [`GpuError::Driver`] on launch failure.
+#[cfg(feature = "cuda")]
+pub fn gpu_unique_consecutive_f32(
+    input: &CudaBuffer<f32>,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f32>, Vec<usize>, Vec<usize>)> {
+    if n == 0 {
+        return Ok((alloc_zeros_f32(0, device)?, vec![], vec![]));
+    }
+    if n > u32::MAX as usize {
+        return Err(GpuError::LengthMismatch {
+            a: n,
+            b: u32::MAX as usize,
+        });
+    }
+
+    let incl = run_flags_and_scan(
+        input.inner(),
+        n,
+        device,
+        RUN_FLAG_F32_PTX,
+        "run_flag_f32_kernel",
+    )?;
+    let incl_host = gpu_to_cpu(&incl, device)?;
+    let (inverse, counts, out_len) = decode_runs(&incl_host);
+
+    let mut out = alloc_zeros_f32(out_len, device)?;
+    launch_compact_f32(input, &incl, &mut out, n, device)?;
+    Ok((out, inverse, counts))
+}
+
+/// On-device `unique_consecutive` over an f64 value buffer. f64 counterpart of
+/// [`gpu_unique_consecutive_f32`]; the run-start scan still runs in f32 (the
+/// flags are 0/1, exact), only the value load/store width differs.
+///
+/// # Errors
+///
+/// See [`gpu_unique_consecutive_f32`].
+#[cfg(feature = "cuda")]
+pub fn gpu_unique_consecutive_f64(
+    input: &CudaBuffer<f64>,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f64>, Vec<usize>, Vec<usize>)> {
+    if n == 0 {
+        return Ok((alloc_zeros_f64(0, device)?, vec![], vec![]));
+    }
+    if n > u32::MAX as usize {
+        return Err(GpuError::LengthMismatch {
+            a: n,
+            b: u32::MAX as usize,
+        });
+    }
+
+    // The run-start scan runs in f32 (the flags are exact 0/1); only the value
+    // load/store width differs from the f32 path.
+    let incl = run_flags_and_scan(
+        input.inner(),
+        n,
+        device,
+        RUN_FLAG_F64_PTX,
+        "run_flag_f64_kernel",
+    )?;
+    let incl_host = gpu_to_cpu(&incl, device)?;
+    let (inverse, counts, out_len) = decode_runs(&incl_host);
+
+    let mut out = alloc_zeros_f64(out_len, device)?;
+    launch_compact_f64(input, &incl, &mut out, n, device)?;
+    Ok((out, inverse, counts))
+}
+
+/// Launch the f32 compaction scatter kernel.
+#[cfg(feature = "cuda")]
+fn launch_compact_f32(
+    input: &CudaBuffer<f32>,
+    incl: &CudaBuffer<f32>,
+    out: &mut CudaBuffer<f32>,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<()> {
+    let stream = device.stream();
+    let ctx = device.context();
+    let f = get_or_compile(
+        ctx,
+        COMPACT_F32_PTX,
+        "compact_f32_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "compact_f32_kernel",
+        source: e,
+    })?;
+    let block: u32 = 256;
+    let grid = (n as u32).div_ceil(block).max(1);
+    let cfg = LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (block, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let n_u = n as u32;
+    // SAFETY:
+    // - `f` is the `compact_f32_kernel` PTX entry; its 4-arg ABI
+    //   `(in_ptr, incl_ptr, out_ptr, n)` matches the args pushed below.
+    // - `input` and `incl` each hold `n` f32 elements; thread `idx in [0, n)`
+    //   reads `in[idx]` / `in[idx-1]` / `incl[idx]`, all in range.
+    // - `out` is the only `&mut` arg, freshly allocated with `out_len`
+    //   elements. Each run-start thread writes `out[(u32)incl[idx]-1]`; because
+    //   `incl` is the monotone inclusive scan of the run-start flags (idx 0 is
+    //   a run-start so `incl >= 1`), the write index lies in `[0, out_len)` and
+    //   each output slot is written by exactly one run-start thread (no data
+    //   race). `out` cannot alias `input`/`incl` (distinct allocations).
+    // - Threads with `idx >= n` exit via the leading `setp.ge.u32 %p_oob`.
+    // - cudarc copies `n_u` by reference into the launch buffer for this frame.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(incl.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u)
+            .launch(cfg)?;
+    }
+    Ok(())
+}
+
+/// Launch the f64 compaction scatter kernel.
+#[cfg(feature = "cuda")]
+fn launch_compact_f64(
+    input: &CudaBuffer<f64>,
+    incl: &CudaBuffer<f32>,
+    out: &mut CudaBuffer<f64>,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<()> {
+    let stream = device.stream();
+    let ctx = device.context();
+    let f = get_or_compile(
+        ctx,
+        COMPACT_F64_PTX,
+        "compact_f64_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "compact_f64_kernel",
+        source: e,
+    })?;
+    let block: u32 = 256;
+    let grid = (n as u32).div_ceil(block).max(1);
+    let cfg = LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (block, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let n_u = n as u32;
+    // SAFETY: identical contract to `launch_compact_f32`; the only differences
+    // are the f64 value load/store width (8 bytes) and the f64 `compact_f64`
+    // entry. `incl` is still an f32 inclusive scan of `n` run-start flags;
+    // `out` is a fresh `out_len`-element f64 buffer, each slot written once.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(incl.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u)
+            .launch(cfg)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

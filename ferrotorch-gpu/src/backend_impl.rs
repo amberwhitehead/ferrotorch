@@ -3925,6 +3925,21 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
+    fn roll_f64(
+        &self,
+        a: &GpuBufferHandle,
+        outer: usize,
+        dim_size: usize,
+        inner: usize,
+        shift_norm: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::roll::gpu_roll_f64(a_buf, outer, dim_size, inner, shift_norm, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
     // -- Triangular masks: triu / tril (#1545 / sub #1535) -------------------
     //
     // Gated `#[cfg(feature = "cuda")]` (the `triangular` module is cuda-only,
@@ -7291,6 +7306,36 @@ impl GpuBackend for CudaBackendImpl {
             }
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!("meshgrid_grid: unsupported value dtype {other}"),
+            }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn unique_consecutive_1d(
+        &self,
+        input: &GpuBufferHandle,
+        n: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, Vec<usize>, Vec<usize>)> {
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        match input.dtype() {
+            DType::F32 => {
+                let (values, inverse, counts) =
+                    crate::search::gpu_unique_consecutive_f32(Self::unwrap_buffer(input)?, n, dev)
+                        .map_err(Self::map_gpu_err)?;
+                Ok((Self::wrap_buffer(values, ord), inverse, counts))
+            }
+            DType::F64 => {
+                let (values, inverse, counts) = crate::search::gpu_unique_consecutive_f64(
+                    Self::unwrap_buffer_f64(input)?,
+                    n,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok((Self::wrap_buffer_f64(values, ord), inverse, counts))
+            }
+            other => Err(FerrotorchError::InvalidArgument {
+                message: format!("unique_consecutive_1d: unsupported value dtype {other}"),
             }),
         }
     }

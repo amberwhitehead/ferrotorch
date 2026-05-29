@@ -1,4 +1,4 @@
-# GPU roll forward kernel (f32)
+# GPU roll forward kernel (f32 / f64)
 
 <!--
 tier: 3-component
@@ -42,6 +42,15 @@ the global `module_cache::get_or_compile` cache. Mirrors upstream
 - REQ-5: Non-test production consumer wiring: ferrotorch-core dispatches
   GPU rolls through the `CudaBackendImpl::roll_f32` trait method which
   calls into this kernel.
+- REQ-6: f64 roll. `pub fn gpu_roll_f64` + `pub(crate) const ROLL_F64_PTX`
+  are the f64 siblings of REQ-1/REQ-2 — identical `(outer, dim_size, inner)`
+  factorisation and identical index map, differing only in the element
+  register type (`.f64`) and the 8-byte element stride (`shl.b64 .., 3`).
+  Because `roll` performs no arithmetic on the loaded values (a pure
+  relocating gather), the f64 path is bit-exact (no transcendentals). The
+  non-test production consumer is `CudaBackendImpl::roll_f64`, dispatched from
+  `ferrotorch_core::ops::tensor_ops::roll`'s f64 CUDA branch (#1545 / sub
+  #1535).
 
 ## Acceptance Criteria
 
@@ -59,6 +68,13 @@ the global `module_cache::get_or_compile` cache. Mirrors upstream
 - [x] AC-5: SAFETY comment on the single `unsafe { ... .launch(cfg) }`
   block documents the buffer lengths, grid sizing, and the in-bounds
   guarantee on the kernel index map.
+- [x] AC-6: `pub fn gpu_roll_f64` exists with the f64-typed signature;
+  3 f64 unit tests (`roll_f64_1d_positive_shift_matches_cpu`,
+  `roll_f64_2d_inner_axis_matches_cpu`, `roll_f64_rejects_shift_at_dim_size`)
+  plus the live-GPU consumer tests `roll_f64_1d_positive_and_negative_match_torch`
+  / `roll_f64_2d_per_dim_matches_torch` in
+  `ferrotorch-gpu/tests/divergence_roll_f64_unique_consecutive_gpu.rs` assert
+  the f64 result `is_cuda()` and matches `torch.roll` (and the CPU path).
 
 ## Architecture
 
@@ -118,7 +134,7 @@ Edge cases preserved:
 
 ## Verification
 
-Unit tests in `ferrotorch-gpu/src/roll.rs` `mod tests` (8 tests):
+Unit tests in `ferrotorch-gpu/src/roll.rs` `mod tests` (11 tests):
 
 - `roll_1d_positive_shift_matches_cpu`
 - `roll_2d_inner_axis_matches_cpu`
@@ -128,6 +144,15 @@ Unit tests in `ferrotorch-gpu/src/roll.rs` `mod tests` (8 tests):
 - `roll_zero_shift_is_identity`
 - `roll_rejects_shift_at_dim_size`
 - `roll_rejects_wrong_length`
+- `roll_f64_1d_positive_shift_matches_cpu`
+- `roll_f64_2d_inner_axis_matches_cpu`
+- `roll_f64_rejects_shift_at_dim_size`
+
+Live-GPU consumer-path tests in
+`ferrotorch-gpu/tests/divergence_roll_f64_unique_consecutive_gpu.rs` assert
+the f64 `roll` result `is_cuda()` and matches `torch.roll` / the CPU path
+(`roll_f64_1d_positive_and_negative_match_torch`,
+`roll_f64_2d_per_dim_matches_torch`, plus an f32 no-regression guard).
 
 Each test that runs on hardware uses the `match GpuDevice::new(0)`
 graceful-skip pattern: on a host without CUDA the test returns
@@ -151,3 +176,4 @@ without CUDA).
 | REQ-3 | SHIPPED | impl: precondition checks at `roll.rs` lines 200-213 (`dim_size == 0` rejection, `shift_norm >= dim_size` rejection); negative-shift normalisation contract documented at lines 162-165 and exercised by `roll_negative_shift_via_normalization_matches_cpu`. |
 | REQ-4 | SHIPPED | impl: device-ordinal check at `roll in roll.rs`, length check at line 192, u32-overflow check at line 221. |
 | REQ-5 | SHIPPED | impl: `pub use roll::gpu_roll_f32` at `backend_impl in ferrotorch-gpu/src/lib.rs`; non-test consumer: `gpu_roll_f32 in backend_impl.rs` (the trait method `CudaBackendImpl::roll_f32` registered via `init_cuda_backend` is what ferrotorch-core dispatches GPU rolls through). |
+| REQ-6 | SHIPPED | impl: `pub fn gpu_roll_f64` + `pub(crate) const ROLL_F64_PTX in ferrotorch-gpu/src/roll.rs` (f64 sibling of REQ-1/REQ-2, 8-byte `shl.b64 .., 3` stride); re-export `pub use roll::{gpu_roll_f32, gpu_roll_f64} in ferrotorch-gpu/src/lib.rs`; non-test consumer: `CudaBackendImpl::roll_f64 in ferrotorch-gpu/src/backend_impl.rs` invokes `crate::roll::gpu_roll_f64`, dispatched from the `is_f64::<T>()` arm of `ferrotorch_core::ops::tensor_ops::roll`'s CUDA branch (`roll in ferrotorch-core/src/ops/tensor_ops.rs`). |

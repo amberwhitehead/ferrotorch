@@ -166,6 +166,35 @@ against torch 2.11 CUDA (values exact in all cases; gathered values exact).
   `ferrotorch-core/src/ops/search.rs::meshgrid`, which when ALL inputs are CUDA
   f32/f64 produces each axis grid through `GpuBackend::meshgrid_grid` and keeps
   every grid GPU-resident (`TensorStorage::gpu`) — no R-CODE-4 round trip.
+- REQ-19: `gpu_unique_consecutive_f32` / `gpu_unique_consecutive_f64` — given a
+  device value buffer of `n` elements, collapse each maximal RUN of equal
+  ADJACENT elements into a single output element. The output length is
+  DATA-DEPENDENT. The on-device pipeline is: (a) a `run_flag_{f32,f64}_kernel`
+  marks each element `flag[i] = (i==0 || in[i] != in[i-1]) ? 1 : 0` into a
+  device f32 buffer; (b) the existing `gpu_cumsum` primitive inclusive-prefix-
+  sums the flags (flat axis `outer=1, dim_size=n, inner=1`), so `incl[i]` is the
+  number of run-starts in `[0,i]` and `out_len = incl[n-1]`; (c) a
+  `compact_{f32,f64}_kernel` scatters each run-start value `in[i]` to
+  `out[(u32)incl[i] - 1]`. Returns `(CudaBuffer<V> values, Vec<usize> inverse,
+  Vec<usize> counts)`: `values` is the GPU-resident deduplicated output;
+  `inverse[i] = incl[i] - 1`; `counts[j]` is the run length of output run `j`.
+  NaN starts its own run (`setp.ne` is true for `NaN != NaN`), matching the CPU
+  PartialEq path. The flag scan runs in f32 for both dtypes (flags are exact
+  0/1); only the value load/store width differs (`shl.b64 .., 2` vs `.., 3`).
+- REQ-20: PTX + ABI for unique_consecutive. `RUN_FLAG_F32_PTX` /
+  `RUN_FLAG_F64_PTX` carry the 3-arg ABI `(in_ptr, flag_ptr, n)`;
+  `COMPACT_F32_PTX` / `COMPACT_F64_PTX` carry the 4-arg ABI `(in_ptr, incl_ptr,
+  out_ptr, n)`. Loaded via `module_cache::get_or_compile`. The trait surface is
+  `GpuBackend::unique_consecutive_1d(input, n) -> (GpuBufferHandle, Vec<usize>,
+  Vec<usize>)` in `ferrotorch-core/src/gpu_dispatch.rs`; dispatch wiring in
+  `CudaBackendImpl::unique_consecutive_1d` (`match dtype { F32, F64 }`, wrapping
+  values via `wrap_buffer{,_f64}`). The non-test production consumer is
+  `ferrotorch-core/src/ops/search.rs::unique_consecutive`, which on CUDA f32/f64
+  keeps the VALUES tensor GPU-resident (`TensorStorage::gpu`) and reads back
+  ONLY the derived run-position metadata to build the host `inverse` / `counts`
+  vectors (host `Vec<usize>` by the CPU signature) — the value data never leaves
+  the device and returns, so this is NOT an R-CODE-4 round trip (the same
+  contract as `searchsorted_1d` reading back its i64 indices).
 
 ## Acceptance Criteria
 
@@ -207,6 +236,20 @@ against torch 2.11 CUDA (values exact in all cases; gathered values exact).
   `view(view_shape).expand(shape)` CPU reference per axis.
 - [x] AC-17: the meshgrid result grids `is_cuda()`; the consumer
   `ferrotorch_core::meshgrid` returns CUDA tensors when all inputs are CUDA.
+- [x] AC-18: `unique_consecutive([1,1,2,3,3,3,1])` → values `[1,2,3,1]`,
+  inverse `[0,0,1,2,2,2,3]`, counts `[2,1,3,1]`, matching live
+  `torch.unique_consecutive(return_inverse=True, return_counts=True)` and the
+  CPU path (f32 + f64). Pinned by
+  `unique_consecutive_f{32,64}_runs_match_torch`.
+- [x] AC-19: no-duplicates input `[1,2,3,4,5]` → identity values, counts all
+  `1`; all-same input `[7,7,7,7]` → values `[7]`, counts `[4]`; 2-D input
+  flattens in C-order. Pinned by
+  `unique_consecutive_f32_no_duplicates_is_identity`,
+  `unique_consecutive_f32_all_same_collapses_to_one`,
+  `unique_consecutive_f64_2d_input_flattens_like_torch`.
+- [x] AC-20: the deduplicated values tensor `is_cuda()` (lives on device); only
+  the run-position metadata is read back to build `inverse` / `counts` (no
+  value round trip).
 
 ## Architecture
 
@@ -280,3 +323,5 @@ consumer path (result `is_cuda()` + torch value-match) is pinned by
 | REQ-16 | SHIPPED | `MESHGRID_F32_PTX` / `MESHGRID_F64_PTX in search.rs` carry the 5-arg ABI `(in,out,total,inner,axis_len)`; launcher forces `inner >= 1` (no zero-divisor) |
 | REQ-17 | SHIPPED | `fn meshgrid_grid in gpu_dispatch.rs` (`GpuBackend` trait method, same-dtype grid output); consumer `ops::search::meshgrid` GPU branch |
 | REQ-18 | SHIPPED | `CudaBackendImpl::meshgrid_grid in backend_impl.rs` dispatches `match dtype { F32, F64 }`, wraps via `wrap_slice_{f32,f64}`; non-test consumer `ferrotorch_core::ops::search::meshgrid` CUDA f32/f64 branch keeps each grid GPU-resident (`TensorStorage::gpu`, `meshgrid in ops/search.rs`) |
+| REQ-19 | SHIPPED | `pub fn gpu_unique_consecutive_f32` / `gpu_unique_consecutive_f64 in ferrotorch-gpu/src/search.rs` run the on-device run-flag → `gpu_cumsum` prefix-sum → compaction pipeline; consumer `CudaBackendImpl::unique_consecutive_1d in ferrotorch-gpu/src/backend_impl.rs` dispatches `match dtype { F32, F64 }` and wraps values via `wrap_buffer{,_f64}` |
+| REQ-20 | SHIPPED | `RUN_FLAG_F32_PTX`/`RUN_FLAG_F64_PTX` (3-arg `(in,flag,n)`) + `COMPACT_F32_PTX`/`COMPACT_F64_PTX` (4-arg `(in,incl,out,n)`) `in ferrotorch-gpu/src/search.rs`; trait `fn unique_consecutive_1d in ferrotorch-core/src/gpu_dispatch.rs`; re-export `pub use search::{gpu_unique_consecutive_f32, gpu_unique_consecutive_f64} in ferrotorch-gpu/src/lib.rs`; non-test consumer `ferrotorch_core::ops::search::unique_consecutive` CUDA f32/f64 branch keeps the deduplicated VALUES GPU-resident (`TensorStorage::gpu`, `unique_consecutive in ferrotorch-core/src/ops/search.rs`), reads back only run-position metadata for the host `inverse`/`counts` vectors (no R-CODE-4 value round trip) |

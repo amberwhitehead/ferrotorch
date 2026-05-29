@@ -269,7 +269,7 @@ pub use memory_guard::{
 pub use pool::{cached_bytes, empty_cache, empty_cache_all, round_len};
 pub use rng::{CudaRngManager, PhiloxGenerator, PhiloxState, cuda_rng_manager, fork_rng, join_rng};
 #[cfg(feature = "cuda")]
-pub use roll::gpu_roll_f32;
+pub use roll::{gpu_roll_f32, gpu_roll_f64};
 #[cfg(feature = "cuda")]
 pub use scatter_gather_kernels::{
     gpu_gather_dim_f32, gpu_gather_dim_f64, gpu_scatter_add_dim_f32, gpu_scatter_add_dim_f64,
@@ -278,7 +278,8 @@ pub use scatter_gather_kernels::{
 #[cfg(feature = "cuda")]
 pub use search::{
     gpu_histc_f32, gpu_histc_f64, gpu_meshgrid_f32, gpu_meshgrid_f64, gpu_searchsorted_f32,
-    gpu_searchsorted_f64, gpu_topk_f32, gpu_topk_f64,
+    gpu_searchsorted_f64, gpu_topk_f32, gpu_topk_f64, gpu_unique_consecutive_f32,
+    gpu_unique_consecutive_f64,
 };
 #[cfg(feature = "cuda")]
 pub use special::{

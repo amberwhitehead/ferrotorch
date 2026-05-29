@@ -17,7 +17,7 @@ upstream-paths:
 manipulation primitives: `triu` / `tril` (triangular masks),
 `diag` / `diagflat` (diagonal extraction and construction), `roll`
 (circular shift), and `cdist` (pairwise distance matrix). Each
-mirrors the same-named `torch.*` function. `roll` has a GPU f32 fast
+mirrors the same-named `torch.*` function. `roll` has a GPU f32+f64 fast
 path (cumulative-scan-style dispatch). `triu`/`tril` have GPU f32+f64
 fast paths (resident triangular-mask kernels in
 `ferrotorch-gpu/src/triangular.rs`, crosslink #1545 / sub #1535).
@@ -52,9 +52,9 @@ as `NotImplementedOnCuda`.
 - REQ-4: `diagflat(input, diagonal)` — flatten input then build a
   2-D diagonal matrix. Mirrors `torch.diagflat`.
 - REQ-5: `roll(input, shifts, dim)` — circular shift along a
-  dimension. Wraps elements past the end. Has GPU f32 fast path via
-  `backend.roll_f32` (other dtypes / GPU paths error with
-  `NotImplementedOnCuda`). Autograd: when `input.requires_grad()`,
+  dimension. Wraps elements past the end. Has GPU f32+f64 fast path via
+  `backend.roll_f32` / `backend.roll_f64` (#1545; other dtypes / GPU paths
+  error with `NotImplementedOnCuda`). Autograd: when `input.requires_grad()`,
   attaches `RollBackward` that pushes gradients back through the
   inverse shift. Mirrors `torch.roll`.
 - REQ-6: `cdist(x1, x2, p)` — pairwise Lp distance matrix. Accepts
@@ -120,9 +120,9 @@ kernel, then for the CPU path walks every `(b, r, c)` slot, emitting
    short-circuits to `shift_norm = 0`.
 3. `shift_norm == 0` → return `input.clone()` (preserves the
    upstream grad_fn).
-4. GPU f32 fast path: if `input.is_cuda()` and `T ==
-   f32`, call `backend.roll_f32(handle, outer, dim_size, inner,
-   shift_norm)`. Other GPU dtypes return `NotImplementedOnCuda`.
+4. GPU f32/f64 fast path: if `input.is_cuda()` and `T ∈ {f32, f64}`,
+   call `backend.roll_f32` / `backend.roll_f64(handle, outer, dim_size,
+   inner, shift_norm)`. Other GPU dtypes return `NotImplementedOnCuda`.
 5. CPU path: call `roll_cpu_inner(&data, shape,
    shift_norm, dim)`.
 6. Autograd: when `requires_grad() && is_grad_enabled`,
@@ -175,6 +175,6 @@ grad_fns::shape::tests::roll_*` covers the autograd path.
 | REQ-2 | SHIPPED | impl: `tril` in `ops/tensor_ops.rs` (CPU + the `input.is_cuda()` GPU f32/f64 branch calling `backend.tril_f32`/`tril_f64`); GPU kernel `gpu_tril_f32`/`gpu_tril_f64` in `ferrotorch-gpu/src/triangular.rs`; non-test consumer: re-exported as `ferrotorch_core::tril` in `lib.rs`; GPU consumer: the `is_cuda()` branch of `tril` in `ops/tensor_ops.rs` dispatches `CudaBackendImpl::tril_f32`/`tril_f64` in `ferrotorch-gpu/src/backend_impl.rs` |
 | REQ-3 | SHIPPED | impl: `diag in ops/tensor_ops.rs` (CPU + the `input.is_cuda()` GPU f32/f64 branch calling `backend.diag_embed_f32`/`diag_extract_f32` etc.); GPU kernels `gpu_diag_embed_f32`/`gpu_diag_extract_f32` (+f64) in `ferrotorch-gpu/src/diag.rs`; non-test consumer: re-exported as `ferrotorch_core::diag in lib.rs`; GPU consumer: the `is_cuda()` branch of `diag` in `ops/tensor_ops.rs` dispatches `CudaBackendImpl::diag_embed_f32`/`diag_extract_f32` (+f64) in `ferrotorch-gpu/src/backend_impl.rs` |
 | REQ-4 | SHIPPED | impl: `diagflat in ops/tensor_ops.rs` flattens via the device-aware `Tensor::view_reshape` (GPU-resident) then delegates to `diag`, so CUDA inputs ride the `diag` GPU fast path; non-test consumer: re-exported as `ferrotorch_core::diagflat in lib.rs` |
-| REQ-5 | SHIPPED | impl: `roll in ops/tensor_ops.rs`; non-test consumer: re-exported as `ferrotorch_core::roll in lib.rs`. The autograd-attached `RollBackward` is the consumer of REQ-7's shared inner kernel |
+| REQ-5 | SHIPPED | impl: `roll in ops/tensor_ops.rs` (CPU + GPU f32/f64 `is_cuda()` branch); non-test consumer: re-exported as `ferrotorch_core::roll in lib.rs`. The autograd-attached `RollBackward` is the consumer of REQ-7's shared inner kernel. GPU f64 (#1545): kernel `gpu_roll_f64 in ferrotorch-gpu/src/roll.rs`, GPU consumer `CudaBackendImpl::roll_f64 in ferrotorch-gpu/src/backend_impl.rs`, dispatched from the `is_f64::<T>()` arm of the `roll` CUDA branch |
 | REQ-6 | SHIPPED | impl: `cdist in ops/tensor_ops.rs` (CPU + the `is_cuda()` GPU branch calling `backend.cdist_f32`/`cdist_f64`, gated by `gpu_dispatch::cdist_supported_f32`/`_f64`); GPU kernel `gpu_cdist_f32`/`gpu_cdist_f64` in `ferrotorch-gpu/src/distance.rs`; non-test consumer: re-exported as `ferrotorch_core::cdist in lib.rs`; GPU consumer: the `is_cuda()` branch of `cdist` in `ops/tensor_ops.rs` dispatches `CudaBackendImpl::cdist_f32`/`cdist_f64` in `ferrotorch-gpu/src/backend_impl.rs` |
 | REQ-7 | SHIPPED | impl: `roll_cpu_inner in ops/tensor_ops.rs`; non-test consumer: `crate::grad_fns::shape::RollBackward::backward in grad_fns/shape.rs` invokes `crate::ops::tensor_ops::roll_cpu_inner` for the backward shift |

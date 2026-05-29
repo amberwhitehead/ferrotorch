@@ -35,7 +35,11 @@ under #1545).
   return_counts=True)`.
 - REQ-4: `unique_consecutive(input)` — same return tuple but
   collapses only adjacent-equal runs. Mirrors
-  `torch.unique_consecutive`.
+  `torch.unique_consecutive`. CUDA f32/f64 run the data-dependent run
+  compaction on-device (run-flag → prefix-sum → scatter) via
+  `GpuBackend::unique_consecutive_1d` (#1545); the deduplicated VALUES stay
+  GPU-resident and only the run-position metadata is read back for the host
+  `inverse` / `counts` vectors (no value round trip).
 - REQ-5: `histc(input, bins, min, max)` — `bins`-bucket histogram of
   the flattened input. Out-of-range elements (and `NaN`) are SKIPPED,
   matching torch's `if (bVal >= minvalue && bVal <= maxvalue)` guard
@@ -169,7 +173,7 @@ clamping) paths.
 | REQ-1 | SHIPPED | impl: `searchsorted in ops/search.rs`; non-test consumer: re-exported as `ferrotorch_core::searchsorted` (boundary public API per goal.md S5). CUDA f32/f64 lower on-device via `GpuBackend::searchsorted_1d` (`gpu_searchsorted_f32`/`_f64 in ferrotorch-gpu/src/search.rs`); #1545. |
 | REQ-2 | SHIPPED | impl: `bucketize in ops/search.rs`; non-test consumer: re-exported as `ferrotorch_core::bucketize`. Inherits the CUDA GPU path through its delegation to `searchsorted`. |
 | REQ-3 | SHIPPED | impl: `unique in ops/search.rs`; non-test consumer: re-exported as `ferrotorch_core::unique` |
-| REQ-4 | SHIPPED | impl: `unique_consecutive in ops/search.rs`; non-test consumer: re-exported as `ferrotorch_core::unique_consecutive` |
+| REQ-4 | SHIPPED | impl: `unique_consecutive in ops/search.rs`; non-test consumer: re-exported as `ferrotorch_core::unique_consecutive`. CUDA f32/f64 lower the run compaction on-device via `GpuBackend::unique_consecutive_1d` (#1545); GPU impl `gpu_unique_consecutive_f32`/`_f64 in ferrotorch-gpu/src/search.rs`, GPU consumer `CudaBackendImpl::unique_consecutive_1d in ferrotorch-gpu/src/backend_impl.rs`; values stay GPU-resident, only run-position metadata read back. |
 | REQ-5 | SHIPPED | impl: `histc in ops/search.rs` (skips out-of-range/NaN per `SummaryOps.cu:92`; default `min==max` infers range per `:328-336`); non-test consumer: re-exported as `ferrotorch_core::histc`. CUDA f32/f64 via `GpuBackend::histc_1d` (#1545). |
 | REQ-6 | SHIPPED | impl: `meshgrid` + `meshgrid_indexing in ops/search.rs` (`MeshIndexing::Xy` swaps first two inputs+grids per `TensorShape.cpp:4433-4438,4470-4472`); non-test consumer: `meshgrid` delegates to `meshgrid_indexing`, both re-exported as `ferrotorch_core::{meshgrid, meshgrid_indexing}`. CUDA f32/f64 via `GpuBackend::meshgrid_grid` (#1545). |
 | REQ-7 | SHIPPED | impl: `topk in ops/search.rs`; non-test consumer: re-exported as `ferrotorch_core::topk`. CUDA f32/f64 via `GpuBackend::topk_1d` (#1545). |

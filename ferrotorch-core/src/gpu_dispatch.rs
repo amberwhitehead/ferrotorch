@@ -1897,6 +1897,22 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// f64 sibling of [`GpuBackend::roll_f32`] — same `(outer, dim_size,
+    /// inner)` factorization and `shift_norm` contract; only the element width
+    /// differs (`roll` is pure index movement, so the f64 path is exact).
+    fn roll_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+        _shift_norm: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "roll_f64 GPU op not yet implemented".into(),
+        })
+    }
+
     // -- Triangular masks: triu / tril (#1545 / sub #1535) -------------------
     //
     // `[batch.., rows, cols]` C-contiguous masks (`batch` = product of the
@@ -5066,6 +5082,37 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "meshgrid_grid",
+        })
+    }
+
+    /// On-device `unique_consecutive` over a GPU-resident 1-D value buffer
+    /// (#1545). Collapses each maximal RUN of equal ADJACENT elements into a
+    /// single output element, returning `(values, inverse, counts)`:
+    ///
+    /// - `values` — a value handle of `out_len` run-start values with the SAME
+    ///   `DType` as `input` (∈ {F32, F64}); the deduplicated output stays
+    ///   GPU-resident. `out_len` is DATA-DEPENDENT (the number of runs).
+    /// - `inverse` — host `Vec<usize>` of length `n`: each input element's
+    ///   index in `values` (`return_inverse=True`).
+    /// - `counts` — host `Vec<usize>` of length `out_len`: the length of each
+    ///   run (`return_counts=True`).
+    ///
+    /// Run detection uses value inequality of adjacent elements, so NaN starts
+    /// its own run (`NaN != NaN`), matching the CPU `ops::search`
+    /// `unique_consecutive` (`data[i] == data[i-1]`, PartialEq) bit-for-bit.
+    /// The compaction runs entirely on-device (run-flag → prefix-sum →
+    /// scatter); only the derived run-position metadata is read back to build
+    /// `inverse` / `counts` (host `Vec<usize>` by the CPU signature) — the
+    /// VALUE data never leaves the device (no R-CODE-4 round trip). The default
+    /// impl errors; the CUDA backend overrides it with the
+    /// `gpu_unique_consecutive_*` kernels.
+    fn unique_consecutive_1d(
+        &self,
+        _input: &GpuBufferHandle,
+        _n: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, Vec<usize>, Vec<usize>)> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "unique_consecutive_1d",
         })
     }
 

@@ -13,7 +13,7 @@
 //! | REQ-2 | SHIPPED | `tril` in `ops/tensor_ops.rs` (CPU + GPU f32/f64 `is_cuda()` branch); GPU kernel `gpu_tril_f32`/`gpu_tril_f64` in `ferrotorch-gpu/src/triangular.rs`; consumer: re-export in `lib.rs`; GPU consumer: `CudaBackendImpl::tril_f32`/`tril_f64` in `ferrotorch-gpu/src/backend_impl.rs` |
 //! | REQ-3 | SHIPPED | `diag` in `ops/tensor_ops.rs` (CPU + GPU f32/f64 `is_cuda()` branch); GPU kernels `gpu_diag_embed_f32`/`gpu_diag_extract_f32` (+f64) in `ferrotorch-gpu/src/diag.rs`; consumer: re-export `ferrotorch_core::diag` in `lib.rs`; GPU consumer: `CudaBackendImpl::diag_embed_f32`/`diag_extract_f32` (+f64) in `ferrotorch-gpu/src/backend_impl.rs` (crosslink #1545 / sub #1535) |
 //! | REQ-4 | SHIPPED | `diagflat` in `ops/tensor_ops.rs` flattens via device-aware `Tensor::view_reshape` then delegates to `diag` (so CUDA inputs ride the `diag` GPU fast path, GPU-resident); consumer: re-export `ferrotorch_core::diagflat` in `lib.rs` |
-//! | REQ-5 | SHIPPED | `roll` in `ops/tensor_ops.rs`; consumer: re-export `ferrotorch_core::roll` in `lib.rs`; `RollBackward` autograd |
+//! | REQ-5 | SHIPPED | `roll` in `ops/tensor_ops.rs` (CPU + GPU f32/f64 `is_cuda()` branch); consumer: re-export `ferrotorch_core::roll` in `lib.rs`; `RollBackward` autograd; GPU f64 kernel `gpu_roll_f64` in `ferrotorch-gpu/src/roll.rs`, GPU consumer `CudaBackendImpl::roll_f64` in `ferrotorch-gpu/src/backend_impl.rs` (crosslink #1545 / sub #1535) |
 //! | REQ-6 | SHIPPED | `cdist` in `ops/tensor_ops.rs` (CPU + GPU f32 {1,2,inf,general}/f64 {1,2,inf} `is_cuda()` branch); GPU kernel `gpu_cdist_f32`/`gpu_cdist_f64` in `ferrotorch-gpu/src/distance.rs`; consumer: re-export `ferrotorch_core::cdist` in `lib.rs`; GPU consumer: `CudaBackendImpl::cdist_f32`/`cdist_f64` in `ferrotorch-gpu/src/backend_impl.rs` |
 //! | REQ-7 | SHIPPED | `roll_cpu_inner` in `ops/tensor_ops.rs`; consumer: `grad_fns::shape::RollBackward::backward` in `grad_fns/shape.rs` invokes `ops::tensor_ops::roll_cpu_inner` |
 
@@ -382,22 +382,32 @@ pub fn roll<T: Float>(input: &Tensor<T>, shifts: i64, dim: usize) -> FerrotorchR
         return Ok(input.clone());
     }
 
-    // GPU fast path: f32 only — matches the f32-first dispatch shape used
-    // by the cumulative scans (see `cumsum_forward`). Other dtypes fall
-    // through to the existing NotImplementedOnCuda error so the contract
-    // matches the rest of `tensor_ops`.
+    // GPU fast path: f32 and f64. `roll` is pure index movement (a circular
+    // shift), so the f64 kernel is bit-exact (no transcendentals). Other
+    // dtypes (bf16/f16/...) fall through to the existing NotImplementedOnCuda
+    // error so the contract matches the rest of `tensor_ops`.
     if input.is_cuda() {
-        if is_f32::<T>() {
+        if is_f32::<T>() || is_f64::<T>() {
             if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
                 let outer: usize = shape[..dim].iter().product();
                 let inner: usize = shape[dim + 1..].iter().product();
-                let handle = backend.roll_f32(
-                    input.gpu_handle()?,
-                    outer,
-                    shape[dim],
-                    inner,
-                    shift_norm as usize,
-                )?;
+                let handle = if is_f32::<T>() {
+                    backend.roll_f32(
+                        input.gpu_handle()?,
+                        outer,
+                        shape[dim],
+                        inner,
+                        shift_norm as usize,
+                    )?
+                } else {
+                    backend.roll_f64(
+                        input.gpu_handle()?,
+                        outer,
+                        shape[dim],
+                        inner,
+                        shift_norm as usize,
+                    )?
+                };
                 let storage = TensorStorage::gpu(handle);
                 return if input.requires_grad() && is_grad_enabled() {
                     let grad_fn = Arc::new(crate::grad_fns::shape::RollBackward::new(

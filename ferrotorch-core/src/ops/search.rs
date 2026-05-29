@@ -12,7 +12,7 @@
 //! | REQ-1 | SHIPPED | `searchsorted` at `ops/search.rs:20`; consumer: re-export `ferrotorch_core::searchsorted` at `lib.rs:176`. CUDA f32/f64 lower on-device via `GpuBackend::searchsorted_1d` (#1545). |
 //! | REQ-2 | SHIPPED | `bucketize` at `ops/search.rs:63`; consumer: re-export at `lib.rs:176`. Inherits the CUDA GPU path through its delegation to `searchsorted`. |
 //! | REQ-3 | SHIPPED | `unique` at `ops/search.rs:79`; consumer: re-export at `lib.rs:176` |
-//! | REQ-4 | SHIPPED | `unique_consecutive` at `ops/search.rs:140`; consumer: re-export at `lib.rs:176` |
+//! | REQ-4 | SHIPPED | `unique_consecutive` at `ops/search.rs:140`; consumer: re-export at `lib.rs:176`. CUDA f32/f64 lower the data-dependent run compaction on-device via `GpuBackend::unique_consecutive_1d` (#1545); values stay GPU-resident, only run-position metadata read back. |
 //! | REQ-5 | SHIPPED | `histc`; consumer: re-export `ferrotorch_core::histc`. Out-of-range/NaN values are SKIPPED (not clamped), matching torch `SummaryOps.cu:92` (#1650); default `min==max` infers the range from data `aminmax`, widening all-equal data to `[v-1,v+1]` per `SummaryOps.cu:328-336` (#1652). CUDA f32/f64 accumulate the histogram on-device via `GpuBackend::histc_1d` (#1545); counts stay GPU-resident. |
 //! | REQ-6 | SHIPPED | `meshgrid` (= `meshgrid_indexing(.., Ij)`) + `meshgrid_indexing(tensors, MeshIndexing)`; consumer: `meshgrid` delegates to `meshgrid_indexing`, both re-exported. `MeshIndexing::Xy` swaps the first two inputs+output grids per torch `TensorShape.cpp:4433-4438,4470-4472` (#1652). CUDA f32/f64 produce each axis grid on-device via `GpuBackend::meshgrid_grid` (#1545); grids stay GPU-resident. |
 //! | REQ-7 | SHIPPED | `topk` at `ops/search.rs:287`; consumer: re-export `ferrotorch_core::topk` at `lib.rs:176`. CUDA f32/f64 lower the k-selection on-device via `GpuBackend::topk_1d` (#1545); values stay GPU-resident, only int64 indices read back. |
@@ -210,6 +210,27 @@ pub fn unique<T: Float>(
 pub fn unique_consecutive<T: Float>(
     input: &Tensor<T>,
 ) -> FerrotorchResult<(Tensor<T>, Vec<usize>, Vec<usize>)> {
+    // GPU fast path (#1545): for CUDA-resident f32/f64 the run compaction runs
+    // entirely on-device (run-flag → prefix-sum → scatter) via
+    // `GpuBackend::unique_consecutive_1d`. The deduplicated VALUE tensor stays
+    // GPU-resident (wrapped straight back into a CUDA `Tensor`); only the
+    // derived run-position metadata is read back to build the host `inverse` /
+    // `counts` vectors — which are host `Vec<usize>` by this function's
+    // signature regardless. The value data never leaves the device and returns,
+    // so this is NOT an R-CODE-4 round trip (mirrors `searchsorted` reading back
+    // its i64 indices while the values stay on device).
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let n = input.numel();
+        let (values_handle, inverse, counts) =
+            backend.unique_consecutive_1d(input.gpu_handle()?, n)?;
+        let out_len = values_handle.len();
+        let output_tensor =
+            Tensor::from_storage(TensorStorage::gpu(values_handle), vec![out_len], false)?;
+        return Ok((output_tensor, inverse, counts));
+    }
+
     if input.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda {
             op: "unique_consecutive",
