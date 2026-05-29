@@ -294,7 +294,7 @@ pub(crate) const ADD_VEC4_PTX: &str = "\
     setp.ge.u32 %p, %r_tid, %n4_reg;
     @%p bra DONE;
 
-    // Byte offset = tid * 16 (4 floats × 4 bytes)
+    // Byte offset = tid * 16 (4 floats x 4 bytes)
     cvt.u64.u32 %off, %r_tid;
     shl.b64 %off, %off, 4;
 
