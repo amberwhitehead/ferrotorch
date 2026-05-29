@@ -15,7 +15,7 @@
 //! | REQ-4 | SHIPPED | `unique_consecutive` at `ops/search.rs:140`; consumer: re-export at `lib.rs:176` |
 //! | REQ-5 | SHIPPED | `histc` at `ops/search.rs:186`; consumer: re-export at `lib.rs:176` |
 //! | REQ-6 | SHIPPED | `meshgrid` at `ops/search.rs:228`; consumer: re-export at `lib.rs:176` |
-//! | REQ-7 | SHIPPED | `topk` at `ops/search.rs:287`; consumer: re-export at `lib.rs:176` |
+//! | REQ-7 | SHIPPED | `topk` at `ops/search.rs:287`; consumer: re-export `ferrotorch_core::topk` at `lib.rs:176`. CUDA f32/f64 lower the k-selection on-device via `GpuBackend::topk_1d` (#1545); values stay GPU-resident, only int64 indices read back. |
 
 use crate::dtype::Float;
 use crate::dtype_dispatch::{is_f32, is_f64};
@@ -364,9 +364,6 @@ pub fn topk<T: Float>(
             message: "topk: input must have at least 1 dimension".into(),
         });
     }
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "topk" });
-    }
 
     let shape = input.shape();
     let last_dim = *shape.last().unwrap();
@@ -374,6 +371,53 @@ pub fn topk<T: Float>(
         return Err(FerrotorchError::InvalidArgument {
             message: format!("topk: k ({k}) > last dimension size ({last_dim})"),
         });
+    }
+
+    // GPU fast path (#1545): for CUDA-resident f32/f64 inputs the k-selection
+    // runs on-device via `GpuBackend::topk_1d` over the `[outer, last_dim]`
+    // layout (the input is contiguous, so the last dim is the innermost run).
+    // The VALUES tensor stays GPU-resident — it is wrapped straight back into a
+    // CUDA `Tensor` with no host crossing — and ONLY the freshly-computed int64
+    // indices are read to host to satisfy this function's `Vec<usize>` contract
+    // (R-CODE-4: no CPU<->GPU round trip of the value data).
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let outer = input.numel() / last_dim;
+        let (val_handle, idx_handle) =
+            backend.topk_1d(input.gpu_handle()?, outer, last_dim, k, largest)?;
+        let bytes = backend.gpu_to_cpu(&idx_handle)?;
+        let n = outer * k;
+        if bytes.len() < n * 8 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "topk: GPU returned {} bytes for indices, expected >= {} (8 per index)",
+                    bytes.len(),
+                    n * 8
+                ),
+            });
+        }
+        let out_indices: Vec<usize> = bytes
+            .chunks_exact(8)
+            .take(n)
+            .map(|c| {
+                let mut buf = [0u8; 8];
+                buf.copy_from_slice(c);
+                i64::from_le_bytes(buf) as usize
+            })
+            .collect();
+        let mut out_shape = shape.to_vec();
+        *out_shape.last_mut().unwrap() = k;
+        let values = Tensor::from_storage(
+            crate::storage::TensorStorage::gpu(val_handle),
+            out_shape,
+            false,
+        )?;
+        return Ok((values, out_indices));
+    }
+
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "topk" });
     }
 
     let data = input.data_vec()?;

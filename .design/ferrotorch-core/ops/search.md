@@ -44,7 +44,11 @@ under #1545).
   convention. Mirrors `torch.meshgrid`.
 - REQ-7: `topk(input, k, largest)` — return `(values, indices)` for
   the k largest (or smallest) along the last dim. Both shapes have
-  last-dim replaced by `k`. Mirrors `torch.topk`.
+  last-dim replaced by `k`. Mirrors `torch.topk`. CUDA f32/f64 inputs
+  lower on-device via `GpuBackend::topk_1d` (#1545): the k-selection runs
+  on the GPU, the VALUES tensor stays GPU-resident, and only the int64
+  indices are read back to host. Ties resolve to ascending original index
+  (a valid `torch.topk` result; matches the CPU stable-sort path).
 
 ## Acceptance Criteria
 
@@ -63,9 +67,14 @@ under #1545).
 - [x] AC-8: GPU paths for `searchsorted` / `bucketize` (f32/f64) — SHIPPED
   (#1545). CUDA inputs lower the binary search on-device via
   `GpuBackend::searchsorted_1d` (`ferrotorch-gpu/src/search.rs`); only the
-  int64 result indices are read back. `unique`, `unique_consecutive`,
-  `histc`, `meshgrid`, `topk` remain CPU-only (sort/dedup/index-arithmetic
-  GPU lowerings tracked as a follow-up under #1545).
+  int64 result indices are read back.
+- [x] AC-9: GPU path for `topk` (f32/f64, last-dim, largest/smallest,
+  sorted) — SHIPPED (#1545). CUDA inputs lower the k-selection on-device via
+  `GpuBackend::topk_1d` (`ferrotorch-gpu/src/search.rs`); the values tensor
+  stays GPU-resident and only the int64 indices are read back. `unique`,
+  `unique_consecutive`, `histc`, `meshgrid`, and arbitrary non-last-dim
+  `topk` remain CPU-only (sort/dedup/index-arithmetic GPU lowerings tracked
+  as a follow-up under #1545).
 
 ## Architecture
 

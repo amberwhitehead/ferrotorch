@@ -4743,6 +4743,34 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// On-device `topk` over a GPU-resident `[outer, last_dim]` value buffer
+    /// (#1545). Selects the `k` extrema along the last dim for every one of the
+    /// `outer` slices, returning `(values, indices)`:
+    ///
+    /// - `values` — a `GpuBufferHandle` of `outer * k` elements with the SAME
+    ///   `DType` as `values_in` (∈ {F32, F64}), in sorted order.
+    /// - `indices` — an `I64`-tagged `GpuBufferHandle` of `outer * k` original
+    ///   indices into `[0, last_dim)` (PyTorch returns `ScalarType::Long`).
+    ///
+    /// `largest == true` → descending value order; else ascending. Ties are
+    /// broken by ascending original index, which is a valid `torch.topk`
+    /// result (upstream `topk_out_cuda` gathers then sorts the top-k with
+    /// `stable=false`, leaving the per-tie index order unspecified) and matches
+    /// the CPU `ops::search::topk` path bit-for-bit. Mirrors
+    /// `topk_out_cuda` in `aten/src/ATen/native/cuda/TensorTopK.cpp` for the
+    /// last-dim, sorted case. The default impl errors; the CUDA backend
+    /// overrides it with the `gpu_topk_*` PTX kernel.
+    fn topk_1d(
+        &self,
+        _values_in: &GpuBufferHandle,
+        _outer: usize,
+        _last_dim: usize,
+        _k: usize,
+        _largest: bool,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "topk_1d" })
+    }
+
     /// `index_select(dim)` driven by a GPU-resident integer index handle.
     ///
     /// `src` is the value buffer (layout `[outer, in_dim, inner]`); `index` is

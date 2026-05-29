@@ -6956,6 +6956,54 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
+    fn topk_1d(
+        &self,
+        values_in: &GpuBufferHandle,
+        outer: usize,
+        last_dim: usize,
+        k: usize,
+        largest: bool,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        let dev = self.device(values_in.device_ordinal())?;
+        let ord = values_in.device_ordinal();
+        match values_in.dtype() {
+            DType::F32 => {
+                let (vals, idx) = crate::search::gpu_topk_f32(
+                    Self::unwrap_buffer(values_in)?.inner(),
+                    outer,
+                    last_dim,
+                    k,
+                    largest,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok((
+                    Self::wrap_slice_f32(vals, ord),
+                    Self::wrap_slice_i64(idx, ord),
+                ))
+            }
+            DType::F64 => {
+                let (vals, idx) = crate::search::gpu_topk_f64(
+                    Self::unwrap_buffer_f64(values_in)?.inner(),
+                    outer,
+                    last_dim,
+                    k,
+                    largest,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok((
+                    Self::wrap_slice_f64(vals, ord),
+                    Self::wrap_slice_i64(idx, ord),
+                ))
+            }
+            other => Err(FerrotorchError::InvalidArgument {
+                message: format!("topk_1d: unsupported value dtype {other}"),
+            }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
     fn index_select_intidx(
         &self,
         src: &GpuBufferHandle,
