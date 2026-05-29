@@ -47,6 +47,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- Divergence: ferrotorch_core::grad_fns::indexing::masked_scatter rejects a broadcast CUDA mask (broadcast_bool_tensor NotImplementedOnCuda); torch broadcasts on-device (#1663)
 - Divergence: masked_scatter forward rejects a GPU-resident mask (GpuTensorNotAccessible) — torch accepts it (#1662)
 - masked_invalid/masked_equal GPU predicate decodes full mask-buffer byte length instead of numel (#1659)
 - Divergence: masked_fill drops storage_offset on row-narrowed CUDA input (ferrotorch-core indexing.rs:418/1047 -> masked_fill_dt/launch_masked_fill raw-len check) (#1661)
