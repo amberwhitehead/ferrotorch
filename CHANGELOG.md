@@ -48,6 +48,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- ferrotorch open-blocker closeout sweep — drive 220 open blockers to zero via builder/critic loop (#1542)
+- Wire ferrotorch-cubecl::quant dequantize_q* + apply_token_mask_to_gpu into ferrotorch-llama GGUF GPU path (#1350)
 - Generic cite-drift walker doesn't catch *Backward line-number cite mismatches (gap-A probe premise eliminated by S3 anchors) (#1643)
 - Divergence: ferrotorch-core::unique CPU all-NaN miscount — extra spurious entry (count 0) for inputs whose sorted-first element is NaN (#1666)
 - Divergence: ferrotorch_core::ops::search::unique (CPU path) mishandles NaN vs pytorch aten/.../Unique.cpp (#1665)
