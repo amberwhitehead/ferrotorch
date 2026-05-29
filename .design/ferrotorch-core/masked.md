@@ -46,7 +46,11 @@ constructors + a `to_ferray` bridge.
 - REQ-6: `masked_where(data, condition)` / `masked_invalid(data)` /
   `masked_equal(data, value)` — numpy-style constructors;
   `masked_where` inverts the condition to match torch convention.
-  CPU-only (blocked on #1545 for GPU). Mirrors
+  `masked_invalid` / `masked_equal` compute their boolean predicate
+  on-device for f32/f64 CUDA inputs (`GpuBackend::isfinite_mask` /
+  `ne_scalar_mask`, #1545); the mask is read back once to the
+  host-resident `Vec<bool>` (no value-data round trip). `masked_where`
+  takes a host `&[bool]` and is device-agnostic. Mirrors
   `numpy.ma.{masked_where, masked_invalid, masked_equal}`.
 - REQ-7: `to_ferray::<U>(op)` — bridge to `ferray_ma::MaskedArray<U,
   IxDyn>`. Inverts the mask at the boundary (ferrotorch `true`=valid
@@ -70,8 +74,14 @@ constructors + a `to_ferray` bridge.
   (`to_ferray_round_trip_mean_matches_inhouse`).
 - [x] AC-7: `masked_min` / `masked_max` return NaN when fully masked
   (`masked_min_max_all_masked_returns_nan`).
-- [ ] AC-8: GPU paths for `masked_where` / `masked_invalid` /
-  `masked_equal` constructors — NOT-STARTED, blocked on #1545.
+- [x] AC-8: GPU paths for `masked_invalid` / `masked_equal`
+  constructors (f32/f64) — the predicate runs on-device and the input
+  stays CUDA-resident. Covered by `gpu_masked_invalid_f32_matches_cpu_\
+  and_is_on_device`, `gpu_masked_invalid_f64_matches_cpu`,
+  `gpu_masked_equal_f32_matches_cpu_and_is_on_device`,
+  `gpu_masked_equal_f64_nan_is_unequal` in
+  `tests/conformance_masked.rs` (`--features gpu`, live CUDA).
+  `masked_where` needs no GPU path (host `&[bool]` condition).
 
 ## Architecture
 
@@ -106,11 +116,18 @@ with an `Option<T>` accumulator.
 `masked_count` at `:419` returns a 0-D tensor in `T` holding
 `count_valid() as T`.
 
-`masked_where` at `:435` inverts the condition (`!c` per element) to
-match the torch convention. `masked_invalid` at `:453` and
-`masked_equal` at `:472` walk the data in host memory and build the
-mask. All three constructors reject CUDA inputs with
-`NotImplementedOnCuda`, tracked by #1545.
+`masked_where in masked.rs` inverts the condition (`!c` per element)
+to match the torch convention; it takes a host `&[bool]` and is
+device-agnostic. `masked_invalid in masked.rs` and
+`masked_equal in masked.rs` build the mask: on a CPU data tensor they
+walk host memory; on an f32/f64 CUDA data tensor they run the
+predicate on-device (`GpuBackend::isfinite_mask` for `isfinite`,
+`GpuBackend::ne_scalar_mask` for `v != value`) and read the resulting
+`DType::Bool` buffer back once via `predicate_mask_gpu in masked.rs`
+into the host `Vec<bool>` — the value data never leaves and returns to
+the device (#1545). bf16/f16 CUDA inputs still error
+`NotImplementedOnCuda` (out of `MaskedTensor<T: Float>`'s GPU-lowered
+dtype set).
 
 The `to_ferray` bridge at `:165-186` inverts the mask
 (`!v` per element) so the resulting `ferray_ma::MaskedArray` uses
@@ -150,5 +167,5 @@ unit file).
 | REQ-3 | SHIPPED | impl: `with_fill_value` at `masked in masked.rs`; non-test consumer: re-exported via `MaskedTensor` builder at `masked in lib.rs` |
 | REQ-4 | SHIPPED | impl: `filled` / `to_tensor` at `masked in masked.rs,143`; non-test consumer: re-exported method on `MaskedTensor` at `masked in lib.rs` |
 | REQ-5 | SHIPPED | impl: `masked_sum`/`masked_mean`/`masked_min`/`masked_max`/`masked_count` at `masked in masked.rs,275,322,330,419`; non-test consumer: re-exported at `masked in lib.rs` |
-| REQ-6 | SHIPPED | impl: `masked_where`/`masked_invalid`/`masked_equal` at `masked.rs:435,453,472`; non-test consumer: re-exported at `lib.rs:167-170`. GPU paths NOT-STARTED, blocked on #1545 — does NOT block CPU-path SHIPPED for the constructor itself |
+| REQ-6 | SHIPPED | impl: `masked_where`/`masked_invalid`/`masked_equal in masked.rs`; non-test consumer: re-exported at `lib.rs`. GPU predicate masks (f32/f64): `masked_invalid in masked.rs` consumes `GpuBackend::isfinite_mask`, `masked_equal in masked.rs` consumes `GpuBackend::ne_scalar_mask` (#1545) — the constructors' CUDA branches ARE the non-test production consumers of the new trait methods |
 | REQ-7 | SHIPPED | impl: `to_ferray` at `masked in masked.rs`; non-test consumer: the bridge enables ferray-ma's wider op surface; `to_ferray_round_trip_mean_matches_inhouse` test pins the cross-check |

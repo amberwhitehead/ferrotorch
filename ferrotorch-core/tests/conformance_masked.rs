@@ -63,9 +63,11 @@
 //! kernels for f32 + f64 when the underlying data tensor is on CUDA.
 //! `masked_count` is intentionally a host-side count of the boolean mask
 //! (the mask itself is a `Vec<bool>` on host) and works regardless of the
-//! data tensor's device. The CPU-only constructors `masked_invalid` and
-//! `masked_equal` reject GPU input with [`FerrotorchError::NotImplementedOnCuda`];
-//! they are not exercised in the GPU lane.
+//! data tensor's device. The constructors `masked_invalid` and
+//! `masked_equal` compute their boolean predicate ON-DEVICE for f32/f64 CUDA
+//! inputs via `GpuBackend::isfinite_mask` / `ne_scalar_mask` (#1545); only the
+//! resulting mask is read back to populate the host `Vec<bool>`. The GPU lane
+//! checks the on-device mask matches the CPU reference exactly.
 //!
 //! Tolerances follow the dispatch table:
 //!   F32_REDUCTION_CPU = 1e-6, F32_REDUCTION_GPU = 1e-5,
@@ -1109,9 +1111,9 @@ fn fixture_file_covers_every_phase212_op() {
 //     `Vec<bool>` regardless of where the data tensor lives) — including
 //     it in the GPU lane proves it stays correct when the data tensor is
 //     on CUDA.
-//   * masked_invalid / masked_equal explicitly return
-//     `NotImplementedOnCuda` for GPU input — they have no GPU lane and
-//     are NOT exercised here. (See conformance_masked_constructors_*)
+//   * masked_invalid / masked_equal compute their predicate on-device for
+//     f32/f64 CUDA inputs (#1545); the GPU lane below asserts the input is
+//     CUDA-resident and that the on-device mask equals the CPU reference mask.
 
 #[cfg(feature = "gpu")]
 mod gpu {
@@ -1174,5 +1176,76 @@ mod gpu {
         let file = load_fixtures();
         require_cuda_fixtures(&file);
         run_reduction_for_device(ReductionOp::Count, "cuda:0", Device::Cuda(0));
+    }
+
+    // ── #1545: constructor predicate masks computed on-device ────────────────
+
+    #[test]
+    fn gpu_masked_invalid_f32_matches_cpu_and_is_on_device() {
+        ensure_cuda_backend();
+        let host = [
+            1.0_f64,
+            f64::NAN,
+            3.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -2.5,
+        ];
+        // CPU reference mask (named reference for this numpy-style op).
+        let cpu_mt = masked_invalid(make_cpu_f32(&host, &[6])).expect("cpu masked_invalid");
+        // Closed form: finite -> valid (true).
+        let expected: Vec<bool> = host.iter().map(|v| v.is_finite()).collect();
+        assert_eq!(cpu_mt.mask(), expected.as_slice(), "cpu reference mask");
+
+        let gpu_in = upload_f32(make_cpu_f32(&host, &[6]), Device::Cuda(0));
+        assert!(
+            gpu_in.is_cuda(),
+            "input must be CUDA-resident before the op"
+        );
+        let gpu_mt = masked_invalid(gpu_in).expect("gpu masked_invalid");
+        // Data tensor stays on device; only the mask was read back.
+        assert!(gpu_mt.data().is_cuda(), "data must remain CUDA-resident");
+        assert_eq!(gpu_mt.mask(), expected.as_slice(), "gpu mask == cpu mask");
+    }
+
+    #[test]
+    fn gpu_masked_invalid_f64_matches_cpu() {
+        ensure_cuda_backend();
+        let host = [0.0_f64, f64::NAN, 7.0, f64::INFINITY];
+        let expected: Vec<bool> = host.iter().map(|v| v.is_finite()).collect();
+        let gpu_in = upload_f64(make_cpu_f64(&host, &[4]), Device::Cuda(0));
+        assert!(gpu_in.is_cuda());
+        let gpu_mt = masked_invalid(gpu_in).expect("gpu masked_invalid f64");
+        assert!(gpu_mt.data().is_cuda());
+        assert_eq!(gpu_mt.mask(), expected.as_slice());
+    }
+
+    #[test]
+    fn gpu_masked_equal_f32_matches_cpu_and_is_on_device() {
+        ensure_cuda_backend();
+        let host = [1.0_f64, 5.0, 5.0, 2.0];
+        let cpu_mt = masked_equal(make_cpu_f32(&host, &[4]), 5.0_f32).expect("cpu masked_equal");
+        // mask = (v != value): equal -> masked out (false).
+        let expected: Vec<bool> = host.iter().map(|&v| (v as f32) != 5.0_f32).collect();
+        assert_eq!(cpu_mt.mask(), expected.as_slice(), "cpu reference mask");
+
+        let gpu_in = upload_f32(make_cpu_f32(&host, &[4]), Device::Cuda(0));
+        assert!(gpu_in.is_cuda());
+        let gpu_mt = masked_equal(gpu_in, 5.0_f32).expect("gpu masked_equal");
+        assert!(gpu_mt.data().is_cuda());
+        assert_eq!(gpu_mt.mask(), expected.as_slice(), "gpu mask == cpu mask");
+    }
+
+    #[test]
+    fn gpu_masked_equal_f64_nan_is_unequal() {
+        ensure_cuda_backend();
+        let host = [5.0_f64, f64::NAN, 5.0, 6.0];
+        // NaN != 5.0 is true -> valid (matches CPU `v != value` walk).
+        let expected: Vec<bool> = host.iter().map(|&v| v != 5.0_f64).collect();
+        let gpu_in = upload_f64(make_cpu_f64(&host, &[4]), Device::Cuda(0));
+        assert!(gpu_in.is_cuda());
+        let gpu_mt = masked_equal(gpu_in, 5.0_f64).expect("gpu masked_equal f64");
+        assert!(gpu_mt.data().is_cuda());
+        assert_eq!(gpu_mt.mask(), expected.as_slice());
     }
 }

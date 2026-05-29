@@ -15,11 +15,16 @@
 //!
 //! # GPU discipline
 //!
-//! CPU-only today. Constructors and reductions reject GPU input tensors
-//! with [`FerrotorchError::NotImplementedOnCuda`] — they never silently
-//! download data through host. A future GPU `MaskedTensor` would lower
-//! reductions to existing kernels (`gpu_softmax_into` + `where_cond`,
-//! `masked_select`, etc.) and stays a separate concern (#569 follow-up).
+//! No silent CPU↔GPU round trips. Reductions (`masked_sum` / `masked_mean` /
+//! `masked_min` / `masked_max`) lower to on-device kernels for f32/f64
+//! (#597 / #627). The constructors `masked_invalid` / `masked_equal` compute
+//! their boolean predicate ON-DEVICE for f32/f64 CUDA inputs via
+//! `GpuBackend::isfinite_mask` / `ne_scalar_mask` (#1545); only the resulting
+//! boolean mask is read back to populate the host-resident `Vec<bool>` (the
+//! mask is host-side BY DESIGN — this is a one-way readback of the freshly
+//! computed predicate, not a round trip of the value data, which never leaves
+//! the device). `masked_where` takes a host `&[bool]` condition and is
+//! device-agnostic. bf16/f16 constructors still take the host walk.
 //!
 //! ## REQ status (per `.design/ferrotorch-core/masked.md`)
 //!
@@ -30,7 +35,7 @@
 //! | REQ-3 | SHIPPED | `with_fill_value` at `masked.rs:84`; consumer: re-export at `lib.rs:167` |
 //! | REQ-4 | SHIPPED | `filled`/`to_tensor` at `masked.rs:131,143`; consumer: re-export at `lib.rs:167` |
 //! | REQ-5 | SHIPPED | `masked_sum`/`masked_mean`/`masked_min`/`masked_max`/`masked_count` at `masked.rs:200,275,322,330,419`; consumer: re-export at `lib.rs:167-170` |
-//! | REQ-6 | SHIPPED | `masked_where`/`masked_invalid`/`masked_equal` at `masked.rs:435,453,472`; consumer: re-export at `lib.rs:167-170`. GPU lowering tracked under umbrella #1545 (ferrotorch-core CPU-only paths roadmap) |
+//! | REQ-6 | SHIPPED | `masked_where`/`masked_invalid`/`masked_equal` (`masked_invalid`/`masked_equal` in `masked.rs`); consumer: re-export at `lib.rs`. GPU predicate masks for `masked_invalid`/`masked_equal` (f32/f64) via `GpuBackend::isfinite_mask`/`ne_scalar_mask` (#1545); consumer: those constructors' CUDA branches in `masked.rs` |
 //! | REQ-7 | SHIPPED | `to_ferray` at `masked.rs:165`; consumer: `to_ferray_round_trip_mean_matches_inhouse` pins the bridge |
 
 use ferray_core::{Array as FerrayArray, IxDyn as FerrayIxDyn};
@@ -462,7 +467,21 @@ pub fn masked_where<T: Float>(
 }
 
 /// Mask out non-finite entries (NaN, ±∞). Matches `numpy.ma.masked_invalid`.
+///
+/// On CUDA the `isfinite` predicate runs on-device via the
+/// `GpuBackend::isfinite_mask` PTX kernel (#1545); only the resulting boolean
+/// mask is read back to populate the host-resident `Vec<bool>` (see
+/// [`predicate_mask_gpu`] — this is NOT a CPU↔GPU round trip of the value
+/// data, which never leaves the device). f32/f64 only; other dtypes take the
+/// host walk.
 pub fn masked_invalid<T: Float>(data: Tensor<T>) -> FerrotorchResult<MaskedTensor<T>> {
+    if data.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let mask_h = backend.isfinite_mask(data.gpu_handle()?)?;
+        let mask = predicate_mask_gpu(backend, &mask_h)?;
+        return MaskedTensor::new(data, mask);
+    }
     if data.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda {
             op: "masked_invalid",
@@ -481,16 +500,46 @@ pub fn masked_invalid<T: Float>(data: Tensor<T>) -> FerrotorchResult<MaskedTenso
 }
 
 /// Mask out entries equal to `value`. Matches `numpy.ma.masked_equal`.
+///
+/// On CUDA the `v != value` predicate (the VALID mask under the torch
+/// convention) runs on-device via `GpuBackend::ne_scalar_mask` (#1545); only
+/// the boolean mask is read back ([`predicate_mask_gpu`]). f32/f64 only.
 pub fn masked_equal<T: Float + PartialEq>(
     data: Tensor<T>,
     value: T,
 ) -> FerrotorchResult<MaskedTensor<T>> {
+    if data.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let value_f = value
+            .to_f64()
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "masked_equal: value not representable as f64".into(),
+            })?;
+        let mask_h = backend.ne_scalar_mask(data.gpu_handle()?, value_f)?;
+        let mask = predicate_mask_gpu(backend, &mask_h)?;
+        return MaskedTensor::new(data, mask);
+    }
     if data.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "masked_equal" });
     }
     let data_vec = data.data_vec()?;
     let mask: Vec<bool> = data_vec.iter().map(|&v| v != value).collect();
     MaskedTensor::new(data, mask)
+}
+
+/// Read a device-resident `DType::Bool` (u8 0/1) predicate buffer back into the
+/// host `Vec<bool>` that backs a [`MaskedTensor`]. The mask is host-resident by
+/// design, so this one-way readback of the freshly-computed predicate is the
+/// intended data path — the value tensor stays on the device (no R-CODE-4
+/// round trip). Each byte is normalised `b != 0` so a stray nonzero never
+/// produces an invalid `bool` bit pattern (mirrors `BoolTensor::to(Cpu)`).
+fn predicate_mask_gpu(
+    backend: &dyn crate::gpu_dispatch::GpuBackend,
+    mask_h: &crate::gpu_dispatch::GpuBufferHandle,
+) -> FerrotorchResult<Vec<bool>> {
+    let bytes = backend.gpu_to_cpu(mask_h)?;
+    Ok(bytes.iter().map(|&b| b != 0).collect())
 }
 
 // ---------------------------------------------------------------------------

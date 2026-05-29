@@ -740,8 +740,277 @@ fn launch_scatter<T: DeviceRepr + ValidAsZeroBits>(
 }
 
 // ===========================================================================
+// Predicate-mask kernels (#1545 / #1534): compute a Bool (u8 0/1) mask
+// directly on-device from a float value buffer, so the masked-tensor
+// constructors `masked_invalid` / `masked_equal` never download the data
+// tensor to host to compute the predicate. The result is the host-resident
+// mask of `MaskedTensor` (which is fundamentally a `Vec<bool>`), so the only
+// host crossing is the one-way readback of the freshly-computed predicate
+// bytes — the value data never leaves and returns to the device (no R-CODE-4
+// round trip).
+//
+// - isfinite: `out[i] = (v==v) && (|v| != +inf)` — exact PyTorch parity with
+//   `aten/src/ATen/native/TensorCompare.cpp:484` `isfinite = (self == self) *
+//   (self.abs() != inf)`. `setp.eq.f{32,64}` is unordered-false so NaN gives
+//   `v==v -> false`; `|v|!=inf` is `setp.neu` (unordered-true) but since `|v|`
+//   is never NaN when `v==v` held, ordered/unordered agree here.
+// - ne_scalar: `out[i] = (v != value)` — the VALID mask for `masked_equal`
+//   under the torch convention (positions equal to `value` are masked OUT, so
+//   `mask = (v != value)`). The kernel uses `setp.neu.f{32,64}` (the UNORDERED
+//   not-equal: NaN != x is true), matching the CPU `v != value` walk where Rust
+//   `NaN != x` is true. Plain `setp.ne` is the ordered form (NaN -> false) and
+//   would diverge.
+// ===========================================================================
+
+/// PTX for `isfinite`: reads `v` (f{32,64}), writes 1 if `v` is finite else 0.
+/// `ty` ∈ {"f32","f64"}; `in_shift` = log2(elem bytes) (2 for f32, 3 for f64).
+/// `inf_lit` is the PTX float literal for +inf in that width.
+fn isfinite_ptx(kernel_name: &str, ty: &str, in_shift: u32, inf_lit: &str) -> String {
+    format!(
+        "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry {kernel_name}(
+    .param .u64 in_ptr, .param .u64 out_ptr, .param .u32 n
+) {{
+    .reg .u32 %idx, %bid, %bdim, %nr;
+    .reg .u64 %a, %out, %ioff, %ooff;
+    .reg .{ty} %v, %av, %inf;
+    .reg .u16 %res;
+    .reg .pred %p, %notnan, %notinf, %fin;
+
+    ld.param.u64 %a, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %nr, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr;
+    @%p bra DONE;
+
+    cvt.u64.u32 %ioff, %idx;
+    shl.b64 %ioff, %ioff, {in_shift};
+    add.u64 %a, %a, %ioff;
+    cvt.u64.u32 %ooff, %idx;
+    add.u64 %out, %out, %ooff;
+
+    ld.global.{ty} %v, [%a];
+    // not-NaN: v == v  (setp.eq is unordered-false, so NaN -> false)
+    setp.eq.{ty} %notnan, %v, %v;
+    // |v| != inf
+    abs.{ty} %av, %v;
+    mov.{ty} %inf, {inf_lit};
+    setp.ne.{ty} %notinf, %av, %inf;
+    and.pred %fin, %notnan, %notinf;
+    selp.u16 %res, 1, 0, %fin;
+    st.global.u8 [%out], %res;
+DONE:
+    ret;
+}}
+"
+    )
+}
+
+/// PTX for `ne_scalar`: reads `v` (f{32,64}), writes 1 if `v != value` else 0.
+/// `value` is a kernel scalar param of the same width as the elements.
+fn ne_scalar_ptx(kernel_name: &str, ty: &str, in_shift: u32) -> String {
+    format!(
+        "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry {kernel_name}(
+    .param .u64 in_ptr, .param .u64 out_ptr, .param .{ty} value, .param .u32 n
+) {{
+    .reg .u32 %idx, %bid, %bdim, %nr;
+    .reg .u64 %a, %out, %ioff, %ooff;
+    .reg .{ty} %v, %val;
+    .reg .u16 %res;
+    .reg .pred %p, %c;
+
+    ld.param.u64 %a, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.{ty} %val, [value];
+    ld.param.u32 %nr, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr;
+    @%p bra DONE;
+
+    cvt.u64.u32 %ioff, %idx;
+    shl.b64 %ioff, %ioff, {in_shift};
+    add.u64 %a, %a, %ioff;
+    cvt.u64.u32 %ooff, %idx;
+    add.u64 %out, %out, %ooff;
+
+    ld.global.{ty} %v, [%a];
+    // setp.neu.f is the UNORDERED not-equal: NaN != value -> true (matches the
+    // CPU `v != value` walk where Rust `NaN != x` is true). Plain `setp.ne.f`
+    // is the *ordered* form (NaN -> false), which would diverge from the CPU
+    // reference, so `.neu` is required here.
+    setp.neu.{ty} %c, %v, %val;
+    selp.u16 %res, 1, 0, %c;
+    st.global.u8 [%out], %res;
+DONE:
+    ret;
+}}
+"
+    )
+}
+
+/// Launch a unary predicate kernel `(in_ptr, out_ptr, n)` over a value buffer
+/// of native element type `T`, producing a fresh `CudaSlice<u8>` of `n` 0/1
+/// bytes resident on `device`.
+fn launch_predicate<T: DeviceRepr + ValidAsZeroBits>(
+    input: &CudaSlice<T>,
+    device: &GpuDevice,
+    ptx: String,
+    kernel_name: String,
+) -> GpuResult<CudaSlice<u8>> {
+    let n = input.len();
+    let stream = device.stream();
+    if n == 0 {
+        return Ok(stream.alloc_zeros::<u8>(0)?);
+    }
+    let ctx = device.context();
+    let f =
+        crate::module_cache::get_or_compile_owned(ctx, ptx, kernel_name, device.ordinal() as u32)
+            .map_err(|e| GpuError::PtxCompileFailed {
+            kernel: "masked_predicate",
+            source: e,
+        })?;
+    let mut out = stream.alloc_zeros::<u8>(n)?;
+    let cfg = launch_1d(n);
+    let n_u32 = n as u32;
+    // SAFETY:
+    // - `f` is the predicate PTX entry; signature (in_ptr, out_ptr, n) matches
+    //   the three args below.
+    // - `input` is the caller's n-element `T` buffer; `out` is a fresh n-element
+    //   u8 buffer, the only `&mut`, not aliased with `input`.
+    // - Each thread reads input[i] and writes out[i] only for i in [0,n) (PTX
+    //   bound check `setp.ge.u32 %p, %idx, %nr`).
+    // - `n_u32` is non-truncating for any host-allocatable contiguous buffer.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(&mut out)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Launch a unary predicate-with-scalar kernel `(in_ptr, out_ptr, value, n)`
+/// over a value buffer of native element type `T`, producing a fresh
+/// `CudaSlice<u8>` of `n` 0/1 bytes resident on `device`.
+fn launch_predicate_scalar<T: DeviceRepr + ValidAsZeroBits, S: DeviceRepr>(
+    input: &CudaSlice<T>,
+    value: S,
+    device: &GpuDevice,
+    ptx: String,
+    kernel_name: String,
+) -> GpuResult<CudaSlice<u8>> {
+    let n = input.len();
+    let stream = device.stream();
+    if n == 0 {
+        return Ok(stream.alloc_zeros::<u8>(0)?);
+    }
+    let ctx = device.context();
+    let f =
+        crate::module_cache::get_or_compile_owned(ctx, ptx, kernel_name, device.ordinal() as u32)
+            .map_err(|e| GpuError::PtxCompileFailed {
+            kernel: "masked_predicate_scalar",
+            source: e,
+        })?;
+    let mut out = stream.alloc_zeros::<u8>(n)?;
+    let cfg = launch_1d(n);
+    let n_u32 = n as u32;
+    // SAFETY:
+    // - `f` is the predicate-scalar PTX entry; signature
+    //   (in_ptr, out_ptr, value, n) matches the four args below.
+    // - `input` is the caller's n-element `T` buffer; `out` is a fresh
+    //   n-element u8 buffer, the only `&mut`, not aliased with `input`.
+    // - `value` is a scalar passed by reference, living for the launch.
+    // - Each thread reads input[i] and writes out[i] only for i in [0,n).
+    // - `n_u32` is non-truncating.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(&mut out)
+            .arg(&value)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+// ===========================================================================
 // Public entry points
 // ===========================================================================
+
+/// `isfinite` mask for f32: `out[i] = (v==v) && (|v| != +inf)` (1 if finite).
+///
+/// Mirrors `aten/src/ATen/native/TensorCompare.cpp:484`
+/// (`isfinite = (self == self) * (self.abs() != inf)`). The result is a
+/// `DType::Bool` (u8 0/1) buffer the caller reads back to populate the
+/// host-resident `MaskedTensor` mask.
+pub fn isfinite_mask_f32(input: &CudaSlice<f32>, d: &GpuDevice) -> GpuResult<CudaSlice<u8>> {
+    let ptx = isfinite_ptx("isfinite_mask_f32_kernel", "f32", 2, "0f7F800000");
+    launch_predicate(input, d, ptx, "isfinite_mask_f32_kernel".to_string())
+}
+
+/// `isfinite` mask for f64. `+inf` (f64) literal is `0d7FF0000000000000`.
+pub fn isfinite_mask_f64(input: &CudaSlice<f64>, d: &GpuDevice) -> GpuResult<CudaSlice<u8>> {
+    let ptx = isfinite_ptx("isfinite_mask_f64_kernel", "f64", 3, "0d7FF0000000000000");
+    launch_predicate(input, d, ptx, "isfinite_mask_f64_kernel".to_string())
+}
+
+/// `ne_scalar` mask for f32: `out[i] = (v != value)` (1 where not equal).
+///
+/// This is the VALID mask for `numpy.ma.masked_equal` under the torch
+/// convention (entries equal to `value` are masked OUT, so the valid mask is
+/// `v != value`). `setp.ne.f32` is unordered-true (NaN gives true), matching
+/// the CPU `v != value` walk.
+pub fn ne_scalar_mask_f32(
+    input: &CudaSlice<f32>,
+    value: f32,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    let ptx = ne_scalar_ptx("ne_scalar_mask_f32_kernel", "f32", 2);
+    launch_predicate_scalar(
+        input,
+        value,
+        d,
+        ptx,
+        "ne_scalar_mask_f32_kernel".to_string(),
+    )
+}
+
+/// `ne_scalar` mask for f64.
+pub fn ne_scalar_mask_f64(
+    input: &CudaSlice<f64>,
+    value: f64,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    let ptx = ne_scalar_ptx("ne_scalar_mask_f64_kernel", "f64", 3);
+    launch_predicate_scalar(
+        input,
+        value,
+        d,
+        ptx,
+        "ne_scalar_mask_f64_kernel".to_string(),
+    )
+}
 
 /// masked_fill for f32: `out[i] = mask[i]!=0 ? value : input[i]`.
 pub fn masked_fill_f32(
@@ -1099,5 +1368,58 @@ mod tests {
         let empty: Vec<u8> = vec![];
         let m0 = d.stream().clone_htod(&empty).unwrap();
         assert_eq!(count_true(&m0, &d).unwrap(), 0);
+    }
+
+    // ── #1545: predicate-mask kernels ────────────────────────────────────────
+
+    #[test]
+    fn isfinite_mask_f32_matches_ieee() {
+        let d = dev();
+        // [finite, NaN, finite, +inf, -inf, finite]
+        let input = d
+            .stream()
+            .clone_htod(&vec![
+                1.0f32,
+                f32::NAN,
+                3.0,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                -2.5,
+            ])
+            .unwrap();
+        let mask = isfinite_mask_f32(&input, &d).unwrap();
+        // finite -> 1, non-finite -> 0 (matches f32::is_finite)
+        assert_eq!(
+            d.stream().clone_dtoh(&mask).unwrap(),
+            vec![1u8, 0, 1, 0, 0, 1]
+        );
+    }
+
+    #[test]
+    fn isfinite_mask_f64_matches_ieee() {
+        let d = dev();
+        let host = vec![1.0f64, f64::NAN, f64::INFINITY, 0.0, f64::NEG_INFINITY];
+        let input = d.stream().clone_htod(&host).unwrap();
+        let mask = isfinite_mask_f64(&input, &d).unwrap();
+        let expected: Vec<u8> = host.iter().map(|v| u8::from(v.is_finite())).collect();
+        assert_eq!(d.stream().clone_dtoh(&mask).unwrap(), expected);
+    }
+
+    #[test]
+    fn ne_scalar_mask_f32_marks_unequal() {
+        let d = dev();
+        // value 5.0; mask = (v != 5.0): equal -> 0, unequal -> 1.
+        let input = d.stream().clone_htod(&vec![1.0f32, 5.0, 5.0, 2.0]).unwrap();
+        let mask = ne_scalar_mask_f32(&input, 5.0, &d).unwrap();
+        assert_eq!(d.stream().clone_dtoh(&mask).unwrap(), vec![1u8, 0, 0, 1]);
+    }
+
+    #[test]
+    fn ne_scalar_mask_f64_nan_is_unequal() {
+        let d = dev();
+        // NaN != value is true (unordered) -> mask 1, matching the CPU walk.
+        let input = d.stream().clone_htod(&vec![5.0f64, f64::NAN, 5.0]).unwrap();
+        let mask = ne_scalar_mask_f64(&input, 5.0, &d).unwrap();
+        assert_eq!(d.stream().clone_dtoh(&mask).unwrap(), vec![0u8, 1, 0]);
     }
 }

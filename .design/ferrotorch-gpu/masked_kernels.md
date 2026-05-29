@@ -55,6 +55,16 @@ the bool-mask `where` selection in upstream's iterator-based
   `use crate::masked_kernels as mk` at four sites in
   `backend_impl.rs` (`6660`, `6735`, `6834`, `6903`) that dispatch
   masked_fill / where / masked_select / masked_scatter calls.
+- REQ-8: Predicate-mask entry points for the masked-tensor
+  constructors (#1545 / #1534): `pub fn isfinite_mask_{f32,f64}`
+  (`out[i] = (v==v) && (|v| != +inf)`, PyTorch parity with
+  `aten/src/ATen/native/TensorCompare.cpp:484`) and
+  `pub fn ne_scalar_mask_{f32,f64}` (`out[i] = (v != value)` via the
+  UNORDERED `setp.neu`, so `NaN != value` is true matching the CPU
+  walk). Each reads a value `CudaSlice<T>` and returns a fresh
+  `CudaSlice<u8>` 0/1 mask. These let `masked_invalid` / `masked_equal`
+  compute their predicate on-device instead of downloading the data
+  tensor to host.
 
 ## Acceptance Criteria
 
@@ -174,3 +184,4 @@ Expected: ≥ 1 `test result: ok` line.
 | REQ-5 | SHIPPED | impl: every kernel launch in this file routes through `module_cache::get_or_compile`. The file's `use crate::module_cache::get_or_compile` import at line 44 binds the single PTX load path; the file has no `cudarc::nvrtc` import. |
 | REQ-6 | SHIPPED | impl: per-dtype `pub fn` entries mean the (op, dtype) coverage is structurally surfaced — a missing combination is a missing function symbol that the `backend_impl` dispatcher converts to `FerrotorchError::NotImplementedOnCuda` (the policy documented in the module `//!` block at line 36). |
 | REQ-7 | SHIPPED | impl: four `use crate::masked_kernels as mk` sites in `backend_impl.rs` at lines 6660, 6735, 6834, 6903 — each is the body of a `CudaBackendImpl` trait method. ferrotorch-core dispatches `Tensor::masked_fill`/etc. through the `GpuBackend` trait when the input is CUDA-resident. |
+| REQ-8 | SHIPPED | impl: `pub fn isfinite_mask_f32`/`isfinite_mask_f64`/`ne_scalar_mask_f32`/`ne_scalar_mask_f64 in masked_kernels.rs`; non-test consumer: `CudaBackendImpl::isfinite_mask`/`ne_scalar_mask in backend_impl.rs` dispatch to them per-dtype, which `ferrotorch_core::masked_invalid`/`masked_equal` (`masked.rs`) invoke on f32/f64 CUDA inputs. Live-CUDA tests `isfinite_mask_f32_matches_ieee`/`isfinite_mask_f64_matches_ieee`/`ne_scalar_mask_f32_marks_unequal`/`ne_scalar_mask_f64_nan_is_unequal` in this file's `#[cfg(test)] mod tests`. |
