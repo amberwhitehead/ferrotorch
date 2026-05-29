@@ -1115,6 +1115,25 @@ fn poly_is_f64<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<f64>()
 }
 
+/// Per-dtype Hermite order limit, above which the polynomial value is replaced
+/// by `NaN` — a byte-for-relevant mirror of PyTorch's
+/// `getHermitianLimit<T>()` (`aten/src/ATen/native/Math.h:3044-3052`):
+/// `float -> 128`, `double -> 512`, otherwise `1024`. The recurrence overflows
+/// for `n` this large; torch short-circuits to `quiet_NaN()` rather than
+/// emitting the overflowed value (`Math.h:3068` for `hermite_polynomial_h`,
+/// `:3109` for `hermite_polynomial_he`). The limit is keyed on the tensor's
+/// scalar type `T`, exactly as torch templates `getHermitianLimit<scalar_t>`.
+#[inline]
+fn hermitian_limit<T: Float>() -> usize {
+    if poly_is_f32::<T>() {
+        128
+    } else if poly_is_f64::<T>() {
+        512
+    } else {
+        1024
+    }
+}
+
 /// Wrap a GPU buffer handle returned by a polynomial kernel into a
 /// CUDA-resident output tensor of the same shape (no host copy).
 #[inline]
@@ -1213,6 +1232,22 @@ fn elementwise_f64<T: Float, F: Fn(f64) -> f64>(
     )
 }
 
+/// Build a CPU tensor of the same shape as `input`, every element `NaN`.
+/// Used by the Hermite high-`n` guard to mirror PyTorch's
+/// `std::numeric_limits<T>::quiet_NaN()` short-circuit
+/// (`aten/src/ATen/native/Math.h:3069` / `:3110`). Reached only on the CPU
+/// fallthrough (the GPU dispatch handles CUDA tensors before this point), so a
+/// host-resident NaN buffer is the correct device.
+fn nan_like<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let nan = T::from(f64::NAN).unwrap_or_else(T::nan);
+    let out = vec![nan; input.numel()];
+    crate::tensor::Tensor::from_storage(
+        crate::storage::TensorStorage::cpu(out),
+        input.shape().to_vec(),
+        false,
+    )
+}
+
 // --- Chebyshev family ------------------------------------------------------
 
 /// Chebyshev polynomial of the **first kind** `T_n(x)`.
@@ -1288,6 +1323,14 @@ pub fn hermite_polynomial_h<T: Float>(input: &Tensor<T>, n: usize) -> Ferrotorch
     )? {
         return Ok(out);
     }
+    // PyTorch replaces the overflowing recurrence with NaN above
+    // `getHermitianLimit<T>()` (`Math.h:3068` -> `:3044-3052`). The CPU path
+    // runs the recurrence in f64 and narrows; without this guard an f64
+    // overflow narrows to `+inf` (diverging from torch's NaN and from the
+    // GPU f32-register path's NaN). Match torch exactly, keyed on `T`.
+    if n > hermitian_limit::<T>() {
+        return nan_like(input);
+    }
     elementwise_f64(input, "hermite_polynomial_h", move |x| hermite_h(n, x))
 }
 
@@ -1304,6 +1347,12 @@ pub fn hermite_polynomial_he<T: Float>(input: &Tensor<T>, n: usize) -> Ferrotorc
         |b, h| b.hermite_he_poly_f64(h, n),
     )? {
         return Ok(out);
+    }
+    // Same `getHermitianLimit<T>()` NaN short-circuit as `hermite_polynomial_h`
+    // (`Math.h:3109` -> `:3044-3052`); without it the f64-then-narrow CPU path
+    // returns `±inf` where torch returns NaN.
+    if n > hermitian_limit::<T>() {
+        return nan_like(input);
     }
     elementwise_f64(input, "hermite_polynomial_he", move |x| hermite_he(n, x))
 }

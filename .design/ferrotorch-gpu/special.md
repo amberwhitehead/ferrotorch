@@ -36,11 +36,23 @@ recurrence body matches `aten/src/ATen/native/Math.h`
 `chebyshev_polynomial_t_forward` (line 2861-2869) et al. — but the GPU
 kernels deliberately omit torch's CUDA edge-case shortcuts (`|x| == 1`
 closed forms, `cos(n*acos(x))` / `sin((n+1)*acos(x))` high-`n`
-shortcuts, the `n < 0 -> 0` guard, NaN early-exit) because reproducing
+shortcuts, the `n < 0 -> 0` guard) because reproducing
 them here would make the GPU path disagree with the ferrotorch CPU path.
 That ferrotorch-CPU vs. torch-CUDA edge-case gap is a pre-existing
 CPU-side divergence tracked separately (it is symmetric across both
 backends today); the GPU kernel's contract is CPU/GPU agreement.
+
+**Exception — the Hermite high-`n` NaN guard IS reproduced (#1641).** The
+physicist's/probabilist's Hermite kernels (`HERMITE_H_F32_PTX` /
+`HERMITE_H_F64_PTX` / `HERMITE_HE_F32_PTX` / `HERMITE_HE_F64_PTX`) replicate
+torch's `getHermitianLimit<T>()` guard (`Math.h:3044-3052`,
+`float -> 128`, `double -> 512`): for `n` above the limit they store
+`quiet_NaN()` (`Math.h:3068-3070` / `:3109-3111`) instead of running the
+overflowing recurrence. This is the one case where reproducing torch's NaN
+short-circuit MAKES the backends agree rather than disagree, because the
+ferrotorch CPU path now applies the same guard
+(`hermitian_limit` in `ferrotorch-core/src/special.rs`); above the limit
+CPU == GPU == torch == NaN.
 
 ## Requirements
 

@@ -271,7 +271,7 @@ pub(crate) const HERMITE_H_F32_PTX: &str = "\
     .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r, %n_r, %k;
     .reg .u64 %in_p, %out_p, %off, %addr;
     .reg .f32 %x, %two_x, %p, %q, %r, %twok;
-    .reg .pred %oob, %is0, %is1, %loop;
+    .reg .pred %oob, %is0, %is1, %loop, %over;
 
     ld.param.u64 %in_p,    [in_ptr];
     ld.param.u64 %out_p,   [out_ptr];
@@ -299,6 +299,10 @@ pub(crate) const HERMITE_H_F32_PTX: &str = "\
     setp.eq.u32 %is1, %n_r, 1;
     mov.f32 %r, %q;
     @%is1 bra STORE_R;
+    // getHermitianLimit<float>() == 128 (Math.h:3044-3052); n>limit -> NaN
+    // (Math.h:3068-3070), matching torch + the ferrotorch CPU f64 path.
+    setp.gt.u32 %over, %n_r, 128;
+    @%over bra STORE_NAN;
 
     mov.u32 %k, 1;
 LOOP:
@@ -315,6 +319,9 @@ LOOP:
     add.u32 %k, %k, 1;
     bra LOOP;
 
+STORE_NAN:
+    mov.f32 %r, 0f7FC00000;        // quiet NaN
+    bra STORE_R;
 STORE_ONE:
     mov.f32 %r, 0f3F800000;
 STORE_R:
@@ -343,7 +350,7 @@ pub(crate) const HERMITE_H_F64_PTX: &str = "\
     .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r, %n_r, %k;
     .reg .u64 %in_p, %out_p, %off, %addr;
     .reg .f64 %x, %two_x, %p, %q, %r, %twok;
-    .reg .pred %oob, %is0, %is1, %loop;
+    .reg .pred %oob, %is0, %is1, %loop, %over;
 
     ld.param.u64 %in_p,    [in_ptr];
     ld.param.u64 %out_p,   [out_ptr];
@@ -371,6 +378,10 @@ pub(crate) const HERMITE_H_F64_PTX: &str = "\
     setp.eq.u32 %is1, %n_r, 1;
     mov.f64 %r, %q;
     @%is1 bra STORE_R;
+    // getHermitianLimit<double>() == 512 (Math.h:3044-3052); n>limit -> NaN
+    // (Math.h:3068-3070), matching torch + the ferrotorch CPU f64 path.
+    setp.gt.u32 %over, %n_r, 512;
+    @%over bra STORE_NAN;
 
     mov.u32 %k, 1;
 LOOP:
@@ -386,6 +397,9 @@ LOOP:
     add.u32 %k, %k, 1;
     bra LOOP;
 
+STORE_NAN:
+    mov.f64 %r, 0d7FF8000000000000;   // quiet NaN
+    bra STORE_R;
 STORE_ONE:
     mov.f64 %r, 0d3FF0000000000000;
 STORE_R:
@@ -415,7 +429,7 @@ pub(crate) const HERMITE_HE_F32_PTX: &str = "\
     .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r, %n_r, %k;
     .reg .u64 %in_p, %out_p, %off, %addr;
     .reg .f32 %x, %p, %q, %r, %kf;
-    .reg .pred %oob, %is0, %is1, %loop;
+    .reg .pred %oob, %is0, %is1, %loop, %over;
 
     ld.param.u64 %in_p,    [in_ptr];
     ld.param.u64 %out_p,   [out_ptr];
@@ -442,6 +456,10 @@ pub(crate) const HERMITE_HE_F32_PTX: &str = "\
     setp.eq.u32 %is1, %n_r, 1;
     mov.f32 %r, %q;
     @%is1 bra STORE_R;
+    // getHermitianLimit<float>() == 128 (Math.h:3044-3052); n>limit -> NaN
+    // (Math.h:3109-3111), matching torch + the ferrotorch CPU f64 path.
+    setp.gt.u32 %over, %n_r, 128;
+    @%over bra STORE_NAN;
 
     mov.u32 %k, 1;
 LOOP:
@@ -456,6 +474,9 @@ LOOP:
     add.u32 %k, %k, 1;
     bra LOOP;
 
+STORE_NAN:
+    mov.f32 %r, 0f7FC00000;   // quiet NaN
+    bra STORE_R;
 STORE_ONE:
     mov.f32 %r, 0f3F800000;
 STORE_R:
@@ -484,7 +505,7 @@ pub(crate) const HERMITE_HE_F64_PTX: &str = "\
     .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r, %n_r, %k;
     .reg .u64 %in_p, %out_p, %off, %addr;
     .reg .f64 %x, %p, %q, %r, %kf;
-    .reg .pred %oob, %is0, %is1, %loop;
+    .reg .pred %oob, %is0, %is1, %loop, %over;
 
     ld.param.u64 %in_p,    [in_ptr];
     ld.param.u64 %out_p,   [out_ptr];
@@ -511,6 +532,10 @@ pub(crate) const HERMITE_HE_F64_PTX: &str = "\
     setp.eq.u32 %is1, %n_r, 1;
     mov.f64 %r, %q;
     @%is1 bra STORE_R;
+    // getHermitianLimit<double>() == 512 (Math.h:3044-3052); n>limit -> NaN
+    // (Math.h:3109-3111), matching torch + the ferrotorch CPU f64 path.
+    setp.gt.u32 %over, %n_r, 512;
+    @%over bra STORE_NAN;
 
     mov.u32 %k, 1;
 LOOP:
@@ -525,6 +550,9 @@ LOOP:
     add.u32 %k, %k, 1;
     bra LOOP;
 
+STORE_NAN:
+    mov.f64 %r, 0d7FF8000000000000;   // quiet NaN
+    bra STORE_R;
 STORE_ONE:
     mov.f64 %r, 0d3FF0000000000000;
 STORE_R:

@@ -65,7 +65,6 @@ fn cpu_f64(data: &[f64]) -> Tensor<f64> {
 ///
 /// Tracking: #1641.
 #[test]
-#[ignore = "divergence: hermite_polynomial_h GPU(f32-reg)=NaN != CPU(f64-narrow)=inf for n>128; commit claims bit-identical; tracking #1641"]
 fn divergence_hermite_h_gpu_cpu_disagree_above_limit() {
     if !ensure_cuda() {
         return;
@@ -106,7 +105,6 @@ fn divergence_hermite_h_gpu_cpu_disagree_above_limit() {
 ///
 /// Tracking: #1641.
 #[test]
-#[ignore = "divergence: CPU hermite_polynomial_h returns inf where torch returns NaN (no getHermitianLimit guard); tracking #1641"]
 fn divergence_hermite_h_cpu_vs_torch_above_limit() {
     if !ensure_cuda() {
         return;
@@ -130,7 +128,6 @@ fn divergence_hermite_h_cpu_vs_torch_above_limit() {
 ///
 /// Tracking: #1641.
 #[test]
-#[ignore = "divergence: CPU hermite_polynomial_he returns inf where torch returns NaN (no getHermitianLimit guard); tracking #1641"]
 fn divergence_hermite_he_cpu_vs_torch_above_limit() {
     if !ensure_cuda() {
         return;
@@ -173,7 +170,10 @@ fn verify_legendre_p_gpu_f64_matches_torch_1e12() {
     for (n, x, torch_val) in cases {
         let gpu_in = cpu_f64(&[x]).to(Device::Cuda(0)).expect("to GPU");
         let gpu_out = special::legendre_polynomial_p(&gpu_in, n).unwrap();
-        assert!(gpu_out.is_cuda(), "legendre f64 GPU out must stay on device");
+        assert!(
+            gpu_out.is_cuda(),
+            "legendre f64 GPU out must stay on device"
+        );
         let got = gpu_out.to(Device::Cpu).unwrap().data().unwrap()[0];
         assert!(
             (got - torch_val).abs() <= 1e-12,
