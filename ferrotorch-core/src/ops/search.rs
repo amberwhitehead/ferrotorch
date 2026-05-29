@@ -348,6 +348,24 @@ pub fn meshgrid<T: Float>(tensors: &[Tensor<T>]) -> FerrotorchResult<Vec<Tensor<
     Ok(result)
 }
 
+/// Total-order comparison ranking `NaN` as the MAXIMUM, matching torch's
+/// sort/topk comparator (`aten/src/ATen/native/cuda/SortingCommon.cuh:47-60`,
+/// `GTOp`/`LTOp` with `handleNaN=true`): a NaN `lhs` compares greater than a
+/// non-NaN `rhs`, and any two NaNs compare equal.
+///
+/// Used by [`topk`] so that `largest=true` selects NaN-bearing elements first
+/// and `largest=false` ranks NaN last (only picked after the finite values are
+/// exhausted), byte-for-byte with `torch.topk`.
+fn nan_is_max_cmp<T: Float>(lhs: T, rhs: T) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (lhs.is_nan(), rhs.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater, // NaN ranks above any finite/inf
+        (false, true) => Ordering::Less,
+        (false, false) => lhs.partial_cmp(&rhs).unwrap_or(Ordering::Equal),
+    }
+}
+
 /// Return the `k` largest elements and their indices along the last dimension.
 ///
 /// Input must be at least 1-D. Returns `(values, indices)` both with the
@@ -430,18 +448,19 @@ pub fn topk<T: Float>(
         let slice = &data[o * last_dim..(o + 1) * last_dim];
         let mut idx: Vec<usize> = (0..last_dim).collect();
 
+        // NaN-ordering mirrors torch's sort/topk comparator
+        // (`aten/src/ATen/native/cuda/SortingCommon.cuh:47-60`, `GTOp`/`LTOp`
+        // with `handleNaN=true`): NaN compares GREATER than every finite/inf
+        // value. So `topk(largest=true)` selects NaN-bearing elements first
+        // (`[NaN, NaN, 5, 3]`), and `topk(largest=false)` ranks NaN LAST and
+        // only picks it once the finite values are exhausted (`[1,2,3,5,NaN,NaN]`
+        // at k=numel). Verified live on torch 2.11.0+cu130 (RTX 3090). Replaces
+        // the old `partial_cmp(..).unwrap_or(Equal)` which treated NaN as equal
+        // to its neighbours, dropping NaN out of the top-k entirely.
         if largest {
-            idx.sort_by(|&a, &b| {
-                slice[b]
-                    .partial_cmp(&slice[a])
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            idx.sort_by(|&a, &b| nan_is_max_cmp(slice[b], slice[a]));
         } else {
-            idx.sort_by(|&a, &b| {
-                slice[a]
-                    .partial_cmp(&slice[b])
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            idx.sort_by(|&a, &b| nan_is_max_cmp(slice[a], slice[b]));
         }
 
         for &i in &idx[..k] {
@@ -629,5 +648,43 @@ mod tests {
         let input = tensor_1d(&[1.0, 2.0]);
         let result = topk(&input, 5, true);
         assert!(result.is_err());
+    }
+
+    /// NaN ordering matches torch's sort/topk comparator (`GTOp`/`LTOp`,
+    /// `aten/src/ATen/native/cuda/SortingCommon.cuh:47-60`): NaN ranks as the
+    /// MAXIMUM. Verified live on torch 2.11.0+cu130:
+    ///   topk([3,NaN,1,5,NaN,2], k=4, largest=True) -> [NaN,NaN,5,3] idx [1,4,3,0]
+    #[test]
+    fn test_topk_largest_nan_is_top() {
+        let input = tensor_1d(&[3.0, f32::NAN, 1.0, 5.0, f32::NAN, 2.0]);
+        let (values, indices) = topk(&input, 4, true).unwrap();
+        let vdata = values.data().unwrap();
+        assert!(
+            vdata[0].is_nan() && vdata[1].is_nan(),
+            "NaNs first: {vdata:?}"
+        );
+        assert_eq!(vdata[2], 5.0);
+        assert_eq!(vdata[3], 3.0);
+        // Two NaNs in ascending original-index order, then the finite extrema.
+        assert_eq!(indices, vec![1, 4, 3, 0]);
+    }
+
+    /// largest=False ranks NaN LAST under the same comparator. Verified live:
+    ///   topk(.., k=4, largest=False) -> [1,2,3,5]              idx [2,5,0,3]
+    ///   topk(.., k=6, largest=False) -> [1,2,3,5,NaN,NaN]      idx [2,5,0,3,1,4]
+    #[test]
+    fn test_topk_smallest_nan_is_last() {
+        let input = tensor_1d(&[3.0, f32::NAN, 1.0, 5.0, f32::NAN, 2.0]);
+        let (v4, i4) = topk(&input, 4, false).unwrap();
+        let v4d = v4.data().unwrap();
+        assert!(v4d.iter().all(|v| !v.is_nan()), "no NaN at k=4: {v4d:?}");
+        assert_eq!(v4d, &[1.0, 2.0, 3.0, 5.0]);
+        assert_eq!(i4, vec![2, 5, 0, 3]);
+
+        let (v6, i6) = topk(&input, 6, false).unwrap();
+        let v6d = v6.data().unwrap();
+        assert_eq!(&v6d[..4], &[1.0, 2.0, 3.0, 5.0]);
+        assert!(v6d[4].is_nan() && v6d[5].is_nan(), "NaNs last: {v6d:?}");
+        assert_eq!(i6, vec![2, 5, 0, 3, 1, 4]);
     }
 }

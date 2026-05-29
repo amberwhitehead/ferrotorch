@@ -59,7 +59,6 @@ const ROW_F64: [f64; 6] = [3.0, NAN64, 1.0, 5.0, NAN64, 2.0];
 /// CUDA comparator). We assert position 0 and 1 are NaN; ferrotorch returns
 /// finite 5.0 / 3.0 there.
 #[test]
-#[ignore = "divergence: GPU topk(largest=True) drops NaN from top-k VALUES (torch returns NaN as the max); tracking #1648"]
 fn divergence_topk_f32_largest_nan_is_top() {
     let device = match ensure_cuda() {
         Some(d) => d,
@@ -83,13 +82,15 @@ fn divergence_topk_f32_largest_nan_is_top() {
         host[1]
     );
     // Positions 2,3 are the two largest finite values, descending.
-    assert_eq!(host[2], 5.0_f32, "third element should be 5.0 (largest finite)");
+    assert_eq!(
+        host[2], 5.0_f32,
+        "third element should be 5.0 (largest finite)"
+    );
     assert_eq!(host[3], 3.0_f32, "fourth element should be 3.0");
 }
 
 /// f64 counterpart — same torch CUDA result `[NaN, NaN, 5.0, 3.0]`.
 #[test]
-#[ignore = "divergence: GPU topk(largest=True) drops NaN from top-k VALUES (torch returns NaN as the max); tracking #1648"]
 fn divergence_topk_f64_largest_nan_is_top() {
     let device = match ensure_cuda() {
         Some(d) => d,
@@ -111,4 +112,46 @@ fn divergence_topk_f64_largest_nan_is_top() {
     );
     assert_eq!(host[2], 5.0_f64);
     assert_eq!(host[3], 3.0_f64);
+}
+
+/// largest=False (smallest) with NaN. torch ranks NaN as the MAXIMUM under the
+/// same comparator (`GTOp`/`LTOp` handleNaN, `SortingCommon.cuh:47-60`), so for
+/// ascending sort NaN goes to the END and `topk(largest=False)` does NOT pick a
+/// NaN until the finite values are exhausted. Verified live on torch
+/// 2.11.0+cu130 (RTX 3090):
+///   torch.topk([3,NaN,1,5,NaN,2], k=4, largest=False) -> [1,2,3,5] idx [2,5,0,3]
+///   torch.topk([3,NaN,1,5,NaN,2], k=6, largest=False) -> [1,2,3,5,NaN,NaN]
+///                                                         idx [2,5,0,3,1,4]
+#[test]
+fn divergence_topk_f32_smallest_nan_is_last() {
+    let device = match ensure_cuda() {
+        Some(d) => d,
+        None => return,
+    };
+    let g = cpu_to_gpu(&ROW_F32, &device).expect("upload");
+
+    // k=4 smallest: the four finite extrema, ascending; NO NaN selected.
+    let (vals, idx) = gpu_topk_f32(g.inner(), 1, 6, 4, false, &device).expect("topk k4");
+    let host = device.stream().clone_dtoh(&vals).expect("readback");
+    let hidx = device.stream().clone_dtoh(&idx).expect("readback idx");
+    assert!(
+        host.iter().take(4).all(|v| !v.is_nan()),
+        "torch topk(largest=False, k=4) selects no NaN (NaN ranks last); got {host:?}"
+    );
+    assert_eq!(&host[..4], &[1.0_f32, 2.0, 3.0, 5.0]);
+    assert_eq!(&hidx[..4], &[2_i64, 5, 0, 3]);
+
+    // k=6 == numel: now the finite values are exhausted and the two NaNs land
+    // in the LAST two positions (NaN ranks as the maximum under ascending sort).
+    let (vals6, idx6) = gpu_topk_f32(g.inner(), 1, 6, 6, false, &device).expect("topk k6");
+    let host6 = device.stream().clone_dtoh(&vals6).expect("readback6");
+    let hidx6 = device.stream().clone_dtoh(&idx6).expect("readback6 idx");
+    assert_eq!(&host6[..4], &[1.0_f32, 2.0, 3.0, 5.0]);
+    assert!(
+        host6[4].is_nan() && host6[5].is_nan(),
+        "NaNs last: {host6:?}"
+    );
+    assert_eq!(&hidx6[..4], &[2_i64, 5, 0, 3]);
+    // Two NaNs in ascending original-index order (indices 1 and 4).
+    assert_eq!(&hidx6[4..], &[1_i64, 4]);
 }

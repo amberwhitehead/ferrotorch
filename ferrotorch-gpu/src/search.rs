@@ -471,10 +471,16 @@ pub fn gpu_searchsorted_f64(
 // "after previous" for largest:
 //     elem is eligible  <=>  (prev > val) || (prev == val && prev_idx < idx)
 // For largest == 0 the value `>` becomes `<` (index tie-break stays ascending).
-// `setp.gt`/`setp.lt`/`setp.eq` are ORDERED (false for NaN); a NaN value never
-// outranks and is never eligible after a finite pick, so finite elements are
-// selected first — matching the CPU path for the finite inputs the parity
-// contract covers.
+// `setp.gt`/`setp.lt`/`setp.eq` are ORDERED (false for NaN). NaN ordering
+// mirrors torch's sort/topk comparator (`GTOp`/`LTOp` with `handleNaN=true` in
+// `aten/src/ATen/native/cuda/SortingCommon.cuh:47-60`): NaN compares GREATER
+// than every finite/inf value. The kernel adds `testp.notanumber` terms so a
+// NaN value OUTRANKS any finite for largest=true (selected first) and is ranked
+// LAST for largest=false (only picked once finite values are exhausted), and
+// two NaNs compare equal so the ascending-index tie-break applies. This is
+// byte-identical to the CPU path (`ops::search::topk` `nan_is_max_cmp`) and to
+// `torch.topk` — verified live on torch 2.11.0+cu130 (RTX 3090):
+//   topk([3,NaN,1,5,NaN,2], k=4, largest=True) -> [NaN,NaN,5,3] idx [1,4,3,0].
 //
 // ABI: (in_ptr, vals_ptr, idx_ptr, outer, dim, k, largest)
 //   in    : V[outer * dim]
@@ -512,6 +518,7 @@ macro_rules! topk_ptx {
             "    .reg .pred %p_oob, %p_jloop, %p_iloop, %p_lg, %p_have, %p_first;\n",
             "    .reg .pred %p_elig, %p_beat, %p_vgt, %p_vlt, %p_veq, %p_vsel, %p_idx;\n",
             "    .reg .pred %p_pgt, %p_plt, %p_peq, %p_psel, %p_pidx, %p_upd;\n",
+            "    .reg .pred %p_cnan, %p_pnan, %p_bnan, %p_na, %p_nb;\n",
             "\n",
             "    ld.param.u64 %in_p, [in_ptr];\n",
             "    ld.param.u64 %vp,   [vals_ptr];\n",
@@ -559,11 +566,24 @@ macro_rules! topk_ptx {
             $tyld,
             " %cur_val, [%addr];\n",
             "    mov.u32 %cur_idx, %i;\n",
+            "    testp.notanumber.",
+            $tyld,
+            " %p_cnan, %cur_val;          // p_cnan = isnan(cur)\n",
             "\n",
             "    // eligibility: for j==0 every element is eligible. Otherwise eligible iff\n",
-            "    // it ranks strictly after the previous pick:\n",
-            "    //   largest:  (prev > cur) || (prev == cur && prev_idx < cur_idx)\n",
-            "    //   smallest: (prev < cur) || (prev == cur && prev_idx < cur_idx)\n",
+            "    // `prev` ranks strictly before `cur` in selection order. NaN ordering\n",
+            "    // mirrors torch's GTOp/LTOp comparator with handleNaN=true\n",
+            "    // (aten/src/ATen/native/cuda/SortingCommon.cuh:47-60): NaN compares\n",
+            "    // GREATER than every finite/inf value. So `prev outranks cur`:\n",
+            "    //   largest:  (isnan(prev) && !isnan(cur)) || (prev > cur)\n",
+            "    //   smallest: (isnan(cur)  && !isnan(prev)) || (prev < cur)\n",
+            "    // equal-rank (so the ascending-index tie-break applies, incl. NaN==NaN):\n",
+            "    //   (isnan(prev) && isnan(cur)) || (prev == cur)\n",
+            "    // `setp.gt/lt/eq` are ORDERED (false if either operand is NaN), so the\n",
+            "    // finite terms need no extra masking; the NaN terms add the ordering.\n",
+            "    testp.notanumber.",
+            $tyld,
+            " %p_pnan, %prev_val;          // p_pnan = isnan(prev)\n",
             "    setp.gt.",
             $tyld,
             " %p_pgt, %prev_val, %cur_val;\n",
@@ -573,22 +593,36 @@ macro_rules! topk_ptx {
             "    setp.eq.",
             $tyld,
             " %p_peq, %prev_val, %cur_val;\n",
+            "    // NaN-greater terms\n",
+            "    not.pred %p_na, %p_cnan;            // !isnan(cur)\n",
+            "    and.pred %p_na, %p_pnan, %p_na;     // isnan(prev) && !isnan(cur)\n",
+            "    or.pred  %p_pgt, %p_pgt, %p_na;     // largest:  prev outranks cur\n",
+            "    not.pred %p_nb, %p_pnan;            // !isnan(prev)\n",
+            "    and.pred %p_nb, %p_cnan, %p_nb;     // isnan(cur) && !isnan(prev)\n",
+            "    or.pred  %p_plt, %p_plt, %p_nb;     // smallest: prev outranks cur\n",
+            "    and.pred %p_na, %p_pnan, %p_cnan;   // isnan(prev) && isnan(cur)\n",
+            "    or.pred  %p_peq, %p_peq, %p_na;     // equal-rank (incl. NaN==NaN)\n",
             "    // p_psel = largest ? p_pgt : p_plt\n",
             "    and.pred %p_psel, %p_lg, %p_pgt;\n",
             "    not.pred %p_idx, %p_lg;\n",
             "    and.pred %p_pidx, %p_idx, %p_plt;\n",
             "    or.pred  %p_psel, %p_psel, %p_pidx;\n",
             "    setp.lt.u32 %p_pidx, %prev_idx, %cur_idx;\n",
-            "    and.pred %p_pidx, %p_peq, %p_pidx;  // prev==cur && prev_idx<cur_idx\n",
+            "    and.pred %p_pidx, %p_peq, %p_pidx;  // equal-rank && prev_idx<cur_idx\n",
             "    or.pred  %p_elig, %p_psel, %p_pidx;\n",
             "    or.pred  %p_elig, %p_elig, %p_first; // j==0 -> always eligible\n",
             "    @!%p_elig bra INEXT;\n",
             "\n",
-            "    // candidate beats current best?\n",
+            "    // candidate beats current best? Same NaN-as-maximum comparator:\n",
             "    //   if !have_best -> yes\n",
-            "    //   else largest:  (cur > best) || (cur == best && cur_idx < best_idx)\n",
-            "    //        smallest: (cur < best) || (cur == best && cur_idx < best_idx)\n",
+            "    //   else largest:  (isnan(cur) && !isnan(best)) || (cur > best)\n",
+            "    //                  || (equal-rank && cur_idx < best_idx)\n",
+            "    //        smallest: (isnan(best) && !isnan(cur)) || (cur < best)\n",
+            "    //                  || (equal-rank && cur_idx < best_idx)\n",
             "    not.pred %p_upd, %p_have;           // !have_best\n",
+            "    testp.notanumber.",
+            $tyld,
+            " %p_bnan, %best_val;          // p_bnan = isnan(best)\n",
             "    setp.gt.",
             $tyld,
             " %p_vgt, %cur_val, %best_val;\n",
@@ -598,6 +632,14 @@ macro_rules! topk_ptx {
             "    setp.eq.",
             $tyld,
             " %p_veq, %cur_val, %best_val;\n",
+            "    not.pred %p_na, %p_bnan;            // !isnan(best)\n",
+            "    and.pred %p_na, %p_cnan, %p_na;     // isnan(cur) && !isnan(best)\n",
+            "    or.pred  %p_vgt, %p_vgt, %p_na;     // largest:  cur outranks best\n",
+            "    not.pred %p_nb, %p_cnan;            // !isnan(cur)\n",
+            "    and.pred %p_nb, %p_bnan, %p_nb;     // isnan(best) && !isnan(cur)\n",
+            "    or.pred  %p_vlt, %p_vlt, %p_nb;     // smallest: cur outranks best\n",
+            "    and.pred %p_na, %p_cnan, %p_bnan;   // isnan(cur) && isnan(best)\n",
+            "    or.pred  %p_veq, %p_veq, %p_na;     // equal-rank (incl. NaN==NaN)\n",
             "    and.pred %p_vsel, %p_lg, %p_vgt;\n",
             "    not.pred %p_idx, %p_lg;\n",
             "    and.pred %p_idx, %p_idx, %p_vlt;\n",
