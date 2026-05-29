@@ -46,7 +46,7 @@
 //! | REQ-1 (`masked_fill` per-dtype) | SHIPPED | six `pub fn masked_fill_*` symbols in `masked_kernels.rs`; consumer `use crate::masked_kernels as mk` site in `backend_impl.rs` dispatches per-dtype calls |
 //! | REQ-2 (`where`) | SHIPPED | `pub fn where_32 / where_64 / where_16 in masked_kernels.rs`; consumer `CudaBackendImpl::where_cond_* in backend_impl.rs` |
 //! | REQ-3 (`masked_select`) | SHIPPED | `pub fn count_true in masked_kernels.rs` + `masked_select_32 / masked_select_64 / masked_select_16`; consumer `CudaBackendImpl::masked_select_* in backend_impl.rs` |
-//! | REQ-4 (`masked_scatter`) | SHIPPED | `pub fn masked_scatter_32 / masked_scatter_64 / masked_scatter_16 in masked_kernels.rs`; consumer `CudaBackendImpl::masked_scatter_* in backend_impl.rs` |
+//! | REQ-4 (`masked_scatter`) | SHIPPED | backward `pub fn masked_scatter_32 / masked_scatter_64 / masked_scatter_16` (VJP) + forward `pub fn masked_scatter_forward_32 / masked_scatter_forward_64` (#1662, `out[i] = mask[i] ? source[j++] : input[i]`) in `masked_kernels.rs`; consumers `CudaBackendImpl::masked_scatter` / `masked_scatter_forward in backend_impl.rs` (the latter wired by `grad_fns::indexing::masked_scatter`'s all-CUDA branch so a fully-resident forward keeps `is_cuda()`) |
 //! | REQ-5 (single PTX load path) | SHIPPED | `use crate::module_cache::get_or_compile` in `masked_kernels.rs` binds the single PTX load path; no `cudarc::nvrtc` import — every launch routes through `module_cache` |
 //! | REQ-6 ((op, dtype) coverage matrix) | SHIPPED | per-dtype `pub fn` entries in `masked_kernels.rs` mean (op, dtype) coverage is structurally surfaced — a missing combination is a missing function symbol that the `backend_impl` dispatcher converts to `FerrotorchError::NotImplementedOnCuda` |
 //! | REQ-7 (workspace consumer wiring) | SHIPPED | four `use crate::masked_kernels as mk` sites in `backend_impl.rs` (each is the body of a `CudaBackendImpl` trait method); ferrotorch-core dispatches `Tensor::masked_fill / etc.` through the `GpuBackend` trait when input is CUDA-resident |
@@ -460,6 +460,74 @@ DONE: ret;
 }
 
 // ===========================================================================
+// masked_scatter FORWARD (#1662): out = input.clone(); for each i where
+// mask[i]!=0, out[i] = source[j++] (source consumed serially in flat order),
+// else out[i] = input[i].
+//
+// Signature: (in_ptr, src_ptr, mask_ptr, out_ptr, n)
+//   in:   VAL_BYTES per element, length n (the base tensor)
+//   src:  VAL_BYTES per element, length >= #true (the scatter source)
+//   mask: 1 byte per element (u8 0/1), length n
+//   out:  VAL_BYTES per element, length n (fresh)
+//   for i in [0,n): out[i] = mask[i]!=0 ? src[j++] : in[i]
+//
+// This differs from the backward `scatter_ptx` above in the FALSE branch: the
+// backward leaves a pre-zeroed buffer untouched (VJP semantic), whereas the
+// forward copies `in[i]` through. The serial source cursor `j` is exactly the
+// EXCLUSIVE PREFIX-SUM of the mask at position `i` (the offset upstream computes
+// via `at::cuda::cub::mask_exclusive_sum` in
+// `aten/src/ATen/native/cuda/IndexKernel.cu:416` then gathers
+// `source[maskPrefixSum]` at `:450`); a single in-order thread realises the
+// same offset without a separate scan buffer (matching COMPACT/COUNT_TRUE).
+// VAL_SHIFT is log2(VAL_BYTES).
+// ===========================================================================
+fn scatter_forward_ptx(
+    kernel_name: &str,
+    val_shift: u32,
+    ld_st_ty: &str,
+    reg_decl: &str,
+) -> String {
+    format!(
+        "\
+.version 7.0
+.target sm_52
+.address_size 64
+.visible .entry {kernel_name}(.param .u64 in_ptr, .param .u64 src_ptr, .param .u64 mask_ptr, .param .u64 out_ptr, .param .u32 n) {{
+    .reg .u32 %idx, %bid, %bdim, %nr, %i, %j;
+    .reg .u64 %in, %sr, %mk, %out, %eoff, %soff, %icur, %scur, %mcur, %ocur;
+    .reg .u16 %m; {reg_decl}
+    .reg .pred %only0, %p, %nz;
+    ld.param.u64 %in, [in_ptr]; ld.param.u64 %sr, [src_ptr];
+    ld.param.u64 %mk, [mask_ptr]; ld.param.u64 %out, [out_ptr]; ld.param.u32 %nr, [n];
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ne.u32 %only0, %idx, 0; @%only0 bra DONE;
+    mov.u32 %i, 0; mov.u32 %j, 0;
+LOOP:
+    setp.ge.u32 %p, %i, %nr; @%p bra DONE;
+    cvt.u64.u32 %eoff, %i; add.u64 %mcur, %mk, %eoff;
+    ld.global.u8 %m, [%mcur]; setp.ne.u16 %nz, %m, 0;
+    shl.b64 %eoff, %eoff, {val_shift};
+    @!%nz bra COPYIN;
+    // mask[i] true: out[i] = src[j]; j++
+    cvt.u64.u32 %soff, %j; shl.b64 %soff, %soff, {val_shift}; add.u64 %scur, %sr, %soff;
+    ld.global.{ld_st_ty} %val, [%scur];
+    add.u64 %ocur, %out, %eoff; st.global.{ld_st_ty} [%ocur], %val;
+    add.u32 %j, %j, 1;
+    bra NEXT;
+COPYIN:
+    // mask[i] false: out[i] = in[i]
+    add.u64 %icur, %in, %eoff; ld.global.{ld_st_ty} %val, [%icur];
+    add.u64 %ocur, %out, %eoff; st.global.{ld_st_ty} [%ocur], %val;
+NEXT:
+    add.u32 %i, %i, 1; bra LOOP;
+DONE: ret;
+}}
+"
+    )
+}
+
+// ===========================================================================
 // Launch harness
 // ===========================================================================
 
@@ -755,6 +823,77 @@ fn launch_scatter<T: DeviceRepr + ValidAsZeroBits>(
         stream
             .launch_builder(&f)
             .arg(grad)
+            .arg(mask)
+            .arg(&mut out)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Serial masked_scatter FORWARD (#1662): write `out[i] = mask[i]!=0 ?
+/// source[j++] : input[i]`, walking `[0,n)` in order with a serial source
+/// cursor `j`. `out` is a fresh `n`-element buffer (NOT pre-zeroed — every
+/// position is written, either from `source` or passed through from `input`).
+///
+/// `n` is the LOGICAL element count of `input`/`mask` (their numel). The raw
+/// slices may be over-allocated past `n` (a pooled `.contiguous()`
+/// materialisation, #1661 class) so we validate `>= n`, matching
+/// `launch_masked_fill`/`launch_where`. `source` need only hold the #true
+/// elements; the caller (core layer) has already checked
+/// `source.numel() >= count_nonzero(mask)`, so the in-order cursor `j` never
+/// exceeds `source.len()`.
+fn launch_scatter_forward<T: DeviceRepr + ValidAsZeroBits>(
+    input: &CudaSlice<T>,
+    source: &CudaSlice<T>,
+    mask: &CudaSlice<u8>,
+    n: usize,
+    device: &GpuDevice,
+    ptx: String,
+    kernel_name: String,
+) -> GpuResult<CudaSlice<T>> {
+    if input.len() < n || mask.len() < n {
+        return Err(GpuError::LengthMismatch {
+            a: input.len().min(mask.len()),
+            b: n,
+        });
+    }
+    let stream = device.stream();
+    if n == 0 {
+        return Ok(stream.alloc_zeros::<T>(0)?);
+    }
+    let ctx = device.context();
+    let f =
+        crate::module_cache::get_or_compile_owned(ctx, ptx, kernel_name, device.ordinal() as u32)
+            .map_err(|e| GpuError::PtxCompileFailed {
+            kernel: "masked_scatter_forward",
+            source: e,
+        })?;
+    let mut out = stream.alloc_zeros::<T>(n)?;
+    // Single block, single active thread (thread 0 scatters serially).
+    let cfg = LaunchConfig {
+        grid_dim: (1, 1, 1),
+        block_dim: (1, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let n_u32 = n as u32;
+    // SAFETY:
+    // - `f` is the forward-scatter PTX entry; signature
+    //   (in_ptr, src_ptr, mask_ptr, out_ptr, n) matches the five args below.
+    // - `input` (`T`) and `mask` (u8) each back AT LEAST `n` elements
+    //   (`*.len() >= n` checked above; either may be a pooled, over-allocated
+    //   `.contiguous()` materialisation). Thread 0 reads only `[0, n)` of each.
+    // - `source` holds the #true compacted scatter values; thread 0 reads
+    //   `source[j]` only as it increments `j` once per true byte. The caller
+    //   guarantees `source.len() >= count_nonzero(mask)`, so `j` stays in bounds.
+    // - `out` is a fresh n-element `T` buffer, the only `&mut`, not aliased with
+    //   `input`/`source`/`mask`; thread 0 writes each `out[i]` exactly once.
+    // - `n_u32` is non-truncating for any host-allocatable contiguous buffer.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(source)
             .arg(mask)
             .arg(&mut out)
             .arg(&n_u32)
@@ -1321,6 +1460,59 @@ pub fn masked_scatter_16(
     )
 }
 
+/// masked_scatter FORWARD (#1662) for a 32-bit value dtype (f32 / i32):
+/// `out[i] = mask[i]!=0 ? source[j++] : input[i]`. `n` is the logical numel of
+/// `input`/`mask`; `source` holds at least the #true elements (caller-checked).
+/// Result is a fresh `n`-element GPU-resident buffer.
+pub fn masked_scatter_forward_32<T: DeviceRepr + ValidAsZeroBits>(
+    input: &CudaSlice<T>,
+    source: &CudaSlice<T>,
+    mask: &CudaSlice<u8>,
+    n: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<T>> {
+    debug_assert_eq!(
+        std::mem::size_of::<T>(),
+        4,
+        "masked_scatter_forward_32 requires a 4-byte element"
+    );
+    let ptx = scatter_forward_ptx("masked_scatter_forward_32", 2, "b32", ".reg .b32 %val;");
+    launch_scatter_forward(
+        input,
+        source,
+        mask,
+        n,
+        d,
+        ptx,
+        "masked_scatter_forward_32".to_string(),
+    )
+}
+
+/// masked_scatter FORWARD for a 64-bit value dtype (f64 / i64).
+pub fn masked_scatter_forward_64<T: DeviceRepr + ValidAsZeroBits>(
+    input: &CudaSlice<T>,
+    source: &CudaSlice<T>,
+    mask: &CudaSlice<u8>,
+    n: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<T>> {
+    debug_assert_eq!(
+        std::mem::size_of::<T>(),
+        8,
+        "masked_scatter_forward_64 requires an 8-byte element"
+    );
+    let ptx = scatter_forward_ptx("masked_scatter_forward_64", 3, "b64", ".reg .b64 %val;");
+    launch_scatter_forward(
+        input,
+        source,
+        mask,
+        n,
+        d,
+        ptx,
+        "masked_scatter_forward_64".to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1384,6 +1576,43 @@ mod tests {
         assert_eq!(
             d.stream().clone_dtoh(&out).unwrap(),
             vec![10.0f32, 0.0, 30.0, 40.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn masked_scatter_forward_32_keeps_input_where_false() {
+        let d = dev();
+        // input [1,2,3,4]; mask [F,T,T,F]; source [-1,-2] ->
+        // out = [1, -1, -2, 4]  (source consumed in flat order; false keeps in).
+        let input = d.stream().clone_htod(&vec![1.0f32, 2.0, 3.0, 4.0]).unwrap();
+        let mask = d.stream().clone_htod(&vec![0u8, 1, 1, 0]).unwrap();
+        let source = d.stream().clone_htod(&vec![-1.0f32, -2.0]).unwrap();
+        let out = masked_scatter_forward_32::<f32>(&input, &source, &mask, 4, &d).unwrap();
+        assert_eq!(
+            d.stream().clone_dtoh(&out).unwrap(),
+            vec![1.0f32, -1.0, -2.0, 4.0]
+        );
+    }
+
+    #[test]
+    fn masked_scatter_forward_64_all_false_and_all_true() {
+        let d = dev();
+        let input = d.stream().clone_htod(&vec![1.0f64, 2.0, 3.0]).unwrap();
+        // all-false: out == input (source unconsumed).
+        let mask_f = d.stream().clone_htod(&vec![0u8, 0, 0]).unwrap();
+        let src_f = d.stream().clone_htod(&vec![9.0f64]).unwrap();
+        let out_f = masked_scatter_forward_64::<f64>(&input, &src_f, &mask_f, 3, &d).unwrap();
+        assert_eq!(
+            d.stream().clone_dtoh(&out_f).unwrap(),
+            vec![1.0f64, 2.0, 3.0]
+        );
+        // all-true: out == source (full copy).
+        let mask_t = d.stream().clone_htod(&vec![1u8, 1, 1]).unwrap();
+        let src_t = d.stream().clone_htod(&vec![-7.0f64, -8.0, -9.0]).unwrap();
+        let out_t = masked_scatter_forward_64::<f64>(&input, &src_t, &mask_t, 3, &d).unwrap();
+        assert_eq!(
+            d.stream().clone_dtoh(&out_t).unwrap(),
+            vec![-7.0f64, -8.0, -9.0]
         );
     }
 

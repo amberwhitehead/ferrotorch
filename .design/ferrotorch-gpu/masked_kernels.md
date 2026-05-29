@@ -38,10 +38,23 @@ the bool-mask `where` selection in upstream's iterator-based
   output, exactly mirroring upstream's CUDA sync) plus per-width
   compaction entries `masked_select_32<T>`/`masked_select_64<T>`/
   `masked_select_16`. Returns a 1-D output sized by `count_true`.
-- REQ-4: `masked_scatter` inverse-of-masked-select: copies source
-  values into positions where the mask is true, in source order.
-  Three width-templated entries
-  `masked_scatter_{32, 64, 16}` matching the `where` family.
+- REQ-4: `masked_scatter` two on-device families:
+  - BACKWARD (VJP of `masked_select`): scatter the compacted gradient
+    into a **zeroed** buffer at the true positions. Three
+    width-templated entries `masked_scatter_{32, 64, 16}` matching the
+    `where` family.
+  - FORWARD (#1662): `out[i] = mask[i] ? source[j++] : input[i]` —
+    copies source values (consumed serially in flat order) into a clone
+    of `input` at true positions, keeping `input[i]` elsewhere. The
+    source-index `j` is the EXCLUSIVE PREFIX-SUM of the mask, matching
+    upstream `aten/src/ATen/native/cuda/IndexKernel.cu:416-453`
+    (`at::cuda::cub::mask_exclusive_sum` + `source[maskPrefixSum]`
+    gather); a single in-order thread realises the same offset without a
+    separate scan buffer. Entries `masked_scatter_forward_{32, 64}`
+    (f32/f64 — the dtypes torch's all-CUDA masked_scatter forward
+    exercises). Distinct from the backward family in the FALSE branch
+    (forward passes `input[i]` through; backward leaves the pre-zeroed
+    slot).
 - REQ-5: Hand-written PTX kernels owned by Rust — no CUDA C++, no
   nvrtc, no external toolchain at load time. Loaded through
   `crate::module_cache::get_or_compile` exactly like
@@ -74,8 +87,9 @@ the bool-mask `where` selection in upstream's iterator-based
   833-877.
 - [x] AC-3: One `pub fn count_true` at line 570 and three
   `pub fn masked_select_*` entries at lines 877-936.
-- [x] AC-4: Three `pub fn masked_scatter_*` entries at lines
-  936-1000.
+- [x] AC-4: Three backward `pub fn masked_scatter_{32,64,16}` entries
+  plus two forward `pub fn masked_scatter_forward_{32,64}` entries
+  (#1662) in `masked_kernels.rs`.
 - [x] AC-5: Every kernel launch loads PTX via
   `module_cache::get_or_compile`; no nvrtc dependency in this file.
 - [x] AC-6: Unsupported dtypes are surfaced by the absence of a
@@ -107,9 +121,19 @@ The module is organised as a sequence of dtype-specialised sections:
    `mask[i] != 0`. A parallel prefix-sum scan is a perf follow-up;
    the serial walk is correct (matches the existing serial
    reductions in `bool_kernels` / `int_kernels`).
-4. **`masked_scatter` distribution**: inverse of `masked_select` —
-   a serial source-cursor walks `source[..]` and writes into the
-   destination position when `mask[i] != 0`.
+4. **`masked_scatter` distribution**:
+   - BACKWARD (inverse of `masked_select`): a serial source-cursor
+     walks the compacted gradient and writes into the destination
+     position when `mask[i] != 0`, leaving a pre-zeroed buffer
+     elsewhere.
+   - FORWARD (#1662): the same serial source-cursor walk, but the
+     destination starts as a copy of `input` — `out[i] = mask[i] ?
+     source[j++] : input[i]`. The `out` buffer is fully written (no
+     pre-zero needed). Wired by `grad_fns::indexing::masked_scatter`'s
+     all-CUDA branch so `Tensor::masked_scatter_t` with input + mask +
+     source all on CUDA stays GPU-resident (NO host round trip,
+     R-CODE-4) — previously the forward called `mask_b.data()` which
+     errors `GpuTensorNotAccessible` on a CUDA bool mask.
 
 The single host crossing in this file is the `i32` size returned by
 `count_true` — the result *shape* of `masked_select`, not a data
@@ -194,7 +218,7 @@ Expected: ≥ 1 `test result: ok` line.
 | REQ-1 | SHIPPED | impl: six `pub fn masked_fill_*` at `masked_fill_ in ferrotorch-gpu/src/masked_kernels.rs`; non-test consumer: `backend_impl.rs` (`use crate::masked_kernels as mk`) dispatches per-dtype calls. `launch_masked_fill` validates+launches on the LOGICAL `n` (#1661), tolerating pooled over-allocated `.contiguous()` inputs (regression test `masked_fill_narrowed_offset_view_gpu_matches_torch` + `masked_fill_normal_offset0_above_round_elements_gpu_matches_torch` in `tests/divergence_masked_fill_storage_offset_gpu.rs`); core-layer `.contiguous()` normalisation in `ferrotorch_core::grad_fns::indexing::masked_fill` + `masked_fill_bt`. |
 | REQ-2 | SHIPPED | impl: `pub fn where_32`/`where_64`/`where_16` at `where_32 in masked_kernels.rs`; non-test consumer: `where_16 in backend_impl.rs`. `launch_where` validates+launches on the LOGICAL `n` (#1660), tolerating pooled over-allocated `.contiguous()` operands (regression test `compare_gt_both_narrowed_views_pooled_logical_len_gpu_matches_torch` / `where_cond_bt_narrowed_offset_view_gpu_matches_torch` in `tests/divergence_storage_offset_class_completeness.rs`). KNOWN LATENT (spillover, not fixed here): `launch_scatter` (`mask.len() != out_numel`) still compares RAW lens — same class, but its core-layer `.contiguous()` normalisation + tests need a separate dispatch. (`launch_masked_fill` was fixed in #1661, see REQ-1.) |
 | REQ-3 | SHIPPED | impl: `pub fn count_true` at `count_true in masked_kernels.rs`; `masked_select_32/64/16` at lines 877-936; non-test consumer: `backend_impl.rs`. |
-| REQ-4 | SHIPPED | impl: `masked_scatter_32/64/16` at `masked_scatter_32 in masked_kernels.rs`; non-test consumer: `backend_impl.rs`. |
+| REQ-4 | SHIPPED | BACKWARD impl: `masked_scatter_32/64/16 in ferrotorch-gpu/src/masked_kernels.rs`; non-test consumer: `CudaBackendImpl::masked_scatter in ferrotorch-gpu/src/backend_impl.rs:8300` (the VJP of `masked_select`, used by `MaskedSelectBackward::backward in ferrotorch-core/src/grad_fns/indexing.rs:979`). FORWARD impl (#1662): `masked_scatter_forward_32`/`masked_scatter_forward_64 in ferrotorch-gpu/src/masked_kernels.rs` (`out[i] = mask[i] ? source[j++] : input[i]`, exclusive-prefix-sum source index per `aten/src/ATen/native/cuda/IndexKernel.cu:416-453`); non-test consumer: `CudaBackendImpl::masked_scatter_forward in ferrotorch-gpu/src/backend_impl.rs:8385` dispatched from `ferrotorch_core::grad_fns::indexing::masked_scatter`'s all-CUDA branch (`ferrotorch-core/src/grad_fns/indexing.rs:3620`), so `Tensor::masked_scatter_t` with input+mask+source all on CUDA keeps the result `is_cuda()` (NO host round trip, R-CODE-4) instead of erroring `GpuTensorNotAccessible` on the resident bool mask. Tests: `masked_scatter_forward_gpu_mask_rejected_divergence` (pinned, #1662) + `masked_scatter_forward_all_cuda_patterns_f32/f64_matches_torch` + `masked_scatter_forward_all_cuda_backward_matches_torch in ferrotorch-gpu/tests/divergence_masked_fill_reaudit.rs`; unit tests `masked_scatter_forward_32_keeps_input_where_false` / `masked_scatter_forward_64_all_false_and_all_true` in this file's `mod tests`. |
 | REQ-5 | SHIPPED | impl: every kernel launch in this file routes through `module_cache::get_or_compile`. The file's `use crate::module_cache::get_or_compile` import at line 44 binds the single PTX load path; the file has no `cudarc::nvrtc` import. |
 | REQ-6 | SHIPPED | impl: per-dtype `pub fn` entries mean the (op, dtype) coverage is structurally surfaced — a missing combination is a missing function symbol that the `backend_impl` dispatcher converts to `FerrotorchError::NotImplementedOnCuda` (the policy documented in the module `//!` block at line 36). |
 | REQ-7 | SHIPPED | impl: four `use crate::masked_kernels as mk` sites in `backend_impl.rs` at lines 6660, 6735, 6834, 6903 — each is the body of a `CudaBackendImpl` trait method. ferrotorch-core dispatches `Tensor::masked_fill`/etc. through the `GpuBackend` trait when the input is CUDA-resident. |

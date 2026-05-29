@@ -8380,6 +8380,89 @@ impl GpuBackend for CudaBackendImpl {
             }),
         }
     }
+
+    #[cfg(feature = "cuda")]
+    fn masked_scatter_forward(
+        &self,
+        input: &GpuBufferHandle,
+        source: &GpuBufferHandle,
+        mask: &GpuBufferHandle,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        use crate::masked_kernels as mk;
+        if mask.dtype() != DType::Bool {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "masked_scatter_forward: mask is tagged {}, expected Bool",
+                    mask.dtype()
+                ),
+            });
+        }
+        if input.dtype() != source.dtype() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "masked_scatter_forward: input dtype {} != source dtype {}",
+                    input.dtype(),
+                    source.dtype()
+                ),
+            });
+        }
+        if input.len() != n || mask.len() != n {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "masked_scatter_forward: input numel {} / mask numel {} != n {}",
+                    input.len(),
+                    mask.len(),
+                    n
+                ),
+            });
+        }
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let mb = Self::unwrap_buffer_bool(mask)?.inner();
+        // Single-integer shape sync (the on-device true count), mirroring
+        // upstream `masked_scatter_size_check` (`IndexKernel.cu:394-401`): the
+        // serial source cursor would over-read `source` if more positions are
+        // true than `source` has elements. NOT a data round trip — only the count
+        // crosses to host. `source.len()` is the resident source buffer length.
+        let true_count = mk::count_true(mb, dev).map_err(Self::map_gpu_err)?;
+        if source.len() < true_count {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "masked_scatter: source has {} elements, but mask has {} true positions",
+                    source.len(),
+                    true_count
+                ),
+            });
+        }
+        match input.dtype() {
+            DType::F32 => Ok(Self::wrap_slice_f32(
+                mk::masked_scatter_forward_32::<f32>(
+                    Self::unwrap_buffer(input)?.inner(),
+                    Self::unwrap_buffer(source)?.inner(),
+                    mb,
+                    n,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::F64 => Ok(Self::wrap_slice_f64(
+                mk::masked_scatter_forward_64::<f64>(
+                    Self::unwrap_buffer_f64(input)?.inner(),
+                    Self::unwrap_buffer_f64(source)?.inner(),
+                    mb,
+                    n,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            _ => Err(FerrotorchError::NotImplementedOnCuda {
+                op: "masked_scatter_forward",
+            }),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

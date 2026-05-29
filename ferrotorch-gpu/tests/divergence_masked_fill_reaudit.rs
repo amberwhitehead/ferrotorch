@@ -277,7 +277,6 @@ fn masked_select_backward_narrowed_offset_view_reaches_scatter_and_matches_torch
 const TORCH_MS_GPUMASK: [f32; 4] = [1.0, -1.0, -2.0, 4.0];
 
 #[test]
-#[ignore = "divergence: masked_scatter forward rejects GPU-resident mask (GpuTensorNotAccessible); tracking #1662"]
 fn masked_scatter_forward_gpu_mask_rejected_divergence() {
     ensure_cuda();
     let x = cpu_f32(&[1., 2., 3., 4.], &[4])
@@ -298,5 +297,158 @@ fn masked_scatter_forward_gpu_mask_rejected_divergence() {
         host_f32(&got),
         TORCH_MS_GPUMASK.to_vec(),
         "masked_scatter (GPU mask) diverged from live torch"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #1662 NEW COVERAGE: on-device masked_scatter forward (input + mask + source
+// all CUDA) across mask patterns + dtypes. Result must stay is_cuda() (NO host
+// round trip) and match live torch / the upstream
+// `out[i] = mask[i] ? source[exclusive_prefix_sum(mask)[i]] : input[i]`
+// semantic (`aten/src/ATen/native/cuda/IndexKernel.cu:447-453`). R-CHAR-3:
+// expectations built in-test from that elementwise semantic (route (b)).
+// ---------------------------------------------------------------------------
+
+/// Build the torch masked_scatter expectation from the upstream semantic.
+fn torch_masked_scatter_f32(input: &[f32], mask: &[bool], source: &[f32]) -> Vec<f32> {
+    let mut out = input.to_vec();
+    let mut j = 0usize;
+    for (i, &m) in mask.iter().enumerate() {
+        if m {
+            out[i] = source[j];
+            j += 1;
+        }
+    }
+    out
+}
+fn torch_masked_scatter_f64(input: &[f64], mask: &[bool], source: &[f64]) -> Vec<f64> {
+    let mut out = input.to_vec();
+    let mut j = 0usize;
+    for (i, &m) in mask.iter().enumerate() {
+        if m {
+            out[i] = source[j];
+            j += 1;
+        }
+    }
+    out
+}
+
+#[test]
+fn masked_scatter_forward_all_cuda_patterns_f32_matches_torch() {
+    ensure_cuda();
+    let input = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    // (mask, source) cases: some-trues, all-false (input unchanged),
+    // all-true (full source copy).
+    let cases: &[(Vec<bool>, Vec<f32>)] = &[
+        (
+            vec![false, true, true, false, true, false],
+            vec![-1.0, -2.0, -3.0],
+        ),
+        (vec![false; 6], vec![]),
+        (
+            vec![true; 6],
+            vec![-10.0, -20.0, -30.0, -40.0, -50.0, -60.0],
+        ),
+    ];
+    for (mask_vec, source) in cases {
+        let expect = torch_masked_scatter_f32(&input, mask_vec, source);
+        let x = cpu_f32(&input, &[6]).to(Device::Cuda(0)).expect("cuda");
+        let mask = BoolTensor::from_vec(mask_vec.clone(), vec![6])
+            .expect("mask")
+            .to(Device::Cuda(0))
+            .expect("mask cuda");
+        let src = cpu_f32(source, &[source.len()])
+            .to(Device::Cuda(0))
+            .expect("src cuda");
+        let got = x
+            .masked_scatter_t(&mask, &src)
+            .expect("masked_scatter all-cuda f32");
+        assert!(got.is_cuda(), "result must stay CUDA (mask={mask_vec:?})");
+        assert_eq!(
+            host_f32(&got),
+            expect,
+            "masked_scatter all-cuda f32 diverged (mask={mask_vec:?})"
+        );
+    }
+}
+
+#[test]
+fn masked_scatter_forward_all_cuda_patterns_f64_matches_torch() {
+    ensure_cuda();
+    let input = vec![1.0f64, 2.0, 3.0, 4.0, 5.0];
+    let cases: &[(Vec<bool>, Vec<f64>)] = &[
+        (vec![true, false, true, false, true], vec![-7.0, -8.0, -9.0]),
+        (vec![false; 5], vec![]),
+        (vec![true; 5], vec![-1.0, -2.0, -3.0, -4.0, -5.0]),
+    ];
+    for (mask_vec, source) in cases {
+        let expect = torch_masked_scatter_f64(&input, mask_vec, source);
+        let x = cpu_f64(&input, &[5]).to(Device::Cuda(0)).expect("cuda");
+        let mask = BoolTensor::from_vec(mask_vec.clone(), vec![5])
+            .expect("mask")
+            .to(Device::Cuda(0))
+            .expect("mask cuda");
+        let src = cpu_f64(source, &[source.len()])
+            .to(Device::Cuda(0))
+            .expect("src cuda");
+        let got = x
+            .masked_scatter_t(&mask, &src)
+            .expect("masked_scatter all-cuda f64");
+        assert!(got.is_cuda(), "result must stay CUDA (mask={mask_vec:?})");
+        assert_eq!(
+            host_f64(&got),
+            expect,
+            "masked_scatter all-cuda f64 diverged (mask={mask_vec:?})"
+        );
+    }
+}
+
+/// All-CUDA masked_scatter FORWARD must still attach a correct backward.
+/// live torch 2.11.0+cu130 (RTX 3090): input=[1,2,3,4] (requires_grad),
+/// mask=[F,T,T,F]cuda, source=[10,20]cuda (requires_grad);
+///   out = input.masked_scatter(mask, source) = [1,10,20,4];
+///   (out * [1,2,3,4]).sum().backward()
+///   => input.grad = grad_out.masked_fill(mask,0) = [1,0,0,4]
+///   => source.grad = grad_out[mask] = [2,3]
+const TORCH_MS_FWD_INPUT_GRAD: [f32; 4] = [1.0, 0.0, 0.0, 4.0];
+const TORCH_MS_FWD_SOURCE_GRAD: [f32; 2] = [2.0, 3.0];
+
+#[test]
+fn masked_scatter_forward_all_cuda_backward_matches_torch() {
+    ensure_cuda();
+    let input = cpu_f32(&[1., 2., 3., 4.], &[4])
+        .to(Device::Cuda(0))
+        .expect("cuda")
+        .requires_grad_(true);
+    let mask = BoolTensor::from_vec(vec![false, true, true, false], vec![4])
+        .expect("mask")
+        .to(Device::Cuda(0))
+        .expect("mask cuda");
+    let source = cpu_f32(&[10., 20.], &[2])
+        .to(Device::Cuda(0))
+        .expect("src cuda")
+        .requires_grad_(true);
+    let out = input
+        .masked_scatter_t(&mask, &source)
+        .expect("masked_scatter all-cuda forward");
+    assert!(out.is_cuda());
+    assert_eq!(host_f32(&out), vec![1.0, 10.0, 20.0, 4.0]);
+    let w = cpu_f32(&[1., 2., 3., 4.], &[4])
+        .to(Device::Cuda(0))
+        .expect("w cuda");
+    let loss = out.mul_t(&w).expect("mul").sum_all().expect("sum");
+    loss.backward()
+        .expect("backward of all-cuda masked_scatter forward");
+    let gi = input.grad().expect("ok").expect("input grad");
+    assert_eq!(
+        host_f32(&gi),
+        TORCH_MS_FWD_INPUT_GRAD.to_vec(),
+        "masked_scatter forward input grad diverged from live torch"
+    );
+    let gs = source.grad().expect("ok").expect("source grad");
+    assert_eq!(
+        host_f32(&gs),
+        TORCH_MS_FWD_SOURCE_GRAD.to_vec(),
+        "masked_scatter forward source grad diverged from live torch"
     );
 }

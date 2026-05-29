@@ -2803,6 +2803,27 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    // masked_scatter FORWARD (#1662): the on-device `Tensor::masked_scatter`
+    // forward when input, source and mask are all CUDA-resident.
+    // `out[i] = mask[i]!=0 ? source[j++] : input[i]`, source consumed serially
+    // in flat C-order (the source-index `j` is the exclusive prefix-sum of the
+    // mask, matching upstream `aten/src/ATen/native/cuda/IndexKernel.cu:416-453`).
+    // `input` and `mask` MUST have equal numel == `n`; `mask` MUST be tagged
+    // `DType::Bool`; `source` must hold >= count_nonzero(mask) elements (the
+    // caller checks this). Result keeps `input`'s dtype and stays GPU-resident
+    // (NO host round trip — R-CODE-4). Covers f32/f64.
+    fn masked_scatter_forward(
+        &self,
+        _input: &GpuBufferHandle,
+        _source: &GpuBufferHandle,
+        _mask: &GpuBufferHandle,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "masked_scatter_forward",
+        })
+    }
+
     // masked_zero: out[i] = mask[i] ? 0.0 : grad[i]  (backward of masked_fill)
     fn masked_zero_f32(
         &self,

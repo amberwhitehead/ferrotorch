@@ -3525,7 +3525,19 @@ impl<T: Float> GradFn<T> for MaskedScatterBackward<T> {
         if !is_grad_enabled() {
             return Ok(vec![None, None]);
         }
-        let mask_h = self.mask.data()?;
+        // The mask may be CUDA-resident (the #1662 on-device forward saves the
+        // resident mask in the grad_fn). `.data()` errors on a CUDA bool tensor,
+        // so read it host-side via `.cpu()` first; for an already-host mask
+        // `.cpu()` is a cheap no-op clone. The VJP is a serial host walk in
+        // either case (matching the pre-#1662 CPU backward exactly), so this is
+        // the existing backward semantics — no behavioural change for the
+        // all-CPU path.
+        let mask_cpu = if self.mask.is_cuda() {
+            self.mask.to(Device::Cpu)?
+        } else {
+            self.mask.clone()
+        };
+        let mask_h = mask_cpu.data()?;
         let go = grad_output.data_vec()?;
         let zero = <T as num_traits::Zero>::zero();
 
@@ -3616,6 +3628,57 @@ pub fn masked_scatter<T: Float>(
     } else {
         broadcast_bool_tensor(mask, &common)?
     };
+
+    // GPU-resident fast path (#1662): input, mask AND source all on CUDA. torch
+    // accepts a fully-on-device masked_scatter (input, mask, source all CUDA ->
+    // CUDA result); the host path below calls `mask_b.data()` which errors
+    // `GpuTensorNotAccessible` on a CUDA bool mask. Route the forward through the
+    // on-device kernel `out[i] = mask[i] ? source[j++] : input[i]` (the
+    // source-index `j` is the exclusive prefix-sum of the mask, realised by a
+    // serial in-order walk — matching upstream
+    // `aten/src/ATen/native/cuda/IndexKernel.cu:416-453`). Result stays
+    // `is_cuda()`; NO host round trip (R-CODE-4). f32/f64 only — other dtypes
+    // (and any mixed-residency combination) fall through to the host path, whose
+    // `mask_b.data()` surfaces the correct device-mismatch error.
+    if input_b.is_cuda() && mask_b.is_cuda() && source.is_cuda() {
+        use std::any::TypeId;
+        let is_t_f32 = TypeId::of::<T>() == TypeId::of::<f32>();
+        let is_t_f64 = TypeId::of::<T>() == TypeId::of::<f64>();
+        if (is_t_f32 || is_t_f64)
+            && input_b.device() == mask_b.device()
+            && input_b.device() == source.device()
+        {
+            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            // `.contiguous()` materialises a (possibly narrowed-offset) view's
+            // logical [0,n) window on-device (#1657), so the handle's logical len
+            // matches the mask numel and the kernel reads `[0, n)` (the #1661
+            // pooled-buffer convention). Source is flattened-contiguous too.
+            let input_c = input_b.contiguous()?;
+            let source_c = source.contiguous()?;
+            let n = input_c.numel();
+            // The backend reads the on-device true count once (the same
+            // single-integer shape sync PyTorch performs in
+            // `masked_scatter_size_check`, `IndexKernel.cu:394`) and validates
+            // `source.numel() >= count_nonzero(mask)` — NOT a data round trip.
+            let result_handle = backend.masked_scatter_forward(
+                input_c.gpu_handle()?,
+                source_c.gpu_handle()?,
+                mask_b.gpu_handle()?,
+                n,
+            )?;
+            let storage = TensorStorage::gpu(result_handle);
+            let output_shape = common.clone();
+            if (input_c.requires_grad() || source.requires_grad()) && is_grad_enabled() {
+                let grad_fn = Arc::new(MaskedScatterBackward {
+                    input: input_c.clone(),
+                    source: source.clone(),
+                    mask: mask_b.clone(),
+                });
+                return Tensor::from_operation(storage, output_shape, grad_fn);
+            }
+            return Tensor::from_storage(storage, output_shape, false);
+        }
+    }
 
     let mask_h = mask_b.data()?;
     let true_count = mask_h.iter().filter(|&&b| b).count();
