@@ -16,6 +16,7 @@
 //! | REQ-10 (state-dict entries) | SHIPPED | `pub fn load_gguf_state_dict` + `_mmap` in `gguf.rs`; consumed by `ferrotorch-llama`. |
 //! | REQ-11 (alignment handling) | SHIPPED | `Reader::align_to` + `general.alignment` lookup in `parse_gguf_bytes`. |
 //! | REQ-12 (bounded reader + OOM defense) | SHIPPED | `struct Reader<'a>` with bounds-checked methods in `gguf.rs`. |
+//! | REQ-13 (`GgufFile::data` raw-bytes accessor) | SHIPPED | `pub fn GgufFile::data(&self) -> &[u8]` in `gguf.rs`; consumer: `ferrotorch-llama` `gguf_tensor_to_bf16_cudarc` in `gpu_gguf.rs` slices per-tensor quantized blocks for the GPU dequant bridge. |
 //!
 //! GGUF is the standard binary format used by llama.cpp for quantized LLM
 //! weights. This module implements:
@@ -207,6 +208,15 @@ pub struct GgufFile {
     pub tensors: Vec<GgufTensorInfo>,
     /// Raw data section bytes (tensor data lives here at their declared offsets).
     data: Vec<u8>,
+}
+
+impl GgufFile {
+    /// Raw GGUF data section bytes (the tensor block region). Used by the
+    /// GPU dequant bridge to slice each quantized tensor's on-disk blocks.
+    #[must_use]
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
 }
 
 // ---------------------------------------------------------------------------

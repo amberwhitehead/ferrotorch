@@ -147,6 +147,8 @@ pub mod generation;
 pub mod gguf_remap;
 #[cfg(feature = "cuda")]
 pub mod gpu;
+#[cfg(feature = "cuda")]
+pub mod gpu_gguf;
 /// Re-export of [`ferrotorch_grammar`] for backward compatibility.
 ///
 /// The constrained-decoding grammar processors used to live in
@@ -182,3 +184,5 @@ pub use spec_decode::{
 
 #[cfg(feature = "cuda")]
 pub use gpu::{GraphedDecoder, LlamaGpuInferencer, LlamaGpuLayer, ProfiledForwardResult};
+#[cfg(feature = "cuda")]
+pub use gpu_gguf::{cubecl_cuda_client, gpu_dequantize_to_bf16_cudarc};

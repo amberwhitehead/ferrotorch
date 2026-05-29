@@ -18,7 +18,11 @@ cuda = [
     "dep:ferrotorch-gpu",
     "dep:cudarc",
     "dep:half",
+    "dep:ferrotorch-cubecl",
+    "dep:cubecl",
+    "dep:cubecl-cuda",
     "ferrotorch-grammar/cuda",
+    "ferrotorch-cubecl/cuda",
 ]
 
 [dependencies]
@@ -28,6 +32,9 @@ ferrotorch-serialize = { workspace = true }
 ferrotorch-hub = { workspace = true }
 ferrotorch-grammar = { workspace = true }
 ferrotorch-gpu = { workspace = true, optional = true }
+ferrotorch-cubecl = { workspace = true, optional = true }
+cubecl = { workspace = true, optional = true }
+cubecl-cuda = { workspace = true, optional = true }
 cudarc = { workspace = true, optional = true }
 half = { workspace = true, optional = true }
 num-traits = { workspace = true }

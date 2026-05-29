@@ -2704,8 +2704,11 @@ name = "ferrotorch-llama"
 version = "0.6.0"
 dependencies = [
  "bytemuck",
+ "cubecl",
+ "cubecl-cuda",
  "cudarc",
  "ferrotorch-core",
+ "ferrotorch-cubecl",
  "ferrotorch-gpu",
  "ferrotorch-grammar",
  "ferrotorch-hub",
