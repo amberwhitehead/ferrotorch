@@ -206,14 +206,24 @@ mechanically dischargeable when the corresponding REQ ships.
   matches live `torch.special.ndtri` on `[0.025,0.25,0.5,0.75,0.975]` to f64
   tolerance; round-trips `ndtr(ndtri(p)) ≈ p`.
   (SHIPPED #1651 batch 1 — `ndtri_*_vs_torch` / `ndtr_ndtri_roundtrip in special.rs`.)
-- [ ] AC-B4: `i0` CPU impl exists; `i0(0.0) == 1.0`, `i0` even, matches live
+- [x] AC-B4: `i0` CPU impl exists; `i0(0.0) == 1.0`, `i0` even, matches live
   `torch.special.i0` on `[0,1,2,5,10,20]` to tolerance.
-- [ ] AC-B5: `i0e` CPU impl exists; `i0e(0.0) == 1.0`, `i0e` even,
+  (SHIPPED #1651 batch 2 — `i0_known_values_vs_torch` / `i_family_edges_vs_torch`
+  / `i_family_boundary_at_8_vs_torch in special.rs`. NOTE: `i0(+/-inf) = NaN`
+  in live torch, NOT `+inf` — the Cephes kernel forms `exp(inf)/sqrt(inf) =
+  inf/inf = NaN`; we match torch byte-for-byte, R-DEV-1.)
+- [x] AC-B5: `i0e` CPU impl exists; `i0e(0.0) == 1.0`, `i0e` even,
   `i0e(x) == exp(-|x|)*i0(x)` for finite `x`; matches live `torch.special.i0e`.
-- [ ] AC-B6: `i1` CPU impl exists; `i1(0.0) == 0.0`, `i1` odd, matches live
-  `torch.special.i1`.
-- [ ] AC-B7: `i1e` CPU impl exists; `i1e(0.0) == 0.0`, `i1e` odd,
+  (SHIPPED #1651 batch 2 — `i0e_known_values_vs_torch` /
+  `i_family_large_x_scaled_finite_vs_torch in special.rs`: `i0e(700)` stays at
+  ~0.0151 where `i0(700) > 1e300`.)
+- [x] AC-B6: `i1` CPU impl exists; `i1(0.0) == 0.0`, `i1` odd, matches live
+  `torch.special.i1`. (SHIPPED #1651 batch 2 — `i1_known_values_vs_torch in
+  special.rs`; `i1(+/-inf) = NaN` matches torch.)
+- [x] AC-B7: `i1e` CPU impl exists; `i1e(0.0) == 0.0`, `i1e` odd,
   `i1e(x) == exp(-|x|)*i1(x)`; matches live `torch.special.i1e`.
+  (SHIPPED #1651 batch 2 — `i1e_known_values_vs_torch` /
+  `i_family_large_x_scaled_finite_vs_torch in special.rs`.)
 - [ ] AC-B8: `zeta` CPU impl exists; `zeta(2.0, 1.0) == pi^2/6`,
   `zeta(1.0, q) == +inf`, `zeta(0.5, q).is_nan()`, `zeta(x, q<=0 integer)
   == +inf`; matches live `torch.special.zeta` on a grid of `(x>1, q>0)`.
@@ -238,8 +248,13 @@ mechanically dischargeable when the corresponding REQ ships.
   precision on-device — the same constraint that routes general f64
   transcendentals off-device for `cdist_f64` (`distance.rs:211-219`). bf16/f16
   CUDA inputs return `NotImplementedOnCuda` (rejected in `special_gpu_simple`
-  before any device call). The i0..k1 / zeta / airy families (batches 2, 3)
-  remain NOT-STARTED.
+  before any device call). **i0/i0e/i1/i1e SHIPPED for f32** (#1651 batch 2):
+  `I0_F32_PTX` / `I0E_F32_PTX` / `I1_F32_PTX` / `I1E_F32_PTX` +
+  `gpu_{i0,i0e,i1,i1e}_f32` via the `GpuBackend::iX_f32` methods, verified on
+  the RTX 3090 by `{i0,i0e,i1,i1e}_on_device_matches_torch in
+  ferrotorch-gpu/src/special.rs` (the chbevl Clenshaw recurrence unrolled over
+  the Cephes A/B tables, exp via `ex2.approx.f32`, B-set `sqrt.rn.f32` divide).
+  The zeta / airy / bessel-k families (batch 3) remain NOT-STARTED.
 - [ ] AC-B14: parity-sweep runner arms exist for each op and report
   `passed (0 skipped, 0 failed)` at `--seeds 8`. Per goal.md S5 / R-DEFER-6 the
   missing runner arm is ONE test-infrastructure follow-up blocker for the whole
@@ -363,10 +378,10 @@ Each line must print `>= 1` before the corresponding REQ can move to SHIPPED.
 | REQ-B1 | SHIPPED | CPU: `entr_scalar` -> `pub fn entr in special.rs` (NaN/`>0`/`==0`/else ladder, `aten/src/ATen/native/cuda/Math.cuh:463-480`). GPU (f32): `ENTR_F32_PTX` + `pub fn gpu_entr_f32 in ferrotorch-gpu/src/special.rs` via `GpuBackend::entr_f32` (`CudaBackendImpl::entr_f32 in backend_impl.rs`); the CUDA branch (`special_gpu_simple`) of `entr in special.rs` dispatches on-device (f64 CUDA -> `NotImplementedOnCuda`, no host round trip). Non-test consumer: re-exported as `ferrotorch_core::entr` (`pub use special::entr in lib.rs`) — S5 torch.special public surface. Tests: live-torch-2.11 oracle (`entr_*_vs_torch in special.rs`, `entr_on_device_matches_torch in ferrotorch-gpu/src/special.rs`). |
 | REQ-B2 | SHIPPED | CPU: `ndtr_scalar` -> `pub fn ndtr in special.rs`, composite `(1+erf(x*M_SQRT1_2))*0.5` over shipped `erf_scalar` (`aten/src/ATen/native/UnaryOps.cpp:715-718`). GPU (f32): `NDTR_F32_PTX` + `pub fn gpu_ndtr_f32 in ferrotorch-gpu/src/special.rs` via `GpuBackend::ndtr_f32` (A&S-7.1.26 erf in PTX matching the CPU f32 path); CUDA branch of `ndtr in special.rs` on-device (f64 CUDA -> `NotImplementedOnCuda`). Non-test consumer: `ferrotorch_core::ndtr` (`pub use special::ndtr in lib.rs`). Tests: `ndtr_*_vs_torch in special.rs`, `ndtr_on_device_matches_torch in ferrotorch-gpu/src/special.rs`. |
 | REQ-B3 | SHIPPED | CPU: `ndtri_scalar` -> `ndtri_f64` -> `pub fn ndtri in special.rs`, full Cephes 3-region rational + `polevl` reverse-order helper + code-flag sign flip (`aten/src/ATen/native/cuda/Math.cuh:30-39, 48-173`); NOT `sqrt(2)*erfinv`. GPU (f32): `NDTRI_F32_PTX` + `pub fn gpu_ndtri_f32 in ferrotorch-gpu/src/special.rs` via `GpuBackend::ndtri_f32` (`CudaBackendImpl::ndtri_f32 in backend_impl.rs`); CUDA branch of `ndtri in special.rs` on-device (f64 CUDA -> `NotImplementedOnCuda`). Non-test consumer: `ferrotorch_core::ndtri` (`pub use special::ndtri in lib.rs`). Tests: `ndtri_known_values_vs_torch` / `ndtri_cephes_regions_vs_torch` / `ndtri_domain_edges_vs_torch` / `ndtri_f32_vs_torch` / `ndtr_ndtri_roundtrip in special.rs`, `ndtri_on_device_matches_torch` / `ndtri_tail_and_edges_on_device_matches_torch in ferrotorch-gpu/src/special.rs`. |
-| REQ-B4 | NOT-STARTED | `i0` does not exist. Open prereq blocker #1651. Upstream: `aten/src/ATen/native/cuda/Math.cuh:484-556`. |
-| REQ-B5 | NOT-STARTED | `i0e` does not exist. Open prereq blocker #1651. Upstream: `aten/src/ATen/native/Math.h:101-135`. |
-| REQ-B6 | NOT-STARTED | `i1` does not exist. Open prereq blocker #1651. Upstream: `aten/src/ATen/native/Math.h:1500-1518` / `cuda/Math.cuh:558-623`. |
-| REQ-B7 | NOT-STARTED | `i1e` does not exist. Open prereq blocker #1651. Upstream: `aten/src/ATen/native/Math.h:1530-1544` / `cuda/Math.cuh:625-745`. |
+| REQ-B4 | SHIPPED | CPU: `chbevl` + `i0_f64` -> `i0_scalar` -> `pub fn i0 in special.rs` (even, A[30]/B[25] Chebyshev sets, `aten/src/ATen/native/cuda/Math.cuh:502-555`). GPU (f32): `I0_F32_PTX` + `pub fn gpu_i0_f32 in ferrotorch-gpu/src/special.rs` via `GpuBackend::i0_f32` (`CudaBackendImpl::i0_f32 in backend_impl.rs`); the CUDA branch (`special_gpu_simple`) of `i0 in special.rs` dispatches on-device (f64 CUDA -> `NotImplementedOnCuda`, no host round trip). Non-test consumer: re-exported as `ferrotorch_core::i0` (`pub use special::i0 in lib.rs`) — S5 torch.special public surface. Tests: live-torch-2.11 oracle (`i0_known_values_vs_torch` / `i_family_edges_vs_torch` / `i_family_boundary_at_8_vs_torch in special.rs`, `i0_on_device_matches_torch in ferrotorch-gpu/src/special.rs`). |
+| REQ-B5 | SHIPPED | CPU: `i0e_f64` -> `i0e_scalar` -> `pub fn i0e in special.rs` (same A/B sets WITHOUT `exp(x)`, `aten/src/ATen/native/Math.h:101-145`). GPU (f32): `I0E_F32_PTX` + `pub fn gpu_i0e_f32 in ferrotorch-gpu/src/special.rs` via `GpuBackend::i0e_f32`; CUDA branch of `i0e in special.rs` on-device (f64 CUDA -> `NotImplementedOnCuda`). Non-test consumer: `ferrotorch_core::i0e` (`pub use special::i0e in lib.rs`). Tests: `i0e_known_values_vs_torch` / `i_family_large_x_scaled_finite_vs_torch in special.rs`, `i0e_on_device_matches_torch in ferrotorch-gpu/src/special.rs`. |
+| REQ-B6 | SHIPPED | CPU: `i1_f64` -> `i1_scalar` -> `pub fn i1 in special.rs` (odd, i1e_A[29]/i1e_B[25], `aten/src/ATen/native/cuda/Math.cuh:575-622`). GPU (f32): `I1_F32_PTX` + `pub fn gpu_i1_f32 in ferrotorch-gpu/src/special.rs` via `GpuBackend::i1_f32`; CUDA branch of `i1 in special.rs` on-device (f64 CUDA -> `NotImplementedOnCuda`). Non-test consumer: `ferrotorch_core::i1` (`pub use special::i1 in lib.rs`). Tests: `i1_known_values_vs_torch in special.rs`, `i1_on_device_matches_torch in ferrotorch-gpu/src/special.rs`. |
+| REQ-B7 | SHIPPED | CPU: `i1e_f64` -> `i1e_scalar` -> `pub fn i1e in special.rs` (odd, same i1e_A/B sets WITHOUT `exp(x)`, `aten/src/ATen/native/cuda/Math.cuh:647-696`). GPU (f32): `I1E_F32_PTX` + `pub fn gpu_i1e_f32 in ferrotorch-gpu/src/special.rs` via `GpuBackend::i1e_f32`; CUDA branch of `i1e in special.rs` on-device (f64 CUDA -> `NotImplementedOnCuda`). Non-test consumer: `ferrotorch_core::i1e` (`pub use special::i1e in lib.rs`). Tests: `i1e_known_values_vs_torch` / `i_family_large_x_scaled_finite_vs_torch in special.rs`, `i1e_on_device_matches_torch in ferrotorch-gpu/src/special.rs`. |
 | REQ-B8 | NOT-STARTED | `zeta` does not exist as a public real-`x` op (only an integer-order private `hurwitz_zeta_scalar` in distributions, not the torch.special op). Open prereq blocker #1651. Upstream Cephes: `aten/src/ATen/native/cuda/Math.cuh:299-383`. |
 | REQ-B9 | NOT-STARTED | `airy_ai` does not exist. Open prereq blocker #1651. Upstream: `aten/src/ATen/native/cuda/Math.cuh:1280-1459`. |
 | REQ-B10 | NOT-STARTED | `spherical_bessel_j0` does not exist. Open prereq blocker #1651. Upstream: `aten/src/ATen/native/cuda/Math.cuh:3039-3052`. |

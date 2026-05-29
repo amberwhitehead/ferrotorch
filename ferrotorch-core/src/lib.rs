@@ -219,8 +219,8 @@ pub use shape::{broadcast_shapes, normalize_axis};
 pub use sparse::{CooTensor, CscTensor, CsrTensor, SparseGrad, SparseTensor};
 pub use sparse::{SemiStructuredSparseTensor, sparse_matmul_24};
 pub use special::{
-    beta, digamma, entr, erf, erfc, erfinv, expm1, gammainc, gammaincc, gammaln_sign, lgamma,
-    log_beta, log1p, multigammaln, mvlgamma, ndtr, ndtri, sinc, xlogy,
+    beta, digamma, entr, erf, erfc, erfinv, expm1, gammainc, gammaincc, gammaln_sign, i0, i0e, i1,
+    i1e, lgamma, log_beta, log1p, multigammaln, mvlgamma, ndtr, ndtri, sinc, xlogy,
 };
 pub use storage::{StorageBuffer, TensorStorage};
 pub use stride_tricks::{AsStridedBackward, as_strided, as_strided_copy, as_strided_scatter};

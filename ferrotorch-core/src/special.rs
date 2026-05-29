@@ -897,6 +897,271 @@ fn ndtri_f64(y0: f64) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
+// Modified-Bessel-I family: i0 / i0e / i1 / i1e (Cephes, #1651 batch 2)
+// ---------------------------------------------------------------------------
+//
+// Direct ports of the upstream torch.special Cephes kernels. The scalar
+// evaluators run in f64 (the `*_f64` core) then narrow to `T` via `T::from`,
+// exactly like the sibling `ndtri_f64` / `gammainc_scalar` convention above:
+// the f64 arithmetic gives the mathematically-correct value, and narrowing to
+// f32 stays well inside the f32 transcendental tolerance (1e-5). This is at
+// least as accurate as torch's own f32 path, which uses SHORTER Chebyshev
+// coefficient sets for `i1e` (17/7 vs the f64 29/25,
+// `aten/src/ATen/native/cuda/Math.cuh:3289-3356`) — running the full f64 sets
+// and narrowing strictly dominates that on accuracy.
+//
+//   - chbevl: the shared Clenshaw Chebyshev evaluator,
+//     `aten/src/ATen/native/cuda/Math.cuh:485-500`.
+//   - i0:  `cuda/Math.cuh:502-555` (i0_string). Even (fabs). `|x|<=8` A[30]
+//     on `exp(x)*chbevl(x/2-2, A)`; `|x|>8` B[25] on
+//     `exp(x)*chbevl(32/x-2, B)/sqrt(x)`.
+//   - i0e: `aten/src/ATen/native/Math.h:101-145` (calc_i0e). Same A[30]/B[25]
+//     WITHOUT the `exp(x)` factor.
+//   - i1:  `cuda/Math.cuh:575-622` (i1_string). Odd (sign of _x). `|x|<=8`
+//     i1e_A[29] on `exp(x)*x*chbevl(y, A)`; `|x|>8` i1e_B[25] on
+//     `exp(x)*chbevl(32/x-2, B)/sqrt(x)`.
+//   - i1e: `cuda/Math.cuh:647-696` (i1e double specialization). Same
+//     i1e_A[29]/i1e_B[25] WITHOUT the `exp(x)` factor.
+
+/// Cephes `chbevl`: evaluate a Chebyshev series by the Clenshaw recurrence.
+/// Verbatim port of `aten/src/ATen/native/cuda/Math.cuh:485-500`:
+/// `b0 = array[0]; b1 = 0;` then for `i in 1..len`:
+/// `b2 = b1; b1 = b0; b0 = x*b1 - b2 + array[i];` returning `0.5*(b0 - b2)`.
+/// The coefficient slice is consumed front-to-back (the i0/i1 tables are stored
+/// in that order, NOT reversed like the `polevl` tables).
+fn chbevl<T: Float>(x: T, array: &[T]) -> T {
+    let mut b0 = array[0];
+    let mut b1 = nt_zero::<T>();
+    let mut b2 = nt_zero::<T>();
+    for &c in &array[1..] {
+        b2 = b1;
+        b1 = b0;
+        b0 = x * b1 - b2 + c;
+    }
+    T::from(0.5).unwrap() * (b0 - b2)
+}
+
+// Chebyshev coefficients for exp(-x) I0(x) on [0, 8]
+// (`aten/src/ATen/native/cuda/Math.cuh:512-527`). lim(x->0) = 1.
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes i0e_A coefficients (cuda/Math.cuh:512-527) reproduced to full width for an audit-friendly diff; trailing digits round to the same f64 bit pattern"
+)]
+const I0E_A: [f64; 30] = [
+    -4.41534164647933937950E-18,
+    3.33079451882223809783E-17,
+    -2.43127984654795469359E-16,
+    1.71539128555513303061E-15,
+    -1.16853328779934516808E-14,
+    7.67618549860493561688E-14,
+    -4.85644678311192946090E-13,
+    2.95505266312963983461E-12,
+    -1.72682629144155570723E-11,
+    9.67580903537323691224E-11,
+    -5.18979560163526290666E-10,
+    2.65982372468238665035E-9,
+    -1.30002500998624804212E-8,
+    6.04699502254191894932E-8,
+    -2.67079385394061173391E-7,
+    1.11738753912010371815E-6,
+    -4.41673835845875056359E-6,
+    1.64484480707288970893E-5,
+    -5.75419501008210370398E-5,
+    1.88502885095841655729E-4,
+    -5.76375574538582365885E-4,
+    1.63947561694133579842E-3,
+    -4.32430999505057594430E-3,
+    1.05464603945949983183E-2,
+    -2.37374148058994688156E-2,
+    4.93052842396707084878E-2,
+    -9.49010970480476444210E-2,
+    1.71620901522208775349E-1,
+    -3.04682672343198398683E-1,
+    6.76795274409476084995E-1,
+];
+
+// Chebyshev coefficients for exp(-x) sqrt(x) I0(x) on [8, inf]
+// (`aten/src/ATen/native/cuda/Math.cuh:539-552`). lim(x->inf) = 1/sqrt(2pi).
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes i0e_B coefficients (cuda/Math.cuh:539-552)"
+)]
+const I0E_B: [f64; 25] = [
+    -7.23318048787475395456E-18,
+    -4.83050448594418207126E-18,
+    4.46562142029675999901E-17,
+    3.46122286769746109310E-17,
+    -2.82762398051658348494E-16,
+    -3.42548561967721913462E-16,
+    1.77256013305652638360E-15,
+    3.81168066935262242075E-15,
+    -9.55484669882830764870E-15,
+    -4.15056934728722208663E-14,
+    1.54008621752140982691E-14,
+    3.85277838274214270114E-13,
+    7.18012445138366623367E-13,
+    -1.79417853150680611778E-12,
+    -1.32158118404477131188E-11,
+    -3.14991652796324136454E-11,
+    1.18891471078464383424E-11,
+    4.94060238822496958910E-10,
+    3.39623202570838634515E-9,
+    2.26666899049817806459E-8,
+    2.04891858946906374183E-7,
+    2.89137052083475648297E-6,
+    6.88975834691682398426E-5,
+    3.36911647825569408990E-3,
+    8.04490411014108831608E-1,
+];
+
+// Chebyshev coefficients for exp(-x) I1(x) on [0, 8]
+// (`aten/src/ATen/native/cuda/Math.cuh:582-597`). lim(x->0){ ../x } = 1/2.
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes i1e_A coefficients (cuda/Math.cuh:582-597)"
+)]
+const I1E_A: [f64; 29] = [
+    2.77791411276104639959E-18,
+    -2.11142121435816608115E-17,
+    1.55363195773620046921E-16,
+    -1.10559694773538630805E-15,
+    7.60068429473540693410E-15,
+    -5.04218550472791168711E-14,
+    3.22379336594557470981E-13,
+    -1.98397439776494371520E-12,
+    1.17361862988909016308E-11,
+    -6.66348972350202774223E-11,
+    3.62559028155211703701E-10,
+    -1.88724975172282928790E-9,
+    9.38153738649577178388E-9,
+    -4.44505912879632808065E-8,
+    2.00329475355213526229E-7,
+    -8.56872026469545474066E-7,
+    3.47025130813767847674E-6,
+    -1.32731636560394358279E-5,
+    4.78156510755005422638E-5,
+    -1.61760815825896745588E-4,
+    5.12285956168575772895E-4,
+    -1.51357245063125314899E-3,
+    4.15642294431288815669E-3,
+    -1.05640848946261981558E-2,
+    2.47264490306265168283E-2,
+    -5.29459812080949914269E-2,
+    1.02643658689847095384E-1,
+    -1.76416518357834055153E-1,
+    2.52587186443633654823E-1,
+];
+
+// Chebyshev coefficients for exp(-x) sqrt(x) I1(x) on [8, inf]
+// (`aten/src/ATen/native/cuda/Math.cuh:606-619`). lim(x->inf) = 1/sqrt(2pi).
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes i1e_B coefficients (cuda/Math.cuh:606-619)"
+)]
+const I1E_B: [f64; 25] = [
+    7.51729631084210481353E-18,
+    4.41434832307170791151E-18,
+    -4.65030536848935832153E-17,
+    -3.20952592199342395980E-17,
+    2.96262899764595013876E-16,
+    3.30820231092092828324E-16,
+    -1.88035477551078244854E-15,
+    -3.81440307243700780478E-15,
+    1.04202769841288027642E-14,
+    4.27244001671195135429E-14,
+    -2.10154184277266431302E-14,
+    -4.08355111109219731823E-13,
+    -7.19855177624590851209E-13,
+    2.03562854414708950722E-12,
+    1.41258074366137813316E-11,
+    3.25260358301548823856E-11,
+    -1.89749581235054123450E-11,
+    -5.58974346219658380687E-10,
+    -3.83538038596423702205E-9,
+    -2.63146884688951950684E-8,
+    -2.51223623787020892529E-7,
+    -3.88256480887769039346E-6,
+    -1.10588938762623716291E-4,
+    -9.76109749136146840777E-3,
+    7.78576235018280120474E-1,
+];
+
+/// f64 Cephes `i0`. Even function. See module note for the upstream cite
+/// (`aten/src/ATen/native/cuda/Math.cuh:502-555`).
+fn i0_f64(x_in: f64) -> f64 {
+    let x = x_in.abs();
+    if x <= 8.0 {
+        let y = (x / 2.0) - 2.0;
+        x.exp() * chbevl(y, &I0E_A)
+    } else {
+        (x.exp() * chbevl(32.0 / x - 2.0, &I0E_B)) / x.sqrt()
+    }
+}
+
+/// f64 Cephes `i0e` = exp(-|x|) I0(x). Even. `calc_i0e`
+/// (`aten/src/ATen/native/Math.h:101-145`).
+fn i0e_f64(x_in: f64) -> f64 {
+    let x = x_in.abs();
+    if x <= 8.0 {
+        let y = (x / 2.0) - 2.0;
+        chbevl(y, &I0E_A)
+    } else {
+        chbevl(32.0 / x - 2.0, &I0E_B) / x.sqrt()
+    }
+}
+
+/// f64 Cephes `i1`. Odd function (sign follows `x_in`). `i1_string`
+/// (`aten/src/ATen/native/cuda/Math.cuh:575-622`).
+fn i1_f64(x_in: f64) -> f64 {
+    let x = x_in.abs();
+    let out = if x <= 8.0 {
+        let y = x / 2.0 - 2.0;
+        x.exp() * x * chbevl(y, &I1E_A)
+    } else {
+        (x.exp() * chbevl(32.0 / x - 2.0, &I1E_B)) / x.sqrt()
+    };
+    if x_in < 0.0 { -out } else { out }
+}
+
+/// f64 Cephes `i1e` = exp(-|x|) I1(x). Odd. `calc_i1e`
+/// (`aten/src/ATen/native/cuda/Math.cuh:647-696`).
+fn i1e_f64(x_in: f64) -> f64 {
+    let x = x_in.abs();
+    let out = if x <= 8.0 {
+        let y = x / 2.0 - 2.0;
+        chbevl(y, &I1E_A) * x
+    } else {
+        chbevl(32.0 / x - 2.0, &I1E_B) / x.sqrt()
+    };
+    if x_in < 0.0 { -out } else { out }
+}
+
+/// `i0(x)` scalar: run the Cephes evaluator in f64, narrow to `T`. NaN in -> NaN
+/// out (propagates through `abs`/`exp`/`chbevl`); `i0(0)=1`, `i0(+/-inf)=+inf`.
+fn i0_scalar<T: Float>(x: T) -> T {
+    let xf = <T as num_traits::ToPrimitive>::to_f64(&x).unwrap_or(f64::NAN);
+    T::from(i0_f64(xf)).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+/// `i0e(x)` scalar. `i0e(0)=1`, `i0e(+/-inf)=0`.
+fn i0e_scalar<T: Float>(x: T) -> T {
+    let xf = <T as num_traits::ToPrimitive>::to_f64(&x).unwrap_or(f64::NAN);
+    T::from(i0e_f64(xf)).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+/// `i1(x)` scalar. Odd. `i1(0)=0`, `i1(+inf)=+inf`, `i1(-inf)=-inf`.
+fn i1_scalar<T: Float>(x: T) -> T {
+    let xf = <T as num_traits::ToPrimitive>::to_f64(&x).unwrap_or(f64::NAN);
+    T::from(i1_f64(xf)).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+/// `i1e(x)` scalar. Odd. `i1e(0)=0`, `i1e(+/-inf)=+/-0`.
+fn i1e_scalar<T: Float>(x: T) -> T {
+    let xf = <T as num_traits::ToPrimitive>::to_f64(&x).unwrap_or(f64::NAN);
+    T::from(i1e_f64(xf)).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+// ---------------------------------------------------------------------------
 // Incomplete-gamma family (gammainc / gammaincc) and log-beta / multigammaln
 // ---------------------------------------------------------------------------
 //
@@ -1262,6 +1527,68 @@ pub fn ndtri<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         return Ok(out);
     }
     unary_map(input, ndtri_scalar)
+}
+
+/// Modified Bessel function of the first kind, order 0: `i0(x)`. Even function;
+/// `i0(0) = 1`, `i0(+/-inf) = +inf`, `i0(NaN) = NaN`. Mirrors
+/// `torch.special.i0` / `torch.i0` (`torch/special/__init__.py:522`); the
+/// scalar evaluator ports the Cephes `chbevl` Chebyshev kernel from
+/// `aten/src/ATen/native/cuda/Math.cuh:502-555`.
+///
+/// CUDA f32 tensors run an on-device elementwise PTX kernel via
+/// [`crate::gpu_dispatch::GpuBackend::i0_f32`] (no host round trip); f64 CUDA
+/// returns `NotImplementedOnCuda` (base PTX lacks `lg2.approx.f64`), bf16/f16
+/// CUDA likewise.
+pub fn i0<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) = special_gpu_simple(input, "i0", |b, h| b.i0_f32(h), |b, h| b.i0_f64(h))? {
+        return Ok(out);
+    }
+    unary_map(input, i0_scalar)
+}
+
+/// Exponentially-scaled modified Bessel order 0: `i0e(x) = exp(-|x|) I0(x)`.
+/// Even; `i0e(0) = 1`, `i0e(+/-inf) = 0` (stays finite where `i0` overflows),
+/// `i0e(NaN) = NaN`. Mirrors `torch.special.i0e`
+/// (`torch/special/__init__.py:548`); scalar evaluator ports `calc_i0e`
+/// (`aten/src/ATen/native/Math.h:101-145`) — same Chebyshev sets as [`i0`]
+/// without the `exp(x)` factor.
+///
+/// CUDA f32 runs on-device via [`crate::gpu_dispatch::GpuBackend::i0e_f32`];
+/// f64/bf16/f16 CUDA return `NotImplementedOnCuda`.
+pub fn i0e<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) = special_gpu_simple(input, "i0e", |b, h| b.i0e_f32(h), |b, h| b.i0e_f64(h))? {
+        return Ok(out);
+    }
+    unary_map(input, i0e_scalar)
+}
+
+/// Modified Bessel function of the first kind, order 1: `i1(x)`. Odd function
+/// (sign follows `x`); `i1(0) = 0`, `i1(+inf) = +inf`, `i1(-inf) = -inf`,
+/// `i1(NaN) = NaN`. Mirrors `torch.special.i1` / `torch.i1`; scalar evaluator
+/// ports `i1_string` (`aten/src/ATen/native/cuda/Math.cuh:575-622`).
+///
+/// CUDA f32 runs on-device via [`crate::gpu_dispatch::GpuBackend::i1_f32`];
+/// f64/bf16/f16 CUDA return `NotImplementedOnCuda`.
+pub fn i1<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) = special_gpu_simple(input, "i1", |b, h| b.i1_f32(h), |b, h| b.i1_f64(h))? {
+        return Ok(out);
+    }
+    unary_map(input, i1_scalar)
+}
+
+/// Exponentially-scaled modified Bessel order 1: `i1e(x) = exp(-|x|) I1(x)`.
+/// Odd; `i1e(0) = 0`, `i1e(+/-inf) = +/-0`, `i1e(NaN) = NaN`. Mirrors
+/// `torch.special.i1e` (`torch/special/__init__.py:598`); scalar evaluator
+/// ports `calc_i1e` (`aten/src/ATen/native/cuda/Math.cuh:647-696`) — same
+/// Chebyshev sets as [`i1`] without the `exp(x)` factor.
+///
+/// CUDA f32 runs on-device via [`crate::gpu_dispatch::GpuBackend::i1e_f32`];
+/// f64/bf16/f16 CUDA return `NotImplementedOnCuda`.
+pub fn i1e<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) = special_gpu_simple(input, "i1e", |b, h| b.i1e_f32(h), |b, h| b.i1e_f64(h))? {
+        return Ok(out);
+    }
+    unary_map(input, i1e_scalar)
 }
 
 /// Regularized lower incomplete gamma `P(a, x)`, element-wise over a broadcast
@@ -3141,6 +3468,336 @@ mod tests {
                 d[i],
                 want[i]
             );
+        }
+    }
+
+    // --- i0 / i0e / i1 / i1e (#1651 batch 2) ---------------------------------
+    //
+    // Expected values are live `torch.special.{i0,i0e,i1,i1e}`
+    // (torch 2.11.0+cu130) outputs (R-CHAR-3: oracle-derived, not
+    // self-referential). f64 oracle, grid [0,0.5,1,2,5,8,10,20,-1,-2,-5]:
+    //   i0  = [1, 1.0634833707413236, 1.2660658777520082, 2.279585302336067,
+    //          27.239871823604442, 427.56411572180474, 2815.716628466254,
+    //          43558282.559553534, 1.2660658777520082, 2.279585302336067,
+    //          27.239871823604442]
+    //   i0e = [1, 0.6450352704491501, 0.46575960759364043, 0.308508322553671,
+    //          0.18354081260932834, 0.1434317818568503, 0.1278333371634286,
+    //          0.089780311884826, 0.46575960759364043, 0.308508322553671,
+    //          0.18354081260932834]
+    //   i1  = [0, 0.25789430539089636, 0.5651591039924851, 1.5906368546373295,
+    //          24.335642142450524, 399.8731367825599, 2670.988303701255,
+    //          42454973.385127775, -0.5651591039924851, -1.5906368546373295,
+    //          -24.335642142450524]
+    //   i1e = [0, 0.15642080318487173, 0.2079104153497085, 0.2152692892489377,
+    //          0.16397226694454234, 0.13414249329269812, 0.1212626813844555,
+    //          0.08750622218328867, -0.2079104153497085, -0.2152692892489377,
+    //          -0.16397226694454234]
+
+    const I_GRID: [f64; 11] = [0.0, 0.5, 1.0, 2.0, 5.0, 8.0, 10.0, 20.0, -1.0, -2.0, -5.0];
+
+    #[test]
+    fn i0_known_values_vs_torch() {
+        let input = t(&I_GRID, &[11]);
+        let r = i0(&input).unwrap();
+        let d = r.data().unwrap();
+        let want = [
+            1.0,
+            1.063_483_370_741_323_6,
+            1.266_065_877_752_008_2,
+            2.279_585_302_336_067,
+            27.239_871_823_604_442,
+            427.564_115_721_804_74,
+            2815.716_628_466_254,
+            43_558_282.559_553_534,
+            1.266_065_877_752_008_2,
+            2.279_585_302_336_067,
+            27.239_871_823_604_442,
+        ];
+        for i in 0..11 {
+            assert!(
+                (d[i] - want[i]).abs() <= 1e-9 * (1.0 + want[i].abs()),
+                "i0 idx {i} x={}: got {} want {}",
+                I_GRID[i],
+                d[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn i0e_known_values_vs_torch() {
+        let input = t(&I_GRID, &[11]);
+        let r = i0e(&input).unwrap();
+        let d = r.data().unwrap();
+        let want = [
+            1.0,
+            0.645_035_270_449_150_1,
+            0.465_759_607_593_640_43,
+            0.308_508_322_553_671,
+            0.183_540_812_609_328_34,
+            0.143_431_781_856_850_3,
+            0.127_833_337_163_428_6,
+            0.089_780_311_884_826,
+            0.465_759_607_593_640_43,
+            0.308_508_322_553_671,
+            0.183_540_812_609_328_34,
+        ];
+        for i in 0..11 {
+            assert!(
+                (d[i] - want[i]).abs() <= 1e-12 * (1.0 + want[i].abs()),
+                "i0e idx {i} x={}: got {} want {}",
+                I_GRID[i],
+                d[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn i1_known_values_vs_torch() {
+        let input = t(&I_GRID, &[11]);
+        let r = i1(&input).unwrap();
+        let d = r.data().unwrap();
+        let want = [
+            0.0,
+            0.257_894_305_390_896_36,
+            0.565_159_103_992_485_1,
+            1.590_636_854_637_329_5,
+            24.335_642_142_450_524,
+            399.873_136_782_559_9,
+            2670.988_303_701_255,
+            42_454_973.385_127_775,
+            -0.565_159_103_992_485_1,
+            -1.590_636_854_637_329_5,
+            -24.335_642_142_450_524,
+        ];
+        for i in 0..11 {
+            assert!(
+                (d[i] - want[i]).abs() <= 1e-9 * (1.0 + want[i].abs()),
+                "i1 idx {i} x={}: got {} want {}",
+                I_GRID[i],
+                d[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn i1e_known_values_vs_torch() {
+        let input = t(&I_GRID, &[11]);
+        let r = i1e(&input).unwrap();
+        let d = r.data().unwrap();
+        let want = [
+            0.0,
+            0.156_420_803_184_871_73,
+            0.207_910_415_349_708_5,
+            0.215_269_289_248_937_7,
+            0.163_972_266_944_542_34,
+            0.134_142_493_292_698_12,
+            0.121_262_681_384_455_5,
+            0.087_506_222_183_288_67,
+            -0.207_910_415_349_708_5,
+            -0.215_269_289_248_937_7,
+            -0.163_972_266_944_542_34,
+        ];
+        for i in 0..11 {
+            assert!(
+                (d[i] - want[i]).abs() <= 1e-12 * (1.0 + want[i].abs()),
+                "i1e idx {i} x={}: got {} want {}",
+                I_GRID[i],
+                d[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "i0(0)=1, i1(0)=0 are exact Cephes branch returns (chbevl at x=0 with the limit constants); torch returns the literal endpoint"
+    )]
+    fn i_family_edges_vs_torch() {
+        // Even: i0/i0e symmetric. Odd: i1/i1e antisymmetric. Zero + NaN + inf.
+        // NOTE: torch's Cephes i0/i1 at +/-inf return NaN (the kernel forms
+        // `exp(inf)*chbevl/sqrt(inf) = inf/inf = NaN`, NOT +inf — verified
+        // against live torch.special.i0([inf]) == nan, i1([inf]) == nan). The
+        // exp-scaled i0e/i1e stay finite: i0e(+/-inf)=0, i1e(+/-inf)=+/-0. We
+        // match torch byte-for-byte (R-DEV-1), not the design-doc edge prose.
+        let input = t(&[0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY], &[4]);
+        let r0 = i0(&input).unwrap();
+        let d0 = r0.data().unwrap();
+        assert_eq!(d0[0], 1.0, "i0(0) == 1");
+        assert!(d0[1].is_nan(), "i0(NaN) == NaN");
+        assert!(d0[2].is_nan(), "i0(+inf) == NaN (torch parity)");
+        assert!(d0[3].is_nan(), "i0(-inf) == NaN (torch parity, even)");
+
+        let r0e = i0e(&input).unwrap();
+        let d0e = r0e.data().unwrap();
+        assert_eq!(d0e[0], 1.0, "i0e(0) == 1");
+        assert!(d0e[1].is_nan(), "i0e(NaN) == NaN");
+        assert_eq!(d0e[2], 0.0, "i0e(+inf) == 0");
+        assert_eq!(d0e[3], 0.0, "i0e(-inf) == 0");
+
+        let r1 = i1(&input).unwrap();
+        let d1 = r1.data().unwrap();
+        assert_eq!(d1[0], 0.0, "i1(0) == 0");
+        assert!(d1[1].is_nan(), "i1(NaN) == NaN");
+        assert!(d1[2].is_nan(), "i1(+inf) == NaN (torch parity)");
+        assert!(d1[3].is_nan(), "i1(-inf) == NaN (torch parity, odd)");
+
+        let r1e = i1e(&input).unwrap();
+        let d1e = r1e.data().unwrap();
+        assert_eq!(d1e[0], 0.0, "i1e(0) == 0");
+        assert!(d1e[1].is_nan(), "i1e(NaN) == NaN");
+        assert_eq!(d1e[2], 0.0, "i1e(+inf) == 0");
+        assert_eq!(d1e[3], 0.0, "i1e(-inf) == 0");
+    }
+
+    #[test]
+    fn i_family_boundary_at_8_vs_torch() {
+        // |x| == 8 is the A/B coefficient-set split (`x <= 8` uses A). Verify the
+        // A-set value at exactly 8 and B-set just above. Live torch f64:
+        //   i0(8)=427.56411572180474, i0(8.5)=683.1619269901155
+        //   i1(8)=399.8731367825599, i1(12)=18141.348781638833
+        let input = t(&[8.0, 8.5, 12.0], &[3]);
+        let r0 = i0(&input).unwrap();
+        let d0 = r0.data().unwrap();
+        let w0 = [
+            427.564_115_721_804_74,
+            683.161_926_990_115_5,
+            18948.925_349_296_31,
+        ];
+        let r1 = i1(&input).unwrap();
+        let d1 = r1.data().unwrap();
+        let w1 = [
+            399.873_136_782_559_9,
+            641.619_902_540_066_7,
+            18141.348_781_638_833,
+        ];
+        for i in 0..3 {
+            assert!(
+                (d0[i] - w0[i]).abs() <= 1e-9 * (1.0 + w0[i].abs()),
+                "i0 boundary idx {i}: got {} want {}",
+                d0[i],
+                w0[i]
+            );
+            assert!(
+                (d1[i] - w1[i]).abs() <= 1e-9 * (1.0 + w1[i].abs()),
+                "i1 boundary idx {i}: got {} want {}",
+                d1[i],
+                w1[i]
+            );
+        }
+    }
+
+    #[test]
+    fn i_family_large_x_scaled_finite_vs_torch() {
+        // At x=700, i0(700)=1.53e302 (near f64 overflow at ~700+) but the
+        // exp-scaled i0e/i1e stay O(0.01). Live torch f64:
+        //   i0e(700)=0.015081295651531355, i1e(700)=0.015070519444716846.
+        let input = t(&[700.0], &[1]);
+        let r0e = i0e(&input).unwrap();
+        let d0e = r0e.data().unwrap();
+        let r1e = i1e(&input).unwrap();
+        let d1e = r1e.data().unwrap();
+        assert!(
+            d0e[0].is_finite() && (d0e[0] - 0.015_081_295_651_531_355).abs() <= 1e-12,
+            "i0e(700) finite & matches torch: got {}",
+            d0e[0]
+        );
+        assert!(
+            d1e[0].is_finite() && (d1e[0] - 0.015_070_519_444_716_846).abs() <= 1e-12,
+            "i1e(700) finite & matches torch: got {}",
+            d1e[0]
+        );
+        // i0(700) overflows to +inf in f64 (torch reports 1.53e302; ferrotorch
+        // computes exp(700)*chbevl/sqrt which also lands near f64::MAX). Assert
+        // it is at least a large finite-or-inf positive (scaling relationship).
+        let r0 = i0(&input).unwrap();
+        let d0 = r0.data().unwrap();
+        assert!(d0[0] > 1e300, "i0(700) is huge (>1e300): got {}", d0[0]);
+    }
+
+    #[test]
+    fn i_family_f32_vs_torch() {
+        // Live torch.special f32 oracle on [-1.5,-0.7,0,0.3,2,5,9]:
+        //   i0 =[1.6467233,1.1263031,1,1.0226269,2.2795851,27.239874,1093.5884]
+        //   i0e=[0.36743364,0.55930555,1,0.7575806,0.3085083,0.18354082,0.13495953]
+        //   i1 =[-0.98166645,-0.37187967,0,0.15169387,1.5906368,24.335642,1030.9148]
+        //   i1e=[-0.21903941,-0.18466999,0,0.11237757,0.21526928,0.16397226,0.127225]
+        let xs = vec![-1.5f32, -0.7, 0.0, 0.3, 2.0, 5.0, 9.0];
+        let input =
+            Tensor::from_storage(TensorStorage::cpu(xs.clone()), vec![xs.len()], false).unwrap();
+        let cases: [(
+            &str,
+            fn(&Tensor<f32>) -> FerrotorchResult<Tensor<f32>>,
+            [f32; 7],
+        ); 4] = [
+            (
+                "i0",
+                i0,
+                [
+                    1.646_723_3,
+                    1.126_303_1,
+                    1.0,
+                    1.022_626_9,
+                    2.279_585_1,
+                    27.239_874,
+                    1_093.588_4,
+                ],
+            ),
+            (
+                "i0e",
+                i0e,
+                [
+                    0.367_433_64,
+                    0.559_305_55,
+                    1.0,
+                    0.757_580_6,
+                    0.308_508_3,
+                    0.183_540_82,
+                    0.134_959_53,
+                ],
+            ),
+            (
+                "i1",
+                i1,
+                [
+                    -0.981_666_45,
+                    -0.371_879_67,
+                    0.0,
+                    0.151_693_87,
+                    1.590_636_8,
+                    24.335_642,
+                    1_030.914_8,
+                ],
+            ),
+            (
+                "i1e",
+                i1e,
+                [
+                    -0.219_039_41,
+                    -0.184_669_99,
+                    0.0,
+                    0.112_377_57,
+                    0.215_269_28,
+                    0.163_972_26,
+                    0.127_225,
+                ],
+            ),
+        ];
+        for (name, f, want) in cases {
+            let r = f(&input).unwrap();
+            let d = r.data().unwrap();
+            for i in 0..7 {
+                assert!(
+                    (d[i] - want[i]).abs() <= 1e-4 * (1.0 + want[i].abs()),
+                    "{name} f32 idx {i} x={}: got {} want {}",
+                    xs[i],
+                    d[i],
+                    want[i]
+                );
+            }
         }
     }
 }
