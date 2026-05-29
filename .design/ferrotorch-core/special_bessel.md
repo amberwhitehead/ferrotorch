@@ -224,11 +224,17 @@ mechanically dischargeable when the corresponding REQ ships.
   `i1e(x) == exp(-|x|)*i1(x)`; matches live `torch.special.i1e`.
   (SHIPPED #1651 batch 2 — `i1e_known_values_vs_torch` /
   `i_family_large_x_scaled_finite_vs_torch in special.rs`.)
-- [ ] AC-B8: `zeta` CPU impl exists; `zeta(2.0, 1.0) == pi^2/6`,
+- [x] AC-B8: `zeta` CPU impl exists; `zeta(2.0, 1.0) == pi^2/6`,
   `zeta(1.0, q) == +inf`, `zeta(0.5, q).is_nan()`, `zeta(x, q<=0 integer)
   == +inf`; matches live `torch.special.zeta` on a grid of `(x>1, q>0)`.
-- [ ] AC-B9: `airy_ai` CPU impl exists; matches live `torch.special.airy_ai`
+  (SHIPPED #1651 batch 3b — `zeta_known_values_vs_torch` /
+  `zeta_2_1_is_pi_squared_over_six` / `zeta_edge_ladder_vs_torch` /
+  `zeta_f32_vs_torch in special.rs`. CPU-only; CUDA -> `NotImplementedOnCuda`.)
+- [x] AC-B9: `airy_ai` CPU impl exists; matches live `torch.special.airy_ai`
   on `[-5,-2,-1,0,1,2,5]` to tolerance.
+  (SHIPPED #1651 batch 3b — `airy_ai_known_values_vs_torch` (all regions) /
+  `airy_ai_zero_vs_torch` (0.3550280538878172) / `airy_ai_edges_vs_torch` /
+  `airy_ai_f32_vs_torch in special.rs`. CPU-only; CUDA -> `NotImplementedOnCuda`.)
 - [x] AC-B10: `spherical_bessel_j0` CPU impl exists; `j0(0.0) == 1.0`,
   `j0(inf) == 0.0`, matches live `torch.special.spherical_bessel_j0`.
   (SHIPPED #1651 batch 3a — `spherical_bessel_j0_known_values_vs_torch` /
@@ -318,16 +324,20 @@ coefficient tables; the CUDA branch of each `pub fn` in
 template) with `Ok(None)` CPU-fallthrough and `NotImplementedOnCuda` for
 bf16/f16.
 
-**Current state — batches 1, 2, and 3a SHIPPED under #1651; batch 3b
-(zeta/airy_ai + K-family GPU f32) NOT-STARTED.** `entr`/`ndtr`/`ndtri` (batch 1),
-`i0`/`i0e`/`i1`/`i1e` (batch 2), and `spherical_bessel_j0` +
-`modified_bessel_k0`/`scaled_k0`/`modified_bessel_k1`/`scaled_k1` (batch 3a)
-exist end-to-end on CPU (f32+f64) with re-exported consumers + live-torch tests;
-GPU f32 is shipped on-device for batches 1/2 and for `spherical_bessel_j0`
-(batch 3a). The remaining batch 3b — `zeta`, `airy_ai` (CPU + GPU), and the
-`modified_bessel_k0/k1 (+scaled)` GPU f32 kernels — stays gated on #1651:
-`grep -rn "fn zeta\b|airy_ai"` returns empty, and the K-family CUDA branch
-returns `NotImplementedOnCuda`.
+**Current state — batches 1, 2, 3a, and the zeta/airy_ai half of 3b SHIPPED
+under #1651.** `entr`/`ndtr`/`ndtri` (batch 1), `i0`/`i0e`/`i1`/`i1e` (batch 2),
+`spherical_bessel_j0` + `modified_bessel_k0`/`scaled_k0`/`modified_bessel_k1`/
+`scaled_k1` (batch 3a), and `zeta` + `airy_ai` (batch 3b) exist end-to-end on CPU
+(f32+f64) with re-exported consumers + live-torch tests; GPU f32 is shipped
+on-device for batches 1/2 and for `spherical_bessel_j0` (batch 3a). The remaining
+GPU f32 kernels — `zeta`, `airy_ai`, and `modified_bessel_k0/k1 (+scaled)` — stay
+gated on #1651 (CUDA branch returns `NotImplementedOnCuda`, no host round trip):
+zeta's data-dependent convergence loop, airy's multi-region 6-table Maclaurin
+loop, and the K-family's full i0/i1 chbevl-over-log/exp unroll each map poorly to
+hand-written flat PTX without a libdevice link. With this commit the
+`torch.special` new-special-fn family (entr/ndtr/ndtri/i0-family/
+spherical_bessel/k0/k1/zeta/airy) is CPU-complete; `grep -rn "fn zeta\b|airy_ai"`
+in `ferrotorch-core/src` now hits.
 
 ### Recommended build batches (tractability order)
 
@@ -412,8 +422,8 @@ Each line must print `>= 1` before the corresponding REQ can move to SHIPPED.
 | REQ-B5 | SHIPPED | CPU: `i0e_f64` -> `i0e_scalar` -> `pub fn i0e in special.rs` (same A/B sets WITHOUT `exp(x)`, `aten/src/ATen/native/Math.h:101-145`). GPU (f32): `I0E_F32_PTX` + `pub fn gpu_i0e_f32 in ferrotorch-gpu/src/special.rs` via `GpuBackend::i0e_f32`; CUDA branch of `i0e in special.rs` on-device (f64 CUDA -> `NotImplementedOnCuda`). Non-test consumer: `ferrotorch_core::i0e` (`pub use special::i0e in lib.rs`). Tests: `i0e_known_values_vs_torch` / `i_family_large_x_scaled_finite_vs_torch in special.rs`, `i0e_on_device_matches_torch in ferrotorch-gpu/src/special.rs`. |
 | REQ-B6 | SHIPPED | CPU: `i1_f64` -> `i1_scalar` -> `pub fn i1 in special.rs` (odd, i1e_A[29]/i1e_B[25], `aten/src/ATen/native/cuda/Math.cuh:575-622`). GPU (f32): `I1_F32_PTX` + `pub fn gpu_i1_f32 in ferrotorch-gpu/src/special.rs` via `GpuBackend::i1_f32`; CUDA branch of `i1 in special.rs` on-device (f64 CUDA -> `NotImplementedOnCuda`). Non-test consumer: `ferrotorch_core::i1` (`pub use special::i1 in lib.rs`). Tests: `i1_known_values_vs_torch in special.rs`, `i1_on_device_matches_torch in ferrotorch-gpu/src/special.rs`. |
 | REQ-B7 | SHIPPED | CPU: `i1e_f64` -> `i1e_scalar` -> `pub fn i1e in special.rs` (odd, same i1e_A/B sets WITHOUT `exp(x)`, `aten/src/ATen/native/cuda/Math.cuh:647-696`). GPU (f32): `I1E_F32_PTX` + `pub fn gpu_i1e_f32 in ferrotorch-gpu/src/special.rs` via `GpuBackend::i1e_f32`; CUDA branch of `i1e in special.rs` on-device (f64 CUDA -> `NotImplementedOnCuda`). Non-test consumer: `ferrotorch_core::i1e` (`pub use special::i1e in lib.rs`). Tests: `i1e_known_values_vs_torch` / `i_family_large_x_scaled_finite_vs_torch in special.rs`, `i1e_on_device_matches_torch in ferrotorch-gpu/src/special.rs`. |
-| REQ-B8 | NOT-STARTED | `zeta` does not exist as a public real-`x` op (only an integer-order private `hurwitz_zeta_scalar` in distributions, not the torch.special op). Open prereq blocker #1651. Upstream Cephes: `aten/src/ATen/native/cuda/Math.cuh:299-383`. |
-| REQ-B9 | NOT-STARTED | `airy_ai` does not exist. Open prereq blocker #1651. Upstream: `aten/src/ATen/native/cuda/Math.cuh:1280-1459`. |
+| REQ-B8 | SHIPPED | CPU (f32+f64): `zeta_f64` -> `zeta_scalar` -> `pub fn zeta in special.rs` (binary, full real-`x` Cephes Hurwitz kernel: `x==1 -> +inf`, `x<1 -> NaN`, `q<=0` integer `-> +inf`, `q<=0` non-integer with non-integer `x -> NaN`; `s=pow(q,-x)` seed + `while ((i<9)||(a<=9.0))` accumulation with MACHEP early-exit + `ZETA_A[12]` Euler-Maclaurin tail, `aten/src/ATen/native/cuda/Math.cuh:299-383`). Non-test consumer: re-exported as `ferrotorch_core::zeta` (`pub use special::zeta in lib.rs`) — S5 torch.special public surface. Tests: live-torch-2.11 oracle (`zeta_known_values_vs_torch` incl. near-1+ x=1.0001, `zeta_2_1_is_pi_squared_over_six`, `zeta_edge_ladder_vs_torch`, `zeta_f32_vs_torch in special.rs`). GPU: CUDA branch of `zeta in special.rs` returns `NotImplementedOnCuda` (no host round trip) — the data-dependent convergence loop maps poorly to flat PTX (#1651). |
+| REQ-B9 | SHIPPED | CPU (f32+f64): `airy_ai_f64` -> `airy_ai_scalar` -> `pub fn airy_ai in special.rs` (multi-region Cephes: `isinf -> NaN`, `x>103.892 -> 0`, `x<-2.09` oscillatory AFN/AFD+AGN/AGD, `x>=2.09` decaying AN/AD, central Maclaurin `f`/`g` loop; all 6 coefficient tables `AIRY_AN/AD/AFN/AFD/AGN/AGD` transcribed verbatim from `aten/src/ATen/native/cuda/Math.cuh:1280-1459`). Non-test consumer: re-exported as `ferrotorch_core::airy_ai` (`pub use special::airy_ai in lib.rs`) — S5. Tests: live-torch-2.11 oracle (`airy_ai_known_values_vs_torch` across all regions, `airy_ai_zero_vs_torch` = 0.3550280538878172, `airy_ai_edges_vs_torch`, `airy_ai_f32_vs_torch in special.rs`). GPU: CUDA branch of `airy_ai in special.rs` returns `NotImplementedOnCuda` (no host round trip) — multi-region + Maclaurin loop maps poorly to flat PTX (#1651). |
 | REQ-B10 | SHIPPED | CPU (f32+f64): `spherical_bessel_j0_f64` -> `spherical_bessel_j0_scalar` -> `pub fn spherical_bessel_j0 in special.rs` (`isinf -> 0`, `|x| < 0.5` 6-term Taylor, else `sin(x)/x`, `aten/src/ATen/native/cuda/Math.cuh:3039-3052`). GPU (f32): `SPHERICAL_BESSEL_J0_F32_PTX` + `pub fn gpu_spherical_bessel_j0_f32 in ferrotorch-gpu/src/special.rs` via `GpuBackend::spherical_bessel_j0_f32` (`CudaBackendImpl::spherical_bessel_j0_f32 in backend_impl.rs`); the CUDA branch (`special_gpu_simple`) of `spherical_bessel_j0 in special.rs` dispatches on-device (f64 CUDA -> `NotImplementedOnCuda`, no host round trip). Non-test consumer: re-exported as `ferrotorch_core::spherical_bessel_j0` (`pub use special::spherical_bessel_j0 in lib.rs`) — S5 torch.special public surface. Tests: live-torch-2.11 oracle (`spherical_bessel_j0_known_values_vs_torch` / `spherical_bessel_j0_edges_vs_torch in special.rs`, `spherical_bessel_j0_on_device_matches_torch` / `spherical_bessel_j0_on_device_edges_match_torch in ferrotorch-gpu/src/special.rs`). |
 | REQ-B11 | SHIPPED | CPU (f32+f64): `modified_bessel_k0_f64` / `scaled_modified_bessel_k0_f64` -> `*_scalar` -> `pub fn modified_bessel_k0` / `pub fn scaled_modified_bessel_k0 in special.rs` (A[10]/B[25] over the shared `chbevl` + batch-2 `i0_f64` log term, `x==0 -> +inf`, `x<0 -> NaN`, region split at `x<=2`, `aten/src/ATen/native/cuda/Math.cuh:2501-2657`). Non-test consumer: re-exported as `ferrotorch_core::{modified_bessel_k0, scaled_modified_bessel_k0}` (`pub use special::{...} in lib.rs`) — S5. Tests: live-torch-2.11 oracle (`modified_bessel_k0_known_values_vs_torch` / `scaled_modified_bessel_k0_known_values_vs_torch` / `k_family_domain_edges_vs_torch` / `spherical_and_k_family_f32_vs_torch in special.rs`). GPU f32 kernel -> batch 3b under #1651 (CUDA input returns `NotImplementedOnCuda`, no host round trip). |
 | REQ-B12 | SHIPPED | CPU (f32+f64): `modified_bessel_k1_f64` / `scaled_modified_bessel_k1_f64` -> `*_scalar` -> `pub fn modified_bessel_k1` / `pub fn scaled_modified_bessel_k1 in special.rs` (A[11]/B[25] over `chbevl` + batch-2 `i1_f64`, `aten/src/ATen/native/cuda/Math.cuh:2659-2817`). Non-test consumer: re-exported as `ferrotorch_core::{modified_bessel_k1, scaled_modified_bessel_k1}` (`pub use special::{...} in lib.rs`) — S5. Tests: live-torch-2.11 oracle (`modified_bessel_k1_known_values_vs_torch` / `scaled_modified_bessel_k1_known_values_vs_torch` / `k_family_domain_edges_vs_torch` / `spherical_and_k_family_f32_vs_torch in special.rs`). GPU f32 kernel -> batch 3b under #1651 (CUDA input returns `NotImplementedOnCuda`, no host round trip). |

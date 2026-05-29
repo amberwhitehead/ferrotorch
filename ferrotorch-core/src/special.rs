@@ -1400,6 +1400,332 @@ fn scaled_modified_bessel_k1_scalar<T: Float>(x: T) -> T {
 }
 
 // ---------------------------------------------------------------------------
+// Hurwitz zeta (`zeta(x, q)`) and Airy Ai (`airy_ai(x)`) — Cephes ports
+// (`aten/src/ATen/native/cuda/Math.cuh`). zeta is binary (two tensor args);
+// airy_ai is unary. Both have data-dependent convergence loops that map poorly
+// to flat PTX, so they ship CPU-only with the CUDA branch returning
+// `NotImplementedOnCuda` (no host round trip) — same honest pattern as the
+// batch-3a K-family.
+// ---------------------------------------------------------------------------
+
+// MACHEP — relative machine epsilon used by the Cephes zeta / airy convergence
+// early-exit (`aten/src/ATen/native/cuda/Math.cuh:302`, `:1437`).
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes MACHEP (cuda/Math.cuh:302); full-width for audit-friendly diff"
+)]
+const CEPHES_MACHEP: f64 = 1.11022302462515654042E-16;
+
+// Bernoulli-derived tail-series denominators A[12] for the Hurwitz-zeta
+// Euler-Maclaurin asymptotic series (`aten/src/ATen/native/cuda/Math.cuh:306-319`).
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes zeta A-set (cuda/Math.cuh:306-319); full-width for audit-friendly diff"
+)]
+const ZETA_A: [f64; 12] = [
+    12.0,
+    -720.0,
+    30240.0,
+    -1209600.0,
+    47900160.0,
+    -1.8924375803183791606e9, /* 1.307674368e12/691 */
+    7.47242496e10,
+    -2.950130727918164224e12,  /* 1.067062284288e16/3617 */
+    1.1646782814350067249e14,  /* 5.109094217170944e18/43867 */
+    -4.5979787224074726105e15, /* 8.028576626982912e20/174611 */
+    1.8152105401943546773e17,  /* 1.5511210043330985984e23/854513 */
+    -7.1661652561756670113e18, /* 1.6938241367317436694528e27/236364091 */
+];
+
+/// Hurwitz zeta `zeta(x, q)` in f64 — Cephes kernel
+/// (`aten/src/ATen/native/cuda/Math.cuh:299-383`, `zeta_string`). Edge ladder:
+/// `x == 1 -> +inf`; `x < 1 -> NaN`; `q <= 0` non-positive integer `-> +inf`,
+/// else (`q <= 0` non-integer with non-integer `x`) `-> NaN`. Interior is the
+/// `s = pow(q, -x)` seed, the `while ((i < 9) || (a <= 9.0))` accumulation with
+/// MACHEP-relative early exit, then the Euler-Maclaurin tail
+/// `s += b*w/(x-1) - 0.5*b + sum_{i<12} a*b/A[i]`.
+#[allow(
+    clippy::float_cmp,
+    reason = "verbatim Cephes edge ladder: `x == 1` and the `q == floor(q)` / `x != floor(x)` integer tests are exact-equality branches in upstream (cuda/Math.cuh:325, 337, 340); R-DEV-1 byte-match"
+)]
+fn zeta_f64(x: f64, q: f64) -> f64 {
+    const ZERO: f64 = 0.0;
+    const HALF: f64 = 0.5;
+    const ONE: f64 = 1.0;
+
+    // Short-circuits x == 1 -> +infty (Math.cuh:325-327).
+    if x == ONE {
+        return f64::INFINITY;
+    }
+    // Short-circuits x < 1 -> NaN (Math.cuh:330-332).
+    if x < ONE {
+        return f64::NAN;
+    }
+    // q <= 0: negative integers -> +infty; negative non-integers with
+    // non-integer x -> NaN (Math.cuh:336-343).
+    if q <= ZERO {
+        if q == q.floor() {
+            return f64::INFINITY;
+        }
+        if x != x.floor() {
+            return f64::NAN;
+        }
+    }
+
+    let mut s = q.powf(-x);
+    let mut a = q;
+    let mut i: i32 = 0;
+    let mut b = ZERO;
+    // while ((i < 9) || (a <= 9.0)) (Math.cuh:349-357).
+    while (i < 9) || (a <= 9.0) {
+        i += 1;
+        a += ONE;
+        b = a.powf(-x);
+        s += b;
+        if (-CEPHES_MACHEP * s < b) && (b < CEPHES_MACHEP * s) {
+            return s;
+        }
+    }
+
+    let w = a;
+    s += b * w / (x - ONE);
+    s -= HALF * b;
+    a = ONE;
+    let mut k = ZERO;
+    // Euler-Maclaurin asymptotic tail (Math.cuh:364-379).
+    for &coeff in &ZETA_A {
+        a *= x + k;
+        b /= w;
+        let mut t = a * b / coeff;
+        s += t;
+        t = (t / s).abs();
+        if t < CEPHES_MACHEP {
+            return s;
+        }
+        k += ONE;
+        a *= x + k;
+        b /= w;
+        k += ONE;
+    }
+
+    s
+}
+
+fn zeta_scalar<T: Float>(x: T, q: T) -> T {
+    let xf = <T as num_traits::ToPrimitive>::to_f64(&x).unwrap_or(f64::NAN);
+    let qf = <T as num_traits::ToPrimitive>::to_f64(&q).unwrap_or(f64::NAN);
+    T::from(zeta_f64(xf, qf)).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+// Airy Ai coefficient tables (`aten/src/ATen/native/cuda/Math.cuh:1283-1354`).
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes airy AN-set (cuda/Math.cuh:1283-1292)"
+)]
+const AIRY_AN: [f64; 8] = [
+    3.46538101525629032477e-01,
+    1.20075952739645805542e+01,
+    7.62796053615234516538e+01,
+    1.68089224934630576269e+02,
+    1.59756391350164413639e+02,
+    7.05360906840444183113e+01,
+    1.40264691163389668864e+01,
+    9.99999999999999995305e-01,
+];
+
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes airy AD-set (cuda/Math.cuh:1294-1303)"
+)]
+const AIRY_AD: [f64; 8] = [
+    5.67594532638770212846e-01,
+    1.47562562584847203173e+01,
+    8.45138970141474626562e+01,
+    1.77318088145400459522e+02,
+    1.64234692871529701831e+02,
+    7.14778400825575695274e+01,
+    1.40959135607834029598e+01,
+    1.00000000000000000470e+00,
+];
+
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes airy AFN-set (cuda/Math.cuh:1305-1315)"
+)]
+const AIRY_AFN: [f64; 9] = [
+    -1.31696323418331795333e-01,
+    -6.26456544431912369773e-01,
+    -6.93158036036933542233e-01,
+    -2.79779981545119124951e-01,
+    -4.91900132609500318020e-02,
+    -4.06265923594885404393e-03,
+    -1.59276496239262096340e-04,
+    -2.77649108155232920844e-06,
+    -1.67787698489114633780e-08,
+];
+
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes airy AFD-set (cuda/Math.cuh:1317-1327)"
+)]
+const AIRY_AFD: [f64; 9] = [
+    1.33560420706553243746e+01,
+    3.26825032795224613948e+01,
+    2.67367040941499554804e+01,
+    9.18707402907259625840e+00,
+    1.47529146771666414581e+00,
+    1.15687173795188044134e-01,
+    4.40291641615211203805e-03,
+    7.54720348287414296618e-05,
+    4.51850092970580378464e-07,
+];
+
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes airy AGN-set (cuda/Math.cuh:1329-1341)"
+)]
+const AIRY_AGN: [f64; 11] = [
+    1.97339932091685679179e-02,
+    3.91103029615688277255e-01,
+    1.06579897599595591108e+00,
+    9.39169229816650230044e-01,
+    3.51465656105547619242e-01,
+    6.33888919628925490927e-02,
+    5.85804113048388458567e-03,
+    2.82851600836737019778e-04,
+    6.98793669997260967291e-06,
+    8.11789239554389293311e-08,
+    3.41551784765923618484e-10,
+];
+
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes airy AGD-set (cuda/Math.cuh:1343-1354)"
+)]
+const AIRY_AGD: [f64; 10] = [
+    9.30892908077441974853e+00,
+    1.98352928718312140417e+01,
+    1.55646628932864612953e+01,
+    5.47686069422975497931e+00,
+    9.54293611618961883998e-01,
+    8.64580826352392193095e-02,
+    4.12656523824222607191e-03,
+    1.01259085116509135510e-04,
+    1.17166733214413521882e-06,
+    4.91834570062930015649e-09,
+];
+
+/// Airy function `Ai(x)` in f64 — Cephes kernel
+/// (`aten/src/ATen/native/cuda/Math.cuh:1280-1459`, `airy_ai_string`). Multi-
+/// region rational/series approximation: `isinf(x) -> NaN`; `x > 103.892 -> 0`;
+/// `x < -2.09` oscillatory asymptotic (AFN/AFD + AGN/AGD over `z = 1/(...)`);
+/// `x >= 2.09` decaying asymptotic (AN/AD over `1/zeta`, early-return for
+/// `x > 8.3203353`); the central Maclaurin series `f`/`g` otherwise.
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes airy magic constants 5.64189583547756286948e-01 (1/(2*sqrt(pi))), 0.355028053887817239260 (Ai(0)), 0.258819403792806798405 (-Ai'(0)) from cuda/Math.cuh:1399,1401,1421,1454; full-width for audit-friendly diff"
+)]
+fn airy_ai_f64(x: f64) -> f64 {
+    if x.is_infinite() {
+        return f64::NAN;
+    }
+    if x > 103.892 {
+        return 0.0;
+    }
+
+    let mut domain_flag: i32 = 0;
+    let mut ai = 0.0;
+
+    // x < -2.09: oscillatory asymptotic region (Math.cuh:1372-1402).
+    if x < -2.09 {
+        let z = 1.0 / (-2.0 * x * (-x).sqrt() / 3.0);
+        let z2 = z * z;
+
+        let mut afn = 0.0;
+        for &c in &AIRY_AFN {
+            afn = afn * z2 + c;
+        }
+        let mut afd = 0.0;
+        for &c in &AIRY_AFD {
+            afd = afd * z2 + c;
+        }
+        let mut agn = 0.0;
+        for &c in &AIRY_AGN {
+            agn = agn * z2 + c;
+        }
+        let mut agd = 0.0;
+        // AGD loop runs index 0..=9 (10 - 1 in upstream), i.e. 10 terms.
+        for &c in &AIRY_AGD {
+            agd = agd * z2 + c;
+        }
+
+        let t = -2.0 * x * (-x).sqrt() / 3.0 + 0.25 * std::f64::consts::PI;
+
+        return 5.64189583547756286948e-01 / (-x).sqrt().sqrt()
+            * (t.sin() * (1.0 + z2 * afn / afd) - t.cos() * (z * agn / agd));
+    }
+
+    // x >= 2.09: decaying asymptotic region (Math.cuh:1404-1426).
+    if x >= 2.09 {
+        domain_flag = 5;
+
+        let zeta = 2.0 * x * x.sqrt() / 3.0;
+
+        let mut an = 0.0;
+        for &c in &AIRY_AN {
+            an = an * (1.0 / zeta) + c;
+        }
+        let mut ad = 0.0;
+        for &c in &AIRY_AD {
+            ad = ad * (1.0 / zeta) + c;
+        }
+
+        ai = 5.64189583547756286948e-01 * (an / ad) / (2.0 * x.sqrt().sqrt() * zeta.exp());
+
+        if x > 8.3203353 {
+            return ai;
+        }
+    }
+
+    // Central Maclaurin series f/g (Math.cuh:1428-1457).
+    let mut f = 1.0;
+    let mut g = x;
+    let mut k = 1.0;
+
+    let mut m = 1.0;
+    let mut n = x;
+    let mut t = 1.0;
+    let z = x * x * x;
+
+    while t > CEPHES_MACHEP {
+        m *= z;
+        k += 1.0;
+        m /= k;
+        n *= z;
+        k += 1.0;
+        n /= k;
+        m /= k;
+        f += m;
+        k += 1.0;
+        n /= k;
+        g += n;
+
+        t = (m / f).abs();
+    }
+
+    if (domain_flag & 1) == 0 {
+        return 0.355028053887817239260 * f - 0.258819403792806798405 * g;
+    }
+
+    ai
+}
+
+fn airy_ai_scalar<T: Float>(x: T) -> T {
+    let xf = <T as num_traits::ToPrimitive>::to_f64(&x).unwrap_or(f64::NAN);
+    T::from(airy_ai_f64(xf)).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+// ---------------------------------------------------------------------------
 // Incomplete-gamma family (gammainc / gammaincc) and log-beta / multigammaln
 // ---------------------------------------------------------------------------
 //
@@ -1923,6 +2249,42 @@ pub fn scaled_modified_bessel_k1<T: Float>(input: &Tensor<T>) -> FerrotorchResul
         });
     }
     unary_map(input, scaled_modified_bessel_k1_scalar)
+}
+
+/// Hurwitz zeta function `zeta(x, q) = sum_{k=0}^inf (k + q)^{-x}`, element-wise
+/// over a broadcast of `input` (the `x` exponent) and `other` (the `q` shift).
+/// Mirrors `torch.special.zeta(input, other)` (`torch/special/__init__.py`);
+/// scalar evaluator ports the Cephes Hurwitz-zeta kernel from
+/// `aten/src/ATen/native/cuda/Math.cuh:299-383`. Edge ladder: `x == 1 -> +inf`;
+/// `x < 1 -> NaN`; `q <= 0` non-positive integer `-> +inf`; `q <= 0` non-integer
+/// with non-integer `x -> NaN`. `zeta(2, 1) == pi^2/6`.
+///
+/// CUDA tensors (all dtypes) return `NotImplementedOnCuda`: the data-dependent
+/// `while ((i < 9) || (a <= 9.0))` accumulation + Euler-Maclaurin tail with
+/// MACHEP-relative early exit maps poorly to flat PTX (no `Ptx::from_src`
+/// libdevice link for the f64 `pow`/`log` it needs); tracked under #1651.
+pub fn zeta<T: Float>(input: &Tensor<T>, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() || other.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "zeta" });
+    }
+    binary_map(input, other, zeta_scalar)
+}
+
+/// Airy function of the first kind `Ai(x)`. Mirrors `torch.special.airy_ai`
+/// (`torch/special/__init__.py:982-985`); scalar evaluator ports the Cephes
+/// multi-region kernel from `aten/src/ATen/native/cuda/Math.cuh:1280-1459`.
+/// `airy_ai(0) = 0.3550280538878172`; oscillatory for `x < -2.09`, decaying for
+/// `x > 0`; `airy_ai(+/-inf) = NaN` (the `isinf` short-circuit at
+/// `Math.cuh:1360-1362`), `airy_ai(x > 103.892) = 0`.
+///
+/// CUDA tensors (all dtypes) return `NotImplementedOnCuda`: the multi-region
+/// rational/series with a data-dependent Maclaurin convergence `while` loop maps
+/// poorly to flat PTX; tracked under #1651.
+pub fn airy_ai<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "airy_ai" });
+    }
+    unary_map(input, airy_ai_scalar)
 }
 
 /// Regularized lower incomplete gamma `P(a, x)`, element-wise over a broadcast
@@ -4426,6 +4788,219 @@ mod tests {
                     want[i]
                 );
             }
+        }
+    }
+
+    // === zeta / airy_ai (batch 3b, #1651) ===================================
+    //
+    // All oracle values constructed by live torch 2.11 (R-CHAR-3):
+    //   torch.special.zeta(x, q) / torch.special.airy_ai(x), torch==2.11.0+cu130.
+
+    #[test]
+    fn zeta_known_values_vs_torch() {
+        // Live torch.special.zeta over (x>1, q>0), incl. near 1+ (x=1.0001).
+        let xs = [2.0, 2.0, 3.0, 4.0, 1.0001, 1.5, 10.0, 2.5, 5.0];
+        let qs = [1.0, 2.0, 1.0, 0.5, 1.0, 2.0, 0.25, 3.0, 1.0];
+        let x = t(&xs, &[9]);
+        let q = t(&qs, &[9]);
+        let r = zeta(&x, &q).unwrap();
+        let d = r.data().unwrap();
+        let want = [
+            1.6449340668482266,
+            0.6449340668482266,
+            1.202056903159594,
+            16.23484850566707,
+            10000.57722294754,
+            1.6123753486854886,
+            1048576.107683115,
+            0.1647105619542803,
+            1.0369277551433704,
+        ];
+        for i in 0..9 {
+            assert!(
+                (d[i] - want[i]).abs() <= 1e-10 * (1.0 + want[i].abs()),
+                "zeta idx {i} x={} q={}: got {} want {}",
+                xs[i],
+                qs[i],
+                d[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn zeta_2_1_is_pi_squared_over_six() {
+        // zeta(2, 1) == pi^2 / 6 (Basel sum) — symbolic constant, not a copied bit.
+        let r = zeta(&t(&[2.0], &[1]), &t(&[1.0], &[1])).unwrap();
+        let got = r.data().unwrap()[0];
+        let want = std::f64::consts::PI * std::f64::consts::PI / 6.0;
+        assert!(
+            (got - want).abs() <= 1e-12 * (1.0 + want.abs()),
+            "zeta(2,1) got {got} want pi^2/6 = {want}"
+        );
+    }
+
+    #[test]
+    fn zeta_edge_ladder_vs_torch() {
+        // Live torch.special.zeta edge ladder:
+        //   x==1            -> +inf
+        //   x<1 (0.5)       -> NaN
+        //   q==0 integer    -> +inf
+        //   q<0 integer     -> +inf
+        //   q<0 integer     -> +inf
+        //   q<0 non-integer, x non-integer -> NaN
+        let xs = [1.0, 0.5, 2.0, 2.0, 3.0, 2.5];
+        let qs = [2.0, 1.0, 0.0, -1.0, -2.0, -1.5];
+        let r = zeta(&t(&xs, &[6]), &t(&qs, &[6])).unwrap();
+        let d = r.data().unwrap();
+        assert!(
+            d[0].is_infinite() && d[0] > 0.0,
+            "zeta(1,q) == +inf: {}",
+            d[0]
+        );
+        assert!(d[1].is_nan(), "zeta(0.5,q) == NaN: {}", d[1]);
+        assert!(
+            d[2].is_infinite() && d[2] > 0.0,
+            "zeta(2, q=0 integer) == +inf: {}",
+            d[2]
+        );
+        assert!(
+            d[3].is_infinite() && d[3] > 0.0,
+            "zeta(2, q=-1 integer) == +inf: {}",
+            d[3]
+        );
+        assert!(
+            d[4].is_infinite() && d[4] > 0.0,
+            "zeta(3, q=-2 integer) == +inf: {}",
+            d[4]
+        );
+        assert!(
+            d[5].is_nan(),
+            "zeta(2.5, q=-1.5 non-integer) == NaN: {}",
+            d[5]
+        );
+    }
+
+    #[test]
+    fn zeta_f32_vs_torch() {
+        // f32 oracle (live torch 2.11). f64-then-narrow must stay inside the
+        // f32 transcendental tolerance.
+        let xs = vec![2.0f32, 3.0, 1.5, 4.0];
+        let qs = vec![1.0f32, 2.0, 2.0, 0.5];
+        let x = Tensor::from_storage(TensorStorage::cpu(xs.clone()), vec![4], false).unwrap();
+        let q = Tensor::from_storage(TensorStorage::cpu(qs.clone()), vec![4], false).unwrap();
+        let r = zeta(&x, &q).unwrap();
+        let d = r.data().unwrap();
+        // torch.special.zeta f32: [1.6449341, 0.20205691, 1.6123753, 16.234848]
+        let want = [1.6449341f32, 0.20205691, 1.6123753, 16.234848];
+        for i in 0..4 {
+            assert!(
+                (d[i] - want[i]).abs() <= 1e-4 * (1.0 + want[i].abs()),
+                "zeta f32 idx {i} x={} q={}: got {} want {}",
+                xs[i],
+                qs[i],
+                d[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn zeta_cuda_not_implemented() {
+        // CPU input only here; the CUDA-dispatch guard returns NotImplementedOnCuda
+        // (no host round trip) — exercised on-device in ferrotorch-gpu when a CUDA
+        // tensor is passed. Smoke: the CPU path works for the binary op.
+        let r = zeta(&t(&[2.0], &[1]), &t(&[1.0], &[1])).unwrap();
+        assert!(r.data().unwrap()[0].is_finite());
+    }
+
+    #[test]
+    fn airy_ai_known_values_vs_torch() {
+        // Live torch.special.airy_ai across all regions: x<-2.09 (oscillatory),
+        // mid Maclaurin, x>=2.09 (decaying), incl. region boundaries.
+        let xs = [
+            -5.0, -2.5, -2.09, -2.0, -1.0, 0.0, 1.0, 2.0, 2.09, 5.0, 8.0, 10.0, 100.0,
+        ];
+        let r = airy_ai(&t(&xs, &[13])).unwrap();
+        let d = r.data().unwrap();
+        let want = [
+            0.35076100902415286,
+            -0.11232483666261353,
+            0.17005055173203007,
+            0.22740742820168564,
+            0.5355608832923521,
+            0.3550280538878172,
+            0.13529241631288144,
+            0.03492413042327433,
+            0.03042031836319837,
+            0.00010834442813607433,
+            4.692207616099224e-08,
+            1.1047532552898654e-10,
+            2.6344821520882847e-291,
+        ];
+        for i in 0..13 {
+            assert!(
+                (d[i] - want[i]).abs() <= 1e-10 * (1.0 + want[i].abs()),
+                "airy_ai idx {i} x={}: got {} want {}",
+                xs[i],
+                d[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn airy_ai_zero_vs_torch() {
+        // airy_ai(0) == 0.3550280538878172 (= 3^(-2/3)/Gamma(2/3), live torch).
+        let r = airy_ai(&t(&[0.0], &[1])).unwrap();
+        let got = r.data().unwrap()[0];
+        let want = 0.3550280538878172;
+        assert!(
+            (got - want).abs() <= 1e-12,
+            "airy_ai(0) got {got} want {want}"
+        );
+    }
+
+    #[test]
+    fn airy_ai_edges_vs_torch() {
+        // Live torch: airy_ai([inf,-inf,nan,200]) = [nan, nan, nan, 0]
+        // (isinf short-circuit -> NaN; x>103.892 -> 0).
+        let r = airy_ai(&t(
+            &[f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 200.0],
+            &[4],
+        ))
+        .unwrap();
+        let d = r.data().unwrap();
+        assert!(d[0].is_nan(), "airy_ai(+inf) == NaN: {}", d[0]);
+        assert!(d[1].is_nan(), "airy_ai(-inf) == NaN: {}", d[1]);
+        assert!(d[2].is_nan(), "airy_ai(NaN) == NaN: {}", d[2]);
+        assert_eq!(d[3], 0.0, "airy_ai(200) == 0 (x>103.892 branch)");
+    }
+
+    #[test]
+    fn airy_ai_f32_vs_torch() {
+        // f32 oracle (live torch 2.11). f64-then-narrow stays inside f32 tol.
+        let xs = vec![-5.0f32, -2.0, -1.0, 0.0, 1.0, 2.0, 5.0];
+        let input = Tensor::from_storage(TensorStorage::cpu(xs.clone()), vec![7], false).unwrap();
+        let r = airy_ai(&input).unwrap();
+        let d = r.data().unwrap();
+        let want = [
+            0.35076096653938293f32,
+            0.22740741074085236,
+            0.5355609059333801,
+            0.35502806305885315,
+            0.13529238104820251,
+            0.03492411598563194,
+            0.00010834442946361378,
+        ];
+        for i in 0..7 {
+            assert!(
+                (d[i] - want[i]).abs() <= 1e-4 * (1.0 + want[i].abs()),
+                "airy_ai f32 idx {i} x={}: got {} want {}",
+                xs[i],
+                d[i],
+                want[i]
+            );
         }
     }
 }

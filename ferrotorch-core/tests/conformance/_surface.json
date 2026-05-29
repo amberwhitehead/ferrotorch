@@ -56,6 +56,7 @@
     { "path": "ferrotorch_core::Tensor", "kind": "re-export", "signature": "pub use tensor::Tensor;" },
     { "path": "ferrotorch_core::TensorId", "kind": "re-export", "signature": "pub use tensor::TensorId;" },
     { "path": "ferrotorch_core::TensorStorage", "kind": "re-export", "signature": "pub use storage::TensorStorage;" },
+    { "path": "ferrotorch_core::airy_ai", "kind": "re-export", "signature": "pub use special::airy_ai;" },
     { "path": "ferrotorch_core::apply_2_4_mask", "kind": "re-export", "signature": "pub use pruning::apply_2_4_mask;" },
     { "path": "ferrotorch_core::arange", "kind": "re-export", "signature": "pub use creation::arange;" },
     { "path": "ferrotorch_core::as_strided", "kind": "re-export", "signature": "pub use stride_tricks::as_strided;" },
@@ -1417,6 +1418,7 @@
     { "path": "ferrotorch_core::sparse::sparse_matmul_24", "kind": "fn", "signature": "fn sparse_matmul_24 < T : Float > (a : & Tensor < T > , b : & SemiStructuredSparseTensor < T > ,) -> FerrotorchResult < Tensor < T > >" },
     { "path": "ferrotorch_core::sparse_matmul_24", "kind": "re-export", "signature": "pub use sparse::sparse_matmul_24;" },
     { "path": "ferrotorch_core::sparsity_ratio", "kind": "re-export", "signature": "pub use pruning::sparsity_ratio;" },
+    { "path": "ferrotorch_core::special::airy_ai", "kind": "fn", "signature": "fn airy_ai < T : Float > (input : & Tensor < T >) -> FerrotorchResult < Tensor < T > >" },
     { "path": "ferrotorch_core::special::beta", "kind": "fn", "signature": "fn beta < T : Float > (a : & Tensor < T > , b : & Tensor < T >) -> FerrotorchResult < Tensor < T > >" },
     { "path": "ferrotorch_core::special::chebyshev_polynomial_t", "kind": "fn", "signature": "fn chebyshev_polynomial_t < T : Float > (input : & Tensor < T > , n : usize ,) -> FerrotorchResult < Tensor < T > >" },
     { "path": "ferrotorch_core::special::chebyshev_polynomial_u", "kind": "fn", "signature": "fn chebyshev_polynomial_u < T : Float > (input : & Tensor < T > , n : usize ,) -> FerrotorchResult < Tensor < T > >" },
@@ -1457,6 +1459,7 @@
     { "path": "ferrotorch_core::special::sinc", "kind": "fn", "signature": "fn sinc < T : Float > (input : & Tensor < T >) -> FerrotorchResult < Tensor < T > >" },
     { "path": "ferrotorch_core::special::spherical_bessel_j0", "kind": "fn", "signature": "fn spherical_bessel_j0 < T : Float > (input : & Tensor < T >) -> FerrotorchResult < Tensor < T > >" },
     { "path": "ferrotorch_core::special::xlogy", "kind": "fn", "signature": "fn xlogy < T : Float > (x : & Tensor < T > , y : & Tensor < T >) -> FerrotorchResult < Tensor < T > >" },
+    { "path": "ferrotorch_core::special::zeta", "kind": "fn", "signature": "fn zeta < T : Float > (input : & Tensor < T > , other : & Tensor < T >) -> FerrotorchResult < Tensor < T > >" },
     { "path": "ferrotorch_core::spherical_bessel_j0", "kind": "re-export", "signature": "pub use special::spherical_bessel_j0;" },
     { "path": "ferrotorch_core::split_t", "kind": "re-export", "signature": "pub use methods::split_t;" },
     { "path": "ferrotorch_core::stack", "kind": "re-export", "signature": "pub use vmap::stack;" },
@@ -1586,6 +1589,7 @@
     { "path": "ferrotorch_core::where_cond_bt", "kind": "re-export", "signature": "pub use ops::indexing::where_cond_bt;" },
     { "path": "ferrotorch_core::xlogy", "kind": "re-export", "signature": "pub use special::xlogy;" },
     { "path": "ferrotorch_core::zeros", "kind": "re-export", "signature": "pub use creation::zeros;" },
-    { "path": "ferrotorch_core::zeros_like", "kind": "re-export", "signature": "pub use creation::zeros_like;" }
+    { "path": "ferrotorch_core::zeros_like", "kind": "re-export", "signature": "pub use creation::zeros_like;" },
+    { "path": "ferrotorch_core::zeta", "kind": "re-export", "signature": "pub use special::zeta;" }
   ]
 }

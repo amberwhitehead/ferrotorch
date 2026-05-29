@@ -1370,6 +1370,36 @@ path = "ferrotorch_core::special::scaled_modified_bessel_k1"
 reason = "Covered by the live-torch-2.11 special::tests suite in special.rs (scaled_modified_bessel_k1_known_values_vs_torch, k_family_domain_edges_vs_torch); the substring-grep gate has no auto-coverage for the unique fn ident absent from conformance_*.rs."
 tracking_issue = "#1651"
 
+# torch.special batch 3b (#1651, final): zeta (Hurwitz, binary) + airy_ai. CPU
+# f32+f64 shipped end-to-end with live-torch-2.11 oracle tests in special.rs
+# (zeta_known_values_vs_torch, zeta_2_1_is_pi_squared_over_six,
+# zeta_edge_ladder_vs_torch, zeta_f32_vs_torch, airy_ai_known_values_vs_torch,
+# airy_ai_zero_vs_torch, airy_ai_edges_vs_torch, airy_ai_f32_vs_torch). Both ship
+# CPU-only with the CUDA branch returning NotImplementedOnCuda (no host round
+# trip): zeta's `while ((i<9)||(a<=9))` accumulation and airy's multi-region
+# Maclaurin convergence loop map poorly to flat PTX. The unique idents are absent
+# from the `conformance_*.rs` substring-grep sources; coverage is the in-crate
+# `special::tests` live-torch suite.
+[[exclusion]]
+path = "ferrotorch_core::zeta"
+reason = "Re-export covered by the live-torch-2.11 special::tests suite in special.rs (zeta_known_values_vs_torch, zeta_2_1_is_pi_squared_over_six, zeta_edge_ladder_vs_torch, zeta_f32_vs_torch); the substring-grep gate has no auto-coverage for the unique re-export ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::special::zeta"
+reason = "Covered by the live-torch-2.11 special::tests suite in special.rs (zeta_known_values_vs_torch, zeta_2_1_is_pi_squared_over_six, zeta_edge_ladder_vs_torch, zeta_f32_vs_torch); the substring-grep gate has no auto-coverage for the unique fn ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::airy_ai"
+reason = "Re-export covered by the live-torch-2.11 special::tests suite in special.rs (airy_ai_known_values_vs_torch, airy_ai_zero_vs_torch, airy_ai_edges_vs_torch, airy_ai_f32_vs_torch); the substring-grep gate has no auto-coverage for the unique re-export ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::special::airy_ai"
+reason = "Covered by the live-torch-2.11 special::tests suite in special.rs (airy_ai_known_values_vs_torch, airy_ai_zero_vs_torch, airy_ai_edges_vs_torch, airy_ai_f32_vs_torch); the substring-grep gate has no auto-coverage for the unique fn ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
 [[exclusion]]
 path = "ferrotorch_core::gpu_dispatch::CompareOp"
 reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
