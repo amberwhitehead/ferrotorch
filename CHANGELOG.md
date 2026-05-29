@@ -46,6 +46,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- Wire parity-sweep runner arms for torch.special transcendentals (entr/ndtr/ndtri + i0-family + zeta/airy/bessel-k as they land under #1651) (#1653)
 - ConvTranspose3d dilated forward divergence: output_padding+dilation drops contributions (conv_transpose3d sample 4/5) (#1619)
 - Pre-existing repo-wide cite-drift: 3100+ line-number cites in .design/**/*.md fail divergence_cite_drift_generic (autocast.md, anomaly.md, fixed_point.md, graph.md, display.md, int_tensor.md, nested.md, ferrotorch-gpu/sparse.md, cusparselt.md, pruning.md, gpu_dispatch.md, ...). Predates #1463 (3135 stale cites unrelated to sparse confirmed at session start). S3/R-CITE-2b requires symbol anchors, not line numbers. Not fixed in #1463 build (out of manifest); the #1463 build cleaned its OWN two docs (ferrotorch-core/sparse.md + ferrotorch-optim/sparse_adam.md now 0 stale cites). Needs a dedicated cite-drift fixer sweep. (#1592)
 - Divergence: ferrotorch_nn::EmbeddingBagSumWeightedBackward scale_grad_by_freq diverges from pytorch EmbeddingBag.cpp:1569-1571 (#1618)

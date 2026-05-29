@@ -196,6 +196,10 @@ fn f32_fft_roundtrip_unregressed_matches_torch() {
     let re: Vec<f32> = rd.chunks(2).map(|c| c[0]).collect();
     let expect_re = [1.0, 2.0, 3.0, 4.0];
     for (i, e) in expect_re.iter().enumerate() {
-        assert!((re[i] - e).abs() < 1e-4, "ifft round-trip bin {i}: {} != {e}", re[i]);
+        assert!(
+            (re[i] - e).abs() < 1e-4,
+            "ifft round-trip bin {i}: {} != {e}",
+            re[i]
+        );
     }
 }

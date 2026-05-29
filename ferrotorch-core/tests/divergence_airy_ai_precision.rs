@@ -60,9 +60,9 @@
 //! is compared against. The right oracle for this op's f32 path is mpmath, not
 //! torch's f32 output.
 
+use ferrotorch_core::TensorStorage;
 use ferrotorch_core::airy_ai;
 use ferrotorch_core::tensor::Tensor;
-use ferrotorch_core::TensorStorage;
 
 /// (x_f32, Ai(x) rounded to f32 from the mpmath 50-digit oracle).
 /// Every `true` value below is `f32(float(airyai(mpf(x))))` with `mp.dps = 50`
@@ -126,8 +126,7 @@ fn airy_ai_more_precise_than_torch_at_opdb_index4() {
     // Live torch 2.11 `torch.special.airy_ai` f32 output at this x (witness).
     let torch_val: f64 = -0.006113202311098576;
 
-    let input =
-        Tensor::from_storage(TensorStorage::cpu(vec![x]), vec![1], false).unwrap();
+    let input = Tensor::from_storage(TensorStorage::cpu(vec![x]), vec![1], false).unwrap();
     let ferro = airy_ai(&input).unwrap().data().unwrap()[0] as f64;
 
     let ferro_err = (ferro - truth).abs();
