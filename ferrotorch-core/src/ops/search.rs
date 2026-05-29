@@ -654,6 +654,11 @@ pub fn topk<T: Float>(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::excessive_precision,
+    clippy::float_cmp,
+    reason = "oracle expected values from live torch 2.11; full precision intentional (rounds to dtype at compile time); float comparisons are deliberately exact byte-for-byte parity checks"
+)]
 mod tests {
     use super::*;
 

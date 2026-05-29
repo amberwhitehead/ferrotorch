@@ -30,6 +30,10 @@
     clippy::excessive_precision,
     reason = "all numeric literals in this file are live-torch 2.11 oracle values recorded verbatim (R-CHAR-3); full precision is intentional and rounds to the tensor dtype at compile time. Test-only oracle file."
 )]
+#![allow(
+    clippy::doc_overindented_list_items,
+    reason = "the oracle-call lines in the module doc are deliberately aligned as a fixed-width transcript block, not a markdown list"
+)]
 
 use ferrotorch_core::{Device, Tensor, TensorStorage, histc, meshgrid};
 use std::sync::Once;

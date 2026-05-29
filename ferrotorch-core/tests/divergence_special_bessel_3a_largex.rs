@@ -94,11 +94,12 @@ fn spherical_bessel_j0_tiny_and_boundary_vs_torch() {
 #[test]
 fn k_family_region_boundary_vs_torch() {
     let xs = [1.9999999, 2.0, 2.0000001];
-    let cases: [(
-        &str,
+    type BesselCase = (
+        &'static str,
         fn(&Tensor<f64>) -> ferrotorch_core::FerrotorchResult<Tensor<f64>>,
         [f64; 3],
-    ); 4] = [
+    );
+    let cases: [BesselCase; 4] = [
         (
             "k0",
             modified_bessel_k0,

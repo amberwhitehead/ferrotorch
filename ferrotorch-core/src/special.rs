@@ -3005,6 +3005,15 @@ fn legendre_p<T: Float>(n: usize, x: T) -> T {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::excessive_precision,
+    clippy::inconsistent_digit_grouping,
+    clippy::unreadable_literal,
+    clippy::float_cmp,
+    clippy::type_complexity,
+    clippy::approx_constant,
+    reason = "oracle divergence tests: expected values are copied verbatim from live torch 2.11 / scipy / Cephes (full precision + grouping intentional); float comparisons are deliberately exact byte-for-byte parity checks; the (name, fn, [f64;3]) case tuples are a local test fixture, not a public type"
+)]
 mod tests {
     use super::*;
     use crate::storage::TensorStorage;
