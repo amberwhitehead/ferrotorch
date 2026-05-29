@@ -1458,9 +1458,11 @@ pub fn gpu_meshgrid_f64(
 // pipeline keeps the VALUE DATA on-device end-to-end:
 //
 //   1. RUN_FLAG kernel: flag[i] = (i == 0 || in[i] != in[i-1]) ? 1 : 0 — a
-//      device f32 buffer marking each run-start. `!=` uses `setp.ne` so NaN
-//      (where NaN != NaN) starts its own run, matching the CPU path's
-//      `data[i] == data[i-1]` (PartialEq, false for NaN).
+//      device f32 buffer marking each run-start. `!=` uses `setp.neu` (the
+//      UNORDERED not-equal) so NaN (where NaN != NaN) starts its own run,
+//      matching the CPU path's `data[i] == data[i-1]` (PartialEq, false for
+//      NaN). The ordered `setp.ne` returns FALSE for NaN operands and would
+//      wrongly collapse consecutive NaNs into one run.
 //   2. INCLUSIVE PREFIX SUM over the flags via the existing `gpu_cumsum`
 //      primitive (one flat axis: outer=1, dim_size=n, inner=1). `incl[i]` is
 //      the number of run-starts in `[0, i]`, so a run-start at `i` writes to
@@ -1536,8 +1538,11 @@ const RUN_FLAG_F32_PTX: &str = "\
     sub.u64 %prev_addr, %addr, 4;
     ld.global.f32 %prev, [%prev_addr];
 
-    // run-start iff cur != prev (NaN != anything -> true, its own run).
-    setp.ne.f32 %p_ne, %cur, %prev;
+    // run-start iff cur != prev. setp.neu is the UNORDERED not-equal: NaN vs
+    // NaN -> true and NaN vs finite -> true, so every NaN starts its own run
+    // (matching the CPU `data[i] == data[i-1]` negation and torch). The ordered
+    // setp.ne returns FALSE for NaN operands and would collapse consecutive NaNs.
+    setp.neu.f32 %p_ne, %cur, %prev;
     @%p_ne bra WRITE_ONE;
 
     // not a run-start
@@ -1601,7 +1606,10 @@ const RUN_FLAG_F64_PTX: &str = "\
     sub.u64 %prev_addr, %addr, 8;
     ld.global.f64 %prev, [%prev_addr];
 
-    setp.ne.f64 %p_ne, %cur, %prev;
+    // run-start iff cur != prev. setp.neu (unordered not-equal) makes every NaN
+    // its own run (NaN vs NaN -> true), matching the CPU path and torch; the
+    // ordered setp.ne returns FALSE for NaN and would collapse consecutive NaNs.
+    setp.neu.f64 %p_ne, %cur, %prev;
     @%p_ne bra WRITE_ONE;
 
     add.u64 %addr, %flag_p, %foff;
@@ -1658,7 +1666,9 @@ const COMPACT_F32_PTX: &str = "\
     @%p_first bra DO_STORE;
     sub.u64 %prev_addr, %addr, 4;
     ld.global.f32 %prev, [%prev_addr];
-    setp.ne.f32 %p_ne, %cur, %prev;
+    // setp.neu (unordered) must match RUN_FLAG exactly: NaN -> own run, else
+    // out_len and the scatter positions disagree.
+    setp.neu.f32 %p_ne, %cur, %prev;
     @%p_ne bra DO_STORE;
     bra DONE;
 
@@ -1720,7 +1730,9 @@ const COMPACT_F64_PTX: &str = "\
     @%p_first bra DO_STORE;
     sub.u64 %prev_addr, %addr, 8;
     ld.global.f64 %prev, [%prev_addr];
-    setp.ne.f64 %p_ne, %cur, %prev;
+    // setp.neu (unordered) must match RUN_FLAG_F64 exactly: NaN -> own run, else
+    // out_len and the scatter positions disagree.
+    setp.neu.f64 %p_ne, %cur, %prev;
     @%p_ne bra DO_STORE;
     bra DONE;
 
