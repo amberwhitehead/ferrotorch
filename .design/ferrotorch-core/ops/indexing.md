@@ -111,8 +111,9 @@ needed, stores the GPU cond directly in `WhereCondBackward` (no
 `cond.to(Cpu)`; #1187 Phase 3d). CPU fallback at `:458` materialises
 the bool slice via `cond.data()?` and delegates to `where_cond`.
 
-`masked_select` at `:478` rejects mask/input numel mismatch. GPU
-path at `:492` (if both are CUDA, same device) routes to
+`masked_select` at `:478` rejects mask/input numel mismatch. The GPU
+path inside `masked_select in ops/indexing.rs` (if both are CUDA, same
+device) routes to
 `backend.masked_select_count_*` + `backend.masked_select_compact_*`
 — the count is a single integer that crosses to the host to size
 the data-dependent output (PyTorch parity: a CUDA sync sizes the
@@ -165,5 +166,5 @@ GPU paths covered by `ferrotorch-core/tests/conformance_indexing.rs`.
 | REQ-5 | SHIPPED | impl: `where_cond_bt` at `ops/indexing.rs:397`; non-test consumer: `crate::grad_fns::indexing::where_differentiable` at `grad_fns/indexing.rs:1845,1853` invokes `crate::ops::indexing::where_cond_bt(cond, x, y)` for both the residency-detected and CPU paths |
 | REQ-6 | SHIPPED | impl: `masked_select` at `ops/indexing.rs:478`; non-test consumer: `crate::tensor::Tensor::masked_select` at `tensor.rs:1146` invokes `crate::ops::indexing::masked_select(self, mask)`; also `crate::grad_fns::indexing::masked_select_backward` at `grad_fns/indexing.rs:1823,1828` |
 | REQ-7 | SHIPPED | impl: grad-fn attachment in each forward path (e.g. `gather` at `attachment in ops/indexing.rs`, `scatter in ops/indexing.rs`, `scatter_add in ops/indexing.rs`, `where_cond in ops/indexing.rs`); non-test consumer: every autograd-tracking caller of these forwards |
-| REQ-8 | SHIPPED | impl: `validate_gather_shapes` at `ops/indexing.rs:66`; non-test consumer: invoked from `gather`, `scatter`, and `scatter_add` |
+| REQ-8 | SHIPPED | impl: `validate_gather_shapes in ops/indexing.rs` (the SAFETY-bounded i64 widening lives in `upload_index_i64 in ops/indexing.rs`); non-test consumer: invoked from `gather`, `scatter`, and `scatter_add` |
 | REQ-9 | SHIPPED | CUDA-resident dim-aware paths for `gather`/`scatter`/`scatter_value`/`scatter_add` (#1545 / sub #1535). impl: the `is_cuda()` f32/f64 branches in each `ops/indexing.rs` pub fn, plus the shared helpers `factor` and `upload_index_i64` (host `&[usize]` → resident `i64`); non-test consumer: each branch dispatches through `crate::gpu_dispatch::GpuBackend::{gather,scatter,scatter_value,scatter_add}_dim_{f32,f64}`, implemented by `ferrotorch-gpu::CudaBackendImpl` over the PTX kernels in `ferrotorch-gpu/src/scatter_gather_kernels.rs`. The result stays GPU-resident (`TensorStorage::gpu`); bf16/f16 return `NotImplementedOnCuda`. The same-module non-CUDA callers (`ferrotorch_core::{gather,scatter,scatter_add}` re-exports at `lib.rs:207`, `Tensor::scatter_value_t`) reach the new branch whenever their operands are CUDA-resident. |

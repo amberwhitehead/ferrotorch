@@ -152,9 +152,11 @@ PTX kernel switches on; the same kernel handles all 6 ops.
 
 - `ferrotorch-core/src/grad_fns/comparison.rs:165, :174` — uses
   `BoolTensor::from_vec` to build masks for the `where_cond` op.
-- `ferrotorch-core/src/grad_fns/indexing.rs:407, :425, :1784` —
+- `ferrotorch-core/src/grad_fns/indexing.rs:407, :425` —
   `BoolTensor::from_slice` / `from_vec` for `masked_fill` /
-  `masked_select` paths.
+  `masked_select` paths; and `broadcast_bool_tensor in
+  ferrotorch-core/src/grad_fns/indexing.rs` returns a `BoolTensor` from
+  the on-device bool-broadcast handle (#1663).
 - `ferrotorch-core/src/ops/indexing.rs:381, :398, :480` — kernel-layer
   ops that take `&BoolTensor` parameters (`where_cond`, `masked_select`).
 - `ferrotorch-core/src/tensor.rs:1128, :1144` — boundary methods on

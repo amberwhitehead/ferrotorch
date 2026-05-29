@@ -113,7 +113,7 @@ sentinel-fill into the running min/max in a single launch — no
 intermediate `prod` / `filled` buffers. CPU path walks data + mask
 with an `Option<T>` accumulator.
 
-`masked_count` at `:419` returns a 0-D tensor in `T` holding
+`masked_count in masked.rs` returns a 0-D tensor in `T` holding
 `count_valid() as T`.
 
 `masked_where in masked.rs` inverts the condition (`!c` per element)
