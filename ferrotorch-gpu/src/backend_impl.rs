@@ -4334,6 +4334,78 @@ impl GpuBackend for CudaBackendImpl {
         })
     }
 
+    // Modified-Bessel-K family (#1651 batch 3b). f32 runs on-device; f64 ->
+    // NotImplementedOnCuda (base PTX has no lg2/ex2.approx.f64). bf16/f16 are
+    // rejected in `special_gpu_simple` before reaching here.
+
+    fn modified_bessel_k0_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::special::gpu_modified_bessel_k0_f32(a_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn modified_bessel_k0_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "modified_bessel_k0_f64",
+        })
+    }
+
+    fn scaled_modified_bessel_k0_f32(
+        &self,
+        a: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::special::gpu_scaled_modified_bessel_k0_f32(a_buf, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn scaled_modified_bessel_k0_f64(
+        &self,
+        _a: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scaled_modified_bessel_k0_f64",
+        })
+    }
+
+    fn modified_bessel_k1_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::special::gpu_modified_bessel_k1_f32(a_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn modified_bessel_k1_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "modified_bessel_k1_f64",
+        })
+    }
+
+    fn scaled_modified_bessel_k1_f32(
+        &self,
+        a: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::special::gpu_scaled_modified_bessel_k1_f32(a_buf, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn scaled_modified_bessel_k1_f64(
+        &self,
+        _a: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scaled_modified_bessel_k1_f64",
+        })
+    }
+
     fn clamp_f32(
         &self,
         a: &GpuBufferHandle,

@@ -2185,15 +2185,18 @@ pub fn spherical_bessel_j0<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tens
 /// `modified_bessel_k0_forward` (`aten/src/ATen/native/cuda/Math.cuh:2503-2577`)
 /// over the shared `chbevl` Clenshaw evaluator and the batch-2 `i0`.
 ///
-/// CUDA tensors (all dtypes) return `NotImplementedOnCuda`: the on-device PTX
-/// kernel is tracked under #1651 (batch 3b) alongside the K1 / `zeta` / `airy`
-/// kernels — the small-region log-term over the full `i0` chbevl unroll plus
-/// `log`/`exp` pushes the hand-written f32 PTX past one cohesive commit.
+/// CUDA f32 runs on-device via
+/// [`crate::gpu_dispatch::GpuBackend::modified_bessel_k0_f32`] (no host round
+/// trip); f64/bf16/f16 CUDA return `NotImplementedOnCuda` (base PTX lacks the
+/// f64 `lg2`/`ex2` approximations needed for the small-region log term).
 pub fn modified_bessel_k0<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: "modified_bessel_k0",
-        });
+    if let Some(out) = special_gpu_simple(
+        input,
+        "modified_bessel_k0",
+        |b, h| b.modified_bessel_k0_f32(h),
+        |b, h| b.modified_bessel_k0_f64(h),
+    )? {
+        return Ok(out);
     }
     unary_map(input, modified_bessel_k0_scalar)
 }
@@ -2206,12 +2209,17 @@ pub fn modified_bessel_k0<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tenso
 /// `scaled_modified_bessel_k0_forward`
 /// (`aten/src/ATen/native/cuda/Math.cuh:2582-2656`).
 ///
-/// CUDA tensors return `NotImplementedOnCuda` (batch 3b, #1651).
+/// CUDA f32 runs on-device via
+/// [`crate::gpu_dispatch::GpuBackend::scaled_modified_bessel_k0_f32`] (no host
+/// round trip); f64/bf16/f16 CUDA return `NotImplementedOnCuda`.
 pub fn scaled_modified_bessel_k0<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: "scaled_modified_bessel_k0",
-        });
+    if let Some(out) = special_gpu_simple(
+        input,
+        "scaled_modified_bessel_k0",
+        |b, h| b.scaled_modified_bessel_k0_f32(h),
+        |b, h| b.scaled_modified_bessel_k0_f64(h),
+    )? {
+        return Ok(out);
     }
     unary_map(input, scaled_modified_bessel_k0_scalar)
 }
@@ -2223,12 +2231,17 @@ pub fn scaled_modified_bessel_k0<T: Float>(input: &Tensor<T>) -> FerrotorchResul
 /// (`aten/src/ATen/native/cuda/Math.cuh:2661-2736`) over `chbevl` and the
 /// batch-2 `i1`.
 ///
-/// CUDA tensors return `NotImplementedOnCuda` (batch 3b, #1651).
+/// CUDA f32 runs on-device via
+/// [`crate::gpu_dispatch::GpuBackend::modified_bessel_k1_f32`] (no host round
+/// trip); f64/bf16/f16 CUDA return `NotImplementedOnCuda`.
 pub fn modified_bessel_k1<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: "modified_bessel_k1",
-        });
+    if let Some(out) = special_gpu_simple(
+        input,
+        "modified_bessel_k1",
+        |b, h| b.modified_bessel_k1_f32(h),
+        |b, h| b.modified_bessel_k1_f64(h),
+    )? {
+        return Ok(out);
     }
     unary_map(input, modified_bessel_k1_scalar)
 }
@@ -2241,12 +2254,17 @@ pub fn modified_bessel_k1<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tenso
 /// `scaled_modified_bessel_k1_forward`
 /// (`aten/src/ATen/native/cuda/Math.cuh:2740-2815`).
 ///
-/// CUDA tensors return `NotImplementedOnCuda` (batch 3b, #1651).
+/// CUDA f32 runs on-device via
+/// [`crate::gpu_dispatch::GpuBackend::scaled_modified_bessel_k1_f32`] (no host
+/// round trip); f64/bf16/f16 CUDA return `NotImplementedOnCuda`.
 pub fn scaled_modified_bessel_k1<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: "scaled_modified_bessel_k1",
-        });
+    if let Some(out) = special_gpu_simple(
+        input,
+        "scaled_modified_bessel_k1",
+        |b, h| b.scaled_modified_bessel_k1_f32(h),
+        |b, h| b.scaled_modified_bessel_k1_f64(h),
+    )? {
+        return Ok(out);
     }
     unary_map(input, scaled_modified_bessel_k1_scalar)
 }

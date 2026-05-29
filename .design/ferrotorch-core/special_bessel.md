@@ -245,14 +245,28 @@ mechanically dischargeable when the corresponding REQ ships.
   exist; `k0(0) == +inf`, `k0(-1).is_nan()`, match live torch.
   (SHIPPED #1651 batch 3a — `modified_bessel_k0_known_values_vs_torch` /
   `scaled_modified_bessel_k0_known_values_vs_torch` /
-  `k_family_domain_edges_vs_torch in special.rs`, CPU f32+f64. GPU f32 ->
-  batch 3b under #1651.)
+  `k_family_domain_edges_vs_torch in special.rs`, CPU f32+f64. **GPU f32 SHIPPED
+  #1651 batch 3b**: `K0_F32_PTX` / `SCALED_K0_F32_PTX` + `gpu_modified_bessel_k0_f32`
+  / `gpu_scaled_modified_bessel_k0_f32` via `GpuBackend::modified_bessel_k0_f32`
+  / `scaled_modified_bessel_k0_f32`, dispatched on-device from
+  `special::modified_bessel_k0` / `scaled_modified_bessel_k0`
+  (`ferrotorch-core/src/special.rs`), verified on the RTX 3090 by
+  `verify_modified_bessel_k0_gpu_f32_on_device_matches_torch` /
+  `verify_scaled_modified_bessel_k0_gpu_f32_on_device_matches_torch in
+  ferrotorch-gpu/tests/divergence_modified_bessel_k_gpu_f32.rs`.)
 - [x] AC-B12: `modified_bessel_k1` / `scaled_modified_bessel_k1` CPU impls
   exist; `k1(0) == +inf`, `k1(-1).is_nan()`, match live torch.
   (SHIPPED #1651 batch 3a — `modified_bessel_k1_known_values_vs_torch` /
   `scaled_modified_bessel_k1_known_values_vs_torch` /
-  `k_family_domain_edges_vs_torch in special.rs`, CPU f32+f64. GPU f32 ->
-  batch 3b under #1651.)
+  `k_family_domain_edges_vs_torch in special.rs`, CPU f32+f64. **GPU f32 SHIPPED
+  #1651 batch 3b**: `K1_F32_PTX` / `SCALED_K1_F32_PTX` + `gpu_modified_bessel_k1_f32`
+  / `gpu_scaled_modified_bessel_k1_f32` via `GpuBackend::modified_bessel_k1_f32`
+  / `scaled_modified_bessel_k1_f32`, dispatched on-device from
+  `special::modified_bessel_k1` / `scaled_modified_bessel_k1`
+  (`ferrotorch-core/src/special.rs`), verified on the RTX 3090 by
+  `verify_modified_bessel_k1_gpu_f32_on_device_matches_torch` /
+  `verify_scaled_modified_bessel_k1_gpu_f32_on_device_matches_torch in
+  ferrotorch-gpu/tests/divergence_modified_bessel_k_gpu_f32.rs`.)
 - [~] AC-B13: GPU kernels exist in `ferrotorch-gpu/src/special.rs`, dispatched
   on-device (no host round trip, R-CODE-4), matching the CPU path to
   f32 tolerance — mirroring the polynomial-kernel pattern (`special_gpu_simple`
@@ -280,11 +294,18 @@ mechanically dischargeable when the corresponding REQ ships.
   `spherical_bessel_j0_on_device_matches_torch` /
   `spherical_bessel_j0_on_device_edges_match_torch in
   ferrotorch-gpu/src/special.rs` (Taylor Horner via `fma.rn.f32`,
-  `sin.approx.f32` branch, `testp.infinite.f32 -> 0`). The **modified_bessel
-  k0/k1 (+scaled) GPU f32 kernels remain batch 3b** (CUDA input ->
-  NotImplementedOnCuda): each K kernel needs the full i0/i1 chbevl unroll inline
-  plus `log`/`exp`, too much hand-written PTX for one cohesive commit
-  (R-BUILD-5). The zeta / airy_ai families (CPU + GPU) also remain batch 3b
+  `sin.approx.f32` branch, `testp.infinite.f32 -> 0`). **modified_bessel
+  k0/k1 (+scaled) SHIPPED for f32** (#1651 batch 3b): `K0_F32_PTX` /
+  `SCALED_K0_F32_PTX` / `K1_F32_PTX` / `SCALED_K1_F32_PTX` +
+  `gpu_{modified_bessel,scaled_modified_bessel}_{k0,k1}_f32` via the
+  `GpuBackend::{modified_bessel,scaled_modified_bessel}_{k0,k1}_f32` methods,
+  verified on the RTX 3090 by `verify_*_gpu_f32_on_device_matches_torch in
+  ferrotorch-gpu/tests/divergence_modified_bessel_k_gpu_f32.rs`. Each K kernel
+  unrolls the chbevl Clenshaw recurrence over the Cephes K0/K1 A/B tables, with
+  the small region (`x <= 2`) composing `log(0.5x)` (via `lg2.approx.f32`*ln2)
+  and the inner `i0`/`i1` (chbevl over I0E_A/I1E_A times `ex2.approx.f32`); the
+  big region (`x > 2`) divides by `sqrt.rn.f32` and (unscaled) multiplies by
+  `exp(-x)`. The zeta / airy_ai families (CPU + GPU) remain batch 3b under #1651
   (zeta's data-dependent convergence loop maps poorly to flat PTX; airy's
   multi-region 5-table transcription warrants its own dispatch).
 - [ ] AC-B14: parity-sweep runner arms exist for each op and report
@@ -329,11 +350,13 @@ under #1651.** `entr`/`ndtr`/`ndtri` (batch 1), `i0`/`i0e`/`i1`/`i1e` (batch 2),
 `spherical_bessel_j0` + `modified_bessel_k0`/`scaled_k0`/`modified_bessel_k1`/
 `scaled_k1` (batch 3a), and `zeta` + `airy_ai` (batch 3b) exist end-to-end on CPU
 (f32+f64) with re-exported consumers + live-torch tests; GPU f32 is shipped
-on-device for batches 1/2 and for `spherical_bessel_j0` (batch 3a). The remaining
-GPU f32 kernels — `zeta`, `airy_ai`, and `modified_bessel_k0/k1 (+scaled)` — stay
+on-device for batches 1/2, for `spherical_bessel_j0` (batch 3a), and for the
+`modified_bessel_k0`/`scaled_k0`/`modified_bessel_k1`/`scaled_k1` family (batch 3b
+GPU tail — `K0_F32_PTX` ... `SCALED_K1_F32_PTX`). The remaining
+GPU f32 kernels — `zeta` and `airy_ai` — stay
 gated on #1651 (CUDA branch returns `NotImplementedOnCuda`, no host round trip):
-zeta's data-dependent convergence loop, airy's multi-region 6-table Maclaurin
-loop, and the K-family's full i0/i1 chbevl-over-log/exp unroll each map poorly to
+zeta's data-dependent convergence loop and airy's multi-region 6-table Maclaurin
+loop each map poorly to
 hand-written flat PTX without a libdevice link. With this commit the
 `torch.special` new-special-fn family (entr/ndtr/ndtri/i0-family/
 spherical_bessel/k0/k1/zeta/airy) is CPU-complete; `grep -rn "fn zeta\b|airy_ai"`

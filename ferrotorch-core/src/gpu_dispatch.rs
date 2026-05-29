@@ -2326,6 +2326,81 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    // Modified-Bessel-K family (#1651 batch 3b): k0 / scaled-k0 / k1 / scaled-k1.
+    // f32 runs an on-device elementwise PTX kernel (one thread per element, no
+    // host round trip). The f32 math mirrors the ferrotorch CPU f64 scalar
+    // evaluators (`modified_bessel_k0_f64` ... narrowed to f32): the shared
+    // `chbevl` Clenshaw recurrence over the Cephes A/B tables, with the small
+    // region (`x <= 2`) composing `log(0.5x)` (via `lg2.approx.f32`*ln2) and the
+    // inner `i0`/`i1` (via `ex2.approx.f32(x*log2e)`). Upstream Cephes kernels:
+    // `modified_bessel_k0_forward` / `_k1_forward` and the scaled variants
+    // (`aten/src/ATen/native/cuda/Math.cuh:2503-2577, 2582-2656, 2661-2736,
+    // 2740-2815`). Defaults return `InvalidArgument` so non-CUDA backends compile
+    // unchanged; the CUDA backend overrides f32 (f64 -> `NotImplementedOnCuda`:
+    // base PTX has no `lg2.approx.f64`/`ex2.approx.f64`, same constraint as the
+    // I-family batch 2 and spherical batch 3a).
+
+    /// Modified Bessel `k0(x)` forward, f32.
+    fn modified_bessel_k0_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "modified_bessel_k0_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Modified Bessel `k0(x)` forward, f64.
+    fn modified_bessel_k0_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "modified_bessel_k0_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Exp-scaled modified Bessel `scaled_modified_bessel_k0(x)` forward, f32.
+    fn scaled_modified_bessel_k0_f32(
+        &self,
+        _a: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "scaled_modified_bessel_k0_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Exp-scaled modified Bessel `scaled_modified_bessel_k0(x)` forward, f64.
+    fn scaled_modified_bessel_k0_f64(
+        &self,
+        _a: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "scaled_modified_bessel_k0_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Modified Bessel `k1(x)` forward, f32.
+    fn modified_bessel_k1_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "modified_bessel_k1_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Modified Bessel `k1(x)` forward, f64.
+    fn modified_bessel_k1_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "modified_bessel_k1_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Exp-scaled modified Bessel `scaled_modified_bessel_k1(x)` forward, f32.
+    fn scaled_modified_bessel_k1_f32(
+        &self,
+        _a: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "scaled_modified_bessel_k1_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Exp-scaled modified Bessel `scaled_modified_bessel_k1(x)` forward, f64.
+    fn scaled_modified_bessel_k1_f64(
+        &self,
+        _a: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "scaled_modified_bessel_k1_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+
     // Clamp: out[i] = max(min_val, min(max_val, x[i]))
     fn clamp_f32(
         &self,

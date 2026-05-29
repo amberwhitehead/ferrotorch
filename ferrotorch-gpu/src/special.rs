@@ -3096,6 +3096,1678 @@ DONE:
 }
 ";
 
+/// modified_bessel_k0(x), f32. x==0 -> +inf; x<0 -> NaN. SMALL (x<=2): chbevl(x*x-2, K0_A) - log(0.5x)*i0(x), where i0(x)=exp(x)*chbevl(x*0.5-2, I0E_A). BIG (x>2): exp(-x)*chbevl(8/x-2, K0_B)/sqrt(x). Mirrors modified_bessel_k0_forward (aten/src/ATen/native/cuda/Math.cuh:2503-2577).
+/// ABI: `(in, out, total)`.
+#[cfg(feature = "cuda")]
+pub(crate) const K0_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+// NOTE: PTX comments must stay ASCII-only. The WSL driver (591.86) JIT parser
+// rejects non-ASCII bytes with CUDA_ERROR_INVALID_PTX. Coefficient immediates
+// are the f32 bit-hex of the Cephes A/B Chebyshev tables (special.rs K0_A.. /
+// I0E_A.. for the inner i0/i1 of the small-region log term).
+
+.visible .entry modified_bessel_k0_f32(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r;
+    .reg .u64 %in_p, %out_p, %off, %addr;
+    .reg .f32 %x, %xx, %xi, %b0, %b1, %b2, %cb, %cba, %ibe, %ex, %lg, %r, %sq;
+    .reg .pred %oob, %small, %zero, %neg;
+
+    ld.param.u64 %in_p,    [in_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %oob, %idx, %total_r;
+    @%oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in_p, %off;
+    ld.global.f32 %x, [%addr];
+
+    // x == 0 -> +inf
+    setp.eq.f32 %zero, %x, 0f00000000;
+    @%zero mov.f32 %r, 0f7F800000;
+    @%zero bra STORE;
+    // x < 0 -> NaN
+    setp.lt.f32 %neg, %x, 0f00000000;
+    @%neg mov.f32 %r, 0f7FC00000;
+    @%neg bra STORE;
+
+    setp.le.f32 %small, %x, 0f40000000;   // x <= 2.0
+    @!%small bra BIG;
+    // SMALL (x <= 2): chbevl(x*x - 2, K0_A)
+    mul.f32 %xx, %x, %x;
+    add.f32 %xx, %xx, 0fC0000000;          // -2.0
+    mov.f32 %b0, 0f251E770F;
+    mov.f32 %b1, 0f00000000;
+    mov.f32 %b2, 0f00000000;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f293FD856;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2D3612E2;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3102E09B;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f348815E7;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f37BFC808;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3AA5C174;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3D135FB3;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3EB046C4;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBF090B37;
+    sub.f32 %cb, %b0, %b2;
+    mul.f32 %cb, %cb, 0f3F000000;
+    mov.f32 %cba, %cb;                    // chbevl(x*x-2, A)
+    // inner i0(x) = exp(x) * chbevl(x*0.5 - 2, I0E_A)
+    mul.f32 %xi, %x, 0f3F000000;          // x*0.5
+    add.f32 %xi, %xi, 0fC0000000;          // -2.0
+    mov.f32 %b0, 0fA2A2E5B9;
+    mov.f32 %b1, 0f00000000;
+    mov.f32 %b2, 0f00000000;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f24199B15;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA58C275C;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f26F736C5;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA8528116;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f29ACDA32;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAB08B263;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2C4FF17F;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAD97E4AC;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2ED4C5F6;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB00EA7F1;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3136C81D;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB25F57B4;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3381DBB5;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB48F631C;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3595F925;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB694337E;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3789FAC6;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB8715933;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3945A8DC;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBA1717E9;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3AD6E3AC;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBB8DB2F1;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3C2CCB10;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBCC274F8;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3D49F456;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBDC25B82;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3E2FBD64;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBE9BFF5E;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3F2D4275;
+    sub.f32 %cb, %b0, %b2;
+    mul.f32 %cb, %cb, 0f3F000000;
+    mov.f32 %ibe, %cb;
+    mul.f32 %ex, %x, 0f3FB8AA3B;          // x*log2e
+    ex2.approx.f32 %ex, %ex;              // exp(x)
+    mul.f32 %ibe, %ibe, %ex;
+    // log(0.5*x) = lg2.approx(0.5*x) * ln2
+    mul.f32 %lg, %x, 0f3F000000;          // 0.5*x
+    lg2.approx.f32 %lg, %lg;
+    mul.f32 %lg, %lg, 0f3F317218;          // * ln2
+    mul.f32 %r, %lg, %ibe;
+    sub.f32 %r, %cba, %r;                 // chbevl(A) - log(0.5x)*i0
+    bra STORE;
+
+BIG:
+    // BIG (x > 2): chbevl(8/x - 2, K0_B) / sqrt(x) * exp(-x)
+    rcp.rn.f32 %xx, %x;
+    mul.f32 %xx, %xx, 0f41000000;          // 8/x
+    add.f32 %xx, %xx, 0fC0000000;          // -2.0
+    mov.f32 %b0, 0f22C38D2E;
+    mov.f32 %b1, 0f00000000;
+    mov.f32 %b2, 0f00000000;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA397F665;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f24704972;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA5417CA4;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f261EDFCB;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA7053487;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f27E46CE2;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA8C8A2F6;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f29B4E276;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAAA7C3B9;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2BA07D19;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAC9ED7E2;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2DA34042;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAEAEFCAF;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2FC4AB64;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB0E94EB0;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f32134D00;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB3482AA1;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f34948ACC;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB5F5DAA4;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f376A09FE;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB906BCBF;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3ACDC490;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBD00CFB9;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f401C2DED;
+    sub.f32 %cb, %b0, %b2;
+    mul.f32 %cb, %cb, 0f3F000000;
+    mov.f32 %r, %cb;
+    sqrt.rn.f32 %sq, %x;
+    div.rn.f32 %r, %r, %sq;                // / sqrt(x)
+    // * exp(-x)
+    mul.f32 %ex, %x, 0fBFB8AA3B;          // -x*log2e
+    ex2.approx.f32 %ex, %ex;              // exp(-x)
+    mul.f32 %r, %r, %ex;
+
+STORE:
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out_p, %off;
+    st.global.f32 [%addr], %r;
+DONE:
+    ret;
+}
+";
+
+/// scaled_modified_bessel_k0(x)=exp(x)*k0(x), f32. SMALL: (chbevl(x*x-2, K0_A) - log(0.5x)*i0(x))*exp(x). BIG: chbevl(8/x-2, K0_B)/sqrt(x). Mirrors scaled_modified_bessel_k0_forward (aten/src/ATen/native/cuda/Math.cuh:2582-2656).
+/// ABI: `(in, out, total)`.
+#[cfg(feature = "cuda")]
+pub(crate) const SCALED_K0_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+// NOTE: PTX comments must stay ASCII-only. The WSL driver (591.86) JIT parser
+// rejects non-ASCII bytes with CUDA_ERROR_INVALID_PTX. Coefficient immediates
+// are the f32 bit-hex of the Cephes A/B Chebyshev tables (special.rs K0_A.. /
+// I0E_A.. for the inner i0/i1 of the small-region log term).
+
+.visible .entry scaled_modified_bessel_k0_f32(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r;
+    .reg .u64 %in_p, %out_p, %off, %addr;
+    .reg .f32 %x, %xx, %xi, %b0, %b1, %b2, %cb, %cba, %ibe, %ex, %lg, %r, %sq;
+    .reg .pred %oob, %small, %zero, %neg;
+
+    ld.param.u64 %in_p,    [in_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %oob, %idx, %total_r;
+    @%oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in_p, %off;
+    ld.global.f32 %x, [%addr];
+
+    // x == 0 -> +inf
+    setp.eq.f32 %zero, %x, 0f00000000;
+    @%zero mov.f32 %r, 0f7F800000;
+    @%zero bra STORE;
+    // x < 0 -> NaN
+    setp.lt.f32 %neg, %x, 0f00000000;
+    @%neg mov.f32 %r, 0f7FC00000;
+    @%neg bra STORE;
+
+    setp.le.f32 %small, %x, 0f40000000;   // x <= 2.0
+    @!%small bra BIG;
+    // SMALL (x <= 2): chbevl(x*x - 2, K0_A)
+    mul.f32 %xx, %x, %x;
+    add.f32 %xx, %xx, 0fC0000000;          // -2.0
+    mov.f32 %b0, 0f251E770F;
+    mov.f32 %b1, 0f00000000;
+    mov.f32 %b2, 0f00000000;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f293FD856;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2D3612E2;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3102E09B;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f348815E7;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f37BFC808;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3AA5C174;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3D135FB3;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3EB046C4;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBF090B37;
+    sub.f32 %cb, %b0, %b2;
+    mul.f32 %cb, %cb, 0f3F000000;
+    mov.f32 %cba, %cb;                    // chbevl(x*x-2, A)
+    // inner i0(x) = exp(x) * chbevl(x*0.5 - 2, I0E_A)
+    mul.f32 %xi, %x, 0f3F000000;          // x*0.5
+    add.f32 %xi, %xi, 0fC0000000;          // -2.0
+    mov.f32 %b0, 0fA2A2E5B9;
+    mov.f32 %b1, 0f00000000;
+    mov.f32 %b2, 0f00000000;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f24199B15;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA58C275C;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f26F736C5;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA8528116;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f29ACDA32;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAB08B263;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2C4FF17F;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAD97E4AC;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2ED4C5F6;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB00EA7F1;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3136C81D;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB25F57B4;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3381DBB5;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB48F631C;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3595F925;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB694337E;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3789FAC6;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB8715933;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3945A8DC;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBA1717E9;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3AD6E3AC;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBB8DB2F1;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3C2CCB10;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBCC274F8;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3D49F456;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBDC25B82;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3E2FBD64;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBE9BFF5E;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3F2D4275;
+    sub.f32 %cb, %b0, %b2;
+    mul.f32 %cb, %cb, 0f3F000000;
+    mov.f32 %ibe, %cb;
+    mul.f32 %ex, %x, 0f3FB8AA3B;          // x*log2e
+    ex2.approx.f32 %ex, %ex;              // exp(x)
+    mul.f32 %ibe, %ibe, %ex;
+    // log(0.5*x) = lg2.approx(0.5*x) * ln2
+    mul.f32 %lg, %x, 0f3F000000;          // 0.5*x
+    lg2.approx.f32 %lg, %lg;
+    mul.f32 %lg, %lg, 0f3F317218;          // * ln2
+    mul.f32 %r, %lg, %ibe;
+    sub.f32 %r, %cba, %r;                 // chbevl(A) - log(0.5x)*i0
+    // scaled: * exp(x)
+    mul.f32 %ex, %x, 0f3FB8AA3B;          // x*log2e
+    ex2.approx.f32 %ex, %ex;
+    mul.f32 %r, %r, %ex;
+    bra STORE;
+
+BIG:
+    // BIG (x > 2): chbevl(8/x - 2, K0_B) / sqrt(x)
+    rcp.rn.f32 %xx, %x;
+    mul.f32 %xx, %xx, 0f41000000;          // 8/x
+    add.f32 %xx, %xx, 0fC0000000;          // -2.0
+    mov.f32 %b0, 0f22C38D2E;
+    mov.f32 %b1, 0f00000000;
+    mov.f32 %b2, 0f00000000;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA397F665;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f24704972;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA5417CA4;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f261EDFCB;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA7053487;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f27E46CE2;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA8C8A2F6;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f29B4E276;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAAA7C3B9;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2BA07D19;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAC9ED7E2;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2DA34042;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAEAEFCAF;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2FC4AB64;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB0E94EB0;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f32134D00;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB3482AA1;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f34948ACC;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB5F5DAA4;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f376A09FE;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB906BCBF;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3ACDC490;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBD00CFB9;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f401C2DED;
+    sub.f32 %cb, %b0, %b2;
+    mul.f32 %cb, %cb, 0f3F000000;
+    mov.f32 %r, %cb;
+    sqrt.rn.f32 %sq, %x;
+    div.rn.f32 %r, %r, %sq;                // / sqrt(x)
+
+STORE:
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out_p, %off;
+    st.global.f32 [%addr], %r;
+DONE:
+    ret;
+}
+";
+
+/// modified_bessel_k1(x), f32. x==0 -> +inf; x<0 -> NaN. SMALL (x<=2): log(0.5x)*i1(x) + chbevl(x*x-2, K1_A)/x, where i1(x)=exp(x)*x*chbevl(x*0.5-2, I1E_A). BIG (x>2): exp(-x)*chbevl(8/x-2, K1_B)/sqrt(x). Mirrors modified_bessel_k1_forward (aten/src/ATen/native/cuda/Math.cuh:2661-2736).
+/// ABI: `(in, out, total)`.
+#[cfg(feature = "cuda")]
+pub(crate) const K1_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+// NOTE: PTX comments must stay ASCII-only. The WSL driver (591.86) JIT parser
+// rejects non-ASCII bytes with CUDA_ERROR_INVALID_PTX. Coefficient immediates
+// are the f32 bit-hex of the Cephes A/B Chebyshev tables (special.rs K0_A.. /
+// I0E_A.. for the inner i0/i1 of the small-region log term).
+
+.visible .entry modified_bessel_k1_f32(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r;
+    .reg .u64 %in_p, %out_p, %off, %addr;
+    .reg .f32 %x, %xx, %xi, %b0, %b1, %b2, %cb, %cba, %ibe, %ex, %lg, %r, %sq;
+    .reg .pred %oob, %small, %zero, %neg;
+
+    ld.param.u64 %in_p,    [in_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %oob, %idx, %total_r;
+    @%oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in_p, %off;
+    ld.global.f32 %x, [%addr];
+
+    // x == 0 -> +inf
+    setp.eq.f32 %zero, %x, 0f00000000;
+    @%zero mov.f32 %r, 0f7F800000;
+    @%zero bra STORE;
+    // x < 0 -> NaN
+    setp.lt.f32 %neg, %x, 0f00000000;
+    @%neg mov.f32 %r, 0f7FC00000;
+    @%neg bra STORE;
+
+    setp.le.f32 %small, %x, 0f40000000;   // x <= 2.0
+    @!%small bra BIG;
+    // SMALL (x <= 2): chbevl(x*x - 2, K1_A)
+    mul.f32 %xx, %x, %x;
+    add.f32 %xx, %xx, 0fC0000000;          // -2.0
+    mov.f32 %b0, 0fA3019142;
+    mov.f32 %b1, 0f00000000;
+    mov.f32 %b2, 0f00000000;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA72EEA8C;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAB3BA817;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAF1B31DE;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB2BE20E9;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB6234D99;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB9356F17;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBBE4949D;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBDFB1B92;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBEB4D0DC;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3FC33D0A;
+    sub.f32 %cb, %b0, %b2;
+    mul.f32 %cb, %cb, 0f3F000000;
+    mov.f32 %cba, %cb;                    // chbevl(x*x-2, A)
+    // inner i1(x) = exp(x) * chbevl(x*0.5 - 2, I1E_A) * x
+    mul.f32 %xi, %x, 0f3F000000;          // x*0.5
+    add.f32 %xi, %xi, 0fC0000000;          // -2.0
+    mov.f32 %b0, 0f224CF950;
+    mov.f32 %b1, 0f00000000;
+    mov.f32 %b2, 0f00000000;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA3C2BE86;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f25331F1F;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA69F5554;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2808EBF8;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA9631471;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2AB57BC2;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAC0B9C1B;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2D4E7716;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAE92881D;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2FC751A6;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB101B0D9;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f32212C70;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB33EE9F1;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f34571A26;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB56603CC;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3668E277;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB75EAFCE;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f38488DAA;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB9299E57;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3A064AEE;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBAC66310;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3B88329A;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBC2D14FC;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3CCA8F1F;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBD58DDE3;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3DD236D7;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBE34A688;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3E81531C;
+    sub.f32 %cb, %b0, %b2;
+    mul.f32 %cb, %cb, 0f3F000000;
+    mov.f32 %ibe, %cb;
+    mul.f32 %ex, %x, 0f3FB8AA3B;          // x*log2e
+    ex2.approx.f32 %ex, %ex;              // exp(x)
+    mul.f32 %ibe, %ibe, %ex;
+    mul.f32 %ibe, %ibe, %x;              // i1 odd: * x
+    // log(0.5*x) = lg2.approx(0.5*x) * ln2
+    mul.f32 %lg, %x, 0f3F000000;          // 0.5*x
+    lg2.approx.f32 %lg, %lg;
+    mul.f32 %lg, %lg, 0f3F317218;          // * ln2
+    mul.f32 %r, %lg, %ibe;               // log(0.5x)*i1
+    div.rn.f32 %cba, %cba, %x;            // chbevl(A)/x
+    add.f32 %r, %r, %cba;
+    bra STORE;
+
+BIG:
+    // BIG (x > 2): chbevl(8/x - 2, K1_B) / sqrt(x) * exp(-x)
+    rcp.rn.f32 %xx, %x;
+    mul.f32 %xx, %xx, 0f41000000;          // 8/x
+    add.f32 %xx, %xx, 0fC0000000;          // -2.0
+    mov.f32 %b0, 0fA2D462EA;
+    mov.f32 %b1, 0f00000000;
+    mov.f32 %b2, 0f00000000;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f23A578D4;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA48330A9;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2553EAF2;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA62E951F;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2712E76F;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA7FCEA92;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f28DF1F4B;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA9CA232F;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2ABC7FD0;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fABB56F63;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2CB4D5C2;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fADBB5A9D;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2ECAB680;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAFE65E00;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f310A7921;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB231BD25;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f337693E3;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB4BC0294;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f36217F19;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB7A26B89;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f394CB2C4;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBB3B4A36;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3DD4D5F8;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f402E1EBD;
+    sub.f32 %cb, %b0, %b2;
+    mul.f32 %cb, %cb, 0f3F000000;
+    mov.f32 %r, %cb;
+    sqrt.rn.f32 %sq, %x;
+    div.rn.f32 %r, %r, %sq;                // / sqrt(x)
+    // * exp(-x)
+    mul.f32 %ex, %x, 0fBFB8AA3B;          // -x*log2e
+    ex2.approx.f32 %ex, %ex;              // exp(-x)
+    mul.f32 %r, %r, %ex;
+
+STORE:
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out_p, %off;
+    st.global.f32 [%addr], %r;
+DONE:
+    ret;
+}
+";
+
+/// scaled_modified_bessel_k1(x)=exp(x)*k1(x), f32. SMALL: (log(0.5x)*i1(x) + chbevl(x*x-2, K1_A)/x)*exp(x). BIG: chbevl(8/x-2, K1_B)/sqrt(x). Mirrors scaled_modified_bessel_k1_forward (aten/src/ATen/native/cuda/Math.cuh:2740-2815).
+/// ABI: `(in, out, total)`.
+#[cfg(feature = "cuda")]
+pub(crate) const SCALED_K1_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+// NOTE: PTX comments must stay ASCII-only. The WSL driver (591.86) JIT parser
+// rejects non-ASCII bytes with CUDA_ERROR_INVALID_PTX. Coefficient immediates
+// are the f32 bit-hex of the Cephes A/B Chebyshev tables (special.rs K0_A.. /
+// I0E_A.. for the inner i0/i1 of the small-region log term).
+
+.visible .entry scaled_modified_bessel_k1_f32(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r;
+    .reg .u64 %in_p, %out_p, %off, %addr;
+    .reg .f32 %x, %xx, %xi, %b0, %b1, %b2, %cb, %cba, %ibe, %ex, %lg, %r, %sq;
+    .reg .pred %oob, %small, %zero, %neg;
+
+    ld.param.u64 %in_p,    [in_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %oob, %idx, %total_r;
+    @%oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in_p, %off;
+    ld.global.f32 %x, [%addr];
+
+    // x == 0 -> +inf
+    setp.eq.f32 %zero, %x, 0f00000000;
+    @%zero mov.f32 %r, 0f7F800000;
+    @%zero bra STORE;
+    // x < 0 -> NaN
+    setp.lt.f32 %neg, %x, 0f00000000;
+    @%neg mov.f32 %r, 0f7FC00000;
+    @%neg bra STORE;
+
+    setp.le.f32 %small, %x, 0f40000000;   // x <= 2.0
+    @!%small bra BIG;
+    // SMALL (x <= 2): chbevl(x*x - 2, K1_A)
+    mul.f32 %xx, %x, %x;
+    add.f32 %xx, %xx, 0fC0000000;          // -2.0
+    mov.f32 %b0, 0fA3019142;
+    mov.f32 %b1, 0f00000000;
+    mov.f32 %b2, 0f00000000;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA72EEA8C;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAB3BA817;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAF1B31DE;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB2BE20E9;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB6234D99;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB9356F17;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBBE4949D;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBDFB1B92;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBEB4D0DC;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3FC33D0A;
+    sub.f32 %cb, %b0, %b2;
+    mul.f32 %cb, %cb, 0f3F000000;
+    mov.f32 %cba, %cb;                    // chbevl(x*x-2, A)
+    // inner i1(x) = exp(x) * chbevl(x*0.5 - 2, I1E_A) * x
+    mul.f32 %xi, %x, 0f3F000000;          // x*0.5
+    add.f32 %xi, %xi, 0fC0000000;          // -2.0
+    mov.f32 %b0, 0f224CF950;
+    mov.f32 %b1, 0f00000000;
+    mov.f32 %b2, 0f00000000;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA3C2BE86;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f25331F1F;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA69F5554;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2808EBF8;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA9631471;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2AB57BC2;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAC0B9C1B;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2D4E7716;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAE92881D;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2FC751A6;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB101B0D9;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f32212C70;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB33EE9F1;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f34571A26;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB56603CC;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3668E277;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB75EAFCE;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f38488DAA;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB9299E57;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3A064AEE;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBAC66310;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3B88329A;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBC2D14FC;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3CCA8F1F;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBD58DDE3;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3DD236D7;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBE34A688;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xi, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3E81531C;
+    sub.f32 %cb, %b0, %b2;
+    mul.f32 %cb, %cb, 0f3F000000;
+    mov.f32 %ibe, %cb;
+    mul.f32 %ex, %x, 0f3FB8AA3B;          // x*log2e
+    ex2.approx.f32 %ex, %ex;              // exp(x)
+    mul.f32 %ibe, %ibe, %ex;
+    mul.f32 %ibe, %ibe, %x;              // i1 odd: * x
+    // log(0.5*x) = lg2.approx(0.5*x) * ln2
+    mul.f32 %lg, %x, 0f3F000000;          // 0.5*x
+    lg2.approx.f32 %lg, %lg;
+    mul.f32 %lg, %lg, 0f3F317218;          // * ln2
+    mul.f32 %r, %lg, %ibe;               // log(0.5x)*i1
+    div.rn.f32 %cba, %cba, %x;            // chbevl(A)/x
+    add.f32 %r, %r, %cba;
+    // scaled: * exp(x)
+    mul.f32 %ex, %x, 0f3FB8AA3B;          // x*log2e
+    ex2.approx.f32 %ex, %ex;
+    mul.f32 %r, %r, %ex;
+    bra STORE;
+
+BIG:
+    // BIG (x > 2): chbevl(8/x - 2, K1_B) / sqrt(x)
+    rcp.rn.f32 %xx, %x;
+    mul.f32 %xx, %xx, 0f41000000;          // 8/x
+    add.f32 %xx, %xx, 0fC0000000;          // -2.0
+    mov.f32 %b0, 0fA2D462EA;
+    mov.f32 %b1, 0f00000000;
+    mov.f32 %b2, 0f00000000;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f23A578D4;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA48330A9;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2553EAF2;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA62E951F;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2712E76F;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA7FCEA92;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f28DF1F4B;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fA9CA232F;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2ABC7FD0;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fABB56F63;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2CB4D5C2;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fADBB5A9D;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f2ECAB680;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fAFE65E00;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f310A7921;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB231BD25;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f337693E3;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB4BC0294;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f36217F19;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fB7A26B89;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f394CB2C4;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0fBB3B4A36;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f3DD4D5F8;
+    mov.f32 %b2, %b1;
+    mov.f32 %b1, %b0;
+    mul.f32 %b0, %xx, %b1;
+    sub.f32 %b0, %b0, %b2;
+    add.f32 %b0, %b0, 0f402E1EBD;
+    sub.f32 %cb, %b0, %b2;
+    mul.f32 %cb, %cb, 0f3F000000;
+    mov.f32 %r, %cb;
+    sqrt.rn.f32 %sq, %x;
+    div.rn.f32 %r, %r, %sq;                // / sqrt(x)
+
+STORE:
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out_p, %off;
+    st.global.f32 [%addr], %r;
+DONE:
+    ret;
+}
+";
+
 /// Spherical Bessel `j0(x)` forward on an f32 buffer (on-device, no host
 /// round-trip).
 ///
@@ -3212,6 +4884,64 @@ pub fn gpu_i1_f32(input: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<Cuda
 #[cfg(feature = "cuda")]
 pub fn gpu_i1e_f32(input: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
     launch_elementwise_f32(input, device, I1E_F32_PTX, "i1e_f32")
+}
+
+/// Modified Bessel `modified_bessel_k0(x)` forward on an f32 buffer (on-device, no host round-trip).
+///
+/// # Errors
+/// See [`gpu_chebyshev_poly_f32`].
+#[cfg(feature = "cuda")]
+pub fn gpu_modified_bessel_k0_f32(
+    input: &CudaBuffer<f32>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    launch_elementwise_f32(input, device, K0_F32_PTX, "modified_bessel_k0_f32")
+}
+
+/// Modified Bessel `scaled_modified_bessel_k0(x)` forward on an f32 buffer (on-device, no host round-trip).
+///
+/// # Errors
+/// See [`gpu_chebyshev_poly_f32`].
+#[cfg(feature = "cuda")]
+pub fn gpu_scaled_modified_bessel_k0_f32(
+    input: &CudaBuffer<f32>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    launch_elementwise_f32(
+        input,
+        device,
+        SCALED_K0_F32_PTX,
+        "scaled_modified_bessel_k0_f32",
+    )
+}
+
+/// Modified Bessel `modified_bessel_k1(x)` forward on an f32 buffer (on-device, no host round-trip).
+///
+/// # Errors
+/// See [`gpu_chebyshev_poly_f32`].
+#[cfg(feature = "cuda")]
+pub fn gpu_modified_bessel_k1_f32(
+    input: &CudaBuffer<f32>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    launch_elementwise_f32(input, device, K1_F32_PTX, "modified_bessel_k1_f32")
+}
+
+/// Modified Bessel `scaled_modified_bessel_k1(x)` forward on an f32 buffer (on-device, no host round-trip).
+///
+/// # Errors
+/// See [`gpu_chebyshev_poly_f32`].
+#[cfg(feature = "cuda")]
+pub fn gpu_scaled_modified_bessel_k1_f32(
+    input: &CudaBuffer<f32>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    launch_elementwise_f32(
+        input,
+        device,
+        SCALED_K1_F32_PTX,
+        "scaled_modified_bessel_k1_f32",
+    )
 }
 
 #[cfg(all(test, feature = "cuda"))]
