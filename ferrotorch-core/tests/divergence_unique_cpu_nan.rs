@@ -48,8 +48,15 @@ fn divergence_cpu_unique_nan_sorts_to_end() {
     let v = vals.data_vec().expect("vals");
 
     // torch: vals = [1, 2, nan, nan]
-    assert_eq!(v.len(), 4, "four unique entries (two finite + two NaN): {v:?}");
-    assert_eq!(v[0], 1.0, "first sorted-unique is the smallest finite: {v:?}");
+    assert_eq!(
+        v.len(),
+        4,
+        "four unique entries (two finite + two NaN): {v:?}"
+    );
+    assert_eq!(
+        v[0], 1.0,
+        "first sorted-unique is the smallest finite: {v:?}"
+    );
     assert_eq!(v[1], 2.0, "second sorted-unique: {v:?}");
     assert!(
         v[2].is_nan() && v[3].is_nan(),
