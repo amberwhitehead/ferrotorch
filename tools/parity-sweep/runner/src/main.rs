@@ -1846,6 +1846,66 @@ fn dispatch_f32(
         "frac" => Ok(Some(grad_fns::transcendental::frac(&unary("frac")?)?)),
         "sign" => Ok(Some(grad_fns::transcendental::sign(&unary("sign")?)?)),
         "sinc" => Ok(Some(grad_fns::transcendental::sinc(&unary("sinc")?)?)),
+        // torch.special transcendental family — runner arms for the ops that
+        // landed SHIPPED in `ferrotorch_core::special` under umbrella #1651
+        // (CPU end-to-end, live-torch-verified) but had NO parity-sweep
+        // dispatch arm, so the sweep reported "unknown op — no runner arm"
+        // (grep count 0). Wired 2026-05-29 to close #1653. The op-name keys
+        // are the EXACT `op_db` registration names (verified present in the
+        // live `torch.testing._internal.common_methods_invocations.op_db` on
+        // 2026-05-29): the `special.*` prefixed names plus PLAIN `i0` (which
+        // op_db registers without the `special.` prefix). Each unary arm
+        // fetches the op_db-sampled input via the `unary` closure (already
+        // f32, already domain-respecting per each op's `OpInfo`) and
+        // dispatches through the matching `pub fn` in
+        // `ferrotorch-core/src/special.rs`. No extra clamping: the op_db
+        // samples already respect each op's domain (e.g. ndtri (0,1),
+        // modified_bessel_k* x>0), so any genuine divergence surfaces.
+        "special.entr" => Ok(Some(ferrotorch_core::special::entr(&unary(
+            "special.entr",
+        )?)?)),
+        "special.ndtr" => Ok(Some(ferrotorch_core::special::ndtr(&unary(
+            "special.ndtr",
+        )?)?)),
+        "special.ndtri" => Ok(Some(ferrotorch_core::special::ndtri(&unary(
+            "special.ndtri",
+        )?)?)),
+        "i0" => Ok(Some(ferrotorch_core::special::i0(&unary("i0")?)?)),
+        "special.i0e" => Ok(Some(ferrotorch_core::special::i0e(&unary("special.i0e")?)?)),
+        "special.i1" => Ok(Some(ferrotorch_core::special::i1(&unary("special.i1")?)?)),
+        "special.i1e" => Ok(Some(ferrotorch_core::special::i1e(&unary("special.i1e")?)?)),
+        "special.airy_ai" => Ok(Some(ferrotorch_core::special::airy_ai(&unary(
+            "special.airy_ai",
+        )?)?)),
+        "special.spherical_bessel_j0" => Ok(Some(ferrotorch_core::special::spherical_bessel_j0(
+            &unary("special.spherical_bessel_j0")?,
+        )?)),
+        "special.modified_bessel_k0" => Ok(Some(ferrotorch_core::special::modified_bessel_k0(
+            &unary("special.modified_bessel_k0")?,
+        )?)),
+        "special.modified_bessel_k1" => Ok(Some(ferrotorch_core::special::modified_bessel_k1(
+            &unary("special.modified_bessel_k1")?,
+        )?)),
+        "special.scaled_modified_bessel_k0" => {
+            Ok(Some(ferrotorch_core::special::scaled_modified_bessel_k0(
+                &unary("special.scaled_modified_bessel_k0")?,
+            )?))
+        }
+        "special.scaled_modified_bessel_k1" => {
+            Ok(Some(ferrotorch_core::special::scaled_modified_bessel_k1(
+                &unary("special.scaled_modified_bessel_k1")?,
+            )?))
+        }
+        // `torch.special.zeta(input, other)` is BINARY (the Hurwitz zeta
+        // `zeta(x, q)`): op_db's `special.zeta` sample serializes as
+        // `args = (s.input, *s.args)` -> `args[0]=x`, `args[1]=q`, both
+        // tensors (verified 2026-05-29: input/other are (possibly 0-d /
+        // broadcastable) f32 tensors). `binary("special.zeta")` fetches both;
+        // `ferrotorch_core::special::zeta` broadcasts via `binary_map`.
+        "special.zeta" => {
+            let (input, other) = binary("special.zeta")?;
+            Ok(Some(ferrotorch_core::special::zeta(&input, &other)?))
+        }
         // `torch.clamp(input, min, max)` — op_db's unary `clamp` samples
         // ship min/max as TENSOR-valued bounds (broadcastable to input).
         // ferrotorch's `pub fn clamp` accepts scalar `T` bounds only — the
@@ -7022,6 +7082,27 @@ fn dispatch_ops() -> &'static [&'static str] {
         "sign",
         "sinc",
         "clamp",
+        // torch.special transcendental family — runner arms wired 2026-05-29
+        // to close #1653 (impl side). These ops are SHIPPED in
+        // `ferrotorch-core/src/special.rs` (under #1651) but had no dispatch
+        // arm, so the sweep reported "unknown op — no runner arm". The names
+        // are the EXACT `op_db` registration keys (the `special.*` names plus
+        // PLAIN `i0`). `special.zeta` is the lone binary (Hurwitz zeta);
+        // the rest are unary.
+        "special.entr",
+        "special.ndtr",
+        "special.ndtri",
+        "i0",
+        "special.i0e",
+        "special.i1",
+        "special.i1e",
+        "special.airy_ai",
+        "special.spherical_bessel_j0",
+        "special.modified_bessel_k0",
+        "special.modified_bessel_k1",
+        "special.scaled_modified_bessel_k0",
+        "special.scaled_modified_bessel_k1",
+        "special.zeta",
         // Reduction cluster — closes umbrella #1314 + per-op blockers
         // #1301 (std/var) #1304 (argmax/argmin) #1310 (logsumexp autograd)
         // #1312 (any/all/count_nonzero). Owned by `grad_fns::reduction`.
