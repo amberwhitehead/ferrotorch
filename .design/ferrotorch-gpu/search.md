@@ -178,7 +178,8 @@ against torch 2.11 CUDA (values exact in all cases; gathered values exact).
   `out[(u32)incl[i] - 1]`. Returns `(CudaBuffer<V> values, Vec<usize> inverse,
   Vec<usize> counts)`: `values` is the GPU-resident deduplicated output;
   `inverse[i] = incl[i] - 1`; `counts[j]` is the run length of output run `j`.
-  NaN starts its own run (`setp.ne` is true for `NaN != NaN`), matching the CPU
+  NaN starts its own run (`setp.neu` — the UNORDERED not-equal — is true for
+  `NaN != NaN`, where ordered `setp.ne` would be false; #1656), matching the CPU
   PartialEq path. The flag scan runs in f32 for both dtypes (flags are exact
   0/1); only the value load/store width differs (`shl.b64 .., 2` vs `.., 3`).
 - REQ-20: PTX + ABI for unique_consecutive. `RUN_FLAG_F32_PTX` /
