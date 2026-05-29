@@ -3935,13 +3935,14 @@ impl GpuBackend for CudaBackendImpl {
     fn triu_f32(
         &self,
         a: &GpuBufferHandle,
+        batch: usize,
         rows: usize,
         cols: usize,
         k: i64,
     ) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::triangular::gpu_triu_f32(a_buf, rows, cols, k, dev)
+        let result = crate::triangular::gpu_triu_f32(a_buf, batch, rows, cols, k, dev)
             .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
@@ -3950,13 +3951,14 @@ impl GpuBackend for CudaBackendImpl {
     fn tril_f32(
         &self,
         a: &GpuBufferHandle,
+        batch: usize,
         rows: usize,
         cols: usize,
         k: i64,
     ) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::triangular::gpu_tril_f32(a_buf, rows, cols, k, dev)
+        let result = crate::triangular::gpu_tril_f32(a_buf, batch, rows, cols, k, dev)
             .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
@@ -3965,13 +3967,14 @@ impl GpuBackend for CudaBackendImpl {
     fn triu_f64(
         &self,
         a: &GpuBufferHandle,
+        batch: usize,
         rows: usize,
         cols: usize,
         k: i64,
     ) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::triangular::gpu_triu_f64(a_buf, rows, cols, k, dev)
+        let result = crate::triangular::gpu_triu_f64(a_buf, batch, rows, cols, k, dev)
             .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
@@ -3980,13 +3983,14 @@ impl GpuBackend for CudaBackendImpl {
     fn tril_f64(
         &self,
         a: &GpuBufferHandle,
+        batch: usize,
         rows: usize,
         cols: usize,
         k: i64,
     ) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::triangular::gpu_tril_f64(a_buf, rows, cols, k, dev)
+        let result = crate::triangular::gpu_tril_f64(a_buf, batch, rows, cols, k, dev)
             .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }

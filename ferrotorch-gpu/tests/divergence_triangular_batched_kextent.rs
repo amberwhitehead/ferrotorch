@@ -2,22 +2,21 @@
 //!
 //! Two concerns pinned here against LIVE torch 2.11 reference values:
 //!
-//!  1. BATCHED N-D INPUT (DIVERGENCE — ignored, tracking issue).
-//!     `torch.triu` / `torch.tril` operate on the LAST TWO DIMS of any tensor
-//!     with `dim() >= 2`, batching over all leading dims. Upstream:
-//!     `pytorch/aten/src/ATen/native/TriangularOps.cpp:31`
-//!       `TORCH_CHECK(self.dim() >= 2, "triu: input tensor must have at least 2 dimensions")`
-//!     and the CUDA template batches via
-//!     `pytorch/aten/src/ATen/native/cuda/TriangularOps.cu:120`
-//!       `int64_t N_padded = c10::multiply_integers(sizes.begin(), sizes.end()-1) * last_dim_padded;`
-//!     ferrotorch `triu`/`tril` HARD-REJECT anything that is not exactly 2-D at
-//!     `ferrotorch-core/src/ops/tensor_ops.rs:52` / `:120`
-//!       `if input.ndim() != 2 { return Err(InvalidArgument ...) }`
-//!     so batched CUDA input never reaches the resident kernel — it errors out.
+//! 1. BATCHED N-D INPUT (DIVERGENCE — FIXED, #1644). `torch.triu` /
+//!    `torch.tril` operate on the LAST TWO DIMS of any tensor with
+//!    `dim() >= 2`, batching over all leading dims. Upstream:
+//!    `pytorch/aten/src/ATen/native/TriangularOps.cpp:31`
+//!    (`TORCH_CHECK(self.dim() >= 2, ...)`) and the CUDA template batches via
+//!    `pytorch/aten/src/ATen/native/cuda/TriangularOps.cu:120`
+//!    (`N_padded = multiply_integers(sizes[..last]) * last_dim_padded`).
+//!    ferrotorch `triu`/`tril` previously HARD-REJECTED anything that was not
+//!    exactly 2-D; the guard is now `ndim() < 2` and both CPU and GPU paths
+//!    batch the mask over the trailing `[rows, cols]` matrix. The two
+//!    `divergence_*_batched_*_on_cuda` tests below are now regular `#[test]`s.
 //!
-//!  2. k-BEYOND-EXTENT + both rectangular orientations (POSITIVE coverage —
-//!     should PASS; pins the resident-kernel math against torch for |k| larger
-//!     than the matrix extent, which the builder only tested for k in -2..2).
+//! 2. k-BEYOND-EXTENT + both rectangular orientations (POSITIVE coverage —
+//!    should PASS; pins the resident-kernel math against torch for |k| larger
+//!    than the matrix extent, which the builder only tested for k in -2..2).
 //!
 //! All expected values were produced by LIVE `torch.triu`/`torch.tril`
 //! (torch 2.11.0+cu130), not copied from the ferrotorch side (R-CHAR-3).
@@ -63,7 +62,6 @@ fn arange_f64(shape: Vec<usize>) -> Tensor<f64> {
 /// the GPU kernel.
 /// Tracking: #1644
 #[test]
-#[ignore = "divergence: triu/tril reject N-D batched input torch handles over last-2-dims; tracking #1644"]
 fn divergence_triu_batched_4d_on_cuda() {
     ensure_cuda();
     let cpu = arange(vec![2, 2, 3, 3]);
@@ -90,7 +88,6 @@ fn divergence_triu_batched_4d_on_cuda() {
 /// returns `Err(InvalidArgument)` at `ops/tensor_ops.rs:120`.
 /// Tracking: #1644
 #[test]
-#[ignore = "divergence: tril rejects N-D batched input torch handles; tracking #1644"]
 fn divergence_tril_batched_3d_on_cuda() {
     ensure_cuda();
     let cpu = arange(vec![2, 3, 3]);
@@ -160,14 +157,18 @@ fn triu_tril_5x3_on_cuda_f32() {
     assert!(triu0.is_cuda());
     assert_eq!(
         triu0.cpu().unwrap().data().unwrap().to_vec(),
-        vec![0.0f32, 1.0, 2.0, 0.0, 4.0, 5.0, 0.0, 0.0, 8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        vec![
+            0.0f32, 1.0, 2.0, 0.0, 4.0, 5.0, 0.0, 0.0, 8.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        ]
     );
 
     // torch.tril(arange(15).reshape(5,3), 0)
     let tril0 = tril(&gpu, 0).expect("tril");
     assert_eq!(
         tril0.cpu().unwrap().data().unwrap().to_vec(),
-        vec![0.0f32, 0.0, 0.0, 3.0, 4.0, 0.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0]
+        vec![
+            0.0f32, 0.0, 0.0, 3.0, 4.0, 0.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0
+        ]
     );
 }
 
@@ -180,7 +181,10 @@ fn triu_k_beyond_extent_4x4_on_cuda_f64() {
     // torch.triu(arange(16,dtype=f64).reshape(4,4), 5) -> all zero (extent 3)
     let out = triu(&gpu, 5).expect("triu k=5 f64");
     assert!(out.is_cuda());
-    assert_eq!(out.cpu().unwrap().data().unwrap().to_vec(), vec![0.0f64; 16]);
+    assert_eq!(
+        out.cpu().unwrap().data().unwrap().to_vec(),
+        vec![0.0f64; 16]
+    );
 
     // torch.triu(..., -5) -> full copy (extent -3)
     let out2 = triu(&gpu, -5).expect("triu k=-5 f64");

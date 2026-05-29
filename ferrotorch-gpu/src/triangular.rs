@@ -6,8 +6,11 @@
 //!
 //! # Semantics (PyTorch parity)
 //!
-//! For a 2-D `[rows, cols]` C-contiguous buffer, element `(row, col)` is
-//! **preserved** when the predicate holds and **zeroed** otherwise:
+//! For a `[batch.., rows, cols]` C-contiguous buffer the upper/lower triangular
+//! mask is applied to the LAST TWO DIMS of EVERY trailing `[rows, cols]`
+//! matrix, batching over all leading dims (`batch` = product of the leading
+//! dims). Element `(row, col)` within a matrix is **preserved** when the
+//! predicate holds and **zeroed** otherwise:
 //!
 //! - **triu** keeps `(row, col)` when `col - row >= k`.
 //! - **tril** keeps `(row, col)` when `col - row <= k`.
@@ -15,6 +18,8 @@
 //! This is exactly PyTorch's CUDA predicate at
 //! `aten/src/ATen/native/cuda/TriangularOps.cu:100`
 //! (`mask = upper ? (col + i - row >= k) : (col + i - row <= k)`) and the
+//! per-trailing-matrix batching at `TriangularOps.cu:120`
+//! (`N_padded = multiply_integers(sizes[..last]) * last_dim_padded`) plus the
 //! ferrotorch CPU path in `ferrotorch_core::ops::tensor_ops`
 //! (`triu`: `c >= r + diagonal`, `tril`: `c <= r + diagonal`). Because the op
 //! only copies-or-zeros (no arithmetic), the GPU result is **bit-for-bit
@@ -29,8 +34,12 @@
 //!
 //! # Launch scheme
 //!
-//! One thread per element. `total = rows * cols` threads; thread `t`
-//! computes `row = t / cols`, `col = t % cols`, then writes one element.
+//! One thread per element. `total = batch * rows * cols` threads; thread `t`
+//! computes `col = t % cols`, `row = (t / cols) % rows` (so the row index
+//! resets per trailing `[rows, cols]` matrix — `batch == 1` reduces to the
+//! plain 2-D case since `row % rows == row` for `row < rows`), then writes
+//! one element. The mask is a pure function of the within-matrix `(row, col)`,
+//! so it repeats identically across the `batch` leading matrices.
 //!
 //! ## REQ status (per `.design/ferrotorch-gpu/triangular.md`)
 //!
@@ -73,10 +82,12 @@ const OP_TRIL: u32 = 1;
 // ===========================================================================
 // f32
 //
-// Params: (in_ptr, out_ptr, rows, cols, k, op)
-//   in  : f32[rows * cols]   (C-contiguous, [rows, cols])
-//   out : f32[rows * cols]
-// Thread t in [0, rows*cols): row = t / cols; col = t % cols.
+// Params: (in_ptr, out_ptr, batch, rows, cols, k, op)
+//   in  : f32[batch * rows * cols]   (C-contiguous, [batch.., rows, cols])
+//   out : f32[batch * rows * cols]
+// Thread t in [0, batch*rows*cols): col = t % cols; row = (t / cols) % rows.
+//   (row resets per trailing [rows, cols] matrix — batches over leading dims,
+//    matching aten/src/ATen/native/cuda/TriangularOps.cu:120)
 //   diff = (s32)col - (s32)row
 //   keep = (op == 0) ? (diff >= k) : (diff <= k)
 //   out[t] = keep ? in[t] : 0.0f
@@ -88,9 +99,9 @@ const TRIANGULAR_F32_PTX: &str = "\
 
 .visible .entry triangular_f32_kernel(
     .param .u64 in_ptr, .param .u64 out_ptr,
-    .param .u32 rows, .param .u32 cols, .param .s32 k, .param .u32 op
+    .param .u32 batch, .param .u32 rows, .param .u32 cols, .param .s32 k, .param .u32 op
 ) {
-    .reg .u32 %gtid, %bid, %bdim, %rows, %cols, %op_r, %row_u, %col_u, %total;
+    .reg .u32 %gtid, %bid, %bdim, %batch, %rows, %cols, %op_r, %row_u, %col_u, %total, %tmp;
     .reg .s32 %row_s, %col_s, %diff, %k_r;
     .reg .u64 %in, %out, %off, %addr;
     .reg .f32 %v, %zero;
@@ -98,6 +109,7 @@ const TRIANGULAR_F32_PTX: &str = "\
 
     ld.param.u64 %in, [in_ptr];
     ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %batch, [batch];
     ld.param.u32 %rows, [rows];
     ld.param.u32 %cols, [cols];
     ld.param.s32 %k_r, [k];
@@ -109,11 +121,13 @@ const TRIANGULAR_F32_PTX: &str = "\
     mad.lo.u32 %gtid, %bid, %bdim, %gtid;
 
     mul.lo.u32 %total, %rows, %cols;
+    mul.lo.u32 %total, %total, %batch;
     setp.ge.u32 %p, %gtid, %total;
     @%p bra DONE;
 
-    div.u32 %row_u, %gtid, %cols;
     rem.u32 %col_u, %gtid, %cols;
+    div.u32 %tmp, %gtid, %cols;
+    rem.u32 %row_u, %tmp, %rows;
     cvt.s32.u32 %row_s, %row_u;
     cvt.s32.u32 %col_s, %col_u;
     sub.s32 %diff, %col_s, %row_s;
@@ -151,9 +165,9 @@ const TRIANGULAR_F64_PTX: &str = "\
 
 .visible .entry triangular_f64_kernel(
     .param .u64 in_ptr, .param .u64 out_ptr,
-    .param .u32 rows, .param .u32 cols, .param .s32 k, .param .u32 op
+    .param .u32 batch, .param .u32 rows, .param .u32 cols, .param .s32 k, .param .u32 op
 ) {
-    .reg .u32 %gtid, %bid, %bdim, %rows, %cols, %op_r, %row_u, %col_u, %total;
+    .reg .u32 %gtid, %bid, %bdim, %batch, %rows, %cols, %op_r, %row_u, %col_u, %total, %tmp;
     .reg .s32 %row_s, %col_s, %diff, %k_r;
     .reg .u64 %in, %out, %off, %addr;
     .reg .f64 %v, %zero;
@@ -161,6 +175,7 @@ const TRIANGULAR_F64_PTX: &str = "\
 
     ld.param.u64 %in, [in_ptr];
     ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %batch, [batch];
     ld.param.u32 %rows, [rows];
     ld.param.u32 %cols, [cols];
     ld.param.s32 %k_r, [k];
@@ -172,11 +187,13 @@ const TRIANGULAR_F64_PTX: &str = "\
     mad.lo.u32 %gtid, %bid, %bdim, %gtid;
 
     mul.lo.u32 %total, %rows, %cols;
+    mul.lo.u32 %total, %total, %batch;
     setp.ge.u32 %p, %gtid, %total;
     @%p bra DONE;
 
-    div.u32 %row_u, %gtid, %cols;
     rem.u32 %col_u, %gtid, %cols;
+    div.u32 %tmp, %gtid, %cols;
+    rem.u32 %row_u, %tmp, %rows;
     cvt.s32.u32 %row_s, %row_u;
     cvt.s32.u32 %col_s, %col_u;
     sub.s32 %diff, %col_s, %row_s;
@@ -205,13 +222,17 @@ DONE:
 
 /// Launch a triangular-mask kernel over a value buffer of element type `V`.
 ///
-/// `in_slice` holds at least `rows * cols` `V`-elements (contiguous,
-/// `[rows, cols]` C-order). `op` is [`OP_TRIU`] or [`OP_TRIL`]; `k` is the
-/// signed diagonal offset. Writes into `out_slice` (also `rows * cols`).
+/// `in_slice` holds at least `batch * rows * cols` `V`-elements (contiguous,
+/// `[batch.., rows, cols]` C-order; `batch` is the product of all leading
+/// dims, `1` for a plain 2-D matrix). The mask is applied to every trailing
+/// `[rows, cols]` matrix (mirrors `TriangularOps.cu:120`). `op` is [`OP_TRIU`]
+/// or [`OP_TRIL`]; `k` is the signed diagonal offset. Writes into `out_slice`
+/// (also `batch * rows * cols`).
 #[allow(clippy::too_many_arguments)]
 fn launch_triangular<V: DeviceRepr + ValidAsZeroBits>(
     in_slice: &CudaSlice<V>,
     out_slice: &mut CudaSlice<V>,
+    batch: usize,
     rows: usize,
     cols: usize,
     k: i64,
@@ -223,6 +244,7 @@ fn launch_triangular<V: DeviceRepr + ValidAsZeroBits>(
 ) -> GpuResult<()> {
     let total = rows
         .checked_mul(cols)
+        .and_then(|mn| mn.checked_mul(batch))
         .ok_or(GpuError::LengthMismatch { a: rows, b: cols })?;
     if total == 0 {
         return Ok(());
@@ -250,15 +272,16 @@ fn launch_triangular<V: DeviceRepr + ValidAsZeroBits>(
     // `k` is the signed diagonal; clamp into i32 range — out-of-range diagonals
     // are degenerate (the whole matrix is kept or zeroed) and i32::MIN/MAX
     // preserve that.
+    let batch_u = batch as u32;
     let rows_u = rows as u32;
     let cols_u = cols as u32;
     let k_i32 = k.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
     let _ = elem_bytes; // documents the per-dtype value stride encoded in the PTX
     // SAFETY:
-    // - `f` is the PTX entry `kernel_name`; its 6-arg signature
-    //   (in_ptr, out_ptr, rows, cols, k, op) matches the args pushed below
-    //   in order.
-    // - `in_slice` holds at least `rows*cols` `V`-elements (checked above).
+    // - `f` is the PTX entry `kernel_name`; its 7-arg signature
+    //   (in_ptr, out_ptr, batch, rows, cols, k, op) matches the args pushed
+    //   below in order.
+    // - `in_slice` holds at least `batch*rows*cols` `V`-elements (checked above).
     // - `out_slice` is the caller's fresh `total`-element buffer, the only
     //   `&mut`, non-aliased with `in_slice` (distinct allocations).
     // - Each thread reads `in[t]` and writes `out[t]` for `t in [0,total)`,
@@ -268,6 +291,7 @@ fn launch_triangular<V: DeviceRepr + ValidAsZeroBits>(
             .launch_builder(&f)
             .arg(in_slice)
             .arg(out_slice)
+            .arg(&batch_u)
             .arg(&rows_u)
             .arg(&cols_u)
             .arg(&k_i32)
@@ -277,18 +301,22 @@ fn launch_triangular<V: DeviceRepr + ValidAsZeroBits>(
     Ok(())
 }
 
-/// `triu` over an f32 `[rows, cols]` buffer. Returns a fresh resident buffer.
+/// `triu` over an f32 `[batch.., rows, cols]` buffer (`batch` = product of the
+/// leading dims, `1` for plain 2-D). Masks each trailing `[rows, cols]` matrix.
+/// Returns a fresh resident buffer of `batch * rows * cols` elements.
 pub fn gpu_triu_f32(
     input: &CudaBuffer<f32>,
+    batch: usize,
     rows: usize,
     cols: usize,
     k: i64,
     device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<f32>> {
-    let mut out = alloc_zeros_f32(rows * cols, device)?;
+    let mut out = alloc_zeros_f32(batch * rows * cols, device)?;
     launch_triangular(
         input.inner(),
         out.inner_mut(),
+        batch,
         rows,
         cols,
         k,
@@ -301,18 +329,21 @@ pub fn gpu_triu_f32(
     Ok(out)
 }
 
-/// `tril` over an f32 `[rows, cols]` buffer. Returns a fresh resident buffer.
+/// `tril` over an f32 `[batch.., rows, cols]` buffer. Masks each trailing
+/// `[rows, cols]` matrix. Returns a fresh resident buffer.
 pub fn gpu_tril_f32(
     input: &CudaBuffer<f32>,
+    batch: usize,
     rows: usize,
     cols: usize,
     k: i64,
     device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<f32>> {
-    let mut out = alloc_zeros_f32(rows * cols, device)?;
+    let mut out = alloc_zeros_f32(batch * rows * cols, device)?;
     launch_triangular(
         input.inner(),
         out.inner_mut(),
+        batch,
         rows,
         cols,
         k,
@@ -325,18 +356,21 @@ pub fn gpu_tril_f32(
     Ok(out)
 }
 
-/// `triu` over an f64 `[rows, cols]` buffer. Returns a fresh resident buffer.
+/// `triu` over an f64 `[batch.., rows, cols]` buffer. Masks each trailing
+/// `[rows, cols]` matrix. Returns a fresh resident buffer.
 pub fn gpu_triu_f64(
     input: &CudaBuffer<f64>,
+    batch: usize,
     rows: usize,
     cols: usize,
     k: i64,
     device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<f64>> {
-    let mut out = alloc_zeros_f64(rows * cols, device)?;
+    let mut out = alloc_zeros_f64(batch * rows * cols, device)?;
     launch_triangular(
         input.inner(),
         out.inner_mut(),
+        batch,
         rows,
         cols,
         k,
@@ -349,18 +383,21 @@ pub fn gpu_triu_f64(
     Ok(out)
 }
 
-/// `tril` over an f64 `[rows, cols]` buffer. Returns a fresh resident buffer.
+/// `tril` over an f64 `[batch.., rows, cols]` buffer. Masks each trailing
+/// `[rows, cols]` matrix. Returns a fresh resident buffer.
 pub fn gpu_tril_f64(
     input: &CudaBuffer<f64>,
+    batch: usize,
     rows: usize,
     cols: usize,
     k: i64,
     device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<f64>> {
-    let mut out = alloc_zeros_f64(rows * cols, device)?;
+    let mut out = alloc_zeros_f64(batch * rows * cols, device)?;
     launch_triangular(
         input.inner(),
         out.inner_mut(),
+        batch,
         rows,
         cols,
         k,
@@ -404,7 +441,7 @@ mod tests {
         // 3x3 matrix 1..9, triu k=0 keeps upper triangle incl. diagonal.
         let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
         let h = cpu_to_gpu(&data, &d).unwrap();
-        let out = gpu_triu_f32(&h, 3, 3, 0, &d).unwrap();
+        let out = gpu_triu_f32(&h, 1, 3, 3, 0, &d).unwrap();
         let got = gpu_to_cpu(&out, &d).unwrap();
         let want = cpu_ref(&data, 3, 3, 0, true);
         assert_eq!(&got[..9], &want[..]);
@@ -417,7 +454,7 @@ mod tests {
         let d = dev();
         let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
         let h = cpu_to_gpu(&data, &d).unwrap();
-        let out = gpu_tril_f32(&h, 3, 3, 0, &d).unwrap();
+        let out = gpu_tril_f32(&h, 1, 3, 3, 0, &d).unwrap();
         let got = gpu_to_cpu(&out, &d).unwrap();
         let want = cpu_ref(&data, 3, 3, 0, false);
         assert_eq!(&got[..9], &want[..]);
@@ -430,7 +467,7 @@ mod tests {
         // k=-1 keeps the sub-diagonal too.
         let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
         let h = cpu_to_gpu(&data, &d).unwrap();
-        let out = gpu_triu_f32(&h, 3, 3, -1, &d).unwrap();
+        let out = gpu_triu_f32(&h, 1, 3, 3, -1, &d).unwrap();
         let got = gpu_to_cpu(&out, &d).unwrap();
         let want = cpu_ref(&data, 3, 3, -1, true);
         assert_eq!(&got[..9], &want[..]);
@@ -443,7 +480,7 @@ mod tests {
         // k=1 keeps the super-diagonal too.
         let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
         let h = cpu_to_gpu(&data, &d).unwrap();
-        let out = gpu_tril_f32(&h, 3, 3, 1, &d).unwrap();
+        let out = gpu_tril_f32(&h, 1, 3, 3, 1, &d).unwrap();
         let got = gpu_to_cpu(&out, &d).unwrap();
         let want = cpu_ref(&data, 3, 3, 1, false);
         assert_eq!(&got[..9], &want[..]);
@@ -456,8 +493,8 @@ mod tests {
         // 2x4 rectangular.
         let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let h = cpu_to_gpu(&data, &d).unwrap();
-        let up = gpu_triu_f32(&h, 2, 4, 0, &d).unwrap();
-        let lo = gpu_tril_f32(&h, 2, 4, 0, &d).unwrap();
+        let up = gpu_triu_f32(&h, 1, 2, 4, 0, &d).unwrap();
+        let lo = gpu_tril_f32(&h, 1, 2, 4, 0, &d).unwrap();
         assert_eq!(
             &gpu_to_cpu(&up, &d).unwrap()[..8],
             &cpu_ref(&data, 2, 4, 0, true)[..]
@@ -473,8 +510,29 @@ mod tests {
         let d = dev();
         let data = vec![1.0f64, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
         let h = cpu_to_gpu(&data, &d).unwrap();
-        let out = gpu_triu_f64(&h, 3, 3, 0, &d).unwrap();
+        let out = gpu_triu_f64(&h, 1, 3, 3, 0, &d).unwrap();
         let got = gpu_to_cpu(&out, &d).unwrap();
         assert_eq!(&got[..9], &[1.0, 2.0, 3.0, 0.0, 5.0, 6.0, 0.0, 0.0, 9.0]);
+    }
+
+    /// Batched: two `[3,3]` matrices (batch=2). The triu mask must apply
+    /// per-matrix, so the row index resets across the batch boundary. Mirrors
+    /// `aten/src/ATen/native/cuda/TriangularOps.cu:120`.
+    #[test]
+    fn triu_f32_batched_two_3x3() {
+        let d = dev();
+        // arange(18) reshaped [2,3,3].
+        let data: Vec<f32> = (0..18).map(|i| i as f32).collect();
+        let h = cpu_to_gpu(&data, &d).unwrap();
+        let out = gpu_triu_f32(&h, 2, 3, 3, 0, &d).unwrap();
+        let got = gpu_to_cpu(&out, &d).unwrap();
+        // torch.triu(arange(18).reshape(2,3,3), 0).flatten()
+        assert_eq!(
+            &got[..18],
+            &[
+                0.0f32, 1.0, 2.0, 0.0, 4.0, 5.0, 0.0, 0.0, 8.0, // matrix 0
+                9.0, 10.0, 11.0, 0.0, 13.0, 14.0, 0.0, 0.0, 17.0, // matrix 1
+            ]
+        );
     }
 }

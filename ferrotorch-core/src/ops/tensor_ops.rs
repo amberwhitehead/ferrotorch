@@ -36,12 +36,16 @@ fn is_f64<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<f64>()
 }
 
-/// Upper triangular part of a 2-D tensor.
+/// Upper triangular part of a tensor with at least 2 dimensions.
 ///
 /// Elements below the `diagonal`-th diagonal are set to zero.
 /// `diagonal=0` is the main diagonal, `diagonal>0` is above, `diagonal<0` is below.
 ///
-/// Matches PyTorch's `torch.triu`.
+/// For an N-D tensor (`ndim >= 2`) the mask is applied to the LAST TWO DIMS of
+/// every trailing `[rows, cols]` matrix, batching over all leading dims, so the
+/// output shape equals the input shape. Mirrors PyTorch's `torch.triu`
+/// (`aten/src/ATen/native/TriangularOps.cpp:31` requires `dim() >= 2`; the CUDA
+/// template batches via `cuda/TriangularOps.cu:120`).
 ///
 /// # Backward
 /// Autograd-aware (CPU): when grad tracking is active for `input`, this routes
@@ -49,9 +53,12 @@ fn is_f64<T: Float>() -> bool {
 /// upstream gradient by the kept upper triangle, per `triu -> grad.triu_symint`
 /// at upstream `tools/autograd/derivatives.yaml:1809`).
 pub fn triu<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tensor<T>> {
-    if input.ndim() != 2 {
+    if input.ndim() < 2 {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!("triu: expected 2-D tensor, got shape {:?}", input.shape()),
+            message: format!(
+                "triu: input tensor must have at least 2 dimensions, got shape {:?}",
+                input.shape()
+            ),
         });
     }
     // Autograd path: delegate to the differentiable wrapper, which computes
@@ -63,26 +70,31 @@ pub fn triu<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
         return crate::grad_fns::linalg::triu_differentiable(input, diagonal);
     }
 
-    let rows = input.shape()[0];
-    let cols = input.shape()[1];
+    // Trailing two dims are the matrix; all leading dims are batched (mirrors
+    // `aten/src/ATen/native/cuda/TriangularOps.cu:120`).
+    let shape = input.shape();
+    let ndim = shape.len();
+    let rows = shape[ndim - 2];
+    let cols = shape[ndim - 1];
+    let batch: usize = shape[..ndim - 2].iter().product();
 
     // GPU fast path: f32/f64 resident kernel (crosslink #1545 / sub #1535).
     // One thread per element; predicate `col - row >= diagonal` mirrors
-    // `aten/src/ATen/native/cuda/TriangularOps.cu:100`. Result stays
-    // GPU-resident — NO host round-trip. Other GPU dtypes keep the
-    // `NotImplementedOnCuda` contract used by the rest of `tensor_ops`.
+    // `aten/src/ATen/native/cuda/TriangularOps.cu:100`, batched per trailing
+    // `[rows, cols]` matrix per `:120`. Result stays GPU-resident — NO host
+    // round-trip. Other GPU dtypes keep the `NotImplementedOnCuda` contract.
     if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
             let handle = if is_f32::<T>() {
-                Some(backend.triu_f32(input.gpu_handle()?, rows, cols, diagonal)?)
+                Some(backend.triu_f32(input.gpu_handle()?, batch, rows, cols, diagonal)?)
             } else if is_f64::<T>() {
-                Some(backend.triu_f64(input.gpu_handle()?, rows, cols, diagonal)?)
+                Some(backend.triu_f64(input.gpu_handle()?, batch, rows, cols, diagonal)?)
             } else {
                 None
             };
             if let Some(handle) = handle {
                 let storage = TensorStorage::gpu(handle);
-                return Tensor::from_storage(storage, vec![rows, cols], false);
+                return Tensor::from_storage(storage, shape.to_vec(), false);
             }
         }
         return Err(FerrotorchError::NotImplementedOnCuda { op: "triu" });
@@ -91,25 +103,33 @@ pub fn triu<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     let data = input.data()?;
     let zero = <T as num_traits::Zero>::zero();
 
-    let mut out = Vec::with_capacity(rows * cols);
-    for r in 0..rows {
-        for c in 0..cols {
-            if (c as i64) >= (r as i64) + diagonal {
-                out.push(data[r * cols + c]);
-            } else {
-                out.push(zero);
+    let matrix = rows * cols;
+    let mut out = Vec::with_capacity(batch * matrix);
+    for b in 0..batch {
+        let base = b * matrix;
+        for r in 0..rows {
+            for c in 0..cols {
+                if (c as i64) >= (r as i64) + diagonal {
+                    out.push(data[base + r * cols + c]);
+                } else {
+                    out.push(zero);
+                }
             }
         }
     }
 
-    Tensor::from_storage(TensorStorage::cpu(out), vec![rows, cols], false)
+    Tensor::from_storage(TensorStorage::cpu(out), shape.to_vec(), false)
 }
 
-/// Lower triangular part of a 2-D tensor.
+/// Lower triangular part of a tensor with at least 2 dimensions.
 ///
 /// Elements above the `diagonal`-th diagonal are set to zero.
 ///
-/// Matches PyTorch's `torch.tril`.
+/// For an N-D tensor (`ndim >= 2`) the mask is applied to the LAST TWO DIMS of
+/// every trailing `[rows, cols]` matrix, batching over all leading dims.
+/// Mirrors PyTorch's `torch.tril` (`aten/src/ATen/native/TriangularOps.cpp:25`
+/// requires `dim() >= 2`; the CUDA template batches via
+/// `cuda/TriangularOps.cu:120`).
 ///
 /// # Backward
 /// Autograd-aware (CPU): when grad tracking is active for `input`, this routes
@@ -117,9 +137,12 @@ pub fn triu<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
 /// upstream gradient by the kept lower triangle, per `tril -> grad.tril_symint`
 /// at upstream `tools/autograd/derivatives.yaml:1805`).
 pub fn tril<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tensor<T>> {
-    if input.ndim() != 2 {
+    if input.ndim() < 2 {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!("tril: expected 2-D tensor, got shape {:?}", input.shape()),
+            message: format!(
+                "tril: input tensor must have at least 2 dimensions, got shape {:?}",
+                input.shape()
+            ),
         });
     }
     // Autograd path: delegate to the differentiable wrapper, which computes
@@ -130,25 +153,31 @@ pub fn tril<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
         return crate::grad_fns::linalg::tril_differentiable(input, diagonal);
     }
 
-    let rows = input.shape()[0];
-    let cols = input.shape()[1];
+    // Trailing two dims are the matrix; all leading dims are batched (mirrors
+    // `aten/src/ATen/native/cuda/TriangularOps.cu:120`).
+    let shape = input.shape();
+    let ndim = shape.len();
+    let rows = shape[ndim - 2];
+    let cols = shape[ndim - 1];
+    let batch: usize = shape[..ndim - 2].iter().product();
 
     // GPU fast path: f32/f64 resident kernel (crosslink #1545 / sub #1535).
     // Predicate `col - row <= diagonal` mirrors
-    // `aten/src/ATen/native/cuda/TriangularOps.cu:100`. Result stays
-    // GPU-resident — NO host round-trip.
+    // `aten/src/ATen/native/cuda/TriangularOps.cu:100`, batched per trailing
+    // `[rows, cols]` matrix per `:120`. Result stays GPU-resident — NO host
+    // round-trip.
     if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
             let handle = if is_f32::<T>() {
-                Some(backend.tril_f32(input.gpu_handle()?, rows, cols, diagonal)?)
+                Some(backend.tril_f32(input.gpu_handle()?, batch, rows, cols, diagonal)?)
             } else if is_f64::<T>() {
-                Some(backend.tril_f64(input.gpu_handle()?, rows, cols, diagonal)?)
+                Some(backend.tril_f64(input.gpu_handle()?, batch, rows, cols, diagonal)?)
             } else {
                 None
             };
             if let Some(handle) = handle {
                 let storage = TensorStorage::gpu(handle);
-                return Tensor::from_storage(storage, vec![rows, cols], false);
+                return Tensor::from_storage(storage, shape.to_vec(), false);
             }
         }
         return Err(FerrotorchError::NotImplementedOnCuda { op: "tril" });
@@ -157,18 +186,22 @@ pub fn tril<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     let data = input.data()?;
     let zero = <T as num_traits::Zero>::zero();
 
-    let mut out = Vec::with_capacity(rows * cols);
-    for r in 0..rows {
-        for c in 0..cols {
-            if (c as i64) <= (r as i64) + diagonal {
-                out.push(data[r * cols + c]);
-            } else {
-                out.push(zero);
+    let matrix = rows * cols;
+    let mut out = Vec::with_capacity(batch * matrix);
+    for b in 0..batch {
+        let base = b * matrix;
+        for r in 0..rows {
+            for c in 0..cols {
+                if (c as i64) <= (r as i64) + diagonal {
+                    out.push(data[base + r * cols + c]);
+                } else {
+                    out.push(zero);
+                }
             }
         }
     }
 
-    Tensor::from_storage(TensorStorage::cpu(out), vec![rows, cols], false)
+    Tensor::from_storage(TensorStorage::cpu(out), shape.to_vec(), false)
 }
 
 /// Extract the diagonal of a 2-D tensor, or construct a 2-D diagonal matrix
@@ -516,6 +549,56 @@ mod tests {
             result.data().unwrap(),
             &[0.0, 2.0, 3.0, 0.0, 0.0, 6.0, 0.0, 0.0, 0.0]
         );
+    }
+
+    /// Batched N-D triu (CPU): the upper-triangular mask is applied per
+    /// trailing `[3,3]` matrix over a `[2,2,3,3]` tensor, batching over the two
+    /// leading dims. Mirrors `torch.triu` (`TriangularOps.cpp:31` `dim() >= 2`,
+    /// batched per `cuda/TriangularOps.cu:120`). Expected vector from LIVE
+    /// torch: `torch.triu(arange(36).reshape(2,2,3,3), 0).flatten()`.
+    #[test]
+    fn test_triu_batched_4d_cpu() {
+        let data: Vec<f32> = (0..36).map(|i| i as f32).collect();
+        let input =
+            Tensor::from_storage(TensorStorage::cpu(data), vec![2, 2, 3, 3], false).unwrap();
+        let result = triu(&input, 0).unwrap();
+        assert_eq!(result.shape(), &[2, 2, 3, 3]);
+        assert_eq!(
+            result.data().unwrap(),
+            &[
+                0.0, 1.0, 2.0, 0.0, 4.0, 5.0, 0.0, 0.0, 8.0, // batch [0,0]
+                9.0, 10.0, 11.0, 0.0, 13.0, 14.0, 0.0, 0.0, 17.0, // batch [0,1]
+                18.0, 19.0, 20.0, 0.0, 22.0, 23.0, 0.0, 0.0, 26.0, // batch [1,0]
+                27.0, 28.0, 29.0, 0.0, 31.0, 32.0, 0.0, 0.0, 35.0, // batch [1,1]
+            ]
+        );
+    }
+
+    /// Batched N-D tril (CPU): lower-triangular mask per trailing `[3,3]`
+    /// matrix over a `[2,3,3]` tensor. Expected from LIVE torch:
+    /// `torch.tril(arange(18).reshape(2,3,3), 0).flatten()`.
+    #[test]
+    fn test_tril_batched_3d_cpu() {
+        let data: Vec<f32> = (0..18).map(|i| i as f32).collect();
+        let input = Tensor::from_storage(TensorStorage::cpu(data), vec![2, 3, 3], false).unwrap();
+        let result = tril(&input, 0).unwrap();
+        assert_eq!(result.shape(), &[2, 3, 3]);
+        assert_eq!(
+            result.data().unwrap(),
+            &[
+                0.0, 0.0, 0.0, 3.0, 4.0, 0.0, 6.0, 7.0, 8.0, // batch 0
+                9.0, 0.0, 0.0, 12.0, 13.0, 0.0, 15.0, 16.0, 17.0, // batch 1
+            ]
+        );
+    }
+
+    /// `triu`/`tril` reject sub-2-D input (mirrors `TriangularOps.cpp:25,31`
+    /// `TORCH_CHECK(self.dim() >= 2, ...)`).
+    #[test]
+    fn test_triu_tril_reject_1d() {
+        let input = t1d(&[1.0, 2.0, 3.0]);
+        assert!(triu(&input, 0).is_err());
+        assert!(tril(&input, 0).is_err());
     }
 
     #[test]
