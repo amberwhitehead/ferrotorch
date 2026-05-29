@@ -1,42 +1,43 @@
-//! Adversarial re-audit of #1668 (commit 3dfb173b6): the single-span S3
-//! symbol-anchor validator added to
+//! Re-audit of #1668 (commit 3dfb173b6) + verification of the #1669 fix
+//! (completes #1668): the single-span S3 symbol-anchor validator in
 //! `ferrotorch-core/tests/divergence_cite_drift_generic.rs`
 //! (`all_design_docs_single_span_anchors_resolve_at_head`,
 //! `parse_symbol_anchors`, `resolve_symbol_anchor_files`,
 //! `anchor_symbol_declared`).
 //!
-//! The builder reported 1070 anchors parsed, ALL valid, 0 stale, 0
-//! unresolvable. This file pins TWO real flaws in that validator that the
-//! green report masks:
+//! #1668 reported 1070 anchors parsed, ALL valid, 0 stale, 0 unresolvable.
+//! That green report masked TWO real flaws, both now FIXED by #1669; these
+//! tests assert the FIXED properties hold (they were `#[ignore]`'d failing
+//! pins under #1668, un-ignored here as permanent regression coverage):
 //!
-//!   1. RESOLVER SOUNDNESS HOLE (bare-basename cross-crate false-accept).
-//!      The shipped `resolve_symbol_anchor_files` resolves a bare basename
+//!   1. RESOLVER SOUNDNESS HOLE — FIXED by crate-disambiguation.
+//!      #1668's `resolve_symbol_anchor_files` resolved a bare basename
 //!      (e.g. `lib.rs`) to ALL files of that basename across EVERY crate, and
-//!      `validate_symbol_anchor` accepts the anchor if the symbol is declared
-//!      in ANY candidate. So an anchor whose INTENDED file does not declare
-//!      the symbol still passes when a DIFFERENT crate's same-basename file
-//!      happens to declare it — masking genuine drift.
-//!      (cite: the resolver, divergence_cite_drift_generic.rs:1526-1562; the
-//!      "found in ANY candidate" rule, :1639-1645.)
+//!      accepted the anchor if the symbol was declared in ANY candidate — so
+//!      an anchor in `.design/ferrotorch-rl/...` saying `mod tests in lib.rs`
+//!      passed because `ferrotorch-mps/src/lib.rs` has `mod tests`, even
+//!      though `ferrotorch-rl/src/lib.rs` does not.
+//!      #1669 binds a bare-basename anchor to the DOC'S OWN CRATE
+//!      (`.design/<crate>/...` -> `<crate>/src/`): the anchor is validated
+//!      against the crate-local same-basename file, so the cross-crate
+//!      sibling can no longer mask drift. This test reproduces the
+//!      crate-disambiguating resolver and asserts the masking is GONE.
 //!
-//!   2. FALSE-NEGATIVE COVERAGE GAP. The parser
-//!      (`parse_decl`, divergence_cite_drift_generic.rs:1310-1354) only matches
-//!      keyword-led decls and `Type::method` assoc-fns; it explicitly drops the
-//!      bare `<lowercase_sym> in <file>.rs` form (:1347-1353,
-//!      "No keyword: ... Anything else ... is NOT a declaration"). Those bare
-//!      forms are the DOMINANT corpus shape and are overwhelmingly GENUINE
-//!      symbol anchors (e.g. `` `abs in complex_tensor.rs` ``,
-//!      `` `addcmul_t in methods.rs` ``) that now rot unvalidated.
+//!   2. FALSE-NEGATIVE COVERAGE GAP — FIXED by the bare-ident matcher.
+//!      #1668's parser only matched keyword-led decls and `Type::method`
+//!      assoc-fns, dropping the bare `<lowercase_sym> in <file>.rs` form (the
+//!      DOMINANT corpus shape, overwhelmingly GENUINE symbol anchors). #1669
+//!      extends the parser to match a bare single snake_case identifier and
+//!      validate it against a real declaration OR a `pub use` re-export. This
+//!      test asserts those genuine bare anchors ARE now validated.
 //!
-//! Both tests are written against the REAL workspace source tree and real
-//! `.design/` corpus. The expected values are grep-derived ground truth about
-//! actual declarations (R-CHAR-3(b)), never literal-copied from the ferrotorch
-//! validator's output.
+//! Both tests run against the REAL workspace source tree and real `.design/`
+//! corpus. Expected values are grep-derived ground truth about actual
+//! declarations (R-CHAR-3(b)), never literal-copied from the validator output.
 //!
-//! These tests reproduce the EXACT documented resolver rule from #1668 (a bare
-//! basename resolves to all same-basename files; valid iff declared in any),
-//! because the production helpers are private to the cite-drift test crate
-//! file. Each reproduction is annotated with the upstream line it mirrors.
+//! The resolver/validator reproductions below mirror the production helpers in
+//! `divergence_cite_drift_generic.rs` (which are private to that test crate),
+//! INCLUDING the #1669 crate-disambiguation and bare-ident validation.
 
 #![allow(clippy::missing_panics_doc)]
 
@@ -96,15 +97,19 @@ fn build_src_index(root: &Path) -> HashMap<String, Vec<PathBuf>> {
     index
 }
 
-/// Faithful reproduction of `resolve_symbol_anchor_files`
-/// (divergence_cite_drift_generic.rs:1526-1562): a bare basename resolves to
-/// ALL files of that basename anywhere in the workspace.
-fn resolve_symbol_anchor_files(
+/// Reproduction of the #1668 (PRE-#1669) `resolve_symbol_anchor_files`: a bare
+/// basename resolves to ALL files of that basename anywhere in the workspace,
+/// with NO crate disambiguation. Retained to demonstrate the masking
+/// precondition the #1669 fix removes.
+fn resolve_symbol_anchor_files_pre1669(
     index: &HashMap<String, Vec<PathBuf>>,
     root: &Path,
     file_as_written: &str,
 ) -> Vec<PathBuf> {
-    let basename = file_as_written.rsplit('/').next().unwrap_or(file_as_written);
+    let basename = file_as_written
+        .rsplit('/')
+        .next()
+        .unwrap_or(file_as_written);
     let all = match index.get(basename) {
         Some(v) => v,
         None => return Vec::new(),
@@ -124,6 +129,70 @@ fn resolve_symbol_anchor_files(
         }
         matches
     } else {
+        all.clone()
+    }
+}
+
+/// Map a design-doc's workspace-relative label to its crate's `src/` dir.
+/// Mirrors `doc_crate_src_dir` in `divergence_cite_drift_generic.rs` (#1669).
+fn doc_crate_src_dir(root: &Path, doc_label: &str) -> Option<PathBuf> {
+    let rel = doc_label.replace('\\', "/");
+    let after = rel.strip_prefix(".design/")?;
+    let first = after.split('/').next()?;
+    if first.is_empty() || !first.starts_with("ferrotorch") {
+        return None;
+    }
+    let src = root.join(first).join("src");
+    if src.is_dir() {
+        Some(src)
+    } else {
+        None
+    }
+}
+
+/// Faithful reproduction of the #1669 crate-disambiguating
+/// `resolve_symbol_anchor_files`: a bare basename binds PREFERENTIALLY to the
+/// doc-crate's same-basename file; only when the doc-crate has no such file
+/// (or the doc maps to no crate) does it fall back to the cross-crate set.
+fn resolve_symbol_anchor_files(
+    index: &HashMap<String, Vec<PathBuf>>,
+    root: &Path,
+    doc_label: &str,
+    file_as_written: &str,
+) -> Vec<PathBuf> {
+    let basename = file_as_written
+        .rsplit('/')
+        .next()
+        .unwrap_or(file_as_written);
+    let all = match index.get(basename) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    if file_as_written.contains('/') {
+        let mut matches: Vec<PathBuf> = all
+            .iter()
+            .filter(|p| {
+                let rel = p.strip_prefix(root).unwrap_or(p);
+                let rel_s = rel.to_string_lossy().replace('\\', "/");
+                rel_s.ends_with(file_as_written)
+            })
+            .cloned()
+            .collect();
+        if matches.is_empty() {
+            matches = all.clone();
+        }
+        matches
+    } else {
+        if let Some(crate_src) = doc_crate_src_dir(root, doc_label) {
+            let crate_local: Vec<PathBuf> = all
+                .iter()
+                .filter(|p| p.starts_with(&crate_src))
+                .cloned()
+                .collect();
+            if !crate_local.is_empty() {
+                return crate_local;
+            }
+        }
         all.clone()
     }
 }
@@ -162,103 +231,172 @@ fn fn_declared(src: &str, ident: &str) -> bool {
     })
 }
 
+/// Reproduction of the #1669 `DeclKind::BareIdent` arm of
+/// `anchor_symbol_declared`: a bare ident is declared if the file has any of
+/// `fn`/`struct`/`enum`/`trait`/`mod`/`const`/`static`/`type`/`macro_rules!`
+/// `<ident>` (word-boundary aware) OR a `pub use`/`use` re-export line that
+/// references `<ident>` as a whole path segment.
+fn bare_ident_declared(src: &str, ident: &str) -> bool {
+    let needles = [
+        format!("fn {ident}"),
+        format!("struct {ident}"),
+        format!("enum {ident}"),
+        format!("trait {ident}"),
+        format!("mod {ident}"),
+        format!("const {ident}"),
+        format!("static {ident}"),
+        format!("type {ident}"),
+        format!("macro_rules! {ident}"),
+    ];
+    let decl = src.lines().any(|line| {
+        needles
+            .iter()
+            .any(|needle| match line.find(needle.as_str()) {
+                Some(idx) => match line[idx + needle.len()..].chars().next() {
+                    None => true,
+                    Some(c) => !(c.is_ascii_alphanumeric() || c == '_'),
+                },
+                None => false,
+            })
+    });
+    if decl {
+        return true;
+    }
+    src.lines().any(|line| {
+        let t = line.trim_start();
+        (t.starts_with("pub use ") || t.starts_with("use ")) && line_has_path_segment(line, ident)
+    })
+}
+
+/// Word-boundary path-segment match, mirroring `line_has_path_segment` in
+/// `divergence_cite_drift_generic.rs` (#1669).
+fn line_has_path_segment(line: &str, ident: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = line[from..].find(ident) {
+        let idx = from + rel;
+        let before_ok = idx == 0 || {
+            let c = line[..idx].chars().next_back().unwrap_or(' ');
+            !(c.is_ascii_alphanumeric() || c == '_')
+        };
+        let after_idx = idx + ident.len();
+        let after_ok = after_idx >= bytes.len() || {
+            let c = line[after_idx..].chars().next().unwrap_or(' ');
+            !(c.is_ascii_alphanumeric() || c == '_')
+        };
+        if before_ok && after_ok {
+            return true;
+        }
+        from = idx + ident.len();
+    }
+    false
+}
+
 // ===========================================================================
 // FINDING 1 — RESOLVER SOUNDNESS HOLE (bare-basename cross-crate false-accept)
 // ===========================================================================
 
-/// Divergence: #1668's `validate_symbol_anchor`
-/// (`divergence_cite_drift_generic.rs:1639-1645`, "found in ANY candidate")
-/// green-lights a single-span anchor `` `mod tests in lib.rs` `` whose INTENDED
-/// crate file does NOT declare the symbol, because a DIFFERENT crate's
-/// same-basename `lib.rs` does. A genuinely-stale anchor passes — the validator
-/// cannot detect drift in any anchor that names a basename present in >= 2
-/// crates (`lib.rs` x201, `mod.rs` x90, `error.rs` x41, ...).
+/// #1669 FIX VERIFICATION (was #1668 soundness-hole pin): the
+/// crate-disambiguating `resolve_symbol_anchor_files` binds a bare-basename
+/// anchor to the DOC'S OWN CRATE, so a cross-crate sibling can no longer mask
+/// drift. Concretely: an anchor `` `mod tests in lib.rs` `` found in a
+/// `.design/ferrotorch-rl/...` doc resolves to `ferrotorch-rl/src/lib.rs`
+/// ONLY — which does NOT declare `mod tests` — so the validator now reports it
+/// STALE, even though `ferrotorch-mps/src/lib.rs` (a sibling) does declare it.
 ///
 /// GROUND TRUTH (grep-verified, R-CHAR-3(b)):
 ///   - `mod tests` IS declared in `ferrotorch-mps/src/lib.rs` (sibling).
-///   - `mod tests` is NOT declared in `ferrotorch-rl/src/lib.rs` (intended).
-/// So an anchor intending ferrotorch-rl's lib.rs is STALE-relative-to-intent
-/// yet the shipped resolver returns Valid.
+///   - `mod tests` is NOT declared in `ferrotorch-rl/src/lib.rs` (doc-crate).
 ///
-/// This test asserts the SOUND property the validator should hold: a bare
-/// basename anchor must be validatable against the INTENDED file, not merely
-/// "some file of that name somewhere". It FAILS because the shipped resolver
-/// returns a candidate list that includes a sibling crate whose declaration
-/// masks the intended file's absence.
-/// Tracking: #1669 (blocker).
+/// The test FIRST demonstrates the #1668 masking precondition (the pre-#1669
+/// resolver returns a candidate set spanning multiple crates, and the
+/// any-candidate rule would call it Valid), THEN asserts the #1669 resolver
+/// closes it (doc-crate-local candidate set, validator reports STALE).
 #[test]
-#[ignore = "divergence: #1668 resolver soundness hole — bare-basename cross-crate false-accept masks drift; tracking #1669"]
 fn divergence_bare_basename_resolver_false_accepts_cross_crate_sibling() {
     let root = workspace_root();
     let index = build_src_index(&root);
 
-    // The anchor as it appears (parsed) in the corpus: `mod tests in lib.rs`.
-    // (Real occurrence: `mod tests in lib.rs` is in the #1668-parsed universe.)
     let file_as_written = "lib.rs";
     let ident = "tests";
+    // The doc the anchor lives in determines the crate it's validated against.
+    let doc_label = ".design/ferrotorch-rl/lib.md";
 
-    // Resolve exactly as #1668 does: every lib.rs in the workspace.
-    let candidates = resolve_symbol_anchor_files(&index, &root, file_as_written);
+    // --- #1668 masking PRECONDITION (pre-#1669 resolver) -------------------
+    // The old resolver returns every lib.rs in the workspace; among them some
+    // declare `mod tests` and some do not — exactly the masking condition.
+    let pre = resolve_symbol_anchor_files_pre1669(&index, &root, file_as_written);
     assert!(
-        candidates.len() > 1,
-        "expected `lib.rs` to be a multi-crate basename (the collision precondition); \
-         got {} candidate(s)",
-        candidates.len()
+        pre.len() > 1,
+        "expected `lib.rs` to be a multi-crate basename (collision precondition); got {}",
+        pre.len()
+    );
+    let any_declares = pre.iter().any(|p| {
+        fs::read_to_string(p)
+            .map(|s| mod_declared(&s, ident))
+            .unwrap_or(false)
+    });
+    let any_lacks = pre.iter().any(|p| {
+        fs::read_to_string(p)
+            .map(|s| !mod_declared(&s, ident))
+            .unwrap_or(true)
+    });
+    assert!(
+        any_declares && any_lacks,
+        "expected SOME lib.rs to declare `mod {ident}` and SOME to NOT — the masking precondition"
+    );
+    // Under the old any-candidate rule this anchor would be Valid (a sibling
+    // declares the symbol), masking the doc-crate's absence — the bug.
+    assert!(
+        any_declares,
+        "pre-#1669 any-candidate rule would (incorrectly) accept `mod {ident} in lib.rs`"
     );
 
-    // Ground truth: at least one sibling lib.rs declares `mod tests`, and at
-    // least one OTHER lib.rs does not. This is precisely the masking condition.
-    let declaring: Vec<&PathBuf> = candidates
-        .iter()
-        .filter(|p| fs::read_to_string(p).map(|s| mod_declared(&s, ident)).unwrap_or(false))
-        .collect();
-    let not_declaring: Vec<&PathBuf> = candidates
-        .iter()
-        .filter(|p| fs::read_to_string(p).map(|s| !mod_declared(&s, ident)).unwrap_or(false))
-        .collect();
+    // --- Ground-truth file facts ------------------------------------------
+    let rl_lib = root.join("ferrotorch-rl/src/lib.rs");
+    assert!(rl_lib.exists(), "fixture: {} must exist", rl_lib.display());
     assert!(
-        !declaring.is_empty() && !not_declaring.is_empty(),
-        "expected SOME lib.rs to declare `mod {ident}` and SOME to NOT — the \
-         masking precondition. declaring={declaring:?} not_declaring(len)={}",
-        not_declaring.len()
+        !mod_declared(&fs::read_to_string(&rl_lib).unwrap(), ident),
+        "ground truth: ferrotorch-rl/src/lib.rs must NOT declare `mod {ident}`"
+    );
+    let mps_lib = root.join("ferrotorch-mps/src/lib.rs");
+    assert!(
+        mod_declared(&fs::read_to_string(&mps_lib).unwrap(), ident),
+        "ground truth: ferrotorch-mps/src/lib.rs MUST declare `mod {ident}` (the masking sibling)"
     );
 
-    // The shipped validator's verdict: Valid (declared in ANY candidate).
-    let shipped_validator_says_valid = candidates
-        .iter()
-        .any(|p| fs::read_to_string(p).map(|s| mod_declared(&s, ident)).unwrap_or(false));
-
-    // Now model an anchor that INTENDED a specific crate whose lib.rs lacks
-    // the symbol (ferrotorch-rl). A sound validator must report this intended
-    // anchor as drift; #1668's any-candidate rule reports Valid.
-    let intended = root.join("ferrotorch-rl/src/lib.rs");
-    let intended_declares = fs::read_to_string(&intended)
-        .map(|s| mod_declared(&s, ident))
-        .unwrap_or(false);
-    assert!(
-        intended.exists(),
-        "test fixture precondition: {} must exist",
-        intended.display()
+    // --- #1669 FIX: crate-disambiguating resolver -------------------------
+    // The anchor in a ferrotorch-rl doc resolves to ferrotorch-rl's lib.rs
+    // ONLY — the cross-crate mps sibling is excluded.
+    let post = resolve_symbol_anchor_files(&index, &root, doc_label, file_as_written);
+    assert_eq!(
+        post.len(),
+        1,
+        "expected crate-disambiguation to bind to exactly ferrotorch-rl/src/lib.rs, got {post:?}"
+    );
+    assert_eq!(
+        post[0], rl_lib,
+        "expected the sole candidate to be the doc-crate's lib.rs"
     );
     assert!(
-        !intended_declares,
-        "ground-truth precondition: ferrotorch-rl/src/lib.rs must NOT declare `mod {ident}`"
+        !post.contains(&mps_lib),
+        "the masking sibling ferrotorch-mps/src/lib.rs must NOT be a candidate"
     );
 
-    // SOUNDNESS ASSERTION (FAILS under #1668): a validator that cannot be
-    // fooled by a cross-crate sibling would NOT call this Valid when the
-    // intended file lacks the symbol. The shipped any-candidate rule does.
+    // SOUNDNESS ASSERTION (now PASSES under #1669): the validator, restricted
+    // to the doc-crate candidate, finds the symbol absent -> STALE. The
+    // cross-crate sibling can no longer mask the drift.
+    let post_says_valid = post.iter().any(|p| {
+        fs::read_to_string(p)
+            .map(|s| mod_declared(&s, ident))
+            .unwrap_or(false)
+    });
     assert!(
-        !shipped_validator_says_valid,
-        "RESOLVER SOUNDNESS HOLE (#1668): the single-span validator green-lights \
-         `mod {ident} in {file_as_written}` because a SIBLING crate's lib.rs \
-         declares it, even though the intended file \
-         ferrotorch-rl/src/lib.rs does NOT. Drift in any anchor naming a \
-         multi-crate basename ({} lib.rs candidates here) is undetectable. \
-         A sound validator must bind the anchor to its intended file (e.g. \
-         require a crate-qualified path, or fail on multi-candidate basenames \
-         where not all candidates agree).",
-        candidates.len(),
+        !post_says_valid,
+        "RESOLVER SOUNDNESS (#1669 fix): a bare-basename anchor in a \
+         .design/ferrotorch-rl doc must be validated against \
+         ferrotorch-rl/src/lib.rs (which lacks `mod {ident}`) and reported \
+         STALE — NOT accepted because a sibling crate's lib.rs declares it."
     );
 }
 
@@ -266,90 +404,119 @@ fn divergence_bare_basename_resolver_false_accepts_cross_crate_sibling() {
 // FINDING 2 — FALSE-NEGATIVE COVERAGE GAP (bare-lowercase anchors unvalidated)
 // ===========================================================================
 
-/// Divergence: #1668's parser (`parse_decl`,
-/// `divergence_cite_drift_generic.rs:1347-1353`) drops the bare
-/// `<lowercase_sym> in <file>.rs` form ("No keyword: only accept the bare
-/// `<Type>::<method>` ... Anything else ... is NOT a declaration"). The builder
-/// reports 1070 parsed, but the non-upstream `` `<x> in <file>.rs` `` corpus is
-/// ~3879 spans — the bare forms are the dominant remainder and are
-/// OVERWHELMINGLY genuine symbol anchors, not prose. They now rot unvalidated:
-/// a renamed `abs`, `accuracy_score`, `addcmul_t`, `add_f32` etc. behind a bare
-/// anchor passes silently. #1668 closes only ~1/3 of the hole it claims.
+/// #1669 FIX VERIFICATION (was #1668 coverage-gap pin): the parser now matches
+/// the bare `<lowercase_sym> in <file>.rs` form (`DeclKind::BareIdent`) and the
+/// validator resolves it against a real declaration OR a `pub use` re-export.
+/// #1668 dropped this form entirely ("No keyword: ... is NOT a declaration"),
+/// leaving the dominant anchor family unvalidated; #1669 closes that.
 ///
 /// GROUND TRUTH (grep-verified, R-CHAR-3(b)): each sampled bare anchor's symbol
-/// IS a real declaration in a file of the named basename — proving the form is
-/// a GENUINE anchor that SHOULD be validated, not prose to be safely skipped.
-///
-/// This test FAILS by asserting that the genuine-anchor share of the excluded
-/// bare forms is small (i.e. that exclusion is safe). It is not: the share is
-/// high, so the assertion that "the excluded forms are mostly prose" is false.
-/// Tracking: #1669 (blocker).
+/// IS a real declaration (or re-export) in a file of the named basename under
+/// the doc's crate — so the form is a GENUINE anchor that MUST be validated,
+/// not prose to be skipped. This test asserts ALL of them now VALIDATE through
+/// the #1669 bare-ident matcher + crate-disambiguating resolver + bare-ident
+/// validator (a renamed symbol behind such an anchor would now be caught).
 #[test]
-#[ignore = "divergence: #1668 false-negative coverage gap — bare-lowercase anchors (~2/3 of corpus) unvalidated; tracking #1669"]
 fn divergence_bare_lowercase_anchors_are_genuine_and_unvalidated() {
     let root = workspace_root();
     let index = build_src_index(&root);
 
     // A grep-derived sample of bare `<lowercase_sym> in <file>.rs` corpus spans
-    // that #1668's parser EXCLUDES (no kw, no `Type::method`). Each pair is the
-    // (symbol, file-as-written) exactly as it appears in `.design/`.
-    let sampled_bare_anchors: &[(&str, &str)] = &[
-        ("abs", "ferrotorch-core/src/complex_tensor.rs"),
-        ("accuracy_score", "ferrotorch-ml/src/metrics.rs"),
-        ("activation", "ferrotorch-nn/src/lib.rs"),
-        ("adamw", "ferrotorch-optim/src/lib.rs"),
-        ("addcmul_t", "methods.rs"),
-        ("addcdiv_t", "methods.rs"),
-        ("add_f32", "backend_impl.rs"),
-        ("add_f64", "backend_impl.rs"),
-        ("add", "grad_fns/arithmetic.rs"),
-        ("align_to", "ferrotorch-core/src/named_tensor.rs"),
+    // #1668 EXCLUDED (no kw, no `Type::method`). Each tuple is
+    // (symbol, file-as-written, doc-crate-label) — the doc label drives the
+    // #1669 crate-disambiguation for bare basenames.
+    let sampled_bare_anchors: &[(&str, &str, &str)] = &[
+        (
+            "abs",
+            "ferrotorch-core/src/complex_tensor.rs",
+            ".design/ferrotorch-core/complex_tensor.md",
+        ),
+        (
+            "accuracy_score",
+            "ferrotorch-ml/src/metrics.rs",
+            ".design/ferrotorch-ml/metrics.md",
+        ),
+        // lib.rs facade re-exports — validated via the `pub use` path.
+        ("activation", "lib.rs", ".design/ferrotorch-nn/lib.md"),
+        ("adamw", "lib.rs", ".design/ferrotorch-optim/lib.md"),
+        (
+            "addcmul_t",
+            "methods.rs",
+            ".design/ferrotorch-core/methods.md",
+        ),
+        (
+            "addcdiv_t",
+            "methods.rs",
+            ".design/ferrotorch-core/methods.md",
+        ),
+        (
+            "add_f32",
+            "backend_impl.rs",
+            ".design/ferrotorch-gpu/backend_impl.md",
+        ),
+        (
+            "add_f64",
+            "backend_impl.rs",
+            ".design/ferrotorch-gpu/backend_impl.md",
+        ),
+        (
+            "add",
+            "grad_fns/arithmetic.rs",
+            ".design/ferrotorch-core/grad_fns/arithmetic.md",
+        ),
+        (
+            "align_to",
+            "ferrotorch-core/src/named_tensor.rs",
+            ".design/ferrotorch-core/named_tensor.md",
+        ),
     ];
 
-    // Confirm none of these would have been parsed by #1668 (they are bare,
-    // lowercase, no keyword, no `::`) — i.e. they are genuinely in the EXCLUDED
-    // set, not double-counted in the 1070.
-    for (sym, _file) in sampled_bare_anchors {
+    // Each sample is a bare single lowercase ident (no `::`, no kw) — exactly
+    // the form #1668 dropped and #1669 now parses.
+    for (sym, _file, _doc) in sampled_bare_anchors {
         assert!(
-            !sym.contains("::")
-                && sym.chars().next().is_some_and(|c| c.is_ascii_lowercase()),
-            "fixture precondition: `{sym}` must be bare-lowercase (excluded by #1668's parser)"
+            !sym.contains("::") && sym.chars().next().is_some_and(|c| c.is_ascii_lowercase()),
+            "fixture precondition: `{sym}` must be a bare lowercase ident (the form #1668 excluded)"
         );
     }
 
-    // How many of the sampled bare anchors are GENUINE (the symbol is really
-    // declared in a file of that basename)? If exclusion were safe, almost all
-    // would be prose (genuine count ~ 0).
-    let mut genuine = 0usize;
-    let mut prose = Vec::new();
-    for (sym, file) in sampled_bare_anchors {
-        let candidates = resolve_symbol_anchor_files(&index, &root, file);
-        let is_genuine = candidates.iter().any(|p| {
+    // FIX ASSERTION (PASSES under #1669): every sampled bare anchor resolves
+    // to a candidate in its doc-crate that genuinely DECLARES or RE-EXPORTS the
+    // symbol — i.e. the bare form is now VALIDATED, not silently skipped.
+    let mut unvalidated = Vec::new();
+    for (sym, file, doc) in sampled_bare_anchors {
+        let candidates = resolve_symbol_anchor_files(&index, &root, doc, file);
+        let validated = candidates.iter().any(|p| {
             fs::read_to_string(p)
-                .map(|s| fn_declared(&s, sym) || s.contains(&format!("struct {sym}")) )
+                .map(|s| bare_ident_declared(&s, sym))
                 .unwrap_or(false)
         });
-        if is_genuine {
-            genuine += 1;
-        } else {
-            prose.push((*sym, *file));
+        if !validated {
+            unvalidated.push((*sym, *file, *doc, candidates.len()));
         }
     }
-
-    // COVERAGE ASSERTION (FAILS under #1668): if dropping the bare form were
-    // safe, the excluded spans would be mostly prose. They are not — the vast
-    // majority are real declarations. We assert the (false) "mostly prose"
-    // premise so the test fails loudly, pinning the coverage gap.
-    let n = sampled_bare_anchors.len();
     assert!(
-        genuine <= n / 4,
-        "FALSE-NEGATIVE COVERAGE GAP (#1668): {genuine}/{n} sampled bare \
-         `<sym> in <file>.rs` anchors are GENUINE symbol declarations (not \
-         prose), so #1668's exclusion of the bare form silently un-validates \
-         the dominant anchor family (~2700 of ~3879 non-upstream spans; only \
-         1070 are parsed). A renamed bare-anchored symbol rots undetected. The \
-         parser must extend to the bare `<lowercase_sym> in <path>.rs` form \
-         (resolvable against a real declaration) instead of dropping it. \
-         Non-genuine (truly prose) sample: {prose:?}",
+        unvalidated.is_empty(),
+        "COVERAGE-GAP FIX (#1669): every sampled bare `<sym> in <file>.rs` anchor \
+         must now be VALIDATED (declared or re-exported) via the bare-ident \
+         matcher + crate-disambiguating resolver + bare-ident validator. \
+         Still-unvalidated samples (a regression in the #1669 fix): {unvalidated:?}",
+    );
+
+    // And the matcher must still be selective: `fn_declared` alone (the #1668
+    // narrow check) would have MISSED the `pub use` facade re-exports
+    // (`activation`, `adamw`), proving the bare-ident validator's re-export
+    // path is load-bearing, not redundant.
+    let facade_missed_by_fn_only = ["activation", "adamw"].iter().all(|sym| {
+        let p = root.join("ferrotorch-nn/src/lib.rs");
+        let nn = fs::read_to_string(&p).unwrap_or_default();
+        let p2 = root.join("ferrotorch-optim/src/lib.rs");
+        let optim = fs::read_to_string(&p2).unwrap_or_default();
+        !fn_declared(&nn, sym) && !fn_declared(&optim, sym)
+    });
+    assert!(
+        facade_missed_by_fn_only,
+        "fixture: the facade re-exports `activation`/`adamw` are NOT `fn` decls — \
+         the bare-ident validator must accept them via the `pub use` re-export path"
     );
 }

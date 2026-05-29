@@ -1271,6 +1271,14 @@ enum DeclKind {
     /// `<Type>::<method>` associated-fn form (with or without a leading
     /// `fn`/`pub fn`). Validated as a `fn <method>` declaration.
     AssocFn,
+    /// A bare single snake_case/lowercase identifier with NO keyword and NO
+    /// `::` (#1669). The dominant corpus shape (`add in arithmetic.rs`,
+    /// `reduce_all in meta_propagate.rs`, `addcmul_t in methods.rs`). The
+    /// declaration could be any item kind OR a `pub use` re-export (lib.rs
+    /// facades re-export `activation`/`adamw` etc.), so validation accepts a
+    /// broad needle set. Precision: EXACTLY one identifier token before
+    /// " in " — multi-word prose ("the model in foo.rs") is excluded.
+    BareIdent,
 }
 
 /// A parsed single-span symbol anchor `` `<decl> in <path>.rs` ``.
@@ -1344,11 +1352,29 @@ fn parse_decl(decl: &str) -> Option<(DeclKind, String)> {
         }
     }
 
-    // No keyword: only accept the bare `<Type>::<method>` associated-fn
-    // form. Anything else (bare prose word, lowercase identifier) is NOT a
-    // declaration — reject to stay precise.
+    // No keyword: accept the bare `<Type>::<method>` associated-fn form.
     if rest.contains("::") {
         return parse_assoc_fn(rest);
+    }
+
+    // No keyword, no `::`: accept a BARE SINGLE snake_case/lowercase
+    // identifier (#1669). PRECISION: the decl must be EXACTLY one identifier
+    // token (no internal whitespace) whose first char is a lowercase ascii
+    // letter or `_`. This excludes:
+    //   - multi-word prose ("the model" -> two tokens before " in ");
+    //   - uppercase-leading bare names (those are the #1643 cross-span struct
+    //     family or prose, handled / rejected elsewhere);
+    //   - empty / non-identifier shapes.
+    // A bare lowercase ident like `add`, `reduce_all`, `addcmul_t`, `add_f32`
+    // is the dominant genuine anchor shape and is now validated.
+    if rest.split_whitespace().count() == 1 {
+        let tok = rest.trim();
+        let first = tok.chars().next()?;
+        if (first.is_ascii_lowercase() || first == '_')
+            && tok.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Some((DeclKind::BareIdent, tok.to_string()));
+        }
     }
     None
 }
@@ -1519,13 +1545,51 @@ fn build_src_index(root: &Path) -> std::collections::HashMap<String, Vec<PathBuf
     index
 }
 
+/// Map a design-doc's workspace-relative label to the crate it documents.
+///
+/// A doc lives at `.design/<crate-or-subpath>/...`. The FIRST path component
+/// under `.design/` is the crate name (`.design/ferrotorch-rl/X.md` documents
+/// `ferrotorch-rl`; `.design/ferrotorch-core/ops/Y.md` documents
+/// `ferrotorch-core`). Returns the crate's `src/` directory (workspace
+/// relative, e.g. `ferrotorch-rl/src`) when that crate has a `src/` dir under
+/// `root`, else `None` (e.g. top-level `.design/phase-0-orchestrator.md` docs
+/// no single crate, or the named subdir isn't a crate root).
+fn doc_crate_src_dir(root: &Path, doc_label: &str) -> Option<PathBuf> {
+    let rel = doc_label.replace('\\', "/");
+    let after = rel.strip_prefix(".design/")?;
+    let first = after.split('/').next()?;
+    if first.is_empty() || !first.starts_with("ferrotorch") {
+        return None;
+    }
+    let src = root.join(first).join("src");
+    if src.is_dir() {
+        Some(src)
+    } else {
+        None
+    }
+}
+
 /// Resolve a single-span anchor's `file_as_written` to the candidate files
 /// it could refer to, per the documented disambiguation rule. Returns the
 /// (possibly multi-element) candidate list, or an empty Vec if no file of
 /// that basename exists anywhere (UNRESOLVABLE).
+///
+/// CRATE DISAMBIGUATION (#1669, fixes the #1668 cross-crate false-accept hole):
+/// `doc_label` is the workspace-relative path of the design doc the anchor was
+/// found in. A doc at `.design/<crate>/...` documents `<crate>`; a bare
+/// basename anchor (`lib.rs`, `mod.rs`) is resolved PREFERENTIALLY to a file
+/// of that basename under the matching crate's `src/`. Validation then runs
+/// against THAT crate-local file, so a bare basename whose doc-crate sibling
+/// lacks the symbol is STALE even if some OTHER crate's same-named file has it.
+/// Only when the doc-crate has NO file of that basename (or the doc maps to no
+/// crate — top-level `.design/*.md`) do we fall back to the cross-crate
+/// candidate set. A prefixed-path anchor (`ops/search.rs`,
+/// `ferrotorch-gpu/src/backend_impl.rs`) already disambiguates by suffix —
+/// that path is unchanged.
 fn resolve_symbol_anchor_files(
     index: &std::collections::HashMap<String, Vec<PathBuf>>,
     root: &Path,
+    doc_label: &str,
     file_as_written: &str,
 ) -> Vec<PathBuf> {
     let basename = file_as_written
@@ -1557,6 +1621,25 @@ fn resolve_symbol_anchor_files(
         }
         matches
     } else {
+        // Bare basename: bind to the DOC'S OWN CRATE if that crate has a file
+        // of this basename. This closes the cross-crate false-accept hole:
+        // an anchor in `.design/ferrotorch-rl/...` saying `mod tests in lib.rs`
+        // is validated against `ferrotorch-rl/src/lib.rs`, NOT against every
+        // `lib.rs` in the workspace.
+        if let Some(crate_src) = doc_crate_src_dir(root, doc_label) {
+            let crate_local: Vec<PathBuf> = all
+                .iter()
+                .filter(|p| p.starts_with(&crate_src))
+                .cloned()
+                .collect();
+            if !crate_local.is_empty() {
+                return crate_local;
+            }
+            // No file of this basename in the doc's crate — fall through to
+            // the cross-crate candidate set (documented fallback: the anchor
+            // names a basename the doc-crate doesn't have, e.g. a doc that
+            // genuinely references a sibling crate's file by bare basename).
+        }
         all.clone()
     }
 }
@@ -1590,8 +1673,25 @@ fn anchor_symbol_declared(src: &str, anchor: &SymbolAnchor) -> bool {
             format!("impl {}", anchor.ident),
             format!("for {}", anchor.ident),
         ],
+        // A bare ident could be declared as ANY item kind. Accept every
+        // declaration keyword; the `pub use` re-export forms are handled
+        // separately below (they don't fit the `<kw> <ident>` word-boundary
+        // shape — `pub use foo::bar::baz` ends the ident, but a re-export of
+        // `activation` may appear as `pub use ...::activation;` or
+        // `pub use activation::...`).
+        DeclKind::BareIdent => vec![
+            format!("fn {}", anchor.ident),
+            format!("struct {}", anchor.ident),
+            format!("enum {}", anchor.ident),
+            format!("trait {}", anchor.ident),
+            format!("mod {}", anchor.ident),
+            format!("const {}", anchor.ident),
+            format!("static {}", anchor.ident),
+            format!("type {}", anchor.ident),
+            format!("macro_rules! {}", anchor.ident),
+        ],
     };
-    src.lines().any(|line| {
+    let declared = src.lines().any(|line| {
         needles.iter().any(|needle| {
             if let Some(idx) = line.find(needle.as_str()) {
                 let after = line[idx + needle.len()..].chars().next();
@@ -1603,7 +1703,51 @@ fn anchor_symbol_declared(src: &str, anchor: &SymbolAnchor) -> bool {
                 false
             }
         })
-    })
+    });
+    if declared {
+        return true;
+    }
+    // Bare-ident re-export fallback (#1669): lib.rs facade modules re-export
+    // submodules/items rather than declaring them locally — e.g.
+    // `pub use activation::*;` / `pub use crate::optim::adamw;` /
+    // `pub use self::metrics::accuracy_score`. Accept a `pub use` line that
+    // mentions the ident as a path segment with word boundaries on both sides.
+    if anchor.kind == DeclKind::BareIdent {
+        return src.lines().any(|line| {
+            let t = line.trim_start();
+            if !t.starts_with("pub use ") && !t.starts_with("use ") {
+                return false;
+            }
+            line_has_path_segment(line, &anchor.ident)
+        });
+    }
+    false
+}
+
+/// Does `line` contain `ident` as a whole path segment (bounded on BOTH sides
+/// by a non-identifier char or `::` / line edge)? Used to validate that a
+/// `pub use ...` re-export line genuinely references the bare ident, so a
+/// re-export of `adam` does not spuriously satisfy an anchor for `adamw`.
+fn line_has_path_segment(line: &str, ident: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = line[from..].find(ident) {
+        let idx = from + rel;
+        let before_ok = idx == 0 || {
+            let c = line[..idx].chars().next_back().unwrap_or(' ');
+            !(c.is_ascii_alphanumeric() || c == '_')
+        };
+        let after_idx = idx + ident.len();
+        let after_ok = after_idx >= bytes.len() || {
+            let c = line[after_idx..].chars().next().unwrap_or(' ');
+            !(c.is_ascii_alphanumeric() || c == '_')
+        };
+        if before_ok && after_ok {
+            return true;
+        }
+        from = idx + ident.len();
+    }
+    false
 }
 
 /// Outcome of validating a single-span anchor, for report-mode counting.
@@ -1625,7 +1769,7 @@ fn validate_symbol_anchor(
     doc_label: &str,
     doc_line_no: usize,
 ) -> (AnchorOutcome, Option<String>) {
-    let candidates = resolve_symbol_anchor_files(index, root, &anchor.file_as_written);
+    let candidates = resolve_symbol_anchor_files(index, root, doc_label, &anchor.file_as_written);
     if candidates.is_empty() {
         return (
             AnchorOutcome::Unresolvable,
@@ -1678,6 +1822,7 @@ fn anchor_decl_repr(anchor: &SymbolAnchor) -> String {
         DeclKind::Const => format!("const {}", anchor.ident),
         DeclKind::Type => format!("type {}", anchor.ident),
         DeclKind::Impl => format!("impl ... {}", anchor.ident),
+        DeclKind::BareIdent => anchor.ident.clone(),
     }
 }
 
@@ -2187,6 +2332,39 @@ fn single_span_anchor_parser_is_precise() {
             "reduce_all",
             "ops/meta_propagate.rs",
         ),
+        // #1669 bare single-identifier anchors (no kw, no `::`) — the dominant
+        // genuine corpus shape, now matched as `DeclKind::BareIdent`.
+        (
+            "`add in arithmetic.rs`",
+            DeclKind::BareIdent,
+            "add",
+            "arithmetic.rs",
+        ),
+        (
+            "`reduce_all in meta_propagate.rs`",
+            DeclKind::BareIdent,
+            "reduce_all",
+            "meta_propagate.rs",
+        ),
+        (
+            "`addcmul_t in methods.rs`",
+            DeclKind::BareIdent,
+            "addcmul_t",
+            "methods.rs",
+        ),
+        (
+            "`add_f32 in backend_impl.rs`",
+            DeclKind::BareIdent,
+            "add_f32",
+            "backend_impl.rs",
+        ),
+        // leading-underscore ident is a legal Rust identifier.
+        (
+            "`_private_helper in util.rs`",
+            DeclKind::BareIdent,
+            "_private_helper",
+            "util.rs",
+        ),
     ];
     for (line, kind, ident, file) in good {
         let anchors = parse_symbol_anchors(line);
@@ -2203,16 +2381,22 @@ fn single_span_anchor_parser_is_precise() {
         );
     }
 
-    // Note: `reduce_all in meta_propagate.rs` (no `::`, no kw) is PROSE-shaped
-    // and intentionally NOT matched — a bare lowercase word with no decl
-    // keyword and no `::` is indistinguishable from prose. The corpus form
-    // that IS matched carries a kind keyword or `Type::method`.
+    // #1669: a bare single lowercase ident IS now matched (the dominant
+    // genuine corpus shape, validated against a real declaration / re-export).
+    // PRECISION is preserved by requiring EXACTLY ONE identifier token before
+    // " in " — multi-word prose ("the model in foo.rs", two tokens) is still
+    // rejected (see the `bad` list below).
 
     // NON-anchors that MUST NOT parse.
     let bad = [
-        // prose: "the model in foo.rs is ..." — `model` is no recognized decl.
+        // prose: "the model in foo.rs is ..." — TWO words before " in " (`the
+        // model`), so the bare-ident matcher (which requires exactly one
+        // token) rejects it. This is the precision boundary for #1669.
         "the model in foo.rs is loaded",
         "`the model in foo.rs`",
+        // multi-word prose inside backticks — two tokens before " in ".
+        "`the cached model in cache.rs`",
+        "`every public helper in util.rs`",
         // upstream cites must be excluded.
         "`fn add in /home/doll/pytorch/aten/foo.rs`",
         "`reduce_all in aten/src/ATen/native/foo.rs`",
@@ -2221,11 +2405,15 @@ fn single_span_anchor_parser_is_precise() {
         // SEPARATE backtick span, so the single-span content `RsqrtBackward`
         // (alone) and the file (alone) never form a `<decl> in <path>.rs`.
         "the `RsqrtBackward` struct in `grad_fns/arithmetic.rs` saving",
-        // bare lowercase word with no kw, no `::` -> prose, not an anchor.
-        "`add in arithmetic.rs`",
+        // uppercase-leading bare ident with no keyword -> NOT a bare-ident
+        // anchor (CamelCase bare names are the #1643 struct family or prose,
+        // handled by the cross-span / keyword paths, not the bare-ident path).
+        "`Foo in bar.rs`",
+        "`RsqrtBackward in arithmetic.rs`",
         // non-.rs file.
         "`pub fn foo in bar.py`",
         "`pub fn foo in derivatives.yaml`",
+        "`add in arithmetic.py`",
         // `::` but lowercase-leading "type" -> not a real Type::method.
         "`foo::bar in x.rs`",
         // no " in " separator at all.
@@ -2250,7 +2438,26 @@ fn single_span_anchor_parser_is_precise() {
 ///
 /// Disambiguation: see the module-level note above
 /// [`resolve_symbol_anchor_files`] — an anchor is VALID iff the symbol is
-/// declared in AT LEAST ONE candidate file of the named basename.
+/// declared in the DOC-CRATE's same-basename file (#1669 crate-disambiguation),
+/// or — when the doc maps to no crate / the crate has no such file — in AT
+/// LEAST ONE cross-crate candidate of the named basename.
+///
+/// SCOPE (#1669): this HARD contract enforces the keyword-led / `Type::method`
+/// anchor kinds (`Fn`, `Struct`, `Enum`, `Trait`, `Mod`, `Const`, `Type`,
+/// `Impl`, `AssocFn`). The #1669 bare single-identifier form (`DeclKind::
+/// BareIdent`, e.g. `add in arithmetic.rs`) is NEWLY parsed + validated by the
+/// same machinery, but enabling it as a HARD gate here would turn ~525 anchors
+/// red in one shot — a FLOOD dominated by prose-shaped spans (`laplace in
+/// laplace.rs`, `device in device.rs`) that reference a file/module by name
+/// rather than declaring a symbol, plus a smaller residual of genuinely-stale
+/// bare anchors and `examples/`-/`tests/`-targeted anchors the `src/`-only
+/// index can't resolve. Per the #1669 dispatch's flood guidance, the bare-ident
+/// residual is ESCALATED to a staged cleanup campaign rather than rewritten
+/// wholesale in this dispatch (which would also risk red-on-main). The
+/// bare-ident matcher + validator + crate-disambiguating resolver ARE shipped
+/// and proven by the `divergence_single_span_anchor_resolver.rs` pins +
+/// `report_single_span_anchor_counts`; this gate adopts the bare-ident kind
+/// once that campaign drives the residual to zero.
 #[test]
 fn all_design_docs_single_span_anchors_resolve_at_head() {
     let root = workspace_root();
@@ -2262,6 +2469,7 @@ fn all_design_docs_single_span_anchors_resolve_at_head() {
     );
     let mut failures: Vec<String> = Vec::new();
     let mut total = 0usize;
+    let mut bare_ident_seen = 0usize;
     for doc in &docs {
         let text = match fs::read_to_string(root.join(doc)) {
             Ok(t) => t,
@@ -2269,6 +2477,13 @@ fn all_design_docs_single_span_anchors_resolve_at_head() {
         };
         for (i, line) in text.lines().enumerate() {
             for anchor in parse_symbol_anchors(line) {
+                if anchor.kind == DeclKind::BareIdent {
+                    // Parsed + validatable, but staged out of the HARD gate
+                    // (see the doc comment above). Counted so the parser can't
+                    // silently stop matching the dominant bare form.
+                    bare_ident_seen += 1;
+                    continue;
+                }
                 total += 1;
                 let (outcome, msg) = validate_symbol_anchor(&anchor, &index, &root, doc, i + 1);
                 if outcome != AnchorOutcome::Valid {
@@ -2280,14 +2495,21 @@ fn all_design_docs_single_span_anchors_resolve_at_head() {
         }
     }
     // Sanity floor: the corpus has thousands of these; if the count collapses
-    // the parser has silently stopped matching the single-span form.
+    // the parser has silently stopped matching the keyword-led single-span
+    // form.
     assert!(
         total >= 500,
-        "expected >=500 single-span symbol anchors across .design/, found {total} — has the parser stopped matching the `<decl> in <path>.rs` form?",
+        "expected >=500 keyword-led single-span symbol anchors across .design/, found {total} — has the parser stopped matching the `<decl> in <path>.rs` form?",
+    );
+    // The #1669 bare-ident matcher is load-bearing: it must keep finding the
+    // dominant bare form (so the staged-cleanup escalation stays meaningful).
+    assert!(
+        bare_ident_seen >= 500,
+        "expected the #1669 bare-ident matcher to find >=500 bare `<ident> in <path>.rs` anchors, found {bare_ident_seen} — has the bare-ident parser regressed?",
     );
     assert!(
         failures.is_empty(),
-        "{n} single-span symbol anchor(s) are STALE/UNRESOLVABLE out of {total} scanned (#1668 / goal.md S3 R-CITE-2b):\n\n{body}",
+        "{n} keyword-led single-span symbol anchor(s) are STALE/UNRESOLVABLE out of {total} scanned (#1668/#1669 crate-disambiguating resolver / goal.md S3 R-CITE-2b):\n\n{body}",
         n = failures.len(),
         body = failures.join("\n\n"),
     );
