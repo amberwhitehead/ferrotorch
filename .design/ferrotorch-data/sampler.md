@@ -202,7 +202,7 @@ separately.
 
 Constructor validates weights (non-empty, non-negative, at least
 one positive). With-replacement uses Walker's alias method via the
-private `AliasTable` struct in `dataset.rs`:
+private `AliasTable` struct in `sampler.rs`:
 
 - Vose's algorithm: scale each weight to mean 1, then pair "small"
   (< 1) bins with "large" (≥ 1) bins until all are balanced.

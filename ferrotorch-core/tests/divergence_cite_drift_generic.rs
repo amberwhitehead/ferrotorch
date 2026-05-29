@@ -803,6 +803,8 @@ fn resolve_cite_path(root: &Path, file_as_written: &str) -> CitePath {
         format!("ferrotorch-core/src/autograd/{basename}"),
         format!("ferrotorch-nn/src/{basename}"),
         format!("ferrotorch-vision/src/{basename}"),
+        format!("ferrotorch-data/src/{basename}"),
+        format!("ferrotorch-distributions/src/{basename}"),
         format!("tools/parity-sweep/runner/src/{basename}"),
     ];
     for c in &candidates {
@@ -1017,6 +1019,195 @@ fn build_symbol_needles(symbol: &str) -> Vec<String> {
     out
 }
 
+/// A parsed S3 line-number-FREE symbol anchor (the #1633 conversion form).
+///
+/// The #1633 S3 conversion replaced every `*Backward:NNN` LINE cite with a
+/// line-number-free symbol anchor per R-CITE-2b/S3. The dominant form the
+/// conversion produced is:
+///
+/// ```text
+/// the `RsqrtBackward` struct in `grad_fns/arithmetic.rs` saving the output
+/// ```
+///
+/// i.e. a backtick-quoted CamelCase struct name, the LITERAL words
+/// `` ` struct in ` ``, then a backtick-quoted `.rs` path. Because there is
+/// no line number, the existing `<file>.rs:<N>` cite machinery never saw
+/// these anchors — so a renamed/moved/deleted `*Backward` struct produced a
+/// silently-stale anchor no test caught (#1643). This struct + the parser
+/// below + [`validate_struct_anchor`] close that gap.
+#[derive(Debug, Clone)]
+struct StructAnchor {
+    /// The CamelCase symbol named inside the first backtick span (generics
+    /// stripped), e.g. `RsqrtBackward`.
+    symbol: String,
+    /// The `.rs` path named inside the second backtick span, as written
+    /// (e.g. `grad_fns/arithmetic.rs` or `arithmetic.rs`).
+    file_as_written: String,
+}
+
+/// Parse every S3 struct-symbol anchor of the form
+/// `` `<CamelCaseSymbol>` struct in `<path>.rs` `` from one doc line.
+///
+/// FALSE-POSITIVE CONTROL (this walker runs over ALL `.design/**/*.md`):
+/// the parser is deliberately conservative — it requires ALL of:
+///   1. a backtick-quoted symbol span whose content (after stripping an
+///      optional `<...>` generic suffix) is a single CamelCase identifier
+///      starting with an UPPERCASE ascii letter (so a struct name like
+///      `RsqrtBackward`, not arbitrary prose);
+///   2. the EXACT literal connective `` ` struct in ` `` between the two
+///      backtick spans (so plain `<foo> in <bar>.rs` single-span prose is
+///      NOT matched — only the explicit "struct in" declaration form #1633
+///      produced);
+///   3. a second backtick-quoted span whose content is an explicit
+///      `.rs` file path (ends in `.rs`, identifier/`/`-shaped stem).
+///
+/// Anything failing any of the three is skipped, not matched. This scopes
+/// the new check to exactly the #1633 `*Backward struct` anchor family
+/// (plus the handful of other genuine `` `Foo` struct in `bar.rs` `` decls)
+/// and away from the ~2700 generic `` `sym in file.rs` `` single-span
+/// anchors (a separate, much larger family — see #1643 report).
+fn parse_struct_anchors(line: &str) -> Vec<StructAnchor> {
+    const CONNECTIVE: &str = "` struct in `";
+    let mut out = Vec::new();
+    let bytes = line.as_bytes();
+    let mut search_from = 0usize;
+    while let Some(rel) = line[search_from..].find(CONNECTIVE) {
+        let conn_start = search_from + rel;
+        let conn_end = conn_start + CONNECTIVE.len();
+        // Advance the cursor unconditionally so a failed match can't loop.
+        search_from = conn_end;
+        // 1. Symbol span: walk backwards from `conn_start` (which is the
+        //    closing backtick of the symbol span) to its opening backtick.
+        //    `conn_start` points at the backtick char itself.
+        if conn_start == 0 || bytes[conn_start] != b'`' {
+            continue;
+        }
+        let sym_close = conn_start;
+        let sym_open = match line[..sym_close].rfind('`') {
+            Some(p) => p,
+            None => continue,
+        };
+        let sym_raw = &line[sym_open + 1..sym_close];
+        let Some(symbol) = camel_struct_ident(sym_raw) else {
+            continue;
+        };
+        // 3. File span: starts at `conn_end` (just after the opening
+        //    backtick of the file span) and runs to the next backtick.
+        let file_close = match line[conn_end..].find('`') {
+            Some(e) => conn_end + e,
+            None => continue,
+        };
+        let file_raw = &line[conn_end..file_close];
+        if !is_rs_path(file_raw) {
+            continue;
+        }
+        out.push(StructAnchor {
+            symbol,
+            file_as_written: file_raw.to_string(),
+        });
+    }
+    out
+}
+
+/// Accept `s` as a CamelCase struct identifier (optionally carrying a
+/// `<...>` generic suffix, which is stripped). Returns the bare ident if it
+/// is a single identifier-shaped token starting with an UPPERCASE ascii
+/// letter; `None` otherwise. Rejects multi-word prose (anything with
+/// whitespace before the optional `<`), method paths (`Foo::bar`), and
+/// lowercase-leading names.
+fn camel_struct_ident(s: &str) -> Option<String> {
+    let stem = match s.find('<') {
+        Some(lt) => &s[..lt],
+        None => s,
+    };
+    let stem = stem.trim();
+    if stem.is_empty() {
+        return None;
+    }
+    let mut chars = stem.chars();
+    let first = chars.next()?;
+    if !first.is_ascii_uppercase() {
+        return None;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(stem.to_string())
+}
+
+/// Is `s` an explicit `.rs` file path (identifier/`/`/`-`/`.`-shaped stem
+/// ending in `.rs`)? Used to gate the file span of a struct anchor.
+fn is_rs_path(s: &str) -> bool {
+    let s = s.trim();
+    if !s.ends_with(".rs") {
+        return false;
+    }
+    let stem = &s[..s.len() - 3];
+    if stem.is_empty() {
+        return false;
+    }
+    stem.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '/' || c == '-' || c == '.')
+}
+
+/// Validate one S3 struct-symbol anchor against the file at HEAD. Returns
+/// `Some(error)` if the named `.rs` file is unresolvable OR does not declare
+/// the named struct (`struct <Symbol>` / `pub struct <Symbol>`), else
+/// `None`.
+///
+/// This is the S3-era structural anti-drift contract (#1643): a symbol
+/// anchor pointing at a renamed/moved/deleted struct is stale and MUST fail.
+fn validate_struct_anchor(
+    anchor: &StructAnchor,
+    root: &Path,
+    doc_label: &str,
+    doc_line_no: usize,
+) -> Option<String> {
+    let target = match resolve_cite_path(root, &anchor.file_as_written) {
+        CitePath::Resolved(p) => p,
+        CitePath::AllowedExternal => return None,
+        CitePath::Unresolved => {
+            return Some(format!(
+                "{doc_label}:{doc_line_no} S3 struct anchor `{sym}` struct in `{file}` names an unresolvable path (not under any known crate root). Either fix the typo or add the file to the resolver's candidate list.",
+                sym = anchor.symbol,
+                file = anchor.file_as_written,
+            ));
+        }
+    };
+    let src = match fs::read_to_string(&target) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+    // The struct must be DECLARED in the named file. We require the literal
+    // `struct <Symbol>` followed by a non-identifier char (so `RsqrtBackward`
+    // does not spuriously match `RsqrtBackwardExt`). `pub`/visibility/derive
+    // prefixes are irrelevant — `struct <Symbol>` appears verbatim in every
+    // Rust struct decl regardless of visibility.
+    let needle = format!("struct {}", anchor.symbol);
+    let declared = src.lines().any(|line| {
+        if let Some(idx) = line.find(&needle) {
+            let after = line[idx + needle.len()..].chars().next();
+            // Boundary: end-of-line, whitespace, `<` (generics), `{`, `(`,
+            // `;`, or `:` (e.g. `struct Foo: Trait` is not valid but be lax).
+            match after {
+                None => true,
+                Some(c) => !(c.is_ascii_alphanumeric() || c == '_'),
+            }
+        } else {
+            false
+        }
+    });
+    if !declared {
+        return Some(format!(
+            "{doc_label}:{doc_line_no} S3 struct anchor `{sym}` struct in `{file}` is STALE: `{needle}` is not declared in {path} at HEAD (struct renamed/moved/deleted?). Re-point the anchor to the correct file/symbol.",
+            sym = anchor.symbol,
+            file = anchor.file_as_written,
+            path = target.display(),
+        ));
+    }
+    None
+}
+
 fn audit_doc(doc_label: &str, doc_text: &str, root: &Path) -> Vec<String> {
     let mut failures = Vec::new();
     // Doc-wide context: bare-parens `(NNNN)` and bare-colon `:NNN` on a later
@@ -1048,6 +1239,16 @@ fn audit_doc(doc_label: &str, doc_text: &str, root: &Path) -> Vec<String> {
         }
         for cite in line_cites {
             if let Some(err) = validate_cite(&cite, root, doc_label, doc_line_no) {
+                failures.push(err);
+            }
+        }
+        // S3 line-number-FREE struct-symbol anchors (#1633 conversion /
+        // #1643): `` `<Sym>` struct in `<file>.rs` ``. These carry no line
+        // number, so the cite machinery above never sees them; validate them
+        // structurally — the named struct MUST be declared in the named file
+        // at HEAD.
+        for anchor in parse_struct_anchors(line) {
+            if let Some(err) = validate_struct_anchor(&anchor, root, doc_label, doc_line_no) {
                 failures.push(err);
             }
         }
@@ -1214,5 +1415,148 @@ fn cumulative_rs_doc_comment_cites_resolve_at_head() {
         "cumulative.rs `//!` doc-comment has {} stale cite(s) (R-CITE-2):\n\n{}",
         failures.len(),
         failures.join("\n\n")
+    );
+}
+
+/// #1643 SCOPED CONTRACT: every S3 line-number-FREE struct-symbol anchor
+/// `` `<Sym>` struct in `<file>.rs` `` across ALL `.design/**/*.md` resolves
+/// to a real `struct <Sym>` declaration in the named file at HEAD.
+///
+/// This is the narrow S3-era anti-drift contract #1643 ships: the #1633
+/// conversion replaced `*Backward:NNN` line cites with these line-number-free
+/// symbol anchors, which the line-number cite machinery is structurally blind
+/// to. This test isolates JUST the struct-anchor family so it gives a clean
+/// green signal independent of the pre-existing line-number-cite drift the
+/// broader `all_design_docs_cites_resolve_at_head` walker (separately) flags.
+#[test]
+fn all_design_docs_s3_struct_anchors_resolve_at_head() {
+    let root = workspace_root();
+    let docs = collect_design_docs(&root);
+    assert!(
+        !docs.is_empty(),
+        "expected at least one .md file under .design/"
+    );
+    let mut failures: Vec<String> = Vec::new();
+    let mut anchor_count = 0usize;
+    for doc in &docs {
+        let text = match fs::read_to_string(root.join(doc)) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        for (i, line) in text.lines().enumerate() {
+            for anchor in parse_struct_anchors(line) {
+                anchor_count += 1;
+                if let Some(err) = validate_struct_anchor(&anchor, &root, doc, i + 1) {
+                    failures.push(err);
+                }
+            }
+        }
+    }
+    // Sanity: the #1633 conversion produced a non-trivial number of these
+    // (the *Backward struct family alone is ~20); if this drops to zero the
+    // parser has silently stopped matching the S3 form.
+    assert!(
+        anchor_count >= 10,
+        "expected >=10 S3 struct-symbol anchors across .design/ (the #1633 *Backward conversion family), found {anchor_count} — has the parser stopped matching the `` `Sym` struct in `file.rs` `` form?",
+    );
+    assert!(
+        failures.is_empty(),
+        "{n} S3 struct-symbol anchor(s) are STALE (renamed/moved/deleted struct) out of {anchor_count} scanned (#1643 / goal.md S3 R-CITE-2b):\n\n{body}",
+        n = failures.len(),
+        body = failures.join("\n\n"),
+    );
+}
+
+/// Positive proof the #1643 struct-anchor parser + validator work — and that
+/// the parser is PRECISE (does not match non-anchor prose). All assertions
+/// run on synthetic in-memory input, so this is independent of the corpus
+/// state. Closes the #1269 gap-A premise (the walker now DOES validate the
+/// S3-era replacement for the retired `*Backward:NNN` line cites).
+#[test]
+fn s3_struct_anchor_parser_is_precise_and_catches_corruption() {
+    let root = workspace_root();
+
+    // 1. PARSE: the canonical S3 form is recognized and the symbol/file are
+    //    extracted correctly (generics stripped).
+    let line = "the `RsqrtBackward` struct in `grad_fns/arithmetic.rs` saving c";
+    let anchors = parse_struct_anchors(line);
+    assert_eq!(
+        anchors.len(),
+        1,
+        "expected 1 anchor from `{line}`, got {anchors:?}"
+    );
+    assert_eq!(anchors[0].symbol, "RsqrtBackward");
+    assert_eq!(anchors[0].file_as_written, "grad_fns/arithmetic.rs");
+
+    let generic_line = "`FlexAttentionBackward<T>` struct in `flex_attention.rs`";
+    let g = parse_struct_anchors(generic_line);
+    assert_eq!(g.len(), 1, "generics should be stripped: {g:?}");
+    assert_eq!(g[0].symbol, "FlexAttentionBackward");
+
+    // 2. PRECISION: forms that are NOT the explicit `` `Sym` struct in `f.rs` ``
+    //    anchor must NOT be matched (false-positive control over the corpus).
+    for non_anchor in [
+        // generic single-span `sym in file.rs` (the ~2700-strong family) —
+        // no `struct` connective:
+        "`add in arithmetic.rs`",
+        // single-span `struct Sym in file.rs` — connective is inside the
+        // backticks, not the ` ` struct in ` ` cross-span form:
+        "`struct NarrowBackward in methods.rs`",
+        // lowercase-leading symbol (not a struct name):
+        "`foo` struct in `bar.rs`",
+        // non-.rs file:
+        "`Foo` struct in `bar.py`",
+        // multi-word prose in the symbol span:
+        "`every public` struct in `transformer.rs`",
+        // method path in the symbol span:
+        "`Tensor::sub_t` struct in `arithmetic.rs`",
+        // bare prose, no backticks:
+        "the AliasTable struct in dataset.rs",
+    ] {
+        assert!(
+            parse_struct_anchors(non_anchor).is_empty(),
+            "PRECISION FAILURE: parser matched a non-anchor: `{non_anchor}` -> {:?}",
+            parse_struct_anchors(non_anchor),
+        );
+    }
+
+    // 3. VALIDATE — GOOD: a real struct resolves clean.
+    let good = StructAnchor {
+        symbol: "RsqrtBackward".to_string(),
+        file_as_written: "grad_fns/arithmetic.rs".to_string(),
+    };
+    assert!(
+        validate_struct_anchor(&good, &root, "synthetic", 1).is_none(),
+        "RsqrtBackward should resolve in grad_fns/arithmetic.rs at HEAD",
+    );
+
+    // 4. VALIDATE — CORRUPTED SYMBOL: a renamed/typo'd struct name is flagged.
+    let bad_symbol = StructAnchor {
+        symbol: "RsqrtBackwardXYZ_DOES_NOT_EXIST".to_string(),
+        file_as_written: "grad_fns/arithmetic.rs".to_string(),
+    };
+    let err = validate_struct_anchor(&bad_symbol, &root, "synthetic", 2)
+        .expect("corrupted struct symbol MUST be flagged as STALE");
+    assert!(err.contains("STALE"), "error should say STALE: {err}");
+
+    // 5. VALIDATE — CORRUPTED FILE: a real struct named in the WRONG file is
+    //    flagged (the exact AliasTable-style drift this enhancement caught:
+    //    struct exists, but not in the named file).
+    let bad_file = StructAnchor {
+        symbol: "RsqrtBackward".to_string(),
+        file_as_written: "grad_fns/cumulative.rs".to_string(),
+    };
+    let err = validate_struct_anchor(&bad_file, &root, "synthetic", 3)
+        .expect("struct named in the WRONG file MUST be flagged as STALE");
+    assert!(err.contains("STALE"), "error should say STALE: {err}");
+
+    // 6. VALIDATE — UNRESOLVABLE FILE: a typo'd path is flagged, not skipped.
+    let typo_file = StructAnchor {
+        symbol: "RsqrtBackward".to_string(),
+        file_as_written: "grad_fns/arithmatic.rs".to_string(),
+    };
+    assert!(
+        validate_struct_anchor(&typo_file, &root, "synthetic", 4).is_some(),
+        "typo'd file path in a struct anchor MUST be flagged, not silently skipped",
     );
 }

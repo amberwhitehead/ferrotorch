@@ -60,6 +60,16 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Mutex;
+
+/// Serializes the probes that MUTATE shared `.design`/`.rs` files (arithmetic.md,
+/// arithmetic.rs) and spawn `cargo test` subprocesses. Without this, the
+/// default multi-threaded test harness can run two such probes concurrently —
+/// one rewriting arithmetic.md while the other reads it through a subprocess —
+/// producing flaky failures. The lock is a process-wide critical section; each
+/// mutating probe restores the file before releasing it, so the on-disk state
+/// is always restored between probes.
+static MUTATING_PROBE_LOCK: Mutex<()> = Mutex::new(());
 
 fn workspace_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -154,63 +164,73 @@ fn divergence_1270_cumulative_md_req_table_rows_446_447_stale_test_cites() {
     );
 }
 
-/// GAP A: the generic test does NOT catch a `*Backward` cite whose line
-/// number moves to a clearly-wrong line. We DEMONSTRATE this by:
-///   1. Backing up arithmetic.md.
-///   2. Editing the `RsqrtBackward` `:1565` cite to `:1500` (line 1500 is
-///      `pub fn sqrt` — definitely NOT `pub struct RsqrtBackward`).
-///   3. Running the generic test programmatically and confirming it STILL
-///      PASSES.
-///   4. Restoring arithmetic.md.
+/// GAP A — NOW CLOSED (#1643), CONVERTED TO A POSITIVE PROBE.
 ///
-/// The test FAILS if the generic test catches the contrived divergence
-/// (meaning gap A is closed and this test is obsolete).
+/// History: the original gap-A probe (closed-source above this commit)
+/// demonstrated that the generic walker did NOT catch a `*Backward` cite
+/// drifting to a wrong line — symbol-hint validation skipped non-`test_*`
+/// hints. The #1633 S3 conversion then replaced every `*Backward:NNN` LINE
+/// cite with a line-number-FREE symbol anchor (`` `RsqrtBackward` struct in
+/// `grad_fns/arithmetic.rs` ``), so there was no `*Backward:NNN` cite left to
+/// corrupt and the probe's premise went stale (it was `#[ignore]`'d tracking
+/// #1643).
+///
+/// #1643 added a struct-symbol-anchor parser + validator to the walker
+/// (`parse_struct_anchors` / `validate_struct_anchor`) and a scoped contract
+/// test `all_design_docs_s3_struct_anchors_resolve_at_head`. This probe now
+/// PROVES that new check works end-to-end through the real test binary:
+///   1. Confirm arithmetic.md carries the real S3 anchor
+///      `` `RsqrtBackward` struct in `grad_fns/arithmetic.rs` ``.
+///   2. Corrupt the FILE half to a file that does not declare RsqrtBackward
+///      (`grad_fns/cumulative.rs`) — the AliasTable-style "right struct,
+///      wrong file" drift the enhancement is built to catch.
+///   3. Run the scoped `all_design_docs_s3_struct_anchors_resolve_at_head`
+///      test as a subprocess and assert it now FAILS (the corruption is
+///      caught). The scoped test is green at HEAD, so its exit status cleanly
+///      isolates THIS corruption (unlike the broader
+///      `all_design_docs_cites_resolve_at_head` walker, which carries
+///      pre-existing unrelated line-number-cite drift).
+///   4. Restore arithmetic.md.
 #[test]
-#[ignore = "OBSOLETE PREMISE (tracking #1643): this probe demonstrated the gap by \
-            corrupting a `RsqrtBackward struct at :1565` LINE cite in arithmetic.md. \
-            The #1633 S3 anchor conversion replaced every *Backward line-number cite \
-            with a line-number-free symbol anchor (`RsqrtBackward struct in \
-            grad_fns/arithmetic.rs`), so there is no `*Backward:NNN` cite left to \
-            corrupt — the probe's setup assertions (md contains `:1565`, rs line 1565 \
-            == struct) are both stale. The WALKER gap it documented (generic test does \
-            not catch *Backward line mismatches) still exists but is now unexercised \
-            for arithmetic.md; #1643 tracks re-pointing the probe at a doc that still \
-            uses line cites, or strengthening the walker. Retired per goal.md S8 \
-            (stale-cite-in-test-file noise), not swept — the follow-up is filed."]
-fn divergence_1269_gap_a_generic_test_misses_backward_struct_cite_mismatch() {
+fn divergence_1643_walker_catches_corrupted_s3_struct_anchor() {
+    let _guard = MUTATING_PROBE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let root = workspace_root();
     let md_path = root.join(".design/ferrotorch-core/grad_fns/arithmetic.md");
-    let rs_path = root.join("ferrotorch-core/src/grad_fns/arithmetic.rs");
-    let rs = fs::read_to_string(&rs_path).unwrap();
-    let rs_lines: Vec<&str> = rs.lines().collect();
+    let rs_arith = root.join("ferrotorch-core/src/grad_fns/arithmetic.rs");
+    let rs_cumul = root.join("ferrotorch-core/src/grad_fns/cumulative.rs");
 
-    // Sanity: confirm :1500 does NOT contain `pub struct RsqrtBackward`,
-    // confirm :1565 DOES. If either has shifted we'd need a different probe.
-    let line_1500 = rs_lines.get(1499).unwrap_or(&"");
-    let line_1565 = rs_lines.get(1564).unwrap_or(&"");
+    // Sanity on the structural facts the corruption relies on: RsqrtBackward
+    // IS declared in arithmetic.rs and is NOT declared in cumulative.rs.
+    let arith = fs::read_to_string(&rs_arith).unwrap();
+    let cumul = fs::read_to_string(&rs_cumul).unwrap();
     assert!(
-        !line_1500.contains("struct RsqrtBackward"),
-        "probe assumption broken: arithmetic.rs:1500 contains struct RsqrtBackward — pick a different decoy line. Actual :1500 = `{line_1500}`",
+        arith.contains("struct RsqrtBackward"),
+        "probe assumption broken: arithmetic.rs no longer declares struct RsqrtBackward at HEAD",
     );
     assert!(
-        line_1565.contains("struct RsqrtBackward"),
-        "probe assumption broken: arithmetic.rs:1565 does NOT contain struct RsqrtBackward at HEAD. Actual :1565 = `{line_1565}`",
+        !cumul.contains("struct RsqrtBackward"),
+        "probe assumption broken: cumulative.rs unexpectedly declares struct RsqrtBackward — pick a different decoy file",
     );
 
     let original_md = fs::read_to_string(&md_path).unwrap();
+    let real_anchor = "`RsqrtBackward` struct in `grad_fns/arithmetic.rs`";
     assert!(
-        original_md.contains("`RsqrtBackward` struct at `:1565`"),
-        "probe assumption broken: arithmetic.md does not contain `RsqrtBackward` struct at `:1565` cite at HEAD",
+        original_md.contains(real_anchor),
+        "probe assumption broken: arithmetic.md does not contain the S3 anchor `{real_anchor}` at HEAD",
     );
 
-    // Contrive: replace `:1565` -> `:1500` in the `RsqrtBackward struct at` line.
-    let corrupted = original_md.replace(
-        "`RsqrtBackward` struct at `:1565`",
-        "`RsqrtBackward` struct at `:1500`",
+    // Corrupt the FILE half: re-point the anchor at a file that does NOT
+    // declare RsqrtBackward.
+    let corrupted = original_md.replacen(
+        real_anchor,
+        "`RsqrtBackward` struct in `grad_fns/cumulative.rs`",
+        1,
     );
     assert_ne!(corrupted, original_md, "edit had no effect");
 
-    // Write, run, restore.
+    // Write, run the SCOPED struct-anchor test, restore.
     fs::write(&md_path, &corrupted).unwrap();
     let result = Command::new("cargo")
         .args([
@@ -220,7 +240,7 @@ fn divergence_1269_gap_a_generic_test_misses_backward_struct_cite_mismatch() {
             "--test",
             "divergence_cite_drift_generic",
             "--",
-            "all_design_docs_cites_resolve_at_head",
+            "all_design_docs_s3_struct_anchors_resolve_at_head",
             "--exact",
         ])
         .current_dir(&root)
@@ -230,11 +250,15 @@ fn divergence_1269_gap_a_generic_test_misses_backward_struct_cite_mismatch() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let combined = format!("{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 
-    // If the generic test PASSED, that's the gap we're pinning.
-    let generic_passed = output.status.success();
+    // The scoped test MUST now fail — proving the new S3 struct-anchor check
+    // catches a right-struct/wrong-file corruption (gap A's S3-era successor).
     assert!(
-        !generic_passed,
-        "GAP A confirmed: the generic cite-drift test PASSED after contriving a `RsqrtBackward struct at :1565` -> `:1500` corruption in arithmetic.md (line 1500 is `pub fn sqrt`, NOT RsqrtBackward). This category was caught by the now-deleted `divergence_arithmetic_md_prose_bare_colon_cites_stale.rs` but is no longer audited.\n\nGeneric-test output:\n{combined}",
+        !output.status.success(),
+        "GAP A SUCCESSOR REGRESSED (#1643): after re-pointing the real `RsqrtBackward` struct anchor in arithmetic.md from `grad_fns/arithmetic.rs` to `grad_fns/cumulative.rs` (which does NOT declare RsqrtBackward), the scoped struct-anchor test `all_design_docs_s3_struct_anchors_resolve_at_head` STILL PASSED. The S3 line-number-free symbol-anchor contract is not actually catching moved/renamed structs.\n\nScoped-test output:\n{combined}",
+    );
+    assert!(
+        combined.contains("STALE") || combined.contains("RsqrtBackward"),
+        "scoped test failed but the failure does not mention the corrupted RsqrtBackward anchor — it may have failed for an unrelated reason:\n{combined}",
     );
 }
 
@@ -245,6 +269,9 @@ fn divergence_1269_gap_a_generic_test_misses_backward_struct_cite_mismatch() {
 ///   4. Restore arithmetic.rs.
 #[test]
 fn divergence_1269_gap_b_generic_test_misses_plus_one_line_shift_in_rs() {
+    let _guard = MUTATING_PROBE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let root = workspace_root();
     let rs_path = root.join("ferrotorch-core/src/grad_fns/arithmetic.rs");
     let original_rs = fs::read_to_string(&rs_path).unwrap();
@@ -280,6 +307,9 @@ fn divergence_1269_gap_b_generic_test_misses_plus_one_line_shift_in_rs() {
 /// `gradfns/arithmetic.rs:1565`) is silently skipped.
 #[test]
 fn divergence_1269_gap_c_generic_test_silently_skips_typo_filepaths() {
+    let _guard = MUTATING_PROBE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let root = workspace_root();
     let md_path = root.join(".design/ferrotorch-core/grad_fns/arithmetic.md");
     let original_md = fs::read_to_string(&md_path).unwrap();
