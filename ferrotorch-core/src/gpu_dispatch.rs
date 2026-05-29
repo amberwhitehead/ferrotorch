@@ -2197,6 +2197,54 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    // -- Normal-distribution trio: entr / ndtr / ndtri (#1651, batch 1) ------
+    //
+    // Each method launches an on-device elementwise PTX kernel (one thread per
+    // element, no host round-trip). The math mirrors the ferrotorch CPU scalar
+    // evaluators (`entr_scalar`, `ndtr_scalar`, `ndtri_f64`) so the GPU result
+    // equals the CPU result bit-for-relevant-tolerance. Upstream kernels:
+    // `entr_string` / `ndtri_string` (`aten/src/ATen/native/cuda/Math.cuh:463-480,
+    // 48-173`) and `calc_ndtr` (`aten/src/ATen/native/UnaryOps.cpp:715-718`).
+    // Defaults return `InvalidArgument` so non-CUDA backends compile unchanged;
+    // the CUDA backend overrides all six.
+
+    /// Entropy `entr(x)` forward, f32.
+    fn entr_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "entr_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Entropy `entr(x)` forward, f64.
+    fn entr_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "entr_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Standard-normal CDF `ndtr(x)` forward, f32.
+    fn ndtr_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "ndtr_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Standard-normal CDF `ndtr(x)` forward, f64.
+    fn ndtr_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "ndtr_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Inverse standard-normal CDF `ndtri(p)` forward, f32.
+    fn ndtri_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "ndtri_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Inverse standard-normal CDF `ndtri(p)` forward, f64.
+    fn ndtri_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "ndtri_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+
     // Clamp: out[i] = max(min_val, min(max_val, x[i]))
     fn clamp_f32(
         &self,

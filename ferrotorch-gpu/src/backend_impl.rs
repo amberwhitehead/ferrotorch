@@ -4230,6 +4230,48 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
+    // -- Normal-distribution trio: entr / ndtr / ndtri (#1651, batch 1) ------
+    //
+    // f32 runs on-device (PTX in `crate::special`). f64 returns
+    // `NotImplementedOnCuda`: base PTX has no `lg2.approx.f64` / `ex2.approx.f64`,
+    // so the f64 log/exp these transcendentals need cannot be evaluated at f64
+    // precision on-device — and silently bouncing f64 through the host would
+    // violate R-CODE-4. The f64 CUDA path is honestly unimplemented (the CPU
+    // `pub fn entr/ndtr/ndtri` covers f64 for host tensors).
+
+    fn entr_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::special::gpu_entr_f32(a_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn entr_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "entr_f64" })
+    }
+
+    fn ndtr_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::special::gpu_ndtr_f32(a_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn ndtr_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "ndtr_f64" })
+    }
+
+    fn ndtri_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::special::gpu_ndtri_f32(a_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn ndtri_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "ndtri_f64" })
+    }
+
     fn clamp_f32(
         &self,
         a: &GpuBufferHandle,

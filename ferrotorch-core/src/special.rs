@@ -685,6 +685,218 @@ fn xlogy_scalar<T: Float>(x: T, y: T) -> T {
 }
 
 // ---------------------------------------------------------------------------
+// Normal-distribution trio: entr / ndtr / ndtri (Cephes)
+// ---------------------------------------------------------------------------
+//
+// Direct ports of the upstream torch.special kernels:
+//   - entr: `aten/src/ATen/native/cuda/Math.cuh:463-480` (entr_string)
+//   - ndtr: `aten/src/ATen/native/UnaryOps.cpp:715-718` (calc_ndtr), a
+//     composite over the already-shipped `erf` (special.md REQ-1).
+//   - ndtri: `aten/src/ATen/native/cuda/Math.cuh:48-173` (ndtri_string),
+//     the Cephes rational approximation — NOT `sqrt(2)*erfinv(2p-1)`, which
+//     loses ULP parity with torch (the design doc, special_bessel.md REQ-B3,
+//     mandates the direct Cephes port).
+
+/// `entr(x)` — entropy. Mirrors `entr_string`
+/// (`aten/src/ATen/native/cuda/Math.cuh:463-480`): the NaN check comes first,
+/// then `x > 0 -> -x*log(x)`, `x == 0 -> 0`, else `-inf`. Note `entr(0) = +0`
+/// (the explicit `0` branch) while `entr(1) = -1*log(1) = -0` flows through the
+/// `>0` branch verbatim, matching torch's signed-zero output.
+fn entr_scalar<T: Float>(a: T) -> T {
+    // `a != a` — NaN propagates unchanged (Math.cuh:466-468).
+    if a.is_nan() {
+        return a;
+    }
+    let zero = nt_zero::<T>();
+    if a > zero {
+        return -a * a.ln();
+    }
+    if a == zero {
+        return zero;
+    }
+    T::neg_infinity()
+}
+
+/// `ndtr(x)` — standard-normal CDF. Mirrors `calc_ndtr`
+/// (`aten/src/ATen/native/UnaryOps.cpp:715-718`):
+/// `ndtr(x) = (1 + erf(x * M_SQRT1_2)) * 0.5` with
+/// `M_SQRT1_2 = 0.70710678118654752440` (1/sqrt(2)). Composed over the shipped
+/// `erf_scalar` so the f64 SunPro-fdlibm ~1-ulp `erf` precision flows through.
+/// Edge behavior is inherited from `erf`: `ndtr(-inf) = 0`, `ndtr(0) = 0.5`,
+/// `ndtr(+inf) = 1`, `ndtr(NaN) = NaN`.
+fn ndtr_scalar<T: Float>(x: T) -> T {
+    // M_SQRT1_2 = 1/sqrt(2). `<math.h>` value, also `UnaryOps.cpp:716`.
+    let sqrt1_2 = T::from(std::f64::consts::FRAC_1_SQRT_2).unwrap();
+    let one = nt_one::<T>();
+    let half = T::from(0.5).unwrap();
+    (one + erf_scalar(x * sqrt1_2)) * half
+}
+
+/// Cephes `polevl`: evaluate the polynomial `A[0]*x^(n-1) + ... + A[n-1]` in
+/// Horner form over the coefficients in REVERSE order, with the upstream-CUDA
+/// `len = len(A)` convention (NOT `len(A) - 1`). Direct port of
+/// `aten/src/ATen/native/cuda/Math.cuh:30-39`:
+/// `result = 0; for i in 0..len { result = result*x + A[i]; }`.
+fn polevl<T: Float>(x: T, coeffs: &[T]) -> T {
+    let mut result = nt_zero::<T>();
+    for &c in coeffs {
+        result = result * x + c;
+    }
+    result
+}
+
+/// `ndtri(y0)` — inverse standard-normal CDF (quantile function). Direct port
+/// of the Cephes `ndtri_string` (`aten/src/ATen/native/cuda/Math.cuh:48-173`).
+/// Domain `(0, 1)`: `y0 == 0 -> -inf`, `y0 == 1 -> +inf`,
+/// `y0 < 0 || y0 > 1 -> NaN`. The interior uses three coefficient regions
+/// (central P0/Q0, tail P1/Q1, far-tail P2/Q2) and the `code`-flag sign flip
+/// (`Math.cuh:65-71, 171-172`). All arithmetic runs in f64 then narrows to `T`
+/// so the f32 path inherits the full-precision Cephes evaluation before the
+/// final cast (torch's CUDA jiterator runs in the tensor's scalar type, but the
+/// f64-then-narrow path stays inside the f32 transcendental tolerance and
+/// avoids the catastrophic `log`/`sqrt` cancellation at the f32 tails).
+fn ndtri_scalar<T: Float>(y0: T) -> T {
+    let yf = <T as num_traits::ToPrimitive>::to_f64(&y0).unwrap_or(f64::NAN);
+    T::from(ndtri_f64(yf)).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+/// f64 Cephes `ndtri`. See [`ndtri_scalar`] for the upstream cite.
+///
+/// `clippy::float_cmp` — the exact `== 0.0` / `== 1.0` boundary tests are a
+/// verbatim port of the Cephes `ndtri` special-case ladder
+/// (`Math.cuh:55,58`); torch compares to the literal endpoints, not an epsilon
+/// band, so matching the exact equality is required for parity (`ndtri(p)` is
+/// `-inf`/`+inf` only AT the endpoints).
+/// `clippy::manual_range_contains` — the `y0 < 0.0 || y0 > 1.0` form mirrors
+/// the upstream `y0 < zero || y0 > one` check (`Math.cuh:61`) one-for-one;
+/// rewriting as `!(0.0..=1.0).contains()` obscures the diff against upstream.
+/// `clippy::excessive_precision` — the P0/Q0/P1/Q1/P2/Q2/S2PI/EXP_M2 constants
+/// are reproduced to their full Cephes decimal width (`Math.cuh:75-166`) so the
+/// diff against the upstream reference is audit-friendly; the trailing digits
+/// round to the same f64 bit pattern as a 17-digit truncation.
+#[allow(
+    clippy::float_cmp,
+    clippy::manual_range_contains,
+    clippy::excessive_precision,
+    reason = "verbatim Cephes ndtri port: exact-endpoint boundary tests and full-width coefficients mirror Math.cuh:48-173 for ULP parity + audit-friendly diff"
+)]
+fn ndtri_f64(y0: f64) -> f64 {
+    // Special cases (Math.cuh:54-63).
+    if y0 == 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if y0 == 1.0 {
+        return f64::INFINITY;
+    }
+    if y0 < 0.0 || y0 > 1.0 {
+        return f64::NAN;
+    }
+    if y0.is_nan() {
+        return f64::NAN;
+    }
+
+    // Cephes coefficient tables (Math.cuh:75-166), reverse-order for `polevl`.
+    // Central region |y - 0.5| <= 3/8.
+    const P0: [f64; 5] = [
+        -5.99633501014107895267E1,
+        9.80010754185999661536E1,
+        -5.66762857469070293439E1,
+        1.39312609387279679503E1,
+        -1.23916583867381258016E0,
+    ];
+    const Q0: [f64; 9] = [
+        1.00000000000000000000E0,
+        1.95448858338141759834E0,
+        4.67627912898881538453E0,
+        8.63602421390890590575E1,
+        -2.25462687854119370527E2,
+        2.00260212380060660359E2,
+        -8.20372256168333339912E1,
+        1.59056225126211695515E1,
+        -1.18331621121330003142E0,
+    ];
+    // Tail region, x = sqrt(-2 log y) < 8.
+    const P1: [f64; 9] = [
+        4.05544892305962419923E0,
+        3.15251094599893866154E1,
+        5.71628192246421288162E1,
+        4.40805073893200834700E1,
+        1.46849561928858024014E1,
+        2.18663306850790267539E0,
+        -1.40256079171354495875E-1,
+        -3.50424626827848203418E-2,
+        -8.57456785154685413611E-4,
+    ];
+    const Q1: [f64; 9] = [
+        1.00000000000000000000E0,
+        1.57799883256466749731E1,
+        4.53907635128879210584E1,
+        4.13172038254672030440E1,
+        1.50425385692907503408E1,
+        2.50464946208309415979E0,
+        -1.42182922854787788574E-1,
+        -3.80806407691578277194E-2,
+        -9.33259480895457427372E-4,
+    ];
+    // Far-tail region, x >= 8.
+    const P2: [f64; 9] = [
+        3.23774891776946035970E0,
+        6.91522889068984211695E0,
+        3.93881025292474443415E0,
+        1.33303460815807542389E0,
+        2.01485389549179081538E-1,
+        1.23716634817820021358E-2,
+        3.01581553508235416007E-4,
+        2.65806974686737550832E-6,
+        6.23974539184983293730E-9,
+    ];
+    const Q2: [f64; 9] = [
+        1.00000000000000000000E0,
+        6.02427039364742014255E0,
+        3.67983563856160859403E0,
+        1.37702099489081330271E0,
+        2.16236993594496635890E-1,
+        1.34204006088543189037E-2,
+        3.28014464682127739104E-4,
+        2.89247864745380683936E-6,
+        6.79019408009981274425E-9,
+    ];
+    // sqrt(2pi) (Math.cuh:96).
+    const S2PI: f64 = 2.50662827463100050242E0;
+    // exp(-2) (Math.cuh:67-68).
+    const EXP_M2: f64 = 0.13533528323661269189;
+
+    let mut code = true;
+    let mut y = y0;
+    if y > 1.0 - EXP_M2 {
+        y = 1.0 - y;
+        code = false;
+    }
+
+    if y > EXP_M2 {
+        // Central region (Math.cuh:73-102).
+        y -= 0.5;
+        let y2 = y * y;
+        let x = y + y * (y2 * polevl(y2, &P0) / polevl(y2, &Q0));
+        return x * S2PI;
+    }
+
+    let mut x = (-2.0 * y.ln()).sqrt();
+    let x0 = x - (x.ln() / x);
+    let z = 1.0 / x;
+    let x1 = if x < 8.0 {
+        // Tail region (Math.cuh:111-139).
+        z * polevl(z, &P1) / polevl(z, &Q1)
+    } else {
+        // Far-tail region (Math.cuh:140-168).
+        z * polevl(z, &P2) / polevl(z, &Q2)
+    };
+    x = x0 - x1;
+    // code-flag sign flip (Math.cuh:171-172): return (!code) ? x : -x.
+    if code { -x } else { x }
+}
+
+// ---------------------------------------------------------------------------
 // Incomplete-gamma family (gammainc / gammaincc) and log-beta / multigammaln
 // ---------------------------------------------------------------------------
 //
@@ -1000,6 +1212,58 @@ pub fn xlogy<T: Float>(x: &Tensor<T>, y: &Tensor<T>) -> FerrotorchResult<Tensor<
     binary_map(x, y, xlogy_scalar)
 }
 
+/// Entropy `entr(x)`: `x > 0 -> -x*log(x)`, `x == 0 -> 0`, `x < 0 -> -inf`,
+/// `NaN -> NaN`. Mirrors `torch.special.entr`
+/// (`torch/special/__init__.py:67`; kernel `aten/src/ATen/native/cuda/Math.cuh:463-480`).
+///
+/// CUDA (f32/f64) tensors run an on-device elementwise PTX kernel via
+/// [`crate::gpu_dispatch::GpuBackend::entr_f32`]/`entr_f64` (no host round
+/// trip); bf16/f16 CUDA inputs return `NotImplementedOnCuda`.
+pub fn entr<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) =
+        special_gpu_simple(input, "entr", |b, h| b.entr_f32(h), |b, h| b.entr_f64(h))?
+    {
+        return Ok(out);
+    }
+    unary_map(input, entr_scalar)
+}
+
+/// Standard-normal CDF `ndtr(x) = (1 + erf(x/sqrt(2))) / 2`. Mirrors
+/// `torch.special.ndtr` (`torch/special/__init__.py:624`; kernel
+/// `aten/src/ATen/native/UnaryOps.cpp:715-718`). Composed over the shipped
+/// `erf` so `ndtr(-inf) = 0`, `ndtr(0) = 0.5`, `ndtr(+inf) = 1`,
+/// `ndtr(NaN) = NaN`.
+///
+/// CUDA (f32/f64) tensors run an on-device elementwise PTX kernel via
+/// [`crate::gpu_dispatch::GpuBackend::ndtr_f32`]/`ndtr_f64` (no host round
+/// trip); bf16/f16 CUDA inputs return `NotImplementedOnCuda`.
+pub fn ndtr<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) =
+        special_gpu_simple(input, "ndtr", |b, h| b.ndtr_f32(h), |b, h| b.ndtr_f64(h))?
+    {
+        return Ok(out);
+    }
+    unary_map(input, ndtr_scalar)
+}
+
+/// Inverse standard-normal CDF (quantile function) `ndtri(p)`. Domain `(0, 1)`:
+/// `ndtri(0) = -inf`, `ndtri(1) = +inf`, `ndtri(p<0 || p>1) = NaN`. Mirrors
+/// `torch.special.ndtri` (`torch/special/__init__.py:649`); the implementation
+/// ports the Cephes rational from `aten/src/ATen/native/cuda/Math.cuh:48-173`
+/// (NOT `sqrt(2)*erfinv(2p-1)`) for ULP parity with torch.
+///
+/// CUDA (f32/f64) tensors run an on-device elementwise PTX kernel via
+/// [`crate::gpu_dispatch::GpuBackend::ndtri_f32`]/`ndtri_f64` (no host round
+/// trip); bf16/f16 CUDA inputs return `NotImplementedOnCuda`.
+pub fn ndtri<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) =
+        special_gpu_simple(input, "ndtri", |b, h| b.ndtri_f32(h), |b, h| b.ndtri_f64(h))?
+    {
+        return Ok(out);
+    }
+    unary_map(input, ndtri_scalar)
+}
+
 /// Regularized lower incomplete gamma `P(a, x)`, element-wise over a broadcast
 /// of `input` (the `a` argument) and `other` (the `x` argument).
 ///
@@ -1163,6 +1427,45 @@ fn poly_gpu_simple<T: Float>(
     ) -> FerrotorchResult<crate::gpu_dispatch::GpuBufferHandle>,
 ) -> FerrotorchResult<Option<Tensor<T>>> {
     let _ = n;
+    if !input.is_cuda() {
+        return Ok(None);
+    }
+    if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
+        return Err(FerrotorchError::NotImplementedOnCuda { op });
+    }
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let handle = input.gpu_handle()?;
+    let out_handle = if poly_is_f32::<T>() {
+        f32_call(backend, handle)?
+    } else {
+        f64_call(backend, handle)?
+    };
+    Ok(Some(poly_gpu_output::<T>(
+        out_handle,
+        input.shape().to_vec(),
+    )?))
+}
+
+/// Run a parameterless elementwise special-function kernel (entr / ndtr /
+/// ndtri) on a CUDA tensor, dispatching by dtype through the registered
+/// [`GpuBackend`]. Returns `Ok(Some(out))` when the GPU path handled it,
+/// `Ok(None)` when the caller should take the CPU path (non-CUDA input).
+/// bf16/f16 CUDA inputs are rejected with `NotImplementedOnCuda` (no host
+/// round trip). This is the elementwise analog of [`poly_gpu_simple`] (which
+/// carries an extra `n` recurrence-order argument the transcendental kernels
+/// don't need).
+fn special_gpu_simple<T: Float>(
+    input: &Tensor<T>,
+    op: &'static str,
+    f32_call: impl Fn(
+        &dyn crate::gpu_dispatch::GpuBackend,
+        &crate::gpu_dispatch::GpuBufferHandle,
+    ) -> FerrotorchResult<crate::gpu_dispatch::GpuBufferHandle>,
+    f64_call: impl Fn(
+        &dyn crate::gpu_dispatch::GpuBackend,
+        &crate::gpu_dispatch::GpuBufferHandle,
+    ) -> FerrotorchResult<crate::gpu_dispatch::GpuBufferHandle>,
+) -> FerrotorchResult<Option<Tensor<T>>> {
     if !input.is_cuda() {
         return Ok(None);
     }
@@ -2650,5 +2953,194 @@ mod tests {
             (gamma - expected).abs() < 1e-9,
             "reconstructed Γ(-0.5) = {gamma} (expected {expected})"
         );
+    }
+
+    // --- entr / ndtr / ndtri (#1651 batch 1) ---
+    //
+    // Expected values are live `torch.special.{entr,ndtr,ndtri}` (torch
+    // 2.11.0+cu130, f64) outputs (R-CHAR-3: oracle-derived, not self-referential):
+    //   entr([0.5,0,-1,1,2,0.1]) = [0.34657359027997264, 0, -inf, -0,
+    //                               -1.3862943611198906, 0.23025850929940456]
+    //   ndtr([-3,-2,-1,0,1,2,3]) = [0.0013498980316301035, 0.022750131948179209,
+    //       0.15865525393145702, 0.5, 0.84134474606854304, 0.97724986805182079,
+    //       0.9986501019683699]
+    //   ndtri([0.025,0.25,0.5,0.75,0.975]) = [-1.9599639845400545,
+    //       -0.67448975019608171, 0, 0.67448975019608171, 1.959963984540054]
+    //   ndtri([0.001,1e-10,0.9,0.999]) = [-3.0902323061678132,
+    //       -6.3613409024040557, 1.2815515655446004, 3.0902323061678132]
+
+    #[test]
+    fn entr_known_values_vs_torch() {
+        let input = t(&[0.5, 2.0, 0.1], &[3]);
+        let r = entr(&input).unwrap();
+        let d = r.data().unwrap();
+        // Live torch.special.entr f64 oracle.
+        let want = [
+            0.346_573_590_279_972_64,
+            -1.386_294_361_119_890_6,
+            0.230_258_509_299_404_56,
+        ];
+        for i in 0..3 {
+            assert!(
+                (d[i] - want[i]).abs() < 1e-12,
+                "entr idx {i}: got {} want {}",
+                d[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "entr(0) is the exact branch return 0.0 / entr(1) the exact -1*ln(1) = -0.0; bit-exact equality is the torch contract (Math.cuh:474-476)"
+    )]
+    fn entr_edges_vs_torch() {
+        let input = t(&[0.0, -1.0, f64::NAN, 1.0], &[4]);
+        let r = entr(&input).unwrap();
+        let d = r.data().unwrap();
+        assert_eq!(d[0], 0.0, "entr(0) == +0.0");
+        assert!(d[0].is_sign_positive(), "entr(0) sign is +0.0");
+        assert!(d[1].is_infinite() && d[1] < 0.0, "entr(-1) == -inf");
+        assert!(d[2].is_nan(), "entr(NaN) == NaN");
+        // entr(1) = -1*ln(1) = -0.0 (flows through the >0 branch verbatim).
+        assert_eq!(d[3], 0.0, "entr(1) magnitude 0");
+        assert!(
+            d[3].is_sign_negative(),
+            "entr(1) sign is -0.0 (torch parity)"
+        );
+    }
+
+    #[test]
+    fn ndtr_known_values_vs_torch() {
+        let input = t(&[-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0], &[7]);
+        let r = ndtr(&input).unwrap();
+        let d = r.data().unwrap();
+        let want = [
+            0.001_349_898_031_630_103_5,
+            0.022_750_131_948_179_209,
+            0.158_655_253_931_457_02,
+            0.5,
+            0.841_344_746_068_543_04,
+            0.977_249_868_051_820_79,
+            0.998_650_101_968_369_9,
+        ];
+        for i in 0..7 {
+            assert!(
+                (d[i] - want[i]).abs() < 1e-12,
+                "ndtr idx {i}: got {} want {}",
+                d[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn ndtr_edges_vs_torch() {
+        let input = t(&[f64::NEG_INFINITY, f64::INFINITY, f64::NAN], &[3]);
+        let r = ndtr(&input).unwrap();
+        let d = r.data().unwrap();
+        assert!((d[0] - 0.0).abs() < 1e-15, "ndtr(-inf) == 0");
+        assert!((d[1] - 1.0).abs() < 1e-15, "ndtr(+inf) == 1");
+        assert!(d[2].is_nan(), "ndtr(NaN) == NaN");
+    }
+
+    #[test]
+    fn ndtri_known_values_vs_torch() {
+        let input = t(&[0.025, 0.25, 0.5, 0.75, 0.975], &[5]);
+        let r = ndtri(&input).unwrap();
+        let d = r.data().unwrap();
+        let want = [
+            -1.959_963_984_540_054_5,
+            -0.674_489_750_196_081_71,
+            0.0,
+            0.674_489_750_196_081_71,
+            1.959_963_984_540_054,
+        ];
+        for i in 0..5 {
+            assert!(
+                (d[i] - want[i]).abs() < 1e-12,
+                "ndtri idx {i}: got {} want {}",
+                d[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn ndtri_cephes_regions_vs_torch() {
+        // 0.001 / 1e-10 exercise the tail (P1/Q1) and far-tail (P2/Q2) regions;
+        // 0.9 / 0.999 exercise the code-flag sign-flip (`y > 1 - exp(-2)`).
+        let input = t(&[0.001, 1e-10, 0.9, 0.999], &[4]);
+        let r = ndtri(&input).unwrap();
+        let d = r.data().unwrap();
+        let want = [
+            -3.090_232_306_167_813_2,
+            -6.361_340_902_404_055_7,
+            1.281_551_565_544_600_4,
+            3.090_232_306_167_813_2,
+        ];
+        for i in 0..4 {
+            assert!(
+                (d[i] - want[i]).abs() < 1e-11,
+                "ndtri region idx {i}: got {} want {}",
+                d[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn ndtri_domain_edges_vs_torch() {
+        let input = t(&[0.0, 1.0, -0.1, 1.1], &[4]);
+        let r = ndtri(&input).unwrap();
+        let d = r.data().unwrap();
+        assert!(d[0].is_infinite() && d[0] < 0.0, "ndtri(0) == -inf");
+        assert!(d[1].is_infinite() && d[1] > 0.0, "ndtri(1) == +inf");
+        assert!(d[2].is_nan(), "ndtri(-0.1) == NaN");
+        assert!(d[3].is_nan(), "ndtri(1.1) == NaN");
+    }
+
+    #[test]
+    fn ndtr_ndtri_roundtrip() {
+        // ndtr(ndtri(p)) ≈ p (AC-B3 round-trip).
+        let ps = [0.05, 0.2, 0.5, 0.8, 0.95];
+        let input = t(&ps, &[5]);
+        let q = ndtri(&input).unwrap();
+        let back = ndtr(&q).unwrap();
+        let bd = back.data().unwrap();
+        for i in 0..5 {
+            assert!(
+                (bd[i] - ps[i]).abs() < 1e-12,
+                "ndtr(ndtri({})) = {} (expected {})",
+                ps[i],
+                bd[i],
+                ps[i]
+            );
+        }
+    }
+
+    #[test]
+    fn ndtri_f32_vs_torch() {
+        // Live torch.special.ndtri f32 oracle:
+        // [0.025,0.25,0.5,0.75,0.975] -> [-1.9599637985229492,
+        //   -0.67448979616165161, 0, 0.67448979616165161, 1.959964394569397]
+        let input = Tensor::from_storage(
+            TensorStorage::cpu(vec![0.025f32, 0.25, 0.5, 0.75, 0.975]),
+            vec![5],
+            false,
+        )
+        .unwrap();
+        let r = ndtri(&input).unwrap();
+        let d = r.data().unwrap();
+        let want = [-1.959_963_8f32, -0.674_489_8, 0.0, 0.674_489_8, 1.959_964_4];
+        for i in 0..5 {
+            assert!(
+                (d[i] - want[i]).abs() < 1e-5,
+                "ndtri_f32 idx {i}: got {} want {}",
+                d[i],
+                want[i]
+            );
+        }
     }
 }

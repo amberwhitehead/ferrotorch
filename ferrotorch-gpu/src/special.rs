@@ -878,6 +878,438 @@ DONE:
 ";
 
 // ---------------------------------------------------------------------------
+// PTX — Normal-distribution trio: entr / ndtr / ndtri (#1651 batch 1)
+// ---------------------------------------------------------------------------
+//
+// These elementwise transcendental kernels are f32-only on the GPU. Base PTX
+// (the `Ptx::from_src` path in `module_cache`, no libdevice link) has no
+// `lg2.approx.f64` / `ex2.approx.f64`: the f64 logarithm/exponential required
+// by these kernels cannot be evaluated at f64 precision on-device. Rather than
+// silently bounce f64 CUDA tensors through the host (forbidden by R-CODE-4),
+// the f64 GpuBackend methods return `NotImplementedOnCuda` (see
+// `backend_impl.rs`); only f32 runs on-device. This mirrors the existing
+// `cdist_f64` decision (`distance.rs:211-219`) where general f64
+// transcendentals are not expressible in base PTX.
+//
+// The f32 math mirrors the ferrotorch CPU f32 scalar path so GPU == CPU to f32
+// tolerance: `ln(x) = lg2.approx.f32(x) * ln(2)`, `exp(x) = ex2.approx.f32(x *
+// log2(e))`, and the ndtr `erf` is the Abramowitz-Stegun 7.1.26 polynomial
+// (`erf_scalar`'s f32 branch, special.rs). ndtri ports the Cephes rational in
+// f32 (`ndtri_f64`, special.rs) — the f32-narrowed coefficients stay inside
+// the f32 transcendental tolerance.
+
+/// Entropy `entr(x)` — f32. Mirrors `entr_string`
+/// (`aten/src/ATen/native/cuda/Math.cuh:463-480`):
+/// NaN -> NaN; `x > 0 -> -x*ln(x)`; `x == 0 -> 0`; else `-inf`.
+/// ABI: `(in, out, total)`. `ln(x) = lg2.approx.f32(x) * ln(2)`.
+#[cfg(feature = "cuda")]
+pub(crate) const ENTR_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry entr_f32(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r;
+    .reg .u64 %in_p, %out_p, %off, %addr;
+    .reg .f32 %x, %r, %lg, %ln2, %zero;
+    .reg .pred %oob, %isnan, %pos, %iszero;
+
+    ld.param.u64 %in_p,    [in_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %oob, %idx, %total_r;
+    @%oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in_p, %off;
+    ld.global.f32 %x, [%addr];
+
+    mov.f32 %zero, 0f00000000;
+
+    // NaN -> x (NaN). setp.nan true when x is NaN.
+    setp.nan.f32 %isnan, %x, %x;
+    @%isnan mov.f32 %r, %x;
+    @%isnan bra STORE;
+
+    // x > 0 -> -x*ln(x)
+    setp.gt.f32 %pos, %x, %zero;
+    @!%pos bra NOT_POS;
+    mov.f32 %ln2, 0f3F317218;       // ln(2)
+    lg2.approx.f32 %lg, %x;         // log2(x)
+    mul.f32 %lg, %lg, %ln2;         // ln(x)
+    mul.f32 %r, %x, %lg;            // x*ln(x)
+    neg.f32 %r, %r;                 // -x*ln(x)
+    bra STORE;
+
+NOT_POS:
+    // x == 0 -> +0.0 ; x < 0 -> -inf
+    setp.eq.f32 %iszero, %x, %zero;
+    @%iszero mov.f32 %r, 0f00000000;
+    @%iszero bra STORE;
+    mov.f32 %r, 0fFF800000;         // -inf
+
+STORE:
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out_p, %off;
+    st.global.f32 [%addr], %r;
+DONE:
+    ret;
+}
+";
+
+/// Standard-normal CDF `ndtr(x)` — f32. Mirrors `calc_ndtr`
+/// (`aten/src/ATen/native/UnaryOps.cpp:715-718`):
+/// `ndtr(x) = (1 + erf(x/sqrt(2))) * 0.5`. `erf` is the Abramowitz-Stegun
+/// 7.1.26 polynomial (matching the ferrotorch CPU f32 `erf_scalar` path):
+/// `t = 1/(1 + p*|z|)`, `poly = a1 + t*(a2 + t*(a3 + t*(a4 + t*a5)))`,
+/// `erf(z) = sign(z) * (1 - poly*t*exp(-z*z))`. ABI: `(in, out, total)`.
+#[cfg(feature = "cuda")]
+pub(crate) const NDTR_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry ndtr_f32(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r;
+    .reg .u64 %in_p, %out_p, %off, %addr;
+    .reg .f32 %x, %z, %az, %sign, %t, %poly, %ex, %erf, %r;
+    .reg .f32 %sqrt1_2, %p_c, %a1, %a2, %a3, %a4, %a5, %one, %half, %log2e, %zero;
+    .reg .pred %oob, %neg;
+
+    ld.param.u64 %in_p,    [in_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %oob, %idx, %total_r;
+    @%oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in_p, %off;
+    ld.global.f32 %x, [%addr];
+
+    mov.f32 %one,     0f3F800000;       // 1.0
+    mov.f32 %half,    0f3F000000;       // 0.5
+    mov.f32 %zero,    0f00000000;       // 0.0
+    mov.f32 %sqrt1_2, 0f3F3504F3;       // 1/sqrt(2) = 0.70710677
+    mov.f32 %log2e,   0f3FB8AA3B;       // log2(e)
+    // Abramowitz-Stegun 7.1.26 constants (special.rs ERF_*).
+    mov.f32 %p_c, 0f3EA7BA05;           //  0.3275911
+    mov.f32 %a1,  0f3E827906;           //  0.254829592
+    mov.f32 %a2,  0fBE91A98E;           // -0.284496736
+    mov.f32 %a3,  0f3FB5F0E3;           //  1.421413741
+    mov.f32 %a4,  0fBFBA00E3;           // -1.453152027
+    mov.f32 %a5,  0f3F87DC22;           //  1.061405429
+
+    // z = x / sqrt(2)
+    mul.f32 %z, %x, %sqrt1_2;
+
+    // erf(z): sign and |z|
+    setp.lt.f32 %neg, %z, %zero;
+    mov.f32 %sign, %one;
+    @%neg neg.f32 %sign, %one;          // sign = -1 when z<0
+    abs.f32 %az, %z;
+
+    // t = 1 / (1 + p*|z|)
+    fma.rn.f32 %t, %p_c, %az, %one;     // 1 + p*az
+    rcp.rn.f32 %t, %t;                  // 1/(1+p*az)
+
+    // poly = a1 + t*(a2 + t*(a3 + t*(a4 + t*a5)))
+    mov.f32 %poly, %a5;
+    fma.rn.f32 %poly, %poly, %t, %a4;
+    fma.rn.f32 %poly, %poly, %t, %a3;
+    fma.rn.f32 %poly, %poly, %t, %a2;
+    fma.rn.f32 %poly, %poly, %t, %a1;
+
+    // ex = exp(-z*z) = 2^((-z*z)*log2e)
+    mul.f32 %ex, %az, %az;              // z*z (= |z|^2)
+    neg.f32 %ex, %ex;                   // -z*z
+    mul.f32 %ex, %ex, %log2e;
+    ex2.approx.f32 %ex, %ex;
+
+    // erf = sign * (1 - poly*t*ex)
+    mul.f32 %erf, %poly, %t;
+    mul.f32 %erf, %erf, %ex;
+    sub.f32 %erf, %one, %erf;           // 1 - poly*t*ex
+    mul.f32 %erf, %erf, %sign;
+
+    // ndtr = (1 + erf) * 0.5
+    add.f32 %r, %one, %erf;
+    mul.f32 %r, %r, %half;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out_p, %off;
+    st.global.f32 [%addr], %r;
+DONE:
+    ret;
+}
+";
+
+/// Inverse standard-normal CDF `ndtri(p)` — f32. Direct port of the Cephes
+/// `ndtri_string` (`aten/src/ATen/native/cuda/Math.cuh:48-173`) in f32: the
+/// three coefficient regions (central P0/Q0, tail P1/Q1, far-tail P2/Q2) and
+/// the `code`-flag sign flip. `log`/`sqrt` use `lg2.approx.f32`*ln(2) /
+/// `sqrt.rn.f32`. Domain `(0,1)`: `0 -> -inf`, `1 -> +inf`, outside -> NaN.
+/// ABI: `(in, out, total)`.
+///
+/// The polevl regions are unrolled `fma.rn.f32` chains over the reverse-order
+/// Cephes coefficients (`polevl`, special.rs). `code` starts true; if
+/// `y > 1 - exp(-2)` we set `y = 1 - y`, `code = false`, and the final result
+/// is negated unless `code` (i.e. `return code ? -x : x`).
+#[cfg(feature = "cuda")]
+pub(crate) const NDTRI_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+// NOTE: PTX comments must stay ASCII-only. The WSL driver (591.86) JIT parser
+// rejects non-ASCII bytes (e.g. an em-dash in a comment) with
+// CUDA_ERROR_INVALID_PTX, even though standalone ptxas tolerates UTF-8.
+.visible .entry ndtri_f32(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r;
+    .reg .u64 %in_p, %out_p, %off, %addr;
+    .reg .f32 %y0, %y, %y2, %x, %x0, %x1, %z, %num, %den, %r;
+    .reg .f32 %one, %zero, %half, %ln2, %s2pi, %expm2, %thresh, %lg;
+    .reg .pred %oob, %is0, %is1, %ood, %flip, %central, %smallx;
+
+    ld.param.u64 %in_p,    [in_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %oob, %idx, %total_r;
+    @%oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in_p, %off;
+    ld.global.f32 %y0, [%addr];
+
+    mov.f32 %one,   0f3F800000;     // 1.0
+    mov.f32 %zero,  0f00000000;     // 0.0
+    mov.f32 %half,  0f3F000000;     // 0.5
+    mov.f32 %ln2,   0f3F317218;     // ln(2)
+    mov.f32 %s2pi,  0f40206C99;     // sqrt(2*pi) = 2.5066283
+    mov.f32 %expm2, 0f3E0A9555;     // exp(-2) = 0.13533528
+    mov.f32 %thresh,0f3F5D5AAB;     // 1 - exp(-2) = 0.86466472
+
+    // y0 == 0 -> -inf
+    setp.eq.f32 %is0, %y0, %zero;
+    @%is0 bra NEG_INF;
+    // y0 == 1 -> +inf
+    setp.eq.f32 %is1, %y0, %one;
+    @%is1 bra POS_INF;
+    // y0 < 0 || y0 > 1 -> NaN
+    setp.lt.f32 %ood, %y0, %zero;
+    @%ood bra NANV;
+    setp.gt.f32 %ood, %y0, %one;
+    @%ood bra NANV;
+
+    // code = true; y = y0; if (y > 1 - exp(-2)) { y = 1 - y; code = false; }
+    mov.f32 %y, %y0;
+    setp.gt.f32 %flip, %y0, %thresh;
+    @%flip sub.f32 %y, %one, %y0;
+
+    // central region: y > exp(-2)
+    setp.gt.f32 %central, %y, %expm2;
+    @!%central bra TAIL;
+
+    // y = y - 0.5; y2 = y*y; x = y + y*(y2 * P0(y2)/Q0(y2)); return x*s2pi
+    sub.f32 %y, %y, %half;
+    mul.f32 %y2, %y, %y;
+    // P0 (reverse order): -59.9633501, 98.0010754, -56.6762857,
+    //                      13.9312609, -1.23916584
+    mov.f32 %num, 0fC26FDA78;       // -59.9633501
+    mov.f32 %x0,  0f42C4008D;       //  98.0010754  (scratch for coeffs)
+    fma.rn.f32 %num, %num, %y2, %x0;
+    mov.f32 %x0,  0fC262B484;       // -56.6762857
+    fma.rn.f32 %num, %num, %y2, %x0;
+    mov.f32 %x0,  0f415EE672;       //  13.9312609
+    fma.rn.f32 %num, %num, %y2, %x0;
+    mov.f32 %x0,  0fBF9E9CFC;       //  -1.23916584
+    fma.rn.f32 %num, %num, %y2, %x0;
+    // Q0 (reverse order): 1, 1.95448858, 4.67627913, 86.3602421,
+    //   -225.462688, 200.260212, -82.0372256, 15.9056225, -1.18331621
+    mov.f32 %den, 0f3F800000;       // 1.0
+    mov.f32 %x0,  0f3FFA2CAF;       // 1.95448858
+    fma.rn.f32 %den, %den, %y2, %x0;
+    mov.f32 %x0,  0f4095A414;       // 4.67627913
+    fma.rn.f32 %den, %den, %y2, %x0;
+    mov.f32 %x0,  0f42ACB872;       // 86.3602421
+    fma.rn.f32 %den, %den, %y2, %x0;
+    mov.f32 %x0,  0fC3617673;       // -225.462688
+    fma.rn.f32 %den, %den, %y2, %x0;
+    mov.f32 %x0,  0f4348429D;       // 200.260212
+    fma.rn.f32 %den, %den, %y2, %x0;
+    mov.f32 %x0,  0fC2A4130F;       // -82.0372256
+    fma.rn.f32 %den, %den, %y2, %x0;
+    mov.f32 %x0,  0f417E7D6E;       // 15.9056225
+    fma.rn.f32 %den, %den, %y2, %x0;
+    mov.f32 %x0,  0fBF9776E8;       // -1.18331621
+    fma.rn.f32 %den, %den, %y2, %x0;
+    // x = y + y*(y2 * num/den)
+    div.rn.f32 %x0, %num, %den;
+    mul.f32 %x0, %x0, %y2;
+    fma.rn.f32 %x, %y, %x0, %y;      // y + y*x0
+    mul.f32 %r, %x, %s2pi;
+    // Central region returns x*s2pi directly (Math.cuh:101): NO sign flip.
+    bra STORE;
+
+TAIL:
+    // x = sqrt(-2 log y); ln y = lg2(y)*ln2
+    lg2.approx.f32 %lg, %y;
+    mul.f32 %lg, %lg, %ln2;          // ln(y)
+    mov.f32 %x0, 0fC0000000;         // -2.0
+    mul.f32 %x, %lg, %x0;            // -2 log y
+    sqrt.rn.f32 %x, %x;              // x = sqrt(-2 log y)
+    // x0 = x - log(x)/x
+    lg2.approx.f32 %lg, %x;
+    mul.f32 %lg, %lg, %ln2;          // ln(x)
+    div.rn.f32 %lg, %lg, %x;         // log(x)/x
+    sub.f32 %x0, %x, %lg;            // x0 = x - log(x)/x
+    rcp.rn.f32 %z, %x;               // z = 1/x
+
+    mov.f32 %lg, 0f41000000;         // 8.0 (reuse %lg as scratch)
+    setp.lt.f32 %smallx, %x, %lg;    // x < 8.0
+    @!%smallx bra FARTAIL;
+
+    // P1/Q1 (x < 8). reverse-order coeffs.
+    // P1: 4.05544892, 31.5251095, 57.1628192, 44.0805074, 14.6849562,
+    //     2.18663307, -0.140256079, -0.0350424627, -0.000857456785
+    mov.f32 %num, 0f4081C63D;        // 4.05544892
+    mov.f32 %x1,  0f41FC336D;        // 31.5251095
+    fma.rn.f32 %num, %num, %z, %x1;
+    mov.f32 %x1,  0f4264A6BA;        // 57.1628192
+    fma.rn.f32 %num, %num, %z, %x1;
+    mov.f32 %x1,  0f42305271;        // 44.0805074
+    fma.rn.f32 %num, %num, %z, %x1;
+    mov.f32 %x1,  0f416AF595;        // 14.6849562
+    fma.rn.f32 %num, %num, %z, %x1;
+    mov.f32 %x1,  0f400BF1CC;        // 2.18663307
+    fma.rn.f32 %num, %num, %z, %x1;
+    mov.f32 %x1,  0fBE0F9F4A;        // -0.140256079
+    fma.rn.f32 %num, %num, %z, %x1;
+    mov.f32 %x1,  0fBD0F88AF;        // -0.0350424627
+    fma.rn.f32 %num, %num, %z, %x1;
+    mov.f32 %x1,  0fBA60C6F3;        // -0.000857456785
+    fma.rn.f32 %num, %num, %z, %x1;
+    // Q1
+    mov.f32 %den, 0f3F800000;        // 1.0
+    mov.f32 %x1,  0f417C7AD5;        // 15.7799883
+    fma.rn.f32 %den, %den, %z, %x1;
+    mov.f32 %x1,  0f42359024;        // 45.3907635
+    fma.rn.f32 %den, %den, %z, %x1;
+    mov.f32 %x1,  0f422544D1;        // 41.3172038
+    fma.rn.f32 %den, %den, %z, %x1;
+    mov.f32 %x1,  0f4170AE3D;        // 15.0425386
+    fma.rn.f32 %den, %den, %z, %x1;
+    mov.f32 %x1,  0f40204C2D;        // 2.50464946
+    fma.rn.f32 %den, %den, %z, %x1;
+    mov.f32 %x1,  0fBE119866;        // -0.142182923
+    fma.rn.f32 %den, %den, %z, %x1;
+    mov.f32 %x1,  0fBD1BFA72;        // -0.0380806408
+    fma.rn.f32 %den, %den, %z, %x1;
+    mov.f32 %x1,  0fBA74A5FC;        // -0.000933259481
+    fma.rn.f32 %den, %den, %z, %x1;
+    bra TAIL_FINISH;
+
+FARTAIL:
+    // P2/Q2 (x >= 8). reverse-order coeffs.
+    mov.f32 %num, 0f404F3747;        // 3.23774892
+    mov.f32 %x1,  0f40DD498E;        // 6.91522889
+    fma.rn.f32 %num, %num, %z, %x1;
+    mov.f32 %x1,  0f407C1578;        // 3.93881025
+    fma.rn.f32 %num, %num, %z, %x1;
+    mov.f32 %x1,  0f3FAAA0E1;        // 1.33303461
+    fma.rn.f32 %num, %num, %z, %x1;
+    mov.f32 %x1,  0f3E4E5230;        // 0.201485390
+    fma.rn.f32 %num, %num, %z, %x1;
+    mov.f32 %x1,  0f3C4AB285;        // 0.0123716635
+    fma.rn.f32 %num, %num, %z, %x1;
+    mov.f32 %x1,  0f399E1D97;        // 0.000301581554
+    fma.rn.f32 %num, %num, %z, %x1;
+    mov.f32 %x1,  0f3632614A;        // 2.65806975e-06
+    fma.rn.f32 %num, %num, %z, %x1;
+    mov.f32 %x1,  0f31D66562;        // 6.23974539e-09
+    fma.rn.f32 %num, %num, %z, %x1;
+    // Q2
+    mov.f32 %den, 0f3F800000;        // 1.0
+    mov.f32 %x1,  0f40C0C6D3;        // 6.02427039
+    fma.rn.f32 %den, %den, %z, %x1;
+    mov.f32 %x1,  0f406B826D;        // 3.67983564
+    fma.rn.f32 %den, %den, %z, %x1;
+    mov.f32 %x1,  0f3FB04239;        // 1.37702099
+    fma.rn.f32 %den, %den, %z, %x1;
+    mov.f32 %x1,  0f3E5D6D3B;        // 0.216236994
+    fma.rn.f32 %den, %den, %z, %x1;
+    mov.f32 %x1,  0f3C5BE13D;        // 0.0134204006
+    fma.rn.f32 %den, %den, %z, %x1;
+    mov.f32 %x1,  0f39ABF95B;        // 0.000328014465
+    fma.rn.f32 %den, %den, %z, %x1;
+    mov.f32 %x1,  0f36421C68;        // 2.89247865e-06
+    fma.rn.f32 %den, %den, %z, %x1;
+    mov.f32 %x1,  0f31E94F2E;        // 6.79019408e-09
+    fma.rn.f32 %den, %den, %z, %x1;
+
+TAIL_FINISH:
+    // x1 = z * num/den ; x = x0 - x1
+    div.rn.f32 %x1, %num, %den;
+    mul.f32 %x1, %x1, %z;
+    sub.f32 %r, %x0, %x1;
+
+SIGN_FLIP:
+    // return code ? -x : x. code is FALSE iff we flipped (y0 > thresh).
+    // So: if (!flip) r = -r.
+    @!%flip neg.f32 %r, %r;
+    bra STORE;
+
+NEG_INF:
+    mov.f32 %r, 0fFF800000;          // -inf
+    bra STORE;
+POS_INF:
+    mov.f32 %r, 0f7F800000;          // +inf
+    bra STORE;
+NANV:
+    mov.f32 %r, 0f7FC00000;          // quiet NaN
+
+STORE:
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out_p, %off;
+    st.global.f32 [%addr], %r;
+DONE:
+    ret;
+}
+";
+
+// ---------------------------------------------------------------------------
 // Launch helpers
 // ---------------------------------------------------------------------------
 
@@ -1205,6 +1637,70 @@ pub fn gpu_legendre_poly_f64(
     launch_simple_f64(input, n, device, LEGENDRE_F64_PTX, "legendre_poly_f64")
 }
 
+/// Launch a parameterless elementwise transcendental kernel (entr / ndtr /
+/// ndtri) whose ABI is `(in, out, total)` on an f32 buffer.
+#[cfg(feature = "cuda")]
+fn launch_elementwise_f32(
+    input: &CudaBuffer<f32>,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel: &'static str,
+) -> GpuResult<CudaBuffer<f32>> {
+    let total = check_input(input, device, kernel)?;
+    let mut out = alloc_zeros_f32(total, device)?;
+    if total == 0 {
+        return Ok(out);
+    }
+    let f =
+        crate::module_cache::get_or_compile(device.context(), ptx, kernel, device.ordinal() as u32)
+            .map_err(|e| GpuError::PtxCompileFailed { kernel, source: e })?;
+    let total_u32 = total as u32;
+    let cfg = launch_cfg(total_u32);
+    // SAFETY: `f` is `kernel` (one of the `(in, out, total)`-ABI elementwise
+    // transcendental entries); the three launch args match the PTX `.entry`
+    // order. `input` is on `device` with `total` f32 elements (validated by
+    // `check_input`); `out` is a fresh non-aliasing `total`-element buffer;
+    // every thread is bounds-guarded by the `setp.ge.u32` head; `total` fits
+    // u32. By-ref params outlive the synchronous launch on this stack frame.
+    unsafe {
+        device
+            .stream()
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Entropy `entr(x)` forward on an f32 buffer (on-device, no host round-trip).
+///
+/// # Errors
+/// See [`gpu_chebyshev_poly_f32`].
+#[cfg(feature = "cuda")]
+pub fn gpu_entr_f32(input: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    launch_elementwise_f32(input, device, ENTR_F32_PTX, "entr_f32")
+}
+
+/// Standard-normal CDF `ndtr(x)` forward on an f32 buffer (on-device).
+///
+/// # Errors
+/// See [`gpu_chebyshev_poly_f32`].
+#[cfg(feature = "cuda")]
+pub fn gpu_ndtr_f32(input: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    launch_elementwise_f32(input, device, NDTR_F32_PTX, "ndtr_f32")
+}
+
+/// Inverse standard-normal CDF `ndtri(p)` forward on an f32 buffer (on-device).
+///
+/// # Errors
+/// See [`gpu_chebyshev_poly_f32`].
+#[cfg(feature = "cuda")]
+pub fn gpu_ndtri_f32(input: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    launch_elementwise_f32(input, device, NDTRI_F32_PTX, "ndtri_f32")
+}
+
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
     use super::*;
@@ -1445,6 +1941,134 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- entr / ndtr / ndtri (#1651 batch 1) ---------------------------------
+    //
+    // Expected values are live `torch.special.*` (torch 2.11.0+cu130, f32)
+    // outputs (R-CHAR-3: oracle-derived). The GPU result stays on-device — it
+    // is a `CudaBuffer<f32>` (is_cuda by type), `device_ordinal()` is asserted
+    // before the explicit `gpu_to_cpu` read-back for value comparison.
+
+    #[test]
+    fn entr_on_device_matches_torch() {
+        let Some(device) = dev() else { return };
+        let xs: [f32; 7] = [-1.5, -0.7, -0.25, 0.0, 0.3, 0.8, 1.4];
+        // torch.special.entr f32 oracle:
+        let want: [f32; 7] = [
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            0.361_191_9,
+            0.178_514_8,
+            -0.471_061_1,
+        ];
+        let xg = cpu_to_gpu(&xs, &device).unwrap();
+        let yg = gpu_entr_f32(&xg, &device).unwrap();
+        // result stays on device.
+        assert_eq!(yg.device_ordinal(), device.ordinal());
+        let got = gpu_to_cpu(&yg, &device).unwrap();
+        for i in 0..7 {
+            if want[i].is_infinite() {
+                assert!(
+                    got[i].is_infinite() && got[i] < 0.0,
+                    "entr idx {i}: got {} want -inf",
+                    got[i]
+                );
+            } else {
+                assert!(
+                    (got[i] - want[i]).abs() <= 1e-5 * (1.0 + want[i].abs()),
+                    "entr idx {i} x={}: got {} want {}",
+                    xs[i],
+                    got[i],
+                    want[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ndtr_on_device_matches_torch() {
+        let Some(device) = dev() else { return };
+        let xs: [f32; 7] = [-1.5, -0.7, -0.25, 0.0, 0.3, 0.8, 1.4];
+        let want: [f32; 7] = [
+            0.066_807_21,
+            0.241_963_7,
+            0.401_293_7,
+            0.5,
+            0.617_911_4,
+            0.788_144_6,
+            0.919_243_3,
+        ];
+        let xg = cpu_to_gpu(&xs, &device).unwrap();
+        let yg = gpu_ndtr_f32(&xg, &device).unwrap();
+        assert_eq!(yg.device_ordinal(), device.ordinal());
+        let got = gpu_to_cpu(&yg, &device).unwrap();
+        for i in 0..7 {
+            assert!(
+                (got[i] - want[i]).abs() <= 1e-5,
+                "ndtr idx {i} x={}: got {} want {}",
+                xs[i],
+                got[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn ndtri_on_device_matches_torch() {
+        let Some(device) = dev() else { return };
+        // central + flip-region interior points.
+        let ps: [f32; 7] = [0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975];
+        let want: [f32; 7] = [
+            -1.959_964,
+            -1.281_552,
+            -0.674_489_8,
+            0.0,
+            0.674_489_8,
+            1.281_551,
+            1.959_964,
+        ];
+        let xg = cpu_to_gpu(&ps, &device).unwrap();
+        let yg = gpu_ndtri_f32(&xg, &device).unwrap();
+        assert_eq!(yg.device_ordinal(), device.ordinal());
+        let got = gpu_to_cpu(&yg, &device).unwrap();
+        for i in 0..7 {
+            assert!(
+                (got[i] - want[i]).abs() <= 2e-4 * (1.0 + want[i].abs()),
+                "ndtri idx {i} p={}: got {} want {}",
+                ps[i],
+                got[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn ndtri_tail_and_edges_on_device_matches_torch() {
+        let Some(device) = dev() else { return };
+        // 0.001/1e-6 -> tail+far-tail regions; 0.999 -> flip region;
+        // 0.0/1.0 -> -inf/+inf; -0.1/1.1 -> NaN.
+        let ps: [f32; 7] = [0.001, 1e-6, 0.999, 0.0, 1.0, -0.1, 1.1];
+        let want_tail: [f32; 3] = [-3.090_232, -4.753_424, 3.090_236];
+        let xg = cpu_to_gpu(&ps, &device).unwrap();
+        let yg = gpu_ndtri_f32(&xg, &device).unwrap();
+        assert_eq!(yg.device_ordinal(), device.ordinal());
+        let got = gpu_to_cpu(&yg, &device).unwrap();
+        for i in 0..3 {
+            assert!(
+                (got[i] - want_tail[i]).abs() <= 5e-3 * (1.0 + want_tail[i].abs()),
+                "ndtri tail idx {i} p={}: got {} want {}",
+                ps[i],
+                got[i],
+                want_tail[i]
+            );
+        }
+        assert!(got[3].is_infinite() && got[3] < 0.0, "ndtri(0) == -inf");
+        assert!(got[4].is_infinite() && got[4] > 0.0, "ndtri(1) == +inf");
+        assert!(got[5].is_nan(), "ndtri(-0.1) == NaN");
+        assert!(got[6].is_nan(), "ndtri(1.1) == NaN");
     }
 
     #[test]
