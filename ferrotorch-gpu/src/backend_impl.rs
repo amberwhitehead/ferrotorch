@@ -7341,6 +7341,33 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
+    fn unique_1d(
+        &self,
+        input: &GpuBufferHandle,
+        n: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, Vec<usize>, Vec<usize>)> {
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        match input.dtype() {
+            DType::F32 => {
+                let (values, inverse, counts) =
+                    crate::search::gpu_unique_f32(Self::unwrap_buffer(input)?, n, dev)
+                        .map_err(Self::map_gpu_err)?;
+                Ok((Self::wrap_buffer(values, ord), inverse, counts))
+            }
+            DType::F64 => {
+                let (values, inverse, counts) =
+                    crate::search::gpu_unique_f64(Self::unwrap_buffer_f64(input)?, n, dev)
+                        .map_err(Self::map_gpu_err)?;
+                Ok((Self::wrap_buffer_f64(values, ord), inverse, counts))
+            }
+            other => Err(FerrotorchError::InvalidArgument {
+                message: format!("unique_1d: unsupported value dtype {other}"),
+            }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
     fn index_select_intidx(
         &self,
         src: &GpuBufferHandle,

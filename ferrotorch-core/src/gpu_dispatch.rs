@@ -5159,6 +5159,37 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// On-device `torch.unique(sorted=True, return_inverse=True,
+    /// return_counts=True)` over a GPU-resident 1-D value buffer (#1545).
+    /// Returns the SORTED-ascending DISTINCT elements plus inverse + counts:
+    ///
+    /// - `values` — a value handle of `out_len` sorted unique elements with the
+    ///   SAME `DType` as `input` (∈ {F32, F64}); the deduplicated output stays
+    ///   GPU-resident. `out_len` is DATA-DEPENDENT (the number of distinct
+    ///   values). NaN entries sort to the end, each NaN a DISTINCT unique.
+    /// - `inverse` — host `Vec<usize>` of length `n`: each input element's index
+    ///   into `values` (`return_inverse=True`).
+    /// - `counts` — host `Vec<usize>` of length `out_len`: each unique's
+    ///   frequency (`return_counts=True`).
+    ///
+    /// Unlike [`Self::unique_consecutive_1d`] (which collapses only ADJACENT
+    /// runs), this first SORTS the values (carrying their original indices) so
+    /// that ALL occurrences of a value collapse — mirroring `compute_unique` in
+    /// `aten/src/ATen/native/cuda/Unique.cu` (sort-by-key → adjacent-difference
+    /// inverse scan → run-length counts). The CUDA `unique` always sorts (no
+    /// device hashtable in thrust). The compaction/dedup runs on-device; only
+    /// the derived index/run metadata is read back to build `inverse` / `counts`
+    /// (host `Vec<usize>` by the CPU signature) — the VALUE data never leaves
+    /// the device (no R-CODE-4 round trip). The default impl errors; the CUDA
+    /// backend overrides it with the `gpu_unique_*` kernels.
+    fn unique_1d(
+        &self,
+        _input: &GpuBufferHandle,
+        _n: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, Vec<usize>, Vec<usize>)> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "unique_1d" })
+    }
+
     /// `index_select(dim)` driven by a GPU-resident integer index handle.
     ///
     /// `src` is the value buffer (layout `[outer, in_dim, inner]`); `index` is

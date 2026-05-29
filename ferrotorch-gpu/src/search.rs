@@ -60,6 +60,9 @@
 //! | REQ-16 (meshgrid PTX + ABI) | SHIPPED | `MESHGRID_F32_PTX`/`MESHGRID_F64_PTX in search.rs` carry the 5-arg ABI `(in,out,total,inner,axis_len)`; one thread per output element gathers `in[(flat/inner)%axis_len]` |
 //! | REQ-17 (meshgrid trait surface) | SHIPPED | `fn meshgrid_grid in gpu_dispatch.rs`; consumer `ops::search::meshgrid` GPU branch |
 //! | REQ-18 (meshgrid dispatch + consumer) | SHIPPED | `CudaBackendImpl::meshgrid_grid in backend_impl.rs` dispatches `match dtype { F32, F64 }`; non-test consumer `ferrotorch_core::ops::search::meshgrid` CUDA branch keeps each grid GPU-resident (`TensorStorage::gpu`) |
+//! | REQ-21 (`gpu_unique_f32`/`_f64`) | SHIPPED | `pub fn gpu_unique_f32`/`_f64 in search.rs` run init → bitonic sort-by-key → run-flag → `gpu_cumsum` → compaction mirroring `compute_unique` at `aten/src/ATen/native/cuda/Unique.cu:51-85` (sort-by-key `radix_sort_pairs` `UniqueCub.cu:175`, inverse scatter `:63-66`, run-length counts `:75-81`); consumer `CudaBackendImpl::unique_1d in backend_impl.rs` |
+//! | REQ-22 (unique PTX + ABI) | SHIPPED | `UNIQUE_INIT_F32_PTX`/`_F64_PTX` (5-arg `(in,key,idx,n,npad)`) + `UNIQUE_BITONIC_F32_PTX`/`_F64_PTX` (5-arg `(key,idx,npad,j,k)`, via `unique_bitonic_ptx!`) `in search.rs`; comparator ranks pads (`idx==i32::MAX`) + NaN (`setp.neu`) last via `selp.u32`/`setp.*.u32` (no `.pred` arithmetic); dedup/compaction reuse `RUN_FLAG_*`/`COMPACT_*`/`gpu_cumsum` |
+//! | REQ-23 (unique trait + dispatch + consumer) | SHIPPED | `fn unique_1d in gpu_dispatch.rs`; `CudaBackendImpl::unique_1d in backend_impl.rs` (`match dtype { F32, F64 }`); `pub use search::{gpu_unique_f32, gpu_unique_f64} in lib.rs`; non-test consumer `ferrotorch_core::ops::search::unique` CUDA branch keeps SORTED-unique VALUES GPU-resident (`TensorStorage::gpu`), reads back only index/run metadata; bf16/f16 reject |
 
 #![cfg(feature = "cuda")]
 
@@ -2028,6 +2031,716 @@ fn launch_compact_f64(
             .launch(cfg)?;
     }
     Ok(())
+}
+
+// ===========================================================================
+// unique — sorted unique elements with inverse + counts (#1545, final op)
+//
+// `torch.unique(sorted=True, return_inverse=True, return_counts=True)` returns
+// the SORTED-ascending unique elements of a flat tensor, plus per-input inverse
+// indices and per-unique counts. Upstream CUDA
+// (`aten/src/ATen/native/cuda/Unique.cu` `compute_unique:51-85`,
+// `UniqueCub.cu` `unique_cuda_template:155-185`) ALWAYS sorts (no device
+// hashtable in thrust): it `radix_sort_pairs` the values CARRYING their
+// original int64 indices (`UniqueCub.cu:175`), then
+//   - inverse:  `inverse[sorted_indices[i]] = inclusive_scan(adjacent_diff(
+//                not_equal))[i]`  (`Unique.cu:63-66`, `inv_loc[0]=0`),
+//   - counts:   run-length of each unique value (`Unique.cu:75-81`,
+//                `unique_by_key` + `adjacent_difference` of run boundaries).
+//
+// ferrotorch lowers the same pipeline, keeping the VALUE DATA on-device:
+//   1. INIT kernel: build a power-of-2 padded key+index pair array
+//      (`padkey[i] = i<n ? in[i] : +INF`, `padidx[i] = i<n ? i : PAD_IDX`).
+//      Padding lets a single BITONIC network sort any length.
+//   2. BITONIC sort-by-key (ascending): a standard multi-launch bitonic network
+//      compare-exchanges (key,idx) pairs. The comparator is a TOTAL order that
+//      ranks pads strictly last (via the `idx == PAD_IDX` payload) and NaN as
+//      the maximum among real values (`a != a` unordered self-compare), so NaN
+//      sorts to the end and pads sort after even NaN. After the sort the first
+//      `n` positions hold the real elements in ascending order (NaN last); the
+//      pads occupy `[n, npad)` and are never read again.
+//   3. DEDUP: reuse the `unique_consecutive` `run_flags_and_scan` (the
+//      `setp.neu` UNORDERED not-equal run-flag — true for `NaN != NaN`, so each
+//      NaN is its OWN run) over the first `n` SORTED positions → `incl` (the
+//      inclusive run-start scan; `incl[i]-1` is the 0-based unique id of sorted
+//      position `i`) → `launch_compact` scatters each run-start's sorted value
+//      to its unique slot, producing the GPU-resident `unique_values`.
+//   4. INVERSE / COUNTS: read back ONLY the integer metadata — the `incl` scan
+//      and the sorted index permutation (i32) — and build the host vectors
+//      `inverse[sortidx[i]] = incl[i]-1` and `counts[uid] += 1`. This mirrors
+//      `Unique.cu:63-66,75-81` exactly. The VALUE data never leaves the device
+//      and returns (only the derived index/run metadata is copied to host, the
+//      same contract as `searchsorted_1d` / `unique_consecutive_1d`); the
+//      `inverse` / `counts` outputs are host `Vec<usize>` BY the CPU
+//      `ops::search::unique` signature.
+//
+// NaN parity (R-CHAR-3, verified live torch 2.11.0+cu130, RTX 3090):
+//   torch.unique([nan,1,nan,2,nan]) -> values [1,2,nan,nan,nan] (each NaN a
+//   DISTINCT unique entry at the end), inverse [2,0,3,1,4], counts [1,1,1,1,1].
+//   torch.unique does NOT collapse NaNs — identical to `unique_consecutive`'s
+//   `setp.neu` predicate, so step 3 reuses it unchanged.
+//
+// INIT ABL: (in_ptr, key_ptr, idx_ptr, n, npad)
+// BITONIC ABI: (key_ptr, idx_ptr, npad, j, k)   — one (k,j) step per launch
+// ===========================================================================
+
+// Sentinel index marking a pad slot is `i32::MAX` (`2147483647`, hardcoded in
+// the INIT and BITONIC PTX below). Real indices are `[0, n)` with `n <=
+// i32::MAX`, so the sentinel never collides with a real index and — being
+// treated as strictly-largest by the comparator — pins every pad to the tail
+// of the sorted array regardless of its (+INF) value, even past NaN.
+
+/// f32 init kernel: scatter the input into a padded `(key, idx)` pair array.
+/// `key[i] = i<n ? in[i] : +INF`, `idx[i] = i<n ? i : PAD_IDX`.
+const UNIQUE_INIT_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry unique_init_f32_kernel(
+    .param .u64 in_ptr,
+    .param .u64 key_ptr,
+    .param .u64 idx_ptr,
+    .param .u32 n,
+    .param .u32 npad
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %i, %n_r, %npad_r, %pad_idx;
+    .reg .u64 %in_p, %key_p, %idx_p, %koff, %ioff, %addr;
+    .reg .f32 %v, %inf;
+    .reg .pred %p_oob, %p_real;
+
+    ld.param.u64 %in_p,   [in_ptr];
+    ld.param.u64 %key_p,  [key_ptr];
+    ld.param.u64 %idx_p,  [idx_ptr];
+    ld.param.u32 %n_r,    [n];
+    ld.param.u32 %npad_r, [npad];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %i, %bid_r, %bdim_r, %tid_r;
+
+    setp.ge.u32 %p_oob, %i, %npad_r;
+    @%p_oob bra DONE;
+
+    // koff = i * 4 (f32 key stride); ioff = i * 4 (i32 idx stride)
+    cvt.u64.u32 %koff, %i;
+    shl.b64 %koff, %koff, 2;
+    cvt.u64.u32 %ioff, %i;
+    shl.b64 %ioff, %ioff, 2;
+
+    mov.u32 %pad_idx, 2147483647;       // i32::MAX
+    mov.f32 %inf, 0f7F800000;           // +INF
+
+    setp.lt.u32 %p_real, %i, %n_r;
+    @!%p_real bra WRITE_PAD;
+
+    // real: key[i] = in[i], idx[i] = i
+    add.u64 %addr, %in_p, %koff;
+    ld.global.f32 %v, [%addr];
+    add.u64 %addr, %key_p, %koff;
+    st.global.f32 [%addr], %v;
+    add.u64 %addr, %idx_p, %ioff;
+    st.global.u32 [%addr], %i;
+    bra DONE;
+
+WRITE_PAD:
+    add.u64 %addr, %key_p, %koff;
+    st.global.f32 [%addr], %inf;
+    add.u64 %addr, %idx_p, %ioff;
+    st.global.u32 [%addr], %pad_idx;
+
+DONE:
+    ret;
+}
+";
+
+/// f64 init kernel. f64 keys (8-byte stride); the idx payload stays i32.
+const UNIQUE_INIT_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry unique_init_f64_kernel(
+    .param .u64 in_ptr,
+    .param .u64 key_ptr,
+    .param .u64 idx_ptr,
+    .param .u32 n,
+    .param .u32 npad
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %i, %n_r, %npad_r, %pad_idx;
+    .reg .u64 %in_p, %key_p, %idx_p, %koff, %ioff, %addr;
+    .reg .f64 %v, %inf;
+    .reg .pred %p_oob, %p_real;
+
+    ld.param.u64 %in_p,   [in_ptr];
+    ld.param.u64 %key_p,  [key_ptr];
+    ld.param.u64 %idx_p,  [idx_ptr];
+    ld.param.u32 %n_r,    [n];
+    ld.param.u32 %npad_r, [npad];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %i, %bid_r, %bdim_r, %tid_r;
+
+    setp.ge.u32 %p_oob, %i, %npad_r;
+    @%p_oob bra DONE;
+
+    // koff = i * 8 (f64 key stride); ioff = i * 4 (i32 idx stride)
+    cvt.u64.u32 %koff, %i;
+    shl.b64 %koff, %koff, 3;
+    cvt.u64.u32 %ioff, %i;
+    shl.b64 %ioff, %ioff, 2;
+
+    mov.u32 %pad_idx, 2147483647;
+    mov.f64 %inf, 0d7FF0000000000000;   // +INF (f64)
+
+    setp.lt.u32 %p_real, %i, %n_r;
+    @!%p_real bra WRITE_PAD;
+
+    add.u64 %addr, %in_p, %koff;
+    ld.global.f64 %v, [%addr];
+    add.u64 %addr, %key_p, %koff;
+    st.global.f64 [%addr], %v;
+    add.u64 %addr, %idx_p, %ioff;
+    st.global.u32 [%addr], %i;
+    bra DONE;
+
+WRITE_PAD:
+    add.u64 %addr, %key_p, %koff;
+    st.global.f64 [%addr], %inf;
+    add.u64 %addr, %idx_p, %ioff;
+    st.global.u32 [%addr], %pad_idx;
+
+DONE:
+    ret;
+}
+";
+
+/// Generate one bitonic compare-exchange PTX step kernel for value type `tyld`
+/// (`f32`/`f64`) with element byte-width `kbytes` (`"2"` shift for f32, `"3"`
+/// for f64). The idx payload is always i32 (4-byte). One thread per array
+/// position `i`; the thread that owns the LOWER of the pair `(i, i^j)` performs
+/// the exchange. Ascending sub-sequence when `(i & k) == 0`.
+///
+/// Comparator (a = pos i, b = pos ixj) is a TOTAL order: pads (idx == PAD_IDX)
+/// rank strictly above non-pads; among equal pad-status, NaN ranks above
+/// non-NaN; among equal NaN-status, ordered `a > b`. `greater` is the predicate
+/// "a should come AFTER b". Swap iff `greater(a,b) == ascending` (i.e. for an
+/// ascending block we want the larger element at the higher index).
+macro_rules! unique_bitonic_ptx {
+    ($name:literal, $tyld:literal, $kbytes:literal) => {
+        concat!(
+            ".version 7.0\n",
+            ".target sm_52\n",
+            ".address_size 64\n",
+            "\n",
+            ".visible .entry ",
+            $name,
+            "(\n",
+            "    .param .u64 key_ptr,\n",
+            "    .param .u64 idx_ptr,\n",
+            "    .param .u32 npad,\n",
+            "    .param .u32 j,\n",
+            "    .param .u32 k\n",
+            ") {\n",
+            "    .reg .u32 %tid_r, %bid_r, %bdim_r, %i, %ixj, %npad_r, %j_r, %k_r, %t1, %t2, %g;\n",
+            "    .reg .u32 %ia, %ib;\n",
+            "    .reg .u64 %key_p, %idx_p, %koffa, %koffb, %ioffa, %ioffb, %addr;\n",
+            "    .reg .",
+            $tyld,
+            " %a, %b;\n",
+            "    .reg .pred %p_oob, %p_partner, %p_asc, %p_pada, %p_padb;\n",
+            "    .reg .pred %p_nana, %p_nanb, %p_gt, %p_swap, %p_tmp;\n",
+            "\n",
+            "    ld.param.u64 %key_p,  [key_ptr];\n",
+            "    ld.param.u64 %idx_p,  [idx_ptr];\n",
+            "    ld.param.u32 %npad_r, [npad];\n",
+            "    ld.param.u32 %j_r,    [j];\n",
+            "    ld.param.u32 %k_r,    [k];\n",
+            "\n",
+            "    mov.u32 %tid_r,  %tid.x;\n",
+            "    mov.u32 %bid_r,  %ctaid.x;\n",
+            "    mov.u32 %bdim_r, %ntid.x;\n",
+            "    mad.lo.u32 %i, %bid_r, %bdim_r, %tid_r;\n",
+            "\n",
+            "    setp.ge.u32 %p_oob, %i, %npad_r;\n",
+            "    @%p_oob bra DONE;\n",
+            "\n",
+            "    // ixj = i ^ j; only the LOWER thread of the pair acts (ixj > i).\n",
+            "    xor.b32 %ixj, %i, %j_r;\n",
+            "    setp.le.u32 %p_partner, %ixj, %i;\n",
+            "    @%p_partner bra DONE;\n",
+            "\n",
+            "    // ascending block iff (i & k) == 0\n",
+            "    and.b32 %t1, %i, %k_r;\n",
+            "    setp.eq.u32 %p_asc, %t1, 0;\n",
+            "\n",
+            "    // load (key,idx) at i and ixj\n",
+            "    cvt.u64.u32 %koffa, %i;\n",
+            "    shl.b64 %koffa, %koffa, ",
+            $kbytes,
+            ";\n",
+            "    cvt.u64.u32 %koffb, %ixj;\n",
+            "    shl.b64 %koffb, %koffb, ",
+            $kbytes,
+            ";\n",
+            "    cvt.u64.u32 %ioffa, %i;\n",
+            "    shl.b64 %ioffa, %ioffa, 2;\n",
+            "    cvt.u64.u32 %ioffb, %ixj;\n",
+            "    shl.b64 %ioffb, %ioffb, 2;\n",
+            "    add.u64 %addr, %key_p, %koffa;\n",
+            "    ld.global.",
+            $tyld,
+            " %a, [%addr];\n",
+            "    add.u64 %addr, %key_p, %koffb;\n",
+            "    ld.global.",
+            $tyld,
+            " %b, [%addr];\n",
+            "    add.u64 %addr, %idx_p, %ioffa;\n",
+            "    ld.global.u32 %ia, [%addr];\n",
+            "    add.u64 %addr, %idx_p, %ioffb;\n",
+            "    ld.global.u32 %ib, [%addr];\n",
+            "\n",
+            "    // --- total-order greater(a,b): does a belong AFTER b? ---\n",
+            "    // Computed as a u32 flag %g (0/1); predicate arithmetic is avoided (PTX\n",
+            "    // has no setp/mov on .pred operands) by materialising each sub-predicate\n",
+            "    // to a u32 via selp and branching on setp.*.u32.\n",
+            "    // pad status (idx == i32::MAX), as u32 flags.\n",
+            "    setp.eq.u32 %p_pada, %ia, 2147483647;\n",
+            "    selp.u32 %t1, 1, 0, %p_pada;\n",
+            "    setp.eq.u32 %p_padb, %ib, 2147483647;\n",
+            "    selp.u32 %t2, 1, 0, %p_padb;\n",
+            "    // if pad_a != pad_b -> greater = pad_a; resolve at the tail.\n",
+            "    setp.ne.u32 %p_tmp, %t1, %t2;\n",
+            "    @%p_tmp bra PAD_DECIDE;\n",
+            "\n",
+            "    // same pad status: NaN-aware value compare. setp.neu.<f> (UNORDERED\n",
+            "    // not-equal) self-compare is true ONLY for NaN (a != a iff a is NaN); the\n",
+            "    // ORDERED setp.ne returns FALSE for NaN and would mis-rank it. Materialise\n",
+            "    // each to a u32 flag.\n",
+            "    setp.neu.",
+            $tyld,
+            " %p_nana, %a, %a;\n",
+            "    selp.u32 %t1, 1, 0, %p_nana;\n",
+            "    setp.neu.",
+            $tyld,
+            " %p_nanb, %b, %b;\n",
+            "    selp.u32 %t2, 1, 0, %p_nanb;\n",
+            "    setp.ne.u32 %p_tmp, %t1, %t2;\n",
+            "    @%p_tmp bra NAN_DECIDE;\n",
+            "    // equal NaN status. If both NaN they are 'equal' as values -> break the tie\n",
+            "    // by ASCENDING original index (greater = ia > ib) so distinct NaN entries\n",
+            "    // sort by original position, matching torch's radix-stable NaN order\n",
+            "    // (verified live: unique([nan,1,nan,2,nan]).inverse = [2,0,3,1,4]).\n",
+            "    @%p_nana bra IDX_DECIDE;           // both NaN -> tie-break by index\n",
+            "    // both finite: ordered compare; on an exact value tie, also break by index\n",
+            "    // so equal-value runs are stable (uid is identical either way, but this\n",
+            "    // keeps the sorted permutation deterministic).\n",
+            "    setp.gt.",
+            $tyld,
+            " %p_gt, %a, %b;\n",
+            "    @%p_gt bra SET_TRUE;\n",
+            "    setp.lt.",
+            $tyld,
+            " %p_gt, %a, %b;\n",
+            "    @%p_gt bra SET_FALSE;\n",
+            "    // a == b (finite): tie-break by index.\n",
+            "    bra IDX_DECIDE;\n",
+            "\n",
+            "PAD_DECIDE:\n",
+            "    selp.u32 %g, 1, 0, %p_pada;        // the pad is the greater one\n",
+            "    bra HAVE_GREATER;\n",
+            "\n",
+            "NAN_DECIDE:\n",
+            "    selp.u32 %g, 1, 0, %p_nana;        // the NaN is the greater one\n",
+            "    bra HAVE_GREATER;\n",
+            "\n",
+            "IDX_DECIDE:\n",
+            "    setp.gt.u32 %p_gt, %ia, %ib;       // greater iff higher original index\n",
+            "    selp.u32 %g, 1, 0, %p_gt;\n",
+            "    bra HAVE_GREATER;\n",
+            "\n",
+            "SET_TRUE:\n",
+            "    mov.u32 %g, 1;\n",
+            "    bra HAVE_GREATER;\n",
+            "\n",
+            "SET_FALSE:\n",
+            "    mov.u32 %g, 0;\n",
+            "\n",
+            "HAVE_GREATER:\n",
+            "    // ascending flag as u32; swap iff greater == ascending.\n",
+            "    selp.u32 %t1, 1, 0, %p_asc;\n",
+            "    setp.ne.u32 %p_swap, %g, %t1;      // p_swap true when they DIFFER\n",
+            "    @%p_swap bra DONE;                 // differ -> no swap\n",
+            "\n",
+            "    // exchange key and idx between i and ixj\n",
+            "    add.u64 %addr, %key_p, %koffa;\n",
+            "    st.global.",
+            $tyld,
+            " [%addr], %b;\n",
+            "    add.u64 %addr, %key_p, %koffb;\n",
+            "    st.global.",
+            $tyld,
+            " [%addr], %a;\n",
+            "    add.u64 %addr, %idx_p, %ioffa;\n",
+            "    st.global.u32 [%addr], %ib;\n",
+            "    add.u64 %addr, %idx_p, %ioffb;\n",
+            "    st.global.u32 [%addr], %ia;\n",
+            "\n",
+            "DONE:\n",
+            "    ret;\n",
+            "}\n"
+        )
+    };
+}
+
+const UNIQUE_BITONIC_F32_PTX: &str = unique_bitonic_ptx!("unique_bitonic_f32_kernel", "f32", "2");
+const UNIQUE_BITONIC_F64_PTX: &str = unique_bitonic_ptx!("unique_bitonic_f64_kernel", "f64", "3");
+
+/// Smallest power of two `>= n` (with `next_pow2(0) == 1`, `next_pow2(1) == 1`).
+#[cfg(feature = "cuda")]
+fn next_pow2(n: usize) -> usize {
+    if n <= 1 {
+        return n.max(1);
+    }
+    let mut p = 1usize;
+    while p < n {
+        p <<= 1;
+    }
+    p
+}
+
+/// Bitonic sort-by-key the device `key` (length `npad`, power of two) carrying
+/// the parallel i32 `idx` payload, ascending under the total-order comparator
+/// baked into `bitonic_ptx`. Multi-launch network: outer `k` doubles from 2 to
+/// `npad`, inner `j` halves from `k/2` to 1; each `(k, j)` step is one launch.
+#[cfg(feature = "cuda")]
+fn bitonic_sort_by_key(
+    key: &mut CudaSlice<impl cudarc::driver::DeviceRepr>,
+    idx: &mut CudaSlice<i32>,
+    npad: usize,
+    device: &GpuDevice,
+    bitonic_ptx: &'static str,
+    bitonic_kernel: &'static str,
+) -> GpuResult<()> {
+    if npad <= 1 {
+        return Ok(());
+    }
+    let stream = device.stream();
+    let ctx = device.context();
+    let f =
+        get_or_compile(ctx, bitonic_ptx, bitonic_kernel, device.ordinal() as u32).map_err(|e| {
+            GpuError::PtxCompileFailed {
+                kernel: bitonic_kernel,
+                source: e,
+            }
+        })?;
+    let block: u32 = 256;
+    let grid = (npad as u32).div_ceil(block).max(1);
+    let cfg = LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (block, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let npad_u = npad as u32;
+    let mut k = 2usize;
+    while k <= npad {
+        let mut j = k >> 1;
+        while j >= 1 {
+            let j_u = j as u32;
+            let k_u = k as u32;
+            // SAFETY:
+            // - `f` is the bitonic-step PTX entry `bitonic_kernel`; its 5-arg
+            //   ABI `(key_ptr, idx_ptr, npad, j, k)` matches the args below.
+            // - `key` and `idx` each hold exactly `npad` elements. Thread `i in
+            //   [0, npad)` reads/writes positions `i` and `i ^ j`, both `<
+            //   npad` (bitonic invariant: `i ^ j < npad` whenever `i < npad` and
+            //   `j < npad` is a power of two). Only the lower thread of each pair
+            //   stores (the `setp.le %p_partner` guard), so the two stores to a
+            //   pair are issued by one thread — no intra-step write race.
+            // - Each `(k, j)` step is fully read-then-write per pair and the
+            //   host serialises steps (one launch each on the same stream), so
+            //   the network's data dependence across steps is respected.
+            // - Threads with `i >= npad` exit via `setp.ge.u32 %p_oob`.
+            // - cudarc copies `npad_u`/`j_u`/`k_u` by reference into the launch
+            //   buffer for this synchronous frame.
+            unsafe {
+                stream
+                    .launch_builder(&f)
+                    .arg(&*key)
+                    .arg(&*idx)
+                    .arg(&npad_u)
+                    .arg(&j_u)
+                    .arg(&k_u)
+                    .launch(cfg)?;
+            }
+            j >>= 1;
+        }
+        k <<= 1;
+    }
+    Ok(())
+}
+
+/// Launch the f32 unique-init kernel: build the padded `(key, idx)` arrays.
+#[cfg(feature = "cuda")]
+fn launch_unique_init_f32(
+    input: &CudaBuffer<f32>,
+    key: &mut CudaBuffer<f32>,
+    idx: &mut CudaSlice<i32>,
+    n: usize,
+    npad: usize,
+    device: &GpuDevice,
+) -> GpuResult<()> {
+    let stream = device.stream();
+    let ctx = device.context();
+    let f = get_or_compile(
+        ctx,
+        UNIQUE_INIT_F32_PTX,
+        "unique_init_f32_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "unique_init_f32_kernel",
+        source: e,
+    })?;
+    let block: u32 = 256;
+    let grid = (npad as u32).div_ceil(block).max(1);
+    let cfg = LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (block, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let n_u = n as u32;
+    let npad_u = npad as u32;
+    // SAFETY:
+    // - `f` is the `unique_init_f32_kernel` PTX entry; its 5-arg ABI
+    //   `(in_ptr, key_ptr, idx_ptr, n, npad)` matches the args below.
+    // - `input` holds `n` f32 elements; thread `i in [0, n)` reads `in[i]`,
+    //   in range. `key` (f32) and `idx` (i32) each hold `npad >= n` elements;
+    //   thread `i in [0, npad)` writes exactly `key[i]` and `idx[i]` once.
+    //   `key`/`idx` are fresh allocations distinct from `input` (no alias).
+    // - Threads with `i >= npad` exit via `setp.ge.u32 %p_oob`.
+    // - cudarc copies `n_u`/`npad_u` by reference for this synchronous frame.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(key.inner_mut())
+            .arg(&*idx)
+            .arg(&n_u)
+            .arg(&npad_u)
+            .launch(cfg)?;
+    }
+    Ok(())
+}
+
+/// Launch the f64 unique-init kernel. f64 keys; i32 idx payload.
+#[cfg(feature = "cuda")]
+fn launch_unique_init_f64(
+    input: &CudaBuffer<f64>,
+    key: &mut CudaBuffer<f64>,
+    idx: &mut CudaSlice<i32>,
+    n: usize,
+    npad: usize,
+    device: &GpuDevice,
+) -> GpuResult<()> {
+    let stream = device.stream();
+    let ctx = device.context();
+    let f = get_or_compile(
+        ctx,
+        UNIQUE_INIT_F64_PTX,
+        "unique_init_f64_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "unique_init_f64_kernel",
+        source: e,
+    })?;
+    let block: u32 = 256;
+    let grid = (npad as u32).div_ceil(block).max(1);
+    let cfg = LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (block, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let n_u = n as u32;
+    let npad_u = npad as u32;
+    // SAFETY: identical contract to `launch_unique_init_f32`; only the key load/
+    // store width (8 bytes, f64) differs. `idx` is still i32 (`npad` elements).
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(key.inner_mut())
+            .arg(&*idx)
+            .arg(&n_u)
+            .arg(&npad_u)
+            .launch(cfg)?;
+    }
+    Ok(())
+}
+
+/// Build the host `inverse` and `counts` vectors from the inclusive run-start
+/// scan over the SORTED-unique array and the sorted index permutation.
+///
+/// `incl_host[i]` is the number of run-starts (distinct-value starts) in the
+/// sorted prefix `[0, i]`, so sorted position `i` belongs to 0-based unique
+/// `uid = incl_host[i] - 1`. `sorted_idx[i]` is the ORIGINAL index of the value
+/// now at sorted position `i`. Therefore `inverse[sorted_idx[i]] = uid`
+/// (`Unique.cu:66` scatter) and `counts[uid] += 1` (`Unique.cu:81`
+/// run-length). `out_len = incl_host[n-1]`. Pads are excluded by construction:
+/// `incl_host` / `sorted_idx` are the first `n` (real) sorted positions only.
+fn decode_unique(incl_host: &[f32], sorted_idx: &[i32]) -> (Vec<usize>, Vec<usize>, usize) {
+    let n = incl_host.len();
+    if n == 0 {
+        return (vec![], vec![], 0);
+    }
+    let out_len = incl_host[n - 1] as usize;
+    let mut inverse = vec![0usize; n];
+    let mut counts = vec![0usize; out_len];
+    for i in 0..n {
+        let uid = (incl_host[i] as usize) - 1;
+        let orig = sorted_idx[i] as usize;
+        inverse[orig] = uid;
+        counts[uid] += 1;
+    }
+    (inverse, counts, out_len)
+}
+
+/// On-device `torch.unique(sorted=True, return_inverse=True,
+/// return_counts=True)` over an f32 value buffer (#1545).
+///
+/// Returns `(values, inverse, counts)`:
+/// - `values` — a fresh device `CudaBuffer<f32>` of `out_len` SORTED-ascending
+///   unique elements (NaN entries last, each NaN distinct), GPU-resident.
+/// - `inverse` — host `Vec<usize>` of length `n`: each input's index into
+///   `values` (`return_inverse=True`).
+/// - `counts` — host `Vec<usize>` of length `out_len`: each unique's frequency
+///   (`return_counts=True`).
+///
+/// Mirrors `aten/src/ATen/native/cuda/Unique.cu` `compute_unique` (sort-by-key
+/// → adjacent-difference inverse-scan → run-length counts). Only the derived
+/// index/run metadata is read back to host; the VALUE data stays on-device
+/// (no R-CODE-4 round trip).
+///
+/// # Errors
+///
+/// - [`GpuError::LengthMismatch`] when `n > u32::MAX` (the padded length and
+///   the i32 index payload must fit a `u32` / `i32`).
+/// - [`GpuError::PtxCompileFailed`] if a PTX module fails to compile.
+/// - [`GpuError::Driver`] on launch failure.
+#[cfg(feature = "cuda")]
+pub fn gpu_unique_f32(
+    input: &CudaBuffer<f32>,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f32>, Vec<usize>, Vec<usize>)> {
+    if n == 0 {
+        return Ok((alloc_zeros_f32(0, device)?, vec![], vec![]));
+    }
+    // The padded length is the next power of two >= n; the i32 index payload
+    // and the u32 thread index must address every padded slot.
+    if n > (i32::MAX as usize) {
+        return Err(GpuError::LengthMismatch {
+            a: n,
+            b: i32::MAX as usize,
+        });
+    }
+    let npad = next_pow2(n);
+
+    // 1. INIT: build the padded (key, idx) pair arrays.
+    let mut key = alloc_zeros_f32(npad, device)?;
+    let mut idx: CudaSlice<i32> = device.stream().alloc_zeros::<i32>(npad)?;
+    launch_unique_init_f32(input, &mut key, &mut idx, n, npad, device)?;
+
+    // 2. SORT-BY-KEY ascending (NaN last, pads strictly last).
+    bitonic_sort_by_key(
+        key.inner_mut(),
+        &mut idx,
+        npad,
+        device,
+        UNIQUE_BITONIC_F32_PTX,
+        "unique_bitonic_f32_kernel",
+    )?;
+
+    // 3. DEDUP over the first `n` SORTED positions (pads occupy [n, npad)).
+    //    `run_flags_and_scan` flags each distinct-value start (setp.neu — NaN
+    //    starts its own run) and inclusive-prefix-sums into `incl`.
+    let incl = run_flags_and_scan(
+        key.inner(),
+        n,
+        device,
+        RUN_FLAG_F32_PTX,
+        "run_flag_f32_kernel",
+    )?;
+    let incl_host = gpu_to_cpu(&incl, device)?;
+
+    // 4. INVERSE / COUNTS from the run-scan + the sorted index permutation.
+    let mut sorted_idx_host = device.stream().clone_dtoh(&idx)?;
+    sorted_idx_host.truncate(n);
+    let (inverse, counts, out_len) = decode_unique(&incl_host, &sorted_idx_host);
+
+    // COMPACT: scatter each sorted run-start value to its unique slot.
+    let mut out = alloc_zeros_f32(out_len, device)?;
+    launch_compact_f32(&key, &incl, &mut out, n, device)?;
+    Ok((out, inverse, counts))
+}
+
+/// On-device `torch.unique` over an f64 value buffer. f64 counterpart of
+/// [`gpu_unique_f32`]; the sort/dedup/compact run on f64 keys while the run-flag
+/// scan stays f32 (exact 0/1 flags) and the index payload stays i32.
+///
+/// # Errors
+///
+/// See [`gpu_unique_f32`].
+#[cfg(feature = "cuda")]
+pub fn gpu_unique_f64(
+    input: &CudaBuffer<f64>,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f64>, Vec<usize>, Vec<usize>)> {
+    if n == 0 {
+        return Ok((alloc_zeros_f64(0, device)?, vec![], vec![]));
+    }
+    if n > (i32::MAX as usize) {
+        return Err(GpuError::LengthMismatch {
+            a: n,
+            b: i32::MAX as usize,
+        });
+    }
+    let npad = next_pow2(n);
+
+    let mut key = alloc_zeros_f64(npad, device)?;
+    let mut idx: CudaSlice<i32> = device.stream().alloc_zeros::<i32>(npad)?;
+    launch_unique_init_f64(input, &mut key, &mut idx, n, npad, device)?;
+
+    bitonic_sort_by_key(
+        key.inner_mut(),
+        &mut idx,
+        npad,
+        device,
+        UNIQUE_BITONIC_F64_PTX,
+        "unique_bitonic_f64_kernel",
+    )?;
+
+    let incl = run_flags_and_scan(
+        key.inner(),
+        n,
+        device,
+        RUN_FLAG_F64_PTX,
+        "run_flag_f64_kernel",
+    )?;
+    let incl_host = gpu_to_cpu(&incl, device)?;
+
+    let mut sorted_idx_host = device.stream().clone_dtoh(&idx)?;
+    sorted_idx_host.truncate(n);
+    let (inverse, counts, out_len) = decode_unique(&incl_host, &sorted_idx_host);
+
+    let mut out = alloc_zeros_f64(out_len, device)?;
+    launch_compact_f64(&key, &incl, &mut out, n, device)?;
+    Ok((out, inverse, counts))
 }
 
 #[cfg(test)]
