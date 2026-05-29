@@ -27,6 +27,34 @@ where
     elapsed
 }
 
+/// Like [`bench`] but synchronizes the CUDA device around the timed region, so
+/// the reported time reflects real kernel execution (not just async launch
+/// overhead). This matches PyTorch's `torch.cuda.synchronize()` benchmarking
+/// methodology, making the GPU numbers directly comparable.
+#[cfg(feature = "gpu")]
+fn bench_gpu<R, F>(name: &str, warmup: usize, iters: usize, mut f: F) -> f64
+where
+    F: FnMut() -> R,
+{
+    let sync = || {
+        if let Some(b) = ferrotorch_core::gpu_dispatch::gpu_backend() {
+            let _ = b.synchronize(0);
+        }
+    };
+    for _ in 0..warmup {
+        black_box(f());
+    }
+    sync();
+    let start = Instant::now();
+    for _ in 0..iters {
+        black_box(f());
+    }
+    sync();
+    let elapsed = start.elapsed().as_secs_f64() / iters as f64 * 1e6; // microseconds
+    println!("  {name}: {elapsed:.1} us");
+    elapsed
+}
+
 fn main() -> FerrotorchResult<()> {
     println!("ferrotorch benchmarks");
     println!();
@@ -243,11 +271,11 @@ fn main() -> FerrotorchResult<()> {
     if ferrotorch_core::gpu_dispatch::gpu_backend().is_some() {
         // Tensor creation on GPU
         println!("\n--- GPU Tensor Creation ---");
-        bench("GPU zeros [1000,1000]", 5, 100, || {
+        bench_gpu("GPU zeros [1000,1000]", 5, 100, || {
             let t = zeros::<f32>(&[1000, 1000]).unwrap();
             t.cuda().unwrap()
         });
-        bench("GPU rand [1000,1000]", 5, 100, || {
+        bench_gpu("GPU rand [1000,1000]", 5, 100, || {
             let t = rand::<f32>(&[1000, 1000]).unwrap();
             t.cuda().unwrap()
         });
@@ -256,30 +284,30 @@ fn main() -> FerrotorchResult<()> {
         println!("\n--- GPU Elementwise Ops ---");
         let ga = rand::<f32>(&[1000, 1000])?.cuda()?;
         let gb = rand::<f32>(&[1000, 1000])?.cuda()?;
-        bench("GPU add [1000,1000]", 10, 100, || (&ga + &gb).unwrap());
-        bench("GPU mul [1000,1000]", 10, 100, || (&ga * &gb).unwrap());
-        bench("GPU sub [1000,1000]", 10, 100, || (&ga - &gb).unwrap());
-        bench("GPU div [1000,1000]", 10, 100, || (&ga / &gb).unwrap());
+        bench_gpu("GPU add [1000,1000]", 10, 100, || (&ga + &gb).unwrap());
+        bench_gpu("GPU mul [1000,1000]", 10, 100, || (&ga * &gb).unwrap());
+        bench_gpu("GPU sub [1000,1000]", 10, 100, || (&ga - &gb).unwrap());
+        bench_gpu("GPU div [1000,1000]", 10, 100, || (&ga / &gb).unwrap());
 
         // Unary on GPU
         println!("\n--- GPU Unary Ops ---");
         let gt = rand::<f32>(&[1000, 1000])?.cuda()?;
-        bench("GPU relu [1000,1000]", 10, 100, || {
+        bench_gpu("GPU relu [1000,1000]", 10, 100, || {
             ferrotorch_core::grad_fns::activation::relu(&gt).unwrap()
         });
-        bench("GPU sigmoid [1000,1000]", 10, 100, || {
+        bench_gpu("GPU sigmoid [1000,1000]", 10, 100, || {
             ferrotorch_core::grad_fns::activation::sigmoid(&gt).unwrap()
         });
-        bench("GPU tanh [1000,1000]", 10, 100, || {
+        bench_gpu("GPU tanh [1000,1000]", 10, 100, || {
             ferrotorch_core::grad_fns::activation::tanh(&gt).unwrap()
         });
-        bench("GPU exp [1000,1000]", 10, 100, || {
+        bench_gpu("GPU exp [1000,1000]", 10, 100, || {
             ferrotorch_core::grad_fns::transcendental::exp(&gt).unwrap()
         });
-        bench("GPU log [1000,1000]", 10, 100, || {
+        bench_gpu("GPU log [1000,1000]", 10, 100, || {
             ferrotorch_core::grad_fns::transcendental::log(&gt).unwrap()
         });
-        bench("GPU neg [1000,1000]", 10, 100, || {
+        bench_gpu("GPU neg [1000,1000]", 10, 100, || {
             ferrotorch_core::grad_fns::arithmetic::neg(&gt).unwrap()
         });
 
@@ -290,7 +318,7 @@ fn main() -> FerrotorchResult<()> {
             let gb = rand::<f32>(&[size, size])?.cuda()?;
             let iters = if size >= 4096 { 20 } else { 100 };
             let backend = ferrotorch_core::gpu_dispatch::gpu_backend().unwrap();
-            bench(&format!("GPU matmul [{size},{size}]"), 10, iters, || {
+            bench_gpu(&format!("GPU matmul [{size},{size}]"), 10, iters, || {
                 backend
                     .matmul_f32(
                         ga.gpu_handle().unwrap(),
@@ -306,13 +334,13 @@ fn main() -> FerrotorchResult<()> {
         // Reduction on GPU
         println!("\n--- GPU Reduction Ops ---");
         let gr = rand::<f32>(&[1000, 1000])?.cuda()?;
-        bench("GPU sum_all [1000,1000]", 10, 100, || {
+        bench_gpu("GPU sum_all [1000,1000]", 10, 100, || {
             ferrotorch_core::grad_fns::reduction::sum(&gr).unwrap()
         });
-        bench("GPU sum dim=0 [1000,1000]", 10, 100, || {
+        bench_gpu("GPU sum dim=0 [1000,1000]", 10, 100, || {
             ferrotorch_core::grad_fns::reduction::sum_dim(&gr, 0, false).unwrap()
         });
-        bench("GPU mean [1000,1000]", 10, 100, || {
+        bench_gpu("GPU mean [1000,1000]", 10, 100, || {
             ferrotorch_core::grad_fns::reduction::mean(&gr).unwrap()
         });
 
@@ -326,7 +354,7 @@ fn main() -> FerrotorchResult<()> {
         mlp_gpu.to_device(ferrotorch_core::device::Device::Cuda(0))?;
 
         let x_gpu = rand::<f32>(&[32, 784])?.cuda()?;
-        bench("GPU MLP forward B=32", 10, 100, || {
+        bench_gpu("GPU MLP forward B=32", 10, 100, || {
             mlp_gpu.forward(&x_gpu).unwrap()
         });
 
@@ -334,13 +362,13 @@ fn main() -> FerrotorchResult<()> {
         println!("\n--- Host <-> Device Transfer ---");
         let h = rand::<f32>(&[1000, 1000])?;
         let d = h.cuda()?;
-        bench("CPU->GPU [1000,1000]", 5, 100, || h.cuda().unwrap());
-        bench("GPU->CPU [1000,1000]", 5, 100, || d.cpu().unwrap());
+        bench_gpu("CPU->GPU [1000,1000]", 5, 100, || h.cuda().unwrap());
+        bench_gpu("GPU->CPU [1000,1000]", 5, 100, || d.cpu().unwrap());
 
         // Softmax/LayerNorm on GPU
         println!("\n--- GPU Normalization ---");
         let gn = rand::<f32>(&[64, 256])?.cuda()?;
-        bench("GPU softmax [64,256]", 10, 100, || {
+        bench_gpu("GPU softmax [64,256]", 10, 100, || {
             ferrotorch_core::grad_fns::activation::softmax(&gn).unwrap()
         });
     } else {
