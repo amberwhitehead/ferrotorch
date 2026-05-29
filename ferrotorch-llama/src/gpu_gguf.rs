@@ -467,26 +467,107 @@ pub fn apply_grammar_mask_gpu(
     Ok(f32::from_bytes(&bytes).to_vec())
 }
 
+/// Shared, model-agnostic masked greedy-decode loop — the production
+/// heart of [`LlamaGpuInferencer::generate_masked`].
+///
+/// `next_logits` is the per-step logits source: given the current id
+/// sequence (prompt + everything generated so far) it returns the
+/// last-token logits (`Vec<f32>`, length `vocab_size`). In production
+/// this is `|ids| self.forward_from_ids(ids)`; tests inject a synthetic
+/// closure so the loop's grammar/masking/completion logic is exercised
+/// **without** loading a full GGUF model (the GPU mask kernel still runs
+/// live).
+///
+/// When `grammar` is `Some`, each step:
+///
+/// 0. **completion guard** — if the grammar has already reached a
+///    complete value ([`JsonSchemaProcessor::is_complete`]), `break`
+///    immediately. Without this guard the next `compute_mask()` returns
+///    an all-deny mask, [`apply_grammar_mask_gpu`] forces every logit to
+///    `f32::MIN`, [`argmax_f32`] returns index `0` (a **forbidden**
+///    token), and `step_token(0)` errors `AlreadyComplete` — turning a
+///    finished, valid sequence into a hard error. The guard is
+///    load-bearing: removing it reintroduces the #1667 divergence.
+/// 1. obtains the last-token logits via `next_logits`,
+/// 2. computes the per-step allow mask
+///    ([`JsonSchemaProcessor::compute_mask`]),
+/// 3. masks the logits **on the GPU** via [`apply_grammar_mask_gpu`],
+/// 4. greedily picks the argmax of the masked logits, and
+/// 5. advances the grammar with [`JsonSchemaProcessor::step_token`].
+///
+/// When `grammar` is `None` this is plain greedy decoding: no guard, no
+/// masking, argmax over the raw logits each step until `max_new_tokens`.
+/// The returned `Vec<u32>` is the sequence of newly generated token ids
+/// (the prompt is **not** included) and may be shorter than
+/// `max_new_tokens` when an active grammar completes early.
+///
+/// # Errors
+///
+/// Forwards `next_logits` errors, the [`apply_grammar_mask_gpu`] error
+/// surface, and [`FerrotorchError::InvalidArgument`] if a grammar step
+/// rejects the greedily-chosen (already-allowed) token — which would
+/// indicate a mask/grammar inconsistency.
+pub fn masked_decode_loop(
+    mut next_logits: impl FnMut(&[u32]) -> FerrotorchResult<Vec<f32>>,
+    grammar: Option<&mut JsonSchemaProcessor>,
+    prompt: &[u32],
+    max_new_tokens: usize,
+    device_ordinal: usize,
+) -> FerrotorchResult<Vec<u32>> {
+    let mut ids: Vec<u32> = prompt.to_vec();
+    let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
+    let mut grammar = grammar;
+
+    for _ in 0..max_new_tokens {
+        // Step 0: completion guard. A finished grammar emits an all-deny
+        // mask; decoding past it would force the forbidden index-0 token
+        // and error on `step_token`. Stop and return what we have.
+        if let Some(proc) = grammar.as_deref_mut() {
+            if proc.is_complete() {
+                break;
+            }
+        }
+
+        let logits = next_logits(&ids)?;
+
+        let next = if let Some(proc) = grammar.as_deref_mut() {
+            let mask = proc.compute_mask();
+            let masked = apply_grammar_mask_gpu(&logits, &mask.allow, device_ordinal)?;
+            let next = argmax_f32(&masked);
+            proc.step_token(next)
+                .map_err(|e| FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "masked_decode_loop: grammar rejected greedily-chosen token \
+                         {next} (mask/grammar inconsistency): {e}"
+                    ),
+                })?;
+            next
+        } else {
+            argmax_f32(&logits)
+        };
+
+        generated.push(next);
+        ids.push(next);
+    }
+
+    Ok(generated)
+}
+
 impl LlamaGpuInferencer {
     /// Greedy GPU generation with optional grammar-constrained decoding.
     ///
-    /// Drives [`Self::forward_from_ids`] in an autoregressive loop. When
-    /// `grammar` is `Some`, each step:
+    /// Thin wrapper over [`masked_decode_loop`]: it supplies
+    /// [`Self::forward_from_ids`] as the per-step logits source and the
+    /// device ordinal for the GPU mask kernel. All decode logic — the
+    /// completion guard, the GPU masking, and the grammar advance — lives
+    /// in the shared [`masked_decode_loop`] so it is unit-testable without
+    /// a loaded model.
     ///
-    /// 1. obtains the last-token logits (`Vec<f32>`, length `vocab_size`),
-    /// 2. computes the per-step allow mask
-    ///    ([`JsonSchemaProcessor::compute_mask`]),
-    /// 3. masks the logits **on the GPU** via [`apply_grammar_mask_gpu`]
-    ///    (the real consumer of
-    ///    [`ferrotorch_cubecl::apply_token_mask_to_gpu`]),
-    /// 4. greedily picks the argmax of the masked logits, and
-    /// 5. advances the grammar state with
-    ///    [`JsonSchemaProcessor::step_token`].
-    ///
-    /// When `grammar` is `None` this is plain greedy GPU generation: no
-    /// masking, identical to argmax over the raw logits each step. The
-    /// returned `Vec<u32>` is the sequence of newly generated token ids
-    /// (the prompt is **not** included).
+    /// When `grammar` is `Some`, generation stops as soon as the grammar
+    /// reaches a complete value (so the returned sequence may be shorter
+    /// than `max_new_tokens`); when `None` it is plain greedy GPU decoding
+    /// for `max_new_tokens` steps. The returned `Vec<u32>` is the sequence
+    /// of newly generated token ids (the prompt is **not** included).
     ///
     /// Greedy (argmax) sampling is intentional: it makes the
     /// grammar-masking effect deterministic and testable (a token forced
@@ -495,11 +576,9 @@ impl LlamaGpuInferencer {
     ///
     /// # Errors
     ///
-    /// Forwards [`Self::forward_from_ids`] errors, the
-    /// [`apply_grammar_mask_gpu`] error surface, and
-    /// [`FerrotorchError::InvalidArgument`] if a grammar step rejects the
-    /// greedily-chosen (already-allowed) token — which would indicate a
-    /// mask/grammar inconsistency.
+    /// Forwards the [`masked_decode_loop`] error surface (which forwards
+    /// [`Self::forward_from_ids`] and [`apply_grammar_mask_gpu`] errors,
+    /// plus the mask/grammar-inconsistency guard).
     pub fn generate_masked(
         &self,
         prompt_ids: &[u32],
@@ -507,34 +586,13 @@ impl LlamaGpuInferencer {
         grammar: Option<&mut JsonSchemaProcessor>,
     ) -> FerrotorchResult<Vec<u32>> {
         let ordinal = self.device.ordinal();
-        let mut ids: Vec<u32> = prompt_ids.to_vec();
-        let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
-        let mut grammar = grammar;
-
-        for _ in 0..max_new_tokens {
-            let logits = self.forward_from_ids(&ids)?;
-
-            let next = if let Some(proc) = grammar.as_deref_mut() {
-                let mask = proc.compute_mask();
-                let masked = apply_grammar_mask_gpu(&logits, &mask.allow, ordinal)?;
-                let next = argmax_f32(&masked);
-                proc.step_token(next)
-                    .map_err(|e| FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "generate_masked: grammar rejected greedily-chosen token \
-                             {next} (mask/grammar inconsistency): {e}"
-                        ),
-                    })?;
-                next
-            } else {
-                argmax_f32(&logits)
-            };
-
-            generated.push(next);
-            ids.push(next);
-        }
-
-        Ok(generated)
+        masked_decode_loop(
+            |ids| self.forward_from_ids(ids),
+            grammar,
+            prompt_ids,
+            max_new_tokens,
+            ordinal,
+        )
     }
 }
 

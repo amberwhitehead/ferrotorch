@@ -185,4 +185,6 @@ pub use spec_decode::{
 #[cfg(feature = "cuda")]
 pub use gpu::{GraphedDecoder, LlamaGpuInferencer, LlamaGpuLayer, ProfiledForwardResult};
 #[cfg(feature = "cuda")]
-pub use gpu_gguf::{apply_grammar_mask_gpu, cubecl_cuda_client, gpu_dequantize_to_bf16_cudarc};
+pub use gpu_gguf::{
+    apply_grammar_mask_gpu, cubecl_cuda_client, gpu_dequantize_to_bf16_cudarc, masked_decode_loop,
+};
