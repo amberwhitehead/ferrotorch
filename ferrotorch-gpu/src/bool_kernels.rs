@@ -45,6 +45,7 @@
 //! | REQ-6 (half-precision compare) | SHIPPED | `fn cmp_half_ptx in bool_kernels.rs` decodes bf16 via `mov.b32 %ua, {%zero16, %ha}` and f16 via `cvt.f32.f16 %fa, %ha` then `setp.{op}.f32`; consumer `pub fn gpu_cmp_bf16 / gpu_cmp_f16` invoke `launch_cmp_half` from bool-comparison arms of `backend_impl.rs` |
 //! | REQ-7 (SAFETY annotations) | SHIPPED | every `unsafe { stream.launch_builder(&f)... }` in `bool_kernels.rs` (`launch_cmp`, `launch_not`, `launch_reduce_bool`) carries a multi-line `SAFETY:` comment; consumer SAFETY contract inherited via each public wrapper |
 //! | REQ-8 (empty-input short-circuit) | SHIPPED | `launch_cmp` and `launch_not` short-circuit `n == 0` via `if n == 0 { return Ok(stream.alloc_zeros::<u8>(0)?); }`; `launch_reduce_bool` short-circuits with empty-identity clone_htod; consumer backend dispatch path (`torch.any(empty)`) |
+//! | REQ-9 (on-device bool broadcast, #1663) | SHIPPED | `pub fn gpu_broadcast_bool in bool_kernels.rs` (u8 strided gather over `BOOL_BROADCAST_PTX`, 8-dim unrolled); consumer `CudaBackendImpl::broadcast_bool in backend_impl.rs`, itself consumed by `grad_fns::indexing::broadcast_bool_tensor`'s CUDA branch (the path `masked_scatter` / `masked_fill_bcast` / `masked_select_bcast` / `where_cond_bcast` flow through). Mirrors `expand_outplace` at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2406`. |
 
 #![cfg(feature = "cuda")]
 
@@ -704,4 +705,314 @@ pub fn gpu_any_bool(a: &CudaSlice<u8>, d: &GpuDevice) -> GpuResult<CudaSlice<u8>
 /// Global AND-reduction (`torch.all`) → 1-element u8 buffer (0/1).
 pub fn gpu_all_bool(a: &CudaSlice<u8>, d: &GpuDevice) -> GpuResult<CudaSlice<u8>> {
     launch_reduce_bool(a, d, REDUCE_ALL, 1)
+}
+
+// ===========================================================================
+// On-device bool broadcast (#1663)
+//
+// `broadcast_bool` expands a `DType::Bool` (u8 0/1) buffer from its own shape
+// to a larger `out_shape` using NumPy / torch broadcasting rules (align
+// trailing dims; a size-1 or absent input dim replicates). This is the resident
+// analog of the CPU `grad_fns::indexing::broadcast_bool_tensor`, mirroring the
+// `expand_outplace(mask, self)` step PyTorch performs for masked ops at
+// `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2406`. Broadcasting reduces
+// to a STRIDED GATHER over u8 elements: output flat index `i` -> input flat
+// index via per-output-dim element strides, where a broadcast (size-1 / absent)
+// input dim contributes stride 0. This is structurally identical to the f32
+// `crate::kernels::STRIDED_COPY_PTX`, specialised to a 1-byte element (no
+// `shl.b64 .., 2`; the offset is the index itself). 8 dims unrolled, each stride
+// passed as an individual u32 param (20 params, within the ~4KB param limit).
+// ===========================================================================
+
+/// Maximum rank supported by [`gpu_broadcast_bool`]. Matches the unrolled PTX.
+pub const BOOL_BROADCAST_MAX_DIMS: usize = 8;
+
+/// PTX for `bool_broadcast_kernel`: a u8 strided gather with up to 8 dims.
+///
+/// Thread `i` computes:
+///   flat = i
+///   src = 0
+///   for d in 0..8:
+///       coord = flat / out_stride[d]
+///       flat  = flat % out_stride[d]
+///       src  += coord * src_stride[d]
+///   out[i] = in[src]
+///
+/// For tensors with fewer than 8 dims, unused positions are padded with
+/// `out_stride[d] = n + 1` (so `flat / out_stride[d] == 0`) and
+/// `src_stride[d] = 0` (so the contribution is zero). u8 elements: the byte
+/// offset equals the element index (no shift).
+const BOOL_BROADCAST_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry bool_broadcast_kernel(
+    .param .u64 input_ptr,
+    .param .u64 output_ptr,
+    .param .u32 n,
+    .param .u32 os0, .param .u32 os1, .param .u32 os2, .param .u32 os3,
+    .param .u32 os4, .param .u32 os5, .param .u32 os6, .param .u32 os7,
+    .param .u32 ss0, .param .u32 ss1, .param .u32 ss2, .param .u32 ss3,
+    .param .u32 ss4, .param .u32 ss5, .param .u32 ss6, .param .u32 ss7
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u32 %flat, %src_idx, %coord, %tmp, %os, %ss;
+    .reg .u64 %in, %out, %off;
+    .reg .u16 %val;
+    .reg .pred %p;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %out, [output_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    mov.u32 %flat, %r_tid;
+    mov.u32 %src_idx, 0;
+
+    // Dim 0
+    ld.param.u32 %os, [os0];
+    ld.param.u32 %ss, [ss0];
+    div.u32 %coord, %flat, %os;
+    mul.lo.u32 %tmp, %coord, %os;
+    sub.u32 %flat, %flat, %tmp;
+    mul.lo.u32 %tmp, %coord, %ss;
+    add.u32 %src_idx, %src_idx, %tmp;
+
+    // Dim 1
+    ld.param.u32 %os, [os1];
+    ld.param.u32 %ss, [ss1];
+    div.u32 %coord, %flat, %os;
+    mul.lo.u32 %tmp, %coord, %os;
+    sub.u32 %flat, %flat, %tmp;
+    mul.lo.u32 %tmp, %coord, %ss;
+    add.u32 %src_idx, %src_idx, %tmp;
+
+    // Dim 2
+    ld.param.u32 %os, [os2];
+    ld.param.u32 %ss, [ss2];
+    div.u32 %coord, %flat, %os;
+    mul.lo.u32 %tmp, %coord, %os;
+    sub.u32 %flat, %flat, %tmp;
+    mul.lo.u32 %tmp, %coord, %ss;
+    add.u32 %src_idx, %src_idx, %tmp;
+
+    // Dim 3
+    ld.param.u32 %os, [os3];
+    ld.param.u32 %ss, [ss3];
+    div.u32 %coord, %flat, %os;
+    mul.lo.u32 %tmp, %coord, %os;
+    sub.u32 %flat, %flat, %tmp;
+    mul.lo.u32 %tmp, %coord, %ss;
+    add.u32 %src_idx, %src_idx, %tmp;
+
+    // Dim 4
+    ld.param.u32 %os, [os4];
+    ld.param.u32 %ss, [ss4];
+    div.u32 %coord, %flat, %os;
+    mul.lo.u32 %tmp, %coord, %os;
+    sub.u32 %flat, %flat, %tmp;
+    mul.lo.u32 %tmp, %coord, %ss;
+    add.u32 %src_idx, %src_idx, %tmp;
+
+    // Dim 5
+    ld.param.u32 %os, [os5];
+    ld.param.u32 %ss, [ss5];
+    div.u32 %coord, %flat, %os;
+    mul.lo.u32 %tmp, %coord, %os;
+    sub.u32 %flat, %flat, %tmp;
+    mul.lo.u32 %tmp, %coord, %ss;
+    add.u32 %src_idx, %src_idx, %tmp;
+
+    // Dim 6
+    ld.param.u32 %os, [os6];
+    ld.param.u32 %ss, [ss6];
+    div.u32 %coord, %flat, %os;
+    mul.lo.u32 %tmp, %coord, %os;
+    sub.u32 %flat, %flat, %tmp;
+    mul.lo.u32 %tmp, %coord, %ss;
+    add.u32 %src_idx, %src_idx, %tmp;
+
+    // Dim 7
+    ld.param.u32 %os, [os7];
+    ld.param.u32 %ss, [ss7];
+    div.u32 %coord, %flat, %os;
+    mul.lo.u32 %tmp, %coord, %os;
+    sub.u32 %flat, %flat, %tmp;
+    mul.lo.u32 %tmp, %coord, %ss;
+    add.u32 %src_idx, %src_idx, %tmp;
+
+    // Load in[src_idx] (1 byte per element: byte offset == element index).
+    cvt.u64.u32 %off, %src_idx;
+    add.u64 %off, %in, %off;
+    ld.global.u8 %val, [%off];
+
+    // Store out[r_tid].
+    cvt.u64.u32 %off, %r_tid;
+    add.u64 %off, %out, %off;
+    st.global.u8 [%off], %val;
+
+DONE:
+    ret;
+}
+";
+
+/// Pad-and-validate the (`out_shape`, broadcast `src_strides`) pair for the
+/// [`gpu_broadcast_bool`] kernel.
+///
+/// Returns a fixed-size `[MAX_DIMS]` pair where `out_stride[d]` is the
+/// contiguous output element stride (unused trailing dims filled with `n + 1`
+/// so `flat / out_stride[d] == 0`) and `src_stride[d]` is the broadcast input
+/// element stride (unused dims filled with 0). `out_shape` and `src_strides`
+/// must have equal length, at most [`BOOL_BROADCAST_MAX_DIMS`]; `n` is
+/// `product(out_shape)`.
+fn pad_bool_broadcast_params(
+    out_shape: &[usize],
+    src_strides: &[usize],
+    n: usize,
+) -> GpuResult<(
+    [u32; BOOL_BROADCAST_MAX_DIMS],
+    [u32; BOOL_BROADCAST_MAX_DIMS],
+)> {
+    if out_shape.len() != src_strides.len() {
+        return Err(GpuError::ShapeMismatch {
+            op: "bool_broadcast_pad",
+            expected: vec![out_shape.len()],
+            got: vec![src_strides.len()],
+        });
+    }
+    if out_shape.len() > BOOL_BROADCAST_MAX_DIMS {
+        return Err(GpuError::ShapeMismatch {
+            op: "bool_broadcast_pad",
+            expected: vec![BOOL_BROADCAST_MAX_DIMS],
+            got: vec![out_shape.len()],
+        });
+    }
+    let rank = out_shape.len();
+    // Contiguous output strides: stride[rank-1] = 1, stride[d] = stride[d+1] * shape[d+1].
+    let mut out_stride = [0u32; BOOL_BROADCAST_MAX_DIMS];
+    if rank > 0 {
+        let mut acc: usize = 1;
+        for d in (0..rank).rev() {
+            if acc > u32::MAX as usize {
+                return Err(GpuError::ShapeMismatch {
+                    op: "bool_broadcast_stride_overflow",
+                    expected: vec![u32::MAX as usize],
+                    got: vec![acc],
+                });
+            }
+            out_stride[d] = acc as u32;
+            acc = acc.saturating_mul(out_shape[d]);
+        }
+    }
+    // Pad unused dims with `n + 1` so `flat / out_stride[d] == 0`.
+    let pad_val = (n as u32).saturating_add(1).max(1);
+    out_stride[rank..BOOL_BROADCAST_MAX_DIMS].fill(pad_val);
+
+    let mut src_stride_out = [0u32; BOOL_BROADCAST_MAX_DIMS];
+    for d in 0..rank {
+        let s = src_strides[d];
+        if s > u32::MAX as usize {
+            return Err(GpuError::ShapeMismatch {
+                op: "bool_broadcast_src_stride_overflow",
+                expected: vec![u32::MAX as usize],
+                got: vec![s],
+            });
+        }
+        src_stride_out[d] = s as u32;
+    }
+    Ok((out_stride, src_stride_out))
+}
+
+/// Broadcast a u8 bool buffer to `out_shape` entirely on device (#1663).
+///
+/// `src_strides` are the per-output-dim broadcast input element strides, aligned
+/// with `out_shape`: the contiguous input stride where the input dim equals the
+/// output dim, or `0` where the input dim is size-1 or absent (the standard
+/// NumPy/torch broadcast pattern). The caller (the [`crate::backend_impl`]
+/// `broadcast_bool` dispatch) computes these from the (in_shape, out_shape)
+/// pair, mirroring the CPU `broadcast_in_flat` index map. Returns a fresh
+/// `CudaSlice<u8>` of `product(out_shape)` 0/1 bytes resident on `device` — no
+/// host round trip.
+#[allow(clippy::too_many_lines, reason = "8-dim unrolled launch arg list")]
+pub fn gpu_broadcast_bool(
+    input: &CudaSlice<u8>,
+    out_shape: &[usize],
+    src_strides: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    let n: usize = if out_shape.is_empty() {
+        1
+    } else {
+        out_shape.iter().product()
+    };
+    let (out_stride, src_stride) = pad_bool_broadcast_params(out_shape, src_strides, n)?;
+    let stream = device.stream();
+    if n == 0 {
+        return Ok(stream.alloc_zeros::<u8>(0)?);
+    }
+    let ctx = device.context();
+    let f = get_or_compile(
+        ctx,
+        BOOL_BROADCAST_PTX,
+        "bool_broadcast_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "bool_broadcast_kernel",
+        source: e,
+    })?;
+    let mut out = stream.alloc_zeros::<u8>(n)?;
+    let cfg = launch_1d(n);
+    let n_u32 = n as u32;
+    // SAFETY:
+    // - `f` is the `bool_broadcast_kernel` PTX entry just compiled; its ABI is
+    //   `(in_ptr: u64, out_ptr: u64, n: u32, out_stride[0..8]: u32,
+    //   src_stride[0..8]: u32)` — 19 args matching the order pushed below.
+    // - `input` is an immutable u8 buffer backing at least one element; the
+    //   broadcast src index for every output thread stays within `input.len()`
+    //   because each `src_stride[d]` is the contiguous input stride for a
+    //   non-broadcast dim (0 for broadcast/absent dims), so the maximum src
+    //   index equals the input's last contiguous element — validated by the
+    //   caller's (in_shape, out_shape) broadcast-compatibility check.
+    // - `out` was freshly `alloc_zeros::<u8>(n)` (the only `&mut`), non-aliased
+    //   with `input` (distinct allocations).
+    // - Each thread `i in [0, n)` decodes a multi-dim index via `out_stride`
+    //   then sums `coord_d * src_stride[d]`; the `tid >= n` PTX bound check
+    //   short-circuits OOB threads. Unused trailing dims are no-ops
+    //   (`out_stride[d] = n+1` -> coord 0, `src_stride[d] = 0`).
+    // - `n_u32 = n as u32` sized the grid in `launch_1d`; all 18 stride refs and
+    //   the `n_u32` ref live to the trailing `?`.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(&mut out)
+            .arg(&n_u32)
+            .arg(&out_stride[0])
+            .arg(&out_stride[1])
+            .arg(&out_stride[2])
+            .arg(&out_stride[3])
+            .arg(&out_stride[4])
+            .arg(&out_stride[5])
+            .arg(&out_stride[6])
+            .arg(&out_stride[7])
+            .arg(&src_stride[0])
+            .arg(&src_stride[1])
+            .arg(&src_stride[2])
+            .arg(&src_stride[3])
+            .arg(&src_stride[4])
+            .arg(&src_stride[5])
+            .arg(&src_stride[6])
+            .arg(&src_stride[7])
+            .launch(cfg)?;
+    }
+    Ok(out)
 }

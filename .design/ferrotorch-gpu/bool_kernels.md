@@ -139,6 +139,32 @@ returns the empty-identity (0 for `any`, 1 for `all`) via a single
 `pub fn gpu_all_bool in bool_kernels.rs`. Non-test consumer:
 `gpu_all_bool in backend_impl.rs` (`gpu_any_bool`), `gpu_any_bool in backend_impl.rs` (`gpu_all_bool`).
 
+### On-device bool broadcast (REQ-9, #1663)
+
+`const BOOL_BROADCAST_PTX in bool_kernels.rs` is a u8 strided gather (8
+dims unrolled, structurally identical to the f32
+`crate::kernels::STRIDED_COPY_PTX` but with a 1-byte element, so the byte
+offset equals the element index — no `shl.b64`). Thread `i` decodes its
+output flat index into per-dim coordinates via the contiguous output
+strides `os0..os7`, accumulates an input flat index `Σ_d coord_d *
+src_stride[d]`, and copies `in[src] -> out[i]`. Broadcasting reduces to a
+gather because the per-dim input element stride is the contiguous input
+stride where `in_dim == out_dim`, or `0` where the input dim is size-1 or
+absent (the NumPy / torch rule). `pad_bool_broadcast_params` computes the
+contiguous output strides and pads unused trailing dims (`os = n+1` so the
+coord is 0, `ss = 0` so the contribution is 0). Public entry point:
+`pub fn gpu_broadcast_bool in bool_kernels.rs`. Non-test consumer:
+`CudaBackendImpl::broadcast_bool in backend_impl.rs` (which derives the
+per-dim broadcast strides from `(in_shape, out_shape)`), itself consumed
+by `grad_fns::indexing::broadcast_bool_tensor`'s CUDA branch in
+`ferrotorch-core`. The result stays a `DType::Bool` CUDA buffer — no host
+round trip (R-CODE-4). This is the resident analog of the CPU
+`broadcast_bool_tensor` walk and mirrors PyTorch's `expand_outplace(mask,
+self)` at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2406`. Before
+#1663 the CUDA path returned `NotImplementedOnCuda`, so a `masked_scatter`
+(or any masked op) with a CUDA mask whose shape required broadcasting
+diverged from torch.
+
 ### Logical-length launch contract (#1660)
 
 `launch_cmp` (and its forwarders `launch_cmp_half` / the `gpu_cmp_*`
@@ -224,3 +250,4 @@ Expected: `test result: ok` on a host with a CUDA device. The
 | REQ-6 | SHIPPED | impl: `fn cmp_half_ptx in bool_kernels.rs` decodes bf16 via `mov.b32 %ua, {%zero16, %ha}` (BF16_DECODE constant) and f16 via `cvt.f32.f16 %fa, %ha` (F16_DECODE), then `setp.{op}.f32`. Result is always u8 0/1 (`selp.u16 %res, 1, 0, %c`). Non-test consumer: `pub fn gpu_cmp_{bf16,f16}` invoke `launch_cmp_half` with the right decode, called from the bool-comparison arms of the backend. |
 | REQ-7 | SHIPPED | impl: every `unsafe { stream.launch_builder(&f)... }` in `bool_kernels.rs` (in `launch_cmp`, `launch_not`, `launch_reduce_bool`) is preceded by a multi-line SAFETY comment naming entry signature, length binding, alloc, bound check, and `n as u32` non-truncation. Non-test consumer inherits the contract via each public wrapper. |
 | REQ-8 | SHIPPED | impl: `launch_cmp` and `launch_not` short-circuit on `n == 0` via `if n == 0 { return Ok(stream.alloc_zeros::<u8>(0)?); }`; `launch_reduce_bool` short-circuits with `let host = [empty_identity]; return Ok(stream.clone_htod(&host)?);`. Non-test consumer relies on the no-launch short circuit via backend dispatch (e.g. `torch.any(empty)` returning a 1-element false). |
+| REQ-9 (on-device bool broadcast, #1663) | SHIPPED | impl: `pub fn gpu_broadcast_bool in ferrotorch-gpu/src/bool_kernels.rs` (u8 strided-gather over `BOOL_BROADCAST_PTX`, 8-dim unrolled, `pad_bool_broadcast_params` computes the contiguous output strides + pads unused dims). Non-test consumer: `CudaBackendImpl::broadcast_bool in ferrotorch-gpu/src/backend_impl.rs` computes the per-dim broadcast input strides and invokes `gpu_broadcast_bool`; that backend slot is itself consumed by `grad_fns::indexing::broadcast_bool_tensor`'s CUDA branch in `ferrotorch-core/src/grad_fns/indexing.rs`, which `masked_scatter` / `masked_fill_bcast` / `masked_select_bcast` / `where_cond_bcast` all flow through. Mirrors PyTorch `expand_outplace(mask, self)` at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2406`. |

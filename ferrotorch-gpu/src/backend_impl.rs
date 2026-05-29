@@ -8463,6 +8463,87 @@ impl GpuBackend for CudaBackendImpl {
             }),
         }
     }
+
+    fn broadcast_bool(
+        &self,
+        mask: &GpuBufferHandle,
+        in_shape: &[usize],
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        if mask.dtype() != DType::Bool {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "broadcast_bool: mask is tagged {}, expected Bool",
+                    mask.dtype()
+                ),
+            });
+        }
+        let in_numel: usize = if in_shape.is_empty() {
+            1
+        } else {
+            in_shape.iter().product()
+        };
+        if mask.len() != in_numel {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "broadcast_bool: mask numel {} != product(in_shape {:?}) = {in_numel}",
+                    mask.len(),
+                    in_shape,
+                ),
+            });
+        }
+        let out_ndim = out_shape.len();
+        let in_ndim = in_shape.len();
+        if in_ndim > out_ndim {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "broadcast_bool: input ndim {in_ndim} > target ndim {out_ndim} \
+                     (shapes {in_shape:?} -> {out_shape:?})"
+                ),
+            });
+        }
+        // Per-output-dim broadcast input element strides. Walk output dims;
+        // right-align the input. The input element stride for a dim is the
+        // contiguous input stride where `in_dim == out_dim`, or 0 where the
+        // input dim is size-1 or absent (the NumPy / torch broadcast rule that
+        // the CPU `broadcast_in_flat` index map encodes).
+        let mut in_contig = vec![0usize; in_ndim];
+        if in_ndim > 0 {
+            in_contig[in_ndim - 1] = 1;
+            for d in (0..in_ndim - 1).rev() {
+                in_contig[d] = in_contig[d + 1] * in_shape[d + 1];
+            }
+        }
+        let mut src_strides = vec![0usize; out_ndim];
+        for (d_off, src_stride_slot) in src_strides.iter_mut().rev().enumerate() {
+            let out_dim = out_shape[out_ndim - 1 - d_off];
+            if d_off < in_ndim {
+                let d_in = in_ndim - 1 - d_off;
+                let in_dim = in_shape[d_in];
+                if in_dim == 1 {
+                    // broadcast — stride 0
+                } else if in_dim == out_dim {
+                    *src_stride_slot = in_contig[d_in];
+                } else {
+                    return Err(FerrotorchError::ShapeMismatch {
+                        message: format!(
+                            "broadcast_bool: cannot broadcast {in_shape:?} -> {out_shape:?} \
+                             (axis {} mismatch: {in_dim} vs {out_dim})",
+                            out_ndim - 1 - d_off
+                        ),
+                    });
+                }
+            }
+            // d_off >= in_ndim: leading output axis with no input counterpart —
+            // stride stays 0 (replicate).
+        }
+        let ord = mask.device_ordinal();
+        let dev = self.device(ord)?;
+        let mb = Self::unwrap_buffer_bool(mask)?.inner();
+        let out = crate::bool_kernels::gpu_broadcast_bool(mb, out_shape, &src_strides, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_slice_bool(out, ord))
+    }
 }
 
 // ---------------------------------------------------------------------------

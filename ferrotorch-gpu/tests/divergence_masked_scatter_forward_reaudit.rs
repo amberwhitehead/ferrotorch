@@ -23,14 +23,17 @@
 //!   6. BACKWARD on an all-CUDA masked_scatter with a non-trivial grad_output.
 //!      PASSES.
 //!   7. BROADCAST MASK — input [2,3] + CUDA mask [3] (torch broadcasts the mask
-//!      on-device). FAILS — DIVERGENCE, tracking #1663 (see test (7) below).
+//!      on-device). FIXED in #1663: `broadcast_bool_tensor`'s CUDA path now
+//!      dispatches to the on-device `GpuBackend::broadcast_bool` kernel
+//!      (`ferrotorch-gpu/src/bool_kernels.rs::gpu_broadcast_bool`), so the
+//!      broadcast mask reaches the all-CUDA forward kernel. PASSES (test (7)).
 //!
 //! R-CHAR-3 provenance: every expected value is the live-torch result captured
 //! in this env (torch 2.11.0+cu130, RTX 3090) — recorded inline as a symbolic
 //! constant traceable to the `LD_LIBRARY_PATH=$HOME/.local/lib python3` run.
 //!
-//! VERDICT: GENERATOR MUST FIX (1 divergence, #7 broadcast CUDA mask). Tests
-//! (1)-(6) are permanent regression guards (NOT `#[ignore]`d).
+//! VERDICT: CLEAN — tests (1)-(7) are permanent regression guards (NOT
+//! `#[ignore]`d; #1663 closed the broadcast divergence on the all-CUDA path).
 
 #![cfg(feature = "cuda")]
 
@@ -317,7 +320,6 @@ fn masked_scatter_forward_all_cuda_backward_nontrivial_matches_torch() {
 const TORCH_BCAST_MASK: [f32; 6] = [-1.0, 2.0, -2.0, -3.0, 5.0, -4.0];
 
 #[test]
-#[ignore = "divergence: masked_scatter rejects a broadcast CUDA mask (broadcast_bool_tensor NotImplementedOnCuda); tracking #1663"]
 fn masked_scatter_forward_all_cuda_broadcast_mask_matches_torch() {
     ensure_cuda();
     let inp = cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
@@ -336,5 +338,127 @@ fn masked_scatter_forward_all_cuda_broadcast_mask_matches_torch() {
         host_f32(&out),
         TORCH_BCAST_MASK.to_vec(),
         "torch broadcasts a CUDA mask on-device; ferrotorch must not reject it"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// (8) DIRECT broadcast_bool kernel matrix (#1663). Exercise the on-device
+// `GpuBackend::broadcast_bool` slot for the broadcast patterns the consumer
+// relies on, comparing the expanded CUDA bool buffer to the CPU broadcast of
+// the same mask. is_cuda() preserved (no host round trip in the kernel; we read
+// host-side only to assert). The "expected" is the host broadcast computed by
+// the same NumPy/torch rule (right-align dims; size-1/absent dim replicates) —
+// route (b) symbolic, the standard broadcast contract.
+// ───────────────────────────────────────────────────────────────────────────
+fn cpu_broadcast_ref(bits: &[bool], in_shape: &[usize], out_shape: &[usize]) -> Vec<bool> {
+    let out_numel: usize = out_shape.iter().product();
+    let out_ndim = out_shape.len();
+    let in_ndim = in_shape.len();
+    let mut in_strides = vec![0usize; in_ndim];
+    if in_ndim > 0 {
+        in_strides[in_ndim - 1] = 1;
+        for d in (0..in_ndim - 1).rev() {
+            in_strides[d] = in_strides[d + 1] * in_shape[d + 1];
+        }
+    }
+    let mut out = Vec::with_capacity(out_numel);
+    for flat in 0..out_numel {
+        let mut rem = flat;
+        let mut in_idx = 0usize;
+        for d_out in (0..out_ndim).rev() {
+            let coord = rem % out_shape[d_out];
+            rem /= out_shape[d_out];
+            let d_off = out_ndim - 1 - d_out;
+            if d_off < in_ndim {
+                let d_in = in_ndim - 1 - d_off;
+                if in_shape[d_in] != 1 {
+                    in_idx += coord * in_strides[d_in];
+                }
+            }
+        }
+        out.push(bits[in_idx]);
+    }
+    out
+}
+
+fn broadcast_bool_on_device(bits: &[bool], in_shape: &[usize], out_shape: &[usize]) -> Vec<bool> {
+    use ferrotorch_core::gpu_dispatch::gpu_backend;
+    let mask = cuda_mask(bits, in_shape);
+    let backend = gpu_backend().expect("cuda backend registered");
+    let handle = backend
+        .broadcast_bool(mask.gpu_handle().unwrap(), in_shape, out_shape)
+        .expect("broadcast_bool on device");
+    let bt = BoolTensor::from_gpu_handle(handle, out_shape.to_vec());
+    assert!(bt.is_cuda(), "broadcast_bool result must stay CUDA");
+    bt.to(Device::Cpu).unwrap().data().unwrap().to_vec()
+}
+
+#[test]
+fn broadcast_bool_cuda_matrix_matches_cpu_broadcast() {
+    ensure_cuda();
+    // [3] -> [2,3]
+    let bits = [true, false, true];
+    assert_eq!(
+        broadcast_bool_on_device(&bits, &[3], &[2, 3]),
+        cpu_broadcast_ref(&bits, &[3], &[2, 3]),
+        "[3] -> [2,3]"
+    );
+    // [1,3] -> [2,3]
+    assert_eq!(
+        broadcast_bool_on_device(&bits, &[1, 3], &[2, 3]),
+        cpu_broadcast_ref(&bits, &[1, 3], &[2, 3]),
+        "[1,3] -> [2,3]"
+    );
+    // [2,1] -> [2,3]
+    let col = [true, false];
+    assert_eq!(
+        broadcast_bool_on_device(&col, &[2, 1], &[2, 3]),
+        cpu_broadcast_ref(&col, &[2, 1], &[2, 3]),
+        "[2,1] -> [2,3]"
+    );
+    // scalar [1] -> [2,3]
+    let scalar = [true];
+    assert_eq!(
+        broadcast_bool_on_device(&scalar, &[1], &[2, 3]),
+        vec![true; 6],
+        "scalar [1] -> [2,3]"
+    );
+    // already-equal shape: kernel returns the same bits (no-op broadcast).
+    let same = [true, false, true, false, true, false];
+    assert_eq!(
+        broadcast_bool_on_device(&same, &[2, 3], &[2, 3]),
+        same.to_vec(),
+        "[2,3] -> [2,3] no-op"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// (9) masked_scatter with a broadcast CUDA mask, additional shapes (#1663).
+// live torch (torch 2.11.0+cu130, RTX 3090):
+//   inp [[1,2,3],[4,5,6]], col mask [[T],[F]] (shape [2,1]) broadcast to [2,3],
+//   src [-1,-2,-3,-4] -> row 0 all true (3 trues take -1,-2,-3), row 1 all false
+//   -> [[-1,-2,-3],[4,5,6]]
+// ───────────────────────────────────────────────────────────────────────────
+const TORCH_BCAST_COL_MASK: [f32; 6] = [-1.0, -2.0, -3.0, 4.0, 5.0, 6.0];
+
+#[test]
+fn masked_scatter_forward_all_cuda_broadcast_col_mask_matches_torch() {
+    ensure_cuda();
+    let inp = cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
+        .to(Device::Cuda(0))
+        .expect("inp cuda");
+    // [2,1] CUDA mask broadcast to [2,3].
+    let mask = cuda_mask(&[true, false], &[2, 1]);
+    let src = cpu_f32(&[-1.0, -2.0, -3.0, -4.0], &[4])
+        .to(Device::Cuda(0))
+        .expect("src cuda");
+    let out = inp
+        .masked_scatter_t(&mask, &src)
+        .expect("masked_scatter broadcast [2,1] CUDA mask");
+    assert!(out.is_cuda());
+    assert_eq!(
+        host_f32(&out),
+        TORCH_BCAST_COL_MASK.to_vec(),
+        "torch broadcasts a [2,1] CUDA mask over [2,3] on-device"
     );
 }

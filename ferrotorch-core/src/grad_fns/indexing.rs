@@ -1764,20 +1764,29 @@ fn broadcast_in_flat(flat: usize, out_shape: &[usize], in_shape: &[usize]) -> us
     in_idx
 }
 
-/// Broadcast a CPU-resident [`BoolTensor`] to `out_shape` using NumPy rules,
-/// returning a new contiguous CPU `BoolTensor`. Errors if the mask is GPU-
-/// resident (no resident broadcast kernel exists for `DType::Bool`; the
-/// runner-side production consumer feeds CPU tensors). Used by the
-/// broadcasting wrappers `masked_fill_bcast`, `masked_select_bcast`, and
-/// `where_cond_bcast` below to mirror PyTorch's `expand_outplace` step.
+/// Broadcast a [`BoolTensor`] to `out_shape` using NumPy / torch rules,
+/// returning a new contiguous `BoolTensor` on the SAME device as `mask`.
+///
+/// CPU masks broadcast host-side here; a CUDA-resident mask broadcasts ENTIRELY
+/// on device via [`crate::gpu_dispatch::GpuBackend::broadcast_bool`] (#1663) —
+/// the result stays `is_cuda()`, no host round trip (R-CODE-4). This mirrors the
+/// `expand_outplace(mask, self)` step PyTorch performs for masked ops at
+/// `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2406`. Used by the
+/// broadcasting wrappers `masked_fill_bcast`, `masked_select_bcast`,
+/// `where_cond_bcast`, and `masked_scatter` below.
 fn broadcast_bool_tensor(mask: &BoolTensor, out_shape: &[usize]) -> FerrotorchResult<BoolTensor> {
     if mask.shape() == out_shape {
         return Ok(mask.clone());
     }
     if mask.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: "broadcast_bool_tensor",
-        });
+        // On-device bool broadcast (#1663): the resident analog of the CPU walk
+        // below. The kernel maps each output flat index to the corresponding
+        // input flat index via per-dim broadcast strides (size-1 / absent dim ->
+        // stride 0), reading the u8 and writing the expanded u8 buffer. Result
+        // stays a CUDA `BoolTensor`.
+        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = backend.broadcast_bool(mask.gpu_handle()?, mask.shape(), out_shape)?;
+        return Ok(BoolTensor::from_gpu_handle(handle, out_shape.to_vec()));
     }
     let in_data = mask.data()?;
     let in_shape: Vec<usize> = mask.shape().to_vec();

@@ -2824,6 +2824,28 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    // broadcast_bool (#1663): expand a `DType::Bool` (u8 0/1) mask from
+    // `in_shape` to a larger `out_shape` ENTIRELY on device, using NumPy / torch
+    // broadcasting rules (align trailing dims; a size-1 or absent input dim
+    // replicates). This is the resident analog of the CPU
+    // `grad_fns::indexing::broadcast_bool_tensor`, mirroring the
+    // `expand_outplace(mask, self)` step PyTorch performs for masked ops at
+    // `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2406`. `mask` MUST be
+    // tagged `DType::Bool` with `mask.len() == product(in_shape)`; the result is
+    // a `DType::Bool` handle of `product(out_shape)` elements and stays
+    // GPU-resident (NO host round trip — R-CODE-4). The default impl returns
+    // `NotImplementedOnCuda` so non-CUDA backends compile unchanged.
+    fn broadcast_bool(
+        &self,
+        _mask: &GpuBufferHandle,
+        _in_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_bool",
+        })
+    }
+
     // masked_zero: out[i] = mask[i] ? 0.0 : grad[i]  (backward of masked_fill)
     fn masked_zero_f32(
         &self,
