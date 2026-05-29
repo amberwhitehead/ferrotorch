@@ -48,6 +48,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- Divergence: #1668 single-span anchor validator — resolver soundness hole (bare-basename cross-crate false-accept) + bare-lowercase coverage gap (~2/3 of anchors unvalidated) (#1669)
+- Cite-drift walker: validate single-span S3 symbol anchors (`<sym> in <file>.rs`) resolve at HEAD (#1668)
 - ferrotorch open-blocker closeout sweep — drive 220 open blockers to zero via builder/critic loop (#1542)
 - Wire ferrotorch-cubecl::quant dequantize_q* + apply_token_mask_to_gpu into ferrotorch-llama GGUF GPU path (#1350)
 - Divergence: ferrotorch_llama::generate_masked (gpu_gguf.rs:514) lacks is_complete() guard — over-long max_new_tokens errors instead of stopping at grammar completion (#1667)
