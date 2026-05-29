@@ -100,8 +100,8 @@ fn cdist_p2_large_rows_gpu_is_more_precise_than_torch_default() {
 fn cdist_p2_large_rows_cpu_is_more_precise_than_torch_default() {
     let rows = 26;
     let data = fixture(rows);
-    let cpu = Tensor::from_storage(TensorStorage::cpu(data), vec![rows, 4], false)
-        .expect("cpu tensor");
+    let cpu =
+        Tensor::from_storage(TensorStorage::cpu(data), vec![rows, 4], false).expect("cpu tensor");
 
     let out = cdist(&cpu, &cpu, 2.0).expect("cpu cdist p=2");
     let host = out.data().unwrap().to_vec();

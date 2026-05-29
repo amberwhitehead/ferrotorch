@@ -135,8 +135,8 @@ fn batched_nonsquare_2x3x5_tril_f32() {
         0,
         false,
         &[
-            0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 6.0, 0.0, 0.0, 0.0, 10.0, 11.0, 12.0, 0.0, 0.0, 15.0, 0.0,
-            0.0, 0.0, 0.0, 20.0, 21.0, 0.0, 0.0, 0.0, 25.0, 26.0, 27.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 6.0, 0.0, 0.0, 0.0, 10.0, 11.0, 12.0, 0.0, 0.0, 15.0,
+            0.0, 0.0, 0.0, 0.0, 20.0, 21.0, 0.0, 0.0, 0.0, 25.0, 26.0, 27.0, 0.0, 0.0,
         ],
     );
     check_f32(
@@ -267,10 +267,10 @@ fn batched_nonsquare_k_beyond_extent() {
     // torch.triu(arange(30).reshape(2,3,5), 10) -> all zero
     let z = triu(&gpu, 10).unwrap();
     assert_eq!(z.cpu().unwrap().data().unwrap().to_vec(), vec![0.0f32; 30]);
-    assert_eq!(triu(&cpu, 10).unwrap().data().unwrap().to_vec(), vec![
-        0.0f32;
-        30
-    ]);
+    assert_eq!(
+        triu(&cpu, 10).unwrap().data().unwrap().to_vec(),
+        vec![0.0f32; 30]
+    );
 
     // torch.triu(arange(30).reshape(2,3,5), -10) -> full copy
     let full: Vec<f32> = (0..30).map(|i| i as f32).collect();

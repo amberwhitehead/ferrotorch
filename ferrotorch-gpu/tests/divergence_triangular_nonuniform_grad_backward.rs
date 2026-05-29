@@ -50,9 +50,14 @@ fn run(upper: bool, shape: Vec<usize>, k: i64) -> (Vec<usize>, Vec<f64>) {
     } else {
         tril(&x, k).expect("tril forward")
     };
-    assert_eq!(y.shape(), &shape[..], "forward shape must equal input shape");
+    assert_eq!(
+        y.shape(),
+        &shape[..],
+        "forward shape must equal input shape"
+    );
     let g = ramp_f64(shape.clone());
-    y.backward_with_gradient(&g).expect("backward_with_gradient");
+    y.backward_with_gradient(&g)
+        .expect("backward_with_gradient");
     let grad = x.grad().expect("grad query").expect("x has grad");
     (grad.shape().to_vec(), grad.data().unwrap().to_vec())
 }
