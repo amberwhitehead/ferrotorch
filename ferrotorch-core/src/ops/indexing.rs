@@ -182,6 +182,12 @@ pub fn gather<T: Float>(
                     });
                 }
                 let dim = normalize_axis(dim, ndim)?;
+                // The dim-aware PTX kernel assumes a C-contiguous
+                // `[outer, axis, inner]` physical buffer. A transposed/permuted
+                // CUDA view has logical shape != physical layout, so materialise
+                // to contiguous ON-DEVICE first (strided_copy kernel — no host
+                // round trip) so the buffer matches the `factor` decomposition.
+                let input = input.contiguous()?;
                 let input_shape = input.shape().to_vec();
                 let (outer, in_dim, inner) = factor(&input_shape, dim);
                 let out_dim = if index_shape.is_empty() {
@@ -339,6 +345,14 @@ pub fn scatter<T: Float>(
                         got: src.device(),
                     });
                 }
+                // The scatter PTX kernel reads `self`/`src` as C-contiguous
+                // `[outer, axis, inner]`. Materialise both to contiguous
+                // ON-DEVICE (strided_copy — no host round trip) so a
+                // transposed/permuted view's physical buffer matches the
+                // logical shape `factor` decomposes.
+                let input = input.contiguous()?;
+                let src = src.contiguous()?;
+                let input_shape: &[usize] = input.shape();
                 let (outer, out_dim, inner) = factor(input_shape, dim);
                 let idx_dim = index_shape[dim];
                 let input_handle = input.gpu_handle()?;
@@ -370,7 +384,7 @@ pub fn scatter<T: Float>(
                 };
                 let output_shape = input_shape.to_vec();
                 let storage = TensorStorage::gpu(h);
-                if needs_grad(input, src) {
+                if needs_grad(&input, &src) {
                     let grad_fn = Arc::new(crate::grad_fns::indexing::ScatterBackward {
                         input: input.clone(),
                         src: src.clone(),
@@ -480,6 +494,11 @@ pub fn scatter_value<T: Float>(
     if input.is_cuda() {
         match T::dtype() {
             DType::F32 | DType::F64 => {
+                // Materialise `self` to contiguous ON-DEVICE (strided_copy — no
+                // host round trip) so a transposed/permuted view's physical
+                // buffer matches the logical shape the kernel `factor` assumes.
+                let input = input.contiguous()?;
+                let input_shape: &[usize] = input.shape();
                 let (outer, out_dim, inner) = factor(input_shape, dim);
                 let idx_dim = index_shape[dim];
                 let input_handle = input.gpu_handle()?;
@@ -626,6 +645,15 @@ pub fn scatter_add<T: Float>(
                         got: src.device(),
                     });
                 }
+                // The scatter_add PTX kernel reads `self`/`src` as C-contiguous
+                // `[outer, axis, inner]`. Materialise both to contiguous
+                // ON-DEVICE (strided_copy — no host round trip) so a
+                // transposed/permuted view's physical buffer matches the
+                // logical shape `factor` decomposes. (A non-zero `self` exposes
+                // this: an all-zeros buffer reads identically either layout.)
+                let input = input.contiguous()?;
+                let src = src.contiguous()?;
+                let input_shape: &[usize] = input.shape();
                 let (outer, out_dim, inner) = factor(input_shape, dim);
                 let idx_dim = index_shape[dim];
                 let input_handle = input.gpu_handle()?;
@@ -657,7 +685,7 @@ pub fn scatter_add<T: Float>(
                 };
                 let output_shape = input_shape.to_vec();
                 let storage = TensorStorage::gpu(h);
-                if needs_grad(input, src) {
+                if needs_grad(&input, &src) {
                     let grad_fn = Arc::new(crate::grad_fns::indexing::ScatterAddBackward {
                         input: input.clone(),
                         src: src.clone(),
