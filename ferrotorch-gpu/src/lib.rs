@@ -257,6 +257,8 @@ pub use kernels::{
     gpu_mul_into, gpu_permute_0213_into, gpu_scale_into, gpu_slice_read_into,
     gpu_small_matmul_into, gpu_softmax_into, gpu_transpose_2d_into,
 };
+#[cfg(feature = "cuda")]
+pub use kernels::{gpu_add_scaled_f32, gpu_add_scaled_f64};
 pub use kernels::{gpu_broadcast_add, gpu_broadcast_mul, gpu_broadcast_sub};
 pub use kernels::{gpu_causal_mask_indirect, gpu_slice_write_indirect};
 pub use kernels::{

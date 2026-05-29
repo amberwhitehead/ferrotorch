@@ -13,21 +13,21 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:376`, `add_scaled` at `:746`, `add_out` at `:653`, `add_scaled_out` at `:680`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
-//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:824` delegates to `sub_scaled` at `:853` → `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
+//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:912` delegates to `sub_scaled` at `:941` → `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
 //! | REQ-3 (mul) | SHIPPED | `mul` + `MulBackward` in `arithmetic.rs`; parity `[mul] 72/72` (grep=1) |
 //! | REQ-4 (div) | SHIPPED | `div` + `DivBackward` in `arithmetic.rs`; parity `[div] 72/72` (grep=1) |
 //! | REQ-5 (neg) | SHIPPED | `neg` + `NegBackward`; parity `[neg] 8/8` (grep=1) |
 //! | REQ-6 (abs) | SHIPPED | `abs` + `AbsBackward`; parity `[abs] 8/8` (grep=1) |
 //! | REQ-7 (sqrt) | SHIPPED | `sqrt` + `SqrtBackward`; parity `[sqrt] 8/8` (grep=1) |
 //! | REQ-8 (pow scalar exponent) | SHIPPED | `pow` + `PowBackward` (scalar exp; tensor-exp overload returns `Ok(None)` and is skipped, not failed); parity `[pow] 24/72 passed 48 skipped` (grep=1) |
-//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:905` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
-//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:1669` + `RsqrtBackward` at `:1578`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
-//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:1817` + `ReciprocalBackward` at `:1740`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
-//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:2654` + `FloorDivideBackward` at `:2497` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
-//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:2017` + `RemainderBackward` at `:1903`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
-//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:2324` + `FmodBackward` at `:2206`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
-//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:3001` + `AddcmulBackward` at `:2858`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
-//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:3316` + `AddcdivBackward` at `:3154`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
+//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:993` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
+//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:1757` + `RsqrtBackward` at `:1666`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
+//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:1905` + `ReciprocalBackward` at `:1828`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
+//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:2742` + `FloorDivideBackward` at `:2585` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
+//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:2105` + `RemainderBackward` at `:1991`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
+//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:2412` + `FmodBackward` at `:2294`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
+//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:3089` + `AddcmulBackward` at `:2946`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
+//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:3404` + `AddcdivBackward` at `:3242`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -773,6 +773,36 @@ pub fn add_scaled<T: Float>(
         "tensor_op",
         &[a.shape(), b.shape()],
         || {
+            // Fused GPU fast path (#1675): when `a` and `b` are CUDA-resident,
+            // SAME shape (no broadcast), dtype f32/f64, and `alpha` is finite,
+            // compute `out = a + alpha*b` in a SINGLE on-device FMA launch
+            // instead of the two-launch `scale_tensor(b, alpha)` +
+            // `add_inner(a, b_scaled)` staging (which also allocated a temporary
+            // device buffer). This roughly halves the kernel-launch cost of
+            // `sub` / `sub_scaled` / `rsub`, which all delegate to `add_scaled`
+            // (the alpha=-1 case is `fma(-1, b, a) = a - b`, bit-exact vs the
+            // scalar path AND torch). Broadcast / mixed-device / non-f32-f64
+            // dtype / non-finite alpha all fall through to the existing
+            // scale-then-add path (correctness over completeness). The fused
+            // result stays `is_cuda()`, and the `AddScaledBackward` node below
+            // is unchanged — only the forward storage source moves.
+            if let Some(result) = maybe_add_scaled_fused_gpu(a, b, alpha)? {
+                return if needs_grad(a, b) {
+                    let (storage, shape) = result.into_storage_and_shape()?;
+                    Tensor::from_operation(
+                        storage,
+                        shape,
+                        Arc::new(AddScaledBackward {
+                            a: a.clone(),
+                            b: b.clone(),
+                            alpha,
+                        }),
+                    )
+                } else {
+                    Ok(result)
+                };
+            }
+
             // Forward: scale `b`, then add. `no_grad` so the temporary `b_scaled`
             // does not introduce its own MulScalarBackward node — we attach a
             // single `AddScaledBackward` that handles the full VJP directly.
@@ -799,6 +829,64 @@ pub fn add_scaled<T: Float>(
             }
         },
     )
+}
+
+/// Fused single-launch `out = a + alpha * b` on CUDA, when eligible.
+///
+/// Returns `Ok(Some(result))` (a fresh, `is_cuda()`, grad-free tensor) when
+/// `a` and `b` are both CUDA-resident, share the SAME shape (no broadcast),
+/// are dtype f32 or f64, and `alpha` is finite. Returns `Ok(None)` (the
+/// caller must take the existing `scale_tensor` + `add_inner` path) for any
+/// of: CPU tensors, broadcast (different shapes), bf16/f16, or non-finite
+/// `alpha`. This deliberately scopes the fast path to the cases where a
+/// single `fma.rn.f{32,64}` is provably correct: for the included dtypes the
+/// fused FMA does one rounding (>= as accurate as scale-then-add's two), and
+/// for `alpha == -1.0` it is exactly `a - b`.
+///
+/// Non-finite alpha is excluded only to keep this fast path conservative; the
+/// fall-through scale-then-add path already matches torch for NaN/inf alpha,
+/// so excluding them here never changes observable results.
+fn maybe_add_scaled_fused_gpu<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    alpha: f64,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    // Same-device check already ran in `add_scaled` before this call; here we
+    // additionally require both operands to be CUDA-resident and a supported
+    // dtype. CPU, broadcast, bf16/f16, and non-finite alpha fall back.
+    if !(a.is_cuda() && b.is_cuda()) {
+        return Ok(None);
+    }
+    if !(is_f32::<T>() || is_f64::<T>()) {
+        return Ok(None);
+    }
+    if !alpha.is_finite() {
+        return Ok(None);
+    }
+    let Some(backend) = crate::gpu_dispatch::gpu_backend() else {
+        return Ok(None);
+    };
+
+    // Materialize non-contiguous CUDA views (#812 cluster) so the raw
+    // `gpu_handle()` matches the logical extent the fused kernel expects.
+    let a_c = ensure_contig_for_gpu(a)?;
+    let b_c = ensure_contig_for_gpu(b)?;
+
+    // SAME-shape only — broadcast falls back to the scale-then-add /
+    // broadcast_add path which already handles unequal shapes correctly.
+    if a_c.shape() != b_c.shape() {
+        return Ok(None);
+    }
+
+    let out_shape = a_c.shape().to_vec();
+    let handle = if is_f32::<T>() {
+        backend.add_scaled_f32(a_c.gpu_handle()?, b_c.gpu_handle()?, alpha)?
+    } else {
+        backend.add_scaled_f64(a_c.gpu_handle()?, b_c.gpu_handle()?, alpha)?
+    };
+    let storage = TensorStorage::gpu(handle);
+    let result = Tensor::from_storage(storage, out_shape, false)?;
+    Ok(Some(result))
 }
 
 // ===========================================================================

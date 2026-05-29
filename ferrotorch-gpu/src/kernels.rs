@@ -370,6 +370,128 @@ DONE:
 }
 ";
 
+/// PTX source for `add_scaled_kernel`: fused `out[i] = a[i] + alpha * b[i]`.
+///
+/// Single-launch FMA: `fma.rn.f32 %vr, %alpha, %vb, %va` computes
+/// `alpha*b + a` with ONE IEEE-754 round-to-nearest-even rounding, replacing
+/// the previous two-kernel `scale_tensor(b, alpha)` + `add_inner(a, b_scaled)`
+/// path (which also allocated a temporary device buffer). For `alpha == -1`
+/// this is exactly `a - b` (the `sub` / `sub_scaled` delegation target). The
+/// `.param .f32 alpha` declaration and `ld.param.f32` are auto-lifted to
+/// f64 by `ptx_f32_to_f64` for the f64 variant (which also lifts
+/// `fma.rn.f32` -> `fma.rn.f64`). ABI: `(a_ptr, b_ptr, out_ptr, alpha, n)`.
+#[cfg(feature = "cuda")]
+pub(crate) const ADD_SCALED_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry add_scaled_kernel(
+    .param .u64 a_ptr,
+    .param .u64 b_ptr,
+    .param .u64 out_ptr,
+    .param .f32 alpha,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %b, %out, %off;
+    .reg .f32 %va, %vb, %vr, %al;
+    .reg .pred %p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %b, [b_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.f32 %al, [alpha];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+
+    add.u64 %a, %a, %off;
+    add.u64 %b, %b, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f32 %va, [%a];
+    ld.global.f32 %vb, [%b];
+    fma.rn.f32 %vr, %al, %vb, %va;
+    st.global.f32 [%out], %vr;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for `add_scaled_vec4_kernel`: fused FMA, 4 elements per thread.
+///
+/// `out[i] = a[i] + alpha * b[i]` via four per-lane `fma.rn.f32` on 128-bit
+/// `ld.global.v4.f32` loads (4x memory throughput vs scalar). Thread i
+/// processes elements `[i*4 .. i*4+3]`. f32-only (the `shl.b64 %off, %off, 4`
+/// 16-byte stride is not auto-converted to the 32-byte f64 stride; the f64
+/// path uses the scalar `add_scaled_kernel` exclusively, mirroring how
+/// `gpu_add_f64` uses only the scalar `add_kernel`).
+#[cfg(feature = "cuda")]
+pub(crate) const ADD_SCALED_VEC4_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry add_scaled_vec4_kernel(
+    .param .u64 a_ptr,
+    .param .u64 b_ptr,
+    .param .u64 out_ptr,
+    .param .f32 alpha,
+    .param .u32 n4
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n4_reg;
+    .reg .u64 %a, %b, %out, %off;
+    .reg .f32 %a0, %a1, %a2, %a3, %b0, %b1, %b2, %b3, %r0, %r1, %r2, %r3, %al;
+    .reg .pred %p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %b, [b_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.f32 %al, [alpha];
+    ld.param.u32 %n4_reg, [n4];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n4_reg;
+    @%p bra DONE;
+
+    // Byte offset = tid * 16 (4 floats x 4 bytes)
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 4;
+
+    add.u64 %a, %a, %off;
+    add.u64 %b, %b, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.v4.f32 {%a0, %a1, %a2, %a3}, [%a];
+    ld.global.v4.f32 {%b0, %b1, %b2, %b3}, [%b];
+
+    fma.rn.f32 %r0, %al, %b0, %a0;
+    fma.rn.f32 %r1, %al, %b1, %a1;
+    fma.rn.f32 %r2, %al, %b2, %a2;
+    fma.rn.f32 %r3, %al, %b3, %a3;
+
+    st.global.v4.f32 [%out], {%r0, %r1, %r2, %r3};
+
+DONE:
+    ret;
+}
+";
+
 /// PTX source for `sub_kernel`: `out[i] = a[i] - b[i]`.
 #[cfg(feature = "cuda")]
 pub(crate) const SUB_PTX: &str = "\
@@ -13160,6 +13282,180 @@ pub fn gpu_add(
     try_launch_binary(a, b, device, ADD_PTX, "add_kernel")
 }
 
+/// Fused scaled add: `out[i] = a[i] + alpha * b[i]` in a SINGLE kernel launch.
+///
+/// Replaces the two-launch `gpu_scale(b, alpha)` + `gpu_add(a, b_scaled)`
+/// path (which also allocated an intermediate device buffer). Uses a per-lane
+/// `fma.rn.f32` so the result is computed with ONE IEEE-754 rounding. For
+/// `alpha == -1.0` this is exactly `a - b` (bit-exact vs `gpu_sub`); for
+/// general finite `alpha` the single-rounding fused result is at least as
+/// accurate as scale-then-add (two roundings); NaN/inf `alpha` propagate
+/// through the FMA exactly as the hardware contract specifies.
+///
+/// Tries the vec4 kernel (4 elems/thread, 128-bit loads) when `n >= 16 &&
+/// n % 4 == 0`, falling back to the scalar kernel on PTX compile failure or
+/// non-vec4 sizes.
+///
+/// # Errors
+///
+/// - [`GpuError::DeviceMismatch`] if `a`, `b`, or `device` refer to
+///   different CUDA devices.
+/// - [`GpuError::LengthMismatch`] if `a` and `b` have different lengths.
+/// - [`GpuError::Driver`] on CUDA runtime errors.
+#[cfg(feature = "cuda")]
+pub fn gpu_add_scaled_f32(
+    a: &CudaBuffer<f32>,
+    b: &CudaBuffer<f32>,
+    alpha: f32,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    validate_binary(a, b, device)?;
+
+    let n = a.len();
+    if n >= 16 && n % 4 == 0 {
+        match try_launch_add_scaled_vec4(a, b, alpha, device) {
+            Ok(out) => return Ok(out),
+            Err(GpuError::PtxCompileFailed { .. }) => {}
+            Err(e) => return Err(e),
+        }
+    }
+
+    try_launch_add_scaled_scalar(a, b, alpha, device)
+}
+
+/// Scalar fused-add launcher: `out[i] = a[i] + alpha * b[i]` via
+/// `add_scaled_kernel` (ABI `(a_ptr, b_ptr, out_ptr, alpha, n)`).
+#[cfg(feature = "cuda")]
+fn try_launch_add_scaled_scalar(
+    a: &CudaBuffer<f32>,
+    b: &CudaBuffer<f32>,
+    alpha: f32,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    let n = a.len();
+    let ctx = device.context();
+    let stream = device.stream();
+
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        ADD_SCALED_PTX,
+        "add_scaled_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "add_scaled_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = alloc_zeros_f32(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+
+    // SAFETY:
+    // - `f` is a valid PTX `CudaFunction` resolved via
+    //   `module_cache::get_or_compile(ctx, ADD_SCALED_PTX,
+    //   "add_scaled_kernel", ...)` immediately above; ABI is
+    //   `(a_ptr, b_ptr, out_ptr, alpha, n)` per the `ADD_SCALED_PTX`
+    //   const.
+    // - `a` and `b` are caller-validated (via `validate_binary` in
+    //   `gpu_add_scaled_f32`) to be same-length, same-device buffers.
+    // - `out` was freshly allocated by `alloc_zeros_f32(n, device)?`
+    //   immediately above, so it cannot alias `a` or `b`; the
+    //   `out.inner_mut()` borrow is the only live mutable reference.
+    // - `alpha: f32` is passed by reference to the fn-parameter local,
+    //   which lives for the full call frame covering the async launch.
+    // - The kernel's bound check `setp.ge.u32 %p, %r_tid, %n_reg;
+    //   @%p bra DONE` (matching `ADD_PTX`) skips threads with `tid >= n`,
+    //   so all loads/stores stay in `[0, n)`.
+    // - `n_u32 = n as u32` is bounded by `launch_cfg(n)?` which errors
+    //   when `n > u32::MAX`.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a.inner())
+            .arg(b.inner())
+            .arg(out.inner_mut())
+            .arg(&alpha)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
+/// Vec4 fused-add launcher: 4 elems/thread via `add_scaled_vec4_kernel`
+/// (ABI `(a_ptr, b_ptr, out_ptr, alpha, n4)`). Caller gates on
+/// `n >= 16 && n % 4 == 0`.
+#[cfg(feature = "cuda")]
+fn try_launch_add_scaled_vec4(
+    a: &CudaBuffer<f32>,
+    b: &CudaBuffer<f32>,
+    alpha: f32,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    let n = a.len();
+    let n4 = (n / 4) as u32;
+    let ctx = device.context();
+    let stream = device.stream();
+
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        ADD_SCALED_VEC4_PTX,
+        "add_scaled_vec4_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "add_scaled_vec4_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = alloc_zeros_f32(n, device)?;
+    let cfg = launch_cfg(n4 as usize)?;
+
+    // SAFETY:
+    // - `f` is a valid PTX `CudaFunction` resolved via
+    //   `module_cache::get_or_compile(ctx, ADD_SCALED_VEC4_PTX,
+    //   "add_scaled_vec4_kernel", ...)` immediately above; ABI is
+    //   `(a_ptr, b_ptr, out_ptr, alpha, n4)` per the
+    //   `ADD_SCALED_VEC4_PTX` const (mirrors `ADD_VEC4_PTX`).
+    // - The vec4 kernel processes 4 f32 elements per thread via
+    //   `ld.global.v4.f32` 128-bit loads; its bound check
+    //   `setp.ge.u32 %p, %r_tid, %n4_reg` skips `tid >= n4`. Reading
+    //   `4 * n4 == n - (n % 4)` elements requires `n % 4 == 0`, which
+    //   the caller (`gpu_add_scaled_f32`) enforces before invoking this
+    //   helper.
+    // - `a` and `b` are caller-validated same-length same-device; `out`
+    //   was freshly allocated by `alloc_zeros_f32(n, device)?` and
+    //   cannot alias them; `out.inner_mut()` is the only mutable borrow.
+    // - `alpha: f32` is passed by reference to the fn-parameter local.
+    // - `n4` fits in `u32` (computed as `(n / 4) as u32`) and
+    //   `launch_cfg(n4 as usize)?` re-validates against `u32::MAX`.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a.inner())
+            .arg(b.inner())
+            .arg(out.inner_mut())
+            .arg(&alpha)
+            .arg(&n4)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
 /// Elementwise subtraction: `out[i] = a[i] - b[i]`.
 ///
 /// Attempts to run a PTX kernel on the GPU. Returns `Err(GpuError::PtxCompileFailed)`
@@ -17913,6 +18209,99 @@ pub fn gpu_add_f64(
     }
     let ptx = get_f64_ptx(&CACHE, ADD_PTX, "add_kernel", "add_f64_kernel");
     try_launch_binary_f64(a, b, device, ptx, "add_f64_kernel")
+}
+
+/// Fused f64 scaled add: `out[i] = a[i] + alpha * b[i]` in a SINGLE launch.
+///
+/// f64 counterpart of [`gpu_add_scaled_f32`]. The f64 PTX is auto-derived
+/// from the f32 `ADD_SCALED_PTX` scalar kernel via `ptx_f32_to_f64`, which
+/// lifts `.param .f32 alpha` -> `.param .f64`, `ld.param.f32` ->
+/// `ld.param.f64`, `fma.rn.f32` -> `fma.rn.f64`, and the 4-byte element
+/// stride `shl.b64 %off, %off, 2` -> the 8-byte `shl.b64 %off, %off, 3`.
+/// Only the scalar kernel is used (no vec4) — mirroring `gpu_add_f64`,
+/// because the vec4 16-byte stride is not part of the f32->f64 converter's
+/// rewrite set.
+///
+/// # Errors
+///
+/// - [`GpuError::LengthMismatch`] if `a` and `b` have different lengths.
+/// - [`GpuError::PtxCompileFailed`] if the PTX module cannot be loaded.
+/// - [`GpuError::Driver`] on CUDA runtime errors.
+#[cfg(feature = "cuda")]
+pub fn gpu_add_scaled_f64(
+    a: &CudaBuffer<f64>,
+    b: &CudaBuffer<f64>,
+    alpha: f64,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    if a.len() != b.len() {
+        return Err(GpuError::LengthMismatch {
+            a: a.len(),
+            b: b.len(),
+        });
+    }
+
+    let n = a.len();
+    let ctx = device.context();
+    let stream = device.stream();
+
+    let ptx = get_f64_ptx(
+        &CACHE,
+        ADD_SCALED_PTX,
+        "add_scaled_kernel",
+        "add_scaled_f64_kernel",
+    );
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "add_scaled_f64_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "add_scaled_f64_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = alloc_zeros_f64(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+
+    // SAFETY:
+    // - `f` is a valid PTX `CudaFunction` resolved via
+    //   `module_cache::get_or_compile(ctx, ptx, "add_scaled_f64_kernel",
+    //   ...)` immediately above; `ptx` is the f64 form produced by
+    //   `get_f64_ptx` from the f32 `ADD_SCALED_PTX`. ABI is
+    //   `(a_ptr, b_ptr, out_ptr, alpha, n)` with `alpha` widened to
+    //   `.param .f64` and the element stride widened to 8 bytes.
+    // - `a` and `b` are caller-supplied `&CudaBuffer<f64>` validated
+    //   above to be equal-length; `n = a.len()`.
+    // - `out` was freshly allocated by `alloc_zeros_f64(n, device)?`
+    //   immediately above, so it cannot alias `a`/`b`; `out.inner_mut()`
+    //   is the only live mutable borrow.
+    // - `alpha: f64` is passed by reference to the fn-parameter local,
+    //   live for the full call frame covering the async launch.
+    // - The kernel's bound check skips threads with `tid >= n`, so all
+    //   8-byte f64 loads/stores stay in `[0, n)`.
+    // - `n_u32 = n as u32` is bounded by `launch_cfg(n)?`.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a.inner())
+            .arg(b.inner())
+            .arg(out.inner_mut())
+            .arg(&alpha)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
 }
 
 /// Elementwise f64 subtraction: `out[i] = a[i] - b[i]`.

@@ -1360,6 +1360,24 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
+    fn add_scaled_f32(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        alpha: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let b_buf = Self::unwrap_buffer(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        // `alpha` arrives as f64 (the dtype-agnostic trait scalar); narrow to
+        // f32 for the f32 fused kernel. `alpha as f32` is the same rounding
+        // PyTorch applies when an f64 Python scalar is bound to an f32 tensor
+        // op, and it preserves NaN / +-inf bit patterns.
+        let result = crate::kernels::gpu_add_scaled_f32(a_buf, b_buf, alpha as f32, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
     fn mul_f32(
         &self,
         a: &GpuBufferHandle,
@@ -1472,6 +1490,21 @@ impl GpuBackend for CudaBackendImpl {
         let b_buf = Self::unwrap_buffer_f64(b)?;
         let dev = self.device(a.device_ordinal())?;
         let result = crate::kernels::gpu_sub_f64(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    fn add_scaled_f64(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        alpha: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let b_buf = Self::unwrap_buffer_f64(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        // f64 alpha is used at full precision by the f64 fused kernel.
+        let result = crate::kernels::gpu_add_scaled_f64(a_buf, b_buf, alpha, dev)
+            .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 

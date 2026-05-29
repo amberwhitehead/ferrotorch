@@ -139,7 +139,7 @@ The file is ~4.3k LOC and exposes:
   `register_gpu_backend(b2)` returns `Err(b2)`
   (`gpu_dispatch.rs` (GpuBackend trait methods)).
 - [x] AC-5: `has_gpu_backend()` toggles with registration
-  (`gpu_dispatch.rs:4278-4280`).
+  (`gpu_dispatch.rs:4308-4310`).
 - [x] AC-6: A concrete backend implementing the trait (i.e.
   `ferrotorch-gpu::CudaBackendImpl`) registers successfully and
   serves dispatch calls.

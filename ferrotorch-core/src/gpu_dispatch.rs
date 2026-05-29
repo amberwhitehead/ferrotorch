@@ -349,6 +349,24 @@ pub trait GpuBackend: Send + Sync {
         a: &GpuBufferHandle,
         b: &GpuBufferHandle,
     ) -> FerrotorchResult<GpuBufferHandle>;
+    /// Fused f32 scaled add: `out[i] = a[i] + alpha * b[i]` in a single
+    /// device kernel launch (FMA), for SAME-shape inputs. Replaces the
+    /// two-launch `scale_f32(b, alpha)` + `add_f32(a, b_scaled)` staging.
+    /// For `alpha == -1.0` the FMA result is exactly `a - b`; this is the
+    /// fast path consumed by `sub` / `sub_scaled` / `rsub` (all delegate to
+    /// `add_scaled`). Default returns `NotImplementedOnCuda` so non-CUDA
+    /// backends compile unchanged and the caller falls back to the
+    /// scale-then-add path. (#1675)
+    fn add_scaled_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _alpha: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "add_scaled_f32",
+        })
+    }
     fn neg_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle>;
     fn relu_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle>;
 
@@ -467,6 +485,18 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::InvalidArgument {
             message: "f64 GPU ops not yet implemented".into(),
+        })
+    }
+    /// Fused f64 scaled add: `out[i] = a[i] + alpha * b[i]` in a single
+    /// launch. f64 counterpart of [`Self::add_scaled_f32`]. (#1675)
+    fn add_scaled_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _alpha: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "add_scaled_f64",
         })
     }
     fn neg_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
