@@ -26,6 +26,10 @@
 //!     (`view(view_shape).expand(shape)`).
 
 #![cfg(feature = "gpu")]
+#![allow(
+    clippy::excessive_precision,
+    reason = "all numeric literals in this file are live-torch 2.11 oracle values recorded verbatim (R-CHAR-3); full precision is intentional and rounds to the tensor dtype at compile time. Test-only oracle file."
+)]
 
 use ferrotorch_core::{Device, Tensor, TensorStorage, histc, meshgrid};
 use std::sync::Once;
