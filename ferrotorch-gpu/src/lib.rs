@@ -194,6 +194,8 @@ pub mod rng;
 pub mod roll;
 #[cfg(feature = "cuda")]
 pub mod sparse;
+#[cfg(feature = "cuda")]
+pub mod special;
 pub mod stream;
 pub mod tensor_bridge;
 pub mod transfer;
@@ -260,6 +262,12 @@ pub use pool::{cached_bytes, empty_cache, empty_cache_all, round_len};
 pub use rng::{CudaRngManager, PhiloxGenerator, PhiloxState, cuda_rng_manager, fork_rng, join_rng};
 #[cfg(feature = "cuda")]
 pub use roll::gpu_roll_f32;
+#[cfg(feature = "cuda")]
+pub use special::{
+    gpu_chebyshev_poly_f32, gpu_chebyshev_poly_f64, gpu_hermite_h_poly_f32, gpu_hermite_h_poly_f64,
+    gpu_hermite_he_poly_f32, gpu_hermite_he_poly_f64, gpu_laguerre_poly_f32, gpu_laguerre_poly_f64,
+    gpu_legendre_poly_f32, gpu_legendre_poly_f64,
+};
 pub use tensor_bridge::{GpuFloat, GpuTensor, cuda, cuda_default, tensor_to_cpu, tensor_to_gpu};
 #[cfg(feature = "cuda")]
 pub use transfer::alloc_zeros_bf16;

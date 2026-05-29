@@ -3925,6 +3925,134 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
+    // -- Orthogonal-polynomial special functions (#1545 / #1533) -------------
+
+    fn chebyshev_poly_f32(
+        &self,
+        a: &GpuBufferHandle,
+        n: usize,
+        seed_a: f32,
+        seed_b: f32,
+        shift: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::special::gpu_chebyshev_poly_f32(a_buf, n, seed_a, seed_b, shift, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn chebyshev_poly_f64(
+        &self,
+        a: &GpuBufferHandle,
+        n: usize,
+        seed_a: f64,
+        seed_b: f64,
+        shift: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::special::gpu_chebyshev_poly_f64(a_buf, n, seed_a, seed_b, shift, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    fn hermite_h_poly_f32(
+        &self,
+        a: &GpuBufferHandle,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::special::gpu_hermite_h_poly_f32(a_buf, n, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn hermite_h_poly_f64(
+        &self,
+        a: &GpuBufferHandle,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::special::gpu_hermite_h_poly_f64(a_buf, n, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    fn hermite_he_poly_f32(
+        &self,
+        a: &GpuBufferHandle,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::special::gpu_hermite_he_poly_f32(a_buf, n, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn hermite_he_poly_f64(
+        &self,
+        a: &GpuBufferHandle,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::special::gpu_hermite_he_poly_f64(a_buf, n, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    fn laguerre_poly_f32(
+        &self,
+        a: &GpuBufferHandle,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::special::gpu_laguerre_poly_f32(a_buf, n, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn laguerre_poly_f64(
+        &self,
+        a: &GpuBufferHandle,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::special::gpu_laguerre_poly_f64(a_buf, n, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    fn legendre_poly_f32(
+        &self,
+        a: &GpuBufferHandle,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::special::gpu_legendre_poly_f32(a_buf, n, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn legendre_poly_f64(
+        &self,
+        a: &GpuBufferHandle,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::special::gpu_legendre_poly_f64(a_buf, n, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
     fn clamp_f32(
         &self,
         a: &GpuBufferHandle,
@@ -6951,6 +7079,50 @@ impl GpuBackend for CudaBackendImpl {
                 message: format!("cast_bool_to_f: unsupported Bool -> {d}"),
             }),
         }
+    }
+
+    // ── #1545 / #1534: predicate masks for masked-tensor constructors ────────
+
+    #[cfg(feature = "cuda")]
+    fn isfinite_mask(&self, input: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        use crate::masked_kernels as mk;
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let r = match input.dtype() {
+            DType::F32 => mk::isfinite_mask_f32(Self::unwrap_buffer(input)?.inner(), dev),
+            DType::F64 => mk::isfinite_mask_f64(Self::unwrap_buffer_f64(input)?.inner(), dev),
+            _ => {
+                return Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "isfinite_mask",
+                });
+            }
+        };
+        Ok(Self::wrap_slice_bool(r.map_err(Self::map_gpu_err)?, ord))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn ne_scalar_mask(
+        &self,
+        input: &GpuBufferHandle,
+        value: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        use crate::masked_kernels as mk;
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let r = match input.dtype() {
+            DType::F32 => {
+                mk::ne_scalar_mask_f32(Self::unwrap_buffer(input)?.inner(), value as f32, dev)
+            }
+            DType::F64 => {
+                mk::ne_scalar_mask_f64(Self::unwrap_buffer_f64(input)?.inner(), value, dev)
+            }
+            _ => {
+                return Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "ne_scalar_mask",
+                });
+            }
+        };
+        Ok(Self::wrap_slice_bool(r.map_err(Self::map_gpu_err)?, ord))
     }
 
     // ── Phase 3c: mask-driven ops with a GPU-resident Bool mask ──────────────

@@ -2419,6 +2419,18 @@ parity_ops = []
 
 
 [[route]]
+crate_pattern = "ferrotorch-gpu/src/special.rs"
+upstream = [
+  "/home/doll/pytorch/aten/src/ATen/native/Math.h",
+  "/home/doll/pytorch/aten/src/ATen/native/cuda/chebyshev_polynomial_t.cu",
+  "/home/doll/pytorch/aten/src/ATen/native/cuda/legendre_polynomial_p.cu",
+  "/home/doll/pytorch/aten/src/ATen/native/cuda/",
+]
+design = ".design/ferrotorch-gpu/special.md"
+parity_ops = []
+
+
+[[route]]
 crate_pattern = "ferrotorch-gpu/src/sparse.rs"
 upstream = [
   "/home/doll/pytorch/aten/src/ATen/cuda/",

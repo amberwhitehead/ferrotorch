@@ -1859,6 +1859,129 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    // -- Orthogonal-polynomial special functions (#1545 / #1533) -------------
+    //
+    // Each evaluates the n-th degree basis polynomial pointwise on a CUDA
+    // buffer via an on-device three-term recurrence (one thread per element,
+    // no host round-trip). The math mirrors the ferrotorch CPU recurrences in
+    // `ferrotorch_core::special` so the GPU result equals the CPU result
+    // bit-for-relevant-tolerance. The upstream recurrence reference is
+    // `aten/src/ATen/native/Math.h` `chebyshev_polynomial_t_forward` et al.
+    //
+    // The chebyshev method folds T/U/V/W and their shifted variants into one
+    // entry via `(seed_a, seed_b, shift)`: `q1 = seed_a*xx + seed_b` with
+    // `xx = shift ? 2x-1 : x` (T: 1,0; U: 2,0; V: 2,-1; W: 2,1). Defaults
+    // return `InvalidArgument` so non-CUDA backends compile unchanged; the
+    // CUDA backend overrides all ten.
+
+    /// Chebyshev polynomial (T/U/V/W + shifted) forward, f32. See the module
+    /// comment for the `(seed_a, seed_b, shift)` kind selector.
+    fn chebyshev_poly_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _n: usize,
+        _seed_a: f32,
+        _seed_b: f32,
+        _shift: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "chebyshev_poly_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Chebyshev polynomial (T/U/V/W + shifted) forward, f64.
+    fn chebyshev_poly_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _n: usize,
+        _seed_a: f64,
+        _seed_b: f64,
+        _shift: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "chebyshev_poly_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Hermite (physicist's) `H_n` forward, f32.
+    fn hermite_h_poly_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "hermite_h_poly_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Hermite (physicist's) `H_n` forward, f64.
+    fn hermite_h_poly_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "hermite_h_poly_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Hermite (probabilist's) `He_n` forward, f32.
+    fn hermite_he_poly_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "hermite_he_poly_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Hermite (probabilist's) `He_n` forward, f64.
+    fn hermite_he_poly_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "hermite_he_poly_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Laguerre `L_n` forward, f32.
+    fn laguerre_poly_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "laguerre_poly_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Laguerre `L_n` forward, f64.
+    fn laguerre_poly_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "laguerre_poly_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Legendre `P_n` forward, f32.
+    fn legendre_poly_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "legendre_poly_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Legendre `P_n` forward, f64.
+    fn legendre_poly_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "legendre_poly_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+
     // Clamp: out[i] = max(min_val, min(max_val, x[i]))
     fn clamp_f32(
         &self,
@@ -4531,6 +4654,44 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "cast_bool_to_f",
+        })
+    }
+
+    // ── #1545 / #1534: predicate masks for masked-tensor constructors ────────
+    //
+    // `MaskedTensor`'s mask is a host `Vec<bool>` by design. These methods
+    // compute the boolean predicate ON-DEVICE from the (CUDA-resident) data
+    // buffer, returning a `DType::Bool` (u8 0/1) handle. The core
+    // `masked_invalid` / `masked_equal` constructors then read that mask back
+    // ONCE to populate the host `Vec<bool>` — a one-way readback of the
+    // freshly-computed predicate, not a CPU↔GPU round trip of the value data
+    // (which never leaves and returns to the device). Dispatched on
+    // `input.dtype()`; covers F32/F64 (the dtypes `MaskedTensor<T: Float>`
+    // currently lowers to GPU). Default bodies return a structured error so
+    // non-CUDA backends compile.
+
+    /// `isfinite` mask: `out[i] = (v==v) && (|v| != +inf)` as a `DType::Bool`
+    /// (u8 0/1) buffer. PyTorch parity with `at::isfinite`
+    /// (`aten/src/ATen/native/TensorCompare.cpp:484` —
+    /// `(self == self) * (self.abs() != inf)`). Consumer:
+    /// `ferrotorch_core::masked_invalid` GPU branch.
+    fn isfinite_mask(&self, _input: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "isfinite_mask",
+        })
+    }
+
+    /// `ne_scalar` mask: `out[i] = (v != value)` as a `DType::Bool` (u8 0/1)
+    /// buffer (`value` passed as f64, narrowed to the input dtype). This is the
+    /// VALID mask for `numpy.ma.masked_equal` under the torch convention.
+    /// Consumer: `ferrotorch_core::masked_equal` GPU branch.
+    fn ne_scalar_mask(
+        &self,
+        _input: &GpuBufferHandle,
+        _value: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "ne_scalar_mask",
         })
     }
 }

@@ -50,8 +50,11 @@ polynomial families).
   `torch.special.xlogy`.
 - REQ-9: Chebyshev polynomial family — `chebyshev_polynomial_{t,u,v,w}`
   via three-term recurrence. Mirrors
-  `torch.special.chebyshev_polynomial_{t,u,v,w}`. CPU-only;
-  GPU path NOT-STARTED, blocked on #1545.
+  `torch.special.chebyshev_polynomial_{t,u,v,w}`. CPU path runs the
+  recurrence in f64; CUDA (f32/f64) tensors dispatch to the on-device
+  PTX kernel `gpu_chebyshev_poly_f32`/`_f64` in `ferrotorch-gpu/src/special.rs`
+  via `GpuBackend::chebyshev_poly_f32`/`_f64` (#1545 / #1533 closed) — no
+  host round trip.
 - REQ-10: Hermite polynomial family — `hermite_polynomial_h`
   (physicist's, `H_{n+1} = 2x H_n - 2n H_{n-1}`),
   `hermite_polynomial_he` (probabilist's, `He_{n+1} = x He_n - n
@@ -99,9 +102,13 @@ polynomial families).
 - [x] AC-5: `chebyshev_polynomial_t(x, 0) == 1` and
   `chebyshev_polynomial_t(x, 1) == x` for all x.
 - [x] AC-6: `hermite_polynomial_h(x, 2)` matches `4*x^2 - 2`.
-- [ ] AC-7: GPU lowering for the polynomial families — NOT-STARTED,
-  blocked on #1545 (CubeCL kernel for on-device three-term
-  recurrence).
+- [x] AC-7: GPU lowering for the polynomial families — SHIPPED. CUDA
+  (f32/f64) tensors run an on-device PTX three-term-recurrence kernel
+  (`ferrotorch-gpu/src/special.rs`) via the `GpuBackend` poly methods;
+  the GPU result matches the CPU path bit-for-relevant-tolerance
+  (verified by `test_gpu_special_polynomials.rs` asserting `is_cuda()`
+  + value-match vs the CPU path). bf16/f16 CUDA inputs still return
+  `NotImplementedOnCuda` (no host round trip).
 - [x] AC-8: `gammainc(a, x) + gammaincc(a, x) == 1` for `a, x > 0`, and the
   boundary table matches live `torch.special.gammainc`/`gammaincc`
   (`gammainc(0, x>0) == 1`, `gammainc(a>0, 0) == 0`, NaN for negatives).
@@ -177,10 +184,10 @@ recurrence-identity checks (`H_n(x) - 2x*H_{n-1}(x) + 2(n-1)*H_{n-2}(x) =
 | REQ-6 | SHIPPED | impl: `log1p`/`expm1` at `special.rs:714,721`; non-test consumer: re-exported as `ferrotorch_core::log1p`/`expm1` at `lib.rs:187` |
 | REQ-7 | SHIPPED | impl: `sinc` at `special.rs:726`; non-test consumer: re-exported as `ferrotorch_core::sinc` at `lib.rs:187` |
 | REQ-8 | SHIPPED | impl: `xlogy` at `special.rs:733`; non-test consumer: re-exported as `ferrotorch_core::xlogy` at `lib.rs:187` |
-| REQ-9 | SHIPPED | impl: `chebyshev_polynomial_{t,u,v,w}` at `special.rs:794-832`; non-test consumer: accessible via `ferrotorch_core::special::chebyshev_polynomial_*`. GPU lowering NOT-STARTED, blocked on #1545 — does NOT block CPU SHIPPED |
-| REQ-10 | SHIPPED | impl: `hermite_polynomial_h` / `hermite_polynomial_he` at `special.rs:841,849`; non-test consumer: accessible via `ferrotorch_core::special::hermite_polynomial_*` |
-| REQ-11 | SHIPPED | impl: `laguerre_polynomial_l` / `legendre_polynomial_p` at `special.rs:859,867`; non-test consumer: accessible via `ferrotorch_core::special::laguerre_polynomial_l` / `legendre_polynomial_p` |
-| REQ-12 | SHIPPED | impl: `shifted_chebyshev_polynomial_{t,u,v,w}` at `special.rs:875-908`; non-test consumer: accessible via `ferrotorch_core::special::shifted_chebyshev_polynomial_*` |
+| REQ-9 | SHIPPED | impl (CPU): `chebyshev_polynomial_{t,u,v,w} in special.rs`; impl (GPU): `gpu_chebyshev_poly_f32`/`_f64 in ferrotorch-gpu/src/special.rs` via `GpuBackend::chebyshev_poly_f32`/`_f64`; non-test consumer: the CUDA branch (`poly_gpu_chebyshev`) of `chebyshev_polynomial_t`/`u`/`v`/`w in special.rs` dispatches CUDA tensors on-device. CPU/GPU agreement verified by `ferrotorch-gpu/tests/test_gpu_special_polynomials.rs` (#1545 / #1533 GPU lowering SHIPPED) |
+| REQ-10 | SHIPPED | impl (CPU): `hermite_polynomial_h` / `hermite_polynomial_he in special.rs`; impl (GPU): `gpu_hermite_h_poly_*` / `gpu_hermite_he_poly_* in ferrotorch-gpu/src/special.rs`; non-test consumer: the CUDA branch (`poly_gpu_simple`) of `hermite_polynomial_h` / `hermite_polynomial_he in special.rs` |
+| REQ-11 | SHIPPED | impl (CPU): `laguerre_polynomial_l` / `legendre_polynomial_p in special.rs`; impl (GPU): `gpu_laguerre_poly_*` / `gpu_legendre_poly_* in ferrotorch-gpu/src/special.rs`; non-test consumer: the CUDA branch of `laguerre_polynomial_l` / `legendre_polynomial_p in special.rs` |
+| REQ-12 | SHIPPED | impl (CPU): `shifted_chebyshev_polynomial_{t,u,v,w} in special.rs`; impl (GPU): `gpu_chebyshev_poly_f32`/`_f64` with `shift = true`; non-test consumer: the CUDA branch of `shifted_chebyshev_polynomial_{t,u,v,w} in special.rs` |
 | REQ-13 | SHIPPED | impl: `pub fn gammainc` / `pub fn gammaincc` in `special.rs` (boundary kernels `calc_igamma_f64` / `calc_igammac_f64` over NR core `gammp_core_f64` / `gammq_core_f64`) mirror `torch.special.gammainc` / `gammaincc` (`aten/src/ATen/native/Math.h:1144 calc_igamma`, `:1085 calc_igammac`); non-test consumer: re-exported as top-level `ferrotorch_core::gammainc` / `ferrotorch_core::gammaincc` in `lib.rs` — per goal.md S5 the public `torch.special` surface IS the consumer (boundary API needs no further downstream caller) |
 | REQ-14 | SHIPPED | impl: `pub fn log_beta` / `pub fn beta` in `special.rs` (scalar `log_beta_scalar` / `beta_scalar`) mirror `scipy.special.betaln` / `beta`; non-test consumer: re-exported as `ferrotorch_core::log_beta` / `ferrotorch_core::beta` in `lib.rs` (S5 public-surface consumer) |
 | REQ-15 | SHIPPED | impl: `pub fn multigammaln` + alias `pub fn mvlgamma` in `special.rs` (scalar `multigammaln_scalar`) mirror `torch.special.multigammaln` / `torch.mvlgamma` (`aten/src/ATen/native/UnaryOps.cpp:887 mvlgamma`; only guard is `p >= 1` per `mvlgamma_check` at `UnaryOps.cpp:884` — NO fabricated NaN domain-guard; out-of-domain `a <= (p-1)/2` returns the ordinary finite lgamma-sum or `+inf` at an lgamma pole, matching torch); non-test consumer: re-exported as `ferrotorch_core::multigammaln` / `ferrotorch_core::mvlgamma` in `lib.rs` (S5 public-surface consumer) |

@@ -16,10 +16,10 @@
 //! | REQ-6 | SHIPPED | `log1p`/`expm1` at `special.rs:714,721`; consumer: re-export at `lib.rs:187` |
 //! | REQ-7 | SHIPPED | `sinc` at `special.rs:726`; consumer: re-export at `lib.rs:187` |
 //! | REQ-8 | SHIPPED | `xlogy` at `special.rs:733`; consumer: re-export at `lib.rs:187` |
-//! | REQ-9 | SHIPPED | `chebyshev_polynomial_{t,u,v,w}` at `special.rs:794-832`; consumer: `ferrotorch_core::special::*`. GPU lowering tracked under umbrella #1545 (ferrotorch-core CPU-only paths roadmap) |
-//! | REQ-10 | SHIPPED | `hermite_polynomial_h`/`hermite_polynomial_he` at `special.rs:841,849`; consumer: `ferrotorch_core::special::*` |
-//! | REQ-11 | SHIPPED | `laguerre_polynomial_l`/`legendre_polynomial_p` at `special.rs:859,867`; consumer: `ferrotorch_core::special::*` |
-//! | REQ-12 | SHIPPED | `shifted_chebyshev_polynomial_{t,u,v,w}` at `special.rs:875-908`; consumer: `ferrotorch_core::special::*` |
+//! | REQ-9 | SHIPPED | CPU: `chebyshev_polynomial_{t,u,v,w}`; GPU: `gpu_chebyshev_poly_f32`/`_f64` in `ferrotorch-gpu/src/special.rs` via `GpuBackend::chebyshev_poly_f32`/`_f64`; consumer: the CUDA branch (`poly_gpu_chebyshev`) of each `chebyshev_polynomial_*` dispatches on-device (#1545 / #1533) |
+//! | REQ-10 | SHIPPED | CPU: `hermite_polynomial_h`/`hermite_polynomial_he`; GPU: `gpu_hermite_h_poly_*`/`gpu_hermite_he_poly_*`; consumer: the CUDA branch (`poly_gpu_simple`) of each `hermite_polynomial_*` |
+//! | REQ-11 | SHIPPED | CPU: `laguerre_polynomial_l`/`legendre_polynomial_p`; GPU: `gpu_laguerre_poly_*`/`gpu_legendre_poly_*`; consumer: the CUDA branch of `laguerre_polynomial_l`/`legendre_polynomial_p` |
+//! | REQ-12 | SHIPPED | CPU: `shifted_chebyshev_polynomial_{t,u,v,w}`; GPU: `gpu_chebyshev_poly_f32`/`_f64` with `shift=true`; consumer: the CUDA branch of each `shifted_chebyshev_polynomial_*` |
 //! | REQ-13 | SHIPPED | pub fn `gammainc`/`gammaincc` mirror `torch.special.gammainc`/`gammaincc`; consumer: re-exported at top of `lib.rs` as `ferrotorch_core::{gammainc, gammaincc}` (S5: torch.special public surface IS the consumer) |
 //! | REQ-14 | SHIPPED | pub fn `log_beta`/`beta` mirror `scipy.special.betaln`/`beta`; consumer: re-exported as `ferrotorch_core::{log_beta, beta}` |
 //! | REQ-15 | SHIPPED | pub fn `multigammaln`/`mvlgamma` mirror `torch.special.multigammaln`/`torch.mvlgamma`; consumer: re-exported as `ferrotorch_core::{multigammaln, mvlgamma}` |
@@ -1086,14 +1086,18 @@ pub fn gammaln_sign<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> 
 //
 // These mirror torch.special.{chebyshev,hermite,laguerre,legendre}_polynomial_*.
 // Each function returns the n-th degree basis polynomial evaluated pointwise
-// at every element of `input`. CPU-only today; a CubeCL kernel that runs the
-// three-term recurrence on-device is tracked as a follow-up. GPU tensors
-// return NotImplementedOnCuda — never silently bounce through host (per
-// /rust-gpu-discipline).
+// at every element of `input`. CUDA tensors (f32/f64) run an on-device PTX
+// three-term-recurrence kernel via the `GpuBackend` trait (#1545 / #1533) —
+// the input buffer never leaves VRAM; the recurrence runs in each thread's
+// registers; the output stays on-device (R-CODE-4, no silent round trip).
+// Non-f32/f64 CUDA dtypes (bf16/f16) still return NotImplementedOnCuda rather
+// than bouncing through host.
 //
 // Implementation: every basis is evaluated by its standard three-term
-// recurrence directly in this module. ferray-polynomial 0.3 has the same
-// idiom (Clenshaw on basis-coefficient vectors), but for the
+// recurrence. The CPU path runs it in f64 directly in this module; the GPU
+// path runs the bit-for-relevant-tolerance-identical recurrence in PTX (see
+// `ferrotorch-gpu/src/special.rs`). ferray-polynomial 0.3 has the same idiom
+// (Clenshaw on basis-coefficient vectors), but for the
 // "single-basis-element" case the direct recurrence is shorter, dependency-
 // free, and numerically equivalent for the orders typically used in ML
 // pipelines (n ≤ 50). We keep the option open to swap in ferray's Clenshaw
@@ -1101,24 +1105,102 @@ pub fn gammaln_sign<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> 
 
 use crate::error::FerrotorchError;
 
-/// Reject GPU tensors with an explicit error rather than bouncing through
-/// host. Polynomial evaluation has no GPU kernel today; see follow-up.
 #[inline]
-fn require_cpu_poly<T: Float>(t: &Tensor<T>, op: &'static str) -> FerrotorchResult<()> {
-    if t.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op });
-    }
-    Ok(())
+fn poly_is_f32<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<f32>()
 }
 
-/// Apply a `f64 -> f64` evaluator to every element of a tensor, with the
-/// CPU/dtype guard inlined so each function below stays a one-liner.
+#[inline]
+fn poly_is_f64<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<f64>()
+}
+
+/// Wrap a GPU buffer handle returned by a polynomial kernel into a
+/// CUDA-resident output tensor of the same shape (no host copy).
+#[inline]
+fn poly_gpu_output<T: Float>(
+    handle: crate::gpu_dispatch::GpuBufferHandle,
+    shape: Vec<usize>,
+) -> FerrotorchResult<Tensor<T>> {
+    Tensor::from_storage(crate::storage::TensorStorage::gpu(handle), shape, false)
+}
+
+/// Run a single-`n` polynomial kernel (hermite / laguerre / legendre) on a
+/// CUDA tensor, dispatching by dtype through the registered [`GpuBackend`].
+/// Returns `Ok(Some(out))` when the GPU path handled it, `Ok(None)` when the
+/// caller should take the CPU path (non-CUDA input). bf16/f16 CUDA inputs are
+/// rejected with `NotImplementedOnCuda` (no host round trip).
+fn poly_gpu_simple<T: Float>(
+    input: &Tensor<T>,
+    n: usize,
+    op: &'static str,
+    f32_call: impl Fn(
+        &dyn crate::gpu_dispatch::GpuBackend,
+        &crate::gpu_dispatch::GpuBufferHandle,
+    ) -> FerrotorchResult<crate::gpu_dispatch::GpuBufferHandle>,
+    f64_call: impl Fn(
+        &dyn crate::gpu_dispatch::GpuBackend,
+        &crate::gpu_dispatch::GpuBufferHandle,
+    ) -> FerrotorchResult<crate::gpu_dispatch::GpuBufferHandle>,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    let _ = n;
+    if !input.is_cuda() {
+        return Ok(None);
+    }
+    if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
+        return Err(FerrotorchError::NotImplementedOnCuda { op });
+    }
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let handle = input.gpu_handle()?;
+    let out_handle = if poly_is_f32::<T>() {
+        f32_call(backend, handle)?
+    } else {
+        f64_call(backend, handle)?
+    };
+    Ok(Some(poly_gpu_output::<T>(
+        out_handle,
+        input.shape().to_vec(),
+    )?))
+}
+
+/// Chebyshev-family GPU dispatch (T/U/V/W + shifted), selecting the kind via
+/// the `(seed_a, seed_b, shift)` recurrence seed. See [`poly_gpu_simple`] for
+/// the `Ok(None)` CPU-fallthrough contract.
+fn poly_gpu_chebyshev<T: Float>(
+    input: &Tensor<T>,
+    n: usize,
+    seed_a: f64,
+    seed_b: f64,
+    shift: bool,
+    op: &'static str,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !input.is_cuda() {
+        return Ok(None);
+    }
+    if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
+        return Err(FerrotorchError::NotImplementedOnCuda { op });
+    }
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let handle = input.gpu_handle()?;
+    let out_handle = if poly_is_f32::<T>() {
+        backend.chebyshev_poly_f32(handle, n, seed_a as f32, seed_b as f32, shift)?
+    } else {
+        backend.chebyshev_poly_f64(handle, n, seed_a, seed_b, shift)?
+    };
+    Ok(Some(poly_gpu_output::<T>(
+        out_handle,
+        input.shape().to_vec(),
+    )?))
+}
+
+/// Apply a `f64 -> f64` evaluator to every element of a CPU tensor. The GPU
+/// path is handled by the per-family dispatch helpers above before this is
+/// reached; this is the CPU fallthrough only.
 fn elementwise_f64<T: Float, F: Fn(f64) -> f64>(
     input: &Tensor<T>,
-    op: &'static str,
+    _op: &'static str,
     f: F,
 ) -> FerrotorchResult<Tensor<T>> {
-    require_cpu_poly(input, op)?;
     let data = input.data_vec()?;
     let out: Vec<T> = data
         .into_iter()
@@ -1141,6 +1223,9 @@ pub fn chebyshev_polynomial_t<T: Float>(
     input: &Tensor<T>,
     n: usize,
 ) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) = poly_gpu_chebyshev(input, n, 1.0, 0.0, false, "chebyshev_polynomial_t")? {
+        return Ok(out);
+    }
     elementwise_f64(input, "chebyshev_polynomial_t", move |x| chebyshev_t(n, x))
 }
 
@@ -1153,6 +1238,9 @@ pub fn chebyshev_polynomial_u<T: Float>(
     input: &Tensor<T>,
     n: usize,
 ) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) = poly_gpu_chebyshev(input, n, 2.0, 0.0, false, "chebyshev_polynomial_u")? {
+        return Ok(out);
+    }
     elementwise_f64(input, "chebyshev_polynomial_u", move |x| chebyshev_u(n, x))
 }
 
@@ -1164,6 +1252,9 @@ pub fn chebyshev_polynomial_v<T: Float>(
     input: &Tensor<T>,
     n: usize,
 ) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) = poly_gpu_chebyshev(input, n, 2.0, -1.0, false, "chebyshev_polynomial_v")? {
+        return Ok(out);
+    }
     elementwise_f64(input, "chebyshev_polynomial_v", move |x| chebyshev_v(n, x))
 }
 
@@ -1175,6 +1266,9 @@ pub fn chebyshev_polynomial_w<T: Float>(
     input: &Tensor<T>,
     n: usize,
 ) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) = poly_gpu_chebyshev(input, n, 2.0, 1.0, false, "chebyshev_polynomial_w")? {
+        return Ok(out);
+    }
     elementwise_f64(input, "chebyshev_polynomial_w", move |x| chebyshev_w(n, x))
 }
 
@@ -1185,6 +1279,15 @@ pub fn chebyshev_polynomial_w<T: Float>(
 /// `H_0 = 1`, `H_1 = 2x`, `H_{n+1} = 2x H_n - 2n H_{n-1}`. Mirrors
 /// `torch.special.hermite_polynomial_h`.
 pub fn hermite_polynomial_h<T: Float>(input: &Tensor<T>, n: usize) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) = poly_gpu_simple(
+        input,
+        n,
+        "hermite_polynomial_h",
+        |b, h| b.hermite_h_poly_f32(h, n),
+        |b, h| b.hermite_h_poly_f64(h, n),
+    )? {
+        return Ok(out);
+    }
     elementwise_f64(input, "hermite_polynomial_h", move |x| hermite_h(n, x))
 }
 
@@ -1193,6 +1296,15 @@ pub fn hermite_polynomial_h<T: Float>(input: &Tensor<T>, n: usize) -> Ferrotorch
 /// `He_0 = 1`, `He_1 = x`, `He_{n+1} = x He_n - n He_{n-1}`. Mirrors
 /// `torch.special.hermite_polynomial_he`.
 pub fn hermite_polynomial_he<T: Float>(input: &Tensor<T>, n: usize) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) = poly_gpu_simple(
+        input,
+        n,
+        "hermite_polynomial_he",
+        |b, h| b.hermite_he_poly_f32(h, n),
+        |b, h| b.hermite_he_poly_f64(h, n),
+    )? {
+        return Ok(out);
+    }
     elementwise_f64(input, "hermite_polynomial_he", move |x| hermite_he(n, x))
 }
 
@@ -1203,6 +1315,15 @@ pub fn hermite_polynomial_he<T: Float>(input: &Tensor<T>, n: usize) -> Ferrotorc
 /// `L_0 = 1`, `L_1 = 1 - x`, `(n+1) L_{n+1} = (2n + 1 - x) L_n - n L_{n-1}`.
 /// Mirrors `torch.special.laguerre_polynomial_l`.
 pub fn laguerre_polynomial_l<T: Float>(input: &Tensor<T>, n: usize) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) = poly_gpu_simple(
+        input,
+        n,
+        "laguerre_polynomial_l",
+        |b, h| b.laguerre_poly_f32(h, n),
+        |b, h| b.laguerre_poly_f64(h, n),
+    )? {
+        return Ok(out);
+    }
     elementwise_f64(input, "laguerre_polynomial_l", move |x| laguerre_l(n, x))
 }
 
@@ -1211,6 +1332,15 @@ pub fn laguerre_polynomial_l<T: Float>(input: &Tensor<T>, n: usize) -> Ferrotorc
 /// `P_0 = 1`, `P_1 = x`, `(n+1) P_{n+1} = (2n+1) x P_n - n P_{n-1}`.
 /// Mirrors `torch.special.legendre_polynomial_p`.
 pub fn legendre_polynomial_p<T: Float>(input: &Tensor<T>, n: usize) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) = poly_gpu_simple(
+        input,
+        n,
+        "legendre_polynomial_p",
+        |b, h| b.legendre_poly_f32(h, n),
+        |b, h| b.legendre_poly_f64(h, n),
+    )? {
+        return Ok(out);
+    }
     elementwise_f64(input, "legendre_polynomial_p", move |x| legendre_p(n, x))
 }
 
@@ -1222,6 +1352,11 @@ pub fn shifted_chebyshev_polynomial_t<T: Float>(
     input: &Tensor<T>,
     n: usize,
 ) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) =
+        poly_gpu_chebyshev(input, n, 1.0, 0.0, true, "shifted_chebyshev_polynomial_t")?
+    {
+        return Ok(out);
+    }
     elementwise_f64(input, "shifted_chebyshev_polynomial_t", move |x| {
         chebyshev_t(n, 2.0 * x - 1.0)
     })
@@ -1232,6 +1367,11 @@ pub fn shifted_chebyshev_polynomial_u<T: Float>(
     input: &Tensor<T>,
     n: usize,
 ) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) =
+        poly_gpu_chebyshev(input, n, 2.0, 0.0, true, "shifted_chebyshev_polynomial_u")?
+    {
+        return Ok(out);
+    }
     elementwise_f64(input, "shifted_chebyshev_polynomial_u", move |x| {
         chebyshev_u(n, 2.0 * x - 1.0)
     })
@@ -1242,6 +1382,11 @@ pub fn shifted_chebyshev_polynomial_v<T: Float>(
     input: &Tensor<T>,
     n: usize,
 ) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) =
+        poly_gpu_chebyshev(input, n, 2.0, -1.0, true, "shifted_chebyshev_polynomial_v")?
+    {
+        return Ok(out);
+    }
     elementwise_f64(input, "shifted_chebyshev_polynomial_v", move |x| {
         chebyshev_v(n, 2.0 * x - 1.0)
     })
@@ -1252,6 +1397,11 @@ pub fn shifted_chebyshev_polynomial_w<T: Float>(
     input: &Tensor<T>,
     n: usize,
 ) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) =
+        poly_gpu_chebyshev(input, n, 2.0, 1.0, true, "shifted_chebyshev_polynomial_w")?
+    {
+        return Ok(out);
+    }
     elementwise_f64(input, "shifted_chebyshev_polynomial_w", move |x| {
         chebyshev_w(n, 2.0 * x - 1.0)
     })

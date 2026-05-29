@@ -2482,10 +2482,10 @@ mod tests {
         };
         let x = vec![0.0f32; 10]; // not batch*channels*hw
         let xg = cpu_to_gpu(&x, &device).unwrap();
-        let gg = cpu_to_gpu(&vec![1.0f32; 3], &device).unwrap();
-        let bg = cpu_to_gpu(&vec![0.0f32; 3], &device).unwrap();
-        let mut mean_g = cpu_to_gpu(&vec![0.0f32; 3], &device).unwrap();
-        let mut var_g = cpu_to_gpu(&vec![1.0f32; 3], &device).unwrap();
+        let gg = cpu_to_gpu(&[1.0f32; 3], &device).unwrap();
+        let bg = cpu_to_gpu(&[0.0f32; 3], &device).unwrap();
+        let mut mean_g = cpu_to_gpu(&[0.0f32; 3], &device).unwrap();
+        let mut var_g = cpu_to_gpu(&[1.0f32; 3], &device).unwrap();
         let res = gpu_batch_norm_f32(
             &xg,
             &gg,
