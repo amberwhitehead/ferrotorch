@@ -80,7 +80,9 @@
 #![cfg(feature = "cuda")]
 #![allow(
     clippy::excessive_precision,
-    reason = "oracle expected values copied verbatim from live torch 2.11; full precision intentional (rounds to dtype at compile time)"
+    clippy::unnecessary_to_owned,
+    clippy::inconsistent_digit_grouping,
+    reason = "oracle test: expected values copied verbatim from live torch 2.11 (full precision + grouping intentional); the .to_vec() calls clone GPU-readback buffers for assert helpers"
 )]
 
 use ferrotorch_core::{Device, Tensor, TensorStorage, entr, exp, i0, ndtr, triu};
