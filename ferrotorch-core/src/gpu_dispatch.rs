@@ -5111,6 +5111,161 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    // -- dim-aware gather / scatter family (#1545 / sub #1535) ----------------
+    //
+    // These are the `ops::indexing` dim-parameterised, full-rank-index ops
+    // (`torch.gather` / `Tensor.scatter_` / `scatter_(value)` /
+    // `scatter_add_`). The `[outer, axis, inner]` decomposition follows the
+    // upstream `aten/src/ATen/native/cuda/ScatterGatherKernel.cu` per-dim
+    // stride indexing. `index` is a GPU-resident `i64` handle (PyTorch index
+    // tensors are int64). The CUDA backend overrides these with real PTX
+    // kernels (`ferrotorch-gpu/src/scatter_gather_kernels.rs`); other backends
+    // inherit the `NotImplementedOnCuda` default.
+
+    /// f32 dim-aware `gather`: `input` `[outer, in_dim, inner]`, `index` (I64)
+    /// AND output both `[outer, out_dim, inner]`. Returns a fresh resident
+    /// buffer of `outer*out_dim*inner` f32 elements.
+    #[allow(clippy::too_many_arguments)]
+    fn gather_dim_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _outer: usize,
+        _in_dim: usize,
+        _out_dim: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "gather_dim_f32",
+        })
+    }
+
+    /// f64 dim-aware `gather`. Companion of [`Self::gather_dim_f32`].
+    #[allow(clippy::too_many_arguments)]
+    fn gather_dim_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _outer: usize,
+        _in_dim: usize,
+        _out_dim: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "gather_dim_f64",
+        })
+    }
+
+    /// f32 dim-aware `scatter`: clones `input` (`[outer, out_dim, inner]`) and
+    /// writes `out[.., index[t].., ..] = src[t]` where `index`/`src` are
+    /// `[outer, idx_dim, inner]`. Returns a fresh resident buffer.
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_dim_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _outer: usize,
+        _out_dim: usize,
+        _idx_dim: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_dim_f32",
+        })
+    }
+
+    /// f64 dim-aware `scatter`. Companion of [`Self::scatter_dim_f32`].
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_dim_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _outer: usize,
+        _out_dim: usize,
+        _idx_dim: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_dim_f64",
+        })
+    }
+
+    /// f32 dim-aware `scatter_value`: clones `input` (`[outer, out_dim,
+    /// inner]`) and writes the broadcast scalar `value` at every position named
+    /// by `index` (`[outer, idx_dim, inner]`).
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_value_dim_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _value: f32,
+        _outer: usize,
+        _out_dim: usize,
+        _idx_dim: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_value_dim_f32",
+        })
+    }
+
+    /// f64 dim-aware `scatter_value`. Companion of
+    /// [`Self::scatter_value_dim_f32`].
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_value_dim_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _value: f64,
+        _outer: usize,
+        _out_dim: usize,
+        _idx_dim: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_value_dim_f64",
+        })
+    }
+
+    /// f32 dim-aware `scatter_add`: like [`Self::scatter_dim_f32`] but
+    /// accumulates (`out[dst] += src[t]`) via an atomic add, so duplicate index
+    /// values targeting the same `dst` sum correctly.
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_add_dim_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _outer: usize,
+        _out_dim: usize,
+        _idx_dim: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_add_dim_f32",
+        })
+    }
+
+    /// f64 dim-aware `scatter_add`. Companion of
+    /// [`Self::scatter_add_dim_f32`]; uses an `sm_60+` f64 atomic add.
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_add_dim_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _outer: usize,
+        _out_dim: usize,
+        _idx_dim: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_add_dim_f64",
+        })
+    }
+
     /// Cast a float buffer (`src.dtype()` ∈ {F32,F64,BF16,F16}) to an integer
     /// buffer tagged `dst` (∈ {I32,I64}), truncating toward zero (PyTorch
     /// `.to(int)`). Result stays GPU-resident.

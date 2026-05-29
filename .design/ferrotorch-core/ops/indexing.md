@@ -71,10 +71,16 @@ returns.
 - [x] AC-5: `masked_select` GPU path emits the compacted size via
   on-device count, then the compaction kernel writes the kept
   elements (no host bounce except for the single integer count).
-- [ ] AC-6: GPU paths for `gather` / `scatter` / `scatter_add` —
-  NOT-STARTED, blocked on #1545 (these CPU-only paths need
-  GPU lowering through `crate::grad_fns::indexing::GatherBackward`'s
-  resident path).
+- [x] AC-6: GPU paths for `gather` / `scatter` / `scatter_value` /
+  `scatter_add` — SHIPPED (#1545 / sub #1535). Each pub fn has a
+  CUDA-resident fast path (f32/f64) that uploads the host index as a
+  resident `i64` buffer and dispatches through
+  `GpuBackend::{op}_dim_{f32,f64}` to the PTX kernels in
+  `ferrotorch-gpu/src/scatter_gather_kernels.rs`, keeping the result
+  GPU-resident. bf16/f16 reject `NotImplementedOnCuda`. Live-GPU
+  parity vs torch at
+  `ferrotorch-gpu/tests/divergence_scatter_gather_gpu.rs` (15 tests,
+  incl. atomic `scatter_add` duplicate-index f32 AND f64).
 
 ## Architecture
 
@@ -160,3 +166,4 @@ GPU paths covered by `ferrotorch-core/tests/conformance_indexing.rs`.
 | REQ-6 | SHIPPED | impl: `masked_select` at `ops/indexing.rs:478`; non-test consumer: `crate::tensor::Tensor::masked_select` at `tensor.rs:1146` invokes `crate::ops::indexing::masked_select(self, mask)`; also `crate::grad_fns::indexing::masked_select_backward` at `grad_fns/indexing.rs:1823,1828` |
 | REQ-7 | SHIPPED | impl: grad-fn attachment in each forward path (e.g. `gather` at `attachment in ops/indexing.rs`, `scatter in ops/indexing.rs`, `scatter_add in ops/indexing.rs`, `where_cond in ops/indexing.rs`); non-test consumer: every autograd-tracking caller of these forwards |
 | REQ-8 | SHIPPED | impl: `validate_gather_shapes` at `ops/indexing.rs:66`; non-test consumer: invoked from `gather`, `scatter`, and `scatter_add` |
+| REQ-9 | SHIPPED | CUDA-resident dim-aware paths for `gather`/`scatter`/`scatter_value`/`scatter_add` (#1545 / sub #1535). impl: the `is_cuda()` f32/f64 branches in each `ops/indexing.rs` pub fn, plus the shared helpers `factor` and `upload_index_i64` (host `&[usize]` → resident `i64`); non-test consumer: each branch dispatches through `crate::gpu_dispatch::GpuBackend::{gather,scatter,scatter_value,scatter_add}_dim_{f32,f64}`, implemented by `ferrotorch-gpu::CudaBackendImpl` over the PTX kernels in `ferrotorch-gpu/src/scatter_gather_kernels.rs`. The result stays GPU-resident (`TensorStorage::gpu`); bf16/f16 return `NotImplementedOnCuda`. The same-module non-CUDA callers (`ferrotorch_core::{gather,scatter,scatter_add}` re-exports at `lib.rs:207`, `Tensor::scatter_value_t`) reach the new branch whenever their operands are CUDA-resident. |

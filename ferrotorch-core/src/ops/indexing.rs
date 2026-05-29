@@ -5,8 +5,13 @@
 //! - `scatter_add(input, dim, index, src)` — scatter with addition
 //! - `where_cond(condition, x, y)` — ternary selection
 //!
-//! All operations are CPU-only; GPU tensors must be transferred with `.cpu()`
-//! before calling these functions.
+//! `gather` / `scatter` / `scatter_value` / `scatter_add` have CUDA-resident
+//! fast paths (f32/f64) that dispatch through `GpuBackend::{op}_dim_{f32,f64}`
+//! to the PTX kernels in `ferrotorch-gpu/src/scatter_gather_kernels.rs` (the
+//! host `&[usize]` index is uploaded as a resident `i64` buffer; the result
+//! stays GPU-resident). bf16/f16 CUDA inputs return `NotImplementedOnCuda`.
+//! `where_cond` (host-`&[bool]`) is CPU-only; `where_cond_bt` / `masked_select`
+//! have their own GPU-resident paths (#1185 / #1187).
 //! Backward (gradient) functions live in `grad_fns::indexing`.
 //!
 //! ## REQ status (per `.design/ferrotorch-core/ops/indexing.md`)
@@ -25,11 +30,45 @@
 use std::sync::Arc;
 
 use crate::autograd::no_grad::is_grad_enabled;
-use crate::dtype::Float;
+use crate::dtype::{DType, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
+use crate::gpu_dispatch::GpuBufferHandle;
 use crate::shape::normalize_axis;
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
+
+/// Factorise `shape` around `dim` into `(outer, dim_size, inner)` for the
+/// `[outer, dim_size, inner]` GPU kernel layout shared by the dim-aware
+/// gather/scatter family (`scatter_gather_kernels.rs`). `outer =
+/// prod(shape[..dim])`, `inner = prod(shape[dim+1..])`. Mirrors the per-dim
+/// stride decomposition in
+/// `aten/src/ATen/native/cuda/ScatterGatherKernel.cu`.
+#[inline]
+fn factor(shape: &[usize], dim: usize) -> (usize, usize, usize) {
+    let outer: usize = shape[..dim].iter().product();
+    let dim_size = shape[dim];
+    let inner: usize = shape[dim + 1..].iter().product();
+    (outer, dim_size, inner)
+}
+
+/// Upload a host `&[usize]` index slice to a GPU-resident `i64` buffer on
+/// `ordinal` (PyTorch index tensors are `int64`). The dim-aware
+/// gather/scatter CUDA kernels read the index with `ld.global.s64`, so the
+/// host indices are widened to `i64` before the copy. The core validator
+/// (`validate_gather_shapes`) has already rejected out-of-range values, so
+/// every uploaded index is in-bounds along `dim`.
+fn upload_index_i64(index: &[usize], ordinal: usize) -> FerrotorchResult<GpuBufferHandle> {
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let widened: Vec<i64> = index.iter().map(|&v| v as i64).collect();
+    // SAFETY: `widened: Vec<i64>` is fully initialized and borrowed for the
+    // duration of this call. `i64` has no padding/niches, so reading its
+    // backing store as `&[u8]` of length `widened.len() * 8` (==
+    // `widened.len() * size_of::<i64>()`) is sound and exactly covers the
+    // allocation; the byte slice does not outlive `widened`.
+    let bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(widened.as_ptr().cast::<u8>(), widened.len() * 8) };
+    backend.cpu_to_gpu(bytes, DType::I64, ordinal)
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -128,8 +167,67 @@ pub fn gather<T: Float>(
     index: &[usize],
     index_shape: &[usize],
 ) -> FerrotorchResult<Tensor<T>> {
+    // CUDA-resident fast path: `input` on a CUDA device, f32/f64 dtype. The
+    // host `&[usize]` index is uploaded as a GPU-resident `i64` buffer; the
+    // dim-aware PTX kernel runs entirely on-device and the result stays
+    // resident (no host round trip). bf16/f16 fall through to
+    // `NotImplementedOnCuda` (no dim-aware kernel for those dtypes yet).
     if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "gather" });
+        match T::dtype() {
+            DType::F32 | DType::F64 => {
+                let ndim = input.ndim();
+                if ndim == 0 {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: "gather: 0-D CUDA input not supported".into(),
+                    });
+                }
+                let dim = normalize_axis(dim, ndim)?;
+                let input_shape = input.shape().to_vec();
+                let (outer, in_dim, inner) = factor(&input_shape, dim);
+                let out_dim = if index_shape.is_empty() {
+                    1
+                } else {
+                    index_shape[dim]
+                };
+                let input_handle = input.gpu_handle()?;
+                let ordinal = input_handle.device_ordinal();
+                let idx_handle = upload_index_i64(index, ordinal)?;
+                let backend =
+                    crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+                let h = if T::dtype() == DType::F32 {
+                    backend.gather_dim_f32(
+                        input_handle,
+                        &idx_handle,
+                        outer,
+                        in_dim,
+                        out_dim,
+                        inner,
+                    )?
+                } else {
+                    backend.gather_dim_f64(
+                        input_handle,
+                        &idx_handle,
+                        outer,
+                        in_dim,
+                        out_dim,
+                        inner,
+                    )?
+                };
+                let output_shape = index_shape.to_vec();
+                let storage = TensorStorage::gpu(h);
+                if input.requires_grad() && is_grad_enabled() {
+                    let grad_fn = Arc::new(crate::grad_fns::indexing::GatherBackward {
+                        input: input.clone(),
+                        dim,
+                        index: index.to_vec(),
+                        index_shape: index_shape.to_vec(),
+                    });
+                    return Tensor::from_operation(storage, output_shape, grad_fn);
+                }
+                return Tensor::from_storage(storage, output_shape, false);
+            }
+            _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "gather" }),
+        }
     }
 
     // PyTorch treats 0-D tensors as if they had `ensure_nonempty_dim(self.dim()) == 1`
@@ -228,8 +326,64 @@ pub fn scatter<T: Float>(
     let dim = normalize_axis(dim, ndim)?;
     let input_shape = input.shape();
 
+    // CUDA-resident fast path: `input` + `src` on the same CUDA device,
+    // f32/f64. The host index uploads as a resident `i64` buffer; the result
+    // (a clone of `input` with the scattered writes) stays GPU-resident.
+    // bf16/f16 → `NotImplementedOnCuda`.
     if input.is_cuda() || src.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "scatter" });
+        match T::dtype() {
+            DType::F32 | DType::F64 if input.is_cuda() && src.is_cuda() => {
+                if input.device() != src.device() {
+                    return Err(FerrotorchError::DeviceMismatch {
+                        expected: input.device(),
+                        got: src.device(),
+                    });
+                }
+                let (outer, out_dim, inner) = factor(input_shape, dim);
+                let idx_dim = index_shape[dim];
+                let input_handle = input.gpu_handle()?;
+                let ordinal = input_handle.device_ordinal();
+                let idx_handle = upload_index_i64(index, ordinal)?;
+                let backend =
+                    crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+                let src_handle = src.gpu_handle()?;
+                let h = if T::dtype() == DType::F32 {
+                    backend.scatter_dim_f32(
+                        input_handle,
+                        &idx_handle,
+                        src_handle,
+                        outer,
+                        out_dim,
+                        idx_dim,
+                        inner,
+                    )?
+                } else {
+                    backend.scatter_dim_f64(
+                        input_handle,
+                        &idx_handle,
+                        src_handle,
+                        outer,
+                        out_dim,
+                        idx_dim,
+                        inner,
+                    )?
+                };
+                let output_shape = input_shape.to_vec();
+                let storage = TensorStorage::gpu(h);
+                if needs_grad(input, src) {
+                    let grad_fn = Arc::new(crate::grad_fns::indexing::ScatterBackward {
+                        input: input.clone(),
+                        src: src.clone(),
+                        dim,
+                        index: index.to_vec(),
+                        index_shape: index_shape.to_vec(),
+                    });
+                    return Tensor::from_operation(storage, output_shape, grad_fn);
+                }
+                return Tensor::from_storage(storage, output_shape, false);
+            }
+            _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "scatter" }),
+        }
     }
 
     validate_gather_shapes(input_shape, dim, index_shape, index, input_shape[dim])?;
@@ -319,10 +473,71 @@ pub fn scatter_value<T: Float>(
     let dim = normalize_axis(dim, ndim)?;
     let input_shape = input.shape();
 
+    // CUDA-resident fast path: `input` on a CUDA device, f32/f64. The host
+    // index uploads as a resident `i64` buffer; the broadcast scalar `value`
+    // is written at every named position by the on-device kernel and the
+    // result stays resident. bf16/f16 → `NotImplementedOnCuda`.
     if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: "scatter_value",
-        });
+        match T::dtype() {
+            DType::F32 | DType::F64 => {
+                let (outer, out_dim, inner) = factor(input_shape, dim);
+                let idx_dim = index_shape[dim];
+                let input_handle = input.gpu_handle()?;
+                let ordinal = input_handle.device_ordinal();
+                let idx_handle = upload_index_i64(index, ordinal)?;
+                let backend =
+                    crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+                let h = if T::dtype() == DType::F32 {
+                    backend.scatter_value_dim_f32(
+                        input_handle,
+                        &idx_handle,
+                        value.to_f32().ok_or(FerrotorchError::InvalidArgument {
+                            message: "scatter_value: value not representable as f32".into(),
+                        })?,
+                        outer,
+                        out_dim,
+                        idx_dim,
+                        inner,
+                    )?
+                } else {
+                    backend.scatter_value_dim_f64(
+                        input_handle,
+                        &idx_handle,
+                        value.to_f64().ok_or(FerrotorchError::InvalidArgument {
+                            message: "scatter_value: value not representable as f64".into(),
+                        })?,
+                        outer,
+                        out_dim,
+                        idx_dim,
+                        inner,
+                    )?
+                };
+                let output_shape = input_shape.to_vec();
+                let storage = TensorStorage::gpu(h);
+                if is_grad_enabled() && input.requires_grad() {
+                    let zero = <T as num_traits::Zero>::zero();
+                    let zeros_src = Tensor::from_storage(
+                        TensorStorage::cpu(vec![zero; index_shape.iter().product()]),
+                        index_shape.to_vec(),
+                        false,
+                    )?;
+                    let grad_fn = Arc::new(crate::grad_fns::indexing::ScatterBackward {
+                        input: input.clone(),
+                        src: zeros_src,
+                        dim,
+                        index: index.to_vec(),
+                        index_shape: index_shape.to_vec(),
+                    });
+                    return Tensor::from_operation(storage, output_shape, grad_fn);
+                }
+                return Tensor::from_storage(storage, output_shape, false);
+            }
+            _ => {
+                return Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "scatter_value",
+                });
+            }
+        }
     }
 
     validate_gather_shapes(input_shape, dim, index_shape, index, input_shape[dim])?;
@@ -397,8 +612,65 @@ pub fn scatter_add<T: Float>(
     let dim = normalize_axis(dim, ndim)?;
     let input_shape = input.shape();
 
+    // CUDA-resident fast path: `input` + `src` on the same CUDA device,
+    // f32/f64. The host index uploads as a resident `i64` buffer; the kernel
+    // accumulates with an ATOMIC add so duplicate index values targeting the
+    // same output slot sum correctly. The result stays GPU-resident. bf16/f16
+    // → `NotImplementedOnCuda`.
     if input.is_cuda() || src.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "scatter_add" });
+        match T::dtype() {
+            DType::F32 | DType::F64 if input.is_cuda() && src.is_cuda() => {
+                if input.device() != src.device() {
+                    return Err(FerrotorchError::DeviceMismatch {
+                        expected: input.device(),
+                        got: src.device(),
+                    });
+                }
+                let (outer, out_dim, inner) = factor(input_shape, dim);
+                let idx_dim = index_shape[dim];
+                let input_handle = input.gpu_handle()?;
+                let ordinal = input_handle.device_ordinal();
+                let idx_handle = upload_index_i64(index, ordinal)?;
+                let backend =
+                    crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+                let src_handle = src.gpu_handle()?;
+                let h = if T::dtype() == DType::F32 {
+                    backend.scatter_add_dim_f32(
+                        input_handle,
+                        &idx_handle,
+                        src_handle,
+                        outer,
+                        out_dim,
+                        idx_dim,
+                        inner,
+                    )?
+                } else {
+                    backend.scatter_add_dim_f64(
+                        input_handle,
+                        &idx_handle,
+                        src_handle,
+                        outer,
+                        out_dim,
+                        idx_dim,
+                        inner,
+                    )?
+                };
+                let output_shape = input_shape.to_vec();
+                let storage = TensorStorage::gpu(h);
+                if needs_grad(input, src) {
+                    let grad_fn = Arc::new(crate::grad_fns::indexing::ScatterAddBackward {
+                        input: input.clone(),
+                        src: src.clone(),
+                        dim,
+                        index: index.to_vec(),
+                        index_shape: index_shape.to_vec(),
+                    });
+                    return Tensor::from_operation(storage, output_shape, grad_fn);
+                }
+                return Tensor::from_storage(storage, output_shape, false);
+            }
+            _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "scatter_add" }),
+        }
     }
 
     validate_gather_shapes(input_shape, dim, index_shape, index, input_shape[dim])?;

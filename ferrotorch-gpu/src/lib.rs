@@ -195,6 +195,8 @@ pub mod rng;
 #[cfg(feature = "cuda")]
 pub mod roll;
 #[cfg(feature = "cuda")]
+pub mod scatter_gather_kernels;
+#[cfg(feature = "cuda")]
 pub mod search;
 #[cfg(feature = "cuda")]
 pub mod sparse;
@@ -268,6 +270,11 @@ pub use pool::{cached_bytes, empty_cache, empty_cache_all, round_len};
 pub use rng::{CudaRngManager, PhiloxGenerator, PhiloxState, cuda_rng_manager, fork_rng, join_rng};
 #[cfg(feature = "cuda")]
 pub use roll::gpu_roll_f32;
+#[cfg(feature = "cuda")]
+pub use scatter_gather_kernels::{
+    gpu_gather_dim_f32, gpu_gather_dim_f64, gpu_scatter_add_dim_f32, gpu_scatter_add_dim_f64,
+    gpu_scatter_dim_f32, gpu_scatter_dim_f64, gpu_scatter_value_dim_f32, gpu_scatter_value_dim_f64,
+};
 #[cfg(feature = "cuda")]
 pub use search::{
     gpu_histc_f32, gpu_histc_f64, gpu_meshgrid_f32, gpu_meshgrid_f64, gpu_searchsorted_f32,

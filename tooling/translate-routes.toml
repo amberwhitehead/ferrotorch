@@ -2419,6 +2419,18 @@ parity_ops = []
 
 
 [[route]]
+crate_pattern = "ferrotorch-gpu/src/scatter_gather_kernels.rs"
+upstream = [
+  "/home/doll/pytorch/aten/src/ATen/native/cuda/ScatterGatherKernel.cu",
+  "/home/doll/pytorch/aten/src/ATen/native/TensorAdvancedIndexing.cpp",
+  "/home/doll/pytorch/aten/src/ATen/native/ScatterGatherChecks.h",
+  "/home/doll/pytorch/aten/src/ATen/native/cuda/",
+]
+design = ".design/ferrotorch-gpu/scatter_gather.md"
+parity_ops = []
+
+
+[[route]]
 crate_pattern = "ferrotorch-gpu/src/search.rs"
 upstream = [
   "/home/doll/pytorch/aten/src/ATen/cuda/",
