@@ -58,12 +58,14 @@ use cubecl::prelude::*;
 use cubecl_cuda::{CudaDevice, CudaRuntime};
 use cudarc::driver::CudaSlice;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult};
+use ferrotorch_cubecl::quant::apply_token_mask_to_gpu;
 use ferrotorch_cubecl::{
     dequantize_q4_0_to_gpu, dequantize_q4_1_to_gpu, dequantize_q5_0_to_gpu, dequantize_q5_1_to_gpu,
     dequantize_q8_0_to_gpu, dequantize_q8_1_to_gpu, split_q4_0_blocks, split_q4_1_blocks,
     split_q5_0_blocks, split_q5_1_blocks, split_q8_0_blocks, split_q8_1_blocks,
 };
 use ferrotorch_gpu::GpuDevice;
+use ferrotorch_grammar::JsonSchemaProcessor;
 use ferrotorch_serialize::gguf::{GgmlType, GgufFile, dequantize_gguf_tensor, load_gguf_mmap};
 use half::bf16;
 
@@ -408,4 +410,145 @@ fn bf16_state_dict_from_gguf_gpu(
     }
 
     Ok(state)
+}
+
+// ---------------------------------------------------------------------------
+// GPU grammar-constrained logit masking (REQ-8)
+// ---------------------------------------------------------------------------
+
+/// Apply a grammar allow-mask to a logits vector **on the GPU**.
+///
+/// This is the production consumer of
+/// [`ferrotorch_cubecl::apply_token_mask_to_gpu`]: it opens (well, reuses
+/// via [`cubecl_cuda_client`]) a cubecl `CudaRuntime` client on
+/// `device_ordinal`, uploads `logits` + `allow_mask`, dispatches the
+/// `kernel_apply_token_mask` `#[cube]` kernel (one GPU thread per token),
+/// and reads the masked logits back to host.
+///
+/// Mask semantics mirror the kernel: `allow_mask[i] != 0` passes
+/// `logits[i]` through bit-exact; `allow_mask[i] == 0` forces the entry
+/// to `f32::MIN` (the kernel's `F::min_value()`, the most-negative finite
+/// f32 ≈ -3.4e38), which underflows to probability zero under softmax and
+/// can never be the greedy argmax winner against any finite logit.
+///
+/// The `allow_mask` is exactly the `allow` vector produced by
+/// [`ferrotorch_grammar::JsonSchemaProcessor::compute_mask`]
+/// (`1` = allowed token, `0` = masked).
+///
+/// # Errors
+///
+/// Returns [`FerrotorchError::InvalidArgument`] if
+/// `logits.len() != allow_mask.len()` (the mask must cover the whole
+/// vocabulary) or if the cubecl `read_one` of the masked-logits handle
+/// fails.
+pub fn apply_grammar_mask_gpu(
+    logits: &[f32],
+    allow_mask: &[u32],
+    device_ordinal: usize,
+) -> FerrotorchResult<Vec<f32>> {
+    if logits.len() != allow_mask.len() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "apply_grammar_mask_gpu: logits.len() ({}) must equal allow_mask.len() ({}) \
+                 — the mask must span the full vocabulary",
+                logits.len(),
+                allow_mask.len()
+            ),
+        });
+    }
+
+    let client = cubecl_cuda_client(device_ordinal);
+    let handle = apply_token_mask_to_gpu(&client, logits, allow_mask);
+    let bytes = client
+        .read_one(handle)
+        .map_err(|e| FerrotorchError::InvalidArgument {
+            message: format!("cubecl read_one (grammar mask handle) failed: {e}"),
+        })?;
+    Ok(f32::from_bytes(&bytes).to_vec())
+}
+
+impl LlamaGpuInferencer {
+    /// Greedy GPU generation with optional grammar-constrained decoding.
+    ///
+    /// Drives [`Self::forward_from_ids`] in an autoregressive loop. When
+    /// `grammar` is `Some`, each step:
+    ///
+    /// 1. obtains the last-token logits (`Vec<f32>`, length `vocab_size`),
+    /// 2. computes the per-step allow mask
+    ///    ([`JsonSchemaProcessor::compute_mask`]),
+    /// 3. masks the logits **on the GPU** via [`apply_grammar_mask_gpu`]
+    ///    (the real consumer of
+    ///    [`ferrotorch_cubecl::apply_token_mask_to_gpu`]),
+    /// 4. greedily picks the argmax of the masked logits, and
+    /// 5. advances the grammar state with
+    ///    [`JsonSchemaProcessor::step_token`].
+    ///
+    /// When `grammar` is `None` this is plain greedy GPU generation: no
+    /// masking, identical to argmax over the raw logits each step. The
+    /// returned `Vec<u32>` is the sequence of newly generated token ids
+    /// (the prompt is **not** included).
+    ///
+    /// Greedy (argmax) sampling is intentional: it makes the
+    /// grammar-masking effect deterministic and testable (a token forced
+    /// to `f32::MIN` can never win the argmax against any finite logit, so
+    /// a masked token is provably never emitted).
+    ///
+    /// # Errors
+    ///
+    /// Forwards [`Self::forward_from_ids`] errors, the
+    /// [`apply_grammar_mask_gpu`] error surface, and
+    /// [`FerrotorchError::InvalidArgument`] if a grammar step rejects the
+    /// greedily-chosen (already-allowed) token — which would indicate a
+    /// mask/grammar inconsistency.
+    pub fn generate_masked(
+        &self,
+        prompt_ids: &[u32],
+        max_new_tokens: usize,
+        grammar: Option<&mut JsonSchemaProcessor>,
+    ) -> FerrotorchResult<Vec<u32>> {
+        let ordinal = self.device.ordinal();
+        let mut ids: Vec<u32> = prompt_ids.to_vec();
+        let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
+        let mut grammar = grammar;
+
+        for _ in 0..max_new_tokens {
+            let logits = self.forward_from_ids(&ids)?;
+
+            let next = if let Some(proc) = grammar.as_deref_mut() {
+                let mask = proc.compute_mask();
+                let masked = apply_grammar_mask_gpu(&logits, &mask.allow, ordinal)?;
+                let next = argmax_f32(&masked);
+                proc.step_token(next)
+                    .map_err(|e| FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "generate_masked: grammar rejected greedily-chosen token \
+                             {next} (mask/grammar inconsistency): {e}"
+                        ),
+                    })?;
+                next
+            } else {
+                argmax_f32(&logits)
+            };
+
+            generated.push(next);
+            ids.push(next);
+        }
+
+        Ok(generated)
+    }
+}
+
+/// Argmax over an f32 logits slice (greedy decode). Ties resolve to the
+/// lowest index. An empty slice returns `0`.
+#[must_use]
+fn argmax_f32(logits: &[f32]) -> u32 {
+    let mut best_idx = 0usize;
+    let mut best_val = f32::NEG_INFINITY;
+    for (i, &v) in logits.iter().enumerate() {
+        if v > best_val {
+            best_val = v;
+            best_idx = i;
+        }
+    }
+    best_idx as u32
 }
