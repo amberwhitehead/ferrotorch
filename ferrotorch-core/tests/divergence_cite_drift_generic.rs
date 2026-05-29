@@ -1502,20 +1502,30 @@ fn parse_single_span(span: &str) -> Option<SymbolAnchor> {
     })
 }
 
-/// One-shot index of every `*/src/**/*.rs` file in the workspace, keyed by
-/// basename -> all matching workspace-relative paths. Built once per test.
+/// One-shot index of every `*/src/**/*.rs`, `*/examples/**/*.rs`, and
+/// `*/tests/**/*.rs` file in the workspace, keyed by basename -> all matching
+/// workspace-relative paths. Built once per test.
+///
+/// #1669 extends the index beyond `src/` to also cover `examples/` and
+/// `tests/` directories: a small number of single-span anchors legitimately
+/// point at example/integration-test files (`<sym> in some_example.rs`), and
+/// a `src/`-only index would report those as UNRESOLVABLE (false positives).
+/// Indexing those dirs lets such anchors resolve to a real file.
 fn build_src_index(root: &Path) -> std::collections::HashMap<String, Vec<PathBuf>> {
     let mut index: std::collections::HashMap<String, Vec<PathBuf>> =
         std::collections::HashMap::new();
-    // Walk each `<crate>/src` directory recursively.
+    // Walk each `<crate>/src`, `<crate>/examples`, `<crate>/tests` directory
+    // recursively.
     let mut crate_src_dirs: Vec<PathBuf> = Vec::new();
     if let Ok(entries) = fs::read_dir(root) {
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
-                let src = p.join("src");
-                if src.is_dir() {
-                    crate_src_dirs.push(src);
+                for sub in ["src", "examples", "tests"] {
+                    let d = p.join(sub);
+                    if d.is_dir() {
+                        crate_src_dirs.push(d);
+                    }
                 }
             }
         }
@@ -1562,11 +1572,7 @@ fn doc_crate_src_dir(root: &Path, doc_label: &str) -> Option<PathBuf> {
         return None;
     }
     let src = root.join(first).join("src");
-    if src.is_dir() {
-        Some(src)
-    } else {
-        None
-    }
+    if src.is_dir() { Some(src) } else { None }
 }
 
 /// Resolve a single-span anchor's `file_as_written` to the candidate files
@@ -1758,6 +1764,32 @@ enum AnchorOutcome {
     Stale,
     /// No file of that basename exists anywhere in the workspace.
     Unresolvable,
+    /// NOT a real symbol anchor — a `BareIdent` whose ident equals the named
+    /// file's stem (`laplace in laplace.rs`, `device in device.rs`) that does
+    /// NOT resolve to a real declaration. These are prose references to a
+    /// module/file BY ITS OWN NAME ("the Laplace distribution ... in
+    /// laplace.rs"), not symbol declarations. Per #1669 the file-stem rule
+    /// reclassifies them as prose so they neither pass nor fail the gate —
+    /// they're simply not anchors. (If such a span DID resolve to a real
+    /// `fn <stem>` / `struct <stem>` decl it would be `Valid`, not `Prose`.)
+    Prose,
+}
+
+/// Does `ident` equal a PATH COMPONENT of `file_as_written` — the basename
+/// stem (without `.rs`) OR any intermediate directory segment? Used by the
+/// file-stem prose rule (#1669).
+///
+/// `device` matches `device.rs` (stem). `gpu` matches `gpu/unet.rs` (a
+/// directory segment — the prose form `` `gpu in gpu/unet.rs` `` names the GPU
+/// module by its dir name, not a symbol). `arithmetic` matches
+/// `grad_fns/arithmetic.rs` (stem). A genuine multi-segment symbol like
+/// `gpu_backend` or `reduce_all` does NOT equal any single path component, so
+/// it is NOT reclassified as prose by this rule.
+fn ident_is_path_component(ident: &str, file_as_written: &str) -> bool {
+    file_as_written.split('/').any(|seg| {
+        let stem = seg.strip_suffix(".rs").unwrap_or(seg);
+        stem == ident
+    })
 }
 
 /// Validate one single-span anchor, returning its outcome + (on
@@ -1786,6 +1818,19 @@ fn validate_symbol_anchor(
                 return (AnchorOutcome::Valid, None);
             }
         }
+    }
+    // FILE-STEM PROSE RULE (#1669): a `BareIdent` whose identifier equals the
+    // named file's own stem (`laplace in laplace.rs`, `device in device.rs`,
+    // `dispatch in dispatch.rs`) that does NOT resolve to a real declaration
+    // is a prose reference to the module/file by its own name, NOT a symbol
+    // anchor. Reclassify as `Prose` (neither passes nor fails the gate). The
+    // declared case was already handled above (returns `Valid`), so by the
+    // time we reach here the stem-named symbol is genuinely not a decl — i.e.
+    // the module-name-prose case the dispatch describes.
+    if anchor.kind == DeclKind::BareIdent
+        && ident_is_path_component(&anchor.ident, &anchor.file_as_written)
+    {
+        return (AnchorOutcome::Prose, None);
     }
     (
         AnchorOutcome::Stale,
@@ -2189,7 +2234,11 @@ fn report_single_span_anchor_counts() {
     let root = workspace_root();
     let index = build_src_index(&root);
     let docs = collect_design_docs(&root);
-    let (mut total, mut valid, mut stale, mut unres) = (0usize, 0usize, 0usize, 0usize);
+    // Overall counts.
+    let (mut total, mut valid, mut stale, mut unres, mut prose) = (0, 0, 0, 0, 0usize);
+    // Bare-ident-only counts (the #1669 family).
+    let (mut bi_total, mut bi_valid, mut bi_stale, mut bi_unres, mut bi_prose) =
+        (0, 0, 0, 0, 0usize);
     let mut stale_list: Vec<String> = Vec::new();
     let mut unres_list: Vec<String> = Vec::new();
     for doc in &docs {
@@ -2200,31 +2249,59 @@ fn report_single_span_anchor_counts() {
         for (i, line) in text.lines().enumerate() {
             for anchor in parse_symbol_anchors(line) {
                 total += 1;
+                let is_bare = anchor.kind == DeclKind::BareIdent;
+                if is_bare {
+                    bi_total += 1;
+                }
                 let (outcome, msg) = validate_symbol_anchor(&anchor, &index, &root, doc, i + 1);
                 match outcome {
-                    AnchorOutcome::Valid => valid += 1,
+                    AnchorOutcome::Valid => {
+                        valid += 1;
+                        if is_bare {
+                            bi_valid += 1;
+                        }
+                    }
                     AnchorOutcome::Stale => {
                         stale += 1;
+                        if is_bare {
+                            bi_stale += 1;
+                        }
                         if let Some(m) = msg {
                             stale_list.push(m);
                         }
                     }
                     AnchorOutcome::Unresolvable => {
                         unres += 1;
+                        if is_bare {
+                            bi_unres += 1;
+                        }
                         if let Some(m) = msg {
                             unres_list.push(m);
+                        }
+                    }
+                    AnchorOutcome::Prose => {
+                        prose += 1;
+                        if is_bare {
+                            bi_prose += 1;
                         }
                     }
                 }
             }
         }
     }
-    println!("=== #1668 single-span anchor report ===");
+    println!("=== #1668/#1669 single-span anchor report ===");
     println!("docs scanned: {}", docs.len());
     println!("total parsed:  {total}");
     println!("valid:         {valid}");
     println!("STALE:         {stale}");
     println!("UNRESOLVABLE:  {unres}");
+    println!("PROSE (file-stem, non-anchor): {prose}");
+    println!("--- bare-ident only ---");
+    println!("bare total:        {bi_total}");
+    println!("bare valid:        {bi_valid}");
+    println!("bare STALE:        {bi_stale}");
+    println!("bare UNRESOLVABLE: {bi_unres}");
+    println!("bare PROSE:        {bi_prose}");
     println!("--- STALE ---");
     for m in &stale_list {
         println!("{m}");
@@ -2430,6 +2507,179 @@ fn single_span_anchor_parser_is_precise() {
     }
 }
 
+/// #1669 PRECISION — the bare-ident VALIDATOR (not just the parser) must:
+///   1. reclassify `<file-stem-or-dir-segment> in <file>.rs` PROSE
+///      (`laplace in laplace.rs`, `gpu in gpu/unet.rs`) as `Prose`, NOT `Stale`
+///      — these name a module/file by its own name in prose, not a symbol;
+///   2. KEEP a file-stem-named ident that DOES resolve to a real decl as
+///      `Valid` (the edge the dispatch calls out — only the not-declared
+///      stem case is prose);
+///   3. validate genuine bare anchors (`reduce_all in meta_propagate.rs`,
+///      `add in grad_fns/arithmetic.rs`) as `Valid`;
+///   4. resolve `examples/` and `tests/` anchors (no longer `Unresolvable`).
+///
+/// Runs against the REAL workspace tree; expected values are grep-derived
+/// ground truth (R-CHAR-3(b)), not copied from validator output.
+#[test]
+fn bare_ident_validator_file_stem_prose_and_examples_tests() {
+    let root = workspace_root();
+    let index = build_src_index(&root);
+
+    let mk = |kind, ident: &str, file: &str| SymbolAnchor {
+        kind,
+        ident: ident.to_string(),
+        file_as_written: file.to_string(),
+    };
+    // Ground-truth declaration check via the SAME production validator path a
+    // bare-ident anchor uses (`anchor_symbol_declared` on a BareIdent anchor).
+    let bare_ident_declared = |src: &str, ident: &str| {
+        anchor_symbol_declared(
+            src,
+            &SymbolAnchor {
+                kind: DeclKind::BareIdent,
+                ident: ident.to_string(),
+                file_as_written: String::new(),
+            },
+        )
+    };
+
+    // 1. FILE-STEM PROSE: `laplace in laplace.rs` — `laplace` is the file stem
+    //    and is NOT declared as a symbol in laplace.rs -> Prose (non-anchor).
+    let laplace_src = root.join("ferrotorch-distributions/src/laplace.rs");
+    assert!(laplace_src.exists(), "fixture: {laplace_src:?} must exist");
+    assert!(
+        !bare_ident_declared(&fs::read_to_string(&laplace_src).unwrap(), "laplace"),
+        "ground truth: `laplace` is NOT a decl in laplace.rs (it's the module name)"
+    );
+    let (o, _) = validate_symbol_anchor(
+        &mk(DeclKind::BareIdent, "laplace", "laplace.rs"),
+        &index,
+        &root,
+        ".design/ferrotorch-distributions/laplace.md",
+        1,
+    );
+    assert_eq!(
+        o,
+        AnchorOutcome::Prose,
+        "`laplace in laplace.rs` (stem == ident, not a decl) must be PROSE, not STALE"
+    );
+
+    // 1b. DIR-SEGMENT PROSE: `gpu in gpu/unet.rs` — `gpu` is a directory
+    //     segment of the path, used as a prose module reference -> Prose.
+    let (o, _) = validate_symbol_anchor(
+        &mk(DeclKind::BareIdent, "gpu", "gpu/unet.rs"),
+        &index,
+        &root,
+        ".design/ferrotorch-diffusion/gpu/unet.md",
+        1,
+    );
+    assert_eq!(
+        o,
+        AnchorOutcome::Prose,
+        "`gpu in gpu/unet.rs` (gpu == dir segment, not a decl) must be PROSE"
+    );
+
+    // 2. FILE-STEM EDGE that RESOLVES: pick a file whose stem IS a real decl.
+    //    `dtype.rs` declares `pub fn dtype` is unlikely; use a known case:
+    //    `device in device.rs` — verify behaviour matches ground truth. If
+    //    `device` is declared (e.g. `pub fn device`) it must be Valid; if not,
+    //    Prose. We assert the validator AGREES with the grep ground truth.
+    let device_src = root.join("ferrotorch-core/src/device.rs");
+    let device_declared = bare_ident_declared(&fs::read_to_string(&device_src).unwrap(), "device");
+    let (o, _) = validate_symbol_anchor(
+        &mk(DeclKind::BareIdent, "device", "device.rs"),
+        &index,
+        &root,
+        ".design/ferrotorch-core/device.md",
+        1,
+    );
+    if device_declared {
+        assert_eq!(
+            o,
+            AnchorOutcome::Valid,
+            "stem ident that IS a decl -> Valid"
+        );
+    } else {
+        assert_eq!(
+            o,
+            AnchorOutcome::Prose,
+            "stem ident that is NOT a decl -> Prose (module-name prose)"
+        );
+    }
+
+    // 3. GENUINE bare anchors resolve Valid.
+    let mp_src = root.join("ferrotorch-core/src/meta_propagate.rs");
+    assert!(
+        bare_ident_declared(&fs::read_to_string(&mp_src).unwrap(), "reduce_all"),
+        "ground truth: `reduce_all` IS declared in meta_propagate.rs"
+    );
+    let (o, _) = validate_symbol_anchor(
+        &mk(DeclKind::BareIdent, "reduce_all", "meta_propagate.rs"),
+        &index,
+        &root,
+        ".design/ferrotorch-core/meta_propagate.md",
+        1,
+    );
+    assert_eq!(
+        o,
+        AnchorOutcome::Valid,
+        "`reduce_all in meta_propagate.rs` is a genuine anchor -> Valid"
+    );
+    let arith_src = root.join("ferrotorch-core/src/grad_fns/arithmetic.rs");
+    assert!(
+        bare_ident_declared(&fs::read_to_string(&arith_src).unwrap(), "add"),
+        "ground truth: `add` IS declared in grad_fns/arithmetic.rs"
+    );
+    let (o, _) = validate_symbol_anchor(
+        &mk(DeclKind::BareIdent, "add", "grad_fns/arithmetic.rs"),
+        &index,
+        &root,
+        ".design/ferrotorch-core/grad_fns/arithmetic.md",
+        1,
+    );
+    assert_eq!(
+        o,
+        AnchorOutcome::Valid,
+        "`add in grad_fns/arithmetic.rs` is a genuine anchor -> Valid"
+    );
+
+    // 4. EXAMPLES/TESTS indexing: an anchor naming an examples/ or tests/ file
+    //    must RESOLVE (candidate set non-empty), never Unresolvable. Pick a
+    //    real example file present in the tree.
+    let examples_in_index = index
+        .values()
+        .flatten()
+        .any(|p| p.to_string_lossy().contains("/examples/"));
+    assert!(
+        examples_in_index,
+        "the #1669 file index must include `*/examples/**/*.rs` files"
+    );
+    let tests_in_index = index
+        .values()
+        .flatten()
+        .any(|p| p.to_string_lossy().contains("/tests/"));
+    assert!(
+        tests_in_index,
+        "the #1669 file index must include `*/tests/**/*.rs` files"
+    );
+    // A bare anchor naming an example file resolves to >=1 candidate (so it is
+    // never reported Unresolvable purely for being outside `src/`).
+    let example_basename = index
+        .iter()
+        .find(|(_, ps)| {
+            ps.iter()
+                .all(|p| p.to_string_lossy().contains("/examples/"))
+        })
+        .map(|(name, _)| name.clone());
+    if let Some(name) = example_basename {
+        let cands = resolve_symbol_anchor_files(&index, &root, "synthetic", &name);
+        assert!(
+            !cands.is_empty(),
+            "an example-only basename `{name}` must resolve to >=1 candidate (examples/ indexed)"
+        );
+    }
+}
+
 /// #1668 HARD CONTRACT: every single-span symbol anchor
 /// `` `<decl> in <path>.rs` `` across ALL `.design/**/*.md` resolves to a
 /// genuine declaration of that symbol in a file of the named basename at
@@ -2442,22 +2692,44 @@ fn single_span_anchor_parser_is_precise() {
 /// or — when the doc maps to no crate / the crate has no such file — in AT
 /// LEAST ONE cross-crate candidate of the named basename.
 ///
-/// SCOPE (#1669): this HARD contract enforces the keyword-led / `Type::method`
-/// anchor kinds (`Fn`, `Struct`, `Enum`, `Trait`, `Mod`, `Const`, `Type`,
-/// `Impl`, `AssocFn`). The #1669 bare single-identifier form (`DeclKind::
-/// BareIdent`, e.g. `add in arithmetic.rs`) is NEWLY parsed + validated by the
-/// same machinery, but enabling it as a HARD gate here would turn ~525 anchors
-/// red in one shot — a FLOOD dominated by prose-shaped spans (`laplace in
-/// laplace.rs`, `device in device.rs`) that reference a file/module by name
-/// rather than declaring a symbol, plus a smaller residual of genuinely-stale
-/// bare anchors and `examples/`-/`tests/`-targeted anchors the `src/`-only
-/// index can't resolve. Per the #1669 dispatch's flood guidance, the bare-ident
-/// residual is ESCALATED to a staged cleanup campaign rather than rewritten
-/// wholesale in this dispatch (which would also risk red-on-main). The
-/// bare-ident matcher + validator + crate-disambiguating resolver ARE shipped
-/// and proven by the `divergence_single_span_anchor_resolver.rs` pins +
-/// `report_single_span_anchor_counts`; this gate adopts the bare-ident kind
-/// once that campaign drives the residual to zero.
+/// SCOPE (#1669, FLAW 2): this HARD contract enforces the keyword-led /
+/// `Type::method` anchor kinds (`Fn`, `Struct`, `Enum`, `Trait`, `Mod`,
+/// `Const`, `Type`, `Impl`, `AssocFn`) AND the bare single-identifier form
+/// (`DeclKind::BareIdent`, e.g. `add in arithmetic.rs`) — the latter is now
+/// ADOPTED into the gate, but at the precise soundness boundary the #1669
+/// tightening achieves with zero false-positives.
+///
+/// ALL anchor kinds (keyword-led + bare-ident): a `Valid` resolution passes;
+/// an `Unresolvable` outcome (the named `.rs` file exists NOWHERE under any
+/// `*/src/**`, `*/examples/**`, or `*/tests/**` in the workspace — an
+/// unambiguous typo / deleted-file) FAILS the gate.
+///
+/// Keyword-led kinds: a `Stale` outcome (file resolves, symbol absent) ALSO
+/// fails — those forms are precise (an explicit `fn`/`struct`/`Type::method`
+/// decl-shape), so a `Stale` there is genuine drift.
+///
+/// Bare-ident kind: `Stale` is NOT gated. After the #1669 precision tightening
+/// (file-stem / path-component PROSE reclassification + `examples/`-`tests/`
+/// indexing), the bare-ident `Unresolvable` count is ZERO, but a residual of
+/// ~290 bare-ident `Stale` lines remains. That residual is a MIX of (a) genuine
+/// drift (a real multi-segment symbol named in the wrong file, e.g.
+/// `gpu_matmul_f32 in backend_impl.rs` when `gpu_matmul_f32` is declared in
+/// `blas.rs` and `backend_impl.rs` holds only the `CudaBackendImpl::matmul_f32`
+/// CONSUMER arm) and (b) prose secondary references that survive the
+/// path-component rule (a bare parameter/variable/PyTorch-noun word — `input`,
+/// `torch`, `forward` — used in prose alongside a genuine anchor in an adjacent
+/// backtick span). Disentangling (a) from (b) requires per-symbol re-pointing
+/// across ~50 docs in 12 crates — far beyond one cohesive change, and exactly
+/// the "do NOT fix hundreds of prose spans / do not ship red" boundary the
+/// #1669 dispatch's ESCALATION clause draws. So the bare-ident `Stale` residual
+/// is ESCALATED to a staged cleanup campaign; the
+/// `report_single_span_anchor_counts` diagnostic re-measures it. The SOUND,
+/// zero-false-positive subset (bare-ident `Valid` + `Prose` pass, bare-ident
+/// `Unresolvable` fail) IS adopted here — so a NEW bare anchor pointing at a
+/// nonexistent file is now caught on every run.
+///
+/// The bare-ident matcher + validator + crate-disambiguating resolver are
+/// further proven by the `divergence_single_span_anchor_resolver.rs` pins.
 #[test]
 fn all_design_docs_single_span_anchors_resolve_at_head() {
     let root = workspace_root();
@@ -2470,6 +2742,7 @@ fn all_design_docs_single_span_anchors_resolve_at_head() {
     let mut failures: Vec<String> = Vec::new();
     let mut total = 0usize;
     let mut bare_ident_seen = 0usize;
+    let mut bare_ident_stale_residual = 0usize;
     for doc in &docs {
         let text = match fs::read_to_string(root.join(doc)) {
             Ok(t) => t,
@@ -2477,18 +2750,31 @@ fn all_design_docs_single_span_anchors_resolve_at_head() {
         };
         for (i, line) in text.lines().enumerate() {
             for anchor in parse_symbol_anchors(line) {
-                if anchor.kind == DeclKind::BareIdent {
-                    // Parsed + validatable, but staged out of the HARD gate
-                    // (see the doc comment above). Counted so the parser can't
-                    // silently stop matching the dominant bare form.
+                let is_bare = anchor.kind == DeclKind::BareIdent;
+                if is_bare {
                     bare_ident_seen += 1;
-                    continue;
+                } else {
+                    total += 1;
                 }
-                total += 1;
                 let (outcome, msg) = validate_symbol_anchor(&anchor, &index, &root, doc, i + 1);
-                if outcome != AnchorOutcome::Valid {
-                    if let Some(m) = msg {
-                        failures.push(m);
+                match outcome {
+                    AnchorOutcome::Valid | AnchorOutcome::Prose => {}
+                    AnchorOutcome::Unresolvable => {
+                        // Unambiguous typo / deleted file — GATED for ALL kinds
+                        // (bare-ident included: zero false-positives, since the
+                        // file genuinely exists nowhere in the workspace).
+                        if let Some(m) = msg {
+                            failures.push(m);
+                        }
+                    }
+                    AnchorOutcome::Stale => {
+                        if is_bare {
+                            // ESCALATED staged-cleanup residual — see doc above.
+                            bare_ident_stale_residual += 1;
+                        } else if let Some(m) = msg {
+                            // Keyword-led Stale IS gated (precise decl-shape).
+                            failures.push(m);
+                        }
                     }
                 }
             }
@@ -2507,9 +2793,17 @@ fn all_design_docs_single_span_anchors_resolve_at_head() {
         bare_ident_seen >= 500,
         "expected the #1669 bare-ident matcher to find >=500 bare `<ident> in <path>.rs` anchors, found {bare_ident_seen} — has the bare-ident parser regressed?",
     );
+    // The escalated bare-ident `Stale` residual is tracked (not gated). If it
+    // GROWS materially the cleanup campaign has regressed; if it COLLAPSES the
+    // bare-ident matcher / resolver tightening has over-excluded. This window
+    // pins the documented escalation state at adoption time (~290 lines).
+    assert!(
+        bare_ident_stale_residual <= 360,
+        "bare-ident STALE residual grew to {bare_ident_stale_residual} (>360) — the escalated cleanup campaign has regressed or a new flood of bare anchors landed; re-run report_single_span_anchor_counts and triage.",
+    );
     assert!(
         failures.is_empty(),
-        "{n} keyword-led single-span symbol anchor(s) are STALE/UNRESOLVABLE out of {total} scanned (#1668/#1669 crate-disambiguating resolver / goal.md S3 R-CITE-2b):\n\n{body}",
+        "{n} single-span symbol anchor(s) are STALE (keyword-led) / UNRESOLVABLE (any kind) out of {total} keyword-led + {bare_ident_seen} bare-ident scanned (#1668/#1669 crate-disambiguating resolver / goal.md S3 R-CITE-2b):\n\n{body}",
         n = failures.len(),
         body = failures.join("\n\n"),
     );

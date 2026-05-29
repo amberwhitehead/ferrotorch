@@ -143,11 +143,7 @@ fn doc_crate_src_dir(root: &Path, doc_label: &str) -> Option<PathBuf> {
         return None;
     }
     let src = root.join(first).join("src");
-    if src.is_dir() {
-        Some(src)
-    } else {
-        None
-    }
+    if src.is_dir() { Some(src) } else { None }
 }
 
 /// Faithful reproduction of the #1669 crate-disambiguating
