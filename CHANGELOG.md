@@ -48,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CPU Conv2d im2col is single-threaded — parallelize the batch loop (rayon) like fast_add (~12x gap vs torch cuDNN) (#1681)
 - RNN/GRU/LSTM sequence forward re-transposes constant weights every timestep (2*seq_len redundant transposes) — hoist out of the per-step loop (#1680)
 - GPU linear_fused transposes the constant weight via a separate kernel every forward — use cuBLAS transpose-B matmul (matmul_f32_nt) to drop a launch+transpose per Linear (GPU MLP 5x gap) (#1679)
 - GPU mean wastes an H2D upload + mul kernel scaling sum by 1/n — use scale_f32 (no upload) (#1677)
