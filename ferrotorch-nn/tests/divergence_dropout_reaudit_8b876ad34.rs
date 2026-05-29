@@ -49,8 +49,7 @@ fn approx(got: &[f32], want: &[f32], tol: f32, ctx: &str) {
 #[test]
 fn dropout3d_1x2x2x2x2_arange_seed1_p05_matches_torch() {
     let want: [f32; 16] = [
-        2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0,
-        32.0,
+        2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0,
     ];
     ferrotorch_core::rng::manual_seed(1);
     let layer = Dropout3d::<f32>::new(0.5).unwrap();
@@ -93,10 +92,18 @@ fn dropout2d_manual_seed_is_deterministic() {
     let layer = Dropout2d::<f32>::new(0.5).unwrap();
 
     ferrotorch_core::rng::manual_seed(42);
-    let y1 = layer.forward(&arange(vec![2, 4, 3, 3])).unwrap().data_vec().unwrap();
+    let y1 = layer
+        .forward(&arange(vec![2, 4, 3, 3]))
+        .unwrap()
+        .data_vec()
+        .unwrap();
 
     ferrotorch_core::rng::manual_seed(42);
-    let y2 = layer.forward(&arange(vec![2, 4, 3, 3])).unwrap().data_vec().unwrap();
+    let y2 = layer
+        .forward(&arange(vec![2, 4, 3, 3]))
+        .unwrap()
+        .data_vec()
+        .unwrap();
 
     approx(&y1, &y2, 0.0, "Dropout2d seed42 determinism (run1 vs run2)");
 }
