@@ -170,6 +170,8 @@ pub mod cusolver;
 #[cfg(all(feature = "cuda", feature = "cusparselt"))]
 pub mod cusparselt;
 pub mod device;
+pub mod diag;
+pub mod distance;
 pub mod error;
 #[cfg(feature = "cuda")]
 pub mod f16;

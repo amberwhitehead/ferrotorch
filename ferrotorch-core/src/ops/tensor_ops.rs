@@ -11,11 +11,11 @@
 //! |---|---|---|
 //! | REQ-1 | SHIPPED | `triu` in `ops/tensor_ops.rs` (CPU + GPU f32/f64 `is_cuda()` branch); GPU kernel `gpu_triu_f32`/`gpu_triu_f64` in `ferrotorch-gpu/src/triangular.rs`; consumer: re-export `ferrotorch_core::triu` in `lib.rs`; GPU consumer: `CudaBackendImpl::triu_f32`/`triu_f64` in `ferrotorch-gpu/src/backend_impl.rs` (crosslink #1545 / sub #1535) |
 //! | REQ-2 | SHIPPED | `tril` in `ops/tensor_ops.rs` (CPU + GPU f32/f64 `is_cuda()` branch); GPU kernel `gpu_tril_f32`/`gpu_tril_f64` in `ferrotorch-gpu/src/triangular.rs`; consumer: re-export in `lib.rs`; GPU consumer: `CudaBackendImpl::tril_f32`/`tril_f64` in `ferrotorch-gpu/src/backend_impl.rs` |
-//! | REQ-3 | SHIPPED | `diag` at `ops/tensor_ops.rs:98`; consumer: re-export at `lib.rs:177` |
-//! | REQ-4 | SHIPPED | `diagflat` at `ops/tensor_ops.rs:155`; consumer: re-export at `lib.rs:177` |
-//! | REQ-5 | SHIPPED | `roll` at `ops/tensor_ops.rs:181`; consumer: re-export at `lib.rs:177`; `RollBackward` autograd |
-//! | REQ-6 | SHIPPED | `cdist` at `ops/tensor_ops.rs:292`; consumer: re-export at `lib.rs:177` |
-//! | REQ-7 | SHIPPED | `roll_cpu_inner` at `ops/tensor_ops.rs:259`; consumer: `grad_fns::shape::RollBackward::backward` at `grad_fns/shape.rs:1006` invokes `ops::tensor_ops::roll_cpu_inner` |
+//! | REQ-3 | SHIPPED | `diag` in `ops/tensor_ops.rs` (CPU + GPU f32/f64 `is_cuda()` branch); GPU kernels `gpu_diag_embed_f32`/`gpu_diag_extract_f32` (+f64) in `ferrotorch-gpu/src/diag.rs`; consumer: re-export `ferrotorch_core::diag` in `lib.rs`; GPU consumer: `CudaBackendImpl::diag_embed_f32`/`diag_extract_f32` (+f64) in `ferrotorch-gpu/src/backend_impl.rs` (crosslink #1545 / sub #1535) |
+//! | REQ-4 | SHIPPED | `diagflat` in `ops/tensor_ops.rs` flattens via device-aware `Tensor::view_reshape` then delegates to `diag` (so CUDA inputs ride the `diag` GPU fast path, GPU-resident); consumer: re-export `ferrotorch_core::diagflat` in `lib.rs` |
+//! | REQ-5 | SHIPPED | `roll` in `ops/tensor_ops.rs`; consumer: re-export `ferrotorch_core::roll` in `lib.rs`; `RollBackward` autograd |
+//! | REQ-6 | SHIPPED | `cdist` in `ops/tensor_ops.rs` (CPU + GPU f32 {1,2,inf,general}/f64 {1,2,inf} `is_cuda()` branch); GPU kernel `gpu_cdist_f32`/`gpu_cdist_f64` in `ferrotorch-gpu/src/distance.rs`; consumer: re-export `ferrotorch_core::cdist` in `lib.rs`; GPU consumer: `CudaBackendImpl::cdist_f32`/`cdist_f64` in `ferrotorch-gpu/src/backend_impl.rs` |
+//! | REQ-7 | SHIPPED | `roll_cpu_inner` in `ops/tensor_ops.rs`; consumer: `grad_fns::shape::RollBackward::backward` in `grad_fns/shape.rs` invokes `ops::tensor_ops::roll_cpu_inner` |
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -218,18 +218,72 @@ pub fn tril<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
 /// 0/1 selection — for a 1-D input the VJP gathers grad's diagonal, for a 2-D
 /// input it scatters grad onto the `diagonal`-th diagonal of a zero matrix).
 pub fn diag<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "diag" });
-    }
-
     // Autograd path: delegate to the differentiable wrapper, which computes
-    // the forward inside `no_grad` (preventing re-entry here) and attaches
-    // `DiagBackward`.
+    // the forward inside `no_grad` (preventing re-entry here, so the `no_grad`
+    // re-entry lands in the GPU/CPU forward branches below with grad disabled)
+    // and attaches `DiagBackward`.
     if is_grad_enabled() && input.requires_grad() {
         return crate::grad_fns::linalg::diag_differentiable(input, diagonal);
     }
 
-    match input.ndim() {
+    // Validate rank first so the CUDA and CPU paths share the 1-D/2-D contract
+    // (mirrors `aten/src/ATen/native/TensorShape.cpp:4612` `ndim == 1 || 2`).
+    let ndim = input.ndim();
+    if ndim != 1 && ndim != 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("diag: expected 1-D or 2-D tensor, got {:?}", input.shape()),
+        });
+    }
+
+    // GPU fast path: f32/f64 resident kernel (crosslink #1545 / sub #1535).
+    // 1-D → `diag_embed` scatter onto the k-th diagonal of a `[size, size]`
+    // matrix (`size = n + |k|`); 2-D → `diag_extract` gather of the k-th
+    // diagonal. Both mirror `torch.diag` (`TensorShape.cpp:4610`); pure
+    // gather/scatter, so the GPU result is bit-identical to the CPU path and
+    // stays GPU-resident — NO host round-trip. Other GPU dtypes keep the
+    // `NotImplementedOnCuda` contract.
+    if input.is_cuda() {
+        if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            let result = if ndim == 1 {
+                let n = input.shape()[0];
+                let size = n + diagonal.unsigned_abs() as usize;
+                let handle = if is_f32::<T>() {
+                    Some(backend.diag_embed_f32(input.gpu_handle()?, n, diagonal)?)
+                } else if is_f64::<T>() {
+                    Some(backend.diag_embed_f64(input.gpu_handle()?, n, diagonal)?)
+                } else {
+                    None
+                };
+                handle.map(|h| (h, vec![size, size]))
+            } else {
+                let rows = input.shape()[0];
+                let cols = input.shape()[1];
+                let (start_r, start_c) = if diagonal >= 0 {
+                    (0usize, diagonal as usize)
+                } else {
+                    ((-diagonal) as usize, 0usize)
+                };
+                let diag_len = rows
+                    .saturating_sub(start_r)
+                    .min(cols.saturating_sub(start_c));
+                let handle = if is_f32::<T>() {
+                    Some(backend.diag_extract_f32(input.gpu_handle()?, rows, cols, diagonal)?)
+                } else if is_f64::<T>() {
+                    Some(backend.diag_extract_f64(input.gpu_handle()?, rows, cols, diagonal)?)
+                } else {
+                    None
+                };
+                handle.map(|h| (h, vec![diag_len]))
+            };
+            if let Some((handle, shape)) = result {
+                let storage = TensorStorage::gpu(handle);
+                return Tensor::from_storage(storage, shape, false);
+            }
+        }
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "diag" });
+    }
+
+    match ndim {
         1 => {
             // 1-D → 2-D diagonal matrix
             let data = input.data()?;
@@ -250,7 +304,7 @@ pub fn diag<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
 
             Tensor::from_storage(TensorStorage::cpu(out), vec![size, size], false)
         }
-        2 => {
+        _ => {
             // 2-D → extract diagonal
             let rows = input.shape()[0];
             let cols = input.shape()[1];
@@ -270,9 +324,6 @@ pub fn diag<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
 
             Tensor::from_storage(TensorStorage::cpu(out), vec![diag_len], false)
         }
-        _ => Err(FerrotorchError::InvalidArgument {
-            message: format!("diag: expected 1-D or 2-D tensor, got {:?}", input.shape()),
-        }),
     }
 }
 
@@ -282,16 +333,16 @@ pub fn diag<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
 ///
 /// Matches PyTorch's `torch.diagflat`.
 pub fn diagflat<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "diagflat" });
-    }
-
+    // Flatten to 1-D, then delegate to `diag` (which carries the GPU f32/f64
+    // resident `diag_embed` fast path). `view_reshape` is device-aware: a
+    // contiguous CUDA tensor stays GPU-resident (shares storage, NO host
+    // round-trip), a non-contiguous one is gathered on-device first. This
+    // mirrors `torch.diagflat` flattening before `diag_embed`
+    // (`aten/src/ATen/native/TensorShape.cpp:1230`).
     let flat = if input.ndim() == 1 {
         input.clone()
     } else {
-        let data = input.data_vec()?;
-        let n = data.len();
-        Tensor::from_storage(TensorStorage::cpu(data), vec![n], false)?
+        input.view_reshape(vec![input.numel()])?
     };
 
     diag(&flat, diagonal)
@@ -419,10 +470,6 @@ pub(crate) fn roll_cpu_inner<T: Float>(
 ///
 /// Matches PyTorch's `torch.cdist`.
 pub fn cdist<T: Float>(x1: &Tensor<T>, x2: &Tensor<T>, p: f64) -> FerrotorchResult<Tensor<T>> {
-    if x1.is_cuda() || x2.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "cdist" });
-    }
-
     let (batched, b, p_dim, r_dim, m) = match (x1.ndim(), x2.ndim()) {
         (2, 2) => {
             let p_dim = x1.shape()[0];
@@ -474,6 +521,59 @@ pub fn cdist<T: Float>(x1: &Tensor<T>, x2: &Tensor<T>, p: f64) -> FerrotorchResu
         }
     };
 
+    let out_shape = if batched {
+        vec![b, p_dim, r_dim]
+    } else {
+        vec![p_dim, r_dim]
+    };
+
+    // GPU fast path: f32/f64 resident kernel (crosslink #1545 / sub #1535).
+    // Both inputs must be CUDA-resident on the same device. Mirrors
+    // `aten/src/ATen/native/cuda/DistanceKernel.cu:195` (`cdist_kernel_cuda_impl`)
+    // + the per-norm accumulate/finish in `dists<scalar_t>::{p,one,two,inf}`
+    // (`:50-86`). Result stays GPU-resident — NO host round-trip. The f32
+    // kernel covers `p in {1, 2, inf}` and general `p`; the f64 kernel covers
+    // `p in {1, 2, inf}`. Unsupported (op, dtype, p) combinations (e.g. the
+    // `p == 0` count-norm) surface as `NotImplementedOnCuda` rather than a
+    // silent host fallback, matching the rest of `tensor_ops`'s GPU contract.
+    if x1.is_cuda() || x2.is_cuda() {
+        if !x1.is_cuda() || !x2.is_cuda() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "cdist: x1 and x2 must be on the same device".into(),
+            });
+        }
+        if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            let handle = if is_f32::<T>() && crate::gpu_dispatch::cdist_supported_f32(p) {
+                Some(backend.cdist_f32(
+                    x1.gpu_handle()?,
+                    x2.gpu_handle()?,
+                    b,
+                    p_dim,
+                    r_dim,
+                    m,
+                    p,
+                )?)
+            } else if is_f64::<T>() && crate::gpu_dispatch::cdist_supported_f64(p) {
+                Some(backend.cdist_f64(
+                    x1.gpu_handle()?,
+                    x2.gpu_handle()?,
+                    b,
+                    p_dim,
+                    r_dim,
+                    m,
+                    p,
+                )?)
+            } else {
+                None
+            };
+            if let Some(handle) = handle {
+                let storage = TensorStorage::gpu(handle);
+                return Tensor::from_storage(storage, out_shape, false);
+            }
+        }
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "cdist" });
+    }
+
     let d1 = x1.data()?;
     let d2 = x2.data()?;
     let p_val = T::from(p).unwrap();
@@ -499,12 +599,6 @@ pub fn cdist<T: Float>(x1: &Tensor<T>, x2: &Tensor<T>, p: f64) -> FerrotorchResu
             }
         }
     }
-
-    let out_shape = if batched {
-        vec![b, p_dim, r_dim]
-    } else {
-        vec![p_dim, r_dim]
-    };
 
     Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)
 }

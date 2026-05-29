@@ -3995,6 +3995,113 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
+    // -- Diagonal: diag_embed / diag_extract (#1545 / sub #1535) -------------
+    //
+    // Gated `#[cfg(feature = "cuda")]` (the `diag` module is cuda-only,
+    // mirroring `triangular`); when the feature is off, the trait default
+    // `NotImplementedOnCuda` is used instead. Non-test consumer: the
+    // `is_cuda()` branch of `diag`/`diagflat` in `ops::tensor_ops`.
+
+    #[cfg(feature = "cuda")]
+    fn diag_embed_f32(
+        &self,
+        a: &GpuBufferHandle,
+        n: usize,
+        k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::diag::gpu_diag_embed_f32(a_buf, n, k, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn diag_embed_f64(
+        &self,
+        a: &GpuBufferHandle,
+        n: usize,
+        k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::diag::gpu_diag_embed_f64(a_buf, n, k, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn diag_extract_f32(
+        &self,
+        a: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+        k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::diag::gpu_diag_extract_f32(a_buf, rows, cols, k, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn diag_extract_f64(
+        &self,
+        a: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+        k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::diag::gpu_diag_extract_f64(a_buf, rows, cols, k, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    // -- Pairwise distance: cdist (#1545 / sub #1535) ------------------------
+
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    fn cdist_f32(
+        &self,
+        x1: &GpuBufferHandle,
+        x2: &GpuBufferHandle,
+        b: usize,
+        p_dim: usize,
+        r_dim: usize,
+        m: usize,
+        p: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let x1_buf = Self::unwrap_buffer(x1)?;
+        let x2_buf = Self::unwrap_buffer(x2)?;
+        let dev = self.device(x1.device_ordinal())?;
+        let result = crate::distance::gpu_cdist_f32(x1_buf, x2_buf, b, p_dim, r_dim, m, p, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, x1.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    fn cdist_f64(
+        &self,
+        x1: &GpuBufferHandle,
+        x2: &GpuBufferHandle,
+        b: usize,
+        p_dim: usize,
+        r_dim: usize,
+        m: usize,
+        p: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let x1_buf = Self::unwrap_buffer_f64(x1)?;
+        let x2_buf = Self::unwrap_buffer_f64(x2)?;
+        let dev = self.device(x1.device_ordinal())?;
+        let result = crate::distance::gpu_cdist_f64(x1_buf, x2_buf, b, p_dim, r_dim, m, p, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, x1.device_ordinal()))
+    }
+
     // -- Orthogonal-polynomial special functions (#1545 / #1533) -------------
 
     fn chebyshev_poly_f32(

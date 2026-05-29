@@ -230,6 +230,44 @@ impl std::fmt::Debug for GpuBufferHandle {
     }
 }
 
+/// True when the f32 GPU `cdist` kernel covers the norm exponent `p`.
+///
+/// The on-device f32 kernel ([`GpuBackend::cdist_f32`]) handles `p == 1`,
+/// `p == 2`, `p == inf`, and general finite `p > 0` (via an on-device `pow`).
+/// The only excluded case is the `p == 0` count-of-nonzeros norm, which is
+/// delegated to the CPU path. Mirrors the upstream dispatch in
+/// `aten/src/ATen/native/cuda/DistanceKernel.cu:230-240` (which special-cases
+/// `0`, `1`, `2`, `inf` and falls through to the general kernel otherwise).
+#[must_use]
+// reason: `p` is a discrete norm selector, not a measured value; PyTorch
+// itself special-cases the norm with exact `p == 0.0` / `1.0` / `2.0`
+// comparisons at `aten/src/ATen/native/cuda/DistanceKernel.cu:232-238`, so
+// the exact compare is the correct upstream-mirroring behaviour here.
+#[allow(
+    clippy::float_cmp,
+    reason = "discrete norm selector, mirrors upstream exact p compares"
+)]
+pub(crate) fn cdist_supported_f32(p: f64) -> bool {
+    p != 0.0
+}
+
+/// True when the f64 GPU `cdist` kernel covers the norm exponent `p`.
+///
+/// The on-device f64 kernel ([`GpuBackend::cdist_f64`]) covers `p == 1`,
+/// `p == 2`, and `p == inf`; the `p == 0` count-norm and general finite `p`
+/// (which would need an accurate f64 `pow` the base PTX ISA does not provide)
+/// fall back to the CPU path.
+#[must_use]
+// reason: see `cdist_supported_f32` — `p` is a discrete norm selector and the
+// exact compare mirrors the upstream norm dispatch.
+#[allow(
+    clippy::float_cmp,
+    reason = "discrete norm selector, mirrors upstream exact p compares"
+)]
+pub(crate) fn cdist_supported_f64(p: f64) -> bool {
+    p == 1.0 || p == 2.0 || p.is_infinite()
+}
+
 /// Trait that GPU backends implement to handle tensor operations.
 ///
 /// ferrotorch-core calls these methods; ferrotorch-gpu provides the implementation.
@@ -1922,6 +1960,118 @@ pub trait GpuBackend: Send + Sync {
         _k: i64,
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda { op: "tril_f64" })
+    }
+
+    // -- Diagonal: diag_embed / diag_extract (#1545 / sub #1535) -------------
+    //
+    // `torch.diag` is `diag_embed` (1-D -> 2-D scatter onto the k-th diagonal)
+    // for a 1-D input and `diagonal_copy` (2-D -> 1-D gather of the k-th
+    // diagonal) for a 2-D input, mirroring
+    // `aten/src/ATen/native/TensorShape.cpp:4610`. Both are pure gather/scatter
+    // (no arithmetic), so the GPU result is bit-for-bit identical to the
+    // ferrotorch CPU `diag`. `k` is the signed diagonal offset. The result
+    // stays GPU-resident (no host round-trip). Default bodies return
+    // `NotImplementedOnCuda` so non-CUDA backends compile unchanged; the CUDA
+    // backend overrides all four. Non-test consumer: the `input.is_cuda()`
+    // branch of `diag`/`diagflat` in `ferrotorch-core/src/ops/tensor_ops.rs`.
+
+    /// `diag` of a 1-D f32 buffer: scatter `n` elements onto the `k`-th
+    /// diagonal of a `[size, size]` matrix (`size = n + |k|`). Returns the
+    /// resident `size*size`-element output.
+    fn diag_embed_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _n: usize,
+        _k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "diag_embed_f32",
+        })
+    }
+
+    /// `diag` of a 1-D f64 buffer. See [`Self::diag_embed_f32`].
+    fn diag_embed_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _n: usize,
+        _k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "diag_embed_f64",
+        })
+    }
+
+    /// `diag` of a 2-D f32 `[rows, cols]` buffer: gather the `k`-th diagonal
+    /// into a 1-D vector of `min(rows-start_r, cols-start_c)` elements.
+    fn diag_extract_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+        _k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "diag_extract_f32",
+        })
+    }
+
+    /// `diag` of a 2-D f64 `[rows, cols]` buffer. See [`Self::diag_extract_f32`].
+    fn diag_extract_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+        _k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "diag_extract_f64",
+        })
+    }
+
+    // -- Pairwise distance: cdist (#1545 / sub #1535) ------------------------
+    //
+    // `torch.cdist(x1, x2, p)` is the batched Lp pairwise distance matrix:
+    // `x1` is `[b, p_dim, m]`, `x2` is `[b, r_dim, m]`, the result is
+    // `[b, p_dim, r_dim]`, `out[b,i,j] = (sum_k |x1[b,i,k]-x2[b,j,k]|^p)^(1/p)`.
+    // Mirrors `aten/src/ATen/native/cuda/DistanceKernel.cu:195`
+    // (`cdist_kernel_cuda_impl`) and the per-norm `dists<scalar_t>::{p,one,
+    // two,inf}` accumulate/finish at `:50-86`. The result stays GPU-resident.
+    // The CUDA backend covers `p in {1, 2, inf}` and general `p` for f32; the
+    // `p == 0` count-norm (and general-p f64) fall back to the CPU path. Non-
+    // test consumer: the `is_cuda()` branch of `cdist` in
+    // `ferrotorch-core/src/ops/tensor_ops.rs`.
+
+    /// Batched f32 `cdist`. `x1`/`x2` are `[b, p_dim, m]` / `[b, r_dim, m]`
+    /// flattened; result is `[b, p_dim, r_dim]` flattened. Returns the
+    /// resident `b * p_dim * r_dim`-element output.
+    #[allow(clippy::too_many_arguments)]
+    fn cdist_f32(
+        &self,
+        _x1: &GpuBufferHandle,
+        _x2: &GpuBufferHandle,
+        _b: usize,
+        _p_dim: usize,
+        _r_dim: usize,
+        _m: usize,
+        _p: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cdist_f32" })
+    }
+
+    /// Batched f64 `cdist`. The f64 GPU kernel covers `p in {1, 2, inf}`;
+    /// see [`Self::cdist_f32`] and [`cdist_supported_f64`].
+    #[allow(clippy::too_many_arguments)]
+    fn cdist_f64(
+        &self,
+        _x1: &GpuBufferHandle,
+        _x2: &GpuBufferHandle,
+        _b: usize,
+        _p_dim: usize,
+        _r_dim: usize,
+        _m: usize,
+        _p: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cdist_f64" })
     }
 
     // -- Orthogonal-polynomial special functions (#1545 / #1533) -------------

@@ -2442,6 +2442,26 @@ parity_ops = []
 
 
 [[route]]
+crate_pattern = "ferrotorch-gpu/src/diag.rs"
+upstream = [
+  "/home/doll/pytorch/aten/src/ATen/native/TensorShape.cpp",
+  "/home/doll/pytorch/aten/src/ATen/native/cuda/TriangularOps.cu",
+]
+design = ".design/ferrotorch-gpu/diag.md"
+parity_ops = []
+
+
+[[route]]
+crate_pattern = "ferrotorch-gpu/src/distance.rs"
+upstream = [
+  "/home/doll/pytorch/aten/src/ATen/native/cuda/DistanceKernel.cu",
+  "/home/doll/pytorch/aten/src/ATen/native/Distance.cpp",
+]
+design = ".design/ferrotorch-gpu/distance.md"
+parity_ops = []
+
+
+[[route]]
 crate_pattern = "ferrotorch-gpu/src/special.rs"
 upstream = [
   "/home/doll/pytorch/aten/src/ATen/native/Math.h",

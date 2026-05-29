@@ -276,10 +276,10 @@ and `meta_propagate.rs`.
   `TensorShape.cpp` — the route's `upstream` list is incomplete for
   this op. ferrotorch's forward `pub fn roll` lives in
   `roll in ferrotorch-core/src/ops/tensor_ops.rs`; backward
-  `RollBackward` is in THIS file at `shape.rs:925`, consumed at
-  `tensor_ops.rs:223` and `tensor_ops.rs:241` (CUDA and CPU forward
-  arms both attach the backward fn from this module). Backward
-  applies the inverse shift `-shifts` mod `size(dim)`.
+  `RollBackward` is in THIS file at `RollBackward in shape.rs`, consumed
+  by the CUDA and CPU forward arms of `roll in tensor_ops.rs` (both
+  attach the backward fn from this module). Backward applies the inverse
+  shift `-shifts` mod `size(dim)`.
 
 - REQ-33: `rot90(input, k, dims)` — `torch.rot90`. Per
   `TensorTransformations.cpp:134 Tensor rot90(const Tensor& self,
