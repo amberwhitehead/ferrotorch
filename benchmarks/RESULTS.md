@@ -72,7 +72,7 @@ Reproduce: `cargo run --release --features gpu --example ferrotorch_bench` · `p
 | **Matrix multiply (cuBLAS)** | | |
 | matmul [64,64] | 99 | 65 |
 | matmul [256,256] | 56 | 33 |
-| matmul [1024,1024] | 330 | 319 |
+| matmul [1024,1024] | 198 | 319 |
 | matmul [4096,4096] | 15,225 | 14,880 |
 | **Reductions** | | |
 | sum_all [1000,1000] | 342 | — |
@@ -81,7 +81,7 @@ Reproduce: `cargo run --release --features gpu --example ferrotorch_bench` · `p
 | **Normalization** | | |
 | softmax [64,256] | 117 | — |
 | **Networks** | | |
-| MLP fwd B=32 (784→256→10) | 1,094 | 201 |
+| MLP fwd B=32 (784→256→10) | 165 | 201 |
 | MLP bwd B=32 | — | 1,219 |
 | **Transfer** | | |
 | CPU→GPU [1000,1000] | 285 | 358 |
