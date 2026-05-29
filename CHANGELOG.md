@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Translate missing torch.special ops: entr/ndtr/ndtri/i0-family/zeta/airy/bessel-k (CPU+GPU) (#1651)
 - Translate ferrotorch-tokenize crate (1 file) (#1364)
 - Translate ferrotorch-distributed backend impls (12 files: gloo/mpi/nccl/ucc/gpu) (#1367)
 - Translate ferrotorch-distributed high-level (6 files: ddp/fsdp/pipeline/rpc/checkpoint/sync_bn) (#1368)
@@ -46,6 +47,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- Divergence: ferrotorch_core::special::zeta broadcast/mixed-device CUDA leaks GpuTensorNotAccessible instead of staying on-device (torch) or NotImplementedOnCuda (#1654)
 - Wire parity-sweep runner arms for torch.special transcendentals (entr/ndtr/ndtri + i0-family + zeta/airy/bessel-k as they land under #1651) (#1653)
 - ConvTranspose3d dilated forward divergence: output_padding+dilation drops contributions (conv_transpose3d sample 4/5) (#1619)
 - Pre-existing repo-wide cite-drift: 3100+ line-number cites in .design/**/*.md fail divergence_cite_drift_generic (autocast.md, anomaly.md, fixed_point.md, graph.md, display.md, int_tensor.md, nested.md, ferrotorch-gpu/sparse.md, cusparselt.md, pruning.md, gpu_dispatch.md, ...). Predates #1463 (3135 stale cites unrelated to sparse confirmed at session start). S3/R-CITE-2b requires symbol anchors, not line numbers. Not fixed in #1463 build (out of manifest); the #1463 build cleaned its OWN two docs (ferrotorch-core/sparse.md + ferrotorch-optim/sparse_adam.md now 0 stale cites). Needs a dedicated cite-drift fixer sweep. (#1592)
