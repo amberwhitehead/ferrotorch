@@ -56,7 +56,6 @@ fn cpu_f64(data: &[f64]) -> Tensor<f64> {
 /// Live torch 2.11: searchsorted([1,3,5,7], [NaN,2], right=False) == [4, 1].
 /// Tracking: #1645
 #[test]
-#[ignore = "divergence: GPU searchsorted NaN value lands at 0, torch lands at len; tracking #1645"]
 fn divergence_searchsorted_f32_nan_value_left() {
     ensure_cuda();
     let bounds = cpu_f32(&[1.0, 3.0, 5.0, 7.0]).to(Device::Cuda(0)).unwrap();
@@ -72,7 +71,6 @@ fn divergence_searchsorted_f32_nan_value_left() {
 /// resolves to index 4 (== len). ferrotorch GPU kernel returns 0 for the NaN.
 /// Tracking: #1645
 #[test]
-#[ignore = "divergence: GPU searchsorted NaN value lands at 0, torch lands at len; tracking #1645"]
 fn divergence_searchsorted_f32_nan_value_right() {
     ensure_cuda();
     let bounds = cpu_f32(&[1.0, 3.0, 5.0, 7.0]).to(Device::Cuda(0)).unwrap();
@@ -87,7 +85,6 @@ fn divergence_searchsorted_f32_nan_value_right() {
 /// (`setp.lt.f64`/`setp.le.f64`) carrying the same NaN miscompute.
 /// Tracking: #1645
 #[test]
-#[ignore = "divergence: GPU searchsorted NaN value lands at 0, torch lands at len; tracking #1645"]
 fn divergence_searchsorted_f64_nan_value_both_sides() {
     ensure_cuda();
     let bounds = cpu_f64(&[1.0, 3.0, 5.0, 7.0]).to(Device::Cuda(0)).unwrap();

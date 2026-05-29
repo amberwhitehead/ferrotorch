@@ -110,7 +110,7 @@ const SEARCHSORTED_F32_PTX: &str = "\
     .reg .f32 %v, %bv;
     .reg .s64 %res;
     .reg .pred %p_oob, %p_loop, %p_is_right, %p_not_right, %p_adv;
-    .reg .pred %p_lt, %p_le, %p_a, %p_b;
+    .reg .pred %p_ge, %p_gt, %p_nge, %p_ngt, %p_a, %p_b;
 
     ld.param.u64 %vals_p, [vals_ptr];
     ld.param.u64 %bnd_p,  [bounds_ptr];
@@ -154,14 +154,21 @@ LOOP:
     add.u64 %addr, %bnd_p, %off;
     ld.global.f32 %bv, [%addr];
 
-    // advance predicate (no `selp.pred`; build it with predicate logic):
-    //   left : bv <  v   (lower_bound advances while !(bv >= v))
-    //   right: bv <= v   (upper_bound advances while !(bv >  v))
-    //   p_adv = (right & (bv <= v)) | (!right & (bv < v))
-    setp.lt.f32 %p_lt, %bv, %v;
-    setp.le.f32 %p_le, %bv, %v;
-    and.pred %p_a, %p_is_right, %p_le;
-    and.pred %p_b, %p_not_right, %p_lt;
+    // advance predicate (no `selp.pred`; build it with predicate logic),
+    // mirroring upstream aten/src/ATen/native/cuda/Bucketization.cu:33,51:
+    //   left  (lower_bound): advance while `!(bv >= v)`  (Bucketization.cu:33)
+    //   right (upper_bound): advance while `!(bv >  v)`  (Bucketization.cu:51)
+    //   p_adv = (right & !(bv > v)) | (!right & !(bv >= v))
+    // `setp.ge`/`setp.gt` are ORDERED (false for NaN), so the negation is TRUE
+    // for a NaN value -> always advance -> lo = len, matching torch. For finite
+    // operands `!(bv >= v) == (bv < v)` and `!(bv > v) == (bv <= v)`, so the
+    // finite tie/dup/oob cases are byte-identical to the prior setp.lt/le form.
+    setp.ge.f32 %p_ge, %bv, %v;        // p_ge = (bv >= v), ordered (false for NaN)
+    setp.gt.f32 %p_gt, %bv, %v;        // p_gt = (bv >  v), ordered (false for NaN)
+    not.pred %p_nge, %p_ge;            // p_nge = !(bv >= v)  (true for NaN)
+    not.pred %p_ngt, %p_gt;            // p_ngt = !(bv >  v)  (true for NaN)
+    and.pred %p_a, %p_is_right, %p_ngt;
+    and.pred %p_b, %p_not_right, %p_nge;
     or.pred %p_adv, %p_a, %p_b;
 
     // if advance: lo = mid + 1 ; else: hi = mid
@@ -204,7 +211,7 @@ const SEARCHSORTED_F64_PTX: &str = "\
     .reg .f64 %v, %bv;
     .reg .s64 %res;
     .reg .pred %p_oob, %p_loop, %p_is_right, %p_not_right, %p_adv;
-    .reg .pred %p_lt, %p_le, %p_a, %p_b;
+    .reg .pred %p_ge, %p_gt, %p_nge, %p_ngt, %p_a, %p_b;
 
     ld.param.u64 %vals_p, [vals_ptr];
     ld.param.u64 %bnd_p,  [bounds_ptr];
@@ -245,10 +252,17 @@ LOOP:
     add.u64 %addr, %bnd_p, %off;
     ld.global.f64 %bv, [%addr];
 
-    setp.lt.f64 %p_lt, %bv, %v;
-    setp.le.f64 %p_le, %bv, %v;
-    and.pred %p_a, %p_is_right, %p_le;
-    and.pred %p_b, %p_not_right, %p_lt;
+    // advance predicate mirroring aten/src/ATen/native/cuda/Bucketization.cu:33,51:
+    //   left  (lower_bound): advance while `!(bv >= v)`  (Bucketization.cu:33)
+    //   right (upper_bound): advance while `!(bv >  v)`  (Bucketization.cu:51)
+    // `setp.ge`/`setp.gt` are ORDERED (false for NaN) -> negation TRUE for NaN ->
+    // always advance -> lo = len, matching torch. Finite operands unchanged.
+    setp.ge.f64 %p_ge, %bv, %v;        // p_ge = (bv >= v), ordered (false for NaN)
+    setp.gt.f64 %p_gt, %bv, %v;        // p_gt = (bv >  v), ordered (false for NaN)
+    not.pred %p_nge, %p_ge;            // p_nge = !(bv >= v)  (true for NaN)
+    not.pred %p_ngt, %p_gt;            // p_ngt = !(bv >  v)  (true for NaN)
+    and.pred %p_a, %p_is_right, %p_ngt;
+    and.pred %p_b, %p_not_right, %p_nge;
     or.pred %p_adv, %p_a, %p_b;
 
     add.u32 %mid1, %mid, 1;

@@ -87,15 +87,36 @@ pub fn searchsorted<T: Float>(
     let bounds = boundaries.data()?;
     let vals = values.data_vec()?;
 
+    // The negated comparison operators below are the intended NaN-handling
+    // form copied byte-for-byte from upstream Bucketization.cu:33,51
+    // (`!(mid_val >= val)` / `!(mid_val > val)`); they are NOT equivalent to
+    // `<` / `<=` when `val` is NaN (NaN must advance to `len`, not stop at 0).
+    #[allow(
+        clippy::neg_cmp_op_on_partial_ord,
+        reason = "matches pytorch Bucketization.cu:33,51 NaN advance semantics; \
+                  `!(b >= v)` differs from `b < v` for NaN val (advances to len)"
+    )]
     let result: Vec<usize> = vals
         .iter()
         .map(|v| {
             if right {
-                // Find first index where bounds[i] > v (upper_bound).
-                bounds.partition_point(|b| *b <= *v)
+                // upper_bound: advance while `!(mid_val > val)`, mirroring
+                // pytorch aten/src/ATen/native/cuda/Bucketization.cu:51
+                // (`if (!(mid_val > val)) start = mid + 1;`). For a NaN `v`,
+                // `b > NaN` is false so `!(b > NaN)` is true on every step ->
+                // advance to `len`, matching torch (NaN -> len). The negated
+                // form is REQUIRED: `*b <= *v` is false for NaN and would stop
+                // at 0. Finite operands are unchanged: `!(b > v) == (b <= v)`.
+                bounds.partition_point(|b| !(*b > *v))
             } else {
-                // Find first index where bounds[i] >= v (lower_bound).
-                bounds.partition_point(|b| *b < *v)
+                // lower_bound: advance while `!(mid_val >= val)`, mirroring
+                // pytorch aten/src/ATen/native/cuda/Bucketization.cu:33
+                // (`if (!(mid_val >= val)) start = mid + 1;`). For a NaN `v`,
+                // `b >= NaN` is false so `!(b >= NaN)` is true on every step ->
+                // advance to `len`, matching torch (NaN -> len). The negated
+                // form is REQUIRED: `*b < *v` is false for NaN and would stop
+                // at 0. Finite operands are unchanged: `!(b >= v) == (b < v)`.
+                bounds.partition_point(|b| !(*b >= *v))
             }
         })
         .collect();
