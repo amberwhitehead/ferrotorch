@@ -62,6 +62,10 @@ fn topk32(row: &[f32], k: usize, largest: bool) -> (Vec<f32>, Vec<i64>) {
 
 /// largest=True: NaN OUTRANKS +inf. torch: [NaN,NaN,inf,5].
 #[test]
+#[allow(
+    clippy::needless_range_loop,
+    reason = "oracle slot/index comparison reads clearer than an iterator here"
+)]
 fn divergence_topk_f32_nan_outranks_pos_inf() {
     if ensure_cuda().is_none() {
         return;
@@ -108,6 +112,10 @@ fn divergence_topk_f32_largest_full_order_with_inf() {
 
 /// largest=False: -inf first, NaN never selected until finite/inf exhausted.
 #[test]
+#[allow(
+    clippy::needless_range_loop,
+    reason = "oracle slot/index comparison reads clearer than an iterator here"
+)]
 fn divergence_topk_f32_smallest_neg_inf_first_nan_last() {
     if ensure_cuda().is_none() {
         return;
@@ -217,7 +225,10 @@ fn divergence_topk_f64_nan_outranks_pos_inf() {
     let (vals, idx) = gpu_topk_f64(g.inner(), 1, 6, 4, true, &device).expect("topk");
     let v = device.stream().clone_dtoh(&vals).expect("readback");
     let i = device.stream().clone_dtoh(&idx).expect("readback idx");
-    assert!(v[0].is_nan() && v[1].is_nan(), "f64 NaN outranks +inf: {v:?}");
+    assert!(
+        v[0].is_nan() && v[1].is_nan(),
+        "f64 NaN outranks +inf: {v:?}"
+    );
     for slot in 0..2 {
         assert!(row[i[slot] as usize].is_nan(), "NaN-slot indexes a NaN");
     }

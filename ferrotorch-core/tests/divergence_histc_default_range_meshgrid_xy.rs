@@ -63,7 +63,8 @@ fn divergence_histc_default_minmax_infers_data_range() {
     let input = cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0]);
     // torch.histc(tensor([1,2,3,4,5]), bins=4) == torch.histc(..., min=0, max=0)
     // -> range inferred [1,5], bins -> [1,1,1,2].
-    let out = histc(&input, 4, 0.0, 0.0).expect("histc with default min=max=0 must succeed (torch infers data range)");
+    let out = histc(&input, 4, 0.0, 0.0)
+        .expect("histc with default min=max=0 must succeed (torch infers data range)");
     assert_eq!(data_f32(&out), vec![1.0, 1.0, 1.0, 2.0]);
 }
 
@@ -78,7 +79,8 @@ fn divergence_histc_default_minmax_infers_data_range() {
 fn divergence_histc_default_minmax_all_equal_widens_range() {
     let input = cpu_f32(&[3.0, 3.0, 3.0]);
     // torch.histc(tensor([3,3,3]), bins=4) -> range [2,4] -> [0,0,3,0].
-    let out = histc(&input, 4, 0.0, 0.0).expect("histc all-equal default range must succeed (torch widens to [v-1,v+1])");
+    let out = histc(&input, 4, 0.0, 0.0)
+        .expect("histc all-equal default range must succeed (torch widens to [v-1,v+1])");
     assert_eq!(data_f32(&out), vec![0.0, 0.0, 3.0, 0.0]);
 }
 

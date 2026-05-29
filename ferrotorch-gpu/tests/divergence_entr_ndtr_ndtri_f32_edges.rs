@@ -12,7 +12,9 @@
 
 #![cfg(feature = "cuda")]
 
-use ferrotorch_gpu::{GpuDevice, cpu_to_gpu, gpu_entr_f32, gpu_ndtr_f32, gpu_ndtri_f32, gpu_to_cpu};
+use ferrotorch_gpu::{
+    GpuDevice, cpu_to_gpu, gpu_entr_f32, gpu_ndtr_f32, gpu_ndtri_f32, gpu_to_cpu,
+};
 
 fn dev() -> Option<GpuDevice> {
     GpuDevice::new(0).ok()
@@ -49,6 +51,10 @@ fn entr_near_one_on_device_matches_torch() {
 
 /// ndtr at large |x|: torch.special.ndtr f32 oracle.
 #[test]
+#[allow(
+    clippy::excessive_precision,
+    reason = "live torch.special f32 oracle literals; rounds to f32 at compile time"
+)]
 fn ndtr_large_x_on_device_matches_torch() {
     let Some(device) = dev() else { return };
     let xs: [f32; 6] = [-4.0, -3.0, 3.0, 4.0, 6.0, 10.0];
