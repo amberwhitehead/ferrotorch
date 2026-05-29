@@ -50,7 +50,7 @@ Reproduce: `cargo run --release --features gpu --example ferrotorch_bench` · `p
 | MLP bwd B=128 | 3,670 | 1,555 | — |
 | training step B=128 | 6,418 | 1,972 | — |
 | Conv2d fwd [32,3,32,32]→[32,16,30,30] | 1,244 | 102 | — |
-| GRU/LSTM fwd (128→256, seq=32, B=16) | 27,839 | 2,381 | — |
+| GRU/LSTM fwd (128→256, seq=32, B=16) | 9,212 | 2,381 | — |
 
 ## GPU (synchronized)
 
