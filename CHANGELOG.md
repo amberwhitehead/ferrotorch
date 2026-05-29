@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Umbrella: ferrotorch-core CPU-only paths needing GPU implementations (special / masked / fft / ops/* families) (#1545)
 - Translate missing torch.special ops: entr/ndtr/ndtri/i0-family/zeta/airy/bessel-k (CPU+GPU) (#1651)
 - Translate ferrotorch-tokenize crate (1 file) (#1364)
 - Translate ferrotorch-distributed backend impls (12 files: gloo/mpi/nccl/ucc/gpu) (#1367)
@@ -47,6 +48,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- Divergence: ferrotorch-core::unique CPU all-NaN miscount — extra spurious entry (count 0) for inputs whose sorted-first element is NaN (#1666)
+- Divergence: ferrotorch_core::ops::search::unique (CPU path) mishandles NaN vs pytorch aten/.../Unique.cpp (#1665)
 - Divergence: ferrotorch_core::grad_fns::indexing::masked_scatter rejects a broadcast CUDA mask (broadcast_bool_tensor NotImplementedOnCuda); torch broadcasts on-device (#1663)
 - Divergence: masked_scatter forward rejects a GPU-resident mask (GpuTensorNotAccessible) — torch accepts it (#1662)
 - masked_invalid/masked_equal GPU predicate decodes full mask-buffer byte length instead of numel (#1659)
