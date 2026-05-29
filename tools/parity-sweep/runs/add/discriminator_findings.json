@@ -1,0 +1,650 @@
+[
+  {
+    "args_spec": [
+      {
+        "data": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ],
+        "dtype": "float32",
+        "fill": null,
+        "kind": "tensor",
+        "shape": [
+          2,
+          3
+        ],
+        "transform": "transpose",
+        "transform_args": {
+          "dim0": 0,
+          "dim1": 1
+        }
+      },
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 10.0,
+        "kind": "tensor",
+        "shape": [
+          3,
+          2
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "noncontig_stride",
+    "divergence": "ferrotorch raised: add_scaled: invalid argument: tensor is not contiguous; call .contiguous() or use .data_vec()",
+    "ferrotorch_output": {
+      "ERROR": "add_scaled: invalid argument: tensor is not contiguous; call .contiguous() or use .data_vec()"
+    },
+    "id": "transpose_2d",
+    "kwargs": {},
+    "rationale": "transpose(0,1) of [2,3] -> non-contiguous [3,2]",
+    "torch_output": {
+      "__tensor__": {
+        "data_b64": "AAAwQQAAYEEAAEBBAABwQQAAUEEAAIBB",
+        "dtype": "float32",
+        "shape": [
+          3,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 1.0,
+        "kind": "tensor",
+        "shape": [
+          3,
+          4
+        ],
+        "transform": "transpose",
+        "transform_args": {
+          "dim0": 0,
+          "dim1": 1
+        }
+      },
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 2.0,
+        "kind": "tensor",
+        "shape": [
+          3,
+          4
+        ],
+        "transform": "transpose",
+        "transform_args": {
+          "dim0": 0,
+          "dim1": 1
+        }
+      }
+    ],
+    "category": "noncontig_stride",
+    "divergence": "ferrotorch raised: add_scaled: invalid argument: tensor is not contiguous; call .contiguous() or use .data_vec()",
+    "ferrotorch_output": {
+      "ERROR": "add_scaled: invalid argument: tensor is not contiguous; call .contiguous() or use .data_vec()"
+    },
+    "id": "transpose_both",
+    "kwargs": {},
+    "rationale": "both transposed — torch should still produce the contig logical view",
+    "torch_output": {
+      "__tensor__": {
+        "data_b64": "AABAQAAAQEAAAEBAAABAQAAAQEAAAEBAAABAQAAAQEAAAEBAAABAQAAAQEAAAEBA",
+        "dtype": "float32",
+        "shape": [
+          4,
+          3
+        ]
+      }
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 1.0,
+        "kind": "tensor",
+        "shape": [
+          2,
+          3,
+          4
+        ],
+        "transform": "transpose",
+        "transform_args": {
+          "dim0": 1,
+          "dim1": 2
+        }
+      },
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 0.5,
+        "kind": "tensor",
+        "shape": [
+          2,
+          4,
+          3
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "noncontig_stride",
+    "divergence": "ferrotorch raised: add_scaled: invalid argument: tensor is not contiguous; call .contiguous() or use .data_vec()",
+    "ferrotorch_output": {
+      "ERROR": "add_scaled: invalid argument: tensor is not contiguous; call .contiguous() or use .data_vec()"
+    },
+    "id": "transpose_3d",
+    "kwargs": {},
+    "rationale": "3d transpose(1,2)",
+    "torch_output": {
+      "__tensor__": {
+        "data_b64": "AADAPwAAwD8AAMA/AADAPwAAwD8AAMA/AADAPwAAwD8AAMA/AADAPwAAwD8AAMA/AADAPwAAwD8AAMA/AADAPwAAwD8AAMA/AADAPwAAwD8AAMA/AADAPwAAwD8AAMA/",
+        "dtype": "float32",
+        "shape": [
+          2,
+          4,
+          3
+        ]
+      }
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": [
+          1,
+          2,
+          3,
+          4
+        ],
+        "dtype": "float32",
+        "fill": null,
+        "kind": "tensor",
+        "shape": [
+          2,
+          2
+        ],
+        "transform": "transpose",
+        "transform_args": {
+          "dim0": 0,
+          "dim1": 1
+        }
+      },
+      {
+        "data": [
+          10,
+          20,
+          30,
+          40
+        ],
+        "dtype": "float32",
+        "fill": null,
+        "kind": "tensor",
+        "shape": [
+          2,
+          2
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "noncontig_stride",
+    "divergence": "ferrotorch raised: add_scaled: invalid argument: tensor is not contiguous; call .contiguous() or use .data_vec()",
+    "ferrotorch_output": {
+      "ERROR": "add_scaled: invalid argument: tensor is not contiguous; call .contiguous() or use .data_vec()"
+    },
+    "id": "transpose_with_alpha",
+    "kwargs": {
+      "alpha": 3.0
+    },
+    "rationale": "transpose + alpha=3 — combines two adversarial axes",
+    "torch_output": {
+      "__tensor__": {
+        "data_b64": "AAD4QQAAfEIAALhCAAD4Qg==",
+        "dtype": "float32",
+        "shape": [
+          2,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": [
+          "NaN",
+          1.0,
+          2.0,
+          3.0
+        ],
+        "dtype": "float32",
+        "fill": null,
+        "kind": "tensor",
+        "shape": [
+          2,
+          2
+        ],
+        "transform": "transpose",
+        "transform_args": {
+          "dim0": 0,
+          "dim1": 1
+        }
+      },
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 0.0,
+        "kind": "tensor",
+        "shape": [
+          2,
+          2
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "noncontig_stride",
+    "divergence": "ferrotorch raised: add_scaled: invalid argument: tensor is not contiguous; call .contiguous() or use .data_vec()",
+    "ferrotorch_output": {
+      "ERROR": "add_scaled: invalid argument: tensor is not contiguous; call .contiguous() or use .data_vec()"
+    },
+    "id": "transpose_with_nan",
+    "kwargs": {},
+    "rationale": "non-contig view containing NaN",
+    "torch_output": {
+      "__tensor__": {
+        "data_b64": "AADAfwAAAEAAAIA/AABAQA==",
+        "dtype": "float32",
+        "shape": [
+          2,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 1.0,
+        "kind": "tensor",
+        "shape": [
+          4
+        ],
+        "transform": "none",
+        "transform_args": {}
+      },
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 2.0,
+        "kind": "tensor",
+        "shape": [
+          4
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "inplace",
+    "divergence": "ferrotorch raised: ferrotorch add_ has no alpha kwarg (got alpha=3); cannot mirror torch add_",
+    "ferrotorch_output": {
+      "ERROR": "ferrotorch add_ has no alpha kwarg (got alpha=3); cannot mirror torch add_"
+    },
+    "id": "inplace_alpha",
+    "kwargs": {
+      "alpha": 3.0,
+      "inplace": true
+    },
+    "rationale": "add_ with alpha=3",
+    "torch_output": {
+      "__tensor__": {
+        "data_b64": "AADgQAAA4EAAAOBAAADgQA==",
+        "dtype": "float32",
+        "shape": [
+          4
+        ]
+      }
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 1.0,
+        "kind": "tensor",
+        "shape": [
+          4,
+          3
+        ],
+        "transform": "none",
+        "transform_args": {}
+      },
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 2.0,
+        "kind": "tensor",
+        "shape": [
+          3
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "inplace",
+    "divergence": "ferrotorch raised: add_: shape mismatch: add_: shape mismatch [4, 3] vs [3]",
+    "ferrotorch_output": {
+      "ERROR": "add_: shape mismatch: add_: shape mismatch [4, 3] vs [3]"
+    },
+    "id": "inplace_broadcast",
+    "kwargs": {
+      "inplace": true
+    },
+    "rationale": "add_ broadcasting other -> input shape unchanged",
+    "torch_output": {
+      "__tensor__": {
+        "data_b64": "AABAQAAAQEAAAEBAAABAQAAAQEAAAEBAAABAQAAAQEAAAEBAAABAQAAAQEAAAEBA",
+        "dtype": "float32",
+        "shape": [
+          4,
+          3
+        ]
+      }
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 1.0,
+        "kind": "tensor",
+        "shape": [
+          4
+        ],
+        "transform": "none",
+        "transform_args": {}
+      },
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 2.0,
+        "kind": "tensor",
+        "shape": [
+          4
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "out_kwarg",
+    "divergence": "ferrotorch raised: ferrotorch add has no `out=` kwarg; cannot mirror torch out=",
+    "ferrotorch_output": {
+      "ERROR": "ferrotorch add has no `out=` kwarg; cannot mirror torch out="
+    },
+    "id": "out_basic",
+    "kwargs": {
+      "out_spec": {
+        "data": null,
+        "dtype": "float32",
+        "fill": 0.0,
+        "kind": "tensor",
+        "shape": [
+          4
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    },
+    "rationale": "out= preallocated tensor receives result",
+    "torch_output": {
+      "__tensor__": {
+        "data_b64": "AABAQAAAQEAAAEBAAABAQA==",
+        "dtype": "float32",
+        "shape": [
+          4
+        ]
+      }
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 1.0,
+        "kind": "tensor",
+        "shape": [
+          4
+        ],
+        "transform": "none",
+        "transform_args": {}
+      },
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 2.0,
+        "kind": "tensor",
+        "shape": [
+          4
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "out_kwarg",
+    "divergence": "ferrotorch raised: ferrotorch add has no `out=` kwarg; cannot mirror torch out=",
+    "ferrotorch_output": {
+      "ERROR": "ferrotorch add has no `out=` kwarg; cannot mirror torch out="
+    },
+    "id": "out_with_alpha",
+    "kwargs": {
+      "alpha": 2.0,
+      "out_spec": {
+        "data": null,
+        "dtype": "float32",
+        "fill": 0.0,
+        "kind": "tensor",
+        "shape": [
+          4
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    },
+    "rationale": "out= with alpha=2",
+    "torch_output": {
+      "__tensor__": {
+        "data_b64": "AACgQAAAoEAAAKBAAACgQA==",
+        "dtype": "float32",
+        "shape": [
+          4
+        ]
+      }
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 1.0,
+        "kind": "tensor",
+        "shape": [
+          3,
+          1
+        ],
+        "transform": "none",
+        "transform_args": {}
+      },
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 2.0,
+        "kind": "tensor",
+        "shape": [
+          1,
+          4
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "out_kwarg",
+    "divergence": "ferrotorch raised: ferrotorch add has no `out=` kwarg; cannot mirror torch out=",
+    "ferrotorch_output": {
+      "ERROR": "ferrotorch add has no `out=` kwarg; cannot mirror torch out="
+    },
+    "id": "out_broadcast",
+    "kwargs": {
+      "out_spec": {
+        "data": null,
+        "dtype": "float32",
+        "fill": 0.0,
+        "kind": "tensor",
+        "shape": [
+          3,
+          4
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    },
+    "rationale": "out= must match broadcast shape",
+    "torch_output": {
+      "__tensor__": {
+        "data_b64": "AABAQAAAQEAAAEBAAABAQAAAQEAAAEBAAABAQAAAQEAAAEBAAABAQAAAQEAAAEBA",
+        "dtype": "float32",
+        "shape": [
+          3,
+          4
+        ]
+      }
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 1.0,
+        "kind": "tensor",
+        "shape": [
+          4
+        ],
+        "transform": "none",
+        "transform_args": {}
+      },
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 2.0,
+        "kind": "tensor",
+        "shape": [
+          4
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "out_kwarg",
+    "divergence": "ferrotorch raised: ferrotorch add has no `out=` kwarg; cannot mirror torch out=",
+    "ferrotorch_output": {
+      "ERROR": "ferrotorch add has no `out=` kwarg; cannot mirror torch out="
+    },
+    "id": "out_wrong_shape",
+    "kwargs": {
+      "out_spec": {
+        "data": null,
+        "dtype": "float32",
+        "fill": 0.0,
+        "kind": "tensor",
+        "shape": [
+          3
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    },
+    "rationale": "out= tensor with wrong shape — torch errors; what does ferrotorch do?",
+    "torch_output": {
+      "__tensor__": {
+        "data_b64": "AABAQAAAQEAAAEBAAABAQA==",
+        "dtype": "float32",
+        "shape": [
+          4
+        ]
+      }
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 1.0,
+        "kind": "tensor",
+        "shape": [
+          4
+        ],
+        "transform": "none",
+        "transform_args": {}
+      },
+      {
+        "data": null,
+        "dtype": "float32",
+        "fill": 2.0,
+        "kind": "tensor",
+        "shape": [
+          4
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "out_kwarg",
+    "divergence": "ferrotorch raised: ferrotorch add has no `out=` kwarg; cannot mirror torch out=",
+    "ferrotorch_output": {
+      "ERROR": "ferrotorch add has no `out=` kwarg; cannot mirror torch out="
+    },
+    "id": "out_nan",
+    "kwargs": {
+      "out_spec": {
+        "data": null,
+        "dtype": "float32",
+        "fill": "NaN",
+        "kind": "tensor",
+        "shape": [
+          4
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    },
+    "rationale": "out= filled with NaN, then overwritten — must not leak NaN",
+    "torch_output": {
+      "__tensor__": {
+        "data_b64": "AABAQAAAQEAAAEBAAABAQA==",
+        "dtype": "float32",
+        "shape": [
+          4
+        ]
+      }
+    }
+  }
+]

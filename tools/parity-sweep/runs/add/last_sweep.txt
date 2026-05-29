@@ -1,0 +1,5 @@
+
+[add] 88/88 passed (0 skipped, 0 failed)
+
+--- stderr ---
+torch 2.11.0+cu130 (634 ops) — sweeping add with seeds 0..8

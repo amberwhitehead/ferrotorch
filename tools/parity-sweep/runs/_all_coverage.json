@@ -1,0 +1,5708 @@
+[
+  {
+    "op": "H",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "T",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "__getitem__",
+    "status": "diverges",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 1,
+    "first_failure": "seed=0 i=1 oracle: oracle: ValueError: cannot encode arg of type slice: slice(0, 3, None)"
+  },
+  {
+    "op": "__radd__",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "__rand__",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError('\"bitwise_and_cpu\" not implemented for \\'Float\\'')"
+  },
+  {
+    "op": "__rdiv__",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "__rmatmul__",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "__rmod__",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "__rmul__",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "__ror__",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError('\"bitwise_or_cpu\" not implemented for \\'Float\\'')"
+  },
+  {
+    "op": "__rpow__",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "__rsub__",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "__rxor__",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError('\"bitwise_xor_cpu\" not implemented for \\'Float\\'')"
+  },
+  {
+    "op": "_batch_norm_with_update",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "_chunk_cat",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "_native_batch_norm_legit",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "_segment_reduce",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "_softmax_backward_data",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "_unsafe_masked_index",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "_unsafe_masked_index_put_accumulate",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "_upsample_bilinear2d_aa",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "abs",
+    "status": "passes_quick",
+    "attempted": 1,
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "first_failure": null
+  },
+  {
+    "op": "acos",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "acosh",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "add",
+    "status": "passes_quick",
+    "attempted": 4,
+    "passed": 4,
+    "failed": 0,
+    "skipped": 0,
+    "first_failure": null
+  },
+  {
+    "op": "addbmm",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "addcdiv",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "addcmul",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "addmm",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "addmv",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "addr",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "alias_copy",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "all",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "allclose",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "amax",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "amin",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "aminmax",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "angle",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "any",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "arange",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "argmax",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "argmin",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "argsort",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "argwhere",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "as_strided",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "as_strided_copy",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "as_strided_scatter",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "asin",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "asinh",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "atan",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "atan2",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "atanh",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "atleast_1d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "atleast_2d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "atleast_3d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "baddbmm",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "bernoulli",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "bfloat16",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "bincount",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError('\"bincount_cpu\" not implemented for \\'Float\\'')"
+  },
+  {
+    "op": "bitwise_and",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError('\"bitwise_and_cpu\" not implemented for \\'Float\\'')"
+  },
+  {
+    "op": "bitwise_left_shift",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError('\"lshift_cpu\" not implemented for \\'Float\\'')"
+  },
+  {
+    "op": "bitwise_not",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError('\"bitwise_not_cpu\" not implemented for \\'Float\\'')"
+  },
+  {
+    "op": "bitwise_or",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError('\"bitwise_or_cpu\" not implemented for \\'Float\\'')"
+  },
+  {
+    "op": "bitwise_right_shift",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError('\"rshift_cpu\" not implemented for \\'Float\\'')"
+  },
+  {
+    "op": "bitwise_xor",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError('\"bitwise_xor_cpu\" not implemented for \\'Float\\'')"
+  },
+  {
+    "op": "block_diag",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "bmm",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "bool",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "broadcast_shapes",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "broadcast_tensors",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "broadcast_to",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "bucketize",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "byte",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "cartesian_prod",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "cat",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "cauchy",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "cdist",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "cdouble",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex128"
+  },
+  {
+    "op": "ceil",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "cfloat",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "chalf",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex32"
+  },
+  {
+    "op": "char",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "cholesky",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "cholesky_inverse",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "cholesky_solve",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "chunk",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "clamp",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "clamp_max",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "clamp_min",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "clone",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "column_stack",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "combinations",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "complex",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "conj",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "conj_physical",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "constant_pad_nd",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "contiguous",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "copysign",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "corrcoef",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "cos",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "cosh",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "count_nonzero",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "cov",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "cross",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "cummax",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "cummin",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "cumprod",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "cumsum",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "cumulative_trapezoid",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "deg2rad",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "diag",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "diag_embed",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "diagflat",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "diagonal",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "diagonal_copy",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "diagonal_scatter",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "diff",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "digamma",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "dist",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "div",
+    "status": "passes_quick",
+    "attempted": 4,
+    "passed": 4,
+    "failed": 0,
+    "skipped": 0,
+    "first_failure": null
+  },
+  {
+    "op": "dot",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "double",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "dsplit",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "dstack",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "einsum",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "empty",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "empty_like",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "empty_permuted",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "empty_strided",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "eq",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "equal",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "erf",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "erfc",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "erfinv",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "exp",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "exp2",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "expand",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "expand_as",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "expand_copy",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "expm1",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "exponential",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "eye",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "fft.fft",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "fft.fft2",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "fft.fftn",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "fft.fftshift",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "fft.hfft",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "fft.hfft2",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "fft.hfftn",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "fft.ifft",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "fft.ifft2",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "fft.ifftn",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "fft.ifftshift",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "fft.ihfft",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "fft.ihfft2",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "fft.ihfftn",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "fft.irfft",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "fft.irfft2",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "fft.irfftn",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "fft.rfft",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "fft.rfft2",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "fft.rfftn",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "fill",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "flatten",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "flip",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "fliplr",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "flipud",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "float",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "float_power",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "floor",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "floor_divide",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "fmax",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "fmin",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "fmod",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "frac",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "frexp",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "full",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "full_like",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "gather",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "gcd",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError('\"gcd_cpu\" not implemented for \\'Float\\'')"
+  },
+  {
+    "op": "ge",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "geometric",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "geqrf",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "gradient",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "grid_sampler_2d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "grid_sampler_3d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "gt",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "half",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "hash_tensor",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.uint64"
+  },
+  {
+    "op": "heaviside",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "histc",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "histogram",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "histogramdd",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "hsplit",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "hstack",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "hypot",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "i0",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "igamma",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "igammac",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "imag",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: RuntimeError('imag is not implemented for tensors with non-complex dtypes.')"
+  },
+  {
+    "op": "index_add",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "index_copy",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "index_fill",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "index_put",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "index_reduce",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "index_select",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "inner",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "int",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "isclose",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "isfinite",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "isin",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "isinf",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "isnan",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "isneginf",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "isposinf",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "isreal",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "istft",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: RuntimeError('istft requires a complex-valued input tensor matching the output from stft with return_complex=True.')"
+  },
+  {
+    "op": "item",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "jiterator_2inputs_2outputs",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: RuntimeError('CUDAGuardImpl initialized with non-CUDA DeviceType: cpu')"
+  },
+  {
+    "op": "jiterator_4inputs_with_extra_args",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: RuntimeError('CUDAGuardImpl initialized with non-CUDA DeviceType: cpu')"
+  },
+  {
+    "op": "jiterator_binary",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: RuntimeError('CUDAGuardImpl initialized with non-CUDA DeviceType: cpu')"
+  },
+  {
+    "op": "jiterator_binary_return_by_ref",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: RuntimeError('CUDAGuardImpl initialized with non-CUDA DeviceType: cpu')"
+  },
+  {
+    "op": "jiterator_unary",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: RuntimeError('CUDAGuardImpl initialized with non-CUDA DeviceType: cpu')"
+  },
+  {
+    "op": "kron",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "kthvalue",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "lcm",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError('\"lcm_cpu\" not implemented for \\'Float\\'')"
+  },
+  {
+    "op": "ldexp",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "le",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "lerp",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "lgamma",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.cholesky",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.cholesky_ex",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.cond",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.cross",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.det",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.diagonal",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.eig",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "linalg.eigh",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.eigvals",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "linalg.eigvalsh",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.householder_product",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.inv",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.inv_ex",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.ldl_factor",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.ldl_factor_ex",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.ldl_solve",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.lstsq",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.lu",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.lu_factor",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.lu_factor_ex",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.lu_solve",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.matrix_norm",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.matrix_power",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.matrix_rank",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.multi_dot",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.norm",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.pinv",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.qr",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.slogdet",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.solve",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.solve_ex",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.solve_triangular",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.svd",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.svdvals",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.tensorinv",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.tensorsolve",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.vander",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.vecdot",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linalg.vector_norm",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "linspace",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "log",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "log10",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "log1p",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "log2",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "log_normal",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "log_softmax",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "logaddexp",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "logaddexp2",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "logcumsumexp",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "logdet",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "logical_and",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "logical_not",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "logical_or",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "logical_xor",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "logit",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "logspace",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "logsumexp",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "long",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "lt",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "lu",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "lu_solve",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "lu_unpack",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "mH",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "mT",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.amax",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.amin",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.argmax",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.argmin",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.cumprod",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.cumsum",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.log_softmax",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.logaddexp",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.logsumexp",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.mean",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.median",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.norm",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.normalize",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.prod",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.softmax",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.softmin",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.std",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.sum",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked.var",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked_fill",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked_scatter",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "masked_select",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "matmul",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "matrix_exp",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "max",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "max_pool2d_with_indices_backward",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "maximum",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "mean",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "median",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "meshgrid",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "min",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "minimum",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "mm",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "mode",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "movedim",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "msort",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "mul",
+    "status": "passes_quick",
+    "attempted": 4,
+    "passed": 4,
+    "failed": 0,
+    "skipped": 0,
+    "first_failure": null
+  },
+  {
+    "op": "multinomial",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "mv",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "mvlgamma",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nan_to_num",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "nanmean",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nanmedian",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nanquantile",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nansum",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "narrow",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "narrow_copy",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "native_batch_norm",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "native_dropout_backward",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "native_layer_norm",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "ne",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "neg",
+    "status": "passes_quick",
+    "attempted": 1,
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "first_failure": null
+  },
+  {
+    "op": "new_empty",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "new_empty_strided",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "new_full",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "new_ones",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "new_zeros",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nextafter",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.adaptive_avg_pool1d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.adaptive_avg_pool2d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.adaptive_avg_pool3d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.adaptive_max_pool1d",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.adaptive_max_pool2d",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.adaptive_max_pool3d",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.alpha_dropout",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.avg_pool1d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.avg_pool2d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.avg_pool3d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.batch_norm",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.bilinear",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.binary_cross_entropy",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.binary_cross_entropy_with_logits",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.celu",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.channel_shuffle",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.conv1d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.conv2d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.conv3d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.conv_transpose1d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.conv_transpose2d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.conv_transpose3d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.cosine_embedding_loss",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.cosine_similarity",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.cross_entropy",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.ctc_loss",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.dropout",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.dropout2d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.dropout3d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.elu",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.embedding",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.embedding_bag",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.feature_alpha_dropout",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.fractional_max_pool2d",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.fractional_max_pool3d",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.gaussian_nll_loss",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.gelu",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.glu",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.grid_sample",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.group_norm",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.hardshrink",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.hardsigmoid",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.hardswish",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.hardtanh",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.hinge_embedding_loss",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.huber_loss",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.instance_norm",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.interpolate",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.kl_div",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.l1_loss",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.layer_norm",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.leaky_relu",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.linear",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.local_response_norm",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.logsigmoid",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.margin_ranking_loss",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.max_pool1d",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.max_pool2d",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.max_pool3d",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.max_unpool1d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.max_unpool2d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.max_unpool3d",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.mish",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.mse_loss",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.multi_head_attention_forward",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.multi_margin_loss",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.multilabel_margin_loss",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.multilabel_soft_margin_loss",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.nll_loss",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.normalize",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.one_hot",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: RuntimeError('one_hot is only applicable to index tensor of type LongTensor.')"
+  },
+  {
+    "op": "nn.functional.pad",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.pairwise_distance",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.pdist",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.pixel_shuffle",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.pixel_unshuffle",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.poisson_nll_loss",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.prelu",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.relu",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.relu6",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.rms_norm",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.rrelu",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.scaled_dot_product_attention",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.selu",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.silu",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.smooth_l1_loss",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.soft_margin_loss",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.softmin",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.softplus",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.softshrink",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.softsign",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.tanhshrink",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.threshold",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.triplet_margin_loss",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.triplet_margin_with_distance_loss",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: cannot encode arg of type PairwiseDistance: PairwiseDistance()"
+  },
+  {
+    "op": "nn.functional.unfold",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.upsample_bilinear",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nn.functional.upsample_nearest",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nonzero",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "nonzero_static",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "norm",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "normal",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "ones",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "ones_like",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "ormqr",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "outer",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "pca_lowrank",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "permute",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "permute_copy",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "pinverse",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "polar",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "polygamma",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "positive",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "pow",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "prod",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "put",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "qr",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "quantile",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "rad2deg",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "rand_like",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "randint",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "randint_like",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "randn",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "randn_like",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "ravel",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "real",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "reciprocal",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "remainder",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "renorm",
+    "status": "diverges",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 3,
+    "first_failure": "seed=0 i=3 oracle: expected value at line 1 column 753"
+  },
+  {
+    "op": "repeat",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "repeat_interleave",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "reshape",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "reshape_as",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "resize_",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "resize_as_",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "resolve_conj",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "resolve_neg",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "roll",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "rot90",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "round",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "rsqrt",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "rsub",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "scalar_tensor",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "scatter",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "scatter_add",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "scatter_reduce",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "searchsorted",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "select",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "select_scatter",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "sgn",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "short",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "sigmoid",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "sign",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "signal.windows.bartlett",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "signal.windows.blackman",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "signal.windows.cosine",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "signal.windows.exponential",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "signal.windows.gaussian",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "signal.windows.general_cosine",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "signal.windows.general_hamming",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "signal.windows.hamming",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "signal.windows.hann",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "signal.windows.kaiser",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "signal.windows.nuttall",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "signbit",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "sin",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "sinc",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "sinh",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "slice",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "slice_scatter",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "softmax",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "sort",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "sparse.mm",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: RuntimeError: Sparse CSR tensors do not have is_contiguous"
+  },
+  {
+    "op": "sparse.sampled_addmm",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: RuntimeError: Sparse CSR tensors do not have is_contiguous"
+  },
+  {
+    "op": "special.airy_ai",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "special.bessel_j0",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "special.bessel_j1",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "special.bessel_y0",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "special.bessel_y1",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "special.chebyshev_polynomial_t",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "special.chebyshev_polynomial_u",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "special.chebyshev_polynomial_v",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "special.chebyshev_polynomial_w",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "special.entr",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "special.erfcx",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "special.hermite_polynomial_h",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "special.hermite_polynomial_he",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "special.i0e",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "special.i1",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "special.i1e",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "special.laguerre_polynomial_l",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "special.legendre_polynomial_p",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "special.log_ndtr",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "special.modified_bessel_i0",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "special.modified_bessel_i1",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "special.modified_bessel_k0",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "special.modified_bessel_k1",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "special.ndtr",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "special.ndtri",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "special.polygamma",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "special.scaled_modified_bessel_k0",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "special.scaled_modified_bessel_k1",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "special.shifted_chebyshev_polynomial_t",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "special.shifted_chebyshev_polynomial_u",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "special.shifted_chebyshev_polynomial_v",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "special.shifted_chebyshev_polynomial_w",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "special.spherical_bessel_j0",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "special.xlog1py",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "special.zeta",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "split",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "split_with_sizes",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "split_with_sizes_copy",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "sqrt",
+    "status": "passes_quick",
+    "attempted": 1,
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "first_failure": null
+  },
+  {
+    "op": "square",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "squeeze",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "squeeze_copy",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "stack",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "std",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "std_mean",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "stft",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "sub",
+    "status": "passes_quick",
+    "attempted": 4,
+    "passed": 4,
+    "failed": 0,
+    "skipped": 0,
+    "first_failure": null
+  },
+  {
+    "op": "sum",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "sum_to_size",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "svd",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "svd_lowrank",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "t",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "t_copy",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "take",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "take_along_dim",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "tan",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "tanh",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "tensor_split",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "tensordot",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "tile",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "to",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "to_sparse",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: RuntimeError: unsupported memory format option Contiguous"
+  },
+  {
+    "op": "topk",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "torch._scaled_mm",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.float8_e4m3fn"
+  },
+  {
+    "op": "torch._scaled_mm_v2",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError(\"Could not run 'aten::_scaled_mm_v2' with arguments from the 'CPU' backend. This could be because the operator doesn't exist for this backend, or was omitted during the selective/custom build process (if using custom build). If you are a Facebook employee using PyTorch on mobile, please visit https://fburl.com/ptmfixes for possible resolutions. 'aten::_scaled_mm_v2' is only available for these backends: [CUDA, Meta, BackendSelect, Python, FuncTorchDynamicLayerBackMode, Functionalize, Named, Conjugate, Negative, ZeroTensor, ADInplaceOrView, AutogradOther, AutogradCPU, AutogradCUDA, AutogradHIP, AutogradXLA, AutogradMPS, AutogradIPU, AutogradXPU, AutogradHPU, AutogradVE, AutogradLazy, AutogradMTIA, AutogradMAIA, AutogradPrivateUse1, AutogradPrivateUse2, AutogradPrivateUse3, AutogradMeta, AutogradNestedTensor, Tracer, AutocastCPU, AutocastMTIA, AutocastMAIA, AutocastXPU, AutocastMPS, AutocastCUDA, FuncTorchBatched, BatchedNestedTensor, FuncTorchVmapMode, Batched, VmapMode, FuncTorchGradWrapper, PythonTLSSnapshot, FuncTorchDynamicLayerFrontMode, PreDispatch, PythonDispatcher].\\n\\nCUDA: registered at /pytorch/build/aten/src/ATen/RegisterCUDA_0.cpp:24394 [kernel]\\nMeta: registered at /home/doll/.local/lib/python3.13/site-packages/torch/_meta_registrations.py:53 [kernel]\\nBackendSelect: fallthrough registered at /pytorch/aten/src/ATen/core/BackendSelectFallbackKernel.cpp:3 [backend fallback]\\nPython: registered at /pytorch/aten/src/ATen/core/PythonFallbackKernel.cpp:198 [backend fallback]\\nFuncTorchDynamicLayerBackMode: registered at /pytorch/aten/src/ATen/functorch/DynamicLayer.cpp:477 [backend fallback]\\nFunctionalize: registered at /pytorch/aten/src/ATen/FunctionalizeFallbackKernel.cpp:384 [backend fallback]\\nNamed: registered at /pytorch/aten/src/ATen/core/NamedRegistrations.cpp:5 [backend fallback]\\nConjugate: registered at /pytorch/aten/src/ATen/ConjugateFallback.cpp:17 [backend fallback]\\nNegative: registered at /pytorch/aten/src/ATen/native/NegateFallback.cpp:18 [backend fallback]\\nZeroTensor: registered at /pytorch/aten/src/ATen/ZeroTensorFallback.cpp:115 [backend fallback]\\nADInplaceOrView: fallthrough registered at /pytorch/aten/src/ATen/core/VariableFallbackKernel.cpp:103 [backend fallback]\\nAutogradOther: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradCPU: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradCUDA: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradHIP: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradXLA: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradMPS: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradIPU: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradXPU: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradHPU: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradVE: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradLazy: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradMTIA: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradMAIA: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradPrivateUse1: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradPrivateUse2: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradPrivateUse3: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradMeta: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nAutogradNestedTensor: registered at /pytorch/torch/csrc/autograd/generated/VariableType_1.cpp:17404 [autograd kernel]\\nTracer: registered at /pytorch/torch/csrc/autograd/generated/TraceType_1.cpp:16736 [kernel]\\nAutocastCPU: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:336 [backend fallback]\\nAutocastMTIA: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:480 [backend fallback]\\nAutocastMAIA: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:518 [backend fallback]\\nAutocastXPU: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:556 [backend fallback]\\nAutocastMPS: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:221 [backend fallback]\\nAutocastCUDA: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:177 [backend fallback]\\nFuncTorchBatched: registered at /pytorch/aten/src/ATen/functorch/LegacyBatchingRegistrations.cpp:727 [backend fallback]\\nBatchedNestedTensor: registered at /pytorch/aten/src/ATen/functorch/LegacyBatchingRegistrations.cpp:754 [backend fallback]\\nFuncTorchVmapMode: fallthrough registered at /pytorch/aten/src/ATen/functorch/VmapModeRegistrations.cpp:22 [backend fallback]\\nBatched: registered at /pytorch/aten/src/ATen/LegacyBatchingRegistrations.cpp:1072 [backend fallback]\\nVmapMode: fallthrough registered at /pytorch/aten/src/ATen/VmapModeRegistrations.cpp:32 [backend fallback]\\nFuncTorchGradWrapper: registered at /pytorch/aten/src/ATen/functorch/TensorWrapper.cpp:210 [backend fallback]\\nPythonTLSSnapshot: registered at /pytorch/aten/src/ATen/core/PythonFallbackKernel.cpp:206 [backend fallback]\\nFuncTorchDynamicLayerFrontMode: registered at /pytorch/aten/src/ATen/functorch/DynamicLayer.cpp:473 [backend fallback]\\nPreDispatch: registered at /pytorch/aten/src/ATen/core/PythonFallbackKernel.cpp:210 [backend fallback]\\nPythonDispatcher: registered at /pytorch/aten/src/ATen/core/PythonFallbackKernel.cpp:202 [backend fallback]\\n\")"
+  },
+  {
+    "op": "torch.ops.aten._efficient_attention_forward",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError(\"Could not run 'aten::_efficient_attention_forward' with arguments from the 'CPU' backend. This could be because the operator doesn't exist for this backend, or was omitted during the selective/custom build process (if using custom build). If you are a Facebook employee using PyTorch on mobile, please visit https://fburl.com/ptmfixes for possible resolutions. 'aten::_efficient_attention_forward' is only available for these backends: [CUDA, Meta, BackendSelect, Python, FuncTorchDynamicLayerBackMode, Functionalize, Named, Conjugate, Negative, ZeroTensor, ADInplaceOrView, AutogradOther, AutogradCPU, AutogradCUDA, AutogradHIP, AutogradXLA, AutogradMPS, AutogradIPU, AutogradXPU, AutogradHPU, AutogradVE, AutogradLazy, AutogradMTIA, AutogradMAIA, AutogradPrivateUse1, AutogradPrivateUse2, AutogradPrivateUse3, AutogradMeta, AutogradNestedTensor, Tracer, AutocastCPU, AutocastMTIA, AutocastMAIA, AutocastXPU, AutocastMPS, AutocastCUDA, FuncTorchBatched, BatchedNestedTensor, FuncTorchVmapMode, Batched, VmapMode, FuncTorchGradWrapper, PythonTLSSnapshot, FuncTorchDynamicLayerFrontMode, PreDispatch, PythonDispatcher].\\n\\nCUDA: registered at /pytorch/build/aten/src/ATen/RegisterCUDA_0.cpp:56914 [kernel]\\nMeta: registered at /home/doll/.local/lib/python3.13/site-packages/torch/_meta_registrations.py:53 [kernel]\\nBackendSelect: fallthrough registered at /pytorch/aten/src/ATen/core/BackendSelectFallbackKernel.cpp:3 [backend fallback]\\nPython: registered at /pytorch/aten/src/ATen/core/PythonFallbackKernel.cpp:198 [backend fallback]\\nFuncTorchDynamicLayerBackMode: registered at /pytorch/aten/src/ATen/functorch/DynamicLayer.cpp:477 [backend fallback]\\nFunctionalize: registered at /pytorch/aten/src/ATen/FunctionalizeFallbackKernel.cpp:384 [backend fallback]\\nNamed: registered at /pytorch/aten/src/ATen/core/NamedRegistrations.cpp:5 [backend fallback]\\nConjugate: registered at /pytorch/aten/src/ATen/ConjugateFallback.cpp:17 [backend fallback]\\nNegative: registered at /pytorch/aten/src/ATen/native/NegateFallback.cpp:18 [backend fallback]\\nZeroTensor: registered at /pytorch/aten/src/ATen/ZeroTensorFallback.cpp:115 [backend fallback]\\nADInplaceOrView: fallthrough registered at /pytorch/aten/src/ATen/core/VariableFallbackKernel.cpp:103 [backend fallback]\\nAutogradOther: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradCPU: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradCUDA: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradHIP: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradXLA: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradMPS: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradIPU: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradXPU: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradHPU: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradVE: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradLazy: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradMTIA: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradMAIA: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradPrivateUse1: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradPrivateUse2: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradPrivateUse3: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradMeta: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nAutogradNestedTensor: registered at /pytorch/torch/csrc/autograd/generated/VariableType_3.cpp:20155 [autograd kernel]\\nTracer: registered at /pytorch/torch/csrc/autograd/generated/TraceType_3.cpp:15245 [kernel]\\nAutocastCPU: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:336 [backend fallback]\\nAutocastMTIA: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:480 [backend fallback]\\nAutocastMAIA: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:518 [backend fallback]\\nAutocastXPU: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:556 [backend fallback]\\nAutocastMPS: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:221 [backend fallback]\\nAutocastCUDA: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:177 [backend fallback]\\nFuncTorchBatched: registered at /pytorch/aten/src/ATen/functorch/LegacyBatchingRegistrations.cpp:727 [backend fallback]\\nBatchedNestedTensor: registered at /pytorch/aten/src/ATen/functorch/LegacyBatchingRegistrations.cpp:754 [backend fallback]\\nFuncTorchVmapMode: fallthrough registered at /pytorch/aten/src/ATen/functorch/VmapModeRegistrations.cpp:22 [backend fallback]\\nBatched: registered at /pytorch/aten/src/ATen/LegacyBatchingRegistrations.cpp:1072 [backend fallback]\\nVmapMode: fallthrough registered at /pytorch/aten/src/ATen/VmapModeRegistrations.cpp:32 [backend fallback]\\nFuncTorchGradWrapper: registered at /pytorch/aten/src/ATen/functorch/TensorWrapper.cpp:210 [backend fallback]\\nPythonTLSSnapshot: registered at /pytorch/aten/src/ATen/core/PythonFallbackKernel.cpp:206 [backend fallback]\\nFuncTorchDynamicLayerFrontMode: registered at /pytorch/aten/src/ATen/functorch/DynamicLayer.cpp:473 [backend fallback]\\nPreDispatch: registered at /pytorch/aten/src/ATen/core/PythonFallbackKernel.cpp:210 [backend fallback]\\nPythonDispatcher: registered at /pytorch/aten/src/ATen/core/PythonFallbackKernel.cpp:202 [backend fallback]\\n\")"
+  },
+  {
+    "op": "torch.ops.aten._flash_attention_forward",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError(\"Could not run 'aten::_flash_attention_forward' with arguments from the 'CPU' backend. This could be because the operator doesn't exist for this backend, or was omitted during the selective/custom build process (if using custom build). If you are a Facebook employee using PyTorch on mobile, please visit https://fburl.com/ptmfixes for possible resolutions. 'aten::_flash_attention_forward' is only available for these backends: [CUDA, Meta, BackendSelect, Python, FuncTorchDynamicLayerBackMode, Functionalize, Named, Conjugate, Negative, ZeroTensor, ADInplaceOrView, AutogradOther, AutogradCPU, AutogradCUDA, AutogradHIP, AutogradXLA, AutogradMPS, AutogradIPU, AutogradXPU, AutogradHPU, AutogradVE, AutogradLazy, AutogradMTIA, AutogradMAIA, AutogradPrivateUse1, AutogradPrivateUse2, AutogradPrivateUse3, AutogradMeta, AutogradNestedTensor, Tracer, AutocastCPU, AutocastMTIA, AutocastMAIA, AutocastXPU, AutocastMPS, AutocastCUDA, FuncTorchBatched, BatchedNestedTensor, FuncTorchVmapMode, Batched, VmapMode, FuncTorchGradWrapper, PythonTLSSnapshot, FuncTorchDynamicLayerFrontMode, PreDispatch, PythonDispatcher].\\n\\nCUDA: registered at /pytorch/build/aten/src/ATen/RegisterCUDA_0.cpp:56820 [kernel]\\nMeta: registered at /home/doll/.local/lib/python3.13/site-packages/torch/_meta_registrations.py:53 [kernel]\\nBackendSelect: fallthrough registered at /pytorch/aten/src/ATen/core/BackendSelectFallbackKernel.cpp:3 [backend fallback]\\nPython: registered at /pytorch/aten/src/ATen/core/PythonFallbackKernel.cpp:198 [backend fallback]\\nFuncTorchDynamicLayerBackMode: registered at /pytorch/aten/src/ATen/functorch/DynamicLayer.cpp:477 [backend fallback]\\nFunctionalize: registered at /pytorch/aten/src/ATen/FunctionalizeFallbackKernel.cpp:384 [backend fallback]\\nNamed: registered at /pytorch/aten/src/ATen/core/NamedRegistrations.cpp:5 [backend fallback]\\nConjugate: registered at /pytorch/aten/src/ATen/ConjugateFallback.cpp:17 [backend fallback]\\nNegative: registered at /pytorch/aten/src/ATen/native/NegateFallback.cpp:18 [backend fallback]\\nZeroTensor: registered at /pytorch/aten/src/ATen/ZeroTensorFallback.cpp:115 [backend fallback]\\nADInplaceOrView: fallthrough registered at /pytorch/aten/src/ATen/core/VariableFallbackKernel.cpp:103 [backend fallback]\\nAutogradOther: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradCPU: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradCUDA: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradHIP: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradXLA: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradMPS: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradIPU: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradXPU: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradHPU: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradVE: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradLazy: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradMTIA: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradMAIA: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradPrivateUse1: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradPrivateUse2: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradPrivateUse3: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradMeta: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nAutogradNestedTensor: registered at /pytorch/torch/csrc/autograd/generated/VariableType_0.cpp:18396 [autograd kernel]\\nTracer: registered at /pytorch/torch/csrc/autograd/generated/TraceType_0.cpp:17280 [kernel]\\nAutocastCPU: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:336 [backend fallback]\\nAutocastMTIA: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:480 [backend fallback]\\nAutocastMAIA: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:518 [backend fallback]\\nAutocastXPU: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:556 [backend fallback]\\nAutocastMPS: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:221 [backend fallback]\\nAutocastCUDA: fallthrough registered at /pytorch/aten/src/ATen/autocast_mode.cpp:177 [backend fallback]\\nFuncTorchBatched: registered at /pytorch/aten/src/ATen/functorch/LegacyBatchingRegistrations.cpp:727 [backend fallback]\\nBatchedNestedTensor: registered at /pytorch/aten/src/ATen/functorch/LegacyBatchingRegistrations.cpp:754 [backend fallback]\\nFuncTorchVmapMode: fallthrough registered at /pytorch/aten/src/ATen/functorch/VmapModeRegistrations.cpp:22 [backend fallback]\\nBatched: registered at /pytorch/aten/src/ATen/LegacyBatchingRegistrations.cpp:1072 [backend fallback]\\nVmapMode: fallthrough registered at /pytorch/aten/src/ATen/VmapModeRegistrations.cpp:32 [backend fallback]\\nFuncTorchGradWrapper: registered at /pytorch/aten/src/ATen/functorch/TensorWrapper.cpp:210 [backend fallback]\\nPythonTLSSnapshot: registered at /pytorch/aten/src/ATen/core/PythonFallbackKernel.cpp:206 [backend fallback]\\nFuncTorchDynamicLayerFrontMode: registered at /pytorch/aten/src/ATen/functorch/DynamicLayer.cpp:473 [backend fallback]\\nPreDispatch: registered at /pytorch/aten/src/ATen/core/PythonFallbackKernel.cpp:210 [backend fallback]\\nPythonDispatcher: registered at /pytorch/aten/src/ATen/core/PythonFallbackKernel.cpp:202 [backend fallback]\\n\")"
+  },
+  {
+    "op": "torch.ops.aten._safe_softmax.default",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "trace",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "transpose",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "transpose_copy",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "trapezoid",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "trapz",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "triangular_solve",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "tril",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "tril_indices",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError('\"tril_indices\" not implemented for \\'Float\\'')"
+  },
+  {
+    "op": "triu",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "triu_indices",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: NotImplementedError('\"triu_indices\" not implemented for \\'Float\\'')"
+  },
+  {
+    "op": "true_divide",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "trunc",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "unbind",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "unbind_copy",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "unflatten",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "unfold",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "unfold_copy",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "uniform",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "unique",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "unique_consecutive",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "unravel_index",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: TypeError(\"expected 'indices' to be integer dtype, but got torch.float32\")"
+  },
+  {
+    "op": "unsafe_chunk",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "unsafe_split",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "unsqueeze",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "unsqueeze_copy",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "var",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "var_mean",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "vdot",
+    "status": "no_dispatch",
+    "attempted": 1,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 1,
+    "first_failure": null
+  },
+  {
+    "op": "view",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "view_as",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "view_as_complex",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: ValueError: unsupported dtype: torch.complex64"
+  },
+  {
+    "op": "view_as_real",
+    "status": "oracle_error",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "first_failure": "seed=0 i=0 oracle: oracle: torch raised on sample 0: RuntimeError('view_as_real is only supported for complex tensors')"
+  },
+  {
+    "op": "view_copy",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "vsplit",
+    "status": "no_dispatch",
+    "attempted": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "vstack",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "where",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "xlogy",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  },
+  {
+    "op": "zero_",
+    "status": "no_dispatch",
+    "attempted": 3,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 3,
+    "first_failure": null
+  },
+  {
+    "op": "zeros",
+    "status": "no_dispatch",
+    "attempted": 2,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 2,
+    "first_failure": null
+  },
+  {
+    "op": "zeros_like",
+    "status": "no_dispatch",
+    "attempted": 4,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 4,
+    "first_failure": null
+  }
+]

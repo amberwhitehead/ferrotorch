@@ -1,0 +1,284 @@
+[
+  {
+    "args_spec": [
+      {
+        "data": [
+          0.0
+        ],
+        "dtype": "float32",
+        "fill": null,
+        "kind": "tensor",
+        "shape": [
+          1
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "ieee_signed_zero",
+    "divergence": "both rejected (torch: torch raised: IndexError: list index out of range; ferrotorch: add probe needs 2 args, got 1)",
+    "ferrotorch_output": {
+      "ERROR": "add probe needs 2 args, got 1"
+    },
+    "id": "reciprocal_pos_zero",
+    "kwargs": {},
+    "rationale": "reciprocal(+0.0) = +Inf per IEEE-754 and torch (1/+0 = +Inf). Edge A.1.",
+    "torch_output": {
+      "ERROR": "torch raised: IndexError: list index out of range"
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": [
+          -0.0
+        ],
+        "dtype": "float32",
+        "fill": null,
+        "kind": "tensor",
+        "shape": [
+          1
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "ieee_signed_zero",
+    "divergence": "both rejected (torch: torch raised: IndexError: list index out of range; ferrotorch: add probe needs 2 args, got 1)",
+    "ferrotorch_output": {
+      "ERROR": "add probe needs 2 args, got 1"
+    },
+    "id": "reciprocal_neg_zero",
+    "kwargs": {},
+    "rationale": "reciprocal(-0.0) = -Inf per IEEE-754 and torch (1/-0 = -Inf). Sign-of-zero must propagate through `1.0 / x`. Edge A.2.",
+    "torch_output": {
+      "ERROR": "torch raised: IndexError: list index out of range"
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": [
+          "+Inf"
+        ],
+        "dtype": "float32",
+        "fill": null,
+        "kind": "tensor",
+        "shape": [
+          1
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "ieee_inf",
+    "divergence": "both rejected (torch: torch raised: IndexError: list index out of range; ferrotorch: add probe needs 2 args, got 1)",
+    "ferrotorch_output": {
+      "ERROR": "add probe needs 2 args, got 1"
+    },
+    "id": "reciprocal_pos_inf",
+    "kwargs": {},
+    "rationale": "reciprocal(+Inf) = +0.0 per IEEE-754 and torch. Edge A.3.",
+    "torch_output": {
+      "ERROR": "torch raised: IndexError: list index out of range"
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": [
+          "-Inf"
+        ],
+        "dtype": "float32",
+        "fill": null,
+        "kind": "tensor",
+        "shape": [
+          1
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "ieee_inf",
+    "divergence": "both rejected (torch: torch raised: IndexError: list index out of range; ferrotorch: add probe needs 2 args, got 1)",
+    "ferrotorch_output": {
+      "ERROR": "add probe needs 2 args, got 1"
+    },
+    "id": "reciprocal_neg_inf",
+    "kwargs": {},
+    "rationale": "reciprocal(-Inf) = -0.0 per IEEE-754 and torch (sign of zero preserved). Edge A.4.",
+    "torch_output": {
+      "ERROR": "torch raised: IndexError: list index out of range"
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": [
+          "NaN"
+        ],
+        "dtype": "float32",
+        "fill": null,
+        "kind": "tensor",
+        "shape": [
+          1
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "nan_propagation",
+    "divergence": "both rejected (torch: torch raised: IndexError: list index out of range; ferrotorch: add probe needs 2 args, got 1)",
+    "ferrotorch_output": {
+      "ERROR": "add probe needs 2 args, got 1"
+    },
+    "id": "reciprocal_nan",
+    "kwargs": {},
+    "rationale": "reciprocal(NaN) = NaN. Edge A.5.",
+    "torch_output": {
+      "ERROR": "torch raised: IndexError: list index out of range"
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": [
+          5.877471754111438e-39
+        ],
+        "dtype": "float32",
+        "fill": null,
+        "kind": "tensor",
+        "shape": [
+          1
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "denormal",
+    "divergence": "both rejected (torch: torch raised: IndexError: list index out of range; ferrotorch: add probe needs 2 args, got 1)",
+    "ferrotorch_output": {
+      "ERROR": "add probe needs 2 args, got 1"
+    },
+    "id": "reciprocal_denormal",
+    "kwargs": {},
+    "rationale": "reciprocal(denormal) = +Inf in fp32 (1/(MIN_POSITIVE/2) overflows). Edge A.6.",
+    "torch_output": {
+      "ERROR": "torch raised: IndexError: list index out of range"
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": [
+          1.0
+        ],
+        "dtype": "float32",
+        "fill": null,
+        "kind": "tensor",
+        "shape": [
+          1
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "exact_value",
+    "divergence": "both rejected (torch: torch raised: IndexError: list index out of range; ferrotorch: add probe needs 2 args, got 1)",
+    "ferrotorch_output": {
+      "ERROR": "add probe needs 2 args, got 1"
+    },
+    "id": "reciprocal_one",
+    "kwargs": {},
+    "rationale": "reciprocal(1.0) = exactly 1.0. Edge A.7.",
+    "torch_output": {
+      "ERROR": "torch raised: IndexError: list index out of range"
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": [
+          -1.0
+        ],
+        "dtype": "float32",
+        "fill": null,
+        "kind": "tensor",
+        "shape": [
+          1
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "exact_value",
+    "divergence": "both rejected (torch: torch raised: IndexError: list index out of range; ferrotorch: add probe needs 2 args, got 1)",
+    "ferrotorch_output": {
+      "ERROR": "add probe needs 2 args, got 1"
+    },
+    "id": "reciprocal_neg_one",
+    "kwargs": {},
+    "rationale": "reciprocal(-1.0) = exactly -1.0. Edge A.8.",
+    "torch_output": {
+      "ERROR": "torch raised: IndexError: list index out of range"
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": [
+          2.0
+        ],
+        "dtype": "float32",
+        "fill": null,
+        "kind": "tensor",
+        "shape": [
+          1
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "exact_value",
+    "divergence": "both rejected (torch: torch raised: IndexError: list index out of range; ferrotorch: add probe needs 2 args, got 1)",
+    "ferrotorch_output": {
+      "ERROR": "add probe needs 2 args, got 1"
+    },
+    "id": "reciprocal_two",
+    "kwargs": {},
+    "rationale": "reciprocal(2.0) = exactly 0.5. Edge A.9.",
+    "torch_output": {
+      "ERROR": "torch raised: IndexError: list index out of range"
+    }
+  },
+  {
+    "args_spec": [
+      {
+        "data": [
+          2.0,
+          4.0,
+          8.0
+        ],
+        "dtype": "float32",
+        "fill": null,
+        "kind": "tensor",
+        "shape": [
+          3
+        ],
+        "transform": "none",
+        "transform_args": {}
+      }
+    ],
+    "category": "bit_exact",
+    "divergence": "both rejected (torch: torch raised: IndexError: list index out of range; ferrotorch: add probe needs 2 args, got 1)",
+    "ferrotorch_output": {
+      "ERROR": "add probe needs 2 args, got 1"
+    },
+    "id": "reciprocal_vector_powers_of_two",
+    "kwargs": {},
+    "rationale": "reciprocal([2,4,8]) = [0.5,0.25,0.125] — all exact in fp32. Confirms vector path matches torch bit-for-bit.",
+    "torch_output": {
+      "ERROR": "torch raised: IndexError: list index out of range"
+    }
+  }
+]

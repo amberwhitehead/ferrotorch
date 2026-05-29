@@ -170,7 +170,11 @@ fn add_scaled_general_alpha_matches_fma_f32() {
         let (a, b) = make_inputs_f32(n);
         for &alpha in &[-1.0f32, 2.5, -0.5, 0.0, 3.0] {
             let got = run_f32(&a, &b, alpha);
-            let want: Vec<f32> = a.iter().zip(&b).map(|(&x, &y)| y.mul_add(alpha, x)).collect();
+            let want: Vec<f32> = a
+                .iter()
+                .zip(&b)
+                .map(|(&x, &y)| y.mul_add(alpha, x))
+                .collect();
             assert_bits_f32(&got, &want, &format!("add_scaled f32 n={n} alpha={alpha}"));
         }
     }
@@ -183,7 +187,11 @@ fn add_scaled_general_alpha_matches_fma_f64() {
         let (a, b) = make_inputs_f64(n);
         for &alpha in &[-1.0f64, 2.5, -0.5, 0.0, 3.0] {
             let got = run_f64(&a, &b, alpha);
-            let want: Vec<f64> = a.iter().zip(&b).map(|(&x, &y)| y.mul_add(alpha, x)).collect();
+            let want: Vec<f64> = a
+                .iter()
+                .zip(&b)
+                .map(|(&x, &y)| y.mul_add(alpha, x))
+                .collect();
             assert_bits_f64(&got, &want, &format!("add_scaled f64 n={n} alpha={alpha}"));
         }
     }
@@ -247,7 +255,11 @@ fn add_scaled_alpha0_inf_nan_b_matches_torch_f32_scalar_tail() {
         .zip(&b)
         .map(|(&x, &y)| if y.is_finite() { x } else { f32::NAN })
         .collect();
-    assert_bits_f32(&got, &want, "add_scaled f32 alpha=0 inf/nan b (scalar n=17)");
+    assert_bits_f32(
+        &got,
+        &want,
+        "add_scaled f32 alpha=0 inf/nan b (scalar n=17)",
+    );
 }
 
 #[test]
@@ -281,7 +293,11 @@ fn vec4_lane_mapping_correct_f32() {
     // alpha=2.5 (not ±1 or 0) so a wrong lane is not accidentally masked.
     let alpha = 2.5f32;
     let got = run_f32(&a, &b, alpha);
-    let want: Vec<f32> = a.iter().zip(&b).map(|(&x, &y)| y.mul_add(alpha, x)).collect();
+    let want: Vec<f32> = a
+        .iter()
+        .zip(&b)
+        .map(|(&x, &y)| y.mul_add(alpha, x))
+        .collect();
     assert_bits_f32(&got, &want, "vec4 lane mapping f32 n=8192 alpha=2.5");
 }
 
