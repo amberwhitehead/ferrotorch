@@ -2284,9 +2284,14 @@ pub fn scaled_modified_bessel_k1<T: Float>(input: &Tensor<T>) -> FerrotorchResul
 /// `i == 9` (since `a = q + 9 > 9` for any `q > 0` by then), so it is a FIXED
 /// 9-iteration unroll with a relative-MACHEP `converged` early-exit flag, and
 /// the Euler-Maclaurin tail is a FIXED 12-term loop over the Bernoulli-derived
-/// `ZETA_A` table with the same early-exit. Broadcast / mixed-device cases fall
-/// through to the CPU [`binary_map`]. f64/bf16/f16 CUDA return
-/// `NotImplementedOnCuda` (base PTX lacks the f64 `pow`/`log` approximations).
+/// `ZETA_A` table with the same early-exit. Broadcast (CUDA operands of
+/// differing shape) and mixed-device (one CUDA, one CPU) cases return
+/// `NotImplementedOnCuda`: on-device broadcasting zeta is not yet implemented,
+/// and the CPU [`binary_map`] cannot read CUDA storage, so neither computes
+/// there. Only the same-shape, same-device CUDA case runs on-device; all-CPU
+/// inputs use [`binary_map`] (which broadcasts on the host). f64/bf16/f16 CUDA
+/// return `NotImplementedOnCuda` (base PTX lacks the f64 `pow`/`log`
+/// approximations).
 pub fn zeta<T: Float>(input: &Tensor<T>, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if let Some(out) = special_gpu_binary(
         input,
@@ -2555,11 +2560,15 @@ fn special_gpu_simple<T: Float>(
 ///
 /// The GPU fast path requires BOTH operands CUDA-resident, on the same device,
 /// same dtype, and the SAME shape (the elementwise kernel is one-thread-per-
-/// element with no on-device broadcast). When only one operand is CUDA, or the
-/// shapes differ (broadcast), it returns `Ok(None)` so the caller falls through
-/// to the CPU [`binary_map`] (which broadcasts). bf16/f16 CUDA inputs are
-/// rejected with `NotImplementedOnCuda` (no host round trip). The result stays
-/// on-device (R-CODE-4).
+/// element with no on-device broadcast). When NEITHER operand is CUDA it
+/// returns `Ok(None)` so the caller takes the CPU [`binary_map`] path (which
+/// broadcasts on the host). When exactly one operand is CUDA (mixed device) or
+/// both are CUDA but the shapes differ (broadcast), it returns
+/// `Err(NotImplementedOnCuda)`: on-device broadcasting is not implemented and
+/// `binary_map` cannot read CUDA storage, so there is no valid host fallback
+/// (rejecting cleanly avoids leaking the internal `GpuTensorNotAccessible`).
+/// bf16/f16 CUDA inputs are likewise rejected with `NotImplementedOnCuda` (no
+/// host round trip). The result stays on-device (R-CODE-4).
 fn special_gpu_binary<T: Float>(
     x: &Tensor<T>,
     q: &Tensor<T>,
@@ -2582,11 +2591,16 @@ fn special_gpu_binary<T: Float>(
     if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
         return Err(FerrotorchError::NotImplementedOnCuda { op });
     }
-    // Mixed device or broadcast shapes: defer to the CPU binary path (which
-    // handles broadcasting). Only the same-device, same-shape case runs the
-    // on-device kernel.
+    // Mixed device (one CUDA, one CPU) or shapes that require broadcasting:
+    // the on-device kernel is one-thread-per-element with NO on-device
+    // broadcast, and the CPU `binary_map` cannot read CUDA storage (it calls
+    // `.data()`, which returns `GpuTensorNotAccessible` for GPU tensors). So
+    // there is no valid host fallback here; reject cleanly with
+    // `NotImplementedOnCuda` (R-CODE-4: no leaked internal storage error, no
+    // silent host detour). Only the same-device, same-shape CUDA case runs the
+    // on-device kernel below.
     if x.is_cuda() != q.is_cuda() || x.shape() != q.shape() {
-        return Ok(None);
+        return Err(FerrotorchError::NotImplementedOnCuda { op });
     }
     let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
     let xh = x.gpu_handle()?;
