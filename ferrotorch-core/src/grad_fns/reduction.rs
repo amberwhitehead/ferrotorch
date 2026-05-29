@@ -873,23 +873,41 @@ fn sum_dim_inner<T: Float>(
     let accum_numel: usize = accum_shape.iter().product();
     let mut accum = vec![<T as num_traits::Zero>::zero(); accum_numel];
 
-    for (flat, &val) in in_data.iter().enumerate().take(input.numel()) {
-        // Decompose flat index into per-axis coordinates.
-        let mut rem = flat;
-        let mut coords = vec![0usize; in_shape.len()];
-        for d in (0..in_shape.len()).rev() {
-            coords[d] = rem % in_shape[d];
-            rem /= in_shape[d];
+    // Precompute the accumulator's row-major strides ONCE (the reduced axis
+    // has extent 1, so its stride contributes nothing). Walk the input in
+    // flat row-major order with an "odometer" coordinate counter, mapping each
+    // element to its accumulator slot incrementally — no per-element heap
+    // allocation and no per-element div/mod decomposition (the prior code
+    // allocated a `coords` Vec and ran two full index loops for EVERY element,
+    // which made a [1000,1000] axis reduction ~100x slower than a flat scan).
+    let mut out_strides = vec![0usize; ndim];
+    {
+        let mut s = 1usize;
+        for d in (0..ndim).rev() {
+            out_strides[d] = s;
+            s *= accum_shape[d];
         }
-        // Map to accumulator index (reduced dim coord -> 0).
+    }
+    let mut coords = vec![0usize; ndim];
+    for &val in in_data.iter().take(input.numel()) {
+        // Accumulator index: reduced-dim coord folds to 0 (its out_stride is
+        // multiplied by coords[norm_dim] which we simply skip).
         let mut oi = 0usize;
-        let mut os = 1usize;
-        for d in (0..accum_shape.len()).rev() {
-            let c = if d == norm_dim { 0 } else { coords[d] };
-            oi += c * os;
-            os *= accum_shape[d];
+        for d in 0..ndim {
+            if d != norm_dim {
+                oi += coords[d] * out_strides[d];
+            }
         }
         accum[oi] += val;
+        // Odometer increment, last (fastest) dim first — matches the
+        // contiguous row-major order of `in_data`.
+        for d in (0..ndim).rev() {
+            coords[d] += 1;
+            if coords[d] < in_shape[d] {
+                break;
+            }
+            coords[d] = 0;
+        }
     }
 
     let device = input.device();
@@ -1156,21 +1174,34 @@ fn mean_dim_inner<T: Float>(
     let accum_numel: usize = accum_shape.iter().product();
     let mut accum = vec![<T as num_traits::Zero>::zero(); accum_numel];
 
-    for (flat, &val) in in_data.iter().enumerate().take(input.numel()) {
-        let mut rem = flat;
-        let mut coords = vec![0usize; in_shape.len()];
-        for d in (0..in_shape.len()).rev() {
-            coords[d] = rem % in_shape[d];
-            rem /= in_shape[d];
+    // Odometer-style strided accumulation (no per-element heap alloc / div-mod;
+    // see `sum_dim_inner` for the rationale — the prior per-element `coords`
+    // Vec made this ~100x slower than a flat scan).
+    let nd = in_shape.len();
+    let mut out_strides = vec![0usize; nd];
+    {
+        let mut s = 1usize;
+        for d in (0..nd).rev() {
+            out_strides[d] = s;
+            s *= accum_shape[d];
         }
+    }
+    let mut coords = vec![0usize; nd];
+    for &val in in_data.iter().take(input.numel()) {
         let mut oi = 0usize;
-        let mut os = 1usize;
-        for d in (0..accum_shape.len()).rev() {
-            let c = if d == norm_dim { 0 } else { coords[d] };
-            oi += c * os;
-            os *= accum_shape[d];
+        for d in 0..nd {
+            if d != norm_dim {
+                oi += coords[d] * out_strides[d];
+            }
         }
         accum[oi] += val;
+        for d in (0..nd).rev() {
+            coords[d] += 1;
+            if coords[d] < in_shape[d] {
+                break;
+            }
+            coords[d] = 0;
+        }
     }
 
     // Divide by dim size to get mean.
