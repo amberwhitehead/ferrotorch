@@ -14227,8 +14227,12 @@ pub fn gpu_log_softmax_backward(
 ///
 /// Uses a two-pass approach: first pass reduces `n` elements to `num_blocks`
 /// partial sums via the `reduce_sum_kernel`, second pass reduces the partial
-/// sums to a single scalar. For small inputs (< 256 blocks), the second pass
-/// runs on CPU to avoid kernel launch overhead.
+/// sums to a single scalar. The second pass stays ON-DEVICE — it recurses
+/// via another `gpu_reduce_sum` launch on the `<= 1024` partials (#1672).
+/// The old CPU-readback combine for few blocks forced a blocking
+/// Device->Host sync mid-reduction (~110x slower than the axis path) and
+/// was removed; only the `num_blocks == 1` case (partial IS the result)
+/// short-circuits without a second launch.
 #[cfg(feature = "cuda")]
 pub fn gpu_reduce_sum(a: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
     use cudarc::driver::PushKernelArg;
@@ -14314,14 +14318,12 @@ pub fn gpu_reduce_sum(a: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<Cuda
         return Ok(partials);
     }
 
-    // For small number of blocks, reduce on CPU (cheaper than another kernel launch).
-    if num_blocks <= 256 {
-        let host_partials = gpu_to_cpu(&partials, device)?;
-        let total: f32 = host_partials.iter().sum();
-        return cpu_to_gpu(&[total], device);
-    }
-
-    // For many blocks, recurse with another kernel launch.
+    // Combine the partials ON-DEVICE via a second kernel launch (#1672).
+    // `num_blocks <= 1024`, so this recursion folds them in a single block
+    // (`ceil(1024 / 256) == 4` blocks at the deepest, then `<= 1`) without
+    // ever copying the partials back to the host. The previous CPU-readback
+    // branch (`gpu_to_cpu(&partials)` + host `.sum()`) forced a blocking
+    // Device->Host sync mid-reduction — ~110x slower than the axis path.
     gpu_reduce_sum(&partials, device)
 }
 
@@ -14418,11 +14420,7 @@ pub fn gpu_reduce_prod(a: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<Cud
     if num_blocks <= 1 {
         return Ok(partials);
     }
-    if num_blocks <= 256 {
-        let host = gpu_to_cpu(&partials, device)?;
-        let total: f32 = host.iter().product();
-        return cpu_to_gpu(&[total], device);
-    }
+    // Combine the partials ON-DEVICE (#1672); no Device->Host readback.
     gpu_reduce_prod(&partials, device)
 }
 
@@ -14669,12 +14667,7 @@ pub fn gpu_reduce_min(a: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<Cuda
         return Ok(partials);
     }
 
-    if num_blocks <= 256 {
-        let host_partials = gpu_to_cpu(&partials, device)?;
-        let total = host_partials.iter().copied().fold(f32::INFINITY, f32::min);
-        return cpu_to_gpu(&[total], device);
-    }
-
+    // Combine the partials ON-DEVICE (#1672); no Device->Host readback.
     gpu_reduce_min(&partials, device)
 }
 
@@ -14764,15 +14757,7 @@ pub fn gpu_reduce_max(a: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<Cuda
         return Ok(partials);
     }
 
-    if num_blocks <= 256 {
-        let host_partials = gpu_to_cpu(&partials, device)?;
-        let total = host_partials
-            .iter()
-            .copied()
-            .fold(f32::NEG_INFINITY, f32::max);
-        return cpu_to_gpu(&[total], device);
-    }
-
+    // Combine the partials ON-DEVICE (#1672); no Device->Host readback.
     gpu_reduce_max(&partials, device)
 }
 
@@ -14877,12 +14862,8 @@ pub fn gpu_masked_reduce_min(
     if num_blocks <= 1 {
         return Ok(partials);
     }
-    if num_blocks <= 256 {
-        let host = gpu_to_cpu(&partials, device)?;
-        let total = host.iter().copied().fold(f32::INFINITY, f32::min);
-        return cpu_to_gpu(&[total], device);
-    }
-    // Recurse with the unmasked reducer on the partials (already filtered).
+    // Recurse with the unmasked reducer on the partials (already filtered),
+    // staying ON-DEVICE (#1672); no Device->Host readback of the partials.
     gpu_reduce_min(&partials, device)
 }
 
@@ -14987,11 +14968,8 @@ pub fn gpu_masked_reduce_max(
     if num_blocks <= 1 {
         return Ok(partials);
     }
-    if num_blocks <= 256 {
-        let host = gpu_to_cpu(&partials, device)?;
-        let total = host.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        return cpu_to_gpu(&[total], device);
-    }
+    // Recurse with the unmasked reducer on the partials (already filtered),
+    // staying ON-DEVICE (#1672); no Device->Host readback of the partials.
     gpu_reduce_max(&partials, device)
 }
 
@@ -18535,12 +18513,7 @@ pub fn gpu_reduce_sum_f64(a: &CudaBuffer<f64>, device: &GpuDevice) -> GpuResult<
         return Ok(partials);
     }
 
-    if num_blocks <= 256 {
-        let host_partials = gpu_to_cpu(&partials, device)?;
-        let total: f64 = host_partials.iter().sum();
-        return cpu_to_gpu(&[total], device);
-    }
-
+    // Combine the partials ON-DEVICE (#1672); no Device->Host readback.
     gpu_reduce_sum_f64(&partials, device)
 }
 
@@ -18635,12 +18608,7 @@ pub fn gpu_reduce_min_f64(a: &CudaBuffer<f64>, device: &GpuDevice) -> GpuResult<
         return Ok(partials);
     }
 
-    if num_blocks <= 256 {
-        let host_partials = gpu_to_cpu(&partials, device)?;
-        let total = host_partials.iter().copied().fold(f64::INFINITY, f64::min);
-        return cpu_to_gpu(&[total], device);
-    }
-
+    // Combine the partials ON-DEVICE (#1672); no Device->Host readback.
     gpu_reduce_min_f64(&partials, device)
 }
 
@@ -18734,15 +18702,7 @@ pub fn gpu_reduce_max_f64(a: &CudaBuffer<f64>, device: &GpuDevice) -> GpuResult<
         return Ok(partials);
     }
 
-    if num_blocks <= 256 {
-        let host_partials = gpu_to_cpu(&partials, device)?;
-        let total = host_partials
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max);
-        return cpu_to_gpu(&[total], device);
-    }
-
+    // Combine the partials ON-DEVICE (#1672); no Device->Host readback.
     gpu_reduce_max_f64(&partials, device)
 }
 
@@ -18834,11 +18794,7 @@ pub fn gpu_reduce_prod_f64(a: &CudaBuffer<f64>, device: &GpuDevice) -> GpuResult
     if num_blocks <= 1 {
         return Ok(partials);
     }
-    if num_blocks <= 256 {
-        let host = gpu_to_cpu(&partials, device)?;
-        let total: f64 = host.iter().product();
-        return cpu_to_gpu(&[total], device);
-    }
+    // Combine the partials ON-DEVICE (#1672); no Device->Host readback.
     gpu_reduce_prod_f64(&partials, device)
 }
 
@@ -18963,11 +18919,7 @@ pub fn gpu_masked_reduce_min_f64(
     if num_blocks <= 1 {
         return Ok(partials);
     }
-    if num_blocks <= 256 {
-        let host = gpu_to_cpu(&partials, device)?;
-        let total = host.iter().copied().fold(f64::INFINITY, f64::min);
-        return cpu_to_gpu(&[total], device);
-    }
+    // Combine the partials ON-DEVICE (#1672); no Device->Host readback.
     gpu_reduce_min_f64(&partials, device)
 }
 
@@ -19073,11 +19025,7 @@ pub fn gpu_masked_reduce_max_f64(
     if num_blocks <= 1 {
         return Ok(partials);
     }
-    if num_blocks <= 256 {
-        let host = gpu_to_cpu(&partials, device)?;
-        let total = host.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        return cpu_to_gpu(&[total], device);
-    }
+    // Combine the partials ON-DEVICE (#1672); no Device->Host readback.
     gpu_reduce_max_f64(&partials, device)
 }
 
