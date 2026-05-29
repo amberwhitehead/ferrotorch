@@ -18,7 +18,7 @@
 #![cfg(feature = "cuda")]
 
 use ferrotorch_gpu::special::{gpu_i0_f32, gpu_i0e_f32, gpu_i1_f32, gpu_i1e_f32};
-use ferrotorch_gpu::{cpu_to_gpu, gpu_to_cpu, init_cuda_backend, GpuDevice};
+use ferrotorch_gpu::{GpuDevice, cpu_to_gpu, gpu_to_cpu, init_cuda_backend};
 use std::sync::Once;
 
 fn ensure_cuda() {
