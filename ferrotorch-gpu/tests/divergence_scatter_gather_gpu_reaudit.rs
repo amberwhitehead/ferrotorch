@@ -1,77 +1,100 @@
 //! ADVERSARIAL RE-AUDIT of the dim-aware GPU gather/scatter family
-//! (commit b2793d6a9, #1545 / sub #1535). The builder verified only "nice"
-//! contiguous cases. This file hunts the cases it skipped.
+//! (commit b2793d6a9, #1545 / sub #1535) and the strided-view fix
+//! (commit 02fcd71a1, #1655). The original builder verified only "nice"
+//! contiguous cases; the #1655 fix made the four CUDA fast paths
+//! `.contiguous()`-materialise input/self/src on-device before dispatch.
+//! This file (a) pins the transposed-view divergences the fix targets and
+//! (b) hunts HARDER strided cases (non-zero storage_offset, permuted 3D)
+//! the fix might not cover.
 //!
-//! # DIVERGENCE FOUND — non-contiguous (transposed) CUDA input ignores strides
+//! # FIX UNDER AUDIT — non-contiguous CUDA input must honor strides
 //!
 //! `ferrotorch_core::ops::indexing::{gather,scatter,scatter_value,scatter_add}`
-//! take a CUDA fast path (guarded only by `input.is_cuda()`, NOT by
-//! `is_contiguous()`) that passes `input.gpu_handle()` (the RAW physical
-//! buffer, in original memory order, ignoring `strides()` and
-//! `storage_offset()`) into the PTX launchers together with `factor(
-//! input.shape(), dim)` computed from the LOGICAL (permuted) shape. See
-//! `ferrotorch-core/src/ops/indexing.rs:175-231` (gather), `:333-387`
-//! (scatter), `:480-541` (scatter_value), `:620-674` (scatter_add). None of
-//! the four branches materialise `.contiguous()` first, unlike
-//! `ferrotorch-core/src/ops/elementwise.rs:549` and `:592` which DO guard with
-//! `if input.is_contiguous() { .. } else { .. }`.
+//! formerly took a CUDA fast path guarded only by `input.is_cuda()`, passing
+//! `input.gpu_handle()` (the RAW physical buffer, ignoring `strides()` and
+//! `storage_offset()`) into PTX launchers that assume a C-contiguous
+//! `[outer, axis, inner]` layout. For a transposed/permuted/narrowed view the
+//! logical shape != physical layout, so every computed address was wrong.
 //!
-//! The kernels themselves (`ferrotorch-gpu/src/scatter_gather_kernels.rs:14-21`
-//! module doc) explicitly assume a "C-contiguous" `[outer, axis, inner]`
-//! buffer: `o*axis*inner + a*inner + k`. For a transposed view the logical
-//! shape no longer matches the physical buffer layout, so every address is
-//! computed against the wrong stride.
+//! The fix (`ferrotorch-core/src/ops/indexing.rs:190,351-352,498,653-654`)
+//! calls `input.contiguous()` (and `src.contiguous()` for scatter/scatter_add)
+//! before dispatch. For a non-contiguous CUDA tensor `.contiguous()` dispatches
+//! to the backend `strided_copy_f32/f64` kernel, an ON-DEVICE copy that
+//! honors `src_strides` AND `src_offset`
+//! (`ferrotorch-core/src/methods.rs:1583-1589`) — no host round trip; result
+//! stays GPU-resident. Upstream parallel: torch's CUDA scatter/gather restrides
+//! via TensorIterator honoring `self.strides()`
+//! (`pytorch aten/src/ATen/native/cuda/ScatterGatherKernel.cu:196,205-207`).
 //!
-//! The CPU path (the within-framework reference) does NOT diverge: its
-//! `input.data_vec()?` (`ferrotorch-core/src/tensor.rs:723-752`) walks the
-//! strides for a non-contiguous tensor, materialising the logical order. So
-//! CPU == torch, GPU != torch — a real GPU-vs-CPU AND GPU-vs-torch divergence.
-//!
-//! ## Mechanism, gather example
-//!
-//! `base = [[1,2,3],[4,5,6]]` shape `[2,3]`, physical buffer
-//! `[1,2,3,4,5,6]`. `base.transpose(0,1)` is the `[3,2]` view
-//! `[[1,4],[2,5],[3,6]]` (strides `[1,3]`, SAME buffer). `torch.gather(view,
-//! 1, idx)` with `idx=[[0,1],[1,0],[0,1]]` returns `[[1,4],[5,2],[3,6]]`
-//! (verified live, torch 2.11.0+cu130, CUDA). ferrotorch's GPU kernel instead
-//! reads the buffer as a fresh C-contiguous `[3,2]` = `[[1,2],[3,4],[5,6]]`
-//! and returns `[[1,2],[4,3],[5,6]]` — wrong (observed left
-//! `[1,2,4,3,5,6]`).
+//! NB: in this API the `index` is a flat row-major `&[usize]` host slice with
+//! `index_shape` — there is NO index Tensor that could be non-contiguous, so
+//! "transposed index view" is not expressible at this surface; the index is
+//! always the logical row-major order torch's `index` tensor would present.
 //!
 //! # R-CHAR-3 provenance (live torch 2.11.0+cu130, CUDA — RTX 3090)
 //!
 //! ```python
-//! import torch; d="cuda"
+//! import torch; d="cuda"   # values identical on cpu unless noted nondeterministic
+//!
+//! # --- transposed gather (fix target) ---
 //! base = torch.tensor([[1.,2.,3.],[4.,5.,6.]], device=d)   # [2,3]
 //! tt = base.t()                                            # [3,2] view, NOT contiguous
 //! idx = torch.tensor([[0,1],[1,0],[0,1]], device=d)
-//! torch.gather(tt, 1, idx).cpu().tolist()
-//! #   [[1.,4.],[5.,2.],[3.,6.]]
+//! torch.gather(tt, 1, idx).cpu().tolist()  #   [[1.,4.],[5.,2.],[3.,6.]]
 //!
+//! # --- transposed scatter OVERWRITE, UNIQUE target offsets, NON-ZERO self (deterministic) ---
+//! st  = torch.tensor([[1.,2.,3.],[4.,5.,6.]], device=d).t()  # [3,2] view [[1,4],[2,5],[3,6]]
+//! src = torch.tensor([[10.,20.],[30.,40.]], device=d)        # [2,2]
+//! sidx= torch.tensor([[0,1],[2,0]], device=d)                # dim0, unique per col: c0{0,2} c1{1,0}
+//! torch.scatter(st, 0, sidx, src).cpu().tolist()
+//! #   [[10.,40.],[2.,20.],[30.,6.]]   (cpu == cuda; the 2 & 6 are PRESERVED self values
+//! #                                    a contiguous-misread would corrupt)
+//!
+//! # --- transposed scatter OVERWRITE, DUPLICATE target offsets (NONDETERMINISTIC on CUDA) ---
 //! z = torch.zeros(2,3, device=d).t()                       # [3,2] view
-//! src  = torch.tensor([[10.,20.],[30.,40.],[50.,60.]], device=d)
-//! sidx = torch.tensor([[0,1],[1,0],[0,1]], device=d)
-//! torch.scatter(z, 0, sidx, src).cpu().tolist()
-//! #   [[10.,40.],[30.,20.],[0.,0.]]
+//! src2 = torch.tensor([[10.,20.],[30.,40.],[50.,60.]], device=d)
+//! sidx2= torch.tensor([[0,1],[1,0],[0,1]], device=d)       # col0 rows {0,1,0}, col1 {1,0,1}
+//! torch.scatter(z, 0, sidx2, src2).cpu().tolist()
+//! #   cpu : [[50.,40.],[30.,60.],[0.,0.]]
+//! #   cuda: [[10.,40.],[30.,20.],[0.,0.]]   (stable on this HW; torch docs: unspecified)
 //!
-//! za   = torch.tensor([[1.,2.,3.],[4.,5.,6.]], device=d).t()   # [3,2] view [[1,4],[2,5],[3,6]]
+//! # --- transposed scatter_add, NON-ZERO self (fix target) ---
+//! za   = torch.tensor([[1.,2.,3.],[4.,5.,6.]], device=d).t()   # [3,2] view
 //! aidx = torch.tensor([[0,0],[1,1],[0,1]], device=d)
 //! asrc = torch.tensor([[1.,2.],[3.,4.],[5.,6.]], device=d)
-//! torch.scatter_add(za, 1, aidx, asrc).cpu().tolist()
-//! #   [[4.,4.],[2.,12.],[8.,12.]]
+//! torch.scatter_add(za, 1, aidx, asrc).cpu().tolist()  #   [[4.,4.],[2.,12.],[8.,12.]]
+//!
+//! # --- HARDER: narrowed (nonzero storage_offset) non-contiguous gather ---
+//! big = torch.arange(0.,24.,device=d).reshape(4,6)
+//! v   = big.narrow(1,1,3).narrow(0,1,2)    # [2,3] view, strides (6,1), offset 7, NOT contig
+//! gidx= torch.tensor([[0,2,1],[1,0,2]], device=d)
+//! torch.gather(v, 1, gidx).cpu().tolist()  #   [[7.,9.,8.],[14.,13.,15.]]
+//!
+//! # --- HARDER: transposed-narrowed non-contiguous scatter_add ---
+//! base = torch.arange(1.,25.,device=d).reshape(4,6)
+//! nc   = base.narrow(1,0,2).narrow(0,0,3).t()   # [2,3] view strides (1,6) offset 0, NOT contig
+//!                                                # == [[1,7,13],[2,8,14]]
+//! saidx= torch.tensor([[0,0,1],[1,1,0]], device=d)
+//! sasrc= torch.tensor([[1.,2.,3.],[4.,5.,6.]], device=d)
+//! torch.scatter_add(nc, 0, saidx, sasrc).cpu().tolist()  #   [[2.,9.,19.],[6.,13.,17.]]
+//!
+//! # --- HARDER: 3D permuted non-contiguous gather at the permuted dim ---
+//! t3 = torch.arange(0.,24.,device=d).reshape(2,3,4)
+//! p  = t3.permute(2,0,1)                  # [4,2,3] view, strides (1,12,4), NOT contig
+//! g3 = torch.zeros(4,2,3,dtype=torch.long,device=d); g3[:,1,:]=1
+//! torch.gather(p, 1, g3).flatten().cpu().tolist()
+//! #   [0,4,8, 12,16,20, 1,5,9, 13,17,21, 2,6,10, 14,18,22, 3,7,11, 15,19,23]
 //!
 //! # --- clean (regression-guard) fixtures, contiguous inputs ---
 //! inp = torch.arange(1.,13.,device=d).reshape(3,4)
-//! idx = torch.tensor([[0,3],[1,2],[3,0]], device=d)        # smaller than input
-//! torch.gather(inp,1,idx).cpu().tolist()
-//! #   [[1.,4.],[6.,7.],[12.,9.]]
+//! idx = torch.tensor([[0,3],[1,2],[3,0]], device=d)
+//! torch.gather(inp,1,idx).cpu().tolist()  #   [[1.,4.],[6.,7.],[12.,9.]]
 //! z = torch.zeros(3,4,device=d)
 //! src = torch.tensor([[1.,2.],[3.,4.],[5.,6.]],device=d)
 //! torch.scatter(z,1,torch.tensor([[0,3],[1,2],[3,0]],device=d),src).cpu().tolist()
 //! #   [[1.,0.,0.,2.],[0.,3.,4.,0.],[6.,0.,0.,5.]]
 //! za = torch.zeros(3,device=d); aidx=torch.zeros(1000,dtype=torch.long,device=d)
-//! torch.scatter_add(za,0,aidx,torch.ones(1000,device=d)).cpu().tolist()[0]
-//! #   1000.0  (atomic, no lost updates)
+//! torch.scatter_add(za,0,aidx,torch.ones(1000,device=d)).cpu().tolist()[0]  #   1000.0
 //! ```
 
 #![cfg(feature = "cuda")]
@@ -107,39 +130,33 @@ fn host_f64(t: &Tensor<f64>) -> Vec<f64> {
 }
 
 // ===========================================================================
-// DIVERGENCE: non-contiguous (transposed) CUDA input — strides ignored.
-// These are HARD FAILURES (release-blocker): the GPU kernel silently
-// corrupts the result for any transposed/permuted CUDA tensor, a class of
-// inputs PyTorch handles transparently.
-//
-// TRACKING: ferrotorch-core/src/ops/indexing.rs CUDA fast paths must
-// `.contiguous()`-materialise the input (and src) before dispatch, OR the
-// kernels must honor strides.
+// FIX TARGET: non-contiguous (transposed) CUDA input — strides honored.
+// These exercise the #1655 .contiguous()-materialise fix. They must PASS:
+// GPU result == torch == ferrotorch-CPU (all deterministic cases). Each FAILS
+// against the pre-fix (b2793d6a9) kernel (negative control verified live).
 // ===========================================================================
 
-/// Divergence: `gather` on a transposed (non-contiguous) CUDA tensor diverges
-/// from `torch.gather` because `ferrotorch-core/src/ops/indexing.rs:175`
-/// passes the raw physical buffer (ignoring `strides()`) with the LOGICAL
-/// permuted shape into `gather_dim_f32`.
-/// Upstream torch returns `[[1,4],[5,2],[3,6]]`; ferrotorch GPU returns the
-/// contiguous-misread `[[1,2],[4,3],[5,6]]`.
+/// `gather` on a transposed (non-contiguous) CUDA tensor must match
+/// `torch.gather`. Pins the #1655 fix at
+/// `ferrotorch-core/src/ops/indexing.rs:190` (input.contiguous()).
+/// torch returns `[[1,4],[5,2],[3,6]]`; pre-fix GPU returned `[1,2,4,3,5,6]`.
 #[test]
 fn divergence_gather_transposed_cuda_input_f32() {
     ensure_cuda();
-    // base [2,3] contiguous -> transpose to [3,2] non-contiguous view on GPU.
     let base = cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
         .to(Device::Cuda(0))
         .expect("to cuda");
     let tt = base.transpose(0, 1).expect("transpose"); // [3,2] view, non-contig
     assert!(tt.is_cuda());
-    assert!(!tt.is_contiguous(), "transposed view must be non-contiguous");
+    assert!(
+        !tt.is_contiguous(),
+        "transposed view must be non-contiguous"
+    );
 
-    // gather along dim=1 of the [3,2] view, index shape [3,2].
     let index = [0usize, 1, 1, 0, 0, 1];
     let out = gather(&tt, 1, &index, &[3, 2]).expect("gpu gather transposed");
     assert!(out.is_cuda(), "result must stay GPU-resident");
 
-    // CPU reference honors strides (tensor.rs:723) and equals torch.
     let cpu_view = cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
         .transpose(0, 1)
         .expect("cpu transpose");
@@ -158,15 +175,73 @@ fn divergence_gather_transposed_cuda_input_f32() {
     );
 }
 
-/// Divergence: `scatter` on a transposed (non-contiguous) CUDA `self` diverges
-/// from `torch.scatter` (`ferrotorch-core/src/ops/indexing.rs:333` clones the
-/// raw buffer and writes against the logical shape, ignoring strides).
-/// Upstream torch returns `[[10,40],[30,20],[0,0]]`; ferrotorch GPU observed
-/// `[50,40,30,60,0,0]`.
+/// `scatter` (OVERWRITE) on a transposed (non-contiguous) CUDA `self` with a
+/// **UNIQUE** target-offset index set AND a **NON-ZERO** self — deterministic,
+/// so GPU==CPU==torch, while the preserved non-zero self values expose the
+/// stride bug.
+///
+/// (Rewritten from the prior ill-posed fixture which used DUPLICATE target
+/// offsets into a zeros self: scatter-overwrite with duplicate indices is
+/// documented NONDETERMINISTIC on CUDA per torch, so torch-CPU and torch-CUDA
+/// legitimately differ and GPU==CPU is impossible; a zeros self ALSO masks the
+/// stride bug. This rewrite uses unique indices into a non-zero self so the
+/// case is both well-posed AND still pins the stride fix. The duplicate-index
+/// nondeterminism is covered separately by
+/// `scatter_transposed_dup_idx_cuda_matches_torch_cuda`.)
+///
+/// self = `[[1,2,3],[4,5,6]].t()` = `[[1,4],[2,5],[3,6]]` ([3,2] view, dim0
+/// extent 3). dim=0 scatter, idx `[[0,1],[2,0]]` (unique per column),
+/// src `[[10,20],[30,40]]`. The `2` at [1][0] and `6` at [2][1] are PRESERVED
+/// self values; a contiguous-misread of the physical buffer corrupts them.
+/// torch (cpu == cuda): `[[10,40],[2,20],[30,6]]`.
 #[test]
 fn divergence_scatter_transposed_cuda_self_f32() {
     ensure_cuda();
-    // self: zeros [2,3] -> transpose -> [3,2] non-contig view.
+    let base = cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
+        .to(Device::Cuda(0))
+        .expect("to cuda");
+    let st = base.transpose(0, 1).expect("transpose"); // [3,2] view [[1,4],[2,5],[3,6]]
+    assert!(st.is_cuda());
+    assert!(
+        !st.is_contiguous(),
+        "transposed self must be non-contiguous"
+    );
+    let src = cpu_f32(&[10.0, 20.0, 30.0, 40.0], &[2, 2])
+        .to(Device::Cuda(0))
+        .expect("src cuda");
+    // torch sidx = [[0,1],[2,0]] -> row-major flat. UNIQUE per column.
+    let index = [0usize, 1, 2, 0];
+    let out = scatter(&st, 0, &index, &[2, 2], &src).expect("gpu scatter transposed unique");
+    assert!(out.is_cuda(), "result must stay GPU-resident");
+
+    let st_cpu = cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
+        .transpose(0, 1)
+        .expect("cpu t");
+    let src_cpu = cpu_f32(&[10.0, 20.0, 30.0, 40.0], &[2, 2]);
+    let cpu_out = scatter(&st_cpu, 0, &index, &[2, 2], &src_cpu).expect("cpu scatter t");
+    assert_eq!(
+        cpu_out.data_vec().unwrap(),
+        vec![10.0, 40.0, 2.0, 20.0, 30.0, 6.0],
+        "CPU reference must equal torch (sanity)"
+    );
+
+    // torch.scatter(base.t(), 0, [[0,1],[2,0]], src) == [[10,40],[2,20],[30,6]].
+    assert_eq!(
+        host_f32(&out),
+        vec![10.0, 40.0, 2.0, 20.0, 30.0, 6.0],
+        "GPU scatter into transposed non-zero self (unique idx) must match torch (and CPU)"
+    );
+}
+
+/// Coverage of the DUPLICATE-index scatter-overwrite case the original
+/// (ill-posed) test conflated. scatter-overwrite with duplicate target offsets
+/// is NONDETERMINISTIC on CUDA per torch docs: torch-CPU and torch-CUDA give
+/// DIFFERENT results, so the correct cross-check is GPU == **torch-CUDA**, NOT
+/// GPU == CPU. On the RTX 3090 / torch 2.11.0+cu130 the CUDA value is stably
+/// `[[10,40],[30,20],[0,0]]` (cpu would be `[[50,40],[30,60],[0,0]]`).
+#[test]
+fn scatter_transposed_dup_idx_cuda_matches_torch_cuda() {
+    ensure_cuda();
     let z = cpu_f32(&[0.0; 6], &[2, 3])
         .to(Device::Cuda(0))
         .expect("to cuda");
@@ -175,39 +250,26 @@ fn divergence_scatter_transposed_cuda_self_f32() {
     let src = cpu_f32(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0], &[3, 2])
         .to(Device::Cuda(0))
         .expect("src cuda");
+    // torch sidx = [[0,1],[1,0],[0,1]] -> DUPLICATE: col0 rows {0,1,0}, col1 {1,0,1}.
     let index = [0usize, 1, 1, 0, 0, 1];
-    let out = scatter(&zt, 0, &index, &[3, 2], &src).expect("gpu scatter transposed");
-    assert!(out.is_cuda());
+    let out = scatter(&zt, 0, &index, &[3, 2], &src).expect("gpu scatter transposed dup");
+    assert!(out.is_cuda(), "result must stay GPU-resident");
 
-    let zt_cpu = cpu_f32(&[0.0; 6], &[2, 3]).transpose(0, 1).expect("cpu t");
-    let src_cpu = cpu_f32(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0], &[3, 2]);
-    let cpu_out = scatter(&zt_cpu, 0, &index, &[3, 2], &src_cpu).expect("cpu scatter t");
-    assert_eq!(
-        cpu_out.data_vec().unwrap(),
-        vec![10.0, 40.0, 30.0, 20.0, 0.0, 0.0]
-    );
-
-    // torch.scatter(z.t(), 0, idx, src) == [[10,40],[30,20],[0,0]].
+    // torch CUDA value (NOT cpu): [[10,40],[30,20],[0,0]].
     assert_eq!(
         host_f32(&out),
         vec![10.0, 40.0, 30.0, 20.0, 0.0, 0.0],
-        "GPU scatter into transposed self must match torch (and CPU)"
+        "GPU scatter dup-idx must match torch-CUDA (nondeterministic-on-CUDA op)"
     );
 }
 
-/// Divergence: `scatter_add` on a transposed (non-contiguous) CUDA `self`
-/// with NON-ZERO `self` data diverges from `torch.scatter_add`
-/// (`ferrotorch-core/src/ops/indexing.rs:620`). The `self` clone is read in
-/// physical (un-permuted) order, so the preserved-and-accumulated values land
-/// in the wrong slots. Upstream torch returns `[[4,4],[2,12],[8,12]]`.
-///
-/// NB: a zeros-`self` fixture would MASK this divergence (an all-zeros buffer
-/// reads identically contiguous or strided) — the builder's "nice" cases used
-/// zeros. The non-zero `self` here is what exposes it.
+/// `scatter_add` on a transposed (non-contiguous) CUDA `self` with NON-ZERO
+/// `self` data must match `torch.scatter_add`. A zeros-`self` would MASK the
+/// bug (all-zeros reads identically contiguous or strided). torch returns
+/// `[[4,4],[2,12],[8,12]]`.
 #[test]
 fn divergence_scatter_add_transposed_cuda_nonzero_self_f32() {
     ensure_cuda();
-    // self = [[1,2,3],[4,5,6]] -> transpose -> [[1,4],[2,5],[3,6]] [3,2] view.
     let z = cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
         .to(Device::Cuda(0))
         .expect("to cuda");
@@ -236,6 +298,143 @@ fn divergence_scatter_add_transposed_cuda_nonzero_self_f32() {
         vec![4.0, 4.0, 2.0, 12.0, 8.0, 12.0],
         "GPU scatter_add into transposed nonzero self must match torch (and CPU)"
     );
+}
+
+// ===========================================================================
+// HARDER strided cases the fixer might not cover: non-zero storage_offset
+// (narrowed views) and 3D permutation. .contiguous()->strided_copy passes
+// BOTH src_strides AND src_offset (methods.rs:1583-1589); these prove it.
+// Each FAILS against the pre-fix kernel (negative control verified live).
+// ===========================================================================
+
+/// `gather` on a NARROWED (non-zero `storage_offset`, non-contiguous) CUDA
+/// view. `big[4,6].narrow(1,1,3).narrow(0,1,2)` is a `[2,3]` view with strides
+/// `(6,1)` and storage_offset 7 (== `[[7,8,9],[13,14,15]]`). If
+/// `.contiguous()` ignored `storage_offset` the gather would read from offset
+/// 0 and corrupt the result. torch.gather(v,1,[[0,2,1],[1,0,2]]) ==
+/// `[[7,9,8],[14,13,15]]`.
+#[test]
+fn gather_narrowed_storage_offset_cuda_f32() {
+    ensure_cuda();
+    let data: Vec<f32> = (0..24).map(|v| v as f32).collect();
+    let big = cpu_f32(&data, &[4, 6]).to(Device::Cuda(0)).unwrap();
+    let v = big
+        .narrow(1, 1, 3)
+        .expect("narrow dim1")
+        .narrow(0, 1, 2)
+        .expect("narrow dim0"); // [2,3] view, offset 7, strides (6,1)
+    assert!(v.is_cuda());
+    assert!(
+        !v.is_contiguous(),
+        "narrowed inner-dim view must be non-contiguous"
+    );
+    assert_ne!(v.storage_offset(), 0, "fixture must have nonzero offset");
+
+    let index = [0usize, 2, 1, 1, 0, 2];
+    let out = gather(&v, 1, &index, &[2, 3]).expect("gpu gather narrowed");
+    assert!(out.is_cuda(), "result must stay GPU-resident");
+
+    // torch.gather(big[1:3,1:4], 1, [[0,2,1],[1,0,2]]) == [[7,9,8],[14,13,15]].
+    assert_eq!(
+        host_f32(&out),
+        vec![7.0, 9.0, 8.0, 14.0, 13.0, 15.0],
+        "GPU gather on narrowed (offset!=0) input must match torch"
+    );
+
+    let v_cpu = cpu_f32(&data, &[4, 6])
+        .narrow(1, 1, 3)
+        .unwrap()
+        .narrow(0, 1, 2)
+        .unwrap();
+    let cpu_out = gather(&v_cpu, 1, &index, &[2, 3]).unwrap();
+    assert_eq!(host_f32(&out), cpu_out.data_vec().unwrap(), "GPU == CPU");
+}
+
+/// `scatter_add` on a TRANSPOSED-NARROWED non-contiguous CUDA `self`.
+/// `base[4,6].narrow(1,0,2).narrow(0,0,3).t()` is a `[2,3]` view, strides
+/// `(1,6)`, == `[[1,7,13],[2,8,14]]`. dim=0 scatter_add with
+/// idx `[[0,0,1],[1,1,0]]`, src `[[1,2,3],[4,5,6]]`.
+/// torch (cpu == cuda) == `[[2,9,19],[6,13,17]]`.
+#[test]
+fn scatter_add_transposed_narrowed_cuda_f32() {
+    ensure_cuda();
+    let data: Vec<f32> = (1..=24).map(|v| v as f32).collect();
+    let base = cpu_f32(&data, &[4, 6]).to(Device::Cuda(0)).unwrap();
+    let nc = base
+        .narrow(1, 0, 2)
+        .expect("narrow dim1")
+        .narrow(0, 0, 3)
+        .expect("narrow dim0")
+        .transpose(0, 1)
+        .expect("transpose"); // [2,3] view, strides (1,6)
+    assert!(nc.is_cuda());
+    assert!(!nc.is_contiguous());
+
+    let src = cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
+        .to(Device::Cuda(0))
+        .unwrap();
+    let index = [0usize, 0, 1, 1, 1, 0];
+    let out = scatter_add(&nc, 0, &index, &[2, 3], &src).expect("gpu scatter_add tnarrow");
+    assert!(out.is_cuda());
+
+    // torch.scatter_add([[1,7,13],[2,8,14]], 0, [[0,0,1],[1,1,0]], src) == [[2,9,19],[6,13,17]].
+    assert_eq!(
+        host_f32(&out),
+        vec![2.0, 9.0, 19.0, 6.0, 13.0, 17.0],
+        "GPU scatter_add on transposed-narrowed self must match torch"
+    );
+
+    let nc_cpu = cpu_f32(&data, &[4, 6])
+        .narrow(1, 0, 2)
+        .unwrap()
+        .narrow(0, 0, 3)
+        .unwrap()
+        .transpose(0, 1)
+        .unwrap();
+    let src_cpu = cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+    let cpu_out = scatter_add(&nc_cpu, 0, &index, &[2, 3], &src_cpu).unwrap();
+    assert_eq!(host_f32(&out), cpu_out.data_vec().unwrap(), "GPU == CPU");
+}
+
+/// 3D PERMUTED non-contiguous CUDA gather at the permuted (scattered) dim.
+/// `arange(24).reshape(2,3,4).permute(2,0,1)` is a `[4,2,3]` view, strides
+/// `(1,12,4)`. gather dim=1 with index selecting row 1 of the permuted axis.
+/// torch flat == `[0,4,8, 12,16,20, 1,5,9, 13,17,21, 2,6,10, 14,18,22,
+/// 3,7,11, 15,19,23]`.
+#[test]
+fn gather_3d_permuted_cuda_f32() {
+    ensure_cuda();
+    let data: Vec<f32> = (0..24).map(|v| v as f32).collect();
+    let t3 = cpu_f32(&data, &[2, 3, 4]).to(Device::Cuda(0)).unwrap();
+    let p = t3.permute(&[2, 0, 1]).expect("permute"); // [4,2,3] view, strides (1,12,4)
+    assert!(p.is_cuda());
+    assert!(!p.is_contiguous(), "permuted view must be non-contiguous");
+    assert_eq!(p.shape(), &[4, 2, 3]);
+
+    // index [4,2,3]: row 0 of dim1 -> 0, row 1 -> 1 (g3[:,1,:]=1).
+    let mut index = vec![0usize; 24];
+    // row-major over [4,2,3]: positions where dim1==1 are flat idx (o*6 + 1*3 + k).
+    for o in 0..4 {
+        for k in 0..3 {
+            index[o * 6 + 3 + k] = 1;
+        }
+    }
+    let out = gather(&p, 1, &index, &[4, 2, 3]).expect("gpu gather 3d permuted");
+    assert!(out.is_cuda());
+
+    let expected = vec![
+        0.0, 4.0, 8.0, 12.0, 16.0, 20.0, 1.0, 5.0, 9.0, 13.0, 17.0, 21.0, 2.0, 6.0, 10.0, 14.0,
+        18.0, 22.0, 3.0, 7.0, 11.0, 15.0, 19.0, 23.0,
+    ];
+    assert_eq!(
+        host_f32(&out),
+        expected,
+        "GPU gather on 3D permuted input must match torch"
+    );
+
+    let p_cpu = cpu_f32(&data, &[2, 3, 4]).permute(&[2, 0, 1]).unwrap();
+    let cpu_out = gather(&p_cpu, 1, &index, &[4, 2, 3]).unwrap();
+    assert_eq!(host_f32(&out), cpu_out.data_vec().unwrap(), "GPU == CPU");
 }
 
 // ===========================================================================
