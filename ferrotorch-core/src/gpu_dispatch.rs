@@ -5313,6 +5313,40 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// f32 segmented row-scatter-add (GNN message passing —
+    /// `ops::scatter::scatter_add_segments`). `src` is `[e, d]`; `index` is a
+    /// resident `i64` per-ROW segment id (length `e`); the result is a fresh
+    /// zero-initialised `[dim_size, d]` buffer with
+    /// `out[index[row], :] += src[row, :]` accumulated atomically over all
+    /// rows. Duplicate segment ids sum; rows with no contributing edge stay 0.
+    fn scatter_add_segments_f32(
+        &self,
+        _src: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _e: usize,
+        _d: usize,
+        _dim_size: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_add_segments_f32",
+        })
+    }
+
+    /// f64 segmented row-scatter-add. Companion of
+    /// [`Self::scatter_add_segments_f32`]; uses an `sm_60+` f64 atomic add.
+    fn scatter_add_segments_f64(
+        &self,
+        _src: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _e: usize,
+        _d: usize,
+        _dim_size: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_add_segments_f64",
+        })
+    }
+
     /// Cast a float buffer (`src.dtype()` ∈ {F32,F64,BF16,F16}) to an integer
     /// buffer tagged `dst` (∈ {I32,I64}), truncating toward zero (PyTorch
     /// `.to(int)`). Result stays GPU-resident.

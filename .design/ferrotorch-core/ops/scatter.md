@@ -38,9 +38,14 @@ version takes a 1-D `index` over E edges mapping into a pre-decided
 - REQ-4: Empty rows — rows with no incoming edges stay zero (the
   initial `vec![T::zero(); ...]` fill is preserved). Matches
   `torch_scatter.scatter_add` default behaviour.
-- REQ-5: CPU-only forward — CUDA `src` errors with
-  `NotImplementedOnCuda`. GPU lowering NOT-STARTED (blocked on
-  #1545).
+- REQ-5: Forward on CPU AND CUDA — the CPU path is the row-loop
+  accumulation; the CUDA path (`scatter_add_segments_cuda`) materialises
+  `src` contiguous on-device, uploads the host `&[i64]` segment index
+  once to a resident `i64` buffer, and runs the atomic segmented
+  row-scatter-add GPU kernel (`gpu_scatter_add_segments_f{32,64}` in
+  `ferrotorch-gpu`), keeping the result GPU-resident (no host round trip
+  for src/out data). f32 AND f64; bf16/f16 CUDA reject with
+  `NotImplementedOnCuda`. GPU lowering landed under #1545 / sub #1535.
 - REQ-6: Forward only — no autograd. Documented in the module
   doc-comment at `:24-30`: GCN inference runs under `no_grad`; if
   autograd is needed later, the grad is a simple `gather`
@@ -61,25 +66,38 @@ version takes a 1-D `index` over E edges mapping into a pre-decided
   (`segments_rejects_negative_index`).
 - [x] AC-7: Out-of-bounds index errors
   (`segments_rejects_oob_index`).
-- [ ] AC-8: GPU lowering — NOT-STARTED, blocked on #1545.
+- [x] AC-8: GPU lowering — the `is_cuda()` branch dispatches through
+  `GpuBackend::scatter_add_segments_f{32,64}` into the atomic PTX
+  kernel; result stays GPU-resident. Live-GPU parity vs
+  `torch.zeros(N,D).index_add_(0, index, src)` at
+  `ferrotorch-gpu/tests/divergence_scatter_add_segments_gpu.rs`
+  (7 tests, RTX 3090): basic f32/f64, duplicate-segment atomic
+  (100 rows → exact column sums) f32/f64, empty-row-stays-zero,
+  bf16/f16 reject.
 
 ## Architecture
 
-The single `pub fn scatter_add_segments<T: Float>` at
-`ops/scatter.rs:74-128`:
+The single `pub fn scatter_add_segments<T: Float>` in `ops/scatter.rs`:
 
-1. Reject CUDA src with `NotImplementedOnCuda` (`ops/scatter.rs`).
-2. Validate `src` is 2-D `[E, D]` (`:84-89`).
-3. Validate `index.len() == src.shape()[0] == E` (`:90-99`).
-4. Allocate `out = vec![T::zero(); dim_size * d]` (`:101-102`).
-5. Read `src_data = src.data_vec()` (`:104`).
-6. Walk each edge `(e_idx, dst_i64) in index.iter().enumerate()`:
-   - Reject negative (`:107-111`).
-   - Reject out-of-range (`:112-119`).
-   - Add `src_data[e_idx*d..(e_idx+1)*d]` into
-     `out[dst*d..(dst+1)*d]` element-wise (`:120-124`).
-7. Build result via `Tensor::from_storage(TensorStorage::cpu(out),
+1. Validate `src` is 2-D `[E, D]`.
+2. Validate `index.len() == src.shape()[0] == E`.
+3. Per-edge segment-id validation (shared by CPU and CUDA): reject
+   negative / `>= dim_size`. This runs on the HOST before any device
+   upload — the CUDA kernel does no device-side bounds check.
+4. If `src.is_cuda()`, dispatch to `scatter_add_segments_cuda` (below).
+5. CPU path: allocate `out = vec![T::zero(); dim_size * d]`, read
+   `src_data = src.data_vec()`, walk each edge and add
+   `src_data[e_idx*d..(e_idx+1)*d]` into `out[dst*d..(dst+1)*d]`.
+6. Build result via `Tensor::from_storage(TensorStorage::cpu(out),
    vec![dim_size, d], false)`.
+
+**CUDA path** (`scatter_add_segments_cuda`): rejects bf16/f16 with
+`NotImplementedOnCuda`; materialises `src` contiguous on-device
+(`contiguous()` — no host round trip); uploads the host `&[i64]`
+segment index once to a resident `i64` buffer (uploading a
+freshly-provided host INPUT, not device data); dispatches
+`GpuBackend::scatter_add_segments_f32`/`_f64` (zero-init `[dim_size, d]`
+output + atomic row scatter-add); returns `TensorStorage::gpu`.
 
 The implementation is intentionally narrow: separate from the
 `ops::indexing::scatter_add(input, dim, index, ..., src)` which has
@@ -115,5 +133,5 @@ in `ferrotorch-graph/tests/`.
 | REQ-2 | SHIPPED | impl: shape validation at `ops/scatter.rs:84-99`; non-test consumer: `scatter_add_segments` entry — every public call runs through this validator |
 | REQ-3 | SHIPPED | impl: per-edge validation at `ops/scatter.rs:107-119`; non-test consumer: `scatter_add_segments` entry |
 | REQ-4 | SHIPPED | impl: zero-initialised `out` at `ops/scatter.rs:101-102`; non-test consumer: `scatter_add_segments` entry; tested by `segments_empty_rows_are_zero` |
-| REQ-5 | SHIPPED | impl: `NotImplementedOnCuda` at `scatter_add_segments in ops/scatter.rs`; non-test consumer: `scatter_add_segments` entry. GPU lowering NOT-STARTED, blocked on #1545 — does NOT block CPU SHIPPED |
+| REQ-5 | SHIPPED | impl: CPU row-loop + CUDA `scatter_add_segments_cuda` (contiguous-on-device, host-`&[i64]` index upload, `backend.scatter_add_segments_f{32,64}`, `TensorStorage::gpu`) in `ferrotorch-core/src/ops/scatter.rs`; GPU primitive `gpu_scatter_add_segments_f{32,64}` + `CudaBackendImpl::scatter_add_segments_f{32,64}` in `ferrotorch-gpu`; non-test consumer: `scatter_add_segments` public entry (the `is_cuda()` branch), re-exported `ferrotorch_core::scatter_add_segments` for `ferrotorch-graph::MessagePassing`. GPU lowering landed #1545 / sub #1535; live-GPU verified at `ferrotorch-gpu/tests/divergence_scatter_add_segments_gpu.rs` |
 | REQ-6 | SHIPPED | impl: documented in module-level `//!` comment at `ops/scatter.rs`; non-test consumer: explicit `no_grad` invocation by the `ferrotorch-graph` inference harness |

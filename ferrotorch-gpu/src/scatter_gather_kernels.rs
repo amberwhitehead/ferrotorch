@@ -40,6 +40,16 @@
 //!   Mirrors `aten::scatter_add` whose CUDA reduce op is `fastAtomicAdd`
 //!   (`ScatterGatherKernel.cu:41-44`).
 //!
+//! - **scatter_add_segments**: the segmented ROW scatter-add used by GNN
+//!   message passing (`ferrotorch-core::ops::scatter::scatter_add_segments`).
+//!   `src` is `[E, D]`; `index` is a per-ROW `i64` segment id (length `E`,
+//!   uploaded from the host `&[i64]`); output is the zero-initialised
+//!   `[dim_size, D]` with `out[index[e], :] += src[e, :]` accumulated over all
+//!   rows. One thread per `(e, d)` element, `atom.global.add.f{32,64}` so
+//!   duplicate segment ids sum. This is the same primitive
+//!   `torch.zeros(dim_size, D).index_add_(0, index, src)` computes (and
+//!   `torch_scatter.scatter_add(src, index, dim=0, dim_size=N)`).
+//!
 //! # Index dtype
 //!
 //! The index is supplied as a GPU-resident `i64` buffer (PyTorch's index
@@ -75,6 +85,7 @@
 //! | REQ-2 (f64 family) | SHIPPED | `gpu_*_dim_f64` in `scatter_gather_kernels.rs`; consumer `CudaBackendImpl::*_dim_f64` in `backend_impl.rs` |
 //! | REQ-3 (atomic scatter_add) | SHIPPED | `atom.global.add.f32` / `atom.global.add.f64` in the scatter_add PTX; verified by the duplicate-index unit test `scatter_add_dim_f32_duplicate_indices` |
 //! | REQ-4 (dispatch wiring) | SHIPPED | the four `CudaBackendImpl::*_dim_{f32,f64}` overrides; consumer the `is_cuda()` branch of `gather`/`scatter`/`scatter_value`/`scatter_add` in `ferrotorch-core/src/ops/indexing.rs` |
+//! | REQ-5 (segmented row scatter-add) | SHIPPED | `gpu_scatter_add_segments_f32`/`_f64` (`atom.global.add.f{32,64}` over a per-row i64 segment index, zero-init output); consumer `CudaBackendImpl::scatter_add_segments_f32`/`_f64` in `backend_impl.rs`, themselves consumed by the `is_cuda()` branch of `ferrotorch_core::ops::scatter::scatter_add_segments` |
 
 #![cfg(feature = "cuda")]
 
@@ -459,6 +470,101 @@ const SCATTER_ADD_DIM_F64_PTX: &str = scatter_add_dim_ptx!(
 );
 
 // ===========================================================================
+// scatter_add_segments PTX. The segmented row-scatter-add used by GNN message
+// passing (`ferrotorch-core/src/ops/scatter.rs::scatter_add_segments`).
+//
+// Params: (out_ptr, idx_ptr, src_ptr, e, d, total)
+//   out : V[dim_size * d]   (PRE-ZEROED by the launcher; dim_size implicit)
+//   idx : i64[e]            (one segment/output-row id per src row)
+//   src : V[e * d]          (E rows, D features, C-contiguous)
+// Thread t in [0, total = e*d):
+//   row = t / d; col = t % d
+//   seg = idx[row]
+//   dst = seg*d + col
+//   out[dst] += src[t]      (ATOMIC — duplicate seg ids accumulate)
+//
+// Distinct from scatter_add_dim_ptx: the index is per-ROW (length E), not a
+// full-rank per-element index, and addressing is the flat `seg*d + col` row
+// scatter rather than the `[outer, axis, inner]` decomposition. The atomic add
+// is the same `atom.global.add.f{32,64}` (`sm_60+`) — duplicate segment ids
+// into the same output row are the whole reason for the atomic.
+// ($wsh = value byte-width shift "2"=f32 / "3"=f64; $ldv/$atom/$vreg per width)
+// ===========================================================================
+macro_rules! scatter_add_segments_ptx {
+    ($kname:literal, $wsh:literal, $ldv:literal, $atom:literal, $vreg:literal) => {
+        concat!(
+            ".version 7.0\n.target sm_60\n.address_size 64\n",
+            ".visible .entry ",
+            $kname,
+            "(
+    .param .u64 out_ptr, .param .u64 idx_ptr, .param .u64 src_ptr,
+    .param .u32 e, .param .u32 d, .param .u32 total
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %dd, %row, %col, %seg, %dstelem;
+    .reg .u64 %out, %idx, %src, %off, %addr;
+    .reg .s64 %segv;
+    .reg ",
+            $vreg,
+            " %v, %dummy;
+    .reg .pred %p;
+
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %idx, [idx_ptr];
+    ld.param.u64 %src, [src_ptr];
+    ld.param.u32 %tot, [total];
+    ld.param.u32 %dd, [d];
+
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot; @%p bra DONE;
+
+    div.u32 %row, %gtid, %dd;
+    rem.u32 %col, %gtid, %dd;
+
+    cvt.u64.u32 %off, %row; shl.b64 %off, %off, 3; add.u64 %addr, %idx, %off;
+    ld.global.s64 %segv, [%addr];
+    cvt.u32.s64 %seg, %segv;
+
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, ",
+            $wsh,
+            "; add.u64 %addr, %src, %off;
+    ",
+            $ldv,
+            " %v, [%addr];
+
+    mul.lo.u32 %dstelem, %seg, %dd;
+    add.u32 %dstelem, %dstelem, %col;
+
+    cvt.u64.u32 %off, %dstelem; shl.b64 %off, %off, ",
+            $wsh,
+            "; add.u64 %addr, %out, %off;
+    ",
+            $atom,
+            " %dummy, [%addr], %v;
+DONE:
+    ret;
+}
+"
+        )
+    };
+}
+
+const SCATTER_ADD_SEGMENTS_F32_PTX: &str = scatter_add_segments_ptx!(
+    "scatter_add_segments_f32_kernel",
+    "2",
+    "ld.global.f32",
+    "atom.global.add.f32",
+    ".f32"
+);
+const SCATTER_ADD_SEGMENTS_F64_PTX: &str = scatter_add_segments_ptx!(
+    "scatter_add_segments_f64_kernel",
+    "3",
+    "ld.global.f64",
+    "atom.global.add.f64",
+    ".f64"
+);
+
+// ===========================================================================
 // gather launchers
 // ===========================================================================
 
@@ -780,6 +886,116 @@ pub fn gpu_scatter_add_dim_f64(
 }
 
 // ===========================================================================
+// scatter_add_segments launchers (out is zero-initialised; segmented row add)
+// ===========================================================================
+
+/// Compile + launch the segmented row-scatter-add kernel. `out` is the
+/// pre-zeroed `dim_size*d` output buffer (the only `&mut`); `idx` is the
+/// resident `i64` segment id per src row (`e` ids); `src` is `[e, d]`. Thread
+/// `t in [0, e*d)` atomically adds `src[t]` into `out[idx[t/d]*d + t%d]`.
+fn launch_scatter_add_segments<V: DeviceRepr + ValidAsZeroBits>(
+    out: &mut CudaSlice<V>,
+    idx: &CudaSlice<i64>,
+    src: &CudaSlice<V>,
+    e: usize,
+    d: usize,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<()> {
+    let total = e.checked_mul(d).ok_or(GpuError::LengthMismatch { a: e, b: d })?;
+    if total == 0 {
+        return Ok(());
+    }
+    let stream = device.stream();
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|err| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: err,
+        }
+    })?;
+    let cfg = launch_1d(total);
+    let (e_u, d_u, total_u) = (e as u32, d as u32, total as u32);
+    // SAFETY:
+    // - `f` is the PTX entry `kernel_name`; its 6-arg signature
+    //   (out, idx, src, e, d, total) matches the args pushed below in order.
+    // - `out` is the caller's pre-zeroed `dim_size*d` buffer (the only `&mut`,
+    //   non-aliased); `idx` (i64, length `e`) and `src` (V, length `e*d`) are
+    //   immutable inputs in distinct allocations.
+    // - Each thread `t in [0,total=e*d)` is bound-checked
+    //   (`setp.ge.u32 %p, %gtid, %tot; @%p bra DONE`). It reads `idx[t/d]` and
+    //   atomically adds `src[t]` into `out[seg*d + t%d]`. The core CPU validator
+    //   (`scatter_add_segments`) rejects negative / `>= dim_size` segment ids
+    //   before this launch, so `seg*d + col < dim_size*d` always. Concurrent
+    //   threads whose segment id collides accumulate via `atom.global.add`
+    //   without a data race.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(out)
+            .arg(idx)
+            .arg(src)
+            .arg(&e_u)
+            .arg(&d_u)
+            .arg(&total_u)
+            .launch(cfg)?;
+    }
+    Ok(())
+}
+
+/// f32 segmented row-scatter-add. `src` is `[e, d]`; `idx` is the resident
+/// `i64` segment id per src row (length `e`). Returns a fresh zero-initialised
+/// `[dim_size, d]` buffer with `out[idx[row], :] += src[row, :]` accumulated
+/// over all rows (atomic — duplicate segment ids sum). Output rows with no
+/// contributing row stay 0.
+pub fn gpu_scatter_add_segments_f32(
+    src: &CudaBuffer<f32>,
+    idx: &CudaSlice<i64>,
+    e: usize,
+    d: usize,
+    dim_size: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let mut out = alloc_zeros_f32(dim_size * d, device)?;
+    launch_scatter_add_segments(
+        out.inner_mut(),
+        idx,
+        src.inner(),
+        e,
+        d,
+        device,
+        SCATTER_ADD_SEGMENTS_F32_PTX,
+        "scatter_add_segments_f32_kernel",
+    )?;
+    Ok(out)
+}
+
+/// f64 segmented row-scatter-add. Companion of
+/// [`gpu_scatter_add_segments_f32`]; uses `atom.global.add.f64` (`sm_60+`).
+pub fn gpu_scatter_add_segments_f64(
+    src: &CudaBuffer<f64>,
+    idx: &CudaSlice<i64>,
+    e: usize,
+    d: usize,
+    dim_size: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    let mut out = alloc_zeros_f64(dim_size * d, device)?;
+    launch_scatter_add_segments(
+        out.inner_mut(),
+        idx,
+        src.inner(),
+        e,
+        d,
+        device,
+        SCATTER_ADD_SEGMENTS_F64_PTX,
+        "scatter_add_segments_f64_kernel",
+    )?;
+    Ok(out)
+}
+
+// ===========================================================================
 // scatter_value launchers (out is pre-cloned from input; scalar broadcast)
 // ===========================================================================
 
@@ -1071,5 +1287,37 @@ mod tests {
         let idx = htod_i64(&d, &[2i64, 0, 1, 1]);
         let out = gpu_gather_dim_f64(&inp, &idx, 1, 3, 2, 2, &d).unwrap();
         assert_eq!(gpu_to_cpu(&out, &d).unwrap()[..4], [5.0f64, 2.0, 3.0, 4.0]);
+    }
+
+    // scatter_add_segments doc example: src=[[1,2],[3,4],[5,6]], index=[0,1,0],
+    // dim_size=2 -> out[0]=src[0]+src[2]=[6,8], out[1]=src[1]=[3,4].
+    #[test]
+    fn scatter_add_segments_f32_basic() {
+        let d = dev();
+        let src = cpu_to_gpu(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &d).unwrap();
+        let idx = htod_i64(&d, &[0i64, 1, 0]);
+        let out = gpu_scatter_add_segments_f32(&src, &idx, 3, 2, 2, &d).unwrap();
+        assert_eq!(gpu_to_cpu(&out, &d).unwrap()[..4], [6.0f32, 8.0, 3.0, 4.0]);
+    }
+
+    // Duplicate-segment atomic case: 4 rows of D=2, all into segment 0,
+    // dim_size=2 -> out[0] = column sums, out[1] stays exactly 0.
+    #[test]
+    fn scatter_add_segments_f32_duplicate_and_empty_row() {
+        let d = dev();
+        let src = cpu_to_gpu(&[1.0f32, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 40.0], &d).unwrap();
+        let idx = htod_i64(&d, &[0i64, 0, 0, 0]);
+        let out = gpu_scatter_add_segments_f32(&src, &idx, 4, 2, 2, &d).unwrap();
+        let got = gpu_to_cpu(&out, &d).unwrap();
+        assert_eq!(got[..4], [10.0f32, 100.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn scatter_add_segments_f64_basic() {
+        let d = dev();
+        let src = cpu_to_gpu(&[1.0f64, 2.0, 3.0, 4.0, 5.0, 6.0], &d).unwrap();
+        let idx = htod_i64(&d, &[0i64, 1, 0]);
+        let out = gpu_scatter_add_segments_f64(&src, &idx, 3, 2, 2, &d).unwrap();
+        assert_eq!(gpu_to_cpu(&out, &d).unwrap()[..4], [6.0f64, 8.0, 3.0, 4.0]);
     }
 }

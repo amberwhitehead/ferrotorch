@@ -37,10 +37,10 @@
 //! | REQ-2 | SHIPPED | shape validation at `ops/scatter.rs:84-99`; consumer: `scatter_add_segments` entry |
 //! | REQ-3 | SHIPPED | per-edge validation at `ops/scatter.rs:107-119`; consumer: `scatter_add_segments` entry |
 //! | REQ-4 | SHIPPED | zero-init `out` at `ops/scatter.rs:101-102`; consumer: `scatter_add_segments` |
-//! | REQ-5 | SHIPPED | `NotImplementedOnCuda` at `ops/scatter.rs:79-83`; consumer: `scatter_add_segments`. GPU lowering tracked under umbrella #1545 (ferrotorch-core CPU-only paths roadmap) |
+//! | REQ-5 | SHIPPED | CPU row-loop + CUDA `scatter_add_segments_cuda` (host-`&[i64]` index upload, atomic GPU kernel via `GpuBackend::scatter_add_segments_f{32,64}`, GPU-resident result); bf16/f16 CUDA → `NotImplementedOnCuda`. Consumer: the `is_cuda()` branch of `scatter_add_segments`. GPU lowering landed #1545 / sub #1535 |
 //! | REQ-6 | SHIPPED | module `//!` at `ops/scatter.rs:24-30`; consumer: `ferrotorch-graph` inference harness under `no_grad` |
 
-use crate::dtype::Float;
+use crate::dtype::{DType, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
@@ -64,7 +64,8 @@ use crate::tensor::Tensor;
 ///
 /// * `ShapeMismatch` if `src` is not 2-D, or if `index.len() != src.shape()[0]`.
 /// * `InvalidArgument` if any `index[e]` is negative or `>= dim_size`.
-/// * `NotImplementedOnCuda` if `src` is on CUDA.
+/// * `NotImplementedOnCuda` if `src` is a CUDA bf16/f16 tensor (the CUDA
+///   path supports f32 and f64). f32/f64 CUDA `src` runs on the GPU.
 ///
 /// # Example
 ///
@@ -87,11 +88,6 @@ pub fn scatter_add_segments<T: Float>(
     index: &[i64],
     dim_size: usize,
 ) -> FerrotorchResult<Tensor<T>> {
-    if src.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: "scatter_add_segments",
-        });
-    }
     let shape = src.shape();
     if shape.len() != 2 {
         return Err(FerrotorchError::ShapeMismatch {
@@ -109,25 +105,37 @@ pub fn scatter_add_segments<T: Float>(
         });
     }
 
-    let zero = <T as num_traits::Zero>::zero();
-    let mut out = vec![zero; dim_size * d];
-
-    let src_data = src.data_vec()?;
-
+    // Per-edge segment-id validation (shared by the CPU and CUDA paths). The
+    // CUDA kernel does NO device-side bounds check (a host round trip to
+    // validate would defeat the no-CPU contract for the data buffers), so the
+    // host must reject negative / out-of-range segment ids before the index is
+    // uploaded — exactly as the CPU loop does below.
     for (e_idx, &dst_i64) in index.iter().enumerate() {
         if dst_i64 < 0 {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!("scatter_add_segments: index[{e_idx}] = {dst_i64} is negative"),
             });
         }
-        let dst = dst_i64 as usize;
-        if dst >= dim_size {
+        if dst_i64 as usize >= dim_size {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
-                    "scatter_add_segments: index[{e_idx}] = {dst} >= dim_size {dim_size}"
+                    "scatter_add_segments: index[{e_idx}] = {dst_i64} >= dim_size {dim_size}"
                 ),
             });
         }
+    }
+
+    if src.is_cuda() {
+        return scatter_add_segments_cuda(src, index, e, d, dim_size);
+    }
+
+    let zero = <T as num_traits::Zero>::zero();
+    let mut out = vec![zero; dim_size * d];
+
+    let src_data = src.data_vec()?;
+
+    for (e_idx, &dst_i64) in index.iter().enumerate() {
+        let dst = dst_i64 as usize;
         let src_row = &src_data[e_idx * d..(e_idx + 1) * d];
         let out_row = &mut out[dst * d..(dst + 1) * d];
         for (o, &v) in out_row.iter_mut().zip(src_row.iter()) {
@@ -136,6 +144,57 @@ pub fn scatter_add_segments<T: Float>(
     }
 
     Tensor::from_storage(TensorStorage::cpu(out), vec![dim_size, d], false)
+}
+
+/// CUDA lowering of [`scatter_add_segments`] (crosslink #1545 / sub #1535).
+///
+/// `src` is a CUDA `[e, d]` tensor; `index` is the host `&[i64]` per-row
+/// segment id (already validated in-range by the caller). The result stays
+/// GPU-resident: `src` is materialised contiguous ON-DEVICE, the host index is
+/// uploaded once to a resident `i64` buffer, and the segmented atomic
+/// row-scatter-add runs on the device. bf16/f16 reject with
+/// `NotImplementedOnCuda` (no 2-byte segmented kernel yet).
+fn scatter_add_segments_cuda<T: Float>(
+    src: &Tensor<T>,
+    index: &[i64],
+    e: usize,
+    d: usize,
+    dim_size: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    if !matches!(T::dtype(), DType::F32 | DType::F64) {
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_add_segments",
+        });
+    }
+
+    // The kernel reads `src` as C-contiguous `[e, d]`; materialise on-device
+    // (strided_copy — no host round trip) so a transposed/permuted view's
+    // physical buffer matches the logical `[e, d]` shape.
+    let src = src.contiguous()?;
+    let src_handle = src.gpu_handle()?;
+    let ordinal = src_handle.device_ordinal();
+
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+
+    // Upload the host `&[i64]` segment index once to a resident `i64` buffer.
+    // This is uploading a freshly-provided host INPUT (the index is not a CUDA
+    // tensor), not a forbidden host round trip of device data.
+    // SAFETY: `index: &[i64]` is fully initialized and borrowed for the
+    // duration of this call. `i64` has no padding/niches, so reading its
+    // backing store as `&[u8]` of length `index.len() * 8` (==
+    // `index.len() * size_of::<i64>()`) is sound and exactly covers the
+    // slice; the byte view does not outlive `index`.
+    let idx_bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(index.as_ptr().cast::<u8>(), index.len() * 8) };
+    let idx_handle = backend.cpu_to_gpu(idx_bytes, DType::I64, ordinal)?;
+
+    let h = if T::dtype() == DType::F32 {
+        backend.scatter_add_segments_f32(src_handle, &idx_handle, e, d, dim_size)?
+    } else {
+        backend.scatter_add_segments_f64(src_handle, &idx_handle, e, d, dim_size)?
+    };
+
+    Tensor::from_storage(TensorStorage::gpu(h), vec![dim_size, d], false)
 }
 
 #[cfg(test)]

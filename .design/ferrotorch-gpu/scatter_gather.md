@@ -49,6 +49,18 @@ decomposition follows the per-dim stride indexing of upstream
   `&[usize]` index as a resident `i64` buffer and keeps the result
   GPU-resident (no host round trip). bf16/f16 inputs reject with
   `NotImplementedOnCuda` (no dim-aware kernel for 2-byte dtypes yet).
+- REQ-5: Segmented row scatter-add — `gpu_scatter_add_segments_f32` /
+  `_f64` for the GNN message-passing primitive
+  (`ops::scatter::scatter_add_segments`). `src` is `[E, D]`; `index` is
+  a per-ROW `i64` segment id (length `E`, uploaded from the host
+  `&[i64]`); output is the ZERO-INITIALISED `[dim_size, D]` with
+  `out[index[e], :] += src[e, :]` accumulated atomically
+  (`atom.global.add.f{32,64}`, `sm_60+`) over all rows. Distinct from
+  the dim-aware `scatter_add` (per-ROW index, not full-rank; flat
+  `seg*D + col` addressing; zero-init not clone). Mirrors
+  `torch.zeros(dim_size, D).index_add_(0, index, src)` /
+  `torch_scatter.scatter_add(src, index, dim=0, dim_size=N)`. bf16/f16
+  reject with `NotImplementedOnCuda`.
 
 ## Layout contract
 
@@ -85,6 +97,14 @@ into `[outer, axis, inner]` where `outer = prod(shape[..dim])`,
 - [x] AC-6: Live-GPU divergence parity (`torch.gather` /
   `scatter_` / `scatter_(value)` / `scatter_add_`) at
   `ferrotorch-gpu/tests/divergence_scatter_gather_gpu.rs` (15 tests).
+- [x] AC-7: Segmented row scatter-add `gpu_scatter_add_segments_f32` /
+  `_f64` exist, are re-exported from `lib.rs`, and are wired through
+  `CudaBackendImpl::scatter_add_segments_f{32,64}` into the `is_cuda()`
+  branch of `ops::scatter::scatter_add_segments`. Live-GPU parity vs
+  `torch.index_add_` at
+  `ferrotorch-gpu/tests/divergence_scatter_add_segments_gpu.rs`
+  (7 tests): basic, duplicate-segment atomic (100 rows → exact column
+  sums) f32 AND f64, empty-row-stays-zero, bf16/f16 reject.
 
 ## Architecture
 
@@ -132,10 +152,12 @@ Edge cases preserved:
 
 ## Verification
 
-In-module unit tests (`scatter_gather_kernels::tests`, 6 tests) and
-the live-GPU divergence suite
-(`ferrotorch-gpu/tests/divergence_scatter_gather_gpu.rs`, 15 tests)
-both run on the RTX 3090.
+In-module unit tests (`scatter_gather_kernels::tests`, 9 tests — 6
+gather/scatter/scatter_add + 3 scatter_add_segments) and the live-GPU
+divergence suites
+(`ferrotorch-gpu/tests/divergence_scatter_gather_gpu.rs`, 15 tests;
+`ferrotorch-gpu/tests/divergence_scatter_add_segments_gpu.rs`, 7 tests)
+all run on the RTX 3090.
 
 Smoke command (no parity ops):
 
@@ -154,3 +176,4 @@ Expected: `test result: ok. 15 passed`.
 | REQ-2 | SHIPPED | impl: `gpu_*_dim_f64` companions in `scatter_gather_kernels.rs`; non-test consumer: `CudaBackendImpl::*_dim_f64` overrides in `backend_impl.rs:7354,7408,7464,7520`, consumed by the f64 arm of `ops::indexing` |
 | REQ-3 | SHIPPED | impl: `atom.global.add.f32`/`atom.global.add.f64` in the `scatter_add_dim_ptx!` expansion; verified by `scatter_add_gpu_f32_duplicate_indices_dim0_matches_torch` / `..._f64_...` / `..._dim1_...` in `tests/divergence_scatter_gather_gpu.rs` (3 hits → slot 0, atomic sum 91 vs torch) |
 | REQ-4 | SHIPPED | impl: the four `CudaBackendImpl::*_dim_{f32,f64}` overrides in `backend_impl.rs`; non-test consumer: the `is_cuda()` branches of `ferrotorch_core::ops::indexing::gather` (`ops/indexing.rs` gather CUDA arm), `scatter`, `scatter_value`, `scatter_add` — each uploads the host index as resident `i64` via `upload_index_i64` and returns a `TensorStorage::gpu` result |
+| REQ-5 | SHIPPED | impl: `gpu_scatter_add_segments_f32`/`_f64` + `launch_scatter_add_segments` + `scatter_add_segments_ptx!` (atom.global.add.f{32,64}, zero-init output) in `ferrotorch-gpu/src/scatter_gather_kernels.rs`; non-test consumer: `CudaBackendImpl::scatter_add_segments_f32`/`_f64` in `ferrotorch-gpu/src/backend_impl.rs`, themselves consumed by the `is_cuda()` branch (`scatter_add_segments_cuda`) of `ferrotorch_core::ops::scatter::scatter_add_segments` — uploads the host `&[i64]` segment index once as resident `i64` and returns a `TensorStorage::gpu` result. Live-GPU verified at `tests/divergence_scatter_add_segments_gpu.rs` (7 tests, RTX 3090) |
