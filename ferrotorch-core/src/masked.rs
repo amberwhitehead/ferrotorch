@@ -492,7 +492,7 @@ pub fn masked_invalid<T: Float>(data: Tensor<T>) -> FerrotorchResult<MaskedTenso
         // order, so the original `data` is stored unchanged in the result.
         let data_c = data.contiguous()?;
         let mask_h = backend.isfinite_mask(data_c.gpu_handle()?)?;
-        let mask = predicate_mask_gpu(backend, &mask_h)?;
+        let mask = predicate_mask_gpu(backend, &mask_h, data.numel())?;
         return MaskedTensor::new(data, mask);
     }
     if data.is_cuda() {
@@ -535,7 +535,7 @@ pub fn masked_equal<T: Float + PartialEq>(
         // `data` is stored unchanged.
         let data_c = data.contiguous()?;
         let mask_h = backend.ne_scalar_mask(data_c.gpu_handle()?, value_f)?;
-        let mask = predicate_mask_gpu(backend, &mask_h)?;
+        let mask = predicate_mask_gpu(backend, &mask_h, data.numel())?;
         return MaskedTensor::new(data, mask);
     }
     if data.is_cuda() {
@@ -552,12 +552,22 @@ pub fn masked_equal<T: Float + PartialEq>(
 /// intended data path — the value tensor stays on the device (no R-CODE-4
 /// round trip). Each byte is normalised `b != 0` so a stray nonzero never
 /// produces an invalid `bool` bit pattern (mirrors `BoolTensor::to(Cpu)`).
+///
+/// The predicate kernel is launched over the data buffer's RAW cudarc slice
+/// length, which the pool over-allocates to a multiple of `ROUND_ELEMENTS`
+/// (#1659): a 6-element tensor lands in a 256-element slice, so the readback
+/// `bytes` may be longer than the tensor's logical `numel`. The leading `numel`
+/// bytes are the valid predicate results; the pooled tail is zeroed garbage to
+/// be discarded. Truncate to `numel` so the returned mask matches
+/// `data.numel()` (a no-op for an already-packed offset-0 buffer where the raw
+/// slice length already equals `numel`).
 fn predicate_mask_gpu(
     backend: &dyn crate::gpu_dispatch::GpuBackend,
     mask_h: &crate::gpu_dispatch::GpuBufferHandle,
+    numel: usize,
 ) -> FerrotorchResult<Vec<bool>> {
     let bytes = backend.gpu_to_cpu(mask_h)?;
-    Ok(bytes.iter().map(|&b| b != 0).collect())
+    Ok(bytes.iter().take(numel).map(|&b| b != 0).collect())
 }
 
 // ---------------------------------------------------------------------------
