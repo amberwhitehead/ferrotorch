@@ -166,6 +166,17 @@ fn divergence_1270_cumulative_md_req_table_rows_446_447_stale_test_cites() {
 /// The test FAILS if the generic test catches the contrived divergence
 /// (meaning gap A is closed and this test is obsolete).
 #[test]
+#[ignore = "OBSOLETE PREMISE (tracking #1643): this probe demonstrated the gap by \
+            corrupting a `RsqrtBackward struct at :1565` LINE cite in arithmetic.md. \
+            The #1633 S3 anchor conversion replaced every *Backward line-number cite \
+            with a line-number-free symbol anchor (`RsqrtBackward struct in \
+            grad_fns/arithmetic.rs`), so there is no `*Backward:NNN` cite left to \
+            corrupt — the probe's setup assertions (md contains `:1565`, rs line 1565 \
+            == struct) are both stale. The WALKER gap it documented (generic test does \
+            not catch *Backward line mismatches) still exists but is now unexercised \
+            for arithmetic.md; #1643 tracks re-pointing the probe at a doc that still \
+            uses line cites, or strengthening the walker. Retired per goal.md S8 \
+            (stale-cite-in-test-file noise), not swept — the follow-up is filed."]
 fn divergence_1269_gap_a_generic_test_misses_backward_struct_cite_mismatch() {
     let root = workspace_root();
     let md_path = root.join(".design/ferrotorch-core/grad_fns/arithmetic.md");
