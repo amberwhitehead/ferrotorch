@@ -54,95 +54,219 @@ struct Case {
 // ---------------------------------------------------------------------------
 const MATRIX: &[Case] = &[
     // --- 2-D non-square [3,5] ---
-    Case { shape: &[3, 5], dim: 0, keepdim: true,
-        sum_shape: &[1, 5], sum: &[15.0, 18.0, 21.0, 24.0, 27.0],
-        mean_shape: &[1, 5], mean: &[5.0, 6.0, 7.0, 8.0, 9.0] },
-    Case { shape: &[3, 5], dim: 0, keepdim: false,
-        sum_shape: &[5], sum: &[15.0, 18.0, 21.0, 24.0, 27.0],
-        mean_shape: &[5], mean: &[5.0, 6.0, 7.0, 8.0, 9.0] },
-    Case { shape: &[3, 5], dim: 1, keepdim: true,
-        sum_shape: &[3, 1], sum: &[10.0, 35.0, 60.0],
-        mean_shape: &[3, 1], mean: &[2.0, 7.0, 12.0] },
-    Case { shape: &[3, 5], dim: 1, keepdim: false,
-        sum_shape: &[3], sum: &[10.0, 35.0, 60.0],
-        mean_shape: &[3], mean: &[2.0, 7.0, 12.0] },
+    Case {
+        shape: &[3, 5],
+        dim: 0,
+        keepdim: true,
+        sum_shape: &[1, 5],
+        sum: &[15.0, 18.0, 21.0, 24.0, 27.0],
+        mean_shape: &[1, 5],
+        mean: &[5.0, 6.0, 7.0, 8.0, 9.0],
+    },
+    Case {
+        shape: &[3, 5],
+        dim: 0,
+        keepdim: false,
+        sum_shape: &[5],
+        sum: &[15.0, 18.0, 21.0, 24.0, 27.0],
+        mean_shape: &[5],
+        mean: &[5.0, 6.0, 7.0, 8.0, 9.0],
+    },
+    Case {
+        shape: &[3, 5],
+        dim: 1,
+        keepdim: true,
+        sum_shape: &[3, 1],
+        sum: &[10.0, 35.0, 60.0],
+        mean_shape: &[3, 1],
+        mean: &[2.0, 7.0, 12.0],
+    },
+    Case {
+        shape: &[3, 5],
+        dim: 1,
+        keepdim: false,
+        sum_shape: &[3],
+        sum: &[10.0, 35.0, 60.0],
+        mean_shape: &[3],
+        mean: &[2.0, 7.0, 12.0],
+    },
     // --- 3-D [2,3,4] — the critical multi-dim-output / odometer case ---
-    Case { shape: &[2, 3, 4], dim: 0, keepdim: true,
+    Case {
+        shape: &[2, 3, 4],
+        dim: 0,
+        keepdim: true,
         sum_shape: &[1, 3, 4],
-        sum: &[12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0],
+        sum: &[
+            12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0,
+        ],
         mean_shape: &[1, 3, 4],
-        mean: &[6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0] },
-    Case { shape: &[2, 3, 4], dim: 0, keepdim: false,
+        mean: &[
+            6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
+        ],
+    },
+    Case {
+        shape: &[2, 3, 4],
+        dim: 0,
+        keepdim: false,
         sum_shape: &[3, 4],
-        sum: &[12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0],
+        sum: &[
+            12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0,
+        ],
         mean_shape: &[3, 4],
-        mean: &[6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0] },
-    Case { shape: &[2, 3, 4], dim: 1, keepdim: true,
+        mean: &[
+            6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
+        ],
+    },
+    Case {
+        shape: &[2, 3, 4],
+        dim: 1,
+        keepdim: true,
         sum_shape: &[2, 1, 4],
         sum: &[12.0, 15.0, 18.0, 21.0, 48.0, 51.0, 54.0, 57.0],
         mean_shape: &[2, 1, 4],
-        mean: &[4.0, 5.0, 6.0, 7.0, 16.0, 17.0, 18.0, 19.0] },
-    Case { shape: &[2, 3, 4], dim: 1, keepdim: false,
+        mean: &[4.0, 5.0, 6.0, 7.0, 16.0, 17.0, 18.0, 19.0],
+    },
+    Case {
+        shape: &[2, 3, 4],
+        dim: 1,
+        keepdim: false,
         sum_shape: &[2, 4],
         sum: &[12.0, 15.0, 18.0, 21.0, 48.0, 51.0, 54.0, 57.0],
         mean_shape: &[2, 4],
-        mean: &[4.0, 5.0, 6.0, 7.0, 16.0, 17.0, 18.0, 19.0] },
-    Case { shape: &[2, 3, 4], dim: 2, keepdim: true,
+        mean: &[4.0, 5.0, 6.0, 7.0, 16.0, 17.0, 18.0, 19.0],
+    },
+    Case {
+        shape: &[2, 3, 4],
+        dim: 2,
+        keepdim: true,
         sum_shape: &[2, 3, 1],
         sum: &[6.0, 22.0, 38.0, 54.0, 70.0, 86.0],
         mean_shape: &[2, 3, 1],
-        mean: &[1.5, 5.5, 9.5, 13.5, 17.5, 21.5] },
-    Case { shape: &[2, 3, 4], dim: 2, keepdim: false,
+        mean: &[1.5, 5.5, 9.5, 13.5, 17.5, 21.5],
+    },
+    Case {
+        shape: &[2, 3, 4],
+        dim: 2,
+        keepdim: false,
         sum_shape: &[2, 3],
         sum: &[6.0, 22.0, 38.0, 54.0, 70.0, 86.0],
         mean_shape: &[2, 3],
-        mean: &[1.5, 5.5, 9.5, 13.5, 17.5, 21.5] },
+        mean: &[1.5, 5.5, 9.5, 13.5, 17.5, 21.5],
+    },
     // --- 4-D [2,3,2,3] — reduce a MIDDLE dim ---
-    Case { shape: &[2, 3, 2, 3], dim: 1, keepdim: true,
+    Case {
+        shape: &[2, 3, 2, 3],
+        dim: 1,
+        keepdim: true,
         sum_shape: &[2, 1, 2, 3],
-        sum: &[18.0, 21.0, 24.0, 27.0, 30.0, 33.0, 72.0, 75.0, 78.0, 81.0, 84.0, 87.0],
+        sum: &[
+            18.0, 21.0, 24.0, 27.0, 30.0, 33.0, 72.0, 75.0, 78.0, 81.0, 84.0, 87.0,
+        ],
         mean_shape: &[2, 1, 2, 3],
-        mean: &[6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0] },
-    Case { shape: &[2, 3, 2, 3], dim: 1, keepdim: false,
+        mean: &[
+            6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0,
+        ],
+    },
+    Case {
+        shape: &[2, 3, 2, 3],
+        dim: 1,
+        keepdim: false,
         sum_shape: &[2, 2, 3],
-        sum: &[18.0, 21.0, 24.0, 27.0, 30.0, 33.0, 72.0, 75.0, 78.0, 81.0, 84.0, 87.0],
+        sum: &[
+            18.0, 21.0, 24.0, 27.0, 30.0, 33.0, 72.0, 75.0, 78.0, 81.0, 84.0, 87.0,
+        ],
         mean_shape: &[2, 2, 3],
-        mean: &[6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0] },
-    Case { shape: &[2, 3, 2, 3], dim: 2, keepdim: true,
+        mean: &[
+            6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0,
+        ],
+    },
+    Case {
+        shape: &[2, 3, 2, 3],
+        dim: 2,
+        keepdim: true,
         sum_shape: &[2, 3, 1, 3],
-        sum: &[3.0, 5.0, 7.0, 15.0, 17.0, 19.0, 27.0, 29.0, 31.0, 39.0, 41.0, 43.0,
-               51.0, 53.0, 55.0, 63.0, 65.0, 67.0],
+        sum: &[
+            3.0, 5.0, 7.0, 15.0, 17.0, 19.0, 27.0, 29.0, 31.0, 39.0, 41.0, 43.0, 51.0, 53.0, 55.0,
+            63.0, 65.0, 67.0,
+        ],
         mean_shape: &[2, 3, 1, 3],
-        mean: &[1.5, 2.5, 3.5, 7.5, 8.5, 9.5, 13.5, 14.5, 15.5, 19.5, 20.5, 21.5,
-                25.5, 26.5, 27.5, 31.5, 32.5, 33.5] },
-    Case { shape: &[2, 3, 2, 3], dim: 2, keepdim: false,
+        mean: &[
+            1.5, 2.5, 3.5, 7.5, 8.5, 9.5, 13.5, 14.5, 15.5, 19.5, 20.5, 21.5, 25.5, 26.5, 27.5,
+            31.5, 32.5, 33.5,
+        ],
+    },
+    Case {
+        shape: &[2, 3, 2, 3],
+        dim: 2,
+        keepdim: false,
         sum_shape: &[2, 3, 3],
-        sum: &[3.0, 5.0, 7.0, 15.0, 17.0, 19.0, 27.0, 29.0, 31.0, 39.0, 41.0, 43.0,
-               51.0, 53.0, 55.0, 63.0, 65.0, 67.0],
+        sum: &[
+            3.0, 5.0, 7.0, 15.0, 17.0, 19.0, 27.0, 29.0, 31.0, 39.0, 41.0, 43.0, 51.0, 53.0, 55.0,
+            63.0, 65.0, 67.0,
+        ],
         mean_shape: &[2, 3, 3],
-        mean: &[1.5, 2.5, 3.5, 7.5, 8.5, 9.5, 13.5, 14.5, 15.5, 19.5, 20.5, 21.5,
-                25.5, 26.5, 27.5, 31.5, 32.5, 33.5] },
+        mean: &[
+            1.5, 2.5, 3.5, 7.5, 8.5, 9.5, 13.5, 14.5, 15.5, 19.5, 20.5, 21.5, 25.5, 26.5, 27.5,
+            31.5, 32.5, 33.5,
+        ],
+    },
     // --- negative dim ---
-    Case { shape: &[2, 3, 4], dim: -1, keepdim: false,
-        sum_shape: &[2, 3], sum: &[6.0, 22.0, 38.0, 54.0, 70.0, 86.0],
-        mean_shape: &[2, 3], mean: &[1.5, 5.5, 9.5, 13.5, 17.5, 21.5] },
-    Case { shape: &[2, 3, 4], dim: -2, keepdim: true,
-        sum_shape: &[2, 1, 4], sum: &[12.0, 15.0, 18.0, 21.0, 48.0, 51.0, 54.0, 57.0],
-        mean_shape: &[2, 1, 4], mean: &[4.0, 5.0, 6.0, 7.0, 16.0, 17.0, 18.0, 19.0] },
+    Case {
+        shape: &[2, 3, 4],
+        dim: -1,
+        keepdim: false,
+        sum_shape: &[2, 3],
+        sum: &[6.0, 22.0, 38.0, 54.0, 70.0, 86.0],
+        mean_shape: &[2, 3],
+        mean: &[1.5, 5.5, 9.5, 13.5, 17.5, 21.5],
+    },
+    Case {
+        shape: &[2, 3, 4],
+        dim: -2,
+        keepdim: true,
+        sum_shape: &[2, 1, 4],
+        sum: &[12.0, 15.0, 18.0, 21.0, 48.0, 51.0, 54.0, 57.0],
+        mean_shape: &[2, 1, 4],
+        mean: &[4.0, 5.0, 6.0, 7.0, 16.0, 17.0, 18.0, 19.0],
+    },
     // --- extent-1 reduced dim ---
-    Case { shape: &[2, 1, 4], dim: 1, keepdim: false,
-        sum_shape: &[2, 4], sum: &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
-        mean_shape: &[2, 4], mean: &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0] },
-    Case { shape: &[2, 1, 4], dim: 1, keepdim: true,
-        sum_shape: &[2, 1, 4], sum: &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
-        mean_shape: &[2, 1, 4], mean: &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0] },
+    Case {
+        shape: &[2, 1, 4],
+        dim: 1,
+        keepdim: false,
+        sum_shape: &[2, 4],
+        sum: &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+        mean_shape: &[2, 4],
+        mean: &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+    },
+    Case {
+        shape: &[2, 1, 4],
+        dim: 1,
+        keepdim: true,
+        sum_shape: &[2, 1, 4],
+        sum: &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+        mean_shape: &[2, 1, 4],
+        mean: &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+    },
     // --- 1-D reduced to scalar ---
-    Case { shape: &[5], dim: 0, keepdim: false,
-        sum_shape: &[], sum: &[10.0],
-        mean_shape: &[], mean: &[2.0] },
-    Case { shape: &[5], dim: 0, keepdim: true,
-        sum_shape: &[1], sum: &[10.0],
-        mean_shape: &[1], mean: &[2.0] },
+    Case {
+        shape: &[5],
+        dim: 0,
+        keepdim: false,
+        sum_shape: &[],
+        sum: &[10.0],
+        mean_shape: &[],
+        mean: &[2.0],
+    },
+    Case {
+        shape: &[5],
+        dim: 0,
+        keepdim: true,
+        sum_shape: &[1],
+        sum: &[10.0],
+        mean_shape: &[1],
+        mean: &[2.0],
+    },
 ];
 
 /// RE-AUDIT (#1678): full rank x dim x keepdim correctness matrix for
@@ -155,16 +279,26 @@ const MATRIX: &[Case] = &[
 fn divergence_sum_dim_rank_dim_keepdim_matrix_vs_torch() {
     for c in MATRIX {
         let x = arange(c.shape);
-        let out = sum_dim(&x, c.dim, c.keepdim)
-            .unwrap_or_else(|e| panic!("sum_dim {:?} dim={} kd={} err: {e:?}",
-                c.shape, c.dim, c.keepdim));
-        assert_eq!(out.shape(), c.sum_shape,
+        let out = sum_dim(&x, c.dim, c.keepdim).unwrap_or_else(|e| {
+            panic!(
+                "sum_dim {:?} dim={} kd={} err: {e:?}",
+                c.shape, c.dim, c.keepdim
+            )
+        });
+        assert_eq!(
+            out.shape(),
+            c.sum_shape,
             "sum_dim SHAPE mismatch: shape={:?} dim={} keepdim={}",
-            c.shape, c.dim, c.keepdim);
+            c.shape,
+            c.dim,
+            c.keepdim
+        );
         let got = out.data().expect("read sum_dim output");
-        assert_eq!(got, c.sum,
+        assert_eq!(
+            got, c.sum,
             "sum_dim VALUE mismatch (wrong slot mapping?): shape={:?} dim={} keepdim={}\n  torch={:?}\n  ferro={:?}",
-            c.shape, c.dim, c.keepdim, c.sum, got);
+            c.shape, c.dim, c.keepdim, c.sum, got
+        );
     }
 }
 
@@ -180,19 +314,37 @@ fn divergence_sum_dim_rank_dim_keepdim_matrix_vs_torch() {
 fn divergence_mean_dim_rank_dim_keepdim_matrix_vs_torch() {
     for c in MATRIX {
         let x = arange(c.shape);
-        let out = mean_dim(&x, c.dim, c.keepdim)
-            .unwrap_or_else(|e| panic!("mean_dim {:?} dim={} kd={} err: {e:?}",
-                c.shape, c.dim, c.keepdim));
-        assert_eq!(out.shape(), c.mean_shape,
+        let out = mean_dim(&x, c.dim, c.keepdim).unwrap_or_else(|e| {
+            panic!(
+                "mean_dim {:?} dim={} kd={} err: {e:?}",
+                c.shape, c.dim, c.keepdim
+            )
+        });
+        assert_eq!(
+            out.shape(),
+            c.mean_shape,
             "mean_dim SHAPE mismatch: shape={:?} dim={} keepdim={}",
-            c.shape, c.dim, c.keepdim);
+            c.shape,
+            c.dim,
+            c.keepdim
+        );
         let got = out.data().expect("read mean_dim output");
-        assert_eq!(got.len(), c.mean.len(),
-            "mean_dim numel mismatch: shape={:?} dim={}", c.shape, c.dim);
+        assert_eq!(
+            got.len(),
+            c.mean.len(),
+            "mean_dim numel mismatch: shape={:?} dim={}",
+            c.shape,
+            c.dim
+        );
         for (i, (&g, &e)) in got.iter().zip(c.mean.iter()).enumerate() {
-            assert!((g - e).abs() < 1e-12,
+            assert!(
+                (g - e).abs() < 1e-12,
                 "mean_dim VALUE mismatch (wrong slot or wrong divisor?): shape={:?} dim={} keepdim={} idx={}\n  torch={e}\n  ferro={g}",
-                c.shape, c.dim, c.keepdim, i);
+                c.shape,
+                c.dim,
+                c.keepdim,
+                i
+            );
         }
     }
 }
