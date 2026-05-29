@@ -67,7 +67,6 @@ fn reaudit_f32_no_nan() {
 }
 
 #[test]
-#[ignore = "divergence: CPU unique miscounts all-NaN input (extra count-0 entry when sorted-first elem is NaN); tracking #1666"]
 fn reaudit_f32_all_nan() {
     // torch keeps EACH NaN distinct (equal_nan disabled): 3 entries, inverse
     // maps each original position to a distinct sorted-unique NaN slot in order.
@@ -84,7 +83,6 @@ fn reaudit_f32_all_nan() {
 }
 
 #[test]
-#[ignore = "divergence: CPU unique miscounts all-NaN input (extra count-0 entry when sorted-first elem is NaN); tracking #1666"]
 fn reaudit_f32_single_nan() {
     let (vals, inv, counts) = unique(&cpu_f32(&[f32::NAN])).unwrap();
     let v = vals.data_vec().unwrap();
@@ -195,7 +193,6 @@ fn reaudit_f64_nan_interleaved() {
 }
 
 #[test]
-#[ignore = "divergence: CPU unique miscounts all-NaN input (extra count-0 entry when sorted-first elem is NaN); tracking #1666"]
 fn reaudit_f64_all_nan() {
     let (vals, inv, counts) = unique(&cpu_f64(&[f64::NAN, f64::NAN, f64::NAN])).unwrap();
     assert_eq!(vals.data_vec().unwrap().len(), 3);

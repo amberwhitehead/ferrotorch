@@ -213,11 +213,22 @@ pub fn unique<T: Float>(
     let mut inverse = vec![0usize; n];
     let mut counts: Vec<usize> = Vec::new();
 
+    // The first sorted element is ALWAYS unique (its own first occurrence),
+    // mirroring upstream `IsUnique<false>::operator()` which returns `true` for
+    // `i == 0` unconditionally (`aten/src/ATen/native/Unique.cpp:128`). Seed it
+    // with `counts = [1]` and `inverse[indices[0]] = 0`, then walk only
+    // `indices[1..]`. Pre-seeding `counts = [0]` and re-iterating from index 0
+    // (the old code) double-processed the seed: for a FINITE first element the
+    // `val != last` test was false on iteration 0 so it merely incremented the
+    // seed count to 1, but for a NaN first element `NaN != NaN == true` opened a
+    // SECOND entry and left the seed's count at 0 — a spurious leading entry
+    // (count 0) for all-NaN / single-NaN inputs (#1666).
     let mut current_unique_idx = 0;
     unique_vals.push(data[indices[0]]);
-    counts.push(0);
+    counts.push(1);
+    inverse[indices[0]] = 0;
 
-    for &orig_idx in &indices {
+    for &orig_idx in &indices[1..] {
         let val = data[orig_idx];
         if val != *unique_vals.last().unwrap() {
             unique_vals.push(val);
