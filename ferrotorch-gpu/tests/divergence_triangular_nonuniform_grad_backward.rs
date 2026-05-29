@@ -11,6 +11,7 @@
 //!   - a wrong batch stride permutes which ramp value lands at each slot,
 //!   - a wrong/flipped `k` masks the wrong positions,
 //!   - a non-square trailing-dim stride error misplaces values,
+//!
 //! all become observable failures.
 //!
 //! VJP (`tools/autograd/derivatives.yaml:1805,1809`):
