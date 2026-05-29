@@ -269,48 +269,24 @@ fn mean_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
             // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
             // buffer before the full reduction reads element 0.
             let input = input.contiguous()?;
-            let device = input.device();
-            let ordinal = match device {
-                crate::device::Device::Cuda(o) => o,
-                _ => 0,
-            };
             // #23: dispatch by dtype. bf16 routes to `mean_bf16_bf16`
             // (sum_bf16 + on-device scale by 1/n, both in f32 accumulator).
             let mean_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
                 T,
                 "mean",
                 f32 => {
+                    // mean = sum / n. The sum is a 1-element on-device scalar;
+                    // scale it by 1/n with the host-scalar `scale_f32` kernel
+                    // (one launch, no H2D upload) rather than uploading a
+                    // 1-element `1/n` buffer and running a full `mul` kernel.
                     let sum_handle = backend.sum_f32(input.gpu_handle()?, input.numel())?;
-                    let n = input.numel() as f32;
-                    let inv_n_data = [1.0f32 / n];
-                    // SAFETY: `inv_n_data` is a stack array of one f32, borrowed
-                    // for this scope. Reading 4 bytes (1 * size_of::<f32>()) as
-                    // &[u8] is sound: f32 has no padding/niches and the length
-                    // matches the array's byte size.
-                    let inv_n_bytes: &[u8] = unsafe {
-                        std::slice::from_raw_parts(
-                            inv_n_data.as_ptr().cast::<u8>(),
-                            inv_n_data.len() * 4,
-                        )
-                    };
-                    let inv_handle =
-                        backend.cpu_to_gpu(inv_n_bytes, crate::dtype::DType::F32, ordinal)?;
-                    Ok::<_, crate::error::FerrotorchError>(backend.mul_f32(&sum_handle, &inv_handle)?)
+                    let inv_n = 1.0f32 / input.numel() as f32;
+                    Ok::<_, crate::error::FerrotorchError>(backend.scale_f32(&sum_handle, inv_n)?)
                 },
                 f64 => {
                     let sum_handle = backend.sum_f64(input.gpu_handle()?, input.numel())?;
-                    let n = input.numel() as f64;
-                    let inv_n_data = [1.0f64 / n];
-                    // SAFETY: same as f32 arm with f64 width (8 bytes).
-                    let inv_n_bytes: &[u8] = unsafe {
-                        std::slice::from_raw_parts(
-                            inv_n_data.as_ptr().cast::<u8>(),
-                            inv_n_data.len() * 8,
-                        )
-                    };
-                    let inv_handle =
-                        backend.cpu_to_gpu(inv_n_bytes, crate::dtype::DType::F64, ordinal)?;
-                    Ok::<_, crate::error::FerrotorchError>(backend.mul_f64(&sum_handle, &inv_handle)?)
+                    let inv_n = 1.0f64 / input.numel() as f64;
+                    Ok::<_, crate::error::FerrotorchError>(backend.scale_f64(&sum_handle, inv_n)?)
                 },
                 bf16 => Ok::<_, crate::error::FerrotorchError>(
                     backend.mean_bf16_bf16(input.gpu_handle()?)?
