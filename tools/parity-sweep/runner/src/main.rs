@@ -8003,6 +8003,26 @@ fn tolerance_for(op: &str) -> (f32, f32) {
         | "fft.fftn" | "fft.ifftn" | "fft.rfftn" | "fft.irfftn" | "fft.hfftn" | "fft.ihfftn" => {
             (1e-4, 1e-7)
         }
+        // ACCEPTED-PRECISION (ferrotorch MORE precise than torch — same class as the
+        // matmul/conv cross-implementation cases above, but here the oracle itself
+        // is the less-accurate side). The parity-sweep flags `special.airy_ai` on
+        // ~8/24 oscillatory-region samples (x < -2.09), diff up to ~2.5e-7 (e.g.
+        // x≈-2.5) and 1.84e-7 at the op_db `[20]` index-4 sample x=-7.950586795806885.
+        // An mpmath 50-dps gold-reference adjudication (commit 4d516a3bd, test
+        // `ferrotorch-core/tests/divergence_airy_ai_precision.rs`) proved this gap is
+        // TORCH's f32 error, NOT a ferrotorch divergence:
+        //   mpmath truth  = -0.006113017822...   (reference)
+        //   ferrotorch    = -0.006113018          |err| = 8.66e-11
+        //   torch 2.11    = -0.0061132023         |err| = 1.844e-7   (~2130x worse)
+        // torch's CUDA-jiterator-derived f32 asymptotic series (the AFN/AFD + AGN/AGD
+        // branch at `aten/src/ATen/native/cuda/Math.cuh:1372-1402`) carries the error;
+        // ferrotorch's f64-then-narrow Cephes evaluator is closer to the true value.
+        // Per the ferrotorch precision contract, being MORE precise than the torch
+        // oracle is ACCEPTED — the oracle penalizes ferrotorch for being right. atol
+        // widened to 5e-7 to absorb torch's own f32 asymptotic-series error with
+        // margin (covers the observed ~2.5e-7 gap). Mirrors the cdist p=2
+        // accepted-precision rationale; scoped to `special.airy_ai` ONLY.
+        "special.airy_ai" => (1e-5, 5e-7),
         _ => tol_f32(),
     }
 }
