@@ -4320,6 +4320,20 @@ impl GpuBackend for CudaBackendImpl {
         Err(FerrotorchError::NotImplementedOnCuda { op: "i1e_f64" })
     }
 
+    fn spherical_bessel_j0_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::special::gpu_spherical_bessel_j0_f32(a_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn spherical_bessel_j0_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "spherical_bessel_j0_f64",
+        })
+    }
+
     fn clamp_f32(
         &self,
         a: &GpuBufferHandle,

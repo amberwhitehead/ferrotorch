@@ -2306,6 +2306,26 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    // Spherical Bessel `j0(x)` forward (#1651 batch 3a). `j0(x) = sin(x)/x`
+    // with the `|x| < 0.5` Taylor branch and `isinf -> 0`
+    // (`aten/src/ATen/native/cuda/Math.cuh:3039-3052`). Defaults return
+    // `InvalidArgument` so non-CUDA backends compile unchanged; the CUDA
+    // backend overrides f32 (f64 -> `NotImplementedOnCuda`: base PTX has no
+    // `lg2.approx.f64`/`ex2.approx.f64`, same constraint as batches 1/2).
+
+    /// Spherical Bessel `j0(x)` forward, f32.
+    fn spherical_bessel_j0_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "spherical_bessel_j0_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Spherical Bessel `j0(x)` forward, f64.
+    fn spherical_bessel_j0_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "spherical_bessel_j0_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+
     // Clamp: out[i] = max(min_val, min(max_val, x[i]))
     fn clamp_f32(
         &self,

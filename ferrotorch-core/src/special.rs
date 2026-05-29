@@ -1162,6 +1162,244 @@ fn i1e_scalar<T: Float>(x: T) -> T {
 }
 
 // ---------------------------------------------------------------------------
+// spherical Bessel j0 + modified Bessel K family (Cephes, #1651 batch 3a)
+// ---------------------------------------------------------------------------
+//
+// Direct ports of the upstream torch.special Cephes kernels. The K-family
+// reuses the shared `chbevl` Clenshaw evaluator from batch 2: the upstream
+// inline Clenshaw loop (`a = z*q - p + A[index]`, return `T(0.5)*(a - p)`,
+// `aten/src/ATen/native/cuda/Math.cuh:2557-2576`) is bit-identical to
+// `chbevl(z, A)` — `a` plays `b0`, `q` plays `b1`, `p` plays `b2`, and the
+// upstream `T(0.5)*(a - p)` is exactly `chbevl`'s `0.5*(b0 - b2)` return. The
+// argument `z` is `x*x - 2` in the small region (`x <= 2`) and `8/x - 2` in the
+// large region (`x > 2`). `k0`/`k1` reuse the batch-2 `i0_f64`/`i1_f64`
+// (modified_bessel_i0/i1_forward) for the small-region log term.
+//
+//   - spherical_bessel_j0: `cuda/Math.cuh:3039-3052`. `isinf -> 0`;
+//     `|x| < 0.5 -> ` 6-term Taylor; else `sin(x)/x`. `j0(0) = 1`,
+//     `j0(NaN) = NaN`.
+//   - modified_bessel_k0 / scaled: `cuda/Math.cuh:2501-2657`. A[10]/B[25].
+//     `x == 0 -> +inf`; `x < 0 -> NaN`. Region split at `x <= 2`.
+//   - modified_bessel_k1 / scaled: `cuda/Math.cuh:2659-2817`. A[11]/B[25].
+//     `x == 0 -> +inf`; `x < 0 -> NaN`. Region split at `x <= 2`.
+
+/// `spherical_bessel_j0(x)` f64. Verbatim port of `spherical_bessel_j0_forward`
+/// (`aten/src/ATen/native/cuda/Math.cuh:3039-3052`).
+fn spherical_bessel_j0_f64(x: f64) -> f64 {
+    if x.is_infinite() {
+        return 0.0;
+    }
+    if x.abs() < 0.5 {
+        let x2 = x * x;
+        return 1.0
+            + x2 * (-1.0 / 6.0
+                + x2 * (1.0 / 120.0
+                    + x2 * (-1.0 / 5040.0
+                        + x2 * (1.0 / 362880.0
+                            + x2 * (-1.0 / 39916800.0 + x2 * (1.0 / 6227020800.0))))));
+    }
+    x.sin() / x
+}
+
+fn spherical_bessel_j0_scalar<T: Float>(x: T) -> T {
+    let xf = <T as num_traits::ToPrimitive>::to_f64(&x).unwrap_or(f64::NAN);
+    T::from(spherical_bessel_j0_f64(xf)).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+// Cephes A[10] / B[25] for K0 (`aten/src/ATen/native/cuda/Math.cuh:2504-2543`).
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes K0 A-set (cuda/Math.cuh:2504-2515); full-width for audit-friendly diff"
+)]
+const K0_A: [f64; 10] = [
+    1.37446543561352307156e-16,
+    4.25981614279661018399e-14,
+    1.03496952576338420167e-11,
+    1.90451637722020886025e-09,
+    2.53479107902614945675e-07,
+    2.28621210311945178607e-05,
+    1.26461541144692592338e-03,
+    3.59799365153615016266e-02,
+    3.44289899924628486886e-01,
+    -5.35327393233902768720e-01,
+];
+
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes K0 B-set (cuda/Math.cuh:2517-2543)"
+)]
+const K0_B: [f64; 25] = [
+    5.30043377268626276149e-18,
+    -1.64758043015242134646e-17,
+    5.21039150503902756861e-17,
+    -1.67823109680541210385e-16,
+    5.51205597852431940784e-16,
+    -1.84859337734377901440e-15,
+    6.34007647740507060557e-15,
+    -2.22751332699166985548e-14,
+    8.03289077536357521100e-14,
+    -2.98009692317273043925e-13,
+    1.14034058820847496303e-12,
+    -4.51459788337394416547e-12,
+    1.85594911495471785253e-11,
+    -7.95748924447710747776e-11,
+    3.57739728140030116597e-10,
+    -1.69753450938905987466e-09,
+    8.57403401741422608519e-09,
+    -4.66048989768794782956e-08,
+    2.76681363944501510342e-07,
+    -1.83175552271911948767e-06,
+    1.39498137188764993662e-05,
+    -1.28495495816278026384e-04,
+    1.56988388573005337491e-03,
+    -3.14481013119645005427e-02,
+    2.44030308206595545468e+00,
+];
+
+// Cephes A[11] / B[25] for K1 (`aten/src/ATen/native/cuda/Math.cuh:2662-2702`).
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes K1 A-set (cuda/Math.cuh:2662-2673)"
+)]
+const K1_A: [f64; 11] = [
+    -7.02386347938628759343e-18,
+    -2.42744985051936593393e-15,
+    -6.66690169419932900609e-13,
+    -1.41148839263352776110e-10,
+    -2.21338763073472585583e-08,
+    -2.43340614156596823496e-06,
+    -1.73028895751305206302e-04,
+    -6.97572385963986435018e-03,
+    -1.22611180822657148235e-01,
+    -3.53155960776544875667e-01,
+    1.52530022733894777053e+00,
+];
+
+#[allow(
+    clippy::excessive_precision,
+    reason = "verbatim Cephes K1 B-set (cuda/Math.cuh:2676-2702)"
+)]
+const K1_B: [f64; 25] = [
+    -5.75674448366501715755e-18,
+    1.79405087314755922667e-17,
+    -5.68946255844285935196e-17,
+    1.83809354436663880070e-16,
+    -6.05704724837331885336e-16,
+    2.03870316562433424052e-15,
+    -7.01983709041831346144e-15,
+    2.47715442448130437068e-14,
+    -8.97670518232499435011e-14,
+    3.34841966607842919884e-13,
+    -1.28917396095102890680e-12,
+    5.13963967348173025100e-12,
+    -2.12996783842756842877e-11,
+    9.21831518760500529508e-11,
+    -4.19035475934189648750e-10,
+    2.01504975519703286596e-09,
+    -1.03457624656780970260e-08,
+    5.74108412545004946722e-08,
+    -3.50196060308781257119e-07,
+    2.40648494783721712015e-06,
+    -1.93619797416608296024e-05,
+    1.95215518471351631108e-04,
+    -2.85781685962277938680e-03,
+    1.03923736576817238437e-01,
+    2.72062619048444266945e+00,
+];
+
+/// `modified_bessel_k0(x)` f64. `modified_bessel_k0_forward`
+/// (`aten/src/ATen/native/cuda/Math.cuh:2503-2577`). `x==0 -> +inf`,
+/// `x<0 -> NaN`. Small region (`x <= 2`): `chbevl(x*x-2, A) - log(0.5x)*i0(x)`;
+/// large region: `exp(-x) * chbevl(8/x-2, B) / sqrt(x)`.
+fn modified_bessel_k0_f64(x: f64) -> f64 {
+    if x == 0.0 {
+        return f64::INFINITY;
+    }
+    if x < 0.0 {
+        return f64::NAN;
+    }
+    if x <= 2.0 {
+        chbevl(x * x - 2.0, &K0_A) - (0.5 * x).ln() * i0_f64(x)
+    } else {
+        (-x).exp() * chbevl(8.0 / x - 2.0, &K0_B) / x.sqrt()
+    }
+}
+
+/// `scaled_modified_bessel_k0(x)` f64 — `k0(x) * exp(x)` (drops the `exp(-x)`
+/// in the large region). `scaled_modified_bessel_k0_forward`
+/// (`aten/src/ATen/native/cuda/Math.cuh:2582-2656`). For large `x`,
+/// `-> sqrt(pi/(2x))`.
+fn scaled_modified_bessel_k0_f64(x: f64) -> f64 {
+    if x == 0.0 {
+        return f64::INFINITY;
+    }
+    if x < 0.0 {
+        return f64::NAN;
+    }
+    if x <= 2.0 {
+        (chbevl(x * x - 2.0, &K0_A) - (0.5 * x).ln() * i0_f64(x)) * x.exp()
+    } else {
+        chbevl(8.0 / x - 2.0, &K0_B) / x.sqrt()
+    }
+}
+
+/// `modified_bessel_k1(x)` f64. `modified_bessel_k1_forward`
+/// (`aten/src/ATen/native/cuda/Math.cuh:2661-2736`). `x==0 -> +inf`,
+/// `x<0 -> NaN`. Small region (`x <= 2`):
+/// `log(0.5x)*i1(x) + 0.5*chbevl(x*x-2, A)/x`; large region:
+/// `exp(-x) * chbevl(8/x-2, B) / sqrt(x)`.
+fn modified_bessel_k1_f64(x: f64) -> f64 {
+    if x == 0.0 {
+        return f64::INFINITY;
+    }
+    if x < 0.0 {
+        return f64::NAN;
+    }
+    if x <= 2.0 {
+        (0.5 * x).ln() * i1_f64(x) + chbevl(x * x - 2.0, &K1_A) / x
+    } else {
+        (-x).exp() * chbevl(8.0 / x - 2.0, &K1_B) / x.sqrt()
+    }
+}
+
+/// `scaled_modified_bessel_k1(x)` f64 — `k1(x) * exp(x)`.
+/// `scaled_modified_bessel_k1_forward`
+/// (`aten/src/ATen/native/cuda/Math.cuh:2740-2815`).
+fn scaled_modified_bessel_k1_f64(x: f64) -> f64 {
+    if x == 0.0 {
+        return f64::INFINITY;
+    }
+    if x < 0.0 {
+        return f64::NAN;
+    }
+    if x <= 2.0 {
+        ((0.5 * x).ln() * i1_f64(x) + chbevl(x * x - 2.0, &K1_A) / x) * x.exp()
+    } else {
+        chbevl(8.0 / x - 2.0, &K1_B) / x.sqrt()
+    }
+}
+
+fn modified_bessel_k0_scalar<T: Float>(x: T) -> T {
+    let xf = <T as num_traits::ToPrimitive>::to_f64(&x).unwrap_or(f64::NAN);
+    T::from(modified_bessel_k0_f64(xf)).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+fn scaled_modified_bessel_k0_scalar<T: Float>(x: T) -> T {
+    let xf = <T as num_traits::ToPrimitive>::to_f64(&x).unwrap_or(f64::NAN);
+    T::from(scaled_modified_bessel_k0_f64(xf)).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+fn modified_bessel_k1_scalar<T: Float>(x: T) -> T {
+    let xf = <T as num_traits::ToPrimitive>::to_f64(&x).unwrap_or(f64::NAN);
+    T::from(modified_bessel_k1_f64(xf)).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+fn scaled_modified_bessel_k1_scalar<T: Float>(x: T) -> T {
+    let xf = <T as num_traits::ToPrimitive>::to_f64(&x).unwrap_or(f64::NAN);
+    T::from(scaled_modified_bessel_k1_f64(xf)).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+// ---------------------------------------------------------------------------
 // Incomplete-gamma family (gammainc / gammaincc) and log-beta / multigammaln
 // ---------------------------------------------------------------------------
 //
@@ -1589,6 +1827,102 @@ pub fn i1e<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         return Ok(out);
     }
     unary_map(input, i1e_scalar)
+}
+
+/// Spherical Bessel function of the first kind, order 0:
+/// `j0(x) = sin(x)/x`, with `j0(0) = 1` (the Taylor branch) and `j0(+/-inf) = 0`.
+/// `j0(NaN) = NaN`. Mirrors `torch.special.spherical_bessel_j0`
+/// (`torch/special/__init__.py:1444+`); scalar evaluator ports
+/// `spherical_bessel_j0_forward` (`aten/src/ATen/native/cuda/Math.cuh:3039-3052`):
+/// `|x| < 0.5` uses the explicit 6-term Taylor series, else `sin(x)/x`.
+///
+/// CUDA f32 tensors run an on-device elementwise PTX kernel via
+/// [`crate::gpu_dispatch::GpuBackend::spherical_bessel_j0_f32`] (no host round
+/// trip); f64/bf16/f16 CUDA return `NotImplementedOnCuda` (base PTX lacks the
+/// f64 transcendental approximations needed for the `sin(x)/x` branch).
+pub fn spherical_bessel_j0<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) = special_gpu_simple(
+        input,
+        "spherical_bessel_j0",
+        |b, h| b.spherical_bessel_j0_f32(h),
+        |b, h| b.spherical_bessel_j0_f64(h),
+    )? {
+        return Ok(out);
+    }
+    unary_map(input, spherical_bessel_j0_scalar)
+}
+
+/// Modified Bessel function of the second kind, order 0: `k0(x)`. Domain
+/// `x > 0`: `k0(0) = +inf`, `k0(x < 0) = NaN`, `k0(NaN) = NaN`. Decays to `0`
+/// for large `x`. Mirrors `torch.special.modified_bessel_k0`
+/// (`torch/special/__init__.py:1304-1341`); scalar evaluator ports
+/// `modified_bessel_k0_forward` (`aten/src/ATen/native/cuda/Math.cuh:2503-2577`)
+/// over the shared `chbevl` Clenshaw evaluator and the batch-2 `i0`.
+///
+/// CUDA tensors (all dtypes) return `NotImplementedOnCuda`: the on-device PTX
+/// kernel is tracked under #1651 (batch 3b) alongside the K1 / `zeta` / `airy`
+/// kernels — the small-region log-term over the full `i0` chbevl unroll plus
+/// `log`/`exp` pushes the hand-written f32 PTX past one cohesive commit.
+pub fn modified_bessel_k0<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "modified_bessel_k0",
+        });
+    }
+    unary_map(input, modified_bessel_k0_scalar)
+}
+
+/// Exponentially-scaled modified Bessel order 0:
+/// `scaled_modified_bessel_k0(x) = exp(x) * k0(x)`. Same domain as
+/// [`modified_bessel_k0`]; stays finite (`-> sqrt(pi/(2x))`) where `k0`
+/// underflows. Mirrors `torch.special.scaled_modified_bessel_k0`
+/// (`torch/special/__init__.py:1304-1341`); ports
+/// `scaled_modified_bessel_k0_forward`
+/// (`aten/src/ATen/native/cuda/Math.cuh:2582-2656`).
+///
+/// CUDA tensors return `NotImplementedOnCuda` (batch 3b, #1651).
+pub fn scaled_modified_bessel_k0<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scaled_modified_bessel_k0",
+        });
+    }
+    unary_map(input, scaled_modified_bessel_k0_scalar)
+}
+
+/// Modified Bessel function of the second kind, order 1: `k1(x)`. Domain
+/// `x > 0`: `k1(0) = +inf`, `k1(x < 0) = NaN`, `k1(NaN) = NaN`. Mirrors
+/// `torch.special.modified_bessel_k1` (`torch/special/__init__.py:1321-1358`);
+/// scalar evaluator ports `modified_bessel_k1_forward`
+/// (`aten/src/ATen/native/cuda/Math.cuh:2661-2736`) over `chbevl` and the
+/// batch-2 `i1`.
+///
+/// CUDA tensors return `NotImplementedOnCuda` (batch 3b, #1651).
+pub fn modified_bessel_k1<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "modified_bessel_k1",
+        });
+    }
+    unary_map(input, modified_bessel_k1_scalar)
+}
+
+/// Exponentially-scaled modified Bessel order 1:
+/// `scaled_modified_bessel_k1(x) = exp(x) * k1(x)`. Same domain as
+/// [`modified_bessel_k1`]. Mirrors
+/// `torch.special.scaled_modified_bessel_k1`
+/// (`torch/special/__init__.py:1321-1358`); ports
+/// `scaled_modified_bessel_k1_forward`
+/// (`aten/src/ATen/native/cuda/Math.cuh:2740-2815`).
+///
+/// CUDA tensors return `NotImplementedOnCuda` (batch 3b, #1651).
+pub fn scaled_modified_bessel_k1<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scaled_modified_bessel_k1",
+        });
+    }
+    unary_map(input, scaled_modified_bessel_k1_scalar)
 }
 
 /// Regularized lower incomplete gamma `P(a, x)`, element-wise over a broadcast
@@ -3794,6 +4128,300 @@ mod tests {
                     (d[i] - want[i]).abs() <= 1e-4 * (1.0 + want[i].abs()),
                     "{name} f32 idx {i} x={}: got {} want {}",
                     xs[i],
+                    d[i],
+                    want[i]
+                );
+            }
+        }
+    }
+
+    // --- spherical_bessel_j0 / modified_bessel_k0/k1 (+scaled) (#1651 batch 3a) ---
+    //
+    // Expected values are live `torch.special.*` (torch 2.11.0+cu130, f64)
+    // outputs (R-CHAR-3: oracle-derived, not self-referential).
+
+    // Live torch.special.spherical_bessel_j0 f64 oracle on SBJ0_GRID. The grid
+    // straddles the |x|<0.5 Taylor branch (0,0.25,0.49), the boundary (0.5),
+    // and the sin(x)/x branch (>=0.5, incl. pi where sin(pi)~0).
+    const SBJ0_GRID: [f64; 11] = [
+        0.0,
+        0.25,
+        0.49,
+        0.5,
+        1.0,
+        2.0,
+        3.141_592_653_589_79,
+        5.0,
+        10.0,
+        -1.0,
+        -3.0,
+    ];
+
+    #[test]
+    fn spherical_bessel_j0_known_values_vs_torch() {
+        let input = t(&SBJ0_GRID, &[11]);
+        let r = spherical_bessel_j0(&input).unwrap();
+        let d = r.data().unwrap();
+        let want = [
+            1.0,
+            0.989_615_837_018_091_7,
+            0.960_460_996_267_669_5,
+            0.958_851_077_208_406,
+            0.841_470_984_807_896_5,
+            0.454_648_713_412_840_85,
+            1.028_487_619_224_955_5e-15,
+            -0.191_784_854_932_627_7,
+            -0.054_402_111_088_936_98,
+            0.841_470_984_807_896_5,
+            0.047_040_002_686_622_4,
+        ];
+        for i in 0..11 {
+            assert!(
+                (d[i] - want[i]).abs() <= 1e-12 * (1.0 + want[i].abs()),
+                "spherical_bessel_j0 idx {i} x={}: got {} want {}",
+                SBJ0_GRID[i],
+                d[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "j0(0)=1 is the exact Taylor branch return (x2=0); j0(+/-inf)=0 the explicit isinf branch — torch returns the literal endpoints"
+    )]
+    fn spherical_bessel_j0_edges_vs_torch() {
+        // Live torch: spherical_bessel_j0([inf,-inf,nan]) = [0, 0, nan].
+        let input = t(&[0.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN], &[4]);
+        let r = spherical_bessel_j0(&input).unwrap();
+        let d = r.data().unwrap();
+        assert_eq!(d[0], 1.0, "j0(0) == 1 (Taylor branch)");
+        assert_eq!(d[1], 0.0, "j0(+inf) == 0");
+        assert_eq!(d[2], 0.0, "j0(-inf) == 0");
+        assert!(d[3].is_nan(), "j0(NaN) == NaN");
+    }
+
+    // Live torch.special K-family f64 oracle. K_GRID straddles the small region
+    // (x<=2) and large region (x>2), incl. the boundary at 2 and just above.
+    const K_GRID: [f64; 9] = [0.1, 0.5, 1.0, 2.0, 2.0001, 3.0, 5.0, 10.0, 50.0];
+
+    #[test]
+    fn modified_bessel_k0_known_values_vs_torch() {
+        let input = t(&K_GRID, &[9]);
+        let r = modified_bessel_k0(&input).unwrap();
+        let d = r.data().unwrap();
+        let want = [
+            2.427_069_024_702_017,
+            0.924_419_071_227_666,
+            0.421_024_438_240_708_2,
+            0.113_893_872_749_533_4,
+            0.113_879_887_080_441_4,
+            0.034_739_504_386_279_25,
+            0.003_691_098_334_042_594_2,
+            1.778_006_231_616_765e-5,
+            3.410_167_749_789_495e-23,
+        ];
+        for i in 0..9 {
+            assert!(
+                (d[i] - want[i]).abs() <= 1e-12 * (1.0 + want[i].abs()),
+                "k0 idx {i} x={}: got {} want {}",
+                K_GRID[i],
+                d[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn scaled_modified_bessel_k0_known_values_vs_torch() {
+        let input = t(&K_GRID, &[9]);
+        let r = scaled_modified_bessel_k0(&input).unwrap();
+        let d = r.data().unwrap();
+        let want = [
+            2.682_326_102_262_895,
+            1.524_109_385_773_909_9,
+            1.144_463_079_806_894_4,
+            0.841_568_215_070_771_2,
+            0.841_549_024_872_151_7,
+            0.697_761_598_043_851_7,
+            0.547_807_564_313_519,
+            0.391_631_934_436_598_66,
+            0.176_807_155_857_429_32,
+        ];
+        for i in 0..9 {
+            assert!(
+                (d[i] - want[i]).abs() <= 1e-12 * (1.0 + want[i].abs()),
+                "scaled_k0 idx {i} x={}: got {} want {}",
+                K_GRID[i],
+                d[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn modified_bessel_k1_known_values_vs_torch() {
+        let input = t(&K_GRID, &[9]);
+        let r = modified_bessel_k1(&input).unwrap();
+        let d = r.data().unwrap();
+        let want = [
+            9.853_844_780_870_606,
+            1.656_441_120_003_300_7,
+            0.601_907_230_197_234_6,
+            0.139_865_881_816_522_46,
+            0.139_847_500_468_811_42,
+            0.040_156_431_128_194_19,
+            0.004_044_613_445_452_163,
+            1.864_877_345_382_558_5e-5,
+            3.444_102_226_717_555_5e-23,
+        ];
+        for i in 0..9 {
+            assert!(
+                (d[i] - want[i]).abs() <= 1e-12 * (1.0 + want[i].abs()),
+                "k1 idx {i} x={}: got {} want {}",
+                K_GRID[i],
+                d[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn scaled_modified_bessel_k1_known_values_vs_torch() {
+        let input = t(&K_GRID, &[9]);
+        let r = scaled_modified_bessel_k1(&input).unwrap();
+        let d = r.data().unwrap();
+        let want = [
+            10.890_182_683_049_698,
+            2.731_009_708_211_785_5,
+            1.636_153_486_263_258,
+            1.033_476_847_068_688_8,
+            1.033_444_365_528_781_5,
+            0.806_563_480_128_787,
+            0.600_273_858_788_312_5,
+            0.410_766_570_595_788_7,
+            0.178_566_558_558_815_56,
+        ];
+        for i in 0..9 {
+            assert!(
+                (d[i] - want[i]).abs() <= 1e-12 * (1.0 + want[i].abs()),
+                "scaled_k1 idx {i} x={}: got {} want {}",
+                K_GRID[i],
+                d[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn k_family_domain_edges_vs_torch() {
+        // Live torch: k0/k1 (+scaled) at [0, -1, NaN]: [+inf, NaN, NaN].
+        // At x=700: k0/k1 underflow to a tiny finite (~4.7e-306), while the
+        // scaled variants stay O(0.047) (-> sqrt(pi/(2x))).
+        let input = t(&[0.0, -1.0, f64::NAN, 700.0], &[4]);
+        let fns: [(&str, fn(&Tensor<f64>) -> FerrotorchResult<Tensor<f64>>, f64); 4] = [
+            ("k0", modified_bessel_k0, 0.047_362_369_454_613_57),
+            (
+                "scaled_k0",
+                scaled_modified_bessel_k0,
+                0.047_362_369_454_613_57,
+            ),
+            ("k1", modified_bessel_k1, 0.047_396_187_653_494_55),
+            (
+                "scaled_k1",
+                scaled_modified_bessel_k1,
+                0.047_396_187_653_494_55,
+            ),
+        ];
+        for (name, f, scaled_at_700) in fns {
+            let r = f(&input).unwrap();
+            let d = r.data().unwrap();
+            assert!(
+                d[0].is_infinite() && d[0] > 0.0,
+                "{name}(0) == +inf: got {}",
+                d[0]
+            );
+            assert!(d[1].is_nan(), "{name}(-1) == NaN: got {}", d[1]);
+            assert!(d[2].is_nan(), "{name}(NaN) == NaN: got {}", d[2]);
+            if name.starts_with("scaled") {
+                assert!(
+                    (d[3] - scaled_at_700).abs() <= 1e-12 * (1.0 + scaled_at_700.abs()),
+                    "{name}(700) ~ sqrt(pi/2x): got {} want {}",
+                    d[3],
+                    scaled_at_700
+                );
+            } else {
+                // Unscaled underflows toward 0 but stays finite & positive.
+                assert!(
+                    d[3].is_finite() && d[3] >= 0.0 && d[3] < 1e-300,
+                    "{name}(700) underflows finite-nonneg: got {}",
+                    d[3]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn spherical_and_k_family_f32_vs_torch() {
+        // f32 oracle (live torch.special, 2.11). The f64-then-narrow CPU path
+        // must stay inside the f32 transcendental tolerance (1e-4 rel).
+        //   spherical_bessel_j0([0,0.25,0.5,1,2,5,-3]) =
+        //     [1, 0.98961586, 0.9588511, 0.84147096, 0.4546487, -0.19178486, 0.047040001]
+        let xs = vec![0.0f32, 0.25, 0.5, 1.0, 2.0, 5.0, -3.0];
+        let input =
+            Tensor::from_storage(TensorStorage::cpu(xs.clone()), vec![xs.len()], false).unwrap();
+        let r = spherical_bessel_j0(&input).unwrap();
+        let d = r.data().unwrap();
+        let want = [
+            1.0f32,
+            0.989_615_86,
+            0.958_851_1,
+            0.841_470_96,
+            0.454_648_7,
+            -0.191_784_86,
+            0.047_04,
+        ];
+        for i in 0..7 {
+            assert!(
+                (d[i] - want[i]).abs() <= 1e-4 * (1.0 + want[i].abs()),
+                "spherical_bessel_j0 f32 idx {i} x={}: got {} want {}",
+                xs[i],
+                d[i],
+                want[i]
+            );
+        }
+
+        // K-family f32 at x=1.0 (small region) and x=3.0 (large region).
+        let kx = vec![1.0f32, 3.0];
+        let kin =
+            Tensor::from_storage(TensorStorage::cpu(kx.clone()), vec![kx.len()], false).unwrap();
+        let kcases: [(
+            &str,
+            fn(&Tensor<f32>) -> FerrotorchResult<Tensor<f32>>,
+            [f32; 2],
+        ); 4] = [
+            ("k0", modified_bessel_k0, [0.421_024_44, 0.034_739_504]),
+            (
+                "scaled_k0",
+                scaled_modified_bessel_k0,
+                [1.144_463_1, 0.697_761_6],
+            ),
+            ("k1", modified_bessel_k1, [0.601_907_23, 0.040_156_43]),
+            (
+                "scaled_k1",
+                scaled_modified_bessel_k1,
+                [1.636_153_5, 0.806_563_5],
+            ),
+        ];
+        for (name, f, want) in kcases {
+            let r = f(&kin).unwrap();
+            let d = r.data().unwrap();
+            for i in 0..2 {
+                assert!(
+                    (d[i] - want[i]).abs() <= 1e-4 * (1.0 + want[i].abs()),
+                    "{name} f32 idx {i} x={}: got {} want {}",
+                    kx[i],
                     d[i],
                     want[i]
                 );

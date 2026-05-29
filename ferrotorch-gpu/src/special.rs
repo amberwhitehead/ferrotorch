@@ -3017,6 +3017,103 @@ DONE:
 }
 ";
 
+/// Spherical Bessel j0(x), f32. `isinf -> 0`; `|x| < 0.5` Taylor (Horner in
+/// x*x over the 6 explicit Cephes terms); else `sin.approx.f32(x) / x`. Mirrors
+/// spherical_bessel_j0_forward (aten/src/ATen/native/cuda/Math.cuh:3039-3052).
+/// `j0(NaN) = NaN` (NaN is not `< 0.5`, falls through to `sin(NaN)/NaN = NaN`;
+/// the `isinf` test is false for NaN). ABI: `(in, out, total)`.
+#[cfg(feature = "cuda")]
+pub(crate) const SPHERICAL_BESSEL_J0_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+// NOTE: PTX comments must stay ASCII-only. The WSL driver (591.86) JIT parser
+// rejects non-ASCII bytes with CUDA_ERROR_INVALID_PTX. Taylor coefficients are
+// the f32 bit-hex of the Cephes terms (-1/6, 1/120, -1/5040, 1/362880,
+// -1/39916800, 1/6227020800) in cuda/Math.cuh:3047.
+
+.visible .entry spherical_bessel_j0_f32(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r;
+    .reg .u64 %in_p, %out_p, %off, %addr;
+    .reg .f32 %x, %ax, %x2, %p, %s, %r;
+    .reg .pred %oob, %isinf, %small;
+
+    ld.param.u64 %in_p,    [in_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %oob, %idx, %total_r;
+    @%oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in_p, %off;
+    ld.global.f32 %x, [%addr];
+
+    // isinf(x) -> 0.0
+    testp.infinite.f32 %isinf, %x;
+    @%isinf bra ZERO;
+
+    abs.f32 %ax, %x;
+    setp.lt.f32 %small, %ax, 0f3F000000;   // |x| < 0.5
+    @!%small bra SINX;
+
+    // Taylor: Horner in x2 = x*x.
+    mul.f32 %x2, %x, %x;
+    mov.f32 %p, 0f2F309231;                 // 1/6227020800
+    fma.rn.f32 %p, %p, %x2, 0fB2D7322B;     // *x2 + (-1/39916800)
+    fma.rn.f32 %p, %p, %x2, 0f3638EF1D;     // *x2 + (1/362880)
+    fma.rn.f32 %p, %p, %x2, 0fB9500D01;     // *x2 + (-1/5040)
+    fma.rn.f32 %p, %p, %x2, 0f3C088889;     // *x2 + (1/120)
+    fma.rn.f32 %p, %p, %x2, 0fBE2AAAAB;     // *x2 + (-1/6)
+    fma.rn.f32 %r, %p, %x2, 0f3F800000;     // *x2 + 1.0
+    bra STORE;
+
+SINX:
+    sin.approx.f32 %s, %x;
+    div.rn.f32 %r, %s, %x;
+    bra STORE;
+
+ZERO:
+    mov.f32 %r, 0f00000000;
+
+STORE:
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out_p, %off;
+    st.global.f32 [%addr], %r;
+DONE:
+    ret;
+}
+";
+
+/// Spherical Bessel `j0(x)` forward on an f32 buffer (on-device, no host
+/// round-trip).
+///
+/// # Errors
+/// See [`gpu_chebyshev_poly_f32`].
+#[cfg(feature = "cuda")]
+pub fn gpu_spherical_bessel_j0_f32(
+    input: &CudaBuffer<f32>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    launch_elementwise_f32(
+        input,
+        device,
+        SPHERICAL_BESSEL_J0_F32_PTX,
+        "spherical_bessel_j0_f32",
+    )
+}
+
 /// Launch a parameterless elementwise transcendental kernel (entr / ndtr /
 /// ndtri) whose ABI is `(in, out, total)` on an f32 buffer.
 #[cfg(feature = "cuda")]
@@ -3606,6 +3703,54 @@ mod tests {
                 want[i]
             );
         }
+    }
+
+    #[test]
+    fn spherical_bessel_j0_on_device_matches_torch() {
+        // Live torch.special.spherical_bessel_j0 (2.11.0+cu130, f32). Grid spans
+        // the |x|<0.5 Taylor branch (0,0.25), the boundary (0.5), and the
+        // sin(x)/x branch (1,2,5), plus a negative (sin/x is even -> same as +3).
+        // The kernel runs ON-DEVICE (CudaBuffer<f32>, is_cuda by type); the
+        // device_ordinal is asserted before the explicit gpu_to_cpu read-back.
+        let Some(device) = dev() else { return };
+        let xs: [f32; 7] = [0.0, 0.25, 0.5, 1.0, 2.0, 5.0, -3.0];
+        let want: [f32; 7] = [
+            1.0,
+            0.989_615_86,
+            0.958_851_1,
+            0.841_470_96,
+            0.454_648_7,
+            -0.191_784_86,
+            0.047_04,
+        ];
+        let xg = cpu_to_gpu(&xs, &device).unwrap();
+        let yg = gpu_spherical_bessel_j0_f32(&xg, &device).unwrap();
+        assert_eq!(yg.device_ordinal(), device.ordinal());
+        let got = gpu_to_cpu(&yg, &device).unwrap();
+        for i in 0..7 {
+            assert!(
+                (got[i] - want[i]).abs() <= 2e-4 * (1.0 + want[i].abs()),
+                "spherical_bessel_j0 idx {i} x={}: got {} want {}",
+                xs[i],
+                got[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn spherical_bessel_j0_on_device_edges_match_torch() {
+        // Live torch: spherical_bessel_j0([inf,-inf,nan]) = [0, 0, nan]; j0(0)=1.
+        let Some(device) = dev() else { return };
+        let xs: [f32; 4] = [0.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN];
+        let xg = cpu_to_gpu(&xs, &device).unwrap();
+        let yg = gpu_spherical_bessel_j0_f32(&xg, &device).unwrap();
+        assert_eq!(yg.device_ordinal(), device.ordinal());
+        let got = gpu_to_cpu(&yg, &device).unwrap();
+        assert!((got[0] - 1.0).abs() <= 1e-6, "j0(0) == 1: got {}", got[0]);
+        assert!(got[1].abs() <= 1e-6, "j0(+inf) == 0: got {}", got[1]);
+        assert!(got[2].abs() <= 1e-6, "j0(-inf) == 0: got {}", got[2]);
+        assert!(got[3].is_nan(), "j0(NaN) == NaN: got {}", got[3]);
     }
 
     #[test]

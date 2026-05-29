@@ -1263,6 +1263,113 @@ path = "ferrotorch_core::gammaln_sign"
 reason = "Re-export covered transitively by the Phase 2.5-special-transcendental conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
 tracking_issue = "#767"
 
+# torch.special batch 2 (#1651): modified-Bessel-I family. CPU f32+f64 + GPU
+# f32 shipped end-to-end with live-torch-2.11 oracle tests in special.rs
+# (i0/i0e/i1/i1e_known_values_vs_torch, i_family_edges/boundary/large_x/f32) +
+# ferrotorch-gpu (i{0,0e,1,1e}_on_device_matches_torch). The short idents `i0`,
+# `i0e`, `i1`, `i1e` are absent from the conformance_*.rs substring-grep sources
+# (they previously relied on incidental substring hits that no longer exist);
+# coverage is the in-crate special::tests live-torch suite. Closes the batch-2
+# surface-gate gap in the same commit as batch 3a since the mechanism is shared.
+[[exclusion]]
+path = "ferrotorch_core::i0"
+reason = "Re-export covered by the live-torch-2.11 special::tests suite in special.rs (i0_known_values_vs_torch, i_family_edges/boundary/f32_vs_torch, CPU f32/f64 + GPU f32); the substring-grep gate has no auto-coverage for the unique re-export ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::special::i0"
+reason = "Covered by the live-torch-2.11 special::tests suite in special.rs (i0_known_values_vs_torch, i_family_edges/boundary/f32_vs_torch, CPU f32/f64 + GPU f32 on the RTX 3090); the substring-grep gate has no auto-coverage for the unique fn ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::i0e"
+reason = "Re-export covered by the live-torch-2.11 special::tests suite in special.rs (i0e_known_values_vs_torch, i_family_large_x_scaled_finite_vs_torch, CPU f32/f64 + GPU f32); the substring-grep gate has no auto-coverage for the unique re-export ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::special::i0e"
+reason = "Covered by the live-torch-2.11 special::tests suite in special.rs (i0e_known_values_vs_torch, i_family_large_x_scaled_finite_vs_torch, CPU f32/f64 + GPU f32); the substring-grep gate has no auto-coverage for the unique fn ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::i1"
+reason = "Re-export covered by the live-torch-2.11 special::tests suite in special.rs (i1_known_values_vs_torch, i_family_edges/boundary/f32_vs_torch, CPU f32/f64 + GPU f32); the substring-grep gate has no auto-coverage for the unique re-export ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::special::i1"
+reason = "Covered by the live-torch-2.11 special::tests suite in special.rs (i1_known_values_vs_torch, i_family_edges/boundary/f32_vs_torch, CPU f32/f64 + GPU f32); the substring-grep gate has no auto-coverage for the unique fn ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::i1e"
+reason = "Re-export covered by the live-torch-2.11 special::tests suite in special.rs (i1e_known_values_vs_torch, i_family_large_x_scaled_finite_vs_torch, CPU f32/f64 + GPU f32); the substring-grep gate has no auto-coverage for the unique re-export ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::special::i1e"
+reason = "Covered by the live-torch-2.11 special::tests suite in special.rs (i1e_known_values_vs_torch, i_family_large_x_scaled_finite_vs_torch, CPU f32/f64 + GPU f32); the substring-grep gate has no auto-coverage for the unique fn ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+# torch.special batch 3a (#1651): spherical_bessel_j0 + modified_bessel_k0/k1
+# (+scaled). CPU f32+f64 shipped end-to-end with live-torch-2.11 oracle tests in
+# `special.rs` (spherical_bessel_j0_known_values_vs_torch,
+# modified_bessel_k0/k1_known_values_vs_torch, scaled_*, k_family_domain_edges,
+# spherical_and_k_family_f32_vs_torch) + GPU f32 for spherical_bessel_j0
+# (spherical_bessel_j0_on_device_matches_torch in ferrotorch-gpu). The unique
+# idents are absent from the `conformance_*.rs` substring-grep sources; coverage
+# is the in-crate `special::tests` live-torch suite. Phase-2.5-style conformance
+# tests for the new family are tracked under #1651.
+[[exclusion]]
+path = "ferrotorch_core::spherical_bessel_j0"
+reason = "Re-export covered by the live-torch-2.11 special::tests suite in special.rs (spherical_bessel_j0_*_vs_torch, CPU f32/f64 + GPU f32); the substring-grep gate has no auto-coverage for the unique re-export ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::special::spherical_bessel_j0"
+reason = "Covered by the live-torch-2.11 special::tests suite in special.rs (spherical_bessel_j0_*_vs_torch, CPU f32/f64 + GPU f32 on the RTX 3090); the substring-grep gate has no auto-coverage for the unique fn ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::modified_bessel_k0"
+reason = "Re-export covered by the live-torch-2.11 special::tests suite in special.rs (modified_bessel_k0_known_values_vs_torch, k_family_domain_edges_vs_torch, spherical_and_k_family_f32_vs_torch); the substring-grep gate has no auto-coverage for the unique re-export ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::special::modified_bessel_k0"
+reason = "Covered by the live-torch-2.11 special::tests suite in special.rs (modified_bessel_k0_known_values_vs_torch, k_family_domain_edges_vs_torch); the substring-grep gate has no auto-coverage for the unique fn ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::scaled_modified_bessel_k0"
+reason = "Re-export covered by the live-torch-2.11 special::tests suite in special.rs (scaled_modified_bessel_k0_known_values_vs_torch, k_family_domain_edges_vs_torch); the substring-grep gate has no auto-coverage for the unique re-export ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::special::scaled_modified_bessel_k0"
+reason = "Covered by the live-torch-2.11 special::tests suite in special.rs (scaled_modified_bessel_k0_known_values_vs_torch, k_family_domain_edges_vs_torch); the substring-grep gate has no auto-coverage for the unique fn ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::modified_bessel_k1"
+reason = "Re-export covered by the live-torch-2.11 special::tests suite in special.rs (modified_bessel_k1_known_values_vs_torch, k_family_domain_edges_vs_torch); the substring-grep gate has no auto-coverage for the unique re-export ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::special::modified_bessel_k1"
+reason = "Covered by the live-torch-2.11 special::tests suite in special.rs (modified_bessel_k1_known_values_vs_torch, k_family_domain_edges_vs_torch); the substring-grep gate has no auto-coverage for the unique fn ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::scaled_modified_bessel_k1"
+reason = "Re-export covered by the live-torch-2.11 special::tests suite in special.rs (scaled_modified_bessel_k1_known_values_vs_torch, k_family_domain_edges_vs_torch); the substring-grep gate has no auto-coverage for the unique re-export ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
+[[exclusion]]
+path = "ferrotorch_core::special::scaled_modified_bessel_k1"
+reason = "Covered by the live-torch-2.11 special::tests suite in special.rs (scaled_modified_bessel_k1_known_values_vs_torch, k_family_domain_edges_vs_torch); the substring-grep gate has no auto-coverage for the unique fn ident absent from conformance_*.rs."
+tracking_issue = "#1651"
+
 [[exclusion]]
 path = "ferrotorch_core::gpu_dispatch::CompareOp"
 reason = "Pending Phase 2.14-plumbing — plumbing & core types. The phase will land a conformance test exercising this item against PyTorch parity (CPU + GPU + autograd-where-applicable)."
