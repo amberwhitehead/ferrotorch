@@ -196,13 +196,17 @@ pub fn unique<T: Float>(
         ));
     }
 
-    // Sort indices by value.
+    // Sort indices by value. NaN must sort to the END (ranked as the maximum),
+    // mirroring upstream `_unique_cpu`'s `input_flattened.sort()`
+    // (`aten/src/ATen/native/Unique.cpp:185`), whose default ascending tensor
+    // sort drives every NaN past every finite/inf value. The previous
+    // `partial_cmp(..).unwrap_or(Equal)` treated NaN as Equal to its neighbours
+    // so NaN never moved — corrupting the sorted order, inverse map, and counts.
+    // `nan_is_max_cmp` uses `partial_cmp` for the non-NaN/non-NaN case, so
+    // `-0.0` and `+0.0` stay equal+adjacent and dedup to ONE entry (torch), and
+    // `-inf`/`+inf` order correctly (`-inf` first, `+inf` just before NaN).
     let mut indices: Vec<usize> = (0..n).collect();
-    indices.sort_by(|&a, &b| {
-        data[a]
-            .partial_cmp(&data[b])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    indices.sort_by(|&a, &b| nan_is_max_cmp(data[a], data[b]));
 
     // Extract unique values, inverse mapping, and counts.
     let mut unique_vals: Vec<T> = Vec::new();
