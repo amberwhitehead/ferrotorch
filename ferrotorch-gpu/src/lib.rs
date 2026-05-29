@@ -275,10 +275,10 @@ pub use search::{
 };
 #[cfg(feature = "cuda")]
 pub use special::{
-    gpu_chebyshev_poly_f32, gpu_chebyshev_poly_f64, gpu_entr_f32, gpu_hermite_h_poly_f32,
-    gpu_hermite_h_poly_f64, gpu_hermite_he_poly_f32, gpu_hermite_he_poly_f64,
-    gpu_laguerre_poly_f32, gpu_laguerre_poly_f64, gpu_legendre_poly_f32, gpu_legendre_poly_f64,
-    gpu_ndtr_f32, gpu_ndtri_f32, gpu_spherical_bessel_j0_f32,
+    gpu_airy_ai_f32, gpu_chebyshev_poly_f32, gpu_chebyshev_poly_f64, gpu_entr_f32,
+    gpu_hermite_h_poly_f32, gpu_hermite_h_poly_f64, gpu_hermite_he_poly_f32,
+    gpu_hermite_he_poly_f64, gpu_laguerre_poly_f32, gpu_laguerre_poly_f64, gpu_legendre_poly_f32,
+    gpu_legendre_poly_f64, gpu_ndtr_f32, gpu_ndtri_f32, gpu_spherical_bessel_j0_f32, gpu_zeta_f32,
 };
 pub use tensor_bridge::{GpuFloat, GpuTensor, cuda, cuda_default, tensor_to_cpu, tensor_to_gpu};
 #[cfg(feature = "cuda")]

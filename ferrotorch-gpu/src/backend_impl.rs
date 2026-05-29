@@ -4406,6 +4406,41 @@ impl GpuBackend for CudaBackendImpl {
         })
     }
 
+    // Airy Ai + Hurwitz zeta (#1651 GPU tail). f32 runs on-device; f64 ->
+    // NotImplementedOnCuda (base PTX has no lg2/ex2.approx.f64). bf16/f16 are
+    // rejected in the core dispatch before reaching here.
+
+    fn airy_ai_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::special::gpu_airy_ai_f32(a_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn airy_ai_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "airy_ai_f64" })
+    }
+
+    fn zeta_f32(
+        &self,
+        x: &GpuBufferHandle,
+        q: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let x_buf = Self::unwrap_buffer(x)?;
+        let q_buf = Self::unwrap_buffer(q)?;
+        let dev = self.device(x.device_ordinal())?;
+        let result = crate::special::gpu_zeta_f32(x_buf, q_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, x.device_ordinal()))
+    }
+
+    fn zeta_f64(
+        &self,
+        _x: &GpuBufferHandle,
+        _q: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "zeta_f64" })
+    }
+
     fn clamp_f32(
         &self,
         a: &GpuBufferHandle,

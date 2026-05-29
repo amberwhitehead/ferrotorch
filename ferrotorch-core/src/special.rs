@@ -2277,13 +2277,25 @@ pub fn scaled_modified_bessel_k1<T: Float>(input: &Tensor<T>) -> FerrotorchResul
 /// `x < 1 -> NaN`; `q <= 0` non-positive integer `-> +inf`; `q <= 0` non-integer
 /// with non-integer `x -> NaN`. `zeta(2, 1) == pi^2/6`.
 ///
-/// CUDA tensors (all dtypes) return `NotImplementedOnCuda`: the data-dependent
-/// `while ((i < 9) || (a <= 9.0))` accumulation + Euler-Maclaurin tail with
-/// MACHEP-relative early exit maps poorly to flat PTX (no `Ptx::from_src`
-/// libdevice link for the f64 `pow`/`log` it needs); tracked under #1651.
+/// CUDA f32 runs an on-device PTX kernel via
+/// [`crate::gpu_dispatch::GpuBackend::zeta_f32`] (no host round trip) when both
+/// operands are CUDA-resident, same-device and SAME-shape: the
+/// `while ((i < 9) || (a <= 9.0))` first-sum loop ALWAYS terminates at exactly
+/// `i == 9` (since `a = q + 9 > 9` for any `q > 0` by then), so it is a FIXED
+/// 9-iteration unroll with a relative-MACHEP `converged` early-exit flag, and
+/// the Euler-Maclaurin tail is a FIXED 12-term loop over the Bernoulli-derived
+/// `ZETA_A` table with the same early-exit. Broadcast / mixed-device cases fall
+/// through to the CPU [`binary_map`]. f64/bf16/f16 CUDA return
+/// `NotImplementedOnCuda` (base PTX lacks the f64 `pow`/`log` approximations).
 pub fn zeta<T: Float>(input: &Tensor<T>, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() || other.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "zeta" });
+    if let Some(out) = special_gpu_binary(
+        input,
+        other,
+        "zeta",
+        |b, x, q| b.zeta_f32(x, q),
+        |b, x, q| b.zeta_f64(x, q),
+    )? {
+        return Ok(out);
     }
     binary_map(input, other, zeta_scalar)
 }
@@ -2295,12 +2307,22 @@ pub fn zeta<T: Float>(input: &Tensor<T>, other: &Tensor<T>) -> FerrotorchResult<
 /// `x > 0`; `airy_ai(+/-inf) = NaN` (the `isinf` short-circuit at
 /// `Math.cuh:1360-1362`), `airy_ai(x > 103.892) = 0`.
 ///
-/// CUDA tensors (all dtypes) return `NotImplementedOnCuda`: the multi-region
-/// rational/series with a data-dependent Maclaurin convergence `while` loop maps
-/// poorly to flat PTX; tracked under #1651.
+/// CUDA f32 runs an on-device PTX kernel via
+/// [`crate::gpu_dispatch::GpuBackend::airy_ai_f32`] (no host round trip): the
+/// multi-region rational/series is reproduced with the oscillatory/decaying
+/// Horner chains and a FIXED 36-iteration central-Maclaurin unroll (the
+/// `while (t > MACHEP)` central loop is only reached for the bounded
+/// `x in [-2.09, 8.3203353]` window, where 36 terms more than cover
+/// convergence). f64/bf16/f16 CUDA return `NotImplementedOnCuda` (base PTX
+/// lacks `lg2.approx.f64`/`ex2.approx.f64`).
 pub fn airy_ai<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "airy_ai" });
+    if let Some(out) = special_gpu_simple(
+        input,
+        "airy_ai",
+        |b, h| b.airy_ai_f32(h),
+        |b, h| b.airy_ai_f64(h),
+    )? {
+        return Ok(out);
     }
     unary_map(input, airy_ai_scalar)
 }
@@ -2524,6 +2546,57 @@ fn special_gpu_simple<T: Float>(
         out_handle,
         input.shape().to_vec(),
     )?))
+}
+
+/// Run a two-input elementwise special-function kernel (`zeta`) on a pair of
+/// CUDA tensors, dispatching by dtype through the registered [`GpuBackend`].
+/// Returns `Ok(Some(out))` when the GPU path handled it, `Ok(None)` when the
+/// caller should take the CPU path.
+///
+/// The GPU fast path requires BOTH operands CUDA-resident, on the same device,
+/// same dtype, and the SAME shape (the elementwise kernel is one-thread-per-
+/// element with no on-device broadcast). When only one operand is CUDA, or the
+/// shapes differ (broadcast), it returns `Ok(None)` so the caller falls through
+/// to the CPU [`binary_map`] (which broadcasts). bf16/f16 CUDA inputs are
+/// rejected with `NotImplementedOnCuda` (no host round trip). The result stays
+/// on-device (R-CODE-4).
+fn special_gpu_binary<T: Float>(
+    x: &Tensor<T>,
+    q: &Tensor<T>,
+    op: &'static str,
+    f32_call: impl Fn(
+        &dyn crate::gpu_dispatch::GpuBackend,
+        &crate::gpu_dispatch::GpuBufferHandle,
+        &crate::gpu_dispatch::GpuBufferHandle,
+    ) -> FerrotorchResult<crate::gpu_dispatch::GpuBufferHandle>,
+    f64_call: impl Fn(
+        &dyn crate::gpu_dispatch::GpuBackend,
+        &crate::gpu_dispatch::GpuBufferHandle,
+        &crate::gpu_dispatch::GpuBufferHandle,
+    ) -> FerrotorchResult<crate::gpu_dispatch::GpuBufferHandle>,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !x.is_cuda() && !q.is_cuda() {
+        return Ok(None);
+    }
+    // Any CUDA operand of a non-f32/f64 dtype rejects (no host round trip).
+    if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
+        return Err(FerrotorchError::NotImplementedOnCuda { op });
+    }
+    // Mixed device or broadcast shapes: defer to the CPU binary path (which
+    // handles broadcasting). Only the same-device, same-shape case runs the
+    // on-device kernel.
+    if x.is_cuda() != q.is_cuda() || x.shape() != q.shape() {
+        return Ok(None);
+    }
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let xh = x.gpu_handle()?;
+    let qh = q.gpu_handle()?;
+    let out_handle = if poly_is_f32::<T>() {
+        f32_call(backend, xh, qh)?
+    } else {
+        f64_call(backend, xh, qh)?
+    };
+    Ok(Some(poly_gpu_output::<T>(out_handle, x.shape().to_vec())?))
 }
 
 /// Chebyshev-family GPU dispatch (T/U/V/W + shifted), selecting the kind via

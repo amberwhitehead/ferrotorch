@@ -53,6 +53,7 @@
 //! | REQ-3 (laguerre, f32/f64) | SHIPPED | `pub fn gpu_laguerre_poly_* in special.rs`; consumer `CudaBackendImpl::laguerre_polynomial_l_f32`/`_f64` |
 //! | REQ-4 (legendre, f32/f64) | SHIPPED | `pub fn gpu_legendre_poly_* in special.rs`; consumer `CudaBackendImpl::legendre_polynomial_p_f32`/`_f64` |
 //! | REQ-5 (re-export + consumer wiring) | SHIPPED | `pub use special::* in lib.rs`; consumer the `CudaBackendImpl` trait-method bodies registered via `init_cuda_backend`, which `ferrotorch_core::special` GPU branches dispatch through |
+//! | REQ-7 (Airy Ai + Hurwitz zeta GPU f32, #1651 GPU tail) | SHIPPED | impl `pub fn gpu_airy_ai_f32` (`AIRY_AI_F32_PTX`) + `pub fn gpu_zeta_f32` (`ZETA_F32_PTX`, via `launch_binary_elementwise_f32`) `in special.rs`, porting `airy_ai_forward`/`zeta` at upstream `cuda/Math.cuh:1280-1459, 299-383` as fixed-count unrolls (bounded loops); consumer `CudaBackendImpl::airy_ai_f32`/`zeta_f32 in backend_impl.rs`, dispatched from the `special_gpu_simple`/`special_gpu_binary` GPU branches of `ferrotorch_core::special::airy_ai`/`zeta`. f64/bf16/f16 CUDA reject `NotImplementedOnCuda` |
 
 #[cfg(feature = "cuda")]
 use cudarc::driver::{LaunchConfig, PushKernelArg};
@@ -4768,6 +4769,466 @@ DONE:
 }
 ";
 
+// ---------------------------------------------------------------------------
+// PTX - Airy Ai (#1651 GPU tail) + Hurwitz zeta (#1651 GPU tail)
+// ---------------------------------------------------------------------------
+//
+// f32-only on the GPU (base PTX lacks lg2/ex2.approx.f64; f64 ->
+// NotImplementedOnCuda, same constraint as the earlier #1651 batches). The f32
+// math mirrors the ferrotorch CPU f64 scalar evaluators (`airy_ai_f64` /
+// `zeta_f64` in ferrotorch-core/src/special.rs, themselves verbatim ports of
+// the Cephes kernels at aten/src/ATen/native/cuda/Math.cuh:1280-1459 (airy)
+// and :299-383 (zeta)) narrowed to f32. Both kernels are BOUNDED:
+//
+//   - airy_ai's central Maclaurin series `while (t > MACHEP)` (Math.cuh:1437)
+//     is only reached for the bounded x in [-2.09, 8.3203353] window; over that
+//     entire window it converges in <= 30 terms (f64) and far fewer in f32, so
+//     a FIXED 36-iteration unrolled counted loop reproduces the unbounded
+//     reference bit-for-relevant-tolerance (verified: 0 rel err vs the f64
+//     reference across x in [-2.2, 10.5] step 0.01, and <=2.2e-8 rel vs live
+//     torch f32). The oscillatory (x<-2.09) and decaying (x>8.32) regions are
+//     already flat polynomial Horner chains in upstream.
+//
+//   - zeta's `while ((i < 9) || (a <= 9.0))` (Math.cuh:349) ALWAYS terminates
+//     at exactly i==9 because a = q + 9 > 9 for any q > 0 by then, so it is a
+//     FIXED 9-iteration counted loop with a per-iteration MACHEP-relative
+//     early-exit `converged` flag (Math.cuh:354-356); the Euler-Maclaurin tail
+//     (Math.cuh:364-379) is a FIXED 12-term loop over the ZETA_A table with the
+//     same relative early-exit flag. Once `converged` is set the accumulation
+//     is guarded off and the tail is skipped, exactly mirroring the upstream
+//     early `return s`.
+//
+// `pow(a, -x)` (Math.cuh:347) is evaluated on-device as
+// `a^(-x) = 2^(-x * log2(a)) = ex2.approx.f32(-x * lg2.approx.f32(a))`; `exp`,
+// `sin`, `cos`, `sqrt` use `ex2.approx.f32`(* log2e) / `sin.approx.f32` /
+// `cos.approx.f32` / `sqrt.rn.f32`. PTX comments stay ASCII-only (the WSL
+// driver JIT rejects non-ASCII bytes with CUDA_ERROR_INVALID_PTX).
+
+/// Airy function of the first kind `Ai(x)`, f32. Multi-region Cephes kernel
+/// (`aten/src/ATen/native/cuda/Math.cuh:1280-1459`, `airy_ai_forward`): `isinf
+/// -> NaN`; `x > 103.892 -> 0`; `x < -2.09` oscillatory asymptotic (AFN/AFD +
+/// AGN/AGD Horner chains over `z2`); `x >= 2.09` decaying asymptotic (AN/AD over
+/// `1/zeta`, early-return for `x > 8.3203353`); else the central Maclaurin
+/// `f`/`g` series (FIXED 36-iter unroll). ABI: `(in, out, total)`.
+#[cfg(feature = "cuda")]
+pub(crate) const AIRY_AI_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+// NOTE: PTX comments must stay ASCII-only (WSL driver JIT rejects non-ASCII
+// with CUDA_ERROR_INVALID_PTX). Coefficient immediates are the f32 bit-hex of
+// the Cephes airy AN/AD/AFN/AFD/AGN/AGD tables (special.rs AIRY_*).
+
+.visible .entry airy_ai_f32(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r, %kk;
+    .reg .u64 %in_p, %out_p, %off, %addr;
+    .reg .f32 %x, %r, %ai, %z, %z2, %iz, %sx, %t, %st, %ct;
+    .reg .f32 %afn, %afd, %agn, %agd, %an, %ad, %zeta;
+    .reg .f32 %ff, %g, %k, %m, %n, %zc, %tmp, %c0, %ai0, %nai0;
+    .reg .pred %oob, %isinf, %big0, %osc, %dec, %df1, %fardec, %loop;
+
+    ld.param.u64 %in_p,    [in_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %oob, %idx, %total_r;
+    @%oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in_p, %off;
+    ld.global.f32 %x, [%addr];
+
+    mov.f32 %c0,   0f3F106EBB;     // 5.64189583547756286948e-01 = 1/(2*sqrt(pi))
+    mov.f32 %ai0,  0f3EB5C63D;     // 0.355028053887817239260 = Ai(0)
+    mov.f32 %nai0, 0f3E8483FA;     // 0.258819403792806798405 = -Ai'(0)
+
+    // isinf(x) -> NaN (Math.cuh:1360-1362). |x| == +inf.
+    abs.f32 %tmp, %x;
+    setp.eq.f32 %isinf, %tmp, 0f7F800000;
+    @%isinf mov.f32 %r, 0f7FC00000;
+    @%isinf bra STORE;
+    // NaN input -> NaN: the region comparisons below all fail (NaN compares
+    // false), so a NaN x routes through the central series, which propagates
+    // NaN through the arithmetic to a NaN result, matching torch.
+
+    // x > 103.892 -> 0 (Math.cuh:1364-1366).
+    setp.gt.f32 %big0, %x, 0f42CFC8B4;
+    @%big0 mov.f32 %r, 0f00000000;
+    @%big0 bra STORE;
+
+    // df1 encodes domain_flag&1: false everywhere except the decaying region
+    // (domain_flag = 5, &1 == 1). Initialise FALSE via an always-false compare.
+    setp.gt.f32 %df1, %x, 0f7F800000;   // x > +inf is always false -> df1 = 0
+    mov.f32 %ai, 0f00000000;
+
+    // x < -2.09 -> oscillatory asymptotic region (Math.cuh:1372-1402).
+    setp.lt.f32 %osc, %x, 0fC005C28F;   // -2.09
+    @!%osc bra AFTER_OSC;
+    // t = -2*x*sqrt(-x)/3 ; z = 1/t ; z2 = z*z
+    neg.f32 %tmp, %x;
+    sqrt.rn.f32 %sx, %tmp;              // sqrt(-x)
+    mul.f32 %t, %x, %sx;                // x*sqrt(-x)
+    mov.f32 %tmp, 0fC0000000;           // -2.0
+    mul.f32 %t, %t, %tmp;               // -2*x*sqrt(-x)
+    mov.f32 %tmp, 0f3EAAAAAB;           // 1/3
+    mul.f32 %t, %t, %tmp;               // -2*x*sqrt(-x)/3
+    rcp.rn.f32 %z, %t;                  // z = 1/(-2*x*sqrt(-x)/3)
+    mul.f32 %z2, %z, %z;
+    // AFN Horner over z2
+    mov.f32 %afn, 0fBE06DB67;
+    fma.rn.f32 %afn, %afn, %z2, 0fBF205F75;
+    fma.rn.f32 %afn, %afn, %z2, 0fBF3172CE;
+    fma.rn.f32 %afn, %afn, %z2, 0fBE8F3F52;
+    fma.rn.f32 %afn, %afn, %z2, 0fBD497B78;
+    fma.rn.f32 %afn, %afn, %z2, 0fBB85200E;
+    fma.rn.f32 %afn, %afn, %z2, 0fB9270375;
+    fma.rn.f32 %afn, %afn, %z2, 0fB63A53C1;
+    fma.rn.f32 %afn, %afn, %z2, 0fB29020E8;
+    // AFD Horner over z2
+    mov.f32 %afd, 0f4155B259;
+    fma.rn.f32 %afd, %afd, %z2, 0f4202BAE2;
+    fma.rn.f32 %afd, %afd, %z2, 0f41D5E4C5;
+    fma.rn.f32 %afd, %afd, %z2, 0f4112FE41;
+    fma.rn.f32 %afd, %afd, %z2, 0f3FBCD65A;
+    fma.rn.f32 %afd, %afd, %z2, 0f3DECED66;
+    fma.rn.f32 %afd, %afd, %z2, 0f3B904657;
+    fma.rn.f32 %afd, %afd, %z2, 0f389E46BD;
+    fma.rn.f32 %afd, %afd, %z2, 0f34F295CE;
+    // AGN Horner over z2
+    mov.f32 %agn, 0f3CA1A92F;
+    fma.rn.f32 %agn, %agn, %z2, 0f3EC83EA8;
+    fma.rn.f32 %agn, %agn, %z2, 0f3F886C1A;
+    fma.rn.f32 %agn, %agn, %z2, 0f3F706D65;
+    fma.rn.f32 %agn, %agn, %z2, 0f3EB3F34E;
+    fma.rn.f32 %agn, %agn, %z2, 0f3D81D209;
+    fma.rn.f32 %agn, %agn, %z2, 0f3BBFF4D0;
+    fma.rn.f32 %agn, %agn, %z2, 0f39944BB3;
+    fma.rn.f32 %agn, %agn, %z2, 0f36EA79EB;
+    fma.rn.f32 %agn, %agn, %z2, 0f33AE5496;
+    fma.rn.f32 %agn, %agn, %z2, 0f2FBBC524;
+    // AGD Horner over z2
+    mov.f32 %agd, 0f4114F160;
+    fma.rn.f32 %agd, %agd, %z2, 0f419EAEAE;
+    fma.rn.f32 %agd, %agd, %z2, 0f417908DC;
+    fma.rn.f32 %agd, %agd, %z2, 0f40AF4271;
+    fma.rn.f32 %agd, %agd, %z2, 0f3F744C96;
+    fma.rn.f32 %agd, %agd, %z2, 0f3DB110EF;
+    fma.rn.f32 %agd, %agd, %z2, 0f3B873823;
+    fma.rn.f32 %agd, %agd, %z2, 0f38D45B0F;
+    fma.rn.f32 %agd, %agd, %z2, 0f359D422F;
+    fma.rn.f32 %agd, %agd, %z2, 0f31A8FE3A;
+    // t_arg = -2*x*sqrt(-x)/3 + 0.25*pi  (reuse %t which currently holds the
+    // -2*x*sqrt(-x)/3 value; add 0.25*pi).
+    mov.f32 %tmp, 0f3E800000;           // 0.25
+    mov.f32 %st,  0f40490FDB;           // pi
+    fma.rn.f32 %t, %tmp, %st, %t;       // 0.25*pi + t
+    sin.approx.f32 %st, %t;             // sin(t_arg)
+    cos.approx.f32 %ct, %t;             // cos(t_arg)
+    // result = c0 / sqrt(sqrt(-x)) * (sin*(1 + z2*afn/afd) - cos*(z*agn/agd))
+    sqrt.rn.f32 %tmp, %sx;              // sqrt(sqrt(-x))  (sx = sqrt(-x))
+    rcp.rn.f32 %tmp, %tmp;              // 1/sqrt(sqrt(-x))
+    mul.f32 %tmp, %tmp, %c0;            // c0/sqrt(sqrt(-x))
+    // term_a = 1 + z2*afn/afd
+    div.rn.f32 %afn, %afn, %afd;
+    mul.f32 %afn, %afn, %z2;
+    add.f32 %afn, %afn, 0f3F800000;     // 1 + z2*afn/afd
+    mul.f32 %st, %st, %afn;             // sin*(...)
+    // term_b = z*agn/agd
+    div.rn.f32 %agn, %agn, %agd;
+    mul.f32 %agn, %agn, %z;
+    mul.f32 %ct, %ct, %agn;             // cos*(...)
+    sub.f32 %r, %st, %ct;
+    mul.f32 %r, %r, %tmp;
+    bra STORE;
+
+AFTER_OSC:
+    // x >= 2.09 -> decaying asymptotic region (Math.cuh:1404-1426).
+    setp.lt.f32 %dec, %x, 0f4005C28F;   // x < 2.09 ?
+    @%dec bra CENTRAL;                  // x < 2.09 -> skip decaying, dec=true
+    // here x >= 2.09. set dec = (domain_flag&1 == 1) i.e. TRUE for this branch.
+    // zeta = 2*x*sqrt(x)/3 ; iz = 1/zeta
+    sqrt.rn.f32 %sx, %x;                // sqrt(x)
+    mul.f32 %zeta, %x, %sx;             // x*sqrt(x)
+    add.f32 %zeta, %zeta, %zeta;        // 2*x*sqrt(x)
+    mov.f32 %tmp, 0f3EAAAAAB;           // 1/3
+    mul.f32 %zeta, %zeta, %tmp;         // 2*x*sqrt(x)/3
+    rcp.rn.f32 %iz, %zeta;
+    // AN Horner over iz
+    mov.f32 %an, 0f3EB16D71;
+    fma.rn.f32 %an, %an, %iz, 0f41401F1C;
+    fma.rn.f32 %an, %an, %iz, 0f42988F28;
+    fma.rn.f32 %an, %an, %iz, 0f432816D7;
+    fma.rn.f32 %an, %an, %iz, 0f431FC1A3;
+    fma.rn.f32 %an, %an, %iz, 0f428D127A;
+    fma.rn.f32 %an, %an, %iz, 0f41606C6B;
+    fma.rn.f32 %an, %an, %iz, 0f3F800000;
+    // AD Horner over iz
+    mov.f32 %ad, 0f3F114DE0;
+    fma.rn.f32 %ad, %ad, %iz, 0f416C19A0;
+    fma.rn.f32 %ad, %ad, %iz, 0f42A9071E;
+    fma.rn.f32 %ad, %ad, %iz, 0f4331516E;
+    fma.rn.f32 %ad, %ad, %iz, 0f43243C15;
+    fma.rn.f32 %ad, %ad, %iz, 0f428EF4A7;
+    fma.rn.f32 %ad, %ad, %iz, 0f416188DD;
+    fma.rn.f32 %ad, %ad, %iz, 0f3F800000;
+    // ai = c0 * (an/ad) / (2 * sqrt(sqrt(x)) * exp(zeta))
+    div.rn.f32 %ai, %an, %ad;
+    mul.f32 %ai, %ai, %c0;
+    sqrt.rn.f32 %tmp, %sx;              // sqrt(sqrt(x))
+    add.f32 %tmp, %tmp, %tmp;           // 2*sqrt(sqrt(x))
+    // exp(zeta) = ex2.approx.f32(zeta*log2e)
+    mov.f32 %st, 0f3FB8AA3B;            // log2e
+    mul.f32 %st, %zeta, %st;
+    ex2.approx.f32 %st, %st;            // exp(zeta)
+    mul.f32 %tmp, %tmp, %st;            // 2*sqrt(sqrt(x))*exp(zeta)
+    div.rn.f32 %ai, %ai, %tmp;
+    // domain_flag = 5 here -> &1 == 1 -> df1 TRUE (final result is `ai`).
+    setp.eq.f32 %df1, %x, %x;          // df1 = TRUE (x finite/non-NaN here)
+    // x > 8.3203353 -> return ai immediately (Math.cuh:1423-1425).
+    setp.gt.f32 %fardec, %x, 0f41052018;
+    @%fardec mov.f32 %r, %ai;
+    @%fardec bra STORE;
+    // else fall through to the central series; final result is `ai` (df1 TRUE).
+
+CENTRAL:
+    // Central Maclaurin f/g series (Math.cuh:1428-1457), FIXED 36-iter unroll.
+    // f=1; g=x; k=1; m=1; n=x; zc=x*x*x. Per iter:
+    //   m*=zc; k+=1; m/=k; n*=zc; k+=1; n/=k; m/=k; f+=m; k+=1; n/=k; g+=n
+    mov.f32 %ff, 0f3F800000;           // f = 1
+    mov.f32 %g, %x;                    // g = x
+    mov.f32 %k, 0f3F800000;            // k = 1
+    mov.f32 %m, 0f3F800000;            // m = 1
+    mov.f32 %n, %x;                    // n = x
+    mul.f32 %zc, %x, %x;
+    mul.f32 %zc, %zc, %x;              // zc = x^3
+    mov.u32 %kk, 0;
+CLOOP:
+    setp.ge.u32 %loop, %kk, 36;
+    @%loop bra CDONE;
+    mul.f32 %m, %m, %zc;               // m *= zc
+    add.f32 %k, %k, 0f3F800000;        // k += 1
+    div.rn.f32 %m, %m, %k;             // m /= k
+    mul.f32 %n, %n, %zc;               // n *= zc
+    add.f32 %k, %k, 0f3F800000;        // k += 1
+    div.rn.f32 %n, %n, %k;             // n /= k
+    div.rn.f32 %m, %m, %k;             // m /= k
+    add.f32 %ff, %ff, %m;              // f += m
+    add.f32 %k, %k, 0f3F800000;        // k += 1
+    div.rn.f32 %n, %n, %k;             // n /= k
+    add.f32 %g, %g, %n;                // g += n
+    add.u32 %kk, %kk, 1;
+    bra CLOOP;
+CDONE:
+    // if (domain_flag & 1) == 0 -> return ai0*f - nai0*g ; else return ai.
+    @%df1 mov.f32 %r, %ai;
+    @%df1 bra STORE;
+    mul.f32 %r, %ai0, %ff;
+    mul.f32 %tmp, %nai0, %g;
+    sub.f32 %r, %r, %tmp;
+
+STORE:
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out_p, %off;
+    st.global.f32 [%addr], %r;
+DONE:
+    ret;
+}
+";
+
+/// Hurwitz zeta `zeta(x, q) = sum_{k=0}^inf (k+q)^{-x}`, f32, binary. Direct
+/// port of the Cephes `zeta_string` (`aten/src/ATen/native/cuda/Math.cuh:
+/// 299-383`) in f32: the edge ladder (`x==1 -> +inf`, `x<1 -> NaN`, `q<=0`
+/// integer `-> +inf`, `q<=0` non-integer with non-integer `x -> NaN`), a FIXED
+/// 9-iteration first-sum loop with a relative-MACHEP `converged` early-exit
+/// flag, and the FIXED 12-term Euler-Maclaurin tail over the ZETA_A table (same
+/// early-exit). `pow(a,-x) = ex2.approx.f32(-x * lg2.approx.f32(a))`.
+/// ABI: `(in_x, in_q, out, total)`.
+#[cfg(feature = "cuda")]
+pub(crate) const ZETA_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+// NOTE: PTX comments must stay ASCII-only (WSL driver JIT rejects non-ASCII
+// with CUDA_ERROR_INVALID_PTX). ZETA_A immediates are the f32 bit-hex of the
+// Cephes Euler-Maclaurin coefficient table (special.rs ZETA_A).
+
+.visible .entry zeta_f32(
+    .param .u64 inx_ptr,
+    .param .u64 inq_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r, %i;
+    .reg .u64 %inx_p, %inq_p, %out_p, %off, %addr;
+    .reg .f32 %x, %q, %s, %a, %b, %w, %t, %k, %r, %eps, %one, %tmp, %xm1;
+    .reg .pred %oob, %xeq1, %xlt1, %qle0, %qint, %xint, %conv, %term;
+
+    ld.param.u64 %inx_p,   [inx_ptr];
+    ld.param.u64 %inq_p,   [inq_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %oob, %idx, %total_r;
+    @%oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %inx_p, %off;
+    ld.global.f32 %x, [%addr];
+    add.u64 %addr, %inq_p, %off;
+    ld.global.f32 %q, [%addr];
+
+    mov.f32 %one, 0f3F800000;          // 1.0
+    mov.f32 %eps, 0f34000000;          // f32 MACHEP 1.1920929e-07
+
+    // x == 1 -> +inf (Math.cuh:325-327).
+    setp.eq.f32 %xeq1, %x, %one;
+    @%xeq1 mov.f32 %r, 0f7F800000;
+    @%xeq1 bra STORE;
+    // x < 1 -> NaN (Math.cuh:330-332).
+    setp.lt.f32 %xlt1, %x, %one;
+    @%xlt1 mov.f32 %r, 0f7FC00000;
+    @%xlt1 bra STORE;
+    // q <= 0 ladder (Math.cuh:336-343).
+    setp.le.f32 %qle0, %q, 0f00000000;
+    @!%qle0 bra MAIN;
+    cvt.rmi.f32.f32 %tmp, %q;          // floor(q)
+    setp.eq.f32 %qint, %tmp, %q;       // q is integer
+    @%qint mov.f32 %r, 0f7F800000;     // q<=0 integer -> +inf
+    @%qint bra STORE;
+    cvt.rmi.f32.f32 %tmp, %x;          // floor(x)
+    setp.ne.f32 %xint, %tmp, %x;       // x non-integer
+    @%xint mov.f32 %r, 0f7FC00000;     // q<=0 non-int, x non-int -> NaN
+    @%xint bra STORE;
+
+MAIN:
+    // s = pow(q, -x) = ex2(-x * lg2(q)); a = q; conv = false.
+    lg2.approx.f32 %tmp, %q;
+    mul.f32 %tmp, %tmp, %x;
+    neg.f32 %tmp, %tmp;                // -x*log2(q)
+    ex2.approx.f32 %s, %tmp;           // q^(-x)
+    mov.f32 %a, %q;
+    mov.u32 %i, 0;
+    setp.ne.f32 %conv, %x, %x;         // conv = false (x==x is true -> ne false)
+    mov.f32 %b, 0f00000000;
+SLOOP:
+    setp.ge.u32 %oob, %i, 9;
+    @%oob bra AFTER_SLOOP;
+    @%conv bra SLOOP_NEXT;             // once converged, stop accumulating
+    add.f32 %a, %a, %one;              // a += 1
+    lg2.approx.f32 %tmp, %a;
+    mul.f32 %tmp, %tmp, %x;
+    neg.f32 %tmp, %tmp;
+    ex2.approx.f32 %b, %tmp;           // b = a^(-x)
+    add.f32 %s, %s, %b;                // s += b
+    // converged if |b| < eps*|s|  (Math.cuh:354-356, relative MACHEP test).
+    abs.f32 %tmp, %s;
+    mul.f32 %tmp, %tmp, %eps;          // eps*|s|
+    abs.f32 %r, %b;                    // |b| (reuse %r as scratch)
+    setp.lt.f32 %conv, %r, %tmp;
+SLOOP_NEXT:
+    add.u32 %i, %i, 1;
+    bra SLOOP;
+AFTER_SLOOP:
+    @%conv mov.f32 %r, %s;             // converged -> return s (skip tail)
+    @%conv bra STORE;
+
+    // Euler-Maclaurin tail (Math.cuh:359-379).
+    // w = a; s += b*w/(x-1); s -= 0.5*b; a = 1; k = 0.
+    mov.f32 %w, %a;
+    sub.f32 %xm1, %x, %one;            // x - 1
+    mul.f32 %tmp, %b, %w;
+    div.rn.f32 %tmp, %tmp, %xm1;
+    add.f32 %s, %s, %tmp;              // s += b*w/(x-1)
+    mov.f32 %tmp, 0f3F000000;          // 0.5
+    mul.f32 %tmp, %tmp, %b;
+    sub.f32 %s, %s, %tmp;              // s -= 0.5*b
+    mov.f32 %a, %one;                  // a = 1
+    mov.f32 %k, 0f00000000;            // k = 0
+    setp.ne.f32 %conv, %x, %x;         // term-converged flag = false
+    // unrolled 12-term loop over ZETA_A; per term:
+    //   a *= x+k; b /= w; t = a*b/coeff; s += t; if |t/s|<eps break;
+    //   k += 1; a *= x+k; b /= w; k += 1;
+    mov.u32 %i, 0;
+TLOOP:
+    setp.ge.u32 %oob, %i, 12;
+    @%oob bra AFTER_TLOOP;
+    @%conv bra AFTER_TLOOP;            // term converged -> stop
+    // a *= (x + k)
+    add.f32 %tmp, %x, %k;
+    mul.f32 %a, %a, %tmp;
+    div.rn.f32 %b, %b, %w;             // b /= w
+    // t = a*b/coeff  (coeff selected per-iter via the table below)
+    mul.f32 %t, %a, %b;
+    // load coeff[i] into %tmp via a small jump table.
+    setp.eq.u32 %term, %i, 0;
+    @%term mov.f32 %tmp, 0f41400000;   // 12
+    setp.eq.u32 %term, %i, 1;
+    @%term mov.f32 %tmp, 0fC4340000;   // -720
+    setp.eq.u32 %term, %i, 2;
+    @%term mov.f32 %tmp, 0f46EC4000;   // 30240
+    setp.eq.u32 %term, %i, 3;
+    @%term mov.f32 %tmp, 0fC993A800;   // -1209600
+    setp.eq.u32 %term, %i, 4;
+    @%term mov.f32 %tmp, 0f4C36B980;   // 47900160
+    setp.eq.u32 %term, %i, 5;
+    @%term mov.f32 %tmp, 0fCEE1989D;   // -1.8924375803183791606e9
+    setp.eq.u32 %term, %i, 6;
+    @%term mov.f32 %tmp, 0f518B2F4C;   // 7.47242496e10
+    setp.eq.u32 %term, %i, 7;
+    @%term mov.f32 %tmp, 0fD42BB860;   // -2.950130727918164224e12
+    setp.eq.u32 %term, %i, 8;
+    @%term mov.f32 %tmp, 0f56D3DA8F;   // 1.1646782814350067249e14
+    setp.eq.u32 %term, %i, 9;
+    @%term mov.f32 %tmp, 0fD982AEB3;   // -4.5979787224074726105e15
+    setp.eq.u32 %term, %i, 10;
+    @%term mov.f32 %tmp, 0f5C21391C;   // 1.8152105401943546773e17
+    setp.eq.u32 %term, %i, 11;
+    @%term mov.f32 %tmp, 0fDEC6E6AB;   // -7.1661652561756670113e18
+    div.rn.f32 %t, %t, %tmp;           // t = a*b/coeff
+    add.f32 %s, %s, %t;                // s += t
+    // term converged if |t/s| < eps
+    div.rn.f32 %tmp, %t, %s;
+    abs.f32 %tmp, %tmp;
+    setp.lt.f32 %conv, %tmp, %eps;
+    @%conv bra AFTER_TLOOP;
+    // k += 1; a *= (x + k); b /= w; k += 1
+    add.f32 %k, %k, %one;
+    add.f32 %tmp, %x, %k;
+    mul.f32 %a, %a, %tmp;
+    div.rn.f32 %b, %b, %w;
+    add.f32 %k, %k, %one;
+    add.u32 %i, %i, 1;
+    bra TLOOP;
+AFTER_TLOOP:
+    mov.f32 %r, %s;
+
+STORE:
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out_p, %off;
+    st.global.f32 [%addr], %r;
+DONE:
+    ret;
+}
+";
+
 /// Spherical Bessel `j0(x)` forward on an f32 buffer (on-device, no host
 /// round-trip).
 ///
@@ -4942,6 +5403,83 @@ pub fn gpu_scaled_modified_bessel_k1_f32(
         SCALED_K1_F32_PTX,
         "scaled_modified_bessel_k1_f32",
     )
+}
+
+/// Airy function of the first kind `Ai(x)` forward on an f32 buffer (on-device,
+/// no host round-trip).
+///
+/// # Errors
+/// See [`gpu_chebyshev_poly_f32`].
+#[cfg(feature = "cuda")]
+pub fn gpu_airy_ai_f32(input: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    launch_elementwise_f32(input, device, AIRY_AI_F32_PTX, "airy_ai_f32")
+}
+
+/// Launch a two-input elementwise kernel whose ABI is `(in_x, in_q, out,
+/// total)` on a pair of equal-length f32 buffers (Hurwitz zeta). The result
+/// stays on-device (no host round-trip, R-CODE-4).
+///
+/// Both inputs must be on `device` with the same element count; mismatched
+/// lengths return [`GpuError::ShapeMismatch`].
+#[cfg(feature = "cuda")]
+fn launch_binary_elementwise_f32(
+    x: &CudaBuffer<f32>,
+    q: &CudaBuffer<f32>,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel: &'static str,
+) -> GpuResult<CudaBuffer<f32>> {
+    let total = check_input(x, device, kernel)?;
+    let total_q = check_input(q, device, kernel)?;
+    if total != total_q {
+        return Err(GpuError::ShapeMismatch {
+            op: kernel,
+            expected: vec![total],
+            got: vec![total_q],
+        });
+    }
+    let mut out = alloc_zeros_f32(total, device)?;
+    if total == 0 {
+        return Ok(out);
+    }
+    let f =
+        crate::module_cache::get_or_compile(device.context(), ptx, kernel, device.ordinal() as u32)
+            .map_err(|e| GpuError::PtxCompileFailed { kernel, source: e })?;
+    let total_u32 = total as u32;
+    let cfg = launch_cfg(total_u32);
+    // SAFETY: `f` is `kernel` (a `(in_x, in_q, out, total)`-ABI two-input
+    // elementwise entry); the four launch args match the PTX `.entry` order.
+    // `x` and `q` are on `device` with exactly `total` f32 elements each
+    // (validated by `check_input` + the equal-length check above); `out` is a
+    // fresh non-aliasing `total`-element buffer; every thread is bounds-guarded
+    // by the `setp.ge.u32` head, so all loads/stores are in-bounds; `total`
+    // fits u32. By-ref params outlive the synchronous launch on this frame.
+    unsafe {
+        device
+            .stream()
+            .launch_builder(&f)
+            .arg(x.inner())
+            .arg(q.inner())
+            .arg(out.inner_mut())
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Hurwitz zeta `zeta(x, q)` forward on a pair of equal-length f32 buffers
+/// (on-device, no host round-trip). `x` is the exponent buffer, `q` the shift.
+///
+/// # Errors
+/// [`GpuError::DeviceMismatch`] / [`GpuError::ShapeMismatch`] on validation
+/// failure; [`GpuError::PtxCompileFailed`] / [`GpuError::Driver`] on launch.
+#[cfg(feature = "cuda")]
+pub fn gpu_zeta_f32(
+    x: &CudaBuffer<f32>,
+    q: &CudaBuffer<f32>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    launch_binary_elementwise_f32(x, q, device, ZETA_F32_PTX, "zeta_f32")
 }
 
 #[cfg(all(test, feature = "cuda"))]

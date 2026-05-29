@@ -2401,6 +2401,53 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    // -- Airy Ai + Hurwitz zeta (#1651 GPU tail) ------------------------------
+    //
+    // f32 runs an on-device PTX kernel (no host round trip). `airy_ai` is a
+    // unary multi-region Cephes rational/series (FIXED 36-iter central Maclaurin
+    // unroll); `zeta` is the binary Hurwitz zeta (FIXED 9-iter first sum + FIXED
+    // 12-term Euler-Maclaurin tail, both with a relative-MACHEP early-exit
+    // flag). Upstream Cephes: `airy_ai_forward` / `zeta` at
+    // `aten/src/ATen/native/cuda/Math.cuh:1280-1459, 299-383`. Defaults return
+    // `InvalidArgument` so non-CUDA backends compile unchanged; the CUDA backend
+    // overrides f32 (f64 -> `NotImplementedOnCuda`: base PTX has no
+    // `lg2.approx.f64`/`ex2.approx.f64`, same constraint as the earlier #1651
+    // batches). bf16/f16 are rejected by the core dispatch before reaching here.
+
+    /// Airy function of the first kind `Ai(x)` forward, f32.
+    fn airy_ai_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "airy_ai_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Airy function of the first kind `Ai(x)` forward, f64.
+    fn airy_ai_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "airy_ai_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Hurwitz zeta `zeta(x, q)` forward, f32. `x` is the exponent buffer,
+    /// `q` the shift; both equal-length.
+    fn zeta_f32(
+        &self,
+        _x: &GpuBufferHandle,
+        _q: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "zeta_f32 GPU op not implemented for this backend".into(),
+        })
+    }
+    /// Hurwitz zeta `zeta(x, q)` forward, f64.
+    fn zeta_f64(
+        &self,
+        _x: &GpuBufferHandle,
+        _q: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "zeta_f64 GPU op not implemented for this backend".into(),
+        })
+    }
+
     // Clamp: out[i] = max(min_val, min(max_val, x[i]))
     fn clamp_f32(
         &self,
