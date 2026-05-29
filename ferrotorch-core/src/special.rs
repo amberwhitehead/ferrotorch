@@ -1212,19 +1212,25 @@ fn poly_gpu_chebyshev<T: Float>(
     )?))
 }
 
-/// Apply a `f64 -> f64` evaluator to every element of a CPU tensor. The GPU
+/// Apply a NATIVE-`T` evaluator to every element of a CPU tensor. The GPU
 /// path is handled by the per-family dispatch helpers above before this is
 /// reached; this is the CPU fallthrough only.
-fn elementwise_f64<T: Float, F: Fn(f64) -> f64>(
+///
+/// Unlike a f64-then-narrow helper, the closure runs entirely in the tensor's
+/// scalar type `T`. This is a byte-for-relevant mirror of PyTorch's
+/// `*_forward<T>` family (`aten/src/ATen/native/Math.h`): every forward
+/// function declares `T p, q, r;`, so for an f32 tensor the recurrence runs in
+/// f32 and overflows to `±inf` → `NaN` exactly where torch does (and exactly
+/// like the ferrotorch GPU f32 PTX kernels). A f64-then-narrow path stayed
+/// finite far longer (f64 max ~1.8e308 vs f32 max ~3.4e38) and narrowed an
+/// f64-finite value to `+inf` where torch returns `NaN` (#1642 / #1641).
+fn elementwise_native<T: Float, F: Fn(T) -> T>(
     input: &Tensor<T>,
     _op: &'static str,
     f: F,
 ) -> FerrotorchResult<Tensor<T>> {
     let data = input.data_vec()?;
-    let out: Vec<T> = data
-        .into_iter()
-        .map(|v| T::from(f(v.to_f64().unwrap())).unwrap())
-        .collect();
+    let out: Vec<T> = data.into_iter().map(f).collect();
     crate::tensor::Tensor::from_storage(
         crate::storage::TensorStorage::cpu(out),
         input.shape().to_vec(),
@@ -1261,7 +1267,7 @@ pub fn chebyshev_polynomial_t<T: Float>(
     if let Some(out) = poly_gpu_chebyshev(input, n, 1.0, 0.0, false, "chebyshev_polynomial_t")? {
         return Ok(out);
     }
-    elementwise_f64(input, "chebyshev_polynomial_t", move |x| chebyshev_t(n, x))
+    elementwise_native(input, "chebyshev_polynomial_t", move |x| chebyshev_t(n, x))
 }
 
 /// Chebyshev polynomial of the **second kind** `U_n(x)`.
@@ -1276,7 +1282,7 @@ pub fn chebyshev_polynomial_u<T: Float>(
     if let Some(out) = poly_gpu_chebyshev(input, n, 2.0, 0.0, false, "chebyshev_polynomial_u")? {
         return Ok(out);
     }
-    elementwise_f64(input, "chebyshev_polynomial_u", move |x| chebyshev_u(n, x))
+    elementwise_native(input, "chebyshev_polynomial_u", move |x| chebyshev_u(n, x))
 }
 
 /// Chebyshev polynomial of the **third kind** `V_n(x)`.
@@ -1290,7 +1296,7 @@ pub fn chebyshev_polynomial_v<T: Float>(
     if let Some(out) = poly_gpu_chebyshev(input, n, 2.0, -1.0, false, "chebyshev_polynomial_v")? {
         return Ok(out);
     }
-    elementwise_f64(input, "chebyshev_polynomial_v", move |x| chebyshev_v(n, x))
+    elementwise_native(input, "chebyshev_polynomial_v", move |x| chebyshev_v(n, x))
 }
 
 /// Chebyshev polynomial of the **fourth kind** `W_n(x)`.
@@ -1304,7 +1310,7 @@ pub fn chebyshev_polynomial_w<T: Float>(
     if let Some(out) = poly_gpu_chebyshev(input, n, 2.0, 1.0, false, "chebyshev_polynomial_w")? {
         return Ok(out);
     }
-    elementwise_f64(input, "chebyshev_polynomial_w", move |x| chebyshev_w(n, x))
+    elementwise_native(input, "chebyshev_polynomial_w", move |x| chebyshev_w(n, x))
 }
 
 // --- Hermite family --------------------------------------------------------
@@ -1331,7 +1337,7 @@ pub fn hermite_polynomial_h<T: Float>(input: &Tensor<T>, n: usize) -> Ferrotorch
     if n > hermitian_limit::<T>() {
         return nan_like(input);
     }
-    elementwise_f64(input, "hermite_polynomial_h", move |x| hermite_h(n, x))
+    elementwise_native(input, "hermite_polynomial_h", move |x| hermite_h(n, x))
 }
 
 /// Probabilist's Hermite polynomial `He_n(x)`.
@@ -1354,7 +1360,7 @@ pub fn hermite_polynomial_he<T: Float>(input: &Tensor<T>, n: usize) -> Ferrotorc
     if n > hermitian_limit::<T>() {
         return nan_like(input);
     }
-    elementwise_f64(input, "hermite_polynomial_he", move |x| hermite_he(n, x))
+    elementwise_native(input, "hermite_polynomial_he", move |x| hermite_he(n, x))
 }
 
 // --- Laguerre & Legendre ---------------------------------------------------
@@ -1373,7 +1379,7 @@ pub fn laguerre_polynomial_l<T: Float>(input: &Tensor<T>, n: usize) -> Ferrotorc
     )? {
         return Ok(out);
     }
-    elementwise_f64(input, "laguerre_polynomial_l", move |x| laguerre_l(n, x))
+    elementwise_native(input, "laguerre_polynomial_l", move |x| laguerre_l(n, x))
 }
 
 /// Legendre polynomial `P_n(x)`.
@@ -1390,7 +1396,7 @@ pub fn legendre_polynomial_p<T: Float>(input: &Tensor<T>, n: usize) -> Ferrotorc
     )? {
         return Ok(out);
     }
-    elementwise_f64(input, "legendre_polynomial_p", move |x| legendre_p(n, x))
+    elementwise_native(input, "legendre_polynomial_p", move |x| legendre_p(n, x))
 }
 
 // --- Shifted Chebyshev family (domain [0, 1]) ------------------------------
@@ -1406,8 +1412,9 @@ pub fn shifted_chebyshev_polynomial_t<T: Float>(
     {
         return Ok(out);
     }
-    elementwise_f64(input, "shifted_chebyshev_polynomial_t", move |x| {
-        chebyshev_t(n, 2.0 * x - 1.0)
+    elementwise_native(input, "shifted_chebyshev_polynomial_t", move |x| {
+        let one = nt_one::<T>();
+        chebyshev_t(n, x + x - one)
     })
 }
 
@@ -1421,8 +1428,9 @@ pub fn shifted_chebyshev_polynomial_u<T: Float>(
     {
         return Ok(out);
     }
-    elementwise_f64(input, "shifted_chebyshev_polynomial_u", move |x| {
-        chebyshev_u(n, 2.0 * x - 1.0)
+    elementwise_native(input, "shifted_chebyshev_polynomial_u", move |x| {
+        let one = nt_one::<T>();
+        chebyshev_u(n, x + x - one)
     })
 }
 
@@ -1436,8 +1444,9 @@ pub fn shifted_chebyshev_polynomial_v<T: Float>(
     {
         return Ok(out);
     }
-    elementwise_f64(input, "shifted_chebyshev_polynomial_v", move |x| {
-        chebyshev_v(n, 2.0 * x - 1.0)
+    elementwise_native(input, "shifted_chebyshev_polynomial_v", move |x| {
+        let one = nt_one::<T>();
+        chebyshev_v(n, x + x - one)
     })
 }
 
@@ -1451,29 +1460,51 @@ pub fn shifted_chebyshev_polynomial_w<T: Float>(
     {
         return Ok(out);
     }
-    elementwise_f64(input, "shifted_chebyshev_polynomial_w", move |x| {
-        chebyshev_w(n, 2.0 * x - 1.0)
+    elementwise_native(input, "shifted_chebyshev_polynomial_w", move |x| {
+        let one = nt_one::<T>();
+        chebyshev_w(n, x + x - one)
     })
 }
 
 // ---------------------------------------------------------------------------
-// Internal scalar evaluators (three-term recurrences in f64)
+// Internal scalar evaluators (three-term recurrences in NATIVE `T`)
 // ---------------------------------------------------------------------------
+//
+// Each evaluator is a byte-for-relevant mirror of the matching
+// `*_forward<T>(T x, int64_t n)` in `aten/src/ATen/native/Math.h`: the
+// recurrence variables `p, q, r` live in the tensor's scalar type `T`, the
+// integer loop coefficients are promoted to `T` exactly as the C++ `k * p`
+// promotes `int64_t k` to `T`, and the chebyshev / laguerre / legendre loops
+// carry torch's `&& !std::isnan(q)` latch (the hermite loops have no latch in
+// upstream — `Math.h:3076` / `:3117`). Running in native `T` makes the f32
+// recurrence overflow to `±inf` → `NaN` exactly where torch does, instead of
+// staying f64-finite and narrowing to `+inf` (#1642 / #1641).
+
+/// Promote a non-negative loop index to the scalar type `T` (mirrors the C++
+/// `int64_t k` → `T` promotion in `k * p`). `usize` → `T` is exact for the
+/// loop bounds these recurrences use.
+#[inline]
+fn nt_from_usize<T: Float>(k: usize) -> T {
+    T::from(k).unwrap_or_else(T::nan)
+}
 
 /// `H_n(x)` (physicist's Hermite) via three-term recurrence
-/// `H_{n+1} = 2x H_n - 2n H_{n-1}` with `H_0 = 1`, `H_1 = 2x`.
-fn hermite_h(n: usize, x: f64) -> f64 {
+/// `H_{n+1} = 2x H_n - 2n H_{n-1}` with `H_0 = 1`, `H_1 = 2x`, in native `T`.
+/// Mirrors `hermite_polynomial_h_forward<T>` (`Math.h:3072-3081`, no isnan
+/// latch).
+fn hermite_h<T: Float>(n: usize, x: T) -> T {
+    let one = nt_one::<T>();
     if n == 0 {
-        return 1.0;
+        return one;
     }
     if n == 1 {
-        return 2.0 * x;
+        return x + x;
     }
-    let mut prev2 = 1.0;
-    let mut prev1 = 2.0 * x;
+    let mut prev2 = one;
+    let mut prev1 = x + x;
     for k in 1..n {
-        let kf = k as f64;
-        let next = 2.0 * x * prev1 - 2.0 * kf * prev2;
+        let kf = nt_from_usize::<T>(k);
+        let next = (x + x) * prev1 - (kf + kf) * prev2;
         prev2 = prev1;
         prev1 = next;
     }
@@ -1481,18 +1512,20 @@ fn hermite_h(n: usize, x: f64) -> f64 {
 }
 
 /// `He_n(x)` (probabilist's Hermite) via three-term recurrence
-/// `He_{n+1} = x He_n - n He_{n-1}` with `He_0 = 1`, `He_1 = x`.
-fn hermite_he(n: usize, x: f64) -> f64 {
+/// `He_{n+1} = x He_n - n He_{n-1}` with `He_0 = 1`, `He_1 = x`, in native `T`.
+/// Mirrors `hermite_polynomial_he_forward<T>` (`Math.h:3113-3122`, no latch).
+fn hermite_he<T: Float>(n: usize, x: T) -> T {
+    let one = nt_one::<T>();
     if n == 0 {
-        return 1.0;
+        return one;
     }
     if n == 1 {
         return x;
     }
-    let mut prev2 = 1.0;
+    let mut prev2 = one;
     let mut prev1 = x;
     for k in 1..n {
-        let kf = k as f64;
+        let kf = nt_from_usize::<T>(k);
         let next = x * prev1 - kf * prev2;
         prev2 = prev1;
         prev1 = next;
@@ -1500,105 +1533,141 @@ fn hermite_he(n: usize, x: f64) -> f64 {
     prev1
 }
 
-/// `T_n(x)` via direct recurrence — used internally for shifted variants.
-fn chebyshev_t(n: usize, x: f64) -> f64 {
+/// `T_n(x)` via direct recurrence in native `T` — also used internally for the
+/// shifted variant. Mirrors `chebyshev_polynomial_t_forward<T>`
+/// (`Math.h:2861-2871`) including the `&& !std::isnan(q)` latch.
+fn chebyshev_t<T: Float>(n: usize, x: T) -> T {
+    let one = nt_one::<T>();
     if n == 0 {
-        return 1.0;
+        return one;
     }
     if n == 1 {
         return x;
     }
-    let mut prev2 = 1.0;
+    let mut prev2 = one;
     let mut prev1 = x;
     for _ in 2..=n {
-        let next = 2.0 * x * prev1 - prev2;
+        if prev1.is_nan() {
+            break;
+        }
+        let next = (x + x) * prev1 - prev2;
         prev2 = prev1;
         prev1 = next;
     }
     prev1
 }
 
-fn chebyshev_u(n: usize, x: f64) -> f64 {
+/// `U_n(x)` in native `T`. Mirrors `chebyshev_polynomial_u_forward<T>`
+/// (`Math.h:2909-2919`) including the `&& !std::isnan(q)` latch.
+fn chebyshev_u<T: Float>(n: usize, x: T) -> T {
+    let one = nt_one::<T>();
     if n == 0 {
-        return 1.0;
+        return one;
     }
     if n == 1 {
-        return 2.0 * x;
+        return x + x;
     }
-    let mut prev2 = 1.0;
-    let mut prev1 = 2.0 * x;
+    let mut prev2 = one;
+    let mut prev1 = x + x;
     for _ in 2..=n {
-        let next = 2.0 * x * prev1 - prev2;
+        if prev1.is_nan() {
+            break;
+        }
+        let next = (x + x) * prev1 - prev2;
         prev2 = prev1;
         prev1 = next;
     }
     prev1
 }
 
-fn chebyshev_v(n: usize, x: f64) -> f64 {
+/// `V_n(x)` in native `T`. Mirrors `chebyshev_polynomial_v_forward<T>`
+/// (`Math.h:2965-2975`) including the `&& !std::isnan(q)` latch.
+fn chebyshev_v<T: Float>(n: usize, x: T) -> T {
+    let one = nt_one::<T>();
     if n == 0 {
-        return 1.0;
+        return one;
     }
     if n == 1 {
-        return 2.0 * x - 1.0;
+        return x + x - one;
     }
-    let mut prev2 = 1.0;
-    let mut prev1 = 2.0 * x - 1.0;
+    let mut prev2 = one;
+    let mut prev1 = x + x - one;
     for _ in 2..=n {
-        let next = 2.0 * x * prev1 - prev2;
+        if prev1.is_nan() {
+            break;
+        }
+        let next = (x + x) * prev1 - prev2;
         prev2 = prev1;
         prev1 = next;
     }
     prev1
 }
 
-fn chebyshev_w(n: usize, x: f64) -> f64 {
+/// `W_n(x)` in native `T`. Mirrors `chebyshev_polynomial_w_forward<T>`
+/// (`Math.h:3025-3035`) including the `&& !std::isnan(q)` latch.
+fn chebyshev_w<T: Float>(n: usize, x: T) -> T {
+    let one = nt_one::<T>();
     if n == 0 {
-        return 1.0;
+        return one;
     }
     if n == 1 {
-        return 2.0 * x + 1.0;
+        return x + x + one;
     }
-    let mut prev2 = 1.0;
-    let mut prev1 = 2.0 * x + 1.0;
+    let mut prev2 = one;
+    let mut prev1 = x + x + one;
     for _ in 2..=n {
-        let next = 2.0 * x * prev1 - prev2;
+        if prev1.is_nan() {
+            break;
+        }
+        let next = (x + x) * prev1 - prev2;
         prev2 = prev1;
         prev1 = next;
     }
     prev1
 }
 
-fn laguerre_l(n: usize, x: f64) -> f64 {
+/// `L_n(x)` in native `T`. Mirrors `laguerre_polynomial_l_forward<T>`
+/// (`Math.h:3149-3159`) including the `&& !std::isnan(q)` latch.
+fn laguerre_l<T: Float>(n: usize, x: T) -> T {
+    let one = nt_one::<T>();
     if n == 0 {
-        return 1.0;
+        return one;
     }
     if n == 1 {
-        return 1.0 - x;
+        return one - x;
     }
-    let mut prev2 = 1.0;
-    let mut prev1 = 1.0 - x;
+    let mut prev2 = one;
+    let mut prev1 = one - x;
     for k in 1..n {
-        let kf = k as f64;
-        let next = ((2.0 * kf + 1.0 - x) * prev1 - kf * prev2) / (kf + 1.0);
+        if prev1.is_nan() {
+            break;
+        }
+        let kf = nt_from_usize::<T>(k);
+        let next = ((kf + kf + (one - x)) * prev1 - kf * prev2) / (kf + one);
         prev2 = prev1;
         prev1 = next;
     }
     prev1
 }
 
-fn legendre_p(n: usize, x: f64) -> f64 {
+/// `P_n(x)` in native `T`. Mirrors `legendre_polynomial_p_forward<T>`
+/// (`Math.h:3189-3199`) including the `&& !std::isnan(q)` latch.
+fn legendre_p<T: Float>(n: usize, x: T) -> T {
+    let one = nt_one::<T>();
     if n == 0 {
-        return 1.0;
+        return one;
     }
     if n == 1 {
         return x;
     }
-    let mut prev2 = 1.0;
+    let mut prev2 = one;
     let mut prev1 = x;
     for k in 1..n {
-        let kf = k as f64;
-        let next = ((2.0 * kf + 1.0) * x * prev1 - kf * prev2) / (kf + 1.0);
+        if prev1.is_nan() {
+            break;
+        }
+        let kf = nt_from_usize::<T>(k);
+        let next = ((kf + kf + one) * x * prev1 - kf * prev2) / (kf + one);
         prev2 = prev1;
         prev1 = next;
     }
@@ -2242,7 +2311,7 @@ mod tests {
         // polynomial fn calls `require_cpu_poly` at entry which only
         // returns Ok for `!is_cuda()`. If a future refactor accidentally
         // bypasses the gate, this asserts we have at least one fn covered
-        // (the others share the same code path via elementwise_f64).
+        // (the others share the same code path via elementwise_native).
         // Sanity: the gate itself is exercised here on a CPU tensor.
         let x = t(&[0.0], &[1]);
         assert!(chebyshev_polynomial_t(&x, 3).is_ok());

@@ -58,9 +58,11 @@ fn f32t(x: f32) -> Tensor<f32> {
 /// (f64-then-narrow via `special.rs:1218 elementwise_f64`).
 /// Tracking: #1642.
 #[test]
-#[ignore = "divergence: hermite_polynomial_h f32 n=64 (below limit, guard inactive) torch=NaN ferro=inf via elementwise_f64 f64-narrow; tracking #1642"]
 fn divergence_hermite_h_f32_n64_below_limit() {
-    let got = special::hermite_polynomial_h(&f32t(0.05), 64).unwrap().data().unwrap()[0];
+    let got = special::hermite_polynomial_h(&f32t(0.05), 64)
+        .unwrap()
+        .data()
+        .unwrap()[0];
     // torch.special.hermite_polynomial_h(torch.tensor([0.05]), 64) -> nan
     assert!(
         got.is_nan(),
@@ -77,9 +79,11 @@ fn divergence_hermite_h_f32_n64_below_limit() {
 /// exact case #1642 was opened on.
 /// Tracking: #1642.
 #[test]
-#[ignore = "divergence: hermite_polynomial_h f32 n=128 (==limit) torch=NaN ferro=inf; tracking #1642"]
 fn divergence_hermite_h_f32_at_limit_128() {
-    let got = special::hermite_polynomial_h(&f32t(0.05), 128).unwrap().data().unwrap()[0];
+    let got = special::hermite_polynomial_h(&f32t(0.05), 128)
+        .unwrap()
+        .data()
+        .unwrap()[0];
     // torch.special.hermite_polynomial_h(torch.tensor([0.05]), 128) -> nan
     assert!(
         got.is_nan(),
@@ -94,9 +98,11 @@ fn divergence_hermite_h_f32_at_limit_128() {
 /// Upstream returns NaN; ferrotorch returns +inf (f64-narrow).
 /// Tracking: #1642.
 #[test]
-#[ignore = "divergence: hermite_polynomial_he f32 n=128 (==limit) torch=NaN ferro=inf; tracking #1642"]
 fn divergence_hermite_he_f32_at_limit_128() {
-    let got = special::hermite_polynomial_he(&f32t(0.05), 128).unwrap().data().unwrap()[0];
+    let got = special::hermite_polynomial_he(&f32t(0.05), 128)
+        .unwrap()
+        .data()
+        .unwrap()[0];
     // torch.special.hermite_polynomial_he(torch.tensor([0.05]), 128) -> nan
     assert!(
         got.is_nan(),
@@ -121,9 +127,11 @@ fn divergence_hermite_he_f32_at_limit_128() {
 /// finite-ish then narrows). Confirms the divergence is NOT hermite-only.
 /// Tracking: #1642.
 #[test]
-#[ignore = "divergence: legendre_polynomial_p f32 n=80 x=2.0 torch=NaN ferro=inf via elementwise_f64 f64-narrow; tracking #1642"]
 fn divergence_legendre_p_f32_overflow() {
-    let got = special::legendre_polynomial_p(&f32t(2.0), 80).unwrap().data().unwrap()[0];
+    let got = special::legendre_polynomial_p(&f32t(2.0), 80)
+        .unwrap()
+        .data()
+        .unwrap()[0];
     // torch.special.legendre_polynomial_p(torch.tensor([2.0]), 80) -> nan
     assert!(
         got.is_nan(),
@@ -147,9 +155,11 @@ fn divergence_legendre_p_f32_overflow() {
 /// Upstream (torch 2.11 CPU) returns NaN; ferrotorch returns +inf.
 /// Tracking: #1642.
 #[test]
-#[ignore = "divergence: chebyshev_polynomial_t f32 n=100 x=1.5 torch=NaN ferro=inf via elementwise_f64 f64-narrow; tracking #1642"]
 fn divergence_chebyshev_t_f32_overflow() {
-    let got = special::chebyshev_polynomial_t(&f32t(1.5), 100).unwrap().data().unwrap()[0];
+    let got = special::chebyshev_polynomial_t(&f32t(1.5), 100)
+        .unwrap()
+        .data()
+        .unwrap()[0];
     // torch.special.chebyshev_polynomial_t(torch.tensor([1.5]), 100) -> nan
     assert!(
         got.is_nan(),
@@ -164,9 +174,11 @@ fn divergence_chebyshev_t_f32_overflow() {
 /// Upstream (torch 2.11 CPU) returns NaN; ferrotorch returns +inf.
 /// Tracking: #1642.
 #[test]
-#[ignore = "divergence: chebyshev_polynomial_u f32 n=100 x=1.5 torch=NaN ferro=inf via elementwise_f64 f64-narrow; tracking #1642"]
 fn divergence_chebyshev_u_f32_overflow() {
-    let got = special::chebyshev_polynomial_u(&f32t(1.5), 100).unwrap().data().unwrap()[0];
+    let got = special::chebyshev_polynomial_u(&f32t(1.5), 100)
+        .unwrap()
+        .data()
+        .unwrap()[0];
     // torch.special.chebyshev_polynomial_u(torch.tensor([1.5]), 100) -> nan
     assert!(
         got.is_nan(),
