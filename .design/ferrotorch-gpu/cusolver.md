@@ -196,10 +196,15 @@ Edge cases mirrored from upstream:
   rank — the wrapper does not attempt to compute rank either, the
   caller in `ferrotorch-core::linalg` falls back to SVD-based
   lstsq for the explicit-rank path.
-- **Complex eigenvalues from real input in eig**: returned as
-  pairs of f32 (real, imag); the caller in
+- **Complex eigenvalues from real input in eig**: `cusolverDnXgeev`
+  requires a HOMOGENEOUS datatype set (A, W, VL, VR, computeType all
+  the same — there is no mixed real-A / complex-W combination), so
+  the real input matrix is promoted to a complex column-major buffer
+  (imag = 0) via `gpu_real_to_complex_f32` / `gpu_real_to_complex_f64`
+  and every datatype is `CUDA_C_32F`/`CUDA_C_64F`. Eigenvalues come
+  back as interleaved f32/f64 (real, imag) pairs; the caller in
   `ferrotorch-core::linalg` packs them into `Complex32` tensors
-  matching torch's `eig` return type.
+  matching torch's `eig` return type. (#1687)
 - **Empty matrix (n=0)**: returns empty `Vec`s; consistent with
   upstream's empty-matrix linalg semantics.
 
@@ -247,7 +252,7 @@ GPU.
 | REQ-4 | SHIPPED | impl: `pub fn gpu_solve_f32 in cusolver.rs`, `pub fn gpu_solve_f64 in cusolver.rs`, `pub fn gpu_solve_f32_dev in cusolver.rs`, `pub fn gpu_solve_f64_dev in cusolver.rs`. Non-test consumer: `gpu_solve_f64_dev in backend_impl.rs` (f32_dev) and `backend_impl.rs` (f64_dev). |
 | REQ-5 | SHIPPED | impl: `pub fn gpu_lu_factor_f32 in cusolver.rs` and `pub fn gpu_lu_factor_f64 in cusolver.rs` per upstream `aten/src/ATen/native/cuda/linalg/BatchLinearAlgebraLib.cpp:1647::lu_factor_looped_cusolver`. Non-test consumer: `backend_impl.rs` (f32) and `backend_impl.rs` (f64); also documented at `ferrotorch-core/src/linalg.rs` ("dispatches to the native `gpu_lu_factor` kernel"). |
 | REQ-6 | SHIPPED | impl: `pub fn gpu_lstsq_f32 in cusolver.rs` and `pub fn gpu_lstsq_f64 in cusolver.rs`. Non-test consumer: `gpu_lstsq_f64 in backend_impl.rs` (f32) and `backend_impl.rs` (f64). |
-| REQ-7 | SHIPPED | impl: `pub fn gpu_eig_f32 in cusolver.rs`, `pub fn gpu_eig_f64 in cusolver.rs`, `pub fn gpu_eig_f32_dev in cusolver.rs`, `pub fn gpu_eig_f64_dev in cusolver.rs` per upstream `aten/src/ATen/native/cuda/linalg/BatchLinearAlgebraLib.cpp:1636::linalg_eig_cusolver_xgeev`. Non-test consumer: `backend_impl.rs` (f32) and `backend_impl.rs` (f64). |
+| REQ-7 | SHIPPED | impl: `pub fn gpu_eig_f32 in cusolver.rs`, `pub fn gpu_eig_f64 in cusolver.rs`, `pub fn gpu_eig_f32_dev in cusolver.rs`, `pub fn gpu_eig_f64_dev in cusolver.rs` per upstream `aten/src/ATen/native/cuda/linalg/BatchLinearAlgebraLib.cpp:1636::linalg_eig_cusolver_xgeev`. cusolverDnXgeev's homogeneous datatype contract is honored by promoting the real col-major A to complex col-major (imag=0) via `pub fn gpu_real_to_complex_f32 in kernels.rs` / `pub fn gpu_real_to_complex_f64 in kernels.rs` and passing all-`CUDA_C_32F`/`CUDA_C_64F` (mirrors `aten/src/ATen/native/cuda/linalg/CUDASolver.cpp:1865-1931`, the `c10::complex<scalar_t>` xgeev specializations). Non-test consumer: `eig_f32 in backend_impl.rs` (calls `gpu_eig_f32`) and `eig_f64 in backend_impl.rs` (calls `gpu_eig_f64`). |
 | REQ-8 | SHIPPED | impl: `pub fn gpu_eigh_f32 in cusolver.rs`, `pub fn gpu_eigh_f64 in cusolver.rs`, `pub fn gpu_eigvalsh_f32 in cusolver.rs`, `pub fn gpu_eigvalsh_f64 in cusolver.rs` per upstream `aten/src/ATen/native/cuda/linalg/BatchLinearAlgebraLib.cpp:1509::linalg_eigh_cusolver`. Non-test consumer: `backend_impl.rs` (all four arms). |
 | REQ-9 | SHIPPED | impl: `impl DnParamsHandle in cusolver.rs` (line 2837) + `impl Drop for DnParamsHandle in cusolver.rs` (line 2869). Non-test consumer: every eig / SVD path inside `cusolver.rs` that takes a `cusolverDnParams_t` opaque allocates a `DnParamsHandle` and lets RAII drop it. |
 | REQ-10 | SHIPPED | impl: every cuSOLVER call in `cusolver.rs` checks `devInfo` and returns `Err(GpuError::Solver(...))` on non-zero. Non-test consumer: every caller in `map_gpu_err in backend_impl.rs` uses `.map_err(Self::map_gpu_err)?` to propagate the structured error to core. |

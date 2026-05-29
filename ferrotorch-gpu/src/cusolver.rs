@@ -2945,23 +2945,31 @@ pub fn gpu_eig_f32(
     let dn = cusolver_safe::DnHandle::new(stream.clone())?;
     let params = DnParamsHandle::new()?;
 
-    // Row-major → column-major on device (cuSOLVER expects column-major).
-    let mut d_a_col = crate::kernels::gpu_transpose_2d(a_dev, n, n, device)?;
+    // Row-major → column-major real on device (cuSOLVER expects column-major).
+    let d_a_col_real = crate::kernels::gpu_transpose_2d(a_dev, n, n, device)?;
+    // cusolverDnXgeev requires a HOMOGENEOUS datatype contract: A, W, VL, VR
+    // and computeType must ALL be the same. General eigenvalues are complex,
+    // so torch.linalg.eig always takes the all-COMPLEX path: promote the real
+    // column-major A to a complex column-major A buffer (imag = 0, length
+    // 2*n*n) and pass CUDA_C_32F for every datatype. (#1687, mirrors torch
+    // CUDASolver.cpp:1865-1897 `c10::complex<float>` xgeev specialization.)
+    let mut d_a_col = crate::kernels::gpu_real_to_complex_f32(&d_a_col_real, n * n, device)?;
     // W: complex eigenvalues, 2n f32 (re/im interleaved).
     let mut d_w = crate::transfer::alloc_zeros_f32(2 * n, device)?;
     // VR: complex right eigenvectors, 2 * n * n f32 (re/im interleaved per element).
     let mut d_vr = crate::transfer::alloc_zeros_f32(2 * n * n, device)?;
-    // VL: dummy 1-element placeholder for the buffer-size argument-validation
-    // path. Even with jobvl = NOVECTOR, cuSOLVER's X-API rejects null VL.
+    // VL: complex dummy placeholder for the buffer-size argument-validation
+    // path. Even with jobvl = NOVECTOR, cuSOLVER's X-API rejects null VL; the
+    // 2-element complex buffer matches the all-complex datatype contract.
     let mut d_vl_dummy = crate::transfer::alloc_zeros_f32(2, device)?;
     let mut d_info = alloc_zeros_i32(1, device)?;
 
     let novec = csys::cusolverEigMode_t::CUSOLVER_EIG_MODE_NOVECTOR;
     let vec_mode = csys::cusolverEigMode_t::CUSOLVER_EIG_MODE_VECTOR;
-    let dt_a = csys::cudaDataType::CUDA_R_32F;
+    let dt_a = csys::cudaDataType::CUDA_C_32F;
     let dt_w = csys::cudaDataType::CUDA_C_32F;
     let dt_v = csys::cudaDataType::CUDA_C_32F;
-    let compute_type = csys::cudaDataType::CUDA_R_32F;
+    let compute_type = csys::cudaDataType::CUDA_C_32F;
 
     // Buffer-size query.
     let mut wks_dev_bytes: usize = 0;
@@ -2974,23 +2982,23 @@ pub fn gpu_eig_f32(
     //   for the entire function (Drop runs at function exit, after this call).
     // - `n` was validated at line 1755-1760 (A length == n*n) and is non-zero
     //   (line 1762 short-circuits the n==0 path).
-    // - `a_ptr` points to an `n*n` f32 column-major buffer (`d_a_col`)
-    //   produced by `gpu_transpose_2d` at line 1774; `lda = n as i64` matches
-    //   the column-major leading dimension. Cast to `*const c_void` per the
-    //   Xgeev type-erased ABI; `dt_a = CUDA_R_32F` (line 1786) tells cuSOLVER
-    //   to interpret these bytes as f32.
-    // - `w_ptr` points to a `2n` f32 buffer alloc'd at line 1776 holding
-    //   complex eigenvalues as interleaved re/im pairs; `dt_w = CUDA_C_32F`
-    //   (line 1787) matches the interleaved layout: each complex element
-    //   spans 2 consecutive f32s.
-    // - `vl_ptr` points to a 2-element placeholder buffer alloc'd at line
-    //   1781. cuSOLVER's X-API rejects null VL even with `jobvl = NOVECTOR`,
-    //   per the comment at lines 1779-1781; `ldvl = n as i64` is the leading
-    //   dim. The buffer is never written to (NOVECTOR mode).
-    // - `vr_ptr` points to a `2*n*n` f32 buffer alloc'd at line 1778 (complex
-    //   eigenvectors interleaved); `ldvr = n as i64`; `dt_v = CUDA_C_32F`.
-    // - `compute_type = CUDA_R_32F` (line 1789) — cuSOLVER's mixed-precision
-    //   API requires a separate compute precision; we keep it real f32.
+    // - `a_ptr` points to a `2*n*n` f32 complex column-major buffer
+    //   (`d_a_col`, the real col-major matrix promoted to interleaved complex
+    //   with imag = 0); `lda = n as i64` matches the column-major leading
+    //   dimension (in complex elements). Cast to `*const c_void` per the
+    //   Xgeev type-erased ABI; `dt_a = CUDA_C_32F` tells cuSOLVER to interpret
+    //   these bytes as interleaved-complex f32 — required because Xgeev only
+    //   accepts a HOMOGENEOUS datatype set (all CUDA_C_32F here).
+    // - `w_ptr` points to a `2n` f32 buffer holding complex eigenvalues as
+    //   interleaved re/im pairs; `dt_w = CUDA_C_32F` matches the layout: each
+    //   complex element spans 2 consecutive f32s.
+    // - `vl_ptr` points to a 2-element complex placeholder buffer. cuSOLVER's
+    //   X-API rejects null VL even with `jobvl = NOVECTOR`; `ldvl = n as i64`
+    //   is the leading dim. The buffer is never written to (NOVECTOR mode).
+    // - `vr_ptr` points to a `2*n*n` f32 buffer (complex eigenvectors
+    //   interleaved); `ldvr = n as i64`; `dt_v = CUDA_C_32F`.
+    // - `compute_type = CUDA_C_32F` — Xgeev's homogeneous datatype contract
+    //   requires the compute precision to match the all-complex A/W/V types.
     // - `&mut wks_dev_bytes` and `&mut wks_host_bytes` are stack-resident
     //   `usize`; cuSOLVER writes the device and host workspace sizes
     //   **in bytes** per the Xgeev ABI's two-buffer scheme.
@@ -3032,13 +3040,14 @@ pub fn gpu_eig_f32(
 
     // SAFETY:
     // - `dn.cu()`, `params.raw()` are the same valid handles from above.
-    // - `a_ptr` points to the `n*n` f32 column-major matrix (line 1774);
-    //   Xgeev may overwrite it during reduction to Hessenberg form.
-    // - `w_ptr` points to the `2n` f32 eigenvalue buffer (line 1776);
-    //   cuSOLVER writes complex eigenvalues here as re/im pairs.
-    // - `vl_ptr` points to the dummy 2-element VL buffer (line 1781) — not
-    //   written to in NOVECTOR mode but required to be non-null by the X-API.
-    // - `vr_ptr` points to the `2*n*n` f32 eigenvector buffer (line 1778);
+    // - `a_ptr` points to the `2*n*n` f32 complex column-major matrix
+    //   (`d_a_col`); Xgeev may overwrite it during reduction to Hessenberg
+    //   form. `dt_a = CUDA_C_32F`.
+    // - `w_ptr` points to the `2n` f32 eigenvalue buffer; cuSOLVER writes
+    //   complex eigenvalues here as re/im pairs.
+    // - `vl_ptr` points to the complex dummy VL buffer — not written to in
+    //   NOVECTOR mode but required to be non-null by the X-API.
+    // - `vr_ptr` points to the `2*n*n` f32 eigenvector buffer;
     //   cuSOLVER writes the right eigenvectors here in column-major complex
     //   layout (each element occupies 2 consecutive f32s).
     // - `lda = ldvl = ldvr = n as i64` — column-major leading dims.
@@ -3158,7 +3167,11 @@ pub fn gpu_eig_f64(
     let dn = cusolver_safe::DnHandle::new(stream.clone())?;
     let params = DnParamsHandle::new()?;
 
-    let mut d_a_col = crate::kernels::gpu_transpose_2d_f64(a_dev, n, n, device)?;
+    let d_a_col_real = crate::kernels::gpu_transpose_2d_f64(a_dev, n, n, device)?;
+    // Promote real col-major A to complex col-major (imag = 0) for Xgeev's
+    // homogeneous all-complex datatype contract. (#1687, mirrors torch
+    // CUDASolver.cpp:1899-1931 `c10::complex<double>` xgeev specialization.)
+    let mut d_a_col = crate::kernels::gpu_real_to_complex_f64(&d_a_col_real, n * n, device)?;
     let mut d_w = crate::transfer::alloc_zeros_f64(2 * n, device)?;
     let mut d_vr = crate::transfer::alloc_zeros_f64(2 * n * n, device)?;
     let mut d_vl_dummy = crate::transfer::alloc_zeros_f64(2, device)?;
@@ -3166,33 +3179,32 @@ pub fn gpu_eig_f64(
 
     let novec = csys::cusolverEigMode_t::CUSOLVER_EIG_MODE_NOVECTOR;
     let vec_mode = csys::cusolverEigMode_t::CUSOLVER_EIG_MODE_VECTOR;
-    let dt_a = csys::cudaDataType::CUDA_R_64F;
+    let dt_a = csys::cudaDataType::CUDA_C_64F;
     let dt_w = csys::cudaDataType::CUDA_C_64F;
     let dt_v = csys::cudaDataType::CUDA_C_64F;
-    let compute_type = csys::cudaDataType::CUDA_R_64F;
+    let compute_type = csys::cudaDataType::CUDA_C_64F;
 
     let mut wks_dev_bytes: usize = 0;
     let mut wks_host_bytes: usize = 0;
     // SAFETY:
-    // - `dn.cu()` returns a valid `cusolverDnHandle_t` bound to `stream`,
-    //   created at line 1971 by `cusolverDnHandle::new(stream.clone())`.
-    // - `params.raw()` returns the `cusolverDnParams_t` created at line 1972;
-    //   the params handle outlives this call (Drop runs at function exit).
-    // - `n` was validated at line 1956-1961 (A length == n*n) and is non-zero
-    //   (line 1963 short-circuits the n==0 path).
-    // - `a_ptr` points to an `n*n` f64 column-major buffer (`d_a_col`)
-    //   produced by `gpu_transpose_2d_f64` at line 1974; `lda = n as i64`.
-    //   Cast to `*const c_void` per Xgeev's type-erased ABI; `dt_a =
-    //   CUDA_R_64F` (line 1982) tells cuSOLVER to interpret the bytes as f64.
-    // - `w_ptr` points to a `2n` f64 buffer alloc'd at line 1976 holding
-    //   complex eigenvalues as interleaved re/im pairs; `dt_w = CUDA_C_64F`
-    //   matches the layout (each complex element spans 2 consecutive f64s).
-    // - `vl_ptr` points to a 2-element dummy alloc'd at line 1977; cuSOLVER's
-    //   X-API rejects null VL even with NOVECTOR mode (same constraint as the
-    //   f32 sibling). `ldvl = n as i64`.
-    // - `vr_ptr` points to a `2*n*n` f64 buffer alloc'd at line 1976 (complex
-    //   eigenvectors interleaved); `ldvr = n as i64`; `dt_v = CUDA_C_64F`.
-    // - `compute_type = CUDA_R_64F` (line 1985) — real f64 compute precision.
+    // - `dn.cu()` returns a valid `cusolverDnHandle_t` bound to `stream`.
+    // - `params.raw()` returns the `cusolverDnParams_t`; the params handle
+    //   outlives this call (Drop runs at function exit).
+    // - `n` was validated (A length == n*n) and is non-zero (n==0
+    //   short-circuited above).
+    // - `a_ptr` points to a `2*n*n` f64 complex column-major buffer
+    //   (`d_a_col`, real col-major matrix promoted to interleaved complex with
+    //   imag = 0); `lda = n as i64`. Cast to `*const c_void` per Xgeev's
+    //   type-erased ABI; `dt_a = CUDA_C_64F` per the homogeneous all-complex
+    //   datatype contract.
+    // - `w_ptr` points to a `2n` f64 buffer holding complex eigenvalues as
+    //   interleaved re/im pairs; `dt_w = CUDA_C_64F` matches the layout (each
+    //   complex element spans 2 consecutive f64s).
+    // - `vl_ptr` points to a 2-element complex dummy; cuSOLVER's X-API rejects
+    //   null VL even with NOVECTOR mode. `ldvl = n as i64`.
+    // - `vr_ptr` points to a `2*n*n` f64 buffer (complex eigenvectors
+    //   interleaved); `ldvr = n as i64`; `dt_v = CUDA_C_64F`.
+    // - `compute_type = CUDA_C_64F` — matches the all-complex datatype set.
     // - `&mut wks_dev_bytes` and `&mut wks_host_bytes` are stack-resident
     //   `usize`; cuSOLVER writes the device and host workspace sizes
     //   **in bytes** per the Xgeev two-buffer ABI.
@@ -3232,9 +3244,9 @@ pub fn gpu_eig_f64(
 
     // SAFETY:
     // - `dn.cu()`, `params.raw()` are the same valid handles from above.
-    // - `a_ptr` (line 1974), `w_ptr` (line 1976), `vl_ptr` (line 1977),
-    //   `vr_ptr` (line 1976) point to the same buffers proved above; Xgeev
-    //   may overwrite A during Hessenberg reduction and writes complex
+    // - `a_ptr` (the `2*n*n` f64 complex col-major A, `dt_a = CUDA_C_64F`),
+    //   `w_ptr`, `vl_ptr`, `vr_ptr` point to the same buffers proved above;
+    //   Xgeev may overwrite A during Hessenberg reduction and writes complex
     //   eigenvalues into W and right eigenvectors into VR in column-major
     //   complex layout.
     // - `lda = ldvl = ldvr = n as i64` — column-major leading dims.
@@ -5014,22 +5026,26 @@ pub fn gpu_eig_f32_dev(
     let dn = cusolver_safe::DnHandle::new(stream.clone())?;
     let params = DnParamsHandle::new()?;
 
-    // Row-major → column-major on device (cuSOLVER expects column-major).
-    let mut d_a_col = crate::kernels::gpu_transpose_2d(a_dev, n, n, device)?;
+    // Row-major → column-major real on device (cuSOLVER expects column-major).
+    let d_a_col_real = crate::kernels::gpu_transpose_2d(a_dev, n, n, device)?;
+    // Promote real col-major A to complex col-major (imag = 0) for Xgeev's
+    // homogeneous all-complex datatype contract — Xgeev has no mixed real-A /
+    // complex-W path. (#1687, mirrors torch CUDASolver.cpp:1865-1897.)
+    let mut d_a_col = crate::kernels::gpu_real_to_complex_f32(&d_a_col_real, n * n, device)?;
     // W: complex eigenvalues, 2n f32 (re/im interleaved). Stays on device.
     let mut d_w = crate::transfer::alloc_zeros_f32(2 * n, device)?;
     // VR: complex right eigenvectors, col-major, 2*n*n f32.
     let mut d_vr = crate::transfer::alloc_zeros_f32(2 * n * n, device)?;
-    // VL: 2-element dummy placeholder (X-API rejects null VL even with NOVECTOR).
+    // VL: 2-element complex dummy (X-API rejects null VL even with NOVECTOR).
     let mut d_vl_dummy = crate::transfer::alloc_zeros_f32(2, device)?;
     let mut d_info = alloc_zeros_i32(1, device)?;
 
     let novec = csys::cusolverEigMode_t::CUSOLVER_EIG_MODE_NOVECTOR;
     let vec_mode = csys::cusolverEigMode_t::CUSOLVER_EIG_MODE_VECTOR;
-    let dt_a = csys::cudaDataType::CUDA_R_32F;
+    let dt_a = csys::cudaDataType::CUDA_C_32F;
     let dt_w = csys::cudaDataType::CUDA_C_32F;
     let dt_v = csys::cudaDataType::CUDA_C_32F;
-    let compute_type = csys::cudaDataType::CUDA_R_32F;
+    let compute_type = csys::cudaDataType::CUDA_C_32F;
 
     let mut wks_dev_bytes: usize = 0;
     let mut wks_host_bytes: usize = 0;
@@ -5037,7 +5053,9 @@ pub fn gpu_eig_f32_dev(
     // - `dn.cu()` is a valid `cusolverDnHandle_t` bound to `stream`.
     // - `params.raw()` is a valid `cusolverDnParams_t` (owned local, lives to fn exit).
     // - `n` is non-zero (short-circuited above) and `a_dev.len() == n*n` (validated).
-    // - All device pointers are freshly alloc'd on `device` and live for this fn.
+    // - `d_a_col` is the `2*n*n` f32 complex-promoted col-major A (`dt_a =
+    //   CUDA_C_32F`); all other device pointers are freshly alloc'd on
+    //   `device` and live for this fn.
     // - `&mut wks_dev_bytes` / `&mut wks_host_bytes` are stack `usize`.
     // - This is a query-only call: no buffer is written.
     unsafe {
@@ -5075,9 +5093,10 @@ pub fn gpu_eig_f32_dev(
 
     // SAFETY:
     // - Same handles/buffers as the buffer-size query above.
-    // - `d_a_col` may be overwritten (Hessenberg reduction). `d_w` receives
-    //   complex eigenvalues as re/im pairs. `d_vr` receives right eigenvectors
-    //   in column-major complex layout. `d_vl_dummy` is not written (NOVECTOR).
+    // - `d_a_col` (the `2*n*n` f32 complex-promoted A, `dt_a = CUDA_C_32F`)
+    //   may be overwritten (Hessenberg reduction). `d_w` receives complex
+    //   eigenvalues as re/im pairs. `d_vr` receives right eigenvectors in
+    //   column-major complex layout. `d_vl_dummy` is not written (NOVECTOR).
     // - `d_work` is the device scratch sized by `wks_dev_bytes`.
     // - `host_work` is the host scratch sized by `wks_host_bytes`.
     // - `d_info` receives the convergence status (0 = success).
@@ -5165,7 +5184,11 @@ pub fn gpu_eig_f64_dev(
     let dn = cusolver_safe::DnHandle::new(stream.clone())?;
     let params = DnParamsHandle::new()?;
 
-    let mut d_a_col = crate::kernels::gpu_transpose_2d_f64(a_dev, n, n, device)?;
+    let d_a_col_real = crate::kernels::gpu_transpose_2d_f64(a_dev, n, n, device)?;
+    // Promote real col-major A to complex col-major (imag = 0) for Xgeev's
+    // homogeneous all-complex datatype contract. (#1687, mirrors torch
+    // CUDASolver.cpp:1899-1931 `c10::complex<double>` xgeev specialization.)
+    let mut d_a_col = crate::kernels::gpu_real_to_complex_f64(&d_a_col_real, n * n, device)?;
     let mut d_w = crate::transfer::alloc_zeros_f64(2 * n, device)?;
     let mut d_vr = crate::transfer::alloc_zeros_f64(2 * n * n, device)?;
     let mut d_vl_dummy = crate::transfer::alloc_zeros_f64(2, device)?;
@@ -5173,14 +5196,15 @@ pub fn gpu_eig_f64_dev(
 
     let novec = csys::cusolverEigMode_t::CUSOLVER_EIG_MODE_NOVECTOR;
     let vec_mode = csys::cusolverEigMode_t::CUSOLVER_EIG_MODE_VECTOR;
-    let dt_a = csys::cudaDataType::CUDA_R_64F;
+    let dt_a = csys::cudaDataType::CUDA_C_64F;
     let dt_w = csys::cudaDataType::CUDA_C_64F;
     let dt_v = csys::cudaDataType::CUDA_C_64F;
-    let compute_type = csys::cudaDataType::CUDA_R_64F;
+    let compute_type = csys::cudaDataType::CUDA_C_64F;
 
     let mut wks_dev_bytes: usize = 0;
     let mut wks_host_bytes: usize = 0;
-    // SAFETY: same obligations as gpu_eig_f32_dev; f64 types throughout.
+    // SAFETY: same obligations as gpu_eig_f32_dev; f64 types throughout, with
+    // `d_a_col` the `2*n*n` f64 complex-promoted A and `dt_a = CUDA_C_64F`.
     unsafe {
         let (a_ptr, _a_sync) = d_a_col.inner_mut().device_ptr_mut(&stream);
         let (w_ptr, _w_sync) = d_w.inner_mut().device_ptr_mut(&stream);

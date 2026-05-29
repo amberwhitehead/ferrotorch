@@ -19818,6 +19818,283 @@ DONE:\n\
 ";
 
 // ---------------------------------------------------------------------------
+// Real -> interleaved-complex promotion (#1687)
+//
+// cusolverDnXgeev requires a HOMOGENEOUS datatype contract: dataTypeA,
+// dataTypeW, dataTypeVL, dataTypeVR and computeType must ALL be the same
+// (all CUDA_R_* or all CUDA_C_*). Since general eigenvalues are complex,
+// torch.linalg.eig always takes the all-COMPLEX path, promoting the real
+// input matrix to a complex buffer (imag = 0) and passing CUDA_C_32F/64F
+// for every datatype (verified vs torch
+// aten/src/ATen/native/cuda/linalg/CUDASolver.cpp:1865-1897, the
+// `c10::complex<float>` xgeev_bufferSize specialization). These kernels
+// perform the real -> interleaved-complex promotion on device with no host
+// bounce, so the eig path can hand cuSOLVER a complex A buffer.
+// ---------------------------------------------------------------------------
+
+/// PTX for `real_to_complex_f32_kernel`: promote a length-`total` real f32
+/// buffer to a `2*total` interleaved-complex f32 buffer (`out[2i] = real[i]`,
+/// `out[2i+1] = 0`). Used by the non-symmetric eig path to satisfy
+/// `cusolverDnXgeev`'s homogeneous all-complex datatype contract. (#1687)
+///
+/// PTX discipline (#1684/#1685): no `.reg` is named `%tid`/`%ctaid`/`%ntid`
+/// — those shadow builtin special registers and trigger
+/// CUDA_ERROR_INVALID_PTX; the thread index lives in `%ltid`. ptxas-validated
+/// `sm_86` clean before being trusted.
+#[cfg(feature = "cuda")]
+pub(crate) const REAL_TO_COMPLEX_F32_PTX: &str = "\
+.version 7.0\n\
+.target sm_52\n\
+.address_size 64\n\
+\n\
+.visible .entry real_to_complex_f32_kernel(\n\
+    .param .u64 in_ptr,\n\
+    .param .u64 out_ptr,\n\
+    .param .u32 total\n\
+) {\n\
+    .reg .u32 %ltid, %bid, %bdim, %total_reg;\n\
+    .reg .u32 %in_off, %out_off;\n\
+    .reg .u64 %in, %out;\n\
+    .reg .u64 %p_in, %p_out_re, %p_out_im;\n\
+    .reg .f32 %re, %zero;\n\
+    .reg .pred %p;\n\
+\n\
+    ld.param.u64 %in, [in_ptr];\n\
+    ld.param.u64 %out, [out_ptr];\n\
+    ld.param.u32 %total_reg, [total];\n\
+\n\
+    mov.u32 %bid, %ctaid.x;\n\
+    mov.u32 %bdim, %ntid.x;\n\
+    mov.u32 %ltid, %tid.x;\n\
+    mad.lo.u32 %ltid, %bid, %bdim, %ltid;\n\
+\n\
+    setp.ge.u32 %p, %ltid, %total_reg;\n\
+    @%p bra DONE;\n\
+\n\
+    // Input real element at byte offset ltid*4 (4-byte f32).\n\
+    shl.b32 %in_off, %ltid, 2;\n\
+    cvt.u64.u32 %p_in, %in_off;\n\
+    add.u64 %p_in, %in, %p_in;\n\
+\n\
+    // Output complex element at byte offset ltid*8 (re,im = 8 bytes).\n\
+    shl.b32 %out_off, %ltid, 3;\n\
+    cvt.u64.u32 %p_out_re, %out_off;\n\
+    add.u64 %p_out_re, %out, %p_out_re;\n\
+    add.u64 %p_out_im, %p_out_re, 4;\n\
+\n\
+    ld.global.f32 %re, [%p_in];\n\
+    mov.f32 %zero, 0f00000000;\n\
+    st.global.f32 [%p_out_re], %re;\n\
+    st.global.f32 [%p_out_im], %zero;\n\
+\n\
+DONE:\n\
+    ret;\n\
+}\n\
+";
+
+/// PTX for `real_to_complex_f64_kernel`: f64 sibling of
+/// [`REAL_TO_COMPLEX_F32_PTX`]. Hand-written with DEDICATED 8-byte f64
+/// element strides (input shift `3` = x8, output complex element shift `4` =
+/// x16, imaginary part at `+8`) rather than produced by [`get_f64_ptx`]: the
+/// textual f32->f64 converter does not rescale these hardcoded byte offsets,
+/// which is exactly the #1685 f64 stride bug. ptxas-validated `sm_86` clean.
+/// (#1687)
+#[cfg(feature = "cuda")]
+pub(crate) const REAL_TO_COMPLEX_F64_PTX: &str = "\
+.version 7.0\n\
+.target sm_60\n\
+.address_size 64\n\
+\n\
+.visible .entry real_to_complex_f64_kernel(\n\
+    .param .u64 in_ptr,\n\
+    .param .u64 out_ptr,\n\
+    .param .u32 total\n\
+) {\n\
+    .reg .u32 %ltid, %bid, %bdim, %total_reg;\n\
+    .reg .u32 %in_off, %out_off;\n\
+    .reg .u64 %in, %out;\n\
+    .reg .u64 %p_in, %p_out_re, %p_out_im;\n\
+    .reg .f64 %re, %zero;\n\
+    .reg .pred %p;\n\
+\n\
+    ld.param.u64 %in, [in_ptr];\n\
+    ld.param.u64 %out, [out_ptr];\n\
+    ld.param.u32 %total_reg, [total];\n\
+\n\
+    mov.u32 %bid, %ctaid.x;\n\
+    mov.u32 %bdim, %ntid.x;\n\
+    mov.u32 %ltid, %tid.x;\n\
+    mad.lo.u32 %ltid, %bid, %bdim, %ltid;\n\
+\n\
+    setp.ge.u32 %p, %ltid, %total_reg;\n\
+    @%p bra DONE;\n\
+\n\
+    // Input real element at byte offset ltid*8 (8-byte f64).\n\
+    shl.b32 %in_off, %ltid, 3;\n\
+    cvt.u64.u32 %p_in, %in_off;\n\
+    add.u64 %p_in, %in, %p_in;\n\
+\n\
+    // Output complex element at byte offset ltid*16 (re,im = 16 bytes).\n\
+    shl.b32 %out_off, %ltid, 4;\n\
+    cvt.u64.u32 %p_out_re, %out_off;\n\
+    add.u64 %p_out_re, %out, %p_out_re;\n\
+    add.u64 %p_out_im, %p_out_re, 8;\n\
+\n\
+    ld.global.f64 %re, [%p_in];\n\
+    mov.f64 %zero, 0d0000000000000000;\n\
+    st.global.f64 [%p_out_re], %re;\n\
+    st.global.f64 [%p_out_im], %zero;\n\
+\n\
+DONE:\n\
+    ret;\n\
+}\n\
+";
+
+/// Promote a length-`len` real f32 buffer to a `2*len` interleaved-complex
+/// f32 buffer (`out[2i] = real[i]`, `out[2i+1] = 0`) on device.
+///
+/// Used by the non-symmetric eig path (`gpu_eig_f32` / `gpu_eig_f32_dev`) to
+/// satisfy `cusolverDnXgeev`'s homogeneous all-complex datatype contract: the
+/// real column-major A matrix is promoted to a complex column-major A buffer
+/// so `dataTypeA = CUDA_C_32F` can be passed. (#1687)
+#[cfg(feature = "cuda")]
+pub fn gpu_real_to_complex_f32(
+    input: &CudaBuffer<f32>,
+    len: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    if input.len() != len {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_real_to_complex_f32",
+            expected: vec![len],
+            got: vec![input.len()],
+        });
+    }
+    if len == 0 {
+        return crate::transfer::alloc_zeros_f32(0, device);
+    }
+    validate_device(input, device)?;
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        REAL_TO_COMPLEX_F32_PTX,
+        "real_to_complex_f32_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "real_to_complex_f32_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = alloc_zeros_f32(2 * len, device)?;
+    let cfg = launch_cfg(len)?;
+    let total_u32 = len as u32;
+
+    // SAFETY:
+    // - `f` is the valid PTX `CudaFunction` for `real_to_complex_f32_kernel`
+    //   resolved by `module_cache::get_or_compile` above; ABI is
+    //   `(in_ptr, out_ptr, total)`.
+    // - `input` is validated: `input.len() == len` (above) and resident on
+    //   `device` (`validate_device`); the kernel reads one f32 at byte offset
+    //   `ltid * 4` for each `ltid < len`.
+    // - `out` is freshly alloc'd `2 * len` f32 with exclusive `inner_mut()`;
+    //   it cannot alias `input` (distinct allocations). The kernel writes the
+    //   real part at byte offset `ltid * 8` and `0.0` at `ltid * 8 + 4`.
+    // - `total_u32 = len as u32`: `launch_cfg(len)?` returns `Err` if
+    //   `len > u32::MAX`, so the cast cannot truncate.
+    // - cudarc enqueues on `stream`; the arg refs live until the trailing `?`.
+    //   Stream synchronization is the caller's responsibility.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
+/// f64 variant of [`gpu_real_to_complex_f32`]: promote a length-`len` real
+/// f64 buffer to a `2*len` interleaved-complex f64 buffer. (#1687)
+#[cfg(feature = "cuda")]
+pub fn gpu_real_to_complex_f64(
+    input: &CudaBuffer<f64>,
+    len: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+
+    if input.len() != len {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_real_to_complex_f64",
+            expected: vec![len],
+            got: vec![input.len()],
+        });
+    }
+    if len == 0 {
+        return crate::transfer::alloc_zeros_f64(0, device);
+    }
+    validate_device(input, device)?;
+
+    let ctx = device.context();
+    let stream = device.stream();
+    // Dedicated f64 PTX: the f32->f64 textual converter cannot rescale this
+    // kernel's hardcoded byte strides (4B->8B real, 8B->16B complex element),
+    // so a hand-written const is required. (#1685 / #1687)
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        REAL_TO_COMPLEX_F64_PTX,
+        "real_to_complex_f64_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "real_to_complex_f64_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = alloc_zeros_f64(2 * len, device)?;
+    let cfg = launch_cfg(len)?;
+    let total_u32 = len as u32;
+
+    // SAFETY:
+    // - `f` is the valid PTX `CudaFunction` for `real_to_complex_f64_kernel`
+    //   resolved above; ABI is `(in_ptr, out_ptr, total)`.
+    // - `input` is validated `input.len() == len` and resident on `device`;
+    //   the kernel reads one f64 at byte offset `ltid * 8` for each
+    //   `ltid < len`.
+    // - `out` is freshly alloc'd `2 * len` f64 with exclusive `inner_mut()`;
+    //   distinct allocation from `input`. The kernel writes the real part at
+    //   byte offset `ltid * 16` and `0.0` at `ltid * 16 + 8` (16-byte complex
+    //   f64 element, 8-byte imag offset — the dedicated f64 strides).
+    // - `total_u32 = len as u32`: `launch_cfg(len)?` guards `len > u32::MAX`.
+    // - cudarc enqueues on `stream`; arg refs live until the trailing `?`.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
 // Public API -- f64 shape ops
 // ---------------------------------------------------------------------------
 
