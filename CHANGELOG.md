@@ -48,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- GPU mean wastes an H2D upload + mul kernel scaling sum by 1/n — use scale_f32 (no upload) (#1677)
 - Benchmark harness: ferrotorch GPU bench does not synchronize — GPU timings are launch-bound, not comparable to torch's synchronized numbers (#1676)
 - GPU sub ~2x slower than add (12.8us vs 5.8us) — no vec4 path / routes through neg+add (#1675)
 - Divergence: ferrotorch-gpu gelu_backward_tanh c3 constant 0x3E096B8C=0.134199 should be 3*0.044715=0.134145 (kernels.rs:2162 f32, :2259 f64) — wrong GPU tanh-GELU gradient vs torch (rel 2e-4) (#1674)
