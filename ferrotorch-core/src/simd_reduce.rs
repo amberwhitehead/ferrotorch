@@ -14,6 +14,7 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 (`l2_norm_f32_torch`) | SHIPPED | `pub fn l2_norm_f32_torch` here models torch's vectorized last-dim L2 kernel (`aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:222-255`): 8 f32 lanes accumulate `lanes[j] += data[d+j]*data[d+j]` (plain mul+add, mirroring AVX2 `_mm256_mul_ps`+`_mm256_add_ps` at `vec256/vec256_float.h:564`), a naive left-fold `buffer[0] += buffer[j]`, a scalar FMA tail `buffer[0] = fma(data, data, buffer[0])` (mirroring the compiled contraction of `buffer[0] += data*data` at `ReduceOpsKernel.cpp:251`), then `sqrt`. Non-test production consumers: `ferrotorch_core::grad_fns::reduction::norm_with_dim` (the `p==2.0`, `T==f32`, last-dim-contiguous slice) and `ferrotorch_nn::embedding::renorm_weight_rows_in_place` (the `norm_type==2.0`, `T==f32` renorm decision). |
+//! | REQ-2 (`sum_f32` / `sum_f64`) | SHIPPED | `pub fn sum_f32` / `pub fn sum_f64` here model torch's vectorized contiguous (last-dim) sum kernel: a lane-grouped multi-accumulator (`acc[j] += data[d+j]`, mirroring `acc_vec += data_vec` in `vectorized_reduction` at `aten/src/ATen/native/cpu/Reduce.h:41-51`) followed by a horizontal fold and a scalar tail. A scalar `iter().sum()` does NOT autovectorize (FP add is non-associative → a sequential dependency the compiler cannot reorder), so the multi-accumulator is required to get AVX throughput AND is numerically CLOSER to torch's own lane-grouped order than a sequential sum (well within the conformance atol 1e-5 / 1e-10). Non-test production consumers: `sum_dim` / `mean_dim` forward in `grad_fns/reduction.rs` (the `inner==1` contiguous-last-dim rows of the `[outer, axis, inner]` fast path). |
 //!
 //! ## Why this is not byte-exact for 100% of rows (honest scope, R-HONEST-3)
 //!
@@ -113,6 +114,106 @@ pub fn l2_norm_f32_torch(data: &[f32]) -> f32 {
     // `NormTwoOps::project` is `device_sqrt(a)` (SharedReduceOps.h:375-381),
     // i.e. f32 sqrt of the accumulated sum-of-squares.
     acc.sqrt()
+}
+
+/// Number of `f64` lanes torch's `Vectorized<double>` holds on AVX2 (256-bit /
+/// 64-bit = 4). The sum accumulation tree width is dtype-dependent.
+const F64_LANES: usize = 4;
+
+/// Horizontal sum of a contiguous `f32` slice, modelling torch's vectorized
+/// contiguous reduction order (a lane-grouped multi-accumulator + fold) rather
+/// than a sequential `Σ`.
+///
+/// PyTorch's CPU contiguous sum reduction is NOT a sequential scalar fold. The
+/// inner contiguous-reduction kernel (`vectorized_inner_reduction` →
+/// `vectorized_reduction` at `aten/src/ATen/native/cpu/Reduce.h:36-91`) keeps a
+/// bank of `Vec` lane accumulators and adds successive vector loads into them
+/// (`acc[j] = vop(acc[j], Vec::loadu(ptr))`, `Reduce.h:47-50`), then folds the
+/// lanes (`Reduce.h:54-58`). The lane count makes the accumulation a tree, not a
+/// chain.
+///
+/// Why a multi-accumulator (and not `data.iter().sum()`): f32 addition is
+/// non-associative, so the compiler cannot legally reassociate a sequential
+/// `Σ` into independent lanes — the sequential version carries a single
+/// loop-carried dependency and stays scalar (no AVX). The `F32_LANES`
+/// independent accumulators here have no cross-lane dependency in the hot loop,
+/// so the autovectorizer (with this crate's `target-cpu=native`) lowers the
+/// lane loop to AVX adds, and the result is ALSO numerically closer to torch's
+/// own lane-grouped order than a sequential sum would be.
+///
+/// Scope (R-HONEST-3): this is NOT claimed byte-exact with torch. Torch's f32
+/// sum fold tree is the permute-based `VecReduceAllSIMD<float>`
+/// (`functional_base.h:59-76`) over 4×8 lanes, not this 8-lane left-fold; the
+/// difference is sub-ULP and well inside the conformance atol (1e-5 for f32).
+/// `sum`/`mean` carry no byte-exact boundary-decision contract (unlike the L2
+/// renorm decision that `l2_norm_f32_torch` exists to pin), so the
+/// within-tolerance multi-accumulator is the right model: it gets AVX speed and
+/// torch-adjacent rounding without the byte-exactness machinery.
+#[must_use]
+pub fn sum_f32(data: &[f32]) -> f32 {
+    let n = data.len();
+    // 8 lane accumulators, all zero — mirrors the `Vec acc` bank in
+    // `vectorized_reduction` (Reduce.h:41), narrowed to one Vec width here.
+    let mut lanes = [0.0_f32; F32_LANES];
+
+    // Main loop: each contiguous group of 8 elements adds into its own lane.
+    // The 8 `*lane += ...` statements touch 8 DISTINCT accumulators, so they are
+    // mutually independent and autovectorize to a single AVX add per group.
+    let main = n - (n % F32_LANES);
+    let mut d = 0;
+    while d < main {
+        for (j, lane) in lanes.iter_mut().enumerate() {
+            *lane += data[d + j];
+        }
+        d += F32_LANES;
+    }
+
+    // Horizontal fold of the 8 lanes into lane 0 (left-fold; FP add is
+    // non-associative so the order is fixed and documented).
+    let mut acc = lanes[0];
+    for &lane in &lanes[1..] {
+        acc += lane;
+    }
+
+    // Scalar remainder for the `n % 8` trailing elements.
+    while d < n {
+        acc += data[d];
+        d += 1;
+    }
+
+    acc
+}
+
+/// Horizontal sum of a contiguous `f64` slice, the `f64` analogue of
+/// [`sum_f32`]. Uses `F64_LANES` (4) independent accumulators — torch's
+/// `Vectorized<double>` width on AVX2 — for the same autovectorize-friendly,
+/// torch-adjacent reduction order. Same honest scope as [`sum_f32`]: within
+/// conformance atol (1e-10 for f64), not byte-exact.
+#[must_use]
+pub fn sum_f64(data: &[f64]) -> f64 {
+    let n = data.len();
+    let mut lanes = [0.0_f64; F64_LANES];
+
+    let main = n - (n % F64_LANES);
+    let mut d = 0;
+    while d < main {
+        for (j, lane) in lanes.iter_mut().enumerate() {
+            *lane += data[d + j];
+        }
+        d += F64_LANES;
+    }
+
+    let mut acc = lanes[0];
+    for &lane in &lanes[1..] {
+        acc += lane;
+    }
+
+    while d < n {
+        acc += data[d];
+        d += 1;
+    }
+
+    acc
 }
 
 #[cfg(test)]
@@ -313,6 +414,36 @@ mod tests {
     #[test]
     fn empty_is_zero() {
         assert_eq!(l2_norm_f32_torch(&[]).to_bits(), 0.0_f32.to_bits());
+    }
+
+    /// `sum_f32` of an empty / single-element / short (sub-lane) slice. The fold
+    /// + scalar-tail structure must handle `n < F32_LANES` (pure tail, no full
+    /// 8-wide group) without touching uninitialised lanes.
+    #[test]
+    fn sum_f32_short_slices() {
+        assert_eq!(sum_f32(&[]), 0.0_f32);
+        assert_eq!(sum_f32(&[3.5]), 3.5_f32);
+        assert_eq!(sum_f32(&[1.0, 2.0, 3.0]), 6.0_f32);
+    }
+
+    /// `sum_f32` over a length spanning multiple full 8-wide groups plus a tail
+    /// (n = 19 = 2 groups + 3 tail) of exactly representable integers; the sum
+    /// is exact regardless of lane grouping, so it must equal the closed form.
+    #[test]
+    fn sum_f32_exact_integers() {
+        let data: Vec<f32> = (1..=19).map(|i| i as f32).collect();
+        // 1+2+...+19 = 190, exactly representable in f32.
+        assert_eq!(sum_f32(&data), 190.0_f32);
+    }
+
+    /// `sum_f64` mirrors `sum_f32` over the short and multi-group-with-tail
+    /// cases at f64 width (4 lanes), with exactly representable integers.
+    #[test]
+    fn sum_f64_cases() {
+        assert_eq!(sum_f64(&[]), 0.0_f64);
+        assert_eq!(sum_f64(&[3.5]), 3.5_f64);
+        let data: Vec<f64> = (1..=19).map(f64::from).collect();
+        assert_eq!(sum_f64(&data), 190.0_f64);
     }
 
     /// The boundary row's norm must NOT exceed itself: feeding the matched f32

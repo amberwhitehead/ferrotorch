@@ -57,6 +57,25 @@ reproduces the AVX2 rounding exactly.
   oracle sweep (vs ~79% for the prior `powf` scalar path), with the residual
   bounded to one ULP.
 
+- REQ-2: `pub fn sum_f32(data: &[f32]) -> f32` / `pub fn sum_f64(data: &[f64])
+  -> f64` (#1689) — the torch-matching contiguous (last-dim) horizontal sum.
+  Models torch's `vectorized_inner_reduction` → `vectorized_reduction`
+  (`aten/src/ATen/native/cpu/Reduce.h:36-91`): a bank of lane accumulators
+  (`F32_LANES = 8` / `F64_LANES = 4`, the AVX2 `Vectorized<float>` /
+  `Vectorized<double>` widths) accumulate successive elements (`acc[j] +=
+  data[d+j]`, mirroring `acc[j] = vop(acc[j], Vec::loadu(ptr))`,
+  `Reduce.h:47-50`), then a horizontal left-fold and a scalar tail. Exists
+  because a sequential `data.iter().sum()` does NOT autovectorize (FP add is
+  non-associative → loop-carried dependency the compiler cannot reorder),
+  whereas the independent-lane multi-accumulator does (under this crate's
+  `target-cpu=native`) AND is numerically CLOSER to torch's own lane-grouped
+  order than a sequential sum. Honest scope (R-HONEST-3): NOT byte-exact with
+  torch (torch's f32 sum fold is the permute tree `VecReduceAllSIMD<float>`,
+  `functional_base.h:59-76`, over 4×8 lanes — this is an 8-lane left-fold); the
+  difference is sub-ULP and well inside the conformance atol (1e-5 f32 / 1e-10
+  f64), and `sum`/`mean` carry no byte-exact boundary-decision contract (unlike
+  the L2 renorm decision REQ-1 pins).
+
 ## Acceptance Criteria
 
 - [x] AC-1: `l2_norm_f32_torch` reproduces live torch `at::norm(2.0)` f32 bits
@@ -80,6 +99,7 @@ reproduces the AVX2 rounding exactly.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 (`l2_norm_f32_torch`) | SHIPPED | impl: `pub fn l2_norm_f32_torch` in `simd_reduce.rs` per upstream `ReduceOpsKernel.cpp:222-255` + `SharedReduceOps.h:365-392` + `OpMathType.h:16`. Non-test production consumers: `pub fn norm_with_dim` in `grad_fns/reduction.rs` (the `p==2.0`, `T==f32`, last-dim-contiguous slice path) and `fn renorm_weight_rows_in_place` in `ferrotorch-nn/src/embedding.rs` (the `norm_type==2.0`, `T==f32` renorm-decision path, itself consumed by `Embedding::forward` / `EmbeddingBag::forward_bag`). |
+| REQ-2 (`sum_f32` / `sum_f64`) | SHIPPED | impl: `pub fn sum_f32` / `pub fn sum_f64` in `simd_reduce.rs` per upstream `aten/src/ATen/native/cpu/Reduce.h:36-91` (`vectorized_inner_reduction` / `vectorized_reduction`). Non-test production consumer: `fn reduce_axis_sum_contiguous` in `grad_fns/reduction.rs` (the `inner == 1` contiguous-last-dim regime of the `[outer, axis, inner]` fast path), itself consumed by `pub fn sum_dim` and `pub fn mean_dim` forward (#1689). Unit tests `sum_f32_*` / `sum_f64_cases` in `simd_reduce.rs`; correctness vs torch across the dim/dtype/keepdim matrix in `divergence_axis_reduction_simd_fastpath_1689`. |
 
 ## Known residual (R-HONEST-3)
 

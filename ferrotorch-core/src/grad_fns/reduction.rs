@@ -792,6 +792,116 @@ pub fn sum_dim<T: Float>(
     })
 }
 
+/// Fast single-dim sum of a CONTIGUOUS row-major buffer, decomposed as
+/// `[outer, axis, inner]`:
+///   `outer = prod(in_shape[..norm_dim])`,
+///   `axis  = in_shape[norm_dim]`,
+///   `inner = prod(in_shape[norm_dim+1..])`.
+/// Element `(o, a, i)` of the input lives at flat `(o*axis + a)*inner + i` and
+/// accumulates into `accum[o*inner + i]` (the keepdim-shape accumulator, axis
+/// extent collapsed to 1, `numel == outer*inner`).
+///
+/// Two regimes mirror torch's two contiguous-reduction kernels
+/// (`aten/src/ATen/native/cpu/Reduce.h`):
+///
+/// 1. `inner > 1` (reduce a non-last dim, e.g. dim 0 of `[1000,1000]`): the hot
+///    inner loop `accum[ab+i] += in[ib+i]` runs over CONTIGUOUS `i` writing to
+///    DISTINCT accumulator slots, so the lanes are independent and the
+///    autovectorizer (this crate sets `target-cpu=native`) lowers it to AVX
+///    adds. This is torch's `vectorized_outer_reduction` (`Reduce.h:94-113`),
+///    which accumulates lane-wise down each column into the output row.
+///
+/// 2. `inner == 1` (reduce the contiguous last dim, e.g. dim 1 of
+///    `[1000,1000]`): each output element is the horizontal sum of one
+///    contiguous slice `in[o*axis .. o*axis+axis]`. A scalar `iter().sum()` does
+///    NOT autovectorize (sequential FP-add dependency), so f32/f64 rows go
+///    through `simd_reduce::sum_f32` / `sum_f64` (the lane-grouped
+///    multi-accumulator), torch's `vectorized_inner_reduction`
+///    (`Reduce.h:80-91`). Other dtypes use a correct scalar fold (not the perf
+///    target).
+///
+/// Returns the accumulator (length `outer*inner`).
+fn reduce_axis_sum_contiguous<T: Float>(
+    in_data: &[T],
+    outer: usize,
+    axis: usize,
+    inner: usize,
+) -> Vec<T> {
+    let accum_numel = outer * inner;
+    let mut accum = vec![<T as num_traits::Zero>::zero(); accum_numel];
+
+    if inner == 1 {
+        // Regime 2: each output row is a horizontal sum of `axis` contiguous
+        // input elements. f32/f64 route through the SIMD multi-accumulator.
+        let t_is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
+        let t_is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
+        if t_is_f32 {
+            // T is f32 here, so `to_f32` is the identity conversion — no
+            // precision loss, just a typed view we can hand to the typed SIMD
+            // kernel without an `unsafe` transmute. The scratch buffer is
+            // allocated ONCE and reused across rows (per-row alloc would dominate
+            // a tall-thin reduction like [1000,1000] dim=1).
+            let mut buf: Vec<f32> = vec![0.0; axis];
+            for (o, slot) in accum.iter_mut().enumerate() {
+                let row = &in_data[o * axis..o * axis + axis];
+                for (b, &v) in buf.iter_mut().zip(row.iter()) {
+                    *b = num_traits::ToPrimitive::to_f32(&v).unwrap_or(0.0);
+                }
+                let s = crate::simd_reduce::sum_f32(&buf);
+                *slot = <T as num_traits::NumCast>::from(s).unwrap_or(*slot);
+            }
+        } else if t_is_f64 {
+            let mut buf: Vec<f64> = vec![0.0; axis];
+            for (o, slot) in accum.iter_mut().enumerate() {
+                let row = &in_data[o * axis..o * axis + axis];
+                for (b, &v) in buf.iter_mut().zip(row.iter()) {
+                    *b = num_traits::ToPrimitive::to_f64(&v).unwrap_or(0.0);
+                }
+                let s = crate::simd_reduce::sum_f64(&buf);
+                *slot = <T as num_traits::NumCast>::from(s).unwrap_or(*slot);
+            }
+        } else {
+            // Generic correct scalar fold (f16/bf16/other T — not the perf
+            // target; correctness only).
+            for (o, slot) in accum.iter_mut().enumerate() {
+                let row = &in_data[o * axis..o * axis + axis];
+                let mut acc = <T as num_traits::Zero>::zero();
+                for &v in row {
+                    acc += v;
+                }
+                *slot = acc;
+            }
+        }
+    } else {
+        // Regime 1: `accum[o*inner + i] += in[(o*axis + a)*inner + i]`. The
+        // innermost `i` loop over contiguous, distinct accumulator lanes
+        // autovectorizes to AVX adds.
+        for o in 0..outer {
+            let ab = o * inner;
+            for a in 0..axis {
+                let ib = (o * axis + a) * inner;
+                let src = &in_data[ib..ib + inner];
+                let dst = &mut accum[ab..ab + inner];
+                for (acc_i, &v) in dst.iter_mut().zip(src.iter()) {
+                    *acc_i += v;
+                }
+            }
+        }
+    }
+
+    accum
+}
+
+/// Decompose a single normalised reduce dimension into `[outer, axis, inner]`
+/// over a row-major shape. `outer = prod(shape[..norm_dim])`,
+/// `axis = shape[norm_dim]`, `inner = prod(shape[norm_dim+1..])`.
+fn outer_axis_inner(in_shape: &[usize], norm_dim: usize) -> (usize, usize, usize) {
+    let outer: usize = in_shape[..norm_dim].iter().product();
+    let axis: usize = in_shape[norm_dim];
+    let inner: usize = in_shape[norm_dim + 1..].iter().product();
+    (outer, axis, inner)
+}
+
 fn sum_dim_inner<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -867,48 +977,14 @@ fn sum_dim_inner<T: Float>(
     };
     let in_data = input_ref.data()?;
 
-    // For the accumulation, we work with a "keepdim" view internally.
-    let mut accum_shape: Vec<usize> = in_shape.to_vec();
-    accum_shape[norm_dim] = 1;
-    let accum_numel: usize = accum_shape.iter().product();
-    let mut accum = vec![<T as num_traits::Zero>::zero(); accum_numel];
-
-    // Precompute the accumulator's row-major strides ONCE (the reduced axis
-    // has extent 1, so its stride contributes nothing). Walk the input in
-    // flat row-major order with an "odometer" coordinate counter, mapping each
-    // element to its accumulator slot incrementally — no per-element heap
-    // allocation and no per-element div/mod decomposition (the prior code
-    // allocated a `coords` Vec and ran two full index loops for EVERY element,
-    // which made a [1000,1000] axis reduction ~100x slower than a flat scan).
-    let mut out_strides = vec![0usize; ndim];
-    {
-        let mut s = 1usize;
-        for d in (0..ndim).rev() {
-            out_strides[d] = s;
-            s *= accum_shape[d];
-        }
-    }
-    let mut coords = vec![0usize; ndim];
-    for &val in in_data.iter().take(input.numel()) {
-        // Accumulator index: reduced-dim coord folds to 0 (its out_stride is
-        // multiplied by coords[norm_dim] which we simply skip).
-        let mut oi = 0usize;
-        for d in 0..ndim {
-            if d != norm_dim {
-                oi += coords[d] * out_strides[d];
-            }
-        }
-        accum[oi] += val;
-        // Odometer increment, last (fastest) dim first — matches the
-        // contiguous row-major order of `in_data`.
-        for d in (0..ndim).rev() {
-            coords[d] += 1;
-            if coords[d] < in_shape[d] {
-                break;
-            }
-            coords[d] = 0;
-        }
-    }
+    // `input_ref` is contiguous (cloned or materialised above), so decompose
+    // the single reduced dim as `[outer, axis, inner]` and run the AVX-friendly
+    // fast accumulate (regime 1 lane-add for inner>1, SIMD horizontal sum for
+    // inner==1). This replaces the prior per-element odometer scan (~10ms on a
+    // [1000,1000] reduction) — see `reduce_axis_sum_contiguous`. The result is
+    // the keepdim-shape accumulator with the reduced axis collapsed to 1.
+    let (outer, axis, inner) = outer_axis_inner(in_shape, norm_dim);
+    let accum = reduce_axis_sum_contiguous(&in_data[..input.numel()], outer, axis, inner);
 
     let device = input.device();
     if is_grad_enabled() && input.requires_grad() {
@@ -1166,43 +1242,21 @@ fn mean_dim_inner<T: Float>(
         return Err(FerrotorchError::DeviceUnavailable);
     }
 
-    let in_data = input.data()?;
+    // The fast `[outer, axis, inner]` accumulate (shared with `sum_dim`)
+    // requires a CONTIGUOUS row-major buffer, so normalise a strided / narrowed
+    // view first (free clone when already contiguous).
+    let input_ref = if input.is_contiguous() {
+        input.clone()
+    } else {
+        input.contiguous()?
+    };
+    let in_data = input_ref.data()?;
 
-    // Accumulate sum first, then divide.
-    let mut accum_shape: Vec<usize> = in_shape.to_vec();
-    accum_shape[norm_dim] = 1;
-    let accum_numel: usize = accum_shape.iter().product();
-    let mut accum = vec![<T as num_traits::Zero>::zero(); accum_numel];
-
-    // Odometer-style strided accumulation (no per-element heap alloc / div-mod;
-    // see `sum_dim_inner` for the rationale — the prior per-element `coords`
-    // Vec made this ~100x slower than a flat scan).
-    let nd = in_shape.len();
-    let mut out_strides = vec![0usize; nd];
-    {
-        let mut s = 1usize;
-        for d in (0..nd).rev() {
-            out_strides[d] = s;
-            s *= accum_shape[d];
-        }
-    }
-    let mut coords = vec![0usize; nd];
-    for &val in in_data.iter().take(input.numel()) {
-        let mut oi = 0usize;
-        for d in 0..nd {
-            if d != norm_dim {
-                oi += coords[d] * out_strides[d];
-            }
-        }
-        accum[oi] += val;
-        for d in (0..nd).rev() {
-            coords[d] += 1;
-            if coords[d] < in_shape[d] {
-                break;
-            }
-            coords[d] = 0;
-        }
-    }
+    // mean_dim == sum_dim then scale by 1/axis. Reuse the same AVX-friendly
+    // accumulate (regime 1 lane-add for inner>1, SIMD horizontal sum for
+    // inner==1), then divide — replacing the prior per-element odometer scan.
+    let (outer, axis, inner) = outer_axis_inner(in_shape, norm_dim);
+    let mut accum = reduce_axis_sum_contiguous(&in_data[..input.numel()], outer, axis, inner);
 
     // Divide by dim size to get mean.
     for v in &mut accum {
