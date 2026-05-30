@@ -185,6 +185,47 @@ Required because the host-only `ops::linalg::mm` reads via
 `.data()?` and errors on GPU storage after the Phase-2a
 `try_as_slice` migration (#750).
 
+### Sequence-forward performance (REQ-2, REQ-4, REQ-7)
+
+The `LSTM`/`GRU`/`RNN` sequence forwards apply two reassociations to
+the per-timestep loop, both pure (value- and gradient-identical) so
+they preserve exact autograd parity:
+
+1. **Hoisted recurrent-weight transpose (#1680).** Each layer
+   transposes + materializes `weight_ih`/`weight_hh` once
+   (`transpose_2d(...).contiguous()`) outside the timestep loop
+   instead of per step.
+
+2. **Batched input-to-hidden projection (#1690).** The input
+   projection `x_t @ W_ih^T` has no time dependency, so the `seq_len`
+   separate `[batch, in] @ [in, k*hs]` GEMMs are folded into ONE
+   `[seq_len*batch, in] @ [in, k*hs]` GEMM via the private
+   `fn batched_input_projection in rnn.rs` helper (stack the per-step
+   inputs with `cat` dim 0, run one `mm`, slice back per step with
+   `narrow(0, t*batch, batch)`). Only the recurrent `h @ W_hh^T`
+   (genuine time dependency) stays inside the loop. This mirrors
+   upstream `FullLayer::operator()` at
+   `aten/src/ATen/native/RNN.cpp:863-869`, which projects the whole
+   stacked sequence with `linear_ih` then consumes per timestep with
+   `pre_compute_input=true`. The projection is kept bias-free so the
+   GRU GPU fused-cell kernel (`fused_gru_cell_f32`) still receives the
+   raw gate matrix plus separate biases; the GPU per-step slice is
+   `.contiguous()`-materialized before its buffer handle reaches the
+   offset-unaware kernel. The gradient to `weight_ih` accumulates
+   through one matmul node — the concatenation of the per-step
+   upstream grads — equal to the sum the per-step shape produced
+   across `seq_len` matmul nodes (pinned vs LIVE torch in
+   `divergence_rnn_hoist_autograd_reaudit.rs` and vs the per-step
+   reference in `divergence_1690_rnn_batched_input_projection.rs`).
+
+   On the CPU BLAS path the win is marginal (the per-call GEMM
+   overhead this amortizes is small and the input `cat` adds a copy);
+   the batching is a launch-overhead win on the GPU/cuBLAS path where
+   many tiny GEMMs are dominated by per-launch cost. The residual CPU
+   gap to cuDNN at `[128->256, seq=32, B=16]` is the `seq_len`
+   per-step recurrent GEMMs plus composite gate ops, which carry a
+   true time dependency and cannot be batched.
+
 ### Non-test production consumers
 
 - `pub use rnn::{GRU, GRUCell, LSTM, LSTMCell, RNN, RNNCell,

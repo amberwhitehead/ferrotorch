@@ -305,15 +305,37 @@ impl<T: Float> LSTM<T> {
             let wih_t = transpose_2d(params.weight_ih.tensor())?.contiguous()?;
             let whh_t = transpose_2d(params.weight_hh.tensor())?.contiguous()?;
 
-            for x_t in &layer_outputs {
-                // gates = x_t @ W_ih^T + bias_ih + h @ W_hh^T + bias_hh
-                let xw = mm(x_t, &wih_t)?; // [batch, 4*hs]
-                let hw = mm(&h, &whh_t)?; // [batch, 4*hs]
+            // Batch the input-to-hidden projection into ONE GEMM across all
+            // timesteps (#1690). The input projection `x_t @ W_ih^T + b_ih`
+            // has no time dependency, so the seq_len separate small
+            // [batch, in]@[in, 4*hs] GEMMs are replaced by a single
+            // [seq_len*batch, in]@[in, 4*hs] GEMM. Only the recurrent term
+            // `h @ W_hh^T` (which depends on the previous hidden state) stays
+            // inside the per-timestep loop.
+            //
+            // This mirrors upstream's `FullLayer::operator()` CPU path at
+            // `aten/src/ATen/native/RNN.cpp:863-869`, which computes
+            // `params.linear_ih(inputs)` over the whole stacked sequence then
+            // `unbind(0)` per timestep with `pre_compute_input=true`.
+            //
+            // Autograd correctness: this is a pure reassociation. Stacking the
+            // per-step inputs (`cat` dim 0) and slicing the projection back
+            // (`narrow` dim 0) are differentiable; the gradient to `weight_ih`
+            // now accumulates through ONE matmul node whose upstream grad is
+            // the concatenation of the per-step grads — exactly the sum the
+            // per-step version produced across seq_len separate matmul nodes.
+            // The #1690 live-torch parity test pins this (grads must match
+            // torch, not be doubled or dropped).
+            let bias_ih_2d = broadcast_bias_to_batch(&params.bias_ih, batch)?;
+            let bias_hh_2d = broadcast_bias_to_batch(&params.bias_hh, batch)?;
+            let xw_all = batched_input_projection(&layer_outputs, &wih_t)?;
 
-                // Broadcast biases: bias_ih and bias_hh are 1-D [4*hs].
-                // We need them as [batch, 4*hs] for add.
-                let bias_ih_2d = broadcast_bias_to_batch(&params.bias_ih, batch)?;
-                let bias_hh_2d = broadcast_bias_to_batch(&params.bias_hh, batch)?;
+            for (t, _x_t) in layer_outputs.iter().enumerate() {
+                // gates = x_t @ W_ih^T + bias_ih + h @ W_hh^T + bias_hh
+                // The input projection x_t @ W_ih^T is precomputed; slice the
+                // [batch, 4*hs] block for this timestep out of the batched GEMM.
+                let xw = xw_all.narrow(0, t * batch, batch)?; // [batch, 4*hs]
+                let hw = mm(&h, &whh_t)?; // [batch, 4*hs]
 
                 let gates = add(&add(&add(&xw, &bias_ih_2d)?, &hw)?, &bias_hh_2d)?;
 
@@ -486,6 +508,42 @@ impl<T: Float> Module<T> for LSTM<T> {
 /// closure for context).
 fn transpose_2d<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     ferrotorch_core::grad_fns::shape::transpose_2d(input)
+}
+
+/// Batch the input-to-hidden projection across all timesteps into ONE GEMM
+/// (#1690).
+///
+/// `step_inputs` is the per-timestep sequence of `[batch, layer_input]`
+/// tensors (already extracted via `narrow` + `squeeze` from the layer input).
+/// This stacks them along a new leading axis into `[seq_len*batch,
+/// layer_input]` and runs the single RAW matmul `X_all @ W_ih^T`, returning
+/// `[seq_len*batch, gate_size]`. The result is sliced per timestep by the
+/// caller via `narrow(0, t*batch, batch)`. The bias is intentionally NOT
+/// folded in here: the LSTM/RNN generic paths add `bias_ih` after slicing,
+/// and the GRU GPU fused kernel takes the raw (bias-free) projection plus the
+/// biases as separate arguments. Keeping the projection bias-free preserves
+/// both contracts.
+///
+/// This is the same reassociation upstream performs in `FullLayer::operator()`
+/// for CPU inputs (`aten/src/ATen/native/RNN.cpp:863-869`): project the whole
+/// stacked sequence then consume per timestep with `pre_compute_input=true`.
+///
+/// Every op here (`cat`, `mm`) is differentiable and device-aware, so this
+/// preserves autograd and device placement. The gradient to `weight_ih`
+/// accumulates through one matmul node — value- and gradient-identical to
+/// summing across the per-step matmul nodes.
+fn batched_input_projection<T: Float>(
+    step_inputs: &[Tensor<T>],
+    wih_t: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    if step_inputs.len() == 1 {
+        // Single timestep: no stacking needed.
+        return mm(&step_inputs[0], wih_t);
+    }
+    // Stack per-step [batch, in] -> [seq_len*batch, in] along dim 0, then run
+    // the single fused input-projection GEMM.
+    let x_all = cat(step_inputs, 0)?;
+    mm(&x_all, wih_t) // [seq_len*batch, gate_size]
 }
 
 /// Broadcast a 1-D bias of shape `[n]` into shape `[batch, n]`.
@@ -732,23 +790,41 @@ impl<T: Float> GRU<T> {
             let whh_t = ferrotorch_core::grad_fns::shape::transpose_2d(params.weight_hh.tensor())?
                 .contiguous()?;
 
+            // Batch the input-to-hidden projection into ONE GEMM across all
+            // timesteps (#1690): the seq_len small [batch, in]@[in, 3*hs]
+            // input GEMMs collapse to a single [seq_len*batch, in]@[in, 3*hs]
+            // GEMM. Only the recurrent h@W_hh^T stays per-step. The raw
+            // (bias-free) projection is what BOTH the GPU fused kernel and the
+            // generic CPU path expect for `xw`, so the per-path bias handling
+            // below is unchanged. Mirrors upstream `RNN.cpp:863-869`
+            // (`linear_ih` over the stacked sequence + `pre_compute_input`).
+            let xw_all = batched_input_projection(&layer_outputs, &wih_t)?;
+
             // Check if we can use the fused GPU kernel.
             let use_fused_gpu =
                 is_f32 && h.is_cuda() && ferrotorch_core::gpu_dispatch::gpu_backend().is_some();
 
-            for x_t in &layer_outputs {
-                // Phase 1: compute gate matrices via cuBLAS GEMMs.
-                let xw = mm(x_t, &wih_t)?; // [batch, 3*hs]
+            for (t, _x_t) in layer_outputs.iter().enumerate() {
+                // Phase 1: slice this timestep's precomputed input projection
+                // and compute the recurrent gate matrix via cuBLAS GEMM.
+                let xw = xw_all.narrow(0, t * batch, batch)?; // [batch, 3*hs]
                 let hw = mm(&h, &whh_t)?; // [batch, 3*hs]
 
                 if use_fused_gpu {
                     // ---- GPU fast path: fused pointwise kernel ----
                     // The kernel takes raw gate matrices (no bias added) + biases
                     // and computes all gate activations + GRU update in one launch.
+                    // The per-step `xw` is a `narrow` view into the batched
+                    // projection buffer; the fused kernel reads from the buffer
+                    // start (offset-unaware), so materialize a contiguous,
+                    // offset-0 copy of this timestep's [batch, 3*hs] block
+                    // before handing its handle to the kernel (#1690).
+                    // `contiguous()` is a differentiable identity-on-values op.
+                    let xw_c = xw.contiguous()?;
                     let backend = ferrotorch_core::gpu_dispatch::gpu_backend()
                         .ok_or(FerrotorchError::DeviceUnavailable)?;
                     let (hy_handle, _workspace) = backend.fused_gru_cell_f32(
-                        xw.gpu_handle()?,
+                        xw_c.gpu_handle()?,
                         hw.gpu_handle()?,
                         params.bias_ih.tensor().gpu_handle()?,
                         params.bias_hh.tensor().gpu_handle()?,
@@ -1774,12 +1850,19 @@ impl<T: Float> RNN<T> {
             let wih_t = transpose_2d(params.weight_ih.tensor())?.contiguous()?;
             let whh_t = transpose_2d(params.weight_hh.tensor())?.contiguous()?;
 
-            for x_t in &layer_outputs {
-                let xw = mm(x_t, &wih_t)?; // [batch, hs]
-                let hw = mm(&h, &whh_t)?; // [batch, hs]
+            // Batch the input-to-hidden projection into ONE GEMM across all
+            // timesteps (#1690): the seq_len small [batch, in]@[in, hs] input
+            // GEMMs collapse to a single [seq_len*batch, in]@[in, hs] GEMM;
+            // only the recurrent h@W_hh^T stays per-step. Pure reassociation —
+            // value/grad-identical, pinned by the #1690 live-torch parity
+            // test. Mirrors upstream `RNN.cpp:863-869`.
+            let bias_ih_2d = broadcast_bias_to_batch(&params.bias_ih, batch)?;
+            let bias_hh_2d = broadcast_bias_to_batch(&params.bias_hh, batch)?;
+            let xw_all = batched_input_projection(&layer_outputs, &wih_t)?;
 
-                let bias_ih_2d = broadcast_bias_to_batch(&params.bias_ih, batch)?;
-                let bias_hh_2d = broadcast_bias_to_batch(&params.bias_hh, batch)?;
+            for (t, _x_t) in layer_outputs.iter().enumerate() {
+                let xw = xw_all.narrow(0, t * batch, batch)?; // [batch, hs]
+                let hw = mm(&h, &whh_t)?; // [batch, hs]
 
                 let pre_act = add(&add(&add(&xw, &bias_ih_2d)?, &hw)?, &bias_hh_2d)?;
 
