@@ -2235,9 +2235,9 @@ dependencies = [
 
 [[package]]
 name = "ferray-core"
-version = "0.3.8"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33baa29f8f1a30b17ad604732d0051fdd70baba90dc0deeec4d924129a739cfc"
+checksum = "458caafeb28be0ddec9f1c100ca6326495bf6f6323a36725695cbfcfa673aac3"
 dependencies = [
  "ferray-core-macros",
  "half",
@@ -2249,9 +2249,9 @@ dependencies = [
 
 [[package]]
 name = "ferray-core-macros"
-version = "0.3.8"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45945c52fa21443167432d1da4217f824fb128cb9ab880788d9a5034486f0d9e"
+checksum = "0525405bd4d035482ad599200a32924870a1b7935a801001dad1f17018608d5c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2260,9 +2260,9 @@ dependencies = [
 
 [[package]]
 name = "ferray-fft"
-version = "0.3.8"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a14be82dcf83af2fb9b44f93bbb5155cae3959505fd4873ff4908a55cf94667"
+checksum = "c5770e36c2f60a4847bbcfded4d9f4f7d1018eed034871010e64b1ad362ea558"
 dependencies = [
  "ferray-core",
  "num-complex 0.4.6",
@@ -2274,9 +2274,9 @@ dependencies = [
 
 [[package]]
 name = "ferray-linalg"
-version = "0.3.7"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e2a094cac9694e6b2e8815995e69cc292bacc21e3ccafb804d6785552995794"
+checksum = "7c14fbfaaf561d231095cab292292734a569b797e0e7f05f568d7d2717e8926b"
 dependencies = [
  "faer",
  "faer-traits",
@@ -2289,9 +2289,9 @@ dependencies = [
 
 [[package]]
 name = "ferray-ma"
-version = "0.3.1"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9bf1d631285e1e9c6b124d209f4bdcdf91259a7c76898592ede58801df7f2fc1"
+checksum = "0d538bfd839ccbf45993524fe870876968b14207443d0d7d60ffb31091df80c9"
 dependencies = [
  "ferray-core",
  "num-traits",
@@ -2299,9 +2299,9 @@ dependencies = [
 
 [[package]]
 name = "ferray-numpy-interop"
-version = "0.3.1"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb82e171a3c7a476440bff9f7577153eab81a29a469e95378b918de3c41fe711"
+checksum = "7578b3990b8c86545d6d9833c34417fb22213ad1701ac84933b41284164c5a5e"
 dependencies = [
  "arrow",
  "ferray-core",
@@ -2310,29 +2310,30 @@ dependencies = [
 
 [[package]]
 name = "ferray-random"
-version = "0.3.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51caa8c25c59c2ca34ff9717bed11ac4fa7a11c8f8262e3935f2ba22ef7c2f9b"
+checksum = "bee42e19863c7f357bede033ff49abb9720316eecaad889f612066385a6f13e9"
 dependencies = [
  "ferray-core",
+ "ferray-linalg",
  "getrandom 0.4.2",
  "rayon",
 ]
 
 [[package]]
 name = "ferray-stride-tricks"
-version = "0.3.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c1d250ba48c77fd068694f06807e818fbbe85ca1e87adf3072dfc3126ba4b15"
+checksum = "894fa92ee31f3ba9964e7d8f43616aa6e59e7f596969251e201abc3ce48e9ec4"
 dependencies = [
  "ferray-core",
 ]
 
 [[package]]
 name = "ferray-ufunc"
-version = "0.3.7"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86c85b16016143b106f794ff23ba8c6d505f1963bc7c33dac245601f1bf61539"
+checksum = "0ea2c955b58b80743af49cf869e26a7a72ad4d62a5794a6d7f1d5346be7516e8"
 dependencies = [
  "core-math",
  "ferray-core",
@@ -2344,9 +2345,9 @@ dependencies = [
 
 [[package]]
 name = "ferray-window"
-version = "0.3.7"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c13491d0a9bb09c0016379c2b0316ed22a65044947bc7ad7bc5e41d9da994f08"
+checksum = "fab41f436b2dd5a638cc78369101f34efa5ec516bbaced9e268d796f3de96e26"
 dependencies = [
  "ferray-core",
  "ferray-ufunc",
@@ -2448,7 +2449,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ferrotorch-core",
  "ferrotorch-cubecl",
@@ -2475,7 +2476,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-bert"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ferrotorch-core",
  "ferrotorch-hub",
@@ -2492,7 +2493,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "faer",
  "ferray-core",
@@ -2520,7 +2521,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-cubecl"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "approx 0.5.1",
  "cubecl",
@@ -2537,7 +2538,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-data"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "arrow",
  "crossbeam-channel",
@@ -2557,7 +2558,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-diffusion"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "cudarc",
  "ferrotorch-core",
@@ -2575,7 +2576,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-distributed"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ferrotorch-core",
  "ferrotorch-gpu",
@@ -2593,7 +2594,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-distributions"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ferrotorch-core",
  "ferrotorch-gpu",
@@ -2607,7 +2608,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-gpu"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "bindgen 0.69.5",
  "cudarc",
@@ -2623,7 +2624,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-grammar"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "cubecl",
  "cubecl-cuda",
@@ -2634,7 +2635,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-graph"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ferrotorch-core",
  "ferrotorch-hub",
@@ -2648,7 +2649,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-hub"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ferrotorch-core",
  "ferrotorch-nn",
@@ -2663,7 +2664,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-jit"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -2687,7 +2688,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-jit-script"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ferrotorch-core",
  "ferrotorch-jit",
@@ -2701,7 +2702,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-llama"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "bytemuck",
  "cubecl",
@@ -2726,7 +2727,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-ml"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ferrolearn-core",
  "ferrolearn-datasets",
@@ -2745,7 +2746,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-mps"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ferrotorch-core",
  "objc2",
@@ -2759,7 +2760,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-nn"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ferrotorch-core",
  "ferrotorch-gpu",
@@ -2773,7 +2774,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-nn-derive"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2783,7 +2784,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-optim"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ferrotorch-core",
  "ferrotorch-gpu",
@@ -2796,7 +2797,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-profiler"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "cudarc",
  "ferrotorch-core",
@@ -2808,7 +2809,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-rl"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ferrotorch-core",
  "ferrotorch-hub",
@@ -2822,7 +2823,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-serialize"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "bytemuck",
  "ferrotorch-core",
@@ -2843,7 +2844,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-tokenize"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "chrono",
  "ferrotorch-core",
@@ -2858,7 +2859,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-train"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ferrotorch-core",
  "ferrotorch-data",
@@ -2875,7 +2876,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-vision"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ferrotorch-core",
  "ferrotorch-data",
@@ -2892,7 +2893,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-whisper"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ferrotorch-core",
  "ferrotorch-hub",
@@ -2908,7 +2909,7 @@ dependencies = [
 
 [[package]]
 name = "ferrotorch-xpu"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ferrotorch-core",
  "ferrotorch-cubecl",
@@ -4836,7 +4837,7 @@ dependencies = [
 
 [[package]]
 name = "parity-sweep-runner"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.22.1",
  "ferrotorch-core",

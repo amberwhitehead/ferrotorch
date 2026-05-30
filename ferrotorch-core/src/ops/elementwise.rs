@@ -796,14 +796,13 @@ pub fn fast_sin<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
                 .for_each(|(ci, chunk)| {
                     let offset = ci * chunk_size;
                     let slice = &inp[offset..offset + chunk.len()];
-                    for i in 0..chunk.len() {
-                        chunk[i] = slice[i].sin();
-                    }
+                    // SIMD (AVX2/FMA, runtime-multiversioned in ferray-ufunc) per
+                    // chunk × rayon across chunks. ≤1 ULP of true sin for
+                    // |x| ≤ 2^20 — inside the F32_TRANSCENDENTAL_CPU=1e-5 band.
+                    ferray_ufunc::fast_trig::sin_fast_batch_f32(slice, chunk);
                 });
         } else {
-            for i in 0..n {
-                out[i] = inp[i].sin();
-            }
+            ferray_ufunc::fast_trig::sin_fast_batch_f32(inp, &mut out);
         }
         // SAFETY: enclosing branch guards on size_of::<T>() == 4, so
         // T == f32 (only Float impl with that size); satisfies
@@ -844,14 +843,13 @@ pub fn fast_cos<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
                 .for_each(|(ci, chunk)| {
                     let offset = ci * chunk_size;
                     let slice = &inp[offset..offset + chunk.len()];
-                    for i in 0..chunk.len() {
-                        chunk[i] = slice[i].cos();
-                    }
+                    // SIMD (AVX2/FMA, runtime-multiversioned in ferray-ufunc) per
+                    // chunk × rayon across chunks. ≤1 ULP of true cos for
+                    // |x| ≤ 2^20 — inside the F32_TRANSCENDENTAL_CPU=1e-5 band.
+                    ferray_ufunc::fast_trig::cos_fast_batch_f32(slice, chunk);
                 });
         } else {
-            for i in 0..n {
-                out[i] = inp[i].cos();
-            }
+            ferray_ufunc::fast_trig::cos_fast_batch_f32(inp, &mut out);
         }
         // SAFETY: enclosing branch guards on size_of::<T>() == 4, so
         // T == f32 (only Float impl with that size); satisfies
