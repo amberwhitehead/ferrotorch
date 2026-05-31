@@ -70,7 +70,15 @@ fn main() {
     // CUDA-13 default toolkit but a 12080-pinned cudarc (WSL2 + RTX 3090).
     // On macOS / Windows / non-cuda builds this whole block is skipped, so
     // it can never break CI or a host without the 12.x toolkit.
-    if std::env::var_os("CARGO_FEATURE_CUDA").is_some() && cfg!(target_os = "linux") {
+    //
+    // Also skip it on a deliberate CUDA-13 build: there the shim can never
+    // find a `libcusolver.so.11` and would only emit a misleading warning
+    // predicting a `cusolverDnGeqrf` panic — that 12.x→13.x soname problem
+    // does not apply when cudarc is itself building against 13.x.
+    if std::env::var_os("CARGO_FEATURE_CUDA").is_some()
+        && cfg!(target_os = "linux")
+        && !cuda_version_at_least_13()
+    {
         cuda_cusolver_compat::ensure();
     }
 }
