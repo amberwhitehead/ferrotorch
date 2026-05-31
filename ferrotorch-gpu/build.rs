@@ -46,6 +46,18 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CUSPARSELT_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=CUSPARSELT_LIB_DIR");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
+    println!("cargo:rerun-if-env-changed=CUDARC_CUDA_VERSION");
+
+    // Emit the `ferrotorch_cuda13` cfg when the resolved cudarc CUDA version
+    // is >= 13000. CUDA 13.x reshaped a few driver structs (e.g.
+    // `CUmemLocation::id` moved into an anonymous union); the rare call sites
+    // that touch raw `sys` structs are cfg-gated on this flag. The default
+    // build (CUDARC_CUDA_VERSION=12080, pinned in .cargo/config.toml) leaves
+    // the cfg unset, so the 12.x path is unchanged.
+    println!("cargo::rustc-check-cfg=cfg(ferrotorch_cuda13)");
+    if cuda_version_at_least_13() {
+        println!("cargo::rustc-cfg=ferrotorch_cuda13");
+    }
 
     if std::env::var_os("CARGO_FEATURE_CUSPARSELT").is_some() {
         #[cfg(feature = "cusparselt")]
@@ -58,9 +70,42 @@ fn main() {
     // CUDA-13 default toolkit but a 12080-pinned cudarc (WSL2 + RTX 3090).
     // On macOS / Windows / non-cuda builds this whole block is skipped, so
     // it can never break CI or a host without the 12.x toolkit.
-    if std::env::var_os("CARGO_FEATURE_CUDA").is_some() && cfg!(target_os = "linux") {
+    //
+    // Also skip it on a deliberate CUDA-13 build: there the shim can never
+    // find a `libcusolver.so.11` and would only emit a misleading warning
+    // predicting a `cusolverDnGeqrf` panic — that 12.x→13.x soname problem
+    // does not apply when cudarc is itself building against 13.x.
+    if std::env::var_os("CARGO_FEATURE_CUDA").is_some()
+        && cfg!(target_os = "linux")
+        && !cuda_version_at_least_13()
+    {
         cuda_cusolver_compat::ensure();
     }
+}
+
+/// Resolve the CUDA major version cudarc will build against and report
+/// whether it is >= 13. Mirrors cudarc's own resolution order: the
+/// `CUDARC_CUDA_VERSION` env var (e.g. `13020`) wins; otherwise probe
+/// `nvcc --version` ("release 13.2"). Defaults to false (12.x path) when
+/// neither is available, so the cfg is never emitted by accident.
+fn cuda_version_at_least_13() -> bool {
+    if let Ok(v) = std::env::var("CUDARC_CUDA_VERSION") {
+        if let Ok(n) = v.trim().parse::<u32>() {
+            return n >= 13000;
+        }
+    }
+    if let Ok(out) = std::process::Command::new("nvcc").arg("--version").output() {
+        if let Ok(s) = String::from_utf8(out.stdout) {
+            if let Some(i) = s.find("release ") {
+                if let Some(major) = s[i + 8..].split('.').next() {
+                    if let Ok(m) = major.trim().parse::<u32>() {
+                        return m >= 13;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Force the CUDA-12.x cuSOLVER (`libcusolver.so.11`) to be resolved at

@@ -146,7 +146,20 @@ impl PrivateMemPool {
         props.allocType = sys::CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED;
         props.handleTypes = sys::CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_NONE;
         props.location.type_ = sys::CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE;
-        props.location.id = device;
+        // CUDA 12.x exposes `CUmemLocation::id` as a direct field. CUDA 13.x
+        // (cudarc `cuda-130xx` bindings) moved it into an anonymous union
+        // (`__bindgen_anon_1.id`); the value semantics are identical. The
+        // `ferrotorch_cuda13` cfg is emitted by build.rs when the resolved
+        // CUDARC_CUDA_VERSION is >= 13000, so the default 12.x build is
+        // byte-for-byte unchanged.
+        #[cfg(not(ferrotorch_cuda13))]
+        {
+            props.location.id = device;
+        }
+        #[cfg(ferrotorch_cuda13)]
+        {
+            props.location.__bindgen_anon_1.id = device;
+        }
 
         let mut pool: sys::CUmemoryPool = core::ptr::null_mut();
         // SAFETY: `props` is a fully-initialized, valid pool descriptor;
