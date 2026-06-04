@@ -217,6 +217,12 @@ pub fn sum_f64(data: &[f64]) -> f64 {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::float_cmp,
+    reason = "tests assert bit-exact f32/f64 sums against the torch oracle bit \
+              pattern (R-CHAR-3); approximate comparison would mask precision \
+              regressions instead of catching them."
+)]
 mod tests {
     use super::*;
 
@@ -416,9 +422,9 @@ mod tests {
         assert_eq!(l2_norm_f32_torch(&[]).to_bits(), 0.0_f32.to_bits());
     }
 
-    /// `sum_f32` of an empty / single-element / short (sub-lane) slice. The fold
-    /// + scalar-tail structure must handle `n < F32_LANES` (pure tail, no full
-    /// 8-wide group) without touching uninitialised lanes.
+    /// `sum_f32` of an empty / single-element / short (sub-lane) slice. The
+    /// fold-plus-scalar-tail structure must handle `n < F32_LANES` (pure tail,
+    /// no full 8-wide group) without touching uninitialised lanes.
     #[test]
     fn sum_f32_short_slices() {
         assert_eq!(sum_f32(&[]), 0.0_f32);

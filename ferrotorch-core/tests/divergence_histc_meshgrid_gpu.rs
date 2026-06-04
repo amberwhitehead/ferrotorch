@@ -13,11 +13,11 @@
 //!      vectors below are the exact outputs of `torch.histc` / `torch.meshgrid`
 //!      on torch 2.11.0+cu130 (RTX 3090), recorded inline as named references
 //!      (R-CHAR-3: not copied from the ferrotorch GPU side):
-//!        torch.histc(arange(0,11.), bins=5, min=0, max=10) -> [2,2,2,2,3]
-//!        torch.histc([-1,.5,1.5,2.5,4,5,nan], 4, 0, 4)     -> [1,1,1,1]
-//!        torch.histc(linspace(0,1,5).f64, 4, 0, 1)         -> [1,1,1,2]
-//!        torch.meshgrid([1,2,3],[4,5], indexing='ij')[0]   -> [1,1,2,2,3,3]
-//!        torch.meshgrid([1,2,3],[4,5], indexing='ij')[1]   -> [4,5,4,5,4,5]
+//!      `torch.histc(arange(0,11.), bins=5, min=0, max=10) -> [2,2,2,2,3]`,
+//!      `torch.histc([-1,.5,1.5,2.5,4,5,nan], 4, 0, 4) -> [1,1,1,1]`,
+//!      `torch.histc(linspace(0,1,5).f64, 4, 0, 1) -> [1,1,1,2]`,
+//!      `torch.meshgrid([1,2,3],[4,5], indexing='ij')[0] -> [1,1,2,2,3,3]`,
+//!      `torch.meshgrid([1,2,3],[4,5], indexing='ij')[1] -> [4,5,4,5,4,5]`.
 //!
 //! Upstream contract:
 //!   - histc bins: `aten/src/ATen/native/cuda/SummaryOps.cu:41,47,92`

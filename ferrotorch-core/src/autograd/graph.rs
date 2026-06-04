@@ -126,14 +126,14 @@ pub fn backward_with_grad<T: Float>(
 
     while let Some(id) = bfs_queue.pop_front() {
         topo_order.push(id);
-        if let Some(node) = node_map.get(&id) {
-            if let Some(grad_fn) = node.grad_fn() {
-                for input in grad_fn.inputs() {
-                    if let Some(deg) = in_degree.get_mut(&input.id()) {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            bfs_queue.push_back(input.id());
-                        }
+        if let Some(node) = node_map.get(&id)
+            && let Some(grad_fn) = node.grad_fn()
+        {
+            for input in grad_fn.inputs() {
+                if let Some(deg) = in_degree.get_mut(&input.id()) {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        bfs_queue.push_back(input.id());
                     }
                 }
             }
@@ -185,34 +185,33 @@ pub fn backward_with_grad<T: Float>(
             }
 
             for (input, maybe_grad) in inputs.iter().zip(input_grads) {
-                if let Some(grad) = maybe_grad {
-                    if input.requires_grad() {
-                        // Run gradient hooks (if any), which may modify the gradient.
-                        let hooks = input.hooks();
-                        let has_hooks = {
-                            let guard =
-                                hooks.lock().map_err(|e| FerrotorchError::LockPoisoned {
-                                    message: format!("hook storage mutex: {e}"),
-                                })?;
-                            (guard.has_grad_hooks(), guard.has_post_accumulate_hooks())
-                        };
-                        let grad = if has_hooks.0 {
-                            run_grad_hooks(hooks, grad)?
-                        } else {
-                            grad
-                        };
+                if let Some(grad) = maybe_grad
+                    && input.requires_grad()
+                {
+                    // Run gradient hooks (if any), which may modify the gradient.
+                    let hooks = input.hooks();
+                    let has_hooks = {
+                        let guard = hooks.lock().map_err(|e| FerrotorchError::LockPoisoned {
+                            message: format!("hook storage mutex: {e}"),
+                        })?;
+                        (guard.has_grad_hooks(), guard.has_post_accumulate_hooks())
+                    };
+                    let grad = if has_hooks.0 {
+                        run_grad_hooks(hooks, grad)?
+                    } else {
+                        grad
+                    };
 
-                        if input.is_leaf() {
-                            // Leaf tensor: accumulate gradient on the tensor itself.
-                            input.accumulate_grad(&grad)?;
-                            // Run post-accumulate-grad hooks on the leaf (if any).
-                            if has_hooks.1 {
-                                run_post_accumulate_hooks(hooks, input)?;
-                            }
-                        } else {
-                            // Non-leaf: accumulate into the grads map for the next iteration.
-                            accumulate_non_leaf_grad(&mut grads, input, grad)?;
+                    if input.is_leaf() {
+                        // Leaf tensor: accumulate gradient on the tensor itself.
+                        input.accumulate_grad(&grad)?;
+                        // Run post-accumulate-grad hooks on the leaf (if any).
+                        if has_hooks.1 {
+                            run_post_accumulate_hooks(hooks, input)?;
                         }
+                    } else {
+                        // Non-leaf: accumulate into the grads map for the next iteration.
+                        accumulate_non_leaf_grad(&mut grads, input, grad)?;
                     }
                 }
             }
@@ -397,35 +396,32 @@ pub fn backward_parallel<T: Float>(
                             }
 
                             for (input, maybe_grad) in inputs.iter().zip(input_grads) {
-                                if let Some(grad) = maybe_grad {
-                                    if input.requires_grad() {
-                                        let hooks = input.hooks();
-                                        let has_hooks = {
-                                            let guard = hooks.lock().map_err(|e| {
-                                                FerrotorchError::LockPoisoned {
-                                                    message: format!("hook storage mutex: {e}"),
-                                                }
-                                            })?;
-                                            (
-                                                guard.has_grad_hooks(),
-                                                guard.has_post_accumulate_hooks(),
-                                            )
-                                        };
-                                        let grad = if has_hooks.0 {
-                                            run_grad_hooks(hooks, grad)?
-                                        } else {
-                                            grad
-                                        };
-
-                                        if input.is_leaf() {
-                                            input.accumulate_grad(&grad)?;
-                                            if has_hooks.1 {
-                                                run_post_accumulate_hooks(hooks, input)?;
+                                if let Some(grad) = maybe_grad
+                                    && input.requires_grad()
+                                {
+                                    let hooks = input.hooks();
+                                    let has_hooks = {
+                                        let guard = hooks.lock().map_err(|e| {
+                                            FerrotorchError::LockPoisoned {
+                                                message: format!("hook storage mutex: {e}"),
                                             }
-                                        } else {
-                                            let mut g = grads.lock().unwrap();
-                                            accumulate_non_leaf_grad_locked(&mut g, input, grad)?;
+                                        })?;
+                                        (guard.has_grad_hooks(), guard.has_post_accumulate_hooks())
+                                    };
+                                    let grad = if has_hooks.0 {
+                                        run_grad_hooks(hooks, grad)?
+                                    } else {
+                                        grad
+                                    };
+
+                                    if input.is_leaf() {
+                                        input.accumulate_grad(&grad)?;
+                                        if has_hooks.1 {
+                                            run_post_accumulate_hooks(hooks, input)?;
                                         }
+                                    } else {
+                                        let mut g = grads.lock().unwrap();
+                                        accumulate_non_leaf_grad_locked(&mut g, input, grad)?;
                                     }
                                 }
                             }
@@ -495,21 +491,19 @@ fn accumulate_non_leaf_grad_locked<T: Float>(
     }
 
     // GPU-native accumulation when both on same GPU.
-    if let (Device::Cuda(_), Device::Cuda(_)) = (existing.device(), grad.device()) {
-        if existing.device() == grad.device() {
-            if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-                if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>() {
-                    let sum_handle = backend.add_f32(existing.gpu_handle()?, grad.gpu_handle()?)?;
-                    let combined = Tensor::from_storage(
-                        crate::storage::TensorStorage::gpu(sum_handle),
-                        existing.shape().to_vec(),
-                        false,
-                    )?;
-                    grads.insert(input.id(), combined);
-                    return Ok(());
-                }
-            }
-        }
+    if let (Device::Cuda(_), Device::Cuda(_)) = (existing.device(), grad.device())
+        && existing.device() == grad.device()
+        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+        && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>()
+    {
+        let sum_handle = backend.add_f32(existing.gpu_handle()?, grad.gpu_handle()?)?;
+        let combined = Tensor::from_storage(
+            crate::storage::TensorStorage::gpu(sum_handle),
+            existing.shape().to_vec(),
+            false,
+        )?;
+        grads.insert(input.id(), combined);
+        return Ok(());
     }
 
     // CPU path.
@@ -566,23 +560,22 @@ fn accumulate_non_leaf_grad<T: Float>(
     }
 
     // B6 fix: GPU-native accumulation when both tensors are on the same GPU.
-    if let (Device::Cuda(_), Device::Cuda(_)) = (existing.device(), grad.device()) {
-        if existing.device() == grad.device() {
-            if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-                let a_handle = existing.gpu_handle()?;
-                let b_handle = grad.gpu_handle()?;
-                // Dispatch by element size to pick add_f32 or add_f64.
-                let result_handle = if std::mem::size_of::<T>() == 4 {
-                    backend.add_f32(a_handle, b_handle)?
-                } else {
-                    backend.add_f64(a_handle, b_handle)?
-                };
-                let storage = crate::storage::TensorStorage::gpu(result_handle);
-                let combined = Tensor::from_storage(storage, existing.shape().to_vec(), false)?;
-                grads.insert(input.id(), combined);
-                return Ok(());
-            }
-        }
+    if let (Device::Cuda(_), Device::Cuda(_)) = (existing.device(), grad.device())
+        && existing.device() == grad.device()
+        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+    {
+        let a_handle = existing.gpu_handle()?;
+        let b_handle = grad.gpu_handle()?;
+        // Dispatch by element size to pick add_f32 or add_f64.
+        let result_handle = if std::mem::size_of::<T>() == 4 {
+            backend.add_f32(a_handle, b_handle)?
+        } else {
+            backend.add_f64(a_handle, b_handle)?
+        };
+        let storage = crate::storage::TensorStorage::gpu(result_handle);
+        let combined = Tensor::from_storage(storage, existing.shape().to_vec(), false)?;
+        grads.insert(input.id(), combined);
+        return Ok(());
     }
 
     // B1 fix: in-place accumulation is only safe when we have exclusive

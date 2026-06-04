@@ -337,27 +337,26 @@ impl<T: Float> GradFn<T> for ProdBackward<T> {
         // single launch — no host detour for the gradient values.
         let t_is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
         let t_is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
-        if self.input.is_cuda() && (t_is_f32 || t_is_f64) {
-            if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-                // grad_output may live on CPU when constructed by
-                // the autograd seed; upload it to the same device as
-                // the input so the kernel can read it directly.
-                let go_on_device = if grad_output.is_cuda() {
-                    grad_output.clone()
-                } else {
-                    grad_output.to(self.input.device())?
-                };
-                let grad_handle = if t_is_f32 {
-                    backend
-                        .prod_backward_f32(self.input.gpu_handle()?, go_on_device.gpu_handle()?)?
-                } else {
-                    backend
-                        .prod_backward_f64(self.input.gpu_handle()?, go_on_device.gpu_handle()?)?
-                };
-                let storage = TensorStorage::gpu(grad_handle);
-                let grad_input = Tensor::from_storage(storage, self.input.shape().to_vec(), false)?;
-                return Ok(vec![Some(grad_input)]);
-            }
+        if self.input.is_cuda()
+            && (t_is_f32 || t_is_f64)
+            && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+        {
+            // grad_output may live on CPU when constructed by
+            // the autograd seed; upload it to the same device as
+            // the input so the kernel can read it directly.
+            let go_on_device = if grad_output.is_cuda() {
+                grad_output.clone()
+            } else {
+                grad_output.to(self.input.device())?
+            };
+            let grad_handle = if t_is_f32 {
+                backend.prod_backward_f32(self.input.gpu_handle()?, go_on_device.gpu_handle()?)?
+            } else {
+                backend.prod_backward_f64(self.input.gpu_handle()?, go_on_device.gpu_handle()?)?
+            };
+            let storage = TensorStorage::gpu(grad_handle);
+            let grad_input = Tensor::from_storage(storage, self.input.shape().to_vec(), false)?;
+            return Ok(vec![Some(grad_input)]);
         }
 
         if self.input.is_cuda() {
@@ -1029,58 +1028,60 @@ impl<T: Float> GradFn<T> for MeanDimBackward<T> {
         // grad_output_keepdim is grad_output with a size-1 dim re-inserted
         // when keepdim=false (free metadata change, no copy).
         let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
-        if grad_output.is_cuda() && is_f32 {
-            if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-                let grad_shape_keepdim: Vec<usize> = if self.keepdim {
-                    grad_output.shape().to_vec()
-                } else {
-                    let mut s = grad_output.shape().to_vec();
-                    s.insert(self.dim, 1);
-                    s
-                };
-                let input_numel: usize = input_shape.iter().product();
-                let inv_n = 1.0f32 / (dim_size as f32);
-                // Use device 0 — current backend doesn't expose handle's
-                // ordinal at this layer; the upstream GPU pipeline is
-                // single-device for now. (Multi-device support lives in
-                // a wider refactor; not blocking this.)
-                let ones_handle = backend.fill_f32(input_numel, inv_n, 0)?;
-                let grad_handle = grad_output.gpu_handle()?;
-                let grad_input_handle = backend.broadcast_mul_f32(
-                    &ones_handle,
-                    grad_handle,
-                    input_shape,
-                    &grad_shape_keepdim,
-                    input_shape,
-                )?;
-                let storage = TensorStorage::gpu(grad_input_handle);
-                let grad_input = Tensor::from_storage(storage, input_shape.to_vec(), false)?;
-                return Ok(vec![Some(grad_input)]);
-            }
+        if grad_output.is_cuda()
+            && is_f32
+            && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+        {
+            let grad_shape_keepdim: Vec<usize> = if self.keepdim {
+                grad_output.shape().to_vec()
+            } else {
+                let mut s = grad_output.shape().to_vec();
+                s.insert(self.dim, 1);
+                s
+            };
+            let input_numel: usize = input_shape.iter().product();
+            let inv_n = 1.0f32 / (dim_size as f32);
+            // Use device 0 — current backend doesn't expose handle's
+            // ordinal at this layer; the upstream GPU pipeline is
+            // single-device for now. (Multi-device support lives in
+            // a wider refactor; not blocking this.)
+            let ones_handle = backend.fill_f32(input_numel, inv_n, 0)?;
+            let grad_handle = grad_output.gpu_handle()?;
+            let grad_input_handle = backend.broadcast_mul_f32(
+                &ones_handle,
+                grad_handle,
+                input_shape,
+                &grad_shape_keepdim,
+                input_shape,
+            )?;
+            let storage = TensorStorage::gpu(grad_input_handle);
+            let grad_input = Tensor::from_storage(storage, input_shape.to_vec(), false)?;
+            return Ok(vec![Some(grad_input)]);
         }
 
         // f64 GPU path via the new repeat_along_dim kernel + scale (#524).
         let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
-        if grad_output.is_cuda() && is_f64 {
-            if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-                let outer: usize = input_shape[..self.dim].iter().product::<usize>().max(1);
-                let inner: usize = input_shape[(self.dim + 1)..]
-                    .iter()
-                    .product::<usize>()
-                    .max(1);
-                let repeat_count = dim_size;
-                let expanded = backend.repeat_along_dim_f64(
-                    grad_output.gpu_handle()?,
-                    outer,
-                    repeat_count,
-                    inner,
-                )?;
-                // Scale by 1/repeat_count to get the mean's gradient.
-                let scaled = backend.scale_f64(&expanded, 1.0 / repeat_count as f64)?;
-                let grad_input =
-                    Tensor::from_storage(TensorStorage::gpu(scaled), input_shape.to_vec(), false)?;
-                return Ok(vec![Some(grad_input)]);
-            }
+        if grad_output.is_cuda()
+            && is_f64
+            && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+        {
+            let outer: usize = input_shape[..self.dim].iter().product::<usize>().max(1);
+            let inner: usize = input_shape[(self.dim + 1)..]
+                .iter()
+                .product::<usize>()
+                .max(1);
+            let repeat_count = dim_size;
+            let expanded = backend.repeat_along_dim_f64(
+                grad_output.gpu_handle()?,
+                outer,
+                repeat_count,
+                inner,
+            )?;
+            // Scale by 1/repeat_count to get the mean's gradient.
+            let scaled = backend.scale_f64(&expanded, 1.0 / repeat_count as f64)?;
+            let grad_input =
+                Tensor::from_storage(TensorStorage::gpu(scaled), input_shape.to_vec(), false)?;
+            return Ok(vec![Some(grad_input)]);
         }
 
         if grad_output.is_cuda() {
@@ -2954,12 +2955,11 @@ fn median_with_dim_forward<T: Float>(
                 .collect();
 
             // median (not nanmedian): a NaN anywhere wins, at its first index.
-            if !ignore_nan {
-                if let Some(&(nan_idx, nan_val)) = slice.iter().find(|(_, v)| v.is_nan()) {
-                    values.push(nan_val);
-                    indices.push(nan_idx as i64);
-                    continue;
-                }
+            if !ignore_nan && let Some(&(nan_idx, nan_val)) = slice.iter().find(|(_, v)| v.is_nan())
+            {
+                values.push(nan_val);
+                indices.push(nan_idx as i64);
+                continue;
             }
 
             // Stable sort by value with the upstream tie-break: equal values

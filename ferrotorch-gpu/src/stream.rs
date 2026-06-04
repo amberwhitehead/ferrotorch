@@ -115,7 +115,7 @@ impl StreamPriority {
                 } else {
                     // Midpoint; the +/-1 handling for odd-length ranges
                     // doesn't matter for stream priority.
-                    (least + greatest) / 2
+                    i32::midpoint(least, greatest)
                 }
             }
             StreamPriority::Low => least,
@@ -450,10 +450,10 @@ impl StreamPool {
                 }
             }
             // If we got zero streams, push a fallback: fork from default stream.
-            if streams.is_empty() {
-                if let Ok(s) = ctx.default_stream().fork() {
-                    streams.push(s);
-                }
+            if streams.is_empty()
+                && let Ok(s) = ctx.default_stream().fork()
+            {
+                streams.push(s);
             }
             DeviceStreams {
                 streams,

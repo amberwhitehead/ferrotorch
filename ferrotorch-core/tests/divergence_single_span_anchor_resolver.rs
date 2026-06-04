@@ -87,10 +87,10 @@ fn build_src_index(root: &Path) -> HashMap<String, Vec<PathBuf>> {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
-                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                    index.entry(name.to_string()).or_default().push(p.clone());
-                }
+            } else if p.extension().and_then(|x| x.to_str()) == Some("rs")
+                && let Some(name) = p.file_name().and_then(|n| n.to_str())
+            {
+                index.entry(name.to_string()).or_default().push(p.clone());
             }
         }
     }

@@ -1389,36 +1389,37 @@ pub fn mv_differentiable<T: Float>(a: &Tensor<T>, x: &Tensor<T>) -> FerrotorchRe
     // the function unconditionally called `.data()?` and surfaced as
     // `GpuTensorNotAccessible`. PyTorch's `torch.mv` works on CUDA for
     // f32 and f64 and so must ferrotorch's.
-    if a.is_cuda() && a.device() == x.device() {
-        if let Some(backend) = gpu_backend() {
-            // Materialise non-contiguous views (e.g. permute/transpose) so the
-            // row-major-trick in cuBLAS sees contiguous strides.
-            let a = if a.is_contiguous() {
-                a.clone()
-            } else {
-                a.contiguous()?
-            };
-            let x = if x.is_contiguous() {
-                x.clone()
-            } else {
-                x.contiguous()?
-            };
-            let handle = if is_f32::<T>() {
-                backend.mv_f32(a.gpu_handle()?, x.gpu_handle()?, m, k)?
-            } else if is_f64::<T>() {
-                backend.mv_f64(a.gpu_handle()?, x.gpu_handle()?, m, k)?
-            } else {
-                return Err(FerrotorchError::NotImplementedOnCuda { op: "mv" });
-            };
-            let storage = TensorStorage::gpu(handle);
-            let shape = vec![m];
-            return if needs_grad {
-                let grad_fn = Arc::new(MvBackward::new(a, x));
-                Tensor::from_operation(storage, shape, grad_fn)
-            } else {
-                Tensor::from_storage(storage, shape, false)
-            };
-        }
+    if a.is_cuda()
+        && a.device() == x.device()
+        && let Some(backend) = gpu_backend()
+    {
+        // Materialise non-contiguous views (e.g. permute/transpose) so the
+        // row-major-trick in cuBLAS sees contiguous strides.
+        let a = if a.is_contiguous() {
+            a.clone()
+        } else {
+            a.contiguous()?
+        };
+        let x = if x.is_contiguous() {
+            x.clone()
+        } else {
+            x.contiguous()?
+        };
+        let handle = if is_f32::<T>() {
+            backend.mv_f32(a.gpu_handle()?, x.gpu_handle()?, m, k)?
+        } else if is_f64::<T>() {
+            backend.mv_f64(a.gpu_handle()?, x.gpu_handle()?, m, k)?
+        } else {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "mv" });
+        };
+        let storage = TensorStorage::gpu(handle);
+        let shape = vec![m];
+        return if needs_grad {
+            let grad_fn = Arc::new(MvBackward::new(a, x));
+            Tensor::from_operation(storage, shape, grad_fn)
+        } else {
+            Tensor::from_storage(storage, shape, false)
+        };
     }
 
     // CPU path: compute mv directly from slices to avoid double-copy.
@@ -1455,35 +1456,36 @@ pub fn dot_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchR
     // the function unconditionally called `.data()?` and surfaced as
     // `GpuTensorNotAccessible`. PyTorch's `torch.dot` works on CUDA for
     // f32 and f64 and so must ferrotorch's.
-    if a.is_cuda() && a.device() == b.device() {
-        if let Some(backend) = gpu_backend() {
-            let a = if a.is_contiguous() {
-                a.clone()
-            } else {
-                a.contiguous()?
-            };
-            let b = if b.is_contiguous() {
-                b.clone()
-            } else {
-                b.contiguous()?
-            };
-            let n = a.shape().first().copied().unwrap_or(0);
-            let handle = if is_f32::<T>() {
-                backend.dot_f32(a.gpu_handle()?, b.gpu_handle()?, n)?
-            } else if is_f64::<T>() {
-                backend.dot_f64(a.gpu_handle()?, b.gpu_handle()?, n)?
-            } else {
-                return Err(FerrotorchError::NotImplementedOnCuda { op: "dot" });
-            };
-            let storage = TensorStorage::gpu(handle);
-            let shape: Vec<usize> = vec![];
-            return if needs_grad {
-                let grad_fn = Arc::new(DotBackward::new(a, b));
-                Tensor::from_operation(storage, shape, grad_fn)
-            } else {
-                Tensor::from_storage(storage, shape, false)
-            };
-        }
+    if a.is_cuda()
+        && a.device() == b.device()
+        && let Some(backend) = gpu_backend()
+    {
+        let a = if a.is_contiguous() {
+            a.clone()
+        } else {
+            a.contiguous()?
+        };
+        let b = if b.is_contiguous() {
+            b.clone()
+        } else {
+            b.contiguous()?
+        };
+        let n = a.shape().first().copied().unwrap_or(0);
+        let handle = if is_f32::<T>() {
+            backend.dot_f32(a.gpu_handle()?, b.gpu_handle()?, n)?
+        } else if is_f64::<T>() {
+            backend.dot_f64(a.gpu_handle()?, b.gpu_handle()?, n)?
+        } else {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "dot" });
+        };
+        let storage = TensorStorage::gpu(handle);
+        let shape: Vec<usize> = vec![];
+        return if needs_grad {
+            let grad_fn = Arc::new(DotBackward::new(a, b));
+            Tensor::from_operation(storage, shape, grad_fn)
+        } else {
+            Tensor::from_storage(storage, shape, false)
+        };
     }
 
     let a_data = a.data()?;
@@ -1823,26 +1825,26 @@ pub fn bmm<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>
     let out_shape = vec![batch, m, n];
 
     // GPU path.
-    if a.is_cuda() {
-        if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            // Dtype-aware GPU dispatch (#800): the f32-only path returned
-            // "GPU handle does not contain a CudaBuffer<f32>" for f64 inputs.
-            // Forward must branch on `is_f64::<T>()` and use `bmm_f64` (cuBLAS
-            // dgemm strided-batched) for f64 tensors.
-            let handle = if is_f32::<T>() {
-                // Use f16 Tensor Core path when autocast selects ReducedPrecision.
-                if autocast_guard("bmm") == Some(AutocastCategory::ReducedPrecision) {
-                    backend.bmm_f16_f32(a.gpu_handle()?, b.gpu_handle()?, batch, m, k, n)?
-                } else {
-                    backend.bmm_f32(a.gpu_handle()?, b.gpu_handle()?, batch, m, k, n)?
-                }
-            } else if is_f64::<T>() {
-                backend.bmm_f64(a.gpu_handle()?, b.gpu_handle()?, batch, m, k, n)?
+    if a.is_cuda()
+        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+    {
+        // Dtype-aware GPU dispatch (#800): the f32-only path returned
+        // "GPU handle does not contain a CudaBuffer<f32>" for f64 inputs.
+        // Forward must branch on `is_f64::<T>()` and use `bmm_f64` (cuBLAS
+        // dgemm strided-batched) for f64 tensors.
+        let handle = if is_f32::<T>() {
+            // Use f16 Tensor Core path when autocast selects ReducedPrecision.
+            if autocast_guard("bmm") == Some(AutocastCategory::ReducedPrecision) {
+                backend.bmm_f16_f32(a.gpu_handle()?, b.gpu_handle()?, batch, m, k, n)?
             } else {
-                return Err(FerrotorchError::NotImplementedOnCuda { op: "bmm" });
-            };
-            return Tensor::from_storage(TensorStorage::gpu(handle), out_shape, false);
-        }
+                backend.bmm_f32(a.gpu_handle()?, b.gpu_handle()?, batch, m, k, n)?
+            }
+        } else if is_f64::<T>() {
+            backend.bmm_f64(a.gpu_handle()?, b.gpu_handle()?, batch, m, k, n)?
+        } else {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "bmm" });
+        };
+        return Tensor::from_storage(TensorStorage::gpu(handle), out_shape, false);
     }
 
     // CPU path: per-batch slab through the faer-backed `mm_raw` workhorse.
@@ -1897,11 +1899,11 @@ pub fn permute_0213<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> 
     let out_shape = vec![d0, d2, d1, d3];
 
     // GPU path.
-    if input.is_cuda() {
-        if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            let handle = backend.permute_0213_f32(input.gpu_handle()?, d0, d1, d2, d3)?;
-            return Tensor::from_storage(TensorStorage::gpu(handle), out_shape, false);
-        }
+    if input.is_cuda()
+        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+    {
+        let handle = backend.permute_0213_f32(input.gpu_handle()?, d0, d1, d2, d3)?;
+        return Tensor::from_storage(TensorStorage::gpu(handle), out_shape, false);
     }
 
     // CPU path.

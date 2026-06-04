@@ -824,14 +824,14 @@ impl<T: GpuFloat> GpuTensor<T> {
             });
         }
         // Validate 1-D bias.
-        if let Some(b) = bias {
-            if b.ndim() != 1 {
-                return Err(GpuError::ShapeMismatch {
-                    op: "conv2d",
-                    expected: vec![weight.shape[0]],
-                    got: b.shape.clone(),
-                });
-            }
+        if let Some(b) = bias
+            && b.ndim() != 1
+        {
+            return Err(GpuError::ShapeMismatch {
+                op: "conv2d",
+                expected: vec![weight.shape[0]],
+                got: b.shape.clone(),
+            });
         }
         // Device consistency.
         if self.device.ordinal() != weight.device.ordinal() {
@@ -840,13 +840,13 @@ impl<T: GpuFloat> GpuTensor<T> {
                 got: weight.device.ordinal(),
             });
         }
-        if let Some(b) = bias {
-            if self.device.ordinal() != b.device.ordinal() {
-                return Err(GpuError::DeviceMismatch {
-                    expected: self.device.ordinal(),
-                    got: b.device.ordinal(),
-                });
-            }
+        if let Some(b) = bias
+            && self.device.ordinal() != b.device.ordinal()
+        {
+            return Err(GpuError::DeviceMismatch {
+                expected: self.device.ordinal(),
+                got: b.device.ordinal(),
+            });
         }
 
         if !is_f32::<T>() {

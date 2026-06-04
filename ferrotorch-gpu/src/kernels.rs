@@ -13271,7 +13271,7 @@ pub fn gpu_add(
 
     // Try vec4 kernel for 4x memory throughput (128-bit loads).
     let n = a.len();
-    if n >= 16 && n % 4 == 0 {
+    if n >= 16 && n.is_multiple_of(4) {
         match try_launch_binary_vec4(a, b, device, ADD_VEC4_PTX, "add_vec4_kernel") {
             Ok(out) => return Ok(out),
             Err(GpuError::PtxCompileFailed { .. }) => {}
@@ -13312,7 +13312,7 @@ pub fn gpu_add_scaled_f32(
     validate_binary(a, b, device)?;
 
     let n = a.len();
-    if n >= 16 && n % 4 == 0 {
+    if n >= 16 && n.is_multiple_of(4) {
         match try_launch_add_scaled_vec4(a, b, alpha, device) {
             Ok(out) => return Ok(out),
             Err(GpuError::PtxCompileFailed { .. }) => {}
@@ -13498,7 +13498,7 @@ pub fn gpu_mul(
     validate_binary(a, b, device)?;
 
     let n = a.len();
-    if n >= 16 && n % 4 == 0 {
+    if n >= 16 && n.is_multiple_of(4) {
         match try_launch_binary_vec4(a, b, device, MUL_VEC4_PTX, "mul_vec4_kernel") {
             Ok(out) => return Ok(out),
             Err(GpuError::PtxCompileFailed { .. }) => {}
@@ -27052,7 +27052,7 @@ DONE:
 pub fn gpu_conj_f32(mut buf: CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
     use cudarc::driver::PushKernelArg;
 
-    if buf.len() % 2 != 0 {
+    if !buf.len().is_multiple_of(2) {
         return Err(GpuError::ShapeMismatch {
             op: "gpu_conj_f32",
             expected: vec![2],
@@ -27118,7 +27118,7 @@ pub fn gpu_conj_f32(_buf: CudaBuffer<f32>, _device: &GpuDevice) -> GpuResult<Cud
 pub fn gpu_conj_f64(mut buf: CudaBuffer<f64>, device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
     use cudarc::driver::PushKernelArg;
 
-    if buf.len() % 2 != 0 {
+    if !buf.len().is_multiple_of(2) {
         return Err(GpuError::ShapeMismatch {
             op: "gpu_conj_f64",
             expected: vec![2],

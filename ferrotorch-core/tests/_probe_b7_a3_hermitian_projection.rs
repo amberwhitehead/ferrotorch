@@ -86,7 +86,7 @@ fn project_hermitian_last_axis(data: &mut [f64], leading: usize, half_n: usize, 
     for b in 0..leading {
         let dc_im = b * half_n * 2 + 1;
         data[dc_im] = 0.0;
-        if output_n % 2 == 0 {
+        if output_n.is_multiple_of(2) {
             let nyq = output_n / 2;
             if nyq < half_n {
                 let nyq_im = b * half_n * 2 + nyq * 2 + 1;
@@ -120,7 +120,7 @@ fn reference_irfft_1d(data: &[f64], batch: usize, half_n: usize, output_n: usize
             .collect();
         // Hermitian projection: zero im at DC and (for even output) Nyquist.
         half[0].1 = 0.0;
-        if output_n % 2 == 0 {
+        if output_n.is_multiple_of(2) {
             let nyq = output_n / 2;
             half[nyq].1 = 0.0;
         }

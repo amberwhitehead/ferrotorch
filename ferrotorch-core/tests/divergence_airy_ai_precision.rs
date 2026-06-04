@@ -71,16 +71,16 @@ use ferrotorch_core::tensor::Tensor;
 /// the decaying-asymptotic region (x >= 2.09).
 const GRID: &[(f32, f32)] = &[
     // The op_db special.airy_ai sample[20] index-4 input (the surfaced point).
-    (-7.950586795806885, -0.006113017909228802),
-    (-7.0, 0.18428084254264832),
-    (-5.0, 0.3507609963417053),
-    (-3.0, -0.3788142800331116),
-    (-2.5, -0.11232506483793259),
-    (-1.0, 0.5355609059333801),
-    (0.0, 0.35502806305885315),
-    (1.0, 0.1352924108505249),
-    (3.0, 0.0065911393612623215),
-    (6.0, 9.94769470707979e-06),
+    (-7.950_587, -0.006_113_018),
+    (-7.0, 0.184_280_84),
+    (-5.0, 0.350_761),
+    (-3.0, -0.378_814_28),
+    (-2.5, -0.112_325_065),
+    (-1.0, 0.535_560_9),
+    (0.0, 0.355_028_06),
+    (1.0, 0.135_292_41),
+    (3.0, 0.006_591_139_4),
+    (6.0, 9.947_695e-6),
 ];
 
 /// ferrotorch's `airy_ai` matches the mpmath 50-digit truth across all three
@@ -119,10 +119,10 @@ fn airy_ai_f32_matches_mpmath_truth() {
 fn airy_ai_more_precise_than_torch_at_opdb_index4() {
     // x = op_db special.airy_ai sample[20] index 4, exact f32 (bits 0xc0fe6b35).
     let x = f32::from_bits(0xc0fe_6b35);
-    assert_eq!(x, -7.950586795806885, "input reconstruction");
+    assert_eq!(x, -7.950_587, "input reconstruction");
 
     // mpmath airyai(mpf(x)) @ mp.dps=50, as f64 (the gold reference).
-    let truth: f64 = -0.0061130178225984497843;
+    let truth: f64 = -0.006_113_017_822_598_449_5;
     // Live torch 2.11 `torch.special.airy_ai` f32 output at this x (witness).
     let torch_val: f64 = -0.006113202311098576;
 

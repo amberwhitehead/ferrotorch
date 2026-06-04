@@ -75,7 +75,7 @@ fn uniform_gpu_strict_unit_interval() {
     };
     for &x in &v {
         assert!(
-            x >= 0.0 && x < 1.0,
+            (0.0..1.0).contains(&x),
             "on-device uniform produced {x} outside [0,1)"
         );
     }

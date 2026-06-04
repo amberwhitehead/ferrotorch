@@ -463,10 +463,10 @@ impl<T: Float> NestedTensor<T> {
         // GPU fast path — CUDA padded tensor + f32/f64 dtype. Composes
         // from `narrow` (zero-copy stride view) + `.contiguous()` (which
         // routes through `strided_copy_*` for non-contiguous CUDA views).
-        if tensor.is_cuda() {
-            if let Some(nested) = Self::try_from_padded_gpu(tensor, lengths, ragged_dim)? {
-                return Ok(nested);
-            }
+        if tensor.is_cuda()
+            && let Some(nested) = Self::try_from_padded_gpu(tensor, lengths, ragged_dim)?
+        {
+            return Ok(nested);
         }
 
         let padded_data = tensor.data()?;

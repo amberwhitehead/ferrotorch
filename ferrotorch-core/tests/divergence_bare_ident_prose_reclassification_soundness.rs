@@ -303,10 +303,10 @@ fn build_min_index(root: &Path) -> HashMap<String, ()> {
             let p = e.path();
             if p.is_dir() {
                 dirs.push(p);
-            } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
-                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                    index.insert(name.to_string(), ());
-                }
+            } else if p.extension().and_then(|x| x.to_str()) == Some("rs")
+                && let Some(name) = p.file_name().and_then(|n| n.to_str())
+            {
+                index.insert(name.to_string(), ());
             }
         }
     }

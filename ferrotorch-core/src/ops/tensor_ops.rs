@@ -396,39 +396,39 @@ pub fn roll<T: Float>(input: &Tensor<T>, shifts: i64, dim: usize) -> FerrotorchR
     // dtypes (bf16/f16/...) fall through to the existing NotImplementedOnCuda
     // error so the contract matches the rest of `tensor_ops`.
     if input.is_cuda() {
-        if is_f32::<T>() || is_f64::<T>() {
-            if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-                let outer: usize = shape[..dim].iter().product();
-                let inner: usize = shape[dim + 1..].iter().product();
-                let handle = if is_f32::<T>() {
-                    backend.roll_f32(
-                        input.gpu_handle()?,
-                        outer,
-                        shape[dim],
-                        inner,
-                        shift_norm as usize,
-                    )?
-                } else {
-                    backend.roll_f64(
-                        input.gpu_handle()?,
-                        outer,
-                        shape[dim],
-                        inner,
-                        shift_norm as usize,
-                    )?
-                };
-                let storage = TensorStorage::gpu(handle);
-                return if input.requires_grad() && is_grad_enabled() {
-                    let grad_fn = Arc::new(crate::grad_fns::shape::RollBackward::new(
-                        input.clone(),
-                        shifts,
-                        dim,
-                    ));
-                    Tensor::from_operation(storage, shape.to_vec(), grad_fn)
-                } else {
-                    Tensor::from_storage(storage, shape.to_vec(), false)
-                };
-            }
+        if (is_f32::<T>() || is_f64::<T>())
+            && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+        {
+            let outer: usize = shape[..dim].iter().product();
+            let inner: usize = shape[dim + 1..].iter().product();
+            let handle = if is_f32::<T>() {
+                backend.roll_f32(
+                    input.gpu_handle()?,
+                    outer,
+                    shape[dim],
+                    inner,
+                    shift_norm as usize,
+                )?
+            } else {
+                backend.roll_f64(
+                    input.gpu_handle()?,
+                    outer,
+                    shape[dim],
+                    inner,
+                    shift_norm as usize,
+                )?
+            };
+            let storage = TensorStorage::gpu(handle);
+            return if input.requires_grad() && is_grad_enabled() {
+                let grad_fn = Arc::new(crate::grad_fns::shape::RollBackward::new(
+                    input.clone(),
+                    shifts,
+                    dim,
+                ));
+                Tensor::from_operation(storage, shape.to_vec(), grad_fn)
+            } else {
+                Tensor::from_storage(storage, shape.to_vec(), false)
+            };
         }
         return Err(FerrotorchError::NotImplementedOnCuda { op: "roll" });
     }

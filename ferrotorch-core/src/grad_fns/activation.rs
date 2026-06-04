@@ -892,34 +892,35 @@ pub fn gelu_with<T: Float>(
         return Ok(out);
     }
     // GPU fast path for all approximation modes (f32/f64).
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
-        if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
-            // buffer before the elementwise kernel reads element 0.
-            let input = input.contiguous()?;
-            let handle = if is_f32::<T>() {
-                match approximate {
-                    GeluApproximate::Sigmoid => backend.gelu_f32(input.gpu_handle()?)?,
-                    GeluApproximate::Tanh => backend.gelu_tanh_f32(input.gpu_handle()?)?,
-                    GeluApproximate::None => backend.gelu_erf_f32(input.gpu_handle()?)?,
-                }
-            } else {
-                match approximate {
-                    GeluApproximate::Sigmoid => backend.gelu_f64(input.gpu_handle()?)?,
-                    GeluApproximate::Tanh => backend.gelu_tanh_f64(input.gpu_handle()?)?,
-                    GeluApproximate::None => backend.gelu_erf_f64(input.gpu_handle()?)?,
-                }
-            };
-            return if is_grad_enabled() && input.requires_grad() {
-                Tensor::from_operation(
-                    TensorStorage::gpu(handle),
-                    input.shape().to_vec(),
-                    Arc::new(GeluBackward::new(input.clone(), approximate)),
-                )
-            } else {
-                Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)
-            };
-        }
+    if input.is_cuda()
+        && (is_f32::<T>() || is_f64::<T>())
+        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+    {
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the elementwise kernel reads element 0.
+        let input = input.contiguous()?;
+        let handle = if is_f32::<T>() {
+            match approximate {
+                GeluApproximate::Sigmoid => backend.gelu_f32(input.gpu_handle()?)?,
+                GeluApproximate::Tanh => backend.gelu_tanh_f32(input.gpu_handle()?)?,
+                GeluApproximate::None => backend.gelu_erf_f32(input.gpu_handle()?)?,
+            }
+        } else {
+            match approximate {
+                GeluApproximate::Sigmoid => backend.gelu_f64(input.gpu_handle()?)?,
+                GeluApproximate::Tanh => backend.gelu_tanh_f64(input.gpu_handle()?)?,
+                GeluApproximate::None => backend.gelu_erf_f64(input.gpu_handle()?)?,
+            }
+        };
+        return if is_grad_enabled() && input.requires_grad() {
+            Tensor::from_operation(
+                TensorStorage::gpu(handle),
+                input.shape().to_vec(),
+                Arc::new(GeluBackward::new(input.clone(), approximate)),
+            )
+        } else {
+            Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)
+        };
     }
 
     // CPU path.
@@ -985,26 +986,27 @@ pub fn silu<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 
 fn silu_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     // GPU fast path for f32/f64
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
-        if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
-            // buffer before the elementwise kernel reads element 0.
-            let input = input.contiguous()?;
-            let handle = if is_f32::<T>() {
-                backend.silu_f32(input.gpu_handle()?)?
-            } else {
-                backend.silu_f64(input.gpu_handle()?)?
-            };
-            return if is_grad_enabled() && input.requires_grad() {
-                Tensor::from_operation(
-                    TensorStorage::gpu(handle),
-                    input.shape().to_vec(),
-                    Arc::new(SiluBackward::new(input.clone())),
-                )
-            } else {
-                Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)
-            };
-        }
+    if input.is_cuda()
+        && (is_f32::<T>() || is_f64::<T>())
+        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+    {
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the elementwise kernel reads element 0.
+        let input = input.contiguous()?;
+        let handle = if is_f32::<T>() {
+            backend.silu_f32(input.gpu_handle()?)?
+        } else {
+            backend.silu_f64(input.gpu_handle()?)?
+        };
+        return if is_grad_enabled() && input.requires_grad() {
+            Tensor::from_operation(
+                TensorStorage::gpu(handle),
+                input.shape().to_vec(),
+                Arc::new(SiluBackward::new(input.clone())),
+            )
+        } else {
+            Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)
+        };
     }
 
     // CPU path
@@ -1044,38 +1046,39 @@ fn softmax_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let shape = input.shape().to_vec();
 
     // GPU fast path: dispatch to native softmax kernel.
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()) {
-        if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
-            // buffer before the row-major softmax kernel reads element 0.
-            let input = input.contiguous()?;
-            let last_dim = *shape.last().unwrap_or(&1);
-            let rows = input.numel() / last_dim.max(1);
-            // #23: bf16 routes through `softmax_bf16_bf16` (existing kernel
-            // from #17; this site was the missing dispatch arm).
-            let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
-                T,
-                "softmax",
-                f32 => backend.softmax_f32(input.gpu_handle()?, rows, last_dim),
-                f64 => backend.softmax_f64(input.gpu_handle()?, rows, last_dim),
-                bf16 => backend.softmax_bf16_bf16(input.gpu_handle()?, rows, last_dim),
-                f16 => backend.softmax_f16(input.gpu_handle()?, rows, last_dim),
-            )?;
+    if input.is_cuda()
+        && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>())
+        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+    {
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the row-major softmax kernel reads element 0.
+        let input = input.contiguous()?;
+        let last_dim = *shape.last().unwrap_or(&1);
+        let rows = input.numel() / last_dim.max(1);
+        // #23: bf16 routes through `softmax_bf16_bf16` (existing kernel
+        // from #17; this site was the missing dispatch arm).
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "softmax",
+            f32 => backend.softmax_f32(input.gpu_handle()?, rows, last_dim),
+            f64 => backend.softmax_f64(input.gpu_handle()?, rows, last_dim),
+            bf16 => backend.softmax_bf16_bf16(input.gpu_handle()?, rows, last_dim),
+            f16 => backend.softmax_f16(input.gpu_handle()?, rows, last_dim),
+        )?;
 
-            return if is_grad_enabled() && input.requires_grad() {
-                // Clone the result buffer so backward can reference the output.
-                let cache_handle = backend.clone_buffer(&handle)?;
-                let output_cache =
-                    Tensor::from_storage(TensorStorage::gpu(cache_handle), shape.clone(), false)?;
-                Tensor::from_operation(
-                    TensorStorage::gpu(handle),
-                    shape,
-                    Arc::new(SoftmaxBackward::new(input.clone(), output_cache)),
-                )
-            } else {
-                Tensor::from_storage(TensorStorage::gpu(handle), shape, false)
-            };
-        }
+        return if is_grad_enabled() && input.requires_grad() {
+            // Clone the result buffer so backward can reference the output.
+            let cache_handle = backend.clone_buffer(&handle)?;
+            let output_cache =
+                Tensor::from_storage(TensorStorage::gpu(cache_handle), shape.clone(), false)?;
+            Tensor::from_operation(
+                TensorStorage::gpu(handle),
+                shape,
+                Arc::new(SoftmaxBackward::new(input.clone(), output_cache)),
+            )
+        } else {
+            Tensor::from_storage(TensorStorage::gpu(handle), shape, false)
+        };
     }
 
     // CPU path.
@@ -1171,35 +1174,37 @@ fn log_softmax_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>>
     let shape = input.shape();
 
     // GPU fast path for f32/f64
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) && !shape.is_empty() {
-        if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            let cols = *shape.last().unwrap();
-            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
-            // buffer before the row-major log_softmax kernel reads element 0.
-            let input = input.contiguous()?;
-            let handle = if is_f32::<T>() {
-                backend.log_softmax_f32(input.gpu_handle()?, cols)?
+    if input.is_cuda()
+        && (is_f32::<T>() || is_f64::<T>())
+        && !shape.is_empty()
+        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+    {
+        let cols = *shape.last().unwrap();
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the row-major log_softmax kernel reads element 0.
+        let input = input.contiguous()?;
+        let handle = if is_f32::<T>() {
+            backend.log_softmax_f32(input.gpu_handle()?, cols)?
+        } else {
+            backend.log_softmax_f64(input.gpu_handle()?, cols)?
+        };
+        return if is_grad_enabled() && input.requires_grad() {
+            // Compute softmax = exp(log_softmax) on GPU for backward storage
+            let sm_handle = if is_f32::<T>() {
+                backend.exp_f32(&handle)?
             } else {
-                backend.log_softmax_f64(input.gpu_handle()?, cols)?
+                backend.exp_f64(&handle)?
             };
-            return if is_grad_enabled() && input.requires_grad() {
-                // Compute softmax = exp(log_softmax) on GPU for backward storage
-                let sm_handle = if is_f32::<T>() {
-                    backend.exp_f32(&handle)?
-                } else {
-                    backend.exp_f64(&handle)?
-                };
-                let softmax_tensor =
-                    Tensor::from_storage(TensorStorage::gpu(sm_handle), shape.to_vec(), false)?;
-                Tensor::from_operation(
-                    TensorStorage::gpu(handle),
-                    shape.to_vec(),
-                    Arc::new(LogSoftmaxBackward::new(input.clone(), softmax_tensor)),
-                )
-            } else {
-                Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), false)
-            };
-        }
+            let softmax_tensor =
+                Tensor::from_storage(TensorStorage::gpu(sm_handle), shape.to_vec(), false)?;
+            Tensor::from_operation(
+                TensorStorage::gpu(handle),
+                shape.to_vec(),
+                Arc::new(LogSoftmaxBackward::new(input.clone(), softmax_tensor)),
+            )
+        } else {
+            Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), false)
+        };
     }
 
     // Non-f32/f64 CUDA tensors are not supported.
@@ -1490,26 +1495,27 @@ impl<T: Float> GradFn<T> for EluBackward<T> {
 /// ```
 pub fn elu<T: Float>(input: &Tensor<T>, alpha: f64) -> FerrotorchResult<Tensor<T>> {
     // GPU fast path for f32/f64
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
-        if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
-            // buffer before the elementwise kernel reads element 0.
-            let input = input.contiguous()?;
-            let handle = if is_f32::<T>() {
-                backend.elu_f32(input.gpu_handle()?, alpha as f32)?
-            } else {
-                backend.elu_f64(input.gpu_handle()?, alpha)?
-            };
-            return if is_grad_enabled() && input.requires_grad() {
-                Tensor::from_operation(
-                    TensorStorage::gpu(handle),
-                    input.shape().to_vec(),
-                    Arc::new(EluBackward::new(input.clone(), alpha)),
-                )
-            } else {
-                Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)
-            };
-        }
+    if input.is_cuda()
+        && (is_f32::<T>() || is_f64::<T>())
+        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+    {
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the elementwise kernel reads element 0.
+        let input = input.contiguous()?;
+        let handle = if is_f32::<T>() {
+            backend.elu_f32(input.gpu_handle()?, alpha as f32)?
+        } else {
+            backend.elu_f64(input.gpu_handle()?, alpha)?
+        };
+        return if is_grad_enabled() && input.requires_grad() {
+            Tensor::from_operation(
+                TensorStorage::gpu(handle),
+                input.shape().to_vec(),
+                Arc::new(EluBackward::new(input.clone(), alpha)),
+            )
+        } else {
+            Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)
+        };
     }
 
     // CPU path
@@ -1624,26 +1630,27 @@ impl<T: Float> GradFn<T> for MishBackward<T> {
 /// when gradients are enabled.
 pub fn mish<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     // GPU fast path for f32/f64
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
-        if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
-            // buffer before the elementwise kernel reads element 0.
-            let input = input.contiguous()?;
-            let handle = if is_f32::<T>() {
-                backend.mish_f32(input.gpu_handle()?)?
-            } else {
-                backend.mish_f64(input.gpu_handle()?)?
-            };
-            return if is_grad_enabled() && input.requires_grad() {
-                Tensor::from_operation(
-                    TensorStorage::gpu(handle),
-                    input.shape().to_vec(),
-                    Arc::new(MishBackward::new(input.clone())),
-                )
-            } else {
-                Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)
-            };
-        }
+    if input.is_cuda()
+        && (is_f32::<T>() || is_f64::<T>())
+        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+    {
+        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
+        // buffer before the elementwise kernel reads element 0.
+        let input = input.contiguous()?;
+        let handle = if is_f32::<T>() {
+            backend.mish_f32(input.gpu_handle()?)?
+        } else {
+            backend.mish_f64(input.gpu_handle()?)?
+        };
+        return if is_grad_enabled() && input.requires_grad() {
+            Tensor::from_operation(
+                TensorStorage::gpu(handle),
+                input.shape().to_vec(),
+                Arc::new(MishBackward::new(input.clone())),
+            )
+        } else {
+            Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)
+        };
     }
 
     // CPU path. Use `ln_1p(exp(x))` (= `log1p(exp(x))`) for the softplus
@@ -2373,7 +2380,7 @@ pub fn glu<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<Tensor<T>>
         });
     }
     let len_dim = shape[resolved];
-    if len_dim % 2 != 0 {
+    if !len_dim.is_multiple_of(2) {
         return Err(FerrotorchError::InvalidArgument {
             message: format!("glu: split dim must be even, got {len_dim} along dim {resolved}"),
         });

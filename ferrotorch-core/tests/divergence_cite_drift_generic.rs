@@ -198,11 +198,12 @@ fn scan_line_inner<'a>(line: &'a str, ctx: &mut CiteContext<'a>) {
             let span = &line[start..end];
             let trimmed = span.trim();
             let (lo_hi_opt, had_colon) = parse_paren_cite(trimmed);
-            if let Some((lo, hi)) = lo_hi_opt {
-                if (had_colon || lo >= 100) && ctx.last_rs_file.is_some() {
-                    let file = ctx.last_rs_file.clone().unwrap();
-                    ctx.emit(file, lo, hi, start);
-                }
+            if let Some((lo, hi)) = lo_hi_opt
+                && (had_colon || lo >= 100)
+                && ctx.last_rs_file.is_some()
+            {
+                let file = ctx.last_rs_file.clone().unwrap();
+                ctx.emit(file, lo, hi, start);
             }
             j = end + 1;
         } else {
@@ -388,11 +389,11 @@ fn scan_span_inner<'a>(
             continue;
         }
         // Bare-colon continuation.
-        if let Some((lo, hi)) = parse_bare_colon_cite(tok) {
-            if let Some(file_as_written) = span_local_file.clone() {
-                ctx.emit_with_end(file_as_written, lo, hi, span_offset, span_end);
-                emitted_indices.push(idx);
-            }
+        if let Some((lo, hi)) = parse_bare_colon_cite(tok)
+            && let Some(file_as_written) = span_local_file.clone()
+        {
+            ctx.emit_with_end(file_as_written, lo, hi, span_offset, span_end);
+            emitted_indices.push(idx);
         }
     }
     // Post-cite hint pass (#1270): for each emitted cite, if the next token
@@ -521,10 +522,10 @@ fn parse_line_range(s: &str) -> Option<(usize, usize)> {
                 break;
             }
         }
-        if let Ok(hi) = hi_str.parse::<usize>() {
-            if hi >= lo {
-                return Some((lo, hi));
-            }
+        if let Ok(hi) = hi_str.parse::<usize>()
+            && hi >= lo
+        {
+            return Some((lo, hi));
         }
         return Some((lo, lo));
     }
@@ -1545,10 +1546,10 @@ fn build_src_index(root: &Path) -> std::collections::HashMap<String, Vec<PathBuf
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
-                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                    index.entry(name.to_string()).or_default().push(p.clone());
-                }
+            } else if p.extension().and_then(|x| x.to_str()) == Some("rs")
+                && let Some(name) = p.file_name().and_then(|n| n.to_str())
+            {
+                index.entry(name.to_string()).or_default().push(p.clone());
             }
         }
     }
@@ -1850,10 +1851,10 @@ fn validate_symbol_anchor(
         );
     }
     for cand in &candidates {
-        if let Ok(src) = fs::read_to_string(cand) {
-            if anchor_symbol_declared(&src, anchor) {
-                return (AnchorOutcome::Valid, None);
-            }
+        if let Ok(src) = fs::read_to_string(cand)
+            && anchor_symbol_declared(&src, anchor)
+        {
+            return (AnchorOutcome::Valid, None);
         }
     }
     // BARE-IDENT PROSE RULE (#1669 final). A `BareIdent` `` `<id> in <file>` ``
@@ -2010,10 +2011,10 @@ fn collect_design_docs(root: &Path) -> Vec<String> {
             } else if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md")
             {
                 // Store path relative to workspace root for stable labels.
-                if let Ok(rel) = path.strip_prefix(root) {
-                    if let Some(s) = rel.to_str() {
-                        out.push(s.to_string());
-                    }
+                if let Ok(rel) = path.strip_prefix(root)
+                    && let Some(s) = rel.to_str()
+                {
+                    out.push(s.to_string());
                 }
             }
         }

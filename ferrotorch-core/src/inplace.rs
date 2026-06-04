@@ -193,19 +193,18 @@ impl<T: Float> Tensor<T> {
             if self.is_cuda()
                 && other.is_cuda()
                 && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>()
+                && let Some(backend) = crate::gpu_dispatch::gpu_backend()
             {
-                if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-                    let sum_handle = backend.add_f32(self.gpu_handle()?, other.gpu_handle()?)?;
-                    let storage = crate::storage::TensorStorage::gpu(sum_handle);
-                    // SAFETY: check_inplace_allowed above proved `self` has
-                    // no grad_fn and is not a requires_grad leaf, so no
-                    // autograd machinery references this storage; `&self` +
-                    // `Float: 'static` ensure no concurrent reader/writer
-                    // holds a borrow across this point on this thread,
-                    // satisfying update_storage's exclusive-access contract.
-                    unsafe { self.update_storage(storage)? };
-                    return Ok(self);
-                }
+                let sum_handle = backend.add_f32(self.gpu_handle()?, other.gpu_handle()?)?;
+                let storage = crate::storage::TensorStorage::gpu(sum_handle);
+                // SAFETY: check_inplace_allowed above proved `self` has
+                // no grad_fn and is not a requires_grad leaf, so no
+                // autograd machinery references this storage; `&self` +
+                // `Float: 'static` ensure no concurrent reader/writer
+                // holds a borrow across this point on this thread,
+                // satisfying update_storage's exclusive-access contract.
+                unsafe { self.update_storage(storage)? };
+                return Ok(self);
             }
 
             let mut data = self.data_vec()?;
@@ -340,17 +339,16 @@ impl<T: Float> Tensor<T> {
             if self.is_cuda()
                 && other.is_cuda()
                 && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>()
+                && let Some(backend) = crate::gpu_dispatch::gpu_backend()
             {
-                if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-                    let handle = backend.mul_f32(self.gpu_handle()?, other.gpu_handle()?)?;
-                    let storage = crate::storage::TensorStorage::gpu(handle);
-                    // SAFETY: check_inplace_allowed at the top of `mul_` already
-                    // proved `self` has no grad_fn and is not a requires_grad leaf;
-                    // single-threaded `&self` satisfies update_storage's
-                    // exclusive-access contract.
-                    unsafe { self.update_storage(storage)? };
-                    return Ok(self);
-                }
+                let handle = backend.mul_f32(self.gpu_handle()?, other.gpu_handle()?)?;
+                let storage = crate::storage::TensorStorage::gpu(handle);
+                // SAFETY: check_inplace_allowed at the top of `mul_` already
+                // proved `self` has no grad_fn and is not a requires_grad leaf;
+                // single-threaded `&self` satisfies update_storage's
+                // exclusive-access contract.
+                unsafe { self.update_storage(storage)? };
+                return Ok(self);
             }
 
             let mut data = self.data_vec()?;
@@ -422,17 +420,16 @@ impl<T: Float> Tensor<T> {
             if self.is_cuda()
                 && other.is_cuda()
                 && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>()
+                && let Some(backend) = crate::gpu_dispatch::gpu_backend()
             {
-                if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-                    let handle = backend.div_f32(self.gpu_handle()?, other.gpu_handle()?)?;
-                    let storage = crate::storage::TensorStorage::gpu(handle);
-                    // SAFETY: check_inplace_allowed at the top of `div_` already
-                    // proved `self` has no grad_fn and is not a requires_grad leaf;
-                    // single-threaded `&self` satisfies update_storage's
-                    // exclusive-access contract.
-                    unsafe { self.update_storage(storage)? };
-                    return Ok(self);
-                }
+                let handle = backend.div_f32(self.gpu_handle()?, other.gpu_handle()?)?;
+                let storage = crate::storage::TensorStorage::gpu(handle);
+                // SAFETY: check_inplace_allowed at the top of `div_` already
+                // proved `self` has no grad_fn and is not a requires_grad leaf;
+                // single-threaded `&self` satisfies update_storage's
+                // exclusive-access contract.
+                unsafe { self.update_storage(storage)? };
+                return Ok(self);
             }
 
             let mut data = self.data_vec()?;
@@ -627,12 +624,12 @@ impl<T: Float> Tensor<T> {
                 message: "clamp_opt_: at least one of 'min' or 'max' must not be None".into(),
             });
         }
-        if let (Some(lo), Some(hi)) = (min, max) {
-            if lo > hi {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: format!("clamp_opt_ requires min <= max, got min={lo:?}, max={hi:?}"),
-                });
-            }
+        if let (Some(lo), Some(hi)) = (min, max)
+            && lo > hi
+        {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("clamp_opt_ requires min <= max, got min={lo:?}, max={hi:?}"),
+            });
         }
 
         check_inplace_allowed(self, "clamp_opt_")?;

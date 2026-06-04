@@ -19,16 +19,17 @@
 //! on CPU — EVERY one raised, uniformly:
 //!   * float16  -> `RuntimeError: Unsupported dtype Half`
 //!   * bfloat16 -> `RuntimeError: Unsupported dtype BFloat16`
+//!
 //! There is NO CPU half upcast path. (Verified 2026-05-29.)
 //!
 //! LIVE torch 2.11, the two NON-transform helpers (pure axis rolls) ACCEPT half:
 //!   >>> torch.fft.fftshift(torch.arange(8).to(torch.float16))
-//!   tensor([4,5,6,7,0,1,2,3], dtype=torch.float16)        # OK, same dtype
+//! > > > tensor([4,5,6,7,0,1,2,3], dtype=torch.float16)        # OK, same dtype
 //!   >>> torch.fft.ifftshift(...float16/bfloat16...)        # OK, same dtype
 //!
 //! LIVE torch 2.11, f32 forward FFT is unregressed by the reject:
 //!   >>> torch.fft.fft(torch.tensor([1.,2.,3.,4.]))
-//!   [(10+0j), (-2+2j), (-2+0j), (-2-2j)]
+//! > > > [(10+0j), (-2+2j), (-2+0j), (-2-2j)]
 //!
 //! ferrotorch represents complex tensors as interleaved real (trailing dim == 2)
 //! over the SAME element type (complex64 == Tensor<f32>, complex128 == Tensor<f64>),

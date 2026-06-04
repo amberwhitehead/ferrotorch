@@ -139,14 +139,14 @@ pub fn grad<T: Float>(
 
     while let Some(id) = bfs_queue.pop_front() {
         topo_order.push(id);
-        if let Some(node) = node_map.get(&id) {
-            if let Some(grad_fn) = node.grad_fn() {
-                for input in grad_fn.inputs() {
-                    if let Some(deg) = in_degree.get_mut(&input.id()) {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            bfs_queue.push_back(input.id());
-                        }
+        if let Some(node) = node_map.get(&id)
+            && let Some(grad_fn) = node.grad_fn()
+        {
+            for input in grad_fn.inputs() {
+                if let Some(deg) = in_degree.get_mut(&input.id()) {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        bfs_queue.push_back(input.id());
                     }
                 }
             }
@@ -193,44 +193,40 @@ pub fn grad<T: Float>(
             let fn_inputs = grad_fn.inputs();
 
             for (input, maybe_grad) in fn_inputs.iter().zip(input_grads) {
-                if let Some(ig) = maybe_grad {
-                    if input.requires_grad() {
-                        // When create_graph=true, ensure the gradient tensor
-                        // participates in the computation graph. The GradFn::backward()
-                        // implementations that use raw Vec operations (non-differentiable)
-                        // produce tensors with requires_grad=false. We wrap them so
-                        // they can be differentiated again.
-                        let grad_tensor = if create_graph && !ig.requires_grad() {
-                            ig.requires_grad_(true)
-                        } else {
-                            ig
-                        };
+                if let Some(ig) = maybe_grad
+                    && input.requires_grad()
+                {
+                    // When create_graph=true, ensure the gradient tensor
+                    // participates in the computation graph. The GradFn::backward()
+                    // implementations that use raw Vec operations (non-differentiable)
+                    // produce tensors with requires_grad=false. We wrap them so
+                    // they can be differentiated again.
+                    let grad_tensor = if create_graph && !ig.requires_grad() {
+                        ig.requires_grad_(true)
+                    } else {
+                        ig
+                    };
 
-                        // Accumulate into the grads map for the next iteration.
-                        if let Some(existing) = grads.remove(&input.id()) {
-                            if create_graph {
-                                // Use differentiable addition so the accumulation
-                                // is itself part of the computation graph.
-                                let summed =
-                                    differentiable_add(&existing, &grad_tensor, create_graph)?;
-                                grads.insert(input.id(), summed);
-                            } else {
-                                // Plain element-wise add (non-differentiable).
-                                let a = existing.data_vec()?;
-                                let b = grad_tensor.data_vec()?;
-                                let summed: Vec<T> =
-                                    a.iter().zip(b.iter()).map(|(&x, &y)| x + y).collect();
-                                let storage = TensorStorage::cpu(summed);
-                                let combined = Tensor::from_storage(
-                                    storage,
-                                    existing.shape().to_vec(),
-                                    false,
-                                )?;
-                                grads.insert(input.id(), combined);
-                            }
+                    // Accumulate into the grads map for the next iteration.
+                    if let Some(existing) = grads.remove(&input.id()) {
+                        if create_graph {
+                            // Use differentiable addition so the accumulation
+                            // is itself part of the computation graph.
+                            let summed = differentiable_add(&existing, &grad_tensor, create_graph)?;
+                            grads.insert(input.id(), summed);
                         } else {
-                            grads.insert(input.id(), grad_tensor);
+                            // Plain element-wise add (non-differentiable).
+                            let a = existing.data_vec()?;
+                            let b = grad_tensor.data_vec()?;
+                            let summed: Vec<T> =
+                                a.iter().zip(b.iter()).map(|(&x, &y)| x + y).collect();
+                            let storage = TensorStorage::cpu(summed);
+                            let combined =
+                                Tensor::from_storage(storage, existing.shape().to_vec(), false)?;
+                            grads.insert(input.id(), combined);
                         }
+                    } else {
+                        grads.insert(input.id(), grad_tensor);
                     }
                 }
             }
@@ -241,10 +237,10 @@ pub fn grad<T: Float>(
     // should be captured. (They would be leaf tensors that were not visited
     // as intermediate nodes above.)
     for (id, g) in grads {
-        if let Some(&idx) = input_ids.get(&id) {
-            if result[idx].is_none() {
-                result[idx] = Some(g);
-            }
+        if let Some(&idx) = input_ids.get(&id)
+            && result[idx].is_none()
+        {
+            result[idx] = Some(g);
         }
     }
 

@@ -33,8 +33,8 @@ use ferrotorch_core::grad_fns::arithmetic::{add, mul, sub};
 use ferrotorch_core::grad_fns::linalg::mm_differentiable as mm;
 use ferrotorch_core::grad_fns::reduction::sum;
 use ferrotorch_core::grad_fns::shape::{cat, expand, reshape, transpose_2d};
-use ferrotorch_core::{from_slice, Tensor};
-use ferrotorch_nn::{Module, RNNNonlinearity, GRU, LSTM, RNN};
+use ferrotorch_core::{Tensor, from_slice};
+use ferrotorch_nn::{GRU, LSTM, Module, RNN, RNNNonlinearity};
 use std::collections::HashMap;
 
 const EPS: f32 = 1e-5;

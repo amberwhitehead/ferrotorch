@@ -111,14 +111,14 @@ impl CudaBuffer<f64> {
 #[cfg(feature = "cuda")]
 impl<T> Drop for CudaBuffer<T> {
     fn drop(&mut self) {
-        if let Some(slice) = self.data.take() {
-            if let Some(return_fn) = self.pool_fn {
-                // Use alloc_len (rounded) as the pool key so the buffer
-                // is findable on the next pool_take with the same rounded len.
-                return_fn(self.device_ordinal, self.alloc_len, slice);
-            }
-            // else: CudaSlice::Drop fires naturally (cuMemFreeAsync)
+        if let Some(slice) = self.data.take()
+            && let Some(return_fn) = self.pool_fn
+        {
+            // Use alloc_len (rounded) as the pool key so the buffer
+            // is findable on the next pool_take with the same rounded len.
+            return_fn(self.device_ordinal, self.alloc_len, slice);
         }
+        // else: CudaSlice::Drop fires naturally (cuMemFreeAsync)
     }
 }
 

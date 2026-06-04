@@ -246,10 +246,10 @@ fn find_call_sites(src_path: &Path, symbol: &str) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     for (idx0, line) in text.lines().enumerate() {
         let lineno = idx0 + 1;
-        if let Some(open) = test_open {
-            if lineno >= open {
-                break; // Past the test boundary; rest is test code.
-            }
+        if let Some(open) = test_open
+            && lineno >= open
+        {
+            break; // Past the test boundary; rest is test code.
         }
         if !line.contains(&needle) {
             continue;

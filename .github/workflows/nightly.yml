@@ -1,0 +1,109 @@
+name: Nightly + release CUDA sweep
+
+# Tier-4 CI: runs the same gated CUDA workflow as `cuda-ci.yml` on a
+# scheduled cadence (08:00 UTC daily) against `main`, plus on every push
+# to a `release/*` branch. Uses the same `gpu` environment, so the
+# scheduled run still requires a maintainer to approve the deployment
+# before the runner spins up — no surprise overnight billing.
+#
+# Tracking: #32 (tiered CI strategy).
+
+on:
+  schedule:
+    # 08:00 UTC = ~midnight Pacific. Picked for low contention with the
+    # PR / push-to-main workflows that hit the same gpu environment.
+    - cron: "0 8 * * *"
+  push:
+    branches:
+      - "release/*"
+  workflow_dispatch:
+
+concurrency:
+  # Shares the global single-slot group with `cuda-ci.yml` so a
+  # scheduled nightly and a concurrent PR-triggered CUDA run can't
+  # both grab the GPU runner at once. `cancel-in-progress: false`
+  # so whichever ran first finishes cleanly and the other queues.
+  group: cuda-ci-global
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  CFLAGS: -Wno-implicit-function-declaration
+  # See `cuda-ci.yml` for the full rationale. Matches lucida's CUDA 13.0
+  # base symbol set; the `ferrotorch_cuda_mem_location_anon_union` cfg
+  # selects the right struct accessor for this version.
+  CUDARC_CUDA_VERSION: "13000"
+
+jobs:
+  test-cuda-full-sweep:
+    name: ferrotorch-gpu nightly (CUDA, full sweep)
+    # Same self-hosted runner pool as `cuda-ci.yml` — see `ci/runner/`
+    # and `OPERATIONS.md` for the setup. `runs-on:` label must match
+    # the labels the runner registered with.
+    runs-on: [self-hosted, gpu, cuda]
+    # Same `gpu` environment + required-reviewer gate as cuda-ci.yml.
+    # Scheduled runs target main; the maintainer chooses whether to
+    # approve the day's run, skipping during release-freeze windows.
+    environment:
+      name: gpu
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable, with clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install C build deps (core-math-sys via ferray-ufunc)
+        run: sudo apt-get update && sudo apt-get install -y libgmp-dev libmpfr-dev pkg-config
+
+      - name: Diagnostic — nvidia-smi + nvcc version
+        run: |
+          set -x
+          nvidia-smi || true
+          nvcc --version || true
+
+      - name: Cache cargo registry, index, and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cuda-nightly
+          workspaces: . -> target
+
+      - name: cargo build --features cuda (full workspace)
+        run: cargo build --workspace --features cuda --release -v --exclude ferrotorch-mps --exclude ferrotorch-xpu
+
+      - name: cargo test --features cuda --lib (full workspace)
+        run: |
+          cargo test \
+            --workspace \
+            --exclude ferrotorch-mps \
+            --exclude ferrotorch-xpu \
+            --features cuda \
+            --release \
+            --lib
+
+      - name: cargo test --features cuda --tests (full workspace)
+        run: |
+          cargo test \
+            --workspace \
+            --exclude ferrotorch-mps \
+            --exclude ferrotorch-xpu \
+            --features cuda \
+            --release \
+            --tests
+
+      - name: cargo test --features cuda -- --ignored (perf / known-slow)
+        # `--ignored` opts into the long-running benches that PR-level CI
+        # skips. Failures here are tracked but don't necessarily fail the
+        # nightly until a baseline is established (allow continue).
+        continue-on-error: true
+        run: |
+          cargo test \
+            -p ferrotorch-gpu \
+            --features cuda \
+            --release \
+            -- --ignored

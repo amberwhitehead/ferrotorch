@@ -304,7 +304,7 @@ pub fn gpu_group_norm_f32(
     eps: f32,
     device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<f32>> {
-    if groups == 0 || channels % groups != 0 {
+    if groups == 0 || !channels.is_multiple_of(groups) {
         return Err(GpuError::ShapeMismatch {
             op: "group_norm",
             expected: vec![channels],

@@ -255,11 +255,11 @@ impl BlockPool {
     /// Find the smallest free block >= `size` on `stream`.
     pub fn find_free_block(&self, stream: StreamId, size: usize) -> Option<usize> {
         let search = (BlockKey::search(stream, size), 0);
-        if let Some(&(key, idx)) = self.free_blocks.range(search..).next() {
-            if key.stream == stream {
-                // Found a block on the same stream that is >= requested size.
-                return Some(idx);
-            }
+        if let Some(&(key, idx)) = self.free_blocks.range(search..).next()
+            && key.stream == stream
+        {
+            // Found a block on the same stream that is >= requested size.
+            return Some(idx);
         }
         None
     }

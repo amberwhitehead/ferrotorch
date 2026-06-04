@@ -1597,54 +1597,55 @@ impl<T: Float> Tensor<T> {
         // matches the target memory layout (e.g., NHWC for
         // ChannelsLast). The gathered buffer is then naturally
         // contiguous in the target format.
-        if self.is_cuda() && ndim <= 8 {
-            if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-                use std::any::TypeId;
-                let perm = format_permutation(format, ndim);
-                let permuted_shape: Vec<usize> = perm.iter().map(|&d| shape[d]).collect();
-                let permuted_src_strides: Vec<isize> =
-                    perm.iter().map(|&d| self.inner.strides[d]).collect();
-                let in_handle = self.gpu_handle()?;
-                let src_offset = self.inner.offset;
+        if self.is_cuda()
+            && ndim <= 8
+            && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+        {
+            use std::any::TypeId;
+            let perm = format_permutation(format, ndim);
+            let permuted_shape: Vec<usize> = perm.iter().map(|&d| shape[d]).collect();
+            let permuted_src_strides: Vec<isize> =
+                perm.iter().map(|&d| self.inner.strides[d]).collect();
+            let in_handle = self.gpu_handle()?;
+            let src_offset = self.inner.offset;
 
-                let out_handle = if TypeId::of::<T>() == TypeId::of::<f32>() {
-                    backend.strided_copy_f32(
-                        in_handle,
-                        &permuted_shape,
-                        &permuted_src_strides,
-                        src_offset,
-                    )
-                } else if TypeId::of::<T>() == TypeId::of::<f64>() {
-                    backend.strided_copy_f64(
-                        in_handle,
-                        &permuted_shape,
-                        &permuted_src_strides,
-                        src_offset,
-                    )
-                } else {
-                    // Unsupported dtype — fall through to CPU path.
-                    return self.materialize_format_cpu(format, target_strides);
-                };
+            let out_handle = if TypeId::of::<T>() == TypeId::of::<f32>() {
+                backend.strided_copy_f32(
+                    in_handle,
+                    &permuted_shape,
+                    &permuted_src_strides,
+                    src_offset,
+                )
+            } else if TypeId::of::<T>() == TypeId::of::<f64>() {
+                backend.strided_copy_f64(
+                    in_handle,
+                    &permuted_shape,
+                    &permuted_src_strides,
+                    src_offset,
+                )
+            } else {
+                // Unsupported dtype — fall through to CPU path.
+                return self.materialize_format_cpu(format, target_strides);
+            };
 
-                if let Ok(handle) = out_handle {
-                    let storage = TensorStorage::gpu(handle);
-                    return Ok(Self {
-                        inner: Arc::new(TensorInner {
-                            id: TensorId::next(),
-                            storage: Arc::new(storage),
-                            shape: shape.clone(),
-                            strides: target_strides,
-                            offset: 0,
-                            grad: Mutex::new(None),
-                            grad_fn: None,
-                            requires_grad: self.inner.requires_grad,
-                            is_leaf: true,
-                            hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
-                        }),
-                    });
-                }
-                // Kernel failure — fall through to CPU.
+            if let Ok(handle) = out_handle {
+                let storage = TensorStorage::gpu(handle);
+                return Ok(Self {
+                    inner: Arc::new(TensorInner {
+                        id: TensorId::next(),
+                        storage: Arc::new(storage),
+                        shape: shape.clone(),
+                        strides: target_strides,
+                        offset: 0,
+                        grad: Mutex::new(None),
+                        grad_fn: None,
+                        requires_grad: self.inner.requires_grad,
+                        is_leaf: true,
+                        hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
+                    }),
+                });
             }
+            // Kernel failure — fall through to CPU.
         }
 
         self.materialize_format_cpu(format, target_strides)

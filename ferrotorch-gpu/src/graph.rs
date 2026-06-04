@@ -146,17 +146,21 @@ impl PrivateMemPool {
         props.allocType = sys::CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED;
         props.handleTypes = sys::CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_NONE;
         props.location.type_ = sys::CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE;
-        // CUDA 12.x exposes `CUmemLocation::id` as a direct field. CUDA 13.x
-        // (cudarc `cuda-130xx` bindings) moved it into an anonymous union
-        // (`__bindgen_anon_1.id`); the value semantics are identical. The
-        // `ferrotorch_cuda13` cfg is emitted by build.rs when the resolved
-        // CUDARC_CUDA_VERSION is >= 13000, so the default 12.x build is
-        // byte-for-byte unchanged.
-        #[cfg(not(ferrotorch_cuda13))]
+        // CUDA 12.x AND CUDA 13.0.0-13.0.10 expose `CUmemLocation::id` as a
+        // direct field. CUDA 13.0.20 (cudarc `cuda-13020` and later) moved
+        // it into an anonymous union (`__bindgen_anon_1.id`); the value
+        // semantics are identical. The
+        // `ferrotorch_cuda_mem_location_anon_union` cfg is emitted by
+        // build.rs when the resolved CUDARC_CUDA_VERSION is >= 13020 — the
+        // boundary where bindgen regenerated the union variant. Hosts on
+        // older 13.0 drivers (e.g. NVIDIA SBSA 580.126.09 with the
+        // CUDA-13.0-base symbol set) must build at CUDARC_CUDA_VERSION
+        // <13020, which lands here on the direct-field path.
+        #[cfg(not(ferrotorch_cuda_mem_location_anon_union))]
         {
             props.location.id = device;
         }
-        #[cfg(ferrotorch_cuda13)]
+        #[cfg(ferrotorch_cuda_mem_location_anon_union)]
         {
             props.location.__bindgen_anon_1.id = device;
         }

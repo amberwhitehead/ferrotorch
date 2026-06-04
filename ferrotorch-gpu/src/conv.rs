@@ -587,14 +587,14 @@ pub fn gpu_conv2d_f32(
         });
     }
 
-    if let Some(b) = bias {
-        if b.len() != c_out {
-            return Err(GpuError::ShapeMismatch {
-                op: "conv2d",
-                expected: vec![c_out],
-                got: vec![b.len()],
-            });
-        }
+    if let Some(b) = bias
+        && b.len() != c_out
+    {
+        return Err(GpuError::ShapeMismatch {
+            op: "conv2d",
+            expected: vec![c_out],
+            got: vec![b.len()],
+        });
     }
 
     // Validate devices.

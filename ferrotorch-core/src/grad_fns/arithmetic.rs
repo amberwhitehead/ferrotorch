@@ -110,27 +110,27 @@ fn ensure_contig_for_gpu<T: Float>(t: &Tensor<T>) -> FerrotorchResult<Tensor<T>>
     // `Tensor::contiguous()` would early-return a `clone()` for the
     // contiguous-but-oversized-buffer case, leaving the bug unfixed; so
     // we bypass that path via the strided_copy kernel directly.
-    if t.shape().len() <= 8 {
-        if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            let in_handle = t.gpu_handle()?;
-            let out_shape = t.shape().to_vec();
-            let src_strides = t.strides().to_vec();
-            let src_offset = t.storage_offset();
-            let out_handle = if is_f32::<T>() {
-                backend
-                    .strided_copy_f32(in_handle, &out_shape, &src_strides, src_offset)
-                    .ok()
-            } else if is_f64::<T>() {
-                backend
-                    .strided_copy_f64(in_handle, &out_shape, &src_strides, src_offset)
-                    .ok()
-            } else {
-                None
-            };
-            if let Some(handle) = out_handle {
-                let storage = TensorStorage::gpu(handle);
-                return Tensor::from_storage(storage, out_shape, false);
-            }
+    if t.shape().len() <= 8
+        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+    {
+        let in_handle = t.gpu_handle()?;
+        let out_shape = t.shape().to_vec();
+        let src_strides = t.strides().to_vec();
+        let src_offset = t.storage_offset();
+        let out_handle = if is_f32::<T>() {
+            backend
+                .strided_copy_f32(in_handle, &out_shape, &src_strides, src_offset)
+                .ok()
+        } else if is_f64::<T>() {
+            backend
+                .strided_copy_f64(in_handle, &out_shape, &src_strides, src_offset)
+                .ok()
+        } else {
+            None
+        };
+        if let Some(handle) = out_handle {
+            let storage = TensorStorage::gpu(handle);
+            return Tensor::from_storage(storage, out_shape, false);
         }
     }
 

@@ -1,0 +1,101 @@
+name: Linux CPU CI
+
+# Tier-1 CI on a free `ubuntu-latest` runner — fills the gap where
+# `macos-ci.yml` only exercises `ferrotorch-mps` and `ferrotorch-core`'s own
+# tests never run in CI.
+#
+# Scope (initial):
+#   - `ferrotorch-core`        : fmt + clippy + test (lib + integration).
+#   - `ferrotorch-gpu`         : fmt + clippy + compile-check only. The
+#                                crate's tests call into the CUDA driver
+#                                even without `--features cuda` (e.g.
+#                                `GpuDevice::new(0)`), so they need an
+#                                actual GPU — they live in `cuda-ci.yml`.
+#
+# Excluded by design:
+#   - `ferrotorch-mps` — macOS-only (Metal Performance Shaders). Covered by
+#     the sibling `macos-ci.yml` workflow.
+#   - `ferrotorch-xpu` — Intel XPU (cubecl wgpu); the GPU bindings only
+#     resolve under the Intel runner image.
+#   - Other workspace crates — expansion is gated on per-crate clippy debt
+#     cleanup; tracked in #32.
+#
+# Tracking: #32 (tiered CI strategy).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: linux-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  # ferray-ufunc transitively pulls core-math-sys, whose vendored
+  # `compoundf.c` calls `exit(1)` without `#include <stdlib.h>`. Clang 14+
+  # promotes implicit function declarations to a hard error per ISO C99,
+  # killing the build with `-Wimplicit-function-declaration`. Downgrading
+  # to a warning matches the workaround in `macos-ci.yml` + decode's
+  # `.cargo/config.toml` for the same upstream bug.
+  CFLAGS: -Wno-implicit-function-declaration
+
+jobs:
+  fmt:
+    name: cargo fmt --check (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    name: cargo clippy (ferrotorch-core + ferrotorch-gpu, CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install C build deps (core-math-sys via ferray-ufunc)
+        run: sudo apt-get update && sudo apt-get install -y libgmp-dev libmpfr-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-cpu
+          workspaces: . -> target
+      - name: cargo clippy -p ferrotorch-core -p ferrotorch-gpu
+        run: |
+          cargo clippy \
+            -p ferrotorch-core \
+            -p ferrotorch-gpu \
+            --all-targets \
+            -- -D warnings
+
+  test:
+    name: cargo test (ferrotorch-core lib + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install C build deps (core-math-sys via ferray-ufunc)
+        run: sudo apt-get update && sudo apt-get install -y libgmp-dev libmpfr-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-cpu
+          workspaces: . -> target
+      - name: cargo test -p ferrotorch-core (lib)
+        # `--lib` only for now. The `--tests` (integration) surface includes
+        # a handful of pre-existing failures on `main` unrelated to this
+        # workflow (e.g. `divergence_b247_generic_test_does_not_pass_4_of_4_at_head`,
+        # `all_design_docs_cites_resolve_at_head`); adding them to CI scope
+        # is a separate follow-up tracked under #32.
+        run: |
+          cargo test \
+            -p ferrotorch-core \
+            --release \
+            --lib

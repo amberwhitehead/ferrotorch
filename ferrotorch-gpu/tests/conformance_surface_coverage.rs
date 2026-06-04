@@ -44,10 +44,10 @@ fn extract_toml_paths(content: &str) -> HashSet<String> {
     let mut paths = HashSet::new();
     for line in content.lines() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("path = \"") {
-            if let Some(path) = rest.strip_suffix('"') {
-                paths.insert(path.to_owned());
-            }
+        if let Some(rest) = trimmed.strip_prefix("path = \"")
+            && let Some(path) = rest.strip_suffix('"')
+        {
+            paths.insert(path.to_owned());
         }
     }
     paths
@@ -70,10 +70,10 @@ fn extract_inventory_phases(content: &str) -> HashMap<String, String> {
             if let Some(path) = rest.strip_suffix('"') {
                 current_path = Some(path.to_owned());
             }
-        } else if let Some(rest) = trimmed.strip_prefix("c8_phase = \"") {
-            if let Some(phase) = rest.strip_suffix('"') {
-                current_phase = Some(phase.to_owned());
-            }
+        } else if let Some(rest) = trimmed.strip_prefix("c8_phase = \"")
+            && let Some(phase) = rest.strip_suffix('"')
+        {
+            current_phase = Some(phase.to_owned());
         }
     }
     // Flush last item.

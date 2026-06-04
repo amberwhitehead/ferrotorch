@@ -17,12 +17,12 @@
 //!    shapes (`out != in`, e.g. `784 -> 256`, `256 -> 10`) where a wrong
 //!    transpose / dim swap would show.
 //!
-//! 2. **PyTorch `F.linear` parity.** For a small named-bits case, the result must
-//!    equal `torch.nn.functional.linear(input, weight, bias) = input @ weight.T
-//!    + bias` computed from the SAME typed inputs by the closed-form definition
-//!    (PyTorch `aten/src/ATen/native/Linear.cpp` `at::linear` = `addmm(bias,
-//!    input, weight.t())`). The reference is built from named constants, not
-//!    from a ferrotorch self-call (R-CHAR-3).
+//! 2. **PyTorch `F.linear` parity.** For a small named-bits case, the result
+//!    must equal `torch.nn.functional.linear(input, weight, bias) = input @
+//!    weight.T + bias` computed from the SAME typed inputs by the closed-form
+//!    definition (PyTorch `aten/src/ATen/native/Linear.cpp` `at::linear` =
+//!    `addmm(bias, input, weight.t())`). The reference is built from named
+//!    constants, not from a ferrotorch self-call (R-CHAR-3).
 //!
 //! All tests are gated on `#[cfg(feature = "cuda")]` and require a live CUDA GPU.
 

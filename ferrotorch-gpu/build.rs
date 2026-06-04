@@ -49,14 +49,24 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CUDARC_CUDA_VERSION");
 
     // Emit the `ferrotorch_cuda13` cfg when the resolved cudarc CUDA version
-    // is >= 13000. CUDA 13.x reshaped a few driver structs (e.g.
-    // `CUmemLocation::id` moved into an anonymous union); the rare call sites
-    // that touch raw `sys` structs are cfg-gated on this flag. The default
-    // build (CUDARC_CUDA_VERSION=12080, pinned in .cargo/config.toml) leaves
-    // the cfg unset, so the 12.x path is unchanged.
+    // is >= 13000. CUDA 13.x reshaped a few driver structs. Kept as a coarse
+    // "any CUDA 13" gate for future use.
     println!("cargo::rustc-check-cfg=cfg(ferrotorch_cuda13)");
-    if cuda_version_at_least_13() {
+    if cuda_version_at_least(13000) {
         println!("cargo::rustc-cfg=ferrotorch_cuda13");
+    }
+
+    // `CUmemLocation::id` moved into an anonymous union (`__bindgen_anon_1`)
+    // in CUDA 13.0.20 — NOT at the 13.0.0 boundary. cudarc's `cuda-13000`
+    // and `cuda-13010` bindings still expose `.id` as a direct field; only
+    // `cuda-13020` and later wrap it in the union. Gating the anon-union
+    // accessor at the coarser `ferrotorch_cuda13` cfg breaks the build when
+    // a host pins to the older 13.0 patch level (e.g. lucida's GB10 driver
+    // 580.126.09 doesn't export the 13.0.20+ symbols cudarc dlsyms at
+    // startup, so `CUDARC_CUDA_VERSION=13000` is the only working choice).
+    println!("cargo::rustc-check-cfg=cfg(ferrotorch_cuda_mem_location_anon_union)");
+    if cuda_version_at_least(13020) {
+        println!("cargo::rustc-cfg=ferrotorch_cuda_mem_location_anon_union");
     }
 
     if std::env::var_os("CARGO_FEATURE_CUSPARSELT").is_some() {
@@ -77,31 +87,55 @@ fn main() {
     // does not apply when cudarc is itself building against 13.x.
     if std::env::var_os("CARGO_FEATURE_CUDA").is_some()
         && cfg!(target_os = "linux")
-        && !cuda_version_at_least_13()
+        && !cuda_version_at_least(13000)
     {
         cuda_cusolver_compat::ensure();
     }
 }
 
-/// Resolve the CUDA major version cudarc will build against and report
-/// whether it is >= 13. Mirrors cudarc's own resolution order: the
-/// `CUDARC_CUDA_VERSION` env var (e.g. `13020`) wins; otherwise probe
-/// `nvcc --version` ("release 13.2"). Defaults to false (12.x path) when
-/// neither is available, so the cfg is never emitted by accident.
-fn cuda_version_at_least_13() -> bool {
-    if let Ok(v) = std::env::var("CUDARC_CUDA_VERSION") {
-        if let Ok(n) = v.trim().parse::<u32>() {
-            return n >= 13000;
-        }
+/// Resolve the CUDA version cudarc will build against and report whether
+/// it is `>= min` (using cudarc's `MAJOR<MINOR:02d><PATCH:02d>` encoding,
+/// e.g. `13020` for CUDA 13.0.20). Mirrors cudarc's own resolution order:
+/// the `CUDARC_CUDA_VERSION` env var wins; otherwise probe `nvcc --version`
+/// ("release 13.0, V13.0.88"). Defaults to false when neither is available,
+/// so cfgs gated on this are never emitted by accident.
+fn cuda_version_at_least(min: u32) -> bool {
+    if let Ok(v) = std::env::var("CUDARC_CUDA_VERSION")
+        && let Ok(n) = v.trim().parse::<u32>()
+    {
+        return n >= min;
     }
-    if let Ok(out) = std::process::Command::new("nvcc").arg("--version").output() {
-        if let Ok(s) = String::from_utf8(out.stdout) {
-            if let Some(i) = s.find("release ") {
-                if let Some(major) = s[i + 8..].split('.').next() {
-                    if let Ok(m) = major.trim().parse::<u32>() {
-                        return m >= 13;
-                    }
-                }
+    // nvcc fallback: parse "release MAJOR.MINOR, VMAJOR.MINOR.PATCH" out of
+    // the second line of `nvcc --version`. The V-line is the authoritative
+    // patch number; the "release" line only gives MAJOR.MINOR.
+    if let Ok(out) = std::process::Command::new("nvcc").arg("--version").output()
+        && let Ok(s) = String::from_utf8(out.stdout)
+    {
+        // Try the V-line first (e.g. "V13.0.88"): gives full M.N.P.
+        if let Some(i) = s.find(", V")
+            && let Some(rest) = s.get(i + 3..)
+            && let Some(end) = rest.find(char::is_whitespace)
+            && let Some(version) = rest.get(..end)
+        {
+            let parts: Vec<&str> = version.split('.').collect();
+            if let (Some(maj), Some(min_), Some(pat)) = (parts.first(), parts.get(1), parts.get(2))
+                && let (Ok(m), Ok(n_), Ok(p)) =
+                    (maj.parse::<u32>(), min_.parse::<u32>(), pat.parse::<u32>())
+            {
+                return m * 1000 + n_ * 100 + p >= min;
+            }
+        }
+        // Fallback: just MAJOR.MINOR from "release X.Y" line (patch = 0).
+        if let Some(i) = s.find("release ")
+            && let Some(rest) = s.get(i + 8..)
+            && let Some(comma) = rest.find(',')
+            && let Some(version) = rest.get(..comma)
+        {
+            let parts: Vec<&str> = version.split('.').collect();
+            if let (Some(maj), Some(min_)) = (parts.first(), parts.get(1))
+                && let (Ok(m), Ok(n_)) = (maj.parse::<u32>(), min_.parse::<u32>())
+            {
+                return m * 1000 + n_ * 100 >= min;
             }
         }
     }

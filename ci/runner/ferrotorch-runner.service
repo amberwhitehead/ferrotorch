@@ -1,0 +1,121 @@
+# systemd unit for the ferrotorch self-hosted GH Actions runner.
+#
+# Install on the runner host (initial buildout: lucida) at
+# /etc/systemd/system/ferrotorch-runner.service, then:
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ferrotorch-runner.service
+#
+# See OPERATIONS.md for the full deployment runbook.
+#
+# Design:
+#   - Each `ExecStart` runs ONE Docker container, which runs ONE
+#     ephemeral runner job, then exits.
+#   - `Restart=always` + `RestartSec=10s` spawns the next container,
+#     restarting the cycle. This gives one-container-per-job
+#     lifecycle isolation: nothing from PR A's job is visible to
+#     PR B's job.
+#   - `--rm` ensures the container is fully torn down after each
+#     exit (no leftover stopped containers consuming disk).
+#   - Resource limits (`--memory`, `--cpus`, `--pids-limit`) prevent
+#     a runaway job from DoSing the host.
+#   - `--read-only` + tmpfs mounts mean nothing the container writes
+#     persists past the job, even inside the container layer.
+#   - `--cap-drop=ALL` + `--security-opt no-new-privileges` is the
+#     standard non-privileged container hardening posture.
+#   - GPU access via `--gpus all` (requires nvidia-container-toolkit
+#     on the host; see OPERATIONS.md).
+
+[Unit]
+Description=ferrotorch self-hosted GH Actions runner (ephemeral, GPU)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10s
+# Hard ceiling — a single job runs at most 90 min (matches the
+# nightly workflow timeout). Anything longer is a runaway.
+TimeoutStartSec=90min
+
+# When we explicitly stop the service, `docker stop` sends SIGTERM
+# then SIGKILLs after the grace period. The runner's `./run.sh`
+# doesn't trap SIGTERM, so it exits 137 (= 128 + SIGKILL). Mark
+# 137 as "success on stop" so a `systemctl stop` / `down` doesn't
+# leave the unit in `failed` state. (`Restart=always` ignores
+# SuccessExitStatus for the restart decision — that's fine; we
+# *want* it to restart on the normal --ephemeral exit and not on
+# explicit stops, and `systemctl stop` sets a flag that overrides
+# the restart anyway.)
+SuccessExitStatus=137
+
+# The PAT lives in a root-owned file (chmod 0400) on the host.
+# We bind-mount it read-only at /run/secrets/pat inside the
+# container; the entrypoint reads from $PAT_FILE.
+Environment=PAT_HOST_FILE=/etc/ferrotorch-runner/pat
+
+# The runner image is built locally on the host (see OPERATIONS.md
+# step 3 + `ci/runner/Dockerfile`); it isn't published to any
+# registry, so we don't ExecStartPre a `docker pull` — there's
+# nothing to pull. To refresh, rebuild via `docker build` and the
+# next container spawn picks up the new image automatically.
+
+# Defensive cleanup: if a previous container is stuck (e.g.
+# a manual `docker run` was Ctrl-C'd before `--rm` could fire, or
+# the host was hard-rebooted mid-job), a stale `/ferrotorch-runner`
+# entry blocks the next `docker run --name`. The leading `-` tells
+# systemd to ignore non-zero exit codes (e.g. "no such container",
+# which is the steady state on a clean host).
+ExecStartPre=-/usr/bin/docker rm -f ferrotorch-runner
+
+ExecStart=/usr/bin/docker run \
+    --rm \
+    --name ferrotorch-runner \
+    --hostname ferrotorch-runner \
+    --gpus all \
+    --memory=24g \
+    --cpus=8 \
+    --pids-limit=2048 \
+    --tmpfs /tmp:rw,size=2g \
+    --cap-drop=ALL \
+    --security-opt=no-new-privileges \
+    --env PAT_FILE=/run/secrets/pat \
+    -v ${PAT_HOST_FILE}:/run/secrets/pat:ro \
+    ferrotorch-runner:latest
+
+# Why no `--read-only` and no `--tmpfs` for /home/runner/*:
+#   The actions/runner writes state files (.env, .path, .runner,
+#   .credentials, _work/_tool, etc.) directly under /home/runner/.
+#   --read-only blocks that outright. Adding `--tmpfs /home/runner/_work`
+#   was our first workaround, but docker's --tmpfs defaults to
+#   root:root ownership and masks the image-layer's runner-owned
+#   /home/runner; the non-root `runner` user then can't write to its
+#   own _work dir — the "/home/runner/_work/_tool: Permission denied"
+#   failure mode caught during the PR #33 test-fire.
+#
+#   The correct posture for an ephemeral runner is to let the
+#   container's writable rootfs handle scratch writes. The image
+#   chown's /home/runner to the runner user, `--rm` tears the
+#   container down on every exit, and `Restart=always` respawns a
+#   fresh container — per-job state isolation comes from the
+#   container lifecycle, not from filesystem mount tricks. `/tmp`
+#   stays as tmpfs because that's the canonical scratch path and
+#   tmpfs's default world-writable perms work there.
+#
+#   Combined with --cap-drop=ALL + --security-opt=no-new-privileges
+#   + Environment gate + cgroup limits above, the security posture
+#   is still
+#   strong; we just trade one layer for the ergonomics of a working
+#   runner.
+
+# `--rm` already tears the container down on exit; ExecStop is a
+# belt-and-suspenders for systemctl stop / restart while a job is in
+# flight. Container name is static (`ferrotorch-runner`) since each
+# container is fully torn down before the next ExecStart fires.
+# `--timeout` (not the deprecated `--time`) sets the grace period
+# before docker SIGKILLs the container.
+ExecStop=/usr/bin/docker stop --timeout=30 ferrotorch-runner
+
+[Install]
+WantedBy=multi-user.target

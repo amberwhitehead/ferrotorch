@@ -1588,36 +1588,37 @@ pub fn contiguous_t<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> 
 
     // GPU fast path: dispatch to the backend's strided_copy kernel
     // when the input is a non-contiguous CUDA tensor with rank ≤ 8.
-    if device.is_cuda() && input.shape().len() <= 8 {
-        if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            let in_handle = input.gpu_handle()?;
-            let out_shape = input.shape().to_vec();
-            let src_strides = input.strides().to_vec();
-            let src_offset = input.storage_offset();
+    if device.is_cuda()
+        && input.shape().len() <= 8
+        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+    {
+        let in_handle = input.gpu_handle()?;
+        let out_shape = input.shape().to_vec();
+        let src_strides = input.strides().to_vec();
+        let src_offset = input.storage_offset();
 
-            let out_handle = if TypeId::of::<T>() == TypeId::of::<f32>() {
-                backend.strided_copy_f32(in_handle, &out_shape, &src_strides, src_offset)
-            } else if TypeId::of::<T>() == TypeId::of::<f64>() {
-                backend.strided_copy_f64(in_handle, &out_shape, &src_strides, src_offset)
+        let out_handle = if TypeId::of::<T>() == TypeId::of::<f32>() {
+            backend.strided_copy_f32(in_handle, &out_shape, &src_strides, src_offset)
+        } else if TypeId::of::<T>() == TypeId::of::<f64>() {
+            backend.strided_copy_f64(in_handle, &out_shape, &src_strides, src_offset)
+        } else {
+            // Unsupported dtype — fall through to CPU path.
+            return contiguous_t_cpu(input);
+        };
+
+        if let Ok(handle) = out_handle {
+            let storage = TensorStorage::gpu(handle);
+            return if crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
+                let grad_fn = std::sync::Arc::new(ContiguousBackward {
+                    input: input.clone(),
+                });
+                Tensor::from_operation(storage, out_shape, grad_fn)
             } else {
-                // Unsupported dtype — fall through to CPU path.
-                return contiguous_t_cpu(input);
+                Tensor::from_storage(storage, out_shape, false)
             };
-
-            if let Ok(handle) = out_handle {
-                let storage = TensorStorage::gpu(handle);
-                return if crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
-                    let grad_fn = std::sync::Arc::new(ContiguousBackward {
-                        input: input.clone(),
-                    });
-                    Tensor::from_operation(storage, out_shape, grad_fn)
-                } else {
-                    Tensor::from_storage(storage, out_shape, false)
-                };
-            }
-            // Kernel failure (negative strides, overflow, etc.) —
-            // fall through to the host path which handles any layout.
         }
+        // Kernel failure (negative strides, overflow, etc.) —
+        // fall through to the host path which handles any layout.
     }
 
     contiguous_t_cpu(input)
@@ -1748,51 +1749,52 @@ pub fn split_t<T: Float>(
     let needs_grad = is_grad_enabled() && input.requires_grad();
 
     // GPU fast path: use strided_split to extract each chunk directly on GPU.
-    if device.is_cuda() && TypeId::of::<T>() == TypeId::of::<f32>() {
-        if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            let inner: usize = if dim + 1 < ndim {
-                shape[dim + 1..].iter().product()
-            } else {
-                1
-            };
-            let total_along_dim = shape[dim];
-            let in_handle = input.gpu_handle()?;
+    if device.is_cuda()
+        && TypeId::of::<T>() == TypeId::of::<f32>()
+        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+    {
+        let inner: usize = if dim + 1 < ndim {
+            shape[dim + 1..].iter().product()
+        } else {
+            1
+        };
+        let total_along_dim = shape[dim];
+        let in_handle = input.gpu_handle()?;
 
-            let mut results = Vec::with_capacity(split_sizes.len());
-            let mut offset_along_dim = 0usize;
+        let mut results = Vec::with_capacity(split_sizes.len());
+        let mut offset_along_dim = 0usize;
 
-            for &split_size in split_sizes {
-                let mut chunk_shape = shape.to_vec();
-                chunk_shape[dim] = split_size;
-                let chunk_numel: usize = chunk_shape.iter().product();
+        for &split_size in split_sizes {
+            let mut chunk_shape = shape.to_vec();
+            chunk_shape[dim] = split_size;
+            let chunk_numel: usize = chunk_shape.iter().product();
 
-                let chunk_handle = backend.strided_split_f32(
-                    in_handle,
-                    total_along_dim,
+            let chunk_handle = backend.strided_split_f32(
+                in_handle,
+                total_along_dim,
+                offset_along_dim,
+                split_size,
+                inner,
+                chunk_numel,
+            )?;
+
+            let storage = TensorStorage::gpu(chunk_handle);
+            let t = if needs_grad {
+                let grad_fn = Arc::new(SplitBackward::new(
+                    input.clone(),
+                    dim,
                     offset_along_dim,
                     split_size,
-                    inner,
-                    chunk_numel,
-                )?;
-
-                let storage = TensorStorage::gpu(chunk_handle);
-                let t = if needs_grad {
-                    let grad_fn = Arc::new(SplitBackward::new(
-                        input.clone(),
-                        dim,
-                        offset_along_dim,
-                        split_size,
-                    ));
-                    Tensor::from_operation(storage, chunk_shape, grad_fn)?
-                } else {
-                    Tensor::from_storage(storage, chunk_shape, false)?
-                };
-                results.push(t);
-                offset_along_dim += split_size;
-            }
-
-            return Ok(results);
+                ));
+                Tensor::from_operation(storage, chunk_shape, grad_fn)?
+            } else {
+                Tensor::from_storage(storage, chunk_shape, false)?
+            };
+            results.push(t);
+            offset_along_dim += split_size;
         }
+
+        return Ok(results);
     }
 
     // CPU path (also serves as fallback for non-f32 or missing backend).

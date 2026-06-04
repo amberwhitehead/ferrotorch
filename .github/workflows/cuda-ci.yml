@@ -1,0 +1,183 @@
+name: CUDA CI
+
+# Tier-3 CI: runs the `--features cuda` test surface on a GitHub-hosted GPU
+# runner, gated behind a deployment environment that requires explicit
+# maintainer approval before the runner spins up. Until a reviewer clicks
+# "Approve and deploy" on the GitHub Actions UI, no GPU runner minutes are
+# billed.
+#
+# Tracking: #32 (tiered CI strategy).
+#
+# ## Operational setup required (one-time, by a repo admin)
+#
+# 1. **Register a GitHub-hosted larger runner with a GPU instance type.**
+#    Settings -> Actions -> Runners -> Larger runners -> New runner.
+#    Give it the label `gpu-runner` (referenced below as `runs-on:`).
+#    Recommended baseline: T4 (`gpu-t4` family) for unit-test latency;
+#    L4 / A10 if matmul-heavy benches start landing.
+#
+# 2. **Create the `gpu` environment with required reviewers.**
+#    Settings -> Environments -> New environment -> name = `gpu`.
+#    Add "Required reviewers" -> list of maintainers who can authorise
+#    a GPU run. Optionally add a "Wait timer" (e.g. 0-5 min) to allow
+#    cancelling.
+#
+# 3. **Optionally restrict deployment branches** (env settings) to
+#    `pull_request` from the same repo + `main` + `release/*` so forks
+#    can't trigger paid runs.
+#
+# Until both runner label `gpu-runner` and environment `gpu` exist, this
+# workflow queues but never executes — no cost. With them in place, every
+# PR shows a "Review deployments" prompt that a maintainer must approve.
+#
+# ## Trigger modes
+#
+# - `pull_request`: every PR posts a pending check; a maintainer must
+#   approve via the environment-gate UI for the runner to spin up.
+# - `workflow_dispatch`: manual button on the Actions tab — useful for
+#   re-running on `main` after a doc-only change, or for ad-hoc audits.
+
+on:
+  pull_request:
+    branches: [main]
+    # Conservative inclusive list — only fire on PRs that touch
+    # GPU-relevant code. Other PRs (docs, linux-ci.yml tweaks,
+    # non-GPU crates) skip posting a pending "CUDA CI" check so
+    # reviewers aren't asked to approve a no-op deployment.
+    #
+    # Add more entries as GPU dependencies expand (e.g.
+    # ferrotorch-nn/** if/when ferrotorch-gpu starts dispatching
+    # to nn-specific kernels). The workflow + runner files are
+    # included so changes there validate themselves.
+    paths:
+      - 'ferrotorch-gpu/**'
+      - 'ferrotorch-core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/cuda-ci.yml'
+      - 'ci/runner/**'
+  workflow_dispatch:
+
+concurrency:
+  # Global single-slot group: at most one CUDA job in flight across
+  # the whole repo (PRs, dispatches, cron, release pushes). Protects
+  # the GPU runner pool from being double-booked even if additional
+  # self-hosted runners get registered later. Shared with
+  # `nightly.yml` so a scheduled nightly and a concurrent PR run
+  # also serialize against each other.
+  #
+  # `cancel-in-progress: false` so an in-flight CUDA run finishes
+  # cleanly and the next run queues behind it — preferable to
+  # cancellation since most CUDA tests do real GPU work (allocations,
+  # memory pool teardown) that we don't want to leave dangling.
+  group: cuda-ci-global
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  CFLAGS: -Wno-implicit-function-declaration
+  # cudarc dlopens libcuda.so at runtime and expects symbols present in
+  # the CUDA driver version named here (format: `MAJOR<MINOR:02d><PATCH:02d>`,
+  # so 13000 = CUDA 13.0.0). lucida's NVIDIA SBSA 580.126.09 driver advertises
+  # CUDA 13.0 (base release set) and does NOT export the 13.0.20+ symbol
+  # additions (e.g. cuCoredumpDeregisterCompleteCallback) that cudarc's
+  # cuda-13020 bindings dlsym at startup. Pin to 13000 so cudarc resolves
+  # against the base CUDA 13.0 symbol set the host actually exports.
+  #
+  # ferrotorch-gpu's source-side accessor for `CUmemLocation::__bindgen_anon_1`
+  # is cfg-gated on `ferrotorch_cuda_mem_location_anon_union` (build.rs emits
+  # it only when CUDARC_CUDA_VERSION >= 13020 — the actual binding-shape
+  # boundary). 13000 lands on the direct-field path; same value semantics.
+  #
+  # Bump to 13020 (or whatever cudarc version matches the latest layout) if
+  # a future host advertises a newer CUDA patch level AND needs the newer
+  # struct accessor.
+  CUDARC_CUDA_VERSION: "13000"
+
+jobs:
+  test-cuda:
+    name: ferrotorch-gpu (CUDA)
+    # Self-hosted runner labelled `gpu` + `cuda` (one of the maintainer
+    # boxes — lucida as of the initial buildout). See `ci/runner/` and
+    # `OPERATIONS.md` for the operational setup. Switch to a GH-hosted
+    # larger runner label here if/when the org plan supports them.
+    runs-on: [self-hosted, gpu, cuda]
+    # The `gpu` environment carries the required-reviewer protection.
+    # Until a maintainer approves the deployment via the GitHub Actions UI,
+    # this job pauses and no runner minutes are consumed.
+    environment:
+      name: gpu
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable, with clippy)
+        # Idempotent on our self-hosted runner: the container image already
+        # has stable Rust + clippy + rustfmt baked in (see ci/runner/Dockerfile).
+        # Kept here because the action also normalises PATH / $GITHUB_PATH
+        # entries and remains valid when this workflow runs against a
+        # different runner image (e.g. a GH-hosted larger runner later).
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # No `apt-get install` step on this workflow:
+      #   linux-ci.yml runs on a fresh GH-hosted ubuntu-latest where
+      #   libgmp-dev / libmpfr-dev / pkg-config need to be apt-installed.
+      #   This workflow runs inside our self-hosted container image which
+      #   already has all those C build deps baked in (see Dockerfile's
+      #   apt-install step). `sudo apt-get` also fails here because the
+      #   container is started with --security-opt=no-new-privileges, which
+      #   blocks sudo from escalating to root — and that flag is part of
+      #   the runner's intentional hardening posture.
+
+      - name: Diagnostic — nvidia-smi + nvcc version + CUDA env
+        run: |
+          set -x
+          nvidia-smi || true
+          nvcc --version || true
+          echo "CUDARC_CUDA_VERSION=${CUDARC_CUDA_VERSION}"
+
+      - name: Cache cargo registry, index, and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cuda
+          workspaces: . -> target
+
+      - name: cargo build -p ferrotorch-gpu --features cuda
+        run: cargo build -p ferrotorch-gpu --features cuda --release -v
+
+      - name: cargo test -p ferrotorch-gpu --features cuda --lib cast_kernels
+        run: |
+          cargo test \
+            -p ferrotorch-gpu \
+            --features cuda \
+            --release \
+            --lib cast_kernels
+
+      - name: cargo test -p ferrotorch-gpu --features cuda --lib
+        run: |
+          cargo test \
+            -p ferrotorch-gpu \
+            --features cuda \
+            --release \
+            --lib
+
+      - name: cargo test -p ferrotorch-gpu --features cuda --tests
+        run: |
+          cargo test \
+            -p ferrotorch-gpu \
+            --features cuda \
+            --release \
+            --tests
+
+      - name: cargo clippy -p ferrotorch-gpu --features cuda
+        run: |
+          cargo clippy \
+            -p ferrotorch-gpu \
+            --features cuda \
+            --all-targets \
+            -- -D warnings

@@ -107,11 +107,11 @@ pub fn pool_alloc_cpu<T: Default + Clone + 'static>(len: usize) -> Vec<T> {
 
     let maybe = CPU_POOL.with(|pool| {
         let mut pool = pool.borrow_mut();
-        if let Some(bucket) = pool.free.get_mut(&key) {
-            if let Some(boxed) = bucket.pop() {
-                pool.cached_bytes -= len * elem_size;
-                return Some(boxed);
-            }
+        if let Some(bucket) = pool.free.get_mut(&key)
+            && let Some(boxed) = bucket.pop()
+        {
+            pool.cached_bytes -= len * elem_size;
+            return Some(boxed);
         }
         None
     });
@@ -145,11 +145,11 @@ pub fn pool_alloc_cpu_uninit_f32(len: usize) -> Vec<f32> {
 
     let maybe = CPU_POOL.with(|pool| {
         let mut pool = pool.borrow_mut();
-        if let Some(bucket) = pool.free.get_mut(&key) {
-            if let Some(boxed) = bucket.pop() {
-                pool.cached_bytes -= len * 4;
-                return Some(boxed);
-            }
+        if let Some(bucket) = pool.free.get_mut(&key)
+            && let Some(boxed) = bucket.pop()
+        {
+            pool.cached_bytes -= len * 4;
+            return Some(boxed);
         }
         None
     });
@@ -176,11 +176,11 @@ pub fn pool_alloc_cpu_uninit_f64(len: usize) -> Vec<f64> {
 
     let maybe = CPU_POOL.with(|pool| {
         let mut pool = pool.borrow_mut();
-        if let Some(bucket) = pool.free.get_mut(&key) {
-            if let Some(boxed) = bucket.pop() {
-                pool.cached_bytes -= len * 8;
-                return Some(boxed);
-            }
+        if let Some(bucket) = pool.free.get_mut(&key)
+            && let Some(boxed) = bucket.pop()
+        {
+            pool.cached_bytes -= len * 8;
+            return Some(boxed);
         }
         None
     });

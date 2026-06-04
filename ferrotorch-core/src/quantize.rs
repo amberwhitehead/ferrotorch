@@ -698,7 +698,7 @@ impl Observer for PerChannelMinMaxObserver {
         // caller can use the shape-aware `observe_with_shape` if they need a
         // reportable error. The previous `eprintln!` was unactionable noise
         // and is forbidden by `rust-quality` §4 (`print_stderr` lint).
-        if data.len() % self.num_channels != 0 {
+        if !data.len().is_multiple_of(self.num_channels) {
             return;
         }
         let per_channel = data.len() / self.num_channels;

@@ -279,7 +279,7 @@ fn resolve_sizes(
                 }
 
                 if let Some(ui) = unknown_idx {
-                    if known_product == 0 || dim_size % known_product != 0 {
+                    if known_product == 0 || !dim_size.is_multiple_of(known_product) {
                         return Err(FerrotorchError::InvalidArgument {
                             message: format!(
                                 "einops: dimension {} (size {}) is not divisible by \
@@ -551,8 +551,8 @@ pub fn rearrange_with<T: Float>(
     // We try the tensor-op path first; if any step fails (e.g. an inner op
     // doesn't yet support a particular shape), we fall back to the legacy
     // index-walk implementation below.
-    if input.is_contiguous() {
-        if let Ok(result) = (|| -> FerrotorchResult<Tensor<T>> {
+    if input.is_contiguous()
+        && let Ok(result) = (|| -> FerrotorchResult<Tensor<T>> {
             let elem_view = input.view_reshape(left_elem_shape.clone())?;
             let permuted = elem_view.permute(&perm)?;
             let contig = permuted.contiguous()?;
@@ -564,9 +564,9 @@ pub fn rearrange_with<T: Float>(
             } else {
                 contig.view_reshape(out_shape.clone())
             }
-        })() {
-            return Ok(result);
-        }
+        })()
+    {
+        return Ok(result);
     }
 
     // Legacy fallback: pure-CPU index-walk. Used when the tensor-op path

@@ -1105,7 +1105,7 @@ impl<T: Float> GradFn<T> for IrfftnBackward<T> {
                 // Boundary: kk == 0 always; kk == K-1 only when n_last is even.
                 // `f` is already normalized; only the Hermitian-doubling
                 // factor (1 boundary / 2 interior) remains.
-                let is_boundary = kk == 0 || (n_last % 2 == 0 && kk == k - 1);
+                let is_boundary = kk == 0 || (n_last.is_multiple_of(2) && kk == k - 1);
                 let factor = if is_boundary {
                     T::from(1.0).unwrap()
                 } else {
@@ -1207,7 +1207,7 @@ impl<T: Float> GradFn<T> for HfftBackward<T> {
             for b in 0..batch_size {
                 for kk in 0..k {
                     // Boundary: kk == 0; kk == K-1 only when n is even.
-                    let is_boundary = kk == 0 || (n % 2 == 0 && kk == k - 1);
+                    let is_boundary = kk == 0 || (n.is_multiple_of(2) && kk == k - 1);
                     let factor = if is_boundary {
                         T::from(1.0).unwrap()
                     } else {

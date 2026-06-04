@@ -179,10 +179,10 @@ fn find_method_call_sites(src_path: &Path, method: &str) -> Vec<(String, usize)>
     let mut out = Vec::new();
     for (idx0, line) in text.lines().enumerate() {
         let lineno = idx0 + 1;
-        if let Some(open) = test_open {
-            if lineno >= open {
-                break;
-            }
+        if let Some(open) = test_open
+            && lineno >= open
+        {
+            break;
         }
         if !line.contains(&dot_needle) && !line.contains(&tensor_needle) {
             continue;

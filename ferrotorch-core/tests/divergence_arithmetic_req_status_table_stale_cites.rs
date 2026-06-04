@@ -153,12 +153,12 @@ fn parse_pattern_b_path_then_op(row: &str) -> Vec<(String, String, usize)> {
             if (p.ends_with(".rs") || p.contains("/src/")) && l.parse::<usize>().is_ok() {
                 // Look ahead for ` (` then a backtick-quoted op name.
                 let after = &row[j + 1..];
-                if let Some(stripped) = after.strip_prefix(" (`") {
-                    if let Some(end_op) = stripped.find('`') {
-                        let op = &stripped[..end_op];
-                        if !op.is_empty() && !op.contains(' ') {
-                            out.push((op.to_string(), p.to_string(), l.parse().unwrap()));
-                        }
+                if let Some(stripped) = after.strip_prefix(" (`")
+                    && let Some(end_op) = stripped.find('`')
+                {
+                    let op = &stripped[..end_op];
+                    if !op.is_empty() && !op.contains(' ') {
+                        out.push((op.to_string(), p.to_string(), l.parse().unwrap()));
                     }
                 }
             }

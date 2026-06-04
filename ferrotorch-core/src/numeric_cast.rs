@@ -105,20 +105,19 @@ where
     // For integer targets the result always projects to a finite f64, so
     // the check is a no-op cost in those (common) call sites.
     let src_finite = v.to_f64().is_some_and(f64::is_finite);
-    if src_finite {
-        if let Some(r) = result.to_f64() {
-            if !r.is_finite() {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: format!(
-                        "cast from {} to {} failed: value {:?} saturates to non-finite ({}) and is not representable",
-                        std::any::type_name::<T>(),
-                        std::any::type_name::<U>(),
-                        v,
-                        r,
-                    ),
-                });
-            }
-        }
+    if src_finite
+        && let Some(r) = result.to_f64()
+        && !r.is_finite()
+    {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "cast from {} to {} failed: value {:?} saturates to non-finite ({}) and is not representable",
+                std::any::type_name::<T>(),
+                std::any::type_name::<U>(),
+                v,
+                r,
+            ),
+        });
     }
 
     Ok(result)

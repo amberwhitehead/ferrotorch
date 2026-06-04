@@ -455,14 +455,15 @@ fn cascade_skip(
     //     Returns NotImplementedOnCuda on CUDA input.
     //   ndim_2_with_s: s-override (pad/truncate) not yet GPU-accelerated;
     //     falls through but ferray-fft rejects CUDA tensors.
-    if (_op == "fftn" || _op == "ifftn") && _device_label == "cuda:0" {
-        if let Some("ndim_3_axes_0" | "ndim_2_with_s") = _tag {
-            return Some(
-                "#966 partial: non-innermost axis (axes_0) and s-override (with_s) \
+    if (_op == "fftn" || _op == "ifftn")
+        && _device_label == "cuda:0"
+        && let Some("ndim_3_axes_0" | "ndim_2_with_s") = _tag
+    {
+        return Some(
+            "#966 partial: non-innermost axis (axes_0) and s-override (with_s) \
                  not yet GPU-accelerated; innermost-axes cases (axes_neg1, axes_n2_n1) \
                  now run live via cufftPlanMany",
-            );
-        }
+        );
     }
 
     None

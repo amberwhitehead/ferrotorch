@@ -1614,7 +1614,7 @@ pub fn gpu_rope_half_bf16(
     seq_offset: usize,
     device: &GpuDevice,
 ) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
-    if head_dim == 0 || head_dim % 2 != 0 {
+    if head_dim == 0 || !head_dim.is_multiple_of(2) {
         return Err(GpuError::ShapeMismatch {
             op: "rope_half_bf16",
             expected: vec![head_dim],

@@ -134,11 +134,11 @@ fn divergence_1270_cumulative_md_req_table_rows_446_447_stale_test_cites() {
         let needle = format!("fn {expected_fn}");
         let mut any_hit = false;
         for i in lo..=hi {
-            if let Some(line) = rs_lines.get(i.saturating_sub(1)) {
-                if line.contains(&needle) {
-                    any_hit = true;
-                    break;
-                }
+            if let Some(line) = rs_lines.get(i.saturating_sub(1))
+                && line.contains(&needle)
+            {
+                any_hit = true;
+                break;
             }
         }
         if !any_hit {
