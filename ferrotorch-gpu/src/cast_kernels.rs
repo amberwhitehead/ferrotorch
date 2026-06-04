@@ -20,6 +20,10 @@
 //!   cast; the CPU reference path in `IntTensor::cast` errors on out-of-range,
 //!   so the GPU narrow path documents the wrapping divergence: an out-of-range
 //!   i64→i32 on CUDA wraps, mirroring PyTorch's CUDA `.to(torch.int)`).
+//! - **float → float** (`bf16` ↔ `f32`): widen via bf16 decode pattern
+//!   (`shl 16` + `mov.b32`); narrow via hardware `cvt.rn.bf16.f32`. Round mode
+//!   = round-to-nearest-even on narrowing, exact on widening. Other float
+//!   pairs (f16↔f32, f32↔f64, etc.) follow the same pattern; see #29 follow-up.
 //!
 //! bf16: a bf16 is the high 16 bits of an f32. Decode = splat into the high
 //! half of a b32 register (`shl 16`) + reinterpret (`mov.b32`). Encode uses the
@@ -40,6 +44,7 @@
 //! | REQ-5 (bool→float) | SHIPPED | `pub fn cast_bool_to_f32 / cast_bool_to_f64 / cast_bool_to_f16 / cast_bool_to_bf16 in cast_kernels.rs` (each normalises via `setp.ne %nz, %bv, 0; selp 1, 0, %nz` then `cvt.rn.f*.u32`); consumer four bool→float arms of the `to_dtype` handler in `backend_impl.rs` |
 //! | REQ-6 (SAFETY annotation) | SHIPPED | the single `unsafe { stream.launch_builder(&f)...launch(cfg)? }` block in `fn launch_cast in cast_kernels.rs` carries a multi-line `SAFETY:` comment; consumer SAFETY contract inherited via every `pub fn cast_*` wrapper called from `backend_impl.rs` |
 //! | REQ-7 (empty-input short-circuit) | SHIPPED | `fn launch_cast in cast_kernels.rs` opens with `if n == 0 { return Ok(stream.alloc_zeros::<OUT>(0)?); }` plus `debug_assert!(input.len() >= n)`; consumer backend dispatch path relies on this for empty dtype casts |
+//! | REQ-8 (bf16 ↔ f32 float cast) | SHIPPED | `pub fn cast_bf16_to_f32 / cast_f32_to_bf16 in cast_kernels.rs` (widen via bf16-decode `shl 16 + mov.b32`; narrow via hardware `cvt.rn.bf16.f32`, sm_80+); consumer two arms of `CudaBackendImpl::cast_f_to_f in backend_impl.rs` plus the `Tensor::to_dtype<U>()` entry point in `ferrotorch-core/src/tensor.rs` — closes upstream #29 (decode-side consumer: `forecast-bio/decode#27`) |
 
 #![cfg(feature = "cuda")]
 
@@ -570,6 +575,58 @@ DONE: ret;
 }
 ";
 
+// ── float → float (bf16 ↔ f32) ─────────────────────────────────────────────
+//
+// REQ-8 / issue #29. Other float pairs (f16↔f32, f32↔f64, bf16↔f16, …)
+// follow the same pattern; tracked in the #29 follow-up issue.
+
+// bf16 → f32: a bf16 is the high 16 bits of an f32. Decode = widen u16 to u32,
+// shl 16 to splat into the high half, reinterpret as f32. No precision loss
+// (widening). sm_52: this kernel uses only bit-manipulation + reinterpret.
+const BF16_TO_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+.visible .entry bf16_to_f32_kernel(.param .u64 in_ptr, .param .u64 out_ptr, .param .u32 n) {
+    .reg .u32 %idx, %bid, %bdim, %nr, %bits; .reg .u16 %h;
+    .reg .u64 %in, %out, %ioff, %ooff;
+    .reg .f32 %v; .reg .pred %p;
+    ld.param.u64 %in, [in_ptr]; ld.param.u64 %out, [out_ptr]; ld.param.u32 %nr, [n];
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr; @%p bra DONE;
+    cvt.u64.u32 %ioff, %idx; shl.b64 %ioff, %ioff, 1; add.u64 %in, %in, %ioff;
+    ld.global.u16 %h, [%in]; cvt.u32.u16 %bits, %h; shl.b32 %bits, %bits, 16; mov.b32 %v, %bits;
+    cvt.u64.u32 %ooff, %idx; shl.b64 %ooff, %ooff, 2; add.u64 %out, %out, %ooff;
+    st.global.f32 [%out], %v;
+DONE: ret;
+}
+";
+
+// f32 → bf16: hardware `cvt.rn.bf16.f32` round-to-nearest-even, sm_80+. Same
+// rounding mode as int → bf16's narrowing step (used by `cast_i32_to_bf16` and
+// friends in this file). PyTorch parity: `tensor.to(torch.bfloat16)` on CUDA
+// dispatches through the same instruction.
+const F32_TO_BF16_PTX: &str = "\
+.version 7.8
+.target sm_80
+.address_size 64
+.visible .entry f32_to_bf16_kernel(.param .u64 in_ptr, .param .u64 out_ptr, .param .u32 n) {
+    .reg .u32 %idx, %bid, %bdim, %nr;
+    .reg .u64 %in, %out, %ioff, %ooff;
+    .reg .f32 %v; .reg .b16 %r; .reg .pred %p;
+    ld.param.u64 %in, [in_ptr]; ld.param.u64 %out, [out_ptr]; ld.param.u32 %nr, [n];
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr; @%p bra DONE;
+    cvt.u64.u32 %ioff, %idx; shl.b64 %ioff, %ioff, 2; add.u64 %in, %in, %ioff;
+    ld.global.f32 %v, [%in]; cvt.rn.bf16.f32 %r, %v;
+    cvt.u64.u32 %ooff, %idx; shl.b64 %ooff, %ooff, 1; add.u64 %out, %out, %ooff;
+    st.global.b16 [%out], %r;
+DONE: ret;
+}
+";
+
 /// Launch an elementwise cast kernel from `IN` to `OUT` native element types,
 /// returning a fresh resident `CudaSlice<OUT>` of `n` elements.
 fn launch_cast<IN: DeviceRepr + ValidAsZeroBits, OUT: DeviceRepr + ValidAsZeroBits>(
@@ -718,6 +775,15 @@ pub fn cast_bool_to_f16(x: &CudaSlice<u8>, n: usize, d: &GpuDevice) -> GpuResult
 pub fn cast_bool_to_bf16(x: &CudaSlice<u8>, n: usize, d: &GpuDevice) -> GpuResult<CudaSlice<u16>> {
     launch_cast(x, n, d, BOOL_TO_BF16_PTX, "bool_to_bf16_kernel")
 }
+// float ↔ float (REQ-8 / issue #29)
+/// Cast bf16 (u16 bits) → f32 (widening, lossless).
+pub fn cast_bf16_to_f32(x: &CudaSlice<u16>, n: usize, d: &GpuDevice) -> GpuResult<CudaSlice<f32>> {
+    launch_cast(x, n, d, BF16_TO_F32_PTX, "bf16_to_f32_kernel")
+}
+/// Cast f32 → bf16 (u16 bits, round-to-nearest-even via `cvt.rn.bf16.f32`).
+pub fn cast_f32_to_bf16(x: &CudaSlice<f32>, n: usize, d: &GpuDevice) -> GpuResult<CudaSlice<u16>> {
+    launch_cast(x, n, d, F32_TO_BF16_PTX, "f32_to_bf16_kernel")
+}
 
 #[cfg(test)]
 mod tests {
@@ -833,5 +899,93 @@ mod tests {
             d.stream().clone_dtoh(&ci).unwrap(),
             vec![i32::MIN, i32::MAX, 0]
         );
+    }
+
+    // REQ-8 / issue #29.
+    #[test]
+    fn bf16_f32_roundtrip_lossless_for_bf16_representable_values() {
+        let d = dev();
+
+        // Pick values that are exactly representable in bf16 (the high 16 bits
+        // of an f32) so the round trip is bit-exact. NaN / ±Inf are also
+        // included to confirm non-finite preservation.
+        let f32_in: Vec<f32> = vec![
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            2.0,
+            0.5,
+            -0.25,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ];
+        let h_f32 = d.stream().clone_htod(&f32_in).unwrap();
+
+        // f32 -> bf16 -> f32 should be bit-exact for bf16-representable inputs.
+        let bf16_buf = cast_f32_to_bf16(&h_f32, h_f32.len(), &d).unwrap();
+        let f32_out_buf = cast_bf16_to_f32(&bf16_buf, bf16_buf.len(), &d).unwrap();
+        let f32_out: Vec<f32> = d.stream().clone_dtoh(&f32_out_buf).unwrap();
+
+        for (i, (got, want)) in f32_out.iter().zip(f32_in.iter()).enumerate() {
+            if want.is_nan() {
+                assert!(got.is_nan(), "idx {i}: lost NaN");
+            } else {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "idx {i}: bf16 round trip lost value {want} (got {got})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn f32_to_bf16_matches_host_cvt_rn() {
+        let d = dev();
+
+        // For arbitrary f32 inputs, GPU `cvt.rn.bf16.f32` should match
+        // `half::bf16::from_f32` (which also rounds to nearest even).
+        let f32_in: Vec<f32> = vec![1.1, -1.1, 5.2, -4.3, 1e-5, 1e5, 0.1, 0.2, 0.3, 1234567.0];
+        let h_f32 = d.stream().clone_htod(&f32_in).unwrap();
+
+        let bf16_buf = cast_f32_to_bf16(&h_f32, h_f32.len(), &d).unwrap();
+        let bf16_bits: Vec<u16> = d.stream().clone_dtoh(&bf16_buf).unwrap();
+
+        for (i, (bits, want)) in bf16_bits.iter().zip(f32_in.iter()).enumerate() {
+            let host = half::bf16::from_f32(*want).to_bits();
+            assert_eq!(
+                *bits, host,
+                "idx {i}: GPU cvt.rn.bf16.f32 disagrees with host bf16::from_f32 for {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn bf16_to_f32_widens_exactly() {
+        let d = dev();
+
+        // Build bf16 bits from a known set of f32 values via `from_f32`, then
+        // widen via the GPU kernel and confirm we recover the exact f32 the
+        // bf16 represents (i.e. high 16 bits of the f32 with low 16 zeroed).
+        let f32_in: Vec<f32> = vec![1.0, 1.5, -2.25, 100.0, 1e-3, 1.1];
+        let bf16_bits: Vec<u16> = f32_in
+            .iter()
+            .map(|&v| half::bf16::from_f32(v).to_bits())
+            .collect();
+        let h_bf16 = d.stream().clone_htod(&bf16_bits).unwrap();
+
+        let f32_buf = cast_bf16_to_f32(&h_bf16, h_bf16.len(), &d).unwrap();
+        let f32_out: Vec<f32> = d.stream().clone_dtoh(&f32_buf).unwrap();
+
+        for (i, (got, bits)) in f32_out.iter().zip(bf16_bits.iter()).enumerate() {
+            let want = half::bf16::from_bits(*bits).to_f32();
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "idx {i}: GPU bf16_to_f32 disagrees with host bf16::to_f32 for bits {bits:#06x}"
+            );
+        }
     }
 }

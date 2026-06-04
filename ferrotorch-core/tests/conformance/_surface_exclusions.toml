@@ -2934,3 +2934,29 @@ tracking_issue = "#765"
 path = "ferrotorch_core::where_cond_bt"
 reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
 tracking_issue = "#765"
+
+# `rand_on_device` / `randn_on_device` (#1682) added on-device RNG initializers
+# for CUDA tensors. Conformance coverage requires a live CUDA host so they
+# can't be exercised from the CPU-only conformance suite. Once the tiered CI
+# strategy (#32) lands a gated CUDA workflow, the right home is a conformance
+# test executed in that workflow; until then these exclusion entries keep the
+# strict surface gate green.
+[[exclusion]]
+path = "ferrotorch_core::creation::rand_on_device"
+reason = "GPU-only initializer; conformance exercise requires a live CUDA host. Will be covered by a `tests/conformance_creation_gpu.rs` test under the gated CUDA workflow (#32)."
+tracking_issue = "#1682"
+
+[[exclusion]]
+path = "ferrotorch_core::creation::randn_on_device"
+reason = "GPU-only initializer; conformance exercise requires a live CUDA host. Will be covered by a `tests/conformance_creation_gpu.rs` test under the gated CUDA workflow (#32)."
+tracking_issue = "#1682"
+
+[[exclusion]]
+path = "ferrotorch_core::rand_on_device"
+reason = "Re-export of `creation::rand_on_device`; the underlying item is excluded above with the same tracking issue (#1682) pending a CUDA conformance test in the gated workflow (#32)."
+tracking_issue = "#1682"
+
+[[exclusion]]
+path = "ferrotorch_core::randn_on_device"
+reason = "Re-export of `creation::randn_on_device`; the underlying item is excluded above with the same tracking issue (#1682) pending a CUDA conformance test in the gated workflow (#32)."
+tracking_issue = "#1682"

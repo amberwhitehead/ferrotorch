@@ -1087,6 +1087,90 @@ impl<T: Float> Tensor<T> {
         self.to(Device::Cpu)
     }
 
+    /// Cast this tensor to a different float dtype, preserving device + shape.
+    ///
+    /// `U: Float` — any of `f32` / `f64` / `bf16` / `f16`. PyTorch parity:
+    /// `tensor.to(dtype)` / `tensor.to(torch.float32)`.
+    ///
+    /// - **Same dtype (`T == U`)**: zero-copy `Arc`-shared clone.
+    /// - **CPU**: per-element cast via [`crate::numeric_cast::cast`] (fallible —
+    ///   returns `Err(InvalidArgument)` if a finite source value saturates to
+    ///   `±∞` in a narrower target, per issue #815).
+    /// - **GPU**: dispatched through [`crate::gpu_dispatch::GpuBackend::cast_f_to_f`];
+    ///   stays GPU-resident. Initial implementation covers `bf16 ↔ f32`
+    ///   (issue #29); other float pairs return `Err` until the follow-up
+    ///   issue lands.
+    ///
+    /// # Autograd
+    ///
+    /// The returned tensor has `requires_grad = false` regardless of `self`.
+    /// A `CastBackward` grad_fn that propagates gradients through the cast is
+    /// follow-up work tracked alongside the remaining float-pair kernels.
+    pub fn to_dtype<U: Float>(&self) -> FerrotorchResult<Tensor<U>> {
+        use std::any::TypeId;
+
+        // Same-dtype: zero-copy clone (PyTorch parity for `tensor.to(same_dtype)`).
+        if TypeId::of::<T>() == TypeId::of::<U>() {
+            let cloned = self.clone();
+            // SAFETY: `TypeId::of::<T>() == TypeId::of::<U>()` means T and U are
+            // the same concrete type at this monomorphisation. `Tensor<X>` is
+            // `Arc<TensorInner<X>>`; with X identical the byte layout matches
+            // exactly. `ManuallyDrop` blocks the source's destructor since we
+            // moved ownership into the transmuted value.
+            return Ok(unsafe {
+                let md = std::mem::ManuallyDrop::new(cloned);
+                std::mem::transmute_copy::<Tensor<T>, Tensor<U>>(&md)
+            });
+        }
+
+        match self.device() {
+            Device::Cpu => {
+                // Non-contiguous source: materialise so `.data()` is logical order.
+                let materialised = if self.is_contiguous() {
+                    self.clone()
+                } else {
+                    crate::methods::contiguous_t(self)?
+                };
+                let src = materialised.data()?;
+                let mut out: Vec<U> = Vec::with_capacity(src.len());
+                for (i, &v) in src.iter().enumerate() {
+                    out.push(crate::numeric_cast::cast::<T, U>(v).map_err(|_| {
+                        FerrotorchError::InvalidArgument {
+                            message: format!(
+                                "Tensor::to_dtype: element {i} = {v:?} not representable in {}",
+                                U::dtype()
+                            ),
+                        }
+                    })?);
+                }
+                let storage = TensorStorage::cpu(out);
+                Tensor::<U>::from_storage(storage, self.shape().to_vec(), false)
+            }
+            Device::Cuda(_) => {
+                // Non-contiguous GPU view: materialise via the existing
+                // CPU/GPU `contiguous_t` fast path so the cast sees a fresh
+                // contiguous buffer matching the logical numel.
+                let materialised = if self.is_contiguous() {
+                    self.clone()
+                } else {
+                    crate::methods::contiguous_t(self)?
+                };
+                let backend =
+                    crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+                let src_handle = materialised.gpu_handle()?;
+                let new_handle = backend.cast_f_to_f(src_handle, U::dtype())?;
+                let storage = TensorStorage::gpu(new_handle);
+                Tensor::<U>::from_storage(storage, self.shape().to_vec(), false)
+            }
+            _ => Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Tensor::to_dtype: unsupported source device {:?}",
+                    self.device()
+                ),
+            }),
+        }
+    }
+
     /// Returns `true` if this tensor is on CPU.
     #[inline]
     pub fn is_cpu(&self) -> bool {
@@ -1988,5 +2072,73 @@ mod tests {
         assert!((data[0] - 1.1).abs() < 1e-6);
         assert!((data[1] - 1.2).abs() < 1e-6);
         assert!((data[2] - 1.3).abs() < 1e-6);
+    }
+
+    // ── to_dtype (REQ-8 / issue #29) ─────────────────────────────────────────
+
+    #[test]
+    fn to_dtype_same_dtype_is_zero_copy_clone() {
+        let storage = TensorStorage::cpu(vec![1.0f32, 2.0, 3.0]);
+        let t = Tensor::from_storage(storage, vec![3], false).unwrap();
+        let same: Tensor<f32> = t.to_dtype::<f32>().unwrap();
+        assert_eq!(same.shape(), &[3usize]);
+        assert_eq!(same.data().unwrap(), &[1.0_f32, 2.0, 3.0]);
+        // Same underlying Arc storage — id() compares by Arc address via TensorId.
+        assert_eq!(same.id(), t.id());
+    }
+
+    #[test]
+    fn to_dtype_cpu_f32_to_bf16_round_trips_bf16_representable_values() {
+        let storage = TensorStorage::cpu(vec![1.0f32, -2.0, 0.5, 100.0]);
+        let t = Tensor::from_storage(storage, vec![4], false).unwrap();
+        let bf16 = t.to_dtype::<half::bf16>().unwrap();
+        assert_eq!(bf16.shape(), &[4usize]);
+        let bits: Vec<u16> = bf16.data().unwrap().iter().map(|b| b.to_bits()).collect();
+        let expect: Vec<u16> = [1.0f32, -2.0, 0.5, 100.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v).to_bits())
+            .collect();
+        assert_eq!(bits, expect);
+    }
+
+    #[test]
+    fn to_dtype_cpu_bf16_to_f32_widens_exactly() {
+        let bf16_data: Vec<half::bf16> = [1.0f32, 1.5, -2.25, 100.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v))
+            .collect();
+        let storage = TensorStorage::cpu(bf16_data.clone());
+        let t = Tensor::from_storage(storage, vec![4], false).unwrap();
+        let f32_t = t.to_dtype::<f32>().unwrap();
+        let got = f32_t.data().unwrap();
+        let want: Vec<f32> = bf16_data.iter().map(|b| b.to_f32()).collect();
+        for (g, w) in got.iter().zip(want.iter()) {
+            assert_eq!(g.to_bits(), w.to_bits());
+        }
+    }
+
+    #[test]
+    fn to_dtype_cpu_saturating_cast_errors() {
+        // f32 value far beyond bf16's max exponent range (~3.4e38) wouldn't
+        // overflow bf16 (same 8-bit exponent), so use f64 -> bf16 saturation
+        // through an intermediate widening path is tricky to trigger via this
+        // API. Instead test that f64 -> bf16 with a value that's in-range for
+        // bf16 succeeds, then test that f64 -> f32 saturates for huge values.
+        let big = TensorStorage::cpu(vec![1e300_f64, -1e300_f64]);
+        let t = Tensor::from_storage(big, vec![2], false).unwrap();
+        let result = t.to_dtype::<f32>();
+        assert!(
+            result.is_err(),
+            "expected saturation error casting 1e300_f64 to f32, got Ok"
+        );
+    }
+
+    #[test]
+    fn to_dtype_cpu_preserves_shape() {
+        let storage = TensorStorage::cpu(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let t = Tensor::from_storage(storage, vec![2, 3], false).unwrap();
+        let bf16 = t.to_dtype::<half::bf16>().unwrap();
+        assert_eq!(bf16.shape(), &[2usize, 3]);
+        assert_eq!(bf16.numel(), 6);
     }
 }

@@ -1110,6 +1110,40 @@ fn tensor_to_same_device_is_identity_metadata() {
     assert_eq!(b.device(), Device::Cpu);
 }
 
+/// `Tensor <T>::to_dtype<U: Float>()` (issue #29 / PR #30): cross-float
+/// dtype cast. Same dtype returns an `Arc`-shared clone (PyTorch parity
+/// for `tensor.to(same_dtype)`); cross-float on CPU casts per-element via
+/// `numeric_cast::cast`; cross-float on GPU dispatches through
+/// `GpuBackend::cast_f_to_f`.
+#[test]
+fn tensor_to_dtype_same_dtype_is_arc_shared_clone() {
+    let a: Tensor<f32> = make_cpu_f32(&[1.0, 2.0, 3.0], &[3]);
+    let b: Tensor<f32> = a.to_dtype::<f32>().expect("to_dtype<f32> on f32 tensor");
+    assert_eq!(b.shape(), &[3]);
+    // Same-dtype path uses transmute_copy on the Arc, so id() (Arc address)
+    // is preserved.
+    assert_eq!(a.id(), b.id());
+}
+
+#[test]
+fn tensor_to_dtype_f32_to_bf16_bit_exact_for_representable_values() {
+    // 1.0, -2.0, 0.5, 100.0 are exactly representable in bf16 (the high
+    // 16 bits of the f32 bit pattern have zero rounding error).
+    let a: Tensor<f32> = make_cpu_f32(&[1.0, -2.0, 0.5, 100.0], &[4]);
+    let b: Tensor<half::bf16> = a.to_dtype::<half::bf16>().expect("to_dtype<bf16>");
+    let want: Vec<u16> = [1.0f32, -2.0, 0.5, 100.0]
+        .iter()
+        .map(|&v| half::bf16::from_f32(v).to_bits())
+        .collect();
+    let got: Vec<u16> = b
+        .data()
+        .expect("bf16 data")
+        .iter()
+        .map(|x| x.to_bits())
+        .collect();
+    assert_eq!(got, want);
+}
+
 #[test]
 fn tensor_meta_propagates_is_meta() {
     let m: Tensor<f32> = creation::zeros_meta(&[3, 4]).expect("zeros_meta");

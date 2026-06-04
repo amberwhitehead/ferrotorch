@@ -60,6 +60,15 @@ machinery in `c10/util/`.
   input comes from a pooled float op); the kernel reads/writes strictly
   `[0, n)`.
 
+- REQ-8: Float → float cast (`bf16` ↔ `f32`) — `cast_bf16_to_f32`
+  (widen via the bf16-decode `shl 16 + mov.b32` pattern, lossless),
+  `cast_f32_to_bf16` (narrow via hardware `cvt.rn.bf16.f32`,
+  round-to-nearest-even, sm_80+). Backs `Tensor::to_dtype<U>()` in
+  ferrotorch-core via the new `GpuBackend::cast_f_to_f` trait method
+  and its `CudaBackendImpl` arm. Other float pairs (`f16 ↔ f32`,
+  `f32 ↔ f64`, `bf16 ↔ f16`, etc.) follow the same pattern and are
+  tracked in the issue #29 follow-up.
+
 ## Acceptance Criteria
 
 - [x] AC-1: All eight float → int cast functions exist with the
@@ -71,10 +80,34 @@ machinery in `c10/util/`.
 - [x] AC-5: Every `unsafe { ... }` block has a SAFETY comment
   immediately above it.
 - [x] AC-6: `cargo test -p ferrotorch-gpu --features cuda --lib
-  cast_kernels` passes its inline `#[cfg(test)] mod tests` (7 tests
+  cast_kernels` passes its inline `#[cfg(test)] mod tests` (10 tests
   in the file's tests module).
+- [x] AC-7: `cast_bf16_to_f32` and `cast_f32_to_bf16` exist and
+  round-trip bf16-representable f32 values bit-exactly; `f32 →
+  bf16` matches `half::bf16::from_f32` (PyTorch parity).
 
 ## Architecture
+
+### Float → float bf16 ↔ f32 (REQ-8)
+
+Two new kernels added in the #29 commit:
+
+- `BF16_TO_F32_PTX` widens bf16 to f32 using the bf16-decode pattern
+  shared with the bf16 → int kernels: `ld.global.u16; cvt.u32.u16;
+  shl.b32 %, %, 16; mov.b32 %f32, %`. Lossless (the f32 payload is
+  exactly the bf16 with low 16 bits zeroed). Targets sm_52 — pure
+  bit-manipulation + reinterpret.
+- `F32_TO_BF16_PTX` narrows f32 to bf16 via hardware `cvt.rn.bf16.f32`
+  (round-to-nearest-even, sm_80+). Same instruction the bool → bf16
+  and int → bf16 kernels already use as their final step.
+
+`Tensor::to_dtype<U: Float>()` in ferrotorch-core is the public entry
+point. CPU dispatches via per-element `crate::numeric_cast::cast` (the
+existing fallible cast helper that enforces the issue-#815 saturation
+guard). GPU dispatches via `GpuBackend::cast_f_to_f`, which in
+`CudaBackendImpl` matches `(BF16, F32)` / `(F32, BF16)` arms against
+the two new wrappers in `cast_kernels.rs`. Same-dtype `to_dtype::<T>()`
+short-circuits to an Arc-shared clone before reaching the backend.
 
 ### Per-cast PTX `&'static str` (REQ-1, REQ-2, REQ-3, REQ-5)
 
@@ -215,3 +248,4 @@ device.
 | REQ-5 | SHIPPED | impl: `pub fn cast_bool_to_{f32,f64,f16,bf16} in cast_kernels.rs` (each normalises via `setp.ne %nz, %bv, 0; selp 1, 0, %nz` then `cvt.rn.f*.u32`). Non-test consumer: `cast_bool_to_f32 in backend_impl.rs` (`ck::cast_bool_to_f32`) plus three sibling bool→float arms in the `to_dtype` handler. |
 | REQ-6 | SHIPPED | impl: the single `unsafe { stream.launch_builder(&f)...launch(cfg)? }` block in `fn launch_cast` is preceded by a multi-line SAFETY comment naming entry signature, alloc, bound check, and `n as u32` non-truncation. Non-test consumer inherits the SAFETY contract via every `pub fn cast_*` wrapper called from backend_impl. |
 | REQ-7 | SHIPPED | impl: `fn launch_cast in cast_kernels.rs` opens with `if n == 0 { return Ok(stream.alloc_zeros::<OUT>(0)?); }` and a `debug_assert!(input.len() >= n)` for the pool-rounded-input case. Non-test consumer relies on this no-launch short circuit for empty dtype casts via the backend `to_dtype` op. |
+| REQ-8 | SHIPPED | impl: `pub fn cast_bf16_to_f32 / cast_f32_to_bf16 in cast_kernels.rs` (`BF16_TO_F32_PTX` uses the bf16-decode `shl 16 + mov.b32` pattern, sm_52; `F32_TO_BF16_PTX` uses hardware `cvt.rn.bf16.f32`, sm_80+) plus the new `GpuBackend::cast_f_to_f` trait method in `ferrotorch-core/src/gpu_dispatch.rs` and its `impl CudaBackendImpl::cast_f_to_f in backend_impl.rs` arm. Non-test consumer: `Tensor::to_dtype<U: Float>() in ferrotorch-core/src/tensor.rs` (CPU dispatches through `crate::numeric_cast::cast`; GPU dispatches through `cast_f_to_f`). Closes upstream issue #29 (decode-side consumer `forecast-bio/decode#27`). |

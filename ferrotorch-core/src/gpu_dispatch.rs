@@ -5566,6 +5566,20 @@ pub trait GpuBackend: Send + Sync {
         Err(FerrotorchError::NotImplementedOnCuda { op: "cast_i_to_i" })
     }
 
+    /// Cast a float buffer between two float dtypes (`src.dtype()` and `dst`
+    /// each ∈ {F32,F64,BF16,F16}). Widening (e.g. bf16 → f32) is exact;
+    /// narrowing (e.g. f32 → bf16) is round-to-nearest-even via PTX
+    /// `cvt.rn.<narrow>.<wide>`. PyTorch parity: `tensor.to(<dtype>)` on CUDA.
+    /// Initial implementation covers bf16 ↔ f32 (issue #29); other float
+    /// pairs return `Err` until the follow-up issue lands.
+    fn cast_f_to_f(
+        &self,
+        _src: &GpuBufferHandle,
+        _dst: DType,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cast_f_to_f" })
+    }
+
     // ── Boolean / comparison ops — crosslink #1185 Phase 3b ──────────────────
     //
     // Comparisons read a VALUE buffer (`a.dtype()` ∈ {F32,F64,BF16,F16,I32,I64})

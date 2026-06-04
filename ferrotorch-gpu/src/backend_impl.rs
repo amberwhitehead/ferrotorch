@@ -7901,6 +7901,34 @@ impl GpuBackend for CudaBackendImpl {
         }
     }
 
+    // REQ-8 / issue #29: cross-float cast. Initial PR covers bf16 ↔ f32 only;
+    // f16↔f32, f32↔f64, bf16↔f16 etc. are tracked in the #29 follow-up issue.
+    // Same-dtype is not exposed here — `Tensor::to_dtype<U>()` short-circuits
+    // T == U at the public API boundary before this dispatch is reached.
+    #[cfg(feature = "cuda")]
+    fn cast_f_to_f(&self, src: &GpuBufferHandle, dst: DType) -> FerrotorchResult<GpuBufferHandle> {
+        use crate::cast_kernels as ck;
+        let dev = self.device(src.device_ordinal())?;
+        let ord = src.device_ordinal();
+        match (src.dtype(), dst) {
+            (DType::BF16, DType::F32) => Ok(Self::wrap_slice_f32(
+                ck::cast_bf16_to_f32(Self::unwrap_buffer_bf16(src)?, src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            (DType::F32, DType::BF16) => Ok(Self::wrap_buffer_bf16(
+                ck::cast_f32_to_bf16(Self::unwrap_buffer(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            (s, d) => Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "cast_f_to_f: unsupported {s} -> {d} (tracked in ferrotorch#29 follow-up)"
+                ),
+            }),
+        }
+    }
+
     // ── Boolean / comparison ops — crosslink #1185 Phase 3b ──────────────────
     //
     // `compare` reads the value dtype from `a.dtype()` to pick the kernel
