@@ -46,6 +46,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- GPU dropout drew the SAME mask on every call: the dropout kernel's per-element hash (xorshift over `tid*2654435761 ^ seed`) is GF(2)-linear, so the small seed deltas derived from consecutive Philox counter snapshots (0, 256, 512, …) never flipped the high bits that decide `hash < threshold` — masks were bit-identical across calls for both f32 and f64, breaking MC-dropout ensembles (zero variance) and silently freezing the dropout pattern across GPU training steps. Replaced the mix with murmur3 fmix32 in DROPOUT_PTX and, in lockstep, in ferrotorch-nn's `philox_dropout_mask` backward-mask mirror (divergence there corrupts gradients). New conformance tests pin the seed-avalanche property (f32+f64) and the exact fmix32 sequence (ferrotorch-paged #43)
 - GPU complex transpose (cusolver eig) dead on hardware: %tid JIT-death (f32+f64) + f64 byte-stride bug (#1685)
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
