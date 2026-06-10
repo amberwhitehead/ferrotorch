@@ -10129,7 +10129,17 @@ DONE:\n\
 ";
 
 // ---------------------------------------------------------------------------
-// Dropout PTX kernel (inverted dropout with xorshift RNG)
+// Dropout PTX kernel (inverted dropout, murmur3-fmix32 hash)
+//
+// The hash MUST be non-linear over GF(2). The original xorshift mix was
+// linear, so `hash(tid_mix ^ seed) == hash(tid_mix) ^ hash(seed)`: two
+// seeds differing by a small Philox counter delta produced masks whose
+// drop decisions (a comparison against `threshold`, dominated by the
+// high bits) were bit-identical — every dropout call drew the SAME mask
+// (ferrotorch-paged #43). The fmix32 multiplications avalanche the seed
+// into all 32 bits. Mirror: `philox_dropout_mask` in
+// ferrotorch-nn/src/dropout.rs regenerates this exact sequence on CPU
+// for the backward pass — any change here must change there in lockstep.
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "cuda")]
@@ -10168,11 +10178,13 @@ pub(crate) const DROPOUT_PTX: &str = "\
 \n\
     mul.lo.u32 %rng, %r_tid, 2654435761;\n\
     xor.b32 %rng, %rng, %seed_reg;\n\
-    shl.b32 %tmp, %rng, 13;\n\
+    shr.b32 %tmp, %rng, 16;\n\
     xor.b32 %rng, %rng, %tmp;\n\
-    shr.b32 %tmp, %rng, 17;\n\
+    mul.lo.u32 %rng, %rng, 2246822507;\n\
+    shr.b32 %tmp, %rng, 13;\n\
     xor.b32 %rng, %rng, %tmp;\n\
-    shl.b32 %tmp, %rng, 5;\n\
+    mul.lo.u32 %rng, %rng, 3266489909;\n\
+    shr.b32 %tmp, %rng, 16;\n\
     xor.b32 %rng, %rng, %tmp;\n\
 \n\
     cvt.u64.u32 %off, %r_tid;\n\
@@ -16812,14 +16824,19 @@ pub fn gpu_softmax(
 /// `scale` = `1.0 / (1.0 - p)`.
 /// `seed` = random seed for the RNG.
 ///
-/// **Known limitation**: This kernel uses a simple per-element hash
-/// (`tid * 2654435761 ^ seed` with xorshift mixing), not the full
-/// Philox 4x32-10 counter-based RNG that PyTorch uses. A proper Philox
-/// dropout kernel would generate the mask via `philox_uniform_kernel`
-/// and then threshold — producing higher-quality randomness and exact
-/// reproducibility across CPU/GPU. The current hash is sufficient for
-/// training but should be upgraded for research requiring strict
-/// statistical properties.
+/// Per-element hash: `fmix32(tid * 2654435761 ^ seed)` (murmur3
+/// finalizer). The fmix32 multiplications are essential: a GF(2)-linear
+/// mix (the original xorshift) made the drop decision invariant under
+/// the small seed deltas produced by consecutive Philox counter
+/// snapshots, so every dropout call reused one mask (ferrotorch-paged
+/// #43). Reproduced byte-exactly on CPU by `philox_dropout_mask` in
+/// ferrotorch-nn/src/dropout.rs for backward-mask regeneration — keep
+/// the two in lockstep.
+///
+/// **Known limitation**: still not the full Philox 4x32-10
+/// counter-based RNG that PyTorch uses; a proper Philox dropout kernel
+/// would generate the mask via `philox_uniform_kernel` and threshold
+/// it, for strict statistical properties and cross-device parity.
 #[cfg(feature = "cuda")]
 pub fn gpu_dropout(
     input: &CudaBuffer<f32>,
@@ -16870,8 +16887,8 @@ pub fn gpu_dropout(
     //   each living for the full call frame including the async
     //   launch.
     // - Per-thread `i in [0, n)`: reads `input[i]`, hashes the
-    //   thread id with the seed (xorshift mixing of `tid *
-    //   2654435761 ^ seed` per the rustdoc above), and writes
+    //   thread id with the seed (`fmix32(tid * 2654435761 ^ seed)`
+    //   per the rustdoc above), and writes
     //   `out[i] = (hash >= threshold) ? input[i] * scale : 0.0`. PTX
     //   bound check `setp.ge.u32 %p, %r_tid, %n_reg; @%p bra DONE`
     //   skips OOB threads.

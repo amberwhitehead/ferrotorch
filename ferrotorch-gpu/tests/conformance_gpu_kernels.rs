@@ -1386,6 +1386,127 @@ fn kernel_dropout_shape_and_sparsity() {
     );
 }
 
+/// gpu_dropout: nearby seeds MUST produce different masks.
+///
+/// Regression for ferrotorch-paged #43: the original GF(2)-linear
+/// xorshift hash made the drop decision invariant under small seed
+/// deltas — `dropout_philox_f32` derives consecutive seeds from Philox
+/// counter snapshots (0, 256, 512, …), so every dropout call drew the
+/// SAME mask and MC-dropout ensembles had zero variance. Seed 256 is the
+/// exact delta two back-to-back 1024-element calls produce.
+#[test]
+fn kernel_dropout_mask_varies_with_nearby_seeds() {
+    ensure_cuda();
+    let dev = device();
+    let n = 1024usize;
+    let inp_h = vec![1.0f32; n];
+    let inp = cpu_to_gpu(&inp_h, &dev).unwrap();
+    let threshold = (0.5f64 * u32::MAX as f64) as u32;
+
+    let a = gpu_to_cpu(
+        &ferrotorch_gpu::kernels::gpu_dropout(&inp, threshold, 2.0, 0, &dev).unwrap(),
+        &dev,
+    )
+    .unwrap();
+    let b = gpu_to_cpu(
+        &ferrotorch_gpu::kernels::gpu_dropout(&inp, threshold, 2.0, 256, &dev).unwrap(),
+        &dev,
+    )
+    .unwrap();
+
+    let flipped = a
+        .iter()
+        .zip(&b)
+        .filter(|(x, y)| (**x == 0.0) != (**y == 0.0))
+        .count();
+    // An avalanching hash flips each decision independently with p≈0.5;
+    // n/8 is a generous 3σ-safe lower bound. The linear-hash bug gives 0.
+    assert!(
+        flipped > n / 8,
+        "dropout masks for seeds 0 and 256 share too much structure: \
+         only {flipped}/{n} decisions differ — seed is not avalanching \
+         (GF(2)-linear hash regression, ferrotorch-paged #43)"
+    );
+}
+
+/// gpu_dropout_f64: the f64 kernel is auto-converted from the same
+/// DROPOUT_PTX (integer hash ops pass through `ptx_f32_to_f64`
+/// untouched), so it must satisfy the same seed-avalanche property.
+/// Verifies the #43 fix reaches the f64 path, not just f32.
+#[test]
+fn kernel_dropout_f64_mask_varies_with_nearby_seeds() {
+    ensure_cuda();
+    let dev = device();
+    let n = 1024usize;
+    let inp_h = vec![1.0f64; n];
+    let inp = cpu_to_gpu(&inp_h, &dev).unwrap();
+    let threshold = (0.5f64 * u32::MAX as f64) as u32;
+
+    let a = gpu_to_cpu(
+        &ferrotorch_gpu::kernels::gpu_dropout_f64(&inp, threshold, 2.0, 0, &dev).unwrap(),
+        &dev,
+    )
+    .unwrap();
+    let b = gpu_to_cpu(
+        &ferrotorch_gpu::kernels::gpu_dropout_f64(&inp, threshold, 2.0, 256, &dev).unwrap(),
+        &dev,
+    )
+    .unwrap();
+
+    let flipped = a
+        .iter()
+        .zip(&b)
+        .filter(|(x, y)| (**x == 0.0) != (**y == 0.0))
+        .count();
+    assert!(
+        flipped > n / 8,
+        "f64 dropout masks for seeds 0 and 256 share too much structure: \
+         only {flipped}/{n} decisions differ (ferrotorch-paged #43)"
+    );
+}
+
+/// gpu_dropout: the kernel hash is pinned bit-exactly to
+/// `fmix32(i * 2654435761 ^ seed)` (murmur3 finalizer).
+///
+/// ferrotorch-nn's `philox_dropout_mask` regenerates this sequence on
+/// CPU to build the backward mask for autograd; if the kernel and that
+/// mirror drift apart, gradients silently use a different mask than the
+/// forward pass. This test IS the spec: any PTX hash change must update
+/// this test AND the nn-side mirror in the same commit.
+#[test]
+fn kernel_dropout_mask_matches_fmix32_spec() {
+    ensure_cuda();
+    let dev = device();
+    let n = 4096usize;
+    let inp_h = vec![1.0f32; n];
+    let inp = cpu_to_gpu(&inp_h, &dev).unwrap();
+    let threshold = (0.3f64 * u32::MAX as f64) as u32;
+    let scale = 1.0f32 / 0.7;
+    let seed = 0xDEAD_BEEFu32;
+
+    let out = gpu_to_cpu(
+        &ferrotorch_gpu::kernels::gpu_dropout(&inp, threshold, scale, seed, &dev).unwrap(),
+        &dev,
+    )
+    .unwrap();
+
+    for (i, &v) in out.iter().enumerate() {
+        let mut r = (i as u32).wrapping_mul(2654435761) ^ seed;
+        r ^= r >> 16;
+        r = r.wrapping_mul(0x85eb_ca6b);
+        r ^= r >> 13;
+        r = r.wrapping_mul(0xc2b2_ae35);
+        r ^= r >> 16;
+        let expected = if r < threshold { 0.0 } else { scale };
+        assert_eq!(
+            v, expected,
+            "dropout kernel diverged from the fmix32 spec at element {i} \
+             (got {v}, expected {expected}) — if the PTX hash changed, \
+             ferrotorch-nn::philox_dropout_mask must change in lockstep"
+        );
+    }
+}
+
 #[test]
 fn kernel_has_inf_nan_matches_reference() {
     ensure_cuda();

@@ -107,11 +107,17 @@ fn philox_4x32_10(counter: u64, key: u64) -> [u32; 4] {
     [c0, c1, c2, c3]
 }
 
-/// Generate a dropout mask using the Philox algorithm, matching the GPU kernel's
-/// behavior. The mask uses `(counter ^ seed)` as a derived u32 seed and applies
-/// the same xorshift-multiply hash that the GPU dropout kernel uses.
+/// Regenerate the GPU dropout mask on CPU, byte-exactly mirroring the
+/// `dropout_kernel` PTX in ferrotorch-gpu/src/kernels.rs: derived u32 seed
+/// `(counter ^ seed)`, per-element hash `fmix32(i * 2654435761 ^ seed)`
+/// (murmur3 finalizer), drop when `hash < threshold`.
 ///
-/// This ensures backward mask matches the forward mask generated on GPU.
+/// This ensures the backward mask matches the forward mask generated on
+/// GPU. The fmix32 multiplications are load-bearing: a GF(2)-linear mix
+/// here (the original xorshift) made masks invariant under consecutive
+/// Philox counter deltas, so every dropout call drew the same mask
+/// (ferrotorch-paged #43). Any change here must change the PTX in
+/// lockstep.
 fn philox_dropout_mask<T: Float>(
     numel: usize,
     threshold: u32,
@@ -124,9 +130,11 @@ fn philox_dropout_mask<T: Float>(
     (0..numel)
         .map(|i| {
             let mut r = (i as u32).wrapping_mul(2654435761) ^ derived_seed;
-            r ^= r << 13;
-            r ^= r >> 17;
-            r ^= r << 5;
+            r ^= r >> 16;
+            r = r.wrapping_mul(0x85eb_ca6b);
+            r ^= r >> 13;
+            r = r.wrapping_mul(0xc2b2_ae35);
+            r ^= r >> 16;
             if r < threshold { zero } else { scale }
         })
         .collect()
