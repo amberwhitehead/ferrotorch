@@ -6,9 +6,26 @@
 //! `conformance_surface_inventory.rs`) and scans the `tests/conformance_*.rs`
 //! files for references to each `pub` item. Fails the build if any inventory
 //! item is neither (a) referenced by a conformance test, nor (b) explicitly
-//! excluded in `_surface_exclusions.toml` with a written reason **and a
-//! tracking-issue ref**. The tracking-issue requirement is the audit trail —
-//! "deferred without a follow-up issue" is a no-fly state.
+//! excluded in `_surface_exclusions.toml`.
+//!
+//! Exclusion contract (CORE-195 / #1889): every exclusion carries a `kind`:
+//!
+//! - `kind = "permanent"` — the item IS tested, but this gate's substring
+//!   scan over `tests/conformance_*.rs` cannot see the coverage (re-export,
+//!   grad_fn struct exercised via its op's grad assertion, src-side
+//!   `#[cfg(test)]` live-torch suite, ...). The `reason` must name where the
+//!   coverage actually lives; `exclusion_tracking_issues_are_live` enforces
+//!   that it contains one of [`PERMANENT_COVERAGE_MARKERS`]. `tracking_issue`
+//!   is optional.
+//! - `kind = "deferred"` — conformance coverage genuinely not yet authored.
+//!   `tracking_issue` is required (`#NNN`) and must be OPEN. Because
+//!   `.crosslink/issues.db` is gitignored, liveness is checked against the
+//!   committed snapshot `tests/conformance/_tracking_issue_status.json`,
+//!   refreshed locally via `python3 scripts/refresh_exclusion_issue_status.py`
+//!   and expiring after [`SNAPSHOT_MAX_AGE_DAYS`] days. A missing snapshot is
+//!   a hard failure, never a skip. An exclusion pointing at a closed issue is
+//!   indefinite deferral and the gate rejects it — dead references satisfied
+//!   this gate for 569/573 entries before this contract existed.
 //!
 //! This is the project's signal: we do not add a public API to ferrotorch-core
 //! without proving its contract against PyTorch parity.
@@ -16,6 +33,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
@@ -41,13 +59,39 @@ struct ExclusionsFile {
     exclusions: Vec<Exclusion>,
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ExclusionKind {
+    /// Gate-limitation annotation: coverage exists but the substring scan
+    /// cannot see it. `reason` must say where (see
+    /// [`PERMANENT_COVERAGE_MARKERS`]).
+    Permanent,
+    /// Coverage genuinely not yet authored. `tracking_issue` must reference
+    /// an OPEN issue in the committed liveness snapshot.
+    Deferred,
+}
+
 #[derive(Debug, Deserialize)]
 struct Exclusion {
     path: String,
+    kind: ExclusionKind,
     reason: String,
-    /// Tracking issue ref. Required: an exclusion without a follow-up issue
-    /// is "indefinite deferral" and the gate rejects it.
-    tracking_issue: String,
+    /// Tracking issue ref. Required for `kind = "deferred"`: a deferred
+    /// exclusion without a live follow-up issue is "indefinite deferral" and
+    /// the gate rejects it. Optional for `kind = "permanent"`.
+    #[serde(default)]
+    tracking_issue: Option<String>,
+}
+
+/// Committed liveness snapshot for the tracking issues referenced by
+/// deferred exclusions (`_tracking_issue_status.json`), produced by
+/// `scripts/refresh_exclusion_issue_status.py`.
+#[derive(Debug, Deserialize)]
+struct TrackingSnapshot {
+    /// `YYYY-MM-DD` date the snapshot was generated.
+    generated_at: String,
+    /// Issue number (digits, no `#`) → crosslink status (`"open"` / ...).
+    issues: BTreeMap<String, String>,
 }
 
 fn conformance_dir() -> PathBuf {
@@ -180,11 +224,18 @@ fn every_public_item_has_a_conformance_reference_or_tracking_issue() {
     // test failure regardless of whether it would have covered anything.
     let mut bad_entries: Vec<String> = Vec::new();
     for e in &exclusions {
-        if !tracking_issue_valid(&e.tracking_issue) {
-            bad_entries.push(format!(
-                "{} — invalid `tracking_issue` field: {:?}",
-                e.path, e.tracking_issue
-            ));
+        match (&e.kind, &e.tracking_issue) {
+            // Deferred work without a follow-up issue is indefinite deferral.
+            (ExclusionKind::Deferred, None) => bad_entries.push(format!(
+                "{} — `kind = \"deferred\"` requires a `tracking_issue` field",
+                e.path
+            )),
+            // Any tracking_issue present (either kind) must be well-formed.
+            (_, Some(ti)) if !tracking_issue_valid(ti) => bad_entries.push(format!(
+                "{} — invalid `tracking_issue` field: {ti:?}",
+                e.path
+            )),
+            _ => {}
         }
         if e.reason.trim().is_empty() {
             bad_entries.push(format!("{} — empty `reason` field", e.path));
@@ -197,9 +248,9 @@ fn every_public_item_has_a_conformance_reference_or_tracking_issue() {
         bad_entries.join("\n  ")
     );
 
-    let exclusion_set: BTreeMap<String, (String, String)> = exclusions
+    let exclusion_set: BTreeMap<String, Exclusion> = exclusions
         .into_iter()
-        .map(|e| (e.path, (e.reason, e.tracking_issue)))
+        .map(|e| (e.path.clone(), e))
         .collect();
 
     let test_sources = read_conformance_test_sources();
@@ -210,7 +261,7 @@ fn every_public_item_has_a_conformance_reference_or_tracking_issue() {
     );
 
     let mut covered: Vec<&str> = Vec::new();
-    let mut excluded: Vec<(&str, &str, &str)> = Vec::new();
+    let mut excluded: Vec<&str> = Vec::new();
     let mut uncovered: Vec<&SurfaceItem> = Vec::new();
 
     for item in &surface.items {
@@ -218,16 +269,16 @@ fn every_public_item_has_a_conformance_reference_or_tracking_issue() {
         // require an explicit exclusion. The inventory writer stores them
         // with a `path` ending in `::*`.
         if item.path.ends_with("::*") {
-            if let Some((reason, issue)) = exclusion_set.get(&item.path) {
-                excluded.push((item.path.as_str(), reason.as_str(), issue.as_str()));
+            if exclusion_set.contains_key(&item.path) {
+                excluded.push(item.path.as_str());
             } else {
                 uncovered.push(item);
             }
             continue;
         }
 
-        if let Some((reason, issue)) = exclusion_set.get(&item.path) {
-            excluded.push((item.path.as_str(), reason.as_str(), issue.as_str()));
+        if exclusion_set.contains_key(&item.path) {
+            excluded.push(item.path.as_str());
             continue;
         }
 
@@ -261,7 +312,8 @@ fn every_public_item_has_a_conformance_reference_or_tracking_issue() {
         "{} ferrotorch-core public item(s) lack a conformance reference. \
          Either author a test in tests/conformance_*.rs that references the \
          item by name, OR add it to tests/conformance/_surface_exclusions.toml \
-         with `reason` and `tracking_issue` fields.",
+         with `kind` (\"permanent\" | \"deferred\") and `reason` fields, plus \
+         a `tracking_issue` pointing at an OPEN issue when deferred.",
         uncovered.len()
     );
 
@@ -279,5 +331,193 @@ fn every_public_item_has_a_conformance_reference_or_tracking_issue() {
         stale.is_empty(),
         "_surface_exclusions.toml lists items that no longer exist in the \
          surface inventory (stale entries — remove or update): {stale:?}"
+    );
+}
+
+/// Coverage-location markers required in the `reason` of every
+/// `kind = "permanent"` exclusion. The rule: a permanent exclusion is a
+/// claim that coverage already exists somewhere this gate cannot see, so its
+/// reason must contain at least one phrase that points at that coverage.
+/// The accepted phrases (case-sensitive substrings):
+///
+/// - `"Implicit coverage"`       — grad_fn/method tested via its op's suite
+/// - `"overed by"`               — matches `Covered by` / `covered by ...`
+/// - `"tested via"`              — names the exercising test directly
+/// - `"covered transitively by"` — re-export covered through the underlying
+///   item's conformance test
+/// - `"verified vs LIVE torch"`  — src-side live-torch test module
+/// - `"Exercised by"`            — src-side `#[cfg(test)]` unit test
+const PERMANENT_COVERAGE_MARKERS: &[&str] = &[
+    "Implicit coverage",
+    "overed by",
+    "tested via",
+    "covered transitively by",
+    "verified vs LIVE torch",
+    "Exercised by",
+];
+
+/// Maximum age of the committed liveness snapshot before the gate demands a
+/// refresh. 45 days keeps "the snapshot says open but the issue closed
+/// months ago" from becoming the new dead-reference loophole.
+const SNAPSHOT_MAX_AGE_DAYS: i64 = 45;
+
+/// Days from civil date to the Unix epoch (1970-01-01), via Howard Hinnant's
+/// `days_from_civil` algorithm — avoids pulling `chrono` into the dev-deps
+/// for a single date comparison.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (i64::from(m) + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Parse a strict `YYYY-MM-DD` date into days-since-Unix-epoch.
+fn parse_iso_date_days(s: &str) -> Option<i64> {
+    let parts: Vec<&str> = s.split('-').collect();
+    let [y, m, d] = parts.as_slice() else {
+        return None;
+    };
+    if y.len() != 4 || m.len() != 2 || d.len() != 2 {
+        return None;
+    }
+    let y: i64 = y.parse().ok()?;
+    let m: u32 = m.parse().ok()?;
+    let d: u32 = d.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    Some(days_from_civil(y, m, d))
+}
+
+/// CORE-195 (#1889): the gate above proves excluded items still exist; this
+/// one proves the *deferral audit trail* is alive. Before this test, 569 of
+/// 573 exclusions referenced CLOSED tracking issues — "an exclusion without
+/// a follow-up issue is indefinite deferral" was enforced against dead
+/// references. Contract enforced here:
+///
+/// - every `kind = "deferred"` exclusion references a `#NNN` issue that the
+///   committed snapshot (`_tracking_issue_status.json`) records as `"open"`;
+/// - every `kind = "permanent"` exclusion's reason names where the coverage
+///   actually lives (contains a [`PERMANENT_COVERAGE_MARKERS`] phrase);
+/// - the snapshot exists (missing file = hard failure, never a skip) and is
+///   less than [`SNAPSHOT_MAX_AGE_DAYS`] days old, so closures get noticed.
+///
+/// `.crosslink/issues.db` is gitignored, so CI cannot query issue state;
+/// regenerate the snapshot locally with
+/// `python3 scripts/refresh_exclusion_issue_status.py` and commit it.
+#[test]
+fn exclusion_tracking_issues_are_live() {
+    let exclusions = read_exclusions();
+    assert!(
+        !exclusions.is_empty(),
+        "no exclusions parsed from _surface_exclusions.toml — the liveness \
+         gate expects the exclusion ledger to exist"
+    );
+
+    let snap_path = conformance_dir().join("_tracking_issue_status.json");
+    let bytes = fs::read(&snap_path).unwrap_or_else(|e| {
+        panic!(
+            "read {} failed: {e}.\nThe tracking-issue liveness snapshot is \
+             REQUIRED — a missing snapshot is a hard failure, not a skip. \
+             Regenerate and commit it with:\n  \
+             python3 scripts/refresh_exclusion_issue_status.py",
+            snap_path.display()
+        )
+    });
+    let snapshot: TrackingSnapshot = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|e| panic!("parse {}: {e}", snap_path.display()));
+
+    // Freshness: a stale snapshot would let closed issues keep passing.
+    let generated_days = parse_iso_date_days(&snapshot.generated_at).unwrap_or_else(|| {
+        panic!(
+            "snapshot `generated_at` {:?} is not a YYYY-MM-DD date",
+            snapshot.generated_at
+        )
+    });
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_secs();
+    let now_days = i64::try_from(now_secs / 86_400).expect("days since epoch fits i64");
+    let age_days = now_days - generated_days;
+    assert!(
+        age_days >= 0,
+        "snapshot `generated_at` {} is in the future — regenerate it with:\n  \
+         python3 scripts/refresh_exclusion_issue_status.py",
+        snapshot.generated_at
+    );
+    assert!(
+        age_days < SNAPSHOT_MAX_AGE_DAYS,
+        "tracking-issue snapshot is {age_days} days old (generated {}; limit \
+         {SNAPSHOT_MAX_AGE_DAYS}). Refresh and commit it with:\n  \
+         python3 scripts/refresh_exclusion_issue_status.py",
+        snapshot.generated_at
+    );
+
+    let mut violations: Vec<String> = Vec::new();
+    for e in &exclusions {
+        match e.kind {
+            ExclusionKind::Deferred => {
+                // Shape (`Some` + valid) is already gated by the main test;
+                // here we only resolve liveness. Liveness lookups need the
+                // `#NNN` form — a URL-form ref cannot be resolved against the
+                // crosslink snapshot and is a violation for deferred entries.
+                let Some(ti) = &e.tracking_issue else {
+                    violations.push(format!(
+                        "{} — deferred exclusion without a `tracking_issue`",
+                        e.path
+                    ));
+                    continue;
+                };
+                let Some(num) = ti.trim().strip_prefix('#') else {
+                    violations.push(format!(
+                        "{} — deferred `tracking_issue` {ti:?} must be the \
+                         `#NNN` form so liveness can be checked against the \
+                         crosslink snapshot",
+                        e.path
+                    ));
+                    continue;
+                };
+                match snapshot.issues.get(num) {
+                    Some(status) if status == "open" => {}
+                    Some(status) => violations.push(format!(
+                        "{} — tracking issue #{num} is {status:?}, not open. A \
+                         deferred exclusion must point at LIVE follow-up work: \
+                         author the conformance coverage, or re-point the \
+                         entry at an open burndown issue",
+                        e.path
+                    )),
+                    None => violations.push(format!(
+                        "{} — tracking issue #{num} is absent from \
+                         _tracking_issue_status.json; refresh the snapshot \
+                         with `python3 scripts/refresh_exclusion_issue_status.py`",
+                        e.path
+                    )),
+                }
+            }
+            ExclusionKind::Permanent => {
+                if !PERMANENT_COVERAGE_MARKERS
+                    .iter()
+                    .any(|m| e.reason.contains(m))
+                {
+                    violations.push(format!(
+                        "{} — permanent exclusion whose reason never says \
+                         where the coverage lives (needs one of \
+                         {PERMANENT_COVERAGE_MARKERS:?}): {:?}",
+                        e.path, e.reason
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "{} exclusion liveness violation(s):\n  {}",
+        violations.len(),
+        violations.join("\n  ")
     );
 }
