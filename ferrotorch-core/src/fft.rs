@@ -56,7 +56,6 @@ use rustfft::num_complex::Complex;
 
 use crate::dtype::{DType, Element, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
-use crate::numeric_cast::cast;
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
 
@@ -268,6 +267,80 @@ fn is_last_signal_axis(dim: Option<isize>, signal_ndim: usize) -> bool {
     }
 }
 
+/// Output-length validation + empty-frequency-axis short circuit for the
+/// complex-to-real entry points ([`irfft_norm`] / [`hfft_norm`]) — CORE-155 /
+/// #1849.
+///
+/// Mirrors upstream `fft_c2r` (`aten/src/ATen/native/SpectralOps.cpp:207-208`):
+///
+/// ```cpp
+/// const auto n = n_opt.value_or(2*(input.sym_sizes()[dim] - 1));
+/// TORCH_CHECK(n >= 1, "Invalid number of data points (", n, ") specified");
+/// ```
+///
+/// The default output length is computed **lazily** and in **signed**
+/// arithmetic, so a zero-length frequency axis with `n=None` reports torch's
+/// `Invalid number of data points (-2) specified` instead of underflowing
+/// `usize`, and an explicit `n` never evaluates the underflowing expression.
+/// With a valid explicit `n`, torch zero-pads the empty spectrum
+/// (`resize_fft_input`, `SpectralOps.cpp:209-211`) and the all-zero Hermitian
+/// spectrum inverts to all zeros (verified live, torch 2.11:
+/// `torch.fft.irfft(torch.zeros(0, dtype=torch.complex64), n=8)` is eight
+/// zeros) — the wrapper returns those zeros directly, because delegating
+/// would re-trigger the same eager `2 * (len - 1)` underflow duplicated
+/// inside ferray-fft (`ferray-fft-0.4.1/src/real.rs:139`,
+/// `src/hermitian.rs:72`).
+///
+/// Returns `Ok(Some(result))` when the empty frequency axis fully determines
+/// the result, `Ok(None)` to proceed with the normal transform paths. Inputs
+/// whose shape is not a well-formed complex layout (`ndim < 2` or no trailing
+/// pair axis) and out-of-range `dim`s fall through unchanged so the entry
+/// points / ferray bridge keep reporting their existing structured errors.
+fn c2r_guard_empty_axis<T: Float>(
+    input: &Tensor<T>,
+    n: Option<usize>,
+    dim: Option<isize>,
+    op: &'static str,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    let shape = input.shape();
+    let ndim = shape.len();
+    if ndim < 2 || shape.last() != Some(&2) {
+        return Ok(None);
+    }
+    let signal_ndim = ndim - 1;
+    // Resolve `dim` against the signal layout, mirroring `maybe_wrap_dim`
+    // (`SpectralOps.cpp:206`).
+    let axis = match dim {
+        None => signal_ndim - 1,
+        Some(d) if d >= 0 && (d as usize) < signal_ndim => d as usize,
+        Some(d) if d < 0 && d >= -(signal_ndim as isize) => (d + signal_ndim as isize) as usize,
+        Some(_) => return Ok(None),
+    };
+    let m = shape[axis];
+    let n_eff: i128 = match n {
+        Some(v) => v as i128,
+        None => 2 * (m as i128) - 2,
+    };
+    if n_eff < 1 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: Invalid number of data points ({n_eff}) specified"),
+        });
+    }
+    if m == 0 {
+        let mut out_shape: Vec<usize> = shape[..signal_ndim].to_vec();
+        out_shape[axis] = n_eff as usize;
+        let zeros = crate::creation::zeros::<T>(&out_shape)?;
+        if input.is_cuda() {
+            // The result is fully determined (all zeros) but must live on
+            // the input's device; this is a fresh H2D upload of the freshly
+            // created tensor, not a device round trip of input data.
+            return zeros.to(input.device()).map(Some);
+        }
+        return Ok(Some(zeros));
+    }
+    Ok(None)
+}
+
 /// 1-D inverse FFT along the last dimension (default `norm`).
 ///
 /// Input has shape `[..., n, 2]` (complex). Returns complex output of the
@@ -463,37 +536,44 @@ pub fn irfft_norm<T: Float>(
         });
     }
 
+    // CORE-155 / #1849: validate the output length (torch's "Invalid number
+    // of data points") and short-circuit the empty-frequency-axis case
+    // BEFORE the default length is ever computed (the eager
+    // `n.unwrap_or(2 * (half_n - 1))` underflowed on `[0, 2]` inputs).
+    if let Some(short_circuit) = c2r_guard_empty_axis(input, n, dim, "irfft")? {
+        return Ok(short_circuit);
+    }
+
     let half_n = shape[ndim - 2];
-    let output_n = n.unwrap_or(2 * (half_n - 1));
 
     // GPU fast path: default last-axis / backward-norm / canonical-half only.
-    if input.is_cuda()
-        && norm == FftNorm::Backward
-        && is_last_signal_axis(dim, ndim - 1)
-        && half_n == output_n / 2 + 1
-    {
-        if output_n == 0 {
-            return Err(FerrotorchError::InvalidArgument {
-                message: "irfft: output length must be > 0".into(),
-            });
-        }
-        let batch_shape = &shape[..ndim - 2];
-        let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
-        let backend =
-            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let buf = input.gpu_handle()?;
-        let h = if is_f32::<T>() {
-            backend.irfft_c2r_f32(buf, batch_size, output_n)?
-        } else if is_f64::<T>() {
-            backend.irfft_c2r_f64(buf, batch_size, output_n)?
-        } else {
-            return Err(FerrotorchError::InvalidArgument {
-                message: "irfft requires f32 or f64".into(),
-            });
+    if input.is_cuda() && norm == FftNorm::Backward && is_last_signal_axis(dim, ndim - 1) {
+        // Past `c2r_guard_empty_axis` the last-axis case has `half_n >= 1`
+        // and the requested length is `>= 1`, so the lazy default cannot
+        // underflow and `output_n >= 1` (CORE-155 / #1849).
+        let output_n = match n {
+            Some(v) => v,
+            None => 2 * (half_n - 1),
         };
-        let mut out_shape = batch_shape.to_vec();
-        out_shape.push(output_n);
-        return Tensor::from_storage(TensorStorage::gpu(h), out_shape, false);
+        if half_n == output_n / 2 + 1 {
+            let batch_shape = &shape[..ndim - 2];
+            let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let buf = input.gpu_handle()?;
+            let h = if is_f32::<T>() {
+                backend.irfft_c2r_f32(buf, batch_size, output_n)?
+            } else if is_f64::<T>() {
+                backend.irfft_c2r_f64(buf, batch_size, output_n)?
+            } else {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: "irfft requires f32 or f64".into(),
+                });
+            };
+            let mut out_shape = batch_shape.to_vec();
+            out_shape.push(output_n);
+            return Tensor::from_storage(TensorStorage::gpu(h), out_shape, false);
+        }
     }
 
     // CPU path: ferray_fft 0.3.8 performs the Hermitian projection + the
@@ -704,8 +784,41 @@ fn tensor_to_real_array<T: Float>(
     })
 }
 
+/// Direct `f64 -> T` float conversion with `as`-cast semantics for the FFT
+/// array->tensor bridges (CORE-157 / #1851): a finite f64 spectrum bin that
+/// overflows the narrower target saturates to ±inf, matching torch, which
+/// computes f32 FFTs natively in f32 and returns `inf` bins on overflow
+/// (verified live, torch 2.11:
+/// `torch.fft.rfft(torch.tensor([3e38, 3e38])) == [inf+0j, 0+0j]`). NaN and
+/// ±inf sources pass through unchanged.
+///
+/// The general-purpose fallible [`crate::numeric_cast::cast`] (whose #815
+/// saturation guard *rejects* finite overflow) stays in use everywhere else:
+/// its contract is argument validation, while this conversion is the
+/// value-domain result encoding of a transform whose torch contract is
+/// saturate-to-inf.
+#[inline]
+fn f64_to_float_saturating<T: Float>(v: f64) -> T {
+    match num_traits::NumCast::from(v) {
+        Some(x) => x,
+        // Unreachable for float targets: num_traits' float->float conversion
+        // is `Some(v as T)` (`num-traits-0.2.19/src/cast.rs:269-278`) and the
+        // `half` impls saturate to ±inf. Stay total without panicking,
+        // preserving the sign.
+        None => {
+            if v.is_sign_negative() {
+                T::neg_infinity()
+            } else {
+                T::infinity()
+            }
+        }
+    }
+}
+
 /// Convert an `Array<Complex<f64>, IxDyn>` back to a `Tensor<T>` with the
-/// trailing 2-dim representing complex pairs.
+/// trailing 2-dim representing complex pairs. Finite overflow of the target
+/// dtype saturates to ±inf per [`f64_to_float_saturating`] (CORE-157 /
+/// #1851).
 fn complex_array_to_tensor<T: Float>(
     arr: &FerrayArray<Complex<f64>, FerrayIxDyn>,
 ) -> FerrotorchResult<Tensor<T>> {
@@ -713,23 +826,22 @@ fn complex_array_to_tensor<T: Float>(
     let total: usize = shape.iter().product();
     let mut out_data: Vec<T> = Vec::with_capacity(total * 2);
     for c in arr.iter() {
-        out_data.push(cast(c.re)?);
-        out_data.push(cast(c.im)?);
+        out_data.push(f64_to_float_saturating(c.re));
+        out_data.push(f64_to_float_saturating(c.im));
     }
     let mut out_shape = shape;
     out_shape.push(2);
     Tensor::from_storage(TensorStorage::cpu(out_data), out_shape, false)
 }
 
-/// Convert an `Array<f64, IxDyn>` back to a real `Tensor<T>`.
+/// Convert an `Array<f64, IxDyn>` back to a real `Tensor<T>`. Finite overflow
+/// of the target dtype saturates to ±inf per [`f64_to_float_saturating`]
+/// (CORE-157 / #1851).
 fn real_array_to_tensor<T: Float>(
     arr: &FerrayArray<f64, FerrayIxDyn>,
 ) -> FerrotorchResult<Tensor<T>> {
     let shape = arr.shape().to_vec();
-    let out_data: Vec<T> = arr
-        .iter()
-        .map(|&v| cast(v))
-        .collect::<FerrotorchResult<_>>()?;
+    let out_data: Vec<T> = arr.iter().map(|&v| f64_to_float_saturating(v)).collect();
     Tensor::from_storage(TensorStorage::cpu(out_data), shape, false)
 }
 
@@ -1157,6 +1269,12 @@ pub fn hfft_norm<T: Float>(
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
     reject_half_cpu_fft::<T>("hfft")?;
+    // CORE-155 / #1849: validate the output length and short-circuit the
+    // empty-frequency-axis case BEFORE the CUDA gate or the ferray bridge
+    // can evaluate the underflowing `2 * (half_n - 1)` default.
+    if let Some(short_circuit) = c2r_guard_empty_axis(input, n, dim, "hfft")? {
+        return Ok(short_circuit);
+    }
     // GPU fast path (#636): hfft = conj + irfft, fully on-device. Restricted
     // to default last-axis / backward-norm (cuFFT can't honour dim/norm here).
     if input.is_cuda()
@@ -1169,7 +1287,12 @@ pub fn hfft_norm<T: Float>(
         if shape.len() >= 2 && *shape.last().unwrap() == 2 {
             let ndim = shape.len();
             let half_in = shape[ndim - 2];
-            let n_out = n.unwrap_or(2 * (half_in - 1));
+            // Past `c2r_guard_empty_axis`: `half_in >= 1`, so the lazy
+            // default cannot underflow (CORE-155 / #1849).
+            let n_out = match n {
+                Some(v) => v,
+                None => 2 * (half_in - 1),
+            };
             // GPU path only when half_in == n_out/2+1 (no pad/truncate needed).
             if half_in == n_out / 2 + 1 {
                 let batch_shape = &shape[..ndim - 2];
@@ -1425,16 +1548,52 @@ pub fn rfftfreq(n: usize, d: f64) -> FerrotorchResult<Tensor<f64>> {
 // Shift helpers (fftshift, ifftshift)
 // ---------------------------------------------------------------------------
 
+/// True when a shift input is complex-encoded under the module's interleaved
+/// convention: `ndim >= 2` with a trailing pair axis of size 2 (CORE-156 /
+/// #1850).
+///
+/// Upstream `fft_fftshift` / `fft_ifftshift`
+/// (`aten/src/ATen/native/SpectralOps.cpp:767-789`) roll the tensor's *dims*
+/// — for a complex tensor the re/im pair is dtype payload, not a dim, and is
+/// never rolled. In the interleaved `[..., 2]` representation the pair axis
+/// is therefore metadata: axes resolve against the signal layout (trailing 2
+/// stripped) and `axes=None` shifts every *signal* axis only.
+///
+/// Inherent encoding ambiguity, documented contract: a genuinely REAL tensor
+/// whose last dim happens to be 2 is indistinguishable from a length-`[...]`
+/// complex tensor and is treated as complex (its pair axis is not shifted).
+/// Callers with such real data must shift explicitly per axis on a layout
+/// that does not end in 2.
+#[inline]
+fn is_complex_encoded_shift_input(shape: &[usize]) -> bool {
+    shape.len() >= 2 && shape.last() == Some(&2)
+}
+
 /// Shift the zero-frequency component to the center along the given axes.
 ///
-/// If `axes` is `None`, shifts every axis. Matches `torch.fft.fftshift`
-/// (and `numpy.fft.fftshift`).
+/// Matches `torch.fft.fftshift` (`aten/src/ATen/native/SpectralOps.cpp:767`,
+/// shift `size[dim] / 2` per axis via `roll`). For complex-encoded inputs
+/// (`[..., 2]` interleaved pairs, `ndim >= 2`) `axes` resolves against the
+/// signal layout with the trailing pair axis stripped — like every transform
+/// entry point in this module — and `axes=None` shifts every *signal* axis;
+/// the re/im pair axis is metadata and is never shifted (CORE-156 / #1850;
+/// see [`is_complex_encoded_shift_input`] for the encoding-ambiguity
+/// contract). For other inputs (e.g. `fftshift(fftfreq(n))`, shape `[n]`)
+/// `axes=None` shifts every axis, matching torch on real tensors.
 pub fn fftshift<T: Float>(
     input: &Tensor<T>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "fftshift" });
+    }
+    if is_complex_encoded_shift_input(input.shape()) {
+        let arr = tensor_to_complex_array(input, "fftshift")?;
+        let shifted =
+            ferray_fft::fftshift(&arr, axes).map_err(|e| FerrotorchError::InvalidArgument {
+                message: format!("fftshift: {e}"),
+            })?;
+        return complex_array_to_tensor(&shifted);
     }
     let arr = tensor_to_real_array(input, "fftshift")?;
     let shifted =
@@ -1447,13 +1606,23 @@ pub fn fftshift<T: Float>(
 /// Inverse of [`fftshift`].
 ///
 /// Differs from `fftshift` only on odd-length axes. Matches
-/// `torch.fft.ifftshift`.
+/// `torch.fft.ifftshift` (`aten/src/ATen/native/SpectralOps.cpp:779`, shift
+/// `(size[dim] + 1) / 2` per axis). Complex-encoded inputs follow the same
+/// signal-layout axis resolution as [`fftshift`] (CORE-156 / #1850).
 pub fn ifftshift<T: Float>(
     input: &Tensor<T>,
     axes: Option<&[isize]>,
 ) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "ifftshift" });
+    }
+    if is_complex_encoded_shift_input(input.shape()) {
+        let arr = tensor_to_complex_array(input, "ifftshift")?;
+        let shifted =
+            ferray_fft::ifftshift(&arr, axes).map_err(|e| FerrotorchError::InvalidArgument {
+                message: format!("ifftshift: {e}"),
+            })?;
+        return complex_array_to_tensor(&shifted);
     }
     let arr = tensor_to_real_array(input, "ifftshift")?;
     let shifted =

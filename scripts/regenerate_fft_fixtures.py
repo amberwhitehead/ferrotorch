@@ -459,6 +459,20 @@ SHIFT_CASES: list[tuple[str, list[int], list[int] | None]] = [
     ("shape_2x3x4_default", [2, 3, 4], None),
 ]
 
+# Complex-encoded shift cases (CORE-156 / #1850): ferrotorch carries complex
+# tensors as interleaved `[..., 2]`; the pair axis is metadata and is never
+# shifted, so `a_shape` carries the trailing 2 while `axes` name the SIGNAL
+# axes — identical indices to the torch complex tensor's dims (the runner
+# passes both straight through to `fft::fftshift`/`ifftshift`). Shapes here
+# are the torch complex-tensor shapes (without the trailing 2).
+COMPLEX_SHIFT_CASES: list[tuple[str, list[int], list[int] | None]] = [
+    ("complex_len_4_all_axes", [4], None),
+    ("complex_len_5_all_axes", [5], None),  # odd
+    ("complex_len_4_axes_n1", [4], [-1]),
+    ("complex_2x3_default", [2, 3], None),
+    ("complex_2x3_axes_0", [2, 3], [0]),
+]
+
 
 def fixture_fftshift() -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
@@ -482,6 +496,27 @@ def fixture_fftshift() -> list[dict[str, Any]]:
                             "a_shape": shape,
                             "a_data": to_listf(inp),
                             "out_shape": list(fwd.shape),
+                            "out_values": to_listf(fwd),
+                        }
+                    )
+        for tag, shape, axes in COMPLEX_SHIFT_CASES:
+            for device in DEVICES:
+                for dtype in DTYPES:
+                    inp = _complex_input(shape, dtype, device, 0x502)
+                    kwargs = {}
+                    if axes is not None:
+                        kwargs["dim"] = tuple(axes)
+                    fwd = torch_op(inp, **kwargs)
+                    out.append(
+                        {
+                            "op": op_name,
+                            "tag": tag,
+                            "dtype": dtype,
+                            "device": device,
+                            "axes": axes,
+                            "a_shape": shape_with_complex_trailing(inp),
+                            "a_data": to_listf(inp),
+                            "out_shape": shape_with_complex_trailing(fwd),
                             "out_values": to_listf(fwd),
                         }
                     )
