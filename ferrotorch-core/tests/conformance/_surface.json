@@ -1192,6 +1192,8 @@
     { "path": "ferrotorch_core::ops::phase2c::Tensor <T>::to_int", "kind": "method", "signature": "fn to_int < I : IntElement > (& self) -> FerrotorchResult < IntTensor < I > >" },
     { "path": "ferrotorch_core::ops::scatter::scatter_add_segments", "kind": "fn", "signature": "fn scatter_add_segments < T : Float > (src : & Tensor < T > , index : & [i64] , dim_size : usize ,) -> FerrotorchResult < Tensor < T > >" },
     { "path": "ferrotorch_core::ops::search::MeshIndexing", "kind": "enum", "signature": "pub enum MeshIndexing" },
+    { "path": "ferrotorch_core::ops::search::MeshgridBackward", "kind": "struct", "signature": "# [derive (Debug)] pub struct MeshgridBackward< T : Float >" },
+    { "path": "ferrotorch_core::ops::search::TopkBackward", "kind": "struct", "signature": "# [derive (Debug)] pub struct TopkBackward< T : Float >" },
     { "path": "ferrotorch_core::ops::search::bucketize", "kind": "fn", "signature": "fn bucketize < T : Float > (input : & Tensor < T > , boundaries : & Tensor < T > , right : bool ,) -> FerrotorchResult < Vec < usize > >" },
     { "path": "ferrotorch_core::ops::search::histc", "kind": "fn", "signature": "fn histc < T : Float > (input : & Tensor < T > , bins : usize , min_val : f64 , max_val : f64 ,) -> FerrotorchResult < Tensor < T > >" },
     { "path": "ferrotorch_core::ops::search::meshgrid", "kind": "fn", "signature": "fn meshgrid < T : Float > (tensors : & [Tensor < T >]) -> FerrotorchResult < Vec < Tensor < T > > >" },

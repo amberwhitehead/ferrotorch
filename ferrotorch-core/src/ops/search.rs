@@ -9,19 +9,22 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `searchsorted` at `ops/search.rs:20`; consumer: re-export `ferrotorch_core::searchsorted` at `lib.rs:176`. CUDA f32/f64 lower on-device via `GpuBackend::searchsorted_1d` (#1545). |
-//! | REQ-2 | SHIPPED | `bucketize` at `ops/search.rs:63`; consumer: re-export at `lib.rs:176`. Inherits the CUDA GPU path through its delegation to `searchsorted`. |
+//! | REQ-1 | SHIPPED | `searchsorted` at `ops/search.rs:36`; consumer: re-export `ferrotorch_core::searchsorted` at `lib.rs:176`. CUDA f32/f64 lower on-device via `GpuBackend::searchsorted_1d` (#1545). |
+//! | REQ-2 | SHIPPED | `bucketize` at `ops/search.rs:140`; consumer: re-export at `lib.rs:176`. Inherits the CUDA GPU path through its delegation to `searchsorted`. |
 //! | REQ-3 | SHIPPED | `unique`; consumer: re-export `ferrotorch_core::unique`. CUDA f32/f64 lower the SORTED sort-by-key dedup on-device via `GpuBackend::unique_1d` (#1545); SORTED-unique values stay GPU-resident, only index/run metadata read back. NaN NOT collapsed (each distinct, sorted last), matching live torch 2.11. |
-//! | REQ-4 | SHIPPED | `unique_consecutive` at `ops/search.rs:140`; consumer: re-export at `lib.rs:176`. CUDA f32/f64 lower the data-dependent run compaction on-device via `GpuBackend::unique_consecutive_1d` (#1545); values stay GPU-resident, only run-position metadata read back. |
+//! | REQ-4 | SHIPPED | `unique_consecutive` at `ops/search.rs:260`; consumer: re-export at `lib.rs:176`. CUDA f32/f64 lower the data-dependent run compaction on-device via `GpuBackend::unique_consecutive_1d` (#1545); values stay GPU-resident, only run-position metadata read back. |
 //! | REQ-5 | SHIPPED | `histc`; consumer: re-export `ferrotorch_core::histc`. Out-of-range/NaN values are SKIPPED (not clamped), matching torch `SummaryOps.cu:92` (#1650); default `min==max` infers the range from data `aminmax`, widening all-equal data to `[v-1,v+1]` per `SummaryOps.cu:328-336` (#1652). CUDA f32/f64 accumulate the histogram on-device via `GpuBackend::histc_1d` (#1545); counts stay GPU-resident. |
-//! | REQ-6 | SHIPPED | `meshgrid` (= `meshgrid_indexing(.., Ij)`) + `meshgrid_indexing(tensors, MeshIndexing)`; consumer: `meshgrid` delegates to `meshgrid_indexing`, both re-exported. `MeshIndexing::Xy` swaps the first two inputs+output grids per torch `TensorShape.cpp:4433-4438,4470-4472` (#1652). CUDA f32/f64 produce each axis grid on-device via `GpuBackend::meshgrid_grid` (#1545); grids stay GPU-resident. |
-//! | REQ-7 | SHIPPED | `topk` at `ops/search.rs:287`; consumer: re-export `ferrotorch_core::topk` at `lib.rs:176`. CUDA f32/f64 lower the k-selection on-device via `GpuBackend::topk_1d` (#1545); values stay GPU-resident, only int64 indices read back. |
+//! | REQ-6 | SHIPPED | `meshgrid` (= `meshgrid_indexing(.., Ij)`) + `meshgrid_indexing(tensors, MeshIndexing)`; consumer: `meshgrid` delegates to `meshgrid_indexing`, both re-exported. `MeshIndexing::Xy` swaps the first two inputs+output grids per torch `TensorShape.cpp:4433-4438,4470-4472` (#1652). CUDA f32/f64 produce each axis grid on-device via `GpuBackend::meshgrid_grid` (#1545); grids stay GPU-resident. Grid `i` is differentiable w.r.t. coordinate tensor `i` via `MeshgridBackward` (CORE-110, #1804). |
+//! | REQ-7 | SHIPPED | `topk` at `ops/search.rs:814`; consumer: re-export `ferrotorch_core::topk` at `lib.rs:176`. CUDA f32/f64 lower the k-selection on-device via `GpuBackend::topk_1d` (#1545); values stay GPU-resident, only int64 indices read back. Zero-width last dim short-circuits to shaped empty results (CORE-108, #1802); values carry `TopkBackward` for tracking inputs (CORE-109, #1803). |
 
+use std::sync::Arc;
+
+use crate::autograd::no_grad::is_grad_enabled;
 use crate::dtype::Float;
 use crate::dtype_dispatch::{is_f32, is_f64};
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
-use crate::tensor::Tensor;
+use crate::tensor::{GradFn, Tensor};
 
 /// Find insertion indices for `values` in a sorted 1-D `boundaries` tensor.
 ///
@@ -471,10 +474,99 @@ pub enum MeshIndexing {
     Xy,
 }
 
+/// Backward node for ONE [`meshgrid`] output grid (CORE-110, #1804).
+///
+/// Upstream `meshgrid` builds grid `i` as
+/// `tensors[i].view(view_shape).expand(shape)`
+/// (`aten/src/ATen/native/TensorShape.cpp:4462-4467`), so grid `i` connects
+/// ONLY to coordinate tensor `i` and its backward is `ExpandBackward0`: the
+/// grid gradient summed over every axis except the grid's own axis `dim`.
+/// The `'xy'` convention needs no special casing here — the recursion in
+/// [`meshgrid_indexing`] swaps tensor CLONES (which share autograd
+/// identity), so each grid's node already references the right coordinate
+/// tensor.
+///
+/// The reduction runs on host (the upstream gradient is read back via
+/// `data_vec`) and the reduced gradient is uploaded back to the input's
+/// device via `TensorStorage::on_device` — an explicit host round trip of
+/// the GRADIENT only (R-LOUD-2; same pattern as `WhereBackward` in
+/// `grad_fns/comparison.rs` and [`TopkBackward`]). The forward grids never
+/// leave their device.
+#[derive(Debug)]
+pub struct MeshgridBackward<T: Float> {
+    input: Tensor<T>,
+    /// The axis this grid varies along (its index in the input list).
+    dim: usize,
+    /// Full grid shape `[len0, len1, ..., lenN-1]`.
+    shapes: Vec<usize>,
+}
+
+impl<T: Float> GradFn<T> for MeshgridBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let go = grad_output.data_vec()?;
+        let len = self.shapes[self.dim];
+        let inner: usize = self.shapes[self.dim + 1..].iter().product();
+        // grad[c] = sum of grad_output over every flat position whose
+        // coordinate along `dim` is `c` — the inverse of the forward gather
+        // `grid[flat] = input[(flat / inner) % len]`. An empty axis anywhere
+        // makes `go` empty (total == 0), so the loop body (and its division
+        // by `inner`) is never reached with `inner == 0`.
+        let mut grad = vec![<T as num_traits::Zero>::zero(); len];
+        for (flat, &g) in go.iter().enumerate() {
+            grad[(flat / inner) % len] += g;
+        }
+        let grad_tensor = Tensor::from_storage(
+            TensorStorage::on_device(grad, self.input.device())?,
+            self.input.shape().to_vec(),
+            false,
+        )?;
+        Ok(vec![Some(grad_tensor)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "MeshgridBackward"
+    }
+}
+
+/// Wrap one freshly computed meshgrid grid, attaching a
+/// [`MeshgridBackward`] node when gradient tracking is enabled and THIS
+/// grid's coordinate tensor tracks (torch: grid `i` carries
+/// `ExpandBackward0` iff `tensors[i].requires_grad`; the other grids stay
+/// honestly detached — R-LOUD-3).
+fn meshgrid_grid_tensor<T: Float>(
+    storage: TensorStorage<T>,
+    shapes: &[usize],
+    input: &Tensor<T>,
+    dim: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    if is_grad_enabled() && input.requires_grad() {
+        Tensor::from_operation(
+            storage,
+            shapes.to_vec(),
+            Arc::new(MeshgridBackward {
+                input: input.clone(),
+                dim,
+                shapes: shapes.to_vec(),
+            }),
+        )
+    } else {
+        Tensor::from_storage(storage, shapes.to_vec(), false)
+    }
+}
+
 /// Create coordinate grids from 1-D coordinate vectors.
 ///
 /// Given N 1-D tensors, returns N tensors of shape `[len0, len1, ..., lenN-1]`
 /// where each output tensor contains the coordinates for one axis.
+///
+/// Grid `i` is differentiable w.r.t. coordinate tensor `i`: for a
+/// gradient-tracking input it carries a [`MeshgridBackward`] node that sums
+/// the grid gradient over every other axis, matching torch's
+/// `view(..).expand(..)` composition (CORE-110, #1804).
 ///
 /// Matches PyTorch's `torch.meshgrid` with `indexing='ij'` (the default). For
 /// `indexing='xy'` use [`meshgrid_indexing`].
@@ -556,13 +648,17 @@ pub fn meshgrid_indexing<T: Float>(
         for (dim, t) in tensors.iter().enumerate() {
             let inner: usize = shapes[dim + 1..].iter().product();
             // #1658: normalise a possibly narrowed-offset CUDA input to a packed
-            // offset-0 buffer before the per-axis gather reads element 0.
-            let t = t.contiguous()?;
-            let grid_handle = backend.meshgrid_grid(t.gpu_handle()?, total, inner, shapes[dim])?;
-            result.push(Tensor::from_storage(
+            // offset-0 buffer before the per-axis gather reads element 0. Kept
+            // as a separate binding (NOT shadowing `t`) so the backward node
+            // references the ORIGINAL input tensor for graph traversal.
+            let t_c = t.contiguous()?;
+            let grid_handle =
+                backend.meshgrid_grid(t_c.gpu_handle()?, total, inner, shapes[dim])?;
+            result.push(meshgrid_grid_tensor(
                 TensorStorage::gpu(grid_handle),
-                shapes.clone(),
-                false,
+                &shapes,
+                t,
+                dim,
             )?);
         }
         return Ok(result);
@@ -592,10 +688,11 @@ pub fn meshgrid_indexing<T: Float>(
         // Suppress unused variable warning.
         let _ = outer_stride;
 
-        result.push(Tensor::from_storage(
+        result.push(meshgrid_grid_tensor(
             TensorStorage::cpu(grid),
-            shapes.clone(),
-            false,
+            &shapes,
+            t,
+            dim,
         )?);
     }
 
@@ -620,10 +717,98 @@ fn nan_is_max_cmp<T: Float>(lhs: T, rhs: T) -> std::cmp::Ordering {
     }
 }
 
+/// Backward node for [`topk`] values (CORE-109, #1803).
+///
+/// Mirrors upstream `value_selecting_reduction_backward`
+/// (`pytorch/torch/csrc/autograd/FunctionsManual.cpp`, used by
+/// `derivatives.yaml`'s `topk` entry): the input gradient is
+/// `zeros_like(input).scatter(dim, indices, grad)` — each value gradient
+/// lands on the index `topk` SELECTED, so ties propagate to the returned
+/// index only. Within a row the `k` selected indices are distinct, so
+/// scatter-assign and scatter-add coincide.
+///
+/// The scatter itself runs on host (the gradient and saved indices are read
+/// back via `data_vec`) and the resulting gradient is uploaded back to the
+/// input's device via `TensorStorage::on_device` — an explicit host round
+/// trip of the GRADIENT only (R-LOUD-2; same pattern as `WhereBackward` in
+/// `grad_fns/comparison.rs`). The forward values never leave their device.
+#[derive(Debug)]
+pub struct TopkBackward<T: Float> {
+    input: Tensor<T>,
+    /// Row-major `[outer, k]` indices into the last dimension, exactly the
+    /// `indices` half of the forward's return value.
+    indices: Vec<usize>,
+    outer: usize,
+    k: usize,
+    last_dim: usize,
+}
+
+impl<T: Float> GradFn<T> for TopkBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let go = grad_output.data_vec()?;
+        let mut grad = vec![<T as num_traits::Zero>::zero(); self.input.numel()];
+        for o in 0..self.outer {
+            for j in 0..self.k {
+                let idx = self.indices[o * self.k + j];
+                grad[o * self.last_dim + idx] += go[o * self.k + j];
+            }
+        }
+        let grad_tensor = Tensor::from_storage(
+            TensorStorage::on_device(grad, self.input.device())?,
+            self.input.shape().to_vec(),
+            false,
+        )?;
+        Ok(vec![Some(grad_tensor)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "TopkBackward"
+    }
+}
+
+/// Wrap freshly computed `topk` values, attaching a [`TopkBackward`] node
+/// when gradient tracking is enabled and the input tracks (torch: topk
+/// values always carry `TopkBackward0` for a `requires_grad` input,
+/// including `k == 0`). Otherwise the values are an honest non-tracking
+/// tensor (R-LOUD-3: no bare `requires_grad` flag without a backward edge).
+fn topk_values_tensor<T: Float>(
+    storage: TensorStorage<T>,
+    out_shape: Vec<usize>,
+    input: &Tensor<T>,
+    indices: &[usize],
+    outer: usize,
+    k: usize,
+    last_dim: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    if is_grad_enabled() && input.requires_grad() {
+        Tensor::from_operation(
+            storage,
+            out_shape,
+            Arc::new(TopkBackward {
+                input: input.clone(),
+                indices: indices.to_vec(),
+                outer,
+                k,
+                last_dim,
+            }),
+        )
+    } else {
+        Tensor::from_storage(storage, out_shape, false)
+    }
+}
+
 /// Return the `k` largest elements and their indices along the last dimension.
 ///
 /// Input must be at least 1-D. Returns `(values, indices)` both with the
 /// last dimension replaced by `k`.
+///
+/// For a gradient-tracking input the values tensor carries a
+/// [`TopkBackward`] node that scatters value gradients to the selected
+/// input indices, matching `torch.topk`'s `TopkBackward0` (CORE-109, #1803).
 ///
 /// Matches PyTorch's `torch.topk`.
 pub fn topk<T: Float>(
@@ -645,6 +830,28 @@ pub fn topk<T: Float>(
         });
     }
 
+    // CORE-108 (#1802): a zero-width last dimension admits ONLY `k == 0`
+    // (the `k > last_dim` check above already rejected `k > 0`). Both device
+    // paths below compute `numel / last_dim`, an integer divide-by-zero, so
+    // short-circuit to the correctly shaped empty result: torch preserves
+    // every outer dimension and returns empty values + indices on the
+    // input's device (`torch.topk(torch.empty(2,3,0), 0)` -> values/indices
+    // shape [2,3,0]; CUDA input -> cuda:0 outputs; verified live on torch
+    // 2.11.0+cu130). `TensorStorage::on_device` keeps a CUDA input's empty
+    // values CUDA-resident (no silent CPU demotion, R-LOUD-1).
+    if last_dim == 0 {
+        let values = topk_values_tensor(
+            TensorStorage::on_device(Vec::new(), input.device())?,
+            shape.to_vec(),
+            input,
+            &[],
+            0,
+            0,
+            0,
+        )?;
+        return Ok((values, Vec::new()));
+    }
+
     // GPU fast path (#1545): for CUDA-resident f32/f64 inputs the k-selection
     // runs on-device via `GpuBackend::topk_1d` over the `[outer, last_dim]`
     // layout (the input is contiguous, so the last dim is the innermost run).
@@ -658,10 +865,13 @@ pub fn topk<T: Float>(
         // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
         // buffer before the on-device k-selection reads element 0 (the
         // `[outer, last_dim]` layout assumption now also guarantees offset 0).
-        let input = input.contiguous()?;
-        let outer = input.numel() / last_dim;
+        // Kept as a separate binding (NOT shadowing `input`) so the backward
+        // node below references the ORIGINAL input tensor for graph
+        // traversal to the leaf.
+        let input_c = input.contiguous()?;
+        let outer = input_c.numel() / last_dim;
         let (val_handle, idx_handle) =
-            backend.topk_1d(input.gpu_handle()?, outer, last_dim, k, largest)?;
+            backend.topk_1d(input_c.gpu_handle()?, outer, last_dim, k, largest)?;
         let bytes = backend.gpu_to_cpu(&idx_handle)?;
         let n = outer * k;
         if bytes.len() < n * 8 {
@@ -684,10 +894,14 @@ pub fn topk<T: Float>(
             .collect();
         let mut out_shape = shape.to_vec();
         *out_shape.last_mut().unwrap() = k;
-        let values = Tensor::from_storage(
+        let values = topk_values_tensor(
             crate::storage::TensorStorage::gpu(val_handle),
             out_shape,
-            false,
+            input,
+            &out_indices,
+            outer,
+            k,
+            last_dim,
         )?;
         return Ok((values, out_indices));
     }
@@ -729,7 +943,15 @@ pub fn topk<T: Float>(
 
     let mut out_shape = shape.to_vec();
     *out_shape.last_mut().unwrap() = k;
-    let values = Tensor::from_storage(TensorStorage::cpu(out_values), out_shape, false)?;
+    let values = topk_values_tensor(
+        TensorStorage::cpu(out_values),
+        out_shape,
+        input,
+        &out_indices,
+        outer,
+        k,
+        last_dim,
+    )?;
 
     Ok((values, out_indices))
 }

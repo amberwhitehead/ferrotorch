@@ -962,6 +962,16 @@ kind = "permanent"
 reason = "Implicit coverage: constructor for RollBackward; invoked by Tensor::roll in ops/tensor_ops.rs when requires_grad. The RollBackward struct itself is covered via conformance_shape.rs; the gate's Type::method substring match doesn't catch RollBackward::new through the struct's existing coverage."
 
 [[exclusion]]
+path = "ferrotorch_core::ops::search::MeshgridBackward"
+kind = "permanent"
+reason = "Implicit coverage: autograd grad_fn for meshgrid/meshgrid_indexing (CORE-110, #1804); gradient values, ij+xy routing, singleton/empty axes, and the CUDA grad-device assertion are tested via tests/audit_core110_meshgrid_backward.rs against live-torch oracles (Cat G — backward grad_fn struct, not a user-callable forward op)."
+
+[[exclusion]]
+path = "ferrotorch_core::ops::search::TopkBackward"
+kind = "permanent"
+reason = "Implicit coverage: autograd grad_fn for topk values (CORE-109, #1803); scatter-to-selected-index gradients, tie case, largest=false, k=0, and the CUDA grad-device assertion are tested via tests/audit_core109_topk_backward.rs against live-torch oracles (Cat G — backward grad_fn struct, not a user-callable forward op)."
+
+[[exclusion]]
 path = "ferrotorch_core::ops::scatter::scatter_add_segments"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed). Segment-scatter primitive (scatter-add along a 1-D index into a fixed dim_size); non-test consumer is ferrotorch-graph MessagePassing per ferrotorch-graph/README.md."
