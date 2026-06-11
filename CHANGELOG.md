@@ -51,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-206: The live-torch parity gate is entirely outside CI, and the parity runner's tests pass vacuously without torch (#1900)
 - CORE-202: The surface-coverage gate counts comment mentions as conformance coverage (#1896)
 - CORE-198: Tie-break regimes are systematically excluded from fixtures while tie semantics are known to diverge (#1892)
 - CORE-197: Masked extremum fixtures pin ferrotorch's NaN where PyTorch raises (#1891)
