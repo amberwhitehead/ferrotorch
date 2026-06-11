@@ -21,7 +21,8 @@
 //!   dequant under `F32_REDUCTION` tolerance):
 //!   - `quantize` per-tensor / per-channel for INT8, UINT8, INT4
 //!   - `dequantize` (round-trip parity within one quantization step)
-//!   - `quantized_matmul` (real-valued output asserted within `2 * scale`)
+//!   - `quantized_matmul` (real-valued output asserted within the analytic
+//!     INT8 error bound derived in `quantized_matmul_real_value_parity`)
 //! * **QParams** symmetric & asymmetric for the boundary zp values
 //!   `0`, `128`, and the all-positive-range cases that exercise the
 //!   non-clamped `zp` path.
@@ -57,8 +58,9 @@
 //!   - quantize integer codes: bit-exact (`assert_eq` on i32-domain)
 //!   - dequantize: F32_REDUCTION (multiplication by scale)
 //!   - prune masks: bit-exact (mask × original)
-//!   - quantized_matmul real-valued output: 2 * combined_scale
-//!     (one scale-step on each input, summed)
+//!   - quantized_matmul real-valued output: analytic INT8 propagation
+//!     bound `k*(|a|max*s_b + |b|max*s_a + s_a*s_b/2)/2 + s_c/2` plus f32
+//!     round-off headroom (CORE-201 -> #1895; derivation at the call site)
 //!
 //! ## Fixture provenance (CORE-194 -> #1888)
 //!
@@ -821,13 +823,40 @@ fn quantized_matmul_real_value_parity() {
         let actual = c_back.data().expect("c data").to_vec();
         let expected_f32: Vec<f32> = c_data.iter().map(|&v| v as f32).collect();
 
-        // Tolerance: combined_scale ≈ qa.scale * qb.scale; the ferrotorch
-        // requantize step then adds another step's worth. Bound by
-        // 4 * combined_scale to absorb round-off + requantize step at boundary.
-        let combined = qa.scale()[0] * qb.scale()[0];
-        let out_step = qc.scale()[0];
-        let step = combined.mul_add(2.0, out_step * 2.0);
-        tolerance::assert_within_step_f32(&actual, &expected_f32, step.max(0.5), &label);
+        // Analytic tolerance (R-ORACLE-5) — derived from the quantization
+        // scheme in src/quantize.rs (CORE-201 -> #1895; the previous
+        // `.max(0.5)` floor had no analytic justification and absorbed
+        // errors up to half a unit on these fixtures):
+        //
+        // 1. Per-tensor INT8 quantize covers each input's own [min, max]
+        //    (zero-extended), so every dequantized element satisfies
+        //    |x_hat - x| <= s/2 with s the input's scale (round-to-nearest;
+        //    `quantize_val`'s clamp cannot push the error past s/2 because
+        //    x/s + zp lies within [qmin - 0.5, qmax + 0.5] for in-range x).
+        // 2. `quantized_matmul` accumulates (qa - za)*(qb - zb) EXACTLY in
+        //    i32, so its pre-requantize real value is exactly the matmul of
+        //    the dequantized inputs: c_hat = A_hat @ B_hat. Against torch's
+        //    float oracle c = A @ B, each k-length dot product obeys
+        //      |c_hat - c| = |sum_p (a*e_b + b*e_a + e_a*e_b)|
+        //                 <= k * (|a|max*s_b + |b|max*s_a + s_a*s_b/2) / 2,
+        //    with |e_a| <= s_a/2, |e_b| <= s_b/2 from step 1.
+        // 3. The internal requantize to INT8 (out scale s_c computed from
+        //    c_hat's own min/max) followed by the test's dequantize adds at
+        //    most one half output step: s_c/2.
+        // 4. f32 round-off (the acc * s_a * s_b multiply, scale computation)
+        //    is a few ULPs relative to |c|; F32_REDUCTION * max(|c|, 1)
+        //    covers it.
+        let s_a = qa.scale()[0];
+        let s_b = qb.scale()[0];
+        let s_c = qc.scale()[0];
+        let k = a_shape[1] as f32;
+        let a_max = a_data.iter().fold(0.0_f32, |m, &v| m.max((v as f32).abs()));
+        let b_max = b_data.iter().fold(0.0_f32, |m, &v| m.max((v as f32).abs()));
+        let c_max = expected_f32.iter().fold(0.0_f32, |m, &v| m.max(v.abs()));
+        let bound = k * (a_max * s_b + b_max * s_a + s_a * s_b * 0.5) / 2.0
+            + s_c * 0.5
+            + tolerance::F32_REDUCTION * c_max.max(1.0);
+        tolerance::assert_within_step_f32(&actual, &expected_f32, bound, &label);
     }
 }
 

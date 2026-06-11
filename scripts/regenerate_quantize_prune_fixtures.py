@@ -476,6 +476,30 @@ def fixture_quantized_matmul() -> list[dict[str, Any]]:
             "c_data": to_listf(c),
             "oracle": "torch.matmul",
         })
+
+    # CORE-201 -> #1895: a k=64 case so the suite's analytic matmul error
+    # bound (which scales linearly with k) is exercised on a long i32
+    # accumulation, not just the 2x2/3x3 toys above. Small magnitudes
+    # (|x| <= 0.25) keep the quantization step — and therefore the bound —
+    # tight (~3e-2 absolute), so the case genuinely discriminates sub-0.5
+    # errors (the old unjustified tolerance floor). A local torch.Generator
+    # makes the data independent of module-level RNG consumption order.
+    g = torch.Generator().manual_seed(RNG_SEED)
+    a64 = (torch.rand(4, 64, generator=g, dtype=torch.float32) - 0.5) * 0.5
+    b64 = (torch.rand(64, 3, generator=g, dtype=torch.float32) - 0.5) * 0.5
+    c64 = a64 @ b64
+    out.append({
+        "op": "quantized_matmul",
+        "tag": "long_k64_4x64_64x3",
+        "qdtype": "int8",
+        "a_shape": [4, 64],
+        "b_shape": [64, 3],
+        "a_data": to_listf(a64),
+        "b_data": to_listf(b64),
+        "c_shape": list(c64.shape),
+        "c_data": to_listf(c64),
+        "oracle": "torch.matmul",
+    })
     return out
 
 
