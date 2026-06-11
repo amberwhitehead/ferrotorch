@@ -51,6 +51,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-135: `vexp_f32` clamps the domain: `exp(-inf)` returns 1.18e-38 and near-threshold inputs fabricate +inf (#1829)
+- CORE-134: `logsumexp` and `logsumexp_dim` return NaN for +inf inputs and all-(-inf) slices (#1828)
+- CORE-133: `logcumsumexp` NaN-poisons scan lines containing infinities (#1827)
+- CORE-140: f16 and bf16 matmul accumulate in storage precision instead of PyTorch's f32 opmath (#1834)
+- CORE-139: Broadcast matmul panics on zero-sized batch dimensions (#1833)
+- CORE-186: 1-D × batched matmul backward returns wrong gradients or errors (#1880)
 - CORE-157: f32 FFTs return errors where PyTorch returns infinities (#1851)
 - CORE-156: `fftshift`/`ifftshift` roll the interleaved complex pair axis, silently corrupting complex spectra (#1850)
 - CORE-155: `irfft`/`hfft` underflow-panic on zero-length frequency axes, even with explicit `n` (#1849)
