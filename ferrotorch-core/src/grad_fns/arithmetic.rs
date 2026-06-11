@@ -12,22 +12,22 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:376`, `add_scaled` at `:754`, `add_out` at `:653`, `add_scaled_out` at `:685`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
-//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:920` delegates to `sub_scaled` at `:949` → `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
+//! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:376`, `add_scaled` at `:774`, `add_out` at `:653`, `add_scaled_out` at `:698`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
+//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:940` delegates to `sub_scaled` at `:969` → `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
 //! | REQ-3 (mul) | SHIPPED | `mul` + `MulBackward` in `arithmetic.rs`; parity `[mul] 72/72` (grep=1) |
 //! | REQ-4 (div) | SHIPPED | `div` + `DivBackward` in `arithmetic.rs`; parity `[div] 72/72` (grep=1) |
 //! | REQ-5 (neg) | SHIPPED | `neg` + `NegBackward`; parity `[neg] 8/8` (grep=1) |
 //! | REQ-6 (abs) | SHIPPED | `abs` + `AbsBackward`; parity `[abs] 8/8` (grep=1) |
 //! | REQ-7 (sqrt) | SHIPPED | `sqrt` + `SqrtBackward`; parity `[sqrt] 8/8` (grep=1) |
 //! | REQ-8 (pow scalar exponent) | SHIPPED | `pow` + `PowBackward` (scalar exp; tensor-exp overload returns `Ok(None)` and is skipped, not failed); parity `[pow] 24/72 passed 48 skipped` (grep=1) |
-//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:1001` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
-//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:1765` + `RsqrtBackward` at `:1674`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
-//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:1913` + `ReciprocalBackward` at `:1836`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
-//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:2750` + `FloorDivideBackward` at `:2593` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
-//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:2113` + `RemainderBackward` at `:1999`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
-//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:2420` + `FmodBackward` at `:2302`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
-//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:3097` + `AddcmulBackward` at `:2954`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
-//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:3412` + `AddcdivBackward` at `:3250`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
+//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:1021` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
+//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:1785` + `RsqrtBackward` at `:1694`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
+//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:1933` + `ReciprocalBackward` at `:1856`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
+//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:2770` + `FloorDivideBackward` at `:2613` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
+//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:2133` + `RemainderBackward` at `:2019`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
+//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:2440` + `FmodBackward` at `:2322`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
+//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:3117` + `AddcmulBackward` at `:2974`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
+//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:3432` + `AddcdivBackward` at `:3270`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -658,9 +658,14 @@ pub fn add_out<T: Float>(out: &Tensor<T>, a: &Tensor<T>, b: &Tensor<T>) -> Ferro
 /// into `out` in-place.
 ///
 /// `out`'s shape must equal the broadcast result shape of `a` and `b`.
-/// `out`'s storage is replaced with the freshly-computed result; any
-/// values previously held by `out` (including NaN sentinels) are
-/// completely overwritten.
+/// The freshly-computed result is written INTO `out`'s existing storage
+/// region — honoring `out`'s storage offset and strides when `out` is a
+/// view, so other tensors sharing the storage keep their elements
+/// (upstream `aten/src/ATen/native/Resize.cpp:27`: matched sizes ⇒ no
+/// resize/swap; #1938). Any values previously held by `out` (including
+/// NaN sentinels) are completely overwritten. Only when `out` covers its
+/// whole storage contiguously is the write performed as a buffer swap
+/// (an unobservable optimization; see [`Tensor::update_storage`]).
 ///
 /// `out` is a `&Tensor` rather than `&mut Tensor` because `Tensor` carries
 /// its mutability through the `Arc<TensorStorage>` (matching `add_scaled_`
@@ -677,6 +682,14 @@ pub fn add_out<T: Float>(out: &Tensor<T>, a: &Tensor<T>, b: &Tensor<T>) -> Ferro
 ///   a leaf with `requires_grad = true` (matches PyTorch's `out=` rule).
 /// - [`FerrotorchError::InvalidArgument`] if `alpha` is not representable
 ///   in the tensor's dtype.
+/// - [`FerrotorchError::InvalidArgument`] if `out` is an internally
+///   overlapping view (a dim of size > 1 with stride 0) — torch raises
+///   "more than one element of the written-to tensor refers to a single
+///   memory location" (#1938).
+/// - [`FerrotorchError::NotImplementedOnCuda`] if `out` is a CUDA
+///   sub-view/strided view with a dtype other than f32/f64 — no
+///   strided-scatter kernel exists yet (follow-up #1939); the error fires
+///   before any storage mutation.
 /// - [`FerrotorchError::InvalidArgument`] if `out.shape()` differs from the
 ///   broadcast shape (the resize path) while `out` is aliased by another
 ///   clone or view — the resize would rewrite shape metadata behind the
@@ -712,19 +725,26 @@ pub fn add_scaled_out<T: Float>(
     let (storage, result_shape) = result.into_storage_and_shape()?;
 
     // Shape policy: matches torch's CURRENT semantics — when `out.shape()`
-    // equals the broadcast shape, the write is purely a storage swap;
-    // when it differs, `out` is silently resized to the broadcast shape
-    // (PyTorch emits a `UserWarning` for this; it is being deprecated in
-    // a future release but is still the observed behavior in 2.x).
-    // Mirroring it keeps `torch.add(a, b, out=t)` bit-equivalent across
-    // both the matched-shape and resize cases.
+    // equals the broadcast shape, the result is written elementwise into
+    // `out`'s EXISTING storage region (upstream Resize.cpp:27 returns
+    // false on matched sizes: no resize, no buffer swap — `out`'s
+    // storage_offset and strides are honored, so other views of the same
+    // storage keep their elements; #1938). When the shape differs, `out`
+    // is silently resized to the broadcast shape (PyTorch emits a
+    // `UserWarning` for this; it is being deprecated in a future release
+    // but is still the observed behavior in 2.x). Mirroring it keeps
+    // `torch.add(a, b, out=t)` bit-equivalent across both the
+    // matched-shape and resize cases.
     if out.shape() == broadcast_shape.as_slice() {
         // SAFETY: `check_out_allowed` proved `out` has no grad_fn and is
         // not a requires_grad leaf, so no autograd machinery references
         // its storage. `storage` was just produced by a freshly-allocated
-        // tensor with no outstanding aliases. Shape equality guarantees
+        // tensor with no outstanding aliases, and this function holds no
+        // borrow of `out`'s data across the call — update_storage's
+        // exclusive-access contract holds. Shape equality guarantees
         // `storage.len() == out.numel()`, satisfying update_storage's
-        // length contract.
+        // length contract; `update_storage` itself enforces the #1938
+        // view rule (whole-storage swap vs in-place region write).
         unsafe { out.update_storage(storage)? };
     } else {
         // Resize `out` to the broadcast shape and swap in the result

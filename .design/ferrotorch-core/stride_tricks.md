@@ -44,7 +44,7 @@ scatters the upstream gradient back into a zero-initialised input via
   `strided_copy_*` + `strided_scatter_*` kernels (no host bounce); CPU
   walks the multi-index. Mirrors
   `aten/src/ATen/native/TensorAdvancedIndexing.cpp::as_strided_scatter`.
-- REQ-4: Bounds validation — `validate_bounds` (`stride_tricks.rs:126`)
+- REQ-4: Bounds validation — `validate_bounds` (`stride_tricks.rs:142`)
   computes the (min, max) reachable offset from `(shape, stride)`,
   returns `InvalidArgument` when:
   - shape/stride length mismatch (`:133-141`)
@@ -89,27 +89,27 @@ scatters the upstream gradient back into a zero-initialised input via
 
 ## Architecture
 
-- `Tensor::as_strided` (`stride_tricks.rs:196-220`) — no-grad fast
+- `Tensor::as_strided` (`stride_tricks.rs:212-236`) — no-grad fast
   path is a zero-copy `stride_view`; grad path attaches
   `AsStridedBackward` and uses `stride_view_operation`. Both routes
   share the same `Arc<Storage>` with the source tensor on every
   device, so no data movement.
-- `Tensor::as_strided_copy` (`stride_tricks.rs:231-251`) — builds the
+- `Tensor::as_strided_copy` (`stride_tricks.rs:247-267`) — builds the
   view first (re-uses `as_strided` for autograd + bounds), then
   materialises:
-  - CUDA path: `materialize_strided_cuda` at `stride_tricks.rs:394-417`
+  - CUDA path: `materialize_strided_cuda` at `stride_tricks.rs:410-433`
     dispatches to `backend.strided_copy_f32` / `f64`. Other dtypes on
     CUDA error with `NotImplementedOnCuda`.
   - CPU path: `view.data_vec()` walks the strided view and copies
     elements in logical order.
-- `Tensor::as_strided_scatter` (`stride_tricks.rs:260-322`) — CPU
+- `Tensor::as_strided_scatter` (`stride_tricks.rs:276-338`) — CPU
   path: starts from a contiguous copy of `self`, walks `src` in
   C-order, writes into the strided positions. CUDA path:
   `scatter_on_cuda` at `:431-476` clones `self` into a fresh
   contiguous GPU buffer via `strided_copy_*` then runs
   `strided_scatter_*` to overwrite positions — never bounces through
   host. bf16 / f16 on CUDA error with `NotImplementedOnCuda`.
-- `AsStridedBackward` (`stride_tricks.rs:336-383`) implements
+- `AsStridedBackward` (`stride_tricks.rs:352-399`) implements
   `GradFn::backward` by allocating `zeros(input.shape())` and calling
   `zeros.as_strided_scatter(grad_output, size, stride, offset)`.
 
@@ -155,11 +155,11 @@ Expected: ~17 tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `Tensor::as_strided` at `ferrotorch-core/src/stride_tricks.rs:196` mirrors `aten/src/ATen/native/TensorShape.cpp::Tensor::as_strided`; non-test consumer: `crate::einsum` calls `as_strided` directly for Einstein-summation diagonal extraction (`ferrotorch-core/src/einsum.rs:425`). |
-| REQ-2 | SHIPPED | impl: `Tensor::as_strided_copy` at `ferrotorch-core/src/stride_tricks.rs:231` mirrors `aten/src/ATen/native/AsStridedCopy.cpp::as_strided_copy`; non-test consumer: `crate::einsum` calls `as_strided_copy` for materialising diagonals on CUDA (`ferrotorch-core/src/einsum.rs:324, 357`). |
-| REQ-3 | SHIPPED | impl: `Tensor::as_strided_scatter` at `ferrotorch-core/src/stride_tricks.rs:260` mirrors `aten/src/ATen/native/TensorAdvancedIndexing.cpp::as_strided_scatter`; non-test consumer: `AsStridedBackward::backward` at `:366-372` calls `zeros.as_strided_scatter(grad_output, ...)` to scatter gradients in production autograd. |
-| REQ-4 | SHIPPED | impl: `validate_bounds` at `ferrotorch-core/src/stride_tricks.rs:126` with `stride_extent` helper at `:102`; non-test consumer: invoked from `Tensor::as_strided` at `:204` and `Tensor::as_strided_scatter` at `:269` — every public call validates before constructing the view. |
+| REQ-1 | SHIPPED | impl: `Tensor::as_strided` at `ferrotorch-core/src/stride_tricks.rs:212` mirrors `aten/src/ATen/native/TensorShape.cpp::Tensor::as_strided`; non-test consumer: `crate::einsum` calls `as_strided` directly for Einstein-summation diagonal extraction (`ferrotorch-core/src/einsum.rs:425`). |
+| REQ-2 | SHIPPED | impl: `Tensor::as_strided_copy` at `ferrotorch-core/src/stride_tricks.rs:247` mirrors `aten/src/ATen/native/AsStridedCopy.cpp::as_strided_copy`; non-test consumer: `crate::einsum` calls `as_strided_copy` for materialising diagonals on CUDA (`ferrotorch-core/src/einsum.rs:324, 357`). |
+| REQ-3 | SHIPPED | impl: `Tensor::as_strided_scatter` at `ferrotorch-core/src/stride_tricks.rs:276` mirrors `aten/src/ATen/native/TensorAdvancedIndexing.cpp::as_strided_scatter`; non-test consumer: `AsStridedBackward::backward` at `:376-399` calls `zeros.as_strided_scatter(grad_output, ...)` to scatter gradients in production autograd. |
+| REQ-4 | SHIPPED | impl: `validate_bounds` at `ferrotorch-core/src/stride_tricks.rs:142` with `stride_extent` helper at `:115`; non-test consumer: invoked from `Tensor::as_strided` at `:204` and `Tensor::as_strided_scatter` at `:269` — every public call validates before constructing the view. |
 | REQ-5 | SHIPPED | impl: `AsStridedBackward in ferrotorch-core/src/stride_tricks.rs` with `impl GradFn::backward` at `backward in ferrotorch-core/src/stride_tricks.rs`; non-test consumer: `Tensor::as_strided` attaches it when `requires_grad` is set (`requires_grad in ferrotorch-core/src/stride_tricks.rs`) — production autograd graph routes through this when stride ops appear in a differentiable function. |
-| REQ-6 | SHIPPED | impl: `stride_extent` at `ferrotorch-core/src/stride_tricks.rs:102-120` handles negative `s` via the `last >= 0` branch; non-test consumer: any user calling `tensor.flip(0)` semantically equivalent path (negative strides are how PyTorch encodes reverse views). Test pin at `:518-525`. |
-| REQ-7 | SHIPPED | impl: `stride_extent` at `ferrotorch-core/src/stride_tricks.rs:102-120` treats `s == 0` as zero contribution per dim; non-test consumer: broadcast-replication via stride 0 is the foundational mechanic behind `Tensor::expand`. Test pin at `:527-533`. |
+| REQ-6 | SHIPPED | impl: `stride_extent` at `ferrotorch-core/src/stride_tricks.rs:115-133` handles negative `s` via the `last >= 0` branch; non-test consumer: any user calling `tensor.flip(0)` semantically equivalent path (negative strides are how PyTorch encodes reverse views). Test pin at `:518-525`. |
+| REQ-7 | SHIPPED | impl: `stride_extent` at `ferrotorch-core/src/stride_tricks.rs:115-133` treats `s == 0` as zero contribution per dim; non-test consumer: broadcast-replication via stride 0 is the foundational mechanic behind `Tensor::expand`. Test pin at `:527-533`. |
 | REQ-8 | SHIPPED | impl: `as_strided in ferrotorch-core/src/stride_tricks.rs`, `as_strided_copy in ferrotorch-core/src/stride_tricks.rs`, `as_strided_scatter in ferrotorch-core/src/stride_tricks.rs`; non-test consumer: free-function path delegates to inherent methods; downstream code that prefers function form (e.g. functional-style composition) reaches the same logic. Per S5 the pub API surface is grandfathered. |

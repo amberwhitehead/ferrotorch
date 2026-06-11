@@ -206,9 +206,9 @@ code compiles identically against both feature configurations.
   `OpProfiler::record_op` method this crate implements.
 - `ferrotorch-core/src/grad_fns/arithmetic.rs:388` —
   `crate::profiler_hook::profile_op_scope("add", "tensor_op", &[a.shape(), b.shape()], || { ... })`.
-  Same pattern at `arithmetic.rs:758` (`add_scaled`), `arithmetic.rs:978` (mul),
-  `arithmetic.rs:1138` (div), `arithmetic.rs:1272` (neg),
-  `arithmetic.rs:1403` (pow), plus `grad_fns/transcendental.rs:107` (exp),
+  Same pattern at `arithmetic.rs:799` (`add_scaled`), `arithmetic.rs:1107` (mul),
+  `arithmetic.rs:1267` (div), `arithmetic.rs:1401` (neg),
+  `arithmetic.rs:1532` (pow), plus `grad_fns/transcendental.rs:107` (exp),
   line 209 (log), line 313 (sin), line 390 (cos), and ~26 more — 36
   call sites total.
 - `ferrotorch/src/lib.rs:107` `pub use ferrotorch_profiler::*;`

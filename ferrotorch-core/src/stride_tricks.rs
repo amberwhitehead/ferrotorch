@@ -136,7 +136,10 @@ fn stride_extent(shape: &[usize], stride: &[isize]) -> (i64, i64) {
 ///
 /// Returns `Ok(())` if every reachable offset (including the zero-position
 /// origin at `storage_offset`) lies inside `[0, storage_len)`.
-fn validate_bounds(
+///
+/// `pub(crate)`: also the bounds gate for the in-place view-region writes
+/// in `Tensor::update_storage` / `Tensor::update_data` (#1938).
+pub(crate) fn validate_bounds(
     op: &'static str,
     shape: &[usize],
     stride: &[isize],

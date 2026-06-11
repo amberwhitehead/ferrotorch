@@ -1343,19 +1343,26 @@ impl<T: Float> Tensor<T> {
 
     /// Write `new_data` into this tensor's storage, preserving tensor identity.
     ///
-    /// - **CPU**: copies data into the existing storage Vec.
-    /// - **GPU**: uploads data to GPU and replaces the storage buffer.
+    /// `new_data` holds the tensor's elements in C-contiguous order of
+    /// `self.shape()`.
+    ///
+    /// - **CPU**: copies data into the existing storage Vec — a single run
+    ///   at the storage offset for contiguous tensors, a strided scatter
+    ///   for non-contiguous views (#1938).
+    /// - **GPU**: uploads data to the device, then applies the
+    ///   [`update_storage`] view rule (#1938): whole-storage tensors swap
+    ///   the buffer; sub-views scatter into the existing device buffer.
     ///
     /// This is the device-transparent alternative to `data_mut()` for
     /// optimizer step implementations.
     ///
-    /// Both branches mutate through the storage's interior mutability
-    /// ([`TensorStorage::cpu_write_at`] for CPU element writes,
-    /// [`TensorStorage::replace_buffer_aliased`] for the GPU buffer swap),
-    /// never through a `&mut` manufactured behind the shared `Arc` — so
-    /// metadata borrows held by aliasing handles survive the call. See the
-    /// synchronization contract on [`crate::storage::TensorStorage`]
-    /// (CORE-001 / #1695).
+    /// All branches mutate through the storage's interior mutability
+    /// ([`TensorStorage::cpu_write_at`] / the element-level scatter for CPU
+    /// writes, [`TensorStorage::replace_buffer_aliased`] for the GPU
+    /// whole-buffer swap), never through a `&mut` manufactured behind the
+    /// shared `Arc` — so metadata borrows held by aliasing handles survive
+    /// the call. See the synchronization contract on
+    /// [`crate::storage::TensorStorage`] (CORE-001 / #1695).
     ///
     /// # Safety
     ///
@@ -1399,14 +1406,21 @@ impl<T: Float> Tensor<T> {
                 )
             };
             let new_handle = backend.cpu_to_gpu(bytes, T::dtype(), ordinal)?;
+            // Route through `update_storage`, which enforces the #1938 view
+            // rule: a whole-storage tensor swaps the buffer (the previous
+            // behavior); a sub-view scatters into the EXISTING device
+            // buffer via `strided_scatter_*` instead of replacing the
+            // shared storage behind aliasing views' backs.
+            //
             // SAFETY: caller guarantees exclusive access per this function's
-            // `# Safety` contract; the fresh handle is on `ordinal`, i.e.
-            // the same device the storage already resides on, so the device
-            // check inside `replace_buffer_aliased` passes.
+            // `# Safety` contract (forwarded verbatim); the fresh handle is
+            // on `ordinal`, i.e. the same device the storage already
+            // resides on, so the device check inside `update_storage`
+            // passes.
             unsafe {
-                storage.replace_buffer_aliased(TensorStorage::gpu(new_handle))?;
+                self.update_storage(TensorStorage::gpu(new_handle))?;
             }
-        } else {
+        } else if self.is_contiguous() {
             // is_gpu() branch above already routed Gpu storage; cpu_write_at
             // here Errs only on Cubecl/Meta — neither of which an update_data
             // caller in the optimizer hot path is expected to hit, so the
@@ -1416,6 +1430,18 @@ impl<T: Float> Tensor<T> {
             // `# Safety` contract; bounds are checked inside `cpu_write_at`.
             unsafe {
                 storage.cpu_write_at(self.inner.offset, new_data)?;
+            }
+        } else {
+            // Non-contiguous CPU view: scatter `new_data` (C-order of
+            // `self.shape()`) through the strides. Pre-#1938 this wrote a
+            // contiguous run at the storage offset, landing elements in
+            // the wrong slots and clobbering interleaved base elements.
+            self.check_view_write("update_data")?;
+            // SAFETY: caller guarantees exclusive access per this
+            // function's `# Safety` contract; `check_view_write` above
+            // validated bounds and rejected overlapping views.
+            unsafe {
+                self.cpu_scatter_through_view(new_data)?;
             }
         }
 
@@ -1531,27 +1557,63 @@ impl<T: Float> Tensor<T> {
         Ok(())
     }
 
-    /// Replace this tensor's storage with a new `TensorStorage` in-place.
+    /// Write `new_storage`'s elements into this tensor, in-place.
     ///
-    /// Used by GPU-native optimizer steps that compute the updated parameter
-    /// entirely on-device and need to swap the underlying buffer without a
-    /// CPU round-trip.
+    /// `new_storage` must hold exactly `self.numel()` elements, laid out in
+    /// C-contiguous order of `self.shape()`, on `self`'s device. Used by
+    /// GPU-native optimizer steps (whole-parameter update without a CPU
+    /// round-trip) and by the `out=` / trailing-underscore in-place op
+    /// family to land a freshly-computed result in the target tensor.
     ///
-    /// The swap goes through the storage's buffer-level interior mutability
-    /// ([`TensorStorage::replace_buffer_aliased`]), never through a `&mut`
-    /// manufactured behind the shared `Arc` — so `&TensorStorage` metadata
-    /// borrows held by aliasing handles survive the swap, and aliasing
-    /// clones/views observe the new buffer on their next (sequenced) read.
-    /// `&[T]` borrows into the *old* buffer dangle after the swap; using
-    /// them is the documented residual-contract violation (see
-    /// [`crate::storage::TensorStorage`], CORE-001 / #1695).
+    /// **The view rule (#1938 / CORE-001 residual).** Which write strategy
+    /// runs depends on whether this tensor covers its entire storage:
+    ///
+    /// - **Whole-storage swap** — only when `storage_offset == 0`,
+    ///   `numel == storage.len()` AND the tensor is C-contiguous. The
+    ///   buffer is swapped through
+    ///   [`TensorStorage::replace_buffer_aliased`] (the optimizer `step()`
+    ///   fast path: zero copies). The swap goes through the storage's
+    ///   buffer-level interior mutability, never through a `&mut`
+    ///   manufactured behind the shared `Arc` — so `&TensorStorage`
+    ///   metadata borrows held by aliasing handles survive the swap, and
+    ///   aliasing clones/views observe the new buffer on their next
+    ///   (sequenced) read. `&[T]` borrows into the *old* buffer dangle
+    ///   after the swap; using them is the documented residual-contract
+    ///   violation (see [`crate::storage::TensorStorage`], CORE-001 /
+    ///   #1695).
+    /// - **Region write** — when this tensor is a sub-view (offset, fewer
+    ///   elements than the storage) or a non-contiguous view, the elements
+    ///   are written INTO the existing buffer at this tensor's
+    ///   `storage_offset`, honoring its strides, so every other view of
+    ///   the same storage keeps its elements. This matches PyTorch's
+    ///   matched-shape `out=` semantics
+    ///   (`aten/src/ATen/native/Resize.cpp:27`: equal sizes ⇒ no
+    ///   resize/swap; the TensorIterator writes elementwise into `out`'s
+    ///   storage). Pre-#1938 this case incorrectly swapped the whole
+    ///   shared buffer, shrinking it to the view's numel and destroying
+    ///   the base tensor's other elements. On CPU the write goes through
+    ///   the CORE-001 aliased-write primitives
+    ///   ([`TensorStorage::cpu_write_at`] for contiguous views, a strided
+    ///   scatter over [`TensorStorage::try_as_mut_slice_aliased`]
+    ///   otherwise); on CUDA through the `strided_scatter_{f32,f64}`
+    ///   kernels into the existing device buffer (no handle swap — aliased
+    ///   views keep pointing at live memory).
     ///
     /// # Errors
     ///
-    /// Returns [`FerrotorchError::ShapeMismatch`] when the element counts
-    /// differ and [`FerrotorchError::DeviceMismatch`] when `new_storage`
-    /// resides on a different device (the documented same-device
-    /// precondition is now enforced).
+    /// - [`FerrotorchError::ShapeMismatch`] when the element counts differ.
+    /// - [`FerrotorchError::DeviceMismatch`] when `new_storage` resides on
+    ///   a different device.
+    /// - [`FerrotorchError::InvalidArgument`] when the region write targets
+    ///   an internally-overlapping view (a dim of size > 1 with stride 0 —
+    ///   torch: "more than one element of the written-to tensor refers to
+    ///   a single memory location") or a view whose extent escapes the
+    ///   storage bounds.
+    /// - [`FerrotorchError::NotImplementedOnCuda`] for CUDA region writes
+    ///   with a dtype other than f32/f64 — no strided-scatter kernel
+    ///   exists yet (follow-up #1939). Returned BEFORE any mutation.
+    /// - [`FerrotorchError::GpuTensorNotAccessible`] for region writes on
+    ///   CubeCL/meta storage (no in-place region primitive).
     ///
     /// # Safety
     ///
@@ -1570,19 +1632,174 @@ impl<T: Float> Tensor<T> {
                 ),
             });
         }
-
-        // SAFETY: caller guarantees exclusive access (optimizer step inside
-        // no_grad) per this function's `# Safety` contract.
-        // `replace_buffer_aliased` drops the OLD buffer (returning CPU
-        // buffers to the pool) so nothing leaks — in the GPU case a leaked
-        // storage would leak its `GpuBufferHandle` -> `CudaBuffer` ->
-        // pooled `CudaSlice`, climbing toward VRAM exhaustion across
-        // optimizer steps (e.g. AdamW foreach calls this once per
-        // parameter per step).
-        unsafe {
-            self.inner.storage.replace_buffer_aliased(new_storage)?;
+        if new_storage.device() != self.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: self.device(),
+                got: new_storage.device(),
+            });
         }
 
+        let storage = &*self.inner.storage;
+
+        // Whole-storage fast path (the only case where a buffer swap is
+        // observationally equivalent to an elementwise write): this tensor
+        // covers the entire buffer as one C-contiguous run.
+        if self.inner.offset == 0 && storage.len() == numel && self.is_contiguous() {
+            // SAFETY: caller guarantees exclusive access (optimizer step
+            // inside no_grad) per this function's `# Safety` contract.
+            // `replace_buffer_aliased` drops the OLD buffer (returning CPU
+            // buffers to the pool) so nothing leaks — in the GPU case a
+            // leaked storage would leak its `GpuBufferHandle` ->
+            // `CudaBuffer` -> pooled `CudaSlice`, climbing toward VRAM
+            // exhaustion across optimizer steps (e.g. AdamW foreach calls
+            // this once per parameter per step).
+            unsafe {
+                storage.replace_buffer_aliased(new_storage)?;
+            }
+            return Ok(());
+        }
+
+        // Region write: this tensor is a sub-view / non-contiguous view of
+        // a (possibly shared) storage — write its region in place (#1938).
+        self.check_view_write("update_storage")?;
+
+        if storage.is_gpu() {
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            use std::any::TypeId;
+            // Dispatch BEFORE touching the destination so unsupported
+            // dtypes error with the storage untouched (R-LOUD-1).
+            let is_f32 = TypeId::of::<T>() == TypeId::of::<f32>();
+            let is_f64 = TypeId::of::<T>() == TypeId::of::<f64>();
+            if !is_f32 && !is_f64 {
+                return Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "update_storage: CUDA sub-view/strided write \
+                         (strided_scatter kernel exists only for f32/f64; \
+                         f16/bf16 tracked in #1939)",
+                });
+            }
+            let src = new_storage
+                .gpu_handle()
+                .ok_or(FerrotorchError::DeviceUnavailable)?;
+            // SAFETY: the `&mut GpuBufferHandle` is derived through the
+            // storage's buffer-level `UnsafeCell` (never from the `Arc`);
+            // the caller's exclusive-access contract guarantees no other
+            // reference to this storage is used while it is live, and it
+            // does not outlive this call.
+            let dst = unsafe { storage.gpu_handle_mut_aliased() }
+                .ok_or(FerrotorchError::DeviceUnavailable)?;
+            if is_f32 {
+                backend.strided_scatter_f32(
+                    src,
+                    dst,
+                    &self.inner.shape,
+                    &self.inner.strides,
+                    self.inner.offset,
+                )?;
+            } else {
+                backend.strided_scatter_f64(
+                    src,
+                    dst,
+                    &self.inner.shape,
+                    &self.inner.strides,
+                    self.inner.offset,
+                )?;
+            }
+            return Ok(());
+        }
+
+        // CPU storage (CubeCL/meta fall out of the primitives below with a
+        // structured GpuTensorNotAccessible — never a silent wrong write).
+        let src = new_storage.try_as_slice()?;
+        if self.is_contiguous() {
+            // SAFETY: caller's exclusive-access contract is forwarded
+            // verbatim; bounds are checked inside `cpu_write_at`.
+            unsafe {
+                storage.cpu_write_at(self.inner.offset, src)?;
+            }
+        } else {
+            // SAFETY: caller's exclusive-access contract is forwarded
+            // verbatim; `check_view_write` above validated bounds and
+            // rejected overlapping views.
+            unsafe {
+                self.cpu_scatter_through_view(src)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate that this tensor's view geometry can receive an in-place
+    /// region write (#1938): rejects internally-overlapping views (a dim
+    /// of size > 1 with stride 0 — torch raises "unsupported operation:
+    /// more than one element of the written-to tensor refers to a single
+    /// memory location") and views whose reachable extent escapes the
+    /// storage bounds.
+    fn check_view_write(&self, op: &'static str) -> FerrotorchResult<()> {
+        if self
+            .inner
+            .shape
+            .iter()
+            .zip(self.inner.strides.iter())
+            .any(|(&d, &s)| d > 1 && s == 0)
+        {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "{op}: cannot write through an internally-overlapping view \
+                     (shape {:?}, strides {:?}): more than one element of the \
+                     written-to tensor refers to a single memory location",
+                    self.inner.shape, self.inner.strides,
+                ),
+            });
+        }
+        crate::stride_tricks::validate_bounds(
+            op,
+            &self.inner.shape,
+            &self.inner.strides,
+            self.inner.offset,
+            self.inner.storage.len(),
+        )
+    }
+
+    /// Scatter `src` (exactly `self.numel()` elements, C-order of
+    /// `self.shape()`) into this tensor's CPU storage region, honoring
+    /// `storage_offset` and strides (#1938). Odometer walk: the rightmost
+    /// index advances fastest; the running offset is updated incrementally
+    /// so each element write is O(1) amortized.
+    ///
+    /// # Safety
+    ///
+    /// Same exclusive-access contract as
+    /// [`TensorStorage::try_as_mut_slice_aliased`]: no other thread touches
+    /// this storage during the call, and no outstanding borrow of its
+    /// elements (from this or any aliasing handle) is *used* afterwards.
+    /// The caller must have validated the view geometry via
+    /// [`Self::check_view_write`] first — it proves every offset the walk
+    /// reaches is in `[0, storage.len())` and that no two logical elements
+    /// alias one slot.
+    unsafe fn cpu_scatter_through_view(&self, src: &[T]) -> FerrotorchResult<()> {
+        debug_assert_eq!(src.len(), self.numel());
+        // SAFETY: exclusivity is forwarded verbatim from this function's
+        // own `# Safety` contract.
+        let dst = unsafe { self.inner.storage.try_as_mut_slice_aliased()? };
+        let shape = &self.inner.shape;
+        let strides = &self.inner.strides;
+        let ndim = shape.len();
+        let mut idx = vec![0usize; ndim];
+        let mut off = self.inner.offset as isize;
+        for &v in src {
+            // In-bounds per the caller's `check_view_write` obligation
+            // (validate_bounds covered the full reachable extent).
+            dst[off as usize] = v;
+            for d in (0..ndim).rev() {
+                idx[d] += 1;
+                off += strides[d];
+                if idx[d] < shape[d] {
+                    break;
+                }
+                off -= shape[d] as isize * strides[d];
+                idx[d] = 0;
+            }
+        }
         Ok(())
     }
 

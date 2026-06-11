@@ -780,11 +780,22 @@ impl<T: Element> TensorStorage<T> {
     /// is dropped (CPU buffers return to the pool).
     ///
     /// This is the aliased-swap primitive behind `Tensor::update_storage`
-    /// (and the GPU branch of `update_data`): the replacement goes through
-    /// the buffer-level [`UnsafeCell`], so outstanding `&TensorStorage`
-    /// metadata borrows held by aliasing handles survive the swap. Element
-    /// borrows (`try_as_slice` results) into the *old* buffer dangle after
-    /// the swap — using them is the documented residual-contract violation.
+    /// (and, transitively, the GPU branch of `update_data`): the
+    /// replacement goes through the buffer-level [`UnsafeCell`], so
+    /// outstanding `&TensorStorage` metadata borrows held by aliasing
+    /// handles survive the swap. Element borrows (`try_as_slice` results)
+    /// into the *old* buffer dangle after the swap — using them is the
+    /// documented residual-contract violation.
+    ///
+    /// **View rule (#1938):** swapping the buffer is only observationally
+    /// correct when every tensor viewing this storage maps the WHOLE
+    /// buffer (`storage_offset == 0`, `numel == len`, C-contiguous). A
+    /// caller holding a sub-view must NOT swap — it would shrink/reorder
+    /// the shared buffer under every other alias — and must write the
+    /// view's region in place instead ([`Self::cpu_write_at`] /
+    /// [`Self::try_as_mut_slice_aliased`] on CPU, `strided_scatter_*` on
+    /// CUDA). `Tensor::update_storage` enforces this dispatch; new callers
+    /// of this primitive must uphold it themselves.
     ///
     /// # Errors
     ///
