@@ -26,7 +26,7 @@
 //! | REQ-17 (`prelu`, scalar alpha) | SHIPPED | `prelu` + `PReluBackward` (fused dual VJP routing to input + alpha) consumed by `ferrotorch-nn/src/functional.rs` and the `PReLU` Module; full per-channel alpha is a follow-up. |
 //! | REQ-18 (`glu`) | SHIPPED | `glu` + `GluBackward` consumed by `ferrotorch-nn/src/functional.rs`. |
 //! | REQ-19 (`threshold`) | SHIPPED | `threshold` + `ThresholdBackward` consumed by `Tensor::threshold_t` in `methods.rs` (closes #1341 REQ-19). |
-//! | REQ-20 (`rrelu` inference) | SHIPPED | `rrelu` + `RReluBackward` (deterministic mean-slope path) consumed by `Tensor::rrelu_t` in `methods.rs`; training-mode RNG variant is a separate follow-up. |
+//! | REQ-20 (`rrelu`) | SHIPPED | `rrelu` + `RReluBackward` (deterministic mean-slope inference path) and `RReluTrainBackward` (training mode: per-element `Uniform[lower, upper]` slopes drawn from the thread-local MT19937, bit-exact vs torch CPU under `manual_seed`, #1738) consumed by `Tensor::rrelu_t` in `methods.rs`. |
 //! | REQ-21 (`celu`) | SHIPPED | `celu` + `CeluBackward` consumed by `Tensor::celu_t` in `methods.rs`. |
 //! | REQ-22 (`softmin` fused) | SHIPPED | `softmin` + `SoftminBackward` (fused single-`GradFn`) consumed by `Tensor::softmin_t` in `methods.rs`; the explicit-composition `neg -> softmax` route still ships in `ferrotorch-nn`. |
 //! | REQ-23 (autograd gating) | SHIPPED | every public forward checks `is_grad_enabled() && input.requires_grad()` before attaching a `*Backward` node; verified by the `test_*_no_grad` family. |
@@ -1796,11 +1796,26 @@ impl<T: Float> HardtanhBackward<T> {
 
 impl<T: Float> GradFn<T> for HardtanhBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let input_data = self.input.data()?;
-        let grad_data = grad_output.data()?;
         let zero = <T as num_traits::Zero>::zero();
+        let one = <T as num_traits::One>::one();
         let lo = T::from(self.min_val).unwrap();
         let hi = T::from(self.max_val).unwrap();
+
+        // CUDA path: derivative mask via `unary_map` (documented host round
+        // trip that restores the input's device) multiplied by `grad_output`
+        // with the CUDA-aware `arithmetic::mul` — the `LeakyReluBackward`
+        // pattern. Pre-fix this method unconditionally called the CPU-only
+        // `data()`, failing with `GpuTensorNotAccessible`. (#1739 / CORE-045)
+        if self.input.is_cuda() || grad_output.is_cuda() {
+            let grad_input = crate::autograd::no_grad::no_grad(|| {
+                let mask = unary_map(&self.input, |x| if x > lo && x < hi { one } else { zero })?;
+                crate::grad_fns::arithmetic::mul(grad_output, &mask)
+            })?;
+            return Ok(vec![Some(grad_input)]);
+        }
+
+        let input_data = self.input.data()?;
+        let grad_data = grad_output.data()?;
         let result: Vec<T> = input_data
             .iter()
             .zip(grad_data.iter())
@@ -1830,6 +1845,9 @@ pub fn hardtanh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 }
 
 /// Hardtanh with explicit bounds.
+///
+/// CUDA inputs are computed via `unary_map`'s documented host round trip;
+/// the output (autograd-tracked or not) stays on the input's device (#1739).
 pub fn hardtanh_with<T: Float>(
     input: &Tensor<T>,
     min_val: f64,
@@ -1847,9 +1865,14 @@ pub fn hardtanh_with<T: Float>(
         }
     })?;
     if is_grad_enabled() && input.requires_grad() {
+        // Consume the storage `unary_map` produced — it is already on the
+        // input's device. Pre-fix this branch boxed the CPU-only
+        // `output.data()?.to_vec()`, which failed with
+        // `GpuTensorNotAccessible` for CUDA inputs. (#1739 / CORE-045)
+        let (storage, shape) = output.into_storage_and_shape()?;
         Tensor::from_operation(
-            TensorStorage::cpu(output.data()?.to_vec()),
-            output.shape().to_vec(),
+            storage,
+            shape,
             Arc::new(HardtanhBackward::new(input.clone(), min_val, max_val)),
         )
     } else {
@@ -1880,12 +1903,27 @@ impl<T: Float> HardsigmoidBackward<T> {
 
 impl<T: Float> GradFn<T> for HardsigmoidBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let input_data = self.input.data()?;
-        let grad_data = grad_output.data()?;
         let zero = <T as num_traits::Zero>::zero();
         let inv_six = T::from(1.0 / 6.0).unwrap();
         let lo = T::from(-3.0).unwrap();
         let hi = T::from(3.0).unwrap();
+
+        // CUDA path: derivative mask via `unary_map` (documented host round
+        // trip) + CUDA-aware `arithmetic::mul`, per the `LeakyReluBackward`
+        // pattern. (#1739 / CORE-045)
+        if self.input.is_cuda() || grad_output.is_cuda() {
+            let grad_input = crate::autograd::no_grad::no_grad(|| {
+                let mask = unary_map(
+                    &self.input,
+                    |x| if x > lo && x < hi { inv_six } else { zero },
+                )?;
+                crate::grad_fns::arithmetic::mul(grad_output, &mask)
+            })?;
+            return Ok(vec![Some(grad_input)]);
+        }
+
+        let input_data = self.input.data()?;
+        let grad_data = grad_output.data()?;
         let result: Vec<T> = input_data
             .iter()
             .zip(grad_data.iter())
@@ -1909,6 +1947,9 @@ impl<T: Float> GradFn<T> for HardsigmoidBackward<T> {
 }
 
 /// Native `hardsigmoid(x) = clamp((x + 3) / 6, 0, 1)` (MobileNetV3).
+///
+/// CUDA inputs are computed via `unary_map`'s documented host round trip;
+/// the output (autograd-tracked or not) stays on the input's device (#1739).
 pub fn hardsigmoid<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let zero = <T as num_traits::Zero>::zero();
     let one = <T as num_traits::One>::one();
@@ -1925,9 +1966,11 @@ pub fn hardsigmoid<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         }
     })?;
     if is_grad_enabled() && input.requires_grad() {
+        // Device-preserving storage handoff — see `hardtanh_with`. (#1739)
+        let (storage, shape) = output.into_storage_and_shape()?;
         Tensor::from_operation(
-            TensorStorage::cpu(output.data()?.to_vec()),
-            output.shape().to_vec(),
+            storage,
+            shape,
             Arc::new(HardsigmoidBackward::new(input.clone())),
         )
     } else {
@@ -1952,13 +1995,34 @@ impl<T: Float> HardswishBackward<T> {
 
 impl<T: Float> GradFn<T> for HardswishBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let input_data = self.input.data()?;
-        let grad_data = grad_output.data()?;
         let zero = <T as num_traits::Zero>::zero();
+        let one = <T as num_traits::One>::one();
         let two = T::from(2.0).unwrap();
         let three = T::from(3.0).unwrap();
         let neg_three = T::from(-3.0).unwrap();
         let inv_six = T::from(1.0 / 6.0).unwrap();
+
+        // CUDA path: derivative mask via `unary_map` (documented host round
+        // trip) + CUDA-aware `arithmetic::mul`, per the `LeakyReluBackward`
+        // pattern. (#1739 / CORE-045)
+        if self.input.is_cuda() || grad_output.is_cuda() {
+            let grad_input = crate::autograd::no_grad::no_grad(|| {
+                let mask = unary_map(&self.input, |x| {
+                    if x <= neg_three {
+                        zero
+                    } else if x >= three {
+                        one
+                    } else {
+                        (two * x + three) * inv_six
+                    }
+                })?;
+                crate::grad_fns::arithmetic::mul(grad_output, &mask)
+            })?;
+            return Ok(vec![Some(grad_input)]);
+        }
+
+        let input_data = self.input.data()?;
+        let grad_data = grad_output.data()?;
         let result: Vec<T> = input_data
             .iter()
             .zip(grad_data.iter())
@@ -1990,6 +2054,9 @@ impl<T: Float> GradFn<T> for HardswishBackward<T> {
 }
 
 /// Native `hardswish(x) = x * hardsigmoid(x)`.
+///
+/// CUDA inputs are computed via `unary_map`'s documented host round trip;
+/// the output (autograd-tracked or not) stays on the input's device (#1739).
 pub fn hardswish<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let zero = <T as num_traits::Zero>::zero();
     let three = T::from(3.0).unwrap();
@@ -2005,9 +2072,11 @@ pub fn hardswish<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         }
     })?;
     if is_grad_enabled() && input.requires_grad() {
+        // Device-preserving storage handoff — see `hardtanh_with`. (#1739)
+        let (storage, shape) = output.into_storage_and_shape()?;
         Tensor::from_operation(
-            TensorStorage::cpu(output.data()?.to_vec()),
-            output.shape().to_vec(),
+            storage,
+            shape,
             Arc::new(HardswishBackward::new(input.clone())),
         )
     } else {
@@ -2035,11 +2104,29 @@ impl<T: Float> SeluBackward<T> {
 
 impl<T: Float> GradFn<T> for SeluBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let input_data = self.input.data()?;
-        let grad_data = grad_output.data()?;
         let zero = <T as num_traits::Zero>::zero();
         let alpha = T::from(SELU_ALPHA).unwrap();
         let scale = T::from(SELU_SCALE).unwrap();
+
+        // CUDA path: derivative mask via `unary_map` (documented host round
+        // trip) + CUDA-aware `arithmetic::mul`, per the `LeakyReluBackward`
+        // pattern. (#1739 / CORE-045)
+        if self.input.is_cuda() || grad_output.is_cuda() {
+            let grad_input = crate::autograd::no_grad::no_grad(|| {
+                let mask = unary_map(&self.input, |x| {
+                    if x > zero {
+                        scale
+                    } else {
+                        scale * alpha * x.exp()
+                    }
+                })?;
+                crate::grad_fns::arithmetic::mul(grad_output, &mask)
+            })?;
+            return Ok(vec![Some(grad_input)]);
+        }
+
+        let input_data = self.input.data()?;
+        let grad_data = grad_output.data()?;
         let result: Vec<T> = input_data
             .iter()
             .zip(grad_data.iter())
@@ -2070,6 +2157,9 @@ impl<T: Float> GradFn<T> for SeluBackward<T> {
 
 /// Native `selu(x) = scale * (max(0, x) + min(0, alpha * (exp(x) - 1)))`
 /// with the canonical SELU constants from Klambauer et al. 2017.
+///
+/// CUDA inputs are computed via `unary_map`'s documented host round trip;
+/// the output (autograd-tracked or not) stays on the input's device (#1739).
 pub fn selu<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let zero = <T as num_traits::Zero>::zero();
     let one = <T as num_traits::One>::one();
@@ -2083,11 +2173,9 @@ pub fn selu<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         }
     })?;
     if is_grad_enabled() && input.requires_grad() {
-        Tensor::from_operation(
-            TensorStorage::cpu(output.data()?.to_vec()),
-            output.shape().to_vec(),
-            Arc::new(SeluBackward::new(input.clone())),
-        )
+        // Device-preserving storage handoff — see `hardtanh_with`. (#1739)
+        let (storage, shape) = output.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, Arc::new(SeluBackward::new(input.clone())))
     } else {
         Ok(output)
     }
@@ -2110,9 +2198,24 @@ impl<T: Float> SoftsignBackward<T> {
 
 impl<T: Float> GradFn<T> for SoftsignBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let one = <T as num_traits::One>::one();
+
+        // CUDA path: derivative mask via `unary_map` (documented host round
+        // trip) + CUDA-aware `arithmetic::mul`, per the `LeakyReluBackward`
+        // pattern. (#1739 / CORE-045)
+        if self.input.is_cuda() || grad_output.is_cuda() {
+            let grad_input = crate::autograd::no_grad::no_grad(|| {
+                let mask = unary_map(&self.input, |x| {
+                    let denom = one + x.abs();
+                    one / (denom * denom)
+                })?;
+                crate::grad_fns::arithmetic::mul(grad_output, &mask)
+            })?;
+            return Ok(vec![Some(grad_input)]);
+        }
+
         let input_data = self.input.data()?;
         let grad_data = grad_output.data()?;
-        let one = <T as num_traits::One>::one();
         let result: Vec<T> = input_data
             .iter()
             .zip(grad_data.iter())
@@ -2139,13 +2242,18 @@ impl<T: Float> GradFn<T> for SoftsignBackward<T> {
 }
 
 /// Native `softsign(x) = x / (1 + |x|)`.
+///
+/// CUDA inputs are computed via `unary_map`'s documented host round trip;
+/// the output (autograd-tracked or not) stays on the input's device (#1739).
 pub fn softsign<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let one = <T as num_traits::One>::one();
     let output = unary_map(input, |x| x / (one + x.abs()))?;
     if is_grad_enabled() && input.requires_grad() {
+        // Device-preserving storage handoff — see `hardtanh_with`. (#1739)
+        let (storage, shape) = output.into_storage_and_shape()?;
         Tensor::from_operation(
-            TensorStorage::cpu(output.data()?.to_vec()),
-            output.shape().to_vec(),
+            storage,
+            shape,
             Arc::new(SoftsignBackward::new(input.clone())),
         )
     } else {
@@ -2157,9 +2265,12 @@ pub fn softsign<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 
 /// Backward for `prelu(x, alpha) = max(0, x) + alpha * min(0, x)`.
 ///
-/// Gradients:
-///   `dL/dx[i]    = grad[i] * (x[i] >= 0 ? 1 : alpha)`
-///   `dL/dalpha   = sum_i grad[i] * (x[i] < 0 ? x[i] : 0)`   (scalar slope)
+/// Gradients (strict comparison per torch's `_prelu_kernel_backward`,
+/// `dx = x > 0 ? grad : weight * grad` — x == 0 takes the WEIGHT branch,
+/// #1951):
+///   `dL/dx[i]    = grad[i] * (x[i] > 0 ? 1 : alpha)`
+///   `dL/dalpha   = sum_i grad[i] * (x[i] < 0 ? x[i] : 0)`   (scalar slope;
+///   x == 0 contributes `x * grad = 0` under both conventions)
 ///
 /// Single-pass fused VJP — replaces the previous
 /// `(1 - alpha) * relu(x) + alpha * x` decomposition that walked through three
@@ -2178,18 +2289,51 @@ impl<T: Float> PReluBackward<T> {
 
 impl<T: Float> GradFn<T> for PReluBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let zero = <T as num_traits::Zero>::zero();
+        let one = <T as num_traits::One>::one();
+
+        // CUDA path (#1739 / CORE-045):
+        // - grad wrt input: derivative mask via `unary_map` (documented host
+        //   round trip) + CUDA-aware `arithmetic::mul`, per the
+        //   `LeakyReluBackward` pattern;
+        // - grad wrt alpha: a scalar reduction over the negative cells —
+        //   computed via an explicit host readback (`data_vec`, documented
+        //   round trip per R-LOUD-2) and re-uploaded to alpha's own device.
+        if self.input.is_cuda() || grad_output.is_cuda() || self.alpha.is_cuda() {
+            let alpha_host = self.alpha.data_vec()?;
+            let alpha_v = alpha_host[0];
+            let grad_input_t = crate::autograd::no_grad::no_grad(|| {
+                // Strict `x > 0`: x == 0 takes the weight branch (#1951).
+                let mask = unary_map(&self.input, |x| if x > zero { one } else { alpha_v })?;
+                crate::grad_fns::arithmetic::mul(grad_output, &mask)
+            })?;
+
+            let x_host = self.input.data_vec()?;
+            let g_host = grad_output.data_vec()?;
+            let mut grad_alpha = zero;
+            for (&xv, &gv) in x_host.iter().zip(g_host.iter()) {
+                if xv < zero {
+                    grad_alpha += gv * xv;
+                }
+            }
+            let grad_alpha_t =
+                Tensor::from_storage(TensorStorage::cpu(vec![grad_alpha]), vec![1], false)?
+                    .to(self.alpha.device())?;
+            return Ok(vec![Some(grad_input_t), Some(grad_alpha_t)]);
+        }
+
         let x = self.input.data()?;
         let alpha_data = self.alpha.data()?;
         let alpha_v = alpha_data[0];
         let g = grad_output.data()?;
-        let zero = <T as num_traits::Zero>::zero();
-        let one = <T as num_traits::One>::one();
 
-        // grad wrt input
+        // grad wrt input — strict `x > 0` per torch's `_prelu_kernel_backward`
+        // (`dx = x > 0 ? grad : weight * grad`): x == 0 takes the weight
+        // branch (#1951).
         let grad_input: Vec<T> = x
             .iter()
             .zip(g.iter())
-            .map(|(&xv, &gv)| if xv >= zero { gv * one } else { gv * alpha_v })
+            .map(|(&xv, &gv)| if xv > zero { gv * one } else { gv * alpha_v })
             .collect();
         let grad_input_t = Tensor::from_storage(
             TensorStorage::cpu(grad_input),
@@ -2224,6 +2368,10 @@ impl<T: Float> GradFn<T> for PReluBackward<T> {
 /// `alpha` is the (scalar, length-1) learnable slope tensor. This is the fused
 /// counterpart of the `nn::PReLU` module: a single forward pass over `x` and a
 /// single backward node, so the autograd graph carries one VJP instead of three.
+///
+/// CUDA inputs (and a CUDA-resident scalar `alpha`) are computed via
+/// `unary_map`'s / `data_vec`'s documented host round trips; the output
+/// (autograd-tracked or not) stays on the input's device (#1739).
 pub fn prelu<T: Float>(input: &Tensor<T>, alpha: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if alpha.numel() != 1 {
         return Err(FerrotorchError::ShapeMismatch {
@@ -2233,15 +2381,20 @@ pub fn prelu<T: Float>(input: &Tensor<T>, alpha: &Tensor<T>) -> FerrotorchResult
             ),
         });
     }
-    let alpha_data = alpha.data()?;
+    // `data_vec` performs an explicit host readback for a CUDA-resident
+    // alpha (documented round trip, R-LOUD-2); on CPU it is a plain copy of
+    // the single element. (#1739)
+    let alpha_data = alpha.data_vec()?;
     let alpha_v = alpha_data[0];
     let zero = <T as num_traits::Zero>::zero();
 
     let output = unary_map(input, |x| if x >= zero { x } else { alpha_v * x })?;
     if is_grad_enabled() && (input.requires_grad() || alpha.requires_grad()) {
+        // Device-preserving storage handoff — see `hardtanh_with`. (#1739)
+        let (storage, shape) = output.into_storage_and_shape()?;
         Tensor::from_operation(
-            TensorStorage::cpu(output.data()?.to_vec()),
-            output.shape().to_vec(),
+            storage,
+            shape,
             Arc::new(PReluBackward::new(input.clone(), alpha.clone())),
         )
     } else {
@@ -2575,11 +2728,21 @@ pub fn threshold<T: Float>(
 //   - User-facing: `torch.nn.functional.rrelu(input, lower=1/8, upper=1/3,
 //     training=False, inplace=False)` at `torch/nn/functional.py:1962-1989`.
 //
-// ferrotorch ships the deterministic / inference path as a fused
-// `RReluBackward`; the training-mode RNG-stateful variant is filed as a
-// separate follow-up (would require a thread-safe RNG draw + a saved noise
-// tensor identical to upstream's `noise` out-arg). The inference path is the
-// one the op_db parity-sweep samples exercise (default `training=False`).
+// ferrotorch ships BOTH paths (#1738 / CORE-044):
+//   - inference (`training=false`): fused `RReluBackward` with the
+//     deterministic mean slope, mirroring the upstream `else` branch;
+//   - training (`training=true`): per-element slope drawn from
+//     `Uniform[lower, upper]` via the thread-local MT19937 generator
+//     (`crate::rng::with_thread_rng`), saved as the `noise` buffer for the
+//     backward — mirroring `_rrelu_with_noise_train` exactly. The draw is
+//     `at::uniform_real_distribution<double>(lower, upper)` per
+//     `aten/src/ATen/core/DistributionsHelper.h:60-70`, i.e.
+//     `next_uniform_f64() * (upper - lower) + lower` (one u64 = two MT19937
+//     u32 calls) for every element with `x <= 0` (zero included), in
+//     sequential element order, double precision regardless of dtype. Since
+//     `rng::Generator` is byte-identical to torch's CPU MT19937, the
+//     training forward is bit-exact vs torch CPU under `manual_seed`
+//     (pinned by `tests/audit_core044_rrelu_training.rs`).
 
 /// Backward for `rrelu(x; lower, upper, training=False)` — inference mode.
 ///
@@ -2635,23 +2798,83 @@ impl<T: Float> GradFn<T> for RReluBackward<T> {
     }
 }
 
-/// Compute `rrelu(x; lower, upper, training)` — inference mode mirrors the
-/// upstream delegation `return at::leaky_relu_out(output, self,
-/// (lower + upper) / 2)` at `aten/src/ATen/native/Activation.cpp:624-630`.
+/// Backward for `rrelu(x; lower, upper, training=true)` — training mode.
 ///
-/// `training=true` would draw a per-element slope from `Uniform[lower, upper]`
-/// (see `_rrelu_with_noise_train` at
-/// `aten/src/ATen/native/Activation.cpp:578-608`). The training path is not
-/// yet shipped (requires thread-safe RNG-state-aware backward); for the
-/// `training=true` case we fall back to the deterministic mean slope which
-/// matches upstream's INFERENCE behavior exactly. This is documented divergence
-/// — the deterministic op IS what the op_db parity-sweep exercises for
-/// `nn.functional.rrelu` (sample_inputs default `training=False`).
+/// VJP: `grad * noise` where `noise[i]` is the per-element slope drawn in
+/// the forward pass (`noise[i] = 1` for `x[i] > 0`, `noise[i] ~
+/// Uniform[lower, upper]` for `x[i] <= 0`). Mirrors
+/// `rrelu_with_noise_backward` at `aten/src/ATen/native/Activation.cpp`
+/// (training branch: `grad_output * noise`) wired via
+/// `tools/autograd/derivatives.yaml` — `rrelu_with_noise` saves `noise` and
+/// the backward multiplies by it.
+///
+/// Private: not part of the conformance surface; constructed only by
+/// [`rrelu`]. (#1738 / CORE-044)
+#[derive(Debug)]
+struct RReluTrainBackward<T: Float> {
+    input: Tensor<T>,
+    /// Per-element slopes drawn in forward (`1` on the positive branch).
+    noise: Vec<T>,
+}
+
+impl<T: Float> RReluTrainBackward<T> {
+    fn new(input: Tensor<T>, noise: Vec<T>) -> Self {
+        Self { input, noise }
+    }
+}
+
+impl<T: Float> GradFn<T> for RReluTrainBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        // The training forward rejects CUDA inputs, so the saved state is
+        // CPU-resident; a CUDA grad_output would mean a mixed-device graph.
+        if grad_output.is_cuda() || self.input.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "rrelu training backward",
+            });
+        }
+        let grad_data = grad_output.data()?;
+        let result: Vec<T> = self
+            .noise
+            .iter()
+            .zip(grad_data.iter())
+            .map(|(&r, &g)| g * r)
+            .collect();
+        let grad_input = Tensor::from_storage(
+            TensorStorage::cpu(result),
+            self.input.shape().to_vec(),
+            false,
+        )?;
+        Ok(vec![Some(grad_input)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "RReluTrainBackward"
+    }
+}
+
+/// Compute `rrelu(x; lower, upper, training)`.
+///
+/// - `training=false` (inference) mirrors the upstream delegation
+///   `return at::leaky_relu_out(output, self, (lower + upper) / 2)` at
+///   `aten/src/ATen/native/Activation.cpp:624-630` — deterministic mean
+///   slope, no RNG consumption.
+/// - `training=true` draws an independent per-element slope from
+///   `Uniform[lower, upper]` for every element with `x <= 0` (zero
+///   included), mirroring `_rrelu_with_noise_train` at
+///   `aten/src/ATen/native/Activation.cpp:578-608`: the slope is drawn in
+///   DOUBLE precision via `at::uniform_real_distribution<double>` from the
+///   thread-local MT19937 generator (`crate::manual_seed` controls it),
+///   saved as the `noise` buffer, and the backward applies `grad * noise`.
+///   Bit-exact vs torch CPU under `manual_seed` (#1738 / CORE-044).
 pub fn rrelu<T: Float>(
     input: &Tensor<T>,
     lower: f64,
     upper: f64,
-    _training: bool,
+    training: bool,
 ) -> FerrotorchResult<Tensor<T>> {
     if lower > upper {
         return Err(FerrotorchError::InvalidArgument {
@@ -2660,6 +2883,9 @@ pub fn rrelu<T: Float>(
     }
     if input.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "rrelu" });
+    }
+    if training {
+        return rrelu_train(input, lower, upper);
     }
     let negative_slope = f64::midpoint(lower, upper);
     let slope_t = t_from::<T>(negative_slope, "rrelu")?;
@@ -2674,6 +2900,78 @@ pub fn rrelu<T: Float>(
         )
     } else {
         Ok(output)
+    }
+}
+
+/// Training-mode rrelu forward — see [`rrelu`]. CPU-only (the caller has
+/// already rejected CUDA inputs). Mirrors `_rrelu_with_noise_train` at
+/// `aten/src/ATen/native/Activation.cpp:578-608` element for element:
+///
+/// ```cpp
+/// using opmath_t = at::opmath_type<scalar_t>;
+/// if (input_data[i] <= 0) {
+///   at::uniform_real_distribution<double> uniform(lower, upper);
+///   const opmath_t r = (opmath_t)uniform(gen);
+///   output_data[i] = input_data[i] * r;   // multiply in opmath_t
+///   noise_data[i] = r;                    // store rounds to scalar_t
+/// } else {
+///   noise_data[i] = 1;
+///   output_data[i] = input_data[i];
+/// }
+/// ```
+///
+/// `opmath_type<bf16/f16> = float`: the f64 draw is cast to f32 (NOT to the
+/// storage dtype), the product is computed in f32, and only the store rounds
+/// to bf16/f16 — rounding `r` to the storage dtype first double-rounds and
+/// drifts by 1 ULP vs torch (#1953). For f32/f64, `opmath_t == scalar_t`,
+/// so the plain path is already exact.
+fn rrelu_train<T: Float>(input: &Tensor<T>, lower: f64, upper: f64) -> FerrotorchResult<Tensor<T>> {
+    let data = input.data()?;
+    let zero = <T as num_traits::Zero>::zero();
+    let one = <T as num_traits::One>::one();
+    let n = data.len();
+    let mut out = Vec::with_capacity(n);
+    let mut noise = Vec::with_capacity(n);
+    let reduced_fp = is_bf16::<T>() || is_f16::<T>();
+    crate::rng::with_thread_rng(|g| -> FerrotorchResult<()> {
+        for &x in data {
+            if x <= zero {
+                // `at::uniform_real_distribution<double>(lower, upper)(gen)`
+                // = next_uniform_f64() * (upper - lower) + lower, per
+                // `aten/src/ATen/core/DistributionsHelper.h:60-70`. Drawn in
+                // f64 regardless of T, then cast to opmath_t.
+                let r64 = g.next_uniform_f64() * (upper - lower) + lower;
+                if reduced_fp {
+                    // opmath_t = f32 for bf16/f16 (#1953): r → f32, promote
+                    // x exactly to f32, multiply in f32, round ONCE on store.
+                    let r_op = r64 as f32;
+                    let x_op = x.to_f32().ok_or_else(|| FerrotorchError::InvalidArgument {
+                        message: "rrelu training: input not representable as f32".into(),
+                    })?;
+                    out.push(t_from::<T>(f64::from(x_op * r_op), "rrelu training")?);
+                    noise.push(t_from::<T>(f64::from(r_op), "rrelu training")?);
+                } else {
+                    // f32/f64: opmath_t == scalar_t — single rounding either way.
+                    let r = t_from::<T>(r64, "rrelu training")?;
+                    out.push(x * r);
+                    noise.push(r);
+                }
+            } else {
+                out.push(x);
+                noise.push(one);
+            }
+        }
+        Ok(())
+    })?;
+    let shape = input.shape().to_vec();
+    if is_grad_enabled() && input.requires_grad() {
+        Tensor::from_operation(
+            TensorStorage::cpu(out),
+            shape,
+            Arc::new(RReluTrainBackward::new(input.clone(), noise)),
+        )
+    } else {
+        Tensor::from_storage(TensorStorage::cpu(out), shape, false)
     }
 }
 

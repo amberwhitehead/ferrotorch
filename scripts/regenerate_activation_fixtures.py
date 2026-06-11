@@ -171,22 +171,26 @@ ACTIVATION_SHAPES: list[tuple[list[int], str]] = [
 
 
 # (op_name, callable, supports_gpu, requires_positive_input)
-# `supports_gpu = True` means there is a real GPU kernel registered in
-# ferrotorch-gpu; the fixture script tabulates the same op on cuda:0 and the
-# Rust test runs the GPU lane.
+# `supports_gpu = True` means the op is CUDA-functional in ferrotorch —
+# either a real GPU kernel registered in ferrotorch-gpu, or (post-#1739 /
+# CORE-045) the documented `unary_map` host-round-trip path that keeps the
+# output and the autograd graph on the CUDA device (relu6 / hardtanh /
+# hardsigmoid / hardswish / selu / softsign). The fixture script tabulates
+# the same op on cuda:0 and the Rust test runs the GPU lane with device
+# readback assertions.
 SIMPLE_ACTIVATIONS: list[tuple[str, Any, bool, bool]] = [
     ("relu", lambda x: F.relu(x), True, False),
-    ("relu6", lambda x: F.relu6(x), False, False),
+    ("relu6", lambda x: F.relu6(x), True, False),
     ("sigmoid", lambda x: torch.sigmoid(x), True, False),
     ("tanh", lambda x: torch.tanh(x), True, False),
     ("silu", lambda x: F.silu(x), True, False),
     ("mish", lambda x: F.mish(x), True, False),
     ("leaky_relu", lambda x: F.leaky_relu(x, 0.01), True, False),
-    ("hardtanh", lambda x: F.hardtanh(x), False, False),
-    ("hardsigmoid", lambda x: F.hardsigmoid(x), False, False),
-    ("hardswish", lambda x: F.hardswish(x), False, False),
-    ("selu", lambda x: F.selu(x), False, False),
-    ("softsign", lambda x: F.softsign(x), False, False),
+    ("hardtanh", lambda x: F.hardtanh(x), True, False),
+    ("hardsigmoid", lambda x: F.hardsigmoid(x), True, False),
+    ("hardswish", lambda x: F.hardswish(x), True, False),
+    ("selu", lambda x: F.selu(x), True, False),
+    ("softsign", lambda x: F.softsign(x), True, False),
     ("softplus_default", lambda x: F.softplus(x, beta=1.0, threshold=20.0), True, False),
     ("elu_default", lambda x: F.elu(x, alpha=1.0), True, False),
     # GELU variants — three approximation modes mapped via gelu_with.
@@ -231,6 +235,17 @@ def fixture_simple_activations() -> list[dict[str, Any]]:
     return out
 
 
+def _prelu_input(shape: list[int], dtype: str, device: str) -> torch.Tensor:
+    """Negative + EXACT-zero + positive input for prelu so the backward's
+    branch boundary is exercised. `_basic_input` is all-negative for the
+    shapes in use, which let the `x == 0` weight-branch divergence (#1951)
+    through the conformance gate; `(i - 2) * 0.25` is exact in binary and
+    crosses zero at i == 2."""
+    n = max(1, math.prod(shape))
+    vals = [(i - 2) * 0.25 for i in range(n)]
+    return torch.tensor(vals, dtype=torch_dtype(dtype), device=device).reshape(shape)
+
+
 def fixture_prelu() -> list[dict[str, Any]]:
     """prelu: scalar `alpha` parameter. Ferrotorch's CPU impl fixes alpha to
     a 1-element tensor (numel==1) and treats it as a scalar."""
@@ -238,7 +253,7 @@ def fixture_prelu() -> list[dict[str, Any]]:
     for device in DEVICES:
         for dtype in DTYPES:
             for shape, tag in ACTIVATION_SHAPES:
-                a = _basic_input(shape, dtype, device)
+                a = _prelu_input(shape, dtype, device)
                 a_g = _grad_clone(a)
                 alpha_val = 0.25
                 alpha = torch.tensor(

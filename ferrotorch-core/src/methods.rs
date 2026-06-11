@@ -540,9 +540,12 @@ impl<T: Float> Tensor<T> {
     /// this method is the public, chainable surface that closes the
     /// consumer requirement (closes #1341 REQ-20).
     ///
-    /// Note: `training=true` falls back to the deterministic mean-slope
-    /// inference path (per the GradFn docs at `activation.rs`). The
-    /// RNG-stateful training-mode VJP is a separately-tracked follow-up.
+    /// `training=true` draws a per-element slope from `Uniform[lower,
+    /// upper]` for every `x <= 0` element via the thread-local MT19937
+    /// generator (seed with [`crate::manual_seed`]; bit-exact vs torch CPU)
+    /// and the backward applies the saved per-element slopes.
+    /// `training=false` applies the deterministic mean slope
+    /// `(lower + upper) / 2` (#1738 / CORE-044).
     pub fn rrelu_t(&self, lower: f64, upper: f64, training: bool) -> FerrotorchResult<Tensor<T>> {
         crate::grad_fns::activation::rrelu(self, lower, upper, training)
     }

@@ -2663,13 +2663,19 @@ fn dispatch_f32(
                 .unwrap_or(false);
             // Stochastic training-mode samples emit per-element slopes drawn
             // from `Uniform[lower, upper]` — see `_rrelu_with_noise_train` at
-            // `aten/src/ATen/native/Activation.cpp:578-608`. ferrotorch's
-            // deterministic mean-slope inference path cannot match a single
-            // stochastic oracle output by construction (each invocation draws
-            // different slopes). Skip those samples as legitimate
-            // "differentiability infrastructure not yet shipped" rather than
-            // reporting a numerical divergence. The non-training samples
-            // (which are the public-API contract worth pinning) all pass.
+            // `aten/src/ATen/native/Activation.cpp:578-608`. ferrotorch
+            // SHIPS the training path (#1738 / CORE-044: per-element MT19937
+            // draws, bit-exact vs torch CPU under coordinated `manual_seed`,
+            // pinned by `tests/audit_core044_rrelu_training.rs`), but
+            // SEED-SYNC IS NOT ACHIEVABLE in this sweep architecture — same
+            // analysis as the dropout2d/dropout3d arm below: the oracle's
+            // `sample()` calls `torch.manual_seed(seed)` and then consumes an
+            // OPAQUE number of torch RNG draws building the sample inputs
+            // BEFORE `F.rrelu` draws its slopes, so the op-time RNG state is
+            // unreproducible from the runner side. Skip the training samples
+            // with that documented reason — never a fake-pass or a reported
+            // divergence. The non-training samples (the deterministic
+            // mean-slope contract) all pass.
             if training {
                 return Ok(None);
             }

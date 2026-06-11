@@ -400,17 +400,35 @@ fn make_cpu_f64(data: &[f64], shape: &[usize], requires_grad: bool) -> Tensor<f6
     .expect("make_cpu_f64")
 }
 
+/// Upload to a CUDA device as a true CUDA LEAF.
+///
+/// CORE-012 (#1706): `.to(device)` of a requires-grad leaf is a
+/// differentiable copy — the result is a NON-leaf whose backward gradients
+/// accumulate on the ORIGINAL CPU leaf (torch: `is_leaf=False`, grad_fn
+/// `ToCopyBackward0`). These lanes assert CUDA-resident `.grad()` on the
+/// uploaded tensor, so they need a real CUDA leaf — torch's
+/// `x.to('cuda').detach().requires_grad_(True)` idiom (same as the
+/// `conformance_autograd.rs` gpu module).
 fn upload_f32(t: Tensor<f32>, device: Device) -> Tensor<f32> {
     if matches!(device, Device::Cuda(_)) {
-        t.to(device).expect("upload to cuda")
+        let track = t.requires_grad();
+        t.detach()
+            .to(device)
+            .expect("upload to cuda")
+            .requires_grad_(track)
     } else {
         t
     }
 }
 
+/// f64 twin of [`upload_f32`] — same CORE-012 leaf-preserving idiom.
 fn upload_f64(t: Tensor<f64>, device: Device) -> Tensor<f64> {
     if matches!(device, Device::Cuda(_)) {
-        t.to(device).expect("upload to cuda")
+        let track = t.requires_grad();
+        t.detach()
+            .to(device)
+            .expect("upload to cuda")
+            .requires_grad_(track)
     } else {
         t
     }
@@ -579,6 +597,21 @@ fn tol_overrides(op: &str) -> Option<(Option<f32>, Option<f64>)> {
         // for any other op. The f32 lane is unaffected — both sides use
         // the same f32 constant.
         "hardsigmoid" => Some((None, Some(5.0e-8))),
+        // #1739 GPU lane — hardswish f64 forward. PyTorch's CUDA f64
+        // hardswish kernel carries an f32-rounded `1/6` factor (same
+        // artefact family as #795). Live torch 2.11.0+cu130:
+        //   >>> F.hardswish(torch.tensor([-0.75], dtype=torch.float64,
+        //   ...                          device='cuda:0')).item()
+        //   -0.28125000838190317        # exact value is -0.28125
+        //   >>> F.hardswish(torch.tensor([-0.75], dtype=torch.float64)).item()
+        //   -0.28125                    # CPU lane is exact
+        // ferrotorch computes the exact f64 piecewise form on both devices.
+        // Analytical worst case for the fixture range (|x| ≤ 0.75, middle
+        // branch |x(x+3)| ≤ 1.6875): `1.6875 * |1/6 − f32(1/6)| ≈ 1.7e-8`;
+        // backward (|2x+3| ≤ 4.5): ≤ 4.5e-8. Override f64 to 5e-8 (≥ the
+        // worst case with margin), matching the hardsigmoid policy. The
+        // f32 lane agrees exactly — both sides round through f32.
+        "hardswish" => Some((None, Some(5.0e-8))),
         _ => None,
     }
 }
@@ -963,11 +996,21 @@ fn cpu_log_softmax() {
 // Parametrised activations (carry their own scalar params)
 // ---------------------------------------------------------------------------
 
-#[test]
-fn cpu_hardtanh_with_custom_bounds() {
+/// Shared CPU/GPU driver for the `hardtanh_with` fixture rows. The GPU lane
+/// exists post-#1739 (CORE-045): the grad-enabled forward keeps `unary_map`'s
+/// CUDA storage and the backward is device-aware.
+fn run_hardtanh_with_for_device(device_label: &str, device: Device) {
     let file = load_fixtures();
-    for f in cases_for(&file, "hardtanh_with", "cpu") {
-        let label = format!("hardtanh_with cpu tag={:?} dtype={}", f.tag, f.dtype);
+    let cases = cases_for(&file, "hardtanh_with", device_label);
+    assert!(
+        !cases.is_empty(),
+        "no fixtures for hardtanh_with on {device_label}"
+    );
+    for f in cases {
+        let label = format!(
+            "hardtanh_with {device_label} tag={:?} dtype={}",
+            f.tag, f.dtype
+        );
         let shape = f.a_shape.as_ref().expect("a_shape");
         let a_data = f
             .a_data
@@ -988,41 +1031,41 @@ fn cpu_hardtanh_with_custom_bounds() {
         let max_v = f.max_val.expect("max_val");
         match f.dtype.as_str() {
             "float32" => {
-                let a = make_cpu_f32(a_data, shape, false);
+                let a = upload_f32(make_cpu_f32(a_data, shape, false), device);
                 let c = hardtanh_with(&a, min_v, max_v).expect("hardtanh_with");
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c, Device::Cpu),
+                    &read_back_f32(&c, device),
                     expected,
                     tolerance::F32_ELEMENTWISE,
                 );
-                let a_g = make_cpu_f32(a_data, shape, true);
+                let a_g = upload_f32(make_cpu_f32(a_data, shape, true), device);
                 let out = hardtanh_with(&a_g, min_v, max_v).expect("hardtanh_with grad");
                 reduce_sum(&out).expect("sum").backward().expect("backward");
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga, Device::Cpu),
+                    &read_back_f32(&ga, device),
                     grad_a_exp,
                     tolerance::F32_ELEMENTWISE,
                 );
             }
             "float64" => {
-                let a = make_cpu_f64(a_data, shape, false);
+                let a = upload_f64(make_cpu_f64(a_data, shape, false), device);
                 let c = hardtanh_with(&a, min_v, max_v).expect("hardtanh_with");
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c, Device::Cpu),
+                    &read_back_f64(&c, device),
                     expected,
                     tolerance::F64_TRANSCENDENTAL,
                 );
-                let a_g = make_cpu_f64(a_data, shape, true);
+                let a_g = upload_f64(make_cpu_f64(a_data, shape, true), device);
                 let out = hardtanh_with(&a_g, min_v, max_v).expect("hardtanh_with grad");
                 reduce_sum(&out).expect("sum").backward().expect("backward");
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga, Device::Cpu),
+                    &read_back_f64(&ga, device),
                     grad_a_exp,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1030,6 +1073,11 @@ fn cpu_hardtanh_with_custom_bounds() {
             _ => unreachable!(),
         }
     }
+}
+
+#[test]
+fn cpu_hardtanh_with_custom_bounds() {
+    run_hardtanh_with_for_device("cpu", Device::Cpu);
 }
 
 #[test]
@@ -1241,11 +1289,17 @@ fn cpu_leaky_relu_with_slope() {
 // prelu — scalar alpha tensor (numel == 1)
 // ---------------------------------------------------------------------------
 
-#[test]
-fn cpu_prelu() {
+/// Shared CPU/GPU driver for the `prelu` fixture rows (scalar alpha uploaded
+/// to the same device as the input, matching torch's same-device weight
+/// requirement). The GPU lane exists post-#1739 (CORE-045). The fixture
+/// inputs cross zero so the `x == 0` weight-branch boundary (#1951) stays
+/// pinned on both devices.
+fn run_prelu_for_device(device_label: &str, device: Device) {
     let file = load_fixtures();
-    for f in cases_for(&file, "prelu", "cpu") {
-        let label = format!("prelu cpu tag={:?} dtype={}", f.tag, f.dtype);
+    let cases = cases_for(&file, "prelu", device_label);
+    assert!(!cases.is_empty(), "no fixtures for prelu on {device_label}");
+    for f in cases {
+        let label = format!("prelu {device_label} tag={:?} dtype={}", f.tag, f.dtype);
         let shape = f.a_shape.as_ref().expect("a_shape");
         let a_data = f
             .a_data
@@ -1265,45 +1319,45 @@ fn cpu_prelu() {
         let alpha_v = f.alpha.expect("alpha");
         match f.dtype.as_str() {
             "float32" => {
-                let a = make_cpu_f32(a_data, shape, false);
-                let alpha = make_cpu_f32(&[alpha_v], &[1], false);
+                let a = upload_f32(make_cpu_f32(a_data, shape, false), device);
+                let alpha = upload_f32(make_cpu_f32(&[alpha_v], &[1], false), device);
                 let c = prelu(&a, &alpha).expect("prelu");
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c, Device::Cpu),
+                    &read_back_f32(&c, device),
                     expected,
                     tolerance::F32_ELEMENTWISE,
                 );
-                let a_g = make_cpu_f32(a_data, shape, true);
-                let alpha = make_cpu_f32(&[alpha_v], &[1], false);
+                let a_g = upload_f32(make_cpu_f32(a_data, shape, true), device);
+                let alpha = upload_f32(make_cpu_f32(&[alpha_v], &[1], false), device);
                 let out = prelu(&a_g, &alpha).expect("prelu grad");
                 reduce_sum(&out).expect("sum").backward().expect("backward");
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga, Device::Cpu),
+                    &read_back_f32(&ga, device),
                     grad_a_exp,
                     tolerance::F32_ELEMENTWISE,
                 );
             }
             "float64" => {
-                let a = make_cpu_f64(a_data, shape, false);
-                let alpha = make_cpu_f64(&[alpha_v], &[1], false);
+                let a = upload_f64(make_cpu_f64(a_data, shape, false), device);
+                let alpha = upload_f64(make_cpu_f64(&[alpha_v], &[1], false), device);
                 let c = prelu(&a, &alpha).expect("prelu");
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c, Device::Cpu),
+                    &read_back_f64(&c, device),
                     expected,
                     tolerance::F64_TRANSCENDENTAL,
                 );
-                let a_g = make_cpu_f64(a_data, shape, true);
-                let alpha = make_cpu_f64(&[alpha_v], &[1], false);
+                let a_g = upload_f64(make_cpu_f64(a_data, shape, true), device);
+                let alpha = upload_f64(make_cpu_f64(&[alpha_v], &[1], false), device);
                 let out = prelu(&a_g, &alpha).expect("prelu grad");
                 reduce_sum(&out).expect("sum").backward().expect("backward");
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga, Device::Cpu),
+                    &read_back_f64(&ga, device),
                     grad_a_exp,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1311,6 +1365,11 @@ fn cpu_prelu() {
             _ => unreachable!(),
         }
     }
+}
+
+#[test]
+fn cpu_prelu() {
+    run_prelu_for_device("cpu", Device::Cpu);
 }
 
 // ---------------------------------------------------------------------------
@@ -2568,6 +2627,94 @@ mod gpu {
             Device::Cuda(0),
             true,
         );
+    }
+
+    // ----- Cat A — activations CUDA-functional via the documented
+    // `unary_map` host round trip (post-#1739 / CORE-045: the grad-enabled
+    // forward keeps the CUDA storage and the backward is device-aware) -----
+
+    #[test]
+    fn gpu_relu6() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        run_simple_activation_for_device(SimpleActivation::Relu6, "cuda:0", Device::Cuda(0), true);
+    }
+
+    #[test]
+    fn gpu_hardtanh() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        run_simple_activation_for_device(
+            SimpleActivation::Hardtanh,
+            "cuda:0",
+            Device::Cuda(0),
+            true,
+        );
+    }
+
+    #[test]
+    fn gpu_hardsigmoid() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        run_simple_activation_for_device(
+            SimpleActivation::Hardsigmoid,
+            "cuda:0",
+            Device::Cuda(0),
+            true,
+        );
+    }
+
+    #[test]
+    fn gpu_hardswish() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        run_simple_activation_for_device(
+            SimpleActivation::Hardswish,
+            "cuda:0",
+            Device::Cuda(0),
+            true,
+        );
+    }
+
+    #[test]
+    fn gpu_selu() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        run_simple_activation_for_device(SimpleActivation::Selu, "cuda:0", Device::Cuda(0), true);
+    }
+
+    #[test]
+    fn gpu_softsign() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        run_simple_activation_for_device(
+            SimpleActivation::Softsign,
+            "cuda:0",
+            Device::Cuda(0),
+            true,
+        );
+    }
+
+    #[test]
+    fn gpu_hardtanh_with_custom_bounds() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        run_hardtanh_with_for_device("cuda:0", Device::Cuda(0));
+    }
+
+    #[test]
+    fn gpu_prelu() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        run_prelu_for_device("cuda:0", Device::Cuda(0));
     }
 
     // ----- Cat A — transcendentals on GPU -----

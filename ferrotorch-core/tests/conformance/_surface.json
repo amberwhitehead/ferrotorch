@@ -543,7 +543,7 @@
     { "path": "ferrotorch_core::grad_fns::activation::prelu", "kind": "fn", "signature": "fn prelu < T : Float > (input : & Tensor < T > , alpha : & Tensor < T >) -> FerrotorchResult < Tensor < T > >" },
     { "path": "ferrotorch_core::grad_fns::activation::relu", "kind": "fn", "signature": "fn relu < T : Float > (input : & Tensor < T >) -> FerrotorchResult < Tensor < T > >" },
     { "path": "ferrotorch_core::grad_fns::activation::relu6", "kind": "fn", "signature": "fn relu6 < T : Float > (input : & Tensor < T >) -> FerrotorchResult < Tensor < T > >" },
-    { "path": "ferrotorch_core::grad_fns::activation::rrelu", "kind": "fn", "signature": "fn rrelu < T : Float > (input : & Tensor < T > , lower : f64 , upper : f64 , _training : bool ,) -> FerrotorchResult < Tensor < T > >" },
+    { "path": "ferrotorch_core::grad_fns::activation::rrelu", "kind": "fn", "signature": "fn rrelu < T : Float > (input : & Tensor < T > , lower : f64 , upper : f64 , training : bool ,) -> FerrotorchResult < Tensor < T > >" },
     { "path": "ferrotorch_core::grad_fns::activation::selu", "kind": "fn", "signature": "fn selu < T : Float > (input : & Tensor < T >) -> FerrotorchResult < Tensor < T > >" },
     { "path": "ferrotorch_core::grad_fns::activation::sigmoid", "kind": "fn", "signature": "fn sigmoid < T : Float > (input : & Tensor < T >) -> FerrotorchResult < Tensor < T > >" },
     { "path": "ferrotorch_core::grad_fns::activation::silu", "kind": "fn", "signature": "fn silu < T : Float > (input : & Tensor < T >) -> FerrotorchResult < Tensor < T > >" },
