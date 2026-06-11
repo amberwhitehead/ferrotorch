@@ -1,0 +1,5 @@
+
+[remainder] 72/72 passed (0 skipped, 0 failed)
+
+--- stderr ---
+torch 2.11.0+cu130 (662 ops) — sweeping remainder with seeds 0..8
