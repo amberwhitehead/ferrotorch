@@ -24,7 +24,7 @@ use crate::autograd::no_grad::is_grad_enabled;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
-use crate::tensor::Tensor;
+use crate::tensor::{GradFn, Tensor};
 
 #[inline]
 fn is_f32<T: Float>() -> bool {
@@ -112,7 +112,12 @@ pub fn triu<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
         let base = b * matrix;
         for r in 0..rows {
             for c in 0..cols {
-                if (c as i64) >= (r as i64) + diagonal {
+                // `c - r >= diagonal` evaluated as a DIFFERENCE: both indices
+                // are in-bounds (< isize::MAX), so the difference always fits
+                // i64, whereas `r + diagonal` overflows for offsets within
+                // `rows` of i64::MAX/MIN (CORE-121 / #1815). Mirrors the PTX
+                // kernel's `diff = col - row` compare (`triangular.rs`).
+                if (c as i64) - (r as i64) >= diagonal {
                     out.push(data[base + r * cols + c]);
                 } else {
                     out.push(zero);
@@ -198,7 +203,9 @@ pub fn tril<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
         let base = b * matrix;
         for r in 0..rows {
             for c in 0..cols {
-                if (c as i64) <= (r as i64) + diagonal {
+                // Overflow-free difference form — see the `triu` mask note
+                // (CORE-121 / #1815).
+                if (c as i64) - (r as i64) <= diagonal {
                     out.push(data[base + r * cols + c]);
                 } else {
                     out.push(zero);
@@ -208,6 +215,35 @@ pub fn tril<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     }
 
     Tensor::from_storage(TensorStorage::cpu(out), shape.to_vec(), false)
+}
+
+/// Checked `[size, size]` sizing for the 1-D `diag` embed
+/// (`size = n + |diagonal|`).
+///
+/// Returns a structured `InvalidArgument` when the side, the element count
+/// `size * size`, or the byte size is unrepresentable — the analog of torch's
+/// `RuntimeError: Storage size calculation overflowed with sizes=[...]`
+/// (live torch 2.11.0 raises for `torch.diag(torch.ones(2), 2**62)`).
+/// Pre-fix the unchecked `n + |k|` / `size * size` wrapped and then scattered
+/// out of bounds on CPU or dispatched a CUDA kernel sized from the wrapped
+/// count (CORE-121 / #1815).
+fn diag_embed_size<T: Float>(n: usize, diagonal: i64) -> FerrotorchResult<usize> {
+    let overflow = || FerrotorchError::InvalidArgument {
+        message: format!(
+            "diag: storage size calculation overflowed with sizes=[n={n} + |diagonal={diagonal}|]^2"
+        ),
+    };
+    let offset = usize::try_from(diagonal.unsigned_abs()).map_err(|_| overflow())?;
+    let size = n.checked_add(offset).ok_or_else(overflow)?;
+    let total = size.checked_mul(size).ok_or_else(overflow)?;
+    // Byte-size representability: Rust allocations are capped at isize::MAX
+    // bytes (a `Vec` past that panics with "capacity overflow" — still a
+    // panic inside a fallible API), so reject it here like torch rejects its
+    // int64 storage-size overflow.
+    match total.checked_mul(std::mem::size_of::<T>()) {
+        Some(bytes) if isize::try_from(bytes).is_ok() => Ok(size),
+        _ => Err(overflow()),
+    }
 }
 
 /// Extract the diagonal of a 2-D tensor, or construct a 2-D diagonal matrix
@@ -255,7 +291,10 @@ pub fn diag<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
             let input = input.contiguous()?;
             let result = if ndim == 1 {
                 let n = input.shape()[0];
-                let size = n + diagonal.unsigned_abs() as usize;
+                // Checked BEFORE kernel dispatch: pre-fix a wrapped size
+                // reached the backend and sized the scatter kernel from the
+                // wrapped count (CORE-121 / #1815).
+                let size = diag_embed_size::<T>(n, diagonal)?;
                 let handle = if is_f32::<T>() {
                     Some(backend.diag_embed_f32(input.gpu_handle()?, n, diagonal)?)
                 } else if is_f64::<T>() {
@@ -270,7 +309,9 @@ pub fn diag<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
                 let (start_r, start_c) = if diagonal >= 0 {
                     (0usize, diagonal as usize)
                 } else {
-                    ((-diagonal) as usize, 0usize)
+                    // `unsigned_abs`, NOT negation: i64::MIN is unnegatable
+                    // (CORE-121 / #1815).
+                    (diagonal.unsigned_abs() as usize, 0usize)
                 };
                 let diag_len = rows
                     .saturating_sub(start_r)
@@ -297,8 +338,10 @@ pub fn diag<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
             // 1-D → 2-D diagonal matrix
             let data = input.data()?;
             let n = data.len();
-            let offset = diagonal.unsigned_abs() as usize;
-            let size = n + offset;
+            // Checked sizing — unrepresentable `[n + |k|]^2` is a structured
+            // error, never a wrapped allocation (CORE-121 / #1815).
+            let size = diag_embed_size::<T>(n, diagonal)?;
+            let offset = size - n;
             let zero = <T as num_traits::Zero>::zero();
             let mut out = vec![zero; size * size];
 
@@ -322,10 +365,20 @@ pub fn diag<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
             let (start_r, start_c) = if diagonal >= 0 {
                 (0, diagonal as usize)
             } else {
-                ((-diagonal) as usize, 0)
+                // `unsigned_abs`, NOT negation: i64::MIN is unnegatable
+                // (CORE-121 / #1815).
+                (diagonal.unsigned_abs() as usize, 0)
             };
 
-            let diag_len = (rows - start_r).min(cols - start_c);
+            // Saturating bounds: an offset at/beyond the matrix edge selects
+            // an EMPTY diagonal (mirrors `torch.diag` length clamping,
+            // `aten/src/ATen/native/TensorShape.cpp` `apply_diag`
+            // `sz = std::max<int64_t>(0, ...)`), matching the CUDA branch
+            // above. Pre-fix the unchecked subtraction underflowed and drove
+            // out-of-bounds indexing (CORE-120 / #1814).
+            let diag_len = rows
+                .saturating_sub(start_r)
+                .min(cols.saturating_sub(start_c));
             let mut out = Vec::with_capacity(diag_len);
             for i in 0..diag_len {
                 out.push(data[(start_r + i) * cols + (start_c + i)]);
@@ -540,6 +593,16 @@ pub fn cdist<T: Float>(x1: &Tensor<T>, x2: &Tensor<T>, p: f64) -> FerrotorchResu
         }
     };
 
+    // Input contract BEFORE any device dispatch (mirrors
+    // `aten/src/ATen/native/Distance.cpp` `TORCH_CHECK(p >= 0, "cdist only
+    // supports non-negative p values")`); pre-fix both devices accepted a
+    // negative `p` into the norm formula/kernel (CORE-122 / #1816).
+    if p < 0.0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("cdist only supports non-negative p values, got {p}"),
+        });
+    }
+
     let out_shape = if batched {
         vec![b, p_dim, r_dim]
     } else {
@@ -556,12 +619,24 @@ pub fn cdist<T: Float>(x1: &Tensor<T>, x2: &Tensor<T>, p: f64) -> FerrotorchResu
     // `p == 0` count-norm) surface as `NotImplementedOnCuda` rather than a
     // silent host fallback, matching the rest of `tensor_ops`'s GPU contract.
     if x1.is_cuda() || x2.is_cuda() {
-        if !x1.is_cuda() || !x2.is_cuda() {
-            return Err(FerrotorchError::InvalidArgument {
-                message: "cdist: x1 and x2 must be on the same device".into(),
+        // EXACT device equality — ordinal included — before ANY backend
+        // access (CORE-124 / #1818). Mirrors `aten/src/ATen/native/
+        // Distance.cpp` `cdist_impl`'s operand-device TORCH_CHECK: a
+        // CPU×CUDA mix and a cross-ordinal CUDA pair both refuse here;
+        // pre-fix the `is_cuda()`-only pair check let operands on different
+        // GPU ordinals reach one kernel with a pointer owned by another
+        // device.
+        if x1.device() != x2.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: x1.device(),
+                got: x2.device(),
             });
         }
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
+            // Originals (NOT the contiguous copies below) are what the
+            // backward saves: gradient accumulation must reach the caller's
+            // leaves (CORE-123 / #1817).
+            let (orig_x1, orig_x2) = (x1.clone(), x2.clone());
             // #1658: normalise BOTH narrowed-offset CUDA operands to packed
             // offset-0 buffers before the distance kernel reads element 0.
             let x1 = x1.contiguous()?;
@@ -591,7 +666,21 @@ pub fn cdist<T: Float>(x1: &Tensor<T>, x2: &Tensor<T>, p: f64) -> FerrotorchResu
             };
             if let Some(handle) = handle {
                 let storage = TensorStorage::gpu(handle);
-                return Tensor::from_storage(storage, out_shape, false);
+                // Autograd edge for CUDA results too (the forward stays
+                // GPU-resident; `CdistBackward` documents its host round
+                // trip). Pre-fix the GPU result was silently detached
+                // (CORE-123 / #1817).
+                return if is_grad_enabled() && (orig_x1.requires_grad() || orig_x2.requires_grad())
+                {
+                    let grad_fn = Arc::new(CdistBackward {
+                        x1: orig_x1,
+                        x2: orig_x2,
+                        p,
+                    });
+                    Tensor::from_operation(storage, out_shape, grad_fn)
+                } else {
+                    Tensor::from_storage(storage, out_shape, false)
+                };
             }
         }
         return Err(FerrotorchError::NotImplementedOnCuda { op: "cdist" });
@@ -599,31 +688,308 @@ pub fn cdist<T: Float>(x1: &Tensor<T>, x2: &Tensor<T>, p: f64) -> FerrotorchResu
 
     let d1 = x1.data()?;
     let d2 = x2.data()?;
-    let p_val = T::from(p).unwrap();
-    let inv_p = T::from(1.0 / p).unwrap();
-    let mut out = Vec::with_capacity(b * p_dim * r_dim);
+    let out = cdist_cpu_distances(d1, d2, b, p_dim, r_dim, m, norm_for_p::<T>(p));
 
+    let storage = TensorStorage::cpu(out);
+    if is_grad_enabled() && (x1.requires_grad() || x2.requires_grad()) {
+        let grad_fn = Arc::new(CdistBackward {
+            x1: x1.clone(),
+            x2: x2.clone(),
+            p,
+        });
+        Tensor::from_operation(storage, out_shape, grad_fn)
+    } else {
+        Tensor::from_storage(storage, out_shape, false)
+    }
+}
+
+/// Norm selector for the explicit `cdist` branch dispatch, mirroring the
+/// upstream per-norm accumulate/finish structs
+/// (`aten/src/ATen/native/cuda/DistanceKernel.cu`
+/// `dists<scalar_t>::{zero, one, two, inf, p}`, selected at `:232-238` with
+/// exact `p ==` compares; the CPU path `aten/src/ATen/native/Distance.cpp`
+/// dispatches identically). Pre-CORE-122 every `p` ran the generic
+/// `sum(|d|^p)^(1/p)` formula, which is wrong for the `p == 0` count-"norm"
+/// (counted EQUAL coordinates too, then `sum^inf`) and for `p == inf`
+/// (max |d|) — and disagreed with the GPU kernels that already branch
+/// (CORE-122 / #1816).
+#[derive(Clone, Copy)]
+enum Norm<T> {
+    Zero,
+    One,
+    Two,
+    Inf,
+    /// General finite p: carries (p, p - 1, 1/p) as T.
+    P(T, T, T),
+}
+
+// reason: `p` is a discrete norm selector, not a measured value — the exact
+// compares mirror the upstream norm dispatch (see
+// `gpu_dispatch::cdist_supported_f32`).
+#[allow(
+    clippy::float_cmp,
+    reason = "discrete norm selector, mirrors upstream exact p compares"
+)]
+fn norm_for_p<T: Float>(p: f64) -> Norm<T> {
+    if p == 0.0 {
+        Norm::Zero
+    } else if p == 1.0 {
+        Norm::One
+    } else if p == 2.0 {
+        Norm::Two
+    } else if p.is_infinite() {
+        Norm::Inf
+    } else {
+        Norm::P(
+            T::from(p).unwrap(),
+            T::from(p - 1.0).unwrap(),
+            T::from(1.0 / p).unwrap(),
+        )
+    }
+}
+
+/// CPU pairwise-distance kernel shared by the `cdist` forward and the
+/// distance recomputation inside [`CdistBackward`]. Layouts are the packed
+/// `[b, p_dim, m]` / `[b, r_dim, m]` row-major buffers; output is the packed
+/// `[b, p_dim, r_dim]` distance buffer.
+fn cdist_cpu_distances<T: Float>(
+    d1: &[T],
+    d2: &[T],
+    b: usize,
+    p_dim: usize,
+    r_dim: usize,
+    m: usize,
+    norm: Norm<T>,
+) -> Vec<T> {
+    let zero = <T as num_traits::Zero>::zero();
+    let one = <T as num_traits::One>::one();
+    let mut out = Vec::with_capacity(b * p_dim * r_dim);
     for batch in 0..b {
         let off1 = batch * p_dim * m;
         let off2 = batch * r_dim * m;
         for i in 0..p_dim {
             for j in 0..r_dim {
-                let mut dist = <T as num_traits::Zero>::zero();
+                let mut acc = zero;
                 for k in 0..m {
                     let diff = d1[off1 + i * m + k] - d2[off2 + j * m + k];
-                    let abs_diff = if diff < <T as num_traits::Zero>::zero() {
-                        <T as num_traits::Zero>::zero() - diff
-                    } else {
-                        diff
-                    };
-                    dist += abs_diff.powf(p_val);
+                    let abs_diff = diff.abs();
+                    match norm {
+                        // Zero-"norm": `min(ceil(|d|), 1)` summed — NOT a
+                        // `!= 0` count (identical for finite diffs, but NaN
+                        // must PROPAGATE: `ceil(NaN) = NaN` and C++ `min`
+                        // returns its NaN first operand) — upstream
+                        // `DistanceOpsKernel.cpp:94` / `DistanceKernel.cu`
+                        // `dists::zero`. Rust's `min` would return the
+                        // non-NaN operand, so clamp via comparison: `NaN > 1`
+                        // is false, letting the NaN flow into the sum
+                        // (discriminator pin
+                        // `divergence_tensor_ops_cdist_p0_nan.rs`).
+                        Norm::Zero => {
+                            let c = abs_diff.ceil();
+                            acc += if c > one { one } else { c };
+                        }
+                        Norm::One => acc += abs_diff,
+                        Norm::Two => acc += abs_diff * abs_diff,
+                        // `dists::inf`: running max of |diff|.
+                        Norm::Inf => acc = acc.max(abs_diff),
+                        Norm::P(p_val, _, _) => acc += abs_diff.powf(p_val),
+                    }
                 }
-                out.push(dist.powf(inv_p));
+                let dist = match norm {
+                    Norm::Zero | Norm::One | Norm::Inf => acc,
+                    Norm::Two => acc.sqrt(),
+                    Norm::P(_, _, inv_p) => acc.powf(inv_p),
+                };
+                out.push(dist);
             }
         }
     }
+    out
+}
 
-    Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)
+/// Backward for `cdist(x1, x2, p)` — differentiates BOTH point sets
+/// (pre-CORE-123 every result was silently detached; CORE-123 / #1817).
+///
+/// VJP (upstream `tools/autograd/derivatives.yaml`:
+/// `_cdist_forward -> _cdist_backward`; per-norm weights per
+/// `aten/src/ATen/native/cuda/DistanceKernel.cu`
+/// `dists::{zero, one, two, inf, p}::backward`, all probed against live
+/// torch 2.11.0 — probe transcripts quoted in
+/// `tests/audit_core123_cdist_backward.rs`):
+///
+/// ```text
+/// w(d, dist) = 0                                  (p = 0: count-norm is
+///                                                  piecewise constant)
+///            | sign(d), sign(0) = 0               (p = 1)
+///            | d / dist, 0 at dist == 0           (p = 2)
+///            | sign(d) * (|d| == dist)            (p = inf: EVERY tied max)
+///            | sign(d) * (|d|/dist)^(p-1),
+///              0 at d == 0 or dist == 0           (general p, incl. p < 1)
+/// grad_x1[b,i,k] = Σ_j g[b,i,j] · w;   grad_x2[b,j,k] = −Σ_i g[b,i,j] · w
+/// ```
+///
+/// The pairwise distances are RECOMPUTED with the same [`Norm`] dispatch the
+/// forward uses (bit-identical to the forward values on CPU), instead of
+/// retaining the output tensor (which would create an `Arc` cycle through
+/// its own grad_fn).
+///
+/// # Device
+/// The gradient math runs on the host. For CUDA inputs this is an explicit
+/// host round trip (D2H copies of `x1`/`x2`/`grad_output`, H2D upload of
+/// both gradients back to the input device) — the VALUES are identical to a
+/// resident implementation; only WHERE the backward computes differs
+/// (documented per the module's R-LOUD-2 contract). The forward stays
+/// GPU-resident.
+#[derive(Debug)]
+struct CdistBackward<T: Float> {
+    x1: Tensor<T>,
+    x2: Tensor<T>,
+    p: f64,
+}
+
+impl<T: Float> GradFn<T> for CdistBackward<T> {
+    // reason: `dist == 0` / `|d| == dist` are the upstream guard semantics —
+    // `dist` is recomputed bit-identically from the same inputs, so the exact
+    // compares select exactly the coordinates torch's backward selects
+    // (`DistanceKernel.cu` `dists::inf::backward` compares `device(diff) ==
+    // dist` exactly).
+    #[allow(
+        clippy::float_cmp,
+        reason = "upstream-exact zero/max guards on bit-identical recomputed distances"
+    )]
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !is_grad_enabled() || (!self.x1.requires_grad() && !self.x2.requires_grad()) {
+            return Ok(vec![None, None]);
+        }
+
+        // Host copies (documented round trip for CUDA inputs — see the
+        // struct-level `# Device` note).
+        let x1_host = if self.x1.is_cpu() {
+            self.x1.clone()
+        } else {
+            self.x1.cpu()?
+        };
+        let x2_host = if self.x2.is_cpu() {
+            self.x2.clone()
+        } else {
+            self.x2.cpu()?
+        };
+        let g_host = if grad_output.is_cpu() {
+            grad_output.clone()
+        } else {
+            grad_output.cpu()?
+        };
+
+        let s1 = self.x1.shape();
+        let s2 = self.x2.shape();
+        let (b, p_dim, m) = if s1.len() == 3 {
+            (s1[0], s1[1], s1[2])
+        } else {
+            (1, s1[0], s1[1])
+        };
+        let r_dim = s2[s2.len() - 2];
+
+        let d1 = x1_host.data()?;
+        let d2 = x2_host.data()?;
+        let g = g_host.data()?;
+        let norm = norm_for_p::<T>(self.p);
+        // Recompute the forward distances (same kernel ⇒ bit-identical).
+        let dists = cdist_cpu_distances(d1, d2, b, p_dim, r_dim, m, norm);
+
+        let zero = <T as num_traits::Zero>::zero();
+        let one = <T as num_traits::One>::one();
+        let sign = |d: T| {
+            if d > zero {
+                one
+            } else if d < zero {
+                -one
+            } else {
+                zero
+            }
+        };
+
+        let mut g1 = vec![zero; b * p_dim * m];
+        let mut g2 = vec![zero; b * r_dim * m];
+        for batch in 0..b {
+            let off1 = batch * p_dim * m;
+            let off2 = batch * r_dim * m;
+            let offd = batch * p_dim * r_dim;
+            for i in 0..p_dim {
+                for j in 0..r_dim {
+                    let go = g[offd + i * r_dim + j];
+                    let dist = dists[offd + i * r_dim + j];
+                    for k in 0..m {
+                        let diff = d1[off1 + i * m + k] - d2[off2 + j * m + k];
+                        let w = match norm {
+                            Norm::Zero => zero,
+                            Norm::One => sign(diff),
+                            Norm::Two => {
+                                if dist == zero {
+                                    zero
+                                } else {
+                                    diff / dist
+                                }
+                            }
+                            // sign(0) = 0 also covers the all-zero pair
+                            // (dist == 0 ⇒ every |d| == dist but sign is 0).
+                            Norm::Inf => {
+                                if diff.abs() == dist {
+                                    sign(diff)
+                                } else {
+                                    zero
+                                }
+                            }
+                            Norm::P(_, p_m1, _) => {
+                                if dist == zero || diff == zero {
+                                    zero
+                                } else {
+                                    sign(diff) * (diff.abs() / dist).powf(p_m1)
+                                }
+                            }
+                        };
+                        let contrib = go * w;
+                        g1[off1 + i * m + k] += contrib;
+                        g2[off2 + j * m + k] += -contrib;
+                    }
+                }
+            }
+        }
+
+        // Re-materialize each gradient on its input's device (H2D upload for
+        // CUDA leaves) so accumulation happens device-local (R-ORACLE-3).
+        let to_input_device = |data: Vec<T>, input: &Tensor<T>| -> FerrotorchResult<Tensor<T>> {
+            let t = Tensor::from_storage(TensorStorage::cpu(data), input.shape().to_vec(), false)?;
+            if input.is_cpu() {
+                Ok(t)
+            } else {
+                t.to(input.device())
+            }
+        };
+
+        let grad1 = if self.x1.requires_grad() {
+            Some(to_input_device(g1, &self.x1)?)
+        } else {
+            None
+        };
+        let grad2 = if self.x2.requires_grad() {
+            Some(to_input_device(g2, &self.x2)?)
+        } else {
+            None
+        };
+        Ok(vec![grad1, grad2])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.x1, &self.x2]
+    }
+
+    fn name(&self) -> &'static str {
+        "CdistBackward"
+    }
+
+    fn scalar_args(&self) -> Vec<f64> {
+        vec![self.p]
+    }
 }
 
 #[cfg(test)]
