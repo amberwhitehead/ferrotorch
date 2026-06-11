@@ -226,7 +226,11 @@ mod gpu {
     fn div_bgrad_cuda_f32(adata: &[f32], bdata: &[f32]) -> f32 {
         let dev = Device::Cuda(0);
         let a = t_f32(adata, &[adata.len()]).to(dev).expect("upload a");
-        let b = leaf_f32(bdata, &[bdata.len()]).to(dev).expect("upload b");
+        let b = leaf_f32(bdata, &[bdata.len()])
+            .to(dev)
+            .expect("upload b")
+            .detach()
+            .requires_grad_(true);
         let c = div(&a, &b).expect("forward div cuda");
         sum(&c).expect("sum").backward().expect("backward cuda");
         let g = b.grad().unwrap().expect("b.grad present");

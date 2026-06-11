@@ -550,17 +550,34 @@ fn make_cpu_f64(data: &[f64], shape: &[usize], requires_grad: bool) -> Tensor<f6
     .expect("make_cpu_f64")
 }
 
+/// Upload to CUDA as a true CUDA LEAF.
+///
+/// CORE-012 (#1706): `.to(device)` of a requires-grad leaf is a
+/// differentiable copy — the result is a NON-leaf whose backward gradients
+/// accumulate on the ORIGINAL CPU leaf (torch: `is_leaf=False`, grad_fn
+/// `ToCopyBackward0`). These suites assert CUDA-resident `.grad()` on the
+/// uploaded tensor, so they need a real CUDA leaf — torch's
+/// `x.to('cuda').detach().requires_grad_(True)` idiom.
 fn upload_f32(t: Tensor<f32>, device: Device) -> Tensor<f32> {
     if matches!(device, Device::Cuda(_)) {
-        t.to(device).expect("upload to cuda")
+        let track = t.requires_grad();
+        t.detach()
+            .to(device)
+            .expect("upload to cuda")
+            .requires_grad_(track)
     } else {
         t
     }
 }
 
+/// f64 twin of [`upload_f32`] — same CORE-012 leaf-preserving idiom.
 fn upload_f64(t: Tensor<f64>, device: Device) -> Tensor<f64> {
     if matches!(device, Device::Cuda(_)) {
-        t.to(device).expect("upload to cuda")
+        let track = t.requires_grad();
+        t.detach()
+            .to(device)
+            .expect("upload to cuda")
+            .requires_grad_(track)
     } else {
         t
     }

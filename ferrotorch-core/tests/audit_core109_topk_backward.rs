@@ -173,7 +173,9 @@ mod gpu {
         let dev = Device::Cuda(0);
         let x = leaf_f32(&[3.0, 1.0, 4.0, 1.0, 5.0, 9.0], &[6], true)
             .to(dev)
-            .expect("upload x");
+            .expect("upload x")
+            .detach()
+            .requires_grad_(true);
         let (v, i) = topk(&x, 3, true).expect("topk forward cuda");
         // R-ORACLE-3 / post-#1890: values stay CUDA-resident.
         assert_eq!(v.device(), dev, "values must be CUDA-resident");

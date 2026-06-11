@@ -220,7 +220,7 @@ and `meta_propagate.rs`.
   dim, int64_t start, int64_t length)` — returns a zero-copy view of
   `length` elements starting at `start` along `dim` (uses
   `slice` internally). Backward zero-pads at the narrow offset. The
-  forward pub fn `narrow_t` lives in `methods.rs:965`.
+  forward pub fn `narrow_t` lives in `methods.rs:1448`.
 
 - REQ-25: `unbind(input, dim)` — `torch.unbind`. Per
   `TensorShape.cpp:4367 std::vector<Tensor> unbind(const Tensor&
@@ -334,7 +334,7 @@ and `meta_propagate.rs`.
 - [x] AC-8: `cat` GPU fast path dispatches to byte-width-dispatched
   `strided_cat` (elem_size ∈ {2, 4, 8}) per
   `shape.rs:814-855` (matches `aten::cat_out_cuda` shape).
-- [x] AC-9: `narrow_t` (`methods.rs:965`) returns a zero-copy view
+- [x] AC-9: `narrow_t` (`methods.rs:1448`) returns a zero-copy view
   with the appropriate `NarrowBackward` for autograd.
 - [x] AC-10: `split_t` (`split_t in methods.rs`) returns one tensor per
   chunk, each carrying a `SplitBackward` from this module
@@ -409,7 +409,7 @@ reshape` — so the `view` API IS the `reshape` API plus a pre-check.
 flatten_t`, `methods.rs:555 view`, `flex_attention.rs:167-256` (four
 reshapes inside the SDP-attention forward), `einsum.rs:1072-1107`
 (reshape used to materialize batched matmul intermediates),
-`tensor.rs:1912` (FlattenBackward attached on the `Tensor::flatten`
+`tensor.rs:2438` (FlattenBackward attached on the `Tensor::flatten`
 method body).
 
 ### REQ-5 / REQ-6 — `squeeze`, `unsqueeze`
@@ -517,7 +517,7 @@ the production consumer of the exported `SplitBackward` struct.
 
 ### REQ-24 — `narrow`
 
-`narrow_t` (`methods.rs:965`) returns a zero-copy view with
+`narrow_t` (`methods.rs:1448`) returns a zero-copy view with
 adjusted shape, strides, and storage offset. Backward
 (`NarrowBackward in methods.rs` and the implementation
 fn above it) zero-pads the incoming gradient at the offset along

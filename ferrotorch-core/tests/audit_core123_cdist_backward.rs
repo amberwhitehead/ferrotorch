@@ -283,10 +283,14 @@ mod gpu {
         ensure_cuda_backend();
         let x1 = leaf(&[0.0, 0.5, 2.0, 1.0, 1.0, 1.0], &[2, 3], true)
             .to(Device::Cuda(0))
-            .expect("upload x1");
+            .expect("upload x1")
+            .detach()
+            .requires_grad_(true);
         let x2 = leaf(&[0.0, 1.5, 0.5, 1.0, 1.0, 1.0], &[2, 3], true)
             .to(Device::Cuda(0))
-            .expect("upload x2");
+            .expect("upload x2")
+            .detach()
+            .requires_grad_(true);
         assert!(x1.requires_grad(), "to(cuda) keeps requires_grad");
         let d = cdist(&x1, &x2, 2.0).expect("cdist on cuda");
         assert_eq!(d.device(), Device::Cuda(0), "forward output device");

@@ -217,8 +217,14 @@ mod gpu {
         let dev = Device::Cuda(0);
         let a = leaf_f32(&[1.0, 2.0, 3.0], &[3], true)
             .to(dev)
-            .expect("upload a");
-        let b = leaf_f32(&[4.0, 5.0], &[2], true).to(dev).expect("upload b");
+            .expect("upload a")
+            .detach()
+            .requires_grad_(true);
+        let b = leaf_f32(&[4.0, 5.0], &[2], true)
+            .to(dev)
+            .expect("upload b")
+            .detach()
+            .requires_grad_(true);
         let grids = meshgrid(&[a.clone(), b.clone()]).expect("meshgrid forward cuda");
         // R-ORACLE-3 / post-#1890: forward grids stay CUDA-resident.
         assert_eq!(grids[0].device(), dev, "grid0 must be CUDA-resident");

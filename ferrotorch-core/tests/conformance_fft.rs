@@ -410,7 +410,16 @@ fn make_cpu_f64(data: &[f64], shape: &[usize], requires_grad: bool) -> Tensor<f6
 
 fn upload_f32(t: Tensor<f32>, device: Device) -> Tensor<f32> {
     if matches!(device, Device::Cuda(_)) {
-        t.to(device).expect("upload to cuda")
+        // CORE-012 (#1706): `.to(device)` of a requires-grad leaf is a
+        // differentiable copy (non-leaf; grads accumulate on the ORIGINAL
+        // CPU leaf, as in torch). These suites assert `.grad()` on the
+        // uploaded tensor, so build a true CUDA leaf via torch's
+        // `x.to('cuda').detach().requires_grad_(True)` idiom.
+        let track = t.requires_grad();
+        t.detach()
+            .to(device)
+            .expect("upload to cuda")
+            .requires_grad_(track)
     } else {
         t
     }
@@ -418,7 +427,16 @@ fn upload_f32(t: Tensor<f32>, device: Device) -> Tensor<f32> {
 
 fn upload_f64(t: Tensor<f64>, device: Device) -> Tensor<f64> {
     if matches!(device, Device::Cuda(_)) {
-        t.to(device).expect("upload to cuda")
+        // CORE-012 (#1706): `.to(device)` of a requires-grad leaf is a
+        // differentiable copy (non-leaf; grads accumulate on the ORIGINAL
+        // CPU leaf, as in torch). These suites assert `.grad()` on the
+        // uploaded tensor, so build a true CUDA leaf via torch's
+        // `x.to('cuda').detach().requires_grad_(True)` idiom.
+        let track = t.requires_grad();
+        t.detach()
+            .to(device)
+            .expect("upload to cuda")
+            .requires_grad_(track)
     } else {
         t
     }

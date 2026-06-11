@@ -59,11 +59,14 @@ fn record(label: &str, ok: bool, detail: &str, pass: &mut usize, fail: &mut usiz
 
 /// GPU f32 tensor with requires_grad.
 fn gpu_f32(data: &[f32], shape: &[usize]) -> Tensor<f32> {
+    // CORE-012 (#1706): mark requires_grad AFTER the transfer so this is
+    // a true CUDA leaf (a tracked `.to()` is a differentiable copy whose
+    // grads land on the CPU source instead).
     ferrotorch_core::creation::from_slice::<f32>(data, shape)
         .unwrap()
-        .requires_grad_(true)
         .to(Device::Cuda(0))
         .unwrap()
+        .requires_grad_(true)
 }
 
 /// GPU f32 tensor without requires_grad (e.g. a grad_output seed).

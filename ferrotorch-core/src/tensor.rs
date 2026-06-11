@@ -227,12 +227,17 @@ impl<T: Float> Tensor<T> {
     ) -> FerrotorchResult<Self> {
         // Non-contiguous tensors must be materialized first — a view over
         // non-contiguous storage with new strides would read wrong elements.
+        // Use the device-aware `contiguous()` path so a non-contiguous CUDA
+        // tensor is gathered on-device via `strided_copy_*` rather than
+        // demoted to CPU storage — the same #750 fix `view_reshape` carries.
+        // The previous `data_vec() + TensorStorage::cpu` path silently moved
+        // GPU tensors to host on every grad-tracking reshape / flatten /
+        // squeeze / unsqueeze after a stride-view op (CORE-011, #1705).
+        // The caller-supplied `grad_fn` references the ORIGINAL input, so
+        // discarding the materialized intermediate from the graph is sound:
+        // the copy is the identity on values.
         if !self.is_contiguous() {
-            let data = self.data_vec()?;
-            let storage = TensorStorage::cpu(data);
-            let contiguous =
-                Tensor::from_storage(storage, self.shape().to_vec(), self.requires_grad())?;
-            return contiguous.view_operation(new_shape, grad_fn);
+            return self.contiguous()?.view_operation(new_shape, grad_fn);
         }
 
         let new_numel: usize = new_shape.iter().product();
@@ -392,6 +397,38 @@ impl<T: Float> GradFn<T> for ToDeviceBackward<T> {
 
     fn name(&self) -> &'static str {
         "ToDeviceBackward"
+    }
+}
+
+// --- MemoryFormatBackward ---
+
+/// Backward for the physical materialization in
+/// [`Tensor::to_memory_format`] / [`Tensor::contiguous_in`].
+///
+/// A memory-format change permutes the PHYSICAL order only; logical values
+/// are untouched, so its gradient is the identity (torch records
+/// `ToCopyBackward0` / `CloneBackward0` on these paths and the source's
+/// grad equals the output's grad — probed live, CORE-013 / #1707).
+#[derive(Debug)]
+struct MemoryFormatBackward<T: Float> {
+    source: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for MemoryFormatBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.source.requires_grad() {
+            Ok(vec![Some(grad_output.clone())])
+        } else {
+            Ok(vec![None])
+        }
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.source]
+    }
+
+    fn name(&self) -> &'static str {
+        "MemoryFormatBackward"
     }
 }
 
@@ -826,8 +863,16 @@ impl<T: Float> Tensor<T> {
             return Ok(self.clone());
         }
 
-        let needs_grad_fn =
-            self.requires_grad() && !self.is_leaf() && crate::autograd::no_grad::is_grad_enabled();
+        // CORE-012 (#1706): torch treats a differentiable `.to(device)` as a
+        // copy WITH a backward edge even when the source is a LEAF — the
+        // transferred tensor is a non-leaf (`is_leaf=False`, grad_fn
+        // `ToCopyBackward0`) and backward reaches the ORIGINAL source leaf.
+        // The previous `&& !self.is_leaf()` silently severed the graph for
+        // leaf transfers. When tracking is off (no_grad, or the source does
+        // not require grad), the output is an untracked fresh leaf with
+        // `requires_grad = false` (torch: `.to()` under `no_grad` yields
+        // requires_grad=False) — never a bare copied flag, per R-LOUD-3.
+        let needs_grad_fn = self.requires_grad() && crate::autograd::no_grad::is_grad_enabled();
 
         match (self.device(), device) {
             (Device::Cpu, Device::Cuda(ordinal)) => {
@@ -861,7 +906,7 @@ impl<T: Float> Tensor<T> {
                     });
                     Tensor::from_operation(storage, self.shape().to_vec(), grad_fn)
                 } else {
-                    Tensor::from_storage(storage, self.shape().to_vec(), self.requires_grad())
+                    Tensor::from_storage(storage, self.shape().to_vec(), false)
                 }
             }
             (Device::Cuda(_), Device::Cpu) => {
@@ -970,7 +1015,7 @@ impl<T: Float> Tensor<T> {
                     });
                     Tensor::from_operation(storage, self.shape().to_vec(), grad_fn)
                 } else {
-                    Tensor::from_storage(storage, self.shape().to_vec(), self.requires_grad())
+                    Tensor::from_storage(storage, self.shape().to_vec(), false)
                 }
             }
             (Device::Cuda(a), Device::Cuda(b)) if a != b => {
@@ -1031,7 +1076,7 @@ impl<T: Float> Tensor<T> {
                     });
                     Tensor::from_operation(storage, self.shape().to_vec(), grad_fn)
                 } else {
-                    Tensor::from_storage(storage, self.shape().to_vec(), self.requires_grad())
+                    Tensor::from_storage(storage, self.shape().to_vec(), false)
                 }
             }
             // XPU → XPU on a different ordinal: route through CPU for
@@ -1047,9 +1092,27 @@ impl<T: Float> Tensor<T> {
             }
             // Move TO the meta device: drop the data, keep shape only.
             // Works from any source device.
+            //
+            // Autograd contract (CORE-012, #1706): torch attaches
+            // `ToCopyBackward0` to `.to('meta')` like any other transfer;
+            // driving backward through it then raises `NotImplementedError:
+            // Cannot copy out of meta tensor; no data!` (probed live on
+            // torch 2.11.0+cu130). ferrotorch mirrors this: the edge is
+            // attached here, and backward fails with the structured
+            // `InvalidArgument("cannot move a meta tensor to …")` when
+            // `ToDeviceBackward` tries to copy the meta gradient out to the
+            // source device — a loud error per R-LOUD-1, never a silently
+            // severed graph.
             (_, Device::Meta) => {
                 let storage = TensorStorage::meta(self.numel());
-                Tensor::from_storage(storage, self.shape().to_vec(), self.requires_grad())
+                if needs_grad_fn {
+                    let grad_fn = Arc::new(ToDeviceBackward {
+                        source: self.clone(),
+                    });
+                    Tensor::from_operation(storage, self.shape().to_vec(), grad_fn)
+                } else {
+                    Tensor::from_storage(storage, self.shape().to_vec(), false)
+                }
             }
             // Move FROM the meta device: cannot materialize random data,
             // so this errors. Users should construct fresh tensors with
@@ -1088,9 +1151,11 @@ impl<T: Float> Tensor<T> {
         // else fall through to the regular `to()` path.
         match (self.device(), device) {
             (Device::Cpu, Device::Cuda(_)) => {
-                let needs_grad_fn = self.requires_grad()
-                    && !self.is_leaf()
-                    && crate::autograd::no_grad::is_grad_enabled();
+                // Same leaf-inclusive tracking rule as `to` (CORE-012,
+                // #1706); torch's pinned chain is differentiable too
+                // (`PinMemoryBackward0` / `ToCopyBackward0`).
+                let needs_grad_fn =
+                    self.requires_grad() && crate::autograd::no_grad::is_grad_enabled();
 
                 // Materialize non-contiguous tensors before upload.
                 let contiguous_self = if self.is_contiguous() {
@@ -1108,7 +1173,7 @@ impl<T: Float> Tensor<T> {
                     });
                     Tensor::from_operation(storage, self.shape().to_vec(), grad_fn)
                 } else {
-                    Tensor::from_storage(storage, self.shape().to_vec(), self.requires_grad())
+                    Tensor::from_storage(storage, self.shape().to_vec(), false)
                 }
             }
             _ => self.to(device),
@@ -1977,6 +2042,47 @@ impl<T: Float> Tensor<T> {
         self.to_memory_format(format)
     }
 
+    /// Assemble the result tensor of a physical memory-format
+    /// materialization, wiring the autograd edge (CORE-013, #1707).
+    ///
+    /// When gradient tracking applies (grad mode on, not inference mode,
+    /// source requires grad), the output is a non-leaf carrying a
+    /// [`MemoryFormatBackward`] identity edge back to `self` — torch parity
+    /// for `.to(memory_format=…)` / `.contiguous(memory_format=…)`
+    /// (`ToCopyBackward0` / `CloneBackward0`). Otherwise the output is an
+    /// honestly untracked fresh leaf (`requires_grad = false`); the flag is
+    /// never copied bare onto a disconnected tensor (R-LOUD-3).
+    ///
+    /// `Tensor::from_operation` cannot be used here: it derives C-contiguous
+    /// strides, while format materialization needs the target format's
+    /// stride pattern over an offset-0 buffer.
+    fn format_materialized(&self, storage: TensorStorage<T>, target_strides: Vec<isize>) -> Self {
+        let track = !crate::autograd::no_grad::is_inference_mode()
+            && crate::autograd::no_grad::is_grad_enabled()
+            && self.inner.requires_grad;
+        let grad_fn: Option<Arc<dyn GradFn<T>>> = if track {
+            Some(Arc::new(MemoryFormatBackward {
+                source: self.clone(),
+            }))
+        } else {
+            None
+        };
+        Self {
+            inner: Arc::new(TensorInner {
+                id: TensorId::next(),
+                storage: Arc::new(storage),
+                shape: self.inner.shape.clone(),
+                strides: target_strides,
+                offset: 0,
+                grad: Mutex::new(None),
+                grad_fn,
+                requires_grad: track,
+                is_leaf: !track,
+                hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
+            }),
+        }
+    }
+
     /// Physically rearrange data into the target memory format.
     ///
     /// Called when the tensor is NOT already contiguous in `format`.
@@ -2050,20 +2156,7 @@ impl<T: Float> Tensor<T> {
 
             if let Ok(handle) = out_handle {
                 let storage = TensorStorage::gpu(handle);
-                return Ok(Self {
-                    inner: Arc::new(TensorInner {
-                        id: TensorId::next(),
-                        storage: Arc::new(storage),
-                        shape: shape.clone(),
-                        strides: target_strides,
-                        offset: 0,
-                        grad: Mutex::new(None),
-                        grad_fn: None,
-                        requires_grad: self.inner.requires_grad,
-                        is_leaf: true,
-                        hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
-                    }),
-                });
+                return Ok(self.format_materialized(storage, target_strides));
             }
             // Kernel failure — fall through to CPU.
         }
@@ -2119,20 +2212,7 @@ impl<T: Float> Tensor<T> {
         }
 
         let storage = TensorStorage::on_device(dst, device)?;
-        Ok(Self {
-            inner: Arc::new(TensorInner {
-                id: TensorId::next(),
-                storage: Arc::new(storage),
-                shape: shape.clone(),
-                strides: target_strides,
-                offset: 0,
-                grad: Mutex::new(None),
-                grad_fn: None,
-                requires_grad: self.inner.requires_grad,
-                is_leaf: true,
-                hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
-            }),
-        })
+        Ok(self.format_materialized(storage, target_strides))
     }
 
     /// Returns `true` if this is a scalar (0-dimensional) tensor.

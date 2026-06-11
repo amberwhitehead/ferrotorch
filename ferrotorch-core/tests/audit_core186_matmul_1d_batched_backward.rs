@@ -406,9 +406,17 @@ mod gpu {
     fn core186_gpu_1d_at_3d_ones_cotangent_f32() {
         ensure_cuda_backend();
         let dev = Device::Cuda(0);
-        let a = leaf_f32(&[1.0, 2.0], &[2]).to(dev).expect("upload a");
+        let a = leaf_f32(&[1.0, 2.0], &[2])
+            .to(dev)
+            .expect("upload a")
+            .detach()
+            .requires_grad_(true);
         let b_data: Vec<f32> = (1..=12).map(|v| v as f32).collect();
-        let b = leaf_f32(&b_data, &[2, 2, 3]).to(dev).expect("upload b");
+        let b = leaf_f32(&b_data, &[2, 2, 3])
+            .to(dev)
+            .expect("upload b")
+            .detach()
+            .requires_grad_(true);
         let c = a.matmul(&b).expect("forward 1D@3D cuda");
         assert_eq!(c.shape(), &[2, 3]);
         let loss = sum(&c).expect("sum");
@@ -434,8 +442,16 @@ mod gpu {
         ensure_cuda_backend();
         let dev = Device::Cuda(0);
         let a_data: Vec<f32> = (1..=12).map(|v| v as f32).collect();
-        let a = leaf_f32(&a_data, &[2, 2, 3]).to(dev).expect("upload a");
-        let v = leaf_f32(&[1.0, 2.0, 3.0], &[3]).to(dev).expect("upload v");
+        let a = leaf_f32(&a_data, &[2, 2, 3])
+            .to(dev)
+            .expect("upload a")
+            .detach()
+            .requires_grad_(true);
+        let v = leaf_f32(&[1.0, 2.0, 3.0], &[3])
+            .to(dev)
+            .expect("upload v")
+            .detach()
+            .requires_grad_(true);
         let c = a.matmul(&v).expect("forward 3D@1D cuda");
         assert_eq!(c.shape(), &[2, 2]);
         let loss = sum(&c).expect("sum");
@@ -466,9 +482,17 @@ mod gpu {
     fn core186_gpu_1d_at_4d_ones_cotangent_f64() {
         ensure_cuda_backend();
         let dev = Device::Cuda(0);
-        let v = leaf_f64(&[1.0, 2.0], &[2]).to(dev).expect("upload v");
+        let v = leaf_f64(&[1.0, 2.0], &[2])
+            .to(dev)
+            .expect("upload v")
+            .detach()
+            .requires_grad_(true);
         let b_data: Vec<f64> = (1..=24).map(|x| x as f64).collect();
-        let b = leaf_f64(&b_data, &[2, 2, 2, 3]).to(dev).expect("upload b");
+        let b = leaf_f64(&b_data, &[2, 2, 2, 3])
+            .to(dev)
+            .expect("upload b")
+            .detach()
+            .requires_grad_(true);
         let c = v.matmul(&b).expect("forward 1D@4D cuda");
         assert_eq!(c.shape(), &[2, 2, 3]);
         let loss = sum(&c).expect("sum");
@@ -499,8 +523,16 @@ mod gpu {
         ensure_cuda_backend();
         let dev = Device::Cuda(0);
         let a_data: Vec<f64> = (1..=24).map(|x| x as f64).collect();
-        let a = leaf_f64(&a_data, &[2, 2, 2, 3]).to(dev).expect("upload a");
-        let v = leaf_f64(&[1.0, 2.0, 3.0], &[3]).to(dev).expect("upload v");
+        let a = leaf_f64(&a_data, &[2, 2, 2, 3])
+            .to(dev)
+            .expect("upload a")
+            .detach()
+            .requires_grad_(true);
+        let v = leaf_f64(&[1.0, 2.0, 3.0], &[3])
+            .to(dev)
+            .expect("upload v")
+            .detach()
+            .requires_grad_(true);
         let c = a.matmul(&v).expect("forward 4D@1D cuda");
         assert_eq!(c.shape(), &[2, 2, 2]);
         let loss = sum(&c).expect("sum");

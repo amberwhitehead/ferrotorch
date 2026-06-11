@@ -1167,24 +1167,32 @@ mod gpu {
     #[test]
     fn gpu_autograd_leaf_creation() {
         ensure_cuda_backend();
-        // PyTorch parity: zeros on CUDA with requires_grad=True should be
-        // a leaf with grad_fn=None. ferrotorch's `.to(Cuda)` of a leaf
-        // tensor with requires_grad=true must preserve leaf status.
+        // PyTorch parity (CORE-012, #1706): `.to(Cuda)` of a requires-grad
+        // leaf is a differentiable copy. Live torch 2.11.0+cu130 oracle:
+        //   >>> x = torch.zeros(2, 3, requires_grad=True)
+        //   >>> y = x.to('cuda')
+        //   >>> y.requires_grad, y.is_leaf, type(y.grad_fn).__name__
+        //   (True, False, 'ToCopyBackward0')
+        // The audit (CORE-012) flagged this test as vacuous — its comments
+        // claimed a tracking node must exist while it asserted only
+        // `requires_grad` and the device. Assert the actual graph shape.
         let leaf: Tensor<f32> = zeros(&[2, 3]).expect("zeros");
         let leaf = leaf.requires_grad_(true);
         let on_gpu = leaf.to(Device::Cuda(0)).expect("upload");
-        // Going CPU→CUDA on a leaf with requires_grad=true creates a non-
-        // leaf tensor with `ToDeviceBackward` as its grad_fn — this is
-        // PyTorch-divergent (PyTorch records `CopyBackwards`) but
-        // semantically equivalent: the round-trip through `.cpu()` /
-        // `.cuda()` is itself a differentiable op. Assert the *behaviour*
-        // PyTorch users care about: requires_grad propagates and a
-        // grad-tracking node exists.
         assert!(
             on_gpu.requires_grad(),
             "requires_grad must propagate to GPU"
         );
         assert!(on_gpu.is_cuda(), "tensor not on CUDA after .to(Cuda(0))");
+        assert!(
+            !on_gpu.is_leaf(),
+            "x.to(cuda) of a requires-grad leaf is a NON-leaf (torch: is_leaf=False)"
+        );
+        assert!(
+            on_gpu.grad_fn().is_some(),
+            "x.to(cuda) must carry a transfer grad_fn (torch: ToCopyBackward0; \
+             ferrotorch: ToDeviceBackward)"
+        );
     }
 
     /// GPU equivalent of `cpu_zeros_meta` / `cpu_ones_meta` / etc. There is

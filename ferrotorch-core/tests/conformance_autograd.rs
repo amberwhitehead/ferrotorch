@@ -2571,12 +2571,30 @@ mod gpu {
         }
     }
 
+    /// Upload to cuda:0 as a true CUDA LEAF.
+    ///
+    /// CORE-012 (#1706): `.to(device)` of a requires-grad leaf is a
+    /// differentiable copy — the result is a NON-leaf whose backward
+    /// gradients accumulate on the ORIGINAL CPU leaf (torch:
+    /// `is_leaf=False`, grad_fn `ToCopyBackward0`). These suites assert
+    /// CUDA-resident `.grad()` on the uploaded tensor, so they need a real
+    /// CUDA leaf — torch's `x.to('cuda').detach().requires_grad_(True)`
+    /// idiom.
     fn upload_f32(t: Tensor<f32>) -> Tensor<f32> {
-        t.to(Device::Cuda(0)).expect("upload to cuda:0")
+        let track = t.requires_grad();
+        t.detach()
+            .to(Device::Cuda(0))
+            .expect("upload to cuda:0")
+            .requires_grad_(track)
     }
 
+    /// f64 twin of [`upload_f32`] — same CORE-012 leaf-preserving idiom.
     fn upload_f64(t: Tensor<f64>) -> Tensor<f64> {
-        t.to(Device::Cuda(0)).expect("upload to cuda:0")
+        let track = t.requires_grad();
+        t.detach()
+            .to(Device::Cuda(0))
+            .expect("upload to cuda:0")
+            .requires_grad_(track)
     }
 
     fn backward_cases<'a>(file: &'a FixtureFile, tag: &str) -> Vec<&'a Fixture> {

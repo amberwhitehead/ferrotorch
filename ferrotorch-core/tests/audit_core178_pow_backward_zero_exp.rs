@@ -140,7 +140,11 @@ mod gpu {
     fn core178_gpu_pow_zero_exp_backward_f32() {
         ensure_cuda_backend();
         let dev = Device::Cuda(0);
-        let x = leaf_f32(&[0.0, 1.0, -2.0], &[3]).to(dev).expect("upload x");
+        let x = leaf_f32(&[0.0, 1.0, -2.0], &[3])
+            .to(dev)
+            .expect("upload x")
+            .detach()
+            .requires_grad_(true);
         let y = pow(&x, 0.0).expect("forward pow exp=0 cuda");
         let loss = sum(&y).expect("sum");
         loss.backward().expect("backward cuda");
@@ -158,7 +162,11 @@ mod gpu {
     fn core178_gpu_pow_zero_exp_backward_f64() {
         ensure_cuda_backend();
         let dev = Device::Cuda(0);
-        let x = leaf_f64(&[0.0, 4.0], &[2]).to(dev).expect("upload x");
+        let x = leaf_f64(&[0.0, 4.0], &[2])
+            .to(dev)
+            .expect("upload x")
+            .detach()
+            .requires_grad_(true);
         let y = pow(&x, 0.0).expect("forward pow exp=0 cuda f64");
         let loss = sum(&y).expect("sum");
         loss.backward().expect("backward cuda f64");

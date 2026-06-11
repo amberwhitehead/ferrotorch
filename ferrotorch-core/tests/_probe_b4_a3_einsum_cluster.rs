@@ -188,7 +188,13 @@ mod gpu {
     }
 
     fn upload(t: Tensor<f32>) -> Tensor<f32> {
-        t.to(Device::Cuda(0)).expect("upload to cuda")
+        // CORE-012 (#1706): re-leaf after the differentiable upload so
+        // `.grad()` assertions read the CUDA tensor itself.
+        let track = t.requires_grad();
+        t.detach()
+            .to(Device::Cuda(0))
+            .expect("upload to cuda")
+            .requires_grad_(track)
     }
 
     #[test]
@@ -295,7 +301,12 @@ mod gpu {
     fn gpu_einsum_axis_sum_backward_projects_via_broadcast() {
         ensure_cuda_backend();
         let a_cpu = leaf_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
-        let a = a_cpu.to(Device::Cuda(0)).expect("upload");
+        // CORE-012 (#1706): re-leaf after the differentiable upload.
+        let a = a_cpu
+            .to(Device::Cuda(0))
+            .expect("upload")
+            .detach()
+            .requires_grad_(true);
         let r = einsum_differentiable("ij->i", &[&a]).expect("forward");
 
         let loss = ferrotorch_core::grad_fns::reduction::sum(&r).expect("loss");

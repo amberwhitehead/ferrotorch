@@ -224,8 +224,16 @@ mod gpu {
     fn core181_gpu_rem_bgrad_floor_boundary_f32() {
         ensure_cuda_backend();
         let dev = Device::Cuda(0);
-        let a = leaf_f32(&[-7.0], &[1]).to(dev).expect("upload a");
-        let b = leaf_f32(&[0.7], &[1]).to(dev).expect("upload b");
+        let a = leaf_f32(&[-7.0], &[1])
+            .to(dev)
+            .expect("upload a")
+            .detach()
+            .requires_grad_(true);
+        let b = leaf_f32(&[0.7], &[1])
+            .to(dev)
+            .expect("upload b")
+            .detach()
+            .requires_grad_(true);
         let y = remainder(&a, &b).expect("forward remainder cuda");
         sum(&y).expect("sum").backward().expect("backward cuda");
         let ga = a.grad().unwrap().expect("a.grad present");

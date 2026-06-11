@@ -141,7 +141,7 @@ directly outside `#[cfg(test)]`):
   `use crate::grad_fns::activation::{gelu, relu, sigmoid, silu, softmax, tanh}`
 - `ferrotorch-core/src/tensor.rs:1131` —
   `crate::grad_fns::indexing::masked_fill_bt(self, mask, value)`
-- `ferrotorch-core/src/tensor.rs:1912` —
+- `ferrotorch-core/src/tensor.rs:2438` —
   `use crate::grad_fns::shape::FlattenBackward`
 - `ferrotorch-core/src/autograd/grad_penalty.rs` — pervasive use of
   `crate::grad_fns::arithmetic::{pow, sqrt, sub, mul}` and
