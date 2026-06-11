@@ -673,6 +673,54 @@ fn broadcast_matmul_backward<T: Float>(
     b: &Tensor<T>,
     grad_output: &Tensor<T>,
 ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+    // CORE-186 (#1880): re-promote 1-D operands before the transpose/matmul
+    // pipeline. The forward (`ops::linalg::broadcast_matmul`) promotes a 1-D
+    // LHS to (1, K) and a 1-D RHS to (K, 1) and squeezes the promoted dim
+    // from the output — mirroring torch's `matmul_impl` decomposition
+    // (aten/src/ATen/native/LinearAlgebra.cpp), through which torch autograd
+    // differentiates. The saved operands here are the ORIGINAL 1-D tensors
+    // and `grad_output` carries the squeezed shape, so without re-promotion
+    // the vector gradient broadcast-matmuls the squeezed cotangent against
+    // every batch element (cross-batch contamination: the audit's [60, 96]
+    // vs torch's [30, 48]) and the other operand's gradient errors outright
+    // (`swap_last_two` rejects ndim < 2). Promote, run the matrix backward,
+    // then squeeze the resulting gradient back to the leaf's 1-D shape.
+    //
+    // `view_reshape` is a pure metadata op on contiguous tensors (any
+    // device) and never attaches autograd edges; whether a gradient is
+    // needed is captured from the ORIGINAL leaves first.
+    let need_a = a.requires_grad();
+    let need_b = b.requires_grad();
+    let a_is_1d = a.ndim() == 1;
+    let b_is_1d = b.ndim() == 1;
+    let a_p: Tensor<T> = if a_is_1d {
+        a.view_reshape(vec![1, a.shape()[0]])?
+    } else {
+        a.clone()
+    };
+    let b_p: Tensor<T> = if b_is_1d {
+        b.view_reshape(vec![b.shape()[0], 1])?
+    } else {
+        b.clone()
+    };
+    let g_p: Tensor<T> = if a_is_1d || b_is_1d {
+        // Re-insert the squeezed output dims: the promoted output shape is
+        // batch ++ [m, n]; the forward removed n (last dim) when b was 1-D
+        // and m (second-to-last) when a was 1-D. Append the n=1 axis first,
+        // then insert the m=1 axis before the last position.
+        let mut g_shape = grad_output.shape().to_vec();
+        if b_is_1d {
+            g_shape.push(1);
+        }
+        if a_is_1d {
+            let pos = g_shape.len() - 1;
+            g_shape.insert(pos, 1);
+        }
+        grad_output.view_reshape(g_shape)?
+    } else {
+        grad_output.clone()
+    };
+
     // Transpose last two dims of a tensor (swap matrix dims in batched tensor).
     //
     // §3 GPU-native: use `permute + contiguous` which already dispatches to GPU.
@@ -695,7 +743,10 @@ fn broadcast_matmul_backward<T: Float>(
         let rows = shape[nd - 2];
         let cols = shape[nd - 1];
         let mat_size = rows * cols;
-        let n_mats: usize = shape[..nd - 2].iter().product::<usize>().max(1);
+        // CORE-139 (#1833): no `.max(1)` — an empty batch prefix already has
+        // product 1; a zero-sized batch dim must skip the loop (the data
+        // slice is empty, so a forced iteration would index out of bounds).
+        let n_mats: usize = shape[..nd - 2].iter().product::<usize>();
         let mut out = vec![<T as num_traits::Zero>::zero(); data.len()];
         for m in 0..n_mats {
             let off = m * mat_size;
@@ -758,11 +809,14 @@ fn broadcast_matmul_backward<T: Float>(
         let offset = grad_nd - target_nd;
         let grad_data = grad.data()?;
 
-        // Compute target total size.
-        let target_size: usize = target.iter().product::<usize>().max(1);
+        // Compute target total size. CORE-139 (#1833): no `.max(1)` — a
+        // scalar (empty) target already has product 1; a zero-sized target
+        // dim must produce a zero-length buffer, not a spurious 1-element
+        // one (`from_storage` would reject the length/shape mismatch).
+        let target_size: usize = target.iter().product::<usize>();
         let mut result = vec![<T as num_traits::Zero>::zero(); target_size];
 
-        let grad_total: usize = grad_shape.iter().product::<usize>().max(1);
+        let grad_total: usize = grad_shape.iter().product::<usize>();
 
         // For each element in the gradient, compute which element in the
         // target it maps to, and accumulate.
@@ -801,20 +855,32 @@ fn broadcast_matmul_backward<T: Float>(
         Tensor::from_storage(TensorStorage::cpu(result), target.to_vec(), false)
     };
 
-    let grad_a = if a.requires_grad() {
-        // grad_A = matmul(grad_C, B^T) reduced to A's shape.
-        let bt = swap_last_two(b)?;
-        let full_grad = linalg::matmul(grad_output, &bt)?;
-        Some(reduce_to_shape(full_grad, a.shape())?)
+    let grad_a = if need_a {
+        // grad_A = matmul(grad_C, B^T) reduced to A's (promoted) shape.
+        let bt = swap_last_two(&b_p)?;
+        let full_grad = linalg::matmul(&g_p, &bt)?;
+        let reduced = reduce_to_shape(full_grad, a_p.shape())?;
+        // Squeeze the promoted (1, K) gradient back to the 1-D leaf shape.
+        Some(if a_is_1d {
+            reduced.view_reshape(a.shape().to_vec())?
+        } else {
+            reduced
+        })
     } else {
         None
     };
 
-    let grad_b = if b.requires_grad() {
-        // grad_B = matmul(A^T, grad_C) reduced to B's shape.
-        let at = swap_last_two(a)?;
-        let full_grad = linalg::matmul(&at, grad_output)?;
-        Some(reduce_to_shape(full_grad, b.shape())?)
+    let grad_b = if need_b {
+        // grad_B = matmul(A^T, grad_C) reduced to B's (promoted) shape.
+        let at = swap_last_two(&a_p)?;
+        let full_grad = linalg::matmul(&at, &g_p)?;
+        let reduced = reduce_to_shape(full_grad, b_p.shape())?;
+        // Squeeze the promoted (K, 1) gradient back to the 1-D leaf shape.
+        Some(if b_is_1d {
+            reduced.view_reshape(b.shape().to_vec())?
+        } else {
+            reduced
+        })
     } else {
         None
     };
@@ -1428,13 +1494,28 @@ pub fn mv_differentiable<T: Float>(a: &Tensor<T>, x: &Tensor<T>) -> FerrotorchRe
     let zero = <T as num_traits::Zero>::zero();
 
     let mut result_vec = vec![zero; m];
-    for (i, result_elem) in result_vec.iter_mut().enumerate() {
-        let mut acc = zero;
-        let row = i * k;
-        for p in 0..k {
-            acc += a_data[row + p] * x_data[p];
+    // CORE-140 (#1834): f16/bf16 accumulate in the f32 opmath type with a
+    // single rounding at the end, matching torch's CPU mv for Half/BFloat16
+    // (opmath_type<Half> = float, aten/src/ATen/OpMathType.h).
+    if crate::ops::linalg::is_reduced_precision::<T>() {
+        for (i, result_elem) in result_vec.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            let row = i * k;
+            for p in 0..k {
+                acc += crate::ops::linalg::opmath_up(a_data[row + p])
+                    * crate::ops::linalg::opmath_up(x_data[p]);
+            }
+            *result_elem = crate::ops::linalg::opmath_down(acc);
         }
-        *result_elem = acc;
+    } else {
+        for (i, result_elem) in result_vec.iter_mut().enumerate() {
+            let mut acc = zero;
+            let row = i * k;
+            for p in 0..k {
+                acc += a_data[row + p] * x_data[p];
+            }
+            *result_elem = acc;
+        }
     }
 
     let storage = TensorStorage::cpu(result_vec);
@@ -1490,10 +1571,25 @@ pub fn dot_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchR
 
     let a_data = a.data()?;
     let b_data = b.data()?;
-    let result_val = a_data
-        .iter()
-        .zip(b_data.iter())
-        .fold(<T as num_traits::Zero>::zero(), |acc, (&x, &y)| acc + x * y);
+    // CORE-140 (#1834): f16/bf16 accumulate in the f32 opmath type with a
+    // single rounding at the end, matching torch's CPU dot for Half/BFloat16
+    // (opmath_type<Half> = float, aten/src/ATen/OpMathType.h). Storage-
+    // precision accumulation drifts ~0.5 % at k = 128 and overflows to inf
+    // when an f16 partial sum exceeds 65504.
+    let result_val = if crate::ops::linalg::is_reduced_precision::<T>() {
+        let acc = a_data
+            .iter()
+            .zip(b_data.iter())
+            .fold(0.0f32, |acc, (&x, &y)| {
+                acc + crate::ops::linalg::opmath_up(x) * crate::ops::linalg::opmath_up(y)
+            });
+        crate::ops::linalg::opmath_down(acc)
+    } else {
+        a_data
+            .iter()
+            .zip(b_data.iter())
+            .fold(<T as num_traits::Zero>::zero(), |acc, (&x, &y)| acc + x * y)
+    };
 
     let storage = TensorStorage::cpu(vec![result_val]);
     let shape = vec![];

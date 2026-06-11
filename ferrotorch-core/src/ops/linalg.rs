@@ -18,7 +18,7 @@
 //! | REQ-9 (`dot`) | SHIPPED | mirrors `Tensor dot`; non-test consumer is `matmul`'s `(1, 1) => dot(a, b)` arm; in-file `test_dot`. |
 //! | REQ-10 (`transpose`) | SHIPPED | materialises a row-major 2-D transpose (R-DEV-7 deviation from upstream's view); non-test consumer `MmBackward::backward` for `A^T @ grad_C` setup. |
 //! | REQ-11 (private broadcast helpers) | SHIPPED | `broadcast_batch_shapes`, `broadcast_strides`, `batch_linear_index`; consumed only by `broadcast_matmul`; exercised indirectly through `test_matmul_*_broadcast` and `test_matmul_4d`. |
-//! | REQ-12 (bf16 precision helpers) | SHIPPED | `is_bf16::<T>()`, `as_bf16_slice`, `write_f32_as_bf16` — all `#[inline(always)]`; consumed by all three small-matrix paths in `mm_raw` / `mm_raw_bt` / `mm_raw_at`; per-block `// SAFETY:` comments name the `TypeId`-guard invariant. |
+//! | REQ-12 (reduced-precision opmath helpers) | SHIPPED | `is_bf16::<T>()`, `is_f16::<T>()`, `is_reduced_precision::<T>()`, `opmath_up`, `opmath_down` — all `#[inline(always)]`; consumed by all three small-matrix paths in `mm_raw` / `mm_raw_bt` / `mm_raw_at` AND the `dot` / `mv` / `vm` / `bmm` f32-opmath accumulators (CORE-140 / #1834 widened the original bf16-only route to f16); per-block `// SAFETY:` comments name the index-bound invariant. |
 //! | REQ-13 (`MKL_ENABLED` runtime cfg probe + Fortran sgemm_/dgemm_ FFI path) | SHIPPED under `--features mkl` | const `MKL_ENABLED: bool` in `ops/linalg.rs` (true iff built with `--features mkl`); `mm_raw` / `mm_raw_bt` / `mm_raw_at` f32 and f64 branches gain a `#[cfg(feature = "mkl")]` fork that calls the Fortran `sgemm_` / `dgemm_` symbols of system MKL 2024.x directly via the helpers `mm_raw_mkl_f32` / `mm_raw_bt_mkl_f32` / `mm_raw_at_mkl_f32` and f64 mirrors. The dispatcher mirrors torch's exact call shape at `aten/src/ATen/native/CPUBlas.cpp:215-247` (raw `sgemm_` with operand-swap + dim-swap + lda/ldb-swap to convert ferrotorch's row-major into the col-major equivalent torch dispatches). Non-test production consumers identical to REQ-5/6/7 (the same `grad_fns::linalg` and `MmBackward` call-sites pick up the MKL path transparently when the feature is on). The parity-sweep runner `tolerance_for` reads `MKL_ENABLED` at runtime to tighten the matmul-family envelope from `rtol=1e-4` (faer fallback) to `tol_f32()` (the default `(1e-5, 1e-7)`). Closes #1538 and #1348. |
 
 use crate::dtype::Float;
@@ -516,7 +516,13 @@ fn broadcast_matmul<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<
     let a_batch = &a_shape[..a_nd - 2];
     let b_batch = &b_shape[..b_nd - 2];
     let batch_shape = broadcast_batch_shapes(a_batch, b_batch)?;
-    let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
+    // CORE-139 (#1833): no `.max(1)` here. An EMPTY batch shape already has
+    // product 1 (empty product), while a zero-SIZED batch dim must yield
+    // batch_size = 0 so the loop is skipped and the correctly-shaped empty
+    // output is returned (torch: `(0,2,3) @ (0,3,2) -> (0,2,2)`). The old
+    // `.max(1)` forced one iteration whose `batch_linear_index` evaluated
+    // `remaining % 0` — a panic inside this Result-returning API.
+    let batch_size: usize = batch_shape.iter().product::<usize>();
 
     // Compute strides for broadcasting iteration.
     let a_batch_strides = broadcast_strides(a_batch, &batch_shape);
@@ -640,10 +646,23 @@ pub fn dot<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>
 
     let a_data = a.data()?;
     let b_data = b.data()?;
-    let result = a_data
-        .iter()
-        .zip(b_data.iter())
-        .fold(<T as num_traits::Zero>::zero(), |acc, (&x, &y)| acc + x * y);
+    // CORE-140 (#1834): f16/bf16 accumulate in the f32 opmath type with a
+    // single rounding at the end, matching torch's CPU `dot` for Half /
+    // BFloat16 (opmath_type<Half> = float, aten/src/ATen/OpMathType.h).
+    // Accumulating in storage precision drifts ~0.5 % at k = 128 and
+    // overflows to inf when an f16 partial sum exceeds 65504.
+    let result = if is_reduced_precision::<T>() {
+        let acc = a_data
+            .iter()
+            .zip(b_data.iter())
+            .fold(0.0f32, |acc, (&x, &y)| acc + opmath_up(x) * opmath_up(y));
+        opmath_down(acc)
+    } else {
+        a_data
+            .iter()
+            .zip(b_data.iter())
+            .fold(<T as num_traits::Zero>::zero(), |acc, (&x, &y)| acc + x * y)
+    };
 
     Tensor::from_storage(TensorStorage::cpu(vec![result]), vec![], false)
 }
@@ -661,24 +680,41 @@ fn is_bf16<T: 'static>() -> bool {
     std::any::TypeId::of::<T>() == std::any::TypeId::of::<half::bf16>()
 }
 
-/// Reinterpret a bf16 slice as `&[half::bf16]`. Only call when
-/// `is_bf16::<T>()` is true.
-#[allow(clippy::inline_always)] // reason: zero-cost reinterpret cast; must inline so caller sees through to the bf16 slice
+/// Whether `T` is `half::f16` (IEEE binary16).
+#[allow(clippy::inline_always)] // reason: trivial TypeId compare; must inline to constant-fold the f16 dispatch in hot matmul
 #[inline(always)]
-unsafe fn as_bf16_slice<T>(data: &[T]) -> &[half::bf16] {
-    // SAFETY: caller guarantees T is half::bf16 (same size, same repr).
-    unsafe { &*(std::ptr::from_ref::<[T]>(data) as *const [half::bf16]) }
+fn is_f16<T: 'static>() -> bool {
+    std::any::TypeId::of::<T>() == std::any::TypeId::of::<half::f16>()
 }
 
-/// Write f32 results into a freshly-zeroed T slice (only valid when T=bf16).
-#[allow(clippy::inline_always)] // reason: tight zip-loop fused into matmul epilogue; must inline to vectorize the bf16 store
+/// Whether `T` is a reduced-precision (16-bit) float. PyTorch computes the
+/// CPU matmul family for these dtypes in `opmath_type<T> = float`
+/// (`aten/src/ATen/OpMathType.h`); accumulating in storage precision loses
+/// ~0.5 % at k = 128 for f16 — and overflows to `inf` whenever an
+/// intermediate partial sum exceeds f16's 65504 max — and several percent
+/// for bf16 (CORE-140 / #1834).
+#[allow(clippy::inline_always)] // reason: trivial TypeId compares; must inline to constant-fold the half dispatch in hot matmul
 #[inline(always)]
-unsafe fn write_f32_as_bf16<T>(dst: &mut [T], src: &[f32]) {
-    // SAFETY: caller guarantees T is half::bf16.
-    let dst_bf16 = unsafe { &mut *(std::ptr::from_mut::<[T]>(dst) as *mut [half::bf16]) };
-    for (d, &s) in dst_bf16.iter_mut().zip(src.iter()) {
-        *d = half::bf16::from_f32(s);
-    }
+pub(crate) fn is_reduced_precision<T: 'static>() -> bool {
+    is_bf16::<T>() || is_f16::<T>()
+}
+
+/// Exact upcast of a reduced-precision value to the f32 opmath type.
+/// f16 → f32 and bf16 → f32 are both value-preserving widenings (NaN and
+/// ±inf included). Only ever called under an `is_reduced_precision` guard.
+#[allow(clippy::inline_always)] // reason: compiles to a single widening conversion inside the hot accumulation loops
+#[inline(always)]
+pub(crate) fn opmath_up<T: Float>(v: T) -> f32 {
+    num_traits::cast::<T, f32>(v).unwrap_or(f32::NAN)
+}
+
+/// Round an f32 opmath accumulator back to the storage dtype — a single
+/// rounding at the end of the reduction, exactly like torch's opmath
+/// kernels (out-of-range magnitudes round to ±inf per IEEE 754).
+#[allow(clippy::inline_always)] // reason: compiles to a single narrowing conversion in the matmul epilogue
+#[inline(always)]
+pub(crate) fn opmath_down<T: Float>(v: f32) -> T {
+    T::from(v).unwrap_or_else(T::nan)
 }
 
 /// Choose parallelism for faer matmul.  For medium matrices use sequential
@@ -1162,9 +1198,9 @@ pub fn mm_raw<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize
     // here because the small ikj loop is precisely where the cross-
     // implementation drift originates (a k=10 dot in ferrotorch's loop
     // vs MKL's k=10 dot diverge by ~3e-6 at f32 due to different
-    // accumulation orders and FMA fusion). The bf16 small-matrix path
-    // keeps its f32-accumulator route (MKL has no bf16 sgemm via cblas
-    // anyway), and the f16 large-matrix upcast fallback stays.
+    // accumulation orders and FMA fusion). The f16/bf16 small-matrix path
+    // keeps its f32-opmath-accumulator route (MKL has no half sgemm via
+    // cblas anyway), and the f16/bf16 large-matrix upcast fallback stays.
     #[cfg(feature = "mkl")]
     {
         if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>() {
@@ -1181,36 +1217,35 @@ pub fn mm_raw<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize
         // Direct ikj loop — cache-friendly, zero intermediate allocations.
         // Uses unsafe get_unchecked to eliminate bounds checks in the hot loop.
         let mut result = vec![zero; m * n];
-        if is_bf16::<T>() {
-            // bf16 fast path with f32 accumulator. Summing up to
-            // DIRECT_MM_THRESHOLD bf16 values in bf16 loses ~7 bits of
-            // precision per dot; accumulating in f32 preserves them.
-            // SAFETY: is_bf16::<T>() returned true (TypeId::of::<T>() ==
-            // TypeId::of::<half::bf16>()), so T == half::bf16. This satisfies
-            // the contracts of as_bf16_slice (T == bf16) and write_f32_as_bf16
-            // (dst is bf16-layout). All get_unchecked calls index in [0, m*k),
-            // [0, k*n), or [0, m*n), which are within the allocated buffers
-            // of length m*k, k*n, m*n respectively (acc and result are
-            // explicitly sized m*n; a_data.len() == m*k and b_data.len() ==
-            // k*n are enforced by the entry assertions at the top of this
-            // function — CORE-138).
+        if is_reduced_precision::<T>() {
+            // f16/bf16 fast path with f32 opmath accumulator (CORE-140 /
+            // #1834). Summing up to DIRECT_MM_THRESHOLD half-precision
+            // values in storage precision loses ~7 (bf16) / ~4 (f16) bits
+            // per dot, and an f16 partial sum overflows to inf above 65504;
+            // PyTorch accumulates these dtypes in opmath_type = float and
+            // rounds back once at the end (aten/src/ATen/OpMathType.h).
+            // SAFETY: all get_unchecked calls index in [0, m*k), [0, k*n),
+            // or [0, m*n), which are within the allocated buffers of length
+            // m*k, k*n, m*n respectively (acc is explicitly sized m*n;
+            // a_data.len() == m*k and b_data.len() == k*n are enforced by
+            // the entry assertions at the top of this function — CORE-138).
+            let mut acc = vec![0.0f32; m * n];
             unsafe {
-                let a_bf16 = as_bf16_slice(a_data);
-                let b_bf16 = as_bf16_slice(b_data);
-                let mut acc = vec![0.0f32; m * n];
                 for i in 0..m {
                     let a_row = i * k;
                     let r_row = i * n;
                     for p in 0..k {
-                        let a_ip = a_bf16.get_unchecked(a_row + p).to_f32();
+                        let a_ip = opmath_up(*a_data.get_unchecked(a_row + p));
                         let b_row = p * n;
                         for j in 0..n {
                             *acc.get_unchecked_mut(r_row + j) +=
-                                a_ip * b_bf16.get_unchecked(b_row + j).to_f32();
+                                a_ip * opmath_up(*b_data.get_unchecked(b_row + j));
                         }
                     }
                 }
-                write_f32_as_bf16(&mut result, &acc);
+            }
+            for (r, &s) in result.iter_mut().zip(acc.iter()) {
+                *r = opmath_down(s);
             }
         } else {
             // SAFETY: a_data has length m*k and b_data has length k*n —
@@ -1369,19 +1404,16 @@ pub fn mm_raw_bt<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
         // B is (N,K) row-major, so B[j][p] = b_data[j*k + p].
         // C[i][j] = sum_p A[i][p] * B[j][p]
         let mut result = vec![zero; m * n];
-        if is_bf16::<T>() {
-            // bf16 fast path with f32 accumulator (see note in `mm_raw`).
-            // SAFETY: is_bf16::<T>() returned true so T == half::bf16, which
-            // satisfies as_bf16_slice and write_f32_as_bf16 contracts. A is
-            // (M,K) and B is (N,K) with a_data.len() == m*k and b_data.len()
-            // == n*k enforced by the entry assertions at the top of this
-            // function (CORE-138), so a_row+p < m*k and b_row+p < n*k for
-            // i<m, j<n, p<k. acc_buf and result both have length m*n, so
+        if is_reduced_precision::<T>() {
+            // f16/bf16 fast path with f32 opmath accumulator (CORE-140 /
+            // #1834; see note in `mm_raw`).
+            // SAFETY: A is (M,K) and B is (N,K) with a_data.len() == m*k and
+            // b_data.len() == n*k enforced by the entry assertions at the
+            // top of this function (CORE-138), so a_row+p < m*k and
+            // b_row+p < n*k for i<m, j<n, p<k. acc_buf has length m*n, so
             // r_row+j = i*n+j < m*n. All get_unchecked accesses are in bounds.
+            let mut acc_buf = vec![0.0f32; m * n];
             unsafe {
-                let a_bf16 = as_bf16_slice(a_data);
-                let b_bf16 = as_bf16_slice(b_data);
-                let mut acc_buf = vec![0.0f32; m * n];
                 for i in 0..m {
                     let a_row = i * k;
                     let r_row = i * n;
@@ -1389,13 +1421,15 @@ pub fn mm_raw_bt<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
                         let b_row = j * k;
                         let mut acc = 0.0f32;
                         for p in 0..k {
-                            acc += a_bf16.get_unchecked(a_row + p).to_f32()
-                                * b_bf16.get_unchecked(b_row + p).to_f32();
+                            acc += opmath_up(*a_data.get_unchecked(a_row + p))
+                                * opmath_up(*b_data.get_unchecked(b_row + p));
                         }
                         *acc_buf.get_unchecked_mut(r_row + j) = acc;
                     }
                 }
-                write_f32_as_bf16(&mut result, &acc_buf);
+            }
+            for (r, &s) in result.iter_mut().zip(acc_buf.iter()) {
+                *r = opmath_down(s);
             }
         } else {
             // SAFETY: A is (M,K) and B is (N,K) row-major with lengths m*k
@@ -1562,33 +1596,32 @@ pub fn mm_raw_at<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
         // Direct loop: A is (K,M) row-major, B is (K,N) row-major.
         // C[i,j] = sum_p A[p,i] * B[p,j]
         let mut result = vec![zero; m * n];
-        if is_bf16::<T>() {
-            // bf16 fast path with f32 accumulator (see note in `mm_raw`).
-            // SAFETY: is_bf16::<T>() returned true so T == half::bf16,
-            // satisfying as_bf16_slice and write_f32_as_bf16 contracts.
-            // A is (K,M) and B is (K,N) with a_data.len() == k*m and
+        if is_reduced_precision::<T>() {
+            // f16/bf16 fast path with f32 opmath accumulator (CORE-140 /
+            // #1834; see note in `mm_raw`).
+            // SAFETY: A is (K,M) and B is (K,N) with a_data.len() == k*m and
             // b_data.len() == k*n enforced by the entry assertions at the
             // top of this function (CORE-138), so for p<k, i<m, j<n we have
-            // a_row+i = p*m+i < k*m and b_row+j = p*n+j < k*n. acc_buf and
-            // result both have length m*n, so r_row+j = i*n+j < m*n. All
-            // get_unchecked accesses are in bounds.
+            // a_row+i = p*m+i < k*m and b_row+j = p*n+j < k*n. acc_buf has
+            // length m*n, so r_row+j = i*n+j < m*n. All get_unchecked
+            // accesses are in bounds.
+            let mut acc_buf = vec![0.0f32; m * n];
             unsafe {
-                let a_bf16 = as_bf16_slice(a_data);
-                let b_bf16 = as_bf16_slice(b_data);
-                let mut acc_buf = vec![0.0f32; m * n];
                 for p in 0..k {
                     let a_row = p * m;
                     let b_row = p * n;
                     for i in 0..m {
-                        let a_val = a_bf16.get_unchecked(a_row + i).to_f32();
+                        let a_val = opmath_up(*a_data.get_unchecked(a_row + i));
                         let r_row = i * n;
                         for j in 0..n {
                             *acc_buf.get_unchecked_mut(r_row + j) +=
-                                a_val * b_bf16.get_unchecked(b_row + j).to_f32();
+                                a_val * opmath_up(*b_data.get_unchecked(b_row + j));
                         }
                     }
                 }
-                write_f32_as_bf16(&mut result, &acc_buf);
+            }
+            for (r, &s) in result.iter_mut().zip(acc_buf.iter()) {
+                *r = opmath_down(s);
             }
         } else {
             // SAFETY: A is (K,M) and B is (K,N) row-major with lengths k*m
@@ -1778,12 +1811,24 @@ pub fn mv<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>>
     let b_data = b.data()?;
     let mut result = vec![<T as num_traits::Zero>::zero(); m];
 
-    for i in 0..m {
-        let mut acc = <T as num_traits::Zero>::zero();
-        for p in 0..k {
-            acc += a_data[i * k + p] * b_data[p];
+    // CORE-140 (#1834): f16/bf16 accumulate in the f32 opmath type
+    // (torch CPU mv for Half/BFloat16; see `dot` above).
+    if is_reduced_precision::<T>() {
+        for (i, r) in result.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            for p in 0..k {
+                acc += opmath_up(a_data[i * k + p]) * opmath_up(b_data[p]);
+            }
+            *r = opmath_down(acc);
         }
-        result[i] = acc;
+    } else {
+        for (i, r) in result.iter_mut().enumerate() {
+            let mut acc = <T as num_traits::Zero>::zero();
+            for p in 0..k {
+                acc += a_data[i * k + p] * b_data[p];
+            }
+            *r = acc;
+        }
     }
 
     Tensor::from_storage(TensorStorage::cpu(result), vec![m], false)
@@ -1809,12 +1854,24 @@ fn vm<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let b_data = b.data()?;
     let mut result = vec![<T as num_traits::Zero>::zero(); n];
 
-    for j in 0..n {
-        let mut acc = <T as num_traits::Zero>::zero();
-        for p in 0..k {
-            acc += a_data[p] * b_data[p * n + j];
+    // CORE-140 (#1834): f16/bf16 accumulate in the f32 opmath type
+    // (torch CPU vec @ mat for Half/BFloat16; see `dot` above).
+    if is_reduced_precision::<T>() {
+        for (j, r) in result.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            for p in 0..k {
+                acc += opmath_up(a_data[p]) * opmath_up(b_data[p * n + j]);
+            }
+            *r = opmath_down(acc);
         }
-        result[j] = acc;
+    } else {
+        for (j, r) in result.iter_mut().enumerate() {
+            let mut acc = <T as num_traits::Zero>::zero();
+            for p in 0..k {
+                acc += a_data[p] * b_data[p * n + j];
+            }
+            *r = acc;
+        }
     }
 
     Tensor::from_storage(TensorStorage::cpu(result), vec![n], false)
@@ -1869,17 +1926,37 @@ pub fn bmm<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>
     let slice_c = m * n;
     let mut result = vec![<T as num_traits::Zero>::zero(); batch * slice_c];
 
-    for bi in 0..batch {
-        let a_off = bi * slice_a;
-        let b_off = bi * slice_b;
-        let c_off = bi * slice_c;
-        for i in 0..m {
-            for j in 0..n {
-                let mut acc = <T as num_traits::Zero>::zero();
-                for p in 0..k {
-                    acc += a_data[a_off + i * k + p] * b_data[b_off + p * n + j];
+    // CORE-140 (#1834): f16/bf16 accumulate in the f32 opmath type
+    // (torch CPU bmm for Half/BFloat16; see `dot` above).
+    if is_reduced_precision::<T>() {
+        for bi in 0..batch {
+            let a_off = bi * slice_a;
+            let b_off = bi * slice_b;
+            let c_off = bi * slice_c;
+            for i in 0..m {
+                for j in 0..n {
+                    let mut acc = 0.0f32;
+                    for p in 0..k {
+                        acc += opmath_up(a_data[a_off + i * k + p])
+                            * opmath_up(b_data[b_off + p * n + j]);
+                    }
+                    result[c_off + i * n + j] = opmath_down(acc);
                 }
-                result[c_off + i * n + j] = acc;
+            }
+        }
+    } else {
+        for bi in 0..batch {
+            let a_off = bi * slice_a;
+            let b_off = bi * slice_b;
+            let c_off = bi * slice_c;
+            for i in 0..m {
+                for j in 0..n {
+                    let mut acc = <T as num_traits::Zero>::zero();
+                    for p in 0..k {
+                        acc += a_data[a_off + i * k + p] * b_data[b_off + p * n + j];
+                    }
+                    result[c_off + i * n + j] = acc;
+                }
             }
         }
     }
