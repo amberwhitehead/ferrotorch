@@ -3788,16 +3788,18 @@ impl<T: Float> LuBackwardShared<T> {
         let z = crate::autograd::no_grad::no_grad(|| {
             linalg_fwd::solve_triangular(&self.l, &step1, false, true, true)
         })?; // [n,n]
-        // gA = P^T @ Z.  PyTorch's `linalg_lu_backward` returns `P.matmul(...)`
-        // (FunctionsManual.cpp:6873) under its `A = P L U` convention where its
-        // `P` is the permutation that LEFT-multiplies `L U` — i.e. torch's `P`
-        // is the INVERSE of the row-swap permutation. ferray returns the `P`
-        // satisfying the same reconstruction `A = P L U` (verified by
-        // `test_lu_reconstructs`), but the adjoint of the row permutation is its
-        // transpose, so the gradient maps back through `P^T` (FD-verified on
-        // the pivoted case by `lu_public_forward_is_grad_aware_and_matches_fd`).
+        // gA = P @ Z, exactly PyTorch's `linalg_lu_backward` final step
+        // `P.matmul(...)` (FunctionsManual.cpp:6873). The saved `P` is the
+        // forward's output, which since CORE-144 / #1838 follows torch's
+        // `A = P L U` convention (ferray's inverse-convention `P_f` is
+        // transposed inside `linalg_fwd::lu` before it ever reaches here).
+        // Pre-#1838 this multiplied by `P^T` — numerically the same product,
+        // because the saved matrix was `P_f = P^T`; the justifying comment,
+        // however, wrongly claimed ferray itself returned the `A = P L U`
+        // permutation (the audit-flagged misattribution). Torch-pinned by
+        // `lu_backward_three_cycle_pivot_matches_torch_1838` on a 3-cycle
+        // pivot, where the conventions genuinely differ.
         let pd = self.p.data()?.to_vec();
-        // P^T @ Z:  (P^T)[i,k] = P[k,i].
         let zd = z.data()?;
         let zero = <T as num_traits::Zero>::zero();
         let mut ga = vec![zero; n * n];
@@ -3805,7 +3807,7 @@ impl<T: Float> LuBackwardShared<T> {
             for j in 0..n {
                 let mut acc = zero;
                 for k in 0..n {
-                    acc += pd[k * n + i] * zd[k * n + j];
+                    acc += pd[i * n + k] * zd[k * n + j];
                 }
                 ga[i * n + j] = acc;
             }
@@ -8115,6 +8117,62 @@ mod tests {
             weighted_sum(l.data().unwrap(), &wl) + weighted_sum(u.data().unwrap(), &wu)
         });
         assert_grad_close64(&analytic, &numeric, 1e-3, "lu vs FD");
+    }
+
+    // lu — gradient on a NON-INVOLUTORY (3-cycle) pivot, pinned to LIVE
+    // torch (CORE-144 / #1838). The FD test above is self-consistent under
+    // EITHER permutation convention (forward and backward flip together),
+    // so only a torch-pinned value can catch a convention mismatch in the
+    // saved-P adjoint (`gA = P @ M`, FunctionsManual.cpp:6873).
+    //
+    // Oracle (live torch 2.11.0+cu130):
+    //   A = torch.tensor([[0.5,4.,1.],[1.,0.25,3.],[6.,2.,0.5]],
+    //                    dtype=torch.float64, requires_grad=True)
+    //   P, L, U = torch.linalg.lu(A)            # ipiv 3-cycle [3,3,3]
+    //   WL = torch.arange(1., 10., dtype=torch.float64).reshape(3, 3)
+    //   WU = torch.arange(2., 11., dtype=torch.float64).reshape(3, 3)
+    //   ((L*WL).sum() + (U*WU).sum()).backward()
+    //   A.grad.flatten().tolist() ==
+    //     [-1.9317895400126024, 5.991020793950851, 7.217391304347826,
+    //       0.4710144927536232, -0.4130434782608696, 10.0,
+    //       2.08248004620878, 2.5695888468809076, 1.7318840579710146]
+    #[test]
+    fn lu_backward_three_cycle_pivot_matches_torch_1838() {
+        let a_data = vec![0.5, 4.0, 1.0, 1.0, 0.25, 3.0, 6.0, 2.0, 0.5];
+        let shape = [3usize, 3];
+        let wl: Vec<f64> = (1..10).map(|i| i as f64).collect();
+        let wu: Vec<f64> = (2..11).map(|i| i as f64).collect();
+        let expected = [
+            -1.931_789_540_012_602_4,
+            5.991_020_793_950_851,
+            7.217_391_304_347_826,
+            0.471_014_492_753_623_2,
+            -0.413_043_478_260_869_6,
+            10.0,
+            2.082_480_046_208_78,
+            2.569_588_846_880_907_6,
+            1.731_884_057_971_014_6,
+        ];
+
+        let a = leaf64(&a_data, &shape);
+        let (_p, l, u) = linalg_fwd::lu(&a).unwrap();
+        let wlt = no_grad_leaf64(&wl, &shape);
+        let wut = no_grad_leaf64(&wu, &shape);
+        let ll =
+            crate::grad_fns::reduction::sum(&crate::grad_fns::arithmetic::mul(&l, &wlt).unwrap())
+                .unwrap();
+        let lu_loss =
+            crate::grad_fns::reduction::sum(&crate::grad_fns::arithmetic::mul(&u, &wut).unwrap())
+                .unwrap();
+        let loss = crate::grad_fns::arithmetic::add(&ll, &lu_loss).unwrap();
+        loss.backward().unwrap();
+        let analytic = a.grad().unwrap().unwrap().data().unwrap().to_vec();
+        // f64 tolerance: values are O(10); the VJP chains two triangular
+        // solves + one matmul over n = 3 (accumulation length ≤ 3), so
+        // expected drift is within ~1e2 ULP ≈ 1e-13 relative; 1e-9 absolute
+        // gives slack without admitting a convention error (which moves
+        // entries by O(1)).
+        assert_grad_close64(&analytic, &expected, 1e-9, "lu 3-cycle dA vs torch");
     }
 
     // lu_factor — packed-LU VJP via grad_a_combined

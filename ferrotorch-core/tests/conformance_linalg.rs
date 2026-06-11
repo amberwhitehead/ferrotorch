@@ -1960,13 +1960,11 @@ fn cpu_lu_reconstruction() {
         if f.dtype != "float64" {
             continue;
         }
-        // The 3-cycle pivot row reconstructs ONLY under ferray's inverse
-        // convention; it is handled by the dedicated #1838 pin test below
-        // (`cpu_lu_three_cycle_pivot_pin_1838`). The involutory rows here
-        // cannot distinguish the conventions, so `P L U = A` holds for them.
-        if f.tag.as_deref() == Some("lu_3cycle_3x3") {
-            continue;
-        }
+        // The 3-cycle pivot row (`lu_3cycle_3x3`) is intentionally NOT
+        // skipped: post-#1838 the documented torch contract `A = P L U`
+        // holds for every pivot structure, involutory or not. The dedicated
+        // bit-exact check against torch's `P` lives in
+        // `cpu_lu_three_cycle_pivot_matches_torch_1838`.
         let a_shape = f.a_shape.as_ref().unwrap();
         let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
         let n = a_shape[0];
@@ -1986,26 +1984,26 @@ fn cpu_lu_reconstruction() {
     }
 }
 
-/// CORE-144 / #1838 pin — `lu` returns the INVERSE of its documented
-/// permutation (lane added per the CORE-199 / #1893 dispatch).
+/// CORE-144 / #1838 — `lu` matches `torch.linalg.lu`'s documented
+/// permutation convention `A = P L U` (retired pin, now a live contract).
 ///
 /// The `lu_3cycle_3x3` fixture rows hold a matrix whose partial pivoting
 /// composes to a 3-cycle (torch `lu_factor` ipiv = `[3, 3, 3]`, 1-based) —
-/// the smallest non-involutory permutation. torch's documented contract,
-/// which `lu`'s doc-comment claims to mirror, is `A = P L U` with
-/// `p_values` the exact 0/1 matrix torch returns (live torch 2.11.0+cu130:
-/// `P, L, U = torch.linalg.lu(A); (P @ L @ U - A).abs().max() == 0.0`).
+/// the smallest non-involutory permutation, the only structure that can
+/// discriminate torch's convention from ferray's inverse (`P A = L U`)
+/// convention. `p_values` is the exact 0/1 matrix torch returns (live
+/// torch 2.11.0+cu130: `P, L, U = torch.linalg.lu(A);
+/// (P @ L @ U - A).abs().max() == 0.0`).
 ///
-/// ferrotorch probed at HEAD (401233b56): the returned `P` is torch's `P`
-/// TRANSPOSED (ferray's `P A = L U` convention), so `P L U = P² A ≠ A`
-/// (max abs deviation 5.5 on this fixture) while `Pᵀ L U = A` to machine
-/// precision. Single-contract pin (R-ORACLE-4): assert the inverse
-/// convention exactly — returned `P` bit-equals the transpose of torch's
-/// `p_values`, and `Pᵀ L U` reconstructs `A`. When #1838 lands (transpose
-/// before returning), the bit-equality assert fires — retire this pin and
-/// assert `P == p_values` plus `P L U = A` instead.
+/// History: at pre-fix HEAD (401233b56) the returned `P` was torch's `P`
+/// TRANSPOSED, so `P L U = P² A ≠ A` (Frobenius deviation ~5.5 on this
+/// fixture). This test was the red pin asserting that inverse convention;
+/// it was observed red against the torch contract before the #1838 fix
+/// (transpose ferray's `P` in `lu`) landed, and now asserts the torch
+/// contract directly per its own retirement instruction (R-ORACLE-4:
+/// single contract, bit-exact `P`).
 #[test]
-fn cpu_lu_three_cycle_pivot_pin_1838() {
+fn cpu_lu_three_cycle_pivot_matches_torch_1838() {
     let file = load_fixtures();
     let mut seen = 0usize;
     for f in cases_for(&file, "lu", "cpu") {
@@ -2041,45 +2039,29 @@ fn cpu_lu_three_cycle_pivot_pin_1838() {
              this row no longer discriminates the lu conventions"
         );
 
-        // Pin 1: returned P is EXACTLY torch's P transposed (0/1 entries).
+        // Contract 1: returned P bit-equals torch's P (0/1 entries — exact
+        // equality is well-defined; any deviation is a convention bug, not
+        // rounding).
         for i in 0..n {
             for j in 0..n {
                 assert_eq!(
                     p_d[i * n + j],
-                    p_torch[j * n + i],
-                    "lu 3-cycle: returned P[{i},{j}] != torch P[{j},{i}] — \
-                     if P now equals torch's p_values, #1838 appears fixed; \
-                     retire this pin and assert P == p_values + P L U = A"
+                    p_torch[i * n + j],
+                    "lu 3-cycle: returned P[{i},{j}] != torch P[{i},{j}] — \
+                     #1838 regressed (P convention no longer torch's A = P L U)"
                 );
             }
         }
 
-        // Pin 2: the inverse convention reconstructs: Pᵀ L U = A.
-        let mut p_t = vec![0.0f64; n * n];
-        for i in 0..n {
-            for j in 0..n {
-                p_t[i * n + j] = p_d[j * n + i];
-            }
-        }
+        // Contract 2: the documented reconstruction holds: P L U = A.
         let lu_v = matmul_dense_f64(&l_d, &u_d, n, n, n);
-        let recon_t = matmul_dense_f64(&p_t, &lu_v, n, n, n);
-        let scale = frob_norm_f64(a_data).max(1.0);
-        let diff_t = frob_diff_f64(&recon_t, a_data);
-        assert!(
-            diff_t <= tolerance::F64_RECON * scale,
-            "lu 3-cycle: Pᵀ L U no longer reconstructs A (diff {diff_t:.3e}) \
-             — L/U themselves diverge; re-probe #1838"
-        );
-
-        // Pin 3: the documented contract P L U = A does NOT hold today
-        // (deviation is structural — rows mis-permuted, ~5.5 in Frobenius
-        // terms on this fixture, far above any rounding band).
         let recon = matmul_dense_f64(&p_d, &lu_v, n, n, n);
+        let scale = frob_norm_f64(a_data).max(1.0);
         let diff = frob_diff_f64(&recon, a_data);
         assert!(
-            diff > 1.0,
-            "lu 3-cycle: P L U ≈ A (diff {diff:.3e}) — #1838 appears fixed; \
-             retire this pin and assert the torch contract directly"
+            diff <= tolerance::F64_RECON * scale,
+            "lu 3-cycle: P L U does not reconstruct A (diff {diff:.3e}) — \
+             #1838 regressed"
         );
     }
     assert_eq!(
@@ -2648,6 +2630,123 @@ fn cpu_inv_ex_and_cholesky_ex() {
     }
 }
 
+/// CORE-145 / #1839 — the `_ex` family must PROPAGATE structural errors
+/// (shape/dim/device/dtype). PyTorch's `_ex` variants suppress only LAPACK
+/// numerical (`info`) failures; structural errors still raise:
+///
+/// ```text
+/// live torch 2.11.0+cu130:
+/// >>> torch.linalg.cholesky_ex(torch.randn(2, 3, dtype=torch.float64))
+/// RuntimeError: linalg.cholesky: A must be batches of square matrices,
+///   but they are 2 by 3 matrices
+/// >>> torch.linalg.cholesky_ex(torch.randn(7, dtype=torch.float64))
+/// RuntimeError: linalg.cholesky: The input tensor A must have at least
+///   2 dimensions.
+/// ```
+///
+/// Pre-fix HEAD fabricated `Ok((zeros, info=1))` for every one of these.
+#[test]
+fn cpu_ex_family_structural_errors_propagate_1839() {
+    let a23 = make_cpu_f64(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false);
+    assert!(
+        cholesky_ex(&a23).is_err(),
+        "cholesky_ex of non-square [2,3] must propagate the structural \
+         error (torch raises), not fabricate (zeros, info=1) — #1839"
+    );
+
+    let a7 = make_cpu_f64(&[1.0; 7], &[7], false);
+    assert!(
+        cholesky_ex(&a7).is_err(),
+        "cholesky_ex of 1-D [7] must propagate the structural error \
+         (torch raises), not fabricate [7,7] zeros — #1839"
+    );
+
+    assert!(
+        inv_ex(&a23).is_err(),
+        "inv_ex of non-square [2,3] must propagate the structural error \
+         (torch raises) — #1839"
+    );
+
+    // Incompatible RHS length: structural, torch raises.
+    let a22 = make_cpu_f64(&[1.0, 0.0, 0.0, 1.0], &[2, 2], false);
+    let b3 = make_cpu_f64(&[1.0, 2.0, 3.0], &[3], false);
+    assert!(
+        solve_ex(&a22, &b3).is_err(),
+        "solve_ex with A [2,2] / b [3] must propagate the structural \
+         error (torch raises) — #1839"
+    );
+}
+
+/// CORE-145 / #1839 — NUMERICAL failures (and only those) convert to
+/// `info != 0` with a same-shape fallback value tensor.
+///
+/// torch oracle (live 2.11.0+cu130):
+/// ```text
+/// >>> L, info = torch.linalg.cholesky_ex(torch.tensor(
+/// ...     [[1.,2.,0.],[2.,1.,0.],[0.,0.,1.]], dtype=torch.float64))
+/// >>> info.item()
+/// 2                        # failing leading-minor index
+/// >>> torch.linalg.inv_ex(torch.tensor([[1.,2.],[2.,4.]],
+/// ...     dtype=torch.float64))[1].item()
+/// 2                        # first zero pivot
+/// ```
+///
+/// CPU `info` is pinned to the documented constant 1: ferray-linalg 0.4.9
+/// reports `SingularMatrix` with NO index ("matrix is not positive
+/// definite"). #1944 tracks surfacing the true LAPACK index on CPU; the
+/// torch-side expected values are quoted above (R-ORACLE-4). The CUDA
+/// lane DOES report the true cuSOLVER devInfo index — see the `gpu`
+/// module's `_1839` tests.
+///
+/// The fallback value tensor is same-shape zeros: torch documents the
+/// value output as UNDEFINED when `info != 0` (it returns the partial
+/// factor), so all-zeros is a legal, deterministic choice.
+#[test]
+fn cpu_ex_family_numerical_failure_info_1839() {
+    // Non-PD (minor 2 fails; torch info=2, CPU pinned 1 per #1944).
+    let a = make_cpu_f64(
+        &[1.0, 2.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        &[3, 3],
+        false,
+    );
+    let (l, info) = cholesky_ex(&a).expect("numerical failure stays Ok");
+    let info_v = read_back_f64(&info, Device::Cpu);
+    assert_eq!(
+        info_v,
+        vec![1.0],
+        "cholesky_ex CPU info pins the documented constant 1 (#1944; torch: 2)"
+    );
+    let l_v = read_back_f64(&l, Device::Cpu);
+    assert_eq!(l_v.len(), 9, "fallback L keeps the [3,3] shape");
+    assert!(
+        l_v.iter().all(|&x| x == 0.0),
+        "fallback L is deterministic zeros (torch: undefined values)"
+    );
+
+    // Singular inv (torch info=2, CPU pinned 1 per #1944).
+    let s = make_cpu_f64(&[1.0, 2.0, 2.0, 4.0], &[2, 2], false);
+    let (_, info) = inv_ex(&s).expect("numerical failure stays Ok");
+    assert_eq!(
+        read_back_f64(&info, Device::Cpu),
+        vec![1.0],
+        "inv_ex CPU info pins the documented constant 1 (#1944; torch: 2)"
+    );
+
+    // Singular solve (torch solve_ex info=2, CPU pinned 1 per #1944).
+    let b = make_cpu_f64(&[1.0, 1.0], &[2], false);
+    let (x, info) = solve_ex(&s, &b).expect("numerical failure stays Ok");
+    assert_eq!(
+        read_back_f64(&info, Device::Cpu),
+        vec![1.0],
+        "solve_ex CPU info pins the documented constant 1 (#1944; torch: 2)"
+    );
+    assert_eq!(
+        read_back_f64(&x, Device::Cpu),
+        vec![0.0, 0.0],
+        "fallback x is deterministic zeros shaped like b"
+    );
+}
+
 #[test]
 fn cpu_matrix_power() {
     let file = load_fixtures();
@@ -2917,6 +3016,78 @@ fn cpu_cross() {
     }
 }
 
+/// CORE-147 / #1841 — `cross` on tensors with a zero-sized NON-cross
+/// dimension returns an empty tensor of the input shape, like torch:
+///
+/// ```text
+/// live torch 2.11.0+cu130:
+/// >>> torch.linalg.cross(torch.randn(0,3,dtype=torch.float64),
+/// ...                    torch.randn(0,3,dtype=torch.float64), dim=-1).shape
+/// torch.Size([0, 3])      # same for (3,0) dim=0 and (2,0,3) dim=2
+/// ```
+///
+/// Pre-fix HEAD pushed a base offset for the empty multi-index before
+/// detecting the zero-sized dim: debug builds aborted on
+/// `debug_assert_eq!(base_offsets.len(), groups)`; release builds indexed
+/// an empty data slice and PANICKED inside the `FerrotorchResult` API.
+#[test]
+fn cpu_cross_zero_sized_dim_returns_empty_1841() {
+    for (shape, dim) in [
+        (vec![0usize, 3], -1i64),
+        (vec![3, 0], 0),
+        (vec![2, 0, 3], 2),
+        (vec![2, 0, 3], -1),
+    ] {
+        let a = make_cpu_f64(&[], &shape, false);
+        let b = make_cpu_f64(&[], &shape, false);
+        let c = cross(&a, &b, dim).unwrap_or_else(|e| {
+            panic!("cross on empty shape {shape:?} dim={dim} must be Ok (torch returns empty), got Err({e}) — #1841")
+        });
+        assert_eq!(
+            c.shape(),
+            shape.as_slice(),
+            "cross empty result keeps the input shape (torch contract) — #1841"
+        );
+        assert_eq!(
+            read_back_f64(&c, Device::Cpu).len(),
+            0,
+            "cross empty result has numel 0 — #1841"
+        );
+    }
+
+    // f32 lane shares the generic implementation; cover one shape.
+    let a = make_cpu_f32(&[], &[0, 3], false);
+    let b = make_cpu_f32(&[], &[0, 3], false);
+    let c = cross(&a, &b, -1).expect("f32 cross on [0,3] must be Ok — #1841");
+    assert_eq!(c.shape(), &[0, 3]);
+}
+
+/// CORE-147 / #1841 — the differentiable wrapper shares the forward, so
+/// autograd through an empty `cross` must also work: torch attaches
+/// `LinalgCrossBackward0` and `.sum().backward()` yields EMPTY grads of
+/// the leaf shape (live 2.11.0+cu130: `a.grad.shape == (0, 3)`).
+/// Gradient-flow assertion per R-ORACLE-3: values (here: empty buffers)
+/// reaching the original leaves, not a `requires_grad` flag check.
+#[test]
+fn cpu_cross_zero_sized_dim_autograd_flows_1841() {
+    let a = make_cpu_f64(&[], &[0, 3], true);
+    let b = make_cpu_f64(&[], &[0, 3], true);
+    let c = cross(&a, &b, -1).expect("grad-tracked cross on [0,3] must be Ok — #1841");
+    assert_eq!(c.shape(), &[0, 3]);
+    let loss = ferrotorch_core::grad_fns::reduction::sum(&c).expect("sum of empty");
+    loss.backward().expect("backward through empty cross");
+    let ga = a
+        .grad()
+        .unwrap()
+        .expect("a.grad present (torch: empty grad)");
+    let gb = b
+        .grad()
+        .unwrap()
+        .expect("b.grad present (torch: empty grad)");
+    assert_eq!(ga.shape(), &[0, 3], "a.grad keeps leaf shape — #1841");
+    assert_eq!(gb.shape(), &[0, 3], "b.grad keeps leaf shape — #1841");
+}
+
 #[test]
 fn cpu_multi_dot() {
     let file = load_fixtures();
@@ -3081,6 +3252,127 @@ fn cpu_matrix_exp() {
             }
             _ => unreachable!(),
         }
+    }
+}
+
+/// CORE-148 / #1842 — `matrix_exp` for extreme infinity-norms. Pre-fix
+/// HEAD computed the scaling factor as `1u64 << s`: for
+/// `||A||_inf > θ13·2^63 ≈ 4.95e19` (a single `1e20` entry suffices),
+/// `s ≥ 64` PANICS in debug builds and WRAPS mod 64 in release builds
+/// (scale 2 instead of 2^65 → Padé(13) evaluated far outside its
+/// convergence region → silently wrong finite values).
+///
+/// torch oracle (live 2.11.0+cu130):
+/// ```text
+/// >>> me = lambda m: torch.linalg.matrix_exp(
+/// ...     torch.tensor(m, dtype=torch.float64)).flatten().tolist()
+/// >>> me([[1e20]])
+/// [inf]
+/// >>> me([[-1e20]])
+/// [0.0]
+/// >>> me([[0., 1e20], [0., 0.]])          # nilpotent: exact answer
+/// [1.0, 1e+20, 0.0, 1.0]
+/// >>> v = 5.371920351148152 * 2**63 * 1.01   # just over the wrap line
+/// >>> me([[0., v], [0., 0.]])
+/// [1.0, 5.004269215050086e+19, 0.0, 1.0]
+/// >>> me([[1e20, 1e20], [1e20, 1e20]])
+/// [inf, inf, inf, inf]
+/// ```
+///
+/// `[[1e20]]` / `[[-1e20]]` also pin the upstream TRIVIAL `n == 1 →
+/// a.exp()` case (pytorch `aten/src/ATen/native/LinearAlgebra.cpp:2795`).
+#[test]
+fn cpu_matrix_exp_extreme_norm_overflow_1842() {
+    // n == 1, |entry| > θ13·2^63: exp(1e20) = inf, exp(-1e20) = 0.
+    let r = matrix_exp(&make_cpu_f64(&[1e20], &[1, 1], false)).expect("matrix_exp [[1e20]]");
+    check_f64(
+        "matrix_exp [[1e20]] — #1842",
+        &read_back_f64(&r, Device::Cpu),
+        &[f64::INFINITY],
+        tolerance::F64_RECON,
+    );
+    let r = matrix_exp(&make_cpu_f64(&[-1e20], &[1, 1], false)).expect("matrix_exp [[-1e20]]");
+    check_f64(
+        "matrix_exp [[-1e20]] — #1842",
+        &read_back_f64(&r, Device::Cpu),
+        &[0.0],
+        tolerance::F64_RECON,
+    );
+
+    // Nilpotent 2x2 with a FINITE exact answer in the wrap regime — the
+    // sharpest discriminator: release-mode HEAD returned a finite WRONG
+    // off-diagonal here (wrapped scale), not an inf.
+    let r = matrix_exp(&make_cpu_f64(&[0.0, 1e20, 0.0, 0.0], &[2, 2], false))
+        .expect("matrix_exp nilpotent 1e20");
+    check_f64(
+        "matrix_exp [[0,1e20],[0,0]] — #1842",
+        &read_back_f64(&r, Device::Cpu),
+        &[1.0, 1e20, 0.0, 1.0],
+        tolerance::F64_RECON,
+    );
+
+    // Just over the θ13·2^63 threshold (s = 64 exactly).
+    let v = 5.371920351148152 * 2f64.powi(63) * 1.01;
+    assert_eq!(v, 5.004269215050086e19, "threshold sample drifted");
+    let r = matrix_exp(&make_cpu_f64(&[0.0, v, 0.0, 0.0], &[2, 2], false))
+        .expect("matrix_exp nilpotent just-over-2^63");
+    check_f64(
+        "matrix_exp [[0,v],[0,0]] v=θ13·2^63·1.01 — #1842",
+        &read_back_f64(&r, Device::Cpu),
+        &[1.0, v, 0.0, 1.0],
+        tolerance::F64_RECON,
+    );
+
+    // Dense huge matrix: every entry overflows to +inf, like torch.
+    let r = matrix_exp(&make_cpu_f64(&[1e20, 1e20, 1e20, 1e20], &[2, 2], false))
+        .expect("matrix_exp all-1e20");
+    check_f64(
+        "matrix_exp [[1e20 x4]] — #1842",
+        &read_back_f64(&r, Device::Cpu),
+        &[f64::INFINITY; 4],
+        tolerance::F64_RECON,
+    );
+}
+
+/// CORE-148 / #1842 — `matrix_exp` with an INFINITE infinity-norm
+/// (`inf` entries, or finite entries whose row sum overflows). Pre-fix
+/// HEAD: `s` saturates to `i32::MAX` → debug shift panic / release wrap.
+///
+/// torch oracle (live 2.11.0+cu130):
+/// ```text
+/// >>> me([[float('inf')]])                 # n==1 trivial: a.exp()
+/// [inf]
+/// >>> me([[float('inf'), 1.], [0., 1.]])
+/// [nan, nan, nan, nan]
+/// >>> me([[1e308, 1e308], [0., 0.]])       # finite entries, row sum inf
+/// [nan, nan, nan, nan]
+/// >>> me([[1e308, 0.], [0., -1e308]])
+/// [nan, nan, nan, nan]
+/// ```
+#[test]
+fn cpu_matrix_exp_infinite_norm_1842() {
+    let r =
+        matrix_exp(&make_cpu_f64(&[f64::INFINITY], &[1, 1], false)).expect("matrix_exp [[inf]]");
+    check_f64(
+        "matrix_exp [[inf]] — #1842",
+        &read_back_f64(&r, Device::Cpu),
+        &[f64::INFINITY],
+        tolerance::F64_RECON,
+    );
+
+    for (label, data) in [
+        ("[[inf,1],[0,1]]", vec![f64::INFINITY, 1.0, 0.0, 1.0]),
+        ("[[1e308,1e308],[0,0]]", vec![1e308, 1e308, 0.0, 0.0]),
+        ("[[1e308,0],[0,-1e308]]", vec![1e308, 0.0, 0.0, -1e308]),
+    ] {
+        let r = matrix_exp(&make_cpu_f64(&data, &[2, 2], false))
+            .unwrap_or_else(|e| panic!("matrix_exp {label} must be Ok, got Err({e}) — #1842"));
+        check_f64(
+            &format!("matrix_exp {label} — #1842"),
+            &read_back_f64(&r, Device::Cpu),
+            &[f64::NAN; 4],
+            tolerance::F64_RECON,
+        );
     }
 }
 
@@ -3786,5 +4078,106 @@ mod gpu {
                 _ => unreachable!(),
             }
         }
+    }
+
+    /// CORE-145 / #1839 — CUDA `_ex` device + info contract on numerical
+    /// failure. torch oracle (live 2.11.0+cu130, RTX 3090):
+    ///
+    /// ```text
+    /// >>> A = torch.tensor([[1.,2.,0.],[2.,1.,0.],[0.,0.,1.]],
+    /// ...                  dtype=torch.float64).cuda()
+    /// >>> L, info = torch.linalg.cholesky_ex(A)
+    /// >>> L.device, info.device, info.item()
+    /// (device(type='cuda', index=0), device(type='cuda', index=0), 2)
+    /// ```
+    ///
+    /// The CUDA lane reports the TRUE cuSOLVER devInfo index (2 here —
+    /// matching torch), recovered from the backend error; pre-fix HEAD
+    /// returned CPU-resident zeros with info=1.
+    #[test]
+    fn gpu_cholesky_ex_non_pd_devices_and_info_1839() {
+        ensure_cuda_backend();
+        let a = upload_f64(
+            make_cpu_f64(
+                &[1.0, 2.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                &[3, 3],
+                false,
+            ),
+            Device::Cuda(0),
+        );
+        let (l, info) = cholesky_ex(&a).expect("numerical failure stays Ok");
+        let l_v = read_back_f64(&l, Device::Cuda(0)); // asserts CUDA residency
+        let info_v = read_back_f64(&info, Device::Cuda(0));
+        assert_eq!(
+            info_v,
+            vec![2.0],
+            "CUDA cholesky_ex info must be the cuSOLVER devInfo failing-minor \
+             index (torch: 2) — #1839"
+        );
+        assert!(
+            l_v.iter().all(|&x| x == 0.0) && l_v.len() == 9,
+            "fallback L is [3,3] zeros (torch: undefined values)"
+        );
+    }
+
+    /// CORE-145 / #1839 — CUDA `_ex` success path: `info` (0) must live on
+    /// the input device, like torch's.
+    #[test]
+    fn gpu_cholesky_ex_success_info_device_1839() {
+        ensure_cuda_backend();
+        let a = upload_f64(
+            make_cpu_f64(
+                &[6.0, 5.0, 1.0, 5.0, 12.0, 5.0, 1.0, 5.0, 6.0],
+                &[3, 3],
+                false,
+            ),
+            Device::Cuda(0),
+        );
+        let (l, info) = cholesky_ex(&a).expect("cholesky_ex SPD");
+        let _ = read_back_f64(&l, Device::Cuda(0)); // asserts CUDA residency
+        let info_v = read_back_f64(&info, Device::Cuda(0));
+        assert_eq!(info_v, vec![0.0], "success info is 0 on the input device");
+    }
+
+    /// CORE-145 / #1839 — CUDA `solve_ex`: singular A is a NUMERICAL
+    /// failure (info = first zero pivot, torch: 2 for [[1,2],[2,4]]);
+    /// fallback x + info live on the input device.
+    #[test]
+    fn gpu_solve_ex_singular_devices_and_info_1839() {
+        ensure_cuda_backend();
+        let a = upload_f64(
+            make_cpu_f64(&[1.0, 2.0, 2.0, 4.0], &[2, 2], false),
+            Device::Cuda(0),
+        );
+        let b = upload_f64(make_cpu_f64(&[1.0, 1.0], &[2], false), Device::Cuda(0));
+        let (x, info) = solve_ex(&a, &b).expect("numerical failure stays Ok");
+        let x_v = read_back_f64(&x, Device::Cuda(0)); // asserts CUDA residency
+        let info_v = read_back_f64(&info, Device::Cuda(0));
+        assert_eq!(
+            info_v,
+            vec![2.0],
+            "CUDA solve_ex info must be the cuSOLVER getrf devInfo pivot \
+             index (torch: 2) — #1839"
+        );
+        assert_eq!(x_v, vec![0.0, 0.0], "fallback x is zeros shaped like b");
+    }
+
+    /// CORE-145 / #1839 — `solve_ex` device mismatch is STRUCTURAL and
+    /// propagates (torch: RuntimeError "Expected all tensors to be on the
+    /// same device, but got B is on cpu, different from other tensors on
+    /// cuda:0", live 2.11.0+cu130). Pre-fix HEAD swallowed it into
+    /// `Ok((cpu zeros, info=1))`.
+    #[test]
+    fn gpu_solve_ex_device_mismatch_propagates_1839() {
+        ensure_cuda_backend();
+        let a = upload_f64(
+            make_cpu_f64(&[1.0, 0.0, 0.0, 1.0], &[2, 2], false),
+            Device::Cuda(0),
+        );
+        let b = make_cpu_f64(&[1.0, 2.0], &[2], false);
+        assert!(
+            solve_ex(&a, &b).is_err(),
+            "solve_ex(cuda A, cpu b) must propagate DeviceMismatch — #1839"
+        );
     }
 }

@@ -175,7 +175,7 @@ Expected: round-trip tests for each decomposition pass.
 | REQ-17 | SHIPPED | impl: `vector_norm` at `ferrotorch-core/src/linalg.rs:1194`; non-test consumer: pub API. |
 | REQ-18 | SHIPPED | impl: `slogdet in ferrotorch-core/src/linalg.rs`; non-test consumer: pub API; used by likelihood / log-prob computations in `ferrotorch-distributions`. |
 | REQ-19 | SHIPPED | impl: `matrix_rank` at `ferrotorch-core/src/linalg.rs:1276`, `cond` at `:1313`; non-test consumer: pub API. |
-| REQ-20 | SHIPPED | impl: `cross` at `ferrotorch-core/src/linalg.rs:1388`; non-test consumer: pub API. |
+| REQ-20 | SHIPPED | impl: `cross` at `ferrotorch-core/src/linalg.rs:1760`; non-test consumer: pub API. |
 | REQ-21 | SHIPPED | impl: `multi_dot` at `ferrotorch-core/src/linalg.rs:1502`; non-test consumer: pub API. |
 | REQ-22 | SHIPPED | impl: `diagonal` at `ferrotorch-core/src/linalg.rs:1545`; non-test consumer: pub API. |
 | REQ-23 | SHIPPED | impl: `solve_triangular` at `ferrotorch-core/src/linalg.rs:1593`; non-test consumer: pub API; called by `cholesky_solve` paths. |

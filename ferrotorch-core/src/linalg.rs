@@ -1081,6 +1081,12 @@ pub fn eigvals<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// is unit-lower-triangular (m × k), and `U` is upper-triangular (k × n)
 /// with `k = min(m, n)`.
 ///
+/// `P` follows torch's convention (`A = P L U`). ferray's `lu` returns the
+/// permutation satisfying `P_f A = L U` (the inverse/transpose of torch's
+/// `P`), so the matrix is transposed before returning (CORE-144 / #1838) —
+/// for non-involutory pivot sequences (any 3-cycle) the two conventions
+/// genuinely differ.
+///
 /// Mirrors `torch.linalg.lu`. CPU-only today.
 pub fn lu<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>, Tensor<T>)> {
     require_cpu(a, "lu")?;
@@ -1101,7 +1107,9 @@ pub fn lu<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>, Te
     if is_f32::<T>() {
         let arr = tensor_to_array2_f32(a)?;
         let (p, l, u) = ferray_linalg::lu(&arr).map_err(FerrotorchError::Ferray)?;
-        let p_data = slice_f32_to_vec::<T>(p.as_slice().unwrap());
+        // ferray convention: `P_f A = L U`. torch convention (this fn's
+        // contract): `A = P L U` with `P = P_f^T` (CORE-144 / #1838).
+        let p_data = transpose_square_to_vec_f32::<T>(p.as_slice().unwrap(), p.shape()[0]);
         let l_data = slice_f32_to_vec::<T>(l.as_slice().unwrap());
         let u_data = slice_f32_to_vec::<T>(u.as_slice().unwrap());
         Ok((
@@ -1112,7 +1120,9 @@ pub fn lu<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>, Te
     } else if is_f64::<T>() {
         let arr = tensor_to_array2_f64(a)?;
         let (p, l, u) = ferray_linalg::lu(&arr).map_err(FerrotorchError::Ferray)?;
-        let p_data = slice_to_vec::<T>(p.as_slice().unwrap());
+        // ferray convention: `P_f A = L U`. torch convention (this fn's
+        // contract): `A = P L U` with `P = P_f^T` (CORE-144 / #1838).
+        let p_data = transpose_square_to_vec_f64::<T>(p.as_slice().unwrap(), p.shape()[0]);
         let l_data = slice_to_vec::<T>(l.as_slice().unwrap());
         let u_data = slice_to_vec::<T>(u.as_slice().unwrap());
         Ok((
@@ -1125,6 +1135,30 @@ pub fn lu<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>, Te
             message: "linalg op requires f32 or f64".into(),
         })
     }
+}
+
+/// Transpose an `n × n` row-major f32 slice into a `Vec<T>` (used to convert
+/// ferray's `P_f A = L U` permutation into torch's `A = P L U` one; a
+/// permutation matrix's inverse is its transpose). CORE-144 / #1838.
+fn transpose_square_to_vec_f32<T: Float>(src: &[f32], n: usize) -> Vec<T> {
+    let mut out = vec![<T as num_traits::Zero>::zero(); n * n];
+    for i in 0..n {
+        for j in 0..n {
+            out[i * n + j] = T::from(src[j * n + i]).unwrap();
+        }
+    }
+    out
+}
+
+/// See [`transpose_square_to_vec_f32`] — f64 source variant.
+fn transpose_square_to_vec_f64<T: Float>(src: &[f64], n: usize) -> Vec<T> {
+    let mut out = vec![<T as num_traits::Zero>::zero(); n * n];
+    for i in 0..n {
+        for j in 0..n {
+            out[i * n + j] = T::from(src[j * n + i]).unwrap();
+        }
+    }
+    out
 }
 
 /// LU factorization in cuSOLVER's packed form: returns `(LU_packed, pivots)`
@@ -1790,26 +1824,37 @@ pub fn cross<T: Float>(a: &Tensor<T>, b: &Tensor<T>, dim: i64) -> FerrotorchResu
         .enumerate()
         .filter_map(|(i, &s)| if i == axis { None } else { Some(s) })
         .collect();
+    // CORE-147 / #1841: a zero-sized NON-cross dimension means there are no
+    // groups at all (`numel == 0`); skip the enumeration entirely — the
+    // multi-index loop below visits the all-zeros index BEFORE noticing a
+    // zero-sized dim, which used to push a bogus base offset (debug:
+    // `debug_assert` abort; release: out-of-bounds panic on the empty data
+    // slice). torch returns an empty tensor of the input shape here
+    // (`torch.linalg.cross` on `[0,3]`/`[3,0]`/`[2,0,3]`, live 2.11.0).
+    // With `base_offsets` left empty, `out` below is an empty buffer and the
+    // normal exit returns the empty same-shape tensor.
     let mut idx = vec![0usize; other_dims.len()];
-    'outer: loop {
-        let off: usize = idx
-            .iter()
-            .zip(other_strides.iter())
-            .map(|(i, s)| i * s)
-            .sum();
-        base_offsets.push(off);
-        // Increment the multi-index (last axis fastest).
-        if other_dims.is_empty() {
-            break;
-        }
-        for k in (0..other_dims.len()).rev() {
-            idx[k] += 1;
-            if idx[k] < other_dims[k] {
-                continue 'outer;
+    if numel > 0 {
+        'outer: loop {
+            let off: usize = idx
+                .iter()
+                .zip(other_strides.iter())
+                .map(|(i, s)| i * s)
+                .sum();
+            base_offsets.push(off);
+            // Increment the multi-index (last axis fastest).
+            if other_dims.is_empty() {
+                break;
             }
-            idx[k] = 0;
-            if k == 0 {
-                break 'outer;
+            for k in (0..other_dims.len()).rev() {
+                idx[k] += 1;
+                if idx[k] < other_dims[k] {
+                    continue 'outer;
+                }
+                idx[k] = 0;
+                if k == 0 {
+                    break 'outer;
+                }
             }
         }
     }
@@ -2526,6 +2571,16 @@ pub fn matrix_exp<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     }
     let n = a.shape()[0];
     let a_data: Vec<f64> = a.data()?.iter().map(|&v| v.to_f64().unwrap()).collect();
+    // Trivial 1x1 case mirrors upstream `linalg_matrix_exp` (pytorch
+    // `aten/src/ATen/native/LinearAlgebra.cpp:2795`: `n == 1` returns
+    // `a.exp()`). Exact for extreme magnitudes — `exp(1e20) = inf`,
+    // `exp(-1e20) = 0`, `exp(inf) = inf` — where scaling-and-squaring
+    // either drifts or (for `inf`) would poison the Padé solve into NaN
+    // (CORE-148 / #1842).
+    if n == 1 {
+        let out: Vec<T> = vec![T::from(a_data[0].exp()).unwrap()];
+        return Tensor::from_storage(TensorStorage::cpu(out), vec![1, 1], false);
+    }
     let result = matrix_exp_pade13(&a_data, n)?;
     let out: Vec<T> = result.into_iter().map(|v| T::from(v).unwrap()).collect();
     Tensor::from_storage(TensorStorage::cpu(out), vec![n, n], false)
@@ -2552,9 +2607,14 @@ fn mat_mul(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
     for i in 0..n {
         for k in 0..n {
             let aik = a[i * n + k];
-            if aik == 0.0 {
-                continue;
-            }
+            // NO zero-skip shortcut (CORE-148 / #1842): skipping `aik == 0`
+            // suppresses IEEE `0 × inf = NaN`, which torch's dense matmul in
+            // the squaring phase DOES produce — e.g.
+            // `matrix_exp([[1e308, 0], [0, -1e308]])` is all-NaN in torch
+            // (live 2.11.0+cu130) precisely because the overflowing diagonal
+            // poisons the off-diagonal zeros. For finite inputs the skip was
+            // value-neutral; for non-finite intermediates it silently
+            // diverged.
             for j in 0..n {
                 out[i * n + j] += aik * b[k * n + j];
             }
@@ -2651,12 +2711,31 @@ fn matrix_exp_pade13(a: &[f64], n: usize) -> FerrotorchResult<Vec<f64>> {
     ];
 
     let norm = mat_inf_norm(a, n);
+    // CORE-148 / #1842: an INFINITE norm (an `inf` entry, or finite entries
+    // whose absolute row sum overflows) cannot be scaled into the Padé
+    // convergence region at all. torch returns an all-NaN matrix for every
+    // such case (live 2.11.0+cu130 probes: `[[inf,1],[0,1]]`,
+    // `[[1e308,1e308],[0,0]]`, `[[1e308,0],[0,-1e308]]` → all `nan`; the
+    // `n == 1` trivial case is handled by `matrix_exp` before this fn).
+    // NaN entries don't reach this branch: `mat_inf_norm`'s
+    // `fold(0.0, f64::max)` ignores NaN row sums, and the Padé arithmetic
+    // below propagates the NaNs itself.
+    if norm.is_infinite() {
+        return Ok(vec![f64::NAN; n * n]);
+    }
+    // Scaling exponent. The `as i32` cast saturates, and `s` is clamped to
+    // 1023: a FINITE norm is < f64::MAX ≈ 1.8e308, so
+    // `ceil(log2(norm / θ13)) ≤ ceil(log2(1.8e308 / 5.37)) = 1021` — the
+    // clamp is unreachable for finite norms and exists only to keep
+    // `2f64.powi(s)` finite (2^1023 < f64::MAX) against float pathologies.
+    // Pre-#1842 this computed `1u64 << s`, which PANICS (debug) or WRAPS
+    // mod 64 (release) for `s ≥ 64`, i.e. `norm > θ13·2^63 ≈ 4.95e19`.
     let s = if norm <= THETA13 {
         0
     } else {
-        (norm / THETA13).log2().ceil() as i32
+        ((norm / THETA13).log2().ceil() as i32).clamp(0, 1023)
     };
-    let scale = (1u64 << s.max(0)) as f64;
+    let scale = 2f64.powi(s);
     let a_scaled: Vec<f64> = a.iter().map(|&v| v / scale).collect();
 
     let id = mat_eye(n);
@@ -2699,96 +2778,162 @@ fn matrix_exp_pade13(a: &[f64], n: usize) -> FerrotorchResult<Vec<f64>> {
 }
 
 // ---------------------------------------------------------------------------
-// `_ex` variants — return `(value, info)` with non-throwing semantics
+// `_ex` variants — return `(value, info)` with non-throwing semantics for
+// NUMERICAL failures only (CORE-145 / #1839)
 // ---------------------------------------------------------------------------
 
-/// `cholesky` that doesn't error on failure: returns `(L, info)` where
-/// `info` is `0` on success and the leading-minor index that failed
-/// (1-based) when `A` is not positive-definite.
+/// Classify an error from an `_ex`-family forward: `Some(info)` for a
+/// NUMERICAL failure (the LAPACK/cuSOLVER `info > 0` class that
+/// `torch.linalg.*_ex` suppresses), `None` for a structural error
+/// (shape/dim/dtype/device/backend) that the `_ex` wrapper must PROPAGATE
+/// — torch's `_ex` variants still raise on those (CORE-145 / #1839).
 ///
-/// Mirrors `torch.linalg.cholesky_ex`. `info` is returned as a 0-d
-/// scalar tensor (cast to `T`) for shape consistency with the family.
+/// `info` provenance:
+/// - **CPU**: ferray-linalg reports `FerrayError::SingularMatrix` for both
+///   not-positive-definite (`cholesky`) and singular (`inv`/`solve`)
+///   inputs. Probed at ferray-linalg 0.4.9: the error carries NO
+///   minor/pivot index ("matrix is not positive definite"), so CPU `info`
+///   is the documented constant `1` (#1944 tracks surfacing the true
+///   LAPACK index; torch reports e.g. `2` for a minor-2 failure).
+/// - **CUDA**: cuSOLVER `devInfo` failures surface as
+///   `InvalidArgument` whose message ferrotorch-gpu's `map_gpu_err` builds
+///   from `GpuError::ShapeMismatch { op: "gpu_…", got: vec![devInfo] }`
+///   (e.g. `"gpu_cholesky_f64_dev: potrf failed (matrix not positive
+///   definite): shape mismatch, expected [0], got [2]"`). The true
+///   `devInfo` index — identical to torch's `info` — is recovered from the
+///   trailing `got [k]`. String-matching is the only classification
+///   channel available here: `ferrotorch-core` cannot depend on
+///   `ferrotorch-gpu`'s `GpuError` type (workspace dep cycle), and
+///   `map_gpu_err` erases the variant into `InvalidArgument`. The CUDA
+///   conformance tests (`gpu_*_1839`) pin this contract on real hardware.
+fn ex_numerical_info(err: &FerrotorchError) -> Option<i32> {
+    match err {
+        FerrotorchError::Ferray(ferray_core::FerrayError::SingularMatrix { .. }) => Some(1),
+        FerrotorchError::InvalidArgument { message }
+            if (message.starts_with("gpu_cholesky")
+                && (message.contains("not positive definite")
+                    || message.contains("not positive-definite")))
+                || (message.starts_with("gpu_solve")
+                    && message.contains("LU factorization failed")) =>
+        {
+            Some(parse_trailing_dev_info(message).unwrap_or(1))
+        }
+        _ => None,
+    }
+}
+
+/// Recover the cuSOLVER `devInfo` value from a `map_gpu_err`-formatted
+/// message ending in `… got [k]` (see [`ex_numerical_info`]).
+fn parse_trailing_dev_info(message: &str) -> Option<i32> {
+    let rest = &message[message.rfind("got [")? + 5..];
+    rest[..rest.find(']')?].parse().ok()
+}
+
+/// Build the 0-d `info` scalar on `like`'s device (torch returns `info` on
+/// the input device; the pre-#1839 code always allocated it on CPU).
+///
+/// `info` is a `T`-typed 0-d tensor — a documented deviation from torch's
+/// `int32` (`Tensor<T>` is the only tensor type this signature can carry).
+fn ex_info_scalar<T: Float>(value: i32, like: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let t = Tensor::from_storage(
+        TensorStorage::cpu(vec![T::from(value).unwrap()]),
+        vec![],
+        false,
+    )?;
+    if like.is_cuda() {
+        t.to(like.device())
+    } else {
+        Ok(t)
+    }
+}
+
+/// Build an all-zeros fallback value tensor of `shape` on `like`'s device.
+/// torch documents the value output as UNDEFINED when `info != 0` (it
+/// returns the partial factor); deterministic zeros are a legal choice.
+fn ex_zeros_like<T: Float>(shape: Vec<usize>, like: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let total: usize = shape.iter().product();
+    let t = Tensor::from_storage(
+        TensorStorage::cpu(vec![T::from(0.0).unwrap(); total]),
+        shape,
+        false,
+    )?;
+    if like.is_cuda() {
+        t.to(like.device())
+    } else {
+        Ok(t)
+    }
+}
+
+/// `cholesky` that doesn't error on a NUMERICAL failure: returns
+/// `(L, info)` where `info` is `0` on success and non-zero when `A` is not
+/// positive-definite (`L` is then same-shape zeros — torch documents the
+/// value as undefined). Structural errors (non-square, non-2-D, dtype,
+/// device, missing backend) PROPAGATE as `Err`, exactly like
+/// `torch.linalg.cholesky_ex` raises (CORE-145 / #1839).
+///
+/// `info` index: the true cuSOLVER failing-minor index on CUDA; the
+/// documented constant `1` on CPU (ferray carries no index — #1944).
+/// Returned as a `T`-typed 0-d scalar on the input device (torch: `int32`).
+///
+/// Mirrors `torch.linalg.cholesky_ex`.
 pub fn cholesky_ex<T: Float>(input: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
     match cholesky(input) {
-        Ok(l) => Ok((
-            l,
-            Tensor::from_storage(
-                TensorStorage::cpu(vec![T::from(0.0).unwrap()]),
-                vec![],
-                false,
-            )?,
-        )),
-        Err(_) => {
-            // Build a same-shape zero L and info=1 (non-zero failure indicator).
-            let shape = input.shape();
-            let n = shape.first().copied().unwrap_or(0);
-            let zero_l = vec![T::from(0.0).unwrap(); n * n];
-            Ok((
-                Tensor::from_storage(TensorStorage::cpu(zero_l), vec![n, n], false)?,
-                Tensor::from_storage(
-                    TensorStorage::cpu(vec![T::from(1.0).unwrap()]),
-                    vec![],
-                    false,
-                )?,
-            ))
-        }
+        Ok(l) => Ok((l, ex_info_scalar(0, input)?)),
+        Err(e) => match ex_numerical_info(&e) {
+            Some(info) => {
+                // `cholesky` validated square 2-D before dispatch, so a
+                // numerical failure implies shape [n, n].
+                let n = input.shape()[0];
+                Ok((
+                    ex_zeros_like(vec![n, n], input)?,
+                    ex_info_scalar(info, input)?,
+                ))
+            }
+            None => Err(e),
+        },
     }
 }
 
-/// `inv` that doesn't error on singular input: returns `(A^{-1}, info)`.
+/// `inv` that doesn't error on singular input: returns `(A^{-1}, info)`;
+/// on a NUMERICAL (singular) failure the value is same-shape zeros and
+/// `info != 0`. Structural errors PROPAGATE (torch raises) — CORE-145 /
+/// #1839. CPU `info` is the documented constant `1` (#1944); torch
+/// reports the first zero pivot. Mirrors `torch.linalg.inv_ex`.
 pub fn inv_ex<T: Float>(input: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
     match inv(input) {
-        Ok(out) => Ok((
-            out,
-            Tensor::from_storage(
-                TensorStorage::cpu(vec![T::from(0.0).unwrap()]),
-                vec![],
-                false,
-            )?,
-        )),
-        Err(_) => {
-            let shape = input.shape();
-            let n = shape.first().copied().unwrap_or(0);
-            let zero = vec![T::from(0.0).unwrap(); n * n];
-            Ok((
-                Tensor::from_storage(TensorStorage::cpu(zero), vec![n, n], false)?,
-                Tensor::from_storage(
-                    TensorStorage::cpu(vec![T::from(1.0).unwrap()]),
-                    vec![],
-                    false,
-                )?,
-            ))
-        }
+        Ok(out) => Ok((out, ex_info_scalar(0, input)?)),
+        Err(e) => match ex_numerical_info(&e) {
+            Some(info) => {
+                let n = input.shape()[0];
+                Ok((
+                    ex_zeros_like(vec![n, n], input)?,
+                    ex_info_scalar(info, input)?,
+                ))
+            }
+            None => Err(e),
+        },
     }
 }
 
-/// `solve` that doesn't error on singular `A`: returns `(x, info)`.
+/// `solve` that doesn't error on singular `A`: returns `(x, info)`; on a
+/// NUMERICAL (singular) failure `x` is zeros shaped like `b` and
+/// `info != 0`. Structural errors — including `DeviceMismatch` —
+/// PROPAGATE (torch raises) — CORE-145 / #1839. `info` is the true
+/// cuSOLVER getrf pivot index on CUDA, the documented constant `1` on CPU
+/// (#1944). Mirrors `torch.linalg.solve_ex`.
 pub fn solve_ex<T: Float>(
     a: &Tensor<T>,
     b: &Tensor<T>,
 ) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
     match solve(a, b) {
-        Ok(x) => Ok((
-            x,
-            Tensor::from_storage(
-                TensorStorage::cpu(vec![T::from(0.0).unwrap()]),
-                vec![],
-                false,
-            )?,
-        )),
-        Err(_) => {
-            let shape = b.shape().to_vec();
-            let total: usize = shape.iter().product();
-            let zero = vec![T::from(0.0).unwrap(); total];
-            Ok((
-                Tensor::from_storage(TensorStorage::cpu(zero), shape, false)?,
-                Tensor::from_storage(
-                    TensorStorage::cpu(vec![T::from(1.0).unwrap()]),
-                    vec![],
-                    false,
-                )?,
-            ))
-        }
+        Ok(x) => Ok((x, ex_info_scalar(0, b)?)),
+        Err(e) => match ex_numerical_info(&e) {
+            Some(info) => Ok((
+                ex_zeros_like(b.shape().to_vec(), b)?,
+                ex_info_scalar(info, b)?,
+            )),
+            None => Err(e),
+        },
     }
 }
 
