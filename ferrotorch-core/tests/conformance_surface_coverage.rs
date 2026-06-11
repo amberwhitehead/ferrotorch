@@ -127,13 +127,181 @@ fn read_exclusions() -> Vec<Exclusion> {
     parsed.exclusions
 }
 
+/// Strip comments and string literals from Rust source so the coverage scan
+/// only sees code (CORE-202 / #1896: an op name surviving in a doc comment or
+/// skip-rationale prose must NOT count as conformance coverage).
+///
+/// Line-based / byte-based, NOT a real lexer. Handles:
+///
+/// - `//` line comments (incl. `///`, `//!`) — stripped to end of line, the
+///   newline is kept;
+/// - `/* ... */` block comments (incl. `/** */`, `/*! */`), nested per Rust
+///   rules;
+/// - regular string literals `"..."` / `b"..."` with `\` escapes (so `\"`
+///   does not terminate the literal);
+/// - raw string literals `r"..."`, `r#"..."#` (any hash count), `br...`
+///   variants;
+/// - char / byte-char literals `'x'`, `b'\n'` — stripped too, both so a `'"'`
+///   literal cannot derail string detection and because a one-char literal
+///   cannot contain a multi-char identifier anyway. Lifetimes (`'a`) are
+///   distinguished heuristically: a `'` is a char literal iff it is followed
+///   by a `\` escape or has a closing `'` within the next 4 bytes.
+///
+/// Each stripped region is replaced by a single space so tokens on either
+/// side cannot fuse into a false-positive identifier (`foo/*c*/bar` must not
+/// scan as `foobar`).
+///
+/// KNOWN LIMITS (accepted; matching fidelity beyond comments is out of
+/// scope per CORE-202):
+///
+/// - identifiers spliced by macros (`concat!`, `paste!`) are invisible either
+///   way — same as before this fix;
+/// - the lifetime/char-literal heuristic can misfire on pathological
+///   spacing like `<'a>'x'` (no space between a lifetime and a char
+///   literal), slightly over-stripping; conformance sources contain no such
+///   construct;
+/// - `c"..."` C-string literals (Rust 2021+) are not recognized and would be
+///   treated as a regular string starting at the `"` — harmless here since
+///   the `"` body is stripped regardless;
+/// - stripping string literals means an item referenced ONLY inside a test's
+///   string (e.g. an error-message assertion) no longer counts as coverage.
+///   That is intentional: prose is not proof.
+fn strip_comments_and_strings(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    while i < bytes.len() {
+        let b = bytes[i];
+
+        // `//` line comment: strip to (but not including) the newline.
+        if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            out.push(b' ');
+            continue;
+        }
+
+        // `/* ... */` block comment, nested per Rust rules.
+        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            let mut depth = 1usize;
+            i += 2;
+            while i < bytes.len() && depth > 0 {
+                if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            out.push(b' ');
+            continue;
+        }
+
+        // Raw string literals: optional `b`, then `r`, hashes, `"`. Guard
+        // against a preceding identifier byte so `var"` inside an already-
+        // mangled stream can't trigger (valid Rust never produces that).
+        let prev_ident = i > 0 && is_ident(bytes[i - 1]);
+        if !prev_ident && (b == b'r' || (b == b'b' && bytes.get(i + 1) == Some(&b'r'))) {
+            let mut j = if b == b'b' { i + 2 } else { i + 1 };
+            let hash_start = j;
+            while bytes.get(j) == Some(&b'#') {
+                j += 1;
+            }
+            let hashes = j - hash_start;
+            if bytes.get(j) == Some(&b'"') {
+                // Scan for `"` followed by `hashes` hash marks.
+                j += 1;
+                loop {
+                    match bytes[j..].iter().position(|&c| c == b'"') {
+                        None => {
+                            j = bytes.len();
+                            break;
+                        }
+                        Some(p) => {
+                            let q = j + p + 1;
+                            let close = bytes
+                                .get(q..q + hashes)
+                                .is_some_and(|s| s.iter().all(|&c| c == b'#'));
+                            if close {
+                                j = q + hashes;
+                                break;
+                            }
+                            j = q;
+                        }
+                    }
+                }
+                out.push(b' ');
+                i = j;
+                continue;
+            }
+        }
+
+        // Regular string literals: `"` or `b"`.
+        if b == b'"' || (!prev_ident && b == b'b' && bytes.get(i + 1) == Some(&b'"')) {
+            let mut j = if b == b'"' { i + 1 } else { i + 2 };
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'\\' => j += 2,
+                    b'"' => {
+                        j += 1;
+                        break;
+                    }
+                    _ => j += 1,
+                }
+            }
+            out.push(b' ');
+            i = j;
+            continue;
+        }
+
+        // Char / byte-char literals vs lifetimes.
+        if b == b'\'' || (!prev_ident && b == b'b' && bytes.get(i + 1) == Some(&b'\'')) {
+            let quote = if b == b'b' { i + 1 } else { i };
+            let is_char_literal = bytes.get(quote + 1) == Some(&b'\\')
+                || (1..=4).any(|n| bytes.get(quote + 1 + n) == Some(&b'\''));
+            if is_char_literal {
+                let mut j = quote + 1;
+                while j < bytes.len() {
+                    match bytes[j] {
+                        b'\\' => j += 2,
+                        b'\'' => {
+                            j += 1;
+                            break;
+                        }
+                        _ => j += 1,
+                    }
+                }
+                out.push(b' ');
+                i = j;
+                continue;
+            }
+            // Lifetime: copy the `'` and continue normally.
+        }
+
+        out.push(b);
+        i += 1;
+    }
+    // Stripping only ever removes/replaces at ASCII boundaries and copies all
+    // other bytes verbatim, so the result is still valid UTF-8.
+    String::from_utf8(out).expect("stripper preserves UTF-8 validity")
+}
+
 /// Read every `tests/conformance_*.rs` (other than the inventory + this gate)
-/// and return their concatenated source. The coverage check is a substring
-/// grep — an item is "covered" iff its short identifier (or `Type::method`
-/// segment for methods) appears anywhere in any conformance test source.
-/// Substring grep is intentional: we don't want to demand a specific call
-/// shape because tests may reference a type via `use`, a method call, or a
-/// `Debug` print.
+/// and return their concatenated source, with comments and string literals
+/// stripped (see [`strip_comments_and_strings`]; CORE-202 / #1896). The
+/// coverage check is a substring grep — an item is "covered" iff its short
+/// identifier (or `Type::method` segment for methods) appears anywhere in any
+/// conformance test source CODE (not comments, not strings). Substring grep
+/// over the remaining code is intentional: we don't want to demand a specific
+/// call shape because tests may reference a type via `use`, a method call, or
+/// a `Debug` print. Known residual limit: a method exercised purely via
+/// method-call syntax (`x.foo()`) is not matched by its `Type::foo` key —
+/// unchanged from before CORE-202.
 fn read_conformance_test_sources() -> String {
     let mut combined = String::new();
     let root = tests_dir();
@@ -157,7 +325,7 @@ fn read_conformance_test_sources() -> String {
         }
         let body =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        combined.push_str(&body);
+        combined.push_str(&strip_comments_and_strings(&body));
         combined.push('\n');
     }
     combined
@@ -213,6 +381,48 @@ fn tracking_issue_valid(s: &str) -> bool {
     let hash_form = s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_digit()) && s.len() > 1;
     let url_form = s.starts_with("http://") || s.starts_with("https://");
     hash_form || url_form
+}
+
+/// Pins [`strip_comments_and_strings`] behavior: identifiers in comments and
+/// string literals must vanish; identifiers in code must survive; stripped
+/// regions must not fuse surrounding tokens.
+#[test]
+fn stripper_removes_comments_and_strings_but_keeps_code() {
+    let s = strip_comments_and_strings;
+
+    // Line + doc comments vanish, code before them survives, newline kept.
+    assert_eq!(
+        s("let x = sigmoid(); // calls erfinv\nnext"),
+        "let x = sigmoid();  \nnext"
+    );
+    assert_eq!(
+        s("/// erfinv is skipped here\nfn f() { g() }"),
+        " \nfn f() { g() }"
+    );
+
+    // Nested block comments vanish entirely.
+    assert_eq!(s("a /* outer /* erfinv */ still comment */ b"), "a   b");
+
+    // String literals (regular, escaped-quote, byte, raw, raw-with-hashes).
+    assert_eq!(s(r#"assert(msg == "erfinv failed");"#), "assert(msg ==  );");
+    assert_eq!(s(r#"let m = "say \"erfinv\" twice";"#), "let m =  ;");
+    assert_eq!(s(r#"let b = b"erfinv";"#), "let b =  ;");
+    assert_eq!(s(r##"let r = r"erfinv";"##), "let r =  ;");
+    assert_eq!(s(r###"let r = r#"erfinv " quoted"#;"###), "let r =  ;");
+
+    // Char literal containing a quote must not derail string detection:
+    // the call after it must survive.
+    assert_eq!(s("if c == '\"' { erfinv(x) }"), "if c ==   { erfinv(x) }");
+
+    // Lifetimes are NOT char literals; code around them survives.
+    assert_eq!(
+        s("fn f<'a>(x: &'a Tensor) -> &'a f32 { x.g() }"),
+        "fn f<'a>(x: &'a Tensor) -> &'a f32 { x.g() }"
+    );
+
+    // Stripped regions become a single space: no token fusion.
+    assert_eq!(s("erf/*comment*/inv"), "erf inv");
+    assert!(!s("erf/*c*/inv").contains("erfinv"));
 }
 
 #[test]

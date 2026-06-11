@@ -3240,3 +3240,1120 @@ path = "ferrotorch_core::randn_on_device"
 kind = "deferred"
 reason = "Re-export of `creation::randn_on_device`; the underlying item is excluded above with the same tracking issue (#1682) pending a CUDA conformance test in the gated workflow (#32)."
 tracking_issue = "#1682"
+
+# ---------------------------------------------------------------------------
+# CORE-202 (#1896) triage block: the gate now strips comments and string
+# literals before its substring scan, which exposed 219 items whose only
+# "coverage" was prose (surface-roster comment blocks, skip rationales, or
+# accidental substrings like `asin` inside `aliasing`). Each entry below was
+# triaged individually: kind = "permanent" cites the real test (conformance
+# method-call/turbofish sites the `Type <T>::method` inventory key cannot
+# match, src-side #[cfg(test)] units, or non-conformance test targets);
+# kind = "deferred" points at the family burndown issue.
+# ---------------------------------------------------------------------------
+
+[[exclusion]]
+path = "ferrotorch_core::autograd::anomaly::ForwardBacktrace::trace"
+kind = "permanent"
+reason = "CORE-202: tested via forward_backtrace_capture_returns_some_when_enabled in conformance_autograd.rs (`.trace()` method-call syntax; the `ForwardBacktrace::trace` key only matches UFCS)."
+
+[[exclusion]]
+path = "ferrotorch_core::autograd::forward_ad::DualTensor <T>::constant"
+kind = "permanent"
+reason = "CORE-202: tested via dual_tensor_constant_zero_tangent in conformance_autograd.rs (`DualTensor::constant`); the inventory key `DualTensor <T>::constant` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::autograd::forward_ad::DualTensor <T>::new"
+kind = "permanent"
+reason = "CORE-202: tested via dual_tensor_new_shape_and_numel and dual_tensor_new_rejects_shape_mismatch in conformance_autograd.rs; the inventory key `DualTensor <T>::new` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::autograd::forward_ad::DualTensor <T>::numel"
+kind = "permanent"
+reason = "CORE-202: tested via dual_tensor_new_shape_and_numel in conformance_autograd.rs (`.numel()` on the DualTensor); the inventory key `DualTensor <T>::numel` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::autograd::forward_ad::DualTensor <T>::shape"
+kind = "permanent"
+reason = "CORE-202: tested via dual_tensor_new_shape_and_numel in conformance_autograd.rs (`.shape()` on the DualTensor); the inventory key `DualTensor <T>::shape` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::autograd::graph::Tensor <T>::backward"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_backward_top_level_function_accumulates_grad in conformance_autograd.rs and ~109 `.backward()` call sites across the suites; the inventory key `Tensor <T>::backward` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::autograd::graph::Tensor <T>::backward_with_gradient"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_tensor_backward_with_gradient_method_threads_external_seed in conformance_autograd.rs; the inventory key `Tensor <T>::backward_with_gradient` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::autograd::higher_order::Tensor <T>::grad_wrt"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_grad_wrt_convenience_method in conformance_autograd.rs; the inventory key `Tensor <T>::grad_wrt` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::autograd::hooks::HookStorage <T>::add_grad_hook"
+kind = "permanent"
+reason = "CORE-202: Exercised by test_hook_storage_add_remove in src/autograd/hooks.rs; tested via cpu_hook_fires_with_correct_grad in conformance_autograd.rs through Tensor::register_hook."
+
+[[exclusion]]
+path = "ferrotorch_core::autograd::hooks::HookStorage <T>::add_post_accumulate_hook"
+kind = "permanent"
+reason = "CORE-202: Exercised by test_post_accumulate_hook_fires in src/autograd/hooks.rs; tested via cpu_post_accumulate_hook_fires_on_leaf in conformance_autograd.rs through Tensor::register_post_accumulate_grad_hook."
+
+[[exclusion]]
+path = "ferrotorch_core::autograd::hooks::HookStorage <T>::has_grad_hooks"
+kind = "permanent"
+reason = "CORE-202: Exercised by test_hook_storage_add_remove in src/autograd/hooks.rs; queried by backward on every hook-bearing graph (cpu_hook_fires_with_correct_grad in conformance_autograd.rs)."
+
+[[exclusion]]
+path = "ferrotorch_core::autograd::hooks::HookStorage <T>::has_post_accumulate_hooks"
+kind = "permanent"
+reason = "CORE-202: Implicit coverage: queried by backward_with_grad / backward_parallel (src/autograd/graph.rs) on every backward; the hook can only fire when it returns true — pinned by cpu_post_accumulate_hook_fires_on_leaf in conformance_autograd.rs."
+
+[[exclusion]]
+path = "ferrotorch_core::autograd::hooks::HookStorage <T>::new"
+kind = "permanent"
+reason = "CORE-202: Exercised by test_hook_storage_add_remove (and the other hook unit tests) in src/autograd/hooks.rs."
+
+[[exclusion]]
+path = "ferrotorch_core::autograd::hooks::HookStorage <T>::remove"
+kind = "permanent"
+reason = "CORE-202: Exercised by test_hook_storage_add_remove in src/autograd/hooks.rs; tested via cpu_remove_hook_disables_it in conformance_autograd.rs through Tensor::remove_hook."
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::to"
+kind = "deferred"
+reason = "CORE-202: no test calls BoolTensor::to in code — pre-CORE-202 the gate was satisfied by `.to(Device::Cuda(_))` prose in conformance_bool_int.rs comments. Conformance coverage not yet authored; burndown tracked by #1920."
+tracking_issue = "#1920"
+
+[[exclusion]]
+path = "ferrotorch_core::bool_tensor::BoolTensor::to_float"
+kind = "permanent"
+reason = "CORE-202: tested via bool_to_float_conversion in conformance_bool_int.rs (`.to_float()` method-call syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::abs"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_conj_abs_angle in conformance_fft.rs; the inventory key `ComplexTensor <T>::abs` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::add"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_pointwise_ops in conformance_fft.rs; the inventory key `ComplexTensor <T>::add` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::angle"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_conj_abs_angle in conformance_fft.rs; the inventory key `ComplexTensor <T>::angle` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::conj"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_conj_abs_angle in conformance_fft.rs; the inventory key `ComplexTensor <T>::conj` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::fft"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_fft_bridges in conformance_fft.rs; the inventory key `ComplexTensor <T>::fft` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::fft2"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_fft_bridges in conformance_fft.rs; the inventory key `ComplexTensor <T>::fft2` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::from_interleaved"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_interleaved_roundtrip in conformance_fft.rs; the inventory key `ComplexTensor <T>::from_interleaved` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::from_re_im"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_constructors_and_accessors in conformance_fft.rs; the inventory key `ComplexTensor <T>::from_re_im` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::from_real"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_constructors_and_accessors in conformance_fft.rs; the inventory key `ComplexTensor <T>::from_real` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::ifft"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_fft_bridges in conformance_fft.rs; the inventory key `ComplexTensor <T>::ifft` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::ifft2"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_fft_bridges in conformance_fft.rs; the inventory key `ComplexTensor <T>::ifft2` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::im"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_constructors_and_accessors in conformance_fft.rs; the inventory key `ComplexTensor <T>::im` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::imag"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_constructors_and_accessors in conformance_fft.rs; the inventory key `ComplexTensor <T>::imag` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::matmul"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_matmul in conformance_fft.rs; the inventory key `ComplexTensor <T>::matmul` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::mul"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_pointwise_ops in conformance_fft.rs; the inventory key `ComplexTensor <T>::mul` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::ndim"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_constructors_and_accessors in conformance_fft.rs; the inventory key `ComplexTensor <T>::ndim` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::numel"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_constructors_and_accessors in conformance_fft.rs; the inventory key `ComplexTensor <T>::numel` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::re"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_constructors_and_accessors in conformance_fft.rs; the inventory key `ComplexTensor <T>::re` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::real"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_constructors_and_accessors in conformance_fft.rs; the inventory key `ComplexTensor <T>::real` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::reshape"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_constructors_and_accessors in conformance_fft.rs; the inventory key `ComplexTensor <T>::reshape` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::scalar"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_constructors_and_accessors in conformance_fft.rs; the inventory key `ComplexTensor <T>::scalar` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::shape"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_constructors_and_accessors in conformance_fft.rs; the inventory key `ComplexTensor <T>::shape` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::sub"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_pointwise_ops in conformance_fft.rs; the inventory key `ComplexTensor <T>::sub` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::to_interleaved"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_interleaved_roundtrip in conformance_fft.rs; the inventory key `ComplexTensor <T>::to_interleaved` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::complex_tensor::ComplexTensor <T>::zeros"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_complex_tensor_constructors_and_accessors in conformance_fft.rs; the inventory key `ComplexTensor <T>::zeros` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::device::Device::is_cpu"
+kind = "permanent"
+reason = "CORE-202: tested via device_variant_display_and_predicates in conformance_plumbing.rs (fixture-driven asserts on every Device variant; `.is_cpu()` method-call syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::device::Device::is_cuda"
+kind = "permanent"
+reason = "CORE-202: tested via device_variant_display_and_predicates in conformance_plumbing.rs (fixture-driven asserts on every Device variant; `.is_cuda()` method-call syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::device::Device::is_meta"
+kind = "permanent"
+reason = "CORE-202: tested via device_variant_display_and_predicates in conformance_plumbing.rs (fixture-driven asserts on every Device variant; `.is_meta()` method-call syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::device::Device::is_mps"
+kind = "permanent"
+reason = "CORE-202: tested via device_variant_display_and_predicates in conformance_plumbing.rs (fixture-driven asserts on every Device variant; `.is_mps()` method-call syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::device::Device::is_xpu"
+kind = "permanent"
+reason = "CORE-202: tested via device_variant_display_and_predicates in conformance_plumbing.rs (fixture-driven asserts on every Device variant; `.is_xpu()` method-call syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::dispatch::DispatchKey::priority"
+kind = "permanent"
+reason = "CORE-202: tested via dispatch_key_priority_ordering in conformance_plumbing.rs (`.priority()` method-call syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::dispatch::DispatchKeySet::contains"
+kind = "permanent"
+reason = "CORE-202: tested via dispatch_key_set_membership in conformance_plumbing.rs (`.contains()` method-call syntax on the DispatchKeySet under test)."
+
+[[exclusion]]
+path = "ferrotorch_core::dispatch::DispatchKeySet::highest"
+kind = "permanent"
+reason = "CORE-202: tested via dispatch_key_set_membership in conformance_plumbing.rs (`.highest()` method-call syntax on the DispatchKeySet under test)."
+
+[[exclusion]]
+path = "ferrotorch_core::dispatch::DispatchKeySet::insert"
+kind = "permanent"
+reason = "CORE-202: tested via dispatch_key_set_membership in conformance_plumbing.rs (`.insert()` method-call syntax on the DispatchKeySet under test)."
+
+[[exclusion]]
+path = "ferrotorch_core::dispatch::DispatchKeySet::intersection"
+kind = "permanent"
+reason = "CORE-202: tested via dispatch_key_set_union_intersection_iter_desc in conformance_plumbing.rs (`.intersection()` method-call syntax on the DispatchKeySet under test)."
+
+[[exclusion]]
+path = "ferrotorch_core::dispatch::DispatchKeySet::is_empty"
+kind = "permanent"
+reason = "CORE-202: tested via dispatch_key_set_membership in conformance_plumbing.rs (`.is_empty()` method-call syntax on the DispatchKeySet under test)."
+
+[[exclusion]]
+path = "ferrotorch_core::dispatch::DispatchKeySet::iter_desc"
+kind = "permanent"
+reason = "CORE-202: tested via dispatch_key_set_union_intersection_iter_desc in conformance_plumbing.rs (`.iter_desc()` method-call syntax on the DispatchKeySet under test)."
+
+[[exclusion]]
+path = "ferrotorch_core::dispatch::DispatchKeySet::len"
+kind = "permanent"
+reason = "CORE-202: tested via dispatch_key_set_membership in conformance_plumbing.rs (`.len()` method-call syntax on the DispatchKeySet under test)."
+
+[[exclusion]]
+path = "ferrotorch_core::dispatch::DispatchKeySet::remove"
+kind = "permanent"
+reason = "CORE-202: tested via dispatch_key_set_membership in conformance_plumbing.rs (`.remove()` method-call syntax on the DispatchKeySet under test)."
+
+[[exclusion]]
+path = "ferrotorch_core::dispatch::DispatchKeySet::union"
+kind = "permanent"
+reason = "CORE-202: tested via dispatch_key_set_union_intersection_iter_desc in conformance_plumbing.rs (`.union()` method-call syntax on the DispatchKeySet under test)."
+
+[[exclusion]]
+path = "ferrotorch_core::dispatch::Dispatcher <T>::call"
+kind = "permanent"
+reason = "CORE-202: tested via dispatcher_register_call_and_direct (and dispatcher_call_empty_keyset_errors) in conformance_plumbing.rs; the inventory key `Dispatcher <T>::call` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::dispatch::Dispatcher <T>::call_direct"
+kind = "permanent"
+reason = "CORE-202: tested via dispatcher_register_call_and_direct (and dispatcher_call_empty_keyset_errors) in conformance_plumbing.rs; the inventory key `Dispatcher <T>::call_direct` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::dispatch::Dispatcher <T>::has_kernel"
+kind = "permanent"
+reason = "CORE-202: tested via dispatcher_register_call_and_direct (and dispatcher_call_empty_keyset_errors) in conformance_plumbing.rs; the inventory key `Dispatcher <T>::has_kernel` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::dispatch::Dispatcher <T>::kernel_count"
+kind = "permanent"
+reason = "CORE-202: tested via dispatcher_register_call_and_direct (and dispatcher_call_empty_keyset_errors) in conformance_plumbing.rs; the inventory key `Dispatcher <T>::kernel_count` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::dispatch::Dispatcher <T>::new"
+kind = "permanent"
+reason = "CORE-202: tested via dispatcher_register_call_and_direct (and dispatcher_call_empty_keyset_errors) in conformance_plumbing.rs; the inventory key `Dispatcher <T>::new` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::dispatch::Dispatcher <T>::register"
+kind = "permanent"
+reason = "CORE-202: tested via dispatcher_register_call_and_direct (and dispatcher_call_empty_keyset_errors) in conformance_plumbing.rs; the inventory key `Dispatcher <T>::register` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::dtype_dispatch::is_f64"
+kind = "deferred"
+reason = "CORE-202: no test references is_f64 in code (pre-CORE-202 the gate was satisfied by doc-comment mentions, e.g. conformance_flex_attention.rs:421); production-only consumer is fft.rs dispatch routing. Burndown tracked by #1921."
+tracking_issue = "#1921"
+
+[[exclusion]]
+path = "ferrotorch_core::flip"
+kind = "permanent"
+reason = "CORE-202: re-export of grad_fns::shape::flip; Exercised by test_flip_forward_1d / test_flip_forward_2d_both_dims in src/grad_fns/shape.rs (no conformance test names `flip` in code)."
+
+[[exclusion]]
+path = "ferrotorch_core::gpu_dispatch::GpuBufferHandle::device_ordinal"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_buffer_handle_any_round_trip in conformance_plumbing.rs (exercises new/len/is_empty/device_ordinal/downcast_ref/downcast_mut/into_inner; turbofish forms invisible to the substring key)."
+
+[[exclusion]]
+path = "ferrotorch_core::gpu_dispatch::GpuBufferHandle::downcast_mut"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_buffer_handle_any_round_trip in conformance_plumbing.rs (exercises new/len/is_empty/device_ordinal/downcast_ref/downcast_mut/into_inner; turbofish forms invisible to the substring key)."
+
+[[exclusion]]
+path = "ferrotorch_core::gpu_dispatch::GpuBufferHandle::downcast_ref"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_buffer_handle_any_round_trip in conformance_plumbing.rs (exercises new/len/is_empty/device_ordinal/downcast_ref/downcast_mut/into_inner; turbofish forms invisible to the substring key)."
+
+[[exclusion]]
+path = "ferrotorch_core::gpu_dispatch::GpuBufferHandle::into_inner"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_buffer_handle_any_round_trip in conformance_plumbing.rs (exercises new/len/is_empty/device_ordinal/downcast_ref/downcast_mut/into_inner; turbofish forms invisible to the substring key)."
+
+[[exclusion]]
+path = "ferrotorch_core::gpu_dispatch::GpuBufferHandle::is_empty"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_buffer_handle_any_round_trip in conformance_plumbing.rs (exercises new/len/is_empty/device_ordinal/downcast_ref/downcast_mut/into_inner; turbofish forms invisible to the substring key)."
+
+[[exclusion]]
+path = "ferrotorch_core::gpu_dispatch::GpuBufferHandle::len"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_buffer_handle_any_round_trip in conformance_plumbing.rs (exercises new/len/is_empty/device_ordinal/downcast_ref/downcast_mut/into_inner; turbofish forms invisible to the substring key)."
+
+[[exclusion]]
+path = "ferrotorch_core::gpu_dispatch::GpuRngState::counter"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_rng_state_construction_and_accessors in conformance_plumbing.rs (`.counter()` method-call syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::gpu_dispatch::GpuRngState::device"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_rng_state_construction_and_accessors in conformance_plumbing.rs (`.device()` method-call syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::gpu_dispatch::GpuRngState::offset"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_rng_state_construction_and_accessors in conformance_plumbing.rs (`.offset()` method-call syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::gpu_dispatch::GpuRngState::seed"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_rng_state_construction_and_accessors in conformance_plumbing.rs (`.seed()` method-call syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::gpu_dispatch::register_gpu_backend"
+kind = "permanent"
+reason = "CORE-202: Implicit coverage: ferrotorch-gpu/src/backend_impl.rs registers through register_gpu_backend at init of every `--features gpu` lane; tested via tensor_cuda_round_trip_preserves_metadata in conformance_plumbing.rs, which cannot pass without the registered backend."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::FftBackward <T>::new"
+kind = "permanent"
+reason = "CORE-202: tested via surface_coverage_grad_fn_struct_substring_pins in conformance_fft.rs, which constructs the node via `FftBackward::new` in code; the inventory key `FftBackward <T>::new` cannot match that form."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::FftnBackward <T>::new"
+kind = "permanent"
+reason = "CORE-202: tested via surface_coverage_grad_fn_struct_substring_pins in conformance_fft.rs, which constructs the node via `FftnBackward::new` in code; the inventory key `FftnBackward <T>::new` cannot match that form."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::HfftBackward <T>::new"
+kind = "permanent"
+reason = "CORE-202: tested via surface_coverage_grad_fn_struct_substring_pins in conformance_fft.rs, which constructs the node via `HfftBackward::new` in code; the inventory key `HfftBackward <T>::new` cannot match that form."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::IfftBackward <T>::new"
+kind = "permanent"
+reason = "CORE-202: tested via surface_coverage_grad_fn_struct_substring_pins in conformance_fft.rs, which constructs the node via `IfftBackward::new` in code; the inventory key `IfftBackward <T>::new` cannot match that form."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::IfftnBackward <T>::new"
+kind = "permanent"
+reason = "CORE-202: tested via surface_coverage_grad_fn_struct_substring_pins in conformance_fft.rs, which constructs the node via `IfftnBackward::new` in code; the inventory key `IfftnBackward <T>::new` cannot match that form."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::IhfftBackward <T>::new"
+kind = "permanent"
+reason = "CORE-202: tested via surface_coverage_grad_fn_struct_substring_pins in conformance_fft.rs, which constructs the node via `IhfftBackward::new` in code; the inventory key `IhfftBackward <T>::new` cannot match that form."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::IrfftBackward <T>::new"
+kind = "permanent"
+reason = "CORE-202: tested via surface_coverage_grad_fn_struct_substring_pins in conformance_fft.rs, which constructs the node via `IrfftBackward::new` in code; the inventory key `IrfftBackward <T>::new` cannot match that form."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::IrfftnBackward <T>::new"
+kind = "permanent"
+reason = "CORE-202: tested via surface_coverage_grad_fn_struct_substring_pins in conformance_fft.rs, which constructs the node via `IrfftnBackward::new` in code; the inventory key `IrfftnBackward <T>::new` cannot match that form."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::RfftBackward <T>::new"
+kind = "permanent"
+reason = "CORE-202: tested via surface_coverage_grad_fn_struct_substring_pins in conformance_fft.rs, which constructs the node via `RfftBackward::new` in code; the inventory key `RfftBackward <T>::new` cannot match that form."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::fft::RfftnBackward <T>::new"
+kind = "permanent"
+reason = "CORE-202: tested via surface_coverage_grad_fn_struct_substring_pins in conformance_fft.rs, which constructs the node via `RfftnBackward::new` in code; the inventory key `RfftnBackward <T>::new` cannot match that form."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::quantize_grad::fake_quantize_per_tensor_affine"
+kind = "permanent"
+reason = "CORE-202: Covered by the audit_scale_zero_* regression tests in tests/audit_6f1270133_per_tensor_scale_matrix.rs (direct calls); this gate only scans tests/conformance_*.rs."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::quantize_grad::fake_quantize_per_tensor_affine_tensor_qparams"
+kind = "permanent"
+reason = "CORE-202: Exercised by tensor_qparams_matches_scalar_qparams and the tensor_qparams_rejects_* unit tests in src/grad_fns/quantize_grad.rs."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::RollBackward"
+kind = "permanent"
+reason = "CORE-202: Implicit coverage: grad_fn for roll; tested via cpu_roll and gpu_roll_matches_cpu_forward_and_backward in conformance_shape.rs (Cat G — backward struct, not a user-callable forward op)."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::flip"
+kind = "permanent"
+reason = "CORE-202: Exercised by test_flip_forward_1d / test_flip_forward_2d_both_dims / test_flip_rejects_duplicate_dim in src/grad_fns/shape.rs; no conformance test names `flip` in code (pre-CORE-202 prose like `can flip sign` satisfied the gate)."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::shape::tile"
+kind = "permanent"
+reason = "CORE-202: Exercised by test_tile_pads_reps in src/grad_fns/shape.rs; no conformance test names `tile` in code."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::asin"
+kind = "permanent"
+reason = "CORE-202: Exercised by test_asin_forward_and_backward in src/grad_fns/transcendental.rs. Pre-CORE-202 the gate was satisfied by the substring `asin` inside the word `aliasing` in comments."
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::transcendental::trunc"
+kind = "permanent"
+reason = "CORE-202: Exercised by test_trunc_forward_and_zero_backward in src/grad_fns/transcendental.rs. Pre-CORE-202 the gate was satisfied by `trunc` inside `truncation`/`truncated` prose."
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::arange"
+kind = "permanent"
+reason = "CORE-202: tested via int_arange_constructor in conformance_bool_int.rs; the inventory key `IntTensor <I>::arange` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::cast"
+kind = "permanent"
+reason = "CORE-202: tested via int_cast_in_range_and_oob (turbofish `.cast::<i64>()` — invisible to the substring key) in conformance_bool_int.rs; the inventory key `IntTensor <I>::cast` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::data"
+kind = "permanent"
+reason = "CORE-202: tested via run_int_zeros_for_dtype (and every int fixture assert) in conformance_bool_int.rs; the inventory key `IntTensor <I>::data` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::dtype_name"
+kind = "permanent"
+reason = "CORE-202: tested via int_dtype_name_reports_correct_label in conformance_bool_int.rs; the inventory key `IntTensor <I>::dtype_name` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::from_slice"
+kind = "permanent"
+reason = "CORE-202: tested via int_from_slice_constructor in conformance_bool_int.rs; the inventory key `IntTensor <I>::from_slice` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::from_vec"
+kind = "permanent"
+reason = "CORE-202: tested via run_int_from_vec_for_dtype in conformance_bool_int.rs; the inventory key `IntTensor <I>::from_vec` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::ndim"
+kind = "permanent"
+reason = "CORE-202: tested via run_int_zeros_for_dtype in conformance_bool_int.rs; the inventory key `IntTensor <I>::ndim` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::numel"
+kind = "permanent"
+reason = "CORE-202: tested via run_int_zeros_for_dtype in conformance_bool_int.rs; the inventory key `IntTensor <I>::numel` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::reshape"
+kind = "permanent"
+reason = "CORE-202: tested via int_reshape_preserves_data and int_reshape_size_mismatch_errors in conformance_bool_int.rs; the inventory key `IntTensor <I>::reshape` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::scalar"
+kind = "permanent"
+reason = "CORE-202: tested via int_scalar_constructor in conformance_bool_int.rs; the inventory key `IntTensor <I>::scalar` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::shape"
+kind = "permanent"
+reason = "CORE-202: tested via run_int_zeros_for_dtype in conformance_bool_int.rs; the inventory key `IntTensor <I>::shape` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::int_tensor::IntTensor <I>::zeros"
+kind = "permanent"
+reason = "CORE-202: tested via run_int_zeros_for_dtype in conformance_bool_int.rs; the inventory key `IntTensor <I>::zeros` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::linalg::householder_product_full"
+kind = "permanent"
+reason = "CORE-202: Exercised by householder_product_identity_when_no_reflectors in src/linalg.rs (direct call)."
+
+[[exclusion]]
+path = "ferrotorch_core::masked::MaskedTensor <T>::count_masked"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_from_data_marks_all_valid in conformance_masked.rs; the inventory key `MaskedTensor <T>::count_masked` cannot match real code (the old roster comment block satisfied the substring gate instead)."
+
+[[exclusion]]
+path = "ferrotorch_core::masked::MaskedTensor <T>::count_valid"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_from_data_marks_all_valid in conformance_masked.rs; the inventory key `MaskedTensor <T>::count_valid` cannot match real code (the old roster comment block satisfied the substring gate instead)."
+
+[[exclusion]]
+path = "ferrotorch_core::masked::MaskedTensor <T>::data"
+kind = "permanent"
+reason = "CORE-202: tested via data_accessor_returns_underlying_tensor in conformance_masked.rs; the inventory key `MaskedTensor <T>::data` cannot match real code (the old roster comment block satisfied the substring gate instead)."
+
+[[exclusion]]
+path = "ferrotorch_core::masked::MaskedTensor <T>::fill_value"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_filled_default_substitutes_zero and cpu_with_fill_value_substitutes_override in conformance_masked.rs; the inventory key `MaskedTensor <T>::fill_value` cannot match real code (the old roster comment block satisfied the substring gate instead)."
+
+[[exclusion]]
+path = "ferrotorch_core::masked::MaskedTensor <T>::filled"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_filled_default_substitutes_zero in conformance_masked.rs; the inventory key `MaskedTensor <T>::filled` cannot match real code (the old roster comment block satisfied the substring gate instead)."
+
+[[exclusion]]
+path = "ferrotorch_core::masked::MaskedTensor <T>::from_data"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_from_data_marks_all_valid in conformance_masked.rs; the inventory key `MaskedTensor <T>::from_data` cannot match real code (the old roster comment block satisfied the substring gate instead)."
+
+[[exclusion]]
+path = "ferrotorch_core::masked::MaskedTensor <T>::mask"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_masked_where_inverts_condition and cpu_masked_invalid_masks_nan_inf in conformance_masked.rs; the inventory key `MaskedTensor <T>::mask` cannot match real code (the old roster comment block satisfied the substring gate instead)."
+
+[[exclusion]]
+path = "ferrotorch_core::masked::MaskedTensor <T>::new"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_all_true_mask_matches_unmasked (and the run_reduction_for_device fixture driver) in conformance_masked.rs; the inventory key `MaskedTensor <T>::new` cannot match real code (the old roster comment block satisfied the substring gate instead)."
+
+[[exclusion]]
+path = "ferrotorch_core::masked::MaskedTensor <T>::numel"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_from_data_marks_all_valid in conformance_masked.rs; the inventory key `MaskedTensor <T>::numel` cannot match real code (the old roster comment block satisfied the substring gate instead)."
+
+[[exclusion]]
+path = "ferrotorch_core::masked::MaskedTensor <T>::shape"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_from_data_marks_all_valid in conformance_masked.rs; the inventory key `MaskedTensor <T>::shape` cannot match real code (the old roster comment block satisfied the substring gate instead)."
+
+[[exclusion]]
+path = "ferrotorch_core::masked::MaskedTensor <T>::to_ferray"
+kind = "permanent"
+reason = "CORE-202: tested via to_ferray_bridges_to_numpy_convention in conformance_masked.rs; the inventory key `MaskedTensor <T>::to_ferray` cannot match real code (the old roster comment block satisfied the substring gate instead)."
+
+[[exclusion]]
+path = "ferrotorch_core::masked::MaskedTensor <T>::to_tensor"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_filled_default_substitutes_zero in conformance_masked.rs; the inventory key `MaskedTensor <T>::to_tensor` cannot match real code (the old roster comment block satisfied the substring gate instead)."
+
+[[exclusion]]
+path = "ferrotorch_core::masked::MaskedTensor <T>::with_fill_value"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_with_fill_value_substitutes_override in conformance_masked.rs; the inventory key `MaskedTensor <T>::with_fill_value` cannot match real code (the old roster comment block satisfied the substring gate instead)."
+
+[[exclusion]]
+path = "ferrotorch_core::named_tensor::NamedTensor <T>::align_to"
+kind = "permanent"
+reason = "CORE-202: tested via named_tensor_align_to_permutes in conformance_plumbing.rs; the inventory key `NamedTensor <T>::align_to` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::named_tensor::NamedTensor <T>::detached"
+kind = "permanent"
+reason = "CORE-202: tested via named_tensor_detached_drops_names in conformance_plumbing.rs; the inventory key `NamedTensor <T>::detached` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::named_tensor::NamedTensor <T>::dim_index"
+kind = "permanent"
+reason = "CORE-202: tested via named_tensor_basic_metadata in conformance_plumbing.rs; the inventory key `NamedTensor <T>::dim_index` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::named_tensor::NamedTensor <T>::into_tensor"
+kind = "permanent"
+reason = "CORE-202: tested via named_tensor_into_tensor_recovers_inner in conformance_plumbing.rs; the inventory key `NamedTensor <T>::into_tensor` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::named_tensor::NamedTensor <T>::names"
+kind = "permanent"
+reason = "CORE-202: tested via named_tensor_basic_metadata in conformance_plumbing.rs; the inventory key `NamedTensor <T>::names` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::named_tensor::NamedTensor <T>::ndim"
+kind = "permanent"
+reason = "CORE-202: tested via named_tensor_basic_metadata in conformance_plumbing.rs; the inventory key `NamedTensor <T>::ndim` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::named_tensor::NamedTensor <T>::new"
+kind = "permanent"
+reason = "CORE-202: tested via named_tensor_new_rejects_mismatched_lengths in conformance_plumbing.rs; the inventory key `NamedTensor <T>::new` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::named_tensor::NamedTensor <T>::numel"
+kind = "permanent"
+reason = "CORE-202: tested via named_tensor_basic_metadata in conformance_plumbing.rs; the inventory key `NamedTensor <T>::numel` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::named_tensor::NamedTensor <T>::refined"
+kind = "permanent"
+reason = "CORE-202: tested via named_tensor_basic_metadata (constructed through the `nt` helper, which calls NamedTensor::refined) in conformance_plumbing.rs; the inventory key `NamedTensor <T>::refined` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::named_tensor::NamedTensor <T>::rename"
+kind = "permanent"
+reason = "CORE-202: tested via named_tensor_rename_swaps_names in conformance_plumbing.rs; the inventory key `NamedTensor <T>::rename` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::named_tensor::NamedTensor <T>::shape"
+kind = "permanent"
+reason = "CORE-202: tested via named_tensor_basic_metadata in conformance_plumbing.rs; the inventory key `NamedTensor <T>::shape` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::named_tensor::NamedTensor <T>::size_of"
+kind = "permanent"
+reason = "CORE-202: tested via named_tensor_basic_metadata in conformance_plumbing.rs; the inventory key `NamedTensor <T>::size_of` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::named_tensor::NamedTensor <T>::tensor"
+kind = "permanent"
+reason = "CORE-202: tested via named_tensor_basic_metadata in conformance_plumbing.rs; the inventory key `NamedTensor <T>::tensor` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::data_to_tensor"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_packed_nested_tensor_ops in conformance_nested_sparse.rs (`.data_to_tensor` call in code); the inventory key `PackedNestedTensor <T>::data_to_tensor` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::nested::PackedNestedTensor <T>::from_data_tensor"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_packed_nested_tensor_ops in conformance_nested_sparse.rs (`.from_data_tensor` call in code); the inventory key `PackedNestedTensor <T>::from_data_tensor` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::ops::phase2c::Tensor <T>::to_int"
+kind = "permanent"
+reason = "CORE-202: Covered by phase2c_argmax_gather_cast in tests/_probe_phase2c_argmax_gather_cast.rs (turbofish `.to_int::<i32>()`); this gate only scans tests/conformance_*.rs."
+
+[[exclusion]]
+path = "ferrotorch_core::quantize::QatModel::register_layer"
+kind = "permanent"
+reason = "CORE-202: tested via qat_model_register_layer_and_fake_quantize_weights in conformance_quantize_prune.rs (`.register_layer()` method-call syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::simd_reduce::sum_f32"
+kind = "permanent"
+reason = "CORE-202: Exercised by sum_f32_short_slices and the length-sweep unit tests in src/simd_reduce.rs; Implicit coverage via cpu_sum in conformance_reduction.rs (sum_inner routes the contiguous fast path through it)."
+
+[[exclusion]]
+path = "ferrotorch_core::simd_reduce::sum_f64"
+kind = "permanent"
+reason = "CORE-202: Exercised by sum_f64_cases in src/simd_reduce.rs; Implicit coverage via cpu_sum in conformance_reduction.rs (f64 fixture rows)."
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CooTensor <T>::to_dense_on"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_sparse_tensor_to_dense and gpu_coo_csr_csc_conversions in conformance_nested_sparse.rs; the generic inventory key cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CscTensor <T>::from_csr_on"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_coo_csr_csc_conversions in conformance_nested_sparse.rs; the generic inventory key cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CscTensor <T>::to_csr_on"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_coo_csr_csc_conversions in conformance_nested_sparse.rs; the generic inventory key cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CscTensor <T>::to_dense_on"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_coo_csr_csc_conversions in conformance_nested_sparse.rs; the generic inventory key cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CsrTensor <T>::from_coo_on"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_coo_csr_csc_conversions in conformance_nested_sparse.rs; the generic inventory key cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::sparse::CsrTensor <T>::to_dense_on"
+kind = "permanent"
+reason = "CORE-202: tested via gpu_sparse_tensor_to_dense and gpu_coo_csr_csc_conversions in conformance_nested_sparse.rs; the generic inventory key cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::CubeStorageHandle"
+kind = "deferred"
+reason = "CORE-202: trait whose only impl lives in ferrotorch-cubecl; no ferrotorch-core test references it in code (pre-CORE-202 it was `covered` by comment mentions in conformance_plumbing.rs). Burndown tracked by #1921."
+tracking_issue = "#1921"
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::as_mut_slice"
+kind = "deferred"
+reason = "CORE-202: only callers are the mkl-feature mm_raw_* paths in src/ops/linalg.rs; no test references it in code; pre-CORE-202 the name only appeared in prose. Conformance coverage not yet authored; burndown tracked by #1921."
+tracking_issue = "#1921"
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::as_slice"
+kind = "permanent"
+reason = "CORE-202: Implicit coverage: the primary CPU data accessor used by op inner fns crate-wide; every CPU conformance op test executes it — e.g. cpu_sum in conformance_reduction.rs; the inventory key `TensorStorage <T>::as_slice` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::cpu"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_storage_cpu_constructor in conformance_plumbing.rs (and the make_cpu_f32 fixture helpers in every suite); the inventory key `TensorStorage <T>::cpu` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::cubecl_handle"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_storage_cpu_constructor in conformance_plumbing.rs; the inventory key `TensorStorage <T>::cubecl_handle` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::device"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_storage_meta_constructor and tensor_storage_gpu_via_on_device in conformance_plumbing.rs; the inventory key `TensorStorage <T>::device` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::gpu"
+kind = "permanent"
+reason = "CORE-202: Implicit coverage: TensorStorage::on_device routes GPU targets through Self::gpu (src/storage.rs); tested via tensor_storage_gpu_via_on_device in conformance_plumbing.rs; the inventory key `TensorStorage <T>::gpu` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::gpu_handle"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_storage_gpu_via_on_device in conformance_plumbing.rs; the inventory key `TensorStorage <T>::gpu_handle` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::gpu_handle_mut"
+kind = "deferred"
+reason = "CORE-202: only caller is Tensor::with_gpu_handle_mut, itself untested in this crate; pre-CORE-202 the name only appeared in prose. Conformance coverage not yet authored; burndown tracked by #1921."
+tracking_issue = "#1921"
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::is_cpu"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_storage_gpu_via_on_device in conformance_plumbing.rs (asserts `!storage.is_cpu()`); the inventory key `TensorStorage <T>::is_cpu` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::is_cubecl"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_storage_cpu_constructor and tensor_storage_buffer_variants_match in conformance_plumbing.rs; the inventory key `TensorStorage <T>::is_cubecl` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::is_empty"
+kind = "deferred"
+reason = "CORE-202: no test calls is_empty on a TensorStorage receiver (every `.is_empty()` in the suites is a Vec/slice/keyset); pre-CORE-202 the name only appeared in prose. Conformance coverage not yet authored; burndown tracked by #1921."
+tracking_issue = "#1921"
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::is_gpu"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_storage_buffer_variants_match and tensor_storage_gpu_via_on_device in conformance_plumbing.rs; the inventory key `TensorStorage <T>::is_gpu` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::is_meta"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_storage_meta_constructor in conformance_plumbing.rs; the inventory key `TensorStorage <T>::is_meta` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::len"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_storage_gpu_via_on_device in conformance_plumbing.rs (asserts `storage.len()`); the inventory key `TensorStorage <T>::len` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::meta"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_storage_meta_constructor in conformance_plumbing.rs (`TensorStorage::meta` UFCS without the `<T>` infix the key demands); the inventory key `TensorStorage <T>::meta` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::on_device"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_storage_on_device_cpu, tensor_storage_on_device_meta_discards_data and tensor_storage_gpu_via_on_device in conformance_plumbing.rs; the inventory key `TensorStorage <T>::on_device` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::on_device_pinned"
+kind = "deferred"
+reason = "CORE-202: only caller is Tensor::to_pinned, itself untested in this crate; pre-CORE-202 the name only appeared in prose. Conformance coverage not yet authored; burndown tracked by #1921."
+tracking_issue = "#1921"
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::try_as_mut_slice"
+kind = "permanent"
+reason = "CORE-202: Implicit coverage: backing accessor of Tensor::update_data (in-place op family); tested via cpu_inplace_scalar_ops in conformance_elementwise.rs; the inventory key `TensorStorage <T>::try_as_mut_slice` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::try_as_slice"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_storage_cpu_constructor, tensor_storage_meta_constructor and tensor_storage_try_clone_round_trip in conformance_plumbing.rs; the inventory key `TensorStorage <T>::try_as_slice` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::try_clone"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_storage_try_clone_round_trip in conformance_plumbing.rs; the inventory key `TensorStorage <T>::try_clone` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::try_clone_subregion"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_storage_try_clone_round_trip in conformance_plumbing.rs; the inventory key `TensorStorage <T>::try_clone_subregion` cannot match real code."
+
+[[exclusion]]
+path = "ferrotorch_core::storage::TensorStorage <T>::xpu_from_handle"
+kind = "deferred"
+reason = "CORE-202: no callers and no test references it in code; pre-CORE-202 the name only appeared in prose. Conformance coverage not yet authored; burndown tracked by #1921."
+tracking_issue = "#1921"
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::contiguous_in"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_memory_format_variants_and_contiguous_in in conformance_plumbing.rs; the inventory key `Tensor <T>::contiguous_in` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::cpu"
+kind = "permanent"
+reason = "CORE-202: tested via the read_back_f32 / read_back_f64 helpers (D2H `.cpu()` readback invoked by every GPU-lane test) in conformance_activation.rs; the inventory key `Tensor <T>::cpu` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::cuda"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_cuda_round_trip_preserves_metadata in conformance_plumbing.rs; the inventory key `Tensor <T>::cuda` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::data"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_data_and_data_vec_round_trip in conformance_plumbing.rs and the read_back_f32 helpers in every suite; the inventory key `Tensor <T>::data` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::data_mut"
+kind = "deferred"
+reason = "CORE-202: only production caller is autograd's accumulate_non_leaf_grad and no test references data_mut in code; pre-CORE-202 the name only appeared in prose. Conformance coverage not yet authored; burndown tracked by #1921."
+tracking_issue = "#1921"
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::data_ref"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_data_and_data_vec_round_trip in conformance_plumbing.rs; the inventory key `Tensor <T>::data_ref` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::data_vec"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_data_and_data_vec_round_trip in conformance_plumbing.rs; the inventory key `Tensor <T>::data_vec` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::detach"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_detach_drops_grad_fn_and_makes_leaf in conformance_plumbing.rs; the inventory key `Tensor <T>::detach` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::device"
+kind = "permanent"
+reason = "CORE-202: tested via run_gpu_op_family in conformance_creation.rs and the read_back_f32 device asserts (CORE-196) in conformance_activation.rs; the inventory key `Tensor <T>::device` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::from_operation"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_from_operation_is_non_leaf_with_grad_fn in conformance_plumbing.rs; the inventory key `Tensor <T>::from_operation` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::from_storage"
+kind = "permanent"
+reason = "CORE-202: tested via the make_cpu_f32 fixture helpers (Tensor::from_storage) in every suite, e.g. conformance_activation.rs; the inventory key `Tensor <T>::from_storage` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::gpu_handle"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_cuda_round_trip_preserves_metadata in conformance_plumbing.rs; the inventory key `Tensor <T>::gpu_handle` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::grad"
+kind = "permanent"
+reason = "CORE-202: tested via run_simple_activation_for_device in conformance_activation.rs (grad readback after `.backward()`) and ~135 call sites; the inventory key `Tensor <T>::grad` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::grad_fn"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_autograd_after_downstream_op in conformance_creation.rs and tensor_from_operation_is_non_leaf_with_grad_fn in conformance_plumbing.rs; the inventory key `Tensor <T>::grad_fn` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::id"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_id_uniqueness in conformance_plumbing.rs; the inventory key `Tensor <T>::id` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::inner_storage_arc"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_view_reshape_changes_shape_preserves_storage_id_arc in conformance_plumbing.rs and the storage_arc_id helper in conformance_elementwise.rs; the inventory key `Tensor <T>::inner_storage_arc` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::into_storage_and_shape"
+kind = "permanent"
+reason = "CORE-202: Implicit coverage: input decomposition used by every op inner fn (e.g. relu_inner in src/grad_fns/activation.rs); tested via run_simple_activation_for_device in conformance_activation.rs; the inventory key `Tensor <T>::into_storage_and_shape` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::is_contiguous"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_metadata_transposed_breaks_contiguity and tensor_metadata_narrowed_contiguity in conformance_plumbing.rs; the inventory key `Tensor <T>::is_contiguous` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::is_contiguous_for"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_memory_format_variants_and_contiguous_in in conformance_plumbing.rs; the inventory key `Tensor <T>::is_contiguous_for` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::is_cpu"
+kind = "permanent"
+reason = "CORE-202: tested via the read_back_f32 helper in conformance_activation.rs (`t.is_cpu()` branch before D2H readback); the inventory key `Tensor <T>::is_cpu` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::is_cuda"
+kind = "permanent"
+reason = "CORE-202: tested via run_gpu_op_family in conformance_creation.rs (asserts `gpu.is_cuda()` post-upload, CORE-196 device pinning); the inventory key `Tensor <T>::is_cuda` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::is_leaf"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_autograd_leaf_creation in conformance_creation.rs; the inventory key `Tensor <T>::is_leaf` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::is_meta"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_zeros_meta / cpu_ones_meta / cpu_full_meta in conformance_creation.rs; the inventory key `Tensor <T>::is_meta` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::is_same"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_id_uniqueness in conformance_plumbing.rs; the inventory key `Tensor <T>::is_same` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::is_scalar"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_item_for_scalar_only in conformance_plumbing.rs; the inventory key `Tensor <T>::is_scalar` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::is_xpu"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_metadata_basic_shapes and tensor_meta_propagates_is_meta in conformance_plumbing.rs; the inventory key `Tensor <T>::is_xpu` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::item"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_item_for_scalar_only in conformance_plumbing.rs; the inventory key `Tensor <T>::item` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::ndim"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_metadata_basic_shapes in conformance_plumbing.rs; the inventory key `Tensor <T>::ndim` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::numel"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_metadata_basic_shapes in conformance_plumbing.rs; the inventory key `Tensor <T>::numel` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::register_hook"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_hook_fires_with_correct_grad / cpu_hook_can_mutate_grad / cpu_hook_handle_uniqueness in conformance_autograd.rs; the inventory key `Tensor <T>::register_hook` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::register_post_accumulate_grad_hook"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_post_accumulate_hook_fires_on_leaf in conformance_autograd.rs; the inventory key `Tensor <T>::register_post_accumulate_grad_hook` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::remove_hook"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_remove_hook_disables_it in conformance_autograd.rs; the inventory key `Tensor <T>::remove_hook` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::requires_grad"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_autograd_leaf_creation in conformance_creation.rs; the inventory key `Tensor <T>::requires_grad` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::requires_grad_"
+kind = "permanent"
+reason = "CORE-202: tested via cpu_autograd_leaf_creation in conformance_creation.rs; the inventory key `Tensor <T>::requires_grad_` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::set_grad"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_zero_grad_clears_set_grad in conformance_plumbing.rs; the inventory key `Tensor <T>::set_grad` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::shape"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_metadata_basic_shapes in conformance_plumbing.rs and ~107 call sites; the inventory key `Tensor <T>::shape` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::storage"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_metadata_basic_shapes in conformance_plumbing.rs (asserts `t.storage().device()`); the inventory key `Tensor <T>::storage` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::storage_len"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_metadata_basic_shapes in conformance_plumbing.rs; the inventory key `Tensor <T>::storage_len` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::storage_offset"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_metadata_basic_shapes in conformance_plumbing.rs; the inventory key `Tensor <T>::storage_offset` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::stride_view"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_stride_view_zero_copy in conformance_plumbing.rs; the inventory key `Tensor <T>::stride_view` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::stride_view_operation"
+kind = "permanent"
+reason = "CORE-202: Implicit coverage: implements permute_t / narrow_t / as_strided (src/methods.rs, src/stride_tricks.rs); tested via cpu_permute and cpu_narrow in conformance_shape.rs; the inventory key `Tensor <T>::stride_view_operation` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::strides"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_metadata_basic_shapes and tensor_stride_view_zero_copy in conformance_plumbing.rs; the inventory key `Tensor <T>::strides` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::to"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_to_cuda_then_to_cpu_uses_to_method in conformance_plumbing.rs and the upload_f32 helpers in conformance_activation.rs; the inventory key `Tensor <T>::to` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::to_dtype"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_to_dtype_same_dtype_is_arc_shared_clone and the tensor_to_dtype_f32_to_bf16_* tests in conformance_plumbing.rs (turbofish `.to_dtype::<bf16>()` is invisible to the substring key); also Exercised by the to_dtype_* unit tests in src/tensor.rs; the inventory key `Tensor <T>::to_dtype` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::to_memory_format"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_memory_format_variants_and_contiguous_in in conformance_plumbing.rs; the inventory key `Tensor <T>::to_memory_format` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::to_pinned"
+kind = "deferred"
+reason = "CORE-202: only consumer is ferrotorch-data's dataloader (production); no test references it in code; pre-CORE-202 the name only appeared in prose. Conformance coverage not yet authored; burndown tracked by #1921."
+tracking_issue = "#1921"
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::update_data"
+kind = "permanent"
+reason = "CORE-202: Implicit coverage: storage-swap primitive of the in-place scalar ops (add_scalar_/mul_scalar_/fill_ in src/inplace.rs); tested via cpu_inplace_scalar_ops in conformance_elementwise.rs; the inventory key `Tensor <T>::update_data` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::update_storage"
+kind = "permanent"
+reason = "CORE-202: Implicit coverage: storage-swap primitive of the in-place binary ops (mul_/div_/add_scaled_ in src/inplace.rs); tested via cpu_inplace_add_sub_mul_div in conformance_elementwise.rs; the inventory key `Tensor <T>::update_storage` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::view_operation"
+kind = "permanent"
+reason = "CORE-202: Exercised by test_view_operation_shares_storage in src/tensor.rs; also the primitive behind reshape/flatten/squeeze/unsqueeze (src/grad_fns/shape.rs), all conformance-tested; the inventory key `Tensor <T>::view_operation` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::view_reshape"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_view_reshape_changes_shape_preserves_storage_id_arc in conformance_plumbing.rs; the inventory key `Tensor <T>::view_reshape` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::with_gpu_handle_mut"
+kind = "deferred"
+reason = "CORE-202: only consumer is ferrotorch-optim's fused-adam path (production); no test references it in code; pre-CORE-202 the name only appeared in prose. Conformance coverage not yet authored; burndown tracked by #1921."
+tracking_issue = "#1921"
+
+[[exclusion]]
+path = "ferrotorch_core::tensor::Tensor <T>::zero_grad"
+kind = "permanent"
+reason = "CORE-202: tested via tensor_zero_grad_clears_set_grad in conformance_plumbing.rs; the inventory key `Tensor <T>::zero_grad` cannot match real code (method-call / turbofish syntax)."
+
+[[exclusion]]
+path = "ferrotorch_core::tile"
+kind = "permanent"
+reason = "CORE-202: re-export of grad_fns::shape::tile; Exercised by test_tile_pads_reps in src/grad_fns/shape.rs."
