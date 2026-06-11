@@ -286,6 +286,34 @@ pub trait GpuBackend: Send + Sync {
         dtype: DType,
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle>;
+    /// Copy GPU buffer contents back to the host as raw bytes (D2H).
+    ///
+    /// Returns the buffer's element bytes in element order (native
+    /// endianness), interpreted per the handle's authoritative
+    /// [`GpuBufferHandle::dtype`] tag. Pooled backends may return more bytes
+    /// than `handle.len() * dtype.size_of()` (a zero-filled rounded-up tail);
+    /// callers truncate to the logical length.
+    ///
+    /// # Contract (CORE-100 / #1794)
+    ///
+    /// The returned value is an ORDINARY `Vec<u8>`: implementations make no
+    /// promise about the allocation's alignment, capacity, or allocator
+    /// layout beyond what `Vec<u8>` itself guarantees. Callers MUST decode
+    /// it by copy (chunk-decode, or `ptr::copy_nonoverlapping` into a
+    /// freshly allocated typed buffer) and MUST NOT reinterpret the
+    /// allocation in place via `Vec::from_raw_parts` — `Vec`'s allocator
+    /// contract makes that undefined behavior for a byte vector the caller
+    /// did not allocate under the target type's layout (misaligned reads +
+    /// dealloc with the wrong `Layout`), even if the length happens to
+    /// divide evenly.
+    ///
+    /// The same allocator contract binds implementations: the returned
+    /// `Vec<u8>` must be sound for the caller to DROP as a `Vec<u8>` —
+    /// i.e. its allocation must have been made under `Layout::array::<u8>`.
+    /// Building the byte vector by `from_raw_parts`-reinterpreting a typed
+    /// vector's allocation shifts the dealloc-layout mismatch onto the
+    /// caller's drop and is a backend bug (tracked for the bundled CUDA
+    /// backend's typed-reinterpret arms).
     fn gpu_to_cpu(&self, handle: &GpuBufferHandle) -> FerrotorchResult<Vec<u8>>;
 
     /// Get the raw CUDA device pointer from a buffer handle.

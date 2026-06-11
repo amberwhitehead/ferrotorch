@@ -311,29 +311,41 @@ impl<I: IntElement> IntTensor<I> {
                         ),
                     });
                 }
-                // SAFETY: `bytes` is the raw byte serialisation of the GPU
-                // buffer, originally written by an upload of `I`-sized values
-                // (the cpu_to_gpu I32/I64 arm). We reconstruct a `Vec<I>` from
-                // the same allocation: ManuallyDrop prevents the Vec<u8>
-                // destructor from freeing it, then ptr/len/cap are reused with
-                // len/cap divided by size_of::<I>(). This is sound because:
-                //   - `I` is i32 or i64, both plain integer types with no
-                //     padding and no invalid bit patterns (every bit pattern is
-                //     a valid value).
-                //   - `bytes.len()` is a multiple of size_of::<I>() (checked
-                //     above); ferrotorch-gpu's gpu_to_cpu builds the Vec<u8>
-                //     from a Vec<I> via the inverse ManuallyDrop reinterpret,
-                //     so capacity is also a size_of::<I>() multiple and the
-                //     allocator layout is compatible.
-                //   - The source allocation is I-aligned (it came from a Vec<I>
-                //     reinterpreted to Vec<u8>), so casting the pointer back to
-                //     *mut I restores correct alignment.
-                let data: Vec<I> = unsafe {
-                    let mut bytes = std::mem::ManuallyDrop::new(bytes);
-                    let len = bytes.len() / elem_size;
-                    let cap = bytes.capacity() / elem_size;
-                    Vec::from_raw_parts(bytes.as_mut_ptr().cast::<I>(), len, cap)
-                };
+                // CORE-100 (#1794): decode the D2H byte buffer BY COPY into a
+                // freshly allocated `Vec<I>` — never by reinterpreting the
+                // `Vec<u8>` allocation in place. `GpuBackend::gpu_to_cpu`
+                // only promises an ordinary `Vec<u8>`: no alignment guarantee
+                // for `I` and no allocation-layout compatibility (a conforming
+                // backend may return a normally allocated byte vector).
+                // Rebuilding a `Vec<I>` over that allocation with
+                // `Vec::from_raw_parts` was undefined behavior (misaligned
+                // reference + dealloc under the wrong layout, observed under
+                // MIRI). One extra host memcpy is the price of soundness; the
+                // D2H transfer itself already dominates this path.
+                let len = bytes.len() / elem_size;
+                let mut data: Vec<I> = Vec::with_capacity(len);
+                // SAFETY: `data` was freshly allocated just above with
+                // capacity `len` under `Layout::array::<I>(len)`, so its
+                // pointer is valid for `len * elem_size` bytes of writes and
+                // correctly aligned for `I` by construction. The source
+                // `bytes` is valid for `len * elem_size` bytes of reads (its
+                // length equals that product per the divisibility check
+                // above); `u8`-typed copies impose no alignment requirement
+                // on the source, and the two allocations are distinct,
+                // satisfying `copy_nonoverlapping`'s no-overlap contract.
+                // After the copy the first `len` elements are fully
+                // initialized, and `I` is i32 or i64 — plain integer types
+                // with no padding and no invalid bit patterns — so
+                // `set_len(len)` exposes only valid values. Nothing is
+                // assumed about `bytes`' alignment, capacity, or allocator.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        data.as_mut_ptr().cast::<u8>(),
+                        len * elem_size,
+                    );
+                    data.set_len(len);
+                }
                 Ok(Self {
                     storage: TensorStorage::cpu(data),
                     shape: self.shape.clone(),

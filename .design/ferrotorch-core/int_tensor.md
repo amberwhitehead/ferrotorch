@@ -37,10 +37,13 @@ Phase 2b (CPU + GPU compute kernels), Phase 2c (cross-width casts).
   `torch.arange(n, dtype=torch.int64)`.
 - REQ-3: Device methods: `device`, `is_cuda`, `to(Device)`. Reuses
   ferrotorch's DType-tagged raw-byte transport (Phase 2a; #1185). The
-  CUDA→CPU readback at `int_tensor.rs:278-323` reinterprets the
-  D2H byte buffer back into a `Vec<I>` via `ManuallyDrop` + ptr-aligned
-  `from_raw_parts` (sound because `i32`/`i64` have no padding and
-  no invalid bit patterns; documented `// SAFETY:` block).
+  CUDA→CPU readback in `pub fn to in int_tensor.rs` validates the byte
+  count is a `size_of::<I>()` multiple (structured `InvalidArgument`
+  otherwise) and decodes BY COPY into a freshly allocated `Vec<I>` via
+  `ptr::copy_nonoverlapping` (CORE-100 / #1794: `GpuBackend::gpu_to_cpu`
+  returns an ordinary `Vec<u8>` with no alignment or allocation-layout
+  guarantee, so in-place `from_raw_parts` reinterpretation was UB;
+  documented `// SAFETY:` block).
 - REQ-4: Cross-width cast `cast<J: IntElement>(&self) ->
   FerrotorchResult<IntTensor<J>>` (Phase 2c #1185). Routes to a GPU
   kernel (`cast_gpu`) when CUDA-resident; CPU widens-then-narrows via
@@ -77,8 +80,8 @@ Phase 2b (CPU + GPU compute kernels), Phase 2c (cross-width casts).
   `arange_oob_for_i32` at `:818`.
 - [x] AC-3: `cast_i64_to_i32_in_range` at `int_tensor.rs:828`,
   `cast_i64_to_i32_out_of_range_errors` at `:836`.
-- [x] AC-4: `reshape_preserves_data` at `int_tensor.rs:843`,
-  `reshape_size_mismatch_errors` at `:851`.
+- [x] AC-4: `reshape_preserves_data` at `int_tensor.rs:873`,
+  `reshape_size_mismatch_errors` at `:881`.
 - [x] AC-5: `scalar_constructor` at `int_tensor.rs:858`,
   `dtype_name_reports_i32_or_i64` at `:866`.
 - [x] AC-6: `cpu_tensor_reports_cpu_device` at `int_tensor.rs:874`,

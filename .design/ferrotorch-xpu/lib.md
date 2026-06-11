@@ -280,7 +280,7 @@ The crate's public API is consumed by:
 - `ferrotorch-core/src/tensor.rs:920-927` — the `Tensor::to` D2H
   helper text directs CPU→XPU callers to `ferrotorch_xpu::make_xpu_tensor`
   / `ferrotorch_xpu::XpuDevice::upload`. The XPU→CPU readback path
-  itself (`tensor.rs:932`) consumes the `CubeclStorageHandle` that
+  itself (`tensor.rs:992`) consumes the `CubeclStorageHandle` that
   this crate produces, completing the round trip.
 - `ferrotorch-cubecl/src/runtime.rs` REQ table records
   `ferrotorch-xpu/src/lib.rs::XpuDevice::new` as the non-test consumer

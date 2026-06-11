@@ -159,7 +159,7 @@ PTX kernel switches on; the same kernel handles all 6 ops.
   the on-device bool-broadcast handle (#1663).
 - `ferrotorch-core/src/ops/indexing.rs:381, :398, :480` — kernel-layer
   ops that take `&BoolTensor` parameters (`where_cond`, `masked_select`).
-- `ferrotorch-core/src/tensor.rs:1128, :1144` — boundary methods on
+- `ferrotorch-core/src/tensor.rs:1261, :1277` — boundary methods on
   `Tensor<T>` (`masked_fill`, `masked_select`) take `&BoolTensor` as
   the mask parameter.
 - `ferrotorch-core/src/lib.rs:135` — `pub use bool_tensor::BoolTensor`

@@ -904,27 +904,53 @@ impl<T: Float> Tensor<T> {
                 } else {
                     backend.gpu_to_cpu(handle)?
                 };
-                // SAFETY: `bytes` is a `Vec<u8>` returned by gpu_to_cpu
-                // containing the raw bytes of a Tensor<T>'s GPU storage —
-                // those bytes were originally written by an upload of T-sized
-                // values (cpu_to_gpu uploads bytes of T) or produced by a
-                // strided_copy_{f32,f64} kernel which writes T-aligned
-                // T-sized elements. Wrapping `bytes` in ManuallyDrop
-                // prevents its destructor from running, then we reconstruct
-                // a Vec<T> from the same allocation: ptr/len/cap are from
-                // the now-orphaned Vec<u8> with len/cap divided by
-                // size_of::<T>(). This requires bytes.len() and
-                // bytes.capacity() to be multiples of size_of::<T>() and
-                // the allocator layout to be compatible. The ferrotorch-gpu
-                // backend guarantees both (it allocates Vec<u8> with
-                // size_of::<T>()-aligned, T-multiple length and capacity
-                // for D2H readbacks).
-                let data: Vec<T> = unsafe {
-                    let mut bytes = std::mem::ManuallyDrop::new(bytes);
-                    let len = bytes.len() / std::mem::size_of::<T>();
-                    let cap = bytes.capacity() / std::mem::size_of::<T>();
-                    Vec::from_raw_parts(bytes.as_mut_ptr().cast::<T>(), len, cap)
-                };
+                // CORE-100 (#1794): decode the D2H byte buffer BY COPY into a
+                // freshly allocated `Vec<T>` — never by reinterpreting the
+                // `Vec<u8>` allocation in place. `GpuBackend::gpu_to_cpu`
+                // only promises an ordinary `Vec<u8>`: no alignment guarantee
+                // for `T` and no allocation-layout compatibility (a conforming
+                // backend may return a normally allocated byte vector).
+                // Rebuilding a `Vec<T>` over that allocation with
+                // `Vec::from_raw_parts` was undefined behavior (misaligned
+                // reference + dealloc under the wrong layout, observed under
+                // MIRI). One extra host memcpy is the price of soundness; the
+                // D2H transfer itself already dominates this path.
+                let elem_size = std::mem::size_of::<T>();
+                if bytes.len() % elem_size != 0 {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "Tensor::to(Cpu): D2H readback of {} bytes is not a \
+                             multiple of size_of::<{}>()={elem_size}",
+                            bytes.len(),
+                            std::any::type_name::<T>()
+                        ),
+                    });
+                }
+                let len = bytes.len() / elem_size;
+                let mut data: Vec<T> = Vec::with_capacity(len);
+                // SAFETY: `data` was freshly allocated just above with
+                // capacity `len` under `Layout::array::<T>(len)`, so its
+                // pointer is valid for `len * elem_size` bytes of writes and
+                // correctly aligned for `T` by construction. The source
+                // `bytes` is valid for `len * elem_size` bytes of reads (its
+                // length equals that product per the check above); `u8`-typed
+                // copies impose no alignment requirement on the source, and
+                // the two allocations are distinct, satisfying
+                // `copy_nonoverlapping`'s no-overlap contract. After the copy
+                // the first `len` elements are fully initialized, and `T` is
+                // a `Float` element type (f32 / f64 / half::f16 / half::bf16)
+                // — plain numeric types with no padding and no invalid bit
+                // patterns — so `set_len(len)` exposes only valid values.
+                // Nothing is assumed about `bytes`' alignment, capacity, or
+                // allocator.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        data.as_mut_ptr().cast::<u8>(),
+                        len * elem_size,
+                    );
+                    data.set_len(len);
+                }
                 let storage = TensorStorage::cpu(data);
                 if needs_grad_fn {
                     let grad_fn = Arc::new(ToDeviceBackward {
