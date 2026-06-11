@@ -51,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-192: The nightly workflow has never executed a test step (#1886)
 - CORE-193: The failures blocking `--tests` in Linux CI are two doc-hygiene meta-tests; the functional suites pass at HEAD (#1887)
 - Author audit-remediation contract (goal-audit-fix.md) for ferrotorch-core (#1902)
 - Backlog item 4: fused/batched RNN input projection — GRU/LSTM/RNN 3.9x slower than torch (#1690)
