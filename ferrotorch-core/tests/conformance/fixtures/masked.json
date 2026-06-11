@@ -1,12 +1,12 @@
 {
   "metadata": {
     "torch_version": "2.11.0+cu130",
-    "numpy_version": "2.4.4",
+    "numpy_version": "2.4.5",
     "cuda_version": "13.0",
     "cuda_available": true,
     "python_executable": "/usr/sbin/python3",
     "python_platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
-    "generated_at": "2026-05-06T16:39:41.421366+00:00",
+    "generated_at": "2026-06-11T05:10:48.614853+00:00",
     "rng_seed": 195939070,
     "dtypes": [
       "float32",
@@ -2498,7 +2498,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_min",
@@ -2588,7 +2589,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_min",
@@ -2717,7 +2719,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_min",
@@ -2798,7 +2801,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_min",
@@ -2888,7 +2892,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_min",
@@ -3017,7 +3022,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_min",
@@ -3098,7 +3104,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_min",
@@ -3188,7 +3195,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_min",
@@ -3317,7 +3325,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_min",
@@ -3398,7 +3407,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_min",
@@ -3488,7 +3498,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_min",
@@ -3617,7 +3628,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_max",
@@ -3698,7 +3710,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_max",
@@ -3788,7 +3801,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_max",
@@ -3917,7 +3931,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_max",
@@ -3998,7 +4013,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_max",
@@ -4088,7 +4104,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_max",
@@ -4217,7 +4234,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_max",
@@ -4298,7 +4316,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_max",
@@ -4388,7 +4407,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_max",
@@ -4517,7 +4537,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_max",
@@ -4598,7 +4619,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_max",
@@ -4688,7 +4710,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_max",
@@ -4817,7 +4840,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_count",
@@ -6062,7 +6086,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_max_empty",
@@ -6077,7 +6102,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_count_empty",
@@ -6137,7 +6163,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_max_empty",
@@ -6152,7 +6179,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_count_empty",
@@ -6212,7 +6240,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_max_empty",
@@ -6227,7 +6256,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_count_empty",
@@ -6287,7 +6317,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_max_empty",
@@ -6302,7 +6333,8 @@
       "out_shape": [],
       "out_values": [
         "NaN"
-      ]
+      ],
+      "divergence": "TRACKED DIVERGENCE #1924: expected value is ferrotorch's pinned NaN sentinel, NOT a torch oracle. torch 2.11.0+cu130 MaskedTensor.amax/.amin on all-masked non-empty input return a fully-masked 0-d MaskedTensor whose payload is the reduction identity (amax: -inf, amin: inf); on EMPTY input they raise \"IndexError: amax(): Expected reduction dim 0 to have non-zero size.\" (amin analogous). ferrotorch returns a 0-d NaN tensor in both cases. Retire this pin and regenerate when #1924 is fixed."
     },
     {
       "op": "masked_count_empty",

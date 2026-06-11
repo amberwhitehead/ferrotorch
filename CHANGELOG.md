@@ -51,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-203: The live fft GPU cascade-skip asserts nothing about the skipped contract (#1897)
 - CORE-201: `quantized_matmul` tolerance floor of 0.5 absolute swallows up to 50% error (#1895)
 - CORE-200: The `mean` gradient conformance test never exercises mean's backward (#1894)
 - CORE-196: Five GPU conformance suites never assert result device; the linalg suite knowingly exercises a CPU fallback (#1890)

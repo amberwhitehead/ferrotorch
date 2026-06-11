@@ -25,10 +25,14 @@ functions + their top-level re-exports):
     count_masked / numel / shape / data / mask / fill_value).
   Edge cases per the dispatch:
     * all-true mask -> equivalent to the unmasked op
-    * all-false mask -> sum=0, mean=NaN, min/max=NaN (ferrotorch matches torch
-      semantically: torch raises for all-masked min/max but ferrotorch returns
-      NaN-tensor; the parity-check uses NaN sentinels in fixtures and the
-      Rust assert_close treats NaN==NaN)
+    * all-false mask -> sum=0, mean=NaN (both match torch.masked);
+      min/max=NaN is a TRACKED DIVERGENCE (#1924, split out of CORE-197
+      #1891): torch.masked amax/amin return a fully-masked 0-d MaskedTensor
+      with the +/-inf identity payload on all-masked non-empty input, and
+      RAISE IndexError on empty input, while ferrotorch returns a 0-d NaN
+      tensor in both cases. The pinned rows carry a ``divergence`` note
+      probed from live torch at generation time, and the Rust suite asserts
+      the NaN pin explicitly (no NaN-tolerant laundering).
     * partial mask
     * empty masked tensor (len 0)
 
@@ -170,17 +174,80 @@ def ref_masked_extreme(
 ) -> float:
     """min/max of valid entries. All-masked => NaN (ferrotorch convention).
 
-    Note: PyTorch's `MaskedTensor.amax/amin` raises on all-masked input
-    (no identity element), but ferrotorch's `masked_min` / `masked_max`
-    return a 0-d NaN tensor by design (see source comment in
-    `masked_extremum_cpu`). Fixtures encode the ferrotorch-side answer
-    (NaN) for the all-masked rows so the tests assert ferrotorch's
-    contract; the divergence vs. torch is documented in the dispatch.
+    TRACKED DIVERGENCE (#1924, split out of CORE-197 #1891): the all-masked
+    and empty rows encode ferrotorch's pinned NaN sentinel, NOT a torch
+    oracle value. Live torch 2.11.0 `MaskedTensor.amax/amin` on all-masked
+    non-empty input return a fully-masked 0-d MaskedTensor whose payload is
+    the reduction identity (-inf for amax, +inf for amin; the free functions
+    `torch.masked.amax/amin` return the bare identity tensor), and on EMPTY
+    input they RAISE
+    `IndexError: amax(): Expected reduction dim 0 to have non-zero size.`
+    (amin analogous). ferrotorch's `masked_min` / `masked_max` return a 0-d
+    NaN tensor in both cases (see `masked_extremum_cpu` in src/masked.rs).
+
+    The pinned fixture rows carry a ``divergence`` note probed from live
+    torch at generation time (see `all_masked_extremum_note`), and the Rust
+    suite asserts the NaN pin explicitly with the issue number — retire both
+    when #1924 is fixed.
     """
     if not valid_mask.any():
         return float("nan")
     arr = _to_ma(data_np, valid_mask)
     return float(arr.min()) if pick_min else float(arr.max())
+
+
+# Tracking issue for the all-masked extremum divergence pin (CORE-197).
+DIVERGENCE_ISSUE: str = "#1924"
+
+_ALL_MASKED_EXTREMUM_NOTE: str | None = None
+
+
+def all_masked_extremum_note() -> str:
+    """Probe live torch.masked for its all-masked / empty amax+amin contract.
+
+    The resulting note is embedded in the pinned fixture rows (``divergence``
+    field) so the divergence vs. ferrotorch's NaN sentinel is recorded next
+    to the expectation instead of being laundered through a NaN-tolerant
+    compare. Regenerating against a future torch refreshes the recorded
+    upstream behavior automatically; the Rust suite hard-fails if the note
+    drops the tracking-issue reference.
+    """
+    global _ALL_MASKED_EXTREMUM_NOTE
+    if _ALL_MASKED_EXTREMUM_NOTE is not None:
+        return _ALL_MASKED_EXTREMUM_NOTE
+
+    import warnings
+
+    from torch.masked import masked_tensor
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # torch.masked prototype warnings
+        all_masked = masked_tensor(
+            torch.tensor([1.0, 2.0]), torch.tensor([False, False])
+        )
+        amax_payload = float(all_masked.amax().get_data())
+        amin_payload = float(all_masked.amin().get_data())
+        empty = masked_tensor(torch.tensor([]), torch.tensor([], dtype=torch.bool))
+        try:
+            empty.amax()
+            empty_msg = (
+                "no exception (torch behavior changed -- re-audit "
+                f"{DIVERGENCE_ISSUE})"
+            )
+        except Exception as exc:  # noqa: BLE001 -- recording the raise verbatim
+            empty_msg = f"{type(exc).__name__}: {exc}"
+
+    _ALL_MASKED_EXTREMUM_NOTE = (
+        f"TRACKED DIVERGENCE {DIVERGENCE_ISSUE}: expected value is ferrotorch's "
+        "pinned NaN sentinel, NOT a torch oracle. "
+        f"torch {torch.__version__} MaskedTensor.amax/.amin on all-masked "
+        "non-empty input return a fully-masked 0-d MaskedTensor whose payload "
+        f"is the reduction identity (amax: {amax_payload}, amin: "
+        f"{amin_payload}); on EMPTY input they raise \"{empty_msg}\" (amin "
+        "analogous). ferrotorch returns a 0-d NaN tensor in both cases. "
+        f"Retire this pin and regenerate when {DIVERGENCE_ISSUE} is fixed."
+    )
+    return _ALL_MASKED_EXTREMUM_NOTE
 
 
 def ref_masked_count(valid_mask: np.ndarray) -> float:
@@ -267,19 +334,26 @@ def fixture_op(op: str) -> list[dict[str, Any]]:
                     else:
                         raise ValueError(op)
 
-                    out.append(
-                        {
-                            "op": op,
-                            "tag": f"{shape_tag}_{mask_kind}",
-                            "dtype": dtype,
-                            "device": device,
-                            "a_shape": shape,
-                            "a_data": to_listf(data.reshape(-1).tolist()),
-                            "mask": [bool(b) for b in mask.tolist()],
-                            "out_shape": [],
-                            "out_values": to_listf([scalar]),
-                        }
-                    )
+                    row: dict[str, Any] = {
+                        "op": op,
+                        "tag": f"{shape_tag}_{mask_kind}",
+                        "dtype": dtype,
+                        "device": device,
+                        "a_shape": shape,
+                        "a_data": to_listf(data.reshape(-1).tolist()),
+                        "mask": [bool(b) for b in mask.tolist()],
+                        "out_shape": [],
+                        "out_values": to_listf([scalar]),
+                    }
+                    # All-masked min/max is a pinned divergence (#1924): the
+                    # expected NaN is ferrotorch's contract, not torch's.
+                    # Record the live-probed torch behavior on the row.
+                    if mask_kind == "all_false" and op in (
+                        "masked_min",
+                        "masked_max",
+                    ):
+                        row["divergence"] = all_masked_extremum_note()
+                    out.append(row)
     return out
 
 
@@ -287,9 +361,10 @@ def fixture_op(op: str) -> list[dict[str, Any]]:
 
 
 def fixture_empty() -> list[dict[str, Any]]:
-    """Empty 1-D masked tensor. PyTorch contract: sum=0, mean/min/max=NaN,
-    count=0. ferrotorch matches sum/mean/count exactly; min/max also return
-    NaN (no identity element)."""
+    """Empty 1-D masked tensor. PyTorch contract: sum=0, mean=NaN, count=0
+    (ferrotorch matches these exactly). min/max=NaN is the pinned #1924
+    divergence — torch.masked amax/amin RAISE IndexError on empty input;
+    the rows carry the live-probed ``divergence`` note."""
     out: list[dict[str, Any]] = []
     for device in DEVICES:
         for dtype in DTYPES:
@@ -303,19 +378,20 @@ def fixture_empty() -> list[dict[str, Any]]:
                 ("masked_count", ref_masked_count(empty_mask)),
             ]
             for op_name, scalar in cases:
-                out.append(
-                    {
-                        "op": f"{op_name}_empty",
-                        "tag": "empty",
-                        "dtype": dtype,
-                        "device": device,
-                        "a_shape": [0],
-                        "a_data": [],
-                        "mask": [],
-                        "out_shape": [],
-                        "out_values": to_listf([scalar]),
-                    }
-                )
+                row: dict[str, Any] = {
+                    "op": f"{op_name}_empty",
+                    "tag": "empty",
+                    "dtype": dtype,
+                    "device": device,
+                    "a_shape": [0],
+                    "a_data": [],
+                    "mask": [],
+                    "out_shape": [],
+                    "out_values": to_listf([scalar]),
+                }
+                if op_name in ("masked_min", "masked_max"):
+                    row["divergence"] = all_masked_extremum_note()
+                out.append(row)
     return out
 
 

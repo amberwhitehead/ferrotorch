@@ -48,14 +48,25 @@
 //! `mask` arrays are emitted in this convention so they pass straight into
 //! [`MaskedTensor::new`] without inversion.
 //!
-//! ## torch.masked status
+//! ## torch.masked status / oracle note (CORE-197 → #1924)
 //!
 //! `torch.masked.MaskedTensor` is a *prototype* API. Its reduction
 //! semantics are stable but the surface moves between minor releases — the
 //! fixture metadata pins the torch + numpy versions so divergences are
-//! caught here, not silently absorbed. The reductions themselves are
-//! cross-checked against `numpy.ma`, which is the upstream definition
-//! torch.masked mirrors.
+//! caught here, not silently absorbed.
+//!
+//! The suite's oracle is `numpy.ma` (the upstream definition torch.masked
+//! mirrors), NOT `torch.masked` itself. Where ferrotorch knowingly diverges
+//! from torch.masked, the divergence is NOT laundered through a tolerant
+//! compare: the divergent fixture rows carry a `divergence` note (probed
+//! from live torch at generation time) and the test asserts ferrotorch's
+//! current contract explicitly via a PIN that names the tracking issue.
+//! Current pins:
+//! * all-masked / empty `masked_min` / `masked_max` → 0-d NaN sentinel,
+//!   tracked in #1924 — torch.masked amax/amin instead return a
+//!   fully-masked 0-d MaskedTensor with the ±inf identity payload, and
+//!   RAISE `IndexError` on empty input (see
+//!   [`assert_all_masked_extremum_pin`]).
 //!
 //! ## GPU lane
 //!
@@ -307,6 +318,11 @@ struct Fixture {
     /// `filled` fixture: which fill value to set via `with_fill_value`.
     #[serde(default)]
     fill_value: Option<f64>,
+    /// CORE-197 → #1924: torch-side behavior note for rows whose expected
+    /// value is a pinned ferrotorch divergence rather than an oracle value.
+    /// Present on the all-masked / empty `masked_min` / `masked_max` rows.
+    #[serde(default)]
+    divergence: Option<String>,
 }
 
 fn load_fixtures() -> FixtureFile {
@@ -400,6 +416,56 @@ fn check_f64(label: &str, actual: &[f64], expected: &[f64], tol: f64) {
 /// pattern.)
 fn cascade_skip(_op: &str, _device_label: &str, _dtype: &str) -> Option<&'static str> {
     None
+}
+
+/// Tracking issue for the all-masked extremum divergence pin (CORE-197).
+const ALL_MASKED_EXTREMUM_ISSUE: &str = "#1924";
+
+/// Explicit PIN of ferrotorch's all-masked `masked_min` / `masked_max`
+/// contract — TRACKED DIVERGENCE #1924 (split out of CORE-197 / #1891).
+///
+/// ferrotorch returns a 0-d NaN tensor when no element is valid. Live
+/// torch 2.11.0+cu130 (probed 2026-06-11) instead returns, on all-masked
+/// NON-EMPTY input, a fully-masked 0-d MaskedTensor whose payload is the
+/// reduction identity (`mt.amax().get_data() == -inf`,
+/// `mt.amin().get_data() == +inf`; the free functions
+/// `torch.masked.amax/amin` return the bare identity tensor), and on EMPTY
+/// input RAISES
+/// `IndexError: amax(): Expected reduction dim 0 to have non-zero size.`
+/// (amin analogous).
+///
+/// Per R-ORACLE-4 this pins exactly ONE contract — ferrotorch's current
+/// NaN sentinel — with no dual-accept. The matching fixture rows carry the
+/// same live-probed note in their `divergence` field so the divergence is
+/// visible in the data, not laundered through the NaN-tolerant
+/// `assert_close_*` path. When #1924 is fixed (the op matches torch or
+/// returns a structured `Err`), this assertion goes red: retire the pin
+/// and regenerate `masked.json` (`scripts/regenerate_masked_fixtures.py`).
+fn assert_all_masked_extremum_pin(label: &str, actual: &[f64], divergence: Option<&str>) {
+    let note = divergence.unwrap_or_else(|| {
+        panic!(
+            "{label}: pinned all-masked extremum fixture row is missing its \
+             `divergence` note — regenerate masked.json via \
+             scripts/regenerate_masked_fixtures.py"
+        )
+    });
+    assert!(
+        note.contains(ALL_MASKED_EXTREMUM_ISSUE),
+        "{label}: fixture `divergence` note no longer references \
+         {ALL_MASKED_EXTREMUM_ISSUE}: {note}"
+    );
+    assert_eq!(actual.len(), 1, "{label}: expected a 0-d scalar result");
+    assert!(
+        actual[0].is_nan(),
+        "{label}: PINNED DIVERGENCE {ALL_MASKED_EXTREMUM_ISSUE} violated — \
+         ferrotorch's masked_min/masked_max currently return a 0-d NaN tensor \
+         on all-masked input, got {} instead. If the op now matches \
+         torch.masked (fully-masked ±inf-identity result; IndexError raise on \
+         empty input) or returns a structured Err, close \
+         {ALL_MASKED_EXTREMUM_ISSUE}, retire this pin, and regenerate \
+         masked.json.",
+        actual[0]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -498,29 +564,43 @@ fn run_reduction_for_device(op: ReductionOp, device_label: &str, device: Device)
             .as_ref()
             .map(F64ListSentinel::as_slice)
             .expect("out_values");
+        // All-masked min/max rows go through the explicit #1924 divergence
+        // pin instead of the NaN-tolerant compare (which would silently
+        // bless any fixture answer that happens to be NaN).
+        let pinned_all_masked_extremum = matches!(op, ReductionOp::Min | ReductionOp::Max)
+            && f.tag.as_deref().is_some_and(|t| t.ends_with("_all_false"));
 
         match f.dtype.as_str() {
             "float32" => {
                 let a = upload_f32(make_cpu_f32(a_data, shape), device);
                 let mt = MaskedTensor::new(a, mask).expect("MaskedTensor::new f32");
                 let out = op.apply_f32(&mt);
-                check_f32(
-                    &format!("{label} fwd"),
-                    &read_back_f32(&out),
-                    expected,
-                    tol_f32,
-                );
+                let vals = read_back_f32(&out);
+                if pinned_all_masked_extremum {
+                    let vals64: Vec<f64> = vals.iter().map(|&v| f64::from(v)).collect();
+                    assert_all_masked_extremum_pin(
+                        &format!("{label} fwd"),
+                        &vals64,
+                        f.divergence.as_deref(),
+                    );
+                } else {
+                    check_f32(&format!("{label} fwd"), &vals, expected, tol_f32);
+                }
             }
             "float64" => {
                 let a = upload_f64(make_cpu_f64(a_data, shape), device);
                 let mt = MaskedTensor::new(a, mask).expect("MaskedTensor::new f64");
                 let out = op.apply_f64(&mt);
-                check_f64(
-                    &format!("{label} fwd"),
-                    &read_back_f64(&out),
-                    expected,
-                    tol_f64,
-                );
+                let vals = read_back_f64(&out);
+                if pinned_all_masked_extremum {
+                    assert_all_masked_extremum_pin(
+                        &format!("{label} fwd"),
+                        &vals,
+                        f.divergence.as_deref(),
+                    );
+                } else {
+                    check_f64(&format!("{label} fwd"), &vals, expected, tol_f64);
+                }
             }
             other => panic!("{label}: unexpected dtype {other:?}"),
         }
@@ -556,17 +636,20 @@ fn cpu_masked_count() {
 // Empty-masked-tensor edge cases
 // ---------------------------------------------------------------------------
 //
-// PyTorch / numpy.ma contract on an empty 1-D masked tensor:
-//   sum   = 0
-//   mean  = NaN
-//   min   = NaN  (ferrotorch chooses NaN; torch raises — see fixture
-//                 generator's `ref_masked_extreme` for the divergence note)
-//   max   = NaN
-//   count = 0
+// Contract on an empty 1-D masked tensor:
+//   sum   = 0    (matches torch.masked / numpy.ma)
+//   mean  = NaN  (matches torch.masked / numpy.ma)
+//   min   = NaN  — PINNED DIVERGENCE #1924: live torch 2.11.0 amax/amin
+//                 RAISE `IndexError: amax(): Expected reduction dim 0 to
+//                 have non-zero size.` on empty input; ferrotorch returns
+//                 a 0-d NaN tensor.
+//   max   = NaN  (same pin)
+//   count = 0    (matches)
 //
-// The fixtures encode the ferrotorch-side answer in `out_values` and the
-// `assert_close_*` helpers treat NaN==NaN as equal, so this tests the
-// contract directly.
+// sum / mean / count come straight from the fixture (numpy.ma agrees with
+// torch.masked for these); the min/max rows carry a `divergence` note and
+// are asserted via `assert_all_masked_extremum_pin`, NOT the NaN-tolerant
+// `assert_close_*` compare.
 
 #[test]
 fn cpu_masked_reductions_empty() {
@@ -592,6 +675,8 @@ fn cpu_masked_reductions_empty() {
                 .as_ref()
                 .map(F64ListSentinel::as_slice)
                 .expect("out_values");
+            // Empty min/max rows are the #1924 pin (torch raises here).
+            let pinned = matches!(op, "masked_min_empty" | "masked_max_empty");
             match f.dtype.as_str() {
                 "float32" => {
                     let a = make_cpu_f32(a_data, shape);
@@ -606,12 +691,13 @@ fn cpu_masked_reductions_empty() {
                         "masked_count_empty" => masked_count(&mt).expect("masked_count"),
                         _ => unreachable!(),
                     };
-                    check_f32(
-                        &label,
-                        &read_back_f32(&out),
-                        expected,
-                        tolerance::F32_REDUCTION_CPU,
-                    );
+                    let vals = read_back_f32(&out);
+                    if pinned {
+                        let vals64: Vec<f64> = vals.iter().map(|&v| f64::from(v)).collect();
+                        assert_all_masked_extremum_pin(&label, &vals64, f.divergence.as_deref());
+                    } else {
+                        check_f32(&label, &vals, expected, tolerance::F32_REDUCTION_CPU);
+                    }
                 }
                 "float64" => {
                     let a = make_cpu_f64(a_data, shape);
@@ -625,12 +711,12 @@ fn cpu_masked_reductions_empty() {
                         "masked_count_empty" => masked_count(&mt).expect("masked_count"),
                         _ => unreachable!(),
                     };
-                    check_f64(
-                        &label,
-                        &read_back_f64(&out),
-                        expected,
-                        tolerance::F64_REDUCTION_CPU,
-                    );
+                    let vals = read_back_f64(&out);
+                    if pinned {
+                        assert_all_masked_extremum_pin(&label, &vals, f.divergence.as_deref());
+                    } else {
+                        check_f64(&label, &vals, expected, tolerance::F64_REDUCTION_CPU);
+                    }
                 }
                 other => panic!("{label}: unexpected dtype {other:?}"),
             }
