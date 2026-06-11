@@ -51,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-199 residual (#1893 follow-through): missing dispatch-specified pins — #1825 simd shape-validation lane, #1745 empty amin/amax single-contract pin (replace dual-accept), #1746 zero-length-slice dim-reduction panic pin, #1838 lu 3-cycle pivot fixture (#1937)
 - CORE-125: Safe indexing APIs trust contradictory index data and shape metadata (#1819)
 - CORE-111: Direct integer-index gather APIs do not validate index values (#1805)
 - CORE-100: CUDA readback relies on an alignment guarantee absent from the backend trait (#1794)
