@@ -51,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-201: `quantized_matmul` tolerance floor of 0.5 absolute swallows up to 50% error (#1895)
 - CORE-200: The `mean` gradient conformance test never exercises mean's backward (#1894)
 - CORE-196: Five GPU conformance suites never assert result device; the linalg suite knowingly exercises a CPU fallback (#1890)
 - CORE-195: 331 coverage-gate exclusions cite tracking issues that are all closed (#1889)

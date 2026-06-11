@@ -63,7 +63,7 @@ use ferrotorch_core::grad_fns::fft::{
     rfft_differentiable, rfftn_differentiable,
 };
 use ferrotorch_core::signal::{self, windows as windows_mod};
-use ferrotorch_core::{Device, Tensor, TensorStorage};
+use ferrotorch_core::{Device, FerrotorchError, FerrotorchResult, Tensor, TensorStorage};
 
 // ---------------------------------------------------------------------------
 // Tolerance helpers
@@ -433,9 +433,62 @@ fn check_f64(label: &str, actual: &[f64], expected: &[f64], tol: f64) {
     tolerance::assert_close_f64(actual, expected, tol, label);
 }
 
-/// Per-fixture diagnostic skip for cascade issues surfaced by Phase 2.7.
+/// A cascade entry that is PINNED rather than blindly skipped
+/// (CORE-203 / #1897). When an entry fires, the runner still CALLS the op
+/// and asserts it returns exactly the documented error — so if the skipped
+/// case started silently returning values, or its error class/payload
+/// drifted, the suite fails instead of green-lighting the change forever.
+///
+/// Every active pin documents a `FerrotorchError::NotImplementedOnCuda`
+/// rejection, probed live at HEAD on the cuda:0 lane (2026-06-11; see the
+/// per-entry comments in [`cascade_skip`]). If a future entry needs to pin
+/// a different error class, extend this struct with a matcher for it —
+/// never widen [`assert_pinned_err`] to accept more than one class
+/// (R-ORACLE-4: one contract per pin).
+struct PinnedSkip {
+    /// Tracking issue whose fix retires the pin (R-DEFER-3). Quoted in
+    /// every assertion message.
+    issue: &'static str,
+    /// Human-readable reason for the eprintln pin notice.
+    reason: &'static str,
+    /// Exact `op` payload the documented `NotImplementedOnCuda { op }`
+    /// error must carry.
+    expected_err_op: &'static str,
+}
+
+/// Pinned-error assertion (CORE-203 / #1897): the op under a cascade entry
+/// was still called and must have returned the documented error.
+///
+/// Retire-on-fix (R-DEFER-3): when the tracking issue lands the real
+/// device path the op succeeds, the `expect_err` here fails, and the
+/// matching [`cascade_skip`] entry must be retired so the case runs — and
+/// is value-checked — live.
+fn assert_pinned_err(result: FerrotorchResult<()>, pin: &PinnedSkip, label: &str) {
+    let err = result.expect_err(&format!(
+        "{label}: op succeeded but {} pins it as NotImplementedOnCuda — the fix \
+         has landed; retire the matching cascade_skip entry so this case runs live",
+        pin.issue
+    ));
+    match err {
+        FerrotorchError::NotImplementedOnCuda { op } => assert_eq!(
+            op, pin.expected_err_op,
+            "{label}: pinned error payload drifted ({}): expected \
+             NotImplementedOnCuda {{ op: {:?} }}, got op {op:?}",
+            pin.issue, pin.expected_err_op
+        ),
+        other => panic!(
+            "{label}: pinned error class drifted ({}): expected \
+             NotImplementedOnCuda {{ op: {:?} }}, got {other:?}",
+            pin.issue, pin.expected_err_op
+        ),
+    }
+}
+
+/// Per-fixture pinned skip for cascade issues surfaced by Phase 2.7.
 /// The dispatch's cascade-handling mandate requires surfacing each failure
-/// with a tracking issue rather than silently weakening tolerance.
+/// with a tracking issue rather than silently weakening tolerance; per
+/// CORE-203 / #1897 each entry additionally pins the documented error
+/// (see [`PinnedSkip`] / [`assert_pinned_err`]).
 ///
 /// `tag` is consulted in addition to (op, device, dtype) to target specific
 /// fixture cases without affecting others.
@@ -444,7 +497,7 @@ fn cascade_skip(
     _device_label: &str,
     _dtype: &str,
     _tag: Option<&str>,
-) -> Option<&'static str> {
+) -> Option<PinnedSkip> {
     // Issue #807: closed by Bugfix Batch 7 dispatch A2. irfft CPU pad/truncate
     // semantics now slice/zero-pad the input spectrum to output_n/2+1 (the
     // canonical Hermitian half-size for output length output_n) instead of
@@ -479,15 +532,21 @@ fn cascade_skip(
     //     Returns NotImplementedOnCuda on CUDA input.
     //   ndim_2_with_s: s-override (pad/truncate) not yet GPU-accelerated;
     //     falls through but ferray-fft rejects CUDA tensors.
+    // Each case below returns NotImplementedOnCuda — probed live at HEAD
+    // (CORE-203 / #1897, 2026-06-11):
+    //   fftn  ndim_3_axes_0 / ndim_2_with_s -> NotImplementedOnCuda { op: "fftn" }
+    //   ifftn ndim_3_axes_0 / ndim_2_with_s -> NotImplementedOnCuda { op: "ifftn" }
     if (_op == "fftn" || _op == "ifftn")
         && _device_label == "cuda:0"
         && let Some("ndim_3_axes_0" | "ndim_2_with_s") = _tag
     {
-        return Some(
-            "#966 partial: non-innermost axis (axes_0) and s-override (with_s) \
-                 not yet GPU-accelerated; innermost-axes cases (axes_neg1, axes_n2_n1) \
-                 now run live via cufftPlanMany",
-        );
+        return Some(PinnedSkip {
+            issue: "#966",
+            reason: "non-innermost axis (axes_0) and s-override (with_s) not yet \
+                     GPU-accelerated; innermost-axes cases (axes_neg1, axes_n2_n1) \
+                     run live via cufftPlanMany",
+            expected_err_op: if _op == "fftn" { "fftn" } else { "ifftn" },
+        });
     }
 
     // Issue #1904 (found running the gpu-feature lane for the first time
@@ -495,12 +554,22 @@ fn cascade_skip(
     // executed them):
     //   rfft: the CUDA fast path in `rfft_norm` gates on `n == input_n`;
     //     n-resize (pad/truncate) falls through to the ferray-fft CPU
-    //     bridge, which rejects CUDA tensors with NotImplementedOnCuda.
-    //   irfft: the CUDA gate covers only `n == 2 * (half_n - 1)` (the even
-    //     default); odd-length and n-resize fall through identically.
+    //     bridge, which rejects CUDA tensors with
+    //     NotImplementedOnCuda { op: "rfft" } (probed at HEAD).
+    //   irfft: the CUDA gate covers only `half_n == output_n / 2 + 1`
+    //     (the canonical Hermitian half-size, even AND odd defaults);
+    //     n-resize falls through to the CPU bridge, which rejects CUDA
+    //     with NotImplementedOnCuda { op: "irfft" } (probed at HEAD).
+    //     The original `len_7_default` entry is RETIRED: the odd-length
+    //     default now satisfies the gate and was probed bit-identical to
+    //     the torch fixture on cuda:0 (f64 exact, f32 at f32 precision),
+    //     so it runs live below.
     //   fft/ifft differentiable: forward CUDA fast paths work, but
     //     FftBackward/IfftBackward route the VJP through the CPU bridge,
-    //     which rejects CUDA grads.
+    //     which rejects CUDA grads at the `.backward()` stage with
+    //     NotImplementedOnCuda { op: "ifft" } (FftBackward applies `ifft`
+    //     to the incoming grad) / { op: "fft" } (IfftBackward applies
+    //     `fft`) — probed at HEAD.
     // torch.fft computes and differentiates all of these on CUDA. Per
     // R-DEFER-3 this skip block only retires when #1904 lands the CUDA
     // paths and the tags below run live.
@@ -508,21 +577,33 @@ fn cascade_skip(
         if _op == "rfft"
             && let Some("len_8_pad_to_16" | "len_8_truncate_to_4") = _tag
         {
-            return Some("#1904: rfft n-resize not GPU-accelerated; CPU bridge rejects CUDA");
+            return Some(PinnedSkip {
+                issue: "#1904",
+                reason: "rfft n-resize not GPU-accelerated; CPU bridge rejects CUDA",
+                expected_err_op: "rfft",
+            });
         }
         if _op == "irfft"
-            && let Some("len_7_default" | "len_8_pad_to_16" | "len_8_truncate_to_4") = _tag
+            && let Some("len_8_pad_to_16" | "len_8_truncate_to_4") = _tag
         {
-            return Some(
-                "#1904: irfft odd-length / n-resize not GPU-accelerated; \
-                 CPU bridge rejects CUDA",
-            );
+            return Some(PinnedSkip {
+                issue: "#1904",
+                reason: "irfft n-resize not GPU-accelerated; CPU bridge rejects CUDA",
+                expected_err_op: "irfft",
+            });
         }
         if _op == "fft_differentiable" || _op == "ifft_differentiable" {
-            return Some(
-                "#1904: FftBackward/IfftBackward route the VJP through the \
-                 CPU ferray-fft bridge, which rejects CUDA grads",
-            );
+            return Some(PinnedSkip {
+                issue: "#1904",
+                reason: "FftBackward/IfftBackward route the VJP through the \
+                         CPU ferray-fft bridge, which rejects CUDA grads at \
+                         the .backward() stage (forward runs live)",
+                expected_err_op: if _op == "fft_differentiable" {
+                    "ifft"
+                } else {
+                    "fft"
+                },
+            });
         }
     }
 
@@ -549,13 +630,6 @@ fn run_fft_1d_for_device(op_name: &str, device_label: &str, device: Device) {
     let tol_f64 = tolerance::F64_FFT;
 
     for f in cases {
-        if let Some(reason) = cascade_skip(op_name, device_label, &f.dtype, f.tag.as_deref()) {
-            eprintln!(
-                "skipping {op_name} {device_label} dtype={} tag={:?}: {reason}",
-                f.dtype, f.tag,
-            );
-            continue;
-        }
         let label = format!("{op_name} {device_label} tag={:?} dtype={}", f.tag, f.dtype);
         let shape = f.a_shape.as_ref().expect("a_shape");
         let a_data = f
@@ -563,6 +637,35 @@ fn run_fft_1d_for_device(op_name: &str, device_label: &str, device: Device) {
             .as_ref()
             .map(F64ListSentinel::as_slice)
             .expect("a_data");
+
+        if let Some(pin) = cascade_skip(op_name, device_label, &f.dtype, f.tag.as_deref()) {
+            eprintln!(
+                "pinned {op_name} {device_label} dtype={} tag={:?}: {} — {}",
+                f.dtype, f.tag, pin.issue, pin.reason,
+            );
+            match f.dtype.as_str() {
+                "float32" => {
+                    let a = upload_f32(make_cpu_f32(a_data, shape, false), device);
+                    let r = match op_name {
+                        "fft" => fft(&a, f.n_arg).map(|_| ()),
+                        "ifft" => ifft(&a, f.n_arg).map(|_| ()),
+                        _ => unreachable!(),
+                    };
+                    assert_pinned_err(r, &pin, &label);
+                }
+                "float64" => {
+                    let a = upload_f64(make_cpu_f64(a_data, shape, false), device);
+                    let r = match op_name {
+                        "fft" => fft(&a, f.n_arg).map(|_| ()),
+                        "ifft" => ifft(&a, f.n_arg).map(|_| ()),
+                        _ => unreachable!(),
+                    };
+                    assert_pinned_err(r, &pin, &label);
+                }
+                other => panic!("unexpected dtype {other:?}"),
+            }
+            continue;
+        }
         let expected = f
             .out_values
             .as_ref()
@@ -623,13 +726,6 @@ fn run_rfft_1d_for_device(op_name: &str, device_label: &str, device: Device) {
     let tol_f64 = tolerance::F64_FFT;
 
     for f in cases {
-        if let Some(reason) = cascade_skip(op_name, device_label, &f.dtype, f.tag.as_deref()) {
-            eprintln!(
-                "skipping {op_name} {device_label} dtype={} tag={:?}: {reason}",
-                f.dtype, f.tag,
-            );
-            continue;
-        }
         let label = format!("{op_name} {device_label} tag={:?} dtype={}", f.tag, f.dtype);
         let shape = f.a_shape.as_ref().expect("a_shape");
         let a_data = f
@@ -637,6 +733,35 @@ fn run_rfft_1d_for_device(op_name: &str, device_label: &str, device: Device) {
             .as_ref()
             .map(F64ListSentinel::as_slice)
             .expect("a_data");
+
+        if let Some(pin) = cascade_skip(op_name, device_label, &f.dtype, f.tag.as_deref()) {
+            eprintln!(
+                "pinned {op_name} {device_label} dtype={} tag={:?}: {} — {}",
+                f.dtype, f.tag, pin.issue, pin.reason,
+            );
+            match f.dtype.as_str() {
+                "float32" => {
+                    let a = upload_f32(make_cpu_f32(a_data, shape, false), device);
+                    let r = match op_name {
+                        "rfft" => rfft(&a, f.n_arg).map(|_| ()),
+                        "irfft" => irfft(&a, f.n_arg).map(|_| ()),
+                        _ => unreachable!(),
+                    };
+                    assert_pinned_err(r, &pin, &label);
+                }
+                "float64" => {
+                    let a = upload_f64(make_cpu_f64(a_data, shape, false), device);
+                    let r = match op_name {
+                        "rfft" => rfft(&a, f.n_arg).map(|_| ()),
+                        "irfft" => irfft(&a, f.n_arg).map(|_| ()),
+                        _ => unreachable!(),
+                    };
+                    assert_pinned_err(r, &pin, &label);
+                }
+                other => panic!("unexpected dtype {other:?}"),
+            }
+            continue;
+        }
         let expected = f
             .out_values
             .as_ref()
@@ -762,13 +887,6 @@ fn run_fftn_for_device(op_name: &str, device_label: &str, device: Device) {
     let tol_f64 = tolerance::F64_FFT;
 
     for f in cases {
-        if let Some(reason) = cascade_skip(op_name, device_label, &f.dtype, f.tag.as_deref()) {
-            eprintln!(
-                "skipping {op_name} {device_label} dtype={} tag={:?}: {reason}",
-                f.dtype, f.tag,
-            );
-            continue;
-        }
         let label = format!("{op_name} {device_label} tag={:?} dtype={}", f.tag, f.dtype);
         let shape = f.a_shape.as_ref().expect("a_shape");
         let a_data = f
@@ -776,15 +894,48 @@ fn run_fftn_for_device(op_name: &str, device_label: &str, device: Device) {
             .as_ref()
             .map(F64ListSentinel::as_slice)
             .expect("a_data");
+        let s_arg: Option<Vec<usize>> = f.s.clone();
+        let axes_arg: Option<Vec<isize>> = f.axes.clone();
+        let s_slice = s_arg.as_deref();
+        let axes_slice = axes_arg.as_deref();
+
+        if let Some(pin) = cascade_skip(op_name, device_label, &f.dtype, f.tag.as_deref()) {
+            eprintln!(
+                "pinned {op_name} {device_label} dtype={} tag={:?}: {} — {}",
+                f.dtype, f.tag, pin.issue, pin.reason,
+            );
+            match f.dtype.as_str() {
+                "float32" => {
+                    let a = upload_f32(make_cpu_f32(a_data, shape, false), device);
+                    let r = match op_name {
+                        "fftn" => fftn(&a, s_slice, axes_slice).map(|_| ()),
+                        "ifftn" => ifftn(&a, s_slice, axes_slice).map(|_| ()),
+                        "rfftn" => rfftn(&a, s_slice, axes_slice).map(|_| ()),
+                        "irfftn" => irfftn(&a, s_slice, axes_slice).map(|_| ()),
+                        _ => unreachable!(),
+                    };
+                    assert_pinned_err(r, &pin, &label);
+                }
+                "float64" => {
+                    let a = upload_f64(make_cpu_f64(a_data, shape, false), device);
+                    let r = match op_name {
+                        "fftn" => fftn(&a, s_slice, axes_slice).map(|_| ()),
+                        "ifftn" => ifftn(&a, s_slice, axes_slice).map(|_| ()),
+                        "rfftn" => rfftn(&a, s_slice, axes_slice).map(|_| ()),
+                        "irfftn" => irfftn(&a, s_slice, axes_slice).map(|_| ()),
+                        _ => unreachable!(),
+                    };
+                    assert_pinned_err(r, &pin, &label);
+                }
+                other => panic!("unexpected dtype {other:?}"),
+            }
+            continue;
+        }
         let expected = f
             .out_values
             .as_ref()
             .map(F64ListSentinel::as_slice)
             .expect("out_values");
-        let s_arg: Option<Vec<usize>> = f.s.clone();
-        let axes_arg: Option<Vec<isize>> = f.axes.clone();
-        let s_slice = s_arg.as_deref();
-        let axes_slice = axes_arg.as_deref();
 
         match f.dtype.as_str() {
             "float32" => {
@@ -1269,19 +1420,11 @@ fn cpu_window_taylor() {
     let file = load_fixtures();
     let cases = cases_for(&file, "window_taylor", "cpu");
     assert!(!cases.is_empty());
+    // NOTE: the #810 cascade entry for window_taylor was retired by
+    // ferray-window 0.3.7; its smoke-only skip branch here is gone with it.
+    // Any future window pin must use the error-asserting `PinnedSkip`
+    // mechanism (CORE-203 / #1897), never a value-unchecked smoke run.
     for f in cases {
-        if let Some(reason) = cascade_skip("window_taylor", "cpu", &f.dtype, f.tag.as_deref()) {
-            eprintln!("skipping window_taylor cpu tag={:?}: {reason}", f.tag);
-            // Still exercise the surface symbols so they appear in coverage,
-            // but don't compare against the reference values.
-            let m = f.m.expect("m");
-            let nbar = f.nbar.expect("nbar");
-            let sll = f.sll.expect("sll");
-            let norm = f.norm.expect("norm");
-            let _ = signal::taylor(m, nbar, sll, norm).expect("signal::taylor smoke");
-            let _ = windows_mod::taylor(m, nbar, sll, norm).expect("windows::taylor smoke");
-            continue;
-        }
         let label = format!("window_taylor cpu tag={:?}", f.tag);
         let m = f.m.expect("m");
         let nbar = f.nbar.expect("nbar");
@@ -1647,13 +1790,6 @@ fn run_fft_diff_for_device(op_name: &str, device_label: &str, device: Device) {
     let tol_f64 = tolerance::F64_FFT;
 
     for f in cases {
-        if let Some(reason) = cascade_skip(op_name, device_label, &f.dtype, f.tag.as_deref()) {
-            eprintln!(
-                "skipping {op_name} {device_label} dtype={} tag={:?}: {reason}",
-                f.dtype, f.tag,
-            );
-            continue;
-        }
         let label = format!("{op_name} {device_label} tag={:?} dtype={}", f.tag, f.dtype,);
         let shape = f.a_shape.as_ref().expect("a_shape");
         let a_data = f
@@ -1666,6 +1802,66 @@ fn run_fft_diff_for_device(op_name: &str, device_label: &str, device: Device) {
             .as_ref()
             .map(F64ListSentinel::as_slice)
             .expect("out_values");
+
+        if let Some(pin) = cascade_skip(op_name, device_label, &f.dtype, f.tag.as_deref()) {
+            eprintln!(
+                "pinned {op_name} {device_label} dtype={} tag={:?}: {} — {}",
+                f.dtype, f.tag, pin.issue, pin.reason,
+            );
+            // For the pinned differentiable ops the CUDA FORWARD fast path
+            // works — only the VJP routes through the CPU bridge — so the
+            // documented error fires at the `.backward()` stage, not at the
+            // forward call. Run the forward live against the fixture, then
+            // pin the backward error.
+            match f.dtype.as_str() {
+                "float32" => {
+                    let a_g = upload_f32(make_cpu_f32(a_data, shape, true), device);
+                    let out = match op_name {
+                        "fft_differentiable" => {
+                            fft_differentiable(&a_g, f.n_arg).expect("fft_diff fwd")
+                        }
+                        "ifft_differentiable" => {
+                            ifft_differentiable(&a_g, f.n_arg).expect("ifft_diff fwd")
+                        }
+                        _ => unreachable!(
+                            "no pinned-error arm for {op_name}; add one before pinning it"
+                        ),
+                    };
+                    check_f32(
+                        &format!("{label} fwd"),
+                        &read_back_f32(&out, device),
+                        expected,
+                        tol_f32,
+                    );
+                    let loss = ferrotorch_core::grad_fns::reduction::sum(&out).expect("sum loss");
+                    assert_pinned_err(loss.backward(), &pin, &format!("{label} backward"));
+                }
+                "float64" => {
+                    let a_g = upload_f64(make_cpu_f64(a_data, shape, true), device);
+                    let out = match op_name {
+                        "fft_differentiable" => {
+                            fft_differentiable(&a_g, f.n_arg).expect("fft_diff fwd")
+                        }
+                        "ifft_differentiable" => {
+                            ifft_differentiable(&a_g, f.n_arg).expect("ifft_diff fwd")
+                        }
+                        _ => unreachable!(
+                            "no pinned-error arm for {op_name}; add one before pinning it"
+                        ),
+                    };
+                    check_f64(
+                        &format!("{label} fwd"),
+                        &read_back_f64(&out, device),
+                        expected,
+                        tol_f64,
+                    );
+                    let loss = ferrotorch_core::grad_fns::reduction::sum(&out).expect("sum loss");
+                    assert_pinned_err(loss.backward(), &pin, &format!("{label} backward"));
+                }
+                other => panic!("unexpected dtype {other:?}"),
+            }
+            continue;
+        }
         let grad_a_exp = f
             .grad_a
             .as_ref()
