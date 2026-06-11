@@ -543,7 +543,16 @@ impl<I: IntElement> IntTensor<I> {
             // Empty min/max are undefined in PyTorch; sum/prod have an identity.
             if self.numel() == 0 {
                 match empty {
-                    Some(id) => return Ok(IntTensor::scalar(id)),
+                    // CORE-103 (#1797): the identity scalar must live on the
+                    // INPUT device — `IntTensor::scalar(id)` alone builds CPU
+                    // storage, silently changing the result device just
+                    // because an input dim is zero (torch: empty CUDA int
+                    // sum/prod stay on cuda). There is no on-device scalar
+                    // constructor, so build on host and explicitly upload the
+                    // one-element identity via the Phase-2a `to` transport —
+                    // this H2D copy constructs the result, it is not a
+                    // compute fallback.
+                    Some(id) => return IntTensor::scalar(id).to(self.device()),
                     None => {
                         return Err(FerrotorchError::InvalidArgument {
                             message: format!(
@@ -579,22 +588,12 @@ impl<I: IntElement> IntTensor<I> {
 
     /// Elementwise `a + b` (wrapping on overflow — PyTorch integer semantics).
     pub fn add(&self, other: &IntTensor<I>) -> FerrotorchResult<IntTensor<I>> {
-        self.binary_op(
-            other,
-            "add",
-            |b, x, y| b.int_add(x, y),
-            |x, y| I::try_from_i64(x.to_i64().wrapping_add(y.to_i64())).unwrap_or(x),
-        )
+        self.binary_op(other, "add", |b, x, y| b.int_add(x, y), int_wrapping_add)
     }
 
     /// Elementwise `a - b` (wrapping).
     pub fn sub(&self, other: &IntTensor<I>) -> FerrotorchResult<IntTensor<I>> {
-        self.binary_op(
-            other,
-            "sub",
-            |b, x, y| b.int_sub(x, y),
-            |x, y| I::try_from_i64(x.to_i64().wrapping_sub(y.to_i64())).unwrap_or(x),
-        )
+        self.binary_op(other, "sub", |b, x, y| b.int_sub(x, y), int_wrapping_sub)
     }
 
     /// Elementwise `a * b` (wrapping).
@@ -615,8 +614,44 @@ impl<I: IntElement> IntTensor<I> {
         )
     }
 
+    /// Reject zero divisors on the CPU path (CORE-102, #1796).
+    ///
+    /// PyTorch's per-device contract, probed live (torch 2.11.0+cu130):
+    /// - **CPU**: `torch.floor_divide` / `torch.remainder` raise
+    ///   `RuntimeError: ZeroDivisionError` when ANY divisor element is zero.
+    /// - **CUDA**: no trap; the zero-divisor lanes hold unspecified values.
+    ///
+    /// `self` is the DIVISOR. CUDA tensors return `Ok(())` — pre-scanning
+    /// device memory would need a D2H round trip or a dedicated kernel and
+    /// would diverge from torch's CUDA contract, which does not error.
+    fn check_zero_divisor(&self, op: &'static str) -> FerrotorchResult<()> {
+        if self.is_cuda() {
+            return Ok(());
+        }
+        if self.data()?.iter().any(|&v| v.to_i64() == 0) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "IntTensor::{op}: ZeroDivisionError (integer division or modulo by zero \
+                     — PyTorch CPU parity)"
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// Elementwise floor division (`torch.floor_divide`: floors toward −∞).
+    ///
+    /// # Errors
+    ///
+    /// On CPU, returns [`FerrotorchError::InvalidArgument`] (carrying
+    /// `ZeroDivisionError`) if any divisor element is zero — PyTorch CPU
+    /// parity (CORE-102, #1796). On CUDA there is no zero-divisor pre-scan:
+    /// matching `torch.floor_divide` on CUDA, the kernel does not trap and
+    /// the zero-divisor lanes hold unspecified values (nonzero lanes are
+    /// exact).
     pub fn floor_div(&self, other: &IntTensor<I>) -> FerrotorchResult<IntTensor<I>> {
+        self.check_binary(other, "floor_div")?;
+        other.check_zero_divisor("floor_div")?;
         self.binary_op(
             other,
             "floor_div",
@@ -626,7 +661,17 @@ impl<I: IntElement> IntTensor<I> {
     }
 
     /// Elementwise remainder (`torch.remainder`: sign of the divisor).
+    ///
+    /// # Errors
+    ///
+    /// On CPU, returns [`FerrotorchError::InvalidArgument`] (carrying
+    /// `ZeroDivisionError`) if any divisor element is zero — PyTorch CPU
+    /// parity (CORE-102, #1796). On CUDA there is no zero-divisor pre-scan:
+    /// matching `torch.remainder` on CUDA, the kernel does not trap and the
+    /// zero-divisor lanes hold unspecified values (nonzero lanes are exact).
     pub fn remainder(&self, other: &IntTensor<I>) -> FerrotorchResult<IntTensor<I>> {
+        self.check_binary(other, "remainder")?;
+        other.check_zero_divisor("remainder")?;
         self.binary_op(
             other,
             "remainder",
@@ -686,7 +731,7 @@ impl<I: IntElement> IntTensor<I> {
             "sum",
             |b, x| b.int_sum(x),
             Some(I::try_from_i64(0).expect("0 fits any IntElement")),
-            |acc, x| I::try_from_i64(acc.to_i64().wrapping_add(x.to_i64())).unwrap_or(acc),
+            int_wrapping_add,
         )
     }
 
@@ -721,6 +766,31 @@ impl<I: IntElement> IntTensor<I> {
     }
 }
 
+/// Wrapping integer add at the element type's width (matches the GPU
+/// `add.s{32,64}` kernel and PyTorch integer overflow semantics).
+///
+/// CORE-101 (#1795): computing in i64 and converting back with
+/// `unwrap_or(x)` returned the unwrapped left operand whenever an i32
+/// boundary was crossed (`i32::MAX + 1` -> `i32::MAX`). Arithmetic must
+/// happen at the concrete width, as [`int_wrapping_mul`] always did.
+fn int_wrapping_add<I: IntElement>(x: I, y: I) -> I {
+    let v = match I::BITS {
+        32 => ((x.to_i64() as i32).wrapping_add(y.to_i64() as i32)) as i64,
+        _ => x.to_i64().wrapping_add(y.to_i64()),
+    };
+    I::try_from_i64(v).unwrap_or(x)
+}
+
+/// Wrapping integer subtract at the element type's width (see
+/// [`int_wrapping_add`]; CORE-101 / #1795).
+fn int_wrapping_sub<I: IntElement>(x: I, y: I) -> I {
+    let v = match I::BITS {
+        32 => ((x.to_i64() as i32).wrapping_sub(y.to_i64() as i32)) as i64,
+        _ => x.to_i64().wrapping_sub(y.to_i64()),
+    };
+    I::try_from_i64(v).unwrap_or(x)
+}
+
 /// Wrapping integer multiply at the element type's width (matches the GPU
 /// `mul.lo.s{32,64}` kernel, which truncates to the operand width).
 fn int_wrapping_mul<I: IntElement>(x: I, y: I) -> I {
@@ -733,9 +803,10 @@ fn int_wrapping_mul<I: IntElement>(x: I, y: I) -> I {
 
 /// CPU reference for `torch.floor_divide`: truncated quotient corrected to
 /// floor toward −∞ (subtract 1 when the remainder is nonzero and the operand
-/// signs differ). Division by zero mirrors the GPU's implementation-defined
-/// result by returning 0 (PyTorch on CUDA does not trap; the value is
-/// unspecified, so we pick a stable sentinel rather than panicking).
+/// signs differ). The `b == 0` arm is unreachable from the public API —
+/// `IntTensor::floor_div` rejects zero divisors before dispatch on CPU
+/// (CORE-102, #1796) — and is kept only as defense-in-depth against a
+/// future caller that skips the pre-scan.
 fn int_floor_div_ref<I: IntElement>(x: I, y: I) -> I {
     let a = x.to_i64();
     let b = y.to_i64();
@@ -753,8 +824,10 @@ fn int_floor_div_ref<I: IntElement>(x: I, y: I) -> I {
 }
 
 /// CPU reference for `torch.remainder`: result has the sign of the divisor.
-/// `remainder(a,b) = a - floor_divide(a,b)*b`. Division by zero returns 0
-/// (see [`int_floor_div_ref`]).
+/// `remainder(a,b) = a - floor_divide(a,b)*b`. The `b == 0` arm is
+/// unreachable from the public API (`IntTensor::remainder` rejects zero
+/// divisors before dispatch on CPU — CORE-102, #1796; see
+/// [`int_floor_div_ref`]).
 fn int_remainder_ref<I: IntElement>(x: I, y: I) -> I {
     let a = x.to_i64();
     let b = y.to_i64();

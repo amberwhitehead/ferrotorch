@@ -69,7 +69,7 @@ Crosslink #618 (introduction) + #624 (matmul + FFT integration).
 - [x] AC-8: `complex_abs_pythagorean` at `complex_tensor.rs:546`,
   `complex_angle_quadrants` at `:553`.
 - [x] AC-9: `complex_matmul_2x2_known_value` at `complex_tensor.rs:612`,
-  `complex_matmul_rejects_shape_mismatch` at `:633`,
+  `complex_matmul_rejects_shape_mismatch in complex_tensor.rs`,
   `complex_matmul_against_real_path_when_im_is_zero` at `:642`.
 - [x] AC-10: `complex_fft_ifft_roundtrip` at `complex_tensor.rs:657`,
   `complex_fft2_ifft2_roundtrip in complex_tensor.rs`.

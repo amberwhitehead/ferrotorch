@@ -243,14 +243,20 @@ impl<T: Float> ComplexTensor<T> {
         }
     }
 
-    /// Pointwise modulus / magnitude: `|a + bi| = sqrt(a^2 + b^2)`.
+    /// Pointwise modulus / magnitude: `|a + bi| = hypot(a, b)`.
     /// Returns a real-valued `Tensor<T>`.
+    ///
+    /// Computed with the element type's stable `hypot` — never the naive
+    /// `sqrt(a*a + b*b)`, whose squaring overflows to `inf` for finite
+    /// magnitudes (≈1e200+ in f64, ≈1e20+ in f32), flushes subnormal
+    /// components to zero, and poisons `(inf, nan)` inputs to `nan` where
+    /// PyTorch (C99 hypot semantics) returns `inf` (CORE-107, #1801).
     pub fn abs(&self) -> FerrotorchResult<Tensor<T>> {
         let data: Vec<T> = self
             .re
             .iter()
             .zip(self.im.iter())
-            .map(|(&a, &b)| (a * a + b * b).sqrt())
+            .map(|(&a, &b)| a.hypot(b))
             .collect();
         Tensor::from_storage(TensorStorage::cpu(data), self.shape.clone(), false)
     }
