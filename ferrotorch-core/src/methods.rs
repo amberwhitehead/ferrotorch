@@ -789,6 +789,13 @@ impl<T: Float> Tensor<T> {
     /// Zero-copy: returns a view with swapped strides.
     pub fn transpose(&self, dim0: usize, dim1: usize) -> FerrotorchResult<Tensor<T>> {
         let ndim = self.ndim();
+        // torch accepts `transpose(0, 0)` on a 0-D tensor: `maybe_wrap_dim`
+        // wraps scalar dims over the range `[-1, 0]`, of which 0 is the only
+        // `usize`-expressible member (CORE-153 / #1847). Any other dim still
+        // errors below, matching torch's IndexError.
+        if ndim == 0 && dim0 == 0 && dim1 == 0 {
+            return Ok(self.clone());
+        }
         if dim0 >= ndim || dim1 >= ndim {
             return Err(crate::error::FerrotorchError::InvalidArgument {
                 message: format!("transpose: dims ({dim0}, {dim1}) out of bounds for ndim {ndim}"),
@@ -1697,6 +1704,17 @@ pub fn chunk_t<T: Float>(
     }
 
     let dim_size = shape[dim];
+
+    // ATen special case (CORE-152 / #1846): chunking an empty dimension
+    // returns `chunks` zero-sized tensors — `chunk` never returns an empty
+    // list. Mirrors `aten/src/ATen/native/TensorShape.cpp` `chunk`:
+    // `split_size == 0 && dim_size == 0` →
+    // `split_with_sizes(vec![0; chunks], dim)`. Live torch 2.11:
+    // `torch.empty(0, 3).chunk(3, 0)` yields three `(0, 3)` tensors.
+    if dim_size == 0 {
+        return split_t(input, &vec![0; chunks], dim);
+    }
+
     let chunk_size = dim_size.div_ceil(chunks);
     let mut split_sizes = Vec::new();
     let mut remaining = dim_size;
@@ -1714,6 +1732,13 @@ pub fn chunk_t<T: Float>(
 /// The sum of `split_sizes` must equal the tensor's size along `dim`.
 /// When gradient tracking is enabled and the input requires grad, each
 /// output chunk is connected to the autograd graph via `SplitBackward`.
+///
+/// On CUDA f32 with a registered backend, chunks are extracted on-device
+/// via `strided_split_f32`; a non-contiguous or offset view is first
+/// materialized on-device via [`contiguous_t`] (CORE-151 / #1845). If the
+/// kernel is unavailable or fails, the split falls back to an explicit
+/// host round trip (`data_vec` gather + re-upload) that preserves the
+/// result device (R-LOUD-2).
 pub fn split_t<T: Float>(
     input: &Tensor<T>,
     split_sizes: &[usize],
@@ -1749,52 +1774,89 @@ pub fn split_t<T: Float>(
     let needs_grad = is_grad_enabled() && input.requires_grad();
 
     // GPU fast path: use strided_split to extract each chunk directly on GPU.
-    if device.is_cuda()
-        && TypeId::of::<T>() == TypeId::of::<f32>()
-        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
-    {
-        let inner: usize = if dim + 1 < ndim {
-            shape[dim + 1..].iter().product()
-        } else {
-            1
-        };
-        let total_along_dim = shape[dim];
-        let in_handle = input.gpu_handle()?;
+    //
+    // View-geometry gate (CORE-151 / #1845 — same `gpu_handle()`-drops-view-
+    // geometry class as #1657): `strided_split_f32` receives the raw base
+    // buffer plus logical-shape-derived extents — its trait signature carries
+    // no source strides and no storage offset — so it is only correct for a
+    // C-contiguous, offset-0 input. Any other view (transpose / permute /
+    // narrow) is materialized ONCE via `contiguous_t` (on-device
+    // `strided_copy_f32` per the #1657 fix) before the per-chunk kernel
+    // loop. `SplitBackward` still attaches to the ORIGINAL input, so
+    // autograd is unaffected by the staging copy.
+    //
+    // Any kernel `Err` abandons the fast path and falls through to the CPU
+    // branch below (the documented fallback, which handles every layout via
+    // `data_vec`) instead of propagating — mirroring `contiguous_t`.
+    'gpu_fast_path: {
+        if device.is_cuda()
+            && TypeId::of::<T>() == TypeId::of::<f32>()
+            && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+        {
+            let staged;
+            let src: &Tensor<T> = if input.is_contiguous() && input.storage_offset() == 0 {
+                input
+            } else {
+                match contiguous_t(input) {
+                    Ok(t) => {
+                        staged = t;
+                        &staged
+                    }
+                    // Materialization failed — the host path below handles
+                    // any layout (and surfaces any genuine readback error).
+                    Err(_) => break 'gpu_fast_path,
+                }
+            };
 
-        let mut results = Vec::with_capacity(split_sizes.len());
-        let mut offset_along_dim = 0usize;
+            let inner: usize = if dim + 1 < ndim {
+                shape[dim + 1..].iter().product()
+            } else {
+                1
+            };
+            let total_along_dim = shape[dim];
+            let Ok(in_handle) = src.gpu_handle() else {
+                break 'gpu_fast_path;
+            };
 
-        for &split_size in split_sizes {
-            let mut chunk_shape = shape.to_vec();
-            chunk_shape[dim] = split_size;
-            let chunk_numel: usize = chunk_shape.iter().product();
+            let mut results = Vec::with_capacity(split_sizes.len());
+            let mut offset_along_dim = 0usize;
 
-            let chunk_handle = backend.strided_split_f32(
-                in_handle,
-                total_along_dim,
-                offset_along_dim,
-                split_size,
-                inner,
-                chunk_numel,
-            )?;
+            for &split_size in split_sizes {
+                let mut chunk_shape = shape.to_vec();
+                chunk_shape[dim] = split_size;
+                let chunk_numel: usize = chunk_shape.iter().product();
 
-            let storage = TensorStorage::gpu(chunk_handle);
-            let t = if needs_grad {
-                let grad_fn = Arc::new(SplitBackward::new(
-                    input.clone(),
-                    dim,
+                let Ok(chunk_handle) = backend.strided_split_f32(
+                    in_handle,
+                    total_along_dim,
                     offset_along_dim,
                     split_size,
-                ));
-                Tensor::from_operation(storage, chunk_shape, grad_fn)?
-            } else {
-                Tensor::from_storage(storage, chunk_shape, false)?
-            };
-            results.push(t);
-            offset_along_dim += split_size;
-        }
+                    inner,
+                    chunk_numel,
+                ) else {
+                    // Kernel failure — discard partial results and use the
+                    // CPU fallback for the whole split.
+                    break 'gpu_fast_path;
+                };
 
-        return Ok(results);
+                let storage = TensorStorage::gpu(chunk_handle);
+                let t = if needs_grad {
+                    let grad_fn = Arc::new(SplitBackward::new(
+                        input.clone(),
+                        dim,
+                        offset_along_dim,
+                        split_size,
+                    ));
+                    Tensor::from_operation(storage, chunk_shape, grad_fn)?
+                } else {
+                    Tensor::from_storage(storage, chunk_shape, false)?
+                };
+                results.push(t);
+                offset_along_dim += split_size;
+            }
+
+            return Ok(results);
+        }
     }
 
     // CPU path (also serves as fallback for non-f32 or missing backend).

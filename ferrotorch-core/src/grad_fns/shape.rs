@@ -390,15 +390,27 @@ impl<T: Float> GradFn<T> for TransposeBackward<T> {
     }
 }
 
-/// Transpose a 2-D tensor, preserving the computation graph.
+/// Transpose a tensor of rank ≤ 2, preserving the computation graph.
+/// Backs `Tensor::t()`.
+///
+/// Mirrors `torch.t` (`aten/src/ATen/native/TensorShape.cpp` `t`):
+/// 0-D and 1-D tensors are returned as is (alias — same storage, same
+/// autograd node), rank > 2 errors with torch's contract message, and
+/// rank 2 transposes (CORE-153 / #1847).
 ///
 /// CPU path: zero-copy O(1) stride swap — shares storage with the input.
 /// GPU path: runs a transpose kernel (data copy on device).
 pub fn transpose_2d<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if input.ndim() != 2 {
+    let ndim = input.ndim();
+    if ndim > 2 {
+        // torch: "t() expects a tensor with <= 2 dimensions, but self is 3D"
         return Err(FerrotorchError::InvalidArgument {
-            message: format!("transpose_2d requires 2-D tensor, got {:?}", input.shape()),
+            message: format!("t() expects a tensor with <= 2 dimensions, but self is {ndim}D"),
         });
+    }
+    if ndim < 2 {
+        // torch.t pass-through: `self.transpose(0, 0)` — the identity.
+        return Ok(input.clone());
     }
 
     // Zero-copy stride swap — works on both CPU and GPU.
