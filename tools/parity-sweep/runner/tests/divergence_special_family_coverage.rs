@@ -31,14 +31,21 @@
 //!
 //! Tracking: crosslink #1653 (impl side; parent #1651).
 //!
+//! Oracle availability (CORE-206 / #1900): soft-skip prints a `VACUOUS-PASS:`
+//! marker; `PARITY_ORACLE_REQUIRED=1` fails closed (see `tests/common/mod.rs`).
+//! (`special_family_is_listed_in_dispatch_ops` needs no oracle and always runs.)
+//!
 //! Run with:
 //!   LD_LIBRARY_PATH="$HOME/.local/lib:$LD_LIBRARY_PATH" \
+//!     PARITY_ORACLE_REQUIRED=1 \
 //!     cargo test -p parity-sweep-runner \
 //!     --test divergence_special_family_coverage -- --nocapture
 
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+mod common;
 
+use std::process::Command;
+
+use common::OracleProc;
 use serde_json::{Value, json};
 
 /// The full set of torch.special transcendental op_db names the runner arms of
@@ -60,54 +67,6 @@ const SPECIAL_FAMILY: &[&str] = &[
     "special.scaled_modified_bessel_k1",
     "special.zeta",
 ];
-
-struct OracleProc {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-}
-
-impl OracleProc {
-    fn spawn() -> Option<Self> {
-        let mut child = Command::new("python3")
-            .arg("../oracle.py")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        let stdin = child.stdin.take()?;
-        let stdout = BufReader::new(child.stdout.take()?);
-        let mut p = OracleProc {
-            child,
-            stdin,
-            stdout,
-        };
-        let ready = p.request(json!({"cmd": "ready"}))?;
-        if ready.get("ok").and_then(Value::as_bool) != Some(true) {
-            return None;
-        }
-        Some(p)
-    }
-
-    fn request(&mut self, req: Value) -> Option<Value> {
-        let line = serde_json::to_string(&req).ok()?;
-        self.stdin.write_all(line.as_bytes()).ok()?;
-        self.stdin.write_all(b"\n").ok()?;
-        self.stdin.flush().ok()?;
-        let mut resp = String::new();
-        self.stdout.read_line(&mut resp).ok()?;
-        serde_json::from_str(&resp).ok()
-    }
-}
-
-impl Drop for OracleProc {
-    fn drop(&mut self) {
-        let _ = self.request(json!({"cmd": "shutdown"}));
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 
 /// The runner binary's `dispatch_ops()` list (the `&'static [&'static str]`
 /// the sweep enumerates) MUST include every torch.special transcendental op
@@ -151,8 +110,8 @@ fn special_family_is_listed_in_dispatch_ops() {
 /// sample with "unknown op" would prove the name key is wrong.
 #[test]
 fn special_family_samples_from_op_db_without_unknown_op() {
+    // Soft-skip marker / fail-closed panic handled in `common` (#1900).
     let Some(mut oracle) = OracleProc::spawn() else {
-        eprintln!("SKIP: torch oracle unavailable; cannot probe special-family coverage");
         return;
     };
 

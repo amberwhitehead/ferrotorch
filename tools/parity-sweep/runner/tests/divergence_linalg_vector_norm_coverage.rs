@@ -38,78 +38,20 @@
 //!
 //! Tracking: crosslink #1599 (closed; parent #1344).
 //!
+//! Oracle availability (CORE-206 / #1900): soft-skip prints a `VACUOUS-PASS:`
+//! marker; `PARITY_ORACLE_REQUIRED=1` fails closed (see `tests/common/mod.rs`).
+//!
 //! Run with:
 //!   LD_LIBRARY_PATH="$HOME/.local/lib:$LD_LIBRARY_PATH" \
+//!     PARITY_ORACLE_REQUIRED=1 \
 //!     cargo test -p parity-sweep-runner \
 //!     --test divergence_linalg_vector_norm_coverage -- --nocapture
 
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+mod common;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use common::{OracleProc, tensor_arg};
 use serde_json::{Value, json};
-
-struct OracleProc {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-}
-
-impl OracleProc {
-    fn spawn() -> Option<Self> {
-        let mut child = Command::new("python3")
-            .arg("../oracle.py")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        let stdin = child.stdin.take()?;
-        let stdout = BufReader::new(child.stdout.take()?);
-        let mut p = OracleProc {
-            child,
-            stdin,
-            stdout,
-        };
-        let ready = p.request(json!({"cmd": "ready"}))?;
-        if ready.get("ok").and_then(Value::as_bool) != Some(true) {
-            return None;
-        }
-        Some(p)
-    }
-
-    fn request(&mut self, req: Value) -> Option<Value> {
-        let line = serde_json::to_string(&req).ok()?;
-        self.stdin.write_all(line.as_bytes()).ok()?;
-        self.stdin.write_all(b"\n").ok()?;
-        self.stdin.flush().ok()?;
-        let mut resp = String::new();
-        self.stdout.read_line(&mut resp).ok()?;
-        serde_json::from_str(&resp).ok()
-    }
-}
-
-impl Drop for OracleProc {
-    fn drop(&mut self) {
-        let _ = self.request(json!({"cmd": "shutdown"}));
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn tensor_arg(data: &[f32], shape: &[usize]) -> Value {
-    let mut bytes = Vec::with_capacity(data.len() * 4);
-    for &x in data {
-        bytes.extend_from_slice(&x.to_le_bytes());
-    }
-    json!({
-        "__tensor__": {
-            "shape": shape,
-            "dtype": "float32",
-            "data_b64": B64.encode(&bytes),
-        }
-    })
-}
 
 /// PINS THE COVERAGE GAP: the oracle must expose a `vector_norm` custom-op
 /// adapter (the same `_CUSTOM_OPS` mechanism `solve`/`qr`/`cholesky`/`inv`/
@@ -123,8 +65,8 @@ fn tensor_arg(data: &[f32], shape: &[usize]) -> Value {
 /// dot/mv/mm_bt lacked arms, omitting vector_norm).
 #[test]
 fn vector_norm_has_a_runner_arm_or_oracle_adapter() {
+    // Soft-skip marker / fail-closed panic handled in `common` (#1900).
     let Some(mut oracle) = OracleProc::spawn() else {
-        eprintln!("SKIP: torch oracle unavailable; cannot probe vector_norm coverage");
         return;
     };
 

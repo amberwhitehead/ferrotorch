@@ -108,6 +108,28 @@ jobs:
             --release \
             --tests
 
+      - name: Diagnostic — torch version for the parity oracle
+        # Precedes the parity-smoke step so a missing/broken torch install is
+        # legible in the log: this line fails (and is MEANT to fail) when the
+        # runner has no python3+torch, instead of the smoke step dying with a
+        # bare spawn error.
+        run: python3 -c "import torch; print(torch.__version__)"
+
+      - name: Parity smoke — live-torch oracle suite (fail-closed)
+        # CORE-206 / crosslink #1900: the parity-sweep runner's test suites
+        # talk to the live PyTorch oracle (tools/parity-sweep/oracle.py).
+        # PARITY_ORACLE_REQUIRED=1 makes an unavailable oracle a hard PANIC
+        # (tools/parity-sweep/runner/tests/common/mod.rs) instead of the old
+        # vacuous green skip. If this self-hosted runner does not (yet) have
+        # python3+torch, this step FAILS — that is the CORRECT behavior under
+        # goal-audit-fix.md: a missing oracle must be visible red, never
+        # silent green. Provisioning a torch venv on the runner is a
+        # runner-ops decision; do NOT soften this step to get a green
+        # nightly.
+        env:
+          PARITY_ORACLE_REQUIRED: "1"
+        run: cargo test -p parity-sweep-runner --release
+
       - name: cargo test --features cuda -- --ignored (perf / known-slow)
         # `--ignored` opts into the long-running benches that PR-level CI
         # skips. Failures here are tracked but don't necessarily fail the

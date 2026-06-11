@@ -21,18 +21,20 @@
 //!   - `torch.linalg.eigh` : aten/src/ATen/native/BatchLinearAlgebra.cpp
 //!   - `torch.linalg.eig`  : aten/src/ATen/native/BatchLinearAlgebra.cpp:3075
 //!
-//! If the oracle (python3 + torch) is unavailable the tests `eprintln!` and
-//! return Ok — they are an audit artifact, not a CI gate. Run explicitly with:
+//! Oracle availability (CORE-206 / #1900, fail-closed gate in
+//! `tests/common/mod.rs`): if the oracle (python3 + torch) is unavailable the
+//! tests print a single-line `VACUOUS-PASS:` marker and soft-skip — UNLESS
+//! `PARITY_ORACLE_REQUIRED=1` is set (as in the nightly parity-smoke step),
+//! in which case they PANIC with diagnostics. Run explicitly with:
 //!   LD_LIBRARY_PATH="$HOME/.local/lib:$LD_LIBRARY_PATH" \
+//!     PARITY_ORACLE_REQUIRED=1 \
 //!     cargo test -p parity-sweep-runner --test divergence_linalg_decomp_gauge \
 //!     -- --nocapture
 
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+mod common;
 
-use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use common::OracleProc;
 use ferrotorch_core::{Tensor, from_vec};
-use serde_json::{Value, json};
 
 // Runner's decomposition tolerance (`tolerance_for` in main.rs): (1e-4, 1e-6).
 const RTOL: f32 = 1e-4;
@@ -74,125 +76,6 @@ fn gate(
         }
     }
     Ok(())
-}
-
-struct OracleProc {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-}
-
-impl OracleProc {
-    /// Spawn the python oracle subprocess. Returns None if torch/python is
-    /// unavailable (the audit then degrades to a no-op with an eprintln).
-    fn spawn() -> Option<Self> {
-        // tests run with CWD = crate dir (tools/parity-sweep/runner). The
-        // oracle lives one level up.
-        let oracle_path = "../oracle.py";
-        let mut child = Command::new("python3")
-            .arg(oracle_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        let stdin = child.stdin.take()?;
-        let stdout = BufReader::new(child.stdout.take()?);
-        let mut p = OracleProc {
-            child,
-            stdin,
-            stdout,
-        };
-        // Handshake: confirm torch is importable.
-        let ready = p.request(json!({"cmd": "ready"}))?;
-        if ready.get("ok").and_then(Value::as_bool) != Some(true) {
-            return None;
-        }
-        Some(p)
-    }
-
-    fn request(&mut self, req: Value) -> Option<Value> {
-        let line = serde_json::to_string(&req).ok()?;
-        self.stdin.write_all(line.as_bytes()).ok()?;
-        self.stdin.write_all(b"\n").ok()?;
-        self.stdin.flush().ok()?;
-        let mut resp = String::new();
-        self.stdout.read_line(&mut resp).ok()?;
-        serde_json::from_str(&resp).ok()
-    }
-
-    /// Live-torch `execute` of a custom op on a single 2-D f32 matrix arg.
-    /// Returns the flattened f32 output + its shape (the gauge-invariant
-    /// derived quantity the oracle adapter emits). Args ride the oracle's
-    /// `{"__tensor__": {shape, dtype, data_b64}}` wire envelope.
-    fn execute_mat(
-        &mut self,
-        op: &str,
-        data: &[f32],
-        shape: &[usize],
-    ) -> Option<(Vec<f32>, Vec<usize>)> {
-        let mut bytes = Vec::with_capacity(data.len() * 4);
-        for &x in data {
-            bytes.extend_from_slice(&x.to_le_bytes());
-        }
-        let arg = json!({
-            "__tensor__": {
-                "shape": shape,
-                "dtype": "float32",
-                "data_b64": B64.encode(&bytes),
-            }
-        });
-        let resp =
-            self.request(json!({"cmd": "execute", "op": op, "args": [arg], "kwargs": {}}))?;
-        if resp.get("ok").and_then(Value::as_bool) != Some(true) {
-            eprintln!("oracle execute {op} err: {resp:?}");
-            return None;
-        }
-        decode_tensor(resp.get("output")?)
-    }
-}
-
-impl Drop for OracleProc {
-    fn drop(&mut self) {
-        let _ = self.request(json!({"cmd": "shutdown"}));
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Decode the oracle's `{"__tensor__": {shape, dtype, data_b64}}` envelope to
-/// (flattened f32, shape). The custom decomposition adapters all emit f32
-/// tensors via `encode_arg` -> `tensor_to_wire`.
-fn decode_tensor(v: &Value) -> Option<(Vec<f32>, Vec<usize>)> {
-    let obj = v.as_object()?;
-    let inner = obj.get("__tensor__").and_then(Value::as_object)?;
-    let shape: Vec<usize> = inner
-        .get("shape")?
-        .as_array()?
-        .iter()
-        .map(|x| x.as_u64().unwrap_or(0) as usize)
-        .collect();
-    let b64 = inner.get("data_b64").and_then(Value::as_str)?;
-    let bytes = B64.decode(b64).ok()?;
-    let dtype = inner
-        .get("dtype")
-        .and_then(Value::as_str)
-        .unwrap_or("float32");
-    let data: Vec<f32> = match dtype {
-        "float32" => bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect(),
-        "int64" => bytes
-            .chunks_exact(8)
-            .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32)
-            .collect(),
-        other => {
-            eprintln!("decode_tensor: unexpected dtype {other}");
-            return None;
-        }
-    };
-    Some((data, shape))
 }
 
 // ----- ferrotorch-side gauge-invariant probes (mirror of main.rs helpers) ---
@@ -249,8 +132,9 @@ fn sample_3x3() -> (Vec<f32>, Vec<usize>) {
 
 #[test]
 fn divergence_svd_gate_is_real_and_tight() {
+    // `common::OracleProc::spawn` prints the `VACUOUS-PASS:` marker on soft
+    // skip and PANICS under PARITY_ORACLE_REQUIRED=1 (CORE-206 / #1900).
     let Some(mut oracle) = OracleProc::spawn() else {
-        eprintln!("SKIP: torch oracle unavailable; cannot run live-parity discrimination");
         return;
     };
     let (data, shape) = sample_3x3();
@@ -295,8 +179,8 @@ fn divergence_svd_gate_is_real_and_tight() {
 
 #[test]
 fn divergence_eigh_gate_is_real_and_tight() {
+    // Soft-skip marker / fail-closed panic handled in `common` (#1900).
     let Some(mut oracle) = OracleProc::spawn() else {
-        eprintln!("SKIP: torch oracle unavailable");
         return;
     };
     // Symmetric, well-separated eigenvalues (mirror `_linalg_symmetric_matrices`).
@@ -343,8 +227,8 @@ fn divergence_eigh_gate_is_real_and_tight() {
 
 #[test]
 fn divergence_eig_complex_imaginary_part_is_compared() {
+    // Soft-skip marker / fail-closed panic handled in `common` (#1900).
     let Some(mut oracle) = OracleProc::spawn() else {
-        eprintln!("SKIP: torch oracle unavailable");
         return;
     };
     // A 2x2 rotation-like matrix with a genuine complex-conjugate eigenvalue
