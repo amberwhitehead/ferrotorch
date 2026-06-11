@@ -163,12 +163,13 @@ fn audit_56e81de88_scatter_reduce_amax_breaks_autograd_chain() {
     );
 }
 
-/// Divergence C-cont: same for prod (the test that is currently mis-pinned
-/// against the wrong upstream behavior in the existing critic test
-/// `divergence_scatter_reduce_prod_docstring_claims_no_grad_fn_but_code_attaches_one`).
-/// The PRIOR critic test asserts `out.grad_fn().is_none()` based on the
-/// docstring's claim — but that docstring claim was WRONG against upstream
-/// from day one. This new test pins the correct upstream behavior.
+/// Divergence C-cont: same for prod (the case that was, at audit time,
+/// mis-pinned against the wrong upstream behavior by the then-extant critic
+/// test `divergence_scatter_reduce_prod_docstring_claims_no_grad_fn_but_code_attaches_one`;
+/// that test asserted `out.grad_fn().is_none()` from a docstring claim that
+/// was WRONG against upstream from day one — since rewritten at `2071a0de2`
+/// to assert attach, see the RESOLVED note at the bottom of this file).
+/// This test pins the correct upstream behavior.
 #[test]
 fn audit_56e81de88_scatter_reduce_prod_must_attach_grad_fn_per_upstream() {
     let input =
@@ -193,17 +194,19 @@ fn audit_56e81de88_scatter_reduce_prod_must_attach_grad_fn_per_upstream() {
     );
 }
 
-/// Pre-existing critic test `divergence_scatter_reduce_prod_docstring_claims_no_grad_fn_but_code_attaches_one`
-/// asserts the OPPOSITE of the upstream truth above. That test now passes
-/// not because the bug is fixed but because the bug was made worse (chain
-/// silently broken instead of erroring inside backward).
-///
-/// This audit-pin demonstrates the inconsistency: BOTH assertions cannot
-/// be simultaneously consistent with upstream.
-#[test]
-#[ignore = "documentation pin only: shows the prior critic test is wrong"]
-fn audit_56e81de88_prior_critic_test_was_pinned_against_wrong_truth() {
-    // Intentional left blank — the body of this test would just be a long
-    // comment block. See module docstring section C above and the live
-    // oracle output in the audit report.
-}
+// RESOLVED (CORE-207 / #1901 hygiene pass): an empty `#[ignore =
+// "documentation pin only"]` test used to sit here documenting that the
+// prior critic test
+// `divergence_scatter_reduce_prod_docstring_claims_no_grad_fn_but_code_attaches_one`
+// asserted the OPPOSITE of the upstream truth pinned above (grad_fn IS
+// attached for non-sum scatter_reduce). That inconsistency no longer
+// exists: commit `2071a0de2` ("critic: scatter_reduce prod/amax/amin
+// backward VERIFIED correct vs torch (#1570)") rewrote the prior test as
+// `scatter_reduce_prod_attaches_grad_fn_and_matches_torch` in
+// `divergence_indexing_batch_8e98ee0d2_scatter_reduce.rs`, which asserts
+// `out.grad_fn().is_some()` — the SAME contract as
+// `audit_56e81de88_scatter_reduce_prod_must_attach_grad_fn_per_upstream`
+// above, and both pass at HEAD. The empty ignored pin carried no
+// tracking-issue reference and asserted nothing, so it was deleted
+// rather than laundered with a fake issue (R-AHON-1: the finding it
+// documented is stale).

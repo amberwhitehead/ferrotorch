@@ -130,14 +130,29 @@ jobs:
           PARITY_ORACLE_REQUIRED: "1"
         run: cargo test -p parity-sweep-runner --release
 
-      - name: cargo test --features cuda -- --ignored (perf / known-slow)
+      - name: cargo test -- --ignored (perf / known-slow / core ignored set)
         # `--ignored` opts into the long-running benches that PR-level CI
-        # skips. Failures here are tracked but don't necessarily fail the
-        # nightly until a baseline is established (allow continue).
+        # skips, plus ferrotorch-core's ignored set (CORE-207 / crosslink
+        # #1901: this step used to target only ferrotorch-gpu, so core's
+        # ignored tests — MKL byte-exact probes, l2-norm ULP residuals,
+        # the network-aware autograd-parity harness, diagnostics — ran on
+        # no tier at all). Features are package-qualified because two
+        # `-p` selections are in play: `ferrotorch-gpu/cuda` is the same
+        # backend lane as the sweeps above, and `ferrotorch-core/gpu`
+        # compiles core's full GPU test corpus (same rationale as the
+        # `--tests` step / CORE-191).
+        #
+        # continue-on-error is a TRACKED BASELINE, not permanent policy:
+        # crosslink #1928 ("nightly --ignored baseline") tracks recording
+        # this step's first real pass/fail set on the CUDA runner, filing
+        # or fixing each failure, and then REMOVING continue-on-error so
+        # the step gates.
         continue-on-error: true
         run: |
           cargo test \
             -p ferrotorch-gpu \
-            --features cuda \
+            -p ferrotorch-core \
+            --features ferrotorch-gpu/cuda \
+            --features ferrotorch-core/gpu \
             --release \
             -- --ignored

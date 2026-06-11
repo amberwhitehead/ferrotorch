@@ -2269,8 +2269,12 @@ fn s3_struct_anchor_parser_is_precise_and_catches_corruption() {
 /// unresolvable across `.design/`. `#[ignore]` so it does not gate CI; run
 /// with `--ignored -- --nocapture` to see the cleanup scope. Kept as a
 /// permanent diagnostic so the cleanup campaign can re-measure residual.
+/// The reason string leads with the `diagnostic:` marker that
+/// `ignore_reasons_carry_issue_ref_or_diagnostic_marker` (CORE-207 /
+/// #1901) recognizes as the sanctioned alternative to a tracking-issue
+/// reference.
 #[test]
-#[ignore = "diagnostic — run with --ignored --nocapture to print single-span anchor counts"]
+#[ignore = "diagnostic: run with --ignored --nocapture to print single-span anchor counts"]
 fn report_single_span_anchor_counts() {
     let root = workspace_root();
     let index = build_src_index(&root);
@@ -2976,5 +2980,141 @@ fn all_design_docs_single_span_anchors_resolve_at_head() {
         "{n} single-span symbol anchor(s) are STALE (keyword-led + bare-ident) / UNRESOLVABLE (any kind) out of {total} keyword-led + {bare_ident_seen} bare-ident scanned (#1668/#1669 crate-disambiguating resolver / goal.md S3 R-CITE-2b):\n\n{body}",
         n = failures.len(),
         body = failures.join("\n\n"),
+    );
+}
+
+/// CORE-207 / #1901 ignore-reason hygiene gate.
+///
+/// Scans every `.rs` file under `ferrotorch-core/tests/` (recursively) for
+/// `#[ignore]` attributes and requires each reason string to carry either
+/// a tracking-issue reference (`#<digits>`, e.g. `tracking #1617`) or the
+/// explicit `diagnostic:` marker (a sanctioned operator-run lane that gates
+/// nothing — the marker names the intent so R-VERIFY-1 audits can tell a
+/// tracked divergence from a report-mode tool). A bare `#[ignore]` with no
+/// reason at all is always a violation: it is exactly the untracked-skip
+/// pattern CORE-207 flagged.
+///
+/// Detection is line-anchored: rustfmt (enforced crate-wide via
+/// `cargo fmt --check` in CI) places attributes on their own line, so an
+/// attribute occurrence is a line whose trimmed text starts with
+/// `#[ignore`. Prose mentions in comments (`// NOT #[ignore]'d`) and
+/// string literals never start a trimmed line with that token in this
+/// corpus, and any new violation that tried to hide mid-line would be
+/// reformatted onto its own line by the fmt gate before it could land.
+/// Multi-line attributes are handled by consuming lines until the
+/// bracket depth returns to zero.
+#[test]
+fn ignore_reasons_carry_issue_ref_or_diagnostic_marker() {
+    // Tracked baseline exemptions — each entry is (file basename, exact
+    // reason substring) and MUST cite an open issue that tracks removing
+    // it. The gate still fails on any NEW untracked ignore.
+    //
+    // #1929: conformance_autograd_parity.rs predates this gate and was
+    // out of scope for the #1901 dispatch; the issue tracks rewording its
+    // reason (or attaching the #1171 ref) and deleting this entry.
+    const BASELINE: &[(&str, &str)] = &[(
+        "conformance_autograd_parity.rs",
+        "network-aware real-artifact harness; run with --ignored",
+    )];
+
+    let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut rs_files: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![tests_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).expect("read_dir tests/") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                rs_files.push(path);
+            }
+        }
+    }
+    assert!(
+        rs_files.len() >= 50,
+        "sanity floor: expected >=50 .rs files under ferrotorch-core/tests/, found {} — has the walker broken?",
+        rs_files.len()
+    );
+    rs_files.sort();
+
+    let issue_ref = |reason: &str| -> bool {
+        // `#` immediately followed by at least one ASCII digit, anywhere
+        // in the reason (covers `#1617`, `local #1543`,
+        // `forecast-bio/ferrotorch#25`).
+        reason
+            .as_bytes()
+            .windows(2)
+            .any(|w| w[0] == b'#' && w[1].is_ascii_digit())
+    };
+
+    let mut violations: Vec<String> = Vec::new();
+    let mut attrs_seen = 0usize;
+    for path in &rs_files {
+        let text = fs::read_to_string(path).expect("read test file");
+        let basename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("utf8 basename")
+            .to_string();
+        let lines: Vec<&str> = text.lines().collect();
+        let mut i = 0usize;
+        while i < lines.len() {
+            let trimmed = lines[i].trim_start();
+            if !trimmed.starts_with("#[ignore") {
+                i += 1;
+                continue;
+            }
+            attrs_seen += 1;
+            let lineno = i + 1;
+            // Collect the full attribute text (multi-line safe): consume
+            // until bracket depth closes.
+            let mut attr = String::new();
+            let mut depth = 0i32;
+            loop {
+                let l = if attr.is_empty() {
+                    lines[i].trim_start()
+                } else {
+                    lines[i]
+                };
+                attr.push_str(l);
+                attr.push('\n');
+                depth += l.matches('[').count() as i32 - l.matches(']').count() as i32;
+                if depth <= 0 || i + 1 >= lines.len() {
+                    break;
+                }
+                i += 1;
+            }
+            let ok = match attr.find('=') {
+                // Bare `#[ignore]` — no reason string at all.
+                None => false,
+                Some(_) => attr.contains("diagnostic:") || issue_ref(&attr),
+            };
+            let baselined = BASELINE
+                .iter()
+                .any(|(file, reason)| *file == basename && attr.contains(reason));
+            if !ok && !baselined {
+                violations.push(format!(
+                    "{basename}:{lineno}: #[ignore] reason carries neither a '#<digits>' \
+                     tracking-issue reference nor the 'diagnostic:' marker:\n    {}",
+                    attr.trim_end()
+                ));
+            }
+            i += 1;
+        }
+    }
+    // Sanity floor: the corpus has a known population of real #[ignore]
+    // attributes (9 at gate-introduction time). Zero matches means the
+    // line-anchored detector has silently stopped seeing attributes.
+    assert!(
+        attrs_seen >= 8,
+        "sanity floor: expected >=8 #[ignore] attributes across ferrotorch-core/tests/, found {attrs_seen} — has the detector broken?"
+    );
+    assert!(
+        violations.is_empty(),
+        "{} untracked #[ignore] attribute(s) (CORE-207 / #1901): every ignore reason must \
+         contain '#<digits>' (tracking issue) or 'diagnostic:' (operator-run report lane), \
+         or be a baseline entry citing an open issue:\n\n{}",
+        violations.len(),
+        violations.join("\n\n")
     );
 }

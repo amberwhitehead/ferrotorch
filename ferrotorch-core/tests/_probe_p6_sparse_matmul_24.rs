@@ -20,10 +20,19 @@
 //! This probe is **gated on `#[cfg(feature = "cusparselt")]`**: the
 //! default workspace build (`--features gpu` only) doesn't include it,
 //! so the regression sentinel only runs when the operator is actually
-//! built. If `libcusparseLt.so` is not installed at runtime, the test
-//! detects the resulting backend error and skips with a clear message
-//! rather than panicking — `LIBCUSPARSELT_RUNTIME_MISSING=1` can be
-//! set to unconditionally skip.
+//! built. Library absence at runtime is a HARD FAILURE by default
+//! (CORE-207 / #1901: the previous error-string sniff for
+//! `cusparseLt`/`CUSPARSE_STATUS_*` substrings made the probe
+//! green-when-absent). The ONLY sanctioned skip is the explicit opt-out
+//! `CUSPARSELT_ABSENT_OK=1`, which acknowledges the host has no
+//! `libcusparseLt.so` (or the backend was built without the
+//! `ferrotorch-gpu/cusparselt` FFI) and soft-skips with a single-line
+//! `VACUOUS-PASS:` marker — the same convention the parity-sweep
+//! runner uses for an absent torch oracle (CORE-206 / #1900). Both
+//! absence manifestations are covered: a structured backend `Err`, and
+//! the silent CPU fall-through in `sparse.rs::sparse_matmul_24` (which
+//! otherwise fails the `is_cuda` assertion, observed red on a 3090
+//! without the FFI built).
 
 #![cfg(all(feature = "gpu", feature = "cusparselt"))]
 
@@ -36,6 +45,14 @@ use ferrotorch_core::sparse::{SemiStructuredSparseTensor, sparse_matmul_24};
 const F32_MATMUL_GPU: f32 = 1e-3;
 
 static GPU_INIT: Once = Once::new();
+
+/// Explicit opt-out for hosts without cuSPARSELt (CORE-207 / #1901).
+/// Exactly `"1"` — not mere presence — so an empty or stale export
+/// can't silently re-enable the green-when-absent behavior this
+/// replaced.
+fn cusparselt_absent_ok() -> bool {
+    std::env::var("CUSPARSELT_ABSENT_OK").as_deref() == Ok("1")
+}
 
 fn ensure_cuda_backend() {
     GPU_INIT.call_once(|| {
@@ -97,29 +114,49 @@ fn check_shape(m: usize, k: usize, n: usize) {
     let out = match result {
         Ok(t) => t,
         Err(err) => {
-            // The library returned an error. If libcusparseLt.so isn't
-            // present at runtime the backend will surface a status code
-            // — we treat that as a skip for this probe rather than a
-            // hard failure.
-            let msg = format!("{err:?}");
-            if msg.contains("CUSPARSE_STATUS_NOT_INITIALIZED")
-                || msg.contains("CUSPARSE_STATUS_NOT_SUPPORTED")
-                || msg.contains("cusparseLt")
-                || msg.contains("libcusparseLt")
-                || std::env::var("LIBCUSPARSELT_RUNTIME_MISSING").is_ok()
-            {
+            // The library returned an error. No error-string sniffing
+            // here (CORE-207 / #1901: matching `cusparseLt` /
+            // `CUSPARSE_STATUS_*` substrings made every
+            // library-missing host pass green). Library absence must
+            // be acknowledged explicitly via CUSPARSELT_ABSENT_OK=1;
+            // anything else is a hard failure.
+            if cusparselt_absent_ok() {
                 eprintln!(
-                    "skipping P6 probe (m={m}, k={k}, n={n}): cuSPARSELt unavailable at runtime: {msg}"
+                    "VACUOUS-PASS: P6 probe (m={m}, k={k}, n={n}) skipped — \
+                     CUSPARSELT_ABSENT_OK=1 acknowledges cuSPARSELt is absent on this host; \
+                     sparse_matmul_24 error: {err:?}"
                 );
                 return;
             }
-            panic!("sparse_matmul_24 GPU path failed unexpectedly: {msg}");
+            panic!(
+                "sparse_matmul_24 GPU path failed: {err:?}. If libcusparseLt.so is genuinely \
+                 not installed on this host (or ferrotorch-gpu was built without the \
+                 `cusparselt` FFI feature), set CUSPARSELT_ABSENT_OK=1 to opt into a \
+                 documented VACUOUS-PASS skip; otherwise this is a real regression."
+            );
         }
     };
 
+    // The silent CPU fall-through in `sparse.rs::sparse_matmul_24`
+    // (backend declined: FFI feature off or libcusparseLt.so missing)
+    // returns Ok with a CPU-resident result — the second
+    // green-when-absent manifestation. Under the explicit opt-out it is
+    // a documented skip; otherwise the `is_cuda` assertion below stays
+    // a hard failure.
+    if !out.is_cuda() && cusparselt_absent_ok() {
+        eprintln!(
+            "VACUOUS-PASS: P6 probe (m={m}, k={k}, n={n}) skipped — \
+             CUSPARSELT_ABSENT_OK=1 acknowledges cuSPARSELt is absent on this host; \
+             sparse_matmul_24 fell through to the dense CPU reference path."
+        );
+        return;
+    }
+
     assert!(
         out.is_cuda(),
-        "sparse_matmul_24 output must remain on CUDA when input was CUDA"
+        "sparse_matmul_24 output must remain on CUDA when input was CUDA \
+         (the backend declined and the op fell through to the dense CPU path; \
+         set CUSPARSELT_ABSENT_OK=1 ONLY if cuSPARSELt is genuinely absent on this host)"
     );
     assert_eq!(out.shape(), &[m, n]);
 
