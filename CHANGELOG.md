@@ -51,6 +51,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- Divergence: ferrotorch-core rrelu(training=true) multiplies in scalar_t not opmath_t — bf16 last-bit mismatch vs torch (pytorch aten/src/ATen/native/Activation.cpp:598-599) (#1953)
+- prelu backward: x==0 routed to the passthrough branch (grad 1) — torch routes to the weight branch (grad = alpha) (#1951)
+- CORE-045: Several activation APIs fail on CUDA only when autograd is enabled (#1739)
+- CORE-044: `rrelu(training=true)` silently executes inference behavior (#1738)
+- CORE-013: Memory-format conversion discards autograd history while retaining `requires_grad` (#1707)
+- CORE-012: Device transfer of a gradient-tracking leaf severs the source graph (#1706)
+- CORE-011: Autograd-aware reshape of a non-contiguous GPU tensor silently moves it to CPU (#1705)
 - CORE-129: CUDA indexing gradients lose destination precision above 2^24 (#1823)
 - CORE-128: CUDA gather/scatter backward is hard-wired to f32 for f64 tensors (#1822)
 - CORE-127: Scatter reads the wrong source elements when `src` is larger than `index` (#1821)
