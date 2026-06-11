@@ -640,13 +640,29 @@ fn cpu_zeros_meta() {
                 let t: Tensor<f32> = zeros_meta(&shape).expect(&label);
                 assert!(t.is_meta(), "{label}: not meta");
                 assert_eq!(t.shape(), shape.as_slice(), "{label}: shape mismatch");
-                assert_eq!(t.numel(), f.numel.unwrap_or(t.numel()), "{label}: numel");
+                // CORE-204 / #1898: `numel` is a HARD fixture requirement.
+                // The previous `f.numel.unwrap_or(t.numel())` self-compared
+                // (a no-op assertion) whenever the fixture omitted the field.
+                let expected_numel = f.numel.unwrap_or_else(|| {
+                    panic!(
+                        "{label}: fixture omits `numel` — regenerate via \
+                         scripts/regenerate_core_creation_fixtures.py"
+                    )
+                });
+                assert_eq!(t.numel(), expected_numel, "{label}: numel");
                 assert!(t.data().is_err(), "{label}: data() should error on meta");
             }
             "float64" => {
                 let t: Tensor<f64> = zeros_meta(&shape).expect(&label);
                 assert!(t.is_meta());
                 assert_eq!(t.shape(), shape.as_slice());
+                let expected_numel = f.numel.unwrap_or_else(|| {
+                    panic!(
+                        "{label}: fixture omits `numel` — regenerate via \
+                         scripts/regenerate_core_creation_fixtures.py"
+                    )
+                });
+                assert_eq!(t.numel(), expected_numel, "{label}: numel");
             }
             _ => unreachable!(),
         }

@@ -42,25 +42,26 @@
 //! - `ferrotorch-core/src/ops/higher_order.rs` — `cond`, `scan`,
 //!   `validate_cond_branches`.
 //!
-//! # Architectural posture: CPU-only by design
+//! # Architectural posture: host-side engine, device-resident tensors
 //!
-//! The autograd machinery is *control flow* (closures, RAII guards, hook
-//! storage, thread-local state), not tensor numerics. Almost none of it has
-//! a GPU lowering — the few numerical ops that do (matmul, sum, mul, add,
-//! etc.) live behind grad_fns and are exercised in the elementwise / linalg
-//! / reduction phases, not here. The conformance suite therefore mirrors
-//! PyTorch parity on CPU only; the `gpu` feature gate exists at the test
-//! crate level but the GPU module is intentionally minimal (a sanity test
-//! that cuda backend initializes), since the autograd graph itself is a
-//! host-side data structure regardless of where its tensors live. This is
-//! **not** a cascade-bug — it's an architectural contract baked into the
-//! autograd engine.
+//! The autograd machinery itself is *control flow* (closures, RAII guards,
+//! hook storage, thread-local state) and runs on the host — but the tensors
+//! flowing through the graph may live on CUDA, and the tree's own bug
+//! history (#796 sin/cos backward-on-CUDA `GpuTensorNotAccessible`,
+//! #798/#820 GPU log_softmax backward wrong values, #1922 CPU grads for
+//! CUDA leaves, #1923 cumulative backwards `NotImplementedOnCuda`) proves
+//! backward-on-CUDA is NOT device-transparent in practice. The `gpu`
+//! cfg-gated module therefore runs a real fixture-driven backward-on-CUDA
+//! lane (CORE-204 / #1898): one case per grad-fn family the CPU lane
+//! covers, asserting gradient VALUES against torch-on-cuda:0 references
+//! and gradient DEVICE == Cuda(0) via the device-checked readback pattern
+//! from `conformance_reduction.rs` (CORE-196 / #1890).
 //!
 //! # Tolerances
 //!
 //! Per the dispatch tolerance dispatch-table:
 //!   * F32_GRAD_CPU = 1e-4 rel
-//!   * F32_GRAD_GPU = 1e-3 rel (unused — autograd is CPU-only here)
+//!   * F32_GRAD_GPU = 1e-3 rel (GPU backward lane, CORE-204)
 //!   * F64_GRAD = 1e-9 rel
 //!
 //! Bit-exact comparisons apply to: (a) hook-fire booleans, (b) state
@@ -148,6 +149,17 @@ use ferrotorch_core::{Tensor, TensorStorage};
 mod tolerance {
     pub const F32_GRAD_CPU: f32 = 1e-4;
     pub const F64_GRAD_CPU: f64 = 1e-9;
+    /// GPU f32 gradients: same dispatch-table envelope as the other GPU
+    /// conformance phases — CUDA kernels may reorder f32 accumulation vs
+    /// torch's, costing a few ULP per op in short chains; 1e-3 rel is the
+    /// phase-wide F32_GRAD_GPU budget.
+    #[allow(dead_code, reason = "consumed by `gpu` cfg-gated module")]
+    pub const F32_GRAD_GPU: f32 = 1e-3;
+    /// GPU f64 gradients: f64 epsilon ~2.2e-16; the backward chains here
+    /// are <= 4 ops over <= 4 elements, so 1e-9 rel (the same budget as
+    /// F64_GRAD_CPU) leaves orders of magnitude of headroom.
+    #[allow(dead_code, reason = "consumed by `gpu` cfg-gated module")]
+    pub const F64_GRAD_GPU: f64 = 1e-9;
 
     pub fn assert_close_f32(actual: &[f32], expected: &[f32], tol: f32, label: &str) {
         assert_eq!(
@@ -323,8 +335,7 @@ struct Fixture {
     dtype: String,
     #[allow(
         dead_code,
-        reason = "device is part of the fixture schema for future GPU autograd \
-                  lanes; CPU-only today (autograd is host-side)"
+        reason = "consumed by the `gpu` cfg-gated module (backward_cuda lane)"
     )]
     device: String,
     #[serde(default)]
@@ -367,6 +378,19 @@ struct Fixture {
     max_iter: Option<usize>,
     #[serde(default)]
     tol: Option<f64>,
+    // backward_cuda lane (CORE-204 / #1898): torch-on-cuda:0 gradients.
+    #[allow(
+        dead_code,
+        reason = "consumed by the `gpu` cfg-gated module (backward_cuda lane)"
+    )]
+    #[serde(default)]
+    grad_a: Option<F64ListSentinel>,
+    #[allow(
+        dead_code,
+        reason = "consumed by the `gpu` cfg-gated module (backward_cuda lane)"
+    )]
+    #[serde(default)]
+    grad_b: Option<F64ListSentinel>,
 }
 
 fn load_fixtures() -> FixtureFile {
@@ -2456,37 +2480,780 @@ fn fixture_file_covers_every_phase210_op() {
 }
 
 // ---------------------------------------------------------------------------
-// GPU paths — gated on the `gpu` feature
+// GPU paths — gated on the `gpu` feature (CORE-204 / #1898)
 // ---------------------------------------------------------------------------
 //
-// The autograd machinery is a host-side data structure: thread-local state
-// (no_grad, autocast, AnomalyMode), Arc<Mutex<Vec<...>>> hook storage,
-// graph nodes wired via `Arc<dyn GradFn<T>>`. None of this lowers to a GPU
-// kernel — the underlying tensors may live on CUDA, but the autograd code
-// itself runs on CPU regardless of where the data lives.
+// The previous incarnation of this module was an intentionally empty test
+// (`gpu_lane_present_by_design`) resting on an "autograd is device-
+// transparent" claim that the tree's own GPU-autograd bug history refutes
+// (#796, #798/#820, #1922, #1923). This lane now runs REAL fixture-driven
+// backward-on-CUDA coverage: one case per grad-fn family the CPU lane
+// covers (arithmetic add/mul chain, div, pow, neg, transcendental
+// sin/cos/exp/log, activation relu/sigmoid/tanh, matmul, reduction
+// sum/mean, seeded backward = the vjp analog). Each case:
 //
-// The numerical ops that DO have GPU lowerings (matmul, sum, mul, add)
-// are exercised by other phases (linalg, reduction, elementwise). Re-
-// running them here would duplicate coverage without surfacing autograd-
-// specific bugs.
+//   1. uploads `requires_grad` leaves to `Device::Cuda(0)`,
+//   2. runs the fixture's op chain on CUDA,
+//   3. asserts the FORWARD values + device (device-checked readback,
+//      CORE-196 / #1890 pattern from `conformance_reduction.rs`),
+//   4. calls backward,
+//   5. asserts the GRADIENT values against the torch-on-cuda:0 fixture
+//      AND the gradient device == Cuda(0).
 //
-// The GPU lane therefore exists only as a sanity that the CUDA backend
-// can initialize when the `gpu` feature is enabled — the core autograd
-// behaviour (state toggles, hook fire, anomaly detection) has no
-// device-dependent semantics.
-//
-// If a future change adds a GPU-resident grad node (e.g. a fused
-// backward kernel), the `mod gpu` body should grow a real numerical
-// fixture lane that exercises the new path.
+// Expectations come from `scripts/regenerate_autograd_fixtures.py`
+// (`fixture_backward_cuda`, torch 2.11.0+cu130 on cuda:0 — R-ORACLE-1/2).
 
 #[cfg(feature = "gpu")]
 mod gpu {
-    /// Sanity: the `gpu` feature compiles. The autograd engine is
-    /// device-transparent — no GPU-specific autograd behaviour to
-    /// exercise here. See the module-level comment above.
+    use super::*;
+    use std::sync::Once;
+
+    use ferrotorch_core::Device;
+    use ferrotorch_core::grad_fns::activation::{relu, sigmoid, tanh};
+    use ferrotorch_core::grad_fns::arithmetic::{add, div, mul, neg, pow};
+    use ferrotorch_core::grad_fns::linalg::matmul_differentiable;
+    use ferrotorch_core::grad_fns::reduction::{mean, sum};
+    use ferrotorch_core::grad_fns::transcendental::{cos, exp, log, sin};
+
+    static GPU_INIT: Once = Once::new();
+
+    fn ensure_cuda_backend() {
+        GPU_INIT.call_once(|| {
+            ferrotorch_gpu::init_cuda_backend()
+                .expect("CUDA backend must initialize for the GPU conformance suite");
+        });
+    }
+
+    fn require_cuda_fixtures(file: &FixtureFile) {
+        if !file.metadata.cuda_available {
+            panic!(
+                "fixtures/autograd.json was generated without CUDA — regenerate \
+                 on a CUDA-enabled host before running --features gpu tests"
+            );
+        }
+    }
+
+    /// Device-checked readback (CORE-196 / #1890). When `expect` is a CUDA
+    /// device the tensor must actually be CUDA-resident before the D2H
+    /// copy: a CPU-resident result produced from CUDA inputs means the op
+    /// (or its backward) silently fell back to host compute, which a
+    /// device-transparent readback would green-light forever.
+    fn read_back_f32(t: &Tensor<f32>, expect: Device, label: &str) -> Vec<f32> {
+        assert_eq!(
+            t.device(),
+            expect,
+            "{label}: expected on {expect:?} but resides on {:?} — \
+             silent CPU fallback (CORE-196 / #1890)",
+            t.device()
+        );
+        if t.is_cpu() {
+            t.data().expect("read CPU data").to_vec()
+        } else {
+            let cpu = t.cpu().expect("D2H readback");
+            cpu.data().expect("read CPU data after readback").to_vec()
+        }
+    }
+
+    /// See [`read_back_f32`] — device-checked readback (CORE-196 / #1890).
+    fn read_back_f64(t: &Tensor<f64>, expect: Device, label: &str) -> Vec<f64> {
+        assert_eq!(
+            t.device(),
+            expect,
+            "{label}: expected on {expect:?} but resides on {:?} — \
+             silent CPU fallback (CORE-196 / #1890)",
+            t.device()
+        );
+        if t.is_cpu() {
+            t.data().expect("read CPU data").to_vec()
+        } else {
+            let cpu = t.cpu().expect("D2H readback");
+            cpu.data().expect("read CPU data after readback").to_vec()
+        }
+    }
+
+    fn upload_f32(t: Tensor<f32>) -> Tensor<f32> {
+        t.to(Device::Cuda(0)).expect("upload to cuda:0")
+    }
+
+    fn upload_f64(t: Tensor<f64>) -> Tensor<f64> {
+        t.to(Device::Cuda(0)).expect("upload to cuda:0")
+    }
+
+    fn backward_cases<'a>(file: &'a FixtureFile, tag: &str) -> Vec<&'a Fixture> {
+        file.fixtures
+            .iter()
+            .filter(|f| {
+                f.op == "backward_cuda" && f.tag.as_deref() == Some(tag) && f.device == "cuda:0"
+            })
+            .collect()
+    }
+
+    fn slice<'a>(field: &'a Option<F64ListSentinel>, name: &str, label: &str) -> &'a [f64] {
+        field
+            .as_ref()
+            .map(F64ListSentinel::as_slice)
+            .unwrap_or_else(|| panic!("{label}: fixture missing {name}"))
+    }
+
+    // -----------------------------------------------------------------------
+    // Unary chains: loss = sum(f(x)); grad = f'(x)
+    // -----------------------------------------------------------------------
+
+    #[derive(Clone, Copy)]
+    enum UnaryOp {
+        Sin,
+        Cos,
+        Exp,
+        Log,
+        Tanh,
+        Sigmoid,
+        Relu,
+        Neg,
+    }
+
+    impl UnaryOp {
+        fn tag(self) -> &'static str {
+            match self {
+                UnaryOp::Sin => "sin",
+                UnaryOp::Cos => "cos",
+                UnaryOp::Exp => "exp",
+                UnaryOp::Log => "log",
+                UnaryOp::Tanh => "tanh",
+                UnaryOp::Sigmoid => "sigmoid",
+                UnaryOp::Relu => "relu",
+                UnaryOp::Neg => "neg",
+            }
+        }
+        fn apply_f32(self, a: &Tensor<f32>) -> ferrotorch_core::FerrotorchResult<Tensor<f32>> {
+            match self {
+                UnaryOp::Sin => sin(a),
+                UnaryOp::Cos => cos(a),
+                UnaryOp::Exp => exp(a),
+                UnaryOp::Log => log(a),
+                UnaryOp::Tanh => tanh(a),
+                UnaryOp::Sigmoid => sigmoid(a),
+                UnaryOp::Relu => relu(a),
+                UnaryOp::Neg => neg(a),
+            }
+        }
+        fn apply_f64(self, a: &Tensor<f64>) -> ferrotorch_core::FerrotorchResult<Tensor<f64>> {
+            match self {
+                UnaryOp::Sin => sin(a),
+                UnaryOp::Cos => cos(a),
+                UnaryOp::Exp => exp(a),
+                UnaryOp::Log => log(a),
+                UnaryOp::Tanh => tanh(a),
+                UnaryOp::Sigmoid => sigmoid(a),
+                UnaryOp::Relu => relu(a),
+                UnaryOp::Neg => neg(a),
+            }
+        }
+    }
+
+    fn run_unary_backward_cuda(op: UnaryOp) {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        let cases = backward_cases(&file, op.tag());
+        assert!(
+            !cases.is_empty(),
+            "no backward_cuda fixtures for tag={}; regenerate via \
+             scripts/regenerate_autograd_fixtures.py on a CUDA host",
+            op.tag()
+        );
+        for f in cases {
+            let label = format!("backward_cuda {} dtype={}", op.tag(), f.dtype);
+            let shape = f.a_shape.as_ref().expect("a_shape");
+            let a_data = slice(&f.a_data, "a_data", &label);
+            let out_exp = slice(&f.out_values, "out_values", &label);
+            let grad_exp = slice(&f.grad_a, "grad_a", &label);
+            match f.dtype.as_str() {
+                "float32" => {
+                    let a = upload_f32(make_cpu_f32(a_data, shape, true));
+                    let y = op
+                        .apply_f32(&a)
+                        .unwrap_or_else(|e| panic!("{label}: forward on CUDA failed: {e}"));
+                    check_f32(
+                        &format!("{label} fwd"),
+                        &read_back_f32(&y, Device::Cuda(0), &format!("{label} fwd")),
+                        out_exp,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                    let s = sum(&y).expect("sum");
+                    s.backward()
+                        .unwrap_or_else(|e| panic!("{label}: backward on CUDA failed: {e}"));
+                    let ga = a.grad().expect("grad lookup").expect("grad_a present");
+                    check_f32(
+                        &format!("{label} grad_a"),
+                        &read_back_f32(&ga, Device::Cuda(0), &format!("{label} grad_a")),
+                        grad_exp,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                }
+                "float64" => {
+                    let a = upload_f64(make_cpu_f64(a_data, shape, true));
+                    let y = op
+                        .apply_f64(&a)
+                        .unwrap_or_else(|e| panic!("{label}: forward on CUDA failed: {e}"));
+                    check_f64(
+                        &format!("{label} fwd"),
+                        &read_back_f64(&y, Device::Cuda(0), &format!("{label} fwd")),
+                        out_exp,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                    let s = sum(&y).expect("sum");
+                    s.backward()
+                        .unwrap_or_else(|e| panic!("{label}: backward on CUDA failed: {e}"));
+                    let ga = a.grad().expect("grad lookup").expect("grad_a present");
+                    check_f64(
+                        &format!("{label} grad_a"),
+                        &read_back_f64(&ga, Device::Cuda(0), &format!("{label} grad_a")),
+                        grad_exp,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                }
+                other => panic!("{label}: unexpected dtype {other:?}"),
+            }
+        }
+    }
+
     #[test]
-    fn gpu_lane_present_by_design() {
-        // Intentional minimal body. Per-tensor GPU autograd flows through
-        // the elementwise / linalg / reduction conformance suites.
+    fn gpu_backward_sin() {
+        run_unary_backward_cuda(UnaryOp::Sin);
+    }
+    #[test]
+    fn gpu_backward_cos() {
+        run_unary_backward_cuda(UnaryOp::Cos);
+    }
+    #[test]
+    fn gpu_backward_exp() {
+        run_unary_backward_cuda(UnaryOp::Exp);
+    }
+    #[test]
+    fn gpu_backward_log() {
+        run_unary_backward_cuda(UnaryOp::Log);
+    }
+    #[test]
+    fn gpu_backward_tanh() {
+        run_unary_backward_cuda(UnaryOp::Tanh);
+    }
+    #[test]
+    fn gpu_backward_sigmoid() {
+        run_unary_backward_cuda(UnaryOp::Sigmoid);
+    }
+    #[test]
+    fn gpu_backward_relu() {
+        run_unary_backward_cuda(UnaryOp::Relu);
+    }
+    #[test]
+    fn gpu_backward_neg() {
+        run_unary_backward_cuda(UnaryOp::Neg);
+    }
+
+    // -----------------------------------------------------------------------
+    // Arithmetic chains: add/mul, div, pow
+    // -----------------------------------------------------------------------
+
+    /// loss = sum(a*b + a); grad_a = b + 1, grad_b = a.
+    #[test]
+    fn gpu_backward_add_mul_chain() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        let cases = backward_cases(&file, "add_mul_chain");
+        assert!(!cases.is_empty(), "no backward_cuda add_mul_chain fixtures");
+        for f in cases {
+            let label = format!("backward_cuda add_mul_chain dtype={}", f.dtype);
+            let a_shape = f.a_shape.as_ref().expect("a_shape");
+            let b_shape = f.b_shape.as_ref().expect("b_shape");
+            let a_data = slice(&f.a_data, "a_data", &label);
+            let b_data = slice(&f.b_data, "b_data", &label);
+            let out_exp = slice(&f.out_values, "out_values", &label);
+            let grad_a_exp = slice(&f.grad_a, "grad_a", &label);
+            let grad_b_exp = slice(&f.grad_b, "grad_b", &label);
+            match f.dtype.as_str() {
+                "float32" => {
+                    let a = upload_f32(make_cpu_f32(a_data, a_shape, true));
+                    let b = upload_f32(make_cpu_f32(b_data, b_shape, true));
+                    let prod = mul(&a, &b).expect("mul");
+                    let y = add(&prod, &a).expect("add");
+                    check_f32(
+                        &format!("{label} fwd"),
+                        &read_back_f32(&y, Device::Cuda(0), &format!("{label} fwd")),
+                        out_exp,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                    let s = sum(&y).expect("sum");
+                    s.backward()
+                        .unwrap_or_else(|e| panic!("{label}: backward on CUDA failed: {e}"));
+                    let ga = a.grad().expect("grad lookup").expect("grad_a present");
+                    check_f32(
+                        &format!("{label} grad_a"),
+                        &read_back_f32(&ga, Device::Cuda(0), &format!("{label} grad_a")),
+                        grad_a_exp,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                    let gb = b.grad().expect("grad lookup").expect("grad_b present");
+                    check_f32(
+                        &format!("{label} grad_b"),
+                        &read_back_f32(&gb, Device::Cuda(0), &format!("{label} grad_b")),
+                        grad_b_exp,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                }
+                "float64" => {
+                    let a = upload_f64(make_cpu_f64(a_data, a_shape, true));
+                    let b = upload_f64(make_cpu_f64(b_data, b_shape, true));
+                    let prod = mul(&a, &b).expect("mul");
+                    let y = add(&prod, &a).expect("add");
+                    check_f64(
+                        &format!("{label} fwd"),
+                        &read_back_f64(&y, Device::Cuda(0), &format!("{label} fwd")),
+                        out_exp,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                    let s = sum(&y).expect("sum");
+                    s.backward()
+                        .unwrap_or_else(|e| panic!("{label}: backward on CUDA failed: {e}"));
+                    let ga = a.grad().expect("grad lookup").expect("grad_a present");
+                    check_f64(
+                        &format!("{label} grad_a"),
+                        &read_back_f64(&ga, Device::Cuda(0), &format!("{label} grad_a")),
+                        grad_a_exp,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                    let gb = b.grad().expect("grad lookup").expect("grad_b present");
+                    check_f64(
+                        &format!("{label} grad_b"),
+                        &read_back_f64(&gb, Device::Cuda(0), &format!("{label} grad_b")),
+                        grad_b_exp,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                }
+                other => panic!("{label}: unexpected dtype {other:?}"),
+            }
+        }
+    }
+
+    /// loss = sum(a/b); grad_a = 1/b, grad_b = -a/b^2.
+    #[test]
+    fn gpu_backward_div() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        let cases = backward_cases(&file, "div");
+        assert!(!cases.is_empty(), "no backward_cuda div fixtures");
+        for f in cases {
+            let label = format!("backward_cuda div dtype={}", f.dtype);
+            let a_shape = f.a_shape.as_ref().expect("a_shape");
+            let b_shape = f.b_shape.as_ref().expect("b_shape");
+            let a_data = slice(&f.a_data, "a_data", &label);
+            let b_data = slice(&f.b_data, "b_data", &label);
+            let out_exp = slice(&f.out_values, "out_values", &label);
+            let grad_a_exp = slice(&f.grad_a, "grad_a", &label);
+            let grad_b_exp = slice(&f.grad_b, "grad_b", &label);
+            match f.dtype.as_str() {
+                "float32" => {
+                    let a = upload_f32(make_cpu_f32(a_data, a_shape, true));
+                    let b = upload_f32(make_cpu_f32(b_data, b_shape, true));
+                    let y = div(&a, &b).expect("div");
+                    check_f32(
+                        &format!("{label} fwd"),
+                        &read_back_f32(&y, Device::Cuda(0), &format!("{label} fwd")),
+                        out_exp,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                    let s = sum(&y).expect("sum");
+                    s.backward()
+                        .unwrap_or_else(|e| panic!("{label}: backward on CUDA failed: {e}"));
+                    let ga = a.grad().expect("grad lookup").expect("grad_a present");
+                    check_f32(
+                        &format!("{label} grad_a"),
+                        &read_back_f32(&ga, Device::Cuda(0), &format!("{label} grad_a")),
+                        grad_a_exp,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                    let gb = b.grad().expect("grad lookup").expect("grad_b present");
+                    check_f32(
+                        &format!("{label} grad_b"),
+                        &read_back_f32(&gb, Device::Cuda(0), &format!("{label} grad_b")),
+                        grad_b_exp,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                }
+                "float64" => {
+                    let a = upload_f64(make_cpu_f64(a_data, a_shape, true));
+                    let b = upload_f64(make_cpu_f64(b_data, b_shape, true));
+                    let y = div(&a, &b).expect("div");
+                    check_f64(
+                        &format!("{label} fwd"),
+                        &read_back_f64(&y, Device::Cuda(0), &format!("{label} fwd")),
+                        out_exp,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                    let s = sum(&y).expect("sum");
+                    s.backward()
+                        .unwrap_or_else(|e| panic!("{label}: backward on CUDA failed: {e}"));
+                    let ga = a.grad().expect("grad lookup").expect("grad_a present");
+                    check_f64(
+                        &format!("{label} grad_a"),
+                        &read_back_f64(&ga, Device::Cuda(0), &format!("{label} grad_a")),
+                        grad_a_exp,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                    let gb = b.grad().expect("grad lookup").expect("grad_b present");
+                    check_f64(
+                        &format!("{label} grad_b"),
+                        &read_back_f64(&gb, Device::Cuda(0), &format!("{label} grad_b")),
+                        grad_b_exp,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                }
+                other => panic!("{label}: unexpected dtype {other:?}"),
+            }
+        }
+    }
+
+    /// loss = sum(x^3); grad = 3x^2 (PowBackward on CUDA).
+    ///
+    /// #1926 pin (found by this CORE-204/#1898 lane): the CUDA pow kernels
+    /// diverge from torch for NEGATIVE bases. `POW_PTX` (f32) computes
+    /// x^e = 2^(e*log2(x)) — NaN for x < 0; `POW_F64_PTX` runs its inline
+    /// ln on the magnitude bits — the sign is silently dropped (|x|^e).
+    /// torch on cuda:0: (-1.5)**3.0 == -3.375 (the fixture value), grad
+    /// 6.75. Until #1926 lands a sign-correct kernel, this test pins the
+    /// CURRENT divergent values (single contract, R-ORACLE-4): f32 fwd/grad
+    /// are NaN at negative-base elements, f64 fwd is |fixture| (the f64
+    /// grad 3x^2 happens to match torch because exp-1 is even). When #1926
+    /// is fixed the pinned expectations mismatch loudly — retire the pin by
+    /// asserting the raw fixture values.
+    #[test]
+    fn gpu_backward_pow() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        let cases = backward_cases(&file, "pow3");
+        assert!(!cases.is_empty(), "no backward_cuda pow3 fixtures");
+        for f in cases {
+            let label = format!("backward_cuda pow3 dtype={}", f.dtype);
+            let shape = f.a_shape.as_ref().expect("a_shape");
+            let a_data = slice(&f.a_data, "a_data", &label);
+            let out_exp = slice(&f.out_values, "out_values", &label);
+            let grad_exp = slice(&f.grad_a, "grad_a", &label);
+            // The pin only bites if the fixture exercises a negative base —
+            // guard against a regenerated fixture silently dropping it.
+            assert!(
+                a_data.iter().any(|&x| x < 0.0),
+                "{label}: fixture lost its negative-base element — the #1926 \
+                 pin would be vacuous; restore a negative base"
+            );
+            match f.dtype.as_str() {
+                "float32" => {
+                    // #1926 pin: NaN at negative-base elements (torch: the
+                    // fixture values out_exp/grad_exp). Retire when fixed.
+                    let pinned_fwd: Vec<f64> = out_exp
+                        .iter()
+                        .zip(a_data)
+                        .map(|(&o, &a)| if a < 0.0 { f64::NAN } else { o })
+                        .collect();
+                    let pinned_grad: Vec<f64> = grad_exp
+                        .iter()
+                        .zip(a_data)
+                        .map(|(&g, &a)| if a < 0.0 { f64::NAN } else { g })
+                        .collect();
+                    let a = upload_f32(make_cpu_f32(a_data, shape, true));
+                    let y = pow(&a, 3.0)
+                        .unwrap_or_else(|e| panic!("{label}: forward on CUDA failed: {e}"));
+                    check_f32(
+                        &format!("{label} fwd (#1926 pin — retire when fixed)"),
+                        &read_back_f32(&y, Device::Cuda(0), &format!("{label} fwd")),
+                        &pinned_fwd,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                    let s = sum(&y).expect("sum");
+                    s.backward()
+                        .unwrap_or_else(|e| panic!("{label}: backward on CUDA failed: {e}"));
+                    let ga = a.grad().expect("grad lookup").expect("grad_a present");
+                    check_f32(
+                        &format!("{label} grad_a (#1926 pin — retire when fixed)"),
+                        &read_back_f32(&ga, Device::Cuda(0), &format!("{label} grad_a")),
+                        &pinned_grad,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                }
+                "float64" => {
+                    // #1926 pin: the f64 kernel computes |x|^e, so the
+                    // negative-base element comes back sign-flipped:
+                    // |fixture| (torch: out_exp verbatim, i.e. -3.375).
+                    // |x^3| == |x|^3, so mapping abs over the fixture IS the
+                    // currently-produced value. Retire when fixed.
+                    let pinned_fwd: Vec<f64> = out_exp.iter().map(|&o| o.abs()).collect();
+                    let a = upload_f64(make_cpu_f64(a_data, shape, true));
+                    let y = pow(&a, 3.0)
+                        .unwrap_or_else(|e| panic!("{label}: forward on CUDA failed: {e}"));
+                    check_f64(
+                        &format!("{label} fwd (#1926 pin — retire when fixed)"),
+                        &read_back_f64(&y, Device::Cuda(0), &format!("{label} fwd")),
+                        &pinned_fwd,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                    let s = sum(&y).expect("sum");
+                    s.backward()
+                        .unwrap_or_else(|e| panic!("{label}: backward on CUDA failed: {e}"));
+                    let ga = a.grad().expect("grad lookup").expect("grad_a present");
+                    // grad = 3x^2: even power of the base, so the sign loss
+                    // in the kernel is invisible here and the torch fixture
+                    // value asserts verbatim (not a pin).
+                    check_f64(
+                        &format!("{label} grad_a"),
+                        &read_back_f64(&ga, Device::Cuda(0), &format!("{label} grad_a")),
+                        grad_exp,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                }
+                other => panic!("{label}: unexpected dtype {other:?}"),
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // matmul: loss = sum(A @ B); grad_A = 1 @ B^T, grad_B = A^T @ 1
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn gpu_backward_matmul() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        let cases = backward_cases(&file, "matmul");
+        assert!(!cases.is_empty(), "no backward_cuda matmul fixtures");
+        for f in cases {
+            let label = format!("backward_cuda matmul dtype={}", f.dtype);
+            let a_shape = f.a_shape.as_ref().expect("a_shape");
+            let b_shape = f.b_shape.as_ref().expect("b_shape");
+            let a_data = slice(&f.a_data, "a_data", &label);
+            let b_data = slice(&f.b_data, "b_data", &label);
+            let out_exp = slice(&f.out_values, "out_values", &label);
+            let grad_a_exp = slice(&f.grad_a, "grad_a", &label);
+            let grad_b_exp = slice(&f.grad_b, "grad_b", &label);
+            match f.dtype.as_str() {
+                "float32" => {
+                    let a = upload_f32(make_cpu_f32(a_data, a_shape, true));
+                    let b = upload_f32(make_cpu_f32(b_data, b_shape, true));
+                    let y = matmul_differentiable(&a, &b).expect("matmul");
+                    check_f32(
+                        &format!("{label} fwd"),
+                        &read_back_f32(&y, Device::Cuda(0), &format!("{label} fwd")),
+                        out_exp,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                    let s = sum(&y).expect("sum");
+                    s.backward()
+                        .unwrap_or_else(|e| panic!("{label}: backward on CUDA failed: {e}"));
+                    let ga = a.grad().expect("grad lookup").expect("grad_a present");
+                    check_f32(
+                        &format!("{label} grad_a"),
+                        &read_back_f32(&ga, Device::Cuda(0), &format!("{label} grad_a")),
+                        grad_a_exp,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                    let gb = b.grad().expect("grad lookup").expect("grad_b present");
+                    check_f32(
+                        &format!("{label} grad_b"),
+                        &read_back_f32(&gb, Device::Cuda(0), &format!("{label} grad_b")),
+                        grad_b_exp,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                }
+                "float64" => {
+                    let a = upload_f64(make_cpu_f64(a_data, a_shape, true));
+                    let b = upload_f64(make_cpu_f64(b_data, b_shape, true));
+                    let y = matmul_differentiable(&a, &b).expect("matmul");
+                    check_f64(
+                        &format!("{label} fwd"),
+                        &read_back_f64(&y, Device::Cuda(0), &format!("{label} fwd")),
+                        out_exp,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                    let s = sum(&y).expect("sum");
+                    s.backward()
+                        .unwrap_or_else(|e| panic!("{label}: backward on CUDA failed: {e}"));
+                    let ga = a.grad().expect("grad lookup").expect("grad_a present");
+                    check_f64(
+                        &format!("{label} grad_a"),
+                        &read_back_f64(&ga, Device::Cuda(0), &format!("{label} grad_a")),
+                        grad_a_exp,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                    let gb = b.grad().expect("grad lookup").expect("grad_b present");
+                    check_f64(
+                        &format!("{label} grad_b"),
+                        &read_back_f64(&gb, Device::Cuda(0), &format!("{label} grad_b")),
+                        grad_b_exp,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                }
+                other => panic!("{label}: unexpected dtype {other:?}"),
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Reduction: loss = mean(x); grad = 1/n
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn gpu_backward_mean() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        let cases = backward_cases(&file, "mean");
+        assert!(!cases.is_empty(), "no backward_cuda mean fixtures");
+        for f in cases {
+            let label = format!("backward_cuda mean dtype={}", f.dtype);
+            let shape = f.a_shape.as_ref().expect("a_shape");
+            let a_data = slice(&f.a_data, "a_data", &label);
+            let out_exp = slice(&f.out_values, "out_values", &label);
+            let grad_exp = slice(&f.grad_a, "grad_a", &label);
+            match f.dtype.as_str() {
+                "float32" => {
+                    let a = upload_f32(make_cpu_f32(a_data, shape, true));
+                    let y = mean(&a).expect("mean");
+                    check_f32(
+                        &format!("{label} fwd"),
+                        &read_back_f32(&y, Device::Cuda(0), &format!("{label} fwd")),
+                        out_exp,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                    y.backward()
+                        .unwrap_or_else(|e| panic!("{label}: backward on CUDA failed: {e}"));
+                    let ga = a.grad().expect("grad lookup").expect("grad_a present");
+                    check_f32(
+                        &format!("{label} grad_a"),
+                        &read_back_f32(&ga, Device::Cuda(0), &format!("{label} grad_a")),
+                        grad_exp,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                }
+                "float64" => {
+                    let a = upload_f64(make_cpu_f64(a_data, shape, true));
+                    let y = mean(&a).expect("mean");
+                    check_f64(
+                        &format!("{label} fwd"),
+                        &read_back_f64(&y, Device::Cuda(0), &format!("{label} fwd")),
+                        out_exp,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                    y.backward()
+                        .unwrap_or_else(|e| panic!("{label}: backward on CUDA failed: {e}"));
+                    let ga = a.grad().expect("grad lookup").expect("grad_a present");
+                    check_f64(
+                        &format!("{label} grad_a"),
+                        &read_back_f64(&ga, Device::Cuda(0), &format!("{label} grad_a")),
+                        grad_exp,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                }
+                other => panic!("{label}: unexpected dtype {other:?}"),
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Seeded backward (vjp analog): y = x*x, y.backward(v); grad = 2x*v
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn gpu_backward_seeded_square() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        let cases = backward_cases(&file, "seeded_square");
+        assert!(!cases.is_empty(), "no backward_cuda seeded_square fixtures");
+        for f in cases {
+            let label = format!("backward_cuda seeded_square dtype={}", f.dtype);
+            let shape = f.a_shape.as_ref().expect("a_shape");
+            let a_data = slice(&f.a_data, "a_data", &label);
+            let v_data = slice(&f.v_data, "v_data", &label);
+            let out_exp = slice(&f.out_values, "out_values", &label);
+            let grad_exp = slice(&f.grad_a, "grad_a", &label);
+            match f.dtype.as_str() {
+                "float32" => {
+                    let a = upload_f32(make_cpu_f32(a_data, shape, true));
+                    let v = upload_f32(make_cpu_f32(v_data, shape, false));
+                    let y = mul(&a, &a).expect("mul");
+                    check_f32(
+                        &format!("{label} fwd"),
+                        &read_back_f32(&y, Device::Cuda(0), &format!("{label} fwd")),
+                        out_exp,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                    y.backward_with_gradient(&v)
+                        .unwrap_or_else(|e| panic!("{label}: backward on CUDA failed: {e}"));
+                    let ga = a.grad().expect("grad lookup").expect("grad_a present");
+                    check_f32(
+                        &format!("{label} grad_a"),
+                        &read_back_f32(&ga, Device::Cuda(0), &format!("{label} grad_a")),
+                        grad_exp,
+                        tolerance::F32_GRAD_GPU,
+                    );
+                }
+                "float64" => {
+                    let a = upload_f64(make_cpu_f64(a_data, shape, true));
+                    let v = upload_f64(make_cpu_f64(v_data, shape, false));
+                    let y = mul(&a, &a).expect("mul");
+                    check_f64(
+                        &format!("{label} fwd"),
+                        &read_back_f64(&y, Device::Cuda(0), &format!("{label} fwd")),
+                        out_exp,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                    y.backward_with_gradient(&v)
+                        .unwrap_or_else(|e| panic!("{label}: backward on CUDA failed: {e}"));
+                    let ga = a.grad().expect("grad lookup").expect("grad_a present");
+                    check_f64(
+                        &format!("{label} grad_a"),
+                        &read_back_f64(&ga, Device::Cuda(0), &format!("{label} grad_a")),
+                        grad_exp,
+                        tolerance::F64_GRAD_GPU,
+                    );
+                }
+                other => panic!("{label}: unexpected dtype {other:?}"),
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Fixture presence: the GPU lane hard-fails if the backward_cuda family
+    // is ever stripped from the fixture file (e.g. a CPU-only regeneration).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn gpu_backward_cuda_fixture_family_present() {
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        let required_tags = [
+            "sin",
+            "cos",
+            "exp",
+            "log",
+            "tanh",
+            "sigmoid",
+            "relu",
+            "neg",
+            "add_mul_chain",
+            "div",
+            "pow3",
+            "matmul",
+            "mean",
+            "seeded_square",
+        ];
+        for tag in required_tags {
+            assert!(
+                !backward_cases(&file, tag).is_empty(),
+                "backward_cuda fixture family missing tag {tag:?} — regenerate \
+                 via scripts/regenerate_autograd_fixtures.py on a CUDA host"
+            );
+        }
     }
 }

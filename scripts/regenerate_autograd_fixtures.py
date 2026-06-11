@@ -628,6 +628,190 @@ def fixture_grad_penalty() -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Reverse-mode backward on cuda:0 — CORE-204 / #1898
+# ---------------------------------------------------------------------------
+#
+# One case per grad-fn family the conformance suite exercises on CPU. The
+# Rust `gpu` module uploads the leaves to Device::Cuda(0), runs the same op
+# chain, calls backward, and asserts BOTH the gradient values (against these
+# torch-on-cuda:0 references) and the gradient device (== Cuda(0)).
+# Expectations are computed exclusively with torch APIs on cuda:0
+# (R-ORACLE-1/R-ORACLE-2).
+
+
+def fixture_backward_cuda() -> list[dict[str, Any]]:
+    if not torch.cuda.is_available():
+        # The Rust gpu lane hard-fails when these fixtures are absent (and
+        # when metadata.cuda_available is false), so a CPU-only regeneration
+        # cannot silently strip GPU coverage.
+        print("WARNING: CUDA unavailable — backward_cuda fixtures NOT generated", file=sys.stderr)
+        return []
+
+    dev = torch.device("cuda:0")
+    out: list[dict[str, Any]] = []
+
+    # --- unary chains: y = f(x).sum(); grad_a = f'(x) ----------------------
+    # Transcendental family (#1743-class history) + activation family
+    # (#1739-class history) + neg (arithmetic unary).
+    unary_cases = [
+        ("sin", torch.sin, [0.3, -1.2, 2.5, 0.0]),
+        ("cos", torch.cos, [0.3, -1.2, 2.5, 0.0]),
+        ("exp", torch.exp, [-1.0, 0.0, 0.5, 1.0]),
+        ("log", torch.log, [0.5, 1.0, 2.0, 3.0]),
+        ("tanh", torch.tanh, [-1.5, 0.0, 0.7, 2.0]),
+        ("sigmoid", torch.sigmoid, [-2.0, 0.0, 1.5, 3.0]),
+        ("relu", torch.relu, [-1.0, 0.5, 2.0, -3.0]),
+        ("neg", torch.neg, [1.0, -2.0, 3.5, 0.0]),
+    ]
+    for dtype in DTYPES:
+        for tag, fn, a_data in unary_cases:
+            a = torch.tensor(a_data, dtype=torch_dtype(dtype), device=dev, requires_grad=True)
+            y = fn(a)
+            y.sum().backward()
+            assert a.grad is not None and a.grad.device == a.device
+            out.append(
+                {
+                    "op": "backward_cuda",
+                    "tag": tag,
+                    "dtype": dtype,
+                    "device": "cuda:0",
+                    "a_shape": list(a.shape),
+                    "a_data": to_listf(a.detach()),
+                    "out_values": to_listf(y.detach()),
+                    "grad_a": to_listf(a.grad),
+                }
+            )
+
+    # --- binary chains ------------------------------------------------------
+    for dtype in DTYPES:
+        # add/mul chain: y = sum(a*b + a); grad_a = b + 1, grad_b = a
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch_dtype(dtype), device=dev, requires_grad=True)
+        b = torch.tensor([4.0, 5.0, 6.0], dtype=torch_dtype(dtype), device=dev, requires_grad=True)
+        y = a * b + a
+        y.sum().backward()
+        assert a.grad is not None and b.grad is not None
+        out.append(
+            {
+                "op": "backward_cuda",
+                "tag": "add_mul_chain",
+                "dtype": dtype,
+                "device": "cuda:0",
+                "a_shape": list(a.shape),
+                "a_data": to_listf(a.detach()),
+                "b_shape": list(b.shape),
+                "b_data": to_listf(b.detach()),
+                "out_values": to_listf(y.detach()),
+                "grad_a": to_listf(a.grad),
+                "grad_b": to_listf(b.grad),
+            }
+        )
+
+        # div: y = sum(a/b); grad_a = 1/b, grad_b = -a/b^2
+        a = torch.tensor([6.0, 8.0, 9.0], dtype=torch_dtype(dtype), device=dev, requires_grad=True)
+        b = torch.tensor([3.0, 4.0, 3.0], dtype=torch_dtype(dtype), device=dev, requires_grad=True)
+        y = a / b
+        y.sum().backward()
+        out.append(
+            {
+                "op": "backward_cuda",
+                "tag": "div",
+                "dtype": dtype,
+                "device": "cuda:0",
+                "a_shape": list(a.shape),
+                "a_data": to_listf(a.detach()),
+                "b_shape": list(b.shape),
+                "b_data": to_listf(b.detach()),
+                "out_values": to_listf(y.detach()),
+                "grad_a": to_listf(a.grad),
+                "grad_b": to_listf(b.grad),
+            }
+        )
+
+        # pow: y = sum(x^3); grad = 3x^2
+        a = torch.tensor([1.0, 2.0, -1.5], dtype=torch_dtype(dtype), device=dev, requires_grad=True)
+        y = a ** 3.0
+        y.sum().backward()
+        out.append(
+            {
+                "op": "backward_cuda",
+                "tag": "pow3",
+                "dtype": dtype,
+                "device": "cuda:0",
+                "a_shape": list(a.shape),
+                "a_data": to_listf(a.detach()),
+                "out_values": to_listf(y.detach()),
+                "grad_a": to_listf(a.grad),
+            }
+        )
+
+        # matmul: y = sum(A @ B); grad_A = ones @ B^T, grad_B = A^T @ ones
+        a = torch.tensor(
+            [[1.0, 2.0], [3.0, 4.0]], dtype=torch_dtype(dtype), device=dev, requires_grad=True
+        )
+        b = torch.tensor(
+            [[5.0, 6.0], [7.0, 8.0]], dtype=torch_dtype(dtype), device=dev, requires_grad=True
+        )
+        y = a @ b
+        y.sum().backward()
+        out.append(
+            {
+                "op": "backward_cuda",
+                "tag": "matmul",
+                "dtype": dtype,
+                "device": "cuda:0",
+                "a_shape": list(a.shape),
+                "a_data": to_listf(a.detach().flatten()),
+                "b_shape": list(b.shape),
+                "b_data": to_listf(b.detach().flatten()),
+                "out_shape": list(y.shape),
+                "out_values": to_listf(y.detach().flatten()),
+                "grad_a": to_listf(a.grad.flatten()),
+                "grad_b": to_listf(b.grad.flatten()),
+            }
+        )
+
+        # reduction (mean): y = mean(x); grad = 1/n
+        a = torch.tensor(
+            [2.0, -4.0, 6.0, 8.0], dtype=torch_dtype(dtype), device=dev, requires_grad=True
+        )
+        y = a.mean()
+        y.backward()
+        out.append(
+            {
+                "op": "backward_cuda",
+                "tag": "mean",
+                "dtype": dtype,
+                "device": "cuda:0",
+                "a_shape": list(a.shape),
+                "a_data": to_listf(a.detach()),
+                "out_values": to_listf(y.detach()),
+                "grad_a": to_listf(a.grad),
+            }
+        )
+
+        # seeded backward (vjp analog): y = x*x, y.backward(v); grad = 2x*v
+        a = torch.tensor([1.0, 2.0, 3.0], dtype=torch_dtype(dtype), device=dev, requires_grad=True)
+        v = torch.tensor([4.0, 5.0, 6.0], dtype=torch_dtype(dtype), device=dev)
+        y = a * a
+        y.backward(v)
+        out.append(
+            {
+                "op": "backward_cuda",
+                "tag": "seeded_square",
+                "dtype": dtype,
+                "device": "cuda:0",
+                "a_shape": list(a.shape),
+                "a_data": to_listf(a.detach()),
+                "v_data": to_listf(v),
+                "out_values": to_listf(y.detach()),
+                "grad_a": to_listf(a.grad),
+            }
+        )
+
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Fixed point reference: x = a*x has fixed point 0 when |a| < 1
 # ---------------------------------------------------------------------------
 
@@ -685,6 +869,9 @@ def main() -> int:
 
     # gradient penalty
     fixtures += fixture_grad_penalty()
+
+    # reverse-mode backward on cuda:0 (CORE-204 / #1898)
+    fixtures += fixture_backward_cuda()
 
     # fixed point
     fixtures += fixture_fixed_point()
