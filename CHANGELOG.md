@@ -51,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- Author audit-remediation contract (goal-audit-fix.md) for ferrotorch-core (#1902)
 - Backlog item 4: fused/batched RNN input projection — GRU/LSTM/RNN 3.9x slower than torch (#1690)
 - Backlog item 2: CPU transcendentals (sin/cos/tanh/exp/log) ~48x slower than torch — wire SIMD path (#1688)
 - GPU non-symmetric eig (gpu_eig_f32/f64 + _dev) returned CUSOLVER_STATUS_INVALID_VALUE on every call — cusolverDnXgeev requires a homogeneous datatype set but ferrotorch passed real dataTypeA/computeType with complex W/V; promote the real input to a complex buffer (new gpu_real_to_complex_f32/f64 kernel) and use all-complex datatypes (mirrors torch.linalg.eig). GPU general-eig now matches torch (eigenvalues + Av=λv), unblocking the #1685 complex-transpose consumer (#1687)
