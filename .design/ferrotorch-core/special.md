@@ -36,18 +36,26 @@ polynomial families).
 - REQ-3: `erfinv(input)` — inverse error function via Winitzki (2008)
   rational. Returns `±inf` for `±1`, `NaN` for `|x| > 1`. Mirrors
   `torch.special.erfinv`.
-- REQ-4: `lgamma(input)` — `log(|Gamma(x)|)` via Lanczos (g=7, n=9).
-  Mirrors `torch.special.gammaln` / `torch.lgamma`.
+- REQ-4: `lgamma(input)` — `log(|Gamma(x)|)` via Lanczos (g=7, n=9);
+  `lgamma(±inf) = +inf` per C99/torch (audit CORE-174 — note scipy's
+  `gammaln(-inf)` is `-inf`; torch wins). Mirrors
+  `torch.special.gammaln` / `torch.lgamma`.
 - REQ-5: `digamma(input)` — `d/dx ln Gamma(x)` via shift-up-then-
-  asymptotic-expansion. Mirrors `torch.special.digamma`.
+  asymptotic-expansion, with the `calc_digamma` edge ladder
+  (`Math.h:375-390`): `±0 → ∓inf`, negative-integer poles → NaN
+  (audit CORE-173), in both the f64 and f32/bf16 paths. Mirrors
+  `torch.special.digamma`.
 - REQ-6: `log1p(input)` / `expm1(input)` — numerically-stable
   `log(1+x)` / `exp(x)-1` via `num_traits::Float::ln_1p` /
   `exp_m1`. Mirrors `torch.log1p` / `torch.expm1`.
 - REQ-7: `sinc(input)` — normalised sinc: `sin(pi*x)/(pi*x)` with
   `sinc(0) = 1`. Mirrors `torch.special.sinc`.
 - REQ-8: `xlogy(x, y)` — `x * log(y)` with `xlogy(0, y) = 0`
-  convention (matches the entropy-computation use). Mirrors
-  `torch.special.xlogy`.
+  convention (matches the entropy-computation use), EXCEPT that NaN `y`
+  wins over the zero shortcut: `xlogy(0, NaN) = NaN`, mirroring the
+  `isnan(y)`-first ordering of upstream `xlogy_kernel`
+  (`aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:1288-1300`; audit
+  CORE-175). Mirrors `torch.special.xlogy`.
 - REQ-9: Chebyshev polynomial family — `chebyshev_polynomial_{t,u,v,w}`
   via three-term recurrence. Mirrors
   `torch.special.chebyshev_polynomial_{t,u,v,w}`. CPU path runs the
@@ -69,15 +77,28 @@ polynomial families).
   `torch.special.shifted_chebyshev_polynomial_{t,u,v,w}`.
 - REQ-13: Incomplete-gamma family — `gammainc(input, other)` (regularized
   lower `P(a, x)`) and `gammaincc(input, other)` (regularized upper
-  `Q(a, x) = 1 - P`). Numerical-Recipes `gammp`/`gammq` interior (power series
-  for `x < a + 1`, Lentz continued fraction for `x >= a + 1`) wrapped with
-  PyTorch's exact boundary contract (`calc_igamma`/`calc_igammac`: NaN for
-  negatives, `a=0,x>0 -> 1` / `0`, `x=0 -> 0` / `1`, infinity cases). Mirrors
-  `torch.special.gammainc` / `torch.special.gammaincc`.
+  `Q(a, x) = 1 - P`). Interior is a direct f64 port of PyTorch's igamma
+  kernel suite (`aten/src/ATen/native/Math.h`: `_igam_helper_fac`,
+  `_igam_helper_series` DLMF 8.11.4, `_igamc_helper_series` DLMF 8.7.3,
+  `_igam_helper_asymptotic_series` DLMF 8.12.3/8.12.4 with the 25×25 `d`
+  table for the large-`a` `x ≈ a` ridge, `_igamc_helper_continued_fraction`
+  DLMF 8.9.2) under the `calc_igamma`/`calc_igammac` regime selection
+  (SMALL=20, LARGE=200, SMALLRATIO=0.3, LARGERATIO=4.5 — the pre-CORE-169
+  Numerical-Recipes interior silently truncated at 300 iterations from
+  `a ≈ 1.2e4`), wrapped with PyTorch's exact boundary contract
+  (`calc_igamma`/`calc_igammac`: NaN for negatives, `a=0,x>0 -> 1` / `0`,
+  `x=0 -> 0` / `1`, infinity cases). Mirrors `torch.special.gammainc` /
+  `torch.special.gammaincc`.
 - REQ-14: Log-beta / beta — `log_beta(a, b) = lgamma(a) + lgamma(b) -
-  lgamma(a + b)` and `beta(a, b) = exp(log_beta(a, b))`, computed in f64 then
-  narrowed. Mirrors `scipy.special.betaln` / `scipy.special.beta` (the `lbeta`
-  PyTorch users compose from `torch.lgamma`).
+  lgamma(a + b)` computed in f64 then narrowed; `beta(a, b)` is the
+  SIGN-TRACKED cephes `beta.c` contract (audit CORE-172): non-positive-integer
+  arguments route through the `beta_negint` branch (`+inf`, or the finite
+  pole-ratio limit `(-1)^b · B(1-a-b, b)` for integer `b` with `1-a-b > 0`),
+  `Γ(a+b)` denominator poles yield signed zeros, and the smooth path applies
+  `sgn(Γ(a))·sgn(Γ(b))/sgn(Γ(a+b))` to `exp(log_beta)` (so
+  `beta(-0.5, 1.5) = -π`). Mirrors `scipy.special.betaln` /
+  `scipy.special.beta` (the `lbeta` PyTorch users compose from
+  `torch.lgamma`).
 - REQ-15: Multivariate log-gamma — `multigammaln(input, p)` and its alias
   `mvlgamma(input, p)` computing `(p(p-1)/4) ln(π) + Σ_{i=1}^p lgamma(a +
   (1-i)/2)`. `p >= 1` (error for `p == 0`, matching `mvlgamma_check` at
@@ -188,7 +209,7 @@ recurrence-identity checks (`H_n(x) - 2x*H_{n-1}(x) + 2(n-1)*H_{n-2}(x) =
 | REQ-10 | SHIPPED | impl (CPU): `hermite_polynomial_h` / `hermite_polynomial_he in special.rs`; impl (GPU): `gpu_hermite_h_poly_*` / `gpu_hermite_he_poly_* in ferrotorch-gpu/src/special.rs`; non-test consumer: the CUDA branch (`poly_gpu_simple`) of `hermite_polynomial_h` / `hermite_polynomial_he in special.rs` |
 | REQ-11 | SHIPPED | impl (CPU): `laguerre_polynomial_l` / `legendre_polynomial_p in special.rs`; impl (GPU): `gpu_laguerre_poly_*` / `gpu_legendre_poly_* in ferrotorch-gpu/src/special.rs`; non-test consumer: the CUDA branch of `laguerre_polynomial_l` / `legendre_polynomial_p in special.rs` |
 | REQ-12 | SHIPPED | impl (CPU): `shifted_chebyshev_polynomial_{t,u,v,w} in special.rs`; impl (GPU): `gpu_chebyshev_poly_f32`/`_f64` with `shift = true`; non-test consumer: the CUDA branch of `shifted_chebyshev_polynomial_{t,u,v,w} in special.rs` |
-| REQ-13 | SHIPPED | impl: `pub fn gammainc` / `pub fn gammaincc` in `special.rs` (boundary kernels `calc_igamma_f64` / `calc_igammac_f64` over NR core `gammp_core_f64` / `gammq_core_f64`) mirror `torch.special.gammainc` / `gammaincc` (`aten/src/ATen/native/Math.h:1144 calc_igamma`, `:1085 calc_igammac`); non-test consumer: re-exported as top-level `ferrotorch_core::gammainc` / `ferrotorch_core::gammaincc` in `lib.rs` — per goal.md S5 the public `torch.special` surface IS the consumer (boundary API needs no further downstream caller) |
-| REQ-14 | SHIPPED | impl: `pub fn log_beta` / `pub fn beta` in `special.rs` (scalar `log_beta_scalar` / `beta_scalar`) mirror `scipy.special.betaln` / `beta`; non-test consumer: re-exported as `ferrotorch_core::log_beta` / `ferrotorch_core::beta` in `lib.rs` (S5 public-surface consumer) |
+| REQ-13 | SHIPPED | impl: `pub fn gammainc` / `pub fn gammaincc` in `special.rs` (boundary kernels `calc_igamma_f64` / `calc_igammac_f64` over the ported torch interior `igam_interior_f64` / `igamc_interior_f64` — `_igam_helper_*` suite incl. the DLMF 8.12.3/8.12.4 large-`a` asymptotic expansion, audit CORE-169) mirror `torch.special.gammainc` / `gammaincc` (`aten/src/ATen/native/Math.h:1144 calc_igamma`, `:1070 calc_igammac`); non-test consumer: re-exported as top-level `ferrotorch_core::gammainc` / `ferrotorch_core::gammaincc` in `lib.rs` — per goal.md S5 the public `torch.special` surface IS the consumer (boundary API needs no further downstream caller) |
+| REQ-14 | SHIPPED | impl: `pub fn log_beta` / `pub fn beta` in `special.rs` (scalar `log_beta_scalar`; `beta_scalar` over the sign-tracked cephes port `beta_f64` / `beta_negint_f64` / `lgam_sgn_sign_f64`, audit CORE-172) mirror `scipy.special.betaln` / `beta`; non-test consumer: re-exported as `ferrotorch_core::log_beta` / `ferrotorch_core::beta` in `lib.rs` (S5 public-surface consumer) |
 | REQ-15 | SHIPPED | impl: `pub fn multigammaln` + alias `pub fn mvlgamma` in `special.rs` (scalar `multigammaln_scalar`) mirror `torch.special.multigammaln` / `torch.mvlgamma` (`aten/src/ATen/native/UnaryOps.cpp:887 mvlgamma`; only guard is `p >= 1` per `mvlgamma_check` at `UnaryOps.cpp:884` — NO fabricated NaN domain-guard; out-of-domain `a <= (p-1)/2` returns the ordinary finite lgamma-sum or `+inf` at an lgamma pole, matching torch); non-test consumer: re-exported as `ferrotorch_core::multigammaln` / `ferrotorch_core::mvlgamma` in `lib.rs` (S5 public-surface consumer) |
 | REQ-16 | SHIPPED | impl: `pub fn gammaln_sign` in `special.rs` (scalar `gammaln_sign_scalar`) mirrors `scipy.special.gammasgn`; non-test consumer: re-exported as `ferrotorch_core::gammaln_sign` in `lib.rs` (S5 public-surface consumer) |
