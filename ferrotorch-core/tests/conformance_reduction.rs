@@ -82,6 +82,26 @@ mod tolerance {
     #[allow(dead_code, reason = "consumed by `gpu` cfg-gated module")]
     pub const F64_LOGSCAN_GPU: f64 = 1e-9;
 
+    /// Accumulation-aware reduction tolerance (R-ORACLE-5, CORE-199 / #1893
+    /// sweep lanes, k up to 10007 summands).
+    ///
+    /// Analytic justification: torch reduces with pairwise summation
+    /// (error O(eps*log2 k)); ferrotorch folds sequentially (deterministic
+    /// bound O(eps*k), expected O(eps*sqrt(k)) under the standard
+    /// random-rounding model — Higham, *Accuracy and Stability of Numerical
+    /// Algorithms*, sec. 4.2). The order difference is therefore expected
+    /// O(eps*sqrt(k)); the factor 8 covers the constant without admitting
+    /// the eps*k worst case. For small k the per-lane base band dominates
+    /// via `max`, so all pre-sweep rows keep their original bound.
+    pub fn accum_tol_f32(base: f32, k: usize) -> f32 {
+        base.max(8.0 * (k as f32).sqrt() * f32::EPSILON)
+    }
+
+    /// See [`accum_tol_f32`]; same model at f64 epsilon.
+    pub fn accum_tol_f64(base: f64, k: usize) -> f64 {
+        base.max(8.0 * (k as f64).sqrt() * f64::EPSILON)
+    }
+
     pub fn assert_close_f32(actual: &[f32], expected: &[f32], tol: f32, label: &str) {
         assert_eq!(
             actual.len(),
@@ -274,6 +294,11 @@ struct Fixture {
     axis: Option<i64>,
     #[serde(default)]
     keepdim: Option<bool>,
+    /// CORE-199 / #1893 non-contiguous lane: when `true`, `a_data` is the
+    /// CONTIGUOUS row-major base buffer and the runner applies
+    /// `.transpose(0, 1)` to build the non-contiguous view the op consumes.
+    #[serde(default)]
+    input_transpose: Option<bool>,
 }
 
 fn load_fixtures() -> FixtureFile {
@@ -513,7 +538,7 @@ fn run_global_reduction_for_device(op: GlobalReduction, device_label: &str, devi
             .map(F64ListSentinel::as_slice)
             .expect("grad_a");
 
-        let (tol_fwd_f32, tol_grad_f32, tol_fwd_f64, tol_grad_f64) =
+        let (mut tol_fwd_f32, tol_grad_f32, mut tol_fwd_f64, tol_grad_f64) =
             if matches!(device, Device::Cuda(_)) {
                 (
                     tolerance::F32_REDUCTION_GPU,
@@ -529,6 +554,15 @@ fn run_global_reduction_for_device(op: GlobalReduction, device_label: &str, devi
                     tolerance::F64_REDUCTION_CPU,
                 )
             };
+        // CORE-199 sweep rows reduce up to k = 10007 summands; sum/mean
+        // forwards take the accumulation-aware band (see
+        // tolerance::accum_tol_f32). amax/amin are comparisons (exact) and
+        // prod has no sweep rows, so they keep the base band. Gradients are
+        // broadcast constants / indicators — no accumulation.
+        if matches!(op, GlobalReduction::Sum | GlobalReduction::Mean) {
+            tol_fwd_f32 = tolerance::accum_tol_f32(tol_fwd_f32, a_data.len());
+            tol_fwd_f64 = tolerance::accum_tol_f64(tol_fwd_f64, a_data.len());
+        }
 
         match f.dtype.as_str() {
             "float32" => {
@@ -679,7 +713,7 @@ fn run_dim_reduction_for_device(op: DimReduction, device_label: &str, device: De
         let axis = f.axis.expect("axis");
         let keepdim = f.keepdim.expect("keepdim");
 
-        let (tol_fwd_f32, tol_grad_f32, tol_fwd_f64, tol_grad_f64) =
+        let (tol_fwd_f32_base, tol_grad_f32, tol_fwd_f64_base, tol_grad_f64) =
             if matches!(device, Device::Cuda(_)) {
                 (
                     tolerance::F32_REDUCTION_GPU,
@@ -695,6 +729,18 @@ fn run_dim_reduction_for_device(op: DimReduction, device_label: &str, device: De
                     tolerance::F64_REDUCTION_CPU,
                 )
             };
+        // CORE-199 sweep rows reduce rows of up to k = 911 elements; the
+        // forward takes the accumulation-aware band over the REDUCED dim's
+        // length (see tolerance::accum_tol_f32). Gradients are broadcast
+        // constants — no accumulation.
+        let norm_axis = if axis < 0 {
+            (shape.len() as i64 + axis) as usize
+        } else {
+            axis as usize
+        };
+        let k_reduced = shape[norm_axis];
+        let tol_fwd_f32 = tolerance::accum_tol_f32(tol_fwd_f32_base, k_reduced);
+        let tol_fwd_f64 = tolerance::accum_tol_f64(tol_fwd_f64_base, k_reduced);
 
         match f.dtype.as_str() {
             "float32" => {
@@ -1609,6 +1655,378 @@ fn forward_only_helpers_smoke() {
 // Sanity: assert the fixture file has every op we expect.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// CORE-199 / #1893 — special-value lanes
+// ---------------------------------------------------------------------------
+//
+// Live-torch expectations (fixture). Pins (single contract, retire-on-fix,
+// R-ORACLE-4):
+//   * amax/amin NaN propagation        -> #1932 (torch: NaN; ferrotorch
+//     skips NaN and returns a finite extremum)
+//   * logcumsumexp inf scan poisoning  -> CORE-133 / #1827
+
+#[test]
+fn cpu_amax_amin_special() {
+    let file = load_fixtures();
+    for op_name in ["amax_special", "amin_special"] {
+        let cases = cases_for(&file, op_name, "cpu");
+        assert!(!cases.is_empty(), "no fixtures for {op_name}");
+        for f in cases {
+            let label = format!("{op_name} cpu tag={:?} dtype={}", f.tag, f.dtype);
+            let shape = f.a_shape.as_ref().unwrap();
+            let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
+            let exp = f
+                .out_values
+                .as_ref()
+                .map(F64ListSentinel::as_slice)
+                .unwrap();
+            // The sv_nan_* rows expect torch's NaN; ferrotorch returns the
+            // finite extremum (pin). The sv_inf row is finite-contract and
+            // value-asserted.
+            let pinned_nan = exp[0].is_nan();
+            match f.dtype.as_str() {
+                "float32" => {
+                    let a = make_cpu_f32(a_data, shape, false);
+                    let r = match op_name {
+                        "amax_special" => amax(&a).expect("amax"),
+                        _ => amin(&a).expect("amin"),
+                    };
+                    let actual = read_back_f32(&r, Device::Cpu);
+                    if pinned_nan {
+                        // #1932 pin: torch propagates NaN (fixture);
+                        // ferrotorch's fold skips it. When #1932 lands this
+                        // assert fails — retire the pin and let the fixture
+                        // comparison below run for every row.
+                        assert!(
+                            !actual[0].is_nan(),
+                            "{label}: result is now NaN — #1932 appears \
+                             fixed; retire this pin and assert the fixture"
+                        );
+                    } else {
+                        check_f32(&label, &actual, exp, tolerance::F32_REDUCTION_CPU);
+                    }
+                }
+                "float64" => {
+                    let a = make_cpu_f64(a_data, shape, false);
+                    let r = match op_name {
+                        "amax_special" => amax(&a).expect("amax"),
+                        _ => amin(&a).expect("amin"),
+                    };
+                    let actual = read_back_f64(&r, Device::Cpu);
+                    if pinned_nan {
+                        // #1932 pin — same mechanism at f64.
+                        assert!(
+                            !actual[0].is_nan(),
+                            "{label}: result is now NaN — #1932 appears \
+                             fixed; retire this pin and assert the fixture"
+                        );
+                    } else {
+                        check_f64(&label, &actual, exp, tolerance::F64_REDUCTION_CPU);
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
+fn cpu_sum_mean_special() {
+    let file = load_fixtures();
+    for op_name in ["sum_special", "mean_special"] {
+        let cases = cases_for(&file, op_name, "cpu");
+        assert!(!cases.is_empty(), "no fixtures for {op_name}");
+        for f in cases {
+            let label = format!("{op_name} cpu tag={:?} dtype={}", f.tag, f.dtype);
+            let shape = f.a_shape.as_ref().unwrap();
+            let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
+            let exp = f
+                .out_values
+                .as_ref()
+                .map(F64ListSentinel::as_slice)
+                .unwrap();
+            match f.dtype.as_str() {
+                "float32" => {
+                    let a = make_cpu_f32(a_data, shape, false);
+                    let r = match op_name {
+                        "sum_special" => sum(&a).expect("sum"),
+                        _ => mean(&a).expect("mean"),
+                    };
+                    check_f32(
+                        &label,
+                        &read_back_f32(&r, Device::Cpu),
+                        exp,
+                        tolerance::F32_REDUCTION_CPU,
+                    );
+                }
+                "float64" => {
+                    let a = make_cpu_f64(a_data, shape, false);
+                    let r = match op_name {
+                        "sum_special" => sum(&a).expect("sum"),
+                        _ => mean(&a).expect("mean"),
+                    };
+                    check_f64(
+                        &label,
+                        &read_back_f64(&r, Device::Cpu),
+                        exp,
+                        tolerance::F64_REDUCTION_CPU,
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
+fn cpu_cummax_cummin_special() {
+    let file = load_fixtures();
+    for op_name in ["cummax_special", "cummin_special"] {
+        let cases = cases_for(&file, op_name, "cpu");
+        assert!(!cases.is_empty(), "no fixtures for {op_name}");
+        for f in cases {
+            let label = format!("{op_name} cpu tag={:?} dtype={}", f.tag, f.dtype);
+            let shape = f.a_shape.as_ref().unwrap();
+            let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
+            let expected_vals = f
+                .out_values
+                .as_ref()
+                .map(F64ListSentinel::as_slice)
+                .unwrap();
+            let expected_idx = f.out_indices.as_ref().expect("out_indices");
+            let axis = f.axis.expect("axis");
+            // Probed at HEAD: ferrotorch's CPU scan matches torch's NaN
+            // propagation exactly (values [1, nan, nan], indices [0, 1, 1])
+            // — straight value+indices assertion.
+            match f.dtype.as_str() {
+                "float32" => {
+                    let a = make_cpu_f32(a_data, shape, false);
+                    let result: CumExtremeResult<f32> = match op_name {
+                        "cummax_special" => cummax(&a, axis).expect("cummax"),
+                        _ => cummin(&a, axis).expect("cummin"),
+                    };
+                    check_f32(
+                        &format!("{label} values"),
+                        &read_back_f32(&result.values, Device::Cpu),
+                        expected_vals,
+                        tolerance::F32_REDUCTION_CPU,
+                    );
+                    assert_eq!(&result.indices, expected_idx, "{label} indices");
+                }
+                "float64" => {
+                    let a = make_cpu_f64(a_data, shape, false);
+                    let result: CumExtremeResult<f64> = match op_name {
+                        "cummax_special" => cummax(&a, axis).expect("cummax"),
+                        _ => cummin(&a, axis).expect("cummin"),
+                    };
+                    check_f64(
+                        &format!("{label} values"),
+                        &read_back_f64(&result.values, Device::Cpu),
+                        expected_vals,
+                        tolerance::F64_REDUCTION_CPU,
+                    );
+                    assert_eq!(&result.indices, expected_idx, "{label} indices");
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
+fn cpu_logcumsumexp_special() {
+    let file = load_fixtures();
+    let cases = cases_for(&file, "logcumsumexp_special", "cpu");
+    assert!(!cases.is_empty(), "no fixtures for logcumsumexp_special");
+    for f in cases {
+        let label = format!("logcumsumexp_special cpu tag={:?} dtype={}", f.tag, f.dtype);
+        let shape = f.a_shape.as_ref().unwrap();
+        let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
+        let exp = f
+            .out_values
+            .as_ref()
+            .map(F64ListSentinel::as_slice)
+            .unwrap();
+        let axis = f.axis.expect("axis");
+        // #1827 pin (CORE-133): torch passes equal infinities through
+        // (fixture: [-inf, 0] -> [-inf, 0]; [0, inf] -> [0, inf]);
+        // ferrotorch's running-max rescaling computes (inf - inf).exp() =
+        // NaN and poisons the scan line. Pin the current NaN at the
+        // position AFTER the infinity enters the scan; when #1827 lands
+        // these asserts fail — retire the pin and assert the fixture.
+        match f.dtype.as_str() {
+            "float32" => {
+                let a = make_cpu_f32(a_data, shape, false);
+                let l = logcumsumexp(&a, axis).expect("logcumsumexp");
+                let actual = read_back_f32(&l, Device::Cpu);
+                let poisoned = actual.iter().any(|v| v.is_nan());
+                assert!(
+                    poisoned,
+                    "{label}: scan no longer NaN-poisoned (got {actual:?}, \
+                     torch expects {exp:?}) — #1827 appears fixed; retire \
+                     this pin and assert the fixture values"
+                );
+            }
+            "float64" => {
+                let a = make_cpu_f64(a_data, shape, false);
+                let l = logcumsumexp(&a, axis).expect("logcumsumexp");
+                let actual = read_back_f64(&l, Device::Cpu);
+                let poisoned = actual.iter().any(|v| v.is_nan());
+                assert!(
+                    poisoned,
+                    "{label}: scan no longer NaN-poisoned (got {actual:?}, \
+                     torch expects {exp:?}) — #1827 appears fixed; retire \
+                     this pin and assert the fixture values"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CORE-199 / #1893 — non-contiguous (transpose-view) lanes (CORE-132 / #1826)
+// ---------------------------------------------------------------------------
+//
+// The fixture stores the contiguous base buffer; the runner builds the view
+// with `.transpose(0, 1)` (input_transpose flag). Probed at HEAD:
+//   * amax / amin / sum_dim / mean_dim ACCEPT views -> value-asserted.
+//   * sum / mean / prod / cumsum / cummax reject ("tensor is not
+//     contiguous") -> expect_err pins on #1826, retire-on-fix.
+
+#[test]
+fn cpu_transpose_view_lanes() {
+    let file = load_fixtures();
+    // Ops that accept views today: assert torch values.
+    let accept_ops = [
+        "amax_tview",
+        "amin_tview",
+        "sum_dim_tview",
+        "mean_dim_tview",
+    ];
+    for op_name in accept_ops {
+        let cases = cases_for(&file, op_name, "cpu");
+        assert!(!cases.is_empty(), "no fixtures for {op_name}");
+        for f in cases {
+            assert_eq!(f.input_transpose, Some(true), "{op_name}: missing flag");
+            let label = format!("{op_name} cpu dtype={}", f.dtype);
+            let shape = f.a_shape.as_ref().unwrap();
+            let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
+            let exp = f
+                .out_values
+                .as_ref()
+                .map(F64ListSentinel::as_slice)
+                .unwrap();
+            match f.dtype.as_str() {
+                "float32" => {
+                    let v = make_cpu_f32(a_data, shape, false)
+                        .transpose(0, 1)
+                        .expect("transpose");
+                    assert!(!v.is_contiguous(), "{label}: view must be non-contiguous");
+                    let r = match op_name {
+                        "amax_tview" => amax(&v).expect("amax"),
+                        "amin_tview" => amin(&v).expect("amin"),
+                        "sum_dim_tview" => sum_dim(&v, 0, false).expect("sum_dim"),
+                        "mean_dim_tview" => mean_dim(&v, 0, false).expect("mean_dim"),
+                        _ => unreachable!(),
+                    };
+                    check_f32(
+                        &label,
+                        &read_back_f32(&r, Device::Cpu),
+                        exp,
+                        tolerance::F32_REDUCTION_CPU,
+                    );
+                }
+                "float64" => {
+                    let v = make_cpu_f64(a_data, shape, false)
+                        .transpose(0, 1)
+                        .expect("transpose");
+                    assert!(!v.is_contiguous(), "{label}: view must be non-contiguous");
+                    let r = match op_name {
+                        "amax_tview" => amax(&v).expect("amax"),
+                        "amin_tview" => amin(&v).expect("amin"),
+                        "sum_dim_tview" => sum_dim(&v, 0, false).expect("sum_dim"),
+                        "mean_dim_tview" => mean_dim(&v, 0, false).expect("mean_dim"),
+                        _ => unreachable!(),
+                    };
+                    check_f64(
+                        &label,
+                        &read_back_f64(&r, Device::Cpu),
+                        exp,
+                        tolerance::F64_REDUCTION_CPU,
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    // Ops that reject views today: #1826 pin (single contract,
+    // retire-on-fix; torch values live in the fixture's out_values).
+    let reject_ops = [
+        "sum_tview",
+        "mean_tview",
+        "prod_tview",
+        "cumsum_tview",
+        "cummax_tview",
+    ];
+    for op_name in reject_ops {
+        let cases = cases_for(&file, op_name, "cpu");
+        assert!(!cases.is_empty(), "no fixtures for {op_name}");
+        for f in cases {
+            assert_eq!(f.input_transpose, Some(true), "{op_name}: missing flag");
+            let label = format!("{op_name} cpu dtype={}", f.dtype);
+            let shape = f.a_shape.as_ref().unwrap();
+            let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
+            macro_rules! pin_err {
+                ($res:expr) => {{
+                    let err = $res.expect_err(&format!(
+                        "{label}: op accepted a non-contiguous view — #1826 \
+                         appears fixed; retire this pin and assert the \
+                         fixture out_values"
+                    ));
+                    let msg = format!("{err}");
+                    assert!(
+                        msg.contains("contiguous"),
+                        "{label}: expected the contiguity rejection, got {msg:?}"
+                    );
+                }};
+            }
+            match f.dtype.as_str() {
+                "float32" => {
+                    let v = make_cpu_f32(a_data, shape, false)
+                        .transpose(0, 1)
+                        .expect("transpose");
+                    assert!(!v.is_contiguous(), "{label}: view must be non-contiguous");
+                    match op_name {
+                        "sum_tview" => pin_err!(sum(&v)),
+                        "mean_tview" => pin_err!(mean(&v)),
+                        "prod_tview" => pin_err!(prod(&v)),
+                        "cumsum_tview" => pin_err!(cumsum(&v, 0)),
+                        "cummax_tview" => pin_err!(cummax(&v, 0).map(|r| r.values)),
+                        _ => unreachable!(),
+                    }
+                }
+                "float64" => {
+                    let v = make_cpu_f64(a_data, shape, false)
+                        .transpose(0, 1)
+                        .expect("transpose");
+                    assert!(!v.is_contiguous(), "{label}: view must be non-contiguous");
+                    match op_name {
+                        "sum_tview" => pin_err!(sum(&v)),
+                        "mean_tview" => pin_err!(mean(&v)),
+                        "prod_tview" => pin_err!(prod(&v)),
+                        "cumsum_tview" => pin_err!(cumsum(&v, 0)),
+                        "cummax_tview" => pin_err!(cummax(&v, 0).map(|r| r.values)),
+                        _ => unreachable!(),
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
 #[test]
 fn fixture_file_covers_every_phase22_op() {
     let file = load_fixtures();
@@ -1641,6 +2059,23 @@ fn fixture_file_covers_every_phase22_op() {
         // Cat B — edge cases
         "cumprod_zero",
         "logcumsumexp_overflow",
+        // CORE-199 / #1893 lanes
+        "amax_special",
+        "amin_special",
+        "sum_special",
+        "mean_special",
+        "cummax_special",
+        "cummin_special",
+        "logcumsumexp_special",
+        "sum_tview",
+        "mean_tview",
+        "prod_tview",
+        "amax_tview",
+        "amin_tview",
+        "sum_dim_tview",
+        "mean_dim_tview",
+        "cumsum_tview",
+        "cummax_tview",
     ];
     for r in required {
         let n = by_op.get(r).copied().unwrap_or(0);

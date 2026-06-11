@@ -525,6 +525,281 @@ def fixture_cat_b_edge_cases() -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Cat F — size-sweep lanes (CORE-199 / #1893)
+# ---------------------------------------------------------------------------
+#
+# numel 4096 (power of two) and 10007 (prime — forces SIMD/unroll tails and
+# meaningful accumulation drift between torch's pairwise summation and a
+# sequential fold). Inputs are exact multiples of 0.25 so the JSON input
+# side stays compact and f32/f64 conversion is lossless.
+
+SWEEP_SIZES: list[int] = [4096, 10007]
+
+# 2-D shapes for the dim-reduction sweep: 16*256 = 4096 and 11*911 = 10021
+# (both factors prime — odd row lengths stress per-row tails).
+SWEEP_2D_SHAPES: list[list[int]] = [[16, 256], [11, 911]]
+
+
+def _sweep_vals(n: int, lo: float, hi: float) -> list[float]:
+    span = hi - lo
+    steps = max(1, int(span * 4))
+    return [lo + ((i * 7) % steps) * 0.25 for i in range(n)]
+
+
+def fixture_cat_f_size_sweep() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for n in SWEEP_SIZES:
+        vals = _sweep_vals(n, 0.25, 16.0)
+        # Make the global extremum unique so amax/amin stay out of the tie
+        # regime (tie semantics are covered by the dedicated tie fixtures).
+        vals[n // 2] = 99.0
+        vals[n // 3] = -99.0
+        for device in DEVICES:
+            for dtype in DTYPES:
+                td = torch_dtype(dtype)
+                a = torch.tensor(vals, dtype=td, device=device)
+                for op in ("sum", "mean", "amax", "amin"):
+                    a_g = a.detach().clone().requires_grad_(True)
+                    if op == "sum":
+                        fwd = a_g.sum()
+                    elif op == "mean":
+                        fwd = a_g.mean()
+                    elif op == "amax":
+                        fwd = torch.amax(a_g)
+                    else:
+                        fwd = torch.amin(a_g)
+                    fwd.backward()
+                    out.append(
+                        {
+                            "op": op,
+                            "tag": f"sweep{n}",
+                            "dtype": dtype,
+                            "device": device,
+                            "a_shape": [n],
+                            "a_data": to_listf(a),
+                            "out_shape": [],
+                            "out_values": to_listf(fwd),
+                            "grad_a": to_listf(a_g.grad),
+                        }
+                    )
+    for shape in SWEEP_2D_SHAPES:
+        n = shape[0] * shape[1]
+        vals = _sweep_vals(n, 0.25, 16.0)
+        for device in DEVICES:
+            for dtype in DTYPES:
+                td = torch_dtype(dtype)
+                a = torch.tensor(vals, dtype=td, device=device).reshape(shape)
+                for op in ("sum_dim", "mean_dim"):
+                    for axis in (0, 1):
+                        a_g = a.detach().clone().requires_grad_(True)
+                        if op == "sum_dim":
+                            fwd = torch.sum(a_g, dim=axis, keepdim=False)
+                        else:
+                            fwd = torch.mean(a_g, dim=axis, keepdim=False)
+                        fwd.sum().backward()
+                        out.append(
+                            {
+                                "op": op,
+                                "tag": f"sweep{shape[0]}x{shape[1]}_axis{axis}",
+                                "dtype": dtype,
+                                "device": device,
+                                "axis": axis,
+                                "keepdim": False,
+                                "a_shape": shape,
+                                "a_data": to_listf(a),
+                                "out_shape": list(fwd.shape),
+                                "out_values": to_listf(fwd),
+                                "grad_a": to_listf(a_g.grad),
+                            }
+                        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Cat G — special-value lanes (CORE-199 / #1893)
+# ---------------------------------------------------------------------------
+#
+# Live-torch expectations only (R-ORACLE-1/2). Probed at torch 2.11.0+cu130:
+#   * amax/amin PROPAGATE NaN (`torch.amax(tensor([1., nan, 3.])) -> nan`);
+#     ferrotorch's fold skips NaN — pinned in the Rust suite (new issue,
+#     retire-on-fix).
+#   * cummax/cummin propagate NaN once seen (`values [1, nan, nan]`,
+#     `indices [0, 1, 1]`) — ferrotorch matches; asserted as values.
+#   * logcumsumexp inf rows ([-inf, 0] -> [-inf, 0]; [0, inf] -> [0, inf])
+#     — ferrotorch NaN-poisons (CORE-133 / #1827); pinned in the suite.
+#   * sum([inf, -inf]) -> NaN; sum([nan, ...]) -> NaN — ferrotorch matches.
+
+
+def fixture_cat_g_special_values() -> list[dict[str, Any]]:
+    inf = float("inf")
+    nan = float("nan")
+    out: list[dict[str, Any]] = []
+    for device in DEVICES:
+        for dtype in DTYPES:
+            td = torch_dtype(dtype)
+
+            # amax/amin NaN propagation (forward only — torch's backward
+            # through a NaN extremum is NaN-everywhere and ferrotorch's
+            # divergence is already in the forward).
+            for op in ("amax", "amin"):
+                for tag, vals in (
+                    ("sv_nan_mid", [1.0, nan, 3.0]),
+                    ("sv_nan_first", [nan, 2.0, 3.0]),
+                    ("sv_inf", [1.0, inf, -inf]),
+                ):
+                    a = torch.tensor(vals, dtype=td, device=device)
+                    fwd = torch.amax(a) if op == "amax" else torch.amin(a)
+                    out.append(
+                        {
+                            "op": f"{op}_special",
+                            "tag": tag,
+                            "dtype": dtype,
+                            "device": device,
+                            "a_shape": [len(vals)],
+                            "a_data": to_listf(a),
+                            "out_shape": [],
+                            "out_values": to_listf(fwd),
+                        }
+                    )
+
+            # sum/mean specials: inf cancellation and NaN passthrough.
+            for op in ("sum", "mean"):
+                for tag, vals in (
+                    ("sv_inf_cancel", [inf, -inf]),
+                    ("sv_inf", [inf, 1.0]),
+                    ("sv_nan", [nan, 1.0]),
+                    ("sv_neg_zero", [-0.0, -0.0]),
+                ):
+                    a = torch.tensor(vals, dtype=td, device=device)
+                    fwd = a.sum() if op == "sum" else a.mean()
+                    out.append(
+                        {
+                            "op": f"{op}_special",
+                            "tag": tag,
+                            "dtype": dtype,
+                            "device": device,
+                            "a_shape": [len(vals)],
+                            "a_data": to_listf(a),
+                            "out_shape": [],
+                            "out_values": to_listf(fwd),
+                        }
+                    )
+
+            # cummax/cummin NaN propagation (values + indices).
+            for op in ("cummax", "cummin"):
+                for tag, vals in (
+                    ("sv_nan_mid", [1.0, nan, 3.0]),
+                    ("sv_nan_first", [nan, 2.0, 3.0]),
+                ):
+                    a = torch.tensor(vals, dtype=td, device=device)
+                    result = (
+                        torch.cummax(a, dim=0)
+                        if op == "cummax"
+                        else torch.cummin(a, dim=0)
+                    )
+                    out.append(
+                        {
+                            "op": f"{op}_special",
+                            "tag": tag,
+                            "dtype": dtype,
+                            "device": device,
+                            "axis": 0,
+                            "a_shape": [len(vals)],
+                            "a_data": to_listf(a),
+                            "out_shape": list(result.values.shape),
+                            "out_values": to_listf(result.values),
+                            "out_indices": to_list_int(result.indices),
+                        }
+                    )
+
+            # logcumsumexp inf rows (CORE-133 / #1827 pins).
+            for tag, vals in (
+                ("sv_neg_inf_first", [-inf, 0.0]),
+                ("sv_pos_inf_last", [0.0, inf]),
+            ):
+                a = torch.tensor(vals, dtype=td, device=device)
+                fwd = torch.logcumsumexp(a, dim=0)
+                out.append(
+                    {
+                        "op": "logcumsumexp_special",
+                        "tag": tag,
+                        "dtype": dtype,
+                        "device": device,
+                        "axis": 0,
+                        "a_shape": [len(vals)],
+                        "a_data": to_listf(a),
+                        "out_shape": list(fwd.shape),
+                        "out_values": to_listf(fwd),
+                    }
+                )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Cat H — non-contiguous (transpose-view) lanes (CORE-199 / #1893,
+# CORE-132 / #1826)
+# ---------------------------------------------------------------------------
+#
+# `a_data` is the contiguous row-major [2, 3] base; `input_transpose: true`
+# tells the Rust runner to apply `.transpose(0, 1)` and feed the resulting
+# non-contiguous view to the op. Expected values are torch on the same view.
+# Probed at HEAD: amax/amin/sum_dim/mean_dim ACCEPT views (value-asserted);
+# sum/mean/prod/cumsum/cummax reject them (expect_err pins on #1826).
+
+
+def fixture_cat_h_transpose_views() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    base_vals = [0.5, -1.25, 2.0, 3.75, -0.25, 1.5]
+    for dtype in DTYPES:
+        td = torch_dtype(dtype)
+        base = torch.tensor(base_vals, dtype=td).reshape(2, 3)
+        view = base.t()  # [3, 2] non-contiguous
+        for op_name, fwd, axis in (
+            ("sum_tview", torch.sum(view), None),
+            ("mean_tview", torch.mean(view), None),
+            ("prod_tview", torch.prod(view), None),
+            ("amax_tview", torch.amax(view), None),
+            ("amin_tview", torch.amin(view), None),
+            ("sum_dim_tview", torch.sum(view, dim=0), 0),
+            ("mean_dim_tview", torch.mean(view, dim=0), 0),
+            ("cumsum_tview", torch.cumsum(view, dim=0), 0),
+        ):
+            entry: dict[str, Any] = {
+                "op": op_name,
+                "tag": "tview_3x2",
+                "dtype": dtype,
+                "device": "cpu",
+                "input_transpose": True,
+                "a_shape": [2, 3],
+                "a_data": to_listf(base),
+                "out_shape": list(fwd.shape),
+                "out_values": to_listf(fwd),
+            }
+            if axis is not None:
+                entry["axis"] = axis
+                entry["keepdim"] = False
+            out.append(entry)
+        # cummax on a view: values + indices.
+        result = torch.cummax(view, dim=0)
+        out.append(
+            {
+                "op": "cummax_tview",
+                "tag": "tview_3x2",
+                "dtype": dtype,
+                "device": "cpu",
+                "input_transpose": True,
+                "axis": 0,
+                "a_shape": [2, 3],
+                "a_data": to_listf(base),
+                "out_shape": list(result.values.shape),
+                "out_values": to_listf(result.values),
+                "out_indices": to_list_int(result.indices),
+            }
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Top-level entry
 # ---------------------------------------------------------------------------
 
@@ -537,6 +812,9 @@ def main() -> int:
     fixtures += fixture_cat_b_cumulative()
     fixtures += fixture_cat_b_cumextreme_ties()
     fixtures += fixture_cat_b_edge_cases()
+    fixtures += fixture_cat_f_size_sweep()
+    fixtures += fixture_cat_g_special_values()
+    fixtures += fixture_cat_h_transpose_views()
 
     payload = {
         "metadata": fixture_metadata(),

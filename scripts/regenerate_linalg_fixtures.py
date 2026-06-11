@@ -1280,6 +1280,261 @@ def fixture_edge_cases() -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Stress lanes — rank deficiency, repeated singular values, 64x64
+# (CORE-199 / #1893)
+# ---------------------------------------------------------------------------
+#
+# Comparison contracts (documented per case, enforced by the existing
+# gauge-aware handlers in conformance_linalg.rs):
+#   * svd:      singular values pinned element-wise (unique up to sort) +
+#               A ≈ U @ diag(S) @ Vh reconstruction. U/V columns are gauge-
+#               free (sign, and arbitrary rotation inside a repeated-σ
+#               subspace) and are NEVER compared element-wise.
+#   * qr:       A ≈ Q @ R reconstruction only (Q sign columns are gauge-free;
+#               for rank-deficient A the factorization is non-unique but the
+#               product contract still holds).
+#   * cholesky: A ≈ L @ L^T reconstruction (L unique for SPD, but the
+#               reconstruction contract is what survives rounding).
+#   * solve:    x pinned element-wise against torch (unique solution — the
+#               stress matrices are deliberately well-conditioned SPD+shift
+#               so the comparison is meaningful at f32).
+#   * det:      scalar pinned against torch. The 64x64 input is built with
+#               log-balanced eigenvalues so |det| stays O(1) in f32.
+#   * rank-deficient solve / cholesky of a PSD-singular matrix: expect_err
+#               (torch raises RuntimeError; ferrotorch must Err).
+
+
+def _orthogonal(n: int, dtype: str, device: str, seed_offset: int) -> torch.Tensor:
+    g = torch.Generator(device="cpu")
+    g.manual_seed(RNG_SEED + seed_offset)
+    m = torch.randn(n, n, dtype=torch_dtype(dtype), generator=g)
+    q, _ = torch.linalg.qr(m)
+    return q.to(device)
+
+
+def _rank_deficient(
+    rows: int, cols: int, rank: int, dtype: str, device: str, seed_offset: int
+) -> torch.Tensor:
+    g = torch.Generator(device="cpu")
+    g.manual_seed(RNG_SEED + seed_offset)
+    b = torch.randn(rows, rank, dtype=torch_dtype(dtype), generator=g)
+    c = torch.randn(rank, cols, dtype=torch_dtype(dtype), generator=g)
+    return (b @ c).to(device)
+
+
+def fixture_stress() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for device in DEVICES:
+        for dtype in DTYPES:
+            td = torch_dtype(dtype)
+
+            # --- svd: rank-deficient 6x4 (rank 2) ------------------------
+            a = _rank_deficient(6, 4, 2, dtype, device, 611)
+            _u, s, _vh = torch.linalg.svd(a, full_matrices=False)
+            out.append(
+                {
+                    "op": "svd",
+                    "tag": "svd_rankdef_6x4r2",
+                    "dtype": dtype,
+                    "device": device,
+                    "a_shape": [6, 4],
+                    "a_data": to_listf(a),
+                    "u_shape": [6, 4],
+                    "s_shape": [4],
+                    "vh_shape": [4, 4],
+                    "s_values": to_listf(s),
+                }
+            )
+
+            # --- svd: repeated singular values (σ = [3, 3, 3, 0.5]) ------
+            # A = Q1 @ diag(σ) @ Q2^T. The repeated-σ subspace makes U/V
+            # non-unique BEYOND sign — only S + reconstruction are valid
+            # comparisons (the handlers already do exactly that).
+            q1 = _orthogonal(4, dtype, device, 613)
+            q2 = _orthogonal(4, dtype, device, 617)
+            sigma = torch.tensor([3.0, 3.0, 3.0, 0.5], dtype=td, device=device)
+            a = q1 @ torch.diag(sigma) @ q2.mT
+            _u, s, _vh = torch.linalg.svd(a, full_matrices=False)
+            out.append(
+                {
+                    "op": "svd",
+                    "tag": "svd_repeated_sigma_4x4",
+                    "dtype": dtype,
+                    "device": device,
+                    "a_shape": [4, 4],
+                    "a_data": to_listf(a),
+                    "u_shape": [4, 4],
+                    "s_shape": [4],
+                    "vh_shape": [4, 4],
+                    "s_values": to_listf(s),
+                }
+            )
+
+            # --- svd: 64x64 ----------------------------------------------
+            a = _gen_matrix(64, 64, dtype, "cpu", 619).to(device)
+            _u, s, _vh = torch.linalg.svd(a, full_matrices=False)
+            out.append(
+                {
+                    "op": "svd",
+                    "tag": "svd_64x64",
+                    "dtype": dtype,
+                    "device": device,
+                    "a_shape": [64, 64],
+                    "a_data": to_listf(a),
+                    "u_shape": [64, 64],
+                    "s_shape": [64],
+                    "vh_shape": [64, 64],
+                    "s_values": to_listf(s),
+                }
+            )
+
+            # --- qr: rank-deficient 4x3 (rank 2) and 64x64 ----------------
+            a = _rank_deficient(4, 3, 2, dtype, device, 631)
+            qq, rr = torch.linalg.qr(a, mode="reduced")
+            out.append(
+                {
+                    "op": "qr",
+                    "tag": "qr_rankdef_4x3r2",
+                    "dtype": dtype,
+                    "device": device,
+                    "a_shape": [4, 3],
+                    "a_data": to_listf(a),
+                    "q_shape": list(qq.shape),
+                    "r_shape": list(rr.shape),
+                }
+            )
+            a = _gen_matrix(64, 64, dtype, "cpu", 633).to(device)
+            qq, rr = torch.linalg.qr(a, mode="reduced")
+            out.append(
+                {
+                    "op": "qr",
+                    "tag": "qr_64x64",
+                    "dtype": dtype,
+                    "device": device,
+                    "a_shape": [64, 64],
+                    "a_data": to_listf(a),
+                    "q_shape": list(qq.shape),
+                    "r_shape": list(rr.shape),
+                }
+            )
+
+            # --- cholesky: 64x64 SPD (G @ G^T / n + I, κ small) ------------
+            g = torch.Generator(device="cpu")
+            g.manual_seed(RNG_SEED + 641)
+            gm = torch.randn(64, 64, dtype=td, generator=g)
+            a = (gm @ gm.mT / 64.0 + torch.eye(64, dtype=td)).to(device)
+            torch.linalg.cholesky(a)  # sanity: SPD
+            out.append(
+                {
+                    "op": "cholesky",
+                    "tag": "chol_64x64",
+                    "dtype": dtype,
+                    "device": device,
+                    "a_shape": [64, 64],
+                    "a_data": to_listf(a),
+                    "l_shape": [64, 64],
+                }
+            )
+
+            # --- solve: 64x64 SPD+shift (κ ~ few; unique, f32-comparable) --
+            b = torch.tensor(
+                [((i * 7) % 23) * 0.25 - 2.0 for i in range(64)],
+                dtype=td,
+                device=device,
+            )
+            x = torch.linalg.solve(a, b)
+            out.append(
+                {
+                    "op": "solve",
+                    "tag": "solve_64x64",
+                    "dtype": dtype,
+                    "device": device,
+                    "a_shape": [64, 64],
+                    "b_shape": [64],
+                    "a_data": to_listf(a),
+                    "b_data": to_listf(b),
+                    "out_shape": [64],
+                    "out_values": to_listf(x),
+                }
+            )
+
+    # CPU-only stress rows (det is CPU-only in ferrotorch; the *_singular
+    # error contracts are CPU-only like the existing edge fixtures).
+    for dtype in DTYPES:
+        td = torch_dtype(dtype)
+
+        # --- det: rank-deficient 4x4 (det = 0 analytically) ----------------
+        a = _rank_deficient(4, 4, 2, dtype, "cpu", 651)
+        out.append(
+            {
+                "op": "det",
+                "tag": "det_rankdef_4x4r2",
+                "dtype": dtype,
+                "device": "cpu",
+                "a_shape": [4, 4],
+                "a_data": to_listf(a),
+                "out_shape": [],
+                "out_values": to_listf(torch.linalg.det(a)),
+            }
+        )
+
+        # --- det: 64x64 with log-balanced eigenvalues ----------------------
+        # A = Q D Q^T with D pairing λ and 1/λ so |det| = O(1) and the value
+        # is comparable in f32 without overflow.
+        q = _orthogonal(64, dtype, "cpu", 653)
+        lams = []
+        for i in range(32):
+            lam = 1.0 + (i % 8) * 0.25
+            lams += [lam, 1.0 / lam]
+        d = torch.tensor(lams, dtype=td)
+        a = q @ torch.diag(d) @ q.mT
+        out.append(
+            {
+                "op": "det",
+                "tag": "det_64x64_balanced",
+                "dtype": dtype,
+                "device": "cpu",
+                "a_shape": [64, 64],
+                "a_data": to_listf(a),
+                "out_shape": [],
+                "out_values": to_listf(torch.linalg.det(a)),
+            }
+        )
+
+        # --- solve on a rank-deficient A: torch raises; ferrotorch must Err.
+        sing = _rank_deficient(4, 4, 2, dtype, "cpu", 655)
+        b4 = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=td)
+        out.append(
+            {
+                "op": "solve_singular",
+                "tag": "stress_rankdef_4x4r2",
+                "dtype": dtype,
+                "device": "cpu",
+                "a_shape": [4, 4],
+                "b_shape": [4],
+                "a_data": to_listf(sing),
+                "b_data": to_listf(b4),
+                "expect_err": True,
+            }
+        )
+
+        # --- cholesky on a PSD-singular matrix: torch raises; must Err. ----
+        psd_sing = sing @ sing.mT  # rank 2, PSD, not PD
+        out.append(
+            {
+                "op": "cholesky_singular",
+                "tag": "stress_psd_rankdef_4x4",
+                "dtype": dtype,
+                "device": "cpu",
+                "a_shape": [4, 4],
+                "a_data": to_listf(psd_sing),
+                "expect_err": True,
+            }
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Top-level entry
 # ---------------------------------------------------------------------------
 
@@ -1293,6 +1548,7 @@ def main() -> int:
     fixtures += fixture_det_norm_inv()
     fixtures += fixture_misc()
     fixtures += fixture_edge_cases()
+    fixtures += fixture_stress()
 
     payload = {
         "metadata": fixture_metadata(),

@@ -859,6 +859,393 @@ def fixture_cat_f_inplace() -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Cat G — size-sweep lanes (CORE-199 / #1893)
+# ---------------------------------------------------------------------------
+#
+# The original fixtures top out at numel 8, which cannot exercise SIMD
+# multi-chunk loops, vector tails, or accumulation drift. These lanes add
+# numel 4096 (power of two: whole-chunk SIMD bodies) and 10007 (prime:
+# forces a non-empty scalar tail for every SIMD width) cases.
+#
+# Inputs are exact multiples of 0.25 (representable in f32 and f64) so the
+# input side of the JSON stays compact and dtype conversion is lossless.
+
+SWEEP_SIZES: list[int] = [4096, 10007]
+
+
+def _sweep_vals(n: int, lo: float, hi: float) -> list[float]:
+    """Deterministic values in [lo, hi), exact multiples of 2**-2 where the
+    span allows, cycling so no two adjacent elements are equal."""
+    span = hi - lo
+    steps = max(1, int(span * 4))  # quarter-steps across the span
+    return [lo + ((i * 7) % steps) * 0.25 for i in range(n)]
+
+
+def fixture_cat_g_size_sweep() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for n in SWEEP_SIZES:
+        for dtype in DTYPES:
+            td = torch_dtype(dtype)
+            # --- binary add / mul (Cat A runner: forward + autograd) ------
+            a_vals = _sweep_vals(n, 1.0, 9.0)
+            b_vals = _sweep_vals(n, -3.0, 5.0)
+            for op in ("add", "mul"):
+                for device in DEVICES:
+                    a = torch.tensor(a_vals, dtype=td, device=device)
+                    b = torch.tensor(b_vals, dtype=td, device=device)
+                    a_g = a.detach().clone().requires_grad_(True)
+                    b_g = b.detach().clone().requires_grad_(True)
+                    fwd = _binary_op(op)(a_g, b_g)
+                    fwd.sum().backward()
+                    out.append(
+                        {
+                            "op": op,
+                            "tag": f"sweep{n}",
+                            "dtype": dtype,
+                            "device": device,
+                            "a_shape": [n],
+                            "b_shape": [n],
+                            "a_data": to_listf(a),
+                            "b_data": to_listf(b),
+                            "out_shape": [n],
+                            "out_values": to_listf(fwd),
+                            "grad_a": to_listf(a_g.grad),
+                            "grad_b": to_listf(b_g.grad),
+                        }
+                    )
+
+            # --- fast_exp / fast_log / fast_sigmoid (Cat D runner) --------
+            exp_in = _sweep_vals(n, -4.0, 4.0)
+            log_in = _sweep_vals(n, 0.25, 8.0)
+            sig_in = _sweep_vals(n, -6.0, 6.0)
+            for op_name, vals, ref_fn in (
+                ("fast_exp", exp_in, torch.exp),
+                ("fast_log", log_in, torch.log),
+                ("fast_sigmoid", sig_in, torch.sigmoid),
+            ):
+                src = torch.tensor(vals, dtype=td)
+                out.append(
+                    {
+                        "op": op_name,
+                        "tag": f"sweep{n}",
+                        "dtype": dtype,
+                        "device": "cpu",
+                        "a_shape": [n],
+                        "a_data": to_listf(src),
+                        "out_values": to_listf(ref_fn(src)),
+                    }
+                )
+
+            # --- sum / mean / logsumexp (Cat E runners) --------------------
+            red_in = _sweep_vals(n, 0.25, 16.0)
+            a = torch.tensor(red_in, dtype=td)
+            a_g = a.detach().clone().requires_grad_(True)
+            fwd = a_g.sum()
+            fwd.backward()
+            sum_entry = {
+                "op": "sum",
+                "tag": f"sweep{n}",
+                "dtype": dtype,
+                "device": "cpu",
+                "a_shape": [n],
+                "a_data": to_listf(a),
+                "out_values": to_listf(fwd),
+                "grad_a": to_listf(a_g.grad),
+            }
+            out.append(sum_entry)
+            if "cuda:0" in DEVICES:
+                # gpu_sum_forward_only consumes cuda rows (forward only,
+                # but the generator records the grads for schema parity).
+                a_c = torch.tensor(red_in, dtype=td, device="cuda:0")
+                a_cg = a_c.detach().clone().requires_grad_(True)
+                fwd_c = a_cg.sum()
+                fwd_c.backward()
+                out.append(
+                    {
+                        **sum_entry,
+                        "device": "cuda:0",
+                        "a_data": to_listf(a_c),
+                        "out_values": to_listf(fwd_c),
+                        "grad_a": to_listf(a_cg.grad),
+                    }
+                )
+
+            a_g = a.detach().clone().requires_grad_(True)
+            fwd = a_g.mean()
+            fwd.backward()
+            out.append(
+                {
+                    "op": "mean",
+                    "tag": f"sweep{n}",
+                    "dtype": dtype,
+                    "device": "cpu",
+                    "a_shape": [n],
+                    "a_data": to_listf(a),
+                    "out_values": to_listf(fwd),
+                    "grad_a": to_listf(a_g.grad),
+                }
+            )
+
+            lse_in = torch.tensor(_sweep_vals(n, -2.0, 6.0), dtype=td)
+            out.append(
+                {
+                    "op": "logsumexp",
+                    "tag": f"sweep{n}",
+                    "dtype": dtype,
+                    "device": "cpu",
+                    "a_shape": [n],
+                    "a_data": to_listf(lse_in),
+                    "out_values": to_listf(torch.logsumexp(lse_in, dim=0)),
+                }
+            )
+
+        # --- SIMD lanes (dtype-pinned ops; multi-chunk + prime tail) -------
+        a32 = torch.tensor(_sweep_vals(n, -4.0, 4.0), dtype=torch.float32)
+        b32 = torch.tensor(_sweep_vals(n, -2.0, 6.0), dtype=torch.float32)
+        a32_pos = torch.tensor(_sweep_vals(n, 0.25, 8.0), dtype=torch.float32)
+        a64 = a32.to(torch.float64)
+        b64 = b32.to(torch.float64)
+        for op_name, src_a, src_b, dtype, ref in (
+            ("simd_add_f32", a32, b32, "float32", a32 + b32),
+            ("simd_mul_f32", a32, b32, "float32", a32 * b32),
+            ("simd_exp_f32", a32, None, "float32", torch.exp(a32)),
+            ("simd_log_f32", a32_pos, None, "float32", torch.log(a32_pos)),
+            ("simd_sqrt_f32", a32_pos, None, "float32", torch.sqrt(a32_pos)),
+            ("simd_add_f64", a64, b64, "float64", a64 + b64),
+            ("simd_mul_f64", a64, b64, "float64", a64 * b64),
+            ("simd_exp_f64", a64, None, "float64", torch.exp(a64)),
+        ):
+            entry: dict[str, Any] = {
+                "op": op_name,
+                "tag": f"sweep{n}",
+                "dtype": dtype,
+                "device": "cpu",
+                "a_shape": [n],
+                "a_data": to_listf(src_a),
+                "out_values": to_listf(ref),
+            }
+            if src_b is not None:
+                entry["b_shape"] = [n]
+                entry["b_data"] = to_listf(src_b)
+            out.append(entry)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Cat H — special-value lanes (CORE-199 / #1893)
+# ---------------------------------------------------------------------------
+#
+# NaN / ±inf / -0.0 / subnormal inputs per op family. All expectations are
+# live-torch (R-ORACLE-1/2). Known ferrotorch divergences are PINNED in the
+# Rust suite (single contract each, retire-on-fix):
+#   * logsumexp / logsumexp_dim inf-poisoning  -> CORE-134 / #1828
+#   * fast_exp (vexp_f32) domain clamping      -> CORE-135 / #1829
+#   * amax/amin NaN propagation lives in the REDUCTION fixtures (its grad_fns
+#     home), not here.
+
+F32_SUBNORMAL = 1e-40  # subnormal in f32, normal in f64
+
+
+def fixture_cat_h_special_values() -> list[dict[str, Any]]:
+    inf = float("inf")
+    nan = float("nan")
+    out: list[dict[str, Any]] = []
+    for dtype in DTYPES:
+        td = torch_dtype(dtype)
+
+        # logsumexp specials (CORE-134 / #1828 pins the +inf rows).
+        for tag, vals in (
+            ("sv_pos_inf", [1.0, inf]),
+            ("sv_all_neg_inf", [-inf, -inf]),
+            ("sv_nan", [nan, 1.0]),
+            ("sv_mixed_neg_inf", [-inf, 0.0, 5.0]),
+            ("sv_neg_zero", [-0.0, -0.0]),
+            ("sv_subnormal", [F32_SUBNORMAL, F32_SUBNORMAL]),
+        ):
+            a = torch.tensor(vals, dtype=td)
+            out.append(
+                {
+                    "op": "logsumexp_special",
+                    "tag": tag,
+                    "dtype": dtype,
+                    "device": "cpu",
+                    "a_shape": [len(vals)],
+                    "a_data": to_listf(a),
+                    "out_values": to_listf(torch.logsumexp(a, dim=0)),
+                }
+            )
+
+        # logsumexp_dim specials: an all-(-inf) row and a +inf row.
+        for tag, vals, axis in (
+            ("sv_row_all_neg_inf", [[-inf, -inf], [1.0, 2.0]], 1),
+            ("sv_row_pos_inf", [[1.0, inf], [3.0, 4.0]], 1),
+        ):
+            a = torch.tensor(vals, dtype=td)
+            fwd = torch.logsumexp(a, dim=axis, keepdim=False)
+            out.append(
+                {
+                    "op": "logsumexp_dim_special",
+                    "tag": tag,
+                    "dtype": dtype,
+                    "device": "cpu",
+                    "axis": axis,
+                    "keepdim": False,
+                    "a_shape": list(a.shape),
+                    "a_data": to_listf(a),
+                    "out_shape": list(fwd.shape),
+                    "out_values": to_listf(fwd),
+                }
+            )
+
+        # exp domain (CORE-135 / #1829 pins the f32 -inf / deep-negative /
+        # near-threshold rows for fast_exp; simd_exp_* currently matches
+        # torch on all of these — asserted as values).
+        exp_in = [-inf, -100.0, -103.9, 88.5, inf, nan, -0.0, F32_SUBNORMAL]
+        a = torch.tensor(exp_in, dtype=td)
+        ref = torch.exp(a)
+        # simd_exp_special covers simd_exp_f32 (float32) and simd_exp_f64
+        # (float64) — both exist in ferrotorch.
+        for op_name in ("fast_exp_special", "simd_exp_special"):
+            out.append(
+                {
+                    "op": op_name,
+                    "tag": "sv_domain",
+                    "dtype": dtype,
+                    "device": "cpu",
+                    "a_shape": [len(exp_in)],
+                    "a_data": to_listf(a),
+                    "out_values": to_listf(ref),
+                }
+            )
+
+        # log specials: log(0) = -inf, log(-1) = NaN, log(inf) = inf,
+        # log(-0.0) = -inf, log(subnormal) = large negative finite.
+        log_in = [0.0, -1.0, inf, nan, -0.0, F32_SUBNORMAL]
+        a = torch.tensor(log_in, dtype=td)
+        out.append(
+            {
+                "op": "fast_log_special",
+                "tag": "sv_domain",
+                "dtype": dtype,
+                "device": "cpu",
+                "a_shape": [len(log_in)],
+                "a_data": to_listf(a),
+                "out_values": to_listf(torch.log(a)),
+            }
+        )
+
+        # sigmoid specials: saturation at ±inf, NaN propagation, -0.0.
+        sig_in = [-inf, inf, nan, -0.0, F32_SUBNORMAL]
+        a = torch.tensor(sig_in, dtype=td)
+        out.append(
+            {
+                "op": "fast_sigmoid_special",
+                "tag": "sv_domain",
+                "dtype": dtype,
+                "device": "cpu",
+                "a_shape": [len(sig_in)],
+                "a_data": to_listf(a),
+                "out_values": to_listf(torch.sigmoid(a)),
+            }
+        )
+
+        # sum / nansum specials: inf cancellation -> NaN, NaN passthrough.
+        for op_name, vals, ref_fn in (
+            ("sum_special", [inf, -inf], torch.sum),
+            ("sum_special", [inf, 1.0, 2.0], torch.sum),
+            ("sum_special", [-0.0, -0.0], torch.sum),
+            ("sum_special", [nan, 1.0], torch.sum),
+            ("nansum_special", [1.0, nan, inf], torch.nansum),
+            ("nansum_special", [nan, nan], torch.nansum),
+        ):
+            a = torch.tensor(vals, dtype=td)
+            out.append(
+                {
+                    "op": op_name,
+                    "tag": "sv_" + "_".join(f"{v}" for v in vals)[:32],
+                    "dtype": dtype,
+                    "device": "cpu",
+                    "a_shape": [len(vals)],
+                    "a_data": to_listf(a),
+                    "out_values": to_listf(ref_fn(a)),
+                }
+            )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Cat I — non-contiguous (transpose-view) lanes (CORE-199 / #1893, CORE-132 /
+# #1826)
+# ---------------------------------------------------------------------------
+#
+# Fixture rows stay CONTIGUOUS: `a_data` is the row-major base [2, 3] (or
+# [3, 4]) buffer; `input_transpose: true` instructs the Rust runner to apply
+# `.transpose(0, 1)` and feed the resulting non-contiguous VIEW to the op.
+# Expected values come from torch applied to the same transposed view.
+#
+# Per CORE-132 / #1826 most ferrotorch CPU kernels currently reject these
+# views; the Rust suite pins those as expect_err on #1826 (retire-on-fix).
+# Ops that DO accept views get value assertions immediately.
+
+
+def fixture_cat_i_transpose_views() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    base_vals = [0.5, -1.25, 2.0, 3.75, -0.25, 1.5]  # [2, 3] row-major
+    for dtype in DTYPES:
+        td = torch_dtype(dtype)
+        base = torch.tensor(base_vals, dtype=td).reshape(2, 3)
+        view = base.t()  # [3, 2] non-contiguous
+
+        # Binary on two identical views.
+        for op in ("add", "mul"):
+            fwd = _binary_op(op)(view, view)
+            out.append(
+                {
+                    "op": f"{op}_tview",
+                    "tag": "tview_3x2",
+                    "dtype": dtype,
+                    "device": "cpu",
+                    "input_transpose": True,
+                    "a_shape": [2, 3],
+                    "b_shape": [2, 3],
+                    "a_data": to_listf(base),
+                    "b_data": to_listf(base),
+                    "out_shape": [3, 2],
+                    "out_values": to_listf(fwd),
+                }
+            )
+
+        # Unary / reduction families on the view.
+        pos_base = torch.tensor(
+            [0.25, 1.0, 2.25, 4.0, 6.25, 9.0], dtype=td
+        ).reshape(2, 3)
+        pos_view = pos_base.t()
+        for op_name, src_base, fwd in (
+            ("sqrt_tview", pos_base, torch.sqrt(pos_view)),
+            ("fast_sigmoid_tview", base, torch.sigmoid(view)),
+            ("sum_tview", base, torch.sum(view)),
+            ("mean_tview", base, torch.mean(view)),
+            ("logsumexp_tview", base, torch.logsumexp(view.reshape(-1), dim=0)),
+            ("sum_axis_tview", base, torch.sum(view, dim=0)),
+        ):
+            out.append(
+                {
+                    "op": op_name,
+                    "tag": "tview_3x2",
+                    "dtype": dtype,
+                    "device": "cpu",
+                    "input_transpose": True,
+                    "axis": 0,
+                    "a_shape": [2, 3],
+                    "a_data": to_listf(src_base),
+                    "out_shape": list(fwd.shape),
+                    "out_values": to_listf(fwd),
+                }
+            )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Top-level entry
 # ---------------------------------------------------------------------------
 
@@ -874,6 +1261,9 @@ def main() -> int:
     fixtures += fixture_cat_d_perf()
     fixtures += fixture_cat_e_reductions()
     fixtures += fixture_cat_f_inplace()
+    fixtures += fixture_cat_g_size_sweep()
+    fixtures += fixture_cat_h_special_values()
+    fixtures += fixture_cat_i_transpose_views()
 
     payload = {
         "metadata": fixture_metadata(),

@@ -92,6 +92,27 @@ mod tolerance {
     pub const F32_REDUCTION: f32 = 1e-5;
     pub const F64_REDUCTION: f64 = 1e-12;
 
+    /// Accumulation-aware reduction tolerance (R-ORACLE-5, CORE-199 sweep
+    /// lanes with k = 4096 / 10007 summands).
+    ///
+    /// Analytic justification: torch reduces with pairwise summation
+    /// (error O(eps·log2 k)); ferrotorch folds sequentially (error bound
+    /// O(eps·k), expected O(eps·sqrt(k)) under the standard random-rounding
+    /// model — Higham, *Accuracy and Stability of Numerical Algorithms*,
+    /// §4.2). The ORDER difference between the two is therefore expected
+    /// O(eps·sqrt(k)) with a deterministic ceiling of O(eps·k); the factor
+    /// 8 covers the constant without admitting the k·eps worst case. For
+    /// small k the base band (`F32_REDUCTION`, itself justified above)
+    /// dominates via `max`, so legacy rows keep their original bound.
+    pub fn accum_tol_f32(k: usize) -> f32 {
+        F32_REDUCTION.max(8.0 * (k as f32).sqrt() * f32::EPSILON)
+    }
+
+    /// See [`accum_tol_f32`]; same model at f64 epsilon.
+    pub fn accum_tol_f64(k: usize) -> f64 {
+        F64_REDUCTION.max(8.0 * (k as f64).sqrt() * f64::EPSILON)
+    }
+
     /// GPU paths run the same kernels but through the cudarc dispatch; the
     /// reduction order may differ and cuBLAS-style accumulation introduces
     /// extra rounding.
@@ -323,6 +344,11 @@ struct Fixture {
     min: Option<f64>,
     #[serde(default)]
     max: Option<f64>,
+    /// CORE-199 / #1893 non-contiguous lane: when `true`, `a_data`/`b_data`
+    /// are the CONTIGUOUS row-major base buffers and the runner applies
+    /// `.transpose(0, 1)` to build the non-contiguous view the op consumes.
+    #[serde(default)]
+    input_transpose: Option<bool>,
 }
 
 fn load_fixtures() -> FixtureFile {
@@ -1486,11 +1512,12 @@ fn cpu_sum() {
             "float32" => {
                 let a = make_cpu_f32(a_data, shape, false);
                 let s = sum(&a).expect("sum");
+                // k-aware tolerance: sweep rows reduce up to 10007 summands.
                 check_f32(
                     &format!("{label} fwd"),
                     &read_back_f32(&s),
                     exp,
-                    tolerance::F32_REDUCTION,
+                    tolerance::accum_tol_f32(a_data.len()),
                 );
                 // sum's grad-of-input is all-ones (loss = sum(a) -> ds/da = 1).
                 // ferrotorch::ops::elementwise::sum is non-differentiable; the
@@ -1514,7 +1541,7 @@ fn cpu_sum() {
                     &format!("{label} fwd"),
                     &read_back_f64(&s),
                     exp,
-                    tolerance::F64_REDUCTION,
+                    tolerance::accum_tol_f64(a_data.len()),
                 );
                 let a_g = make_cpu_f64(a_data, shape, true);
                 let s_g = ferrotorch_core::grad_fns::reduction::sum(&a_g).expect("grad sum");
@@ -1584,11 +1611,13 @@ fn cpu_mean() {
             "float32" => {
                 let a = make_cpu_f32(a_data, shape, false);
                 let m = mean(&a).expect("mean");
+                // k-aware tolerance: mean = sum/k inherits the sum's
+                // accumulation error (see tolerance::accum_tol_f32).
                 check_f32(
                     &format!("{label} fwd"),
                     &read_back_f32(&m),
                     exp,
-                    tolerance::F32_REDUCTION,
+                    tolerance::accum_tol_f32(a_data.len()),
                 );
                 // CORE-200 (#1894): drive mean's OWN backward
                 // (`grad_fns::reduction::mean` -> `MeanBackward`), never a
@@ -1603,7 +1632,7 @@ fn cpu_mean() {
                     &format!("{label} grad fwd"),
                     &read_back_f32(&m_g),
                     exp,
-                    tolerance::F32_REDUCTION,
+                    tolerance::accum_tol_f32(a_data.len()),
                 );
                 m_g.backward().expect("backward");
                 let ga = a_g.grad().unwrap().expect("grad_a");
@@ -1621,7 +1650,7 @@ fn cpu_mean() {
                     &format!("{label} fwd"),
                     &read_back_f64(&m),
                     exp,
-                    tolerance::F64_REDUCTION,
+                    tolerance::accum_tol_f64(a_data.len()),
                 );
                 // CORE-200 (#1894): same as the f32 lane — mean's own
                 // backward, expectations from the torch fixture.
@@ -1631,7 +1660,7 @@ fn cpu_mean() {
                     &format!("{label} grad fwd"),
                     &read_back_f64(&m_g),
                     exp,
-                    tolerance::F64_REDUCTION,
+                    tolerance::accum_tol_f64(a_data.len()),
                 );
                 m_g.backward().expect("backward");
                 let ga = a_g.grad().unwrap().expect("grad_a");
@@ -1728,22 +1757,26 @@ fn cpu_logsumexp() {
                 // The numerical-stability case (input [100, 100]) must
                 // produce 100 + ln(2) ~ 100.693, NOT inf. The tolerance
                 // here is loose enough to ride the f32 accumulation but
-                // tight enough that an overflow would still fail.
+                // tight enough that an overflow would still fail. Sweep
+                // rows (k up to 10007) take the k-aware band: logsumexp's
+                // error is the k-term exp-sum's accumulation error divided
+                // by the sum — the same relative model as accum_tol.
                 check_f32(
                     &label,
                     &read_back_f32(&l),
                     exp,
-                    tolerance::F32_TRANSCENDENTAL,
+                    tolerance::F32_TRANSCENDENTAL.max(tolerance::accum_tol_f32(a_data.len())),
                 );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, shape, false);
                 let l = logsumexp(&a).expect("logsumexp");
+                // k-aware band for the sweep rows — see the f32 lane.
                 check_f64(
                     &label,
                     &read_back_f64(&l),
                     exp,
-                    tolerance::F64_TRANSCENDENTAL,
+                    tolerance::F64_TRANSCENDENTAL.max(tolerance::accum_tol_f64(a_data.len())),
                 );
             }
             _ => unreachable!(),
@@ -2050,6 +2083,430 @@ fn cpu_inplace_rejects_requires_grad_leaf() {
         format!("{err}").contains("in-place") || format!("{err:?}").contains("InvalidArgument"),
         "expected InvalidArgument for add_scalar_ on a requires_grad leaf, got {err:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Cat H — special-value lanes (CORE-199 / #1893)
+// ---------------------------------------------------------------------------
+//
+// NaN / ±inf / -0.0 / subnormal per op family, expectations from live torch
+// 2.11.0 (recorded in the fixture). Known divergences are pinned —
+// single-contract, retire-on-fix (R-ORACLE-4):
+//   * logsumexp / logsumexp_dim +inf poisoning  -> CORE-134 / #1828
+//   * fast_exp (vexp_f32) domain clamping (f32) -> CORE-135 / #1829
+
+#[test]
+fn cpu_logsumexp_special() {
+    let file = load_fixtures();
+    let cases = cases_for(&file, "logsumexp_special", "cpu");
+    assert!(!cases.is_empty(), "no fixtures for logsumexp_special");
+    for f in cases {
+        let label = format!("logsumexp_special cpu tag={:?} dtype={}", f.tag, f.dtype);
+        let shape = f.a_shape.as_ref().unwrap();
+        let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
+        let exp = f
+            .out_values
+            .as_ref()
+            .map(F64ListSentinel::as_slice)
+            .unwrap();
+        let pinned_inf = f.tag.as_deref() == Some("sv_pos_inf");
+        match f.dtype.as_str() {
+            "float32" => {
+                let a = make_cpu_f32(a_data, shape, false);
+                let l = logsumexp(&a).expect("logsumexp");
+                let actual = read_back_f32(&l);
+                if pinned_inf {
+                    // #1828 pin (CORE-134): torch returns +inf (fixture);
+                    // ferrotorch's max-subtract computes (inf - inf).exp()
+                    // = NaN. Pin the current NaN; when #1828 lands this
+                    // assert fails — retire the pin and fall through to the
+                    // fixture comparison below.
+                    assert!(
+                        actual[0].is_nan(),
+                        "{label}: logsumexp(+inf row) no longer NaN — #1828 \
+                         appears fixed; retire this pin and assert the \
+                         fixture value (+inf)"
+                    );
+                } else {
+                    check_f32(&label, &actual, exp, tolerance::F32_TRANSCENDENTAL);
+                }
+            }
+            "float64" => {
+                let a = make_cpu_f64(a_data, shape, false);
+                let l = logsumexp(&a).expect("logsumexp");
+                let actual = read_back_f64(&l);
+                if pinned_inf {
+                    // #1828 pin — same mechanism at f64.
+                    assert!(
+                        actual[0].is_nan(),
+                        "{label}: logsumexp(+inf row) no longer NaN — #1828 \
+                         appears fixed; retire this pin"
+                    );
+                } else {
+                    check_f64(&label, &actual, exp, tolerance::F64_TRANSCENDENTAL);
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn cpu_logsumexp_dim_special() {
+    let file = load_fixtures();
+    let cases = cases_for(&file, "logsumexp_dim_special", "cpu");
+    assert!(!cases.is_empty(), "no fixtures for logsumexp_dim_special");
+    for f in cases {
+        let label = format!(
+            "logsumexp_dim_special cpu tag={:?} dtype={}",
+            f.tag, f.dtype
+        );
+        let shape = f.a_shape.as_ref().unwrap();
+        let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
+        let axis = f.axis.expect("axis");
+        let exp = f
+            .out_values
+            .as_ref()
+            .map(F64ListSentinel::as_slice)
+            .unwrap();
+        // Both special rows put the infinite slice at output index 0 and a
+        // finite slice at index 1.
+        //
+        // #1828 pin (CORE-134): torch gives -inf for an all-(-inf) row and
+        // +inf for a row containing +inf (fixture); ferrotorch's
+        // logsumexp_dim guards neither and returns NaN. Pin element 0's
+        // current NaN; element 1 (finite slice) must match torch. When
+        // #1828 lands the pin assert fails — retire it and compare the
+        // whole vector against the fixture.
+        match f.dtype.as_str() {
+            "float32" => {
+                let a = make_cpu_f32(a_data, shape, false);
+                let l = logsumexp_dim(&a, axis, false).expect("logsumexp_dim");
+                let actual = read_back_f32(&l);
+                assert!(
+                    actual[0].is_nan(),
+                    "{label}: infinite slice no longer NaN — #1828 appears \
+                     fixed; retire this pin and assert the fixture values"
+                );
+                check_f32(
+                    &format!("{label} finite-slice"),
+                    &actual[1..],
+                    &exp[1..],
+                    tolerance::F32_TRANSCENDENTAL,
+                );
+            }
+            "float64" => {
+                let a = make_cpu_f64(a_data, shape, false);
+                let l = logsumexp_dim(&a, axis, false).expect("logsumexp_dim");
+                let actual = read_back_f64(&l);
+                assert!(
+                    actual[0].is_nan(),
+                    "{label}: infinite slice no longer NaN — #1828 appears \
+                     fixed; retire this pin and assert the fixture values"
+                );
+                check_f64(
+                    &format!("{label} finite-slice"),
+                    &actual[1..],
+                    &exp[1..],
+                    tolerance::F64_TRANSCENDENTAL,
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn cpu_fast_exp_special() {
+    let file = load_fixtures();
+    let cases = cases_for(&file, "fast_exp_special", "cpu");
+    assert!(!cases.is_empty(), "no fixtures for fast_exp_special");
+    for f in cases {
+        let label = format!("fast_exp_special cpu dtype={}", f.dtype);
+        let shape = f.a_shape.as_ref().unwrap();
+        let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
+        let exp = f
+            .out_values
+            .as_ref()
+            .map(F64ListSentinel::as_slice)
+            .unwrap();
+        // Input layout (fixture cat H):
+        //   [0]=-inf [1]=-100 [2]=-103.9 [3]=88.5 [4]=+inf [5]=NaN
+        //   [6]=-0.0 [7]=1e-40
+        match f.dtype.as_str() {
+            "float32" => {
+                let a = make_cpu_f32(a_data, shape, false);
+                let r = fast_exp(&a).expect("fast_exp");
+                let actual = read_back_f32(&r);
+                // #1829 pins (CORE-135): vexp_f32 clamps the domain.
+                // torch (fixture): exp(-inf)=0, exp(-100)=3.78e-44,
+                // exp(-103.9)=1.4e-45, exp(88.5)=2.7231e38 (finite).
+                // Each assert pins the CURRENT divergent behavior and
+                // fails loudly when #1829 lands — retire all four and
+                // compare the whole vector against the fixture.
+                assert!(
+                    actual[0] != 0.0,
+                    "{label}: fast_exp(-inf) now 0 — #1829 appears fixed; \
+                     retire this pin"
+                );
+                assert!(
+                    actual[1] > 1e-40,
+                    "{label}: fast_exp(-100) now subnormal — #1829 appears \
+                     fixed; retire this pin"
+                );
+                assert!(
+                    actual[2] > 1e-40,
+                    "{label}: fast_exp(-103.9) now subnormal — #1829 \
+                     appears fixed; retire this pin"
+                );
+                assert!(
+                    actual[3].is_infinite(),
+                    "{label}: fast_exp(88.5) now finite — #1829 appears \
+                     fixed; retire this pin"
+                );
+                // Non-divergent tail: +inf, NaN, -0.0, subnormal input.
+                check_f32(
+                    &format!("{label} non-pinned tail"),
+                    &actual[4..],
+                    &exp[4..],
+                    tolerance::F32_FAST,
+                );
+            }
+            "float64" => {
+                // The f64 fast_exp path delegates to libm — full parity
+                // with torch on every special value.
+                let a = make_cpu_f64(a_data, shape, false);
+                let r = fast_exp(&a).expect("fast_exp");
+                check_f64(&label, &read_back_f64(&r), exp, tolerance::F64_FAST);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn cpu_simd_exp_special() {
+    let file = load_fixtures();
+    let cases = cases_for(&file, "simd_exp_special", "cpu");
+    assert!(!cases.is_empty(), "no fixtures for simd_exp_special");
+    for f in cases {
+        let label = format!("simd_exp_special cpu dtype={}", f.dtype);
+        let shape = f.a_shape.as_ref().unwrap();
+        let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
+        let exp = f
+            .out_values
+            .as_ref()
+            .map(F64ListSentinel::as_slice)
+            .unwrap();
+        match f.dtype.as_str() {
+            // Unlike vexp_f32 (#1829), the simd exp kernels handle the full
+            // special-value domain — value-asserted against torch.
+            "float32" => {
+                let a = make_cpu_f32(a_data, shape, false);
+                let r = simd_exp_f32(&a).expect("simd_exp_f32");
+                check_f32(&label, &read_back_f32(&r), exp, tolerance::F32_FAST);
+            }
+            "float64" => {
+                let a = make_cpu_f64(a_data, shape, false);
+                let r = simd_exp_f64(&a).expect("simd_exp_f64");
+                check_f64(&label, &read_back_f64(&r), exp, tolerance::F64_FAST);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn cpu_fast_log_and_sigmoid_special() {
+    let file = load_fixtures();
+    for op_name in ["fast_log_special", "fast_sigmoid_special"] {
+        let cases = cases_for(&file, op_name, "cpu");
+        assert!(!cases.is_empty(), "no fixtures for {op_name}");
+        for f in cases {
+            let label = format!("{op_name} cpu dtype={}", f.dtype);
+            let shape = f.a_shape.as_ref().unwrap();
+            let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
+            let exp = f
+                .out_values
+                .as_ref()
+                .map(F64ListSentinel::as_slice)
+                .unwrap();
+            match f.dtype.as_str() {
+                "float32" => {
+                    let a = make_cpu_f32(a_data, shape, false);
+                    let r = match op_name {
+                        "fast_log_special" => fast_log(&a).expect("fast_log"),
+                        _ => fast_sigmoid(&a).expect("fast_sigmoid"),
+                    };
+                    let actual = read_back_f32(&r);
+                    if op_name == "fast_log_special" {
+                        // #1931 pin: fast_log's f32 vector kernel assumes a
+                        // normalized mantissa; the subnormal input (index 5
+                        // = 1e-40) yields -88.021 instead of torch's
+                        // -92.10341 (fixture). Pin the current divergence;
+                        // when #1931 lands this assert fails — retire it
+                        // and compare the whole vector against the fixture.
+                        assert!(
+                            (f64::from(actual[5]) - exp[5]).abs() > 1.0,
+                            "{label}: fast_log(subnormal) now matches torch \
+                             — #1931 appears fixed; retire this pin"
+                        );
+                        check_f32(
+                            &format!("{label} non-pinned head"),
+                            &actual[..5],
+                            &exp[..5],
+                            tolerance::F32_FAST,
+                        );
+                    } else {
+                        check_f32(&label, &actual, exp, tolerance::F32_FAST);
+                    }
+                }
+                "float64" => {
+                    let a = make_cpu_f64(a_data, shape, false);
+                    let r = match op_name {
+                        "fast_log_special" => fast_log(&a).expect("fast_log"),
+                        _ => fast_sigmoid(&a).expect("fast_sigmoid"),
+                    };
+                    check_f64(&label, &read_back_f64(&r), exp, tolerance::F64_FAST);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
+fn cpu_sum_and_nansum_special() {
+    let file = load_fixtures();
+    for op_name in ["sum_special", "nansum_special"] {
+        let cases = cases_for(&file, op_name, "cpu");
+        assert!(!cases.is_empty(), "no fixtures for {op_name}");
+        for f in cases {
+            let label = format!("{op_name} cpu tag={:?} dtype={}", f.tag, f.dtype);
+            let shape = f.a_shape.as_ref().unwrap();
+            let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
+            let exp = f
+                .out_values
+                .as_ref()
+                .map(F64ListSentinel::as_slice)
+                .unwrap();
+            match f.dtype.as_str() {
+                "float32" => {
+                    let a = make_cpu_f32(a_data, shape, false);
+                    let r = match op_name {
+                        "sum_special" => sum(&a).expect("sum"),
+                        _ => nansum(&a).expect("nansum"),
+                    };
+                    check_f32(&label, &read_back_f32(&r), exp, tolerance::F32_REDUCTION);
+                }
+                "float64" => {
+                    let a = make_cpu_f64(a_data, shape, false);
+                    let r = match op_name {
+                        "sum_special" => sum(&a).expect("sum"),
+                        _ => nansum(&a).expect("nansum"),
+                    };
+                    check_f64(&label, &read_back_f64(&r), exp, tolerance::F64_REDUCTION);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cat I — non-contiguous (transpose-view) lanes (CORE-199 / #1893,
+// CORE-132 / #1826)
+// ---------------------------------------------------------------------------
+//
+// The fixture stores the contiguous base buffer; the runner builds the
+// non-contiguous view with `.transpose(0, 1)` (input_transpose flag).
+// Probed at HEAD: every elementwise CPU kernel in this suite rejects
+// non-contiguous views ("tensor is not contiguous"). torch computes all of
+// these (expected values are in the fixture, out_values) — pinned as
+// expect_err on #1826, single contract, retire-on-fix.
+
+#[test]
+fn cpu_transpose_view_lanes() {
+    let file = load_fixtures();
+    let tview_ops = [
+        "add_tview",
+        "mul_tview",
+        "sqrt_tview",
+        "fast_sigmoid_tview",
+        "sum_tview",
+        "mean_tview",
+        "logsumexp_tview",
+        "sum_axis_tview",
+    ];
+    for op_name in tview_ops {
+        let cases = cases_for(&file, op_name, "cpu");
+        assert!(!cases.is_empty(), "no fixtures for {op_name}");
+        for f in cases {
+            assert_eq!(
+                f.input_transpose,
+                Some(true),
+                "{op_name}: tview fixture row missing input_transpose flag"
+            );
+            let label = format!("{op_name} cpu dtype={}", f.dtype);
+            let shape = f.a_shape.as_ref().unwrap();
+            let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
+            // #1826 pin (CORE-132): the op must currently return Err on a
+            // non-contiguous view; torch computes the values recorded in
+            // out_values. When #1826 lands, the Err assert below fails —
+            // retire the pin and assert out_values instead.
+            macro_rules! pin_err {
+                ($res:expr) => {{
+                    let err = $res.expect_err(&format!(
+                        "{label}: op accepted a non-contiguous view — #1826 \
+                         appears fixed; retire this pin and assert the \
+                         fixture out_values"
+                    ));
+                    let msg = format!("{err}");
+                    assert!(
+                        msg.contains("contiguous"),
+                        "{label}: expected the contiguity rejection, got {msg:?}"
+                    );
+                }};
+            }
+            match f.dtype.as_str() {
+                "float32" => {
+                    let v = make_cpu_f32(a_data, shape, false)
+                        .transpose(0, 1)
+                        .expect("transpose");
+                    assert!(!v.is_contiguous(), "{label}: view must be non-contiguous");
+                    match op_name {
+                        "add_tview" => pin_err!(add(&v, &v)),
+                        "mul_tview" => pin_err!(mul(&v, &v)),
+                        "sqrt_tview" => pin_err!(sqrt(&v)),
+                        "fast_sigmoid_tview" => pin_err!(fast_sigmoid(&v)),
+                        "sum_tview" => pin_err!(sum(&v)),
+                        "mean_tview" => pin_err!(mean(&v)),
+                        "logsumexp_tview" => pin_err!(logsumexp(&v)),
+                        "sum_axis_tview" => pin_err!(sum_axis(&v, 0)),
+                        _ => unreachable!(),
+                    }
+                }
+                "float64" => {
+                    let v = make_cpu_f64(a_data, shape, false)
+                        .transpose(0, 1)
+                        .expect("transpose");
+                    assert!(!v.is_contiguous(), "{label}: view must be non-contiguous");
+                    match op_name {
+                        "add_tview" => pin_err!(add(&v, &v)),
+                        "mul_tview" => pin_err!(mul(&v, &v)),
+                        "sqrt_tview" => pin_err!(sqrt(&v)),
+                        "fast_sigmoid_tview" => pin_err!(fast_sigmoid(&v)),
+                        "sum_tview" => pin_err!(sum(&v)),
+                        "mean_tview" => pin_err!(mean(&v)),
+                        "logsumexp_tview" => pin_err!(logsumexp(&v)),
+                        "sum_axis_tview" => pin_err!(sum_axis(&v, 0)),
+                        _ => unreachable!(),
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2384,12 +2841,24 @@ mod gpu {
                 "float32" => {
                     let a = upload_f32(make_cpu_f32(a_data, shape, false), Device::Cuda(0));
                     let s = grad_sum(&a).expect("sum");
-                    check_f32(&label, &read_back_f32(&s), exp, tolerance::F32_GPU);
+                    // Sweep rows reduce up to 10007 summands — k-aware band
+                    // (see tolerance::accum_tol_f32) on top of the GPU base.
+                    check_f32(
+                        &label,
+                        &read_back_f32(&s),
+                        exp,
+                        tolerance::F32_GPU.max(tolerance::accum_tol_f32(a_data.len())),
+                    );
                 }
                 "float64" => {
                     let a = upload_f64(make_cpu_f64(a_data, shape, false), Device::Cuda(0));
                     let s = grad_sum(&a).expect("sum");
-                    check_f64(&label, &read_back_f64(&s), exp, tolerance::F64_GPU);
+                    check_f64(
+                        &label,
+                        &read_back_f64(&s),
+                        exp,
+                        tolerance::F64_GPU.max(tolerance::accum_tol_f64(a_data.len())),
+                    );
                 }
                 _ => unreachable!(),
             }
@@ -2576,6 +3045,23 @@ fn fixture_file_covers_every_phase21_op() {
         "fill_",
         "zero_",
         "clamp_",
+        // CORE-199 / #1893 lanes:
+        "logsumexp_special",
+        "logsumexp_dim_special",
+        "fast_exp_special",
+        "simd_exp_special",
+        "fast_log_special",
+        "fast_sigmoid_special",
+        "sum_special",
+        "nansum_special",
+        "add_tview",
+        "mul_tview",
+        "sqrt_tview",
+        "fast_sigmoid_tview",
+        "sum_tview",
+        "mean_tview",
+        "logsumexp_tview",
+        "sum_axis_tview",
     ];
     for r in required {
         let n = by_op.get(r).copied().unwrap_or(0);
