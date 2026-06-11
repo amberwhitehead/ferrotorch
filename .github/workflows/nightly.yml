@@ -58,8 +58,14 @@ jobs:
         with:
           components: clippy
 
-      - name: Install C build deps (core-math-sys via ferray-ufunc)
-        run: sudo apt-get update && sudo apt-get install -y libgmp-dev libmpfr-dev pkg-config
+      # No `apt-get install` step on this workflow: it runs inside the same
+      # self-hosted container image as cuda-ci.yml, which already has
+      # libgmp-dev / libmpfr-dev / pkg-config baked in (see
+      # ci/runner/Dockerfile). `sudo apt-get` also FAILS here because the
+      # container is started with --security-opt=no-new-privileges. This
+      # exact step is why no nightly ever reached its build/test steps
+      # (CORE-192 / crosslink #1886): run 27006022877 died at
+      # "Install C build deps" before executing a single test.
 
       - name: Diagnostic — nvidia-smi + nvcc version
         run: |
