@@ -47,14 +47,28 @@
 //! passing byte-exact (the dispatcher port matches torch's
 //! `transa='N',transb='T'` call shape exactly, eliminating the prior
 //! `cblas_sgemm(Trans,NoTrans)` micro-kernel mismatch). The thin-matmul
-//! probe stays `#[ignore]`'d: on hosts where torch's CPU build
-//! dispatches to OpenBLAS (via `numpy.libs/libscipy_openblas64_*.so`)
-//! rather than MKL, the residual 5 ULP drift is structural torch-vs-
-//! OpenBLAS variance, not a ferrotorch bug — the architectural fix is
-//! the same on hosts where torch DOES link MKL (the probe passes
-//! byte-exact there). The CBWR-branch probe is inverted to assert
-//! CBWR forcing is gone (default dispatch matches torch by linking
-//! the same MKL major.minor).
+//! probe's stale `#[ignore]` was retired under CORE-205 / crosslink
+//! #1899: its reason reasoned about the host's live-torch BLAS, but the
+//! probe compares against PRE-RECORDED torch-MKL bit patterns and never
+//! consults the host's torch — it passes byte-exact with MKL 2024.2.
+//! The CBWR-branch probe is inverted to assert CBWR forcing is gone
+//! (default dispatch matches torch by linking the same MKL major.minor).
+//!
+//! ## Run policy (CORE-205 / #1899)
+//!
+//! This lane is OPERATOR-RUN: it needs `$HOME/.local/lib/libmkl_rt.so.2`
+//! (`pip install mkl==2024.2.*` provides it user-locally; present on the
+//! dev host). No CI tier enables `--features mkl` — the GH-hosted and
+//! self-hosted runner images do not carry MKL. Run locally with:
+//!
+//! ```bash
+//! cargo test -p ferrotorch-core --features mkl --release \
+//!   --test divergence_mkl_byte_exact_audit \
+//!   --test divergence_mkl_byte_exact_critic
+//! ```
+//!
+//! Adding a pip-mkl layer to ci/runner/Dockerfile would let nightly run
+//! this lane; that is a runner-ops decision tracked on crosslink #1899.
 
 #![cfg(feature = "mkl")]
 
@@ -122,8 +136,15 @@ fn assert_byte_exact(actual: &[f32], expected_bits: &[u32], label: &str) {
 // depend on the host's `torch.randn` PRNG (input bytes are the same
 // regardless of where the test runs).
 
+// STALE-IGNORE RETIRED (CORE-205 / crosslink #1899): this test was
+// `#[ignore]`d with a reason claiming the host's torch links OpenBLAS and
+// drifts ~5 ULP — but the expected value here is a PRE-RECORDED torch-MKL
+// bit pattern (above), not a live-torch comparison, so the host's torch
+// BLAS never enters the assertion at all. Probed at HEAD with MKL 2024.2
+// (`~/.local/lib/libmkl_rt.so.2`, pip `mkl` package): passes byte-exact.
+// If this ever fails, that is a real ferrotorch-vs-recorded-torch-MKL
+// divergence — investigate, do not re-ignore.
 #[test]
-#[ignore = "host-dependent: torch on this host links OpenBLAS (via numpy.libs), not MKL — so even ferrotorch+MKL 2024.x with the correct Fortran dispatch shape drifts by ~5 ULP vs torch's OpenBLAS dot. On hosts where torch links MKL (Intel oneAPI desktop SDK, conda-forge mkl), this probe passes byte-exact. The #1538 architectural fix (Fortran-symbol dispatcher port) is the SAME on both hosts; the residual drift on this host is structural torch-vs-OpenBLAS variance not a #1538 bug."]
 fn divergence_mkl_thin_1x256_byte_exact() {
     let a_bits: &[u32] = &[
         0xbf51f456, 0x3eca902b, 0x3f661ede, 0xbfb1b738, 0xbe2b0101, 0x3e91ff2d, 0xbf241e93,

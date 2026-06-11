@@ -35,7 +35,7 @@ const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
 fn load_bits(path: &str) -> Vec<u32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-    assert!(bytes.len() % 4 == 0, "{path}: not a u32 stream");
+    assert!(bytes.len().is_multiple_of(4), "{path}: not a u32 stream");
     bytes
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))

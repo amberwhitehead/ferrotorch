@@ -134,7 +134,7 @@ fn fixtures_dir() -> PathBuf {
 fn load_f32_bin(path: &PathBuf) -> Vec<f32> {
     let bytes = fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     assert!(
-        bytes.len() % 4 == 0,
+        bytes.len().is_multiple_of(4),
         "fixture {} not a multiple of 4 bytes",
         path.display()
     );
