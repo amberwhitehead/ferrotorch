@@ -51,6 +51,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-125: Safe indexing APIs trust contradictory index data and shape metadata (#1819)
+- CORE-111: Direct integer-index gather APIs do not validate index values (#1805)
+- CORE-100: CUDA readback relies on an alignment guarantee absent from the backend trait (#1794)
 - CORE-138: Safe public `mm_raw` family performs unchecked indexing — out-of-bounds reads from safe code (#1832)
 - ignore_reasons_carry_issue_ref_or_diagnostic_marker sanity floor (>=8) broken at HEAD: b17c1a86e (#1899) retired 2 stale #[ignore]s, population now 7 — floor needs recalibration or a non-count-based detector health check. Fails divergence_cite_drift_generic + the divergence_b247d7dbc_self_inflicted_gap_c_probe meta-run on every whole-crate gauntlet (observed during CORE-138/#1832 remediation; orthogonal to that fix). (#1934)
 - CORE-205: MKL-gated suites containing a self-described release-blocking failing test never run anywhere (#1899)
