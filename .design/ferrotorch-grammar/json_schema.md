@@ -220,7 +220,7 @@ Accessors for tests + observability:
   `lib.rs:19`). Grandfathered public API per goal.md S5.
 - `gpu_dispatch::compute_mask_gpu` takes `processor:
   &JsonSchemaProcessor` and reads `processor.grammar()` to compile
-  the DFA — see `gpu_dispatch.rs:778`. The GPU path is the primary
+  the DFA — see `pub fn compute_mask_gpu in gpu_dispatch.rs`. The GPU path is the primary
   *internal* consumer.
 - The CubeCL `kernel_apply_token_mask` op (referenced in
   `ferrotorch-cubecl/src/grammar.rs`) accepts a `TokenMask`-shaped

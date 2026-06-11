@@ -88,14 +88,14 @@ jobs:
         with:
           shared-key: linux-cpu
           workspaces: . -> target
-      - name: cargo test -p ferrotorch-core (lib)
-        # `--lib` only for now. The `--tests` (integration) surface includes
-        # a handful of pre-existing failures on `main` unrelated to this
-        # workflow (e.g. `divergence_b247_generic_test_does_not_pass_4_of_4_at_head`,
-        # `all_design_docs_cites_resolve_at_head`); adding them to CI scope
-        # is a separate follow-up tracked under #32.
+      - name: cargo test -p ferrotorch-core (lib + integration tests)
+        # Full surface: --lib plus the ~170 integration/conformance/divergence
+        # test binaries. Flipped from --lib-only under CORE-193 (crosslink
+        # #1887, gh follow-up #32) after fixing the cite-drift failures that
+        # blocked it; the whole surface passes at HEAD.
         run: |
           cargo test \
             -p ferrotorch-core \
             --release \
-            --lib
+            --lib \
+            --tests

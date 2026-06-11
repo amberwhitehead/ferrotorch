@@ -284,10 +284,10 @@ cargo test -p ferrotorch-gpu --features cuda 2>&1 | tail -5
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub struct CudaBackendImpl in ferrotorch-gpu/src/backend_impl.rs` (line 36) with `pub fn new` (line 60); non-test consumer: `init_cuda_backend` (line 7018) constructs it; `ferrotorch/examples/ferrotorch_bench.rs:239` calls `ferrotorch_gpu::init_cuda_backend()`. |
+| REQ-1 | SHIPPED | impl: `pub struct CudaBackendImpl in ferrotorch-gpu/src/backend_impl.rs` (line 36) with `pub fn new` (line 60); non-test consumer: `init_cuda_backend` (line 7018) constructs it; `fn main in ferrotorch/examples/ferrotorch_bench.rs` calls `ferrotorch_gpu::init_cuda_backend()` inside its `#[cfg(feature = "gpu")]` block. |
 | REQ-2 | SHIPPED | impl: 12 `wrap_*` / `unwrap_*` helpers on `impl CudaBackendImpl` at lines 127-441; non-test consumer: 348+ call sites across the `impl GpuBackend` block (every trait method body). |
 | REQ-3 | SHIPPED | impl: `cusparse_handle: OnceLock<CusparseHandle>` at `backend_impl.rs`, `cusparselt_handle: OnceLock<CusparseLtHandle>` at line 50; lazy methods at lines 78, 95; non-test consumer: the SpMM / 2:4-sparse matmul trait method bodies in the same `impl GpuBackend` block. |
-| REQ-4 | SHIPPED | impl: `pub fn init_cuda_backend in backend_impl.rs` (line 7018); non-test consumer: `ferrotorch/examples/ferrotorch_bench.rs:239`. Re-exported at `lib.rs:191`. |
+| REQ-4 | SHIPPED | impl: `pub fn init_cuda_backend in backend_impl.rs` (line 7018); non-test consumer: `fn main in ferrotorch/examples/ferrotorch_bench.rs` (gpu-feature block). Re-exported at `lib.rs:191`. |
 | REQ-5 | SHIPPED | impl: `pub fn get_cuda_device in backend_impl.rs` (line 6992); non-test consumer: re-exported at `lib.rs:191`. The downcast-via-`as_any` pattern is the single canonical accessor for the shared `GpuDevice` from any registered-backend caller. |
 | REQ-6 | SHIPPED | impl: `impl GpuBackend for CudaBackendImpl` at `gpu_backend in backend_impl.rs` with 348+ method bodies forwarding to `crate::kernels::*` / siblings; non-test consumer: ferrotorch-core's `gpu_dispatch::gpu_backend()` returns the registered global `&dyn GpuBackend`, and every CUDA-aware tensor op in ferrotorch-core (Tensor::add, matmul, softmax, etc.) dispatches through it when the input is GPU-resident. |
 | REQ-7 | SHIPPED | impl: `fn map_gpu_err in backend_impl.rs` (line 571); non-test consumer: every `.map_err(Self::map_gpu_err)?` call site in the trait-method bodies (hundreds of sites). |
