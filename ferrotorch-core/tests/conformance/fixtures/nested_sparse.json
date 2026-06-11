@@ -5,7 +5,7 @@
     "cuda_available": true,
     "python_executable": "/usr/sbin/python3",
     "python_platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
-    "generated_at": "2026-05-06T16:41:33.447919+00:00",
+    "generated_at": "2026-06-11T04:01:58.203169+00:00",
     "rng_seed": 195939070,
     "dtypes": [
       "float32",
@@ -14,7 +14,9 @@
     "devices": [
       "cpu",
       "cuda:0"
-    ]
+    ],
+    "generation_command": "python3 scripts/regenerate_nested_sparse_fixtures.py",
+    "oracle_policy": "torch APIs only (goal-audit-fix.md R-ORACLE-2)"
   },
   "fixtures": [
     {
@@ -4768,7 +4770,7 @@
       ],
       "expected_decompressed": [
         3.0,
-        0.0,
+        -0.0,
         0.0,
         -4.0,
         5.0,
@@ -4808,7 +4810,7 @@
       ],
       "expected_decompressed": [
         3.0,
-        0.0,
+        -0.0,
         0.0,
         -4.0,
         5.0,
@@ -4817,6 +4819,122 @@
         0.0
       ],
       "expected_num_groups": 2
+    },
+    {
+      "op": "semi_structured_24",
+      "tag": "tie_all_equal_1d4",
+      "dtype": "float32",
+      "device": "cpu",
+      "dense_data": [
+        2.0,
+        2.0,
+        2.0,
+        2.0
+      ],
+      "shape": [
+        4
+      ],
+      "expected_kept_values": [
+        2.0,
+        2.0
+      ],
+      "expected_nibbles": [
+        3
+      ],
+      "expected_decompressed": [
+        2.0,
+        2.0,
+        0.0,
+        0.0
+      ],
+      "expected_num_groups": 1
+    },
+    {
+      "op": "semi_structured_24",
+      "tag": "tie_all_equal_1d4",
+      "dtype": "float64",
+      "device": "cpu",
+      "dense_data": [
+        2.0,
+        2.0,
+        2.0,
+        2.0
+      ],
+      "shape": [
+        4
+      ],
+      "expected_kept_values": [
+        2.0,
+        2.0
+      ],
+      "expected_nibbles": [
+        3
+      ],
+      "expected_decompressed": [
+        2.0,
+        2.0,
+        0.0,
+        0.0
+      ],
+      "expected_num_groups": 1
+    },
+    {
+      "op": "semi_structured_24",
+      "tag": "tie_three_equal_1d4",
+      "dtype": "float32",
+      "device": "cpu",
+      "dense_data": [
+        1.0,
+        3.0,
+        3.0,
+        3.0
+      ],
+      "shape": [
+        4
+      ],
+      "expected_kept_values": [
+        3.0,
+        3.0
+      ],
+      "expected_nibbles": [
+        10
+      ],
+      "expected_decompressed": [
+        0.0,
+        3.0,
+        0.0,
+        3.0
+      ],
+      "expected_num_groups": 1
+    },
+    {
+      "op": "semi_structured_24",
+      "tag": "tie_three_equal_1d4",
+      "dtype": "float64",
+      "device": "cpu",
+      "dense_data": [
+        1.0,
+        3.0,
+        3.0,
+        3.0
+      ],
+      "shape": [
+        4
+      ],
+      "expected_kept_values": [
+        3.0,
+        3.0
+      ],
+      "expected_nibbles": [
+        10
+      ],
+      "expected_decompressed": [
+        0.0,
+        3.0,
+        0.0,
+        3.0
+      ],
+      "expected_num_groups": 1
     },
     {
       "op": "sparse_matmul_24",

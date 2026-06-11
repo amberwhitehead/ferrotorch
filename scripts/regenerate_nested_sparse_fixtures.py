@@ -29,11 +29,17 @@ Coverage (105 surface items split across two modules):
       new, accessors, coalesce, to_dense, from_csr
     - CsrTensor: new, from_coo, accessors, to_dense
     - CscTensor: new, from_csr, to_csr, to_dense, accessors
-    - SemiStructuredSparseTensor: compress / decompress / sparse_matmul_24
-      (the 2:4 semi-structured pattern is reference-only; PyTorch's
-      `to_sparse_semi_structured` is experimental and out of scope here —
-      we just verify ferrotorch's compress/decompress behaviour preserves
-      values per its own docs).
+    - SemiStructuredSparseTensor: compress / decompress / sparse_matmul_24.
+      The 2:4 keep/drop selection comes from a REAL torch oracle
+      (CORE-194 -> #1888, R-ORACLE-2): `torch.ao.pruning.
+      WeightNormSparsifier(sparsity_level=1.0, sparse_block_shape=(1, 4),
+      zeros_per_block=2)`, the documented PyTorch 2:4 pruning path that
+      feeds `to_sparse_semi_structured` (which itself only compresses an
+      already 2:4-sparse tensor on CUDA and so cannot CHOOSE the mask).
+      The torch mask is mapped into ferrotorch's fixture fields (kept
+      values / nibbles / masked dense); the matmul reference is
+      `torch.matmul` on the masked dense. Tie-magnitude groups are
+      deliberately included.
     - SparseGrad: new, coalesce, apply_sgd
 
 Edge cases (per dispatch):
@@ -133,6 +139,8 @@ def fixture_metadata() -> dict[str, Any]:
         "rng_seed": RNG_SEED,
         "dtypes": DTYPES,
         "devices": DEVICES,
+        "generation_command": "python3 scripts/regenerate_nested_sparse_fixtures.py",
+        "oracle_policy": "torch APIs only (goal-audit-fix.md R-ORACLE-2)",
     }
 
 
@@ -815,54 +823,67 @@ def fixture_coo_csr_csc() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _compress_24_reference(data: list[float]) -> tuple[list[float], list[int]]:
-    """Reference for ferrotorch's `compress`: per group of 4, keep the 2
-    largest-magnitude positions (ties broken by lower index). Returns
-    (kept_values_in_orig_order, group_nibbles)."""
-    assert len(data) % 4 == 0
-    num_groups = len(data) // 4
-    values: list[float] = []
+def _torch_24_selection(
+    data: list[float], shape: list[int]
+) -> tuple[list[float], list[int], list[float]]:
+    """Torch oracle for the 2:4 keep/drop selection (R-ORACLE-2).
+
+    Oracle: `torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0,
+    sparse_block_shape=(1, 4), zeros_per_block=2)` — PyTorch's documented
+    2:4 semi-structured pruning configuration (see the PyTorch tutorial
+    "Accelerating BERT with semi-structured (2:4) sparsity", which feeds
+    this exact sparsifier into `to_sparse_semi_structured`). 1-D inputs
+    are presented as a single row `[1, n]` (the 2:4 pattern groups along
+    the innermost dimension, so this is the identity mapping for 1-D).
+
+    The torch-derived boolean keep-mask is then MAPPED into ferrotorch's
+    fixture fields (kept values in original order, one 4-bit nibble per
+    group, masked dense). No selection math is re-derived here — the mask
+    is torch's output; `dense * mask` is torch arithmetic.
+
+    Returns (kept_values, nibbles, masked_dense_flat).
+    """
+    import torch.nn as nn
+    from torch.ao.pruning import WeightNormSparsifier
+
+    t = torch.tensor(data, dtype=torch.float64).reshape(shape)
+    t2d = t.reshape(1, -1) if t.dim() == 1 else t
+    m = nn.Linear(t2d.shape[-1], t2d.shape[0])
+    m.weight = nn.Parameter(t2d.clone().to(torch.float32))
+    sparsifier = WeightNormSparsifier(
+        sparsity_level=1.0, sparse_block_shape=(1, 4), zeros_per_block=2
+    )
+    sparsifier.prepare(m, [{"tensor_fqn": "weight"}])
+    sparsifier.step()
+    # The parametrization's mask is the oracle output.
+    keep_mask = m.parametrizations["weight"][0].mask.detach().to(torch.bool)
+    sparsifier.squash_mask()
+
+    flat_mask = keep_mask.reshape(-1)
+    masked_dense = (t.reshape(-1) * flat_mask.to(torch.float64)).tolist()
+    kept_values = t.reshape(-1)[flat_mask].tolist()
     nibbles: list[int] = []
-    for g in range(num_groups):
-        base = g * 4
-        # (pos, |value|) sorted descending by magnitude, ties by lower pos.
-        mags = sorted(
-            ((p, abs(data[base + p])) for p in range(4)),
-            key=lambda t: (-t[1], t[0]),
-        )
-        kept = sorted([mags[0][0], mags[1][0]])
-        for p in kept:
-            values.append(data[base + p])
-        nibble = (1 << kept[0]) | (1 << kept[1])
-        nibbles.append(nibble)
-    return values, nibbles
-
-
-def _decompress_24_reference(
-    values: list[float], nibbles: list[int], shape: list[int]
-) -> list[float]:
-    numel = 1
-    for x in shape:
-        numel *= x
-    out = [0.0] * numel
-    val_idx = 0
-    for g, nibble in enumerate(nibbles):
+    assert flat_mask.numel() % 4 == 0
+    for g in range(flat_mask.numel() // 4):
+        nibble = 0
         for p in range(4):
-            if (nibble >> p) & 1:
-                out[g * 4 + p] = values[val_idx]
-                val_idx += 1
-    return out
+            if bool(flat_mask[g * 4 + p]):
+                nibble |= 1 << p
+        nibbles.append(nibble)
+    return kept_values, nibbles, masked_dense
 
 
 def fixture_semi_structured() -> list[dict[str, Any]]:
-    """Cover SemiStructuredSparseTensor and sparse_matmul_24."""
+    """Cover SemiStructuredSparseTensor and sparse_matmul_24.
+
+    All 2:4 keep/drop selections come from the torch sparsifier oracle
+    (`_torch_24_selection`); tie-magnitude groups are deliberately
+    included — they are where the 2:4 tie-break can diverge."""
     out: list[dict[str, Any]] = []
 
-    # 1-D, 8 elements (2 groups of 4). Picks distinct magnitudes so the
-    # tie-break behaviour is unambiguous.
+    # 1-D, 8 elements (2 groups of 4), distinct magnitudes per group.
     data = [3.0, -1.0, 2.0, -4.0, 5.0, -6.0, 1.5, 0.5]
-    values, nibbles = _compress_24_reference(data)
-    decompressed = _decompress_24_reference(values, nibbles, [8])
+    values, nibbles, decompressed = _torch_24_selection(data, [8])
 
     for dtype in DTYPES:
         out.append(
@@ -880,23 +901,43 @@ def fixture_semi_structured() -> list[dict[str, Any]]:
             }
         )
 
+    # Tie-magnitude groups (single group of 4 each). Torch's sparsifier
+    # makes a deterministic keep/drop choice on ties; ferrotorch's
+    # `compress` tie-break ("lower index wins") can diverge — the suite
+    # pins any divergence against its tracking issue.
+    for tag, tie_data in [
+        ("tie_all_equal_1d4", [2.0, 2.0, 2.0, 2.0]),
+        ("tie_three_equal_1d4", [1.0, 3.0, 3.0, 3.0]),
+    ]:
+        values, nibbles, decompressed = _torch_24_selection(tie_data, [4])
+        for dtype in DTYPES:
+            out.append(
+                {
+                    "op": "semi_structured_24",
+                    "tag": tag,
+                    "dtype": dtype,
+                    "device": "cpu",
+                    "dense_data": listf(tie_data),
+                    "shape": [4],
+                    "expected_kept_values": listf(values),
+                    "expected_nibbles": nibbles,
+                    "expected_decompressed": listf(decompressed),
+                    "expected_num_groups": 1,
+                }
+            )
+
     # 2-D matmul: A [3, 8] @ B [8, 4] where B is compressed in 2:4 format.
     # B's last-dim stride is 4, which is the contract `compress` enforces
     # via `numel % 4 == 0`. n=4 is a multiple of 4 (per the function's
     # docstring contract).
     a = [(i * 0.25 + 1.0) for i in range(3 * 8)]
     b = [(i * 0.5 - 1.0) for i in range(8 * 4)]
-    # Build the compressed B's effective dense (zeros where masked out).
-    b_values, b_nibbles = _compress_24_reference(b)
-    b_eff = _decompress_24_reference(b_values, b_nibbles, [8, 4])
-    # Reference matmul: A @ B_effective.
-    matmul_ref = [0.0] * (3 * 4)
-    for i in range(3):
-        for j in range(4):
-            acc = 0.0
-            for k in range(8):
-                acc += a[i * 8 + k] * b_eff[k * 4 + j]
-            matmul_ref[i * 4 + j] = acc
+    # B's keep/drop selection + masked dense from the torch sparsifier
+    # oracle; reference matmul is `torch.matmul` on the masked dense.
+    b_values, b_nibbles, b_eff = _torch_24_selection(b, [8, 4])
+    a_t = torch.tensor(a, dtype=torch.float64).reshape(3, 8)
+    b_eff_t = torch.tensor(b_eff, dtype=torch.float64).reshape(8, 4)
+    matmul_ref = (a_t @ b_eff_t).reshape(-1).tolist()
 
     for dtype in DTYPES:
         out.append(

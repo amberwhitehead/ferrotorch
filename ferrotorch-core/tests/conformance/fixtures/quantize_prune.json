@@ -5,10 +5,12 @@
     "cuda_available": true,
     "python_executable": "/usr/sbin/python3",
     "python_platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
-    "generated_at": "2026-05-06T16:46:33.020991+00:00",
+    "generated_at": "2026-06-11T04:01:56.897551+00:00",
     "rng_seed": 511565482750,
     "phase": "2.9-quantize-prune",
-    "tracking_issue": "#771"
+    "tracking_issue": "#771; oracle rewrite CORE-194 -> #1888",
+    "generation_command": "python3 scripts/regenerate_quantize_prune_fixtures.py",
+    "oracle_policy": "torch APIs only (goal-audit-fix.md R-ORACLE-2)"
   },
   "fixtures": [
     {
@@ -49,7 +51,8 @@
         2.0039215087890625,
         2.992156982421875,
         4.007843017578125
-      ]
+      ],
+      "oracle": "MinMaxObserver.calculate_qparams + torch.quantize_per_tensor"
     },
     {
       "op": "quantize_per_tensor",
@@ -83,7 +86,8 @@
         0.6000000238418579,
         0.8000000715255737,
         1.0
-      ]
+      ],
+      "oracle": "MinMaxObserver.calculate_qparams + torch.quantize_per_tensor"
     },
     {
       "op": "quantize_per_tensor",
@@ -117,7 +121,8 @@
         0.6000000238418579,
         0.8000000715255737,
         1.0
-      ]
+      ],
+      "oracle": "MinMaxObserver.calculate_qparams + torch.quantize_per_tensor"
     },
     {
       "op": "quantize_per_tensor",
@@ -157,7 +162,8 @@
         1.4960784912109375,
         2.0039215087890625,
         2.4980392456054688
-      ]
+      ],
+      "oracle": "MinMaxObserver.calculate_qparams + torch.quantize_per_tensor"
     },
     {
       "op": "quantize_per_tensor",
@@ -221,7 +227,8 @@
         5.0,
         6.0,
         7.0
-      ]
+      ],
+      "oracle": "MinMaxObserver(quant_min=-8,quant_max=7) + torch.ops.quantized_decomposed.quantize_per_tensor"
     },
     {
       "op": "quantize_per_tensor",
@@ -249,7 +256,8 @@
         1.0,
         2.0,
         3.0
-      ]
+      ],
+      "oracle": "MinMaxObserver(quant_min=-8,quant_max=7) + torch.ops.quantized_decomposed.quantize_per_tensor"
     },
     {
       "op": "quantize_per_tensor",
@@ -277,7 +285,8 @@
         5.0,
         5.0,
         5.0
-      ]
+      ],
+      "oracle": "MinMaxObserver.calculate_qparams + torch.quantize_per_tensor"
     },
     {
       "op": "quantize_per_tensor",
@@ -292,7 +301,7 @@
         0.0,
         0.0
       ],
-      "scale": 4.674874376497939e-10,
+      "scale": 1.1920928955078125e-07,
       "zero_point": -128,
       "codes": [
         -128,
@@ -305,7 +314,8 @@
         0.0,
         0.0,
         0.0
-      ]
+      ],
+      "oracle": "MinMaxObserver.calculate_qparams + torch.quantize_per_tensor"
     },
     {
       "op": "quantize_per_tensor",
@@ -324,7 +334,8 @@
       ],
       "dequant": [
         42.0
-      ]
+      ],
+      "oracle": "MinMaxObserver.calculate_qparams + torch.quantize_per_tensor"
     },
     {
       "op": "quantize_per_tensor",
@@ -359,7 +370,8 @@
         2.0,
         3.0,
         4.0
-      ]
+      ],
+      "oracle": "MinMaxObserver.calculate_qparams + torch.quantize_per_tensor"
     },
     {
       "op": "quantize_per_channel",
@@ -402,8 +414,8 @@
         -128,
         -65,
         63,
-        126,
-        -1,
+        127,
+        0,
         38,
         89,
         127
@@ -416,12 +428,13 @@
         -9.960784912109375,
         -5.019608020782471,
         5.019608020782471,
-        9.960784912109375,
-        99.60784149169922,
+        10.039216041564941,
+        100.39215850830078,
         130.19607543945312,
         170.19607543945312,
         200.0
-      ]
+      ],
+      "oracle": "PerChannelMinMaxObserver.calculate_qparams + torch.quantize_per_channel"
     },
     {
       "op": "quantize_per_channel",
@@ -483,7 +496,8 @@
         130.19607543945312,
         170.19607543945312,
         200.0
-      ]
+      ],
+      "oracle": "PerChannelMinMaxObserver.calculate_qparams + torch.quantize_per_channel"
     },
     {
       "op": "quantize_per_channel",
@@ -515,7 +529,7 @@
       ],
       "zero_points": [
         -8,
-        -1,
+        0,
         -8
       ],
       "codes": [
@@ -524,10 +538,10 @@
         2,
         7,
         -8,
-        -5,
-        3,
+        -4,
+        4,
         7,
-        -1,
+        0,
         2,
         5,
         7
@@ -537,15 +551,16 @@
         1.0,
         2.0,
         3.0,
-        -9.333333969116211,
+        -10.666666984558105,
         -5.333333492279053,
         5.333333492279053,
-        10.666666984558105,
-        93.33332824707031,
+        9.333333969116211,
+        106.66666412353516,
         133.3333282470703,
         173.3333282470703,
         200.0
-      ]
+      ],
+      "oracle": "PerChannelMinMaxObserver(quant_min=-8,quant_max=7) + torch.ops.quantized_decomposed.quantize_per_channel"
     },
     {
       "op": "quantize_per_channel",
@@ -589,79 +604,89 @@
         -2.0,
         4.0,
         8.0
-      ]
+      ],
+      "oracle": "PerChannelMinMaxObserver.calculate_qparams + torch.quantize_per_channel"
     },
     {
       "op": "qparams_symmetric",
       "tag": "int8_maxabs5.0",
       "qdtype": "int8",
       "max_abs": 5.0,
-      "scale": 0.03937007859349251,
-      "zero_point": 0
+      "scale": 0.03921568766236305,
+      "zero_point": 0,
+      "oracle": "MinMaxObserver(qscheme=per_tensor_symmetric).calculate_qparams"
     },
     {
       "op": "qparams_symmetric",
       "tag": "uint8_maxabs5.0",
       "qdtype": "uint8",
       "max_abs": 5.0,
-      "scale": 0.0390625,
-      "zero_point": 128
+      "scale": 0.03921568766236305,
+      "zero_point": 128,
+      "oracle": "MinMaxObserver(qscheme=per_tensor_symmetric).calculate_qparams"
     },
     {
       "op": "qparams_symmetric",
       "tag": "int4_maxabs5.0",
       "qdtype": "int4",
       "max_abs": 5.0,
-      "scale": 0.7142857313156128,
-      "zero_point": 0
+      "scale": 0.6666666865348816,
+      "zero_point": 0,
+      "oracle": "MinMaxObserver(qscheme=per_tensor_symmetric).calculate_qparams"
     },
     {
       "op": "qparams_symmetric",
       "tag": "int8_maxabs1.0",
       "qdtype": "int8",
       "max_abs": 1.0,
-      "scale": 0.007874015718698502,
-      "zero_point": 0
+      "scale": 0.007843137718737125,
+      "zero_point": 0,
+      "oracle": "MinMaxObserver(qscheme=per_tensor_symmetric).calculate_qparams"
     },
     {
       "op": "qparams_symmetric",
       "tag": "uint8_maxabs1.0",
       "qdtype": "uint8",
       "max_abs": 1.0,
-      "scale": 0.0078125,
-      "zero_point": 128
+      "scale": 0.007843137718737125,
+      "zero_point": 128,
+      "oracle": "MinMaxObserver(qscheme=per_tensor_symmetric).calculate_qparams"
     },
     {
       "op": "qparams_symmetric",
       "tag": "int4_maxabs1.0",
       "qdtype": "int4",
       "max_abs": 1.0,
-      "scale": 0.1428571492433548,
-      "zero_point": 0
+      "scale": 0.13333334028720856,
+      "zero_point": 0,
+      "oracle": "MinMaxObserver(qscheme=per_tensor_symmetric).calculate_qparams"
     },
     {
       "op": "qparams_symmetric",
       "tag": "int8_maxabs100.0",
       "qdtype": "int8",
       "max_abs": 100.0,
-      "scale": 0.787401556968689,
-      "zero_point": 0
+      "scale": 0.7843137383460999,
+      "zero_point": 0,
+      "oracle": "MinMaxObserver(qscheme=per_tensor_symmetric).calculate_qparams"
     },
     {
       "op": "qparams_symmetric",
       "tag": "uint8_maxabs100.0",
       "qdtype": "uint8",
       "max_abs": 100.0,
-      "scale": 0.78125,
-      "zero_point": 128
+      "scale": 0.7843137383460999,
+      "zero_point": 128,
+      "oracle": "MinMaxObserver(qscheme=per_tensor_symmetric).calculate_qparams"
     },
     {
       "op": "qparams_symmetric",
       "tag": "int4_maxabs100.0",
       "qdtype": "int4",
       "max_abs": 100.0,
-      "scale": 14.285714149475098,
-      "zero_point": 0
+      "scale": 13.333333015441895,
+      "zero_point": 0,
+      "oracle": "MinMaxObserver(qscheme=per_tensor_symmetric).calculate_qparams"
     },
     {
       "op": "qparams_asymmetric",
@@ -670,7 +695,8 @@
       "min_val": -3.0,
       "max_val": 3.0,
       "scale": 0.0235294122248888,
-      "zero_point": -1
+      "zero_point": 0,
+      "oracle": "MinMaxObserver(qscheme=per_tensor_affine).calculate_qparams"
     },
     {
       "op": "qparams_asymmetric",
@@ -679,7 +705,8 @@
       "min_val": 0.0,
       "max_val": 1.0,
       "scale": 0.003921568859368563,
-      "zero_point": -128
+      "zero_point": -128,
+      "oracle": "MinMaxObserver(qscheme=per_tensor_affine).calculate_qparams"
     },
     {
       "op": "qparams_asymmetric",
@@ -688,7 +715,8 @@
       "min_val": -1.0,
       "max_val": 0.0,
       "scale": 0.003921568859368563,
-      "zero_point": 127
+      "zero_point": 127,
+      "oracle": "MinMaxObserver(qscheme=per_tensor_affine).calculate_qparams"
     },
     {
       "op": "qparams_asymmetric",
@@ -697,7 +725,8 @@
       "min_val": -1.0,
       "max_val": 1.0,
       "scale": 0.007843137718737125,
-      "zero_point": 127
+      "zero_point": 127,
+      "oracle": "MinMaxObserver(qscheme=per_tensor_affine).calculate_qparams"
     },
     {
       "op": "qparams_asymmetric",
@@ -706,7 +735,8 @@
       "min_val": 0.0,
       "max_val": 1.0,
       "scale": 0.003921568859368563,
-      "zero_point": 0
+      "zero_point": 0,
+      "oracle": "MinMaxObserver(qscheme=per_tensor_affine).calculate_qparams"
     },
     {
       "op": "qparams_asymmetric",
@@ -715,7 +745,8 @@
       "min_val": -1.0,
       "max_val": 1.0,
       "scale": 0.13333334028720856,
-      "zero_point": -1
+      "zero_point": -1,
+      "oracle": "MinMaxObserver(qscheme=per_tensor_affine).calculate_qparams"
     },
     {
       "op": "quantized_matmul",
@@ -750,7 +781,8 @@
         2.0,
         3.0,
         4.0
-      ]
+      ],
+      "oracle": "torch.matmul"
     },
     {
       "op": "quantized_matmul",
@@ -789,7 +821,8 @@
         64.0,
         139.0,
         154.0
-      ]
+      ],
+      "oracle": "torch.matmul"
     },
     {
       "op": "quantized_matmul",
@@ -833,7 +866,8 @@
         29.0,
         40.0,
         51.0
-      ]
+      ],
+      "oracle": "torch.matmul"
     },
     {
       "op": "fake_quantize_differentiable",
@@ -859,7 +893,8 @@
         1.0,
         1.0,
         1.0
-      ]
+      ],
+      "oracle": "torch.fake_quantize_per_tensor_affine + autograd"
     },
     {
       "op": "fake_quantize_differentiable",
@@ -888,7 +923,8 @@
         1.0,
         1.0,
         0.0
-      ]
+      ],
+      "oracle": "torch.fake_quantize_per_tensor_affine + autograd"
     },
     {
       "op": "fake_quantize_differentiable",
@@ -914,7 +950,8 @@
         1.0,
         1.0,
         1.0
-      ]
+      ],
+      "oracle": "torch.fake_quantize_per_tensor_affine + autograd"
     },
     {
       "op": "fake_quantize_differentiable",
@@ -940,7 +977,8 @@
         1.0,
         1.0,
         1.0
-      ]
+      ],
+      "oracle": "torch.fake_quantize_per_tensor_affine + autograd"
     },
     {
       "op": "magnitude_prune",
@@ -961,7 +999,8 @@
         0.0,
         -3.0
       ],
-      "n_zeros": 2
+      "n_zeros": 2,
+      "oracle": "torch.nn.utils.prune.l1_unstructured"
     },
     {
       "op": "magnitude_prune",
@@ -982,7 +1021,7 @@
       ],
       "pruned": [
         0.0,
-        0.0,
+        -0.0,
         3.0,
         -4.0,
         5.0,
@@ -990,7 +1029,8 @@
         7.0,
         -8.0
       ],
-      "n_zeros": 2
+      "n_zeros": 2,
+      "oracle": "torch.nn.utils.prune.l1_unstructured"
     },
     {
       "op": "magnitude_prune",
@@ -1011,15 +1051,16 @@
       ],
       "pruned": [
         0.0,
+        -0.0,
         0.0,
+        -0.0,
         0.0,
-        0.0,
-        0.0,
-        0.0,
+        -0.0,
         7.0,
         -8.0
       ],
-      "n_zeros": 6
+      "n_zeros": 6,
+      "oracle": "torch.nn.utils.prune.l1_unstructured"
     },
     {
       "op": "magnitude_prune",
@@ -1040,7 +1081,8 @@
         3.0,
         4.0
       ],
-      "n_zeros": 0
+      "n_zeros": 0,
+      "oracle": "torch.nn.utils.prune.l1_unstructured"
     },
     {
       "op": "magnitude_prune",
@@ -1073,7 +1115,8 @@
         0.0,
         10.0
       ],
-      "n_zeros": 9
+      "n_zeros": 9,
+      "oracle": "torch.nn.utils.prune.l1_unstructured"
     },
     {
       "op": "magnitude_prune",
@@ -1095,15 +1138,108 @@
       ],
       "pruned": [
         0.0,
+        -0.0,
         0.0,
-        0.0,
-        0.0,
+        -0.0,
         5.0,
         -6.0,
         7.0,
         -8.0
       ],
-      "n_zeros": 4
+      "n_zeros": 4,
+      "oracle": "torch.nn.utils.prune.l1_unstructured"
+    },
+    {
+      "op": "magnitude_prune",
+      "tag": "tie_all_equal",
+      "sparsity": 0.5,
+      "shape": [
+        4
+      ],
+      "x_data": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "pruned": [
+        1.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "n_zeros": 2,
+      "oracle": "torch.nn.utils.prune.l1_unstructured"
+    },
+    {
+      "op": "magnitude_prune",
+      "tag": "tie_threshold_partial",
+      "sparsity": 0.5,
+      "shape": [
+        4
+      ],
+      "x_data": [
+        1.0,
+        2.0,
+        2.0,
+        3.0
+      ],
+      "pruned": [
+        0.0,
+        0.0,
+        2.0,
+        3.0
+      ],
+      "n_zeros": 2,
+      "oracle": "torch.nn.utils.prune.l1_unstructured"
+    },
+    {
+      "op": "magnitude_prune",
+      "tag": "tie_multiway",
+      "sparsity": 0.5,
+      "shape": [
+        6
+      ],
+      "x_data": [
+        2.0,
+        -2.0,
+        2.0,
+        5.0,
+        -2.0,
+        7.0
+      ],
+      "pruned": [
+        0.0,
+        -2.0,
+        0.0,
+        5.0,
+        -0.0,
+        7.0
+      ],
+      "n_zeros": 3,
+      "oracle": "torch.nn.utils.prune.l1_unstructured"
+    },
+    {
+      "op": "magnitude_prune",
+      "tag": "count_round_half",
+      "sparsity": 0.125,
+      "shape": [
+        4
+      ],
+      "x_data": [
+        1.0,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "pruned": [
+        1.0,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "n_zeros": 0,
+      "oracle": "torch.nn.utils.prune.l1_unstructured"
     },
     {
       "op": "apply_2_4_mask",
@@ -1117,6 +1253,7 @@
         2.0,
         -3.0
       ],
+      "oracle": "torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0, sparse_block_shape=(1,4), zeros_per_block=2)",
       "masked": [
         0.0,
         -4.0,
@@ -1141,6 +1278,7 @@
         0.9,
         0.8
       ],
+      "oracle": "torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0, sparse_block_shape=(1,4), zeros_per_block=2)",
       "masked": [
         0.0,
         -4.0,
@@ -1148,8 +1286,8 @@
         -3.0,
         0.0,
         0.0,
-        0.9,
-        0.8
+        0.8999999761581421,
+        0.800000011920929
       ],
       "n_zeros": 4
     },
@@ -1167,15 +1305,8 @@
         0.5,
         0.1
       ],
-      "masked": [
-        0.0,
-        -4.0,
-        0.0,
-        -3.0,
-        0.5,
-        0.1
-      ],
-      "n_zeros": 2
+      "oracle": "torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0, sparse_block_shape=(1,4), zeros_per_block=2)",
+      "torch_error": "AssertionError: mask shape (torch.Size([1, 8])) must match x shape (torch.Size([1, 6]))"
     },
     {
       "op": "apply_2_4_mask",
@@ -1194,6 +1325,7 @@
         0.9,
         0.8
       ],
+      "oracle": "torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0, sparse_block_shape=(1,4), zeros_per_block=2)",
       "masked": [
         0.0,
         -4.0,
@@ -1201,10 +1333,97 @@
         -3.0,
         0.0,
         0.0,
-        0.9,
-        0.8
+        0.8999999761581421,
+        0.800000011920929
       ],
       "n_zeros": 4
+    },
+    {
+      "op": "apply_2_4_mask",
+      "tag": "rows_cross_2x6",
+      "shape": [
+        2,
+        6
+      ],
+      "x_data": [
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5.0,
+        6.0,
+        6.0,
+        5.0,
+        4.0,
+        3.0,
+        2.0,
+        1.0
+      ],
+      "oracle": "torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0, sparse_block_shape=(1,4), zeros_per_block=2)",
+      "torch_error": "AssertionError: mask shape (torch.Size([2, 8])) must match x shape (torch.Size([2, 6]))"
+    },
+    {
+      "op": "apply_2_4_mask",
+      "tag": "tie_all_equal",
+      "shape": [
+        4
+      ],
+      "x_data": [
+        2.0,
+        2.0,
+        2.0,
+        2.0
+      ],
+      "oracle": "torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0, sparse_block_shape=(1,4), zeros_per_block=2)",
+      "masked": [
+        2.0,
+        2.0,
+        0.0,
+        0.0
+      ],
+      "n_zeros": 2
+    },
+    {
+      "op": "apply_2_4_mask",
+      "tag": "tie_three_equal",
+      "shape": [
+        4
+      ],
+      "x_data": [
+        1.0,
+        3.0,
+        3.0,
+        3.0
+      ],
+      "oracle": "torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0, sparse_block_shape=(1,4), zeros_per_block=2)",
+      "masked": [
+        0.0,
+        3.0,
+        0.0,
+        3.0
+      ],
+      "n_zeros": 2
+    },
+    {
+      "op": "apply_2_4_mask",
+      "tag": "tie_neg_pair",
+      "shape": [
+        4
+      ],
+      "x_data": [
+        -2.0,
+        2.0,
+        -2.0,
+        2.0
+      ],
+      "oracle": "torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0, sparse_block_shape=(1,4), zeros_per_block=2)",
+      "masked": [
+        -2.0,
+        2.0,
+        -0.0,
+        0.0
+      ],
+      "n_zeros": 2
     },
     {
       "op": "sparsity_ratio",
@@ -1218,7 +1437,8 @@
         0.0,
         2.0
       ],
-      "ratio": 0.5
+      "ratio": 0.5,
+      "oracle": "(t == 0).float().mean()"
     },
     {
       "op": "sparsity_ratio",
@@ -1232,7 +1452,8 @@
         3.0,
         4.0
       ],
-      "ratio": 0.0
+      "ratio": 0.0,
+      "oracle": "(t == 0).float().mean()"
     },
     {
       "op": "sparsity_ratio",
@@ -1246,7 +1467,8 @@
         0.0,
         0.0
       ],
-      "ratio": 1.0
+      "ratio": 1.0,
+      "oracle": "(t == 0).float().mean()"
     },
     {
       "op": "sparsity_ratio",
@@ -1260,7 +1482,8 @@
         0.0,
         1.0
       ],
-      "ratio": 0.75
+      "ratio": 0.75,
+      "oracle": "(t == 0).float().mean()"
     },
     {
       "op": "roundtrip",
@@ -1286,17 +1509,18 @@
       "zero_point": 127,
       "recovered": [
         -5.0,
-        -4.490196228027344,
+        -4.5098042488098145,
         -4.0,
-        -3.5098040103912354,
+        -3.4901962280273438,
         -3.0,
-        -2.4901962280273438,
+        -2.5098040103912354,
         -2.0,
         -1.4901961088180542,
         -1.0,
-        -0.4901961088180542,
+        -0.5098039507865906,
         0.0
-      ]
+      ],
+      "oracle": "MinMaxObserver.calculate_qparams + torch.quantize_per_tensor(...).dequantize()"
     },
     {
       "op": "roundtrip",
@@ -1324,7 +1548,7 @@
         0.0,
         0.19607844948768616,
         0.40000003576278687,
-        0.6039215922355652,
+        0.5960784554481506,
         0.8000000715255737,
         0.9960784912109375,
         1.2000000476837158,
@@ -1332,7 +1556,8 @@
         1.6000001430511475,
         1.7960785627365112,
         2.0
-      ]
+      ],
+      "oracle": "MinMaxObserver.calculate_qparams + torch.quantize_per_tensor(...).dequantize()"
     },
     {
       "op": "roundtrip",
@@ -1378,7 +1603,8 @@
         5.0,
         6.0,
         7.0
-      ]
+      ],
+      "oracle": "MinMaxObserver.calculate_qparams + torch.quantize_per_tensor(...).dequantize()"
     }
   ]
 }

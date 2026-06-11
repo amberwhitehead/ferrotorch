@@ -51,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- conformance_shape.rs fails to compile without the gpu feature: FerrotorchError import is gpu-gated but used in ungated code (#1912)
 - CORE-191: The `gpu` feature of ferrotorch-core is enabled nowhere — every GPU test lane is dead in every workflow (#1885)
 - CORE-192: The nightly workflow has never executed a test step (#1886)
 - CORE-193: The failures blocking `--tests` in Linux CI are two doc-hygiene meta-tests; the functional suites pass at HEAD (#1887)

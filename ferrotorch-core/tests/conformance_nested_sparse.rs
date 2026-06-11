@@ -29,8 +29,15 @@
 //!   `to_dense`, `coalesce` (Coo only), accessors.
 //! * **Cat A — SemiStructuredSparseTensor**: `compress`, `decompress`,
 //!   accessors (`shape`, `values`, `mask`, `num_groups`,
-//!   `compression_ratio`, `group_mask`).
-//! * **Cat A — sparse_matmul_24**: 2:4 reference matmul.
+//!   `compression_ratio`, `group_mask`). The 2:4 keep/drop expectations
+//!   come from a REAL torch oracle (CORE-194 -> #1888):
+//!   `torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0,
+//!   sparse_block_shape=(1, 4), zeros_per_block=2)`, the documented
+//!   PyTorch 2:4 pruning configuration. Tie-magnitude groups are covered;
+//!   the in-group tie-break divergence is pinned against #1910 in
+//!   `cpu_semi_structured_24_tie_groups` (written to FAIL when fixed).
+//! * **Cat A — sparse_matmul_24**: 2:4 matmul; reference is `torch.matmul`
+//!   on the sparsifier-masked dense B.
 //! * **Cat A — SparseGrad**: `new`, `coalesce`, `apply_sgd`, accessors
 //!   (`indices`, `values`, `nnz`, `slab_shape`, `slab_size`).
 //!
@@ -1492,6 +1499,94 @@ fn cpu_semi_structured_compress_decompress() {
             }
             _ => unreachable!(),
         }
+    }
+}
+
+/// 2:4 in-group magnitude ties against the torch sparsifier oracle
+/// (`torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0,
+/// sparse_block_shape=(1, 4), zeros_per_block=2)`).
+///
+/// * `tie_all_equal_1d4` (`[2, 2, 2, 2]`): torch keeps idx `{0, 1}`
+///   (nibble `0b0011`); ferrotorch's `compress` lower-index tie-break
+///   AGREES — torch-parity assertion.
+/// * `tie_three_equal_1d4` (`[1, 3, 3, 3]`): torch keeps idx `{1, 3}`
+///   (nibble `0b1010` = 10, fixture truth); ferrotorch's `compress`
+///   keeps idx `{1, 2}` (nibble `0b0110` = 6). KNOWN DIVERGENCE #1910 —
+///   pinned to the observed ferrotorch behavior; the pinned assertions
+///   FAIL (retire) when #1910 is fixed.
+#[test]
+fn cpu_semi_structured_24_tie_groups() {
+    let file = load_fixtures();
+    for dtype in ["float32", "float64"] {
+        // --- tie_all_equal_1d4: ferrotorch matches torch. ---
+        let f = pick(
+            &file,
+            "semi_structured_24",
+            dtype,
+            Some("tie_all_equal_1d4"),
+        );
+        let dense_data = as_f64_list(&f["dense_data"]);
+        let expected_kept = as_f64_list(&f["expected_kept_values"]);
+        let expected_nibble = f["expected_nibbles"].as_array().expect("nibbles")[0]
+            .as_u64()
+            .expect("nibble") as u8;
+        let expected_decompressed = as_f64_list(&f["expected_decompressed"]);
+
+        let dense = make_tensor_f64(&dense_data, &[4]);
+        let sst = SemiStructuredSparseTensor::compress(&dense).expect("compress tie_all_equal");
+        assert_eq!(sst.group_mask(0), expected_nibble, "tie_all_equal nibble");
+        tolerance::assert_close_f64(
+            sst.values(),
+            &expected_kept,
+            tolerance::F64_ELEMENTWISE,
+            "tie_all_equal kept values",
+        );
+        let recovered = sst.decompress().expect("decompress tie_all_equal");
+        tolerance::assert_close_f64(
+            recovered.data().expect("decompressed"),
+            &expected_decompressed,
+            tolerance::F64_ELEMENTWISE,
+            "tie_all_equal decompressed",
+        );
+
+        // --- tie_three_equal_1d4: KNOWN DIVERGENCE #1910 (pinned). ---
+        let f = pick(
+            &file,
+            "semi_structured_24",
+            dtype,
+            Some("tie_three_equal_1d4"),
+        );
+        let dense_data = as_f64_list(&f["dense_data"]);
+        let torch_nibble = f["expected_nibbles"].as_array().expect("nibbles")[0]
+            .as_u64()
+            .expect("nibble") as u8;
+        assert_eq!(torch_nibble, 0b1010, "torch oracle nibble (fixture)");
+
+        let dense = make_tensor_f64(&dense_data, &[4]);
+        let sst = SemiStructuredSparseTensor::compress(&dense).expect("compress tie_three_equal");
+        // Pinned: ferrotorch keeps idx {1, 2} (nibble 0b0110); torch keeps
+        // idx {1, 3} (nibble 0b1010, fixture). FAILS (retire) when #1910
+        // is fixed.
+        assert_ne!(
+            sst.group_mask(0),
+            torch_nibble,
+            "tie_three_equal: nibble now matches the torch oracle — #1910 \
+             appears fixed; retire this pin"
+        );
+        assert_eq!(
+            sst.group_mask(0),
+            0b0110,
+            "tie_three_equal: nibble no longer matches the pinned divergent \
+             value 0b0110 (torch: 0b1010; #1910)"
+        );
+        // Decompressed: ferrotorch [0, 3, 3, 0]; torch [0, 3, 0, 3] (fixture).
+        let recovered = sst.decompress().expect("decompress tie_three_equal");
+        tolerance::assert_close_f64(
+            recovered.data().expect("decompressed"),
+            &[0.0, 3.0, 3.0, 0.0],
+            tolerance::F64_ELEMENTWISE,
+            "tie_three_equal decompressed (pinned divergent; #1910)",
+        );
     }
 }
 
