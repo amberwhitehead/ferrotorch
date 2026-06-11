@@ -2223,42 +2223,31 @@ fn cpu_logsumexp_special() {
             .as_ref()
             .map(F64ListSentinel::as_slice)
             .unwrap();
-        let pinned_inf = f.tag.as_deref() == Some("sv_pos_inf");
+        // #1828 (CORE-134) fixed: infinite maxes are masked to zero before
+        // the exp-sum per ATen (`logsumexp_out_impl` at pytorch
+        // `aten/src/ATen/native/ReduceOps.cpp:1512-1521`), so the sv_pos_inf
+        // row now returns torch's +inf. Pin retired — every row asserts the
+        // live-torch fixture value.
         match f.dtype.as_str() {
             "float32" => {
                 let a = make_cpu_f32(a_data, shape, false);
                 let l = logsumexp(&a).expect("logsumexp");
-                let actual = read_back_f32(&l);
-                if pinned_inf {
-                    // #1828 pin (CORE-134): torch returns +inf (fixture);
-                    // ferrotorch's max-subtract computes (inf - inf).exp()
-                    // = NaN. Pin the current NaN; when #1828 lands this
-                    // assert fails — retire the pin and fall through to the
-                    // fixture comparison below.
-                    assert!(
-                        actual[0].is_nan(),
-                        "{label}: logsumexp(+inf row) no longer NaN — #1828 \
-                         appears fixed; retire this pin and assert the \
-                         fixture value (+inf)"
-                    );
-                } else {
-                    check_f32(&label, &actual, exp, tolerance::F32_TRANSCENDENTAL);
-                }
+                check_f32(
+                    &label,
+                    &read_back_f32(&l),
+                    exp,
+                    tolerance::F32_TRANSCENDENTAL,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, shape, false);
                 let l = logsumexp(&a).expect("logsumexp");
-                let actual = read_back_f64(&l);
-                if pinned_inf {
-                    // #1828 pin — same mechanism at f64.
-                    assert!(
-                        actual[0].is_nan(),
-                        "{label}: logsumexp(+inf row) no longer NaN — #1828 \
-                         appears fixed; retire this pin"
-                    );
-                } else {
-                    check_f64(&label, &actual, exp, tolerance::F64_TRANSCENDENTAL);
-                }
+                check_f64(
+                    &label,
+                    &read_back_f64(&l),
+                    exp,
+                    tolerance::F64_TRANSCENDENTAL,
+                );
             }
             _ => unreachable!(),
         }
@@ -2286,42 +2275,29 @@ fn cpu_logsumexp_dim_special() {
         // Both special rows put the infinite slice at output index 0 and a
         // finite slice at index 1.
         //
-        // #1828 pin (CORE-134): torch gives -inf for an all-(-inf) row and
-        // +inf for a row containing +inf (fixture); ferrotorch's
-        // logsumexp_dim guards neither and returns NaN. Pin element 0's
-        // current NaN; element 1 (finite slice) must match torch. When
-        // #1828 lands the pin assert fails — retire it and compare the
-        // whole vector against the fixture.
+        // #1828 (CORE-134) fixed: infinite per-slice maxes are masked to
+        // zero before the exp-sum per ATen (`logsumexp_out_impl` at pytorch
+        // `aten/src/ATen/native/ReduceOps.cpp:1512-1521`), so the all-(-inf)
+        // row gives torch's -inf and the +inf row gives +inf. Pin retired —
+        // the whole vector asserts the live-torch fixture values.
         match f.dtype.as_str() {
             "float32" => {
                 let a = make_cpu_f32(a_data, shape, false);
                 let l = logsumexp_dim(&a, axis, false).expect("logsumexp_dim");
-                let actual = read_back_f32(&l);
-                assert!(
-                    actual[0].is_nan(),
-                    "{label}: infinite slice no longer NaN — #1828 appears \
-                     fixed; retire this pin and assert the fixture values"
-                );
                 check_f32(
-                    &format!("{label} finite-slice"),
-                    &actual[1..],
-                    &exp[1..],
+                    &label,
+                    &read_back_f32(&l),
+                    exp,
                     tolerance::F32_TRANSCENDENTAL,
                 );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, shape, false);
                 let l = logsumexp_dim(&a, axis, false).expect("logsumexp_dim");
-                let actual = read_back_f64(&l);
-                assert!(
-                    actual[0].is_nan(),
-                    "{label}: infinite slice no longer NaN — #1828 appears \
-                     fixed; retire this pin and assert the fixture values"
-                );
                 check_f64(
-                    &format!("{label} finite-slice"),
-                    &actual[1..],
-                    &exp[1..],
+                    &label,
+                    &read_back_f64(&l),
+                    exp,
                     tolerance::F64_TRANSCENDENTAL,
                 );
             }
@@ -2351,40 +2327,14 @@ fn cpu_fast_exp_special() {
             "float32" => {
                 let a = make_cpu_f32(a_data, shape, false);
                 let r = fast_exp(&a).expect("fast_exp");
-                let actual = read_back_f32(&r);
-                // #1829 pins (CORE-135): vexp_f32 clamps the domain.
-                // torch (fixture): exp(-inf)=0, exp(-100)=3.78e-44,
-                // exp(-103.9)=1.4e-45, exp(88.5)=2.7231e38 (finite).
-                // Each assert pins the CURRENT divergent behavior and
-                // fails loudly when #1829 lands — retire all four and
-                // compare the whole vector against the fixture.
-                assert!(
-                    actual[0] != 0.0,
-                    "{label}: fast_exp(-inf) now 0 — #1829 appears fixed; \
-                     retire this pin"
-                );
-                assert!(
-                    actual[1] > 1e-40,
-                    "{label}: fast_exp(-100) now subnormal — #1829 appears \
-                     fixed; retire this pin"
-                );
-                assert!(
-                    actual[2] > 1e-40,
-                    "{label}: fast_exp(-103.9) now subnormal — #1829 \
-                     appears fixed; retire this pin"
-                );
-                assert!(
-                    actual[3].is_infinite(),
-                    "{label}: fast_exp(88.5) now finite — #1829 appears \
-                     fixed; retire this pin"
-                );
-                // Non-divergent tail: +inf, NaN, -0.0, subnormal input.
-                check_f32(
-                    &format!("{label} non-pinned tail"),
-                    &actual[4..],
-                    &exp[4..],
-                    tolerance::F32_FAST,
-                );
+                // #1829 (CORE-135) fixed: vexp_f32 delegates NaN/±inf, the
+                // subnormal-result band (x < -87.33654), and the
+                // near-overflow band (x > 88.0) to libm f32::exp instead of
+                // clamping, so exp(-inf)=0, exp(-100)=3.78e-44 (subnormal),
+                // exp(-103.9)=1.4e-45, exp(88.5)=2.7231e38 (finite) all
+                // match torch. Pins retired — the whole vector asserts the
+                // live-torch fixture values.
+                check_f32(&label, &read_back_f32(&r), exp, tolerance::F32_FAST);
             }
             "float64" => {
                 // The f64 fast_exp path delegates to libm — full parity

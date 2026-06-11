@@ -74,13 +74,16 @@ functions.
   `out[..., i, ...] = log(sum(exp(input[..., 0..=i, ...])))` along `dim`.
   Mirrors `logcumsumexp_cpu_kernel` at
   `aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:117-136` (uses
-  `_log_add_exp_helper` for stability). ferrotorch uses a two-pass
-  running-max trick at `ops/cumulative.rs:382-410`: first pass computes
-  `maxes[i] = max(input[..0..=i])`, second pass accumulates
-  `exp(in_data[idx] - m)` and writes `m + ln(acc)`. When the running max
-  changes between iterations, the accumulator is rescaled by
-  `(prev_max - m).exp()` to preserve numerical correctness. GPU dispatch
-  via `logcumsumexp_{f32,f64}`.
+  `_log_add_exp_helper` for stability). ferrotorch ports the helper as
+  `fn log_add_exp in ops/cumulative.rs` (`_log_add_exp_helper` at
+  `aten/src/ATen/native/cpu/LogAddExp.h:22-33`: min/max with NaN
+  propagation, `log1p(exp(min - max)) + max` when `min != max ||
+  isfinite(min)`, and pass-through of `x` for equal infinities so the
+  scan never computes `inf - inf` — CORE-133 / #1827) and folds each
+  element through it sequentially with a `-inf` initial accumulator in
+  `pub fn logcumsumexp_forward in ops/cumulative.rs`. GPU dispatch
+  via `logcumsumexp_{f32,f64}` (the PTX kernels still lack the
+  equal-infinity guard — tracked as #1942).
 
 - REQ-6: `reverse_cumsum(data, shape, dim)` helper — `out[..., i, ...] =
   sum(input[..., i..dim_size, ...])` (the suffix-sum sibling of cumsum).
@@ -236,7 +239,8 @@ All three follow the same scaffold (`ops/cumulative.rs:66-104, 135-173,
 4. CUDA + non-{f32,f64} → `NotImplementedOnCuda { op }` early-out.
 5. CPU triple-loop over `(outer, inner, dim_size)` accumulating into the
    output. For `cumsum`/`cumprod` the accumulator is a `T` scalar; for
-   `logcumsumexp` it's the two-pass running-max algorithm.
+   `logcumsumexp` it's a `-inf`-seeded scalar folded through
+   `fn log_add_exp in ops/cumulative.rs` (the `_log_add_exp_helper` port).
 6. `Tensor::from_storage(TensorStorage::cpu(out), shape.to_vec(), false)`
    returns a fresh tensor with `requires_grad=false` (the autograd layer
    attaches the grad-fn after this returns).
@@ -346,7 +350,7 @@ is therefore validated through the autograd layer's parity-sweep runs.
 | `cumprod` | `cumprod_cpu_kernel` at `cpu/ReduceOpsKernel.cpp:98-115` | `cumprod_forward` at `ops/cumulative.rs:135-173` | Zeros propagate (`0 * x = 0` once seen); NaN propagates; non-contiguous: same as cumsum. |
 | `cummax` | `cummax_helper_cpu` at `aten/src/ATen/native/ReduceOps.cpp:828-834` dispatching `cummax_cummin_helper<..., std::greater_equal>` at `aten/src/ATen/native/ReduceOps.cpp:811-826` | `pub fn cummax_forward in ops/cumulative.rs` | Tie-break and NaN behavior mirror upstream's `isnan_(curr_elem)` branch at `aten/src/ATen/native/ReduceOps.cpp:819` (NaN propagates forever; later index wins on ties via `std::greater_equal`). |
 | `cummin` | `cummin_helper_cpu` at `aten/src/ATen/native/ReduceOps.cpp:867-873` dispatching `cummax_cummin_helper<..., std::less_equal>` | `pub fn cummin_forward in ops/cumulative.rs` | Symmetric to cummax (`std::less_equal` later-index ties; NaN propagation). |
-| `logcumsumexp` | `logcumsumexp_cpu_kernel` at `cpu/ReduceOpsKernel.cpp:117-136` (uses `_log_add_exp_helper`) | `logcumsumexp_forward in ops/cumulative.rs` | Numerical stability via two-pass running-max trick (`maxes[i] = max(input[0..=i])` then `exp(in - m)` accumulator); `(-inf).exp() == 0`, `0.ln() == -inf` so `logcumsumexp([-inf, x]) == [-inf, x]` matches upstream. |
+| `logcumsumexp` | `logcumsumexp_cpu_kernel` at `cpu/ReduceOpsKernel.cpp:117-136` (uses `_log_add_exp_helper` at `cpu/LogAddExp.h:22-33`) | `logcumsumexp_forward in ops/cumulative.rs` | Numerical stability via the sequential `fn log_add_exp in ops/cumulative.rs` fold (`log1p(exp(min - max)) + max`, NaN propagation, equal infinities pass through — CORE-133 / #1827); `logcumsumexp([-inf, x]) == [-inf, x]` and `logcumsumexp([x, inf]) == [x, inf]` match upstream. |
 
 End-to-end verification flows through the autograd layer's parity-sweep
 runs (see `.design/ferrotorch-core/grad_fns/cumulative.md` Verification

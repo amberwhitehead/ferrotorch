@@ -420,11 +420,55 @@ pub fn cummin_forward<T: Float>(
 // logcumsumexp
 // ---------------------------------------------------------------------------
 
+/// Pairwise log-add-exp with PyTorch's equal-infinity guards.
+///
+/// Mirrors `_log_add_exp_helper` at
+/// `pytorch/aten/src/ATen/native/cpu/LogAddExp.h:22-33`:
+///
+/// ```cpp
+/// scalar_t min = at::_isnan(y) ? y : std::min(x, y);
+/// scalar_t max = at::_isnan(y) ? y : std::max(x, y);
+/// if (min != max || std::isfinite(min)) {
+///   return std::log1p(std::exp(min - max)) + max;  // nan propagates here
+/// } else {
+///   return x;  // special case to correctly handle infinite cases
+/// }
+/// ```
+///
+/// When both arguments are the same infinity, `min - max` would be
+/// `inf - inf = NaN`, so the equal-infinity branch returns `x` directly
+/// (CORE-133 / #1827). NaN in either argument propagates through the
+/// `log1p(exp(min - max)) + max` arithmetic.
+#[inline]
+fn log_add_exp<T: Float>(x: T, y: T) -> T {
+    let (min, max) = if y.is_nan() {
+        (y, y)
+    } else if x.is_nan() {
+        // `std::min(x, y)` / `std::max(x, y)` both return `x` when `x` is NaN.
+        (x, x)
+    } else if x < y {
+        (x, y)
+    } else {
+        (y, x)
+    };
+    if min != max || min.is_finite() {
+        // NaN propagates here.
+        (min - max).exp().ln_1p() + max
+    } else {
+        // Equal infinities pass through instead of entering `inf - inf`.
+        x
+    }
+}
+
 /// Log-cumulative-sum-exp along `dim`.
 ///
 /// `output[..., i, ...] = log(sum(exp(input[..., 0..=i, ...])))`
 ///
-/// Numerically stable: uses the running-max trick to avoid overflow.
+/// Numerically stable: sequential [`log_add_exp`] scan with a `-inf` initial
+/// accumulator, mirroring `logcumsumexp_cpu_kernel` at
+/// `pytorch/aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:117-136`
+/// (`cum_number = _log_add_exp_helper(x, cum_number)` with
+/// `init_val = -std::numeric_limits<scalar_t>::infinity()`).
 pub fn logcumsumexp_forward<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<Tensor<T>> {
     let norm_dim = validate_dim(input.ndim(), dim, "logcumsumexp")?;
     let shape = input.shape();
@@ -455,37 +499,18 @@ pub fn logcumsumexp_forward<T: Float>(input: &Tensor<T>, dim: i64) -> Ferrotorch
     let mut out = vec![<T as num_traits::Zero>::zero(); in_data.len()];
     let neg_inf = <T as num_traits::Float>::neg_infinity();
 
+    // Sequential scan: acc starts at -inf and folds each element through
+    // `log_add_exp` (the `_log_add_exp_helper` port above), matching
+    // `logcumsumexp_cpu_kernel`'s accumulation loop at
+    // `pytorch/aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:126-132`.
     for o in 0..outer {
         for k in 0..inner {
             let base = o * dim_size * inner + k;
-
-            // First pass: compute running max for numerical stability.
-            let mut running_max = neg_inf;
-            let mut maxes = Vec::with_capacity(dim_size);
+            let mut acc = neg_inf;
             for i in 0..dim_size {
                 let idx = base + i * inner;
-                if in_data[idx] > running_max {
-                    running_max = in_data[idx];
-                }
-                maxes.push(running_max);
-            }
-
-            // Second pass: accumulate exp(x_i - running_max) and take log.
-            let mut acc = <T as num_traits::Zero>::zero();
-            let mut prev_max = neg_inf;
-            for (i, &m) in maxes.iter().enumerate().take(dim_size) {
-                let idx = base + i * inner;
-
-                // When the running max changes, rescale the accumulator.
-                if m > prev_max && prev_max != neg_inf {
-                    #[allow(clippy::assign_op_pattern)]
-                    {
-                        acc = acc * (prev_max - m).exp();
-                    }
-                }
-                acc += (in_data[idx] - m).exp();
-                out[idx] = m + acc.ln();
-                prev_max = m;
+                acc = log_add_exp(in_data[idx], acc);
+                out[idx] = acc;
             }
         }
     }

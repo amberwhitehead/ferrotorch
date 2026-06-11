@@ -44,8 +44,13 @@ they are the building-blocks `grad_fns::*` modules use under
   path at this layer; the autograd-tracking `grad_fns::reduction`
   has the GPU paths via `gpu_dispatch`).
 - REQ-5: `logsumexp` numerical stability — subtracts the max before
-  exponentiating. Empty input returns `-inf`. All-`-inf` input
-  returns `-inf` (matches torch).
+  exponentiating; an infinite max is masked to zero for the subtraction
+  and restored after the log, mirroring `logsumexp_out_impl` at
+  `aten/src/ATen/native/ReduceOps.cpp:1512-1521`
+  (`maxes_squeezed.masked_fill_(maxes_squeezed.abs() == INFINITY, 0)`)
+  so a `+inf` element yields `+inf` and an all-`-inf` input/slice yields
+  `-inf` instead of NaN (CORE-134 / #1828; same mechanism in
+  `logsumexp_dim`). Empty input returns `-inf`.
 - REQ-6: NaN-aware sum/mean — `nansum` treats NaN as 0 and skips it
   from the count; `nanmean` returns NaN when every element is NaN.
   Mirrors `torch.nansum` / `torch.nanmean`.

@@ -1931,35 +1931,30 @@ fn cpu_logcumsumexp_special() {
             .map(F64ListSentinel::as_slice)
             .unwrap();
         let axis = f.axis.expect("axis");
-        // #1827 pin (CORE-133): torch passes equal infinities through
-        // (fixture: [-inf, 0] -> [-inf, 0]; [0, inf] -> [0, inf]);
-        // ferrotorch's running-max rescaling computes (inf - inf).exp() =
-        // NaN and poisons the scan line. Pin the current NaN at the
-        // position AFTER the infinity enters the scan; when #1827 lands
-        // these asserts fail — retire the pin and assert the fixture.
+        // #1827 (CORE-133) fixed: equal infinities pass through the scan via
+        // the `_log_add_exp_helper` port (pytorch
+        // `aten/src/ATen/native/cpu/LogAddExp.h:22-33`), matching torch's
+        // [-inf, 0] -> [-inf, 0] and [0, inf] -> [0, inf]. Pin retired to a
+        // live-torch fixture assertion.
         match f.dtype.as_str() {
             "float32" => {
                 let a = make_cpu_f32(a_data, shape, false);
                 let l = logcumsumexp(&a, axis).expect("logcumsumexp");
-                let actual = read_back_f32(&l, Device::Cpu);
-                let poisoned = actual.iter().any(|v| v.is_nan());
-                assert!(
-                    poisoned,
-                    "{label}: scan no longer NaN-poisoned (got {actual:?}, \
-                     torch expects {exp:?}) — #1827 appears fixed; retire \
-                     this pin and assert the fixture values"
+                check_f32(
+                    &label,
+                    &read_back_f32(&l, Device::Cpu),
+                    exp,
+                    tolerance::F32_LOGSCAN_CPU,
                 );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, shape, false);
                 let l = logcumsumexp(&a, axis).expect("logcumsumexp");
-                let actual = read_back_f64(&l, Device::Cpu);
-                let poisoned = actual.iter().any(|v| v.is_nan());
-                assert!(
-                    poisoned,
-                    "{label}: scan no longer NaN-poisoned (got {actual:?}, \
-                     torch expects {exp:?}) — #1827 appears fixed; retire \
-                     this pin and assert the fixture values"
+                check_f64(
+                    &label,
+                    &read_back_f64(&l, Device::Cpu),
+                    exp,
+                    tolerance::F64_LOGSCAN_CPU,
                 );
             }
             _ => unreachable!(),
@@ -2304,6 +2299,82 @@ mod gpu {
         let file = load_fixtures();
         require_cuda_fixtures(&file);
         run_diff_cum_for_device(DiffCumOp::Logcumsumexp, "cuda:0", Device::Cuda(0));
+    }
+
+    /// CUDA special-value lanes for logcumsumexp (CORE-133 family).
+    ///
+    /// The CPU kernel is fixed (#1827: `_log_add_exp_helper` port, pytorch
+    /// `aten/src/ATen/native/cpu/LogAddExp.h:22-33`), but the PTX kernels in
+    /// `ferrotorch-gpu` (`LOGCUMSUMEXP_PTX` / `LOGCUMSUMEXP_F64_PTX`) still
+    /// run the unguarded `exp(x - max)` rescaling. Pins (single contract,
+    /// retire-on-fix, R-ORACLE-4) -> #1942:
+    ///   * f32 (both rows): the scan NaN-poisons after the infinity enters
+    ///     (torch cuda: [-inf, 0] -> [-inf, 0]; [0, inf] -> [0, inf]).
+    ///   * f64 sv_neg_inf_first: position 1 returns plausible finite garbage
+    ///     (~710.188) instead of torch's 0.0.
+    ///   * f64 sv_pos_inf_last: matches torch — value-asserted.
+    ///
+    /// When #1942 lands these pins fail — retire them and assert the
+    /// fixture for every row (as `cpu_logcumsumexp_special` now does).
+    #[test]
+    fn gpu_logcumsumexp_special() {
+        ensure_cuda_backend();
+        let file = load_fixtures();
+        require_cuda_fixtures(&file);
+        let cases = cases_for(&file, "logcumsumexp_special", "cuda:0");
+        assert!(
+            !cases.is_empty(),
+            "no cuda fixtures for logcumsumexp_special"
+        );
+        for f in cases {
+            let label = format!(
+                "logcumsumexp_special cuda:0 tag={:?} dtype={}",
+                f.tag, f.dtype
+            );
+            let shape = f.a_shape.as_ref().expect("a_shape");
+            let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
+            let exp = f
+                .out_values
+                .as_ref()
+                .map(F64ListSentinel::as_slice)
+                .unwrap();
+            let axis = f.axis.expect("axis");
+            match f.dtype.as_str() {
+                "float32" => {
+                    let a = upload_f32(make_cpu_f32(a_data, shape, false), Device::Cuda(0));
+                    let l = logcumsumexp(&a, axis).expect("logcumsumexp");
+                    let actual = read_back_f32(&l, Device::Cuda(0));
+                    // #1942 pin: the f32 PTX scan NaN-poisons.
+                    assert!(
+                        actual.iter().any(|v| v.is_nan()),
+                        "{label}: scan no longer NaN-poisoned (got {actual:?}, \
+                         torch expects {exp:?}) — #1942 appears fixed; retire \
+                         this pin and assert the fixture values"
+                    );
+                }
+                "float64" => {
+                    let a = upload_f64(make_cpu_f64(a_data, shape, false), Device::Cuda(0));
+                    let l = logcumsumexp(&a, axis).expect("logcumsumexp");
+                    let actual = read_back_f64(&l, Device::Cuda(0));
+                    if f.tag.as_deref() == Some("sv_neg_inf_first") {
+                        // #1942 pin: torch's [-inf, 0] comes back as
+                        // [-inf, ~710.188] from the f64 PTX software
+                        // exp/log path.
+                        assert!(
+                            (actual[1] - exp[1]).abs() > 1.0,
+                            "{label}: position 1 now matches torch \
+                             (got {actual:?}, torch expects {exp:?}) — #1942 \
+                             appears fixed; retire this pin and assert the \
+                             fixture values"
+                        );
+                    } else {
+                        // sv_pos_inf_last matches torch on the f64 kernel.
+                        check_f64(&label, &actual, exp, tolerance::F64_LOGSCAN_GPU);
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 
     #[test]

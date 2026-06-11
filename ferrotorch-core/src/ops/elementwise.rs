@@ -476,6 +476,17 @@ pub fn fast_div<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tens
 ///
 /// Algorithm: exp(x) = 2^n * exp(r) where n = round(x / ln2), r = x - n*ln2.
 /// The reduced exp(r) is evaluated via a degree-5 minimax polynomial.
+///
+/// The polynomial body is only valid while the integer exponent
+/// `n = round(x·log2e)` stays in `[-126, 127]`; outside that band the
+/// `(127 + n) << 23` bit trick fabricates garbage (n = 128 wraps the biased
+/// exponent to 255 = +inf for inputs as low as ~88.38, and results below
+/// `2^-126` are subnormal — unreachable through exponent bits alone). NaN,
+/// ±inf, the subnormal-result band (`x < -87.33654 = ln(2^-126)`), and the
+/// near-overflow band (`x > 88.0`) therefore delegate to libm `f32::exp`,
+/// which returns the IEEE-754 result for every special value: `exp(-inf) = 0`,
+/// exact subnormals down to `exp(-103.97…)`, finite values up to
+/// `exp(ln(f32::MAX)) ≈ 3.4e38`, and `+inf` beyond (CORE-135 / #1829).
 #[inline(always)]
 fn vexp_f32(x: f32) -> f32 {
     const LOG2E: f32 = std::f32::consts::LOG2_E;
@@ -484,8 +495,11 @@ fn vexp_f32(x: f32) -> f32 {
     const LN2_HI: f32 = 0.693_145_75;
     const LN2_LO: f32 = 1.428_606_8e-6;
 
-    // Clamp to avoid overflow/underflow in the integer exponent.
-    let x = x.clamp(-87.33654, 88.72284);
+    // Special/boundary guard (see doc comment): NaN fails the range test and
+    // propagates through libm exp.
+    if !(-87.336_54..=88.0).contains(&x) {
+        return x.exp();
+    }
 
     // Range reduction: n = round(x * log2e), r = x - n * ln2.
     let n = (x * LOG2E).round();
@@ -1166,19 +1180,27 @@ pub fn logsumexp<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         .copied()
         .fold(T::neg_infinity(), |a, b| if b > a { b } else { a });
 
-    if max_val.is_infinite() && max_val < <T as num_traits::Zero>::zero() {
-        // All -inf → result is -inf
-        return Tensor::from_storage(TensorStorage::cpu(vec![T::neg_infinity()]), vec![], false);
-    }
+    // ATen masks an infinite max to zero before the exp-sum and restores it
+    // after the log (`logsumexp_out_impl` at
+    // `pytorch/aten/src/ATen/native/ReduceOps.cpp:1512-1521`:
+    // `maxes_squeezed.masked_fill_(maxes_squeezed.abs() == INFINITY, 0)`).
+    // With the shift at 0, a +inf element overflows the sum to +inf
+    // (log → +inf) and an all-(-inf) input underflows to 0 (log → -inf),
+    // so equal infinities never reach `inf - inf` (CORE-134 / #1828).
+    let shift = if max_val.is_infinite() {
+        <T as num_traits::Zero>::zero()
+    } else {
+        max_val
+    };
 
     let sum_exp = data
         .iter()
         .copied()
         .fold(<T as num_traits::Zero>::zero(), |acc, v| {
-            acc + (v - max_val).exp()
+            acc + (v - shift).exp()
         });
 
-    let result = max_val + sum_exp.ln();
+    let result = shift + sum_exp.ln();
     Tensor::from_storage(TensorStorage::cpu(vec![result]), vec![], false)
 }
 
@@ -1223,14 +1245,26 @@ pub fn logsumexp_dim<T: Float>(
                 }
             }
 
-            // Sum exp(x - max).
+            // Mask an infinite per-slice max to zero before the exp-sum,
+            // restoring it after the log — same ATen mechanism as the global
+            // `logsumexp` above (`logsumexp_out_impl` at
+            // `pytorch/aten/src/ATen/native/ReduceOps.cpp:1512-1521`):
+            // a +inf slice sums to +inf (log → +inf), an all-(-inf) slice
+            // sums to 0 (log → -inf); no `inf - inf` (CORE-134 / #1828).
+            let shift = if max_val.is_infinite() {
+                <T as num_traits::Zero>::zero()
+            } else {
+                max_val
+            };
+
+            // Sum exp(x - shift).
             let mut sum_exp = <T as num_traits::Zero>::zero();
             for d in 0..dim_size {
                 let idx = o * dim_size * inner + d * inner + i;
-                sum_exp += (data[idx] - max_val).exp();
+                sum_exp += (data[idx] - shift).exp();
             }
 
-            result.push(max_val + sum_exp.ln());
+            result.push(shift + sum_exp.ln());
         }
     }
 
