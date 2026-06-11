@@ -63,7 +63,9 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 
-#[cfg(feature = "gpu")]
+// Used unconditionally: the shared masked_fill runner pins the #1905 CUDA
+// backward contract with `FerrotorchError::GpuTensorNotAccessible`, and that
+// branch compiles (dead) in non-gpu builds too.
 use ferrotorch_core::FerrotorchError;
 use ferrotorch_core::grad_fns::indexing::{
     GatherBackward, IndexSelectBackward, MaskedFillBackward, ScatterAddBackward, ScatterBackward,
