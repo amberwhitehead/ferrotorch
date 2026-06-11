@@ -51,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-196: Five GPU conformance suites never assert result device; the linalg suite knowingly exercises a CPU fallback (#1890)
 - CORE-195: 331 coverage-gate exclusions cite tracking issues that are all closed (#1889)
 - CORE-194: Quantize/prune conformance fixtures are a Python mirror of ferrotorch's own algorithms, not PyTorch (#1888)
 - conformance_shape.rs fails to compile without the gpu feature: FerrotorchError import is gpu-gated but used in ungated code (#1912)
