@@ -693,6 +693,32 @@ fn faer_par(m: usize, k: usize, n: usize) -> faer::Par {
     }
 }
 
+/// Checked dimension product backing the `mm_raw` family's entry
+/// validation (CORE-138 / #1832).
+///
+/// # Panics
+///
+/// Panics when `lhs * rhs` overflows `usize`, naming the calling kernel
+/// and both dimensions. Keeping this multiplication checked means the
+/// slice-length validation in `mm_raw` / `mm_raw_bt` / `mm_raw_at`
+/// cannot itself wrap and accept an undersized slice (CORE-007 class).
+#[inline]
+fn checked_dim_product(
+    func: &'static str,
+    lhs_name: &'static str,
+    lhs: usize,
+    rhs_name: &'static str,
+    rhs: usize,
+) -> usize {
+    assert!(
+        lhs.checked_mul(rhs).is_some(),
+        "{func}: dimension product {lhs_name}*{rhs_name} overflows usize \
+         ({lhs_name}={lhs}, {rhs_name}={rhs})"
+    );
+    // Cannot overflow: asserted above.
+    lhs * rhs
+}
+
 // MKL Fortran-symbol helpers — used by `mm_raw`/`mm_raw_bt`/`mm_raw_at`
 // under `--features mkl` to route the entire f32/f64 path (any matrix
 // size) through MKL's `sgemm_`/`dgemm_` Fortran symbols for byte-for-
@@ -774,7 +800,9 @@ fn mm_raw_mkl_f32<T: 'static + num_traits::Zero + Clone>(
         // SAFETY: leaf FFI to MKL's `sgemm_`. (T,T)+no-swap mirrors
         // torch's `addmm_impl_cpu_` derivation at LinearAlgebra.cpp:1450-1557
         // → CPUBlas.cpp:238 for thin matmul. m/n/k cast to i32 is sound
-        // for any host-memory-bounded tensor shape.
+        // for any host-memory-bounded tensor shape. Buffer lengths
+        // (a=m*k, b=k*n, c=m*n) are enforced by `mm_raw`'s entry
+        // assertions (CORE-138).
         unsafe {
             call_sgemm(
                 b'T',
@@ -797,7 +825,9 @@ fn mm_raw_mkl_f32<T: 'static + num_traits::Zero + Clone>(
     // SAFETY: leaf FFI shim to MKL's Fortran `sgemm_`. Dispatch is the
     // operand-swap + dim-swap pattern documented in this function's
     // doc-comment. m/n/k cast to i32 is sound for any host-memory-
-    // bounded tensor shape. beta=0.0 writes (not accumulates).
+    // bounded tensor shape. beta=0.0 writes (not accumulates). Buffer
+    // lengths (a=m*k, b=k*n, c=m*n) are enforced by `mm_raw`'s entry
+    // assertions (CORE-138).
     unsafe {
         call_sgemm(
             b'N',
@@ -845,6 +875,8 @@ fn mm_raw_mkl_f64<T: 'static + num_traits::Zero + Clone>(
     // (T,T)+no-swap mirror of torch's dispatch applies.
     if m == 1 || n == 1 {
         // SAFETY: leaf FFI to MKL's `dgemm_`; mirror of the f32 path.
+        // Buffer lengths (a=m*k, b=k*n, c=m*n) are enforced by
+        // `mm_raw`'s entry assertions (CORE-138).
         unsafe {
             call_dgemm(
                 b'T',
@@ -865,7 +897,8 @@ fn mm_raw_mkl_f64<T: 'static + num_traits::Zero + Clone>(
         return result;
     }
     // SAFETY: leaf FFI shim to MKL's `dgemm_`; same invariants as
-    // `mm_raw_mkl_f32` but f64.
+    // `mm_raw_mkl_f32` but f64. Buffer lengths (a=m*k, b=k*n, c=m*n)
+    // are enforced by `mm_raw`'s entry assertions (CORE-138).
     unsafe {
         call_dgemm(
             b'N',
@@ -918,6 +951,8 @@ fn mm_raw_bt_mkl_f32<T: 'static + num_traits::Zero + Clone>(
     let c_f32 = unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f32]) };
     // SAFETY: leaf FFI to MKL's `sgemm_`. transa='T' applied to the
     // col-major B view (of row-major (N,K), which is col-major (K,N)).
+    // Buffer lengths (a=m*k, b=n*k, c=m*n) are enforced by
+    // `mm_raw_bt`'s entry assertions (CORE-138).
     unsafe {
         call_sgemm(
             b'T',
@@ -960,6 +995,8 @@ fn mm_raw_bt_mkl_f64<T: 'static + num_traits::Zero + Clone>(
     // SAFETY: T == f64; result is fresh and unaliased.
     let c_f64 = unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f64]) };
     // SAFETY: leaf FFI to MKL's `dgemm_`; mirror of the f32 path.
+    // Buffer lengths (a=m*k, b=n*k, c=m*n) are enforced by
+    // `mm_raw_bt`'s entry assertions (CORE-138).
     unsafe {
         call_dgemm(
             b'T',
@@ -1020,6 +1057,8 @@ fn mm_raw_at_mkl_f32<T: 'static + num_traits::Zero + Clone>(
     let c_f32 = unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f32]) };
     // SAFETY: leaf FFI to MKL's `sgemm_`. transb='T' applied to the
     // col-major A view (of row-major (K,M), which is col-major (M,K)).
+    // Buffer lengths (a=k*m, b=k*n, c=m*n) are enforced by
+    // `mm_raw_at`'s entry assertions (CORE-138).
     unsafe {
         call_sgemm(
             b'N',
@@ -1062,6 +1101,8 @@ fn mm_raw_at_mkl_f64<T: 'static + num_traits::Zero + Clone>(
     // SAFETY: T == f64; result is fresh and unaliased.
     let c_f64 = unsafe { &mut *(std::ptr::from_mut::<[T]>(result.as_mut_slice()) as *mut [f64]) };
     // SAFETY: leaf FFI to MKL's `dgemm_`; mirror of the f32 path.
+    // Buffer lengths (a=k*m, b=k*n, c=m*n) are enforced by
+    // `mm_raw_at`'s entry assertions (CORE-138).
     unsafe {
         call_dgemm(
             b'N',
@@ -1085,7 +1126,35 @@ fn mm_raw_at_mkl_f64<T: 'static + num_traits::Zero + Clone>(
 /// Raw matrix multiply on borrowed slices: (M,K) @ (K,N) -> Vec<T>.
 /// Zero input allocations — operates directly on the borrowed data.
 /// This is the hot-path workhorse used by both `mm` and `mm_differentiable`.
+///
+/// # Panics
+///
+/// Panics if `a_data.len() != m * k`, if `b_data.len() != k * n`, or if
+/// any of `m*k`, `k*n`, `m*n` overflows `usize`. The dimensions must
+/// exactly describe the row-major slices; the entry assertions make the
+/// internal `get_unchecked` fast paths and the MKL FFI calls
+/// unreachable with undersized buffers from safe code (CORE-138 /
+/// #1832).
 pub fn mm_raw<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize) -> Vec<T> {
+    // CORE-138 (#1832): validate the slice-length contract at entry so
+    // the `get_unchecked` small-matrix paths below (and the MKL FFI
+    // paths under `--features mkl`) cannot read out of bounds when a
+    // caller passes inconsistent dimensions. Products use checked
+    // multiplication so the validation itself cannot wrap (CORE-007
+    // class). O(1) — no hot-path cost.
+    let a_expected = checked_dim_product("mm_raw", "m", m, "k", k);
+    let b_expected = checked_dim_product("mm_raw", "k", k, "n", n);
+    checked_dim_product("mm_raw", "m", m, "n", n); // result alloc cannot wrap
+    assert_eq!(
+        a_data.len(),
+        a_expected,
+        "mm_raw: a_data.len() must equal m*k for row-major A of shape (M,K)=({m},{k}) (n={n})"
+    );
+    assert_eq!(
+        b_data.len(),
+        b_expected,
+        "mm_raw: b_data.len() must equal k*n for row-major B of shape (K,N)=({k},{n}) (m={m})"
+    );
     // Under `--features mkl`, every f32 and f64 multiply (regardless of
     // matrix size) routes through `cblas_sgemm`/`cblas_dgemm` for
     // byte-for-byte parity with PyTorch's MKL CPU build (closes #1348).
@@ -1122,7 +1191,9 @@ pub fn mm_raw<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize
             // (dst is bf16-layout). All get_unchecked calls index in [0, m*k),
             // [0, k*n), or [0, m*n), which are within the allocated buffers
             // of length m*k, k*n, m*n respectively (acc and result are
-            // explicitly sized m*n; a_data/b_data are guaranteed by caller).
+            // explicitly sized m*n; a_data.len() == m*k and b_data.len() ==
+            // k*n are enforced by the entry assertions at the top of this
+            // function — CORE-138).
             unsafe {
                 let a_bf16 = as_bf16_slice(a_data);
                 let b_bf16 = as_bf16_slice(b_data);
@@ -1142,8 +1213,9 @@ pub fn mm_raw<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize
                 write_f32_as_bf16(&mut result, &acc);
             }
         } else {
-            // SAFETY: a_data has length m*k and b_data has length k*n by
-            // function contract; result was allocated with `vec![zero; m*n]`.
+            // SAFETY: a_data has length m*k and b_data has length k*n —
+            // enforced by the entry assertions at the top of this function
+            // (CORE-138); result was allocated with `vec![zero; m*n]`.
             // Index arithmetic `i*k + p` with i<m, p<k stays in [0, m*k);
             // `p*n + j` with p<k, j<n stays in [0, k*n); `i*n + j` stays in
             // [0, m*n). All get_unchecked accesses are in bounds.
@@ -1250,7 +1322,33 @@ pub fn mm_raw<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize
 /// A is (M,K), B is (N,K) stored row-major, result is (M,N).
 /// For small matrices, uses a direct loop. For large matrices, uses faer GEMM
 /// with a zero-copy transposed view of B.
+///
+/// # Panics
+///
+/// Panics if `a_data.len() != m * k`, if `b_data.len() != n * k`, or if
+/// any of `m*k`, `n*k`, `m*n` overflows `usize`. The dimensions must
+/// exactly describe the row-major slices; the entry assertions make the
+/// internal `get_unchecked` fast paths and the MKL FFI calls
+/// unreachable with undersized buffers from safe code (CORE-138 /
+/// #1832).
 pub fn mm_raw_bt<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize) -> Vec<T> {
+    // CORE-138 (#1832): validate the slice-length contract at entry —
+    // A is (M,K) and B is (N,K) row-major here. See `mm_raw` for the
+    // full rationale; products are checked so the validation itself
+    // cannot wrap (CORE-007 class).
+    let a_expected = checked_dim_product("mm_raw_bt", "m", m, "k", k);
+    let b_expected = checked_dim_product("mm_raw_bt", "n", n, "k", k);
+    checked_dim_product("mm_raw_bt", "m", m, "n", n); // result alloc cannot wrap
+    assert_eq!(
+        a_data.len(),
+        a_expected,
+        "mm_raw_bt: a_data.len() must equal m*k for row-major A of shape (M,K)=({m},{k}) (n={n})"
+    );
+    assert_eq!(
+        b_data.len(),
+        b_expected,
+        "mm_raw_bt: b_data.len() must equal n*k for row-major B of shape (N,K)=({n},{k}) (m={m})"
+    );
     // Under `--features mkl`, route every f32/f64 multiply through MKL
     // for byte-for-byte parity vs torch. See the equivalent guard in
     // `mm_raw` for the full rationale (closes #1348).
@@ -1275,7 +1373,9 @@ pub fn mm_raw_bt<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
             // bf16 fast path with f32 accumulator (see note in `mm_raw`).
             // SAFETY: is_bf16::<T>() returned true so T == half::bf16, which
             // satisfies as_bf16_slice and write_f32_as_bf16 contracts. A is
-            // (M,K) and B is (N,K), so a_row+p < m*k and b_row+p < n*k for
+            // (M,K) and B is (N,K) with a_data.len() == m*k and b_data.len()
+            // == n*k enforced by the entry assertions at the top of this
+            // function (CORE-138), so a_row+p < m*k and b_row+p < n*k for
             // i<m, j<n, p<k. acc_buf and result both have length m*n, so
             // r_row+j = i*n+j < m*n. All get_unchecked accesses are in bounds.
             unsafe {
@@ -1298,9 +1398,11 @@ pub fn mm_raw_bt<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
                 write_f32_as_bf16(&mut result, &acc_buf);
             }
         } else {
-            // SAFETY: A is (M,K) and B is (N,K) row-major (function contract);
-            // result was allocated with `vec![zero; m*n]`. Index arithmetic
-            // i*k+p < m*k for i<m,p<k; j*k+p < n*k for j<n,p<k; i*n+j < m*n.
+            // SAFETY: A is (M,K) and B is (N,K) row-major with lengths m*k
+            // and n*k enforced by the entry assertions at the top of this
+            // function (CORE-138); result was allocated with `vec![zero; m*n]`.
+            // Index arithmetic i*k+p < m*k for i<m,p<k; j*k+p < n*k for
+            // j<n,p<k; i*n+j < m*n.
             // All get_unchecked accesses are in bounds for the respective slices.
             unsafe {
                 for i in 0..m {
@@ -1414,7 +1516,33 @@ pub fn mm_raw_bt<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
 /// Matrix multiply with A transposed: A^T @ B.
 /// A is (K,M) stored row-major, B is (K,N) row-major, result is (M,N).
 /// Computes C[i,j] = sum_k A[k,i] * B[k,j] = A^T @ B without materializing the transpose.
+///
+/// # Panics
+///
+/// Panics if `a_data.len() != k * m`, if `b_data.len() != k * n`, or if
+/// any of `k*m`, `k*n`, `m*n` overflows `usize`. The dimensions must
+/// exactly describe the row-major slices; the entry assertions make the
+/// internal `get_unchecked` fast paths and the MKL FFI calls
+/// unreachable with undersized buffers from safe code (CORE-138 /
+/// #1832).
 pub fn mm_raw_at<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: usize) -> Vec<T> {
+    // CORE-138 (#1832): validate the slice-length contract at entry —
+    // A is (K,M) and B is (K,N) row-major here. See `mm_raw` for the
+    // full rationale; products are checked so the validation itself
+    // cannot wrap (CORE-007 class).
+    let a_expected = checked_dim_product("mm_raw_at", "k", k, "m", m);
+    let b_expected = checked_dim_product("mm_raw_at", "k", k, "n", n);
+    checked_dim_product("mm_raw_at", "m", m, "n", n); // result alloc cannot wrap
+    assert_eq!(
+        a_data.len(),
+        a_expected,
+        "mm_raw_at: a_data.len() must equal k*m for row-major A of shape (K,M)=({k},{m}) (n={n})"
+    );
+    assert_eq!(
+        b_data.len(),
+        b_expected,
+        "mm_raw_at: b_data.len() must equal k*n for row-major B of shape (K,N)=({k},{n}) (m={m})"
+    );
     // Under `--features mkl`, route every f32/f64 multiply through MKL
     // for byte-for-byte parity vs torch. See the equivalent guard in
     // `mm_raw` for the full rationale (closes #1348).
@@ -1438,7 +1566,9 @@ pub fn mm_raw_at<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
             // bf16 fast path with f32 accumulator (see note in `mm_raw`).
             // SAFETY: is_bf16::<T>() returned true so T == half::bf16,
             // satisfying as_bf16_slice and write_f32_as_bf16 contracts.
-            // A is (K,M) and B is (K,N), so for p<k, i<m, j<n we have
+            // A is (K,M) and B is (K,N) with a_data.len() == k*m and
+            // b_data.len() == k*n enforced by the entry assertions at the
+            // top of this function (CORE-138), so for p<k, i<m, j<n we have
             // a_row+i = p*m+i < k*m and b_row+j = p*n+j < k*n. acc_buf and
             // result both have length m*n, so r_row+j = i*n+j < m*n. All
             // get_unchecked accesses are in bounds.
@@ -1461,9 +1591,11 @@ pub fn mm_raw_at<T: Float>(a_data: &[T], b_data: &[T], m: usize, k: usize, n: us
                 write_f32_as_bf16(&mut result, &acc_buf);
             }
         } else {
-            // SAFETY: A is (K,M) and B is (K,N) row-major (function contract);
-            // result was allocated with `vec![zero; m*n]`. p*m+i < k*m for
-            // p<k,i<m; p*n+j < k*n for p<k,j<n; i*n+j < m*n for i<m,j<n.
+            // SAFETY: A is (K,M) and B is (K,N) row-major with lengths k*m
+            // and k*n enforced by the entry assertions at the top of this
+            // function (CORE-138); result was allocated with
+            // `vec![zero; m*n]`. p*m+i < k*m for p<k,i<m; p*n+j < k*n for
+            // p<k,j<n; i*n+j < m*n for i<m,j<n.
             // All get_unchecked accesses are in bounds.
             unsafe {
                 for p in 0..k {
@@ -2040,5 +2172,90 @@ mod tests {
         let a = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
         let b = t(&[1.0; 2 * 2], &[1, 2, 2]);
         assert!(bmm(&a, &b).is_err());
+    }
+
+    // -------------------------------------------------------------------
+    // CORE-138 (#1832) regression tests: the safe `pub fn` mm_raw family
+    // must panic with a clear precondition message — never perform
+    // out-of-bounds reads — when the slice lengths do not match the
+    // dimension products. Pre-fix these inputs reproduced a debug-mode
+    // UB-precondition abort ("unsafe precondition(s) violated:
+    // slice::get_unchecked requires that the index is within the
+    // slice") and a release-mode SIGSEGV from safe code.
+
+    #[test]
+    #[should_panic(expected = "mm_raw: a_data.len() must equal m*k")]
+    fn test_mm_raw_short_a_panics() {
+        // 4-element A for a claimed (64,64) — small-matrix get_unchecked path.
+        let a = [1.0f32; 4];
+        let b = vec![1.0f32; 64 * 64];
+        let _ = mm_raw(&a, &b, 64, 64, 64);
+    }
+
+    #[test]
+    #[should_panic(expected = "mm_raw: b_data.len() must equal k*n")]
+    fn test_mm_raw_short_b_panics() {
+        let a = vec![1.0f32; 64 * 64];
+        let b = [1.0f32; 4];
+        let _ = mm_raw(&a, &b, 64, 64, 64);
+    }
+
+    #[test]
+    #[should_panic(expected = "mm_raw: dimension product m*k overflows usize")]
+    fn test_mm_raw_dim_product_overflow_panics() {
+        // m*k overflows usize; the validation itself must use checked
+        // multiplication (CORE-007 class) instead of wrapping and
+        // accepting an undersized slice.
+        let a: [f32; 0] = [];
+        let b: [f32; 0] = [];
+        let _ = mm_raw(&a, &b, usize::MAX, 2, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "mm_raw_bt: a_data.len() must equal m*k")]
+    fn test_mm_raw_bt_short_a_panics() {
+        let a = [1.0f32; 4];
+        let b = vec![1.0f32; 64 * 64];
+        let _ = mm_raw_bt(&a, &b, 64, 64, 64);
+    }
+
+    #[test]
+    #[should_panic(expected = "mm_raw_bt: b_data.len() must equal n*k")]
+    fn test_mm_raw_bt_short_b_panics() {
+        let a = vec![1.0f32; 64 * 64];
+        let b = [1.0f32; 4];
+        let _ = mm_raw_bt(&a, &b, 64, 64, 64);
+    }
+
+    #[test]
+    #[should_panic(expected = "mm_raw_bt: dimension product m*k overflows usize")]
+    fn test_mm_raw_bt_dim_product_overflow_panics() {
+        let a: [f32; 0] = [];
+        let b: [f32; 0] = [];
+        let _ = mm_raw_bt(&a, &b, usize::MAX, 2, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "mm_raw_at: a_data.len() must equal k*m")]
+    fn test_mm_raw_at_short_a_panics() {
+        let a = [1.0f32; 4];
+        let b = vec![1.0f32; 64 * 64];
+        let _ = mm_raw_at(&a, &b, 64, 64, 64);
+    }
+
+    #[test]
+    #[should_panic(expected = "mm_raw_at: b_data.len() must equal k*n")]
+    fn test_mm_raw_at_short_b_panics() {
+        let a = vec![1.0f32; 64 * 64];
+        let b = [1.0f32; 4];
+        let _ = mm_raw_at(&a, &b, 64, 64, 64);
+    }
+
+    #[test]
+    #[should_panic(expected = "mm_raw_at: dimension product k*m overflows usize")]
+    fn test_mm_raw_at_dim_product_overflow_panics() {
+        let a: [f32; 0] = [];
+        let b: [f32; 0] = [];
+        let _ = mm_raw_at(&a, &b, usize::MAX, 2, 1);
     }
 }
