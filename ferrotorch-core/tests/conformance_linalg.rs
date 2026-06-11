@@ -305,6 +305,11 @@ struct Fixture {
     grad_bias: Option<F64ListSentinel>,
 
     // Factorization-only fields
+    /// torch's exact permutation matrix P from `torch.linalg.lu` (0/1
+    /// entries — bit-exact across platforms). Only the `lu_3cycle_3x3` rows
+    /// carry it (CORE-144 / #1838 pin lane).
+    #[serde(default)]
+    p_values: Option<F64ListSentinel>,
     #[serde(default)]
     s_values: Option<F64ListSentinel>,
     #[serde(default)]
@@ -1955,6 +1960,13 @@ fn cpu_lu_reconstruction() {
         if f.dtype != "float64" {
             continue;
         }
+        // The 3-cycle pivot row reconstructs ONLY under ferray's inverse
+        // convention; it is handled by the dedicated #1838 pin test below
+        // (`cpu_lu_three_cycle_pivot_pin_1838`). The involutory rows here
+        // cannot distinguish the conventions, so `P L U = A` holds for them.
+        if f.tag.as_deref() == Some("lu_3cycle_3x3") {
+            continue;
+        }
         let a_shape = f.a_shape.as_ref().unwrap();
         let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
         let n = a_shape[0];
@@ -1972,6 +1984,109 @@ fn cpu_lu_reconstruction() {
             "lu recon diff {diff:.3e} exceeds tol",
         );
     }
+}
+
+/// CORE-144 / #1838 pin — `lu` returns the INVERSE of its documented
+/// permutation (lane added per the CORE-199 / #1893 dispatch).
+///
+/// The `lu_3cycle_3x3` fixture rows hold a matrix whose partial pivoting
+/// composes to a 3-cycle (torch `lu_factor` ipiv = `[3, 3, 3]`, 1-based) —
+/// the smallest non-involutory permutation. torch's documented contract,
+/// which `lu`'s doc-comment claims to mirror, is `A = P L U` with
+/// `p_values` the exact 0/1 matrix torch returns (live torch 2.11.0+cu130:
+/// `P, L, U = torch.linalg.lu(A); (P @ L @ U - A).abs().max() == 0.0`).
+///
+/// ferrotorch probed at HEAD (401233b56): the returned `P` is torch's `P`
+/// TRANSPOSED (ferray's `P A = L U` convention), so `P L U = P² A ≠ A`
+/// (max abs deviation 5.5 on this fixture) while `Pᵀ L U = A` to machine
+/// precision. Single-contract pin (R-ORACLE-4): assert the inverse
+/// convention exactly — returned `P` bit-equals the transpose of torch's
+/// `p_values`, and `Pᵀ L U` reconstructs `A`. When #1838 lands (transpose
+/// before returning), the bit-equality assert fires — retire this pin and
+/// assert `P == p_values` plus `P L U = A` instead.
+#[test]
+fn cpu_lu_three_cycle_pivot_pin_1838() {
+    let file = load_fixtures();
+    let mut seen = 0usize;
+    for f in cases_for(&file, "lu", "cpu") {
+        if f.tag.as_deref() != Some("lu_3cycle_3x3") || f.dtype != "float64" {
+            continue;
+        }
+        seen += 1;
+        let a_shape = f.a_shape.as_ref().unwrap();
+        let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
+        let p_torch = f.p_values.as_ref().map(F64ListSentinel::as_slice).unwrap();
+        let n = a_shape[0];
+        let a = make_cpu_f64(a_data, a_shape, false);
+        let (p, l, u) = lu(&a).expect("lu");
+        let p_d = read_back_f64(&p, Device::Cpu);
+        let l_d = read_back_f64(&l, Device::Cpu);
+        let u_d = read_back_f64(&u, Device::Cpu);
+
+        // Sanity: torch's P on this row is genuinely non-involutory, so the
+        // row can discriminate the conventions (anti-vacuity guard).
+        let p_torch_sq = matmul_dense_f64(p_torch, p_torch, n, n, n);
+        let mut is_identity = true;
+        for i in 0..n {
+            for j in 0..n {
+                let expect = if i == j { 1.0 } else { 0.0 };
+                if p_torch_sq[i * n + j] != expect {
+                    is_identity = false;
+                }
+            }
+        }
+        assert!(
+            !is_identity,
+            "lu_3cycle fixture P is involutory — regenerate the fixture; \
+             this row no longer discriminates the lu conventions"
+        );
+
+        // Pin 1: returned P is EXACTLY torch's P transposed (0/1 entries).
+        for i in 0..n {
+            for j in 0..n {
+                assert_eq!(
+                    p_d[i * n + j],
+                    p_torch[j * n + i],
+                    "lu 3-cycle: returned P[{i},{j}] != torch P[{j},{i}] — \
+                     if P now equals torch's p_values, #1838 appears fixed; \
+                     retire this pin and assert P == p_values + P L U = A"
+                );
+            }
+        }
+
+        // Pin 2: the inverse convention reconstructs: Pᵀ L U = A.
+        let mut p_t = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                p_t[i * n + j] = p_d[j * n + i];
+            }
+        }
+        let lu_v = matmul_dense_f64(&l_d, &u_d, n, n, n);
+        let recon_t = matmul_dense_f64(&p_t, &lu_v, n, n, n);
+        let scale = frob_norm_f64(a_data).max(1.0);
+        let diff_t = frob_diff_f64(&recon_t, a_data);
+        assert!(
+            diff_t <= tolerance::F64_RECON * scale,
+            "lu 3-cycle: Pᵀ L U no longer reconstructs A (diff {diff_t:.3e}) \
+             — L/U themselves diverge; re-probe #1838"
+        );
+
+        // Pin 3: the documented contract P L U = A does NOT hold today
+        // (deviation is structural — rows mis-permuted, ~5.5 in Frobenius
+        // terms on this fixture, far above any rounding band).
+        let recon = matmul_dense_f64(&p_d, &lu_v, n, n, n);
+        let diff = frob_diff_f64(&recon, a_data);
+        assert!(
+            diff > 1.0,
+            "lu 3-cycle: P L U ≈ A (diff {diff:.3e}) — #1838 appears fixed; \
+             retire this pin and assert the torch contract directly"
+        );
+    }
+    assert_eq!(
+        seen, 1,
+        "expected exactly one f64 lu_3cycle_3x3 fixture row — regenerate \
+         linalg.json via scripts/regenerate_linalg_fixtures.py"
+    );
 }
 
 #[test]

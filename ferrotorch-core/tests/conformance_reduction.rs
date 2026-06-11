@@ -43,7 +43,10 @@ use serde::Deserialize;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 
 use ferrotorch_core::grad_fns::cumulative::{cummax, cummin, cumprod, cumsum, logcumsumexp};
-use ferrotorch_core::grad_fns::reduction::{amax, amin, mean, mean_dim, prod, sum, sum_dim};
+use ferrotorch_core::grad_fns::reduction::{
+    amax, amax_dim, amin, amin_dim, argmax_dim, argmin_dim, max_with_dim, mean, mean_dim,
+    median_with_dim, min_with_dim, nanmedian_with_dim, prod, sum, sum_dim,
+};
 use ferrotorch_core::ops::cumulative::{
     CumExtremeResult, cummax_forward, cummin_forward, cumprod_forward, cumsum_forward,
     logcumsumexp_forward, reverse_cumsum,
@@ -866,53 +869,55 @@ fn cpu_empty_sum_mean_prod() {
     }
 }
 
-/// `amax([])` / `amin([])` are explicit RuntimeErrors in PyTorch because
-/// neither has a sensible identity. Ferrotorch's CPU walk folds with
-/// `+inf`/`-inf` — that's a documented divergence we tighten here. The
-/// expected ferrotorch behaviour (per #764 dispatch) is that calling
-/// `amax`/`amin` on an empty 1-D tensor returns `Err`. The corresponding
-/// cascade follow-up is filed if this test fails.
+/// CORE-051 / #1745 pin — global `amax`/`amin` return false fold identities
+/// for empty tensors (single-contract rewrite of the former dual-accepting
+/// test, per the CORE-199 / #1893 dispatch and R-ORACLE-4: the old version
+/// passed on EITHER `Err` OR the ±inf sentinel, so it could never go red).
+///
+/// torch oracle (live session, torch 2.11.0+cu130):
+/// ```text
+/// >>> torch.amax(torch.tensor([]))
+/// RuntimeError: amax(): Expected reduction dim to be specified for
+/// input.numel() == 0. Specify the reduction dim with the 'dim' argument.
+/// ```
+/// (`amin` identical.) The contractual ferrotorch behavior once #1745 lands
+/// is a structured `Err` before dispatch on every device.
+///
+/// ferrotorch probed at HEAD (401233b56): `amax([]) == Ok([-inf])`,
+/// `amin([]) == Ok([+inf])` for both f32 and f64 — the fold identities leak
+/// out as values. Pin exactly that; when #1745 lands the `expect` calls
+/// below fire — retire this pin and assert the structured `Err`.
 #[test]
-fn cpu_empty_amax_amin_returns_err_or_inf() {
-    // Build a 1-D empty f32 tensor.
-    let a = make_cpu_f32(&[], &[0], false);
-    // amax: ferrotorch's CPU path folds with -inf; PyTorch raises. Either is
-    // acceptable as long as it does NOT silently return finite garbage.
-    let r = amax(&a);
-    match r {
-        Err(_) => { /* matches PyTorch behavior */ }
-        Ok(t) => {
-            let v = read_back_f32(&t, Device::Cpu);
-            assert_eq!(v.len(), 1, "amax on empty must return scalar");
+fn cpu_empty_amax_amin_pin_1745() {
+    macro_rules! pin {
+        ($label:literal, $call:expr, $read:ident, $negative:expr) => {{
+            let t = $call.expect(concat!(
+                $label,
+                " returned Err — #1745 appears fixed; retire this pin and \
+                 assert the structured error"
+            ));
+            let v = $read(&t, Device::Cpu);
+            assert_eq!(v.len(), 1, "{} must return a scalar", $label);
             assert!(
-                v[0].is_infinite() && v[0].is_sign_negative(),
-                "amax([]) returned finite value {} — not the documented \
-                 -inf-fold sentinel and not an Err; tracking issue: \
-                 file a cascade for amax/amin empty parity",
+                v[0].is_infinite() && v[0].is_sign_negative() == $negative,
+                "{} returned {:?} — neither the pinned fold identity nor an \
+                 Err; re-probe #1745",
+                $label,
                 v[0]
             );
-        }
+        }};
     }
-    let r = amin(&a);
-    match r {
-        Err(_) => { /* matches PyTorch behavior */ }
-        Ok(t) => {
-            let v = read_back_f32(&t, Device::Cpu);
-            assert_eq!(v.len(), 1, "amin on empty must return scalar");
-            assert!(
-                v[0].is_infinite() && v[0].is_sign_positive(),
-                "amin([]) returned finite value {} — not the documented \
-                 +inf-fold sentinel and not an Err; tracking issue: \
-                 file a cascade for amax/amin empty parity",
-                v[0]
-            );
-        }
-    }
+    let a32 = make_cpu_f32(&[], &[0], false);
+    pin!("amax_f32([])", amax(&a32), read_back_f32, true);
+    pin!("amin_f32([])", amin(&a32), read_back_f32, false);
+    let a64 = make_cpu_f64(&[], &[0], false);
+    pin!("amax_f64([])", amax(&a64), read_back_f64, true);
+    pin!("amin_f64([])", amin(&a64), read_back_f64, false);
 
-    // Non-empty path: a stub that returns `Err(_)` for every input would
-    // satisfy the empty-branch above, and a stub returning a constant
-    // would satisfy the inf-fold branch. Pin the actual reduction values
-    // for `[1.0, 2.0, 3.0]` so neither shortcut survives.
+    // Non-empty path (anti-stub): a stub returning a constant ±inf for
+    // every input would satisfy the fold-identity pins above. Pin the
+    // actual reduction values for `[1.0, 2.0, 3.0]` so that shortcut does
+    // not survive.
     let b = make_cpu_f32(&[1.0, 2.0, 3.0], &[3], false);
     let amax_b = amax(&b).expect("amax over non-empty must succeed");
     let amax_v = read_back_f32(&amax_b, Device::Cpu);
@@ -930,6 +935,84 @@ fn cpu_empty_amax_amin_returns_err_or_inf() {
         "amin of 1-D non-empty must reduce to scalar"
     );
     assert_eq!(amin_v[0], 1.0_f32, "amin([1,2,3]) must be 1.0");
+}
+
+/// CORE-052 / #1746 pin — dim-keyed value reductions PANIC on zero-length
+/// reduced slices (lane added per the CORE-199 / #1893 dispatch).
+///
+/// torch oracle (live session, torch 2.11.0+cu130, `z = torch.zeros(2,0,3)`):
+/// ```text
+/// >>> torch.amax(z, dim=1)
+/// IndexError: amax(): Expected reduction dim 1 to have non-zero size.
+/// ```
+/// (amin/argmax/argmin/max/min identical with their own op names;
+/// median/nanmedian both report `median(): Expected reduction dim 1 to have
+/// non-zero size.`) The contractual ferrotorch behavior once #1746 lands is
+/// a structured `Err` from these `FerrotorchResult` APIs.
+///
+/// ferrotorch probed at HEAD (401233b56): all eight panic — slice
+/// index-out-of-bounds at `grad_fns/reduction.rs:2430` (amin/amax_dim),
+/// `:1619` (argmax/argmin_dim), `:2786` (max/min_with_dim), and a
+/// `dim_size - 1` usize underflow at `:2996` for median/nanmedian (debug:
+/// overflow panic; release: wraps and then indexes the empty `order` vec —
+/// still a panic, so the pin is build-profile stable).
+///
+/// Pin mechanics: `#[should_panic]` is forbidden here (it would accept ANY
+/// panic anywhere in the test body, including in tensor construction — a
+/// dual-accept in disguise), and a fixture-level expected-err row cannot
+/// express "panics" (the fixture runner itself would die). So the pin wraps
+/// EXACTLY the op call in `catch_unwind`: today only the panic outcome
+/// passes; a structured `Err` means #1746 landed (retire the pin and assert
+/// the error kind); an `Ok` is an instant failure (torch raises — there is
+/// no valid value).
+#[test]
+fn cpu_zero_length_slice_dim_reductions_panic_pin_1746() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    macro_rules! pin_panic {
+        ($name:literal, $call:expr) => {{
+            let r = catch_unwind(AssertUnwindSafe(|| $call.map(|_| ())));
+            match r {
+                Err(_) => { /* pinned: panics at HEAD (see doc-comment) */ }
+                Ok(Err(e)) => panic!(
+                    "{}: returned structured Err({e}) — #1746 appears \
+                     fixed; retire this pin and assert the error kind",
+                    $name
+                ),
+                Ok(Ok(())) => panic!(
+                    "{}: returned Ok on a zero-length reduced slice — torch \
+                     raises IndexError; neither the pinned panic nor the \
+                     contractual Err",
+                    $name
+                ),
+            }
+        }};
+    }
+
+    let z = make_cpu_f32(&[], &[2, 0, 3], false);
+    pin_panic!("amax_dim([2,0,3], dim=1)", amax_dim(&z, 1, false));
+    pin_panic!("amin_dim([2,0,3], dim=1)", amin_dim(&z, 1, false));
+    pin_panic!("argmax_dim([2,0,3], dim=1)", argmax_dim(&z, 1, false));
+    pin_panic!("argmin_dim([2,0,3], dim=1)", argmin_dim(&z, 1, false));
+    pin_panic!("max_with_dim([2,0,3], dim=1)", max_with_dim(&z, 1, false));
+    pin_panic!("min_with_dim([2,0,3], dim=1)", min_with_dim(&z, 1, false));
+    pin_panic!(
+        "median_with_dim([2,0,3], dim=1)",
+        median_with_dim(&z, 1, false)
+    );
+    pin_panic!(
+        "nanmedian_with_dim([2,0,3], dim=1)",
+        nanmedian_with_dim(&z, 1, false)
+    );
+
+    // The mechanism is dtype-generic (`<T: Float>`); one f64 lane guards
+    // against a dtype-specialized early return sneaking in.
+    let z64 = make_cpu_f64(&[], &[2, 0, 3], false);
+    pin_panic!("amax_dim f64([2,0,3], dim=1)", amax_dim(&z64, 1, false));
+    pin_panic!(
+        "median_with_dim f64([2,0,3], dim=1)",
+        median_with_dim(&z64, 1, false)
+    );
 }
 
 /// Tie-mass distribution test for amax/amin: input `[1.0, 1.0, 1.0]`,

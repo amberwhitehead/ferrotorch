@@ -1488,6 +1488,120 @@ fn cpu_simd_ops() {
     }
 }
 
+/// CORE-131 / #1825 pin — the four fallible simd binary ops skip shape
+/// validation (lane added per the CORE-199 / #1893 dispatch).
+///
+/// torch oracle (live session, torch 2.11.0+cu130):
+/// ```text
+/// >>> torch.add(torch.ones(2, 3), torch.ones(2))
+/// RuntimeError: The size of tensor a (3) must match the size of tensor b
+/// (2) at non-singleton dimension 1
+/// ```
+/// torch never returns partially computed data for non-broadcastable
+/// shapes; the future ferrotorch contract is a structured `Err` BEFORE the
+/// kernel runs.
+///
+/// ferrotorch probed at HEAD (401233b56): the length guard is a
+/// `debug_assert_eq!` inside ferray-ufunc's dispatch
+/// (`ferray-ufunc-0.4.9/src/dispatch.rs:118` / `:133`), so the symptom is
+/// build-profile dependent — a debug build PANICS inside the
+/// `FerrotorchResult` API; a release build (the CI lane: linux-ci runs
+/// `cargo test --release`) silently zips to the shortest input and returns
+/// an output sized to `a` whose tail is the zero-initialized buffer
+/// (CORE-131 audit probe). Single-contract pin per profile (R-ORACLE-4):
+/// each `cfg!(debug_assertions)` branch asserts exactly the one behavior
+/// that profile exhibits today, and a structured `Err` in either branch
+/// means #1825 landed — retire this pin and assert the error kind.
+#[test]
+fn cpu_simd_shape_mismatch_pin_1825() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    // Distinct operand values so add/mul prefixes are distinguishable from
+    // each other and from the zero-initialized tail.
+    let a32 = make_cpu_f32(&[1.5; 6], &[2, 3], false);
+    let b32 = make_cpu_f32(&[0.25; 2], &[2], false);
+    let a64 = make_cpu_f64(&[1.5; 6], &[2, 3], false);
+    let b64 = make_cpu_f64(&[0.25; 2], &[2], false);
+
+    // (op label, prefix value expected in release partial output)
+    macro_rules! pin {
+        ($label:literal, $call:expr, $read:ident, $prefix:expr) => {{
+            let outcome = catch_unwind(AssertUnwindSafe(|| $call));
+            match outcome {
+                Ok(Err(e)) => panic!(
+                    "{}: mismatched shapes returned structured Err({e}) — \
+                     #1825 appears fixed; retire this pin and assert the \
+                     error kind",
+                    $label
+                ),
+                Ok(Ok(t)) => {
+                    assert!(
+                        !cfg!(debug_assertions),
+                        "{}: debug build returned Ok — expected the pinned \
+                         ferray debug_assert panic; re-probe #1825",
+                        $label
+                    );
+                    // Release: output sized to `a`, prefix computed up to
+                    // b.len(), tail left as the zero-initialized buffer.
+                    assert_eq!(
+                        t.shape(),
+                        &[2, 3],
+                        "{}: partial output no longer sized to `a`",
+                        $label
+                    );
+                    let v = $read(&t);
+                    assert_eq!(
+                        v[..2].to_vec(),
+                        vec![$prefix; 2],
+                        "{}: computed prefix changed — re-probe #1825",
+                        $label
+                    );
+                    assert_eq!(
+                        v[2..].to_vec(),
+                        vec![0.0; 4],
+                        "{}: tail is no longer the zero-initialized buffer \
+                         — re-probe #1825",
+                        $label
+                    );
+                }
+                Err(_) => {
+                    assert!(
+                        cfg!(debug_assertions),
+                        "{}: release build panicked — expected the pinned \
+                         silent partial compute; re-probe #1825",
+                        $label
+                    );
+                }
+            }
+        }};
+    }
+
+    pin!(
+        "simd_add_f32([2,3],[2])",
+        simd_add_f32(&a32, &b32),
+        read_back_f32,
+        1.75f32
+    );
+    pin!(
+        "simd_mul_f32([2,3],[2])",
+        simd_mul_f32(&a32, &b32),
+        read_back_f32,
+        0.375f32
+    );
+    pin!(
+        "simd_add_f64([2,3],[2])",
+        simd_add_f64(&a64, &b64),
+        read_back_f64,
+        1.75f64
+    );
+    pin!(
+        "simd_mul_f64([2,3],[2])",
+        simd_mul_f64(&a64, &b64),
+        read_back_f64,
+        0.375f64
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Cat E — reductions
 // ---------------------------------------------------------------------------

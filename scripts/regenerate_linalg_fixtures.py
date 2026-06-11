@@ -32,6 +32,9 @@ Edge cases per the dispatch:
   * Empty matrix paths.
   * Scalar/1×1 degenerate factorizations.
   * Complex eig output (returned as [n, 2] real-imag tensor).
+  * lu with a 3-cycle (non-involutory) pivot composition discriminating
+    torch's `A = P L U` from ferray's `P A = L U` convention
+    (CORE-144 / #1838; lane added per CORE-199 / #1893).
 
 For non-unique factorizations (qr, svd, eigh, lu) the fixture stores the
 INPUT and (for forward sanity) the singular values / eigenvalues only.
@@ -629,6 +632,36 @@ def fixture_factorizations_cpu_only() -> list[dict[str, Any]]:
                 "device": device,
                 "a_shape": [3, 3],
                 "a_data": to_listf(a),
+            }
+        )
+
+        # lu with a 3-CYCLE pivot composition (CORE-144 / #1838; lane added
+        # per the CORE-199 / #1893 dispatch). Partial pivoting on this
+        # matrix swaps r0<->r2 then r1<->r2 — torch.linalg.lu_factor ipiv =
+        # [3, 3, 3] (1-based) — composing to a 3-cycle, the smallest
+        # NON-involutory permutation. torch's `A = P L U` and ferray's
+        # `P A = L U` conventions disagree exactly when P is non-involutory
+        # (P != P^T), so this row discriminates them; the random lu_3x3 row
+        # above happens to pivot involutorily and cannot. `p_values` records
+        # torch's exact P (a 0/1 matrix — bit-exact across platforms).
+        a3 = torch.tensor(
+            [[0.5, 4.0, 1.0], [1.0, 0.25, 3.0], [6.0, 2.0, 0.5]],
+            dtype=torch_dtype(dtype),
+            device=device,
+        )
+        p3, l3, u3 = torch.linalg.lu(a3)
+        eye3 = torch.eye(3, dtype=p3.dtype, device=device)
+        assert not torch.equal(p3 @ p3, eye3), "lu_3cycle row must be non-involutory"
+        assert torch.allclose(p3 @ l3 @ u3, a3), "torch lu reconstruction failed"
+        out.append(
+            {
+                "op": "lu",
+                "tag": "lu_3cycle_3x3",
+                "dtype": dtype,
+                "device": device,
+                "a_shape": [3, 3],
+                "a_data": to_listf(a3),
+                "p_values": to_listf(p3),
             }
         )
 
