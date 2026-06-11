@@ -46,7 +46,7 @@ use serde::de::{self, Deserializer, SeqAccess, Visitor};
 
 use ferrotorch_core::grad_fns::arithmetic::{abs, add, div, mul, neg, pow, sqrt, sub};
 use ferrotorch_core::grad_fns::comparison::{where_, where_bt};
-use ferrotorch_core::grad_fns::reduction::sum as grad_sum;
+use ferrotorch_core::grad_fns::reduction::{mean as grad_mean, sum as grad_sum};
 use ferrotorch_core::ops::elementwise::{
     binary_map, fast_add, fast_cos, fast_div, fast_exp, fast_log, fast_mul, fast_sigmoid, fast_sin,
     fast_sub, fast_tanh, logsumexp, logsumexp_dim, mean, nanmean, nansum, scalar_map, simd_add_f32,
@@ -1590,22 +1590,26 @@ fn cpu_mean() {
                     exp,
                     tolerance::F32_REDUCTION,
                 );
-                // Differentiable mean is `grad_fns::reduction::mean_dim` —
-                // for a flat reduction we use the equivalent: scale the
-                // sum-grad by 1/n. Compare against the fixture grad
-                // (which is 1/n at every element).
+                // CORE-200 (#1894): drive mean's OWN backward
+                // (`grad_fns::reduction::mean` -> `MeanBackward`), never a
+                // sum-backward rescaled by 1/n inside the test — that
+                // synthesizes the expected VJP from a different node and
+                // passes green even when MeanBackward is wrong or missing.
+                // `mean` returns a scalar, so the loss is the mean itself.
+                // Expected grads come straight from the torch fixture.
                 let a_g = make_cpu_f32(a_data, shape, true);
-                // mean over all elements via mean_dim along last axis if 1D
-                // doesn't exist — fall back to sum / n.
-                let s_g = ferrotorch_core::grad_fns::reduction::sum(&a_g).expect("sum");
-                s_g.backward().expect("backward");
+                let m_g = grad_mean(&a_g).expect("grad mean");
+                check_f32(
+                    &format!("{label} grad fwd"),
+                    &read_back_f32(&m_g),
+                    exp,
+                    tolerance::F32_REDUCTION,
+                );
+                m_g.backward().expect("backward");
                 let ga = a_g.grad().unwrap().expect("grad_a");
-                let n = a_g.numel() as f32;
-                // sum's grad is all-ones; mean's grad is all-1/n. Scale.
-                let scaled: Vec<f32> = read_back_f32(&ga).iter().map(|&x| x / n).collect();
                 check_f32(
                     &format!("{label} grad_a"),
-                    &scaled,
+                    &read_back_f32(&ga),
                     grad_a_exp,
                     tolerance::F32_ELEMENTWISE,
                 );
@@ -1619,15 +1623,21 @@ fn cpu_mean() {
                     exp,
                     tolerance::F64_REDUCTION,
                 );
+                // CORE-200 (#1894): same as the f32 lane — mean's own
+                // backward, expectations from the torch fixture.
                 let a_g = make_cpu_f64(a_data, shape, true);
-                let s_g = ferrotorch_core::grad_fns::reduction::sum(&a_g).expect("sum");
-                s_g.backward().expect("backward");
+                let m_g = grad_mean(&a_g).expect("grad mean");
+                check_f64(
+                    &format!("{label} grad fwd"),
+                    &read_back_f64(&m_g),
+                    exp,
+                    tolerance::F64_REDUCTION,
+                );
+                m_g.backward().expect("backward");
                 let ga = a_g.grad().unwrap().expect("grad_a");
-                let n = a_g.numel() as f64;
-                let scaled: Vec<f64> = read_back_f64(&ga).iter().map(|&x| x / n).collect();
                 check_f64(
                     &format!("{label} grad_a"),
-                    &scaled,
+                    &read_back_f64(&ga),
                     grad_a_exp,
                     tolerance::F64_ELEMENTWISE,
                 );
