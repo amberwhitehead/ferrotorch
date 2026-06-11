@@ -340,10 +340,24 @@ fn cases_for<'a>(file: &'a FixtureFile, op: &str, device: &str) -> Vec<&'a Fixtu
 }
 
 // ---------------------------------------------------------------------------
-// Device-transparent helpers
+// Tensor helpers (readback is device-CHECKED — CORE-196 / #1890)
 // ---------------------------------------------------------------------------
 
-fn read_back_f32(t: &Tensor<f32>) -> Vec<f32> {
+/// Device-checked readback (CORE-196 / #1890). When `expect` is a CUDA
+/// device the tensor must actually be CUDA-resident before the D2H copy:
+/// a CPU-resident result produced from CUDA inputs means the op under test
+/// silently fell back to host compute, which a device-transparent readback
+/// would green-light forever.
+fn read_back_f32(t: &Tensor<f32>, expect: Device) -> Vec<f32> {
+    if expect.is_cuda() {
+        assert_eq!(
+            t.device(),
+            expect,
+            "result expected on {expect:?} but resides on {:?} — \
+             silent CPU fallback (CORE-196 / #1890)",
+            t.device()
+        );
+    }
     if t.is_cpu() {
         t.data().expect("read CPU data").to_vec()
     } else {
@@ -352,7 +366,17 @@ fn read_back_f32(t: &Tensor<f32>) -> Vec<f32> {
     }
 }
 
-fn read_back_f64(t: &Tensor<f64>) -> Vec<f64> {
+/// See [`read_back_f32`] — device-checked readback (CORE-196 / #1890).
+fn read_back_f64(t: &Tensor<f64>, expect: Device) -> Vec<f64> {
+    if expect.is_cuda() {
+        assert_eq!(
+            t.device(),
+            expect,
+            "result expected on {expect:?} but resides on {:?} — \
+             silent CPU fallback (CORE-196 / #1890)",
+            t.device()
+        );
+    }
     if t.is_cpu() {
         t.data().expect("read CPU data").to_vec()
     } else {
@@ -788,7 +812,7 @@ fn run_simple_activation_for_device(
                 let c = op.apply_f32(&a);
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, device),
                     expected,
                     tol_f32,
                 );
@@ -800,7 +824,7 @@ fn run_simple_activation_for_device(
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, device),
                     grad_a_exp,
                     tol_f32,
                 );
@@ -810,7 +834,7 @@ fn run_simple_activation_for_device(
                 let c = op.apply_f64(&a);
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, device),
                     expected,
                     tol_f64,
                 );
@@ -822,7 +846,7 @@ fn run_simple_activation_for_device(
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, device),
                     grad_a_exp,
                     tol_f64,
                 );
@@ -968,7 +992,7 @@ fn cpu_hardtanh_with_custom_bounds() {
                 let c = hardtanh_with(&a, min_v, max_v).expect("hardtanh_with");
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, Device::Cpu),
                     expected,
                     tolerance::F32_ELEMENTWISE,
                 );
@@ -978,7 +1002,7 @@ fn cpu_hardtanh_with_custom_bounds() {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F32_ELEMENTWISE,
                 );
@@ -988,7 +1012,7 @@ fn cpu_hardtanh_with_custom_bounds() {
                 let c = hardtanh_with(&a, min_v, max_v).expect("hardtanh_with");
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, Device::Cpu),
                     expected,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -998,7 +1022,7 @@ fn cpu_hardtanh_with_custom_bounds() {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1037,7 +1061,7 @@ fn cpu_softplus_with_custom_beta() {
                 let c = softplus(&a, beta, threshold).expect("softplus");
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, Device::Cpu),
                     expected,
                     tolerance::F32_TRANSCENDENTAL_CPU,
                 );
@@ -1047,7 +1071,7 @@ fn cpu_softplus_with_custom_beta() {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F32_TRANSCENDENTAL_CPU,
                 );
@@ -1057,7 +1081,7 @@ fn cpu_softplus_with_custom_beta() {
                 let c = softplus(&a, beta, threshold).expect("softplus");
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, Device::Cpu),
                     expected,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1067,7 +1091,7 @@ fn cpu_softplus_with_custom_beta() {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1105,7 +1129,7 @@ fn cpu_elu_with_alpha() {
                 let c = elu(&a, alpha).expect("elu");
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, Device::Cpu),
                     expected,
                     tolerance::F32_TRANSCENDENTAL_CPU,
                 );
@@ -1115,7 +1139,7 @@ fn cpu_elu_with_alpha() {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F32_TRANSCENDENTAL_CPU,
                 );
@@ -1125,7 +1149,7 @@ fn cpu_elu_with_alpha() {
                 let c = elu(&a, alpha).expect("elu");
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, Device::Cpu),
                     expected,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1135,7 +1159,7 @@ fn cpu_elu_with_alpha() {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1173,7 +1197,7 @@ fn cpu_leaky_relu_with_slope() {
                 let c = leaky_relu(&a, slope).expect("leaky_relu");
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, Device::Cpu),
                     expected,
                     tolerance::F32_ELEMENTWISE,
                 );
@@ -1183,7 +1207,7 @@ fn cpu_leaky_relu_with_slope() {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F32_ELEMENTWISE,
                 );
@@ -1193,7 +1217,7 @@ fn cpu_leaky_relu_with_slope() {
                 let c = leaky_relu(&a, slope).expect("leaky_relu");
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, Device::Cpu),
                     expected,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1203,7 +1227,7 @@ fn cpu_leaky_relu_with_slope() {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1246,7 +1270,7 @@ fn cpu_prelu() {
                 let c = prelu(&a, &alpha).expect("prelu");
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, Device::Cpu),
                     expected,
                     tolerance::F32_ELEMENTWISE,
                 );
@@ -1257,7 +1281,7 @@ fn cpu_prelu() {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F32_ELEMENTWISE,
                 );
@@ -1268,7 +1292,7 @@ fn cpu_prelu() {
                 let c = prelu(&a, &alpha).expect("prelu");
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, Device::Cpu),
                     expected,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1279,7 +1303,7 @@ fn cpu_prelu() {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1321,7 +1345,7 @@ fn cpu_glu() {
                 let c = glu(&a, axis).expect("glu");
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, Device::Cpu),
                     expected,
                     tolerance::F32_TRANSCENDENTAL_CPU,
                 );
@@ -1331,7 +1355,7 @@ fn cpu_glu() {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F32_TRANSCENDENTAL_CPU,
                 );
@@ -1341,7 +1365,7 @@ fn cpu_glu() {
                 let c = glu(&a, axis).expect("glu");
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, Device::Cpu),
                     expected,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1351,7 +1375,7 @@ fn cpu_glu() {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1454,7 +1478,7 @@ fn run_transcendental_for_device(op: Transcendental, device_label: &str, device:
                 let c = op.apply_f32(&a);
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, device),
                     expected,
                     tol_f32,
                 );
@@ -1464,7 +1488,7 @@ fn run_transcendental_for_device(op: Transcendental, device_label: &str, device:
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, device),
                     grad_a_exp,
                     tol_f32,
                 );
@@ -1474,7 +1498,7 @@ fn run_transcendental_for_device(op: Transcendental, device_label: &str, device:
                 let c = op.apply_f64(&a);
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, device),
                     expected,
                     tol_f64,
                 );
@@ -1484,7 +1508,7 @@ fn run_transcendental_for_device(op: Transcendental, device_label: &str, device:
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, device),
                     grad_a_exp,
                     tol_f64,
                 );
@@ -1543,7 +1567,7 @@ fn cpu_clamp() {
                 let c = clamp(&a, min_v as f32, max_v as f32).expect("clamp");
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, Device::Cpu),
                     expected,
                     tolerance::F32_ELEMENTWISE,
                 );
@@ -1553,7 +1577,7 @@ fn cpu_clamp() {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F32_ELEMENTWISE,
                 );
@@ -1563,7 +1587,7 @@ fn cpu_clamp() {
                 let c = clamp(&a, min_v, max_v).expect("clamp");
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, Device::Cpu),
                     expected,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1573,7 +1597,7 @@ fn cpu_clamp() {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1679,7 +1703,7 @@ fn run_special_cpu(op: SpecialOp) {
                 let c = op.apply_f32(&a);
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, Device::Cpu),
                     expected,
                     tolerance::F32_TRANSCENDENTAL_CPU,
                 );
@@ -1694,7 +1718,7 @@ fn run_special_cpu(op: SpecialOp) {
                 let c = op.apply_f64(&a);
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, Device::Cpu),
                     expected,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1774,7 +1798,7 @@ fn cpu_xlogy() {
                 let c = xlogy(&x, &y).expect("xlogy");
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, Device::Cpu),
                     expected,
                     tolerance::F32_TRANSCENDENTAL_CPU,
                 );
@@ -1785,7 +1809,7 @@ fn cpu_xlogy() {
                 let c = xlogy(&x, &y).expect("xlogy");
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, Device::Cpu),
                     expected,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -1911,7 +1935,7 @@ fn run_poly_cpu(op: PolyOp) {
                 let c = op.apply_f32(&a, n);
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, Device::Cpu),
                     expected,
                     tolerance::F32_TRANSCENDENTAL_CPU,
                 );
@@ -1921,7 +1945,7 @@ fn run_poly_cpu(op: PolyOp) {
                 let c = op.apply_f64(&a, n);
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, Device::Cpu),
                     expected,
                     tolerance::F64_TRANSCENDENTAL,
                 );
@@ -2017,7 +2041,7 @@ fn cpu_tanh_saturated() {
             "float32" => {
                 let a = make_cpu_f32(a_data, shape, false);
                 let c = tanh(&a).expect("tanh");
-                let actual = read_back_f32(&c);
+                let actual = read_back_f32(&c, Device::Cpu);
                 for v in &actual {
                     assert!(v.is_finite(), "{label}: produced non-finite {v}");
                 }
@@ -2026,7 +2050,7 @@ fn cpu_tanh_saturated() {
             "float64" => {
                 let a = make_cpu_f64(a_data, shape, false);
                 let c = tanh(&a).expect("tanh");
-                let actual = read_back_f64(&c);
+                let actual = read_back_f64(&c, Device::Cpu);
                 for v in &actual {
                     assert!(v.is_finite(), "{label}: produced non-finite {v}");
                 }
@@ -2057,7 +2081,7 @@ fn cpu_sigmoid_saturated() {
             "float32" => {
                 let a = make_cpu_f32(a_data, shape, false);
                 let c = sigmoid(&a).expect("sigmoid");
-                let actual = read_back_f32(&c);
+                let actual = read_back_f32(&c, Device::Cpu);
                 for v in &actual {
                     assert!(v.is_finite(), "{label}: produced non-finite {v}");
                 }
@@ -2066,7 +2090,7 @@ fn cpu_sigmoid_saturated() {
             "float64" => {
                 let a = make_cpu_f64(a_data, shape, false);
                 let c = sigmoid(&a).expect("sigmoid");
-                let actual = read_back_f64(&c);
+                let actual = read_back_f64(&c, Device::Cpu);
                 for v in &actual {
                     assert!(v.is_finite(), "{label}: produced non-finite {v}");
                 }
@@ -2099,7 +2123,7 @@ fn cpu_softmax_uniform_large() {
             "float32" => {
                 let a = make_cpu_f32(a_data, shape, false);
                 let c = softmax(&a).expect("softmax");
-                let actual = read_back_f32(&c);
+                let actual = read_back_f32(&c, Device::Cpu);
                 for v in &actual {
                     assert!(v.is_finite(), "{label}: produced non-finite {v}");
                 }
@@ -2108,7 +2132,7 @@ fn cpu_softmax_uniform_large() {
             "float64" => {
                 let a = make_cpu_f64(a_data, shape, false);
                 let c = softmax(&a).expect("softmax");
-                let actual = read_back_f64(&c);
+                let actual = read_back_f64(&c, Device::Cpu);
                 for v in &actual {
                     assert!(v.is_finite(), "{label}: produced non-finite {v}");
                 }
@@ -2141,7 +2165,7 @@ fn cpu_log_softmax_large() {
             "float32" => {
                 let a = make_cpu_f32(a_data, shape, false);
                 let c = log_softmax(&a).expect("log_softmax");
-                let actual = read_back_f32(&c);
+                let actual = read_back_f32(&c, Device::Cpu);
                 for v in &actual {
                     assert!(v.is_finite(), "{label}: produced non-finite {v}");
                 }
@@ -2150,7 +2174,7 @@ fn cpu_log_softmax_large() {
             "float64" => {
                 let a = make_cpu_f64(a_data, shape, false);
                 let c = log_softmax(&a).expect("log_softmax");
-                let actual = read_back_f64(&c);
+                let actual = read_back_f64(&c, Device::Cpu);
                 for v in &actual {
                     assert!(v.is_finite(), "{label}: produced non-finite {v}");
                 }
@@ -2169,7 +2193,7 @@ fn cpu_log_boundary_zero_and_negative() {
     // log(0) = -inf, log(-1) = NaN. Use f32 to keep the test obvious.
     let a = make_cpu_f32(&[0.0, -1.0, 1.0], &[3], false);
     let c = log(&a).expect("log");
-    let v = read_back_f32(&c);
+    let v = read_back_f32(&c, Device::Cpu);
     assert!(
         v[0].is_infinite() && v[0].is_sign_negative(),
         "log(0) expected -inf, got {}",
@@ -2213,7 +2237,7 @@ fn cpu_log1p_expm1_small_x() {
             };
             check_f64(
                 &label,
-                &read_back_f64(&c),
+                &read_back_f64(&c, Device::Cpu),
                 expected,
                 tolerance::F64_TRANSCENDENTAL,
             );
@@ -2623,7 +2647,7 @@ mod gpu {
                 "gpu_mish_f64_typical" => mish(&a).expect("mish f64 on cuda"),
                 _ => unreachable!("unknown verif-debt op {op}"),
             };
-            let actual = read_back_f64(&c);
+            let actual = read_back_f64(&c, Device::Cuda(0));
             // Hard assert: F64_TRANSCENDENTAL = 1e-10.
             check_f64(&label, &actual, expected, tolerance::F64_TRANSCENDENTAL);
         }

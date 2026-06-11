@@ -39,11 +39,10 @@
 //!   currently CPU-detour through `data_vec()` → `to(device)` (issue #496).
 //! * `reduce` on CUDA: axis-aligned-fast-path composes GPU-aware `sum_dim` /
 //!   `cummax` / `cummin`; the reorder-fallback CPU-detours.
-//! * `einsum` returns a CPU-backed tensor regardless of input device — its
-//!   internal compute is a Rust loop on `data_vec()`. We compare values via
-//!   `.cpu().data()`. `einsum_differentiable` re-uploads the result to the
-//!   input's device via `TensorStorage::on_device`, so its forward output is
-//!   on-device and the backward graph runs through the autograd machinery.
+//! * `einsum` / `einsum_differentiable` on CUDA: results are device-resident
+//!   (the GPU dispatch decomposes into on-device primitives per #803 / #821 /
+//!   #822 / #824 / #825) and every GPU readback in this suite asserts CUDA
+//!   residency (CORE-196 / #1890) — a silent CPU fallback now fails the lane.
 
 use std::path::PathBuf;
 
@@ -311,10 +310,24 @@ fn cases_for<'a>(file: &'a FixtureFile, op: &str, device: &str) -> Vec<&'a Fixtu
 }
 
 // ---------------------------------------------------------------------------
-// Device-transparent helpers
+// Tensor helpers (readback is device-CHECKED — CORE-196 / #1890)
 // ---------------------------------------------------------------------------
 
-fn read_back_f32(t: &Tensor<f32>) -> Vec<f32> {
+/// Device-checked readback (CORE-196 / #1890). When `expect` is a CUDA
+/// device the tensor must actually be CUDA-resident before the D2H copy:
+/// a CPU-resident result produced from CUDA inputs means the op under test
+/// silently fell back to host compute, which a device-transparent readback
+/// would green-light forever.
+fn read_back_f32(t: &Tensor<f32>, expect: Device) -> Vec<f32> {
+    if expect.is_cuda() {
+        assert_eq!(
+            t.device(),
+            expect,
+            "result expected on {expect:?} but resides on {:?} — \
+             silent CPU fallback (CORE-196 / #1890)",
+            t.device()
+        );
+    }
     if t.is_cpu() {
         t.data().expect("read CPU data").to_vec()
     } else {
@@ -323,7 +336,17 @@ fn read_back_f32(t: &Tensor<f32>) -> Vec<f32> {
     }
 }
 
-fn read_back_f64(t: &Tensor<f64>) -> Vec<f64> {
+/// See [`read_back_f32`] — device-checked readback (CORE-196 / #1890).
+fn read_back_f64(t: &Tensor<f64>, expect: Device) -> Vec<f64> {
+    if expect.is_cuda() {
+        assert_eq!(
+            t.device(),
+            expect,
+            "result expected on {expect:?} but resides on {:?} — \
+             silent CPU fallback (CORE-196 / #1890)",
+            t.device()
+        );
+    }
     if t.is_cpu() {
         t.data().expect("read CPU data").to_vec()
     } else {
@@ -510,7 +533,7 @@ fn run_rearrange_for_device(op_name: &str, device_label: &str, device: Device) {
                 };
                 check_f32(
                     &label,
-                    &read_back_f32(&r),
+                    &read_back_f32(&r, device),
                     expected,
                     tolerance::BIT_EXACT_F32,
                 );
@@ -524,7 +547,7 @@ fn run_rearrange_for_device(op_name: &str, device_label: &str, device: Device) {
                 };
                 check_f64(
                     &label,
-                    &read_back_f64(&r),
+                    &read_back_f64(&r, device),
                     expected,
                     tolerance::BIT_EXACT_F64,
                 );
@@ -584,7 +607,7 @@ fn run_repeat_for_device(device_label: &str, device: Device) {
                 let r = repeat(&a, pattern, &pairs).expect("repeat");
                 check_f32(
                     &label,
-                    &read_back_f32(&r),
+                    &read_back_f32(&r, device),
                     expected,
                     tolerance::BIT_EXACT_F32,
                 );
@@ -594,7 +617,7 @@ fn run_repeat_for_device(device_label: &str, device: Device) {
                 let r = repeat(&a, pattern, &pairs).expect("repeat");
                 check_f64(
                     &label,
-                    &read_back_f64(&r),
+                    &read_back_f64(&r, device),
                     expected,
                     tolerance::BIT_EXACT_F64,
                 );
@@ -676,12 +699,12 @@ fn run_reduce_for_device(device_label: &str, device: Device) {
             "float32" => {
                 let a = upload_f32(make_cpu_f32(a_data, shape, false), device);
                 let r = reduce(&a, pattern, red).expect("reduce");
-                check_f32(&label, &read_back_f32(&r), expected, tol_f32);
+                check_f32(&label, &read_back_f32(&r, device), expected, tol_f32);
             }
             "float64" => {
                 let a = upload_f64(make_cpu_f64(a_data, shape, false), device);
                 let r = reduce(&a, pattern, red).expect("reduce");
-                check_f64(&label, &read_back_f64(&r), expected, tol_f64);
+                check_f64(&label, &read_back_f64(&r, device), expected, tol_f64);
             }
             _ => unreachable!(),
         }
@@ -824,7 +847,7 @@ fn run_einsum_for_device(device_label: &str, device: Device) {
                 } else {
                     einsum(equation, &[&a]).expect("einsum")
                 };
-                check_f32(&label, &read_back_f32(&r), expected, tol_f32);
+                check_f32(&label, &read_back_f32(&r, device), expected, tol_f32);
             }
             "float64" => {
                 let a = upload_f64(make_cpu_f64(a_data, a_shape, false), device);
@@ -839,7 +862,7 @@ fn run_einsum_for_device(device_label: &str, device: Device) {
                 } else {
                     einsum(equation, &[&a]).expect("einsum")
                 };
-                check_f64(&label, &read_back_f64(&r), expected, tol_f64);
+                check_f64(&label, &read_back_f64(&r, device), expected, tol_f64);
             }
             _ => unreachable!(),
         }
@@ -919,7 +942,7 @@ fn run_einsum_differentiable_for_device(device_label: &str, device: Device) {
                 };
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&r),
+                    &read_back_f32(&r, device),
                     expected,
                     tol_f32,
                 );
@@ -946,7 +969,7 @@ fn run_einsum_differentiable_for_device(device_label: &str, device: Device) {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, device),
                     grad_a_exp,
                     tol_f32,
                 );
@@ -963,7 +986,7 @@ fn run_einsum_differentiable_for_device(device_label: &str, device: Device) {
                         .expect("grad_b");
                     check_f32(
                         &format!("{label} grad_b"),
-                        &read_back_f32(&gb),
+                        &read_back_f32(&gb, device),
                         grad_b_exp,
                         tol_f32,
                     );
@@ -985,7 +1008,7 @@ fn run_einsum_differentiable_for_device(device_label: &str, device: Device) {
                 };
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&r),
+                    &read_back_f64(&r, device),
                     expected,
                     tol_f64,
                 );
@@ -1010,7 +1033,7 @@ fn run_einsum_differentiable_for_device(device_label: &str, device: Device) {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, device),
                     grad_a_exp,
                     tol_f64,
                 );
@@ -1027,7 +1050,7 @@ fn run_einsum_differentiable_for_device(device_label: &str, device: Device) {
                         .expect("grad_b");
                     check_f64(
                         &format!("{label} grad_b"),
-                        &read_back_f64(&gb),
+                        &read_back_f64(&gb, device),
                         grad_b_exp,
                         tol_f64,
                     );

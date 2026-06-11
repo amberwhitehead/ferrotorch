@@ -300,10 +300,24 @@ fn cases_for<'a>(file: &'a FixtureFile, op: &str, device: &str) -> Vec<&'a Fixtu
 }
 
 // ---------------------------------------------------------------------------
-// Device-transparent helpers
+// Tensor helpers (readback is device-CHECKED — CORE-196 / #1890)
 // ---------------------------------------------------------------------------
 
-fn read_back_f32(t: &Tensor<f32>) -> Vec<f32> {
+/// Device-checked readback (CORE-196 / #1890). When `expect` is a CUDA
+/// device the tensor must actually be CUDA-resident before the D2H copy:
+/// a CPU-resident result produced from CUDA inputs means the op under test
+/// silently fell back to host compute, which a device-transparent readback
+/// would green-light forever.
+fn read_back_f32(t: &Tensor<f32>, expect: Device) -> Vec<f32> {
+    if expect.is_cuda() {
+        assert_eq!(
+            t.device(),
+            expect,
+            "result expected on {expect:?} but resides on {:?} — \
+             silent CPU fallback (CORE-196 / #1890)",
+            t.device()
+        );
+    }
     if t.is_cpu() {
         t.data().expect("read CPU data").to_vec()
     } else {
@@ -312,7 +326,17 @@ fn read_back_f32(t: &Tensor<f32>) -> Vec<f32> {
     }
 }
 
-fn read_back_f64(t: &Tensor<f64>) -> Vec<f64> {
+/// See [`read_back_f32`] — device-checked readback (CORE-196 / #1890).
+fn read_back_f64(t: &Tensor<f64>, expect: Device) -> Vec<f64> {
+    if expect.is_cuda() {
+        assert_eq!(
+            t.device(),
+            expect,
+            "result expected on {expect:?} but resides on {:?} — \
+             silent CPU fallback (CORE-196 / #1890)",
+            t.device()
+        );
+    }
     if t.is_cpu() {
         t.data().expect("read CPU data").to_vec()
     } else {
@@ -421,6 +445,33 @@ fn cascade_skip(_op: &str, _device_label: &str, _dtype: &str) -> Option<&'static
     None
 }
 
+/// Expected `.grad` device for a global reduction on `device`.
+///
+/// #1922 pin (found via CORE-196 / #1890): `AmaxBackward` / `AminBackward`
+/// build their tie-splitting subgradient on the host and always return CPU
+/// gradients, so a CUDA leaf currently gets a CPU `.grad`. torch guarantees
+/// gradient device == parameter device. This helper asserts the CURRENT
+/// (wrong) CPU placement for exactly those two ops so the pin fails loudly —
+/// and gets retired (return `device` unconditionally) — when #1922 lands
+/// device-preserving backwards. All other ops expect grads on `device`.
+fn grad_device_for(
+    op: GlobalReduction,
+    device: Device,
+    label: &str,
+    actual_grad_device: Device,
+) -> Device {
+    if device.is_cuda() && matches!(op, GlobalReduction::Amax | GlobalReduction::Amin) {
+        assert_eq!(
+            actual_grad_device,
+            Device::Cpu,
+            "{label}: grad no longer on CPU — #1922 appears fixed; retire \
+             this pin and expect the gradient on {device:?}",
+        );
+        return Device::Cpu;
+    }
+    device
+}
+
 fn run_global_reduction_for_device(op: GlobalReduction, device_label: &str, device: Device) {
     let file = load_fixtures();
     let cases = cases_for(&file, op.name(), device_label);
@@ -485,7 +536,7 @@ fn run_global_reduction_for_device(op: GlobalReduction, device_label: &str, devi
                 let c = op.apply_f32(&a);
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, device),
                     expected,
                     tol_fwd_f32,
                 );
@@ -498,7 +549,7 @@ fn run_global_reduction_for_device(op: GlobalReduction, device_label: &str, devi
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, grad_device_for(op, device, &label, ga.device())),
                     grad_a_exp,
                     tol_grad_f32,
                 );
@@ -508,7 +559,7 @@ fn run_global_reduction_for_device(op: GlobalReduction, device_label: &str, devi
                 let c = op.apply_f64(&a);
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, device),
                     expected,
                     tol_fwd_f64,
                 );
@@ -519,7 +570,7 @@ fn run_global_reduction_for_device(op: GlobalReduction, device_label: &str, devi
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, grad_device_for(op, device, &label, ga.device())),
                     grad_a_exp,
                     tol_grad_f64,
                 );
@@ -651,7 +702,7 @@ fn run_dim_reduction_for_device(op: DimReduction, device_label: &str, device: De
                 let c = op.apply_f32(&a, axis, keepdim);
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, device),
                     expected,
                     tol_fwd_f32,
                 );
@@ -664,7 +715,7 @@ fn run_dim_reduction_for_device(op: DimReduction, device_label: &str, device: De
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, device),
                     grad_a_exp,
                     tol_grad_f32,
                 );
@@ -674,7 +725,7 @@ fn run_dim_reduction_for_device(op: DimReduction, device_label: &str, device: De
                 let c = op.apply_f64(&a, axis, keepdim);
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, device),
                     expected,
                     tol_fwd_f64,
                 );
@@ -686,7 +737,7 @@ fn run_dim_reduction_for_device(op: DimReduction, device_label: &str, device: De
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, device),
                     grad_a_exp,
                     tol_grad_f64,
                 );
@@ -743,7 +794,7 @@ fn cpu_empty_sum_mean_prod() {
                     };
                     check_f32(
                         &label,
-                        &read_back_f32(&c),
+                        &read_back_f32(&c, Device::Cpu),
                         expected,
                         tolerance::F32_REDUCTION_CPU,
                     );
@@ -758,7 +809,7 @@ fn cpu_empty_sum_mean_prod() {
                     };
                     check_f64(
                         &label,
-                        &read_back_f64(&c),
+                        &read_back_f64(&c, Device::Cpu),
                         expected,
                         tolerance::F64_REDUCTION_CPU,
                     );
@@ -785,7 +836,7 @@ fn cpu_empty_amax_amin_returns_err_or_inf() {
     match r {
         Err(_) => { /* matches PyTorch behavior */ }
         Ok(t) => {
-            let v = read_back_f32(&t);
+            let v = read_back_f32(&t, Device::Cpu);
             assert_eq!(v.len(), 1, "amax on empty must return scalar");
             assert!(
                 v[0].is_infinite() && v[0].is_sign_negative(),
@@ -800,7 +851,7 @@ fn cpu_empty_amax_amin_returns_err_or_inf() {
     match r {
         Err(_) => { /* matches PyTorch behavior */ }
         Ok(t) => {
-            let v = read_back_f32(&t);
+            let v = read_back_f32(&t, Device::Cpu);
             assert_eq!(v.len(), 1, "amin on empty must return scalar");
             assert!(
                 v[0].is_infinite() && v[0].is_sign_positive(),
@@ -818,7 +869,7 @@ fn cpu_empty_amax_amin_returns_err_or_inf() {
     // for `[1.0, 2.0, 3.0]` so neither shortcut survives.
     let b = make_cpu_f32(&[1.0, 2.0, 3.0], &[3], false);
     let amax_b = amax(&b).expect("amax over non-empty must succeed");
-    let amax_v = read_back_f32(&amax_b);
+    let amax_v = read_back_f32(&amax_b, Device::Cpu);
     assert_eq!(
         amax_v.len(),
         1,
@@ -826,7 +877,7 @@ fn cpu_empty_amax_amin_returns_err_or_inf() {
     );
     assert_eq!(amax_v[0], 3.0_f32, "amax([1,2,3]) must be 3.0");
     let amin_b = amin(&b).expect("amin over non-empty must succeed");
-    let amin_v = read_back_f32(&amin_b);
+    let amin_v = read_back_f32(&amin_b, Device::Cpu);
     assert_eq!(
         amin_v.len(),
         1,
@@ -867,7 +918,7 @@ fn cpu_amax_amin_tie_distribution() {
                     let ga = a_g.grad().unwrap().expect("grad_a");
                     check_f32(
                         &format!("{label} grad_a"),
-                        &read_back_f32(&ga),
+                        &read_back_f32(&ga, Device::Cpu),
                         grad_a_exp,
                         tolerance::F32_REDUCTION_CPU,
                     );
@@ -883,7 +934,7 @@ fn cpu_amax_amin_tie_distribution() {
                     let ga = a_g.grad().unwrap().expect("grad_a");
                     check_f64(
                         &format!("{label} grad_a"),
-                        &read_back_f64(&ga),
+                        &read_back_f64(&ga, Device::Cpu),
                         grad_a_exp,
                         tolerance::F64_REDUCTION_CPU,
                     );
@@ -901,9 +952,12 @@ fn cpu_amax_amin_tie_distribution() {
 // For the differentiable trio (cumsum/cumprod/logcumsumexp), the backward
 // node currently routes through CPU (the `*Backward` impls return
 // `NotImplementedOnCuda` if invoked with a CUDA grad_output). So:
-//   * Forward: CPU + GPU (the forward kernels dispatch to GPU when present).
-//   * Backward: CPU only — the GPU forward path runs but we do NOT call
-//     `.backward()` on a CUDA leaf for these ops.
+//   * Forward: CPU + GPU (the forward kernels dispatch to GPU when present);
+//     the GPU result is asserted CUDA-resident (CORE-196 / #1890).
+//   * Backward: CPU only — tracked as #1923 (torch differentiates all three
+//     on CUDA). The gpu lane pins the current behavior by asserting
+//     `.backward()` through a CUDA leaf returns `NotImplementedOnCuda`;
+//     gradient VALUES are verified through a CPU leaf.
 //
 // `cummax` / `cummin` are not differentiable at all (they return indices);
 // we just compare values + indices.
@@ -1010,14 +1064,31 @@ fn run_diff_cum_for_device(op: DiffCumOp, device_label: &str, device: Device) {
                 let c = op.apply_f32(&a, axis);
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, device),
                     expected,
                     tol_f32,
                 );
 
-                // Autograd path is CPU-only — every cumulative `*Backward`
-                // returns NotImplementedOnCuda. We always run autograd on
-                // CPU regardless of the forward device argument.
+                // #1923 pin (found via CORE-196 / #1890): the cumulative
+                // `*Backward` nodes return `NotImplementedOnCuda` for CUDA
+                // grads although torch differentiates these ops on CUDA.
+                // Assert that exact error on the gpu lane; retire this pin
+                // (run autograd on `device` and expect a CUDA grad) when
+                // #1923 lands the CUDA backwards.
+                if on_gpu {
+                    let a_pin = upload_f32(make_cpu_f32(a_data, shape, true), device);
+                    let out = op.apply_f32(&a_pin, axis);
+                    let loss = sum(&out).expect("sum-to-scalar loss");
+                    let err = loss.backward().expect_err(
+                        "cumulative backward on CUDA succeeded — #1923 \
+                         appears fixed; retire this pin and assert a \
+                         CUDA-resident gradient",
+                    );
+                    eprintln!("{label}: pinned to #1923 — got expected Err: {err}");
+                }
+
+                // Gradient VALUES verified through a CPU leaf (per #1923 the
+                // CUDA autograd path is pinned above).
                 let a_g = make_cpu_f32(a_data, shape, true);
                 let out = op.apply_f32(&a_g, axis);
                 let loss = sum(&out).expect("sum-to-scalar loss");
@@ -1025,7 +1096,7 @@ fn run_diff_cum_for_device(op: DiffCumOp, device_label: &str, device: Device) {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f32(
                     &format!("{label} grad_a (cpu autograd)"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F32_REDUCTION_CPU.max(tol_f32),
                 );
@@ -1035,10 +1106,23 @@ fn run_diff_cum_for_device(op: DiffCumOp, device_label: &str, device: Device) {
                 let c = op.apply_f64(&a, axis);
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, device),
                     expected,
                     tol_f64,
                 );
+
+                // #1923 pin — see the float32 arm above.
+                if on_gpu {
+                    let a_pin = upload_f64(make_cpu_f64(a_data, shape, true), device);
+                    let out = op.apply_f64(&a_pin, axis);
+                    let loss = sum(&out).expect("sum-to-scalar loss");
+                    let err = loss.backward().expect_err(
+                        "cumulative backward on CUDA succeeded — #1923 \
+                         appears fixed; retire this pin and assert a \
+                         CUDA-resident gradient",
+                    );
+                    eprintln!("{label}: pinned to #1923 — got expected Err: {err}");
+                }
 
                 let a_g = make_cpu_f64(a_data, shape, true);
                 let out = op.apply_f64(&a_g, axis);
@@ -1047,7 +1131,7 @@ fn run_diff_cum_for_device(op: DiffCumOp, device_label: &str, device: Device) {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f64(
                     &format!("{label} grad_a (cpu autograd)"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F64_REDUCTION_CPU.max(tol_f64),
                 );
@@ -1139,7 +1223,7 @@ fn run_cum_extreme_for_device(op_name: &str, device_label: &str, device: Device)
                 };
                 check_f32(
                     &format!("{label} values"),
-                    &read_back_f32(&result.values),
+                    &read_back_f32(&result.values, device),
                     expected_vals,
                     tol_f32,
                 );
@@ -1164,7 +1248,7 @@ fn run_cum_extreme_for_device(op_name: &str, device_label: &str, device: Device)
                 };
                 check_f64(
                     &format!("{label} values"),
-                    &read_back_f64(&result.values),
+                    &read_back_f64(&result.values, device),
                     expected_vals,
                     tol_f64,
                 );
@@ -1227,7 +1311,7 @@ fn cpu_cumprod_with_zero() {
                 let c = cumprod(&a, axis).expect("cumprod fwd");
                 check_f32(
                     &format!("{label} fwd"),
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, Device::Cpu),
                     expected,
                     tolerance::F32_REDUCTION_CPU,
                 );
@@ -1240,7 +1324,7 @@ fn cpu_cumprod_with_zero() {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F32_REDUCTION_CPU,
                 );
@@ -1250,7 +1334,7 @@ fn cpu_cumprod_with_zero() {
                 let c = cumprod(&a, axis).expect("cumprod fwd");
                 check_f64(
                     &format!("{label} fwd"),
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, Device::Cpu),
                     expected,
                     tolerance::F64_REDUCTION_CPU,
                 );
@@ -1263,7 +1347,7 @@ fn cpu_cumprod_with_zero() {
                 let ga = a_g.grad().unwrap().expect("grad_a");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, Device::Cpu),
                     grad_a_exp,
                     tolerance::F64_REDUCTION_CPU,
                 );
@@ -1298,7 +1382,7 @@ fn cpu_logcumsumexp_overflow_stability() {
             "float32" => {
                 let a = make_cpu_f32(a_data, shape, false);
                 let c = logcumsumexp(&a, axis).expect("logcumsumexp");
-                let actual = read_back_f32(&c);
+                let actual = read_back_f32(&c, Device::Cpu);
                 for v in &actual {
                     assert!(v.is_finite(), "{label}: produced non-finite {v}");
                 }
@@ -1307,7 +1391,7 @@ fn cpu_logcumsumexp_overflow_stability() {
             "float64" => {
                 let a = make_cpu_f64(a_data, shape, false);
                 let c = logcumsumexp(&a, axis).expect("logcumsumexp");
-                let actual = read_back_f64(&c);
+                let actual = read_back_f64(&c, Device::Cpu);
                 for v in &actual {
                     assert!(v.is_finite(), "{label}: produced non-finite {v}");
                 }
@@ -1366,7 +1450,7 @@ fn cum_extreme_result_struct_fields() {
     let r: CumExtremeResult<f32> = cummax_forward(&a, 0).expect("cummax_forward");
     assert_eq!(r.values.shape(), &[5]);
     assert_eq!(r.indices, vec![0, 1, 2, 3, 4]);
-    let v = read_back_f32(&r.values);
+    let v = read_back_f32(&r.values, Device::Cpu);
     tolerance::assert_close_f32(
         &v,
         &[1.0, 2.0, 3.0, 4.0, 5.0],
@@ -1379,7 +1463,7 @@ fn cum_extreme_result_struct_fields() {
     let r: CumExtremeResult<f64> = cummin_forward(&a, 0).expect("cummin_forward");
     assert_eq!(r.values.shape(), &[5]);
     assert_eq!(r.indices, vec![0, 1, 2, 3, 4]);
-    let v = read_back_f64(&r.values);
+    let v = read_back_f64(&r.values, Device::Cpu);
     tolerance::assert_close_f64(
         &v,
         &[5.0, 4.0, 3.0, 2.0, 1.0],
@@ -1405,7 +1489,7 @@ fn forward_only_helpers_smoke() {
 
     let cs = cumsum_forward(&a, 0).expect("cumsum_forward");
     tolerance::assert_close_f32(
-        &read_back_f32(&cs),
+        &read_back_f32(&cs, Device::Cpu),
         &[1.0, 3.0, 6.0, 10.0],
         tolerance::F32_REDUCTION_CPU,
         "cumsum_forward",
@@ -1413,7 +1497,7 @@ fn forward_only_helpers_smoke() {
 
     let cp = cumprod_forward(&a, 0).expect("cumprod_forward");
     tolerance::assert_close_f32(
-        &read_back_f32(&cp),
+        &read_back_f32(&cp, Device::Cpu),
         &[1.0, 2.0, 6.0, 24.0],
         tolerance::F32_REDUCTION_CPU,
         "cumprod_forward",
@@ -1437,7 +1521,7 @@ fn forward_only_helpers_smoke() {
     // A finiteness+monotonicity-only check would let a stub returning
     // `[1.0, 1.5, 2.0, 2.5]` pass; pinning the values catches it.
     let lc = logcumsumexp_forward(&a, 0).expect("logcumsumexp_forward");
-    let lc_v = read_back_f32(&lc);
+    let lc_v = read_back_f32(&lc, Device::Cpu);
     let expected: [f32; 4] = [1.0_f32, 2.313_261_7_f32, 3.407_606_1_f32, 4.440_19_f32];
     tolerance::assert_close_f32(
         &lc_v,

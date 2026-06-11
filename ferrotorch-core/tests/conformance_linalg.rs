@@ -432,7 +432,21 @@ fn cases_for<'a>(file: &'a FixtureFile, op: &str, device: &str) -> Vec<&'a Fixtu
 // Tensor helpers
 // ---------------------------------------------------------------------------
 
-fn read_back_f32(t: &Tensor<f32>) -> Vec<f32> {
+/// Device-checked readback (CORE-196 / #1890). When `expect` is a CUDA
+/// device the tensor must actually be CUDA-resident before the D2H copy:
+/// a CPU-resident result produced from CUDA inputs means the op under test
+/// silently fell back to host compute, which a device-transparent readback
+/// would green-light forever.
+fn read_back_f32(t: &Tensor<f32>, expect: Device) -> Vec<f32> {
+    if expect.is_cuda() {
+        assert_eq!(
+            t.device(),
+            expect,
+            "result expected on {expect:?} but resides on {:?} — \
+             silent CPU fallback (CORE-196 / #1890)",
+            t.device()
+        );
+    }
     if t.is_cpu() {
         t.data().expect("read CPU data").to_vec()
     } else {
@@ -441,7 +455,17 @@ fn read_back_f32(t: &Tensor<f32>) -> Vec<f32> {
     }
 }
 
-fn read_back_f64(t: &Tensor<f64>) -> Vec<f64> {
+/// See [`read_back_f32`] — device-checked readback (CORE-196 / #1890).
+fn read_back_f64(t: &Tensor<f64>, expect: Device) -> Vec<f64> {
+    if expect.is_cuda() {
+        assert_eq!(
+            t.device(),
+            expect,
+            "result expected on {expect:?} but resides on {:?} — \
+             silent CPU fallback (CORE-196 / #1890)",
+            t.device()
+        );
+    }
     if t.is_cpu() {
         t.data().expect("read CPU data").to_vec()
     } else {
@@ -619,7 +643,12 @@ fn run_mm_for_device(device_label: &str, device: Device) {
                 let a = upload_f32(make_cpu_f32(a_data, a_shape, false), device);
                 let b = upload_f32(make_cpu_f32(b_data, b_shape, false), device);
                 let c = mm_differentiable(&a, &b).expect("mm_differentiable fwd");
-                check_f32(&format!("{label} fwd"), &read_back_f32(&c), expected, tol);
+                check_f32(
+                    &format!("{label} fwd"),
+                    &read_back_f32(&c, device),
+                    expected,
+                    tol,
+                );
 
                 // Autograd: loss = sum(C); backward → grad_a, grad_b.
                 let a_g = upload_f32(make_cpu_f32(a_data, a_shape, true), device);
@@ -631,13 +660,13 @@ fn run_mm_for_device(device_label: &str, device: Device) {
                 let gb = b_g.grad().unwrap().expect("grad_b");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, device),
                     grad_a_exp,
                     tol,
                 );
                 check_f32(
                     &format!("{label} grad_b"),
-                    &read_back_f32(&gb),
+                    &read_back_f32(&gb, device),
                     grad_b_exp,
                     tol,
                 );
@@ -647,7 +676,12 @@ fn run_mm_for_device(device_label: &str, device: Device) {
                 let a = upload_f64(make_cpu_f64(a_data, a_shape, false), device);
                 let b = upload_f64(make_cpu_f64(b_data, b_shape, false), device);
                 let c = mm_differentiable(&a, &b).expect("mm_differentiable fwd");
-                check_f64(&format!("{label} fwd"), &read_back_f64(&c), expected, tol);
+                check_f64(
+                    &format!("{label} fwd"),
+                    &read_back_f64(&c, device),
+                    expected,
+                    tol,
+                );
 
                 let a_g = upload_f64(make_cpu_f64(a_data, a_shape, true), device);
                 let b_g = upload_f64(make_cpu_f64(b_data, b_shape, true), device);
@@ -658,13 +692,13 @@ fn run_mm_for_device(device_label: &str, device: Device) {
                 let gb = b_g.grad().unwrap().expect("grad_b");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, device),
                     grad_a_exp,
                     tol,
                 );
                 check_f64(
                     &format!("{label} grad_b"),
-                    &read_back_f64(&gb),
+                    &read_back_f64(&gb, device),
                     grad_b_exp,
                     tol,
                 );
@@ -702,20 +736,20 @@ fn run_mv_for_device(device_label: &str, device: Device) {
         match f.dtype.as_str() {
             "float32" => {
                 let tol = matmul_tol_f32(on_gpu);
+                // mv_differentiable dispatches CUDA inputs to the cuBLAS mv
+                // kernels (#817); forward and gradients stay device-resident.
                 let a = upload_f32(make_cpu_f32(a_data, a_shape, false), device);
                 let b = upload_f32(make_cpu_f32(b_data, b_shape, false), device);
-                // mv_differentiable is CPU-only by signature (uses .data()?).
-                // For GPU paths we round-trip through CPU.
-                let (a_in, b_in) = if on_gpu {
-                    (a.cpu().unwrap(), b.cpu().unwrap())
-                } else {
-                    (a, b)
-                };
-                let c = mv_differentiable(&a_in, &b_in).expect("mv_differentiable fwd");
-                check_f32(&format!("{label} fwd"), &read_back_f32(&c), expected, tol);
+                let c = mv_differentiable(&a, &b).expect("mv_differentiable fwd");
+                check_f32(
+                    &format!("{label} fwd"),
+                    &read_back_f32(&c, device),
+                    expected,
+                    tol,
+                );
 
-                let a_g = make_cpu_f32(a_data, a_shape, true);
-                let b_g = make_cpu_f32(b_data, b_shape, true);
+                let a_g = upload_f32(make_cpu_f32(a_data, a_shape, true), device);
+                let b_g = upload_f32(make_cpu_f32(b_data, b_shape, true), device);
                 let c = mv_differentiable(&a_g, &b_g).expect("mv grad");
                 let loss = ferrotorch_core::grad_fns::reduction::sum(&c).expect("sum");
                 loss.backward().expect("backward");
@@ -723,13 +757,13 @@ fn run_mv_for_device(device_label: &str, device: Device) {
                 let gb = b_g.grad().unwrap().expect("grad_b");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, device),
                     grad_a_exp,
                     tol,
                 );
                 check_f32(
                     &format!("{label} grad_b"),
-                    &read_back_f32(&gb),
+                    &read_back_f32(&gb, device),
                     grad_b_exp,
                     tol,
                 );
@@ -738,16 +772,16 @@ fn run_mv_for_device(device_label: &str, device: Device) {
                 let tol = matmul_tol_f64(on_gpu);
                 let a = upload_f64(make_cpu_f64(a_data, a_shape, false), device);
                 let b = upload_f64(make_cpu_f64(b_data, b_shape, false), device);
-                let (a_in, b_in) = if on_gpu {
-                    (a.cpu().unwrap(), b.cpu().unwrap())
-                } else {
-                    (a, b)
-                };
-                let c = mv_differentiable(&a_in, &b_in).expect("mv_differentiable fwd");
-                check_f64(&format!("{label} fwd"), &read_back_f64(&c), expected, tol);
+                let c = mv_differentiable(&a, &b).expect("mv_differentiable fwd");
+                check_f64(
+                    &format!("{label} fwd"),
+                    &read_back_f64(&c, device),
+                    expected,
+                    tol,
+                );
 
-                let a_g = make_cpu_f64(a_data, a_shape, true);
-                let b_g = make_cpu_f64(b_data, b_shape, true);
+                let a_g = upload_f64(make_cpu_f64(a_data, a_shape, true), device);
+                let b_g = upload_f64(make_cpu_f64(b_data, b_shape, true), device);
                 let c = mv_differentiable(&a_g, &b_g).expect("mv grad");
                 let loss = ferrotorch_core::grad_fns::reduction::sum(&c).expect("sum");
                 loss.backward().expect("backward");
@@ -755,13 +789,13 @@ fn run_mv_for_device(device_label: &str, device: Device) {
                 let gb = b_g.grad().unwrap().expect("grad_b");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, device),
                     grad_a_exp,
                     tol,
                 );
                 check_f64(
                     &format!("{label} grad_b"),
-                    &read_back_f64(&gb),
+                    &read_back_f64(&gb, device),
                     grad_b_exp,
                     tol,
                 );
@@ -803,7 +837,12 @@ fn run_dot_for_device(device_label: &str, device: Device) {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let b = make_cpu_f32(b_data, b_shape, false);
                 let c = dot_differentiable(&a, &b).expect("dot fwd");
-                check_f32(&format!("{label} fwd"), &read_back_f32(&c), expected, tol);
+                check_f32(
+                    &format!("{label} fwd"),
+                    &read_back_f32(&c, device),
+                    expected,
+                    tol,
+                );
 
                 let a_g = make_cpu_f32(a_data, a_shape, true);
                 let b_g = make_cpu_f32(b_data, b_shape, true);
@@ -813,13 +852,13 @@ fn run_dot_for_device(device_label: &str, device: Device) {
                 let gb = b_g.grad().unwrap().expect("grad_b");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, device),
                     grad_a_exp,
                     tol,
                 );
                 check_f32(
                     &format!("{label} grad_b"),
-                    &read_back_f32(&gb),
+                    &read_back_f32(&gb, device),
                     grad_b_exp,
                     tol,
                 );
@@ -829,7 +868,12 @@ fn run_dot_for_device(device_label: &str, device: Device) {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let b = make_cpu_f64(b_data, b_shape, false);
                 let c = dot_differentiable(&a, &b).expect("dot fwd");
-                check_f64(&format!("{label} fwd"), &read_back_f64(&c), expected, tol);
+                check_f64(
+                    &format!("{label} fwd"),
+                    &read_back_f64(&c, device),
+                    expected,
+                    tol,
+                );
 
                 let a_g = make_cpu_f64(a_data, a_shape, true);
                 let b_g = make_cpu_f64(b_data, b_shape, true);
@@ -839,13 +883,13 @@ fn run_dot_for_device(device_label: &str, device: Device) {
                 let gb = b_g.grad().unwrap().expect("grad_b");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, device),
                     grad_a_exp,
                     tol,
                 );
                 check_f64(
                     &format!("{label} grad_b"),
-                    &read_back_f64(&gb),
+                    &read_back_f64(&gb, device),
                     grad_b_exp,
                     tol,
                 );
@@ -893,7 +937,12 @@ fn run_bmm_for_device(device_label: &str, device: Device) {
                 let a = upload_f32(make_cpu_f32(a_data, a_shape, false), device);
                 let b = upload_f32(make_cpu_f32(b_data, b_shape, false), device);
                 let c = bmm_differentiable(&a, &b).expect("bmm_differentiable fwd");
-                check_f32(&format!("{label} fwd"), &read_back_f32(&c), expected, tol);
+                check_f32(
+                    &format!("{label} fwd"),
+                    &read_back_f32(&c, device),
+                    expected,
+                    tol,
+                );
 
                 // Autograd path: bmm_differentiable attaches BmmBackward and the
                 // backward dispatches to the right device for each tensor.
@@ -906,13 +955,13 @@ fn run_bmm_for_device(device_label: &str, device: Device) {
                 let gb = b_g.grad().unwrap().expect("grad_b");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, device),
                     grad_a_exp,
                     tol,
                 );
                 check_f32(
                     &format!("{label} grad_b"),
-                    &read_back_f32(&gb),
+                    &read_back_f32(&gb, device),
                     grad_b_exp,
                     tol,
                 );
@@ -922,7 +971,12 @@ fn run_bmm_for_device(device_label: &str, device: Device) {
                 let a = upload_f64(make_cpu_f64(a_data, a_shape, false), device);
                 let b = upload_f64(make_cpu_f64(b_data, b_shape, false), device);
                 let c = bmm_differentiable(&a, &b).expect("bmm_differentiable fwd");
-                check_f64(&format!("{label} fwd"), &read_back_f64(&c), expected, tol);
+                check_f64(
+                    &format!("{label} fwd"),
+                    &read_back_f64(&c, device),
+                    expected,
+                    tol,
+                );
 
                 let a_g = upload_f64(make_cpu_f64(a_data, a_shape, true), device);
                 let b_g = upload_f64(make_cpu_f64(b_data, b_shape, true), device);
@@ -933,13 +987,13 @@ fn run_bmm_for_device(device_label: &str, device: Device) {
                 let gb = b_g.grad().unwrap().expect("grad_b");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, device),
                     grad_a_exp,
                     tol,
                 );
                 check_f64(
                     &format!("{label} grad_b"),
-                    &read_back_f64(&gb),
+                    &read_back_f64(&gb, device),
                     grad_b_exp,
                     tol,
                 );
@@ -992,14 +1046,24 @@ fn run_matmul_for_device(device_label: &str, device: Device) {
                 let a = upload_f32(make_cpu_f32(a_data, a_shape, false), device);
                 let b = upload_f32(make_cpu_f32(b_data, b_shape, false), device);
                 let c = matmul_differentiable(&a, &b).expect("matmul fwd");
-                check_f32(&format!("{label} fwd"), &read_back_f32(&c), expected, tol);
+                check_f32(
+                    &format!("{label} fwd"),
+                    &read_back_f32(&c, device),
+                    expected,
+                    tol,
+                );
             }
             "float64" => {
                 let tol = matmul_tol_f64(on_gpu);
                 let a = upload_f64(make_cpu_f64(a_data, a_shape, false), device);
                 let b = upload_f64(make_cpu_f64(b_data, b_shape, false), device);
                 let c = matmul_differentiable(&a, &b).expect("matmul fwd");
-                check_f64(&format!("{label} fwd"), &read_back_f64(&c), expected, tol);
+                check_f64(
+                    &format!("{label} fwd"),
+                    &read_back_f64(&c, device),
+                    expected,
+                    tol,
+                );
             }
             _ => unreachable!(),
         }
@@ -1029,7 +1093,7 @@ fn cpu_transpose() {
                 let c = ops_transpose(&a).expect("transpose");
                 check_f32(
                     &label,
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, Device::Cpu),
                     expected,
                     tolerance::F32_MATMUL_CPU,
                 );
@@ -1039,7 +1103,7 @@ fn cpu_transpose() {
                 let c = ops_transpose(&a).expect("transpose");
                 check_f64(
                     &label,
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, Device::Cpu),
                     expected,
                     tolerance::F64_MATMUL_CPU,
                 );
@@ -1075,7 +1139,7 @@ fn cpu_ops_linalg_direct_surface() {
                 let c = ops_mm(&a, &b).expect("ops_mm");
                 check_f32(
                     &label,
-                    &read_back_f32(&c),
+                    &read_back_f32(&c, Device::Cpu),
                     expected,
                     tolerance::F32_MATMUL_CPU,
                 );
@@ -1086,7 +1150,7 @@ fn cpu_ops_linalg_direct_surface() {
                 let c = ops_mm(&a, &b).expect("ops_mm");
                 check_f64(
                     &label,
-                    &read_back_f64(&c),
+                    &read_back_f64(&c, Device::Cpu),
                     expected,
                     tolerance::F64_MATMUL_CPU,
                 );
@@ -1113,7 +1177,7 @@ fn cpu_ops_linalg_direct_surface() {
         let c = ops_mv(&a, &b).expect("ops_mv");
         check_f32(
             &format!("ops_mv tag={:?}", f.tag),
-            &read_back_f32(&c),
+            &read_back_f32(&c, Device::Cpu),
             expected,
             tolerance::F32_MATMUL_CPU,
         );
@@ -1137,7 +1201,7 @@ fn cpu_ops_linalg_direct_surface() {
         let c = ops_dot(&a, &b).expect("ops_dot");
         check_f32(
             &format!("ops_dot tag={:?}", f.tag),
-            &read_back_f32(&c),
+            &read_back_f32(&c, Device::Cpu),
             expected,
             tolerance::F32_MATMUL_CPU,
         );
@@ -1161,7 +1225,7 @@ fn cpu_ops_linalg_direct_surface() {
         let c = ops_bmm(&a, &b).expect("ops_bmm");
         check_f32(
             &format!("ops_bmm tag={:?}", f.tag),
-            &read_back_f32(&c),
+            &read_back_f32(&c, Device::Cpu),
             expected,
             tolerance::F32_MATMUL_CPU,
         );
@@ -1186,7 +1250,7 @@ fn cpu_ops_linalg_direct_surface() {
         let c = ops_matmul(&a, &b).expect("ops_matmul");
         check_f32(
             &format!("ops_matmul tag={:?}", f.tag),
-            &read_back_f32(&c),
+            &read_back_f32(&c, Device::Cpu),
             expected,
             tolerance::F32_MATMUL_CPU,
         );
@@ -1246,7 +1310,12 @@ fn run_mm_bt_for_device(device_label: &str, device: Device) {
                 let a = upload_f32(make_cpu_f32(a_data, a_shape, false), device);
                 let b = upload_f32(make_cpu_f32(b_data, b_shape, false), device);
                 let c = mm_bt_differentiable(&a, &b).expect("mm_bt fwd");
-                check_f32(&format!("{label} fwd"), &read_back_f32(&c), expected, tol);
+                check_f32(
+                    &format!("{label} fwd"),
+                    &read_back_f32(&c, device),
+                    expected,
+                    tol,
+                );
 
                 let a_g = upload_f32(make_cpu_f32(a_data, a_shape, true), device);
                 let b_g = upload_f32(make_cpu_f32(b_data, b_shape, true), device);
@@ -1257,13 +1326,13 @@ fn run_mm_bt_for_device(device_label: &str, device: Device) {
                 let gb = b_g.grad().unwrap().expect("grad_b");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, device),
                     grad_a_exp,
                     tol,
                 );
                 check_f32(
                     &format!("{label} grad_b"),
-                    &read_back_f32(&gb),
+                    &read_back_f32(&gb, device),
                     grad_b_exp,
                     tol,
                 );
@@ -1273,7 +1342,12 @@ fn run_mm_bt_for_device(device_label: &str, device: Device) {
                 let a = upload_f64(make_cpu_f64(a_data, a_shape, false), device);
                 let b = upload_f64(make_cpu_f64(b_data, b_shape, false), device);
                 let c = mm_bt_differentiable(&a, &b).expect("mm_bt fwd");
-                check_f64(&format!("{label} fwd"), &read_back_f64(&c), expected, tol);
+                check_f64(
+                    &format!("{label} fwd"),
+                    &read_back_f64(&c, device),
+                    expected,
+                    tol,
+                );
 
                 let a_g = upload_f64(make_cpu_f64(a_data, a_shape, true), device);
                 let b_g = upload_f64(make_cpu_f64(b_data, b_shape, true), device);
@@ -1284,13 +1358,13 @@ fn run_mm_bt_for_device(device_label: &str, device: Device) {
                 let gb = b_g.grad().unwrap().expect("grad_b");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, device),
                     grad_a_exp,
                     tol,
                 );
                 check_f64(
                     &format!("{label} grad_b"),
-                    &read_back_f64(&gb),
+                    &read_back_f64(&gb, device),
                     grad_b_exp,
                     tol,
                 );
@@ -1348,7 +1422,12 @@ fn run_linear_fused_for_device(device_label: &str, device: Device) {
                 let b = upload_f32(make_cpu_f32(b_data, b_shape, false), device);
                 let bias = upload_f32(make_cpu_f32(bias_data, bias_shape, false), device);
                 let c = linear_fused(&a, &b, Some(&bias)).expect("linear_fused fwd");
-                check_f32(&format!("{label} fwd"), &read_back_f32(&c), expected, tol);
+                check_f32(
+                    &format!("{label} fwd"),
+                    &read_back_f32(&c, device),
+                    expected,
+                    tol,
+                );
 
                 let a_g = upload_f32(make_cpu_f32(a_data, a_shape, true), device);
                 let b_g = upload_f32(make_cpu_f32(b_data, b_shape, true), device);
@@ -1361,19 +1440,19 @@ fn run_linear_fused_for_device(device_label: &str, device: Device) {
                 let gbi = bias_g.grad().unwrap().expect("grad_bias");
                 check_f32(
                     &format!("{label} grad_a"),
-                    &read_back_f32(&ga),
+                    &read_back_f32(&ga, device),
                     grad_a_exp,
                     tol,
                 );
                 check_f32(
                     &format!("{label} grad_b"),
-                    &read_back_f32(&gb),
+                    &read_back_f32(&gb, device),
                     grad_b_exp,
                     tol,
                 );
                 check_f32(
                     &format!("{label} grad_bias"),
-                    &read_back_f32(&gbi),
+                    &read_back_f32(&gbi, device),
                     grad_bias_exp,
                     tol,
                 );
@@ -1384,7 +1463,12 @@ fn run_linear_fused_for_device(device_label: &str, device: Device) {
                 let b = upload_f64(make_cpu_f64(b_data, b_shape, false), device);
                 let bias = upload_f64(make_cpu_f64(bias_data, bias_shape, false), device);
                 let c = linear_fused(&a, &b, Some(&bias)).expect("linear_fused fwd");
-                check_f64(&format!("{label} fwd"), &read_back_f64(&c), expected, tol);
+                check_f64(
+                    &format!("{label} fwd"),
+                    &read_back_f64(&c, device),
+                    expected,
+                    tol,
+                );
 
                 let a_g = upload_f64(make_cpu_f64(a_data, a_shape, true), device);
                 let b_g = upload_f64(make_cpu_f64(b_data, b_shape, true), device);
@@ -1397,19 +1481,19 @@ fn run_linear_fused_for_device(device_label: &str, device: Device) {
                 let gbi = bias_g.grad().unwrap().expect("grad_bias");
                 check_f64(
                     &format!("{label} grad_a"),
-                    &read_back_f64(&ga),
+                    &read_back_f64(&ga, device),
                     grad_a_exp,
                     tol,
                 );
                 check_f64(
                     &format!("{label} grad_b"),
-                    &read_back_f64(&gb),
+                    &read_back_f64(&gb, device),
                     grad_b_exp,
                     tol,
                 );
                 check_f64(
                     &format!("{label} grad_bias"),
-                    &read_back_f64(&gbi),
+                    &read_back_f64(&gbi, device),
                     grad_bias_exp,
                     tol,
                 );
@@ -1455,7 +1539,7 @@ fn run_permute_0213_for_device(device_label: &str, device: Device) {
                 };
                 let a = upload_f32(make_cpu_f32(a_data, a_shape, false), device);
                 let c = permute_0213(&a).expect("permute_0213");
-                check_f32(&label, &read_back_f32(&c), expected, tol);
+                check_f32(&label, &read_back_f32(&c, device), expected, tol);
             }
             "float64" => {
                 let tol = if on_gpu {
@@ -1463,11 +1547,24 @@ fn run_permute_0213_for_device(device_label: &str, device: Device) {
                 } else {
                     tolerance::F64_MATMUL_CPU
                 };
-                // permute_0213's GPU path is f32-only; for f64 inputs the CPU
-                // path is exercised regardless of `device`.
-                let a = make_cpu_f64(a_data, a_shape, false);
+                let a = upload_f64(make_cpu_f64(a_data, a_shape, false), device);
+                if on_gpu {
+                    // #1884 pin (CORE-190): `permute_0213` dispatches the
+                    // f32 kernel for every dtype, so an f64 CUDA input
+                    // fails the typed-buffer downcast instead of permuting.
+                    // torch.permute works on every dtype + device. Retire
+                    // this pin (drop the branch; assert a CUDA-resident
+                    // result like the f32 arm) when #1884 lands the f64
+                    // kernel dispatch.
+                    let err = permute_0213(&a).expect_err(
+                        "permute_0213(f64) on CUDA succeeded — #1884 appears \
+                         fixed; retire this pin and assert a CUDA result",
+                    );
+                    eprintln!("{label}: pinned to #1884 — got expected Err: {err}");
+                    continue;
+                }
                 let c = permute_0213(&a).expect("permute_0213");
-                check_f64(&label, &read_back_f64(&c), expected, tol);
+                check_f64(&label, &read_back_f64(&c, device), expected, tol);
             }
             _ => unreachable!(),
         }
@@ -1549,8 +1646,8 @@ fn cpu_qr_reconstruction() {
             "float32" => {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let (q, r) = qr(&a).expect("qr");
-                let q_d = read_back_f32(&q);
-                let r_d = read_back_f32(&r);
+                let q_d = read_back_f32(&q, Device::Cpu);
+                let r_d = read_back_f32(&r, Device::Cpu);
                 let m = a_shape[0];
                 let n = a_shape[1];
                 let k = m.min(n);
@@ -1567,8 +1664,8 @@ fn cpu_qr_reconstruction() {
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let (q, r) = qr(&a).expect("qr");
-                let q_d = read_back_f64(&q);
-                let r_d = read_back_f64(&r);
+                let q_d = read_back_f64(&q, Device::Cpu);
+                let r_d = read_back_f64(&r, Device::Cpu);
                 let m = a_shape[0];
                 let n = a_shape[1];
                 let k = m.min(n);
@@ -1598,9 +1695,9 @@ fn cpu_svd_reconstruction() {
             "float32" => {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let (u, s, vh) = svd(&a).expect("svd");
-                let u_d = read_back_f32(&u);
-                let s_d = read_back_f32(&s);
-                let vh_d = read_back_f32(&vh);
+                let u_d = read_back_f32(&u, Device::Cpu);
+                let s_d = read_back_f32(&s, Device::Cpu);
+                let vh_d = read_back_f32(&vh, Device::Cpu);
                 // Singular values ARE unique (up to sort).
                 check_f32(&format!("{label} S"), &s_d, s_exp, tolerance::F32_RECON);
                 // Reconstruct: U @ diag(S) @ Vh.
@@ -1625,9 +1722,9 @@ fn cpu_svd_reconstruction() {
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let (u, s, vh) = svd(&a).expect("svd");
-                let u_d = read_back_f64(&u);
-                let s_d = read_back_f64(&s);
-                let vh_d = read_back_f64(&vh);
+                let u_d = read_back_f64(&u, Device::Cpu);
+                let s_d = read_back_f64(&s, Device::Cpu);
+                let vh_d = read_back_f64(&vh, Device::Cpu);
                 check_f64(&format!("{label} S"), &s_d, s_exp, tolerance::F64_RECON);
                 let m = a_shape[0];
                 let n = a_shape[1];
@@ -1663,7 +1760,7 @@ fn cpu_cholesky_reconstruction() {
             "float32" => {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let l = cholesky(&a).expect("cholesky");
-                let l_d = read_back_f32(&l);
+                let l_d = read_back_f32(&l, Device::Cpu);
                 // L @ L^T
                 let mut lt = vec![0.0f32; n * n];
                 for i in 0..n {
@@ -1683,7 +1780,7 @@ fn cpu_cholesky_reconstruction() {
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let l = cholesky(&a).expect("cholesky");
-                let l_d = read_back_f64(&l);
+                let l_d = read_back_f64(&l, Device::Cpu);
                 let mut lt = vec![0.0f64; n * n];
                 for i in 0..n {
                     for j in 0..n {
@@ -1716,8 +1813,8 @@ fn cpu_eigh_reconstruction() {
             "float32" => {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let (w, v) = eigh(&a).expect("eigh");
-                let w_d = read_back_f32(&w);
-                let v_d = read_back_f32(&v);
+                let w_d = read_back_f32(&w, Device::Cpu);
+                let v_d = read_back_f32(&v, Device::Cpu);
                 // Eigenvalues are unique up to ordering; eigh sorts ascending.
                 check_f32(&format!("{label} w"), &w_d, w_exp, tolerance::F32_RECON);
                 // Reconstruct: V @ diag(w) @ V^T (Q is V here, since
@@ -1747,8 +1844,8 @@ fn cpu_eigh_reconstruction() {
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let (w, v) = eigh(&a).expect("eigh");
-                let w_d = read_back_f64(&w);
-                let v_d = read_back_f64(&v);
+                let w_d = read_back_f64(&w, Device::Cpu);
+                let v_d = read_back_f64(&v, Device::Cpu);
                 check_f64(&format!("{label} w"), &w_d, w_exp, tolerance::F64_RECON);
                 let mut vd = vec![0.0f64; n * n];
                 for i in 0..n {
@@ -1791,12 +1888,22 @@ fn cpu_eigvalsh() {
             "float32" => {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let w = eigvalsh(&a).expect("eigvalsh");
-                check_f32(&label, &read_back_f32(&w), expected, tolerance::F32_RECON);
+                check_f32(
+                    &label,
+                    &read_back_f32(&w, Device::Cpu),
+                    expected,
+                    tolerance::F32_RECON,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let w = eigvalsh(&a).expect("eigvalsh");
-                check_f64(&label, &read_back_f64(&w), expected, tolerance::F64_RECON);
+                check_f64(
+                    &label,
+                    &read_back_f64(&w, Device::Cpu),
+                    expected,
+                    tolerance::F64_RECON,
+                );
             }
             _ => unreachable!(),
         }
@@ -1819,12 +1926,22 @@ fn cpu_svdvals() {
             "float32" => {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let s = svdvals(&a).expect("svdvals");
-                check_f32(&label, &read_back_f32(&s), expected, tolerance::F32_RECON);
+                check_f32(
+                    &label,
+                    &read_back_f32(&s, Device::Cpu),
+                    expected,
+                    tolerance::F32_RECON,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let s = svdvals(&a).expect("svdvals");
-                check_f64(&label, &read_back_f64(&s), expected, tolerance::F64_RECON);
+                check_f64(
+                    &label,
+                    &read_back_f64(&s, Device::Cpu),
+                    expected,
+                    tolerance::F64_RECON,
+                );
             }
             _ => unreachable!(),
         }
@@ -1843,9 +1960,9 @@ fn cpu_lu_reconstruction() {
         let n = a_shape[0];
         let a = make_cpu_f64(a_data, a_shape, false);
         let (p, l, u) = lu(&a).expect("lu");
-        let p_d = read_back_f64(&p);
-        let l_d = read_back_f64(&l);
-        let u_d = read_back_f64(&u);
+        let p_d = read_back_f64(&p, Device::Cpu);
+        let l_d = read_back_f64(&l, Device::Cpu);
+        let u_d = read_back_f64(&u, Device::Cpu);
         let lu_v = matmul_dense_f64(&l_d, &u_d, n, n, n);
         let recon = matmul_dense_f64(&p_d, &lu_v, n, n, n);
         let diff = frob_diff_f64(&recon, a_data);
@@ -1896,13 +2013,23 @@ fn cpu_solve() {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let b = make_cpu_f32(b_data, b_shape, false);
                 let x = solve(&a, &b).expect("solve");
-                check_f32(&label, &read_back_f32(&x), expected, tolerance::F32_SOLVE);
+                check_f32(
+                    &label,
+                    &read_back_f32(&x, Device::Cpu),
+                    expected,
+                    tolerance::F32_SOLVE,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let b = make_cpu_f64(b_data, b_shape, false);
                 let x = solve(&a, &b).expect("solve");
-                check_f64(&label, &read_back_f64(&x), expected, tolerance::F64_SOLVE);
+                check_f64(
+                    &label,
+                    &read_back_f64(&x, Device::Cpu),
+                    expected,
+                    tolerance::F64_SOLVE,
+                );
             }
             _ => unreachable!(),
         }
@@ -1929,11 +2056,11 @@ fn cpu_solve_ex() {
                 let (x, info) = solve_ex(&a, &b).expect("solve_ex");
                 check_f32(
                     &format!("solve_ex cpu tag={:?} dtype={}", f.tag, f.dtype),
-                    &read_back_f32(&x),
+                    &read_back_f32(&x, Device::Cpu),
                     expected,
                     tolerance::F32_SOLVE,
                 );
-                let info_v = read_back_f32(&info);
+                let info_v = read_back_f32(&info, Device::Cpu);
                 assert!(
                     info_v[0].abs() < 0.5,
                     "solve_ex info should be ~0 on success"
@@ -1945,11 +2072,11 @@ fn cpu_solve_ex() {
                 let (x, info) = solve_ex(&a, &b).expect("solve_ex");
                 check_f64(
                     &format!("solve_ex cpu tag={:?} dtype={}", f.tag, f.dtype),
-                    &read_back_f64(&x),
+                    &read_back_f64(&x, Device::Cpu),
                     expected,
                     tolerance::F64_SOLVE,
                 );
-                let info_v = read_back_f64(&info);
+                let info_v = read_back_f64(&info, Device::Cpu);
                 assert!(
                     info_v[0].abs() < 0.5,
                     "solve_ex info should be ~0 on success"
@@ -1979,13 +2106,23 @@ fn cpu_lstsq_solve() {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let b = make_cpu_f32(b_data, b_shape, false);
                 let x = lstsq_solve(&a, &b).expect("lstsq_solve");
-                check_f32(&label, &read_back_f32(&x), expected, tolerance::F32_SOLVE);
+                check_f32(
+                    &label,
+                    &read_back_f32(&x, Device::Cpu),
+                    expected,
+                    tolerance::F32_SOLVE,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let b = make_cpu_f64(b_data, b_shape, false);
                 let x = lstsq_solve(&a, &b).expect("lstsq_solve");
-                check_f64(&label, &read_back_f64(&x), expected, tolerance::F64_SOLVE);
+                check_f64(
+                    &label,
+                    &read_back_f64(&x, Device::Cpu),
+                    expected,
+                    tolerance::F64_SOLVE,
+                );
             }
             _ => unreachable!(),
         }
@@ -2013,7 +2150,7 @@ fn cpu_lstsq() {
                 let (sol, _, _, _) = lstsq(&a, &b, None).expect("lstsq");
                 check_f32(
                     &format!("{label} sol"),
-                    &read_back_f32(&sol),
+                    &read_back_f32(&sol, Device::Cpu),
                     sol_expected,
                     tolerance::F32_SOLVE,
                 );
@@ -2024,7 +2161,7 @@ fn cpu_lstsq() {
                 let (sol, _, _, _) = lstsq(&a, &b, None).expect("lstsq");
                 check_f64(
                     &format!("{label} sol"),
-                    &read_back_f64(&sol),
+                    &read_back_f64(&sol, Device::Cpu),
                     sol_expected,
                     tolerance::F64_SOLVE,
                 );
@@ -2056,13 +2193,23 @@ fn cpu_solve_triangular() {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let b = make_cpu_f32(b_data, b_shape, false);
                 let x = solve_triangular(&a, &b, upper, trans, unit).expect("solve_tri");
-                check_f32(&label, &read_back_f32(&x), expected, tolerance::F32_SOLVE);
+                check_f32(
+                    &label,
+                    &read_back_f32(&x, Device::Cpu),
+                    expected,
+                    tolerance::F32_SOLVE,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let b = make_cpu_f64(b_data, b_shape, false);
                 let x = solve_triangular(&a, &b, upper, trans, unit).expect("solve_tri");
-                check_f64(&label, &read_back_f64(&x), expected, tolerance::F64_SOLVE);
+                check_f64(
+                    &label,
+                    &read_back_f64(&x, Device::Cpu),
+                    expected,
+                    tolerance::F64_SOLVE,
+                );
             }
             _ => unreachable!(),
         }
@@ -2082,8 +2229,8 @@ fn cpu_ldl_factor_and_solve() {
         let n = a_shape[0];
         let a = make_cpu_f64(a_data, a_shape, false);
         let (l, d) = ldl_factor(&a).expect("ldl_factor");
-        let l_d = read_back_f64(&l);
-        let d_d = read_back_f64(&d);
+        let l_d = read_back_f64(&l, Device::Cpu);
+        let d_d = read_back_f64(&d, Device::Cpu);
         // L D = scale columns of L by d
         let mut ld = vec![0.0f64; n * n];
         for i in 0..n {
@@ -2127,7 +2274,7 @@ fn cpu_ldl_factor_and_solve() {
         let x = ldl_solve(&l, &d, &b).expect("ldl_solve");
         check_f64(
             &format!("ldl_solve tag={:?}", f.tag),
-            &read_back_f64(&x),
+            &read_back_f64(&x, Device::Cpu),
             expected,
             tolerance::F64_SOLVE,
         );
@@ -2155,7 +2302,7 @@ fn cpu_tensorsolve_and_tensorinv() {
         let x = tensorsolve(&a, &b).expect("tensorsolve");
         check_f64(
             &format!("tensorsolve tag={:?}", f.tag),
-            &read_back_f64(&x),
+            &read_back_f64(&x, Device::Cpu),
             expected,
             tolerance::F64_SOLVE,
         );
@@ -2176,7 +2323,7 @@ fn cpu_tensorsolve_and_tensorinv() {
         let inv_t = tensorinv(&a, ind).expect("tensorinv");
         check_f64(
             &format!("tensorinv tag={:?}", f.tag),
-            &read_back_f64(&inv_t),
+            &read_back_f64(&inv_t, Device::Cpu),
             expected,
             tolerance::F64_SOLVE,
         );
@@ -2203,12 +2350,22 @@ fn cpu_det() {
             "float32" => {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let d = det(&a).expect("det");
-                check_f32(&label, &read_back_f32(&d), expected, tolerance::F32_DET);
+                check_f32(
+                    &label,
+                    &read_back_f32(&d, Device::Cpu),
+                    expected,
+                    tolerance::F32_DET,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let d = det(&a).expect("det");
-                check_f64(&label, &read_back_f64(&d), expected, tolerance::F64_DET);
+                check_f64(
+                    &label,
+                    &read_back_f64(&d, Device::Cpu),
+                    expected,
+                    tolerance::F64_DET,
+                );
             }
             _ => unreachable!(),
         }
@@ -2238,13 +2395,13 @@ fn cpu_slogdet() {
                 let (s, ld) = slogdet(&a).expect("slogdet");
                 check_f32(
                     &format!("{label} sign"),
-                    &read_back_f32(&s),
+                    &read_back_f32(&s, Device::Cpu),
                     sign_exp,
                     tolerance::F32_DET,
                 );
                 check_f32(
                     &format!("{label} logabs"),
-                    &read_back_f32(&ld),
+                    &read_back_f32(&ld, Device::Cpu),
                     ld_exp,
                     tolerance::F32_DET,
                 );
@@ -2254,13 +2411,13 @@ fn cpu_slogdet() {
                 let (s, ld) = slogdet(&a).expect("slogdet");
                 check_f64(
                     &format!("{label} sign"),
-                    &read_back_f64(&s),
+                    &read_back_f64(&s, Device::Cpu),
                     sign_exp,
                     tolerance::F64_DET,
                 );
                 check_f64(
                     &format!("{label} logabs"),
-                    &read_back_f64(&ld),
+                    &read_back_f64(&ld, Device::Cpu),
                     ld_exp,
                     tolerance::F64_DET,
                 );
@@ -2286,12 +2443,22 @@ fn cpu_inv() {
             "float32" => {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let r = inv(&a).expect("inv");
-                check_f32(&label, &read_back_f32(&r), expected, tolerance::F32_SOLVE);
+                check_f32(
+                    &label,
+                    &read_back_f32(&r, Device::Cpu),
+                    expected,
+                    tolerance::F32_SOLVE,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let r = inv(&a).expect("inv");
-                check_f64(&label, &read_back_f64(&r), expected, tolerance::F64_SOLVE);
+                check_f64(
+                    &label,
+                    &read_back_f64(&r, Device::Cpu),
+                    expected,
+                    tolerance::F64_SOLVE,
+                );
             }
             _ => unreachable!(),
         }
@@ -2315,11 +2482,11 @@ fn cpu_inv_ex_and_cholesky_ex() {
                 let (out, info) = inv_ex(&a).expect("inv_ex");
                 check_f32(
                     &format!("inv_ex tag={:?}", f.tag),
-                    &read_back_f32(&out),
+                    &read_back_f32(&out, Device::Cpu),
                     expected,
                     tolerance::F32_SOLVE,
                 );
-                let info_v = read_back_f32(&info);
+                let info_v = read_back_f32(&info, Device::Cpu);
                 assert!(info_v[0].abs() < 0.5, "inv_ex info should be ~0 on success");
             }
             "float64" => {
@@ -2327,11 +2494,11 @@ fn cpu_inv_ex_and_cholesky_ex() {
                 let (out, info) = inv_ex(&a).expect("inv_ex");
                 check_f64(
                     &format!("inv_ex tag={:?}", f.tag),
-                    &read_back_f64(&out),
+                    &read_back_f64(&out, Device::Cpu),
                     expected,
                     tolerance::F64_SOLVE,
                 );
-                let info_v = read_back_f64(&info);
+                let info_v = read_back_f64(&info, Device::Cpu);
                 assert!(info_v[0].abs() < 0.5, "inv_ex info should be ~0 on success");
             }
             _ => unreachable!(),
@@ -2345,10 +2512,10 @@ fn cpu_inv_ex_and_cholesky_ex() {
         let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
         let a = make_cpu_f64(a_data, a_shape, false);
         let (l, info) = cholesky_ex(&a).expect("cholesky_ex");
-        let info_v = read_back_f64(&info);
+        let info_v = read_back_f64(&info, Device::Cpu);
         assert!(info_v[0].abs() < 0.5, "cholesky_ex info should be ~0");
         // Reconstruct
-        let l_d = read_back_f64(&l);
+        let l_d = read_back_f64(&l, Device::Cpu);
         let n = a_shape[0];
         let mut lt = vec![0.0f64; n * n];
         for i in 0..n {
@@ -2383,12 +2550,22 @@ fn cpu_matrix_power() {
             "float32" => {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let r = matrix_power(&a, n).expect("matrix_power");
-                check_f32(&label, &read_back_f32(&r), expected, tolerance::F32_DET);
+                check_f32(
+                    &label,
+                    &read_back_f32(&r, Device::Cpu),
+                    expected,
+                    tolerance::F32_DET,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let r = matrix_power(&a, n).expect("matrix_power");
-                check_f64(&label, &read_back_f64(&r), expected, tolerance::F64_DET);
+                check_f64(
+                    &label,
+                    &read_back_f64(&r, Device::Cpu),
+                    expected,
+                    tolerance::F64_DET,
+                );
             }
             _ => unreachable!(),
         }
@@ -2411,12 +2588,22 @@ fn cpu_matrix_norm() {
             "float32" => {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let r = matrix_norm(&a).expect("matrix_norm");
-                check_f32(&label, &read_back_f32(&r), expected, tolerance::F32_DET);
+                check_f32(
+                    &label,
+                    &read_back_f32(&r, Device::Cpu),
+                    expected,
+                    tolerance::F32_DET,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let r = matrix_norm(&a).expect("matrix_norm");
-                check_f64(&label, &read_back_f64(&r), expected, tolerance::F64_DET);
+                check_f64(
+                    &label,
+                    &read_back_f64(&r, Device::Cpu),
+                    expected,
+                    tolerance::F64_DET,
+                );
             }
             _ => unreachable!(),
         }
@@ -2440,12 +2627,22 @@ fn cpu_vector_norm() {
             "float32" => {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let r = vector_norm(&a, ord).expect("vector_norm");
-                check_f32(&label, &read_back_f32(&r), expected, tolerance::F32_DET);
+                check_f32(
+                    &label,
+                    &read_back_f32(&r, Device::Cpu),
+                    expected,
+                    tolerance::F32_DET,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let r = vector_norm(&a, ord).expect("vector_norm");
-                check_f64(&label, &read_back_f64(&r), expected, tolerance::F64_DET);
+                check_f64(
+                    &label,
+                    &read_back_f64(&r, Device::Cpu),
+                    expected,
+                    tolerance::F64_DET,
+                );
             }
             _ => unreachable!(),
         }
@@ -2464,7 +2661,7 @@ fn cpu_matrix_rank() {
         let expected = f.rank_expected.expect("rank_expected");
         let a = make_cpu_f64(a_data, a_shape, false);
         let r = matrix_rank(&a, None).expect("matrix_rank");
-        let r_v = read_back_f64(&r);
+        let r_v = read_back_f64(&r, Device::Cpu);
         assert_eq!(r_v.len(), 1, "matrix_rank should return scalar");
         assert!(
             (r_v[0] - expected as f64).abs() < 0.5,
@@ -2494,7 +2691,7 @@ fn cpu_cond() {
                 // cond can produce large values for ill-conditioned matrices;
                 // use a relative tolerance of 1% which still catches signal
                 // bugs without being noise-sensitive.
-                let actual = read_back_f32(&r);
+                let actual = read_back_f32(&r, Device::Cpu);
                 assert!(
                     (actual[0] - expected[0] as f32).abs()
                         <= 0.01 * (expected[0] as f32).abs().max(1.0),
@@ -2506,7 +2703,7 @@ fn cpu_cond() {
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let r = cond(&a, p).expect("cond");
-                let actual = read_back_f64(&r);
+                let actual = read_back_f64(&r, Device::Cpu);
                 assert!(
                     (actual[0] - expected[0]).abs() <= 0.01 * expected[0].abs().max(1.0),
                     "{label}: cond actual={} expected={}",
@@ -2535,12 +2732,22 @@ fn cpu_pinv() {
             "float32" => {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let r = pinv(&a).expect("pinv");
-                check_f32(&label, &read_back_f32(&r), expected, tolerance::F32_SOLVE);
+                check_f32(
+                    &label,
+                    &read_back_f32(&r, Device::Cpu),
+                    expected,
+                    tolerance::F32_SOLVE,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let r = pinv(&a).expect("pinv");
-                check_f64(&label, &read_back_f64(&r), expected, tolerance::F64_SOLVE);
+                check_f64(
+                    &label,
+                    &read_back_f64(&r, Device::Cpu),
+                    expected,
+                    tolerance::F64_SOLVE,
+                );
             }
             _ => unreachable!(),
         }
@@ -2572,13 +2779,23 @@ fn cpu_cross() {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let b = make_cpu_f32(b_data, b_shape, false);
                 let c = cross(&a, &b, axis).expect("cross");
-                check_f32(&label, &read_back_f32(&c), expected, tolerance::F32_DET);
+                check_f32(
+                    &label,
+                    &read_back_f32(&c, Device::Cpu),
+                    expected,
+                    tolerance::F32_DET,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let b = make_cpu_f64(b_data, b_shape, false);
                 let c = cross(&a, &b, axis).expect("cross");
-                check_f64(&label, &read_back_f64(&c), expected, tolerance::F64_DET);
+                check_f64(
+                    &label,
+                    &read_back_f64(&c, Device::Cpu),
+                    expected,
+                    tolerance::F64_DET,
+                );
             }
             _ => unreachable!(),
         }
@@ -2608,7 +2825,7 @@ fn cpu_multi_dot() {
                 let r = multi_dot(&refs).expect("multi_dot");
                 check_f32(
                     &label,
-                    &read_back_f32(&r),
+                    &read_back_f32(&r, Device::Cpu),
                     expected,
                     tolerance::F32_MATMUL_CPU,
                 );
@@ -2623,7 +2840,7 @@ fn cpu_multi_dot() {
                 let r = multi_dot(&refs).expect("multi_dot");
                 check_f64(
                     &label,
-                    &read_back_f64(&r),
+                    &read_back_f64(&r, Device::Cpu),
                     expected,
                     tolerance::F64_MATMUL_CPU,
                 );
@@ -2650,12 +2867,22 @@ fn cpu_diagonal() {
             "float32" => {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let r = diagonal(&a, offset).expect("diagonal");
-                check_f32(&label, &read_back_f32(&r), expected, tolerance::F32_DET);
+                check_f32(
+                    &label,
+                    &read_back_f32(&r, Device::Cpu),
+                    expected,
+                    tolerance::F32_DET,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let r = diagonal(&a, offset).expect("diagonal");
-                check_f64(&label, &read_back_f64(&r), expected, tolerance::F64_DET);
+                check_f64(
+                    &label,
+                    &read_back_f64(&r, Device::Cpu),
+                    expected,
+                    tolerance::F64_DET,
+                );
             }
             _ => unreachable!(),
         }
@@ -2694,7 +2921,7 @@ fn cpu_householder_product() {
             &[m, k],
             "householder_product mirrors torch [m, k]"
         );
-        let q_mk = read_back_f64(&q);
+        let q_mk = read_back_f64(&q, Device::Cpu);
         check_f64(
             &format!("hh_product tag={:?}", f.tag),
             &q_mk,
@@ -2720,12 +2947,22 @@ fn cpu_matrix_exp() {
             "float32" => {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let r = matrix_exp(&a).expect("matrix_exp");
-                check_f32(&label, &read_back_f32(&r), expected, tolerance::F32_RECON);
+                check_f32(
+                    &label,
+                    &read_back_f32(&r, Device::Cpu),
+                    expected,
+                    tolerance::F32_RECON,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let r = matrix_exp(&a).expect("matrix_exp");
-                check_f64(&label, &read_back_f64(&r), expected, tolerance::F64_RECON);
+                check_f64(
+                    &label,
+                    &read_back_f64(&r, Device::Cpu),
+                    expected,
+                    tolerance::F64_RECON,
+                );
             }
             _ => unreachable!(),
         }
@@ -2753,7 +2990,7 @@ fn cpu_eig_and_eigvals() {
             .unwrap();
         let a = make_cpu_f64(a_data, a_shape, false);
         let (w, _v) = eig(&a).expect("eig");
-        let w_d = read_back_f64(&w);
+        let w_d = read_back_f64(&w, Device::Cpu);
         // Extract real parts (every other element).
         let mut re: Vec<f64> = w_d.iter().step_by(2).copied().collect();
         re.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -2772,7 +3009,7 @@ fn cpu_eig_and_eigvals() {
             .unwrap();
         let a = make_cpu_f64(a_data, a_shape, false);
         let w = eigvals(&a).expect("eigvals");
-        let w_d = read_back_f64(&w);
+        let w_d = read_back_f64(&w, Device::Cpu);
         let mut re: Vec<f64> = w_d.iter().step_by(2).copied().collect();
         re.sort_by(|a, b| a.partial_cmp(b).unwrap());
         check_f64("eigvals real-parts", &re, w_re_sorted, tolerance::F64_RECON);
@@ -2974,9 +3211,9 @@ mod gpu {
 
     #[test]
     fn gpu_mv() {
-        // ferrotorch's mv_differentiable uses .data()? on its inputs, which
-        // fails on CUDA tensors; for parity with the published surface we
-        // exercise it with the CPU fallback (the helper above round-trips).
+        // mv_differentiable runs natively on CUDA since #816/#817/#818
+        // landed the dot/mv/vm cuBLAS kernels; the runner asserts the
+        // forward result and both gradients are CUDA-resident (CORE-196).
         ensure_cuda_backend();
         let file = load_fixtures();
         require_cuda_fixtures(&file);
@@ -3041,7 +3278,7 @@ mod gpu {
                 "float32" => {
                     let a = upload_f32(make_cpu_f32(a_data, a_shape, false), Device::Cuda(0));
                     let l = cholesky(&a).expect("cholesky gpu");
-                    let l_d = read_back_f32(&l);
+                    let l_d = read_back_f32(&l, Device::Cuda(0));
                     let mut lt = vec![0.0f32; n * n];
                     for i in 0..n {
                         for j in 0..n {
@@ -3060,7 +3297,7 @@ mod gpu {
                 "float64" => {
                     let a = upload_f64(make_cpu_f64(a_data, a_shape, false), Device::Cuda(0));
                     let l = cholesky(&a).expect("cholesky gpu");
-                    let l_d = read_back_f64(&l);
+                    let l_d = read_back_f64(&l, Device::Cuda(0));
                     let mut lt = vec![0.0f64; n * n];
                     for i in 0..n {
                         for j in 0..n {
@@ -3096,8 +3333,8 @@ mod gpu {
                 "float32" => {
                     let a = upload_f32(make_cpu_f32(a_data, a_shape, false), Device::Cuda(0));
                     let (q, r) = qr(&a).expect("qr gpu");
-                    let q_d = read_back_f32(&q);
-                    let r_d = read_back_f32(&r);
+                    let q_d = read_back_f32(&q, Device::Cuda(0));
+                    let r_d = read_back_f32(&r, Device::Cuda(0));
                     let recon = matmul_dense_f32(&q_d, &r_d, m, k, n);
                     let a_v: Vec<f32> = a_data.iter().map(|&x| x as f32).collect();
                     let diff = frob_diff_f32(&recon, &a_v);
@@ -3110,8 +3347,8 @@ mod gpu {
                 "float64" => {
                     let a = upload_f64(make_cpu_f64(a_data, a_shape, false), Device::Cuda(0));
                     let (q, r) = qr(&a).expect("qr gpu");
-                    let q_d = read_back_f64(&q);
-                    let r_d = read_back_f64(&r);
+                    let q_d = read_back_f64(&q, Device::Cuda(0));
+                    let r_d = read_back_f64(&r, Device::Cuda(0));
                     let recon = matmul_dense_f64(&q_d, &r_d, m, k, n);
                     let diff = frob_diff_f64(&recon, a_data);
                     let scale = frob_norm_f64(a_data).max(1.0);
@@ -3141,9 +3378,9 @@ mod gpu {
                 "float32" => {
                     let a = upload_f32(make_cpu_f32(a_data, a_shape, false), Device::Cuda(0));
                     let (u, s, vh) = svd(&a).expect("svd gpu");
-                    let u_d = read_back_f32(&u);
-                    let s_d = read_back_f32(&s);
-                    let vh_d = read_back_f32(&vh);
+                    let u_d = read_back_f32(&u, Device::Cuda(0));
+                    let s_d = read_back_f32(&s, Device::Cuda(0));
+                    let vh_d = read_back_f32(&vh, Device::Cuda(0));
                     let mut us = vec![0.0f32; m * k];
                     for i in 0..m {
                         for j in 0..k {
@@ -3162,9 +3399,9 @@ mod gpu {
                 "float64" => {
                     let a = upload_f64(make_cpu_f64(a_data, a_shape, false), Device::Cuda(0));
                     let (u, s, vh) = svd(&a).expect("svd gpu");
-                    let u_d = read_back_f64(&u);
-                    let s_d = read_back_f64(&s);
-                    let vh_d = read_back_f64(&vh);
+                    let u_d = read_back_f64(&u, Device::Cuda(0));
+                    let s_d = read_back_f64(&s, Device::Cuda(0));
+                    let vh_d = read_back_f64(&vh, Device::Cuda(0));
                     let mut us = vec![0.0f64; m * k];
                     for i in 0..m {
                         for j in 0..k {
@@ -3199,8 +3436,8 @@ mod gpu {
                 "float32" => {
                     let a = upload_f32(make_cpu_f32(a_data, a_shape, false), Device::Cuda(0));
                     let (w, v) = eigh(&a).expect("eigh gpu");
-                    let w_d = read_back_f32(&w);
-                    let v_d = read_back_f32(&v);
+                    let w_d = read_back_f32(&w, Device::Cuda(0));
+                    let v_d = read_back_f32(&v, Device::Cuda(0));
                     let mut vd = vec![0.0f32; n * n];
                     for i in 0..n {
                         for j in 0..n {
@@ -3225,8 +3462,8 @@ mod gpu {
                 "float64" => {
                     let a = upload_f64(make_cpu_f64(a_data, a_shape, false), Device::Cuda(0));
                     let (w, v) = eigh(&a).expect("eigh gpu");
-                    let w_d = read_back_f64(&w);
-                    let v_d = read_back_f64(&v);
+                    let w_d = read_back_f64(&w, Device::Cuda(0));
+                    let v_d = read_back_f64(&v, Device::Cuda(0));
                     let mut vd = vec![0.0f64; n * n];
                     for i in 0..n {
                         for j in 0..n {
@@ -3264,12 +3501,22 @@ mod gpu {
                 "float32" => {
                     let a = upload_f32(make_cpu_f32(a_data, a_shape, false), Device::Cuda(0));
                     let w = eigvalsh(&a).expect("eigvalsh gpu");
-                    check_f32(&label, &read_back_f32(&w), expected, tolerance::F32_RECON);
+                    check_f32(
+                        &label,
+                        &read_back_f32(&w, Device::Cuda(0)),
+                        expected,
+                        tolerance::F32_RECON,
+                    );
                 }
                 "float64" => {
                     let a = upload_f64(make_cpu_f64(a_data, a_shape, false), Device::Cuda(0));
                     let w = eigvalsh(&a).expect("eigvalsh gpu");
-                    check_f64(&label, &read_back_f64(&w), expected, tolerance::F64_RECON);
+                    check_f64(
+                        &label,
+                        &read_back_f64(&w, Device::Cuda(0)),
+                        expected,
+                        tolerance::F64_RECON,
+                    );
                 }
                 _ => unreachable!(),
             }
@@ -3297,13 +3544,23 @@ mod gpu {
                     let a = upload_f32(make_cpu_f32(a_data, a_shape, false), Device::Cuda(0));
                     let b = upload_f32(make_cpu_f32(b_data, b_shape, false), Device::Cuda(0));
                     let x = solve(&a, &b).expect("solve gpu");
-                    check_f32(&label, &read_back_f32(&x), expected, tolerance::F32_SOLVE);
+                    check_f32(
+                        &label,
+                        &read_back_f32(&x, Device::Cuda(0)),
+                        expected,
+                        tolerance::F32_SOLVE,
+                    );
                 }
                 "float64" => {
                     let a = upload_f64(make_cpu_f64(a_data, a_shape, false), Device::Cuda(0));
                     let b = upload_f64(make_cpu_f64(b_data, b_shape, false), Device::Cuda(0));
                     let x = solve(&a, &b).expect("solve gpu");
-                    check_f64(&label, &read_back_f64(&x), expected, tolerance::F64_SOLVE);
+                    check_f64(
+                        &label,
+                        &read_back_f64(&x, Device::Cuda(0)),
+                        expected,
+                        tolerance::F64_SOLVE,
+                    );
                 }
                 _ => unreachable!(),
             }
@@ -3331,13 +3588,23 @@ mod gpu {
                     let a = upload_f32(make_cpu_f32(a_data, a_shape, false), Device::Cuda(0));
                     let b = upload_f32(make_cpu_f32(b_data, b_shape, false), Device::Cuda(0));
                     let x = lstsq_solve(&a, &b).expect("lstsq_solve gpu");
-                    check_f32(&label, &read_back_f32(&x), expected, tolerance::F32_SOLVE);
+                    check_f32(
+                        &label,
+                        &read_back_f32(&x, Device::Cuda(0)),
+                        expected,
+                        tolerance::F32_SOLVE,
+                    );
                 }
                 "float64" => {
                     let a = upload_f64(make_cpu_f64(a_data, a_shape, false), Device::Cuda(0));
                     let b = upload_f64(make_cpu_f64(b_data, b_shape, false), Device::Cuda(0));
                     let x = lstsq_solve(&a, &b).expect("lstsq_solve gpu");
-                    check_f64(&label, &read_back_f64(&x), expected, tolerance::F64_SOLVE);
+                    check_f64(
+                        &label,
+                        &read_back_f64(&x, Device::Cuda(0)),
+                        expected,
+                        tolerance::F64_SOLVE,
+                    );
                 }
                 _ => unreachable!(),
             }
@@ -3364,12 +3631,22 @@ mod gpu {
                 "float32" => {
                     let a = upload_f32(make_cpu_f32(a_data, a_shape, false), Device::Cuda(0));
                     let r = matrix_norm(&a).expect("matrix_norm gpu");
-                    check_f32(&label, &read_back_f32(&r), expected, tolerance::F32_DET);
+                    check_f32(
+                        &label,
+                        &read_back_f32(&r, Device::Cuda(0)),
+                        expected,
+                        tolerance::F32_DET,
+                    );
                 }
                 "float64" => {
                     let a = upload_f64(make_cpu_f64(a_data, a_shape, false), Device::Cuda(0));
                     let r = matrix_norm(&a).expect("matrix_norm gpu");
-                    check_f64(&label, &read_back_f64(&r), expected, tolerance::F64_DET);
+                    check_f64(
+                        &label,
+                        &read_back_f64(&r, Device::Cuda(0)),
+                        expected,
+                        tolerance::F64_DET,
+                    );
                 }
                 _ => unreachable!(),
             }
