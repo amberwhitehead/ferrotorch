@@ -95,6 +95,21 @@ fn parse_equation(equation: &str, n_inputs: usize) -> FerrotorchResult<ParsedEqu
                 });
             }
         }
+        // Reject repeated output subscripts (CORE-165 / #1859). torch:
+        // `einsum(): output subscript i appears more than once in the
+        // output` (aten einsum sumproduct_pair path). Accepting them
+        // silently overwrites coordinates on CPU and panics or errors on
+        // other paths.
+        let mut seen = std::collections::HashSet::new();
+        for &c in &out {
+            if !seen.insert(c) {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "einsum: output subscript '{c}' appears more than once in the output"
+                    ),
+                });
+            }
+        }
         (lhs.to_string(), out)
     } else {
         // Implicit mode: output is sorted unique indices that appear exactly once.
@@ -151,6 +166,25 @@ fn parse_equation(equation: &str, n_inputs: usize) -> FerrotorchResult<ParsedEqu
         input_subscripts,
         output_subscripts,
     })
+}
+
+/// Re-serialize a [`ParsedEquation`] into canonical explicit form:
+/// whitespace-free, comma-joined input subscripts, and an explicit
+/// `->output` (for implicit-mode equations the output is the
+/// forward-computed sorted once-occurring labels).
+///
+/// `einsum_differentiable` stores THIS string in the grad-fns rather than
+/// the user's raw equation, so the backward passes never re-parse
+/// whitespace (CORE-163 / #1857) and never mistake an implicit output for
+/// an empty one (CORE-164 / #1858).
+fn canonical_equation(parsed: &ParsedEquation) -> String {
+    let lhs: Vec<String> = parsed
+        .input_subscripts
+        .iter()
+        .map(|subs| subs.iter().collect())
+        .collect();
+    let rhs: String = parsed.output_subscripts.iter().collect();
+    format!("{}->{rhs}", lhs.join(","))
 }
 
 // ---------------------------------------------------------------------------
@@ -1212,7 +1246,15 @@ fn einsum_two<T: Float>(
     // batch:    in A, in B, in output
     // free_a:   in A, NOT in B, in output
     // free_b:   in B, NOT in A, in output
-    // contract: in A, in B, NOT in output
+    // contract: NOT in output (shared by A and B, or lone to either)
+    //
+    // A LONE index (present in exactly one operand and absent from the
+    // output) is summed over (CORE-161 / #1855): it joins the contract
+    // group. The inner contraction loop below skips a char that is absent
+    // from an operand's `char_to_axis` map, so accumulating over the lone
+    // char's range performs exactly the implicit summation — matching the
+    // GPU path's `reduce_lone_axes` pre-pass and torch's semantics
+    // (`torch.einsum("ij,j->j", A, B)[j] == sum_i A[i,j] * B[j]`).
     let mut batch_chars: Vec<char> = Vec::new();
     let mut free_a_chars: Vec<char> = Vec::new();
     let mut free_b_chars: Vec<char> = Vec::new();
@@ -1240,17 +1282,26 @@ fn einsum_two<T: Float>(
             (true, false) => contract_chars.push(c),
             (false, true) => free_a_chars.push(c),
             (false, false) => {
-                // Summed over in A only — treat as A-side contraction (sum out).
-                // This case is handled by the general approach below.
-                free_a_chars.push(c); // will be summed implicitly
+                // Lone-A index: summed over in A only. Putting it in the
+                // contract group makes the inner loop iterate its range;
+                // `compute_b_flat` ignores it (not in `b_char_to_axis`),
+                // so the accumulation sums A over this axis (#1855).
+                contract_chars.push(c);
             }
         }
     }
     for &c in &b_unique {
-        if !a_unique.contains(&c) && out_subs.contains(&c) {
-            free_b_chars.push(c);
+        if !a_unique.contains(&c) {
+            if out_subs.contains(&c) {
+                free_b_chars.push(c);
+            } else {
+                // Lone-B index: summed over in B only — same contraction
+                // treatment as lone-A above; `compute_a_flat` ignores it
+                // (#1855). Previously these chars were dropped from every
+                // group, silently reading B at index 0 along the axis.
+                contract_chars.push(c);
+            }
         }
-        // If not in output either, it's summed over in B only.
     }
 
     // Compute sizes.
@@ -1592,10 +1643,18 @@ pub fn einsum_differentiable<T: Float>(
     let any_requires_grad = inputs.iter().any(|t| t.requires_grad());
 
     if is_grad_enabled() && any_requires_grad {
+        // Store the CANONICAL equation (whitespace-free, explicit output)
+        // in the grad-fns, never the raw user string: the backward passes
+        // re-parse it by hand and previously panicked on torch-legal
+        // spaced equations ("ii -> i", CORE-163 / #1857) and treated
+        // implicit-mode outputs as empty (CORE-164 / #1858). The
+        // re-parse here cannot fail: `einsum` above already parsed the
+        // same string for the same input count.
+        let canonical = canonical_equation(&parse_equation(equation, inputs.len())?);
         let wrapped = match inputs.len() {
             1 => {
                 let grad_fn = Arc::new(EinsumBackwardSingle {
-                    equation: equation.to_string(),
+                    equation: canonical,
                     input: inputs[0].clone(),
                 });
                 // Reuse the result's storage as-is. For CUDA inputs the
@@ -1609,7 +1668,7 @@ pub fn einsum_differentiable<T: Float>(
             }
             2 => {
                 let grad_fn = Arc::new(EinsumBackwardTwo {
-                    equation: equation.to_string(),
+                    equation: canonical,
                     a: inputs[0].clone(),
                     b: inputs[1].clone(),
                 });
@@ -1870,13 +1929,14 @@ impl<T: Float> EinsumBackwardSingle<T> {
 
 /// Backward for two-input einsum: `C = einsum(eq, [A, B])`.
 ///
-/// For `"ij,jk->ik"`:
+/// For the classical case `"ij,jk->ik"` (distinct, non-lone subscripts):
 /// - `grad_A = einsum("ik,jk->ij", [grad_C, B])` (swap output with A-input)
 /// - `grad_B = einsum("ij,ik->jk", [A, grad_C])` (swap output with B-input)
 ///
-/// General rule: to get grad w.r.t. input X, form an equation where:
-/// - The output subscripts become those of X.
-/// - X's subscripts are removed from the inputs and replaced with the output subscripts.
+/// The general scheme implemented by [`Self::grad_for_target`] extends the
+/// swap to repeated and lone subscripts (CORE-162 / #1856); the stored
+/// `equation` is the canonical form produced by [`canonical_equation`]
+/// (whitespace-free, explicit output — CORE-163/164, #1857/#1858).
 #[derive(Debug)]
 struct EinsumBackwardTwo<T: Float> {
     equation: String,
@@ -1885,52 +1945,204 @@ struct EinsumBackwardTwo<T: Float> {
 }
 
 impl<T: Float> EinsumBackwardTwo<T> {
-    /// Derive the backward einsum equation for gradient w.r.t. a specific input.
+    /// Gradient w.r.t. operand `target` (0 = A, 1 = B).
     ///
-    /// For `einsum("ij,jk->ik", [A, B])` and target=0 (grad_A):
-    /// We need: `einsum("ik,kj->ij", [grad_C, B])` — but more generally,
-    /// the equation for grad w.r.t. input `target` is formed by replacing
-    /// the target's subscripts in the output and using grad_C + the other input.
-    fn backward_equation(&self, target: usize) -> (String, usize, usize) {
-        // Parse the forward equation.
-        let (lhs, rhs) = self
-            .equation
-            .split_once("->")
-            .unwrap_or((&self.equation, ""));
-
+    /// General scheme (CORE-162 / #1856):
+    /// 1. Dedup the target's subscripts in first-occurrence order.
+    /// 2. `present` = deduped chars that appear in the output or in the
+    ///    other operand. These are recoverable by a plain einsum:
+    ///    `g = einsum("{out},{other}->{present}", [grad_C, other])`.
+    ///    (The naive textual swap `->{target}` instead produced repeated
+    ///    OUTPUT subscripts for repeated-index operands — e.g. grad of
+    ///    `"ii,j->ij"` w.r.t. A became `"ij,j->ii"` — which no einsum can
+    ///    express and which panicked the CPU permute step.)
+    /// 3. Lone chars (absent from both) were summed over in the forward;
+    ///    the gradient broadcasts back along them: unsqueeze + `expand`.
+    /// 4. Repeated subscripts: the forward read only the generalized
+    ///    diagonal, so the gradient is a diagonal-embed scatter — the
+    ///    expanded `g` multiplied by a 0/1 diagonal mask (zero off the
+    ///    diagonal). Matches `torch.einsum("ii,j->ij").backward()`:
+    ///    `A.grad == diag_embed(einsum("ij,j->i", [grad_C, B]))`.
+    ///
+    /// For an operand with distinct, non-lone subscripts steps 3–4 are
+    /// no-ops and this reduces exactly to the classical swap equation.
+    fn grad_for_target(
+        &self,
+        target: usize,
+        grad_output: &Tensor<T>,
+    ) -> FerrotorchResult<Tensor<T>> {
+        let (lhs, rhs) =
+            self.equation
+                .split_once("->")
+                .ok_or_else(|| FerrotorchError::Internal {
+                    message: format!(
+                        "EinsumBackwardTwo: stored equation '{}' is not canonical (no '->')",
+                        self.equation
+                    ),
+                })?;
         let parts: Vec<&str> = lhs.split(',').collect();
-        let a_subs = parts[0];
-        let b_subs = parts[1];
-        let out_subs = rhs;
+        if parts.len() != 2 {
+            return Err(FerrotorchError::Internal {
+                message: format!(
+                    "EinsumBackwardTwo: stored equation '{}' does not have two inputs",
+                    self.equation
+                ),
+            });
+        }
 
-        // For grad_A: equation is "(out_subs),(b_subs)->(a_subs)"
-        // grad_C has shape matching out_subs, B has shape matching b_subs
-        // For grad_B: equation is "(a_subs),(out_subs)->(b_subs)"
-        // A has shape matching a_subs, grad_C has shape matching out_subs
-        if target == 0 {
-            // grad_A: einsum("out,b->a", [grad_C, B])
-            let eq = format!("{out_subs},{b_subs}->{a_subs}");
-            (eq, 0, 1) // (equation, grad_C_pos, other_pos)
+        let x_str = parts[target];
+        let o_str = parts[1 - target];
+        let x_subs: Vec<char> = x_str.chars().collect();
+        let o_subs: Vec<char> = o_str.chars().collect();
+        let out_subs: Vec<char> = rhs.chars().collect();
+        let (x, other) = if target == 0 {
+            (&self.a, &self.b)
         } else {
-            // grad_B: einsum("a,out->b", [A, grad_C])
-            let eq = format!("{a_subs},{out_subs}->{b_subs}");
-            (eq, 1, 0) // (equation, grad_C_pos=1, A_pos=0)
+            (&self.b, &self.a)
+        };
+        let x_shape = x.shape();
+        // Every char of x_subs maps to (at least) one axis of x; the
+        // forward's `build_dim_map` validated subscript/rank agreement
+        // and repeated-index size consistency.
+        let size_of = |c: char| -> usize {
+            x_subs
+                .iter()
+                .position(|&xc| xc == c)
+                .map_or(1, |ax| x_shape[ax])
+        };
+
+        // Step 1: dedup target subscripts, first-occurrence order.
+        let mut x_dedup: Vec<char> = Vec::with_capacity(x_subs.len());
+        for &c in &x_subs {
+            if !x_dedup.contains(&c) {
+                x_dedup.push(c);
+            }
+        }
+
+        // Step 2: contract grad_C with the other operand onto the
+        // recoverable chars. Operand order mirrors the forward equation
+        // so the derived equation stays human-auditable.
+        let present: Vec<char> = x_dedup
+            .iter()
+            .copied()
+            .filter(|c| out_subs.contains(c) || o_subs.contains(c))
+            .collect();
+        let present_str: String = present.iter().collect();
+        let g = if target == 0 {
+            einsum(
+                &format!("{rhs},{o_str}->{present_str}"),
+                &[grad_output, other],
+            )?
+        } else {
+            einsum(
+                &format!("{o_str},{rhs}->{present_str}"),
+                &[other, grad_output],
+            )?
+        };
+
+        // Step 3: broadcast back along lone (forward-summed) chars.
+        let g = if present.len() == x_dedup.len() {
+            g
+        } else {
+            let unsq_shape: Vec<isize> = x_dedup
+                .iter()
+                .map(|&c| {
+                    if present.contains(&c) {
+                        size_of(c) as isize
+                    } else {
+                        1
+                    }
+                })
+                .collect();
+            let full_shape: Vec<usize> = x_dedup.iter().map(|&c| size_of(c)).collect();
+            let g_unsq = crate::grad_fns::shape::reshape(&g, &unsq_shape)?;
+            crate::grad_fns::shape::expand(&g_unsq, &full_shape)?
+        };
+
+        // Step 4: diagonal-embed for repeated subscripts.
+        if !has_duplicate_chars(&x_subs) {
+            // Materialise stride views (from `expand`) so downstream grad
+            // accumulation sees a contiguous buffer.
+            return crate::methods::contiguous_t(&g);
+        }
+        // View `g` (shape per x_dedup) over the operand's full rank with
+        // size-1 axes at every non-first occurrence of a repeated char,
+        // expand to the operand shape, then zero everything off the
+        // generalized diagonal with a 0/1 mask. The mask is host-built
+        // constant data (like `creation::eye`) uploaded to the operand's
+        // device; the masking multiply itself runs on-device (R-LOUD-2:
+        // explicit, result-preserving host constant — not a compute detour).
+        let view_shape: Vec<isize> = {
+            let mut seen: Vec<char> = Vec::new();
+            x_subs
+                .iter()
+                .map(|&c| {
+                    if seen.contains(&c) {
+                        1
+                    } else {
+                        seen.push(c);
+                        size_of(c) as isize
+                    }
+                })
+                .collect()
+        };
+        let g_contig = crate::methods::contiguous_t(&g)?;
+        let g_view = crate::grad_fns::shape::reshape(&g_contig, &view_shape)?;
+        let g_full = crate::grad_fns::shape::expand(&g_view, x_shape)?;
+        let mask = diagonal_mask::<T>(&x_subs, x_shape)?;
+        let mask = if x.is_cuda() {
+            mask.to(x.device())?
+        } else {
+            mask
+        };
+        crate::grad_fns::arithmetic::mul(&g_full, &mask)
+    }
+}
+
+/// Build the 0/1 generalized-diagonal mask for an operand whose subscripts
+/// contain repeats: `mask[idx] == 1` iff every repeated char carries the
+/// same coordinate on all of its axes (CORE-162 / #1856). Host-built
+/// constant; the caller uploads it when the operand lives on CUDA.
+fn diagonal_mask<T: Float>(subs: &[char], shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
+    let numel: usize = shape.iter().product();
+    let mut data = vec![<T as num_traits::Zero>::zero(); numel];
+    for (flat, slot) in data.iter_mut().enumerate() {
+        let mut coords = vec![0usize; shape.len()];
+        let mut rem = flat;
+        for i in (0..shape.len()).rev() {
+            coords[i] = rem % shape[i];
+            rem /= shape[i];
+        }
+        let mut first_val: BTreeMap<char, usize> = BTreeMap::new();
+        let mut on_diag = true;
+        for (axis, &c) in subs.iter().enumerate() {
+            match first_val.get(&c) {
+                Some(&prev) if prev != coords[axis] => {
+                    on_diag = false;
+                    break;
+                }
+                _ => {
+                    first_val.insert(c, coords[axis]);
+                }
+            }
+        }
+        if on_diag {
+            *slot = <T as num_traits::One>::one();
         }
     }
+    Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)
 }
 
 impl<T: Float> GradFn<T> for EinsumBackwardTwo<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_a = if self.a.requires_grad() {
-            let (eq, _, _) = self.backward_equation(0);
-            Some(einsum(&eq, &[grad_output, &self.b])?)
+            Some(self.grad_for_target(0, grad_output)?)
         } else {
             None
         };
 
         let grad_b = if self.b.requires_grad() {
-            let (eq, _, _) = self.backward_equation(1);
-            Some(einsum(&eq, &[&self.a, grad_output])?)
+            Some(self.grad_for_target(1, grad_output)?)
         } else {
             None
         };
