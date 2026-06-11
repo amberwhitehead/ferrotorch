@@ -12,22 +12,22 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:376`, `add_scaled` at `:746`, `add_out` at `:653`, `add_scaled_out` at `:680`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
-//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:912` delegates to `sub_scaled` at `:941` → `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
+//! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:376`, `add_scaled` at `:754`, `add_out` at `:653`, `add_scaled_out` at `:685`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
+//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:920` delegates to `sub_scaled` at `:949` → `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
 //! | REQ-3 (mul) | SHIPPED | `mul` + `MulBackward` in `arithmetic.rs`; parity `[mul] 72/72` (grep=1) |
 //! | REQ-4 (div) | SHIPPED | `div` + `DivBackward` in `arithmetic.rs`; parity `[div] 72/72` (grep=1) |
 //! | REQ-5 (neg) | SHIPPED | `neg` + `NegBackward`; parity `[neg] 8/8` (grep=1) |
 //! | REQ-6 (abs) | SHIPPED | `abs` + `AbsBackward`; parity `[abs] 8/8` (grep=1) |
 //! | REQ-7 (sqrt) | SHIPPED | `sqrt` + `SqrtBackward`; parity `[sqrt] 8/8` (grep=1) |
 //! | REQ-8 (pow scalar exponent) | SHIPPED | `pow` + `PowBackward` (scalar exp; tensor-exp overload returns `Ok(None)` and is skipped, not failed); parity `[pow] 24/72 passed 48 skipped` (grep=1) |
-//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:993` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
-//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:1757` + `RsqrtBackward` at `:1666`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
-//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:1905` + `ReciprocalBackward` at `:1828`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
-//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:2742` + `FloorDivideBackward` at `:2585` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
-//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:2105` + `RemainderBackward` at `:1991`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
-//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:2412` + `FmodBackward` at `:2294`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
-//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:3089` + `AddcmulBackward` at `:2946`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
-//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:3404` + `AddcdivBackward` at `:3242`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
+//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:1001` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
+//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:1765` + `RsqrtBackward` at `:1674`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
+//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:1913` + `ReciprocalBackward` at `:1836`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
+//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:2750` + `FloorDivideBackward` at `:2593` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
+//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:2113` + `RemainderBackward` at `:1999`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
+//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:2420` + `FmodBackward` at `:2302`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
+//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:3097` + `AddcmulBackward` at `:2954`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
+//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:3412` + `AddcdivBackward` at `:3250`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -677,6 +677,11 @@ pub fn add_out<T: Float>(out: &Tensor<T>, a: &Tensor<T>, b: &Tensor<T>) -> Ferro
 ///   a leaf with `requires_grad = true` (matches PyTorch's `out=` rule).
 /// - [`FerrotorchError::InvalidArgument`] if `alpha` is not representable
 ///   in the tensor's dtype.
+/// - [`FerrotorchError::InvalidArgument`] if `out.shape()` differs from the
+///   broadcast shape (the resize path) while `out` is aliased by another
+///   clone or view — the resize would rewrite shape metadata behind the
+///   alias's back (CORE-001 / #1695; see
+///   `Tensor::update_storage_and_shape`).
 pub fn add_scaled_out<T: Float>(
     out: &Tensor<T>,
     a: &Tensor<T>,
@@ -728,11 +733,14 @@ pub fn add_scaled_out<T: Float>(
         debug_assert_eq!(result_shape, broadcast_shape);
         // SAFETY: same autograd argument as the matched-shape branch
         // (check_out_allowed already validated). `update_storage_and_shape`
-        // verifies its own length invariant (storage.len() == new numel).
-        // The caller holds a unique semantic reference to `out` for the
-        // duration of this `out=` write — clones of `out` made before
-        // this call will observe the new shape after it returns, which
-        // matches torch's `Tensor.resize_` behavior exactly.
+        // verifies its own length invariant (storage.len() == new numel)
+        // and gates the resize on `out` being uniquely owned — if another
+        // clone or view aliases `out`'s metadata or storage it returns a
+        // structured InvalidArgument error instead of resizing behind the
+        // alias (CORE-001 / #1695). With uniqueness machine-checked, the
+        // remaining caller obligation (no outstanding shape/data borrows
+        // used after the call) is discharged: this function holds no
+        // borrows of `out`'s shape or data across the call.
         unsafe { out.update_storage_and_shape(storage, broadcast_shape)? };
     }
     Ok(())

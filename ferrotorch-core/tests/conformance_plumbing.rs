@@ -1311,6 +1311,27 @@ fn tensor_storage_buffer_variants_match() {
     let _phantom: Option<&StorageBuffer<f32>> = None;
 }
 
+#[test]
+fn tensor_storage_cpu_buffer_interior_mutability_contract() {
+    // `CpuBuffer` (CORE-001 / #1695) is the interior-mutable CPU element
+    // buffer inside `StorageBuffer::Cpu`. It is `pub` only because enum
+    // variant fields share the enum's visibility; its methods are all
+    // crate-private, so the only public behavior to pin is the contract it
+    // gives the Tensor layer: element writes through one aliased handle are
+    // observed by the other handle on the next sequenced read, without
+    // replacing the storage (same `TensorStorage` allocation before/after).
+    let t1 = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 2.0]), vec![2], false)
+        .expect("from_storage");
+    let t2 = t1.clone();
+    let before = std::ptr::from_ref(t2.storage());
+    t1.fill_(7.0).expect("fill_");
+    assert_eq!(t2.data().expect("data"), &[7.0, 7.0]);
+    assert_eq!(std::ptr::from_ref(t2.storage()), before);
+    // Reference the type by name for the surface gate (the type itself is
+    // not publicly constructible; see above).
+    let _phantom: Option<&ferrotorch_core::storage::CpuBuffer<f32>> = None;
+}
+
 // ---------------------------------------------------------------------------
 // DispatchKey / DispatchKeySet / Dispatcher / Kernel
 // ---------------------------------------------------------------------------

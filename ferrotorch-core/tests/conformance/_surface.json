@@ -1469,6 +1469,7 @@
     { "path": "ferrotorch_core::spherical_bessel_j0", "kind": "re-export", "signature": "pub use special::spherical_bessel_j0;" },
     { "path": "ferrotorch_core::split_t", "kind": "re-export", "signature": "pub use methods::split_t;" },
     { "path": "ferrotorch_core::stack", "kind": "re-export", "signature": "pub use vmap::stack;" },
+    { "path": "ferrotorch_core::storage::CpuBuffer", "kind": "struct", "signature": "pub struct CpuBuffer< T : Element >" },
     { "path": "ferrotorch_core::storage::CubeStorageHandle", "kind": "trait", "signature": "pub trait CubeStorageHandle" },
     { "path": "ferrotorch_core::storage::StorageBuffer", "kind": "enum", "signature": "pub enum StorageBuffer< T : Element >" },
     { "path": "ferrotorch_core::storage::TensorStorage", "kind": "struct", "signature": "# [derive (Debug)] pub struct TensorStorage< T : Element >" },

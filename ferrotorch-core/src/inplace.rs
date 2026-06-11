@@ -3,10 +3,20 @@
 //! These methods mutate the tensor's underlying storage through
 //! [`Tensor::data_vec()`] + [`Tensor::update_data()`], which is
 //! device-transparent (works on both CPU and GPU tensors). The
-//! `update_data()` call performs an unsafe pointer cast through the
-//! `Arc<TensorStorage>` — this is sound under the same contract as
-//! optimizer updates: the caller must ensure no concurrent reads or
-//! writes to the same storage.
+//! `update_data()` / `update_storage()` calls mutate through the storage's
+//! interior mutability (`UnsafeCell`-backed, CORE-001 / #1695) — never
+//! through a `&mut` manufactured behind the aliased `Arc` — so mutating
+//! while clones/views alias the same storage is UB-free for every
+//! sequenced access pattern. What each call site discharges of the
+//! `update_*` safety contract:
+//!
+//! - **No conflicting borrow created here:** the fresh values are computed
+//!   into an owned `Vec` *before* the write; no `&[T]` into the destination
+//!   buffer is live across the `update_*` call within these methods.
+//! - **Forwarded to the crate-level documented contract** (module doc of
+//!   [`crate::storage`], `Tensor::data()` docs): callers must not *use* a
+//!   previously obtained `&[T]` across an in-place op on an aliasing
+//!   handle, and cross-thread access requires external synchronization.
 //!
 //! ## REQ status (per `.design/ferrotorch-core/inplace.md`)
 //!

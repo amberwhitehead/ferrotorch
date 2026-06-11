@@ -657,6 +657,18 @@ impl<T: Float> Tensor<T> {
     /// Returns `Err` if the tensor is not contiguous — the raw storage
     /// slice would not correspond to the logical element order. Use
     /// [`data_vec()`](Self::data_vec) or call `.contiguous()` first.
+    ///
+    /// # Borrow contract (CORE-001 / #1695)
+    ///
+    /// Clones and views share storage (PyTorch parity), so in-place ops on
+    /// *any* aliasing handle write the same buffer this slice points into.
+    /// The returned `&[T]` must not be **used** after an in-place mutation
+    /// (`fill_`, `add_`, `update_data`, ..., or a storage-swapping op such
+    /// as the broadcast `add_scaled_` path) performed through this tensor
+    /// or any clone/view — re-call `data()` after the mutation instead.
+    /// Sequenced read-after-write access is always fine. Cross-thread use
+    /// additionally requires external synchronization. See the
+    /// synchronization contract on [`crate::storage::TensorStorage`].
     pub fn data(&self) -> FerrotorchResult<&[T]> {
         if self.inner.storage.is_gpu() {
             return Err(FerrotorchError::GpuTensorNotAccessible);
@@ -1283,10 +1295,24 @@ impl<T: Float> Tensor<T> {
 
     /// Borrow the underlying data as a mutable flat slice.
     ///
+    /// The `&mut [T]` is derived through the storage's element-level
+    /// interior mutability ([`TensorStorage::try_as_mut_slice_aliased`]),
+    /// never from the shared `Arc` itself, so calling this does not
+    /// invalidate metadata borrows (`shape()`, `storage()`) held through
+    /// aliasing `Tensor` handles. See the synchronization contract on
+    /// [`crate::storage::TensorStorage`] (CORE-001 / #1695).
+    ///
     /// # Safety
     ///
-    /// The caller must ensure exclusive access to this tensor's storage.
-    /// No other references to this tensor's data may exist concurrently.
+    /// The caller must ensure genuinely exclusive access to this tensor's
+    /// *buffer* for the lifetime of the returned slice:
+    ///
+    /// 1. no other thread reads or writes this tensor's storage while the
+    ///    slice is live, and
+    /// 2. no other borrow of the same buffer's elements — a `&[T]` from
+    ///    [`Self::data`] on this tensor or any clone/view sharing the
+    ///    storage — is *used* while the slice is live.
+    ///
     /// Optimizer `step()` methods satisfy this requirement: they run inside
     /// `no_grad()` (no graph is being built) and hold `&mut self` (exclusive
     /// access to the optimizer's parameter copies).
@@ -1297,14 +1323,15 @@ impl<T: Float> Tensor<T> {
                 message: "data_mut requires a contiguous tensor".into(),
             });
         }
-        let storage_ptr = Arc::as_ptr(&self.inner.storage).cast_mut();
-        // SAFETY: Caller guarantees exclusive access (optimizer step inside no_grad).
-        let storage = unsafe { &mut *storage_ptr };
         // Returns Err(GpuTensorNotAccessible) for GPU/Cubecl/Meta storage —
         // the deprecated `as_mut_slice` panicked here. Optimizer step
         // implementations now get a clean error path for misuse against
         // GPU-resident parameters.
-        let slice = storage.try_as_mut_slice()?;
+        //
+        // SAFETY: forwarded verbatim — this function's own `# Safety`
+        // section restates `try_as_mut_slice_aliased`'s exclusivity
+        // contract for the caller.
+        let slice = unsafe { self.inner.storage.try_as_mut_slice_aliased()? };
         let end = self.inner.offset + self.numel();
         if end > slice.len() {
             return Err(FerrotorchError::InvalidArgument {
@@ -1322,12 +1349,22 @@ impl<T: Float> Tensor<T> {
     /// This is the device-transparent alternative to `data_mut()` for
     /// optimizer step implementations.
     ///
+    /// Both branches mutate through the storage's interior mutability
+    /// ([`TensorStorage::cpu_write_at`] for CPU element writes,
+    /// [`TensorStorage::replace_buffer_aliased`] for the GPU buffer swap),
+    /// never through a `&mut` manufactured behind the shared `Arc` — so
+    /// metadata borrows held by aliasing handles survive the call. See the
+    /// synchronization contract on [`crate::storage::TensorStorage`]
+    /// (CORE-001 / #1695).
+    ///
     /// # Safety
     ///
     /// Same requirements as `data_mut()` — caller must ensure exclusive
-    /// access. No concurrent reads or writes to this tensor's storage may
-    /// exist. Optimizer `step()` methods satisfy this by running inside
-    /// `no_grad()` with `&mut self`.
+    /// access: no other thread touches this tensor's storage during the
+    /// call, and no outstanding `&[T]` borrow of this storage's data (from
+    /// this tensor or any clone/view) is *used* after the call. Optimizer
+    /// `step()` methods satisfy this by running inside `no_grad()` with
+    /// `&mut self`.
     pub unsafe fn update_data(&self, new_data: &[T]) -> FerrotorchResult<()> {
         let numel = self.numel();
         if new_data.len() != numel {
@@ -1340,9 +1377,7 @@ impl<T: Float> Tensor<T> {
             });
         }
 
-        let storage_ptr = Arc::as_ptr(&self.inner.storage).cast_mut();
-        // SAFETY: Caller guarantees exclusive access (optimizer step inside no_grad).
-        let storage = unsafe { &mut *storage_ptr };
+        let storage = &*self.inner.storage;
 
         if storage.is_gpu() {
             let backend =
@@ -1364,15 +1399,24 @@ impl<T: Float> Tensor<T> {
                 )
             };
             let new_handle = backend.cpu_to_gpu(bytes, T::dtype(), ordinal)?;
-            storage.data = crate::storage::StorageBuffer::Gpu(new_handle);
+            // SAFETY: caller guarantees exclusive access per this function's
+            // `# Safety` contract; the fresh handle is on `ordinal`, i.e.
+            // the same device the storage already resides on, so the device
+            // check inside `replace_buffer_aliased` passes.
+            unsafe {
+                storage.replace_buffer_aliased(TensorStorage::gpu(new_handle))?;
+            }
         } else {
-            // is_gpu() branch above already routed Gpu storage; try_as_mut_slice
+            // is_gpu() branch above already routed Gpu storage; cpu_write_at
             // here Errs only on Cubecl/Meta — neither of which an update_data
             // caller in the optimizer hot path is expected to hit, so the
             // explicit Err is a strict improvement over the deprecated panic.
-            let slice = storage.try_as_mut_slice()?;
-            let offset = self.inner.offset;
-            slice[offset..offset + numel].copy_from_slice(new_data);
+            //
+            // SAFETY: caller guarantees exclusive access per this function's
+            // `# Safety` contract; bounds are checked inside `cpu_write_at`.
+            unsafe {
+                storage.cpu_write_at(self.inner.offset, new_data)?;
+            }
         }
 
         Ok(())
@@ -1388,18 +1432,25 @@ impl<T: Float> Tensor<T> {
     /// with a deprecation warning, in current versions). The new strides
     /// are computed as C-contiguous for `new_shape`.
     ///
+    /// # Errors
+    ///
+    /// In addition to the shape/device errors below, returns
+    /// [`FerrotorchError::InvalidArgument`] when this tensor is **aliased**
+    /// (another `Tensor` clone shares its `TensorInner`, or another
+    /// tensor/view shares its storage `Arc`). A resize rewrites the
+    /// shape/strides metadata inside the shared `TensorInner` and replaces
+    /// the buffer with one of a *different length* — neither is soundly
+    /// expressible while another handle may be observing them, so the
+    /// aliased case is rejected instead of mutating behind the alias
+    /// (CORE-001 / #1695).
+    ///
     /// # Safety
     ///
-    /// Same as [`update_storage`]: caller must ensure exclusive access.
-    /// The new storage's numel must equal `new_shape.iter().product()`.
-    /// The new storage must reside on the same device as the tensor.
-    ///
-    /// The caller must also guarantee that no other `Tensor` clone is
-    /// concurrently observing this tensor's shape — `Tensor` is
-    /// `Arc<TensorInner>`-shared, and a resize changes the observable
-    /// shape for every clone. This is the same invariant `update_storage`
-    /// already implicitly relies on for buffer-length changes; the
-    /// `out=`-style call sites this method exists for own a unique
+    /// Same as [`update_storage`]: caller must ensure exclusive access —
+    /// no other thread touches this tensor during the call, and no
+    /// outstanding borrow of its data (`data()`), shape (`shape()`,
+    /// `strides()`), or storage (`storage()`) is *used* after the call.
+    /// The `out=`-style call sites this method exists for own a unique
     /// `&Tensor` for the duration of the write.
     pub unsafe fn update_storage_and_shape(
         &self,
@@ -1418,25 +1469,59 @@ impl<T: Float> Tensor<T> {
                 ),
             });
         }
+        if new_storage.device() != self.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: self.device(),
+                got: new_storage.device(),
+            });
+        }
+
+        // Alias gate: rewriting shape/strides inside the Arc-shared
+        // `TensorInner` — and swapping in a buffer of a different length —
+        // is only sound when this handle is the unique owner of both Arcs.
+        // A `&TensorStorage` or shape borrow held through another clone or
+        // view would otherwise be invalidated behind that handle's back.
+        if Arc::strong_count(&self.inner) > 1
+            || Arc::weak_count(&self.inner) > 0
+            || Arc::strong_count(&self.inner.storage) > 1
+        {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "update_storage_and_shape: cannot resize tensor {:?} -> {:?}: \
+                     the tensor is aliased (other clones or views share its \
+                     metadata or storage); resize requires a uniquely-owned \
+                     tensor (CORE-001 / #1695)",
+                    self.shape(),
+                    new_shape,
+                ),
+            });
+        }
 
         let new_strides = c_contiguous_strides(&new_shape);
 
-        // Swap storage first (same logic as update_storage — drops the old
-        // storage so we don't leak its GpuBufferHandle).
-        let storage_ptr = Arc::as_ptr(&self.inner.storage).cast_mut();
-        // SAFETY: Caller guarantees exclusive access.
-        let old_storage = unsafe { std::ptr::replace(storage_ptr, new_storage) };
-        drop(old_storage);
+        // Swap the buffer through the storage's interior mutability. The
+        // numel differs from self.numel() by design (this is the resize
+        // path), so this bypasses update_storage's length check; the
+        // metadata is rewritten in lockstep below.
+        //
+        // SAFETY: caller guarantees exclusive access per this function's
+        // `# Safety` contract; the alias gate above proved both Arcs are
+        // uniquely owned by this handle. Device equality was checked above,
+        // satisfying `replace_buffer_aliased`'s device invariant.
+        unsafe {
+            self.inner.storage.replace_buffer_aliased(new_storage)?;
+        }
 
         // Now mutate the shape/strides/offset fields through the
-        // Arc<TensorInner>. The `inner_ptr.cast_mut()` here is the same
-        // unsafe pattern documented on `update_storage` (Arc-shared
-        // mutation under a caller-enforced exclusive-access contract).
+        // Arc<TensorInner>. The alias gate above proved this Arc is
+        // uniquely owned (strong == 1, weak == 0), so no other handle can
+        // reach these fields.
         let inner_ptr = Arc::as_ptr(&self.inner).cast_mut();
-        // SAFETY: Caller guarantees exclusive access to `self.inner` for
-        // the duration of this call; no other clone is reading the shape
-        // concurrently. Field assignments below are individual `Vec<_>`
-        // writes that drop the old vectors in place — no leak.
+        // SAFETY: the Arc is uniquely owned (checked above) and the caller
+        // guarantees no outstanding borrows of shape/strides are used after
+        // this call (this function's `# Safety` contract). Field
+        // assignments below are individual `Vec<_>` writes that drop the
+        // old vectors in place — no leak.
         unsafe {
             (*inner_ptr).shape = new_shape;
             (*inner_ptr).strides = new_strides;
@@ -1452,11 +1537,28 @@ impl<T: Float> Tensor<T> {
     /// entirely on-device and need to swap the underlying buffer without a
     /// CPU round-trip.
     ///
+    /// The swap goes through the storage's buffer-level interior mutability
+    /// ([`TensorStorage::replace_buffer_aliased`]), never through a `&mut`
+    /// manufactured behind the shared `Arc` — so `&TensorStorage` metadata
+    /// borrows held by aliasing handles survive the swap, and aliasing
+    /// clones/views observe the new buffer on their next (sequenced) read.
+    /// `&[T]` borrows into the *old* buffer dangle after the swap; using
+    /// them is the documented residual-contract violation (see
+    /// [`crate::storage::TensorStorage`], CORE-001 / #1695).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FerrotorchError::ShapeMismatch`] when the element counts
+    /// differ and [`FerrotorchError::DeviceMismatch`] when `new_storage`
+    /// resides on a different device (the documented same-device
+    /// precondition is now enforced).
+    ///
     /// # Safety
     ///
-    /// Same as [`update_data`]: caller must ensure exclusive access. The new
-    /// storage must have the same number of elements as the tensor and reside
-    /// on the same device.
+    /// Same as [`update_data`]: caller must ensure exclusive access — no
+    /// other thread touches this tensor's storage during the call, and no
+    /// outstanding borrow of the storage's data (from this tensor or any
+    /// clone/view) is *used* after the call.
     pub unsafe fn update_storage(&self, new_storage: TensorStorage<T>) -> FerrotorchResult<()> {
         let numel = self.numel();
         if new_storage.len() != numel {
@@ -1469,22 +1571,17 @@ impl<T: Float> Tensor<T> {
             });
         }
 
-        let storage_ptr = Arc::as_ptr(&self.inner.storage).cast_mut();
-        // SAFETY: Caller guarantees exclusive access (optimizer step inside
-        // no_grad).
-        //
-        // Critical: `ptr::replace` returns the OLD value so its destructor
-        // runs. The previous `ptr::write` here treated the target as
-        // uninitialized memory and dropped nothing, leaking the old
-        // `TensorStorage` — and in the GPU case, every leaked storage also
-        // leaked its `GpuBufferHandle` -> `CudaBuffer` -> pooled `CudaSlice`.
-        // Running optimizer steps in a long training loop (e.g. AdamW
-        // foreach, which calls `update_storage` once per parameter per
-        // step) would climb toward VRAM exhaustion at a rate proportional
-        // to parameter size × step count. Replacing with `ptr::replace` +
-        // explicit `drop` restores correct single-ownership semantics.
-        let old = unsafe { std::ptr::replace(storage_ptr, new_storage) };
-        drop(old);
+        // SAFETY: caller guarantees exclusive access (optimizer step inside
+        // no_grad) per this function's `# Safety` contract.
+        // `replace_buffer_aliased` drops the OLD buffer (returning CPU
+        // buffers to the pool) so nothing leaks — in the GPU case a leaked
+        // storage would leak its `GpuBufferHandle` -> `CudaBuffer` ->
+        // pooled `CudaSlice`, climbing toward VRAM exhaustion across
+        // optimizer steps (e.g. AdamW foreach calls this once per
+        // parameter per step).
+        unsafe {
+            self.inner.storage.replace_buffer_aliased(new_storage)?;
+        }
 
         Ok(())
     }
@@ -1527,22 +1624,18 @@ impl<T: Float> Tensor<T> {
         &self,
         f: impl FnOnce(&mut crate::gpu_dispatch::GpuBufferHandle) -> FerrotorchResult<R>,
     ) -> FerrotorchResult<R> {
-        let storage_ptr = Arc::as_ptr(&self.inner.storage).cast_mut();
-        // SAFETY: We materialize a single `&mut TensorStorage<T>` for the
-        // duration of the call. The storage lives behind `Arc`, but the
+        // SAFETY: the `&mut GpuBufferHandle` is derived through the
+        // storage's buffer-level `UnsafeCell` (never from the `Arc`
+        // itself), and its exclusivity contract holds here: the
         // optimizer-step caller holds `&mut self` on the outer optimizer
         // for the whole step, so no other handle into this storage can be
         // observed or mutated concurrently — neither this thread (the
-        // closure is `FnOnce` and consumes the `&mut` borrow chain) nor
-        // any other thread (the storage is not exposed to a sharing
-        // primitive that would let another thread reach it during the
-        // optimizer step). The resulting `&mut GpuBufferHandle` reborrows
-        // out of that exclusive `&mut TensorStorage<T>` and shares its
-        // lifetime, so the borrow checker enforces non-aliasing within
-        // the closure body. No reference produced here outlives the call.
-        let storage: &mut TensorStorage<T> = unsafe { &mut *storage_ptr };
-        let handle = storage
-            .gpu_handle_mut()
+        // closure is `FnOnce` and consumes the borrow chain) nor any other
+        // thread (the storage is not exposed to a sharing primitive that
+        // would let another thread reach it during the optimizer step).
+        // The `&mut GpuBufferHandle` is bounded by the body of this method;
+        // no reference produced here outlives the call.
+        let handle = unsafe { self.inner.storage.gpu_handle_mut_aliased() }
             .ok_or(FerrotorchError::DeviceUnavailable)?;
         f(handle)
     }
