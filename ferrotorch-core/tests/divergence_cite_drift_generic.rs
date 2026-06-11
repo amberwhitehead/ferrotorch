@@ -3102,12 +3102,19 @@ fn ignore_reasons_carry_issue_ref_or_diagnostic_marker() {
             i += 1;
         }
     }
-    // Sanity floor: the corpus has a known population of real #[ignore]
-    // attributes (9 at gate-introduction time). Zero matches means the
-    // line-anchored detector has silently stopped seeing attributes.
+    // Sanity floor: zero matches means the line-anchored detector has
+    // silently stopped seeing attributes. The floor is deliberately >= 1,
+    // NOT a population count: a count-based floor (originally >= 8) broke
+    // the first time legitimate ignores were retired (#1899 retired the
+    // stale mkl ignore and the suite went red repo-wide — crosslink
+    // #1934). Retiring ignores is the SUCCESS path of this gate; the
+    // floor must only catch detector breakage, never progress.
     assert!(
-        attrs_seen >= 8,
-        "sanity floor: expected >=8 #[ignore] attributes across ferrotorch-core/tests/, found {attrs_seen} — has the detector broken?"
+        attrs_seen >= 1,
+        "sanity floor: expected at least one #[ignore] attribute across \
+         ferrotorch-core/tests/, found {attrs_seen} — either the detector \
+         broke, or the corpus genuinely reached zero ignores (celebrate, \
+         then update this floor)"
     );
     assert!(
         violations.is_empty(),
