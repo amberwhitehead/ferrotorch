@@ -51,7 +51,7 @@ tracked by blocker #1293.
   slice, while upstream's `condition: Tensor` permits a device-resident
   boolean tensor with 3-way broadcasting. The shape-broadcasting and
   device-resident-condition path is handled by a separate function
-  `ferrotorch-core/src/grad_fns/indexing.rs:1839 pub fn where_cond_bcast`
+  `ferrotorch-core/src/grad_fns/indexing.rs:1999 pub fn where_cond_bcast`
   (not this file).
 
 - REQ-2: `where_bt(cond, x, y)` — pointwise differentiable selection
