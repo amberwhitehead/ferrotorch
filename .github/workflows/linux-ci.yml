@@ -69,10 +69,16 @@ jobs:
           shared-key: linux-cpu
           workspaces: . -> target
       - name: cargo clippy -p ferrotorch-core -p ferrotorch-gpu
+        # `ferrotorch-core/gpu` is included so the cfg-gated GPU test corpus
+        # (43 probe files + every conformance `mod gpu`) is type-checked and
+        # linted on every PR. Clippy needs no CUDA device; before this flag
+        # the corpus was never compiled by any CI job and could silently rot
+        # (CORE-191 / crosslink #1885).
         run: |
           cargo clippy \
             -p ferrotorch-core \
             -p ferrotorch-gpu \
+            --features ferrotorch-core/gpu \
             --all-targets \
             -- -D warnings
 

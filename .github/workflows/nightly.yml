@@ -93,12 +93,18 @@ jobs:
             --lib
 
       - name: cargo test --features cuda --tests (full workspace)
+        # `cuda` only resolves to ferrotorch-gpu/cuda; ferrotorch-core's GPU
+        # test corpus is gated behind its own `gpu` marker feature, which
+        # `--features cuda` never enabled — the core GPU lanes compiled to
+        # empty test binaries even on this CUDA runner (CORE-191 / crosslink
+        # #1885). `ferrotorch-core/gpu` is now enabled explicitly.
         run: |
           cargo test \
             --workspace \
             --exclude ferrotorch-mps \
             --exclude ferrotorch-xpu \
             --features cuda \
+            --features ferrotorch-core/gpu \
             --release \
             --tests
 

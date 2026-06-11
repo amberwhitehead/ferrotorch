@@ -174,6 +174,21 @@ jobs:
             --release \
             --tests
 
+      - name: cargo test -p ferrotorch-core --features gpu --tests (GPU lanes)
+        # ferrotorch-core's GPU conformance/probe corpus is gated behind its
+        # `gpu` marker feature (cfg-gated, NOT #[ignore], so it is absent
+        # rather than skipped on non-CUDA builds). Before this step existed,
+        # NO workflow enabled ferrotorch-core/gpu — every GPU lane compiled
+        # to an empty test binary even on this runner, and the corpus was
+        # never even type-checked (CORE-191 / crosslink #1885). This
+        # workflow already path-triggers on ferrotorch-core/** changes.
+        run: |
+          cargo test \
+            -p ferrotorch-core \
+            --features gpu \
+            --release \
+            --tests
+
       - name: cargo clippy -p ferrotorch-gpu --features cuda
         run: |
           cargo clippy \

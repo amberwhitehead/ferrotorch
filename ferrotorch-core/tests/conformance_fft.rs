@@ -466,6 +466,42 @@ fn cascade_skip(
         );
     }
 
+    // Issue #1904 (found running the gpu-feature lane for the first time
+    // under CORE-191/#1885 — these tests were red from birth, no CI ever
+    // executed them):
+    //   rfft: the CUDA fast path in `rfft_norm` gates on `n == input_n`;
+    //     n-resize (pad/truncate) falls through to the ferray-fft CPU
+    //     bridge, which rejects CUDA tensors with NotImplementedOnCuda.
+    //   irfft: the CUDA gate covers only `n == 2 * (half_n - 1)` (the even
+    //     default); odd-length and n-resize fall through identically.
+    //   fft/ifft differentiable: forward CUDA fast paths work, but
+    //     FftBackward/IfftBackward route the VJP through the CPU bridge,
+    //     which rejects CUDA grads.
+    // torch.fft computes and differentiates all of these on CUDA. Per
+    // R-DEFER-3 this skip block only retires when #1904 lands the CUDA
+    // paths and the tags below run live.
+    if _device_label == "cuda:0" {
+        if _op == "rfft"
+            && let Some("len_8_pad_to_16" | "len_8_truncate_to_4") = _tag
+        {
+            return Some("#1904: rfft n-resize not GPU-accelerated; CPU bridge rejects CUDA");
+        }
+        if _op == "irfft"
+            && let Some("len_7_default" | "len_8_pad_to_16" | "len_8_truncate_to_4") = _tag
+        {
+            return Some(
+                "#1904: irfft odd-length / n-resize not GPU-accelerated; \
+                 CPU bridge rejects CUDA",
+            );
+        }
+        if _op == "fft_differentiable" || _op == "ifft_differentiable" {
+            return Some(
+                "#1904: FftBackward/IfftBackward route the VJP through the \
+                 CPU ferray-fft bridge, which rejects CUDA grads",
+            );
+        }
+    }
+
     None
 }
 

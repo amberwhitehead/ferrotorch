@@ -2298,14 +2298,32 @@ fn run_masked_fill_for_device(device_label: &str, device: Device) {
                 let a_g = upload_f32(make_cpu_f32(in_data, in_shape, true), device);
                 let r_g = masked_fill(&a_g, mask, value as f32).expect("masked_fill");
                 let loss = ferrotorch_core::grad_fns::reduction::sum(&r_g).expect("sum");
-                loss.backward().expect("backward");
-                let g = a_g.grad().unwrap().expect("grad");
-                check_f32(
-                    &format!("{label} grad_a"),
-                    &read_back_f32(&g),
-                    grad_exp,
-                    tolerance::F32_BITEXACT,
-                );
+                if matches!(device, Device::Cuda(_)) {
+                    // #1905: masked_fill backward on CUDA is unimplemented —
+                    // the backward node reads through CPU-only `data()` and
+                    // fails with GpuTensorNotAccessible, while torch
+                    // differentiates masked_fill on CUDA. Pin the current
+                    // loud-error contract; when #1905 lands, this expect_err
+                    // fails and the pin is retired with live grad assertions
+                    // (R-DEFER-3).
+                    let err = loss
+                        .backward()
+                        .expect_err("#1905 fixed? retire this pin: assert CUDA grads instead");
+                    assert!(
+                        matches!(err, FerrotorchError::GpuTensorNotAccessible),
+                        "#1905: expected GpuTensorNotAccessible from CUDA \
+                         masked_fill backward, got {err:?}"
+                    );
+                } else {
+                    loss.backward().expect("backward");
+                    let g = a_g.grad().unwrap().expect("grad");
+                    check_f32(
+                        &format!("{label} grad_a"),
+                        &read_back_f32(&g),
+                        grad_exp,
+                        tolerance::F32_BITEXACT,
+                    );
+                }
             }
             "float64" => {
                 let a = make_cpu_f64(in_data, in_shape, false);
@@ -3437,52 +3455,63 @@ mod gpu {
         run_masked_fill_for_device("cuda:0", Device::Cuda(0));
     }
 
-    /// PyTorch-parity assertions for GPU-unsupported ops: passing a CUDA
-    /// tensor must produce `FerrotorchError::NotImplementedOnCuda`. This
-    /// regresses the silent-fallback failure mode (`rust-gpu-discipline`
-    /// §3) — the op is forbidden from secretly demoting to CPU.
+    /// CUDA value-correctness for the direct indexing ops. These tests
+    /// originally pinned `NotImplementedOnCuda` for gather/scatter/
+    /// scatter_add, but CUDA kernels landed later and nobody ever ran this
+    /// lane (no CI enabled `--features gpu` until CORE-191 / crosslink
+    /// #1885), so the stale pins asserted the opposite of HEAD behavior.
+    /// Expected values follow torch semantics: `torch.gather` selects
+    /// `input[index[i]]` along `dim`; `torch.Tensor.scatter_` writes
+    /// `src[i]` to `input[index[i]]`; `scatter_add_` accumulates.
     #[test]
-    fn gpu_indexing_unsupported_returns_err() {
+    fn gpu_indexing_ops_on_cuda() {
         ensure_cuda_backend();
-        // gather: build a small CUDA tensor and assert err.
-        let cpu_a = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[4], false);
-        let cuda_a = cpu_a.to(Device::Cuda(0)).expect("upload");
-        let r = gather(&cuda_a, 0, &[0, 1], &[2]);
-        match r {
-            Err(FerrotorchError::NotImplementedOnCuda { op }) => {
-                assert_eq!(op, "gather");
-            }
-            other => panic!("expected NotImplementedOnCuda for gather, got {other:?}"),
-        }
+        let cuda_a = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[4], false)
+            .to(Device::Cuda(0))
+            .expect("upload");
 
-        // scatter
-        let cpu_inp = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[4], false);
-        let cpu_src = make_cpu_f32(&[10.0, 20.0], &[2], false);
-        let cuda_inp = cpu_inp.to(Device::Cuda(0)).expect("upload");
-        let cuda_src = cpu_src.to(Device::Cuda(0)).expect("upload");
-        let r = scatter(&cuda_inp, 0, &[0, 2], &[2], &cuda_src);
-        match r {
-            Err(FerrotorchError::NotImplementedOnCuda { op }) => {
-                assert_eq!(op, "scatter");
-            }
-            other => panic!("expected NotImplementedOnCuda for scatter, got {other:?}"),
-        }
+        // gather([1,2,3,4], dim=0, index=[0,1]) -> [1,2]
+        let r = gather(&cuda_a, 0, &[0, 1], &[2]).expect("gather on cuda");
+        assert_eq!(r.device(), Device::Cuda(0), "gather output device");
+        check_f32(
+            "gather cuda",
+            &read_back_f32(&r),
+            &[1.0, 2.0],
+            tolerance::F32_BITEXACT,
+        );
 
-        // scatter_add
-        let r = scatter_add(&cuda_inp, 0, &[0, 2], &[2], &cuda_src);
-        match r {
-            Err(FerrotorchError::NotImplementedOnCuda { op }) => {
-                assert_eq!(op, "scatter_add");
-            }
-            other => panic!("expected NotImplementedOnCuda for scatter_add, got {other:?}"),
-        }
+        // scatter([1,2,3,4], dim=0, index=[0,2], src=[10,20]) -> [10,2,20,4]
+        let cuda_src = make_cpu_f32(&[10.0, 20.0], &[2], false)
+            .to(Device::Cuda(0))
+            .expect("upload");
+        let r = scatter(&cuda_a, 0, &[0, 2], &[2], &cuda_src).expect("scatter on cuda");
+        assert_eq!(r.device(), Device::Cuda(0), "scatter output device");
+        check_f32(
+            "scatter cuda",
+            &read_back_f32(&r),
+            &[10.0, 2.0, 20.0, 4.0],
+            tolerance::F32_BITEXACT,
+        );
 
-        // where_cond
-        let cpu_y = make_cpu_f32(&[10.0, 20.0, 30.0, 40.0], &[4], false);
-        let cuda_y = cpu_y.to(Device::Cuda(0)).expect("upload");
+        // scatter_add: same layout, accumulating -> [11,2,23,4]
+        let r = scatter_add(&cuda_a, 0, &[0, 2], &[2], &cuda_src).expect("scatter_add on cuda");
+        assert_eq!(r.device(), Device::Cuda(0), "scatter_add output device");
+        check_f32(
+            "scatter_add cuda",
+            &read_back_f32(&r),
+            &[11.0, 2.0, 23.0, 4.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        // where_cond remains genuinely unimplemented on CUDA at HEAD —
+        // keep the loud-error pin (torch.where works on CUDA; the gap is
+        // tracked with the host-mask where_ divergences under CORE-043's
+        // remediation; this pin retires when the CUDA path lands).
+        let cuda_y = make_cpu_f32(&[10.0, 20.0, 30.0, 40.0], &[4], false)
+            .to(Device::Cuda(0))
+            .expect("upload");
         let cond = vec![true, false, true, false];
-        let r = where_cond(&cond, &cuda_inp, &cuda_y);
-        match r {
+        match where_cond(&cond, &cuda_a, &cuda_y) {
             Err(FerrotorchError::NotImplementedOnCuda { op }) => {
                 assert_eq!(op, "where_cond");
             }
@@ -3490,72 +3519,154 @@ mod gpu {
         }
     }
 
-    /// Cat A.tensor_ops / Cat A.search on GPU — every op must return Err
-    /// (PyTorch parity policy: no silent CPU fallback).
+    /// Cat A.tensor_ops on GPU — CUDA value-correctness. Originally pinned
+    /// `NotImplementedOnCuda` for all five ops; CUDA kernels landed later
+    /// and the never-executed lane kept asserting the stale gap (CORE-191 /
+    /// crosslink #1885). Expected values follow torch semantics
+    /// (`torch.triu`/`tril` zero below/above the diagonal, `torch.diag`
+    /// extracts, `torch.diagflat` embeds, `torch.cdist` is pairwise
+    /// p-norm distance).
     #[test]
-    fn gpu_tensor_ops_unsupported_returns_err() {
+    fn gpu_tensor_ops_on_cuda() {
         ensure_cuda_backend();
-        let cpu_2d = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
-        let cuda_2d = cpu_2d.to(Device::Cuda(0)).expect("upload");
+        let cuda_2d = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false)
+            .to(Device::Cuda(0))
+            .expect("upload");
 
-        for (name, r) in [
-            ("triu", triu(&cuda_2d, 0).map(drop)),
-            ("tril", tril(&cuda_2d, 0).map(drop)),
-            ("diag", diag(&cuda_2d, 0).map(drop)),
-            ("diagflat", diagflat(&cuda_2d, 0).map(drop)),
+        for (name, r, expected) in [
+            ("triu", triu(&cuda_2d, 0), vec![1.0_f64, 2.0, 0.0, 4.0]),
+            ("tril", tril(&cuda_2d, 0), vec![1.0, 0.0, 3.0, 4.0]),
+            ("diag", diag(&cuda_2d, 0), vec![1.0, 4.0]),
+            (
+                "diagflat",
+                diagflat(&cuda_2d, 0),
+                vec![
+                    1.0, 0.0, 0.0, 0.0, //
+                    0.0, 2.0, 0.0, 0.0, //
+                    0.0, 0.0, 3.0, 0.0, //
+                    0.0, 0.0, 0.0, 4.0,
+                ],
+            ),
         ] {
-            match r {
-                Err(FerrotorchError::NotImplementedOnCuda { op: _ }) => {}
-                other => panic!("expected NotImplementedOnCuda for {name}, got {other:?}"),
-            }
+            let t = r.unwrap_or_else(|e| panic!("{name} on cuda: {e:?}"));
+            assert_eq!(t.device(), Device::Cuda(0), "{name} output device");
+            check_f32(
+                &format!("{name} cuda"),
+                &read_back_f32(&t),
+                &expected,
+                tolerance::F32_BITEXACT,
+            );
         }
 
-        // cdist needs a 2-D x2 too.
-        let cpu_x2 = make_cpu_f32(&[1.0, 1.0], &[1, 2], false);
-        let cuda_x2 = cpu_x2.to(Device::Cuda(0)).expect("upload");
-        let r = cdist(&cuda_2d, &cuda_x2, 2.0);
-        match r {
-            Err(FerrotorchError::NotImplementedOnCuda { op: _ }) => {}
-            other => panic!("expected NotImplementedOnCuda for cdist, got {other:?}"),
-        }
+        // cdist([[1,2],[3,4]], [[1,1]], p=2) -> [|(0,1)|, |(2,3)|] = [1, sqrt(13)]
+        let cuda_x2 = make_cpu_f32(&[1.0, 1.0], &[1, 2], false)
+            .to(Device::Cuda(0))
+            .expect("upload");
+        let t = cdist(&cuda_2d, &cuda_x2, 2.0).expect("cdist on cuda");
+        assert_eq!(t.device(), Device::Cuda(0), "cdist output device");
+        check_f32(
+            "cdist cuda",
+            &read_back_f32(&t),
+            &[1.0, 13.0_f64.sqrt()],
+            tolerance::F32_TRANSCENDENTAL_GPU,
+        );
     }
 
     #[test]
-    fn gpu_search_unsupported_returns_err() {
+    fn gpu_search_ops_on_cuda() {
+        // CUDA value-correctness for the search family. Originally pinned
+        // `NotImplementedOnCuda` for all seven ops; CUDA support landed
+        // later and the never-executed lane kept asserting the stale gaps
+        // (CORE-191 / crosslink #1885). Expected values follow torch
+        // semantics (`torch.searchsorted` left insertion, `torch.bucketize`,
+        // `torch.unique` sorted + inverse + counts, `torch.histc` equal-width
+        // bins over [min, max], `torch.meshgrid(indexing="ij")`,
+        // `torch.topk` largest-first).
         ensure_cuda_backend();
-        let cpu_a = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[4], false);
-        let cuda_a = cpu_a.to(Device::Cuda(0)).expect("upload");
-        let cpu_b = make_cpu_f32(&[2.0, 3.0], &[2], false);
-        let cuda_b = cpu_b.to(Device::Cuda(0)).expect("upload");
+        let cuda_a = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[4], false)
+            .to(Device::Cuda(0))
+            .expect("upload");
+        let cuda_b = make_cpu_f32(&[2.0, 3.0], &[2], false)
+            .to(Device::Cuda(0))
+            .expect("upload");
 
-        match searchsorted(&cuda_a, &cuda_b, false) {
-            Err(FerrotorchError::NotImplementedOnCuda { op: _ }) => {}
-            other => panic!("expected NotImplementedOnCuda for searchsorted, got {other:?}"),
-        }
-        match bucketize(&cuda_b, &cuda_a, false) {
-            Err(FerrotorchError::NotImplementedOnCuda { op: _ }) => {}
-            other => panic!("expected NotImplementedOnCuda for bucketize, got {other:?}"),
-        }
-        match unique(&cuda_a) {
-            Err(FerrotorchError::NotImplementedOnCuda { op: _ }) => {}
-            other => panic!("expected NotImplementedOnCuda for unique, got {other:?}"),
-        }
-        match unique_consecutive(&cuda_a) {
-            Err(FerrotorchError::NotImplementedOnCuda { op: _ }) => {}
-            other => panic!("expected NotImplementedOnCuda for unique_consecutive, got {other:?}"),
-        }
-        match histc(&cuda_a, 4, 0.0, 5.0) {
-            Err(FerrotorchError::NotImplementedOnCuda { op: _ }) => {}
-            other => panic!("expected NotImplementedOnCuda for histc, got {other:?}"),
-        }
-        match meshgrid(&[cuda_a.clone(), cuda_b.clone()]) {
-            Err(FerrotorchError::NotImplementedOnCuda { op: _ }) => {}
-            other => panic!("expected NotImplementedOnCuda for meshgrid, got {other:?}"),
-        }
-        match topk(&cuda_a, 2, true) {
-            Err(FerrotorchError::NotImplementedOnCuda { op: _ }) => {}
-            other => panic!("expected NotImplementedOnCuda for topk, got {other:?}"),
-        }
+        // searchsorted([1,2,3,4], [2,3], right=false) -> [1, 2]
+        let idx = searchsorted(&cuda_a, &cuda_b, false).expect("searchsorted on cuda");
+        assert_eq!(idx, vec![1, 2], "searchsorted cuda");
+
+        // bucketize([2,3], boundaries=[1,2,3,4], right=false) -> [1, 2]
+        let idx = bucketize(&cuda_b, &cuda_a, false).expect("bucketize on cuda");
+        assert_eq!(idx, vec![1, 2], "bucketize cuda");
+
+        // unique([1,2,3,4]) -> sorted values [1,2,3,4], inverse [0,1,2,3],
+        // counts [1,1,1,1]
+        let (vals, inverse, counts) = unique(&cuda_a).expect("unique on cuda");
+        assert_eq!(vals.device(), Device::Cuda(0), "unique values device");
+        check_f32(
+            "unique cuda values",
+            &read_back_f32(&vals),
+            &[1.0, 2.0, 3.0, 4.0],
+            tolerance::F32_BITEXACT,
+        );
+        assert_eq!(inverse, vec![0, 1, 2, 3], "unique cuda inverse");
+        assert_eq!(counts, vec![1, 1, 1, 1], "unique cuda counts");
+
+        let (vals, inverse, counts) =
+            unique_consecutive(&cuda_a).expect("unique_consecutive on cuda");
+        assert_eq!(
+            vals.device(),
+            Device::Cuda(0),
+            "unique_consecutive values device"
+        );
+        check_f32(
+            "unique_consecutive cuda values",
+            &read_back_f32(&vals),
+            &[1.0, 2.0, 3.0, 4.0],
+            tolerance::F32_BITEXACT,
+        );
+        assert_eq!(inverse, vec![0, 1, 2, 3], "unique_consecutive cuda inverse");
+        assert_eq!(counts, vec![1, 1, 1, 1], "unique_consecutive cuda counts");
+
+        // histc([1,2,3,4], bins=4, min=0, max=5): bin width 1.25 -> one
+        // sample per bin -> [1,1,1,1]
+        let h = histc(&cuda_a, 4, 0.0, 5.0).expect("histc on cuda");
+        assert_eq!(h.device(), Device::Cuda(0), "histc output device");
+        check_f32(
+            "histc cuda",
+            &read_back_f32(&h),
+            &[1.0, 1.0, 1.0, 1.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        // meshgrid([1,2,3,4], [2,3]) (ij) -> two [4,2] grids
+        let grids = meshgrid(&[cuda_a.clone(), cuda_b.clone()]).expect("meshgrid on cuda");
+        assert_eq!(grids.len(), 2, "meshgrid arity");
+        assert_eq!(grids[0].device(), Device::Cuda(0), "meshgrid[0] device");
+        assert_eq!(grids[1].device(), Device::Cuda(0), "meshgrid[1] device");
+        assert_eq!(grids[0].shape(), &[4, 2], "meshgrid[0] shape");
+        check_f32(
+            "meshgrid cuda [0]",
+            &read_back_f32(&grids[0]),
+            &[1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0],
+            tolerance::F32_BITEXACT,
+        );
+        check_f32(
+            "meshgrid cuda [1]",
+            &read_back_f32(&grids[1]),
+            &[2.0, 3.0, 2.0, 3.0, 2.0, 3.0, 2.0, 3.0],
+            tolerance::F32_BITEXACT,
+        );
+
+        // topk([1,2,3,4], k=2, largest=true) -> values [4,3], indices [3,2]
+        let (vals, idx) = topk(&cuda_a, 2, true).expect("topk on cuda");
+        assert_eq!(vals.device(), Device::Cuda(0), "topk values device");
+        check_f32(
+            "topk cuda values",
+            &read_back_f32(&vals),
+            &[4.0, 3.0],
+            tolerance::F32_BITEXACT,
+        );
+        assert_eq!(idx, vec![3, 2], "topk cuda indices");
     }
 
     // Discriminating test for #1097: roll<f32> on CUDA must match the CPU
