@@ -54,9 +54,14 @@ fn factor(shape: &[usize], dim: usize) -> (usize, usize, usize) {
 /// Upload a host `&[usize]` index slice to a GPU-resident `i64` buffer on
 /// `ordinal` (PyTorch index tensors are `int64`). The dim-aware
 /// gather/scatter CUDA kernels read the index with `ld.global.s64`, so the
-/// host indices are widened to `i64` before the copy. The core validator
-/// (`validate_gather_shapes`) has already rejected out-of-range values, so
-/// every uploaded index is in-bounds along `dim`.
+/// host indices are widened to `i64` before the copy.
+///
+/// Precondition (CORE-125 / #1819): every caller runs
+/// `validate_gather_shapes` (rank equality, exact `index.len() ==
+/// product(index_shape)`, per-value bounds along `dim`) PLUS the
+/// kernel-consumption guard (`checked_kernel_numel` vs the index/src
+/// lengths) BEFORE this upload, so every uploaded index is in-bounds along
+/// `dim` and the resident buffer covers every element the kernel reads.
 fn upload_index_i64(index: &[usize], ordinal: usize) -> FerrotorchResult<GpuBufferHandle> {
     let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
     let widened: Vec<i64> = index.iter().map(|&v| v as i64).collect();
@@ -106,28 +111,87 @@ fn increment_coords(coords: &mut [usize], shape: &[usize]) -> bool {
     false
 }
 
-/// Validate that `index` shape matches `input` shape on all dimensions
-/// except `dim`, and that every index value is in-bounds for `input.shape()[dim]`.
+/// Checked element count of a claimed `index_shape` — returns
+/// `InvalidArgument` when the product overflows `usize` (CORE-007 class)
+/// instead of wrapping in release builds.
+fn checked_index_numel(index_shape: &[usize]) -> FerrotorchResult<usize> {
+    index_shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!(
+                "gather/scatter: index_shape {index_shape:?} element count overflows usize"
+            ),
+        })
+}
+
+/// Checked element count the dim-aware CUDA kernel consumes for a
+/// `[outer, dim_size, inner]` launch (see `factor`). The PTX kernels in
+/// `ferrotorch-gpu/src/scatter_gather_kernels.rs` read `index[t]` (and
+/// `src[t]` for the scatter family) for every `t in [0, outer * dim_size *
+/// inner)`, so the host buffers must cover this count before dispatch.
+fn checked_kernel_numel(
+    op: &'static str,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+) -> FerrotorchResult<usize> {
+    outer
+        .checked_mul(dim_size)
+        .and_then(|v| v.checked_mul(inner))
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: CUDA kernel element count overflows usize \
+                 (outer={outer}, dim={dim_size}, inner={inner})"
+            ),
+        })
+}
+
+/// Validate the flat `index` slice and its claimed `index_shape` against
+/// `input` as ONE coherent logical tensor (CORE-125 / #1819):
 ///
-/// This mirrors PyTorch's gather/scatter shape requirements:
-///   - `index.ndim() == input.ndim()`
-///   - For all d != dim: `index.shape()[d] <= input.shape()[d]`  (gather)
-///     or `index.shape()[d] <= src.shape()[d]` (scatter)
+///   - `index.ndim() == input.ndim()` — rank equality, mirroring
+///     `gather_shape_check` / `scatter_shape_check` in
+///     `aten/src/ATen/native/ScatterGatherChecks.h:41-124` (invoked by the
+///     upstream meta functions BEFORE any kernel is selected,
+///     `aten/src/ATen/native/TensorAdvancedIndexing.cpp:179,192`);
+///   - `index.len() == product(index_shape)` with a CHECKED product — in
+///     PyTorch the index is a real tensor so data length and shape agree by
+///     construction; ferrotorch's flat-slice API must enforce the coherence
+///     explicitly before ANY element count is derived from the shape;
+///   - every index value is in-bounds for `input.shape()[dim]`.
 ///
-/// We enforce the simpler check that ndim matches.
+/// PyTorch's per-axis `index.shape[d] <= input.shape[d]` (gather) /
+/// `<= src.shape[d]` (scatter) constraints are tracked separately (#1820)
+/// and NOT enforced here yet.
+///
+/// Returns the validated index element count (== `index_data.len()`).
 fn validate_gather_shapes(
     input_shape: &[usize],
     dim: usize,
     index_shape: &[usize],
     index_data: &[usize],
     axis_size: usize,
-) -> FerrotorchResult<()> {
+) -> FerrotorchResult<usize> {
     if input_shape.len() != index_shape.len() {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
                 "gather/scatter: input ndim ({}) must equal index ndim ({})",
                 input_shape.len(),
                 index_shape.len()
+            ),
+        });
+    }
+    // The host slice and its claimed shape are one logical tensor: their
+    // element counts must agree exactly (CORE-125 metadata coherence).
+    let index_numel = checked_index_numel(index_shape)?;
+    if index_data.len() != index_numel {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "gather/scatter: index slice has {} elements but index_shape {:?} implies {}",
+                index_data.len(),
+                index_shape,
+                index_numel
             ),
         });
     }
@@ -141,7 +205,7 @@ fn validate_gather_shapes(
             });
         }
     }
-    Ok(())
+    Ok(index_numel)
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +231,48 @@ pub fn gather<T: Float>(
     index: &[usize],
     index_shape: &[usize],
 ) -> FerrotorchResult<Tensor<T>> {
+    // PyTorch treats 0-D tensors as if they had `ensure_nonempty_dim(self.dim()) == 1`
+    // for gather/scatter shape checks (see `ScatterGatherChecks.h:44`
+    // `ensure_nonempty_dim`). Mirror that here: a 0-D input acts like a
+    // 1-element tensor of shape `[1]` along the only valid axis (dim 0). When
+    // index is also 0-D (rank-0 scalar index), promote it to shape `[1]` so
+    // the ndim-equality validation succeeds; the output shape preserves the
+    // caller's original `index_shape` (still `[]`) so 0-D in → 0-D out.
+    // (The 0-D promotion is only reachable on the CPU path — the CUDA branch
+    // below rejects 0-D inputs before dispatch.)
+    let ndim = input.ndim();
+    if input.is_cuda() && ndim == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "gather: 0-D CUDA input not supported".into(),
+        });
+    }
+    let effective_input_shape: Vec<usize> = if ndim == 0 {
+        vec![1]
+    } else {
+        input.shape().to_vec()
+    };
+    let effective_ndim = effective_input_shape.len();
+    let effective_index_shape: Vec<usize> = if ndim == 0 && index_shape.is_empty() {
+        vec![1]
+    } else {
+        index_shape.to_vec()
+    };
+    let dim = normalize_axis(dim, effective_ndim)?;
+
+    // CORE-125 (#1819): the host index slice and its claimed shape are
+    // validated as ONE checked logical tensor (rank, exact length, value
+    // bounds) BEFORE any CPU loop or CUDA upload/dispatch — mirroring
+    // upstream, where `gather_shape_check` runs in the meta function before
+    // any device kernel is selected
+    // (`aten/src/ATen/native/TensorAdvancedIndexing.cpp:179`).
+    let index_numel = validate_gather_shapes(
+        &effective_input_shape,
+        dim,
+        &effective_index_shape,
+        index,
+        effective_input_shape[dim],
+    )?;
+
     // CUDA-resident fast path: `input` on a CUDA device, f32/f64 dtype. The
     // host `&[usize]` index is uploaded as a GPU-resident `i64` buffer; the
     // dim-aware PTX kernel runs entirely on-device and the result stays
@@ -175,13 +281,6 @@ pub fn gather<T: Float>(
     if input.is_cuda() {
         match T::dtype() {
             DType::F32 | DType::F64 => {
-                let ndim = input.ndim();
-                if ndim == 0 {
-                    return Err(FerrotorchError::InvalidArgument {
-                        message: "gather: 0-D CUDA input not supported".into(),
-                    });
-                }
-                let dim = normalize_axis(dim, ndim)?;
                 // The dim-aware PTX kernel assumes a C-contiguous
                 // `[outer, axis, inner]` physical buffer. A transposed/permuted
                 // CUDA view has logical shape != physical layout, so materialise
@@ -190,11 +289,28 @@ pub fn gather<T: Float>(
                 let input = input.contiguous()?;
                 let input_shape = input.shape().to_vec();
                 let (outer, in_dim, inner) = factor(&input_shape, dim);
-                let out_dim = if index_shape.is_empty() {
-                    1
-                } else {
-                    index_shape[dim]
-                };
+                let out_dim = index_shape[dim];
+                // The kernel reads `index[t]` for every `t` in
+                // `[0, outer*out_dim*inner)` with `outer`/`inner` factored
+                // from the INPUT shape, and its output buffer holds exactly
+                // that many elements while the result tensor claims
+                // `index_shape`. Until the per-axis index-shape constraints
+                // land (#1820) the CUDA path therefore requires the index
+                // numel to equal the kernel consumption exactly — otherwise
+                // the kernel would read past the uploaded index buffer, or
+                // the result tensor's shape would disagree with its buffer.
+                let consumed = checked_kernel_numel("gather", outer, out_dim, inner)?;
+                if index_numel != consumed {
+                    return Err(FerrotorchError::ShapeMismatch {
+                        message: format!(
+                            "gather: CUDA kernel consumes {consumed} index elements \
+                             (outer={outer} x dim={out_dim} x inner={inner} from input \
+                             shape {input_shape:?}) but index_shape {index_shape:?} has \
+                             {index_numel}; non-dim axes must match the input on the \
+                             CUDA path until #1820"
+                        ),
+                    });
+                }
                 let input_handle = input.gpu_handle()?;
                 let ordinal = input_handle.device_ordinal();
                 let idx_handle = upload_index_i64(index, ordinal)?;
@@ -236,38 +352,10 @@ pub fn gather<T: Float>(
         }
     }
 
-    // PyTorch treats 0-D tensors as if they had `ensure_nonempty_dim(self.dim()) == 1`
-    // for gather/scatter shape checks (see `ScatterGatherChecks.h:44`
-    // `ensure_nonempty_dim`). Mirror that here: a 0-D input acts like a
-    // 1-element tensor of shape `[1]` along the only valid axis (dim 0). When
-    // index is also 0-D (rank-0 scalar index), promote it to shape `[1]` so
-    // the ndim-equality validation succeeds; the output shape preserves the
-    // caller's original `index_shape` (still `[]`) so 0-D in → 0-D out.
-    let ndim = input.ndim();
-    let effective_input_shape: Vec<usize> = if ndim == 0 {
-        vec![1]
-    } else {
-        input.shape().to_vec()
-    };
-    let effective_ndim = effective_input_shape.len();
-    let effective_index_shape: Vec<usize> = if ndim == 0 && index_shape.is_empty() {
-        vec![1]
-    } else {
-        index_shape.to_vec()
-    };
-    let dim = normalize_axis(dim, effective_ndim)?;
-
-    validate_gather_shapes(
-        &effective_input_shape,
-        dim,
-        &effective_index_shape,
-        index,
-        effective_input_shape[dim],
-    )?;
     let input_shape: &[usize] = &effective_input_shape;
 
     let input_data = input.data_vec()?;
-    let out_numel: usize = index_shape.iter().product();
+    let out_numel = index_numel;
     let mut output = vec![<T as num_traits::Zero>::zero(); out_numel];
 
     let mut coords = vec![0usize; effective_ndim];
@@ -332,6 +420,23 @@ pub fn scatter<T: Float>(
     let dim = normalize_axis(dim, ndim)?;
     let input_shape = input.shape();
 
+    // CORE-125 (#1819): validate the index metadata + values and the src
+    // length BEFORE the CUDA fast path — mirroring upstream, where
+    // `scatter_shape_check` runs in the meta function before any device
+    // kernel is selected
+    // (`aten/src/ATen/native/TensorAdvancedIndexing.cpp:192`).
+    let index_numel =
+        validate_gather_shapes(input_shape, dim, index_shape, index, input_shape[dim])?;
+    if src.numel() < index_numel {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "scatter: src has {} elements but index has {}",
+                src.numel(),
+                index_numel
+            ),
+        });
+    }
+
     // CUDA-resident fast path: `input` + `src` on the same CUDA device,
     // f32/f64. The host index uploads as a resident `i64` buffer; the result
     // (a clone of `input` with the scattered writes) stays GPU-resident.
@@ -355,6 +460,25 @@ pub fn scatter<T: Float>(
                 let input_shape: &[usize] = input.shape();
                 let (outer, out_dim, inner) = factor(input_shape, dim);
                 let idx_dim = index_shape[dim];
+                // The kernel reads `index[t]` AND `src[t]` for every `t` in
+                // `[0, outer*idx_dim*inner)` with `outer`/`inner` factored
+                // from the INPUT shape: both host-supplied buffers must cover
+                // that count or the kernel reads past them (CORE-125; the
+                // per-axis constraints that make consumption == numel exactly
+                // are #1820).
+                let consumed = checked_kernel_numel("scatter", outer, idx_dim, inner)?;
+                if index_numel < consumed || src.numel() < consumed {
+                    return Err(FerrotorchError::ShapeMismatch {
+                        message: format!(
+                            "scatter: CUDA kernel consumes {consumed} index/src elements \
+                             (outer={outer} x dim={idx_dim} x inner={inner} from input \
+                             shape {input_shape:?}) but index has {index_numel} and src \
+                             has {}; non-dim axes must match the input on the CUDA path \
+                             until #1820",
+                            src.numel()
+                        ),
+                    });
+                }
                 let input_handle = input.gpu_handle()?;
                 let ordinal = input_handle.device_ordinal();
                 let idx_handle = upload_index_i64(index, ordinal)?;
@@ -398,19 +522,6 @@ pub fn scatter<T: Float>(
             }
             _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "scatter" }),
         }
-    }
-
-    validate_gather_shapes(input_shape, dim, index_shape, index, input_shape[dim])?;
-
-    let index_numel: usize = index_shape.iter().product();
-    if src.numel() < index_numel {
-        return Err(FerrotorchError::ShapeMismatch {
-            message: format!(
-                "scatter: src has {} elements but index has {}",
-                src.numel(),
-                index_numel
-            ),
-        });
     }
 
     let mut output = input.data_vec()?;
@@ -487,6 +598,13 @@ pub fn scatter_value<T: Float>(
     let dim = normalize_axis(dim, ndim)?;
     let input_shape = input.shape();
 
+    // CORE-125 (#1819): validate the index metadata + values BEFORE the CUDA
+    // fast path (upstream runs `scatter_shape_check` in the meta function
+    // before any device kernel is selected,
+    // `aten/src/ATen/native/TensorAdvancedIndexing.cpp:192`).
+    let index_numel =
+        validate_gather_shapes(input_shape, dim, index_shape, index, input_shape[dim])?;
+
     // CUDA-resident fast path: `input` on a CUDA device, f32/f64. The host
     // index uploads as a resident `i64` buffer; the broadcast scalar `value`
     // is written at every named position by the on-device kernel and the
@@ -501,6 +619,23 @@ pub fn scatter_value<T: Float>(
                 let input_shape: &[usize] = input.shape();
                 let (outer, out_dim, inner) = factor(input_shape, dim);
                 let idx_dim = index_shape[dim];
+                // The kernel reads `index[t]` for every `t` in
+                // `[0, outer*idx_dim*inner)` with `outer`/`inner` factored
+                // from the INPUT shape: the host index buffer must cover that
+                // count or the kernel reads past it (CORE-125; per-axis
+                // constraints are #1820).
+                let consumed = checked_kernel_numel("scatter_value", outer, idx_dim, inner)?;
+                if index_numel < consumed {
+                    return Err(FerrotorchError::ShapeMismatch {
+                        message: format!(
+                            "scatter_value: CUDA kernel consumes {consumed} index elements \
+                             (outer={outer} x dim={idx_dim} x inner={inner} from input \
+                             shape {input_shape:?}) but index_shape {index_shape:?} has \
+                             {index_numel}; non-dim axes must match the input on the CUDA \
+                             path until #1820"
+                        ),
+                    });
+                }
                 let input_handle = input.gpu_handle()?;
                 let ordinal = input_handle.device_ordinal();
                 let idx_handle = upload_index_i64(index, ordinal)?;
@@ -558,10 +693,6 @@ pub fn scatter_value<T: Float>(
             }
         }
     }
-
-    validate_gather_shapes(input_shape, dim, index_shape, index, input_shape[dim])?;
-
-    let index_numel: usize = index_shape.iter().product();
 
     let mut output = input.data_vec()?;
 
@@ -631,6 +762,22 @@ pub fn scatter_add<T: Float>(
     let dim = normalize_axis(dim, ndim)?;
     let input_shape = input.shape();
 
+    // CORE-125 (#1819): validate the index metadata + values and the src
+    // length BEFORE the CUDA fast path (upstream runs `scatter_shape_check`
+    // in the meta function before any device kernel is selected,
+    // `aten/src/ATen/native/TensorAdvancedIndexing.cpp:192`).
+    let index_numel =
+        validate_gather_shapes(input_shape, dim, index_shape, index, input_shape[dim])?;
+    if src.numel() < index_numel {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "scatter_add: src has {} elements but index has {}",
+                src.numel(),
+                index_numel
+            ),
+        });
+    }
+
     // CUDA-resident fast path: `input` + `src` on the same CUDA device,
     // f32/f64. The host index uploads as a resident `i64` buffer; the kernel
     // accumulates with an ATOMIC add so duplicate index values targeting the
@@ -656,6 +803,24 @@ pub fn scatter_add<T: Float>(
                 let input_shape: &[usize] = input.shape();
                 let (outer, out_dim, inner) = factor(input_shape, dim);
                 let idx_dim = index_shape[dim];
+                // The kernel reads `index[t]` AND `src[t]` for every `t` in
+                // `[0, outer*idx_dim*inner)` with `outer`/`inner` factored
+                // from the INPUT shape: both host-supplied buffers must cover
+                // that count or the kernel reads past them (CORE-125;
+                // per-axis constraints are #1820).
+                let consumed = checked_kernel_numel("scatter_add", outer, idx_dim, inner)?;
+                if index_numel < consumed || src.numel() < consumed {
+                    return Err(FerrotorchError::ShapeMismatch {
+                        message: format!(
+                            "scatter_add: CUDA kernel consumes {consumed} index/src \
+                             elements (outer={outer} x dim={idx_dim} x inner={inner} from \
+                             input shape {input_shape:?}) but index has {index_numel} and \
+                             src has {}; non-dim axes must match the input on the CUDA \
+                             path until #1820",
+                            src.numel()
+                        ),
+                    });
+                }
                 let input_handle = input.gpu_handle()?;
                 let ordinal = input_handle.device_ordinal();
                 let idx_handle = upload_index_i64(index, ordinal)?;
@@ -699,19 +864,6 @@ pub fn scatter_add<T: Float>(
             }
             _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "scatter_add" }),
         }
-    }
-
-    validate_gather_shapes(input_shape, dim, index_shape, index, input_shape[dim])?;
-
-    let index_numel: usize = index_shape.iter().product();
-    if src.numel() < index_numel {
-        return Err(FerrotorchError::ShapeMismatch {
-            message: format!(
-                "scatter_add: src has {} elements but index has {}",
-                src.numel(),
-                index_numel
-            ),
-        });
     }
 
     let mut output = input.data_vec()?;
