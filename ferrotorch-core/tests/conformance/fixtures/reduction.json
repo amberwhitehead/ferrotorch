@@ -5,7 +5,7 @@
     "cuda_available": true,
     "python_executable": "/usr/sbin/python3",
     "python_platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
-    "generated_at": "2026-05-06T14:10:38.685735+00:00",
+    "generated_at": "2026-06-11T05:33:16.321237+00:00",
     "rng_seed": 195939070,
     "dtypes": [
       "float32",
@@ -11235,6 +11235,814 @@
         0,
         0,
         0
+      ]
+    },
+    {
+      "op": "cummax",
+      "tag": "tie_basic",
+      "dtype": "float32",
+      "device": "cpu",
+      "axis": 0,
+      "a_shape": [
+        5
+      ],
+      "a_data": [
+        1.0,
+        3.0,
+        3.0,
+        2.0,
+        3.0
+      ],
+      "out_shape": [
+        5
+      ],
+      "out_values": [
+        1.0,
+        3.0,
+        3.0,
+        3.0,
+        3.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        2,
+        2,
+        4
+      ]
+    },
+    {
+      "op": "cummax",
+      "tag": "tie_allequal",
+      "dtype": "float32",
+      "device": "cpu",
+      "axis": 0,
+      "a_shape": [
+        3
+      ],
+      "a_data": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "out_shape": [
+        3
+      ],
+      "out_values": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "op": "cummax",
+      "tag": "tie_mat2d_dim1",
+      "dtype": "float32",
+      "device": "cpu",
+      "axis": 1,
+      "a_shape": [
+        2,
+        3
+      ],
+      "a_data": [
+        5.0,
+        5.0,
+        1.0,
+        -2.0,
+        -1.0,
+        -1.0
+      ],
+      "out_shape": [
+        2,
+        3
+      ],
+      "out_values": [
+        5.0,
+        5.0,
+        5.0,
+        -2.0,
+        -1.0,
+        -1.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        1,
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "op": "cummax",
+      "tag": "tie_basic",
+      "dtype": "float64",
+      "device": "cpu",
+      "axis": 0,
+      "a_shape": [
+        5
+      ],
+      "a_data": [
+        1.0,
+        3.0,
+        3.0,
+        2.0,
+        3.0
+      ],
+      "out_shape": [
+        5
+      ],
+      "out_values": [
+        1.0,
+        3.0,
+        3.0,
+        3.0,
+        3.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        2,
+        2,
+        4
+      ]
+    },
+    {
+      "op": "cummax",
+      "tag": "tie_allequal",
+      "dtype": "float64",
+      "device": "cpu",
+      "axis": 0,
+      "a_shape": [
+        3
+      ],
+      "a_data": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "out_shape": [
+        3
+      ],
+      "out_values": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "op": "cummax",
+      "tag": "tie_mat2d_dim1",
+      "dtype": "float64",
+      "device": "cpu",
+      "axis": 1,
+      "a_shape": [
+        2,
+        3
+      ],
+      "a_data": [
+        5.0,
+        5.0,
+        1.0,
+        -2.0,
+        -1.0,
+        -1.0
+      ],
+      "out_shape": [
+        2,
+        3
+      ],
+      "out_values": [
+        5.0,
+        5.0,
+        5.0,
+        -2.0,
+        -1.0,
+        -1.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        1,
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "op": "cummax",
+      "tag": "tie_basic",
+      "dtype": "float32",
+      "device": "cuda:0",
+      "axis": 0,
+      "a_shape": [
+        5
+      ],
+      "a_data": [
+        1.0,
+        3.0,
+        3.0,
+        2.0,
+        3.0
+      ],
+      "out_shape": [
+        5
+      ],
+      "out_values": [
+        1.0,
+        3.0,
+        3.0,
+        3.0,
+        3.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        2,
+        2,
+        4
+      ]
+    },
+    {
+      "op": "cummax",
+      "tag": "tie_allequal",
+      "dtype": "float32",
+      "device": "cuda:0",
+      "axis": 0,
+      "a_shape": [
+        3
+      ],
+      "a_data": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "out_shape": [
+        3
+      ],
+      "out_values": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "op": "cummax",
+      "tag": "tie_mat2d_dim1",
+      "dtype": "float32",
+      "device": "cuda:0",
+      "axis": 1,
+      "a_shape": [
+        2,
+        3
+      ],
+      "a_data": [
+        5.0,
+        5.0,
+        1.0,
+        -2.0,
+        -1.0,
+        -1.0
+      ],
+      "out_shape": [
+        2,
+        3
+      ],
+      "out_values": [
+        5.0,
+        5.0,
+        5.0,
+        -2.0,
+        -1.0,
+        -1.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        1,
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "op": "cummax",
+      "tag": "tie_basic",
+      "dtype": "float64",
+      "device": "cuda:0",
+      "axis": 0,
+      "a_shape": [
+        5
+      ],
+      "a_data": [
+        1.0,
+        3.0,
+        3.0,
+        2.0,
+        3.0
+      ],
+      "out_shape": [
+        5
+      ],
+      "out_values": [
+        1.0,
+        3.0,
+        3.0,
+        3.0,
+        3.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        2,
+        2,
+        4
+      ]
+    },
+    {
+      "op": "cummax",
+      "tag": "tie_allequal",
+      "dtype": "float64",
+      "device": "cuda:0",
+      "axis": 0,
+      "a_shape": [
+        3
+      ],
+      "a_data": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "out_shape": [
+        3
+      ],
+      "out_values": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "op": "cummax",
+      "tag": "tie_mat2d_dim1",
+      "dtype": "float64",
+      "device": "cuda:0",
+      "axis": 1,
+      "a_shape": [
+        2,
+        3
+      ],
+      "a_data": [
+        5.0,
+        5.0,
+        1.0,
+        -2.0,
+        -1.0,
+        -1.0
+      ],
+      "out_shape": [
+        2,
+        3
+      ],
+      "out_values": [
+        5.0,
+        5.0,
+        5.0,
+        -2.0,
+        -1.0,
+        -1.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        1,
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "op": "cummin",
+      "tag": "tie_basic",
+      "dtype": "float32",
+      "device": "cpu",
+      "axis": 0,
+      "a_shape": [
+        5
+      ],
+      "a_data": [
+        3.0,
+        1.0,
+        1.0,
+        2.0,
+        1.0
+      ],
+      "out_shape": [
+        5
+      ],
+      "out_values": [
+        3.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        2,
+        2,
+        4
+      ]
+    },
+    {
+      "op": "cummin",
+      "tag": "tie_allequal",
+      "dtype": "float32",
+      "device": "cpu",
+      "axis": 0,
+      "a_shape": [
+        3
+      ],
+      "a_data": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "out_shape": [
+        3
+      ],
+      "out_values": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "op": "cummin",
+      "tag": "tie_mat2d_dim1",
+      "dtype": "float32",
+      "device": "cpu",
+      "axis": 1,
+      "a_shape": [
+        2,
+        3
+      ],
+      "a_data": [
+        1.0,
+        1.0,
+        5.0,
+        2.0,
+        -1.0,
+        -1.0
+      ],
+      "out_shape": [
+        2,
+        3
+      ],
+      "out_values": [
+        1.0,
+        1.0,
+        1.0,
+        2.0,
+        -1.0,
+        -1.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        1,
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "op": "cummin",
+      "tag": "tie_basic",
+      "dtype": "float64",
+      "device": "cpu",
+      "axis": 0,
+      "a_shape": [
+        5
+      ],
+      "a_data": [
+        3.0,
+        1.0,
+        1.0,
+        2.0,
+        1.0
+      ],
+      "out_shape": [
+        5
+      ],
+      "out_values": [
+        3.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        2,
+        2,
+        4
+      ]
+    },
+    {
+      "op": "cummin",
+      "tag": "tie_allequal",
+      "dtype": "float64",
+      "device": "cpu",
+      "axis": 0,
+      "a_shape": [
+        3
+      ],
+      "a_data": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "out_shape": [
+        3
+      ],
+      "out_values": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "op": "cummin",
+      "tag": "tie_mat2d_dim1",
+      "dtype": "float64",
+      "device": "cpu",
+      "axis": 1,
+      "a_shape": [
+        2,
+        3
+      ],
+      "a_data": [
+        1.0,
+        1.0,
+        5.0,
+        2.0,
+        -1.0,
+        -1.0
+      ],
+      "out_shape": [
+        2,
+        3
+      ],
+      "out_values": [
+        1.0,
+        1.0,
+        1.0,
+        2.0,
+        -1.0,
+        -1.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        1,
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "op": "cummin",
+      "tag": "tie_basic",
+      "dtype": "float32",
+      "device": "cuda:0",
+      "axis": 0,
+      "a_shape": [
+        5
+      ],
+      "a_data": [
+        3.0,
+        1.0,
+        1.0,
+        2.0,
+        1.0
+      ],
+      "out_shape": [
+        5
+      ],
+      "out_values": [
+        3.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        2,
+        2,
+        4
+      ]
+    },
+    {
+      "op": "cummin",
+      "tag": "tie_allequal",
+      "dtype": "float32",
+      "device": "cuda:0",
+      "axis": 0,
+      "a_shape": [
+        3
+      ],
+      "a_data": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "out_shape": [
+        3
+      ],
+      "out_values": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "op": "cummin",
+      "tag": "tie_mat2d_dim1",
+      "dtype": "float32",
+      "device": "cuda:0",
+      "axis": 1,
+      "a_shape": [
+        2,
+        3
+      ],
+      "a_data": [
+        1.0,
+        1.0,
+        5.0,
+        2.0,
+        -1.0,
+        -1.0
+      ],
+      "out_shape": [
+        2,
+        3
+      ],
+      "out_values": [
+        1.0,
+        1.0,
+        1.0,
+        2.0,
+        -1.0,
+        -1.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        1,
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "op": "cummin",
+      "tag": "tie_basic",
+      "dtype": "float64",
+      "device": "cuda:0",
+      "axis": 0,
+      "a_shape": [
+        5
+      ],
+      "a_data": [
+        3.0,
+        1.0,
+        1.0,
+        2.0,
+        1.0
+      ],
+      "out_shape": [
+        5
+      ],
+      "out_values": [
+        3.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        2,
+        2,
+        4
+      ]
+    },
+    {
+      "op": "cummin",
+      "tag": "tie_allequal",
+      "dtype": "float64",
+      "device": "cuda:0",
+      "axis": 0,
+      "a_shape": [
+        3
+      ],
+      "a_data": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "out_shape": [
+        3
+      ],
+      "out_values": [
+        2.0,
+        2.0,
+        2.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "op": "cummin",
+      "tag": "tie_mat2d_dim1",
+      "dtype": "float64",
+      "device": "cuda:0",
+      "axis": 1,
+      "a_shape": [
+        2,
+        3
+      ],
+      "a_data": [
+        1.0,
+        1.0,
+        5.0,
+        2.0,
+        -1.0,
+        -1.0
+      ],
+      "out_shape": [
+        2,
+        3
+      ],
+      "out_values": [
+        1.0,
+        1.0,
+        1.0,
+        2.0,
+        -1.0,
+        -1.0
+      ],
+      "out_indices": [
+        0,
+        1,
+        1,
+        0,
+        1,
+        2
       ]
     },
     {

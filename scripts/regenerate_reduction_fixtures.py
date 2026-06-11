@@ -22,10 +22,13 @@ Coverage (29 surface items split across 5 categories):
   Edge cases: dim=0 vs dim=-1, 1D/2D/3D, cumprod-with-zero
   (`[1.0, 0.0, 2.0, 3.0]` along dim=0), logcumsumexp numerical stability
   (`[100.0, 100.0]`). For cummax/cummin, both .values and .indices are
-  recorded. To avoid PyTorch's "last-tie" vs ferrotorch's "first-tie"
-  index-tracking divergence (a known parity gap surfaced as a separate
-  cascade issue), the cummax/cummin reference inputs use strictly
-  distinct values along the scan dim.
+  recorded. The base inputs use strictly distinct values along the scan
+  dim; the tie regime is covered by dedicated `tie_*` fixtures (CORE-198
+  / #1892) generated from live torch, which keeps the LAST tied index
+  (`std::greater_equal` / `std::less_equal` in ReduceOps.cpp's
+  cummax_cummin_helper). ferrotorch's CPU path matches; the CUDA scan
+  kernels keep the FIRST tied index (strict setp.gt/setp.lt) — tracked
+  as the cascade issue named in conformance_reduction.rs's GPU tie pin.
 
 Cat C/D/E in the dispatch are exclusion-with-implicit-coverage entries
 (`*_forward` ops, backward grad_fn structs, CumExtremeResult struct
@@ -349,11 +352,11 @@ def _cumulative_input(
         # Moderate-magnitude values to keep f32 in the well-behaved band.
         vals = [(i % 7) * 0.25 - 0.5 for i in range(n)]
     elif op in ("cummax", "cummin"):
-        # CRITICAL: use strictly distinct values along the scan dim. PyTorch
-        # uses a "last-tie" index-tracking convention while ferrotorch uses
-        # a "first-tie" convention; this divergence is filed as a separate
-        # cascade issue. The distinct-value case is unambiguous and tests
-        # the values + indices contract without entering the tie regime.
+        # Strictly distinct values along the scan dim keep the BASE fixtures
+        # out of the tie regime so they pinpoint the values+indices contract
+        # in isolation. Tie semantics are NOT excluded from coverage: the
+        # dedicated `tie_*` fixtures from `fixture_cat_b_cumextreme_ties`
+        # (CORE-198 / #1892) pin them against live torch.
         vals = [(i * 1.7 + (i // 3) * 0.3) % 11 - 5 for i in range(n)]
     else:  # cumsum
         vals = [0.5 + i * 0.25 for i in range(n)]
@@ -396,6 +399,60 @@ def fixture_cat_b_cumulative() -> list[dict[str, Any]]:
             for dtype in DTYPES:
                 for shape, axis, tag in CUMULATIVE_SHAPE_AXES:
                     a = _cumulative_input(shape, dtype, device, op)
+                    if op == "cummax":
+                        result = torch.cummax(a, dim=axis)
+                    else:
+                        result = torch.cummin(a, dim=axis)
+                    out.append(
+                        {
+                            "op": op,
+                            "tag": tag,
+                            "dtype": dtype,
+                            "device": device,
+                            "axis": axis,
+                            "a_shape": shape,
+                            "a_data": to_listf(a),
+                            "out_shape": list(result.values.shape),
+                            "out_values": to_listf(result.values),
+                            "out_indices": to_list_int(result.indices),
+                        }
+                    )
+    return out
+
+
+def fixture_cat_b_cumextreme_ties() -> list[dict[str, Any]]:
+    """Tie-regime fixtures for cummax/cummin (CORE-198 / #1892).
+
+    The expectations come from live torch only (R-ORACLE-2). Probed at
+    torch 2.11.0+cu130: torch keeps the LAST tied index on both CPU and
+    CUDA (`torch.cummax(torch.tensor([1.,3.,3.,2.,3.]), 0).indices` ->
+    `[0, 1, 2, 2, 4]`), matching `std::greater_equal` /
+    `std::less_equal` in ReduceOps.cpp's `cummax_cummin_helper`.
+
+    Inputs are chosen per-op so each op actually enters the tie regime
+    (running-extremum ties at multiple positions, including a re-tie
+    after the running value was displaced — index 4 in `tie_basic`).
+    """
+    tie_inputs: dict[str, list[tuple[str, list[int], int, list[float]]]] = {
+        "cummax": [
+            ("tie_basic", [5], 0, [1.0, 3.0, 3.0, 2.0, 3.0]),
+            ("tie_allequal", [3], 0, [2.0, 2.0, 2.0]),
+            ("tie_mat2d_dim1", [2, 3], 1, [5.0, 5.0, 1.0, -2.0, -1.0, -1.0]),
+        ],
+        "cummin": [
+            ("tie_basic", [5], 0, [3.0, 1.0, 1.0, 2.0, 1.0]),
+            ("tie_allequal", [3], 0, [2.0, 2.0, 2.0]),
+            ("tie_mat2d_dim1", [2, 3], 1, [1.0, 1.0, 5.0, 2.0, -1.0, -1.0]),
+        ],
+    }
+    out: list[dict[str, Any]] = []
+    for op, rows in tie_inputs.items():
+        for device in DEVICES:
+            for dtype in DTYPES:
+                for tag, shape, axis, vals in rows:
+                    a = torch.tensor(
+                        vals, dtype=torch_dtype(dtype), device=device
+                    ).reshape(shape)
                     if op == "cummax":
                         result = torch.cummax(a, dim=axis)
                     else:
@@ -478,6 +535,7 @@ def main() -> int:
     fixtures += fixture_cat_a_dim_reductions()
     fixtures += fixture_cat_a_edge_cases()
     fixtures += fixture_cat_b_cumulative()
+    fixtures += fixture_cat_b_cumextreme_ties()
     fixtures += fixture_cat_b_edge_cases()
 
     payload = {
