@@ -1,3 +1,4 @@
+// DIVERGENCE-1269-GAP-B-PROBE-PLUS-ONE
 //! Backward functions for elementwise arithmetic operations.
 //!
 //! Each operation has a backward struct implementing `GradFn<T>` and a public
@@ -12,22 +13,22 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:376`, `add_scaled` at `:774`, `add_out` at `:653`, `add_scaled_out` at `:698`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
-//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:940` delegates to `sub_scaled` at `:969` → `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
+//! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:377`, `add_scaled` at `:775`, `add_out` at `:654`, `add_scaled_out` at `:699`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
+//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:941` delegates to `sub_scaled` at `:970` → `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
 //! | REQ-3 (mul) | SHIPPED | `mul` + `MulBackward` in `arithmetic.rs`; parity `[mul] 72/72` (grep=1) |
 //! | REQ-4 (div) | SHIPPED | `div` + `DivBackward` in `arithmetic.rs`; parity `[div] 72/72` (grep=1) |
 //! | REQ-5 (neg) | SHIPPED | `neg` + `NegBackward`; parity `[neg] 8/8` (grep=1) |
 //! | REQ-6 (abs) | SHIPPED | `abs` + `AbsBackward`; parity `[abs] 8/8` (grep=1) |
 //! | REQ-7 (sqrt) | SHIPPED | `sqrt` + `SqrtBackward`; parity `[sqrt] 8/8` (grep=1) |
 //! | REQ-8 (pow scalar exponent) | SHIPPED | `pow` + `PowBackward` (scalar exp; tensor-exp overload returns `Ok(None)` and is skipped, not failed); parity `[pow] 24/72 passed 48 skipped` (grep=1) |
-//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:1021` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
-//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:1785` + `RsqrtBackward` at `:1694`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
-//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:1933` + `ReciprocalBackward` at `:1856`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
-//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:2770` + `FloorDivideBackward` at `:2613` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
-//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:2133` + `RemainderBackward` at `:2019`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
-//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:2440` + `FmodBackward` at `:2322`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
-//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:3117` + `AddcmulBackward` at `:2974`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
-//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:3432` + `AddcdivBackward` at `:3270`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
+//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:1022` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
+//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:1816` + `RsqrtBackward` at `:1725`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
+//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:1964` + `ReciprocalBackward` at `:1887`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
+//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:2810` + `FloorDivideBackward` at `:2653` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
+//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:2173` + `RemainderBackward` at `:2054`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
+//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:2480` + `FmodBackward` at `:2362`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
+//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:3174` + `AddcmulBackward` at `:3031`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
+//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:3489` + `AddcdivBackward` at `:3327`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -1206,7 +1207,7 @@ fn mul_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
 
 /// Backward node for `c = a / b`.
 ///
-/// VJP: da = grad / b, db = -grad * a / (b * b).
+/// VJP: da = grad / b, db = -grad * ((a / b) / b).
 #[derive(Debug)]
 struct DivBackward<T: Float> {
     a: Tensor<T>,
@@ -1223,13 +1224,21 @@ impl<T: Float> GradFn<T> for DivBackward<T> {
         } else {
             None
         };
-        // db = -grad * a / (b * b)
+        // db = -grad * ((a / b) / b) — upstream's nested staging, per
+        // `pytorch/torch/csrc/autograd/FunctionsManual.cpp:697-708`
+        // `div_tensor_other_backward`:
+        //   auto result = -grad * ((self / other) / other).conj();
+        // (`.conj()` is the identity for this real-only `T: Float` family.)
+        // NOT `-grad * a / (b * b)`: squaring `b` overflows/underflows at
+        // half the exponent range, returning `-0` where torch returns a
+        // subnormal and `inf` where torch is finite (CORE-180, crosslink
+        // #1874).
         let db = if self.b.requires_grad() {
             let raw = no_grad(|| {
                 let neg_go = neg(grad_output)?;
-                let neg_go_a = mul(&neg_go, &self.a)?;
-                let b_sq = mul(&self.b, &self.b)?;
-                div(&neg_go_a, &b_sq)
+                let q = div(&self.a, &self.b)?;
+                let q_over_b = div(&q, &self.b)?;
+                mul(&neg_go, &q_over_b)
             })?;
             Some(reduce_grad_to_shape(&raw, self.b.shape())?)
         } else {
@@ -1453,10 +1462,27 @@ struct PowBackward<T: Float> {
 impl<T: Float> GradFn<T> for PowBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.a.requires_grad() {
-            // When grad_output requires_grad (create_graph=true), use
-            // differentiable operations so the backward pass itself is
-            // tracked in the computation graph for higher-order gradients.
-            if grad_output.requires_grad() || grad_output.grad_fn().is_some() {
+            // exp == 0 special case (CORE-178, crosslink #1872): upstream
+            // `pytorch/torch/csrc/autograd/FunctionsManual.cpp:537-540`
+            // returns `at::zeros_like(self, LEGACY_CONTIGUOUS_MEMORY_FORMAT)`
+            // BEFORE evaluating `a^(exp-1)`. Computing the general formula
+            // here would evaluate `0 * a^(-1) * g = 0 * inf = NaN` wherever
+            // `a == 0`. The zeros are a constant (upstream attaches no
+            // grad_fn either), built on `a`'s shape and device, so this
+            // guard covers all three branches below — higher-order, GPU,
+            // and CPU — identically.
+            if self.exp == 0.0 {
+                let zeros = vec![<T as num_traits::Zero>::zero(); self.a.numel().max(1)];
+                let storage = TensorStorage::on_device(zeros, self.a.device())?;
+                Some(Tensor::from_storage(
+                    storage,
+                    self.a.shape().to_vec(),
+                    false,
+                )?)
+            } else if grad_output.requires_grad() || grad_output.grad_fn().is_some() {
+                // When grad_output requires_grad (create_graph=true), use
+                // differentiable operations so the backward pass itself is
+                // tracked in the computation graph for higher-order gradients.
                 // da = grad_output * exp * a^(exp-1)
                 // Using differentiable pow and mul.
                 let a_pow = pow(&self.a, self.exp - 1.0)?; // a^(exp-1)
@@ -1466,6 +1492,11 @@ impl<T: Float> GradFn<T> for PowBackward<T> {
                     self.a.shape().to_vec(),
                     false,
                 )?;
+                // Build the exponent constant on `a`'s device — same hop as
+                // the non-higher-order GPU branch below. Without it, a CUDA
+                // `pow` under `create_graph=true` fails `mul`'s device
+                // guard with DeviceMismatch (CORE-182, crosslink #1876).
+                let exp_tensor = exp_tensor.to(self.a.device())?;
                 let scaled = mul(&exp_tensor, &a_pow)?; // exp * a^(exp-1)
                 Some(mul(grad_output, &scaled)?) // grad_output * exp * a^(exp-1)
             } else if grad_output.is_cuda() {
@@ -2004,13 +2035,17 @@ fn reciprocal_inner<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 ///
 /// So:
 /// - `da = grad`
-/// - `db = -grad * floor(a / b)`
+/// - `db = -grad * div(a, b, rounding_mode="floor")`
 ///
-/// `floor` is treated as having zero derivative w.r.t. its argument (it is
-/// a step function whose gradient is the Dirac delta — upstream's
-/// "rounding_mode=floor" autograd path explicitly stops grad through it).
-/// `db` is therefore a simple weighted version of `-grad`; for any `b`
-/// such that `floor(a / b) = 0`, `db = 0`.
+/// The floor-quotient is computed by the shared `div_floor_floating`
+/// kernel (`pytorch/c10/util/generic_math.h:34-58`, via `floor_divide`),
+/// exactly as upstream's `self.div(other, rounding_mode="floor")` — not a
+/// naive `floor(a / b)`, which diverges at quotient boundaries (CORE-181,
+/// crosslink #1875). Floor division is treated as having zero derivative
+/// w.r.t. its arguments (it is a step function whose gradient is the Dirac
+/// delta — upstream's "rounding_mode=floor" autograd path explicitly stops
+/// grad through it). `db` is therefore a simple weighted version of
+/// `-grad`; for any `b` such that `div_floor(a, b) = 0`, `db = 0`.
 ///
 /// Broadcasting: backward routes through `reduce_grad_to_shape` to recover
 /// the gradient shape of each leaf when `a` and `b` were broadcast against
@@ -2030,20 +2065,25 @@ impl<T: Float> GradFn<T> for RemainderBackward<T> {
             None
         };
 
-        // db = -grad * floor(a / b), reduced to b.shape() under broadcasting.
+        // db = -grad * div(a, b, rounding_mode="floor"), reduced to
+        // b.shape() under broadcasting.
         //
-        // The `floor(a / b)` term is computed elementwise with broadcasting
-        // and saved into a fresh tensor; we then multiply by `-grad` and
-        // reduce. The whole step runs under `no_grad` so the backward
-        // intermediates do not enter the graph (higher-order remainder is
-        // not exercised by op_db; non-higher-order backward parity is what
-        // this commit ships).
+        // The floor-quotient term routes through `floor_divide`, i.e. the
+        // shared `div_floor_floating` kernel
+        // (`pytorch/c10/util/generic_math.h:34-58`) — NOT a naive
+        // `floor(a / b)` chain, whose single-rounded quotient diverges at
+        // integer boundaries (e.g. a=-7, b=0.7: naive -10, exact -11) and
+        // underflows to ±0 for tiny quotients (CORE-181, crosslink #1875).
+        // We then multiply by `-grad` and reduce. The whole step runs under
+        // `no_grad` so the backward intermediates do not enter the graph
+        // (higher-order remainder is not exercised by op_db;
+        // non-higher-order backward parity is what this commit ships).
         let db = if self.b.requires_grad() {
             let raw = no_grad(|| {
-                // floor(a / b) as a tensor of the broadcast shape.
-                let q = div(&self.a, &self.b)?;
-                let floor_q = unary_map(&q, |x| x.floor())?;
-                // -grad * floor(a / b)
+                // div(a, b, rounding_mode="floor") as a tensor of the
+                // broadcast shape, on a/b's device.
+                let floor_q = floor_divide(&self.a, &self.b)?;
+                // -grad * div_floor(a, b)
                 let neg_go = neg(grad_output)?;
                 mul(&neg_go, &floor_q)
             })?;
@@ -2787,6 +2827,65 @@ pub fn floor_divide<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<
     )
 }
 
+/// Scalar floor-division kernel: `c10::div_floor_floating` from
+/// `pytorch/c10/util/generic_math.h:34-58`, byte-for-byte (R-DEV-1).
+///
+/// Shared by `floor_divide_inner` (the `floor_divide` op's elementwise
+/// loop) and — via `floor_divide` — by `RemainderBackward`, whose
+/// other-operand VJP is `-grad * self.div(other, rounding_mode="floor")`
+/// per `pytorch/tools/autograd/derivatives.yaml:1455-1457` (CORE-181,
+/// crosslink #1875). A naive `floor(a / b)` chain is NOT equivalent: the
+/// single-rounded quotient crosses integer boundaries (e.g. `-7 / 0.7`
+/// rounds to exactly `-10.0`, floor `-10`, where the true floor is `-11`)
+/// and underflows to `±0` for tiny quotients; the `fmod`-based form with
+/// the sign and 0.5 fixups below recovers the exact floor quotient.
+fn div_floor_floating<T: Float>(av: T, bv: T) -> T {
+    let zero = <T as num_traits::Zero>::zero();
+    let one = <T as num_traits::One>::one();
+    let half = T::from(0.5_f64).unwrap_or(zero);
+
+    if bv == zero {
+        // IEEE-754 div-by-zero path: `return a / b` directly.
+        // `5/0 = +Inf`, `-5/0 = -Inf`, `0/0 = NaN`.
+        return av / bv;
+    }
+
+    // mod = fmod(a, b) — Rust's `%` on f32/f64 is C99 fmod.
+    let m = av % bv;
+    // div = (a - mod) / b
+    let mut div = (av - m) / bv;
+    // If signs of `b` and `mod` differ AND mod != 0, subtract 1
+    // from div. This recovers the floor-direction adjustment when
+    // the (a-mod)/b path produced a quotient that's one-too-high
+    // because `fmod`'s sign-of-dividend differs from divisor's.
+    // Upstream `c10/util/generic_math.h:44-46` lines:
+    //   if ((mod != 0) && (b < 0) != (mod < 0)) {
+    //     div -= scalar_t(1);
+    //   }
+    // (Upstream does NOT also adjust `mod` here — only `div`. The
+    // remainder is not returned from this kernel.)
+    if m != zero && (bv < zero) != (m < zero) {
+        div = div - one;
+    }
+
+    // Final floor + 0.5-rounding fixup, matching upstream lines
+    // 48-57 of `c10/util/generic_math.h`. Clippy's `if_not_else`
+    // pedantic-tier lint wants the zero-branch first; the
+    // mathematical reading is "non-zero quotient -> standard
+    // floor with a 0.5 round-up guard; zero quotient -> copysign
+    // to preserve IEEE-754 ±0 sign":
+    if div == zero {
+        // copysign(0, a/b): when div rounds to 0, upstream
+        // explicitly uses `C10_COMPAT_COPYSIGN(0, a/b)` so the
+        // signed zero matches the IEEE-754 quotient sign.
+        let q = av / bv;
+        zero.copysign(q)
+    } else {
+        let f = div.floor();
+        if div - f > half { f + one } else { f }
+    }
+}
+
 fn floor_divide_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     // R-DEV-1 numerical contract: match upstream
     // `c10/util/generic_math.h:35-58 div_floor_floating` byte-for-byte:
@@ -2851,10 +2950,6 @@ fn floor_divide_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResul
         s
     };
 
-    let zero = <T as num_traits::Zero>::zero();
-    let one = <T as num_traits::One>::one();
-    let half = T::from(0.5_f64).unwrap_or(zero);
-
     for i in 0..out_numel {
         // Decompose `i` into per-axis coords over `out_shape`.
         let mut rem_i = i;
@@ -2882,48 +2977,10 @@ fn floor_divide_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResul
         let av = a_data[a_flat];
         let bv = b_data[b_flat];
 
-        // Mirror `c10::div_floor_floating` byte-for-byte. R-DEV-1.
-        let floordiv = if bv == zero {
-            // IEEE-754 div-by-zero path: `return a / b` directly.
-            // `5/0 = +Inf`, `-5/0 = -Inf`, `0/0 = NaN`.
-            av / bv
-        } else {
-            // mod = fmod(a, b) — Rust's `%` on f32/f64 is C99 fmod.
-            let m = av % bv;
-            // div = (a - mod) / b
-            let mut div = (av - m) / bv;
-            // If signs of `b` and `mod` differ AND mod != 0, subtract 1
-            // from div. This recovers the floor-direction adjustment when
-            // the (a-mod)/b path produced a quotient that's one-too-high
-            // because `fmod`'s sign-of-dividend differs from divisor's.
-            // Upstream `c10/util/generic_math.h:44-46` lines:
-            //   if ((mod != 0) && (b < 0) != (mod < 0)) {
-            //     div -= scalar_t(1);
-            //   }
-            // (Upstream does NOT also adjust `mod` here — only `div`. The
-            // remainder is not returned from this kernel.)
-            if m != zero && (bv < zero) != (m < zero) {
-                div = div - one;
-            }
-
-            // Final floor + 0.5-rounding fixup, matching upstream lines
-            // 48-57 of `c10/util/generic_math.h`. Clippy's `if_not_else`
-            // pedantic-tier lint wants the zero-branch first; the
-            // mathematical reading is "non-zero quotient -> standard
-            // floor with a 0.5 round-up guard; zero quotient -> copysign
-            // to preserve IEEE-754 ±0 sign":
-            if div == zero {
-                // copysign(0, a/b): when div rounds to 0, upstream
-                // explicitly uses `C10_COMPAT_COPYSIGN(0, a/b)` so the
-                // signed zero matches the IEEE-754 quotient sign.
-                let q = av / bv;
-                zero.copysign(q)
-            } else {
-                let f = div.floor();
-                if div - f > half { f + one } else { f }
-            }
-        };
-        result[i] = floordiv;
+        // Mirror `c10::div_floor_floating` byte-for-byte via the shared
+        // scalar kernel below (extracted for CORE-181 / crosslink #1875 so
+        // `RemainderBackward` runs the identical algorithm). R-DEV-1.
+        result[i] = div_floor_floating(av, bv);
     }
 
     let storage = TensorStorage::on_device(result, device)?;
