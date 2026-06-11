@@ -51,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-199: Conformance fixture sampling is trivial — tiny, contiguous, finite, well-conditioned (#1893)
 - CORE-207: Untracked ignores and green-when-absent skip patterns (#1901)
 - CORE-206: The live-torch parity gate is entirely outside CI, and the parity runner's tests pass vacuously without torch (#1900)
 - CORE-202: The surface-coverage gate counts comment mentions as conformance coverage (#1896)
