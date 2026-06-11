@@ -51,6 +51,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-157: f32 FFTs return errors where PyTorch returns infinities (#1851)
+- CORE-156: `fftshift`/`ifftshift` roll the interleaved complex pair axis, silently corrupting complex spectra (#1850)
+- CORE-155: `irfft`/`hfft` underflow-panic on zero-length frequency axes, even with explicit `n` (#1849)
+- CORE-165: Repeated output subscripts are accepted and produce garbage (#1859)
+- CORE-164: Implicit-mode einsum equations are not differentiable (#1858)
+- CORE-163: Stored einsum equations are not whitespace-normalized; backward panics or errors on spaced equations (#1857)
+- CORE-162: Einsum backward panics when an operand has repeated subscripts (#1856)
+- CORE-161: Two-input CPU einsum silently drops summation over lone indices (#1855)
+- Divergence: add_out/add_scaled_out matched-shape branch swaps the WHOLE shared storage buffer — corrupts base when out is an offset/sub view (CORE-001 residual) (#1938)
 - CORE-001: Safe in-place APIs violate Rust aliasing requirements (#1695)
 - CORE-199 residual (#1893 follow-through): missing dispatch-specified pins — #1825 simd shape-validation lane, #1745 empty amin/amax single-contract pin (replace dual-accept), #1746 zero-length-slice dim-reduction panic pin, #1838 lu 3-cycle pivot fixture (#1937)
 - CORE-125: Safe indexing APIs trust contradictory index data and shape metadata (#1819)
