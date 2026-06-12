@@ -51,6 +51,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-071: Empty packed components report a false mean of zero (#1765)
+- CORE-070: Nested CPU paths reject valid views and mixed-device construction creates unusable values (#1764)
+- CORE-069: Packed nested tensors mis-handle zero-sized tail dimensions (#1763)
+- CORE-068: `PackedNestedTensor::from_data_tensor` accepts invalid offset layouts (#1762)
+- CORE-067: CUDA nested attention has no working fallback outside the flash-kernel regime (#1761)
+- CORE-066: Nested dense conversion and attention silently detach component graphs (#1760)
+- CORE-065: CUDA masked operations inconsistently and silently return CPU tensors (#1759)
+- CORE-064: Masked tensor materialization and reductions are not differentiable (#1758)
 - CORE-057: `per_sample_grad` silently reconstructs parameters on CPU (#1751)
 - CORE-056: The public `vmap` family detaches autograd and rejects non-CPU inputs (#1750)
 - CORE-062: Reordered-axis einops `repeat` and `reduce` use coordinates in the wrong order (#1756)
