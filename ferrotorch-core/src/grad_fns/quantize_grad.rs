@@ -43,11 +43,28 @@
 
 use std::sync::Arc;
 
+use crate::device::Device;
 use crate::dtype::Float;
 use crate::error::FerrotorchResult;
 use crate::int_tensor::IntTensor;
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
+
+/// Read an [`IntTensor<i64>`] qparam buffer device-transparently.
+///
+/// CORE-041 (#1735): the fake-quantize entry points accept CUDA-resident
+/// `zero_point` tensors (the torch-legal CUDA call passes every operand on
+/// `cuda:0`), but `IntTensor::data` deliberately refuses GPU storage. The
+/// fake-quantize compute is a DOCUMENTED host round trip (R-LOUD-2 — see
+/// each public function's device-contract note), so this zero-point read is
+/// the explicit D2H half of that round trip.
+fn zp_host_vec(zero_point: &IntTensor<i64>) -> FerrotorchResult<Vec<i64>> {
+    if zero_point.is_cuda() {
+        Ok(zero_point.to(Device::Cpu)?.data()?.to_vec())
+    } else {
+        Ok(zero_point.data()?.to_vec())
+    }
+}
 
 /// Differentiable per-tensor affine fake quantization.
 ///
@@ -71,6 +88,15 @@ use crate::tensor::{GradFn, Tensor};
 ///   `int64_t quant_min` at `FakeQuantPerTensorAffine.cpp:35`.
 /// * `quant_max` — maximum integer value of the target dtype. Widened to
 ///   `i64` per upstream `int64_t quant_max` at `:36`.
+///
+/// # Device contract (CORE-041 / #1735, R-LOUD-2)
+///
+/// CUDA inputs are computed via a DOCUMENTED host round trip: the input is
+/// downloaded with `data_vec`, fake-quantized on the host with the exact
+/// upstream formula, and the output is re-uploaded to the input's device.
+/// The backward node returns its STE gradient on the saved input's device
+/// the same way. Values are bit-identical to the device-resident torch
+/// kernel; only WHERE the compute happens differs.
 ///
 /// # Errors
 ///
@@ -141,6 +167,11 @@ pub fn fake_quantize_differentiable<T: Float>(
 /// `Tensor<T: Float>` would silently allow non-integer zero-points and
 /// diverge from upstream's `int64_t` extraction).
 ///
+/// Device contract: same documented host round trip as
+/// [`fake_quantize_per_tensor_affine`] (CORE-041 / #1735, R-LOUD-2) — CUDA
+/// `input`/`scale`/`zero_point` are read via D2H and the output is
+/// re-uploaded to the input's device.
+///
 /// # Errors
 ///
 /// - All errors from `fake_quantize_per_tensor_affine`.
@@ -164,7 +195,10 @@ pub fn fake_quantize_per_tensor_affine_tensor_qparams<T: Float>(
             ),
         });
     }
-    let zp_data = zero_point.data()?;
+    // Device-transparent zero-point read (CORE-041 / #1735): part of the
+    // documented host round trip — see the device-contract note on
+    // `fake_quantize_per_tensor_affine` (R-LOUD-2).
+    let zp_data = zp_host_vec(zero_point)?;
     if zp_data.len() != 1 {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
@@ -276,7 +310,11 @@ fn fake_quantize_per_tensor_affine_impl<T: Float>(
         out.push(dq);
     }
 
-    let storage = TensorStorage::cpu(out);
+    // CORE-041 (#1735): the output lands on the INPUT's device — for CUDA
+    // inputs this is the re-upload half of the documented host round trip
+    // (R-LOUD-2; `data_vec` above was the D2H half). Previously this was an
+    // unconditional `TensorStorage::cpu` (silent demotion).
+    let storage = TensorStorage::on_device(out, input.device())?;
     let shape = input.shape().to_vec();
 
     if input.requires_grad() && crate::autograd::no_grad::is_grad_enabled() {
@@ -441,6 +479,14 @@ fn per_channel_mask_in_range(
 /// * `quant_min` / `quant_max` — quantization range bounds, widened to
 ///   `i64` per upstream `int64_t quant_min, int64_t quant_max` at `:37-38`.
 ///
+/// # Device contract (CORE-041 / #1735, R-LOUD-2)
+///
+/// CUDA inputs are computed via a DOCUMENTED host round trip: `input`,
+/// `scale`, and `zero_point` are downloaded to the host, fake-quantized
+/// with the exact upstream cast-first formula, and the output is
+/// re-uploaded to the input's device. The backward node returns its
+/// per-channel STE gradient on the saved input's device the same way.
+///
 /// # Errors
 ///
 /// - `FerrotorchError::InvalidArgument` if `scale.ndim() != 1`
@@ -523,8 +569,11 @@ pub fn fake_quantize_per_channel_affine<T: Float>(
         });
     }
     // 3. scale.numel() == zero_point.numel() (FakeQuantPerChannelAffine.cpp:57-59)
+    // Device-transparent reads (CORE-041 / #1735): `data_vec` / `zp_host_vec`
+    // are the D2H half of the documented host round trip — see the
+    // device-contract note above (R-LOUD-2).
     let scale_data = scale.data_vec()?;
-    let zp_data = zero_point.data()?;
+    let zp_data = zp_host_vec(zero_point)?;
     if scale_data.len() != zp_data.len() {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
@@ -618,7 +667,11 @@ pub fn fake_quantize_per_channel_affine<T: Float>(
         out.push(dq);
     }
 
-    let storage = TensorStorage::cpu(out);
+    // CORE-041 (#1735): the output lands on the INPUT's device — for CUDA
+    // inputs this is the re-upload half of the documented host round trip
+    // (R-LOUD-2). Previously this was an unconditional `TensorStorage::cpu`
+    // (silent demotion).
+    let storage = TensorStorage::on_device(out, input.device())?;
     let out_shape = shape.to_vec();
 
     if input.requires_grad() && crate::autograd::no_grad::is_grad_enabled() {
@@ -628,7 +681,7 @@ pub fn fake_quantize_per_channel_affine<T: Float>(
             .iter()
             .map(|s| s.to_f64().unwrap_or(f64::NAN))
             .collect();
-        let zp_i64s: Vec<i64> = zp_data.to_vec();
+        let zp_i64s: Vec<i64> = zp_data;
         let grad_fn = Arc::new(FakeQuantizePerChannelBackward::<T> {
             input: input.clone(),
             scale: scale_f64s,
@@ -702,7 +755,10 @@ impl<T: Float> GradFn<T> for FakeQuantizePerChannelBackward<T> {
                 }
             })
             .collect();
-        let storage = TensorStorage::cpu(grad);
+        // CORE-041 (#1735): the gradient lands on the SAVED INPUT's device
+        // (re-upload half of the documented host round trip, R-LOUD-2 /
+        // R-ORACLE-3). Previously an unconditional `TensorStorage::cpu`.
+        let storage = TensorStorage::on_device(grad, self.input.device())?;
         Ok(vec![Some(Tensor::from_storage(storage, shape, false)?)])
     }
 
@@ -773,7 +829,10 @@ impl<T: Float> GradFn<T> for FakeQuantizeBackward<T> {
                 }
             })
             .collect();
-        let storage = TensorStorage::cpu(grad);
+        // CORE-041 (#1735): the gradient lands on the SAVED INPUT's device
+        // (re-upload half of the documented host round trip, R-LOUD-2 /
+        // R-ORACLE-3). Previously an unconditional `TensorStorage::cpu`.
+        let storage = TensorStorage::on_device(grad, self.input.device())?;
         let shape = self.input.shape().to_vec();
         Ok(vec![Some(Tensor::from_storage(storage, shape, false)?)])
     }

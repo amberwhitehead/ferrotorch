@@ -112,10 +112,10 @@ backward characterization tests including numerical-gradient checks).
   delegating to `crate::ops::cumulative::cummax_forward` (CPU loop at
   `ops/cumulative.rs:245-294` with `>=` tie-break + NaN-poison predicate,
   GPU `cummax_f32`/`cummax_f64` kernels at `ops/cumulative.rs:200-240`).
-  Autograd: `CummaxBackward` at `cumulative.rs:413` saves
+  Autograd: `CummaxBackward in cumulative.rs` saves
   `indices: Vec<usize>`, `input_shape: Vec<usize>`, `dim: usize` and
   implements the `scatter_add(zeros, dim, indices, grad)` VJP via
-  `cummaxmin_backward_impl` at `:479`. **Non-test production consumer**:
+  `cummaxmin_backward_impl in cumulative.rs`. **Non-test production consumer**:
   `crate::grad_fns::cumulative::cummax` is invoked at
   `ferrotorch-core/src/einops.rs:796` inside `pub fn reduce<T: Float>`
   (the `EinopsReduction::Max` arm, which `cummax`-then-`narrow` selects
@@ -136,7 +136,7 @@ backward characterization tests including numerical-gradient checks).
   delegating to `crate::ops::cumulative::cummin_forward` (CPU loop at
   `ops/cumulative.rs:353-389` with `<=` tie-break + NaN-poison predicate,
   GPU kernels at `ops/cumulative.rs:316-348`). Autograd: `CumminBackward`
-  at `cumulative.rs:447` shares `cummaxmin_backward_impl` with
+  at `CumminBackward in cumulative.rs` shares `cummaxmin_backward_impl` with
   `CummaxBackward`, differing only in `name()`. **Non-test production
   consumer**: invoked at `ferrotorch-core/src/einops.rs:802` (the
   `EinopsReduction::Min` arm, symmetric to REQ-3).
@@ -151,16 +151,16 @@ backward characterization tests including numerical-gradient checks).
     self: logcumsumexp_backward(grad, self, result, dim)` factors as
   `grad_input[i] = exp(input[i]) * reverse_cumsum(grad_output * exp(-output))`
   (equivalent to softmax-weighted reverse cumsum). ferrotorch implements
-  forward via `logcumsumexp` at `cumulative.rs:712-720`, delegating to
+  forward via `logcumsumexp` at `cumulative.rs:803-811`, delegating to
   `ops::cumulative::logcumsumexp_forward` (CPU two-pass max-rescaling
   algorithm at `ops/cumulative.rs:378-410`, GPU kernels at
   `ops/cumulative.rs:360-365`). Backward is
-  `LogcumsumexpBackward` at `cumulative.rs:641-697` matching the
+  `LogcumsumexpBackward in cumulative.rs` matching the
   derivatives-yaml formula. The numerical-stability invariant (large
   inputs ~1000.0 stay finite) is covered by
-  `test_logcumsumexp_numerical_stability` at `cumulative.rs:1122` and
+  `test_logcumsumexp_numerical_stability in cumulative.rs` and
   the gradient is validated against finite differences in
-  `test_logcumsumexp_backward_1d` at `cumulative.rs:1146`.
+  `test_logcumsumexp_backward_1d in cumulative.rs`.
   **Diverges from upstream**: `LogcumsumexpBackward::backward` errors on
   CUDA at `cumulative.rs:656-660` (CPU round trip on backward). Non-test
   production consumer: `Tensor::logcumsumexp_t(&self, dim: i64)` at
@@ -174,13 +174,13 @@ backward characterization tests including numerical-gradient checks).
   matches: ferrotorch returns `FerrotorchError::*` while upstream raises a
   Python `IndexError`/`RuntimeError`; the divergence is the Result-vs-raise
   vocabulary substitution permitted by R-DEV-4. Implemented at
-  `cumulative.rs:108, :358, :528, :560, :721` (one call per public op).
+  `cumulative.rs:108, :383, :553, :585, :812` (one call per public op).
   The `dim`-out-of-bounds and `dim`-for-scalar error cases are exercised
   by `test_cumsum_scalar_passthrough`, `test_cumprod_scalar_passthrough`,
   `test_cummax_scalar_passthrough`, `test_cummin_scalar_passthrough`,
-  `test_logcumsumexp_scalar_passthrough` (`cumulative.rs:1225-1281`),
+  `test_logcumsumexp_scalar_passthrough` (`test_logcumsumexp_scalar_passthrough in cumulative.rs`),
   the `test_*_scalar_dim_out_of_range` pair (`cumulative.rs:1284-1299`),
-  and `test_cumsum_dim_out_of_bounds` at `cumulative.rs:1331`.
+  and `test_cumsum_dim_out_of_bounds in cumulative.rs`.
 
 - REQ-7: `reverse_cumsum` helper — both `CumsumBackward::backward` and
   `LogcumsumexpBackward::backward` call
@@ -212,19 +212,19 @@ backward characterization tests including numerical-gradient checks).
   `CumExtremeResult { values: scalar, indices: vec![0] }`. The dispatch
   arm at `tools/parity-sweep/runner/src/main.rs:637` selects only the `values`
   half (Option A from #1230). Post-#1231 the values tensor now carries
-  a `CummaxBackward` grad-fn (`cumulative.rs:413`) and the saved indices
+  a `CummaxBackward` grad-fn (`CummaxBackward in cumulative.rs`) and the saved indices
   follow upstream `std::greater_equal` tie-break + NaN poisoning at
   `ops/cumulative.rs:251-282`.
 - [x] AC-4: `cummin` parity-sweep at `--seeds 8` returns
   `[cummin] 24/24 passed (0 skipped, 0 failed)` (smoke grep count = 1).
   Same 0-D resolution as AC-3 via `cumulative.rs:556 pub fn cummin`
   → `cumextreme_scalar_identity`. Post-#1231 the values tensor carries
-  a `CumminBackward` grad-fn (`cumulative.rs:447`) sharing the
+  a `CumminBackward` grad-fn (`CumminBackward in cumulative.rs`) sharing the
   scatter-add VJP with cummax via `cummaxmin_backward_impl` at
-  `cumulative.rs:479`.
+  `cummaxmin_backward_impl in cumulative.rs`.
 - [x] AC-5: `logcumsumexp` parity-sweep at `--seeds 8` returns
   `[logcumsumexp] 48/48 passed (0 skipped, 0 failed)` (smoke grep
-  count = 1). 0-D fast path at `cumulative.rs:712-720 pub fn
+  count = 1). 0-D fast path at `cumulative.rs:803-811 pub fn
   logcumsumexp` → `cumulative_scalar_identity`. The numerical identity
   is `logcumsumexp(x) = log(exp(x)) = x` on a scalar.
 - [x] AC-6: `cargo test -p ferrotorch-core grad_fns::cumulative` passes
@@ -235,13 +235,13 @@ backward characterization tests including numerical-gradient checks).
   backward for logcumsumexp at `cumulative.rs:1146`, zero-input cumprod
   backward at `cumulative.rs:975`, scalar-input passthrough at
   `cumulative.rs:1225-1281`, and dim-out-of-bounds at
-  `cumulative.rs:1331`.
+  `cumulative in cumulative.rs`.
 - [x] AC-7: Negative `dim` produces the same result as the equivalent
-  positive `dim` — `test_cumsum_negative_dim` at `cumulative.rs:818`
+  positive `dim` — `test_cumsum_negative_dim in cumulative.rs`
   verifies `cumsum(x, -1) == cumsum(x, 1)` on shape `[2, 3]`.
 - [x] AC-8: `requires_grad=false` inputs return a tensor with
   `grad_fn().is_none()` — verified by
-  `test_cumsum_no_grad_fn_when_not_requires_grad` at `cumulative.rs:893`.
+  `test_cumsum_no_grad_fn_when_not_requires_grad in cumulative.rs`.
 - [x] AC-9: Within a `no_grad` context, the returned tensor has
   `grad_fn().is_none()` even if the input has `requires_grad=true` —
   verified for cumsum/cumprod/logcumsumexp at `cumulative.rs:900` (cumsum),
@@ -251,7 +251,7 @@ backward characterization tests including numerical-gradient checks).
   routing grad through the saved indices via the `scatter_add` VJP per
   `derivatives.yaml:533-539`. Implemented at `cumulative.rs:413`
   (CummaxBackward) and `cumulative.rs:447` (CumminBackward) sharing
-  `cummaxmin_backward_impl` at `:479`. Tests:
+  `cummaxmin_backward_impl in cumulative.rs`. Tests:
   `test_cummax_backward_monotonic`, `test_cummax_backward_tie`, and
   `test_cummin_backward_tie` verify the scatter-add VJP against
   upstream-traced gradients live-verified 2026-05-25 with torch 2.11.0.
@@ -294,11 +294,11 @@ fast-exit at `:83-85` returns `result` unchanged.
 
 ### REQ-2 `cumprod` (cumulative.rs lines 242-372)
 
-`CumprodBackward<T>` at `:242-246` saves `input`, `output`, and `dim`.
+`CumprodBackward<T>` at `CumprodBackward in cumulative.rs` saves `input`, `output`, and `dim`.
 Saving the output is the upstream-aligned optimization for the no-zeros
 fast path (`output[j] / input[i]` requires both). The backward at
 `:248-342` is the two-path split described in REQ-2 above. `pub fn
-cumprod` at `:354-372` follows the same forward → optional grad-fn
+cumprod` at `:379-397` follows the same forward → optional grad-fn
 attach pattern as cumsum.
 
 ### REQ-3/4 `cummax` / `cummin` (lines 219-242)
@@ -316,7 +316,7 @@ itself non-differentiable, so no grad needs to flow back through cummax).
 
 ### REQ-5 `logcumsumexp` (cumulative.rs lines 641-720)
 
-`LogcumsumexpBackward<T>` at `cumulative.rs:641` saves `input`, `output`, and
+`LogcumsumexpBackward<T>` at `LogcumsumexpBackward in cumulative.rs` saves `input`, `output`, and
 `dim`. Backward at `cumulative.rs:647-697`:
 1. Compute `product[i] = grad_output[i] * exp(-output[i])`.
 2. `rev = reverse_cumsum(product, shape, dim)`.
@@ -326,12 +326,12 @@ The formula docstring at `cumulative.rs:625-639` self-corrects mid-comment from 
 naive `exp(input - output)` form to the correct
 `exp(input) * reverse_cumsum(go * exp(-output))` form — preserved
 verbatim because it documents the derivation step the implementer
-walked through. `pub fn logcumsumexp` at `cumulative.rs:712-720` matches the
+walked through. `pub fn logcumsumexp` at `cumulative.rs:803-811` matches the
 cumsum/cumprod scaffold.
 
 ### REQ-6 dim normalization (call sites only)
 
-The `normalize_axis(dim as isize, ndim)` calls at `:108, :358, :528, :560,
+The `normalize_axis(dim as isize, ndim)` calls at `:108, :383, :553, :585,
 :721` are the upstream `maybe_wrap_dim` analog (R-DEV-2: API-shape
 match). The `isize` cast widens `i64` → `isize` which on every supported
 host platform (64-bit) is lossless; on a 32-bit host the cast would
@@ -346,7 +346,7 @@ call from `CumsumBackward::backward` at `cumulative.rs:76`. A
 `cumulative.rs:676`.
 The `cumprod` backward's
 fast path inlines the equivalent reverse-cumsum-then-divide as a
-single-loop `rev_acc` accumulator at `:172-178` rather than calling
+single-loop `rev_acc` accumulator at `cumulative.rs` rather than calling
 `reverse_cumsum` — minor code duplication that is intentional because
 the per-element division by `in_data[idx]` interleaves with the
 reverse-cumsum accumulation.
@@ -359,7 +359,7 @@ reverse-cumsum accumulation.
 | `cumprod` | `ReduceOps.cpp:519` `TORCH_IMPL_FUNC(cumprod_out)` | `derivatives.yaml:525-527` (`cumprod_backward` = zeros-aware reverse-cumsum-divide) | Zeros in input: ferrotorch slow-path O(n^3) brute force matches upstream's masked-fill composite-compliance path numerically but not algorithmically. Test at `cumulative.rs:577-597` verifies `cumprod([2, 0, 3]).backward() == [1, 8, 0]`. NaN / Inf: propagates naturally; `0 * inf = NaN` will materialize through. Non-contiguous: same caveat as cumsum. Second-order grad (`grad_of_grad`): unsupported — the slow path is O(n^3) and not second-order-differentiable. |
 | `cummax` | `ReduceOps.cpp:860` `Tensor cummax(...)` | `derivatives.yaml:533-535` (`cummaxmin_backward` = `scatter_add` through indices) | Returns `CumExtremeResult { values, indices }` (Rust analog of `std::tuple<Tensor, Tensor>`). Tie-breaking: **DIVERGES** — upstream uses `std::greater_equal` (later wins), ferrotorch uses strict `>` (earlier wins). NaN: **DIVERGES** — upstream's `isnan_(curr_elem)` branch at `ReduceOps.cpp:819` propagates NaN through as the running max (subsequent values stay NaN forever); ferrotorch's strict `cur_max > -inf` after NaN-comparison-with-anything returns false will keep `cur_max` as the prior non-NaN value. Differentiability: **DIVERGES** — upstream is differentiable, ferrotorch declares non-differentiable. (blocker #1231 covers tie-break + differentiability + NaN.) |
 | `cummin` | `ReduceOps.cpp:899` `Tensor cummin(...)` | `derivatives.yaml:537-539` (same `cummaxmin_backward`) | Symmetric to cummax with all the same divergences (tie-break, NaN, differentiability). |
-| `logcumsumexp` | `ReduceOps.cpp:475` `Tensor logcumsumexp(...)` | `derivatives.yaml:521-523` (`logcumsumexp_backward` = `exp(input) * reverse_cumsum(grad * exp(-output))`) | Numerical stability: ferrotorch's two-pass running-max algorithm at `ops/cumulative.rs:425-454` ensures inputs at scale ~1000 stay finite, verified by `test_logcumsumexp_numerical_stability` at `cumulative.rs:1122`. NaN / Inf: `(-inf).exp() == 0` and `0.ln() == -inf` give the upstream-aligned `logcumsumexp([-inf, x]) == [-inf, x]` behavior. Empty input: errors (via `normalize_axis` scalar check). |
+| `logcumsumexp` | `ReduceOps.cpp:475` `Tensor logcumsumexp(...)` | `derivatives.yaml:521-523` (`logcumsumexp_backward` = `exp(input) * reverse_cumsum(grad * exp(-output))`) | Numerical stability: ferrotorch's two-pass running-max algorithm at `exp in ops/cumulative.rs` ensures inputs at scale ~1000 stay finite, verified by `test_logcumsumexp_numerical_stability in cumulative.rs`. NaN / Inf: `(-inf).exp() == 0` and `0.ln() == -inf` give the upstream-aligned `logcumsumexp([-inf, x]) == [-inf, x]` behavior. Empty input: errors (via `normalize_axis` scalar check). |
 
 Parity-sweep audit reference: all five op entries are **MISSING** from
 `tools/parity-sweep/parity_audit.json` as of this writeup. Adding them
@@ -372,27 +372,27 @@ is part of blocker #1230.
 Located at `ferrotorch-core/src/grad_fns/cumulative.rs:753-1569` (the
 `#[cfg(test)] mod tests` block). Key tests:
 
-- `test_cumsum_1d` (`:775`), `test_cumsum_2d_dim0` (`:787`),
-  `test_cumsum_2d_dim1` (`:803`), `test_cumsum_negative_dim`
-  (`:818`), `test_cumsum_3d` (`:829`)
-- `test_cumsum_backward_1d` (`:848`), `test_cumsum_backward_2d_dim0`
-  (`:864`), `test_cumsum_backward_numerical` (`:1381`)
-- `test_cumsum_has_grad_fn` (`:885`),
-  `test_cumsum_no_grad_fn_when_not_requires_grad` (`:893`),
-  `test_cumsum_no_grad_fn_in_no_grad_context` (`:900`)
-- `test_cumprod_1d` (`:911`), `test_cumprod_2d_dim0` (`:922`),
-  `test_cumprod_2d_dim1` (`:937`)
-- `test_cumprod_backward_1d` (`:956`),
-  `test_cumprod_backward_with_zero` (`:975`),
-  `test_cumprod_backward_numerical` (`:1342`)
-- `test_cummax_1d` (`:1017`), `test_cummax_2d_dim1` (`:1030`)
-- `test_cummin_1d` (`:1051`), `test_cummin_2d_dim0` (`:1069`)
-- `test_logcumsumexp_1d` (`:1088`), `test_logcumsumexp_2d_dim1`
-  (`:1104`), `test_logcumsumexp_numerical_stability` (`:1122`)
-- `test_logcumsumexp_backward_1d` (`:1146`)
+- `test_cumsum_1d` (`test_cumsum_1d in ferrotorch-core/src/grad_fns/cumulative.rs`), `test_cumsum_2d_dim0` (`test_cumsum_2d_dim0 in ferrotorch-core/src/grad_fns/cumulative.rs`),
+  `test_cumsum_2d_dim1` (`test_cumsum_2d_dim1 in ferrotorch-core/src/grad_fns/cumulative.rs`), `test_cumsum_negative_dim`
+  (`test_cumsum_negative_dim in ferrotorch-core/src/grad_fns/cumulative.rs`), `test_cumsum_3d` (`test_cumsum_3d in ferrotorch-core/src/grad_fns/cumulative.rs`)
+- `test_cumsum_backward_1d` (`test_cumsum_backward_1d in ferrotorch-core/src/grad_fns/cumulative.rs`), `test_cumsum_backward_2d_dim0`
+  (`test_cumsum_backward_2d_dim0 in ferrotorch-core/src/grad_fns/cumulative.rs`), `test_cumsum_backward_numerical` (`test_cumsum_backward_numerical in ferrotorch-core/src/grad_fns/cumulative.rs`)
+- `test_cumsum_has_grad_fn` (`test_cumsum_has_grad_fn in ferrotorch-core/src/grad_fns/cumulative.rs`),
+  `test_cumsum_no_grad_fn_when_not_requires_grad` (`test_cumsum_no_grad_fn_when_not_requires_grad in ferrotorch-core/src/grad_fns/cumulative.rs`),
+  `test_cumsum_no_grad_fn_in_no_grad_context` (`test_cumsum_no_grad_fn_in_no_grad_context in ferrotorch-core/src/grad_fns/cumulative.rs`)
+- `test_cumprod_1d` (`test_cumprod_1d in ferrotorch-core/src/grad_fns/cumulative.rs`), `test_cumprod_2d_dim0` (`test_cumprod_2d_dim0 in ferrotorch-core/src/grad_fns/cumulative.rs`),
+  `test_cumprod_2d_dim1` (`test_cumprod_2d_dim1 in ferrotorch-core/src/grad_fns/cumulative.rs`)
+- `test_cumprod_backward_1d` (`test_cumprod_backward_1d in ferrotorch-core/src/grad_fns/cumulative.rs`),
+  `test_cumprod_backward_with_zero` (`test_cumprod_backward_with_zero in ferrotorch-core/src/grad_fns/cumulative.rs`),
+  `test_cumprod_backward_numerical` (`test_cumprod_backward_numerical in ferrotorch-core/src/grad_fns/cumulative.rs`)
+- `test_cummax_1d` (`test_cummax_1d in ferrotorch-core/src/grad_fns/cumulative.rs`), `test_cummax_2d_dim1` (`test_cummax_2d_dim1 in ferrotorch-core/src/grad_fns/cumulative.rs`)
+- `test_cummin_1d` (`test_cummin_1d in ferrotorch-core/src/grad_fns/cumulative.rs`), `test_cummin_2d_dim0` (`test_cummin_2d_dim0 in ferrotorch-core/src/grad_fns/cumulative.rs`)
+- `test_logcumsumexp_1d` (`test_logcumsumexp_1d in ferrotorch-core/src/grad_fns/cumulative.rs`), `test_logcumsumexp_2d_dim1`
+  (`test_logcumsumexp_2d_dim1 in ferrotorch-core/src/grad_fns/cumulative.rs`), `test_logcumsumexp_numerical_stability` (`test_logcumsumexp_numerical_stability in ferrotorch-core/src/grad_fns/cumulative.rs`)
+- `test_logcumsumexp_backward_1d` (`test_logcumsumexp_backward_1d in ferrotorch-core/src/grad_fns/cumulative.rs`)
 - `test_*_scalar_passthrough` (`:1225-1281`), `test_*_scalar_dim_out_of_range`
   (`:1284-1299`), `test_*_scalar_backward_is_identity` (`:1301-1329`),
-  `test_cumsum_dim_out_of_bounds` (`:1331`)
+  `test_cumsum_dim_out_of_bounds` (`test_cumsum_dim_out_of_bounds in ferrotorch-core/src/grad_fns/cumulative.rs`)
 
 ### Parity-sweep status
 
@@ -442,8 +442,8 @@ first.
 |---|---|---|
 | REQ-1 (cumsum) | SHIPPED | impl: `cumsum in ferrotorch-core/src/grad_fns/cumulative.rs` + `CumsumBackward in ferrotorch-core/src/grad_fns/cumulative.rs` mirroring `ReduceOps.cpp:511 TORCH_IMPL_FUNC(cumsum_out)` and `derivatives.yaml:529-531`. 0-D scalar fast path at `cumulative in cumulative.rs` (early-out into `cumulative_scalar_identity`) + `CumsumBackward::backward` 0-D fast path at `backward in cumulative.rs` mirror upstream's `impl_func_cum_ops` 0-D branch at `ReduceOps.cpp:501-504` (`result.fill_(self)`). Post-#1233 parity-sweep: `[cumsum] 32/32 passed (0 skipped, 0 failed)`. Non-test production consumer: `Tensor::cumsum_t(&self, dim: i64)` at `cumsum_t in ferrotorch-core/src/methods.rs` mirroring `torch.Tensor.cumsum(dim, dtype=None)` per `torch/_tensor_docs.py:1500-1506` — the public, chainable method-style surface that closes R-DEFER-1 (closed by #1232). |
 | REQ-2 (cumprod) | SHIPPED | impl: `cumprod` at `cumulative in cumulative.rs` + `CumprodBackward in cumulative.rs` mirroring `ReduceOps.cpp:519 TORCH_IMPL_FUNC(cumprod_out)` and `derivatives.yaml:525-527`; backward zeros-path is O(n^3) brute-force not upstream's composite-compliance masked-fill. 0-D scalar fast path at `cumulative in cumulative.rs` + `CumprodBackward::backward` 0-D fast path at `backward in cumulative.rs`. Post-#1233 parity-sweep: `[cumprod] 80/80 passed (0 skipped, 0 failed)`. Non-test production consumer: `Tensor::cumprod_t(&self, dim: i64)` at `cumprod_t in ferrotorch-core/src/methods.rs` mirroring `torch.Tensor.cumprod(dim, dtype=None)` per `torch/_tensor_docs.py:1482-1488` (closed by #1232). |
-| REQ-3 (cummax) | SHIPPED | impl: `cummax` at `ferrotorch-core/src/grad_fns/cumulative.rs:524` delegating to `ops/cumulative.rs:199 cummax_forward` mirroring `aten/src/ATen/native/ReduceOps.cpp:860 Tensor cummax(...)`; CPU kernel at `ops/cumulative.rs:245-294` mirrors `cummax_cummin_helper<...std::greater_equal>` at `ReduceOps.cpp:811-826` (NaN-poison predicate `isnan(curr) || (!isnan(cur) && curr >= cur)` matches `:819`; tie-break `>=` matches `:832 std::greater_equal<scalar_t>`). Backward: `CummaxBackward` at `cumulative.rs:413` saves `indices: Vec<usize>` + `input_shape` + `dim` and implements `scatter_add(zeros, dim, indices, grad)` via `cummaxmin_backward_impl` at `:479` mirroring `cummaxmin_backward` at `ReduceOps.cpp:906-918` per `tools/autograd/derivatives.yaml:533-535 self: cummaxmin_backward(grad, self, indices, dim)`. **Non-test production consumer**: `crate::grad_fns::cumulative::cummax` invoked at `ferrotorch-core/src/einops.rs:796` inside `pub fn reduce<T: Float>` (the `EinopsReduction::Max` arm; closes R-DEFER-1). Post-#1231 parity-sweep: `[cummax] 24/24 passed (0 skipped, 0 failed)`. Backward correctness verified by `test_cummax_backward_monotonic`, `test_cummax_backward_tie` (live-traced torch 2.11.0 expected grads). NaN propagation verified by `test_cummax_forward_nan_propagates`. |
+| REQ-3 (cummax) | SHIPPED | impl: `cummax in ferrotorch-core/src/grad_fns/cumulative.rs` delegating to `cummax in ops/cumulative.rs cummax_forward` mirroring `aten/src/ATen/native/ReduceOps.cpp:860 Tensor cummax(...)`; CPU kernel at `cummax in ops/cumulative.rs` mirrors `cummax_cummin_helper<...std::greater_equal>` at `ReduceOps.cpp:811-826` (NaN-poison predicate `isnan(curr) || (!isnan(cur) && curr >= cur)` matches `:819`; tie-break `>=` matches `:832 std::greater_equal<scalar_t>`). Backward: `CummaxBackward in cumulative.rs` saves `indices: Vec<usize>` + `input_shape` + `dim` and implements `scatter_add(zeros, dim, indices, grad)` via `cummaxmin_backward_impl in cumulative.rs` mirroring `cummaxmin_backward` at `ReduceOps.cpp:906-918` per `tools/autograd/derivatives.yaml:533-535 self: cummaxmin_backward(grad, self, indices, dim)`. **Non-test production consumer**: `crate::grad_fns::cumulative::cummax` invoked at `cummax in ferrotorch-core/src/einops.rs` inside `pub fn reduce<T: Float>` (the `EinopsReduction::Max` arm; closes R-DEFER-1). Post-#1231 parity-sweep: `[cummax] 24/24 passed (0 skipped, 0 failed)`. Backward correctness verified by `test_cummax_backward_monotonic`, `test_cummax_backward_tie` (live-traced torch 2.11.0 expected grads). NaN propagation verified by `test_cummax_forward_nan_propagates`. |
 | REQ-4 (cummin) | SHIPPED | impl: `cummin in ferrotorch-core/src/grad_fns/cumulative.rs` delegating to `cummin in ops/cumulative.rs cummin_forward` mirroring `aten/src/ATen/native/ReduceOps.cpp:899 Tensor cummin(...)`; CPU kernel at `cummin in ops/cumulative.rs` mirrors `cummax_cummin_helper<...std::less_equal>` at `ReduceOps.cpp:867-873` + `:811-826` (tie-break `<=` matches `:871 std::less_equal<scalar_t>`). Backward: `CumminBackward in cumulative.rs` shares `cummaxmin_backward_impl in cumulative.rs` with `CummaxBackward`, differing only in `name()` — symmetric to upstream's reuse of the same `cummaxmin_backward` C++ function for both ops per `derivatives.yaml:537-539`. **Non-test production consumer**: invoked at `name in ferrotorch-core/src/einops.rs` (the `EinopsReduction::Min` arm; closes R-DEFER-1). Post-#1231 parity-sweep: `[cummin] 24/24 passed (0 skipped, 0 failed)`. Backward correctness verified by `test_cummin_backward_tie`; tie-break verified by updated `test_cummin_1d` (indices `[0, 1, 1, 3, 3]` for `[3, 1, 4, 1, 5]`). |
-| REQ-5 (logcumsumexp) | SHIPPED | impl: `logcumsumexp` at `cumulative.rs:712` + `LogcumsumexpBackward` at `:641` mirroring `ReduceOps.cpp:475 Tensor logcumsumexp(...)` and `derivatives.yaml:521-523`; backward formula matches `exp(input) * reverse_cumsum(grad * exp(-output))`. 0-D scalar fast path at `cumulative.rs:712-720` (forward) + `:655-657` (backward — identity VJP since `log(exp(x)) = x`). Numerical stability covered by `test_logcumsumexp_numerical_stability`. Post-#1233 parity-sweep: `[logcumsumexp] 48/48 passed (0 skipped, 0 failed)`. Non-test production consumer: `Tensor::logcumsumexp_t(&self, dim: i64)` at `ferrotorch-core/src/methods.rs:342` mirroring `torch.Tensor.logcumsumexp(dim)` per `torch/_tensor_docs.py:1455-1462` (closed by #1232). |
-| REQ-6 (dim normalization) | SHIPPED | impl: `normalize_axis(dim as isize, input.ndim())?` calls at `cumulative.rs:108, :358, :528, :560, :721` per `crate::shape::normalize_axis` mirroring `maybe_wrap_dim` at `ReduceOps.cpp:506, :622, :851, :890`; production consumer for the normalized result is each of the five `pub fn` bodies themselves (the normalized `dim` is stored into the `*Backward` struct and threaded into `from_storage`); reachable production callers: `einops.rs:796 / :802` invoke `cummax(view, 1)` / `cummin(view, 1)` triggering the normalize path. Tests cover the negative-dim and out-of-range cases. The fn `test_cumsum_negative_dim` is at `cumulative.rs:818`. The fn `test_cumsum_dim_out_of_bounds` is at `cumulative.rs:1331`. |
+| REQ-5 (logcumsumexp) | SHIPPED | impl: `logcumsumexp` at `cumulative in cumulative.rs` + `LogcumsumexpBackward in cumulative.rs` mirroring `ReduceOps.cpp:475 Tensor logcumsumexp(...)` and `derivatives.yaml:521-523`; backward formula matches `exp(input) * reverse_cumsum(grad * exp(-output))`. 0-D scalar fast path at `cumulative in cumulative.rs` (forward) + `cumulative in cumulative.rs` (backward — identity VJP since `log(exp(x)) = x`). Numerical stability covered by `test_logcumsumexp_numerical_stability`. Post-#1233 parity-sweep: `[logcumsumexp] 48/48 passed (0 skipped, 0 failed)`. Non-test production consumer: `Tensor::logcumsumexp_t(&self, dim: i64)` at `logcumsumexp_t in ferrotorch-core/src/methods.rs` mirroring `torch.Tensor.logcumsumexp(dim)` per `torch/_tensor_docs.py:1455-1462` (closed by #1232). |
+| REQ-6 (dim normalization) | SHIPPED | impl: `normalize_axis(dim as isize, input.ndim())?` calls at `normalize_axis in cumulative.rs, , , , ` per `crate::shape::normalize_axis` mirroring `maybe_wrap_dim` at `ReduceOps.cpp:506, :622, :851, :890`; production consumer for the normalized result is each of the five `pub fn` bodies themselves (the normalized `dim` is stored into the `*Backward` struct and threaded into `from_storage`); reachable production callers: `from_storage in einops.rs / ` invoke `cummax(view, 1)` / `cummin(view, 1)` triggering the normalize path. Tests cover the negative-dim and out-of-range cases. The fn `test_cumsum_negative_dim` is at `test_cumsum_negative_dim in cumulative.rs`. The fn `test_cumsum_dim_out_of_bounds` is at `test_cumsum_dim_out_of_bounds in cumulative.rs`. |
 | REQ-7 (reverse_cumsum helper) | SHIPPED | impl: `reverse_cumsum in ferrotorch-core/src/ops/cumulative.rs` mirroring `static Tensor reversed_cumsum(const Tensor& w, int64_t dim)` at `ReduceOps.cpp:527-529`; non-test production consumers at `reverse_cumsum in ferrotorch-core/src/grad_fns/cumulative.rs` (CumsumBackward::backward) and `reverse_cumsum in ferrotorch-core/src/grad_fns/cumulative.rs` (LogcumsumexpBackward::backward). The helper itself is internal scaffolding; its end-to-end exercise lands when REQ-1 and REQ-5 ship with runner-side parity coverage (blocker #1230). Forward and backward unit tests verify it numerically through the consumer path. The fn `test_cumsum_backward_1d` is at `test_cumsum_backward_1d in cumulative.rs`. The fn `test_logcumsumexp_backward_1d` is at `test_logcumsumexp_backward_1d in cumulative.rs`. |

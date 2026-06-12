@@ -140,7 +140,7 @@ qmax)` + a private `FakeQuantizeBackward<T>` grad-fn struct.
     which then `std::fmax(INT64_MIN, quant_min) = quant_min`, snapping
     the output to `(quant_min - zp) * scale`. ferrotorch replicates this
     R-DEV-1 byte-for-byte via the `per_channel_dequantize_f64` helper at
-    `grad_fns/quantize_grad.rs:300` which explicitly maps non-finite
+    `grad_fns/quantize_grad.rs` which explicitly maps non-finite
     qval_f to `i64::MIN` before the clamp. Locked by parity-sweep sample
     6 (`shape=[1, 4]`, input `[+Inf, -Inf, 0.0, 1.0]`): per-tensor would
     clamp +Inf to `quant_max=127`, but per-channel correctly produces
@@ -151,7 +151,7 @@ qmax)` + a private `FakeQuantizeBackward<T>` grad-fn struct.
     `zero_point[i] in [quant_min, quant_max]`. Each rule has a dedicated
     rejection unit test.
   * Backward node `FakeQuantizePerChannelBackward<T>` at
-    `ferrotorch-core/src/grad_fns/quantize_grad.rs:656` with
+    `FakeQuantizePerChannelBackward in ferrotorch-core/src/grad_fns/quantize_grad.rs` with
     `GradFn::backward` impl at `:665` returns `dY * mask` where the mask
     is per-channel: `mask[i] = (quant_min <= round_ties_even(input[i]/
     scale[ch(i)]) + zero_point[ch(i)] <= quant_max)`, matching upstream
@@ -306,7 +306,7 @@ qmax)` + a private `FakeQuantizeBackward<T>` grad-fn struct.
   outside any `#[cfg(test)]` block. Closes the R-DEFER-1 vocabulary-only
   loophole that REQ-1 was previously stuck behind.
 - [x] AC-6: STE backward node correctness — `FakeQuantizeBackward` at
-  `quantize_grad.rs:727` with `backward` impl at `:735-788` returns
+  `FakeQuantizeBackward in quantize_grad.rs` with `backward` impl at `backward in quantize_grad.rs` returns
   `grad_output * 1` for in-range values and `grad_output * 0` otherwise,
   matching upstream's `dY * mask` at `FakeQuantPerTensorAffine.cpp:133`.
   Verified by `fake_quantize_ste_passes_grad_for_in_range_values` at

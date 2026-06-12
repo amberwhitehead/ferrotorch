@@ -50,11 +50,11 @@ fn divergence_cumulative_md_prose_pub_fn_cites_resolve_at_head() {
     // permanent regression coverage against future drift.
     let pub_fn_cites = vec![
         // (doc-line, cited rs line, op_name)
-        (154, 712, "logcumsumexp"), // "ferrotorch implements forward via `logcumsumexp` at `cumulative.rs:712-720`"
-        (226, 712, "logcumsumexp"), // AC-5: "`cumulative.rs:712-720 pub fn logcumsumexp`"
+        (154, 803, "logcumsumexp"), // "ferrotorch implements forward via `logcumsumexp` at `cumulative.rs:803-811`"
+        (226, 803, "logcumsumexp"), // AC-5: "`cumulative.rs:803-811 pub fn logcumsumexp`"
         (288, 104, "cumsum"),       // "`pub fn cumsum` at `:104-121`"
-        (299, 354, "cumprod"),      // "`pub fn cumprod` at `:354-372`"
-        (327, 712, "logcumsumexp"), // "`pub fn logcumsumexp` at `:712-720`"
+        (299, 379, "cumprod"),      // "`pub fn cumprod` at `:379-397`"
+        (327, 803, "logcumsumexp"), // "`pub fn logcumsumexp` at `:803-811`"
     ];
 
     let mut errors: Vec<String> = Vec::new();
@@ -83,10 +83,10 @@ fn divergence_cumulative_md_prose_struct_backward_cites_resolve_at_head() {
     // Refreshed to HEAD line numbers post-#1267 (was: 103/264 pre-shift).
     let struct_cites = vec![
         // (doc-line, cited rs line, struct)
-        (72, 242, "CumprodBackward"), // "ferrotorch implements this as `CumprodBackward` at `cumulative.rs:242-342`"
-        (158, 641, "LogcumsumexpBackward"), // "Backward is `LogcumsumexpBackward` at `cumulative.rs:641-697`"
-        (295, 242, "CumprodBackward"),      // "`CumprodBackward<T>` at `:242-246` saves"
-        (317, 641, "LogcumsumexpBackward"), // "`LogcumsumexpBackward<T>` at `:641-645` saves"
+        (72, 267, "CumprodBackward"), // "ferrotorch implements this as `CumprodBackward` at `cumulative.rs:267-367`"
+        (158, 732, "LogcumsumexpBackward"), // "Backward is `LogcumsumexpBackward` at `cumulative.rs:732-788`"
+        (295, 267, "CumprodBackward"),      // "`CumprodBackward<T>` at `:267-271` saves"
+        (317, 732, "LogcumsumexpBackward"), // "`LogcumsumexpBackward<T>` at `:732-736` saves"
     ];
 
     let mut errors: Vec<String> = Vec::new();
@@ -151,7 +151,7 @@ fn divergence_cumulative_md_req6_normalize_axis_tuple_cite_stale() {
     }
 
     // 3. confirm the actual sites :108, :358, :528, :560, :721 DO contain it.
-    let actual_sites: [usize; 5] = [108, 358, 528, 560, 721];
+    let actual_sites: [usize; 5] = [108, 383, 553, 585, 812];
     let mut missing: Vec<usize> = Vec::new();
     for site in actual_sites {
         let line = rs_text.lines().nth(site - 1).unwrap_or("");
@@ -162,7 +162,7 @@ fn divergence_cumulative_md_req6_normalize_axis_tuple_cite_stale() {
 
     assert!(
         stale_hits.is_empty() && wrongly_hits.is_empty() && missing.is_empty(),
-        "cumulative.md REQ-6 normalize_axis tuple-cite is stale (R-CITE-2):\n  - stale cite (subseq `{stale_substr}` or `{stale_substr_partial}`) still in cumulative.md at lines: {stale_hits:?}\n  - stale-cited rs lines that DON'T contain the call: {wrongly_hits:?} (good — confirms cite is stale)\n  - actual normalize_axis sites at HEAD :108/:358/:528/:560/:721 — any missing: {missing:?}\n  cumulative.rs's own //!-header REQ table (refreshed by commit 6cfaeb115 #1266) correctly cites the new sites, but cumulative.md was NOT updated by commit 91ad29360."
+        "cumulative.md REQ-6 normalize_axis tuple-cite is stale (R-CITE-2):\n  - stale cite (subseq `{stale_substr}` or `{stale_substr_partial}`) still in cumulative.md at lines: {stale_hits:?}\n  - stale-cited rs lines that DON'T contain the call: {wrongly_hits:?} (good — confirms cite is stale)\n  - actual normalize_axis sites at HEAD :108/:383/:553/:585/:812 — any missing: {missing:?}\n  cumulative.rs's own //!-header REQ table (refreshed by commit 6cfaeb115 #1266) correctly cites the new sites, but cumulative.md was NOT updated by commit 91ad29360."
     );
 }
 

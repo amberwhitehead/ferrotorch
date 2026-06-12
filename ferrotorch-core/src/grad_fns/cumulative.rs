@@ -17,12 +17,12 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 (cumsum) | SHIPPED | `cumsum` at `cumulative.rs:104` + `CumsumBackward` at `:51` (0-D fast path mirrors `ReduceOps.cpp:501-504`); consumer `Tensor::cumsum_t` in `methods.rs`; parity `[cumsum] 32/32` (grep=1) |
-//! | REQ-2 (cumprod) | SHIPPED | `cumprod` at `cumulative.rs:354` + `CumprodBackward` at `:242` (O(n^3) zeros-path); consumer `Tensor::cumprod_t` in `methods.rs`; parity `[cumprod] 80/80` (grep=1) |
-//! | REQ-3 (cummax) | SHIPPED | `cummax` at `cumulative.rs:524` + `CummaxBackward` at `:413` via private helper `cummaxmin_backward_impl` (scatter_add VJP per `derivatives.yaml:533-535`); consumer `einops.rs:796` (`EinopsReduction::Max`); parity `[cummax] 24/24` (grep=1) |
-//! | REQ-4 (cummin) | SHIPPED | `cummin` at `cumulative.rs:556` + `CumminBackward` at `:447` shares the private `cummaxmin_backward_impl` helper; consumer `einops.rs:802` (`EinopsReduction::Min`); parity `[cummin] 24/24` (grep=1) |
-//! | REQ-5 (logcumsumexp) | SHIPPED | `logcumsumexp` at `cumulative.rs:712` + `LogcumsumexpBackward` at `:641` (`exp(input) * reverse_cumsum(grad * exp(-output))` per `derivatives.yaml:521-523`); consumer `Tensor::logcumsumexp_t` at `methods.rs:342`; parity `[logcumsumexp] 48/48` (grep=1) |
-//! | REQ-6 (dim normalization) | SHIPPED | `normalize_axis(dim as isize, ndim)` calls at `cumulative.rs:108, :358, :528, :560, :721` mirroring `maybe_wrap_dim` at `ReduceOps.cpp:506, :622, :851, :890`; consumers are the five `pub fn` bodies themselves (reached through `einops.rs:796 / :802` and the `methods.rs` `*_t` surfaces) |
-//! | REQ-7 (reverse_cumsum helper) | SHIPPED | impl `ops/cumulative.rs:109` mirroring `static Tensor reversed_cumsum(...)` at `ReduceOps.cpp:527-529`; non-test consumers `CumsumBackward::backward` at `cumulative.rs:57` and `LogcumsumexpBackward::backward` at `:648` |
+//! | REQ-2 (cumprod) | SHIPPED | `cumprod` at `cumulative.rs:379` + `CumprodBackward` at `:267` (O(n^3) zeros-path); consumer `Tensor::cumprod_t` in `methods.rs`; parity `[cumprod] 80/80` (grep=1) |
+//! | REQ-3 (cummax) | SHIPPED | `cummax` at `cumulative.rs:549` + `CummaxBackward` at `:438` via private helper `cummaxmin_backward_impl` (scatter_add VJP per `derivatives.yaml:533-535`); consumer `einops.rs:796` (`EinopsReduction::Max`); parity `[cummax] 24/24` (grep=1) |
+//! | REQ-4 (cummin) | SHIPPED | `cummin` at `cumulative.rs:581` + `CumminBackward` at `:472` shares the private `cummaxmin_backward_impl` helper; consumer `einops.rs:802` (`EinopsReduction::Min`); parity `[cummin] 24/24` (grep=1) |
+//! | REQ-5 (logcumsumexp) | SHIPPED | `logcumsumexp` at `cumulative.rs:803` + `LogcumsumexpBackward` at `:732` (`exp(input) * reverse_cumsum(grad * exp(-output))` per `derivatives.yaml:521-523`); consumer `Tensor::logcumsumexp_t` at `methods.rs:342`; parity `[logcumsumexp] 48/48` (grep=1) |
+//! | REQ-6 (dim normalization) | SHIPPED | `normalize_axis(dim as isize, ndim)` calls at `cumulative.rs:108, :383, :553, :585, :812` mirroring `maybe_wrap_dim` at `ReduceOps.cpp:506, :622, :851, :890`; consumers are the five `pub fn` bodies themselves (reached through `einops.rs:796 / :802` and the `methods.rs` `*_t` surfaces) |
+//! | REQ-7 (reverse_cumsum helper) | SHIPPED | impl `ops/cumulative.rs:109` mirroring `static Tensor reversed_cumsum(...)` at `ReduceOps.cpp:527-529`; non-test consumers `CumsumBackward::backward` at `cumulative.rs:57` and `LogcumsumexpBackward::backward` at `:746` |
 
 use std::sync::Arc;
 
@@ -152,6 +152,14 @@ enum ScalarBackwardKind {
 /// appropriate `*Backward` node when `input.requires_grad()` is true so
 /// the autograd graph stays connected; the saved `dim` is `0` because the
 /// only normalized scalar dim is `0`.
+///
+/// Device contract (CORE-042 / #1736, R-LOUD-2): the output lands on the
+/// INPUT's device. For a CUDA scalar this is a DOCUMENTED host round trip —
+/// the single element is read via `data_vec` (D2H) and the identity result
+/// is re-uploaded with `TensorStorage::on_device`. The identity backward
+/// passes `grad_output` through unchanged, which is device-consistent with
+/// the device-preserving forward. Live torch 2.11.0+cu130 succeeds on 0-D
+/// CUDA tensors for all three ops, returning 0-D outputs on `cuda:0`.
 fn cumulative_scalar_identity<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -180,8 +188,17 @@ fn cumulative_scalar_identity<T: Float>(
     // Materialize a fresh storage with the input's single element so the
     // returned tensor has a distinct identity from `input` (autograd
     // graph invariant — Tensor::from_operation needs a new TensorId).
-    let scalar_val = input.item()?;
-    let result = Tensor::from_storage(TensorStorage::cpu(vec![scalar_val]), Vec::new(), false)?;
+    //
+    // CORE-042 (#1736): the element is read via `data_vec` (the documented
+    // D2H half of the round trip — `item()`'s `data()` refuses GPU storage)
+    // and the result is re-uploaded to the INPUT's device. Previously this
+    // path materialized `TensorStorage::cpu` unconditionally.
+    let scalar_val = input.data_vec()?[0];
+    let result = Tensor::from_storage(
+        TensorStorage::on_device(vec![scalar_val], input.device())?,
+        Vec::new(),
+        false,
+    )?;
 
     if !(is_grad_enabled() && input.requires_grad()) {
         return Ok(result);
@@ -201,9 +218,14 @@ fn cumulative_scalar_identity<T: Float>(
         ScalarBackwardKind::Cumprod => {
             // CumprodBackward saves `output` too; on 0-D the output
             // equals the input. Materialize a fresh scalar tensor for
-            // it (semantically identical, distinct identity).
-            let saved_output =
-                Tensor::from_storage(TensorStorage::cpu(vec![scalar_val]), Vec::new(), false)?;
+            // it (semantically identical, distinct identity) on the
+            // input's device (CORE-042 / #1736 — keep the saved pair
+            // device-consistent; the 0-D backward never reads it).
+            let saved_output = Tensor::from_storage(
+                TensorStorage::on_device(vec![scalar_val], input.device())?,
+                Vec::new(),
+                false,
+            )?;
             let grad_fn = Arc::new(CumprodBackward {
                 input: input.clone(),
                 output: saved_output,
@@ -212,8 +234,11 @@ fn cumulative_scalar_identity<T: Float>(
             Tensor::from_operation(storage, shape, grad_fn)
         }
         ScalarBackwardKind::Logcumsumexp => {
-            let saved_output =
-                Tensor::from_storage(TensorStorage::cpu(vec![scalar_val]), Vec::new(), false)?;
+            let saved_output = Tensor::from_storage(
+                TensorStorage::on_device(vec![scalar_val], input.device())?,
+                Vec::new(),
+                false,
+            )?;
             let grad_fn = Arc::new(LogcumsumexpBackward {
                 input: input.clone(),
                 output: saved_output,
@@ -523,7 +548,7 @@ fn cummaxmin_backward_impl<T: Float>(
 /// at `aten/src/ATen/native/ReduceOps.cpp:501-504`.
 pub fn cummax<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<CumExtremeResult<T>> {
     if input.ndim() == 0 {
-        return cumextreme_scalar_identity(input, dim, "cummax");
+        return cumextreme_scalar_identity(input, dim, "cummax", ScalarExtremeKind::Cummax);
     }
     let norm_dim = normalize_axis(dim as isize, input.ndim())?;
     let result = cummax_forward(input, dim)?;
@@ -555,7 +580,7 @@ pub fn cummax<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<CumExtr
 /// indices: vec![0] }`.
 pub fn cummin<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<CumExtremeResult<T>> {
     if input.ndim() == 0 {
-        return cumextreme_scalar_identity(input, dim, "cummin");
+        return cumextreme_scalar_identity(input, dim, "cummin", ScalarExtremeKind::Cummin);
     }
     let norm_dim = normalize_axis(dim as isize, input.ndim())?;
     let result = cummin_forward(input, dim)?;
@@ -577,6 +602,15 @@ pub fn cummin<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<CumExtr
     Ok(CumExtremeResult { values, indices })
 }
 
+/// Discriminant for [`cumextreme_scalar_identity`] — picks which
+/// `*Backward` node to attach on the 0-D fast path (mirrors
+/// [`ScalarBackwardKind`] for the single-output identity helper).
+#[derive(Clone, Copy)]
+enum ScalarExtremeKind {
+    Cummax,
+    Cummin,
+}
+
 /// 0-D scalar fast path for `cummax` / `cummin`.
 ///
 /// PyTorch's `impl_func_cum_ops` 0-D branch (`ReduceOps.cpp:501-504`)
@@ -591,10 +625,26 @@ pub fn cummin<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<CumExtr
 ///                                       reduction dim -1 or 0 for scalar
 ///                                       but got 1
 /// ```
+///
+/// Device contract (CORE-042 / #1736, R-LOUD-2): `values` lands on the
+/// INPUT's device — for a CUDA scalar the element is read via `data_vec`
+/// (documented D2H) and re-uploaded with `TensorStorage::on_device`. Live
+/// torch 2.11.0+cu130 returns `(tensor(5., device='cuda:0'), tensor(0,
+/// device='cuda:0'))` for a 0-D CUDA input; ferrotorch's `indices` carrier
+/// stays the documented `Vec<usize>` deviation (no device dimension).
+///
+/// Autograd (CORE-042 / #1736 companion): when gradient tracking is
+/// enabled, `values` carries the op's `*Backward` node (whose existing
+/// 0-D fast path is the identity VJP) so the graph stays connected —
+/// pre-fix this helper returned a detached tensor and the gradient never
+/// reached the leaf, while live torch 2.11.0 differentiates through 0-D
+/// `cummax`/`cummin` (`x.grad == tensor(2.5)` for `vals.backward(
+/// torch.tensor(2.5))`).
 fn cumextreme_scalar_identity<T: Float>(
     input: &Tensor<T>,
     dim: i64,
     op_name: &str,
+    kind: ScalarExtremeKind,
 ) -> FerrotorchResult<CumExtremeResult<T>> {
     // PyTorch's `cummax_helper`/`cummin_helper` route 0-D through
     // `zero_numel_check_dims` at
@@ -610,8 +660,49 @@ fn cumextreme_scalar_identity<T: Float>(
             ),
         });
     }
-    let scalar_val = input.item()?;
-    let values = Tensor::from_storage(TensorStorage::cpu(vec![scalar_val]), Vec::new(), false)?;
+    // CORE-042 (#1736): device-transparent read + re-upload to the input's
+    // device (documented host round trip, R-LOUD-2 — see the device-contract
+    // note above). Previously `item()` + unconditional `TensorStorage::cpu`.
+    let scalar_val = input.data_vec()?[0];
+    let values = Tensor::from_storage(
+        TensorStorage::on_device(vec![scalar_val], input.device())?,
+        Vec::new(),
+        false,
+    )?;
+
+    if !(is_grad_enabled() && input.requires_grad()) {
+        return Ok(CumExtremeResult {
+            values,
+            indices: vec![0],
+        });
+    }
+
+    // CORE-042 (#1736) companion: attach the op's backward node so the
+    // 0-D fast path stays differentiable (identity VJP via the node's own
+    // `ndim() == 0` short-circuit). The saved `indices`/`input_shape`
+    // mirror the 0-D forward result (`indices == [0]`, empty shape); the
+    // backward never reads them on the 0-D path.
+    let (storage, shape) = values.into_storage_and_shape()?;
+    let values = match kind {
+        ScalarExtremeKind::Cummax => {
+            let grad_fn = Arc::new(CummaxBackward {
+                input: input.clone(),
+                indices: vec![0],
+                input_shape: Vec::new(),
+                dim: 0,
+            });
+            Tensor::from_operation(storage, shape, grad_fn)?
+        }
+        ScalarExtremeKind::Cummin => {
+            let grad_fn = Arc::new(CumminBackward {
+                input: input.clone(),
+                indices: vec![0],
+                input_shape: Vec::new(),
+                dim: 0,
+            });
+            Tensor::from_operation(storage, shape, grad_fn)?
+        }
+    };
     Ok(CumExtremeResult {
         values,
         indices: vec![0],
@@ -1324,6 +1415,46 @@ mod tests {
         let loss = sum(&lcs).unwrap();
         loss.backward().unwrap();
         let g = x.grad().unwrap().unwrap();
+        assert!((g.item().unwrap() - 1.0).abs() < 1e-12);
+    }
+
+    /// CORE-042 (#1736) companion: the 0-D fast path of `cummax` must stay
+    /// differentiable — pre-fix `cumextreme_scalar_identity` returned a
+    /// fresh detached tensor and the gradient never reached the leaf
+    /// (`CummaxBackward` already carried the 0-D identity fast path but was
+    /// never attached). Live torch 2.11.0 (verified 2026-06-11):
+    /// ```text
+    /// x = torch.tensor(5.0, requires_grad=True)
+    /// vals, idx = torch.cummax(x, 0)
+    /// vals.backward(torch.tensor(2.5))
+    /// x.grad == tensor(2.5000)
+    /// ```
+    #[test]
+    fn test_cummax_scalar_backward_is_identity() {
+        let x = leaf(&[PT_SCALAR_5_0], &[], true);
+        let r = cummax(&x, 0).unwrap();
+        assert_eq!(r.values.grad_fn().unwrap().name(), "CummaxBackward");
+        let loss = sum(&r.values).unwrap();
+        loss.backward().unwrap();
+        let g = x
+            .grad()
+            .unwrap()
+            .expect("grad must reach the leaf through the 0-D cummax fast path");
+        assert!((g.item().unwrap() - 1.0).abs() < 1e-12);
+    }
+
+    /// Symmetric `cummin` companion (same upstream identity VJP).
+    #[test]
+    fn test_cummin_scalar_backward_is_identity() {
+        let x = leaf(&[PT_SCALAR_NEG_3_5], &[], true);
+        let r = cummin(&x, 0).unwrap();
+        assert_eq!(r.values.grad_fn().unwrap().name(), "CumminBackward");
+        let loss = sum(&r.values).unwrap();
+        loss.backward().unwrap();
+        let g = x
+            .grad()
+            .unwrap()
+            .expect("grad must reach the leaf through the 0-D cummin fast path");
         assert!((g.item().unwrap() - 1.0).abs() < 1e-12);
     }
 
