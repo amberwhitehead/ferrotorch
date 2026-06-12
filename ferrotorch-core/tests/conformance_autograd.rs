@@ -1755,6 +1755,385 @@ fn cpu_stack_three_vectors_axis0() {
 }
 
 // ---------------------------------------------------------------------------
+// CORE-056 (#1750) / CORE-057 (#1751): the vmap family must be differentiable
+// and device/layout-preserving — gradients FLOW to the batched leaves
+// (R-ORACLE-3), non-contiguous inputs work, and per_sample_grad keeps the
+// parameter on its original device. All gradient expectations below come
+// from a live torch 2.11.0+cu130 session (R-ORACLE-1(b)); the producing
+// snippet is quoted in each test.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cpu_vmap_backward_noncontig_input_matches_torch_vmap() {
+    // CORE-056 / #1750 — red at HEAD: `select` rejected the non-contiguous
+    // input (`InvalidArgument: tensor is not contiguous`) and, on contiguous
+    // inputs, vmap output had requires_grad=false and the leaf grad was None.
+    // torch oracle:
+    //   base = torch.tensor([[1.,2.,3.],[4.,5.,6.]], requires_grad=True)
+    //   x = base.t()                                  # [3,2] non-contiguous
+    //   y = torch.vmap(lambda s: (s*s).sum(), in_dims=0)(x)
+    //   y.sum().backward()
+    //   y -> [17., 29., 45.]; base.grad -> [[2.,4.,6.],[8.,10.,12.]]
+    use ferrotorch_core::grad_fns::arithmetic::mul;
+    use ferrotorch_core::grad_fns::reduction::sum;
+    let base = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true);
+    let x = base.t().expect("transpose");
+    assert!(
+        !x.is_contiguous(),
+        "precondition: transposed input must be non-contiguous"
+    );
+    let y = vmap(|s: &Tensor<f32>| sum(&mul(s, s)?), 0, 0)(&x).expect("vmap over non-contiguous");
+    assert_eq!(y.shape(), &[3]);
+    check_f32(
+        "vmap noncontig fwd",
+        y.data().expect("y"),
+        &[17.0, 29.0, 45.0],
+        tolerance::F32_GRAD_CPU,
+    );
+    assert!(
+        y.requires_grad(),
+        "vmap output must stay on the autograd graph (CORE-056)"
+    );
+    sum(&y).expect("loss").backward().expect("backward");
+    let g = base
+        .grad()
+        .expect("grad lookup")
+        .expect("gradient must FLOW to the batched leaf (CORE-056)");
+    check_f32(
+        "vmap noncontig grad",
+        g.data().expect("g"),
+        &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0],
+        tolerance::F32_GRAD_CPU,
+    );
+}
+
+#[test]
+fn cpu_vmap2_backward_reaches_both_leaves_matches_torch_vmap() {
+    // CORE-056 / #1750. torch oracle:
+    //   a = torch.tensor([[1.,2.],[3.,4.],[5.,6.]], requires_grad=True)
+    //   b = torch.tensor([[10.,20.],[30.,40.],[50.,60.]], requires_grad=True)
+    //   y = torch.vmap(lambda p,q: (p*q).sum(), in_dims=(0,0))(a, b)
+    //   y.sum().backward()
+    //   y -> [50., 250., 610.]; a.grad -> b; b.grad -> a
+    use ferrotorch_core::grad_fns::arithmetic::mul;
+    use ferrotorch_core::grad_fns::reduction::sum;
+    let a = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2], true);
+    let b = make_cpu_f32(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0], &[3, 2], true);
+    let y =
+        vmap2(|p: &Tensor<f32>, q: &Tensor<f32>| sum(&mul(p, q)?), 0, 0, 0)(&a, &b).expect("vmap2");
+    check_f32(
+        "vmap2 fwd",
+        y.data().expect("y"),
+        &[50.0, 250.0, 610.0],
+        tolerance::F32_GRAD_CPU,
+    );
+    sum(&y).expect("loss").backward().expect("backward");
+    let ga = a.grad().expect("ga lookup").expect("a grad flows");
+    let gb = b.grad().expect("gb lookup").expect("b grad flows");
+    check_f32(
+        "vmap2 grad_a",
+        ga.data().expect("ga"),
+        &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+        tolerance::F32_GRAD_CPU,
+    );
+    check_f32(
+        "vmap2 grad_b",
+        gb.data().expect("gb"),
+        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        tolerance::F32_GRAD_CPU,
+    );
+}
+
+#[test]
+fn cpu_vmap3_backward_reaches_all_leaves_matches_torch_vmap() {
+    // CORE-056 / #1750. torch oracle:
+    //   a = torch.tensor([[1.,2.],[3.,4.]], requires_grad=True)
+    //   b = torch.tensor([[5.,6.],[7.,8.]], requires_grad=True)
+    //   c = torch.tensor([[9.,10.],[11.,12.]], requires_grad=True)
+    //   y = torch.vmap(lambda p,q,r: (p*q+r).sum(), in_dims=(0,0,0))(a,b,c)
+    //   y.sum().backward()
+    //   y -> [36., 76.]; a.grad -> b; b.grad -> a; c.grad -> ones
+    use ferrotorch_core::grad_fns::arithmetic::{add, mul};
+    use ferrotorch_core::grad_fns::reduction::sum;
+    let a = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], true);
+    let b = make_cpu_f32(&[5.0, 6.0, 7.0, 8.0], &[2, 2], true);
+    let c = make_cpu_f32(&[9.0, 10.0, 11.0, 12.0], &[2, 2], true);
+    let y = vmap3(
+        |p: &Tensor<f32>, q: &Tensor<f32>, r: &Tensor<f32>| sum(&add(&mul(p, q)?, r)?),
+        0,
+        0,
+        0,
+        0,
+    )(&a, &b, &c)
+    .expect("vmap3");
+    check_f32(
+        "vmap3 fwd",
+        y.data().expect("y"),
+        &[36.0, 76.0],
+        tolerance::F32_GRAD_CPU,
+    );
+    sum(&y).expect("loss").backward().expect("backward");
+    let ga = a.grad().expect("ga lookup").expect("a grad flows");
+    let gb = b.grad().expect("gb lookup").expect("b grad flows");
+    let gc = c.grad().expect("gc lookup").expect("c grad flows");
+    check_f32(
+        "vmap3 grad_a",
+        ga.data().expect("ga"),
+        &[5.0, 6.0, 7.0, 8.0],
+        tolerance::F32_GRAD_CPU,
+    );
+    check_f32(
+        "vmap3 grad_b",
+        gb.data().expect("gb"),
+        &[1.0, 2.0, 3.0, 4.0],
+        tolerance::F32_GRAD_CPU,
+    );
+    check_f32(
+        "vmap3 grad_c",
+        gc.data().expect("gc"),
+        &[1.0, 1.0, 1.0, 1.0],
+        tolerance::F32_GRAD_CPU,
+    );
+}
+
+#[test]
+fn cpu_vmap_many_backward_reaches_all_leaves_matches_torch_vmap() {
+    // CORE-056 / #1750. torch oracle:
+    //   a = torch.tensor([[1.,2.],[3.,4.]], requires_grad=True)
+    //   b = torch.tensor([[10.,20.],[30.,40.]], requires_grad=True)
+    //   c = torch.tensor([[100.,200.],[300.,400.]], requires_grad=True)
+    //   d = torch.tensor([[0.5,0.25],[0.125,0.0625]], requires_grad=True)
+    //   y = torch.vmap(lambda p,q,r,s: (p*q+r*s).sum(), in_dims=(0,0,0,0))(a,b,c,d)
+    //   y.sum().backward()
+    //   y -> [150., 312.5]; a.grad -> b; b.grad -> a; c.grad -> d; d.grad -> c
+    use ferrotorch_core::grad_fns::arithmetic::{add, mul};
+    use ferrotorch_core::grad_fns::reduction::sum;
+    let a = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], true);
+    let b = make_cpu_f32(&[10.0, 20.0, 30.0, 40.0], &[2, 2], true);
+    let c = make_cpu_f32(&[100.0, 200.0, 300.0, 400.0], &[2, 2], true);
+    let d = make_cpu_f32(&[0.5, 0.25, 0.125, 0.0625], &[2, 2], true);
+    let y = vmap_many(
+        |slices: &[Tensor<f32>]| -> ferrotorch_core::FerrotorchResult<Tensor<f32>> {
+            let pq = mul(&slices[0], &slices[1])?;
+            let rs = mul(&slices[2], &slices[3])?;
+            sum(&add(&pq, &rs)?)
+        },
+        vec![0, 0, 0, 0],
+        0,
+    )(&[&a, &b, &c, &d])
+    .expect("vmap_many");
+    check_f32(
+        "vmap_many fwd",
+        y.data().expect("y"),
+        &[150.0, 312.5],
+        tolerance::F32_GRAD_CPU,
+    );
+    sum(&y).expect("loss").backward().expect("backward");
+    let expectations: [(&Tensor<f32>, &[f64], &str); 4] = [
+        (&a, &[10.0, 20.0, 30.0, 40.0], "vmap_many grad_a"),
+        (&b, &[1.0, 2.0, 3.0, 4.0], "vmap_many grad_b"),
+        (&c, &[0.5, 0.25, 0.125, 0.0625], "vmap_many grad_c"),
+        (&d, &[100.0, 200.0, 300.0, 400.0], "vmap_many grad_d"),
+    ];
+    for (leaf, exp, label) in expectations {
+        let g = leaf
+            .grad()
+            .expect("grad lookup")
+            .unwrap_or_else(|| panic!("{label}: gradient must flow to the leaf (CORE-056)"));
+        check_f32(label, g.data().expect("g"), exp, tolerance::F32_GRAD_CPU);
+    }
+}
+
+#[test]
+fn cpu_vmap_multi_output_backward_reaches_leaf_matches_torch_vmap() {
+    // CORE-056 / #1750. torch oracle:
+    //   x = torch.tensor([[1.,2.,3.],[4.,5.,6.]], requires_grad=True)
+    //   o0, o1 = torch.vmap(lambda s: (s.sum(), (s*s).sum()), in_dims=0)(x)
+    //   (o0.sum() + o1.sum()).backward()
+    //   o0 -> [6., 15.]; o1 -> [14., 77.]; x.grad -> [[3.,5.,7.],[9.,11.,13.]]
+    use ferrotorch_core::grad_fns::arithmetic::{add, mul};
+    use ferrotorch_core::grad_fns::reduction::sum;
+    let x = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true);
+    let outs = vmap_multi_output(
+        |s: &Tensor<f32>| -> ferrotorch_core::FerrotorchResult<Vec<Tensor<f32>>> {
+            Ok(vec![sum(s)?, sum(&mul(s, s)?)?])
+        },
+        0,
+        0,
+    )(&x)
+    .expect("vmap_multi_output");
+    assert_eq!(outs.len(), 2);
+    check_f32(
+        "vmap_multi_output o0",
+        outs[0].data().expect("o0"),
+        &[6.0, 15.0],
+        tolerance::F32_GRAD_CPU,
+    );
+    check_f32(
+        "vmap_multi_output o1",
+        outs[1].data().expect("o1"),
+        &[14.0, 77.0],
+        tolerance::F32_GRAD_CPU,
+    );
+    let loss = add(&sum(&outs[0]).expect("s0"), &sum(&outs[1]).expect("s1")).expect("loss");
+    loss.backward().expect("backward");
+    let g = x
+        .grad()
+        .expect("grad lookup")
+        .expect("gradient must flow through BOTH stacked outputs (CORE-056)");
+    check_f32(
+        "vmap_multi_output grad",
+        g.data().expect("g"),
+        &[3.0, 5.0, 7.0, 9.0, 11.0, 13.0],
+        tolerance::F32_GRAD_CPU,
+    );
+}
+
+#[test]
+fn cpu_select_backward_scatters_into_leaf_matches_torch_select() {
+    // CORE-056 / #1750 — red at HEAD: select always returned a detached
+    // fresh CPU tensor. torch oracle:
+    //   x = torch.tensor([[1.,2.,3.],[4.,5.,6.]], requires_grad=True)
+    //   w = torch.tensor([10., 20.])
+    //   s = torch.select(x, 1, 1); (s*w).sum().backward()
+    //   s -> [2., 5.]; x.grad -> [[0.,10.,0.],[0.,20.,0.]]
+    use ferrotorch_core::grad_fns::arithmetic::mul;
+    use ferrotorch_core::grad_fns::reduction::sum;
+    let x = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true);
+    let w = make_cpu_f32(&[10.0, 20.0], &[2], false);
+    let s = select(&x, 1, 1).expect("select");
+    assert_eq!(s.shape(), &[2]);
+    check_f32(
+        "select fwd",
+        &s.data_vec().expect("s"),
+        &[2.0, 5.0],
+        tolerance::F32_GRAD_CPU,
+    );
+    assert!(
+        s.requires_grad(),
+        "select output must stay on the autograd graph (CORE-056)"
+    );
+    sum(&mul(&s, &w).expect("mul"))
+        .expect("loss")
+        .backward()
+        .expect("backward");
+    let g = x
+        .grad()
+        .expect("grad lookup")
+        .expect("select gradient must scatter back into the leaf (CORE-056)");
+    check_f32(
+        "select grad",
+        g.data().expect("g"),
+        &[0.0, 10.0, 0.0, 0.0, 20.0, 0.0],
+        tolerance::F32_GRAD_CPU,
+    );
+}
+
+#[test]
+fn cpu_stack_backward_splits_into_leaves_matches_torch_stack() {
+    // CORE-056 / #1750 — red at HEAD: stack always returned a detached
+    // fresh CPU tensor. torch oracle:
+    //   a = torch.tensor([1.,2.], requires_grad=True)
+    //   b = torch.tensor([3.,4.], requires_grad=True)
+    //   w = torch.tensor([[1.,2.],[3.,4.]])
+    //   s = torch.stack([a,b], dim=1); (s*w).sum().backward()
+    //   s -> [[1.,3.],[2.,4.]]; a.grad -> [1.,3.]; b.grad -> [2.,4.]
+    use ferrotorch_core::grad_fns::arithmetic::mul;
+    use ferrotorch_core::grad_fns::reduction::sum;
+    let a = make_cpu_f32(&[1.0, 2.0], &[2], true);
+    let b = make_cpu_f32(&[3.0, 4.0], &[2], true);
+    let w = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+    let s = stack(&[a.clone(), b.clone()], 1).expect("stack");
+    assert_eq!(s.shape(), &[2, 2]);
+    check_f32(
+        "stack fwd",
+        &s.data_vec().expect("s"),
+        &[1.0, 3.0, 2.0, 4.0],
+        tolerance::F32_GRAD_CPU,
+    );
+    assert!(
+        s.requires_grad(),
+        "stack output must stay on the autograd graph (CORE-056)"
+    );
+    sum(&mul(&s, &w).expect("mul"))
+        .expect("loss")
+        .backward()
+        .expect("backward");
+    let ga = a.grad().expect("ga lookup").expect("a grad flows");
+    let gb = b.grad().expect("gb lookup").expect("b grad flows");
+    check_f32(
+        "stack grad_a",
+        ga.data().expect("ga"),
+        &[1.0, 3.0],
+        tolerance::F32_GRAD_CPU,
+    );
+    check_f32(
+        "stack grad_b",
+        gb.data().expect("gb"),
+        &[2.0, 4.0],
+        tolerance::F32_GRAD_CPU,
+    );
+}
+
+#[test]
+fn cpu_per_sample_grad_matches_torch_func_vmap_of_grad() {
+    // CORE-057 / #1751 companion (CPU lane). torch oracle:
+    //   inputs = torch.tensor([[1.,2.,3.],[4.,-5.,6.]])
+    //   param = torch.tensor([0.5,-1.5,2.0])
+    //   loss = lambda x,p: ((x*p)**2).sum()
+    //   torch.func.vmap(torch.func.grad(loss, argnums=1), in_dims=(0,None))(inputs, param)
+    //   -> [[1., -12., 36.], [16., -75., 144.]]
+    use ferrotorch_core::grad_fns::arithmetic::mul;
+    use ferrotorch_core::grad_fns::reduction::sum;
+    let inputs = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, -5.0, 6.0], &[2, 3], false);
+    let param = make_cpu_f32(&[0.5, -1.5, 2.0], &[3], false);
+    let grads = per_sample_grad(
+        |x: &Tensor<f32>, p: &Tensor<f32>| -> ferrotorch_core::FerrotorchResult<Tensor<f32>> {
+            let xp = mul(x, p)?;
+            sum(&mul(&xp, &xp)?)
+        },
+        &inputs,
+        &param,
+        0,
+    )
+    .expect("per_sample_grad");
+    assert_eq!(grads.shape(), &[2, 3]);
+    check_f32(
+        "per_sample_grad torch.func",
+        grads.data().expect("grads"),
+        &[1.0, -12.0, 36.0, 16.0, -75.0, 144.0],
+        tolerance::F32_GRAD_CPU,
+    );
+}
+
+#[test]
+fn cpu_per_sample_grad_does_not_accumulate_into_inputs() {
+    // CORE-057 / #1751: torch.func.grad has functional semantics — only the
+    // differentiated argument receives gradients. The original `inputs`
+    // tensor must NOT accumulate a side-effect .grad across samples.
+    use ferrotorch_core::grad_fns::arithmetic::mul;
+    use ferrotorch_core::grad_fns::reduction::sum;
+    let inputs = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true);
+    let param = make_cpu_f32(&[0.5, 0.5, 0.5], &[3], false);
+    let grads = per_sample_grad(
+        |x: &Tensor<f32>, p: &Tensor<f32>| -> ferrotorch_core::FerrotorchResult<Tensor<f32>> {
+            let xp = mul(x, p)?;
+            sum(&mul(&xp, &xp)?)
+        },
+        &inputs,
+        &param,
+        0,
+    )
+    .expect("per_sample_grad");
+    assert_eq!(grads.shape(), &[2, 3]);
+    assert!(
+        inputs.grad().expect("grad lookup").is_none(),
+        "per_sample_grad must not leak side-effect gradients into `inputs` \
+         (torch.func functional semantics)"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Hooks: HookHandle + register_hook + register_post_accumulate_grad_hook
 // + remove_hook
 //
@@ -3273,5 +3652,402 @@ mod gpu {
                  via scripts/regenerate_autograd_fixtures.py on a CUDA host"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // CORE-056 (#1750) / CORE-057 (#1751): vmap family on CUDA — forward
+    // values + result device, backward grad values + grad device (R-ORACLE-3,
+    // device-checked readback per CORE-196 / #1890). Expectations from a live
+    // torch 2.11.0+cu130 session on cuda:0 (R-ORACLE-1(b)); snippets quoted.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn gpu_vmap_cuda_noncontig_backward_grads_on_cuda() {
+        // Red at HEAD: select() returned Err(GpuTensorNotAccessible) for any
+        // CUDA input, so every vmap variant rejected CUDA outright.
+        // torch oracle on cuda:0:
+        //   base = torch.tensor([[1.,2.,3.],[4.,5.,6.]], device="cuda:0",
+        //                       requires_grad=True)
+        //   x = base.t()                              # [3,2] non-contiguous
+        //   y = torch.vmap(lambda s: (s*s).sum(), in_dims=0)(x)
+        //   y.sum().backward()
+        //   y -> [17., 29., 45.] (cuda:0)
+        //   base.grad -> [[2.,4.,6.],[8.,10.,12.]] (cuda:0)
+        ensure_cuda_backend();
+        let base = upload_f32(make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true));
+        let x = base.t().expect("transpose on cuda");
+        assert!(
+            !x.is_contiguous(),
+            "precondition: transposed input must be non-contiguous"
+        );
+        let y = vmap(|s: &Tensor<f32>| sum(&mul(s, s)?), 0, 0)(&x)
+            .expect("vmap must accept CUDA inputs (CORE-056)");
+        check_f32(
+            "gpu vmap fwd",
+            &read_back_f32(&y, Device::Cuda(0), "gpu vmap fwd"),
+            &[17.0, 29.0, 45.0],
+            tolerance::F32_GRAD_GPU,
+        );
+        sum(&y).expect("loss").backward().expect("backward on CUDA");
+        let g = base
+            .grad()
+            .expect("grad lookup")
+            .expect("gradient must flow to the CUDA leaf (CORE-056)");
+        check_f32(
+            "gpu vmap grad",
+            &read_back_f32(&g, Device::Cuda(0), "gpu vmap grad"),
+            &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0],
+            tolerance::F32_GRAD_GPU,
+        );
+    }
+
+    #[test]
+    fn gpu_vmap2_cuda_backward_grads_on_cuda() {
+        // torch oracle on cuda:0 (same chain as the CPU twin, device="cuda:0"):
+        //   y = torch.vmap(lambda p,q: (p*q).sum(), in_dims=(0,0))(a, b)
+        //   y -> [50., 250., 610.]; a.grad -> b; b.grad -> a (all cuda:0)
+        ensure_cuda_backend();
+        let a = upload_f32(make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2], true));
+        let b = upload_f32(make_cpu_f32(
+            &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            &[3, 2],
+            true,
+        ));
+        let y = vmap2(|p: &Tensor<f32>, q: &Tensor<f32>| sum(&mul(p, q)?), 0, 0, 0)(&a, &b)
+            .expect("vmap2 must accept CUDA inputs (CORE-056)");
+        check_f32(
+            "gpu vmap2 fwd",
+            &read_back_f32(&y, Device::Cuda(0), "gpu vmap2 fwd"),
+            &[50.0, 250.0, 610.0],
+            tolerance::F32_GRAD_GPU,
+        );
+        sum(&y).expect("loss").backward().expect("backward on CUDA");
+        let ga = a.grad().expect("ga lookup").expect("a grad flows");
+        let gb = b.grad().expect("gb lookup").expect("b grad flows");
+        check_f32(
+            "gpu vmap2 grad_a",
+            &read_back_f32(&ga, Device::Cuda(0), "gpu vmap2 grad_a"),
+            &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            tolerance::F32_GRAD_GPU,
+        );
+        check_f32(
+            "gpu vmap2 grad_b",
+            &read_back_f32(&gb, Device::Cuda(0), "gpu vmap2 grad_b"),
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            tolerance::F32_GRAD_GPU,
+        );
+    }
+
+    #[test]
+    fn gpu_vmap3_cuda_backward_grads_on_cuda() {
+        // torch oracle on cuda:0 (CPU twin chain on device="cuda:0"):
+        //   y = torch.vmap(lambda p,q,r: (p*q+r).sum(), in_dims=(0,0,0))(a,b,c)
+        //   y -> [36., 76.]; a.grad -> b; b.grad -> a; c.grad -> ones
+        ensure_cuda_backend();
+        let a = upload_f32(make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], true));
+        let b = upload_f32(make_cpu_f32(&[5.0, 6.0, 7.0, 8.0], &[2, 2], true));
+        let c = upload_f32(make_cpu_f32(&[9.0, 10.0, 11.0, 12.0], &[2, 2], true));
+        let y = vmap3(
+            |p: &Tensor<f32>, q: &Tensor<f32>, r: &Tensor<f32>| sum(&add(&mul(p, q)?, r)?),
+            0,
+            0,
+            0,
+            0,
+        )(&a, &b, &c)
+        .expect("vmap3 must accept CUDA inputs (CORE-056)");
+        check_f32(
+            "gpu vmap3 fwd",
+            &read_back_f32(&y, Device::Cuda(0), "gpu vmap3 fwd"),
+            &[36.0, 76.0],
+            tolerance::F32_GRAD_GPU,
+        );
+        sum(&y).expect("loss").backward().expect("backward on CUDA");
+        let ga = a.grad().expect("ga lookup").expect("a grad flows");
+        let gb = b.grad().expect("gb lookup").expect("b grad flows");
+        let gc = c.grad().expect("gc lookup").expect("c grad flows");
+        check_f32(
+            "gpu vmap3 grad_a",
+            &read_back_f32(&ga, Device::Cuda(0), "gpu vmap3 grad_a"),
+            &[5.0, 6.0, 7.0, 8.0],
+            tolerance::F32_GRAD_GPU,
+        );
+        check_f32(
+            "gpu vmap3 grad_b",
+            &read_back_f32(&gb, Device::Cuda(0), "gpu vmap3 grad_b"),
+            &[1.0, 2.0, 3.0, 4.0],
+            tolerance::F32_GRAD_GPU,
+        );
+        check_f32(
+            "gpu vmap3 grad_c",
+            &read_back_f32(&gc, Device::Cuda(0), "gpu vmap3 grad_c"),
+            &[1.0, 1.0, 1.0, 1.0],
+            tolerance::F32_GRAD_GPU,
+        );
+    }
+
+    #[test]
+    fn gpu_vmap_many_cuda_backward_grads_on_cuda() {
+        // torch oracle on cuda:0 (CPU twin chain on device="cuda:0"):
+        //   y = torch.vmap(lambda p,q,r,s: (p*q+r*s).sum(),
+        //                  in_dims=(0,0,0,0))(a,b,c,d)
+        //   y -> [150., 312.5]; a.grad -> b; b.grad -> a; c.grad -> d;
+        //   d.grad -> c (all cuda:0)
+        ensure_cuda_backend();
+        let a = upload_f32(make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2], true));
+        let b = upload_f32(make_cpu_f32(&[10.0, 20.0, 30.0, 40.0], &[2, 2], true));
+        let c = upload_f32(make_cpu_f32(&[100.0, 200.0, 300.0, 400.0], &[2, 2], true));
+        let d = upload_f32(make_cpu_f32(&[0.5, 0.25, 0.125, 0.0625], &[2, 2], true));
+        let y = vmap_many(
+            |slices: &[Tensor<f32>]| -> ferrotorch_core::FerrotorchResult<Tensor<f32>> {
+                let pq = mul(&slices[0], &slices[1])?;
+                let rs = mul(&slices[2], &slices[3])?;
+                sum(&add(&pq, &rs)?)
+            },
+            vec![0, 0, 0, 0],
+            0,
+        )(&[&a, &b, &c, &d])
+        .expect("vmap_many must accept CUDA inputs (CORE-056)");
+        check_f32(
+            "gpu vmap_many fwd",
+            &read_back_f32(&y, Device::Cuda(0), "gpu vmap_many fwd"),
+            &[150.0, 312.5],
+            tolerance::F32_GRAD_GPU,
+        );
+        sum(&y).expect("loss").backward().expect("backward on CUDA");
+        let expectations: [(&Tensor<f32>, &[f64], &str); 4] = [
+            (&a, &[10.0, 20.0, 30.0, 40.0], "gpu vmap_many grad_a"),
+            (&b, &[1.0, 2.0, 3.0, 4.0], "gpu vmap_many grad_b"),
+            (&c, &[0.5, 0.25, 0.125, 0.0625], "gpu vmap_many grad_c"),
+            (&d, &[100.0, 200.0, 300.0, 400.0], "gpu vmap_many grad_d"),
+        ];
+        for (leaf, exp, label) in expectations {
+            let g = leaf
+                .grad()
+                .expect("grad lookup")
+                .unwrap_or_else(|| panic!("{label}: gradient must flow to the CUDA leaf"));
+            check_f32(
+                label,
+                &read_back_f32(&g, Device::Cuda(0), label),
+                exp,
+                tolerance::F32_GRAD_GPU,
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_vmap_multi_output_cuda_backward_grads_on_cuda() {
+        // Elementwise closure — exercises the vmap_multi_output transform's
+        // own CUDA path (select / per-output stack / gradient flow) without
+        // routing through the whole-tensor CUDA reduction divergence pinned
+        // by #1961 (see gpu_vmap_multi_output_cuda_sum_closure_pinned).
+        // torch oracle on cuda:0:
+        //   x = torch.tensor([[1.,2.,3.],[4.,5.,6.]], device="cuda:0",
+        //                    requires_grad=True)
+        //   o0, o1 = torch.vmap(lambda s: (s+s, s*s), in_dims=0)(x)
+        //   (o0.sum() + o1.sum()).backward()
+        //   o0 -> [[2.,4.,6.],[8.,10.,12.]]; o1 -> [[1.,4.,9.],[16.,25.,36.]]
+        //   x.grad -> [[4.,6.,8.],[10.,12.,14.]] (cuda:0)
+        ensure_cuda_backend();
+        let x = upload_f32(make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true));
+        let outs = vmap_multi_output(
+            |s: &Tensor<f32>| -> ferrotorch_core::FerrotorchResult<Vec<Tensor<f32>>> {
+                Ok(vec![add(s, s)?, mul(s, s)?])
+            },
+            0,
+            0,
+        )(&x)
+        .expect("vmap_multi_output must accept CUDA inputs (CORE-056)");
+        assert_eq!(outs.len(), 2);
+        check_f32(
+            "gpu vmap_multi_output o0",
+            &read_back_f32(&outs[0], Device::Cuda(0), "gpu vmap_multi_output o0"),
+            &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0],
+            tolerance::F32_GRAD_GPU,
+        );
+        check_f32(
+            "gpu vmap_multi_output o1",
+            &read_back_f32(&outs[1], Device::Cuda(0), "gpu vmap_multi_output o1"),
+            &[1.0, 4.0, 9.0, 16.0, 25.0, 36.0],
+            tolerance::F32_GRAD_GPU,
+        );
+        let loss = add(&sum(&outs[0]).expect("s0"), &sum(&outs[1]).expect("s1")).expect("loss");
+        loss.backward().expect("backward on CUDA");
+        let g = x
+            .grad()
+            .expect("grad lookup")
+            .expect("gradient must flow through both stacked CUDA outputs");
+        check_f32(
+            "gpu vmap_multi_output grad",
+            &read_back_f32(&g, Device::Cuda(0), "gpu vmap_multi_output grad"),
+            &[4.0, 6.0, 8.0, 10.0, 12.0, 14.0],
+            tolerance::F32_GRAD_GPU,
+        );
+    }
+
+    #[test]
+    #[ignore = "blocked by #1961: CUDA whole-tensor reductions over an \
+                offset-0 view shorter than its storage reduce the WHOLE \
+                buffer (sum(select(x,0,0)) == sum of all of x). Pinned red \
+                2026-06-11; un-ignore when #1961 closes."]
+    fn gpu_vmap_multi_output_cuda_sum_closure_pinned() {
+        // R-RED-1 pin for #1961 (discovered during the CORE-056 / #1750
+        // remediation — R-AHON-4). torch oracle on cuda:0:
+        //   o0, o1 = torch.vmap(lambda s: (s.sum(), (s*s).sum()), in_dims=0)(x)
+        //   (o0.sum() + o1.sum()).backward()
+        //   o0 -> [6., 15.]; o1 -> [14., 77.];
+        //   x.grad -> [[3.,5.,7.],[9.,11.,13.]] (cuda:0)
+        // Observed red 2026-06-11: "gpu vmap_multi_output o0: index 0 delta
+        // 1.500e1 exceeds tol 1.000e-3 (actual=21, expected=6)" — 21 is the
+        // whole-storage sum of x.
+        ensure_cuda_backend();
+        let x = upload_f32(make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true));
+        let outs = vmap_multi_output(
+            |s: &Tensor<f32>| -> ferrotorch_core::FerrotorchResult<Vec<Tensor<f32>>> {
+                Ok(vec![sum(s)?, sum(&mul(s, s)?)?])
+            },
+            0,
+            0,
+        )(&x)
+        .expect("vmap_multi_output must accept CUDA inputs (CORE-056)");
+        assert_eq!(outs.len(), 2);
+        check_f32(
+            "gpu vmap_multi_output sum-closure o0",
+            &read_back_f32(
+                &outs[0],
+                Device::Cuda(0),
+                "gpu vmap_multi_output sum-closure o0",
+            ),
+            &[6.0, 15.0],
+            tolerance::F32_GRAD_GPU,
+        );
+        check_f32(
+            "gpu vmap_multi_output sum-closure o1",
+            &read_back_f32(
+                &outs[1],
+                Device::Cuda(0),
+                "gpu vmap_multi_output sum-closure o1",
+            ),
+            &[14.0, 77.0],
+            tolerance::F32_GRAD_GPU,
+        );
+        let loss = add(&sum(&outs[0]).expect("s0"), &sum(&outs[1]).expect("s1")).expect("loss");
+        loss.backward().expect("backward on CUDA");
+        let g = x
+            .grad()
+            .expect("grad lookup")
+            .expect("gradient must flow through both stacked CUDA outputs");
+        check_f32(
+            "gpu vmap_multi_output sum-closure grad",
+            &read_back_f32(
+                &g,
+                Device::Cuda(0),
+                "gpu vmap_multi_output sum-closure grad",
+            ),
+            &[3.0, 5.0, 7.0, 9.0, 11.0, 13.0],
+            tolerance::F32_GRAD_GPU,
+        );
+    }
+
+    #[test]
+    fn gpu_select_cuda_preserves_device_and_grad() {
+        // torch oracle on cuda:0:
+        //   x = torch.tensor([[1.,2.,3.],[4.,5.,6.]], device="cuda:0",
+        //                    requires_grad=True)
+        //   w = torch.tensor([10., 20.], device="cuda:0")
+        //   s = torch.select(x, 1, 1); (s*w).sum().backward()
+        //   s -> [2., 5.] (cuda:0); x.grad -> [[0.,10.,0.],[0.,20.,0.]] (cuda:0)
+        ensure_cuda_backend();
+        let x = upload_f32(make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true));
+        let w = upload_f32(make_cpu_f32(&[10.0, 20.0], &[2], false));
+        let s = select(&x, 1, 1).expect("select must accept CUDA inputs (CORE-056)");
+        assert_eq!(s.shape(), &[2]);
+        check_f32(
+            "gpu select fwd",
+            &read_back_f32(&s, Device::Cuda(0), "gpu select fwd"),
+            &[2.0, 5.0],
+            tolerance::F32_GRAD_GPU,
+        );
+        sum(&mul(&s, &w).expect("mul"))
+            .expect("loss")
+            .backward()
+            .expect("backward on CUDA");
+        let g = x
+            .grad()
+            .expect("grad lookup")
+            .expect("select gradient must scatter back into the CUDA leaf");
+        check_f32(
+            "gpu select grad",
+            &read_back_f32(&g, Device::Cuda(0), "gpu select grad"),
+            &[0.0, 10.0, 0.0, 0.0, 20.0, 0.0],
+            tolerance::F32_GRAD_GPU,
+        );
+    }
+
+    #[test]
+    fn gpu_stack_cuda_preserves_device_and_rejects_mixed_devices() {
+        // torch oracle on cuda:0:
+        //   torch.stack([cuda_a, cuda_b], 0) -> cuda:0 tensor
+        //   torch.stack([cpu_a, cuda_b], 0) -> RuntimeError "Expected all
+        //   tensors to be on the same device" — must be a structured error,
+        //   never a silent demotion (R-LOUD-1).
+        ensure_cuda_backend();
+        let a = upload_f32(make_cpu_f32(&[1.0, 2.0], &[2], false));
+        let b = upload_f32(make_cpu_f32(&[3.0, 4.0], &[2], false));
+        let s = stack(&[a.clone(), b], 0).expect("stack must accept CUDA inputs (CORE-056)");
+        assert_eq!(s.shape(), &[2, 2]);
+        check_f32(
+            "gpu stack fwd",
+            &read_back_f32(&s, Device::Cuda(0), "gpu stack fwd"),
+            &[1.0, 2.0, 3.0, 4.0],
+            tolerance::F32_GRAD_GPU,
+        );
+
+        let cpu_b = make_cpu_f32(&[3.0, 4.0], &[2], false);
+        let mixed = stack(&[a, cpu_b], 0);
+        match mixed {
+            Err(ferrotorch_core::FerrotorchError::DeviceMismatch { .. }) => {}
+            other => panic!(
+                "stack of mixed CPU/CUDA inputs must return DeviceMismatch \
+                 (CORE-056), got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn gpu_per_sample_grad_cuda_param_grads_on_cuda() {
+        // CORE-057 / #1751 — red at HEAD: CUDA inputs failed in the CPU-only
+        // select, and a CUDA param was silently rebuilt as a CPU leaf
+        // (probe: per_sample_grad(CPU inputs, CUDA param) -> Ok((Cpu, ...))).
+        // torch oracle on cuda:0:
+        //   inputs = torch.tensor([[1.,2.,3.],[4.,-5.,6.]], device="cuda:0")
+        //   param = torch.tensor([0.5,-1.5,2.0], device="cuda:0")
+        //   loss = lambda x,p: ((x*p)**2).sum()
+        //   torch.func.vmap(torch.func.grad(loss, argnums=1),
+        //                   in_dims=(0,None))(inputs, param)
+        //   -> [[1., -12., 36.], [16., -75., 144.]] (device cuda:0)
+        ensure_cuda_backend();
+        let inputs = upload_f32(make_cpu_f32(
+            &[1.0, 2.0, 3.0, 4.0, -5.0, 6.0],
+            &[2, 3],
+            false,
+        ));
+        let param = upload_f32(make_cpu_f32(&[0.5, -1.5, 2.0], &[3], false));
+        let grads = per_sample_grad(
+            |x: &Tensor<f32>, p: &Tensor<f32>| -> ferrotorch_core::FerrotorchResult<Tensor<f32>> {
+                let xp = mul(x, p)?;
+                sum(&mul(&xp, &xp)?)
+            },
+            &inputs,
+            &param,
+            0,
+        )
+        .expect("per_sample_grad must accept CUDA inputs + CUDA param (CORE-057)");
+        assert_eq!(grads.shape(), &[2, 3]);
+        check_f32(
+            "gpu per_sample_grad",
+            &read_back_f32(&grads, Device::Cuda(0), "gpu per_sample_grad"),
+            &[1.0, -12.0, 36.0, 16.0, -75.0, 144.0],
+            tolerance::F32_GRAD_GPU,
+        );
     }
 }

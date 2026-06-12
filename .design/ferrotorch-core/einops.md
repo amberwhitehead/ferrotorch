@@ -80,13 +80,18 @@ insert.
    remaining size as `parent / known_product`. If two or more are
    unknown, error.
 
-`rearrange` at `einops.rs:458` is the entry point for pure-shape ops:
+`rearrange` at `einops.rs:393` is the entry point for pure-shape ops:
 parses, resolves sizes, then applies the reshape sequence
-(`einops.rs:482` enters `rearrange_with` which routes to the actual
-flat-data permute fill). `repeat` at `:589` similarly resolves sizes
-then replicates along new-axis positions. `reduce` at `:665` walks
-the data, identifying axes-to-reduce as those present on left but not
-right, then applies the chosen reduction.
+(`einops.rs:424` enters `rearrange_with` which routes to the
+differentiable `reshape → permute → reshape` composition). `repeat`
+at `:514` similarly resolves sizes then replicates along new-axis
+positions via `reshape → permute → reshape → expand → reshape`.
+`reduce` at `:614` identifies axes-to-reduce as those present on left
+but not right, then applies the chosen reduction through
+`reshape → permute → reshape → sum_dim/cummax/cummin → reshape`.
+Per CORE-061 (#1755) every step participates in autograd; per
+CORE-062 (#1756) axis reordering happens by name in the permute step,
+never by positional coordinate walks.
 
 The reduction path for `Mean` (`einops.rs`) lifts a scalar
 `n_recip = 1.0 / count` via `crate::creation::scalar` so the
@@ -121,9 +126,9 @@ variants.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `rearrange` at `einops.rs:458` (closest upstream behavioural analog `einops.rearrange`, no PyTorch counterpart); non-test consumer: re-exported as `ferrotorch_core::rearrange` at `lib.rs:143`; used by `ferrotorch-nn` ViT/MLP-Mixer-style patch-shuffling code |
-| REQ-2 | SHIPPED | impl: `rearrange_with` at `einops.rs:482`; non-test consumer: re-exported as `ferrotorch_core::rearrange_with` at `lib.rs:143` |
-| REQ-3 | SHIPPED | impl: `repeat` at `einops.rs:589`; non-test consumer: re-exported as `ferrotorch_core::repeat` at `lib.rs:143` |
+| REQ-1 | SHIPPED | impl: `rearrange` at `einops.rs:393` (closest upstream behavioural analog `einops.rearrange`, no PyTorch counterpart); non-test consumer: re-exported as `ferrotorch_core::rearrange` at `lib.rs:143`; used by `ferrotorch-nn` ViT/MLP-Mixer-style patch-shuffling code |
+| REQ-2 | SHIPPED | impl: `rearrange_with` at `einops.rs:424`; non-test consumer: re-exported as `ferrotorch_core::rearrange_with` at `lib.rs:143` |
+| REQ-3 | SHIPPED | impl: `repeat` at `einops.rs:514`; non-test consumer: re-exported as `ferrotorch_core::repeat` at `lib.rs:143` |
 | REQ-4 | SHIPPED | impl: `reduce in einops.rs` with `EinopsReduction` enum at `EinopsReduction in einops.rs`; non-test consumer: re-exported as `ferrotorch_core::reduce` and `EinopsReduction` at `einops in lib.rs` |
 | REQ-5 | SHIPPED | impl: `parse_pattern`/`parse_side`/`read_axis_name` at `einops.rs:79-195`; non-test consumer: all four public APIs (REQ-1..REQ-4) invoke `parse_pattern` as their first step |
 | REQ-6 | SHIPPED | impl: `resolve_sizes` at `einops.rs:211`; non-test consumer: all four public APIs invoke `resolve_sizes` after `parse_pattern` |

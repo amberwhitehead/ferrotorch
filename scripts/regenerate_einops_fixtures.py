@@ -197,6 +197,15 @@ REPEAT_CASES: list[tuple[str, str, list[int], dict[str, int]]] = [
     ("new_batch_dim", "h w -> b h w", [2, 2], {"b": 3}),
     ("tile_trailing", "c -> c n", [3], {"n": 2}),
     ("multi_new_axes", "c -> b c n", [3], {"b": 2, "n": 2}),
+    # CORE-062 / #1756 — kept-axis reorder combined with new axes. Pre-fix,
+    # ferrotorch collected source coordinates in right-pattern order but
+    # flattened them with the left shape (wrong elements / OOB reads).
+    ("reorder_new_trailing", "a b -> b a c", [2, 3], {"c": 2}),
+    ("reorder_new_leading", "a b -> c b a", [2, 3], {"c": 2}),
+    ("reorder_new_in_merge", "a b -> b (a c)", [2, 3], {"c": 2}),
+    ("reorder_merged_kept_new", "a b -> (b c) a", [2, 3], {"c": 3}),
+    ("split_reorder_new", "(a b) -> b c a", [4], {"b": 2, "c": 2}),
+    ("pure_reorder", "a b -> b a", [2, 3], {}),
 ]
 
 
@@ -244,6 +253,14 @@ REDUCE_CASES: list[tuple[str, str, list[int]]] = [
     ("global_avg_pool", "b c h w -> b c", [1, 2, 2, 2]),
     ("sum_batch", "b c -> c", [3, 2]),
     ("trailing_full_pool", "b c h w -> b", [2, 2, 2, 3]),
+    # CORE-062 / #1756 — kept-axis reorder (forces the non-fast-path mapping).
+    # Pre-fix, ferrotorch collected kept coordinates in left order but
+    # flattened them with the right-order output shape (wrong positions /
+    # OOB accumulator writes — kept_reorder_wide panicked).
+    ("kept_reorder", "a b c -> c a", [2, 3, 4]),
+    ("kept_reorder_wide", "a b c -> c a", [5, 3, 2]),
+    ("kept_reorder_trailing_reduced", "a b c -> b a", [2, 3, 4]),
+    ("kept_reorder_merged", "a b c -> (c a)", [2, 3, 4]),
 ]
 
 

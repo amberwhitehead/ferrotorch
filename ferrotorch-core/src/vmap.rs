@@ -1,21 +1,27 @@
 //! Vectorized map (vmap) — apply a function over a batch dimension.
 //!
 //! This module provides [`vmap`] and [`vmap2`], which take a per-element
-//! function and vectorize it over a batch dimension. The MVP implementation
+//! function and vectorize it over a batch dimension. The implementation
 //! is loop-based (correct but not fused); a future version may trace the
 //! function to produce a batched kernel.
 //!
 //! Helper utilities [`select`] and [`stack`] are also provided for
 //! extracting slices and reassembling tensors along arbitrary dimensions.
+//! Both are differentiable, device-preserving compositions over the
+//! crate's view/concat primitives (CORE-056 / #1750): `select` =
+//! `narrow` + `squeeze`, `stack` = `unsqueeze` + `cat`. The loop
+//! transforms are pure compositions of `select` + `f` + `stack`, so every
+//! `vmap*` variant inherits CUDA support, non-contiguous-input support,
+//! and gradient flow to the batched leaves from those primitives.
 //!
 //! ## REQ status (per `.design/ferrotorch-core/vmap.md`)
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | impl `select`; non-test consumer re-exported at `lib.rs:191` + invoked by `vmap`. |
-//! | REQ-2 | SHIPPED | impl `stack`; non-test consumer re-exported at `lib.rs:191` + invoked by `vmap`. |
-//! | REQ-3 | SHIPPED | impl `vmap`; non-test consumer re-exported at `lib.rs:191`; pattern documented at `autograd/forward_ad.rs:379`. |
-//! | REQ-4 | SHIPPED | impl `vmap2`; non-test consumer re-exported at `lib.rs:191`. |
+//! | REQ-1 | SHIPPED | impl `select` = `narrow_t` + `squeeze` (differentiable, device-preserving); non-test consumer re-exported at `lib.rs:233` + invoked by `vmap`. |
+//! | REQ-2 | SHIPPED | impl `stack` = `unsqueeze` + `cat` (differentiable, device-validating); non-test consumer re-exported at `lib.rs:233` + invoked by `vmap`. |
+//! | REQ-3 | SHIPPED | impl `vmap`; non-test consumer re-exported at `lib.rs:233`; pattern documented at `autograd/forward_ad.rs:379`. |
+//! | REQ-4 | SHIPPED | impl `vmap2`; non-test consumer re-exported at `lib.rs:233`. |
 //! | REQ-5 | SHIPPED | impl `vmap3`; non-test consumer pub API (grandfathered per S5). |
 //! | REQ-6 | SHIPPED | impl `vmap_many`; non-test consumer pub API (grandfathered per S5). |
 //! | REQ-7 | SHIPPED | impl `vmap_multi_output`; non-test consumer pub API (grandfathered per S5). |
@@ -23,7 +29,6 @@
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
-use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
 
 // ---------------------------------------------------------------------------
@@ -35,6 +40,14 @@ use crate::tensor::Tensor;
 ///
 /// For a tensor of shape `[B, M, N]`, `select(t, 0, i)` returns the
 /// `[M, N]` slice at batch index `i`.
+///
+/// Differentiable and device-preserving (CORE-056 / #1750): implemented as
+/// `narrow(dim, index, 1)` + `squeeze(dim)`, the same decomposition as
+/// `torch.select` (`aten/src/ATen/native/TensorShape.cpp` `select`). The
+/// narrow is a zero-copy stride view carrying `NarrowBackward`; the squeeze
+/// carries `SqueezeBackward`, so gradients scatter back into the original
+/// input. CUDA and non-contiguous inputs go through the device-aware
+/// `contiguous()` staging of the view machinery — no host round trip.
 pub fn select<T: Float>(
     input: &Tensor<T>,
     dim: usize,
@@ -59,32 +72,8 @@ pub fn select<T: Float>(
         });
     }
 
-    // Build output shape: the input shape with `dim` removed.
-    let mut out_shape: Vec<usize> = shape.to_vec();
-    out_shape.remove(dim);
-
-    let data = input.data()?;
-
-    // Dimensions factored as: outer * shape[dim] * inner.
-    let outer: usize = shape[..dim].iter().product();
-    let inner: usize = if dim + 1 < ndim {
-        shape[dim + 1..].iter().product()
-    } else {
-        1
-    };
-    let dim_size = shape[dim];
-
-    let out_numel: usize = outer * inner;
-    let mut out_data = Vec::with_capacity(out_numel);
-
-    for o in 0..outer {
-        let src_base = o * dim_size * inner + index * inner;
-        for j in 0..inner {
-            out_data.push(data[src_base + j]);
-        }
-    }
-
-    Tensor::from_storage(TensorStorage::cpu(out_data), out_shape, false)
+    let narrowed = crate::methods::narrow_t(input, dim, index, 1)?;
+    crate::grad_fns::shape::squeeze(&narrowed, dim as isize)
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +84,13 @@ pub fn select<T: Float>(
 ///
 /// All tensors must have the same shape. Given `N` tensors of shape
 /// `[M, K]`, `stack(ts, 0)` returns a tensor of shape `[N, M, K]`.
+///
+/// Differentiable and device-preserving (CORE-056 / #1750): implemented as
+/// `unsqueeze(dim)` per input + `cat(dim)`, the same decomposition as
+/// `torch.stack` (`aten/src/ATen/native/TensorShape.cpp` `stack`). Gradient
+/// flow comes from `UnsqueezeBackward` + `CatBackward`; CUDA inputs use
+/// `cat`'s on-device fast path, and mixed-device input lists return a
+/// structured `DeviceMismatch` (R-LOUD-1) via `cat`'s device validation.
 pub fn stack<T: Float>(tensors: &[Tensor<T>], dim: usize) -> FerrotorchResult<Tensor<T>> {
     if tensors.is_empty() {
         return Err(FerrotorchError::InvalidArgument {
@@ -128,35 +124,11 @@ pub fn stack<T: Float>(tensors: &[Tensor<T>], dim: usize) -> FerrotorchResult<Te
         }
     }
 
-    let n = tensors.len();
-
-    // Output shape: insert `n` at position `dim`.
-    let mut out_shape = base_shape.to_vec();
-    out_shape.insert(dim, n);
-
-    // Dimensions: outer * n * inner, where outer = product of dims before `dim`,
-    // inner = product of dims from `dim` onward (in the original shape).
-    let outer: usize = base_shape[..dim].iter().product();
-    let inner: usize = if dim < base_ndim {
-        base_shape[dim..].iter().product()
-    } else {
-        1
-    };
-
-    let out_numel: usize = out_shape.iter().product();
-    let mut out_data = vec![<T as num_traits::Zero>::zero(); out_numel];
-
-    for (t_idx, t) in tensors.iter().enumerate() {
-        let t_data = t.data()?;
-        for o in 0..outer {
-            let dst_base = o * n * inner + t_idx * inner;
-            let src_base = o * inner;
-            out_data[dst_base..dst_base + inner]
-                .copy_from_slice(&t_data[src_base..src_base + inner]);
-        }
-    }
-
-    Tensor::from_storage(TensorStorage::cpu(out_data), out_shape, false)
+    let unsqueezed: Vec<Tensor<T>> = tensors
+        .iter()
+        .map(|t| crate::grad_fns::shape::unsqueeze(t, dim as isize))
+        .collect::<FerrotorchResult<_>>()?;
+    crate::grad_fns::shape::cat(&unsqueezed, dim as isize)
 }
 
 // ---------------------------------------------------------------------------
@@ -520,8 +492,13 @@ where
 /// you get a stack of `[batch_size, *param.shape()]` per-sample gradients.
 ///
 /// `loss_fn` takes one input slice and one parameter tensor, returns a
-/// scalar loss tensor. The parameter tensor is cloned per-call with
-/// `requires_grad = true` so each call accumulates an isolated gradient.
+/// scalar loss tensor. The parameter is re-leafed per call — a fresh
+/// autograd identity sharing the parameter's storage on its ORIGINAL
+/// device (CORE-057 / #1751; torch's `p.detach().requires_grad_(True)`
+/// idiom) — so each call accumulates an isolated gradient with no host
+/// round trip. Input slices stay on their original device, and the input
+/// tensor never accumulates side-effect gradients (`torch.func.grad`
+/// functional semantics: only the parameter argument is differentiated).
 ///
 /// # Note on cost
 ///
@@ -552,16 +529,18 @@ where
     let mut grads: Vec<Tensor<T>> = Vec::with_capacity(batch_size);
 
     for i in 0..batch_size {
-        let slice = select(inputs, in_dim, i)?;
-        // Build a fresh leaf parameter that requires grad. We clone the
-        // underlying storage so each iteration gets an isolated gradient
-        // slot, then call the user's loss_fn with our leaf.
-        let p_data = param.data_vec()?;
-        let p_leaf = crate::tensor::Tensor::from_storage(
-            crate::storage::TensorStorage::cpu(p_data),
-            param.shape().to_vec(),
-            true,
-        )?;
+        // `select` is differentiable post-CORE-056; detach the slice so
+        // gradients flow ONLY to the per-call parameter leaf and the
+        // original `inputs` never accumulates a side-effect `.grad`
+        // (torch.func.grad functional semantics). The detached slice
+        // shares storage on the input's original device.
+        let slice = select(inputs, in_dim, i)?.detach();
+        // Fresh leaf on the parameter's ORIGINAL device (CORE-057 /
+        // #1751): `detach()` mints a new autograd identity — an isolated
+        // gradient slot per sample — sharing the parameter's storage, and
+        // `requires_grad_(true)` makes it a tracking leaf. No `data_vec`
+        // download, no CPU rebuild.
+        let p_leaf = param.detach().requires_grad_(true);
         let loss = loss_fn(&slice, &p_leaf)?;
         if !loss.is_scalar() && loss.numel() != 1 {
             return Err(FerrotorchError::InvalidArgument {

@@ -21,18 +21,17 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `rearrange` at `einops.rs:458`; consumer: re-export at `lib.rs:143` |
-//! | REQ-2 | SHIPPED | `rearrange_with` at `einops.rs:482`; consumer: re-export at `lib.rs:143` |
-//! | REQ-3 | SHIPPED | `repeat` at `einops.rs:589`; consumer: re-export at `lib.rs:143` |
-//! | REQ-4 | SHIPPED | `reduce` + `EinopsReduction` at `einops.rs:665,33`; consumer: re-export at `lib.rs:143` |
-//! | REQ-5 | SHIPPED | `parse_pattern`/`parse_side`/`read_axis_name` at `einops.rs:79-195`; consumer: every public API invokes `parse_pattern` first |
-//! | REQ-6 | SHIPPED | `resolve_sizes` at `einops.rs:211`; consumer: every public API after `parse_pattern` |
+//! | REQ-1 | SHIPPED | `rearrange` at `einops.rs:393`; consumer: re-export at `lib.rs:143` |
+//! | REQ-2 | SHIPPED | `rearrange_with` at `einops.rs:424`; consumer: re-export at `lib.rs:143` |
+//! | REQ-3 | SHIPPED | `repeat` at `einops.rs:514`; consumer: re-export at `lib.rs:143` |
+//! | REQ-4 | SHIPPED | `reduce` + `EinopsReduction` at `einops.rs:614,43`; consumer: re-export at `lib.rs:143` |
+//! | REQ-5 | SHIPPED | `parse_pattern`/`parse_side`/`read_axis_name` at `einops.rs:89-195`; consumer: every public API invokes `parse_pattern` first |
+//! | REQ-6 | SHIPPED | `resolve_sizes` at `einops.rs:221`; consumer: every public API after `parse_pattern` |
 
 use std::collections::HashMap;
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
-use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
 
 // ---------------------------------------------------------------------------
@@ -346,28 +345,6 @@ fn output_shape(right: &[AxisSpec], sizes: &HashMap<String, usize>) -> Vec<usize
         .collect()
 }
 
-/// Convert a flat index to per-axis coordinates.
-fn flat_to_coords(mut flat: usize, shape: &[usize]) -> Vec<usize> {
-    let ndim = shape.len();
-    let mut coords = vec![0usize; ndim];
-    for d in (0..ndim).rev() {
-        coords[d] = flat % shape[d];
-        flat /= shape[d];
-    }
-    coords
-}
-
-/// Convert per-axis coordinates to a flat index.
-fn coords_to_flat(coords: &[usize], shape: &[usize]) -> usize {
-    let mut flat = 0usize;
-    let mut stride = 1usize;
-    for d in (0..shape.len()).rev() {
-        flat += coords[d] * stride;
-        stride *= shape[d];
-    }
-    flat
-}
-
 /// Build the "elementary" shape from a pattern side: each `AxisSpec::Group`
 /// is expanded into its individual sub-axis sizes.
 fn elementary_shape(specs: &[AxisSpec], sizes: &HashMap<String, usize>) -> Vec<usize> {
@@ -385,68 +362,15 @@ fn elementary_shape(specs: &[AxisSpec], sizes: &HashMap<String, usize>) -> Vec<u
     shape
 }
 
-/// Perform the general rearrange operation. This is the core engine used by
-/// `rearrange`, `repeat`, and `reduce`.
-///
-/// The algorithm:
-/// 1. Compute the "elementary" shapes for left and right (fully expanded).
-/// 2. Reshape input from `input_shape` to `left_elementary_shape` (splits).
-/// 3. Determine the permutation from left-elementary to right-elementary
-///    axis ordering.
-/// 4. Transpose data according to the permutation.
-/// 5. Reshape from `right_elementary_shape` to `output_shape` (merges).
-#[allow(clippy::unnecessary_wraps)] // reason: pairs with rearrange/reduce_impl which DO fail; keeping uniform Result lets the dispatch site stay one match
-fn rearrange_impl<T: Float>(
-    data: &[T],
-    _input_shape: &[usize],
-    pattern: &ParsedPattern,
-    sizes: &HashMap<String, usize>,
-    _output_shape: &[usize],
-) -> FerrotorchResult<Vec<T>> {
-    let left_names = flatten_axes(&pattern.left);
-    let right_names = flatten_axes(&pattern.right);
-    let left_elem_shape = elementary_shape(&pattern.left, sizes);
-    let right_elem_shape = elementary_shape(&pattern.right, sizes);
-
-    // The right_names should be a permutation of left_names (for rearrange).
-    // Build the permutation: for each axis in right_names, find its index
-    // in left_names.
-    let perm: Vec<usize> = right_names
-        .iter()
-        .map(|name| {
-            left_names
-                .iter()
-                .position(|n| n == name)
-                .unwrap_or(usize::MAX)
-        })
-        .collect();
-
-    // If there are axes only on the right (repeat) or only on the left (reduce),
-    // they won't have a valid permutation entry. For a pure rearrange, every
-    // entry should be valid.
-
-    // Step 1: Reshape from input_shape to left_elem_shape. Since both have
-    // the same total number of elements and the data is C-contiguous, this
-    // is a no-op on the buffer — only the interpretation changes.
-
-    // Step 2: Transpose from left_elem_shape to right_elem_shape order.
-    let elem_numel: usize = left_elem_shape.iter().product();
-    let mut transposed = vec![<T as num_traits::Zero>::zero(); elem_numel];
-
-    for (src_flat, &val) in data.iter().enumerate().take(elem_numel) {
-        let src_coords = flat_to_coords(src_flat, &left_elem_shape);
-        let mut dst_coords = vec![0usize; right_elem_shape.len()];
-        for (dst_dim, &src_dim) in perm.iter().enumerate() {
-            dst_coords[dst_dim] = src_coords[src_dim];
-        }
-        let dst_flat = coords_to_flat(&dst_coords, &right_elem_shape);
-        transposed[dst_flat] = val;
-    }
-
-    // Step 3: The transposed buffer now has right_elem_shape layout.
-    // Reshape to the output_shape (merging groups). This is again a
-    // reinterpretation — same buffer, different shape.
-    Ok(transposed)
+/// Differentiable reshape shim: converts a `usize` shape and delegates to
+/// [`crate::grad_fns::shape::reshape`], which attaches a `ReshapeBackward`
+/// node when the input tracks gradients and degrades to a zero-copy
+/// `view_reshape` when it does not. Non-contiguous inputs are materialized
+/// device-aware via `contiguous()` (GPU `strided_copy_*` for f32/f64, host
+/// round-trip otherwise) — see `tensor.rs` `view_operation` (#1705).
+fn reshape_diff<T: Float>(input: &Tensor<T>, shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
+    let shape_isize: Vec<isize> = shape.iter().map(|&d| d as isize).collect();
+    crate::grad_fns::shape::reshape(input, &shape_isize)
 }
 
 // ---------------------------------------------------------------------------
@@ -478,18 +402,25 @@ pub fn rearrange<T: Float>(input: &Tensor<T>, pattern: &str) -> FerrotorchResult
 /// rearrange_with(&t, "b (c h) w -> b c h w", &[("c", 3)])?;
 /// ```
 ///
-/// # Device behavior
+/// # Device and autograd behavior (CORE-061 / #1755)
+///
+/// Built entirely from differentiable tensor operations: when `input` tracks
+/// gradients the output carries a real backward chain
+/// (`ReshapeBackward` → `PermuteBackward` → `ReshapeBackward`/`ContiguousBackward`)
+/// reaching the original leaf; when it does not, the same composition takes
+/// the zero-copy no-grad fast paths.
 ///
 /// When the operation reduces to a pure flatten/unflatten (no axis reordering
 /// at the elementary level — e.g. `"b c h w -> b (c h w)"` or
-/// `"b (c h) w -> b c h w"`), this is a zero-copy `view_reshape` and runs on
-/// any device with no data movement.
+/// `"b (c h) w -> b c h w"`), this is a single (zero-copy) reshape and runs
+/// on any device with no data movement.
 ///
-/// When the operation requires actual axis reordering (e.g. `"b h w c -> b c h w"`),
-/// it goes through `view_reshape → permute → contiguous → view_reshape`. The
-/// `permute` is a zero-copy stride view, but `contiguous` currently materializes
-/// non-contiguous CUDA tensors via a CPU round-trip — see issue #496 for the
-/// missing GPU `gpu_strided_copy` primitive that would close this gap.
+/// When the operation requires actual axis reordering (e.g.
+/// `"b h w c -> b c h w"`), it goes through `reshape → permute → reshape`.
+/// The `permute` is a zero-copy stride view; the final reshape materializes
+/// the permuted layout via `contiguous()`, which stays on-device for CUDA
+/// f32/f64 (`strided_copy_*` kernels) and round-trips through the host for
+/// other dtypes (explicit per R-LOUD-2; see `methods.rs::contiguous_t`).
 pub fn rearrange_with<T: Float>(
     input: &Tensor<T>,
     pattern: &str,
@@ -517,7 +448,6 @@ pub fn rearrange_with<T: Float>(
 
     let out_shape = output_shape(&parsed.right, &sizes);
     let left_elem_shape = elementary_shape(&parsed.left, &sizes);
-    let right_elem_shape = elementary_shape(&parsed.right, &sizes);
 
     // Compute the permutation from left elementary order to right elementary
     // order. Since left and right name the same axes, every right axis has a
@@ -535,49 +465,21 @@ pub fn rearrange_with<T: Float>(
     // Fast path: identity permutation. This covers the common cases of pure
     // flatten (`"b c h w -> b (c h w)"`), pure unflatten
     // (`"b (c h) w -> b c h w"`), and grouping rearrangements where the
-    // elementary axis order matches between left and right. No data movement
-    // — runs zero-copy on any device (CPU or CUDA) when input is contiguous.
+    // elementary axis order matches between left and right. A single
+    // differentiable reshape — zero-copy on any device for contiguous
+    // inputs, with `ReshapeBackward` attached when gradients are tracked.
     let is_identity_perm = perm.iter().enumerate().all(|(i, &p)| i == p);
-    if is_identity_perm && input.is_contiguous() {
-        // Skip the intermediate elementary shape entirely — direct
-        // view_reshape from input shape to output shape.
-        return input.view_reshape(out_shape);
+    if is_identity_perm {
+        return reshape_diff(input, &out_shape);
     }
 
-    // General path: reshape to elementary form, permute, materialize, reshape
-    // to merged output. On CUDA, the contiguous() step currently materializes
-    // strided tensors via CPU (issue #496). On CPU it's all in-place loops.
-    //
-    // We try the tensor-op path first; if any step fails (e.g. an inner op
-    // doesn't yet support a particular shape), we fall back to the legacy
-    // index-walk implementation below.
-    if input.is_contiguous()
-        && let Ok(result) = (|| -> FerrotorchResult<Tensor<T>> {
-            let elem_view = input.view_reshape(left_elem_shape.clone())?;
-            let permuted = elem_view.permute(&perm)?;
-            let contig = permuted.contiguous()?;
-            // Reshape from right_elem_shape (now contiguous) to merged output.
-            // contig already has shape == right_elem_shape; if out_shape merges
-            // some axes, view_reshape will collapse them.
-            if contig.shape() == out_shape.as_slice() {
-                Ok(contig)
-            } else {
-                contig.view_reshape(out_shape.clone())
-            }
-        })()
-    {
-        return Ok(result);
-    }
-
-    // Legacy fallback: pure-CPU index-walk. Used when the tensor-op path
-    // refuses (e.g. non-contiguous input) or errors.
-    let _ = right_elem_shape; // silence unused warning when fast paths take over
-    let device = input.device();
-    let data = input.data_vec()?;
-    let result_data = rearrange_impl(&data, input.shape(), &parsed, &sizes, &out_shape)?;
-
-    let t = Tensor::from_storage(TensorStorage::cpu(result_data), out_shape, false)?;
-    Ok(if device.is_cuda() { t.to(device)? } else { t })
+    // General path: reshape to elementary form, permute (zero-copy stride
+    // view), reshape to the merged output (materializes the permuted layout
+    // device-aware). Every step participates in autograd (CORE-061 / #1755);
+    // gradient behavior does not depend on layout or device.
+    let elem = reshape_diff(input, &left_elem_shape)?;
+    let permuted = elem.permute(&perm)?;
+    reshape_diff(&permuted, &out_shape)
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +499,18 @@ pub fn rearrange_with<T: Float>(
 /// // Tile: [C] -> [C, 3]
 /// repeat(&t, "c -> c n", &[("n", 3)])?;
 /// ```
+///
+/// # Device and autograd behavior (CORE-061 / #1755)
+///
+/// Built from differentiable operations
+/// (`reshape → permute → reshape → expand → reshape`): tracked inputs get a
+/// real backward chain whose `ExpandBackward` sums gradients over the
+/// repeated axes (the einops repeat VJP), reaching the original leaf.
+/// Untracked inputs take the no-grad fast paths.
+///
+/// On CUDA, `expand` materializes on-device for f32/f64; other dtypes return
+/// a structured `Err(NotImplementedOnCuda)` rather than silently demoting to
+/// host (R-LOUD-1).
 pub fn repeat<T: Float>(
     input: &Tensor<T>,
     pattern: &str,
@@ -620,43 +534,56 @@ pub fn repeat<T: Float>(
         }
     }
 
-    // Identify new axes (on right but not left).
-    let _new_axes: Vec<&str> = right_names
-        .iter()
-        .filter(|n| !left_names.contains(n))
-        .map(String::as_str)
-        .collect();
-
-    // Build the right elementary shape and the output shape.
+    // Build the elementary shapes and the output shape.
+    let left_elem_shape = elementary_shape(&parsed.left, &sizes);
     let right_elem_shape = elementary_shape(&parsed.right, &sizes);
     let out_shape = output_shape(&parsed.right, &sizes);
 
-    // Strategy: iterate over every element of the output (in right
-    // elementary order), map its coordinates back to the input.
-    let out_numel: usize = right_elem_shape.iter().product();
-    let left_elem_shape = elementary_shape(&parsed.left, &sizes);
-    let device = input.device();
-    let data = input.data_vec()?;
+    // Differentiable composition (CORE-061 / #1755). Coordinate mapping is BY
+    // AXIS NAME (CORE-062 / #1756): the kept-axis permutation is derived from
+    // each left axis's position among the right names, so reordered patterns
+    // read the correct elements by construction.
+    //
+    // 1. Split: reshape to the left elementary form.
+    let elem = reshape_diff(input, &left_elem_shape)?;
 
-    let mut result = Vec::with_capacity(out_numel);
-    for dst_flat in 0..out_numel {
-        let dst_coords = flat_to_coords(dst_flat, &right_elem_shape);
-        // Map each right-elementary coordinate to a left-elementary coordinate.
-        let mut src_coords = Vec::with_capacity(left_elem_shape.len());
-        for (i, name) in right_names.iter().enumerate() {
+    // 2. Reorder: bring the kept axes into their right-side relative order.
+    //    (Every left axis appears exactly once on the right — validated above.)
+    let kept_perm: Vec<usize> = right_names
+        .iter()
+        .filter_map(|name| left_names.iter().position(|n| n == name))
+        .collect();
+    let is_identity_perm = kept_perm.iter().enumerate().all(|(i, &p)| i == p);
+    let permuted = if is_identity_perm {
+        elem
+    } else {
+        elem.permute(&kept_perm)?
+    };
+
+    // 3. Seed: insert size-1 dims at the new-axis positions (right
+    //    elementary order). Pure metadata — numel is unchanged.
+    let pre_expand_shape: Vec<usize> = right_names
+        .iter()
+        .map(|name| {
             if left_names.contains(name) {
-                src_coords.push(dst_coords[i]);
+                *sizes.get(name).expect("left axes sized in resolve_sizes")
+            } else {
+                1
             }
-            // New axes are simply ignored (they tile/repeat).
-        }
-        let src_flat = coords_to_flat(&src_coords, &left_elem_shape);
-        result.push(data[src_flat]);
-    }
+        })
+        .collect();
+    let seeded = reshape_diff(&permuted, &pre_expand_shape)?;
 
-    // The result buffer is in right-elementary order. Reshape to out_shape
-    // (which merges groups). Since it's the same total size, just reinterpret.
-    let t = Tensor::from_storage(TensorStorage::cpu(result), out_shape, false)?;
-    Ok(if device.is_cuda() { t.to(device)? } else { t })
+    // 4. Broadcast the new axes to their requested sizes. `ExpandBackward`
+    //    sum-reduces gradients over these axes — exactly the repeat VJP.
+    let expanded = if pre_expand_shape == right_elem_shape {
+        seeded // no new axes (pure reorder through the repeat API)
+    } else {
+        crate::grad_fns::shape::expand(&seeded, &right_elem_shape)?
+    };
+
+    // 5. Merge groups into the final output shape.
+    reshape_diff(&expanded, &out_shape)
 }
 
 // ---------------------------------------------------------------------------
@@ -673,6 +600,17 @@ pub fn repeat<T: Float>(
 /// // Sum over batch: [B, C] -> [C]
 /// reduce(&t, "b c -> c", EinopsReduction::Sum)?;
 /// ```
+///
+/// # Device and autograd behavior (CORE-061 / #1755)
+///
+/// One differentiable composition for every pattern (see the body comment):
+/// tracked inputs receive a backward chain reaching the original leaf for
+/// Sum/Mean (any device) and Max/Min (CPU). Max/Min backward on CUDA
+/// surfaces `CummaxBackward`/`CumminBackward`'s structured
+/// `Err(NotImplementedOnCuda)` — loud, never a silent detach (tracked
+/// follow-up: #1962). Max/Min gradient ties follow cummax/cummin (full
+/// gradient to the recorded occurrence), diverging from torch `amax`/`amin`
+/// even-split ONLY on exact ties (tracked follow-up: #1963).
 pub fn reduce<T: Float>(
     input: &Tensor<T>,
     pattern: &str,
@@ -709,43 +647,34 @@ pub fn reduce<T: Float>(
         });
     }
 
-    // Build the output elementary shape.
+    // Build the elementary shapes and the output shape.
     let left_elem_shape = elementary_shape(&parsed.left, &sizes);
     let right_elem_shape = elementary_shape(&parsed.right, &sizes);
     let out_shape = output_shape(&parsed.right, &sizes);
 
     // ----------------------------------------------------------------------
-    // Fast path: axis-aligned reductions via existing GPU-aware tensor ops.
+    // Single differentiable composition (CORE-061 / #1755) — one path for
+    // every pattern, layout, and device, so gradient behavior never depends
+    // on which internal decomposition happened to fire:
     //
-    // This path triggers when:
-    //   1. The kept axes (left ∩ right) appear in the same relative order on
-    //      both sides (no reordering needed for the kept axes).
-    //   2. The reduced axes are contiguous in left elementary order — i.e.
-    //      they form a single run within the left axis sequence.
+    //   reshape(left elementary)                       — split
+    //   → permute(kept-in-RIGHT-order ++ reduced)      — reorder by axis name
+    //   → reshape([right_elem..., reduce_count])       — collapse reduced run
+    //   → sum_dim / sum_dim·(1/N) / cummax / cummin    — reduce trailing dim
+    //   → reshape(out_shape)                           — merge groups
     //
-    // When both hold, we can express the reduction as:
-    //   view_reshape(input, [outer_kept, reduced_combined, inner_kept])
-    //   → sum_dim(dim=1, keepdim=false)        for Sum/Mean
-    //   → cummax/cummin → narrow(last)         for Max/Min
-    //   → view_reshape(out_shape)
+    // Coordinate mapping is BY AXIS NAME (CORE-062 / #1756): the permutation
+    // places each kept axis at its right-side position before any
+    // flattening, so reordered kept axes land correctly by construction.
     //
-    // All steps run on the input's native device — no CPU round-trip.
-    //
-    // For Mean, we follow the sum_dim with a scalar multiply by 1/reduce_count
-    // (cheaper than dividing every element through a separate kernel and
-    // works on GPU since `mul` is GPU-aware).
+    // All steps run on the input's native device. For Mean, sum_dim is
+    // followed by a scalar multiply by 1/reduce_count (`mul` is GPU-aware;
+    // `mean_dim` is not). For Max/Min, the running cummax/cummin's last slice
+    // is the global extremum; its backward (`CummaxBackward`/`CumminBackward`)
+    // routes gradients to the recorded extremum positions on CPU and returns
+    // a structured `Err(NotImplementedOnCuda)` on CUDA — loud, never a
+    // silent detach (R-LOUD-1).
     // ----------------------------------------------------------------------
-    let kept_left_positions: Vec<usize> = left_names
-        .iter()
-        .enumerate()
-        .filter_map(|(i, name)| {
-            if right_names.contains(name) {
-                Some(i)
-            } else {
-                None
-            }
-        })
-        .collect();
     let reduced_left_positions: Vec<usize> = left_names
         .iter()
         .enumerate()
@@ -757,145 +686,74 @@ pub fn reduce<T: Float>(
             }
         })
         .collect();
-
-    // Are the reduced axes contiguous in left order?
-    let reduced_contiguous = reduced_left_positions.windows(2).all(|w| w[1] == w[0] + 1);
-
-    // Are the kept axes in the same relative order on right as on left?
-    // Build the sequence of kept names in left order, then check it matches
-    // the sequence of right_names that are kept (= all right names, since
-    // every right axis is kept by construction).
-    let kept_in_left_order: Vec<&str> = kept_left_positions
+    let reduce_count: usize = reduced_left_positions
         .iter()
-        .map(|&i| left_names[i].as_str())
-        .collect();
-    let kept_order_matches = kept_in_left_order.len() == right_names.len()
-        && kept_in_left_order
-            .iter()
-            .zip(right_names.iter())
-            .all(|(a, b)| *a == b);
-
-    if reduced_contiguous && kept_order_matches && input.is_contiguous() {
-        let reduced_start = reduced_left_positions[0];
-        let reduced_len = reduced_left_positions.len();
-
-        // Build the 3-D view shape: [outer, reduced_combined, inner].
-        let outer: usize = left_elem_shape[..reduced_start].iter().product();
-        let reduced_combined: usize = left_elem_shape[reduced_start..reduced_start + reduced_len]
-            .iter()
-            .product();
-        let inner: usize = left_elem_shape[reduced_start + reduced_len..]
-            .iter()
-            .product();
-
-        if let Ok(result) = (|| -> FerrotorchResult<Tensor<T>> {
-            let view = input.view_reshape(vec![outer, reduced_combined, inner])?;
-            let reduced_tensor = match reduction {
-                EinopsReduction::Sum => crate::grad_fns::reduction::sum_dim(&view, 1, false)?,
-                EinopsReduction::Mean => {
-                    // sum_dim is GPU-aware; mean_dim is not. Compose
-                    // sum_dim → multiply by 1/N to stay on-device.
-                    let summed = crate::grad_fns::reduction::sum_dim(&view, 1, false)?;
-                    let n_recip =
-                        <T as num_traits::One>::one() / T::from(reduced_combined).unwrap();
-                    let scale_t = crate::creation::scalar(n_recip)?.to(input.device())?;
-                    crate::grad_fns::arithmetic::mul(&summed, &scale_t)?
-                }
-                EinopsReduction::Max => {
-                    // cummax along dim 1, then narrow to the last index.
-                    // The running max ends with the global max along that axis.
-                    let cmax = crate::grad_fns::cumulative::cummax(&view, 1)?;
-                    cmax.values
-                        .narrow(1, reduced_combined - 1, 1)?
-                        .squeeze_t(1)?
-                }
-                EinopsReduction::Min => {
-                    let cmin = crate::grad_fns::cumulative::cummin(&view, 1)?;
-                    cmin.values
-                        .narrow(1, reduced_combined - 1, 1)?
-                        .squeeze_t(1)?
-                }
-            };
-            // reduced_tensor has shape [outer, inner] (non-keepdim sum) or
-            // [outer, inner] (cummax narrow→squeeze). Reshape to right
-            // elementary shape, then to the merged output shape.
-            let _ = right_elem_shape.clone(); // for documentation
-            let materialized = if reduced_tensor.is_contiguous() {
-                reduced_tensor
-            } else {
-                reduced_tensor.contiguous()?
-            };
-            let final_t = if materialized.shape() == out_shape.as_slice() {
-                materialized
-            } else {
-                materialized.view_reshape(out_shape.clone())?
-            };
-            Ok(final_t)
-        })() {
-            return Ok(result);
-        }
-    }
-
-    // ----------------------------------------------------------------------
-    // Fallback: legacy CPU index-walk implementation. Used when the kept
-    // axes need reordering, or the reduced axes are not contiguous in the
-    // left layout, or any of the GPU-aware ops above bail. Functionally
-    // equivalent — same result, but does a CPU round-trip on CUDA inputs.
-    // ----------------------------------------------------------------------
-    let out_numel: usize = right_elem_shape.iter().product();
-    let device = input.device();
-    let data = input.data_vec()?;
-    let in_numel: usize = left_elem_shape.iter().product();
-
-    // Compute how many elements are reduced per output element.
-    let reduce_count: usize = reduced_axes
-        .iter()
-        .map(|name| sizes.get(*name).unwrap())
+        .map(|&i| left_elem_shape[i])
         .product();
+    if reduce_count == 0 && matches!(reduction, EinopsReduction::Max | EinopsReduction::Min) {
+        // Mirrors torch: `amax`/`amin` over an empty slice has no identity.
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "einops reduce: cannot compute {reduction:?} over an empty reduction axis \
+                 (reduced extent is 0)"
+            ),
+        });
+    }
 
-    let init_val = match reduction {
-        EinopsReduction::Sum | EinopsReduction::Mean => <T as num_traits::Zero>::zero(),
-        EinopsReduction::Max => T::neg_infinity(),
-        EinopsReduction::Min => T::infinity(),
+    // 1. Split: reshape to the left elementary form.
+    let elem = reshape_diff(input, &left_elem_shape)?;
+
+    // 2. Reorder: kept axes (in right-side order, by name) first, reduced
+    //    axes last.
+    let mut perm: Vec<usize> = right_names
+        .iter()
+        .map(|name| {
+            left_names
+                .iter()
+                .position(|n| n == name)
+                .expect("validated above: every right axis appears on the left")
+        })
+        .collect();
+    perm.extend(reduced_left_positions.iter().copied());
+    let is_identity_perm = perm.iter().enumerate().all(|(i, &p)| i == p);
+    let permuted = if is_identity_perm {
+        elem
+    } else {
+        elem.permute(&perm)?
     };
-    let mut accum = vec![init_val; out_numel];
 
-    for (src_flat, &val) in data.iter().enumerate().take(in_numel) {
-        let src_coords = flat_to_coords(src_flat, &left_elem_shape);
-        let mut dst_coords = Vec::with_capacity(right_elem_shape.len());
-        for (i, name) in left_names.iter().enumerate() {
-            if right_names.contains(name) {
-                dst_coords.push(src_coords[i]);
-            }
+    // 3. Collapse the (now trailing) reduced axes into a single dimension.
+    let mut grouped_shape = right_elem_shape.clone();
+    grouped_shape.push(reduce_count);
+    let grouped = reshape_diff(&permuted, &grouped_shape)?;
+    let last_dim = right_elem_shape.len() as i64;
+
+    // 4. Reduce the trailing dimension.
+    let reduced_t = match reduction {
+        EinopsReduction::Sum => crate::grad_fns::reduction::sum_dim(&grouped, last_dim, false)?,
+        EinopsReduction::Mean => {
+            let summed = crate::grad_fns::reduction::sum_dim(&grouped, last_dim, false)?;
+            let n_recip = <T as num_traits::One>::one() / T::from(reduce_count).unwrap();
+            let scale_t = crate::creation::scalar(n_recip)?.to(input.device())?;
+            crate::grad_fns::arithmetic::mul(&summed, &scale_t)?
         }
-        let dst_flat = coords_to_flat(&dst_coords, &right_elem_shape);
-
-        match reduction {
-            EinopsReduction::Sum | EinopsReduction::Mean => {
-                accum[dst_flat] += val;
-            }
-            EinopsReduction::Max => {
-                if val > accum[dst_flat] {
-                    accum[dst_flat] = val;
-                }
-            }
-            EinopsReduction::Min => {
-                if val < accum[dst_flat] {
-                    accum[dst_flat] = val;
-                }
-            }
+        EinopsReduction::Max => {
+            // The running max ends with the global max along that axis.
+            let cmax = crate::grad_fns::cumulative::cummax(&grouped, last_dim)?;
+            cmax.values
+                .narrow(right_elem_shape.len(), reduce_count - 1, 1)?
+                .squeeze_t(last_dim as isize)?
         }
-    }
-
-    if reduction == EinopsReduction::Mean {
-        let n = T::from(reduce_count).unwrap();
-        for v in &mut accum {
-            *v = *v / n;
+        EinopsReduction::Min => {
+            let cmin = crate::grad_fns::cumulative::cummin(&grouped, last_dim)?;
+            cmin.values
+                .narrow(right_elem_shape.len(), reduce_count - 1, 1)?
+                .squeeze_t(last_dim as isize)?
         }
-    }
+    };
 
-    let t = Tensor::from_storage(TensorStorage::cpu(accum), out_shape, false)?;
-    Ok(if device.is_cuda() { t.to(device)? } else { t })
+    // 5. Merge groups into the final output shape.
+    reshape_diff(&reduced_t, &out_shape)
 }
 
 // ---------------------------------------------------------------------------
@@ -905,6 +763,7 @@ pub fn reduce<T: Float>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::TensorStorage;
 
     /// Helper: create a leaf tensor.
     fn leaf(data: &[f32], shape: &[usize]) -> Tensor<f32> {

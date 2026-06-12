@@ -303,7 +303,7 @@ Non-test consumers: `ferrotorch-nn/src/attention.rs:275,292,312,313,314,
 `ferrotorch-diffusion/src/resnet_block_time.rs:133 (reshape_t)`,
 `ferrotorch-diffusion/src/blocks.rs:309,310,316,348 (reshape_t / transpose)`,
 `ferrotorch-nn/src/rnn.rs:244,245,669,1711 (squeeze_t)`,
-`ferrotorch-core/src/einops.rs:799,805 (squeeze_t)`,
+`ferrotorch-core/src/einops.rs:745,751 (squeeze_t)`,
 `ferrotorch-core/src/flex_attention.rs,213,226 (squeeze_t / unsqueeze_t)`,
 `ferrotorch-vision/src/models/vit.rs:437,570 (squeeze_t)`,
 `ferrotorch-vision/src/models/detection/roi_heads_postprocess.rs +
