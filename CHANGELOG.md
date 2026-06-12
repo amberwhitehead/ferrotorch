@@ -51,6 +51,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-057: `per_sample_grad` silently reconstructs parameters on CPU (#1751)
+- CORE-056: The public `vmap` family detaches autograd and rejects non-CPU inputs (#1750)
+- CORE-062: Reordered-axis einops `repeat` and `reduce` use coordinates in the wrong order (#1756)
+- CORE-061: All public einops transforms can silently sever autograd graphs (#1755)
 - CORE-060: `as_strided_copy` and `as_strided_scatter` silently detach outputs (#1754)
 - CORE-059: `AsStridedBackward` fails on CUDA and nonzero-offset input views (#1753)
 - CORE-058: Overlapping `as_strided` views return mathematically wrong gradients (#1752)
