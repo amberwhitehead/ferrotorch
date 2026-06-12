@@ -51,6 +51,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-049: New transcendental forwards preserve CUDA but their backwards do not (#1743)
+- CORE-048: Advanced indexing APIs silently demote CUDA and accept mixed-device operands (#1742)
+- CORE-047: `vector_norm_differentiable` silently detaches all norms except `ord=2` (#1741)
+- CORE-046: `var_dim` and `std_dim` silently sever autograd graphs (#1740)
 - Divergence: ferrotorch-core rrelu(training=true) multiplies in scalar_t not opmath_t — bf16 last-bit mismatch vs torch (pytorch aten/src/ATen/native/Activation.cpp:598-599) (#1953)
 - prelu backward: x==0 routed to the passthrough branch (grad 1) — torch routes to the weight branch (grad = alpha) (#1951)
 - CORE-045: Several activation APIs fail on CUDA only when autograd is enabled (#1739)
