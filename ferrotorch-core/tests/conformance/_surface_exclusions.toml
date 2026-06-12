@@ -337,6 +337,11 @@ reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was 
 tracking_issue = "#1915"
 
 [[exclusion]]
+path = "ferrotorch_core::stride_tricks::AsStridedScatterBackward <T>::new"
+kind = "permanent"
+reason = "Implicit coverage: constructor exercised directly by `cpu_as_strided_scatter_backward_node_grads` in conformance_shape.rs (`AsStridedScatterBackward::new` with inferred T); the generic ` <T>::new` method key cannot be substring-matched by the gate — same limitation as the sibling `<T>::new` entries (CORE-060 / #1754)."
+
+[[exclusion]]
 path = "ferrotorch_core::stride_tricks::Tensor <T>::as_strided"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1915 (was Phase 2.3-shape #765, closed)."

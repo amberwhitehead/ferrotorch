@@ -21,9 +21,27 @@
 //!
 //! # Autograd
 //!
-//! `as_strided` is differentiable: the backward pass scatters the upstream
-//! gradient back into a zero-initialised tensor of the original shape via
-//! `as_strided_scatter`. This matches torch's `AsStridedBackward`.
+//! All three operations are differentiable (CORE-058/059/060,
+//! #1752/#1753/#1754):
+//!
+//! - [`as_strided`] / [`as_strided_copy`] attach [`AsStridedBackward`],
+//!   which implements torch's full `as_strided_backward` algorithm
+//!   (`torch/csrc/autograd/FunctionsManual.cpp`, baseline `2ec0222669`):
+//!   scatter-ADD the upstream gradient into a base buffer spanning the
+//!   input and output geometries (overlapping view positions SUM, not
+//!   overwrite), divide by the visit count when the input geometry itself
+//!   may overlap, then gather back out through the input's own
+//!   (shape, strides, offset) geometry. Offsets are handled as deltas
+//!   against the shared minimum reachable offset, so offset / transposed /
+//!   chained input views are correct, and negative strides (which torch
+//!   rejects in the forward) size the base buffer from the signed
+//!   reachable span.
+//! - [`as_strided_scatter`] attaches [`AsStridedScatterBackward`]:
+//!   `d/d src` is the upstream gradient gathered at the view geometry
+//!   (matches torch); `d/d self` is the upstream gradient with the view
+//!   region zeroed — the finite-difference Jacobian. torch 2.11.0's
+//!   analytic formula returns the opposite masking and fails its own
+//!   `gradcheck`; the deliberate divergence is tracked in #1959.
 //!
 //! # Safety
 //!
@@ -41,10 +59,15 @@
 //!   on every device. No silent device transfer.
 //! - `as_strided_copy` on CUDA dispatches to the dedicated GPU kernel; it
 //!   does not bounce data through host memory.
-//! - `as_strided_scatter` on non-CPU returns
-//!   [`FerrotorchError::NotImplementedOnCuda`]; callers must move to CPU
-//!   explicitly. The CUDA kernel will land in a follow-up issue (the
-//!   forbidden pattern would be a silent `to(Cpu)` round-trip).
+//! - `as_strided_scatter` on CUDA dispatches through `strided_copy_*` +
+//!   `strided_scatter_*`; no host bounce.
+//! - `AsStridedBackward` on CUDA keeps the gradient data on device
+//!   end-to-end: non-overlapping output geometries use `strided_scatter_*`
+//!   into a device zeros buffer; overlapping geometries use the i64-index
+//!   `scatter_add_dim_*` atomic-add kernels. Only host-COMPUTED constants
+//!   move host→device (the freshly built flat-index buffer, a zeros/ones
+//!   fill) — exactly what torch's `index_add_`-based backward materialises
+//!   as an `arange` index tensor.
 //!
 //! ## REQ status (per `.design/ferrotorch-core/stride_tricks.md`)
 //!
@@ -52,7 +75,7 @@
 //! |---|---|---|
 //! | REQ-1 | SHIPPED | impl `Tensor::as_strided`; non-test consumer `crate::einsum`. |
 //! | REQ-2 | SHIPPED | impl `Tensor::as_strided_copy` (CUDA via `strided_copy_*`, CPU walk); non-test consumer `crate::einsum`. |
-//! | REQ-3 | SHIPPED | impl `Tensor::as_strided_scatter`; non-test consumer `AsStridedBackward::backward`. |
+//! | REQ-3 | SHIPPED | impl `Tensor::as_strided_scatter`; non-test consumer `AsStridedScatterBackward::backward` (base-grad masking). |
 //! | REQ-4 | SHIPPED | impl `validate_bounds` + `stride_extent`; non-test consumer invoked from `as_strided` / `as_strided_scatter`. |
 //! | REQ-5 | SHIPPED | impl `AsStridedBackward` + `GradFn::backward`; non-test consumer `Tensor::as_strided` attach path. |
 //! | REQ-6 | SHIPPED | negative-stride support via `stride_extent`; non-test consumer reverse views. |
@@ -61,8 +84,9 @@
 
 use std::sync::Arc;
 
-use crate::dtype::Float;
+use crate::dtype::{DType, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
+use crate::gpu_dispatch::GpuBufferHandle;
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
 
@@ -192,6 +216,131 @@ pub(crate) fn validate_bounds(
 }
 
 // ---------------------------------------------------------------------------
+// Internal: strided-geometry helpers shared by the backward passes
+// ---------------------------------------------------------------------------
+
+/// Conservative memory-overlap test for a strided geometry: `false` only
+/// when the layout provably maps distinct logical positions to distinct
+/// storage offsets. Mirrors `_maybe_overlapping_memory` in
+/// `torch/csrc/autograd/FunctionsManual.cpp` (sort the size>1 dims by
+/// stride; each stride must exceed the maximum offset addressable by all
+/// smaller-stride dims). Extensions over torch (which never sees them
+/// here): a zero stride on a size>1 dim always overlaps; a negative stride
+/// is conservatively treated as maybe-overlapping — correctness is
+/// preserved because the divide-by-count step computes exact multiplicity.
+fn maybe_overlapping_memory(shape: &[usize], stride: &[isize]) -> bool {
+    let mut dims: Vec<(usize, isize)> = shape
+        .iter()
+        .zip(stride.iter())
+        .filter(|&(&sz, _)| sz > 1)
+        .map(|(&sz, &st)| (sz, st))
+        .collect();
+    if dims.iter().any(|&(_, st)| st <= 0) {
+        return true;
+    }
+    dims.sort_by_key(|&(_, st)| st);
+    let mut max_reach: i64 = 0;
+    for (sz, st) in dims {
+        if (st as i64) <= max_reach {
+            return true;
+        }
+        max_reach += (st as i64) * (sz as i64 - 1);
+    }
+    false
+}
+
+/// Walk every logical position of a strided geometry in C order (last axis
+/// fastest), calling `f(linear_index, flat_storage_offset)`. `base_offset`
+/// is added to every flat offset; strides may be zero or negative. The
+/// caller guarantees the geometry was bounds-validated against the buffer
+/// the flat offsets index into.
+fn for_each_strided_offset(
+    shape: &[usize],
+    stride: &[isize],
+    base_offset: i64,
+    mut f: impl FnMut(usize, i64),
+) {
+    let numel: usize = shape.iter().product();
+    if numel == 0 {
+        return;
+    }
+    let ndim = shape.len();
+    let mut indices = vec![0usize; ndim];
+    let mut flat = base_offset;
+    for i in 0..numel {
+        f(i, flat);
+        for d in (0..ndim).rev() {
+            indices[d] += 1;
+            flat += stride[d] as i64;
+            if indices[d] < shape[d] {
+                break;
+            }
+            flat -= (shape[d] as i64) * (stride[d] as i64);
+            indices[d] = 0;
+        }
+    }
+}
+
+/// Signed inclusive range `[lo, hi]` of storage offsets reachable by a
+/// strided geometry rooted at `offset`. Caller guarantees the shape is
+/// non-empty.
+fn reachable_span(shape: &[usize], stride: &[isize], offset: usize) -> (i64, i64) {
+    let (min_off, max_off) = stride_extent(shape, stride);
+    (offset as i64 + min_off, offset as i64 + max_off)
+}
+
+/// Materialise `t` into a tensor whose backing buffer is EXACTLY its
+/// logical C-order elements (offset 0, `storage_len == numel`). Tensors
+/// already in that form are returned as cheap clones. Device-preserving:
+/// CUDA tensors gather via the `strided_copy_*` kernels (no host bounce).
+///
+/// The kernel-facing backward paths need this exactness because they read
+/// the raw buffer linearly (`scatter_add_1d_*`) or re-interpret offsets
+/// against a fresh logical buffer.
+fn exact_contiguous<T: Float>(t: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if t.is_contiguous() && t.storage_offset() == 0 && t.storage_len() == t.numel() {
+        return Ok(t.clone());
+    }
+    if t.is_cuda() {
+        let storage = materialize_strided_cuda(t)?;
+        return Tensor::from_storage(storage, t.shape().to_vec(), false);
+    }
+    let data = t.data_vec()?;
+    Tensor::from_storage(TensorStorage::cpu(data), t.shape().to_vec(), false)
+}
+
+/// Upload `len` copies of `value` (an f32/f64 scalar fill, dtype-tagged per
+/// `T`) to a device buffer on `ordinal`. Used for the zeros scatter base
+/// and the ones multiplicity source of the CUDA backward — host-computed
+/// constants, not tensor-data round trips.
+fn upload_scalar_fill<T: Float>(
+    value: f64,
+    len: usize,
+    ordinal: usize,
+) -> FerrotorchResult<GpuBufferHandle> {
+    use std::any::TypeId;
+
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    if TypeId::of::<T>() == TypeId::of::<f32>() {
+        let mut bytes = Vec::with_capacity(len * 4);
+        for _ in 0..len {
+            bytes.extend_from_slice(&(value as f32).to_ne_bytes());
+        }
+        backend.cpu_to_gpu(&bytes, DType::F32, ordinal)
+    } else if TypeId::of::<T>() == TypeId::of::<f64>() {
+        let mut bytes = Vec::with_capacity(len * 8);
+        for _ in 0..len {
+            bytes.extend_from_slice(&value.to_ne_bytes());
+        }
+        backend.cpu_to_gpu(&bytes, DType::F64, ordinal)
+    } else {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "as_strided backward (non-f32/f64 dtype)",
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tensor methods (the impl block in tensor.rs is closed; we use a separate
 // inherent impl here)
 // ---------------------------------------------------------------------------
@@ -244,26 +393,45 @@ impl<T: Float> Tensor<T> {
     /// the multi-index. On other devices (e.g. XPU) it returns
     /// [`FerrotorchError::NotImplementedOnCuda`] — install a kernel before
     /// using this on those devices.
+    ///
+    /// Differentiable like `torch.as_strided_copy` (CORE-060 / #1754): when
+    /// grad is enabled and `self` tracks gradients, the output carries
+    /// [`AsStridedBackward`] — the copy is the identity on values, so its
+    /// VJP equals the view's VJP (torch generates `AsStridedBackward0_copy`
+    /// from the same derivative entry).
     pub fn as_strided_copy(
         &self,
         size: &[usize],
         stride: &[isize],
         storage_offset: Option<usize>,
     ) -> FerrotorchResult<Tensor<T>> {
-        // Construct the view first (validates bounds + propagates autograd).
-        let view = self.as_strided(size, stride, storage_offset)?;
-        // Materialise. `data_vec` already understands non-contiguous CPU
-        // layouts, and on CUDA it routes through the GPU strided_copy
-        // dispatcher in `cpu()`/`data_vec()` — see the comment in
-        // tensor.rs:data_vec.
-        if view.is_cuda() {
-            // For CUDA tensors we reshape the storage by directly invoking
-            // the GPU strided_copy dispatcher. `view.data_vec()` would
+        let offset = storage_offset.unwrap_or_else(|| self.storage_offset());
+        validate_bounds("as_strided_copy", size, stride, offset, self.storage_len())?;
+
+        // Materialise from a plain metadata view (no intermediate grad
+        // node; the backward node attaches to the OUTPUT below,
+        // referencing `self` directly).
+        let view = self.stride_view(size.to_vec(), stride.to_vec(), offset);
+        let storage = if view.is_cuda() {
+            // Direct GPU strided_copy dispatch; `view.data_vec()` would
             // bounce through host first, which violates GPU discipline.
-            return materialize_strided_cuda(&view);
+            materialize_strided_cuda(&view)?
+        } else {
+            // `data_vec` already understands non-contiguous CPU layouts.
+            TensorStorage::cpu(view.data_vec()?)
+        };
+
+        if crate::autograd::no_grad::is_grad_enabled() && self.requires_grad() {
+            let grad_fn = Arc::new(AsStridedBackward::new(
+                self.clone(),
+                size.to_vec(),
+                stride.to_vec(),
+                offset,
+            ));
+            Tensor::from_operation(storage, size.to_vec(), grad_fn)
+        } else {
+            Tensor::from_storage(storage, size.to_vec(), false)
         }
-        let data = view.data_vec()?;
-        Tensor::from_storage(TensorStorage::cpu(data), size.to_vec(), false)
     }
 
     /// Inverse of [`as_strided`]: return a copy of `self` with `src` written
@@ -273,6 +441,16 @@ impl<T: Float> Tensor<T> {
     /// Equivalent to `torch.as_strided_scatter`. The CUDA path
     /// dispatches through the GPU backend (via the
     /// `strided_copy` + `strided_scatter` kernels) — no host bounce.
+    ///
+    /// Differentiable w.r.t. BOTH `self` and `src` (CORE-060 / #1754) via
+    /// [`AsStridedScatterBackward`]. The `src` gradient (a gather at the
+    /// view geometry) matches torch; the `self` gradient pins the
+    /// finite-difference Jacobian, deliberately diverging from torch
+    /// 2.11.0's self-inconsistent analytic formula — see #1959.
+    ///
+    /// Like torch, the gradients assume the view geometry does not overlap
+    /// itself; the forward's last-write-wins resolution of overlapping
+    /// destinations is not reflected in the `src` gather.
     pub fn as_strided_scatter(
         &self,
         src: &Tensor<T>,
@@ -300,41 +478,34 @@ impl<T: Float> Tensor<T> {
             });
         }
 
-        if self.is_cuda() {
-            return scatter_on_cuda(self, src, size, stride, offset);
+        let storage = if self.is_cuda() {
+            scatter_on_cuda(self, src, size, stride, offset)?
+        } else {
+            // CPU path: start from a contiguous copy of self, walk src in
+            // C-order and write into the strided positions.
+            let mut buf = self.data_vec()?;
+            let src_data = src.data_vec()?;
+            // Bounds were validated; every flat offset is in [0, storage_len).
+            for_each_strided_offset(size, stride, offset as i64, |src_i, flat| {
+                buf[flat as usize] = src_data[src_i];
+            });
+            TensorStorage::cpu(buf)
+        };
+
+        if crate::autograd::no_grad::is_grad_enabled()
+            && (self.requires_grad() || src.requires_grad())
+        {
+            let grad_fn = Arc::new(AsStridedScatterBackward::new(
+                self.clone(),
+                src.clone(),
+                size.to_vec(),
+                stride.to_vec(),
+                offset,
+            ));
+            Tensor::from_operation(storage, self.shape().to_vec(), grad_fn)
+        } else {
+            Tensor::from_storage(storage, self.shape().to_vec(), false)
         }
-
-        // CPU path: start from a contiguous copy of self, walk src in C-order
-        // and write into the strided positions.
-        let mut buf = self.data_vec()?;
-        let src_data = src.data_vec()?;
-        let ndim = size.len();
-
-        let numel: usize = size.iter().product();
-        if numel == 0 {
-            return Tensor::from_storage(TensorStorage::cpu(buf), self.shape().to_vec(), false);
-        }
-
-        let mut indices = vec![0usize; ndim];
-        #[allow(clippy::needless_range_loop)]
-        for src_i in 0..numel {
-            let mut flat = offset as i64;
-            for d in 0..ndim {
-                flat += indices[d] as i64 * stride[d] as i64;
-            }
-            // Bounds were validated; flat is in [0, storage_len).
-            buf[flat as usize] = src_data[src_i];
-            // Increment multi-index (rightmost first).
-            for d in (0..ndim).rev() {
-                indices[d] += 1;
-                if indices[d] < size[d] {
-                    break;
-                }
-                indices[d] = 0;
-            }
-        }
-
-        Tensor::from_storage(TensorStorage::cpu(buf), self.shape().to_vec(), false)
     }
 }
 
@@ -342,12 +513,36 @@ impl<T: Float> Tensor<T> {
 // Autograd: AsStridedBackward
 // ---------------------------------------------------------------------------
 
-/// VJP for `as_strided(input, size, stride, offset)`.
+/// VJP for `as_strided(input, size, stride, offset)` and
+/// `as_strided_copy(input, size, stride, offset)`.
 ///
-/// The forward op gathers elements from `input` at strided positions; the
-/// gradient w.r.t. `input` therefore scatters `grad_output` back into the
-/// same positions, leaving everything else zero. Mirrors torch's
-/// `AsStridedBackward0`.
+/// Implements torch's full `as_strided_backward` algorithm
+/// (`torch/csrc/autograd/FunctionsManual.cpp`, baseline `2ec0222669`;
+/// derivative entry in `tools/autograd/derivatives.yaml: as_strided`):
+///
+/// 1. Allocate a zero "base" buffer spanning the union of the reachable
+///    storage ranges of the INPUT geometry (`input.shape/strides/offset`)
+///    and the OUTPUT geometry (`size/stride/storage_offset`). Offsets are
+///    rebased as deltas against the shared minimum reachable offset
+///    (torch's `shared_offset` trick), so nonzero-offset input views
+///    (narrow, chained `as_strided`) are handled, and negative strides
+///    (rejected by torch's forward but supported here) size the buffer
+///    from the signed span (CORE-059 / #1753).
+/// 2. Scatter-ADD `grad_output` into the base at the output geometry —
+///    overlapping view positions (sliding windows, zero strides) SUM their
+///    upstream gradients instead of keeping the last write
+///    (CORE-058 / #1752).
+/// 3. If the input geometry itself may overlap (a chained overlapping
+///    view), divide each base cell by its visit count, mirroring torch's
+///    `index_add_`-of-ones step.
+/// 4. Gather the base back out through the input geometry into a
+///    contiguous tensor of `input.shape()`.
+///
+/// Device-preserving: the CPU path is pure `Vec` walks; the CUDA path
+/// composes `strided_scatter_*` (non-overlapping outputs),
+/// `scatter_add_dim_*` (overlapping outputs; i64 indices, atomic adds),
+/// `div`, and `strided_copy_*` so the gradient data never bounces through
+/// the host.
 #[derive(Debug)]
 pub struct AsStridedBackward<T: Float> {
     input: Tensor<T>,
@@ -370,6 +565,185 @@ impl<T: Float> AsStridedBackward<T> {
             storage_offset,
         }
     }
+
+    /// CPU half of [`GradFn::backward`]: plain `Vec` walks, no unsafe.
+    fn backward_cpu(
+        &self,
+        grad_output: &Tensor<T>,
+        base_len: usize,
+        out_eff: i64,
+        inp_eff: i64,
+        inp_overlap: bool,
+    ) -> FerrotorchResult<Tensor<T>> {
+        let inp_shape = self.input.shape();
+        let inp_strides = self.input.strides();
+        let gdata = grad_output.data_vec()?; // logical C-order, any layout
+        let zero = <T as num_traits::Zero>::zero();
+        let one = <T as num_traits::One>::one();
+
+        // Step 2: scatter-ADD at the output geometry.
+        let mut base = vec![zero; base_len];
+        for_each_strided_offset(&self.size, &self.stride, out_eff, |i, flat| {
+            base[flat as usize] += gdata[i];
+        });
+
+        // Step 3: divide by visit count where the input geometry overlaps.
+        if inp_overlap {
+            let mut count = vec![zero; base_len];
+            for_each_strided_offset(inp_shape, inp_strides, inp_eff, |_, flat| {
+                count[flat as usize] += one;
+            });
+            for (b, c) in base.iter_mut().zip(count.iter()) {
+                // Cells with count 0 are never gathered below; skipping the
+                // division avoids materialising torch's 0/0 NaNs.
+                if *c > one {
+                    *b = *b / *c;
+                }
+            }
+        }
+
+        // Step 4: gather through the input geometry.
+        let mut out = vec![zero; self.input.numel()];
+        for_each_strided_offset(inp_shape, inp_strides, inp_eff, |i, flat| {
+            out[i] = base[flat as usize];
+        });
+        Tensor::from_storage(TensorStorage::cpu(out), inp_shape.to_vec(), false)
+    }
+
+    /// CUDA half of [`GradFn::backward`]: gradient data stays on device.
+    fn backward_cuda(
+        &self,
+        grad_output: &Tensor<T>,
+        base_len: usize,
+        out_eff: i64,
+        inp_eff: i64,
+        inp_overlap: bool,
+    ) -> FerrotorchResult<Tensor<T>> {
+        use std::any::TypeId;
+
+        let is_f32 = TypeId::of::<T>() == TypeId::of::<f32>();
+        let is_f64 = TypeId::of::<T>() == TypeId::of::<f64>();
+        if !is_f32 && !is_f64 {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "as_strided backward (non-f32/f64 dtype)",
+            });
+        }
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+
+        // `scatter_add_1d_*` reads its grad buffer linearly and
+        // `strided_scatter_*` consumes a contiguous src, so the upstream
+        // grad must be exactly its logical elements.
+        let grad = exact_contiguous(grad_output)?;
+        let grad_buf = grad
+            .storage()
+            .gpu_handle()
+            .ok_or(FerrotorchError::DeviceUnavailable)?;
+        let ordinal = grad_buf.device_ordinal();
+
+        let inp_shape = self.input.shape().to_vec();
+        let inp_strides = self.input.strides().to_vec();
+
+        // Step 2: scatter the upstream grad into the base buffer.
+        let out_overlap = maybe_overlapping_memory(&self.size, &self.stride);
+        let base_t: Tensor<T> = if out_overlap {
+            // Aliasing destinations: atomic scatter-add via the modern
+            // i64-index `scatter_add_dim_*` kernels (sm_60+ f64 atomics),
+            // decomposed as [outer=1, out_dim=base_len, inner=1]: for every
+            // t in [0, numel), base[idx[t]] += grad[t] on top of the zeros
+            // base. (The legacy `scatter_add_1d_*` arms were rejected: f32-
+            // encoded indices round above 2^24 and the f64 PTX transform
+            // fails to JIT — see the #1960 thread.)
+            let mut idx = vec![0usize; grad.numel()];
+            for_each_strided_offset(&self.size, &self.stride, out_eff, |i, flat| {
+                // flat ∈ [0, base_len) by construction (bounds-validated
+                // geometry rebased to the shared minimum offset).
+                idx[i] = flat as usize;
+            });
+            let idx_h = crate::ops::indexing::upload_index_i64(&idx, ordinal)?;
+            let zeros_h = upload_scalar_fill::<T>(0.0, base_len, ordinal)?;
+            let base_h = if is_f32 {
+                backend.scatter_add_dim_f32(
+                    &zeros_h,
+                    &idx_h,
+                    grad_buf,
+                    1,
+                    base_len,
+                    idx.len(),
+                    1,
+                )?
+            } else {
+                backend.scatter_add_dim_f64(
+                    &zeros_h,
+                    &idx_h,
+                    grad_buf,
+                    1,
+                    base_len,
+                    idx.len(),
+                    1,
+                )?
+            };
+            Tensor::from_storage(TensorStorage::gpu(base_h), vec![base_len], false)?
+        } else {
+            // Distinct destinations: overwrite-scatter into zeros is
+            // exactly scatter-add, with no index buffer needed.
+            let mut base_h = upload_scalar_fill::<T>(0.0, base_len, ordinal)?;
+            if is_f32 {
+                backend.strided_scatter_f32(
+                    grad_buf,
+                    &mut base_h,
+                    &self.size,
+                    &self.stride,
+                    out_eff as usize,
+                )?;
+            } else {
+                backend.strided_scatter_f64(
+                    grad_buf,
+                    &mut base_h,
+                    &self.size,
+                    &self.stride,
+                    out_eff as usize,
+                )?;
+            }
+            Tensor::from_storage(TensorStorage::gpu(base_h), vec![base_len], false)?
+        };
+
+        // Step 3: divide by visit count where the input geometry overlaps.
+        let base_t = if inp_overlap {
+            let inp_numel = self.input.numel();
+            let mut idx = vec![0usize; inp_numel];
+            for_each_strided_offset(&inp_shape, &inp_strides, inp_eff, |i, flat| {
+                idx[i] = flat as usize;
+            });
+            let idx_h = crate::ops::indexing::upload_index_i64(&idx, ordinal)?;
+            let zeros_h = upload_scalar_fill::<T>(0.0, base_len, ordinal)?;
+            let ones_h = upload_scalar_fill::<T>(1.0, inp_numel, ordinal)?;
+            let count_h = if is_f32 {
+                backend.scatter_add_dim_f32(&zeros_h, &idx_h, &ones_h, 1, base_len, inp_numel, 1)?
+            } else {
+                backend.scatter_add_dim_f64(&zeros_h, &idx_h, &ones_h, 1, base_len, inp_numel, 1)?
+            };
+            let count_t = Tensor::from_storage(TensorStorage::gpu(count_h), vec![base_len], false)?;
+            // Cells with count 0 become 0/0 = NaN, exactly like torch's
+            // `storage.div_(count)` ("this will give nan outside visible
+            // range"); the gather below never reads them.
+            base_t.div_t(&count_t)?
+        } else {
+            base_t
+        };
+
+        // Step 4: gather through the input geometry.
+        let base_buf = base_t
+            .storage()
+            .gpu_handle()
+            .ok_or(FerrotorchError::DeviceUnavailable)?;
+        let out_h = if is_f32 {
+            backend.strided_copy_f32(base_buf, &inp_shape, &inp_strides, inp_eff as usize)?
+        } else {
+            backend.strided_copy_f64(base_buf, &inp_shape, &inp_strides, inp_eff as usize)?
+        };
+        Tensor::from_storage(TensorStorage::gpu(out_h), inp_shape, false)
+    }
 }
 
 impl<T: Float> GradFn<T> for AsStridedBackward<T> {
@@ -377,15 +751,40 @@ impl<T: Float> GradFn<T> for AsStridedBackward<T> {
         if !self.input.requires_grad() {
             return Ok(vec![None]);
         }
-        // Gradient w.r.t. input has the input's shape: zeros, with the
-        // upstream grad written into the strided positions.
-        let zeros = crate::creation::zeros::<T>(self.input.shape())?;
-        let grad_input = zeros.as_strided_scatter(
-            grad_output,
-            &self.size,
-            &self.stride,
-            Some(self.storage_offset),
-        )?;
+
+        let inp_shape = self.input.shape();
+        let out_numel: usize = self.size.iter().product();
+
+        // Empty output view (or empty input): nothing was read, so the
+        // gradient is identically zero (torch returns
+        // `at::zeros(input_geometry.sizes())` for size-0 dims).
+        if out_numel == 0 || self.input.numel() == 0 {
+            let zeros = crate::creation::zeros::<T>(inp_shape)?;
+            let zeros = if self.input.is_cuda() {
+                zeros.to(self.input.device())?
+            } else {
+                zeros
+            };
+            return Ok(vec![Some(zeros)]);
+        }
+
+        // Step 1: base-buffer geometry. Both spans were validated against
+        // the SAME storage in their forwards, so the union is finite and
+        // every effective offset is non-negative.
+        let (in_lo, in_hi) =
+            reachable_span(inp_shape, self.input.strides(), self.input.storage_offset());
+        let (out_lo, out_hi) = reachable_span(&self.size, &self.stride, self.storage_offset);
+        let shared = in_lo.min(out_lo);
+        let base_len = (in_hi.max(out_hi) - shared + 1) as usize;
+        let inp_eff = self.input.storage_offset() as i64 - shared;
+        let out_eff = self.storage_offset as i64 - shared;
+        let inp_overlap = maybe_overlapping_memory(inp_shape, self.input.strides());
+
+        let grad_input = if grad_output.is_cuda() {
+            self.backward_cuda(grad_output, base_len, out_eff, inp_eff, inp_overlap)?
+        } else {
+            self.backward_cpu(grad_output, base_len, out_eff, inp_eff, inp_overlap)?
+        };
         Ok(vec![Some(grad_input)])
     }
 
@@ -399,15 +798,112 @@ impl<T: Float> GradFn<T> for AsStridedBackward<T> {
 }
 
 // ---------------------------------------------------------------------------
+// Autograd: AsStridedScatterBackward
+// ---------------------------------------------------------------------------
+
+/// VJP for `as_strided_scatter(input, src, size, stride, offset)`.
+///
+/// Forward: `out = input.clone(); out.as_strided(size, stride, offset)
+/// .copy_(src)` — view positions come from `src`, everything else passes
+/// `input` through.
+///
+/// - `d/d src`: gather `grad_output` at the view geometry (matches torch's
+///   `grad.as_strided(size, stride, storage_offset)` derivative and the
+///   numerical Jacobian).
+/// - `d/d input`: `grad_output` with the view region ZEROED — the
+///   finite-difference Jacobian. **Deliberate divergence (#1959):** torch
+///   2.11.0's `as_strided_scatter_backward`
+///   (`torch/csrc/autograd/FunctionsManual.cpp:3366-3389` at baseline
+///   `2ec0222669`) returns the OPPOSITE masking (zeros except the view
+///   region) and fails `torch.autograd.gradcheck` against its own
+///   numerical Jacobian.
+///
+/// Like torch, both formulas assume the view geometry does not overlap
+/// itself.
+#[derive(Debug)]
+pub struct AsStridedScatterBackward<T: Float> {
+    input: Tensor<T>,
+    src: Tensor<T>,
+    size: Vec<usize>,
+    stride: Vec<isize>,
+    storage_offset: usize,
+}
+
+impl<T: Float> AsStridedScatterBackward<T> {
+    pub fn new(
+        input: Tensor<T>,
+        src: Tensor<T>,
+        size: Vec<usize>,
+        stride: Vec<isize>,
+        storage_offset: usize,
+    ) -> Self {
+        Self {
+            input,
+            src,
+            size,
+            stride,
+            storage_offset,
+        }
+    }
+}
+
+impl<T: Float> GradFn<T> for AsStridedScatterBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        // The (size, stride, offset) triple is interpreted against the
+        // logical C-order buffer of the forward output (the forward
+        // validated it against `self.numel()`), so rebase the upstream
+        // grad to exactly that layout before gathering/masking.
+        let grad = exact_contiguous(grad_output)?;
+
+        let grad_input = if self.input.requires_grad() {
+            // Pass-through grad with the scattered region zeroed: reuse the
+            // forward scatter with a zeros src (device-preserving on CUDA;
+            // `grad` never requires grad here, so no graph is attached).
+            let zeros_src = crate::creation::zeros::<T>(&self.size)?;
+            let zeros_src = if grad.is_cuda() {
+                zeros_src.to(grad.device())?
+            } else {
+                zeros_src
+            };
+            Some(grad.as_strided_scatter(
+                &zeros_src,
+                &self.size,
+                &self.stride,
+                Some(self.storage_offset),
+            )?)
+        } else {
+            None
+        };
+
+        let grad_src = if self.src.requires_grad() {
+            Some(grad.as_strided_copy(&self.size, &self.stride, Some(self.storage_offset))?)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_input, grad_src])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input, &self.src]
+    }
+
+    fn name(&self) -> &'static str {
+        "AsStridedScatterBackward"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CUDA strided copy dispatch
 // ---------------------------------------------------------------------------
 
 /// Materialise an `as_strided` view living on CUDA into a contiguous CUDA
-/// tensor. Dispatches to the existing `strided_copy_{f32,f64}` GPU kernels
+/// storage. Dispatches to the existing `strided_copy_{f32,f64}` GPU kernels
 /// via the `GpuBackend` dispatcher.
 ///
-/// Never bounces data through host memory.
-fn materialize_strided_cuda<T: Float>(view: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+/// Never bounces data through host memory. Returns the bare storage so
+/// callers decide whether to attach autograd metadata (CORE-060 / #1754).
+fn materialize_strided_cuda<T: Float>(view: &Tensor<T>) -> FerrotorchResult<TensorStorage<T>> {
     use std::any::TypeId;
 
     let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -428,8 +924,7 @@ fn materialize_strided_cuda<T: Float>(view: &Tensor<T>) -> FerrotorchResult<Tens
             op: "as_strided_copy",
         });
     };
-    let new_storage = TensorStorage::gpu(new_handle);
-    Tensor::from_storage(new_storage, out_shape, false)
+    Ok(TensorStorage::gpu(new_handle))
 }
 
 /// CUDA path for `as_strided_scatter`. Mirrors the CPU implementation
@@ -439,7 +934,8 @@ fn materialize_strided_cuda<T: Float>(view: &Tensor<T>) -> FerrotorchResult<Tens
 ///    `numel(self)` using `strided_copy_*` (no host bounce).
 /// 2. Run `strided_scatter_*` to overwrite the strided positions with
 ///    values from `src`.
-/// 3. Wrap the result as a new contiguous tensor with `self.shape()`.
+/// 3. Return the resulting contiguous storage (the caller wraps it with
+///    `self.shape()` and the autograd node when needed, CORE-060 / #1754).
 ///
 /// f32 and f64 are supported. Other dtypes (`bf16`) on CUDA fall back
 /// with `NotImplementedOnCuda`. There is no `.to(Cpu)` shortcut anywhere
@@ -450,7 +946,7 @@ fn scatter_on_cuda<T: Float>(
     size: &[usize],
     stride: &[isize],
     offset: usize,
-) -> FerrotorchResult<Tensor<T>> {
+) -> FerrotorchResult<TensorStorage<T>> {
     use std::any::TypeId;
 
     let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -488,7 +984,7 @@ fn scatter_on_cuda<T: Float>(
         backend.strided_scatter_f64(src_buf, &mut dst_handle, size, stride, offset)?;
     }
 
-    Tensor::from_storage(TensorStorage::gpu(dst_handle), out_shape, false)
+    Ok(TensorStorage::gpu(dst_handle))
 }
 
 // ---------------------------------------------------------------------------
@@ -701,16 +1197,21 @@ mod tests {
     }
 
     #[test]
-    fn as_strided_backward_overlapping_view_last_write_wins() {
+    fn as_strided_backward_overlapping_view_sums_gradients() {
         use crate::autograd::backward;
 
         // Sliding window: each input element appears in multiple view
-        // positions. `as_strided_scatter` is OVERWRITE semantics (matching
-        // torch's documented gradient formula for `as_strided`), so the
-        // gradient at each input position is `1` regardless of how many
-        // view positions reference it. Counting occurrences would require
-        // a `_scatter_add_` variant that ferrotorch doesn't yet expose;
-        // tracked as a follow-up.
+        // positions, so autograd must SUM the upstream gradient over every
+        // aliasing position (CORE-058 / #1752 — the previous expectation
+        // pinned the buggy last-write-wins scatter as `[1.0; 5]` and
+        // claimed torch parity).
+        //
+        // torch oracle (live, 2.11.0+cu130):
+        // ```python
+        // x = torch.arange(1., 6., dtype=torch.float64, requires_grad=True)
+        // x.as_strided([3,3],[1,1],0).sum().backward()
+        // x.grad  # tensor([1., 2., 3., 2., 1.], dtype=torch.float64)
+        // ```
         //
         // The view is non-contiguous, and `sum_all` requires contiguous
         // input today, so materialise via `.contiguous()` first; this
@@ -723,6 +1224,6 @@ mod tests {
         let s = contig.sum_all().unwrap();
         backward(&s).unwrap();
         let g = input.grad().unwrap().expect("input should have a gradient");
-        assert_eq!(g.data_vec().unwrap(), vec![1.0; 5]);
+        assert_eq!(g.data_vec().unwrap(), vec![1.0, 2.0, 3.0, 2.0, 1.0]);
     }
 }

@@ -87,7 +87,7 @@ use ferrotorch_core::shape::{
     check_shapes_match, normalize_axis, numel,
 };
 use ferrotorch_core::stride_tricks::{
-    AsStridedBackward, as_strided, as_strided_copy, as_strided_scatter,
+    AsStridedBackward, AsStridedScatterBackward, as_strided, as_strided_copy, as_strided_scatter,
 };
 use ferrotorch_core::{
     BoolTensor, Device, IntTensor, Tensor, TensorStorage, chunk_t, contiguous_t, permute_t,
@@ -3140,6 +3140,7 @@ fn grad_fn_struct_paths_link() {
     let _c = CatBackward::<f32>::new(vec![leaf.clone()], 0, vec![1]);
     let _sp = SplitBackward::<f32>::new(leaf.clone(), 0, 0, 1);
     let _as = AsStridedBackward::<f32>::new(leaf.clone(), vec![1], vec![1], 0);
+    let _ass = AsStridedScatterBackward::new(leaf.clone(), leaf.clone(), vec![1], vec![1], 0);
 
     // Indexing grad_fn structs — again, just confirm names resolve.
     let _g = GatherBackward::<f32> {
@@ -3175,6 +3176,38 @@ fn grad_fn_struct_paths_link() {
         y: leaf.clone(),
         condition: BoolTensor::from_vec(vec![true], vec![1]).unwrap(),
     };
+}
+
+/// Node-level VJP contract of `AsStridedScatterBackward` (CORE-060 /
+/// #1754): grads w.r.t. BOTH base and src.
+///
+/// torch oracle (live 2.11.0+cu130) for the src gather (torch == finite
+/// differences here):
+/// ```python
+/// base = torch.zeros(6, dtype=torch.float64, requires_grad=True)
+/// src = torch.tensor([10.,20.,30.], dtype=torch.float64, requires_grad=True)
+/// out = torch.as_strided_scatter(base, src, [3],[2],0)
+/// (out * torch.arange(1.,7.)).sum().backward()
+/// src.grad   # tensor([1., 3., 5.])
+/// ```
+/// The base grad pins the finite-difference Jacobian `[0,2,0,4,0,6]`
+/// (upstream grad with the scattered region zeroed); torch 2.11.0's
+/// analytic formula returns the opposite masking `[1,0,3,0,5,0]` and fails
+/// its own `torch.autograd.gradcheck` — deliberate divergence tracked in
+/// #1959.
+#[test]
+fn cpu_as_strided_scatter_backward_node_grads() {
+    let base = make_cpu_f32(&[0.0; 6], &[6], true);
+    let src = make_cpu_f32(&[10.0, 20.0, 30.0], &[3], true);
+    let node = AsStridedScatterBackward::new(base.clone(), src.clone(), vec![3], vec![2], 0);
+    // Upstream grad = [1..6] (the weighted-sum loss's local gradient).
+    let upstream = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[6], false);
+    let grads = ferrotorch_core::GradFn::backward(&node, &upstream).expect("backward");
+    assert_eq!(grads.len(), 2, "one grad slot per input (base, src)");
+    let g_base = grads[0].as_ref().expect("base grad").data_vec().unwrap();
+    let g_src = grads[1].as_ref().expect("src grad").data_vec().unwrap();
+    assert_eq!(g_base, vec![0.0, 2.0, 0.0, 4.0, 0.0, 6.0]);
+    assert_eq!(g_src, vec![1.0, 3.0, 5.0]);
 }
 
 // ---------------------------------------------------------------------------

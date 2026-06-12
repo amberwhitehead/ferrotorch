@@ -1028,9 +1028,17 @@ pub fn repeat<T: Float>(input: &Tensor<T>, repeats: &[isize]) -> FerrotorchResul
             continue;
         }
         if r == 0 {
-            let mut zero_shape: Vec<isize> = cur.shape().iter().map(|&d| d as isize).collect();
-            zero_shape[ax] = 0;
-            cur = reshape(&cur, &zero_shape)?;
+            // A zero count collapses this axis to size zero (torch:
+            // `input_size[i] * repeats[i]`). `reshape` cannot do this — it
+            // requires the element count to stay unchanged, so reshaping the
+            // non-empty `cur` to a zero-sized shape was a guaranteed
+            // ShapeMismatch (CORE-054 / #1748). `narrow(ax, 0, 0)` yields a
+            // genuine zero-size tensor with the computed output shape on the
+            // input's device, and its `NarrowBackward` scatters the (empty)
+            // upstream gradient into zeros of the input shape — exactly the
+            // zero gradient torch's `RepeatBackward0` produces for a zero
+            // count.
+            cur = cur.narrow(ax, 0, 0)?;
             continue;
         }
         let copies = vec![cur.clone(); r];
@@ -1424,6 +1432,20 @@ impl<T: Float> CatBackward<T> {
 
 impl<T: Float> GradFn<T> for CatBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        // Packed-buffer gate (CORE-055 / #1749): both consumers below
+        // require a packed offset-0 `grad_output` — the GPU `strided_split_*`
+        // fast path reads the raw base handle (no strides / offset in its
+        // trait signature) and the CPU path reads `data()` (which rejects
+        // non-contiguous tensors). A non-conforming upstream gradient is
+        // staged ONCE via `contiguous()` (device-aware per #1657).
+        let staged_go;
+        let grad_output = if grad_output.is_contiguous() && grad_output.storage_offset() == 0 {
+            grad_output
+        } else {
+            staged_go = crate::autograd::no_grad::no_grad(|| grad_output.contiguous())?;
+            &staged_go
+        };
+
         // GPU fast path: use strided_split to extract each chunk directly on GPU.
         if grad_output.is_cuda()
             && (is_f32::<T>() || is_f64::<T>())
@@ -1711,6 +1733,43 @@ pub fn cat<T: Float>(tensors: &[Tensor<T>], axis: isize) -> FerrotorchResult<Ten
 
     let device = tensors[0].device();
 
+    // Device validation up front (CORE-055 / #1749): torch requires all cat
+    // inputs on one device ("Expected all tensors to be on the same
+    // device"). Without this check the failure mode depended on which path
+    // happened to choke on the foreign tensor (raw `gpu_handle()` error on
+    // the GPU path, `data()` error on the CPU path).
+    for t in tensors.iter().skip(1) {
+        if t.device() != device {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: device,
+                got: t.device(),
+            });
+        }
+    }
+
+    // View-geometry staging (CORE-055 / #1749 — same `gpu_handle()`-drops-
+    // view-geometry class as #1657 / #1845): both consumers below require a
+    // packed offset-0 buffer. The CUDA `strided_cat` kernel receives the raw
+    // base handle plus logical `numel` — its trait signature carries no
+    // source strides and no storage offset — so a transposed / permuted /
+    // narrowed / offset view would silently concatenate the WRONG values.
+    // The CPU loop reads `data()`, which rejects non-contiguous tensors.
+    // Any non-conforming input is materialized ONCE via `contiguous()`
+    // (device-aware: on-device `strided_copy` per the #1657 fix) under
+    // `no_grad` — the staged copies are pure data sources; `CatBackward`
+    // still attaches to the ORIGINAL inputs, so gradients reach the original
+    // views' leaves through their own backward chains.
+    let staged: Vec<Tensor<T>> = tensors
+        .iter()
+        .map(|t| {
+            if t.is_contiguous() && t.storage_offset() == 0 {
+                Ok(t.clone())
+            } else {
+                crate::autograd::no_grad::no_grad(|| t.contiguous())
+            }
+        })
+        .collect::<FerrotorchResult<_>>()?;
+
     // GPU fast path: allocate output on GPU, then strided_cat each input — no CPU
     // download needed. Mirrors `aten::cat_out_cuda` (PyTorch): host computes
     // `elem_size` once, backend dispatches by element width into a pure-memcpy
@@ -1726,12 +1785,14 @@ pub fn cat<T: Float>(tensors: &[Tensor<T>], axis: isize) -> FerrotorchResult<Ten
             1
         };
         let out_numel: usize = out_shape.iter().product();
-        let device_ord = tensors[0].gpu_handle()?.device_ordinal();
+        let device_ord = staged[0].gpu_handle()?.device_ordinal();
 
         let mut out_handle = backend.alloc_zeros(out_numel, T::dtype(), device_ord)?;
 
         let mut offset = 0usize;
-        for t in tensors {
+        // Read from the STAGED (packed, offset-0) copies — `strided_cat`
+        // sees no view geometry (CORE-055 / #1749).
+        for t in &staged {
             let t_axis_size = t.shape()[norm_axis];
             let t_numel = t.numel();
             let t_handle = t.gpu_handle()?;
@@ -1765,7 +1826,9 @@ pub fn cat<T: Float>(tensors: &[Tensor<T>], axis: isize) -> FerrotorchResult<Ten
     if device.is_cuda() {
         return Err(crate::error::FerrotorchError::NotImplementedOnCuda { op: "cat" });
     }
-    let cpu_tensors: Vec<Tensor<T>> = tensors.to_vec();
+    // Read from the STAGED copies — `data()` rejects non-contiguous views
+    // (CORE-055 / #1749).
+    let cpu_tensors: Vec<Tensor<T>> = staged;
 
     // Compute strides for the interleaved copy.
     let outer: usize = out_shape[..norm_axis].iter().product();

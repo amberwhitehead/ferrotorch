@@ -20,9 +20,12 @@ family — direct stride manipulation on tensors. It mirrors
 `torch.as_strided_scatter`. Strides are in *element* units (not bytes),
 may be zero (broadcast) or negative (reverse), and views may overlap
 (used for Toeplitz matrices, sliding windows, broadcast replication).
-The backward pass for `as_strided` is `AsStridedBackward`, which
-scatters the upstream gradient back into a zero-initialised input via
-`as_strided_scatter`.
+The backward pass for `as_strided` (and `as_strided_copy`) is
+`AsStridedBackward`, which implements torch's full geometry-aware
+`as_strided_backward` algorithm (scatter-ADD into a shared base buffer,
+overlap multiplicity division, gather through the input geometry);
+`as_strided_scatter` differentiates w.r.t. base and src via
+`AsStridedScatterBackward` (CORE-058/059/060, #1752/#1753/#1754).
 
 ## Requirements
 
@@ -53,9 +56,15 @@ scatters the upstream gradient back into a zero-initialised input via
   - `storage_offset > storage_len` for an empty view
     (`:145-153`)
 - REQ-5: Autograd: `AsStridedBackward` saves the input + `(size,
-  stride, offset)` and scatters the upstream gradient into a
-  zero-initialised tensor of the input's shape via
-  `as_strided_scatter`. Mirrors torch's `AsStridedBackward0`.
+  stride, offset)` and mirrors torch's `as_strided_backward`
+  (`torch/csrc/autograd/FunctionsManual.cpp`): scatter-ADD the upstream
+  gradient into a base buffer spanning the input+output geometries
+  (overlapping positions SUM), divide by visit count when the input
+  geometry overlaps, gather back through the input geometry. Attached
+  by `as_strided` AND `as_strided_copy`; `as_strided_scatter` attaches
+  `AsStridedScatterBackward` (grads w.r.t. base and src; base grad pins
+  the finite-difference Jacobian, diverging from torch 2.11.0's
+  gradcheck-failing analytic formula — #1959).
 - REQ-6: Negative strides — `as_strided(_, &[-1], Some(N-1))` reverses
   a 1-D tensor. Pinned by test `as_strided_negative_stride_reverses`
   at `stride_tricks.rs:518-525`.
@@ -109,9 +118,21 @@ scatters the upstream gradient back into a zero-initialised input via
   contiguous GPU buffer via `strided_copy_*` then runs
   `strided_scatter_*` to overwrite positions — never bounces through
   host. bf16 / f16 on CUDA error with `NotImplementedOnCuda`.
-- `AsStridedBackward` (`stride_tricks.rs:352-399`) implements
-  `GradFn::backward` by allocating `zeros(input.shape())` and calling
-  `zeros.as_strided_scatter(grad_output, size, stride, offset)`.
+- `AsStridedBackward` (`stride_tricks.rs:547-820`) implements
+  `GradFn::backward` as torch's full `as_strided_backward` algorithm
+  (CORE-058/059, #1752/#1753): scatter-ADD the upstream gradient into a
+  base buffer spanning the input+output geometries (offsets rebased as
+  deltas against the shared minimum reachable offset), divide by visit
+  count when the input geometry itself may overlap, then gather back out
+  through the input geometry. CPU half at `:570`, CUDA half at `:614`
+  (`strided_scatter_*` / i64-index `scatter_add_dim_*` / `strided_copy_*`
+  — gradient data stays on device).
+- `AsStridedScatterBackward` (`stride_tricks.rs:824-871`) is the
+  two-input VJP of `as_strided_scatter` (CORE-060, #1754): `d/d src`
+  gathers the upstream grad at the view geometry (matches torch);
+  `d/d input` zeroes the view region of the upstream grad — the
+  finite-difference Jacobian, deliberately diverging from torch 2.11.0's
+  self-inconsistent analytic formula (#1959).
 
 Non-test production consumers:
 
@@ -157,7 +178,7 @@ Expected: ~17 tests pass.
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `Tensor::as_strided` at `ferrotorch-core/src/stride_tricks.rs:212` mirrors `aten/src/ATen/native/TensorShape.cpp::Tensor::as_strided`; non-test consumer: `crate::einsum` calls `as_strided` directly for Einstein-summation diagonal extraction (`ferrotorch-core/src/einsum.rs:425`). |
 | REQ-2 | SHIPPED | impl: `Tensor::as_strided_copy` at `ferrotorch-core/src/stride_tricks.rs:247` mirrors `aten/src/ATen/native/AsStridedCopy.cpp::as_strided_copy`; non-test consumer: `crate::einsum` calls `as_strided_copy` for materialising diagonals on CUDA (`ferrotorch-core/src/einsum.rs:324, 357`). |
-| REQ-3 | SHIPPED | impl: `Tensor::as_strided_scatter` at `ferrotorch-core/src/stride_tricks.rs:276` mirrors `aten/src/ATen/native/TensorAdvancedIndexing.cpp::as_strided_scatter`; non-test consumer: `AsStridedBackward::backward` at `:376-399` calls `zeros.as_strided_scatter(grad_output, ...)` to scatter gradients in production autograd. |
+| REQ-3 | SHIPPED | impl: `Tensor::as_strided_scatter` at `ferrotorch-core/src/stride_tricks.rs:454` mirrors `aten/src/ATen/native/TensorAdvancedIndexing.cpp::as_strided_scatter`; non-test consumer: `AsStridedScatterBackward::backward` calls `grad.as_strided_scatter(&zeros_src, ...)` to mask the base gradient in production autograd (#1754). |
 | REQ-4 | SHIPPED | impl: `validate_bounds` at `ferrotorch-core/src/stride_tricks.rs:142` with `stride_extent` helper at `:115`; non-test consumer: invoked from `Tensor::as_strided` at `:204` and `Tensor::as_strided_scatter` at `:269` — every public call validates before constructing the view. |
 | REQ-5 | SHIPPED | impl: `AsStridedBackward in ferrotorch-core/src/stride_tricks.rs` with `impl GradFn::backward` at `backward in ferrotorch-core/src/stride_tricks.rs`; non-test consumer: `Tensor::as_strided` attaches it when `requires_grad` is set (`requires_grad in ferrotorch-core/src/stride_tricks.rs`) — production autograd graph routes through this when stride ops appear in a differentiable function. |
 | REQ-6 | SHIPPED | impl: `stride_extent` at `ferrotorch-core/src/stride_tricks.rs:115-133` handles negative `s` via the `last >= 0` branch; non-test consumer: any user calling `tensor.flip(0)` semantically equivalent path (negative strides are how PyTorch encodes reverse views). Test pin at `:518-525`. |
