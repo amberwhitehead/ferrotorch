@@ -2028,6 +2028,36 @@ pub fn where_cond_bcast<T: Float>(
 // concrete error rather than a wrong-value silent miss.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// CORE-048 (#1742): device contract for the advanced-indexing family
+// (`scatter_reduce`, `index_add`, `index_copy`, `take`, `put`,
+// `masked_scatter`).
+//
+// torch enforces strict same-device placement for EVERY operand of these
+// ops — input, src/source, index AND mask. Live torch 2.11.0+cu130 probe
+// (pasted in #1742): each mixed combination raises `RuntimeError: Expected
+// all tensors to be on the same device, but got index is on cpu, different
+// from other tensors on cuda:0 (...)`; the all-same-device forms return
+// outputs on that device and deliver gradients on the leaves' devices.
+// ferrotorch surfaces the structured `DeviceMismatch` equivalent at entry
+// (R-LOUD-1) and preserves residency on the way out: `take`/`put` run the
+// dim-aware CUDA kernels (flat == outer=1/inner=1), while `scatter_reduce`/
+// `index_add`/`index_copy` (and non-f32/f64 `masked_scatter`) perform a
+// DOCUMENTED host round trip and re-upload the result (R-LOUD-2; see each
+// op's doc-comment).
+// ---------------------------------------------------------------------------
+
+/// Strict same-device operand check (CORE-048 / #1742). `expected` is the
+/// `self`/input device; `got` is the operand under test.
+#[inline]
+fn same_device(expected: Device, got: Device) -> FerrotorchResult<()> {
+    if got == expected {
+        Ok(())
+    } else {
+        Err(FerrotorchError::DeviceMismatch { expected, got })
+    }
+}
+
 /// Reduce mode for `scatter_reduce` mirroring upstream `ReductionType` at
 /// `aten/src/ATen/native/ReductionType.h` (enum SUM / PROD / MAX / MIN /
 /// MEAN). PyTorch's user-facing string-keyword `reduce` arg per
@@ -2180,7 +2210,8 @@ impl<T: Float> ScatterReduceBackward<T> {
         }
         let grad_input = if self.input.requires_grad() {
             Some(Tensor::from_storage(
-                TensorStorage::cpu(grad_input_data),
+                // CORE-048 (#1742): gradient on the input leaf's device.
+                TensorStorage::on_device(grad_input_data, self.input.device())?,
                 vec![],
                 false,
             )?)
@@ -2189,7 +2220,8 @@ impl<T: Float> ScatterReduceBackward<T> {
         };
         let grad_src = if self.src.requires_grad() {
             Some(Tensor::from_storage(
-                TensorStorage::cpu(go_data),
+                // CORE-048 (#1742): gradient on the src leaf's device.
+                TensorStorage::on_device(go_data, self.src.device())?,
                 self.src.shape().to_vec(),
                 false,
             )?)
@@ -2218,7 +2250,8 @@ impl<T: Float> ScatterReduceBackward<T> {
                 });
             }
             Some(Tensor::from_storage(
-                TensorStorage::cpu(gi),
+                // CORE-048 (#1742): gradient on the input leaf's device.
+                TensorStorage::on_device(gi, self.input.device())?,
                 input_shape.to_vec(),
                 false,
             )?)
@@ -2232,7 +2265,8 @@ impl<T: Float> ScatterReduceBackward<T> {
                 gs[i] = go_data[dst_flat];
             });
             Some(Tensor::from_storage(
-                TensorStorage::cpu(gs),
+                // CORE-048 (#1742): gradient on the src leaf's device.
+                TensorStorage::on_device(gs, self.src.device())?,
                 self.index_shape.clone(),
                 false,
             )?)
@@ -2325,7 +2359,8 @@ impl<T: Float> ScatterReduceBackward<T> {
                 });
             }
             Some(Tensor::from_storage(
-                TensorStorage::cpu(gi),
+                // CORE-048 (#1742): gradient on the input leaf's device.
+                TensorStorage::on_device(gi, self.input.device())?,
                 input_shape.to_vec(),
                 false,
             )?)
@@ -2341,7 +2376,8 @@ impl<T: Float> ScatterReduceBackward<T> {
                 }
             });
             Some(Tensor::from_storage(
-                TensorStorage::cpu(gs),
+                // CORE-048 (#1742): gradient on the src leaf's device.
+                TensorStorage::on_device(gs, self.src.device())?,
                 self.index_shape.clone(),
                 false,
             )?)
@@ -2483,7 +2519,8 @@ impl<T: Float> ScatterReduceBackward<T> {
                 });
             }
             Some(Tensor::from_storage(
-                TensorStorage::cpu(gi),
+                // CORE-048 (#1742): gradient on the input leaf's device.
+                TensorStorage::on_device(gi, self.input.device())?,
                 input_shape.to_vec(),
                 false,
             )?)
@@ -2510,7 +2547,8 @@ impl<T: Float> ScatterReduceBackward<T> {
                 };
             });
             Some(Tensor::from_storage(
-                TensorStorage::cpu(gs),
+                // CORE-048 (#1742): gradient on the src leaf's device.
+                TensorStorage::on_device(gs, self.src.device())?,
                 self.index_shape.clone(),
                 false,
             )?)
@@ -2550,6 +2588,19 @@ impl<T: Float> ScatterReduceBackward<T> {
 /// the value-aware VJPs (which need to read the per-slot max/min and the
 /// prod chain-rule) can compute the right gradient. For all modes the
 /// result tensor carries [`ScatterReduceBackward`] when grad is enabled.
+///
+/// # Device contract (CORE-048 / #1742)
+///
+/// `src` must live on `input`'s device — a mix returns
+/// [`FerrotorchError::DeviceMismatch`] (torch: "Expected all tensors to be
+/// on the same device, but got src is on cpu, different from other tensors
+/// on cuda:0"). For CUDA operands the reduction is an EXPLICIT host round
+/// trip (R-LOUD-2): operands download via `data_vec`, the fold runs on host
+/// (identical to the CPU path), and the result re-uploads to `input`'s
+/// device. Rationale: the backend trait has no `scatter_reduce` kernels for
+/// `prod`/`amax`/`amin`, and routing only `sum` through `scatter_add_dim_*`
+/// would make residency mode-dependent within one op (on-device kernels
+/// tracked in #1954). Gradients are delivered on the leaves' devices.
 pub fn scatter_reduce<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -2559,6 +2610,9 @@ pub fn scatter_reduce<T: Float>(
     reduce: ScatterReduce,
     include_self: bool,
 ) -> FerrotorchResult<Tensor<T>> {
+    // CORE-048 (#1742): strict same-device operands at entry.
+    same_device(input.device(), src.device())?;
+
     let input_shape = input.shape();
     let ndim = input_shape.len();
     if ndim == 0 {
@@ -2582,7 +2636,9 @@ pub fn scatter_reduce<T: Float>(
             let s = src_data[i.min(src_data.len() - 1)];
             out = apply_reduce(reduce, out, s);
         }
-        let out_storage = TensorStorage::cpu(vec![out]);
+        // CORE-048 (#1742): result lands on input's device (host round trip
+        // for CUDA — see the device-contract doc-comment).
+        let out_storage = TensorStorage::on_device(vec![out], input.device())?;
         if (input.requires_grad() || src.requires_grad()) && is_grad_enabled() {
             let grad_fn = Arc::new(ScatterReduceBackward {
                 input: input.clone(),
@@ -2720,9 +2776,18 @@ pub fn scatter_reduce<T: Float>(
                     include_self,
                     result: out.clone(),
                 });
-                return Tensor::from_operation(TensorStorage::cpu(out), output_shape, grad_fn);
+                // CORE-048 (#1742): result on input's device.
+                return Tensor::from_operation(
+                    TensorStorage::on_device(out, input.device())?,
+                    output_shape,
+                    grad_fn,
+                );
             }
-            return Tensor::from_storage(TensorStorage::cpu(out), output_shape, false);
+            return Tensor::from_storage(
+                TensorStorage::on_device(out, input.device())?,
+                output_shape,
+                false,
+            );
         }
     }
 
@@ -2755,9 +2820,18 @@ pub fn scatter_reduce<T: Float>(
             include_self,
             result: out.clone(),
         });
-        Tensor::from_operation(TensorStorage::cpu(out), output_shape, grad_fn)
+        // CORE-048 (#1742): result on input's device.
+        Tensor::from_operation(
+            TensorStorage::on_device(out, input.device())?,
+            output_shape,
+            grad_fn,
+        )
     } else {
-        Tensor::from_storage(TensorStorage::cpu(out), output_shape, false)
+        Tensor::from_storage(
+            TensorStorage::on_device(out, input.device())?,
+            output_shape,
+            false,
+        )
     }
 }
 
@@ -3071,7 +3145,8 @@ impl<T: Float> GradFn<T> for IndexAddBackward<T> {
         let grad_input = if self.input.requires_grad() {
             let go = grad_output.data_vec()?;
             Some(Tensor::from_storage(
-                TensorStorage::cpu(go),
+                // CORE-048 (#1742): gradient on the input leaf's device.
+                TensorStorage::on_device(go, self.input.device())?,
                 input_shape.to_vec(),
                 false,
             )?)
@@ -3131,7 +3206,8 @@ impl<T: Float> GradFn<T> for IndexAddBackward<T> {
                 out
             };
             Some(Tensor::from_storage(
-                TensorStorage::cpu(gs),
+                // CORE-048 (#1742): gradient on the source leaf's device.
+                TensorStorage::on_device(gs, self.source.device())?,
                 source_shape.to_vec(),
                 false,
             )?)
@@ -3168,6 +3244,20 @@ impl<T: Float> GradFn<T> for IndexAddBackward<T> {
 /// 0-d source on N-D self is REJECTED (shape mismatch). See
 /// [`strict_index_add_copy_validate`] for the shared helper. Closes #1286
 /// divergences D3/D4/D5.
+///
+/// # Device contract (CORE-048 / #1742)
+///
+/// `index` and `source` must live on `input`'s device — a mix returns
+/// [`FerrotorchError::DeviceMismatch`] (torch: "Expected all tensors to be
+/// on the same device, but got index is on cpu, different from other
+/// tensors on cuda:0"). For CUDA operands the op is an EXPLICIT host round
+/// trip (R-LOUD-2): the index downloads for value validation, the operands
+/// download via `data_vec`, the accumulation runs on host (identical to the
+/// CPU path), and the result re-uploads to `input`'s device (no
+/// `index_add` kernel in the backend trait; the expanded-index
+/// `scatter_add_dim_*` composition additionally needs an on-device alpha
+/// scale — kernel work tracked in #1954, the residency contract holds
+/// either way). Gradients are delivered on the leaves' devices.
 pub fn index_add<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -3175,6 +3265,19 @@ pub fn index_add<T: Float>(
     source: &Tensor<T>,
     alpha: f64,
 ) -> FerrotorchResult<Tensor<T>> {
+    // CORE-048 (#1742): strict same-device operands at entry.
+    same_device(input.device(), index.device())?;
+    same_device(input.device(), source.device())?;
+    // Host copy of a CUDA index for value validation (part of the documented
+    // round trip above; the same-device check has already passed).
+    let index_host;
+    let index: &IntTensor<i64> = if index.is_cuda() {
+        index_host = index.to(Device::Cpu)?;
+        &index_host
+    } else {
+        index
+    };
+
     let input_shape = input.shape();
     let ndim = input_shape.len();
 
@@ -3258,7 +3361,8 @@ pub fn index_add<T: Float>(
             acc += alpha_t * src_v;
             saved_index.push(0);
         }
-        let storage = TensorStorage::cpu(vec![acc]);
+        // CORE-048 (#1742): result on input's device.
+        let storage = TensorStorage::on_device(vec![acc], input.device())?;
         if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {
             let grad_fn = Arc::new(IndexAddBackward {
                 input: input.clone(),
@@ -3324,9 +3428,18 @@ pub fn index_add<T: Float>(
             index: idx_usize,
             alpha,
         });
-        Tensor::from_operation(TensorStorage::cpu(out), output_shape, grad_fn)
+        // CORE-048 (#1742): result on input's device.
+        Tensor::from_operation(
+            TensorStorage::on_device(out, input.device())?,
+            output_shape,
+            grad_fn,
+        )
     } else {
-        Tensor::from_storage(TensorStorage::cpu(out), output_shape, false)
+        Tensor::from_storage(
+            TensorStorage::on_device(out, input.device())?,
+            output_shape,
+            false,
+        )
     }
 }
 
@@ -3393,7 +3506,8 @@ impl<T: Float> GradFn<T> for IndexCopyBackward<T> {
                 }
             }
             Some(Tensor::from_storage(
-                TensorStorage::cpu(gi),
+                // CORE-048 (#1742): gradient on the input leaf's device.
+                TensorStorage::on_device(gi, self.input.device())?,
                 input_shape.to_vec(),
                 false,
             )?)
@@ -3431,7 +3545,8 @@ impl<T: Float> GradFn<T> for IndexCopyBackward<T> {
                 out
             };
             Some(Tensor::from_storage(
-                TensorStorage::cpu(gs),
+                // CORE-048 (#1742): gradient on the source leaf's device.
+                TensorStorage::on_device(gs, self.source.device())?,
                 source_shape.to_vec(),
                 false,
             )?)
@@ -3466,12 +3581,39 @@ impl<T: Float> GradFn<T> for IndexCopyBackward<T> {
 /// index.numel()` is REJECTED (no silent clamp); non-dim shape mismatch
 /// rejected. See [`strict_index_add_copy_validate`] for the shared helper.
 /// Closes #1286 divergences D6/D6b.
+///
+/// # Device contract (CORE-048 / #1742)
+///
+/// `index` and `source` must live on `input`'s device — a mix returns
+/// [`FerrotorchError::DeviceMismatch`] (torch: "Expected all tensors to be
+/// on the same device, but got source is on cpu, different from other
+/// tensors on cuda:0"). For CUDA operands the op is an EXPLICIT host round
+/// trip (R-LOUD-2): the index downloads for value validation, the operands
+/// download via `data_vec`, the copy runs on host (identical to the CPU
+/// path), and the result re-uploads to `input`'s device (no `index_copy`
+/// kernel in the backend trait; the expanded-index `scatter_dim_*`
+/// composition needs 0-d-source broadcast glue — kernel work tracked in
+/// #1954, the residency contract holds either way). Gradients are delivered
+/// on the leaves' devices.
 pub fn index_copy<T: Float>(
     input: &Tensor<T>,
     dim: i64,
     index: &IntTensor<i64>,
     source: &Tensor<T>,
 ) -> FerrotorchResult<Tensor<T>> {
+    // CORE-048 (#1742): strict same-device operands at entry.
+    same_device(input.device(), index.device())?;
+    same_device(input.device(), source.device())?;
+    // Host copy of a CUDA index for value validation (part of the documented
+    // round trip above; the same-device check has already passed).
+    let index_host;
+    let index: &IntTensor<i64> = if index.is_cuda() {
+        index_host = index.to(Device::Cpu)?;
+        &index_host
+    } else {
+        index
+    };
+
     let input_shape = input.shape();
     let ndim = input_shape.len();
 
@@ -3538,7 +3680,8 @@ pub fn index_copy<T: Float>(
             };
             saved_index.push(0);
         }
-        let storage = TensorStorage::cpu(vec![result_val]);
+        // CORE-048 (#1742): result on input's device.
+        let storage = TensorStorage::on_device(vec![result_val], input.device())?;
         if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {
             let grad_fn = Arc::new(IndexCopyBackward {
                 input: input.clone(),
@@ -3606,9 +3749,18 @@ pub fn index_copy<T: Float>(
             dim: dim_usize,
             index: idx_usize,
         });
-        Tensor::from_operation(TensorStorage::cpu(out), output_shape, grad_fn)
+        // CORE-048 (#1742): result on input's device.
+        Tensor::from_operation(
+            TensorStorage::on_device(out, input.device())?,
+            output_shape,
+            grad_fn,
+        )
     } else {
-        Tensor::from_storage(TensorStorage::cpu(out), output_shape, false)
+        Tensor::from_storage(
+            TensorStorage::on_device(out, input.device())?,
+            output_shape,
+            false,
+        )
     }
 }
 
@@ -3675,7 +3827,8 @@ impl<T: Float> GradFn<T> for MaskedScatterBackward<T> {
                 }
             }
             Some(Tensor::from_storage(
-                TensorStorage::cpu(gi),
+                // CORE-048 (#1742): gradient on the input leaf's device.
+                TensorStorage::on_device(gi, self.input.device())?,
                 self.input.shape().to_vec(),
                 false,
             )?)
@@ -3698,7 +3851,8 @@ impl<T: Float> GradFn<T> for MaskedScatterBackward<T> {
                 }
             }
             Some(Tensor::from_storage(
-                TensorStorage::cpu(gs),
+                // CORE-048 (#1742): gradient on the source leaf's device.
+                TensorStorage::on_device(gs, self.source.device())?,
                 self.source.shape().to_vec(),
                 false,
             )?)
@@ -3731,11 +3885,27 @@ impl<T: Float> GradFn<T> for MaskedScatterBackward<T> {
 /// `source` must have at least `count_nonzero(mask)` elements (upstream
 /// requirement at `:2406-2408`). The walk consumes source in C-order, taking
 /// the first `count_nonzero(mask)` elements.
+///
+/// # Device contract (CORE-048 / #1742)
+///
+/// `mask` and `source` must live on `input`'s device — a mix returns
+/// [`FerrotorchError::DeviceMismatch`] (torch: "Expected all tensors to be
+/// on the same device, but got mask is on cpu, different from other tensors
+/// on cuda:0"); the audit's "host-accessible mask" fallback for a CUDA
+/// input is therefore unreachable. All-CUDA f32/f64 runs the on-device
+/// `masked_scatter_forward` kernel (#1662, below). All-CUDA f16/bf16 is an
+/// EXPLICIT host round trip (R-LOUD-2): mask + operands download, the walk
+/// runs on host, and the result re-uploads to `input`'s device. Gradients
+/// are delivered on the leaves' devices.
 pub fn masked_scatter<T: Float>(
     input: &Tensor<T>,
     mask: &BoolTensor,
     source: &Tensor<T>,
 ) -> FerrotorchResult<Tensor<T>> {
+    // CORE-048 (#1742): strict same-device operands at entry.
+    same_device(input.device(), mask.device())?;
+    same_device(input.device(), source.device())?;
+
     // Broadcast input + mask to common shape (upstream `expand_outplace` at
     // `TensorAdvancedIndexing.cpp:2406`).
     let common = if input.shape() == mask.shape() {
@@ -3805,7 +3975,16 @@ pub fn masked_scatter<T: Float>(
         }
     }
 
-    let mask_h = mask_b.data()?;
+    // Host path. The entry device check means a CUDA mask here implies ALL
+    // operands are CUDA (f16/bf16 — no kernel): the documented host round
+    // trip downloads the mask, walks on host, and re-uploads the result.
+    let mask_host;
+    let mask_h = if mask_b.is_cuda() {
+        mask_host = mask_b.to(Device::Cpu)?;
+        mask_host.data()?
+    } else {
+        mask_b.data()?
+    };
     let true_count = mask_h.iter().filter(|&&b| b).count();
     if source.numel() < true_count {
         return Err(FerrotorchError::ShapeMismatch {
@@ -3835,9 +4014,18 @@ pub fn masked_scatter<T: Float>(
             source: source.clone(),
             mask: mask_b.clone(),
         });
-        Tensor::from_operation(TensorStorage::cpu(out), output_shape, grad_fn)
+        // CORE-048 (#1742): result on input's device.
+        Tensor::from_operation(
+            TensorStorage::on_device(out, input_b.device())?,
+            output_shape,
+            grad_fn,
+        )
     } else {
-        Tensor::from_storage(TensorStorage::cpu(out), output_shape, false)
+        Tensor::from_storage(
+            TensorStorage::on_device(out, input_b.device())?,
+            output_shape,
+            false,
+        )
     }
 }
 
@@ -3893,7 +4081,12 @@ impl<T: Float> GradFn<T> for TakeBackward<T> {
                 grad_input[idx] += go[i];
             }
         }
-        let grad_tensor = Tensor::from_storage(TensorStorage::cpu(grad_input), input_shape, false)?;
+        // CORE-048 (#1742): gradient on the input leaf's device.
+        let grad_tensor = Tensor::from_storage(
+            TensorStorage::on_device(grad_input, self.input.device())?,
+            input_shape,
+            false,
+        )?;
         Ok(vec![Some(grad_tensor)])
     }
 
@@ -3915,8 +4108,31 @@ impl<T: Float> GradFn<T> for TakeBackward<T> {
 /// values are flat indices into the C-contiguous buffer of `input`. Negative
 /// indices wrap per `idx + input.numel()`. Out-of-range raises
 /// `IndexOutOfBounds`.
+///
+/// # Device contract (CORE-048 / #1742)
+///
+/// `index` must live on `input`'s device — a mix returns
+/// [`FerrotorchError::DeviceMismatch`] (torch: "Expected all tensors to be
+/// on the same device, but got index is on cpu, different from other
+/// tensors on cuda:0"). A CUDA f32/f64 input gathers ON-DEVICE via the
+/// dim-aware `gather_dim_{f32,f64}` kernel (a flat gather is the
+/// `outer=1, inner=1` special case); the validated/wrapped index uploads as
+/// a resident `i64` buffer, and only the index itself downloads host-side
+/// for value validation. Remaining CUDA cases (f16/bf16, empty index) are
+/// an EXPLICIT host round trip that re-uploads the result to `input`'s
+/// device (R-LOUD-2). Gradients are delivered on the leaf's device.
 pub fn take<T: Float>(input: &Tensor<T>, index: &IntTensor<i64>) -> FerrotorchResult<Tensor<T>> {
-    let input_data = input.data_vec()?;
+    // CORE-048 (#1742): strict same-device operands at entry.
+    same_device(input.device(), index.device())?;
+    // Host copy of a CUDA index for value validation (see device contract).
+    let index_host;
+    let index: &IntTensor<i64> = if index.is_cuda() {
+        index_host = index.to(Device::Cpu)?;
+        &index_host
+    } else {
+        index
+    };
+
     let input_numel: usize = if input.shape().is_empty() {
         1
     } else {
@@ -3953,6 +4169,59 @@ pub fn take<T: Float>(input: &Tensor<T>, index: &IntTensor<i64>) -> FerrotorchRe
     } else {
         output_shape.iter().product()
     };
+
+    // CORE-048 (#1742): CUDA-resident path — flat gather via the dim-aware
+    // kernel with `outer=1, inner=1` (every index value already validated/
+    // wrapped into `[0, input_numel)` above, so the kernel reads in-bounds).
+    if input.is_cuda()
+        && matches!(
+            T::dtype(),
+            crate::dtype::DType::F32 | crate::dtype::DType::F64
+        )
+        && !idx_usize.is_empty()
+        && input_numel > 0
+    {
+        // `.contiguous()` materialises the logical [0, n) window on-device
+        // (#1657) so the flat kernel addressing matches `data_vec`'s C-order.
+        let input_c = input.contiguous()?;
+        let input_handle = input_c.gpu_handle()?;
+        let ordinal = input_handle.device_ordinal();
+        let idx_handle = crate::ops::indexing::upload_index_i64(&idx_usize, ordinal)?;
+        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let h = if T::dtype() == crate::dtype::DType::F32 {
+            backend.gather_dim_f32(
+                input_handle,
+                &idx_handle,
+                1,
+                input_numel,
+                idx_usize.len(),
+                1,
+            )?
+        } else {
+            backend.gather_dim_f64(
+                input_handle,
+                &idx_handle,
+                1,
+                input_numel,
+                idx_usize.len(),
+                1,
+            )?
+        };
+        let storage = TensorStorage::gpu(h);
+        if input.requires_grad() && is_grad_enabled() {
+            let grad_fn = Arc::new(TakeBackward {
+                input: input.clone(),
+                index: idx_usize,
+            });
+            return Tensor::from_operation(storage, output_shape, grad_fn);
+        }
+        return Tensor::from_storage(storage, output_shape, false);
+    }
+
+    // Host path. For the remaining CUDA cases (f16/bf16, empty index) this
+    // is the documented host round trip: `data_vec` downloads, the gather
+    // runs on host, and the result re-uploads to `input`'s device.
+    let input_data = input.data_vec()?;
     let mut out = Vec::with_capacity(output_numel);
     // For a 0-d index tensor `index.numel()` == 1 (the scalar count), so the
     // loop runs once with idx_usize[0].
@@ -3969,9 +4238,17 @@ pub fn take<T: Float>(input: &Tensor<T>, index: &IntTensor<i64>) -> FerrotorchRe
             input: input.clone(),
             index: idx_usize,
         });
-        Tensor::from_operation(TensorStorage::cpu(out), output_shape, grad_fn)
+        Tensor::from_operation(
+            TensorStorage::on_device(out, input.device())?,
+            output_shape,
+            grad_fn,
+        )
     } else {
-        Tensor::from_storage(TensorStorage::cpu(out), output_shape, false)
+        Tensor::from_storage(
+            TensorStorage::on_device(out, input.device())?,
+            output_shape,
+            false,
+        )
     }
 }
 
@@ -4034,7 +4311,8 @@ impl<T: Float> GradFn<T> for PutBackward<T> {
                 }
             }
             Some(Tensor::from_storage(
-                TensorStorage::cpu(gi),
+                // CORE-048 (#1742): gradient on the input leaf's device.
+                TensorStorage::on_device(gi, self.input.device())?,
                 input_shape,
                 false,
             )?)
@@ -4052,7 +4330,8 @@ impl<T: Float> GradFn<T> for PutBackward<T> {
                 }
             }
             Some(Tensor::from_storage(
-                TensorStorage::cpu(gs),
+                // CORE-048 (#1742): gradient on the source leaf's device.
+                TensorStorage::on_device(gs, self.source.device())?,
                 self.source.shape().to_vec(),
                 false,
             )?)
@@ -4082,12 +4361,41 @@ impl<T: Float> GradFn<T> for PutBackward<T> {
 /// C-contiguous buffer (negative-wrap per `idx + input.numel()`,
 /// out-of-range raises `IndexOutOfBounds`). `source` must have at least as
 /// many elements as `index`.
+///
+/// # Device contract (CORE-048 / #1742)
+///
+/// `index` and `source` must live on `input`'s device — a mix returns
+/// [`FerrotorchError::DeviceMismatch`] (torch: "Expected all tensors to be
+/// on the same device, but got source is on cpu, different from other
+/// tensors on cuda:0"). A CUDA f32/f64 input scatters ON-DEVICE via the
+/// dim-aware `scatter_dim_{f32,f64}` (`accumulate=false`) or atomic
+/// `scatter_add_dim_{f32,f64}` (`accumulate=true`) kernel — a flat scatter
+/// is the `outer=1, inner=1` special case; the validated/wrapped index
+/// uploads as a resident `i64` buffer, and only the index itself downloads
+/// host-side for value validation. Like torch's CUDA `put_`, the
+/// `accumulate=false` write order for DUPLICATE flat indices is
+/// nondeterministic on the kernel path. Remaining CUDA cases (f16/bf16,
+/// empty index) are an EXPLICIT host round trip that re-uploads the result
+/// to `input`'s device (R-LOUD-2). Gradients are delivered on the leaves'
+/// devices.
 pub fn put<T: Float>(
     input: &Tensor<T>,
     index: &IntTensor<i64>,
     source: &Tensor<T>,
     accumulate: bool,
 ) -> FerrotorchResult<Tensor<T>> {
+    // CORE-048 (#1742): strict same-device operands at entry.
+    same_device(input.device(), index.device())?;
+    same_device(input.device(), source.device())?;
+    // Host copy of a CUDA index for value validation (see device contract).
+    let index_host;
+    let index: &IntTensor<i64> = if index.is_cuda() {
+        index_host = index.to(Device::Cpu)?;
+        &index_host
+    } else {
+        index
+    };
+
     let input_shape = input.shape().to_vec();
     let input_numel: usize = if input_shape.is_empty() {
         1
@@ -4128,6 +4436,83 @@ pub fn put<T: Float>(
         });
     }
 
+    // CORE-048 (#1742): CUDA-resident path — flat scatter via the dim-aware
+    // kernels with `outer=1, inner=1` (every index value already validated/
+    // wrapped into `[0, input_numel)` above; the kernel reads `src[t]`
+    // parallel to `index[t]` for `t < index.numel()`, exactly the host
+    // walk's consumption order).
+    if input.is_cuda()
+        && matches!(
+            T::dtype(),
+            crate::dtype::DType::F32 | crate::dtype::DType::F64
+        )
+        && !idx_usize.is_empty()
+        && input_numel > 0
+    {
+        // `.contiguous()` materialises the logical [0, n) window on-device
+        // (#1657) so flat kernel addressing matches `data_vec`'s C-order.
+        let input_c = input.contiguous()?;
+        let source_c = source.contiguous()?;
+        let input_handle = input_c.gpu_handle()?;
+        let ordinal = input_handle.device_ordinal();
+        let idx_handle = crate::ops::indexing::upload_index_i64(&idx_usize, ordinal)?;
+        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let src_handle = source_c.gpu_handle()?;
+        let n_idx = idx_usize.len();
+        let h = match (accumulate, T::dtype() == crate::dtype::DType::F32) {
+            (false, true) => backend.scatter_dim_f32(
+                input_handle,
+                &idx_handle,
+                src_handle,
+                1,
+                input_numel,
+                n_idx,
+                1,
+            )?,
+            (false, false) => backend.scatter_dim_f64(
+                input_handle,
+                &idx_handle,
+                src_handle,
+                1,
+                input_numel,
+                n_idx,
+                1,
+            )?,
+            (true, true) => backend.scatter_add_dim_f32(
+                input_handle,
+                &idx_handle,
+                src_handle,
+                1,
+                input_numel,
+                n_idx,
+                1,
+            )?,
+            (true, false) => backend.scatter_add_dim_f64(
+                input_handle,
+                &idx_handle,
+                src_handle,
+                1,
+                input_numel,
+                n_idx,
+                1,
+            )?,
+        };
+        let storage = TensorStorage::gpu(h);
+        if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {
+            let grad_fn = Arc::new(PutBackward {
+                input: input.clone(),
+                source: source.clone(),
+                index: idx_usize,
+                accumulate,
+            });
+            return Tensor::from_operation(storage, input_shape, grad_fn);
+        }
+        return Tensor::from_storage(storage, input_shape, false);
+    }
+
+    // Host path. For the remaining CUDA cases (f16/bf16, empty index) this
+    // is the documented host round trip: `data_vec` downloads, the scatter
+    // runs on host, and the result re-uploads to `input`'s device.
     let mut out = input.data_vec()?;
     if out.is_empty() && input_numel == 1 {
         out.push(<T as num_traits::Zero>::zero());
@@ -4149,9 +4534,17 @@ pub fn put<T: Float>(
             index: idx_usize,
             accumulate,
         });
-        Tensor::from_operation(TensorStorage::cpu(out), input_shape, grad_fn)
+        Tensor::from_operation(
+            TensorStorage::on_device(out, input.device())?,
+            input_shape,
+            grad_fn,
+        )
     } else {
-        Tensor::from_storage(TensorStorage::cpu(out), input_shape, false)
+        Tensor::from_storage(
+            TensorStorage::on_device(out, input.device())?,
+            input_shape,
+            false,
+        )
     }
 }
 

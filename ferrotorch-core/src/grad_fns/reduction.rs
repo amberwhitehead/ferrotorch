@@ -1924,19 +1924,28 @@ pub fn std_with_correction<T: Float>(
 // associativity); the runner therefore uses `var_dim` chain then
 // `sqrt` for multi-dim std.
 
-#[allow(
-    clippy::type_complexity,
-    reason = "single-use forward helper returning (result, in_shape, norm_dim, \
-              out_shape, dim_size); a struct adds boilerplate without aiding \
-              the two callers (var_dim/std_dim)."
-)]
+/// Forward result of the shared dim-keyed std/var kernel, carrying the
+/// per-slice statistics the backward nodes need (means, denominator).
+struct StdVarDimForward<T: Float> {
+    /// Reduced values, row-major over `outer * inner` slices.
+    data: Vec<T>,
+    /// Output shape (keepdim-aware).
+    out_shape: Vec<usize>,
+    /// Normalized (non-negative) reduced dim.
+    norm_dim: usize,
+    /// Per-slice means (row-major over `outer * inner`), f64 as computed.
+    means: Vec<f64>,
+    /// `max(0, n - correction)` — shared by every slice.
+    denom: f64,
+}
+
 fn std_var_dim_forward<T: Float>(
     input: &Tensor<T>,
     dim: i64,
     keepdim: bool,
     correction: f64,
     take_sqrt: bool,
-) -> FerrotorchResult<(Vec<T>, Vec<usize>, usize, Vec<usize>, usize)> {
+) -> FerrotorchResult<StdVarDimForward<T>> {
     let ndim = input.ndim();
     if ndim == 0 {
         return Err(FerrotorchError::InvalidArgument {
@@ -1966,6 +1975,7 @@ fn std_var_dim_forward<T: Float>(
 
     let denom = (dim_size as f64 - correction).max(0.0);
     let mut result = Vec::with_capacity(outer * inner);
+    let mut means = Vec::with_capacity(outer * inner);
     for o in 0..outer {
         for i in 0..inner {
             // Pass 1: mean.
@@ -1974,6 +1984,7 @@ fn std_var_dim_forward<T: Float>(
                 s += to_f64::<T>(in_data[o * dim_size * inner + d * inner + i])?;
             }
             let mean_f = s / dim_size as f64;
+            means.push(mean_f);
             // Pass 2: sum-of-squared deviations.
             let mut ss = 0.0_f64;
             for d in 0..dim_size {
@@ -1992,13 +2003,179 @@ fn std_var_dim_forward<T: Float>(
     } else {
         out_shape.remove(norm_dim);
     }
-    Ok((result, in_shape, norm_dim, out_shape, dim_size))
+    Ok(StdVarDimForward {
+        data: result,
+        out_shape,
+        norm_dim,
+        means,
+        denom,
+    })
 }
 
-/// Dim-keyed variance (forward-only — backward is the existing full-
-/// reduction VJP per upstream's `var_backward`, deferred to a follow-up
-/// since the chain-grad path through the design doc's REQ-8 design is
-/// out of scope for this builder dispatch). Closes the `var` runner-arm
+/// Backward node for `var_dim(input, dim, correction, keepdim)`.
+///
+/// VJP per `derivatives.yaml` `var.correction` →
+/// `var_backward(grad, self, dim, correction, keepdim)` in
+/// `torch/csrc/autograd/FunctionsManual.cpp`:
+/// `dx = grad * 2 * (x - mean(dim, keepdim=True)) / max(0, n - correction)`
+/// — the keepdim-shaped `grad`/`mean` broadcast over the reduced dim.
+///
+/// `denom == 0` (correction >= slice length) yields NaN gradients via IEEE
+/// `inf * 0` to match torch (live oracle on 2.11.0:
+/// `torch.var(torch.tensor([[3.],[4.]]), dim=1, correction=1)` →
+/// fwd `[nan, nan]`, `.backward` grad `[[nan],[nan]]`; `correction=0` →
+/// fwd `[0., 0.]`, grad `[[0.],[0.]]`). Closes CORE-046 (#1740).
+#[derive(Debug)]
+pub struct VarDimBackward<T: Float> {
+    input: Tensor<T>,
+    /// Normalized (non-negative) reduced dim.
+    norm_dim: usize,
+    /// Per-slice means (row-major over `outer * inner`), saved at forward.
+    means: Vec<f64>,
+    /// `max(0, n - correction)` denominator shared by every slice.
+    denom: f64,
+}
+
+impl<T: Float> GradFn<T> for VarDimBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "var_dim backward",
+            });
+        }
+        // Whether keepdim was true (out slice dim retained as size 1) or
+        // false (removed), a contiguous grad_output flattens to the same
+        // `o * inner + i` slice order the forward used.
+        let go_ref = if grad_output.is_contiguous() {
+            grad_output.clone()
+        } else {
+            grad_output.contiguous()?
+        };
+        let go = go_ref.data()?;
+        let in_ref = if self.input.is_contiguous() {
+            self.input.clone()
+        } else {
+            self.input.contiguous()?
+        };
+        let in_data = in_ref.data()?;
+        let in_shape = in_ref.shape().to_vec();
+        let dim_size = in_shape[self.norm_dim];
+        let outer: usize = in_shape[..self.norm_dim].iter().product();
+        let inner: usize = in_shape[self.norm_dim + 1..].iter().product();
+        // May be +inf when denom == 0 — the NaN-propagation path above.
+        let scale = 2.0 / self.denom;
+        let mut dx = vec![<T as num_traits::Zero>::zero(); in_data.len()];
+        for o in 0..outer {
+            for i in 0..inner {
+                let g = to_f64::<T>(go[o * inner + i])?;
+                let mean_f = self.means[o * inner + i];
+                for d in 0..dim_size {
+                    let idx = o * dim_size * inner + d * inner + i;
+                    let v = to_f64::<T>(in_data[idx])?;
+                    dx[idx] = float_from_f64::<T>(g * scale * (v - mean_f))?;
+                }
+            }
+        }
+        let grad_input = Tensor::from_storage(TensorStorage::cpu(dx), in_shape, false)?;
+        Ok(vec![Some(grad_input)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "VarDimBackward"
+    }
+}
+
+/// Backward node for `std_dim(input, dim, correction, keepdim)`.
+///
+/// VJP per `derivatives.yaml` `std.correction` →
+/// `std_backward(result, grad, self, dim, correction, keepdim)` in
+/// `torch/csrc/autograd/FunctionsManual.cpp` — chain rule through
+/// `sqrt`: `dx = grad * (x - mean) / (max(0, n - correction) * result)`,
+/// with the `result == 0 → 0` degeneracy guard per `derivatives.yaml`'s
+/// `masked_fill_(result == 0, 0)` (live oracle:
+/// `torch.std([[5.,5.,5.],[1.,2.,3.]], dim=1, correction=1)` → grad
+/// `[[0,0,0],[-0.5,0,0.5]]`). A NaN `result` (correction >= slice length)
+/// fails the `== 0` test and propagates NaN, matching torch.
+#[derive(Debug)]
+pub struct StdDimBackward<T: Float> {
+    input: Tensor<T>,
+    /// Normalized (non-negative) reduced dim.
+    norm_dim: usize,
+    /// Per-slice means (row-major over `outer * inner`), saved at forward.
+    means: Vec<f64>,
+    /// `max(0, n - correction)` denominator shared by every slice.
+    denom: f64,
+    /// Per-slice `result = sqrt(var)` saved at forward time (zero guard +
+    /// chain-rule factor).
+    results: Vec<T>,
+}
+
+impl<T: Float> GradFn<T> for StdDimBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "std_dim backward",
+            });
+        }
+        let go_ref = if grad_output.is_contiguous() {
+            grad_output.clone()
+        } else {
+            grad_output.contiguous()?
+        };
+        let go = go_ref.data()?;
+        let in_ref = if self.input.is_contiguous() {
+            self.input.clone()
+        } else {
+            self.input.contiguous()?
+        };
+        let in_data = in_ref.data()?;
+        let in_shape = in_ref.shape().to_vec();
+        let dim_size = in_shape[self.norm_dim];
+        let outer: usize = in_shape[..self.norm_dim].iter().product();
+        let inner: usize = in_shape[self.norm_dim + 1..].iter().product();
+        let zero = <T as num_traits::Zero>::zero();
+        let mut dx = vec![zero; in_data.len()];
+        for o in 0..outer {
+            for i in 0..inner {
+                let slice = o * inner + i;
+                let result = self.results[slice];
+                if result == zero {
+                    // masked_fill_(result == 0, 0): every element of the
+                    // slice equals the mean; subgradient 0 (dx pre-zeroed).
+                    continue;
+                }
+                let g = to_f64::<T>(go[slice])?;
+                let mean_f = self.means[slice];
+                // NaN result (denom 0): `denom * result_f` is NaN and the
+                // `0 / NaN` division propagates NaN per torch.
+                let result_f = to_f64::<T>(result)?;
+                let denom_result = self.denom * result_f;
+                for d in 0..dim_size {
+                    let idx = o * dim_size * inner + d * inner + i;
+                    let v = to_f64::<T>(in_data[idx])?;
+                    dx[idx] = float_from_f64::<T>(g * (v - mean_f) / denom_result)?;
+                }
+            }
+        }
+        let grad_input = Tensor::from_storage(TensorStorage::cpu(dx), in_shape, false)?;
+        Ok(vec![Some(grad_input)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "StdDimBackward"
+    }
+}
+
+/// Dim-keyed variance. Attaches [`VarDimBackward`] when grad is needed
+/// (CORE-046 / #1740 — was forward-only). Closes the `var` runner-arm
 /// half of #1301 + #1314.
 pub fn var_dim<T: Float>(
     input: &Tensor<T>,
@@ -2009,12 +2186,25 @@ pub fn var_dim<T: Float>(
     if input.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "var_dim" });
     }
-    let (data, _, _, out_shape, _) = std_var_dim_forward(input, dim, keepdim, correction, false)?;
-    Tensor::from_storage(TensorStorage::cpu(data), out_shape, false)
+    let fwd = std_var_dim_forward(input, dim, keepdim, correction, false)?;
+    let result = Tensor::from_storage(TensorStorage::cpu(fwd.data), fwd.out_shape, false)?;
+    if is_grad_enabled() && input.requires_grad() {
+        let grad_fn = Arc::new(VarDimBackward {
+            input: input.clone(),
+            norm_dim: fwd.norm_dim,
+            means: fwd.means,
+            denom: fwd.denom,
+        });
+        let (storage, shape) = result.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, grad_fn)
+    } else {
+        Ok(result)
+    }
 }
 
-/// Dim-keyed standard deviation (forward-only — see `var_dim` rationale).
-/// Closes the `std` runner-arm half of #1301 + #1314.
+/// Dim-keyed standard deviation. Attaches [`StdDimBackward`] when grad is
+/// needed (CORE-046 / #1740 — was forward-only). Closes the `std`
+/// runner-arm half of #1301 + #1314.
 pub fn std_dim<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -2024,8 +2214,22 @@ pub fn std_dim<T: Float>(
     if input.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "std_dim" });
     }
-    let (data, _, _, out_shape, _) = std_var_dim_forward(input, dim, keepdim, correction, true)?;
-    Tensor::from_storage(TensorStorage::cpu(data), out_shape, false)
+    let fwd = std_var_dim_forward(input, dim, keepdim, correction, true)?;
+    let results = fwd.data.clone();
+    let result = Tensor::from_storage(TensorStorage::cpu(fwd.data), fwd.out_shape, false)?;
+    if is_grad_enabled() && input.requires_grad() {
+        let grad_fn = Arc::new(StdDimBackward {
+            input: input.clone(),
+            norm_dim: fwd.norm_dim,
+            means: fwd.means,
+            denom: fwd.denom,
+            results,
+        });
+        let (storage, shape) = result.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, grad_fn)
+    } else {
+        Ok(result)
+    }
 }
 
 // ---------------------------------------------------------------------------

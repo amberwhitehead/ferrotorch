@@ -2238,9 +2238,21 @@ reason = "Conformance coverage not yet authored; burndown tracked by #1914 (was 
 tracking_issue = "#1914"
 
 [[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::StdDimBackward"
+kind = "deferred"
+reason = "Conformance coverage not yet authored; burndown tracked by #1914 (was Phase 2.2-reduction #764, closed). Autograd grad_fn for std_dim (CORE-046 / #1740); red-then-green grad-value regression coverage lives in tests/audit_core046_var_std_dim_autograd.rs pending the conformance-suite burndown."
+tracking_issue = "#1914"
+
+[[exclusion]]
 path = "ferrotorch_core::grad_fns::reduction::VarBackward"
 kind = "deferred"
 reason = "Conformance coverage not yet authored; burndown tracked by #1914 (was Phase 2.2-reduction #764, closed). Autograd grad_fn / forward-helper internal for the reduction family."
+tracking_issue = "#1914"
+
+[[exclusion]]
+path = "ferrotorch_core::grad_fns::reduction::VarDimBackward"
+kind = "deferred"
+reason = "Conformance coverage not yet authored; burndown tracked by #1914 (was Phase 2.2-reduction #764, closed). Autograd grad_fn for var_dim (CORE-046 / #1740); red-then-green grad-value regression coverage lives in tests/audit_core046_var_std_dim_autograd.rs pending the conformance-suite burndown."
 tracking_issue = "#1914"
 
 [[exclusion]]

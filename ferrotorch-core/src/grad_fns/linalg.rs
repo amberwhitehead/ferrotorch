@@ -4113,33 +4113,138 @@ pub fn cross_differentiable<T: Float>(
 // VectorNormBackward / MatrixNormBackward — Euclidean / Frobenius norm
 // ---------------------------------------------------------------------------
 
-/// Backward for the Euclidean (`p=2`) `vector_norm` and the Frobenius
-/// `matrix_norm` (both are `sqrt(sum(x^2))` over all elements).
+/// Backward for the full-tensor `vector_norm` (every `ord`) and the
+/// Frobenius `matrix_norm` (the `ord=2` instance over flattened entries).
 ///
-/// VJP (`torch/csrc/autograd/FunctionsManual.cpp:341` `norm_backward`, `p==2`
-/// branch): `dx = grad * (x / norm)`, with the `masked_fill_(norm == 0, 0)`
-/// guard so a zero-norm input yields a zero gradient (rather than NaN).
-/// Frobenius norm of a matrix equals the 2-norm of its flattened entries, so
-/// the same formula serves both (`linalg_vector_norm_backward`,
-/// `FunctionsManual.cpp:523`, dispatches to `norm_backward`).
+/// VJP per `norm_backward` in `torch/csrc/autograd/FunctionsManual.cpp`
+/// (`linalg_vector_norm_backward` dispatches to it), branch by `p`,
+/// live-oracle-verified on torch 2.11.0+cu130 (CORE-047 / #1741):
+///
+/// - `p == 0`: count of nonzeros — torch returns an UNDEFINED gradient
+///   (`if (p == 0.0) return {};`); the leaf's `.grad` stays `None` and the
+///   contribution accumulates as zero in a wider graph (live probe:
+///   `norm0(x).backward()` → `x.grad is None`; `(norm0(x)+x.sum())
+///   .backward()` → `x.grad == ones`). Returned here as `vec![None]`.
+/// - `p == 1`: `dx = g * sgn(x)` (`sgn(0) = 0`).
+/// - `p == 2`: `dx = g * x / norm`, `masked_fill_(norm == 0, 0)` guard.
+/// - `p == ±inf`: gradient routed to the extremal-`|x|` elements with ties
+///   split EVENLY — `dx = sgn(x) * [|x| == norm] * g / count(|x| == norm)`
+///   (live probe: `x=[3,-3,1]`, `ord=inf` → `[0.5, -0.5, 0]`). NaN inputs
+///   count as ties iff the norm itself is NaN, per upstream's
+///   `isnan().logical_and_(norm.isnan())`.
+/// - `p < 1` (incl. negative p): `dx = sgn(x)*|x|^(p-1) * g * norm^(1-p)`,
+///   with the `x == 0 → 0` subgradient mask (live probe: `x=[0,1,4]`,
+///   `ord=0.5` → `[0, 3, 1.5]`; `x=[1,-2,0]`, `ord=-1` → forward 0,
+///   gradient zeros via the `norm^(1-p) = 0` scale).
+/// - `1 < p < 2`: `dx = sgn(x)*|x|^(p-1) * g / norm^(p-1)`; `|0|^(p-1)=0`
+///   needs no mask; `norm == 0 → 0` guard.
+/// - `p > 2`: `dx = x*|x|^(p-2) * g / norm^(p-1)`; `norm == 0 → 0` guard
+///   (live probe: all-zero input, `ord=3` → zeros, never NaN).
 #[derive(Debug)]
 pub struct NormBackward<T: Float> {
     /// Input `x` (any shape), retained.
     x: Tensor<T>,
     /// Scalar norm value, retained.
     norm: T,
+    /// Norm order saved at forward time — selects the `norm_backward`
+    /// branch above.
+    ord: f64,
 }
 
+/// torch's `sgn` for real floats: `0` at `0` (both signs), `NaN` at `NaN`,
+/// `±1` elsewhere. Distinct from `num_traits::Float::signum`, which maps
+/// `±0 → ±1`.
+fn sgn<T: Float>(v: T) -> T {
+    if v == <T as num_traits::Zero>::zero() {
+        <T as num_traits::Zero>::zero()
+    } else {
+        v.signum()
+    }
+}
+
+#[allow(
+    clippy::float_cmp,
+    reason = "ord is a discrete dispatch selector (0/1/2/±inf are exact \
+              sentinels, not computed values) and the |x| == norm tie test \
+              mirrors upstream norm_backward's exact-equality `self.abs() \
+              == norm` mask"
+)]
 impl<T: Float> GradFn<T> for NormBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let p = self.ord;
+        // p == 0: undefined gradient per upstream `return {};` (doc above).
+        if p == 0.0 {
+            return Ok(vec![None]);
+        }
         let g: T = grad_output.item()?;
         let zero = <T as num_traits::Zero>::zero();
         let xd = self.x.data()?;
-        let dx: Vec<T> = if self.norm == zero {
-            // masked_fill_(norm == 0, 0): zero gradient at a zero-norm input.
-            vec![zero; xd.len()]
+        let norm = self.norm;
+
+        let dx: Vec<T> = if p == 2.0 {
+            if norm == zero {
+                // masked_fill_(norm == 0, 0): zero gradient at zero norm.
+                vec![zero; xd.len()]
+            } else {
+                xd.iter().map(|&v| g * (v / norm)).collect()
+            }
+        } else if p == 1.0 {
+            xd.iter().map(|&v| g * sgn(v)).collect()
+        } else if p.is_infinite() {
+            // Tie mask: |x| == norm, or NaN matching a NaN norm.
+            let is_eq: Vec<bool> = xd
+                .iter()
+                .map(|&v| v.abs() == norm || (v.is_nan() && norm.is_nan()))
+                .collect();
+            let count = is_eq.iter().filter(|&&b| b).count();
+            let count_t = <T as num_traits::NumCast>::from(count).ok_or_else(|| {
+                FerrotorchError::InvalidArgument {
+                    message: format!("norm backward: tie count {count} not representable"),
+                }
+            })?;
+            let scale = g / count_t;
+            xd.iter()
+                .zip(is_eq)
+                .map(|(&v, eq)| if eq { sgn(v) * scale } else { zero })
+                .collect()
         } else {
-            xd.iter().map(|&v| g * (v / self.norm)).collect()
+            // Finite p ∉ {0, 1, 2}.
+            let pt = <T as num_traits::NumCast>::from(p).ok_or_else(|| {
+                FerrotorchError::InvalidArgument {
+                    message: format!("norm backward: ord {p} not representable in dtype"),
+                }
+            })?;
+            let one = <T as num_traits::One>::one();
+            if p < 1.0 {
+                // scale = g * norm^(1-p); norm == 0 → 0^(positive) = 0,
+                // which zeroes the whole gradient (matches the live probes).
+                let scale = g * norm.powf(one - pt);
+                xd.iter()
+                    .map(|&v| {
+                        if v == zero {
+                            // x == 0 subgradient mask (|0|^(p-1) diverges).
+                            zero
+                        } else {
+                            sgn(v) * v.abs().powf(pt - one) * scale
+                        }
+                    })
+                    .collect()
+            } else if norm == zero {
+                // p > 1 and norm == 0: every element is 0; torch returns
+                // exact zeros (scale-inf mask), never NaN.
+                vec![zero; xd.len()]
+            } else if p < 2.0 {
+                let scale = g / norm.powf(pt - one);
+                xd.iter()
+                    .map(|&v| sgn(v) * v.abs().powf(pt - one) * scale)
+                    .collect()
+            } else {
+                let two = one + one;
+                let scale = g / norm.powf(pt - one);
+                xd.iter()
+                    .map(|&v| v * v.abs().powf(pt - two) * scale)
+                    .collect()
+            }
         };
         Ok(vec![Some(from_cpu(dx, self.x.shape().to_vec())?)])
     }
@@ -4162,6 +4267,8 @@ pub fn matrix_norm_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<T
         let grad_fn = Arc::new(NormBackward {
             x: a.clone(),
             norm: norm_val,
+            // Frobenius == 2-norm of the flattened entries.
+            ord: 2.0,
         });
         let (storage, shape) = n.into_storage_and_shape()?;
         Tensor::from_operation(storage, shape, grad_fn)
@@ -4170,27 +4277,22 @@ pub fn matrix_norm_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<T
     }
 }
 
-/// Differentiable Euclidean (`p=2`) `vector_norm`. Attaches `NormBackward`
-/// when grad is needed. Forward computed under `no_grad` (re-entry guard).
-/// Only `ord == 2.0` is grad-aware here (the other `ord` branches of
-/// `norm_backward` are a residual follow-up); other `ord` values fall through
-/// to the plain forward.
-#[allow(
-    clippy::float_cmp,
-    reason = "ord is a discrete dispatch selector (2.0 = Euclidean); only the \
-              p=2 branch of norm_backward is grad-aware here, so an exact \
-              compare against the 2.0 sentinel is the intended gate"
-)]
+/// Differentiable `vector_norm` for EVERY accepted `ord` (CORE-047 /
+/// #1741 — was `ord == 2.0` only, silently detaching the rest). Attaches
+/// `NormBackward` when grad is needed; the per-`ord` VJP branches are
+/// documented on [`NormBackward`]. Forward computed under `no_grad`
+/// (re-entry guard).
 pub fn vector_norm_differentiable<T: Float>(
     a: &Tensor<T>,
     ord: f64,
 ) -> FerrotorchResult<Tensor<T>> {
     let n = crate::autograd::no_grad::no_grad(|| linalg_fwd::vector_norm(a, ord))?;
-    if ord == 2.0 && is_grad_enabled() && a.requires_grad() {
+    if is_grad_enabled() && a.requires_grad() {
         let norm_val: T = n.item()?;
         let grad_fn = Arc::new(NormBackward {
             x: a.clone(),
             norm: norm_val,
+            ord,
         });
         let (storage, shape) = n.into_storage_and_shape()?;
         Tensor::from_operation(storage, shape, grad_fn)

@@ -1553,9 +1553,9 @@ pub fn vector_norm<T: Float>(input: &Tensor<T>, ord: f64) -> FerrotorchResult<Te
     require_cpu(input, "vector_norm")?;
     let order = float_to_norm_order(ord);
 
-    // Autograd path: delegate to the differentiable wrapper (the `ord == 2.0`
-    // Euclidean branch attaches `NormBackward`; other `ord` values fall through
-    // to the plain forward inside the wrapper).
+    // Autograd path: delegate to the differentiable wrapper, which attaches
+    // `NormBackward` for EVERY accepted `ord` (per-ord `norm_backward`
+    // branches; CORE-047 / #1741).
     if crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
         return crate::grad_fns::linalg::vector_norm_differentiable(input, ord);
     }

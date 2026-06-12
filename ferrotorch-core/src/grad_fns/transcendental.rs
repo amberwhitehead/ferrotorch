@@ -618,17 +618,46 @@ pub fn clamp<T: Float>(input: &Tensor<T>, min: T, max: T) -> FerrotorchResult<Te
 // Helpers for new unary ops
 // ===========================================================================
 
-/// Build a tensor of zeros with the same shape as `like`. Used by the
-/// backward of piecewise-constant ops (ceil/floor/round/trunc/sign per
+/// Build a tensor of zeros with the same shape AND device as `like`. Used by
+/// the backward of piecewise-constant ops (ceil/floor/round/trunc/sign per
 /// `tools/autograd/derivatives.yaml` `... self: zeros_like(grad)` entries).
+///
+/// Pre-#1743 (CORE-049) this unconditionally created CPU storage, silently
+/// returning a CPU gradient for a CUDA input. The zeros are staged on the
+/// host and uploaded to `like`'s device when it is CUDA-resident.
 fn zeros_like_tensor<T: Float>(like: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let zero = <T as num_traits::Zero>::zero();
     let n: usize = like.shape().iter().product::<usize>().max(1);
-    Tensor::from_storage(
+    let zeros = Tensor::from_storage(
         TensorStorage::cpu(vec![zero; n]),
         like.shape().to_vec(),
         false,
-    )
+    )?;
+    if like.is_cuda() {
+        zeros.to(like.device())
+    } else {
+        Ok(zeros)
+    }
+}
+
+/// Device-aware unary VJP for the transcendental family (#1743 / CORE-049):
+/// builds the local derivative factor `f'(saved)` via `unary_map` — a
+/// documented host round trip per R-LOUD-2 that re-uploads the factor to
+/// `saved`'s device — and multiplies it with `grad_output` using the
+/// CUDA-aware `arithmetic::mul`, all under `no_grad`. This is the
+/// `LeakyReluBackward` house pattern from `grad_fns::activation` (#796,
+/// #1739 / CORE-045). Call sites gate on
+/// `saved.is_cuda() || grad_output.is_cuda()`; the CPU fast path keeps its
+/// direct `data()` access.
+fn cuda_unary_vjp<T: Float>(
+    grad_output: &Tensor<T>,
+    saved: &Tensor<T>,
+    deriv: impl Fn(T) -> T,
+) -> FerrotorchResult<Tensor<T>> {
+    no_grad(|| {
+        let factor = unary_map(saved, &deriv)?;
+        crate::grad_fns::arithmetic::mul(grad_output, &factor)
+    })
 }
 
 /// Helper to attach a grad_fn to a forward result when grad-tracking is
@@ -666,19 +695,25 @@ struct TanBackward<T: Float> {
 impl<T: Float> GradFn<T> for TanBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
-            let go = grad_output.data()?;
-            let o = self.output.data()?;
             let one = <T as num_traits::One>::one();
-            let g: Vec<T> = go
-                .iter()
-                .zip(o.iter())
-                .map(|(&g, &t)| g * (one + t * t))
-                .collect();
-            Some(Tensor::from_storage(
-                TensorStorage::cpu(g),
-                self.input.shape().to_vec(),
-                false,
-            )?)
+            // CUDA path (#1743 / CORE-049): `dx = grad * (1 + tan(x)^2)` from
+            // the saved output via the documented host-round-trip VJP helper.
+            if self.output.is_cuda() || grad_output.is_cuda() {
+                Some(cuda_unary_vjp(grad_output, &self.output, |t| one + t * t)?)
+            } else {
+                let go = grad_output.data()?;
+                let o = self.output.data()?;
+                let g: Vec<T> = go
+                    .iter()
+                    .zip(o.iter())
+                    .map(|(&g, &t)| g * (one + t * t))
+                    .collect();
+                Some(Tensor::from_storage(
+                    TensorStorage::cpu(g),
+                    self.input.shape().to_vec(),
+                    false,
+                )?)
+            }
         } else {
             None
         };
@@ -724,9 +759,16 @@ struct AsinBackward<T: Float> {
 impl<T: Float> GradFn<T> for AsinBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
+            let one = <T as num_traits::One>::one();
+            // CUDA path (#1743 / CORE-049): `dx = grad / sqrt(1 - x^2)` via
+            // the documented host-round-trip VJP helper.
+            if self.input.is_cuda() || grad_output.is_cuda() {
+                return Ok(vec![Some(cuda_unary_vjp(grad_output, &self.input, |x| {
+                    one / (one - x * x).sqrt()
+                })?)]);
+            }
             let go = grad_output.data()?;
             let x = self.input.data()?;
-            let one = <T as num_traits::One>::one();
             let g: Vec<T> = go
                 .iter()
                 .zip(x.iter())
@@ -769,9 +811,16 @@ struct AcosBackward<T: Float> {
 impl<T: Float> GradFn<T> for AcosBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
+            let one = <T as num_traits::One>::one();
+            // CUDA path (#1743 / CORE-049): `dx = -grad / sqrt(1 - x^2)` via
+            // the documented host-round-trip VJP helper.
+            if self.input.is_cuda() || grad_output.is_cuda() {
+                return Ok(vec![Some(cuda_unary_vjp(grad_output, &self.input, |x| {
+                    -(one / (one - x * x).sqrt())
+                })?)]);
+            }
             let go = grad_output.data()?;
             let x = self.input.data()?;
-            let one = <T as num_traits::One>::one();
             let g: Vec<T> = go
                 .iter()
                 .zip(x.iter())
@@ -814,9 +863,16 @@ struct AtanBackward<T: Float> {
 impl<T: Float> GradFn<T> for AtanBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
+            let one = <T as num_traits::One>::one();
+            // CUDA path (#1743 / CORE-049): `dx = grad / (1 + x^2)` via the
+            // documented host-round-trip VJP helper.
+            if self.input.is_cuda() || grad_output.is_cuda() {
+                return Ok(vec![Some(cuda_unary_vjp(grad_output, &self.input, |x| {
+                    one / (one + x * x)
+                })?)]);
+            }
             let go = grad_output.data()?;
             let x = self.input.data()?;
-            let one = <T as num_traits::One>::one();
             let g: Vec<T> = go
                 .iter()
                 .zip(x.iter())
@@ -863,6 +919,13 @@ struct SinhBackward<T: Float> {
 impl<T: Float> GradFn<T> for SinhBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
+            // CUDA path (#1743 / CORE-049): `dx = grad * cosh(x)` via the
+            // documented host-round-trip VJP helper.
+            if self.input.is_cuda() || grad_output.is_cuda() {
+                return Ok(vec![Some(cuda_unary_vjp(grad_output, &self.input, |x| {
+                    x.cosh()
+                })?)]);
+            }
             let go = grad_output.data()?;
             let x = self.input.data()?;
             let g: Vec<T> = go
@@ -907,6 +970,13 @@ struct CoshBackward<T: Float> {
 impl<T: Float> GradFn<T> for CoshBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
+            // CUDA path (#1743 / CORE-049): `dx = grad * sinh(x)` via the
+            // documented host-round-trip VJP helper.
+            if self.input.is_cuda() || grad_output.is_cuda() {
+                return Ok(vec![Some(cuda_unary_vjp(grad_output, &self.input, |x| {
+                    x.sinh()
+                })?)]);
+            }
             let go = grad_output.data()?;
             let x = self.input.data()?;
             let g: Vec<T> = go
@@ -955,9 +1025,16 @@ struct AsinhBackward<T: Float> {
 impl<T: Float> GradFn<T> for AsinhBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
+            let one = <T as num_traits::One>::one();
+            // CUDA path (#1743 / CORE-049): `dx = grad / sqrt(x^2 + 1)` via
+            // the documented host-round-trip VJP helper.
+            if self.input.is_cuda() || grad_output.is_cuda() {
+                return Ok(vec![Some(cuda_unary_vjp(grad_output, &self.input, |x| {
+                    one / (x * x + one).sqrt()
+                })?)]);
+            }
             let go = grad_output.data()?;
             let x = self.input.data()?;
-            let one = <T as num_traits::One>::one();
             let g: Vec<T> = go
                 .iter()
                 .zip(x.iter())
@@ -1000,9 +1077,16 @@ struct AcoshBackward<T: Float> {
 impl<T: Float> GradFn<T> for AcoshBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
+            let one = <T as num_traits::One>::one();
+            // CUDA path (#1743 / CORE-049): `dx = grad / sqrt(x^2 - 1)` via
+            // the documented host-round-trip VJP helper.
+            if self.input.is_cuda() || grad_output.is_cuda() {
+                return Ok(vec![Some(cuda_unary_vjp(grad_output, &self.input, |x| {
+                    one / (x * x - one).sqrt()
+                })?)]);
+            }
             let go = grad_output.data()?;
             let x = self.input.data()?;
-            let one = <T as num_traits::One>::one();
             let g: Vec<T> = go
                 .iter()
                 .zip(x.iter())
@@ -1045,9 +1129,16 @@ struct AtanhBackward<T: Float> {
 impl<T: Float> GradFn<T> for AtanhBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
+            let one = <T as num_traits::One>::one();
+            // CUDA path (#1743 / CORE-049): `dx = grad / (1 - x^2)` via the
+            // documented host-round-trip VJP helper.
+            if self.input.is_cuda() || grad_output.is_cuda() {
+                return Ok(vec![Some(cuda_unary_vjp(grad_output, &self.input, |x| {
+                    one / (one - x * x)
+                })?)]);
+            }
             let go = grad_output.data()?;
             let x = self.input.data()?;
-            let one = <T as num_traits::One>::one();
             let g: Vec<T> = go
                 .iter()
                 .zip(x.iter())
@@ -1096,10 +1187,19 @@ struct Exp2Backward<T: Float> {
 impl<T: Float> GradFn<T> for Exp2Backward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
-            let go = grad_output.data()?;
-            let o = self.output.data()?;
             // M_LN2 = ln(2). Convert at runtime so we honor the generic T.
             let ln2 = T::from(std::f64::consts::LN_2).unwrap_or_else(<T as num_traits::Zero>::zero);
+            // CUDA path (#1743 / CORE-049): `dx = grad * result * ln(2)` from
+            // the saved output via the documented host-round-trip VJP helper.
+            if self.output.is_cuda() || grad_output.is_cuda() {
+                return Ok(vec![Some(cuda_unary_vjp(
+                    grad_output,
+                    &self.output,
+                    |r| r * ln2,
+                )?)]);
+            }
+            let go = grad_output.data()?;
+            let o = self.output.data()?;
             let g: Vec<T> = go
                 .iter()
                 .zip(o.iter())
@@ -1152,9 +1252,18 @@ struct Expm1Backward<T: Float> {
 impl<T: Float> GradFn<T> for Expm1Backward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
+            let one = <T as num_traits::One>::one();
+            // CUDA path (#1743 / CORE-049): `dx = grad * (result + 1)` from
+            // the saved output via the documented host-round-trip VJP helper.
+            if self.output.is_cuda() || grad_output.is_cuda() {
+                return Ok(vec![Some(cuda_unary_vjp(
+                    grad_output,
+                    &self.output,
+                    |r| r + one,
+                )?)]);
+            }
             let go = grad_output.data()?;
             let o = self.output.data()?;
-            let one = <T as num_traits::One>::one();
             let g: Vec<T> = go
                 .iter()
                 .zip(o.iter())
@@ -1210,9 +1319,17 @@ struct Log2Backward<T: Float> {
 impl<T: Float> GradFn<T> for Log2Backward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
+            let ln2 = T::from(std::f64::consts::LN_2).unwrap_or_else(<T as num_traits::Zero>::zero);
+            let one = <T as num_traits::One>::one();
+            // CUDA path (#1743 / CORE-049): `dx = grad / (x * ln(2))` via the
+            // documented host-round-trip VJP helper.
+            if self.input.is_cuda() || grad_output.is_cuda() {
+                return Ok(vec![Some(cuda_unary_vjp(grad_output, &self.input, |x| {
+                    one / (x * ln2)
+                })?)]);
+            }
             let go = grad_output.data()?;
             let x = self.input.data()?;
-            let ln2 = T::from(std::f64::consts::LN_2).unwrap_or_else(<T as num_traits::Zero>::zero);
             let g: Vec<T> = go
                 .iter()
                 .zip(x.iter())
@@ -1255,10 +1372,18 @@ struct Log10Backward<T: Float> {
 impl<T: Float> GradFn<T> for Log10Backward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
-            let go = grad_output.data()?;
-            let x = self.input.data()?;
             let ln10 =
                 T::from(std::f64::consts::LN_10).unwrap_or_else(<T as num_traits::Zero>::zero);
+            let one = <T as num_traits::One>::one();
+            // CUDA path (#1743 / CORE-049): `dx = grad / (x * ln(10))` via
+            // the documented host-round-trip VJP helper.
+            if self.input.is_cuda() || grad_output.is_cuda() {
+                return Ok(vec![Some(cuda_unary_vjp(grad_output, &self.input, |x| {
+                    one / (x * ln10)
+                })?)]);
+            }
+            let go = grad_output.data()?;
+            let x = self.input.data()?;
             let g: Vec<T> = go
                 .iter()
                 .zip(x.iter())
@@ -1301,9 +1426,16 @@ struct Log1pBackward<T: Float> {
 impl<T: Float> GradFn<T> for Log1pBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
+            let one = <T as num_traits::One>::one();
+            // CUDA path (#1743 / CORE-049): `dx = grad / (1 + x)` via the
+            // documented host-round-trip VJP helper.
+            if self.input.is_cuda() || grad_output.is_cuda() {
+                return Ok(vec![Some(cuda_unary_vjp(grad_output, &self.input, |x| {
+                    one / (one + x)
+                })?)]);
+            }
             let go = grad_output.data()?;
             let x = self.input.data()?;
-            let one = <T as num_traits::One>::one();
             let g: Vec<T> = go
                 .iter()
                 .zip(x.iter())
@@ -1453,6 +1585,17 @@ struct FracBackward<T: Float> {
 impl<T: Float> GradFn<T> for FracBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
+            let one = <T as num_traits::One>::one();
+            // CUDA path (#1743 / CORE-049): pass-through gradient as
+            // `grad * ones_like(x)` via the documented host-round-trip VJP
+            // helper — keeps the gradient on the saved input's device.
+            if self.input.is_cuda() || grad_output.is_cuda() {
+                return Ok(vec![Some(cuda_unary_vjp(
+                    grad_output,
+                    &self.input,
+                    |_| one,
+                )?)]);
+            }
             // Clone the grad: same shape & values as upstream.
             let go = grad_output.data()?;
             Some(Tensor::from_storage(
@@ -1530,10 +1673,23 @@ struct SincBackward<T: Float> {
 impl<T: Float> GradFn<T> for SincBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
-            let go = grad_output.data()?;
-            let x = self.input.data()?;
             let pi = T::from(std::f64::consts::PI).unwrap_or_else(<T as num_traits::Zero>::zero);
             let zero = <T as num_traits::Zero>::zero();
+            // CUDA path (#1743 / CORE-049): closed-form `sinc'(x)` (with the
+            // `sinc'(0) = 0` continuous extension) via the documented
+            // host-round-trip VJP helper.
+            if self.input.is_cuda() || grad_output.is_cuda() {
+                return Ok(vec![Some(cuda_unary_vjp(grad_output, &self.input, |x| {
+                    if x == zero {
+                        zero
+                    } else {
+                        let px = pi * x;
+                        px.cos() / x - px.sin() / (px * x)
+                    }
+                })?)]);
+            }
+            let go = grad_output.data()?;
+            let x = self.input.data()?;
             let g: Vec<T> = go
                 .iter()
                 .zip(x.iter())
