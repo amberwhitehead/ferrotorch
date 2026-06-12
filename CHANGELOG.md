@@ -51,6 +51,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-042: Scalar cumulative operations silently demote CUDA tensors to CPU (#1736)
+- CORE-041: Differentiable fake quantization silently moves CUDA tensors and gradients to CPU (#1735)
+- CORE-106: Bool comparison APIs reject broadcast-compatible inputs (#1800)
+- CORE-105: Predicate mask construction silently downloads CUDA tensors (#1799)
+- CORE-104: Public GPU BoolTensor construction accepts malformed handles in release builds (#1798)
+- CORE-043: `where_` relies on debug assertions and silently permits cross-device inputs (#1737)
 - CORE-049: New transcendental forwards preserve CUDA but their backwards do not (#1743)
 - CORE-048: Advanced indexing APIs silently demote CUDA and accept mixed-device operands (#1742)
 - CORE-047: `vector_norm_differentiable` silently detaches all norms except `ord=2` (#1741)
