@@ -1902,7 +1902,7 @@ fn broadcast_bool_tensor(mask: &BoolTensor, out_shape: &[usize]) -> FerrotorchRe
         // stays a CUDA `BoolTensor`.
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let handle = backend.broadcast_bool(mask.gpu_handle()?, mask.shape(), out_shape)?;
-        return Ok(BoolTensor::from_gpu_handle(handle, out_shape.to_vec()));
+        return BoolTensor::from_gpu_handle(handle, out_shape.to_vec());
     }
     let in_data = mask.data()?;
     let in_shape: Vec<usize> = mask.shape().to_vec();

@@ -388,7 +388,8 @@ fn broadcast_bool_on_device(bits: &[bool], in_shape: &[usize], out_shape: &[usiz
     let handle = backend
         .broadcast_bool(mask.gpu_handle().unwrap(), in_shape, out_shape)
         .expect("broadcast_bool on device");
-    let bt = BoolTensor::from_gpu_handle(handle, out_shape.to_vec());
+    let bt = BoolTensor::from_gpu_handle(handle, out_shape.to_vec())
+        .expect("kernel-produced Bool handle must validate (CORE-104)");
     assert!(bt.is_cuda(), "broadcast_bool result must stay CUDA");
     bt.to(Device::Cpu).unwrap().data().unwrap().to_vec()
 }

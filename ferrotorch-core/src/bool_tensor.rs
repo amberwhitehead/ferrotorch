@@ -36,16 +36,16 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (constructors) | SHIPPED | `BoolTensor` at `bool_tensor.rs:47`; `from_vec` at `:66`, `from_slice` at `:92`, `zeros` at `:97`, `ones` at `:111`, `from_predicate` at `:126`; consumer `grad_fns/comparison.rs:165` `BoolTensor::from_vec(...)` for `where_cond` mask; `grad_fns/indexing.rs:407` `BoolTensor::from_slice(...)` for masked-fill mask |
-//! | REQ-2 (device methods) | SHIPPED | `device` at `bool_tensor.rs:152`, `is_cuda` at `:158`, `to` at `:224`; consumer `ops/indexing.rs:398` `where_cond` reads `cond.device()` to dispatch GPU vs CPU |
-//! | REQ-3 (logical ops) | SHIPPED | `not` at `bool_tensor.rs:271`, `and` / `or` / `xor` at `:293-303`; consumer `grad_fns/indexing.rs` consumes mask buffers — `binary_op` helper at `:322` dispatches GPU PTX kernels (`bool_and` / `bool_or` / `bool_xor` / `bool_not`) |
-//! | REQ-4 (reductions) | SHIPPED | `count_true` at `bool_tensor.rs:396`, `any` at `:405`, `all` at `:416`; consumer `grad_fns/indexing.rs` uses `BoolTensor::any` to detect empty-mask before dependent kernel launches |
-//! | REQ-5 (float comparisons) | SHIPPED | `gt` / `lt` / `ge` / `le` / `eq_t` / `ne` at `bool_tensor.rs:450-477` + `compare_float` at `:479`; consumer `grad_fns/comparison.rs` invokes `BoolTensor::eq_t` etc. mirroring `torch.gt(a, b)` (`aten/src/ATen/native/Compare.cpp`) |
-//! | REQ-6 (integer comparisons) | SHIPPED | `gt_int` / `lt_int` / `ge_int` / `le_int` / `eq_int` / `ne_int` at `bool_tensor.rs:524-569` + `compare_int` at `:571`; consumer `lib.rs:135` re-export; downstream integer-tensor predicate code |
-//! | REQ-7 (to_float) | SHIPPED | `to_float<T: Float>` at `bool_tensor.rs:612`; consumer `grad_fns/indexing.rs` `masked_select` materializes float tensors from `BoolTensor` masks; test `to_float_emits_zeros_and_ones` at `:730` |
-//! | REQ-8 (reshape) | SHIPPED | `reshape` at `bool_tensor.rs:367`; consumer `grad_fns/indexing.rs` reshapes mask buffers to match broadcast shape; test `reshape_preserves_data` at `:722` |
-//! | REQ-9 (gpu_handle) | SHIPPED | `from_gpu_handle` at `bool_tensor.rs:195`, `gpu_handle` at `:182`; consumer every GPU comparison-op return path (`compare_float` at `:501-505`, `binary_op` at `:347-351`, `unary_gpu` at `:317-319`) |
-//! | REQ-10 (0-D vs zero-axis) | SHIPPED | `shape.is_empty() { 1 } else { product }` at `bool_tensor.rs:70, :99, :113, :369`; consumer `grad_fns/indexing.rs` 0-D mask handling — #805 regression pin |
+//! | REQ-1 (constructors) | SHIPPED | `BoolTensor` at `bool_tensor.rs:64`; `from_vec` at `:83`, `from_slice` at `:109`, `zeros` at `:114`, `ones` at `:128`, `from_predicate` at `:161`; consumer `grad_fns/comparison.rs:234` `BoolTensor::from_vec(...)` for `where_cond` mask; `grad_fns/indexing.rs:407` `BoolTensor::from_slice(...)` for masked-fill mask |
+//! | REQ-2 (device methods) | SHIPPED | `device` at `bool_tensor.rs:195`, `is_cuda` at `:201`, `to` at `:306`; consumer `ops/indexing.rs:398` `where_cond` reads `cond.device()` to dispatch GPU vs CPU |
+//! | REQ-3 (logical ops) | SHIPPED | `not` at `bool_tensor.rs:353`, `and` / `or` / `xor` at `:377-389`; consumer `grad_fns/indexing.rs` consumes mask buffers — `binary_op` helper at `:416` dispatches GPU PTX kernels (`bool_and` / `bool_or` / `bool_xor` / `bool_not`) |
+//! | REQ-4 (reductions) | SHIPPED | `count_true` at `bool_tensor.rs:516`, `any` at `:525`, `all` at `:536`; consumer `grad_fns/indexing.rs` uses `BoolTensor::any` to detect empty-mask before dependent kernel launches |
+//! | REQ-5 (float comparisons) | SHIPPED | `gt` / `lt` / `ge` / `le` / `eq_t` / `ne` at `bool_tensor.rs:573-598` + `compare_float` at `:636`; consumer `grad_fns/comparison.rs` invokes `BoolTensor::eq_t` etc. mirroring `torch.gt(a, b)` (`aten/src/ATen/native/Compare.cpp`) |
+//! | REQ-6 (integer comparisons) | SHIPPED | `gt_int` / `lt_int` / `ge_int` / `le_int` / `eq_int` / `ne_int` at `bool_tensor.rs:721-761` + `compare_int` at `:782`; consumer `lib.rs:135` re-export; downstream integer-tensor predicate code |
+//! | REQ-7 (to_float) | SHIPPED | `to_float<T: Float>` at `bool_tensor.rs:843`; consumer `grad_fns/indexing.rs` `masked_select` materializes float tensors from `BoolTensor` masks; test `to_float_emits_zeros_and_ones` at `:989` |
+//! | REQ-8 (reshape) | SHIPPED | `reshape` at `bool_tensor.rs:487`; consumer `grad_fns/indexing.rs` reshapes mask buffers to match broadcast shape; test `reshape_preserves_data` at `:981` |
+//! | REQ-9 (gpu_handle) | SHIPPED | `from_gpu_handle` at `bool_tensor.rs:250` (fallible — CORE-104/#1798), `gpu_handle` at `:225`; consumer every GPU comparison-op return path (`compare_float` at `:682`, `binary_op` at `:453`, `unary_gpu` at `:404`) |
+//! | REQ-10 (0-D vs zero-axis) | SHIPPED | `shape.is_empty() { 1 } else { product }` at `bool_tensor.rs:87, :116, :130, :489`; consumer `grad_fns/indexing.rs` 0-D mask handling — #805 regression pin |
 //! | REQ-11 (structured errors) | SHIPPED | `ShapeMismatch` / `DeviceMismatch` / `InvalidArgument` at multiple sites; no `panic!` in production paths; consumer `grad_fns/comparison.rs` and `grad_fns/indexing.rs` propagate via `?` |
 
 use crate::device::Device;
@@ -140,13 +140,39 @@ impl BoolTensor {
 
     /// Build a mask by applying `pred` to every element of `t`.
     /// Useful for `Tensor < 0`, `Tensor.is_finite()`, etc.
+    ///
+    /// # Device behavior (CORE-105 / #1799, R-LOUD-2)
+    ///
+    /// The returned mask lives on **`t`'s device** — torch parity:
+    /// predicate-style mask ops keep the input device
+    /// (`torch.gt(t_cuda, 0).device == cuda:0`, live torch 2.11.0+cu130).
+    ///
+    /// `pred` is an arbitrary host closure, so for a CUDA input this is an
+    /// explicit, documented host round trip: the values are read back via
+    /// `data_vec` (full-device D2H copy), the predicate runs on the host,
+    /// and the mask is uploaded back to `t`'s device. Resident alternatives
+    /// for the common predicates are the GPU comparison constructors
+    /// ([`Self::gt`], [`Self::lt`], …), which never leave the device.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `data_vec` errors (e.g. meta tensors) and `.to(device)`
+    /// errors for device pairs without a registered transfer path.
     pub fn from_predicate<T: Float>(
         t: &Tensor<T>,
         pred: impl Fn(T) -> bool,
     ) -> FerrotorchResult<Self> {
+        // Documented D2H readback for non-CPU inputs (see doc-comment).
         let data = t.data_vec()?;
         let mask: Vec<bool> = data.iter().map(|&v| pred(v)).collect();
-        Self::from_vec(mask, t.shape().to_vec())
+        let cpu_mask = Self::from_vec(mask, t.shape().to_vec())?;
+        if t.device() == Device::Cpu {
+            Ok(cpu_mask)
+        } else {
+            // Re-upload: the mask's device is the input's device (torch
+            // parity), never a silent CPU demotion.
+            cpu_mask.to(t.device())
+        }
     }
 
     /// Logical shape.
@@ -207,18 +233,57 @@ impl BoolTensor {
     /// Construct a GPU-resident `BoolTensor` from a CUDA buffer handle + shape.
     ///
     /// The handle must carry the `DType::Bool` tag — this is what every
-    /// Phase-3b GPU op returns. Mirrors
-    /// [`IntTensor::from_gpu_handle`](crate::int_tensor::IntTensor).
-    pub fn from_gpu_handle(handle: GpuBufferHandle, shape: Vec<usize>) -> Self {
-        debug_assert_eq!(
-            handle.dtype(),
-            <bool as crate::dtype::Element>::dtype(),
-            "from_gpu_handle: handle dtype tag must be Bool"
-        );
-        Self {
+    /// Phase-3b GPU op returns.
+    ///
+    /// # Errors (CORE-104 / #1798)
+    ///
+    /// Construction is fallible — every invariant later kernels and readback
+    /// trust is validated here, in release builds too (formerly a
+    /// `debug_assert` for the dtype and no length check at all):
+    ///
+    /// - [`FerrotorchError::DtypeMismatch`] when `handle.dtype()` is not
+    ///   `DType::Bool`.
+    /// - [`FerrotorchError::ShapeMismatch`] when the shape's element count
+    ///   overflows `usize`, or when `handle.len()` differs from it
+    ///   (`shape == []` is the 0-d scalar, numel 1 — the same #805
+    ///   convention as [`Self::from_vec`]).
+    pub fn from_gpu_handle(handle: GpuBufferHandle, shape: Vec<usize>) -> FerrotorchResult<Self> {
+        let expected_dtype = <bool as crate::dtype::Element>::dtype();
+        if handle.dtype() != expected_dtype {
+            return Err(FerrotorchError::DtypeMismatch {
+                expected: format!("{expected_dtype:?}"),
+                got: format!("{:?}", handle.dtype()),
+            });
+        }
+        // shape=[] -> 0-d scalar (numel 1); zero axes -> empty (numel 0). (#805)
+        let expected_numel = if shape.is_empty() {
+            Some(1usize)
+        } else {
+            shape.iter().try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        };
+        let Some(expected_numel) = expected_numel else {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "BoolTensor::from_gpu_handle: element count of shape {shape:?} \
+                     overflows usize"
+                ),
+            });
+        };
+        if handle.len() != expected_numel {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "BoolTensor::from_gpu_handle: handle.len()={} != prod(shape)={} \
+                     for shape {:?}",
+                    handle.len(),
+                    expected_numel,
+                    shape
+                ),
+            });
+        }
+        Ok(Self {
             storage: TensorStorage::gpu(handle),
             shape,
-        }
+        })
     }
 
     /// Move this tensor to `device`, returning a new tensor.
@@ -306,17 +371,21 @@ impl BoolTensor {
         }
     }
 
-    /// Pointwise AND. Errors on shape/device mismatch.
+    /// Pointwise AND, broadcasting compatible shapes (mirrors
+    /// `torch.logical_and` — #1800). Errors on device mismatch or
+    /// non-broadcastable shapes.
     pub fn and(&self, other: &Self) -> FerrotorchResult<Self> {
         self.binary_op(other, |b, a, c| b.bool_and(a, c), |a, b| a && b, "and")
     }
 
-    /// Pointwise OR.
+    /// Pointwise OR, broadcasting compatible shapes (mirrors
+    /// `torch.logical_or` — #1800).
     pub fn or(&self, other: &Self) -> FerrotorchResult<Self> {
         self.binary_op(other, |b, a, c| b.bool_or(a, c), |a, b| a || b, "or")
     }
 
-    /// Pointwise XOR.
+    /// Pointwise XOR, broadcasting compatible shapes (mirrors
+    /// `torch.logical_xor` — #1800).
     pub fn xor(&self, other: &Self) -> FerrotorchResult<Self> {
         self.binary_op(other, |b, a, c| b.bool_xor(a, c), |a, b| a ^ b, "xor")
     }
@@ -332,10 +401,18 @@ impl BoolTensor {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let h = gpu(backend, self.gpu_handle()?)?;
-        Ok(Self::from_gpu_handle(h, self.shape.clone()))
+        Self::from_gpu_handle(h, self.shape.clone())
     }
 
     /// Run a logical binary op: GPU kernel when CUDA-resident, else CPU `f`.
+    ///
+    /// Operands broadcast to their common shape per torch's
+    /// `logical_and`/`or`/`xor` semantics (CORE-106 / #1800). On CUDA each
+    /// non-common-shape operand is expanded ENTIRELY on device through the
+    /// `broadcast_bool` kernel (#1663) before the logical kernel runs — no
+    /// host round trip. Incompatible shapes are a structured
+    /// [`FerrotorchError::ShapeMismatch`] from
+    /// [`crate::shape::broadcast_shapes`].
     fn binary_op(
         &self,
         other: &Self,
@@ -345,7 +422,7 @@ impl BoolTensor {
             &GpuBufferHandle,
         ) -> FerrotorchResult<GpuBufferHandle>,
         f: impl Fn(bool, bool) -> bool,
-        op_name: &str,
+        _op_name: &str,
     ) -> FerrotorchResult<Self> {
         if self.device() != other.device() {
             return Err(FerrotorchError::DeviceMismatch {
@@ -353,30 +430,56 @@ impl BoolTensor {
                 got: other.device(),
             });
         }
-        if self.shape != other.shape {
-            return Err(FerrotorchError::ShapeMismatch {
-                message: format!(
-                    "BoolTensor::{op_name}: shapes {:?} vs {:?}",
-                    self.shape, other.shape
-                ),
-            });
-        }
+        let common = crate::shape::broadcast_shapes(&self.shape, &other.shape)?;
         if self.is_cuda() {
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let h = gpu(backend, self.gpu_handle()?, other.gpu_handle()?)?;
-            return Ok(Self::from_gpu_handle(h, self.shape.clone()));
+            // Expand mismatched operands on-device (broadcast_bool, #1663).
+            let a_expanded;
+            let a_handle = if self.shape == common {
+                self.gpu_handle()?
+            } else {
+                a_expanded = backend.broadcast_bool(self.gpu_handle()?, &self.shape, &common)?;
+                &a_expanded
+            };
+            let b_expanded;
+            let b_handle = if other.shape == common {
+                other.gpu_handle()?
+            } else {
+                b_expanded = backend.broadcast_bool(other.gpu_handle()?, &other.shape, &common)?;
+                &b_expanded
+            };
+            let h = gpu(backend, a_handle, b_handle)?;
+            return Self::from_gpu_handle(h, common);
         }
-        let out: Vec<bool> = self
-            .data()?
-            .iter()
-            .zip(other.data()?.iter())
-            .map(|(&a, &b)| f(a, b))
+        let a_data = self.data()?;
+        let b_data = other.data()?;
+        if self.shape == other.shape {
+            // Fast path: element counts agree, plain zip.
+            let out: Vec<bool> = a_data
+                .iter()
+                .zip(b_data.iter())
+                .map(|(&a, &b)| f(a, b))
+                .collect();
+            return Ok(Self {
+                storage: TensorStorage::cpu(out),
+                shape: common,
+            });
+        }
+        let numel: usize = if common.is_empty() {
+            1
+        } else {
+            common.iter().product()
+        };
+        let out: Vec<bool> = (0..numel)
+            .map(|i| {
+                f(
+                    a_data[broadcast_src_flat(i, &common, &self.shape)],
+                    b_data[broadcast_src_flat(i, &common, &other.shape)],
+                )
+            })
             .collect();
-        Ok(Self {
-            storage: TensorStorage::cpu(out),
-            shape: self.shape.clone(),
-        })
+        Self::from_vec(out, common)
     }
 
     /// Reshape (must preserve numel). Metadata-only; the storage is cloned
@@ -457,13 +560,16 @@ impl BoolTensor {
 
     // ── Float comparison constructors (#615; GPU path #1185 Phase 3b) ────────
     //
-    // Each compares two float `Tensor<T>` of the SAME shape and device. On CUDA
-    // it launches the value-typed comparison PTX kernel and the resulting
+    // Each compares two float `Tensor<T>` on the same device, broadcasting
+    // compatible shapes to their common shape per torch's comparison
+    // semantics (CORE-106 / #1800). On CUDA it launches the value-typed
+    // comparison PTX kernel (mismatched operands are first expanded ENTIRELY
+    // on device — see `expand_float_handle_gpu`) and the resulting
     // `BoolTensor` stays GPU-resident; on CPU it runs the reference closure.
 
-    /// Pointwise `>` comparing two float tensors of the same shape;
-    /// produces a `BoolTensor` of matching shape. Mirrors
-    /// `torch.gt(a, b)` returning a bool tensor. (#615)
+    /// Pointwise `>` comparing two float tensors (broadcasting compatible
+    /// shapes); produces a `BoolTensor` of the common shape. Mirrors
+    /// `torch.gt(a, b)` returning a bool tensor. (#615, broadcast #1800)
     pub fn gt<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Self> {
         Self::compare_float(a, b, CompareOp::Gt, |x, y| x > y)
     }
@@ -493,28 +599,55 @@ impl BoolTensor {
         Self::compare_float(a, b, CompareOp::Ne, |x, y| x != y)
     }
 
+    /// Expand a CUDA value buffer from `in_shape` to `out_shape` ENTIRELY on
+    /// device, by broadcast-adding a 1-element zeros buffer of the same
+    /// dtype — the identical trick `grad_fns::shape::expand` uses for its
+    /// f32/f64 GPU fast path, extended over every comparison value dtype
+    /// with an implemented `broadcast_add_*` kernel (f32/f64/bf16/f16).
+    /// `x + 0` is exact for comparison purposes: every finite value is
+    /// unchanged, NaN stays NaN (compares false either way), and `-0.0`
+    /// normalising to `+0.0` is invisible to every comparison operator
+    /// (`-0.0 == 0.0` in IEEE 754). No host round trip (R-CODE-4).
+    /// (CORE-106 / #1800)
+    fn expand_float_handle_gpu(
+        backend: &dyn crate::gpu_dispatch::GpuBackend,
+        h: &GpuBufferHandle,
+        in_shape: &[usize],
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        use crate::dtype::DType;
+        let zeros = backend.alloc_zeros(1, h.dtype(), h.device_ordinal())?;
+        // 0-d inputs (shape []) broadcast like [1] under right alignment.
+        let in_shape: &[usize] = if in_shape.is_empty() { &[1] } else { in_shape };
+        match h.dtype() {
+            DType::F32 => backend.broadcast_add_f32(h, &zeros, in_shape, &[1], out_shape),
+            DType::F64 => backend.broadcast_add_f64(h, &zeros, in_shape, &[1], out_shape),
+            DType::BF16 => backend.broadcast_add_bf16(h, &zeros, in_shape, &[1], out_shape),
+            DType::F16 => backend.broadcast_add_f16(h, &zeros, in_shape, &[1], out_shape),
+            other => Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "BoolTensor comparison: no GPU broadcast-expand path for \
+                     value dtype {other:?}"
+                ),
+            }),
+        }
+    }
+
     fn compare_float<T: Float>(
         a: &Tensor<T>,
         b: &Tensor<T>,
         op: CompareOp,
         f: impl Fn(T, T) -> bool,
     ) -> FerrotorchResult<Self> {
-        if a.shape() != b.shape() {
-            return Err(FerrotorchError::ShapeMismatch {
-                message: format!(
-                    "BoolTensor::{}: shapes {:?} vs {:?}",
-                    op.suffix(),
-                    a.shape(),
-                    b.shape()
-                ),
-            });
-        }
         if a.device() != b.device() {
             return Err(FerrotorchError::DeviceMismatch {
                 expected: a.device(),
                 got: b.device(),
             });
         }
+        // Broadcast to the common shape (CORE-106 / #1800); incompatible
+        // shapes get broadcast_shapes' structured ShapeMismatch.
+        let common = crate::shape::broadcast_shapes(a.shape(), b.shape())?;
         if a.is_cuda() {
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -527,24 +660,62 @@ impl BoolTensor {
             // BoolTensor result stays GPU-resident.
             let a = a.contiguous()?;
             let b = b.contiguous()?;
-            let h = backend.compare(a.gpu_handle()?, b.gpu_handle()?, op)?;
-            return Ok(Self::from_gpu_handle(h, a.shape().to_vec()));
+            // Expand mismatched operands on-device, then run the comparison
+            // kernel on the (now equal-length) buffers. No host crossing.
+            let a_expanded;
+            let a_handle = if a.shape() == common.as_slice() {
+                a.gpu_handle()?
+            } else {
+                a_expanded =
+                    Self::expand_float_handle_gpu(backend, a.gpu_handle()?, a.shape(), &common)?;
+                &a_expanded
+            };
+            let b_expanded;
+            let b_handle = if b.shape() == common.as_slice() {
+                b.gpu_handle()?
+            } else {
+                b_expanded =
+                    Self::expand_float_handle_gpu(backend, b.gpu_handle()?, b.shape(), &common)?;
+                &b_expanded
+            };
+            let h = backend.compare(a_handle, b_handle, op)?;
+            return Self::from_gpu_handle(h, common);
         }
         let a_data = a.data_vec()?;
         let b_data = b.data_vec()?;
-        let result: Vec<bool> = a_data
-            .iter()
-            .zip(b_data.iter())
-            .map(|(&x, &y)| f(x, y))
+        if a.shape() == b.shape() {
+            // Fast path: equal shapes, plain zip.
+            let result: Vec<bool> = a_data
+                .iter()
+                .zip(b_data.iter())
+                .map(|(&x, &y)| f(x, y))
+                .collect();
+            return Self::from_vec(result, common);
+        }
+        let numel: usize = if common.is_empty() {
+            1
+        } else {
+            common.iter().product()
+        };
+        let result: Vec<bool> = (0..numel)
+            .map(|i| {
+                f(
+                    a_data[broadcast_src_flat(i, &common, a.shape())],
+                    b_data[broadcast_src_flat(i, &common, b.shape())],
+                )
+            })
             .collect();
-        Self::from_vec(result, a.shape().to_vec())
+        Self::from_vec(result, common)
     }
 
     // ── Integer comparison constructors (#1185 Phase 3b) ─────────────────────
     //
-    // Parallel to the float constructors, taking `&IntTensor<I>`. On CUDA they
-    // launch the i32/i64 comparison kernel (dispatched on the handle's tag);
-    // on CPU they compare the host slices.
+    // Parallel to the float constructors, taking `&IntTensor<I>`, with the
+    // same broadcasting semantics (CORE-106 / #1800). On CUDA, same-shape
+    // operands launch the i32/i64 comparison kernel (dispatched on the
+    // handle's tag); differing (broadcast-compatible) shapes take the
+    // documented host round trip described on `compare_int`. On CPU they
+    // compare the host slices.
 
     /// Pointwise `a > b` over two integer tensors → `BoolTensor`. (#1185)
     pub fn gt_int<I: crate::int_tensor::IntElement>(
@@ -594,41 +765,75 @@ impl BoolTensor {
         Self::compare_int(a, b, CompareOp::Ne, |x, y| x != y)
     }
 
+    /// Shared integer comparison dispatch. Broadcasts compatible shapes to
+    /// their common shape (CORE-106 / #1800).
+    ///
+    /// # Device behavior (R-LOUD-2)
+    ///
+    /// Same-shape CUDA operands run the on-device comparison kernel and the
+    /// mask stays resident — unchanged. CUDA operands with DIFFERENT
+    /// (broadcast-compatible) shapes take an explicit, DOCUMENTED host round
+    /// trip: ferrotorch-gpu has no integer broadcast/expand kernel yet, so
+    /// the operands are read back, the broadcast comparison runs on the
+    /// host, and the Bool mask is re-uploaded to the operands' device (the
+    /// result device always equals the input device). The resident integer
+    /// broadcast path is tracked as a follow-up issue (see #1800's result
+    /// comment for the cross-link).
     fn compare_int<I: crate::int_tensor::IntElement>(
         a: &crate::int_tensor::IntTensor<I>,
         b: &crate::int_tensor::IntTensor<I>,
         op: CompareOp,
         f: impl Fn(i64, i64) -> bool,
     ) -> FerrotorchResult<Self> {
-        if a.shape() != b.shape() {
-            return Err(FerrotorchError::ShapeMismatch {
-                message: format!(
-                    "BoolTensor::{}_int: shapes {:?} vs {:?}",
-                    op.suffix(),
-                    a.shape(),
-                    b.shape()
-                ),
-            });
-        }
         if a.device() != b.device() {
             return Err(FerrotorchError::DeviceMismatch {
                 expected: a.device(),
                 got: b.device(),
             });
         }
+        // Broadcast to the common shape (CORE-106 / #1800); incompatible
+        // shapes get broadcast_shapes' structured ShapeMismatch.
+        let common = crate::shape::broadcast_shapes(a.shape(), b.shape())?;
         if a.is_cuda() {
-            let backend =
-                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let h = backend.compare(a.gpu_handle()?, b.gpu_handle()?, op)?;
-            return Ok(Self::from_gpu_handle(h, a.shape().to_vec()));
+            if a.shape() == b.shape() {
+                // Equal shapes: on-device kernel, resident result (unchanged).
+                let backend =
+                    crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+                let h = backend.compare(a.gpu_handle()?, b.gpu_handle()?, op)?;
+                return Self::from_gpu_handle(h, common);
+            }
+            // DOCUMENTED host round trip (see doc-comment): no integer
+            // broadcast kernel exists; compute on host, re-upload the mask.
+            let device = a.device();
+            let a_cpu = a.to(Device::Cpu)?;
+            let b_cpu = b.to(Device::Cpu)?;
+            return Self::compare_int(&a_cpu, &b_cpu, op, f)?.to(device);
         }
-        let result: Vec<bool> = a
-            .data()?
-            .iter()
-            .zip(b.data()?.iter())
-            .map(|(&x, &y)| f(x.to_i64(), y.to_i64()))
+        let a_data = a.data()?;
+        let b_data = b.data()?;
+        if a.shape() == b.shape() {
+            // Fast path: equal shapes, plain zip.
+            let result: Vec<bool> = a_data
+                .iter()
+                .zip(b_data.iter())
+                .map(|(&x, &y)| f(x.to_i64(), y.to_i64()))
+                .collect();
+            return Self::from_vec(result, common);
+        }
+        let numel: usize = if common.is_empty() {
+            1
+        } else {
+            common.iter().product()
+        };
+        let result: Vec<bool> = (0..numel)
+            .map(|i| {
+                f(
+                    a_data[broadcast_src_flat(i, &common, a.shape())].to_i64(),
+                    b_data[broadcast_src_flat(i, &common, b.shape())].to_i64(),
+                )
+            })
             .collect();
-        Self::from_vec(result, a.shape().to_vec())
+        Self::from_vec(result, common)
     }
 
     /// Convert to a float tensor: true → 1.0, false → 0.0.
@@ -652,6 +857,34 @@ impl BoolTensor {
             .collect();
         Tensor::from_storage(TensorStorage::cpu(data), self.shape.clone(), false)
     }
+}
+
+/// Map an output flat index to the source flat index of an operand being
+/// broadcast from `in_shape` to `out_shape` (right-aligned NumPy/torch
+/// rules: a size-1 or absent input axis replicates). `in_shape == []` (0-d)
+/// always maps to source index 0. (CORE-106 / #1800)
+fn broadcast_src_flat(mut out_flat: usize, out_shape: &[usize], in_shape: &[usize]) -> usize {
+    let out_ndim = out_shape.len();
+    let in_ndim = in_shape.len();
+    let mut src = 0usize;
+    let mut stride = 1usize;
+    for i in (0..out_ndim).rev() {
+        let dim = out_shape[i];
+        // dim == 0 only for empty tensors (numel 0 — the loop body never
+        // runs for any real element); checked_* keeps clippy's
+        // manual-checked-division lint and the panic-freedom guarantee.
+        let coord = out_flat.checked_rem(dim).unwrap_or(0);
+        out_flat = out_flat.checked_div(dim).unwrap_or(0);
+        // Right-aligned: out axis i pairs with in axis i - (out_ndim - in_ndim).
+        if i + in_ndim >= out_ndim {
+            let in_dim = in_shape[i + in_ndim - out_ndim];
+            if in_dim != 1 {
+                src += coord * stride;
+            }
+            stride *= in_dim;
+        }
+    }
+    src
 }
 
 impl std::fmt::Display for BoolTensor {

@@ -1263,6 +1263,15 @@ impl<T: Float> Tensor<T> {
     /// — a `WhereBackward` node is attached when grad tracking is enabled
     /// on either input.
     ///
+    /// Validation (CORE-043 / #1737): `self` and `other` must share shape
+    /// AND device, and `condition.len()` must equal `self.numel()` —
+    /// structured `ShapeMismatch` / `DeviceMismatch` otherwise (torch
+    /// raises `RuntimeError` on each of these). This is the same-shape
+    /// subset of `torch.where`; the broadcasting overload is
+    /// `grad_fns::indexing::where_cond_bcast`. For CUDA operands the host
+    /// mask forces a documented host round trip (R-LOUD-2; see
+    /// [`crate::grad_fns::comparison::where_`]).
+    ///
     /// Mirrors `torch.where(condition, input, other)` per
     /// `torch/_torch_docs.py:13089` and the upstream impl macro at
     /// `aten/src/ATen/native/TensorCompare.cpp:646
@@ -1279,9 +1288,10 @@ impl<T: Float> Tensor<T> {
     /// `torch.where(condition, self, other)` — `BoolTensor` overload.
     ///
     /// Pointwise ternary selection where `condition` is a first-class
-    /// [`BoolTensor`](crate::bool_tensor::BoolTensor). The condition must
-    /// match `self.numel()` and `self.shape() == other.shape()`. Delegates
-    /// to `grad_fns::comparison::where_bt` which validates shape +
+    /// [`BoolTensor`](crate::bool_tensor::BoolTensor). The condition's full
+    /// SHAPE must equal `self.shape()` (not just its numel — CORE-043 /
+    /// #1737), and `self.shape() == other.shape()` on the same device.
+    /// Delegates to `grad_fns::comparison::where_bt` which validates shape +
     /// materialises the host mask and dispatches to `where_` for
     /// autograd-aware forward.
     ///

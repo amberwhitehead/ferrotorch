@@ -82,7 +82,32 @@ impl<T: Float> GradFn<T> for WhereBackward<T> {
 /// Differentiable conditional selection.
 ///
 /// For each element `i`, the output is `x[i]` if `condition[i]` is true,
-/// otherwise `y[i]`. All three inputs must have the same length.
+/// otherwise `y[i]`.
+///
+/// # Validation (CORE-043 / #1737)
+///
+/// This host-mask entry implements the SAME-SHAPE subset of `torch.where`
+/// (no broadcasting — the broadcasting overload is
+/// [`crate::grad_fns::indexing::where_cond_bcast`]). Structured errors at
+/// the boundary (R-LOUD-1), each a case live torch 2.11.0+cu130 also
+/// rejects with a `RuntimeError`:
+///
+/// - `x.device() != y.device()` → [`FerrotorchError::DeviceMismatch`]
+///   (torch: "Expected all tensors to be on the same device, but found at
+///   least two devices, cuda:0 and cpu!").
+/// - `x.shape() != y.shape()` → [`FerrotorchError::ShapeMismatch`] — equal
+///   numel does NOT excuse a shape mismatch (torch: "The size of tensor a
+///   (3) must match the size of tensor b (2) at non-singleton dimension 1").
+/// - `condition.len() != x.numel()` → [`FerrotorchError::ShapeMismatch`]
+///   (formerly a `debug_assert_eq!`, i.e. silent zip truncation in release).
+///
+/// # Device behavior (R-LOUD-2)
+///
+/// The condition is an inherently host-side `&[bool]`. For CUDA `x`/`y`
+/// (same device, enforced above) the operands are read back to the host via
+/// `data_vec`, the select runs on the host, and the result is uploaded back
+/// to `x`'s device — an explicit, documented host round trip. The
+/// GPU-resident select is [`crate::ops::indexing::where_cond_bt`].
 ///
 /// When gradient tracking is enabled and either input requires grad, the
 /// returned tensor carries a [`WhereBackward`] node that routes gradients
@@ -93,11 +118,35 @@ pub fn where_<T: Float>(
     y: &Tensor<T>,
 ) -> FerrotorchResult<Tensor<T>> {
     let device = x.device();
+    if y.device() != device {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: device,
+            got: y.device(),
+        });
+    }
+    if x.shape() != y.shape() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "where_: x shape {:?} != y shape {:?} (this entry point selects \
+                 elementwise over same-shape operands; for broadcasting \
+                 torch.where use where_cond_bcast)",
+                x.shape(),
+                y.shape()
+            ),
+        });
+    }
+    if condition.len() != x.numel() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "where_: condition length {} != operand numel {} (shape {:?})",
+                condition.len(),
+                x.numel(),
+                x.shape()
+            ),
+        });
+    }
     let x_data = x.data_vec()?;
     let y_data = y.data_vec()?;
-
-    debug_assert_eq!(condition.len(), x_data.len());
-    debug_assert_eq!(condition.len(), y_data.len());
 
     let result: Vec<T> = condition
         .iter()
@@ -125,19 +174,30 @@ pub fn where_<T: Float>(
 // ---------------------------------------------------------------------------
 
 /// Pointwise ternary `where(cond, x, y)` taking a [`BoolTensor`] for
-/// the condition. Mirrors `torch.where(cond, x, y)`. The mask must
-/// have the same numel as `x` / `y`.
+/// the condition. Mirrors the SAME-SHAPE subset of `torch.where(cond, x, y)`
+/// (the broadcasting overload is
+/// [`crate::grad_fns::indexing::where_cond_bcast`]).
+///
+/// # Validation (CORE-043 / #1737)
+///
+/// The mask's full SHAPE — not just its numel — must equal `x.shape()`
+/// (torch rejects a `[6]` mask against `[2,3]` operands: "The size of
+/// tensor a (6) must match the size of tensor b (3) at non-singleton
+/// dimension 1", live torch 2.11.0+cu130). Operand shape and device
+/// validation is shared with [`where_`], which this delegates to.
 pub fn where_bt<T: Float>(
     cond: &BoolTensor,
     x: &Tensor<T>,
     y: &Tensor<T>,
 ) -> FerrotorchResult<Tensor<T>> {
-    if cond.numel() != x.numel() {
+    if cond.shape() != x.shape() {
         return Err(FerrotorchError::ShapeMismatch {
             message: format!(
-                "where_bt: cond numel={} != x numel={}",
-                cond.numel(),
-                x.numel()
+                "where_bt: cond shape {:?} != x shape {:?} (full shape must \
+                 match, not just numel; for broadcasting torch.where use \
+                 where_cond_bcast)",
+                cond.shape(),
+                x.shape()
             ),
         });
     }
