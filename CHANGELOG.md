@@ -51,6 +51,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-060: `as_strided_copy` and `as_strided_scatter` silently detach outputs (#1754)
+- CORE-059: `AsStridedBackward` fails on CUDA and nonzero-offset input views (#1753)
+- CORE-058: Overlapping `as_strided` views return mathematically wrong gradients (#1752)
+- CORE-055: `cat` rejects CPU views and reads incorrect storage for CUDA views (#1749)
+- CORE-054: `repeat` and `tile` reject valid zero-repeat requests (#1748)
 - CORE-042: Scalar cumulative operations silently demote CUDA tensors to CPU (#1736)
 - CORE-041: Differentiable fake quantization silently moves CUDA tensors and gradients to CPU (#1735)
 - CORE-106: Bool comparison APIs reject broadcast-compatible inputs (#1800)
