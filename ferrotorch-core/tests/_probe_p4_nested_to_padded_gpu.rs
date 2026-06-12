@@ -271,23 +271,23 @@ fn p4_stride_view_component_stays_on_gpu_f32() {
     assert_eq!(&data[12..16], &[0.0; 4]);
 }
 
-/// Mismatched-device components surface as DeviceMismatch from the GPU
-/// pre-flight in `try_to_padded_gpu`.
+/// Mismatched-device components surface as DeviceMismatch AT CONSTRUCTION
+/// (CORE-070 / #1764): pre-fix, `NestedTensor::new` accepted the mixed
+/// list and the failure surfaced later inside `to_padded` as an opaque
+/// `GpuTensorNotAccessible`. Post-fix the single-device invariant is
+/// enforced where the mistake is made.
 #[test]
 fn p4_mixed_device_components_rejected() {
     ensure_cuda_backend();
 
     let cuda_t = cuda::<f32>(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
     let cpu_t = from_vec::<f32>(vec![5.0, 6.0], &[1, 2]).unwrap();
-    let nt = NestedTensor::new(vec![cuda_t, cpu_t], 0).expect("nested");
-
-    // First component is CUDA, second is CPU. The pre-flight check sees
-    // the first as CUDA and the second as Device::Cpu — falls through
-    // to the CPU path. The CPU path then errors at `tensor.data()?`
-    // when it hits the CUDA component (GpuTensorNotAccessible).
-    let result = nt.to_padded(0.0);
-    assert!(
-        result.is_err(),
-        "to_padded with mixed devices must error rather than silently corrupt"
-    );
+    let result = NestedTensor::new(vec![cuda_t, cpu_t], 0);
+    match result {
+        Err(ferrotorch_core::FerrotorchError::DeviceMismatch { .. }) => {}
+        other => panic!(
+            "mixed-device construction must fail with DeviceMismatch at \
+             NestedTensor::new (CORE-070 / #1764), got {other:?}"
+        ),
+    }
 }

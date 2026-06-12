@@ -89,11 +89,15 @@ constructors + a `to_ferray` bridge.
 `mask: Vec<bool>` (flat, length `data.numel()`), and
 `fill_value: T`. Constructors at `:52-85`. Accessors at `:87-118`.
 
-`filled()` at `masked.rs:131` walks
-`zip(data_vec, mask).map(|v, m| if m { v } else { fill })`. Always
-CPU — masked tensors don't have a CUDA storage representation today
-(`masked_tensor` itself can wrap a CUDA `data` field but the mask is
-host-side).
+`fn filled in masked.rs` returns on the data tensor's device (#1759 /
+CORE-065 device contract). On a CPU data tensor it walks
+`zip(data_vec, mask).map(|v, m| if m { v } else { fill })` (logical
+order, non-contiguous views included); on CUDA it routes through
+`masked_fill_bt in grad_fns/indexing.rs` with a device-resident
+`BoolTensor` mask → the dtype-generic `masked_fill_dt` kernel. Both
+paths attach a `MaskedFillBackward` edge when the data tensor tracks
+gradients (#1758 / CORE-064; torch `MaskedTensor.to_tensor` is
+`grad_fn=MaskedFillBackward0` on live 2.11.0).
 
 `masked_sum in masked.rs` branches on `is_cuda() && (is_f32 || is_f64)`
 to the GPU lowering: `mask_as_float_tensor` lifts the bool mask onto
@@ -101,20 +105,37 @@ the device as a `[0/1]` float tensor, then `backend.mul_{f32,f64}` +
 `backend.sum_{f32,f64}` produce the result on-device. CPU fallback
 is a single-pass `zip` accumulator.
 
-`masked_mean` at `:275` reuses `masked_sum_gpu` for the numerator;
-the denominator is the host-side `count_valid()` (a `bool` vec walk).
-The single scalar `sum / count` runs on host because the count is a
-runtime-resolved integer, not a constant.
+`fn masked_mean in masked.rs` reuses `masked_sum_gpu` for the
+numerator; the denominator is the host-side `count_valid()` (a `bool`
+vec walk). The division runs ON-DEVICE (`div_f32` / `div_f64` against
+the uploaded count scalar — #1759): the GPU sum never crosses back to
+the host and the result is a CUDA 0-d scalar. The all-masked NaN edge
+is uploaded to the data device.
 
-`masked_min` / `masked_max` at `:322,330` use the dedicated fused
-`backend.masked_min_{f32,f64}` / `masked_max_{f32,f64}` PTX kernels
-(#627) on CUDA. The kernel reads `(data, mask_f)` and folds the
-sentinel-fill into the running min/max in a single launch — no
-intermediate `prod` / `filled` buffers. CPU path walks data + mask
-with an `Option<T>` accumulator.
+`fn masked_min in masked.rs` / `fn masked_max in masked.rs` use the
+dedicated fused `backend.masked_min_{f32,f64}` /
+`masked_max_{f32,f64}` PTX kernels (#627) on CUDA. The kernel reads
+`(data, mask_f)` and folds the sentinel-fill into the running min/max
+in a single launch — no intermediate `prod` / `filled` buffers. CPU
+path walks data + mask with an `Option<T>` accumulator. The all-masked
+NaN sentinel (#1924 pin) is returned on the data device (#1759).
+
+Autograd (#1758): `masked_sum` / `masked_mean` / `masked_min` /
+`masked_max` attach `MaskedSumBackward` / `MaskedMeanBackward` /
+`MaskedExtremumBackward` nodes when the data tensor tracks gradients.
+Gradient contracts are quoted from live torch 2.11.0+cu130 on each
+node: sum routes the upstream gradient to valid positions; mean scales
+by `1/count_valid`; extrema split the gradient EVENLY among valid
+positions equal to the saved forward result (torch tie contract);
+all-masked routes zero gradients (torch-probed) while the forward
+value stays under the #1924 pin. Extremum tie detection on CUDA
+f32/f64 reuses the `ne_scalar_mask` predicate readback (#1545 — mask
+bytes only, value data stays on device).
 
 `masked_count in masked.rs` returns a 0-D tensor in `T` holding
-`count_valid() as T`.
+`count_valid() as T`, uploaded to the data device when the data is
+CUDA-resident (#1759). It is non-differentiable (constant in the data
+values) and stays `requires_grad = false`.
 
 `masked_where in masked.rs` inverts the condition (`!c` per element)
 to match the torch convention; it takes a host `&[bool]` and is

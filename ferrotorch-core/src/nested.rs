@@ -6,12 +6,12 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (NestedTensor::new) | SHIPPED | `NestedTensor::new` at `nested.rs:50-96` validates ndim + non-ragged shape parity; consumer `lib.rs:172` `pub use nested::{NestedTensor, ...}` — R-DEFER-1 S5 grandfathering (#806, #291) |
-//! | REQ-2 (accessors) | SHIPPED | `num_components` at `nested.rs:100`, `ragged_dim` at `:106`, `tensors` at `:112`, `ndim` at `:118`, `consistent_shape` at `:123`, `ragged_lengths` at `:128`; consumer `lib.rs:172` re-export + internal GPU fast-path uses |
-//! | REQ-3 (to_padded + GPU fast path) | SHIPPED | `to_padded` at `nested.rs:163-240` + GPU fast path `try_to_padded_gpu` at `:258-377`; consumer `lib.rs:172` re-export — R-DEFER-1 S5 grandfathering |
-//! | REQ-4 (from_padded) | SHIPPED | `from_padded` at `nested.rs:401+` with GPU fast path at `:450-454` via `try_from_padded_gpu`; consumer `lib.rs:172` re-export |
-//! | REQ-5 (nested SDPA) | SHIPPED | `pub fn nested_scaled_dot_product_attention<T: Float>` at `nested.rs:657-770` with GPU FlashAttention dispatch `try_flash_attention_gpu_component` at `:775`; consumer `lib.rs:172` re-exports `nested_scaled_dot_product_attention` |
-//! | REQ-6 (PackedNestedTensor) | SHIPPED | `pub struct PackedNestedTensor<T: Float>` at `nested.rs:938`; constructor `from_sequences` at `:967-1010+`; consumer `lib.rs:172` re-export — R-DEFER-1 S5 grandfathering (#291) |
+//! | REQ-1 (NestedTensor::new) | SHIPPED | `NestedTensor::new` validates ndim + non-ragged shape parity + single-device invariant (CORE-070/#1764); consumer `lib.rs` `pub use nested::{NestedTensor, ...}` — R-DEFER-1 S5 grandfathering (#806, #291) |
+//! | REQ-2 (accessors) | SHIPPED | `num_components`, `ragged_dim`, `tensors`, `ndim`, `consistent_shape`, `ragged_lengths`; consumer `lib.rs` re-export + internal GPU fast-path uses |
+//! | REQ-3 (to_padded) | SHIPPED | `to_padded`: differentiable cat/unsqueeze composition when grad is tracked (CORE-066/#1760), GPU fast path `try_to_padded_gpu`, CPU logical-view path (`data_vec`, CORE-070/#1764); consumer `lib.rs` re-export — R-DEFER-1 S5 grandfathering |
+//! | REQ-4 (from_padded) | SHIPPED | `from_padded`: differentiable narrow→contiguous→reshape when the source tracks grads (CORE-066/#1760), GPU fast path `try_from_padded_gpu`, CPU logical-view path; consumer `lib.rs` re-export |
+//! | REQ-5 (nested SDPA) | SHIPPED | `pub fn nested_scaled_dot_product_attention<T: Float>`: differentiable `attention_component_composite` for grad-tracking inputs (CORE-066/#1760) and for CUDA components the flash kernel declines (CORE-067/#1761); flash dispatch `try_flash_attention_gpu_component`; consumer `lib.rs` re-export |
+//! | REQ-6 (PackedNestedTensor) | SHIPPED | `pub struct PackedNestedTensor<T: Float>` with stored `lengths` (CORE-069/#1763); every constructor routes through `validate_packed_layout` (CORE-068/#1762); `mean_per_component` NaN on empty (CORE-071/#1765); `from_nested` rejects grad-tracking components loudly (R-LOUD-3); consumer `lib.rs` re-export — R-DEFER-1 S5 grandfathering (#291) |
 //! | REQ-7 (structured errors) | SHIPPED | `InvalidArgument`/`ShapeMismatch`/`DeviceMismatch` at multiple sites; no `panic!` in production paths; consumers propagate via `?` |
 
 use crate::device::Device;
@@ -62,6 +62,10 @@ impl<T: Float> NestedTensor<T> {
     /// - `tensors` is empty
     /// - Tensors have differing numbers of dimensions
     /// - Tensors have mismatched sizes on non-ragged dimensions
+    /// - Tensors live on different devices (CORE-070 / #1764 — a mixed
+    ///   CPU/CUDA component list would make every later op fail with a
+    ///   confusing data-access error; torch's `nested_tensor` likewise
+    ///   places all components on one device)
     /// - `ragged_dim` is out of range
     pub fn new(tensors: Vec<Tensor<T>>, ragged_dim: usize) -> FerrotorchResult<Self> {
         if tensors.is_empty() {
@@ -75,6 +79,20 @@ impl<T: Float> NestedTensor<T> {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!("ragged_dim {ragged_dim} out of range for {ndim}-D tensors"),
             });
+        }
+
+        // CORE-070 (#1764): single-device invariant. Enforced at
+        // construction so mixed-device lists fail HERE with a structured
+        // DeviceMismatch instead of later inside to_padded/attention with
+        // an opaque GPU-data-access error.
+        let device = tensors[0].device();
+        for t in tensors.iter().skip(1) {
+            if t.device() != device {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected: device,
+                    got: t.device(),
+                });
+            }
         }
 
         for (i, t) in tensors.iter().enumerate().skip(1) {
@@ -210,6 +228,18 @@ impl<T: Float> NestedTensor<T> {
             }
         }
 
+        // CORE-066 (#1760): graph-preserving path when autograd is live.
+        // torch.nested.to_padded_tensor is differentiable (live torch
+        // 2.11.0+cu130: padded.requires_grad == True with component grads
+        // flowing back to the leaves); the fast paths below build detached
+        // outputs, so grad-tracking components route through the
+        // differentiable cat/unsqueeze composition instead.
+        if crate::autograd::no_grad::is_grad_enabled()
+            && self.tensors.iter().any(|t| t.requires_grad())
+        {
+            return self.to_padded_differentiable(pad_value, max_len);
+        }
+
         // GPU fast path — every component on the same CUDA device, dtype
         // is f32 or f64, every component is rank-≤8 (the strided_scatter
         // kernel's hard cap). Composes from `fill_f{32,64}` +
@@ -226,7 +256,16 @@ impl<T: Float> NestedTensor<T> {
         let out_strides: Vec<usize> = out_strides_i.iter().map(|&s| s as usize).collect();
 
         for (b, t) in self.tensors.iter().enumerate() {
-            let t_data = t.data()?;
+            // CORE-070 (#1764): materialize the LOGICAL view — `data_vec`
+            // walks strides/offset, so valid non-contiguous component views
+            // (transpose, narrow) pad correctly. CUDA components that fall
+            // through to this CPU path (unsupported dtype, rank > 8, no
+            // backend) still error loudly — no silent host demotion
+            // (R-LOUD-1).
+            if t.is_cuda() {
+                return Err(FerrotorchError::GpuTensorNotAccessible);
+            }
+            let t_data = t.data_vec()?;
             let t_shape = t.shape();
 
             // Compute strides for this component tensor (row-major).
@@ -253,6 +292,38 @@ impl<T: Float> NestedTensor<T> {
         }
 
         Tensor::from_storage(TensorStorage::cpu(data), out_shape, false)
+    }
+
+    /// Graph-preserving `to_padded` (CORE-066 / #1760): pads each
+    /// component along the ragged dim by concatenating a CONSTANT
+    /// pad-value filler (requires_grad = false — pad slots are constants,
+    /// so the cat backward routes the cotangent only into the component),
+    /// then stacks via `unsqueeze(0)` + `cat(axis 0)`. Every primitive
+    /// (cat / unsqueeze) is differentiable and device-aware, so CUDA
+    /// components stay on-device and gradients flow back to the original
+    /// component leaves — torch parity with the differentiable
+    /// `torch.nested.to_padded_tensor`.
+    fn to_padded_differentiable(
+        &self,
+        pad_value: T,
+        max_len: usize,
+    ) -> FerrotorchResult<Tensor<T>> {
+        let device = self.tensors[0].device();
+        let mut rows = Vec::with_capacity(self.tensors.len());
+        for t in &self.tensors {
+            let len = t.shape()[self.ragged_dim];
+            let padded_comp = if len == max_len {
+                t.clone()
+            } else {
+                let mut pad_shape = t.shape().to_vec();
+                pad_shape[self.ragged_dim] = max_len - len;
+                // Constant filler on the components' device; never tracked.
+                let filler = crate::creation::full::<T>(&pad_shape, pad_value)?.to(device)?;
+                crate::grad_fns::shape::cat(&[t.clone(), filler], self.ragged_dim as isize)?
+            };
+            rows.push(crate::grad_fns::shape::unsqueeze(&padded_comp, 0)?);
+        }
+        crate::grad_fns::shape::cat(&rows, 0)
     }
 
     /// GPU fast path for [`to_padded`]. Returns `Ok(None)` when any
@@ -460,6 +531,40 @@ impl<T: Float> NestedTensor<T> {
             }
         }
 
+        // CORE-066 (#1760): graph-preserving path when autograd is live.
+        // Each component is sliced out of the padded source with the
+        // DIFFERENTIABLE narrow → contiguous → reshape chain (all
+        // device-aware), so the components stay connected to the padded
+        // tensor's graph: backward scatters each component's cotangent
+        // into its slot of the padded source and leaves zeros in the pad
+        // region (live torch oracle in tests/audit_core066_nested_autograd.rs).
+        if crate::autograd::no_grad::is_grad_enabled() && tensor.requires_grad() {
+            let mut tensors = Vec::with_capacity(batch);
+            for (b, &len_b) in lengths.iter().enumerate() {
+                let batch_view = tensor.narrow(0, b, 1)?;
+                let ragged_view = if len_b == full_shape[ragged_dim + 1] {
+                    batch_view
+                } else {
+                    batch_view.narrow(ragged_dim + 1, 0, len_b)?
+                };
+                // Collapse the leading 1-batch axis. `contiguous` and
+                // `reshape` both attach backward edges.
+                let comp_shape: Vec<isize> = (0..comp_ndim)
+                    .map(|d| {
+                        if d == ragged_dim {
+                            len_b as isize
+                        } else {
+                            full_shape[d + 1] as isize
+                        }
+                    })
+                    .collect();
+                let comp =
+                    crate::grad_fns::shape::reshape(&ragged_view.contiguous()?, &comp_shape)?;
+                tensors.push(comp);
+            }
+            return Self::new(tensors, ragged_dim);
+        }
+
         // GPU fast path — CUDA padded tensor + f32/f64 dtype. Composes
         // from `narrow` (zero-copy stride view) + `.contiguous()` (which
         // routes through `strided_copy_*` for non-contiguous CUDA views).
@@ -469,7 +574,14 @@ impl<T: Float> NestedTensor<T> {
             return Ok(nested);
         }
 
-        let padded_data = tensor.data()?;
+        // CORE-070 (#1764): materialize the LOGICAL view so valid
+        // non-contiguous padded sources (e.g. transpose views) slice
+        // correctly; CUDA tensors that the GPU fast path declined still
+        // error loudly (no silent host demotion, R-LOUD-1).
+        if tensor.is_cuda() {
+            return Err(FerrotorchError::GpuTensorNotAccessible);
+        }
+        let padded_data = tensor.data_vec()?;
 
         // Strides for the full padded tensor (row-major).
         let full_ndim = full_shape.len();
@@ -724,6 +836,20 @@ pub fn nested_scaled_dot_product_attention<T: Float>(
             });
         }
 
+        // CORE-066 (#1760): the flash kernel and the scalar CPU loop both
+        // build detached outputs. When autograd is live and any of
+        // q/k/v tracks gradients, route through the differentiable
+        // composite (`mm_bt` → broadcast `mul` → `softmax` → `matmul`),
+        // which is device-aware (CUDA components stay on-device) and
+        // attaches real backward edges — torch parity with the
+        // differentiable `F.scaled_dot_product_attention`.
+        if crate::autograd::no_grad::is_grad_enabled()
+            && (q.requires_grad() || k.requires_grad() || v.requires_grad())
+        {
+            outputs.push(attention_component_composite(q, k, v, d_k)?);
+            continue;
+        }
+
         // GPU FlashAttention forward dispatch. Per #806, when the
         // component lives on CUDA and falls within the kernel's regime
         // (d_k <= 128 and d_v <= 128), route to the on-device tiled
@@ -735,9 +861,22 @@ pub fn nested_scaled_dot_product_attention<T: Float>(
             continue;
         }
 
-        let q_data = q.data()?;
-        let k_data = k.data()?;
-        let v_data = v.data()?;
+        // CORE-067 (#1761): the flash kernel declined (head dim > 128,
+        // unsupported dtype, no backend) but the component lives on CUDA.
+        // The scalar loop below is CPU-only; run the device-aware
+        // composite (`mm_bt` → broadcast `mul` → `softmax` → `matmul`)
+        // instead — the result stays on CUDA. Mixed-device q/k/v surface
+        // a structured DeviceMismatch from the primitives. Never a silent
+        // host bounce (R-LOUD-1).
+        if q.is_cuda() || k.is_cuda() || v.is_cuda() {
+            outputs.push(attention_component_composite(q, k, v, d_k)?);
+            continue;
+        }
+        // CORE-070 (#1764): materialize LOGICAL views (`data_vec` walks
+        // strides/offset) so valid non-contiguous q/k/v views run.
+        let q_data = q.data_vec()?;
+        let k_data = k.data_vec()?;
+        let v_data = v.data_vec()?;
 
         let scale = T::from(d_k).unwrap().sqrt().recip();
 
@@ -776,6 +915,41 @@ pub fn nested_scaled_dot_product_attention<T: Float>(
     }
 
     NestedTensor::new(outputs, query.ragged_dim())
+}
+
+/// Composite scaled-dot-product attention for one nested component,
+/// assembled from the dispatched differentiable primitives:
+///
+/// ```text
+/// out = softmax(q @ k^T / sqrt(d_k)) @ v
+/// ```
+///
+/// - `mm_bt` (fused `q @ k^T`), broadcast `mul` by the constant
+///   `1/sqrt(d_k)`, row-wise `softmax` (last dim), and `matmul` are all
+///   device-aware — CUDA inputs execute on CUDA — and all attach
+///   backward edges, so this is BOTH the autograd path for CORE-066
+///   (#1760) and the device-correct fallback for CUDA shapes outside the
+///   flash-kernel regime (CORE-067 / #1761).
+fn attention_component_composite<T: Float>(
+    q: &Tensor<T>,
+    k: &Tensor<T>,
+    v: &Tensor<T>,
+    d_k: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    let scores = q.mm_bt(k)?; // [seq_q, seq_k]
+    let scale = T::from(d_k)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("attention: d_k {d_k} not representable in the tensor dtype"),
+        })?
+        .sqrt()
+        .recip();
+    // Constant scale factor (never tracked) on the inputs' device;
+    // broadcast [seq_q, seq_k] * [1].
+    let scale_t =
+        Tensor::from_storage(TensorStorage::cpu(vec![scale]), vec![1], false)?.to(q.device())?;
+    let scaled = crate::grad_fns::arithmetic::mul(&scores, &scale_t)?;
+    let weights = scaled.softmax()?; // row-wise over the last dim
+    weights.matmul(v)
 }
 
 /// GPU dispatch for one nested SDPA component. Returns `Ok(true)` when the
@@ -945,11 +1119,19 @@ fn try_flash_attention_gpu_component<T: Float>(
 /// # Layout invariants
 ///
 /// - `offsets.len() == num_components + 1`
+/// - `lengths.len() == num_components`
 /// - `offsets[0] == 0`
 /// - `offsets[i+1] - offsets[i] == lengths[i] * tail_numel`
 /// - `offsets[num_components] == data.len()`
 ///
-/// where `tail_numel = product(tail_shape)`.
+/// where `tail_numel = product(tail_shape)` — the ACTUAL product: `1`
+/// for an empty tail (scalar tail), `0` when any tail dim is zero
+/// (CORE-069 / #1763). Per-component lengths are carried explicitly
+/// because element offsets degenerate (all equal) when
+/// `tail_numel == 0` and the ragged lengths would be unrecoverable;
+/// torch's jagged-layout NJT never loses them because its `_offsets`
+/// count ragged-dim rows rather than flat elements
+/// (`torch/nested/_internal/nested_tensor.py`).
 #[derive(Debug, Clone)]
 pub struct PackedNestedTensor<T: Float> {
     /// Flat concatenation of every component's data, in component
@@ -960,10 +1142,104 @@ pub struct PackedNestedTensor<T: Float> {
     /// Length-`num_components + 1` offsets array. `offsets[i]` is
     /// the start of component `i` in `data`.
     offsets: Vec<usize>,
+    /// Per-component ragged-dim lengths (`num_components` entries).
+    /// Authoritative for [`Self::length`]; NOT derivable from
+    /// `offsets` when the tail contains a zero dim.
+    lengths: Vec<usize>,
     /// Shape of each component's tail (everything after the ragged
     /// dim). For a 1-D ragged sequence the tail is empty; for
     /// `[L, D]` components with ragged dim 0, the tail is `[D]`.
     tail_shape: Vec<usize>,
+}
+
+/// Centralized validation of the packed-layout invariants documented on
+/// [`PackedNestedTensor`] (CORE-068 / #1762). Every constructor routes
+/// through this check so no path can build a layout that violates:
+///
+/// - `offsets` is non-empty
+/// - `offsets[0] == 0` (a nonzero first offset would silently discard a
+///   data prefix)
+/// - `offsets` is monotonically non-decreasing
+/// - `offsets[num_components] == data_len`
+/// - `lengths.len() == offsets.len() - 1`
+/// - every component extent `offsets[i+1] - offsets[i]` equals
+///   `lengths[i] * tail_numel` exactly (a non-divisible extent would
+///   truncate `length()` and let `to_nested()` silently lose elements)
+///
+/// `tail_numel` is the ACTUAL tail product (CORE-069 / #1763): `1` for an
+/// empty tail, `0` when any tail dim is zero. Mirrors the torch
+/// jagged-layout NJT offsets contract
+/// (`torch/nested/_internal/nested_tensor.py` — `_offsets[0] == 0`,
+/// final offset addressing the full `_values` extent).
+fn validate_packed_layout(
+    data_len: usize,
+    offsets: &[usize],
+    lengths: &[usize],
+    tail_shape: &[usize],
+) -> FerrotorchResult<()> {
+    if offsets.is_empty() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "PackedNestedTensor: offsets must be non-empty".into(),
+        });
+    }
+    if offsets[0] != 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "PackedNestedTensor: offsets[0] must be 0 (got {}); a nonzero first \
+                 offset silently discards the data prefix [0..{})",
+                offsets[0], offsets[0]
+            ),
+        });
+    }
+    for w in offsets.windows(2) {
+        if w[1] < w[0] {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("PackedNestedTensor: offsets not monotonic: {offsets:?}"),
+            });
+        }
+    }
+    let last = *offsets.last().unwrap();
+    if last != data_len {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!("PackedNestedTensor: final offset {last} != data length {data_len}"),
+        });
+    }
+    if lengths.len() + 1 != offsets.len() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "PackedNestedTensor: lengths has {} entries but offsets has {} \
+                 (expected lengths.len() + 1 == offsets.len())",
+                lengths.len(),
+                offsets.len()
+            ),
+        });
+    }
+    let tail_numel: usize = tail_shape.iter().product::<usize>();
+    for (i, w) in offsets.windows(2).enumerate() {
+        let extent = w[1] - w[0];
+        let expected =
+            lengths[i]
+                .checked_mul(tail_numel)
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "PackedNestedTensor: length overflow in component {i} \
+                     (length={}, tail_numel={tail_numel})",
+                        lengths[i]
+                    ),
+                })?;
+        if extent != expected {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "PackedNestedTensor: component {i} extent {extent} != \
+                     lengths[{i}] * tail_numel = {} * {tail_numel} = {expected} \
+                     (tail shape {tail_shape:?}); a non-divisible extent would \
+                     truncate length() and silently lose elements",
+                    lengths[i]
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 impl<T: Float> PackedNestedTensor<T> {
@@ -999,7 +1275,11 @@ impl<T: Float> PackedNestedTensor<T> {
                 ),
             });
         }
-        let tail_numel: usize = tail_shape.iter().product::<usize>().max(1);
+        // CORE-069 (#1763): the ACTUAL tail product. An empty tail is a
+        // scalar tail (empty product = 1); a tail containing a zero dim
+        // means every row holds ZERO elements — conflating the two via
+        // `.max(1)` accepted phantom data for `[L, 0]`-shaped components.
+        let tail_numel: usize = tail_shape.iter().product::<usize>();
 
         let mut total = 0usize;
         for (i, seq) in sequences.iter().enumerate() {
@@ -1035,9 +1315,14 @@ impl<T: Float> PackedNestedTensor<T> {
             offsets.push(data.len());
         }
 
+        // CORE-068 (#1762): every constructor funnels through the
+        // centralized layout validation.
+        validate_packed_layout(data.len(), &offsets, lengths, tail_shape)?;
+
         Ok(Self {
             data,
             offsets,
+            lengths: lengths.to_vec(),
             tail_shape: tail_shape.to_vec(),
         })
     }
@@ -1071,7 +1356,29 @@ impl<T: Float> PackedNestedTensor<T> {
 
         let mut sequences: Vec<Vec<T>> = Vec::with_capacity(comps.len());
         for t in comps {
-            sequences.push(t.data()?.to_vec());
+            // CORE-066 (#1760, R-LOUD-3): the packed layout stores raw
+            // values and drops autograd graphs by design. A grad-tracking
+            // component must not be silently detached — error loudly;
+            // callers detach() explicitly or stay on the NestedTensor
+            // components-list layout for autograd work.
+            if crate::autograd::no_grad::is_grad_enabled() && t.requires_grad() {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: "PackedNestedTensor::from_nested: component tracks \
+                              gradients, but the packed layout stores raw values and \
+                              would silently sever its graph; detach() the component \
+                              explicitly or keep the NestedTensor layout"
+                        .into(),
+                });
+            }
+            // CORE-070 (#1764): materialize each component's LOGICAL view
+            // (`data_vec` walks strides/offset) so non-contiguous component
+            // views pack correctly. `PackedNestedTensor` storage is
+            // CPU-resident by construction; CUDA components error loudly
+            // rather than silently bouncing to host (R-LOUD-1).
+            if t.is_cuda() {
+                return Err(FerrotorchError::GpuTensorNotAccessible);
+            }
+            sequences.push(t.data_vec()?);
         }
         Self::from_sequences(sequences, &lengths, &tail_shape)
     }
@@ -1122,13 +1429,16 @@ impl<T: Float> PackedNestedTensor<T> {
 
     /// Length (along the ragged dim) of component `i`.
     ///
+    /// Authoritative from the stored `lengths` (CORE-069 / #1763): with a
+    /// zero-containing tail the element offsets degenerate (all equal) and
+    /// the ragged lengths cannot be recomputed from them.
+    ///
     /// # Panics
     ///
     /// Panics if `i >= num_components()`.
     #[inline]
     pub fn length(&self, i: usize) -> usize {
-        let tail_numel: usize = self.tail_shape.iter().product::<usize>().max(1);
-        (self.offsets[i + 1] - self.offsets[i]) / tail_numel
+        self.lengths[i]
     }
 
     /// Total number of elements in the packed buffer (sum of every
@@ -1179,38 +1489,71 @@ impl<T: Float> PackedNestedTensor<T> {
     ///
     /// # Errors
     ///
+    /// - `tensor` is not the documented flat 1-D tensor (`ndim != 1`)
     /// - `tensor.shape() != [offsets[N]]` (length must match the offsets'
     ///   final entry)
-    /// - `offsets` is empty or not monotonically non-decreasing.
+    /// - `offsets` violates the packed-layout invariants: empty, first
+    ///   entry nonzero, not monotonically non-decreasing, or any component
+    ///   extent not divisible by `product(tail_shape)` (CORE-068 / #1762).
     pub fn from_data_tensor(
         tensor: &Tensor<T>,
         offsets: Vec<usize>,
         tail_shape: Vec<usize>,
     ) -> FerrotorchResult<Self> {
-        if offsets.is_empty() {
+        if tensor.ndim() != 1 {
             return Err(FerrotorchError::InvalidArgument {
-                message: "PackedNestedTensor::from_data_tensor: offsets must be non-empty".into(),
-            });
-        }
-        for w in offsets.windows(2) {
-            if w[1] < w[0] {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: format!(
-                        "PackedNestedTensor::from_data_tensor: offsets not monotonic: {offsets:?}"
-                    ),
-                });
-            }
-        }
-        let expected_len = *offsets.last().unwrap();
-        if tensor.numel() != expected_len {
-            return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
-                    "PackedNestedTensor::from_data_tensor: tensor numel {} != offsets[N] {}",
-                    tensor.numel(),
-                    expected_len
+                    "PackedNestedTensor::from_data_tensor: data tensor must be the \
+                     flat 1-D buffer produced by data_to_tensor (got ndim {} with \
+                     shape {:?})",
+                    tensor.ndim(),
+                    tensor.shape()
                 ),
             });
         }
+        // CORE-069 (#1763): with a zero-containing tail every component
+        // spans zero elements, so the per-component ragged lengths are NOT
+        // derivable from element offsets. The honest contract is a
+        // structured error pointing at the constructor that carries them.
+        let tail_numel: usize = tail_shape.iter().product::<usize>();
+        if tail_numel == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "PackedNestedTensor::from_data_tensor: tail shape {tail_shape:?} \
+                     contains a zero dim, so ragged lengths are not derivable from \
+                     element offsets; use from_sequences (which carries lengths \
+                     explicitly) instead"
+                ),
+            });
+        }
+        // Derive lengths from the extents (divisibility is enforced by the
+        // CORE-068 validation below; use checked_sub so a non-monotonic
+        // offsets array cannot underflow before validation runs).
+        let mut lengths = Vec::with_capacity(offsets.len().saturating_sub(1));
+        for w in offsets.windows(2) {
+            let extent =
+                w[1].checked_sub(w[0])
+                    .ok_or_else(|| FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "PackedNestedTensor::from_data_tensor: offsets not monotonic: \
+                         {offsets:?}"
+                        ),
+                    })?;
+            if extent % tail_numel != 0 {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "PackedNestedTensor::from_data_tensor: component extent {extent} \
+                         is not divisible by tail_numel {tail_numel} (tail shape \
+                         {tail_shape:?}); length() would truncate and silently lose \
+                         elements"
+                    ),
+                });
+            }
+            lengths.push(extent / tail_numel);
+        }
+        // CORE-068 (#1762): full layout validation — offsets[0] == 0,
+        // monotonic, final entry == numel, extents match lengths*tail_numel.
+        validate_packed_layout(tensor.numel(), &offsets, &lengths, &tail_shape)?;
         let host = if tensor.is_cuda() {
             tensor.cpu()?.data()?.to_vec()
         } else {
@@ -1219,6 +1562,7 @@ impl<T: Float> PackedNestedTensor<T> {
         Ok(Self {
             data: host,
             offsets,
+            lengths,
             tail_shape,
         })
     }
@@ -1247,6 +1591,7 @@ impl<T: Float> PackedNestedTensor<T> {
         Self {
             data,
             offsets: self.offsets.clone(),
+            lengths: self.lengths.clone(),
             tail_shape: self.tail_shape.clone(),
         }
     }
@@ -1314,6 +1659,18 @@ impl<T: Float> PackedNestedTensor<T> {
                 ),
             });
         }
+        // CORE-069 (#1763): with a zero-containing tail, equal offsets do
+        // NOT imply equal ragged lengths (all offsets degenerate to 0), so
+        // lengths are compared explicitly.
+        if self.lengths != other.lengths {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "PackedNestedTensor::{op_name}: ragged lengths mismatch \
+                     ({:?} vs {:?})",
+                    self.lengths, other.lengths
+                ),
+            });
+        }
         let data: Vec<T> = self
             .data
             .iter()
@@ -1323,6 +1680,7 @@ impl<T: Float> PackedNestedTensor<T> {
         Ok(Self {
             data,
             offsets: self.offsets.clone(),
+            lengths: self.lengths.clone(),
             tail_shape: self.tail_shape.clone(),
         })
     }
@@ -1343,14 +1701,18 @@ impl<T: Float> PackedNestedTensor<T> {
         out
     }
 
-    /// Per-component mean of every element. Returns zero for
-    /// empty components (length 0) rather than NaN. CL-291.
+    /// Per-component mean of every element. Returns NaN for empty
+    /// components (CORE-071 / #1765): a mean over zero elements is
+    /// undefined, and torch's floating reductions agree —
+    /// `torch.tensor([]).mean()` is `nan` (live session, torch
+    /// 2.11.0+cu130). A fabricated finite `0` would silently bias
+    /// downstream aggregation. CL-291.
     pub fn mean_per_component(&self) -> Vec<T> {
         let mut out = Vec::with_capacity(self.num_components());
         for i in 0..self.num_components() {
             let slice = self.component_slice(i);
             if slice.is_empty() {
-                out.push(<T as num_traits::Zero>::zero());
+                out.push(<T as num_traits::Float>::nan());
                 continue;
             }
             let mut acc = <T as num_traits::Zero>::zero();
@@ -1373,7 +1735,11 @@ impl<T: Float> PackedNestedTensor<T> {
         for i in 0..n {
             max_len = max_len.max(self.length(i));
         }
-        let tail_numel: usize = self.tail_shape.iter().product::<usize>().max(1);
+        // CORE-069 (#1763): actual tail product — a zero-containing tail
+        // yields a zero row stride and an all-pad-free [n, max_len, ..0..]
+        // output with numel 0 (torch jagged oracle: to_padded of
+        // [zeros(3,0), zeros(2,0)] has shape (2, 3, 0)).
+        let tail_numel: usize = self.tail_shape.iter().product::<usize>();
         let row_stride = max_len * tail_numel;
 
         let mut out = vec![pad_value; n * row_stride];
@@ -1411,7 +1777,9 @@ impl<T: Float> PackedNestedTensor<T> {
         let n = shape[0];
         let max_len = shape[1];
         let tail_shape: Vec<usize> = shape[2..].to_vec();
-        let tail_numel: usize = tail_shape.iter().product::<usize>().max(1);
+        // CORE-069 (#1763): actual tail product (0 for zero-containing
+        // tails) — see `to_padded`.
+        let tail_numel: usize = tail_shape.iter().product::<usize>();
 
         if lengths.len() != n {
             return Err(FerrotorchError::InvalidArgument {
@@ -1434,7 +1802,13 @@ impl<T: Float> PackedNestedTensor<T> {
             }
         }
 
-        let padded = tensor.data()?;
+        // CORE-070 (#1764): materialize the LOGICAL view (strided walk) so
+        // non-contiguous padded sources pack correctly; CUDA sources error
+        // loudly (packed storage is CPU-resident by construction).
+        if tensor.is_cuda() {
+            return Err(FerrotorchError::GpuTensorNotAccessible);
+        }
+        let padded = tensor.data_vec()?;
         let row_stride = max_len * tail_numel;
 
         let mut data = Vec::with_capacity(lengths.iter().sum::<usize>() * tail_numel);
@@ -1447,9 +1821,14 @@ impl<T: Float> PackedNestedTensor<T> {
             offsets.push(data.len());
         }
 
+        // CORE-068 (#1762): every constructor funnels through the
+        // centralized layout validation.
+        validate_packed_layout(data.len(), &offsets, lengths, &tail_shape)?;
+
         Ok(Self {
             data,
             offsets,
+            lengths: lengths.to_vec(),
             tail_shape,
         })
     }
@@ -1810,13 +2189,24 @@ mod tests {
     }
 
     #[test]
-    fn packed_mean_handles_empty_component_as_zero() {
-        // Zero-length components give zero mean rather than NaN.
+    // reason: 1.5 == 3.0 / 2.0 is exact in binary; bitwise equality is the
+    // right assertion for the non-empty component.
+    #[allow(clippy::float_cmp)]
+    fn packed_mean_empty_component_is_nan() {
+        // CORE-071 (#1765): a mean over zero elements is undefined; torch
+        // oracle (live session, torch 2.11.0+cu130):
+        //   >>> torch.tensor([]).mean().item()
+        //   nan
         let pnt =
             PackedNestedTensor::from_sequences(vec![vec![1.0f32, 2.0], vec![]], &[2usize, 0], &[])
                 .unwrap();
         let means = pnt.mean_per_component();
-        assert_eq!(means, vec![1.5, 0.0]);
+        assert_eq!(means[0], 1.5);
+        assert!(
+            means[1].is_nan(),
+            "empty component mean must be NaN (torch parity), got {}",
+            means[1]
+        );
     }
 
     #[test]

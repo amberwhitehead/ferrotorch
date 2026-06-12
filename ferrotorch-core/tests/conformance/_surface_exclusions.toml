@@ -184,6 +184,21 @@ kind = "permanent"
 reason = "Implicit coverage: autograd grad_fn for mean_dim; tested via mean_dim's grad assertion in conformance_reduction.rs"
 
 [[exclusion]]
+path = "ferrotorch_core::masked::MaskedSumBackward"
+kind = "permanent"
+reason = "Implicit coverage: autograd grad_fn for masked_sum (#1758/CORE-064); tested via masked_sum's torch-oracle grad assertions in tests/audit_core064_masked_autograd.rs (CPU + CUDA lanes)"
+
+[[exclusion]]
+path = "ferrotorch_core::masked::MaskedMeanBackward"
+kind = "permanent"
+reason = "Implicit coverage: autograd grad_fn for masked_mean (#1758/CORE-064); tested via masked_mean's torch-oracle grad assertions in tests/audit_core064_masked_autograd.rs (CPU + CUDA lanes, all-masked zero-grad edge)"
+
+[[exclusion]]
+path = "ferrotorch_core::masked::MaskedExtremumBackward"
+kind = "permanent"
+reason = "Implicit coverage: autograd grad_fn for masked_min/masked_max (#1758/CORE-064); tested via the extremum tie-split + unique + all-masked grad assertions in tests/audit_core064_masked_autograd.rs (CPU + CUDA lanes)"
+
+[[exclusion]]
 path = "ferrotorch_core::grad_fns::reduction::ProdBackward"
 kind = "permanent"
 reason = "Implicit coverage: autograd grad_fn for prod; tested via prod's grad assertion in conformance_reduction.rs"

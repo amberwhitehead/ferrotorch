@@ -72,9 +72,13 @@
 //!
 //! `masked_sum` / `masked_mean` / `masked_min` / `masked_max` lower to GPU
 //! kernels for f32 + f64 when the underlying data tensor is on CUDA.
-//! `masked_count` is intentionally a host-side count of the boolean mask
-//! (the mask itself is a `Vec<bool>` on host) and works regardless of the
-//! data tensor's device. The constructors `masked_invalid` and
+//! `masked_count` computes its count from the host-resident boolean mask
+//! (the mask itself is a `Vec<bool>` on host BY DESIGN) and uploads the
+//! scalar result to the data tensor's device. Per the CORE-065 → #1759
+//! device contract, EVERY value-producing op returns on the data tensor's
+//! device — the GPU reduction lane asserts the result device on every
+//! fixture row, including the all-masked edge rows that previously
+//! demoted to CPU. The constructors `masked_invalid` and
 //! `masked_equal` compute their boolean predicate ON-DEVICE for f32/f64 CUDA
 //! inputs via `GpuBackend::isfinite_mask` / `ne_scalar_mask` (#1545); only the
 //! resulting mask is read back to populate the host `Vec<bool>`. The GPU lane
@@ -575,6 +579,15 @@ fn run_reduction_for_device(op: ReductionOp, device_label: &str, device: Device)
                 let a = upload_f32(make_cpu_f32(a_data, shape), device);
                 let mt = MaskedTensor::new(a, mask).expect("MaskedTensor::new f32");
                 let out = op.apply_f32(&mt);
+                // CORE-065 → #1759 device contract: value-producing masked
+                // ops return on the data tensor's device — including the
+                // all-masked edge rows (previously a silent CPU demotion the
+                // device-transparent readback below never caught).
+                assert_eq!(
+                    out.device(),
+                    device,
+                    "{label}: result device must match the data device"
+                );
                 let vals = read_back_f32(&out);
                 if pinned_all_masked_extremum {
                     let vals64: Vec<f64> = vals.iter().map(|&v| f64::from(v)).collect();
@@ -591,6 +604,12 @@ fn run_reduction_for_device(op: ReductionOp, device_label: &str, device: Device)
                 let a = upload_f64(make_cpu_f64(a_data, shape), device);
                 let mt = MaskedTensor::new(a, mask).expect("MaskedTensor::new f64");
                 let out = op.apply_f64(&mt);
+                // CORE-065 → #1759 device contract (see f32 arm above).
+                assert_eq!(
+                    out.device(),
+                    device,
+                    "{label}: result device must match the data device"
+                );
                 let vals = read_back_f64(&out);
                 if pinned_all_masked_extremum {
                     assert_all_masked_extremum_pin(
