@@ -68,6 +68,18 @@ fn is_f64<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<f64>()
 }
 
+/// Returns `true` if `T` is `bf16`.
+#[inline]
+fn is_bf16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::bf16>()
+}
+
+/// Returns `true` if `T` is IEEE `f16`.
+#[inline]
+fn is_f16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::f16>()
+}
+
 // ---------------------------------------------------------------------------
 // GPU-aware helper
 // ---------------------------------------------------------------------------
@@ -493,23 +505,31 @@ pub fn expand<T: Float>(input: &Tensor<T>, new_shape: &[usize]) -> FerrotorchRes
         }
     }
 
-    // GPU fast path for f32/f64: broadcast-add with a zeros scalar to produce
-    // the expanded tensor entirely on device (no CPU roundtrip).
+    // GPU fast path: broadcast-add with a zeros scalar to produce the expanded
+    // tensor entirely on device (no CPU roundtrip).
     if input.is_cuda()
-        && (is_f32::<T>() || is_f64::<T>())
+        && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>())
         && let Some(backend) = crate::gpu_dispatch::gpu_backend()
     {
         let device_ord = input.gpu_handle()?.device_ordinal();
-        // This GPU fast path is gated on `is_f32 || is_f64` above, so the
-        // scalar zeros buffer is tagged to match (f64 → F64, else F32).
+        // This GPU fast path is gated on the dtype checks above, so the scalar
+        // zeros buffer is tagged to match the input exactly.
         let zeros_dtype = if is_f64::<T>() {
             crate::dtype::DType::F64
+        } else if is_bf16::<T>() {
+            crate::dtype::DType::BF16
+        } else if is_f16::<T>() {
+            crate::dtype::DType::F16
         } else {
             crate::dtype::DType::F32
         };
         let zeros = backend.alloc_zeros(1, zeros_dtype, device_ord)?;
         let expanded = if is_f64::<T>() {
             backend.broadcast_add_f64(input.gpu_handle()?, &zeros, in_shape, &[1], new_shape)?
+        } else if is_bf16::<T>() {
+            backend.broadcast_add_bf16(input.gpu_handle()?, &zeros, in_shape, &[1], new_shape)?
+        } else if is_f16::<T>() {
+            backend.broadcast_add_f16(input.gpu_handle()?, &zeros, in_shape, &[1], new_shape)?
         } else {
             backend.broadcast_add_f32(input.gpu_handle()?, &zeros, in_shape, &[1], new_shape)?
         };

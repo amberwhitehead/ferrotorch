@@ -172,9 +172,8 @@ fn needs_grad_unary<T: Float>(a: &Tensor<T>) -> bool {
 ///    sum over that dimension.
 /// 4. Reshape to `target_shape`.
 ///
-/// For f32 GPU tensors, reduction is performed entirely on GPU via
-/// `sum_axis_f32` — no CPU roundtrip.  Other dtypes fall back to a
-/// CPU reduction loop and re-upload.
+/// For f32/f64/bf16/f16 GPU tensors, reduction is performed entirely on GPU
+/// via dtype-specific `sum_axis` kernels — no CPU roundtrip.
 pub(crate) fn reduce_grad_to_shape<T: Float>(
     grad: &Tensor<T>,
     target_shape: &[usize],
@@ -192,8 +191,8 @@ pub(crate) fn reduce_grad_to_shape<T: Float>(
         return crate::grad_fns::reduction::sum(grad);
     }
 
-    // GPU fast path for f32/f64: reduce each broadcast axis on-device.
-    if grad.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    // GPU fast path: reduce each broadcast axis on-device.
+    if grad.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         // #812 cluster: a non-contiguous grad view's `gpu_handle()` is the
@@ -207,22 +206,14 @@ pub(crate) fn reduce_grad_to_shape<T: Float>(
 
         // First reduce leading dimensions that don't exist in target.
         while current_shape.len() > target_ndim {
-            handle = if is_f32::<T>() {
-                backend.sum_axis_f32(&handle, &current_shape, 0)?
-            } else {
-                backend.sum_axis_f64(&handle, &current_shape, 0)?
-            };
+            handle = reduce_grad_axis_cuda::<T>(backend, &handle, &current_shape, 0)?;
             current_shape.remove(0);
         }
 
         // Then reduce dimensions where target has size 1 but grad has size > 1.
         for axis in 0..current_shape.len() {
             if axis < target_shape.len() && target_shape[axis] == 1 && current_shape[axis] > 1 {
-                handle = if is_f32::<T>() {
-                    backend.sum_axis_f32(&handle, &current_shape, axis)?
-                } else {
-                    backend.sum_axis_f64(&handle, &current_shape, axis)?
-                };
+                handle = reduce_grad_axis_cuda::<T>(backend, &handle, &current_shape, axis)?;
                 current_shape[axis] = 1;
             }
         }
@@ -230,7 +221,7 @@ pub(crate) fn reduce_grad_to_shape<T: Float>(
         return Tensor::from_storage(TensorStorage::gpu(handle), target_shape.to_vec(), false);
     }
 
-    // CPU path — non-f32/f64 GPU tensors have no GPU kernel, error out.
+    // CPU path — unsupported GPU dtypes have no reduction kernel, error out.
     if grad.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda {
             op: "broadcast_grad",
@@ -333,6 +324,27 @@ pub(crate) fn reduce_grad_to_shape<T: Float>(
     }
 
     Tensor::from_storage(TensorStorage::cpu(result), target_shape.to_vec(), false)
+}
+
+fn reduce_grad_axis_cuda<T: Float>(
+    backend: &dyn crate::gpu_dispatch::GpuBackend,
+    handle: &crate::gpu_dispatch::GpuBufferHandle,
+    shape: &[usize],
+    axis: usize,
+) -> FerrotorchResult<crate::gpu_dispatch::GpuBufferHandle> {
+    if is_f32::<T>() {
+        backend.sum_axis_f32(handle, shape, axis)
+    } else if is_f64::<T>() {
+        backend.sum_axis_f64(handle, shape, axis)
+    } else if is_bf16::<T>() {
+        backend.sum_axis_bf16_bf16(handle, shape, axis)
+    } else if is_f16::<T>() {
+        backend.sum_axis_f16(handle, shape, axis)
+    } else {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_grad",
+        })
+    }
 }
 
 // ===========================================================================

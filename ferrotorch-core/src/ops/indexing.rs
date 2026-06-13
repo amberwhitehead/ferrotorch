@@ -1042,7 +1042,8 @@ pub fn where_cond_bt<T: Float>(
 
 /// `masked_select(input, mask)` — return a 1-D tensor of the elements of
 /// `input` where `mask` is true, in flat C-order. Mirrors
-/// `torch.masked_select`. `mask` must have the same numel as `input`.
+/// `torch.masked_select`: `input` and `mask` are broadcast to a common shape
+/// before compaction.
 ///
 /// On CUDA (input + mask resident, same device) this runs a GPU stream
 /// compaction (crosslink #1185 Phase 3c): an on-device count of the true mask
@@ -1058,6 +1059,29 @@ pub fn where_cond_bt<T: Float>(
 /// `input.numel()` at the selected positions. On the GPU path the backward stays
 /// resident via the `masked_scatter` kernel (crosslink #1187 Phase 3d).
 pub fn masked_select<T: Float>(
+    input: &Tensor<T>,
+    mask: &crate::bool_tensor::BoolTensor,
+) -> FerrotorchResult<Tensor<T>> {
+    if input.device() != mask.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: input.device(),
+            got: mask.device(),
+        });
+    }
+
+    if input.shape() == mask.shape() {
+        return masked_select_strict(input, mask);
+    }
+
+    let common = crate::shape::broadcast_shapes(input.shape(), mask.shape())?;
+    let input_b = crate::grad_fns::shape::expand(input, &common)?;
+    let mask_b = crate::grad_fns::indexing::broadcast_bool_tensor(mask, &common)?;
+    masked_select_strict(&input_b, &mask_b)
+}
+
+/// Shape-strict masked-select implementation used after PyTorch-style
+/// broadcasting has already produced equal-shape operands.
+pub(crate) fn masked_select_strict<T: Float>(
     input: &Tensor<T>,
     mask: &crate::bool_tensor::BoolTensor,
 ) -> FerrotorchResult<Tensor<T>> {
@@ -1085,19 +1109,23 @@ pub fn masked_select<T: Float>(
         // row-narrowed view's BASE buffer is longer than `numel`, which the
         // kernel rejected ("input numel 8 != mask numel 6"); `.contiguous()`
         // materialises the logical view on-device (strided_copy; cheap clone
-        // when already offset-0). The backward capture below stores the packed
-        // input so the scatter agrees.
-        let input = input.contiguous()?;
-        let (handle, len) = backend.masked_select(input.gpu_handle()?, mask.gpu_handle()?)?;
+        // when already offset-0). The backward capture below intentionally
+        // keeps the original logical tensor so gradients route through views
+        // and broadcast `ExpandBackward` nodes instead of stopping at this
+        // packed kernel input.
+        let original_input = input.clone();
+        let packed_input = input.contiguous()?;
+        let (handle, len) =
+            backend.masked_select(packed_input.gpu_handle()?, mask.gpu_handle()?)?;
         let storage = TensorStorage::gpu(handle);
 
         // PyTorch parity: masked_select IS differentiable. Attach the backward
         // (scatter the compacted grad back into a zeros tensor at the true mask
         // positions). Store the resident mask directly — the backward stays
         // GPU-resident, NO host crossing (crosslink #1187 Phase 3d).
-        if input.requires_grad() && is_grad_enabled() {
+        if original_input.requires_grad() && is_grad_enabled() {
             let grad_fn = Arc::new(crate::grad_fns::indexing::MaskedSelectBackward {
-                input: input.clone(),
+                input: original_input,
                 mask: mask.clone(),
             });
             return Tensor::from_operation(storage, vec![len], grad_fn);

@@ -1833,7 +1833,10 @@ fn broadcast_in_flat(flat: usize, out_shape: &[usize], in_shape: &[usize]) -> us
 /// `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2406`. Used by the
 /// broadcasting wrappers `masked_fill_bcast`, `masked_select_bcast`,
 /// `where_cond_bcast`, and `masked_scatter` below.
-fn broadcast_bool_tensor(mask: &BoolTensor, out_shape: &[usize]) -> FerrotorchResult<BoolTensor> {
+pub(crate) fn broadcast_bool_tensor(
+    mask: &BoolTensor,
+    out_shape: &[usize],
+) -> FerrotorchResult<BoolTensor> {
     if mask.shape() == out_shape {
         return Ok(mask.clone());
     }
@@ -1922,13 +1925,7 @@ pub fn masked_select_bcast<T: Float>(
     input: &Tensor<T>,
     mask: &BoolTensor,
 ) -> FerrotorchResult<Tensor<T>> {
-    if input.shape() == mask.shape() {
-        return crate::ops::indexing::masked_select(input, mask);
-    }
-    let common = crate::shape::broadcast_shapes(input.shape(), mask.shape())?;
-    let input_b = crate::grad_fns::shape::expand(input, &common)?;
-    let mask_b = broadcast_bool_tensor(mask, &common)?;
-    crate::ops::indexing::masked_select(&input_b, &mask_b)
+    crate::ops::indexing::masked_select(input, mask)
 }
 
 /// Broadcasting `where_cond` — mirrors `torch.where(condition, self, other)`

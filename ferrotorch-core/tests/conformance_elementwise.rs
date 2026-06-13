@@ -53,7 +53,7 @@ use ferrotorch_core::ops::elementwise::{
     simd_add_f64, simd_exp_f32, simd_exp_f64, simd_log_f32, simd_mul_f32, simd_mul_f64,
     simd_sqrt_f32, sum, sum_axis, unary_map,
 };
-use ferrotorch_core::{BoolTensor, Device, Tensor, TensorStorage};
+use ferrotorch_core::{BoolTensor, Device, FerrotorchError, Tensor, TensorStorage};
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
@@ -1506,30 +1506,10 @@ fn cpu_simd_ops() {
     }
 }
 
-/// CORE-131 / #1825 pin — the four fallible simd binary ops skip shape
-/// validation (lane added per the CORE-199 / #1893 dispatch).
-///
-/// torch oracle (live session, torch 2.11.0+cu130):
-/// ```text
-/// >>> torch.add(torch.ones(2, 3), torch.ones(2))
-/// RuntimeError: The size of tensor a (3) must match the size of tensor b
-/// (2) at non-singleton dimension 1
-/// ```
-/// torch never returns partially computed data for non-broadcastable
-/// shapes; the future ferrotorch contract is a structured `Err` BEFORE the
-/// kernel runs.
-///
-/// ferrotorch probed at HEAD (401233b56): the length guard is a
-/// `debug_assert_eq!` inside ferray-ufunc's dispatch
-/// (`ferray-ufunc-0.4.9/src/dispatch.rs:118` / `:133`), so the symptom is
-/// build-profile dependent — a debug build PANICS inside the
-/// `FerrotorchResult` API; a release build (the CI lane: linux-ci runs
-/// `cargo test --release`) silently zips to the shortest input and returns
-/// an output sized to `a` whose tail is the zero-initialized buffer
-/// (CORE-131 audit probe). Single-contract pin per profile (R-ORACLE-4):
-/// each `cfg!(debug_assertions)` branch asserts exactly the one behavior
-/// that profile exhibits today, and a structured `Err` in either branch
-/// means #1825 landed — retire this pin and assert the error kind.
+/// CORE-131 / #1825 regression: direct SIMD binary ops are same-shape kernel
+/// surfaces. Mismatched shapes must return a structured error before ferray's
+/// debug-asserting zip kernels run; no debug panic and no release partial
+/// output.
 #[test]
 fn cpu_simd_shape_mismatch_pin_1825() {
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -1541,83 +1521,26 @@ fn cpu_simd_shape_mismatch_pin_1825() {
     let a64 = make_cpu_f64(&[1.5; 6], &[2, 3], false);
     let b64 = make_cpu_f64(&[0.25; 2], &[2], false);
 
-    // (op label, prefix value expected in release partial output)
-    macro_rules! pin {
-        ($label:literal, $call:expr, $read:ident, $prefix:expr) => {{
+    macro_rules! assert_shape_err {
+        ($label:literal, $call:expr) => {{
             let outcome = catch_unwind(AssertUnwindSafe(|| $call));
             match outcome {
-                Ok(Err(e)) => panic!(
-                    "{}: mismatched shapes returned structured Err({e}) — \
-                     #1825 appears fixed; retire this pin and assert the \
-                     error kind",
-                    $label
-                ),
+                Ok(Err(FerrotorchError::ShapeMismatch { .. })) => {}
+                Ok(Err(other)) => {
+                    panic!("{}: expected ShapeMismatch, got {other:?}", $label)
+                }
                 Ok(Ok(t)) => {
-                    assert!(
-                        !cfg!(debug_assertions),
-                        "{}: debug build returned Ok — expected the pinned \
-                         ferray debug_assert panic; re-probe #1825",
-                        $label
-                    );
-                    // Release: output sized to `a`, prefix computed up to
-                    // b.len(), tail left as the zero-initialized buffer.
-                    assert_eq!(
-                        t.shape(),
-                        &[2, 3],
-                        "{}: partial output no longer sized to `a`",
-                        $label
-                    );
-                    let v = $read(&t);
-                    assert_eq!(
-                        v[..2].to_vec(),
-                        vec![$prefix; 2],
-                        "{}: computed prefix changed — re-probe #1825",
-                        $label
-                    );
-                    assert_eq!(
-                        v[2..].to_vec(),
-                        vec![0.0; 4],
-                        "{}: tail is no longer the zero-initialized buffer \
-                         — re-probe #1825",
-                        $label
-                    );
+                    panic!("{}: expected ShapeMismatch, got Ok({t:?})", $label)
                 }
-                Err(_) => {
-                    assert!(
-                        cfg!(debug_assertions),
-                        "{}: release build panicked — expected the pinned \
-                         silent partial compute; re-probe #1825",
-                        $label
-                    );
-                }
+                Err(_) => panic!("{}: panicked instead of returning ShapeMismatch", $label),
             }
         }};
     }
 
-    pin!(
-        "simd_add_f32([2,3],[2])",
-        simd_add_f32(&a32, &b32),
-        read_back_f32,
-        1.75f32
-    );
-    pin!(
-        "simd_mul_f32([2,3],[2])",
-        simd_mul_f32(&a32, &b32),
-        read_back_f32,
-        0.375f32
-    );
-    pin!(
-        "simd_add_f64([2,3],[2])",
-        simd_add_f64(&a64, &b64),
-        read_back_f64,
-        1.75f64
-    );
-    pin!(
-        "simd_mul_f64([2,3],[2])",
-        simd_mul_f64(&a64, &b64),
-        read_back_f64,
-        0.375f64
-    );
+    assert_shape_err!("simd_add_f32([2,3],[2])", simd_add_f32(&a32, &b32));
+    assert_shape_err!("simd_mul_f32([2,3],[2])", simd_mul_f32(&a32, &b32));
+    assert_shape_err!("simd_add_f64([2,3],[2])", simd_add_f64(&a64, &b64));
+    assert_shape_err!("simd_mul_f64([2,3],[2])", simd_mul_f64(&a64, &b64));
 }
 
 // ---------------------------------------------------------------------------
@@ -2532,58 +2455,61 @@ fn cpu_transpose_view_lanes() {
             let label = format!("{op_name} cpu dtype={}", f.dtype);
             let shape = f.a_shape.as_ref().unwrap();
             let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
-            // #1826 pin (CORE-132): the op must currently return Err on a
-            // non-contiguous view; torch computes the values recorded in
-            // out_values. When #1826 lands, the Err assert below fails —
-            // retire the pin and assert out_values instead.
-            macro_rules! pin_err {
-                ($res:expr) => {{
-                    let err = $res.expect_err(&format!(
-                        "{label}: op accepted a non-contiguous view — #1826 \
-                         appears fixed; retire this pin and assert the \
-                         fixture out_values"
-                    ));
-                    let msg = format!("{err}");
-                    assert!(
-                        msg.contains("contiguous"),
-                        "{label}: expected the contiguity rejection, got {msg:?}"
-                    );
-                }};
-            }
+            let exp = f
+                .out_values
+                .as_ref()
+                .map(F64ListSentinel::as_slice)
+                .unwrap();
             match f.dtype.as_str() {
                 "float32" => {
                     let v = make_cpu_f32(a_data, shape, false)
                         .transpose(0, 1)
                         .expect("transpose");
                     assert!(!v.is_contiguous(), "{label}: view must be non-contiguous");
-                    match op_name {
-                        "add_tview" => pin_err!(add(&v, &v)),
-                        "mul_tview" => pin_err!(mul(&v, &v)),
-                        "sqrt_tview" => pin_err!(sqrt(&v)),
-                        "fast_sigmoid_tview" => pin_err!(fast_sigmoid(&v)),
-                        "sum_tview" => pin_err!(sum(&v)),
-                        "mean_tview" => pin_err!(mean(&v)),
-                        "logsumexp_tview" => pin_err!(logsumexp(&v)),
-                        "sum_axis_tview" => pin_err!(sum_axis(&v, 0)),
+                    let r = match op_name {
+                        "add_tview" => add(&v, &v).expect("add"),
+                        "mul_tview" => mul(&v, &v).expect("mul"),
+                        "sqrt_tview" => sqrt(&v).expect("sqrt"),
+                        "fast_sigmoid_tview" => fast_sigmoid(&v).expect("fast_sigmoid"),
+                        "sum_tview" => sum(&v).expect("sum"),
+                        "mean_tview" => mean(&v).expect("mean"),
+                        "logsumexp_tview" => logsumexp(&v).expect("logsumexp"),
+                        "sum_axis_tview" => sum_axis(&v, 0).expect("sum_axis"),
                         _ => unreachable!(),
-                    }
+                    };
+                    let tol = match op_name {
+                        "sqrt_tview" | "fast_sigmoid_tview" | "logsumexp_tview" => {
+                            tolerance::F32_TRANSCENDENTAL
+                        }
+                        "sum_tview" | "mean_tview" | "sum_axis_tview" => tolerance::F32_REDUCTION,
+                        _ => tolerance::F32_ELEMENTWISE,
+                    };
+                    check_f32(&label, &read_back_f32(&r), exp, tol);
                 }
                 "float64" => {
                     let v = make_cpu_f64(a_data, shape, false)
                         .transpose(0, 1)
                         .expect("transpose");
                     assert!(!v.is_contiguous(), "{label}: view must be non-contiguous");
-                    match op_name {
-                        "add_tview" => pin_err!(add(&v, &v)),
-                        "mul_tview" => pin_err!(mul(&v, &v)),
-                        "sqrt_tview" => pin_err!(sqrt(&v)),
-                        "fast_sigmoid_tview" => pin_err!(fast_sigmoid(&v)),
-                        "sum_tview" => pin_err!(sum(&v)),
-                        "mean_tview" => pin_err!(mean(&v)),
-                        "logsumexp_tview" => pin_err!(logsumexp(&v)),
-                        "sum_axis_tview" => pin_err!(sum_axis(&v, 0)),
+                    let r = match op_name {
+                        "add_tview" => add(&v, &v).expect("add"),
+                        "mul_tview" => mul(&v, &v).expect("mul"),
+                        "sqrt_tview" => sqrt(&v).expect("sqrt"),
+                        "fast_sigmoid_tview" => fast_sigmoid(&v).expect("fast_sigmoid"),
+                        "sum_tview" => sum(&v).expect("sum"),
+                        "mean_tview" => mean(&v).expect("mean"),
+                        "logsumexp_tview" => logsumexp(&v).expect("logsumexp"),
+                        "sum_axis_tview" => sum_axis(&v, 0).expect("sum_axis"),
                         _ => unreachable!(),
-                    }
+                    };
+                    let tol = match op_name {
+                        "sqrt_tview" | "fast_sigmoid_tview" | "logsumexp_tview" => {
+                            tolerance::F64_TRANSCENDENTAL
+                        }
+                        "sum_tview" | "mean_tview" | "sum_axis_tview" => tolerance::F64_REDUCTION,
+                        _ => tolerance::F64_ELEMENTWISE,
+                    };
+                    check_f64(&label, &read_back_f64(&r), exp, tol);
                 }
                 _ => unreachable!(),
             }

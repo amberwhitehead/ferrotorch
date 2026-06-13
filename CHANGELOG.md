@@ -52,6 +52,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-132: CPU elementwise, reduction, and cumulative kernels reject valid non-contiguous views (#1826)
+- CORE-131: SIMD elementwise helpers skip shape validation and return partially computed tensors (#1825)
+- CORE-130: `masked_select` implements same-numel reshaping instead of broadcasting (#1824)
+- CORE-126: Gather/scatter shape validation omits every non-indexed dimension (#1820)
 - CORE-112: `gather` accepts smaller non-axis dimensions but indexes as if they were full-size (#1806)
 - CORE-017: Linux CI explicitly excludes all core integration tests (#1711)
 - CORE-071: Empty packed components report a false mean of zero (#1765)

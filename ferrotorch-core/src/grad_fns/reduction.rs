@@ -366,7 +366,7 @@ impl<T: Float> GradFn<T> for ProdBackward<T> {
         }
 
         let go = grad_output.data()?[0];
-        let input_data = self.input.data()?;
+        let input_data = self.input.data_vec()?;
         let n = input_data.len();
 
         // Use prefix/suffix products to avoid division by zero.
@@ -450,7 +450,7 @@ fn prod_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "prod" });
     }
-    let data = input.data()?;
+    let data = input.data_vec()?;
     let total = data
         .iter()
         .copied()

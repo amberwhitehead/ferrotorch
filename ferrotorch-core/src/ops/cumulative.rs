@@ -101,7 +101,7 @@ pub fn cumsum_forward<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult
         return Err(FerrotorchError::NotImplementedOnCuda { op: "cumsum" });
     }
 
-    let in_data = input.data()?;
+    let in_data = input.data_vec()?;
 
     let mut out = vec![<T as num_traits::Zero>::zero(); in_data.len()];
 
@@ -174,7 +174,7 @@ pub fn cumprod_forward<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResul
         return Err(FerrotorchError::NotImplementedOnCuda { op: "cumprod" });
     }
 
-    let in_data = input.data()?;
+    let in_data = input.data_vec()?;
 
     let mut out = vec![<T as num_traits::Zero>::zero(); in_data.len()];
 
@@ -265,7 +265,7 @@ pub fn cummax_forward<T: Float>(
         return Err(FerrotorchError::NotImplementedOnCuda { op: "cummax" });
     }
 
-    let in_data = input.data()?;
+    let in_data = input.data_vec()?;
     let numel = in_data.len();
     let mut out_vals = vec![<T as num_traits::Zero>::zero(); numel];
     let mut out_idxs = vec![0usize; numel];
@@ -377,7 +377,7 @@ pub fn cummin_forward<T: Float>(
         return Err(FerrotorchError::NotImplementedOnCuda { op: "cummin" });
     }
 
-    let in_data = input.data()?;
+    let in_data = input.data_vec()?;
     let numel = in_data.len();
     let mut out_vals = vec![<T as num_traits::Zero>::zero(); numel];
     let mut out_idxs = vec![0usize; numel];
@@ -494,7 +494,7 @@ pub fn logcumsumexp_forward<T: Float>(input: &Tensor<T>, dim: i64) -> Ferrotorch
         return Err(FerrotorchError::NotImplementedOnCuda { op: "logcumsumexp" });
     }
 
-    let in_data = input.data()?;
+    let in_data = input.data_vec()?;
 
     let mut out = vec![<T as num_traits::Zero>::zero(); in_data.len()];
     let neg_inf = <T as num_traits::Float>::neg_infinity();

@@ -39,8 +39,35 @@ const PARALLEL_THRESHOLD: usize = 32_768;
 
 // --- SIMD-accelerated specializations for f32 ---
 
+fn validate_same_shape(
+    op: &'static str,
+    a_shape: &[usize],
+    b_shape: &[usize],
+) -> FerrotorchResult<()> {
+    if a_shape != b_shape {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "{op}: SIMD kernel requires identical shapes, got {a_shape:?} and {b_shape:?}; \
+                 use fast_add/fast_mul or the autograd arithmetic APIs for PyTorch-style broadcasting"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn logical_contiguous<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_contiguous() {
+        Ok(input.clone())
+    } else {
+        input.contiguous()
+    }
+}
+
 /// SIMD-accelerated add for same-shape f32 tensors.
 pub fn simd_add_f32(a: &Tensor<f32>, b: &Tensor<f32>) -> FerrotorchResult<Tensor<f32>> {
+    validate_same_shape("simd_add_f32", a.shape(), b.shape())?;
+    let a = logical_contiguous(a)?;
+    let b = logical_contiguous(b)?;
     let a_data = a.data()?;
     let b_data = b.data()?;
     let mut output = vec![0.0f32; a_data.len()];
@@ -50,6 +77,9 @@ pub fn simd_add_f32(a: &Tensor<f32>, b: &Tensor<f32>) -> FerrotorchResult<Tensor
 
 /// SIMD-accelerated mul for same-shape f32 tensors.
 pub fn simd_mul_f32(a: &Tensor<f32>, b: &Tensor<f32>) -> FerrotorchResult<Tensor<f32>> {
+    validate_same_shape("simd_mul_f32", a.shape(), b.shape())?;
+    let a = logical_contiguous(a)?;
+    let b = logical_contiguous(b)?;
     let a_data = a.data()?;
     let b_data = b.data()?;
     let mut output = vec![0.0f32; a_data.len()];
@@ -59,6 +89,7 @@ pub fn simd_mul_f32(a: &Tensor<f32>, b: &Tensor<f32>) -> FerrotorchResult<Tensor
 
 /// SIMD-accelerated exp for f32.
 pub fn simd_exp_f32(input: &Tensor<f32>) -> FerrotorchResult<Tensor<f32>> {
+    let input = logical_contiguous(input)?;
     let data = input.data()?;
     let mut output = vec![0.0f32; data.len()];
     ferray_ufunc::kernels::simd_f32::exp_f32(data, &mut output);
@@ -67,6 +98,7 @@ pub fn simd_exp_f32(input: &Tensor<f32>) -> FerrotorchResult<Tensor<f32>> {
 
 /// SIMD-accelerated log for f32.
 pub fn simd_log_f32(input: &Tensor<f32>) -> FerrotorchResult<Tensor<f32>> {
+    let input = logical_contiguous(input)?;
     let data = input.data()?;
     let mut output = vec![0.0f32; data.len()];
     ferray_ufunc::kernels::simd_f32::log_f32(data, &mut output);
@@ -75,6 +107,7 @@ pub fn simd_log_f32(input: &Tensor<f32>) -> FerrotorchResult<Tensor<f32>> {
 
 /// SIMD-accelerated sqrt for f32.
 pub fn simd_sqrt_f32(input: &Tensor<f32>) -> FerrotorchResult<Tensor<f32>> {
+    let input = logical_contiguous(input)?;
     let data = input.data()?;
     let mut output = vec![0.0f32; data.len()];
     ferray_ufunc::kernels::simd_f32::sqrt_f32(data, &mut output);
@@ -85,6 +118,9 @@ pub fn simd_sqrt_f32(input: &Tensor<f32>) -> FerrotorchResult<Tensor<f32>> {
 
 /// SIMD-accelerated add for same-shape f64 tensors.
 pub fn simd_add_f64(a: &Tensor<f64>, b: &Tensor<f64>) -> FerrotorchResult<Tensor<f64>> {
+    validate_same_shape("simd_add_f64", a.shape(), b.shape())?;
+    let a = logical_contiguous(a)?;
+    let b = logical_contiguous(b)?;
     let a_data = a.data()?;
     let b_data = b.data()?;
     let mut output = vec![0.0f64; a_data.len()];
@@ -94,6 +130,9 @@ pub fn simd_add_f64(a: &Tensor<f64>, b: &Tensor<f64>) -> FerrotorchResult<Tensor
 
 /// SIMD-accelerated mul for same-shape f64 tensors.
 pub fn simd_mul_f64(a: &Tensor<f64>, b: &Tensor<f64>) -> FerrotorchResult<Tensor<f64>> {
+    validate_same_shape("simd_mul_f64", a.shape(), b.shape())?;
+    let a = logical_contiguous(a)?;
+    let b = logical_contiguous(b)?;
     let a_data = a.data()?;
     let b_data = b.data()?;
     let mut output = vec![0.0f64; a_data.len()];
@@ -103,6 +142,7 @@ pub fn simd_mul_f64(a: &Tensor<f64>, b: &Tensor<f64>) -> FerrotorchResult<Tensor
 
 /// SIMD-accelerated exp for f64.
 pub fn simd_exp_f64(input: &Tensor<f64>) -> FerrotorchResult<Tensor<f64>> {
+    let input = logical_contiguous(input)?;
     let data = input.data()?;
     let mut output = vec![0.0f64; data.len()];
     ferray_ufunc::kernels::simd_f64::exp_f64(data, &mut output);
@@ -144,6 +184,8 @@ unsafe fn transmute_vec_f64_to_t<T: Float>(v: Vec<f64>) -> Vec<T> {
 /// rayon threads, each chunk processed by the SIMD kernel.
 pub fn fast_add<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if a.shape() == b.shape() {
+        let a = logical_contiguous(a)?;
+        let b = logical_contiguous(b)?;
         let a_data = a.data()?;
         let b_data = b.data()?;
         let n = a_data.len();
@@ -223,6 +265,8 @@ pub fn fast_add<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tens
 /// SIMD-accelerated mul with rayon parallelism for large tensors.
 pub fn fast_mul<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if a.shape() == b.shape() {
+        let a = logical_contiguous(a)?;
+        let b = logical_contiguous(b)?;
         let a_data = a.data()?;
         let b_data = b.data()?;
         let n = a_data.len();
@@ -306,6 +350,8 @@ pub fn fast_mul<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tens
 /// auto-vectorizes to SIMD. Falls back to `binary_map` for broadcasting.
 pub fn fast_sub<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if a.shape() == b.shape() {
+        let a = logical_contiguous(a)?;
+        let b = logical_contiguous(b)?;
         let a_data = a.data()?;
         let b_data = b.data()?;
         let n = a_data.len();
@@ -390,6 +436,8 @@ pub fn fast_sub<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tens
 /// SIMD-accelerated div with rayon parallelism for large tensors.
 pub fn fast_div<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if a.shape() == b.shape() {
+        let a = logical_contiguous(a)?;
+        let b = logical_contiguous(b)?;
         let a_data = a.data()?;
         let b_data = b.data()?;
         let n = a_data.len();
@@ -560,11 +608,7 @@ fn vlog_f32(x: f32) -> f32 {
 /// Uses a vectorizable polynomial kernel (vexp_f32) that LLVM auto-vectorizes
 /// to AVX2/SSE SIMD instructions, instead of scalar libm expf.
 pub fn fast_exp<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let input = if input.is_contiguous() {
-        input.clone()
-    } else {
-        input.contiguous()?
-    };
+    let input = logical_contiguous(input)?;
     let data = input.data()?;
     let n = data.len();
     if std::mem::size_of::<T>() == 4 {
@@ -603,11 +647,7 @@ pub fn fast_exp<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 ///
 /// Uses a vectorizable polynomial kernel (vlog_f32) that LLVM auto-vectorizes.
 pub fn fast_log<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let input = if input.is_contiguous() {
-        input.clone()
-    } else {
-        input.contiguous()?
-    };
+    let input = logical_contiguous(input)?;
     let data = input.data()?;
     let n = data.len();
     if std::mem::size_of::<T>() == 4 {
@@ -700,6 +740,7 @@ fn fast_log_f32(x: f32) -> f32 {
 /// With `target-cpu=native`, the inner loop auto-vectorizes to AVX2 (8-wide).
 /// For large tensors (>= PARALLEL_THRESHOLD), work is split across rayon threads.
 pub fn fast_sigmoid<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let input = logical_contiguous(input)?;
     let data = input.data()?;
     let n = data.len();
     if std::mem::size_of::<T>() == 4 {
@@ -732,13 +773,14 @@ pub fn fast_sigmoid<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> 
         return Tensor::from_storage(TensorStorage::cpu(result), input.shape().to_vec(), false);
     }
     let one = <T as num_traits::One>::one();
-    unary_map(input, move |x| one / (one + (-x).exp()))
+    unary_map(&input, move |x| one / (one + (-x).exp()))
 }
 
 /// Fused single-pass tanh: `(exp(2x) - 1) / (exp(2x) + 1)`.
 ///
 /// No intermediate allocations — each element computed in registers.
 pub fn fast_tanh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let input = logical_contiguous(input)?;
     let data = input.data()?;
     let n = data.len();
     if std::mem::size_of::<T>() == 4 {
@@ -774,7 +816,7 @@ pub fn fast_tanh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         let result = unsafe { transmute_vec_f32_to_t(out) };
         return Tensor::from_storage(TensorStorage::cpu(result), input.shape().to_vec(), false);
     }
-    unary_map(input, |x| x.tanh())
+    unary_map(&input, |x| x.tanh())
 }
 
 /// Fused single-pass sin for f32.
@@ -794,6 +836,7 @@ pub fn fast_sin<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() {
         return unary_map(input, |x| x.sin());
     }
+    let input = logical_contiguous(input)?;
     let data = input.data()?;
     let n = data.len();
     if std::mem::size_of::<T>() == 4 {
@@ -824,7 +867,7 @@ pub fn fast_sin<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         let result = unsafe { transmute_vec_f32_to_t(out) };
         return Tensor::from_storage(TensorStorage::cpu(result), input.shape().to_vec(), false);
     }
-    unary_map(input, |x| x.sin())
+    unary_map(&input, |x| x.sin())
 }
 
 /// Fused single-pass cos for f32.
@@ -841,6 +884,7 @@ pub fn fast_cos<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() {
         return unary_map(input, |x| x.cos());
     }
+    let input = logical_contiguous(input)?;
     let data = input.data()?;
     let n = data.len();
     if std::mem::size_of::<T>() == 4 {
@@ -871,7 +915,7 @@ pub fn fast_cos<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         let result = unsafe { transmute_vec_f32_to_t(out) };
         return Tensor::from_storage(TensorStorage::cpu(result), input.shape().to_vec(), false);
     }
-    unary_map(input, |x| x.cos())
+    unary_map(&input, |x| x.cos())
 }
 
 // --- Generic fallback operations ---
@@ -886,8 +930,7 @@ pub fn unary_map<T: Float>(input: &Tensor<T>, f: impl Fn(T) -> T) -> FerrotorchR
         let out = Tensor::from_storage(TensorStorage::cpu(result), input.shape().to_vec(), false)?;
         out.to(device)
     } else {
-        // CPU path: borrow directly — zero copy.
-        let data = input.data()?;
+        let data = input.data_vec()?;
         let result: Vec<T> = data.iter().map(|&x| f(x)).collect();
         Tensor::from_storage(TensorStorage::cpu(result), input.shape().to_vec(), false)
     }
@@ -989,7 +1032,7 @@ pub fn scalar_map<T: Float>(
     if input.is_cuda() {
         return Err(crate::error::FerrotorchError::NotImplementedOnCuda { op: "scalar_map" });
     }
-    let data = input.data()?;
+    let data = input.data_vec()?;
     let result: Vec<T> = data.iter().map(|&x| f(x, scalar)).collect();
     Tensor::from_storage(TensorStorage::cpu(result), input.shape().to_vec(), false)
 }
@@ -1046,7 +1089,7 @@ fn precompute_broadcast_strides(
 
 /// Sum all elements of a tensor, returning a scalar tensor.
 pub fn sum<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let data = input.data()?;
+    let data = input.data_vec()?;
     let total = data
         .iter()
         .copied()
@@ -1070,7 +1113,7 @@ pub fn sum_axis<T: Float>(input: &Tensor<T>, axis: usize) -> FerrotorchResult<Te
     let mut out_shape: Vec<usize> = shape.to_vec();
     out_shape.remove(axis);
 
-    let data = input.data()?;
+    let data = input.data_vec()?;
 
     let out_numel: usize = out_shape.iter().product();
     let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
@@ -1108,7 +1151,7 @@ pub fn mean<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() {
         return Err(crate::error::FerrotorchError::NotImplementedOnCuda { op: "mean" });
     }
-    let data = input.data()?;
+    let data = input.data_vec()?;
     let n = T::from(data.len()).unwrap();
     let total = data
         .iter()
@@ -1125,7 +1168,7 @@ pub fn nansum<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() {
         return Err(crate::error::FerrotorchError::NotImplementedOnCuda { op: "nansum" });
     }
-    let data = input.data()?;
+    let data = input.data_vec()?;
     let total = data
         .iter()
         .copied()
@@ -1143,10 +1186,10 @@ pub fn nanmean<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() {
         return Err(crate::error::FerrotorchError::NotImplementedOnCuda { op: "nanmean" });
     }
-    let data = input.data()?;
+    let data = input.data_vec()?;
     let mut total = <T as num_traits::Zero>::zero();
     let mut count = 0usize;
-    for &v in data {
+    for &v in &data {
         if !v.is_nan() {
             total += v;
             count += 1;
@@ -1169,7 +1212,7 @@ pub fn logsumexp<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if input.is_cuda() {
         return Err(crate::error::FerrotorchError::NotImplementedOnCuda { op: "logsumexp" });
     }
-    let data = input.data()?;
+    let data = input.data_vec()?;
     if data.is_empty() {
         return Tensor::from_storage(TensorStorage::cpu(vec![T::neg_infinity()]), vec![], false);
     }
@@ -1226,7 +1269,7 @@ pub fn logsumexp_dim<T: Float>(
         });
     }
 
-    let data = input.data()?;
+    let data = input.data_vec()?;
     let dim_size = shape[dim];
     let outer: usize = shape[..dim].iter().product();
     let inner: usize = shape[dim + 1..].iter().product();

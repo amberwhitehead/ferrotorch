@@ -2057,16 +2057,14 @@ fn cpu_transpose_view_lanes() {
         }
     }
 
-    // Ops that reject views today: #1826 pin (single contract,
-    // retire-on-fix; torch values live in the fixture's out_values).
-    let reject_ops = [
+    let fixed_ops = [
         "sum_tview",
         "mean_tview",
         "prod_tview",
         "cumsum_tview",
         "cummax_tview",
     ];
-    for op_name in reject_ops {
+    for op_name in fixed_ops {
         let cases = cases_for(&file, op_name, "cpu");
         assert!(!cases.is_empty(), "no fixtures for {op_name}");
         for f in cases {
@@ -2074,20 +2072,11 @@ fn cpu_transpose_view_lanes() {
             let label = format!("{op_name} cpu dtype={}", f.dtype);
             let shape = f.a_shape.as_ref().unwrap();
             let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
-            macro_rules! pin_err {
-                ($res:expr) => {{
-                    let err = $res.expect_err(&format!(
-                        "{label}: op accepted a non-contiguous view — #1826 \
-                         appears fixed; retire this pin and assert the \
-                         fixture out_values"
-                    ));
-                    let msg = format!("{err}");
-                    assert!(
-                        msg.contains("contiguous"),
-                        "{label}: expected the contiguity rejection, got {msg:?}"
-                    );
-                }};
-            }
+            let exp = f
+                .out_values
+                .as_ref()
+                .map(F64ListSentinel::as_slice)
+                .unwrap();
             match f.dtype.as_str() {
                 "float32" => {
                     let v = make_cpu_f32(a_data, shape, false)
@@ -2095,12 +2084,35 @@ fn cpu_transpose_view_lanes() {
                         .expect("transpose");
                     assert!(!v.is_contiguous(), "{label}: view must be non-contiguous");
                     match op_name {
-                        "sum_tview" => pin_err!(sum(&v)),
-                        "mean_tview" => pin_err!(mean(&v)),
-                        "prod_tview" => pin_err!(prod(&v)),
-                        "cumsum_tview" => pin_err!(cumsum(&v, 0)),
-                        "cummax_tview" => pin_err!(cummax(&v, 0).map(|r| r.values)),
-                        _ => unreachable!(),
+                        "cummax_tview" => {
+                            let r = cummax(&v, 0).expect("cummax");
+                            check_f32(
+                                &label,
+                                &read_back_f32(&r.values, Device::Cpu),
+                                exp,
+                                tolerance::F32_REDUCTION_CPU,
+                            );
+                            assert_eq!(
+                                r.indices,
+                                f.out_indices.as_ref().unwrap().as_slice(),
+                                "{label}: cummax indices"
+                            );
+                        }
+                        _ => {
+                            let r = match op_name {
+                                "sum_tview" => sum(&v).expect("sum"),
+                                "mean_tview" => mean(&v).expect("mean"),
+                                "prod_tview" => prod(&v).expect("prod"),
+                                "cumsum_tview" => cumsum(&v, 0).expect("cumsum"),
+                                _ => unreachable!(),
+                            };
+                            check_f32(
+                                &label,
+                                &read_back_f32(&r, Device::Cpu),
+                                exp,
+                                tolerance::F32_REDUCTION_CPU,
+                            );
+                        }
                     }
                 }
                 "float64" => {
@@ -2109,12 +2121,35 @@ fn cpu_transpose_view_lanes() {
                         .expect("transpose");
                     assert!(!v.is_contiguous(), "{label}: view must be non-contiguous");
                     match op_name {
-                        "sum_tview" => pin_err!(sum(&v)),
-                        "mean_tview" => pin_err!(mean(&v)),
-                        "prod_tview" => pin_err!(prod(&v)),
-                        "cumsum_tview" => pin_err!(cumsum(&v, 0)),
-                        "cummax_tview" => pin_err!(cummax(&v, 0).map(|r| r.values)),
-                        _ => unreachable!(),
+                        "cummax_tview" => {
+                            let r = cummax(&v, 0).expect("cummax");
+                            check_f64(
+                                &label,
+                                &read_back_f64(&r.values, Device::Cpu),
+                                exp,
+                                tolerance::F64_REDUCTION_CPU,
+                            );
+                            assert_eq!(
+                                r.indices,
+                                f.out_indices.as_ref().unwrap().as_slice(),
+                                "{label}: cummax indices"
+                            );
+                        }
+                        _ => {
+                            let r = match op_name {
+                                "sum_tview" => sum(&v).expect("sum"),
+                                "mean_tview" => mean(&v).expect("mean"),
+                                "prod_tview" => prod(&v).expect("prod"),
+                                "cumsum_tview" => cumsum(&v, 0).expect("cumsum"),
+                                _ => unreachable!(),
+                            };
+                            check_f64(
+                                &label,
+                                &read_back_f64(&r, Device::Cpu),
+                                exp,
+                                tolerance::F64_REDUCTION_CPU,
+                            );
+                        }
                     }
                 }
                 _ => unreachable!(),
