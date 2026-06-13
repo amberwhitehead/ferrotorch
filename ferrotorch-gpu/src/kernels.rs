@@ -7593,6 +7593,185 @@ DONE:
 }
 ";
 
+/// PTX source for `max_with_dim_kernel` / `min_with_dim_kernel`.
+///
+/// One thread reduces one `(outer, inner)` slice and writes the selected value
+/// plus its local axis index. Ties keep the first index; the first NaN poisons
+/// the slice and keeps its index, matching PyTorch `max(dim)` / `min(dim)`.
+#[cfg(feature = "cuda")]
+pub(crate) const MAX_WITH_DIM_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry max_with_dim_kernel(
+    .param .u64 input_ptr,
+    .param .u64 values_ptr,
+    .param .u64 indices_ptr,
+    .param .u32 outer_size,
+    .param .u32 dim_size,
+    .param .u32 inner_size,
+    .param .u32 total
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %outer_sz, %dim_sz, %inner_sz;
+    .reg .u32 %outer_idx, %inner_idx, %k, %base, %idx, %tmp, %best_k;
+    .reg .u64 %in, %vals, %inds, %off, %off_idx, %addr;
+    .reg .s64 %best_k_s64;
+    .reg .f32 %val, %best;
+    .reg .pred %p, %lp, %take, %curr_nan, %best_nan, %best_ok, %cmp;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %vals, [values_ptr];
+    ld.param.u64 %inds, [indices_ptr];
+    ld.param.u32 %outer_sz, [outer_size];
+    ld.param.u32 %dim_sz, [dim_size];
+    ld.param.u32 %inner_sz, [inner_size];
+    ld.param.u32 %tot, [total];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot;
+    @%p bra DONE;
+
+    div.u32 %outer_idx, %gtid, %inner_sz;
+    rem.u32 %inner_idx, %gtid, %inner_sz;
+    mul.lo.u32 %base, %outer_idx, %dim_sz;
+    mul.lo.u32 %base, %base, %inner_sz;
+    add.u32 %base, %base, %inner_idx;
+
+    cvt.u64.u32 %off, %base;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %best, [%addr];
+    mov.u32 %best_k, 0;
+    mov.u32 %k, 1;
+LOOP:
+    setp.ge.u32 %lp, %k, %dim_sz;
+    @%lp bra WRITE;
+
+    mul.lo.u32 %idx, %k, %inner_sz;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %val, [%addr];
+
+    setp.nan.f32 %curr_nan, %val, %val;
+    setp.nan.f32 %best_nan, %best, %best;
+    not.pred %best_ok, %best_nan;
+    setp.gt.f32 %cmp, %val, %best;
+    or.pred %take, %curr_nan, %cmp;
+    and.pred %take, %best_ok, %take;
+    @%take mov.u32 %best_k, %k;
+    @%take mov.f32 %best, %val;
+
+    add.u32 %k, %k, 1;
+    bra LOOP;
+WRITE:
+    cvt.u64.u32 %off, %gtid;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %vals, %off;
+    st.global.f32 [%addr], %best;
+
+    cvt.s64.u32 %best_k_s64, %best_k;
+    cvt.u64.u32 %off_idx, %gtid;
+    shl.b64 %off_idx, %off_idx, 3;
+    add.u64 %addr, %inds, %off_idx;
+    st.global.s64 [%addr], %best_k_s64;
+DONE:
+    ret;
+}
+";
+
+#[cfg(feature = "cuda")]
+pub(crate) const MIN_WITH_DIM_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry min_with_dim_kernel(
+    .param .u64 input_ptr,
+    .param .u64 values_ptr,
+    .param .u64 indices_ptr,
+    .param .u32 outer_size,
+    .param .u32 dim_size,
+    .param .u32 inner_size,
+    .param .u32 total
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %outer_sz, %dim_sz, %inner_sz;
+    .reg .u32 %outer_idx, %inner_idx, %k, %base, %idx, %tmp, %best_k;
+    .reg .u64 %in, %vals, %inds, %off, %off_idx, %addr;
+    .reg .s64 %best_k_s64;
+    .reg .f32 %val, %best;
+    .reg .pred %p, %lp, %take, %curr_nan, %best_nan, %best_ok, %cmp;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %vals, [values_ptr];
+    ld.param.u64 %inds, [indices_ptr];
+    ld.param.u32 %outer_sz, [outer_size];
+    ld.param.u32 %dim_sz, [dim_size];
+    ld.param.u32 %inner_sz, [inner_size];
+    ld.param.u32 %tot, [total];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot;
+    @%p bra DONE;
+
+    div.u32 %outer_idx, %gtid, %inner_sz;
+    rem.u32 %inner_idx, %gtid, %inner_sz;
+    mul.lo.u32 %base, %outer_idx, %dim_sz;
+    mul.lo.u32 %base, %base, %inner_sz;
+    add.u32 %base, %base, %inner_idx;
+
+    cvt.u64.u32 %off, %base;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %best, [%addr];
+    mov.u32 %best_k, 0;
+    mov.u32 %k, 1;
+LOOP:
+    setp.ge.u32 %lp, %k, %dim_sz;
+    @%lp bra WRITE;
+
+    mul.lo.u32 %idx, %k, %inner_sz;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %val, [%addr];
+
+    setp.nan.f32 %curr_nan, %val, %val;
+    setp.nan.f32 %best_nan, %best, %best;
+    not.pred %best_ok, %best_nan;
+    setp.lt.f32 %cmp, %val, %best;
+    or.pred %take, %curr_nan, %cmp;
+    and.pred %take, %best_ok, %take;
+    @%take mov.u32 %best_k, %k;
+    @%take mov.f32 %best, %val;
+
+    add.u32 %k, %k, 1;
+    bra LOOP;
+WRITE:
+    cvt.u64.u32 %off, %gtid;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %vals, %off;
+    st.global.f32 [%addr], %best;
+
+    cvt.s64.u32 %best_k_s64, %best_k;
+    cvt.u64.u32 %off_idx, %gtid;
+    shl.b64 %off_idx, %off_idx, 3;
+    add.u64 %addr, %inds, %off_idx;
+    st.global.s64 [%addr], %best_k_s64;
+DONE:
+    ret;
+}
+";
+
 /// PTX source for `logcumsumexp_kernel`: numerically stable log-cumulative-sum-exp.
 ///
 /// Thread i processes the scan for outer_idx = i / inner, inner_idx = i % inner.
@@ -16622,6 +16801,245 @@ pub fn gpu_cummin(
     }
 
     Ok((out, out_idx))
+}
+
+#[cfg(feature = "cuda")]
+fn gpu_value_selecting_dim_f32(
+    input: &CudaBuffer<f32>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<i64>)> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_unary(input, device)?;
+    let input_total = outer
+        .checked_mul(dim_size)
+        .and_then(|v| v.checked_mul(inner))
+        .ok_or(GpuError::LengthMismatch { a: outer, b: inner })?;
+    let output_total = outer
+        .checked_mul(inner)
+        .ok_or(GpuError::LengthMismatch { a: outer, b: inner })?;
+    validate_cumextreme_u32_dims(kernel_name, outer, dim_size, inner, output_total)?;
+    if dim_size == 0 {
+        return Err(GpuError::InvalidState {
+            message: format!("{kernel_name}: reduced dimension must be non-empty"),
+        });
+    }
+    if input.len() < input_total {
+        return Err(GpuError::LengthMismatch {
+            a: input_total,
+            b: input.len(),
+        });
+    }
+    if output_total == 0 {
+        let values: &[f32] = &[];
+        let indices: &[i64] = &[];
+        return Ok((cpu_to_gpu(values, device)?, cpu_to_gpu(indices, device)?));
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = crate::module_cache::get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32)
+        .map_err(|e| GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        })?;
+    let mut values = alloc_zeros_f32(output_total, device)?;
+    let mut indices = alloc_zeros::<i64>(output_total, device)?;
+    let cfg = launch_cfg(output_total)?;
+    let (o, d, i, t) = (
+        outer as u32,
+        dim_size as u32,
+        inner as u32,
+        output_total as u32,
+    );
+    // SAFETY:
+    // - `f` is the compiled value-selecting reduction kernel with ABI
+    //   `(input, values, indices, outer, dim_size, inner, total)`.
+    // - `input` has at least `outer * dim_size * inner` f32 elements and
+    //   lives on `device`; `values` and `indices` are fresh output buffers
+    //   of length `outer * inner` and cannot alias the input or each other.
+    // - `dim_size > 0`, so each thread's seed read at its slice base is valid.
+    // - `launch_cfg(output_total)?` and `validate_cumextreme_u32_dims` ensure
+    //   the PTX u32 index arithmetic is not truncated.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(values.inner_mut())
+            .arg(indices.inner_mut())
+            .arg(&o)
+            .arg(&d)
+            .arg(&i)
+            .arg(&t)
+            .launch(cfg)?;
+    }
+    Ok((values, indices))
+}
+
+#[cfg(feature = "cuda")]
+fn gpu_value_selecting_dim_f64(
+    input: &CudaBuffer<f64>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+    f32_ptx: &'static str,
+    f32_kernel_name: &'static str,
+    f64_kernel_name: &'static str,
+    cache: &'static std::sync::OnceLock<String>,
+) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<i64>)> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_device(input, device)?;
+    let input_total = outer
+        .checked_mul(dim_size)
+        .and_then(|v| v.checked_mul(inner))
+        .ok_or(GpuError::LengthMismatch { a: outer, b: inner })?;
+    let output_total = outer
+        .checked_mul(inner)
+        .ok_or(GpuError::LengthMismatch { a: outer, b: inner })?;
+    validate_cumextreme_u32_dims(f64_kernel_name, outer, dim_size, inner, output_total)?;
+    if dim_size == 0 {
+        return Err(GpuError::InvalidState {
+            message: format!("{f64_kernel_name}: reduced dimension must be non-empty"),
+        });
+    }
+    if input.len() < input_total {
+        return Err(GpuError::LengthMismatch {
+            a: input_total,
+            b: input.len(),
+        });
+    }
+    if output_total == 0 {
+        let values: &[f64] = &[];
+        let indices: &[i64] = &[];
+        return Ok((cpu_to_gpu(values, device)?, cpu_to_gpu(indices, device)?));
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let ptx = get_f64_ptx(cache, f32_ptx, f32_kernel_name, f64_kernel_name);
+    let f = crate::module_cache::get_or_compile(ctx, ptx, f64_kernel_name, device.ordinal() as u32)
+        .map_err(|e| GpuError::PtxCompileFailed {
+            kernel: f64_kernel_name,
+            source: e,
+        })?;
+    let mut values = alloc_zeros_f64(output_total, device)?;
+    let mut indices = alloc_zeros::<i64>(output_total, device)?;
+    let cfg = launch_cfg(output_total)?;
+    let (o, d, i, t) = (
+        outer as u32,
+        dim_size as u32,
+        inner as u32,
+        output_total as u32,
+    );
+    // SAFETY: same invariants as the f32 launcher above; the PTX is the
+    // mechanical f64 rewrite of the same ABI and uses byte-width-shifted value
+    // loads/stores while keeping the i64 index stores at 8 bytes.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(values.inner_mut())
+            .arg(indices.inner_mut())
+            .arg(&o)
+            .arg(&d)
+            .arg(&i)
+            .arg(&t)
+            .launch(cfg)?;
+    }
+    Ok((values, indices))
+}
+
+/// PyTorch-parity `max(input, dim)` CUDA f32 forward: values plus local i64 indices.
+#[cfg(feature = "cuda")]
+pub fn gpu_max_with_dim(
+    input: &CudaBuffer<f32>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<i64>)> {
+    gpu_value_selecting_dim_f32(
+        input,
+        outer,
+        dim_size,
+        inner,
+        device,
+        MAX_WITH_DIM_PTX,
+        "max_with_dim_kernel",
+    )
+}
+
+/// PyTorch-parity `min(input, dim)` CUDA f32 forward: values plus local i64 indices.
+#[cfg(feature = "cuda")]
+pub fn gpu_min_with_dim(
+    input: &CudaBuffer<f32>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<i64>)> {
+    gpu_value_selecting_dim_f32(
+        input,
+        outer,
+        dim_size,
+        inner,
+        device,
+        MIN_WITH_DIM_PTX,
+        "min_with_dim_kernel",
+    )
+}
+
+#[cfg(feature = "cuda")]
+/// PyTorch-parity `max(input, dim)` CUDA f64 forward: values plus local i64 indices.
+pub fn gpu_max_with_dim_f64(
+    input: &CudaBuffer<f64>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<i64>)> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    gpu_value_selecting_dim_f64(
+        input,
+        outer,
+        dim_size,
+        inner,
+        device,
+        MAX_WITH_DIM_PTX,
+        "max_with_dim_kernel",
+        "max_with_dim_f64_kernel",
+        &CACHE,
+    )
+}
+
+#[cfg(feature = "cuda")]
+/// PyTorch-parity `min(input, dim)` CUDA f64 forward: values plus local i64 indices.
+pub fn gpu_min_with_dim_f64(
+    input: &CudaBuffer<f64>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<i64>)> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    gpu_value_selecting_dim_f64(
+        input,
+        outer,
+        dim_size,
+        inner,
+        device,
+        MIN_WITH_DIM_PTX,
+        "min_with_dim_kernel",
+        "min_with_dim_f64_kernel",
+        &CACHE,
+    )
 }
 
 /// Numerically stable log-cumulative-sum-exp along an axis on GPU.

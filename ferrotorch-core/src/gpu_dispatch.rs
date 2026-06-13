@@ -1980,6 +1980,52 @@ pub trait GpuBackend: Send + Sync {
             message: "cummin_f64 GPU op not yet implemented".into(),
         })
     }
+    // Value-selecting reductions along a dimension. Returns (values, indices_as_i64)
+    // with one output slot per `(outer, inner)` slice.
+    fn max_with_dim_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "max_with_dim_f32 GPU op not yet implemented".into(),
+        })
+    }
+    fn max_with_dim_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "max_with_dim_f64 GPU op not yet implemented".into(),
+        })
+    }
+    fn min_with_dim_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "min_with_dim_f32 GPU op not yet implemented".into(),
+        })
+    }
+    fn min_with_dim_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "min_with_dim_f64 GPU op not yet implemented".into(),
+        })
+    }
     fn logcumsumexp_f32(
         &self,
         _a: &GpuBufferHandle,
