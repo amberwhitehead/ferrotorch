@@ -186,8 +186,9 @@ pub use grad_fns::fft::{
 };
 pub use grad_fns::quantize_grad::fake_quantize_differentiable;
 pub use grad_fns::reduction::{
-    max_with_dim, mean_dim, median_with_dim, min_with_dim, nanmean, nanmean_dim,
-    nanmedian_with_dim, nansum, nansum_dim, norm_with_dim, sum_dim,
+    logsumexp_dims, max_with_dim, mean_dim, mean_dims, median_with_dim, min_with_dim, nanmean,
+    nanmean_dim, nanmean_dims, nanmedian_with_dim, nansum, nansum_dim, nansum_dims, norm_with_dim,
+    std_dim, std_dims, sum_dim, sum_dims, var_dim, var_dims,
 };
 pub use grad_fns::shape::{
     broadcast_tensors, broadcast_to, cat, column_stack, dstack, expand, expand_as, flip, fliplr,

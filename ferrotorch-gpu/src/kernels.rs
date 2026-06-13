@@ -213,6 +213,16 @@ pub(crate) fn get_f64_ptx<'a>(
     cache.get_or_init(|| ptx_f32_to_f64(f32_ptx, f32_name, f64_name))
 }
 
+#[cfg(feature = "cuda")]
+fn ptx_f32_copy_to_u16(f32_ptx: &str, f32_kernel_name: &str, u16_kernel_name: &str) -> String {
+    f32_ptx
+        .replace(f32_kernel_name, u16_kernel_name)
+        .replace(".reg .f32 %val;", ".reg .b16 %val;")
+        .replace("ld.global.f32 %val, [%off];", "ld.global.u16 %val, [%off];")
+        .replace("st.global.f32 [%off], %val;", "st.global.u16 [%off], %val;")
+        .replace("shl.b64 %off, %off, 2;", "shl.b64 %off, %off, 1;")
+}
+
 // ---------------------------------------------------------------------------
 // PTX kernel source strings
 // ---------------------------------------------------------------------------
@@ -19202,6 +19212,94 @@ pub fn gpu_strided_copy_f64(
             .launch_builder(&f)
             .arg(input.inner())
             .arg(out.inner_mut())
+            .arg(&src_offset_u32)
+            .arg(&n_u32)
+            .arg(&out_stride[0])
+            .arg(&out_stride[1])
+            .arg(&out_stride[2])
+            .arg(&out_stride[3])
+            .arg(&out_stride[4])
+            .arg(&out_stride[5])
+            .arg(&out_stride[6])
+            .arg(&out_stride[7])
+            .arg(&src_stride[0])
+            .arg(&src_stride[1])
+            .arg(&src_stride[2])
+            .arg(&src_stride[3])
+            .arg(&src_stride[4])
+            .arg(&src_stride[5])
+            .arg(&src_stride[6])
+            .arg(&src_stride[7])
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
+/// u16-storage variant of [`gpu_strided_copy`] for f16/bf16 bit-pattern
+/// buffers. The copy is byte-for-byte; dtype semantics live in the handle tag.
+#[cfg(feature = "cuda")]
+pub fn gpu_strided_copy_u16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    out_shape: &[usize],
+    src_strides: &[isize],
+    src_offset: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    let n: usize = out_shape.iter().product();
+    let (out_stride, src_stride) = pad_strided_copy_params(out_shape, src_strides, n)?;
+
+    if n == 0 {
+        return device
+            .stream()
+            .alloc_zeros::<u16>(0)
+            .map_err(GpuError::Driver);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let ptx = CACHE.get_or_init(|| {
+        ptx_f32_copy_to_u16(
+            STRIDED_COPY_PTX,
+            "strided_copy_kernel",
+            "strided_copy_u16_kernel",
+        )
+    });
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "strided_copy_u16_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "strided_copy_u16_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = stream.alloc_zeros::<u16>(n).map_err(GpuError::Driver)?;
+    let cfg = launch_cfg(n)?;
+    let src_offset_u32 = src_offset as u32;
+    let n_u32 = n as u32;
+
+    // SAFETY:
+    // - `f` is the cached `strided_copy_u16_kernel` with the same 20-arg ABI
+    //   as the f32/f64 variants.
+    // - `out_stride` and `src_stride` come from `pad_strided_copy_params`,
+    //   which validates rank and rejects negative strides.
+    // - `out` is freshly allocated and each in-bounds thread copies one u16
+    //   element from the logical source view to the contiguous output.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(&mut out)
             .arg(&src_offset_u32)
             .arg(&n_u32)
             .arg(&out_stride[0])

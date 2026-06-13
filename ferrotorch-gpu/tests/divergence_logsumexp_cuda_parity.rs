@@ -8,7 +8,7 @@
 
 #![cfg(feature = "cuda")]
 
-use ferrotorch_core::grad_fns::reduction::{logsumexp, logsumexp_dim};
+use ferrotorch_core::grad_fns::reduction::{logsumexp, logsumexp_dim, logsumexp_dims};
 use ferrotorch_core::{Device, Tensor, TensorStorage, backward};
 use ferrotorch_gpu::init_cuda_backend;
 
@@ -138,6 +138,24 @@ fn cuda_logsumexp_dim_f32_squeezed_backward_stays_on_device() {
             0.09003057, 0.24472847, 0.66524096, 0.01587624, 0.11731043, 0.86681336,
         ],
     );
+}
+
+#[test]
+fn cuda_logsumexp_dims_f64_non_adjacent_axes_backward_stays_cuda() {
+    ensure_cuda();
+    let data: Vec<f64> = (0..24).map(|v| v as f64).collect();
+    let x = cuda_leaf_f64(&data, &[2, 3, 4]);
+    let y = logsumexp_dims(&x, &[0, -1], true).expect("logsumexp_dims f64");
+    assert!(y.is_cuda());
+    assert_eq!(y.shape(), &[1, 3, 1]);
+    assert_close_f64(
+        &host_f64(&y),
+        &[15.440195842754672, 19.440195842754672, 23.440195842754672],
+    );
+
+    backward(&y.sum_all().expect("sum")).expect("backward");
+    let grad = x.grad().expect("grad access").expect("grad");
+    assert!(grad.is_cuda());
 }
 
 #[test]

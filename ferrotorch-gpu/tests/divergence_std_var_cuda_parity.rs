@@ -9,7 +9,7 @@
 #![cfg(feature = "cuda")]
 
 use ferrotorch_core::grad_fns::reduction::{
-    std_dim, std_with_correction, var_dim, var_with_correction,
+    std_dim, std_dims, std_with_correction, var_dim, var_dims, var_with_correction,
 };
 use ferrotorch_core::{Device, Tensor, TensorStorage, backward};
 use ferrotorch_gpu::init_cuda_backend;
@@ -128,6 +128,32 @@ fn cuda_dim_var_std_f64_keepdim_negative_dim() {
     let grad = x.grad().expect("grad access").expect("grad");
     assert!(grad.is_cuda());
     assert_close_f64(&host_f64(&grad), &[-0.5, 0.0, 0.5, -0.5, 0.0, 0.5]);
+}
+
+#[test]
+fn cuda_std_var_dims_f32_non_adjacent_axes_match_torch_math() {
+    ensure_cuda();
+    let data: Vec<f32> = (0..24).map(|v| v as f32).collect();
+    let x = cuda_leaf_f32(&data, &[2, 3, 4]);
+
+    let y = var_dims(&x, &[0, -1], 1.0, false).expect("var_dims cuda f32");
+    assert!(y.is_cuda());
+    assert_eq!(y.shape(), &[3]);
+    assert_close_f32(&host_f32(&y), &[42.57143, 42.57143, 42.57143]);
+
+    let x = cuda_leaf_f32(&data, &[2, 3, 4]);
+    let y = std_dims(&x, &[1, 2], 1.0, true).expect("std_dims cuda f32");
+    assert!(y.is_cuda());
+    assert_eq!(y.shape(), &[2, 1, 1]);
+    let expected = 13.0_f32.sqrt();
+    assert_close_f32(&host_f32(&y), &[expected, expected]);
+    backward(&y.sum_all().expect("sum")).expect("std_dims backward");
+    let grad = x.grad().expect("grad access").expect("grad");
+    assert!(grad.is_cuda());
+    let gd = host_f32(&grad);
+    let denom_std = 11.0 * expected;
+    assert!((gd[0] - ((0.0 - 5.5) / denom_std)).abs() <= 2e-6);
+    assert!((gd[23] - ((23.0 - 17.5) / denom_std)).abs() <= 2e-6);
 }
 
 #[test]

@@ -2,7 +2,9 @@
 
 #![cfg(feature = "cuda")]
 
-use ferrotorch_core::grad_fns::reduction::{nanmean, nanmean_dim, nansum, nansum_dim};
+use ferrotorch_core::grad_fns::reduction::{
+    nanmean, nanmean_dim, nanmean_dims, nansum, nansum_dim, nansum_dims,
+};
 use ferrotorch_core::{Device, Tensor, TensorStorage, backward};
 use ferrotorch_gpu::init_cuda_backend;
 
@@ -104,6 +106,37 @@ fn cuda_nanmean_dim_f32_counts_non_nan_and_matches_all_nan_grad() {
         &host_f32(&grad),
         &[0.5, 0.0, 0.5, f32::NAN, f32::NAN, f32::NAN],
     );
+}
+
+#[test]
+fn cuda_nan_reduction_dims_f32_non_adjacent_axes() {
+    ensure_cuda();
+    let x = cuda_leaf_f32(
+        &[
+            1.0,
+            f32::NAN,
+            3.0,
+            4.0,
+            5.0,
+            6.0,
+            f32::NAN,
+            8.0,
+            9.0,
+            10.0,
+            11.0,
+            12.0,
+        ],
+        &[2, 2, 3],
+    );
+    let y = nansum_dims(&x, &[0, -1], false).expect("nansum_dims");
+    assert!(y.is_cuda());
+    assert_eq!(y.shape(), &[2]);
+    assert_close_f32(&host_f32(&y), &[21.0, 48.0]);
+
+    let y = nanmean_dims(&x, &[0, 2], true).expect("nanmean_dims");
+    assert!(y.is_cuda());
+    assert_eq!(y.shape(), &[1, 2, 1]);
+    assert_close_f32(&host_f32(&y), &[5.25, 8.0]);
 }
 
 #[test]

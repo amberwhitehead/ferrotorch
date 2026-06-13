@@ -668,8 +668,16 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::reduction::sum_dim(self, dim, keepdim)
     }
 
+    pub fn sum_dims(&self, dims: &[i64], keepdim: bool) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::sum_dims(self, dims, keepdim)
+    }
+
     pub fn mean_dim(&self, dim: i64, keepdim: bool) -> FerrotorchResult<Tensor<T>> {
         crate::grad_fns::reduction::mean_dim(self, dim, keepdim)
+    }
+
+    pub fn mean_dims(&self, dims: &[i64], keepdim: bool) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::mean_dims(self, dims, keepdim)
     }
 
     /// Differentiable full-reduction nansum. Mirrors `torch.nansum(self)`.
@@ -682,6 +690,11 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::reduction::nansum_dim(self, dim, keepdim)
     }
 
+    /// Differentiable list-dim nansum. Mirrors `torch.nansum(self, dim=[...], keepdim)`.
+    pub fn nansum_dims_t(&self, dims: &[i64], keepdim: bool) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::nansum_dims(self, dims, keepdim)
+    }
+
     /// Differentiable full-reduction nanmean. Mirrors `torch.nanmean(self)`.
     pub fn nanmean_t(&self) -> FerrotorchResult<Tensor<T>> {
         crate::grad_fns::reduction::nanmean(self)
@@ -690,6 +703,11 @@ impl<T: Float> Tensor<T> {
     /// Differentiable dim-keyed nanmean. Mirrors `torch.nanmean(self, dim, keepdim)`.
     pub fn nanmean_dim_t(&self, dim: i64, keepdim: bool) -> FerrotorchResult<Tensor<T>> {
         crate::grad_fns::reduction::nanmean_dim(self, dim, keepdim)
+    }
+
+    /// Differentiable list-dim nanmean. Mirrors `torch.nanmean(self, dim=[...], keepdim)`.
+    pub fn nanmean_dims_t(&self, dims: &[i64], keepdim: bool) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::nanmean_dims(self, dims, keepdim)
     }
 
     /// Differentiable full-reduction logsumexp. Mirrors
@@ -703,6 +721,11 @@ impl<T: Float> Tensor<T> {
     /// `torch.logsumexp(self, dim, keepdim)`.
     pub fn logsumexp_dim_t(&self, dim: i64, keepdim: bool) -> FerrotorchResult<Tensor<T>> {
         crate::grad_fns::reduction::logsumexp_dim(self, dim, keepdim)
+    }
+
+    /// Differentiable list-dim logsumexp. Mirrors `torch.logsumexp(self, dim=[...], keepdim)`.
+    pub fn logsumexp_dims_t(&self, dims: &[i64], keepdim: bool) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::logsumexp_dims(self, dims, keepdim)
     }
 
     /// Non-differentiable global argmax. Mirrors `torch.argmax(self)`.
@@ -761,6 +784,42 @@ impl<T: Float> Tensor<T> {
     /// #1346 (audit 7cef63f88 REQ-8 full-reduction correction-API gap).
     pub fn std_with_correction_t(&self, correction: f64) -> FerrotorchResult<Tensor<T>> {
         crate::grad_fns::reduction::std_with_correction(self, correction)
+    }
+
+    pub fn var_dim_t(
+        &self,
+        dim: i64,
+        correction: f64,
+        keepdim: bool,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::var_dim(self, dim, correction, keepdim)
+    }
+
+    pub fn std_dim_t(
+        &self,
+        dim: i64,
+        correction: f64,
+        keepdim: bool,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::std_dim(self, dim, correction, keepdim)
+    }
+
+    pub fn var_dims_t(
+        &self,
+        dims: &[i64],
+        correction: f64,
+        keepdim: bool,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::var_dims(self, dims, correction, keepdim)
+    }
+
+    pub fn std_dims_t(
+        &self,
+        dims: &[i64],
+        correction: f64,
+        keepdim: bool,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::std_dims(self, dims, correction, keepdim)
     }
 
     /// Non-differentiable full-reduction `any`. Returns a 0-D BoolTensor
@@ -1637,9 +1696,12 @@ pub fn contiguous_t<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> 
             backend.strided_copy_f32(in_handle, &out_shape, &src_strides, src_offset)
         } else if TypeId::of::<T>() == TypeId::of::<f64>() {
             backend.strided_copy_f64(in_handle, &out_shape, &src_strides, src_offset)
+        } else if TypeId::of::<T>() == TypeId::of::<half::f16>()
+            || TypeId::of::<T>() == TypeId::of::<half::bf16>()
+        {
+            backend.strided_copy_u16(in_handle, &out_shape, &src_strides, src_offset)
         } else {
-            // Unsupported dtype — fall through to CPU path.
-            return contiguous_t_cpu(input);
+            return Err(crate::error::FerrotorchError::NotImplementedOnCuda { op: "contiguous" });
         };
 
         if let Ok(handle) = out_handle {
@@ -1653,8 +1715,7 @@ pub fn contiguous_t<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> 
                 Tensor::from_storage(storage, out_shape, false)
             };
         }
-        // Kernel failure (negative strides, overflow, etc.) —
-        // fall through to the host path which handles any layout.
+        return Err(crate::error::FerrotorchError::NotImplementedOnCuda { op: "contiguous" });
     }
 
     contiguous_t_cpu(input)

@@ -5556,6 +5556,33 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, input.device_ordinal()))
     }
 
+    fn strided_copy_u16(
+        &self,
+        input: &GpuBufferHandle,
+        out_shape: &[usize],
+        src_strides: &[isize],
+        src_offset: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let in_buf = match input.dtype() {
+            DType::F16 => Self::unwrap_buffer_f16(input)?,
+            DType::BF16 => Self::unwrap_buffer_bf16(input)?,
+            other => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("strided_copy_u16 expected F16/BF16, got {other}"),
+                });
+            }
+        };
+        let dev = self.device(input.device_ordinal())?;
+        let result =
+            crate::kernels::gpu_strided_copy_u16(in_buf, out_shape, src_strides, src_offset, dev)
+                .map_err(Self::map_gpu_err)?;
+        Ok(match input.dtype() {
+            DType::F16 => Self::wrap_buffer_f16(result, input.device_ordinal()),
+            DType::BF16 => Self::wrap_buffer_bf16(result, input.device_ordinal()),
+            _ => unreachable!("dtype checked above"),
+        })
+    }
+
     fn strided_scatter_f32(
         &self,
         src: &GpuBufferHandle,

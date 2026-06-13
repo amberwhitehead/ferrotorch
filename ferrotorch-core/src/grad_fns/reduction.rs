@@ -976,6 +976,143 @@ fn outer_axis_inner(in_shape: &[usize], norm_dim: usize) -> (usize, usize, usize
     (outer, axis, inner)
 }
 
+fn normalize_reduction_dims(dims: &[i64], ndim: usize, op: &str) -> FerrotorchResult<Vec<usize>> {
+    let requested: Vec<i64> = if dims.is_empty() {
+        if ndim == 0 {
+            vec![0]
+        } else {
+            (0..ndim as i64).collect()
+        }
+    } else {
+        dims.to_vec()
+    };
+    let effective_ndim = ndim.max(1);
+    let mut norm = Vec::with_capacity(requested.len());
+    for dim in requested {
+        let axis = crate::shape::normalize_axis(dim as isize, effective_ndim)?;
+        if norm.contains(&axis) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("{op}: dim {axis} appears multiple times in the list of dims"),
+            });
+        }
+        norm.push(axis);
+    }
+    norm.sort_unstable();
+    Ok(norm)
+}
+
+struct MultiDimReductionInput<T: Float> {
+    flattened: Tensor<T>,
+    out_shape: Vec<usize>,
+}
+
+fn prepare_multi_dim_reduction<T: Float>(
+    input: &Tensor<T>,
+    dims: &[i64],
+    keepdim: bool,
+    op: &str,
+) -> FerrotorchResult<MultiDimReductionInput<T>> {
+    let ndim = input.ndim();
+    let norm_dims = normalize_reduction_dims(dims, ndim, op)?;
+    if ndim == 0 {
+        return Ok(MultiDimReductionInput {
+            flattened: input.reshape_t(&[1, 1])?,
+            out_shape: Vec::new(),
+        });
+    }
+
+    let shape = input.shape();
+    let mut reduce_mask = vec![false; ndim];
+    for &d in &norm_dims {
+        reduce_mask[d] = true;
+    }
+    let kept_dims: Vec<usize> = (0..ndim).filter(|&d| !reduce_mask[d]).collect();
+    let mut order = kept_dims.clone();
+    order.extend(norm_dims.iter().copied());
+
+    let reduce_len: usize = norm_dims.iter().map(|&d| shape[d]).product();
+    let kept_len: usize = kept_dims.iter().map(|&d| shape[d]).product();
+    let out_shape = if keepdim {
+        let mut s = shape.to_vec();
+        for &d in &norm_dims {
+            s[d] = 1;
+        }
+        s
+    } else {
+        kept_dims.iter().map(|&d| shape[d]).collect()
+    };
+
+    let moved = if order.iter().enumerate().all(|(i, &d)| i == d) {
+        input.clone()
+    } else {
+        crate::methods::permute_t(input, &order)?
+    };
+    let contiguous = crate::methods::contiguous_t(&moved)?;
+    let flattened = contiguous.reshape_t(&[kept_len as isize, reduce_len as isize])?;
+    Ok(MultiDimReductionInput {
+        flattened,
+        out_shape,
+    })
+}
+
+fn finish_multi_dim_reduction<T: Float>(
+    result: &Tensor<T>,
+    out_shape: &[usize],
+) -> FerrotorchResult<Tensor<T>> {
+    let shape: Vec<isize> = out_shape.iter().map(|&d| d as isize).collect();
+    result.reshape_t(&shape)
+}
+
+pub fn sum_dims<T: Float>(
+    input: &Tensor<T>,
+    dims: &[i64],
+    keepdim: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    let prepared = prepare_multi_dim_reduction(input, dims, keepdim, "sum_dims")?;
+    let reduced = sum_dim(&prepared.flattened, 1, false)?;
+    finish_multi_dim_reduction(&reduced, &prepared.out_shape)
+}
+
+pub fn mean_dims<T: Float>(
+    input: &Tensor<T>,
+    dims: &[i64],
+    keepdim: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    let prepared = prepare_multi_dim_reduction(input, dims, keepdim, "mean_dims")?;
+    let reduced = mean_dim(&prepared.flattened, 1, false)?;
+    finish_multi_dim_reduction(&reduced, &prepared.out_shape)
+}
+
+pub fn nansum_dims<T: Float>(
+    input: &Tensor<T>,
+    dims: &[i64],
+    keepdim: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    let prepared = prepare_multi_dim_reduction(input, dims, keepdim, "nansum_dims")?;
+    let reduced = nansum_dim(&prepared.flattened, 1, false)?;
+    finish_multi_dim_reduction(&reduced, &prepared.out_shape)
+}
+
+pub fn nanmean_dims<T: Float>(
+    input: &Tensor<T>,
+    dims: &[i64],
+    keepdim: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    let prepared = prepare_multi_dim_reduction(input, dims, keepdim, "nanmean_dims")?;
+    let reduced = nanmean_dim(&prepared.flattened, 1, false)?;
+    finish_multi_dim_reduction(&reduced, &prepared.out_shape)
+}
+
+pub fn logsumexp_dims<T: Float>(
+    input: &Tensor<T>,
+    dims: &[i64],
+    keepdim: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    let prepared = prepare_multi_dim_reduction(input, dims, keepdim, "logsumexp_dims")?;
+    let reduced = logsumexp_dim(&prepared.flattened, 1, false)?;
+    finish_multi_dim_reduction(&reduced, &prepared.out_shape)
+}
+
 fn sum_dim_inner<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -3470,6 +3607,35 @@ pub fn std_dim<T: Float>(
     } else {
         Ok(result)
     }
+}
+
+/// Variance over one or more dimensions. Negative dims are normalized,
+/// duplicates are rejected, and an empty dim list reduces all dimensions.
+/// The selected axes are flattened and reduced once, so the correction
+/// denominator is the full reduction element count.
+pub fn var_dims<T: Float>(
+    input: &Tensor<T>,
+    dims: &[i64],
+    correction: f64,
+    keepdim: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    let prepared = prepare_multi_dim_reduction(input, dims, keepdim, "var_dims")?;
+    let reduced = var_dim(&prepared.flattened, 1, correction, false)?;
+    finish_multi_dim_reduction(&reduced, &prepared.out_shape)
+}
+
+/// Standard deviation over one or more dimensions. This deliberately does
+/// not chain `std_dim`; PyTorch computes one combined-axis variance and then
+/// takes the square root.
+pub fn std_dims<T: Float>(
+    input: &Tensor<T>,
+    dims: &[i64],
+    correction: f64,
+    keepdim: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    let prepared = prepare_multi_dim_reduction(input, dims, keepdim, "std_dims")?;
+    let reduced = std_dim(&prepared.flattened, 1, correction, false)?;
+    finish_multi_dim_reduction(&reduced, &prepared.out_shape)
 }
 
 // ---------------------------------------------------------------------------

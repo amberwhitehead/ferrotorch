@@ -13,7 +13,8 @@
 use ferrotorch_core::Tensor;
 use ferrotorch_core::grad_fns::reduction::{
     all as red_all, any as red_any, argmax, argmax_dim, argmin, argmin_dim, count_nonzero,
-    logsumexp, logsumexp_dim, std as red_std, var as red_var,
+    logsumexp, logsumexp_dim, logsumexp_dims, mean_dims, std as red_std, std_dims, sum_dims,
+    var as red_var, var_dims,
 };
 use ferrotorch_core::storage::TensorStorage;
 
@@ -206,6 +207,63 @@ fn std_backward_handcomputed() {
     for (a, b) in gd.iter().zip(expected.iter()) {
         assert!((a - b).abs() < 1e-10, "got {a} expected {b}");
     }
+}
+
+#[test]
+fn sum_mean_dims_reduce_non_adjacent_axes_and_keepdim() {
+    let data: Vec<f64> = (0..24).map(|v| v as f64).collect();
+    let x = leaf(&data, &[2, 3, 4], false);
+
+    let s = sum_dims(&x, &[0, -1], false).expect("sum_dims");
+    assert_eq!(s.shape(), &[3]);
+    assert_eq!(s.data().expect("sum data"), &[60.0, 92.0, 124.0]);
+
+    let m = mean_dims(&x, &[0, 2], true).expect("mean_dims keepdim");
+    assert_eq!(m.shape(), &[1, 3, 1]);
+    assert_eq!(m.data().expect("mean data"), &[7.5, 11.5, 15.5]);
+}
+
+#[test]
+fn std_var_dims_reduce_combined_axis_not_chained_std() {
+    let data: Vec<f64> = (0..24).map(|v| v as f64).collect();
+    let x = leaf(&data, &[2, 3, 4], true);
+
+    let v = var_dims(&x, &[1, 2], 1.0, false).expect("var_dims");
+    assert_eq!(v.shape(), &[2]);
+    assert_eq!(v.data().expect("var data"), &[13.0, 13.0]);
+
+    let s = std_dims(&x, &[1, 2], 1.0, true).expect("std_dims");
+    assert_eq!(s.shape(), &[2, 1, 1]);
+    let sd = s.data().expect("std data");
+    let expected = 13.0_f64.sqrt();
+    assert!((sd[0] - expected).abs() < 1e-12);
+    assert!((sd[1] - expected).abs() < 1e-12);
+
+    s.sum_all().expect("sum").backward().expect("backward");
+    let grad = x.grad().expect("grad access").expect("grad");
+    assert_eq!(grad.shape(), &[2, 3, 4]);
+    let gd = grad.data().expect("grad data");
+    let denom_std = 11.0 * expected;
+    assert!((gd[0] - ((0.0 - 5.5) / denom_std)).abs() < 1e-12);
+    assert!((gd[11] - ((11.0 - 5.5) / denom_std)).abs() < 1e-12);
+    assert!((gd[12] - ((12.0 - 17.5) / denom_std)).abs() < 1e-12);
+    assert!((gd[23] - ((23.0 - 17.5) / denom_std)).abs() < 1e-12);
+}
+
+#[test]
+fn reduction_dims_duplicate_rejected_and_empty_reduces_all() {
+    let x = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+    let err = sum_dims(&x, &[1, -1], false).expect_err("duplicate dims must error");
+    assert!(format!("{err}").contains("appears multiple times"));
+
+    let s = sum_dims(&x, &[], true).expect("empty dims reduce all");
+    assert_eq!(s.shape(), &[1, 1]);
+    assert_eq!(s.data().expect("data"), &[10.0]);
+
+    let l = logsumexp_dims(&x, &[], true).expect("logsumexp empty dims keepdim");
+    assert_eq!(l.shape(), &[1, 1]);
+    let expected = (1.0_f64.exp() + 2.0_f64.exp() + 3.0_f64.exp() + 4.0_f64.exp()).ln();
+    assert!((l.data().expect("data")[0] - expected).abs() < 1e-12);
 }
 
 // ----- any / all / count_nonzero -----

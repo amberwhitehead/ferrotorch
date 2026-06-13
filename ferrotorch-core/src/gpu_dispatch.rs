@@ -3618,6 +3618,17 @@ pub trait GpuBackend: Send + Sync {
             message: "strided_copy_f64 GPU op not yet implemented".into(),
         })
     }
+    fn strided_copy_u16(
+        &self,
+        _input: &GpuBufferHandle,
+        _out_shape: &[usize],
+        _src_strides: &[isize],
+        _src_offset: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "strided_copy_u16 GPU op not yet implemented".into(),
+        })
+    }
 
     // Strided scatter: write a contiguous src into strided positions of
     // dst (in-place). Inverse of strided_copy. Used by
