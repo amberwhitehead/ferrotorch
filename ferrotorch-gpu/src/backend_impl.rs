@@ -2203,6 +2203,23 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(grad, input.device_ordinal()))
     }
 
+    fn logsumexp_axis_f64(
+        &self,
+        input: &GpuBufferHandle,
+        outer: usize,
+        axis_size: usize,
+        inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f64(input)?;
+        let dev = self.device(input.device_ordinal())?;
+        let (sum, shift) =
+            crate::kernels::gpu_logsumexp_sum_shift_f64(input_buf, outer, axis_size, inner, dev)
+                .map_err(Self::map_gpu_err)?;
+        let result = crate::kernels::gpu_logsumexp_finalize_f64(&sum, &shift, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, input.device_ordinal()))
+    }
+
     fn min_f64(&self, a: &GpuBufferHandle, _n: usize) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
@@ -3016,6 +3033,23 @@ impl GpuBackend for CudaBackendImpl {
         )
         .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(grad, input.device_ordinal()))
+    }
+
+    fn logsumexp_axis_f32(
+        &self,
+        input: &GpuBufferHandle,
+        outer: usize,
+        axis_size: usize,
+        inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer(input)?;
+        let dev = self.device(input.device_ordinal())?;
+        let (sum, shift) =
+            crate::kernels::gpu_logsumexp_sum_shift(input_buf, outer, axis_size, inner, dev)
+                .map_err(Self::map_gpu_err)?;
+        let log_sum = crate::kernels::gpu_log(&sum, dev).map_err(Self::map_gpu_err)?;
+        let result = crate::kernels::gpu_add(&log_sum, &shift, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, input.device_ordinal()))
     }
 
     fn min_f32(&self, a: &GpuBufferHandle, _len: usize) -> FerrotorchResult<GpuBufferHandle> {

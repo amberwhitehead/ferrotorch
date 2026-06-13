@@ -1408,9 +1408,74 @@ pub struct LogsumexpBackward<T: Float> {
 impl<T: Float> GradFn<T> for LogsumexpBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         if self.input.is_cuda() {
-            return Err(FerrotorchError::NotImplementedOnCuda {
-                op: "logsumexp backward",
-            });
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let input_ref = if self.input.is_contiguous() {
+                self.input.clone()
+            } else {
+                self.input.contiguous()?
+            };
+            let go_on_device = if grad_output.is_cuda() {
+                grad_output.clone()
+            } else {
+                grad_output.to(self.input.device())?
+            };
+            let result_on_device = if self.result.is_cuda() {
+                self.result.clone()
+            } else {
+                self.result.to(self.input.device())?
+            };
+            let input_shape = input_ref.shape().to_vec();
+            let grad_handle = crate::dispatch_floating_dtype!(
+                T,
+                "logsumexp backward",
+                f32 => {
+                    let shifted = backend.broadcast_sub_f32(
+                        input_ref.gpu_handle()?,
+                        result_on_device.gpu_handle()?,
+                        &input_shape,
+                        &[],
+                        &input_shape,
+                    )?;
+                    let weights = backend.exp_f32(&shifted)?;
+                    backend.broadcast_mul_f32(
+                        &weights,
+                        go_on_device.gpu_handle()?,
+                        &input_shape,
+                        &[],
+                        &input_shape,
+                    )
+                },
+                f64 => {
+                    let shifted = backend.broadcast_sub_f64(
+                        input_ref.gpu_handle()?,
+                        result_on_device.gpu_handle()?,
+                        &input_shape,
+                        &[],
+                        &input_shape,
+                    )?;
+                    let weights = backend.exp_f64(&shifted)?;
+                    backend.broadcast_mul_f64(
+                        &weights,
+                        go_on_device.gpu_handle()?,
+                        &input_shape,
+                        &[],
+                        &input_shape,
+                    )
+                },
+                bf16 => Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "logsumexp backward"
+                }),
+                f16 => Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "logsumexp backward"
+                }),
+            )?;
+            let grad_input = Tensor::from_storage(
+                TensorStorage::gpu(grad_handle),
+                self.input.shape().to_vec(),
+                false,
+            )?;
+            return Ok(vec![Some(grad_input)]);
         }
         let go = grad_output.data()?[0];
         let r = self.result.data()?[0];
@@ -1443,7 +1508,26 @@ pub fn logsumexp<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if let Some(out) = crate::meta_propagate::reduce_all(input)? {
         return Ok(out);
     }
-    let result = elementwise::logsumexp(input)?;
+    let result = if input.is_cuda() {
+        let input_ref = if input.is_contiguous() {
+            input.clone()
+        } else {
+            input.contiguous()?
+        };
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = crate::dispatch_floating_dtype!(
+            T,
+            "logsumexp",
+            f32 => backend.logsumexp_axis_f32(input_ref.gpu_handle()?, 1, input_ref.numel(), 1),
+            f64 => backend.logsumexp_axis_f64(input_ref.gpu_handle()?, 1, input_ref.numel(), 1),
+            bf16 => Err(FerrotorchError::NotImplementedOnCuda { op: "logsumexp" }),
+            f16 => Err(FerrotorchError::NotImplementedOnCuda { op: "logsumexp" }),
+        )?;
+        Tensor::from_storage(TensorStorage::gpu(handle), vec![], false)?
+    } else {
+        elementwise::logsumexp(input)?
+    };
 
     if is_grad_enabled() && input.requires_grad() {
         let grad_fn = Arc::new(LogsumexpBackward {
@@ -1478,9 +1562,79 @@ pub struct LogsumexpDimBackward<T: Float> {
 impl<T: Float> GradFn<T> for LogsumexpDimBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         if self.input.is_cuda() {
-            return Err(FerrotorchError::NotImplementedOnCuda {
-                op: "logsumexp_dim backward",
-            });
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let input_ref = if self.input.is_contiguous() {
+                self.input.clone()
+            } else {
+                self.input.contiguous()?
+            };
+            let go_on_device = if grad_output.is_cuda() {
+                grad_output.clone()
+            } else {
+                grad_output.to(self.input.device())?
+            };
+            let result_ref = if self.result_keepdim.is_cuda() {
+                self.result_keepdim.clone()
+            } else {
+                self.result_keepdim.to(self.input.device())?
+            };
+            let input_shape = input_ref.shape().to_vec();
+            if input_shape.is_empty() {
+                return Ok(vec![Some(go_on_device)]);
+            }
+            let mut keepdim_shape = input_shape.clone();
+            keepdim_shape[self.dim] = 1;
+            let grad_handle = crate::dispatch_floating_dtype!(
+                T,
+                "logsumexp_dim backward",
+                f32 => {
+                    let shifted = backend.broadcast_sub_f32(
+                        input_ref.gpu_handle()?,
+                        result_ref.gpu_handle()?,
+                        &input_shape,
+                        &keepdim_shape,
+                        &input_shape,
+                    )?;
+                    let weights = backend.exp_f32(&shifted)?;
+                    backend.broadcast_mul_f32(
+                        &weights,
+                        go_on_device.gpu_handle()?,
+                        &input_shape,
+                        &keepdim_shape,
+                        &input_shape,
+                    )
+                },
+                f64 => {
+                    let shifted = backend.broadcast_sub_f64(
+                        input_ref.gpu_handle()?,
+                        result_ref.gpu_handle()?,
+                        &input_shape,
+                        &keepdim_shape,
+                        &input_shape,
+                    )?;
+                    let weights = backend.exp_f64(&shifted)?;
+                    backend.broadcast_mul_f64(
+                        &weights,
+                        go_on_device.gpu_handle()?,
+                        &input_shape,
+                        &keepdim_shape,
+                        &input_shape,
+                    )
+                },
+                bf16 => Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "logsumexp_dim backward"
+                }),
+                f16 => Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "logsumexp_dim backward"
+                }),
+            )?;
+            let grad_input = Tensor::from_storage(
+                TensorStorage::gpu(grad_handle),
+                self.input.shape().to_vec(),
+                false,
+            )?;
+            return Ok(vec![Some(grad_input)]);
         }
         let input_shape = self.input.shape();
         let input_data = self.input.data()?;
@@ -1546,9 +1700,24 @@ pub fn logsumexp_dim<T: Float>(
     }
     let ndim = input.ndim();
     if ndim == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "logsumexp_dim: cannot reduce a 0-D tensor along a dimension".into(),
-        });
+        if dim != 0 && dim != -1 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "logsumexp_dim: dimension out of range (expected [-1, 0], got {dim})"
+                ),
+            });
+        }
+        let result = input.clone();
+        if is_grad_enabled() && input.requires_grad() {
+            let grad_fn = Arc::new(LogsumexpDimBackward {
+                input: input.clone(),
+                result_keepdim: result.clone(),
+                dim: 0,
+            });
+            let (storage, shape) = result.into_storage_and_shape()?;
+            return Tensor::from_operation(storage, shape, grad_fn);
+        }
+        return Ok(result);
     }
     let norm_dim = if dim < 0 {
         (ndim as i64 + dim) as usize
@@ -1567,7 +1736,36 @@ pub fn logsumexp_dim<T: Float>(
     // This matches upstream's `at::sum_out(result, (self - maxes).exp_(), dims,
     // keepdim).log_().add_(maxes_squeezed)` pipeline at `ReduceOps.cpp:1520`,
     // where `maxes` is computed via `at::amax(..., dims, /*keepdim=*/true)`.
-    let result_keepdim = elementwise::logsumexp_dim(input, norm_dim, true)?;
+    let result_keepdim = if input.is_cuda() {
+        let input_ref = if input.is_contiguous() {
+            input.clone()
+        } else {
+            input.contiguous()?
+        };
+        let in_shape = input_ref.shape().to_vec();
+        let outer: usize = in_shape[..norm_dim].iter().product();
+        let axis_size = in_shape[norm_dim];
+        let inner: usize = in_shape[norm_dim + 1..].iter().product();
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = crate::dispatch_floating_dtype!(
+            T,
+            "logsumexp_dim",
+            f32 => backend.logsumexp_axis_f32(input_ref.gpu_handle()?, outer, axis_size, inner),
+            f64 => backend.logsumexp_axis_f64(input_ref.gpu_handle()?, outer, axis_size, inner),
+            bf16 => Err(FerrotorchError::NotImplementedOnCuda {
+                op: "logsumexp_dim"
+            }),
+            f16 => Err(FerrotorchError::NotImplementedOnCuda {
+                op: "logsumexp_dim"
+            }),
+        )?;
+        let mut shape = in_shape;
+        shape[norm_dim] = 1;
+        Tensor::from_storage(TensorStorage::gpu(handle), shape, false)?
+    } else {
+        elementwise::logsumexp_dim(input, norm_dim, true)?
+    };
     let in_shape = input.shape();
     let mut keepdim_shape: Vec<usize> = in_shape.to_vec();
     keepdim_shape[norm_dim] = 1;
@@ -1576,11 +1774,16 @@ pub fn logsumexp_dim<T: Float>(
         result_keepdim.clone()
     } else {
         // Squeeze the reduced dim. The result was built fresh; rebuild a
-        // tensor with the squeezed shape over the same CPU buffer.
-        let data = result_keepdim.data()?.to_vec();
+        // tensor with the squeezed shape over the same buffer.
         let mut s = keepdim_shape.clone();
         s.remove(norm_dim);
-        Tensor::from_storage(TensorStorage::cpu(data), s, false)?
+        if result_keepdim.is_cuda() {
+            let (storage, _) = result_keepdim.clone().into_storage_and_shape()?;
+            Tensor::from_storage(storage, s, false)?
+        } else {
+            let data = result_keepdim.data()?.to_vec();
+            Tensor::from_storage(TensorStorage::cpu(data), s, false)?
+        }
     };
 
     if is_grad_enabled() && input.requires_grad() {

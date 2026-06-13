@@ -3350,6 +3350,30 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    fn logsumexp_axis_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "logsumexp_axis_f32",
+        })
+    }
+
+    fn logsumexp_axis_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "logsumexp_axis_f64",
+        })
+    }
+
     /// Axis `amin` for f32. Collapses `shape[axis]` and returns a flat
     /// `[outer, inner]` buffer before the caller restores keepdim metadata.
     fn min_axis_f32(

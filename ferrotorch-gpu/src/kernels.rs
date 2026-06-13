@@ -7449,6 +7449,351 @@ DONE:
 ";
 
 #[cfg(feature = "cuda")]
+pub(crate) const LOGSUMEXP_SUM_SHIFT_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry logsumexp_sum_shift_kernel(
+    .param .u64 input_ptr,
+    .param .u64 sum_ptr,
+    .param .u64 shift_ptr,
+    .param .u32 outer_size,
+    .param .u32 axis_size,
+    .param .u32 inner_size,
+    .param .u32 total_output
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %total, %outer_sz, %axis_sz, %inner_sz;
+    .reg .u32 %outer_idx, %inner_idx, %k, %base, %idx;
+    .reg .u32 %bits, %exp_bits;
+    .reg .u64 %in, %sum_out, %shift_out, %off, %addr;
+    .reg .f32 %val, %max_val, %shift, %sum_val, %arg, %exp_val, %zero;
+    .reg .pred %p, %lp, %is_nan, %has_nan, %is_pos_inf, %is_neg_inf, %is_inf, %gt;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %sum_out, [sum_ptr];
+    ld.param.u64 %shift_out, [shift_ptr];
+    ld.param.u32 %outer_sz, [outer_size];
+    ld.param.u32 %axis_sz, [axis_size];
+    ld.param.u32 %inner_sz, [inner_size];
+    ld.param.u32 %total, [total_output];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %total;
+    @%p bra DONE;
+
+    div.u32 %outer_idx, %r_tid, %inner_sz;
+    rem.u32 %inner_idx, %r_tid, %inner_sz;
+    mul.lo.u32 %base, %outer_idx, %axis_sz;
+    mul.lo.u32 %base, %base, %inner_sz;
+    add.u32 %base, %base, %inner_idx;
+
+    mov.f32 %zero, 0f00000000;
+    mov.f32 %max_val, 0fFF800000;
+    mov.pred %has_nan, 0;
+    mov.u32 %k, 0;
+MAX_LOOP:
+    setp.ge.u32 %lp, %k, %axis_sz;
+    @%lp bra MAX_DONE;
+    mul.lo.u32 %idx, %k, %inner_sz;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %val, [%addr];
+    setp.nan.f32 %is_nan, %val, %val;
+    @%is_nan mov.pred %has_nan, 1;
+    setp.gt.f32 %gt, %val, %max_val;
+    @%gt mov.f32 %max_val, %val;
+    add.u32 %k, %k, 1;
+    bra MAX_LOOP;
+MAX_DONE:
+    @%has_nan mov.f32 %max_val, 0f7FC00000;
+
+    mov.f32 %shift, %max_val;
+    mov.b32 %bits, %max_val;
+    and.b32 %exp_bits, %bits, 0x7F800000;
+    setp.eq.u32 %is_inf, %exp_bits, 0x7F800000;
+    @%is_inf mov.f32 %shift, %zero;
+
+    mov.f32 %sum_val, %zero;
+    mov.u32 %k, 0;
+SUM_LOOP:
+    setp.ge.u32 %lp, %k, %axis_sz;
+    @%lp bra SUM_DONE;
+    mul.lo.u32 %idx, %k, %inner_sz;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %val, [%addr];
+    sub.f32 %arg, %val, %shift;
+    mul.f32 %arg, %arg, 0f3FB8AA3B;
+    ex2.approx.f32 %exp_val, %arg;
+    add.f32 %sum_val, %sum_val, %exp_val;
+    add.u32 %k, %k, 1;
+    bra SUM_LOOP;
+SUM_DONE:
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %sum_out, %off;
+    st.global.f32 [%addr], %sum_val;
+    add.u64 %addr, %shift_out, %off;
+    st.global.f32 [%addr], %shift;
+
+DONE:
+    ret;
+}
+";
+
+#[cfg(feature = "cuda")]
+pub(crate) const LOGSUMEXP_SUM_SHIFT_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry logsumexp_sum_shift_f64_kernel(
+    .param .u64 input_ptr,
+    .param .u64 sum_ptr,
+    .param .u64 shift_ptr,
+    .param .u32 outer_size,
+    .param .u32 axis_size,
+    .param .u32 inner_size,
+    .param .u32 total_output
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %total, %outer_sz, %axis_sz, %inner_sz;
+    .reg .u32 %outer_idx, %inner_idx, %k, %base, %idx;
+    .reg .u64 %bits, %exp_bits;
+    .reg .u64 %in, %sum_out, %shift_out, %off, %addr;
+    .reg .f64 %val, %max_val, %shift, %sum_val, %arg, %exp_val, %zero;
+    .reg .f64 %e_nf, %e_r, %e_p, %e_half, %e_one, %neg_inf;
+    .reg .s32 %e_ni;
+    .reg .s64 %e_ni64, %e_bits;
+    .reg .pred %p, %lp, %is_nan, %has_nan, %is_inf, %gt, %p_underflow;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %sum_out, [sum_ptr];
+    ld.param.u64 %shift_out, [shift_ptr];
+    ld.param.u32 %outer_sz, [outer_size];
+    ld.param.u32 %axis_sz, [axis_size];
+    ld.param.u32 %inner_sz, [inner_size];
+    ld.param.u32 %total, [total_output];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %total;
+    @%p bra DONE;
+
+    div.u32 %outer_idx, %r_tid, %inner_sz;
+    rem.u32 %inner_idx, %r_tid, %inner_sz;
+    mul.lo.u32 %base, %outer_idx, %axis_sz;
+    mul.lo.u32 %base, %base, %inner_sz;
+    add.u32 %base, %base, %inner_idx;
+
+    mov.f64 %zero, 0d0000000000000000;
+    mov.f64 %max_val, 0dFFF0000000000000;
+    mov.pred %has_nan, 0;
+    mov.u32 %k, 0;
+MAX_LOOP:
+    setp.ge.u32 %lp, %k, %axis_sz;
+    @%lp bra MAX_DONE;
+    mul.lo.u32 %idx, %k, %inner_sz;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %in, %off;
+    ld.global.f64 %val, [%addr];
+    setp.nan.f64 %is_nan, %val, %val;
+    @%is_nan mov.pred %has_nan, 1;
+    setp.gt.f64 %gt, %val, %max_val;
+    @%gt mov.f64 %max_val, %val;
+    add.u32 %k, %k, 1;
+    bra MAX_LOOP;
+MAX_DONE:
+    @%has_nan mov.f64 %max_val, 0d7FF8000000000000;
+
+    mov.f64 %shift, %max_val;
+    mov.b64 %bits, %max_val;
+    and.b64 %exp_bits, %bits, 0x7FF0000000000000;
+    setp.eq.u64 %is_inf, %exp_bits, 0x7FF0000000000000;
+    @%is_inf mov.f64 %shift, %zero;
+
+    mov.f64 %sum_val, 0d0000000000000000;
+    mov.u32 %k, 0;
+SUM_LOOP:
+    setp.ge.u32 %lp, %k, %axis_sz;
+    @%lp bra SUM_DONE;
+    mul.lo.u32 %idx, %k, %inner_sz;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %in, %off;
+    ld.global.f64 %val, [%addr];
+    sub.f64 %arg, %val, %shift;
+    mov.f64 %neg_inf, 0dFFF0000000000000;
+    setp.le.f64 %p_underflow, %arg, %neg_inf;
+    @%p_underflow bra EXP_UNDERFLOW;
+    mov.f64 %e_one, 0d3FF0000000000000;
+    mov.f64 %e_half, 0d3FE0000000000000;
+    mul.f64 %e_nf, %arg, 0d3FF71547652B82FE;
+    cvt.rni.f64.f64 %e_nf, %e_nf;
+    cvt.rni.s32.f64 %e_ni, %e_nf;
+    fma.rn.f64 %e_r, %e_nf, 0dBFE62E42FEFA3800, %arg;
+    fma.rn.f64 %e_r, %e_nf, 0dBD2EF35793C76730, %e_r;
+    mov.f64 %e_p, 0d3E5AE64567F544E4;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3E927E4FB7789F5C;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3EC71DE3A556C734;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3EFA01A01A01A01A;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F2A01A01A01A01A;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F56C16C16C16C17;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F81111111111111;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3FA5555555555555;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3FC5555555555555;
+    fma.rn.f64 %e_p, %e_p, %e_r, %e_half;
+    fma.rn.f64 %e_p, %e_p, %e_r, %e_one;
+    fma.rn.f64 %exp_val, %e_p, %e_r, %e_one;
+    cvt.s64.s32 %e_ni64, %e_ni;
+    add.s64 %e_ni64, %e_ni64, 1023;
+    shl.b64 %e_bits, %e_ni64, 52;
+    mov.b64 %e_nf, %e_bits;
+    mul.f64 %exp_val, %exp_val, %e_nf;
+    bra EXP_DONE;
+EXP_UNDERFLOW:
+    mov.f64 %exp_val, 0d0000000000000000;
+EXP_DONE:
+    add.f64 %sum_val, %sum_val, %exp_val;
+    add.u32 %k, %k, 1;
+    bra SUM_LOOP;
+SUM_DONE:
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %sum_out, %off;
+    st.global.f64 [%addr], %sum_val;
+    add.u64 %addr, %shift_out, %off;
+    st.global.f64 [%addr], %shift;
+
+DONE:
+    ret;
+}
+";
+
+#[cfg(feature = "cuda")]
+pub(crate) const LOGSUMEXP_FINALIZE_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry logsumexp_finalize_f64_kernel(
+    .param .u64 sum_ptr,
+    .param .u64 shift_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %sum_p, %shift_p, %out, %off;
+    .reg .u64 %xbits, %mantissa_bits, %bias_bits;
+    .reg .f64 %x, %shift, %vr, %m, %f, %f2, %s, %poly;
+    .reg .f64 %ln2_hi, %ln2_lo, %one, %two, %sqrt2, %half_const;
+    .reg .s64 %exp64;
+    .reg .f64 %nf;
+    .reg .pred %p_tid, %p_zero, %p_nan, %p_inf, %p_shift;
+
+    ld.param.u64 %sum_p, [sum_ptr];
+    ld.param.u64 %shift_p, [shift_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p_tid, %r_tid, %n_reg;
+    @%p_tid bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 3;
+    add.u64 %sum_p, %sum_p, %off;
+    add.u64 %shift_p, %shift_p, %off;
+    add.u64 %out, %out, %off;
+    ld.global.f64 %x, [%sum_p];
+    ld.global.f64 %shift, [%shift_p];
+
+    setp.nan.f64 %p_nan, %x, %x;
+    @%p_nan bra WRITE_NAN;
+    setp.eq.f64 %p_zero, %x, 0d0000000000000000;
+    @%p_zero bra WRITE_NEG_INF;
+    setp.eq.f64 %p_inf, %x, 0d7FF0000000000000;
+    @%p_inf bra WRITE_POS_INF;
+
+    mov.f64 %ln2_hi, 0d3FE62E42FEFA3800;
+    mov.f64 %ln2_lo, 0d3D2EF35793C76730;
+    mov.f64 %one, 0d3FF0000000000000;
+    mov.f64 %two, 0d4000000000000000;
+
+    mov.b64 %xbits, %x;
+    shr.u64 %exp64, %xbits, 52;
+    and.b64 %exp64, %exp64, 2047;
+    sub.s64 %exp64, %exp64, 1023;
+    cvt.rn.f64.s64 %nf, %exp64;
+    mov.u64 %bias_bits, 0x3FF0000000000000;
+    and.b64 %mantissa_bits, %xbits, 0x000FFFFFFFFFFFFF;
+    or.b64 %mantissa_bits, %mantissa_bits, %bias_bits;
+    mov.b64 %m, %mantissa_bits;
+
+    mov.f64 %sqrt2, 0d3FF6A09E667F3BCD;
+    mov.f64 %half_const, 0d3FE0000000000000;
+    setp.gt.f64 %p_shift, %m, %sqrt2;
+    @%p_shift mul.f64 %m, %m, %half_const;
+    @%p_shift add.f64 %nf, %nf, %one;
+
+    sub.f64 %f, %m, %one;
+    add.f64 %s, %m, %one;
+    div.rn.f64 %f, %f, %s;
+    mul.f64 %f2, %f, %f;
+    mov.f64 %poly, 0d3FB1111111111111;
+    fma.rn.f64 %poly, %poly, %f2, 0d3FB3B13B13B13B14;
+    fma.rn.f64 %poly, %poly, %f2, 0d3FB745D1745D1746;
+    fma.rn.f64 %poly, %poly, %f2, 0d3FBC71C71C71C71C;
+    fma.rn.f64 %poly, %poly, %f2, 0d3FC2492492492492;
+    fma.rn.f64 %poly, %poly, %f2, 0d3FC999999999999A;
+    fma.rn.f64 %poly, %poly, %f2, 0d3FD5555555555555;
+    fma.rn.f64 %poly, %poly, %f2, %one;
+    mul.f64 %poly, %poly, %f;
+    add.f64 %poly, %poly, %poly;
+    fma.rn.f64 %vr, %nf, %ln2_hi, %poly;
+    fma.rn.f64 %vr, %nf, %ln2_lo, %vr;
+    add.f64 %vr, %vr, %shift;
+    st.global.f64 [%out], %vr;
+    bra DONE;
+
+WRITE_NAN:
+    mov.f64 %vr, 0d7FF8000000000000;
+    st.global.f64 [%out], %vr;
+    bra DONE;
+WRITE_NEG_INF:
+    mov.f64 %vr, 0dFFF0000000000000;
+    st.global.f64 [%out], %vr;
+    bra DONE;
+WRITE_POS_INF:
+    mov.f64 %vr, 0d7FF0000000000000;
+    st.global.f64 [%out], %vr;
+
+DONE:
+    ret;
+}
+";
+
+#[cfg(feature = "cuda")]
 pub(crate) const EXTREME_AXIS_PTX: &str = "\
 .version 7.0
 .target sm_52
@@ -17239,6 +17584,190 @@ pub fn gpu_std_var_axis_backward_f64(
             .arg(&total_u32)
             .arg(&correction)
             .arg(&take_sqrt_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "cuda")]
+/// Compute per-slice `sum(exp(x - shift))` and the masked shift for f32 logsumexp.
+///
+/// Input layout is `[outer, axis_size, inner]`; both returned buffers are flat
+/// `[outer, inner]`. Infinite maxima are masked to shift `0`, matching ATen's
+/// `maxes.masked_fill_(abs(maxes) == inf, 0)` stable logsumexp path.
+pub fn gpu_logsumexp_sum_shift(
+    input: &CudaBuffer<f32>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<f32>)> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_unary(input, device)?;
+    let (_, total_output) = validate_axis_prod_dims(
+        "gpu_logsumexp_sum_shift_f32",
+        input.len(),
+        None,
+        outer,
+        axis_size,
+        inner,
+    )?;
+    let mut sum = alloc_zeros_f32(total_output, device)?;
+    let mut shift = alloc_zeros_f32(total_output, device)?;
+    if total_output == 0 {
+        return Ok((sum, shift));
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        LOGSUMEXP_SUM_SHIFT_PTX,
+        "logsumexp_sum_shift_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "logsumexp_sum_shift_kernel",
+        source: e,
+    })?;
+    let cfg = launch_cfg(total_output)?;
+    let (outer_u32, axis_u32, inner_u32, total_u32) = (
+        outer as u32,
+        axis_size as u32,
+        inner as u32,
+        total_output as u32,
+    );
+    // SAFETY: shape product and u32 bounds are validated above. Each thread
+    // computes one `[outer, inner]` output slice and scans within its
+    // corresponding `[axis]` span.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(sum.inner_mut())
+            .arg(shift.inner_mut())
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+    Ok((sum, shift))
+}
+
+#[cfg(feature = "cuda")]
+/// Compute per-slice `sum(exp(x - shift))` and the masked shift for f64 logsumexp.
+///
+/// This is the f64 companion of [`gpu_logsumexp_sum_shift`].
+pub fn gpu_logsumexp_sum_shift_f64(
+    input: &CudaBuffer<f64>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<f64>)> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_device(input, device)?;
+    let (_, total_output) = validate_axis_prod_dims(
+        "gpu_logsumexp_sum_shift_f64",
+        input.len(),
+        None,
+        outer,
+        axis_size,
+        inner,
+    )?;
+    let mut sum = alloc_zeros_f64(total_output, device)?;
+    let mut shift = alloc_zeros_f64(total_output, device)?;
+    if total_output == 0 {
+        return Ok((sum, shift));
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        LOGSUMEXP_SUM_SHIFT_F64_PTX,
+        "logsumexp_sum_shift_f64_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "logsumexp_sum_shift_f64_kernel",
+        source: e,
+    })?;
+    let cfg = launch_cfg(total_output)?;
+    let (outer_u32, axis_u32, inner_u32, total_u32) = (
+        outer as u32,
+        axis_size as u32,
+        inner as u32,
+        total_output as u32,
+    );
+    // SAFETY: same layout and bounds contract as the f32 launcher.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(sum.inner_mut())
+            .arg(shift.inner_mut())
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+    Ok((sum, shift))
+}
+
+#[cfg(feature = "cuda")]
+/// Finalize f64 logsumexp from per-slice `sum(exp(...))` and masked shift.
+///
+/// Handles `sum == 0` as `-inf` before applying the f64 log approximation,
+/// matching PyTorch's empty/all-`-inf` reduction behavior.
+pub fn gpu_logsumexp_finalize_f64(
+    sum: &CudaBuffer<f64>,
+    shift: &CudaBuffer<f64>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_device(sum, device)?;
+    validate_device(shift, device)?;
+    if sum.len() != shift.len() {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_logsumexp_finalize_f64",
+            expected: vec![sum.len()],
+            got: vec![shift.len()],
+        });
+    }
+    let mut out = alloc_zeros_f64(sum.len(), device)?;
+    if sum.is_empty() {
+        return Ok(out);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        LOGSUMEXP_FINALIZE_F64_PTX,
+        "logsumexp_finalize_f64_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "logsumexp_finalize_f64_kernel",
+        source: e,
+    })?;
+    let cfg = launch_cfg(sum.len())?;
+    let n_u32 = sum.len() as u32;
+    // SAFETY: `sum`, `shift`, and `out` all have identical length and live on
+    // `device`; each thread reads/writes exactly one f64 element.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(sum.inner())
+            .arg(shift.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
             .launch(cfg)?;
     }
     Ok(out)
