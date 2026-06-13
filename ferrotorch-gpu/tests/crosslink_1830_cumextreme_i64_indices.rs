@@ -59,6 +59,43 @@ fn cummin_f64_returns_i64_indices() {
 }
 
 #[test]
+fn cummax_f32_matches_tie_and_nan_index_semantics() {
+    let dev = device();
+    let input = [1.0_f32, f32::NAN, 2.0, f32::NAN];
+    let gpu_in = cpu_to_gpu(&input, &dev).expect("upload");
+    let (values, indices) =
+        kernels::gpu_cummax(&gpu_in, 1, input.len(), 1, &dev).expect("gpu_cummax");
+
+    let host_values = gpu_to_cpu(&values, &dev).expect("download values");
+    assert_eq!(host_values[0], 1.0);
+    assert!(host_values[1].is_nan());
+    assert!(host_values[2].is_nan());
+    assert!(host_values[3].is_nan());
+    assert_eq!(
+        gpu_to_cpu(&indices, &dev).expect("download indices"),
+        vec![0_i64, 1, 1, 3],
+    );
+}
+
+#[test]
+fn cummin_f64_keeps_last_tied_index() {
+    let dev = device();
+    let input = [3.0_f64, 1.0, 1.0, 2.0, 1.0];
+    let gpu_in = cpu_to_gpu(&input, &dev).expect("upload");
+    let (values, indices) =
+        kernels::gpu_cummin_f64(&gpu_in, 1, input.len(), 1, &dev).expect("gpu_cummin_f64");
+
+    assert_eq!(
+        gpu_to_cpu(&values, &dev).expect("download values"),
+        vec![3.0, 1.0, 1.0, 1.0, 1.0],
+    );
+    assert_eq!(
+        gpu_to_cpu(&indices, &dev).expect("download indices"),
+        vec![0_i64, 1, 2, 2, 4],
+    );
+}
+
+#[test]
 #[ignore = "allocates large GPU buffers to prove the >2^24 index precision bug"]
 fn cummax_f32_preserves_indices_above_f32_exact_range() {
     let dev = device();

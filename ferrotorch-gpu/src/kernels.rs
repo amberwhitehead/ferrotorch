@@ -100,6 +100,7 @@ pub(crate) fn ptx_f32_to_f64(
         .replace("fma.rn.f32", "fma.rn.f64")
         .replace("mov.f32", "mov.f64")
         // Comparisons
+        .replace("setp.nan.f32", "setp.nan.f64")
         .replace("setp.gt.f32", "setp.gt.f64")
         .replace("setp.ge.f32", "setp.ge.f64")
         .replace("setp.lt.f32", "setp.lt.f64")
@@ -7113,7 +7114,7 @@ pub(crate) const CUMMAX_PTX: &str = "\
     .reg .u64 %in, %out, %ind, %off_val, %off_idx, %addr;
     .reg .s64 %best_k_s64;
     .reg .f32 %val, %acc;
-    .reg .pred %p, %lp, %is_new_max;
+    .reg .pred %p, %lp, %is_new_max, %curr_nan, %acc_nan, %acc_ok, %cmp;
 
     ld.param.u64 %in, [input_ptr];
     ld.param.u64 %out, [output_ptr];
@@ -7154,9 +7155,14 @@ SCAN_LOOP:
     add.u64 %addr, %in, %off_val;
     ld.global.f32 %val, [%addr];
 
-    setp.gt.f32 %is_new_max, %val, %acc;
+    setp.nan.f32 %curr_nan, %val, %val;
+    setp.nan.f32 %acc_nan, %acc, %acc;
+    not.pred %acc_ok, %acc_nan;
+    setp.ge.f32 %cmp, %val, %acc;
+    and.pred %cmp, %acc_ok, %cmp;
+    or.pred %is_new_max, %curr_nan, %cmp;
     @%is_new_max mov.u32 %best_k, %k;
-    max.f32 %acc, %acc, %val;
+    @%is_new_max mov.f32 %acc, %val;
 
     add.u64 %addr, %out, %off_val;
     st.global.f32 [%addr], %acc;
@@ -7200,7 +7206,7 @@ pub(crate) const CUMMIN_PTX: &str = "\
     .reg .u64 %in, %out, %ind, %off_val, %off_idx, %addr;
     .reg .s64 %best_k_s64;
     .reg .f32 %val, %acc;
-    .reg .pred %p, %lp, %is_new_min;
+    .reg .pred %p, %lp, %is_new_min, %curr_nan, %acc_nan, %acc_ok, %cmp;
 
     ld.param.u64 %in, [input_ptr];
     ld.param.u64 %out, [output_ptr];
@@ -7241,9 +7247,14 @@ SCAN_LOOP:
     add.u64 %addr, %in, %off_val;
     ld.global.f32 %val, [%addr];
 
-    setp.lt.f32 %is_new_min, %val, %acc;
+    setp.nan.f32 %curr_nan, %val, %val;
+    setp.nan.f32 %acc_nan, %acc, %acc;
+    not.pred %acc_ok, %acc_nan;
+    setp.le.f32 %cmp, %val, %acc;
+    and.pred %cmp, %acc_ok, %cmp;
+    or.pred %is_new_min, %curr_nan, %cmp;
     @%is_new_min mov.u32 %best_k, %k;
-    min.f32 %acc, %acc, %val;
+    @%is_new_min mov.f32 %acc, %val;
 
     add.u64 %addr, %out, %off_val;
     st.global.f32 [%addr], %acc;
@@ -15657,6 +15668,29 @@ pub fn gpu_cumprod(
     Ok(out)
 }
 
+#[cfg(feature = "cuda")]
+fn validate_cumextreme_u32_dims(
+    op: &'static str,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    total: usize,
+) -> GpuResult<()> {
+    for (name, value) in [
+        ("outer", outer),
+        ("dim_size", dim_size),
+        ("inner", inner),
+        ("total", total),
+    ] {
+        if value > u32::MAX as usize {
+            return Err(GpuError::InvalidState {
+                message: format!("{op}: {name}={value} exceeds CUDA kernel u32 indexing limit"),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Cumulative maximum (running max) along an axis on GPU.
 ///
 /// `output[base + k*inner] = max_{j=0}^{k} input[base + j*inner]`
@@ -15680,6 +15714,7 @@ pub fn gpu_cummax(
 
     let total = outer * dim_size * inner;
     let num_threads = outer * inner;
+    validate_cumextreme_u32_dims("cummax", outer, dim_size, inner, total)?;
     let ctx = device.context();
     let stream = device.stream();
 
@@ -15771,6 +15806,7 @@ pub fn gpu_cummin(
 
     let total = outer * dim_size * inner;
     let num_threads = outer * inner;
+    validate_cumextreme_u32_dims("cummin", outer, dim_size, inner, total)?;
     let ctx = device.context();
     let stream = device.stream();
 
@@ -25727,6 +25763,7 @@ pub fn gpu_cummax_f64(
     use cudarc::driver::PushKernelArg;
     let total = outer * inner;
     let n = outer * dim_size * inner;
+    validate_cumextreme_u32_dims("cummax_f64", outer, dim_size, inner, n)?;
     if n == 0 {
         let values: &[f64] = &[];
         let indices: &[i64] = &[];
@@ -25798,6 +25835,7 @@ pub fn gpu_cummin_f64(
     use cudarc::driver::PushKernelArg;
     let total = outer * inner;
     let n = outer * dim_size * inner;
+    validate_cumextreme_u32_dims("cummin_f64", outer, dim_size, inner, n)?;
     if n == 0 {
         let values: &[f64] = &[];
         let indices: &[i64] = &[];

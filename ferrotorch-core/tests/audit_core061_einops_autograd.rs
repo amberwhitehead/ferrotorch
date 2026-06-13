@@ -397,14 +397,10 @@ mod gpu {
         assert_grad(&x, &expected, "gpu reduce sum 'a b c -> c a'");
     }
 
-    /// CUDA Max/Min backward is a LOUD structured error, never a silent
-    /// detach: the forward carries a real graph (requires_grad=true), and
-    /// backward surfaces `CummaxBackward`'s `NotImplementedOnCuda` (tracked
-    /// follow-up: #1962; tie-semantics follow-up: #1963). When #1962 lands
-    /// this test should be updated to assert torch-oracle gradient values
-    /// instead.
+    /// CUDA Max backward routes through the cumulative-extreme scatter-add VJP
+    /// and must match the same torch oracle as the CPU lane.
     #[test]
-    fn gpu_reduce_max_backward_is_loud_error_not_silent_detach() {
+    fn gpu_reduce_max_backward_matches_torch_oracle() {
         ensure_cuda_backend();
         let x = cuda_grad_leaf(&[2, 3, 4]);
         let y = reduce(&x, "a b c -> c a", EinopsReduction::Max).unwrap();
@@ -413,21 +409,11 @@ mod gpu {
             y.requires_grad(),
             "CUDA reduce-max forward must carry the graph (pre-fix: silent detach)"
         );
-        let n = y.numel();
-        let w_data: Vec<f32> = (1..=n).map(|i| i as f32).collect();
-        let w = Tensor::from_storage(TensorStorage::cpu(w_data), y.shape().to_vec(), false)
-            .unwrap()
-            .to(Device::Cuda(0))
-            .unwrap();
-        let prod = mul(&y, &w).expect("y * w");
-        let loss = sum(&prod).expect("sum to scalar");
-        let err = loss
-            .backward()
-            .expect_err("CUDA reduce-max backward must be a structured error, not silence");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("CummaxBackward") || msg.contains("not implemented on CUDA"),
-            "expected NotImplementedOnCuda(CummaxBackward), got: {msg}"
-        );
+        weighted_backward(&y);
+        let expected = [
+            0., 0., 0., 0., 0., 0., 0., 0., 1., 3., 5., 7., 0., 0., 0., 0., 0., 0., 0., 0., 2., 4.,
+            6., 8.,
+        ];
+        assert_grad(&x, &expected, "gpu reduce max 'a b c -> c a'");
     }
 }

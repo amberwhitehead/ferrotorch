@@ -27,8 +27,10 @@
 use std::sync::Arc;
 
 use crate::autograd::no_grad::is_grad_enabled;
+use crate::dtype::DType;
 use crate::dtype::Float;
-use crate::error::FerrotorchResult;
+use crate::error::{FerrotorchError, FerrotorchResult};
+use crate::int_tensor::IntTensor;
 use crate::ops::cumulative::{
     CumExtremeResult, cummax_forward, cummin_forward, cumprod_forward, cumsum_forward,
     logcumsumexp_forward, reverse_cumsum,
@@ -438,6 +440,7 @@ pub fn cumprod<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<Tensor
 pub struct CummaxBackward<T: Float> {
     input: Tensor<T>,
     indices: Vec<usize>,
+    indices_tensor: IntTensor<i64>,
     input_shape: Vec<usize>,
     dim: usize,
 }
@@ -450,7 +453,13 @@ impl<T: Float> GradFn<T> for CummaxBackward<T> {
         if self.input.ndim() == 0 {
             return Ok(vec![Some(grad_output.clone())]);
         }
-        cummaxmin_backward_impl(grad_output, &self.input_shape, &self.indices, self.dim)
+        cummaxmin_backward_impl(
+            grad_output,
+            &self.input_shape,
+            &self.indices,
+            &self.indices_tensor,
+            self.dim,
+        )
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -472,6 +481,7 @@ impl<T: Float> GradFn<T> for CummaxBackward<T> {
 pub struct CumminBackward<T: Float> {
     input: Tensor<T>,
     indices: Vec<usize>,
+    indices_tensor: IntTensor<i64>,
     input_shape: Vec<usize>,
     dim: usize,
 }
@@ -481,7 +491,13 @@ impl<T: Float> GradFn<T> for CumminBackward<T> {
         if self.input.ndim() == 0 {
             return Ok(vec![Some(grad_output.clone())]);
         }
-        cummaxmin_backward_impl(grad_output, &self.input_shape, &self.indices, self.dim)
+        cummaxmin_backward_impl(
+            grad_output,
+            &self.input_shape,
+            &self.indices,
+            &self.indices_tensor,
+            self.dim,
+        )
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -505,12 +521,11 @@ fn cummaxmin_backward_impl<T: Float>(
     grad_output: &Tensor<T>,
     input_shape: &[usize],
     indices: &[usize],
+    indices_tensor: &IntTensor<i64>,
     dim: usize,
 ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
     if grad_output.is_cuda() {
-        return Err(crate::error::FerrotorchError::NotImplementedOnCuda {
-            op: "CummaxBackward",
-        });
+        return cummaxmin_backward_cuda(grad_output, input_shape, indices_tensor, dim);
     }
     // Empty-input fast path mirrors upstream
     // `ReduceOps.cpp:907-908 if (input.sym_numel() == 0) { return input; }`
@@ -526,6 +541,67 @@ fn cummaxmin_backward_impl<T: Float>(
     let zeros = crate::creation::zeros::<T>(input_shape)?;
     let grad_input =
         crate::ops::indexing::scatter_add(&zeros, dim as isize, indices, input_shape, grad_output)?;
+    Ok(vec![Some(grad_input)])
+}
+
+fn cummaxmin_backward_cuda<T: Float>(
+    grad_output: &Tensor<T>,
+    input_shape: &[usize],
+    indices_tensor: &IntTensor<i64>,
+    dim: usize,
+) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+    if !indices_tensor.is_cuda() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: grad_output.device(),
+            got: indices_tensor.device(),
+        });
+    }
+    if indices_tensor.device() != grad_output.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: grad_output.device(),
+            got: indices_tensor.device(),
+        });
+    }
+    if indices_tensor.shape() != input_shape {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "CummaxBackward/CumminBackward: indices shape {:?} != input shape {:?}",
+                indices_tensor.shape(),
+                input_shape
+            ),
+        });
+    }
+
+    let grad_output = grad_output.contiguous()?;
+    let grad_handle = grad_output.gpu_handle()?;
+    let ordinal = grad_handle.device_ordinal();
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let numel: usize = input_shape.iter().product();
+    let zeros_h = backend.alloc_zeros(numel, T::dtype(), ordinal)?;
+    let out_h = match T::dtype() {
+        DType::F32 => backend.scatter_add_nd_f32(
+            &zeros_h,
+            indices_tensor.gpu_handle()?,
+            grad_handle,
+            input_shape,
+            input_shape,
+            dim,
+        )?,
+        DType::F64 => backend.scatter_add_nd_f64(
+            &zeros_h,
+            indices_tensor.gpu_handle()?,
+            grad_handle,
+            input_shape,
+            input_shape,
+            dim,
+        )?,
+        _ => {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "CummaxBackward",
+            });
+        }
+    };
+    let grad_input = Tensor::from_storage(TensorStorage::gpu(out_h), input_shape.to_vec(), false)?;
     Ok(vec![Some(grad_input)])
 }
 
@@ -557,17 +633,26 @@ pub fn cummax<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<CumExtr
         return Ok(result);
     }
 
-    let CumExtremeResult { values, indices } = result;
+    let CumExtremeResult {
+        values,
+        indices_tensor,
+        indices,
+    } = result;
     let input_shape = values.shape().to_vec();
     let grad_fn = Arc::new(CummaxBackward {
         input: input.clone(),
         indices: indices.clone(),
+        indices_tensor: indices_tensor.clone(),
         input_shape: input_shape.clone(),
         dim: norm_dim,
     });
     let (storage, shape) = values.into_storage_and_shape()?;
     let values = Tensor::from_operation(storage, shape, grad_fn)?;
-    Ok(CumExtremeResult { values, indices })
+    Ok(CumExtremeResult {
+        values,
+        indices_tensor,
+        indices,
+    })
 }
 
 /// Cumulative minimum along `dim`.
@@ -589,17 +674,26 @@ pub fn cummin<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<CumExtr
         return Ok(result);
     }
 
-    let CumExtremeResult { values, indices } = result;
+    let CumExtremeResult {
+        values,
+        indices_tensor,
+        indices,
+    } = result;
     let input_shape = values.shape().to_vec();
     let grad_fn = Arc::new(CumminBackward {
         input: input.clone(),
         indices: indices.clone(),
+        indices_tensor: indices_tensor.clone(),
         input_shape: input_shape.clone(),
         dim: norm_dim,
     });
     let (storage, shape) = values.into_storage_and_shape()?;
     let values = Tensor::from_operation(storage, shape, grad_fn)?;
-    Ok(CumExtremeResult { values, indices })
+    Ok(CumExtremeResult {
+        values,
+        indices_tensor,
+        indices,
+    })
 }
 
 /// Discriminant for [`cumextreme_scalar_identity`] — picks which
@@ -669,10 +763,12 @@ fn cumextreme_scalar_identity<T: Float>(
         Vec::new(),
         false,
     )?;
+    let indices_tensor = IntTensor::<i64>::from_vec(vec![0], Vec::new())?.to(input.device())?;
 
     if !(is_grad_enabled() && input.requires_grad()) {
         return Ok(CumExtremeResult {
             values,
+            indices_tensor,
             indices: vec![0],
         });
     }
@@ -688,6 +784,7 @@ fn cumextreme_scalar_identity<T: Float>(
             let grad_fn = Arc::new(CummaxBackward {
                 input: input.clone(),
                 indices: vec![0],
+                indices_tensor: indices_tensor.clone(),
                 input_shape: Vec::new(),
                 dim: 0,
             });
@@ -697,6 +794,7 @@ fn cumextreme_scalar_identity<T: Float>(
             let grad_fn = Arc::new(CumminBackward {
                 input: input.clone(),
                 indices: vec![0],
+                indices_tensor: indices_tensor.clone(),
                 input_shape: Vec::new(),
                 dim: 0,
             });
@@ -705,6 +803,7 @@ fn cumextreme_scalar_identity<T: Float>(
     };
     Ok(CumExtremeResult {
         values,
+        indices_tensor,
         indices: vec![0],
     })
 }

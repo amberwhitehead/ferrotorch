@@ -1324,67 +1324,19 @@ fn cpu_logcumsumexp() {
 //     ReduceOps.cpp `cummax_cummin_helper`).
 //   * ferrotorch CPU MATCHES torch (the old "ferrotorch uses first-tie"
 //     comment here was stale — the `>=`/`<=` tie-break landed with #1231).
-//   * ferrotorch CUDA DIVERGES: the scan kernels use strict `setp.gt.f32` /
-//     `setp.lt.f32` (ferrotorch-gpu/src/kernels.rs CUMMAX_PTX/CUMMIN_PTX),
-//     keeping the FIRST tied index — filed as #1925 and pinned below in
-//     `gpu_cummax_cummin_tie_index_pin`.
+//   * ferrotorch CUDA now matches torch as well: the PTX predicate mirrors
+//     `isnan(curr) || (!isnan(out) && curr >= out)` / `<= out`, so ties keep
+//     the LAST tied index.
 
-/// #1925 pin (found via CORE-198 / #1892): the CUDA cummax/cummin scan
-/// kernels update the running-extremum index with a STRICT comparison
-/// (`setp.gt.f32` / `setp.lt.f32` in ferrotorch-gpu/src/kernels.rs
-/// CUMMAX_PTX / CUMMIN_PTX; the f64 kernels are derived from the same PTX),
-/// so the FIRST tied index wins. torch (and the ferrotorch CPU path) keep
-/// the LAST tied index (`std::greater_equal` / `std::less_equal` in
-/// ReduceOps.cpp `cummax_cummin_helper`). Values are unaffected — only the
-/// index output diverges.
-///
-/// This helper returns the CURRENT (wrong) CUDA indices for exactly the
-/// tie-regime fixtures so the gpu lane pins one contract (R-ORACLE-4): the
-/// fixture's `out_indices` carries the torch-side expectation, the pin
-/// asserts today's divergent output, and the assertion message tells the
-/// fixer to retire this pin (delete the helper, let the torch comparison
-/// run) when #1925 lands last-tie CUDA kernels.
-fn gpu_cummax_cummin_tie_index_pin(op_name: &str, tag: &str) -> Option<&'static [usize]> {
-    // Probed at HEAD on cuda:0 (RTX 3090), identical for f32 and f64:
-    //   cummax [1,3,3,2,3]            -> [0,1,1,1,1]   (torch: [0,1,2,2,4])
-    //   cummin [3,1,1,2,1]            -> [0,1,1,1,1]   (torch: [0,1,2,2,4])
-    //   cummax/cummin [2,2,2]         -> [0,0,0]       (torch: [0,1,2])
-    //   cummax [[5,5,1],[-2,-1,-1]]@1 -> [0,0,0,0,1,1] (torch: [0,1,1,0,1,2])
-    //   cummin [[1,1,5],[2,-1,-1]]@1  -> [0,0,0,0,1,1] (torch: [0,1,1,0,1,2])
-    match (op_name, tag) {
-        ("cummax" | "cummin", "tie_basic") => Some(&[0, 1, 1, 1, 1]),
-        ("cummax" | "cummin", "tie_allequal") => Some(&[0, 0, 0]),
-        ("cummax" | "cummin", "tie_mat2d_dim1") => Some(&[0, 0, 0, 0, 1, 1]),
-        _ => None,
-    }
-}
-
-/// Indices assertion for cummax/cummin: torch contract everywhere except
-/// the gpu-lane tie fixtures, which are pinned to #1925 (see
-/// [`gpu_cummax_cummin_tie_index_pin`]).
+/// Indices assertion for cummax/cummin: torch contract on CPU and CUDA.
 fn check_cum_extreme_indices(
     label: &str,
-    op_name: &str,
-    tag: &str,
-    on_gpu: bool,
+    _op_name: &str,
+    _tag: &str,
+    _on_gpu: bool,
     actual: &[usize],
     torch_expected: &[usize],
 ) {
-    if on_gpu && let Some(pinned) = gpu_cummax_cummin_tie_index_pin(op_name, tag) {
-        assert_eq!(
-            actual, pinned,
-            "{label}: CUDA tie indices no longer match the pinned \
-             first-tie output {pinned:?} — if they now equal torch's \
-             {torch_expected:?}, #1925 appears fixed; retire \
-             `gpu_cummax_cummin_tie_index_pin` and let this fixture \
-             assert the torch indices directly"
-        );
-        eprintln!(
-            "{label}: pinned to #1925 — CUDA first-tie indices {actual:?} \
-             (torch last-tie expectation: {torch_expected:?})"
-        );
-        return;
-    }
     assert_eq!(
         actual.len(),
         torch_expected.len(),
@@ -2444,5 +2396,67 @@ mod gpu {
         let file = load_fixtures();
         require_cuda_fixtures(&file);
         run_cum_extreme_for_device("cummin", "cuda:0", Device::Cuda(0));
+    }
+
+    #[test]
+    fn gpu_cummax_indices_tensor_and_backward_ties() {
+        ensure_cuda_backend();
+        let x = upload_f32(
+            make_cpu_f32(&[1.0, 3.0, 3.0, 2.0, 3.0], &[5], true),
+            Device::Cuda(0),
+        );
+        let result = cummax(&x, 0).expect("cummax");
+        let host_indices = result
+            .indices_tensor
+            .to(Device::Cpu)
+            .expect("indices cpu")
+            .data()
+            .expect("indices data")
+            .to_vec();
+        assert_eq!(host_indices, vec![0_i64, 1, 2, 2, 4]);
+        assert_eq!(result.indices, vec![0_usize, 1, 2, 2, 4]);
+
+        sum(&result.values)
+            .expect("sum values")
+            .backward()
+            .expect("cummax backward");
+        let grad = x.grad().expect("grad access").expect("grad");
+        check_f32(
+            "gpu cummax tie backward",
+            &read_back_f32(&grad, Device::Cuda(0)),
+            &[1.0, 1.0, 2.0, 0.0, 1.0],
+            tolerance::F32_REDUCTION_GPU,
+        );
+    }
+
+    #[test]
+    fn gpu_cummin_indices_tensor_and_backward_ties() {
+        ensure_cuda_backend();
+        let x = upload_f64(
+            make_cpu_f64(&[3.0, 1.0, 1.0, 2.0, 1.0], &[5], true),
+            Device::Cuda(0),
+        );
+        let result = cummin(&x, 0).expect("cummin");
+        let host_indices = result
+            .indices_tensor
+            .to(Device::Cpu)
+            .expect("indices cpu")
+            .data()
+            .expect("indices data")
+            .to_vec();
+        assert_eq!(host_indices, vec![0_i64, 1, 2, 2, 4]);
+        assert_eq!(result.indices, vec![0_usize, 1, 2, 2, 4]);
+
+        sum(&result.values)
+            .expect("sum values")
+            .backward()
+            .expect("cummin backward");
+        let grad = x.grad().expect("grad access").expect("grad");
+        check_f64(
+            "gpu cummin tie backward",
+            &read_back_f64(&grad, Device::Cuda(0)),
+            &[1.0, 1.0, 2.0, 0.0, 1.0],
+            tolerance::F64_REDUCTION_GPU,
+        );
     }
 }

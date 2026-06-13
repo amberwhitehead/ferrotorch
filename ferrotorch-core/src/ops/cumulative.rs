@@ -70,21 +70,26 @@ fn validate_dim(ndim: usize, dim: i64, op_name: &str) -> FerrotorchResult<usize>
     normalize_axis(dim as isize, ndim)
 }
 
-fn read_gpu_i64_indices(
-    handle: crate::gpu_dispatch::GpuBufferHandle,
-    shape: &[usize],
-) -> FerrotorchResult<Vec<usize>> {
-    let idxs_tensor = IntTensor::<i64>::from_gpu_handle(handle, shape.to_vec());
+fn indices_from_i64_tensor(idxs_tensor: &IntTensor<i64>) -> FerrotorchResult<Vec<usize>> {
     let idxs_cpu = idxs_tensor.to(Device::Cpu)?;
     idxs_cpu
         .data()?
         .iter()
         .map(|&v| {
             usize::try_from(v).map_err(|_| FerrotorchError::InvalidArgument {
-                message: format!("cummax/cummin: CUDA kernel returned invalid negative index {v}"),
+                message: format!("cummax/cummin: kernel returned invalid negative index {v}"),
             })
         })
         .collect()
+}
+
+fn gpu_i64_indices(
+    handle: crate::gpu_dispatch::GpuBufferHandle,
+    shape: &[usize],
+) -> FerrotorchResult<(IntTensor<i64>, Vec<usize>)> {
+    let idxs_tensor = IntTensor::<i64>::from_gpu_handle(handle, shape.to_vec());
+    let indices = indices_from_i64_tensor(&idxs_tensor)?;
+    Ok((idxs_tensor, indices))
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +225,9 @@ pub fn cumprod_forward<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResul
 #[derive(Debug)]
 pub struct CumExtremeResult<T: Float> {
     pub values: Tensor<T>,
+    /// PyTorch-style int64 tensor of dim-local indices.
+    pub indices_tensor: IntTensor<i64>,
+    /// Legacy host copy of [`Self::indices_tensor`] retained for existing callers.
     pub indices: Vec<usize>,
 }
 
@@ -232,9 +240,8 @@ pub struct CumExtremeResult<T: Float> {
 /// Tie-breaking matches upstream `std::greater_equal<scalar_t>` at
 /// `aten/src/ATen/native/ReduceOps.cpp:832` — on equal values, the LATER
 /// index wins. NaN propagation also matches upstream `cummax_cummin_helper`
-/// at `:811-826`: once a NaN appears in the prefix, every subsequent
-/// `values[..., j, ...]` is NaN and the running `indices[..., j, ...]`
-/// pin to the first-NaN position. The update predicate is
+/// at `:811-826`: once a NaN appears in the prefix, non-NaN values stop
+/// updating it, while later NaNs update the running index. The predicate is
 /// `isnan(curr) || (!isnan(out) && curr >= out)` (mirrors `:819`).
 pub fn cummax_forward<T: Float>(
     input: &Tensor<T>,
@@ -254,18 +261,23 @@ pub fn cummax_forward<T: Float>(
         let input = input.contiguous()?;
         let values;
         let indices: Vec<usize>;
+        let indices_tensor: IntTensor<i64>;
         if is_f32::<T>() {
             let (vals_h, idxs_h) =
                 backend.cummax_f32(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
-            indices = read_gpu_i64_indices(idxs_h, shape)?;
+            (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
         } else {
             let (vals_h, idxs_h) =
                 backend.cummax_f64(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
-            indices = read_gpu_i64_indices(idxs_h, shape)?;
+            (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
         }
-        return Ok(CumExtremeResult { values, indices });
+        return Ok(CumExtremeResult {
+            values,
+            indices_tensor,
+            indices,
+        });
     }
 
     if input.is_cuda() {
@@ -319,8 +331,11 @@ pub fn cummax_forward<T: Float>(
     }
 
     let values = Tensor::from_storage(TensorStorage::cpu(out_vals), shape.to_vec(), false)?;
+    let indices_tensor =
+        IntTensor::<i64>::from_vec(out_idxs.iter().map(|&v| v as i64).collect(), shape.to_vec())?;
     Ok(CumExtremeResult {
         values,
+        indices_tensor,
         indices: out_idxs,
     })
 }
@@ -356,18 +371,23 @@ pub fn cummin_forward<T: Float>(
         let input = input.contiguous()?;
         let values;
         let indices: Vec<usize>;
+        let indices_tensor: IntTensor<i64>;
         if is_f32::<T>() {
             let (vals_h, idxs_h) =
                 backend.cummin_f32(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
-            indices = read_gpu_i64_indices(idxs_h, shape)?;
+            (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
         } else {
             let (vals_h, idxs_h) =
                 backend.cummin_f64(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
-            indices = read_gpu_i64_indices(idxs_h, shape)?;
+            (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
         }
-        return Ok(CumExtremeResult { values, indices });
+        return Ok(CumExtremeResult {
+            values,
+            indices_tensor,
+            indices,
+        });
     }
 
     if input.is_cuda() {
@@ -407,8 +427,11 @@ pub fn cummin_forward<T: Float>(
     }
 
     let values = Tensor::from_storage(TensorStorage::cpu(out_vals), shape.to_vec(), false)?;
+    let indices_tensor =
+        IntTensor::<i64>::from_vec(out_idxs.iter().map(|&v| v as i64).collect(), shape.to_vec())?;
     Ok(CumExtremeResult {
         values,
+        indices_tensor,
         indices: out_idxs,
     })
 }

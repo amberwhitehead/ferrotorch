@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- CummaxBackward/CumminBackward return NotImplementedOnCuda — einops reduce Max/Min CUDA backward errors loudly instead of producing gradients (#1962)
 - GPU on-device RNG: wire ferray-random Philox into a GPU kernel so rand/randn generate on-device (not CPU-gen + upload) (#1682)
 - ptx_compile_guard test: JIT-compiles every static `*_PTX` const (312) on the live GPU via the production driver path, so a kernel that fails to compile (the silent-CPU-fallback / hard-error class behind #1684/#1685) is caught at test time instead of shipping dead (#1686)
 - Umbrella: ferrotorch-core CPU-only paths needing GPU implementations (special / masked / fft / ops/* families) (#1545)
@@ -52,6 +53,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CUDA cummax/cummin kernels break ties to the FIRST occurrence; torch and ferrotorch CPU keep the LAST (>=/<=) (#1925)
+- gather: off-axis-smaller index (valid per torch) panics on CPU / OOB-reads index buffer on CUDA — output geometry derived from input factorization (#1935)
+- CORE-114: Direct `Tensor::index_select` and `Tensor::gather` silently detach autograd (#1808)
 - CORE-136: CUDA `cummax`/`cummin` encode result indices as f32, corrupting positions above 2^24 (#1830)
 - CORE-132: CPU elementwise, reduction, and cumulative kernels reject valid non-contiguous views (#1826)
 - CORE-131: SIMD elementwise helpers skip shape validation and return partially computed tensors (#1825)

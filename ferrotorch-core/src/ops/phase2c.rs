@@ -36,6 +36,8 @@ use crate::int_tensor::{IntElement, IntTensor};
 use crate::shape::normalize_axis;
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
+use crate::{autograd::no_grad::is_grad_enabled, grad_fns::indexing};
+use std::sync::Arc;
 
 /// Factorise `shape` around `dim` into `(outer, dim_size, inner)` for the
 /// `[outer, dim_size, inner]` kernel layout. `outer = prod(shape[..dim])`,
@@ -368,7 +370,21 @@ impl<T: Float> Tensor<T> {
                 out_dim,
                 inner,
             )?;
-            Tensor::from_storage(TensorStorage::gpu(h), out_shape, false)
+            let storage = TensorStorage::gpu(h);
+            if input.requires_grad() && is_grad_enabled() {
+                let idx_usize: Vec<usize> = idx_host
+                    .iter()
+                    .map(|&v| usize::try_from(v).expect("validated non-negative index"))
+                    .collect();
+                let grad_fn = Arc::new(indexing::IndexSelectDimBackward {
+                    input: input.clone(),
+                    dim: d,
+                    indices: idx_usize,
+                });
+                Tensor::from_operation(storage, out_shape, grad_fn)
+            } else {
+                Tensor::from_storage(storage, out_shape, false)
+            }
         } else {
             let data = input.data_vec()?;
             let idx = index_as_i64(&indices.to(Device::Cpu)?)?;
@@ -381,7 +397,21 @@ impl<T: Float> Tensor<T> {
                 inner,
                 <T as num_traits::Zero>::zero(),
             );
-            Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)
+            let storage = TensorStorage::cpu(out);
+            if input.requires_grad() && is_grad_enabled() {
+                let idx_usize: Vec<usize> = idx
+                    .iter()
+                    .map(|&v| usize::try_from(v).expect("validated non-negative index"))
+                    .collect();
+                let grad_fn = Arc::new(indexing::IndexSelectDimBackward {
+                    input: input.clone(),
+                    dim: d,
+                    indices: idx_usize,
+                });
+                Tensor::from_operation(storage, out_shape, grad_fn)
+            } else {
+                Tensor::from_storage(storage, out_shape, false)
+            }
         }
     }
 
@@ -435,7 +465,22 @@ impl<T: Float> Tensor<T> {
                     d,
                 )?
             };
-            Tensor::from_storage(TensorStorage::gpu(h), out_shape, false)
+            let storage = TensorStorage::gpu(h);
+            if input.requires_grad() && is_grad_enabled() {
+                let idx_usize: Vec<usize> = idx_host
+                    .iter()
+                    .map(|&v| usize::try_from(v).expect("validated non-negative index"))
+                    .collect();
+                let grad_fn = Arc::new(indexing::GatherBackward {
+                    input: input.clone(),
+                    dim: d,
+                    index: idx_usize,
+                    index_shape: index.shape().to_vec(),
+                });
+                Tensor::from_operation(storage, out_shape, grad_fn)
+            } else {
+                Tensor::from_storage(storage, out_shape, false)
+            }
         } else {
             let data = input.data_vec()?;
             let idx = index_as_i64(&index.to(Device::Cpu)?)?;
@@ -448,7 +493,22 @@ impl<T: Float> Tensor<T> {
                 d,
                 <T as num_traits::Zero>::zero(),
             );
-            Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)
+            let storage = TensorStorage::cpu(out);
+            if input.requires_grad() && is_grad_enabled() {
+                let idx_usize: Vec<usize> = idx
+                    .iter()
+                    .map(|&v| usize::try_from(v).expect("validated non-negative index"))
+                    .collect();
+                let grad_fn = Arc::new(indexing::GatherBackward {
+                    input: input.clone(),
+                    dim: d,
+                    index: idx_usize,
+                    index_shape: index.shape().to_vec(),
+                });
+                Tensor::from_operation(storage, out_shape, grad_fn)
+            } else {
+                Tensor::from_storage(storage, out_shape, false)
+            }
         }
     }
 
