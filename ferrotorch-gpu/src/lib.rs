@@ -188,6 +188,8 @@ pub mod kernels;
 pub mod masked_kernels;
 pub mod memory_guard;
 pub mod module_cache;
+#[cfg(feature = "cuda")]
+pub mod nan_reductions;
 pub mod pool;
 #[cfg(feature = "cuda")]
 pub mod reduce_arg;

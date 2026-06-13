@@ -3434,6 +3434,60 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    fn nan_reduce_axis_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+        _take_mean: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "nan_reduce_axis_f32",
+        })
+    }
+
+    fn nan_reduce_axis_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+        _take_mean: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "nan_reduce_axis_f64",
+        })
+    }
+
+    fn nan_reduce_axis_backward_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+        _take_mean: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "nan_reduce_axis_backward_f32",
+        })
+    }
+
+    fn nan_reduce_axis_backward_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+        _take_mean: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "nan_reduce_axis_backward_f64",
+        })
+    }
+
     /// Axis `amin` for f32. Collapses `shape[axis]` and returns a flat
     /// `[outer, inner]` buffer before the caller restores keepdim metadata.
     fn min_axis_f32(

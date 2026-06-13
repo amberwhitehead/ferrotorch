@@ -2220,6 +2220,42 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, input.device_ordinal()))
     }
 
+    fn nan_reduce_axis_f64(
+        &self,
+        input: &GpuBufferHandle,
+        outer: usize,
+        axis_size: usize,
+        inner: usize,
+        take_mean: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f64(input)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::nan_reductions::nan_reduce_axis_f64(
+            input_buf, outer, axis_size, inner, take_mean, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, input.device_ordinal()))
+    }
+
+    fn nan_reduce_axis_backward_f64(
+        &self,
+        input: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+        outer: usize,
+        axis_size: usize,
+        inner: usize,
+        take_mean: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f64(input)?;
+        let grad_buf = Self::unwrap_buffer_f64(grad_output)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::nan_reductions::nan_reduce_axis_backward_f64(
+            input_buf, grad_buf, outer, axis_size, inner, take_mean, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, input.device_ordinal()))
+    }
+
     fn min_f64(&self, a: &GpuBufferHandle, _n: usize) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
@@ -3089,6 +3125,42 @@ impl GpuBackend for CudaBackendImpl {
                 .map_err(Self::map_gpu_err)?;
         let log_sum = crate::kernels::gpu_log(&sum, dev).map_err(Self::map_gpu_err)?;
         let result = crate::kernels::gpu_add(&log_sum, &shift, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, input.device_ordinal()))
+    }
+
+    fn nan_reduce_axis_f32(
+        &self,
+        input: &GpuBufferHandle,
+        outer: usize,
+        axis_size: usize,
+        inner: usize,
+        take_mean: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer(input)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::nan_reductions::nan_reduce_axis_f32(
+            input_buf, outer, axis_size, inner, take_mean, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, input.device_ordinal()))
+    }
+
+    fn nan_reduce_axis_backward_f32(
+        &self,
+        input: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+        outer: usize,
+        axis_size: usize,
+        inner: usize,
+        take_mean: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer(input)?;
+        let grad_buf = Self::unwrap_buffer(grad_output)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::nan_reductions::nan_reduce_axis_backward_f32(
+            input_buf, grad_buf, outer, axis_size, inner, take_mean, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, input.device_ordinal()))
     }
 

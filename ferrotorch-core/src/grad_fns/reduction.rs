@@ -1353,6 +1353,238 @@ fn mean_dim_inner<T: Float>(
     }
 }
 
+#[derive(Debug)]
+struct NanReduceBackward<T: Float> {
+    input: Tensor<T>,
+    dim: Option<usize>,
+    take_mean: bool,
+}
+
+impl<T: Float> GradFn<T> for NanReduceBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let input_ref = if self.input.is_contiguous() {
+            self.input.clone()
+        } else {
+            self.input.contiguous()?
+        };
+        let shape = input_ref.shape().to_vec();
+        let (outer, axis, inner) = match self.dim {
+            Some(dim) if !shape.is_empty() => outer_axis_inner(&shape, dim),
+            Some(_) => (1, 1, 1),
+            None => (1, input_ref.numel(), 1),
+        };
+
+        if self.input.is_cuda() {
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let go_on_device = if grad_output.is_cuda() {
+                grad_output.clone()
+            } else {
+                grad_output.to(self.input.device())?
+            };
+            let handle = crate::dispatch_floating_dtype!(
+                T,
+                "nan_reduce backward",
+                f32 => backend.nan_reduce_axis_backward_f32(
+                    input_ref.gpu_handle()?,
+                    go_on_device.gpu_handle()?,
+                    outer,
+                    axis,
+                    inner,
+                    self.take_mean,
+                ),
+                f64 => backend.nan_reduce_axis_backward_f64(
+                    input_ref.gpu_handle()?,
+                    go_on_device.gpu_handle()?,
+                    outer,
+                    axis,
+                    inner,
+                    self.take_mean,
+                ),
+                bf16 => Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "nan_reduce backward"
+                }),
+                f16 => Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "nan_reduce backward"
+                }),
+            )?;
+            let grad_input = Tensor::from_storage(TensorStorage::gpu(handle), shape, false)?;
+            return Ok(vec![Some(grad_input)]);
+        }
+
+        let go_ref = if grad_output.is_contiguous() {
+            grad_output.clone()
+        } else {
+            grad_output.contiguous()?
+        };
+        let go = go_ref.data()?;
+        let input_data = input_ref.data()?;
+        let mut grad = vec![<T as num_traits::Zero>::zero(); input_data.len()];
+        let nan = <T as num_traits::Float>::nan();
+        for o in 0..outer {
+            for i in 0..inner {
+                let out_idx = o * inner + i;
+                let count = (0..axis)
+                    .filter(|&d| !input_data[(o * axis + d) * inner + i].is_nan())
+                    .count();
+                for d in 0..axis {
+                    let idx = (o * axis + d) * inner + i;
+                    grad[idx] = if self.take_mean {
+                        if count == 0 {
+                            nan
+                        } else if input_data[idx].is_nan() {
+                            <T as num_traits::Zero>::zero()
+                        } else {
+                            go[out_idx] / T::from(count).unwrap()
+                        }
+                    } else if input_data[idx].is_nan() {
+                        <T as num_traits::Zero>::zero()
+                    } else {
+                        go[out_idx]
+                    };
+                }
+            }
+        }
+        let grad_input = Tensor::from_storage(TensorStorage::cpu(grad), shape, false)?;
+        Ok(vec![Some(grad_input)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "NanReduceBackward"
+    }
+}
+
+fn nan_reduce_dim_inner<T: Float>(
+    input: &Tensor<T>,
+    dim: Option<i64>,
+    keepdim: bool,
+    take_mean: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    let input_ref = if input.is_contiguous() {
+        input.clone()
+    } else {
+        input.contiguous()?
+    };
+    let ndim = input_ref.ndim();
+    let (norm_dim, out_shape, outer, axis, inner) = match dim {
+        Some(dim) => {
+            if ndim == 0 {
+                if dim != 0 && dim != -1 {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "nan reduction: dimension out of range (expected [-1, 0], got {dim})"
+                        ),
+                    });
+                }
+                (Some(0), Vec::new(), 1, 1, 1)
+            } else {
+                let norm = crate::shape::normalize_axis(dim as isize, ndim)?;
+                let mut shape = input_ref.shape().to_vec();
+                if keepdim {
+                    shape[norm] = 1;
+                } else {
+                    shape.remove(norm);
+                }
+                let (outer, axis, inner) = outer_axis_inner(input_ref.shape(), norm);
+                (Some(norm), shape, outer, axis, inner)
+            }
+        }
+        None => (None, Vec::new(), 1, input_ref.numel(), 1),
+    };
+
+    let result = if input_ref.is_cuda() {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = crate::dispatch_floating_dtype!(
+            T,
+            "nan_reduce",
+            f32 => backend.nan_reduce_axis_f32(
+                input_ref.gpu_handle()?,
+                outer,
+                axis,
+                inner,
+                take_mean,
+            ),
+            f64 => backend.nan_reduce_axis_f64(
+                input_ref.gpu_handle()?,
+                outer,
+                axis,
+                inner,
+                take_mean,
+            ),
+            bf16 => Err(FerrotorchError::NotImplementedOnCuda { op: "nan_reduce" }),
+            f16 => Err(FerrotorchError::NotImplementedOnCuda { op: "nan_reduce" }),
+        )?;
+        Tensor::from_storage(TensorStorage::gpu(handle), out_shape, false)?
+    } else {
+        let data = input_ref.data()?;
+        let mut out = Vec::with_capacity(outer * inner);
+        for o in 0..outer {
+            for i in 0..inner {
+                let mut sum = <T as num_traits::Zero>::zero();
+                let mut count = 0usize;
+                for d in 0..axis {
+                    let v = data[(o * axis + d) * inner + i];
+                    if !v.is_nan() {
+                        sum += v;
+                        count += 1;
+                    }
+                }
+                if take_mean {
+                    out.push(sum / T::from(count).unwrap());
+                } else {
+                    out.push(sum);
+                }
+            }
+        }
+        Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)?
+    };
+
+    if is_grad_enabled() && input.requires_grad() {
+        let grad_fn = Arc::new(NanReduceBackward {
+            input: input_ref,
+            dim: norm_dim,
+            take_mean,
+        });
+        let (storage, shape) = result.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, grad_fn)
+    } else {
+        Ok(result)
+    }
+}
+
+/// Sum while treating NaN inputs as zero.
+pub fn nansum<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    nan_reduce_dim_inner(input, None, false, false)
+}
+
+/// Mean over non-NaN inputs. All-NaN reductions return NaN.
+pub fn nanmean<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    nan_reduce_dim_inner(input, None, false, true)
+}
+
+/// Sum along one dimension while treating NaN inputs as zero.
+pub fn nansum_dim<T: Float>(
+    input: &Tensor<T>,
+    dim: i64,
+    keepdim: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    nan_reduce_dim_inner(input, Some(dim), keepdim, false)
+}
+
+/// Mean along one dimension over non-NaN inputs. All-NaN slices return NaN.
+pub fn nanmean_dim<T: Float>(
+    input: &Tensor<T>,
+    dim: i64,
+    keepdim: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    nan_reduce_dim_inner(input, Some(dim), keepdim, true)
+}
+
 // ---------------------------------------------------------------------------
 // LogsumexpBackward (full reduction)
 // ---------------------------------------------------------------------------
