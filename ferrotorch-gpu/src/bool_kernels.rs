@@ -359,6 +359,566 @@ DONE:
 const REDUCE_ANY: u32 = 0;
 const REDUCE_ALL: u32 = 1;
 
+// Float-value reductions for `torch.any`, `torch.all`, and
+// `torch.count_nonzero`. Logical input layout is `[outer, dim_size, inner]`;
+// one thread folds one `(outer, inner)` slice. NaN is nonzero because PTX
+// `setp.ne.f{32,64}` is unordered-true, matching `NaN != 0` in PyTorch.
+const REDUCE_FLOAT_F32_BOOL_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry reduce_float_f32_bool_kernel(
+    .param .u64 in_ptr, .param .u64 out_ptr,
+    .param .u32 outer, .param .u32 dim_size, .param .u32 inner,
+    .param .u32 total, .param .u32 op
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %dim, %inn, %op_r;
+    .reg .u32 %oidx, %iidx, %base, %j, %elem;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .f32 %v;
+    .reg .u16 %acc;
+    .reg .pred %p, %is_any, %nz, %nan, %accp;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %tot, [total];
+    ld.param.u32 %dim, [dim_size];
+    ld.param.u32 %inn, [inner];
+    ld.param.u32 %op_r, [op];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot;
+    @%p bra DONE;
+
+    setp.eq.u32 %is_any, %op_r, 0;
+    selp.u16 %acc, 0, 1, %is_any;
+
+    div.u32 %oidx, %gtid, %inn;
+    rem.u32 %iidx, %gtid, %inn;
+    mul.lo.u32 %base, %oidx, %dim;
+    mul.lo.u32 %base, %base, %inn;
+    add.u32 %base, %base, %iidx;
+
+    mov.u32 %j, 0;
+LOOP:
+    setp.ge.u32 %p, %j, %dim;
+    @%p bra STORE;
+
+    mul.lo.u32 %elem, %j, %inn;
+    add.u32 %elem, %elem, %base;
+    cvt.u64.u32 %off, %elem;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %v, [%addr];
+    setp.ne.f32 %nz, %v, 0f00000000;
+    setp.nan.f32 %nan, %v, %v;
+    or.pred %nz, %nz, %nan;
+
+    setp.ne.u16 %accp, %acc, 0;
+    @%is_any or.pred %accp, %accp, %nz;
+    @!%is_any and.pred %accp, %accp, %nz;
+    selp.u16 %acc, 1, 0, %accp;
+
+    add.u32 %j, %j, 1;
+    bra LOOP;
+STORE:
+    cvt.u64.u32 %off, %gtid;
+    add.u64 %addr, %out, %off;
+    st.global.u8 [%addr], %acc;
+DONE:
+    ret;
+}
+";
+
+const REDUCE_FLOAT_F64_BOOL_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry reduce_float_f64_bool_kernel(
+    .param .u64 in_ptr, .param .u64 out_ptr,
+    .param .u32 outer, .param .u32 dim_size, .param .u32 inner,
+    .param .u32 total, .param .u32 op
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %dim, %inn, %op_r;
+    .reg .u32 %oidx, %iidx, %base, %j, %elem;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .f64 %v;
+    .reg .u16 %acc;
+    .reg .pred %p, %is_any, %nz, %nan, %accp;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %tot, [total];
+    ld.param.u32 %dim, [dim_size];
+    ld.param.u32 %inn, [inner];
+    ld.param.u32 %op_r, [op];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot;
+    @%p bra DONE;
+
+    setp.eq.u32 %is_any, %op_r, 0;
+    selp.u16 %acc, 0, 1, %is_any;
+
+    div.u32 %oidx, %gtid, %inn;
+    rem.u32 %iidx, %gtid, %inn;
+    mul.lo.u32 %base, %oidx, %dim;
+    mul.lo.u32 %base, %base, %inn;
+    add.u32 %base, %base, %iidx;
+
+    mov.u32 %j, 0;
+LOOP:
+    setp.ge.u32 %p, %j, %dim;
+    @%p bra STORE;
+
+    mul.lo.u32 %elem, %j, %inn;
+    add.u32 %elem, %elem, %base;
+    cvt.u64.u32 %off, %elem;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %in, %off;
+    ld.global.f64 %v, [%addr];
+    setp.ne.f64 %nz, %v, 0d0000000000000000;
+    setp.nan.f64 %nan, %v, %v;
+    or.pred %nz, %nz, %nan;
+
+    setp.ne.u16 %accp, %acc, 0;
+    @%is_any or.pred %accp, %accp, %nz;
+    @!%is_any and.pred %accp, %accp, %nz;
+    selp.u16 %acc, 1, 0, %accp;
+
+    add.u32 %j, %j, 1;
+    bra LOOP;
+STORE:
+    cvt.u64.u32 %off, %gtid;
+    add.u64 %addr, %out, %off;
+    st.global.u8 [%addr], %acc;
+DONE:
+    ret;
+}
+";
+
+const REDUCE_FLOAT_F16_BOOL_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry reduce_float_f16_bool_kernel(
+    .param .u64 in_ptr, .param .u64 out_ptr,
+    .param .u32 outer, .param .u32 dim_size, .param .u32 inner,
+    .param .u32 total, .param .u32 op
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %dim, %inn, %op_r;
+    .reg .u32 %oidx, %iidx, %base, %j, %elem;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .b16 %h;
+    .reg .f32 %v;
+    .reg .u16 %acc;
+    .reg .pred %p, %is_any, %nz, %nan, %accp;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %tot, [total];
+    ld.param.u32 %dim, [dim_size];
+    ld.param.u32 %inn, [inner];
+    ld.param.u32 %op_r, [op];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot;
+    @%p bra DONE;
+
+    setp.eq.u32 %is_any, %op_r, 0;
+    selp.u16 %acc, 0, 1, %is_any;
+
+    div.u32 %oidx, %gtid, %inn;
+    rem.u32 %iidx, %gtid, %inn;
+    mul.lo.u32 %base, %oidx, %dim;
+    mul.lo.u32 %base, %base, %inn;
+    add.u32 %base, %base, %iidx;
+
+    mov.u32 %j, 0;
+LOOP:
+    setp.ge.u32 %p, %j, %dim;
+    @%p bra STORE;
+
+    mul.lo.u32 %elem, %j, %inn;
+    add.u32 %elem, %elem, %base;
+    cvt.u64.u32 %off, %elem;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %in, %off;
+    ld.global.b16 %h, [%addr];
+    cvt.f32.f16 %v, %h;
+    setp.ne.f32 %nz, %v, 0f00000000;
+    setp.nan.f32 %nan, %v, %v;
+    or.pred %nz, %nz, %nan;
+
+    setp.ne.u16 %accp, %acc, 0;
+    @%is_any or.pred %accp, %accp, %nz;
+    @!%is_any and.pred %accp, %accp, %nz;
+    selp.u16 %acc, 1, 0, %accp;
+
+    add.u32 %j, %j, 1;
+    bra LOOP;
+STORE:
+    cvt.u64.u32 %off, %gtid;
+    add.u64 %addr, %out, %off;
+    st.global.u8 [%addr], %acc;
+DONE:
+    ret;
+}
+";
+
+const REDUCE_FLOAT_BF16_BOOL_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry reduce_float_bf16_bool_kernel(
+    .param .u64 in_ptr, .param .u64 out_ptr,
+    .param .u32 outer, .param .u32 dim_size, .param .u32 inner,
+    .param .u32 total, .param .u32 op
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %dim, %inn, %op_r;
+    .reg .u32 %oidx, %iidx, %base, %j, %elem, %bits;
+    .reg .u16 %h;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .f32 %v;
+    .reg .u16 %acc;
+    .reg .pred %p, %is_any, %nz, %nan, %accp;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %tot, [total];
+    ld.param.u32 %dim, [dim_size];
+    ld.param.u32 %inn, [inner];
+    ld.param.u32 %op_r, [op];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot;
+    @%p bra DONE;
+
+    setp.eq.u32 %is_any, %op_r, 0;
+    selp.u16 %acc, 0, 1, %is_any;
+
+    div.u32 %oidx, %gtid, %inn;
+    rem.u32 %iidx, %gtid, %inn;
+    mul.lo.u32 %base, %oidx, %dim;
+    mul.lo.u32 %base, %base, %inn;
+    add.u32 %base, %base, %iidx;
+
+    mov.u32 %j, 0;
+LOOP:
+    setp.ge.u32 %p, %j, %dim;
+    @%p bra STORE;
+
+    mul.lo.u32 %elem, %j, %inn;
+    add.u32 %elem, %elem, %base;
+    cvt.u64.u32 %off, %elem;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %in, %off;
+    ld.global.u16 %h, [%addr];
+    cvt.u32.u16 %bits, %h;
+    shl.b32 %bits, %bits, 16;
+    mov.b32 %v, %bits;
+    setp.ne.f32 %nz, %v, 0f00000000;
+    setp.nan.f32 %nan, %v, %v;
+    or.pred %nz, %nz, %nan;
+
+    setp.ne.u16 %accp, %acc, 0;
+    @%is_any or.pred %accp, %accp, %nz;
+    @!%is_any and.pred %accp, %accp, %nz;
+    selp.u16 %acc, 1, 0, %accp;
+
+    add.u32 %j, %j, 1;
+    bra LOOP;
+STORE:
+    cvt.u64.u32 %off, %gtid;
+    add.u64 %addr, %out, %off;
+    st.global.u8 [%addr], %acc;
+DONE:
+    ret;
+}
+";
+
+const REDUCE_FLOAT_F32_COUNT_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry reduce_float_f32_count_kernel(
+    .param .u64 in_ptr, .param .u64 out_ptr,
+    .param .u32 outer, .param .u32 dim_size, .param .u32 inner,
+    .param .u32 total
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %dim, %inn;
+    .reg .u32 %oidx, %iidx, %base, %j, %elem;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .f32 %v;
+    .reg .s64 %count;
+    .reg .pred %p, %nz, %nan;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %tot, [total];
+    ld.param.u32 %dim, [dim_size];
+    ld.param.u32 %inn, [inner];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot;
+    @%p bra DONE;
+
+    div.u32 %oidx, %gtid, %inn;
+    rem.u32 %iidx, %gtid, %inn;
+    mul.lo.u32 %base, %oidx, %dim;
+    mul.lo.u32 %base, %base, %inn;
+    add.u32 %base, %base, %iidx;
+
+    mov.s64 %count, 0;
+    mov.u32 %j, 0;
+LOOP:
+    setp.ge.u32 %p, %j, %dim;
+    @%p bra STORE;
+
+    mul.lo.u32 %elem, %j, %inn;
+    add.u32 %elem, %elem, %base;
+    cvt.u64.u32 %off, %elem;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %v, [%addr];
+    setp.ne.f32 %nz, %v, 0f00000000;
+    setp.nan.f32 %nan, %v, %v;
+    or.pred %nz, %nz, %nan;
+    @%nz add.s64 %count, %count, 1;
+
+    add.u32 %j, %j, 1;
+    bra LOOP;
+STORE:
+    cvt.u64.u32 %off, %gtid;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %out, %off;
+    st.global.s64 [%addr], %count;
+DONE:
+    ret;
+}
+";
+
+const REDUCE_FLOAT_F64_COUNT_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry reduce_float_f64_count_kernel(
+    .param .u64 in_ptr, .param .u64 out_ptr,
+    .param .u32 outer, .param .u32 dim_size, .param .u32 inner,
+    .param .u32 total
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %dim, %inn;
+    .reg .u32 %oidx, %iidx, %base, %j, %elem;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .f64 %v;
+    .reg .s64 %count;
+    .reg .pred %p, %nz, %nan;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %tot, [total];
+    ld.param.u32 %dim, [dim_size];
+    ld.param.u32 %inn, [inner];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot;
+    @%p bra DONE;
+
+    div.u32 %oidx, %gtid, %inn;
+    rem.u32 %iidx, %gtid, %inn;
+    mul.lo.u32 %base, %oidx, %dim;
+    mul.lo.u32 %base, %base, %inn;
+    add.u32 %base, %base, %iidx;
+
+    mov.s64 %count, 0;
+    mov.u32 %j, 0;
+LOOP:
+    setp.ge.u32 %p, %j, %dim;
+    @%p bra STORE;
+
+    mul.lo.u32 %elem, %j, %inn;
+    add.u32 %elem, %elem, %base;
+    cvt.u64.u32 %off, %elem;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %in, %off;
+    ld.global.f64 %v, [%addr];
+    setp.ne.f64 %nz, %v, 0d0000000000000000;
+    setp.nan.f64 %nan, %v, %v;
+    or.pred %nz, %nz, %nan;
+    @%nz add.s64 %count, %count, 1;
+
+    add.u32 %j, %j, 1;
+    bra LOOP;
+STORE:
+    cvt.u64.u32 %off, %gtid;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %out, %off;
+    st.global.s64 [%addr], %count;
+DONE:
+    ret;
+}
+";
+
+const REDUCE_FLOAT_F16_COUNT_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry reduce_float_f16_count_kernel(
+    .param .u64 in_ptr, .param .u64 out_ptr,
+    .param .u32 outer, .param .u32 dim_size, .param .u32 inner,
+    .param .u32 total
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %dim, %inn;
+    .reg .u32 %oidx, %iidx, %base, %j, %elem;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .b16 %h;
+    .reg .f32 %v;
+    .reg .s64 %count;
+    .reg .pred %p, %nz, %nan;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %tot, [total];
+    ld.param.u32 %dim, [dim_size];
+    ld.param.u32 %inn, [inner];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot;
+    @%p bra DONE;
+
+    div.u32 %oidx, %gtid, %inn;
+    rem.u32 %iidx, %gtid, %inn;
+    mul.lo.u32 %base, %oidx, %dim;
+    mul.lo.u32 %base, %base, %inn;
+    add.u32 %base, %base, %iidx;
+
+    mov.s64 %count, 0;
+    mov.u32 %j, 0;
+LOOP:
+    setp.ge.u32 %p, %j, %dim;
+    @%p bra STORE;
+
+    mul.lo.u32 %elem, %j, %inn;
+    add.u32 %elem, %elem, %base;
+    cvt.u64.u32 %off, %elem;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %in, %off;
+    ld.global.b16 %h, [%addr];
+    cvt.f32.f16 %v, %h;
+    setp.ne.f32 %nz, %v, 0f00000000;
+    setp.nan.f32 %nan, %v, %v;
+    or.pred %nz, %nz, %nan;
+    @%nz add.s64 %count, %count, 1;
+
+    add.u32 %j, %j, 1;
+    bra LOOP;
+STORE:
+    cvt.u64.u32 %off, %gtid;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %out, %off;
+    st.global.s64 [%addr], %count;
+DONE:
+    ret;
+}
+";
+
+const REDUCE_FLOAT_BF16_COUNT_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry reduce_float_bf16_count_kernel(
+    .param .u64 in_ptr, .param .u64 out_ptr,
+    .param .u32 outer, .param .u32 dim_size, .param .u32 inner,
+    .param .u32 total
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %dim, %inn;
+    .reg .u32 %oidx, %iidx, %base, %j, %elem, %bits;
+    .reg .u16 %h;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .f32 %v;
+    .reg .s64 %count;
+    .reg .pred %p, %nz, %nan;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %tot, [total];
+    ld.param.u32 %dim, [dim_size];
+    ld.param.u32 %inn, [inner];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot;
+    @%p bra DONE;
+
+    div.u32 %oidx, %gtid, %inn;
+    rem.u32 %iidx, %gtid, %inn;
+    mul.lo.u32 %base, %oidx, %dim;
+    mul.lo.u32 %base, %base, %inn;
+    add.u32 %base, %base, %iidx;
+
+    mov.s64 %count, 0;
+    mov.u32 %j, 0;
+LOOP:
+    setp.ge.u32 %p, %j, %dim;
+    @%p bra STORE;
+
+    mul.lo.u32 %elem, %j, %inn;
+    add.u32 %elem, %elem, %base;
+    cvt.u64.u32 %off, %elem;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %in, %off;
+    ld.global.u16 %h, [%addr];
+    cvt.u32.u16 %bits, %h;
+    shl.b32 %bits, %bits, 16;
+    mov.b32 %v, %bits;
+    setp.ne.f32 %nz, %v, 0f00000000;
+    setp.nan.f32 %nan, %v, %v;
+    or.pred %nz, %nz, %nan;
+    @%nz add.s64 %count, %count, 1;
+
+    add.u32 %j, %j, 1;
+    bra LOOP;
+STORE:
+    cvt.u64.u32 %off, %gtid;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %out, %off;
+    st.global.s64 [%addr], %count;
+DONE:
+    ret;
+}
+";
+
 // ===========================================================================
 // Launch harness
 // ===========================================================================
@@ -571,6 +1131,124 @@ fn launch_reduce_bool(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn launch_reduce_float_bool<T: DeviceRepr + ValidAsZeroBits>(
+    input: &CudaSlice<T>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+    op: u32,
+) -> GpuResult<CudaSlice<u8>> {
+    let total = outer
+        .checked_mul(inner)
+        .ok_or(GpuError::LengthMismatch { a: outer, b: inner })?;
+    let expect = outer
+        .checked_mul(dim_size)
+        .and_then(|x| x.checked_mul(inner))
+        .ok_or(GpuError::LengthMismatch {
+            a: outer,
+            b: dim_size,
+        })?;
+    if input.len() < expect {
+        return Err(GpuError::LengthMismatch {
+            a: input.len(),
+            b: expect,
+        });
+    }
+    let stream = device.stream();
+    if total == 0 {
+        return Ok(stream.alloc_zeros::<u8>(0)?);
+    }
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        }
+    })?;
+    let mut out = stream.alloc_zeros::<u8>(total)?;
+    let cfg = launch_1d(total);
+    let (outer_u, dim_u, inner_u, total_u) =
+        (outer as u32, dim_size as u32, inner as u32, total as u32);
+    // SAFETY: `f` is the PTX entry `(in, out, outer, dim_size, inner, total,
+    // op)`. `input` backs at least `outer*dim_size*inner` elements; `out` is
+    // freshly allocated for `outer*inner` bool bytes. Each thread writes one
+    // output slot and scans only the corresponding in-bounds slice.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(&mut out)
+            .arg(&outer_u)
+            .arg(&dim_u)
+            .arg(&inner_u)
+            .arg(&total_u)
+            .arg(&op)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_reduce_float_count<T: DeviceRepr + ValidAsZeroBits>(
+    input: &CudaSlice<T>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<CudaSlice<i64>> {
+    let total = outer
+        .checked_mul(inner)
+        .ok_or(GpuError::LengthMismatch { a: outer, b: inner })?;
+    let expect = outer
+        .checked_mul(dim_size)
+        .and_then(|x| x.checked_mul(inner))
+        .ok_or(GpuError::LengthMismatch {
+            a: outer,
+            b: dim_size,
+        })?;
+    if input.len() < expect {
+        return Err(GpuError::LengthMismatch {
+            a: input.len(),
+            b: expect,
+        });
+    }
+    let stream = device.stream();
+    if total == 0 {
+        return Ok(stream.alloc_zeros::<i64>(0)?);
+    }
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        }
+    })?;
+    let mut out = stream.alloc_zeros::<i64>(total)?;
+    let cfg = launch_1d(total);
+    let (outer_u, dim_u, inner_u, total_u) =
+        (outer as u32, dim_size as u32, inner as u32, total as u32);
+    // SAFETY: `f` is the PTX entry `(in, out, outer, dim_size, inner, total)`.
+    // Bounds and exclusive output ownership match `launch_reduce_float_bool`.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(&mut out)
+            .arg(&outer_u)
+            .arg(&dim_u)
+            .arg(&inner_u)
+            .arg(&total_u)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
 // ===========================================================================
 // Public entry points
 // ===========================================================================
@@ -705,6 +1383,242 @@ pub fn gpu_any_bool(a: &CudaSlice<u8>, d: &GpuDevice) -> GpuResult<CudaSlice<u8>
 /// Global AND-reduction (`torch.all`) → 1-element u8 buffer (0/1).
 pub fn gpu_all_bool(a: &CudaSlice<u8>, d: &GpuDevice) -> GpuResult<CudaSlice<u8>> {
     launch_reduce_bool(a, d, REDUCE_ALL, 1)
+}
+
+/// Float-value `any` over logical `[outer, dim_size, inner]` → bool bytes.
+pub fn gpu_any_f32(
+    input: &CudaSlice<f32>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    launch_reduce_float_bool(
+        input,
+        outer,
+        dim_size,
+        inner,
+        d,
+        REDUCE_FLOAT_F32_BOOL_PTX,
+        "reduce_float_f32_bool_kernel",
+        REDUCE_ANY,
+    )
+}
+
+/// Float-value `all` over f32 logical `[outer, dim_size, inner]` → bool bytes.
+pub fn gpu_all_f32(
+    input: &CudaSlice<f32>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    launch_reduce_float_bool(
+        input,
+        outer,
+        dim_size,
+        inner,
+        d,
+        REDUCE_FLOAT_F32_BOOL_PTX,
+        "reduce_float_f32_bool_kernel",
+        REDUCE_ALL,
+    )
+}
+
+/// Count nonzero f32 values over logical `[outer, dim_size, inner]` → i64.
+pub fn gpu_count_nonzero_f32(
+    input: &CudaSlice<f32>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
+    launch_reduce_float_count(
+        input,
+        outer,
+        dim_size,
+        inner,
+        d,
+        REDUCE_FLOAT_F32_COUNT_PTX,
+        "reduce_float_f32_count_kernel",
+    )
+}
+
+/// Float-value `any` over f64 logical `[outer, dim_size, inner]` → bool bytes.
+pub fn gpu_any_f64(
+    input: &CudaSlice<f64>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    launch_reduce_float_bool(
+        input,
+        outer,
+        dim_size,
+        inner,
+        d,
+        REDUCE_FLOAT_F64_BOOL_PTX,
+        "reduce_float_f64_bool_kernel",
+        REDUCE_ANY,
+    )
+}
+
+/// Float-value `all` over f64 logical `[outer, dim_size, inner]` → bool bytes.
+pub fn gpu_all_f64(
+    input: &CudaSlice<f64>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    launch_reduce_float_bool(
+        input,
+        outer,
+        dim_size,
+        inner,
+        d,
+        REDUCE_FLOAT_F64_BOOL_PTX,
+        "reduce_float_f64_bool_kernel",
+        REDUCE_ALL,
+    )
+}
+
+/// Count nonzero f64 values over logical `[outer, dim_size, inner]` → i64.
+pub fn gpu_count_nonzero_f64(
+    input: &CudaSlice<f64>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
+    launch_reduce_float_count(
+        input,
+        outer,
+        dim_size,
+        inner,
+        d,
+        REDUCE_FLOAT_F64_COUNT_PTX,
+        "reduce_float_f64_count_kernel",
+    )
+}
+
+/// Float-value `any` over f16 bit-pattern storage → bool bytes.
+pub fn gpu_any_f16(
+    input: &CudaSlice<u16>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    launch_reduce_float_bool(
+        input,
+        outer,
+        dim_size,
+        inner,
+        d,
+        REDUCE_FLOAT_F16_BOOL_PTX,
+        "reduce_float_f16_bool_kernel",
+        REDUCE_ANY,
+    )
+}
+
+/// Float-value `all` over f16 bit-pattern storage → bool bytes.
+pub fn gpu_all_f16(
+    input: &CudaSlice<u16>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    launch_reduce_float_bool(
+        input,
+        outer,
+        dim_size,
+        inner,
+        d,
+        REDUCE_FLOAT_F16_BOOL_PTX,
+        "reduce_float_f16_bool_kernel",
+        REDUCE_ALL,
+    )
+}
+
+/// Count nonzero f16 bit-pattern values over logical slices → i64.
+pub fn gpu_count_nonzero_f16(
+    input: &CudaSlice<u16>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
+    launch_reduce_float_count(
+        input,
+        outer,
+        dim_size,
+        inner,
+        d,
+        REDUCE_FLOAT_F16_COUNT_PTX,
+        "reduce_float_f16_count_kernel",
+    )
+}
+
+/// Float-value `any` over bf16 bit-pattern storage → bool bytes.
+pub fn gpu_any_bf16(
+    input: &CudaSlice<u16>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    launch_reduce_float_bool(
+        input,
+        outer,
+        dim_size,
+        inner,
+        d,
+        REDUCE_FLOAT_BF16_BOOL_PTX,
+        "reduce_float_bf16_bool_kernel",
+        REDUCE_ANY,
+    )
+}
+
+/// Float-value `all` over bf16 bit-pattern storage → bool bytes.
+pub fn gpu_all_bf16(
+    input: &CudaSlice<u16>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    launch_reduce_float_bool(
+        input,
+        outer,
+        dim_size,
+        inner,
+        d,
+        REDUCE_FLOAT_BF16_BOOL_PTX,
+        "reduce_float_bf16_bool_kernel",
+        REDUCE_ALL,
+    )
+}
+
+/// Count nonzero bf16 bit-pattern values over logical slices → i64.
+pub fn gpu_count_nonzero_bf16(
+    input: &CudaSlice<u16>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
+    launch_reduce_float_count(
+        input,
+        outer,
+        dim_size,
+        inner,
+        d,
+        REDUCE_FLOAT_BF16_COUNT_PTX,
+        "reduce_float_bf16_count_kernel",
+    )
 }
 
 // ===========================================================================

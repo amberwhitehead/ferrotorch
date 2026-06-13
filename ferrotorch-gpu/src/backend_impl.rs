@@ -8737,6 +8737,153 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
+    fn float_any(
+        &self,
+        src: &GpuBufferHandle,
+        outer: usize,
+        dim_size: usize,
+        inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(src.device_ordinal())?;
+        let ord = src.device_ordinal();
+        let r = match src.dtype() {
+            DType::F32 => crate::bool_kernels::gpu_any_f32(
+                Self::unwrap_buffer(src)?.inner(),
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
+            DType::F64 => crate::bool_kernels::gpu_any_f64(
+                Self::unwrap_buffer_f64(src)?.inner(),
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
+            DType::F16 => crate::bool_kernels::gpu_any_f16(
+                Self::unwrap_buffer_f16(src)?,
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
+            DType::BF16 => crate::bool_kernels::gpu_any_bf16(
+                Self::unwrap_buffer_bf16(src)?,
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
+            other => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("float_any: unsupported dtype {other}"),
+                });
+            }
+        }
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_slice_bool(r, ord))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn float_all(
+        &self,
+        src: &GpuBufferHandle,
+        outer: usize,
+        dim_size: usize,
+        inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(src.device_ordinal())?;
+        let ord = src.device_ordinal();
+        let r = match src.dtype() {
+            DType::F32 => crate::bool_kernels::gpu_all_f32(
+                Self::unwrap_buffer(src)?.inner(),
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
+            DType::F64 => crate::bool_kernels::gpu_all_f64(
+                Self::unwrap_buffer_f64(src)?.inner(),
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
+            DType::F16 => crate::bool_kernels::gpu_all_f16(
+                Self::unwrap_buffer_f16(src)?,
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
+            DType::BF16 => crate::bool_kernels::gpu_all_bf16(
+                Self::unwrap_buffer_bf16(src)?,
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
+            other => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("float_all: unsupported dtype {other}"),
+                });
+            }
+        }
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_slice_bool(r, ord))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn float_count_nonzero(
+        &self,
+        src: &GpuBufferHandle,
+        outer: usize,
+        dim_size: usize,
+        inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(src.device_ordinal())?;
+        let ord = src.device_ordinal();
+        let r = match src.dtype() {
+            DType::F32 => crate::bool_kernels::gpu_count_nonzero_f32(
+                Self::unwrap_buffer(src)?.inner(),
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
+            DType::F64 => crate::bool_kernels::gpu_count_nonzero_f64(
+                Self::unwrap_buffer_f64(src)?.inner(),
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
+            DType::F16 => crate::bool_kernels::gpu_count_nonzero_f16(
+                Self::unwrap_buffer_f16(src)?,
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
+            DType::BF16 => crate::bool_kernels::gpu_count_nonzero_bf16(
+                Self::unwrap_buffer_bf16(src)?,
+                outer,
+                dim_size,
+                inner,
+                dev,
+            ),
+            other => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("float_count_nonzero: unsupported dtype {other}"),
+                });
+            }
+        }
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_slice_i64(r, ord))
+    }
+
+    #[cfg(feature = "cuda")]
     fn cast_bool_to_f(
         &self,
         src: &GpuBufferHandle,

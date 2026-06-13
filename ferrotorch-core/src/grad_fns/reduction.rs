@@ -2355,7 +2355,15 @@ fn is_nonzero_float<T: Float>(v: T) -> bool {
 /// Closes blocker #1312 (any).
 pub fn any<T: Float>(input: &Tensor<T>) -> FerrotorchResult<BoolTensor> {
     if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "any" });
+        let input_ref = if input.is_contiguous() {
+            input.clone()
+        } else {
+            input.contiguous()?
+        };
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = backend.float_any(input_ref.gpu_handle()?, 1, input_ref.numel(), 1)?;
+        return BoolTensor::from_gpu_handle(handle, Vec::new());
     }
     let data = input.data()?;
     // Upstream: `any(empty) == false` (zero of the disjunction monoid).
@@ -2371,7 +2379,15 @@ pub fn any<T: Float>(input: &Tensor<T>) -> FerrotorchResult<BoolTensor> {
 /// Closes blocker #1312 (all).
 pub fn all<T: Float>(input: &Tensor<T>) -> FerrotorchResult<BoolTensor> {
     if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "all" });
+        let input_ref = if input.is_contiguous() {
+            input.clone()
+        } else {
+            input.contiguous()?
+        };
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = backend.float_all(input_ref.gpu_handle()?, 1, input_ref.numel(), 1)?;
+        return BoolTensor::from_gpu_handle(handle, Vec::new());
     }
     let data = input.data()?;
     // Upstream: `all(empty) == true` (identity of the conjunction monoid).
@@ -2387,9 +2403,16 @@ pub fn all<T: Float>(input: &Tensor<T>) -> FerrotorchResult<BoolTensor> {
 /// Closes blocker #1312 (count_nonzero).
 pub fn count_nonzero<T: Float>(input: &Tensor<T>) -> FerrotorchResult<IntTensor<i64>> {
     if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: "count_nonzero",
-        });
+        let input_ref = if input.is_contiguous() {
+            input.clone()
+        } else {
+            input.contiguous()?
+        };
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle =
+            backend.float_count_nonzero(input_ref.gpu_handle()?, 1, input_ref.numel(), 1)?;
+        return Ok(IntTensor::<i64>::from_gpu_handle(handle, Vec::new()));
     }
     let data = input.data()?;
     let n = data
@@ -2420,37 +2443,58 @@ where
     T: Float,
     F: Fn(bool, T) -> bool,
 {
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: op_name });
-    }
     let ndim = input.ndim();
     if ndim == 0 {
+        if dim != 0 && dim != -1 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("{op_name}_dim: dim {dim} out of bounds for 0-D tensor"),
+            });
+        }
         // 0-D: degenerate single-element reduction; return the element's
         // truthiness wrapped as 0-D BoolTensor.
+        if input.is_cuda() {
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let handle = if init {
+                backend.float_all(input.gpu_handle()?, 1, 1, 1)?
+            } else {
+                backend.float_any(input.gpu_handle()?, 1, 1, 1)?
+            };
+            return BoolTensor::from_gpu_handle(handle, Vec::new());
+        }
         let v = input.data()?[0];
         return BoolTensor::from_vec(vec![fold(init, v)], vec![]);
     }
-    let norm_dim = if dim < 0 {
-        (ndim as i64 + dim) as usize
-    } else {
-        dim as usize
-    };
-    if norm_dim >= ndim {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!("{op_name}_dim: dim {dim} out of bounds for {ndim}-D tensor"),
-        });
-    }
+    let norm_dim = crate::shape::normalize_axis(dim as isize, ndim)?;
     let input_ref = if input.is_contiguous() {
         input.clone()
     } else {
         input.contiguous()?
     };
-    let in_data = input_ref.data()?;
     let in_shape = input_ref.shape();
     let dim_size = in_shape[norm_dim];
     let outer: usize = in_shape[..norm_dim].iter().product();
     let inner: usize = in_shape[norm_dim + 1..].iter().product();
 
+    let mut out_shape: Vec<usize> = in_shape.to_vec();
+    if keepdim {
+        out_shape[norm_dim] = 1;
+    } else {
+        out_shape.remove(norm_dim);
+    }
+
+    if input_ref.is_cuda() {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = if init {
+            backend.float_all(input_ref.gpu_handle()?, outer, dim_size, inner)?
+        } else {
+            backend.float_any(input_ref.gpu_handle()?, outer, dim_size, inner)?
+        };
+        return BoolTensor::from_gpu_handle(handle, out_shape);
+    }
+
+    let in_data = input_ref.data()?;
     let mut out = Vec::with_capacity(outer * inner);
     for o in 0..outer {
         for i in 0..inner {
@@ -2460,12 +2504,6 @@ where
             }
             out.push(acc);
         }
-    }
-    let mut out_shape: Vec<usize> = in_shape.to_vec();
-    if keepdim {
-        out_shape[norm_dim] = 1;
-    } else {
-        out_shape.remove(norm_dim);
     }
     BoolTensor::from_vec(out, out_shape)
 }
@@ -2501,37 +2539,45 @@ pub fn count_nonzero_dim<T: Float>(
     input: &Tensor<T>,
     dim: i64,
 ) -> FerrotorchResult<IntTensor<i64>> {
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: "count_nonzero_dim",
-        });
-    }
     let ndim = input.ndim();
     if ndim == 0 {
+        if dim != 0 && dim != -1 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("count_nonzero_dim: dim {dim} out of bounds for 0-D tensor"),
+            });
+        }
+        if input.is_cuda() {
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let handle = backend.float_count_nonzero(input.gpu_handle()?, 1, 1, 1)?;
+            return Ok(IntTensor::<i64>::from_gpu_handle(handle, Vec::new()));
+        }
         let v = input.data()?[0];
         return Ok(IntTensor::<i64>::scalar(i64::from(is_nonzero_float(v))));
     }
-    let norm_dim = if dim < 0 {
-        (ndim as i64 + dim) as usize
-    } else {
-        dim as usize
-    };
-    if norm_dim >= ndim {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!("count_nonzero_dim: dim {dim} out of bounds for {ndim}-D tensor"),
-        });
-    }
+    let norm_dim = crate::shape::normalize_axis(dim as isize, ndim)?;
     let input_ref = if input.is_contiguous() {
         input.clone()
     } else {
         input.contiguous()?
     };
-    let in_data = input_ref.data()?;
     let in_shape = input_ref.shape();
     let dim_size = in_shape[norm_dim];
     let outer: usize = in_shape[..norm_dim].iter().product();
     let inner: usize = in_shape[norm_dim + 1..].iter().product();
 
+    let mut out_shape: Vec<usize> = in_shape.to_vec();
+    out_shape.remove(norm_dim);
+
+    if input_ref.is_cuda() {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle =
+            backend.float_count_nonzero(input_ref.gpu_handle()?, outer, dim_size, inner)?;
+        return Ok(IntTensor::<i64>::from_gpu_handle(handle, out_shape));
+    }
+
+    let in_data = input_ref.data()?;
     let mut out = Vec::with_capacity(outer * inner);
     for o in 0..outer {
         for i in 0..inner {
@@ -2544,8 +2590,6 @@ pub fn count_nonzero_dim<T: Float>(
             out.push(count);
         }
     }
-    let mut out_shape: Vec<usize> = in_shape.to_vec();
-    out_shape.remove(norm_dim);
     IntTensor::<i64>::from_vec(out, out_shape)
 }
 

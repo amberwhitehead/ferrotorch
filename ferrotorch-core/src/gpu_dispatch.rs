@@ -6040,6 +6040,45 @@ pub trait GpuBackend: Send + Sync {
         Err(FerrotorchError::NotImplementedOnCuda { op: "bool_all" })
     }
 
+    /// Float-value OR-reduction (`torch.any`) over logical
+    /// `[outer, dim_size, inner]`, returning a `DType::Bool` buffer with
+    /// `outer * inner` elements. Full reduction uses `outer=1, inner=1`.
+    fn float_any(
+        &self,
+        _src: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "float_any" })
+    }
+
+    /// Float-value AND-reduction (`torch.all`); see [`Self::float_any`].
+    fn float_all(
+        &self,
+        _src: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "float_all" })
+    }
+
+    /// Float-value count of nonzero elements over logical
+    /// `[outer, dim_size, inner]`, returning a `DType::I64` buffer with
+    /// `outer * inner` elements.
+    fn float_count_nonzero(
+        &self,
+        _src: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "float_count_nonzero",
+        })
+    }
+
     /// Cast a Bool (u8) buffer to a float buffer tagged `dst`
     /// (∈ {F32,F64,BF16,F16}): `true → 1.0`, `false → 0.0`. Result stays
     /// GPU-resident.
