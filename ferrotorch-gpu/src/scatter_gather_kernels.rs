@@ -108,6 +108,12 @@ fn launch_1d(n: usize) -> LaunchConfig {
     }
 }
 
+fn checked_u32(name: &'static str, value: usize) -> GpuResult<u32> {
+    u32::try_from(value).map_err(|_| GpuError::InvalidState {
+        message: format!("{name}={value} exceeds u32 kernel limit"),
+    })
+}
+
 // ===========================================================================
 // gather PTX. Params: (in_ptr, idx_ptr, out_ptr, outer, in_dim, out_dim,
 //                      inner, total)
@@ -409,6 +415,242 @@ DONE:
     };
 }
 
+// ===========================================================================
+// Rank-aware scatter-family PTX. `idx` and `src` are parallel to the compact
+// index/output coordinate space (`index_shape`). Destination offsets are
+// computed from C-order `input_strides`, replacing only `dim` with idx[t].
+// ===========================================================================
+macro_rules! scatter_nd_ptx {
+    ($kname:literal, $wsh:literal, $ldv:literal, $stv:literal, $vreg:literal) => {
+        concat!(
+            ".version 7.0\n.target sm_60\n.address_size 64\n",
+            ".visible .entry ",
+            $kname,
+            "(
+    .param .u64 out_ptr, .param .u64 idx_ptr, .param .u64 src_ptr,
+    .param .u64 input_strides_ptr, .param .u64 index_shape_ptr,
+    .param .u32 rank, .param .u32 dim, .param .u32 total
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %rank, %dim, %axis, %rem;
+    .reg .u32 %size, %coord, %sel, %stride, %dstelem;
+    .reg .u64 %out, %idx, %src, %istr, %ishape, %off, %addr;
+    .reg .s64 %selv;
+    .reg ",
+            $vreg,
+            " %v;
+    .reg .pred %p;
+
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %idx, [idx_ptr];
+    ld.param.u64 %src, [src_ptr];
+    ld.param.u64 %istr, [input_strides_ptr];
+    ld.param.u64 %ishape, [index_shape_ptr];
+    ld.param.u32 %rank, [rank];
+    ld.param.u32 %dim, [dim];
+    ld.param.u32 %tot, [total];
+
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot; @%p bra DONE;
+
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, ",
+            $wsh,
+            "; add.u64 %addr, %src, %off;
+    ",
+            $ldv,
+            " %v, [%addr];
+
+    mov.u32 %axis, %rank;
+    mov.u32 %rem, %gtid;
+    mov.u32 %dstelem, 0;
+LOOP:
+    setp.eq.u32 %p, %axis, 0; @%p bra LOOP_DONE;
+    sub.u32 %axis, %axis, 1;
+
+    cvt.u64.u32 %off, %axis; shl.b64 %off, %off, 2; add.u64 %addr, %ishape, %off;
+    ld.global.u32 %size, [%addr];
+    rem.u32 %coord, %rem, %size;
+    div.u32 %rem, %rem, %size;
+
+    setp.ne.u32 %p, %axis, %dim; @%p bra USE_OUTPUT_COORD;
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, 3; add.u64 %addr, %idx, %off;
+    ld.global.s64 %selv, [%addr];
+    cvt.u32.s64 %sel, %selv;
+    mov.u32 %coord, %sel;
+USE_OUTPUT_COORD:
+    cvt.u64.u32 %off, %axis; shl.b64 %off, %off, 2; add.u64 %addr, %istr, %off;
+    ld.global.u32 %stride, [%addr];
+    mad.lo.u32 %dstelem, %coord, %stride, %dstelem;
+    bra LOOP;
+
+LOOP_DONE:
+    cvt.u64.u32 %off, %dstelem; shl.b64 %off, %off, ",
+            $wsh,
+            "; add.u64 %addr, %out, %off;
+    ",
+            $stv,
+            " [%addr], %v;
+DONE:
+    ret;
+}
+"
+        )
+    };
+}
+
+macro_rules! scatter_add_nd_ptx {
+    ($kname:literal, $wsh:literal, $ldv:literal, $atom:literal, $vreg:literal) => {
+        concat!(
+            ".version 7.0\n.target sm_60\n.address_size 64\n",
+            ".visible .entry ",
+            $kname,
+            "(
+    .param .u64 out_ptr, .param .u64 idx_ptr, .param .u64 src_ptr,
+    .param .u64 input_strides_ptr, .param .u64 index_shape_ptr,
+    .param .u32 rank, .param .u32 dim, .param .u32 total
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %rank, %dim, %axis, %rem;
+    .reg .u32 %size, %coord, %sel, %stride, %dstelem;
+    .reg .u64 %out, %idx, %src, %istr, %ishape, %off, %addr;
+    .reg .s64 %selv;
+    .reg ",
+            $vreg,
+            " %v, %dummy;
+    .reg .pred %p;
+
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %idx, [idx_ptr];
+    ld.param.u64 %src, [src_ptr];
+    ld.param.u64 %istr, [input_strides_ptr];
+    ld.param.u64 %ishape, [index_shape_ptr];
+    ld.param.u32 %rank, [rank];
+    ld.param.u32 %dim, [dim];
+    ld.param.u32 %tot, [total];
+
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot; @%p bra DONE;
+
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, ",
+            $wsh,
+            "; add.u64 %addr, %src, %off;
+    ",
+            $ldv,
+            " %v, [%addr];
+
+    mov.u32 %axis, %rank;
+    mov.u32 %rem, %gtid;
+    mov.u32 %dstelem, 0;
+LOOP:
+    setp.eq.u32 %p, %axis, 0; @%p bra LOOP_DONE;
+    sub.u32 %axis, %axis, 1;
+
+    cvt.u64.u32 %off, %axis; shl.b64 %off, %off, 2; add.u64 %addr, %ishape, %off;
+    ld.global.u32 %size, [%addr];
+    rem.u32 %coord, %rem, %size;
+    div.u32 %rem, %rem, %size;
+
+    setp.ne.u32 %p, %axis, %dim; @%p bra USE_OUTPUT_COORD;
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, 3; add.u64 %addr, %idx, %off;
+    ld.global.s64 %selv, [%addr];
+    cvt.u32.s64 %sel, %selv;
+    mov.u32 %coord, %sel;
+USE_OUTPUT_COORD:
+    cvt.u64.u32 %off, %axis; shl.b64 %off, %off, 2; add.u64 %addr, %istr, %off;
+    ld.global.u32 %stride, [%addr];
+    mad.lo.u32 %dstelem, %coord, %stride, %dstelem;
+    bra LOOP;
+
+LOOP_DONE:
+    cvt.u64.u32 %off, %dstelem; shl.b64 %off, %off, ",
+            $wsh,
+            "; add.u64 %addr, %out, %off;
+    ",
+            $atom,
+            " %dummy, [%addr], %v;
+DONE:
+    ret;
+}
+"
+        )
+    };
+}
+
+macro_rules! scatter_value_nd_ptx {
+    ($kname:literal, $wsh:literal, $stv:literal, $vreg:literal, $ptype:literal, $ldp:literal) => {
+        concat!(
+            ".version 7.0\n.target sm_60\n.address_size 64\n",
+            ".visible .entry ",
+            $kname,
+            "(
+    .param .u64 out_ptr, .param .u64 idx_ptr, .param ",
+            $ptype,
+            " value,
+    .param .u64 input_strides_ptr, .param .u64 index_shape_ptr,
+    .param .u32 rank, .param .u32 dim, .param .u32 total
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %rank, %dim, %axis, %rem;
+    .reg .u32 %size, %coord, %sel, %stride, %dstelem;
+    .reg .u64 %out, %idx, %istr, %ishape, %off, %addr;
+    .reg .s64 %selv;
+    .reg ",
+            $vreg,
+            " %v;
+    .reg .pred %p;
+
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %idx, [idx_ptr];
+    ",
+            $ldp,
+            " %v, [value];
+    ld.param.u64 %istr, [input_strides_ptr];
+    ld.param.u64 %ishape, [index_shape_ptr];
+    ld.param.u32 %rank, [rank];
+    ld.param.u32 %dim, [dim];
+    ld.param.u32 %tot, [total];
+
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot; @%p bra DONE;
+
+    mov.u32 %axis, %rank;
+    mov.u32 %rem, %gtid;
+    mov.u32 %dstelem, 0;
+LOOP:
+    setp.eq.u32 %p, %axis, 0; @%p bra LOOP_DONE;
+    sub.u32 %axis, %axis, 1;
+
+    cvt.u64.u32 %off, %axis; shl.b64 %off, %off, 2; add.u64 %addr, %ishape, %off;
+    ld.global.u32 %size, [%addr];
+    rem.u32 %coord, %rem, %size;
+    div.u32 %rem, %rem, %size;
+
+    setp.ne.u32 %p, %axis, %dim; @%p bra USE_OUTPUT_COORD;
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, 3; add.u64 %addr, %idx, %off;
+    ld.global.s64 %selv, [%addr];
+    cvt.u32.s64 %sel, %selv;
+    mov.u32 %coord, %sel;
+USE_OUTPUT_COORD:
+    cvt.u64.u32 %off, %axis; shl.b64 %off, %off, 2; add.u64 %addr, %istr, %off;
+    ld.global.u32 %stride, [%addr];
+    mad.lo.u32 %dstelem, %coord, %stride, %dstelem;
+    bra LOOP;
+
+LOOP_DONE:
+    cvt.u64.u32 %off, %dstelem; shl.b64 %off, %off, ",
+            $wsh,
+            "; add.u64 %addr, %out, %off;
+    ",
+            $stv,
+            " [%addr], %v;
+DONE:
+    ret;
+}
+"
+        )
+    };
+}
+
 // ── PTX constants ───────────────────────────────────────────────────────────
 const GATHER_DIM_F32_PTX: &str = gather_dim_ptx!(
     "gather_dim_f32_kernel",
@@ -463,6 +705,50 @@ const SCATTER_ADD_DIM_F32_PTX: &str = scatter_add_dim_ptx!(
 );
 const SCATTER_ADD_DIM_F64_PTX: &str = scatter_add_dim_ptx!(
     "scatter_add_dim_f64_kernel",
+    "3",
+    "ld.global.f64",
+    "atom.global.add.f64",
+    ".f64"
+);
+const SCATTER_ND_F32_PTX: &str = scatter_nd_ptx!(
+    "scatter_nd_f32_kernel",
+    "2",
+    "ld.global.f32",
+    "st.global.f32",
+    ".f32"
+);
+const SCATTER_ND_F64_PTX: &str = scatter_nd_ptx!(
+    "scatter_nd_f64_kernel",
+    "3",
+    "ld.global.f64",
+    "st.global.f64",
+    ".f64"
+);
+const SCATTER_VALUE_ND_F32_PTX: &str = scatter_value_nd_ptx!(
+    "scatter_value_nd_f32_kernel",
+    "2",
+    "st.global.f32",
+    ".f32",
+    ".f32",
+    "ld.param.f32"
+);
+const SCATTER_VALUE_ND_F64_PTX: &str = scatter_value_nd_ptx!(
+    "scatter_value_nd_f64_kernel",
+    "3",
+    "st.global.f64",
+    ".f64",
+    ".f64",
+    "ld.param.f64"
+);
+const SCATTER_ADD_ND_F32_PTX: &str = scatter_add_nd_ptx!(
+    "scatter_add_nd_f32_kernel",
+    "2",
+    "ld.global.f32",
+    "atom.global.add.f32",
+    ".f32"
+);
+const SCATTER_ADD_ND_F64_PTX: &str = scatter_add_nd_ptx!(
+    "scatter_add_nd_f64_kernel",
     "3",
     "ld.global.f64",
     "atom.global.add.f64",
@@ -881,6 +1167,331 @@ pub fn gpu_scatter_add_dim_f64(
         device,
         SCATTER_ADD_DIM_F64_PTX,
         "scatter_add_dim_f64_kernel",
+    )?;
+    Ok(out)
+}
+
+fn scatter_nd_metadata(
+    input_len: usize,
+    index_len: usize,
+    src_len: Option<usize>,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+) -> GpuResult<(usize, Vec<u32>, Vec<u32>)> {
+    if input_shape.len() != index_shape.len() || dim >= input_shape.len() {
+        return Err(GpuError::InvalidState {
+            message: format!(
+                "scatter_nd: invalid metadata input_shape={input_shape:?} \
+                 index_shape={index_shape:?} dim={dim}"
+            ),
+        });
+    }
+    let input_numel = input_shape.iter().try_fold(1usize, |acc, &d| {
+        acc.checked_mul(d)
+            .ok_or(GpuError::LengthMismatch { a: acc, b: d })
+    })?;
+    let index_numel = index_shape.iter().try_fold(1usize, |acc, &d| {
+        acc.checked_mul(d)
+            .ok_or(GpuError::LengthMismatch { a: acc, b: d })
+    })?;
+    if input_len < input_numel {
+        return Err(GpuError::LengthMismatch {
+            a: input_numel,
+            b: input_len,
+        });
+    }
+    if index_len < index_numel {
+        return Err(GpuError::LengthMismatch {
+            a: index_numel,
+            b: index_len,
+        });
+    }
+    if let Some(src_len) = src_len
+        && src_len < index_numel
+    {
+        return Err(GpuError::LengthMismatch {
+            a: index_numel,
+            b: src_len,
+        });
+    }
+
+    let mut input_strides = vec![0u32; input_shape.len()];
+    let mut stride = 1usize;
+    for axis in (0..input_shape.len()).rev() {
+        input_strides[axis] = checked_u32("input_stride", stride)?;
+        stride = stride
+            .checked_mul(input_shape[axis])
+            .ok_or(GpuError::LengthMismatch {
+                a: stride,
+                b: input_shape[axis],
+            })?;
+    }
+    let index_dims = index_shape
+        .iter()
+        .map(|&d| checked_u32("index_dim", d))
+        .collect::<GpuResult<Vec<_>>>()?;
+    Ok((index_numel, input_strides, index_dims))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_scatter_nd<V: DeviceRepr + ValidAsZeroBits>(
+    out: &mut CudaSlice<V>,
+    idx: &CudaSlice<i64>,
+    src: &CudaSlice<V>,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<()> {
+    let (total, input_strides, index_dims) = scatter_nd_metadata(
+        out.len(),
+        idx.len(),
+        Some(src.len()),
+        input_shape,
+        index_shape,
+        dim,
+    )?;
+    if total == 0 {
+        return Ok(());
+    }
+    let stream = device.stream();
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        }
+    })?;
+    let input_strides_dev = stream.clone_htod(&input_strides)?;
+    let index_dims_dev = stream.clone_htod(&index_dims)?;
+    let cfg = launch_1d(total);
+    let rank_u = checked_u32("rank", index_shape.len())?;
+    let dim_u = checked_u32("dim", dim)?;
+    let total_u = checked_u32("total", total)?;
+    // SAFETY:
+    // - `f` is the rank-aware scatter-family entry with signature
+    //   (out, idx, src, input_strides, index_shape, rank, dim, total).
+    // - Metadata buffers are exact-rank device slices uploaded for this launch.
+    // - `out` is the only mutable allocation; `idx`/`src` are read-only and
+    //   have `total == product(index_shape)` elements.
+    // - Core validation guarantees non-dim index coordinates fit `input_shape`
+    //   and index values fit the scatter dimension, so computed destinations
+    //   are in bounds. Atomic variants handle duplicate destinations.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(out)
+            .arg(idx)
+            .arg(src)
+            .arg(&input_strides_dev)
+            .arg(&index_dims_dev)
+            .arg(&rank_u)
+            .arg(&dim_u)
+            .arg(&total_u)
+            .launch(cfg)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_scatter_value_nd<V: DeviceRepr + ValidAsZeroBits>(
+    out: &mut CudaSlice<V>,
+    idx: &CudaSlice<i64>,
+    value: &V,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<()> {
+    let (total, input_strides, index_dims) =
+        scatter_nd_metadata(out.len(), idx.len(), None, input_shape, index_shape, dim)?;
+    if total == 0 {
+        return Ok(());
+    }
+    let stream = device.stream();
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        }
+    })?;
+    let input_strides_dev = stream.clone_htod(&input_strides)?;
+    let index_dims_dev = stream.clone_htod(&index_dims)?;
+    let cfg = launch_1d(total);
+    let rank_u = checked_u32("rank", index_shape.len())?;
+    let dim_u = checked_u32("dim", dim)?;
+    let total_u = checked_u32("total", total)?;
+    // SAFETY: Same destination metadata contract as `launch_scatter_nd`; this
+    // variant broadcasts one by-value scalar instead of reading `src[t]`.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(out)
+            .arg(idx)
+            .arg(value)
+            .arg(&input_strides_dev)
+            .arg(&index_dims_dev)
+            .arg(&rank_u)
+            .arg(&dim_u)
+            .arg(&total_u)
+            .launch(cfg)?;
+    }
+    Ok(())
+}
+
+/// f32 rank-aware `scatter`: index/src are compact `index_shape`, destination
+/// offsets are computed against `input_shape`.
+pub fn gpu_scatter_nd_f32(
+    input: &CudaBuffer<f32>,
+    idx: &CudaSlice<i64>,
+    src: &CudaBuffer<f32>,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let mut out = clone_f32(input, input.len(), device)?;
+    launch_scatter_nd(
+        out.inner_mut(),
+        idx,
+        src.inner(),
+        input_shape,
+        index_shape,
+        dim,
+        device,
+        SCATTER_ND_F32_PTX,
+        "scatter_nd_f32_kernel",
+    )?;
+    Ok(out)
+}
+
+/// f64 rank-aware `scatter`; companion of [`gpu_scatter_nd_f32`].
+pub fn gpu_scatter_nd_f64(
+    input: &CudaBuffer<f64>,
+    idx: &CudaSlice<i64>,
+    src: &CudaBuffer<f64>,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    let mut out = clone_f64(input, input.len(), device)?;
+    launch_scatter_nd(
+        out.inner_mut(),
+        idx,
+        src.inner(),
+        input_shape,
+        index_shape,
+        dim,
+        device,
+        SCATTER_ND_F64_PTX,
+        "scatter_nd_f64_kernel",
+    )?;
+    Ok(out)
+}
+
+/// f32 rank-aware scalar `scatter`.
+pub fn gpu_scatter_value_nd_f32(
+    input: &CudaBuffer<f32>,
+    idx: &CudaSlice<i64>,
+    value: f32,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let mut out = clone_f32(input, input.len(), device)?;
+    launch_scatter_value_nd(
+        out.inner_mut(),
+        idx,
+        &value,
+        input_shape,
+        index_shape,
+        dim,
+        device,
+        SCATTER_VALUE_ND_F32_PTX,
+        "scatter_value_nd_f32_kernel",
+    )?;
+    Ok(out)
+}
+
+/// f64 rank-aware scalar `scatter`; companion of [`gpu_scatter_value_nd_f32`].
+pub fn gpu_scatter_value_nd_f64(
+    input: &CudaBuffer<f64>,
+    idx: &CudaSlice<i64>,
+    value: f64,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    let mut out = clone_f64(input, input.len(), device)?;
+    launch_scatter_value_nd(
+        out.inner_mut(),
+        idx,
+        &value,
+        input_shape,
+        index_shape,
+        dim,
+        device,
+        SCATTER_VALUE_ND_F64_PTX,
+        "scatter_value_nd_f64_kernel",
+    )?;
+    Ok(out)
+}
+
+/// f32 rank-aware `scatter_add`.
+pub fn gpu_scatter_add_nd_f32(
+    input: &CudaBuffer<f32>,
+    idx: &CudaSlice<i64>,
+    src: &CudaBuffer<f32>,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let mut out = clone_f32(input, input.len(), device)?;
+    launch_scatter_nd(
+        out.inner_mut(),
+        idx,
+        src.inner(),
+        input_shape,
+        index_shape,
+        dim,
+        device,
+        SCATTER_ADD_ND_F32_PTX,
+        "scatter_add_nd_f32_kernel",
+    )?;
+    Ok(out)
+}
+
+/// f64 rank-aware `scatter_add`; companion of [`gpu_scatter_add_nd_f32`].
+pub fn gpu_scatter_add_nd_f64(
+    input: &CudaBuffer<f64>,
+    idx: &CudaSlice<i64>,
+    src: &CudaBuffer<f64>,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    let mut out = clone_f64(input, input.len(), device)?;
+    launch_scatter_nd(
+        out.inner_mut(),
+        idx,
+        src.inner(),
+        input_shape,
+        index_shape,
+        dim,
+        device,
+        SCATTER_ADD_ND_F64_PTX,
+        "scatter_add_nd_f64_kernel",
     )?;
     Ok(out)
 }

@@ -5592,6 +5592,97 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// Rank-aware f32 `scatter` for PyTorch-legal index shapes whose non-dim
+    /// axes may be smaller than `input_shape`.
+    fn scatter_nd_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_nd_f32",
+        })
+    }
+
+    /// Rank-aware f64 `scatter`; companion of [`Self::scatter_nd_f32`].
+    fn scatter_nd_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_nd_f64",
+        })
+    }
+
+    /// Rank-aware f32 scalar `scatter`.
+    fn scatter_value_nd_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _value: f32,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_value_nd_f32",
+        })
+    }
+
+    /// Rank-aware f64 scalar `scatter`; companion of [`Self::scatter_value_nd_f32`].
+    fn scatter_value_nd_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _value: f64,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_value_nd_f64",
+        })
+    }
+
+    /// Rank-aware f32 `scatter_add`.
+    fn scatter_add_nd_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_add_nd_f32",
+        })
+    }
+
+    /// Rank-aware f64 `scatter_add`; companion of [`Self::scatter_add_nd_f32`].
+    fn scatter_add_nd_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_add_nd_f64",
+        })
+    }
+
     /// f32 segmented row-scatter-add (GNN message passing —
     /// `ops::scatter::scatter_add_segments`). `src` is `[e, d]`; `index` is a
     /// resident `i64` per-ROW segment id (length `e`); the result is a fresh

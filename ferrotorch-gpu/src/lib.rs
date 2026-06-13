@@ -276,8 +276,10 @@ pub use roll::{gpu_roll_f32, gpu_roll_f64};
 #[cfg(feature = "cuda")]
 pub use scatter_gather_kernels::{
     gpu_gather_dim_f32, gpu_gather_dim_f64, gpu_scatter_add_dim_f32, gpu_scatter_add_dim_f64,
-    gpu_scatter_add_segments_f32, gpu_scatter_add_segments_f64, gpu_scatter_dim_f32,
-    gpu_scatter_dim_f64, gpu_scatter_value_dim_f32, gpu_scatter_value_dim_f64,
+    gpu_scatter_add_nd_f32, gpu_scatter_add_nd_f64, gpu_scatter_add_segments_f32,
+    gpu_scatter_add_segments_f64, gpu_scatter_dim_f32, gpu_scatter_dim_f64, gpu_scatter_nd_f32,
+    gpu_scatter_nd_f64, gpu_scatter_value_dim_f32, gpu_scatter_value_dim_f64,
+    gpu_scatter_value_nd_f32, gpu_scatter_value_nd_f64,
 };
 #[cfg(feature = "cuda")]
 pub use search::{

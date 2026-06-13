@@ -12,7 +12,7 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (`gather`) | SHIPPED | `GatherBackward` Arc-attached by `ops::indexing::gather` (kernel-layer forward); CPU walk + GPU dim-aware `scatter_add_dim_{f32,f64}` path with i64 index (#1822/#1823). |
+//! | REQ-1 (`gather`) | SHIPPED | `GatherBackward` Arc-attached by `ops::indexing::gather` (kernel-layer forward); CPU walk + GPU rank-aware `scatter_add_nd_{f32,f64}` path with i64 index (#1822/#1823/#1820). |
 //! | REQ-2 (`scatter`) | SHIPPED | `ScatterBackward` returns `[grad_input zeroed at written positions, grad_src gathered from those positions]`; Arc-attached by `ops::indexing::scatter`. |
 //! | REQ-3 (`scatter_add`) | SHIPPED | `ScatterAddBackward` returns `[grad, grad.gather(dim, index)]`; Arc-attached by `ops::indexing::scatter_add` and consumed transitively by `grad_fns::cumulative::cummax/cummin` VJPs. |
 //! | REQ-4 (`scatter_reduce`) | SHIPPED | runner arm + impl landed 2026-05-25 closing #1245; 144/168 passed (24 narrower-contract skips). |
@@ -26,7 +26,7 @@
 //! | REQ-12 (`take`) | SHIPPED | runner arm + impl landed closing #1253; 64/80 passed (0-d / negative-index skips). |
 //! | REQ-13 (`put`) | SHIPPED | runner arm + impl landed closing #1254; 192/224 passed (0-d / negative-index skips). |
 //! | REQ-14 (`where`) | SHIPPED | `WhereCondBackward` Arc-attached by `ops::indexing::where_cond` / `where_cond_bt`; GPU-resident path via `masked_fill_dt` + `bool_not` (#1187). |
-//! | REQ-15 (shared backward helpers: `dim_kernel_geometry`, `flat_index`, `increment_coords`) | SHIPPED | internal scaffolding consumed by REQ-1 / REQ-2 / REQ-3 implementations above (the f32 flat-offset helpers `gather_dst_flat_indices` / `scatter_src_flat_indices` / `scatter_write_mask` were removed by the #1823 i64-index migration). |
+//! | REQ-15 (shared backward helpers: `flat_index`, `increment_coords`) | SHIPPED | internal scaffolding consumed by REQ-1 / REQ-2 / REQ-3 implementations above (the f32 flat-offset helpers `gather_dst_flat_indices` / `scatter_src_flat_indices` / `scatter_write_mask` were removed by the #1823 i64-index migration). |
 
 use std::sync::Arc;
 
@@ -61,42 +61,6 @@ fn upload_f32_to_gpu(
     let bytes: &[u8] =
         unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 4) };
     backend.cpu_to_gpu(bytes, crate::dtype::DType::F32, ordinal)
-}
-
-/// Geometry for the dim-aware CUDA kernels used by the indexing backwards
-/// (#1822/#1823): factor the INPUT shape around `dim`, take the index axis
-/// size from `index_shape`, and require the kernel's element consumption
-/// (`outer * idx_dim * inner`) to equal the saved index length EXACTLY — the
-/// CUDA forwards enforced the same equality before dispatch, so a mismatch
-/// here means the saved metadata is incoherent and launching would read or
-/// write out of bounds.
-fn dim_kernel_geometry(
-    op: &'static str,
-    input_shape: &[usize],
-    index_shape: &[usize],
-    dim: usize,
-    index_len: usize,
-) -> FerrotorchResult<(usize, usize, usize, usize)> {
-    let (outer, in_dim, inner) = crate::ops::indexing::factor(input_shape, dim);
-    let idx_dim = *index_shape
-        .get(dim)
-        .ok_or_else(|| FerrotorchError::InvalidArgument {
-            message: format!(
-                "{op}: saved index_shape {index_shape:?} has no axis {dim} \
-                 (input shape {input_shape:?})"
-            ),
-        })?;
-    let consumed = crate::ops::indexing::checked_kernel_numel(op, outer, idx_dim, inner)?;
-    if consumed != index_len {
-        return Err(FerrotorchError::ShapeMismatch {
-            message: format!(
-                "{op}: dim-aware kernel consumes {consumed} index elements (outer={outer} x \
-                 dim={idx_dim} x inner={inner} from input shape {input_shape:?}) but the \
-                 saved index has {index_len}"
-            ),
-        });
-    }
-    Ok((outer, in_dim, idx_dim, inner))
 }
 
 // ---------------------------------------------------------------------------
@@ -521,35 +485,26 @@ impl<T: Float> GradFn<T> for GatherBackward<T> {
                 _ => unreachable!(),
             };
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let (outer, in_dim, idx_dim, inner) = dim_kernel_geometry(
-                "GatherBackward",
-                input_shape,
-                &self.index_shape,
-                self.dim,
-                self.index.len(),
-            )?;
             let idx_handle = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
             let zeros = backend.alloc_zeros(input_numel, dt, ordinal)?;
             let go_handle = grad_output.gpu_handle()?;
             let result_handle = if dt == crate::dtype::DType::F32 {
-                backend.scatter_add_dim_f32(
+                backend.scatter_add_nd_f32(
                     &zeros,
                     &idx_handle,
                     go_handle,
-                    outer,
-                    in_dim,
-                    idx_dim,
-                    inner,
+                    input_shape,
+                    &self.index_shape,
+                    self.dim,
                 )?
             } else {
-                backend.scatter_add_dim_f64(
+                backend.scatter_add_nd_f64(
                     &zeros,
                     &idx_handle,
                     go_handle,
-                    outer,
-                    in_dim,
-                    idx_dim,
-                    inner,
+                    input_shape,
+                    &self.index_shape,
+                    self.dim,
                 )?
             };
             let grad_tensor = Tensor::from_storage(
@@ -671,36 +626,27 @@ impl<T: Float> GradFn<T> for ScatterBackward<T> {
                 _ => unreachable!(),
             };
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let (outer, in_dim, idx_dim, inner) = dim_kernel_geometry(
-                "ScatterBackward",
-                input_shape,
-                &self.index_shape,
-                self.dim,
-                self.index.len(),
-            )?;
             let idx_handle = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
             let go_handle = grad_output.gpu_handle()?;
 
             let grad_input = if self.input.requires_grad() {
                 let result_h = if dt == crate::dtype::DType::F32 {
-                    backend.scatter_value_dim_f32(
+                    backend.scatter_value_nd_f32(
                         go_handle,
                         &idx_handle,
                         0.0,
-                        outer,
-                        in_dim,
-                        idx_dim,
-                        inner,
+                        input_shape,
+                        &self.index_shape,
+                        self.dim,
                     )?
                 } else {
-                    backend.scatter_value_dim_f64(
+                    backend.scatter_value_nd_f64(
                         go_handle,
                         &idx_handle,
                         0.0,
-                        outer,
-                        in_dim,
-                        idx_dim,
-                        inner,
+                        input_shape,
+                        &self.index_shape,
+                        self.dim,
                     )?
                 };
                 Some(Tensor::from_storage(
@@ -713,11 +659,13 @@ impl<T: Float> GradFn<T> for ScatterBackward<T> {
             };
 
             let grad_src = if self.src.requires_grad() {
-                let result_h = if dt == crate::dtype::DType::F32 {
-                    backend.gather_dim_f32(go_handle, &idx_handle, outer, in_dim, idx_dim, inner)?
-                } else {
-                    backend.gather_dim_f64(go_handle, &idx_handle, outer, in_dim, idx_dim, inner)?
-                };
+                let result_h = backend.gather_intidx_nd(
+                    go_handle,
+                    &idx_handle,
+                    input_shape,
+                    &self.index_shape,
+                    self.dim,
+                )?;
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
                     self.index_shape.clone(),
@@ -872,20 +820,15 @@ impl<T: Float> GradFn<T> for ScatterAddBackward<T> {
             };
 
             let grad_src = if self.src.requires_grad() {
-                let (outer, in_dim, idx_dim, inner) = dim_kernel_geometry(
-                    "ScatterAddBackward",
+                let idx_handle = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
+                let go_handle = grad_output.gpu_handle()?;
+                let result_h = backend.gather_intidx_nd(
+                    go_handle,
+                    &idx_handle,
                     input_shape,
                     &self.index_shape,
                     self.dim,
-                    self.index.len(),
                 )?;
-                let idx_handle = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
-                let go_handle = grad_output.gpu_handle()?;
-                let result_h = if dt == crate::dtype::DType::F32 {
-                    backend.gather_dim_f32(go_handle, &idx_handle, outer, in_dim, idx_dim, inner)?
-                } else {
-                    backend.gather_dim_f64(go_handle, &idx_handle, outer, in_dim, idx_dim, inner)?
-                };
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
                     self.index_shape.clone(),

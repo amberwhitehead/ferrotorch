@@ -6,10 +6,10 @@
 //! - `where_cond(condition, x, y)` — ternary selection
 //!
 //! `gather` / `scatter` / `scatter_value` / `scatter_add` have CUDA-resident
-//! fast paths (f32/f64) that dispatch through `GpuBackend::{op}_dim_{f32,f64}`
-//! to the PTX kernels in `ferrotorch-gpu/src/scatter_gather_kernels.rs` (the
-//! host `&[usize]` index is uploaded as a resident `i64` buffer; the result
-//! stays GPU-resident). bf16/f16 CUDA inputs return `NotImplementedOnCuda`.
+//! fast paths (f32/f64) that dispatch through rank-aware `GpuBackend` indexing
+//! entries backed by PTX kernels in `ferrotorch-gpu`; the host `&[usize]` index
+//! is uploaded as a resident `i64` buffer and the result stays GPU-resident.
+//! bf16/f16 CUDA inputs return `NotImplementedOnCuda`.
 //! `where_cond` (host-`&[bool]`) is CPU-only; `where_cond_bt` / `masked_select`
 //! have their own GPU-resident paths (#1185 / #1187).
 //! Backward (gradient) functions live in `grad_fns::indexing`.
@@ -37,31 +37,17 @@ use crate::shape::normalize_axis;
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
 
-/// Factorise `shape` around `dim` into `(outer, dim_size, inner)` for the
-/// `[outer, dim_size, inner]` GPU kernel layout shared by the dim-aware
-/// gather/scatter family (`scatter_gather_kernels.rs`). `outer =
-/// prod(shape[..dim])`, `inner = prod(shape[dim+1..])`. Mirrors the per-dim
-/// stride decomposition in
-/// `aten/src/ATen/native/cuda/ScatterGatherKernel.cu`.
-#[inline]
-pub(crate) fn factor(shape: &[usize], dim: usize) -> (usize, usize, usize) {
-    let outer: usize = shape[..dim].iter().product();
-    let dim_size = shape[dim];
-    let inner: usize = shape[dim + 1..].iter().product();
-    (outer, dim_size, inner)
-}
-
 /// Upload a host `&[usize]` index slice to a GPU-resident `i64` buffer on
-/// `ordinal` (PyTorch index tensors are `int64`). The dim-aware
-/// gather/scatter CUDA kernels read the index with `ld.global.s64`, so the
-/// host indices are widened to `i64` before the copy.
+/// `ordinal` (PyTorch index tensors are `int64`). The CUDA indexing kernels
+/// read the index with `ld.global.s64`, so the host indices are widened to
+/// `i64` before the copy.
 ///
 /// Precondition (CORE-125 / #1819): every caller runs
 /// `validate_gather_shapes` (rank equality, exact `index.len() ==
-/// product(index_shape)`, per-value bounds along `dim`) PLUS the
-/// kernel-consumption guard (`checked_kernel_numel` vs the index/src
-/// lengths) BEFORE this upload, so every uploaded index is in-bounds along
-/// `dim` and the resident buffer covers every element the kernel reads.
+/// product(index_shape)`, per-value bounds along `dim`) plus the PyTorch
+/// non-dim shape constraints before this upload, so every uploaded index is
+/// in-bounds along `dim` and the resident buffer covers exactly the compact
+/// index coordinate space the rank-aware kernels read.
 pub(crate) fn upload_index_i64(
     index: &[usize],
     ordinal: usize,
@@ -128,28 +114,6 @@ fn checked_index_numel(index_shape: &[usize]) -> FerrotorchResult<usize> {
         })
 }
 
-/// Checked element count the dim-aware CUDA kernel consumes for a
-/// `[outer, dim_size, inner]` launch (see `factor`). The PTX kernels in
-/// `ferrotorch-gpu/src/scatter_gather_kernels.rs` read `index[t]` (and
-/// `src[t]` for the scatter family) for every `t in [0, outer * dim_size *
-/// inner)`, so the host buffers must cover this count before dispatch.
-pub(crate) fn checked_kernel_numel(
-    op: &'static str,
-    outer: usize,
-    dim_size: usize,
-    inner: usize,
-) -> FerrotorchResult<usize> {
-    outer
-        .checked_mul(dim_size)
-        .and_then(|v| v.checked_mul(inner))
-        .ok_or_else(|| FerrotorchError::InvalidArgument {
-            message: format!(
-                "{op}: CUDA kernel element count overflows usize \
-                 (outer={outer}, dim={dim_size}, inner={inner})"
-            ),
-        })
-}
-
 /// Validate the flat `index` slice and its claimed `index_shape` against
 /// `input` as ONE coherent logical tensor (CORE-125 / #1819):
 ///
@@ -163,10 +127,6 @@ pub(crate) fn checked_kernel_numel(
 ///     construction; ferrotorch's flat-slice API must enforce the coherence
 ///     explicitly before ANY element count is derived from the shape;
 ///   - every index value is in-bounds for `input.shape()[dim]`.
-///
-/// PyTorch's per-axis `index.shape[d] <= input.shape[d]` (gather) /
-/// `<= src.shape[d]` (scatter) constraints are tracked separately (#1820)
-/// and NOT enforced here yet.
 ///
 /// Returns the validated index element count (== `index_data.len()`).
 fn validate_gather_shapes(
@@ -211,6 +171,32 @@ fn validate_gather_shapes(
     Ok(index_numel)
 }
 
+/// CORE-126 (#1820): enforce PyTorch's self/input-side non-dim shape rule.
+///
+/// `gather_shape_check` requires `index.size(d) <= self.size(d)` for every
+/// `d != dim`; `scatter_shape_check` applies the same self-side rule before
+/// additionally checking `src`. The gather/scatter axis itself is governed by
+/// per-value bounds, not by an index-size upper bound.
+fn validate_index_fits_input_non_dim(
+    op: &'static str,
+    input_shape: &[usize],
+    dim: usize,
+    index_shape: &[usize],
+) -> FerrotorchResult<()> {
+    for (d, (&idx_d, &in_d)) in index_shape.iter().zip(input_shape).enumerate() {
+        if d != dim && idx_d > in_d {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "{op}: expected index {index_shape:?} to be no larger than input \
+                     {input_shape:?} apart from dimension {dim} \
+                     (axis {d}: {idx_d} > {in_d})"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// CORE-127 (#1821): validate `src` against `index` for the scatter family,
 /// mirroring the upstream tensor-src rule in `scatter_shape_check`
 /// (`aten/src/ATen/native/ScatterGatherChecks.h:67-124`), verified live on
@@ -221,10 +207,9 @@ fn validate_gather_shapes(
 ///   - `index.size(d) <= src.size(d)` for ALL `d` — "Expected index [..] to
 ///     be ... no larger size than src [..]".
 ///
-/// (The `index.size(d) <= self.size(d), d != dim` half of the upstream check
-/// is CORE-126 / #1820 and is NOT enforced here.) A larger `src` is legal:
-/// the consumed values are addressed by COORDINATE (each index position maps
-/// to the same coordinates in `src`), never as a flat prefix.
+/// A larger `src` is legal: the consumed values are addressed by COORDINATE
+/// (each index position maps to the same coordinates in `src`), never as a
+/// flat prefix.
 fn validate_scatter_src<T: Float>(
     op: &'static str,
     src: &Tensor<T>,
@@ -359,74 +344,45 @@ pub fn gather<T: Float>(
         index,
         effective_input_shape[dim],
     )?;
+    validate_index_fits_input_non_dim(
+        "gather",
+        &effective_input_shape,
+        dim,
+        &effective_index_shape,
+    )?;
 
     // CUDA-resident fast path: `input` on a CUDA device, f32/f64 dtype. The
     // host `&[usize]` index is uploaded as a GPU-resident `i64` buffer; the
-    // dim-aware PTX kernel runs entirely on-device and the result stays
+    // rank-aware gather kernel runs entirely on-device and the result stays
     // resident (no host round trip). bf16/f16 fall through to
-    // `NotImplementedOnCuda` (no dim-aware kernel for those dtypes yet).
+    // `NotImplementedOnCuda`.
     if input.is_cuda() {
         match T::dtype() {
             DType::F32 | DType::F64 => {
-                // The dim-aware PTX kernel assumes a C-contiguous
-                // `[outer, axis, inner]` physical buffer. A transposed/permuted
-                // CUDA view has logical shape != physical layout, so materialise
-                // to contiguous ON-DEVICE first (strided_copy kernel — no host
-                // round trip) so the buffer matches the `factor` decomposition.
+                // The rank-aware PTX kernel assumes a C-contiguous physical
+                // buffer. A transposed/permuted CUDA view has logical shape !=
+                // physical layout, so materialise to contiguous ON-DEVICE first
+                // (strided_copy kernel — no host round trip).
+                let original_input = input.clone();
                 let input = input.contiguous()?;
                 let input_shape = input.shape().to_vec();
-                let (outer, in_dim, inner) = factor(&input_shape, dim);
-                let out_dim = index_shape[dim];
-                // The kernel reads `index[t]` for every `t` in
-                // `[0, outer*out_dim*inner)` with `outer`/`inner` factored
-                // from the INPUT shape, and its output buffer holds exactly
-                // that many elements while the result tensor claims
-                // `index_shape`. Until the per-axis index-shape constraints
-                // land (#1820) the CUDA path therefore requires the index
-                // numel to equal the kernel consumption exactly — otherwise
-                // the kernel would read past the uploaded index buffer, or
-                // the result tensor's shape would disagree with its buffer.
-                let consumed = checked_kernel_numel("gather", outer, out_dim, inner)?;
-                if index_numel != consumed {
-                    return Err(FerrotorchError::ShapeMismatch {
-                        message: format!(
-                            "gather: CUDA kernel consumes {consumed} index elements \
-                             (outer={outer} x dim={out_dim} x inner={inner} from input \
-                             shape {input_shape:?}) but index_shape {index_shape:?} has \
-                             {index_numel}; non-dim axes must match the input on the \
-                             CUDA path until #1820"
-                        ),
-                    });
-                }
                 let input_handle = input.gpu_handle()?;
                 let ordinal = input_handle.device_ordinal();
                 let idx_handle = upload_index_i64(index, ordinal)?;
                 let backend =
                     crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-                let h = if T::dtype() == DType::F32 {
-                    backend.gather_dim_f32(
-                        input_handle,
-                        &idx_handle,
-                        outer,
-                        in_dim,
-                        out_dim,
-                        inner,
-                    )?
-                } else {
-                    backend.gather_dim_f64(
-                        input_handle,
-                        &idx_handle,
-                        outer,
-                        in_dim,
-                        out_dim,
-                        inner,
-                    )?
-                };
+                let h = backend.gather_intidx_nd(
+                    input_handle,
+                    &idx_handle,
+                    &input_shape,
+                    index_shape,
+                    dim,
+                )?;
                 let output_shape = index_shape.to_vec();
                 let storage = TensorStorage::gpu(h);
-                if input.requires_grad() && is_grad_enabled() {
+                if original_input.requires_grad() && is_grad_enabled() {
                     let grad_fn = Arc::new(crate::grad_fns::indexing::GatherBackward {
-                        input: input.clone(),
+                        input: original_input,
                         dim,
                         index: index.to_vec(),
                         index_shape: index_shape.to_vec(),
@@ -514,6 +470,7 @@ pub fn scatter<T: Float>(
     // (`aten/src/ATen/native/TensorAdvancedIndexing.cpp:192`).
     let index_numel =
         validate_gather_shapes(input_shape, dim, index_shape, index, input_shape[dim])?;
+    validate_index_fits_input_non_dim("scatter", input_shape, dim, index_shape)?;
     // CORE-127 (#1821): per-axis src validation (rank equality +
     // `index.size(d) <= src.size(d)` for all d) replaces the numel-only gate
     // — the per-axis rule implies numel sufficiency and is what upstream
@@ -533,11 +490,11 @@ pub fn scatter<T: Float>(
                         got: src.device(),
                     });
                 }
-                // The scatter PTX kernel reads `self`/`src` as C-contiguous
-                // `[outer, axis, inner]`. Materialise both to contiguous
-                // ON-DEVICE (strided_copy — no host round trip) so a
-                // transposed/permuted view's physical buffer matches the
-                // logical shape `factor` decomposes.
+                // The rank-aware scatter kernel reads `self`/`src` as
+                // C-contiguous buffers. Materialise to contiguous ON-DEVICE
+                // (strided_copy — no host round trip) so a transposed/permuted
+                // view's physical buffer matches its logical shape.
+                let original_input = input.clone();
                 let input = input.contiguous()?;
                 // CORE-127 (#1821): the kernel reads `src[t]` PARALLEL to
                 // `index[t]`, which is coordinate-correct only when src and
@@ -549,27 +506,6 @@ pub fn scatter<T: Float>(
                 // the caller's leaf.
                 let src_slab = cuda_src_prefix_slab(src, index_shape)?.contiguous()?;
                 let input_shape: &[usize] = input.shape();
-                let (outer, out_dim, inner) = factor(input_shape, dim);
-                let idx_dim = index_shape[dim];
-                // The kernel reads `index[t]` AND `src[t]` for every `t` in
-                // `[0, outer*idx_dim*inner)` with `outer`/`inner` factored
-                // from the INPUT shape: both host-supplied buffers must cover
-                // that count or the kernel reads past them (CORE-125; the
-                // per-axis constraints that make consumption == numel exactly
-                // are #1820).
-                let consumed = checked_kernel_numel("scatter", outer, idx_dim, inner)?;
-                if index_numel < consumed || src_slab.numel() < consumed {
-                    return Err(FerrotorchError::ShapeMismatch {
-                        message: format!(
-                            "scatter: CUDA kernel consumes {consumed} index/src elements \
-                             (outer={outer} x dim={idx_dim} x inner={inner} from input \
-                             shape {input_shape:?}) but index has {index_numel} and src \
-                             has {}; non-dim axes must match the input on the CUDA path \
-                             until #1820",
-                            src_slab.numel()
-                        ),
-                    });
-                }
                 let input_handle = input.gpu_handle()?;
                 let ordinal = input_handle.device_ordinal();
                 let idx_handle = upload_index_i64(index, ordinal)?;
@@ -577,31 +513,29 @@ pub fn scatter<T: Float>(
                     crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                 let src_handle = src_slab.gpu_handle()?;
                 let h = if T::dtype() == DType::F32 {
-                    backend.scatter_dim_f32(
+                    backend.scatter_nd_f32(
                         input_handle,
                         &idx_handle,
                         src_handle,
-                        outer,
-                        out_dim,
-                        idx_dim,
-                        inner,
+                        input_shape,
+                        index_shape,
+                        dim,
                     )?
                 } else {
-                    backend.scatter_dim_f64(
+                    backend.scatter_nd_f64(
                         input_handle,
                         &idx_handle,
                         src_handle,
-                        outer,
-                        out_dim,
-                        idx_dim,
-                        inner,
+                        input_shape,
+                        index_shape,
+                        dim,
                     )?
                 };
                 let output_shape = input_shape.to_vec();
                 let storage = TensorStorage::gpu(h);
-                if needs_grad(&input, src) {
+                if needs_grad(&original_input, src) {
                     let grad_fn = Arc::new(crate::grad_fns::indexing::ScatterBackward {
-                        input: input.clone(),
+                        input: original_input,
                         // The ORIGINAL src (not the kernel slab): the graph
                         // edge must reach the caller's leaf, and the backward
                         // src-shape contract (CORE-127) checks against it.
@@ -703,6 +637,7 @@ pub fn scatter_value<T: Float>(
     // `aten/src/ATen/native/TensorAdvancedIndexing.cpp:192`).
     let index_numel =
         validate_gather_shapes(input_shape, dim, index_shape, index, input_shape[dim])?;
+    validate_index_fits_input_non_dim("scatter_value", input_shape, dim, index_shape)?;
 
     // CUDA-resident fast path: `input` on a CUDA device, f32/f64. The host
     // index uploads as a resident `i64` buffer; the broadcast scalar `value`
@@ -713,61 +648,41 @@ pub fn scatter_value<T: Float>(
             DType::F32 | DType::F64 => {
                 // Materialise `self` to contiguous ON-DEVICE (strided_copy — no
                 // host round trip) so a transposed/permuted view's physical
-                // buffer matches the logical shape the kernel `factor` assumes.
+                // buffer matches its logical shape.
+                let original_input = input.clone();
                 let input = input.contiguous()?;
                 let input_shape: &[usize] = input.shape();
-                let (outer, out_dim, inner) = factor(input_shape, dim);
-                let idx_dim = index_shape[dim];
-                // The kernel reads `index[t]` for every `t` in
-                // `[0, outer*idx_dim*inner)` with `outer`/`inner` factored
-                // from the INPUT shape: the host index buffer must cover that
-                // count or the kernel reads past it (CORE-125; per-axis
-                // constraints are #1820).
-                let consumed = checked_kernel_numel("scatter_value", outer, idx_dim, inner)?;
-                if index_numel < consumed {
-                    return Err(FerrotorchError::ShapeMismatch {
-                        message: format!(
-                            "scatter_value: CUDA kernel consumes {consumed} index elements \
-                             (outer={outer} x dim={idx_dim} x inner={inner} from input \
-                             shape {input_shape:?}) but index_shape {index_shape:?} has \
-                             {index_numel}; non-dim axes must match the input on the CUDA \
-                             path until #1820"
-                        ),
-                    });
-                }
                 let input_handle = input.gpu_handle()?;
                 let ordinal = input_handle.device_ordinal();
                 let idx_handle = upload_index_i64(index, ordinal)?;
                 let backend =
                     crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                 let h = if T::dtype() == DType::F32 {
-                    backend.scatter_value_dim_f32(
+                    backend.scatter_value_nd_f32(
                         input_handle,
                         &idx_handle,
                         value.to_f32().ok_or(FerrotorchError::InvalidArgument {
                             message: "scatter_value: value not representable as f32".into(),
                         })?,
-                        outer,
-                        out_dim,
-                        idx_dim,
-                        inner,
+                        input_shape,
+                        index_shape,
+                        dim,
                     )?
                 } else {
-                    backend.scatter_value_dim_f64(
+                    backend.scatter_value_nd_f64(
                         input_handle,
                         &idx_handle,
                         value.to_f64().ok_or(FerrotorchError::InvalidArgument {
                             message: "scatter_value: value not representable as f64".into(),
                         })?,
-                        outer,
-                        out_dim,
-                        idx_dim,
-                        inner,
+                        input_shape,
+                        index_shape,
+                        dim,
                     )?
                 };
                 let output_shape = input_shape.to_vec();
                 let storage = TensorStorage::gpu(h);
-                if is_grad_enabled() && input.requires_grad() {
+                if is_grad_enabled() && original_input.requires_grad() {
                     let zero = <T as num_traits::Zero>::zero();
                     let zeros_src = Tensor::from_storage(
                         TensorStorage::cpu(vec![zero; index_shape.iter().product()]),
@@ -775,7 +690,7 @@ pub fn scatter_value<T: Float>(
                         false,
                     )?;
                     let grad_fn = Arc::new(crate::grad_fns::indexing::ScatterBackward {
-                        input: input.clone(),
+                        input: original_input,
                         src: zeros_src,
                         dim,
                         index: index.to_vec(),
@@ -867,6 +782,7 @@ pub fn scatter_add<T: Float>(
     // `aten/src/ATen/native/TensorAdvancedIndexing.cpp:192`).
     let index_numel =
         validate_gather_shapes(input_shape, dim, index_shape, index, input_shape[dim])?;
+    validate_index_fits_input_non_dim("scatter_add", input_shape, dim, index_shape)?;
     // CORE-127 (#1821): per-axis src validation (rank equality +
     // `index.size(d) <= src.size(d)` for all d) replaces the numel-only gate.
     validate_scatter_src("scatter_add", src, index_shape)?;
@@ -885,12 +801,13 @@ pub fn scatter_add<T: Float>(
                         got: src.device(),
                     });
                 }
-                // The scatter_add PTX kernel reads `self`/`src` as C-contiguous
-                // `[outer, axis, inner]`. Materialise both to contiguous
-                // ON-DEVICE (strided_copy — no host round trip) so a
-                // transposed/permuted view's physical buffer matches the
-                // logical shape `factor` decomposes. (A non-zero `self` exposes
-                // this: an all-zeros buffer reads identically either layout.)
+                // The rank-aware scatter_add kernel reads `self`/`src` as
+                // C-contiguous buffers. Materialise to contiguous ON-DEVICE
+                // (strided_copy — no host round trip) so a transposed/permuted
+                // view's physical buffer matches its logical shape. (A non-zero
+                // `self` exposes this: an all-zeros buffer reads identically
+                // either layout.)
+                let original_input = input.clone();
                 let input = input.contiguous()?;
                 // CORE-127 (#1821): kernel consumption is parallel-flat; for
                 // a per-axis-larger src materialise the coordinate-consumed
@@ -898,26 +815,6 @@ pub fn scatter_add<T: Float>(
                 // stores the ORIGINAL src below.
                 let src_slab = cuda_src_prefix_slab(src, index_shape)?.contiguous()?;
                 let input_shape: &[usize] = input.shape();
-                let (outer, out_dim, inner) = factor(input_shape, dim);
-                let idx_dim = index_shape[dim];
-                // The kernel reads `index[t]` AND `src[t]` for every `t` in
-                // `[0, outer*idx_dim*inner)` with `outer`/`inner` factored
-                // from the INPUT shape: both host-supplied buffers must cover
-                // that count or the kernel reads past them (CORE-125;
-                // per-axis constraints are #1820).
-                let consumed = checked_kernel_numel("scatter_add", outer, idx_dim, inner)?;
-                if index_numel < consumed || src_slab.numel() < consumed {
-                    return Err(FerrotorchError::ShapeMismatch {
-                        message: format!(
-                            "scatter_add: CUDA kernel consumes {consumed} index/src \
-                             elements (outer={outer} x dim={idx_dim} x inner={inner} from \
-                             input shape {input_shape:?}) but index has {index_numel} and \
-                             src has {}; non-dim axes must match the input on the CUDA \
-                             path until #1820",
-                            src_slab.numel()
-                        ),
-                    });
-                }
                 let input_handle = input.gpu_handle()?;
                 let ordinal = input_handle.device_ordinal();
                 let idx_handle = upload_index_i64(index, ordinal)?;
@@ -925,31 +822,29 @@ pub fn scatter_add<T: Float>(
                     crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                 let src_handle = src_slab.gpu_handle()?;
                 let h = if T::dtype() == DType::F32 {
-                    backend.scatter_add_dim_f32(
+                    backend.scatter_add_nd_f32(
                         input_handle,
                         &idx_handle,
                         src_handle,
-                        outer,
-                        out_dim,
-                        idx_dim,
-                        inner,
+                        input_shape,
+                        index_shape,
+                        dim,
                     )?
                 } else {
-                    backend.scatter_add_dim_f64(
+                    backend.scatter_add_nd_f64(
                         input_handle,
                         &idx_handle,
                         src_handle,
-                        outer,
-                        out_dim,
-                        idx_dim,
-                        inner,
+                        input_shape,
+                        index_shape,
+                        dim,
                     )?
                 };
                 let output_shape = input_shape.to_vec();
                 let storage = TensorStorage::gpu(h);
-                if needs_grad(&input, src) {
+                if needs_grad(&original_input, src) {
                     let grad_fn = Arc::new(crate::grad_fns::indexing::ScatterAddBackward {
-                        input: input.clone(),
+                        input: original_input,
                         // The ORIGINAL src (not the kernel slab) — see scatter.
                         src: src.clone(),
                         dim,

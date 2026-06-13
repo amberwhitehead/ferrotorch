@@ -7923,6 +7923,156 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
+    fn scatter_nd_f32(
+        &self,
+        input: &GpuBufferHandle,
+        index: &GpuBufferHandle,
+        src: &GpuBufferHandle,
+        input_shape: &[usize],
+        index_shape: &[usize],
+        dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let out = crate::scatter_gather_kernels::gpu_scatter_nd_f32(
+            Self::unwrap_buffer(input)?,
+            Self::unwrap_buffer_i64(index)?.inner(),
+            Self::unwrap_buffer(src)?,
+            input_shape,
+            index_shape,
+            dim,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(out, ord))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn scatter_nd_f64(
+        &self,
+        input: &GpuBufferHandle,
+        index: &GpuBufferHandle,
+        src: &GpuBufferHandle,
+        input_shape: &[usize],
+        index_shape: &[usize],
+        dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let out = crate::scatter_gather_kernels::gpu_scatter_nd_f64(
+            Self::unwrap_buffer_f64(input)?,
+            Self::unwrap_buffer_i64(index)?.inner(),
+            Self::unwrap_buffer_f64(src)?,
+            input_shape,
+            index_shape,
+            dim,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(out, ord))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn scatter_value_nd_f32(
+        &self,
+        input: &GpuBufferHandle,
+        index: &GpuBufferHandle,
+        value: f32,
+        input_shape: &[usize],
+        index_shape: &[usize],
+        dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let out = crate::scatter_gather_kernels::gpu_scatter_value_nd_f32(
+            Self::unwrap_buffer(input)?,
+            Self::unwrap_buffer_i64(index)?.inner(),
+            value,
+            input_shape,
+            index_shape,
+            dim,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(out, ord))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn scatter_value_nd_f64(
+        &self,
+        input: &GpuBufferHandle,
+        index: &GpuBufferHandle,
+        value: f64,
+        input_shape: &[usize],
+        index_shape: &[usize],
+        dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let out = crate::scatter_gather_kernels::gpu_scatter_value_nd_f64(
+            Self::unwrap_buffer_f64(input)?,
+            Self::unwrap_buffer_i64(index)?.inner(),
+            value,
+            input_shape,
+            index_shape,
+            dim,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(out, ord))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn scatter_add_nd_f32(
+        &self,
+        input: &GpuBufferHandle,
+        index: &GpuBufferHandle,
+        src: &GpuBufferHandle,
+        input_shape: &[usize],
+        index_shape: &[usize],
+        dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let out = crate::scatter_gather_kernels::gpu_scatter_add_nd_f32(
+            Self::unwrap_buffer(input)?,
+            Self::unwrap_buffer_i64(index)?.inner(),
+            Self::unwrap_buffer(src)?,
+            input_shape,
+            index_shape,
+            dim,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(out, ord))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn scatter_add_nd_f64(
+        &self,
+        input: &GpuBufferHandle,
+        index: &GpuBufferHandle,
+        src: &GpuBufferHandle,
+        input_shape: &[usize],
+        index_shape: &[usize],
+        dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let out = crate::scatter_gather_kernels::gpu_scatter_add_nd_f64(
+            Self::unwrap_buffer_f64(input)?,
+            Self::unwrap_buffer_i64(index)?.inner(),
+            Self::unwrap_buffer_f64(src)?,
+            input_shape,
+            index_shape,
+            dim,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(out, ord))
+    }
+
+    #[cfg(feature = "cuda")]
     fn scatter_add_segments_f32(
         &self,
         src: &GpuBufferHandle,
