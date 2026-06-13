@@ -7221,6 +7221,234 @@ DONE:
 ";
 
 #[cfg(feature = "cuda")]
+pub(crate) const STD_VAR_AXIS_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry std_var_axis_kernel(
+    .param .u64 input_ptr,
+    .param .u64 output_ptr,
+    .param .u32 outer_size,
+    .param .u32 axis_size,
+    .param .u32 inner_size,
+    .param .u32 total_output,
+    .param .f32 correction,
+    .param .u32 take_sqrt
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %total, %outer_sz, %axis_sz, %inner_sz;
+    .reg .u32 %outer_idx, %inner_idx, %k, %base, %idx, %flag, %zero_u;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .f32 %val, %sum, %mean, %ss, %dv, %denom, %axis_f, %corr, %outv, %zero;
+    .reg .pred %p, %lp, %empty, %do_sqrt;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %out, [output_ptr];
+    ld.param.u32 %outer_sz, [outer_size];
+    ld.param.u32 %axis_sz, [axis_size];
+    ld.param.u32 %inner_sz, [inner_size];
+    ld.param.u32 %total, [total_output];
+    ld.param.f32 %corr, [correction];
+    ld.param.u32 %flag, [take_sqrt];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %total;
+    @%p bra DONE;
+
+    mov.u32 %zero_u, 0;
+    cvt.rn.f32.u32 %zero, %zero_u;
+
+    div.u32 %outer_idx, %r_tid, %inner_sz;
+    rem.u32 %inner_idx, %r_tid, %inner_sz;
+    mul.lo.u32 %base, %outer_idx, %axis_sz;
+    mul.lo.u32 %base, %base, %inner_sz;
+    add.u32 %base, %base, %inner_idx;
+
+    setp.eq.u32 %empty, %axis_sz, 0;
+    @%empty bra EMPTY_SLICE;
+
+    mov.u32 %k, 0;
+    cvt.rn.f32.u32 %sum, %zero_u;
+SUM_LOOP:
+    setp.ge.u32 %lp, %k, %axis_sz;
+    @%lp bra SUM_DONE;
+    mul.lo.u32 %idx, %k, %inner_sz;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %val, [%addr];
+    add.f32 %sum, %sum, %val;
+    add.u32 %k, %k, 1;
+    bra SUM_LOOP;
+SUM_DONE:
+    cvt.rn.f32.u32 %axis_f, %axis_sz;
+    div.rn.f32 %mean, %sum, %axis_f;
+
+    mov.u32 %k, 0;
+    cvt.rn.f32.u32 %ss, %zero_u;
+SS_LOOP:
+    setp.ge.u32 %lp, %k, %axis_sz;
+    @%lp bra SS_DONE;
+    mul.lo.u32 %idx, %k, %inner_sz;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %val, [%addr];
+    sub.f32 %dv, %val, %mean;
+    fma.rn.f32 %ss, %dv, %dv, %ss;
+    add.u32 %k, %k, 1;
+    bra SS_LOOP;
+SS_DONE:
+    sub.f32 %denom, %axis_f, %corr;
+    max.f32 %denom, %denom, %zero;
+    div.rn.f32 %outv, %ss, %denom;
+    setp.ne.u32 %do_sqrt, %flag, 0;
+    @%do_sqrt sqrt.rn.f32 %outv, %outv;
+    bra STORE;
+
+EMPTY_SLICE:
+    div.rn.f32 %outv, %zero, %zero;
+
+STORE:
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out, %off;
+    st.global.f32 [%addr], %outv;
+
+DONE:
+    ret;
+}
+";
+
+#[cfg(feature = "cuda")]
+pub(crate) const STD_VAR_AXIS_BACKWARD_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry std_var_axis_backward_kernel(
+    .param .u64 input_ptr,
+    .param .u64 grad_out_ptr,
+    .param .u64 result_ptr,
+    .param .u64 grad_in_ptr,
+    .param .u32 outer_size,
+    .param .u32 axis_size,
+    .param .u32 inner_size,
+    .param .u32 total_input,
+    .param .f32 correction,
+    .param .u32 take_sqrt
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %total, %outer_sz, %axis_sz, %inner_sz;
+    .reg .u32 %tmp, %outer_idx, %d_idx, %inner_idx, %k, %src_idx, %go_idx, %flag;
+    .reg .u32 %zero_u, %two_u;
+    .reg .u64 %in, %go, %res, %gi, %off, %addr;
+    .reg .f32 %val, %sum, %mean, %dv, %axis_f, %corr, %denom, %grad, %go_val;
+    .reg .f32 %result, %zero, %two, %scale, %denom_result;
+    .reg .pred %p, %lp, %is_std, %is_zero_result;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %go, [grad_out_ptr];
+    ld.param.u64 %res, [result_ptr];
+    ld.param.u64 %gi, [grad_in_ptr];
+    ld.param.u32 %outer_sz, [outer_size];
+    ld.param.u32 %axis_sz, [axis_size];
+    ld.param.u32 %inner_sz, [inner_size];
+    ld.param.u32 %total, [total_input];
+    ld.param.f32 %corr, [correction];
+    ld.param.u32 %flag, [take_sqrt];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %total;
+    @%p bra DONE;
+
+    mov.u32 %zero_u, 0;
+    mov.u32 %two_u, 2;
+    cvt.rn.f32.u32 %zero, %zero_u;
+    cvt.rn.f32.u32 %two, %two_u;
+
+    rem.u32 %inner_idx, %r_tid, %inner_sz;
+    div.u32 %tmp, %r_tid, %inner_sz;
+    rem.u32 %d_idx, %tmp, %axis_sz;
+    div.u32 %outer_idx, %tmp, %axis_sz;
+
+    mul.lo.u32 %go_idx, %outer_idx, %inner_sz;
+    add.u32 %go_idx, %go_idx, %inner_idx;
+    cvt.u64.u32 %off, %go_idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %go, %off;
+    ld.global.f32 %go_val, [%addr];
+    add.u64 %addr, %res, %off;
+    ld.global.f32 %result, [%addr];
+
+    mov.u32 %k, 0;
+    cvt.rn.f32.u32 %sum, %zero_u;
+SUM_LOOP:
+    setp.ge.u32 %lp, %k, %axis_sz;
+    @%lp bra SUM_DONE;
+    mul.lo.u32 %src_idx, %outer_idx, %axis_sz;
+    add.u32 %src_idx, %src_idx, %k;
+    mul.lo.u32 %src_idx, %src_idx, %inner_sz;
+    add.u32 %src_idx, %src_idx, %inner_idx;
+    cvt.u64.u32 %off, %src_idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %val, [%addr];
+    add.f32 %sum, %sum, %val;
+    add.u32 %k, %k, 1;
+    bra SUM_LOOP;
+SUM_DONE:
+    cvt.rn.f32.u32 %axis_f, %axis_sz;
+    div.rn.f32 %mean, %sum, %axis_f;
+    sub.f32 %denom, %axis_f, %corr;
+    max.f32 %denom, %denom, %zero;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %val, [%addr];
+    sub.f32 %dv, %val, %mean;
+
+    setp.ne.u32 %is_std, %flag, 0;
+    @%is_std bra STD_PATH;
+
+    div.rn.f32 %scale, %two, %denom;
+    mul.f32 %grad, %go_val, %scale;
+    mul.f32 %grad, %grad, %dv;
+    bra STORE;
+
+STD_PATH:
+    setp.eq.f32 %is_zero_result, %result, %zero;
+    @%is_zero_result bra ZERO_STD;
+    mul.f32 %denom_result, %denom, %result;
+    div.rn.f32 %scale, %go_val, %denom_result;
+    mul.f32 %grad, %scale, %dv;
+    bra STORE;
+
+ZERO_STD:
+    cvt.rn.f32.u32 %grad, %zero_u;
+
+STORE:
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %gi, %off;
+    st.global.f32 [%addr], %grad;
+
+DONE:
+    ret;
+}
+";
+
+#[cfg(feature = "cuda")]
 pub(crate) const EXTREME_AXIS_PTX: &str = "\
 .version 7.0
 .target sm_52
@@ -16680,6 +16908,337 @@ pub fn gpu_prod_axis_backward_f64(
             .arg(&axis_u32)
             .arg(&inner_u32)
             .arg(&total_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "cuda")]
+fn launch_std_var_axis_f32(
+    input: &CudaBuffer<f32>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    correction: f64,
+    take_sqrt: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_unary(input, device)?;
+    let (_, total_output) = validate_axis_prod_dims(
+        "gpu_std_var_axis_f32",
+        input.len(),
+        None,
+        outer,
+        axis_size,
+        inner,
+    )?;
+    if total_output == 0 {
+        return alloc_zeros_f32(0, device);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        STD_VAR_AXIS_PTX,
+        "std_var_axis_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "std_var_axis_kernel",
+        source: e,
+    })?;
+    let mut out = alloc_zeros_f32(total_output, device)?;
+    let cfg = launch_cfg(total_output)?;
+    let (outer_u32, axis_u32, inner_u32, total_u32) = (
+        outer as u32,
+        axis_size as u32,
+        inner as u32,
+        total_output as u32,
+    );
+    let corr_f32 = correction as f32;
+    let take_sqrt_u32 = u32::from(take_sqrt);
+    // SAFETY: `input.len() == outer * axis_size * inner` and output length is
+    // `outer * inner`, both validated above. The PTX maps one output thread to
+    // exactly one logical slice and only scans addresses inside that slice.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .arg(&corr_f32)
+            .arg(&take_sqrt_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "cuda")]
+/// Compute variance or standard deviation along one logical axis for f32.
+///
+/// The input is interpreted as `[outer, axis_size, inner]` and the output is
+/// flat `[outer, inner]`. `correction` is the PyTorch-style degrees-of-freedom
+/// correction; `take_sqrt=false` returns variance and `true` returns std.
+pub fn gpu_std_var_axis(
+    input: &CudaBuffer<f32>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    correction: f64,
+    take_sqrt: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    launch_std_var_axis_f32(
+        input, outer, axis_size, inner, correction, take_sqrt, device,
+    )
+}
+
+#[cfg(feature = "cuda")]
+/// Compute variance or standard deviation along one logical axis for f64.
+///
+/// This is the f64 companion of [`gpu_std_var_axis`], using the same logical
+/// `[outer, axis_size, inner] -> [outer, inner]` layout and correction rules.
+pub fn gpu_std_var_axis_f64(
+    input: &CudaBuffer<f64>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    correction: f64,
+    take_sqrt: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    validate_device(input, device)?;
+    let (_, total_output) = validate_axis_prod_dims(
+        "gpu_std_var_axis_f64",
+        input.len(),
+        None,
+        outer,
+        axis_size,
+        inner,
+    )?;
+    if total_output == 0 {
+        return alloc_zeros_f64(0, device);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let ptx = get_f64_ptx(
+        &CACHE,
+        STD_VAR_AXIS_PTX,
+        "std_var_axis_kernel",
+        "std_var_axis_f64_kernel",
+    );
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "std_var_axis_f64_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "std_var_axis_f64_kernel",
+        source: e,
+    })?;
+    let mut out = alloc_zeros_f64(total_output, device)?;
+    let cfg = launch_cfg(total_output)?;
+    let (outer_u32, axis_u32, inner_u32, total_u32) = (
+        outer as u32,
+        axis_size as u32,
+        inner as u32,
+        total_output as u32,
+    );
+    let take_sqrt_u32 = u32::from(take_sqrt);
+    // SAFETY: same contract as the f32 launch; PTX is mechanically promoted
+    // to f64, including f64 correction and 8-byte address scaling.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .arg(&correction)
+            .arg(&take_sqrt_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "cuda")]
+/// Backward pass for f32 axis variance or standard deviation.
+///
+/// `grad_output` and `result` use the flattened `[outer, inner]` forward
+/// output layout. The returned buffer has the original input length.
+pub fn gpu_std_var_axis_backward(
+    input: &CudaBuffer<f32>,
+    grad_output: &CudaBuffer<f32>,
+    result: &CudaBuffer<f32>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    correction: f64,
+    take_sqrt: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_unary(input, device)?;
+    validate_unary(grad_output, device)?;
+    validate_unary(result, device)?;
+    let (total_input, total_output) = validate_axis_prod_dims(
+        "gpu_std_var_axis_backward_f32",
+        input.len(),
+        Some(grad_output.len()),
+        outer,
+        axis_size,
+        inner,
+    )?;
+    if result.len() != total_output {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_std_var_axis_backward_f32",
+            expected: vec![total_output],
+            got: vec![result.len()],
+        });
+    }
+    if total_input == 0 {
+        return alloc_zeros_f32(0, device);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        STD_VAR_AXIS_BACKWARD_PTX,
+        "std_var_axis_backward_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "std_var_axis_backward_kernel",
+        source: e,
+    })?;
+    let mut out = alloc_zeros_f32(total_input, device)?;
+    let cfg = launch_cfg(total_input)?;
+    let (outer_u32, axis_u32, inner_u32, total_u32) = (
+        outer as u32,
+        axis_size as u32,
+        inner as u32,
+        total_input as u32,
+    );
+    let corr_f32 = correction as f32;
+    let take_sqrt_u32 = u32::from(take_sqrt);
+    // SAFETY: one thread writes one input gradient. It scans only within the
+    // matching `[outer, axis, inner]` slice and reads one grad/result value
+    // from the validated `[outer, inner]` output layout.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(grad_output.inner())
+            .arg(result.inner())
+            .arg(out.inner_mut())
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .arg(&corr_f32)
+            .arg(&take_sqrt_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "cuda")]
+/// Backward pass for f64 axis variance or standard deviation.
+///
+/// This is the f64 companion of [`gpu_std_var_axis_backward`].
+pub fn gpu_std_var_axis_backward_f64(
+    input: &CudaBuffer<f64>,
+    grad_output: &CudaBuffer<f64>,
+    result: &CudaBuffer<f64>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    correction: f64,
+    take_sqrt: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    validate_device(input, device)?;
+    validate_device(grad_output, device)?;
+    validate_device(result, device)?;
+    let (total_input, total_output) = validate_axis_prod_dims(
+        "gpu_std_var_axis_backward_f64",
+        input.len(),
+        Some(grad_output.len()),
+        outer,
+        axis_size,
+        inner,
+    )?;
+    if result.len() != total_output {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_std_var_axis_backward_f64",
+            expected: vec![total_output],
+            got: vec![result.len()],
+        });
+    }
+    if total_input == 0 {
+        return alloc_zeros_f64(0, device);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let ptx = get_f64_ptx(
+        &CACHE,
+        STD_VAR_AXIS_BACKWARD_PTX,
+        "std_var_axis_backward_kernel",
+        "std_var_axis_backward_f64_kernel",
+    );
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "std_var_axis_backward_f64_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "std_var_axis_backward_f64_kernel",
+        source: e,
+    })?;
+    let mut out = alloc_zeros_f64(total_input, device)?;
+    let cfg = launch_cfg(total_input)?;
+    let (outer_u32, axis_u32, inner_u32, total_u32) = (
+        outer as u32,
+        axis_size as u32,
+        inner as u32,
+        total_input as u32,
+    );
+    let take_sqrt_u32 = u32::from(take_sqrt);
+    // SAFETY: same layout and bounds contract as f32; the f64 PTX uses 8-byte
+    // loads/stores and f64 arithmetic after mechanical promotion.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(grad_output.inner())
+            .arg(result.inner())
+            .arg(out.inner_mut())
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .arg(&correction)
+            .arg(&take_sqrt_u32)
             .launch(cfg)?;
     }
     Ok(out)

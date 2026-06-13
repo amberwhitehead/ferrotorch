@@ -2163,6 +2163,46 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, input.device_ordinal()))
     }
 
+    fn std_var_axis_f64(
+        &self,
+        input: &GpuBufferHandle,
+        outer: usize,
+        axis_size: usize,
+        inner: usize,
+        correction: f64,
+        take_sqrt: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f64(input)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::kernels::gpu_std_var_axis_f64(
+            input_buf, outer, axis_size, inner, correction, take_sqrt, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, input.device_ordinal()))
+    }
+
+    fn std_var_axis_backward_f64(
+        &self,
+        input: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+        result: &GpuBufferHandle,
+        outer: usize,
+        axis_size: usize,
+        inner: usize,
+        correction: f64,
+        take_sqrt: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f64(input)?;
+        let grad_buf = Self::unwrap_buffer_f64(grad_output)?;
+        let result_buf = Self::unwrap_buffer_f64(result)?;
+        let dev = self.device(input.device_ordinal())?;
+        let grad = crate::kernels::gpu_std_var_axis_backward_f64(
+            input_buf, grad_buf, result_buf, outer, axis_size, inner, correction, take_sqrt, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(grad, input.device_ordinal()))
+    }
+
     fn min_f64(&self, a: &GpuBufferHandle, _n: usize) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
@@ -2936,6 +2976,46 @@ impl GpuBackend for CudaBackendImpl {
         )
         .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, input.device_ordinal()))
+    }
+
+    fn std_var_axis_f32(
+        &self,
+        input: &GpuBufferHandle,
+        outer: usize,
+        axis_size: usize,
+        inner: usize,
+        correction: f64,
+        take_sqrt: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer(input)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::kernels::gpu_std_var_axis(
+            input_buf, outer, axis_size, inner, correction, take_sqrt, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, input.device_ordinal()))
+    }
+
+    fn std_var_axis_backward_f32(
+        &self,
+        input: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+        result: &GpuBufferHandle,
+        outer: usize,
+        axis_size: usize,
+        inner: usize,
+        correction: f64,
+        take_sqrt: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer(input)?;
+        let grad_buf = Self::unwrap_buffer(grad_output)?;
+        let result_buf = Self::unwrap_buffer(result)?;
+        let dev = self.device(input.device_ordinal())?;
+        let grad = crate::kernels::gpu_std_var_axis_backward(
+            input_buf, grad_buf, result_buf, outer, axis_size, inner, correction, take_sqrt, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(grad, input.device_ordinal()))
     }
 
     fn min_f32(&self, a: &GpuBufferHandle, _len: usize) -> FerrotorchResult<GpuBufferHandle> {
