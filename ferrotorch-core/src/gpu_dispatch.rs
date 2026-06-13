@@ -3234,6 +3234,62 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// Axis `prod` for f32. Collapses one dimension and returns a flat
+    /// `[outer, inner]` buffer before the caller restores keepdim metadata.
+    fn prod_axis_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "prod_axis_f32 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// Axis `prod` for f64. Companion of [`Self::prod_axis_f32`].
+    fn prod_axis_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "prod_axis_f64 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// Backward for axis `prod` f32. Computes
+    /// `grad_output[o,i] * product(input[o, all d != current d, i])`.
+    fn prod_axis_backward_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "prod_axis_backward_f32 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// Backward for axis `prod` f64. Companion of [`Self::prod_axis_backward_f32`].
+    fn prod_axis_backward_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "prod_axis_backward_f64 GPU op not yet implemented".into(),
+        })
+    }
+
     /// Axis `amin` for f32. Collapses `shape[axis]` and returns a flat
     /// `[outer, inner]` buffer before the caller restores keepdim metadata.
     fn min_axis_f32(

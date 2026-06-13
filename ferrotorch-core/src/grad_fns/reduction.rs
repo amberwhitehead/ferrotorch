@@ -2942,13 +2942,43 @@ pub struct ProdDimBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for ProdDimBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let in_shape = self.input.shape();
+        if in_shape.is_empty() {
+            return Ok(vec![Some(grad_output.contiguous()?)]);
+        }
         if self.input.is_cuda() {
-            return Err(FerrotorchError::NotImplementedOnCuda {
-                op: "prod_dim backward",
-            });
+            let dim_size = in_shape[self.dim];
+            let outer: usize = in_shape[..self.dim].iter().product();
+            let inner: usize = in_shape[self.dim + 1..].iter().product();
+            let grad_output = grad_output.contiguous()?;
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let handle = match T::dtype() {
+                DType::F32 => backend.prod_axis_backward_f32(
+                    self.input.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                    outer,
+                    dim_size,
+                    inner,
+                )?,
+                DType::F64 => backend.prod_axis_backward_f64(
+                    self.input.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                    outer,
+                    dim_size,
+                    inner,
+                )?,
+                _ => {
+                    return Err(FerrotorchError::NotImplementedOnCuda {
+                        op: "prod_dim backward",
+                    });
+                }
+            };
+            let grad_input =
+                Tensor::from_storage(TensorStorage::gpu(handle), in_shape.to_vec(), false)?;
+            return Ok(vec![Some(grad_input)]);
         }
         let input_data = self.input.data()?;
-        let in_shape = self.input.shape();
         let dim_size = in_shape[self.dim];
         let outer: usize = in_shape[..self.dim].iter().product();
         let inner: usize = in_shape[self.dim + 1..].iter().product();
@@ -2999,33 +3029,66 @@ pub fn prod_dim<T: Float>(
     dim: i64,
     keepdim: bool,
 ) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "prod_dim" });
-    }
     let ndim = input.ndim();
     if ndim == 0 {
-        return grad_clone(input);
+        if dim != 0 && dim != -1 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "prod_dim: Dimension out of range (expected to be in range of [-1, 0], but got {dim})"
+                ),
+            });
+        }
+        let result = input.contiguous()?;
+        if is_grad_enabled() && input.requires_grad() {
+            let grad_fn = Arc::new(ProdDimBackward {
+                input: input.clone(),
+                dim: 0,
+                keepdim,
+            });
+            let (s, sh) = result.into_storage_and_shape()?;
+            return Tensor::from_operation(s, sh, grad_fn);
+        }
+        return Ok(result);
     }
-    let norm_dim = if dim < 0 {
-        (ndim as i64 + dim) as usize
-    } else {
-        dim as usize
-    };
-    if norm_dim >= ndim {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!("prod_dim: dim {dim} out of bounds for {ndim}-D tensor"),
-        });
-    }
+    let norm_dim = crate::shape::normalize_axis(dim as isize, ndim)?;
     let input_ref = if input.is_contiguous() {
         input.clone()
     } else {
         input.contiguous()?
     };
-    let in_data = input_ref.data()?;
     let in_shape = input_ref.shape();
     let dim_size = in_shape[norm_dim];
     let outer: usize = in_shape[..norm_dim].iter().product();
     let inner: usize = in_shape[norm_dim + 1..].iter().product();
+    let mut out_shape: Vec<usize> = in_shape.to_vec();
+    if keepdim {
+        out_shape[norm_dim] = 1;
+    } else {
+        out_shape.remove(norm_dim);
+    }
+
+    if input_ref.is_cuda() {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = match T::dtype() {
+            DType::F32 => backend.prod_axis_f32(input_ref.gpu_handle()?, outer, dim_size, inner)?,
+            DType::F64 => backend.prod_axis_f64(input_ref.gpu_handle()?, outer, dim_size, inner)?,
+            _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "prod_dim" }),
+        };
+        let result_t = Tensor::from_storage(TensorStorage::gpu(handle), out_shape, false)?;
+        if is_grad_enabled() && input.requires_grad() {
+            let grad_fn = Arc::new(ProdDimBackward {
+                input: input_ref,
+                dim: norm_dim,
+                keepdim,
+            });
+            let (s, sh) = result_t.into_storage_and_shape()?;
+            return Tensor::from_operation(s, sh, grad_fn);
+        }
+        return Ok(result_t);
+    }
+
+    let in_data = input_ref.data()?;
     let one = <T as num_traits::One>::one();
     let mut result = Vec::with_capacity(outer * inner);
     for o in 0..outer {
@@ -3037,16 +3100,10 @@ pub fn prod_dim<T: Float>(
             result.push(acc);
         }
     }
-    let mut out_shape: Vec<usize> = in_shape.to_vec();
-    if keepdim {
-        out_shape[norm_dim] = 1;
-    } else {
-        out_shape.remove(norm_dim);
-    }
     let result_t = Tensor::from_storage(TensorStorage::cpu(result), out_shape, false)?;
     if is_grad_enabled() && input.requires_grad() {
         let grad_fn = Arc::new(ProdDimBackward {
-            input: input.clone(),
+            input: input_ref,
             dim: norm_dim,
             keepdim,
         });

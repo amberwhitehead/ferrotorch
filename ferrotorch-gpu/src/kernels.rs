@@ -7069,6 +7069,158 @@ DONE:
 ";
 
 #[cfg(feature = "cuda")]
+pub(crate) const PROD_AXIS_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry prod_axis_kernel(
+    .param .u64 input_ptr,
+    .param .u64 output_ptr,
+    .param .u32 outer_size,
+    .param .u32 axis_size,
+    .param .u32 inner_size,
+    .param .u32 total_output
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %outer_sz, %axis_sz, %inner_sz;
+    .reg .u32 %outer_idx, %inner_idx, %k, %base, %idx;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .f32 %val, %prod;
+    .reg .pred %p, %lp;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %out, [output_ptr];
+    ld.param.u32 %outer_sz, [outer_size];
+    ld.param.u32 %axis_sz, [axis_size];
+    ld.param.u32 %inner_sz, [inner_size];
+    ld.param.u32 %n_reg, [total_output];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    div.u32 %outer_idx, %r_tid, %inner_sz;
+    rem.u32 %inner_idx, %r_tid, %inner_sz;
+    mul.lo.u32 %base, %outer_idx, %axis_sz;
+    mul.lo.u32 %base, %base, %inner_sz;
+    add.u32 %base, %base, %inner_idx;
+
+    mov.f32 %prod, 0f3F800000;
+    mov.u32 %k, 0;
+PROD_LOOP:
+    setp.ge.u32 %lp, %k, %axis_sz;
+    @%lp bra PROD_DONE;
+
+    mul.lo.u32 %idx, %k, %inner_sz;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %val, [%addr];
+    mul.f32 %prod, %prod, %val;
+
+    add.u32 %k, %k, 1;
+    bra PROD_LOOP;
+PROD_DONE:
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out, %off;
+    st.global.f32 [%addr], %prod;
+
+DONE:
+    ret;
+}
+";
+
+#[cfg(feature = "cuda")]
+pub(crate) const PROD_AXIS_BACKWARD_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry prod_axis_backward_kernel(
+    .param .u64 input_ptr,
+    .param .u64 grad_out_ptr,
+    .param .u64 grad_in_ptr,
+    .param .u32 outer_size,
+    .param .u32 axis_size,
+    .param .u32 inner_size,
+    .param .u32 total_input
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %outer_sz, %axis_sz, %inner_sz;
+    .reg .u32 %tmp, %outer_idx, %d_idx, %inner_idx, %k, %src_idx, %go_idx;
+    .reg .u64 %in, %go, %gi, %off, %addr;
+    .reg .f32 %val, %prod, %go_val, %grad;
+    .reg .pred %p, %lp, %skip;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %go, [grad_out_ptr];
+    ld.param.u64 %gi, [grad_in_ptr];
+    ld.param.u32 %outer_sz, [outer_size];
+    ld.param.u32 %axis_sz, [axis_size];
+    ld.param.u32 %inner_sz, [inner_size];
+    ld.param.u32 %n_reg, [total_input];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    rem.u32 %inner_idx, %r_tid, %inner_sz;
+    div.u32 %tmp, %r_tid, %inner_sz;
+    rem.u32 %d_idx, %tmp, %axis_sz;
+    div.u32 %outer_idx, %tmp, %axis_sz;
+
+    mul.lo.u32 %go_idx, %outer_idx, %inner_sz;
+    add.u32 %go_idx, %go_idx, %inner_idx;
+    cvt.u64.u32 %off, %go_idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %go, %off;
+    ld.global.f32 %go_val, [%addr];
+
+    mov.f32 %prod, 0f3F800000;
+    mov.u32 %k, 0;
+BACK_LOOP:
+    setp.ge.u32 %lp, %k, %axis_sz;
+    @%lp bra BACK_DONE;
+    setp.eq.u32 %skip, %k, %d_idx;
+    @%skip bra BACK_NEXT;
+
+    mul.lo.u32 %src_idx, %outer_idx, %axis_sz;
+    add.u32 %src_idx, %src_idx, %k;
+    mul.lo.u32 %src_idx, %src_idx, %inner_sz;
+    add.u32 %src_idx, %src_idx, %inner_idx;
+    cvt.u64.u32 %off, %src_idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %val, [%addr];
+    mul.f32 %prod, %prod, %val;
+
+BACK_NEXT:
+    add.u32 %k, %k, 1;
+    bra BACK_LOOP;
+BACK_DONE:
+
+    mul.f32 %grad, %prod, %go_val;
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %gi, %off;
+    st.global.f32 [%addr], %grad;
+
+DONE:
+    ret;
+}
+";
+
+#[cfg(feature = "cuda")]
 pub(crate) const EXTREME_AXIS_PTX: &str = "\
 .version 7.0
 .target sm_52
@@ -16196,6 +16348,340 @@ pub fn gpu_sum_axis(
             .launch(cfg)?;
     }
 
+    Ok(out)
+}
+
+#[cfg(feature = "cuda")]
+fn validate_axis_prod_dims(
+    op: &'static str,
+    input_len: usize,
+    grad_len: Option<usize>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+) -> GpuResult<(usize, usize)> {
+    let expected_input = outer
+        .checked_mul(axis_size)
+        .and_then(|v| v.checked_mul(inner))
+        .ok_or_else(|| GpuError::InvalidState {
+            message: format!("{op}: input shape product overflows usize"),
+        })?;
+    let expected_output = outer
+        .checked_mul(inner)
+        .ok_or_else(|| GpuError::InvalidState {
+            message: format!("{op}: output shape product overflows usize"),
+        })?;
+    if input_len != expected_input {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![expected_input],
+            got: vec![input_len],
+        });
+    }
+    if let Some(grad_len) = grad_len
+        && grad_len != expected_output
+    {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![expected_output],
+            got: vec![grad_len],
+        });
+    }
+    for (name, value) in [
+        ("outer", outer),
+        ("axis_size", axis_size),
+        ("inner", inner),
+        ("input", expected_input),
+        ("output", expected_output),
+    ] {
+        if value > u32::MAX as usize {
+            return Err(GpuError::InvalidState {
+                message: format!("{op}: {name}={value} exceeds CUDA kernel u32 indexing limit"),
+            });
+        }
+    }
+    Ok((expected_input, expected_output))
+}
+
+#[cfg(feature = "cuda")]
+fn launch_prod_axis_f32(
+    a: &CudaBuffer<f32>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_unary(a, device)?;
+    let (_, total_output) =
+        validate_axis_prod_dims("gpu_prod_axis_f32", a.len(), None, outer, axis_size, inner)?;
+    if total_output == 0 {
+        return alloc_zeros_f32(0, device);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        PROD_AXIS_PTX,
+        "prod_axis_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "prod_axis_kernel",
+        source: e,
+    })?;
+    let mut out = alloc_zeros_f32(total_output, device)?;
+    let cfg = launch_cfg(total_output)?;
+    let (outer_u32, axis_u32, inner_u32, total_u32) = (
+        outer as u32,
+        axis_size as u32,
+        inner as u32,
+        total_output as u32,
+    );
+    // SAFETY:
+    // - `f` is the product-axis kernel with ABI
+    //   `(input, output, outer, axis_size, inner, total_output)`.
+    // - `a.len() == outer * axis_size * inner` was validated above.
+    // - `out` is a fresh `[outer * inner]` buffer and cannot alias `a`.
+    // - The PTX reads only when `k < axis_size`; if `axis_size == 0`,
+    //   it performs no input reads and stores the multiplicative identity.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a.inner())
+            .arg(out.inner_mut())
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "cuda")]
+fn launch_prod_axis_backward_f32(
+    input: &CudaBuffer<f32>,
+    grad_output: &CudaBuffer<f32>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_unary(input, device)?;
+    validate_unary(grad_output, device)?;
+    let (total_input, _) = validate_axis_prod_dims(
+        "gpu_prod_axis_backward_f32",
+        input.len(),
+        Some(grad_output.len()),
+        outer,
+        axis_size,
+        inner,
+    )?;
+    if total_input == 0 {
+        return alloc_zeros_f32(0, device);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        PROD_AXIS_BACKWARD_PTX,
+        "prod_axis_backward_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "prod_axis_backward_kernel",
+        source: e,
+    })?;
+    let mut out = alloc_zeros_f32(total_input, device)?;
+    let cfg = launch_cfg(total_input)?;
+    let (outer_u32, axis_u32, inner_u32, total_u32) = (
+        outer as u32,
+        axis_size as u32,
+        inner as u32,
+        total_input as u32,
+    );
+    // SAFETY:
+    // - `f` is the product-axis backward kernel with ABI
+    //   `(input, grad_output, grad_input, outer, axis_size, inner, total_input)`.
+    // - `input.len() == total_input` and `grad_output.len() == outer * inner`
+    //   were validated above. `total_input > 0` implies `axis_size > 0`.
+    // - `out` is fresh and cannot alias either read-only buffer.
+    // - Each thread writes exactly one gradient slot and scans only within its
+    //   own `[outer, axis, inner]` slice.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(grad_output.inner())
+            .arg(out.inner_mut())
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Axis product for f32. Collapses `[outer, axis_size, inner]` to `[outer, inner]`.
+#[cfg(feature = "cuda")]
+pub fn gpu_prod_axis(
+    a: &CudaBuffer<f32>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    launch_prod_axis_f32(a, outer, axis_size, inner, device)
+}
+
+/// Backward for f32 axis product.
+#[cfg(feature = "cuda")]
+pub fn gpu_prod_axis_backward(
+    input: &CudaBuffer<f32>,
+    grad_output: &CudaBuffer<f32>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    launch_prod_axis_backward_f32(input, grad_output, outer, axis_size, inner, device)
+}
+
+/// Axis product for f64. Collapses `[outer, axis_size, inner]` to `[outer, inner]`.
+#[cfg(feature = "cuda")]
+pub fn gpu_prod_axis_f64(
+    a: &CudaBuffer<f64>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    validate_device(a, device)?;
+    let (_, total_output) =
+        validate_axis_prod_dims("gpu_prod_axis_f64", a.len(), None, outer, axis_size, inner)?;
+    if total_output == 0 {
+        return alloc_zeros_f64(0, device);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let ptx = get_f64_ptx(
+        &CACHE,
+        PROD_AXIS_PTX,
+        "prod_axis_kernel",
+        "prod_axis_f64_kernel",
+    );
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "prod_axis_f64_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "prod_axis_f64_kernel",
+        source: e,
+    })?;
+    let mut out = alloc_zeros_f64(total_output, device)?;
+    let cfg = launch_cfg(total_output)?;
+    let (outer_u32, axis_u32, inner_u32, total_u32) = (
+        outer as u32,
+        axis_size as u32,
+        inner as u32,
+        total_output as u32,
+    );
+    // SAFETY: same launch and bounds contract as `launch_prod_axis_f32`; PTX
+    // is mechanically rewritten for f64 value loads/stores.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a.inner())
+            .arg(out.inner_mut())
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Backward for f64 axis product.
+#[cfg(feature = "cuda")]
+pub fn gpu_prod_axis_backward_f64(
+    input: &CudaBuffer<f64>,
+    grad_output: &CudaBuffer<f64>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    validate_device(input, device)?;
+    validate_device(grad_output, device)?;
+    let (total_input, _) = validate_axis_prod_dims(
+        "gpu_prod_axis_backward_f64",
+        input.len(),
+        Some(grad_output.len()),
+        outer,
+        axis_size,
+        inner,
+    )?;
+    if total_input == 0 {
+        return alloc_zeros_f64(0, device);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let ptx = get_f64_ptx(
+        &CACHE,
+        PROD_AXIS_BACKWARD_PTX,
+        "prod_axis_backward_kernel",
+        "prod_axis_backward_f64_kernel",
+    );
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "prod_axis_backward_f64_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "prod_axis_backward_f64_kernel",
+        source: e,
+    })?;
+    let mut out = alloc_zeros_f64(total_input, device)?;
+    let cfg = launch_cfg(total_input)?;
+    let (outer_u32, axis_u32, inner_u32, total_u32) = (
+        outer as u32,
+        axis_size as u32,
+        inner as u32,
+        total_input as u32,
+    );
+    // SAFETY: same launch and bounds contract as `launch_prod_axis_backward_f32`;
+    // PTX is mechanically rewritten for f64 value loads/stores.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(grad_output.inner())
+            .arg(out.inner_mut())
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
     Ok(out)
 }
 
