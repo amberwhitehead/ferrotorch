@@ -672,6 +672,26 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::reduction::mean_dim(self, dim, keepdim)
     }
 
+    /// Differentiable full-reduction nansum. Mirrors `torch.nansum(self)`.
+    pub fn nansum_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::nansum(self)
+    }
+
+    /// Differentiable dim-keyed nansum. Mirrors `torch.nansum(self, dim, keepdim)`.
+    pub fn nansum_dim_t(&self, dim: i64, keepdim: bool) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::nansum_dim(self, dim, keepdim)
+    }
+
+    /// Differentiable full-reduction nanmean. Mirrors `torch.nanmean(self)`.
+    pub fn nanmean_t(&self) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::nanmean(self)
+    }
+
+    /// Differentiable dim-keyed nanmean. Mirrors `torch.nanmean(self, dim, keepdim)`.
+    pub fn nanmean_dim_t(&self, dim: i64, keepdim: bool) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::reduction::nanmean_dim(self, dim, keepdim)
+    }
+
     /// Differentiable full-reduction logsumexp. Mirrors
     /// `torch.logsumexp(self)` — numerically stable `log(sum(exp(self)))`
     /// to a 0-D scalar. Backward `grad * exp(self - result)`. Closes #1310.
