@@ -54,14 +54,11 @@
 //!
 //! ## GPU policy
 //!
-//! `nested.rs` and `sparse.rs` in ferrotorch-core are CPU-only modules
-//! (every storage construction uses `TensorStorage::cpu`). PyTorch supports
-//! GPU sparse via cuSPARSE; ferrotorch does not yet. Per
-//! `rust-gpu-discipline` §3 the honest response is to surface this as a
-//! tracked cascade issue and `cascade_skip()` the GPU lane against that
-//! issue rather than silently passing CPU work as GPU coverage. The skip
-//! is loud (`eprintln!`) and references the cascade issue so it shows up
-//! in audit trails.
+//! The GPU lane (`mod gpu`, `--features gpu`) exercises the real
+//! cuSPARSE / composite on-device paths with device assertions on every
+//! result (no cascade skips remain — the last two vacuous skips were
+//! replaced under CORE-076 / #1770). The 2:4 layout itself is
+//! host-resident; `gpu_semi_structured_24` pins that contract explicitly.
 //!
 //! ## Tolerances
 //!
@@ -348,21 +345,11 @@ fn make_tensor_f64(data: &[f64], shape: &[usize]) -> Tensor<f64> {
         .expect("make_tensor_f64")
 }
 
-/// Cascade-skip table. Returns `Some(reason)` to skip the GPU lane with a
-/// printed cascade issue reference. Per `rust-gpu-discipline` §3, the
-/// nested + sparse modules are CPU-only so every GPU test routes through
-/// this skip.
-///
-/// The cascade issue covering all of nested+sparse GPU support is filed
-/// once for the phase rather than per-op (every op has the same finding:
-/// no GPU implementation exists yet) — see #806.
-#[allow(dead_code, reason = "consumed by `gpu` cfg-gated module")]
-fn cascade_skip_gpu() -> Option<&'static str> {
-    Some(
-        "ferrotorch-core nested+sparse modules are CPU-only — GPU coverage \
-         cascade-skipped pending #806 (parent #770)",
-    )
-}
+// The legacy cascade-skip table (`cascade_skip_gpu`, #806) is gone:
+// every GPU-lane test in this suite now exercises a real on-device path
+// with device assertions, or pins the host-resident-layout contract
+// explicitly (`gpu_semi_structured_24`). CORE-076 / #1770 removed the
+// last two unconditional skips.
 
 // ===========================================================================
 // CPU tests — NestedTensor / PackedNestedTensor / Sparse — these are the
@@ -1334,7 +1321,7 @@ fn cpu_coo_csr_csc_format_round_trip_5x5() {
                 );
 
                 // CscTensor::to_csr round-trip.
-                let csr_back = csc.to_csr();
+                let csr_back = csc.to_csr().expect("valid CSC -> CSR");
                 let csr_back_dense = csr_back.to_dense().expect("csr_back dense");
                 tolerance::assert_close_f32(
                     csr_back_dense.data().expect("csr_back dense data"),
@@ -1734,18 +1721,13 @@ fn cpu_sparse_grad_coalesce_and_apply_sgd() {
 }
 
 // ===========================================================================
-// GPU lane — every test cascade-skips against the tracked issue.
+// GPU lane — real on-device dispatch with device assertions.
 //
-// Per `rust-gpu-discipline` §3 (PyTorch parity, hard requirement), the
-// honest response when a module has no GPU implementation is to surface
-// it as a tracked cascade issue rather than silently pass CPU work as
-// GPU coverage. ferrotorch's nested + sparse modules build all storage
-// via `TensorStorage::cpu` — there is no GPU code path to exercise.
-//
-// The skip is loud (`eprintln!`) and references the cascade issue so it
-// shows up in audit trails. When a GPU implementation lands, this lane
-// is replaced with real GPU dispatch (mirroring the pattern in
-// `conformance_reduction.rs` Phase 2.2).
+// Per `rust-gpu-discipline` §3 (PyTorch parity, hard requirement), every
+// test here either exercises a genuine GPU code path (asserting
+// `is_cuda()` on the result) or pins the host-resident-layout contract
+// explicitly. The legacy unconditional cascade skips are gone
+// (CORE-076 / #1770).
 // ===========================================================================
 
 #[cfg(feature = "gpu")]
@@ -1760,14 +1742,6 @@ mod gpu {
             ferrotorch_gpu::init_cuda_backend()
                 .expect("CUDA backend must initialize for the GPU conformance suite");
         });
-    }
-
-    fn note_cascade_skip(test_name: &str) {
-        // Loud skip — the cascade-handling mandate requires surfacing each
-        // GPU-not-implemented case rather than silently passing.
-        if let Some(reason) = cascade_skip_gpu() {
-            eprintln!("skipping {test_name} on GPU: {reason}");
-        }
     }
 
     /// Live GPU `NestedTensor::to_padded` / `from_padded` round-trip,
@@ -2342,16 +2316,78 @@ mod gpu {
         }
     }
 
+    /// 2:4 layout from a CUDA dense input (CORE-076 / #1770 follow-on to
+    /// the old vacuous cascade skip). `SemiStructuredSparseTensor` is a
+    /// host-resident layout (like `SparseTensor`): `compress` reads the
+    /// CUDA tensor back to host and `decompress` materialises on CPU —
+    /// pinned here so a behavior change (e.g. an on-device 2:4 layout)
+    /// turns this test red and gets a real device-asserting test.
     #[test]
     fn gpu_semi_structured_24() {
         ensure_cuda_backend();
-        note_cascade_skip("gpu_semi_structured_24");
+
+        let dense_data: Vec<f64> = vec![1.0, 4.0, 2.0, 3.0, -5.0, 2.0, 0.0, 1.0];
+        let dense_cpu = make_tensor_f32(&dense_data, &[2, 4]);
+        let dense_gpu = dense_cpu
+            .to(ferrotorch_core::Device::Cuda(0))
+            .expect("dense->gpu");
+
+        let sp_gpu = SemiStructuredSparseTensor::compress(&dense_gpu)
+            .expect("compress reads a CUDA input back to host (host-resident layout)");
+        let sp_cpu = SemiStructuredSparseTensor::compress(&dense_cpu).expect("cpu compress");
+        assert_eq!(
+            sp_gpu.values(),
+            sp_cpu.values(),
+            "CUDA-origin compress must keep the same 2:4 selection as CPU"
+        );
+        assert_eq!(sp_gpu.mask(), sp_cpu.mask());
+
+        let d = sp_gpu.decompress().expect("decompress");
+        assert!(
+            !d.is_cuda(),
+            "decompress materialises on CPU (host-resident layout contract)"
+        );
+        assert_eq!(d.shape(), &[2, 4]);
     }
 
+    /// Live GPU `sparse_matmul_24` (CORE-076 / #1770 — replaces the
+    /// unconditional cascade skip). With `gpu` but not `cusparselt` this
+    /// exercises the declined-backend ON-DEVICE composite; with
+    /// `cusparselt` it exercises the cuSPARSELt fast path. Either way the
+    /// output must stay on CUDA and match the CPU reference.
     #[test]
     fn gpu_sparse_matmul_24() {
         ensure_cuda_backend();
-        note_cascade_skip("gpu_sparse_matmul_24");
+
+        let a_data: Vec<f64> = (1..=8).map(|x| x as f64).collect();
+        let b_data: Vec<f64> = vec![
+            1.0, 4.0, 2.0, 3.0, //
+            -5.0, 2.0, 0.0, 1.0, //
+            0.5, -0.25, 8.0, 7.0, //
+            3.0, 3.0, -3.0, 0.125,
+        ];
+        let a_cpu = make_tensor_f32(&a_data, &[2, 4]);
+        let b = SemiStructuredSparseTensor::compress(&make_tensor_f32(&b_data, &[4, 4]))
+            .expect("compress b");
+
+        let cpu_out = sparse_matmul_24(&a_cpu, &b).expect("cpu reference");
+        let cpu_ref = cpu_out.data().expect("cpu data").to_vec();
+
+        let a_gpu = a_cpu.to(ferrotorch_core::Device::Cuda(0)).expect("a->cuda");
+        let out = sparse_matmul_24(&a_gpu, &b).expect("cuda sparse_matmul_24");
+        assert!(
+            out.is_cuda(),
+            "sparse_matmul_24 output must stay on CUDA when `a` is CUDA"
+        );
+        assert_eq!(out.shape(), &[2, 4]);
+        let back = out.cpu().expect("gpu->cpu");
+        let got = back.data().expect("data");
+        for (i, (g, e)) in got.iter().zip(cpu_ref.iter()).enumerate() {
+            assert!(
+                (g - e).abs() < tolerance::F32_ELEMENTWISE * (1.0 + e.abs()),
+                "sparse_matmul_24 elem {i}: gpu={g} cpu={e}"
+            );
+        }
     }
 
     /// Live GPU `SparseGrad::apply_sgd` against a CUDA parameter

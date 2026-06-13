@@ -16,6 +16,7 @@
 
 use ferrotorch_core::{Device, manual_seed, rand_on_device, randn_on_device};
 use ferrotorch_gpu::init_cuda_backend;
+use half::{bf16, f16};
 
 fn ensure_init() {
     if !ferrotorch_core::gpu_dispatch::has_gpu_backend() {
@@ -27,6 +28,15 @@ fn ensure_init() {
 fn to_host(t: &ferrotorch_core::Tensor<f32>) -> Vec<f32> {
     let cpu = t.to(Device::Cpu).expect("tensor.to(Cpu)");
     cpu.data().expect("cpu data").to_vec()
+}
+
+fn to_host_f64<T: ferrotorch_core::dtype::Float>(t: &ferrotorch_core::Tensor<T>) -> Vec<f64> {
+    let cpu = t.to(Device::Cpu).expect("tensor.to(Cpu)");
+    cpu.data()
+        .expect("cpu data")
+        .iter()
+        .map(|x| x.to_f64().expect("floating value converts to f64"))
+        .collect()
 }
 
 #[test]
@@ -50,6 +60,40 @@ fn randn_on_device_cuda_is_on_device() {
         "randn_on_device(Cuda) must return an is_cuda() tensor"
     );
     assert_eq!(t.shape(), &[256]);
+}
+
+#[test]
+fn rand_on_device_cuda_non_f32_dtypes_are_on_device() {
+    ensure_init();
+
+    let f64_t = rand_on_device::<f64>(&[257], Device::Cuda(0)).expect("rand f64 cuda");
+    assert!(f64_t.is_cuda(), "f64 rand must stay on CUDA");
+    assert_eq!(f64_t.device(), Device::Cuda(0));
+
+    let f16_t = rand_on_device::<f16>(&[257], Device::Cuda(0)).expect("rand f16 cuda");
+    assert!(f16_t.is_cuda(), "f16 rand must stay on CUDA");
+    assert_eq!(f16_t.device(), Device::Cuda(0));
+
+    let bf16_t = rand_on_device::<bf16>(&[257], Device::Cuda(0)).expect("rand bf16 cuda");
+    assert!(bf16_t.is_cuda(), "bf16 rand must stay on CUDA");
+    assert_eq!(bf16_t.device(), Device::Cuda(0));
+}
+
+#[test]
+fn randn_on_device_cuda_non_f32_dtypes_are_on_device() {
+    ensure_init();
+
+    let f64_t = randn_on_device::<f64>(&[257], Device::Cuda(0)).expect("randn f64 cuda");
+    assert!(f64_t.is_cuda(), "f64 randn must stay on CUDA");
+    assert_eq!(f64_t.device(), Device::Cuda(0));
+
+    let f16_t = randn_on_device::<f16>(&[257], Device::Cuda(0)).expect("randn f16 cuda");
+    assert!(f16_t.is_cuda(), "f16 randn must stay on CUDA");
+    assert_eq!(f16_t.device(), Device::Cuda(0));
+
+    let bf16_t = randn_on_device::<bf16>(&[257], Device::Cuda(0)).expect("randn bf16 cuda");
+    assert!(bf16_t.is_cuda(), "bf16 randn must stay on CUDA");
+    assert_eq!(bf16_t.device(), Device::Cuda(0));
 }
 
 #[test]
@@ -84,6 +128,47 @@ fn rand_on_device_uniform_distribution() {
 }
 
 #[test]
+fn rand_on_device_non_f32_uniform_distribution() {
+    ensure_init();
+    let n = 262_144usize;
+
+    for (name, values) in [
+        (
+            "f64",
+            to_host_f64(&rand_on_device::<f64>(&[n], Device::Cuda(0)).expect("rand f64")),
+        ),
+        (
+            "f16",
+            to_host_f64(&rand_on_device::<f16>(&[n], Device::Cuda(0)).expect("rand f16")),
+        ),
+        (
+            "bf16",
+            to_host_f64(&rand_on_device::<bf16>(&[n], Device::Cuda(0)).expect("rand bf16")),
+        ),
+    ] {
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        let mut sum = 0.0f64;
+        for &x in &values {
+            assert!(
+                (0.0..1.0).contains(&x),
+                "{name} uniform value {x} out of [0,1)"
+            );
+            min = min.min(x);
+            max = max.max(x);
+            sum += x;
+        }
+        let mean = sum / n as f64;
+        assert!(
+            (mean - 0.5).abs() < 0.02,
+            "{name} uniform mean {mean} should be ~= 0.5"
+        );
+        assert!(min < 0.02, "{name} uniform min {min} should be near 0");
+        assert!(max > 0.98, "{name} uniform max {max} should be near 1");
+    }
+}
+
+#[test]
 fn randn_on_device_normal_distribution() {
     ensure_init();
     // 1M samples: standard normal => mean ~= 0, std ~= 1.
@@ -106,6 +191,64 @@ fn randn_on_device_normal_distribution() {
     let std = (var / n as f64).sqrt();
     assert!((mean).abs() < 0.02, "normal mean {mean} should be ~= 0");
     assert!((std - 1.0).abs() < 0.05, "normal std {std} should be ~= 1");
+}
+
+#[test]
+fn randn_on_device_non_f32_normal_distribution() {
+    ensure_init();
+    let n = 262_144usize;
+
+    for (name, values) in [
+        (
+            "f64",
+            to_host_f64(&randn_on_device::<f64>(&[n], Device::Cuda(0)).expect("randn f64")),
+        ),
+        (
+            "f16",
+            to_host_f64(&randn_on_device::<f16>(&[n], Device::Cuda(0)).expect("randn f16")),
+        ),
+        (
+            "bf16",
+            to_host_f64(&randn_on_device::<bf16>(&[n], Device::Cuda(0)).expect("randn bf16")),
+        ),
+    ] {
+        let sum = values.iter().copied().sum::<f64>();
+        for &x in &values {
+            assert!(x.is_finite(), "{name} normal value must be finite, got {x}");
+        }
+        let mean = sum / n as f64;
+        let var = values
+            .iter()
+            .map(|&x| {
+                let d = x - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / n as f64;
+        let std = var.sqrt();
+        assert!(
+            mean.abs() < 0.03,
+            "{name} normal mean {mean} should be ~= 0"
+        );
+        assert!(
+            (std - 1.0).abs() < 0.06,
+            "{name} normal std {std} should be ~= 1"
+        );
+    }
+}
+
+#[test]
+fn f64_rand_then_randn_uses_distinct_cuda_kernels() {
+    ensure_init();
+    let n = 65_536usize;
+    let _ = rand_on_device::<f64>(&[n], Device::Cuda(0)).expect("rand f64 warms uniform kernel");
+    let normal =
+        to_host_f64(&randn_on_device::<f64>(&[n], Device::Cuda(0)).expect("randn f64 cuda"));
+    let mean = normal.iter().copied().sum::<f64>() / n as f64;
+    assert!(
+        mean.abs() < 0.04,
+        "f64 randn after f64 rand must launch the normal kernel, got mean {mean}"
+    );
 }
 
 #[test]

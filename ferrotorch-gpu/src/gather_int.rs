@@ -25,10 +25,13 @@
 //! inner)` decomposes to `(o, i, k)` and writes
 //! `out[t] = input[o*in_dim*inner + index[i]*inner + k]`.
 //!
-//! `gather(dim)`: input `[outer, in_dim, inner]`, index AND output both
-//! `[outer, out_dim, inner]`. Thread `t` writes
-//! `out[t] = input[o*in_dim*inner + index[t]*inner + k]` (the index varies per
-//! output element, read at the SAME flat position `t`).
+//! `gather(dim)`: the fast path uses input `[outer, in_dim, inner]`, with index
+//! AND output both `[outer, out_dim, inner]`. The general `gather_nd_*` entries
+//! use C-order `input_shape`/`input_strides` and `index_shape` metadata so
+//! `index`/output shape is authoritative even when non-gather dimensions are
+//! smaller than the input. Thread `t` decodes the output coordinate from
+//! `index_shape`, replaces only `coord[dim]` with `index[t]`, then copies
+//! `input[src_flat]` to `out[t]`.
 //!
 //! # Out-of-range indices
 //!
@@ -239,6 +242,96 @@ DONE:
     };
 }
 
+// gather_nd: rank-aware gather for valid PyTorch layouts where index/output
+// shape may be smaller than input on non-gather axes.
+macro_rules! gather_nd_ptx {
+    ($kname:literal, $wsh:literal, $ish:literal, $ldi:literal, $icvt:literal,
+     $ldv:literal, $stv:literal, $vreg:literal, $ireg:literal) => {
+        concat!(
+            ".version 7.0\n.target sm_52\n.address_size 64\n",
+            ".visible .entry ",
+            $kname,
+            "(
+    .param .u64 in_ptr, .param .u64 idx_ptr,
+    .param .u64 input_strides_ptr, .param .u64 index_shape_ptr,
+    .param .u64 out_ptr,
+    .param .u32 rank, .param .u32 dim, .param .u32 total
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %rank, %dim, %axis, %rem;
+    .reg .u32 %size, %coord, %sel, %stride, %srcelem;
+    .reg .u64 %in, %idx, %istr, %ishape, %out, %off, %addr;
+    .reg ",
+            $ireg,
+            " %selv;
+    .reg ",
+            $vreg,
+            " %v;
+    .reg .pred %p;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %idx, [idx_ptr];
+    ld.param.u64 %istr, [input_strides_ptr];
+    ld.param.u64 %ishape, [index_shape_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %rank, [rank];
+    ld.param.u32 %dim, [dim];
+    ld.param.u32 %tot, [total];
+
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot; @%p bra DONE;
+
+    mov.u32 %axis, %rank;
+    mov.u32 %rem, %gtid;
+    mov.u32 %srcelem, 0;
+LOOP:
+    setp.eq.u32 %p, %axis, 0; @%p bra LOOP_DONE;
+    sub.u32 %axis, %axis, 1;
+
+    cvt.u64.u32 %off, %axis; shl.b64 %off, %off, 2; add.u64 %addr, %ishape, %off;
+    ld.global.u32 %size, [%addr];
+    rem.u32 %coord, %rem, %size;
+    div.u32 %rem, %rem, %size;
+
+    setp.ne.u32 %p, %axis, %dim; @%p bra USE_OUTPUT_COORD;
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, ",
+            $ish,
+            "; add.u64 %addr, %idx, %off;
+    ",
+            $ldi,
+            " %selv, [%addr];
+    cvt.u32.",
+            $icvt,
+            " %sel, %selv;
+    mov.u32 %coord, %sel;
+USE_OUTPUT_COORD:
+    cvt.u64.u32 %off, %axis; shl.b64 %off, %off, 2; add.u64 %addr, %istr, %off;
+    ld.global.u32 %stride, [%addr];
+    mad.lo.u32 %srcelem, %coord, %stride, %srcelem;
+    bra LOOP;
+
+LOOP_DONE:
+    cvt.u64.u32 %off, %srcelem; shl.b64 %off, %off, ",
+            $wsh,
+            "; add.u64 %addr, %in, %off;
+    ",
+            $ldv,
+            " %v, [%addr];
+
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, ",
+            $wsh,
+            "; add.u64 %addr, %out, %off;
+    ",
+            $stv,
+            " [%addr], %v;
+DONE:
+    ret;
+}
+"
+        )
+    };
+}
+
 // ── index_select PTX constants (value width × index width) ──────────────────
 const ISEL_W2_I32_PTX: &str = index_select_ptx!(
     "isel_w2_i32_kernel",
@@ -375,6 +468,74 @@ const GATHER_W8_I64_PTX: &str = gather_ptx!(
     ".s64"
 );
 
+// ── gather_nd PTX constants ─────────────────────────────────────────────────
+const GATHER_ND_W2_I32_PTX: &str = gather_nd_ptx!(
+    "gather_nd_w2_i32_kernel",
+    "1",
+    "2",
+    "ld.global.s32",
+    "s32",
+    "ld.global.u16",
+    "st.global.u16",
+    ".u16",
+    ".s32"
+);
+const GATHER_ND_W2_I64_PTX: &str = gather_nd_ptx!(
+    "gather_nd_w2_i64_kernel",
+    "1",
+    "3",
+    "ld.global.s64",
+    "s64",
+    "ld.global.u16",
+    "st.global.u16",
+    ".u16",
+    ".s64"
+);
+const GATHER_ND_W4_I32_PTX: &str = gather_nd_ptx!(
+    "gather_nd_w4_i32_kernel",
+    "2",
+    "2",
+    "ld.global.s32",
+    "s32",
+    "ld.global.u32",
+    "st.global.u32",
+    ".u32",
+    ".s32"
+);
+const GATHER_ND_W4_I64_PTX: &str = gather_nd_ptx!(
+    "gather_nd_w4_i64_kernel",
+    "2",
+    "3",
+    "ld.global.s64",
+    "s64",
+    "ld.global.u32",
+    "st.global.u32",
+    ".u32",
+    ".s64"
+);
+const GATHER_ND_W8_I32_PTX: &str = gather_nd_ptx!(
+    "gather_nd_w8_i32_kernel",
+    "3",
+    "2",
+    "ld.global.s32",
+    "s32",
+    "ld.global.u64",
+    "st.global.u64",
+    ".u64",
+    ".s32"
+);
+const GATHER_ND_W8_I64_PTX: &str = gather_nd_ptx!(
+    "gather_nd_w8_i64_kernel",
+    "3",
+    "3",
+    "ld.global.s64",
+    "s64",
+    "ld.global.u64",
+    "st.global.u64",
+    ".u64",
+    ".s64"
+);
+
 /// Byte width of a value element, used to pick the copy kernel.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ValWidth {
@@ -461,6 +622,84 @@ fn launch_select<V: DeviceRepr + ValidAsZeroBits, I: DeviceRepr + ValidAsZeroBit
     Ok(out)
 }
 
+fn checked_u32(name: &'static str, value: usize) -> GpuResult<u32> {
+    u32::try_from(value).map_err(|_| GpuError::InvalidState {
+        message: format!("{name}={value} exceeds gather kernel u32 indexing limit"),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_gather_nd<V: DeviceRepr + ValidAsZeroBits, I: DeviceRepr + ValidAsZeroBits>(
+    input: &CudaSlice<V>,
+    idx: &CudaSlice<I>,
+    input_strides: &[u32],
+    index_shape: &[u32],
+    dim: usize,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<CudaSlice<V>> {
+    let rank = index_shape.len();
+    if rank == 0 || input_strides.len() != rank || dim >= rank {
+        return Err(GpuError::InvalidState {
+            message: format!(
+                "gather_nd: invalid metadata rank={rank} strides={} dim={dim}",
+                input_strides.len()
+            ),
+        });
+    }
+    let total = index_shape.iter().try_fold(1usize, |acc, &d| {
+        acc.checked_mul(d as usize).ok_or(GpuError::LengthMismatch {
+            a: acc,
+            b: d as usize,
+        })
+    })?;
+    let stream = device.stream();
+    if total == 0 {
+        return Ok(stream.alloc_zeros::<V>(0)?);
+    }
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        }
+    })?;
+    let input_strides_vec = input_strides.to_vec();
+    let index_shape_vec = index_shape.to_vec();
+    let input_strides_dev = stream.clone_htod(&input_strides_vec)?;
+    let index_shape_dev = stream.clone_htod(&index_shape_vec)?;
+    let mut out = stream.alloc_zeros::<V>(total)?;
+    let cfg = launch_1d(total);
+    let rank_u = checked_u32("rank", rank)?;
+    let dim_u = checked_u32("dim", dim)?;
+    let total_u = checked_u32("total", total)?;
+    // SAFETY:
+    // - `f` is one of the `gather_nd_*` PTX entries; its signature
+    //   (in, idx, input_strides, index_shape, out, rank, dim, total) matches
+    //   the arguments pushed below.
+    // - `input_strides_dev` and `index_shape_dev` are exact `rank`-element
+    //   metadata buffers uploaded for this launch; `input` and `idx` are read
+    //   only; `out` is freshly allocated and exclusively mutable.
+    // - Each active thread writes exactly one `out[t]`, bounded by `total`.
+    //   Source bounds are guaranteed by the core-side shape and index checks,
+    //   matching PyTorch's CUDA contract for checked indices.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(idx)
+            .arg(&input_strides_dev)
+            .arg(&index_shape_dev)
+            .arg(&mut out)
+            .arg(&rank_u)
+            .arg(&dim_u)
+            .arg(&total_u)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
 fn isel_ptx(vw: ValWidth, iw: IdxWidth) -> (&'static str, &'static str) {
     match (vw, iw) {
         (ValWidth::W2, IdxWidth::I32) => (ISEL_W2_I32_PTX, "isel_w2_i32_kernel"),
@@ -483,6 +722,17 @@ fn gathr_ptx(vw: ValWidth, iw: IdxWidth) -> (&'static str, &'static str) {
     }
 }
 
+fn gather_nd_ptx_for(vw: ValWidth, iw: IdxWidth) -> (&'static str, &'static str) {
+    match (vw, iw) {
+        (ValWidth::W2, IdxWidth::I32) => (GATHER_ND_W2_I32_PTX, "gather_nd_w2_i32_kernel"),
+        (ValWidth::W2, IdxWidth::I64) => (GATHER_ND_W2_I64_PTX, "gather_nd_w2_i64_kernel"),
+        (ValWidth::W4, IdxWidth::I32) => (GATHER_ND_W4_I32_PTX, "gather_nd_w4_i32_kernel"),
+        (ValWidth::W4, IdxWidth::I64) => (GATHER_ND_W4_I64_PTX, "gather_nd_w4_i64_kernel"),
+        (ValWidth::W8, IdxWidth::I32) => (GATHER_ND_W8_I32_PTX, "gather_nd_w8_i32_kernel"),
+        (ValWidth::W8, IdxWidth::I64) => (GATHER_ND_W8_I64_PTX, "gather_nd_w8_i64_kernel"),
+    }
+}
+
 macro_rules! select_entry {
     ($name:ident, $vty:ty, $vw:expr, $idxty:ty, $iw:expr, $sel:ident) => {
         #[doc = concat!("`", stringify!($sel), "` on a ", stringify!($vty), " value buffer with a ", stringify!($idxty), " index buffer.")]
@@ -498,6 +748,23 @@ macro_rules! select_entry {
         ) -> GpuResult<CudaSlice<$vty>> {
             let (ptx, name) = $sel($vw, $iw);
             launch_select(input, idx, outer, in_dim, out_dim, inner, d, ptx, name)
+        }
+    };
+}
+
+macro_rules! gather_nd_entry {
+    ($name:ident, $vty:ty, $vw:expr, $idxty:ty, $iw:expr) => {
+        #[doc = concat!("Rank-aware `gather` on a ", stringify!($vty), " value buffer with a ", stringify!($idxty), " index buffer.")]
+        pub fn $name(
+            input: &CudaSlice<$vty>,
+            idx: &CudaSlice<$idxty>,
+            input_strides: &[u32],
+            index_shape: &[u32],
+            dim: usize,
+            d: &GpuDevice,
+        ) -> GpuResult<CudaSlice<$vty>> {
+            let (ptx, name) = gather_nd_ptx_for($vw, $iw);
+            launch_gather_nd(input, idx, input_strides, index_shape, dim, d, ptx, name)
         }
     };
 }
@@ -666,6 +933,18 @@ select_entry!(
     gathr_ptx
 );
 
+// gather_nd: same value/index matrix, but with full-rank C-order metadata.
+gather_nd_entry!(gather_nd_f32_i32, f32, ValWidth::W4, i32, IdxWidth::I32);
+gather_nd_entry!(gather_nd_f32_i64, f32, ValWidth::W4, i64, IdxWidth::I64);
+gather_nd_entry!(gather_nd_f64_i32, f64, ValWidth::W8, i32, IdxWidth::I32);
+gather_nd_entry!(gather_nd_f64_i64, f64, ValWidth::W8, i64, IdxWidth::I64);
+gather_nd_entry!(gather_nd_i32_i32, i32, ValWidth::W4, i32, IdxWidth::I32);
+gather_nd_entry!(gather_nd_i32_i64, i32, ValWidth::W4, i64, IdxWidth::I64);
+gather_nd_entry!(gather_nd_i64_i32, i64, ValWidth::W8, i32, IdxWidth::I32);
+gather_nd_entry!(gather_nd_i64_i64, i64, ValWidth::W8, i64, IdxWidth::I64);
+gather_nd_entry!(gather_nd_u16_i32, u16, ValWidth::W2, i32, IdxWidth::I32);
+gather_nd_entry!(gather_nd_u16_i64, u16, ValWidth::W2, i64, IdxWidth::I64);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,6 +995,39 @@ mod tests {
         let out = gather_i32_i64(&inp, &idx, 2, 3, 2, 1, &d).unwrap();
         // row0: in[0,0]=5 in[0,2]=7 ; row1: in[1,2]=10 in[1,1]=9
         assert_eq!(d.stream().clone_dtoh(&out).unwrap(), vec![5i32, 7, 10, 9]);
+    }
+
+    #[test]
+    fn gather_nd_dim1_smaller_batch_f32_i64() {
+        let d = dev();
+        let inp = d
+            .stream()
+            .clone_htod(&vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0])
+            .unwrap();
+        let idx = d.stream().clone_htod(&vec![1i64, 0]).unwrap();
+        let out = gather_nd_f32_i64(&inp, &idx, &[3, 1], &[1, 2], 1, &d).unwrap();
+        assert_eq!(d.stream().clone_dtoh(&out).unwrap(), vec![2.0f32, 1.0]);
+    }
+
+    #[test]
+    fn gather_nd_dim0_smaller_column_f32_i64() {
+        let d = dev();
+        let inp = d
+            .stream()
+            .clone_htod(&vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0])
+            .unwrap();
+        let idx = d.stream().clone_htod(&vec![1i64, 0]).unwrap();
+        let out = gather_nd_f32_i64(&inp, &idx, &[3, 1], &[2, 1], 0, &d).unwrap();
+        assert_eq!(d.stream().clone_dtoh(&out).unwrap(), vec![4.0f32, 1.0]);
+    }
+
+    #[test]
+    fn gather_nd_dim1_smaller_batch_i64_values() {
+        let d = dev();
+        let inp = d.stream().clone_htod(&vec![1i64, 2, 3, 4, 5, 6]).unwrap();
+        let idx = d.stream().clone_htod(&vec![1i32, 0]).unwrap();
+        let out = gather_nd_i64_i32(&inp, &idx, &[3, 1], &[1, 2], 1, &d).unwrap();
+        assert_eq!(d.stream().clone_dtoh(&out).unwrap(), vec![2i64, 1]);
     }
 
     #[test]

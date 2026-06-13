@@ -6,6 +6,7 @@ status: draft
 baseline-pytorch: 2ec0222669f1bcd37b5670ce384f8608c033b158
 upstream-paths:
   - torch/nn/utils/prune.py
+  - aten/src/ATen/native/TopKImpl.h
   - aten/src/ATen/native/cuda/Sparse24.cu
   - torch/_torch_docs.py
   - torch/overrides.py
@@ -16,105 +17,163 @@ upstream-paths:
 `ferrotorch-core/src/pruning.rs` ships three free functions that
 correspond to the most common pruning primitives in `torch.nn.utils.prune`:
 unstructured magnitude pruning, 2:4 structured sparsity masking, and
-sparsity ratio measurement. Each operates on CPU tensors and returns a
-new `Tensor<T>` with `requires_grad` propagated.
+sparsity ratio measurement. Each operates on CPU tensors. Both pruning
+functions are implemented as a differentiable constant-mask
+multiplication (`weights * mask` through the real `mul` op), mirroring
+PyTorch's pruning parametrization `weight = weight_orig * weight_mask`
+(`torch/nn/utils/prune.py`, `BasePruningMethod.apply_mask`): when the
+input requires grad, backward delivers `grad * mask` to the ORIGINAL
+parameter — exact zeros at pruned slots (CORE-082 -> #1776).
 
 ## Requirements
 
 - REQ-1: `magnitude_prune(weights, sparsity) -> Tensor<T>` — zero out
-  the `round(sparsity * numel)` smallest-magnitude elements. The
-  threshold is computed by sorting absolute values. NaN values do not
-  panic. Mirrors `torch.nn.utils.prune.l1_unstructured` for the
-  `1 - sparsity` amount semantics.
-- REQ-2: `apply_2_4_mask(weights) -> Tensor<T>` — for every group of
-  4 contiguous elements, keep the 2 with the largest magnitude and
-  zero the other 2. Trailing elements when `numel % 4 != 0` are left
-  unchanged. Mirrors the 2:4 structured-sparsity contract behind
-  `torch.sparse.SparseSemiStructuredTensor` and the cuSPARSELt 2:4
-  layout in `aten/src/ATen/native/cuda/Sparse24.cu`.
+  EXACTLY `round(sparsity * numel)` smallest-magnitude elements.
+  Selection (including which members of a magnitude tie are pruned)
+  reproduces `torch.nn.utils.prune.l1_unstructured`, which scatters
+  zeros at `torch.topk(|t|, k, largest=False).indices`
+  (`torch/nn/utils/prune.py`, `L1Unstructured.compute_mask`); torch's
+  CPU topk selects via `std::partial_sort` when `k * 64 <= numel`, else
+  `std::nth_element` at `k - 1`
+  (`aten/src/ATen/native/TopKImpl.h:44-88`), so the tie split follows
+  libstdc++'s heap-select / introselect order, ported faithfully in
+  `torch_cpu_bottomk_indices` (CORE-083 -> #1777). NaN values do not
+  panic (the topk comparator ranks NaN last for `largest=False`).
+  KNOWN DIVERGENCE #1908: the prune COUNT uses Rust `round`
+  (half-away-from-zero) where torch uses Python `round` (half-to-even).
+- REQ-2: `apply_2_4_mask(weights) -> Tensor<T>` — groups of 4 are formed
+  along the FINAL dimension only (groups never span row boundaries); per
+  group, keep the 2 largest-magnitude elements and zero the other 2.
+  Shapes whose final dimension is not a multiple of 4 (including
+  scalars) return `InvalidArgument`, matching the PyTorch oracle's
+  rejection (`torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0,
+  sparse_block_shape=(1,4), zeros_per_block=2)`; live torch
+  2.11.0+cu130: `AssertionError: mask shape (torch.Size([2, 8])) must
+  match x shape (torch.Size([2, 6]))`) — CORE-084 -> #1778. The kept
+  layout mirrors the 2:4 innermost-dim contract behind
+  `torch.sparse.SparseSemiStructuredTensor` / cuSPARSELt
+  (`aten/src/ATen/native/cuda/Sparse24.cu`).
+  KNOWN DIVERGENCE #1910: in-group magnitude ties keep different
+  members than the torch sparsifier (ferrotorch zeroes the two
+  lowest-index smallest; pinned in the conformance suite).
 - REQ-3: `sparsity_ratio(tensor) -> f64` — return the fraction of
   exact-zero elements. Used to measure post-pruning sparsity.
 - REQ-4: Sparsity argument validation — `magnitude_prune` rejects
-  `sparsity ∉ [0, 1)` with `InvalidArgument`. The exact closed-open
-  interval matches `prune.py`'s `amount` validation.
-- REQ-5: `requires_grad` propagation — the output preserves the
-  input's `requires_grad` flag so downstream backward passes can
-  still flow through (used by sparse-finetuning workflows).
+  `sparsity ∉ [0, 1)` with `InvalidArgument`.
+- REQ-5: Differentiable masking — both pruning functions return
+  `weights * mask` built by `apply_constant_mask` through
+  `grad_fns::arithmetic::mul`, attaching a `MulBackward` edge so
+  backward reaches the original parameter with `grad * mask` (exact
+  zeros at pruned slots), exactly like torch's
+  `weight = weight_orig * weight_mask` parametrization (CORE-082 ->
+  #1776). The multiplication also reproduces torch's value semantics at
+  pruned slots: `(-w) * 0.0 == -0.0` (sign preserved, #1909) and
+  `NaN * 0.0 == NaN`.
 
 ## Acceptance Criteria
 
 - [x] AC-1: `magnitude_prune([1,-4,2,-3], 0.5)` zeros the two
   smallest-magnitude entries and keeps `[-4, -3]`
-  (`pruning.rs:143-154`).
-- [x] AC-2: `magnitude_prune([1,2,3,4], 0.0)` returns the input
-  unchanged (`pruning.rs:157-162`).
+  (`test_magnitude_prune_50_percent`, `pruning.rs:413-427`).
+- [x] AC-2: `magnitude_prune([1,2,3,4], 0.0)` returns the input values
+  unchanged (`test_magnitude_prune_zero_sparsity`, `pruning.rs:450-456`).
 - [x] AC-3: `magnitude_prune(_, 1.0)` and `_, -0.1` return
-  `InvalidArgument` (`pruning.rs`).
+  `InvalidArgument` (`test_magnitude_prune_invalid_sparsity`, `pruning.rs:458-464`).
 - [x] AC-4: NaN inputs do not panic in `magnitude_prune` or
-  `apply_2_4_mask` (`pruning.rs:174-190`).
-- [x] AC-5: `apply_2_4_mask` keeps exactly 2 of every 4 contiguous
-  elements (`pruning.rs:200-218`).
-- [x] AC-6: `apply_2_4_mask` propagates `requires_grad`
-  (`pruning.rs:221-229`).
-- [x] AC-7: `sparsity_ratio` reports 0.5 for `[0, 1, 0, 2]`
-  (`pruning.rs:235-239`).
-- [x] AC-8: `cargo test -p ferrotorch-core --lib pruning` passes.
+  `apply_2_4_mask` (`pruning.rs:467-491`).
+- [x] AC-5: ties at the prune cut are split EXACTLY as live torch
+  (`[1,1,1,1] @ 0.25 -> [1,1,0,1]`, `@ 0.5 -> [1,1,0,0]`;
+  `test_magnitude_prune_ties_prune_exact_count`, `pruning.rs:429-448`, plus the conformance tie fixtures).
+- [x] AC-6: `apply_2_4_mask` keeps exactly 2 of every 4 elements along
+  the final dimension and never groups across rows
+  (`pruning.rs:493-565`).
+- [x] AC-7: `apply_2_4_mask` returns `InvalidArgument` for final dims
+  not divisible by 4 (`[2,6]`, `[6]`, scalar; `test_apply_2_4_mask_rejects_final_dim_not_multiple_of_4`, `pruning.rs:514-545`),
+  matching the torch sparsifier's rejection.
+- [x] AC-8: backward through either pruning function reaches the
+  ORIGINAL parameter with `grad * mask` — exact zeros at pruned slots
+  (conformance `*_backward_flows_masked_gradient_to_original_leaf`,
+  oracle: live torch `weight_orig.grad == [0, 20, 0, 40]`).
+- [x] AC-9: `sparsity_ratio` reports 0.5 for `[0, 1, 0, 2]`
+  (`test_sparsity_ratio`, `pruning.rs:581-585`).
+- [x] AC-10: `cargo test -p ferrotorch-core --lib pruning` passes.
 
 ## Architecture
 
-The file is ~120 production LOC. All three functions allocate a new
-`Vec<T>` for the output, wrap it in `TensorStorage::cpu`, and call
-`Tensor::from_storage`. NaN safety in the sort step uses
-`partial_cmp(_).unwrap_or(Ordering::Equal)` — the `unwrap_or` is
-intentional and matches the NaN-doesn't-panic contract documented in
-the test at `pruning.rs:174-179`.
+All functions consume `tensor.data()?` (CPU-domain; GPU tensors return
+`Err(GpuTensorNotAccessible)`, the PyTorch-parity policy pinned in
+`conformance_quantize_prune.rs` `gpu_tensor_returns_error_*`).
 
-- `magnitude_prune` (`pruning.rs:21-67`) — sort by absolute value, pick
-  the threshold at index `n_prune - 1`, set anything `|v| <= threshold`
-  to zero. The fast path for `n_prune == 0` returns a clone.
-- `apply_2_4_mask` (`pruning.rs:84-112`) — chunked iteration over the
-  data slice; per 4-element group, sort `(idx, |v|)` and zero the two
-  smallest-magnitude positions.
-- `sparsity_ratio` (`pruning.rs:115-122`) — count exact zeros, divide
-  by `numel`. Returns an `f64`.
+- `torch_cpu_bottomk_indices` (`pruning.rs:232`) — faithful port of the
+  selection order of torch CPU `topk(largest=False)`
+  (`aten/src/ATen/native/TopKImpl.h:44-88`): `heap_select`
+  (libstdc++ `__heap_select`, the set-defining half of
+  `std::partial_sort`) when `k * 64 <= n`, otherwise `nth_element`
+  (libstdc++ `__introselect`: median-of-3 quickselect, insertion-sort
+  tail, heap-select depth-limit fallback) at `k - 1`. Comparator is
+  `TopKImpl.h`'s `(!isnan(x) && isnan(y)) || x < y` — value-only, NaN
+  ranks last, never panics. Only SET membership of the first `k` slots
+  feeds the mask, so the final orderings (`sort_heap` / the `sorted`
+  re-sort) are omitted.
+- `magnitude_prune` (`pruning.rs:269`) — validate sparsity, compute
+  `n_prune`, build a 0/1 mask with zeros at the bottom-k indices, then
+  `apply_constant_mask`.
+- `apply_constant_mask` (`pruning.rs:302`) — wraps the mask in a
+  non-tracking CPU tensor and returns
+  `grad_fns::arithmetic::mul(weights, mask)`; `MulBackward` provides
+  the masked-gradient backward edge.
+- `apply_2_4_mask` (`pruning.rs:333`) — validate the final dimension
+  (`InvalidArgument` unless a multiple of 4), build the mask row by row
+  in 4-element groups (sort `(idx, |v|)` per group with
+  `partial_cmp(..).unwrap_or(Equal)` — the NaN-doesn't-panic contract),
+  then `apply_constant_mask`.
+- `sparsity_ratio` (`pruning.rs:385`) — count exact zeros, divide by
+  `numel`. Returns an `f64`. (`-0.0 == 0.0` counts as zero, matching
+  torch's `(t == 0)`.)
 
-Non-test production consumers: `pruning::apply_2_4_mask` is referenced
-by the sparse-tensor compress / decompress integration tests in
-`sparse.rs:3023-3027` which compare 2:4-mask output against a
-`SemiStructuredSparseTensor` round-trip. Top-level re-export at
-`lib.rs:178` lets downstream `ferrotorch-nn` callers reach these.
+Non-test production consumers: top-level re-export at `lib.rs:178`
+(`pub use pruning::{apply_2_4_mask, magnitude_prune, sparsity_ratio};`)
+for downstream `ferrotorch-nn` callers; `apply_2_4_mask` is
+cross-checked against the `SemiStructuredSparseTensor`
+compress/decompress round-trip in `sparse.rs`.
 
 ## Parity contract
 
 `parity_ops = []`. Pruning is a model-compression utility, not a
-parity-tracked numeric op. The byte-for-byte parity with PyTorch is
-achieved only for the determinism of the magnitude threshold (sort by
-absolute value, drop the smallest `k`); PyTorch's
-`l1_unstructured` uses the same algorithm but exposes a different API
-(it returns a mask + pruning hook chain). The numerical output for
-the same input + sparsity is identical.
+parity-tracked numeric op. Output parity with PyTorch is nevertheless
+bit-exact on the conformance fixtures (torch-oracle-generated,
+CORE-194 -> #1888): exact-count selection with torch's CPU topk tie
+order, sign-preserving `-0.0` at pruned negative slots, and the
+sparsifier's shape rejection. Remaining pinned divergences: #1908
+(prune-count rounding), #1910 (2:4 in-group tie selection).
 
 ## Verification
 
-- Unit tests at `pruning.rs:124-240` cover correctness for both
-  pruning functions, the NaN-no-panic property, `requires_grad`
-  propagation, and the sparsity-ratio computation.
-- The sparse-tensor cross-check at `sparse.rs:3011-3027` verifies that
-  `apply_2_4_mask` produces the same output as the
-  `SemiStructuredSparseTensor` compress-then-decompress round-trip.
+- Unit tests at `pruning.rs:395-586` cover exact-count tie behavior
+  (live-torch-quoted), final-dim grouping/rejection, NaN-no-panic,
+  `requires_grad` propagation, and the sparsity-ratio computation.
+- `conformance_quantize_prune.rs` asserts bit-exact parity against the
+  torch-oracle fixtures (`magnitude_prune_bit_exact_and_sparsity`,
+  `apply_2_4_mask_bit_exact_and_sparsity`), structured rejection of
+  torch-rejected shapes, and gradient FLOW to the original leaf
+  (`*_backward_flows_masked_gradient_to_original_leaf`, R-ORACLE-3).
+- The sparse-tensor cross-check in `sparse.rs`
+  (`semi24_compress_then_decompress_matches_apply_2_4_mask`) verifies
+  `apply_2_4_mask` against the compress-then-decompress round-trip.
 
 ```bash
 cargo test -p ferrotorch-core --lib pruning
+cargo test -p ferrotorch-core --test conformance_quantize_prune
 ```
 
-Expected: 8 tests pass.
+Expected: 11 lib tests + 31 conformance tests pass.
 
 ## REQ status table
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `magnitude_prune` at `ferrotorch-core/src/pruning.rs:21` mirrors `torch.nn.utils.prune.l1_unstructured` semantics (sort + threshold + zero); non-test consumer: re-exported at `ferrotorch-core/src/lib.rs:178` (`pub use pruning::{apply_2_4_mask, magnitude_prune, sparsity_ratio};`), reachable by downstream `ferrotorch-nn` callers. |
-| REQ-2 | SHIPPED | impl: `apply_2_4_mask` at `ferrotorch-core/src/pruning.rs:84` mirrors the 2:4 structured-sparsity contract behind `aten/src/ATen/native/cuda/Sparse24.cu`; non-test consumer: cross-checked from `ferrotorch-core/src/sparse.rs:3023` (semi-structured sparse decompress matches this mask) AND re-exported at `lib.rs:178`. |
-| REQ-3 | SHIPPED | impl: `sparsity_ratio` at `ferrotorch-core/src/pruning.rs:115`; non-test consumer: re-exported at `ferrotorch-core/src/lib.rs:178`; used by downstream `ferrotorch-nn` model-statistics utilities. Per S5 the pub API surface is grandfathered. |
-| REQ-4 | SHIPPED | impl: `magnitude_prune`'s validation guard at `ferrotorch-core/src/pruning.rs:25-29` — `if !(0.0..1.0).contains(&sparsity) { return Err(InvalidArgument) }`; non-test consumer: same as REQ-1 (the validation is part of the function contract). |
-| REQ-5 | SHIPPED | impl: `Tensor::from_storage(..., weights.requires_grad())` propagation at `ferrotorch-core/src/pruning.rs:63-66` and `:107-111`; non-test consumer: any sparse-finetune workflow that calls `apply_2_4_mask` on a learnable parameter (the `requires_grad` flag survives the prune, allowing backward to flow through the surviving weights). Test pin at `pruning.rs:221-229`. |
+| REQ-1 | SHIPPED | impl: `magnitude_prune` at `ferrotorch-core/src/pruning.rs:269` — exact-count bottom-k via `torch_cpu_bottomk_indices` (`pruning.rs:232`, faithful `TopKImpl.h` selection-order port; CORE-083 -> #1777); non-test consumer: re-exported at `ferrotorch-core/src/lib.rs:178`, reachable by downstream `ferrotorch-nn` callers. |
+| REQ-2 | SHIPPED | impl: `apply_2_4_mask` at `ferrotorch-core/src/pruning.rs:333` — final-dim grouping with structured `InvalidArgument` for final dims not divisible by 4 (CORE-084 -> #1778), mirroring the torch sparsifier and the 2:4 innermost-dim layout of `aten/src/ATen/native/cuda/Sparse24.cu`; non-test consumer: cross-checked from `ferrotorch-core/src/sparse.rs` AND re-exported at `lib.rs:178`. |
+| REQ-3 | SHIPPED | impl: `sparsity_ratio` at `ferrotorch-core/src/pruning.rs:385`; non-test consumer: re-exported at `ferrotorch-core/src/lib.rs:178`; used by downstream `ferrotorch-nn` model-statistics utilities. Per S5 the pub API surface is grandfathered. |
+| REQ-4 | SHIPPED | impl: `magnitude_prune`'s validation guard at `ferrotorch-core/src/pruning.rs:273-277` — `if !(0.0..1.0).contains(&sparsity) { return Err(InvalidArgument) }`; non-test consumer: same as REQ-1 (the validation is part of the function contract). |
+| REQ-5 | SHIPPED | impl: `apply_constant_mask` at `ferrotorch-core/src/pruning.rs:302` returns `grad_fns::arithmetic::mul(weights, mask)` — a real `MulBackward` edge, so backward delivers `grad * mask` to the original parameter (CORE-082 -> #1776; replaces the old disconnected-leaf `requires_grad` flag copy); non-test consumer: any sparse-finetune workflow calling either pruning fn on a learnable parameter. Gradient-flow pins: conformance `*_backward_flows_masked_gradient_to_original_leaf`. |

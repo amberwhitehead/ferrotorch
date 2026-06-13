@@ -6,7 +6,7 @@
 //! the input is `is_cuda()` (real PTX kernel; the result stays GPU-resident —
 //! no `.to(Cpu)`, no host readback of the DATA) and on CPU otherwise via a
 //! reference loop matching the same PyTorch semantics the GPU kernels
-//! implement. One deliberate, documented exception (CORE-111 / #1805):
+//! implement. Deliberate, documented exception: CORE-111 / #1805:
 //! `index_select` / `gather` copy the INDEX buffer back to host before kernel
 //! launch to validate every index value — the PTX kernels compute unchecked
 //! addresses, so out-of-bounds values must be rejected with `InvalidArgument`
@@ -195,27 +195,65 @@ fn index_select_ref<V: Copy>(
     out
 }
 
+#[inline]
+fn flat_index(coords: &[usize], shape: &[usize]) -> usize {
+    let mut idx = 0usize;
+    let mut stride = 1usize;
+    for d in (0..shape.len()).rev() {
+        idx += coords[d] * stride;
+        stride *= shape[d];
+    }
+    idx
+}
+
+#[inline]
+fn increment_coords(coords: &mut [usize], shape: &[usize]) {
+    for d in (0..shape.len()).rev() {
+        coords[d] += 1;
+        if coords[d] < shape[d] {
+            return;
+        }
+        coords[d] = 0;
+    }
+}
+
 fn gather_ref<V: Copy>(
     data: &[V],
     indices: &[i64],
-    outer: usize,
-    in_dim: usize,
-    out_dim: usize,
-    inner: usize,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
     zero: V,
 ) -> Vec<V> {
-    let mut out = vec![zero; outer * out_dim * inner];
-    for o in 0..outer {
-        for i in 0..out_dim {
-            for k in 0..inner {
-                let t = (o * out_dim + i) * inner + k;
-                let sel = indices[t] as usize;
-                let src = o * in_dim * inner + sel * inner + k;
-                out[t] = data[src];
-            }
+    let out_numel = indices.len();
+    let mut out = vec![zero; out_numel];
+    if out_numel == 0 {
+        return out;
+    }
+
+    let mut coords = vec![0usize; index_shape.len()];
+    for t in 0..out_numel {
+        let mut src_coords = coords.clone();
+        src_coords[dim] = indices[t] as usize;
+        out[t] = data[flat_index(&src_coords, input_shape)];
+
+        if t + 1 < out_numel {
+            increment_coords(&mut coords, index_shape);
         }
     }
     out
+}
+
+fn gather_matches_dim_kernel_layout(
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+) -> bool {
+    input_shape
+        .iter()
+        .zip(index_shape.iter())
+        .enumerate()
+        .all(|(axis, (&input, &index))| axis == dim || input == index)
 }
 
 /// Read an `IntTensor<I>` index as host `Vec<i64>`. The CPU references
@@ -379,14 +417,24 @@ impl<T: Float> Tensor<T> {
             check_index_bounds(&idx_host, d, in_dim, "gather")?;
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let h = backend.gather_intidx(
-                input.gpu_handle()?,
-                index.gpu_handle()?,
-                outer,
-                in_dim,
-                out_dim,
-                inner,
-            )?;
+            let h = if gather_matches_dim_kernel_layout(input.shape(), index.shape(), d) {
+                backend.gather_intidx(
+                    input.gpu_handle()?,
+                    index.gpu_handle()?,
+                    outer,
+                    in_dim,
+                    out_dim,
+                    inner,
+                )?
+            } else {
+                backend.gather_intidx_nd(
+                    input.gpu_handle()?,
+                    index.gpu_handle()?,
+                    input.shape(),
+                    index.shape(),
+                    d,
+                )?
+            };
             Tensor::from_storage(TensorStorage::gpu(h), out_shape, false)
         } else {
             let data = input.data_vec()?;
@@ -395,10 +443,9 @@ impl<T: Float> Tensor<T> {
             let out = gather_ref(
                 &data,
                 &idx,
-                outer,
-                in_dim,
-                out_dim,
-                inner,
+                input.shape(),
+                index.shape(),
+                d,
                 <T as num_traits::Zero>::zero(),
             );
             Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)
@@ -538,21 +585,31 @@ impl<I: IntElement> IntTensor<I> {
             check_index_bounds(&idx_host, d, in_dim, "gather")?;
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let h = backend.gather_intidx(
-                self.gpu_handle()?,
-                index.gpu_handle()?,
-                outer,
-                in_dim,
-                out_dim,
-                inner,
-            )?;
+            let h = if gather_matches_dim_kernel_layout(self.shape(), index.shape(), d) {
+                backend.gather_intidx(
+                    self.gpu_handle()?,
+                    index.gpu_handle()?,
+                    outer,
+                    in_dim,
+                    out_dim,
+                    inner,
+                )?
+            } else {
+                backend.gather_intidx_nd(
+                    self.gpu_handle()?,
+                    index.gpu_handle()?,
+                    self.shape(),
+                    index.shape(),
+                    d,
+                )?
+            };
             Ok(IntTensor::from_gpu_handle(h, out_shape))
         } else {
             let data = self.data()?;
             let idx = index_as_i64(&index.to(Device::Cpu)?)?;
             check_index_bounds(&idx, d, in_dim, "gather")?;
             let zero = I::try_from_i64(0).expect("0 is in range for i32/i64");
-            let out = gather_ref(data, &idx, outer, in_dim, out_dim, inner, zero);
+            let out = gather_ref(data, &idx, self.shape(), index.shape(), d, zero);
             IntTensor::<I>::from_vec(out, out_shape)
         }
     }

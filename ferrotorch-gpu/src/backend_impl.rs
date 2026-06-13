@@ -584,6 +584,86 @@ impl CudaBackendImpl {
         }
     }
 
+    fn gather_nd_metadata(
+        src: &GpuBufferHandle,
+        index: &GpuBufferHandle,
+        input_shape: &[usize],
+        index_shape: &[usize],
+        dim: usize,
+    ) -> FerrotorchResult<(Vec<u32>, Vec<u32>)> {
+        if input_shape.len() != index_shape.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "gather_intidx_nd: rank mismatch input rank {} index rank {}",
+                    input_shape.len(),
+                    index_shape.len()
+                ),
+            });
+        }
+        if dim >= input_shape.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "gather_intidx_nd: dim {dim} out of range for rank {}",
+                    input_shape.len()
+                ),
+            });
+        }
+        let input_numel = input_shape.iter().try_fold(1usize, |acc, &d| {
+            acc.checked_mul(d).ok_or(FerrotorchError::InvalidArgument {
+                message: "gather_intidx_nd: input shape product overflow".to_string(),
+            })
+        })?;
+        let index_numel = index_shape.iter().try_fold(1usize, |acc, &d| {
+            acc.checked_mul(d).ok_or(FerrotorchError::InvalidArgument {
+                message: "gather_intidx_nd: index shape product overflow".to_string(),
+            })
+        })?;
+        if input_numel != src.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "gather_intidx_nd: input shape product {input_numel} != buffer len {}",
+                    src.len()
+                ),
+            });
+        }
+        if index_numel != index.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "gather_intidx_nd: index shape product {index_numel} != buffer len {}",
+                    index.len()
+                ),
+            });
+        }
+
+        let mut input_strides = vec![0u32; input_shape.len()];
+        let mut stride = 1usize;
+        for axis in (0..input_shape.len()).rev() {
+            input_strides[axis] =
+                u32::try_from(stride).map_err(|_| FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "gather_intidx_nd: input stride {stride} exceeds u32 kernel limit"
+                    ),
+                })?;
+            stride =
+                stride
+                    .checked_mul(input_shape[axis])
+                    .ok_or(FerrotorchError::InvalidArgument {
+                        message: "gather_intidx_nd: input stride overflow".to_string(),
+                    })?;
+        }
+        let index_dims: Vec<u32> = index_shape
+            .iter()
+            .map(|&d| {
+                u32::try_from(d).map_err(|_| FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "gather_intidx_nd: index dimension {d} exceeds u32 kernel limit"
+                    ),
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok((input_strides, index_dims))
+    }
+
     /// Convert a [`crate::error::GpuError`] into a [`FerrotorchError`].
     fn map_gpu_err(e: crate::error::GpuError) -> FerrotorchError {
         FerrotorchError::InvalidArgument {
@@ -4823,6 +4903,24 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(buf, dev.ordinal()))
     }
 
+    fn rand_uniform_f64(&self, numel: usize) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.default_device()?;
+        let buf = crate::rng::gpu_philox_uniform_f64(numel, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(buf, dev.ordinal()))
+    }
+
+    fn rand_uniform_f16(&self, numel: usize) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.default_device()?;
+        let buf = crate::rng::gpu_philox_uniform_f16(numel, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(buf, dev.ordinal()))
+    }
+
+    fn rand_uniform_bf16(&self, numel: usize) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.default_device()?;
+        let buf = crate::rng::gpu_philox_uniform_bf16(numel, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(buf, dev.ordinal()))
+    }
+
     fn randn_normal_f32(&self, numel: usize) -> FerrotorchResult<GpuBufferHandle> {
         // f32 standard-normal counterpart of `rand_uniform_f32`, via the
         // Box-Muller PHILOX_NORMAL_PTX kernel. Mirrors
@@ -4830,6 +4928,24 @@ impl GpuBackend for CudaBackendImpl {
         let dev = self.default_device()?;
         let buf = crate::rng::gpu_philox_normal(numel, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(buf, dev.ordinal()))
+    }
+
+    fn randn_normal_f64(&self, numel: usize) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.default_device()?;
+        let buf = crate::rng::gpu_philox_normal_f64(numel, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(buf, dev.ordinal()))
+    }
+
+    fn randn_normal_f16(&self, numel: usize) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.default_device()?;
+        let buf = crate::rng::gpu_philox_normal_f16(numel, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(buf, dev.ordinal()))
+    }
+
+    fn randn_normal_bf16(&self, numel: usize) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.default_device()?;
+        let buf = crate::rng::gpu_philox_normal_bf16(numel, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(buf, dev.ordinal()))
     }
 
     fn manual_seed_gpu(&self, seed: u64) -> FerrotorchResult<()> {
@@ -7491,6 +7607,97 @@ impl GpuBackend for CudaBackendImpl {
         inner: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
         self.gather_or_select(src, index, outer, in_dim, out_dim, inner, true)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn gather_intidx_nd(
+        &self,
+        src: &GpuBufferHandle,
+        index: &GpuBufferHandle,
+        input_shape: &[usize],
+        index_shape: &[usize],
+        dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        use crate::gather_int as gi;
+        let dev = self.device(src.device_ordinal())?;
+        let ord = src.device_ordinal();
+        match index.dtype() {
+            DType::I32 | DType::I64 => {}
+            other => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("gather_intidx_nd: index dtype must be I32/I64, got {other}"),
+                });
+            }
+        }
+        let (input_strides, index_dims) =
+            Self::gather_nd_metadata(src, index, input_shape, index_shape, dim)?;
+        let i32idx = index.dtype() == DType::I32;
+        macro_rules! run {
+            ($val:expr, $g32:path, $g64:path, $wrap:expr) => {{
+                let r = if i32idx {
+                    $g32(
+                        $val,
+                        Self::unwrap_buffer_i32(index)?.inner(),
+                        &input_strides,
+                        &index_dims,
+                        dim,
+                        dev,
+                    )
+                } else {
+                    $g64(
+                        $val,
+                        Self::unwrap_buffer_i64(index)?.inner(),
+                        &input_strides,
+                        &index_dims,
+                        dim,
+                        dev,
+                    )
+                }
+                .map_err(Self::map_gpu_err)?;
+                Ok($wrap(r, ord))
+            }};
+        }
+        match src.dtype() {
+            DType::F32 => run!(
+                Self::unwrap_buffer(src)?.inner(),
+                gi::gather_nd_f32_i32,
+                gi::gather_nd_f32_i64,
+                Self::wrap_slice_f32
+            ),
+            DType::F64 => run!(
+                Self::unwrap_buffer_f64(src)?.inner(),
+                gi::gather_nd_f64_i32,
+                gi::gather_nd_f64_i64,
+                Self::wrap_slice_f64
+            ),
+            DType::I32 => run!(
+                Self::unwrap_buffer_i32(src)?.inner(),
+                gi::gather_nd_i32_i32,
+                gi::gather_nd_i32_i64,
+                Self::wrap_slice_i32
+            ),
+            DType::I64 => run!(
+                Self::unwrap_buffer_i64(src)?.inner(),
+                gi::gather_nd_i64_i32,
+                gi::gather_nd_i64_i64,
+                Self::wrap_slice_i64
+            ),
+            DType::F16 => run!(
+                Self::unwrap_buffer_f16(src)?,
+                gi::gather_nd_u16_i32,
+                gi::gather_nd_u16_i64,
+                Self::wrap_buffer_f16
+            ),
+            DType::BF16 => run!(
+                Self::unwrap_buffer_bf16(src)?,
+                gi::gather_nd_u16_i32,
+                gi::gather_nd_u16_i64,
+                Self::wrap_buffer_bf16
+            ),
+            other => Err(FerrotorchError::InvalidArgument {
+                message: format!("gather_intidx_nd: unsupported value dtype {other}"),
+            }),
+        }
     }
 
     // -- dim-aware gather / scatter family (#1545 / sub #1535) ----------------

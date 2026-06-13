@@ -54,13 +54,14 @@ allocation-free meta-device tensors for shape inference (CL-395). The
   (`test_full_meta_records_value_and_discriminates_by_fill`).
 - REQ-9: `rand_on_device(shape, device)` / `randn_on_device(shape,
   device)` — device-aware random fills (#1682). For `Device::Cuda` +
-  f32 the values are generated DIRECTLY on the GPU via the Philox
-  uniform / normal kernels (no CPU generate-then-upload), mirroring
-  `torch.rand(size, device='cuda')` = `at::empty(size,
-  options).uniform_(0, 1)` (`TensorFactories.cpp:1075-1076`). CPU,
-  f64-on-CUDA and Meta paths fall back to the CPU generator then
-  `.to(device)` (the Philox kernel is f32-only). Reproducible after
-  `manual_seed` (which now seeds the GPU generator too).
+  f32/f64/f16/bf16 the values are generated through dtype-specific
+  GPU backend RNG slots and returned as CUDA-resident tensors (no CPU
+  generate-then-upload), mirroring `torch.rand(size, device='cuda')`
+  = `at::empty(size, options).uniform_(0, 1)`
+  (`TensorFactories.cpp:1075-1076`) and `torch.randn(..., device='cuda')`
+  = `at::empty(...).normal_(0, 1)` (`TensorFactories.cpp:1379`).
+  CPU and Meta paths keep the CPU generator behaviour. Reproducible
+  after `manual_seed` (which now seeds the GPU generator too).
 
 ## Acceptance Criteria
 

@@ -81,17 +81,22 @@
 //! ferrotorch's CURRENT observed behavior with the tracking issue number
 //! and keeps the torch value in the fixture/comment. Each pin is written to
 //! FAIL when the divergence is fixed, so it retires loudly:
-//!   - #1777 (CORE-083): ties at the prune threshold are over-pruned.
-//!   - #1778 (CORE-084): 2:4 mask accepts shapes torch rejects (trailing
-//!     remainder; flat grouping across row boundaries).
 //!   - #1906: `compute_scale_zp` eps floor on range (all-zero scale) and
 //!     zero-point rounding at half-boundaries.
 //!   - #1907: `QParams::symmetric` denominator (qmax vs (qmax-qmin)/2).
 //!   - #1908: prune-count rounding (half-away vs Python round-half-even).
-//!   - #1909: pruned negative slots are +0.0; torch mask-multiply gives -0.0.
 //!   - #1910: 2:4 in-group tie selection differs from the torch sparsifier.
 //!   - #1911: quantize codes at half-step boundaries (divide + round-half-
 //!     away vs torch inv_scale multiply + round-half-even).
+//!
+//! Retired pins (now live assertions):
+//!   - #1777 (CORE-083): magnitude_prune prunes EXACTLY n via torch CPU
+//!     topk selection order, ties included.
+//!   - #1778 (CORE-084): apply_2_4_mask groups along the final dimension
+//!     and rejects (structured `InvalidArgument`) shapes whose final dim
+//!     is not a multiple of 4, matching the torch sparsifier's rejection.
+//!   - #1909: pruning is a real mask multiplication (CORE-082 -> #1776),
+//!     so pruned negative slots carry torch's -0.0 sign bit.
 //!
 //! GPU note (per the dispatch's most-likely-failure-mode):
 //! `quantize`, `dequantize`, `quantized_matmul`, `magnitude_prune` and
@@ -1089,14 +1094,11 @@ fn magnitude_prune_bit_exact_and_sparsity() {
         // The fixture `pruned` field holds the torch
         // `prune.l1_unstructured` truth; each pin FAILS (retire) when the
         // referenced issue is fixed.
+        // #1777 (CORE-083) pins RETIRED: ties at the prune threshold now
+        // follow torch's `topk(|w|, k, largest=False)` selection exactly
+        // (tags tie_all_equal / tie_threshold_partial / tie_multiway are
+        // live bit-exact assertions below).
         let pinned: Option<(Vec<f32>, &str)> = match f.tag.as_deref() {
-            // #1777 (CORE-083): ties at the threshold are ALL pruned.
-            // torch: [1.0, 1.0, 0.0, 0.0] (prunes exactly 2 of the 4 ties).
-            Some("tie_all_equal") => Some((vec![0.0, 0.0, 0.0, 0.0], "#1777")),
-            // torch: [0.0, 0.0, 2.0, 3.0] (only one of the |2.0| ties goes).
-            Some("tie_threshold_partial") => Some((vec![0.0, 0.0, 0.0, 3.0], "#1777")),
-            // torch: [0.0, -0.0, 0.0, 5.0, -0.0, 7.0] (prunes exactly 3).
-            Some("tie_multiway") => Some((vec![0.0, 0.0, 0.0, 5.0, 0.0, 7.0], "#1777")),
             // #1908: n_prune = round(0.125 * 4) — Rust half-away gives 1,
             // torch (Python round-half-even) gives 0. torch: [1, 2, 3, 4].
             Some("count_round_half") => Some((vec![0.0, 2.0, 3.0, 4.0], "#1908")),
@@ -1121,28 +1123,18 @@ fn magnitude_prune_bit_exact_and_sparsity() {
             continue;
         }
 
-        // Bit-exact: for kept elements the bit pattern equals the input;
-        // for pruned elements torch's mask-multiply yields ±0.0 with the
-        // original sign. The test data is exactly representable in f32.
+        // Bit-exact INCLUDING the sign of pruned slots: ferrotorch now
+        // applies the same `weight_orig * mask` multiplication as torch's
+        // pruning parametrization, so pruned negative weights yield -0.0
+        // exactly like the oracle (#1909 pin retired with the CORE-082
+        // mask-multiplication fix). The test data is exactly representable
+        // in f32.
         for (i, (&a, &e)) in actual.iter().zip(expected_f32.iter()).enumerate() {
-            if e == 0.0 && e.is_sign_negative() {
-                // KNOWN DIVERGENCE #1909: torch's `weight_orig * mask`
-                // preserves the sign bit (-0.0) of pruned negative weights;
-                // ferrotorch writes +0.0. FAILS (retire) when #1909 is
-                // fixed and ferrotorch emits -0.0 here too.
-                assert_eq!(
-                    a.to_bits(),
-                    0_f32.to_bits(),
-                    "{label}: index {i} pruned slot is no longer +0.0 \
-                     (torch: -0.0; #1909) — if it is now -0.0, retire this pin"
-                );
-            } else {
-                assert_eq!(
-                    a.to_bits(),
-                    e.to_bits(),
-                    "{label}: index {i} bit pattern (actual={a}, expected={e})"
-                );
-            }
+            assert_eq!(
+                a.to_bits(),
+                e.to_bits(),
+                "{label}: index {i} bit pattern (actual={a}, expected={e})"
+            );
         }
 
         // Zero count: single contract — the torch oracle's count
@@ -1178,48 +1170,37 @@ fn apply_2_4_mask_bit_exact_and_sparsity() {
         let shape = f.shape.as_ref().expect("shape");
         let x_data = f.x_data.as_ref().expect("x_data").as_slice();
 
+        // CORE-084 (#1778) pins RETIRED: torch's 2:4 sparsifier REJECTS
+        // shapes whose rows are not a multiple of 4 wide (the fixture
+        // records the torch rejection in `torch_error` and carries no
+        // `masked` expectation; live torch 2.11.0+cu130:
+        // `AssertionError: mask shape (torch.Size([2, 8])) must match x
+        // shape (torch.Size([2, 6]))`). ferrotorch now matches with a
+        // structured `InvalidArgument` instead of silently flat-grouping
+        // across row boundaries.
+        if let Some(torch_error) = &f.torch_error {
+            assert!(
+                f.masked.is_none(),
+                "{label}: fixture carries both torch_error and masked"
+            );
+            let res = apply_2_4_mask(&make_cpu_f32(x_data, shape, false));
+            assert!(
+                matches!(
+                    &res,
+                    Err(ferrotorch_core::FerrotorchError::InvalidArgument { .. })
+                ),
+                "{label}: torch rejects this shape ({torch_error}); ferrotorch \
+                 must return Err(InvalidArgument), got {res:?}"
+            );
+            continue;
+        }
+
         let t = make_cpu_f32(x_data, shape, false);
         let masked = apply_2_4_mask(&t).expect("apply_2_4_mask");
 
         // Shape preservation.
         assert_eq!(masked.shape(), shape.as_slice(), "{label}: shape");
         let actual = masked.data().expect("masked data").to_vec();
-
-        // KNOWN DIVERGENCE #1778 (CORE-084): torch's 2:4 sparsifier
-        // REJECTS shapes whose rows are not a multiple of 4 wide (the
-        // fixture records the torch error in `torch_error` and carries no
-        // `masked` expectation); ferrotorch silently ACCEPTS them, leaving
-        // a flat trailing remainder unchanged and flat-grouping ACROSS row
-        // boundaries. Pinned to the observed ferrotorch output; FAILS
-        // (retire) when #1778 lands an explicit error or per-row grouping.
-        if let Some(torch_error) = &f.torch_error {
-            assert!(
-                f.masked.is_none(),
-                "{label}: fixture carries both torch_error and masked"
-            );
-            let pinned: Vec<f32> = match f.tag.as_deref() {
-                // torch: AssertionError (mask [1,8] vs x [1,6]); ferrotorch
-                // masks the first group and leaves the 2-element tail.
-                Some("trailing") => vec![0.0, -4.0, 0.0, -3.0, 0.5, 0.1],
-                // torch: AssertionError (mask [2,8] vs x [2,6]); ferrotorch's
-                // second flat group [5,6,6,5] spans row 0 cols 4..6 AND row 1
-                // cols 0..2.
-                Some("rows_cross_2x6") => {
-                    vec![0.0, 0.0, 3.0, 4.0, 0.0, 6.0, 6.0, 0.0, 4.0, 3.0, 0.0, 0.0]
-                }
-                other => panic!("{label}: unpinned torch_error tag {other:?} ({torch_error})"),
-            };
-            for (i, (&a, &p)) in actual.iter().zip(pinned.iter()).enumerate() {
-                assert_eq!(
-                    a.to_bits(),
-                    p.to_bits(),
-                    "{label}: index {i} no longer matches the pinned divergent \
-                     value (pinned={p}, actual={a}; torch rejects this shape: \
-                     {torch_error}; #1778)"
-                );
-            }
-            continue;
-        }
 
         let expected_masked = f.masked.as_ref().expect("masked").as_slice();
         let expected_zeros = f.n_zeros.expect("n_zeros");
@@ -1236,8 +1217,11 @@ fn apply_2_4_mask_bit_exact_and_sparsity() {
             Some("tie_all_equal") => Some(vec![0.0, 0.0, 2.0, 2.0]),
             // torch: [0.0, 3.0, 0.0, 3.0] (keeps idx {1,3}).
             Some("tie_three_equal") => Some(vec![0.0, 0.0, 3.0, 3.0]),
-            // torch: [-2.0, 2.0, -0.0, 0.0] (keeps idx {0,1}).
-            Some("tie_neg_pair") => Some(vec![0.0, 0.0, -2.0, 2.0]),
+            // torch: [-2.0, 2.0, -0.0, 0.0] (keeps idx {0,1}); ferrotorch
+            // zeroes idx {0,1} — the pruned -2.0 at idx 0 yields -0.0 via
+            // the mask multiply (#1909 mechanism, fixed under #1776; the
+            // remaining divergence is WHICH ties are kept: #1910).
+            Some("tie_neg_pair") => Some(vec![-0.0, 0.0, -2.0, 2.0]),
             _ => None,
         };
         if let Some(pinned_vals) = pinned {
@@ -1258,24 +1242,15 @@ fn apply_2_4_mask_bit_exact_and_sparsity() {
             continue;
         }
 
+        // Bit-exact INCLUDING the sign of pruned slots (#1909 pin retired
+        // with the CORE-082 mask-multiplication fix; see
+        // magnitude_prune_bit_exact_and_sparsity).
         for (i, (&a, &e)) in actual.iter().zip(expected_f32.iter()).enumerate() {
-            if e == 0.0 && e.is_sign_negative() {
-                // KNOWN DIVERGENCE #1909: torch's mask-multiply preserves
-                // the sign bit (-0.0) of pruned negative weights; ferrotorch
-                // writes +0.0. FAILS (retire) when #1909 is fixed.
-                assert_eq!(
-                    a.to_bits(),
-                    0_f32.to_bits(),
-                    "{label}: index {i} pruned slot is no longer +0.0 \
-                     (torch: -0.0; #1909) — if it is now -0.0, retire this pin"
-                );
-            } else {
-                assert_eq!(
-                    a.to_bits(),
-                    e.to_bits(),
-                    "{label}: index {i} bit pattern (actual={a}, expected={e})"
-                );
-            }
+            assert_eq!(
+                a.to_bits(),
+                e.to_bits(),
+                "{label}: index {i} bit pattern (actual={a}, expected={e})"
+            );
         }
 
         let zeros = actual.iter().filter(|&&v| v == 0.0).count();
@@ -1328,6 +1303,81 @@ fn pruning_preserves_requires_grad() {
     assert!(
         masked.requires_grad(),
         "apply_2_4_mask must preserve requires_grad"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CORE-082 (#1776): pruning is a differentiable mask multiplication — the
+// backward pass reaches the ORIGINAL parameter with torch's masked gradient
+// (exact zeros at pruned slots), never a fresh disconnected leaf
+// (R-ORACLE-3: assert gradient FLOW, not flags).
+// ---------------------------------------------------------------------------
+
+#[test]
+// reason: the masked gradient is grad_upstream * {0.0, 1.0}; both factors
+// and products are exactly representable, so equality is the right check.
+#[allow(clippy::float_cmp)]
+fn magnitude_prune_backward_flows_masked_gradient_to_original_leaf() {
+    // Live torch 2.11.0+cu130 oracle (R-ORACLE-1b):
+    //   >>> m.weight = nn.Parameter(torch.tensor([1., -4., 2., -3.]))
+    //   >>> prune.l1_unstructured(m, "weight", 0.5)
+    //   >>> (m.weight * torch.tensor([10., 20., 30., 40.])).sum().backward()
+    //   >>> m.weight_orig.grad
+    //   tensor([ 0., 20.,  0., 40.])
+    let x = make_cpu_f32(&[1.0, -4.0, 2.0, -3.0], &[4], true);
+    let pruned = magnitude_prune(&x, 0.5).expect("magnitude_prune");
+
+    let coeffs = make_cpu_f32(&[10.0, 20.0, 30.0, 40.0], &[4], false);
+    let prod = ferrotorch_core::grad_fns::arithmetic::mul(&pruned, &coeffs).expect("mul");
+    let loss = ferrotorch_core::grad_fns::reduction::sum(&prod).expect("sum");
+    loss.backward().expect("backward");
+
+    let grad = x
+        .grad()
+        .expect("grad access")
+        .expect("ORIGINAL leaf must receive a gradient (torch: weight_orig.grad)");
+    let g = grad.data().expect("grad data").to_vec();
+    assert_eq!(
+        g,
+        vec![0.0, 20.0, 0.0, 40.0],
+        "masked gradient on the original parameter (torch: [0, 20, 0, 40])"
+    );
+    // Pruned slots carry EXACT zeros (grad * 0.0-mask).
+    assert_eq!(g[0].to_bits(), 0.0_f32.to_bits());
+    assert_eq!(g[2].to_bits(), 0.0_f32.to_bits());
+}
+
+#[test]
+// reason: see magnitude_prune_backward_flows_masked_gradient_to_original_leaf.
+#[allow(clippy::float_cmp)]
+fn apply_2_4_mask_backward_flows_masked_gradient_to_original_leaf() {
+    // Same masked-gradient contract as l1_unstructured's mask
+    // parametrization (weight = weight_orig * mask => d/d weight_orig =
+    // grad * mask): pruned slots get exact-zero gradient, kept slots pass
+    // the upstream gradient through.
+    // ferrotorch keeps idx {1,3} in group 0 and idx {2,3} in group 1
+    // (in-group tie policy is #1910; this case is tie-free).
+    let x = make_cpu_f32(&[1.0, -4.0, 2.0, -3.0, 0.5, 0.1, 0.9, 0.8], &[8], true);
+    let masked = apply_2_4_mask(&x).expect("apply_2_4_mask");
+
+    let coeffs = make_cpu_f32(
+        &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0],
+        &[8],
+        false,
+    );
+    let prod = ferrotorch_core::grad_fns::arithmetic::mul(&masked, &coeffs).expect("mul");
+    let loss = ferrotorch_core::grad_fns::reduction::sum(&prod).expect("sum");
+    loss.backward().expect("backward");
+
+    let grad = x
+        .grad()
+        .expect("grad access")
+        .expect("ORIGINAL leaf must receive a gradient through the 2:4 mask");
+    let g = grad.data().expect("grad data").to_vec();
+    assert_eq!(
+        g,
+        vec![0.0, 20.0, 0.0, 40.0, 0.0, 0.0, 70.0, 80.0],
+        "masked gradient on the original parameter"
     );
 }
 

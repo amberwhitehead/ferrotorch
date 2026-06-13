@@ -56,18 +56,23 @@ binding role — the file is the "what does CUDA do when you call
   `GpuBackend` trait (348 methods covering: elementwise binary /
   unary / broadcast / reductions / indexing / norms / convs /
   matmul / scan / strided ops / RNG / sparse / pooling / activations
-  / dtype-conversion / casts / inplace / autograd-bw helpers). Each
-  method delegates to the appropriate `crate::kernels::*` or
-  sibling-module function.
+  / dtype-conversion / casts / inplace / autograd-bw helpers). The
+  RNG factory overrides include f32/f64/f16/bf16 uniform and normal
+  slots and return correctly tagged `GpuBufferHandle`s without host
+  staging. Each method delegates to the appropriate `crate::kernels::*`
+  or sibling-module function.
 - REQ-7: Per-op error mapping via `fn map_gpu_err(e:
   GpuError) -> FerrotorchError` — converts the GPU-specific error
   taxonomy (`PtxCompileFailed`, `Driver`, `ShapeMismatch`,
   `DeviceMismatch`, etc.) into the public `FerrotorchError` shape
   that ferrotorch-core surfaces to user code.
 - REQ-8: `gather_or_select` boundary method — unified
-  `index_select` / `gather` dispatcher (`is_gather: bool` toggle)
-  that handles the 5 value dtypes × 2 index dtypes × 2 ops matrix
-  via the `crate::gather_int as gi` sibling module.
+  `index_select` / compact-layout `gather` dispatcher (`is_gather:
+  bool` toggle) that handles the 5 value dtypes × 2 index dtypes × 2
+  ops matrix via the `crate::gather_int as gi` sibling module.
+  `gather_intidx_nd` handles the rank-aware gather case where
+  `index_shape`/output shape is smaller than `input_shape` on
+  non-gather axes.
 
 ## Acceptance Criteria
 
@@ -220,13 +225,21 @@ through here, so a single change to the error surface is one site.
 ### `gather_or_select` (REQ-8)
 
 Lines 442-568 implement the unified dispatcher for `index_select`
-and `gather`. The boundary takes a single `is_gather: bool`
-toggle and `match`es on `src.dtype()` × `index.dtype()` to pick
-the right `gi::gather_<vty>_<ity>` or `gi::isel_<vty>_<ity>`
-function from `crate::gather_int`. The `run!` declarative macro
-expands the 4-arm `(is_gather, i32idx) ∈ {(true, true), (true, false),
-(false, true), (false, false)}` shape, then wraps the result via the
-appropriate `wrap_slice_*` / `wrap_buffer_*` helper.
+and compact-layout `gather`. The boundary takes a single
+`is_gather: bool` toggle and `match`es on `src.dtype()` ×
+`index.dtype()` to pick the right `gi::gather_<vty>_<ity>` or
+`gi::isel_<vty>_<ity>` function from `crate::gather_int`. The `run!`
+declarative macro expands the 4-arm `(is_gather, i32idx) ∈ {(true,
+true), (true, false), (false, true), (false, false)}` shape, then
+wraps the result via the appropriate `wrap_slice_*` /
+`wrap_buffer_*` helper.
+
+`gather_intidx_nd` is the rank-aware companion. It validates the
+shape products against the type-erased buffer lengths, computes
+C-order input strides, uploads the small stride/shape metadata, and
+dispatches the 10 value/index dtype cells through `gi::gather_nd_*`.
+This is the production CUDA path for CORE-112's smaller non-axis
+index shapes; value data stays resident.
 
 ## Parity contract
 
@@ -291,4 +304,4 @@ cargo test -p ferrotorch-gpu --features cuda 2>&1 | tail -5
 | REQ-5 | SHIPPED | impl: `pub fn get_cuda_device in backend_impl.rs` (line 6992); non-test consumer: re-exported at `lib.rs:191`. The downcast-via-`as_any` pattern is the single canonical accessor for the shared `GpuDevice` from any registered-backend caller. |
 | REQ-6 | SHIPPED | impl: `impl GpuBackend for CudaBackendImpl` at `gpu_backend in backend_impl.rs` with 348+ method bodies forwarding to `crate::kernels::*` / siblings; non-test consumer: ferrotorch-core's `gpu_dispatch::gpu_backend()` returns the registered global `&dyn GpuBackend`, and every CUDA-aware tensor op in ferrotorch-core (Tensor::add, matmul, softmax, etc.) dispatches through it when the input is GPU-resident. |
 | REQ-7 | SHIPPED | impl: `fn map_gpu_err in backend_impl.rs` (line 571); non-test consumer: every `.map_err(Self::map_gpu_err)?` call site in the trait-method bodies (hundreds of sites). |
-| REQ-8 | SHIPPED | impl: `fn gather_or_select in backend_impl.rs` (line 442); non-test consumer: it IS itself the `GpuBackend::gather_or_select` trait method body — ferrotorch-core's `Tensor::index_select` and `Tensor::gather` dispatch through it via the trait when the source tensor is CUDA-resident. |
+| REQ-8 | SHIPPED | impl: `fn gather_or_select in backend_impl.rs` for compact `index_select`/`gather`, plus `fn gather_intidx_nd in backend_impl.rs` for rank-aware gather; non-test consumer: these are the `GpuBackend` trait method bodies reached from ferrotorch-core's `Tensor::index_select`, `Tensor::gather`, and `IntTensor::gather` CUDA branches. |

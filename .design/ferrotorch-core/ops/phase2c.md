@@ -23,7 +23,12 @@ These mirror `torch.argmax`, `torch.argmin`, `torch.index_select`,
 `torch.gather`, and `tensor.to(dtype)`. Each op runs on CUDA when
 the input is GPU-resident — real PTX kernels (`backend.argmax`,
 `backend.gather_intidx`, `backend.cast_f_to_i`, etc.) — and on CPU
-otherwise via a reference loop.
+otherwise via a reference loop. `gather` uses the compact
+`backend.gather_intidx` CUDA path when non-gather dimensions match the
+input, and the rank-aware `backend.gather_intidx_nd` CUDA path when
+PyTorch-legal index shapes are smaller on non-gather axes. In both
+cases the value buffer stays GPU-resident; only the integer index
+buffer is read back for the existing bounds-validation gate.
 
 ## Requirements
 
@@ -98,9 +103,20 @@ inputs: CUDA branch calls `backend.argmax(h, outer, dim_size, inner)`
 `inttensor_arg<I: IntElement>` at `:114-153` is the integer-tensor
 counterpart; same dispatch structure.
 
-`index_select_ref<V>` at `:157-177` and `gather_ref<V>` at `:179-200`
-are the CPU references — both walk the `[outer, in_dim/out_dim,
-inner]` layout reading from `data` at the per-element source index.
+`index_select_ref<V>` at `index_select_ref in ops/phase2c.rs` is the
+axis-factorized CPU reference. `gather_ref<V>` at `gather_ref in
+ops/phase2c.rs` walks the actual `index.shape()` coordinates and
+substitutes only the gather-axis coordinate with the selected source
+index, so smaller non-axis index shapes mirror `torch.gather` rather
+than reading a full-input layout.
+
+On CUDA, `Tensor::gather` / `IntTensor::gather` choose
+`backend.gather_intidx` only when the compact `[outer, out_dim,
+inner]` layout is valid. If `index.shape()` is smaller than
+`input.shape()` on any non-gather axis, they call
+`backend.gather_intidx_nd`, which mirrors PyTorch's iterator/restride
+contract by making index/output shape authoritative while keeping the
+value buffer on device.
 
 The public methods on `Tensor` at `:212-350` and on `IntTensor` at
 `gpu_backend in ops/phase2c.rs` dispatch through the helpers + `gpu_dispatch::gpu_backend()`

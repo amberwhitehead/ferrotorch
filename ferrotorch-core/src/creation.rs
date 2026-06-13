@@ -13,7 +13,7 @@
 //! | REQ-7 | SHIPPED | `*_like` family at `creation.rs:288-314`; consumer: `grad_fns::cumulative` at `cumulative.rs:501` |
 //! | REQ-8 | SHIPPED | `zeros_meta`/`ones_meta`/`full_meta`/`meta_like` at `creation.rs:253-289`; consumer: `tensor::Tensor::meta_fill_value` at `tensor.rs:1078` (CL-395) |
 
-use crate::dtype::Float;
+use crate::dtype::{DType, Element, Float};
 use crate::error::FerrotorchResult;
 use crate::rng::with_thread_rng;
 use crate::storage::TensorStorage;
@@ -192,17 +192,12 @@ pub fn randn<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
 ///
 /// # Behaviour by device / dtype
 ///
-/// - `Device::Cuda(_)` + f32: generated entirely on-device via
-///   [`crate::gpu_dispatch::GpuBackend::rand_uniform_f32`], wrapped as an
+/// - `Device::Cuda(_)` + floating dtypes: generated through the dtype-specific
+///   [`crate::gpu_dispatch::GpuBackend`] RNG slot and returned as an
 ///   `is_cuda()` tensor with no host round trip (R-CODE-4). Reproducible after
 ///   [`crate::manual_seed`] (which seeds the GPU generator too).
 /// - `Device::Cpu`: identical to [`rand`] (byte-exact with `torch.rand` for
 ///   f32 via the thread-local MT19937).
-/// - `Device::Cuda(_)` + non-f32 (e.g. f64): the on-device Philox kernel is
-///   f32-only, so this falls back to the CPU `rand` path then transfers to the
-///   device via [`Tensor::to`]. The values are still correct; only the
-///   generation site (CPU vs GPU) differs. f64 on-device RNG is a documented
-///   follow-up.
 /// - `Device::Meta`: falls back to the CPU path then `.to(Meta)`.
 pub fn rand_on_device<T: Float>(
     shape: &[usize],
@@ -210,19 +205,26 @@ pub fn rand_on_device<T: Float>(
 ) -> FerrotorchResult<Tensor<T>> {
     use crate::device::Device;
 
-    let is_f32 = std::mem::size_of::<T>() == 4;
     match device {
-        Device::Cuda(_) if is_f32 => {
+        Device::Cuda(_) => {
             let numel: usize = shape.iter().product();
             let backend = crate::gpu_dispatch::gpu_backend()
                 .ok_or(crate::error::FerrotorchError::DeviceUnavailable)?;
-            let handle = backend.rand_uniform_f32(numel)?;
+            let handle = match <T as Element>::dtype() {
+                DType::F32 => backend.rand_uniform_f32(numel)?,
+                DType::F64 => backend.rand_uniform_f64(numel)?,
+                DType::F16 => backend.rand_uniform_f16(numel)?,
+                DType::BF16 => backend.rand_uniform_bf16(numel)?,
+                dtype => {
+                    return Err(crate::error::FerrotorchError::InvalidArgument {
+                        message: format!("rand_on_device: unsupported floating dtype {dtype}"),
+                    });
+                }
+            };
             let storage = TensorStorage::gpu(handle);
             Tensor::from_storage(storage, shape.to_vec(), false)
         }
         Device::Cpu => rand::<T>(shape),
-        // f64-on-CUDA and Meta: generate on CPU (byte-exact / correct
-        // distribution) then move to the target device.
         other => rand::<T>(shape)?.to(other),
     }
 }
@@ -232,23 +234,30 @@ pub fn rand_on_device<T: Float>(
 /// Standard-normal counterpart of [`rand_on_device`]. PyTorch parity:
 /// `torch.randn(size, device=...)` = `at::empty(...).normal_(0, 1)`
 /// (`aten/src/ATen/native/TensorFactories.cpp:1379`). For `Device::Cuda(_)` +
-/// f32 the values are generated on-device via the Box-Muller Philox normal
-/// kernel ([`crate::gpu_dispatch::GpuBackend::randn_normal_f32`]); other
-/// device/dtype combinations follow the same CPU-then-transfer fall-back as
-/// [`rand_on_device`].
+/// CUDA values are generated through dtype-specific backend RNG slots; CPU and
+/// meta keep the existing CPU factory behaviour.
 pub fn randn_on_device<T: Float>(
     shape: &[usize],
     device: crate::device::Device,
 ) -> FerrotorchResult<Tensor<T>> {
     use crate::device::Device;
 
-    let is_f32 = std::mem::size_of::<T>() == 4;
     match device {
-        Device::Cuda(_) if is_f32 => {
+        Device::Cuda(_) => {
             let numel: usize = shape.iter().product();
             let backend = crate::gpu_dispatch::gpu_backend()
                 .ok_or(crate::error::FerrotorchError::DeviceUnavailable)?;
-            let handle = backend.randn_normal_f32(numel)?;
+            let handle = match <T as Element>::dtype() {
+                DType::F32 => backend.randn_normal_f32(numel)?,
+                DType::F64 => backend.randn_normal_f64(numel)?,
+                DType::F16 => backend.randn_normal_f16(numel)?,
+                DType::BF16 => backend.randn_normal_bf16(numel)?,
+                dtype => {
+                    return Err(crate::error::FerrotorchError::InvalidArgument {
+                        message: format!("randn_on_device: unsupported floating dtype {dtype}"),
+                    });
+                }
+            };
             let storage = TensorStorage::gpu(handle);
             Tensor::from_storage(storage, shape.to_vec(), false)
         }

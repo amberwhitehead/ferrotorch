@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- GPU on-device RNG: wire ferray-random Philox into a GPU kernel so rand/randn generate on-device (not CPU-gen + upload) (#1682)
 - ptx_compile_guard test: JIT-compiles every static `*_PTX` const (312) on the live GPU via the production driver path, so a kernel that fails to compile (the silent-CPU-fallback / hard-error class behind #1684/#1685) is caught at test time instead of shipping dead (#1686)
 - Umbrella: ferrotorch-core CPU-only paths needing GPU implementations (special / masked / fft / ops/* families) (#1545)
 - Translate missing torch.special ops: entr/ndtr/ndtri/i0-family/zeta/airy/bessel-k (CPU+GPU) (#1651)
@@ -51,6 +52,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-112: `gather` accepts smaller non-axis dimensions but indexes as if they were full-size (#1806)
+- CORE-017: Linux CI explicitly excludes all core integration tests (#1711)
 - CORE-071: Empty packed components report a false mean of zero (#1765)
 - CORE-070: Nested CPU paths reject valid views and mixed-device construction creates unusable values (#1764)
 - CORE-069: Packed nested tensors mis-handle zero-sized tail dimensions (#1763)

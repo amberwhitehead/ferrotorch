@@ -1379,7 +1379,7 @@
     { "path": "ferrotorch_core::sparse::CscTensor <T>::nnz", "kind": "method", "signature": "fn nnz (& self) -> usize" },
     { "path": "ferrotorch_core::sparse::CscTensor <T>::nrows", "kind": "method", "signature": "fn nrows (& self) -> usize" },
     { "path": "ferrotorch_core::sparse::CscTensor <T>::row_indices", "kind": "method", "signature": "fn row_indices (& self) -> & [usize]" },
-    { "path": "ferrotorch_core::sparse::CscTensor <T>::to_csr", "kind": "method", "signature": "fn to_csr (& self) -> CsrTensor < T >" },
+    { "path": "ferrotorch_core::sparse::CscTensor <T>::to_csr", "kind": "method", "signature": "fn to_csr (& self) -> FerrotorchResult < CsrTensor < T > >" },
     { "path": "ferrotorch_core::sparse::CscTensor <T>::to_csr_on", "kind": "method", "signature": "fn to_csr_on (& self , device : Device) -> FerrotorchResult < CsrTensor < T > >" },
     { "path": "ferrotorch_core::sparse::CscTensor <T>::to_dense", "kind": "method", "signature": "fn to_dense (& self) -> FerrotorchResult < Tensor < T > >" },
     { "path": "ferrotorch_core::sparse::CscTensor <T>::to_dense_on", "kind": "method", "signature": "fn to_dense_on (& self , device : Device) -> FerrotorchResult < Tensor < T > >" },

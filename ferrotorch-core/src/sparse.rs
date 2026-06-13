@@ -14,12 +14,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::Arc;
 
+use crate::autograd::no_grad::is_grad_enabled;
 use crate::device::Device;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
-use crate::tensor::Tensor;
+use crate::tensor::{GradFn, Tensor};
 
 /// Reinterpret a `Vec<U>` as a `Vec<T>` when `T == U` (TypeId-checked by the
 /// caller). Used by `SparseTensor::from_dense` to convert the typed cuSPARSE
@@ -90,6 +92,99 @@ fn csr_to_coo_t<T: Float>(
         }
     }
     Ok((indices, values))
+}
+
+/// Validate a compressed-sparse pointer/index layout (CORE-072 / #1766).
+///
+/// Shared by [`CsrTensor::new`] and [`CscTensor::new`]; every
+/// backend-return conversion (`from_coo_on`, `from_csr_on`, `to_csr_on`)
+/// routes through those constructors, so cuSPARSE-returned layouts are
+/// validated by the same code path. Mirrors the invariants
+/// `torch.sparse.check_sparse_tensor_invariants` enforces
+/// (`aten/src/ATen/native/sparse/SparseCsrTensor.cpp`,
+/// `_validate_sparse_compressed_tensor_args`):
+///
+/// - `ptrs[0] == 0` (torch: "`crow_indices[..., 0] == 0` is not satisfied")
+/// - `ptrs` non-decreasing
+/// - `ptrs[last] == nnz` (torch: "`crow_indices[..., -1] == nnz`")
+/// - every index in `[0, index_bound)` (torch: "`0 <= col_indices < ncols`")
+///
+/// `ptrs.len()` is validated by the callers (it needs the `nrows`/`ncols`
+/// context). Duplicate indices within a segment are permitted — dense
+/// materialization sums them (CORE-073 / #1767), matching the other
+/// sparse representations in this module and torch's default
+/// (unchecked-invariant) `to_dense` accumulation.
+fn validate_compressed_layout(
+    ptrs: &[usize],
+    indices: &[usize],
+    nnz: usize,
+    index_bound: usize,
+    ptr_name: &str,
+    index_name: &str,
+    bound_name: &str,
+) -> FerrotorchResult<()> {
+    // Callers guarantee ptrs.len() == n + 1 >= 1.
+    if ptrs.first() != Some(&0) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "`{ptr_name}[0] == 0` is not satisfied: got {:?}",
+                ptrs.first()
+            ),
+        });
+    }
+    for (i, w) in ptrs.windows(2).enumerate() {
+        if w[1] < w[0] {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "`{ptr_name}` must be non-decreasing: {ptr_name}[{}]={} > {ptr_name}[{}]={}",
+                    i,
+                    w[0],
+                    i + 1,
+                    w[1]
+                ),
+            });
+        }
+    }
+    if ptrs.last() != Some(&nnz) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "`{ptr_name}[-1] == nnz` is not satisfied: got {:?}, nnz = {nnz}",
+                ptrs.last()
+            ),
+        });
+    }
+    for (slot, &idx) in indices.iter().enumerate() {
+        if idx >= index_bound {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "`0 <= {index_name} < {bound_name}` is not satisfied: \
+                     {index_name}[{slot}] = {idx}, {bound_name} = {index_bound}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Checked `usize` → `u32` conversion for cuSPARSE descriptor arrays
+/// (CORE-077 / #1771). The registered GPU sparse backend uses a 32-bit
+/// index ABI; torch stores sparse indices as int64
+/// (`aten/src/ATen/native/sparse/SparseTensor.cpp` — COO/CSR indices are
+/// `kLong`), so a valid public index above `u32::MAX` must be rejected
+/// with a structured error — never wrapped to an unrelated coordinate.
+fn to_u32_checked(v: usize, what: &str) -> FerrotorchResult<u32> {
+    u32::try_from(v).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!(
+            "{what} = {v} exceeds the u32 limit of the GPU sparse backend's \
+             32-bit index ABI (CORE-077/#1771); use the CPU path for \
+             larger layouts"
+        ),
+    })
+}
+
+/// Vector form of [`to_u32_checked`].
+fn to_u32_vec_checked(vals: &[usize], what: &str) -> FerrotorchResult<Vec<u32>> {
+    vals.iter().map(|&v| to_u32_checked(v, what)).collect()
 }
 
 /// A sparse tensor in COO (Coordinate List) format.
@@ -324,6 +419,10 @@ impl<T: Float> SparseTensor<T> {
                 // Coalesce + CSR build (same as spmm).
                 let coalesced = self.coalesce();
                 let nnz = coalesced.nnz;
+                // Row-pointer values are bounded by nnz; reject layouts
+                // whose pointers cannot fit the backend's 32-bit index
+                // ABI (CORE-077 / #1771).
+                to_u32_checked(nnz, "SparseTensor::to_dense_on: nnz")?;
 
                 let mut crow_indices: Vec<u32> = vec![0; m + 1];
                 for idx in &coalesced.indices {
@@ -344,7 +443,10 @@ impl<T: Float> SparseTensor<T> {
                 let mut col_indices: Vec<u32> = Vec::with_capacity(nnz);
                 let mut values_csr: Vec<T> = Vec::with_capacity(nnz);
                 for (idx, &v) in coalesced.indices.iter().zip(coalesced.values.iter()) {
-                    col_indices.push(idx[1] as u32);
+                    col_indices.push(to_u32_checked(
+                        idx[1],
+                        "SparseTensor::to_dense_on: column index",
+                    )?);
                     values_csr.push(v);
                 }
 
@@ -470,7 +572,32 @@ impl<T: Float> SparseTensor<T> {
     ///
     /// This is a scatter-accumulate pattern — the same kernel used in the
     /// backward pass of `nn.Embedding`.
+    ///
+    /// # Autograd (CORE-074 / #1768)
+    ///
+    /// When `dense` tracks gradients the result carries a
+    /// [`SpmmBackward`] edge: `grad_dense = sparseᵀ @ grad_output`. Live
+    /// torch 2.11.0+cu130 oracle: `torch.sparse.mm(sp, d)` flows the
+    /// gradient to the dense operand (`d.grad == spᵀ @ upstream`). The
+    /// sparse values themselves have no gradient surface (`SparseTensor`
+    /// is not a `Tensor`), matching the dense-operand-only contract.
     pub fn spmm(&self, dense: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        let result = self.spmm_forward(dense)?;
+        if is_grad_enabled() && dense.requires_grad() {
+            let grad_fn = Arc::new(SpmmBackward {
+                // 2-D was validated by the forward; `t()` cannot fail here.
+                sparse_t: self.t()?,
+                dense: dense.clone(),
+            });
+            let (storage, shape) = result.into_storage_and_shape()?;
+            return Tensor::from_operation(storage, shape, grad_fn);
+        }
+        Ok(result)
+    }
+
+    /// Forward-only spmm (CPU + cuSPARSE lanes). Split out so [`Self::spmm`]
+    /// can attach the autograd edge uniformly across lanes.
+    fn spmm_forward(&self, dense: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         use std::any::TypeId;
 
         if self.ndim() != 2 {
@@ -528,6 +655,10 @@ impl<T: Float> SparseTensor<T> {
             // duplicate COO indices are summed before SpMM.
             let coalesced = self.coalesce();
             let nnz = coalesced.nnz;
+            // Row-pointer values are bounded by nnz; reject layouts whose
+            // pointers cannot fit the backend's 32-bit index ABI
+            // (CORE-077 / #1771).
+            to_u32_checked(nnz, "SparseTensor::spmm: nnz")?;
 
             // crow_indices: m+1 row pointers.
             let mut crow_indices: Vec<u32> = vec![0; m + 1];
@@ -552,7 +683,7 @@ impl<T: Float> SparseTensor<T> {
             let mut col_indices: Vec<u32> = Vec::with_capacity(nnz);
             let mut values_csr: Vec<T> = Vec::with_capacity(nnz);
             for (idx, &v) in coalesced.indices.iter().zip(coalesced.values.iter()) {
-                col_indices.push(idx[1] as u32);
+                col_indices.push(to_u32_checked(idx[1], "SparseTensor::spmm: column index")?);
                 values_csr.push(v);
             }
 
@@ -767,6 +898,77 @@ impl<T: Float> fmt::Debug for SparseTensor<T> {
     }
 }
 
+/// Backward node for [`SparseTensor::spmm`] (CORE-074 / #1768):
+/// `grad_dense = sparseᵀ @ grad_output`, computed with the same spmm
+/// dispatch (so a CUDA `grad_output` produces a CUDA gradient).
+struct SpmmBackward<T: Float> {
+    /// The transposed sparse operand, `[k, m]`.
+    sparse_t: SparseTensor<T>,
+    /// The dense input (graph edge target).
+    dense: Tensor<T>,
+}
+
+impl<T: Float> fmt::Debug for SpmmBackward<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SpmmBackward")
+            .field("sparse_t", &self.sparse_t)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T: Float> GradFn<T> for SpmmBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        // d(sp @ d)/d(d) contracted with g: spᵀ [k, m] @ g [m, n] = [k, n].
+        let grad_dense = self.sparse_t.spmm(grad_output)?;
+        Ok(vec![Some(grad_dense)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.dense]
+    }
+
+    fn name(&self) -> &'static str {
+        "SpmmBackward"
+    }
+}
+
+/// Backward node for [`sparse_matmul_24`] (CORE-074 / #1768):
+/// `grad_a = grad_output @ b_denseᵀ`. The decompressed weight is saved
+/// host-side (the 2:4 layout is host-resident) and moved to
+/// `grad_output`'s device at backward time.
+struct Matmul24Backward<T: Float> {
+    /// The dense operand (graph edge target).
+    a: Tensor<T>,
+    /// Decompressed `[k, n]` weight (masked positions are exact zeros).
+    b_dense: Tensor<T>,
+}
+
+impl<T: Float> fmt::Debug for Matmul24Backward<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Matmul24Backward").finish_non_exhaustive()
+    }
+}
+
+impl<T: Float> GradFn<T> for Matmul24Backward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        // d(a @ b)/d(a) contracted with g: g [m, n] @ bᵀ [n, k] = [m, k].
+        let mut b_t = self.b_dense.t()?.contiguous()?;
+        if grad_output.device() != b_t.device() {
+            b_t = b_t.to(grad_output.device())?;
+        }
+        let grad_a = grad_output.matmul(&b_t)?;
+        Ok(vec![Some(grad_a)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.a]
+    }
+
+    fn name(&self) -> &'static str {
+        "Matmul24Backward"
+    }
+}
+
 // --- CooTensor: 2-D COO format with separate row/col arrays ---
 
 /// A 2-D sparse tensor in COO (Coordinate List) format with separate
@@ -940,8 +1142,12 @@ impl<T: Float> CooTensor<T> {
         {
             // Coalesce + row-sort on host (cuSPARSE contract).
             let coalesced = self.coalesce();
-            let row_u32: Vec<u32> = coalesced.row_indices.iter().map(|&v| v as u32).collect();
-            let col_u32: Vec<u32> = coalesced.col_indices.iter().map(|&v| v as u32).collect();
+            let row_u32 =
+                to_u32_vec_checked(&coalesced.row_indices, "CooTensor::to_dense_on: row index")?;
+            let col_u32 = to_u32_vec_checked(
+                &coalesced.col_indices,
+                "CooTensor::to_dense_on: column index",
+            )?;
 
             // We only need the CSR row pointers + column indices from
             // the COO→CSR conversion; values pass through unchanged
@@ -1085,6 +1291,15 @@ pub struct CsrTensor<T: Float> {
 
 impl<T: Float> CsrTensor<T> {
     /// Create a CSR tensor directly from components.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FerrotorchError::InvalidArgument`] when the compressed
+    /// layout is structurally invalid (CORE-072 / #1766): wrong
+    /// `row_ptrs` length, `col_indices`/`values` length mismatch,
+    /// `row_ptrs[0] != 0`, decreasing `row_ptrs`, `row_ptrs[-1] != nnz`,
+    /// or any column index `>= ncols`. Mirrors torch's
+    /// `_validate_sparse_compressed_tensor_args` invariants.
     pub fn new(
         row_ptrs: Vec<usize>,
         col_indices: Vec<usize>,
@@ -1110,6 +1325,15 @@ impl<T: Float> CsrTensor<T> {
                 ),
             });
         }
+        validate_compressed_layout(
+            &row_ptrs,
+            &col_indices,
+            values.len(),
+            ncols,
+            "row_ptrs",
+            "col_indices",
+            "ncols",
+        )?;
         Ok(Self {
             row_ptrs,
             col_indices,
@@ -1231,8 +1455,9 @@ impl<T: Float> CsrTensor<T> {
                 || TypeId::of::<T>() == TypeId::of::<f64>())
             && let Some(backend) = crate::gpu_dispatch::gpu_backend()
         {
-            let crow: Vec<u32> = self.row_ptrs.iter().map(|&v| v as u32).collect();
-            let col: Vec<u32> = self.col_indices.iter().map(|&v| v as u32).collect();
+            let crow = to_u32_vec_checked(&self.row_ptrs, "CsrTensor::to_dense_on: row pointer")?;
+            let col =
+                to_u32_vec_checked(&self.col_indices, "CsrTensor::to_dense_on: column index")?;
 
             let out_handle = if TypeId::of::<T>() == TypeId::of::<f32>() {
                 // SAFETY: TypeId guard establishes T == f32; the slice
@@ -1308,8 +1533,12 @@ impl<T: Float> CsrTensor<T> {
             // Coalesce on host so values are summed and rows arrive
             // sorted (cuSPARSE contract).
             let coalesced = coo.coalesce();
-            let row_u32: Vec<u32> = coalesced.row_indices.iter().map(|&v| v as u32).collect();
-            let col_u32: Vec<u32> = coalesced.col_indices.iter().map(|&v| v as u32).collect();
+            let row_u32 =
+                to_u32_vec_checked(&coalesced.row_indices, "CsrTensor::from_coo_on: row index")?;
+            let col_u32 = to_u32_vec_checked(
+                &coalesced.col_indices,
+                "CsrTensor::from_coo_on: column index",
+            )?;
 
             let (crow, col, vals_t) = if TypeId::of::<T>() == TypeId::of::<f32>() {
                 let vals_f32 = unsafe {
@@ -1411,18 +1640,57 @@ impl<T: Float> SemiStructuredSparseTensor<T> {
     ///
     /// # Errors
     ///
-    /// - `FerrotorchError::InvalidArgument` if `dense.numel() % 4 != 0`.
+    /// - `FerrotorchError::InvalidArgument` if `dense` is 0-dimensional or
+    ///   its innermost (last) dimension is not a multiple of 4 (CORE-075 /
+    ///   #1769: groups of 4 are taken along the innermost dimension and
+    ///   must never span rows, so the *last dim* — not the total size —
+    ///   carries the divisibility requirement).
+    /// - `FerrotorchError::InvalidArgument` if `dense` tracks gradients
+    ///   while grad mode is enabled (CORE-074 / #1768): the 2:4 layout
+    ///   extracts plain host vectors, so compressing a tracked tensor
+    ///   would silently sever autograd. Live torch 2.11.0+cu130 parity:
+    ///   `SparseSemiStructuredTensor` matmul raises `NotImplementedError`
+    ///   as soon as autograd is involved. Trainable 2:4 weights are
+    ///   tracked in #1969 — until then, `detach()` (or compress inside
+    ///   `no_grad`) to state the intent explicitly.
     pub fn compress(dense: &Tensor<T>) -> FerrotorchResult<Self> {
-        let data = dense.data_vec()?;
-        let numel = data.len();
-        if numel % 4 != 0 {
+        if is_grad_enabled() && dense.requires_grad() {
             return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "SemiStructuredSparseTensor::compress: numel must be a \
-                     multiple of 4, got {numel}"
-                ),
+                message: "SemiStructuredSparseTensor::compress: input tracks \
+                          gradients, but the 2:4 layout has no autograd surface \
+                          — compressing would silently sever the graph (torch \
+                          parity: SparseSemiStructuredTensor raises \
+                          NotImplementedError under autograd). Detach the \
+                          weight first, or compress under no_grad; trainable \
+                          2:4 weights are tracked in #1969."
+                    .into(),
             });
         }
+        let shape = dense.shape();
+        match shape.last() {
+            None => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: "SemiStructuredSparseTensor::compress: input must be \
+                              at least 1-D (2:4 groups run along the innermost \
+                              dimension; a scalar has none)"
+                        .into(),
+                });
+            }
+            Some(&last) if !last.is_multiple_of(4) => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "SemiStructuredSparseTensor::compress: innermost dimension \
+                         must be a multiple of 4 (2:4 groups never span rows), got \
+                         shape {shape:?}"
+                    ),
+                });
+            }
+            Some(_) => {}
+        }
+        let data = dense.data_vec()?;
+        let numel = data.len();
+        // last_dim % 4 == 0 implies numel % 4 == 0; flat grouping below is
+        // row-aligned because every row is a whole number of groups.
         let num_groups = numel / 4;
         let mut values = Vec::with_capacity(num_groups * 2);
         let mut mask = vec![0u8; num_groups.div_ceil(2)];
@@ -1566,7 +1834,35 @@ impl<T: Float> SemiStructuredSparseTensor<T> {
 /// - `b.shape().len() != 2`
 /// - `a.shape().len() != 2`
 /// - Inner dimensions don't match
+/// - `b.shape()[1] % 4 != 0` (2:4 contract, CORE-075 / #1769)
+///
+/// # Autograd (CORE-074 / #1768)
+///
+/// When `a` tracks gradients the result carries a [`Matmul24Backward`]
+/// edge: `grad_a = grad_output @ b_denseᵀ` (torch oracle quoted in
+/// `tests/audit_core074_sparse_autograd.rs`). The compressed weight `b`
+/// has no gradient surface — [`SemiStructuredSparseTensor::compress`]
+/// rejects tracked inputs (trainable 2:4 weights tracked in #1969).
 pub fn sparse_matmul_24<T: Float>(
+    a: &Tensor<T>,
+    b: &SemiStructuredSparseTensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    let result = sparse_matmul_24_forward(a, b)?;
+    if is_grad_enabled() && a.requires_grad() {
+        let grad_fn = Arc::new(Matmul24Backward {
+            a: a.clone(),
+            b_dense: b.decompress()?,
+        });
+        let (storage, shape) = result.into_storage_and_shape()?;
+        return Tensor::from_operation(storage, shape, grad_fn);
+    }
+    Ok(result)
+}
+
+/// Forward-only 2:4 matmul (cuSPARSELt / on-device composite / CPU
+/// reference lanes). Split out so [`sparse_matmul_24`] can attach the
+/// autograd edge uniformly across lanes.
+fn sparse_matmul_24_forward<T: Float>(
     a: &Tensor<T>,
     b: &SemiStructuredSparseTensor<T>,
 ) -> FerrotorchResult<Tensor<T>> {
@@ -1597,71 +1893,106 @@ pub fn sparse_matmul_24<T: Float>(
             ),
         });
     }
+    // Documented 2:4 shape contract: `b` is a `[k, n]` weight with
+    // `n % 4 == 0`. Enforced independently of `compress` (CORE-075 /
+    // #1769) — defence in depth at this public boundary; every
+    // `SemiStructuredSparseTensor` built through the validated
+    // constructor already satisfies it.
+    if !n.is_multiple_of(4) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "sparse_matmul_24: b's width n={n} must be a multiple of 4 \
+                 (2:4 semi-structured contract)"
+            ),
+        });
+    }
 
-    // -- CUDA fast path (P6) -------------------------------------------------
+    // -- CUDA path (P6; device contract per CORE-076 / #1770) ---------------
     //
     // PyTorch parity (rust-gpu-discipline §3): `torch._C._sparse_semi_
     // structured_apply` runs on cuSPARSELt when the dense operand is
-    // CUDA and the structured weight is 2:4. ferrotorch mirrors that
-    // when (a) `a` is on CUDA, (b) a GPU backend is registered, (c) the
-    // backend was built with `--features cusparselt` and `libcusparseLt`
-    // is available at runtime (the backend's `sparse_matmul_24_*`
-    // returns Err otherwise), and (d) `T == f32` (cuSPARSELt accepts
-    // FP16/BF16/FP32; only the f32 wire is mapped through the GPU
-    // dispatch trait today — FP16/BF16 require a u16 buffer-handle
-    // convention, tracked as a follow-up). On Err we fall through to
-    // the dense reference path below — same observable as the off-
-    // feature build.
+    // CUDA and the structured weight is 2:4, and the output is a CUDA
+    // tensor. ferrotorch mirrors that: a CUDA `a` NEVER reaches the
+    // host reference path below.
+    //
+    // - `T == f32`: try the cuSPARSELt kernel (requires the backend
+    //   built with `--features cusparselt` + `libcusparseLt` at
+    //   runtime); when the backend declines, fall back to an ON-DEVICE
+    //   composite — the decompressed weight is uploaded and multiplied
+    //   with `matmul_f32`, so the result stays on `a`'s device (same
+    //   values as the reference path, different compute location;
+    //   documented host upload of `b` only).
+    // - `T == f64`: cuSPARSELt has no f64 kernel; the on-device
+    //   composite (`matmul_f64`) runs directly.
+    // - f16/bf16: structured `NotImplementedOnCuda` — the half wire
+    //   needs the u16 buffer-handle convention, tracked in #1967.
     if a.is_cuda()
         && let Some(backend) = crate::gpu_dispatch::gpu_backend()
     {
         use std::any::TypeId;
-        if TypeId::of::<T>() == TypeId::of::<f32>() {
-            // We need the dense decompressed form of `b` on the same
-            // CUDA device as `a`. Decompress on CPU then upload the
-            // bytes. The mask cuSPARSELt re-derives during the
-            // `cusparseLtSpMMACompress` step, so we hand it the dense
-            // form (with masked positions = 0) directly.
-            let b_dense_cpu = b.decompress()?;
-            let b_dense_data = b_dense_cpu.data_vec()?;
-            let ordinal = a.gpu_handle()?.device_ordinal();
+        let is_f32 = TypeId::of::<T>() == TypeId::of::<f32>();
+        let is_f64 = TypeId::of::<T>() == TypeId::of::<f64>();
+        if !is_f32 && !is_f64 {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "sparse_matmul_24: CUDA lane supports f32/f64 only \
+                     (f16/bf16 u16 buffer-handle wire tracked in #1967); \
+                     the host reference path is not used for CUDA inputs \
+                     because it would silently return a CPU tensor",
+            });
+        }
 
-            // SAFETY: TypeId guard establishes T == f32; the cast is
-            // layout-preserving (Vec<T> and Vec<f32> have identical
-            // size/alignment under that condition). `b_dense_data`
-            // outlives the borrow.
-            let b_bytes = unsafe {
-                std::slice::from_raw_parts(
-                    b_dense_data.as_ptr().cast::<u8>(),
-                    b_dense_data.len() * std::mem::size_of::<f32>(),
-                )
-            };
-            let b_handle = backend.cpu_to_gpu(b_bytes, crate::dtype::DType::F32, ordinal)?;
+        // We need the dense decompressed form of `b` on the same CUDA
+        // device as `a`. Decompress on CPU then upload the bytes (the
+        // 2:4 layout itself is host-resident). For the cuSPARSELt path
+        // the mask is re-derived during `cusparseLtSpMMACompress`, so
+        // the dense form (masked positions = 0) is handed over directly.
+        let b_dense_cpu = b.decompress()?;
+        let b_dense_data = b_dense_cpu.data_vec()?;
+        // GEMM kernels expect a contiguous row-major `a`.
+        let a_contig = a.contiguous()?;
+        let a_handle = a_contig.gpu_handle()?;
+        let ordinal = a_handle.device_ordinal();
 
-            let a_handle = a.gpu_handle()?;
+        // SAFETY: the TypeId guard above establishes T == f32 (resp.
+        // f64); the byte cast is layout-preserving and `b_dense_data`
+        // outlives the borrow.
+        let b_bytes = unsafe {
+            std::slice::from_raw_parts(
+                b_dense_data.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(b_dense_data.as_slice()),
+            )
+        };
+        let b_dtype = if is_f32 {
+            crate::dtype::DType::F32
+        } else {
+            crate::dtype::DType::F64
+        };
+        let b_handle = backend.cpu_to_gpu(b_bytes, b_dtype, ordinal)?;
+
+        let out_handle = if is_f32 {
             match backend.sparse_matmul_24_f32(a_handle, &b_handle, m, k, n) {
-                Ok(out_handle) => {
-                    let storage = TensorStorage::gpu(out_handle);
-                    return Tensor::from_storage(storage, vec![m, n], false);
-                }
+                Ok(h) => h,
                 Err(_) => {
                     // Backend declined (cusparselt feature off, or
                     // `libcusparseLt.so` unavailable, or shape not
-                    // alignment-compatible). Fall through to the
-                    // dense reference path. We discard the uploaded
-                    // `b_handle` by letting it drop here.
-                    let _ = b_handle;
+                    // alignment-compatible). ON-DEVICE composite
+                    // fallback (CORE-076 / #1770): dense GEMM against
+                    // the already-uploaded decompressed weight — the
+                    // output stays on `a`'s device.
+                    backend.matmul_f32(a_handle, &b_handle, m, k, n)?
                 }
             }
-        }
+        } else {
+            backend.matmul_f64(a_handle, &b_handle, m, k, n)?
+        };
+        let storage = TensorStorage::gpu(out_handle);
+        return Tensor::from_storage(storage, vec![m, n], false);
     }
 
     // -- Reference path: decompress and do the dense matmul -----------------
     //
-    // This path is also used for non-CUDA `a`, `T != f32`, missing GPU
-    // backend, missing cusparselt feature, or runtime missing-
-    // libcusparseLt. Pre-P6 the only path; post-P6 the conformance fall-
-    // through.
+    // CPU `a` only (CUDA inputs return above, on device or with a
+    // structured error). Also used when no GPU backend is registered.
     let b_dense = b.decompress()?;
     let a_data = a.data_vec()?;
     let b_data = b_dense.data_vec()?;
@@ -1698,6 +2029,15 @@ pub struct CscTensor<T: Float> {
 
 impl<T: Float> CscTensor<T> {
     /// Build directly from components.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FerrotorchError::InvalidArgument`] when the compressed
+    /// layout is structurally invalid (CORE-072 / #1766): wrong
+    /// `col_ptrs` length, `row_indices`/`values` length mismatch,
+    /// `col_ptrs[0] != 0`, decreasing `col_ptrs`, `col_ptrs[-1] != nnz`,
+    /// or any row index `>= nrows`. Mirrors torch's
+    /// `_validate_sparse_compressed_tensor_args` invariants.
     pub fn new(
         col_ptrs: Vec<usize>,
         row_indices: Vec<usize>,
@@ -1723,13 +2063,15 @@ impl<T: Float> CscTensor<T> {
                 ),
             });
         }
-        for &r in &row_indices {
-            if r >= nrows {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: format!("CscTensor: row index {r} >= nrows {nrows}"),
-                });
-            }
-        }
+        validate_compressed_layout(
+            &col_ptrs,
+            &row_indices,
+            values.len(),
+            nrows,
+            "col_ptrs",
+            "row_indices",
+            "nrows",
+        )?;
         Ok(Self {
             col_ptrs,
             row_indices,
@@ -1783,7 +2125,16 @@ impl<T: Float> CscTensor<T> {
     }
 
     /// Convert to CSR via the dual conversion.
-    pub fn to_csr(&self) -> CsrTensor<T> {
+    ///
+    /// # Errors
+    ///
+    /// Propagates the [`CsrTensor::new`] validation error instead of
+    /// panicking (CORE-072 / #1766 replaced the previous `expect`). For a
+    /// `CscTensor` built through the validated public constructors the
+    /// rebuilt CSR always satisfies the invariants, so this is
+    /// unreachable in practice — but the fallible signature keeps the
+    /// public API panic-free.
+    pub fn to_csr(&self) -> FerrotorchResult<CsrTensor<T>> {
         // Mirror the same algorithm with rows/cols swapped.
         let mut counts = vec![0usize; self.nrows];
         for &r in &self.row_indices {
@@ -1809,13 +2160,42 @@ impl<T: Float> CscTensor<T> {
             }
         }
         CsrTensor::new(row_ptrs, col_indices, values, self.nrows, self.ncols)
-            .expect("CSR rebuild from CSC always satisfies invariants")
     }
 
     /// Materialize as a dense 2-D `Tensor` on CPU. To materialise directly
     /// onto a CUDA device, use [`Self::to_dense_on`].
     pub fn to_dense(&self) -> FerrotorchResult<Tensor<T>> {
         self.to_dense_on(Device::Cpu)
+    }
+
+    /// Coalesced `(col_ptrs, row_indices, values)` copy of this CSC
+    /// layout: duplicate row indices within a column are summed and the
+    /// remaining row indices are sorted ascending per column (CORE-073 /
+    /// #1767 — torch's `to_dense` sums duplicates; cuSPARSE additionally
+    /// requires sorted in-segment indices).
+    fn coalesced_arrays(&self) -> (Vec<usize>, Vec<usize>, Vec<T>) {
+        let mut col_ptrs = Vec::with_capacity(self.ncols + 1);
+        let mut row_indices = Vec::with_capacity(self.values.len());
+        let mut values = Vec::with_capacity(self.values.len());
+        col_ptrs.push(0);
+        for c in 0..self.ncols {
+            let start = self.col_ptrs[c];
+            let end = self.col_ptrs[c + 1];
+            let mut per_col: std::collections::BTreeMap<usize, T> =
+                std::collections::BTreeMap::new();
+            for k in start..end {
+                let entry = per_col
+                    .entry(self.row_indices[k])
+                    .or_insert_with(<T as num_traits::Zero>::zero);
+                *entry += self.values[k];
+            }
+            for (r, v) in per_col {
+                row_indices.push(r);
+                values.push(v);
+            }
+            col_ptrs.push(row_indices.len());
+        }
+        (col_ptrs, row_indices, values)
     }
 
     /// Materialize as a dense 2-D `Tensor` on the given device.
@@ -1836,15 +2216,23 @@ impl<T: Float> CscTensor<T> {
                 || TypeId::of::<T>() == TypeId::of::<f64>())
             && let Some(backend) = crate::gpu_dispatch::gpu_backend()
         {
-            let col_ptrs_u32: Vec<u32> = self.col_ptrs.iter().map(|&v| v as u32).collect();
-            let row_idx_u32: Vec<u32> = self.row_indices.iter().map(|&v| v as u32).collect();
+            // Coalesce host-side before building the cuSPARSE descriptor:
+            // cusparseSparseToDense overwrites duplicate coordinates (the
+            // CORE-073 / #1767 probe observed first-duplicate-wins), but
+            // torch sums them. Coalescing also sorts row indices within
+            // each column (cuSPARSE contract).
+            let (col_ptrs, row_indices, values) = self.coalesced_arrays();
+            let col_ptrs_u32 =
+                to_u32_vec_checked(&col_ptrs, "CscTensor::to_dense_on: column pointer")?;
+            let row_idx_u32 =
+                to_u32_vec_checked(&row_indices, "CscTensor::to_dense_on: row index")?;
 
             let out_handle = if TypeId::of::<T>() == TypeId::of::<f32>() {
+                // SAFETY: TypeId guard establishes T == f32; the slice
+                // re-interpret is layout-preserving and `values` outlives
+                // the call.
                 let values_f32 = unsafe {
-                    std::slice::from_raw_parts(
-                        self.values.as_ptr().cast::<f32>(),
-                        self.values.len(),
-                    )
+                    std::slice::from_raw_parts(values.as_ptr().cast::<f32>(), values.len())
                 };
                 backend.csc_to_dense_f32(
                     &col_ptrs_u32,
@@ -1855,11 +2243,9 @@ impl<T: Float> CscTensor<T> {
                     self.ncols,
                 )?
             } else {
+                // SAFETY: TypeId guard establishes T == f64.
                 let values_f64 = unsafe {
-                    std::slice::from_raw_parts(
-                        self.values.as_ptr().cast::<f64>(),
-                        self.values.len(),
-                    )
+                    std::slice::from_raw_parts(values.as_ptr().cast::<f64>(), values.len())
                 };
                 backend.csc_to_dense_f64(
                     &col_ptrs_u32,
@@ -1881,7 +2267,10 @@ impl<T: Float> CscTensor<T> {
             let end = self.col_ptrs[c + 1];
             for k in start..end {
                 let r = self.row_indices[k];
-                data[r * self.ncols + c] = self.values[k];
+                // Accumulate duplicates (CORE-073 / #1767): torch's
+                // to_dense SUMS duplicate coordinates, as do the other
+                // sparse representations in this module.
+                data[r * self.ncols + c] += self.values[k];
             }
         }
         let cpu_tensor = Tensor::from_storage(
@@ -1915,8 +2304,8 @@ impl<T: Float> CscTensor<T> {
                 || TypeId::of::<T>() == TypeId::of::<f64>())
             && let Some(backend) = crate::gpu_dispatch::gpu_backend()
         {
-            let crow: Vec<u32> = csr.row_ptrs.iter().map(|&v| v as u32).collect();
-            let col: Vec<u32> = csr.col_indices.iter().map(|&v| v as u32).collect();
+            let crow = to_u32_vec_checked(&csr.row_ptrs, "CscTensor::from_csr_on: row pointer")?;
+            let col = to_u32_vec_checked(&csr.col_indices, "CscTensor::from_csr_on: column index")?;
 
             let (col_ptrs_u32, row_idx_u32, values_t) = if TypeId::of::<T>() == TypeId::of::<f32>()
             {
@@ -1967,8 +2356,10 @@ impl<T: Float> CscTensor<T> {
             // as `col_indices`, with `m=ncols, n=nrows`. The output
             // `(col_ptrs', row_indices', vals')` is the CSR of `self`
             // since transposing twice round-trips.
-            let col_ptrs_u32: Vec<u32> = self.col_ptrs.iter().map(|&v| v as u32).collect();
-            let row_idx_u32: Vec<u32> = self.row_indices.iter().map(|&v| v as u32).collect();
+            let col_ptrs_u32 =
+                to_u32_vec_checked(&self.col_ptrs, "CscTensor::to_csr_on: column pointer")?;
+            let row_idx_u32 =
+                to_u32_vec_checked(&self.row_indices, "CscTensor::to_csr_on: row index")?;
 
             let (crow_u32, col_u32, values_t) = if TypeId::of::<T>() == TypeId::of::<f32>() {
                 let vals_f32 = unsafe {
@@ -2009,7 +2400,7 @@ impl<T: Float> CscTensor<T> {
             return CsrTensor::new(row_ptrs, col_indices, values_t, self.nrows, self.ncols);
         }
 
-        Ok(self.to_csr())
+        self.to_csr()
     }
 
     pub fn nnz(&self) -> usize {
@@ -2061,12 +2452,20 @@ impl<T: Float> SparseGrad<T> {
     /// Build from indices + per-index value slabs.
     ///
     /// `values.len()` must equal `indices.len() * prod(slab_shape)`.
+    ///
+    /// The slab size is the ACTUAL product of `slab_shape` (CORE-078 /
+    /// #1772): the empty scalar shape `[]` has the empty product 1 (one
+    /// element per index), while a zero-containing shape like `[0]` has
+    /// zero elements per slab and therefore requires `values` to be
+    /// empty — torch: `sparse_coo_tensor(indices=[[1]], values=[[9.0]],
+    /// (2, 0))` raises "values has incorrect size, expected [1, 0], got
+    /// [1, 1]".
     pub fn new(
         indices: Vec<usize>,
         values: Vec<T>,
         slab_shape: Vec<usize>,
     ) -> FerrotorchResult<Self> {
-        let slab_size: usize = slab_shape.iter().product::<usize>().max(1);
+        let slab_size: usize = slab_shape.iter().product::<usize>();
         if values.len() != indices.len() * slab_size {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
@@ -2104,8 +2503,13 @@ impl<T: Float> SparseGrad<T> {
         &self.slab_shape
     }
 
+    /// Elements per slab: the actual product of [`slab_shape`]
+    /// (CORE-078 / #1772 — the empty scalar shape yields 1 via the empty
+    /// product; a zero-containing shape yields 0, never conflated).
+    ///
+    /// [`slab_shape`]: Self::slab_shape
     pub fn slab_size(&self) -> usize {
-        self.slab_shape.iter().product::<usize>().max(1)
+        self.slab_shape.iter().product::<usize>()
     }
 
     /// Whether this gradient uses a sparse layout.
@@ -2162,31 +2566,27 @@ impl<T: Float> SparseGrad<T> {
     /// `param[indices[i]] -= lr * values[i]` for every i. The leading
     /// dim of `param` is the indexed dim; the rest must match `slab_shape`.
     ///
-    /// # GPU dispatch (P8 of #806)
+    /// # GPU dispatch (P8 of #806; integer index ABI per CORE-079 / #1773)
     ///
-    /// When `param` lives on `Device::Cuda(_)` and `T = f32`, the update
-    /// runs entirely on device by composing existing `GpuBackend`
+    /// When `param` lives on `Device::Cuda(_)` and `T ∈ {f32, f64}`, the
+    /// update runs entirely on device by composing existing `GpuBackend`
     /// primitives:
     ///
-    /// 1. Upload `(values, indices_as_f32)` to CUDA.
-    /// 2. `scatter_add_rows_f32` materialises a dense gradient buffer of
-    ///    shape `[leading * slab_size]` with the slabs scattered into the
-    ///    rows named by `indices` (duplicates accumulate, matching
-    ///    `coalesce` + scatter semantics).
-    /// 3. `scale_f32(dense_grad, lr)` produces `lr * dense_grad`.
-    /// 4. `sub_f32(param, scaled)` produces the updated param.
+    /// 1. Upload `values` (typed) and `indices` as **i64** to CUDA —
+    ///    torch stores sparse indices as int64; the previous f32 index
+    ///    encoding rounded rows above 2^24 to a neighboring row.
+    /// 2. `scatter_add_segments_{f32,f64}` materialises a dense gradient
+    ///    buffer of shape `[leading, slab_size]` with the slabs scattered
+    ///    into the rows named by `indices` (duplicates accumulate
+    ///    atomically, matching `coalesce` + scatter semantics).
+    /// 3. `scale_{f32,f64}(dense_grad, lr)` produces `lr * dense_grad`.
+    /// 4. `sub_{f32,f64}(param, scaled)` produces the updated param.
     ///
     /// PyTorch parity (`rust-gpu-discipline` §3 composite-implicit-autograd):
     /// `optim.SGD` with `sparse=True` decomposes into the same scatter +
     /// scaled subtraction on CUDA tensors via the dispatcher's element-wise
     /// kernels. No new GpuBackend trait method is required for this phase
     /// — the composite already runs on-device with the existing primitives.
-    ///
-    /// `T = f64` on CUDA falls through to the structured `Err` path because
-    /// `scatter_add_rows_f64` is not yet implemented (the underlying
-    /// `GpuBackend` returns `InvalidArgument`); that error surfaces verbatim
-    /// rather than silently host-rounding (PyTorch parity: dispatcher raises
-    /// on missing CUDA kernels, never silently degrades to CPU).
     pub fn apply_sgd(&self, param: &mut Tensor<T>, lr: T) -> FerrotorchResult<()> {
         let shape = param.shape().to_vec();
         if shape.len() != 1 + self.slab_shape.len() {
@@ -2220,11 +2620,27 @@ impl<T: Float> SparseGrad<T> {
             }
         }
 
+        // Zero-width slabs (slab_shape contains a 0, CORE-078 / #1772):
+        // every affected row holds zero elements, so the update is a
+        // no-op on both lanes (torch: optim.SGD.step() on a [V, 0]
+        // sparse-grad param succeeds without touching storage). Indices
+        // were still validated above.
+        if slab_size == 0 {
+            return Ok(());
+        }
+
         // -- CUDA fast path ---------------------------------------------------
         //
-        // Composite of existing primitives (cpu_to_gpu + scatter_add_rows_f32
-        // + scale_f32 + sub_f32). Output stays on CUDA. The composite
-        // matches the CPU semantics including duplicate-index accumulation.
+        // Composite of existing primitives (cpu_to_gpu +
+        // scatter_add_segments_{f32,f64} + scale_* + sub_*). Output stays
+        // on CUDA. The composite matches the CPU semantics including
+        // duplicate-index accumulation (the segments kernel sums rows
+        // with equal segment ids atomically).
+        //
+        // Indices travel as i64 (CORE-079 / #1773, the #1822/#1823
+        // integer-ABI pattern): the previous f32 index encoding rounded
+        // row indices above 2^24 to a neighboring row. torch stores
+        // sparse indices as int64; so does the wire format here.
         if param.is_cuda()
             && let Some(backend) = crate::gpu_dispatch::gpu_backend()
         {
@@ -2238,117 +2654,124 @@ impl<T: Float> SparseGrad<T> {
                 return Ok(());
             }
 
-            if TypeId::of::<T>() == TypeId::of::<f32>() {
+            let is_f32 = TypeId::of::<T>() == TypeId::of::<f32>();
+            let is_f64 = TypeId::of::<T>() == TypeId::of::<f64>();
+            if is_f32 || is_f64 {
                 let ordinal = param.gpu_handle()?.device_ordinal();
 
-                // 1. Upload values (slab buffer) to CUDA.
-                // SAFETY: TypeId guard establishes T == f32; the byte
-                // reinterpret of `&[T]` as `&[u8]` is layout-preserving
-                // (T is f32, no padding). The borrow lives only for
+                // 1. Upload values (the [nnz, slab_size] slab buffer).
+                // SAFETY: the TypeId guard establishes T == f32 (resp.
+                // f64); the byte reinterpret of `&[T]` is layout-
+                // preserving (no padding) and the borrow lives only for
                 // the cpu_to_gpu call.
                 let values_bytes = unsafe {
                     std::slice::from_raw_parts(
                         self.values.as_ptr().cast::<u8>(),
-                        self.values.len() * std::mem::size_of::<f32>(),
+                        std::mem::size_of_val(self.values.as_slice()),
                     )
                 };
-                let values_handle =
-                    backend.cpu_to_gpu(values_bytes, crate::dtype::DType::F32, ordinal)?;
+                let values_dtype = if is_f32 {
+                    crate::dtype::DType::F32
+                } else {
+                    crate::dtype::DType::F64
+                };
+                let values_handle = backend.cpu_to_gpu(values_bytes, values_dtype, ordinal)?;
 
-                // 2. Indices as f32 (scatter_add_rows_f32 ABI).
-                let indices_f32: Vec<f32> = self.indices.iter().map(|&i| i as f32).collect();
-                // SAFETY: indices_f32 is a freshly-built Vec<f32> living
-                // for the duration of the call.
+                // 2. Indices as i64 (integer index ABI). Bounds against
+                //    `leading` were validated above; i64::try_from only
+                //    fails above i64::MAX, which no real parameter
+                //    dimension reaches — still checked, never wrapped.
+                let indices_i64: Vec<i64> = self
+                    .indices
+                    .iter()
+                    .map(|&i| {
+                        i64::try_from(i).map_err(|_| FerrotorchError::InvalidArgument {
+                            message: format!(
+                                "SparseGrad::apply_sgd: index {i} exceeds the i64 \
+                                 index ABI limit"
+                            ),
+                        })
+                    })
+                    .collect::<FerrotorchResult<_>>()?;
+                // SAFETY: indices_i64 is a freshly-built Vec<i64> living
+                // for the duration of the call; the byte view spans
+                // exactly its allocation.
                 let idx_bytes = unsafe {
                     std::slice::from_raw_parts(
-                        indices_f32.as_ptr().cast::<u8>(),
-                        indices_f32.len() * std::mem::size_of::<f32>(),
+                        indices_i64.as_ptr().cast::<u8>(),
+                        std::mem::size_of_val(indices_i64.as_slice()),
                     )
                 };
-                // Index data is currently stored as an F32 bit-pattern
-                // (scatter_add_rows_f32 ABI); revisit in the integer phase.
                 let idx_handle =
-                    backend.cpu_to_gpu(idx_bytes, crate::dtype::DType::F32, ordinal)?;
+                    backend.cpu_to_gpu(idx_bytes, crate::dtype::DType::I64, ordinal)?;
 
-                // 3. Scatter-add rows to a dense [leading, slab_size]
-                //    buffer (zero-initialized inside the kernel).
-                let dense_grad = backend.scatter_add_rows_f32(
-                    &values_handle,
-                    &idx_handle,
-                    leading,
-                    slab_size,
-                )?;
-
-                // 4. Scale by lr (lr is T = f32 under the TypeId guard).
-                let lr_f32: f32 = num_traits::ToPrimitive::to_f32(&lr).ok_or_else(|| {
-                    FerrotorchError::InvalidArgument {
-                        message: "SparseGrad::apply_sgd: lr not representable as f32".into(),
-                    }
-                })?;
-                let scaled = backend.scale_f32(&dense_grad, lr_f32)?;
-
+                // 3. Segmented scatter-add into a zero-initialised dense
+                //    [leading, slab_size] buffer: out[idx[k], :] +=
+                //    values[k, :], duplicates accumulating atomically.
+                // 4. Scale by lr.
                 // 5. param -= scaled (full-buffer sub).
                 let param_handle = param.gpu_handle()?;
-                let updated = backend.sub_f32(param_handle, &scaled)?;
+                let updated = if is_f32 {
+                    let dense_grad = backend.scatter_add_segments_f32(
+                        &values_handle,
+                        &idx_handle,
+                        nnz,
+                        slab_size,
+                        leading,
+                    )?;
+                    let lr_f32: f32 = num_traits::ToPrimitive::to_f32(&lr).ok_or_else(|| {
+                        FerrotorchError::InvalidArgument {
+                            message: "SparseGrad::apply_sgd: lr not representable as f32".into(),
+                        }
+                    })?;
+                    let scaled = backend.scale_f32(&dense_grad, lr_f32)?;
+                    backend.sub_f32(param_handle, &scaled)?
+                } else {
+                    let dense_grad = backend.scatter_add_segments_f64(
+                        &values_handle,
+                        &idx_handle,
+                        nnz,
+                        slab_size,
+                        leading,
+                    )?;
+                    let lr_f64: f64 = num_traits::ToPrimitive::to_f64(&lr).ok_or_else(|| {
+                        FerrotorchError::InvalidArgument {
+                            message: "SparseGrad::apply_sgd: lr not representable as f64".into(),
+                        }
+                    })?;
+                    let scaled = backend.scale_f64(&dense_grad, lr_f64)?;
+                    backend.sub_f64(param_handle, &scaled)?
+                };
 
-                let storage = TensorStorage::gpu(updated);
-                *param = Tensor::from_storage(storage, shape, param.requires_grad())?;
+                // In-place landing (CORE-081 / #1775): route through the
+                // CORE-001/#1938 primitive so TensorId, grad, hooks, and
+                // aliasing clones survive the step — torch's optimizer
+                // contract keeps id(p)/data_ptr stable and updates
+                // shared views in place.
+                //
+                // SAFETY: `update_storage` requires exclusive access for
+                // the duration of the call and no outstanding storage
+                // borrows used afterwards. The caller holds `&mut param`
+                // (sole handle in this call); no `&[T]` borrow of the
+                // param's storage is created in this function. Same
+                // justification as the ferrotorch-optim `step()` sites.
+                unsafe { param.update_storage(TensorStorage::gpu(updated))? };
                 return Ok(());
             }
 
-            if TypeId::of::<T>() == TypeId::of::<f64>() {
-                // f64 lane: scatter_add_rows_f64 is not implemented in
-                // the current backend trait (returns
-                // `InvalidArgument`). PyTorch-parity §3 says we should
-                // surface that as a structured error rather than
-                // silently fall back to CPU. Hand off to the f64
-                // primitives so the error message names the missing
-                // kernel.
-                let ordinal = param.gpu_handle()?.device_ordinal();
-                // SAFETY: TypeId guard establishes T == f64.
-                let values_bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        self.values.as_ptr().cast::<u8>(),
-                        self.values.len() * std::mem::size_of::<f64>(),
-                    )
-                };
-                let values_handle =
-                    backend.cpu_to_gpu(values_bytes, crate::dtype::DType::F64, ordinal)?;
-                let indices_f32: Vec<f32> = self.indices.iter().map(|&i| i as f32).collect();
-                // SAFETY: see above.
-                let idx_bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        indices_f32.as_ptr().cast::<u8>(),
-                        indices_f32.len() * std::mem::size_of::<f32>(),
-                    )
-                };
-                // Index data is currently stored as an F32 bit-pattern
-                // (scatter_add_rows ABI); revisit in the integer phase.
-                let idx_handle =
-                    backend.cpu_to_gpu(idx_bytes, crate::dtype::DType::F32, ordinal)?;
-
-                let dense_grad = backend.scatter_add_rows_f64(
-                    &values_handle,
-                    &idx_handle,
-                    leading,
-                    slab_size,
-                )?;
-                let lr_f64: f64 = num_traits::ToPrimitive::to_f64(&lr).ok_or_else(|| {
-                    FerrotorchError::InvalidArgument {
-                        message: "SparseGrad::apply_sgd: lr not representable as f64".into(),
-                    }
-                })?;
-                let scaled = backend.scale_f64(&dense_grad, lr_f64)?;
-                let param_handle = param.gpu_handle()?;
-                let updated = backend.sub_f64(param_handle, &scaled)?;
-                let storage = TensorStorage::gpu(updated);
-                *param = Tensor::from_storage(storage, shape, param.requires_grad())?;
-                return Ok(());
-            }
-
-            // Other dtypes fall through; `param.data_vec()?` will
-            // surface `GpuTensorNotAccessible` rather than silently
-            // host-detour (PyTorch parity: structured error).
+            // Other dtypes: explicit boundary (CORE-080 / #1774).
+            // `Tensor::data_vec` DOWNLOADS CUDA tensors, so falling
+            // through to the CPU lane would silently complete the step
+            // on CPU and reassign the param with CPU storage — a
+            // successful optimizer step that demotes the device.
+            // R-LOUD-1: error instead. On-device f16/bf16 sparse SGD is
+            // tracked in #1966.
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "SparseGrad::apply_sgd: CUDA sparse SGD supports f32/f64 \
+                     only (on-device f16/bf16 lane tracked in #1966); the CPU \
+                     lane is not used for CUDA params because it would \
+                     silently move the parameter to CPU",
+            });
         }
 
         // -- CPU path ---------------------------------------------------------
@@ -2361,7 +2784,16 @@ impl<T: Float> SparseGrad<T> {
                 data[row_start + j] = data[row_start + j] - lr * self.values[val_start + j];
             }
         }
-        *param = Tensor::from_storage(TensorStorage::cpu(data), shape, param.requires_grad())?;
+        // In-place landing (CORE-081 / #1775): see the CUDA tail — the
+        // CORE-001/#1938 primitive preserves TensorId, grad, hooks, and
+        // aliasing clones (torch keeps id(p)/data_ptr stable across
+        // optimizer steps).
+        //
+        // SAFETY: exclusive access via `&mut param` for the call; the
+        // `data_vec` above copied into an owned Vec, so no borrow of the
+        // param's storage is used after this point. Same justification
+        // as the ferrotorch-optim `step()` sites.
+        unsafe { param.update_storage(TensorStorage::cpu(data))? };
         Ok(())
     }
 }
@@ -3078,7 +3510,7 @@ mod tests {
         assert_eq!(csc.ncols(), 3);
         assert_eq!(csc.nnz(), 5);
         // Round-trip back to CSR.
-        let csr2 = csc.to_csr();
+        let csr2 = csc.to_csr().expect("valid CSC -> CSR");
         assert_eq!(csr2.values().to_vec(), vec![1.0, 2.0, 3.0, 4.0, 5.0]);
     }
 

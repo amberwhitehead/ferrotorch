@@ -14,11 +14,13 @@
 //!
 //! # GPU kernels
 //!
-//! Two PTX kernels generate random numbers directly on device without
-//! CPU-to-GPU transfer:
+//! PTX kernels generate random numbers directly on device without CPU-to-GPU
+//! transfer:
 //!
 //! - `philox_uniform_kernel` — fills a buffer with uniform f32 in [0, 1)
 //! - `philox_normal_kernel` — fills with standard normal f32 (Box-Muller)
+//! - dtype conversion kernels narrow/widen those CUDA-resident f32 streams for
+//!   f64/f16/bf16 factory requests without staging through host memory.
 //!
 //! # Fork/join for data parallelism
 //!
@@ -54,6 +56,8 @@ use crate::device::GpuDevice;
 use crate::error::{GpuError, GpuResult};
 #[cfg(feature = "cuda")]
 use crate::transfer::alloc_zeros_f32;
+#[cfg(feature = "cuda")]
+use crate::transfer::alloc_zeros_f64;
 
 // ---------------------------------------------------------------------------
 // Philox 4x32-10 constants
@@ -1209,6 +1213,153 @@ DONE:
 }
 ";
 
+#[cfg(feature = "cuda")]
+const PHILOX_F64_CUDA: &str = r#"
+#include <curand_kernel.h>
+
+extern "C" __global__ void philox_uniform_f64_kernel(
+    double* out,
+    unsigned int n,
+    unsigned long long seed,
+    unsigned long long base_counter
+) {
+    unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int idx0 = gid * 2;
+    if (idx0 >= n) {
+        return;
+    }
+
+    curandStatePhilox4_32_10_t state;
+    curand_init(seed, base_counter + (unsigned long long)gid, 0ULL, &state);
+    double2 v = curand_uniform2_double(&state);
+    out[idx0] = v.x;
+    unsigned int idx1 = idx0 + 1;
+    if (idx1 < n) {
+        out[idx1] = v.y;
+    }
+}
+
+extern "C" __global__ void philox_normal_f64_kernel(
+    double* out,
+    unsigned int n,
+    unsigned long long seed,
+    unsigned long long base_counter
+) {
+    unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int idx0 = gid * 2;
+    if (idx0 >= n) {
+        return;
+    }
+
+    curandStatePhilox4_32_10_t state;
+    curand_init(seed, base_counter + (unsigned long long)gid, 0ULL, &state);
+    double2 v = curand_normal2_double(&state);
+    out[idx0] = v.x;
+    unsigned int idx1 = idx0 + 1;
+    if (idx1 < n) {
+        out[idx1] = v.y;
+    }
+}
+"#;
+
+#[cfg(feature = "cuda")]
+const RNG_UNIFORM_F32_TO_F16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry rng_uniform_f32_to_f16_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %idx, %bid, %bdim, %nr;
+    .reg .u64 %in, %out, %ioff, %ooff;
+    .reg .f32 %v, %max;
+    .reg .b16 %r;
+    .reg .pred %p, %too_high;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %nr, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr;
+    @%p bra DONE;
+
+    cvt.u64.u32 %ioff, %idx;
+    shl.b64 %ioff, %ioff, 2;
+    add.u64 %in, %in, %ioff;
+    ld.global.f32 %v, [%in];
+
+    mov.f32 %max, 0f3F7FE000;
+    setp.gt.f32 %too_high, %v, %max;
+    @%too_high mov.f32 %v, %max;
+
+    cvt.rn.f16.f32 %r, %v;
+
+    cvt.u64.u32 %ooff, %idx;
+    shl.b64 %ooff, %ooff, 1;
+    add.u64 %out, %out, %ooff;
+    st.global.b16 [%out], %r;
+
+DONE:
+    ret;
+}
+";
+
+#[cfg(feature = "cuda")]
+const RNG_UNIFORM_F32_TO_BF16_PTX: &str = "\
+.version 7.8
+.target sm_80
+.address_size 64
+
+.visible .entry rng_uniform_f32_to_bf16_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %idx, %bid, %bdim, %nr;
+    .reg .u64 %in, %out, %ioff, %ooff;
+    .reg .f32 %v, %max;
+    .reg .b16 %r;
+    .reg .pred %p, %too_high;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %nr, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr;
+    @%p bra DONE;
+
+    cvt.u64.u32 %ioff, %idx;
+    shl.b64 %ioff, %ioff, 2;
+    add.u64 %in, %in, %ioff;
+    ld.global.f32 %v, [%in];
+
+    mov.f32 %max, 0f3F7F0000;
+    setp.gt.f32 %too_high, %v, %max;
+    @%too_high mov.f32 %v, %max;
+
+    cvt.rn.bf16.f32 %r, %v;
+
+    cvt.u64.u32 %ooff, %idx;
+    shl.b64 %ooff, %ooff, 1;
+    add.u64 %out, %out, %ooff;
+    st.global.b16 [%out], %r;
+
+DONE:
+    ret;
+}
+";
+
 // ---------------------------------------------------------------------------
 // GPU kernel launch functions
 // ---------------------------------------------------------------------------
@@ -1232,6 +1383,144 @@ fn rng_launch_cfg(n: usize) -> GpuResult<LaunchConfig> {
     })
 }
 
+#[cfg(feature = "cuda")]
+fn cast_uniform_rng_f32_to_u16(
+    input: &CudaBuffer<f32>,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel: &'static str,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    use cudarc::driver::PushKernelArg;
+
+    let n = input.len();
+    if n == 0 {
+        return device.stream().alloc_zeros::<u16>(0).map_err(Into::into);
+    }
+
+    let f =
+        crate::module_cache::get_or_compile(device.context(), ptx, kernel, device.ordinal() as u32)
+            .map_err(|e| GpuError::PtxCompileFailed { kernel, source: e })?;
+
+    let mut out = device.stream().alloc_zeros::<u16>(n)?;
+    let n_u32 = n as u32;
+    let cfg = rng_launch_cfg(n)?;
+
+    unsafe {
+        device
+            .stream()
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(&mut out)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_include_paths() -> Vec<String> {
+    let mut paths = Vec::new();
+    for var in ["CUDA_HOME", "CUDA_PATH"] {
+        if let Ok(root) = std::env::var(var) {
+            paths.push(format!("{root}/include"));
+            paths.push(format!("{root}/targets/x86_64-linux/include"));
+            paths.push(format!("{root}/targets/x86_64-linux/include/cccl"));
+        }
+    }
+    paths.extend([
+        "/usr/local/cuda/include".to_string(),
+        "/usr/local/cuda/targets/x86_64-linux/include".to_string(),
+        "/usr/local/cuda/targets/x86_64-linux/include/cccl".to_string(),
+        "/usr/local/cuda-13.1/include".to_string(),
+        "/usr/local/cuda-13.1/targets/x86_64-linux/include".to_string(),
+        "/usr/local/cuda-13.1/targets/x86_64-linux/include/cccl".to_string(),
+    ]);
+    paths
+        .into_iter()
+        .filter(|p| {
+            let path = std::path::Path::new(p);
+            path.join("curand_kernel.h").exists() || path.join("cuda/std/type_traits").exists()
+        })
+        .collect()
+}
+
+#[cfg(feature = "cuda")]
+fn compile_philox_f64_ptx() -> GpuResult<String> {
+    use cudarc::nvrtc::{CompileOptions, compile_ptx_with_opts};
+
+    let ptx = compile_ptx_with_opts(
+        PHILOX_F64_CUDA,
+        CompileOptions {
+            arch: Some("compute_75"),
+            include_paths: cuda_include_paths(),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| GpuError::InvalidState {
+        message: format!("NVRTC compile failed for philox f64 curand kernels: {e}"),
+    })?;
+    Ok(ptx.to_src())
+}
+
+#[cfg(feature = "cuda")]
+fn gpu_philox_f64_curand(
+    n: usize,
+    device: &GpuDevice,
+    kernel_name: &'static str,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+
+    if n == 0 {
+        return alloc_zeros_f64(0, device);
+    }
+
+    let state = {
+        let mut mgr = CUDA_RNG_MANAGER
+            .lock()
+            .map_err(|e| GpuError::InvalidState {
+                message: format!("CUDA RNG manager mutex poisoned: {e}"),
+            })?;
+        let rng_gen = mgr.generator(device.ordinal());
+        let state = rng_gen.get_state();
+        rng_gen.advance(n.div_ceil(2) as u64);
+        state
+    };
+
+    let ptx = compile_philox_f64_ptx()?;
+    let ptx = format!("// ferrotorch rng entry: {kernel_name}\n{ptx}");
+    let f = crate::module_cache::get_or_compile_owned(
+        device.context(),
+        ptx,
+        kernel_name.to_string(),
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: kernel_name,
+        source: e,
+    })?;
+
+    let mut out = alloc_zeros_f64(n, device)?;
+    let num_threads = n.div_ceil(2);
+    let cfg = rng_launch_cfg(num_threads)?;
+    let n_u32 = n as u32;
+    let seed = state.seed;
+    let counter = state.counter;
+
+    unsafe {
+        device
+            .stream()
+            .launch_builder(&f)
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .arg(&seed)
+            .arg(&counter)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
 /// Fill a GPU buffer with uniform random f32 values in [0, 1) using the
 /// Philox 4x32-10 algorithm.
 ///
@@ -1243,10 +1532,6 @@ fn rng_launch_cfg(n: usize) -> GpuResult<LaunchConfig> {
 /// * `n` — number of f32 values to generate
 /// * `device` — the GPU device
 ///
-/// # CPU fallback
-///
-/// If PTX compilation fails (architecture mismatch), falls back to generating
-/// values on CPU and transferring to GPU.
 #[cfg(feature = "cuda")]
 pub fn gpu_philox_uniform(n: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
     use cudarc::driver::PushKernelArg;
@@ -1273,21 +1558,16 @@ pub fn gpu_philox_uniform(n: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<
     let ctx = device.context();
     let stream = device.stream();
 
-    let f = match crate::module_cache::get_or_compile(
+    let f = crate::module_cache::get_or_compile(
         ctx,
         PHILOX_UNIFORM_PTX,
         "philox_uniform_kernel",
         device.ordinal() as u32,
-    ) {
-        Ok(f) => f,
-        Err(_) => {
-            // CPU fallback: generate on CPU with the same state, then transfer.
-            let mut rng_gen = PhiloxGenerator::new(state.seed);
-            rng_gen.set_state(state);
-            let vals = rng_gen.generate_uniform(n);
-            return crate::transfer::cpu_to_gpu(&vals, device);
-        }
-    };
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "philox_uniform_kernel",
+        source: e,
+    })?;
 
     let mut out = alloc_zeros_f32(n, device)?;
     let cfg = rng_launch_cfg(n)?;
@@ -1346,21 +1626,16 @@ pub fn gpu_philox_normal(n: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<f
     let ctx = device.context();
     let stream = device.stream();
 
-    let f = match crate::module_cache::get_or_compile(
+    let f = crate::module_cache::get_or_compile(
         ctx,
         PHILOX_NORMAL_PTX,
         "philox_normal_kernel",
         device.ordinal() as u32,
-    ) {
-        Ok(f) => f,
-        Err(_) => {
-            // CPU fallback
-            let mut rng_gen = PhiloxGenerator::new(state.seed);
-            rng_gen.set_state(state);
-            let vals = rng_gen.generate_normal(n);
-            return crate::transfer::cpu_to_gpu(&vals, device);
-        }
-    };
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "philox_normal_kernel",
+        source: e,
+    })?;
 
     let mut out = alloc_zeros_f32(n, device)?;
     // Each thread handles 2 elements, so we need ceil(n/2) threads.
@@ -1385,6 +1660,68 @@ pub fn gpu_philox_normal(n: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<f
     }
 
     Ok(out)
+}
+
+/// Fill a GPU buffer with uniform f64 values without host staging.
+#[cfg(feature = "cuda")]
+pub fn gpu_philox_uniform_f64(n: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
+    gpu_philox_f64_curand(n, device, "philox_uniform_f64_kernel")
+}
+
+/// Fill a GPU buffer with standard-normal f64 values without host staging.
+#[cfg(feature = "cuda")]
+pub fn gpu_philox_normal_f64(n: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
+    gpu_philox_f64_curand(n, device, "philox_normal_f64_kernel")
+}
+
+/// Fill a GPU buffer with uniform f16 values without host staging.
+#[cfg(feature = "cuda")]
+pub fn gpu_philox_uniform_f16(
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let f32_vals = gpu_philox_uniform(n, device)?;
+    cast_uniform_rng_f32_to_u16(
+        &f32_vals,
+        device,
+        RNG_UNIFORM_F32_TO_F16_PTX,
+        "rng_uniform_f32_to_f16_kernel",
+    )
+}
+
+/// Fill a GPU buffer with standard-normal f16 values without host staging.
+#[cfg(feature = "cuda")]
+pub fn gpu_philox_normal_f16(
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let f32_vals = gpu_philox_normal(n, device)?;
+    crate::kernels::gpu_f32_to_f16(&f32_vals, device)
+}
+
+/// Fill a GPU buffer with uniform bf16 values without host staging.
+#[cfg(feature = "cuda")]
+pub fn gpu_philox_uniform_bf16(
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let f32_vals = gpu_philox_uniform(n, device)?;
+    cast_uniform_rng_f32_to_u16(
+        &f32_vals,
+        device,
+        RNG_UNIFORM_F32_TO_BF16_PTX,
+        "rng_uniform_f32_to_bf16_kernel",
+    )
+}
+
+/// Fill a GPU buffer with standard-normal bf16 values without host staging.
+#[cfg(feature = "cuda")]
+pub fn gpu_philox_normal_bf16(
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let f32_vals = gpu_philox_normal(n, device)?;
+    crate::kernels::gpu_f32_to_bf16(&f32_vals, device)
 }
 
 // ---------------------------------------------------------------------------

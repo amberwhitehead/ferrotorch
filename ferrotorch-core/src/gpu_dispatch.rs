@@ -3317,6 +3317,27 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// Generate `numel` uniform f64 values on the GPU.
+    fn rand_uniform_f64(&self, _numel: usize) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "rand_uniform_f64",
+        })
+    }
+
+    /// Generate `numel` uniform IEEE-f16 values on the GPU.
+    fn rand_uniform_f16(&self, _numel: usize) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "rand_uniform_f16",
+        })
+    }
+
+    /// Generate `numel` uniform bf16 values on the GPU.
+    fn rand_uniform_bf16(&self, _numel: usize) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "rand_uniform_bf16",
+        })
+    }
+
     /// Generate `numel` standard-normal f32 values directly on the GPU.
     ///
     /// PyTorch parity: `torch.randn(size, device='cuda')` lowers to
@@ -3326,6 +3347,27 @@ pub trait GpuBackend: Send + Sync {
     fn randn_normal_f32(&self, _numel: usize) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "randn_normal_f32",
+        })
+    }
+
+    /// Generate `numel` standard-normal f64 values on the GPU.
+    fn randn_normal_f64(&self, _numel: usize) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "randn_normal_f64",
+        })
+    }
+
+    /// Generate `numel` standard-normal IEEE-f16 values on the GPU.
+    fn randn_normal_f16(&self, _numel: usize) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "randn_normal_f16",
+        })
+    }
+
+    /// Generate `numel` standard-normal bf16 values on the GPU.
+    fn randn_normal_bf16(&self, _numel: usize) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "randn_normal_bf16",
         })
     }
 
@@ -5370,6 +5412,28 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "gather_intidx",
+        })
+    }
+
+    /// Rank-aware `gather(dim)` driven by a GPU-resident integer index handle.
+    ///
+    /// `input_shape` is the contiguous C-order shape of `src`; `index_shape`
+    /// is both the index and output shape. For each output coordinate decoded
+    /// from `index_shape`, only `coord[dim]` is replaced by `index[t]`.
+    /// Backends use this for valid PyTorch gather layouts whose non-gather
+    /// dimensions are smaller than the input, where the compact
+    /// `[outer, out_dim, inner]` fast path would address the index buffer
+    /// incorrectly.
+    fn gather_intidx_nd(
+        &self,
+        _src: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "gather_intidx_nd",
         })
     }
 

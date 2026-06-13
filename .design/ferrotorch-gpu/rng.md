@@ -20,8 +20,10 @@ counter-based RNG that mirrors CUDA's cuRAND / PyTorch's
 registry `CudaRngManager` accessed via the
 `cuda_rng_manager()` singleton + `fork_rng` / `join_rng` snapshot
 helpers, (3) GPU-side PTX kernels `philox_uniform_kernel` and
-`philox_normal_kernel` that generate random buffers directly on
-device. Mirrors upstream's `at::CUDAGeneratorImpl` state machine
+`philox_normal_kernel` that generate f32 random buffers directly on
+device, NVRTC-compiled cuRAND Philox kernels for f64 uniform/normal,
+and CUDA-resident dtype conversion kernels for f16/bf16 factory
+outputs. Mirrors upstream's `at::CUDAGeneratorImpl` state machine
 and the `PhiloxCudaState` capture/restore contract used by
 captured CUDA graphs.
 
@@ -56,6 +58,16 @@ captured CUDA graphs.
 - REQ-6: `gpu_philox_normal(n, device) -> CudaBuffer<f32>` — GPU
   kernel filling a length-`n` f32 buffer with standard-normal f32
   via Box-Muller, using `PHILOX_NORMAL_PTX`. No CPU↔GPU round trip.
+- REQ-6a: `gpu_philox_{uniform,normal}_{f64,f16,bf16}` — dtype-specific
+  CUDA factory helpers used by `rand_on_device` / `randn_on_device`.
+  f64 routes through NVRTC-compiled CUDA C++ kernels that call
+  `curand_uniform2_double` / `curand_normal2_double`, matching
+  PyTorch's double branch in `DistributionTemplates.h`. f16/bf16 keep
+  the random stream and dtype conversion on the device using f32 opmath
+  plus narrowing, matching PyTorch's non-double branch. The f16/bf16
+  uniform paths clamp before narrowing so rounding cannot turn a valid
+  f32 value below 1.0 into an output equal to 1.0; live PyTorch CUDA
+  probes show `torch.rand(dtype=float16/bfloat16)` remains strictly `< 1`.
 - REQ-7: Non-test production consumer wiring through
   `CudaBackendImpl` — the dropout-philox and other RNG-consuming
   paths in `backend_impl.rs` call into `crate::rng::cuda_rng_manager()`
@@ -73,10 +85,14 @@ captured CUDA graphs.
   `pub fn join_rng` at lines 473, 499, 520.
 - [x] AC-5: `pub(crate) const PHILOX_UNIFORM_PTX` at line 557 and
   `pub(crate) const PHILOX_NORMAL_PTX` at line 872.
-- [x] AC-6: `pub fn gpu_philox_uniform` at line 1235 and
-  `pub fn gpu_philox_normal` at line 1307.
+- [x] AC-6: `pub fn gpu_philox_uniform` and
+  `pub fn gpu_philox_normal`, plus f64/f16/bf16 factory helpers.
 - [x] AC-7: 27 unit tests in `mod tests` exercise the algorithmic
   core, fork/join, and the GPU kernel paths.
+- [x] AC-8: `cargo test -p ferrotorch-gpu --features cuda --test
+  on_device_rng -- --nocapture` exercises f32/f64/f16/bf16 CUDA
+  factory residency and distribution probes, including a f64
+  rand-then-randn cache-regression probe.
 
 ## Architecture
 
@@ -138,8 +154,10 @@ host- and device-side cursors in sync.
    global manager.
 2. Allocates the f32 output buffer.
 3. Launches `PHILOX_UNIFORM_PTX` with `(counter, seed, offset)`.
-4. Advances the manager's counter by `ceil(n / 4)`.
-5. Returns the buffer.
+4. Returns `PtxCompileFailed` if the PTX cannot be loaded; this path
+   must not silently generate on CPU and upload.
+5. Advances the manager's counter by `ceil(n / 4)`.
+6. Returns the buffer.
 
 `pub fn gpu_philox_normal(n, device)` (line 1307) is structurally
 identical with the Box-Muller transform applied in the PTX.
