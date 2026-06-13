@@ -15,10 +15,8 @@
 //!   IEEE float compares (`setp.gt.f32/f64`); i32/i64 use signed-integer
 //!   compares (`setp.gt.s32/s64`); bf16/f16 decode each 16-bit element to f32
 //!   (`cvt.f32.f16` after a bf16→f32 hi-half splat / an f16 widening cvt) and
-//!   compare in f32. NaN handling matches a strict `>`/`<`: a NaN never wins,
-//!   so the first non-NaN-or-index-0 element is kept (PyTorch's argmax on CUDA
-//!   propagates NaN; this is a documented minor divergence — see the module
-//!   note on NaN below).
+//!   compare in f32. Float NaN handling matches PyTorch CPU/CUDA: the first
+//!   NaN in a slice wins for both argmax and argmin.
 //!
 //! # Launch scheme
 //!
@@ -39,12 +37,9 @@
 //!
 //! # NaN
 //!
-//! With a strict `>` compare, a NaN value is never `> acc`, so it is skipped.
-//! If element 0 is NaN it seeds `acc` and is only displaced by a real `>`
-//! compare (which against NaN is false), so a slice of all-NaN reports index 0.
-//! PyTorch's CUDA argmax returns the index of a NaN if present. This is a known
-//! minor divergence; ferrotorch's float reductions elsewhere take the same
-//! pragmatic strict-compare stance. Documented, not silently hidden.
+//! A float NaN candidate displaces the accumulator only while the accumulator
+//! is not already NaN. That makes the first NaN sticky, matching
+//! `torch.argmax` / `torch.argmin` on CPU and CUDA.
 //!
 //! ## REQ status (per `.design/ferrotorch-gpu/reduce_arg.md`)
 //!
@@ -57,7 +52,7 @@
 //! | REQ-1 (12 dtype × {argmax,argmin}) | SHIPPED | 12 `pub fn gpu_argmax_* / gpu_argmin_*` symbols in `reduce_arg.rs` (macro-stamped + hand-written); consumer `CudaBackendImpl::argmax_* / argmin_* in backend_impl.rs` dispatches all 12 dtype × {max,min} combinations through `match dtype` arms |
 //! | REQ-2 (PTX template ABI) | SHIPPED | six `ARGREDUCE_*_PTX` constants in `reduce_arg.rs` carry the documented 7-arg ABI; loaded via `module_cache::get_or_compile` in `fn launch_argreduce` |
 //! | REQ-3 (strict compare → first-tie) | SHIPPED | `setp.gt.f32 / setp.lt.f32` (and dtype counterparts) in PTX templates in `reduce_arg.rs`; verified by `argmax_f32_tie_first_index` unit test constructing `[5.0, 1.0, 2.0, 5.0]` and asserting index 0 |
-//! | REQ-4 (NaN handling) | SHIPPED | NaN divergence documented in `reduce_arg.rs` module `//!` block; strict-compare semantics in PTX naturally produce this behaviour |
+//! | REQ-4 (NaN handling) | SHIPPED | f32/f64/f16/bf16 PTX checks `setp.nan` and makes the first NaN sticky, matching PyTorch CPU/CUDA argmax/argmin |
 //! | REQ-5 (dispatch wiring) | SHIPPED | `CudaBackendImpl::argmax_f32 / argmin_f32 in backend_impl.rs` dispatch `match dtype { F32 => gpu_argmax_f32, F64 => gpu_argmax_f64, F16 => gpu_argmax_f16, BF16 => gpu_argmax_bf16, I32 => gpu_argmax_i32, I64 => gpu_argmax_i64 }`; mirror block for argmin; ferrotorch-core dispatches through `GpuBackend` trait |
 
 #![cfg(feature = "cuda")]
@@ -111,7 +106,7 @@ const ARGREDUCE_F32_PTX: &str = "\
     .reg .u64 %in, %out, %off, %addr;
     .reg .f32 %v, %acc;
     .reg .s64 %best_s64;
-    .reg .pred %p, %is_max, %not_max, %better, %lt, %gt;
+    .reg .pred %p, %is_max, %not_max, %better, %lt, %gt, %v_nan, %acc_nan, %acc_not_nan, %nan_better;
 
     ld.param.u64 %in, [in_ptr];
     ld.param.u64 %out, [out_ptr];
@@ -157,12 +152,18 @@ LOOP:
     add.u64 %addr, %in, %off;
     ld.global.f32 %v, [%addr];
 
-    // strict compare: argmax keeps first-greatest, argmin first-least
+    // Strict compare keeps first-greatest/least; a NaN candidate wins only
+    // until the first NaN has become sticky in the accumulator.
     setp.gt.f32 %gt, %v, %acc;
     setp.lt.f32 %lt, %v, %acc;
+    setp.nan.f32 %v_nan, %v, %v;
+    setp.nan.f32 %acc_nan, %acc, %acc;
+    not.pred %acc_not_nan, %acc_nan;
+    and.pred %nan_better, %v_nan, %acc_not_nan;
     and.pred %gt, %gt, %is_max;
     and.pred %lt, %lt, %not_max;
     or.pred %better, %gt, %lt;
+    or.pred %better, %better, %nan_better;
     @%better mov.f32 %acc, %v;
     @%better mov.u32 %best_j, %j;
 
@@ -197,7 +198,7 @@ const ARGREDUCE_F64_PTX: &str = "\
     .reg .u64 %in, %out, %off, %addr;
     .reg .f64 %v, %acc;
     .reg .s64 %best_s64;
-    .reg .pred %p, %is_max, %not_max, %better, %lt, %gt;
+    .reg .pred %p, %is_max, %not_max, %better, %lt, %gt, %v_nan, %acc_nan, %acc_not_nan, %nan_better;
 
     ld.param.u64 %in, [in_ptr];
     ld.param.u64 %out, [out_ptr];
@@ -242,9 +243,14 @@ LOOP:
 
     setp.gt.f64 %gt, %v, %acc;
     setp.lt.f64 %lt, %v, %acc;
+    setp.nan.f64 %v_nan, %v, %v;
+    setp.nan.f64 %acc_nan, %acc, %acc;
+    not.pred %acc_not_nan, %acc_nan;
+    and.pred %nan_better, %v_nan, %acc_not_nan;
     and.pred %gt, %gt, %is_max;
     and.pred %lt, %lt, %not_max;
     or.pred %better, %gt, %lt;
+    or.pred %better, %better, %nan_better;
     @%better mov.f64 %acc, %v;
     @%better mov.u32 %best_j, %j;
 
@@ -448,7 +454,7 @@ const ARGREDUCE_F16_PTX: &str = "\
     .reg .b16 %h;
     .reg .f32 %v, %acc;
     .reg .s64 %best_s64;
-    .reg .pred %p, %is_max, %not_max, %better, %lt, %gt;
+    .reg .pred %p, %is_max, %not_max, %better, %lt, %gt, %v_nan, %acc_nan, %acc_not_nan, %nan_better;
 
     ld.param.u64 %in, [in_ptr];
     ld.param.u64 %out, [out_ptr];
@@ -495,9 +501,14 @@ LOOP:
 
     setp.gt.f32 %gt, %v, %acc;
     setp.lt.f32 %lt, %v, %acc;
+    setp.nan.f32 %v_nan, %v, %v;
+    setp.nan.f32 %acc_nan, %acc, %acc;
+    not.pred %acc_not_nan, %acc_nan;
+    and.pred %nan_better, %v_nan, %acc_not_nan;
     and.pred %gt, %gt, %is_max;
     and.pred %lt, %lt, %not_max;
     or.pred %better, %gt, %lt;
+    or.pred %better, %better, %nan_better;
     @%better mov.f32 %acc, %v;
     @%better mov.u32 %best_j, %j;
 
@@ -530,7 +541,7 @@ const ARGREDUCE_BF16_PTX: &str = "\
     .reg .u64 %in, %out, %off, %addr;
     .reg .f32 %v, %acc;
     .reg .s64 %best_s64;
-    .reg .pred %p, %is_max, %not_max, %better, %lt, %gt;
+    .reg .pred %p, %is_max, %not_max, %better, %lt, %gt, %v_nan, %acc_nan, %acc_not_nan, %nan_better;
 
     ld.param.u64 %in, [in_ptr];
     ld.param.u64 %out, [out_ptr];
@@ -581,9 +592,14 @@ LOOP:
 
     setp.gt.f32 %gt, %v, %acc;
     setp.lt.f32 %lt, %v, %acc;
+    setp.nan.f32 %v_nan, %v, %v;
+    setp.nan.f32 %acc_nan, %acc, %acc;
+    not.pred %acc_not_nan, %acc_nan;
+    and.pred %nan_better, %v_nan, %acc_not_nan;
     and.pred %gt, %gt, %is_max;
     and.pred %lt, %lt, %not_max;
     or.pred %better, %gt, %lt;
+    or.pred %better, %better, %nan_better;
     @%better mov.f32 %acc, %v;
     @%better mov.u32 %best_j, %j;
 

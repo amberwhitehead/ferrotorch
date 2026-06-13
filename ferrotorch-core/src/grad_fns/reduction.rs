@@ -1611,17 +1611,29 @@ fn argmax_argmin_full<T: Float>(
     input: &Tensor<T>,
     find_max: bool,
 ) -> FerrotorchResult<IntTensor<i64>> {
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: if find_max { "argmax" } else { "argmin" },
-        });
-    }
-    let data = input.data()?;
-    if data.is_empty() {
+    if input.numel() == 0 {
         return Err(FerrotorchError::InvalidArgument {
             message: "argmax/argmin: cannot reduce an empty tensor".into(),
         });
     }
+
+    if input.is_cuda() {
+        let input_ref = if input.is_contiguous() {
+            input.clone()
+        } else {
+            input.contiguous()?
+        };
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = if find_max {
+            backend.argmax(input_ref.gpu_handle()?, 1, input_ref.numel(), 1)?
+        } else {
+            backend.argmin(input_ref.gpu_handle()?, 1, input_ref.numel(), 1)?
+        };
+        return Ok(IntTensor::<i64>::from_gpu_handle(handle, Vec::new()));
+    }
+
+    let data = input.data()?;
     let mut best_idx = 0i64;
     let mut best_val = data[0];
     for (i, &v) in data.iter().enumerate().skip(1) {
@@ -1633,9 +1645,9 @@ fn argmax_argmin_full<T: Float>(
         // overwrite NaN with a finite). Matches torch live oracle:
         //   torch.argmax(torch.tensor([1, nan, 3])).item() == 1
         let take = if find_max {
-            v.is_nan() || (!best_val.is_nan() && v > best_val)
+            !best_val.is_nan() && (v.is_nan() || v > best_val)
         } else {
-            v.is_nan() || (!best_val.is_nan() && v < best_val)
+            !best_val.is_nan() && (v.is_nan() || v < best_val)
         };
         if take {
             best_idx = i as i64;
@@ -1651,42 +1663,58 @@ fn argmax_argmin_dim<T: Float>(
     keepdim: bool,
     find_max: bool,
 ) -> FerrotorchResult<IntTensor<i64>> {
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: if find_max { "argmax_dim" } else { "argmin_dim" },
-        });
-    }
     let ndim = input.ndim();
     if ndim == 0 {
-        // Upstream `argmax(scalar, dim=0)` returns a 0-D zero tensor (the
-        // single element is trivially the argmax). `:1789-1792 fill_(0)`
-        // path for `sizes[dim] == 1`.
-        return Ok(IntTensor::<i64>::scalar(0));
-    }
-    let norm_dim = if dim < 0 {
-        (ndim as i64 + dim) as usize
-    } else {
-        dim as usize
-    };
-    if norm_dim >= ndim {
+        if dim == 0 || dim == -1 {
+            // Upstream `argmax(scalar, dim=0/-1)` returns a 0-D zero tensor.
+            return Ok(IntTensor::<i64>::scalar(0));
+        }
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
-                "argmax/argmin: dim {dim} is out of bounds for tensor with {ndim} dimensions"
+                "argmax/argmin: dim {dim} is out of bounds for tensor with 0 dimensions"
             ),
         });
     }
+    let norm_dim = crate::shape::normalize_axis(dim as isize, ndim)?;
     let input_ref = if input.is_contiguous() {
         input.clone()
     } else {
         input.contiguous()?
     };
-    let in_data = input_ref.data()?;
     let in_shape = input_ref.shape();
     let dim_size = in_shape[norm_dim];
     let outer: usize = in_shape[..norm_dim].iter().product();
     let inner: usize = in_shape[norm_dim + 1..].iter().product();
+    let out_numel = outer * inner;
 
-    let mut out = Vec::with_capacity(outer * inner);
+    if dim_size == 0 && out_numel != 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "argmax/argmin: expected reduction dim {norm_dim} to have non-zero size"
+            ),
+        });
+    }
+
+    let mut out_shape: Vec<usize> = in_shape.to_vec();
+    if keepdim {
+        out_shape[norm_dim] = 1;
+    } else {
+        out_shape.remove(norm_dim);
+    }
+
+    if input_ref.is_cuda() {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = if find_max {
+            backend.argmax(input_ref.gpu_handle()?, outer, dim_size, inner)?
+        } else {
+            backend.argmin(input_ref.gpu_handle()?, outer, dim_size, inner)?
+        };
+        return Ok(IntTensor::<i64>::from_gpu_handle(handle, out_shape));
+    }
+
+    let in_data = input_ref.data()?;
+    let mut out = Vec::with_capacity(out_numel);
     for o in 0..outer {
         for i in 0..inner {
             let base = o * dim_size * inner + i;
@@ -1697,9 +1725,9 @@ fn argmax_argmin_dim<T: Float>(
                 // NaN-poison per-slice — same predicate as `argmax_argmin_full`
                 // mirroring upstream `SharedReduceOps.h:26-34`.
                 let take = if find_max {
-                    v.is_nan() || (!best_val.is_nan() && v > best_val)
+                    !best_val.is_nan() && (v.is_nan() || v > best_val)
                 } else {
-                    v.is_nan() || (!best_val.is_nan() && v < best_val)
+                    !best_val.is_nan() && (v.is_nan() || v < best_val)
                 };
                 if take {
                     best_idx = d as i64;
@@ -1708,12 +1736,6 @@ fn argmax_argmin_dim<T: Float>(
             }
             out.push(best_idx);
         }
-    }
-    let mut out_shape: Vec<usize> = in_shape.to_vec();
-    if keepdim {
-        out_shape[norm_dim] = 1;
-    } else {
-        out_shape.remove(norm_dim);
     }
     IntTensor::<i64>::from_vec(out, out_shape)
 }

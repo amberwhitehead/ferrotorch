@@ -15,10 +15,7 @@
 //! `[outer, axis, inner]` kernels factored from the input shape, rejecting
 //! valid compact non-dim index shapes with "until #1820" errors.
 
-use ferrotorch_core::autograd::graph::backward;
-use ferrotorch_core::{
-    Device, FerrotorchError, Tensor, TensorStorage, gather, scatter, scatter_add,
-};
+use ferrotorch_core::{FerrotorchError, Tensor, TensorStorage, gather, scatter, scatter_add};
 
 fn cpu_f32(data: &[f32], shape: &[usize], rg: bool) -> Tensor<f32> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), rg).unwrap()
@@ -106,6 +103,8 @@ fn core126_cpu_smaller_non_dim_axis_matches_torch_contract() {
 #[cfg(feature = "gpu")]
 mod gpu {
     use super::*;
+    use ferrotorch_core::Device;
+    use ferrotorch_core::autograd::graph::backward;
     use std::sync::Once;
 
     static GPU_INIT: Once = Once::new();

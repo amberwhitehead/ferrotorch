@@ -10,8 +10,8 @@
 //!   `zeros_like(input.expand(infer_size(input.sizes(), mask.sizes())))`, so
 //!   gradients reduce through broadcasted input dimensions.
 
-use ferrotorch_core::autograd::graph::{backward, backward_with_grad};
-use ferrotorch_core::{BoolTensor, Device, FerrotorchError, Tensor, TensorStorage, masked_select};
+use ferrotorch_core::autograd::graph::backward;
+use ferrotorch_core::{BoolTensor, FerrotorchError, Tensor, TensorStorage, masked_select};
 
 fn cpu_f32(data: &[f32], shape: &[usize], rg: bool) -> Tensor<f32> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), rg).unwrap()
@@ -70,6 +70,8 @@ fn core130_public_masked_select_broadcasted_input_backward_reduces() {
 #[cfg(feature = "gpu")]
 mod cuda {
     use super::*;
+    use ferrotorch_core::Device;
+    use ferrotorch_core::autograd::graph::backward_with_grad;
     use half::{bf16, f16};
     use std::sync::Once;
 
