@@ -7068,6 +7068,184 @@ DONE:
 }
 ";
 
+#[cfg(feature = "cuda")]
+pub(crate) const EXTREME_AXIS_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry extreme_axis_kernel(
+    .param .u64 input_ptr,
+    .param .u64 output_ptr,
+    .param .u32 outer_size,
+    .param .u32 axis_size,
+    .param .u32 inner_size,
+    .param .u32 total_output,
+    .param .u32 is_max
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %outer_sz, %axis_sz, %inner_sz, %is_max_r;
+    .reg .u32 %outer_idx, %inner_idx, %k, %base, %idx;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .f32 %val, %best;
+    .reg .pred %p, %lp, %other_nan, %best_nan, %best_ok, %gt, %lt, %ismaxp, %cmp, %take;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %out, [output_ptr];
+    ld.param.u32 %outer_sz, [outer_size];
+    ld.param.u32 %axis_sz, [axis_size];
+    ld.param.u32 %inner_sz, [inner_size];
+    ld.param.u32 %n_reg, [total_output];
+    ld.param.u32 %is_max_r, [is_max];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra EXTREME_AXIS_DONE;
+
+    div.u32 %outer_idx, %r_tid, %inner_sz;
+    rem.u32 %inner_idx, %r_tid, %inner_sz;
+    mul.lo.u32 %base, %outer_idx, %axis_sz;
+    mul.lo.u32 %base, %base, %inner_sz;
+    add.u32 %base, %base, %inner_idx;
+
+    cvt.u64.u32 %off, %base;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %best, [%addr];
+
+    mov.u32 %k, 1;
+EXTREME_AXIS_LOOP:
+    setp.ge.u32 %lp, %k, %axis_sz;
+    @%lp bra EXTREME_AXIS_STORE;
+
+    mul.lo.u32 %idx, %k, %inner_sz;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %val, [%addr];
+
+    setp.nan.f32 %other_nan, %val, %val;
+    setp.nan.f32 %best_nan, %best, %best;
+    not.pred %best_ok, %best_nan;
+    setp.ne.u32 %ismaxp, %is_max_r, 0;
+    setp.gt.f32 %gt, %val, %best;
+    setp.lt.f32 %lt, %val, %best;
+    and.pred %gt, %gt, %ismaxp;
+    not.pred %ismaxp, %ismaxp;
+    and.pred %lt, %lt, %ismaxp;
+    or.pred %cmp, %gt, %lt;
+    and.pred %cmp, %cmp, %best_ok;
+    or.pred %take, %other_nan, %cmp;
+    @%take mov.f32 %best, %val;
+
+    add.u32 %k, %k, 1;
+    bra EXTREME_AXIS_LOOP;
+
+EXTREME_AXIS_STORE:
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out, %off;
+    st.global.f32 [%addr], %best;
+
+EXTREME_AXIS_DONE:
+    ret;
+}
+
+.visible .entry extreme_axis_backward_kernel(
+    .param .u64 input_ptr,
+    .param .u64 result_ptr,
+    .param .u64 grad_ptr,
+    .param .u64 out_ptr,
+    .param .u32 outer_size,
+    .param .u32 axis_size,
+    .param .u32 inner_size,
+    .param .u32 total_input
+) {
+    .reg .u32 %t, %bid, %bdim, %tid_r, %total, %outer_sz, %axis_sz, %inner_sz;
+    .reg .u32 %slice_extent, %outer_idx, %within, %axis_idx, %inner_idx, %slice_idx, %base, %k, %idx, %count_u;
+    .reg .u64 %in, %res_ptr, %grad, %out, %off, %addr, %addr_out;
+    .reg .f32 %target, %val, %go, %count_f, %zero, %scale, %result;
+    .reg .pred %p, %lp, %match, %zero_count;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %res_ptr, [result_ptr];
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %outer_sz, [outer_size];
+    ld.param.u32 %axis_sz, [axis_size];
+    ld.param.u32 %inner_sz, [inner_size];
+    ld.param.u32 %total, [total_input];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %tid_r, %tid.x;
+    mad.lo.u32 %t, %bid, %bdim, %tid_r;
+
+    setp.ge.u32 %p, %t, %total;
+    @%p bra EXTREME_AXIS_BWD_DONE;
+
+    mul.lo.u32 %slice_extent, %axis_sz, %inner_sz;
+    div.u32 %outer_idx, %t, %slice_extent;
+    rem.u32 %within, %t, %slice_extent;
+    div.u32 %axis_idx, %within, %inner_sz;
+    rem.u32 %inner_idx, %within, %inner_sz;
+    mad.lo.u32 %slice_idx, %outer_idx, %inner_sz, %inner_idx;
+    mul.lo.u32 %base, %outer_idx, %slice_extent;
+    add.u32 %base, %base, %inner_idx;
+
+    cvt.u64.u32 %off, %slice_idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %res_ptr, %off;
+    ld.global.f32 %target, [%addr];
+    add.u64 %addr, %grad, %off;
+    ld.global.f32 %go, [%addr];
+
+    mov.u32 %count_u, 0;
+    mov.u32 %k, 0;
+EXTREME_AXIS_BWD_COUNT:
+    setp.ge.u32 %lp, %k, %axis_sz;
+    @%lp bra EXTREME_AXIS_BWD_COUNT_DONE;
+
+    mul.lo.u32 %idx, %k, %inner_sz;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %val, [%addr];
+    setp.eq.f32 %match, %val, %target;
+    @%match add.u32 %count_u, %count_u, 1;
+
+    add.u32 %k, %k, 1;
+    bra EXTREME_AXIS_BWD_COUNT;
+
+EXTREME_AXIS_BWD_COUNT_DONE:
+    mov.f32 %zero, 0f00000000;
+    setp.eq.u32 %zero_count, %count_u, 0;
+    cvt.rn.f32.u32 %count_f, %count_u;
+    div.rn.f32 %scale, %go, %count_f;
+    @%zero_count div.rn.f32 %scale, %zero, %zero;
+
+    cvt.u64.u32 %off, %t;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %val, [%addr];
+    setp.eq.f32 %match, %val, %target;
+    mov.f32 %result, %zero;
+    @%match mov.f32 %result, %scale;
+    @%zero_count mov.f32 %result, %scale;
+
+    add.u64 %addr_out, %out, %off;
+    st.global.f32 [%addr_out], %result;
+
+EXTREME_AXIS_BWD_DONE:
+    ret;
+}
+";
+
 // ---------------------------------------------------------------------------
 // Cumulative scan PTX kernels
 //
@@ -15842,6 +16020,228 @@ pub fn gpu_sum_axis(
     Ok(out)
 }
 
+#[cfg(feature = "cuda")]
+fn validate_axis_extreme_dims(
+    op: &'static str,
+    input_len: usize,
+    result_len: usize,
+    grad_len: Option<usize>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+) -> GpuResult<()> {
+    if axis_size == 0 {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![1],
+            got: vec![axis_size],
+        });
+    }
+    let expected_input = outer
+        .checked_mul(axis_size)
+        .and_then(|v| v.checked_mul(inner))
+        .ok_or_else(|| GpuError::InvalidState {
+            message: format!("{op}: input shape product overflows usize"),
+        })?;
+    let expected_result = outer
+        .checked_mul(inner)
+        .ok_or_else(|| GpuError::InvalidState {
+            message: format!("{op}: output shape product overflows usize"),
+        })?;
+    if input_len != expected_input {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![expected_input],
+            got: vec![input_len],
+        });
+    }
+    if result_len != expected_result {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![expected_result],
+            got: vec![result_len],
+        });
+    }
+    if let Some(grad_len) = grad_len
+        && grad_len != expected_result
+    {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![expected_result],
+            got: vec![grad_len],
+        });
+    }
+    for (name, value) in [
+        ("outer", outer),
+        ("axis_size", axis_size),
+        ("inner", inner),
+        ("input", expected_input),
+        ("result", expected_result),
+    ] {
+        if value > u32::MAX as usize {
+            return Err(GpuError::InvalidState {
+                message: format!("{op}: {name}={value} exceeds CUDA kernel u32 indexing limit"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Axis `amin`/`amax` forward for f32. `find_max=false` computes amin,
+/// `find_max=true` computes amax.
+#[cfg(feature = "cuda")]
+pub fn gpu_extreme_axis_f32(
+    input: &CudaBuffer<f32>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    find_max: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    let total_output = outer * inner;
+    validate_axis_extreme_dims(
+        "gpu_extreme_axis_f32",
+        input.len(),
+        total_output,
+        None,
+        outer,
+        axis_size,
+        inner,
+    )?;
+    if total_output == 0 {
+        return alloc_zeros_f32(0, device);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        EXTREME_AXIS_PTX,
+        "extreme_axis_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "extreme_axis_kernel",
+        source: e,
+    })?;
+
+    let mut out = alloc_zeros_f32(total_output, device)?;
+    let cfg = launch_cfg(total_output)?;
+    let outer_u32 = outer as u32;
+    let axis_u32 = axis_size as u32;
+    let inner_u32 = inner as u32;
+    let total_u32 = total_output as u32;
+    let is_max = u32::from(find_max);
+    // SAFETY: `validate_axis_extreme_dims` proves the input/output lengths and
+    // u32 bounds. The PTX ABI is `(input, output, outer, axis, inner, total,
+    // is_max)`, and each thread writes one output element.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .arg(&is_max)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_extreme_axis_f32(
+    _input: &CudaBuffer<f32>,
+    _outer: usize,
+    _axis_size: usize,
+    _inner: usize,
+    _find_max: bool,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+/// Axis `amin`/`amax` backward for f32. The saved result and grad buffers are
+/// flattened `[outer, inner]` regardless of keepdim.
+#[cfg(feature = "cuda")]
+pub fn gpu_extreme_axis_backward_f32(
+    input: &CudaBuffer<f32>,
+    result: &CudaBuffer<f32>,
+    grad_output: &CudaBuffer<f32>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_axis_extreme_dims(
+        "gpu_extreme_axis_backward_f32",
+        input.len(),
+        result.len(),
+        Some(grad_output.len()),
+        outer,
+        axis_size,
+        inner,
+    )?;
+    if input.is_empty() {
+        return alloc_zeros_f32(0, device);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        EXTREME_AXIS_PTX,
+        "extreme_axis_backward_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "extreme_axis_backward_kernel",
+        source: e,
+    })?;
+
+    let mut out = alloc_zeros_f32(input.len(), device)?;
+    let cfg = launch_cfg(input.len())?;
+    let outer_u32 = outer as u32;
+    let axis_u32 = axis_size as u32;
+    let inner_u32 = inner as u32;
+    let total_u32 = input.len() as u32;
+    // SAFETY: shape and u32 bounds are validated above. The kernel reads only
+    // within `[outer * axis * inner]`, reads result/grad at `[outer * inner]`,
+    // and writes one gradient element per input element.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(result.inner())
+            .arg(grad_output.inner())
+            .arg(out.inner_mut())
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_extreme_axis_backward_f32(
+    _input: &CudaBuffer<f32>,
+    _result: &CudaBuffer<f32>,
+    _grad_output: &CudaBuffer<f32>,
+    _outer: usize,
+    _axis_size: usize,
+    _inner: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
 // ---------------------------------------------------------------------------
 // Public API -- Cumulative scan operations
 // ---------------------------------------------------------------------------
@@ -20071,6 +20471,185 @@ pub fn gpu_sum_axis_f64(
     }
 
     Ok(out)
+}
+
+#[cfg(feature = "cuda")]
+/// Axis `amin`/`amax` forward for f64. `find_max=false` computes amin,
+/// `find_max=true` computes amax.
+pub fn gpu_extreme_axis_f64(
+    input: &CudaBuffer<f64>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    find_max: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    let total_output = outer * inner;
+    validate_axis_extreme_dims(
+        "gpu_extreme_axis_f64",
+        input.len(),
+        total_output,
+        None,
+        outer,
+        axis_size,
+        inner,
+    )?;
+    if total_output == 0 {
+        return alloc_zeros_f64(0, device);
+    }
+
+    let ptx = CACHE.get_or_init(|| {
+        ptx_f32_to_f64(
+            EXTREME_AXIS_PTX,
+            "extreme_axis_kernel",
+            "extreme_axis_f64_kernel",
+        )
+        .replace(
+            "extreme_axis_backward_kernel",
+            "extreme_axis_backward_f64_kernel",
+        )
+    });
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "extreme_axis_f64_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "extreme_axis_f64_kernel",
+        source: e,
+    })?;
+
+    let mut out = alloc_zeros_f64(total_output, device)?;
+    let cfg = launch_cfg(total_output)?;
+    let outer_u32 = outer as u32;
+    let axis_u32 = axis_size as u32;
+    let inner_u32 = inner as u32;
+    let total_u32 = total_output as u32;
+    let is_max = u32::from(find_max);
+    // SAFETY: same contract as `gpu_extreme_axis_f32`; the f64 PTX has f64
+    // value loads/stores while keeping the integer shape parameters unchanged.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .arg(&is_max)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_extreme_axis_f64(
+    _input: &CudaBuffer<f64>,
+    _outer: usize,
+    _axis_size: usize,
+    _inner: usize,
+    _find_max: bool,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(feature = "cuda")]
+/// Axis `amin`/`amax` backward for f64.
+///
+/// `result` and `grad_output` are flattened `[outer, inner]`; output has the
+/// full `[outer, axis_size, inner]` input layout.
+pub fn gpu_extreme_axis_backward_f64(
+    input: &CudaBuffer<f64>,
+    result: &CudaBuffer<f64>,
+    grad_output: &CudaBuffer<f64>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    validate_axis_extreme_dims(
+        "gpu_extreme_axis_backward_f64",
+        input.len(),
+        result.len(),
+        Some(grad_output.len()),
+        outer,
+        axis_size,
+        inner,
+    )?;
+    if input.is_empty() {
+        return alloc_zeros_f64(0, device);
+    }
+
+    let ptx = CACHE.get_or_init(|| {
+        ptx_f32_to_f64(
+            EXTREME_AXIS_PTX,
+            "extreme_axis_kernel",
+            "extreme_axis_f64_kernel",
+        )
+        .replace(
+            "extreme_axis_backward_kernel",
+            "extreme_axis_backward_f64_kernel",
+        )
+    });
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "extreme_axis_backward_f64_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "extreme_axis_backward_f64_kernel",
+        source: e,
+    })?;
+
+    let mut out = alloc_zeros_f64(input.len(), device)?;
+    let cfg = launch_cfg(input.len())?;
+    let outer_u32 = outer as u32;
+    let axis_u32 = axis_size as u32;
+    let inner_u32 = inner as u32;
+    let total_u32 = input.len() as u32;
+    // SAFETY: same launch contract as `gpu_extreme_axis_backward_f32`; f64 PTX
+    // only changes value load/store width and float arithmetic.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(result.inner())
+            .arg(grad_output.inner())
+            .arg(out.inner_mut())
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_extreme_axis_backward_f64(
+    _input: &CudaBuffer<f64>,
+    _result: &CudaBuffer<f64>,
+    _grad_output: &CudaBuffer<f64>,
+    _outer: usize,
+    _axis_size: usize,
+    _inner: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
 }
 
 #[cfg(not(feature = "cuda"))]

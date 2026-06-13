@@ -2541,13 +2541,21 @@ pub fn count_nonzero_dim<T: Float>(
 // — every input position equal to the per-slice extremum gets
 // `grad / count_of_extremums_in_that_slice`.
 
+fn normalize_reduction_dim(dim: i64, ndim: usize, op: &str) -> FerrotorchResult<usize> {
+    let norm_dim = if dim < 0 { ndim as i64 + dim } else { dim };
+    if norm_dim < 0 || norm_dim as usize >= ndim {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: dim {dim} out of bounds for {ndim}-D tensor"),
+        });
+    }
+    Ok(norm_dim as usize)
+}
+
 #[derive(Debug)]
 pub struct AminDimBackward<T: Float> {
     input: Tensor<T>,
-    /// Forward output broadcast back to input shape (the per-slice
-    /// extrema replicated along `dim`). Stored at forward to avoid
-    /// recomputation.
-    expanded_result: Tensor<T>,
+    /// Forward output flattened as `[outer, inner]` regardless of keepdim.
+    result: Tensor<T>,
     dim: usize,
     keepdim: bool,
 }
@@ -2555,25 +2563,56 @@ pub struct AminDimBackward<T: Float> {
 #[derive(Debug)]
 pub struct AmaxDimBackward<T: Float> {
     input: Tensor<T>,
-    expanded_result: Tensor<T>,
+    result: Tensor<T>,
     dim: usize,
     keepdim: bool,
 }
 
 fn amin_amax_dim_backward<T: Float>(
     input: &Tensor<T>,
-    expanded: &Tensor<T>,
+    result: &Tensor<T>,
     grad_output: &Tensor<T>,
     dim: usize,
     keepdim: bool,
 ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+    let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
+    let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
+    if input.is_cuda() && (is_f32 || is_f64) {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let grad_output = if grad_output.is_cuda() {
+            grad_output.contiguous()?
+        } else {
+            grad_output.to(input.device())?.contiguous()?
+        };
+        let handle = if is_f32 {
+            backend.extreme_axis_backward_f32(
+                input.gpu_handle()?,
+                result.gpu_handle()?,
+                grad_output.gpu_handle()?,
+                input.shape(),
+                dim,
+            )?
+        } else {
+            backend.extreme_axis_backward_f64(
+                input.gpu_handle()?,
+                result.gpu_handle()?,
+                grad_output.gpu_handle()?,
+                input.shape(),
+                dim,
+            )?
+        };
+        let grad_input =
+            Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)?;
+        return Ok(vec![Some(grad_input)]);
+    }
     if input.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda {
             op: "amin/amax_dim backward",
         });
     }
-    let input_data = input.data()?;
-    let expanded_data = expanded.data()?;
+    let input_data = input.data_vec()?;
+    let result_data = result.data()?;
     let in_shape = input.shape();
     let dim_size = in_shape[dim];
     let outer: usize = in_shape[..dim].iter().product();
@@ -2583,11 +2622,13 @@ fn amin_amax_dim_backward<T: Float>(
     let mut counts = vec![0i64; outer * inner];
     for o in 0..outer {
         for i in 0..inner {
-            let target = expanded_data[o * dim_size * inner + i];
+            let target = result_data[o * inner + i];
             let mut c = 0i64;
-            for d in 0..dim_size {
-                if input_data[o * dim_size * inner + d * inner + i] == target {
-                    c += 1;
+            if !target.is_nan() {
+                for d in 0..dim_size {
+                    if input_data[o * dim_size * inner + d * inner + i] == target {
+                        c += 1;
+                    }
                 }
             }
             counts[o * inner + i] = c;
@@ -2606,12 +2647,14 @@ fn amin_amax_dim_backward<T: Float>(
     for o in 0..outer {
         for d in 0..dim_size {
             for i in 0..inner {
-                let target = expanded_data[o * dim_size * inner + i];
+                let target = result_data[o * inner + i];
                 let val = input_data[o * dim_size * inner + d * inner + i];
-                if val == target {
-                    let c = counts[o * inner + i].max(1) as f64;
+                let c = counts[o * inner + i];
+                if c == 0 {
+                    out.push(T::nan());
+                } else if val == target {
                     let g = grad_data[o * inner + i];
-                    let scale = float_from_f64::<T>(1.0 / c)?;
+                    let scale = float_from_f64::<T>(1.0 / c as f64)?;
                     out.push(g * scale);
                 } else {
                     out.push(<T as num_traits::Zero>::zero());
@@ -2627,7 +2670,7 @@ impl<T: Float> GradFn<T> for AminDimBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         amin_amax_dim_backward(
             &self.input,
-            &self.expanded_result,
+            &self.result,
             grad_output,
             self.dim,
             self.keepdim,
@@ -2647,7 +2690,7 @@ impl<T: Float> GradFn<T> for AmaxDimBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         amin_amax_dim_backward(
             &self.input,
-            &self.expanded_result,
+            &self.result,
             grad_output,
             self.dim,
             self.keepdim,
@@ -2665,7 +2708,7 @@ impl<T: Float> GradFn<T> for AmaxDimBackward<T> {
 
 #[allow(
     clippy::type_complexity,
-    reason = "Single-use helper returning (result, expanded, norm_dim, out_shape); \
+    reason = "Single-use helper returning (result, norm_dim, out_shape); \
               a named tuple struct adds boilerplate without clarifying the local \
               flow at the two callers (amin_dim/amax_dim)."
 )]
@@ -2674,7 +2717,7 @@ fn amin_amax_dim_forward<T: Float>(
     dim: i64,
     keepdim: bool,
     find_max: bool,
-) -> FerrotorchResult<(Vec<T>, Vec<T>, usize, Vec<usize>)> {
+) -> FerrotorchResult<(Vec<T>, usize, Vec<usize>)> {
     let ndim = input.ndim();
     let norm_dim = if dim < 0 {
         (ndim as i64 + dim) as usize
@@ -2694,11 +2737,15 @@ fn amin_amax_dim_forward<T: Float>(
     let in_data = input_ref.data()?;
     let in_shape = input_ref.shape();
     let dim_size = in_shape[norm_dim];
+    if dim_size == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "amin/amax_dim: cannot reduce over an empty dimension".into(),
+        });
+    }
     let outer: usize = in_shape[..norm_dim].iter().product();
     let inner: usize = in_shape[norm_dim + 1..].iter().product();
 
     let mut result = Vec::with_capacity(outer * inner);
-    let mut expanded = Vec::with_capacity(in_shape.iter().product());
     // First pass: compute per-slice extremum, NaN-poisoning per upstream
     // `aten/src/ATen/native/SharedReduceOps.h:26-34
     // `max_propagate_nan` / `min_propagate_nan`. Live torch:
@@ -2721,22 +2768,13 @@ fn amin_amax_dim_forward<T: Float>(
             result.push(best);
         }
     }
-    // Second pass: replicate result along the reduced dim into `expanded`
-    // for use by the backward (broadcast match check `input == expanded`).
-    for o in 0..outer {
-        for _d in 0..dim_size {
-            for i in 0..inner {
-                expanded.push(result[o * inner + i]);
-            }
-        }
-    }
     let mut out_shape: Vec<usize> = in_shape.to_vec();
     if keepdim {
         out_shape[norm_dim] = 1;
     } else {
         out_shape.remove(norm_dim);
     }
-    Ok((result, expanded, norm_dim, out_shape))
+    Ok((result, norm_dim, out_shape))
 }
 
 /// Differentiable dim-keyed amin. Mirrors `torch.amin(input, dim, keepdim)`.
@@ -2747,23 +2785,58 @@ pub fn amin_dim<T: Float>(
     dim: i64,
     keepdim: bool,
 ) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "amin_dim" });
-    }
     let ndim = input.ndim();
     if ndim == 0 {
         return grad_clone(input);
     }
-    let (result, expanded, norm_dim, out_shape) =
-        amin_amax_dim_forward(input, dim, keepdim, false)?;
-    let storage = TensorStorage::cpu(result);
-    let result_t = Tensor::from_storage(storage, out_shape, false)?;
+    let norm_dim = normalize_reduction_dim(dim, ndim, "amin_dim")?;
+    if input.shape()[norm_dim] == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "amin_dim: cannot reduce over an empty dimension".into(),
+        });
+    }
+    let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
+    let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
+
+    if input.is_cuda() && (is_f32 || is_f64) {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let input = input.contiguous()?;
+        let mut out_shape: Vec<usize> = input.shape().to_vec();
+        if keepdim {
+            out_shape[norm_dim] = 1;
+        } else {
+            out_shape.remove(norm_dim);
+        }
+        let handle = if is_f32 {
+            backend.min_axis_f32(input.gpu_handle()?, input.shape(), norm_dim)?
+        } else {
+            backend.min_axis_f64(input.gpu_handle()?, input.shape(), norm_dim)?
+        };
+        let compact_result =
+            Tensor::from_storage(TensorStorage::gpu(handle), out_shape.clone(), false)?;
+        if is_grad_enabled() && input.requires_grad() {
+            let grad_fn = Arc::new(AminDimBackward {
+                input: input.clone(),
+                result: compact_result.clone(),
+                dim: norm_dim,
+                keepdim,
+            });
+            let (s, sh) = compact_result.into_storage_and_shape()?;
+            return Tensor::from_operation(s, sh, grad_fn);
+        }
+        return Ok(compact_result);
+    }
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "amin_dim" });
+    }
+
+    let (result, norm_dim, out_shape) = amin_amax_dim_forward(input, dim, keepdim, false)?;
+    let result_t = Tensor::from_storage(TensorStorage::cpu(result), out_shape, false)?;
     if is_grad_enabled() && input.requires_grad() {
-        let expanded_t =
-            Tensor::from_storage(TensorStorage::cpu(expanded), input.shape().to_vec(), false)?;
         let grad_fn = Arc::new(AminDimBackward {
             input: input.clone(),
-            expanded_result: expanded_t,
+            result: result_t.clone(),
             dim: norm_dim,
             keepdim,
         });
@@ -2780,22 +2853,58 @@ pub fn amax_dim<T: Float>(
     dim: i64,
     keepdim: bool,
 ) -> FerrotorchResult<Tensor<T>> {
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "amax_dim" });
-    }
     let ndim = input.ndim();
     if ndim == 0 {
         return grad_clone(input);
     }
-    let (result, expanded, norm_dim, out_shape) = amin_amax_dim_forward(input, dim, keepdim, true)?;
-    let storage = TensorStorage::cpu(result);
-    let result_t = Tensor::from_storage(storage, out_shape, false)?;
+    let norm_dim = normalize_reduction_dim(dim, ndim, "amax_dim")?;
+    if input.shape()[norm_dim] == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "amax_dim: cannot reduce over an empty dimension".into(),
+        });
+    }
+    let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
+    let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
+
+    if input.is_cuda() && (is_f32 || is_f64) {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let input = input.contiguous()?;
+        let mut out_shape: Vec<usize> = input.shape().to_vec();
+        if keepdim {
+            out_shape[norm_dim] = 1;
+        } else {
+            out_shape.remove(norm_dim);
+        }
+        let handle = if is_f32 {
+            backend.max_axis_f32(input.gpu_handle()?, input.shape(), norm_dim)?
+        } else {
+            backend.max_axis_f64(input.gpu_handle()?, input.shape(), norm_dim)?
+        };
+        let compact_result =
+            Tensor::from_storage(TensorStorage::gpu(handle), out_shape.clone(), false)?;
+        if is_grad_enabled() && input.requires_grad() {
+            let grad_fn = Arc::new(AmaxDimBackward {
+                input: input.clone(),
+                result: compact_result.clone(),
+                dim: norm_dim,
+                keepdim,
+            });
+            let (s, sh) = compact_result.into_storage_and_shape()?;
+            return Tensor::from_operation(s, sh, grad_fn);
+        }
+        return Ok(compact_result);
+    }
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "amax_dim" });
+    }
+
+    let (result, norm_dim, out_shape) = amin_amax_dim_forward(input, dim, keepdim, true)?;
+    let result_t = Tensor::from_storage(TensorStorage::cpu(result), out_shape, false)?;
     if is_grad_enabled() && input.requires_grad() {
-        let expanded_t =
-            Tensor::from_storage(TensorStorage::cpu(expanded), input.shape().to_vec(), false)?;
         let grad_fn = Arc::new(AmaxDimBackward {
             input: input.clone(),
-            expanded_result: expanded_t,
+            result: result_t.clone(),
             dim: norm_dim,
             keepdim,
         });

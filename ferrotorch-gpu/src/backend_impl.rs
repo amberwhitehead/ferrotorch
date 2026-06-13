@@ -2169,6 +2169,62 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
+    fn min_axis_f64(
+        &self,
+        a: &GpuBufferHandle,
+        shape: &[usize],
+        axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let outer: usize = shape[..axis].iter().product();
+        let axis_size = shape[axis];
+        let inner: usize = shape[axis + 1..].iter().product();
+        let result =
+            crate::kernels::gpu_extreme_axis_f64(a_buf, outer, axis_size, inner, false, dev)
+                .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    fn max_axis_f64(
+        &self,
+        a: &GpuBufferHandle,
+        shape: &[usize],
+        axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let outer: usize = shape[..axis].iter().product();
+        let axis_size = shape[axis];
+        let inner: usize = shape[axis + 1..].iter().product();
+        let result =
+            crate::kernels::gpu_extreme_axis_f64(a_buf, outer, axis_size, inner, true, dev)
+                .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    fn extreme_axis_backward_f64(
+        &self,
+        input: &GpuBufferHandle,
+        result: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+        shape: &[usize],
+        axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f64(input)?;
+        let result_buf = Self::unwrap_buffer_f64(result)?;
+        let grad_buf = Self::unwrap_buffer_f64(grad_output)?;
+        let dev = self.device(input.device_ordinal())?;
+        let outer: usize = shape[..axis].iter().product();
+        let axis_size = shape[axis];
+        let inner: usize = shape[axis + 1..].iter().product();
+        let out = crate::kernels::gpu_extreme_axis_backward_f64(
+            input_buf, result_buf, grad_buf, outer, axis_size, inner, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(out, input.device_ordinal()))
+    }
+
     // f64 softmax / log-softmax / layernorm / rmsnorm
 
     fn softmax_f64(
@@ -4911,6 +4967,62 @@ impl GpuBackend for CudaBackendImpl {
         let result = crate::kernels::gpu_sum_axis(a_buf, outer, axis_size, inner, dev)
             .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn min_axis_f32(
+        &self,
+        a: &GpuBufferHandle,
+        shape: &[usize],
+        axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let outer: usize = shape[..axis].iter().product();
+        let axis_size = shape[axis];
+        let inner: usize = shape[axis + 1..].iter().product::<usize>().max(1);
+        let result =
+            crate::kernels::gpu_extreme_axis_f32(a_buf, outer, axis_size, inner, false, dev)
+                .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn max_axis_f32(
+        &self,
+        a: &GpuBufferHandle,
+        shape: &[usize],
+        axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let outer: usize = shape[..axis].iter().product();
+        let axis_size = shape[axis];
+        let inner: usize = shape[axis + 1..].iter().product::<usize>().max(1);
+        let result =
+            crate::kernels::gpu_extreme_axis_f32(a_buf, outer, axis_size, inner, true, dev)
+                .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn extreme_axis_backward_f32(
+        &self,
+        input: &GpuBufferHandle,
+        result: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+        shape: &[usize],
+        axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer(input)?;
+        let result_buf = Self::unwrap_buffer(result)?;
+        let grad_buf = Self::unwrap_buffer(grad_output)?;
+        let dev = self.device(input.device_ordinal())?;
+        let outer: usize = shape[..axis].iter().product();
+        let axis_size = shape[axis];
+        let inner: usize = shape[axis + 1..].iter().product::<usize>().max(1);
+        let out = crate::kernels::gpu_extreme_axis_backward_f32(
+            input_buf, result_buf, grad_buf, outer, axis_size, inner, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(out, input.device_ordinal()))
     }
 
     fn matmul_f16_f32(

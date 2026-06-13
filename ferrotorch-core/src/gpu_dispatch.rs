@@ -3188,6 +3188,84 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// Axis `amin` for f32. Collapses `shape[axis]` and returns a flat
+    /// `[outer, inner]` buffer before the caller restores keepdim metadata.
+    fn min_axis_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _shape: &[usize],
+        _axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "min_axis_f32 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// Axis `amax` for f32. Companion of [`Self::min_axis_f32`].
+    fn max_axis_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _shape: &[usize],
+        _axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "max_axis_f32 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// Axis `amin` for f64.
+    fn min_axis_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _shape: &[usize],
+        _axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "min_axis_f64 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// Axis `amax` for f64.
+    fn max_axis_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _shape: &[usize],
+        _axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "max_axis_f64 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// Axis `amin`/`amax` backward for f32. `result` and `grad_output` are
+    /// flattened `[outer, inner]`; output has the full input shape.
+    fn extreme_axis_backward_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _result: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _shape: &[usize],
+        _axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "extreme_axis_backward_f32 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// f64 companion of [`Self::extreme_axis_backward_f32`].
+    fn extreme_axis_backward_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _result: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _shape: &[usize],
+        _axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "extreme_axis_backward_f64 GPU op not yet implemented".into(),
+        })
+    }
+
     // Strided split: extract a sub-tensor along one axis entirely on GPU.
     fn strided_split_f32(
         &self,
