@@ -3927,6 +3927,411 @@ pub fn gpu_mean_axis_bf16_bf16(
     Ok(out)
 }
 
+const STD_VAR_AXIS_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry std_var_axis_bf16_kernel(
+    .param .u64 input_ptr,
+    .param .u64 output_ptr,
+    .param .u32 outer_size,
+    .param .u32 axis_size,
+    .param .u32 inner_size,
+    .param .u32 total_output,
+    .param .f32 correction,
+    .param .u32 take_sqrt
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %total, %outer_sz, %axis_sz, %inner_sz;
+    .reg .u32 %outer_idx, %inner_idx, %k, %base, %idx, %flag;
+    .reg .u32 %u32, %bits, %round, %lsb;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .b16 %h, %zero16;
+    .reg .f32 %val, %sum, %mean, %ss, %dv, %denom, %axis_f, %corr, %outv, %zero;
+    .reg .pred %p, %lp, %empty, %do_sqrt, %is_nan;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %out, [output_ptr];
+    ld.param.u32 %outer_sz, [outer_size];
+    ld.param.u32 %axis_sz, [axis_size];
+    ld.param.u32 %inner_sz, [inner_size];
+    ld.param.u32 %total, [total_output];
+    ld.param.f32 %corr, [correction];
+    ld.param.u32 %flag, [take_sqrt];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %total;
+    @%p bra DONE;
+
+    mov.f32 %zero, 0f00000000;
+    mov.b16 %zero16, 0;
+    div.u32 %outer_idx, %r_tid, %inner_sz;
+    rem.u32 %inner_idx, %r_tid, %inner_sz;
+    mul.lo.u32 %base, %outer_idx, %axis_sz;
+    mul.lo.u32 %base, %base, %inner_sz;
+    add.u32 %base, %base, %inner_idx;
+
+    setp.eq.u32 %empty, %axis_sz, 0;
+    @%empty bra EMPTY_SLICE;
+
+    mov.u32 %k, 0;
+    mov.f32 %sum, 0f00000000;
+SUM_LOOP:
+    setp.ge.u32 %lp, %k, %axis_sz;
+    @%lp bra SUM_DONE;
+    mul.lo.u32 %idx, %k, %inner_sz;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %in, %off;
+    ld.global.b16 %h, [%addr];
+    mov.b32 %u32, {%zero16, %h};
+    mov.b32 %val, %u32;
+    add.f32 %sum, %sum, %val;
+    add.u32 %k, %k, 1;
+    bra SUM_LOOP;
+SUM_DONE:
+    cvt.rn.f32.u32 %axis_f, %axis_sz;
+    div.rn.f32 %mean, %sum, %axis_f;
+
+    mov.u32 %k, 0;
+    mov.f32 %ss, 0f00000000;
+SS_LOOP:
+    setp.ge.u32 %lp, %k, %axis_sz;
+    @%lp bra SS_DONE;
+    mul.lo.u32 %idx, %k, %inner_sz;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %in, %off;
+    ld.global.b16 %h, [%addr];
+    mov.b32 %u32, {%zero16, %h};
+    mov.b32 %val, %u32;
+    sub.f32 %dv, %val, %mean;
+    fma.rn.f32 %ss, %dv, %dv, %ss;
+    add.u32 %k, %k, 1;
+    bra SS_LOOP;
+SS_DONE:
+    sub.f32 %denom, %axis_f, %corr;
+    max.f32 %denom, %denom, %zero;
+    div.rn.f32 %outv, %ss, %denom;
+    setp.ne.u32 %do_sqrt, %flag, 0;
+    @%do_sqrt sqrt.rn.f32 %outv, %outv;
+    bra STORE;
+
+EMPTY_SLICE:
+    div.rn.f32 %outv, %zero, %zero;
+
+STORE:
+    setp.nan.f32 %is_nan, %outv, %outv;
+    @%is_nan bra STORE_NAN;
+    mov.b32 %bits, %outv;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    bra STORE_BITS;
+STORE_NAN:
+    mov.u32 %bits, 0x7FC0;
+STORE_BITS:
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %out, %off;
+    st.global.u16 [%addr], %bits;
+
+DONE:
+    ret;
+}
+";
+
+const STD_VAR_AXIS_BACKWARD_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry std_var_axis_backward_bf16_kernel(
+    .param .u64 input_ptr,
+    .param .u64 grad_out_ptr,
+    .param .u64 result_ptr,
+    .param .u64 grad_in_ptr,
+    .param .u32 outer_size,
+    .param .u32 axis_size,
+    .param .u32 inner_size,
+    .param .u32 total_input,
+    .param .f32 correction,
+    .param .u32 take_sqrt
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %total, %outer_sz, %axis_sz, %inner_sz;
+    .reg .u32 %tmp, %outer_idx, %d_idx, %inner_idx, %k, %src_idx, %go_idx, %flag;
+    .reg .u32 %u32, %bits, %round, %lsb;
+    .reg .u64 %in, %go, %res, %gi, %off, %addr;
+    .reg .b16 %h, %zero16;
+    .reg .f32 %val, %sum, %mean, %dv, %axis_f, %corr, %denom, %grad, %go_val;
+    .reg .f32 %result, %zero, %two, %scale, %denom_result;
+    .reg .pred %p, %lp, %is_std, %is_zero_result, %is_nan;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %go, [grad_out_ptr];
+    ld.param.u64 %res, [result_ptr];
+    ld.param.u64 %gi, [grad_in_ptr];
+    ld.param.u32 %outer_sz, [outer_size];
+    ld.param.u32 %axis_sz, [axis_size];
+    ld.param.u32 %inner_sz, [inner_size];
+    ld.param.u32 %total, [total_input];
+    ld.param.f32 %corr, [correction];
+    ld.param.u32 %flag, [take_sqrt];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %total;
+    @%p bra DONE;
+
+    mov.f32 %zero, 0f00000000;
+    mov.f32 %two, 0f40000000;
+    mov.b16 %zero16, 0;
+    rem.u32 %inner_idx, %r_tid, %inner_sz;
+    div.u32 %tmp, %r_tid, %inner_sz;
+    rem.u32 %d_idx, %tmp, %axis_sz;
+    div.u32 %outer_idx, %tmp, %axis_sz;
+
+    mul.lo.u32 %go_idx, %outer_idx, %inner_sz;
+    add.u32 %go_idx, %go_idx, %inner_idx;
+    cvt.u64.u32 %off, %go_idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %go, %off;
+    ld.global.b16 %h, [%addr];
+    mov.b32 %u32, {%zero16, %h};
+    mov.b32 %go_val, %u32;
+    add.u64 %addr, %res, %off;
+    ld.global.b16 %h, [%addr];
+    mov.b32 %u32, {%zero16, %h};
+    mov.b32 %result, %u32;
+
+    mov.u32 %k, 0;
+    mov.f32 %sum, 0f00000000;
+SUM_LOOP:
+    setp.ge.u32 %lp, %k, %axis_sz;
+    @%lp bra SUM_DONE;
+    mul.lo.u32 %src_idx, %outer_idx, %axis_sz;
+    add.u32 %src_idx, %src_idx, %k;
+    mul.lo.u32 %src_idx, %src_idx, %inner_sz;
+    add.u32 %src_idx, %src_idx, %inner_idx;
+    cvt.u64.u32 %off, %src_idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %in, %off;
+    ld.global.b16 %h, [%addr];
+    mov.b32 %u32, {%zero16, %h};
+    mov.b32 %val, %u32;
+    add.f32 %sum, %sum, %val;
+    add.u32 %k, %k, 1;
+    bra SUM_LOOP;
+SUM_DONE:
+    cvt.rn.f32.u32 %axis_f, %axis_sz;
+    div.rn.f32 %mean, %sum, %axis_f;
+    sub.f32 %denom, %axis_f, %corr;
+    max.f32 %denom, %denom, %zero;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %in, %off;
+    ld.global.b16 %h, [%addr];
+    mov.b32 %u32, {%zero16, %h};
+    mov.b32 %val, %u32;
+    sub.f32 %dv, %val, %mean;
+
+    setp.ne.u32 %is_std, %flag, 0;
+    @%is_std bra STD_PATH;
+
+    div.rn.f32 %scale, %two, %denom;
+    mul.f32 %grad, %go_val, %scale;
+    mul.f32 %grad, %grad, %dv;
+    bra STORE;
+
+STD_PATH:
+    setp.eq.f32 %is_zero_result, %result, %zero;
+    @%is_zero_result bra ZERO_STD;
+    mul.f32 %denom_result, %denom, %result;
+    div.rn.f32 %scale, %go_val, %denom_result;
+    mul.f32 %grad, %scale, %dv;
+    bra STORE;
+
+ZERO_STD:
+    mov.f32 %grad, 0f00000000;
+
+STORE:
+    setp.nan.f32 %is_nan, %grad, %grad;
+    @%is_nan bra STORE_NAN;
+    mov.b32 %bits, %grad;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    bra STORE_BITS;
+STORE_NAN:
+    mov.u32 %bits, 0x7FC0;
+STORE_BITS:
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %gi, %off;
+    st.global.u16 [%addr], %bits;
+
+DONE:
+    ret;
+}
+";
+
+/// Compute variance or standard deviation along one logical axis for bf16.
+///
+/// Arithmetic is f32; the `[outer, inner]` result is rounded back to bf16.
+pub fn gpu_std_var_axis_bf16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    correction: f64,
+    take_sqrt: bool,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let total = outer.checked_mul(inner).ok_or(GpuError::ShapeMismatch {
+        op: "std_var_axis_bf16",
+        expected: vec![outer, inner],
+        got: vec![usize::MAX],
+    })?;
+    if input.len() != outer.saturating_mul(axis_size).saturating_mul(inner) {
+        return Err(GpuError::ShapeMismatch {
+            op: "std_var_axis_bf16",
+            expected: vec![outer, axis_size, inner],
+            got: vec![input.len()],
+        });
+    }
+    let stream = device.stream();
+    if total == 0 {
+        return Ok(stream.alloc_zeros::<u16>(0)?);
+    }
+    let ctx = device.context();
+    let f = get_or_compile(
+        ctx,
+        STD_VAR_AXIS_BF16_PTX,
+        "std_var_axis_bf16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "std_var_axis_bf16_kernel",
+        source: e,
+    })?;
+    let mut out = stream.alloc_zeros::<u16>(total)?;
+    let cfg = launch_1d(total);
+    let outer_u32 = outer as u32;
+    let axis_u32 = axis_size as u32;
+    let inner_u32 = inner as u32;
+    let total_u32 = total as u32;
+    let corr_f32 = correction as f32;
+    let take_sqrt_u32 = u32::from(take_sqrt);
+    // SAFETY: shape products are checked above; one thread computes one
+    // `[outer, inner]` slice and stores one bf16 result.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(&mut out)
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .arg(&corr_f32)
+            .arg(&take_sqrt_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Backward pass for bf16 axis variance or standard deviation.
+pub fn gpu_std_var_axis_backward_bf16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    grad_output: &cudarc::driver::CudaSlice<u16>,
+    result: &cudarc::driver::CudaSlice<u16>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    correction: f64,
+    take_sqrt: bool,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let total_input = outer
+        .checked_mul(axis_size)
+        .and_then(|v| v.checked_mul(inner))
+        .ok_or(GpuError::ShapeMismatch {
+            op: "std_var_axis_backward_bf16",
+            expected: vec![outer, axis_size, inner],
+            got: vec![usize::MAX],
+        })?;
+    let total_output = outer.checked_mul(inner).ok_or(GpuError::ShapeMismatch {
+        op: "std_var_axis_backward_bf16",
+        expected: vec![outer, inner],
+        got: vec![usize::MAX],
+    })?;
+    if input.len() != total_input
+        || grad_output.len() != total_output
+        || result.len() != total_output
+    {
+        return Err(GpuError::ShapeMismatch {
+            op: "std_var_axis_backward_bf16",
+            expected: vec![total_input, total_output, total_output],
+            got: vec![input.len(), grad_output.len(), result.len()],
+        });
+    }
+    let stream = device.stream();
+    if total_input == 0 {
+        return Ok(stream.alloc_zeros::<u16>(0)?);
+    }
+    let ctx = device.context();
+    let f = get_or_compile(
+        ctx,
+        STD_VAR_AXIS_BACKWARD_BF16_PTX,
+        "std_var_axis_backward_bf16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "std_var_axis_backward_bf16_kernel",
+        source: e,
+    })?;
+    let mut out = stream.alloc_zeros::<u16>(total_input)?;
+    let cfg = launch_1d(total_input);
+    let outer_u32 = outer as u32;
+    let axis_u32 = axis_size as u32;
+    let inner_u32 = inner as u32;
+    let total_u32 = total_input as u32;
+    let corr_f32 = correction as f32;
+    let take_sqrt_u32 = u32::from(take_sqrt);
+    // SAFETY: buffer lengths match `[outer, axis, inner]` and `[outer, inner]`;
+    // each thread writes exactly one bf16 input-gradient element.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(grad_output)
+            .arg(result)
+            .arg(&mut out)
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .arg(&corr_f32)
+            .arg(&take_sqrt_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
 // ─── Broadcast binary ops (#23: add/sub/mul/div on N-D broadcast shapes) ────
 //
 // PyTorch parity: for each output element, decompose the flat output index

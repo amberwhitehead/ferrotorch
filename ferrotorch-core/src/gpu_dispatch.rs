@@ -3318,6 +3318,34 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    fn std_var_axis_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+        _correction: f64,
+        _take_sqrt: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "std_var_axis_bf16",
+        })
+    }
+
+    fn std_var_axis_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+        _correction: f64,
+        _take_sqrt: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "std_var_axis_f16",
+        })
+    }
+
     fn std_var_axis_backward_f32(
         &self,
         _input: &GpuBufferHandle,
@@ -3347,6 +3375,38 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "std_var_axis_backward_f64",
+        })
+    }
+
+    fn std_var_axis_backward_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _result: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+        _correction: f64,
+        _take_sqrt: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "std_var_axis_backward_bf16",
+        })
+    }
+
+    fn std_var_axis_backward_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _result: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+        _correction: f64,
+        _take_sqrt: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "std_var_axis_backward_f16",
         })
     }
 

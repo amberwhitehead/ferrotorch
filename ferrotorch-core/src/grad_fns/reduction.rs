@@ -2068,8 +2068,46 @@ impl<T: Float> GradFn<T> for VarBackward<T> {
                         false,
                     )
                 },
-                bf16 => Err(FerrotorchError::NotImplementedOnCuda { op: "var backward" }),
-                f16 => Err(FerrotorchError::NotImplementedOnCuda { op: "var backward" }),
+                bf16 => {
+                    let result = backend.std_var_axis_bf16(
+                        input_ref.gpu_handle()?,
+                        1,
+                        input_ref.numel(),
+                        1,
+                        correction,
+                        false,
+                    )?;
+                    backend.std_var_axis_backward_bf16(
+                        input_ref.gpu_handle()?,
+                        go_on_device.gpu_handle()?,
+                        &result,
+                        1,
+                        input_ref.numel(),
+                        1,
+                        correction,
+                        false,
+                    )
+                },
+                f16 => {
+                    let result = backend.std_var_axis_f16(
+                        input_ref.gpu_handle()?,
+                        1,
+                        input_ref.numel(),
+                        1,
+                        correction,
+                        false,
+                    )?;
+                    backend.std_var_axis_backward_f16(
+                        input_ref.gpu_handle()?,
+                        go_on_device.gpu_handle()?,
+                        &result,
+                        1,
+                        input_ref.numel(),
+                        1,
+                        correction,
+                        false,
+                    )
+                },
             )?;
             let grad_input = Tensor::from_storage(
                 TensorStorage::gpu(result_handle),
@@ -2171,8 +2209,46 @@ impl<T: Float> GradFn<T> for StdBackward<T> {
                         true,
                     )
                 },
-                bf16 => Err(FerrotorchError::NotImplementedOnCuda { op: "std backward" }),
-                f16 => Err(FerrotorchError::NotImplementedOnCuda { op: "std backward" }),
+                bf16 => {
+                    let result = backend.std_var_axis_bf16(
+                        input_ref.gpu_handle()?,
+                        1,
+                        input_ref.numel(),
+                        1,
+                        correction,
+                        true,
+                    )?;
+                    backend.std_var_axis_backward_bf16(
+                        input_ref.gpu_handle()?,
+                        go_on_device.gpu_handle()?,
+                        &result,
+                        1,
+                        input_ref.numel(),
+                        1,
+                        correction,
+                        true,
+                    )
+                },
+                f16 => {
+                    let result = backend.std_var_axis_f16(
+                        input_ref.gpu_handle()?,
+                        1,
+                        input_ref.numel(),
+                        1,
+                        correction,
+                        true,
+                    )?;
+                    backend.std_var_axis_backward_f16(
+                        input_ref.gpu_handle()?,
+                        go_on_device.gpu_handle()?,
+                        &result,
+                        1,
+                        input_ref.numel(),
+                        1,
+                        correction,
+                        true,
+                    )
+                },
             )?;
             let grad_input = Tensor::from_storage(
                 TensorStorage::gpu(result_handle),
@@ -2234,7 +2310,6 @@ fn var_inner<T: Float>(
     if let Some(out) = crate::meta_propagate::reduce_all(input)? {
         return Ok(out);
     }
-    let op_name = if take_sqrt { "std" } else { "var" };
     if input.is_cuda() {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -2262,8 +2337,22 @@ fn var_inner<T: Float>(
                 correction,
                 take_sqrt,
             ),
-            bf16 => Err(FerrotorchError::NotImplementedOnCuda { op: op_name }),
-            f16 => Err(FerrotorchError::NotImplementedOnCuda { op: op_name }),
+            bf16 => backend.std_var_axis_bf16(
+                input_ref.gpu_handle()?,
+                1,
+                input_ref.numel(),
+                1,
+                correction,
+                take_sqrt,
+            ),
+            f16 => backend.std_var_axis_f16(
+                input_ref.gpu_handle()?,
+                1,
+                input_ref.numel(),
+                1,
+                correction,
+                take_sqrt,
+            ),
         )?;
         let result = Tensor::from_storage(TensorStorage::gpu(result_handle), vec![], false)?;
         return if is_grad_enabled() && input.requires_grad() {
@@ -2608,12 +2697,46 @@ impl<T: Float> GradFn<T> for VarDimBackward<T> {
                         false,
                     )
                 },
-                bf16 => Err(FerrotorchError::NotImplementedOnCuda {
-                    op: "var_dim backward"
-                }),
-                f16 => Err(FerrotorchError::NotImplementedOnCuda {
-                    op: "var_dim backward"
-                }),
+                bf16 => {
+                    let result = backend.std_var_axis_bf16(
+                        input_ref.gpu_handle()?,
+                        outer,
+                        axis_size,
+                        inner,
+                        self.correction,
+                        false,
+                    )?;
+                    backend.std_var_axis_backward_bf16(
+                        input_ref.gpu_handle()?,
+                        go_on_device.gpu_handle()?,
+                        &result,
+                        outer,
+                        axis_size,
+                        inner,
+                        self.correction,
+                        false,
+                    )
+                },
+                f16 => {
+                    let result = backend.std_var_axis_f16(
+                        input_ref.gpu_handle()?,
+                        outer,
+                        axis_size,
+                        inner,
+                        self.correction,
+                        false,
+                    )?;
+                    backend.std_var_axis_backward_f16(
+                        input_ref.gpu_handle()?,
+                        go_on_device.gpu_handle()?,
+                        &result,
+                        outer,
+                        axis_size,
+                        inner,
+                        self.correction,
+                        false,
+                    )
+                },
             )?;
             let grad_input =
                 Tensor::from_storage(TensorStorage::gpu(result_handle), in_shape, false)?;
@@ -2770,12 +2893,46 @@ impl<T: Float> GradFn<T> for StdDimBackward<T> {
                         true,
                     )
                 },
-                bf16 => Err(FerrotorchError::NotImplementedOnCuda {
-                    op: "std_dim backward"
-                }),
-                f16 => Err(FerrotorchError::NotImplementedOnCuda {
-                    op: "std_dim backward"
-                }),
+                bf16 => {
+                    let result = backend.std_var_axis_bf16(
+                        input_ref.gpu_handle()?,
+                        outer,
+                        axis_size,
+                        inner,
+                        self.correction,
+                        true,
+                    )?;
+                    backend.std_var_axis_backward_bf16(
+                        input_ref.gpu_handle()?,
+                        go_on_device.gpu_handle()?,
+                        &result,
+                        outer,
+                        axis_size,
+                        inner,
+                        self.correction,
+                        true,
+                    )
+                },
+                f16 => {
+                    let result = backend.std_var_axis_f16(
+                        input_ref.gpu_handle()?,
+                        outer,
+                        axis_size,
+                        inner,
+                        self.correction,
+                        true,
+                    )?;
+                    backend.std_var_axis_backward_f16(
+                        input_ref.gpu_handle()?,
+                        go_on_device.gpu_handle()?,
+                        &result,
+                        outer,
+                        axis_size,
+                        inner,
+                        self.correction,
+                        true,
+                    )
+                },
             )?;
             let grad_input =
                 Tensor::from_storage(TensorStorage::gpu(result_handle), in_shape, false)?;
@@ -2918,8 +3075,22 @@ pub fn var_dim<T: Float>(
                 correction,
                 false,
             ),
-            bf16 => Err(FerrotorchError::NotImplementedOnCuda { op: "var_dim" }),
-            f16 => Err(FerrotorchError::NotImplementedOnCuda { op: "var_dim" }),
+            bf16 => backend.std_var_axis_bf16(
+                input_ref.gpu_handle()?,
+                outer,
+                axis_size,
+                inner,
+                correction,
+                false,
+            ),
+            f16 => backend.std_var_axis_f16(
+                input_ref.gpu_handle()?,
+                outer,
+                axis_size,
+                inner,
+                correction,
+                false,
+            ),
         )?;
         let result = Tensor::from_storage(TensorStorage::gpu(result_handle), out_shape, false)?;
         if is_grad_enabled() && input.requires_grad() {
@@ -3018,8 +3189,22 @@ pub fn std_dim<T: Float>(
                 correction,
                 true,
             ),
-            bf16 => Err(FerrotorchError::NotImplementedOnCuda { op: "std_dim" }),
-            f16 => Err(FerrotorchError::NotImplementedOnCuda { op: "std_dim" }),
+            bf16 => backend.std_var_axis_bf16(
+                input_ref.gpu_handle()?,
+                outer,
+                axis_size,
+                inner,
+                correction,
+                true,
+            ),
+            f16 => backend.std_var_axis_f16(
+                input_ref.gpu_handle()?,
+                outer,
+                axis_size,
+                inner,
+                correction,
+                true,
+            ),
         )?;
         let result = Tensor::from_storage(TensorStorage::gpu(result_handle), out_shape, false)?;
         if is_grad_enabled() && input.requires_grad() {

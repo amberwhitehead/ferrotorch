@@ -3035,6 +3035,46 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(grad, input.device_ordinal()))
     }
 
+    fn std_var_axis_bf16(
+        &self,
+        input: &GpuBufferHandle,
+        outer: usize,
+        axis_size: usize,
+        inner: usize,
+        correction: f64,
+        take_sqrt: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_bf16(input)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::bf16::gpu_std_var_axis_bf16(
+            input_buf, outer, axis_size, inner, correction, take_sqrt, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, input.device_ordinal()))
+    }
+
+    fn std_var_axis_backward_bf16(
+        &self,
+        input: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+        result: &GpuBufferHandle,
+        outer: usize,
+        axis_size: usize,
+        inner: usize,
+        correction: f64,
+        take_sqrt: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_bf16(input)?;
+        let grad_buf = Self::unwrap_buffer_bf16(grad_output)?;
+        let result_buf = Self::unwrap_buffer_bf16(result)?;
+        let dev = self.device(input.device_ordinal())?;
+        let grad = crate::bf16::gpu_std_var_axis_backward_bf16(
+            input_buf, grad_buf, result_buf, outer, axis_size, inner, correction, take_sqrt, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(grad, input.device_ordinal()))
+    }
+
     fn logsumexp_axis_f32(
         &self,
         input: &GpuBufferHandle,
@@ -7094,6 +7134,48 @@ impl GpuBackend for CudaBackendImpl {
         let result = crate::f16::gpu_mean_axis_f16(buf, outer, axis_size, inner, dev)
             .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn std_var_axis_f16(
+        &self,
+        input: &GpuBufferHandle,
+        outer: usize,
+        axis_size: usize,
+        inner: usize,
+        correction: f64,
+        take_sqrt: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f16(input)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::f16::gpu_std_var_axis_f16(
+            input_buf, outer, axis_size, inner, correction, take_sqrt, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, input.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn std_var_axis_backward_f16(
+        &self,
+        input: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+        result: &GpuBufferHandle,
+        outer: usize,
+        axis_size: usize,
+        inner: usize,
+        correction: f64,
+        take_sqrt: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f16(input)?;
+        let grad_buf = Self::unwrap_buffer_f16(grad_output)?;
+        let result_buf = Self::unwrap_buffer_f16(result)?;
+        let dev = self.device(input.device_ordinal())?;
+        let grad = crate::f16::gpu_std_var_axis_backward_f16(
+            input_buf, grad_buf, result_buf, outer, axis_size, inner, correction, take_sqrt, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(grad, input.device_ordinal()))
     }
 
     #[cfg(feature = "cuda")]
