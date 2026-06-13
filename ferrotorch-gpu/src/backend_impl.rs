@@ -1933,7 +1933,7 @@ impl GpuBackend for CudaBackendImpl {
         let ord = a.device_ordinal();
         Ok((
             Self::wrap_buffer_f64(vals, ord),
-            Self::wrap_buffer_f64(idxs, ord),
+            Self::wrap_buffer_i64(idxs, ord),
         ))
     }
 
@@ -1951,7 +1951,7 @@ impl GpuBackend for CudaBackendImpl {
         let ord = a.device_ordinal();
         Ok((
             Self::wrap_buffer_f64(vals, ord),
-            Self::wrap_buffer_f64(idxs, ord),
+            Self::wrap_buffer_i64(idxs, ord),
         ))
     }
 
@@ -4023,7 +4023,10 @@ impl GpuBackend for CudaBackendImpl {
         let (vals, idxs) = crate::kernels::gpu_cummax(a_buf, outer, dim_size, inner, dev)
             .map_err(Self::map_gpu_err)?;
         let ord = a.device_ordinal();
-        Ok((Self::wrap_buffer(vals, ord), Self::wrap_buffer(idxs, ord)))
+        Ok((
+            Self::wrap_buffer(vals, ord),
+            Self::wrap_buffer_i64(idxs, ord),
+        ))
     }
 
     fn cummin_f32(
@@ -4038,7 +4041,10 @@ impl GpuBackend for CudaBackendImpl {
         let (vals, idxs) = crate::kernels::gpu_cummin(a_buf, outer, dim_size, inner, dev)
             .map_err(Self::map_gpu_err)?;
         let ord = a.device_ordinal();
-        Ok((Self::wrap_buffer(vals, ord), Self::wrap_buffer(idxs, ord)))
+        Ok((
+            Self::wrap_buffer(vals, ord),
+            Self::wrap_buffer_i64(idxs, ord),
+        ))
     }
 
     fn logcumsumexp_f32(

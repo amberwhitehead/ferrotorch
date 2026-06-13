@@ -52,6 +52,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-136: CUDA `cummax`/`cummin` encode result indices as f32, corrupting positions above 2^24 (#1830)
 - CORE-132: CPU elementwise, reduction, and cumulative kernels reject valid non-contiguous views (#1826)
 - CORE-131: SIMD elementwise helpers skip shape validation and return partially computed tensors (#1825)
 - CORE-130: `masked_select` implements same-numel reshaping instead of broadcasting (#1824)

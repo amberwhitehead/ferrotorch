@@ -51,7 +51,7 @@ use crate::buffer::CudaBuffer;
 use crate::device::GpuDevice;
 use crate::error::{GpuError, GpuResult};
 #[cfg(feature = "cuda")]
-use crate::transfer::{alloc_zeros_f32, alloc_zeros_f64, cpu_to_gpu, gpu_to_cpu};
+use crate::transfer::{alloc_zeros, alloc_zeros_f32, alloc_zeros_f64, cpu_to_gpu, gpu_to_cpu};
 
 // ---------------------------------------------------------------------------
 // f32 → f64 PTX auto-conversion
@@ -144,6 +144,10 @@ pub(crate) fn ptx_f32_to_f64(
         // `gpu_rmsnorm_backward_f64` because their f32 templates use
         // `%row_off` for the row-stride (#784 cascade).
         .replace("shl.b64 %off, %off, 2", "shl.b64 %off, %off, 3")
+        .replace(
+            "shl.b64 %off_val, %off_val, 2",
+            "shl.b64 %off_val, %off_val, 3",
+        )
         .replace("shl.b64 %off_in, %off_in, 2", "shl.b64 %off_in, %off_in, 3")
         .replace(
             "shl.b64 %off_out, %off_out, 2",
@@ -7086,7 +7090,7 @@ DONE:
 /// PTX source for `cummax_kernel`: running maximum along an axis.
 ///
 /// Thread i processes the scan for outer_idx = i / inner, inner_idx = i % inner.
-/// Outputs both values and argmax indices (as f32 for uniform buffer handling).
+/// Outputs both values and argmax indices (as i64, matching PyTorch long indices).
 /// `values[idx] = max_{j=0}^{k} input[base + j*inner]`
 /// `indices[idx] = argmax_{j=0}^{k} input[base + j*inner]`
 #[cfg(feature = "cuda")]
@@ -7106,8 +7110,9 @@ pub(crate) const CUMMAX_PTX: &str = "\
 ) {
     .reg .u32 %r_tid, %bid, %bdim, %n_reg, %outer_sz, %dim_sz, %inner_sz;
     .reg .u32 %outer_idx, %inner_idx, %k, %base, %idx, %tmp, %best_k;
-    .reg .u64 %in, %out, %ind, %off, %addr;
-    .reg .f32 %val, %acc, %best_k_f;
+    .reg .u64 %in, %out, %ind, %off_val, %off_idx, %addr;
+    .reg .s64 %best_k_s64;
+    .reg .f32 %val, %acc;
     .reg .pred %p, %lp, %is_new_max;
 
     ld.param.u64 %in, [input_ptr];
@@ -7144,21 +7149,23 @@ SCAN_LOOP:
     mul.lo.u32 %idx, %k, %inner_sz;
     add.u32 %idx, %base, %idx;
 
-    cvt.u64.u32 %off, %idx;
-    shl.b64 %off, %off, 2;
-    add.u64 %addr, %in, %off;
+    cvt.u64.u32 %off_val, %idx;
+    shl.b64 %off_val, %off_val, 2;
+    add.u64 %addr, %in, %off_val;
     ld.global.f32 %val, [%addr];
 
     setp.gt.f32 %is_new_max, %val, %acc;
     @%is_new_max mov.u32 %best_k, %k;
     max.f32 %acc, %acc, %val;
 
-    add.u64 %addr, %out, %off;
+    add.u64 %addr, %out, %off_val;
     st.global.f32 [%addr], %acc;
 
-    cvt.rn.f32.u32 %best_k_f, %best_k;
-    add.u64 %addr, %ind, %off;
-    st.global.f32 [%addr], %best_k_f;
+    cvt.s64.u32 %best_k_s64, %best_k;
+    cvt.u64.u32 %off_idx, %idx;
+    shl.b64 %off_idx, %off_idx, 3;
+    add.u64 %addr, %ind, %off_idx;
+    st.global.s64 [%addr], %best_k_s64;
 
     add.u32 %k, %k, 1;
     bra SCAN_LOOP;
@@ -7172,7 +7179,7 @@ DONE:
 /// PTX source for `cummin_kernel`: running minimum along an axis.
 ///
 /// Thread i processes the scan for outer_idx = i / inner, inner_idx = i % inner.
-/// Outputs both values and argmin indices (as f32 for uniform buffer handling).
+/// Outputs both values and argmin indices (as i64, matching PyTorch long indices).
 #[cfg(feature = "cuda")]
 pub(crate) const CUMMIN_PTX: &str = "\
 .version 7.0
@@ -7190,8 +7197,9 @@ pub(crate) const CUMMIN_PTX: &str = "\
 ) {
     .reg .u32 %r_tid, %bid, %bdim, %n_reg, %outer_sz, %dim_sz, %inner_sz;
     .reg .u32 %outer_idx, %inner_idx, %k, %base, %idx, %tmp, %best_k;
-    .reg .u64 %in, %out, %ind, %off, %addr;
-    .reg .f32 %val, %acc, %best_k_f;
+    .reg .u64 %in, %out, %ind, %off_val, %off_idx, %addr;
+    .reg .s64 %best_k_s64;
+    .reg .f32 %val, %acc;
     .reg .pred %p, %lp, %is_new_min;
 
     ld.param.u64 %in, [input_ptr];
@@ -7228,21 +7236,23 @@ SCAN_LOOP:
     mul.lo.u32 %idx, %k, %inner_sz;
     add.u32 %idx, %base, %idx;
 
-    cvt.u64.u32 %off, %idx;
-    shl.b64 %off, %off, 2;
-    add.u64 %addr, %in, %off;
+    cvt.u64.u32 %off_val, %idx;
+    shl.b64 %off_val, %off_val, 2;
+    add.u64 %addr, %in, %off_val;
     ld.global.f32 %val, [%addr];
 
     setp.lt.f32 %is_new_min, %val, %acc;
     @%is_new_min mov.u32 %best_k, %k;
     min.f32 %acc, %acc, %val;
 
-    add.u64 %addr, %out, %off;
+    add.u64 %addr, %out, %off_val;
     st.global.f32 [%addr], %acc;
 
-    cvt.rn.f32.u32 %best_k_f, %best_k;
-    add.u64 %addr, %ind, %off;
-    st.global.f32 [%addr], %best_k_f;
+    cvt.s64.u32 %best_k_s64, %best_k;
+    cvt.u64.u32 %off_idx, %idx;
+    shl.b64 %off_idx, %off_idx, 3;
+    add.u64 %addr, %ind, %off_idx;
+    st.global.s64 [%addr], %best_k_s64;
 
     add.u32 %k, %k, 1;
     bra SCAN_LOOP;
@@ -15663,7 +15673,7 @@ pub fn gpu_cummax(
     dim_size: usize,
     inner: usize,
     device: &GpuDevice,
-) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<f32>)> {
+) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<i64>)> {
     use cudarc::driver::PushKernelArg;
 
     validate_unary(input, device)?;
@@ -15689,7 +15699,7 @@ pub fn gpu_cummax(
     };
 
     let mut out = alloc_zeros_f32(total, device)?;
-    let mut out_idx = alloc_zeros_f32(total, device)?;
+    let mut out_idx = alloc_zeros::<i64>(total, device)?;
     let cfg = launch_cfg(num_threads)?;
     let outer_u32 = outer as u32;
     let dim_size_u32 = dim_size as u32;
@@ -15701,14 +15711,14 @@ pub fn gpu_cummax(
     //   `module_cache::get_or_compile(ctx, CUMMAX_PTX,
     //   "cummax_kernel", ...)` call earlier in this fn; ABI is
     //   `(in_ptr, out_val_ptr, out_idx_ptr, outer, dim_size, inner,
-    //   total)`. Combiner is `max.f32` along the scan axis (with
-    //   argmax tracking written to `out_idx` as f32-encoded
-    //   indices).
+    //   total)`. Combiner is `max.f32` along the scan axis and
+    //   argmax tracking is written to `out_idx` as i64 indices.
     // - `input` is on `device` (validated by `validate_unary` —
     //   definition at line 10570); length is `outer * dim_size *
     //   inner == total`.
     // - `out` and `out_idx` were freshly allocated by two distinct
-    //   `alloc_zeros_f32(total, device)?` calls immediately above,
+    //   zeroed allocations immediately above (`f32` values and
+    //   `i64` indices, respectively),
     //   so they do not alias each other or `input`. Each is held
     //   under its own `&mut` binding, so `out.inner_mut()` and
     //   `out_idx.inner_mut()` are non-aliasing exclusive borrows.
@@ -15754,7 +15764,7 @@ pub fn gpu_cummin(
     dim_size: usize,
     inner: usize,
     device: &GpuDevice,
-) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<f32>)> {
+) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<i64>)> {
     use cudarc::driver::PushKernelArg;
 
     validate_unary(input, device)?;
@@ -15780,7 +15790,7 @@ pub fn gpu_cummin(
     };
 
     let mut out = alloc_zeros_f32(total, device)?;
-    let mut out_idx = alloc_zeros_f32(total, device)?;
+    let mut out_idx = alloc_zeros::<i64>(total, device)?;
     let cfg = launch_cfg(num_threads)?;
     let outer_u32 = outer as u32;
     let dim_size_u32 = dim_size as u32;
@@ -15797,7 +15807,8 @@ pub fn gpu_cummin(
     //   definition at line 10570); length is `outer * dim_size *
     //   inner == total`.
     // - `out` and `out_idx` were freshly allocated by two distinct
-    //   `alloc_zeros_f32(total, device)?` calls immediately above
+    //   zeroed allocations immediately above (`f32` values and
+    //   `i64` indices, respectively)
     //   and are held under separate `&mut` bindings; the two
     //   `.inner_mut()` borrows do not alias each other or `input`.
     // - Grid covers `num_threads = outer * inner` threads. Each
@@ -21744,7 +21755,7 @@ pub fn gpu_fused_gru_forward(
     _hx: &CudaBuffer<f32>,
     _hsz: usize,
     _device: &GpuDevice,
-) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<f32>)> {
+) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<i64>)> {
     Err(GpuError::NoCudaFeature)
 }
 
@@ -24479,7 +24490,7 @@ pub fn gpu_cummin(
     _dim_size: usize,
     _inner: usize,
     _device: &GpuDevice,
-) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<f32>)> {
+) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<i64>)> {
     Err(GpuError::NoCudaFeature)
 }
 
@@ -25704,7 +25715,7 @@ pub fn gpu_cumprod_f64(
     Ok(out)
 }
 
-/// Cumulative max for f64. Returns (values, indices).
+/// Cumulative max for f64. Returns (values, i64 indices).
 #[cfg(feature = "cuda")]
 pub fn gpu_cummax_f64(
     input: &CudaBuffer<f64>,
@@ -25712,13 +25723,14 @@ pub fn gpu_cummax_f64(
     dim_size: usize,
     inner: usize,
     device: &GpuDevice,
-) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<f64>)> {
+) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<i64>)> {
     use cudarc::driver::PushKernelArg;
     let total = outer * inner;
     let n = outer * dim_size * inner;
     if n == 0 {
-        let e: &[f64] = &[];
-        return Ok((cpu_to_gpu(e, device)?, cpu_to_gpu(e, device)?));
+        let values: &[f64] = &[];
+        let indices: &[i64] = &[];
+        return Ok((cpu_to_gpu(values, device)?, cpu_to_gpu(indices, device)?));
     }
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let ctx = device.context();
@@ -25731,7 +25743,7 @@ pub fn gpu_cummax_f64(
                 source: e,
             })?;
     let mut out = alloc_zeros_f64(n, device)?;
-    let mut ind = alloc_zeros_f64(n, device)?;
+    let mut ind = alloc_zeros::<i64>(n, device)?;
     let cfg = launch_cfg(total)?;
     let (o, d, i, t) = (outer as u32, dim_size as u32, inner as u32, total as u32);
     // SAFETY:
@@ -25743,13 +25755,11 @@ pub fn gpu_cummax_f64(
     //   `CUMMAX_PTX` rewritten by `ptx_f32_to_f64`.
     // - `input: &CudaBuffer<f64>` is the source `[outer, dim_size,
     //   inner]` (caller contract: `input.len() == n`).
-    // - `out: &mut CudaBuffer<f64>` and `ind: &mut CudaBuffer<f64>`
+    // - `out: &mut CudaBuffer<f64>` and `ind: &mut CudaBuffer<i64>`
     //   are two distinct `[outer, dim_size, inner]` buffers
-    //   alloc'd via `alloc_zeros_f64(n, device)?`. Rust borrow
+    //   alloc'd above. Rust borrow
     //   rules guarantee they cannot alias each other or `input`
-    //   (note: `ind` is f64 holding indices as floats — design
-    //   choice of the caller, kernel writes integer values that
-    //   fit exactly in f64).
+    //   and the index buffer is real int64 storage.
     // - The kernel runs one thread per `(o, i)` pair (`total =
     //   outer * inner` threads); each thread sequentially scans
     //   `dim_size` elements writing `out[(o*dim_size+k)*inner+i]
@@ -25776,7 +25786,7 @@ pub fn gpu_cummax_f64(
     Ok((out, ind))
 }
 
-/// Cumulative min for f64. Returns (values, indices).
+/// Cumulative min for f64. Returns (values, i64 indices).
 #[cfg(feature = "cuda")]
 pub fn gpu_cummin_f64(
     input: &CudaBuffer<f64>,
@@ -25784,13 +25794,14 @@ pub fn gpu_cummin_f64(
     dim_size: usize,
     inner: usize,
     device: &GpuDevice,
-) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<f64>)> {
+) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<i64>)> {
     use cudarc::driver::PushKernelArg;
     let total = outer * inner;
     let n = outer * dim_size * inner;
     if n == 0 {
-        let e: &[f64] = &[];
-        return Ok((cpu_to_gpu(e, device)?, cpu_to_gpu(e, device)?));
+        let values: &[f64] = &[];
+        let indices: &[i64] = &[];
+        return Ok((cpu_to_gpu(values, device)?, cpu_to_gpu(indices, device)?));
     }
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let ctx = device.context();
@@ -25803,7 +25814,7 @@ pub fn gpu_cummin_f64(
                 source: e,
             })?;
     let mut out = alloc_zeros_f64(n, device)?;
-    let mut ind = alloc_zeros_f64(n, device)?;
+    let mut ind = alloc_zeros::<i64>(n, device)?;
     let cfg = launch_cfg(total)?;
     let (o, d, i, t) = (outer as u32, dim_size as u32, inner as u32, total as u32);
     // SAFETY:
@@ -25815,12 +25826,11 @@ pub fn gpu_cummin_f64(
     //   `CUMMIN_PTX` rewritten by `ptx_f32_to_f64`.
     // - `input: &CudaBuffer<f64>` is the source `[outer, dim_size,
     //   inner]` (caller contract: `input.len() == n`).
-    // - `out: &mut CudaBuffer<f64>` and `ind: &mut CudaBuffer<f64>`
+    // - `out: &mut CudaBuffer<f64>` and `ind: &mut CudaBuffer<i64>`
     //   are two distinct buffers alloc'd via
-    //   `alloc_zeros_f64(n, device)?`. Rust borrow rules
-    //   guarantee they cannot alias each other or `input`. `ind`
-    //   holds argmin indices as f64 values that fit exactly in
-    //   the mantissa.
+    //   zeroed device allocations. Rust borrow rules guarantee
+    //   they cannot alias each other or `input`; `ind` is real
+    //   int64 storage.
     // - The kernel runs one thread per `(o, i)` pair (`total =
     //   outer * inner` threads); each thread sequentially scans
     //   `dim_size` elements writing `out[...] = running_min`
@@ -26860,7 +26870,7 @@ pub fn gpu_rmsnorm_backward_f64(
     _cols: usize,
     _eps: f64,
     _device: &GpuDevice,
-) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<f64>)> {
+) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<i64>)> {
     Err(GpuError::NoCudaFeature)
 }
 
@@ -26997,7 +27007,7 @@ pub fn gpu_cummin_f64(
     _dim_size: usize,
     _inner: usize,
     _device: &GpuDevice,
-) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<f64>)> {
+) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<i64>)> {
     Err(GpuError::NoCudaFeature)
 }
 #[cfg(not(feature = "cuda"))]

@@ -1905,7 +1905,7 @@ pub trait GpuBackend: Send + Sync {
             message: "cumprod_f64 GPU op not yet implemented".into(),
         })
     }
-    // Returns (values, indices_as_f32)
+    // Returns (values, indices_as_i64)
     fn cummax_f32(
         &self,
         _a: &GpuBufferHandle,
@@ -1928,7 +1928,7 @@ pub trait GpuBackend: Send + Sync {
             message: "cummax_f64 GPU op not yet implemented".into(),
         })
     }
-    // Returns (values, indices_as_f32)
+    // Returns (values, indices_as_i64)
     fn cummin_f32(
         &self,
         _a: &GpuBufferHandle,

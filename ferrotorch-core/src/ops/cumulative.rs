@@ -21,8 +21,10 @@
 
 use std::any::TypeId;
 
+use crate::Device;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
+use crate::int_tensor::IntTensor;
 use crate::shape::normalize_axis;
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
@@ -66,6 +68,23 @@ fn validate_dim(ndim: usize, dim: i64, op_name: &str) -> FerrotorchResult<usize>
         });
     }
     normalize_axis(dim as isize, ndim)
+}
+
+fn read_gpu_i64_indices(
+    handle: crate::gpu_dispatch::GpuBufferHandle,
+    shape: &[usize],
+) -> FerrotorchResult<Vec<usize>> {
+    let idxs_tensor = IntTensor::<i64>::from_gpu_handle(handle, shape.to_vec());
+    let idxs_cpu = idxs_tensor.to(Device::Cpu)?;
+    idxs_cpu
+        .data()?
+        .iter()
+        .map(|&v| {
+            usize::try_from(v).map_err(|_| FerrotorchError::InvalidArgument {
+                message: format!("cummax/cummin: CUDA kernel returned invalid negative index {v}"),
+            })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -239,24 +258,12 @@ pub fn cummax_forward<T: Float>(
             let (vals_h, idxs_h) =
                 backend.cummax_f32(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
-            // f32 path: indices stored as f32 (uniform with values).
-            let idxs_tensor =
-                Tensor::<f32>::from_storage(TensorStorage::gpu(idxs_h), shape.to_vec(), false)?;
-            let idxs_cpu = idxs_tensor.cpu()?;
-            let idxs_data = idxs_cpu.data()?;
-            indices = idxs_data.iter().map(|&v| v as usize).collect();
+            indices = read_gpu_i64_indices(idxs_h, shape)?;
         } else {
             let (vals_h, idxs_h) =
                 backend.cummax_f64(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
-            // f64 path: the converter rewrites the index store
-            // `st.global.f32` → `st.global.f64`, so the index buffer
-            // is f64 (#787). Read it back at f64 width, then cast.
-            let idxs_tensor =
-                Tensor::<f64>::from_storage(TensorStorage::gpu(idxs_h), shape.to_vec(), false)?;
-            let idxs_cpu = idxs_tensor.cpu()?;
-            let idxs_data = idxs_cpu.data()?;
-            indices = idxs_data.iter().map(|&v| v as usize).collect();
+            indices = read_gpu_i64_indices(idxs_h, shape)?;
         }
         return Ok(CumExtremeResult { values, indices });
     }
@@ -353,22 +360,12 @@ pub fn cummin_forward<T: Float>(
             let (vals_h, idxs_h) =
                 backend.cummin_f32(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
-            let idxs_tensor =
-                Tensor::<f32>::from_storage(TensorStorage::gpu(idxs_h), shape.to_vec(), false)?;
-            let idxs_cpu = idxs_tensor.cpu()?;
-            let idxs_data = idxs_cpu.data()?;
-            indices = idxs_data.iter().map(|&v| v as usize).collect();
+            indices = read_gpu_i64_indices(idxs_h, shape)?;
         } else {
             let (vals_h, idxs_h) =
                 backend.cummin_f64(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
-            // f64 path: indices stored at f64 width by the converted
-            // PTX (#787). Read back as f64, then cast.
-            let idxs_tensor =
-                Tensor::<f64>::from_storage(TensorStorage::gpu(idxs_h), shape.to_vec(), false)?;
-            let idxs_cpu = idxs_tensor.cpu()?;
-            let idxs_data = idxs_cpu.data()?;
-            indices = idxs_data.iter().map(|&v| v as usize).collect();
+            indices = read_gpu_i64_indices(idxs_h, shape)?;
         }
         return Ok(CumExtremeResult { values, indices });
     }

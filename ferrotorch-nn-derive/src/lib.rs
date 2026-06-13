@@ -351,15 +351,14 @@ fn find_float_param(generics: &Generics) -> syn::Result<Ident> {
     for param in &generics.params {
         if let GenericParam::Type(TypeParam { ident, bounds, .. }) = param {
             for bound in bounds {
-                if let syn::TypeParamBound::Trait(tb) = bound {
-                    if tb
+                if let syn::TypeParamBound::Trait(tb) = bound
+                    && tb
                         .path
                         .segments
                         .last()
                         .is_some_and(|seg| seg.ident == "Float")
-                    {
-                        return Ok(ident.clone());
-                    }
+                {
+                    return Ok(ident.clone());
                 }
             }
         }

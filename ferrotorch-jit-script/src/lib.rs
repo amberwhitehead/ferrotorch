@@ -251,10 +251,10 @@ fn extract_tensor_param_inner(ty: &syn::Type, depth: u8) -> Option<TokenStream2>
             return Some(ts);
         }
     }
-    if ident_str == "FerrotorchResult" || ident_str == "Result" {
-        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-            return extract_tensor_param_inner(inner, depth + 1);
-        }
+    if (ident_str == "FerrotorchResult" || ident_str == "Result")
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return extract_tensor_param_inner(inner, depth + 1);
     }
     None
 }
