@@ -1589,19 +1589,15 @@ pub fn view_t<T: Float>(input: &Tensor<T>, shape: &[i64]) -> FerrotorchResult<Te
 pub fn contiguous_t<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     use std::any::TypeId;
 
-    // A tensor whose strides look C-contiguous BUT carries a non-zero
-    // `storage_offset` is NOT safe to fast-path-`clone()`: `is_contiguous()`
-    // mirrors PyTorch (`c10::TensorImpl::is_contiguous`, computed from
-    // sizes/strides ONLY — see `compute_contiguous`), so it returns `true`
-    // for a row-narrowed view (`full.narrow(0, 1, 3)` keeps row-major strides
-    // `[D, 1]`). The GPU consumers (`scatter_add_segments_cuda` et al.) read
-    // `gpu_handle()` from the base buffer pointer (element 0) and DROP the
-    // offset — silent wrong results (#1657). Materialising an offset != 0 view
-    // through the strided-copy path below yields a fresh packed offset-0 buffer
-    // whose `gpu_handle()` points at the logical element 0, fixing the whole
-    // class at one site. `strided_copy_*` (and the CPU `data_vec()` fallback)
-    // both honour `storage_offset`.
-    if input.is_contiguous() && input.storage_offset() == 0 {
+    // A tensor whose strides look C-contiguous is safe to cheap-clone only when
+    // it addresses the whole underlying storage from offset zero. PyTorch's
+    // contiguity bit is shape/stride based, so `narrow(0, 0, 1).squeeze()` can
+    // be contiguous with offset 0 while its storage still contains the entire
+    // base tensor. CUDA consumers receive only a raw buffer handle, so they
+    // would reduce/copy past the logical view unless we materialise a packed
+    // buffer here (#1657/#1961).
+    if input.is_contiguous() && input.storage_offset() == 0 && input.storage_len() == input.numel()
+    {
         return Ok(input.clone());
     }
     let device = input.device();

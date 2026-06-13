@@ -18,7 +18,7 @@
 //! | REQ-1 (`sum`) | NOT-STARTED | `sum` + `SumBackward` ship with non-test production consumer `Tensor::sum_all` plus invocations across `autograd/grad_penalty.rs`, `einsum.rs`, `vmap.rs`, `flex_attention.rs`, and `ferrotorch-nn`; parity-sweep runner arm gated by #1314 (currently `0/80 passed (80 skipped)`). |
 //! | REQ-2 (`mean`) | NOT-STARTED | `mean` + `MeanBackward` ship with non-test consumer `Tensor::mean_all`; parity runner arm gated by #1314. |
 //! | REQ-3 (`prod`) | NOT-STARTED | `prod` + `ProdBackward` (prefix-suffix product, zero-aware) ship with consumer `Tensor::prod_all`; parity runner arm gated by #1314. |
-//! | REQ-4 (`amin` / `amax`) | NOT-STARTED | `amin` / `amax` + `AminBackward` / `AmaxBackward` (subgradient at ties) ship with consumers `Tensor::amin` / `Tensor::amax`; parity runner arm gated by #1314 + #1302. |
+//! | REQ-4 (`amin` / `amax`) | SHIPPED | `amin` / `amax` + `AminBackward` / `AmaxBackward` implement PyTorch NaN propagation, tie-split gradients, CUDA f32/f64 forward/backward, and empty-global errors; consumers `Tensor::amin` / `Tensor::amax`; regression coverage in `divergence_global_extrema_reduction_parity.rs`. |
 //! | REQ-5 (`sum_dim`) | NOT-STARTED | `sum_dim` + `SumDimBackward` ship; consumed by `einsum.rs`, `einops.rs`, `grad_fns/linalg.rs`, `meta_propagate.rs`, `ferrotorch-distributions`; parity runner arm gated by #1314. |
 //! | REQ-6 (`mean_dim`) | NOT-STARTED | `mean_dim` + `MeanDimBackward` ship; consumed by `meta_propagate.rs`; parity runner arm gated by #1314. |
 //! | REQ-7 (backward VJP wiring) | NOT-STARTED | every `*Backward` struct implements the `GradFn` trait with `backward` / `inputs` / `name`; the no-grad / `requires_grad=false` short-circuit is exercised by the `test_*_no_grad*` family; gated by #1314 closing the parity runner arms. |
@@ -477,40 +477,92 @@ fn prod_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 // the gradient to every input position equal to the extremum (subgradient
 // at ties), matching torch's behavior.
 
+fn torch_global_extreme<T: Float>(data: &[T], find_max: bool) -> FerrotorchResult<T> {
+    if data.is_empty() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "amin/amax: reduction over an empty tensor requires an explicit dim".into(),
+        });
+    }
+
+    let mut acc = data[0];
+    for &v in &data[1..] {
+        let take = v.is_nan() || (!acc.is_nan() && if find_max { v > acc } else { v < acc });
+        if take {
+            acc = v;
+        }
+    }
+    Ok(acc)
+}
+
+fn torch_global_extreme_backward_cpu<T: Float>(
+    input: &Tensor<T>,
+    extreme: T,
+    grad_output: T,
+) -> FerrotorchResult<Tensor<T>> {
+    let input_data = input.data_vec()?;
+    let result = if extreme.is_nan() {
+        vec![T::nan(); input_data.len()]
+    } else {
+        let zero = <T as num_traits::Zero>::zero();
+        let count = input_data.iter().filter(|&&v| v == extreme).count();
+        let scale = if count == 0 {
+            T::nan()
+        } else {
+            grad_output
+                / T::from(count).ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: "amin/amax backward: match count is not representable".into(),
+                })?
+        };
+        input_data
+            .iter()
+            .map(|&v| if v == extreme { scale } else { zero })
+            .collect()
+    };
+    Tensor::from_storage(TensorStorage::cpu(result), input.shape().to_vec(), false)
+}
+
 #[derive(Debug)]
 pub struct AminBackward<T: Float> {
     input: Tensor<T>,
+    extreme: Tensor<T>,
 }
 
 impl<T: Float> GradFn<T> for AminBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let go = if grad_output.is_cuda() {
-            grad_output.cpu()?.data()?[0]
-        } else {
-            grad_output.data()?[0]
-        };
-        let input_data = self.input.data_vec()?;
-        let zero = <T as num_traits::Zero>::zero();
-        let mn = input_data
-            .iter()
-            .copied()
-            .fold(
-                T::from(f64::INFINITY).unwrap(),
-                |a, b| if b < a { b } else { a },
-            );
-        // Distribute `go` evenly across all positions equal to the min
-        // (subgradient at ties — matches torch.amin's gradient).
-        let count = input_data.iter().filter(|&&v| v == mn).count() as f64;
-        let scale = T::from(go.to_f64().unwrap() / count.max(1.0)).unwrap();
-        let result: Vec<T> = input_data
-            .iter()
-            .map(|&v| if v == mn { scale } else { zero })
-            .collect();
-        let grad_input = Tensor::from_storage(
-            TensorStorage::cpu(result),
-            self.input.shape().to_vec(),
-            false,
-        )?;
+        let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
+        let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
+        if self.input.is_cuda() && (is_f32 || is_f64) {
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let grad_output = if grad_output.is_cuda() {
+                grad_output.clone()
+            } else {
+                grad_output.to(self.input.device())?
+            };
+            let handle = if is_f32 {
+                backend.extreme_backward_f32(
+                    self.input.gpu_handle()?,
+                    self.extreme.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                )?
+            } else {
+                backend.extreme_backward_f64(
+                    self.input.gpu_handle()?,
+                    self.extreme.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                )?
+            };
+            let grad_input = Tensor::from_storage(
+                TensorStorage::gpu(handle),
+                self.input.shape().to_vec(),
+                false,
+            )?;
+            return Ok(vec![Some(grad_input)]);
+        }
+
+        let go = grad_output.data()?[0];
+        let mn = self.extreme.data()?[0];
+        let grad_input = torch_global_extreme_backward_cpu(&self.input, mn, go)?;
         Ok(vec![Some(grad_input)])
     }
 
@@ -526,34 +578,45 @@ impl<T: Float> GradFn<T> for AminBackward<T> {
 #[derive(Debug)]
 pub struct AmaxBackward<T: Float> {
     input: Tensor<T>,
+    extreme: Tensor<T>,
 }
 
 impl<T: Float> GradFn<T> for AmaxBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let go = if grad_output.is_cuda() {
-            grad_output.cpu()?.data()?[0]
-        } else {
-            grad_output.data()?[0]
-        };
-        let input_data = self.input.data_vec()?;
-        let zero = <T as num_traits::Zero>::zero();
-        let mx = input_data
-            .iter()
-            .copied()
-            .fold(T::from(f64::NEG_INFINITY).unwrap(), |a, b| {
-                if b > a { b } else { a }
-            });
-        let count = input_data.iter().filter(|&&v| v == mx).count() as f64;
-        let scale = T::from(go.to_f64().unwrap() / count.max(1.0)).unwrap();
-        let result: Vec<T> = input_data
-            .iter()
-            .map(|&v| if v == mx { scale } else { zero })
-            .collect();
-        let grad_input = Tensor::from_storage(
-            TensorStorage::cpu(result),
-            self.input.shape().to_vec(),
-            false,
-        )?;
+        let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
+        let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
+        if self.input.is_cuda() && (is_f32 || is_f64) {
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let grad_output = if grad_output.is_cuda() {
+                grad_output.clone()
+            } else {
+                grad_output.to(self.input.device())?
+            };
+            let handle = if is_f32 {
+                backend.extreme_backward_f32(
+                    self.input.gpu_handle()?,
+                    self.extreme.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                )?
+            } else {
+                backend.extreme_backward_f64(
+                    self.input.gpu_handle()?,
+                    self.extreme.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                )?
+            };
+            let grad_input = Tensor::from_storage(
+                TensorStorage::gpu(handle),
+                self.input.shape().to_vec(),
+                false,
+            )?;
+            return Ok(vec![Some(grad_input)]);
+        }
+
+        let go = grad_output.data()?[0];
+        let mx = self.extreme.data()?[0];
+        let grad_input = torch_global_extreme_backward_cpu(&self.input, mx, go)?;
         Ok(vec![Some(grad_input)])
     }
 
@@ -576,6 +639,12 @@ pub fn amin<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
     let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
 
+    if input.numel() == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "amin: reduction over an empty tensor requires an explicit dim".into(),
+        });
+    }
+
     if input.is_cuda() && (is_f32 || is_f64) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -588,32 +657,33 @@ pub fn amin<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         } else {
             backend.min_f64(input.gpu_handle()?, input.numel())?
         };
-        let storage = TensorStorage::gpu(handle);
+        let result = Tensor::from_storage(TensorStorage::gpu(handle), vec![], false)?;
         if is_grad_enabled() && input.requires_grad() {
             let grad_fn = Arc::new(AminBackward {
                 input: input.clone(),
+                extreme: result.clone(),
             });
-            return Tensor::from_operation(storage, vec![], grad_fn);
+            let (storage, shape) = result.into_storage_and_shape()?;
+            return Tensor::from_operation(storage, shape, grad_fn);
         }
-        return Tensor::from_storage(storage, vec![], false);
+        return Ok(result);
     }
     if input.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "amin" });
     }
     // CPU walk.
     let data = input.data_vec()?;
-    let mn = data.iter().copied().fold(
-        T::from(f64::INFINITY).unwrap(),
-        |a, b| if b < a { b } else { a },
-    );
-    let storage = TensorStorage::cpu(vec![mn]);
+    let mn = torch_global_extreme(&data, false)?;
+    let result = Tensor::from_storage(TensorStorage::cpu(vec![mn]), vec![], false)?;
     if is_grad_enabled() && input.requires_grad() {
         let grad_fn = Arc::new(AminBackward {
             input: input.clone(),
+            extreme: result.clone(),
         });
-        Tensor::from_operation(storage, vec![], grad_fn)
+        let (storage, shape) = result.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, grad_fn)
     } else {
-        Tensor::from_storage(storage, vec![], false)
+        Ok(result)
     }
 }
 
@@ -622,6 +692,12 @@ pub fn amin<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 pub fn amax<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
     let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
+
+    if input.numel() == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "amax: reduction over an empty tensor requires an explicit dim".into(),
+        });
+    }
 
     if input.is_cuda() && (is_f32 || is_f64) {
         let backend =
@@ -635,33 +711,32 @@ pub fn amax<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         } else {
             backend.max_f64(input.gpu_handle()?, input.numel())?
         };
-        let storage = TensorStorage::gpu(handle);
+        let result = Tensor::from_storage(TensorStorage::gpu(handle), vec![], false)?;
         if is_grad_enabled() && input.requires_grad() {
             let grad_fn = Arc::new(AmaxBackward {
                 input: input.clone(),
+                extreme: result.clone(),
             });
-            return Tensor::from_operation(storage, vec![], grad_fn);
+            let (storage, shape) = result.into_storage_and_shape()?;
+            return Tensor::from_operation(storage, shape, grad_fn);
         }
-        return Tensor::from_storage(storage, vec![], false);
+        return Ok(result);
     }
     if input.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "amax" });
     }
     let data = input.data_vec()?;
-    let mx = data
-        .iter()
-        .copied()
-        .fold(T::from(f64::NEG_INFINITY).unwrap(), |a, b| {
-            if b > a { b } else { a }
-        });
-    let storage = TensorStorage::cpu(vec![mx]);
+    let mx = torch_global_extreme(&data, true)?;
+    let result = Tensor::from_storage(TensorStorage::cpu(vec![mx]), vec![], false)?;
     if is_grad_enabled() && input.requires_grad() {
         let grad_fn = Arc::new(AmaxBackward {
             input: input.clone(),
+            extreme: result.clone(),
         });
-        Tensor::from_operation(storage, vec![], grad_fn)
+        let (storage, shape) = result.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, grad_fn)
     } else {
-        Tensor::from_storage(storage, vec![], false)
+        Ok(result)
     }
 }
 

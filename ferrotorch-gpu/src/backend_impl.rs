@@ -2109,6 +2109,22 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
+    fn extreme_backward_f64(
+        &self,
+        input: &GpuBufferHandle,
+        extreme: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f64(input)?;
+        let extreme_buf = Self::unwrap_buffer_f64(extreme)?;
+        let grad_buf = Self::unwrap_buffer_f64(grad_output)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result =
+            crate::kernels::gpu_extreme_backward_f64(input_buf, extreme_buf, grad_buf, dev)
+                .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, input.device_ordinal()))
+    }
+
     fn masked_min_f64(
         &self,
         data: &GpuBufferHandle,
@@ -2778,6 +2794,22 @@ impl GpuBackend for CudaBackendImpl {
         let dev = self.device(a.device_ordinal())?;
         let result = crate::kernels::gpu_reduce_max(a_buf, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn extreme_backward_f32(
+        &self,
+        input: &GpuBufferHandle,
+        extreme: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer(input)?;
+        let extreme_buf = Self::unwrap_buffer(extreme)?;
+        let grad_buf = Self::unwrap_buffer(grad_output)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result =
+            crate::kernels::gpu_extreme_backward_f32(input_buf, extreme_buf, grad_buf, dev)
+                .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, input.device_ordinal()))
     }
 
     fn masked_min_f32(

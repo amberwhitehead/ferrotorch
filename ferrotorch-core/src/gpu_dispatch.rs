@@ -460,6 +460,22 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// f32 backward for global `amin`/`amax`.
+    ///
+    /// `extreme` is the saved 1-element forward result. The backend must split
+    /// `grad_output` evenly across positions where `input == extreme` and
+    /// preserve PyTorch's NaN result behavior.
+    fn extreme_backward_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _extreme: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "extreme_backward_f32 GPU op not yet implemented".into(),
+        })
+    }
+
     /// f32 fused masked-min reduction (#627). Single-pass kernel that
     /// folds `(data, mask_f) -> min` directly, where `mask_f[i]` is 1.0
     /// for valid entries and 0.0 for masked. Avoids the
@@ -854,6 +870,19 @@ pub trait GpuBackend: Send + Sync {
     fn max_f64(&self, _a: &GpuBufferHandle, _len: usize) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::InvalidArgument {
             message: "f64 GPU reduce_max not implemented for this backend".into(),
+        })
+    }
+
+    /// f64 backward for global `amin`/`amax`. Companion of
+    /// [`Self::extreme_backward_f32`].
+    fn extreme_backward_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _extreme: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "extreme_backward_f64 GPU op not yet implemented".into(),
         })
     }
 
