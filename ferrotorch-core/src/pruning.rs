@@ -2,8 +2,8 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | impl `magnitude_prune` (exact-count selection, torch CPU topk tie order — CORE-083 -> #1777); non-test consumer re-exported at `lib.rs:178` for `ferrotorch-nn` callers. |
-//! | REQ-2 | SHIPPED | impl `apply_2_4_mask` (final-dim grouping, `InvalidArgument` when last dim % 4 != 0 — CORE-084 -> #1778); non-test consumer cross-checked at `sparse.rs` + re-exported at `lib.rs:178`. |
+//! | REQ-1 | SHIPPED | impl `magnitude_prune` (Python round-half-even prune count + torch CPU topk tie order — CORE-083 -> #1777, #1908); non-test consumer re-exported at `lib.rs:178` for `ferrotorch-nn` callers. |
+//! | REQ-2 | SHIPPED | impl `apply_2_4_mask` (final-dim grouping, `InvalidArgument` when last dim % 4 != 0 — CORE-084 -> #1778; torch CPU topk in-block tie order — #1910); non-test consumer cross-checked at `sparse.rs` + re-exported at `lib.rs:178`. |
 //! | REQ-3 | SHIPPED | impl `sparsity_ratio`; non-test consumer re-exported at `lib.rs:178`. |
 //! | REQ-4 | SHIPPED | validation guard in `magnitude_prune`; non-test consumer part of pub-function contract. |
 //! | REQ-5 | SHIPPED | differentiable mask multiplication via `apply_constant_mask` -> `grad_fns::arithmetic::mul` (`MulBackward` edge to the original parameter — CORE-082 -> #1776); non-test consumer sparse-finetune workflows. |
@@ -246,8 +246,9 @@ fn torch_cpu_bottomk_indices<T: Float>(values: &[T], k: usize) -> Vec<usize> {
 /// Unstructured magnitude pruning: zero out the smallest weights.
 ///
 /// Given a weight tensor and a sparsity fraction in `[0, 1)`, zeroes
-/// EXACTLY `round(sparsity * numel)` elements — the smallest by absolute
-/// value, with ties at the cut split exactly as
+/// EXACTLY `round(sparsity * numel)` elements using Python's
+/// round-half-to-even rule — the smallest by absolute value, with ties at
+/// the cut split exactly as
 /// `torch.nn.utils.prune.l1_unstructured` does (torch CPU
 /// `topk(|w|, k, largest=False)` selection order; see
 /// `torch_cpu_bottomk_indices`).
@@ -278,9 +279,7 @@ pub fn magnitude_prune<T: Float>(
 
     let data = weights.data()?;
     let numel = data.len();
-    // KNOWN DIVERGENCE #1908: Rust `round` is half-away-from-zero; torch's
-    // `_compute_nparams_toprune` rounds via Python `round` (half-to-even).
-    let n_prune = ((numel as f64) * sparsity).round() as usize;
+    let n_prune = ((numel as f64) * sparsity).round_ties_even() as usize;
 
     let mut mask = vec![<T as num_traits::One>::one(); numel];
     if n_prune > 0 {
@@ -362,19 +361,13 @@ pub fn apply_2_4_mask<T: Float>(weights: &Tensor<T>) -> FerrotorchResult<Tensor<
         let row = &data[r * last_dim..(r + 1) * last_dim];
         let mask_row = &mut mask[r * last_dim..(r + 1) * last_dim];
         for (group, mask_group) in row.chunks_exact(4).zip(mask_row.chunks_exact_mut(4)) {
-            // Find indices of the 2 smallest-magnitude elements and zero
-            // them. Use unwrap_or(Ordering::Equal) to handle NaN without
-            // panicking.
-            let mut idx_mag: Vec<(usize, T)> = group
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| (i, v.abs()))
-                .collect();
-            idx_mag.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            // Zero the 2 smallest.
-            mask_group[idx_mag[0].0] = <T as num_traits::Zero>::zero();
-            mask_group[idx_mag[1].0] = <T as num_traits::Zero>::zero();
+            // WeightNormSparsifier's default norm is L2 (`w * w`) and it
+            // zeroes `torch.topk(scores, k=2, largest=False).indices` inside
+            // each sparse block.
+            let scores: Vec<T> = group.iter().map(|&v| v * v).collect();
+            for idx in torch_cpu_bottomk_indices(&scores, 2) {
+                mask_group[idx] = <T as num_traits::Zero>::zero();
+            }
         }
     }
 
@@ -452,6 +445,26 @@ mod tests {
         let pruned = magnitude_prune(&t, 0.0).unwrap();
         let d = pruned.data().unwrap();
         assert_eq!(d, &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_magnitude_prune_count_rounds_half_to_even() {
+        let t = make_tensor(vec![1.0, 2.0, 3.0, 4.0], vec![4]);
+
+        // torch.nn.utils.prune._compute_nparams_toprune uses Python round:
+        // 0.125*4 = 0.5 -> 0, 0.375*4 = 1.5 -> 2,
+        // 0.625*4 = 2.5 -> 2, 0.875*4 = 3.5 -> 4.
+        let pruned = magnitude_prune(&t, 0.125).unwrap();
+        assert_eq!(pruned.data().unwrap(), &[1.0, 2.0, 3.0, 4.0]);
+
+        let pruned = magnitude_prune(&t, 0.375).unwrap();
+        assert_eq!(pruned.data().unwrap(), &[0.0, 0.0, 3.0, 4.0]);
+
+        let pruned = magnitude_prune(&t, 0.625).unwrap();
+        assert_eq!(pruned.data().unwrap(), &[0.0, 0.0, 3.0, 4.0]);
+
+        let pruned = magnitude_prune(&t, 0.875).unwrap();
+        assert_eq!(pruned.data().unwrap(), &[0.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -561,6 +574,29 @@ mod tests {
         assert_eq!(d[5], 0.0);
         assert_eq!(d[6], 0.9);
         assert_eq!(d[7], 0.8);
+    }
+
+    #[test]
+    fn test_apply_2_4_mask_ties_match_weight_norm_sparsifier() {
+        // Live torch 2.11.0+cu130 WeightNormSparsifier oracle:
+        //   [2,2,2,2] -> [2,2,0,0]
+        let t = make_tensor(vec![2.0, 2.0, 2.0, 2.0], vec![4]);
+        let masked = apply_2_4_mask(&t).unwrap();
+        assert_eq!(masked.data().unwrap(), &[2.0, 2.0, 0.0, 0.0]);
+
+        //   [1,3,3,3] -> [0,3,0,3]
+        let t = make_tensor(vec![1.0, 3.0, 3.0, 3.0], vec![4]);
+        let masked = apply_2_4_mask(&t).unwrap();
+        assert_eq!(masked.data().unwrap(), &[0.0, 3.0, 0.0, 3.0]);
+
+        //   [-2,2,-2,2] -> [-2,2,-0,0]
+        let t = make_tensor(vec![-2.0, 2.0, -2.0, 2.0], vec![4]);
+        let masked = apply_2_4_mask(&t).unwrap();
+        let d = masked.data().unwrap();
+        let expected = [-2.0_f32, 2.0, -0.0, 0.0];
+        for (actual, expected) in d.iter().zip(expected.iter()) {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
     }
 
     #[test]

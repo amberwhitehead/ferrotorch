@@ -43,15 +43,13 @@ re-implements a ferrotorch algorithm. The torch APIs used, per op family:
   the documented PyTorch 2:4 semi-structured pruning path (see the
   PyTorch tutorial "Accelerating BERT with semi-structured (2:4)
   sparsity"). Shapes the sparsifier REJECTS (rows not a multiple of 4)
-  are recorded with `torch_error` instead of a `masked` expectation;
-  the suite pins ferrotorch's divergent acceptance against #1778.
+  are recorded with `torch_error` instead of a `masked` expectation.
 * sparsity_ratio: `(t == 0).float().mean()` evaluated by torch.
 
 Tie-magnitude cases are deliberately INCLUDED (they were previously
 avoided): ties at the prune threshold (CORE-083 -> #1777), 2:4 in-group
-magnitude ties, and a half-integer prune-count case. Divergences these
-expose are pinned in the consuming suite with tracking-issue numbers —
-the fixture always records the torch-side truth.
+magnitude ties, and a half-integer prune-count case. The fixture always
+records the torch-side truth.
 
 Usage:
 
@@ -550,7 +548,7 @@ def fixture_fake_quantize() -> list[dict[str, Any]]:
 def fixture_magnitude_prune() -> list[dict[str, Any]]:
     """Oracle: `torch.nn.utils.prune.l1_unstructured` (see
     `torch_l1_unstructured`). Tie-magnitude cases are included on purpose
-    — they are where CORE-083 (#1777) predicts ferrotorch over-prunes."""
+    to guard the torch topk selection order and prune-count rounding."""
     out: list[dict[str, Any]] = []
     cases = [
         # (tag, sparsity, shape, data)
@@ -591,21 +589,18 @@ def fixture_magnitude_prune() -> list[dict[str, Any]]:
 def fixture_apply_2_4_mask() -> list[dict[str, Any]]:
     """Oracle: `torch.ao.pruning.WeightNormSparsifier` 2:4 configuration
     (see `torch_2_4_mask`). Shapes the sparsifier rejects (rows not a
-    multiple of 4 wide) carry `torch_error` instead of `masked`; the suite
-    pins ferrotorch's divergent acceptance against CORE-084 (#1778).
+    multiple of 4 wide) carry `torch_error` instead of `masked`.
     In-group tie-magnitude cases are included on purpose."""
     out: list[dict[str, Any]] = []
     cases = [
         # (tag, shape, data)
         ("group1", [4], [1.0, -4.0, 2.0, -3.0]),
         ("group2", [8], [1.0, -4.0, 2.0, -3.0, 0.5, 0.1, 0.9, 0.8]),
-        # Trailing < 4 elements: torch's 2:4 sparsifier REJECTS this
-        # shape; ferrotorch silently leaves the tail unchanged (#1778).
+        # Trailing < 4 elements: torch's 2:4 sparsifier REJECTS this shape.
         ("trailing", [6], [1.0, -4.0, 2.0, -3.0, 0.5, 0.1]),
         # 2-D shape, 8 elements (preserves shape).
         ("mat2d", [2, 4], [1.0, -4.0, 2.0, -3.0, 0.5, 0.1, 0.9, 0.8]),
-        # Rows 6 wide: torch's 2:4 sparsifier REJECTS this shape;
-        # ferrotorch flat-groups ACROSS the row boundary (#1778).
+        # Rows 6 wide: torch's 2:4 sparsifier REJECTS this shape.
         ("rows_cross_2x6", [2, 6],
          [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]),
         # --- in-group tie-magnitude cases ---

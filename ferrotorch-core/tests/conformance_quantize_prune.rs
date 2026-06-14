@@ -80,9 +80,8 @@
 //! Where ferrotorch genuinely diverges from the torch oracle, the test pins
 //! ferrotorch's CURRENT observed behavior with the tracking issue number
 //! and keeps the torch value in the fixture/comment. Each pin is written to
-//! FAIL when the divergence is fixed, so it retires loudly:
-//!   - #1908: prune-count rounding (half-away vs Python round-half-even).
-//!   - #1910: 2:4 in-group tie selection differs from the torch sparsifier.
+//! FAIL when the divergence is fixed, so it retires loudly. There are no
+//! remaining pinned divergences in this segment.
 //!
 //! Retired pins (now live assertions):
 //!   - #1777 (CORE-083): magnitude_prune prunes EXACTLY n via torch CPU
@@ -99,6 +98,10 @@
 //!     `max_abs / ((qmax - qmin) / 2)` denominator and eps scale floor.
 //!   - #1911: quantize code generation uses inverse-scale multiply plus
 //!     round-half-to-even.
+//!   - #1908: `magnitude_prune` computes the prune count with Python
+//!     round-half-to-even semantics.
+//!   - #1910: `apply_2_4_mask` uses the same CPU `topk(largest=False)`
+//!     in-block tie selection as `WeightNormSparsifier`.
 //!
 //! GPU note (per the dispatch's most-likely-failure-mode):
 //! `quantize`, `dequantize`, `quantized_matmul`, `magnitude_prune` and
@@ -352,8 +355,8 @@ struct Fixture {
     oracle: Option<String>,
     /// Set when the torch oracle REJECTED the case's input (e.g. the 2:4
     /// sparsifier refuses rows that are not a multiple of 4 wide). Such
-    /// cases carry no value expectation; the suite pins ferrotorch's
-    /// divergent acceptance against the tracking issue instead.
+    /// cases carry no value expectation; the suite requires ferrotorch to
+    /// reject them with a structured error too.
     #[serde(default)]
     torch_error: Option<String>,
 }
@@ -903,39 +906,6 @@ fn magnitude_prune_bit_exact_and_sparsity() {
         let actual = pruned.data().expect("pruned data").to_vec();
         let expected_f32: Vec<f32> = expected_pruned.iter().map(|&v| v as f32).collect();
 
-        // KNOWN DIVERGENCES — pinned ferrotorch outputs, observed at HEAD.
-        // The fixture `pruned` field holds the torch
-        // `prune.l1_unstructured` truth; each pin FAILS (retire) when the
-        // referenced issue is fixed.
-        // #1777 (CORE-083) pins RETIRED: ties at the prune threshold now
-        // follow torch's `topk(|w|, k, largest=False)` selection exactly
-        // (tags tie_all_equal / tie_threshold_partial / tie_multiway are
-        // live bit-exact assertions below).
-        let pinned: Option<(Vec<f32>, &str)> = match f.tag.as_deref() {
-            // #1908: n_prune = round(0.125 * 4) — Rust half-away gives 1,
-            // torch (Python round-half-even) gives 0. torch: [1, 2, 3, 4].
-            Some("count_round_half") => Some((vec![0.0, 2.0, 3.0, 4.0], "#1908")),
-            _ => None,
-        };
-
-        if let Some((pinned_vals, issue)) = pinned {
-            assert_ne!(
-                actual, expected_f32,
-                "{label}: output now matches the torch oracle — {issue} \
-                 appears fixed; retire this pin"
-            );
-            for (i, (&a, &p)) in actual.iter().zip(pinned_vals.iter()).enumerate() {
-                assert_eq!(
-                    a.to_bits(),
-                    p.to_bits(),
-                    "{label}: index {i} no longer matches the pinned divergent \
-                     value (pinned={p}, actual={a}; torch={}; {issue})",
-                    expected_f32[i]
-                );
-            }
-            continue;
-        }
-
         // Bit-exact INCLUDING the sign of pruned slots: ferrotorch now
         // applies the same `weight_orig * mask` multiplication as torch's
         // pruning parametrization, so pruned negative weights yield -0.0
@@ -1018,42 +988,6 @@ fn apply_2_4_mask_bit_exact_and_sparsity() {
         let expected_masked = f.masked.as_ref().expect("masked").as_slice();
         let expected_zeros = f.n_zeros.expect("n_zeros");
         let expected_f32: Vec<f32> = expected_masked.iter().map(|&v| v as f32).collect();
-
-        // KNOWN DIVERGENCE #1910: in-group magnitude ties — torch's
-        // WeightNormSparsifier makes a deterministic keep choice that
-        // ferrotorch's stable-ascending-sort (zero the two lowest-index
-        // ties) does not match. Pinned to the observed ferrotorch output;
-        // the torch truth stays in the fixture. FAILS (retire) when #1910
-        // is fixed.
-        let pinned: Option<Vec<f32>> = match f.tag.as_deref() {
-            // torch: [2.0, 2.0, 0.0, 0.0] (keeps idx {0,1}).
-            Some("tie_all_equal") => Some(vec![0.0, 0.0, 2.0, 2.0]),
-            // torch: [0.0, 3.0, 0.0, 3.0] (keeps idx {1,3}).
-            Some("tie_three_equal") => Some(vec![0.0, 0.0, 3.0, 3.0]),
-            // torch: [-2.0, 2.0, -0.0, 0.0] (keeps idx {0,1}); ferrotorch
-            // zeroes idx {0,1} — the pruned -2.0 at idx 0 yields -0.0 via
-            // the mask multiply (#1909 mechanism, fixed under #1776; the
-            // remaining divergence is WHICH ties are kept: #1910).
-            Some("tie_neg_pair") => Some(vec![-0.0, 0.0, -2.0, 2.0]),
-            _ => None,
-        };
-        if let Some(pinned_vals) = pinned {
-            assert_ne!(
-                actual, expected_f32,
-                "{label}: output now matches the torch oracle — #1910 \
-                 appears fixed; retire this pin"
-            );
-            for (i, (&a, &p)) in actual.iter().zip(pinned_vals.iter()).enumerate() {
-                assert_eq!(
-                    a.to_bits(),
-                    p.to_bits(),
-                    "{label}: index {i} no longer matches the pinned divergent \
-                     value (pinned={p}, actual={a}; torch={}; #1910)",
-                    expected_f32[i]
-                );
-            }
-            continue;
-        }
 
         // Bit-exact INCLUDING the sign of pruned slots (#1909 pin retired
         // with the CORE-082 mask-multiplication fix; see
@@ -1168,8 +1102,7 @@ fn apply_2_4_mask_backward_flows_masked_gradient_to_original_leaf() {
     // parametrization (weight = weight_orig * mask => d/d weight_orig =
     // grad * mask): pruned slots get exact-zero gradient, kept slots pass
     // the upstream gradient through.
-    // ferrotorch keeps idx {1,3} in group 0 and idx {2,3} in group 1
-    // (in-group tie policy is #1910; this case is tie-free).
+    // ferrotorch keeps idx {1,3} in group 0 and idx {2,3} in group 1.
     let x = make_cpu_f32(&[1.0, -4.0, 2.0, -3.0, 0.5, 0.1, 0.9, 0.8], &[8], true);
     let masked = apply_2_4_mask(&x).expect("apply_2_4_mask");
 
