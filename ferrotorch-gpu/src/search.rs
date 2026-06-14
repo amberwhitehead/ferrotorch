@@ -64,9 +64,9 @@
 //! | REQ-18 (meshgrid dispatch + consumer) | SHIPPED | `CudaBackendImpl::meshgrid_grid in backend_impl.rs` dispatches `match dtype { F32, F64, F16, BF16 }`; non-test consumer `ferrotorch_core::ops::search::meshgrid` CUDA branch keeps each grid GPU-resident (`TensorStorage::gpu`) |
 //! | REQ-19 (`gpu_unique_consecutive_*`) | SHIPPED | `pub fn gpu_unique_consecutive_f32`/`_f64`/`_f16`/`_bf16 in search.rs` run the on-device run-flag → `gpu_cumsum` prefix-sum → compaction pipeline; consumer `CudaBackendImpl::unique_consecutive_1d in backend_impl.rs` |
 //! | REQ-20 (unique_consecutive PTX + ABI) | SHIPPED | `RUN_FLAG_F32_PTX`/`RUN_FLAG_F64_PTX`/`RUN_FLAG_F16_PTX`/`RUN_FLAG_BF16_PTX` (3-arg `(in,flag,n)`) + `COMPACT_F32_PTX`/`COMPACT_F64_PTX`/`COMPACT_F16_PTX`/`COMPACT_BF16_PTX` (4-arg `(in,incl,out,n)`) `in search.rs`; consumer `ferrotorch_core::ops::search::unique_consecutive` CUDA branch keeps deduplicated VALUES GPU-resident and reads back only run metadata |
-//! | REQ-21 (`gpu_unique_f32`/`_f64`) | SHIPPED | `pub fn gpu_unique_f32`/`_f64 in search.rs` run init → bitonic sort-by-key → run-flag → `gpu_cumsum` → compaction mirroring `compute_unique` at `aten/src/ATen/native/cuda/Unique.cu:51-85` (sort-by-key `radix_sort_pairs` `UniqueCub.cu:175`, inverse scatter `:63-66`, run-length counts `:75-81`); consumer `CudaBackendImpl::unique_1d in backend_impl.rs` |
-//! | REQ-22 (unique PTX + ABI) | SHIPPED | `UNIQUE_INIT_F32_PTX`/`_F64_PTX` (5-arg `(in,key,idx,n,npad)`) + `UNIQUE_BITONIC_F32_PTX`/`_F64_PTX` (5-arg `(key,idx,npad,j,k)`, via `unique_bitonic_ptx!`) `in search.rs`; comparator ranks pads (`idx==i32::MAX`) + NaN (`setp.neu`) last via `selp.u32`/`setp.*.u32` (no `.pred` arithmetic); dedup/compaction reuse `RUN_FLAG_*`/`COMPACT_*`/`gpu_cumsum` |
-//! | REQ-23 (unique trait + dispatch + consumer) | SHIPPED | `fn unique_1d in gpu_dispatch.rs`; `CudaBackendImpl::unique_1d in backend_impl.rs` (`match dtype { F32, F64 }`); `pub use search::{gpu_unique_f32, gpu_unique_f64} in lib.rs`; non-test consumer `ferrotorch_core::ops::search::unique` CUDA branch keeps SORTED-unique VALUES GPU-resident (`TensorStorage::gpu`), reads back only index/run metadata; bf16/f16 reject |
+//! | REQ-21 (`gpu_unique_*`) | SHIPPED | `pub fn gpu_unique_f32`/`_f64`/`_f16`/`_bf16 in search.rs` run init → bitonic sort-by-key → run-flag → `gpu_cumsum` → compaction mirroring `compute_unique` at `aten/src/ATen/native/cuda/Unique.cu:51-85` (sort-by-key `radix_sort_pairs` `UniqueCub.cu:175`, inverse scatter `:63-66`, run-length counts `:75-81`); consumer `CudaBackendImpl::unique_1d in backend_impl.rs` |
+//! | REQ-22 (unique PTX + ABI) | SHIPPED | `UNIQUE_INIT_F32_PTX`/`_F64_PTX`/`_F16_PTX`/`_BF16_PTX` (5-arg `(in,key,idx,n,npad)`) + `UNIQUE_BITONIC_F32_PTX`/`_F64_PTX`/`_F16_PTX`/`_BF16_PTX` (5-arg `(key,idx,npad,j,k)`) `in search.rs`; comparator ranks pads (`idx==i32::MAX`) + NaN (`setp.neu`) last via `selp.u32`/`setp.*.u32` (no `.pred` arithmetic), with NaN ties by ascending original index and finite equal ties by descending original index for signed-zero representative parity; dedup/compaction reuse `RUN_FLAG_*`/`COMPACT_*`/`gpu_cumsum` |
+//! | REQ-23 (unique trait + dispatch + consumer) | SHIPPED | `fn unique_1d in gpu_dispatch.rs`; `CudaBackendImpl::unique_1d in backend_impl.rs` (`match dtype { F32, F64, F16, BF16 }`); `pub use search::{gpu_unique_f32, gpu_unique_f64, gpu_unique_f16, gpu_unique_bf16} in lib.rs`; non-test consumer `ferrotorch_core::ops::search::unique` CUDA branch keeps SORTED-unique VALUES GPU-resident (`TensorStorage::gpu`), reads back only index/run metadata |
 
 #![cfg(feature = "cuda")]
 
@@ -77,7 +77,7 @@ use crate::device::GpuDevice;
 use crate::error::{GpuError, GpuResult};
 use crate::kernels::gpu_cumsum;
 use crate::module_cache::get_or_compile;
-use crate::transfer::{alloc_zeros_f32, alloc_zeros_f64, gpu_to_cpu};
+use crate::transfer::{alloc_zeros_bf16, alloc_zeros_f32, alloc_zeros_f64, gpu_to_cpu};
 
 const BLOCK_SIZE: u32 = 256;
 
@@ -2825,7 +2825,11 @@ fn launch_compact_u16(
 //      the maximum among real values (`a != a` unordered self-compare), so NaN
 //      sorts to the end and pads sort after even NaN. After the sort the first
 //      `n` positions hold the real elements in ascending order (NaN last); the
-//      pads occupy `[n, npad)` and are never read again.
+//      pads occupy `[n, npad)` and are never read again. Ties are deliberate:
+//      NaNs keep ascending original index so distinct NaNs match torch's
+//      stable order; finite equal values use descending original index so the
+//      compacted run-start is PyTorch's last original representative (visible
+//      in signed-zero bits).
 //   3. DEDUP: reuse the `unique_consecutive` `run_flags_and_scan` (the
 //      `setp.neu` UNORDERED not-equal run-flag — true for `NaN != NaN`, so each
 //      NaN is its OWN run) over the first `n` SORTED positions → `incl` (the
@@ -2847,7 +2851,7 @@ fn launch_compact_u16(
 //   torch.unique does NOT collapse NaNs — identical to `unique_consecutive`'s
 //   `setp.neu` predicate, so step 3 reuses it unchanged.
 //
-// INIT ABL: (in_ptr, key_ptr, idx_ptr, n, npad)
+// INIT ABI: (in_ptr, key_ptr, idx_ptr, n, npad)
 // BITONIC ABI: (key_ptr, idx_ptr, npad, j, k)   — one (k,j) step per launch
 // ===========================================================================
 
@@ -2985,6 +2989,71 @@ DONE:
 }
 ";
 
+macro_rules! unique_init_16_ptx {
+    ($entry:literal, $version:literal, $target:literal, $pad_bits:literal) => {
+        concat!(
+            ".version ",
+            $version,
+            "\n.target ",
+            $target,
+            "\n.address_size 64\n\n.visible .entry ",
+            $entry,
+            "(\n",
+            "    .param .u64 in_ptr,\n",
+            "    .param .u64 key_ptr,\n",
+            "    .param .u64 idx_ptr,\n",
+            "    .param .u32 n,\n",
+            "    .param .u32 npad\n",
+            ") {\n",
+            "    .reg .u32 %tid_r, %bid_r, %bdim_r, %i, %n_r, %npad_r, %pad_idx;\n",
+            "    .reg .u64 %in_p, %key_p, %idx_p, %koff, %ioff, %addr;\n",
+            "    .reg .b16 %v, %inf_h;\n",
+            "    .reg .pred %p_oob, %p_real;\n\n",
+            "    ld.param.u64 %in_p,   [in_ptr];\n",
+            "    ld.param.u64 %key_p,  [key_ptr];\n",
+            "    ld.param.u64 %idx_p,  [idx_ptr];\n",
+            "    ld.param.u32 %n_r,    [n];\n",
+            "    ld.param.u32 %npad_r, [npad];\n\n",
+            "    mov.u32 %tid_r,  %tid.x;\n",
+            "    mov.u32 %bid_r,  %ctaid.x;\n",
+            "    mov.u32 %bdim_r, %ntid.x;\n",
+            "    mad.lo.u32 %i, %bid_r, %bdim_r, %tid_r;\n\n",
+            "    setp.ge.u32 %p_oob, %i, %npad_r;\n",
+            "    @%p_oob bra DONE;\n\n",
+            "    cvt.u64.u32 %koff, %i;\n",
+            "    shl.b64 %koff, %koff, 1;\n",
+            "    cvt.u64.u32 %ioff, %i;\n",
+            "    shl.b64 %ioff, %ioff, 2;\n\n",
+            "    mov.u32 %pad_idx, 2147483647;\n",
+            "    mov.b16 %inf_h, ",
+            $pad_bits,
+            ";\n\n",
+            "    setp.lt.u32 %p_real, %i, %n_r;\n",
+            "    @!%p_real bra WRITE_PAD;\n\n",
+            "    add.u64 %addr, %in_p, %koff;\n",
+            "    ld.global.b16 %v, [%addr];\n",
+            "    add.u64 %addr, %key_p, %koff;\n",
+            "    st.global.b16 [%addr], %v;\n",
+            "    add.u64 %addr, %idx_p, %ioff;\n",
+            "    st.global.u32 [%addr], %i;\n",
+            "    bra DONE;\n\n",
+            "WRITE_PAD:\n",
+            "    add.u64 %addr, %key_p, %koff;\n",
+            "    st.global.b16 [%addr], %inf_h;\n",
+            "    add.u64 %addr, %idx_p, %ioff;\n",
+            "    st.global.u32 [%addr], %pad_idx;\n\n",
+            "DONE:\n",
+            "    ret;\n",
+            "}\n"
+        )
+    };
+}
+
+const UNIQUE_INIT_F16_PTX: &str =
+    unique_init_16_ptx!("unique_init_f16_kernel", "7.0", "sm_60", "31744");
+const UNIQUE_INIT_BF16_PTX: &str =
+    unique_init_16_ptx!("unique_init_bf16_kernel", "7.8", "sm_80", "32640");
+
 /// Generate one bitonic compare-exchange PTX step kernel for value type `tyld`
 /// (`f32`/`f64`) with element byte-width `kbytes` (`"2"` shift for f32, `"3"`
 /// for f64). The idx payload is always i32 (4-byte). One thread per array
@@ -3101,10 +3170,11 @@ macro_rules! unique_bitonic_ptx {
             "    // by ASCENDING original index (greater = ia > ib) so distinct NaN entries\n",
             "    // sort by original position, matching torch's radix-stable NaN order\n",
             "    // (verified live: unique([nan,1,nan,2,nan]).inverse = [2,0,3,1,4]).\n",
-            "    @%p_nana bra IDX_DECIDE;           // both NaN -> tie-break by index\n",
-            "    // both finite: ordered compare; on an exact value tie, also break by index\n",
-            "    // so equal-value runs are stable (uid is identical either way, but this\n",
-            "    // keeps the sorted permutation deterministic).\n",
+            "    @%p_nana bra NAN_IDX_DECIDE;       // both NaN -> ascending original index\n",
+            "    // both finite: ordered compare; on an exact value tie, break by DESCENDING\n",
+            "    // original index. The run still collapses to one uid, but compaction keeps\n",
+            "    // the first sorted run-start, so this preserves PyTorch's last-original\n",
+            "    // representative bits for signed zero: [0,-0] -> -0, [-0,0] -> +0.\n",
             "    setp.gt.",
             $tyld,
             " %p_gt, %a, %b;\n",
@@ -3113,8 +3183,8 @@ macro_rules! unique_bitonic_ptx {
             $tyld,
             " %p_gt, %a, %b;\n",
             "    @%p_gt bra SET_FALSE;\n",
-            "    // a == b (finite): tie-break by index.\n",
-            "    bra IDX_DECIDE;\n",
+            "    // a == b (finite): tie-break by descending original index.\n",
+            "    bra FINITE_EQ_DECIDE;\n",
             "\n",
             "PAD_DECIDE:\n",
             "    selp.u32 %g, 1, 0, %p_pada;        // the pad is the greater one\n",
@@ -3124,8 +3194,13 @@ macro_rules! unique_bitonic_ptx {
             "    selp.u32 %g, 1, 0, %p_nana;        // the NaN is the greater one\n",
             "    bra HAVE_GREATER;\n",
             "\n",
-            "IDX_DECIDE:\n",
-            "    setp.gt.u32 %p_gt, %ia, %ib;       // greater iff higher original index\n",
+            "NAN_IDX_DECIDE:\n",
+            "    setp.gt.u32 %p_gt, %ia, %ib;       // NaN ties: higher original index sorts later\n",
+            "    selp.u32 %g, 1, 0, %p_gt;\n",
+            "    bra HAVE_GREATER;\n",
+            "\n",
+            "FINITE_EQ_DECIDE:\n",
+            "    setp.lt.u32 %p_gt, %ia, %ib;       // finite equal ties: lower original index sorts later\n",
             "    selp.u32 %g, 1, 0, %p_gt;\n",
             "    bra HAVE_GREATER;\n",
             "\n",
@@ -3165,6 +3240,138 @@ macro_rules! unique_bitonic_ptx {
 
 const UNIQUE_BITONIC_F32_PTX: &str = unique_bitonic_ptx!("unique_bitonic_f32_kernel", "f32", "2");
 const UNIQUE_BITONIC_F64_PTX: &str = unique_bitonic_ptx!("unique_bitonic_f64_kernel", "f64", "3");
+
+macro_rules! unique_bitonic_16_ptx {
+    ($name:literal, $version:literal, $target:literal, $decode_a:literal, $decode_b:literal) => {
+        concat!(
+            ".version ",
+            $version,
+            "\n.target ",
+            $target,
+            "\n.address_size 64\n\n.visible .entry ",
+            $name,
+            "(\n",
+            "    .param .u64 key_ptr,\n",
+            "    .param .u64 idx_ptr,\n",
+            "    .param .u32 npad,\n",
+            "    .param .u32 j,\n",
+            "    .param .u32 k\n",
+            ") {\n",
+            "    .reg .u32 %tid_r, %bid_r, %bdim_r, %i, %ixj, %npad_r, %j_r, %k_r, %t1, %t2, %g;\n",
+            "    .reg .u32 %ia, %ib, %a_bits, %b_bits;\n",
+            "    .reg .u64 %key_p, %idx_p, %koffa, %koffb, %ioffa, %ioffb, %addr;\n",
+            "    .reg .b16 %a_h, %b_h, %zero16;\n",
+            "    .reg .f32 %a, %b;\n",
+            "    .reg .pred %p_oob, %p_partner, %p_asc, %p_pada, %p_padb;\n",
+            "    .reg .pred %p_nana, %p_nanb, %p_gt, %p_swap, %p_tmp;\n\n",
+            "    ld.param.u64 %key_p,  [key_ptr];\n",
+            "    ld.param.u64 %idx_p,  [idx_ptr];\n",
+            "    ld.param.u32 %npad_r, [npad];\n",
+            "    ld.param.u32 %j_r,    [j];\n",
+            "    ld.param.u32 %k_r,    [k];\n\n",
+            "    mov.u32 %tid_r,  %tid.x;\n",
+            "    mov.u32 %bid_r,  %ctaid.x;\n",
+            "    mov.u32 %bdim_r, %ntid.x;\n",
+            "    mad.lo.u32 %i, %bid_r, %bdim_r, %tid_r;\n\n",
+            "    setp.ge.u32 %p_oob, %i, %npad_r;\n",
+            "    @%p_oob bra DONE;\n\n",
+            "    xor.b32 %ixj, %i, %j_r;\n",
+            "    setp.le.u32 %p_partner, %ixj, %i;\n",
+            "    @%p_partner bra DONE;\n\n",
+            "    and.b32 %t1, %i, %k_r;\n",
+            "    setp.eq.u32 %p_asc, %t1, 0;\n\n",
+            "    cvt.u64.u32 %koffa, %i;\n",
+            "    shl.b64 %koffa, %koffa, 1;\n",
+            "    cvt.u64.u32 %koffb, %ixj;\n",
+            "    shl.b64 %koffb, %koffb, 1;\n",
+            "    cvt.u64.u32 %ioffa, %i;\n",
+            "    shl.b64 %ioffa, %ioffa, 2;\n",
+            "    cvt.u64.u32 %ioffb, %ixj;\n",
+            "    shl.b64 %ioffb, %ioffb, 2;\n",
+            "    add.u64 %addr, %key_p, %koffa;\n",
+            "    ld.global.b16 %a_h, [%addr];\n",
+            "    add.u64 %addr, %key_p, %koffb;\n",
+            "    ld.global.b16 %b_h, [%addr];\n",
+            "    add.u64 %addr, %idx_p, %ioffa;\n",
+            "    ld.global.u32 %ia, [%addr];\n",
+            "    add.u64 %addr, %idx_p, %ioffb;\n",
+            "    ld.global.u32 %ib, [%addr];\n\n",
+            "    mov.b16 %zero16, 0;\n",
+            $decode_a,
+            "\n",
+            $decode_b,
+            "\n\n",
+            "    setp.eq.u32 %p_pada, %ia, 2147483647;\n",
+            "    selp.u32 %t1, 1, 0, %p_pada;\n",
+            "    setp.eq.u32 %p_padb, %ib, 2147483647;\n",
+            "    selp.u32 %t2, 1, 0, %p_padb;\n",
+            "    setp.ne.u32 %p_tmp, %t1, %t2;\n",
+            "    @%p_tmp bra PAD_DECIDE;\n\n",
+            "    setp.neu.f32 %p_nana, %a, %a;\n",
+            "    selp.u32 %t1, 1, 0, %p_nana;\n",
+            "    setp.neu.f32 %p_nanb, %b, %b;\n",
+            "    selp.u32 %t2, 1, 0, %p_nanb;\n",
+            "    setp.ne.u32 %p_tmp, %t1, %t2;\n",
+            "    @%p_tmp bra NAN_DECIDE;\n",
+            "    @%p_nana bra NAN_IDX_DECIDE;\n",
+            "    setp.gt.f32 %p_gt, %a, %b;\n",
+            "    @%p_gt bra SET_TRUE;\n",
+            "    setp.lt.f32 %p_gt, %a, %b;\n",
+            "    @%p_gt bra SET_FALSE;\n",
+            "    bra FINITE_EQ_DECIDE;\n\n",
+            "PAD_DECIDE:\n",
+            "    selp.u32 %g, 1, 0, %p_pada;\n",
+            "    bra HAVE_GREATER;\n\n",
+            "NAN_DECIDE:\n",
+            "    selp.u32 %g, 1, 0, %p_nana;\n",
+            "    bra HAVE_GREATER;\n\n",
+            "NAN_IDX_DECIDE:\n",
+            "    setp.gt.u32 %p_gt, %ia, %ib;\n",
+            "    selp.u32 %g, 1, 0, %p_gt;\n",
+            "    bra HAVE_GREATER;\n\n",
+            "FINITE_EQ_DECIDE:\n",
+            "    setp.lt.u32 %p_gt, %ia, %ib;\n",
+            "    selp.u32 %g, 1, 0, %p_gt;\n",
+            "    bra HAVE_GREATER;\n\n",
+            "SET_TRUE:\n",
+            "    mov.u32 %g, 1;\n",
+            "    bra HAVE_GREATER;\n\n",
+            "SET_FALSE:\n",
+            "    mov.u32 %g, 0;\n\n",
+            "HAVE_GREATER:\n",
+            "    selp.u32 %t1, 1, 0, %p_asc;\n",
+            "    setp.ne.u32 %p_swap, %g, %t1;\n",
+            "    @%p_swap bra DONE;\n\n",
+            "    add.u64 %addr, %key_p, %koffa;\n",
+            "    st.global.b16 [%addr], %b_h;\n",
+            "    add.u64 %addr, %key_p, %koffb;\n",
+            "    st.global.b16 [%addr], %a_h;\n",
+            "    add.u64 %addr, %idx_p, %ioffa;\n",
+            "    st.global.u32 [%addr], %ib;\n",
+            "    add.u64 %addr, %idx_p, %ioffb;\n",
+            "    st.global.u32 [%addr], %ia;\n\n",
+            "DONE:\n",
+            "    ret;\n",
+            "}\n"
+        )
+    };
+}
+
+const UNIQUE_BITONIC_F16_PTX: &str = unique_bitonic_16_ptx!(
+    "unique_bitonic_f16_kernel",
+    "7.0",
+    "sm_60",
+    "    cvt.f32.f16 %a, %a_h;",
+    "    cvt.f32.f16 %b, %b_h;"
+);
+
+const UNIQUE_BITONIC_BF16_PTX: &str = unique_bitonic_16_ptx!(
+    "unique_bitonic_bf16_kernel",
+    "7.8",
+    "sm_80",
+    "    mov.b32 %a_bits, {%zero16, %a_h}; mov.b32 %a, %a_bits;",
+    "    mov.b32 %b_bits, {%zero16, %b_h}; mov.b32 %b, %b_bits;"
+);
 
 /// Smallest power of two `>= n` (with `next_pow2(0) == 1`, `next_pow2(1) == 1`).
 #[cfg(feature = "cuda")]
@@ -3349,6 +3556,56 @@ fn launch_unique_init_f64(
     Ok(())
 }
 
+/// Launch the f16/bf16 unique-init kernel over raw u16 keys.
+#[cfg(feature = "cuda")]
+fn launch_unique_init_u16(
+    input: &CudaSlice<u16>,
+    key: &mut CudaSlice<u16>,
+    idx: &mut CudaSlice<i32>,
+    n: usize,
+    npad: usize,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<()> {
+    let stream = device.stream();
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        }
+    })?;
+    let block: u32 = 256;
+    let grid = (npad as u32).div_ceil(block).max(1);
+    let cfg = LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (block, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let n_u = n as u32;
+    let npad_u = npad as u32;
+    // SAFETY:
+    // - `f` is the f16/bf16 `unique_init_*_kernel`; both carry the 5-arg ABI
+    //   `(in_ptr, key_ptr, idx_ptr, n, npad)` bound below.
+    // - `input` has `n` raw u16 values; `key`/`idx` are fresh `npad`-element
+    //   allocations. Thread `i in [0, n)` copies `input[i]` and writes `idx=i`;
+    //   thread `i in [n, npad)` writes a +inf raw half/bfloat16 sentinel and
+    //   `idx=i32::MAX`. Threads `i >= npad` exit.
+    // - `key` and `idx` are the only mutable buffers and do not alias `input`.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(key)
+            .arg(&*idx)
+            .arg(&n_u)
+            .arg(&npad_u)
+            .launch(cfg)?;
+    }
+    Ok(())
+}
+
 /// Build the host `inverse` and `counts` vectors from the inclusive run-start
 /// scan over the SORTED-unique array and the sorted index permutation.
 ///
@@ -3508,6 +3765,132 @@ pub fn gpu_unique_f64(
     let mut out = alloc_zeros_f64(out_len, device)?;
     launch_compact_f64(&key, &incl, &mut out, n, device)?;
     Ok((out, inverse, counts))
+}
+
+fn gpu_unique_u16(
+    input: &CudaSlice<u16>,
+    n: usize,
+    device: &GpuDevice,
+    init_ptx: &'static str,
+    init_kernel: &'static str,
+    bitonic_ptx: &'static str,
+    bitonic_kernel: &'static str,
+    run_flag_ptx: &'static str,
+    run_flag_kernel: &'static str,
+    compact_ptx: &'static str,
+    compact_kernel: &'static str,
+) -> GpuResult<(CudaSlice<u16>, Vec<usize>, Vec<usize>)> {
+    if n == 0 {
+        return Ok((alloc_zeros_bf16(0, device)?, vec![], vec![]));
+    }
+    if n > (i32::MAX as usize) {
+        return Err(GpuError::LengthMismatch {
+            a: n,
+            b: i32::MAX as usize,
+        });
+    }
+    let npad = next_pow2(n);
+
+    let mut key = alloc_zeros_bf16(npad, device)?;
+    let mut idx: CudaSlice<i32> = device.stream().alloc_zeros::<i32>(npad)?;
+    launch_unique_init_u16(
+        input,
+        &mut key,
+        &mut idx,
+        n,
+        npad,
+        device,
+        init_ptx,
+        init_kernel,
+    )?;
+
+    bitonic_sort_by_key(
+        &mut key,
+        &mut idx,
+        npad,
+        device,
+        bitonic_ptx,
+        bitonic_kernel,
+    )?;
+
+    let incl = run_flags_and_scan(&key, n, device, run_flag_ptx, run_flag_kernel)?;
+    let incl_host = gpu_to_cpu(&incl, device)?;
+
+    let mut sorted_idx_host = device.stream().clone_dtoh(&idx)?;
+    sorted_idx_host.truncate(n);
+    let (inverse, counts, out_len) = decode_unique(&incl_host, &sorted_idx_host);
+
+    let mut out = alloc_zeros_bf16(out_len, device)?;
+    launch_compact_u16(
+        &key,
+        &incl,
+        &mut out,
+        n,
+        device,
+        compact_ptx,
+        compact_kernel,
+    )?;
+    Ok((out, inverse, counts))
+}
+
+/// On-device `torch.unique` over an f16 value buffer.
+///
+/// f16 storage stays as raw `u16` payloads. The sort comparator widens only for
+/// ordering predicates; compaction bit-copies the sorted run-start payload, so
+/// signed-zero representative bits match PyTorch while values stay GPU-resident.
+///
+/// # Errors
+///
+/// See [`gpu_unique_f32`].
+#[cfg(feature = "cuda")]
+pub fn gpu_unique_f16(
+    input: &CudaSlice<u16>,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaSlice<u16>, Vec<usize>, Vec<usize>)> {
+    gpu_unique_u16(
+        input,
+        n,
+        device,
+        UNIQUE_INIT_F16_PTX,
+        "unique_init_f16_kernel",
+        UNIQUE_BITONIC_F16_PTX,
+        "unique_bitonic_f16_kernel",
+        RUN_FLAG_F16_PTX,
+        "run_flag_f16_kernel",
+        COMPACT_F16_PTX,
+        "compact_f16_kernel",
+    )
+}
+
+/// On-device `torch.unique` over a bf16 value buffer.
+///
+/// bf16 shares raw `u16` storage with f16, but uses the bf16-to-f32 decode in
+/// the comparator and run predicate. Output values are compacted from sorted
+/// raw keys without host value round trips.
+///
+/// # Errors
+///
+/// See [`gpu_unique_f32`].
+#[cfg(feature = "cuda")]
+pub fn gpu_unique_bf16(
+    input: &CudaSlice<u16>,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaSlice<u16>, Vec<usize>, Vec<usize>)> {
+    gpu_unique_u16(
+        input,
+        n,
+        device,
+        UNIQUE_INIT_BF16_PTX,
+        "unique_init_bf16_kernel",
+        UNIQUE_BITONIC_BF16_PTX,
+        "unique_bitonic_bf16_kernel",
+        RUN_FLAG_BF16_PTX,
+        "run_flag_bf16_kernel",
+        COMPACT_BF16_PTX,
+        "compact_bf16_kernel",
+    )
 }
 
 #[cfg(test)]

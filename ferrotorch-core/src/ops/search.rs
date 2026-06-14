@@ -11,7 +11,7 @@
 //! |---|---|---|
 //! | REQ-1 | SHIPPED | `searchsorted` at `ops/search.rs:36`; consumer: re-export `ferrotorch_core::searchsorted` at `lib.rs:176`. CUDA f32/f64/f16/bf16 lower on-device via `GpuBackend::searchsorted_1d` (#1545). |
 //! | REQ-2 | SHIPPED | `bucketize` at `ops/search.rs:140`; consumer: re-export at `lib.rs:176`. Inherits the CUDA GPU path through its delegation to `searchsorted`. |
-//! | REQ-3 | SHIPPED | `unique`; consumer: re-export `ferrotorch_core::unique`. CUDA f32/f64 lower the SORTED sort-by-key dedup on-device via `GpuBackend::unique_1d` (#1545); SORTED-unique values stay GPU-resident, only index/run metadata read back. NaN NOT collapsed (each distinct, sorted last), matching live torch 2.11. |
+//! | REQ-3 | SHIPPED | `unique`; consumer: re-export `ferrotorch_core::unique`. CUDA f32/f64/f16/bf16 lower the SORTED sort-by-key dedup on-device via `GpuBackend::unique_1d` (#1545); SORTED-unique values stay GPU-resident, only index/run metadata read back. NaN NOT collapsed (each distinct, sorted last), matching live torch 2.11. |
 //! | REQ-4 | SHIPPED | `unique_consecutive` at `ops/search.rs:260`; consumer: re-export at `lib.rs:176`. CUDA f32/f64/f16/bf16 lower the data-dependent run compaction on-device via `GpuBackend::unique_consecutive_1d` (#1545); values stay GPU-resident, only run-position metadata read back. |
 //! | REQ-5 | SHIPPED | `histc`; consumer: re-export `ferrotorch_core::histc`. Out-of-range/NaN values are SKIPPED (not clamped), matching torch `SummaryOps.cu:92` (#1650); default `min==max` infers the range from data `aminmax`, widening all-equal data to `[v-1,v+1]` per `SummaryOps.cu:328-336` (#1652). CUDA f32/f64 accumulate the histogram on-device via `GpuBackend::histc_1d` (#1545); counts stay GPU-resident. |
 //! | REQ-6 | SHIPPED | `meshgrid` (= `meshgrid_indexing(.., Ij)`) + `meshgrid_indexing(tensors, MeshIndexing)`; consumer: `meshgrid` delegates to `meshgrid_indexing`, both re-exported. `MeshIndexing::Xy` swaps the first two inputs+output grids per torch `TensorShape.cpp:4433-4438,4470-4472` (#1652). CUDA f32/f64/f16/bf16 produce each axis grid on-device via `GpuBackend::meshgrid_grid` (#1545); grids stay GPU-resident. Grid `i` is differentiable w.r.t. coordinate tensor `i` via `MeshgridBackward` (CORE-110, #1804). |
@@ -165,8 +165,8 @@ pub fn bucketize<T: Float>(
 pub fn unique<T: Float>(
     input: &Tensor<T>,
 ) -> FerrotorchResult<(Tensor<T>, Vec<usize>, Vec<usize>)> {
-    // GPU fast path (#1545): for CUDA-resident f32/f64 the sort-by-key dedup
-    // runs entirely on-device (bitonic sort carrying original indices →
+    // GPU fast path (#1545): for CUDA-resident f32/f64/f16/bf16 the sort-by-key
+    // dedup runs entirely on-device (bitonic sort carrying original indices →
     // run-flag → prefix-sum → compaction) via `GpuBackend::unique_1d`. The
     // SORTED-unique VALUE tensor stays GPU-resident (wrapped straight back into
     // a CUDA `Tensor`); only the derived index/run metadata is read back to
@@ -179,7 +179,7 @@ pub fn unique<T: Float>(
     // `compute_unique` (sort-by-key → adjacent-difference inverse → run-length
     // counts). NaN sorts to the end, each NaN a distinct unique entry — verified
     // live on torch 2.11.0+cu130, matching the `setp.neu` run predicate.
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_f16::<T>() || is_bf16::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
@@ -214,11 +214,14 @@ pub fn unique<T: Float>(
     // sort drives every NaN past every finite/inf value. The previous
     // `partial_cmp(..).unwrap_or(Equal)` treated NaN as Equal to its neighbours
     // so NaN never moved — corrupting the sorted order, inverse map, and counts.
-    // `nan_is_max_cmp` uses `partial_cmp` for the non-NaN/non-NaN case, so
-    // `-0.0` and `+0.0` stay equal+adjacent and dedup to ONE entry (torch), and
-    // `-inf`/`+inf` order correctly (`-inf` first, `+inf` just before NaN).
+    // `unique_sort_index_cmp` uses `partial_cmp` for the non-NaN/non-NaN case,
+    // so `-0.0` and `+0.0` stay equal+adjacent and dedup to ONE entry (torch).
+    // Its tie-break is intentionally NOT topk's stable ascending-index order:
+    // torch.unique's sorted implementation keeps the last original finite-equal
+    // representative (visible in signed-zero bits), while NaNs keep ascending
+    // original order as distinct unique entries.
     let mut indices: Vec<usize> = (0..n).collect();
-    indices.sort_by(|&a, &b| nan_is_max_cmp(data[a], data[b]));
+    indices.sort_by(|&a, &b| unique_sort_index_cmp(&data, a, b));
 
     // Extract unique values, inverse mapping, and counts.
     let mut unique_vals: Vec<T> = Vec::new();
@@ -716,6 +719,25 @@ fn nan_is_max_cmp<T: Float>(lhs: T, rhs: T) -> std::cmp::Ordering {
         (true, false) => Ordering::Greater, // NaN ranks above any finite/inf
         (false, true) => Ordering::Less,
         (false, false) => lhs.partial_cmp(&rhs).unwrap_or(Ordering::Equal),
+    }
+}
+
+/// Sort-key comparator for `torch.unique(sorted=True)`.
+///
+/// Values use the same NaN-as-maximum ordering as [`nan_is_max_cmp`], but equal
+/// values need a different tie-break from `topk`: PyTorch's sorted unique keeps
+/// NaN payloads as distinct entries in ascending original order, while finite
+/// equal values compact to the last original representative. The latter is
+/// observable for `+0.0`/`-0.0` bit patterns.
+fn unique_sort_index_cmp<T: Float>(data: &[T], a: usize, b: usize) -> std::cmp::Ordering {
+    let value_cmp = nan_is_max_cmp(data[a], data[b]);
+    if value_cmp != std::cmp::Ordering::Equal {
+        return value_cmp;
+    }
+    if data[a].is_nan() && data[b].is_nan() {
+        a.cmp(&b)
+    } else {
+        b.cmp(&a)
     }
 }
 

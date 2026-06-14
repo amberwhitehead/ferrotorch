@@ -20,6 +20,8 @@
 //!   [nan]            -> vals [nan]              inv [0]         counts [1]
 //!   [1,nan,1]        -> vals [1,nan]            inv [0,1,0]     counts [2,1]
 //!   [-0.0,0.0,-0.0]  -> vals [-0.0]             inv [0,0,0]     counts [3]
+//!   [0.0,-0.0]       -> vals [-0.0]             inv [0,0]       counts [2]
+//!   [-0.0,0.0]       -> vals [0.0]              inv [0,0]       counts [2]
 //!   [inf,-inf,0,nan] -> vals [-inf,0,inf,nan]   inv [2,0,1,3]   counts [1,1,1,1]
 //!   [3,1,2,1,3]      -> vals [1,2,3]            inv [2,0,1,0,2] counts [2,1,2]
 //!   [5,4,3,2,1]      -> vals [1,2,3,4,5]        inv [4,3,2,1,0] counts [1,1,1,1,1]
@@ -107,14 +109,32 @@ fn reaudit_f32_finite_dedup_across_nan() {
 
 #[test]
 fn reaudit_f32_signed_zero_collapses() {
-    // torch collapses -0.0 and +0.0 to ONE entry; the sorted-first value (-0.0)
-    // is kept. A total_cmp-based comparator would WRONGLY split them.
+    // torch collapses -0.0 and +0.0 to ONE entry and keeps the last original
+    // finite-equal representative. Here the trailing zero is -0.0.
     let (vals, inv, counts) = unique(&cpu_f32(&[-0.0, 0.0, -0.0])).unwrap();
     let v = vals.data_vec().unwrap();
     assert_eq!(v.len(), 1, "single zero entry (not split): {v:?}");
     assert_eq!(v[0], 0.0, "0.0 == -0.0 by value");
+    assert_eq!(v[0].to_bits(), 0x8000_0000, "representative sign bit");
     assert_eq!(inv, vec![0, 0, 0]);
     assert_eq!(counts, vec![3]);
+}
+
+#[test]
+fn reaudit_f32_signed_zero_keeps_last_original_representative() {
+    let (vals_a, inv_a, counts_a) = unique(&cpu_f32(&[0.0, -0.0])).unwrap();
+    let a = vals_a.data_vec().unwrap();
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].to_bits(), 0x8000_0000);
+    assert_eq!(inv_a, vec![0, 0]);
+    assert_eq!(counts_a, vec![2]);
+
+    let (vals_b, inv_b, counts_b) = unique(&cpu_f32(&[-0.0, 0.0])).unwrap();
+    let b = vals_b.data_vec().unwrap();
+    assert_eq!(b.len(), 1);
+    assert_eq!(b[0].to_bits(), 0x0000_0000);
+    assert_eq!(inv_b, vec![0, 0]);
+    assert_eq!(counts_b, vec![2]);
 }
 
 #[test]
@@ -203,9 +223,28 @@ fn reaudit_f64_all_nan() {
 #[test]
 fn reaudit_f64_signed_zero_collapses() {
     let (vals, inv, counts) = unique(&cpu_f64(&[-0.0, 0.0, -0.0])).unwrap();
-    assert_eq!(vals.data_vec().unwrap().len(), 1);
+    let v = vals.data_vec().unwrap();
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].to_bits(), 0x8000_0000_0000_0000);
     assert_eq!(inv, vec![0, 0, 0]);
     assert_eq!(counts, vec![3]);
+}
+
+#[test]
+fn reaudit_f64_signed_zero_keeps_last_original_representative() {
+    let (vals_a, inv_a, counts_a) = unique(&cpu_f64(&[0.0, -0.0])).unwrap();
+    let a = vals_a.data_vec().unwrap();
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].to_bits(), 0x8000_0000_0000_0000);
+    assert_eq!(inv_a, vec![0, 0]);
+    assert_eq!(counts_a, vec![2]);
+
+    let (vals_b, inv_b, counts_b) = unique(&cpu_f64(&[-0.0, 0.0])).unwrap();
+    let b = vals_b.data_vec().unwrap();
+    assert_eq!(b.len(), 1);
+    assert_eq!(b[0].to_bits(), 0x0000_0000_0000_0000);
+    assert_eq!(inv_b, vec![0, 0]);
+    assert_eq!(counts_b, vec![2]);
 }
 
 #[test]

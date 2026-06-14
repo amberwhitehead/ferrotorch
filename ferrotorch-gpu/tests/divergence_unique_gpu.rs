@@ -55,6 +55,22 @@ fn cuda_f64(data: &[f64]) -> Tensor<f64> {
         .expect("upload f64 to cuda")
 }
 
+fn cuda_f16(data: Vec<half::f16>) -> Tensor<half::f16> {
+    let len = data.len();
+    Tensor::from_storage(TensorStorage::cpu(data), vec![len], false)
+        .expect("cpu f16 tensor")
+        .to(Device::Cuda(0))
+        .expect("upload f16 to cuda")
+}
+
+fn cuda_bf16(data: Vec<half::bf16>) -> Tensor<half::bf16> {
+    let len = data.len();
+    Tensor::from_storage(TensorStorage::cpu(data), vec![len], false)
+        .expect("cpu bf16 tensor")
+        .to(Device::Cuda(0))
+        .expect("upload bf16 to cuda")
+}
+
 fn read_back_f32(t: &Tensor<f32>) -> Vec<f32> {
     t.to(Device::Cpu)
         .expect("download")
@@ -67,6 +83,26 @@ fn read_back_f64(t: &Tensor<f64>) -> Vec<f64> {
         .expect("download")
         .data_vec()
         .expect("data")
+}
+
+fn read_back_f16_bits(t: &Tensor<half::f16>) -> Vec<u16> {
+    t.to(Device::Cpu)
+        .expect("download")
+        .data_vec()
+        .expect("data")
+        .iter()
+        .map(|v| v.to_bits())
+        .collect()
+}
+
+fn read_back_bf16_bits(t: &Tensor<half::bf16>) -> Vec<u16> {
+    t.to(Device::Cpu)
+        .expect("download")
+        .data_vec()
+        .expect("data")
+        .iter()
+        .map(|v| v.to_bits())
+        .collect()
 }
 
 // ===========================================================================
@@ -352,41 +388,105 @@ fn unique_f32_gpu_equals_cpu_finite() {
 }
 
 // ===========================================================================
-// bf16 / f16 reject (NotImplementedOnCuda) — only f32/f64 lower on-device
+// bf16 / f16 resident CUDA paths
 // ===========================================================================
 
 #[test]
-fn unique_bf16_cuda_rejects() {
-    use half::bf16;
+fn unique_f16_cuda_matches_torch_probe() {
+    use half::f16;
     ensure_cuda();
-    let data: Vec<bf16> = vec![
-        bf16::from_f32(1.0),
-        bf16::from_f32(2.0),
-        bf16::from_f32(1.0),
-    ];
-    let xg = Tensor::from_storage(TensorStorage::cpu(data), vec![3], false)
-        .unwrap()
-        .to(Device::Cuda(0))
-        .expect("upload bf16");
-    let err = unique(&xg);
-    assert!(
-        err.is_err(),
-        "bf16 unique on CUDA must reject (only f32/f64 lower)"
+    // Live torch 2.11 CUDA probe:
+    // unique([nan,1,nan,2,nan,-0,+0,-1], dtype=f16)
+    // -> vals [-1,+0,1,2,nan,nan,nan], inv [4,2,5,3,6,1,1,0],
+    //    counts [1,2,1,1,1,1,1].
+    let xg = cuda_f16(vec![
+        f16::from_bits(0x7e00),
+        f16::from_f32(1.0),
+        f16::from_bits(0x7e00),
+        f16::from_f32(2.0),
+        f16::from_bits(0x7e00),
+        f16::from_bits(0x8000),
+        f16::from_bits(0x0000),
+        f16::from_f32(-1.0),
+    ]);
+    let (vals, inverse, counts) = unique(&xg).expect("gpu unique f16");
+    assert!(vals.is_cuda(), "f16 unique values must stay on device");
+    assert_eq!(
+        read_back_f16_bits(&vals),
+        vec![0xbc00, 0x0000, 0x3c00, 0x4000, 0x7e00, 0x7e00, 0x7e00]
     );
+    assert_eq!(inverse, vec![4, 2, 5, 3, 6, 1, 1, 0]);
+    assert_eq!(counts, vec![1, 2, 1, 1, 1, 1, 1]);
 }
 
 #[test]
-fn unique_f16_cuda_rejects() {
+fn unique_bf16_cuda_matches_torch_probe() {
+    use half::bf16;
+    ensure_cuda();
+    // Same live probe as f16, with bf16 payloads. The zero representative is
+    // +0 here because the last original finite-equal zero is +0.
+    let xg = cuda_bf16(vec![
+        bf16::from_bits(0x7fc0),
+        bf16::from_f32(1.0),
+        bf16::from_bits(0x7fc0),
+        bf16::from_f32(2.0),
+        bf16::from_bits(0x7fc0),
+        bf16::from_bits(0x8000),
+        bf16::from_bits(0x0000),
+        bf16::from_f32(-1.0),
+    ]);
+    let (vals, inverse, counts) = unique(&xg).expect("gpu unique bf16");
+    assert!(vals.is_cuda(), "bf16 unique values must stay on device");
+    assert_eq!(
+        read_back_bf16_bits(&vals),
+        vec![0xbf80, 0x0000, 0x3f80, 0x4000, 0x7fc0, 0x7fc0, 0x7fc0]
+    );
+    assert_eq!(inverse, vec![4, 2, 5, 3, 6, 1, 1, 0]);
+    assert_eq!(counts, vec![1, 2, 1, 1, 1, 1, 1]);
+}
+
+#[test]
+fn unique_f16_signed_zero_keeps_last_original_representative() {
     use half::f16;
     ensure_cuda();
-    let data: Vec<f16> = vec![f16::from_f32(1.0), f16::from_f32(2.0), f16::from_f32(1.0)];
-    let xg = Tensor::from_storage(TensorStorage::cpu(data), vec![3], false)
-        .unwrap()
-        .to(Device::Cuda(0))
-        .expect("upload f16");
-    let err = unique(&xg);
-    assert!(
-        err.is_err(),
-        "f16 unique on CUDA must reject (only f32/f64 lower)"
-    );
+    let (vals_a, inverse_a, counts_a) = unique(&cuda_f16(vec![
+        f16::from_bits(0x0000),
+        f16::from_bits(0x8000),
+    ]))
+    .unwrap();
+    assert_eq!(read_back_f16_bits(&vals_a), vec![0x8000]);
+    assert_eq!(inverse_a, vec![0, 0]);
+    assert_eq!(counts_a, vec![2]);
+
+    let (vals_b, inverse_b, counts_b) = unique(&cuda_f16(vec![
+        f16::from_bits(0x8000),
+        f16::from_bits(0x0000),
+    ]))
+    .unwrap();
+    assert_eq!(read_back_f16_bits(&vals_b), vec![0x0000]);
+    assert_eq!(inverse_b, vec![0, 0]);
+    assert_eq!(counts_b, vec![2]);
+}
+
+#[test]
+fn unique_bf16_signed_zero_keeps_last_original_representative() {
+    use half::bf16;
+    ensure_cuda();
+    let (vals_a, inverse_a, counts_a) = unique(&cuda_bf16(vec![
+        bf16::from_bits(0x0000),
+        bf16::from_bits(0x8000),
+    ]))
+    .unwrap();
+    assert_eq!(read_back_bf16_bits(&vals_a), vec![0x8000]);
+    assert_eq!(inverse_a, vec![0, 0]);
+    assert_eq!(counts_a, vec![2]);
+
+    let (vals_b, inverse_b, counts_b) = unique(&cuda_bf16(vec![
+        bf16::from_bits(0x8000),
+        bf16::from_bits(0x0000),
+    ]))
+    .unwrap();
+    assert_eq!(read_back_bf16_bits(&vals_b), vec![0x0000]);
+    assert_eq!(inverse_b, vec![0, 0]);
+    assert_eq!(counts_b, vec![2]);
 }

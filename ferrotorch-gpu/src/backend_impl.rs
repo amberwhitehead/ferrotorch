@@ -8440,6 +8440,18 @@ impl GpuBackend for CudaBackendImpl {
                         .map_err(Self::map_gpu_err)?;
                 Ok((Self::wrap_buffer_f64(values, ord), inverse, counts))
             }
+            DType::F16 => {
+                let (values, inverse, counts) =
+                    crate::search::gpu_unique_f16(Self::unwrap_buffer_f16(input)?, n, dev)
+                        .map_err(Self::map_gpu_err)?;
+                Ok((Self::wrap_buffer_f16(values, ord), inverse, counts))
+            }
+            DType::BF16 => {
+                let (values, inverse, counts) =
+                    crate::search::gpu_unique_bf16(Self::unwrap_buffer_bf16(input)?, n, dev)
+                        .map_err(Self::map_gpu_err)?;
+                Ok((Self::wrap_buffer_bf16(values, ord), inverse, counts))
+            }
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!("unique_1d: unsupported value dtype {other}"),
             }),

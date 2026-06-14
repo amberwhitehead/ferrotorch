@@ -2,13 +2,14 @@
 //!
 //! `ferrotorch_core::ops::search::unique` lowers
 //! `torch.unique(sorted=True, return_inverse=True, return_counts=True)` for
-//! CUDA-resident f32/f64 via the on-device bitonic sort-by-key (pad to next
+//! CUDA-resident f32/f64/f16/bf16 via the on-device bitonic sort-by-key (pad to next
 //! pow2 with +INF/idx-MAX sentinels) -> run-flag -> gpu_cumsum -> compaction
-//! pipeline (`gpu_unique_f{32,64}` in `ferrotorch-gpu/src/search.rs`).
+//! pipeline (`gpu_unique_f{32,64,16}` / `gpu_unique_bf16` in
+//! `ferrotorch-gpu/src/search.rs`).
 //!
 //! The shipped suite `divergence_unique_gpu.rs` covers small finite cases, a
 //! len-7 non-pow2, len-100/1000 invariant checks, NaN/Inf, f64, GPU==CPU, and
-//! bf16/f16 reject. This file pins the cases that suite leaves open and that the
+//! f16/bf16 support. This file pins the cases that suite leaves open and that the
 //! bitonic-padding network is most likely to break:
 //!   - EXACT powers of two (256, 1024): no padding at all -> the +INF sentinel
 //!     branch never runs; a stage-boundary bug shows here.
@@ -203,14 +204,53 @@ fn unique_f32_scattered_inverse() {
 #[test]
 fn unique_f32_signed_zero_collapses() {
     ensure_cuda();
-    // torch.unique([-0.0,0.0,-0.0,0.0]) -> vals [0.0] inv [0,0,0,0] counts [4].
+    // torch.unique([-0.0,0.0,-0.0,0.0]) -> vals [+0.0] inv [0,0,0,0] counts [4].
+    // The sign bit matters: sorted unique keeps the last original finite-equal
+    // representative, so this input's compacted zero is the trailing +0.0.
     let xg = cuda_f32(&[-0.0, 0.0, -0.0, 0.0]);
     let (vals, inverse, counts) = unique(&xg).unwrap();
     let v = read_back_f32(&vals);
     assert_eq!(v.len(), 1, "+/-0 collapse to one entry: {v:?}");
     assert_eq!(v[0], 0.0);
+    assert_eq!(v[0].to_bits(), 0x0000_0000);
     assert_eq!(inverse, vec![0, 0, 0, 0]);
     assert_eq!(counts, vec![4]);
+}
+
+#[test]
+fn unique_f32_signed_zero_keeps_last_original_representative() {
+    ensure_cuda();
+    let (vals_a, inverse_a, counts_a) = unique(&cuda_f32(&[0.0, -0.0])).unwrap();
+    let a = read_back_f32(&vals_a);
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].to_bits(), 0x8000_0000, "[+0,-0] keeps trailing -0");
+    assert_eq!(inverse_a, vec![0, 0]);
+    assert_eq!(counts_a, vec![2]);
+
+    let (vals_b, inverse_b, counts_b) = unique(&cuda_f32(&[-0.0, 0.0])).unwrap();
+    let b = read_back_f32(&vals_b);
+    assert_eq!(b.len(), 1);
+    assert_eq!(b[0].to_bits(), 0x0000_0000, "[-0,+0] keeps trailing +0");
+    assert_eq!(inverse_b, vec![0, 0]);
+    assert_eq!(counts_b, vec![2]);
+}
+
+#[test]
+fn unique_f64_signed_zero_keeps_last_original_representative() {
+    ensure_cuda();
+    let (vals_a, inverse_a, counts_a) = unique(&cuda_f64(&[0.0, -0.0])).unwrap();
+    let a = read_back_f64(&vals_a);
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].to_bits(), 0x8000_0000_0000_0000);
+    assert_eq!(inverse_a, vec![0, 0]);
+    assert_eq!(counts_a, vec![2]);
+
+    let (vals_b, inverse_b, counts_b) = unique(&cuda_f64(&[-0.0, 0.0])).unwrap();
+    let b = read_back_f64(&vals_b);
+    assert_eq!(b.len(), 1);
+    assert_eq!(b[0].to_bits(), 0x0000_0000_0000_0000);
+    assert_eq!(inverse_b, vec![0, 0]);
+    assert_eq!(counts_b, vec![2]);
 }
 
 // --- storage_offset: unique on a narrowed CUDA view uses LOGICAL values ---
