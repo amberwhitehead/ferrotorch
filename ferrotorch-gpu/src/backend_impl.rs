@@ -9306,6 +9306,52 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
+    fn scatter_add_segments_f16(
+        &self,
+        src: &GpuBufferHandle,
+        index: &GpuBufferHandle,
+        e: usize,
+        d: usize,
+        dim_size: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(src.device_ordinal())?;
+        let ord = src.device_ordinal();
+        let out = crate::scatter_gather_kernels::gpu_scatter_add_segments_f16(
+            Self::unwrap_buffer_f16(src)?,
+            Self::unwrap_buffer_i64(index)?.inner(),
+            e,
+            d,
+            dim_size,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(out, ord))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn scatter_add_segments_bf16(
+        &self,
+        src: &GpuBufferHandle,
+        index: &GpuBufferHandle,
+        e: usize,
+        d: usize,
+        dim_size: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(src.device_ordinal())?;
+        let ord = src.device_ordinal();
+        let out = crate::scatter_gather_kernels::gpu_scatter_add_segments_bf16(
+            Self::unwrap_buffer_bf16(src)?,
+            Self::unwrap_buffer_i64(index)?.inner(),
+            e,
+            d,
+            dim_size,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(out, ord))
+    }
+
+    #[cfg(feature = "cuda")]
     fn cast_f_to_i(&self, src: &GpuBufferHandle, dst: DType) -> FerrotorchResult<GpuBufferHandle> {
         use crate::cast_kernels as ck;
         let dev = self.device(src.device_ordinal())?;

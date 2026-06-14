@@ -37,7 +37,7 @@
 //! | REQ-2 | SHIPPED | shape validation at `ops/scatter.rs:84-99`; consumer: `scatter_add_segments` entry |
 //! | REQ-3 | SHIPPED | per-edge validation at `ops/scatter.rs:107-119`; consumer: `scatter_add_segments` entry |
 //! | REQ-4 | SHIPPED | zero-init `out` at `ops/scatter.rs:101-102`; consumer: `scatter_add_segments` |
-//! | REQ-5 | SHIPPED | CPU row-loop + CUDA `scatter_add_segments_cuda` (host-`&[i64]` index upload, atomic GPU kernel via `GpuBackend::scatter_add_segments_f{32,64}`, GPU-resident result); bf16/f16 CUDA → `NotImplementedOnCuda`. Consumer: the `is_cuda()` branch of `scatter_add_segments`. GPU lowering landed #1545 / sub #1535 |
+//! | REQ-5 | SHIPPED | CPU row-loop + CUDA `scatter_add_segments_cuda` (host-`&[i64]` index upload, atomic GPU kernel via `GpuBackend::scatter_add_segments_f{32,64,16,bf16}`, GPU-resident result). Consumer: the `is_cuda()` branch of `scatter_add_segments`. GPU lowering landed #1545 / sub #1535 |
 //! | REQ-6 | SHIPPED | module `//!` at `ops/scatter.rs:24-30`; consumer: `ferrotorch-graph` inference harness under `no_grad` |
 
 use crate::dtype::{DType, Float};
@@ -64,8 +64,8 @@ use crate::tensor::Tensor;
 ///
 /// * `ShapeMismatch` if `src` is not 2-D, or if `index.len() != src.shape()[0]`.
 /// * `InvalidArgument` if any `index[e]` is negative or `>= dim_size`.
-/// * `NotImplementedOnCuda` if `src` is a CUDA bf16/f16 tensor (the CUDA
-///   path supports f32 and f64). f32/f64 CUDA `src` runs on the GPU.
+/// * `NotImplementedOnCuda` if `src` is an unsupported CUDA dtype. f32, f64,
+///   f16, and bf16 CUDA `src` run on the GPU.
 ///
 /// # Example
 ///
@@ -152,8 +152,8 @@ pub fn scatter_add_segments<T: Float>(
 /// segment id (already validated in-range by the caller). The result stays
 /// GPU-resident: `src` is materialised contiguous ON-DEVICE, the host index is
 /// uploaded once to a resident `i64` buffer, and the segmented atomic
-/// row-scatter-add runs on the device. bf16/f16 reject with
-/// `NotImplementedOnCuda` (no 2-byte segmented kernel yet).
+/// row-scatter-add runs on the device. f16/bf16 use a CAS-based half-word
+/// atomic add with f32 accumulation and round back to the storage dtype.
 fn scatter_add_segments_cuda<T: Float>(
     src: &Tensor<T>,
     index: &[i64],
@@ -161,12 +161,6 @@ fn scatter_add_segments_cuda<T: Float>(
     d: usize,
     dim_size: usize,
 ) -> FerrotorchResult<Tensor<T>> {
-    if !matches!(T::dtype(), DType::F32 | DType::F64) {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: "scatter_add_segments",
-        });
-    }
-
     // The kernel reads `src` as C-contiguous `[e, d]`; materialise on-device
     // (strided_copy — no host round trip) so a transposed/permuted view's
     // physical buffer matches the logical `[e, d]` shape.
@@ -188,10 +182,18 @@ fn scatter_add_segments_cuda<T: Float>(
         unsafe { std::slice::from_raw_parts(index.as_ptr().cast::<u8>(), index.len() * 8) };
     let idx_handle = backend.cpu_to_gpu(idx_bytes, DType::I64, ordinal)?;
 
-    let h = if T::dtype() == DType::F32 {
-        backend.scatter_add_segments_f32(src_handle, &idx_handle, e, d, dim_size)?
-    } else {
-        backend.scatter_add_segments_f64(src_handle, &idx_handle, e, d, dim_size)?
+    let h = match T::dtype() {
+        DType::F32 => backend.scatter_add_segments_f32(src_handle, &idx_handle, e, d, dim_size)?,
+        DType::F64 => backend.scatter_add_segments_f64(src_handle, &idx_handle, e, d, dim_size)?,
+        DType::F16 => backend.scatter_add_segments_f16(src_handle, &idx_handle, e, d, dim_size)?,
+        DType::BF16 => {
+            backend.scatter_add_segments_bf16(src_handle, &idx_handle, e, d, dim_size)?
+        }
+        _ => {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "scatter_add_segments",
+            });
+        }
     };
 
     Tensor::from_storage(TensorStorage::gpu(h), vec![dim_size, d], false)

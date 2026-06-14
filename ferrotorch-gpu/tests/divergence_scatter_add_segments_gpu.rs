@@ -42,9 +42,9 @@
 //! #   out[0] = [15., 0.75]; out[1] = [0., 0.]; out[2] = [0., 0.]
 //! ```
 //!
-//! The f64 variants use the identical fixtures with `dtype=torch.float64`;
-//! torch's f64 outputs equal the f32 outputs exactly for these data (no
-//! rounding for the integer / exactly-representable values chosen).
+//! The f64/f16/bf16 variants use the identical fixtures where practical;
+//! torch's outputs equal the f32 outputs exactly for these chosen values
+//! after dtype round-back.
 
 #![cfg(feature = "cuda")]
 
@@ -70,12 +70,42 @@ fn cpu_f64(data: &[f64], shape: &[usize]) -> Tensor<f64> {
         .expect("cpu f64 tensor")
 }
 
+fn cpu_f16(data: &[f16], shape: &[usize]) -> Tensor<f16> {
+    Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false)
+        .expect("cpu f16 tensor")
+}
+
+fn cpu_bf16(data: &[bf16], shape: &[usize]) -> Tensor<bf16> {
+    Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false)
+        .expect("cpu bf16 tensor")
+}
+
 fn host_f32(t: &Tensor<f32>) -> Vec<f32> {
     t.cpu().expect("cpu()").data().unwrap().to_vec()
 }
 
 fn host_f64(t: &Tensor<f64>) -> Vec<f64> {
     t.cpu().expect("cpu()").data().unwrap().to_vec()
+}
+
+fn host_f16(t: &Tensor<f16>) -> Vec<f32> {
+    t.cpu()
+        .expect("cpu()")
+        .data()
+        .unwrap()
+        .iter()
+        .map(|v| v.to_f32())
+        .collect()
+}
+
+fn host_bf16(t: &Tensor<bf16>) -> Vec<f32> {
+    t.cpu()
+        .expect("cpu()")
+        .data()
+        .unwrap()
+        .iter()
+        .map(|v| v.to_f32())
+        .collect()
 }
 
 // ===========================================================================
@@ -180,37 +210,45 @@ fn scatter_add_segments_gpu_f32_empty_row_stays_zero() {
 }
 
 // ===========================================================================
-// bf16 / f16 on CUDA reject with NotImplementedOnCuda
+// f16 / bf16 on CUDA match torch index_add_ and stay resident
 // ===========================================================================
 
 #[test]
-fn scatter_add_segments_gpu_bf16_rejects() {
+fn scatter_add_segments_gpu_f16_basic_matches_torch() {
     ensure_cuda();
-    let data: Vec<bf16> = [1.0f32, 2.0, 3.0, 4.0]
-        .iter()
-        .map(|&v| bf16::from_f32(v))
-        .collect();
-    let cpu = Tensor::from_storage(TensorStorage::cpu(data), vec![2, 2], false).expect("bf16 cpu");
-    let gpu = cpu.to(Device::Cuda(0)).expect("to cuda");
-    let err = scatter_add_segments(&gpu, &[0i64, 1], 2);
-    assert!(
-        err.is_err(),
-        "bf16 CUDA scatter_add_segments must reject NotImplementedOnCuda"
+    let data: Vec<f16> = [
+        1.0f32, 2.0, -0.0, 3.0, -4.0, 5.0, 6.0, 7.0, 8.0, 0.5, 0.25, -0.75,
+    ]
+    .into_iter()
+    .map(f16::from_f32)
+    .collect();
+    let cpu = cpu_f16(&data, &[4, 3]);
+    let gpu = cpu.to(Device::Cuda(0)).expect("to cuda f16");
+    let index = [0i64, 1, 0, 2];
+    let out = scatter_add_segments(&gpu, &index, 4).expect("gpu scatter_add_segments f16");
+    assert!(out.is_cuda());
+    assert_eq!(out.shape(), &[4, 3]);
+    assert_eq!(
+        host_f16(&out),
+        vec![
+            7.0, 9.0, 8.0, 3.0, -4.0, 5.0, 0.5, 0.25, -0.75, 0.0, 0.0, 0.0
+        ]
     );
+    let cpu_out = scatter_add_segments(&cpu, &index, 4).expect("cpu scatter_add_segments f16");
+    assert_eq!(host_f16(&out), host_f16(&cpu_out));
 }
 
 #[test]
-fn scatter_add_segments_gpu_f16_rejects() {
+fn scatter_add_segments_gpu_bf16_duplicate_odd_output_len_matches_torch() {
     ensure_cuda();
-    let data: Vec<f16> = [1.0f32, 2.0, 3.0, 4.0]
-        .iter()
-        .map(|&v| f16::from_f32(v))
-        .collect();
-    let cpu = Tensor::from_storage(TensorStorage::cpu(data), vec![2, 2], false).expect("f16 cpu");
-    let gpu = cpu.to(Device::Cuda(0)).expect("to cuda");
-    let err = scatter_add_segments(&gpu, &[0i64, 1], 2);
-    assert!(
-        err.is_err(),
-        "f16 CUDA scatter_add_segments must reject NotImplementedOnCuda"
-    );
+    let data: Vec<bf16> = [10.0f32, 20.0].into_iter().map(bf16::from_f32).collect();
+    let cpu = cpu_bf16(&data, &[2, 1]);
+    let gpu = cpu.to(Device::Cuda(0)).expect("to cuda bf16");
+    let out = scatter_add_segments(&gpu, &[2i64, 2], 3)
+        .expect("gpu scatter_add_segments bf16 duplicate odd output");
+    assert!(out.is_cuda());
+    assert_eq!(out.shape(), &[3, 1]);
+    assert_eq!(host_bf16(&out), vec![0.0, 0.0, 30.0]);
+    let cpu_out = scatter_add_segments(&cpu, &[2i64, 2], 3).expect("cpu scatter_add_segments bf16");
+    assert_eq!(host_bf16(&out), host_bf16(&cpu_out));
 }

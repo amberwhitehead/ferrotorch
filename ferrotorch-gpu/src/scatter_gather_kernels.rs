@@ -45,8 +45,9 @@
 //!   `src` is `[E, D]`; `index` is a per-ROW `i64` segment id (length `E`,
 //!   uploaded from the host `&[i64]`); output is the zero-initialised
 //!   `[dim_size, D]` with `out[index[e], :] += src[e, :]` accumulated over all
-//!   rows. One thread per `(e, d)` element, `atom.global.add.f{32,64}` so
-//!   duplicate segment ids sum. This is the same primitive
+//!   rows. One thread per `(e, d)` element, native atomic add for f32/f64 and a
+//!   CAS-based half-word atomic for f16/bf16, so duplicate segment ids sum. This
+//!   is the same primitive
 //!   `torch.zeros(dim_size, D).index_add_(0, index, src)` computes (and
 //!   `torch_scatter.scatter_add(src, index, dim=0, dim_size=N)`).
 //!
@@ -85,7 +86,7 @@
 //! | REQ-2 (f64 family) | SHIPPED | `gpu_*_dim_f64` in `scatter_gather_kernels.rs`; consumer `CudaBackendImpl::*_dim_f64` in `backend_impl.rs` |
 //! | REQ-3 (atomic scatter_add) | SHIPPED | `atom.global.add.f32` / `atom.global.add.f64` in the scatter_add PTX; verified by the duplicate-index unit test `scatter_add_dim_f32_duplicate_indices` |
 //! | REQ-4 (dispatch wiring) | SHIPPED | the four `CudaBackendImpl::*_dim_{f32,f64}` overrides; consumer the `is_cuda()` branch of `gather`/`scatter`/`scatter_value`/`scatter_add` in `ferrotorch-core/src/ops/indexing.rs` |
-//! | REQ-5 (segmented row scatter-add) | SHIPPED | `gpu_scatter_add_segments_f32`/`_f64` (`atom.global.add.f{32,64}` over a per-row i64 segment index, zero-init output); consumer `CudaBackendImpl::scatter_add_segments_f32`/`_f64` in `backend_impl.rs`, themselves consumed by the `is_cuda()` branch of `ferrotorch_core::ops::scatter::scatter_add_segments` |
+//! | REQ-5 (segmented row scatter-add) | SHIPPED | `gpu_scatter_add_segments_f32`/`_f64`/`_f16`/`_bf16` over a per-row i64 segment index, zero-init output, native f32/f64 atomics, CAS-based f16/bf16 atomics; consumer `CudaBackendImpl::scatter_add_segments_*` in `backend_impl.rs`, themselves consumed by the `is_cuda()` branch of `ferrotorch_core::ops::scatter::scatter_add_segments` |
 //! | REQ-6 (16-bit flat scatter for `put`) | SHIPPED | `gpu_scatter_dim_u16` plus CAS-based `gpu_scatter_add_dim_f16`/`gpu_scatter_add_dim_bf16`; consumers `CudaBackendImpl::scatter*_dim_{f16,bf16}` and `ferrotorch_core::grad_fns::indexing::put`; verified by `scatter_dim_u16_bitcopy` / `scatter_add_dim_{f16,bf16}_duplicate_odd_len` and core CUDA indexing tests |
 //! | REQ-7 (16-bit rank-aware scatter family) | SHIPPED | `gpu_scatter_nd_u16`, `gpu_scatter_value_nd_u16`, and CAS-based `gpu_scatter_add_nd_{f16,bf16}`; consumers `CudaBackendImpl::scatter*_nd_{f16,bf16}` and `ferrotorch-core::ops::indexing::{scatter,scatter_value,scatter_add}` plus their backward nodes |
 
@@ -1289,6 +1290,112 @@ const SCATTER_ADD_SEGMENTS_F64_PTX: &str = scatter_add_segments_ptx!(
     ".f64"
 );
 
+macro_rules! scatter_add_segments_16_cas_ptx {
+    ($kname:literal, $version:literal, $target:literal, $decode_old:literal,
+     $decode_src:literal, $encode_new:literal) => {
+        concat!(
+            ".version ",
+            $version,
+            "\n.target ",
+            $target,
+            "\n.address_size 64\n",
+            ".visible .entry ",
+            $kname,
+            "(
+    .param .u64 out_ptr, .param .u64 idx_ptr, .param .u64 src_ptr,
+    .param .u32 e, .param .u32 d, .param .u32 total
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %dd, %row, %col, %seg, %dstelem;
+    .reg .u32 %wordidx, %halfsel, %shift;
+    .reg .u32 %old, %assumed, %new, %oldhalf_u, %newhalf_u, %mask, %preserve, %packed;
+    .reg .u64 %out, %idx, %src, %off, %addr, %wordaddr;
+    .reg .s64 %segv;
+    .reg .b16 %src_h, %old_h, %new_h, %zero16;
+    .reg .b32 %src_bits, %old_bits, %new_bits;
+    .reg .f32 %src_f, %old_f, %sum_f;
+    .reg .pred %p, %retry;
+
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %idx, [idx_ptr];
+    ld.param.u64 %src, [src_ptr];
+    ld.param.u32 %tot, [total];
+    ld.param.u32 %dd, [d];
+
+    mov.b16 %zero16, 0;
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot; @%p bra DONE;
+
+    div.u32 %row, %gtid, %dd;
+    rem.u32 %col, %gtid, %dd;
+
+    cvt.u64.u32 %off, %row; shl.b64 %off, %off, 3; add.u64 %addr, %idx, %off;
+    ld.global.s64 %segv, [%addr];
+    cvt.u32.s64 %seg, %segv;
+
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, 1; add.u64 %addr, %src, %off;
+    ld.global.b16 %src_h, [%addr];
+",
+            $decode_src,
+            "
+
+    mul.lo.u32 %dstelem, %seg, %dd;
+    add.u32 %dstelem, %dstelem, %col;
+
+    shr.u32 %wordidx, %dstelem, 1;
+    and.b32 %halfsel, %dstelem, 1;
+    shl.b32 %shift, %halfsel, 4;
+    cvt.u64.u32 %off, %wordidx; shl.b64 %off, %off, 2; add.u64 %wordaddr, %out, %off;
+
+    ld.global.u32 %old, [%wordaddr];
+CAS_LOOP:
+    mov.u32 %assumed, %old;
+    shr.u32 %oldhalf_u, %assumed, %shift;
+    and.b32 %oldhalf_u, %oldhalf_u, 65535;
+    cvt.u16.u32 %old_h, %oldhalf_u;
+",
+            $decode_old,
+            "
+    add.rn.f32 %sum_f, %old_f, %src_f;
+",
+            $encode_new,
+            "
+    mov.b32 %new_bits, {%new_h, %zero16};
+    mov.b32 %newhalf_u, %new_bits;
+    shl.b32 %packed, %newhalf_u, %shift;
+    mov.u32 %mask, 65535;
+    shl.b32 %mask, %mask, %shift;
+    not.b32 %mask, %mask;
+    and.b32 %preserve, %assumed, %mask;
+    or.b32 %new, %preserve, %packed;
+    atom.global.cas.b32 %old, [%wordaddr], %assumed, %new;
+    setp.ne.u32 %retry, %old, %assumed;
+    @%retry bra CAS_LOOP;
+DONE:
+    ret;
+}
+"
+        )
+    };
+}
+
+const SCATTER_ADD_SEGMENTS_F16_PTX: &str = scatter_add_segments_16_cas_ptx!(
+    "scatter_add_segments_f16_kernel",
+    "7.0",
+    "sm_60",
+    "    cvt.f32.f16 %old_f, %old_h;",
+    "    cvt.f32.f16 %src_f, %src_h;",
+    "    cvt.rn.f16.f32 %new_h, %sum_f;"
+);
+const SCATTER_ADD_SEGMENTS_BF16_PTX: &str = scatter_add_segments_16_cas_ptx!(
+    "scatter_add_segments_bf16_kernel",
+    "7.8",
+    "sm_80",
+    "    mov.b32 %old_bits, {%zero16, %old_h}; mov.b32 %old_f, %old_bits;",
+    "    mov.b32 %src_bits, {%zero16, %src_h}; mov.b32 %src_f, %src_bits;",
+    "    cvt.rn.bf16.f32 %new_h, %sum_f;"
+);
+
 // ===========================================================================
 // gather launchers
 // ===========================================================================
@@ -2294,6 +2401,9 @@ fn launch_scatter_add_segments<V: DeviceRepr + ValidAsZeroBits>(
     if total == 0 {
         return Ok(());
     }
+    let e_u = checked_u32("e", e)?;
+    let d_u = checked_u32("d", d)?;
+    let total_u = checked_u32("total", total)?;
     let stream = device.stream();
     let ctx = device.context();
     let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|err| {
@@ -2303,7 +2413,6 @@ fn launch_scatter_add_segments<V: DeviceRepr + ValidAsZeroBits>(
         }
     })?;
     let cfg = launch_1d(total);
-    let (e_u, d_u, total_u) = (e as u32, d as u32, total as u32);
     // SAFETY:
     // - `f` is the PTX entry `kernel_name`; its 6-arg signature
     //   (out, idx, src, e, d, total) matches the args pushed below in order.
@@ -2331,6 +2440,22 @@ fn launch_scatter_add_segments<V: DeviceRepr + ValidAsZeroBits>(
     Ok(())
 }
 
+fn scatter_add_segments_out_len(dim_size: usize, d: usize) -> GpuResult<usize> {
+    dim_size
+        .checked_mul(d)
+        .ok_or(GpuError::LengthMismatch { a: dim_size, b: d })
+}
+
+fn scatter_add_segments_u16_alloc_len(out_len: usize) -> GpuResult<usize> {
+    if out_len % 2 == 1 {
+        out_len
+            .checked_add(1)
+            .ok_or(GpuError::LengthMismatch { a: out_len, b: 1 })
+    } else {
+        Ok(out_len)
+    }
+}
+
 /// f32 segmented row-scatter-add. `src` is `[e, d]`; `idx` is the resident
 /// `i64` segment id per src row (length `e`). Returns a fresh zero-initialised
 /// `[dim_size, d]` buffer with `out[idx[row], :] += src[row, :]` accumulated
@@ -2344,7 +2469,8 @@ pub fn gpu_scatter_add_segments_f32(
     dim_size: usize,
     device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<f32>> {
-    let mut out = alloc_zeros_f32(dim_size * d, device)?;
+    let out_len = scatter_add_segments_out_len(dim_size, d)?;
+    let mut out = alloc_zeros_f32(out_len, device)?;
     launch_scatter_add_segments(
         out.inner_mut(),
         idx,
@@ -2368,7 +2494,8 @@ pub fn gpu_scatter_add_segments_f64(
     dim_size: usize,
     device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<f64>> {
-    let mut out = alloc_zeros_f64(dim_size * d, device)?;
+    let out_len = scatter_add_segments_out_len(dim_size, d)?;
+    let mut out = alloc_zeros_f64(out_len, device)?;
     launch_scatter_add_segments(
         out.inner_mut(),
         idx,
@@ -2378,6 +2505,57 @@ pub fn gpu_scatter_add_segments_f64(
         device,
         SCATTER_ADD_SEGMENTS_F64_PTX,
         "scatter_add_segments_f64_kernel",
+    )?;
+    Ok(out)
+}
+
+/// f16 segmented row-scatter-add. Accumulates each destination in f32 inside a
+/// CAS loop over the containing half-word pair and rounds each successful
+/// update back to f16, mirroring the crate's dim-aware f16 `scatter_add`.
+pub fn gpu_scatter_add_segments_f16(
+    src: &CudaSlice<u16>,
+    idx: &CudaSlice<i64>,
+    e: usize,
+    d: usize,
+    dim_size: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let out_len = scatter_add_segments_out_len(dim_size, d)?;
+    let mut out = alloc_zeros_bf16(scatter_add_segments_u16_alloc_len(out_len)?, device)?;
+    launch_scatter_add_segments(
+        &mut out,
+        idx,
+        src,
+        e,
+        d,
+        device,
+        SCATTER_ADD_SEGMENTS_F16_PTX,
+        "scatter_add_segments_f16_kernel",
+    )?;
+    Ok(out)
+}
+
+/// bf16 segmented row-scatter-add. Companion of
+/// [`gpu_scatter_add_segments_f16`] with bf16 decode and round-back.
+pub fn gpu_scatter_add_segments_bf16(
+    src: &CudaSlice<u16>,
+    idx: &CudaSlice<i64>,
+    e: usize,
+    d: usize,
+    dim_size: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let out_len = scatter_add_segments_out_len(dim_size, d)?;
+    let mut out = alloc_zeros_bf16(scatter_add_segments_u16_alloc_len(out_len)?, device)?;
+    launch_scatter_add_segments(
+        &mut out,
+        idx,
+        src,
+        e,
+        d,
+        device,
+        SCATTER_ADD_SEGMENTS_BF16_PTX,
+        "scatter_add_segments_bf16_kernel",
     )?;
     Ok(out)
 }
@@ -2886,5 +3064,41 @@ mod tests {
         let idx = htod_i64(&d, &[0i64, 1, 0]);
         let out = gpu_scatter_add_segments_f64(&src, &idx, 3, 2, 2, &d).unwrap();
         assert_eq!(gpu_to_cpu(&out, &d).unwrap()[..4], [6.0f64, 8.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn scatter_add_segments_f16_duplicate_odd_output_len() {
+        let d = dev();
+        let src_bits: Vec<u16> = [10.0f32, 20.0]
+            .into_iter()
+            .map(|v| half::f16::from_f32(v).to_bits())
+            .collect();
+        let src = htod_u16(&d, &src_bits);
+        let idx = htod_i64(&d, &[2i64, 2]);
+        let out = gpu_scatter_add_segments_f16(&src, &idx, 2, 1, 3, &d).unwrap();
+        let got = d.stream().clone_dtoh(&out).unwrap();
+        let got: Vec<f32> = got[..3]
+            .iter()
+            .map(|&bits| half::f16::from_bits(bits).to_f32())
+            .collect();
+        assert_eq!(got, vec![0.0, 0.0, 30.0]);
+    }
+
+    #[test]
+    fn scatter_add_segments_bf16_duplicate_odd_output_len() {
+        let d = dev();
+        let src_bits: Vec<u16> = [10.0f32, 20.0]
+            .into_iter()
+            .map(|v| half::bf16::from_f32(v).to_bits())
+            .collect();
+        let src = htod_u16(&d, &src_bits);
+        let idx = htod_i64(&d, &[2i64, 2]);
+        let out = gpu_scatter_add_segments_bf16(&src, &idx, 2, 1, 3, &d).unwrap();
+        let got = d.stream().clone_dtoh(&out).unwrap();
+        let got: Vec<f32> = got[..3]
+            .iter()
+            .map(|&bits| half::bf16::from_bits(bits).to_f32())
+            .collect();
+        assert_eq!(got, vec![0.0, 0.0, 30.0]);
     }
 }

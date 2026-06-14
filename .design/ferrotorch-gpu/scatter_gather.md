@@ -37,30 +37,31 @@ decomposition follows the per-dim stride indexing of upstream
   `atom.global.add.f64` (requires `sm_60+`; the live RTX 3090 is
   `sm_86`).
 - REQ-3: Atomic `scatter_add` — the scatter-add PTX writes with
-  `atom.global.add.f32` / `atom.global.add.f64`, so multiple threads
-  whose index lands on the same output slot accumulate correctly. A
+  `atom.global.add.f32` / `atom.global.add.f64` for f32/f64 and
+  CAS-based half-word atomics for f16/bf16, so multiple threads whose
+  index lands on the same output slot accumulate correctly. A
   non-atomic / last-write-wins kernel would FAIL the duplicate-index
   parity test. Mirrors `ReduceAdd` → `fastAtomicAdd` at
   `aten/src/ATen/native/cuda/ScatterGatherKernel.cu:31-48`.
-- REQ-4: Dispatch wiring — the four `CudaBackendImpl::*_dim_{f32,f64}`
-  overrides forward into these launchers; the production consumer is
+- REQ-4: Dispatch wiring — the `CudaBackendImpl::*_dim_*` and
+  `*_nd_*` overrides forward into these launchers; the production consumer is
   the `is_cuda()` branch of `ferrotorch_core::ops::indexing::gather` /
   `scatter` / `scatter_value` / `scatter_add`, which uploads the host
   `&[usize]` index as a resident `i64` buffer and keeps the result
-  GPU-resident (no host round trip). bf16/f16 inputs reject with
-  `NotImplementedOnCuda` (no dim-aware kernel for 2-byte dtypes yet).
+  GPU-resident (no host round trip). f16/bf16 scatter/scatter_add use
+  raw u16 payload kernels and keep the result in the original dtype.
 - REQ-5: Segmented row scatter-add — `gpu_scatter_add_segments_f32` /
-  `_f64` for the GNN message-passing primitive
+  `_f64` / `_f16` / `_bf16` for the GNN message-passing primitive
   (`ops::scatter::scatter_add_segments`). `src` is `[E, D]`; `index` is
   a per-ROW `i64` segment id (length `E`, uploaded from the host
   `&[i64]`); output is the ZERO-INITIALISED `[dim_size, D]` with
   `out[index[e], :] += src[e, :]` accumulated atomically
-  (`atom.global.add.f{32,64}`, `sm_60+`) over all rows. Distinct from
-  the dim-aware `scatter_add` (per-ROW index, not full-rank; flat
-  `seg*D + col` addressing; zero-init not clone). Mirrors
+  (`atom.global.add.f{32,64}` for f32/f64, CAS-based half-word atomic
+  for f16/bf16) over all rows. Distinct from the dim-aware `scatter_add`
+  (per-ROW index, not full-rank; flat `seg*D + col` addressing;
+  zero-init not clone). Mirrors
   `torch.zeros(dim_size, D).index_add_(0, index, src)` /
-  `torch_scatter.scatter_add(src, index, dim=0, dim_size=N)`. bf16/f16
-  reject with `NotImplementedOnCuda`.
+  `torch_scatter.scatter_add(src, index, dim=0, dim_size=N)`.
 
 ## Layout contract
 
@@ -82,29 +83,31 @@ into `[outer, axis, inner]` where `outer = prod(shape[..dim])`,
 
 ## Acceptance Criteria
 
-- [x] AC-1: 8 `pub fn gpu_*_dim_{f32,f64}` symbols exist and are
-  re-exported from `lib.rs`.
+- [x] AC-1: `pub fn gpu_*_dim_{f32,f64}` plus the u16/f16/bf16
+  scatter/scatter_add symbols exist and are re-exported from `lib.rs`.
 - [x] AC-2: The 6 in-module unit tests pass on hardware (gather dim1
   f32, scatter dim1 f32, scatter_value 1D f32, scatter_add dup-index
   f32 AND f64, gather dim0 f64).
 - [x] AC-3: `scatter_add` with duplicate indices accumulates (atomic)
-  rather than last-write-wins, verified live on the RTX 3090 for both
-  f32 and f64.
-- [x] AC-4: The four `CudaBackendImpl::*_dim_{f32,f64}` overrides
+  rather than last-write-wins, verified live on the RTX 3090 for f32,
+  f64, f16, and bf16.
+- [x] AC-4: The `CudaBackendImpl::*_dim_*` / `*_nd_*` overrides
   forward into the launchers, and `ops::indexing`'s `is_cuda()`
   branches dispatch through them keeping the result resident.
-- [x] AC-5: bf16/f16 CUDA inputs reject with `NotImplementedOnCuda`.
+- [x] AC-5: bf16/f16 CUDA scatter/scatter_add paths keep data
+  GPU-resident and preserve dtype tags through u16 storage.
 - [x] AC-6: Live-GPU divergence parity (`torch.gather` /
   `scatter_` / `scatter_(value)` / `scatter_add_`) at
   `ferrotorch-gpu/tests/divergence_scatter_gather_gpu.rs` (15 tests).
 - [x] AC-7: Segmented row scatter-add `gpu_scatter_add_segments_f32` /
-  `_f64` exist, are re-exported from `lib.rs`, and are wired through
-  `CudaBackendImpl::scatter_add_segments_f{32,64}` into the `is_cuda()`
+  `_f64` / `_f16` / `_bf16` exist, are re-exported from `lib.rs`, and are wired through
+  `CudaBackendImpl::scatter_add_segments_f{32,64,16,bf16}` into the `is_cuda()`
   branch of `ops::scatter::scatter_add_segments`. Live-GPU parity vs
   `torch.index_add_` at
   `ferrotorch-gpu/tests/divergence_scatter_add_segments_gpu.rs`
   (7 tests): basic, duplicate-segment atomic (100 rows → exact column
-  sums) f32 AND f64, empty-row-stays-zero, bf16/f16 reject.
+  sums) f32 AND f64, empty-row-stays-zero, f16 basic, bf16 duplicate
+  odd-output CAS path.
 
 ## Architecture
 
@@ -176,4 +179,4 @@ Expected: `test result: ok. 15 passed`.
 | REQ-2 | SHIPPED | impl: `gpu_*_dim_f64` companions in `scatter_gather_kernels.rs`; non-test consumer: the `CudaBackendImpl::*_dim_f64` overrides (`gather_dim_f64`, `scatter_dim_f64`, `scatter_value_dim_f64`, `scatter_add_dim_f64`) in `backend_impl.rs`, consumed by the f64 arm of `ops::indexing` |
 | REQ-3 | SHIPPED | impl: `atom.global.add.f32`/`atom.global.add.f64` in the `scatter_add_dim_ptx!` expansion; verified by `scatter_add_gpu_f32_duplicate_indices_dim0_matches_torch` / `..._f64_...` / `..._dim1_...` in `tests/divergence_scatter_gather_gpu.rs` (3 hits → slot 0, atomic sum 91 vs torch) |
 | REQ-4 | SHIPPED | impl: the four `CudaBackendImpl::*_dim_{f32,f64}` overrides in `backend_impl.rs`; non-test consumer: the `is_cuda()` branches of `ferrotorch_core::ops::indexing::gather` (`ops/indexing.rs` gather CUDA arm), `scatter`, `scatter_value`, `scatter_add` — each uploads the host index as resident `i64` via `upload_index_i64` and returns a `TensorStorage::gpu` result |
-| REQ-5 | SHIPPED | impl: `gpu_scatter_add_segments_f32`/`_f64` + `launch_scatter_add_segments` + `scatter_add_segments_ptx!` (atom.global.add.f{32,64}, zero-init output) in `ferrotorch-gpu/src/scatter_gather_kernels.rs`; non-test consumer: `CudaBackendImpl::scatter_add_segments_f32`/`_f64` in `ferrotorch-gpu/src/backend_impl.rs`, themselves consumed by the `is_cuda()` branch (`scatter_add_segments_cuda`) of `ferrotorch_core::ops::scatter::scatter_add_segments` — uploads the host `&[i64]` segment index once as resident `i64` and returns a `TensorStorage::gpu` result. Live-GPU verified at `tests/divergence_scatter_add_segments_gpu.rs` (7 tests, RTX 3090) |
+| REQ-5 | SHIPPED | impl: `gpu_scatter_add_segments_f32`/`_f64`/`_f16`/`_bf16` + `launch_scatter_add_segments` + `scatter_add_segments_ptx!` / `scatter_add_segments_16_cas_ptx!` (native f32/f64 atomics, CAS-based f16/bf16 half-word atomics, zero-init output) in `ferrotorch-gpu/src/scatter_gather_kernels.rs`; non-test consumer: `CudaBackendImpl::scatter_add_segments_f32`/`_f64`/`_f16`/`_bf16` in `ferrotorch-gpu/src/backend_impl.rs`, themselves consumed by the `is_cuda()` branch (`scatter_add_segments_cuda`) of `ferrotorch_core::ops::scatter::scatter_add_segments` — uploads the host `&[i64]` segment index once as resident `i64` and returns a `TensorStorage::gpu` result. Live-GPU verified at `tests/divergence_scatter_add_segments_gpu.rs` (7 tests, RTX 3090) |

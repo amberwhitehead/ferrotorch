@@ -6480,6 +6480,37 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// f16 segmented row-scatter-add. Accumulates duplicate segment ids
+    /// atomically through a CAS loop over the destination half-word pair and
+    /// returns a resident f16-tagged buffer.
+    fn scatter_add_segments_f16(
+        &self,
+        _src: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _e: usize,
+        _d: usize,
+        _dim_size: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_add_segments_f16",
+        })
+    }
+
+    /// bf16 segmented row-scatter-add. Companion of
+    /// [`Self::scatter_add_segments_f16`] with bf16 decode/round-back.
+    fn scatter_add_segments_bf16(
+        &self,
+        _src: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _e: usize,
+        _d: usize,
+        _dim_size: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_add_segments_bf16",
+        })
+    }
+
     /// Cast a float buffer (`src.dtype()` ∈ {F32,F64,BF16,F16}) to an integer
     /// buffer tagged `dst` (∈ {I32,I64}), truncating toward zero (PyTorch
     /// `.to(int)`). Result stays GPU-resident.
