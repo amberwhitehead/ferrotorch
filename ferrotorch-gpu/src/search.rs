@@ -62,6 +62,8 @@
 //! | REQ-16 (meshgrid PTX + ABI) | SHIPPED | `MESHGRID_F32_PTX`/`MESHGRID_F64_PTX`/`MESHGRID_U16_PTX in search.rs` carry the 5-arg ABI `(in,out,total,inner,axis_len)`; one thread per output element gathers `in[(flat/inner)%axis_len]` |
 //! | REQ-17 (meshgrid trait surface) | SHIPPED | `fn meshgrid_grid in gpu_dispatch.rs`; consumer `ops::search::meshgrid` GPU branch |
 //! | REQ-18 (meshgrid dispatch + consumer) | SHIPPED | `CudaBackendImpl::meshgrid_grid in backend_impl.rs` dispatches `match dtype { F32, F64, F16, BF16 }`; non-test consumer `ferrotorch_core::ops::search::meshgrid` CUDA branch keeps each grid GPU-resident (`TensorStorage::gpu`) |
+//! | REQ-19 (`gpu_unique_consecutive_*`) | SHIPPED | `pub fn gpu_unique_consecutive_f32`/`_f64`/`_f16`/`_bf16 in search.rs` run the on-device run-flag → `gpu_cumsum` prefix-sum → compaction pipeline; consumer `CudaBackendImpl::unique_consecutive_1d in backend_impl.rs` |
+//! | REQ-20 (unique_consecutive PTX + ABI) | SHIPPED | `RUN_FLAG_F32_PTX`/`RUN_FLAG_F64_PTX`/`RUN_FLAG_F16_PTX`/`RUN_FLAG_BF16_PTX` (3-arg `(in,flag,n)`) + `COMPACT_F32_PTX`/`COMPACT_F64_PTX`/`COMPACT_F16_PTX`/`COMPACT_BF16_PTX` (4-arg `(in,incl,out,n)`) `in search.rs`; consumer `ferrotorch_core::ops::search::unique_consecutive` CUDA branch keeps deduplicated VALUES GPU-resident and reads back only run metadata |
 //! | REQ-21 (`gpu_unique_f32`/`_f64`) | SHIPPED | `pub fn gpu_unique_f32`/`_f64 in search.rs` run init → bitonic sort-by-key → run-flag → `gpu_cumsum` → compaction mirroring `compute_unique` at `aten/src/ATen/native/cuda/Unique.cu:51-85` (sort-by-key `radix_sort_pairs` `UniqueCub.cu:175`, inverse scatter `:63-66`, run-length counts `:75-81`); consumer `CudaBackendImpl::unique_1d in backend_impl.rs` |
 //! | REQ-22 (unique PTX + ABI) | SHIPPED | `UNIQUE_INIT_F32_PTX`/`_F64_PTX` (5-arg `(in,key,idx,n,npad)`) + `UNIQUE_BITONIC_F32_PTX`/`_F64_PTX` (5-arg `(key,idx,npad,j,k)`, via `unique_bitonic_ptx!`) `in search.rs`; comparator ranks pads (`idx==i32::MAX`) + NaN (`setp.neu`) last via `selp.u32`/`setp.*.u32` (no `.pred` arithmetic); dedup/compaction reuse `RUN_FLAG_*`/`COMPACT_*`/`gpu_cumsum` |
 //! | REQ-23 (unique trait + dispatch + consumer) | SHIPPED | `fn unique_1d in gpu_dispatch.rs`; `CudaBackendImpl::unique_1d in backend_impl.rs` (`match dtype { F32, F64 }`); `pub use search::{gpu_unique_f32, gpu_unique_f64} in lib.rs`; non-test consumer `ferrotorch_core::ops::search::unique` CUDA branch keeps SORTED-unique VALUES GPU-resident (`TensorStorage::gpu`), reads back only index/run metadata; bf16/f16 reject |
@@ -1940,7 +1942,9 @@ pub fn gpu_meshgrid_bf16(
 //      UNORDERED not-equal) so NaN (where NaN != NaN) starts its own run,
 //      matching the CPU path's `data[i] == data[i-1]` (PartialEq, false for
 //      NaN). The ordered `setp.ne` returns FALSE for NaN operands and would
-//      wrongly collapse consecutive NaNs into one run.
+//      wrongly collapse consecutive NaNs into one run. f16/bf16 widen adjacent
+//      values to f32 for this comparison, so `-0.0` and `+0.0` collapse while
+//      NaNs still split, matching live torch CUDA behavior.
 //   2. INCLUSIVE PREFIX SUM over the flags via the existing `gpu_cumsum`
 //      primitive (one flat axis: outer=1, dim_size=n, inner=1). `incl[i]` is
 //      the number of run-starts in `[0, i]`, so a run-start at `i` writes to
@@ -1961,11 +1965,11 @@ pub fn gpu_meshgrid_bf16(
 // GPU-resident.
 //
 // RUN_FLAG ABI: (in_ptr, flag_ptr, n)
-//   in   : V[n]    (input values)
+//   in   : V[n]    (input values; f16/bf16 use raw u16 payloads)
 //   flag : f32[n]  (1.0 at run-starts, else 0.0)
 //   n    : u32
 // COMPACT ABI: (in_ptr, incl_ptr, out_ptr, n)
-//   in   : V[n]      (input values)
+//   in   : V[n]      (input values; f16/bf16 use raw u16 payloads)
 //   incl : f32[n]    (inclusive prefix sum of the run-start flags)
 //   out  : V[out_len](compacted run-start values)
 //   n    : u32
@@ -2103,6 +2107,82 @@ DONE:
 }
 ";
 
+macro_rules! run_flag_16_ptx {
+    ($entry:literal, $version:literal, $target:literal, $decode_cur:literal, $decode_prev:literal) => {
+        concat!(
+            ".version ",
+            $version,
+            "\n.target ",
+            $target,
+            "\n.address_size 64\n\n.visible .entry ",
+            $entry,
+            "(\n",
+            "    .param .u64 in_ptr,\n",
+            "    .param .u64 flag_ptr,\n",
+            "    .param .u32 n\n",
+            ") {\n",
+            "    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %n_r, %cur_bits, %prev_bits;\n",
+            "    .reg .u64 %in_p, %flag_p, %ioff, %foff, %addr, %prev_addr;\n",
+            "    .reg .b16 %cur_h, %prev_h, %zero16;\n",
+            "    .reg .f32 %cur, %prev, %one, %zero;\n",
+            "    .reg .pred %p_oob, %p_first, %p_ne;\n\n",
+            "    ld.param.u64 %in_p,   [in_ptr];\n",
+            "    ld.param.u64 %flag_p, [flag_ptr];\n",
+            "    ld.param.u32 %n_r,    [n];\n\n",
+            "    mov.u32 %tid_r,  %tid.x;\n",
+            "    mov.u32 %bid_r,  %ctaid.x;\n",
+            "    mov.u32 %bdim_r, %ntid.x;\n",
+            "    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;\n\n",
+            "    setp.ge.u32 %p_oob, %idx, %n_r;\n",
+            "    @%p_oob bra DONE;\n\n",
+            "    mov.f32 %one,  0f3F800000;\n",
+            "    mov.f32 %zero, 0f00000000;\n",
+            "    mov.b16 %zero16, 0;\n\n",
+            "    cvt.u64.u32 %ioff, %idx;\n",
+            "    shl.b64 %ioff, %ioff, 1;\n",
+            "    cvt.u64.u32 %foff, %idx;\n",
+            "    shl.b64 %foff, %foff, 2;\n",
+            "    add.u64 %addr, %in_p, %ioff;\n",
+            "    ld.global.b16 %cur_h, [%addr];\n",
+            $decode_cur,
+            "\n\n",
+            "    setp.eq.u32 %p_first, %idx, 0;\n",
+            "    @%p_first bra WRITE_ONE;\n\n",
+            "    sub.u64 %prev_addr, %addr, 2;\n",
+            "    ld.global.b16 %prev_h, [%prev_addr];\n",
+            $decode_prev,
+            "\n\n",
+            "    setp.neu.f32 %p_ne, %cur, %prev;\n",
+            "    @%p_ne bra WRITE_ONE;\n\n",
+            "    add.u64 %addr, %flag_p, %foff;\n",
+            "    st.global.f32 [%addr], %zero;\n",
+            "    bra DONE;\n\n",
+            "WRITE_ONE:\n",
+            "    add.u64 %addr, %flag_p, %foff;\n",
+            "    st.global.f32 [%addr], %one;\n\n",
+            "DONE:\n",
+            "    ret;\n",
+            "}\n"
+        )
+    };
+}
+
+const RUN_FLAG_F16_PTX: &str = run_flag_16_ptx!(
+    "run_flag_f16_kernel",
+    "7.0",
+    "sm_60",
+    "    cvt.f32.f16 %cur, %cur_h;",
+    "    cvt.f32.f16 %prev, %prev_h;"
+);
+
+const RUN_FLAG_BF16_PTX: &str = run_flag_16_ptx!(
+    "run_flag_bf16_kernel",
+    "7.8",
+    "sm_80",
+    "    mov.b32 %cur_bits, {%zero16, %cur_h}; mov.b32 %cur, %cur_bits;",
+    "    mov.b32 %prev_bits, {%zero16, %prev_h}; mov.b32 %prev, %prev_bits;"
+);
+
 /// f32 compaction scatter kernel. One thread per element; only run-starts
 /// store. `out_pos = (u32)incl[idx] - 1`.
 const COMPACT_F32_PTX: &str = "\
@@ -2230,6 +2310,86 @@ DONE:
     ret;
 }
 ";
+
+macro_rules! compact_16_ptx {
+    ($entry:literal, $version:literal, $target:literal, $decode_cur:literal, $decode_prev:literal) => {
+        concat!(
+            ".version ",
+            $version,
+            "\n.target ",
+            $target,
+            "\n.address_size 64\n\n.visible .entry ",
+            $entry,
+            "(\n",
+            "    .param .u64 in_ptr,\n",
+            "    .param .u64 incl_ptr,\n",
+            "    .param .u64 out_ptr,\n",
+            "    .param .u32 n\n",
+            ") {\n",
+            "    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %n_r, %pos, %cur_bits, %prev_bits;\n",
+            "    .reg .u64 %in_p, %incl_p, %out_p, %ioff, %foff, %addr, %prev_addr, %ooff;\n",
+            "    .reg .b16 %cur_h, %prev_h, %zero16;\n",
+            "    .reg .f32 %cur, %prev, %incl;\n",
+            "    .reg .pred %p_oob, %p_first, %p_ne;\n\n",
+            "    ld.param.u64 %in_p,   [in_ptr];\n",
+            "    ld.param.u64 %incl_p, [incl_ptr];\n",
+            "    ld.param.u64 %out_p,  [out_ptr];\n",
+            "    ld.param.u32 %n_r,    [n];\n\n",
+            "    mov.u32 %tid_r,  %tid.x;\n",
+            "    mov.u32 %bid_r,  %ctaid.x;\n",
+            "    mov.u32 %bdim_r, %ntid.x;\n",
+            "    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;\n\n",
+            "    setp.ge.u32 %p_oob, %idx, %n_r;\n",
+            "    @%p_oob bra DONE;\n\n",
+            "    mov.b16 %zero16, 0;\n",
+            "    cvt.u64.u32 %ioff, %idx;\n",
+            "    shl.b64 %ioff, %ioff, 1;\n",
+            "    add.u64 %addr, %in_p, %ioff;\n",
+            "    ld.global.b16 %cur_h, [%addr];\n",
+            $decode_cur,
+            "\n\n",
+            "    setp.eq.u32 %p_first, %idx, 0;\n",
+            "    @%p_first bra DO_STORE;\n",
+            "    sub.u64 %prev_addr, %addr, 2;\n",
+            "    ld.global.b16 %prev_h, [%prev_addr];\n",
+            $decode_prev,
+            "\n\n",
+            "    setp.neu.f32 %p_ne, %cur, %prev;\n",
+            "    @%p_ne bra DO_STORE;\n",
+            "    bra DONE;\n\n",
+            "DO_STORE:\n",
+            "    cvt.u64.u32 %foff, %idx;\n",
+            "    shl.b64 %foff, %foff, 2;\n",
+            "    add.u64 %addr, %incl_p, %foff;\n",
+            "    ld.global.f32 %incl, [%addr];\n",
+            "    cvt.rzi.u32.f32 %pos, %incl;\n",
+            "    sub.u32 %pos, %pos, 1;\n",
+            "    cvt.u64.u32 %ooff, %pos;\n",
+            "    shl.b64 %ooff, %ooff, 1;\n",
+            "    add.u64 %addr, %out_p, %ooff;\n",
+            "    st.global.b16 [%addr], %cur_h;\n\n",
+            "DONE:\n",
+            "    ret;\n",
+            "}\n"
+        )
+    };
+}
+
+const COMPACT_F16_PTX: &str = compact_16_ptx!(
+    "compact_f16_kernel",
+    "7.0",
+    "sm_60",
+    "    cvt.f32.f16 %cur, %cur_h;",
+    "    cvt.f32.f16 %prev, %prev_h;"
+);
+
+const COMPACT_BF16_PTX: &str = compact_16_ptx!(
+    "compact_bf16_kernel",
+    "7.8",
+    "sm_80",
+    "    mov.b32 %cur_bits, {%zero16, %cur_h}; mov.b32 %cur, %cur_bits;",
+    "    mov.b32 %prev_bits, {%zero16, %prev_h}; mov.b32 %prev, %prev_bits;"
+);
 
 /// Launch a run-flag kernel over `input` (`n` elements) into a fresh f32 flag
 /// buffer, then inclusive-prefix-sum the flags on-device.
@@ -2409,6 +2569,88 @@ pub fn gpu_unique_consecutive_f64(
     Ok((out, inverse, counts))
 }
 
+fn gpu_unique_consecutive_u16(
+    input: &CudaSlice<u16>,
+    n: usize,
+    device: &GpuDevice,
+    run_flag_ptx: &'static str,
+    run_flag_kernel: &'static str,
+    compact_ptx: &'static str,
+    compact_kernel: &'static str,
+) -> GpuResult<(CudaSlice<u16>, Vec<usize>, Vec<usize>)> {
+    if n == 0 {
+        return Ok((device.stream().alloc_zeros::<u16>(0)?, vec![], vec![]));
+    }
+    if n > u32::MAX as usize {
+        return Err(GpuError::LengthMismatch {
+            a: n,
+            b: u32::MAX as usize,
+        });
+    }
+
+    let incl = run_flags_and_scan(input, n, device, run_flag_ptx, run_flag_kernel)?;
+    let incl_host = gpu_to_cpu(&incl, device)?;
+    let (inverse, counts, out_len) = decode_runs(&incl_host);
+
+    let mut out = device.stream().alloc_zeros::<u16>(out_len)?;
+    launch_compact_u16(
+        input,
+        &incl,
+        &mut out,
+        n,
+        device,
+        compact_ptx,
+        compact_kernel,
+    )?;
+    Ok((out, inverse, counts))
+}
+
+/// On-device `unique_consecutive` over an f16 value buffer.
+///
+/// f16 values are stored as raw `u16` payloads. The run-start comparison
+/// widens adjacent values to f32 so `-0.0` and `+0.0` compare equal while NaN
+/// still starts a fresh run (`setp.neu.f32`), matching PyTorch CUDA behavior.
+/// Compaction stores the original run-start `u16` bits, preserving dtype and
+/// payload. See [`gpu_unique_consecutive_f32`] for return semantics and errors.
+#[cfg(feature = "cuda")]
+pub fn gpu_unique_consecutive_f16(
+    input: &CudaSlice<u16>,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaSlice<u16>, Vec<usize>, Vec<usize>)> {
+    gpu_unique_consecutive_u16(
+        input,
+        n,
+        device,
+        RUN_FLAG_F16_PTX,
+        "run_flag_f16_kernel",
+        COMPACT_F16_PTX,
+        "compact_f16_kernel",
+    )
+}
+
+/// On-device `unique_consecutive` over a bf16 value buffer.
+///
+/// bf16 shares raw `u16` storage with f16, but uses the bf16-to-f32 decode in
+/// the run predicate. Compaction bit-copies the original run-start payload.
+/// See [`gpu_unique_consecutive_f32`] for return semantics and errors.
+#[cfg(feature = "cuda")]
+pub fn gpu_unique_consecutive_bf16(
+    input: &CudaSlice<u16>,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<(CudaSlice<u16>, Vec<usize>, Vec<usize>)> {
+    gpu_unique_consecutive_u16(
+        input,
+        n,
+        device,
+        RUN_FLAG_BF16_PTX,
+        "run_flag_bf16_kernel",
+        COMPACT_BF16_PTX,
+        "compact_bf16_kernel",
+    )
+}
+
 /// Launch the f32 compaction scatter kernel.
 #[cfg(feature = "cuda")]
 fn launch_compact_f32(
@@ -2502,6 +2744,56 @@ fn launch_compact_f64(
             .arg(input.inner())
             .arg(incl.inner())
             .arg(out.inner_mut())
+            .arg(&n_u)
+            .launch(cfg)?;
+    }
+    Ok(())
+}
+
+/// Launch a 16-bit compaction scatter kernel for f16 or bf16 bit-patterns.
+#[cfg(feature = "cuda")]
+fn launch_compact_u16(
+    input: &CudaSlice<u16>,
+    incl: &CudaBuffer<f32>,
+    out: &mut CudaSlice<u16>,
+    n: usize,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<()> {
+    let stream = device.stream();
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        }
+    })?;
+    let block: u32 = 256;
+    let grid = (n as u32).div_ceil(block).max(1);
+    let cfg = LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (block, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let n_u = n as u32;
+    // SAFETY:
+    // - `f` is either `compact_f16_kernel` or `compact_bf16_kernel`; both use
+    //   the 4-arg ABI `(in_ptr, incl_ptr, out_ptr, n)` bound below.
+    // - `input` holds `n` raw u16 values; thread `idx in [0, n)` reads
+    //   `input[idx]` and, when `idx > 0`, `input[idx-1]`, both in range.
+    // - `incl` holds `n` f32 scan values from the matching run-flag kernel.
+    // - `out` is a fresh `out_len`-element u16 allocation. Each run-start
+    //   thread writes exactly one output slot `(u32)incl[idx] - 1`; the scan is
+    //   monotone, starts at one, and maps run starts one-to-one to output slots.
+    // - `out` is the only mutable allocation and cannot alias `input`/`incl`.
+    // - Threads with `idx >= n` exit before reading or writing.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(incl.inner())
+            .arg(out)
             .arg(&n_u)
             .launch(cfg)?;
     }
@@ -3714,6 +4006,68 @@ mod tests {
         assert_eq!(got, vec![4.0, 3.0, 7.0, 7.0]);
         // Equal 7.0 values use ferrotorch's documented ascending-index tie.
         assert_eq!(got_idx, vec![2, 3, 1, 2]);
+    }
+
+    #[test]
+    fn unique_consecutive_f16_nan_zero_runs_match_torch_probe() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        // Live torch 2.11 CUDA oracle:
+        // unique_consecutive([1,1,nan,nan,-0,+0,2,2,1], dtype=f16)
+        //   values [1,nan,nan,-0,2,1], inverse [0,0,1,2,3,3,4,4,5],
+        //   counts [2,1,1,2,2,1]. `-0/+0` collapse numerically; NaNs split.
+        let data: Vec<u16> = [1.0_f32, 1.0, f32::NAN, f32::NAN, -0.0, 0.0, 2.0, 2.0, 1.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x).to_bits())
+            .collect();
+        let g = cpu_to_gpu(&data, &device).unwrap();
+        let (vals, inverse, counts) =
+            gpu_unique_consecutive_f16(g.inner(), data.len(), &device).unwrap();
+        let got_bits = read_u16(&vals, &device);
+        let got: Vec<f32> = got_bits
+            .iter()
+            .map(|&bits| f16::from_bits(bits).to_f32())
+            .collect();
+        assert_eq!(got.len(), 6);
+        assert_eq!(got[0], 1.0);
+        assert!(got[1].is_nan() && got[2].is_nan());
+        assert_eq!(got[3], 0.0);
+        assert_eq!(got[4], 2.0);
+        assert_eq!(got[5], 1.0);
+        assert_eq!(got_bits[3], f16::from_f32(-0.0).to_bits());
+        assert_eq!(inverse, vec![0, 0, 1, 2, 3, 3, 4, 4, 5]);
+        assert_eq!(counts, vec![2, 1, 1, 2, 2, 1]);
+    }
+
+    #[test]
+    fn unique_consecutive_bf16_nan_zero_runs_match_torch_probe() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let data: Vec<u16> = [1.0_f32, 1.0, f32::NAN, f32::NAN, -0.0, 0.0, 2.0, 2.0, 1.0]
+            .into_iter()
+            .map(|x| bf16::from_f32(x).to_bits())
+            .collect();
+        let g = cpu_to_gpu(&data, &device).unwrap();
+        let (vals, inverse, counts) =
+            gpu_unique_consecutive_bf16(g.inner(), data.len(), &device).unwrap();
+        let got_bits = read_u16(&vals, &device);
+        let got: Vec<f32> = got_bits
+            .iter()
+            .map(|&bits| bf16::from_bits(bits).to_f32())
+            .collect();
+        assert_eq!(got.len(), 6);
+        assert_eq!(got[0], 1.0);
+        assert!(got[1].is_nan() && got[2].is_nan());
+        assert_eq!(got[3], 0.0);
+        assert_eq!(got[4], 2.0);
+        assert_eq!(got[5], 1.0);
+        assert_eq!(got_bits[3], bf16::from_f32(-0.0).to_bits());
+        assert_eq!(inverse, vec![0, 0, 1, 2, 3, 3, 4, 4, 5]);
+        assert_eq!(counts, vec![2, 1, 1, 2, 2, 1]);
     }
 
     // --- histc ---

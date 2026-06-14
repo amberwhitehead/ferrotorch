@@ -5,10 +5,12 @@
 //!      `ferrotorch_core::roll`'s f64 CUDA branch. `roll` is pure index
 //!      movement, so the GPU f64 result is bit-exact with both the CPU path and
 //!      `torch.roll`.
-//!   2. `unique_consecutive` (f32 + f64) — on-device run compaction
+//!   2. The original `unique_consecutive` f32/f64 path — on-device run compaction
 //!      (`ferrotorch_gpu::gpu_unique_consecutive_f{32,64}` /
 //!      `GpuBackend::unique_consecutive_1d`) wired through
-//!      `ferrotorch_core::ops::search::unique_consecutive`'s CUDA branch.
+//!      `ferrotorch_core::ops::search::unique_consecutive`'s CUDA branch. f16
+//!      and bf16 coverage is added separately in
+//!      `test_gpu_unique_consecutive_half.rs`.
 //!
 //! Each test confirms the result tensor stays `is_cuda()` (the deduplicated /
 //! rolled VALUES are computed on-device and wrapped straight back; R-CODE-4 —

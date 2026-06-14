@@ -291,7 +291,8 @@ pub use search::{
     gpu_histc_f32, gpu_histc_f64, gpu_meshgrid_bf16, gpu_meshgrid_f16, gpu_meshgrid_f32,
     gpu_meshgrid_f64, gpu_searchsorted_bf16, gpu_searchsorted_f16, gpu_searchsorted_f32,
     gpu_searchsorted_f64, gpu_topk_bf16, gpu_topk_f16, gpu_topk_f32, gpu_topk_f64,
-    gpu_unique_consecutive_f32, gpu_unique_consecutive_f64, gpu_unique_f32, gpu_unique_f64,
+    gpu_unique_consecutive_bf16, gpu_unique_consecutive_f16, gpu_unique_consecutive_f32,
+    gpu_unique_consecutive_f64, gpu_unique_f32, gpu_unique_f64,
 };
 #[cfg(feature = "cuda")]
 pub use special::{

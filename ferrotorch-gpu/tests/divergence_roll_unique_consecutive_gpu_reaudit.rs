@@ -1,7 +1,9 @@
 //! ADVERSARIAL RE-AUDIT (#1545 sub #1535, commit 87eb6597f) of the two GPU ops:
 //!   1. `roll` f64 (`ferrotorch_gpu::gpu_roll_f64` via `ferrotorch_core::roll`)
-//!   2. `unique_consecutive` f32/f64 (on-device run-flag -> prefix-sum -> scatter
-//!      compaction, `ferrotorch_gpu::gpu_unique_consecutive_f{32,64}`).
+//!   2. The original `unique_consecutive` f32/f64 GPU path (on-device run-flag
+//!      -> prefix-sum -> scatter compaction,
+//!      `ferrotorch_gpu::gpu_unique_consecutive_f{32,64}`); f16/bf16 coverage
+//!      is added separately in `test_gpu_unique_consecutive_half.rs`.
 //!
 //! The generator's own test file
 //! (`divergence_roll_f64_unique_consecutive_gpu.rs`) covers the basic run
