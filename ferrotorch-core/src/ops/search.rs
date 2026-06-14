@@ -15,7 +15,7 @@
 //! | REQ-4 | SHIPPED | `unique_consecutive` at `ops/search.rs:260`; consumer: re-export at `lib.rs:176`. CUDA f32/f64 lower the data-dependent run compaction on-device via `GpuBackend::unique_consecutive_1d` (#1545); values stay GPU-resident, only run-position metadata read back. |
 //! | REQ-5 | SHIPPED | `histc`; consumer: re-export `ferrotorch_core::histc`. Out-of-range/NaN values are SKIPPED (not clamped), matching torch `SummaryOps.cu:92` (#1650); default `min==max` infers the range from data `aminmax`, widening all-equal data to `[v-1,v+1]` per `SummaryOps.cu:328-336` (#1652). CUDA f32/f64 accumulate the histogram on-device via `GpuBackend::histc_1d` (#1545); counts stay GPU-resident. |
 //! | REQ-6 | SHIPPED | `meshgrid` (= `meshgrid_indexing(.., Ij)`) + `meshgrid_indexing(tensors, MeshIndexing)`; consumer: `meshgrid` delegates to `meshgrid_indexing`, both re-exported. `MeshIndexing::Xy` swaps the first two inputs+output grids per torch `TensorShape.cpp:4433-4438,4470-4472` (#1652). CUDA f32/f64 produce each axis grid on-device via `GpuBackend::meshgrid_grid` (#1545); grids stay GPU-resident. Grid `i` is differentiable w.r.t. coordinate tensor `i` via `MeshgridBackward` (CORE-110, #1804). |
-//! | REQ-7 | SHIPPED | `topk` at `ops/search.rs:814`; consumer: re-export `ferrotorch_core::topk` at `lib.rs:176`. CUDA f32/f64 lower the k-selection on-device via `GpuBackend::topk_1d` (#1545); values stay GPU-resident, only int64 indices read back. Zero-width last dim short-circuits to shaped empty results (CORE-108, #1802); values carry `TopkBackward` for tracking inputs (CORE-109, #1803). |
+//! | REQ-7 | SHIPPED | `topk` at `ops/search.rs:814`; consumer: re-export `ferrotorch_core::topk` at `lib.rs:176`. CUDA f32/f64/f16/bf16 lower the k-selection on-device via `GpuBackend::topk_1d` (#1545); values stay GPU-resident, only int64 indices read back. Zero-width last dim short-circuits to shaped empty results (CORE-108, #1802); values carry `TopkBackward` for tracking inputs (CORE-109, #1803). |
 
 use std::sync::Arc;
 
@@ -937,14 +937,15 @@ pub fn topk<T: Float>(
         return Ok((values, Vec::new()));
     }
 
-    // GPU fast path (#1545): for CUDA-resident f32/f64 inputs the k-selection
-    // runs on-device via `GpuBackend::topk_1d` over the `[outer, last_dim]`
-    // layout (the input is contiguous, so the last dim is the innermost run).
-    // The VALUES tensor stays GPU-resident — it is wrapped straight back into a
-    // CUDA `Tensor` with no host crossing — and ONLY the freshly-computed int64
-    // indices are read to host to satisfy this function's `Vec<usize>` contract
-    // (R-CODE-4: no CPU<->GPU round trip of the value data).
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    // GPU fast path (#1545): for CUDA-resident supported floating inputs the
+    // k-selection runs on-device via `GpuBackend::topk_1d` over the
+    // `[outer, last_dim]` layout (the input is contiguous, so the last dim is
+    // the innermost run). The VALUES tensor stays GPU-resident — it is wrapped
+    // straight back into a CUDA `Tensor` with no host crossing — and ONLY the
+    // freshly-computed int64 indices are read to host to satisfy this
+    // function's `Vec<usize>` contract (R-CODE-4: no CPU<->GPU round trip of
+    // the value data).
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_f16::<T>() || is_bf16::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         // #1658: normalise a narrowed-offset CUDA view to a packed offset-0

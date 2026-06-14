@@ -8232,6 +8232,36 @@ impl GpuBackend for CudaBackendImpl {
                     Self::wrap_slice_i64(idx, ord),
                 ))
             }
+            DType::F16 => {
+                let (vals, idx) = crate::search::gpu_topk_f16(
+                    Self::unwrap_buffer_f16(values_in)?,
+                    outer,
+                    last_dim,
+                    k,
+                    largest,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok((
+                    Self::wrap_buffer_f16(vals, ord),
+                    Self::wrap_slice_i64(idx, ord),
+                ))
+            }
+            DType::BF16 => {
+                let (vals, idx) = crate::search::gpu_topk_bf16(
+                    Self::unwrap_buffer_bf16(values_in)?,
+                    outer,
+                    last_dim,
+                    k,
+                    largest,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok((
+                    Self::wrap_buffer_bf16(vals, ord),
+                    Self::wrap_slice_i64(idx, ord),
+                ))
+            }
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!("topk_1d: unsupported value dtype {other}"),
             }),

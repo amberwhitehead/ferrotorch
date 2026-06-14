@@ -5800,7 +5800,7 @@ pub trait GpuBackend: Send + Sync {
     /// `outer` slices, returning `(values, indices)`:
     ///
     /// - `values` — a `GpuBufferHandle` of `outer * k` elements with the SAME
-    ///   `DType` as `values_in` (∈ {F32, F64}), in sorted order.
+    ///   `DType` as `values_in` (∈ {F32, F64, F16, BF16}), in sorted order.
     /// - `indices` — an `I64`-tagged `GpuBufferHandle` of `outer * k` original
     ///   indices into `[0, last_dim)` (PyTorch returns `ScalarType::Long`).
     ///
