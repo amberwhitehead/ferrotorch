@@ -18,6 +18,7 @@ use crate::autograd::autocast::{AutocastSnapshot, current_autocast_snapshot, wit
 use crate::dtype::Float;
 use crate::error::FerrotorchResult;
 use crate::gpu_dispatch::GpuRngState;
+use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
 
 /// Type alias for a checkpointable function: takes an input tensor and produces an output tensor.
@@ -81,7 +82,6 @@ where
     F: Fn(&Tensor<T>) -> FerrotorchResult<Tensor<T>> + Send + Sync + 'static,
 {
     use crate::autograd::no_grad::no_grad;
-    use crate::storage::TensorStorage;
 
     // Save GPU RNG state before the forward pass so we can restore it during
     // backward recomputation. This ensures dropout masks are identical.
@@ -110,9 +110,8 @@ where
         saved_autocast,
     });
 
-    let device = output.device();
-    let storage = TensorStorage::on_device(output.data_vec()?, device)?;
-    Tensor::from_operation(storage, output.shape().to_vec(), checkpoint_fn)
+    let (storage, shape) = checkpoint_output_storage(output)?;
+    Tensor::from_operation(storage, shape, checkpoint_fn)
 }
 
 /// Gradient checkpointing for functions with multiple tensor inputs.
@@ -127,7 +126,6 @@ where
     F: Fn(&[Tensor<T>]) -> FerrotorchResult<Tensor<T>> + Send + Sync + 'static,
 {
     use crate::autograd::no_grad::no_grad;
-    use crate::storage::TensorStorage;
 
     if inputs.is_empty() {
         return Err(crate::error::FerrotorchError::InvalidArgument {
@@ -153,9 +151,22 @@ where
         saved_autocast,
     });
 
-    let device = output.device();
-    let storage = TensorStorage::on_device(output.data_vec()?, device)?;
-    Tensor::from_operation(storage, output.shape().to_vec(), checkpoint_fn)
+    let (storage, shape) = checkpoint_output_storage(output)?;
+    Tensor::from_operation(storage, shape, checkpoint_fn)
+}
+
+fn checkpoint_output_storage<T: Float>(
+    output: Tensor<T>,
+) -> FerrotorchResult<(TensorStorage<T>, Vec<usize>)> {
+    let exact_contiguous = output.is_contiguous()
+        && output.storage_offset() == 0
+        && output.storage_len() == output.numel();
+    let packed = if exact_contiguous {
+        output
+    } else {
+        crate::methods::contiguous_t(&output)?
+    };
+    packed.into_storage_and_shape()
 }
 
 /// Save the GPU RNG state for the device the tensor lives on.

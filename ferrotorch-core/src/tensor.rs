@@ -593,6 +593,12 @@ impl<T: Float> Tensor<T> {
     where
         F: Fn(&Tensor<T>) + Send + Sync + 'static,
     {
+        if !self.is_leaf() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "post accumulate grad hooks cannot be registered on non-leaf tensors"
+                    .into(),
+            });
+        }
         let mut guard = self
             .inner
             .hooks

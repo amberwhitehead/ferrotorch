@@ -94,12 +94,13 @@ where
             ),
         });
     }
-    output.backward()?;
+    let input_refs: Vec<&Tensor<T>> = inputs.iter().collect();
+    let analytical_grads = crate::autograd::higher_order::grad(&output, &input_refs, false, false)?;
 
     // Step 2: For each input, compare analytical grad with numerical.
     for (input_idx, input) in inputs.iter().enumerate() {
-        let analytical_grad = match input.grad()? {
-            Some(g) => g,
+        let analytical_grad = match analytical_grads.get(input_idx).and_then(|g| g.as_ref()) {
+            Some(g) => g.clone(),
             None => {
                 return Err(FerrotorchError::InvalidArgument {
                     message: format!(

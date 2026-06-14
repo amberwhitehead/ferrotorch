@@ -19,8 +19,8 @@
 //! | REQ-8 | SHIPPED | `pub(crate) fn `run_post_accumulate_hooks`` at `hooks.rs:145-156`; consumer: `graph.rs:193` (sequential) and `:406` (parallel). |
 //!
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
@@ -28,10 +28,10 @@ use crate::tensor::Tensor;
 
 /// Type alias for a gradient hook function: receives a gradient tensor and
 /// optionally returns a replacement.
-pub(crate) type GradHookFn<T> = Box<dyn Fn(&Tensor<T>) -> Option<Tensor<T>> + Send + Sync>;
+pub(crate) type GradHookFn<T> = Arc<dyn Fn(&Tensor<T>) -> Option<Tensor<T>> + Send + Sync>;
 
 /// Type alias for a post-accumulate-grad hook function.
-pub(crate) type PostAccumulateHookFn<T> = Box<dyn Fn(&Tensor<T>) + Send + Sync>;
+pub(crate) type PostAccumulateHookFn<T> = Arc<dyn Fn(&Tensor<T>) + Send + Sync>;
 
 /// Monotonically increasing handle counter for hook identification.
 static NEXT_HOOK_ID: AtomicU64 = AtomicU64::new(0);
@@ -94,7 +94,7 @@ impl<T: Float> HookStorage<T> {
         let handle = HookHandle::next();
         self.grad_hooks.push(GradHook {
             handle,
-            func: Box::new(func),
+            func: Arc::new(func),
         });
         handle
     }
@@ -107,7 +107,7 @@ impl<T: Float> HookStorage<T> {
         let handle = HookHandle::next();
         self.post_accumulate_hooks.push(PostAccumulateGradHook {
             handle,
-            func: Box::new(func),
+            func: Arc::new(func),
         });
         handle
     }
@@ -141,12 +141,35 @@ pub(crate) fn run_grad_hooks<T: Float>(
     hooks: &Mutex<HookStorage<T>>,
     grad: Tensor<T>,
 ) -> FerrotorchResult<Tensor<T>> {
-    let guard = hooks.lock().map_err(|e| FerrotorchError::LockPoisoned {
-        message: format!("hook storage mutex: {e}"),
-    })?;
+    let hooks_to_run: Vec<GradHookFn<T>> = {
+        let guard = hooks.lock().map_err(|e| FerrotorchError::LockPoisoned {
+            message: format!("hook storage mutex: {e}"),
+        })?;
+        guard
+            .grad_hooks
+            .iter()
+            .map(|hook| Arc::clone(&hook.func))
+            .collect()
+    };
+
     let mut current = grad;
-    for hook in &guard.grad_hooks {
-        if let Some(replacement) = (hook.func)(&current) {
+    for hook in hooks_to_run {
+        if let Some(replacement) = hook(&current) {
+            if replacement.shape() != current.shape() {
+                return Err(FerrotorchError::ShapeMismatch {
+                    message: format!(
+                        "gradient hook changed gradient shape from {:?} to {:?}",
+                        current.shape(),
+                        replacement.shape()
+                    ),
+                });
+            }
+            if replacement.device() != current.device() {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected: current.device(),
+                    got: replacement.device(),
+                });
+            }
             current = replacement;
         }
     }
@@ -160,11 +183,19 @@ pub(crate) fn run_post_accumulate_hooks<T: Float>(
     hooks: &Mutex<HookStorage<T>>,
     tensor: &Tensor<T>,
 ) -> FerrotorchResult<()> {
-    let guard = hooks.lock().map_err(|e| FerrotorchError::LockPoisoned {
-        message: format!("hook storage mutex: {e}"),
-    })?;
-    for hook in &guard.post_accumulate_hooks {
-        (hook.func)(tensor);
+    let hooks_to_run: Vec<PostAccumulateHookFn<T>> = {
+        let guard = hooks.lock().map_err(|e| FerrotorchError::LockPoisoned {
+            message: format!("hook storage mutex: {e}"),
+        })?;
+        guard
+            .post_accumulate_hooks
+            .iter()
+            .map(|hook| Arc::clone(&hook.func))
+            .collect()
+    };
+
+    for hook in hooks_to_run {
+        hook(tensor);
     }
     Ok(())
 }

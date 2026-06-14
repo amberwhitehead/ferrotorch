@@ -25,6 +25,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use crate::device::Device;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
@@ -87,22 +88,16 @@ pub fn grad<T: Float>(
         .map(|(i, t)| (t.id(), i))
         .collect();
 
-    // Seed gradient: d(outputs)/d(outputs) = 1.
-    let seed = if create_graph {
-        // When create_graph=true, the seed must participate in the graph.
-        // Give it requires_grad=true so operations on it are tracked.
-        Tensor::from_storage(
-            TensorStorage::cpu(vec![<T as num_traits::One>::one()]),
-            vec![],
-            true,
-        )?
-    } else {
-        Tensor::from_storage(
-            TensorStorage::cpu(vec![<T as num_traits::One>::one()]),
-            vec![],
-            false,
-        )?
-    };
+    // Seed gradient: d(outputs)/d(outputs) = ones_like(outputs). PyTorch
+    // accepts single-element non-0-D outputs here and preserves their shape.
+    let seed = Tensor::from_storage(
+        TensorStorage::on_device(
+            vec![<T as num_traits::One>::one(); outputs.numel().max(1)],
+            outputs.device(),
+        )?,
+        outputs.shape().to_vec(),
+        create_graph,
+    )?;
 
     // Phase 1: Collect all nodes and compute in-degree via BFS.
     let mut in_degree: HashMap<TensorId, usize> = HashMap::new();
@@ -215,14 +210,7 @@ pub fn grad<T: Float>(
                             let summed = differentiable_add(&existing, &grad_tensor, create_graph)?;
                             grads.insert(input.id(), summed);
                         } else {
-                            // Plain element-wise add (non-differentiable).
-                            let a = existing.data_vec()?;
-                            let b = grad_tensor.data_vec()?;
-                            let summed: Vec<T> =
-                                a.iter().zip(b.iter()).map(|(&x, &y)| x + y).collect();
-                            let storage = TensorStorage::cpu(summed);
-                            let combined =
-                                Tensor::from_storage(storage, existing.shape().to_vec(), false)?;
+                            let combined = add_non_differentiable_grad(&existing, &grad_tensor)?;
                             grads.insert(input.id(), combined);
                         }
                     } else {
@@ -247,6 +235,53 @@ pub fn grad<T: Float>(
     let _ = retain_graph; // Consumed semantically above; graph is immutable via Arc.
 
     Ok(result)
+}
+
+fn add_non_differentiable_grad<T: Float>(
+    existing: &Tensor<T>,
+    incoming: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    if existing.shape() != incoming.shape() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "higher-order gradient accumulation shape mismatch: {:?} vs {:?}",
+                existing.shape(),
+                incoming.shape(),
+            ),
+        });
+    }
+    if existing.device() != incoming.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: existing.device(),
+            got: incoming.device(),
+        });
+    }
+
+    if matches!(existing.device(), Device::Cuda(_))
+        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
+    {
+        let a_handle = existing.gpu_handle()?;
+        let b_handle = incoming.gpu_handle()?;
+        let result_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "higher-order gradient accumulation add",
+            f32 => backend.add_f32(a_handle, b_handle),
+            f64 => backend.add_f64(a_handle, b_handle),
+            bf16 => backend.add_bf16_bf16(a_handle, b_handle),
+            f16 => backend.add_f16(a_handle, b_handle),
+        )?;
+        return Tensor::from_storage(
+            TensorStorage::gpu(result_handle),
+            existing.shape().to_vec(),
+            false,
+        );
+    }
+
+    let a = existing.data_vec()?;
+    let b = incoming.data_vec()?;
+    let summed: Vec<T> = a.iter().zip(b.iter()).map(|(&x, &y)| x + y).collect();
+    let storage = TensorStorage::on_device(summed, existing.device())?;
+    Tensor::from_storage(storage, existing.shape().to_vec(), false)
 }
 
 /// Differentiable element-wise addition used for gradient accumulation

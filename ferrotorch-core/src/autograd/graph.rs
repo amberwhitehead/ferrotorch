@@ -24,6 +24,43 @@ use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::tensor::{Tensor, TensorId};
 
+fn validate_external_gradient<T: Float>(
+    root: &Tensor<T>,
+    ext_grad: &Tensor<T>,
+) -> FerrotorchResult<()> {
+    if ext_grad.shape() != root.shape() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "gradient shape {:?} does not match root shape {:?}",
+                ext_grad.shape(),
+                root.shape(),
+            ),
+        });
+    }
+    if ext_grad.device() != root.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: root.device(),
+            got: ext_grad.device(),
+        });
+    }
+    Ok(())
+}
+
+fn implicit_seed_like<T: Float>(root: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if !root.is_scalar() && root.numel() != 1 {
+        return Err(FerrotorchError::BackwardNonScalar {
+            shape: root.shape().to_vec(),
+        });
+    }
+
+    // PyTorch seeds implicit scalar/single-element roots with ones_like(root).
+    // Preserving the logical shape matters for roots shaped [1], [1, 1], etc.
+    let one = <T as num_traits::One>::one();
+    let ones_storage = crate::storage::TensorStorage::cpu(vec![one; root.numel().max(1)]);
+    let seed_cpu = Tensor::from_storage(ones_storage, root.shape().to_vec(), false)?;
+    seed_cpu.to(root.device())
+}
+
 /// Compute gradients of all leaf tensors that contribute to `root`.
 ///
 /// Implements reverse-mode automatic differentiation:
@@ -49,36 +86,10 @@ pub fn backward_with_grad<T: Float>(
     gradient: Option<&Tensor<T>>,
 ) -> FerrotorchResult<()> {
     let seed = if let Some(ext_grad) = gradient {
-        // Validate that the external gradient shape matches the root shape.
-        if ext_grad.shape() != root.shape() {
-            return Err(FerrotorchError::ShapeMismatch {
-                message: format!(
-                    "gradient shape {:?} does not match root shape {:?}",
-                    ext_grad.shape(),
-                    root.shape(),
-                ),
-            });
-        }
+        validate_external_gradient(root, ext_grad)?;
         ext_grad.clone()
     } else {
-        // No external gradient: root must be scalar (0-D) OR a single-element
-        // tensor (e.g. shape [1], [1,1], …). Both are commonly produced by
-        // user code and PyTorch accepts both as implicit-gradient sources.
-        if !root.is_scalar() && root.numel() != 1 {
-            return Err(FerrotorchError::BackwardNonScalar {
-                shape: root.shape().to_vec(),
-            });
-        }
-
-        // Seed gradient: d(root)/d(root) = 1, with the SAME shape as root
-        // (not an empty shape) so subsequent backward arithmetic gets a
-        // matching gradient shape and reduce_grad_to_shape doesn't have
-        // to fix up a 0-D vs N-D mismatch -- which previously triggered
-        // an integer underflow when the root had shape [1] etc. CL-498.
-        let one = <T as num_traits::One>::one();
-        let ones_storage = crate::storage::TensorStorage::cpu(vec![one; root.numel().max(1)]);
-        let seed_cpu = Tensor::from_storage(ones_storage, root.shape().to_vec(), false)?;
-        seed_cpu.to(root.device())?
+        implicit_seed_like(root)?
     };
 
     // Phase 1: Collect all nodes and compute in-degree via BFS.
@@ -242,25 +253,10 @@ pub fn backward_parallel<T: Float>(
     use std::sync::{Arc, Condvar, Mutex};
 
     let seed = if let Some(ext_grad) = gradient {
-        if ext_grad.shape() != root.shape() {
-            return Err(FerrotorchError::ShapeMismatch {
-                message: format!(
-                    "gradient shape {:?} does not match root shape {:?}",
-                    ext_grad.shape(),
-                    root.shape(),
-                ),
-            });
-        }
+        validate_external_gradient(root, ext_grad)?;
         ext_grad.clone()
     } else {
-        if !root.is_scalar() && root.numel() != 1 {
-            return Err(FerrotorchError::BackwardNonScalar {
-                shape: root.shape().to_vec(),
-            });
-        }
-        let ones_storage = crate::storage::TensorStorage::cpu(vec![<T as num_traits::One>::one()]);
-        let seed_cpu = Tensor::from_storage(ones_storage, vec![], false)?;
-        seed_cpu.to(root.device())?
+        implicit_seed_like(root)?
     };
 
     // Phase 1: Collect nodes and compute in-degree (same as sequential).
