@@ -39,15 +39,17 @@ constructors + a `to_ferray` bridge.
   `torch.masked.MaskedTensor.to_tensor`.
 - REQ-5: `masked_sum` / `masked_mean` / `masked_min` / `masked_max` /
   `masked_count` — return 0-D tensors. GPU paths for `masked_sum` /
-  `masked_mean` lower to `mul + reduce_sum` on f32/f64 (#597);
-  `masked_min` / `masked_max` use the fused `masked_min_*` /
-  `masked_max_*` PTX kernels (#627). Mirrors
+  `masked_mean` lower to resident `mul + reduce_sum/scale` on
+  f32/f64/f16/bf16 (#597); `masked_min` / `masked_max` use the fused
+  `masked_min_*` / `masked_max_*` PTX kernels for f32/f64 (#627).
+  f16/bf16 CUDA extrema return `NotImplementedOnCuda` until resident
+  masked-extrema kernels exist; they do not CPU-pass through. Mirrors
   `torch.masked.{sum, mean, amin, amax}`.
 - REQ-6: `masked_where(data, condition)` / `masked_invalid(data)` /
   `masked_equal(data, value)` — numpy-style constructors;
   `masked_where` inverts the condition to match torch convention.
   `masked_invalid` / `masked_equal` compute their boolean predicate
-  on-device for f32/f64 CUDA inputs (`GpuBackend::isfinite_mask` /
+  on-device for f32/f64/f16/bf16 CUDA inputs (`GpuBackend::isfinite_mask` /
   `ne_scalar_mask`, #1545); the mask is read back once to the
   host-resident `Vec<bool>` (no value-data round trip). `masked_where`
   takes a host `&[bool]` and is device-agnostic. Mirrors
@@ -75,11 +77,15 @@ constructors + a `to_ferray` bridge.
 - [x] AC-7: `masked_min` / `masked_max` return torch's identity payloads
   when fully masked (`+inf` / `-inf`; `masked_min_max_all_masked_return_torch_identities`).
 - [x] AC-8: GPU paths for `masked_invalid` / `masked_equal`
-  constructors (f32/f64) — the predicate runs on-device and the input
-  stays CUDA-resident. Covered by `gpu_masked_invalid_f32_matches_cpu_\
+  constructors (f32/f64/f16/bf16) — the predicate runs on-device and the
+  input stays CUDA-resident. Covered by `gpu_masked_invalid_f32_matches_cpu_\
   and_is_on_device`, `gpu_masked_invalid_f64_matches_cpu`,
+  `gpu_masked_invalid_f16_matches_cpu_and_is_on_device`,
+  `gpu_masked_invalid_bf16_matches_cpu_and_is_on_device`,
   `gpu_masked_equal_f32_matches_cpu_and_is_on_device`,
-  `gpu_masked_equal_f64_nan_is_unequal` in
+  `gpu_masked_equal_f64_nan_is_unequal`,
+  `gpu_masked_equal_f16_nan_is_unequal`, and
+  `gpu_masked_equal_bf16_nan_is_unequal` in
   `tests/conformance_masked.rs` (`--features gpu`, live CUDA).
   `masked_where` needs no GPU path (host `&[bool]` condition).
 
@@ -99,18 +105,20 @@ paths attach a `MaskedFillBackward` edge when the data tensor tracks
 gradients (#1758 / CORE-064; torch `MaskedTensor.to_tensor` is
 `grad_fn=MaskedFillBackward0` on live 2.11.0).
 
-`masked_sum in masked.rs` branches on `is_cuda() && (is_f32 || is_f64)`
-to the GPU lowering: `mask_as_float_tensor` lifts the bool mask onto
-the device as a `[0/1]` float tensor, then `backend.mul_{f32,f64}` +
-`backend.sum_{f32,f64}` produce the result on-device. CPU fallback
-is a single-pass `zip` accumulator.
+`masked_sum in masked.rs` branches on CUDA dtype support
+(f32/f64/f16/bf16) to the GPU lowering: `mask_as_float_tensor` lifts
+the bool mask onto the device as a `[0/1]` float tensor, then
+`backend.mul_*` + dtype-specific scalar `sum_*` produce the result
+on-device. CPU fallback is a single-pass `zip` accumulator.
 
 `fn masked_mean in masked.rs` reuses `masked_sum_gpu` for the
 numerator; the denominator is the host-side `count_valid()` (a `bool`
-vec walk). The division runs ON-DEVICE (`div_f32` / `div_f64` against
-the uploaded count scalar — #1759): the GPU sum never crosses back to
-the host and the result is a CUDA 0-d scalar. The all-masked mean NaN edge
-is uploaded to the data device.
+vec walk). f32/f64 use ON-DEVICE true division against an uploaded count
+scalar; f16/bf16 use the resident scale kernels with an f32 host scalar
+`1/count_valid`, matching the crate's half/bfloat mean kernels and
+avoiding an imprecise half/bfloat count tensor. The GPU sum never
+crosses back to the host and the result is a CUDA 0-d scalar. The
+all-masked mean NaN edge is uploaded to the data device.
 
 `fn masked_min in masked.rs` / `fn masked_max in masked.rs` use the
 dedicated fused `backend.masked_min_{f32,f64}` /
@@ -119,7 +127,10 @@ dedicated fused `backend.masked_min_{f32,f64}` /
 in a single launch — no intermediate `prod` / `filled` buffers. CPU
 path walks data + mask with an `Option<T>` accumulator and torch-style
 NaN poisoning. The all-masked `+inf` / `-inf` identity payload (#1924 pin)
-is returned on the data device (#1759).
+is returned on the data device (#1759). f16/bf16 CUDA extrema return
+`NotImplementedOnCuda` until resident masked-extrema kernels exist;
+they do not take the CPU path because that would read CUDA value data
+back to host.
 
 Autograd (#1758): `masked_sum` / `masked_mean` / `masked_min` /
 `masked_max` attach `MaskedSumBackward` / `MaskedMeanBackward` /
@@ -145,14 +156,12 @@ values) and stays `requires_grad = false`.
 to match the torch convention; it takes a host `&[bool]` and is
 device-agnostic. `masked_invalid in masked.rs` and
 `masked_equal in masked.rs` build the mask: on a CPU data tensor they
-walk host memory; on an f32/f64 CUDA data tensor they run the
+walk host memory; on an f32/f64/f16/bf16 CUDA data tensor they run the
 predicate on-device (`GpuBackend::isfinite_mask` for `isfinite`,
 `GpuBackend::ne_scalar_mask` for `v != value`) and read the resulting
 `DType::Bool` buffer back once via `predicate_mask_gpu in masked.rs`
 into the host `Vec<bool>` — the value data never leaves and returns to
-the device (#1545). bf16/f16 CUDA inputs still error
-`NotImplementedOnCuda` (out of `MaskedTensor<T: Float>`'s GPU-lowered
-dtype set).
+the device (#1545).
 
 The `to_ferray` bridge at `:165-186` inverts the mask
 (`!v` per element) so the resulting `ferray_ma::MaskedArray` uses
@@ -178,12 +187,13 @@ unit tests + the `to_ferray` round-trip vs `ferray_ma::mean()`.
 
 ## Verification
 
-`cargo test -p ferrotorch-core --lib masked::tests` covers 18 tests
+`cargo test -p ferrotorch-core --lib masked::tests` covers 19 tests
 across constructors, reductions (CPU branch), and the ferray-ma
-bridge. GPU `masked_sum` / `masked_mean` paths (#597) and
-`masked_min` / `masked_max` paths (#627) are covered by integration
-tests in `ferrotorch-core/tests/conformance_masked.rs` (not in this
-unit file).
+bridge. GPU `masked_sum` / `masked_mean` paths (#597), f16/bf16
+sum/mean residency, `masked_min` / `masked_max` paths (#627), f16/bf16
+extrema no-passthrough errors, and f32/f64/f16/bf16 constructor
+predicates are covered by integration tests in
+`ferrotorch-core/tests/conformance_masked.rs` (not in this unit file).
 Valid-NaN forward/backward parity and the CUDA resident masked-extrema
 backward path are covered by `tests/audit_core064_masked_autograd.rs`.
 
@@ -196,5 +206,5 @@ backward path are covered by `tests/audit_core064_masked_autograd.rs`.
 | REQ-3 | SHIPPED | impl: `with_fill_value` at `masked in masked.rs`; non-test consumer: re-exported via `MaskedTensor` builder at `masked in lib.rs` |
 | REQ-4 | SHIPPED | impl: `filled` / `to_tensor` at `masked in masked.rs,143`; non-test consumer: re-exported method on `MaskedTensor` at `masked in lib.rs` |
 | REQ-5 | SHIPPED | impl: `masked_sum`/`masked_mean`/`masked_min`/`masked_max`/`masked_count` at `masked in masked.rs,275,322,330,419`; non-test consumer: re-exported at `masked in lib.rs` |
-| REQ-6 | SHIPPED | impl: `masked_where`/`masked_invalid`/`masked_equal in masked.rs`; non-test consumer: re-exported at `lib.rs`. GPU predicate masks (f32/f64): `masked_invalid in masked.rs` consumes `GpuBackend::isfinite_mask`, `masked_equal in masked.rs` consumes `GpuBackend::ne_scalar_mask` (#1545) — the constructors' CUDA branches ARE the non-test production consumers of the new trait methods |
+| REQ-6 | SHIPPED | impl: `masked_where`/`masked_invalid`/`masked_equal in masked.rs`; non-test consumer: re-exported at `lib.rs`. GPU predicate masks (f32/f64/f16/bf16): `masked_invalid in masked.rs` consumes `GpuBackend::isfinite_mask`, `masked_equal in masked.rs` consumes `GpuBackend::ne_scalar_mask` (#1545) — the constructors' CUDA branches ARE the non-test production consumers of the trait methods |
 | REQ-7 | SHIPPED | impl: `to_ferray` at `masked in masked.rs`; non-test consumer: the bridge enables ferray-ma's wider op surface; `to_ferray_round_trip_mean_matches_inhouse` test pins the cross-check |

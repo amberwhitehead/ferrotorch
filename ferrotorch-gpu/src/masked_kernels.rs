@@ -914,9 +914,10 @@ fn launch_scatter_forward<T: DeviceRepr + ValidAsZeroBits>(
 //
 // - isfinite: `out[i] = (v==v) && (|v| != +inf)` — exact PyTorch parity with
 //   `aten/src/ATen/native/TensorCompare.cpp:484` `isfinite = (self == self) *
-//   (self.abs() != inf)`. `setp.eq.f{32,64}` is unordered-false so NaN gives
-//   `v==v -> false`; `|v|!=inf` is `setp.neu` (unordered-true) but since `|v|`
-//   is never NaN when `v==v` held, ordered/unordered agree here.
+//   (self.abs() != inf)`. f16/bf16 first widen each stored 16-bit value to f32,
+//   matching PyTorch half/bfloat predicate math without staging the data on
+//   host. `setp.eq.f{32,64}` is unordered-false so NaN gives `v==v -> false`;
+//   `|v|!=inf` is ordered, and ordered/unordered agree once `v==v` held.
 // - ne_scalar: `out[i] = (v != value)` — the VALID mask for `masked_equal`
 //   under the torch convention (positions equal to `value` are masked OUT, so
 //   `mask = (v != value)`). The kernel uses `setp.neu.f{32,64}` (the UNORDERED
@@ -1020,6 +1021,212 @@ fn ne_scalar_ptx(kernel_name: &str, ty: &str, in_shift: u32) -> String {
     // is the *ordered* form (NaN -> false), which would diverge from the CPU
     // reference, so `.neu` is required here.
     setp.neu.{ty} %c, %v, %val;
+    selp.u16 %res, 1, 0, %c;
+    st.global.u8 [%out], %res;
+DONE:
+    ret;
+}}
+"
+    )
+}
+
+/// PTX for 16-bit float `isfinite`. The element is widened into f32 first,
+/// then compared with the same predicate used by torch's float path.
+fn isfinite_f16_ptx(kernel_name: &str) -> String {
+    format!(
+        "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry {kernel_name}(
+    .param .u64 in_ptr, .param .u64 out_ptr, .param .u32 n
+) {{
+    .reg .u32 %idx, %bid, %bdim, %nr;
+    .reg .u64 %a, %out, %ioff, %ooff;
+    .reg .b16 %h;
+    .reg .f32 %v, %av, %inf;
+    .reg .u16 %res;
+    .reg .pred %p, %notnan, %notinf, %fin;
+
+    ld.param.u64 %a, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %nr, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr;
+    @%p bra DONE;
+
+    cvt.u64.u32 %ioff, %idx;
+    shl.b64 %ioff, %ioff, 1;
+    add.u64 %a, %a, %ioff;
+    cvt.u64.u32 %ooff, %idx;
+    add.u64 %out, %out, %ooff;
+
+    ld.global.b16 %h, [%a];
+    cvt.f32.f16 %v, %h;
+    setp.eq.f32 %notnan, %v, %v;
+    abs.f32 %av, %v;
+    mov.f32 %inf, 0f7F800000;
+    setp.ne.f32 %notinf, %av, %inf;
+    and.pred %fin, %notnan, %notinf;
+    selp.u16 %res, 1, 0, %fin;
+    st.global.u8 [%out], %res;
+DONE:
+    ret;
+}}
+"
+    )
+}
+
+/// PTX for bf16 `isfinite`. bf16 is stored as the high 16 bits of an f32, so
+/// decode by shifting the u16 payload into the high half of a b32 register.
+fn isfinite_bf16_ptx(kernel_name: &str) -> String {
+    format!(
+        "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry {kernel_name}(
+    .param .u64 in_ptr, .param .u64 out_ptr, .param .u32 n
+) {{
+    .reg .u32 %idx, %bid, %bdim, %nr, %bits;
+    .reg .u64 %a, %out, %ioff, %ooff;
+    .reg .u16 %h;
+    .reg .f32 %v, %av, %inf;
+    .reg .u16 %res;
+    .reg .pred %p, %notnan, %notinf, %fin;
+
+    ld.param.u64 %a, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %nr, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr;
+    @%p bra DONE;
+
+    cvt.u64.u32 %ioff, %idx;
+    shl.b64 %ioff, %ioff, 1;
+    add.u64 %a, %a, %ioff;
+    cvt.u64.u32 %ooff, %idx;
+    add.u64 %out, %out, %ooff;
+
+    ld.global.u16 %h, [%a];
+    cvt.u32.u16 %bits, %h;
+    shl.b32 %bits, %bits, 16;
+    mov.b32 %v, %bits;
+    setp.eq.f32 %notnan, %v, %v;
+    abs.f32 %av, %v;
+    mov.f32 %inf, 0f7F800000;
+    setp.ne.f32 %notinf, %av, %inf;
+    and.pred %fin, %notnan, %notinf;
+    selp.u16 %res, 1, 0, %fin;
+    st.global.u8 [%out], %res;
+DONE:
+    ret;
+}}
+"
+    )
+}
+
+/// PTX for 16-bit float `v != value`. `value` is supplied as f32 after the
+/// core layer converts the caller's half scalar through `T`, so equality is
+/// exact for representable half values. `setp.neu` preserves NaN != value.
+fn ne_scalar_f16_ptx(kernel_name: &str) -> String {
+    format!(
+        "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry {kernel_name}(
+    .param .u64 in_ptr, .param .u64 out_ptr, .param .f32 value, .param .u32 n
+) {{
+    .reg .u32 %idx, %bid, %bdim, %nr;
+    .reg .u64 %a, %out, %ioff, %ooff;
+    .reg .b16 %h;
+    .reg .f32 %v, %val;
+    .reg .u16 %res;
+    .reg .pred %p, %c;
+
+    ld.param.u64 %a, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.f32 %val, [value];
+    ld.param.u32 %nr, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr;
+    @%p bra DONE;
+
+    cvt.u64.u32 %ioff, %idx;
+    shl.b64 %ioff, %ioff, 1;
+    add.u64 %a, %a, %ioff;
+    cvt.u64.u32 %ooff, %idx;
+    add.u64 %out, %out, %ooff;
+
+    ld.global.b16 %h, [%a];
+    cvt.f32.f16 %v, %h;
+    setp.neu.f32 %c, %v, %val;
+    selp.u16 %res, 1, 0, %c;
+    st.global.u8 [%out], %res;
+DONE:
+    ret;
+}}
+"
+    )
+}
+
+/// PTX for bf16 `v != value`, decoding bf16 to f32 before the unordered compare.
+fn ne_scalar_bf16_ptx(kernel_name: &str) -> String {
+    format!(
+        "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry {kernel_name}(
+    .param .u64 in_ptr, .param .u64 out_ptr, .param .f32 value, .param .u32 n
+) {{
+    .reg .u32 %idx, %bid, %bdim, %nr, %bits;
+    .reg .u64 %a, %out, %ioff, %ooff;
+    .reg .u16 %h;
+    .reg .f32 %v, %val;
+    .reg .u16 %res;
+    .reg .pred %p, %c;
+
+    ld.param.u64 %a, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.f32 %val, [value];
+    ld.param.u32 %nr, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr;
+    @%p bra DONE;
+
+    cvt.u64.u32 %ioff, %idx;
+    shl.b64 %ioff, %ioff, 1;
+    add.u64 %a, %a, %ioff;
+    cvt.u64.u32 %ooff, %idx;
+    add.u64 %out, %out, %ooff;
+
+    ld.global.u16 %h, [%a];
+    cvt.u32.u16 %bits, %h;
+    shl.b32 %bits, %bits, 16;
+    mov.b32 %v, %bits;
+    setp.neu.f32 %c, %v, %val;
     selp.u16 %res, 1, 0, %c;
     st.global.u8 [%out], %res;
 DONE:
@@ -1138,6 +1345,18 @@ pub fn isfinite_mask_f64(input: &CudaSlice<f64>, d: &GpuDevice) -> GpuResult<Cud
     launch_predicate(input, d, ptx, "isfinite_mask_f64_kernel".to_string())
 }
 
+/// `isfinite` mask for f16, decoded to f32 on-device before the predicate.
+pub fn isfinite_mask_f16(input: &CudaSlice<u16>, d: &GpuDevice) -> GpuResult<CudaSlice<u8>> {
+    let ptx = isfinite_f16_ptx("isfinite_mask_f16_kernel");
+    launch_predicate(input, d, ptx, "isfinite_mask_f16_kernel".to_string())
+}
+
+/// `isfinite` mask for bf16, decoded to f32 on-device before the predicate.
+pub fn isfinite_mask_bf16(input: &CudaSlice<u16>, d: &GpuDevice) -> GpuResult<CudaSlice<u8>> {
+    let ptx = isfinite_bf16_ptx("isfinite_mask_bf16_kernel");
+    launch_predicate(input, d, ptx, "isfinite_mask_bf16_kernel".to_string())
+}
+
 /// `ne_scalar` mask for f32: `out[i] = (v != value)` (1 where not equal).
 ///
 /// This is the VALID mask for `numpy.ma.masked_equal` under the torch
@@ -1172,6 +1391,38 @@ pub fn ne_scalar_mask_f64(
         d,
         ptx,
         "ne_scalar_mask_f64_kernel".to_string(),
+    )
+}
+
+/// `ne_scalar` mask for f16, decoded to f32 on-device before unordered compare.
+pub fn ne_scalar_mask_f16(
+    input: &CudaSlice<u16>,
+    value: f32,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    let ptx = ne_scalar_f16_ptx("ne_scalar_mask_f16_kernel");
+    launch_predicate_scalar(
+        input,
+        value,
+        d,
+        ptx,
+        "ne_scalar_mask_f16_kernel".to_string(),
+    )
+}
+
+/// `ne_scalar` mask for bf16, decoded to f32 on-device before unordered compare.
+pub fn ne_scalar_mask_bf16(
+    input: &CudaSlice<u16>,
+    value: f32,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    let ptx = ne_scalar_bf16_ptx("ne_scalar_mask_bf16_kernel");
+    launch_predicate_scalar(
+        input,
+        value,
+        d,
+        ptx,
+        "ne_scalar_mask_bf16_kernel".to_string(),
     )
 }
 
@@ -1716,6 +1967,44 @@ mod tests {
     }
 
     #[test]
+    fn isfinite_mask_f16_matches_ieee() {
+        let d = dev();
+        let host = vec![
+            half::f16::from_f32(1.0).to_bits(),
+            half::f16::NAN.to_bits(),
+            half::f16::INFINITY.to_bits(),
+            half::f16::NEG_INFINITY.to_bits(),
+            half::f16::from_f32(-0.0).to_bits(),
+            half::f16::from_f32(65504.0).to_bits(),
+        ];
+        let input = d.stream().clone_htod(&host).unwrap();
+        let mask = isfinite_mask_f16(&input, &d).unwrap();
+        assert_eq!(
+            d.stream().clone_dtoh(&mask).unwrap(),
+            vec![1u8, 0, 0, 0, 1, 1]
+        );
+    }
+
+    #[test]
+    fn isfinite_mask_bf16_matches_ieee() {
+        let d = dev();
+        let host = vec![
+            half::bf16::from_f32(1.0).to_bits(),
+            half::bf16::NAN.to_bits(),
+            half::bf16::INFINITY.to_bits(),
+            half::bf16::NEG_INFINITY.to_bits(),
+            half::bf16::from_f32(-0.0).to_bits(),
+            half::bf16::from_f32(3.3895314e38).to_bits(),
+        ];
+        let input = d.stream().clone_htod(&host).unwrap();
+        let mask = isfinite_mask_bf16(&input, &d).unwrap();
+        assert_eq!(
+            d.stream().clone_dtoh(&mask).unwrap(),
+            vec![1u8, 0, 0, 0, 1, 1]
+        );
+    }
+
+    #[test]
     fn ne_scalar_mask_f32_marks_unequal() {
         let d = dev();
         // value 5.0; mask = (v != 5.0): equal -> 0, unequal -> 1.
@@ -1731,5 +2020,33 @@ mod tests {
         let input = d.stream().clone_htod(&vec![5.0f64, f64::NAN, 5.0]).unwrap();
         let mask = ne_scalar_mask_f64(&input, 5.0, &d).unwrap();
         assert_eq!(d.stream().clone_dtoh(&mask).unwrap(), vec![0u8, 1, 0]);
+    }
+
+    #[test]
+    fn ne_scalar_mask_f16_nan_is_unequal() {
+        let d = dev();
+        let host = vec![
+            half::f16::from_f32(5.0).to_bits(),
+            half::f16::NAN.to_bits(),
+            half::f16::from_f32(6.0).to_bits(),
+            half::f16::from_f32(5.0).to_bits(),
+        ];
+        let input = d.stream().clone_htod(&host).unwrap();
+        let mask = ne_scalar_mask_f16(&input, 5.0, &d).unwrap();
+        assert_eq!(d.stream().clone_dtoh(&mask).unwrap(), vec![0u8, 1, 1, 0]);
+    }
+
+    #[test]
+    fn ne_scalar_mask_bf16_nan_is_unequal() {
+        let d = dev();
+        let host = vec![
+            half::bf16::from_f32(5.0).to_bits(),
+            half::bf16::NAN.to_bits(),
+            half::bf16::from_f32(6.0).to_bits(),
+            half::bf16::from_f32(5.0).to_bits(),
+        ];
+        let input = d.stream().clone_htod(&host).unwrap();
+        let mask = ne_scalar_mask_bf16(&input, 5.0, &d).unwrap();
+        assert_eq!(d.stream().clone_dtoh(&mask).unwrap(), vec![0u8, 1, 1, 0]);
     }
 }

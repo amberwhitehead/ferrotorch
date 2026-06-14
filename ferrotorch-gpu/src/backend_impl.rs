@@ -9949,6 +9949,8 @@ impl GpuBackend for CudaBackendImpl {
         let r = match input.dtype() {
             DType::F32 => mk::isfinite_mask_f32(Self::unwrap_buffer(input)?.inner(), dev),
             DType::F64 => mk::isfinite_mask_f64(Self::unwrap_buffer_f64(input)?.inner(), dev),
+            DType::F16 => mk::isfinite_mask_f16(Self::unwrap_buffer_f16(input)?, dev),
+            DType::BF16 => mk::isfinite_mask_bf16(Self::unwrap_buffer_bf16(input)?, dev),
             _ => {
                 return Err(FerrotorchError::NotImplementedOnCuda {
                     op: "isfinite_mask",
@@ -9973,6 +9975,12 @@ impl GpuBackend for CudaBackendImpl {
             }
             DType::F64 => {
                 mk::ne_scalar_mask_f64(Self::unwrap_buffer_f64(input)?.inner(), value, dev)
+            }
+            DType::F16 => {
+                mk::ne_scalar_mask_f16(Self::unwrap_buffer_f16(input)?, value as f32, dev)
+            }
+            DType::BF16 => {
+                mk::ne_scalar_mask_bf16(Self::unwrap_buffer_bf16(input)?, value as f32, dev)
             }
             _ => {
                 return Err(FerrotorchError::NotImplementedOnCuda {

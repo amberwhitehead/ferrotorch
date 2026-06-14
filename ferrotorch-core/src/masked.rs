@@ -34,23 +34,22 @@
 //!
 //! # GPU discipline
 //!
-//! No silent CPU↔GPU round trips. Reductions (`masked_sum` / `masked_mean` /
-//! `masked_min` / `masked_max`) lower to on-device kernels for f32/f64
-//! (#597 / #627); `masked_mean`'s division runs on-device (`div_f32` /
-//! `div_f64` against the uploaded count scalar — the GPU sum never crosses
-//! back to the host). The constructors `masked_invalid` / `masked_equal`
-//! compute their boolean predicate ON-DEVICE for f32/f64 CUDA inputs via
+//! No silent CPU↔GPU round trips. Reductions (`masked_sum` / `masked_mean`)
+//! lower to on-device kernels for f32/f64/f16/bf16; `masked_min` /
+//! `masked_max` lower to on-device kernels for f32/f64 (#597 / #627).
+//! `masked_mean`'s division/scale runs on-device — the GPU sum never crosses
+//! back to the host. The constructors `masked_invalid` / `masked_equal`
+//! compute their boolean predicate ON-DEVICE for f32/f64/f16/bf16 CUDA inputs via
 //! `GpuBackend::isfinite_mask` / `ne_scalar_mask` (#1545); only the resulting
 //! boolean mask is read back to populate the host-resident `Vec<bool>` (the
 //! mask is host-side BY DESIGN — this is a one-way readback of the freshly
 //! computed predicate, not a round trip of the value data, which never leaves
 //! the device). `MaskedExtremumBackward` uses a resident masked-extrema
 //! backward kernel for f32/f64 CUDA data. `masked_where` takes a host `&[bool]`
-//! condition and is device-agnostic. bf16/f16 lowering: `filled` / `to_tensor` run the
-//! dtype-generic resident `masked_fill_dt` kernel on CUDA; the bf16/f16
-//! extremum forward (and its backward tie walk) takes the documented host
-//! readback (#616/#627); bf16/f16 `masked_sum` / `masked_mean` and the
-//! constructors still error `NotImplementedOnCuda` / take the host walk.
+//! condition and is device-agnostic. bf16/f16 lowering: `filled` / `to_tensor`
+//! run the dtype-generic resident `masked_fill_dt` kernel on CUDA; bf16/f16
+//! masked extrema remain a structured `NotImplementedOnCuda` until resident
+//! masked min/max kernels exist for those dtypes.
 //!
 //! ## REQ status (per `.design/ferrotorch-core/masked.md`)
 //!
@@ -61,7 +60,7 @@
 //! | REQ-3 | SHIPPED | `with_fill_value` at `masked.rs:84`; consumer: re-export at `lib.rs:167` |
 //! | REQ-4 | SHIPPED | `fn filled` / `fn to_tensor` in `masked.rs` (autograd via `MaskedFillBackward`, result on the data device — #1758/#1759); consumer: re-export at `lib.rs:167` |
 //! | REQ-5 | SHIPPED | `masked_sum`/`masked_mean`/`masked_min`/`masked_max`/`masked_count` in `masked.rs` (autograd via `MaskedSumBackward`/`MaskedMeanBackward`/`MaskedExtremumBackward`, results on the data device — #1758/#1759); consumer: re-export at `lib.rs:167-170` |
-//! | REQ-6 | SHIPPED | `masked_where`/`masked_invalid`/`masked_equal` (`masked_invalid`/`masked_equal` in `masked.rs`); consumer: re-export at `lib.rs`. GPU predicate masks for `masked_invalid`/`masked_equal` (f32/f64) via `GpuBackend::isfinite_mask`/`ne_scalar_mask` (#1545); consumer: those constructors' CUDA branches in `masked.rs` |
+//! | REQ-6 | SHIPPED | `masked_where`/`masked_invalid`/`masked_equal` (`masked_invalid`/`masked_equal` in `masked.rs`); consumer: re-export at `lib.rs`. GPU predicate masks for `masked_invalid`/`masked_equal` (f32/f64/f16/bf16) via `GpuBackend::isfinite_mask`/`ne_scalar_mask` (#1545); consumer: those constructors' CUDA branches in `masked.rs` |
 //! | REQ-7 | SHIPPED | `to_ferray` at `masked.rs:165`; consumer: `to_ferray_round_trip_mean_matches_inhouse` pins the bridge |
 
 use std::sync::Arc;
@@ -71,7 +70,7 @@ use ferray_ma::masked_array::MaskedArray;
 
 use crate::autograd::no_grad::is_grad_enabled;
 use crate::bool_tensor::BoolTensor;
-use crate::dtype::Float;
+use crate::dtype::{DType, Element, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
@@ -310,7 +309,7 @@ pub fn masked_sum<T: Float>(mt: &MaskedTensor<T>) -> FerrotorchResult<Tensor<T>>
 
 /// Forward-only sum lowering (no autograd bookkeeping).
 fn masked_sum_forward<T: Float>(mt: &MaskedTensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if mt.data.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    if mt.data.is_cuda() && supports_cuda_masked_sum_mean::<T>() {
         return masked_sum_gpu(mt);
     }
     if mt.data.is_cuda() {
@@ -339,13 +338,25 @@ fn masked_sum_gpu<T: Float>(mt: &MaskedTensor<T>) -> FerrotorchResult<Tensor<T>>
     let data = mt.data.contiguous()?;
     let prod_h = if is_f32::<T>() {
         backend.mul_f32(data.gpu_handle()?, mask_t.gpu_handle()?)?
-    } else {
+    } else if is_f64::<T>() {
         backend.mul_f64(data.gpu_handle()?, mask_t.gpu_handle()?)?
+    } else if is_bf16::<T>() {
+        backend.mul_bf16_bf16(data.gpu_handle()?, mask_t.gpu_handle()?)?
+    } else if is_f16::<T>() {
+        backend.mul_f16(data.gpu_handle()?, mask_t.gpu_handle()?)?
+    } else {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "masked_sum" });
     };
     let sum_h = if is_f32::<T>() {
         backend.sum_f32(&prod_h, numel)?
-    } else {
+    } else if is_f64::<T>() {
         backend.sum_f64(&prod_h, numel)?
+    } else if is_bf16::<T>() {
+        backend.sum_bf16_bf16(&prod_h)?
+    } else if is_f16::<T>() {
+        backend.sum_f16(&prod_h)?
+    } else {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "masked_sum" });
     };
     Tensor::from_storage(TensorStorage::gpu(sum_h), vec![], false)
 }
@@ -378,6 +389,26 @@ fn is_f32<T: Float>() -> bool {
 #[inline]
 fn is_f64<T: Float>() -> bool {
     std::mem::size_of::<T>() == 8
+}
+
+/// Helper: are we operating on `bf16`?
+#[inline]
+fn is_bf16<T: Float>() -> bool {
+    <T as Element>::dtype() == DType::BF16
+}
+
+/// Helper: are we operating on `f16`?
+#[inline]
+fn is_f16<T: Float>() -> bool {
+    <T as Element>::dtype() == DType::F16
+}
+
+/// CUDA masked sum/mean support is limited to dtypes with resident multiply
+/// and scalar-reduction kernels. Do not let unsupported dtypes fall through to
+/// the CPU walk, because that would read CUDA value data back to host.
+#[inline]
+fn supports_cuda_masked_sum_mean<T: Float>() -> bool {
+    is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()
 }
 
 /// Fallible `T::from(f64)` with a structured error (R-CODE-2: no
@@ -654,7 +685,7 @@ pub fn masked_mean<T: Float>(mt: &MaskedTensor<T>) -> FerrotorchResult<Tensor<T>
 
 /// Forward-only mean lowering (no autograd bookkeeping).
 fn masked_mean_forward<T: Float>(mt: &MaskedTensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if mt.data.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    if mt.data.is_cuda() && supports_cuda_masked_sum_mean::<T>() {
         return masked_mean_gpu(mt);
     }
     if mt.data.is_cuda() {
@@ -688,25 +719,39 @@ fn masked_mean_gpu<T: Float>(mt: &MaskedTensor<T>) -> FerrotorchResult<Tensor<T>
         return cpu.to(device);
     }
     let sum = masked_sum_gpu(mt)?;
-    // sum is a 0-d tensor on GPU. Divide ON-DEVICE by the count scalar
-    // (uploaded once — the count is host-derived from the host-resident
-    // mask, so this is a one-way upload, not a round trip). True division
-    // matches the CPU walk and torch's `sum / count` bit-for-bit; the GPU
-    // sum never crosses back to the host (#1759).
+    // sum is a 0-d tensor on GPU. f32/f64 keep the existing true-division
+    // path. f16/bf16 match the resident mean kernels: scale by an f32 host
+    // scalar and round back to the destination dtype on-device, avoiding an
+    // imprecise half/bfloat count tensor for large valid counts.
     let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-    let count_t: Tensor<T> = Tensor::from_storage(
-        TensorStorage::cpu(vec![t_from_f64::<T>(
-            count as f64,
-            "masked_mean: valid count",
-        )?]),
-        vec![],
-        false,
-    )?
-    .to(device)?;
     let mean_h = if is_f32::<T>() {
+        let count_t: Tensor<T> = Tensor::from_storage(
+            TensorStorage::cpu(vec![t_from_f64::<T>(
+                count as f64,
+                "masked_mean: valid count",
+            )?]),
+            vec![],
+            false,
+        )?
+        .to(device)?;
         backend.div_f32(sum.gpu_handle()?, count_t.gpu_handle()?)?
-    } else {
+    } else if is_f64::<T>() {
+        let count_t: Tensor<T> = Tensor::from_storage(
+            TensorStorage::cpu(vec![t_from_f64::<T>(
+                count as f64,
+                "masked_mean: valid count",
+            )?]),
+            vec![],
+            false,
+        )?
+        .to(device)?;
         backend.div_f64(sum.gpu_handle()?, count_t.gpu_handle()?)?
+    } else if is_bf16::<T>() {
+        backend.scale_bf16_bf16(sum.gpu_handle()?, 1.0_f32 / count as f32)?
+    } else if is_f16::<T>() {
+        backend.scale_f16(sum.gpu_handle()?, 1.0_f32 / count as f32)?
+    } else {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "masked_mean" });
     };
     Tensor::from_storage(TensorStorage::gpu(mean_h), vec![], false)
 }
@@ -715,12 +760,12 @@ fn masked_mean_gpu<T: Float>(mt: &MaskedTensor<T>) -> FerrotorchResult<Tensor<T>
 /// (`+inf` if all masked and non-empty; errors on empty input like
 /// `torch.masked.amin`).
 ///
-/// GPU path: uses the fused `masked_reduce_min` PTX kernel (#627). Single
-/// launch reads `(data, mask_f)` directly and combines `mask_f != 0 ?
-/// data : +inf` into the running min accumulator — no intermediate
-/// buffers, no CPU-side sentinel construction. Same f32/f64-only gate as
-/// `masked_sum` / `masked_mean`; other dtypes (bf16/f16) take the CPU
-/// walk, matching the existing masked surface.
+/// GPU path: uses the fused `masked_reduce_min` PTX kernel (#627) for f32/f64.
+/// Single launch reads `(data, mask_f)` directly and combines `mask_f != 0 ?
+/// data : +inf` into the running min accumulator — no intermediate buffers, no
+/// CPU-side sentinel construction. bf16/f16 CUDA extrema return a structured
+/// `NotImplementedOnCuda` until resident masked-extrema kernels exist; they do
+/// not take a hidden CPU value walk.
 ///
 /// **Autograd (#1758 / CORE-064):** when the data tensor tracks gradients
 /// the result carries a [`MaskedExtremumBackward`] edge. Live torch
@@ -750,8 +795,14 @@ fn masked_extremum<T: Float>(mt: &MaskedTensor<T>, pick_min: bool) -> Ferrotorch
             message: format!("{op}: {torch_op}(): Expected reduction dim 0 to have non-zero size."),
         });
     }
-    let result = if mt.data.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
-        masked_extremum_gpu(mt, pick_min)?
+    let result = if mt.data.is_cuda() {
+        if is_f32::<T>() || is_f64::<T>() {
+            masked_extremum_gpu(mt, pick_min)?
+        } else {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: if pick_min { "masked_min" } else { "masked_max" },
+            });
+        }
     } else {
         masked_extremum_cpu(mt, pick_min)?
     };
@@ -930,10 +981,9 @@ pub fn masked_where<T: Float>(
 /// `GpuBackend::isfinite_mask` PTX kernel (#1545); only the resulting boolean
 /// mask is read back to populate the host-resident `Vec<bool>` (see
 /// [`predicate_mask_gpu`] — this is NOT a CPU↔GPU round trip of the value
-/// data, which never leaves the device). f32/f64 only; other dtypes take the
-/// host walk.
+/// data, which never leaves the device). Supports f32/f64/f16/bf16 on CUDA.
 pub fn masked_invalid<T: Float>(data: Tensor<T>) -> FerrotorchResult<MaskedTensor<T>> {
-    if data.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    if data.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_f16::<T>() || is_bf16::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
@@ -966,12 +1016,13 @@ pub fn masked_invalid<T: Float>(data: Tensor<T>) -> FerrotorchResult<MaskedTenso
 ///
 /// On CUDA the `v != value` predicate (the VALID mask under the torch
 /// convention) runs on-device via `GpuBackend::ne_scalar_mask` (#1545); only
-/// the boolean mask is read back ([`predicate_mask_gpu`]). f32/f64 only.
+/// the boolean mask is read back ([`predicate_mask_gpu`]). Supports
+/// f32/f64/f16/bf16 on CUDA.
 pub fn masked_equal<T: Float + PartialEq>(
     data: Tensor<T>,
     value: T,
 ) -> FerrotorchResult<MaskedTensor<T>> {
-    if data.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    if data.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_f16::<T>() || is_bf16::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let value_f = value

@@ -62,8 +62,10 @@
 //!
 //! ## GPU lane
 //!
-//! `masked_sum` / `masked_mean` / `masked_min` / `masked_max` lower to GPU
-//! kernels for f32 + f64 when the underlying data tensor is on CUDA.
+//! `masked_sum` / `masked_mean` lower to GPU kernels for f32/f64/f16/bf16
+//! when the underlying data tensor is on CUDA; `masked_min` / `masked_max`
+//! currently lower to resident CUDA kernels for f32 + f64 and reject f16/bf16
+//! with structured `NotImplementedOnCuda` instead of taking a CPU value walk.
 //! `masked_count` computes its count from the host-resident boolean mask
 //! (the mask itself is a `Vec<bool>` on host BY DESIGN) and uploads the
 //! scalar result to the data tensor's device. Per the CORE-065 → #1759
@@ -71,10 +73,11 @@
 //! device — the GPU reduction lane asserts the result device on every
 //! fixture row, including the all-masked edge rows that previously
 //! demoted to CPU. The constructors `masked_invalid` and
-//! `masked_equal` compute their boolean predicate ON-DEVICE for f32/f64 CUDA
-//! inputs via `GpuBackend::isfinite_mask` / `ne_scalar_mask` (#1545); only the
-//! resulting mask is read back to populate the host `Vec<bool>`. The GPU lane
-//! checks the on-device mask matches the CPU reference exactly.
+//! `masked_equal` compute their boolean predicate ON-DEVICE for
+//! f32/f64/f16/bf16 CUDA inputs via `GpuBackend::isfinite_mask` /
+//! `ne_scalar_mask` (#1545); only the resulting mask is read back to populate
+//! the host `Vec<bool>`. The GPU lane checks the on-device mask matches the
+//! CPU reference exactly.
 //!
 //! Tolerances follow the dispatch table:
 //!   F32_REDUCTION_CPU = 1e-6, F32_REDUCTION_GPU = 1e-5,
@@ -1126,16 +1129,18 @@ fn fixture_file_covers_every_phase212_op() {
 // ---------------------------------------------------------------------------
 //
 // Per the dispatch:
-//   * masked_sum / masked_mean / masked_min / masked_max have GPU lowerings
-//     for f32 + f64 (#597 / #627). The fixtures for cuda:0 run on GPU and
-//     read back to host for comparison.
+//   * masked_sum / masked_mean have GPU lowerings for f32/f64/f16/bf16
+//     (#597); masked_min / masked_max have GPU lowerings for f32/f64 (#627)
+//     and reject f16/bf16 rather than CPU-pass through. The fixtures for
+//     cuda:0 run on GPU and read back to host for comparison.
 //   * masked_count is intentionally host-side (the boolean mask is a
 //     `Vec<bool>` regardless of where the data tensor lives) — including
 //     it in the GPU lane proves it stays correct when the data tensor is
 //     on CUDA.
 //   * masked_invalid / masked_equal compute their predicate on-device for
-//     f32/f64 CUDA inputs (#1545); the GPU lane below asserts the input is
-//     CUDA-resident and that the on-device mask equals the CPU reference mask.
+//     f32/f64/f16/bf16 CUDA inputs (#1545); the GPU lane below asserts the
+//     input is CUDA-resident and that the on-device mask equals the CPU
+//     reference mask.
 
 #[cfg(feature = "gpu")]
 mod gpu {
@@ -1158,6 +1163,50 @@ mod gpu {
                  regenerate on a CUDA-enabled host before running --features gpu tests"
             );
         }
+    }
+
+    fn make_cpu_f16(data: &[f32], shape: &[usize]) -> Tensor<half::f16> {
+        let v: Vec<half::f16> = data.iter().map(|&x| half::f16::from_f32(x)).collect();
+        Tensor::from_storage(TensorStorage::cpu(v), shape.to_vec(), false).expect("make_cpu_f16")
+    }
+
+    fn make_cpu_bf16(data: &[f32], shape: &[usize]) -> Tensor<half::bf16> {
+        let v: Vec<half::bf16> = data.iter().map(|&x| half::bf16::from_f32(x)).collect();
+        Tensor::from_storage(TensorStorage::cpu(v), shape.to_vec(), false).expect("make_cpu_bf16")
+    }
+
+    fn upload_f16(t: Tensor<half::f16>) -> Tensor<half::f16> {
+        t.to(Device::Cuda(0)).expect("upload f16 to cuda")
+    }
+
+    fn upload_bf16(t: Tensor<half::bf16>) -> Tensor<half::bf16> {
+        t.to(Device::Cuda(0)).expect("upload bf16 to cuda")
+    }
+
+    fn read_back_f16_as_f32(t: &Tensor<half::f16>) -> Vec<f32> {
+        let cpu = if t.is_cpu() {
+            t.clone()
+        } else {
+            t.cpu().expect("read f16 cuda tensor")
+        };
+        cpu.data()
+            .expect("read f16 cpu data")
+            .iter()
+            .map(|v| v.to_f32())
+            .collect()
+    }
+
+    fn read_back_bf16_as_f32(t: &Tensor<half::bf16>) -> Vec<f32> {
+        let cpu = if t.is_cpu() {
+            t.clone()
+        } else {
+            t.cpu().expect("read bf16 cuda tensor")
+        };
+        cpu.data()
+            .expect("read bf16 cpu data")
+            .iter()
+            .map(|v| v.to_f32())
+            .collect()
     }
 
     #[test]
@@ -1269,5 +1318,195 @@ mod gpu {
         let gpu_mt = masked_equal(gpu_in, 5.0_f64).expect("gpu masked_equal f64");
         assert!(gpu_mt.data().is_cuda());
         assert_eq!(gpu_mt.mask(), expected.as_slice());
+    }
+
+    #[test]
+    fn gpu_masked_invalid_f16_matches_cpu_and_is_on_device() {
+        ensure_cuda_backend();
+        let cpu = Tensor::from_storage(
+            TensorStorage::cpu(vec![
+                half::f16::from_f32(1.0),
+                half::f16::NAN,
+                half::f16::INFINITY,
+                half::f16::NEG_INFINITY,
+                half::f16::from_f32(-2.5),
+            ]),
+            vec![5],
+            false,
+        )
+        .expect("f16 cpu input");
+        let expected = masked_invalid(cpu.clone())
+            .expect("cpu masked_invalid f16")
+            .mask()
+            .to_vec();
+        assert_eq!(expected, vec![true, false, false, false, true]);
+
+        let gpu_mt = masked_invalid(upload_f16(cpu)).expect("gpu masked_invalid f16");
+        assert!(gpu_mt.data().is_cuda());
+        assert_eq!(gpu_mt.mask(), expected.as_slice());
+    }
+
+    #[test]
+    fn gpu_masked_invalid_bf16_matches_cpu_and_is_on_device() {
+        ensure_cuda_backend();
+        let cpu = Tensor::from_storage(
+            TensorStorage::cpu(vec![
+                half::bf16::from_f32(1.0),
+                half::bf16::NAN,
+                half::bf16::INFINITY,
+                half::bf16::NEG_INFINITY,
+                half::bf16::from_f32(-2.5),
+            ]),
+            vec![5],
+            false,
+        )
+        .expect("bf16 cpu input");
+        let expected = masked_invalid(cpu.clone())
+            .expect("cpu masked_invalid bf16")
+            .mask()
+            .to_vec();
+        assert_eq!(expected, vec![true, false, false, false, true]);
+
+        let gpu_mt = masked_invalid(upload_bf16(cpu)).expect("gpu masked_invalid bf16");
+        assert!(gpu_mt.data().is_cuda());
+        assert_eq!(gpu_mt.mask(), expected.as_slice());
+    }
+
+    #[test]
+    fn gpu_masked_equal_f16_nan_is_unequal() {
+        ensure_cuda_backend();
+        let cpu = Tensor::from_storage(
+            TensorStorage::cpu(vec![
+                half::f16::from_f32(5.0),
+                half::f16::NAN,
+                half::f16::from_f32(6.0),
+                half::f16::from_f32(5.0),
+            ]),
+            vec![4],
+            false,
+        )
+        .expect("f16 cpu input");
+        let expected = vec![false, true, true, false];
+        assert_eq!(
+            masked_equal(cpu.clone(), half::f16::from_f32(5.0))
+                .expect("cpu masked_equal f16")
+                .mask(),
+            expected.as_slice()
+        );
+
+        let gpu_mt =
+            masked_equal(upload_f16(cpu), half::f16::from_f32(5.0)).expect("gpu masked_equal f16");
+        assert!(gpu_mt.data().is_cuda());
+        assert_eq!(gpu_mt.mask(), expected.as_slice());
+    }
+
+    #[test]
+    fn gpu_masked_equal_bf16_nan_is_unequal() {
+        ensure_cuda_backend();
+        let cpu = Tensor::from_storage(
+            TensorStorage::cpu(vec![
+                half::bf16::from_f32(5.0),
+                half::bf16::NAN,
+                half::bf16::from_f32(6.0),
+                half::bf16::from_f32(5.0),
+            ]),
+            vec![4],
+            false,
+        )
+        .expect("bf16 cpu input");
+        let expected = vec![false, true, true, false];
+        assert_eq!(
+            masked_equal(cpu.clone(), half::bf16::from_f32(5.0))
+                .expect("cpu masked_equal bf16")
+                .mask(),
+            expected.as_slice()
+        );
+
+        let gpu_mt = masked_equal(upload_bf16(cpu), half::bf16::from_f32(5.0))
+            .expect("gpu masked_equal bf16");
+        assert!(gpu_mt.data().is_cuda());
+        assert_eq!(gpu_mt.mask(), expected.as_slice());
+    }
+
+    #[test]
+    fn gpu_masked_sum_mean_f16_bf16_are_resident() {
+        ensure_cuda_backend();
+        let mask = vec![true, false, true, false];
+
+        let mt_f16 = MaskedTensor::new(
+            upload_f16(make_cpu_f16(&[1.0, 2.0, 3.0, 4.0], &[4])),
+            mask.clone(),
+        )
+        .expect("f16 masked tensor");
+        let sum_f16 = masked_sum(&mt_f16).expect("masked_sum f16 cuda");
+        let mean_f16 = masked_mean(&mt_f16).expect("masked_mean f16 cuda");
+        assert_eq!(sum_f16.device(), Device::Cuda(0));
+        assert_eq!(mean_f16.device(), Device::Cuda(0));
+        assert_eq!(read_back_f16_as_f32(&sum_f16), vec![4.0]);
+        assert_eq!(read_back_f16_as_f32(&mean_f16), vec![2.0]);
+
+        let mt_bf16 = MaskedTensor::new(
+            upload_bf16(make_cpu_bf16(&[1.0, 2.0, 3.0, 4.0], &[4])),
+            mask,
+        )
+        .expect("bf16 masked tensor");
+        let sum_bf16 = masked_sum(&mt_bf16).expect("masked_sum bf16 cuda");
+        let mean_bf16 = masked_mean(&mt_bf16).expect("masked_mean bf16 cuda");
+        assert_eq!(sum_bf16.device(), Device::Cuda(0));
+        assert_eq!(mean_bf16.device(), Device::Cuda(0));
+        assert_eq!(read_back_bf16_as_f32(&sum_bf16), vec![4.0]);
+        assert_eq!(read_back_bf16_as_f32(&mean_bf16), vec![2.0]);
+    }
+
+    #[test]
+    fn gpu_masked_mean_all_false_f16_bf16_is_cuda_nan() {
+        ensure_cuda_backend();
+        let mask = vec![false, false, false, false];
+
+        let mt_f16 = MaskedTensor::new(
+            upload_f16(make_cpu_f16(&[1.0, 2.0, 3.0, 4.0], &[4])),
+            mask.clone(),
+        )
+        .expect("f16 masked tensor");
+        let mean_f16 = masked_mean(&mt_f16).expect("masked_mean all false f16");
+        assert_eq!(mean_f16.device(), Device::Cuda(0));
+        assert!(read_back_f16_as_f32(&mean_f16)[0].is_nan());
+
+        let mt_bf16 = MaskedTensor::new(
+            upload_bf16(make_cpu_bf16(&[1.0, 2.0, 3.0, 4.0], &[4])),
+            mask,
+        )
+        .expect("bf16 masked tensor");
+        let mean_bf16 = masked_mean(&mt_bf16).expect("masked_mean all false bf16");
+        assert_eq!(mean_bf16.device(), Device::Cuda(0));
+        assert!(read_back_bf16_as_f32(&mean_bf16)[0].is_nan());
+    }
+
+    #[test]
+    fn gpu_masked_extrema_f16_bf16_do_not_cpu_passthrough() {
+        ensure_cuda_backend();
+        let mask = vec![true, false, true, false];
+
+        let mt_f16 = MaskedTensor::new(
+            upload_f16(make_cpu_f16(&[1.0, 2.0, 3.0, 4.0], &[4])),
+            mask.clone(),
+        )
+        .expect("f16 masked tensor");
+        let err = masked_min(&mt_f16).expect_err("f16 masked_min must not CPU fallback");
+        assert!(matches!(
+            err,
+            FerrotorchError::NotImplementedOnCuda { op: "masked_min" }
+        ));
+
+        let mt_bf16 = MaskedTensor::new(
+            upload_bf16(make_cpu_bf16(&[1.0, 2.0, 3.0, 4.0], &[4])),
+            mask,
+        )
+        .expect("bf16 masked tensor");
+        let err = masked_max(&mt_bf16).expect_err("bf16 masked_max must not CPU fallback");
+        assert!(matches!(
+            err,
+            FerrotorchError::NotImplementedOnCuda { op: "masked_max" }
+        ));
     }
 }
