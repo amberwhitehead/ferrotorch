@@ -19,7 +19,7 @@
 //! | REQ-8 (`transpose` / 2-D `t`) | SHIPPED | `transpose_2d` + `TransposeBackward` here, plus `Tensor::transpose` in `methods.rs` building a swap perm; consumer is `Tensor::t`; runner-arm gap #1340. |
 //! | REQ-9 (`swapaxes`) | SHIPPED | `swapaxes` here (literal transpose alias) consumed by `Tensor::swapaxes` in `methods.rs`; lib tests `test_swapaxes_equals_transpose`, `test_swapaxes_backward_reaches_leaf`. Closes #1342 REQ-9. |
 //! | REQ-10 (`swapdims`) | SHIPPED | `swapdims` here (literal transpose alias) consumed by `Tensor::swapdims` in `methods.rs`; lib test `test_swapdims_equals_transpose`. Closes #1342 REQ-10. |
-//! | REQ-11 (`expand`) | SHIPPED | `expand` + `ExpandBackward` consume the shared `arithmetic::reduce_grad_to_shape`; GPU fast path via `broadcast_add_{f32,f64}`; consumed by `grad_fns::indexing` broadcast prep and `einsum.rs`; runner-arm gap #1340. |
+//! | REQ-11 (`expand`) | SHIPPED | `expand` + `ExpandBackward` consume the shared `arithmetic::reduce_grad_to_shape`; forward is a PyTorch-parity zero-stride metadata view on CPU and CUDA; consumed by `grad_fns::indexing` broadcast prep and `einsum.rs`; runner-arm gap #1340. |
 //! | REQ-12 (`expand_as`) | SHIPPED | `expand_as` here (delegates to `expand` with `other.shape()`, inheriting `ExpandBackward`) consumed by `Tensor::expand_as_t` in `methods.rs`; lib tests `test_expand_as_equals_expand`, `test_expand_as_backward_sums_broadcast_axes`. Closes #1342 REQ-12. |
 //! | REQ-13 (`repeat`) | SHIPPED | `repeat` here (cat-composition tile) consumed by `Tensor::repeat_t`; lib tests `test_repeat_*`. Closes #1342 REQ-13. |
 //! | REQ-14 (`repeat_interleave`) | SHIPPED | `repeat_interleave` + `RepeatInterleaveBackward` here consumed by `Tensor::repeat_interleave_t`; lib tests `test_repeat_interleave_*`. Closes #1342 REQ-14. |
@@ -60,24 +60,6 @@ use crate::tensor::{GradFn, Tensor};
 #[inline]
 fn is_f32<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<f32>()
-}
-
-/// Returns `true` if `T` is `f64`.
-#[inline]
-fn is_f64<T: Float>() -> bool {
-    TypeId::of::<T>() == TypeId::of::<f64>()
-}
-
-/// Returns `true` if `T` is `bf16`.
-#[inline]
-fn is_bf16<T: Float>() -> bool {
-    TypeId::of::<T>() == TypeId::of::<half::bf16>()
-}
-
-/// Returns `true` if `T` is IEEE `f16`.
-#[inline]
-fn is_f16<T: Float>() -> bool {
-    TypeId::of::<T>() == TypeId::of::<half::f16>()
 }
 
 // ---------------------------------------------------------------------------
@@ -505,63 +487,36 @@ pub fn expand<T: Float>(input: &Tensor<T>, new_shape: &[usize]) -> FerrotorchRes
         }
     }
 
-    // GPU fast path: broadcast-add with a zeros scalar to produce the expanded
-    // tensor entirely on device (no CPU roundtrip).
-    if input.is_cuda()
-        && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>())
-        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
-    {
-        let device_ord = input.gpu_handle()?.device_ordinal();
-        // This GPU fast path is gated on the dtype checks above, so the scalar
-        // zeros buffer is tagged to match the input exactly.
-        let zeros_dtype = if is_f64::<T>() {
-            crate::dtype::DType::F64
-        } else if is_bf16::<T>() {
-            crate::dtype::DType::BF16
-        } else if is_f16::<T>() {
-            crate::dtype::DType::F16
+    // PyTorch `expand` is a metadata-only view. Dimensions that are actually
+    // expanded get stride 0; unchanged dimensions preserve the source stride.
+    // Leading synthetic size-1 dimensions use contiguous-style strides when
+    // they remain size 1, matching ATen's `inferExpandGeometry`.
+    let mut out_strides = vec![0isize; out_ndim];
+    let in_strides = input.strides();
+    let mut next_stride = 1isize;
+    for out_dim in (0..out_ndim).rev() {
+        let in_pos = out_dim as isize - (out_ndim as isize - in_ndim as isize);
+        let (source_size, source_stride) = if in_pos >= 0 {
+            let idx = in_pos as usize;
+            (in_shape[idx], in_strides[idx])
         } else {
-            crate::dtype::DType::F32
+            (1, next_stride)
         };
-        let zeros = backend.alloc_zeros(1, zeros_dtype, device_ord)?;
-        let expanded = if is_f64::<T>() {
-            backend.broadcast_add_f64(input.gpu_handle()?, &zeros, in_shape, &[1], new_shape)?
-        } else if is_bf16::<T>() {
-            backend.broadcast_add_bf16(input.gpu_handle()?, &zeros, in_shape, &[1], new_shape)?
-        } else if is_f16::<T>() {
-            backend.broadcast_add_f16(input.gpu_handle()?, &zeros, in_shape, &[1], new_shape)?
+        let target_size = new_shape[out_dim];
+        out_strides[out_dim] = if source_size == target_size {
+            source_stride
         } else {
-            backend.broadcast_add_f32(input.gpu_handle()?, &zeros, in_shape, &[1], new_shape)?
+            0
         };
-        let storage = TensorStorage::gpu(expanded);
-        return if is_grad_enabled() && input.requires_grad() {
-            let grad_fn = Arc::new(ExpandBackward::new(input.clone(), in_shape.to_vec()));
-            Tensor::from_operation(storage, new_shape.to_vec(), grad_fn)
-        } else {
-            Tensor::from_storage(storage, new_shape.to_vec(), false)
-        };
+        next_stride = new_shape[out_dim] as isize * out_strides[out_dim];
     }
 
-    // CPU path — error if GPU tensor without supported dtype.
-    if input.is_cuda() {
-        return Err(crate::error::FerrotorchError::NotImplementedOnCuda { op: "expand" });
-    }
-
-    // Build expanded data via broadcast indexing.
-    let in_data = input.data()?;
-    let out_numel: usize = new_shape.iter().product();
-    let mut out_data = Vec::with_capacity(out_numel);
-
-    for flat in 0..out_numel {
-        let idx = broadcast_flat_index(flat, new_shape, in_shape);
-        out_data.push(in_data[idx]);
-    }
-
+    let offset = input.storage_offset();
     if is_grad_enabled() && input.requires_grad() {
         let grad_fn = Arc::new(ExpandBackward::new(input.clone(), in_shape.to_vec()));
-        Tensor::from_operation(TensorStorage::cpu(out_data), new_shape.to_vec(), grad_fn)
+        Ok(input.stride_view_operation(new_shape.to_vec(), out_strides, offset, grad_fn))
     } else {
-        Tensor::from_storage(TensorStorage::cpu(out_data), new_shape.to_vec(), false)
+        Ok(input.stride_view(new_shape.to_vec(), out_strides, offset))
     }
 }
 
@@ -1958,34 +1913,6 @@ fn resolve_shape(shape: &[isize], numel: usize) -> FerrotorchResult<Vec<usize>> 
     }
 
     Ok(result)
-}
-
-/// Map a flat index in `out_shape` to a flat index in `in_shape` with
-/// broadcasting (size-1 dims map to 0).
-fn broadcast_flat_index(flat: usize, out_shape: &[usize], in_shape: &[usize]) -> usize {
-    let out_ndim = out_shape.len();
-    let in_ndim = in_shape.len();
-
-    let mut in_flat = 0usize;
-    let mut in_stride = 1usize;
-    let mut out_stride = 1usize;
-
-    for i in 0..in_ndim {
-        let out_axis = out_ndim - 1 - i;
-        let in_axis = in_ndim - 1 - i;
-
-        let out_dim = out_shape[out_axis];
-        let in_dim = in_shape[in_axis];
-
-        let coord = (flat / out_stride) % out_dim;
-        let in_coord = if in_dim == 1 { 0 } else { coord };
-
-        in_flat += in_coord * in_stride;
-        in_stride *= in_dim;
-        out_stride *= out_dim;
-    }
-
-    in_flat
 }
 
 // ---------------------------------------------------------------------------

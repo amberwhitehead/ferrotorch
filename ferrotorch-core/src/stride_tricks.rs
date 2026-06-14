@@ -389,8 +389,8 @@ impl<T: Float> Tensor<T> {
     /// read.
     ///
     /// On CUDA tensors this dispatches to the existing `strided_copy_f32`
-    /// / `strided_copy_f64` GPU kernels (no host bounce). On CPU it walks
-    /// the multi-index. On other devices (e.g. XPU) it returns
+    /// / `strided_copy_f64` / `strided_copy_u16` GPU kernels (no host bounce).
+    /// On CPU it walks the multi-index. On other devices (e.g. XPU) it returns
     /// [`FerrotorchError::NotImplementedOnCuda`] — install a kernel before
     /// using this on those devices.
     ///
@@ -898,7 +898,7 @@ impl<T: Float> GradFn<T> for AsStridedScatterBackward<T> {
 // ---------------------------------------------------------------------------
 
 /// Materialise an `as_strided` view living on CUDA into a contiguous CUDA
-/// storage. Dispatches to the existing `strided_copy_{f32,f64}` GPU kernels
+/// storage. Dispatches to the existing `strided_copy_{f32,f64,u16}` GPU kernels
 /// via the `GpuBackend` dispatcher.
 ///
 /// Never bounces data through host memory. Returns the bare storage so
@@ -919,6 +919,10 @@ fn materialize_strided_cuda<T: Float>(view: &Tensor<T>) -> FerrotorchResult<Tens
         backend.strided_copy_f32(buf, &out_shape, &stride, offset)?
     } else if TypeId::of::<T>() == TypeId::of::<f64>() {
         backend.strided_copy_f64(buf, &out_shape, &stride, offset)?
+    } else if TypeId::of::<T>() == TypeId::of::<half::f16>()
+        || TypeId::of::<T>() == TypeId::of::<half::bf16>()
+    {
+        backend.strided_copy_u16(buf, &out_shape, &stride, offset)?
     } else {
         return Err(FerrotorchError::NotImplementedOnCuda {
             op: "as_strided_copy",
