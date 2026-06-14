@@ -6253,6 +6253,37 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// Rank-aware f16 `scatter`; companion of [`Self::scatter_nd_f32`] for
+    /// raw 16-bit value movement while preserving the F16 dtype tag.
+    fn scatter_nd_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_nd_f16",
+        })
+    }
+
+    /// Rank-aware bf16 `scatter`; companion of [`Self::scatter_nd_f16`].
+    fn scatter_nd_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_nd_bf16",
+        })
+    }
+
     /// Rank-aware f32 scalar `scatter`.
     fn scatter_value_nd_f32(
         &self,
@@ -6283,6 +6314,38 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// Rank-aware f16 scalar `scatter`; `value` is converted by the backend to
+    /// IEEE f16 bits and written without changing the F16 dtype tag.
+    fn scatter_value_nd_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _value: f32,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_value_nd_f16",
+        })
+    }
+
+    /// Rank-aware bf16 scalar `scatter`; companion of
+    /// [`Self::scatter_value_nd_f16`].
+    fn scatter_value_nd_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _value: f32,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_value_nd_bf16",
+        })
+    }
+
     /// Rank-aware f32 `scatter_add`.
     fn scatter_add_nd_f32(
         &self,
@@ -6310,6 +6373,38 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "scatter_add_nd_f64",
+        })
+    }
+
+    /// Rank-aware f16 `scatter_add`; duplicate destinations accumulate
+    /// atomically and return a resident f16-tagged buffer.
+    fn scatter_add_nd_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_add_nd_f16",
+        })
+    }
+
+    /// Rank-aware bf16 `scatter_add`; duplicate destinations accumulate
+    /// atomically and return a resident bf16-tagged buffer.
+    fn scatter_add_nd_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_add_nd_bf16",
         })
     }
 

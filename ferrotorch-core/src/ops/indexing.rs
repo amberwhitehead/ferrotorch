@@ -6,10 +6,10 @@
 //! - `where_cond(condition, x, y)` — ternary selection
 //!
 //! `gather` / `scatter` / `scatter_value` / `scatter_add` have CUDA-resident
-//! fast paths (f32/f64) that dispatch through rank-aware `GpuBackend` indexing
-//! entries backed by PTX kernels in `ferrotorch-gpu`; the host `&[usize]` index
-//! is uploaded as a resident `i64` buffer and the result stays GPU-resident.
-//! bf16/f16 CUDA inputs return `NotImplementedOnCuda`.
+//! fast paths (f32/f64/f16/bf16) that dispatch through rank-aware `GpuBackend`
+//! indexing entries backed by PTX kernels in `ferrotorch-gpu`; the host
+//! `&[usize]` index is uploaded as a resident `i64` buffer and the result stays
+//! GPU-resident.
 //! `where_cond` (host-`&[bool]`) uploads the condition once for CUDA operands
 //! and delegates to the same resident path as `where_cond_bt`; `masked_select`
 //! has its own GPU-resident compaction path (#1185 / #1187).
@@ -352,14 +352,13 @@ pub fn gather<T: Float>(
         &effective_index_shape,
     )?;
 
-    // CUDA-resident fast path: `input` on a CUDA device, f32/f64 dtype. The
+    // CUDA-resident fast path: `input` on a CUDA device. The
     // host `&[usize]` index is uploaded as a GPU-resident `i64` buffer; the
     // rank-aware gather kernel runs entirely on-device and the result stays
-    // resident (no host round trip). bf16/f16 fall through to
-    // `NotImplementedOnCuda`.
+    // resident (no host round trip).
     if input.is_cuda() {
         match T::dtype() {
-            DType::F32 | DType::F64 => {
+            DType::F32 | DType::F64 | DType::F16 | DType::BF16 => {
                 // The rank-aware PTX kernel assumes a C-contiguous physical
                 // buffer. A transposed/permuted CUDA view has logical shape !=
                 // physical layout, so materialise to contiguous ON-DEVICE first
@@ -478,10 +477,9 @@ pub fn scatter<T: Float>(
     // enforces (`scatter_shape_check`).
     validate_scatter_src("scatter", src, index_shape)?;
 
-    // CUDA-resident fast path: `input` + `src` on the same CUDA device,
-    // f32/f64. The host index uploads as a resident `i64` buffer; the result
-    // (a clone of `input` with the scattered writes) stays GPU-resident.
-    // bf16/f16 → `NotImplementedOnCuda`.
+    // CUDA-resident fast path: `input` + `src` on the same CUDA device. The
+    // host index uploads as a resident `i64` buffer; the result (a clone of
+    // `input` with the scattered writes) stays GPU-resident.
     if input.is_cuda() || src.is_cuda() {
         if input.device() != src.device() {
             return Err(FerrotorchError::DeviceMismatch {
@@ -490,7 +488,7 @@ pub fn scatter<T: Float>(
             });
         }
         match T::dtype() {
-            DType::F32 | DType::F64 if input.is_cuda() && src.is_cuda() => {
+            DType::F32 | DType::F64 | DType::F16 | DType::BF16 => {
                 // The rank-aware scatter kernel reads `self`/`src` as
                 // C-contiguous buffers. Materialise to contiguous ON-DEVICE
                 // (strided_copy — no host round trip) so a transposed/permuted
@@ -513,24 +511,40 @@ pub fn scatter<T: Float>(
                 let backend =
                     crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                 let src_handle = src_slab.gpu_handle()?;
-                let h = if T::dtype() == DType::F32 {
-                    backend.scatter_nd_f32(
+                let h = match T::dtype() {
+                    DType::F32 => backend.scatter_nd_f32(
                         input_handle,
                         &idx_handle,
                         src_handle,
                         input_shape,
                         index_shape,
                         dim,
-                    )?
-                } else {
-                    backend.scatter_nd_f64(
+                    )?,
+                    DType::F64 => backend.scatter_nd_f64(
                         input_handle,
                         &idx_handle,
                         src_handle,
                         input_shape,
                         index_shape,
                         dim,
-                    )?
+                    )?,
+                    DType::F16 => backend.scatter_nd_f16(
+                        input_handle,
+                        &idx_handle,
+                        src_handle,
+                        input_shape,
+                        index_shape,
+                        dim,
+                    )?,
+                    DType::BF16 => backend.scatter_nd_bf16(
+                        input_handle,
+                        &idx_handle,
+                        src_handle,
+                        input_shape,
+                        index_shape,
+                        dim,
+                    )?,
+                    _ => unreachable!(),
                 };
                 let output_shape = input_shape.to_vec();
                 let storage = TensorStorage::gpu(h);
@@ -640,13 +654,13 @@ pub fn scatter_value<T: Float>(
         validate_gather_shapes(input_shape, dim, index_shape, index, input_shape[dim])?;
     validate_index_fits_input_non_dim("scatter_value", input_shape, dim, index_shape)?;
 
-    // CUDA-resident fast path: `input` on a CUDA device, f32/f64. The host
+    // CUDA-resident fast path: `input` on a CUDA device. The host
     // index uploads as a resident `i64` buffer; the broadcast scalar `value`
     // is written at every named position by the on-device kernel and the
-    // result stays resident. bf16/f16 → `NotImplementedOnCuda`.
+    // result stays resident.
     if input.is_cuda() {
         match T::dtype() {
-            DType::F32 | DType::F64 => {
+            DType::F32 | DType::F64 | DType::F16 | DType::BF16 => {
                 // Materialise `self` to contiguous ON-DEVICE (strided_copy — no
                 // host round trip) so a transposed/permuted view's physical
                 // buffer matches its logical shape.
@@ -658,8 +672,8 @@ pub fn scatter_value<T: Float>(
                 let idx_handle = upload_index_i64(index, ordinal)?;
                 let backend =
                     crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-                let h = if T::dtype() == DType::F32 {
-                    backend.scatter_value_nd_f32(
+                let h = match T::dtype() {
+                    DType::F32 => backend.scatter_value_nd_f32(
                         input_handle,
                         &idx_handle,
                         value.to_f32().ok_or(FerrotorchError::InvalidArgument {
@@ -668,9 +682,8 @@ pub fn scatter_value<T: Float>(
                         input_shape,
                         index_shape,
                         dim,
-                    )?
-                } else {
-                    backend.scatter_value_nd_f64(
+                    )?,
+                    DType::F64 => backend.scatter_value_nd_f64(
                         input_handle,
                         &idx_handle,
                         value.to_f64().ok_or(FerrotorchError::InvalidArgument {
@@ -679,7 +692,28 @@ pub fn scatter_value<T: Float>(
                         input_shape,
                         index_shape,
                         dim,
-                    )?
+                    )?,
+                    DType::F16 => backend.scatter_value_nd_f16(
+                        input_handle,
+                        &idx_handle,
+                        value.to_f32().ok_or(FerrotorchError::InvalidArgument {
+                            message: "scatter_value: value not representable as f32".into(),
+                        })?,
+                        input_shape,
+                        index_shape,
+                        dim,
+                    )?,
+                    DType::BF16 => backend.scatter_value_nd_bf16(
+                        input_handle,
+                        &idx_handle,
+                        value.to_f32().ok_or(FerrotorchError::InvalidArgument {
+                            message: "scatter_value: value not representable as f32".into(),
+                        })?,
+                        input_shape,
+                        index_shape,
+                        dim,
+                    )?,
+                    _ => unreachable!(),
                 };
                 let output_shape = input_shape.to_vec();
                 let storage = TensorStorage::gpu(h);
@@ -788,11 +822,10 @@ pub fn scatter_add<T: Float>(
     // `index.size(d) <= src.size(d)` for all d) replaces the numel-only gate.
     validate_scatter_src("scatter_add", src, index_shape)?;
 
-    // CUDA-resident fast path: `input` + `src` on the same CUDA device,
-    // f32/f64. The host index uploads as a resident `i64` buffer; the kernel
-    // accumulates with an ATOMIC add so duplicate index values targeting the
-    // same output slot sum correctly. The result stays GPU-resident. bf16/f16
-    // → `NotImplementedOnCuda`.
+    // CUDA-resident fast path: `input` + `src` on the same CUDA device. The
+    // host index uploads as a resident `i64` buffer; the kernel accumulates
+    // with an ATOMIC add so duplicate index values targeting the same output
+    // slot sum correctly. The result stays GPU-resident.
     if input.is_cuda() || src.is_cuda() {
         if input.device() != src.device() {
             return Err(FerrotorchError::DeviceMismatch {
@@ -801,7 +834,7 @@ pub fn scatter_add<T: Float>(
             });
         }
         match T::dtype() {
-            DType::F32 | DType::F64 if input.is_cuda() && src.is_cuda() => {
+            DType::F32 | DType::F64 | DType::F16 | DType::BF16 => {
                 // The rank-aware scatter_add kernel reads `self`/`src` as
                 // C-contiguous buffers. Materialise to contiguous ON-DEVICE
                 // (strided_copy — no host round trip) so a transposed/permuted
@@ -822,24 +855,40 @@ pub fn scatter_add<T: Float>(
                 let backend =
                     crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                 let src_handle = src_slab.gpu_handle()?;
-                let h = if T::dtype() == DType::F32 {
-                    backend.scatter_add_nd_f32(
+                let h = match T::dtype() {
+                    DType::F32 => backend.scatter_add_nd_f32(
                         input_handle,
                         &idx_handle,
                         src_handle,
                         input_shape,
                         index_shape,
                         dim,
-                    )?
-                } else {
-                    backend.scatter_add_nd_f64(
+                    )?,
+                    DType::F64 => backend.scatter_add_nd_f64(
                         input_handle,
                         &idx_handle,
                         src_handle,
                         input_shape,
                         index_shape,
                         dim,
-                    )?
+                    )?,
+                    DType::F16 => backend.scatter_add_nd_f16(
+                        input_handle,
+                        &idx_handle,
+                        src_handle,
+                        input_shape,
+                        index_shape,
+                        dim,
+                    )?,
+                    DType::BF16 => backend.scatter_add_nd_bf16(
+                        input_handle,
+                        &idx_handle,
+                        src_handle,
+                        input_shape,
+                        index_shape,
+                        dim,
+                    )?,
+                    _ => unreachable!(),
                 };
                 let output_shape = input_shape.to_vec();
                 let storage = TensorStorage::gpu(h);

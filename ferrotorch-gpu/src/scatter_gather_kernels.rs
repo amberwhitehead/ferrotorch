@@ -87,6 +87,7 @@
 //! | REQ-4 (dispatch wiring) | SHIPPED | the four `CudaBackendImpl::*_dim_{f32,f64}` overrides; consumer the `is_cuda()` branch of `gather`/`scatter`/`scatter_value`/`scatter_add` in `ferrotorch-core/src/ops/indexing.rs` |
 //! | REQ-5 (segmented row scatter-add) | SHIPPED | `gpu_scatter_add_segments_f32`/`_f64` (`atom.global.add.f{32,64}` over a per-row i64 segment index, zero-init output); consumer `CudaBackendImpl::scatter_add_segments_f32`/`_f64` in `backend_impl.rs`, themselves consumed by the `is_cuda()` branch of `ferrotorch_core::ops::scatter::scatter_add_segments` |
 //! | REQ-6 (16-bit flat scatter for `put`) | SHIPPED | `gpu_scatter_dim_u16` plus CAS-based `gpu_scatter_add_dim_f16`/`gpu_scatter_add_dim_bf16`; consumers `CudaBackendImpl::scatter*_dim_{f16,bf16}` and `ferrotorch_core::grad_fns::indexing::put`; verified by `scatter_dim_u16_bitcopy` / `scatter_add_dim_{f16,bf16}_duplicate_odd_len` and core CUDA indexing tests |
+//! | REQ-7 (16-bit rank-aware scatter family) | SHIPPED | `gpu_scatter_nd_u16`, `gpu_scatter_value_nd_u16`, and CAS-based `gpu_scatter_add_nd_{f16,bf16}`; consumers `CudaBackendImpl::scatter*_nd_{f16,bf16}` and `ferrotorch-core::ops::indexing::{scatter,scatter_value,scatter_add}` plus their backward nodes |
 
 #![cfg(feature = "cuda")]
 
@@ -577,6 +578,114 @@ DONE:
     };
 }
 
+macro_rules! scatter_add_nd_16_cas_ptx {
+    ($kname:literal, $version:literal, $target:literal, $decode_old:literal,
+     $decode_src:literal, $encode_new:literal) => {
+        concat!(
+            ".version ",
+            $version,
+            "\n.target ",
+            $target,
+            "\n.address_size 64\n",
+            ".visible .entry ",
+            $kname,
+            "(
+    .param .u64 out_ptr, .param .u64 idx_ptr, .param .u64 src_ptr,
+    .param .u64 input_strides_ptr, .param .u64 index_shape_ptr,
+    .param .u32 rank, .param .u32 dim, .param .u32 total
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %rank, %dim, %axis, %rem;
+    .reg .u32 %size, %coord, %sel, %stride, %dstelem;
+    .reg .u32 %wordidx, %halfsel, %shift;
+    .reg .u32 %old, %assumed, %new, %oldhalf_u, %newhalf_u, %mask, %preserve, %packed;
+    .reg .u64 %out, %idx, %src, %istr, %ishape, %off, %addr, %wordaddr;
+    .reg .s64 %selv;
+    .reg .b16 %src_h, %old_h, %new_h, %zero16;
+    .reg .b32 %src_bits, %old_bits, %new_bits;
+    .reg .f32 %src_f, %old_f, %sum_f;
+    .reg .pred %p, %retry;
+
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %idx, [idx_ptr];
+    ld.param.u64 %src, [src_ptr];
+    ld.param.u64 %istr, [input_strides_ptr];
+    ld.param.u64 %ishape, [index_shape_ptr];
+    ld.param.u32 %rank, [rank];
+    ld.param.u32 %dim, [dim];
+    ld.param.u32 %tot, [total];
+
+    mov.b16 %zero16, 0;
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot; @%p bra DONE;
+
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, 1; add.u64 %addr, %src, %off;
+    ld.global.b16 %src_h, [%addr];
+",
+            $decode_src,
+            "
+
+    mov.u32 %axis, %rank;
+    mov.u32 %rem, %gtid;
+    mov.u32 %dstelem, 0;
+LOOP:
+    setp.eq.u32 %p, %axis, 0; @%p bra LOOP_DONE;
+    sub.u32 %axis, %axis, 1;
+
+    cvt.u64.u32 %off, %axis; shl.b64 %off, %off, 2; add.u64 %addr, %ishape, %off;
+    ld.global.u32 %size, [%addr];
+    rem.u32 %coord, %rem, %size;
+    div.u32 %rem, %rem, %size;
+
+    setp.ne.u32 %p, %axis, %dim; @%p bra USE_OUTPUT_COORD;
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, 3; add.u64 %addr, %idx, %off;
+    ld.global.s64 %selv, [%addr];
+    cvt.u32.s64 %sel, %selv;
+    mov.u32 %coord, %sel;
+USE_OUTPUT_COORD:
+    cvt.u64.u32 %off, %axis; shl.b64 %off, %off, 2; add.u64 %addr, %istr, %off;
+    ld.global.u32 %stride, [%addr];
+    mad.lo.u32 %dstelem, %coord, %stride, %dstelem;
+    bra LOOP;
+
+LOOP_DONE:
+    shr.u32 %wordidx, %dstelem, 1;
+    and.b32 %halfsel, %dstelem, 1;
+    shl.b32 %shift, %halfsel, 4;
+    cvt.u64.u32 %off, %wordidx; shl.b64 %off, %off, 2; add.u64 %wordaddr, %out, %off;
+
+    ld.global.u32 %old, [%wordaddr];
+CAS_LOOP:
+    mov.u32 %assumed, %old;
+    shr.u32 %oldhalf_u, %assumed, %shift;
+    and.b32 %oldhalf_u, %oldhalf_u, 65535;
+    cvt.u16.u32 %old_h, %oldhalf_u;
+",
+            $decode_old,
+            "
+    add.rn.f32 %sum_f, %old_f, %src_f;
+",
+            $encode_new,
+            "
+    mov.b32 %new_bits, {%new_h, %zero16};
+    mov.b32 %newhalf_u, %new_bits;
+    shl.b32 %packed, %newhalf_u, %shift;
+    mov.u32 %mask, 65535;
+    shl.b32 %mask, %mask, %shift;
+    not.b32 %mask, %mask;
+    and.b32 %preserve, %assumed, %mask;
+    or.b32 %new, %preserve, %packed;
+    atom.global.cas.b32 %old, [%wordaddr], %assumed, %new;
+    setp.ne.u32 %retry, %old, %assumed;
+    @%retry bra CAS_LOOP;
+DONE:
+    ret;
+}
+"
+        )
+    };
+}
+
 macro_rules! scatter_reduce_nd_ptx {
     (
         $kname:literal, $wsh:literal, $ldv:literal, $stv:literal, $vreg:literal,
@@ -1001,6 +1110,13 @@ const SCATTER_ND_F64_PTX: &str = scatter_nd_ptx!(
     "st.global.f64",
     ".f64"
 );
+const SCATTER_ND_U16_PTX: &str = scatter_nd_ptx!(
+    "scatter_nd_u16_kernel",
+    "1",
+    "ld.global.u16",
+    "st.global.u16",
+    ".u16"
+);
 const SCATTER_VALUE_ND_F32_PTX: &str = scatter_value_nd_ptx!(
     "scatter_value_nd_f32_kernel",
     "2",
@@ -1017,6 +1133,14 @@ const SCATTER_VALUE_ND_F64_PTX: &str = scatter_value_nd_ptx!(
     ".f64",
     "ld.param.f64"
 );
+const SCATTER_VALUE_ND_U16_PTX: &str = scatter_value_nd_ptx!(
+    "scatter_value_nd_u16_kernel",
+    "1",
+    "st.global.u16",
+    ".u16",
+    ".u16",
+    "ld.param.u16"
+);
 const SCATTER_ADD_ND_F32_PTX: &str = scatter_add_nd_ptx!(
     "scatter_add_nd_f32_kernel",
     "2",
@@ -1030,6 +1154,22 @@ const SCATTER_ADD_ND_F64_PTX: &str = scatter_add_nd_ptx!(
     "ld.global.f64",
     "atom.global.add.f64",
     ".f64"
+);
+const SCATTER_ADD_ND_F16_PTX: &str = scatter_add_nd_16_cas_ptx!(
+    "scatter_add_nd_f16_kernel",
+    "7.0",
+    "sm_60",
+    "    cvt.f32.f16 %old_f, %old_h;",
+    "    cvt.f32.f16 %src_f, %src_h;",
+    "    cvt.rn.f16.f32 %new_h, %sum_f;"
+);
+const SCATTER_ADD_ND_BF16_PTX: &str = scatter_add_nd_16_cas_ptx!(
+    "scatter_add_nd_bf16_kernel",
+    "7.8",
+    "sm_80",
+    "    mov.b32 %old_bits, {%zero16, %old_h}; mov.b32 %old_f, %old_bits;",
+    "    mov.b32 %src_bits, {%zero16, %src_h}; mov.b32 %src_f, %src_bits;",
+    "    cvt.rn.bf16.f32 %new_h, %sum_f;"
 );
 const SCATTER_REDUCE_ND_F32_PTX: &str = scatter_reduce_nd_ptx!(
     "scatter_reduce_nd_f32_kernel",
@@ -1782,6 +1922,31 @@ pub fn gpu_scatter_nd_f64(
     Ok(out)
 }
 
+/// 16-bit rank-aware `scatter` for f16/bf16 bit-pattern buffers.
+pub fn gpu_scatter_nd_u16(
+    input: &CudaSlice<u16>,
+    idx: &CudaSlice<i64>,
+    src: &CudaSlice<u16>,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let mut out = clone_u16(input, input.len(), false, device)?;
+    launch_scatter_nd(
+        &mut out,
+        idx,
+        src,
+        input_shape,
+        index_shape,
+        dim,
+        device,
+        SCATTER_ND_U16_PTX,
+        "scatter_nd_u16_kernel",
+    )?;
+    Ok(out)
+}
+
 /// f32 rank-aware scalar `scatter`.
 pub fn gpu_scatter_value_nd_f32(
     input: &CudaBuffer<f32>,
@@ -1832,6 +1997,31 @@ pub fn gpu_scatter_value_nd_f64(
     Ok(out)
 }
 
+/// 16-bit rank-aware scalar `scatter` for f16/bf16 bit-pattern buffers.
+pub fn gpu_scatter_value_nd_u16(
+    input: &CudaSlice<u16>,
+    idx: &CudaSlice<i64>,
+    value: u16,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let mut out = clone_u16(input, input.len(), false, device)?;
+    launch_scatter_value_nd(
+        &mut out,
+        idx,
+        &value,
+        input_shape,
+        index_shape,
+        dim,
+        device,
+        SCATTER_VALUE_ND_U16_PTX,
+        "scatter_value_nd_u16_kernel",
+    )?;
+    Ok(out)
+}
+
 /// f32 rank-aware `scatter_add`.
 pub fn gpu_scatter_add_nd_f32(
     input: &CudaBuffer<f32>,
@@ -1878,6 +2068,58 @@ pub fn gpu_scatter_add_nd_f64(
         device,
         SCATTER_ADD_ND_F64_PTX,
         "scatter_add_nd_f64_kernel",
+    )?;
+    Ok(out)
+}
+
+/// f16 rank-aware `scatter_add`. Accumulates in f32 and rounds back to f16
+/// inside a 32-bit CAS loop over the destination half-word pair.
+pub fn gpu_scatter_add_nd_f16(
+    input: &CudaSlice<u16>,
+    idx: &CudaSlice<i64>,
+    src: &CudaSlice<u16>,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let mut out = clone_u16(input, input.len(), true, device)?;
+    launch_scatter_nd(
+        &mut out,
+        idx,
+        src,
+        input_shape,
+        index_shape,
+        dim,
+        device,
+        SCATTER_ADD_ND_F16_PTX,
+        "scatter_add_nd_f16_kernel",
+    )?;
+    Ok(out)
+}
+
+/// bf16 rank-aware `scatter_add`. Accumulates in f32 and rounds back to bf16
+/// inside a 32-bit CAS loop over the destination half-word pair.
+pub fn gpu_scatter_add_nd_bf16(
+    input: &CudaSlice<u16>,
+    idx: &CudaSlice<i64>,
+    src: &CudaSlice<u16>,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let mut out = clone_u16(input, input.len(), true, device)?;
+    launch_scatter_nd(
+        &mut out,
+        idx,
+        src,
+        input_shape,
+        index_shape,
+        dim,
+        device,
+        SCATTER_ADD_ND_BF16_PTX,
+        "scatter_add_nd_bf16_kernel",
     )?;
     Ok(out)
 }
@@ -2517,6 +2759,91 @@ mod tests {
             .map(|&bits| half::bf16::from_bits(bits).to_f32())
             .collect();
         assert_eq!(got, vec![1.0, 2.0, 33.0]);
+    }
+
+    #[test]
+    fn scatter_nd_u16_2d_bitcopy() {
+        let d = dev();
+        let inp = htod_u16(
+            &d,
+            &[
+                0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666, 0x7777, 0x8888,
+            ],
+        );
+        let src = htod_u16(&d, &[0xaaaa, 0xbbbb, 0xcccc, 0xdddd]);
+        let idx = htod_i64(&d, &[3i64, 0, 1, 2]);
+        let out = gpu_scatter_nd_u16(&inp, &idx, &src, &[2, 4], &[2, 2], 1, &d).unwrap();
+        let got = d.stream().clone_dtoh(&out).unwrap();
+        assert_eq!(
+            &got[..8],
+            &[
+                0xbbbb, 0x2222, 0x3333, 0xaaaa, 0x5555, 0xcccc, 0xdddd, 0x8888
+            ]
+        );
+    }
+
+    #[test]
+    fn scatter_value_nd_u16_2d_bitcopy() {
+        let d = dev();
+        let inp = htod_u16(
+            &d,
+            &[
+                0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666, 0x7777, 0x8888,
+            ],
+        );
+        let idx = htod_i64(&d, &[3i64, 0, 1, 2]);
+        let out = gpu_scatter_value_nd_u16(&inp, &idx, 0x9999, &[2, 4], &[2, 2], 1, &d).unwrap();
+        let got = d.stream().clone_dtoh(&out).unwrap();
+        assert_eq!(
+            &got[..8],
+            &[
+                0x9999, 0x2222, 0x3333, 0x9999, 0x5555, 0x9999, 0x9999, 0x8888
+            ]
+        );
+    }
+
+    #[test]
+    fn scatter_add_nd_f16_duplicate_2d_odd_len() {
+        let d = dev();
+        let inp_bits: Vec<u16> = (1..=9)
+            .map(|v| half::f16::from_f32(v as f32).to_bits())
+            .collect();
+        let src_bits: Vec<u16> = [10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0]
+            .into_iter()
+            .map(|v| half::f16::from_f32(v).to_bits())
+            .collect();
+        let inp = htod_u16(&d, &inp_bits);
+        let src = htod_u16(&d, &src_bits);
+        let idx = htod_i64(&d, &[2i64, 2, 0, 1, 1, 1]);
+        let out = gpu_scatter_add_nd_f16(&inp, &idx, &src, &[3, 3], &[3, 2], 1, &d).unwrap();
+        let got = d.stream().clone_dtoh(&out).unwrap();
+        let got: Vec<f32> = got[..9]
+            .iter()
+            .map(|&bits| half::f16::from_bits(bits).to_f32())
+            .collect();
+        assert_eq!(got, vec![1.0, 2.0, 33.0, 34.0, 45.0, 6.0, 7.0, 118.0, 9.0]);
+    }
+
+    #[test]
+    fn scatter_add_nd_bf16_duplicate_2d_odd_len() {
+        let d = dev();
+        let inp_bits: Vec<u16> = (1..=9)
+            .map(|v| half::bf16::from_f32(v as f32).to_bits())
+            .collect();
+        let src_bits: Vec<u16> = [10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0]
+            .into_iter()
+            .map(|v| half::bf16::from_f32(v).to_bits())
+            .collect();
+        let inp = htod_u16(&d, &inp_bits);
+        let src = htod_u16(&d, &src_bits);
+        let idx = htod_i64(&d, &[2i64, 2, 0, 1, 1, 1]);
+        let out = gpu_scatter_add_nd_bf16(&inp, &idx, &src, &[3, 3], &[3, 2], 1, &d).unwrap();
+        let got = d.stream().clone_dtoh(&out).unwrap();
+        let got: Vec<f32> = got[..9]
+            .iter()
+            .map(|&bits| half::bf16::from_bits(bits).to_f32())
+            .collect();
+        assert_eq!(got, vec![1.0, 2.0, 33.0, 34.0, 45.0, 6.0, 7.0, 118.0, 9.0]);
     }
 
     #[test]

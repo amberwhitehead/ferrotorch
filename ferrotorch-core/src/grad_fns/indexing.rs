@@ -12,7 +12,7 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (`gather`) | SHIPPED | `GatherBackward` Arc-attached by `ops::indexing::gather` (kernel-layer forward); CPU walk + GPU rank-aware `scatter_add_nd_{f32,f64}` path with i64 index (#1822/#1823/#1820). |
+//! | REQ-1 (`gather`) | SHIPPED | `GatherBackward` Arc-attached by `ops::indexing::gather` (kernel-layer forward); CPU walk + GPU rank-aware `scatter_add_nd_{f32,f64,f16,bf16}` path with i64 index (#1822/#1823/#1820). |
 //! | REQ-2 (`scatter`) | SHIPPED | `ScatterBackward` returns `[grad_input zeroed at written positions, grad_src gathered from those positions]`; Arc-attached by `ops::indexing::scatter`. |
 //! | REQ-3 (`scatter_add`) | SHIPPED | `ScatterAddBackward` returns `[grad, grad.gather(dim, index)]`; Arc-attached by `ops::indexing::scatter_add` and consumed transitively by `grad_fns::cumulative::cummax/cummin` VJPs. |
 //! | REQ-4 (`scatter_reduce`) | SHIPPED | runner arm + impl landed 2026-05-25 closing #1245; 144/168 passed (24 narrower-contract skips). |
@@ -602,17 +602,12 @@ impl<T: Float> GradFn<T> for GatherBackward<T> {
         let input_numel: usize = input_shape.iter().product();
 
         // §3 GPU-native path (#1822/#1823): scatter-add grad_output into a
-        // zeroed input-shaped buffer via the dim-aware kernel, dispatched on
-        // T::dtype() (f32/f64) with the SAME forward index uploaded as i64 —
+        // zeroed input-shaped buffer via the rank-aware kernel, dispatched on
+        // T::dtype() with the SAME forward index uploaded as i64 —
         // the kernel computes destinations from integer thread math, so no
         // flat offset is ever f32-encoded (offsets above 2^24 stay exact).
         if grad_output.is_cuda() {
             let dt = T::dtype();
-            if !matches!(dt, crate::dtype::DType::F32 | crate::dtype::DType::F64) {
-                return Err(FerrotorchError::NotImplementedOnCuda {
-                    op: "GatherBackward",
-                });
-            }
             let ordinal = match grad_output.device() {
                 Device::Cuda(o) => o,
                 _ => unreachable!(),
@@ -621,24 +616,44 @@ impl<T: Float> GradFn<T> for GatherBackward<T> {
             let idx_handle = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
             let zeros = backend.alloc_zeros(input_numel, dt, ordinal)?;
             let go_handle = grad_output.gpu_handle()?;
-            let result_handle = if dt == crate::dtype::DType::F32 {
-                backend.scatter_add_nd_f32(
+            let result_handle = match dt {
+                DType::F32 => backend.scatter_add_nd_f32(
                     &zeros,
                     &idx_handle,
                     go_handle,
                     input_shape,
                     &self.index_shape,
                     self.dim,
-                )?
-            } else {
-                backend.scatter_add_nd_f64(
+                )?,
+                DType::F64 => backend.scatter_add_nd_f64(
                     &zeros,
                     &idx_handle,
                     go_handle,
                     input_shape,
                     &self.index_shape,
                     self.dim,
-                )?
+                )?,
+                DType::F16 => backend.scatter_add_nd_f16(
+                    &zeros,
+                    &idx_handle,
+                    go_handle,
+                    input_shape,
+                    &self.index_shape,
+                    self.dim,
+                )?,
+                DType::BF16 => backend.scatter_add_nd_bf16(
+                    &zeros,
+                    &idx_handle,
+                    go_handle,
+                    input_shape,
+                    &self.index_shape,
+                    self.dim,
+                )?,
+                _ => {
+                    return Err(FerrotorchError::NotImplementedOnCuda {
+                        op: "GatherBackward",
+                    });
+                }
             };
             let grad_tensor = Tensor::from_storage(
                 TensorStorage::gpu(result_handle),
@@ -739,21 +754,16 @@ impl<T: Float> GradFn<T> for ScatterBackward<T> {
 
         // §3 GPU-native path (#1822/#1823), dispatched on T::dtype() with the
         // forward index uploaded as i64 (no f32 offset/mask encoding):
-        //   grad_input = scatter_value_dim(grad_output, index, 0.0)
+        //   grad_input = scatter_value_nd(grad_output, index, 0.0)
         //     — clones grad_output and writes 0 at every position scatter
         //       wrote to (those positions came from src), replacing the
         //       uploaded f32 write-mask + masked_zero_f32.
-        //   grad_src   = gather_dim(grad_output, index)
+        //   grad_src   = gather_nd(grad_output, index)
         //     — gathers from the positions that scatter wrote into
         //       (src.shape == index.shape is guaranteed by the CORE-127
         //       contract check above).
         if grad_output.is_cuda() {
             let dt = T::dtype();
-            if !matches!(dt, crate::dtype::DType::F32 | crate::dtype::DType::F64) {
-                return Err(FerrotorchError::NotImplementedOnCuda {
-                    op: "ScatterBackward",
-                });
-            }
             let ordinal = match grad_output.device() {
                 Device::Cuda(o) => o,
                 _ => unreachable!(),
@@ -763,24 +773,44 @@ impl<T: Float> GradFn<T> for ScatterBackward<T> {
             let go_handle = grad_output.gpu_handle()?;
 
             let grad_input = if self.input.requires_grad() {
-                let result_h = if dt == crate::dtype::DType::F32 {
-                    backend.scatter_value_nd_f32(
+                let result_h = match dt {
+                    DType::F32 => backend.scatter_value_nd_f32(
                         go_handle,
                         &idx_handle,
                         0.0,
                         input_shape,
                         &self.index_shape,
                         self.dim,
-                    )?
-                } else {
-                    backend.scatter_value_nd_f64(
+                    )?,
+                    DType::F64 => backend.scatter_value_nd_f64(
                         go_handle,
                         &idx_handle,
                         0.0,
                         input_shape,
                         &self.index_shape,
                         self.dim,
-                    )?
+                    )?,
+                    DType::F16 => backend.scatter_value_nd_f16(
+                        go_handle,
+                        &idx_handle,
+                        0.0,
+                        input_shape,
+                        &self.index_shape,
+                        self.dim,
+                    )?,
+                    DType::BF16 => backend.scatter_value_nd_bf16(
+                        go_handle,
+                        &idx_handle,
+                        0.0,
+                        input_shape,
+                        &self.index_shape,
+                        self.dim,
+                    )?,
+                    _ => {
+                        return Err(FerrotorchError::NotImplementedOnCuda {
+                            op: "ScatterBackward",
+                        });
+                    }
                 };
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
@@ -923,13 +953,13 @@ impl<T: Float> GradFn<T> for ScatterAddBackward<T> {
         // §3 GPU-native path (#1822/#1823), dispatched on T::dtype():
         //   grad_input = grad_output  (identity — addition passes grad
         //     through unchanged; `clone_buffer` is dtype-agnostic).
-        //   grad_src   = gather_dim(grad_output, index)  with the forward
+        //   grad_src   = gather_nd(grad_output, index)  with the forward
         //     index uploaded as i64 — gathers the positions scatter_add
         //     accumulated into (src.shape == index.shape guaranteed by the
         //     CORE-127 contract check above).
         if grad_output.is_cuda() {
             let dt = T::dtype();
-            if !matches!(dt, crate::dtype::DType::F32 | crate::dtype::DType::F64) {
+            if !matches!(dt, DType::F32 | DType::F64 | DType::F16 | DType::BF16) {
                 return Err(FerrotorchError::NotImplementedOnCuda {
                     op: "ScatterAddBackward",
                 });
@@ -4776,9 +4806,7 @@ pub fn take<T: Float>(input: &Tensor<T>, index: &IntTensor<i64>) -> FerrotorchRe
         return Tensor::from_storage(storage, output_shape, false);
     }
 
-    // Host path. For the remaining CUDA cases (f16/bf16, empty index) this
-    // is the documented host round trip: `data_vec` downloads, the gather
-    // runs on host, and the result re-uploads to `input`'s device.
+    // CPU host path.
     let input_data = input.data_vec()?;
     let mut out = Vec::with_capacity(output_numel);
     // For a 0-d index tensor `index.numel()` == 1 (the scalar count), so the
@@ -5083,9 +5111,7 @@ pub fn put<T: Float>(
         return Tensor::from_storage(storage, input_shape, false);
     }
 
-    // Host path. For the remaining CUDA cases (f16/bf16, empty index) this
-    // is the documented host round trip: `data_vec` downloads, the scatter
-    // runs on host, and the result re-uploads to `input`'s device.
+    // CPU host path.
     let mut out = input.data_vec()?;
     if out.is_empty() && input_numel == 1 {
         out.push(<T as num_traits::Zero>::zero());

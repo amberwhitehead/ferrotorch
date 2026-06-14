@@ -278,12 +278,13 @@ pub use roll::{gpu_roll_f32, gpu_roll_f64};
 #[cfg(feature = "cuda")]
 pub use scatter_gather_kernels::{
     gpu_gather_dim_f32, gpu_gather_dim_f64, gpu_scatter_add_dim_bf16, gpu_scatter_add_dim_f16,
-    gpu_scatter_add_dim_f32, gpu_scatter_add_dim_f64, gpu_scatter_add_nd_f32,
-    gpu_scatter_add_nd_f64, gpu_scatter_add_segments_f32, gpu_scatter_add_segments_f64,
-    gpu_scatter_dim_f32, gpu_scatter_dim_f64, gpu_scatter_dim_u16, gpu_scatter_nd_f32,
-    gpu_scatter_nd_f64, gpu_scatter_reduce_nd_f32, gpu_scatter_reduce_nd_f64,
+    gpu_scatter_add_dim_f32, gpu_scatter_add_dim_f64, gpu_scatter_add_nd_bf16,
+    gpu_scatter_add_nd_f16, gpu_scatter_add_nd_f32, gpu_scatter_add_nd_f64,
+    gpu_scatter_add_segments_f32, gpu_scatter_add_segments_f64, gpu_scatter_dim_f32,
+    gpu_scatter_dim_f64, gpu_scatter_dim_u16, gpu_scatter_nd_f32, gpu_scatter_nd_f64,
+    gpu_scatter_nd_u16, gpu_scatter_reduce_nd_f32, gpu_scatter_reduce_nd_f64,
     gpu_scatter_value_dim_f32, gpu_scatter_value_dim_f64, gpu_scatter_value_nd_f32,
-    gpu_scatter_value_nd_f64,
+    gpu_scatter_value_nd_f64, gpu_scatter_value_nd_u16,
 };
 #[cfg(feature = "cuda")]
 pub use search::{

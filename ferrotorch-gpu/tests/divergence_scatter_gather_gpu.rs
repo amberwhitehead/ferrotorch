@@ -103,12 +103,64 @@ fn cpu_f64(data: &[f64], shape: &[usize]) -> Tensor<f64> {
         .expect("cpu f64 tensor")
 }
 
+fn cpu_f16(data: &[f32], shape: &[usize], requires_grad: bool) -> Tensor<f16> {
+    Tensor::from_storage(
+        TensorStorage::cpu(data.iter().copied().map(f16::from_f32).collect()),
+        shape.to_vec(),
+        requires_grad,
+    )
+    .expect("cpu f16 tensor")
+}
+
+fn cpu_bf16(data: &[f32], shape: &[usize], requires_grad: bool) -> Tensor<bf16> {
+    Tensor::from_storage(
+        TensorStorage::cpu(data.iter().copied().map(bf16::from_f32).collect()),
+        shape.to_vec(),
+        requires_grad,
+    )
+    .expect("cpu bf16 tensor")
+}
+
 fn host_f32(t: &Tensor<f32>) -> Vec<f32> {
     t.cpu().expect("cpu()").data().unwrap().to_vec()
 }
 
 fn host_f64(t: &Tensor<f64>) -> Vec<f64> {
     t.cpu().expect("cpu()").data().unwrap().to_vec()
+}
+
+fn host_f16(t: &Tensor<f16>) -> Vec<f32> {
+    t.cpu()
+        .expect("cpu()")
+        .data()
+        .unwrap()
+        .iter()
+        .map(|v| v.to_f32())
+        .collect()
+}
+
+fn host_bf16(t: &Tensor<bf16>) -> Vec<f32> {
+    t.cpu()
+        .expect("cpu()")
+        .data()
+        .unwrap()
+        .iter()
+        .map(|v| v.to_f32())
+        .collect()
+}
+
+fn cuda_f16(data: &[f32], shape: &[usize], requires_grad: bool) -> Tensor<f16> {
+    cpu_f16(data, shape, false)
+        .to(Device::Cuda(0))
+        .expect("to cuda f16")
+        .requires_grad_(requires_grad)
+}
+
+fn cuda_bf16(data: &[f32], shape: &[usize], requires_grad: bool) -> Tensor<bf16> {
+    cpu_bf16(data, shape, false)
+        .to(Device::Cuda(0))
+        .expect("to cuda bf16")
+        .requires_grad_(requires_grad)
 }
 
 // ===========================================================================
@@ -321,43 +373,148 @@ fn scatter_add_gpu_f32_duplicate_indices_dim1_matches_torch() {
 }
 
 // ===========================================================================
-// bf16 / f16 must reject with NotImplementedOnCuda (no dim-aware kernel)
+// f16 / bf16 CUDA parity: forward and direct VJP stay resident
 // ===========================================================================
 
 #[test]
-fn gather_gpu_bf16_rejects_not_implemented() {
+fn gather_gpu_f16_forward_backward_matches_torch() {
     ensure_cuda();
-    let data = vec![bf16::from_f32(1.0); 6];
-    let cpu = Tensor::from_storage(TensorStorage::cpu(data), vec![2, 3], false).expect("bf16 cpu");
-    let gpu = cpu.to(Device::Cuda(0)).expect("to cuda bf16");
-    let index = [0usize, 1, 2, 0];
-    let err = gather(&gpu, 1, &index, &[2, 2]).expect_err("bf16 gather must reject");
-    assert!(
-        matches!(
-            err,
-            ferrotorch_core::FerrotorchError::NotImplementedOnCuda { op: "gather" }
-        ),
-        "expected NotImplementedOnCuda{{op:gather}}, got {err:?}"
-    );
+    let x = cuda_f16(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true);
+    let index = [2usize, 0, 1, 1];
+    let out = gather(&x, 1, &index, &[2, 2]).expect("f16 gather");
+    assert!(out.is_cuda(), "f16 gather output must stay CUDA-resident");
+    assert_eq!(host_f16(&out), vec![3.0, 1.0, 5.0, 5.0]);
+
+    let grad_output = cuda_f16(&[1.0; 4], &[2, 2], false);
+    let grads = out
+        .grad_fn()
+        .expect("tracked gather must carry grad_fn")
+        .backward(&grad_output)
+        .expect("f16 gather backward");
+    let grad = grads[0].as_ref().expect("input grad");
+    assert!(grad.is_cuda(), "f16 gather grad must stay CUDA-resident");
+    assert_eq!(host_f16(grad), vec![1.0, 0.0, 1.0, 0.0, 2.0, 0.0]);
 }
 
 #[test]
-fn scatter_add_gpu_f16_rejects_not_implemented() {
+fn gather_gpu_bf16_forward_backward_matches_torch() {
     ensure_cuda();
-    let data = vec![f16::from_f32(0.0); 3];
-    let cpu = Tensor::from_storage(TensorStorage::cpu(data), vec![3], false).expect("f16 cpu");
-    let gpu = cpu.to(Device::Cuda(0)).expect("to cuda f16");
-    let src_data = vec![f16::from_f32(1.0); 3];
-    let src = Tensor::from_storage(TensorStorage::cpu(src_data), vec![3], false).expect("f16 src");
-    let src_gpu = src.to(Device::Cuda(0)).expect("to cuda f16 src");
-    let index = [0usize, 0, 0];
-    let err =
-        scatter_add(&gpu, 0, &index, &[3], &src_gpu).expect_err("f16 scatter_add must reject");
+    let x = cuda_bf16(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true);
+    let index = [2usize, 0, 1, 1];
+    let out = gather(&x, 1, &index, &[2, 2]).expect("bf16 gather");
+    assert!(out.is_cuda(), "bf16 gather output must stay CUDA-resident");
+    assert_eq!(host_bf16(&out), vec![3.0, 1.0, 5.0, 5.0]);
+
+    let grad_output = cuda_bf16(&[1.0; 4], &[2, 2], false);
+    let grads = out
+        .grad_fn()
+        .expect("tracked gather must carry grad_fn")
+        .backward(&grad_output)
+        .expect("bf16 gather backward");
+    let grad = grads[0].as_ref().expect("input grad");
+    assert!(grad.is_cuda(), "bf16 gather grad must stay CUDA-resident");
+    assert_eq!(host_bf16(grad), vec![1.0, 0.0, 1.0, 0.0, 2.0, 0.0]);
+}
+
+#[test]
+fn scatter_gpu_f16_forward_backward_matches_torch() {
+    ensure_cuda();
+    let input = cuda_f16(&[1.0; 6], &[2, 3], true);
+    let src = cuda_f16(&[10.0, 20.0, 40.0, 50.0], &[2, 2], true);
+    let index = [2usize, 0, 1, 2];
+    let out = scatter(&input, 1, &index, &[2, 2], &src).expect("f16 scatter");
+    assert!(out.is_cuda(), "f16 scatter output must stay CUDA-resident");
+    assert_eq!(host_f16(&out), vec![20.0, 1.0, 10.0, 1.0, 40.0, 50.0]);
+
+    let grad_output = cuda_f16(&[1.0; 6], &[2, 3], false);
+    let grads = out
+        .grad_fn()
+        .expect("tracked scatter must carry grad_fn")
+        .backward(&grad_output)
+        .expect("f16 scatter backward");
+    let grad_input = grads[0].as_ref().expect("input grad");
+    let grad_src = grads[1].as_ref().expect("src grad");
+    assert!(grad_input.is_cuda());
+    assert!(grad_src.is_cuda());
+    assert_eq!(host_f16(grad_input), vec![0.0, 1.0, 0.0, 1.0, 0.0, 0.0]);
+    assert_eq!(host_f16(grad_src), vec![1.0, 1.0, 1.0, 1.0]);
+}
+
+#[test]
+fn scatter_value_gpu_bf16_forward_backward_matches_torch() {
+    ensure_cuda();
+    let input = cuda_bf16(&[1.0; 6], &[2, 3], true);
+    let index = [2usize, 0, 1, 1];
+    let out = scatter_value(&input, 1, &index, &[2, 2], bf16::from_f32(7.0))
+        .expect("bf16 scalar scatter");
     assert!(
-        matches!(
-            err,
-            ferrotorch_core::FerrotorchError::NotImplementedOnCuda { op: "scatter_add" }
-        ),
-        "expected NotImplementedOnCuda{{op:scatter_add}}, got {err:?}"
+        out.is_cuda(),
+        "bf16 scatter_value output must stay CUDA-resident"
     );
+    assert_eq!(host_bf16(&out), vec![7.0, 1.0, 7.0, 1.0, 7.0, 1.0]);
+
+    let grad_output = cuda_bf16(&[1.0; 6], &[2, 3], false);
+    let grads = out
+        .grad_fn()
+        .expect("tracked scatter_value must carry grad_fn")
+        .backward(&grad_output)
+        .expect("bf16 scatter_value backward");
+    let grad_input = grads[0].as_ref().expect("input grad");
+    assert!(grad_input.is_cuda());
+    assert_eq!(host_bf16(grad_input), vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+    assert!(grads[1].is_none(), "scalar scatter has no src gradient");
+}
+
+#[test]
+fn scatter_add_gpu_f16_duplicate_forward_backward_matches_torch() {
+    ensure_cuda();
+    let input = cuda_f16(&[1.0; 6], &[2, 3], true);
+    let src = cuda_f16(&[10.0, 20.0, 40.0, 50.0], &[2, 2], true);
+    let index = [2usize, 0, 1, 1];
+    let out = scatter_add(&input, 1, &index, &[2, 2], &src).expect("f16 scatter_add");
+    assert!(
+        out.is_cuda(),
+        "f16 scatter_add output must stay CUDA-resident"
+    );
+    assert_eq!(host_f16(&out), vec![21.0, 1.0, 11.0, 1.0, 91.0, 1.0]);
+
+    let grad_output = cuda_f16(&[1.0; 6], &[2, 3], false);
+    let grads = out
+        .grad_fn()
+        .expect("tracked scatter_add must carry grad_fn")
+        .backward(&grad_output)
+        .expect("f16 scatter_add backward");
+    let grad_input = grads[0].as_ref().expect("input grad");
+    let grad_src = grads[1].as_ref().expect("src grad");
+    assert!(grad_input.is_cuda());
+    assert!(grad_src.is_cuda());
+    assert_eq!(host_f16(grad_input), vec![1.0; 6]);
+    assert_eq!(host_f16(grad_src), vec![1.0; 4]);
+}
+
+#[test]
+fn scatter_add_gpu_bf16_duplicate_forward_backward_matches_torch() {
+    ensure_cuda();
+    let input = cuda_bf16(&[1.0; 6], &[2, 3], true);
+    let src = cuda_bf16(&[10.0, 20.0, 40.0, 50.0], &[2, 2], true);
+    let index = [2usize, 0, 1, 1];
+    let out = scatter_add(&input, 1, &index, &[2, 2], &src).expect("bf16 scatter_add");
+    assert!(
+        out.is_cuda(),
+        "bf16 scatter_add output must stay CUDA-resident"
+    );
+    assert_eq!(host_bf16(&out), vec![21.0, 1.0, 11.0, 1.0, 91.0, 1.0]);
+
+    let grad_output = cuda_bf16(&[1.0; 6], &[2, 3], false);
+    let grads = out
+        .grad_fn()
+        .expect("tracked scatter_add must carry grad_fn")
+        .backward(&grad_output)
+        .expect("bf16 scatter_add backward");
+    let grad_input = grads[0].as_ref().expect("input grad");
+    let grad_src = grads[1].as_ref().expect("src grad");
+    assert!(grad_input.is_cuda());
+    assert!(grad_src.is_cuda());
+    assert_eq!(host_bf16(grad_input), vec![1.0; 6]);
+    assert_eq!(host_bf16(grad_src), vec![1.0; 4]);
 }
