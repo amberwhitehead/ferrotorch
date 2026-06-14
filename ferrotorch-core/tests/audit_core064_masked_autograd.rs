@@ -114,6 +114,42 @@ fn assert_grad_f64(leaf: &Tensor<f64>, expected: &[f64], label: &str) {
     );
 }
 
+fn assert_grad_all_nan_f32(leaf: &Tensor<f32>, label: &str) {
+    let g = leaf
+        .grad()
+        .unwrap()
+        .unwrap_or_else(|| panic!("{label}: no gradient reached the leaf (CORE-064 detach)"));
+    assert_eq!(g.device(), leaf.device(), "{label}: gradient device");
+    let g_cpu = if g.is_cpu() {
+        g
+    } else {
+        g.cpu().expect("grad D2H")
+    };
+    let data = g_cpu.data().unwrap();
+    assert!(
+        data.iter().all(|v| v.is_nan()),
+        "{label}: torch routes NaN to every input slot, got {data:?}"
+    );
+}
+
+fn assert_grad_all_nan_f64(leaf: &Tensor<f64>, label: &str) {
+    let g = leaf
+        .grad()
+        .unwrap()
+        .unwrap_or_else(|| panic!("{label}: no gradient reached the leaf (CORE-064 detach)"));
+    assert_eq!(g.device(), leaf.device(), "{label}: gradient device");
+    let g_cpu = if g.is_cpu() {
+        g
+    } else {
+        g.cpu().expect("grad D2H")
+    };
+    let data = g_cpu.data().unwrap();
+    assert!(
+        data.iter().all(|v| v.is_nan()),
+        "{label}: torch routes NaN to every input slot, got {data:?}"
+    );
+}
+
 /// 0-d scalar weight tensor on the same device as `y`, then `(y * w).backward()`.
 fn scaled_backward_f32(y: &Tensor<f32>, w: f32) {
     let wt = Tensor::from_storage(TensorStorage::cpu(vec![w]), vec![], false).unwrap();
@@ -257,6 +293,67 @@ fn masked_max_tie_f64_backward() {
     let y = masked_max(&mt).unwrap();
     scaled_backward_f64(&y, 4.0);
     assert_grad_f64(&x, &[2.0, 2.0, 0.0, 0.0], "masked_max f64 tie * 4");
+}
+
+/// Live torch 2.11.0+cu130 oracle: a VALID NaN poisons
+/// `torch.masked.{amin,amax}` forward, and backward writes NaN to every input
+/// slot, including masked positions (`scale_grad_by_count` with zero matches).
+#[test]
+fn masked_extremum_valid_nan_backward_all_nan() {
+    type MaskedRed = fn(&MaskedTensor<f32>) -> ferrotorch_core::FerrotorchResult<Tensor<f32>>;
+    for (name, op) in [
+        ("masked_min", masked_min as MaskedRed),
+        ("masked_max", masked_max as MaskedRed),
+    ] {
+        let x = grad_leaf_f32(&[1.0, f32::NAN, 2.0]);
+        let mt = MaskedTensor::new(x.clone(), vec![true, true, false]).unwrap();
+        let y = op(&mt).unwrap();
+        assert!(
+            y.data().unwrap()[0].is_nan(),
+            "{name}: valid NaN must poison forward"
+        );
+        scaled_backward_f32(&y, 3.0);
+        assert_grad_all_nan_f32(&x, &format!("{name} valid NaN"));
+    }
+}
+
+/// f64 lane for the same valid-NaN contract.
+#[test]
+fn masked_extremum_valid_nan_f64_backward_all_nan() {
+    type MaskedRed = fn(&MaskedTensor<f64>) -> ferrotorch_core::FerrotorchResult<Tensor<f64>>;
+    for (name, op) in [
+        ("masked_min", masked_min as MaskedRed),
+        ("masked_max", masked_max as MaskedRed),
+    ] {
+        let x = grad_leaf_f64(&[1.0, f64::NAN, 2.0]);
+        let mt = MaskedTensor::new(x.clone(), vec![true, true, false]).unwrap();
+        let y = op(&mt).unwrap();
+        assert!(
+            y.data().unwrap()[0].is_nan(),
+            "{name}: valid NaN must poison forward"
+        );
+        scaled_backward_f64(&y, 3.0);
+        assert_grad_all_nan_f64(&x, &format!("{name} f64 valid NaN"));
+    }
+}
+
+/// A masked-out NaN is ignored by torch.masked extrema; it must not poison the
+/// forward or the backward.
+#[test]
+fn masked_extremum_masked_nan_is_ignored() {
+    let x = grad_leaf_f32(&[1.0, f32::NAN, 2.0]);
+    let mt = MaskedTensor::new(x.clone(), vec![true, false, true]).unwrap();
+    let y = masked_min(&mt).unwrap();
+    assert_eq!(y.data().unwrap(), &[1.0]);
+    scaled_backward_f32(&y, 3.0);
+    assert_grad_f32(&x, &[3.0, 0.0, 0.0], "masked_min masked NaN");
+
+    let x = grad_leaf_f32(&[1.0, f32::NAN, 2.0]);
+    let mt = MaskedTensor::new(x.clone(), vec![true, false, true]).unwrap();
+    let y = masked_max(&mt).unwrap();
+    assert_eq!(y.data().unwrap(), &[2.0]);
+    scaled_backward_f32(&y, 3.0);
+    assert_grad_f32(&x, &[0.0, 0.0, 3.0], "masked_max masked NaN");
 }
 
 // ---------------------------------------------------------------------------
@@ -438,6 +535,66 @@ mod gpu {
         let y = masked_min(&mt).unwrap();
         y.backward().expect("backward");
         assert_grad_f32(&x, &[0.0, 0.0, 0.0, 1.0], "gpu masked_min unique");
+    }
+
+    #[test]
+    fn gpu_masked_extremum_valid_nan_backward_all_nan() {
+        ensure_cuda_backend();
+        type MaskedRed = fn(&MaskedTensor<f32>) -> ferrotorch_core::FerrotorchResult<Tensor<f32>>;
+        for (name, op) in [
+            ("masked_min", masked_min as MaskedRed),
+            ("masked_max", masked_max as MaskedRed),
+        ] {
+            let x = cuda_grad_leaf_f32(&[1.0, f32::NAN, 2.0]);
+            let mt = MaskedTensor::new(x.clone(), vec![true, true, false]).unwrap();
+            let y = op(&mt).unwrap();
+            let y_cpu = y.cpu().expect("forward D2H for assertion");
+            assert!(
+                y_cpu.data().unwrap()[0].is_nan(),
+                "{name}: CUDA valid NaN must poison forward"
+            );
+            scaled_backward_f32(&y, 3.0);
+            assert_grad_all_nan_f32(&x, &format!("gpu {name} valid NaN"));
+        }
+    }
+
+    #[test]
+    fn gpu_masked_extremum_valid_nan_f64_backward_all_nan() {
+        ensure_cuda_backend();
+        type MaskedRed = fn(&MaskedTensor<f64>) -> ferrotorch_core::FerrotorchResult<Tensor<f64>>;
+        for (name, op) in [
+            ("masked_min", masked_min as MaskedRed),
+            ("masked_max", masked_max as MaskedRed),
+        ] {
+            let x = cuda_grad_leaf_f64(&[1.0, f64::NAN, 2.0]);
+            let mt = MaskedTensor::new(x.clone(), vec![true, true, false]).unwrap();
+            let y = op(&mt).unwrap();
+            let y_cpu = y.cpu().expect("forward D2H for assertion");
+            assert!(
+                y_cpu.data().unwrap()[0].is_nan(),
+                "{name}: CUDA f64 valid NaN must poison forward"
+            );
+            scaled_backward_f64(&y, 3.0);
+            assert_grad_all_nan_f64(&x, &format!("gpu {name} f64 valid NaN"));
+        }
+    }
+
+    #[test]
+    fn gpu_masked_extremum_masked_nan_is_ignored() {
+        ensure_cuda_backend();
+        let x = cuda_grad_leaf_f32(&[1.0, f32::NAN, 2.0]);
+        let mt = MaskedTensor::new(x.clone(), vec![true, false, true]).unwrap();
+        let y = masked_min(&mt).unwrap();
+        assert_eq!(y.cpu().unwrap().data().unwrap(), &[1.0]);
+        scaled_backward_f32(&y, 3.0);
+        assert_grad_f32(&x, &[3.0, 0.0, 0.0], "gpu masked_min masked NaN");
+
+        let x = cuda_grad_leaf_f32(&[1.0, f32::NAN, 2.0]);
+        let mt = MaskedTensor::new(x.clone(), vec![true, false, true]).unwrap();
+        let y = masked_max(&mt).unwrap();
+        assert_eq!(y.cpu().unwrap().data().unwrap(), &[2.0]);
+        scaled_backward_f32(&y, 3.0);
+        assert_grad_f32(&x, &[0.0, 0.0, 3.0], "gpu masked_max masked NaN");
     }
 
     #[test]

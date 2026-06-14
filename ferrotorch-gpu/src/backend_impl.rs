@@ -2286,6 +2286,29 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, input.device_ordinal()))
     }
 
+    fn masked_extreme_backward_f64(
+        &self,
+        input: &GpuBufferHandle,
+        mask_f: &GpuBufferHandle,
+        extreme: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f64(input)?;
+        let mask_buf = Self::unwrap_buffer_f64(mask_f)?;
+        let extreme_buf = Self::unwrap_buffer_f64(extreme)?;
+        let grad_buf = Self::unwrap_buffer_f64(grad_output)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::kernels::gpu_masked_extreme_backward_f64(
+            input_buf,
+            mask_buf,
+            extreme_buf,
+            grad_buf,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, input.device_ordinal()))
+    }
+
     fn masked_min_f64(
         &self,
         data: &GpuBufferHandle,
@@ -3191,6 +3214,29 @@ impl GpuBackend for CudaBackendImpl {
         let result =
             crate::kernels::gpu_extreme_backward_f32(input_buf, extreme_buf, grad_buf, dev)
                 .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, input.device_ordinal()))
+    }
+
+    fn masked_extreme_backward_f32(
+        &self,
+        input: &GpuBufferHandle,
+        mask_f: &GpuBufferHandle,
+        extreme: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer(input)?;
+        let mask_buf = Self::unwrap_buffer(mask_f)?;
+        let extreme_buf = Self::unwrap_buffer(extreme)?;
+        let grad_buf = Self::unwrap_buffer(grad_output)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::kernels::gpu_masked_extreme_backward_f32(
+            input_buf,
+            mask_buf,
+            extreme_buf,
+            grad_buf,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, input.device_ordinal()))
     }
 

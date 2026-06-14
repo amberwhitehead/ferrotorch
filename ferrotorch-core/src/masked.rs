@@ -44,9 +44,9 @@
 //! boolean mask is read back to populate the host-resident `Vec<bool>` (the
 //! mask is host-side BY DESIGN — this is a one-way readback of the freshly
 //! computed predicate, not a round trip of the value data, which never leaves
-//! the device). The same predicate path drives `MaskedExtremumBackward`'s
-//! on-device tie detection. `masked_where` takes a host `&[bool]` condition
-//! and is device-agnostic. bf16/f16 lowering: `filled` / `to_tensor` run the
+//! the device). `MaskedExtremumBackward` uses a resident masked-extrema
+//! backward kernel for f32/f64 CUDA data. `masked_where` takes a host `&[bool]`
+//! condition and is device-agnostic. bf16/f16 lowering: `filled` / `to_tensor` run the
 //! dtype-generic resident `masked_fill_dt` kernel on CUDA; the bf16/f16
 //! extremum forward (and its backward tie walk) takes the documented host
 //! readback (#616/#627); bf16/f16 `masked_sum` / `masked_mean` and the
@@ -395,9 +395,10 @@ fn t_from_f64<T: Float>(v: f64, what: &str) -> FerrotorchResult<T> {
 // data tensor tracks gradients (R-LOUD-3: never a silently detached
 // result). Gradient contracts probed from live torch 2.11.0+cu130
 // (2026-06-11; quoted per-op below and in
-// tests/audit_core064_masked_autograd.rs). Gradients are constructed from
-// the host-resident boolean mask and uploaded once to the data device —
-// a one-way upload (the mask never lives on the device), not a round trip.
+// tests/audit_core064_masked_autograd.rs). Sum/mean/fill gradients are
+// constructed from the host-resident boolean mask and uploaded once to the
+// data device. f32/f64 CUDA masked extrema backward uploads that mask once,
+// then counts/fills the VJP with a resident kernel.
 // ---------------------------------------------------------------------------
 
 /// Read the single element of a 0-d tensor (one-element D2H for CUDA —
@@ -425,6 +426,19 @@ fn mask_scaled_grad<T: Float>(
         .map(|&s| if s { scale } else { zero })
         .collect();
     let cpu = Tensor::from_storage(TensorStorage::cpu(data), input.shape().to_vec(), false)?;
+    if input.is_cuda() {
+        return cpu.to(input.device());
+    }
+    Ok(cpu)
+}
+
+/// Build the gradient tensor `out[i] = scale` for every input element.
+fn full_scaled_grad<T: Float>(input: &Tensor<T>, scale: T) -> FerrotorchResult<Tensor<T>> {
+    let cpu = Tensor::from_storage(
+        TensorStorage::cpu(vec![scale; input.numel()]),
+        input.shape().to_vec(),
+        false,
+    )?;
     if input.is_cuda() {
         return cpu.to(input.device());
     }
@@ -512,16 +526,15 @@ impl<T: Float> GradFn<T> for MaskedMeanBackward<T> {
 /// Edge contracts:
 /// - All-masked: the forward is the torch ±inf identity payload; torch
 ///   routes ZERO grads to the leaf (probed: `tensor([0., 0.])`) — matched.
-/// - NaN extremum payload (valid NaN data): `NaN == NaN` is false, so no
-///   position matches; zero grads are routed rather than dividing 0/0
-///   (torch's `scale_grad_by_count` would emit NaN here — see #1932's
-///   reduction-NaN family for the forward-side divergences).
+/// - NaN extremum payload (valid NaN data): `NaN == NaN` is false, so
+///   `scale_grad_by_count` divides by zero and torch routes NaN to EVERY
+///   input slot, including masked positions (live CPU/CUDA torch
+///   2.11.0+cu130 oracle, 2026-06-14) — matched.
 ///
-/// On CUDA f32/f64 the tie predicate runs on-device via
-/// `GpuBackend::ne_scalar_mask` and only the boolean mask is read back
-/// (the #1545 `predicate_mask_gpu` pattern — the value data never leaves
-/// the device). Other CUDA dtypes take the same documented host readback
-/// as their forward path ([`masked_extremum_cpu`]).
+/// On CUDA f32/f64 the whole masked-extrema VJP runs on-device via
+/// `GpuBackend::masked_extreme_backward_{f32,f64}` after a one-way upload of
+/// the host mask. Other CUDA dtypes take the same documented host readback as
+/// their forward path ([`masked_extremum_cpu`]).
 #[derive(Debug)]
 pub struct MaskedExtremumBackward<T: Float> {
     input: Tensor<T>,
@@ -539,36 +552,55 @@ impl<T: Float> GradFn<T> for MaskedExtremumBackward<T> {
         if !self.mask.iter().any(|&m| m) {
             return Ok(vec![Some(mask_scaled_grad(&self.input, &self.mask, zero)?)]);
         }
-        let r = scalar_of(&self.result)?;
-        let ties: Vec<bool> = if self.input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
-            // On-device `v != r` predicate; one-way boolean readback only.
+
+        if self.input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let r_f64 = r.to_f64().ok_or_else(|| FerrotorchError::InvalidArgument {
-                message: "MaskedExtremumBackward: result not representable as f64".into(),
-            })?;
-            // #1658: normalise a narrowed-offset CUDA view before the
-            // predicate kernel reads element 0 (same as the forward paths).
+            let grad_output = if grad_output.is_cuda() {
+                grad_output.clone()
+            } else {
+                grad_output.to(self.input.device())?
+            };
+            let mask_t: Tensor<T> =
+                mask_as_float_tensor(&self.mask, self.input.shape(), self.input.device())?;
             let data_c = self.input.contiguous()?;
-            let ne_h = backend.ne_scalar_mask(data_c.gpu_handle()?, r_f64)?;
-            let ne = predicate_mask_gpu(backend, &ne_h, self.input.numel())?;
-            self.mask
-                .iter()
-                .zip(ne)
-                .map(|(&valid, ne_i)| valid && !ne_i)
-                .collect()
-        } else {
-            // Host walk (CPU data, or the documented CUDA bf16/f16 host
-            // readback matching the forward lowering).
-            let data = self.input.data_vec()?;
-            data.iter()
-                .zip(self.mask.iter())
-                .map(|(&v, &valid)| valid && v == r)
-                .collect()
-        };
+            let handle = if is_f32::<T>() {
+                backend.masked_extreme_backward_f32(
+                    data_c.gpu_handle()?,
+                    mask_t.gpu_handle()?,
+                    self.result.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                )?
+            } else {
+                backend.masked_extreme_backward_f64(
+                    data_c.gpu_handle()?,
+                    mask_t.gpu_handle()?,
+                    self.result.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                )?
+            };
+            let grad_input = Tensor::from_storage(
+                TensorStorage::gpu(handle),
+                self.input.shape().to_vec(),
+                false,
+            )?;
+            return Ok(vec![Some(grad_input)]);
+        }
+
+        let r = scalar_of(&self.result)?;
+        if r.is_nan() {
+            return Ok(vec![Some(full_scaled_grad(&self.input, T::nan())?)]);
+        }
+        // Host walk (CPU data, or the documented CUDA bf16/f16 host readback
+        // matching the forward lowering).
+        let data = self.input.data_vec()?;
+        let ties: Vec<bool> = data
+            .iter()
+            .zip(self.mask.iter())
+            .map(|(&v, &valid)| valid && v == r)
+            .collect();
         let n_ties = ties.iter().filter(|&&t| t).count();
         if n_ties == 0 {
-            // NaN payload (see doc-comment): nothing matched — zero grads.
             return Ok(vec![Some(mask_scaled_grad(&self.input, &self.mask, zero)?)]);
         }
         let go = scalar_of(grad_output)?;
@@ -696,6 +728,8 @@ fn masked_mean_gpu<T: Float>(mt: &MaskedTensor<T>) -> FerrotorchResult<Tensor<T>
 /// positions equal to the extremum (`torch.masked.amin` of
 /// `[-2, 7, -2, -2]` with mask `[T,T,T,F]` → grad
 /// `tensor([0.5, 0., 0.5, 0.])` — the masked-out tied value gets 0).
+/// A valid NaN poisons the forward result and routes NaN gradients to every
+/// input slot, matching torch's `scale_grad_by_count` edge.
 pub fn masked_min<T: Float>(mt: &MaskedTensor<T>) -> FerrotorchResult<Tensor<T>> {
     masked_extremum(mt, true)
 }
@@ -748,20 +782,8 @@ fn masked_extremum_cpu<T: Float>(
         }
         best = Some(match best {
             None => v,
-            Some(b) if pick_min => {
-                if v < b {
-                    v
-                } else {
-                    b
-                }
-            }
-            Some(b) => {
-                if v > b {
-                    v
-                } else {
-                    b
-                }
-            }
+            Some(b) if v.is_nan() || (!b.is_nan() && if pick_min { v < b } else { v > b }) => v,
+            Some(b) => b,
         });
     }
     let val = best.unwrap_or_else(|| masked_extremum_identity::<T>(pick_min));

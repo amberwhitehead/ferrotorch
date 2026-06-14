@@ -72,8 +72,8 @@ constructors + a `to_ferray` bridge.
   `[T, F, T, F]` (`masked_invalid_masks_nan`).
 - [x] AC-6: `to_ferray` round-trip mean matches in-house mean
   (`to_ferray_round_trip_mean_matches_inhouse`).
-- [x] AC-7: `masked_min` / `masked_max` return NaN when fully masked
-  (`masked_min_max_all_masked_returns_nan`).
+- [x] AC-7: `masked_min` / `masked_max` return torch's identity payloads
+  when fully masked (`+inf` / `-inf`; `masked_min_max_all_masked_return_torch_identities`).
 - [x] AC-8: GPU paths for `masked_invalid` / `masked_equal`
   constructors (f32/f64) — the predicate runs on-device and the input
   stays CUDA-resident. Covered by `gpu_masked_invalid_f32_matches_cpu_\
@@ -109,7 +109,7 @@ is a single-pass `zip` accumulator.
 numerator; the denominator is the host-side `count_valid()` (a `bool`
 vec walk). The division runs ON-DEVICE (`div_f32` / `div_f64` against
 the uploaded count scalar — #1759): the GPU sum never crosses back to
-the host and the result is a CUDA 0-d scalar. The all-masked NaN edge
+the host and the result is a CUDA 0-d scalar. The all-masked mean NaN edge
 is uploaded to the data device.
 
 `fn masked_min in masked.rs` / `fn masked_max in masked.rs` use the
@@ -117,8 +117,9 @@ dedicated fused `backend.masked_min_{f32,f64}` /
 `masked_max_{f32,f64}` PTX kernels (#627) on CUDA. The kernel reads
 `(data, mask_f)` and folds the sentinel-fill into the running min/max
 in a single launch — no intermediate `prod` / `filled` buffers. CPU
-path walks data + mask with an `Option<T>` accumulator. The all-masked
-NaN sentinel (#1924 pin) is returned on the data device (#1759).
+path walks data + mask with an `Option<T>` accumulator and torch-style
+NaN poisoning. The all-masked `+inf` / `-inf` identity payload (#1924 pin)
+is returned on the data device (#1759).
 
 Autograd (#1758): `masked_sum` / `masked_mean` / `masked_min` /
 `masked_max` attach `MaskedSumBackward` / `MaskedMeanBackward` /
@@ -128,9 +129,12 @@ node: sum routes the upstream gradient to valid positions; mean scales
 by `1/count_valid`; extrema split the gradient EVENLY among valid
 positions equal to the saved forward result (torch tie contract);
 all-masked routes zero gradients (torch-probed) while the forward
-value stays under the #1924 pin. Extremum tie detection on CUDA
-f32/f64 reuses the `ne_scalar_mask` predicate readback (#1545 — mask
-bytes only, value data stays on device).
+value stays under the #1924 pin. A valid NaN in `masked_min` /
+`masked_max` poisons the forward result and routes NaN gradients to
+every input slot, including masked positions, matching torch's
+`scale_grad_by_count` edge. CUDA f32/f64 extrema backward uploads the
+host mask once as a resident 0/1 tensor and runs the tie-count/fill VJP
+on-device via `masked_extreme_backward_{f32,f64}`.
 
 `masked_count in masked.rs` returns a 0-D tensor in `T` holding
 `count_valid() as T`, uploaded to the data device when the data is
@@ -167,7 +171,9 @@ construct `MaskedTensor` and call the reductions in-place.
 `parity_ops = []` (no `torch.masked.*` op_db entry maps directly).
 The numeric contract is exact match with `torch.masked` semantics
 under the "true=valid" convention: all-masked → NaN for mean / min /
-max, mask-length-mismatch → ShapeMismatch error. Verified through
+under the "true=valid" convention: all-masked → NaN for mean,
+`+inf` for min, `-inf` for max; valid NaNs poison min/max forward and
+backward as torch does; mask-length-mismatch → ShapeMismatch error. Verified through
 unit tests + the `to_ferray` round-trip vs `ferray_ma::mean()`.
 
 ## Verification
@@ -178,6 +184,8 @@ bridge. GPU `masked_sum` / `masked_mean` paths (#597) and
 `masked_min` / `masked_max` paths (#627) are covered by integration
 tests in `ferrotorch-core/tests/conformance_masked.rs` (not in this
 unit file).
+Valid-NaN forward/backward parity and the CUDA resident masked-extrema
+backward path are covered by `tests/audit_core064_masked_autograd.rs`.
 
 ## REQ status table
 

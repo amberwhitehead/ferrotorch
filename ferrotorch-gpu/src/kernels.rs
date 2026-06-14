@@ -6490,6 +6490,133 @@ FILL_DONE:
 }
 ";
 
+/// PTX source for masked global `amin`/`amax` backward.
+///
+/// This is the masked analogue of [`EXTREME_BACKWARD_PTX`]. `mask_ptr` is a
+/// resident 0/1 valid-entry indicator. Count/fill both stay on device:
+/// valid ties receive `grad / count`, masked or non-tied entries receive zero,
+/// and a NaN saved result (no equality matches because `NaN != NaN`) writes NaN
+/// to every input slot, matching torch's `scale_grad_by_count` behavior.
+#[cfg(feature = "cuda")]
+pub(crate) const MASKED_EXTREME_BACKWARD_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry masked_extreme_backward_count_kernel(
+    .param .u64 input_ptr,
+    .param .u64 mask_ptr,
+    .param .u64 extreme_ptr,
+    .param .u64 count_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %idx, %stride, %bid, %bdim, %tid_r, %gdim, %n_reg, %old;
+    .reg .u64 %in, %mask, %ext, %count, %off, %addr_in, %addr_mask;
+    .reg .f32 %val, %mask_v, %target, %zero;
+    .reg .pred %p, %valid, %match, %take;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %mask, [mask_ptr];
+    ld.param.u64 %ext, [extreme_ptr];
+    ld.param.u64 %count, [count_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %tid_r, %tid.x;
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gdim, %nctaid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %tid_r;
+    mul.lo.u32 %stride, %bdim, %gdim;
+    ld.global.f32 %target, [%ext];
+    mov.f32 %zero, 0f00000000;
+
+MASKED_COUNT_LOOP:
+    setp.ge.u32 %p, %idx, %n_reg;
+    @%p bra MASKED_COUNT_DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr_in, %in, %off;
+    add.u64 %addr_mask, %mask, %off;
+    ld.global.f32 %val, [%addr_in];
+    ld.global.f32 %mask_v, [%addr_mask];
+    setp.ne.f32 %valid, %mask_v, %zero;
+    setp.eq.f32 %match, %val, %target;
+    and.pred %take, %valid, %match;
+    @%take atom.global.add.u32 %old, [%count], 1;
+
+    add.u32 %idx, %idx, %stride;
+    bra MASKED_COUNT_LOOP;
+
+MASKED_COUNT_DONE:
+    ret;
+}
+
+.visible .entry masked_extreme_backward_fill_kernel(
+    .param .u64 input_ptr,
+    .param .u64 mask_ptr,
+    .param .u64 extreme_ptr,
+    .param .u64 grad_ptr,
+    .param .u64 count_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %idx, %stride, %bid, %bdim, %tid_r, %gdim, %n_reg, %count_u;
+    .reg .u64 %in, %mask, %ext, %grad, %count, %out, %off, %addr_in, %addr_mask, %addr_out;
+    .reg .f32 %val, %mask_v, %target, %go, %count_f, %zero, %scale, %res;
+    .reg .pred %p, %valid, %match, %take, %zero_count;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %mask, [mask_ptr];
+    ld.param.u64 %ext, [extreme_ptr];
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %count, [count_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %tid_r, %tid.x;
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gdim, %nctaid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %tid_r;
+    mul.lo.u32 %stride, %bdim, %gdim;
+
+    ld.global.f32 %target, [%ext];
+    ld.global.f32 %go, [%grad];
+    ld.global.u32 %count_u, [%count];
+    mov.f32 %zero, 0f00000000;
+    setp.eq.u32 %zero_count, %count_u, 0;
+    cvt.rn.f32.u32 %count_f, %count_u;
+    div.rn.f32 %scale, %go, %count_f;
+    @%zero_count div.rn.f32 %scale, %zero, %zero;
+
+MASKED_FILL_LOOP:
+    setp.ge.u32 %p, %idx, %n_reg;
+    @%p bra MASKED_FILL_DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr_in, %in, %off;
+    add.u64 %addr_mask, %mask, %off;
+    add.u64 %addr_out, %out, %off;
+    ld.global.f32 %val, [%addr_in];
+    ld.global.f32 %mask_v, [%addr_mask];
+    setp.ne.f32 %valid, %mask_v, %zero;
+    setp.eq.f32 %match, %val, %target;
+    and.pred %take, %valid, %match;
+    mov.f32 %res, %zero;
+    @%take mov.f32 %res, %scale;
+    @%zero_count mov.f32 %res, %scale;
+    st.global.f32 [%addr_out], %res;
+
+    add.u32 %idx, %idx, %stride;
+    bra MASKED_FILL_LOOP;
+
+MASKED_FILL_DONE:
+    ret;
+}
+";
+
 /// PTX source for `has_inf_nan_f32_kernel` (#687).
 ///
 /// One thread inspects one f32 element. If its IEEE-754 exponent field is
@@ -6575,7 +6702,7 @@ pub(crate) const MASKED_REDUCE_MIN_PTX: &str = "\
     .reg .u32 %my_tid, %bid, %bdim, %gdim, %n_reg, %idx, %stride, %half;
     .reg .u64 %dat, %msk, %out, %off, %saddr;
     .reg .f32 %acc, %d, %m, %sentinel, %val;
-    .reg .pred %p, %ptid, %p_valid;
+    .reg .pred %p, %ptid, %p_valid, %val_nan, %acc_nan, %acc_ok, %cmp, %take;
 
     ld.param.u64 %dat, [data_ptr];
     ld.param.u64 %msk, [mask_ptr];
@@ -6610,7 +6737,13 @@ GRID_LOOP_MMIN:
     setp.ne.f32 %p_valid, %m, 0f00000000;
     selp.f32 %val, %d, %sentinel, %p_valid;
 
-    min.f32 %acc, %acc, %val;
+    setp.nan.f32 %val_nan, %val, %val;
+    setp.nan.f32 %acc_nan, %acc, %acc;
+    not.pred %acc_ok, %acc_nan;
+    setp.lt.f32 %cmp, %val, %acc;
+    and.pred %cmp, %acc_ok, %cmp;
+    or.pred %take, %val_nan, %cmp;
+    @%take mov.f32 %acc, %val;
     add.u32 %idx, %idx, %stride;
     bra GRID_LOOP_MMIN;
 
@@ -6641,7 +6774,13 @@ TREE_LOOP_MMIN:
     mov.u64 %saddr, sdata;
     add.u64 %saddr, %saddr, %off;
     ld.shared.f32 %acc, [%saddr];
-    min.f32 %acc, %acc, %val;
+    setp.nan.f32 %val_nan, %val, %val;
+    setp.nan.f32 %acc_nan, %acc, %acc;
+    not.pred %acc_ok, %acc_nan;
+    setp.lt.f32 %cmp, %val, %acc;
+    and.pred %cmp, %acc_ok, %cmp;
+    or.pred %take, %val_nan, %cmp;
+    @%take mov.f32 %acc, %val;
     mov.u64 %saddr, sdata;
     add.u64 %saddr, %saddr, %off;
     st.shared.f32 [%saddr], %acc;
@@ -6685,7 +6824,7 @@ pub(crate) const MASKED_REDUCE_MAX_PTX: &str = "\
     .reg .u32 %my_tid, %bid, %bdim, %gdim, %n_reg, %idx, %stride, %half;
     .reg .u64 %dat, %msk, %out, %off, %saddr;
     .reg .f32 %acc, %d, %m, %sentinel, %val;
-    .reg .pred %p, %ptid, %p_valid;
+    .reg .pred %p, %ptid, %p_valid, %val_nan, %acc_nan, %acc_ok, %cmp, %take;
 
     ld.param.u64 %dat, [data_ptr];
     ld.param.u64 %msk, [mask_ptr];
@@ -6719,7 +6858,13 @@ GRID_LOOP_MMAX:
     setp.ne.f32 %p_valid, %m, 0f00000000;
     selp.f32 %val, %d, %sentinel, %p_valid;
 
-    max.f32 %acc, %acc, %val;
+    setp.nan.f32 %val_nan, %val, %val;
+    setp.nan.f32 %acc_nan, %acc, %acc;
+    not.pred %acc_ok, %acc_nan;
+    setp.gt.f32 %cmp, %val, %acc;
+    and.pred %cmp, %acc_ok, %cmp;
+    or.pred %take, %val_nan, %cmp;
+    @%take mov.f32 %acc, %val;
     add.u32 %idx, %idx, %stride;
     bra GRID_LOOP_MMAX;
 
@@ -6750,7 +6895,13 @@ TREE_LOOP_MMAX:
     mov.u64 %saddr, sdata;
     add.u64 %saddr, %saddr, %off;
     ld.shared.f32 %acc, [%saddr];
-    max.f32 %acc, %acc, %val;
+    setp.nan.f32 %val_nan, %val, %val;
+    setp.nan.f32 %acc_nan, %acc, %acc;
+    not.pred %acc_ok, %acc_nan;
+    setp.gt.f32 %cmp, %val, %acc;
+    and.pred %cmp, %acc_ok, %cmp;
+    or.pred %take, %val_nan, %cmp;
+    @%take mov.f32 %acc, %val;
     mov.u64 %saddr, sdata;
     add.u64 %saddr, %saddr, %off;
     st.shared.f32 [%saddr], %acc;
@@ -16344,6 +16495,235 @@ pub fn gpu_extreme_backward_f64(
 #[cfg(not(feature = "cuda"))]
 pub fn gpu_extreme_backward_f64(
     _input: &CudaBuffer<f64>,
+    _extreme: &CudaBuffer<f64>,
+    _grad_output: &CudaBuffer<f64>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(feature = "cuda")]
+fn launch_masked_extreme_backward_f32(
+    input: &CudaBuffer<f32>,
+    mask_f: &CudaBuffer<f32>,
+    extreme: &CudaBuffer<f32>,
+    grad_output: &CudaBuffer<f32>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    let n = input.len();
+    if mask_f.len() != n {
+        return Err(GpuError::LengthMismatch {
+            a: n,
+            b: mask_f.len(),
+        });
+    }
+    if extreme.len() != 1 {
+        return Err(GpuError::ShapeMismatch {
+            op: "masked_extreme_backward",
+            expected: vec![1],
+            got: vec![extreme.len()],
+        });
+    }
+    if grad_output.len() != 1 {
+        return Err(GpuError::ShapeMismatch {
+            op: "masked_extreme_backward",
+            expected: vec![1],
+            got: vec![grad_output.len()],
+        });
+    }
+    if n == 0 {
+        return alloc_zeros_f32(0, device);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let count_f = crate::module_cache::get_or_compile(
+        ctx,
+        MASKED_EXTREME_BACKWARD_PTX,
+        "masked_extreme_backward_count_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "masked_extreme_backward_count_kernel",
+        source: e,
+    })?;
+    let fill_f = crate::module_cache::get_or_compile(
+        ctx,
+        MASKED_EXTREME_BACKWARD_PTX,
+        "masked_extreme_backward_fill_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "masked_extreme_backward_fill_kernel",
+        source: e,
+    })?;
+
+    let mut count = alloc_zeros::<u32>(1, device)?;
+    let mut out = alloc_zeros_f32(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+
+    // SAFETY:
+    // - Both functions are compiled from `MASKED_EXTREME_BACKWARD_PTX` with
+    //   ABIs matching the argument order below.
+    // - `input` and `mask_f` were length-validated equal; `extreme` and
+    //   `grad_output` are validated scalar buffers; `count` and `out` are
+    //   freshly allocated and exclusively mutably borrowed for their launches.
+    // - Each kernel checks `idx < n`; `launch_cfg(n)?` bounds `n_u32`.
+    unsafe {
+        stream
+            .launch_builder(&count_f)
+            .arg(input.inner())
+            .arg(mask_f.inner())
+            .arg(extreme.inner())
+            .arg(count.inner_mut())
+            .arg(&n_u32)
+            .launch(cfg)?;
+        stream
+            .launch_builder(&fill_f)
+            .arg(input.inner())
+            .arg(mask_f.inner())
+            .arg(extreme.inner())
+            .arg(grad_output.inner())
+            .arg(count.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// f32 backward for masked global `amin`/`amax`.
+#[cfg(feature = "cuda")]
+pub fn gpu_masked_extreme_backward_f32(
+    input: &CudaBuffer<f32>,
+    mask_f: &CudaBuffer<f32>,
+    extreme: &CudaBuffer<f32>,
+    grad_output: &CudaBuffer<f32>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    launch_masked_extreme_backward_f32(input, mask_f, extreme, grad_output, device)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_masked_extreme_backward_f32(
+    _input: &CudaBuffer<f32>,
+    _mask_f: &CudaBuffer<f32>,
+    _extreme: &CudaBuffer<f32>,
+    _grad_output: &CudaBuffer<f32>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+/// f64 backward for masked global `amin`/`amax`, derived from the f32 PTX
+/// template.
+#[cfg(feature = "cuda")]
+pub fn gpu_masked_extreme_backward_f64(
+    input: &CudaBuffer<f64>,
+    mask_f: &CudaBuffer<f64>,
+    extreme: &CudaBuffer<f64>,
+    grad_output: &CudaBuffer<f64>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    let n = input.len();
+    if mask_f.len() != n {
+        return Err(GpuError::LengthMismatch {
+            a: n,
+            b: mask_f.len(),
+        });
+    }
+    if extreme.len() != 1 {
+        return Err(GpuError::ShapeMismatch {
+            op: "masked_extreme_backward_f64",
+            expected: vec![1],
+            got: vec![extreme.len()],
+        });
+    }
+    if grad_output.len() != 1 {
+        return Err(GpuError::ShapeMismatch {
+            op: "masked_extreme_backward_f64",
+            expected: vec![1],
+            got: vec![grad_output.len()],
+        });
+    }
+    if n == 0 {
+        return alloc_zeros_f64(0, device);
+    }
+
+    let ptx = CACHE.get_or_init(|| {
+        ptx_f32_to_f64(
+            MASKED_EXTREME_BACKWARD_PTX,
+            "masked_extreme_backward_count_kernel",
+            "masked_extreme_backward_count_f64_kernel",
+        )
+        .replace(
+            "masked_extreme_backward_fill_kernel",
+            "masked_extreme_backward_fill_f64_kernel",
+        )
+    });
+    let ctx = device.context();
+    let stream = device.stream();
+    let count_f = crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "masked_extreme_backward_count_f64_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "masked_extreme_backward_count_f64_kernel",
+        source: e,
+    })?;
+    let fill_f = crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "masked_extreme_backward_fill_f64_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "masked_extreme_backward_fill_f64_kernel",
+        source: e,
+    })?;
+
+    let mut count = alloc_zeros::<u32>(1, device)?;
+    let mut out = alloc_zeros_f64(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+
+    // SAFETY: identical contract to the f32 helper above, with the PTX
+    // mechanically rewritten to f64 by `ptx_f32_to_f64`; count remains u32.
+    unsafe {
+        stream
+            .launch_builder(&count_f)
+            .arg(input.inner())
+            .arg(mask_f.inner())
+            .arg(extreme.inner())
+            .arg(count.inner_mut())
+            .arg(&n_u32)
+            .launch(cfg)?;
+        stream
+            .launch_builder(&fill_f)
+            .arg(input.inner())
+            .arg(mask_f.inner())
+            .arg(extreme.inner())
+            .arg(grad_output.inner())
+            .arg(count.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_masked_extreme_backward_f64(
+    _input: &CudaBuffer<f64>,
+    _mask_f: &CudaBuffer<f64>,
     _extreme: &CudaBuffer<f64>,
     _grad_output: &CudaBuffer<f64>,
     _device: &GpuDevice,

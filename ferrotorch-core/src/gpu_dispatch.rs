@@ -497,6 +497,24 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// f32 backward for masked global `amin`/`amax`.
+    ///
+    /// `mask_f` is a resident 0/1 valid-entry indicator. The backend must
+    /// split `grad_output` evenly across valid positions where
+    /// `input == extreme`; when `extreme` is NaN, PyTorch's count-scaled
+    /// rule yields NaN at every input slot.
+    fn masked_extreme_backward_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _mask_f: &GpuBufferHandle,
+        _extreme: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "masked_extreme_backward_f32 GPU op not yet implemented".into(),
+        })
+    }
+
     /// f32 fused masked-min reduction (#627). Single-pass kernel that
     /// folds `(data, mask_f) -> min` directly, where `mask_f[i]` is 1.0
     /// for valid entries and 0.0 for masked. Avoids the
@@ -904,6 +922,20 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::InvalidArgument {
             message: "extreme_backward_f64 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// f64 backward for masked global `amin`/`amax`. Companion of
+    /// [`Self::masked_extreme_backward_f32`].
+    fn masked_extreme_backward_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _mask_f: &GpuBufferHandle,
+        _extreme: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "masked_extreme_backward_f64 GPU op not yet implemented".into(),
         })
     }
 
