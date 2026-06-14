@@ -36,7 +36,7 @@
 //! |---|---|---|
 //! | REQ-1 (elementwise binary) | SHIPPED | `pub fn gpu_mul_bf16 / gpu_add_bf16 / gpu_sub_bf16 / gpu_div_bf16 in bf16.rs`; consumer `CudaBackendImpl::add_bf16 / mul_bf16 / sub_bf16 / div_bf16 in backend_impl.rs` |
 //! | REQ-2 (unary activations) | SHIPPED | `pub fn gpu_silu_bf16 / gpu_relu_bf16 / gpu_fatrelu_bf16 / gpu_gelu_bf16 / gpu_exp_bf16 / gpu_log_bf16 / gpu_tanh_bf16 / gpu_sigmoid_bf16 / gpu_neg_bf16 in bf16.rs`; consumer the bf16 arm of activation dispatchers in `backend_impl.rs` |
-//! | REQ-3 (`gpu_scale_bf16`) | SHIPPED | `pub fn gpu_scale_bf16 in bf16.rs`; consumer `CudaBackendImpl::scale_bf16 in backend_impl.rs` |
+//! | REQ-3 (`gpu_scale_bf16` / `gpu_fill_bf16`) | SHIPPED | `pub fn gpu_scale_bf16 / gpu_fill_bf16 in bf16.rs`; consumers `CudaBackendImpl::scale_bf16 / fill_bf16_bf16 in backend_impl.rs` |
 //! | REQ-4 (broadcast binary) | SHIPPED | `pub fn gpu_broadcast_add_bf16 / gpu_broadcast_sub_bf16 / gpu_broadcast_mul_bf16 / gpu_broadcast_div_bf16 in bf16.rs`; consumer the bf16 broadcast arms in `backend_impl.rs` |
 //! | REQ-5 (reductions) | SHIPPED | `pub fn gpu_sum_bf16 / gpu_mean_bf16 / gpu_sum_axis_bf16_bf16 / gpu_mean_axis_bf16_bf16 in bf16.rs`; consumer bf16 reduction arms in `backend_impl.rs` |
 //! | REQ-6 (norm/softmax) | SHIPPED | `pub fn gpu_layernorm_bf16 / gpu_rmsnorm_bf16 / gpu_softmax_bf16 in bf16.rs`; consumer bf16 softmax/layernorm dispatchers in `backend_impl.rs` (rmsnorm via the bf16-dtype rmsnorm arm) |
@@ -2310,6 +2310,51 @@ pub fn gpu_causal_mask_bf16(
 
 // Used to fold 1/sqrt(head_dim) into attention scores. Takes a `scale`
 // f32 parameter and multiplies the input element-wise.
+const FILL_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry fill_bf16_kernel(
+    .param .u64 out_ptr,
+    .param .f32 scalar,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %out, %off;
+    .reg .b32 %bits, %round, %lsb;
+    .reg .f32 %scalar_r;
+    .reg .pred %p;
+
+    ld.param.u64 %out, [out_ptr];
+    ld.param.f32 %scalar_r, [scalar];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %out, %out, %off;
+
+    mov.b32 %bits, %scalar_r;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    st.global.u16 [%out], %bits;
+
+DONE:
+    ret;
+}
+";
+
 const SCALE_BF16_PTX: &str = "\
 .version 7.0
 .target sm_52
@@ -2365,6 +2410,55 @@ DONE:
     ret;
 }
 ";
+
+/// Allocate a bf16 buffer and fill it on the GPU with `scalar`, rounded once
+/// from f32 to bf16 using PyTorch/NVIDIA round-to-nearest-even bit logic.
+pub fn gpu_fill_bf16(
+    n: usize,
+    scalar: f32,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    if n == 0 {
+        return Ok(device.stream().alloc_zeros::<u16>(0)?);
+    }
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = get_or_compile(
+        ctx,
+        FILL_BF16_PTX,
+        "fill_bf16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "fill_bf16_kernel",
+        source: e,
+    })?;
+
+    let mut out = stream.alloc_zeros::<u16>(n)?;
+    let cfg = launch_1d(n);
+    let n_u32 = n as u32;
+    // SAFETY:
+    // - `f` is the `fill_bf16_kernel` PTX entry compiled above; signature
+    //   (out_ptr: u64, scalar: f32, n: u32) matches the three args below.
+    // - `out` was alloc'd with exactly `n` u16 elements from `stream`; it is
+    //   exclusively owned by this scope and mutably borrowed only for launch.
+    // - `scalar` is a stack f32 copied into the kernel arg list; the kernel
+    //   rounds it to bf16 with the same RNE bit bias used by the other bf16
+    //   kernels before storing.
+    // - The kernel writes `out[i]` only within `[0, n)` per the PTX
+    //   bound-check.
+    // - `n` fits in u32 because `launch_1d` uses the same cast to compute the
+    //   covered grid.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(&mut out)
+            .arg(&scalar)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
 
 /// Multiply every element of a bf16 buffer by an f32 scalar on the GPU,
 /// returning a fresh allocation.

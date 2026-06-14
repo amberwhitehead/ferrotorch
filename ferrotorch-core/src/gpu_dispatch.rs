@@ -1837,6 +1837,26 @@ pub trait GpuBackend: Send + Sync {
             message: "fill_f64 GPU op not yet implemented".into(),
         })
     }
+    fn fill_bf16_bf16(
+        &self,
+        _n: usize,
+        _scalar: f32,
+        _ordinal: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "fill_bf16_bf16 GPU op not yet implemented".into(),
+        })
+    }
+    fn fill_f16(
+        &self,
+        _n: usize,
+        _scalar: f32,
+        _ordinal: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "fill_f16 GPU op not yet implemented".into(),
+        })
+    }
     // gelu_backward (sigmoid approx): out[i] = grad[i] * (sig + 1.702*x*sig*(1-sig))
     fn gelu_backward_f32(
         &self,

@@ -39,7 +39,7 @@
 //! |---|---|---|
 //! | REQ-1 (elementwise binary) | SHIPPED | `pub fn gpu_mul_f16 / gpu_add_f16 / gpu_sub_f16 / gpu_div_f16 in f16.rs`; consumer `CudaBackendImpl::add_f16 / sub_f16 / mul_f16 / div_f16 in backend_impl.rs` |
 //! | REQ-2 (unary activations) | SHIPPED | `pub fn gpu_silu_f16 / gpu_relu_f16 / gpu_gelu_f16 / gpu_exp_f16 / gpu_log_f16 / gpu_tanh_f16 / gpu_sigmoid_f16 / gpu_sqrt_f16 / gpu_neg_f16 in f16.rs`; consumer the f16 arm of activation dispatchers in `backend_impl.rs` |
-//! | REQ-3 (`gpu_scale_f16`) | SHIPPED | `pub fn gpu_scale_f16 in f16.rs`; consumer `CudaBackendImpl::scale_f16 in backend_impl.rs` |
+//! | REQ-3 (`gpu_scale_f16` / `gpu_fill_f16`) | SHIPPED | `pub fn gpu_scale_f16 / gpu_fill_f16 in f16.rs`; consumers `CudaBackendImpl::scale_f16 / fill_f16 in backend_impl.rs` |
 //! | REQ-4 (broadcast binary) | SHIPPED | `pub fn gpu_broadcast_add_f16 / gpu_broadcast_sub_f16 / gpu_broadcast_mul_f16 / gpu_broadcast_div_f16 in f16.rs`; consumer the f16 broadcast arms in `backend_impl.rs` |
 //! | REQ-5 (reductions) | SHIPPED | `pub fn gpu_sum_f16 / gpu_mean_f16 / gpu_sum_axis_f16 / gpu_mean_axis_f16 in f16.rs`; consumer f16 reduction arms in `backend_impl.rs` |
 //! | REQ-6 (norm/softmax) | SHIPPED | `pub fn gpu_layernorm_f16 / gpu_rmsnorm_f16 / gpu_softmax_f16 in f16.rs`; consumer f16 softmax/layernorm/rmsnorm dispatchers in `backend_impl.rs` |
@@ -940,6 +940,46 @@ pub fn gpu_sqrt_f16(
 // Scale (out = a * scalar) and neg
 // ===========================================================================
 
+const FILL_F16_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry fill_f16_kernel(
+    .param .u64 out_ptr,
+    .param .f32 scalar,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %out, %off;
+    .reg .b16 %out_h;
+    .reg .f32 %scalar_r;
+    .reg .pred %p;
+
+    ld.param.u64 %out, [out_ptr];
+    ld.param.f32 %scalar_r, [scalar];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %out, %out, %off;
+
+    cvt.rn.f16.f32 %out_h, %scalar_r;
+    st.global.b16 [%out], %out_h;
+
+DONE:
+    ret;
+}
+";
+
 const SCALE_F16_PTX: &str = "\
 .version 7.0
 .target sm_53
@@ -987,6 +1027,54 @@ DONE:
     ret;
 }
 ";
+
+/// Allocate an f16 buffer and fill it on the GPU with `scalar`, rounded once
+/// from f32 to IEEE f16 using PTX round-to-nearest-even.
+pub fn gpu_fill_f16(
+    n: usize,
+    scalar: f32,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    if n == 0 {
+        return Ok(device.stream().alloc_zeros::<u16>(0)?);
+    }
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = get_or_compile(
+        ctx,
+        FILL_F16_PTX,
+        "fill_f16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "fill_f16_kernel",
+        source: e,
+    })?;
+
+    let mut out = stream.alloc_zeros::<u16>(n)?;
+    let cfg = launch_1d(n);
+    let n_u32 = n as u32;
+    // SAFETY:
+    // - `f` is the `fill_f16_kernel` PTX entry compiled above; signature
+    //   (out_ptr: u64, scalar: f32, n: u32) matches the three args below.
+    // - `out` was alloc'd with exactly `n` u16 elements from `stream`; it is
+    //   exclusively owned by this scope and mutably borrowed only for launch.
+    // - `scalar` is a stack f32 copied into the kernel arg list; the kernel
+    //   converts it to f16 using PTX RNE before storing the u16 bit pattern.
+    // - The kernel writes `out[i]` only within `[0, n)` per the PTX
+    //   bound-check.
+    // - `n` fits in u32 because `launch_1d` uses the same cast to compute the
+    //   covered grid.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(&mut out)
+            .arg(&scalar)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
 
 /// Multiply every element of an f16 buffer by an f32 scalar on the GPU,
 /// returning a fresh allocation. Each thread converts its element to f32,
