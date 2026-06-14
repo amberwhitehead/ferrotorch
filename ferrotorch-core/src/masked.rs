@@ -18,8 +18,8 @@
 //! Every value-producing op (`filled` / `to_tensor`, `masked_sum` /
 //! `masked_mean` / `masked_min` / `masked_max` / `masked_count`) returns a
 //! tensor ON THE DATA TENSOR'S DEVICE — including the all-masked edge-case
-//! scalars, which are uploaded rather than silently demoted to CPU
-//! (torch parity, live 2.11.0+cu130 probe: `torch.masked.amax(tc,
+//! scalars, which use torch's ±inf identity payload rather than a NaN
+//! sentinel (live 2.11.0+cu130 probe: `torch.masked.amax(tc,
 //! mask=all_false)` → `tensor(-inf, device='cuda:0')`).
 //!
 //! # Autograd contract (CORE-064 → #1758)
@@ -510,7 +510,7 @@ impl<T: Float> GradFn<T> for MaskedMeanBackward<T> {
 /// masked-out third 5.0 gets 0).
 ///
 /// Edge contracts:
-/// - All-masked: the forward is the #1924-pinned NaN sentinel; torch
+/// - All-masked: the forward is the torch ±inf identity payload; torch
 ///   routes ZERO grads to the leaf (probed: `tensor([0., 0.])`) — matched.
 /// - NaN extremum payload (valid NaN data): `NaN == NaN` is false, so no
 ///   position matches; zero grads are routed rather than dividing 0/0
@@ -534,7 +534,7 @@ pub struct MaskedExtremumBackward<T: Float> {
 impl<T: Float> GradFn<T> for MaskedExtremumBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let zero = <T as num_traits::Zero>::zero();
-        // All-masked: forward is the #1924-pinned NaN sentinel; torch
+        // All-masked: forward is the torch ±inf identity payload; torch
         // routes zero gradient to the data leaf — match it.
         if !self.mask.iter().any(|&m| m) {
             return Ok(vec![Some(mask_scaled_grad(&self.input, &self.mask, zero)?)]);
@@ -680,7 +680,8 @@ fn masked_mean_gpu<T: Float>(mt: &MaskedTensor<T>) -> FerrotorchResult<Tensor<T>
 }
 
 /// Min of valid entries; returns a 0-d tensor on the data tensor's device
-/// (NaN if all masked — the #1924-pinned sentinel).
+/// (`+inf` if all masked and non-empty; errors on empty input like
+/// `torch.masked.amin`).
 ///
 /// GPU path: uses the fused `masked_reduce_min` PTX kernel (#627). Single
 /// launch reads `(data, mask_f)` directly and combines `mask_f != 0 ?
@@ -700,14 +701,21 @@ pub fn masked_min<T: Float>(mt: &MaskedTensor<T>) -> FerrotorchResult<Tensor<T>>
 }
 
 /// Max of valid entries; returns a 0-d tensor on the data tensor's device
-/// (NaN if all masked — the #1924-pinned sentinel). Autograd + tie
-/// contract as for [`masked_min`].
+/// (`-inf` if all masked and non-empty; errors on empty input like
+/// `torch.masked.amax`). Autograd + tie contract as for [`masked_min`].
 pub fn masked_max<T: Float>(mt: &MaskedTensor<T>) -> FerrotorchResult<Tensor<T>> {
     masked_extremum(mt, false)
 }
 
 /// Shared min/max entry: forward lowering + autograd edge.
 fn masked_extremum<T: Float>(mt: &MaskedTensor<T>, pick_min: bool) -> FerrotorchResult<Tensor<T>> {
+    if mt.data.numel() == 0 {
+        let op = if pick_min { "masked_min" } else { "masked_max" };
+        let torch_op = if pick_min { "amin" } else { "amax" };
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: {torch_op}(): Expected reduction dim 0 to have non-zero size."),
+        });
+    }
     let result = if mt.data.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         masked_extremum_gpu(mt, pick_min)?
     } else {
@@ -756,7 +764,7 @@ fn masked_extremum_cpu<T: Float>(
             }
         });
     }
-    let val = best.unwrap_or_else(T::nan);
+    let val = best.unwrap_or_else(|| masked_extremum_identity::<T>(pick_min));
     let cpu = Tensor::from_storage(TensorStorage::cpu(vec![val]), vec![], false)?;
     if device.is_cuda() {
         cpu.to(device)
@@ -776,14 +784,36 @@ fn masked_extremum_gpu<T: Float>(
     mt: &MaskedTensor<T>,
     pick_min: bool,
 ) -> FerrotorchResult<Tensor<T>> {
-    // All-masked → the #1924-pinned NaN sentinel ON THE DATA DEVICE
-    // (#1759 / CORE-065: pre-fix this edge silently demoted to a CPU
-    // scalar; torch keeps its all-masked payload on cuda:0). Short-circuit
-    // before allocating GPU reduction buffers — the scalar is a fresh host
-    // value uploaded once, not a round trip.
+    // All-masked non-empty → torch's identity payload ON THE DATA DEVICE:
+    // +inf for amin, -inf for amax. Allocate it directly on CUDA; no value
+    // payload leaves the device.
     if mt.count_valid() == 0 {
-        let cpu = Tensor::from_storage(TensorStorage::cpu(vec![T::nan()]), vec![], false)?;
-        return cpu.to(mt.data.device());
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let ordinal = match mt.data.device() {
+            crate::device::Device::Cuda(ordinal) => ordinal,
+            got => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("masked_extremum_gpu: expected CUDA data, got {got:?}"),
+                });
+            }
+        };
+        let handle = if is_f32::<T>() {
+            let value = if pick_min {
+                f32::INFINITY
+            } else {
+                f32::NEG_INFINITY
+            };
+            backend.fill_f32(1, value, ordinal)?
+        } else {
+            let value = if pick_min {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            };
+            backend.fill_f64(1, value, ordinal)?
+        };
+        return Tensor::from_storage(TensorStorage::gpu(handle), vec![], false);
     }
 
     let device = mt.data.device();
@@ -813,6 +843,14 @@ fn masked_extremum_gpu<T: Float>(
     };
 
     Tensor::from_storage(TensorStorage::gpu(result_h), vec![], false)
+}
+
+fn masked_extremum_identity<T: Float>(pick_min: bool) -> T {
+    if pick_min {
+        T::infinity()
+    } else {
+        T::neg_infinity()
+    }
 }
 
 /// Number of valid (unmasked) entries; returns a 0-d tensor in `T` on the
@@ -1168,10 +1206,21 @@ mod tests {
     }
 
     #[test]
-    fn masked_min_max_all_masked_returns_nan() {
+    fn masked_min_max_all_masked_return_torch_identities() {
         let d = tensor(&[1.0_f64, 2.0]).unwrap();
         let mt = MaskedTensor::new(d, vec![false, false]).unwrap();
-        assert!(masked_min(&mt).unwrap().data().unwrap()[0].is_nan());
-        assert!(masked_max(&mt).unwrap().data().unwrap()[0].is_nan());
+        assert_eq!(masked_min(&mt).unwrap().data().unwrap(), &[f64::INFINITY]);
+        assert_eq!(
+            masked_max(&mt).unwrap().data().unwrap(),
+            &[f64::NEG_INFINITY]
+        );
+    }
+
+    #[test]
+    fn masked_min_max_empty_error_like_torch() {
+        let d = t(&[], &[0]);
+        let mt = MaskedTensor::new(d, vec![]).unwrap();
+        assert!(masked_min(&mt).is_err());
+        assert!(masked_max(&mt).is_err());
     }
 }

@@ -30,11 +30,10 @@
 //! tensor(nan, device='cuda:0')
 //! ```
 //!
-//! The all-masked extremum VALUE stays under the #1924 NaN pin (ferrotorch
-//! NaN sentinel vs torch ±inf identity); this suite asserts only that the
-//! pinned NaN now lives on the data device instead of silently demoting to
-//! CPU. `masked_count` has no torch.masked free-function counterpart; the
-//! module device contract (result on the data tensor's device) governs it.
+//! The all-masked extremum VALUE follows torch's ±inf identity payload and
+//! stays on the data device. `masked_count` has no torch.masked free-function
+//! counterpart; the module device contract (result on the data tensor's
+//! device) governs it.
 //!
 //! Values compared bit-exact (integers, NaN-bit checks) — no tolerance needed.
 
@@ -192,17 +191,15 @@ mod gpu {
     }
 
     /// THE all-masked edge from the finding: CUDA `masked_min` / `masked_max`
-    /// must return their #1924-pinned NaN sentinel ON CUDA, not silently
-    /// demote to a CPU scalar. (Torch keeps its ±inf identity payload on
-    /// `cuda:0`; the VALUE divergence stays pinned under #1924 — only the
-    /// device is asserted here against the module contract.)
+    /// must return torch's identity payload ON CUDA, not silently demote to a
+    /// CPU scalar.
     #[test]
-    fn gpu_all_masked_extremum_returns_cuda_nan() {
+    fn gpu_all_masked_extremum_returns_cuda_identity_payload() {
         ensure_cuda_backend();
         type MaskedRed = fn(&MaskedTensor<f32>) -> ferrotorch_core::FerrotorchResult<Tensor<f32>>;
-        for (name, op) in [
-            ("masked_min", masked_min as MaskedRed),
-            ("masked_max", masked_max as MaskedRed),
+        for (name, op, expected) in [
+            ("masked_min", masked_min as MaskedRed, f32::INFINITY),
+            ("masked_max", masked_max as MaskedRed, f32::NEG_INFINITY),
         ] {
             let x = cuda_f32(&[1.0, 2.0]);
             let mt = MaskedTensor::new(x, vec![false, false]).unwrap();
@@ -213,10 +210,7 @@ mod gpu {
                 "{name} all-masked must stay on the data device (CORE-065 edge)"
             );
             let v = r.cpu().unwrap().data().unwrap()[0];
-            assert!(
-                v.is_nan(),
-                "{name} all-masked value must remain the #1924-pinned NaN, got {v}"
-            );
+            assert_eq!(v, expected, "{name} all-masked identity payload");
         }
     }
 

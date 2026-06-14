@@ -2,6 +2,8 @@
 //!
 //! Validates the lowering: `masked_sum` = `sum(data * mask_as_float)`,
 //! `masked_mean` = `masked_sum / count_valid` (with NaN on all-masked).
+//! All-masked non-empty `masked_min` / `masked_max` follow torch's
+//! `+inf` / `-inf` identity payloads.
 
 #![cfg(feature = "cuda")]
 
@@ -173,29 +175,29 @@ fn masked_max_f64_gpu_matches_cpu() {
 }
 
 #[test]
-fn masked_min_max_all_masked_returns_nan_on_gpu() {
+fn masked_min_max_all_masked_return_torch_identities_on_gpu() {
     ensure_cuda();
     let data = cpu_t_f32(&[1.0, 2.0, 3.0], &[3]);
     let gpu_data = data.to(Device::Cuda(0)).unwrap();
 
     let all_masked = MaskedTensor::new(gpu_data.clone(), vec![false; 3]).unwrap();
-    assert!(
+    assert_eq!(
         masked_min(&all_masked)
             .unwrap()
             .cpu()
             .unwrap()
             .item()
-            .unwrap()
-            .is_nan()
+            .unwrap(),
+        f32::INFINITY
     );
-    assert!(
+    assert_eq!(
         masked_max(&all_masked)
             .unwrap()
             .cpu()
             .unwrap()
             .item()
-            .unwrap()
-            .is_nan()
+            .unwrap(),
+        f32::NEG_INFINITY
     );
 }
 

@@ -49,9 +49,8 @@
 //! torch.masked.amax(...).backward()  → grad tensor([0., 0.])  (value -inf)
 //! ```
 //!
-//! All-masked extremum FORWARD value stays under the #1924 NaN pin (ferrotorch
-//! NaN sentinel vs torch's ±inf identity payload); the BACKWARD contract is
-//! NOT divergent — torch routes zero gradient to the data leaf and so do we.
+//! All-masked extremum FORWARD values follow torch's ±inf identity payload;
+//! the BACKWARD contract routes zero gradient to the data leaf.
 //!
 //! Tolerance: every gradient above is an exact small f32/f64 value (integers,
 //! halves) — bit-exact compare.
@@ -310,8 +309,8 @@ fn to_tensor_with_fill_value_backward() {
 // ---------------------------------------------------------------------------
 
 /// Oracle (quoted in module doc): all-masked sum/mean/amax backward all give
-/// `tensor([0., 0.])`. The extremum FORWARD value remains the #1924-pinned
-/// NaN sentinel; the backward contract (zero grads) matches torch exactly.
+/// `tensor([0., 0.])`. Extrema use torch's ±inf identity payloads and route
+/// zero grads.
 #[test]
 fn all_masked_backward_routes_zero_grads() {
     type MaskedRed = fn(&MaskedTensor<f32>) -> ferrotorch_core::FerrotorchResult<Tensor<f32>>;
@@ -461,8 +460,8 @@ mod gpu {
         assert_grad_f32(&x, &[10.0, 0.0, 30.0], "gpu filled weighted");
     }
 
-    /// All-masked CUDA extrema: forward stays the #1924-pinned NaN; backward
-    /// routes zero grads to the CUDA leaf (torch: `tensor([0., 0.])`).
+    /// All-masked CUDA extrema: forward uses torch's ±inf identity payload;
+    /// backward routes zero grads to the CUDA leaf (`tensor([0., 0.])`).
     #[test]
     fn gpu_all_masked_extremum_backward_zero_grads() {
         ensure_cuda_backend();
