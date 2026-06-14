@@ -23,8 +23,8 @@
 //! | REQ-9 (`masked_select`) | SHIPPED | `MaskedSelectBackward` Arc-attached by `ops::indexing::masked_select`; consumer is `Tensor::masked_select`. |
 //! | REQ-10 (`masked_fill`) | SHIPPED | `MaskedFillBackward` consumed by `Tensor::masked_fill` (which routes through `masked_fill_bt`); GPU-resident path via `masked_fill_dt` kernel (#1187). |
 //! | REQ-11 (`masked_scatter`) | SHIPPED | runner arm + impl landed closing #1252; 32/32 passed. |
-//! | REQ-12 (`take`) | SHIPPED | runner arm + impl landed closing #1253; 64/80 passed (0-d / negative-index skips). |
-//! | REQ-13 (`put`) | SHIPPED | runner arm + impl landed closing #1254; 192/224 passed (0-d / negative-index skips). |
+//! | REQ-12 (`take`) | SHIPPED | `take` mirrors flat PyTorch indexing incl. 0-d / negative indices, and CUDA f32/f64/f16/bf16 route through resident `index_select_intidx`; pinned by `audit_core048_indexing_device_demotion::{take_cuda_resident_*,take_put_cuda_empty_resident_*}`. |
+//! | REQ-13 (`put`) | SHIPPED | `put` enforces PyTorch's exact `source.numel() == index.numel()` contract; CUDA f32/f64/f16/bf16 route through resident scatter/scatter-add kernels, with f16/bf16 duplicate accumulation pinned by `audit_core048_indexing_device_demotion::put_cuda_accumulate_odd_len_duplicate_*`. |
 //! | REQ-14 (`where`) | SHIPPED | `WhereCondBackward` Arc-attached by `ops::indexing::where_cond` / `where_cond_bt`; GPU-resident path via `masked_fill_dt` + `bool_not` (#1187). |
 //! | REQ-15 (shared backward helpers: `flat_index`, `increment_coords`) | SHIPPED | internal scaffolding consumed by REQ-1 / REQ-2 / REQ-3 implementations above (the f32 flat-offset helpers `gather_dst_flat_indices` / `scatter_src_flat_indices` / `scatter_write_mask` were removed by the #1823 i64-index migration). |
 
@@ -200,6 +200,48 @@ fn gather_dim_cuda<T: Float>(
         _ => return Err(FerrotorchError::NotImplementedOnCuda { op }),
     };
     Tensor::from_storage(TensorStorage::gpu(handle), output_shape, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scatter_dim_cuda_handle<T: Float>(
+    input: &GpuBufferHandle,
+    index: &GpuBufferHandle,
+    src: &GpuBufferHandle,
+    outer: usize,
+    out_dim: usize,
+    idx_dim: usize,
+    inner: usize,
+    accumulate: bool,
+    op: &'static str,
+) -> FerrotorchResult<GpuBufferHandle> {
+    let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    match (accumulate, T::dtype()) {
+        (false, DType::F32) => {
+            backend.scatter_dim_f32(input, index, src, outer, out_dim, idx_dim, inner)
+        }
+        (false, DType::F64) => {
+            backend.scatter_dim_f64(input, index, src, outer, out_dim, idx_dim, inner)
+        }
+        (false, DType::F16) => {
+            backend.scatter_dim_f16(input, index, src, outer, out_dim, idx_dim, inner)
+        }
+        (false, DType::BF16) => {
+            backend.scatter_dim_bf16(input, index, src, outer, out_dim, idx_dim, inner)
+        }
+        (true, DType::F32) => {
+            backend.scatter_add_dim_f32(input, index, src, outer, out_dim, idx_dim, inner)
+        }
+        (true, DType::F64) => {
+            backend.scatter_add_dim_f64(input, index, src, outer, out_dim, idx_dim, inner)
+        }
+        (true, DType::F16) => {
+            backend.scatter_add_dim_f16(input, index, src, outer, out_dim, idx_dim, inner)
+        }
+        (true, DType::BF16) => {
+            backend.scatter_add_dim_bf16(input, index, src, outer, out_dim, idx_dim, inner)
+        }
+        (_, _) => Err(FerrotorchError::NotImplementedOnCuda { op }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4585,6 +4627,27 @@ impl<T: Float> GradFn<T> for TakeBackward<T> {
         } else {
             input_shape.iter().product()
         };
+        if grad_output.is_cuda() {
+            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let ordinal = cuda_ordinal(grad_output.device(), "TakeBackward")?;
+            let idx_handle = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
+            let zeros = backend.alloc_zeros(input_numel, T::dtype(), ordinal)?;
+            let grad_c = no_grad(|| grad_output.contiguous())?;
+            let result_handle = scatter_dim_cuda_handle::<T>(
+                &zeros,
+                &idx_handle,
+                grad_c.gpu_handle()?,
+                1,
+                input_numel,
+                self.index.len(),
+                1,
+                true,
+                "TakeBackward",
+            )?;
+            let grad_tensor =
+                Tensor::from_storage(TensorStorage::gpu(result_handle), input_shape, false)?;
+            return Ok(vec![Some(grad_tensor)]);
+        }
         let go = grad_output.data_vec()?;
         let zero = <T as num_traits::Zero>::zero();
         let mut grad_input = vec![zero; input_numel];
@@ -4626,13 +4689,12 @@ impl<T: Float> GradFn<T> for TakeBackward<T> {
 /// `index` must live on `input`'s device — a mix returns
 /// [`FerrotorchError::DeviceMismatch`] (torch: "Expected all tensors to be
 /// on the same device, but got index is on cpu, different from other
-/// tensors on cuda:0"). A CUDA f32/f64 input gathers ON-DEVICE via the
-/// dim-aware `gather_dim_{f32,f64}` kernel (a flat gather is the
-/// `outer=1, inner=1` special case); the validated/wrapped index uploads as
-/// a resident `i64` buffer, and only the index itself downloads host-side
-/// for value validation. Remaining CUDA cases (f16/bf16, empty index) are
-/// an EXPLICIT host round trip that re-uploads the result to `input`'s
-/// device (R-LOUD-2). Gradients are delivered on the leaf's device.
+/// tensors on cuda:0"). CUDA f32/f64/f16/bf16 inputs gather ON-DEVICE via
+/// the dtype-generic `index_select_intidx` path (a flat take is
+/// `outer=1, inner=1`); the validated/wrapped index uploads as a resident
+/// `i64` buffer, and only the index itself downloads host-side for value
+/// validation. Empty CUDA indices allocate a resident empty output with the
+/// input dtype. Gradients are delivered on the leaf's device.
 pub fn take<T: Float>(input: &Tensor<T>, index: &IntTensor<i64>) -> FerrotorchResult<Tensor<T>> {
     // CORE-048 (#1742): strict same-device operands at entry.
     same_device(input.device(), index.device())?;
@@ -4682,35 +4744,19 @@ pub fn take<T: Float>(input: &Tensor<T>, index: &IntTensor<i64>) -> FerrotorchRe
         output_shape.iter().product()
     };
 
-    // CORE-048 (#1742): CUDA-resident path — flat gather via the dim-aware
-    // kernel with `outer=1, inner=1` (every index value already validated/
-    // wrapped into `[0, input_numel)` above, so the kernel reads in-bounds).
-    if input.is_cuda()
-        && matches!(
-            T::dtype(),
-            crate::dtype::DType::F32 | crate::dtype::DType::F64
-        )
-        && !idx_usize.is_empty()
-        && input_numel > 0
-    {
-        // `.contiguous()` materialises the logical [0, n) window on-device
-        // (#1657) so the flat kernel addressing matches `data_vec`'s C-order.
-        let input_c = input.contiguous()?;
-        let input_handle = input_c.gpu_handle()?;
-        let ordinal = input_handle.device_ordinal();
-        let idx_handle = crate::ops::indexing::upload_index_i64(&idx_usize, ordinal)?;
+    // CUDA-resident path. `.contiguous()` materialises the logical [0, n)
+    // window on-device (#1657) so flat addressing matches `data_vec`'s C-order.
+    if input.is_cuda() {
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let h = if T::dtype() == crate::dtype::DType::F32 {
-            backend.gather_dim_f32(
-                input_handle,
-                &idx_handle,
-                1,
-                input_numel,
-                idx_usize.len(),
-                1,
-            )?
+        let h = if idx_usize.is_empty() {
+            let ordinal = cuda_ordinal(input.device(), "take")?;
+            backend.alloc_zeros(0, T::dtype(), ordinal)?
         } else {
-            backend.gather_dim_f64(
+            let input_c = input.contiguous()?;
+            let input_handle = input_c.gpu_handle()?;
+            let ordinal = input_handle.device_ordinal();
+            let idx_handle = crate::ops::indexing::upload_index_i64(&idx_usize, ordinal)?;
+            backend.index_select_intidx(
                 input_handle,
                 &idx_handle,
                 1,
@@ -4809,6 +4855,58 @@ impl<T: Float> GradFn<T> for PutBackward<T> {
         } else {
             input_shape.iter().product()
         };
+        if grad_output.is_cuda() {
+            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let ordinal = cuda_ordinal(grad_output.device(), "PutBackward")?;
+            let idx_handle = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
+            let grad_c = no_grad(|| grad_output.contiguous())?;
+
+            let grad_input = if self.input.requires_grad() {
+                let result_handle = if self.accumulate {
+                    backend.clone_buffer(grad_c.gpu_handle()?)?
+                } else {
+                    let zeros = backend.alloc_zeros(self.index.len(), T::dtype(), ordinal)?;
+                    scatter_dim_cuda_handle::<T>(
+                        grad_c.gpu_handle()?,
+                        &idx_handle,
+                        &zeros,
+                        1,
+                        input_numel,
+                        self.index.len(),
+                        1,
+                        false,
+                        "PutBackward",
+                    )?
+                };
+                Some(Tensor::from_storage(
+                    TensorStorage::gpu(result_handle),
+                    input_shape.clone(),
+                    false,
+                )?)
+            } else {
+                None
+            };
+
+            let grad_source = if self.source.requires_grad() {
+                let result_handle = backend.index_select_intidx(
+                    grad_c.gpu_handle()?,
+                    &idx_handle,
+                    1,
+                    input_numel,
+                    self.index.len(),
+                    1,
+                )?;
+                Some(Tensor::from_storage(
+                    TensorStorage::gpu(result_handle),
+                    self.source.shape().to_vec(),
+                    false,
+                )?)
+            } else {
+                None
+            };
+
+            return Ok(vec![grad_input, grad_source]);
+        }
         let go = grad_output.data_vec()?;
         let zero = <T as num_traits::Zero>::zero();
 
@@ -4871,7 +4969,7 @@ impl<T: Float> GradFn<T> for PutBackward<T> {
 ///
 /// `index` may be any shape; values are flat indices into input's
 /// C-contiguous buffer (negative-wrap per `idx + input.numel()`,
-/// out-of-range raises `IndexOutOfBounds`). `source` must have at least as
+/// out-of-range raises `IndexOutOfBounds`). `source` must have exactly as
 /// many elements as `index`.
 ///
 /// # Device contract (CORE-048 / #1742)
@@ -4879,17 +4977,15 @@ impl<T: Float> GradFn<T> for PutBackward<T> {
 /// `index` and `source` must live on `input`'s device — a mix returns
 /// [`FerrotorchError::DeviceMismatch`] (torch: "Expected all tensors to be
 /// on the same device, but got source is on cpu, different from other
-/// tensors on cuda:0"). A CUDA f32/f64 input scatters ON-DEVICE via the
-/// dim-aware `scatter_dim_{f32,f64}` (`accumulate=false`) or atomic
-/// `scatter_add_dim_{f32,f64}` (`accumulate=true`) kernel — a flat scatter
-/// is the `outer=1, inner=1` special case; the validated/wrapped index
-/// uploads as a resident `i64` buffer, and only the index itself downloads
-/// host-side for value validation. Like torch's CUDA `put_`, the
-/// `accumulate=false` write order for DUPLICATE flat indices is
-/// nondeterministic on the kernel path. Remaining CUDA cases (f16/bf16,
-/// empty index) are an EXPLICIT host round trip that re-uploads the result
-/// to `input`'s device (R-LOUD-2). Gradients are delivered on the leaves'
-/// devices.
+/// tensors on cuda:0"). CUDA f32/f64/f16/bf16 inputs scatter ON-DEVICE via
+/// dim-aware scatter (`accumulate=false`) or atomic scatter-add
+/// (`accumulate=true`) kernels — a flat scatter is the `outer=1, inner=1`
+/// special case; the validated/wrapped index uploads as a resident `i64`
+/// buffer, and only the index itself downloads host-side for value
+/// validation. Like torch's CUDA `put_`, the `accumulate=false` write order
+/// for DUPLICATE flat indices is nondeterministic on the kernel path. Empty
+/// CUDA indices clone the input on-device. Gradients are delivered on the
+/// leaves' devices.
 pub fn put<T: Float>(
     input: &Tensor<T>,
     index: &IntTensor<i64>,
@@ -4938,76 +5034,41 @@ pub fn put<T: Float>(
         idx_usize.push(i as usize);
     }
 
-    if source.numel() < idx_usize.len() {
+    if source.numel() != idx_usize.len() {
         return Err(FerrotorchError::ShapeMismatch {
             message: format!(
-                "put: source numel {} < index numel {}",
+                "put: source numel {} must equal index numel {}",
                 source.numel(),
                 idx_usize.len()
             ),
         });
     }
 
-    // CORE-048 (#1742): CUDA-resident path — flat scatter via the dim-aware
-    // kernels with `outer=1, inner=1` (every index value already validated/
-    // wrapped into `[0, input_numel)` above; the kernel reads `src[t]`
-    // parallel to `index[t]` for `t < index.numel()`, exactly the host
-    // walk's consumption order).
-    if input.is_cuda()
-        && matches!(
-            T::dtype(),
-            crate::dtype::DType::F32 | crate::dtype::DType::F64
-        )
-        && !idx_usize.is_empty()
-        && input_numel > 0
-    {
-        // `.contiguous()` materialises the logical [0, n) window on-device
-        // (#1657) so flat kernel addressing matches `data_vec`'s C-order.
-        let input_c = input.contiguous()?;
-        let source_c = source.contiguous()?;
-        let input_handle = input_c.gpu_handle()?;
-        let ordinal = input_handle.device_ordinal();
-        let idx_handle = crate::ops::indexing::upload_index_i64(&idx_usize, ordinal)?;
-        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let src_handle = source_c.gpu_handle()?;
-        let n_idx = idx_usize.len();
-        let h = match (accumulate, T::dtype() == crate::dtype::DType::F32) {
-            (false, true) => backend.scatter_dim_f32(
+    // CUDA-resident path. `.contiguous()` materialises the logical [0, n)
+    // window on-device (#1657) so flat kernel addressing matches `data_vec`'s
+    // C-order.
+    if input.is_cuda() {
+        let h = if idx_usize.is_empty() {
+            let input_c = input.contiguous()?;
+            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            backend.clone_buffer(input_c.gpu_handle()?)?
+        } else {
+            let input_c = input.contiguous()?;
+            let source_c = source.contiguous()?;
+            let input_handle = input_c.gpu_handle()?;
+            let ordinal = input_handle.device_ordinal();
+            let idx_handle = crate::ops::indexing::upload_index_i64(&idx_usize, ordinal)?;
+            scatter_dim_cuda_handle::<T>(
                 input_handle,
                 &idx_handle,
-                src_handle,
+                source_c.gpu_handle()?,
                 1,
                 input_numel,
-                n_idx,
+                idx_usize.len(),
                 1,
-            )?,
-            (false, false) => backend.scatter_dim_f64(
-                input_handle,
-                &idx_handle,
-                src_handle,
-                1,
-                input_numel,
-                n_idx,
-                1,
-            )?,
-            (true, true) => backend.scatter_add_dim_f32(
-                input_handle,
-                &idx_handle,
-                src_handle,
-                1,
-                input_numel,
-                n_idx,
-                1,
-            )?,
-            (true, false) => backend.scatter_add_dim_f64(
-                input_handle,
-                &idx_handle,
-                src_handle,
-                1,
-                input_numel,
-                n_idx,
-                1,
-            )?,
+                accumulate,
+                "put",
+            )?
         };
         let storage = TensorStorage::gpu(h);
         if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {

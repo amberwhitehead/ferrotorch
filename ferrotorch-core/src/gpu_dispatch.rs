@@ -6077,6 +6077,41 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// f16 dim-aware `scatter`. Companion of [`Self::scatter_dim_f32`] for
+    /// raw 16-bit value movement; dtype is carried by the handle tag.
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_dim_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _outer: usize,
+        _out_dim: usize,
+        _idx_dim: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_dim_f16",
+        })
+    }
+
+    /// bf16 dim-aware `scatter`. Companion of [`Self::scatter_dim_f16`].
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_dim_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _outer: usize,
+        _out_dim: usize,
+        _idx_dim: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_dim_bf16",
+        })
+    }
+
     /// f32 dim-aware `scatter_value`: clones `input` (`[outer, out_dim,
     /// inner]`) and writes the broadcast scalar `value` at every position named
     /// by `index` (`[outer, idx_dim, inner]`).
@@ -6148,6 +6183,42 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "scatter_add_dim_f64",
+        })
+    }
+
+    /// f16 dim-aware `scatter_add`. Accumulates duplicate destinations
+    /// atomically and returns a resident f16-tagged buffer.
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_add_dim_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _outer: usize,
+        _out_dim: usize,
+        _idx_dim: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_add_dim_f16",
+        })
+    }
+
+    /// bf16 dim-aware `scatter_add`. Accumulates duplicate destinations
+    /// atomically and returns a resident bf16-tagged buffer.
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_add_dim_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _outer: usize,
+        _out_dim: usize,
+        _idx_dim: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_add_dim_bf16",
         })
     }
 

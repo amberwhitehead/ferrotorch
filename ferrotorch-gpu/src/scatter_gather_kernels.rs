@@ -86,6 +86,7 @@
 //! | REQ-3 (atomic scatter_add) | SHIPPED | `atom.global.add.f32` / `atom.global.add.f64` in the scatter_add PTX; verified by the duplicate-index unit test `scatter_add_dim_f32_duplicate_indices` |
 //! | REQ-4 (dispatch wiring) | SHIPPED | the four `CudaBackendImpl::*_dim_{f32,f64}` overrides; consumer the `is_cuda()` branch of `gather`/`scatter`/`scatter_value`/`scatter_add` in `ferrotorch-core/src/ops/indexing.rs` |
 //! | REQ-5 (segmented row scatter-add) | SHIPPED | `gpu_scatter_add_segments_f32`/`_f64` (`atom.global.add.f{32,64}` over a per-row i64 segment index, zero-init output); consumer `CudaBackendImpl::scatter_add_segments_f32`/`_f64` in `backend_impl.rs`, themselves consumed by the `is_cuda()` branch of `ferrotorch_core::ops::scatter::scatter_add_segments` |
+//! | REQ-6 (16-bit flat scatter for `put`) | SHIPPED | `gpu_scatter_dim_u16` plus CAS-based `gpu_scatter_add_dim_f16`/`gpu_scatter_add_dim_bf16`; consumers `CudaBackendImpl::scatter*_dim_{f16,bf16}` and `ferrotorch_core::grad_fns::indexing::put`; verified by `scatter_dim_u16_bitcopy` / `scatter_add_dim_{f16,bf16}_duplicate_odd_len` and core CUDA indexing tests |
 
 #![cfg(feature = "cuda")]
 
@@ -95,7 +96,7 @@ use crate::buffer::CudaBuffer;
 use crate::device::GpuDevice;
 use crate::error::{GpuError, GpuResult};
 use crate::module_cache::get_or_compile;
-use crate::transfer::{alloc_zeros_f32, alloc_zeros_f64};
+use crate::transfer::{alloc_zeros_bf16, alloc_zeros_f32, alloc_zeros_f64};
 
 const BLOCK_SIZE: u32 = 256;
 
@@ -835,6 +836,13 @@ const SCATTER_DIM_F64_PTX: &str = scatter_dim_ptx!(
     "st.global.f64",
     ".f64"
 );
+const SCATTER_DIM_U16_PTX: &str = scatter_dim_ptx!(
+    "scatter_dim_u16_kernel",
+    "1",
+    "ld.global.u16",
+    "st.global.u16",
+    ".u16"
+);
 const SCATTER_VALUE_DIM_F32_PTX: &str = scatter_value_dim_ptx!(
     "scatter_value_dim_f32_kernel",
     "2",
@@ -864,6 +872,120 @@ const SCATTER_ADD_DIM_F64_PTX: &str = scatter_add_dim_ptx!(
     "ld.global.f64",
     "atom.global.add.f64",
     ".f64"
+);
+
+macro_rules! scatter_add_dim_16_cas_ptx {
+    ($kname:literal, $version:literal, $target:literal, $decode_old:literal,
+     $decode_src:literal, $encode_new:literal) => {
+        concat!(
+            ".version ",
+            $version,
+            "\n.target ",
+            $target,
+            "\n.address_size 64\n",
+            ".visible .entry ",
+            $kname,
+            "(
+    .param .u64 out_ptr, .param .u64 idx_ptr, .param .u64 src_ptr,
+    .param .u32 outer, .param .u32 out_dim, .param .u32 idx_dim,
+    .param .u32 inner, .param .u32 total
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %outdim, %idxdim, %inn;
+    .reg .u32 %o, %rem, %k, %slab, %sel, %dstelem;
+    .reg .u32 %wordidx, %halfsel, %shift;
+    .reg .u32 %old, %assumed, %new, %oldhalf_u, %newhalf_u, %mask, %preserve, %packed;
+    .reg .u64 %out, %idx, %src, %off, %addr, %wordaddr;
+    .reg .s64 %selv;
+    .reg .b16 %src_h, %old_h, %new_h, %zero16;
+    .reg .b32 %src_bits, %old_bits, %new_bits;
+    .reg .f32 %src_f, %old_f, %sum_f;
+    .reg .pred %p, %retry;
+
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %idx, [idx_ptr];
+    ld.param.u64 %src, [src_ptr];
+    ld.param.u32 %tot, [total];
+    ld.param.u32 %outdim, [out_dim];
+    ld.param.u32 %idxdim, [idx_dim];
+    ld.param.u32 %inn, [inner];
+
+    mov.b16 %zero16, 0;
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot; @%p bra DONE;
+
+    mul.lo.u32 %slab, %idxdim, %inn;
+    div.u32 %o, %gtid, %slab;
+    rem.u32 %rem, %gtid, %slab;
+    rem.u32 %k, %rem, %inn;
+
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, 3; add.u64 %addr, %idx, %off;
+    ld.global.s64 %selv, [%addr];
+    cvt.u32.s64 %sel, %selv;
+
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, 1; add.u64 %addr, %src, %off;
+    ld.global.b16 %src_h, [%addr];
+",
+            $decode_src,
+            "
+
+    mul.lo.u32 %dstelem, %o, %outdim;
+    add.u32 %dstelem, %dstelem, %sel;
+    mul.lo.u32 %dstelem, %dstelem, %inn;
+    add.u32 %dstelem, %dstelem, %k;
+
+    shr.u32 %wordidx, %dstelem, 1;
+    and.b32 %halfsel, %dstelem, 1;
+    shl.b32 %shift, %halfsel, 4;
+    cvt.u64.u32 %off, %wordidx; shl.b64 %off, %off, 2; add.u64 %wordaddr, %out, %off;
+
+    ld.global.u32 %old, [%wordaddr];
+CAS_LOOP:
+    mov.u32 %assumed, %old;
+    shr.u32 %oldhalf_u, %assumed, %shift;
+    and.b32 %oldhalf_u, %oldhalf_u, 65535;
+    cvt.u16.u32 %old_h, %oldhalf_u;
+",
+            $decode_old,
+            "
+    add.rn.f32 %sum_f, %old_f, %src_f;
+",
+            $encode_new,
+            "
+    mov.b32 %new_bits, {%new_h, %zero16};
+    mov.b32 %newhalf_u, %new_bits;
+    shl.b32 %packed, %newhalf_u, %shift;
+    mov.u32 %mask, 65535;
+    shl.b32 %mask, %mask, %shift;
+    not.b32 %mask, %mask;
+    and.b32 %preserve, %assumed, %mask;
+    or.b32 %new, %preserve, %packed;
+    atom.global.cas.b32 %old, [%wordaddr], %assumed, %new;
+    setp.ne.u32 %retry, %old, %assumed;
+    @%retry bra CAS_LOOP;
+DONE:
+    ret;
+}
+"
+        )
+    };
+}
+
+const SCATTER_ADD_DIM_F16_PTX: &str = scatter_add_dim_16_cas_ptx!(
+    "scatter_add_dim_f16_kernel",
+    "7.0",
+    "sm_60",
+    "    cvt.f32.f16 %old_f, %old_h;",
+    "    cvt.f32.f16 %src_f, %src_h;",
+    "    cvt.rn.f16.f32 %new_h, %sum_f;"
+);
+const SCATTER_ADD_DIM_BF16_PTX: &str = scatter_add_dim_16_cas_ptx!(
+    "scatter_add_dim_bf16_kernel",
+    "7.8",
+    "sm_80",
+    "    mov.b32 %old_bits, {%zero16, %old_h}; mov.b32 %old_f, %old_bits;",
+    "    mov.b32 %src_bits, {%zero16, %src_h}; mov.b32 %src_f, %src_bits;",
+    "    cvt.rn.bf16.f32 %new_h, %sum_f;"
 );
 const SCATTER_ND_F32_PTX: &str = scatter_nd_ptx!(
     "scatter_nd_f32_kernel",
@@ -1289,6 +1411,35 @@ pub fn gpu_scatter_dim_f64(
     Ok(out)
 }
 
+/// 16-bit dim-aware `scatter` for f16/bf16 bit-pattern buffers. This is pure
+/// element movement; dtype disambiguation is done by the caller's handle tag.
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_scatter_dim_u16(
+    input: &CudaSlice<u16>,
+    idx: &CudaSlice<i64>,
+    src: &CudaSlice<u16>,
+    outer: usize,
+    out_dim: usize,
+    idx_dim: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let mut out = clone_u16(input, outer * out_dim * inner, false, device)?;
+    launch_scatter(
+        &mut out,
+        idx,
+        src,
+        outer,
+        out_dim,
+        idx_dim,
+        inner,
+        device,
+        SCATTER_DIM_U16_PTX,
+        "scatter_dim_u16_kernel",
+    )?;
+    Ok(out)
+}
+
 /// f32 dim-aware `scatter_add`. Like [`gpu_scatter_dim_f32`] but accumulates
 /// (`out[dst] += src[t]`) via `atom.global.add.f32`, so duplicate index values
 /// targeting the same `dst` sum correctly.
@@ -1344,6 +1495,64 @@ pub fn gpu_scatter_add_dim_f64(
         device,
         SCATTER_ADD_DIM_F64_PTX,
         "scatter_add_dim_f64_kernel",
+    )?;
+    Ok(out)
+}
+
+/// f16 dim-aware `scatter_add`. Accumulates in f32 and rounds back to f16
+/// inside a 32-bit CAS loop over the containing half-word pair.
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_scatter_add_dim_f16(
+    input: &CudaSlice<u16>,
+    idx: &CudaSlice<i64>,
+    src: &CudaSlice<u16>,
+    outer: usize,
+    out_dim: usize,
+    idx_dim: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let mut out = clone_u16(input, outer * out_dim * inner, true, device)?;
+    launch_scatter(
+        &mut out,
+        idx,
+        src,
+        outer,
+        out_dim,
+        idx_dim,
+        inner,
+        device,
+        SCATTER_ADD_DIM_F16_PTX,
+        "scatter_add_dim_f16_kernel",
+    )?;
+    Ok(out)
+}
+
+/// bf16 dim-aware `scatter_add`. Accumulates in f32 and rounds back to bf16
+/// inside a 32-bit CAS loop over the containing half-word pair.
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_scatter_add_dim_bf16(
+    input: &CudaSlice<u16>,
+    idx: &CudaSlice<i64>,
+    src: &CudaSlice<u16>,
+    outer: usize,
+    out_dim: usize,
+    idx_dim: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let mut out = clone_u16(input, outer * out_dim * inner, true, device)?;
+    launch_scatter(
+        &mut out,
+        idx,
+        src,
+        outer,
+        out_dim,
+        idx_dim,
+        inner,
+        device,
+        SCATTER_ADD_DIM_BF16_PTX,
+        "scatter_add_dim_bf16_kernel",
     )?;
     Ok(out)
 }
@@ -2139,6 +2348,30 @@ fn clone_f64(
     Ok(out)
 }
 
+/// Clone the first `len` 16-bit elements. `pad_even` allocates one extra
+/// element for odd lengths so the CAS-based half-word atomic path can touch
+/// the containing 32-bit word without reading past the allocation.
+fn clone_u16(
+    input: &CudaSlice<u16>,
+    len: usize,
+    pad_even: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let alloc_len = if pad_even && len % 2 == 1 {
+        len + 1
+    } else {
+        len
+    };
+    let mut out = alloc_zeros_bf16(alloc_len, device)?;
+    if len > 0 {
+        let stream = device.stream();
+        let src = input.slice(0..len);
+        let mut dst = out.slice_mut(0..len);
+        stream.memcpy_dtod(&src, &mut dst)?;
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2150,6 +2383,10 @@ mod tests {
 
     fn htod_i64(d: &GpuDevice, v: &[i64]) -> CudaSlice<i64> {
         d.stream().clone_htod(&v.to_vec()).expect("htod i64")
+    }
+
+    fn htod_u16(d: &GpuDevice, v: &[u16]) -> CudaSlice<u16> {
+        d.stream().clone_htod(&v.to_vec()).expect("htod u16")
     }
 
     // gather: input [2,3] dim=1, index [2,2] -> outer=2 in_dim=3 out_dim=2 inner=1.
@@ -2213,6 +2450,73 @@ mod tests {
         let idx = htod_i64(&d, &[0i64, 2, 0]);
         let out = gpu_scatter_add_dim_f64(&inp, &idx, &src, 1, 3, 3, 1, &d).unwrap();
         assert_eq!(gpu_to_cpu(&out, &d).unwrap()[..3], [41.0f64, 2.0, 23.0]);
+    }
+
+    #[test]
+    fn scatter_dim_u16_bitcopy() {
+        let d = dev();
+        let inp = htod_u16(&d, &[0x1111, 0x2222, 0x3333]);
+        let src = htod_u16(&d, &[0xaaaa, 0xbbbb]);
+        let idx = htod_i64(&d, &[2i64, 0]);
+        let out = gpu_scatter_dim_u16(&inp, &idx, &src, 1, 3, 2, 1, &d).unwrap();
+        let got = d.stream().clone_dtoh(&out).unwrap();
+        assert_eq!(&got[..3], &[0xbbbb, 0x2222, 0xaaaa]);
+    }
+
+    #[test]
+    fn scatter_add_dim_f16_duplicate_odd_len() {
+        let d = dev();
+        let inp = htod_u16(
+            &d,
+            &[
+                half::f16::from_f32(1.0).to_bits(),
+                half::f16::from_f32(2.0).to_bits(),
+                half::f16::from_f32(3.0).to_bits(),
+            ],
+        );
+        let src = htod_u16(
+            &d,
+            &[
+                half::f16::from_f32(10.0).to_bits(),
+                half::f16::from_f32(20.0).to_bits(),
+            ],
+        );
+        let idx = htod_i64(&d, &[2i64, 2]);
+        let out = gpu_scatter_add_dim_f16(&inp, &idx, &src, 1, 3, 2, 1, &d).unwrap();
+        let got = d.stream().clone_dtoh(&out).unwrap();
+        let got: Vec<f32> = got[..3]
+            .iter()
+            .map(|&bits| half::f16::from_bits(bits).to_f32())
+            .collect();
+        assert_eq!(got, vec![1.0, 2.0, 33.0]);
+    }
+
+    #[test]
+    fn scatter_add_dim_bf16_duplicate_odd_len() {
+        let d = dev();
+        let inp = htod_u16(
+            &d,
+            &[
+                half::bf16::from_f32(1.0).to_bits(),
+                half::bf16::from_f32(2.0).to_bits(),
+                half::bf16::from_f32(3.0).to_bits(),
+            ],
+        );
+        let src = htod_u16(
+            &d,
+            &[
+                half::bf16::from_f32(10.0).to_bits(),
+                half::bf16::from_f32(20.0).to_bits(),
+            ],
+        );
+        let idx = htod_i64(&d, &[2i64, 2]);
+        let out = gpu_scatter_add_dim_bf16(&inp, &idx, &src, 1, 3, 2, 1, &d).unwrap();
+        let got = d.stream().clone_dtoh(&out).unwrap();
+        let got: Vec<f32> = got[..3]
+            .iter()
+            .map(|&bits| half::bf16::from_bits(bits).to_f32())
+            .collect();
+        assert_eq!(got, vec![1.0, 2.0, 33.0]);
     }
 
     #[test]

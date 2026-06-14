@@ -8589,6 +8589,62 @@ impl GpuBackend for CudaBackendImpl {
 
     #[cfg(feature = "cuda")]
     #[allow(clippy::too_many_arguments)]
+    fn scatter_dim_f16(
+        &self,
+        input: &GpuBufferHandle,
+        index: &GpuBufferHandle,
+        src: &GpuBufferHandle,
+        outer: usize,
+        out_dim: usize,
+        idx_dim: usize,
+        inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let out = crate::scatter_gather_kernels::gpu_scatter_dim_u16(
+            Self::unwrap_buffer_f16(input)?,
+            Self::unwrap_buffer_i64(index)?.inner(),
+            Self::unwrap_buffer_f16(src)?,
+            outer,
+            out_dim,
+            idx_dim,
+            inner,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(out, ord))
+    }
+
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_dim_bf16(
+        &self,
+        input: &GpuBufferHandle,
+        index: &GpuBufferHandle,
+        src: &GpuBufferHandle,
+        outer: usize,
+        out_dim: usize,
+        idx_dim: usize,
+        inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let out = crate::scatter_gather_kernels::gpu_scatter_dim_u16(
+            Self::unwrap_buffer_bf16(input)?,
+            Self::unwrap_buffer_i64(index)?.inner(),
+            Self::unwrap_buffer_bf16(src)?,
+            outer,
+            out_dim,
+            idx_dim,
+            inner,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(out, ord))
+    }
+
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
     fn scatter_value_dim_f32(
         &self,
         input: &GpuBufferHandle,
@@ -8697,6 +8753,62 @@ impl GpuBackend for CudaBackendImpl {
         )
         .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f64(out, ord))
+    }
+
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_add_dim_f16(
+        &self,
+        input: &GpuBufferHandle,
+        index: &GpuBufferHandle,
+        src: &GpuBufferHandle,
+        outer: usize,
+        out_dim: usize,
+        idx_dim: usize,
+        inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let out = crate::scatter_gather_kernels::gpu_scatter_add_dim_f16(
+            Self::unwrap_buffer_f16(input)?,
+            Self::unwrap_buffer_i64(index)?.inner(),
+            Self::unwrap_buffer_f16(src)?,
+            outer,
+            out_dim,
+            idx_dim,
+            inner,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(out, ord))
+    }
+
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_add_dim_bf16(
+        &self,
+        input: &GpuBufferHandle,
+        index: &GpuBufferHandle,
+        src: &GpuBufferHandle,
+        outer: usize,
+        out_dim: usize,
+        idx_dim: usize,
+        inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let out = crate::scatter_gather_kernels::gpu_scatter_add_dim_bf16(
+            Self::unwrap_buffer_bf16(input)?,
+            Self::unwrap_buffer_i64(index)?.inner(),
+            Self::unwrap_buffer_bf16(src)?,
+            outer,
+            out_dim,
+            idx_dim,
+            inner,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(out, ord))
     }
 
     #[cfg(feature = "cuda")]

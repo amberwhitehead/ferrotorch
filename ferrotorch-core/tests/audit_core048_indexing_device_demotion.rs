@@ -34,6 +34,7 @@ use ferrotorch_core::grad_fns::indexing::{
 use ferrotorch_core::{
     BoolTensor, Device, FerrotorchError, Float, IntTensor, Tensor, TensorStorage,
 };
+use half::{bf16, f16};
 use std::sync::Once;
 
 static GPU_INIT: Once = Once::new();
@@ -402,6 +403,51 @@ fn take_cuda_resident_f64() {
     take_cuda_resident::<f64>();
 }
 
+#[test]
+fn take_cuda_resident_f16() {
+    take_cuda_resident::<f16>();
+}
+
+#[test]
+fn take_cuda_resident_bf16() {
+    take_cuda_resident::<bf16>();
+}
+
+fn take_put_cuda_empty_resident<T: Float>() {
+    ensure_cuda_backend();
+    let x = t_cuda::<T>(&[1.0, 2.0, 3.0], &[3], true);
+    let idx = idx_cuda(&[]);
+
+    let taken = take(&x, &idx).unwrap();
+    assert!(taken.is_cuda(), "empty take output must stay CUDA-resident");
+    assert_eq!(taken.shape(), &[0]);
+    assert_eq!(host_f64(&taken), &[] as &[f64]);
+
+    let src = t_cuda::<T>(&[], &[0], true);
+    let put_out = put(&x, &idx, &src, false).unwrap();
+    assert_cuda_with(&put_out, "empty put output", &[1.0, 2.0, 3.0]);
+    let seed = t_cuda::<T>(&[1.0, 2.0, 3.0], &[3], false);
+    backward_with_grad(&put_out, Some(&seed)).unwrap();
+    assert_cuda_with(&grad_of(&x), "empty put grad_input", &[1.0, 2.0, 3.0]);
+    let gs = grad_of(&src);
+    assert!(
+        gs.is_cuda(),
+        "empty put grad_source must stay CUDA-resident"
+    );
+    assert_eq!(gs.shape(), &[0]);
+    assert_eq!(host_f64(&gs), &[] as &[f64]);
+}
+
+#[test]
+fn take_put_cuda_empty_resident_f16() {
+    take_put_cuda_empty_resident::<f16>();
+}
+
+#[test]
+fn take_put_cuda_empty_resident_bf16() {
+    take_put_cuda_empty_resident::<bf16>();
+}
+
 /// torch rejects both directions: `torch.take(cuda_x, cpu_idx)` AND
 /// `torch.take(cpu_x, cuda_idx)` -> "Expected all tensors to be on the same
 /// device" (live probe pasted in #1742).
@@ -484,6 +530,64 @@ fn put_cuda_resident_f32() {
 #[test]
 fn put_cuda_resident_f64() {
     put_cuda_resident::<f64>();
+}
+
+#[test]
+fn put_cuda_resident_f16() {
+    put_cuda_resident::<f16>();
+}
+
+#[test]
+fn put_cuda_resident_bf16() {
+    put_cuda_resident::<bf16>();
+}
+
+fn put_cuda_accumulate_odd_len_duplicate_16bit<T: Float>() {
+    ensure_cuda_backend();
+    let x = t_cuda::<T>(&[1.0, 2.0, 3.0], &[3], true);
+    let s = t_cuda::<T>(&[10.0, 20.0], &[2], true);
+    let idx = idx_cuda(&[2, 2]);
+    let out = put(&x, &idx, &s, true).unwrap();
+    assert_cuda_with(
+        &out,
+        "put 16-bit odd-len duplicate output",
+        &[1.0, 2.0, 33.0],
+    );
+
+    let seed = t_cuda::<T>(&[1.0, 2.0, 3.0], &[3], false);
+    backward_with_grad(&out, Some(&seed)).unwrap();
+    assert_cuda_with(
+        &grad_of(&x),
+        "put 16-bit odd-len duplicate grad_input",
+        &[1.0, 2.0, 3.0],
+    );
+    assert_cuda_with(
+        &grad_of(&s),
+        "put 16-bit odd-len duplicate grad_source",
+        &[3.0, 3.0],
+    );
+}
+
+#[test]
+fn put_cuda_accumulate_odd_len_duplicate_f16() {
+    put_cuda_accumulate_odd_len_duplicate_16bit::<f16>();
+}
+
+#[test]
+fn put_cuda_accumulate_odd_len_duplicate_bf16() {
+    put_cuda_accumulate_odd_len_duplicate_16bit::<bf16>();
+}
+
+#[test]
+fn put_source_index_numel_mismatch_rejected_like_torch() {
+    let x = t_cpu::<f32>(&[1.0, 2.0, 3.0], &[3], false);
+    let idx = idx_cpu(&[0, 2]);
+    let src = t_cpu::<f32>(&[10.0, 20.0, 30.0], &[3], false);
+    let err = put(&x, &idx, &src, false).expect_err("source/index mismatch");
+    assert!(
+        matches!(err, FerrotorchError::ShapeMismatch { .. }),
+        "expected ShapeMismatch, got {err:?}"
+    );
 }
 
 #[test]
