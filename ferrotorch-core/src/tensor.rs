@@ -727,6 +727,9 @@ impl<T: Float> Tensor<T> {
             });
         }
         let slice = self.inner.storage.try_as_slice()?;
+        if self.numel() == 0 {
+            return Ok(&slice[0..0]);
+        }
         let end = self.inner.offset + self.numel();
         if end > slice.len() {
             return Err(FerrotorchError::InvalidArgument {
@@ -1406,6 +1409,9 @@ impl<T: Float> Tensor<T> {
         // section restates `try_as_mut_slice_aliased`'s exclusivity
         // contract for the caller.
         let slice = unsafe { self.inner.storage.try_as_mut_slice_aliased()? };
+        if self.numel() == 0 {
+            return Ok(&mut slice[0..0]);
+        }
         let end = self.inner.offset + self.numel();
         if end > slice.len() {
             return Err(FerrotorchError::InvalidArgument {

@@ -330,10 +330,7 @@ impl<T: Float> GradFn<T> for ProdBackward<T> {
         // GPU fast path (#785): on-device prefix-suffix kernel handles
         // all zero cases (no zero, single zero, multi-zero) with a
         // single launch — no host detour for the gradient values.
-        let t_is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
-        let t_is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
         if self.input.is_cuda()
-            && (t_is_f32 || t_is_f64)
             && let Some(backend) = crate::gpu_dispatch::gpu_backend()
         {
             // grad_output may live on CPU when constructed by
@@ -344,11 +341,26 @@ impl<T: Float> GradFn<T> for ProdBackward<T> {
             } else {
                 grad_output.to(self.input.device())?
             };
-            let grad_handle = if t_is_f32 {
-                backend.prod_backward_f32(self.input.gpu_handle()?, go_on_device.gpu_handle()?)?
-            } else {
-                backend.prod_backward_f64(self.input.gpu_handle()?, go_on_device.gpu_handle()?)?
-            };
+            let grad_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                T,
+                "prod backward",
+                f32 => backend.prod_backward_f32(
+                    self.input.gpu_handle()?,
+                    go_on_device.gpu_handle()?
+                ),
+                f64 => backend.prod_backward_f64(
+                    self.input.gpu_handle()?,
+                    go_on_device.gpu_handle()?
+                ),
+                bf16 => backend.prod_backward_bf16_bf16(
+                    self.input.gpu_handle()?,
+                    go_on_device.gpu_handle()?
+                ),
+                f16 => backend.prod_backward_f16(
+                    self.input.gpu_handle()?,
+                    go_on_device.gpu_handle()?
+                ),
+            )?;
             let storage = TensorStorage::gpu(grad_handle);
             let grad_input = Tensor::from_storage(storage, self.input.shape().to_vec(), false)?;
             return Ok(vec![Some(grad_input)]);
@@ -416,11 +428,8 @@ pub fn prod<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 }
 
 fn prod_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let t_is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
-    let t_is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
-
     // GPU path: native reduce_prod kernel (#524).
-    if input.is_cuda() && (t_is_f32 || t_is_f64) {
+    if input.is_cuda() {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
@@ -428,11 +437,14 @@ fn prod_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         // the `ProdBackward` capture the packed buffer (the VJP reads input
         // values, so the stored input must honour the offset too).
         let input = input.contiguous()?;
-        let handle = if t_is_f32 {
-            backend.prod_f32(input.gpu_handle()?, input.numel())?
-        } else {
-            backend.prod_f64(input.gpu_handle()?, input.numel())?
-        };
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "prod",
+            f32 => backend.prod_f32(input.gpu_handle()?, input.numel()),
+            f64 => backend.prod_f64(input.gpu_handle()?, input.numel()),
+            bf16 => backend.prod_bf16_bf16(input.gpu_handle()?),
+            f16 => backend.prod_f16(input.gpu_handle()?),
+        )?;
         let storage = TensorStorage::gpu(handle);
         if is_grad_enabled() && input.requires_grad() {
             let grad_fn = Arc::new(ProdBackward {
@@ -442,9 +454,7 @@ fn prod_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         }
         return Tensor::from_storage(storage, vec![], false);
     }
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "prod" });
-    }
+
     let data = input.data_vec()?;
     let total = data
         .iter()
@@ -754,42 +764,79 @@ pub struct SumDimBackward<T: Float> {
 impl<T: Float> GradFn<T> for SumDimBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let input_shape = self.input.shape();
-        let outer: usize = input_shape[..self.dim].iter().product::<usize>().max(1);
-        let inner: usize = input_shape[(self.dim + 1)..]
-            .iter()
-            .product::<usize>()
-            .max(1);
-        let repeat_count = input_shape[self.dim];
 
-        // GPU-native path: expand-along-dim via the dedicated kernel (#524).
-        let t_is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
-        let t_is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
-        if grad_output.is_cuda() && (t_is_f32 || t_is_f64) {
+        // GPU-native path: broadcast the upstream gradient along the reduced
+        // dimension. This covers f32/f64/bf16/f16 without a CPU expansion.
+        if self.input.is_cuda() {
+            use crate::device::Device;
+
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let result_h = if t_is_f32 {
-                backend.repeat_along_dim_f32(
-                    grad_output.gpu_handle()?,
-                    outer,
-                    repeat_count,
-                    inner,
-                )?
-            } else {
-                backend.repeat_along_dim_f64(
-                    grad_output.gpu_handle()?,
-                    outer,
-                    repeat_count,
-                    inner,
-                )?
+            let ordinal = match self.input.device() {
+                Device::Cuda(o) => o,
+                _ => 0,
             };
+            let grad_on_device = if grad_output.is_cuda() {
+                grad_output.clone()
+            } else {
+                grad_output.to(self.input.device())?
+            };
+            let grad_shape_keepdim: Vec<usize> = if self.keepdim {
+                grad_on_device.shape().to_vec()
+            } else {
+                let mut s = grad_on_device.shape().to_vec();
+                s.insert(self.dim, 1);
+                s
+            };
+            let input_numel: usize = input_shape.iter().product();
+            let grad_handle = grad_on_device.gpu_handle()?;
+            let result_h: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                T,
+                "sum_dim backward",
+                f32 => {
+                    let ones = backend.fill_f32(input_numel, 1.0, ordinal)?;
+                    backend.broadcast_mul_f32(
+                        &ones,
+                        grad_handle,
+                        input_shape,
+                        &grad_shape_keepdim,
+                        input_shape,
+                    )
+                },
+                f64 => {
+                    let ones = backend.fill_f64(input_numel, 1.0, ordinal)?;
+                    backend.broadcast_mul_f64(
+                        &ones,
+                        grad_handle,
+                        input_shape,
+                        &grad_shape_keepdim,
+                        input_shape,
+                    )
+                },
+                bf16 => {
+                    let ones = backend.fill_bf16_bf16(input_numel, 1.0, ordinal)?;
+                    backend.broadcast_mul_bf16(
+                        &ones,
+                        grad_handle,
+                        input_shape,
+                        &grad_shape_keepdim,
+                        input_shape,
+                    )
+                },
+                f16 => {
+                    let ones = backend.fill_f16(input_numel, 1.0, ordinal)?;
+                    backend.broadcast_mul_f16(
+                        &ones,
+                        grad_handle,
+                        input_shape,
+                        &grad_shape_keepdim,
+                        input_shape,
+                    )
+                },
+            )?;
             let grad_input =
                 Tensor::from_storage(TensorStorage::gpu(result_h), input_shape.to_vec(), false)?;
             return Ok(vec![Some(grad_input)]);
-        }
-        if grad_output.is_cuda() {
-            return Err(FerrotorchError::NotImplementedOnCuda {
-                op: "sum_dim backward",
-            });
         }
 
         // If keepdim was false, reinsert the reduced dimension as size 1.
@@ -1230,71 +1277,93 @@ impl<T: Float> GradFn<T> for MeanDimBackward<T> {
         // GPU path: native expand-and-scale via fill + broadcast_mul.
         // Conceptually grad_input[..., j, ...] = grad_output[..., 0, ...] / N
         // for every j in the reduced dim. Implement that as:
-        //   ones = fill(input_numel, 1/N)         shape: input_shape
-        //   grad_input = broadcast_mul(ones, grad_output_keepdim)
+        //   scale = fill(input_numel, 1/N)       shape: input_shape
+        //   grad_input = broadcast_mul(scale, grad_output_keepdim)
         // grad_output_keepdim is grad_output with a size-1 dim re-inserted
         // when keepdim=false (free metadata change, no copy).
-        let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
-        if grad_output.is_cuda()
-            && is_f32
-            && let Some(backend) = crate::gpu_dispatch::gpu_backend()
-        {
-            let grad_shape_keepdim: Vec<usize> = if self.keepdim {
-                grad_output.shape().to_vec()
+        if self.input.is_cuda() {
+            use crate::device::Device;
+
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let ordinal = match self.input.device() {
+                Device::Cuda(o) => o,
+                _ => 0,
+            };
+            let grad_on_device = if grad_output.is_cuda() {
+                grad_output.clone()
             } else {
-                let mut s = grad_output.shape().to_vec();
+                grad_output.to(self.input.device())?
+            };
+            let grad_shape_keepdim: Vec<usize> = if self.keepdim {
+                grad_on_device.shape().to_vec()
+            } else {
+                let mut s = grad_on_device.shape().to_vec();
                 s.insert(self.dim, 1);
                 s
             };
             let input_numel: usize = input_shape.iter().product();
-            let inv_n = 1.0f32 / (dim_size as f32);
-            // Use device 0 — current backend doesn't expose handle's
-            // ordinal at this layer; the upstream GPU pipeline is
-            // single-device for now. (Multi-device support lives in
-            // a wider refactor; not blocking this.)
-            let ones_handle = backend.fill_f32(input_numel, inv_n, 0)?;
-            let grad_handle = grad_output.gpu_handle()?;
-            let grad_input_handle = backend.broadcast_mul_f32(
-                &ones_handle,
-                grad_handle,
-                input_shape,
-                &grad_shape_keepdim,
-                input_shape,
+            let inv_n_f32 = if dim_size == 0 {
+                0.0
+            } else {
+                1.0 / dim_size as f32
+            };
+            let inv_n_f64 = if dim_size == 0 {
+                0.0
+            } else {
+                1.0 / dim_size as f64
+            };
+            let grad_handle = grad_on_device.gpu_handle()?;
+            let grad_input_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                T,
+                "mean_dim backward",
+                f32 => {
+                    let scale = backend.fill_f32(input_numel, inv_n_f32, ordinal)?;
+                    backend.broadcast_mul_f32(
+                        &scale,
+                        grad_handle,
+                        input_shape,
+                        &grad_shape_keepdim,
+                        input_shape,
+                    )
+                },
+                f64 => {
+                    let scale = backend.fill_f64(input_numel, inv_n_f64, ordinal)?;
+                    backend.broadcast_mul_f64(
+                        &scale,
+                        grad_handle,
+                        input_shape,
+                        &grad_shape_keepdim,
+                        input_shape,
+                    )
+                },
+                bf16 => {
+                    let scale = backend.fill_bf16_bf16(input_numel, inv_n_f32, ordinal)?;
+                    backend.broadcast_mul_bf16(
+                        &scale,
+                        grad_handle,
+                        input_shape,
+                        &grad_shape_keepdim,
+                        input_shape,
+                    )
+                },
+                f16 => {
+                    let scale = backend.fill_f16(input_numel, inv_n_f32, ordinal)?;
+                    backend.broadcast_mul_f16(
+                        &scale,
+                        grad_handle,
+                        input_shape,
+                        &grad_shape_keepdim,
+                        input_shape,
+                    )
+                },
             )?;
-            let storage = TensorStorage::gpu(grad_input_handle);
-            let grad_input = Tensor::from_storage(storage, input_shape.to_vec(), false)?;
-            return Ok(vec![Some(grad_input)]);
-        }
-
-        // f64 GPU path via the new repeat_along_dim kernel + scale (#524).
-        let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
-        if grad_output.is_cuda()
-            && is_f64
-            && let Some(backend) = crate::gpu_dispatch::gpu_backend()
-        {
-            let outer: usize = input_shape[..self.dim].iter().product::<usize>().max(1);
-            let inner: usize = input_shape[(self.dim + 1)..]
-                .iter()
-                .product::<usize>()
-                .max(1);
-            let repeat_count = dim_size;
-            let expanded = backend.repeat_along_dim_f64(
-                grad_output.gpu_handle()?,
-                outer,
-                repeat_count,
-                inner,
+            let grad_input = Tensor::from_storage(
+                TensorStorage::gpu(grad_input_handle),
+                input_shape.to_vec(),
+                false,
             )?;
-            // Scale by 1/repeat_count to get the mean's gradient.
-            let scaled = backend.scale_f64(&expanded, 1.0 / repeat_count as f64)?;
-            let grad_input =
-                Tensor::from_storage(TensorStorage::gpu(scaled), input_shape.to_vec(), false)?;
             return Ok(vec![Some(grad_input)]);
-        }
-
-        if grad_output.is_cuda() {
-            return Err(FerrotorchError::NotImplementedOnCuda {
-                op: "mean_dim backward",
-            });
         }
 
         let n = T::from(dim_size).unwrap();
@@ -4320,30 +4389,45 @@ impl<T: Float> GradFn<T> for ProdDimBackward<T> {
             let dim_size = in_shape[self.dim];
             let outer: usize = in_shape[..self.dim].iter().product();
             let inner: usize = in_shape[self.dim + 1..].iter().product();
-            let grad_output = grad_output.contiguous()?;
+            let grad_output = if grad_output.is_cuda() {
+                grad_output.contiguous()?
+            } else {
+                grad_output.to(self.input.device())?.contiguous()?
+            };
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let handle = match T::dtype() {
-                DType::F32 => backend.prod_axis_backward_f32(
+            let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                T,
+                "prod_dim backward",
+                f32 => backend.prod_axis_backward_f32(
                     self.input.gpu_handle()?,
                     grad_output.gpu_handle()?,
                     outer,
                     dim_size,
                     inner,
-                )?,
-                DType::F64 => backend.prod_axis_backward_f64(
+                ),
+                f64 => backend.prod_axis_backward_f64(
                     self.input.gpu_handle()?,
                     grad_output.gpu_handle()?,
                     outer,
                     dim_size,
                     inner,
-                )?,
-                _ => {
-                    return Err(FerrotorchError::NotImplementedOnCuda {
-                        op: "prod_dim backward",
-                    });
-                }
-            };
+                ),
+                bf16 => backend.prod_axis_backward_bf16_bf16(
+                    self.input.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                    outer,
+                    dim_size,
+                    inner,
+                ),
+                f16 => backend.prod_axis_backward_f16(
+                    self.input.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                    outer,
+                    dim_size,
+                    inner,
+                ),
+            )?;
             let grad_input =
                 Tensor::from_storage(TensorStorage::gpu(handle), in_shape.to_vec(), false)?;
             return Ok(vec![Some(grad_input)]);
@@ -4440,11 +4524,14 @@ pub fn prod_dim<T: Float>(
     if input_ref.is_cuda() {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let handle = match T::dtype() {
-            DType::F32 => backend.prod_axis_f32(input_ref.gpu_handle()?, outer, dim_size, inner)?,
-            DType::F64 => backend.prod_axis_f64(input_ref.gpu_handle()?, outer, dim_size, inner)?,
-            _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "prod_dim" }),
-        };
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "prod_dim",
+            f32 => backend.prod_axis_f32(input_ref.gpu_handle()?, outer, dim_size, inner),
+            f64 => backend.prod_axis_f64(input_ref.gpu_handle()?, outer, dim_size, inner),
+            bf16 => backend.prod_axis_bf16_bf16(input_ref.gpu_handle()?, outer, dim_size, inner),
+            f16 => backend.prod_axis_f16(input_ref.gpu_handle()?, outer, dim_size, inner),
+        )?;
         let result_t = Tensor::from_storage(TensorStorage::gpu(handle), out_shape, false)?;
         if is_grad_enabled() && input.requires_grad() {
             let grad_fn = Arc::new(ProdDimBackward {

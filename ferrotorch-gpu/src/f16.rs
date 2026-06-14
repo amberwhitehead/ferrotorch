@@ -41,7 +41,7 @@
 //! | REQ-2 (unary activations) | SHIPPED | `pub fn gpu_silu_f16 / gpu_relu_f16 / gpu_gelu_f16 / gpu_exp_f16 / gpu_log_f16 / gpu_tanh_f16 / gpu_sigmoid_f16 / gpu_sqrt_f16 / gpu_neg_f16 in f16.rs`; consumer the f16 arm of activation dispatchers in `backend_impl.rs` |
 //! | REQ-3 (`gpu_scale_f16` / `gpu_fill_f16`) | SHIPPED | `pub fn gpu_scale_f16 / gpu_fill_f16 in f16.rs`; consumers `CudaBackendImpl::scale_f16 / fill_f16 in backend_impl.rs` |
 //! | REQ-4 (broadcast binary) | SHIPPED | `pub fn gpu_broadcast_add_f16 / gpu_broadcast_sub_f16 / gpu_broadcast_mul_f16 / gpu_broadcast_div_f16 in f16.rs`; consumer the f16 broadcast arms in `backend_impl.rs` |
-//! | REQ-5 (reductions) | SHIPPED | `pub fn gpu_sum_f16 / gpu_mean_f16 / gpu_sum_axis_f16 / gpu_mean_axis_f16 in f16.rs`; consumer f16 reduction arms in `backend_impl.rs` |
+//! | REQ-5 (reductions) | SHIPPED | `pub fn gpu_sum_f16 / gpu_mean_f16 / gpu_prod_f16 / gpu_sum_axis_f16 / gpu_mean_axis_f16 / gpu_prod_axis_f16 in f16.rs`; consumer f16 reduction arms in `backend_impl.rs` |
 //! | REQ-6 (norm/softmax) | SHIPPED | `pub fn gpu_layernorm_f16 / gpu_rmsnorm_f16 / gpu_softmax_f16 in f16.rs`; consumer f16 softmax/layernorm/rmsnorm dispatchers in `backend_impl.rs` |
 //! | REQ-7 (SAFETY annotations) | SHIPPED | every `unsafe { ... launch(cfg)? }` in `f16.rs` carries a multi-line `SAFETY:` comment naming compile site, entry signature, buffer alloc, bound check, `n as u32` non-truncation; consumer SAFETY contract inherited via each public wrapper called from `backend_impl.rs` |
 //! | REQ-8 (empty-input short-circuit) | SHIPPED | every `pub fn gpu_*_f16 in f16.rs` opens with `if n == 0 { return Ok(stream.alloc_zeros::<u16>(0)?); }`; consumer backend dispatch path relies on the no-launch short circuit |
@@ -1228,6 +1228,203 @@ DONE:
 }
 ";
 
+const PROD_AXIS_F16_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry prod_axis_f16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 out_ptr,
+    .param .u32 outer,
+    .param .u32 axis_size,
+    .param .u32 inner
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %outer_r, %axis_r, %inner_r;
+    .reg .u32 %total_out, %oi, %ii, %k, %a_idx;
+    .reg .u64 %a, %out, %off;
+    .reg .b16 %a_b16, %out_h;
+    .reg .f32 %acc, %va;
+    .reg .pred %p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %outer_r, [outer];
+    ld.param.u32 %axis_r, [axis_size];
+    ld.param.u32 %inner_r, [inner];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    mul.lo.u32 %total_out, %outer_r, %inner_r;
+    setp.ge.u32 %p, %r_tid, %total_out;
+    @%p bra DONE;
+
+    div.u32 %oi, %r_tid, %inner_r;
+    rem.u32 %ii, %r_tid, %inner_r;
+
+    mov.f32 %acc, 0f3F800000;
+    mov.u32 %k, 0;
+LOOP:
+    setp.ge.u32 %p, %k, %axis_r;
+    @%p bra LOOP_END;
+
+    mul.lo.u32 %a_idx, %oi, %axis_r;
+    add.u32 %a_idx, %a_idx, %k;
+    mul.lo.u32 %a_idx, %a_idx, %inner_r;
+    add.u32 %a_idx, %a_idx, %ii;
+
+    cvt.u64.u32 %off, %a_idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %a, %off;
+    ld.global.b16 %a_b16, [%off];
+    cvt.f32.f16 %va, %a_b16;
+    mul.f32 %acc, %acc, %va;
+
+    add.u32 %k, %k, 1;
+    bra LOOP;
+LOOP_END:
+
+    cvt.rn.f16.f32 %out_h, %acc;
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %out, %off;
+    st.global.b16 [%off], %out_h;
+
+DONE:
+    ret;
+}
+";
+
+const PROD_AXIS_BACKWARD_F16_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry prod_axis_backward_f16_kernel(
+    .param .u64 input_ptr,
+    .param .u64 grad_output_ptr,
+    .param .u64 grad_input_ptr,
+    .param .u32 outer,
+    .param .u32 axis_size,
+    .param .u32 inner
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %outer_r, %axis_r, %inner_r;
+    .reg .u32 %axis_inner, %total_in, %oi, %tmp, %di, %ii, %k, %idx, %go_idx;
+    .reg .u64 %input, %go, %gi, %off;
+    .reg .b16 %x_b16, %go_b16, %out_h;
+    .reg .f32 %acc, %vx, %vgo, %vr;
+    .reg .pred %p, %p_skip;
+
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %go, [grad_output_ptr];
+    ld.param.u64 %gi, [grad_input_ptr];
+    ld.param.u32 %outer_r, [outer];
+    ld.param.u32 %axis_r, [axis_size];
+    ld.param.u32 %inner_r, [inner];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    mul.lo.u32 %axis_inner, %axis_r, %inner_r;
+    mul.lo.u32 %total_in, %outer_r, %axis_inner;
+    setp.ge.u32 %p, %r_tid, %total_in;
+    @%p bra DONE;
+
+    div.u32 %oi, %r_tid, %axis_inner;
+    rem.u32 %tmp, %r_tid, %axis_inner;
+    div.u32 %di, %tmp, %inner_r;
+    rem.u32 %ii, %tmp, %inner_r;
+
+    mul.lo.u32 %go_idx, %oi, %inner_r;
+    add.u32 %go_idx, %go_idx, %ii;
+    cvt.u64.u32 %off, %go_idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %go, %off;
+    ld.global.b16 %go_b16, [%off];
+    cvt.f32.f16 %vgo, %go_b16;
+
+    mov.f32 %acc, 0f3F800000;
+    mov.u32 %k, 0;
+LOOP:
+    setp.ge.u32 %p, %k, %axis_r;
+    @%p bra LOOP_END;
+    setp.eq.u32 %p_skip, %k, %di;
+    @%p_skip bra SKIP_MUL;
+
+    mul.lo.u32 %idx, %oi, %axis_r;
+    add.u32 %idx, %idx, %k;
+    mul.lo.u32 %idx, %idx, %inner_r;
+    add.u32 %idx, %idx, %ii;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %input, %off;
+    ld.global.b16 %x_b16, [%off];
+    cvt.f32.f16 %vx, %x_b16;
+    mul.f32 %acc, %acc, %vx;
+
+SKIP_MUL:
+    add.u32 %k, %k, 1;
+    bra LOOP;
+LOOP_END:
+
+    mul.f32 %vr, %acc, %vgo;
+    cvt.rn.f16.f32 %out_h, %vr;
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %gi, %off;
+    st.global.b16 [%off], %out_h;
+
+DONE:
+    ret;
+}
+";
+
+fn validate_prod_axis_dims_f16(
+    op: &'static str,
+    input_len: usize,
+    grad_output_len: Option<usize>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+) -> GpuResult<(usize, usize)> {
+    let total_input = outer
+        .checked_mul(axis_size)
+        .and_then(|v| v.checked_mul(inner))
+        .ok_or(GpuError::ShapeMismatch {
+            op,
+            expected: vec![outer, axis_size, inner],
+            got: vec![usize::MAX],
+        })?;
+    let total_output = outer.checked_mul(inner).ok_or(GpuError::ShapeMismatch {
+        op,
+        expected: vec![outer, inner],
+        got: vec![usize::MAX],
+    })?;
+    if input_len != total_input {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![total_input],
+            got: vec![input_len],
+        });
+    }
+    if let Some(len) = grad_output_len
+        && len != total_output
+    {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![total_output],
+            got: vec![len],
+        });
+    }
+    Ok((total_input, total_output))
+}
+
 /// Axis-reduce sum: f16 [outer, axis, inner] -> f16 [outer, inner].
 /// f32 accumulator (PyTorch parity).
 pub fn gpu_sum_axis_f16(
@@ -1347,6 +1544,119 @@ pub fn gpu_mean_axis_f16(
     Ok(out)
 }
 
+/// Axis-reduce product: f16 [outer, axis, inner] -> f16 [outer, inner].
+/// Accumulates in f32 and rounds once to f16 at the output.
+pub fn gpu_prod_axis_f16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let (_, total) =
+        validate_prod_axis_dims_f16("prod_axis_f16", a.len(), None, outer, axis_size, inner)?;
+    let stream = device.stream();
+    if total == 0 {
+        return Ok(stream.alloc_zeros::<u16>(0)?);
+    }
+    let ctx = device.context();
+    let f = get_or_compile(
+        ctx,
+        PROD_AXIS_F16_PTX,
+        "prod_axis_f16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "prod_axis_f16_kernel",
+        source: e,
+    })?;
+    let mut out = stream.alloc_zeros::<u16>(total)?;
+    let cfg = launch_1d(total);
+    let outer_u32 = outer as u32;
+    let axis_u32 = axis_size as u32;
+    let inner_u32 = inner as u32;
+    // SAFETY:
+    // - `f` is the `prod_axis_f16_kernel` entry with args
+    //   (a_ptr, out_ptr, outer, axis_size, inner).
+    // - `validate_prod_axis_dims_f16` proves `a.len() == outer*axis*inner`;
+    //   the kernel launches one thread per `outer*inner` output and reads
+    //   only k in `[0, axis_size)`.
+    // - `out` is a fresh `total`-element u16 allocation.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a)
+            .arg(&mut out)
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Backward for f16 axis product.
+///
+/// Computes `grad_output[o, i] * product(input[o, d != current, i])`.
+/// This direct prefix/suffix-equivalent product preserves PyTorch's zero
+/// semantics without dividing by the forward product.
+pub fn gpu_prod_axis_backward_f16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    grad_output: &cudarc::driver::CudaSlice<u16>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let (total_input, _) = validate_prod_axis_dims_f16(
+        "prod_axis_backward_f16",
+        input.len(),
+        Some(grad_output.len()),
+        outer,
+        axis_size,
+        inner,
+    )?;
+    let stream = device.stream();
+    if total_input == 0 {
+        return Ok(stream.alloc_zeros::<u16>(0)?);
+    }
+    let ctx = device.context();
+    let f = get_or_compile(
+        ctx,
+        PROD_AXIS_BACKWARD_F16_PTX,
+        "prod_axis_backward_f16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "prod_axis_backward_f16_kernel",
+        source: e,
+    })?;
+    let mut out = stream.alloc_zeros::<u16>(total_input)?;
+    let cfg = launch_1d(total_input);
+    let outer_u32 = outer as u32;
+    let axis_u32 = axis_size as u32;
+    let inner_u32 = inner as u32;
+    // SAFETY:
+    // - `f` is the `prod_axis_backward_f16_kernel` entry with args
+    //   (input_ptr, grad_output_ptr, grad_input_ptr, outer, axis, inner).
+    // - `validate_prod_axis_dims_f16` proves the input and grad_output
+    //   lengths match `[outer, axis, inner]` and `[outer, inner]`.
+    // - `out` is a fresh `total_input` allocation; each thread writes its
+    //   own input-position gradient exactly once.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(grad_output)
+            .arg(&mut out)
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
 /// Sum-reduce an f16 buffer to a scalar (1-element) f16 buffer.
 /// f32 accumulator (PyTorch parity). Implemented as a single-element
 /// axis reduction with `outer=1, axis_size=n, inner=1`.
@@ -1381,6 +1691,24 @@ pub fn gpu_mean_f16(
     let sum = gpu_sum_f16(a, device)?;
     let inv_n = 1.0f32 / (n as f32);
     gpu_scale_f16(&sum, inv_n, device)
+}
+
+/// Product of an f16 buffer to a scalar (1-element) f16 buffer.
+/// Empty input returns the multiplicative identity, matching PyTorch.
+pub fn gpu_prod_f16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    gpu_prod_axis_f16(a, 1, a.len(), 1, device)
+}
+
+/// Backward for global f16 product. Output length equals input length.
+pub fn gpu_prod_backward_f16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    grad_output: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    gpu_prod_axis_backward_f16(input, grad_output, 1, input.len(), 1, device)
 }
 
 const STD_VAR_AXIS_F16_PTX: &str = "\

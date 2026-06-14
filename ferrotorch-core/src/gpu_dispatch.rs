@@ -5175,6 +5175,24 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// bf16 product-reduce to scalar. f32 accumulator, bf16 round-back.
+    fn prod_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prod_bf16_bf16",
+        })
+    }
+
+    /// bf16 backward for global `prod`.
+    fn prod_backward_bf16_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prod_backward_bf16_bf16",
+        })
+    }
+
     /// bf16 axis-reduce sum. `shape` is the full input shape; `axis` is
     /// the index of the dimension being reduced. Output has the same shape
     /// minus the reduced dim (caller may keepdim if desired). f32
@@ -5201,6 +5219,33 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "mean_axis_bf16_bf16",
+        })
+    }
+
+    /// bf16 axis-reduce product. f32 accumulator, bf16 round-back.
+    fn prod_axis_bf16_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prod_axis_bf16_bf16",
+        })
+    }
+
+    /// bf16 backward for axis `prod`.
+    fn prod_axis_backward_bf16_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prod_axis_backward_bf16_bf16",
         })
     }
 
@@ -5358,6 +5403,22 @@ pub trait GpuBackend: Send + Sync {
         Err(FerrotorchError::NotImplementedOnCuda { op: "mean_f16" })
     }
 
+    /// f16 product-reduce to scalar. f32 accumulator, f16 RNE store.
+    fn prod_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "prod_f16" })
+    }
+
+    /// f16 backward for global `prod`.
+    fn prod_backward_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prod_backward_f16",
+        })
+    }
+
     /// f16 axis sum-reduce. f32 accumulator; collapses `shape[axis]`.
     fn sum_axis_f16(
         &self,
@@ -5377,6 +5438,33 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "mean_axis_f16",
+        })
+    }
+
+    /// f16 axis product-reduce. f32 accumulator; collapses `shape[axis]`.
+    fn prod_axis_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prod_axis_f16",
+        })
+    }
+
+    /// f16 backward for axis `prod`.
+    fn prod_axis_backward_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _outer: usize,
+        _axis_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prod_axis_backward_f16",
         })
     }
 
