@@ -41,28 +41,6 @@ use crate::tensor::{GradFn, Tensor};
 use crate::bool_tensor::BoolTensor;
 use crate::int_tensor::{IntElement, IntTensor};
 
-/// Upload a CPU `&[f32]` slice to a GPU buffer on the given device ordinal.
-///
-/// CORE-129 (#1823) note: this is for VALUE payloads (e.g. the legacy
-/// `masked_fill` 0.0/1.0 float mask) ONLY. Index/offset payloads must NEVER
-/// go through an f32 encoding — offsets above 2^24 are not all representable
-/// and silently round to a neighboring element. Indices upload as `i64` via
-/// [`crate::ops::indexing::upload_index_i64`].
-fn upload_f32_to_gpu(
-    data: &[f32],
-    ordinal: usize,
-) -> FerrotorchResult<crate::gpu_dispatch::GpuBufferHandle> {
-    let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-    // SAFETY: `data: &[f32]` is borrowed for the duration of this function
-    // and is fully initialized (f32 has no padding, no niches). Reading its
-    // bytes as &[u8] of length `data.len() * 4` (== `data.len() *
-    // size_of::<f32>()`) is sound and matches the actual byte size of the
-    // underlying allocation; the resulting slice does not outlive `data`.
-    let bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 4) };
-    backend.cpu_to_gpu(bytes, crate::dtype::DType::F32, ordinal)
-}
-
 // ---------------------------------------------------------------------------
 // Helpers for N-D backward (shared by gather/scatter/scatter_add)
 // ---------------------------------------------------------------------------
@@ -369,7 +347,6 @@ pub fn masked_fill<T: Float>(
     value: T,
 ) -> FerrotorchResult<Tensor<T>> {
     let input_len = input.numel();
-
     if mask.len() != input_len {
         return Err(FerrotorchError::ShapeMismatch {
             message: format!(
@@ -380,60 +357,43 @@ pub fn masked_fill<T: Float>(
         });
     }
 
-    let output_shape = input.shape().to_vec();
-
+    let mask_bt = BoolTensor::from_slice(mask, input.shape())?;
     if input.is_cuda() {
-        // GPU path: masked-fill via GPU kernel.
-        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let ordinal = match input.device() {
-            Device::Cuda(o) => o,
-            _ => unreachable!(),
-        };
-        let mask_f32: Vec<f32> = mask.iter().map(|&m| if m { 1.0 } else { 0.0 }).collect();
-        let mask_handle = upload_f32_to_gpu(&mask_f32, ordinal)?;
-        // value must be f32 for the GPU kernel.
-        let value_f32: f32 = num_traits::ToPrimitive::to_f32(&value).unwrap_or(0.0);
-        // #1661: a row-narrowed CUDA view reports its logical numel but is backed
-        // by a larger base buffer carrying `storage_offset`; the GPU kernel would
-        // otherwise read the wrong window (or the dispatch would reject the
-        // `input numel 8 != mask numel 6` mismatch). `.contiguous()` materialises
-        // the logical view on-device via strided_copy (#1657), so the handle's
-        // logical len matches the mask len and the kernel reads `[0, n)`.
-        let input = input.contiguous()?;
-        let result_handle =
-            backend.masked_fill_f32(input.gpu_handle()?, &mask_handle, value_f32)?;
-        let storage = TensorStorage::gpu(result_handle);
+        let mask_bt = mask_bt.to(input.device())?;
+        return masked_fill_bt(input, &mask_bt, value);
+    }
 
-        if input.requires_grad() && is_grad_enabled() {
-            // This entry point inherently has a host `&[bool]`; wrap it as a CPU
-            // BoolTensor for storage. The backward struct now holds a BoolTensor
-            // (CPU here; the resident `masked_fill_bt` path stores a GPU one).
-            let grad_fn = Arc::new(MaskedFillBackward {
-                input: input.clone(),
-                mask: BoolTensor::from_slice(mask, &output_shape)?,
-            });
-            Tensor::from_operation(storage, output_shape, grad_fn)
-        } else {
-            Tensor::from_storage(storage, output_shape, false)
-        }
+    masked_fill_cpu(input, &mask_bt, value)
+}
+
+fn masked_fill_cpu<T: Float>(
+    input: &Tensor<T>,
+    mask: &BoolTensor,
+    value: T,
+) -> FerrotorchResult<Tensor<T>> {
+    if input.device() != mask.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: input.device(),
+            got: mask.device(),
+        });
+    }
+    let output_shape = input.shape().to_vec();
+    let input_data = input.data_vec()?;
+    let mask_data = mask.data()?;
+    let output_data: Vec<T> = input_data
+        .iter()
+        .zip(mask_data.iter())
+        .map(|(&x, &m)| if m { value } else { x })
+        .collect();
+
+    if input.requires_grad() && is_grad_enabled() {
+        let grad_fn = Arc::new(MaskedFillBackward {
+            input: input.clone(),
+            mask: mask.clone(),
+        });
+        Tensor::from_operation(TensorStorage::cpu(output_data), output_shape, grad_fn)
     } else {
-        // CPU path: direct masked fill.
-        let input_data = input.data()?;
-        let output_data: Vec<T> = input_data
-            .iter()
-            .zip(mask.iter())
-            .map(|(&x, &m)| if m { value } else { x })
-            .collect();
-
-        if input.requires_grad() && is_grad_enabled() {
-            let grad_fn = Arc::new(MaskedFillBackward {
-                input: input.clone(),
-                mask: BoolTensor::from_slice(mask, &output_shape)?,
-            });
-            Tensor::from_operation(TensorStorage::cpu(output_data), output_shape, grad_fn)
-        } else {
-            Tensor::from_storage(TensorStorage::cpu(output_data), output_shape, false)
-        }
+        Tensor::from_storage(TensorStorage::cpu(output_data), output_shape, false)
     }
 }
 
@@ -1110,6 +1070,12 @@ pub fn masked_fill_bt<T: Float>(
             ),
         });
     }
+    if input.device() != mask.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: input.device(),
+            got: mask.device(),
+        });
+    }
 
     // GPU-resident fast path (crosslink #1185 Phase 3c): both input and mask
     // live on CUDA — dispatch on input.dtype() through the resident-bool kernel.
@@ -1151,11 +1117,7 @@ pub fn masked_fill_bt<T: Float>(
         return Tensor::from_storage(storage, output_shape, false);
     }
 
-    // CPU (or mixed-residency) path: delegate to the host `&[bool]` variant,
-    // which itself handles a CUDA `input` with a host mask (legacy float-mask
-    // upload). `mask.data()?` errors if the mask is on GPU but input is not,
-    // which is the correct device-mismatch signal.
-    masked_fill(input, mask.data()?, value)
+    masked_fill_cpu(input, mask, value)
 }
 
 /// `index_select_1d` taking an [`IntTensor`] of indices. The index tensor
@@ -3832,11 +3794,10 @@ impl<T: Float> GradFn<T> for MaskedScatterBackward<T> {
 /// [`FerrotorchError::DeviceMismatch`] (torch: "Expected all tensors to be
 /// on the same device, but got mask is on cpu, different from other tensors
 /// on cuda:0"); the audit's "host-accessible mask" fallback for a CUDA
-/// input is therefore unreachable. All-CUDA f32/f64 runs the on-device
-/// `masked_scatter_forward` kernel (#1662, below). All-CUDA f16/bf16 is an
-/// EXPLICIT host round trip (R-LOUD-2): mask + operands download, the walk
-/// runs on host, and the result re-uploads to `input`'s device. Gradients
-/// are delivered on the leaves' devices.
+/// input is therefore unreachable. All-CUDA f32/f64/f16/bf16 runs the
+/// on-device `masked_scatter_forward` kernel (#1662, below), preserving
+/// residency and dtype bit patterns. Gradients are delivered on the leaves'
+/// devices.
 pub fn masked_scatter<T: Float>(
     input: &Tensor<T>,
     mask: &BoolTensor,
@@ -3872,15 +3833,16 @@ pub fn masked_scatter<T: Float>(
     // source-index `j` is the exclusive prefix-sum of the mask, realised by a
     // serial in-order walk — matching upstream
     // `aten/src/ATen/native/cuda/IndexKernel.cu:416-453`). Result stays
-    // `is_cuda()`; NO host round trip (R-CODE-4). f32/f64 only — other dtypes
-    // (and any mixed-residency combination) fall through to the host path, whose
-    // `mask_b.data()` surfaces the correct device-mismatch error.
+    // `is_cuda()`; NO host round trip (R-CODE-4). f32/f64/f16/bf16 are covered
+    // by the backend; unsupported CUDA dtypes remain explicit errors.
     if input_b.is_cuda() && mask_b.is_cuda() && source.is_cuda() {
-        use std::any::TypeId;
-        let is_t_f32 = TypeId::of::<T>() == TypeId::of::<f32>();
-        let is_t_f64 = TypeId::of::<T>() == TypeId::of::<f64>();
-        if (is_t_f32 || is_t_f64)
-            && input_b.device() == mask_b.device()
+        if matches!(
+            T::dtype(),
+            crate::dtype::DType::F32
+                | crate::dtype::DType::F64
+                | crate::dtype::DType::F16
+                | crate::dtype::DType::BF16
+        ) && input_b.device() == mask_b.device()
             && input_b.device() == source.device()
         {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -3913,11 +3875,14 @@ pub fn masked_scatter<T: Float>(
             }
             return Tensor::from_storage(storage, output_shape, false);
         }
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "masked_scatter",
+        });
     }
 
-    // Host path. The entry device check means a CUDA mask here implies ALL
-    // operands are CUDA (f16/bf16 — no kernel): the documented host round
-    // trip downloads the mask, walks on host, and re-uploads the result.
+    // Host path: CPU tensors only. Same-device CUDA operands should have been
+    // handled by the resident branch above or rejected as unsupported, never
+    // downloaded for a fallback walk.
     let mask_host;
     let mask_h = if mask_b.is_cuda() {
         mask_host = mask_b.to(Device::Cpu)?;

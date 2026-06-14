@@ -10,8 +10,9 @@
 //! entries backed by PTX kernels in `ferrotorch-gpu`; the host `&[usize]` index
 //! is uploaded as a resident `i64` buffer and the result stays GPU-resident.
 //! bf16/f16 CUDA inputs return `NotImplementedOnCuda`.
-//! `where_cond` (host-`&[bool]`) is CPU-only; `where_cond_bt` / `masked_select`
-//! have their own GPU-resident paths (#1185 / #1187).
+//! `where_cond` (host-`&[bool]`) uploads the condition once for CUDA operands
+//! and delegates to the same resident path as `where_cond_bt`; `masked_select`
+//! has its own GPU-resident compaction path (#1185 / #1187).
 //! Backward (gradient) functions live in `grad_fns::indexing`.
 //!
 //! ## REQ status (per `.design/ferrotorch-core/ops/indexing.md`)
@@ -482,14 +483,14 @@ pub fn scatter<T: Float>(
     // (a clone of `input` with the scattered writes) stays GPU-resident.
     // bf16/f16 → `NotImplementedOnCuda`.
     if input.is_cuda() || src.is_cuda() {
+        if input.device() != src.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: input.device(),
+                got: src.device(),
+            });
+        }
         match T::dtype() {
             DType::F32 | DType::F64 if input.is_cuda() && src.is_cuda() => {
-                if input.device() != src.device() {
-                    return Err(FerrotorchError::DeviceMismatch {
-                        expected: input.device(),
-                        got: src.device(),
-                    });
-                }
                 // The rank-aware scatter kernel reads `self`/`src` as
                 // C-contiguous buffers. Materialise to contiguous ON-DEVICE
                 // (strided_copy — no host round trip) so a transposed/permuted
@@ -793,14 +794,14 @@ pub fn scatter_add<T: Float>(
     // same output slot sum correctly. The result stays GPU-resident. bf16/f16
     // → `NotImplementedOnCuda`.
     if input.is_cuda() || src.is_cuda() {
+        if input.device() != src.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: input.device(),
+                got: src.device(),
+            });
+        }
         match T::dtype() {
             DType::F32 | DType::F64 if input.is_cuda() && src.is_cuda() => {
-                if input.device() != src.device() {
-                    return Err(FerrotorchError::DeviceMismatch {
-                        expected: input.device(),
-                        got: src.device(),
-                    });
-                }
                 // The rank-aware scatter_add kernel reads `self`/`src` as
                 // C-contiguous buffers. Materialise to contiguous ON-DEVICE
                 // (strided_copy — no host round trip) so a transposed/permuted
@@ -918,8 +919,11 @@ pub fn where_cond<T: Float>(
             ),
         });
     }
-    if x.is_cuda() || y.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "where_cond" });
+    if x.device() != y.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: x.device(),
+            got: y.device(),
+        });
     }
 
     let numel = x.numel();
@@ -933,6 +937,20 @@ pub fn where_cond<T: Float>(
         });
     }
 
+    let cond = crate::bool_tensor::BoolTensor::from_slice(condition, x.shape())?;
+    if x.is_cuda() {
+        let cond = cond.to(x.device())?;
+        return where_cond_bt(&cond, x, y);
+    }
+
+    where_cond_cpu(condition, x, y)
+}
+
+fn where_cond_cpu<T: Float>(
+    condition: &[bool],
+    x: &Tensor<T>,
+    y: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
     let x_data = x.data_vec()?;
     let y_data = y.data_vec()?;
 
@@ -990,21 +1008,21 @@ pub fn where_cond_bt<T: Float>(
             ),
         });
     }
+    if x.device() != y.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: x.device(),
+            got: y.device(),
+        });
+    }
+    if x.device() != cond.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: x.device(),
+            got: cond.device(),
+        });
+    }
 
     // GPU-resident fast path: all three on the same CUDA device.
     if x.is_cuda() && y.is_cuda() && cond.is_cuda() {
-        if x.device() != y.device() {
-            return Err(FerrotorchError::DeviceMismatch {
-                expected: x.device(),
-                got: y.device(),
-            });
-        }
-        if x.device() != cond.device() {
-            return Err(FerrotorchError::DeviceMismatch {
-                expected: x.device(),
-                got: cond.device(),
-            });
-        }
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         // #1660: normalise the narrowed-offset CUDA x/y operands to packed
@@ -1034,10 +1052,7 @@ pub fn where_cond_bt<T: Float>(
         return Tensor::from_storage(storage, output_shape, false);
     }
 
-    // CPU (or mixed-residency) path: materialise the host condition and delegate
-    // to the autograd-aware CPU `where_cond`. `cond.data()?` errors if the cond
-    // is on GPU while x/y are not — the correct device-mismatch signal.
-    where_cond(cond.data()?, x, y)
+    where_cond_cpu(cond.data()?, x, y)
 }
 
 /// `masked_select(input, mask)` — return a 1-D tensor of the elements of

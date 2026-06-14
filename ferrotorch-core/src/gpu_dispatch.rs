@@ -3001,7 +3001,7 @@ pub trait GpuBackend: Send + Sync {
     // `input` and `mask` MUST have equal numel == `n`; `mask` MUST be tagged
     // `DType::Bool`; `source` must hold >= count_nonzero(mask) elements (the
     // caller checks this). Result keeps `input`'s dtype and stays GPU-resident
-    // (NO host round trip — R-CODE-4). Covers f32/f64.
+    // (NO host round trip — R-CODE-4). Covers f32/f64/bf16/f16.
     fn masked_scatter_forward(
         &self,
         _input: &GpuBufferHandle,

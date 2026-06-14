@@ -46,6 +46,12 @@ pub fn searchsorted<T: Float>(
             ),
         });
     }
+    if boundaries.device() != values.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: boundaries.device(),
+            got: values.device(),
+        });
+    }
 
     // GPU fast path (#1545): when both tensors are CUDA-resident f32/f64, run
     // the binary search on-device via `GpuBackend::searchsorted_1d` and read
@@ -352,6 +358,9 @@ pub fn histc<T: Float>(
             message: "histc: bins must be > 0".into(),
         });
     }
+    if input.is_cuda() && !(is_f32::<T>() || is_f64::<T>()) {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "histc" });
+    }
 
     // Default-range inference (#1652a): `torch.histc(x, bins)` defaults to
     // `min=max=0`. Upstream `_histc_*_template` recomputes the range from the
@@ -360,33 +369,15 @@ pub fn histc<T: Float>(
     // Mirrors `aten/src/ATen/native/cuda/SummaryOps.cu:328-336`:
     //   if (min == max && self.numel() > 0) { auto [mn,mx]=self.aminmax(); .. }
     //   if (minvalue == maxvalue) { minvalue -= 1; maxvalue += 1; }
-    // This runs BEFORE the device branch so the CPU and GPU paths agree.
+    // This runs BEFORE the histogram device branch so the CPU and GPU paths
+    // agree. CUDA f32/f64 infer via on-device min/max reductions and copy back
+    // only the two scalar bounds, not the full input buffer.
     let (min_val, max_val) = if min_val == max_val {
         let numel = input.numel();
         if numel > 0 {
-            // `data_vec()` transparently materialises CUDA data to host; here we
-            // only derive the two scalar bounds from it (NOT a value round trip
-            // back to device — the histogram itself still runs on whichever
-            // device the input lives on).
-            let data = input.data_vec()?;
-            let mut mn = f64::INFINITY;
-            let mut mx = f64::NEG_INFINITY;
-            for &v in &data {
-                if let Some(f) = num_traits::ToPrimitive::to_f64(&v) {
-                    if f < mn {
-                        mn = f;
-                    }
-                    if f > mx {
-                        mx = f;
-                    }
-                }
-            }
-            // All-NaN (or empty after the numel guard) leaves the sentinels
-            // untouched; fall back to the requested (equal) bounds so the
-            // widen-by-1 below produces a valid finite range.
+            let (mn, mx) = histc_infer_data_range(input)?;
             if !mn.is_finite() || !mx.is_finite() {
-                mn = min_val;
-                mx = max_val;
+                return Err(histc_nonfinite_range_error(mn, mx));
             }
             if mn == mx {
                 (mn - 1.0, mx + 1.0)
@@ -396,6 +387,9 @@ pub fn histc<T: Float>(
         } else {
             // numel == 0: widen the equal bounds to a valid range (every bin
             // stays empty regardless).
+            if !min_val.is_finite() || !max_val.is_finite() {
+                return Err(histc_nonfinite_range_error(min_val, max_val));
+            }
             (min_val - 1.0, max_val + 1.0)
         }
     } else if min_val > max_val {
@@ -403,6 +397,9 @@ pub fn histc<T: Float>(
             message: format!("histc: min ({min_val}) must be <= max ({max_val})"),
         });
     } else {
+        if !min_val.is_finite() || !max_val.is_finite() {
+            return Err(histc_nonfinite_range_error(min_val, max_val));
+        }
         (min_val, max_val)
     };
 
@@ -610,7 +607,7 @@ pub fn meshgrid_indexing<T: Float>(
         return Ok(grids);
     }
 
-    let all_cuda = tensors.iter().all(|t| t.is_cuda());
+    let device = tensors[0].device();
     for t in tensors {
         if t.ndim() != 1 {
             return Err(FerrotorchError::InvalidArgument {
@@ -620,15 +617,17 @@ pub fn meshgrid_indexing<T: Float>(
                 ),
             });
         }
-        // Mixed CPU/CUDA inputs are rejected (matches upstream meshgrid's
-        // "all tensors to have the same device" check at
-        // `aten/src/ATen/native/TensorShape.cpp:4396-4398`).
-        if t.is_cuda() != all_cuda {
-            return Err(FerrotorchError::InvalidArgument {
-                message: "meshgrid: all inputs must be on the same device".into(),
+        // Mixed devices, including different CUDA ordinals, are rejected
+        // (matches upstream meshgrid's "all tensors to have the same device"
+        // check at `aten/src/ATen/native/TensorShape.cpp:4396-4398`).
+        if t.device() != device {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: device,
+                got: t.device(),
             });
         }
     }
+    let all_cuda = device.is_cuda();
 
     let shapes: Vec<usize> = tensors.iter().map(|t| t.shape()[0]).collect();
     let ndim = shapes.len();
@@ -715,6 +714,89 @@ fn nan_is_max_cmp<T: Float>(lhs: T, rhs: T) -> std::cmp::Ordering {
         (false, true) => Ordering::Less,
         (false, false) => lhs.partial_cmp(&rhs).unwrap_or(Ordering::Equal),
     }
+}
+
+fn histc_nonfinite_range_error(min_val: f64, max_val: f64) -> FerrotorchError {
+    FerrotorchError::InvalidArgument {
+        message: format!("histc: range of [{min_val}, {max_val}] is not finite"),
+    }
+}
+
+fn histc_decode_gpu_scalar(bytes: &[u8], elem_size: usize, op: &str) -> FerrotorchResult<f64> {
+    if bytes.len() < elem_size {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: GPU returned {} scalar bytes, expected >= {elem_size}",
+                bytes.len()
+            ),
+        });
+    }
+    match elem_size {
+        4 => {
+            let mut buf = [0u8; 4];
+            buf.copy_from_slice(&bytes[..4]);
+            Ok(f32::from_le_bytes(buf) as f64)
+        }
+        8 => {
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&bytes[..8]);
+            Ok(f64::from_le_bytes(buf))
+        }
+        _ => Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: unsupported scalar byte width {elem_size}"),
+        }),
+    }
+}
+
+fn histc_infer_data_range<T: Float>(input: &Tensor<T>) -> FerrotorchResult<(f64, f64)> {
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let input = input.contiguous()?;
+        let min_handle = if is_f32::<T>() {
+            backend.min_f32(input.gpu_handle()?, input.numel())?
+        } else {
+            backend.min_f64(input.gpu_handle()?, input.numel())?
+        };
+        let max_handle = if is_f32::<T>() {
+            backend.max_f32(input.gpu_handle()?, input.numel())?
+        } else {
+            backend.max_f64(input.gpu_handle()?, input.numel())?
+        };
+        let elem_size = if is_f32::<T>() { 4 } else { 8 };
+        let mn = histc_decode_gpu_scalar(
+            &backend.gpu_to_cpu(&min_handle)?,
+            elem_size,
+            "histc: min range inference",
+        )?;
+        let mx = histc_decode_gpu_scalar(
+            &backend.gpu_to_cpu(&max_handle)?,
+            elem_size,
+            "histc: max range inference",
+        )?;
+        return Ok((mn, mx));
+    }
+
+    let data = input.data_vec()?;
+    let mut mn = data[0];
+    let mut mx = data[0];
+    for &v in &data[1..] {
+        if v.is_nan() || (!mn.is_nan() && v < mn) {
+            mn = v;
+        }
+        if v.is_nan() || (!mx.is_nan() && v > mx) {
+            mx = v;
+        }
+    }
+    let mn =
+        num_traits::ToPrimitive::to_f64(&mn).ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "histc: inferred minimum is not representable as f64".into(),
+        })?;
+    let mx =
+        num_traits::ToPrimitive::to_f64(&mx).ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "histc: inferred maximum is not representable as f64".into(),
+        })?;
+    Ok((mn, mx))
 }
 
 /// Backward node for [`topk`] values (CORE-109, #1803).

@@ -9853,6 +9853,18 @@ impl GpuBackend for CudaBackendImpl {
                 ),
             });
         }
+        if input.device_ordinal() != source.device_ordinal() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: ferrotorch_core::Device::Cuda(input.device_ordinal()),
+                got: ferrotorch_core::Device::Cuda(source.device_ordinal()),
+            });
+        }
+        if input.device_ordinal() != mask.device_ordinal() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: ferrotorch_core::Device::Cuda(input.device_ordinal()),
+                got: ferrotorch_core::Device::Cuda(mask.device_ordinal()),
+            });
+        }
         if input.len() != n || mask.len() != n {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
@@ -9897,6 +9909,28 @@ impl GpuBackend for CudaBackendImpl {
                 mk::masked_scatter_forward_64::<f64>(
                     Self::unwrap_buffer_f64(input)?.inner(),
                     Self::unwrap_buffer_f64(source)?.inner(),
+                    mb,
+                    n,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::F16 => Ok(Self::wrap_buffer_f16(
+                mk::masked_scatter_forward_16(
+                    Self::unwrap_buffer_f16(input)?,
+                    Self::unwrap_buffer_f16(source)?,
+                    mb,
+                    n,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            DType::BF16 => Ok(Self::wrap_buffer_bf16(
+                mk::masked_scatter_forward_16(
+                    Self::unwrap_buffer_bf16(input)?,
+                    Self::unwrap_buffer_bf16(source)?,
                     mb,
                     n,
                     dev,

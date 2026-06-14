@@ -17,12 +17,10 @@
 //!   (4) THE masked_scatter SPILLOVER VERDICT (the key open question).
 //!       `launch_scatter` (masked_kernels.rs:711) still validates the RAW
 //!       `mask.len() != out_numel`. Empirical findings:
-//!         - masked_scatter FORWARD (`masked_scatter_t` -> grad_fns/indexing.rs
-//!           :3597) builds its result from `input_b.data_vec()` (GPU->host,
-//!           layout-honouring) + a HOST `mask_b.data()` walk, returning a
-//!           `TensorStorage::cpu`. It NEVER reaches `launch_scatter`. With a CPU
-//!           mask + GPU (even narrowed-offset) input it is CORRECT vs torch
-//!           (`masked_scatter_forward_cpumask_narrowed_offset_input_matches_torch`).
+//!         - masked_scatter FORWARD rejects mixed CPU-mask/CUDA-input residency
+//!           like live torch. Older ferrotorch builds accidentally round-tripped
+//!           through host data and returned a CPU tensor; that path is not
+//!           production GPU semantics.
 //!         - The ONLY user-facing path into `backend.masked_scatter` ->
 //!           `launch_scatter` is `MaskedSelectBackward::backward` (indexing.rs
 //!           :979). The saved bool mask there is an EXACT-length resident buffer
@@ -49,7 +47,7 @@
 //! expectations are live-torch constants (2.11.0+cu130, RTX 3090, this env)
 //! quoted at each use.
 
-use ferrotorch_core::{BoolTensor, Device, Tensor, TensorStorage};
+use ferrotorch_core::{BoolTensor, Device, FerrotorchError, Tensor, TensorStorage};
 use ferrotorch_gpu::init_cuda_backend;
 
 fn ensure_cuda() {
@@ -189,35 +187,26 @@ fn masked_fill_f64_narrowed_offset_view_gpu_matches_torch() {
 // (4) masked_scatter SPILLOVER verdict.
 // ===========================================================================
 
-/// masked_scatter FORWARD on a narrowed-offset CUDA input with a CPU mask (the
-/// SUPPORTED path) — host data_vec path honours storage_offset, never reaches
-/// launch_scatter. live torch 2.11.0+cu130 (RTX 3090):
-///   v=[[3,4],[5,6],[7,8]] (offset 2), m=[[F,T],[T,F],[T,T]], src=[-1,-2,-3,-4]
-///   v.masked_scatter(m,src).flatten() == [3,-1,-2,6,-3,-4]
-const TORCH_MS_FWD: [f32; 6] = [3.0, -1.0, -2.0, 6.0, -3.0, -4.0];
-
 #[test]
-fn masked_scatter_forward_cpumask_narrowed_offset_input_matches_torch() {
+fn masked_scatter_forward_cpumask_cuda_input_rejected_like_torch() {
     ensure_cuda();
     let full = cpu_f32(&[1., 2., 3., 4., 5., 6., 7., 8.], &[4, 2])
         .to(Device::Cuda(0))
         .expect("to cuda");
     let view = full.narrow(0, 1, 3).expect("narrow");
     assert_ne!(view.storage_offset(), 0);
-    // CPU mask (the supported masked_scatter mask residency); GPU narrowed input.
+    // Live torch rejects CPU masks with CUDA inputs for masked_scatter.
     let mask =
         BoolTensor::from_vec(vec![false, true, true, false, true, true], vec![3, 2]).expect("mask");
     let src = cpu_f32(&[-1., -2., -3., -4.], &[4])
         .to(Device::Cuda(0))
         .expect("src cuda");
-    let got = view
+    let err = view
         .masked_scatter_t(&mask, &src)
-        .expect("masked_scatter forward (CPU mask + narrowed GPU input)");
-    assert_eq!(
-        host_f32(&got),
-        TORCH_MS_FWD.to_vec(),
-        "masked_scatter forward on narrowed-offset GPU input diverged from live torch \
-         (host data_vec path must honour storage_offset)"
+        .expect_err("CPU mask + CUDA input must be rejected like torch");
+    assert!(
+        matches!(err, FerrotorchError::DeviceMismatch { .. }),
+        "expected DeviceMismatch for CPU mask + CUDA input, got {err:?}"
     );
 }
 

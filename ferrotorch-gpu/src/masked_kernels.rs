@@ -46,7 +46,7 @@
 //! | REQ-1 (`masked_fill` per-dtype) | SHIPPED | six `pub fn masked_fill_*` symbols in `masked_kernels.rs`; consumer `use crate::masked_kernels as mk` site in `backend_impl.rs` dispatches per-dtype calls |
 //! | REQ-2 (`where`) | SHIPPED | `pub fn where_32 / where_64 / where_16 in masked_kernels.rs`; consumer `CudaBackendImpl::where_cond_* in backend_impl.rs` |
 //! | REQ-3 (`masked_select`) | SHIPPED | `pub fn count_true in masked_kernels.rs` + `masked_select_32 / masked_select_64 / masked_select_16`; consumer `CudaBackendImpl::masked_select_* in backend_impl.rs` |
-//! | REQ-4 (`masked_scatter`) | SHIPPED | backward `pub fn masked_scatter_32 / masked_scatter_64 / masked_scatter_16` (VJP) + forward `pub fn masked_scatter_forward_32 / masked_scatter_forward_64` (#1662, `out[i] = mask[i] ? source[j++] : input[i]`) in `masked_kernels.rs`; consumers `CudaBackendImpl::masked_scatter` / `masked_scatter_forward in backend_impl.rs` (the latter wired by `grad_fns::indexing::masked_scatter`'s all-CUDA branch so a fully-resident forward keeps `is_cuda()`) |
+//! | REQ-4 (`masked_scatter`) | SHIPPED | backward `pub fn masked_scatter_32 / masked_scatter_64 / masked_scatter_16` (VJP) + forward `pub fn masked_scatter_forward_32 / masked_scatter_forward_64 / masked_scatter_forward_16` (#1662, `out[i] = mask[i] ? source[j++] : input[i]`) in `masked_kernels.rs`; consumers `CudaBackendImpl::masked_scatter` / `masked_scatter_forward in backend_impl.rs` (the latter wired by `grad_fns::indexing::masked_scatter`'s all-CUDA branch so a fully-resident forward keeps `is_cuda()`) |
 //! | REQ-5 (single PTX load path) | SHIPPED | `use crate::module_cache::get_or_compile` in `masked_kernels.rs` binds the single PTX load path; no `cudarc::nvrtc` import — every launch routes through `module_cache` |
 //! | REQ-6 ((op, dtype) coverage matrix) | SHIPPED | per-dtype `pub fn` entries in `masked_kernels.rs` mean (op, dtype) coverage is structurally surfaced — a missing combination is a missing function symbol that the `backend_impl` dispatcher converts to `FerrotorchError::NotImplementedOnCuda` |
 //! | REQ-7 (workspace consumer wiring) | SHIPPED | four `use crate::masked_kernels as mk` sites in `backend_impl.rs` (each is the body of a `CudaBackendImpl` trait method); ferrotorch-core dispatches `Tensor::masked_fill / etc.` through the `GpuBackend` trait when input is CUDA-resident |
@@ -1513,6 +1513,27 @@ pub fn masked_scatter_forward_64<T: DeviceRepr + ValidAsZeroBits>(
     )
 }
 
+/// masked_scatter FORWARD for a 16-bit value dtype (f16 / bf16; pure 16-bit
+/// bit copy, no decode or arithmetic).
+pub fn masked_scatter_forward_16(
+    input: &CudaSlice<u16>,
+    source: &CudaSlice<u16>,
+    mask: &CudaSlice<u8>,
+    n: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let ptx = scatter_forward_ptx("masked_scatter_forward_16", 1, "b16", ".reg .b16 %val;");
+    launch_scatter_forward(
+        input,
+        source,
+        mask,
+        n,
+        d,
+        ptx,
+        "masked_scatter_forward_16".to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1626,6 +1647,27 @@ mod tests {
         let grad = d.stream().clone_htod(&vec![one, two]).unwrap();
         let out = masked_scatter_16(&grad, &mask, 3, &d).unwrap();
         assert_eq!(d.stream().clone_dtoh(&out).unwrap(), vec![0u16, one, two]);
+    }
+
+    #[test]
+    fn masked_scatter_forward_16_keeps_input_and_source_bits() {
+        let d = dev();
+        let one = half::f16::from_f32(1.0).to_bits();
+        let two = half::f16::from_f32(2.0).to_bits();
+        let three = half::f16::from_f32(3.0).to_bits();
+        let four = half::f16::from_f32(4.0).to_bits();
+        let neg_one = half::f16::from_f32(-1.0).to_bits();
+        let neg_two = half::f16::from_f32(-2.0).to_bits();
+        let input = d.stream().clone_htod(&vec![one, two, three, four]).unwrap();
+        let mask = d.stream().clone_htod(&vec![0u8, 1, 1, 0]).unwrap();
+        let source = d.stream().clone_htod(&vec![neg_one, neg_two]).unwrap();
+
+        let out = masked_scatter_forward_16(&input, &source, &mask, 4, &d).unwrap();
+
+        assert_eq!(
+            d.stream().clone_dtoh(&out).unwrap(),
+            vec![one, neg_one, neg_two, four]
+        );
     }
 
     #[test]

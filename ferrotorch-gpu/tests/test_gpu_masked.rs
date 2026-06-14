@@ -80,7 +80,7 @@ fn masked_mean_f32_matches_cpu() {
 
     let gpu_data = data.to(Device::Cuda(0)).unwrap();
     let mt = MaskedTensor::new(gpu_data, mask).unwrap();
-    let gpu_mean = masked_mean(&mt).unwrap().item().unwrap();
+    let gpu_mean = masked_mean(&mt).unwrap().cpu().unwrap().item().unwrap();
     assert!(
         (gpu_mean - cpu_mean).abs() < 1e-5,
         "gpu={gpu_mean} cpu={cpu_mean}"
@@ -94,7 +94,7 @@ fn masked_mean_all_masked_is_nan() {
     let mask = vec![false, false, false];
     let gpu_data = data.to(Device::Cuda(0)).unwrap();
     let mt = MaskedTensor::new(gpu_data, mask).unwrap();
-    let v = masked_mean(&mt).unwrap().item().unwrap();
+    let v = masked_mean(&mt).unwrap().cpu().unwrap().item().unwrap();
     assert!(v.is_nan());
 }
 
@@ -179,8 +179,24 @@ fn masked_min_max_all_masked_returns_nan_on_gpu() {
     let gpu_data = data.to(Device::Cuda(0)).unwrap();
 
     let all_masked = MaskedTensor::new(gpu_data.clone(), vec![false; 3]).unwrap();
-    assert!(masked_min(&all_masked).unwrap().item().unwrap().is_nan());
-    assert!(masked_max(&all_masked).unwrap().item().unwrap().is_nan());
+    assert!(
+        masked_min(&all_masked)
+            .unwrap()
+            .cpu()
+            .unwrap()
+            .item()
+            .unwrap()
+            .is_nan()
+    );
+    assert!(
+        masked_max(&all_masked)
+            .unwrap()
+            .cpu()
+            .unwrap()
+            .item()
+            .unwrap()
+            .is_nan()
+    );
 }
 
 #[test]
