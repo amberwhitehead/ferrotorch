@@ -14,28 +14,29 @@
 //! | REQ-8 | SHIPPED | `zeros_meta`/`ones_meta`/`full_meta`/`meta_like` at `creation.rs:253-289`; consumer: `tensor::Tensor::meta_fill_value` at `tensor.rs:1078` (CL-395) |
 
 use crate::dtype::{DType, Element, Float};
-use crate::error::FerrotorchResult;
+use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::rng::with_thread_rng;
+use crate::shape::checked_numel;
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
 
 /// Create a tensor filled with zeros.
 pub fn zeros<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
-    let numel: usize = shape.iter().product();
+    let numel = checked_numel(shape, "zeros")?;
     let data = vec![<T as num_traits::Zero>::zero(); numel];
     Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)
 }
 
 /// Create a tensor filled with ones.
 pub fn ones<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
-    let numel: usize = shape.iter().product();
+    let numel = checked_numel(shape, "ones")?;
     let data = vec![<T as num_traits::One>::one(); numel];
     Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)
 }
 
 /// Create a tensor filled with a given value.
 pub fn full<T: Float>(shape: &[usize], value: T) -> FerrotorchResult<Tensor<T>> {
-    let numel: usize = shape.iter().product();
+    let numel = checked_numel(shape, "full")?;
     let data = vec![value; numel];
     Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)
 }
@@ -63,7 +64,12 @@ pub fn scalar<T: Float>(value: T) -> FerrotorchResult<Tensor<T>> {
 
 /// Create an identity matrix of size `n x n`.
 pub fn eye<T: Float>(n: usize) -> FerrotorchResult<Tensor<T>> {
-    let mut data = vec![<T as num_traits::Zero>::zero(); n * n];
+    let numel = n
+        .checked_mul(n)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("eye: shape [{n}, {n}] element count overflows usize"),
+        })?;
+    let mut data = vec![<T as num_traits::Zero>::zero(); numel];
     for i in 0..n {
         data[i * n + i] = <T as num_traits::One>::one();
     }
@@ -133,7 +139,7 @@ pub fn linspace<T: Float>(start: T, end: T, num: usize) -> FerrotorchResult<Tens
 /// main thread's generator so the result is still deterministic given a
 /// `manual_seed`.
 pub fn rand<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
-    let numel: usize = shape.iter().product();
+    let numel = checked_numel(shape, "rand")?;
     let mut data: Vec<T> = Vec::with_capacity(numel);
 
     let is_f32 = std::mem::size_of::<T>() == 4;
@@ -162,7 +168,7 @@ pub fn rand<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
 /// The Box-Muller pair (`r * cos(theta)`, `r * sin(theta)`) order matches
 /// torch CPU: `cos` is returned, `sin` is cached for the next call.
 pub fn randn<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
-    let numel: usize = shape.iter().product();
+    let numel = checked_numel(shape, "randn")?;
     let mut data: Vec<T> = Vec::with_capacity(numel);
 
     let is_f32 = std::mem::size_of::<T>() == 4;
@@ -207,7 +213,7 @@ pub fn rand_on_device<T: Float>(
 
     match device {
         Device::Cuda(_) => {
-            let numel: usize = shape.iter().product();
+            let numel = checked_numel(shape, "rand_on_device")?;
             let backend = crate::gpu_dispatch::gpu_backend()
                 .ok_or(crate::error::FerrotorchError::DeviceUnavailable)?;
             let handle = match <T as Element>::dtype() {
@@ -244,7 +250,7 @@ pub fn randn_on_device<T: Float>(
 
     match device {
         Device::Cuda(_) => {
-            let numel: usize = shape.iter().product();
+            let numel = checked_numel(shape, "randn_on_device")?;
             let backend = crate::gpu_dispatch::gpu_backend()
                 .ok_or(crate::error::FerrotorchError::DeviceUnavailable)?;
             let handle = match <T as Element>::dtype() {
@@ -271,7 +277,7 @@ pub fn randn_on_device<T: Float>(
 /// inference, dry-run model construction, and inspecting parameter counts
 /// of huge models without committing to allocation. CL-395.
 pub fn zeros_meta<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
-    let numel: usize = shape.iter().product();
+    let numel = checked_numel(shape, "zeros_meta")?;
     Tensor::from_storage(TensorStorage::meta(numel), shape.to_vec(), false)
 }
 
@@ -295,7 +301,7 @@ pub fn ones_meta<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
 /// constructor's `value` parameter is observable rather than silently
 /// discarded. CL-395.
 pub fn full_meta<T: Float>(shape: &[usize], value: T) -> FerrotorchResult<Tensor<T>> {
-    let numel: usize = shape.iter().product();
+    let numel = checked_numel(shape, "full_meta")?;
     Tensor::from_storage(
         TensorStorage::meta_filled(numel, value),
         shape.to_vec(),

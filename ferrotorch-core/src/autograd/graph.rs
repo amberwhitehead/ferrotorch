@@ -494,9 +494,17 @@ fn accumulate_non_leaf_grad_locked<T: Float>(
     if let (Device::Cuda(_), Device::Cuda(_)) = (existing.device(), grad.device())
         && existing.device() == grad.device()
         && let Some(backend) = crate::gpu_dispatch::gpu_backend()
-        && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>()
     {
-        let sum_handle = backend.add_f32(existing.gpu_handle()?, grad.gpu_handle()?)?;
+        let a_handle = existing.gpu_handle()?;
+        let b_handle = grad.gpu_handle()?;
+        let sum_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "non-leaf gradient accumulation add",
+            f32 => backend.add_f32(a_handle, b_handle),
+            f64 => backend.add_f64(a_handle, b_handle),
+            bf16 => backend.add_bf16_bf16(a_handle, b_handle),
+            f16 => backend.add_f16(a_handle, b_handle),
+        )?;
         let combined = Tensor::from_storage(
             crate::storage::TensorStorage::gpu(sum_handle),
             existing.shape().to_vec(),
@@ -535,9 +543,9 @@ fn accumulate_non_leaf_grad_locked<T: Float>(
 ///   the storage refcount check, shared-storage views could be corrupted.
 ///
 /// - **B6**: When both the existing gradient and the incoming gradient are
-///   on the same GPU device, we use `backend.add_f32()` / `add_f64()`
-///   directly instead of round-tripping through CPU. This eliminates two
-///   unnecessary PCIe transfers per accumulation.
+///   on the same GPU device, we use the dtype-specific backend add kernel
+///   directly instead of round-tripping through CPU. This covers f32/f64 and
+///   the two-byte floating dtypes f16/bf16.
 fn accumulate_non_leaf_grad<T: Float>(
     grads: &mut HashMap<TensorId, Tensor<T>>,
     input: &Tensor<T>,
@@ -566,12 +574,14 @@ fn accumulate_non_leaf_grad<T: Float>(
     {
         let a_handle = existing.gpu_handle()?;
         let b_handle = grad.gpu_handle()?;
-        // Dispatch by element size to pick add_f32 or add_f64.
-        let result_handle = if std::mem::size_of::<T>() == 4 {
-            backend.add_f32(a_handle, b_handle)?
-        } else {
-            backend.add_f64(a_handle, b_handle)?
-        };
+        let result_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "non-leaf gradient accumulation add",
+            f32 => backend.add_f32(a_handle, b_handle),
+            f64 => backend.add_f64(a_handle, b_handle),
+            bf16 => backend.add_bf16_bf16(a_handle, b_handle),
+            f16 => backend.add_f16(a_handle, b_handle),
+        )?;
         let storage = crate::storage::TensorStorage::gpu(result_handle);
         let combined = Tensor::from_storage(storage, existing.shape().to_vec(), false)?;
         grads.insert(input.id(), combined);

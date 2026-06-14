@@ -514,9 +514,9 @@ pub fn expand<T: Float>(input: &Tensor<T>, new_shape: &[usize]) -> FerrotorchRes
     let offset = input.storage_offset();
     if is_grad_enabled() && input.requires_grad() {
         let grad_fn = Arc::new(ExpandBackward::new(input.clone(), in_shape.to_vec()));
-        Ok(input.stride_view_operation(new_shape.to_vec(), out_strides, offset, grad_fn))
+        input.try_stride_view_operation(new_shape.to_vec(), out_strides, offset, grad_fn)
     } else {
-        Ok(input.stride_view(new_shape.to_vec(), out_strides, offset))
+        input.try_stride_view(new_shape.to_vec(), out_strides, offset)
     }
 }
 

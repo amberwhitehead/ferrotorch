@@ -53,6 +53,22 @@ pub fn numel(shape: &[usize]) -> usize {
     shape.iter().product()
 }
 
+/// Checked total number of elements for a given shape.
+///
+/// Tensor sizes are user-controlled metadata. Release-mode `usize`
+/// multiplication would otherwise wrap and let constructors build tensors
+/// whose logical shape no longer matches their storage. PyTorch raises on
+/// oversized shapes before constructing the tensor; this helper gives the
+/// same structured error boundary to Rust call sites.
+pub fn checked_numel(shape: &[usize], op: &'static str) -> FerrotorchResult<usize> {
+    shape
+        .iter()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("{op}: shape {shape:?} element count overflows usize"),
+        })
+}
+
 /// Compute C-contiguous (row-major) strides for a given shape.
 pub fn c_contiguous_strides(shape: &[usize]) -> Vec<isize> {
     let ndim = shape.len();
@@ -64,6 +80,45 @@ pub fn c_contiguous_strides(shape: &[usize]) -> Vec<isize> {
         strides[i] = strides[i + 1] * shape[i + 1] as isize;
     }
     strides
+}
+
+/// Checked C-contiguous (row-major) strides for a given shape.
+///
+/// Strides are stored as signed element offsets. Reject dimensions/stride
+/// products that cannot be represented instead of wrapping through `as isize`
+/// and creating metadata that points at unrelated storage.
+pub fn checked_c_contiguous_strides(
+    shape: &[usize],
+    op: &'static str,
+) -> FerrotorchResult<Vec<isize>> {
+    for (axis, &dim) in shape.iter().enumerate() {
+        if dim > isize::MAX as usize {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("{op}: shape dimension {axis} value {dim} exceeds isize::MAX"),
+            });
+        }
+    }
+
+    let ndim = shape.len();
+    if ndim == 0 {
+        return Ok(vec![]);
+    }
+
+    let mut strides = vec![1isize; ndim];
+    let mut stride = 1usize;
+    for i in (0..ndim).rev() {
+        strides[i] = isize::try_from(stride).map_err(|_| FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: shape {shape:?} contiguous stride at axis {i} exceeds isize::MAX"
+            ),
+        })?;
+        stride = stride
+            .checked_mul(shape[i])
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!("{op}: shape {shape:?} element count overflows usize"),
+            })?;
+    }
+    Ok(strides)
 }
 
 /// Compute channels-last (NHWC) strides for a 4D shape `[N, C, H, W]`.

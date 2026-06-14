@@ -29,7 +29,10 @@ use std::sync::{Arc, Mutex};
 use crate::device::Device;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
-use crate::shape::{c_contiguous_strides, channels_last_3d_strides, channels_last_strides};
+use crate::shape::{
+    c_contiguous_strides, channels_last_3d_strides, channels_last_strides,
+    checked_c_contiguous_strides, checked_numel,
+};
 use crate::storage::TensorStorage;
 
 /// Describes the physical memory layout of a tensor.
@@ -136,7 +139,7 @@ impl<T: Float> Tensor<T> {
         shape: Vec<usize>,
         requires_grad: bool,
     ) -> FerrotorchResult<Self> {
-        let numel: usize = shape.iter().product();
+        let numel = checked_numel(&shape, "Tensor::from_storage")?;
 
         if numel > storage.len() {
             return Err(FerrotorchError::ShapeMismatch {
@@ -149,7 +152,7 @@ impl<T: Float> Tensor<T> {
             });
         }
 
-        let strides = c_contiguous_strides(&shape);
+        let strides = checked_c_contiguous_strides(&shape, "Tensor::from_storage")?;
 
         Ok(Self {
             inner: Arc::new(TensorInner {
@@ -186,7 +189,7 @@ impl<T: Float> Tensor<T> {
             return self.contiguous()?.view_reshape(new_shape);
         }
 
-        let new_numel: usize = new_shape.iter().product();
+        let new_numel = checked_numel(&new_shape, "view_reshape")?;
         if new_numel != self.numel() {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
@@ -198,7 +201,7 @@ impl<T: Float> Tensor<T> {
                 ),
             });
         }
-        let strides = c_contiguous_strides(&new_shape);
+        let strides = checked_c_contiguous_strides(&new_shape, "view_reshape")?;
         Ok(Self {
             inner: Arc::new(TensorInner {
                 id: TensorId::next(),
@@ -240,7 +243,7 @@ impl<T: Float> Tensor<T> {
             return self.contiguous()?.view_operation(new_shape, grad_fn);
         }
 
-        let new_numel: usize = new_shape.iter().product();
+        let new_numel = checked_numel(&new_shape, "view_operation")?;
         if new_numel != self.numel() {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
@@ -252,7 +255,7 @@ impl<T: Float> Tensor<T> {
                 ),
             });
         }
-        let strides = c_contiguous_strides(&new_shape);
+        let strides = checked_c_contiguous_strides(&new_shape, "view_operation")?;
         Ok(Self {
             inner: Arc::new(TensorInner {
                 id: TensorId::next(),
@@ -273,14 +276,48 @@ impl<T: Float> Tensor<T> {
     ///
     /// This is the lowest-level view constructor — used by permute, transpose,
     /// narrow, and other operations that change the logical layout without
-    /// copying data. The caller is responsible for ensuring that the given
-    /// shape + strides + offset are valid for the underlying storage.
+    /// copying data.
+    ///
+    /// Panics if the metadata is invalid for this tensor's storage. Prefer
+    /// [`Self::try_stride_view`] or [`Self::as_strided`] when forwarding
+    /// user-controlled shape/stride arguments so errors can be propagated.
+    #[track_caller]
     pub fn stride_view(
         &self,
         new_shape: Vec<usize>,
         new_strides: Vec<isize>,
         new_offset: usize,
     ) -> Self {
+        self.try_stride_view(new_shape, new_strides, new_offset)
+            .expect("Tensor::stride_view invalid view metadata")
+    }
+
+    /// Fallible form of [`Self::stride_view`].
+    pub fn try_stride_view(
+        &self,
+        new_shape: Vec<usize>,
+        new_strides: Vec<isize>,
+        new_offset: usize,
+    ) -> FerrotorchResult<Self> {
+        crate::stride_tricks::validate_bounds(
+            "stride_view",
+            &new_shape,
+            &new_strides,
+            new_offset,
+            self.storage_len(),
+        )?;
+        Ok(self.stride_view_unchecked(new_shape, new_strides, new_offset, None))
+    }
+
+    fn stride_view_unchecked(
+        &self,
+        new_shape: Vec<usize>,
+        new_strides: Vec<isize>,
+        new_offset: usize,
+        grad_fn: Option<Arc<dyn GradFn<T>>>,
+    ) -> Self {
+        let requires_grad = grad_fn.is_some();
+        let is_leaf = grad_fn.is_none();
         Self {
             inner: Arc::new(TensorInner {
                 id: TensorId::next(),
@@ -289,9 +326,9 @@ impl<T: Float> Tensor<T> {
                 strides: new_strides,
                 offset: new_offset,
                 grad: Mutex::new(None),
-                grad_fn: None,
-                requires_grad: false,
-                is_leaf: true,
+                grad_fn,
+                requires_grad,
+                is_leaf,
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
         }
@@ -299,6 +336,10 @@ impl<T: Float> Tensor<T> {
 
     /// Create a zero-copy view with explicit shape, strides, and offset,
     /// with an attached gradient function for autograd.
+    ///
+    /// Panics if the metadata is invalid for this tensor's storage. Prefer
+    /// [`Self::try_stride_view_operation`] in fallible operation code.
+    #[track_caller]
     pub fn stride_view_operation(
         &self,
         new_shape: Vec<usize>,
@@ -306,20 +347,26 @@ impl<T: Float> Tensor<T> {
         new_offset: usize,
         grad_fn: Arc<dyn GradFn<T>>,
     ) -> Self {
-        Self {
-            inner: Arc::new(TensorInner {
-                id: TensorId::next(),
-                storage: Arc::clone(&self.inner.storage),
-                shape: new_shape,
-                strides: new_strides,
-                offset: new_offset,
-                grad: Mutex::new(None),
-                grad_fn: Some(grad_fn),
-                requires_grad: true,
-                is_leaf: false,
-                hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
-            }),
-        }
+        self.try_stride_view_operation(new_shape, new_strides, new_offset, grad_fn)
+            .expect("Tensor::stride_view_operation invalid view metadata")
+    }
+
+    /// Fallible form of [`Self::stride_view_operation`].
+    pub fn try_stride_view_operation(
+        &self,
+        new_shape: Vec<usize>,
+        new_strides: Vec<isize>,
+        new_offset: usize,
+        grad_fn: Arc<dyn GradFn<T>>,
+    ) -> FerrotorchResult<Self> {
+        crate::stride_tricks::validate_bounds(
+            "stride_view_operation",
+            &new_shape,
+            &new_strides,
+            new_offset,
+            self.storage_len(),
+        )?;
+        Ok(self.stride_view_unchecked(new_shape, new_strides, new_offset, Some(grad_fn)))
     }
 
     /// Create a tensor that is the result of an operation (non-leaf).
@@ -338,7 +385,7 @@ impl<T: Float> Tensor<T> {
             return Self::from_storage(storage, shape, false);
         }
 
-        let numel: usize = shape.iter().product();
+        let numel = checked_numel(&shape, "Tensor::from_operation")?;
 
         if numel > storage.len() {
             return Err(FerrotorchError::ShapeMismatch {
@@ -351,7 +398,7 @@ impl<T: Float> Tensor<T> {
             });
         }
 
-        let strides = c_contiguous_strides(&shape);
+        let strides = checked_c_contiguous_strides(&shape, "Tensor::from_operation")?;
 
         Ok(Self {
             inner: Arc::new(TensorInner {
@@ -610,9 +657,9 @@ impl<T: Float> Tensor<T> {
     /// Accumulate a gradient additively (used by the backward engine).
     ///
     /// Keeps gradients on their original device to avoid GPU↔CPU round-trips.
-    /// When both the existing gradient and the incoming gradient are on GPU,
-    /// accumulation uses `backend.add_f32()` / `backend.add_f64()` entirely
-    /// on-device (dispatched on element size).
+    /// When both the existing gradient and the incoming gradient are on the
+    /// same CUDA device, accumulation uses the dtype-specific GPU add kernel
+    /// entirely on-device (`f32`, `f64`, `f16`, or `bf16`).
     pub(crate) fn accumulate_grad(&self, incoming: &Tensor<T>) -> FerrotorchResult<()> {
         let mut guard = self
             .inner
@@ -630,10 +677,13 @@ impl<T: Float> Tensor<T> {
             }
             Some(existing) => {
                 // Accumulate: existing_grad += incoming_grad.
-                // GPU-native path: both on GPU. Dispatch by element size to
-                // pick add_f32 or add_f64 — mirrors the canonical pattern in
-                // `autograd::graph::accumulate_non_leaf_grad` (#789, #788, #800).
-                if existing.is_cuda() && incoming.is_cuda() {
+                // GPU-native path: both grads on the same CUDA device. Dispatch
+                // by dtype tag, not Rust element size: f16 and bf16 are both
+                // two-byte floats with distinct CUDA handle tags.
+                if existing.is_cuda()
+                    && incoming.is_cuda()
+                    && existing.device() == incoming.device()
+                {
                     let backend = crate::gpu_dispatch::gpu_backend()
                         .ok_or(FerrotorchError::DeviceUnavailable)?;
                     if existing.numel() != incoming.numel() {
@@ -647,11 +697,14 @@ impl<T: Float> Tensor<T> {
                     }
                     let a_handle = existing.gpu_handle()?;
                     let b_handle = incoming.gpu_handle()?;
-                    let sum_handle = if std::mem::size_of::<T>() == 4 {
-                        backend.add_f32(a_handle, b_handle)?
-                    } else {
-                        backend.add_f64(a_handle, b_handle)?
-                    };
+                    let sum_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                        T,
+                        "gradient accumulation add",
+                        f32 => backend.add_f32(a_handle, b_handle),
+                        f64 => backend.add_f64(a_handle, b_handle),
+                        bf16 => backend.add_bf16_bf16(a_handle, b_handle),
+                        f16 => backend.add_f16(a_handle, b_handle),
+                    )?;
                     let storage = TensorStorage::gpu(sum_handle);
                     let combined = Tensor::from_storage(storage, existing.shape().to_vec(), false)?;
                     *guard = Some(Box::new(combined));
@@ -730,7 +783,11 @@ impl<T: Float> Tensor<T> {
         if self.numel() == 0 {
             return Ok(&slice[0..0]);
         }
-        let end = self.inner.offset + self.numel();
+        let end = self.inner.offset.checked_add(self.numel()).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "tensor view offset + numel overflows usize".into(),
+            }
+        })?;
         if end > slice.len() {
             return Err(FerrotorchError::InvalidArgument {
                 message: "tensor view extends beyond storage".into(),
@@ -783,6 +840,7 @@ impl<T: Float> Tensor<T> {
             let offset = self.inner.offset;
             let numel = self.numel();
             let ndim = shape.len();
+            crate::stride_tricks::validate_bounds("data_vec", shape, strides, offset, slice.len())?;
 
             let mut result = Vec::with_capacity(numel);
             let mut indices = vec![0usize; ndim];
@@ -822,7 +880,7 @@ impl<T: Float> Tensor<T> {
 
         let shape = self.inner.shape.clone();
         let offset = self.inner.offset;
-        let numel: usize = shape.iter().product();
+        let numel = checked_numel(&shape, "into_storage_and_shape")?;
 
         // Try to unwrap the inner Arc to get ownership of TensorInner.
         match Arc::try_unwrap(self.inner) {
@@ -1412,7 +1470,11 @@ impl<T: Float> Tensor<T> {
         if self.numel() == 0 {
             return Ok(&mut slice[0..0]);
         }
-        let end = self.inner.offset + self.numel();
+        let end = self.inner.offset.checked_add(self.numel()).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "tensor view offset + numel overflows usize".into(),
+            }
+        })?;
         if end > slice.len() {
             return Err(FerrotorchError::InvalidArgument {
                 message: "tensor view extends beyond storage".into(),
@@ -1563,7 +1625,7 @@ impl<T: Float> Tensor<T> {
         new_storage: TensorStorage<T>,
         new_shape: Vec<usize>,
     ) -> FerrotorchResult<()> {
-        let new_numel: usize = new_shape.iter().product();
+        let new_numel = checked_numel(&new_shape, "update_storage_and_shape")?;
         if new_storage.len() != new_numel {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
@@ -1603,7 +1665,7 @@ impl<T: Float> Tensor<T> {
             });
         }
 
-        let new_strides = c_contiguous_strides(&new_shape);
+        let new_strides = checked_c_contiguous_strides(&new_shape, "update_storage_and_shape")?;
 
         // Swap the buffer through the storage's interior mutability. The
         // numel differs from self.numel() by design (this is the resize
@@ -1675,9 +1737,10 @@ impl<T: Float> Tensor<T> {
     ///   the CORE-001 aliased-write primitives
     ///   ([`TensorStorage::cpu_write_at`] for contiguous views, a strided
     ///   scatter over [`TensorStorage::try_as_mut_slice_aliased`]
-    ///   otherwise); on CUDA through the `strided_scatter_{f32,f64}`
+    ///   otherwise); on CUDA through the `strided_scatter_{f32,f64,u16}`
     ///   kernels into the existing device buffer (no handle swap — aliased
-    ///   views keep pointing at live memory).
+    ///   views keep pointing at live memory). The u16 path preserves f16/bf16
+    ///   bit patterns and dtype tags.
     ///
     /// # Errors
     ///
@@ -1690,8 +1753,8 @@ impl<T: Float> Tensor<T> {
     ///   a single memory location") or a view whose extent escapes the
     ///   storage bounds.
     /// - [`FerrotorchError::NotImplementedOnCuda`] for CUDA region writes
-    ///   with a dtype other than f32/f64 — no strided-scatter kernel
-    ///   exists yet (follow-up #1939). Returned BEFORE any mutation.
+    ///   with a dtype outside the backend's floating strided-scatter set.
+    ///   Returned BEFORE any mutation.
     /// - [`FerrotorchError::GpuTensorNotAccessible`] for region writes on
     ///   CubeCL/meta storage (no in-place region primitive).
     ///
@@ -1746,18 +1809,6 @@ impl<T: Float> Tensor<T> {
         if storage.is_gpu() {
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            use std::any::TypeId;
-            // Dispatch BEFORE touching the destination so unsupported
-            // dtypes error with the storage untouched (R-LOUD-1).
-            let is_f32 = TypeId::of::<T>() == TypeId::of::<f32>();
-            let is_f64 = TypeId::of::<T>() == TypeId::of::<f64>();
-            if !is_f32 && !is_f64 {
-                return Err(FerrotorchError::NotImplementedOnCuda {
-                    op: "update_storage: CUDA sub-view/strided write \
-                         (strided_scatter kernel exists only for f32/f64; \
-                         f16/bf16 tracked in #1939)",
-                });
-            }
             let src = new_storage
                 .gpu_handle()
                 .ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -1768,22 +1819,36 @@ impl<T: Float> Tensor<T> {
             // does not outlive this call.
             let dst = unsafe { storage.gpu_handle_mut_aliased() }
                 .ok_or(FerrotorchError::DeviceUnavailable)?;
-            if is_f32 {
-                backend.strided_scatter_f32(
+            match <T as crate::dtype::Element>::dtype() {
+                crate::dtype::DType::F32 => backend.strided_scatter_f32(
                     src,
                     dst,
                     &self.inner.shape,
                     &self.inner.strides,
                     self.inner.offset,
-                )?;
-            } else {
-                backend.strided_scatter_f64(
+                )?,
+                crate::dtype::DType::F64 => backend.strided_scatter_f64(
                     src,
                     dst,
                     &self.inner.shape,
                     &self.inner.strides,
                     self.inner.offset,
-                )?;
+                )?,
+                crate::dtype::DType::F16 | crate::dtype::DType::BF16 => backend
+                    .strided_scatter_u16(
+                        src,
+                        dst,
+                        &self.inner.shape,
+                        &self.inner.strides,
+                        self.inner.offset,
+                    )?,
+                other => {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "update_storage: CUDA sub-view/strided write unsupported dtype {other}"
+                        ),
+                    });
+                }
             }
             return Ok(());
         }

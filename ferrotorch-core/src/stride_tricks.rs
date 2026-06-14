@@ -158,10 +158,59 @@ fn stride_extent(shape: &[usize], stride: &[isize]) -> (i64, i64) {
     (min_off, max_off)
 }
 
+fn checked_stride_extent(
+    op: &'static str,
+    shape: &[usize],
+    stride: &[isize],
+) -> FerrotorchResult<(i64, i64)> {
+    if shape.contains(&0) {
+        return Ok((0, 0));
+    }
+
+    let mut min_off: i64 = 0;
+    let mut max_off: i64 = 0;
+    for (axis, (&dim, &s)) in shape.iter().zip(stride.iter()).enumerate() {
+        if dim == 0 {
+            continue;
+        }
+        let last_index = i64::try_from(dim - 1).map_err(|_| FerrotorchError::InvalidArgument {
+            message: format!("{op}: shape dimension {axis} value {dim} exceeds i64::MAX"),
+        })?;
+        let step = s as i64;
+        let last =
+            last_index
+                .checked_mul(step)
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "{op}: shape {shape:?} and strides {stride:?} overflow signed offset range"
+                    ),
+                })?;
+        if last >= 0 {
+            max_off = max_off.checked_add(last).ok_or_else(|| {
+                FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "{op}: shape {shape:?} and strides {stride:?} exceed signed offset range"
+                    ),
+                }
+            })?;
+        } else {
+            min_off = min_off.checked_add(last).ok_or_else(|| {
+                FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "{op}: shape {shape:?} and strides {stride:?} exceed signed offset range"
+                    ),
+                }
+            })?;
+        }
+    }
+    Ok((min_off, max_off))
+}
+
 /// Validate that the requested view fits within `storage_len`.
 ///
-/// Returns `Ok(())` if every reachable offset (including the zero-position
-/// origin at `storage_offset`) lies inside `[0, storage_len)`.
+/// Returns `Ok(())` if every reachable offset lies inside `[0, storage_len)`.
+/// Empty views reach no storage elements; PyTorch permits them with arbitrary
+/// signed storage offsets.
 ///
 /// `pub(crate)`: also the bounds gate for the in-place view-region writes
 /// in `Tensor::update_storage` / `Tensor::update_data` (#1938).
@@ -181,23 +230,47 @@ pub(crate) fn validate_bounds(
             ),
         });
     }
-
-    // Empty view (any dim is zero) — nothing to read or write.
-    if shape.contains(&0) {
-        // Zero-element views are valid even at storage_offset == storage_len.
-        if storage_offset > storage_len {
+    for (axis, &dim) in shape.iter().enumerate() {
+        if dim > i64::MAX as usize {
             return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "{op}: storage_offset {storage_offset} > storage length {storage_len}"
-                ),
+                message: format!("{op}: shape dimension {axis} value {dim} exceeds i64::MAX"),
             });
         }
+    }
+
+    let storage_offset_i64 =
+        i64::try_from(storage_offset).map_err(|_| FerrotorchError::InvalidArgument {
+            message: format!("{op}: storage_offset {storage_offset} exceeds i64::MAX"),
+        })?;
+
+    // Empty view (any dim is zero) — nothing to read or write. PyTorch accepts
+    // storage offsets outside the backing allocation for this case because no
+    // address is ever dereferenced.
+    if shape.contains(&0) {
         return Ok(());
     }
 
-    let (min_off, max_off) = stride_extent(shape, stride);
-    let lo = storage_offset as i64 + min_off;
-    let hi = storage_offset as i64 + max_off;
+    let storage_len_i64 =
+        i64::try_from(storage_len).map_err(|_| FerrotorchError::InvalidArgument {
+            message: format!("{op}: storage length {storage_len} exceeds i64::MAX"),
+        })?;
+    let (min_off, max_off) = checked_stride_extent(op, shape, stride)?;
+    let lo = storage_offset_i64.checked_add(min_off).ok_or_else(|| {
+        FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: storage_offset {storage_offset} with strides {stride:?} overflows \
+                 signed offset range"
+            ),
+        }
+    })?;
+    let hi = storage_offset_i64.checked_add(max_off).ok_or_else(|| {
+        FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: storage_offset {storage_offset} with strides {stride:?} overflows \
+                 signed offset range"
+            ),
+        }
+    })?;
     if lo < 0 {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
@@ -206,7 +279,7 @@ pub(crate) fn validate_bounds(
             ),
         });
     }
-    if hi >= storage_len as i64 {
+    if hi >= storage_len_i64 {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
                 "{op}: storage_offset {storage_offset} with shape {shape:?} and strides \
@@ -388,7 +461,7 @@ impl<T: Float> Tensor<T> {
 
         // No-grad fast path: pure metadata change, zero-copy on every device.
         if !crate::autograd::no_grad::is_grad_enabled() || !self.requires_grad() {
-            return Ok(self.stride_view(size.to_vec(), stride.to_vec(), offset));
+            return self.try_stride_view(size.to_vec(), stride.to_vec(), offset);
         }
 
         // Grad path: attach AsStridedBackward so autograd scatters the
@@ -399,7 +472,7 @@ impl<T: Float> Tensor<T> {
             stride.to_vec(),
             offset,
         ));
-        Ok(self.stride_view_operation(size.to_vec(), stride.to_vec(), offset, grad_fn))
+        self.try_stride_view_operation(size.to_vec(), stride.to_vec(), offset, grad_fn)
     }
 
     /// Materialised strided copy: returns a new contiguous tensor whose
@@ -429,7 +502,7 @@ impl<T: Float> Tensor<T> {
         // Materialise from a plain metadata view (no intermediate grad
         // node; the backward node attaches to the OUTPUT below,
         // referencing `self` directly).
-        let view = self.stride_view(size.to_vec(), stride.to_vec(), offset);
+        let view = self.try_stride_view(size.to_vec(), stride.to_vec(), offset)?;
         let storage = if view.is_cuda() {
             // Direct GPU strided_copy dispatch; `view.data_vec()` would
             // bounce through host first, which violates GPU discipline.

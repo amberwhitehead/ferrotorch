@@ -921,8 +921,31 @@ impl<T: Element> TensorStorage<T> {
                     .ok_or(crate::error::FerrotorchError::DeviceUnavailable)?;
                 let bytes = backend.gpu_to_cpu(h)?;
                 let elem_size = std::mem::size_of::<T>();
-                let start = offset * elem_size;
-                let end = (offset + numel) * elem_size;
+                let elem_end = offset
+                    .checked_add(numel)
+                    .filter(|&end| end <= h.len())
+                    .ok_or_else(|| crate::error::FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "try_clone_subregion: range {offset}..{} exceeds buffer \
+                             length {}",
+                            offset.saturating_add(numel),
+                            h.len(),
+                        ),
+                    })?;
+                let start = offset.checked_mul(elem_size).ok_or_else(|| {
+                    crate::error::FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "try_clone_subregion: byte offset {offset} * {elem_size} overflows"
+                        ),
+                    }
+                })?;
+                let end = elem_end.checked_mul(elem_size).ok_or_else(|| {
+                    crate::error::FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "try_clone_subregion: byte end {elem_end} * {elem_size} overflows"
+                        ),
+                    }
+                })?;
                 // Re-upload the sliced bytes under the *source handle's* dtype
                 // tag so the subregion preserves the original ScalarType.
                 let handle =
@@ -937,7 +960,18 @@ impl<T: Element> TensorStorage<T> {
                 // The new handle reuses the same runtime (held by the original
                 // handle's Arc<CubeRuntime>).
                 let all = h.read_to_host()?;
-                let slice = all[offset..offset + numel].to_vec();
+                let end = offset
+                    .checked_add(numel)
+                    .filter(|&end| end <= all.len())
+                    .ok_or_else(|| crate::error::FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "try_clone_subregion: range {offset}..{} exceeds CubeCL buffer \
+                             length {}",
+                            offset.saturating_add(numel),
+                            all.len(),
+                        ),
+                    })?;
+                let slice = all[offset..end].to_vec();
                 // Re-upload: the concrete impl's `clone_handle` clones the full
                 // buffer; for sub-regions we go through host for now (correct,
                 // can be optimised later with a device-side copy).

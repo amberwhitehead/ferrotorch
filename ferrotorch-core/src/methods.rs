@@ -1494,9 +1494,9 @@ pub fn permute_t<T: Float>(input: &Tensor<T>, dims: &[usize]) -> FerrotorchResul
             input: input.clone(),
             dims: dims.to_vec(),
         });
-        Ok(input.stride_view_operation(out_shape, out_strides, offset, grad_fn))
+        input.try_stride_view_operation(out_shape, out_strides, offset, grad_fn)
     } else {
-        Ok(input.stride_view(out_shape, out_strides, offset))
+        input.try_stride_view(out_shape, out_strides, offset)
     }
 }
 
@@ -1601,9 +1601,9 @@ pub fn narrow_t<T: Float>(
             dim,
             start,
         });
-        Ok(input.stride_view_operation(new_shape, strides.to_vec(), new_offset, grad_fn))
+        input.try_stride_view_operation(new_shape, strides.to_vec(), new_offset, grad_fn)
     } else {
-        Ok(input.stride_view(new_shape, strides.to_vec(), new_offset))
+        input.try_stride_view(new_shape, strides.to_vec(), new_offset)
     }
 }
 
@@ -1904,9 +1904,9 @@ pub fn split_t<T: Float>(
                 offset_along_dim,
                 split_size,
             ));
-            input.stride_view_operation(chunk_shape, strides.clone(), chunk_offset, grad_fn)
+            input.try_stride_view_operation(chunk_shape, strides.clone(), chunk_offset, grad_fn)?
         } else {
-            input.stride_view(chunk_shape, strides.clone(), chunk_offset)
+            input.try_stride_view(chunk_shape, strides.clone(), chunk_offset)?
         };
         results.push(t);
         offset_along_dim += split_size;
