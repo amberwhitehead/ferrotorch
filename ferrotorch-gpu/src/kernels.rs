@@ -6496,7 +6496,8 @@ FILL_DONE:
 /// resident 0/1 valid-entry indicator. Count/fill both stay on device:
 /// valid ties receive `grad / count`, masked or non-tied entries receive zero,
 /// and a NaN saved result (no equality matches because `NaN != NaN`) writes NaN
-/// to every input slot, matching torch's `scale_grad_by_count` behavior.
+/// to valid mask positions while masked-out slots stay zero, matching torch's
+/// `scale_grad_by_count` behavior.
 #[cfg(feature = "cuda")]
 pub(crate) const MASKED_EXTREME_BACKWARD_PTX: &str = "\
 .version 7.0
@@ -6606,7 +6607,8 @@ MASKED_FILL_LOOP:
     and.pred %take, %valid, %match;
     mov.f32 %res, %zero;
     @%take mov.f32 %res, %scale;
-    @%zero_count mov.f32 %res, %scale;
+    and.pred %take, %valid, %zero_count;
+    @%take mov.f32 %res, %scale;
     st.global.f32 [%addr_out], %res;
 
     add.u32 %idx, %idx, %stride;

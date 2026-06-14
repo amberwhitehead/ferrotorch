@@ -2337,6 +2337,108 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, data.device_ordinal()))
     }
 
+    fn masked_extreme_backward_f16(
+        &self,
+        input: &GpuBufferHandle,
+        mask_f: &GpuBufferHandle,
+        extreme: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f16(input)?;
+        let mask_buf = Self::unwrap_buffer_f16(mask_f)?;
+        let extreme_buf = Self::unwrap_buffer_f16(extreme)?;
+        let grad_buf = Self::unwrap_buffer_f16(grad_output)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::masked_kernels::masked_extreme_backward_f16(
+            input_buf,
+            mask_buf,
+            extreme_buf,
+            grad_buf,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, input.device_ordinal()))
+    }
+
+    fn masked_extreme_backward_bf16(
+        &self,
+        input: &GpuBufferHandle,
+        mask_f: &GpuBufferHandle,
+        extreme: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_bf16(input)?;
+        let mask_buf = Self::unwrap_buffer_bf16(mask_f)?;
+        let extreme_buf = Self::unwrap_buffer_bf16(extreme)?;
+        let grad_buf = Self::unwrap_buffer_bf16(grad_output)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::masked_kernels::masked_extreme_backward_bf16(
+            input_buf,
+            mask_buf,
+            extreme_buf,
+            grad_buf,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, input.device_ordinal()))
+    }
+
+    fn masked_min_f16(
+        &self,
+        data: &GpuBufferHandle,
+        mask_f: &GpuBufferHandle,
+        _len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let d_buf = Self::unwrap_buffer_f16(data)?;
+        let m_buf = Self::unwrap_buffer_f16(mask_f)?;
+        let dev = self.device(data.device_ordinal())?;
+        let result = crate::masked_kernels::masked_reduce_min_f16(d_buf, m_buf, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, data.device_ordinal()))
+    }
+
+    fn masked_max_f16(
+        &self,
+        data: &GpuBufferHandle,
+        mask_f: &GpuBufferHandle,
+        _len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let d_buf = Self::unwrap_buffer_f16(data)?;
+        let m_buf = Self::unwrap_buffer_f16(mask_f)?;
+        let dev = self.device(data.device_ordinal())?;
+        let result = crate::masked_kernels::masked_reduce_max_f16(d_buf, m_buf, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, data.device_ordinal()))
+    }
+
+    fn masked_min_bf16(
+        &self,
+        data: &GpuBufferHandle,
+        mask_f: &GpuBufferHandle,
+        _len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let d_buf = Self::unwrap_buffer_bf16(data)?;
+        let m_buf = Self::unwrap_buffer_bf16(mask_f)?;
+        let dev = self.device(data.device_ordinal())?;
+        let result = crate::masked_kernels::masked_reduce_min_bf16(d_buf, m_buf, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, data.device_ordinal()))
+    }
+
+    fn masked_max_bf16(
+        &self,
+        data: &GpuBufferHandle,
+        mask_f: &GpuBufferHandle,
+        _len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let d_buf = Self::unwrap_buffer_bf16(data)?;
+        let m_buf = Self::unwrap_buffer_bf16(mask_f)?;
+        let dev = self.device(data.device_ordinal())?;
+        let result = crate::masked_kernels::masked_reduce_max_bf16(d_buf, m_buf, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, data.device_ordinal()))
+    }
+
     fn sum_axis_f64(
         &self,
         a: &GpuBufferHandle,

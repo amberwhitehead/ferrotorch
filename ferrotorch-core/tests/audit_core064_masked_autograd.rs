@@ -114,7 +114,8 @@ fn assert_grad_f64(leaf: &Tensor<f64>, expected: &[f64], label: &str) {
     );
 }
 
-fn assert_grad_all_nan_f32(leaf: &Tensor<f32>, label: &str) {
+#[allow(clippy::float_cmp)]
+fn assert_grad_f32_nan_pattern(leaf: &Tensor<f32>, expected_nan: &[bool], label: &str) {
     let g = leaf
         .grad()
         .unwrap()
@@ -126,13 +127,18 @@ fn assert_grad_all_nan_f32(leaf: &Tensor<f32>, label: &str) {
         g.cpu().expect("grad D2H")
     };
     let data = g_cpu.data().unwrap();
-    assert!(
-        data.iter().all(|v| v.is_nan()),
-        "{label}: torch routes NaN to every input slot, got {data:?}"
-    );
+    assert_eq!(data.len(), expected_nan.len(), "{label}: gradient length");
+    for (i, (&got, &want_nan)) in data.iter().zip(expected_nan.iter()).enumerate() {
+        if want_nan {
+            assert!(got.is_nan(), "{label}: index {i} expected NaN, got {got}");
+        } else {
+            assert_eq!(got, 0.0, "{label}: index {i} expected zero");
+        }
+    }
 }
 
-fn assert_grad_all_nan_f64(leaf: &Tensor<f64>, label: &str) {
+#[allow(clippy::float_cmp)]
+fn assert_grad_f64_nan_pattern(leaf: &Tensor<f64>, expected_nan: &[bool], label: &str) {
     let g = leaf
         .grad()
         .unwrap()
@@ -144,10 +150,14 @@ fn assert_grad_all_nan_f64(leaf: &Tensor<f64>, label: &str) {
         g.cpu().expect("grad D2H")
     };
     let data = g_cpu.data().unwrap();
-    assert!(
-        data.iter().all(|v| v.is_nan()),
-        "{label}: torch routes NaN to every input slot, got {data:?}"
-    );
+    assert_eq!(data.len(), expected_nan.len(), "{label}: gradient length");
+    for (i, (&got, &want_nan)) in data.iter().zip(expected_nan.iter()).enumerate() {
+        if want_nan {
+            assert!(got.is_nan(), "{label}: index {i} expected NaN, got {got}");
+        } else {
+            assert_eq!(got, 0.0, "{label}: index {i} expected zero");
+        }
+    }
 }
 
 /// 0-d scalar weight tensor on the same device as `y`, then `(y * w).backward()`.
@@ -296,10 +306,11 @@ fn masked_max_tie_f64_backward() {
 }
 
 /// Live torch 2.11.0+cu130 oracle: a VALID NaN poisons
-/// `torch.masked.{amin,amax}` forward, and backward writes NaN to every input
-/// slot, including masked positions (`scale_grad_by_count` with zero matches).
+/// `torch.masked.{amin,amax}` forward, and backward writes NaN to valid mask
+/// positions while masked-out slots stay zero (`scale_grad_by_count` with zero
+/// equality matches).
 #[test]
-fn masked_extremum_valid_nan_backward_all_nan() {
+fn masked_extremum_valid_nan_backward_matches_mask() {
     type MaskedRed = fn(&MaskedTensor<f32>) -> ferrotorch_core::FerrotorchResult<Tensor<f32>>;
     for (name, op) in [
         ("masked_min", masked_min as MaskedRed),
@@ -313,13 +324,13 @@ fn masked_extremum_valid_nan_backward_all_nan() {
             "{name}: valid NaN must poison forward"
         );
         scaled_backward_f32(&y, 3.0);
-        assert_grad_all_nan_f32(&x, &format!("{name} valid NaN"));
+        assert_grad_f32_nan_pattern(&x, &[true, true, false], &format!("{name} valid NaN"));
     }
 }
 
 /// f64 lane for the same valid-NaN contract.
 #[test]
-fn masked_extremum_valid_nan_f64_backward_all_nan() {
+fn masked_extremum_valid_nan_f64_backward_matches_mask() {
     type MaskedRed = fn(&MaskedTensor<f64>) -> ferrotorch_core::FerrotorchResult<Tensor<f64>>;
     for (name, op) in [
         ("masked_min", masked_min as MaskedRed),
@@ -333,7 +344,7 @@ fn masked_extremum_valid_nan_f64_backward_all_nan() {
             "{name}: valid NaN must poison forward"
         );
         scaled_backward_f64(&y, 3.0);
-        assert_grad_all_nan_f64(&x, &format!("{name} f64 valid NaN"));
+        assert_grad_f64_nan_pattern(&x, &[true, true, false], &format!("{name} f64 valid NaN"));
     }
 }
 
@@ -484,6 +495,102 @@ mod gpu {
             .requires_grad_(true)
     }
 
+    fn cuda_grad_leaf_f16(data: &[f32]) -> Tensor<half::f16> {
+        let values: Vec<half::f16> = data.iter().map(|&v| half::f16::from_f32(v)).collect();
+        Tensor::from_storage(TensorStorage::cpu(values), vec![data.len()], false)
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap()
+            .requires_grad_(true)
+    }
+
+    fn cuda_grad_leaf_bf16(data: &[f32]) -> Tensor<half::bf16> {
+        let values: Vec<half::bf16> = data.iter().map(|&v| half::bf16::from_f32(v)).collect();
+        Tensor::from_storage(TensorStorage::cpu(values), vec![data.len()], false)
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap()
+            .requires_grad_(true)
+    }
+
+    #[allow(clippy::float_cmp)]
+    fn assert_grad_f16(leaf: &Tensor<half::f16>, expected: &[f32], label: &str) {
+        let g = leaf
+            .grad()
+            .unwrap()
+            .unwrap_or_else(|| panic!("{label}: no gradient reached the leaf (CORE-064 detach)"));
+        assert_eq!(g.device(), leaf.device(), "{label}: gradient device");
+        let g_cpu = if g.is_cpu() {
+            g
+        } else {
+            g.cpu().expect("grad D2H")
+        };
+        let actual: Vec<f32> = g_cpu.data().unwrap().iter().map(|v| v.to_f32()).collect();
+        assert_eq!(actual, expected, "{label}: leaf gradient vs torch oracle");
+    }
+
+    #[allow(clippy::float_cmp)]
+    fn assert_grad_bf16(leaf: &Tensor<half::bf16>, expected: &[f32], label: &str) {
+        let g = leaf
+            .grad()
+            .unwrap()
+            .unwrap_or_else(|| panic!("{label}: no gradient reached the leaf (CORE-064 detach)"));
+        assert_eq!(g.device(), leaf.device(), "{label}: gradient device");
+        let g_cpu = if g.is_cpu() {
+            g
+        } else {
+            g.cpu().expect("grad D2H")
+        };
+        let actual: Vec<f32> = g_cpu.data().unwrap().iter().map(|v| v.to_f32()).collect();
+        assert_eq!(actual, expected, "{label}: leaf gradient vs torch oracle");
+    }
+
+    #[allow(clippy::float_cmp)]
+    fn assert_grad_f16_nan_pattern(leaf: &Tensor<half::f16>, expected_nan: &[bool], label: &str) {
+        let g = leaf
+            .grad()
+            .unwrap()
+            .unwrap_or_else(|| panic!("{label}: no gradient reached the leaf (CORE-064 detach)"));
+        assert_eq!(g.device(), leaf.device(), "{label}: gradient device");
+        let g_cpu = if g.is_cpu() {
+            g
+        } else {
+            g.cpu().expect("grad D2H")
+        };
+        let actual: Vec<f32> = g_cpu.data().unwrap().iter().map(|v| v.to_f32()).collect();
+        assert_eq!(actual.len(), expected_nan.len(), "{label}: gradient length");
+        for (i, (&got, &want_nan)) in actual.iter().zip(expected_nan.iter()).enumerate() {
+            if want_nan {
+                assert!(got.is_nan(), "{label}: index {i} expected NaN, got {got}");
+            } else {
+                assert_eq!(got, 0.0, "{label}: index {i} expected zero");
+            }
+        }
+    }
+
+    #[allow(clippy::float_cmp)]
+    fn assert_grad_bf16_nan_pattern(leaf: &Tensor<half::bf16>, expected_nan: &[bool], label: &str) {
+        let g = leaf
+            .grad()
+            .unwrap()
+            .unwrap_or_else(|| panic!("{label}: no gradient reached the leaf (CORE-064 detach)"));
+        assert_eq!(g.device(), leaf.device(), "{label}: gradient device");
+        let g_cpu = if g.is_cpu() {
+            g
+        } else {
+            g.cpu().expect("grad D2H")
+        };
+        let actual: Vec<f32> = g_cpu.data().unwrap().iter().map(|v| v.to_f32()).collect();
+        assert_eq!(actual.len(), expected_nan.len(), "{label}: gradient length");
+        for (i, (&got, &want_nan)) in actual.iter().zip(expected_nan.iter()).enumerate() {
+            if want_nan {
+                assert!(got.is_nan(), "{label}: index {i} expected NaN, got {got}");
+            } else {
+                assert_eq!(got, 0.0, "{label}: index {i} expected zero");
+            }
+        }
+    }
+
     /// Oracle values identical to the CPU lanes (same quoted torch session).
     #[test]
     fn gpu_masked_sum_backward() {
@@ -538,7 +645,24 @@ mod gpu {
     }
 
     #[test]
-    fn gpu_masked_extremum_valid_nan_backward_all_nan() {
+    fn gpu_masked_extremum_f16_bf16_tie_backward() {
+        ensure_cuda_backend();
+
+        let x = cuda_grad_leaf_f16(&[5.0, 5.0, 1.0, 5.0]);
+        let mt = MaskedTensor::new(x.clone(), vec![true, true, true, false]).unwrap();
+        let y = masked_max(&mt).unwrap();
+        y.backward().expect("backward");
+        assert_grad_f16(&x, &[0.5, 0.5, 0.0, 0.0], "gpu masked_max f16 tie");
+
+        let x = cuda_grad_leaf_bf16(&[-2.0, 7.0, -2.0, -2.0]);
+        let mt = MaskedTensor::new(x.clone(), vec![true, true, true, false]).unwrap();
+        let y = masked_min(&mt).unwrap();
+        y.backward().expect("backward");
+        assert_grad_bf16(&x, &[0.5, 0.0, 0.5, 0.0], "gpu masked_min bf16 tie");
+    }
+
+    #[test]
+    fn gpu_masked_extremum_valid_nan_backward_matches_mask() {
         ensure_cuda_backend();
         type MaskedRed = fn(&MaskedTensor<f32>) -> ferrotorch_core::FerrotorchResult<Tensor<f32>>;
         for (name, op) in [
@@ -554,12 +678,12 @@ mod gpu {
                 "{name}: CUDA valid NaN must poison forward"
             );
             scaled_backward_f32(&y, 3.0);
-            assert_grad_all_nan_f32(&x, &format!("gpu {name} valid NaN"));
+            assert_grad_f32_nan_pattern(&x, &[true, true, false], &format!("gpu {name} valid NaN"));
         }
     }
 
     #[test]
-    fn gpu_masked_extremum_valid_nan_f64_backward_all_nan() {
+    fn gpu_masked_extremum_valid_nan_f64_backward_matches_mask() {
         ensure_cuda_backend();
         type MaskedRed = fn(&MaskedTensor<f64>) -> ferrotorch_core::FerrotorchResult<Tensor<f64>>;
         for (name, op) in [
@@ -575,7 +699,59 @@ mod gpu {
                 "{name}: CUDA f64 valid NaN must poison forward"
             );
             scaled_backward_f64(&y, 3.0);
-            assert_grad_all_nan_f64(&x, &format!("gpu {name} f64 valid NaN"));
+            assert_grad_f64_nan_pattern(
+                &x,
+                &[true, true, false],
+                &format!("gpu {name} f64 valid NaN"),
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_masked_extremum_valid_nan_f16_bf16_backward_matches_mask() {
+        ensure_cuda_backend();
+        type MaskedRedF16 =
+            fn(&MaskedTensor<half::f16>) -> ferrotorch_core::FerrotorchResult<Tensor<half::f16>>;
+        for (name, op) in [
+            ("masked_min", masked_min as MaskedRedF16),
+            ("masked_max", masked_max as MaskedRedF16),
+        ] {
+            let x = cuda_grad_leaf_f16(&[1.0, f32::NAN, 2.0]);
+            let mt = MaskedTensor::new(x.clone(), vec![true, true, false]).unwrap();
+            let y = op(&mt).unwrap();
+            let y_cpu = y.cpu().expect("forward D2H for assertion");
+            assert!(
+                y_cpu.data().unwrap()[0].is_nan(),
+                "{name}: CUDA f16 valid NaN must poison forward"
+            );
+            y.backward().expect("backward");
+            assert_grad_f16_nan_pattern(
+                &x,
+                &[true, true, false],
+                &format!("gpu {name} f16 valid NaN"),
+            );
+        }
+
+        type MaskedRedBf16 =
+            fn(&MaskedTensor<half::bf16>) -> ferrotorch_core::FerrotorchResult<Tensor<half::bf16>>;
+        for (name, op) in [
+            ("masked_min", masked_min as MaskedRedBf16),
+            ("masked_max", masked_max as MaskedRedBf16),
+        ] {
+            let x = cuda_grad_leaf_bf16(&[1.0, f32::NAN, 2.0]);
+            let mt = MaskedTensor::new(x.clone(), vec![true, true, false]).unwrap();
+            let y = op(&mt).unwrap();
+            let y_cpu = y.cpu().expect("forward D2H for assertion");
+            assert!(
+                y_cpu.data().unwrap()[0].is_nan(),
+                "{name}: CUDA bf16 valid NaN must poison forward"
+            );
+            y.backward().expect("backward");
+            assert_grad_bf16_nan_pattern(
+                &x,
+                &[true, true, false],
+                &format!("gpu {name} bf16 valid NaN"),
+            );
         }
     }
 

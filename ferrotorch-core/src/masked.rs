@@ -36,7 +36,7 @@
 //!
 //! No silent CPU↔GPU round trips. Reductions (`masked_sum` / `masked_mean`)
 //! lower to on-device kernels for f32/f64/f16/bf16; `masked_min` /
-//! `masked_max` lower to on-device kernels for f32/f64 (#597 / #627).
+//! `masked_min` / `masked_max` also lower to resident kernels for those dtypes.
 //! `masked_mean`'s division/scale runs on-device — the GPU sum never crosses
 //! back to the host. The constructors `masked_invalid` / `masked_equal`
 //! compute their boolean predicate ON-DEVICE for f32/f64/f16/bf16 CUDA inputs via
@@ -45,11 +45,9 @@
 //! mask is host-side BY DESIGN — this is a one-way readback of the freshly
 //! computed predicate, not a round trip of the value data, which never leaves
 //! the device). `MaskedExtremumBackward` uses a resident masked-extrema
-//! backward kernel for f32/f64 CUDA data. `masked_where` takes a host `&[bool]`
-//! condition and is device-agnostic. bf16/f16 lowering: `filled` / `to_tensor`
-//! run the dtype-generic resident `masked_fill_dt` kernel on CUDA; bf16/f16
-//! masked extrema remain a structured `NotImplementedOnCuda` until resident
-//! masked min/max kernels exist for those dtypes.
+//! backward kernel for f32/f64/f16/bf16 CUDA data. `masked_where` takes a host
+//! `&[bool]` condition and is device-agnostic. bf16/f16 lowering: `filled` /
+//! `to_tensor`, sum/mean, extrema, and extrema backward all stay resident.
 //!
 //! ## REQ status (per `.design/ferrotorch-core/masked.md`)
 //!
@@ -411,6 +409,12 @@ fn supports_cuda_masked_sum_mean<T: Float>() -> bool {
     is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()
 }
 
+/// CUDA masked extrema require resident forward and backward extrema kernels.
+#[inline]
+fn supports_cuda_masked_extremum<T: Float>() -> bool {
+    is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()
+}
+
 /// Fallible `T::from(f64)` with a structured error (R-CODE-2: no
 /// production `unwrap`).
 fn t_from_f64<T: Float>(v: f64, what: &str) -> FerrotorchResult<T> {
@@ -457,19 +461,6 @@ fn mask_scaled_grad<T: Float>(
         .map(|&s| if s { scale } else { zero })
         .collect();
     let cpu = Tensor::from_storage(TensorStorage::cpu(data), input.shape().to_vec(), false)?;
-    if input.is_cuda() {
-        return cpu.to(input.device());
-    }
-    Ok(cpu)
-}
-
-/// Build the gradient tensor `out[i] = scale` for every input element.
-fn full_scaled_grad<T: Float>(input: &Tensor<T>, scale: T) -> FerrotorchResult<Tensor<T>> {
-    let cpu = Tensor::from_storage(
-        TensorStorage::cpu(vec![scale; input.numel()]),
-        input.shape().to_vec(),
-        false,
-    )?;
     if input.is_cuda() {
         return cpu.to(input.device());
     }
@@ -558,14 +549,13 @@ impl<T: Float> GradFn<T> for MaskedMeanBackward<T> {
 /// - All-masked: the forward is the torch ±inf identity payload; torch
 ///   routes ZERO grads to the leaf (probed: `tensor([0., 0.])`) — matched.
 /// - NaN extremum payload (valid NaN data): `NaN == NaN` is false, so
-///   `scale_grad_by_count` divides by zero and torch routes NaN to EVERY
-///   input slot, including masked positions (live CPU/CUDA torch
+///   `scale_grad_by_count` divides by zero and torch routes NaN to every
+///   VALID input slot while masked-out slots stay zero (live CPU/CUDA torch
 ///   2.11.0+cu130 oracle, 2026-06-14) — matched.
 ///
-/// On CUDA f32/f64 the whole masked-extrema VJP runs on-device via
-/// `GpuBackend::masked_extreme_backward_{f32,f64}` after a one-way upload of
-/// the host mask. Other CUDA dtypes take the same documented host readback as
-/// their forward path ([`masked_extremum_cpu`]).
+/// On CUDA f32/f64/f16/bf16 the whole masked-extrema VJP runs on-device via
+/// `GpuBackend::masked_extreme_backward_*` after a one-way upload of the host
+/// mask as a resident 0/1 tensor.
 #[derive(Debug)]
 pub struct MaskedExtremumBackward<T: Float> {
     input: Tensor<T>,
@@ -584,7 +574,7 @@ impl<T: Float> GradFn<T> for MaskedExtremumBackward<T> {
             return Ok(vec![Some(mask_scaled_grad(&self.input, &self.mask, zero)?)]);
         }
 
-        if self.input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        if self.input.is_cuda() && supports_cuda_masked_extremum::<T>() {
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
             let grad_output = if grad_output.is_cuda() {
@@ -602,13 +592,31 @@ impl<T: Float> GradFn<T> for MaskedExtremumBackward<T> {
                     self.result.gpu_handle()?,
                     grad_output.gpu_handle()?,
                 )?
-            } else {
+            } else if is_f64::<T>() {
                 backend.masked_extreme_backward_f64(
                     data_c.gpu_handle()?,
                     mask_t.gpu_handle()?,
                     self.result.gpu_handle()?,
                     grad_output.gpu_handle()?,
                 )?
+            } else if is_f16::<T>() {
+                backend.masked_extreme_backward_f16(
+                    data_c.gpu_handle()?,
+                    mask_t.gpu_handle()?,
+                    self.result.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                )?
+            } else if is_bf16::<T>() {
+                backend.masked_extreme_backward_bf16(
+                    data_c.gpu_handle()?,
+                    mask_t.gpu_handle()?,
+                    self.result.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                )?
+            } else {
+                return Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "masked_extreme_backward",
+                });
             };
             let grad_input = Tensor::from_storage(
                 TensorStorage::gpu(handle),
@@ -620,10 +628,13 @@ impl<T: Float> GradFn<T> for MaskedExtremumBackward<T> {
 
         let r = scalar_of(&self.result)?;
         if r.is_nan() {
-            return Ok(vec![Some(full_scaled_grad(&self.input, T::nan())?)]);
+            return Ok(vec![Some(mask_scaled_grad(
+                &self.input,
+                &self.mask,
+                T::nan(),
+            )?)]);
         }
-        // Host walk (CPU data, or the documented CUDA bf16/f16 host readback
-        // matching the forward lowering).
+        // Host walk for CPU data.
         let data = self.input.data_vec()?;
         let ties: Vec<bool> = data
             .iter()
@@ -760,12 +771,11 @@ fn masked_mean_gpu<T: Float>(mt: &MaskedTensor<T>) -> FerrotorchResult<Tensor<T>
 /// (`+inf` if all masked and non-empty; errors on empty input like
 /// `torch.masked.amin`).
 ///
-/// GPU path: uses the fused `masked_reduce_min` PTX kernel (#627) for f32/f64.
+/// GPU path: uses the fused `masked_reduce_min` PTX kernel (#627).
 /// Single launch reads `(data, mask_f)` directly and combines `mask_f != 0 ?
 /// data : +inf` into the running min accumulator — no intermediate buffers, no
-/// CPU-side sentinel construction. bf16/f16 CUDA extrema return a structured
-/// `NotImplementedOnCuda` until resident masked-extrema kernels exist; they do
-/// not take a hidden CPU value walk.
+/// CPU-side sentinel construction. f16/bf16 decode to f32 for comparison and
+/// round the scalar result back to the storage dtype on-device.
 ///
 /// **Autograd (#1758 / CORE-064):** when the data tensor tracks gradients
 /// the result carries a [`MaskedExtremumBackward`] edge. Live torch
@@ -773,8 +783,9 @@ fn masked_mean_gpu<T: Float>(mt: &MaskedTensor<T>) -> FerrotorchResult<Tensor<T>
 /// positions equal to the extremum (`torch.masked.amin` of
 /// `[-2, 7, -2, -2]` with mask `[T,T,T,F]` → grad
 /// `tensor([0.5, 0., 0.5, 0.])` — the masked-out tied value gets 0).
-/// A valid NaN poisons the forward result and routes NaN gradients to every
-/// input slot, matching torch's `scale_grad_by_count` edge.
+/// A valid NaN poisons the forward result and routes NaN gradients to valid
+/// mask positions while masked-out slots stay zero, matching torch's
+/// `scale_grad_by_count` edge.
 pub fn masked_min<T: Float>(mt: &MaskedTensor<T>) -> FerrotorchResult<Tensor<T>> {
     masked_extremum(mt, true)
 }
@@ -796,7 +807,7 @@ fn masked_extremum<T: Float>(mt: &MaskedTensor<T>, pick_min: bool) -> Ferrotorch
         });
     }
     let result = if mt.data.is_cuda() {
-        if is_f32::<T>() || is_f64::<T>() {
+        if supports_cuda_masked_extremum::<T>() {
             masked_extremum_gpu(mt, pick_min)?
         } else {
             return Err(FerrotorchError::NotImplementedOnCuda {
@@ -878,13 +889,31 @@ fn masked_extremum_gpu<T: Float>(
                 f32::NEG_INFINITY
             };
             backend.fill_f32(1, value, ordinal)?
-        } else {
+        } else if is_f64::<T>() {
             let value = if pick_min {
                 f64::INFINITY
             } else {
                 f64::NEG_INFINITY
             };
             backend.fill_f64(1, value, ordinal)?
+        } else if is_f16::<T>() {
+            let value = if pick_min {
+                f32::INFINITY
+            } else {
+                f32::NEG_INFINITY
+            };
+            backend.fill_f16(1, value, ordinal)?
+        } else if is_bf16::<T>() {
+            let value = if pick_min {
+                f32::INFINITY
+            } else {
+                f32::NEG_INFINITY
+            };
+            backend.fill_bf16_bf16(1, value, ordinal)?
+        } else {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: if pick_min { "masked_min" } else { "masked_max" },
+            });
         };
         return Tensor::from_storage(TensorStorage::gpu(handle), vec![], false);
     }
@@ -906,13 +935,25 @@ fn masked_extremum_gpu<T: Float>(
     let result_h = if pick_min {
         if is_f32::<T>() {
             backend.masked_min_f32(data.gpu_handle()?, mask_t.gpu_handle()?, numel)?
-        } else {
+        } else if is_f64::<T>() {
             backend.masked_min_f64(data.gpu_handle()?, mask_t.gpu_handle()?, numel)?
+        } else if is_f16::<T>() {
+            backend.masked_min_f16(data.gpu_handle()?, mask_t.gpu_handle()?, numel)?
+        } else if is_bf16::<T>() {
+            backend.masked_min_bf16(data.gpu_handle()?, mask_t.gpu_handle()?, numel)?
+        } else {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "masked_min" });
         }
     } else if is_f32::<T>() {
         backend.masked_max_f32(data.gpu_handle()?, mask_t.gpu_handle()?, numel)?
-    } else {
+    } else if is_f64::<T>() {
         backend.masked_max_f64(data.gpu_handle()?, mask_t.gpu_handle()?, numel)?
+    } else if is_f16::<T>() {
+        backend.masked_max_f16(data.gpu_handle()?, mask_t.gpu_handle()?, numel)?
+    } else if is_bf16::<T>() {
+        backend.masked_max_bf16(data.gpu_handle()?, mask_t.gpu_handle()?, numel)?
+    } else {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "masked_max" });
     };
 
     Tensor::from_storage(TensorStorage::gpu(result_h), vec![], false)

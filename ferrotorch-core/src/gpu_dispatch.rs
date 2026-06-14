@@ -502,7 +502,8 @@ pub trait GpuBackend: Send + Sync {
     /// `mask_f` is a resident 0/1 valid-entry indicator. The backend must
     /// split `grad_output` evenly across valid positions where
     /// `input == extreme`; when `extreme` is NaN, PyTorch's count-scaled
-    /// rule yields NaN at every input slot.
+    /// rule yields NaN at valid mask positions while masked-out slots stay
+    /// zero.
     fn masked_extreme_backward_f32(
         &self,
         _input: &GpuBufferHandle,
@@ -960,6 +961,80 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::InvalidArgument {
             message: "f64 GPU masked_reduce_max not implemented for this backend".into(),
+        })
+    }
+
+    /// f16 backward for masked global `amin`/`amax`.
+    fn masked_extreme_backward_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _mask_f: &GpuBufferHandle,
+        _extreme: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "masked_extreme_backward_f16",
+        })
+    }
+
+    /// bf16 backward for masked global `amin`/`amax`.
+    fn masked_extreme_backward_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _mask_f: &GpuBufferHandle,
+        _extreme: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "masked_extreme_backward_bf16",
+        })
+    }
+
+    /// f16 fused masked-min reduction.
+    fn masked_min_f16(
+        &self,
+        _data: &GpuBufferHandle,
+        _mask_f: &GpuBufferHandle,
+        _len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "masked_min_f16",
+        })
+    }
+
+    /// f16 fused masked-max reduction.
+    fn masked_max_f16(
+        &self,
+        _data: &GpuBufferHandle,
+        _mask_f: &GpuBufferHandle,
+        _len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "masked_max_f16",
+        })
+    }
+
+    /// bf16 fused masked-min reduction.
+    fn masked_min_bf16(
+        &self,
+        _data: &GpuBufferHandle,
+        _mask_f: &GpuBufferHandle,
+        _len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "masked_min_bf16",
+        })
+    }
+
+    /// bf16 fused masked-max reduction.
+    fn masked_max_bf16(
+        &self,
+        _data: &GpuBufferHandle,
+        _mask_f: &GpuBufferHandle,
+        _len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "masked_max_bf16",
         })
     }
 

@@ -18,10 +18,11 @@ keeping compiled `CudaFunction`s alive across all calls. Two parallel
 caches: one keyed by `(&'static str kernel_name, u32 device_ordinal)`
 for the per-kernel string constants in `kernels.rs` / `bf16.rs` /
 `f16.rs` / etc., and a second hash-keyed cache
-`OWNED_MODULE_CACHE` for runtime-generated PTX strings (the
-FusedChain executor's runtime PTX synthesis). Mirrors the JIT
-module-cache role that PyTorch's `jiterator.cpp` plays for runtime
-fused kernels.
+`OWNED_MODULE_CACHE` for runtime-generated PTX strings plus their
+entry-point names (the FusedChain executor's runtime PTX synthesis,
+and generated multi-entry PTX in hand-written GPU modules). Mirrors
+the JIT module-cache role that PyTorch's `jiterator.cpp` plays for
+runtime fused kernels.
 
 ## Requirements
 
@@ -33,8 +34,10 @@ fused kernels.
 - REQ-2: `pub fn get_or_compile_owned(ctx, ptx_src: &str,
   kernel_name, device_ordinal) -> Result<CudaFunction, DriverError>`
   — the hash-keyed cache for runtime-generated PTX. Computes a
-  hash of the PTX body, looks up by `(hash, device_ordinal)`, and
-  compiles on miss.
+  hash of the PTX body and kernel name, looks up by
+  `(ptx_hash, kernel_name_hash, device_ordinal)`, and compiles on miss.
+  The kernel-name component is required because a generated PTX module
+  may expose multiple `.entry` functions.
 - REQ-3: Per-device-ordinal keying — a kernel compiled for device 0
   cannot be used on device 1, so the device ordinal is part of the
   cache key.
@@ -62,8 +65,8 @@ fused kernels.
 - [x] AC-4: 160+ `crate::module_cache::get_or_compile` callsites
   exist in `ferrotorch-gpu/src/` (verified by
   `grep -c "module_cache::get_or_compile" ferrotorch-gpu/src/*.rs`).
-- [x] AC-5: Six unit tests in `mod tests` exercise the cache hit /
-  miss / cross-device-key paths.
+- [x] AC-5: Seven unit tests in `mod tests` exercise the cache hit /
+  miss / cross-device-key / same-PTX-different-entry paths.
 
 ## Architecture
 
@@ -73,10 +76,11 @@ The module is small (~470 lines) and structurally simple:
    - `MODULE_CACHE: LazyLock<Mutex<HashMap<(&'static str, u32), CudaFunction>>>`
      at line 42 — the `&'static str` key is zero-cost because all
      kernel names in `kernels.rs` are string literals.
-   - `OWNED_MODULE_CACHE: LazyLock<Mutex<HashMap<(u64, u32), CudaFunction>>>`
-     at line 53 — the `u64` key is a blake-style hash computed
-     over the PTX body on insert + lookup, avoiding the need to
-     keep the `String` alive as a `&'static str`.
+   - `OWNED_MODULE_CACHE: LazyLock<Mutex<OwnedModuleCache>>` with
+     `OwnedModuleCacheKey = (u64, u64, u32)` — the first `u64` is a
+     hash computed over the PTX body and the second over the entry-point
+     name on insert + lookup, avoiding the need to keep either `String`
+     alive as a `&'static str` before a miss is committed.
 
 2. **`get_or_compile` body** (line 76):
    - Acquire mutex, lookup `(kernel_name, device_ordinal)`.
@@ -86,8 +90,8 @@ The module is small (~470 lines) and structurally simple:
      clone.
 
 3. **`get_or_compile_owned` body** (line 134):
-   - Compute the hash of `ptx_src` via `DefaultHasher`.
-   - Acquire mutex, lookup `(hash, device_ordinal)`.
+   - Compute hashes of `ptx_src` and `kernel_name` via `DefaultHasher`.
+   - Acquire mutex, lookup `(ptx_hash, kernel_name_hash, device_ordinal)`.
    - On hit: return the clone.
    - On miss: compile, insert, return the clone.
 
@@ -133,11 +137,12 @@ Edge cases preserved:
   ensures kernels are compiled separately per device. Critical for
   multi-GPU setups where a device-0 module cannot be launched on
   device 1.
-- **Owned-PTX hash collision**: `OWNED_MODULE_CACHE` uses
-  `DefaultHasher::finish() -> u64`. Practical collision probability
-  is negligible for the runtime PTX strings produced by FusedChain;
-  a collision would surface as a kernel-name resolution failure
-  inside `load_module`, which is then propagated as `DriverError`.
+- **Owned-PTX hash collision**: `OWNED_MODULE_CACHE` uses two
+  `DefaultHasher::finish() -> u64` components (PTX body and kernel
+  name). Practical collision probability is negligible for the runtime
+  PTX strings produced by FusedChain and generated hand-written kernels;
+  a collision would return the wrong function handle and fail under the
+  caller's kernel-specific tests.
 - **Mutex contention**: the critical section is a HashMap lookup +
   one of `clone` (hit) or compile-then-insert (miss). The miss
   path's compile is the expensive piece, and any contention is on
@@ -145,10 +150,11 @@ Edge cases preserved:
 
 ## Verification
 
-Unit tests in `ferrotorch-gpu/src/module_cache.rs` `mod tests` (6
+Unit tests in `ferrotorch-gpu/src/module_cache.rs` `mod tests` (7
 tests) cover: cache hit returns the same function pointer, cache
 miss compiles and inserts, cross-device-ordinal keys are distinct,
-owned-PTX hash collision behaviour, and the `Mutex` poisoning path.
+owned-PTX hash collision behaviour, same PTX source with distinct
+entry-point names, and the `Mutex` poisoning path.
 
 Smoke command (no parity ops):
 
@@ -168,6 +174,6 @@ every kernel load goes through this cache.
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `pub fn get_or_compile in ferrotorch-gpu/src/module_cache.rs` (line 76) mirrors the upstream JIT-module-cache role; non-test consumer: 100+ sites in `ferrotorch-gpu/src/kernels.rs` plus every PTX-loading sibling module (10+ files). E.g. `roll.rs`, `group_norm.rs`, `reduce_arg.rs::launch_argreduce`. |
 | REQ-2 | SHIPPED | impl: `pub fn get_or_compile_owned in module_cache.rs` (line 134) with the hash-keyed `OWNED_MODULE_CACHE`; non-test consumer: FusedChain runtime PTX executor (consumed by the workspace's fused-chain JIT path; the hash-keyed shape only exists because of that consumer). |
-| REQ-3 | SHIPPED | impl: cache key is `(name, ordinal)` tuple at line 42 (`HashMap<(&'static str, u32), CudaFunction>`) and `(hash, ordinal)` at line 53; the unit-test suite verifies cross-device keys are distinct. |
+| REQ-3 | SHIPPED | impl: cache key is `(name, ordinal)` tuple at line 42 (`HashMap<(&'static str, u32), CudaFunction>`) and `(ptx_hash, kernel_name_hash, ordinal)` at line 53; the unit-test suite verifies cross-device keys are distinct. |
 | REQ-4 | SHIPPED | impl: both caches use `LazyLock<Mutex<HashMap<...>>>` at lines 42, 53; the lock-acquire / lookup / optional-compile / insert / drop pattern is the body of both `get_or_compile` and `get_or_compile_owned`. |
 | REQ-5 | SHIPPED | impl: every kernel-loading site in `ferrotorch-gpu/src/` calls into this cache. Non-test consumers include `kernels.rs` (~100 sites), `bf16.rs`, `f16.rs`, `int_kernels.rs`, `bool_kernels.rs`, `cast_kernels.rs`, `masked_kernels.rs`, `reduce_arg.rs`, `gather_int.rs`, `roll.rs`, `group_norm.rs`, `flash_attention.rs`, `conv.rs`, `upsample.rs`, `rng.rs`. Counted via `grep -c "module_cache::" ferrotorch-gpu/src/*.rs` = 160+. |

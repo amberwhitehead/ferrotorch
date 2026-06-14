@@ -64,8 +64,10 @@
 //!
 //! `masked_sum` / `masked_mean` lower to GPU kernels for f32/f64/f16/bf16
 //! when the underlying data tensor is on CUDA; `masked_min` / `masked_max`
-//! currently lower to resident CUDA kernels for f32 + f64 and reject f16/bf16
-//! with structured `NotImplementedOnCuda` instead of taking a CPU value walk.
+//! lower to resident CUDA kernels for f32/f64/f16/bf16. f16/bf16 extrema
+//! decode to f32 for compare/tie-count math and round the scalar/gradient
+//! payloads back to the storage dtype on-device, matching PyTorch's CUDA half
+//! behavior without a CPU value walk.
 //! `masked_count` computes its count from the host-resident boolean mask
 //! (the mask itself is a `Vec<bool>` on host BY DESIGN) and uploads the
 //! scalar result to the data tensor's device. Per the CORE-065 → #1759
@@ -1130,9 +1132,9 @@ fn fixture_file_covers_every_phase212_op() {
 //
 // Per the dispatch:
 //   * masked_sum / masked_mean have GPU lowerings for f32/f64/f16/bf16
-//     (#597); masked_min / masked_max have GPU lowerings for f32/f64 (#627)
-//     and reject f16/bf16 rather than CPU-pass through. The fixtures for
-//     cuda:0 run on GPU and read back to host for comparison.
+//     (#597); masked_min / masked_max have GPU lowerings for f32/f64/f16/bf16
+//     (#627 + half follow-up). The fixtures for cuda:0 run on GPU and read
+//     back to host for comparison.
 //   * masked_count is intentionally host-side (the boolean mask is a
 //     `Vec<bool>` regardless of where the data tensor lives) — including
 //     it in the GPU lane proves it stays correct when the data tensor is
@@ -1483,7 +1485,7 @@ mod gpu {
     }
 
     #[test]
-    fn gpu_masked_extrema_f16_bf16_do_not_cpu_passthrough() {
+    fn gpu_masked_extrema_f16_bf16_are_resident() {
         ensure_cuda_backend();
         let mask = vec![true, false, true, false];
 
@@ -1492,21 +1494,51 @@ mod gpu {
             mask.clone(),
         )
         .expect("f16 masked tensor");
-        let err = masked_min(&mt_f16).expect_err("f16 masked_min must not CPU fallback");
-        assert!(matches!(
-            err,
-            FerrotorchError::NotImplementedOnCuda { op: "masked_min" }
-        ));
+        let min_f16 = masked_min(&mt_f16).expect("masked_min f16 cuda");
+        let max_f16 = masked_max(&mt_f16).expect("masked_max f16 cuda");
+        assert_eq!(min_f16.device(), Device::Cuda(0));
+        assert_eq!(max_f16.device(), Device::Cuda(0));
+        assert_eq!(read_back_f16_as_f32(&min_f16), vec![1.0]);
+        assert_eq!(read_back_f16_as_f32(&max_f16), vec![3.0]);
 
         let mt_bf16 = MaskedTensor::new(
             upload_bf16(make_cpu_bf16(&[1.0, 2.0, 3.0, 4.0], &[4])),
-            mask,
+            mask.clone(),
         )
         .expect("bf16 masked tensor");
-        let err = masked_max(&mt_bf16).expect_err("bf16 masked_max must not CPU fallback");
-        assert!(matches!(
-            err,
-            FerrotorchError::NotImplementedOnCuda { op: "masked_max" }
-        ));
+        let min_bf16 = masked_min(&mt_bf16).expect("masked_min bf16 cuda");
+        let max_bf16 = masked_max(&mt_bf16).expect("masked_max bf16 cuda");
+        assert_eq!(min_bf16.device(), Device::Cuda(0));
+        assert_eq!(max_bf16.device(), Device::Cuda(0));
+        assert_eq!(read_back_bf16_as_f32(&min_bf16), vec![1.0]);
+        assert_eq!(read_back_bf16_as_f32(&max_bf16), vec![3.0]);
+
+        let all_false = vec![false, false, false, false];
+        let mt_all_f16 = MaskedTensor::new(
+            upload_f16(make_cpu_f16(&[1.0, 2.0, 3.0, 4.0], &[4])),
+            all_false.clone(),
+        )
+        .expect("all-false f16 masked tensor");
+        let min_all_f16 = masked_min(&mt_all_f16).expect("masked_min all false f16");
+        let max_all_f16 = masked_max(&mt_all_f16).expect("masked_max all false f16");
+        assert_eq!(min_all_f16.device(), Device::Cuda(0));
+        assert_eq!(max_all_f16.device(), Device::Cuda(0));
+        assert_eq!(read_back_f16_as_f32(&min_all_f16), vec![f32::INFINITY]);
+        assert_eq!(read_back_f16_as_f32(&max_all_f16), vec![f32::NEG_INFINITY]);
+
+        let mt_all_bf16 = MaskedTensor::new(
+            upload_bf16(make_cpu_bf16(&[1.0, 2.0, 3.0, 4.0], &[4])),
+            all_false,
+        )
+        .expect("all-false bf16 masked tensor");
+        let min_all_bf16 = masked_min(&mt_all_bf16).expect("masked_min all false bf16");
+        let max_all_bf16 = masked_max(&mt_all_bf16).expect("masked_max all false bf16");
+        assert_eq!(min_all_bf16.device(), Device::Cuda(0));
+        assert_eq!(max_all_bf16.device(), Device::Cuda(0));
+        assert_eq!(read_back_bf16_as_f32(&min_all_bf16), vec![f32::INFINITY]);
+        assert_eq!(
+            read_back_bf16_as_f32(&max_all_bf16),
+            vec![f32::NEG_INFINITY]
+        );
     }
 }

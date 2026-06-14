@@ -1426,6 +1426,643 @@ pub fn ne_scalar_mask_bf16(
     )
 }
 
+#[derive(Clone, Copy)]
+enum Float16Kind {
+    F16,
+    Bf16,
+}
+
+#[derive(Clone, Copy)]
+enum ExtremeKind {
+    Min,
+    Max,
+}
+
+impl ExtremeKind {
+    fn sentinel_f32(self) -> &'static str {
+        match self {
+            Self::Min => "0f7F800000",
+            Self::Max => "0fFF800000",
+        }
+    }
+
+    fn compare_ptx(self) -> &'static str {
+        match self {
+            Self::Min => "setp.lt.f32 %cmp, %val, %acc;",
+            Self::Max => "setp.gt.f32 %cmp, %val, %acc;",
+        }
+    }
+}
+
+fn load_16_to_f32(kind: Float16Kind, ptr: &str, out: &str) -> String {
+    match kind {
+        Float16Kind::F16 => format!(
+            "\
+    ld.global.b16 %h, [{ptr}];
+    cvt.f32.f16 {out}, %h;"
+        ),
+        Float16Kind::Bf16 => format!(
+            "\
+    ld.global.u16 %h, [{ptr}];
+    cvt.u32.u16 %bits, %h;
+    shl.b32 %bits, %bits, 16;
+    mov.b32 {out}, %bits;"
+        ),
+    }
+}
+
+fn store_f32_to_16(kind: Float16Kind, ptr: &str, value: &str) -> String {
+    match kind {
+        Float16Kind::F16 => format!(
+            "\
+    cvt.rn.f16.f32 %out_h, {value};
+    st.global.b16 [{ptr}], %out_h;"
+        ),
+        Float16Kind::Bf16 => format!(
+            "\
+    cvt.rn.bf16.f32 %out_h, {value};
+    st.global.b16 [{ptr}], %out_h;"
+        ),
+    }
+}
+
+fn half_reg_decl(kind: Float16Kind) -> &'static str {
+    match kind {
+        Float16Kind::F16 => ".reg .b16 %h, %out_h;",
+        Float16Kind::Bf16 => ".reg .u16 %h; .reg .b16 %out_h;",
+    }
+}
+
+fn ptx_header(kind: Float16Kind) -> &'static str {
+    match kind {
+        Float16Kind::F16 => ".version 7.0\n.target sm_53",
+        Float16Kind::Bf16 => ".version 7.8\n.target sm_80",
+    }
+}
+
+/// PTX for f16/bf16 masked or unmasked extrema. Values are decoded to f32,
+/// reduced with the f32 NaN-poisoning combiner used by the f32 path, then
+/// rounded back to the storage dtype for the partial/result buffer.
+fn reduce_extreme_16_ptx(
+    kernel_name: &str,
+    kind: Float16Kind,
+    extreme: ExtremeKind,
+    with_mask: bool,
+) -> String {
+    let params = if with_mask {
+        ".param .u64 data_ptr, .param .u64 mask_ptr, .param .u64 out_ptr, .param .u32 n"
+    } else {
+        ".param .u64 data_ptr, .param .u64 out_ptr, .param .u32 n"
+    };
+    let load_params = if with_mask {
+        "    ld.param.u64 %dat, [data_ptr];
+    ld.param.u64 %msk, [mask_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];"
+    } else {
+        "    ld.param.u64 %dat, [data_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];"
+    };
+    let mask_load = if with_mask {
+        let decode_mask = load_16_to_f32(kind, "%maddr", "%m");
+        format!(
+            "\
+    cvt.u64.u32 %moff, %idx;
+    shl.b64 %moff, %moff, 1;
+    add.u64 %maddr, %msk, %moff;
+{decode_mask}
+    setp.ne.f32 %p_valid, %m, 0f00000000;"
+        )
+    } else {
+        "\
+    setp.ne.f32 %p_valid, 0f3F800000, 0f00000000;"
+            .to_string()
+    };
+    let load_data = load_16_to_f32(kind, "%daddr", "%d");
+    let store_out = store_f32_to_16(kind, "%out", "%acc");
+    let header = ptx_header(kind);
+    let sentinel = extreme.sentinel_f32();
+    let compare = extreme.compare_ptx();
+    let half_reg_decl = half_reg_decl(kind);
+
+    format!(
+        "\
+{header}
+.address_size 64
+
+.shared .align 4 .f32 sdata[256];
+
+.visible .entry {kernel_name}({params}) {{
+    .reg .u32 %my_tid, %bid, %bdim, %gdim, %n_reg, %idx, %stride, %half, %bits;
+    .reg .u64 %dat, %msk, %out, %off, %moff, %daddr, %maddr, %saddr;
+    .reg .f32 %acc, %d, %m, %sentinel, %val;
+    {half_reg_decl}
+    .reg .pred %p, %ptid, %p_valid, %val_nan, %acc_nan, %acc_ok, %cmp, %take;
+
+{load_params}
+
+    mov.u32 %my_tid, %tid.x;
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gdim, %nctaid.x;
+
+    mad.lo.u32 %idx, %bid, %bdim, %my_tid;
+    mul.lo.u32 %stride, %bdim, %gdim;
+    mov.f32 %acc, {sentinel};
+    mov.f32 %sentinel, {sentinel};
+
+GRID_LOOP:
+    setp.ge.u32 %p, %idx, %n_reg;
+    @%p bra GRID_DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %daddr, %dat, %off;
+{load_data}
+
+{mask_load}
+    selp.f32 %val, %d, %sentinel, %p_valid;
+
+    setp.nan.f32 %val_nan, %val, %val;
+    setp.nan.f32 %acc_nan, %acc, %acc;
+    not.pred %acc_ok, %acc_nan;
+    {compare}
+    and.pred %cmp, %acc_ok, %cmp;
+    or.pred %take, %val_nan, %cmp;
+    @%take mov.f32 %acc, %val;
+    add.u32 %idx, %idx, %stride;
+    bra GRID_LOOP;
+
+GRID_DONE:
+    cvt.u64.u32 %off, %my_tid;
+    shl.b64 %off, %off, 2;
+    mov.u64 %saddr, sdata;
+    add.u64 %saddr, %saddr, %off;
+    st.shared.f32 [%saddr], %acc;
+    bar.sync 0;
+
+    mov.u32 %half, 128;
+TREE_LOOP:
+    setp.lt.u32 %p, %half, 1;
+    @%p bra TREE_DONE;
+
+    setp.ge.u32 %ptid, %my_tid, %half;
+    @%ptid bra TREE_SKIP;
+
+    add.u32 %idx, %my_tid, %half;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    mov.u64 %saddr, sdata;
+    add.u64 %saddr, %saddr, %off;
+    ld.shared.f32 %val, [%saddr];
+    cvt.u64.u32 %off, %my_tid;
+    shl.b64 %off, %off, 2;
+    mov.u64 %saddr, sdata;
+    add.u64 %saddr, %saddr, %off;
+    ld.shared.f32 %acc, [%saddr];
+    setp.nan.f32 %val_nan, %val, %val;
+    setp.nan.f32 %acc_nan, %acc, %acc;
+    not.pred %acc_ok, %acc_nan;
+    {compare}
+    and.pred %cmp, %acc_ok, %cmp;
+    or.pred %take, %val_nan, %cmp;
+    @%take mov.f32 %acc, %val;
+    mov.u64 %saddr, sdata;
+    add.u64 %saddr, %saddr, %off;
+    st.shared.f32 [%saddr], %acc;
+
+TREE_SKIP:
+    bar.sync 0;
+    shr.u32 %half, %half, 1;
+    bra TREE_LOOP;
+
+TREE_DONE:
+    setp.ne.u32 %ptid, %my_tid, 0;
+    @%ptid bra END;
+
+    mov.u64 %saddr, sdata;
+    ld.shared.f32 %acc, [%saddr];
+    cvt.u64.u32 %off, %bid;
+    shl.b64 %off, %off, 1;
+    add.u64 %out, %out, %off;
+{store_out}
+
+END:
+    ret;
+}}
+"
+    )
+}
+
+fn masked_extreme_backward_16_ptx(
+    count_kernel: &str,
+    fill_kernel: &str,
+    kind: Float16Kind,
+) -> String {
+    let header = ptx_header(kind);
+    let load_target = load_16_to_f32(kind, "%ext", "%target");
+    let load_count_val = load_16_to_f32(kind, "%addr_in", "%val");
+    let load_count_mask = load_16_to_f32(kind, "%addr_mask", "%mask_v");
+    let load_fill_target = load_16_to_f32(kind, "%ext", "%target");
+    let load_fill_grad = load_16_to_f32(kind, "%grad", "%go");
+    let load_fill_val = load_16_to_f32(kind, "%addr_in", "%val");
+    let load_fill_mask = load_16_to_f32(kind, "%addr_mask", "%mask_v");
+    let store_fill = store_f32_to_16(kind, "%addr_out", "%res");
+    let half_reg_decl = half_reg_decl(kind);
+
+    format!(
+        "\
+{header}
+.address_size 64
+
+.visible .entry {count_kernel}(
+    .param .u64 input_ptr,
+    .param .u64 mask_ptr,
+    .param .u64 extreme_ptr,
+    .param .u64 count_ptr,
+    .param .u32 n
+) {{
+    .reg .u32 %idx, %stride, %bid, %bdim, %tid_r, %gdim, %n_reg, %old, %bits;
+    .reg .u64 %in, %mask, %ext, %count, %off, %addr_in, %addr_mask;
+    .reg .f32 %val, %mask_v, %target, %zero;
+    {half_reg_decl}
+    .reg .pred %p, %valid, %match, %take;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %mask, [mask_ptr];
+    ld.param.u64 %ext, [extreme_ptr];
+    ld.param.u64 %count, [count_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %tid_r, %tid.x;
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gdim, %nctaid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %tid_r;
+    mul.lo.u32 %stride, %bdim, %gdim;
+{load_target}
+    mov.f32 %zero, 0f00000000;
+
+COUNT_LOOP:
+    setp.ge.u32 %p, %idx, %n_reg;
+    @%p bra COUNT_DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr_in, %in, %off;
+    add.u64 %addr_mask, %mask, %off;
+{load_count_val}
+{load_count_mask}
+    setp.ne.f32 %valid, %mask_v, %zero;
+    setp.eq.f32 %match, %val, %target;
+    and.pred %take, %valid, %match;
+    @%take atom.global.add.u32 %old, [%count], 1;
+
+    add.u32 %idx, %idx, %stride;
+    bra COUNT_LOOP;
+
+COUNT_DONE:
+    ret;
+}}
+
+.visible .entry {fill_kernel}(
+    .param .u64 input_ptr,
+    .param .u64 mask_ptr,
+    .param .u64 extreme_ptr,
+    .param .u64 grad_ptr,
+    .param .u64 count_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {{
+    .reg .u32 %idx, %stride, %bid, %bdim, %tid_r, %gdim, %n_reg, %count_u, %bits;
+    .reg .u64 %in, %mask, %ext, %grad, %count, %out, %off, %addr_in, %addr_mask, %addr_out;
+    .reg .f32 %val, %mask_v, %target, %go, %count_f, %zero, %scale, %res;
+    {half_reg_decl}
+    .reg .pred %p, %valid, %match, %take, %zero_count;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %mask, [mask_ptr];
+    ld.param.u64 %ext, [extreme_ptr];
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %count, [count_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %tid_r, %tid.x;
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gdim, %nctaid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %tid_r;
+    mul.lo.u32 %stride, %bdim, %gdim;
+
+{load_fill_target}
+{load_fill_grad}
+    ld.global.u32 %count_u, [%count];
+    mov.f32 %zero, 0f00000000;
+    setp.eq.u32 %zero_count, %count_u, 0;
+    cvt.rn.f32.u32 %count_f, %count_u;
+    div.rn.f32 %scale, %go, %count_f;
+    @%zero_count div.rn.f32 %scale, %zero, %zero;
+
+FILL_LOOP:
+    setp.ge.u32 %p, %idx, %n_reg;
+    @%p bra FILL_DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr_in, %in, %off;
+    add.u64 %addr_mask, %mask, %off;
+    add.u64 %addr_out, %out, %off;
+{load_fill_val}
+{load_fill_mask}
+    setp.ne.f32 %valid, %mask_v, %zero;
+    setp.eq.f32 %match, %val, %target;
+    and.pred %take, %valid, %match;
+    mov.f32 %res, %zero;
+    @%take mov.f32 %res, %scale;
+    and.pred %take, %valid, %zero_count;
+    @%take mov.f32 %res, %scale;
+{store_fill}
+
+    add.u32 %idx, %idx, %stride;
+    bra FILL_LOOP;
+
+FILL_DONE:
+    ret;
+}}
+"
+    )
+}
+
+fn launch_reduce_extreme_16(
+    data: &CudaSlice<u16>,
+    mask: Option<&CudaSlice<u16>>,
+    device: &GpuDevice,
+    kind: Float16Kind,
+    extreme: ExtremeKind,
+) -> GpuResult<CudaSlice<u16>> {
+    if let Some(mask) = mask
+        && data.len() != mask.len()
+    {
+        return Err(GpuError::LengthMismatch {
+            a: data.len(),
+            b: mask.len(),
+        });
+    }
+    let n = data.len();
+    if n > u32::MAX as usize {
+        return Err(GpuError::ShapeMismatch {
+            op: "masked_reduce_extreme_16",
+            expected: vec![u32::MAX as usize],
+            got: vec![n],
+        });
+    }
+    if n == 0 {
+        let bits = match (kind, extreme) {
+            (Float16Kind::F16, ExtremeKind::Min) => half::f16::INFINITY.to_bits(),
+            (Float16Kind::F16, ExtremeKind::Max) => half::f16::NEG_INFINITY.to_bits(),
+            (Float16Kind::Bf16, ExtremeKind::Min) => half::bf16::INFINITY.to_bits(),
+            (Float16Kind::Bf16, ExtremeKind::Max) => half::bf16::NEG_INFINITY.to_bits(),
+        };
+        return device.stream().clone_htod(&vec![bits]).map_err(Into::into);
+    }
+
+    let stream = device.stream();
+    let ctx = device.context();
+    let num_blocks = ((n as u32).saturating_add(BLOCK_SIZE - 1)) / BLOCK_SIZE;
+    let num_blocks = num_blocks.min(1024);
+    let kernel_name = match (kind, extreme, mask.is_some()) {
+        (Float16Kind::F16, ExtremeKind::Min, true) => "masked_reduce_min_f16_kernel",
+        (Float16Kind::F16, ExtremeKind::Max, true) => "masked_reduce_max_f16_kernel",
+        (Float16Kind::Bf16, ExtremeKind::Min, true) => "masked_reduce_min_bf16_kernel",
+        (Float16Kind::Bf16, ExtremeKind::Max, true) => "masked_reduce_max_bf16_kernel",
+        (Float16Kind::F16, ExtremeKind::Min, false) => "reduce_min_f16_kernel",
+        (Float16Kind::F16, ExtremeKind::Max, false) => "reduce_max_f16_kernel",
+        (Float16Kind::Bf16, ExtremeKind::Min, false) => "reduce_min_bf16_kernel",
+        (Float16Kind::Bf16, ExtremeKind::Max, false) => "reduce_max_bf16_kernel",
+    };
+    let ptx = reduce_extreme_16_ptx(kernel_name, kind, extreme, mask.is_some());
+    let f = crate::module_cache::get_or_compile_owned(
+        ctx,
+        ptx,
+        kernel_name.to_string(),
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: kernel_name,
+        source: e,
+    })?;
+    let mut partials = stream.alloc_zeros::<u16>(num_blocks as usize)?;
+    let cfg = LaunchConfig {
+        grid_dim: (num_blocks.max(1), 1, 1),
+        block_dim: (BLOCK_SIZE, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let n_u32 = n as u32;
+
+    unsafe {
+        let mut launch = stream.launch_builder(&f);
+        launch.arg(data);
+        if let Some(mask) = mask {
+            launch.arg(mask);
+        }
+        launch.arg(&mut partials);
+        launch.arg(&n_u32);
+        launch.launch(cfg)?;
+    }
+
+    if num_blocks <= 1 {
+        return Ok(partials);
+    }
+    launch_reduce_extreme_16(&partials, None, device, kind, extreme)
+}
+
+fn launch_masked_extreme_backward_16(
+    input: &CudaSlice<u16>,
+    mask: &CudaSlice<u16>,
+    extreme: &CudaSlice<u16>,
+    grad_output: &CudaSlice<u16>,
+    device: &GpuDevice,
+    kind: Float16Kind,
+) -> GpuResult<CudaSlice<u16>> {
+    let n = input.len();
+    if mask.len() != n {
+        return Err(GpuError::LengthMismatch {
+            a: n,
+            b: mask.len(),
+        });
+    }
+    if extreme.len() != 1 {
+        return Err(GpuError::ShapeMismatch {
+            op: "masked_extreme_backward_16",
+            expected: vec![1],
+            got: vec![extreme.len()],
+        });
+    }
+    if grad_output.len() != 1 {
+        return Err(GpuError::ShapeMismatch {
+            op: "masked_extreme_backward_16",
+            expected: vec![1],
+            got: vec![grad_output.len()],
+        });
+    }
+    if n == 0 {
+        return Ok(device.stream().alloc_zeros::<u16>(0)?);
+    }
+
+    let (count_kernel, fill_kernel) = match kind {
+        Float16Kind::F16 => (
+            "masked_extreme_backward_count_f16_kernel",
+            "masked_extreme_backward_fill_f16_kernel",
+        ),
+        Float16Kind::Bf16 => (
+            "masked_extreme_backward_count_bf16_kernel",
+            "masked_extreme_backward_fill_bf16_kernel",
+        ),
+    };
+    let ptx = masked_extreme_backward_16_ptx(count_kernel, fill_kernel, kind);
+    let ctx = device.context();
+    let stream = device.stream();
+    let count_f = crate::module_cache::get_or_compile_owned(
+        ctx,
+        ptx.clone(),
+        count_kernel.to_string(),
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: count_kernel,
+        source: e,
+    })?;
+    let fill_f = crate::module_cache::get_or_compile_owned(
+        ctx,
+        ptx,
+        fill_kernel.to_string(),
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: fill_kernel,
+        source: e,
+    })?;
+
+    let mut count = stream.alloc_zeros::<u32>(1)?;
+    let mut out = stream.alloc_zeros::<u16>(n)?;
+    let cfg = launch_1d(n);
+    let n_u32 = n as u32;
+    unsafe {
+        stream
+            .launch_builder(&count_f)
+            .arg(input)
+            .arg(mask)
+            .arg(extreme)
+            .arg(&mut count)
+            .arg(&n_u32)
+            .launch(cfg)?;
+        stream
+            .launch_builder(&fill_f)
+            .arg(input)
+            .arg(mask)
+            .arg(extreme)
+            .arg(grad_output)
+            .arg(&count)
+            .arg(&mut out)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Masked f16 minimum reduction.
+///
+/// `data` and `mask` are resident f16 bit-pattern buffers. Nonzero mask
+/// entries participate in the reduction; values are widened to f32 for
+/// comparison/NaN poisoning and the scalar result is rounded back to f16.
+pub fn masked_reduce_min_f16(
+    data: &CudaSlice<u16>,
+    mask: &CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    launch_reduce_extreme_16(data, Some(mask), device, Float16Kind::F16, ExtremeKind::Min)
+}
+
+/// Masked f16 maximum reduction.
+///
+/// See [`masked_reduce_min_f16`] for the resident mask/value contract.
+pub fn masked_reduce_max_f16(
+    data: &CudaSlice<u16>,
+    mask: &CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    launch_reduce_extreme_16(data, Some(mask), device, Float16Kind::F16, ExtremeKind::Max)
+}
+
+/// Masked bf16 minimum reduction.
+///
+/// `data` and `mask` are resident bf16 bit-pattern buffers. Values are decoded
+/// to f32 for comparison/NaN poisoning and the scalar result is rounded back to
+/// bf16 on-device.
+pub fn masked_reduce_min_bf16(
+    data: &CudaSlice<u16>,
+    mask: &CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    launch_reduce_extreme_16(
+        data,
+        Some(mask),
+        device,
+        Float16Kind::Bf16,
+        ExtremeKind::Min,
+    )
+}
+
+/// Masked bf16 maximum reduction.
+///
+/// See [`masked_reduce_min_bf16`] for the resident mask/value contract.
+pub fn masked_reduce_max_bf16(
+    data: &CudaSlice<u16>,
+    mask: &CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    launch_reduce_extreme_16(
+        data,
+        Some(mask),
+        device,
+        Float16Kind::Bf16,
+        ExtremeKind::Max,
+    )
+}
+
+/// f16 masked-extremum VJP.
+///
+/// Counts valid f16 ties against `extreme` on-device, then writes
+/// `grad_output / tie_count` at valid tie positions and zero elsewhere. If the
+/// saved extreme is NaN and no equality ties exist, PyTorch's NaN-gradient edge
+/// is reproduced by writing NaN to valid mask positions while masked-out slots
+/// stay zero.
+pub fn masked_extreme_backward_f16(
+    input: &CudaSlice<u16>,
+    mask: &CudaSlice<u16>,
+    extreme: &CudaSlice<u16>,
+    grad_output: &CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    launch_masked_extreme_backward_16(input, mask, extreme, grad_output, device, Float16Kind::F16)
+}
+
+/// bf16 masked-extremum VJP.
+///
+/// Same contract as [`masked_extreme_backward_f16`], with bf16 decode/store and
+/// f32 tie-count/scale math inside PTX.
+pub fn masked_extreme_backward_bf16(
+    input: &CudaSlice<u16>,
+    mask: &CudaSlice<u16>,
+    extreme: &CudaSlice<u16>,
+    grad_output: &CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    launch_masked_extreme_backward_16(input, mask, extreme, grad_output, device, Float16Kind::Bf16)
+}
+
 /// masked_fill for f32: `out[i] = mask[i]!=0 ? value : input[i]`.
 pub fn masked_fill_f32(
     input: &CudaSlice<f32>,
@@ -2048,5 +2685,217 @@ mod tests {
         let input = d.stream().clone_htod(&host).unwrap();
         let mask = ne_scalar_mask_bf16(&input, 5.0, &d).unwrap();
         assert_eq!(d.stream().clone_dtoh(&mask).unwrap(), vec![0u8, 1, 1, 0]);
+    }
+
+    fn f16_bits(values: &[f32]) -> Vec<u16> {
+        values
+            .iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect()
+    }
+
+    fn bf16_bits(values: &[f32]) -> Vec<u16> {
+        values
+            .iter()
+            .map(|&v| half::bf16::from_f32(v).to_bits())
+            .collect()
+    }
+
+    fn f16_values(bits: &[u16]) -> Vec<f32> {
+        bits.iter()
+            .map(|&bits| half::f16::from_bits(bits).to_f32())
+            .collect()
+    }
+
+    fn bf16_values(bits: &[u16]) -> Vec<f32> {
+        bits.iter()
+            .map(|&bits| half::bf16::from_bits(bits).to_f32())
+            .collect()
+    }
+
+    #[test]
+    fn masked_reduce_extrema_f16_matches_mask_and_identities() {
+        let d = dev();
+        let data = d
+            .stream()
+            .clone_htod(&f16_bits(&[1.0, 2.0, 3.0, 4.0]))
+            .unwrap();
+        let mask = d
+            .stream()
+            .clone_htod(&f16_bits(&[1.0, 0.0, 1.0, 0.0]))
+            .unwrap();
+
+        let min = masked_reduce_min_f16(&data, &mask, &d).unwrap();
+        let max = masked_reduce_max_f16(&data, &mask, &d).unwrap();
+        assert_eq!(f16_values(&d.stream().clone_dtoh(&min).unwrap()), vec![1.0]);
+        assert_eq!(f16_values(&d.stream().clone_dtoh(&max).unwrap()), vec![3.0]);
+
+        let all_false = d
+            .stream()
+            .clone_htod(&f16_bits(&[0.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+        let min = masked_reduce_min_f16(&data, &all_false, &d).unwrap();
+        let max = masked_reduce_max_f16(&data, &all_false, &d).unwrap();
+        assert_eq!(
+            f16_values(&d.stream().clone_dtoh(&min).unwrap()),
+            vec![f32::INFINITY]
+        );
+        assert_eq!(
+            f16_values(&d.stream().clone_dtoh(&max).unwrap()),
+            vec![f32::NEG_INFINITY]
+        );
+    }
+
+    #[test]
+    fn masked_reduce_extrema_bf16_matches_mask_and_identities() {
+        let d = dev();
+        let data = d
+            .stream()
+            .clone_htod(&bf16_bits(&[1.0, 2.0, 3.0, 4.0]))
+            .unwrap();
+        let mask = d
+            .stream()
+            .clone_htod(&bf16_bits(&[1.0, 0.0, 1.0, 0.0]))
+            .unwrap();
+
+        let min = masked_reduce_min_bf16(&data, &mask, &d).unwrap();
+        let max = masked_reduce_max_bf16(&data, &mask, &d).unwrap();
+        assert_eq!(
+            bf16_values(&d.stream().clone_dtoh(&min).unwrap()),
+            vec![1.0]
+        );
+        assert_eq!(
+            bf16_values(&d.stream().clone_dtoh(&max).unwrap()),
+            vec![3.0]
+        );
+
+        let all_false = d
+            .stream()
+            .clone_htod(&bf16_bits(&[0.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+        let min = masked_reduce_min_bf16(&data, &all_false, &d).unwrap();
+        let max = masked_reduce_max_bf16(&data, &all_false, &d).unwrap();
+        assert_eq!(
+            bf16_values(&d.stream().clone_dtoh(&min).unwrap()),
+            vec![f32::INFINITY]
+        );
+        assert_eq!(
+            bf16_values(&d.stream().clone_dtoh(&max).unwrap()),
+            vec![f32::NEG_INFINITY]
+        );
+    }
+
+    #[test]
+    fn masked_reduce_extrema_f16_bf16_valid_nan_poison() {
+        let d = dev();
+        let f16_data = d
+            .stream()
+            .clone_htod(&vec![
+                half::f16::from_f32(1.0).to_bits(),
+                half::f16::NAN.to_bits(),
+                half::f16::from_f32(2.0).to_bits(),
+            ])
+            .unwrap();
+        let f16_mask = d.stream().clone_htod(&f16_bits(&[1.0, 1.0, 0.0])).unwrap();
+        let f16_min = masked_reduce_min_f16(&f16_data, &f16_mask, &d).unwrap();
+        assert!(f16_values(&d.stream().clone_dtoh(&f16_min).unwrap())[0].is_nan());
+
+        let bf16_data = d
+            .stream()
+            .clone_htod(&vec![
+                half::bf16::from_f32(1.0).to_bits(),
+                half::bf16::NAN.to_bits(),
+                half::bf16::from_f32(2.0).to_bits(),
+            ])
+            .unwrap();
+        let bf16_mask = d.stream().clone_htod(&bf16_bits(&[1.0, 1.0, 0.0])).unwrap();
+        let bf16_max = masked_reduce_max_bf16(&bf16_data, &bf16_mask, &d).unwrap();
+        assert!(bf16_values(&d.stream().clone_dtoh(&bf16_max).unwrap())[0].is_nan());
+    }
+
+    #[test]
+    fn masked_extreme_backward_f16_bf16_splits_valid_ties() {
+        let d = dev();
+        let f16_input = d
+            .stream()
+            .clone_htod(&f16_bits(&[5.0, 5.0, 1.0, 5.0]))
+            .unwrap();
+        let f16_mask = d
+            .stream()
+            .clone_htod(&f16_bits(&[1.0, 1.0, 1.0, 0.0]))
+            .unwrap();
+        let f16_extreme = d.stream().clone_htod(&f16_bits(&[5.0])).unwrap();
+        let f16_go = d.stream().clone_htod(&f16_bits(&[1.0])).unwrap();
+        let f16_grad =
+            masked_extreme_backward_f16(&f16_input, &f16_mask, &f16_extreme, &f16_go, &d).unwrap();
+        assert_eq!(
+            f16_values(&d.stream().clone_dtoh(&f16_grad).unwrap()),
+            vec![0.5, 0.5, 0.0, 0.0]
+        );
+
+        let bf16_input = d
+            .stream()
+            .clone_htod(&bf16_bits(&[5.0, 5.0, 1.0, 5.0]))
+            .unwrap();
+        let bf16_mask = d
+            .stream()
+            .clone_htod(&bf16_bits(&[1.0, 1.0, 1.0, 0.0]))
+            .unwrap();
+        let bf16_extreme = d.stream().clone_htod(&bf16_bits(&[5.0])).unwrap();
+        let bf16_go = d.stream().clone_htod(&bf16_bits(&[1.0])).unwrap();
+        let bf16_grad =
+            masked_extreme_backward_bf16(&bf16_input, &bf16_mask, &bf16_extreme, &bf16_go, &d)
+                .unwrap();
+        assert_eq!(
+            bf16_values(&d.stream().clone_dtoh(&bf16_grad).unwrap()),
+            vec![0.5, 0.5, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn masked_extreme_backward_f16_bf16_valid_nan_matches_mask() {
+        let d = dev();
+        let f16_input = d
+            .stream()
+            .clone_htod(&vec![
+                half::f16::from_f32(1.0).to_bits(),
+                half::f16::NAN.to_bits(),
+                half::f16::from_f32(2.0).to_bits(),
+            ])
+            .unwrap();
+        let f16_mask = d.stream().clone_htod(&f16_bits(&[1.0, 1.0, 0.0])).unwrap();
+        let f16_extreme = d
+            .stream()
+            .clone_htod(&vec![half::f16::NAN.to_bits()])
+            .unwrap();
+        let f16_go = d.stream().clone_htod(&f16_bits(&[3.0])).unwrap();
+        let f16_grad =
+            masked_extreme_backward_f16(&f16_input, &f16_mask, &f16_extreme, &f16_go, &d).unwrap();
+        let f16_grad = f16_values(&d.stream().clone_dtoh(&f16_grad).unwrap());
+        assert!(f16_grad[0].is_nan());
+        assert!(f16_grad[1].is_nan());
+        assert_eq!(f16_grad[2], 0.0);
+
+        let bf16_input = d
+            .stream()
+            .clone_htod(&vec![
+                half::bf16::from_f32(1.0).to_bits(),
+                half::bf16::NAN.to_bits(),
+                half::bf16::from_f32(2.0).to_bits(),
+            ])
+            .unwrap();
+        let bf16_mask = d.stream().clone_htod(&bf16_bits(&[1.0, 1.0, 0.0])).unwrap();
+        let bf16_extreme = d
+            .stream()
+            .clone_htod(&vec![half::bf16::NAN.to_bits()])
+            .unwrap();
+        let bf16_go = d.stream().clone_htod(&bf16_bits(&[3.0])).unwrap();
+        let bf16_grad =
+            masked_extreme_backward_bf16(&bf16_input, &bf16_mask, &bf16_extreme, &bf16_go, &d)
+                .unwrap();
+        let bf16_grad = bf16_values(&d.stream().clone_dtoh(&bf16_grad).unwrap());
+        assert!(bf16_grad[0].is_nan());
+        assert!(bf16_grad[1].is_nan());
+        assert_eq!(bf16_grad[2], 0.0);
     }
 }

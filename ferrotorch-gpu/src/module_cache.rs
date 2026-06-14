@@ -30,7 +30,7 @@
 //! |---|---|---|
 //! | REQ-1 (`get_or_compile`) | SHIPPED | `pub fn get_or_compile in module_cache.rs` mirrors PyTorch JIT-module-cache role; consumer 100+ sites in `crate::kernels in kernels.rs` plus every PTX-loading sibling (`roll.rs`, `group_norm.rs`, `reduce_arg.rs::launch_argreduce`, etc.) |
 //! | REQ-2 (`get_or_compile_owned`) | SHIPPED | `pub fn get_or_compile_owned in module_cache.rs` with hash-keyed `OWNED_MODULE_CACHE`; consumer FusedChain runtime PTX executor (the workspace's fused-chain JIT path) |
-//! | REQ-3 (composite cache keys) | SHIPPED | `(name, ordinal)` static cache + `(hash, ordinal)` owned cache in `module_cache.rs`; consumer unit tests verify cross-device keys are distinct |
+//! | REQ-3 (composite cache keys) | SHIPPED | `(name, ordinal)` static cache + `(ptx-hash, name-hash, ordinal)` owned cache in `module_cache.rs`; consumer unit tests verify cross-device keys are distinct |
 //! | REQ-4 (`LazyLock<Mutex<HashMap>>`) | SHIPPED | both caches use `LazyLock<Mutex<HashMap<...>>>` in `module_cache.rs`; consumer body of both `get_or_compile` and `get_or_compile_owned` is the lock-lookup-compile-insert pattern |
 //! | REQ-5 (workspace consumer coverage) | SHIPPED | every kernel-loading site in `ferrotorch-gpu/src/` calls into this cache; consumers `kernels.rs`, `bf16.rs`, `f16.rs`, `int_kernels.rs`, `bool_kernels.rs`, `cast_kernels.rs`, `masked_kernels.rs`, `reduce_arg.rs`, `gather_int.rs`, `roll.rs`, `group_norm.rs`, `flash_attention.rs`, `conv.rs`, `upsample.rs`, `rng.rs` (160+ `module_cache::` references) |
 
@@ -56,15 +56,23 @@ use cudarc::nvrtc::Ptx;
 static MODULE_CACHE: LazyLock<Mutex<HashMap<(&'static str, u32), CudaFunction>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[cfg(feature = "cuda")]
+type OwnedModuleCacheKey = (u64, u64, u32);
+
+#[cfg(feature = "cuda")]
+type OwnedModuleCache = HashMap<OwnedModuleCacheKey, CudaFunction>;
+
 /// Global cache for owned-string PTX modules (e.g. the FusedChain runtime
 /// executor — every fused chain produces a unique PTX string at runtime,
 /// so the `&'static str`-keyed [`MODULE_CACHE`] cannot be used).
 ///
-/// The key is `(blake-style hash of ptx_src, device_ordinal)`. The hash is
-/// computed once on insert and once on lookup; this avoids leaking the
-/// `String` to give the cache a `&'static str` view.
+/// The key is `(hash of ptx_src, hash of kernel_name, device_ordinal)`. The
+/// hashes are computed once on insert and once on lookup; this avoids leaking
+/// the `String` to give the cache a `&'static str` view. The kernel-name
+/// component is required because one generated PTX module can expose multiple
+/// `.entry` functions.
 #[cfg(feature = "cuda")]
-static OWNED_MODULE_CACHE: LazyLock<Mutex<HashMap<(u64, u32), CudaFunction>>> =
+static OWNED_MODULE_CACHE: LazyLock<Mutex<OwnedModuleCache>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Get a compiled kernel function, compiling the PTX only on first use.
@@ -116,10 +124,13 @@ pub fn get_or_compile(
 ///
 /// # Cache key
 ///
-/// The cache is keyed on `(hash(ptx_src), device_ordinal)`. The
-/// `DefaultHasher` is used because the cache is in-process and a chosen
-/// collision would only let an adversary substitute one of their own
-/// fused chains for another — both inside the same trust boundary.
+/// The cache is keyed on `(hash(ptx_src), hash(kernel_name), device_ordinal)`.
+/// The `DefaultHasher` is used because the cache is in-process and a chosen
+/// collision would only let an adversary substitute one of their own fused
+/// chains for another — both inside the same trust boundary. Including the
+/// kernel name is necessary for generated PTX modules with multiple visible
+/// `.entry` functions; otherwise loading entry `b` after entry `a` from the
+/// same module source would incorrectly return `a`.
 ///
 /// # Memory growth
 ///
@@ -131,7 +142,9 @@ pub fn get_or_compile(
 /// of application-distinct `FusedChain`s** (typical use case: a handful
 /// to a few tens). The cached entry itself is small (cudarc's
 /// `CudaFunction` is roughly a pointer + name); the dominant cost is
-/// PTX compilation, which is what this cache is designed to skip.
+/// PTX compilation, which is what this cache is designed to skip. A
+/// multi-entry generated module stores one cached function per requested
+/// entry-point name.
 ///
 /// # Arguments
 ///
@@ -155,10 +168,13 @@ pub fn get_or_compile_owned(
     // `DefaultHasher`; collisions only matter for adversarial inputs,
     // and the cache lives entirely inside a single process's trust
     // boundary.
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    ptx_src.hash(&mut hasher);
-    let ptx_hash = hasher.finish();
-    let key = (ptx_hash, device_ordinal);
+    let mut ptx_hasher = std::collections::hash_map::DefaultHasher::new();
+    ptx_src.hash(&mut ptx_hasher);
+    let ptx_hash = ptx_hasher.finish();
+    let mut name_hasher = std::collections::hash_map::DefaultHasher::new();
+    kernel_name.hash(&mut name_hasher);
+    let name_hash = name_hasher.finish();
+    let key = (ptx_hash, name_hash, device_ordinal);
 
     let mut cache = OWNED_MODULE_CACHE.lock().unwrap();
     if let Some(func) = cache.get(&key) {
@@ -350,6 +366,131 @@ DONE:
         // (different module load), so identical debug strings here are
         // strong evidence the cache hit.
         assert_eq!(format!("{f1:?}"), format!("{f2:?}"));
+    }
+
+    /// Regression for generated PTX modules with multiple `.entry` functions:
+    /// the owned cache key must include the entry-point name, not only the PTX
+    /// source hash. Otherwise the second lookup below would return the copy
+    /// kernel for `owned_multi_neg` and silently launch the wrong function.
+    #[test]
+    fn get_or_compile_owned_same_ptx_different_entries_are_distinct() {
+        use cudarc::driver::{LaunchConfig, PushKernelArg};
+
+        let ptx = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry owned_multi_copy(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %out, %off;
+    .reg .f32 %va;
+    .reg .pred %p;
+    ld.param.u64 %a, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra COPY_DONE;
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+    ld.global.f32 %va, [%a];
+    st.global.f32 [%out], %va;
+COPY_DONE:
+    ret;
+}
+
+.visible .entry owned_multi_neg(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %out, %off;
+    .reg .f32 %va;
+    .reg .pred %p;
+    ld.param.u64 %a, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra NEG_DONE;
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+    ld.global.f32 %va, [%a];
+    neg.f32 %va, %va;
+    st.global.f32 [%out], %va;
+NEG_DONE:
+    ret;
+}
+"
+        .to_string();
+
+        let dev = crate::device::GpuDevice::new(0).expect("CUDA device 0");
+        let ctx = dev.context();
+        let copy_f = super::get_or_compile_owned(
+            ctx,
+            ptx.clone(),
+            "owned_multi_copy".to_string(),
+            dev.ordinal() as u32,
+        )
+        .expect("compile copy entry");
+        let neg_f = super::get_or_compile_owned(
+            ctx,
+            ptx,
+            "owned_multi_neg".to_string(),
+            dev.ordinal() as u32,
+        )
+        .expect("compile neg entry");
+
+        let input = dev.stream().clone_htod(&vec![2.0_f32, -3.0]).unwrap();
+        let mut copy_out = dev.stream().alloc_zeros::<f32>(2).unwrap();
+        let mut neg_out = dev.stream().alloc_zeros::<f32>(2).unwrap();
+        let cfg = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let n = 2_u32;
+        unsafe {
+            dev.stream()
+                .launch_builder(&copy_f)
+                .arg(&input)
+                .arg(&mut copy_out)
+                .arg(&n)
+                .launch(cfg)
+                .expect("launch copy entry");
+            dev.stream()
+                .launch_builder(&neg_f)
+                .arg(&input)
+                .arg(&mut neg_out)
+                .arg(&n)
+                .launch(cfg)
+                .expect("launch neg entry");
+        }
+
+        assert_eq!(
+            dev.stream().clone_dtoh(&copy_out).unwrap(),
+            vec![2.0_f32, -3.0]
+        );
+        assert_eq!(
+            dev.stream().clone_dtoh(&neg_out).unwrap(),
+            vec![-2.0_f32, 3.0]
+        );
     }
 
     /// Different PTX source must produce a different cached function
