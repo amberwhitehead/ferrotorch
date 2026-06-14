@@ -1,16 +1,17 @@
 //! Backward function for the differentiable conditional `where_` operation.
 //!
 //! `where_(condition, x, y)` selects from `x` where `condition` is true, and
-//! from `y` where `condition` is false. The VJP routes the upstream gradient
-//! to `x` at true positions and to `y` at false positions.
+//! from `y` where `condition` is false. The public wrappers route CUDA and
+//! broadcasted cases through the resident `ops::indexing::where_cond_bt` /
+//! `grad_fns::indexing::where_cond_bcast` path.
 //!
 //! ## REQ status (per `.design/ferrotorch-core/grad_fns/comparison.md`)
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (`where_` forward + backward) | SHIPPED | `where_` at `comparison.rs:90` + `WhereBackward` at `comparison.rs:32`; non-test production consumer: `Tensor::where_t` at `methods.rs:1117` (chainable boundary method) delegates to `crate::grad_fns::comparison::where_`. Closes blocker #1295. |
-//! | REQ-2 (`where_bt` `BoolTensor` variant) | SHIPPED | `where_bt` at `comparison.rs:130` with shape validation; non-test production consumer: `Tensor::where_bt_t` at `methods.rs:1141` (chainable boundary method) delegates to `crate::grad_fns::comparison::where_bt`. Closes blocker #1297. |
-//! | REQ-3 (device handling + NaN/Inf passthrough) | NOT-STARTED | CPU and GPU forward both work, but the impl materializes inputs on CPU before selecting — a silent round trip. Gated by REQ-1 consumer wiring (#1295). |
+//! | REQ-1 (`where_` forward + backward) | SHIPPED | `where_` at `comparison.rs` handles the host-mask public method. CPU same-shape keeps the legacy `WhereBackward`; CUDA and broadcasted x/y route through `where_cond_bcast`, with a full-output flat condition mask. Non-test production consumer: `Tensor::where_t` at `methods.rs` delegates to `crate::grad_fns::comparison::where_`. |
+//! | REQ-2 (`where_bt` `BoolTensor` variant) | SHIPPED | `where_bt` at `comparison.rs` delegates to `grad_fns::indexing::where_cond_bcast`, so condition/x/y broadcast by PyTorch rules and CUDA operands stay resident. Non-test production consumer: `Tensor::where_bt_t` at `methods.rs`. |
+//! | REQ-3 (device handling + NaN/Inf passthrough) | SHIPPED | First-class BoolTensor CUDA where uses `ops::indexing::where_cond_bt` via `where_cond_bcast`; host-mask CUDA where uploads only the boolean condition and keeps x/y/result resident. |
 //! | REQ-4 (17 comparison parity ops the route declares) | NOT-STARTED | the 17 ops (`eq`, `ne`, `lt`, `le`, `gt`, `ge`, `logical_and`, `logical_or`, `logical_xor`, `logical_not`, `max`, `min`, `maximum`, `minimum`, `isnan`, `isinf`, `isfinite`) are not implemented in this file; they live in `bool_tensor.rs` or elsewhere. Route retarget tracked under #1293. |
 
 use std::sync::Arc;
@@ -22,6 +23,7 @@ use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
 
 use crate::bool_tensor::BoolTensor;
+use crate::device::Device;
 use crate::error::FerrotorchError;
 
 /// Backward node for `where_(condition, x, y)`.
@@ -79,6 +81,18 @@ impl<T: Float> GradFn<T> for WhereBackward<T> {
     }
 }
 
+fn checked_numel(shape: &[usize], op: &'static str) -> FerrotorchResult<usize> {
+    if shape.is_empty() {
+        return Ok(1);
+    }
+    shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("{op}: output shape {shape:?} element count overflows usize"),
+        })
+}
+
 /// Differentiable conditional selection.
 ///
 /// For each element `i`, the output is `x[i]` if `condition[i]` is true,
@@ -86,32 +100,35 @@ impl<T: Float> GradFn<T> for WhereBackward<T> {
 ///
 /// # Validation (CORE-043 / #1737)
 ///
-/// This host-mask entry implements the SAME-SHAPE subset of `torch.where`
-/// (no broadcasting — the broadcasting overload is
-/// [`crate::grad_fns::indexing::where_cond_bcast`]). Structured errors at
-/// the boundary (R-LOUD-1), each a case live torch 2.11.0+cu130 also
-/// rejects with a `RuntimeError`:
+/// This host-mask entry treats `condition` as a flat mask over the broadcasted
+/// output shape of `x` and `y`. A raw `&[bool]` has no shape of its own, so it
+/// cannot express a lower-rank broadcasted condition tensor; callers needing
+/// condition broadcasting should use [`where_bt`] with a [`BoolTensor`].
+/// Structured errors at the boundary (R-LOUD-1), each a case live torch
+/// 2.11.0+cu130 also rejects with a `RuntimeError`:
 ///
 /// - `x.device() != y.device()` → [`FerrotorchError::DeviceMismatch`]
 ///   (torch: "Expected all tensors to be on the same device, but found at
 ///   least two devices, cuda:0 and cpu!").
-/// - `x.shape() != y.shape()` → [`FerrotorchError::ShapeMismatch`] — equal
-///   numel does NOT excuse a shape mismatch (torch: "The size of tensor a
-///   (3) must match the size of tensor b (2) at non-singleton dimension 1").
-/// - `condition.len() != x.numel()` → [`FerrotorchError::ShapeMismatch`]
-///   (formerly a `debug_assert_eq!`, i.e. silent zip truncation in release).
+/// - `x.shape()` and `y.shape()` not broadcast-compatible →
+///   [`FerrotorchError::ShapeMismatch`] (torch: "The size of tensor a ...").
+/// - `condition.len() != prod(broadcast_shape(x, y))` →
+///   [`FerrotorchError::ShapeMismatch`] (formerly a `debug_assert_eq!`, i.e.
+///   silent zip truncation in release).
 ///
 /// # Device behavior (R-LOUD-2)
 ///
 /// The condition is an inherently host-side `&[bool]`. For CUDA `x`/`y`
-/// (same device, enforced above) the operands are read back to the host via
-/// `data_vec`, the select runs on the host, and the result is uploaded back
-/// to `x`'s device — an explicit, documented host round trip. The
-/// GPU-resident select is [`crate::ops::indexing::where_cond_bt`].
+/// (same device, enforced above) this uploads only the boolean condition to
+/// CUDA and delegates to the resident `where_cond_bcast` path. The value
+/// tensors and result stay on-device.
 ///
 /// When gradient tracking is enabled and either input requires grad, the
-/// returned tensor carries a [`WhereBackward`] node that routes gradients
-/// to the appropriate input during the backward pass.
+/// returned tensor carries a backward node that routes gradients to the
+/// appropriate input during the backward pass. The same-shape CPU fast path
+/// uses [`WhereBackward`]; CUDA and broadcasted paths use
+/// [`crate::grad_fns::indexing::WhereCondBackward`] through
+/// `where_cond_bcast`.
 pub fn where_<T: Float>(
     condition: &[bool],
     x: &Tensor<T>,
@@ -124,27 +141,38 @@ pub fn where_<T: Float>(
             got: y.device(),
         });
     }
-    if x.shape() != y.shape() {
-        return Err(FerrotorchError::ShapeMismatch {
+    let common = crate::shape::broadcast_shapes(x.shape(), y.shape()).map_err(|_| {
+        FerrotorchError::ShapeMismatch {
             message: format!(
-                "where_: x shape {:?} != y shape {:?} (this entry point selects \
-                 elementwise over same-shape operands; for broadcasting \
-                 torch.where use where_cond_bcast)",
+                "where_: x shape {:?} and y shape {:?} are not broadcast-compatible",
                 x.shape(),
                 y.shape()
             ),
-        });
-    }
-    if condition.len() != x.numel() {
+        }
+    })?;
+    let expected = checked_numel(&common, "where_")?;
+    if condition.len() != expected {
         return Err(FerrotorchError::ShapeMismatch {
             message: format!(
-                "where_: condition length {} != operand numel {} (shape {:?})",
+                "where_: condition length {} != broadcast output numel {} \
+                 (broadcast shape {:?})",
                 condition.len(),
-                x.numel(),
-                x.shape()
+                expected,
+                common
             ),
         });
     }
+
+    if device.is_cuda() || x.shape() != common || y.shape() != common {
+        let cond = BoolTensor::from_slice(condition, &common)?;
+        let cond = if device == Device::Cpu {
+            cond
+        } else {
+            cond.to(device)?
+        };
+        return crate::grad_fns::indexing::where_cond_bcast(&cond, x, y);
+    }
+
     let x_data = x.data_vec()?;
     let y_data = y.data_vec()?;
 
@@ -174,43 +202,19 @@ pub fn where_<T: Float>(
 // ---------------------------------------------------------------------------
 
 /// Pointwise ternary `where(cond, x, y)` taking a [`BoolTensor`] for
-/// the condition. Mirrors the SAME-SHAPE subset of `torch.where(cond, x, y)`
-/// (the broadcasting overload is
-/// [`crate::grad_fns::indexing::where_cond_bcast`]).
+/// the condition. Mirrors `torch.where(cond, x, y)`: condition, `x`, and `y`
+/// broadcast to a common shape by PyTorch/NumPy rules.
 ///
 /// # Validation (CORE-043 / #1737)
 ///
-/// The mask's full SHAPE — not just its numel — must equal `x.shape()`
-/// (torch rejects a `[6]` mask against `[2,3]` operands: "The size of
-/// tensor a (6) must match the size of tensor b (3) at non-singleton
-/// dimension 1", live torch 2.11.0+cu130). Operand shape and device
-/// validation is shared with [`where_`], which this delegates to.
+/// Device validation and resident CUDA execution are handled by
+/// [`crate::grad_fns::indexing::where_cond_bcast`].
 pub fn where_bt<T: Float>(
     cond: &BoolTensor,
     x: &Tensor<T>,
     y: &Tensor<T>,
 ) -> FerrotorchResult<Tensor<T>> {
-    if cond.shape() != x.shape() {
-        return Err(FerrotorchError::ShapeMismatch {
-            message: format!(
-                "where_bt: cond shape {:?} != x shape {:?} (full shape must \
-                 match, not just numel; for broadcasting torch.where use \
-                 where_cond_bcast)",
-                cond.shape(),
-                x.shape()
-            ),
-        });
-    }
-    if x.shape() != y.shape() {
-        return Err(FerrotorchError::ShapeMismatch {
-            message: format!(
-                "where_bt: x shape {:?} != y shape {:?}",
-                x.shape(),
-                y.shape()
-            ),
-        });
-    }
-    where_(cond.data()?, x, y)
+    crate::grad_fns::indexing::where_cond_bcast(cond, x, y)
 }
 
 #[cfg(test)]
@@ -244,6 +248,33 @@ mod first_class_tests {
         let err = where_bt(&cond, &x, &y).unwrap_err();
         assert!(matches!(err, FerrotorchError::ShapeMismatch { .. }));
     }
+
+    #[test]
+    fn where_bt_broadcasts_three_inputs_and_reduces_grads() {
+        let cond = BoolTensor::from_vec(vec![true, false], vec![2, 1]).unwrap();
+        let x = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0_f32, 2.0, 3.0]),
+            vec![1, 3],
+            true,
+        )
+        .unwrap();
+        let y = Tensor::from_storage(TensorStorage::cpu(vec![10.0_f32]), vec![], true).unwrap();
+
+        let out = where_bt(&cond, &x, &y).unwrap();
+        assert_eq!(out.shape(), &[2, 3]);
+        assert_eq!(out.data().unwrap(), &[1.0, 2.0, 3.0, 10.0, 10.0, 10.0]);
+
+        crate::grad_fns::reduction::sum(&out)
+            .unwrap()
+            .backward()
+            .unwrap();
+        let gx = x.grad().unwrap().unwrap();
+        let gy = y.grad().unwrap().unwrap();
+        assert_eq!(gx.shape(), &[1, 3]);
+        assert_eq!(gx.data().unwrap(), &[1.0, 1.0, 1.0]);
+        assert!(gy.shape().is_empty());
+        assert_eq!(gy.data().unwrap(), &[3.0]);
+    }
 }
 
 #[cfg(test)]
@@ -270,6 +301,17 @@ mod tests {
 
         let out = where_(&cond, &x, &y).unwrap();
         assert_eq!(out.data().unwrap(), &[1.0, 20.0, 3.0, 40.0]);
+    }
+
+    #[test]
+    fn test_where_host_mask_broadcasts_operands() {
+        let cond = vec![true, false, true];
+        let x = leaf(&[1.0, 2.0, 3.0], &[1, 3], false);
+        let y = leaf(&[10.0], &[], false);
+
+        let out = where_(&cond, &x, &y).unwrap();
+        assert_eq!(out.shape(), &[1, 3]);
+        assert_eq!(out.data().unwrap(), &[1.0, 10.0, 3.0]);
     }
 
     #[test]

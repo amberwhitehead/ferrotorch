@@ -3487,9 +3487,10 @@ mod gpu {
 
     // --- Cat A.indexing GPU lane ---
     //
-    // index_select_1d / masked_fill have GPU f32 kernels; gather / scatter /
-    // scatter_add / where_cond return Err on GPU (asserted). The fixture
-    // emits cuda:0 entries only for the f32-supported subset.
+    // index_select_1d / masked_fill have GPU f32 kernels. The direct
+    // indexing primitives below also have CUDA-resident paths, so the GPU
+    // lane asserts value parity and output residency rather than pinning
+    // historical NotImplementedOnCuda gaps.
 
     #[test]
     fn gpu_index_select_1d_f32() {
@@ -3509,12 +3510,13 @@ mod gpu {
 
     /// CUDA value-correctness for the direct indexing ops. These tests
     /// originally pinned `NotImplementedOnCuda` for gather/scatter/
-    /// scatter_add, but CUDA kernels landed later and nobody ever ran this
-    /// lane (no CI enabled `--features gpu` until CORE-191 / crosslink
-    /// #1885), so the stale pins asserted the opposite of HEAD behavior.
-    /// Expected values follow torch semantics: `torch.gather` selects
-    /// `input[index[i]]` along `dim`; `torch.Tensor.scatter_` writes
-    /// `src[i]` to `input[index[i]]`; `scatter_add_` accumulates.
+    /// scatter_add/where_cond, but CUDA kernels landed later and nobody
+    /// ever ran this lane (no CI enabled `--features gpu` until CORE-191 /
+    /// crosslink #1885), so the stale pins asserted the opposite of HEAD
+    /// behavior. Expected values follow torch semantics: `torch.gather`
+    /// selects `input[index[i]]` along `dim`; `torch.Tensor.scatter_`
+    /// writes `src[i]` to `input[index[i]]`; `scatter_add_` accumulates;
+    /// `torch.where` selects from `x`/`y`.
     #[test]
     fn gpu_indexing_ops_on_cuda() {
         ensure_cuda_backend();
@@ -3555,20 +3557,19 @@ mod gpu {
             tolerance::F32_BITEXACT,
         );
 
-        // where_cond remains genuinely unimplemented on CUDA at HEAD —
-        // keep the loud-error pin (torch.where works on CUDA; the gap is
-        // tracked with the host-mask where_ divergences under CORE-043's
-        // remediation; this pin retires when the CUDA path lands).
+        // where_cond([T,F,T,F], a, y) -> [1,20,3,40], resident on CUDA.
         let cuda_y = make_cpu_f32(&[10.0, 20.0, 30.0, 40.0], &[4], false)
             .to(Device::Cuda(0))
             .expect("upload");
         let cond = vec![true, false, true, false];
-        match where_cond(&cond, &cuda_a, &cuda_y) {
-            Err(FerrotorchError::NotImplementedOnCuda { op }) => {
-                assert_eq!(op, "where_cond");
-            }
-            other => panic!("expected NotImplementedOnCuda for where_cond, got {other:?}"),
-        }
+        let r = where_cond(&cond, &cuda_a, &cuda_y).expect("where_cond on cuda");
+        assert_eq!(r.device(), Device::Cuda(0), "where_cond output device");
+        check_f32(
+            "where_cond cuda",
+            &read_back_f32(&r),
+            &[1.0, 20.0, 3.0, 40.0],
+            tolerance::F32_BITEXACT,
+        );
     }
 
     /// Cat A.tensor_ops on GPU — CUDA value-correctness. Originally pinned

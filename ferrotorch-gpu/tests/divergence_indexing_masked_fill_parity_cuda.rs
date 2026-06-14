@@ -47,6 +47,10 @@ fn host_f64(t: &Tensor<f64>) -> Vec<f64> {
     t.cpu().expect("to cpu").data_vec().expect("host f64")
 }
 
+fn host_f32(t: &Tensor<f32>) -> Vec<f32> {
+    t.cpu().expect("to cpu").data_vec().expect("host f32")
+}
+
 fn host_f16_bits(t: &Tensor<f16>) -> Vec<u16> {
     t.cpu()
         .expect("to cpu")
@@ -194,6 +198,107 @@ fn cuda_host_condition_overload_uses_dtype_generic_f16_where() {
             f16::from_f32(40.0).to_bits(),
         ]
     );
+}
+
+#[test]
+fn tensor_where_t_host_mask_on_cuda_stays_resident_and_backpropagates() {
+    ensure_cuda();
+    let x = cpu_f64(&[1.0, 2.0, 3.0, 4.0], &[4], false)
+        .to(Device::Cuda(0))
+        .expect("x to cuda")
+        .requires_grad_(true);
+    let y = cpu_f64(&[10.0, 20.0, 30.0, 40.0], &[4], false)
+        .to(Device::Cuda(0))
+        .expect("y to cuda")
+        .requires_grad_(true);
+
+    let out = x
+        .where_t(&[true, false, true, false], &y)
+        .expect("Tensor::where_t");
+
+    assert!(
+        out.is_cuda(),
+        "Tensor::where_t result must stay CUDA-resident"
+    );
+    assert_eq!(host_f64(&out), vec![1.0, 20.0, 3.0, 40.0]);
+
+    sum(&out).expect("sum").backward().expect("backward");
+    let gx = x.grad().expect("x grad lookup").expect("x grad");
+    let gy = y.grad().expect("y grad lookup").expect("y grad");
+    assert!(gx.is_cuda(), "x grad must stay CUDA-resident");
+    assert!(gy.is_cuda(), "y grad must stay CUDA-resident");
+    assert_eq!(host_f64(&gx), vec![1.0, 0.0, 1.0, 0.0]);
+    assert_eq!(host_f64(&gy), vec![0.0, 1.0, 0.0, 1.0]);
+}
+
+#[test]
+fn tensor_where_t_host_mask_broadcast_cuda_reduces_grads_resident() {
+    ensure_cuda();
+    let x = cpu_f32(&[1.0, 2.0, 3.0], &[1, 3], false)
+        .to(Device::Cuda(0))
+        .expect("x to cuda")
+        .requires_grad_(true);
+    let y = cpu_f32(&[10.0, 20.0], &[2, 1], false)
+        .to(Device::Cuda(0))
+        .expect("y to cuda")
+        .requires_grad_(true);
+
+    let out = x
+        .where_t(&[true, true, true, false, false, false], &y)
+        .expect("Tensor::where_t broadcast");
+
+    assert!(
+        out.is_cuda(),
+        "Tensor::where_t broadcast result must stay CUDA-resident"
+    );
+    assert_eq!(out.shape(), &[2, 3]);
+    assert_eq!(host_f32(&out), vec![1.0, 2.0, 3.0, 20.0, 20.0, 20.0]);
+
+    sum(&out).expect("sum").backward().expect("backward");
+    let gx = x.grad().expect("x grad lookup").expect("x grad");
+    let gy = y.grad().expect("y grad lookup").expect("y grad");
+    assert!(gx.is_cuda(), "broadcast x grad must stay CUDA-resident");
+    assert!(gy.is_cuda(), "broadcast y grad must stay CUDA-resident");
+    assert_eq!(gx.shape(), &[1, 3]);
+    assert_eq!(gy.shape(), &[2, 1]);
+    assert_eq!(host_f32(&gx), vec![1.0, 1.0, 1.0]);
+    assert_eq!(host_f32(&gy), vec![0.0, 3.0]);
+}
+
+#[test]
+fn tensor_where_bt_broadcast_cuda_condition_stays_resident_and_reduces_grads() {
+    ensure_cuda();
+    let x = cpu_f32(&[1.0, 2.0, 3.0], &[1, 3], false)
+        .to(Device::Cuda(0))
+        .expect("x to cuda")
+        .requires_grad_(true);
+    let y = cpu_f32(&[10.0], &[], false)
+        .to(Device::Cuda(0))
+        .expect("y to cuda")
+        .requires_grad_(true);
+    let cond = BoolTensor::from_vec(vec![true, false], vec![2, 1])
+        .expect("cond cpu")
+        .to(Device::Cuda(0))
+        .expect("cond to cuda");
+
+    let out = x.where_bt_t(&cond, &y).expect("Tensor::where_bt_t");
+
+    assert!(
+        out.is_cuda(),
+        "Tensor::where_bt_t broadcast result must stay CUDA-resident"
+    );
+    assert_eq!(out.shape(), &[2, 3]);
+    assert_eq!(host_f32(&out), vec![1.0, 2.0, 3.0, 10.0, 10.0, 10.0]);
+
+    sum(&out).expect("sum").backward().expect("backward");
+    let gx = x.grad().expect("x grad lookup").expect("x grad");
+    let gy = y.grad().expect("y grad lookup").expect("y grad");
+    assert!(gx.is_cuda(), "broadcast x grad must stay CUDA-resident");
+    assert!(gy.is_cuda(), "broadcast y grad must stay CUDA-resident");
+    assert_eq!(gx.shape(), &[1, 3]);
+    assert!(gy.shape().is_empty());
+    assert_eq!(host_f32(&gx), vec![1.0, 1.0, 1.0]);
+    assert_eq!(host_f32(&gy), vec![3.0]);
 }
 
 #[test]

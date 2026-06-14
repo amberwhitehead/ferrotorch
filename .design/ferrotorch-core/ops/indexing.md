@@ -19,10 +19,11 @@ N-D indexing operations: `gather`, `scatter`, `scatter_add`,
 (`BoolTensor`-typed form), and `masked_select`. Each function in
 this module is the FORWARD implementation; the backward grad-fns
 live in `crate::grad_fns::indexing`. The CUDA paths for
-`where_cond_bt` and `masked_select` are GPU-resident through
-`backend.where_cond` / stream-compaction primitives (#1185 / #1187);
-the other ops are CPU-only with explicit `NotImplementedOnCuda`
-returns.
+`gather`, `scatter`, `scatter_value`, `scatter_add`, `where_cond`,
+`where_cond_bt`, and `masked_select` are GPU-resident through rank-aware
+indexing kernels, `backend.where_cond`, and stream-compaction primitives
+(#1185 / #1187 / #1545). Host index/mask slices are uploaded to CUDA as
+resident buffers; value tensors and results do not round-trip through CPU.
 
 ## Requirements
 
@@ -37,8 +38,9 @@ returns.
   as scatter but `+=` instead of `=`. Mirrors `aten::scatter_add`.
 - REQ-4: `where_cond(condition: &[bool], x, y)` — `out[i] =
   condition[i] ? x[i] : y[i]`. Equal-shape only (no broadcasting).
-  Errors with `NotImplementedOnCuda` for CUDA inputs. Mirrors
-  `torch.where(condition, x, y)`.
+  For CUDA `x`/`y`, uploads the host condition once and delegates to
+  `where_cond_bt`, keeping value tensors and result resident. Mirrors
+  `torch.where(condition, x, y)` for a full flat condition mask.
 - REQ-5: `where_cond_bt(cond: &BoolTensor, x, y)` — typed-condition
   variant. GPU-resident when all three are on the same CUDA device;
   uses `backend.where_cond` (#1185 Phase 3c). CPU fallback delegates
@@ -73,14 +75,14 @@ returns.
   elements (no host bounce except for the single integer count).
 - [x] AC-6: GPU paths for `gather` / `scatter` / `scatter_value` /
   `scatter_add` — SHIPPED (#1545 / sub #1535). Each pub fn has a
-  CUDA-resident fast path (f32/f64) that uploads the host index as a
+  CUDA-resident fast path (f32/f64/f16/bf16) that uploads the host index as a
   resident `i64` buffer and dispatches through
-  `GpuBackend::{op}_dim_{f32,f64}` to the PTX kernels in
+  `GpuBackend::{op}_dim_*` / `GpuBackend::{op}_nd_*` to the PTX kernels in
   `ferrotorch-gpu/src/scatter_gather_kernels.rs`, keeping the result
-  GPU-resident. bf16/f16 reject `NotImplementedOnCuda`. Live-GPU
-  parity vs torch at
-  `ferrotorch-gpu/tests/divergence_scatter_gather_gpu.rs` (15 tests,
-  incl. atomic `scatter_add` duplicate-index f32 AND f64).
+  GPU-resident. f16/bf16 scatter-add accumulates in f32 and rounds back to
+  the original dtype. Live-GPU parity vs torch is pinned by
+  `ferrotorch-gpu/tests/divergence_scatter_gather_gpu.rs` and the CUDA
+  conformance lane in `ferrotorch-core/tests/conformance_shape.rs`.
 
 ## Architecture
 
@@ -92,24 +94,25 @@ the index value is in `[0, input.shape[dim])` via
 `crate::grad_fns::indexing::GatherBackward { input, dim, index,
 index_shape }` via `Tensor::from_operation`.
 
-`scatter` at `:183` starts with `output = input.data_vec()?` (a
-clone), then walks the index slice writing `output[dst_flat] =
-src_data[i]`. `scatter_add` at `:259` is symmetric but with `+=`.
-Both check the src has at least `index_numel` elements.
+`scatter` / `scatter_value` / `scatter_add` validate the index tensor and
+non-dim shape constraints before dispatch. CPU paths clone/walk host data.
+CUDA paths materialise non-contiguous value operands on-device, upload the
+host index as resident `i64`, and dispatch through rank-aware backend kernels;
+the result stays on CUDA.
 
-`where_cond` at `:334` requires `x.shape() == y.shape() ==
-condition.len()`. Walks zipped `condition + x_data + y_data`. When
-either x/y requires grad, wraps in `WhereCondBackward { x, y,
-condition: BoolTensor::from_slice(condition, &output_shape) }`. The
-backward stores a CPU `BoolTensor` even though the input was
-`&[bool]` (no shape info on a raw slice).
+`where_cond` requires `x.shape() == y.shape() == condition.len()`. CPU walks
+zipped `condition + x_data + y_data`. CUDA wraps the host condition as a
+`BoolTensor`, uploads it to the operand device, and delegates to
+`where_cond_bt`, so value tensors and result stay resident. When either x/y
+requires grad, the forward wraps in `WhereCondBackward` with a CPU condition
+for CPU execution or resident condition for CUDA execution.
 
-`where_cond_bt` at `:397` is the typed-condition variant. GPU-
-resident fast path at `:421-453`: all three on same CUDA device →
+`where_cond_bt` is the typed-condition variant. GPU-resident fast path:
+all three on same CUDA device →
 `backend.where_cond(cond, x, y)` (#1185 Phase 3c). When grad is
 needed, stores the GPU cond directly in `WhereCondBackward` (no
-`cond.to(Cpu)`; #1187 Phase 3d). CPU fallback at `:458` materialises
-the bool slice via `cond.data()?` and delegates to `where_cond`.
+`cond.to(Cpu)`; #1187 Phase 3d). CPU fallback materialises the bool slice via
+`cond.data()?` and delegates to `where_cond`.
 
 `masked_select` at `:1165` rejects mask/input numel mismatch. The GPU
 path inside `masked_select in ops/indexing.rs` (if both are CUDA, same
@@ -153,7 +156,9 @@ those tests would surface against this module's forward.
 `cargo test -p ferrotorch-core --lib ops::indexing` covers the
 forward semantics + index-bounds validation. Backward correctness is
 covered by `cargo test -p ferrotorch-core --lib grad_fns::indexing`.
-GPU paths covered by `ferrotorch-core/tests/conformance_indexing.rs`.
+GPU paths are covered by `ferrotorch-core/tests/conformance_indexing.rs`,
+`ferrotorch-core/tests/conformance_shape.rs::gpu_indexing_ops_on_cuda`, and
+the focused `ferrotorch-gpu` divergence tests.
 
 ## REQ status table
 
@@ -167,4 +172,4 @@ GPU paths covered by `ferrotorch-core/tests/conformance_indexing.rs`.
 | REQ-6 | SHIPPED | impl: `masked_select` at `ops/indexing.rs:1165`; non-test consumer: `crate::tensor::Tensor::masked_select` at `tensor.rs:1146` invokes `crate::ops::indexing::masked_select(self, mask)`; also `crate::grad_fns::indexing::masked_select_backward` at `grad_fns/indexing.rs:1983,1988` |
 | REQ-7 | SHIPPED | impl: grad-fn attachment in each forward path (e.g. `gather` at `attachment in ops/indexing.rs`, `scatter in ops/indexing.rs`, `scatter_add in ops/indexing.rs`, `where_cond in ops/indexing.rs`); non-test consumer: every autograd-tracking caller of these forwards |
 | REQ-8 | SHIPPED | impl: `validate_gather_shapes in ops/indexing.rs` (the SAFETY-bounded i64 widening lives in `upload_index_i64 in ops/indexing.rs`); non-test consumer: invoked from `gather`, `scatter`, and `scatter_add` |
-| REQ-9 | SHIPPED | CUDA-resident dim-aware paths for `gather`/`scatter`/`scatter_value`/`scatter_add` (#1545 / sub #1535). impl: the `is_cuda()` f32/f64 branches in each `ops/indexing.rs` pub fn, plus the shared helpers `factor` and `upload_index_i64` (host `&[usize]` → resident `i64`); non-test consumer: each branch dispatches through `crate::gpu_dispatch::GpuBackend::{gather,scatter,scatter_value,scatter_add}_dim_{f32,f64}`, implemented by `ferrotorch-gpu::CudaBackendImpl` over the PTX kernels in `ferrotorch-gpu/src/scatter_gather_kernels.rs`. The result stays GPU-resident (`TensorStorage::gpu`); bf16/f16 return `NotImplementedOnCuda`. The same-module non-CUDA callers (`ferrotorch_core::{gather,scatter,scatter_add}` re-exports at `lib.rs:207`, `Tensor::scatter_value_t`) reach the new branch whenever their operands are CUDA-resident. |
+| REQ-9 | SHIPPED | CUDA-resident dim-aware/rank-aware paths for `gather`/`scatter`/`scatter_value`/`scatter_add` (#1545 / sub #1535). impl: the `is_cuda()` f32/f64/f16/bf16 branches in each `ops/indexing.rs` pub fn, plus `upload_index_i64` (host `&[usize]` → resident `i64`); non-test consumer: each branch dispatches through `crate::gpu_dispatch::GpuBackend::{gather,scatter,scatter_value,scatter_add}_{dim,nd}_*`, implemented by `ferrotorch-gpu::CudaBackendImpl` over the PTX kernels in `ferrotorch-gpu/src/scatter_gather_kernels.rs`. The result stays GPU-resident (`TensorStorage::gpu`). The same-module non-CUDA callers (`ferrotorch_core::{gather,scatter,scatter_add}` re-exports at `lib.rs:207`, `Tensor::scatter_value_t`) reach the branch whenever their operands are CUDA-resident. |

@@ -1339,17 +1339,16 @@ impl<T: Float> Tensor<T> {
     /// `torch.where(condition, self, other)` — pointwise ternary selection
     /// taking a host `&[bool]` mask. Returns a tensor where each element is
     /// `self[i]` if `condition[i]` is true, else `other[i]`. Differentiable
-    /// — a `WhereBackward` node is attached when grad tracking is enabled
+    /// — a where-backward node is attached when grad tracking is enabled
     /// on either input.
     ///
-    /// Validation (CORE-043 / #1737): `self` and `other` must share shape
-    /// AND device, and `condition.len()` must equal `self.numel()` —
-    /// structured `ShapeMismatch` / `DeviceMismatch` otherwise (torch
-    /// raises `RuntimeError` on each of these). This is the same-shape
-    /// subset of `torch.where`; the broadcasting overload is
-    /// `grad_fns::indexing::where_cond_bcast`. For CUDA operands the host
-    /// mask forces a documented host round trip (R-LOUD-2; see
-    /// [`crate::grad_fns::comparison::where_`]).
+    /// Validation (CORE-043 / #1737): `self` and `other` must be on the same
+    /// device and broadcast-compatible, and `condition.len()` must equal the
+    /// broadcast output numel — structured `ShapeMismatch` / `DeviceMismatch`
+    /// otherwise. A raw `&[bool]` has no shape, so it represents the full
+    /// output mask; use `where_bt_t` when the condition itself should
+    /// broadcast by shape. For CUDA operands only the host mask is uploaded;
+    /// the value tensors and result stay resident.
     ///
     /// Mirrors `torch.where(condition, input, other)` per
     /// `torch/_torch_docs.py:13089` and the upstream impl macro at
@@ -1367,12 +1366,10 @@ impl<T: Float> Tensor<T> {
     /// `torch.where(condition, self, other)` — `BoolTensor` overload.
     ///
     /// Pointwise ternary selection where `condition` is a first-class
-    /// [`BoolTensor`](crate::bool_tensor::BoolTensor). The condition's full
-    /// SHAPE must equal `self.shape()` (not just its numel — CORE-043 /
-    /// #1737), and `self.shape() == other.shape()` on the same device.
-    /// Delegates to `grad_fns::comparison::where_bt` which validates shape +
-    /// materialises the host mask and dispatches to `where_` for
-    /// autograd-aware forward.
+    /// [`BoolTensor`](crate::bool_tensor::BoolTensor). The condition, `self`,
+    /// and `other` broadcast to a common shape by PyTorch rules. CUDA inputs
+    /// delegate through the resident `where_cond_bcast`/`where_cond_bt` path,
+    /// so the condition/value tensors and result stay on device.
     ///
     /// Mirrors `torch.where(cond, x, y)` for `cond: BoolTensor` per
     /// `torch/_torch_docs.py:13089`.
