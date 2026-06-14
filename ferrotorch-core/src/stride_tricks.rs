@@ -64,10 +64,12 @@
 //! - `AsStridedBackward` on CUDA keeps the gradient data on device
 //!   end-to-end: non-overlapping output geometries use `strided_scatter_*`
 //!   into a device zeros buffer; overlapping geometries use the i64-index
-//!   `scatter_add_dim_*` atomic-add kernels. Only host-COMPUTED constants
-//!   move host→device (the freshly built flat-index buffer, a zeros/ones
-//!   fill) — exactly what torch's `index_add_`-based backward materialises
-//!   as an `arange` index tensor.
+//!   `scatter_add_dim_*` atomic-add kernels. Half/bfloat16 exact copy paths
+//!   use u16 bit-pattern kernels; accumulation/division cases promote to f32
+//!   on-device and cast back. Only host-COMPUTED constants move host→device
+//!   (the freshly built flat-index buffer, a zeros/ones fill) — exactly what
+//!   torch's `index_add_`-based backward materialises as an `arange` index
+//!   tensor.
 //!
 //! ## REQ status (per `.design/ferrotorch-core/stride_tricks.md`)
 //!
@@ -84,7 +86,7 @@
 
 use std::sync::Arc;
 
-use crate::dtype::{DType, Float};
+use crate::dtype::{DType, Element, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::gpu_dispatch::GpuBufferHandle;
 use crate::storage::TensorStorage;
@@ -309,8 +311,8 @@ fn exact_contiguous<T: Float>(t: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     Tensor::from_storage(TensorStorage::cpu(data), t.shape().to_vec(), false)
 }
 
-/// Upload `len` copies of `value` (an f32/f64 scalar fill, dtype-tagged per
-/// `T`) to a device buffer on `ordinal`. Used for the zeros scatter base
+/// Upload `len` copies of `value` (dtype-tagged per `T`) to a device buffer on
+/// `ordinal`. Used for the zeros scatter base
 /// and the ones multiplicity source of the CUDA backward — host-computed
 /// constants, not tensor-data round trips.
 fn upload_scalar_fill<T: Float>(
@@ -318,25 +320,41 @@ fn upload_scalar_fill<T: Float>(
     len: usize,
     ordinal: usize,
 ) -> FerrotorchResult<GpuBufferHandle> {
-    use std::any::TypeId;
-
     let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-    if TypeId::of::<T>() == TypeId::of::<f32>() {
-        let mut bytes = Vec::with_capacity(len * 4);
-        for _ in 0..len {
-            bytes.extend_from_slice(&(value as f32).to_ne_bytes());
+    match <T as Element>::dtype() {
+        DType::F32 => {
+            let mut bytes = Vec::with_capacity(len * 4);
+            for _ in 0..len {
+                bytes.extend_from_slice(&(value as f32).to_ne_bytes());
+            }
+            backend.cpu_to_gpu(&bytes, DType::F32, ordinal)
         }
-        backend.cpu_to_gpu(&bytes, DType::F32, ordinal)
-    } else if TypeId::of::<T>() == TypeId::of::<f64>() {
-        let mut bytes = Vec::with_capacity(len * 8);
-        for _ in 0..len {
-            bytes.extend_from_slice(&value.to_ne_bytes());
+        DType::F64 => {
+            let mut bytes = Vec::with_capacity(len * 8);
+            for _ in 0..len {
+                bytes.extend_from_slice(&value.to_ne_bytes());
+            }
+            backend.cpu_to_gpu(&bytes, DType::F64, ordinal)
         }
-        backend.cpu_to_gpu(&bytes, DType::F64, ordinal)
-    } else {
-        Err(FerrotorchError::NotImplementedOnCuda {
-            op: "as_strided backward (non-f32/f64 dtype)",
-        })
+        DType::F16 => {
+            let bits = half::f16::from_f32(value as f32).to_bits();
+            let mut bytes = Vec::with_capacity(len * 2);
+            for _ in 0..len {
+                bytes.extend_from_slice(&bits.to_ne_bytes());
+            }
+            backend.cpu_to_gpu(&bytes, DType::F16, ordinal)
+        }
+        DType::BF16 => {
+            let bits = half::bf16::from_f32(value as f32).to_bits();
+            let mut bytes = Vec::with_capacity(len * 2);
+            for _ in 0..len {
+                bytes.extend_from_slice(&bits.to_ne_bytes());
+            }
+            backend.cpu_to_gpu(&bytes, DType::BF16, ordinal)
+        }
+        other => Err(FerrotorchError::InvalidArgument {
+            message: format!("as_strided backward scalar fill expects float dtype, got {other}"),
+        }),
     }
 }
 
@@ -619,13 +637,13 @@ impl<T: Float> AsStridedBackward<T> {
         inp_eff: i64,
         inp_overlap: bool,
     ) -> FerrotorchResult<Tensor<T>> {
-        use std::any::TypeId;
-
-        let is_f32 = TypeId::of::<T>() == TypeId::of::<f32>();
-        let is_f64 = TypeId::of::<T>() == TypeId::of::<f64>();
-        if !is_f32 && !is_f64 {
+        let dtype = <T as Element>::dtype();
+        let is_f32 = dtype == DType::F32;
+        let is_f64 = dtype == DType::F64;
+        let is_f16_or_bf16 = matches!(dtype, DType::F16 | DType::BF16);
+        if !is_f32 && !is_f64 && !is_f16_or_bf16 {
             return Err(FerrotorchError::NotImplementedOnCuda {
-                op: "as_strided backward (non-f32/f64 dtype)",
+                op: "as_strided backward (unsupported dtype)",
             });
         }
         let backend =
@@ -643,9 +661,69 @@ impl<T: Float> AsStridedBackward<T> {
 
         let inp_shape = self.input.shape().to_vec();
         let inp_strides = self.input.strides().to_vec();
+        let out_overlap = maybe_overlapping_memory(&self.size, &self.stride);
+
+        if is_f16_or_bf16 && (out_overlap || inp_overlap) {
+            let grad_f32_h = backend.cast_f_to_f(grad_buf, DType::F32)?;
+            let base_h = if out_overlap {
+                let mut idx = vec![0usize; grad.numel()];
+                for_each_strided_offset(&self.size, &self.stride, out_eff, |i, flat| {
+                    idx[i] = flat as usize;
+                });
+                let idx_h = crate::ops::indexing::upload_index_i64(&idx, ordinal)?;
+                let zeros_h = upload_scalar_fill::<f32>(0.0, base_len, ordinal)?;
+                backend.scatter_add_dim_f32(
+                    &zeros_h,
+                    &idx_h,
+                    &grad_f32_h,
+                    1,
+                    base_len,
+                    idx.len(),
+                    1,
+                )?
+            } else {
+                let mut base_h = upload_scalar_fill::<f32>(0.0, base_len, ordinal)?;
+                backend.strided_scatter_f32(
+                    &grad_f32_h,
+                    &mut base_h,
+                    &self.size,
+                    &self.stride,
+                    out_eff as usize,
+                )?;
+                base_h
+            };
+
+            let base_t: Tensor<f32> =
+                Tensor::from_storage(TensorStorage::gpu(base_h), vec![base_len], false)?;
+            let base_t = if inp_overlap {
+                let inp_numel = self.input.numel();
+                let mut idx = vec![0usize; inp_numel];
+                for_each_strided_offset(&inp_shape, &inp_strides, inp_eff, |i, flat| {
+                    idx[i] = flat as usize;
+                });
+                let idx_h = crate::ops::indexing::upload_index_i64(&idx, ordinal)?;
+                let zeros_h = upload_scalar_fill::<f32>(0.0, base_len, ordinal)?;
+                let ones_h = upload_scalar_fill::<f32>(1.0, inp_numel, ordinal)?;
+                let count_h = backend
+                    .scatter_add_dim_f32(&zeros_h, &idx_h, &ones_h, 1, base_len, inp_numel, 1)?;
+                let count_t =
+                    Tensor::from_storage(TensorStorage::gpu(count_h), vec![base_len], false)?;
+                base_t.div_t(&count_t)?
+            } else {
+                base_t
+            };
+
+            let base_buf = base_t
+                .storage()
+                .gpu_handle()
+                .ok_or(FerrotorchError::DeviceUnavailable)?;
+            let out_f32_h =
+                backend.strided_copy_f32(base_buf, &inp_shape, &inp_strides, inp_eff as usize)?;
+            let out_h = backend.cast_f_to_f(&out_f32_h, dtype)?;
+            return Tensor::from_storage(TensorStorage::gpu(out_h), inp_shape, false);
+        }
 
         // Step 2: scatter the upstream grad into the base buffer.
-        let out_overlap = maybe_overlapping_memory(&self.size, &self.stride);
         let base_t: Tensor<T> = if out_overlap {
             // Aliasing destinations: atomic scatter-add via the modern
             // i64-index `scatter_add_dim_*` kernels (sm_60+ f64 atomics),
@@ -697,13 +775,27 @@ impl<T: Float> AsStridedBackward<T> {
                     out_eff as usize,
                 )?;
             } else {
-                backend.strided_scatter_f64(
-                    grad_buf,
-                    &mut base_h,
-                    &self.size,
-                    &self.stride,
-                    out_eff as usize,
-                )?;
+                match dtype {
+                    DType::F64 => backend.strided_scatter_f64(
+                        grad_buf,
+                        &mut base_h,
+                        &self.size,
+                        &self.stride,
+                        out_eff as usize,
+                    )?,
+                    DType::F16 | DType::BF16 => backend.strided_scatter_u16(
+                        grad_buf,
+                        &mut base_h,
+                        &self.size,
+                        &self.stride,
+                        out_eff as usize,
+                    )?,
+                    other => {
+                        return Err(FerrotorchError::InvalidArgument {
+                            message: format!("as_strided backward: unsupported CUDA dtype {other}"),
+                        });
+                    }
+                }
             }
             Tensor::from_storage(TensorStorage::gpu(base_h), vec![base_len], false)?
         };
@@ -737,10 +829,21 @@ impl<T: Float> AsStridedBackward<T> {
             .storage()
             .gpu_handle()
             .ok_or(FerrotorchError::DeviceUnavailable)?;
-        let out_h = if is_f32 {
-            backend.strided_copy_f32(base_buf, &inp_shape, &inp_strides, inp_eff as usize)?
-        } else {
-            backend.strided_copy_f64(base_buf, &inp_shape, &inp_strides, inp_eff as usize)?
+        let out_h = match dtype {
+            DType::F32 => {
+                backend.strided_copy_f32(base_buf, &inp_shape, &inp_strides, inp_eff as usize)?
+            }
+            DType::F64 => {
+                backend.strided_copy_f64(base_buf, &inp_shape, &inp_strides, inp_eff as usize)?
+            }
+            DType::F16 | DType::BF16 => {
+                backend.strided_copy_u16(base_buf, &inp_shape, &inp_strides, inp_eff as usize)?
+            }
+            other => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("as_strided backward: unsupported CUDA dtype {other}"),
+                });
+            }
         };
         Tensor::from_storage(TensorStorage::gpu(out_h), inp_shape, false)
     }

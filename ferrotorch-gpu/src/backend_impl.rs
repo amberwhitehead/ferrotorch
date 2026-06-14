@@ -5696,6 +5696,56 @@ impl GpuBackend for CudaBackendImpl {
         .map_err(Self::map_gpu_err)
     }
 
+    fn strided_scatter_u16(
+        &self,
+        src: &GpuBufferHandle,
+        dst: &mut GpuBufferHandle,
+        view_shape: &[usize],
+        dst_strides: &[isize],
+        dst_offset: usize,
+    ) -> FerrotorchResult<()> {
+        let ord = src.device_ordinal();
+        if dst.device_ordinal() != ord {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: ferrotorch_core::Device::Cuda(ord),
+                got: ferrotorch_core::Device::Cuda(dst.device_ordinal()),
+            });
+        }
+        if dst.dtype() != src.dtype() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "strided_scatter_u16: source dtype {} does not match destination dtype {}",
+                    src.dtype(),
+                    dst.dtype()
+                ),
+            });
+        }
+        let src_slice = match src.dtype() {
+            DType::F16 => Self::unwrap_buffer_f16(src)?,
+            DType::BF16 => Self::unwrap_buffer_bf16(src)?,
+            other => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("strided_scatter_u16 expected F16/BF16, got {other}"),
+                });
+            }
+        };
+        let dst_slice = dst.downcast_mut::<cudarc::driver::CudaSlice<u16>>().ok_or(
+            FerrotorchError::InvalidArgument {
+                message: "strided_scatter_u16: destination is not a u16 CUDA slice".into(),
+            },
+        )?;
+        let dev = self.device(ord)?;
+        crate::kernels::gpu_strided_scatter_u16(
+            src_slice,
+            dst_slice,
+            view_shape,
+            dst_strides,
+            dst_offset,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)
+    }
+
     fn strided_cat(
         &self,
         src: &GpuBufferHandle,
@@ -8985,8 +9035,8 @@ impl GpuBackend for CudaBackendImpl {
         }
     }
 
-    // REQ-8 / issue #29: cross-float cast. Initial PR covers bf16 ↔ f32 only;
-    // f16↔f32, f32↔f64, bf16↔f16 etc. are tracked in the #29 follow-up issue.
+    // REQ-8 / issue #29: cross-float cast. This covers bf16/f16 ↔ f32;
+    // f32↔f64, bf16↔f16 etc. are tracked in the #29 follow-up issue.
     // Same-dtype is not exposed here — `Tensor::to_dtype<U>()` short-circuits
     // T == U at the public API boundary before this dispatch is reached.
     #[cfg(feature = "cuda")]
@@ -9002,6 +9052,16 @@ impl GpuBackend for CudaBackendImpl {
             )),
             (DType::F32, DType::BF16) => Ok(Self::wrap_buffer_bf16(
                 ck::cast_f32_to_bf16(Self::unwrap_buffer(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            (DType::F16, DType::F32) => Ok(Self::wrap_slice_f32(
+                ck::cast_f16_to_f32(Self::unwrap_buffer_f16(src)?, src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            (DType::F32, DType::F16) => Ok(Self::wrap_buffer_f16(
+                ck::cast_f32_to_f16(Self::unwrap_buffer(src)?.inner(), src.len(), dev)
                     .map_err(Self::map_gpu_err)?,
                 ord,
             )),

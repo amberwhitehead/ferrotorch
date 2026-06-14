@@ -37,6 +37,13 @@ fn cpu_f16(data: &[f32], shape: &[usize]) -> Tensor<f16> {
     .expect("cpu f16 tensor")
 }
 
+fn cuda_leaf_f16(data: &[f32], shape: &[usize]) -> Tensor<f16> {
+    cpu_f16(data, shape)
+        .to(Device::Cuda(0))
+        .expect("to cuda")
+        .requires_grad_(true)
+}
+
 fn cpu_bf16(data: &[f32], shape: &[usize]) -> Tensor<bf16> {
     Tensor::from_storage(
         TensorStorage::cpu(data.iter().copied().map(bf16::from_f32).collect()),
@@ -44,6 +51,13 @@ fn cpu_bf16(data: &[f32], shape: &[usize]) -> Tensor<bf16> {
         false,
     )
     .expect("cpu bf16 tensor")
+}
+
+fn cuda_leaf_bf16(data: &[f32], shape: &[usize]) -> Tensor<bf16> {
+    cpu_bf16(data, shape)
+        .to(Device::Cuda(0))
+        .expect("to cuda")
+        .requires_grad_(true)
 }
 
 fn host_f32(t: &Tensor<f32>) -> Vec<f32> {
@@ -152,4 +166,49 @@ fn cuda_as_strided_copy_bf16_uses_u16_strided_copy_path_with_offset() {
     assert!(y.is_cuda());
     assert!(y.is_contiguous());
     assert_eq!(host_bf16_bits(&y), bf16_bits(&[20.0, 30.0, 40.0, 50.0]));
+}
+
+#[test]
+fn cuda_as_strided_backward_f16_nonoverlap_uses_u16_scatter_copy_path() {
+    ensure_cuda();
+    let x = cuda_leaf_f16(&[1.0, 2.0, 3.0, 4.0], &[4]);
+    let y = x
+        .as_strided(&[2, 2], &[2, 1], Some(0))
+        .expect("f16 as_strided");
+    let loss = y.contiguous().expect("contiguous").sum_all().expect("sum");
+
+    backward(&loss).expect("backward");
+    let grad = x.grad().expect("grad access").expect("grad");
+    assert!(grad.is_cuda());
+    assert_eq!(host_f16_bits(&grad), f16_bits(&[1.0, 1.0, 1.0, 1.0]));
+}
+
+#[test]
+fn cuda_as_strided_backward_f16_overlap_sums_on_device() {
+    ensure_cuda();
+    let x = cuda_leaf_f16(&[1.0, 2.0, 3.0, 4.0, 5.0], &[5]);
+    let y = x
+        .as_strided(&[3, 3], &[1, 1], Some(0))
+        .expect("f16 overlapping as_strided");
+    let loss = y.contiguous().expect("contiguous").sum_all().expect("sum");
+
+    backward(&loss).expect("backward");
+    let grad = x.grad().expect("grad access").expect("grad");
+    assert!(grad.is_cuda());
+    assert_eq!(host_f16_bits(&grad), f16_bits(&[1.0, 2.0, 3.0, 2.0, 1.0]));
+}
+
+#[test]
+fn cuda_as_strided_backward_bf16_zero_stride_overlap_sums_on_device() {
+    ensure_cuda();
+    let x = cuda_leaf_bf16(&[7.0, 8.0, 9.0], &[3]);
+    let y = x
+        .as_strided(&[5], &[0], Some(1))
+        .expect("bf16 zero-stride as_strided");
+    let loss = y.contiguous().expect("contiguous").sum_all().expect("sum");
+
+    backward(&loss).expect("backward");
+    let grad = x.grad().expect("grad access").expect("grad");
+    assert!(grad.is_cuda());
+    assert_eq!(host_bf16_bits(&grad), bf16_bits(&[0.0, 5.0, 0.0]));
 }

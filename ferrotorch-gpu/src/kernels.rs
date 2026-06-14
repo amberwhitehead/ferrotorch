@@ -19550,6 +19550,93 @@ pub fn gpu_strided_scatter_f64(
     Ok(())
 }
 
+/// u16-storage variant of [`gpu_strided_scatter`] for f16/bf16 bit-pattern
+/// buffers. This is a pure copy scatter; dtype semantics live in the handle tag.
+#[cfg(feature = "cuda")]
+pub fn gpu_strided_scatter_u16(
+    src: &cudarc::driver::CudaSlice<u16>,
+    dst: &mut cudarc::driver::CudaSlice<u16>,
+    view_shape: &[usize],
+    dst_strides: &[isize],
+    dst_offset: usize,
+    device: &GpuDevice,
+) -> GpuResult<()> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    let n: usize = view_shape.iter().product();
+    if n == 0 {
+        return Ok(());
+    }
+    let (in_decode_stride, dst_stride_padded) =
+        pad_strided_copy_params(view_shape, dst_strides, n)?;
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let ptx = CACHE.get_or_init(|| {
+        ptx_f32_copy_to_u16(
+            STRIDED_SCATTER_PTX,
+            "strided_scatter_kernel",
+            "strided_scatter_u16_kernel",
+        )
+    });
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "strided_scatter_u16_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "strided_scatter_u16_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let cfg = launch_cfg(n)?;
+    let dst_offset_u32 = dst_offset as u32;
+    let n_u32 = n as u32;
+
+    // SAFETY:
+    // - `f` is the cached `strided_scatter_u16_kernel` with the same 20-arg ABI
+    //   as the f32/f64 variants.
+    // - `in_decode_stride` and `dst_stride_padded` come from
+    //   `pad_strided_copy_params`, which validates rank and rejects negative
+    //   strides.
+    // - Each in-bounds thread copies one u16 bit-pattern from `src[i]` into the
+    //   computed strided destination slot; caller owns the destination bounds
+    //   contract exactly as for `gpu_strided_scatter`.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(src)
+            .arg(dst)
+            .arg(&dst_offset_u32)
+            .arg(&n_u32)
+            .arg(&in_decode_stride[0])
+            .arg(&in_decode_stride[1])
+            .arg(&in_decode_stride[2])
+            .arg(&in_decode_stride[3])
+            .arg(&in_decode_stride[4])
+            .arg(&in_decode_stride[5])
+            .arg(&in_decode_stride[6])
+            .arg(&in_decode_stride[7])
+            .arg(&dst_stride_padded[0])
+            .arg(&dst_stride_padded[1])
+            .arg(&dst_stride_padded[2])
+            .arg(&dst_stride_padded[3])
+            .arg(&dst_stride_padded[4])
+            .arg(&dst_stride_padded[5])
+            .arg(&dst_stride_padded[6])
+            .arg(&dst_stride_padded[7])
+            .launch(cfg)?;
+    }
+
+    Ok(())
+}
+
 /// Scalar multiply: `out[i] = a[i] * scalar`.
 ///
 /// Multiplies every element by a constant float value on the GPU.

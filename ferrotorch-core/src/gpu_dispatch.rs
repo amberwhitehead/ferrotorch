@@ -3677,6 +3677,18 @@ pub trait GpuBackend: Send + Sync {
             message: "strided_scatter_f64 GPU op not yet implemented".into(),
         })
     }
+    fn strided_scatter_u16(
+        &self,
+        _src: &GpuBufferHandle,
+        _dst: &mut GpuBufferHandle,
+        _view_shape: &[usize],
+        _dst_strides: &[isize],
+        _dst_offset: usize,
+    ) -> FerrotorchResult<()> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "strided_scatter_u16 GPU op not yet implemented".into(),
+        })
+    }
 
     // Strided cat: write a sub-tensor into a larger buffer at an offset along
     // one axis on GPU. Dtype-generic via `elem_size`: PyTorch's
@@ -6277,9 +6289,9 @@ pub trait GpuBackend: Send + Sync {
 
     /// Cast a float buffer between two float dtypes (`src.dtype()` and `dst`
     /// each ∈ {F32,F64,BF16,F16}). Widening (e.g. bf16 → f32) is exact;
-    /// narrowing (e.g. f32 → bf16) is round-to-nearest-even via PTX
+    /// narrowing (e.g. f32 → bf16/f16) is round-to-nearest-even via PTX
     /// `cvt.rn.<narrow>.<wide>`. PyTorch parity: `tensor.to(<dtype>)` on CUDA.
-    /// Initial implementation covers bf16 ↔ f32 (issue #29); other float
+    /// Current implementation covers bf16/f16 ↔ f32 (issue #29); other float
     /// pairs return `Err` until the follow-up issue lands.
     fn cast_f_to_f(
         &self,
