@@ -519,19 +519,19 @@ fn cases_op_only<'a>(file: &'a FixtureFile, op: &str) -> Vec<&'a Fixture> {
 
 fn read_back_f32(t: &Tensor<f32>) -> Vec<f32> {
     if t.is_cpu() {
-        t.data().expect("read CPU data").to_vec()
+        t.data_vec().expect("read CPU data")
     } else {
         let cpu = t.cpu().expect("D2H readback");
-        cpu.data().expect("read CPU data after readback").to_vec()
+        cpu.data_vec().expect("read CPU data after readback")
     }
 }
 
 fn read_back_f64(t: &Tensor<f64>) -> Vec<f64> {
     if t.is_cpu() {
-        t.data().expect("read CPU data").to_vec()
+        t.data_vec().expect("read CPU data")
     } else {
         let cpu = t.cpu().expect("D2H readback");
-        cpu.data().expect("read CPU data after readback").to_vec()
+        cpu.data_vec().expect("read CPU data after readback")
     }
 }
 

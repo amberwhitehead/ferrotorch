@@ -36,6 +36,132 @@ fn is_f64<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<f64>()
 }
 
+fn ensure_packed_cuda_f32_f64<T: Float>(
+    input: &Tensor<T>,
+    backend: &dyn crate::gpu_dispatch::GpuBackend,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    if !(is_f32::<T>() || is_f64::<T>()) {
+        return Err(FerrotorchError::NotImplementedOnCuda { op });
+    }
+    if input.is_contiguous() && input.storage_offset() == 0 && input.storage_len() == input.numel()
+    {
+        return Ok(input.clone());
+    }
+    if input.ndim() > 8 {
+        return Err(FerrotorchError::NotImplementedOnCuda { op });
+    }
+
+    let shape = input.shape().to_vec();
+    let strides = input.strides().to_vec();
+    let offset = input.storage_offset();
+    let handle = if is_f32::<T>() {
+        backend.strided_copy_f32(input.gpu_handle()?, &shape, &strides, offset)?
+    } else {
+        backend.strided_copy_f64(input.gpu_handle()?, &shape, &strides, offset)?
+    };
+    Tensor::from_storage(TensorStorage::gpu(handle), shape, false)
+}
+
+fn reshape_for_cdist<T: Float>(input: &Tensor<T>, shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
+    let shape_isize: Vec<isize> = shape
+        .iter()
+        .map(|&d| {
+            isize::try_from(d).map_err(|_| FerrotorchError::InvalidArgument {
+                message: format!("cdist: shape {shape:?} dimension overflows isize"),
+            })
+        })
+        .collect::<FerrotorchResult<_>>()?;
+    crate::grad_fns::shape::reshape(input, &shape_isize)
+}
+
+struct CdistPrepared<T: Float> {
+    x1: Tensor<T>,
+    x2: Tensor<T>,
+    out_shape: Vec<usize>,
+    batch: usize,
+    p_dim: usize,
+    r_dim: usize,
+    m: usize,
+}
+
+fn normalize_cdist_inputs<T: Float>(
+    x1: &Tensor<T>,
+    x2: &Tensor<T>,
+) -> FerrotorchResult<CdistPrepared<T>> {
+    if x1.ndim() < 2 || x2.ndim() < 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "cdist: expected inputs with at least 2 dimensions, got {:?} and {:?}",
+                x1.shape(),
+                x2.shape()
+            ),
+        });
+    }
+
+    let s1 = x1.shape();
+    let s2 = x2.shape();
+    let m1 = s1[s1.len() - 1];
+    let m2 = s2[s2.len() - 1];
+    if m1 != m2 {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!("cdist: feature dims mismatch: {m1} vs {m2}"),
+        });
+    }
+
+    let p_dim = s1[s1.len() - 2];
+    let r_dim = s2[s2.len() - 2];
+    let batch = crate::shape::broadcast_shapes(&s1[..s1.len() - 2], &s2[..s2.len() - 2])?;
+    let b = batch.iter().product();
+    let out_shape = if s1.len() == 2 && s2.len() == 2 {
+        vec![p_dim, r_dim]
+    } else {
+        let mut shape = batch.clone();
+        shape.push(p_dim);
+        shape.push(r_dim);
+        shape
+    };
+
+    let mut x1_view_shape = batch.clone();
+    x1_view_shape.push(p_dim);
+    x1_view_shape.push(m1);
+    let mut x2_view_shape = batch.clone();
+    x2_view_shape.push(r_dim);
+    x2_view_shape.push(m1);
+
+    let x1_base = if s1.len() == 2 {
+        let mut shape = vec![1; batch.len()];
+        shape.push(p_dim);
+        shape.push(m1);
+        reshape_for_cdist(x1, &shape)?
+    } else {
+        x1.clone()
+    };
+    let x2_base = if s2.len() == 2 {
+        let mut shape = vec![1; batch.len()];
+        shape.push(r_dim);
+        shape.push(m1);
+        reshape_for_cdist(x2, &shape)?
+    } else {
+        x2.clone()
+    };
+
+    let x1_exp = crate::grad_fns::shape::expand(&x1_base, &x1_view_shape)?;
+    let x2_exp = crate::grad_fns::shape::expand(&x2_base, &x2_view_shape)?;
+    let x1_3d = reshape_for_cdist(&x1_exp, &[b, p_dim, m1])?;
+    let x2_3d = reshape_for_cdist(&x2_exp, &[b, r_dim, m1])?;
+
+    Ok(CdistPrepared {
+        x1: x1_3d,
+        x2: x2_3d,
+        out_shape,
+        batch: b,
+        p_dim,
+        r_dim,
+        m: m1,
+    })
+}
+
 /// Upper triangular part of a tensor with at least 2 dimensions.
 ///
 /// Elements below the `diagonal`-th diagonal are set to zero.
@@ -85,9 +211,7 @@ pub fn triu<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     // round-trip. Other GPU dtypes keep the `NotImplementedOnCuda` contract.
     if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
-            // buffer before the per-element kernel reads element 0.
-            let input = input.contiguous()?;
+            let input = ensure_packed_cuda_f32_f64(input, backend, "triu")?;
             let handle = if is_f32::<T>() {
                 Some(backend.triu_f32(input.gpu_handle()?, batch, rows, cols, diagonal)?)
             } else if is_f64::<T>() {
@@ -103,7 +227,7 @@ pub fn triu<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
         return Err(FerrotorchError::NotImplementedOnCuda { op: "triu" });
     }
 
-    let data = input.data()?;
+    let data = input.data_vec()?;
     let zero = <T as num_traits::Zero>::zero();
 
     let matrix = rows * cols;
@@ -176,9 +300,7 @@ pub fn tril<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     // round-trip.
     if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
-            // buffer before the per-element kernel reads element 0.
-            let input = input.contiguous()?;
+            let input = ensure_packed_cuda_f32_f64(input, backend, "tril")?;
             let handle = if is_f32::<T>() {
                 Some(backend.tril_f32(input.gpu_handle()?, batch, rows, cols, diagonal)?)
             } else if is_f64::<T>() {
@@ -194,7 +316,7 @@ pub fn tril<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
         return Err(FerrotorchError::NotImplementedOnCuda { op: "tril" });
     }
 
-    let data = input.data()?;
+    let data = input.data_vec()?;
     let zero = <T as num_traits::Zero>::zero();
 
     let matrix = rows * cols;
@@ -286,9 +408,7 @@ pub fn diag<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     // `NotImplementedOnCuda` contract.
     if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
-            // buffer before the gather/scatter kernel reads element 0.
-            let input = input.contiguous()?;
+            let input = ensure_packed_cuda_f32_f64(input, backend, "diag")?;
             let result = if ndim == 1 {
                 let n = input.shape()[0];
                 // Checked BEFORE kernel dispatch: pre-fix a wrapped size
@@ -336,7 +456,7 @@ pub fn diag<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     match ndim {
         1 => {
             // 1-D → 2-D diagonal matrix
-            let data = input.data()?;
+            let data = input.data_vec()?;
             let n = data.len();
             // Checked sizing — unrepresentable `[n + |k|]^2` is a structured
             // error, never a wrapped allocation (CORE-121 / #1815).
@@ -360,7 +480,7 @@ pub fn diag<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
             // 2-D → extract diagonal
             let rows = input.shape()[0];
             let cols = input.shape()[1];
-            let data = input.data()?;
+            let data = input.data_vec()?;
 
             let (start_r, start_c) = if diagonal >= 0 {
                 (0, diagonal as usize)
@@ -452,11 +572,12 @@ pub fn roll<T: Float>(input: &Tensor<T>, shifts: i64, dim: usize) -> FerrotorchR
         if (is_f32::<T>() || is_f64::<T>())
             && let Some(backend) = crate::gpu_dispatch::gpu_backend()
         {
+            let input_packed = ensure_packed_cuda_f32_f64(input, backend, "roll")?;
             let outer: usize = shape[..dim].iter().product();
             let inner: usize = shape[dim + 1..].iter().product();
             let handle = if is_f32::<T>() {
                 backend.roll_f32(
-                    input.gpu_handle()?,
+                    input_packed.gpu_handle()?,
                     outer,
                     shape[dim],
                     inner,
@@ -464,7 +585,7 @@ pub fn roll<T: Float>(input: &Tensor<T>, shifts: i64, dim: usize) -> FerrotorchR
                 )?
             } else {
                 backend.roll_f64(
-                    input.gpu_handle()?,
+                    input_packed.gpu_handle()?,
                     outer,
                     shape[dim],
                     inner,
@@ -535,64 +656,14 @@ pub(crate) fn roll_cpu_inner<T: Float>(
 
 /// Pairwise distance matrix between two sets of vectors.
 ///
-/// `x1` has shape `[B, P, M]`, `x2` has shape `[B, R, M]`.
-/// Returns shape `[B, P, R]` with Lp distances.
+/// `x1` has shape `[..., P, M]`, `x2` has shape `[..., R, M]`.
+/// Leading batch dimensions are broadcast exactly like PyTorch, and the result
+/// has shape `[..., P, R]`.
 ///
 /// If `x1` is 2-D `[P, M]` and `x2` is 2-D `[R, M]`, returns `[P, R]`.
 ///
 /// Matches PyTorch's `torch.cdist`.
 pub fn cdist<T: Float>(x1: &Tensor<T>, x2: &Tensor<T>, p: f64) -> FerrotorchResult<Tensor<T>> {
-    let (batched, b, p_dim, r_dim, m) = match (x1.ndim(), x2.ndim()) {
-        (2, 2) => {
-            let p_dim = x1.shape()[0];
-            let m1 = x1.shape()[1];
-            let r_dim = x2.shape()[0];
-            let m2 = x2.shape()[1];
-            if m1 != m2 {
-                return Err(FerrotorchError::ShapeMismatch {
-                    message: format!("cdist: feature dims mismatch: {m1} vs {m2}"),
-                });
-            }
-            (false, 1, p_dim, r_dim, m1)
-        }
-        (3, 3) => {
-            if x1.shape()[0] != x2.shape()[0] {
-                return Err(FerrotorchError::ShapeMismatch {
-                    message: format!(
-                        "cdist: batch dims mismatch: {} vs {}",
-                        x1.shape()[0],
-                        x2.shape()[0]
-                    ),
-                });
-            }
-            if x1.shape()[2] != x2.shape()[2] {
-                return Err(FerrotorchError::ShapeMismatch {
-                    message: format!(
-                        "cdist: feature dims mismatch: {} vs {}",
-                        x1.shape()[2],
-                        x2.shape()[2]
-                    ),
-                });
-            }
-            (
-                true,
-                x1.shape()[0],
-                x1.shape()[1],
-                x2.shape()[1],
-                x1.shape()[2],
-            )
-        }
-        _ => {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "cdist: expected 2-D or 3-D inputs, got {:?} and {:?}",
-                    x1.shape(),
-                    x2.shape()
-                ),
-            });
-        }
-    };
-
     // Input contract BEFORE any device dispatch (mirrors
     // `aten/src/ATen/native/Distance.cpp` `TORCH_CHECK(p >= 0, "cdist only
     // supports non-negative p values")`); pre-fix both devices accepted a
@@ -603,11 +674,7 @@ pub fn cdist<T: Float>(x1: &Tensor<T>, x2: &Tensor<T>, p: f64) -> FerrotorchResu
         });
     }
 
-    let out_shape = if batched {
-        vec![b, p_dim, r_dim]
-    } else {
-        vec![p_dim, r_dim]
-    };
+    let prepared = normalize_cdist_inputs(x1, x2)?;
 
     // GPU fast path: f32/f64 resident kernel (crosslink #1545 / sub #1535).
     // Both inputs must be CUDA-resident on the same device. Mirrors
@@ -618,7 +685,7 @@ pub fn cdist<T: Float>(x1: &Tensor<T>, x2: &Tensor<T>, p: f64) -> FerrotorchResu
     // `p in {1, 2, inf}`. Unsupported (op, dtype, p) combinations (e.g. the
     // `p == 0` count-norm) surface as `NotImplementedOnCuda` rather than a
     // silent host fallback, matching the rest of `tensor_ops`'s GPU contract.
-    if x1.is_cuda() || x2.is_cuda() {
+    if prepared.x1.is_cuda() || prepared.x2.is_cuda() {
         // EXACT device equality — ordinal included — before ANY backend
         // access (CORE-124 / #1818). Mirrors `aten/src/ATen/native/
         // Distance.cpp` `cdist_impl`'s operand-device TORCH_CHECK: a
@@ -626,39 +693,33 @@ pub fn cdist<T: Float>(x1: &Tensor<T>, x2: &Tensor<T>, p: f64) -> FerrotorchResu
         // pre-fix the `is_cuda()`-only pair check let operands on different
         // GPU ordinals reach one kernel with a pointer owned by another
         // device.
-        if x1.device() != x2.device() {
+        if prepared.x1.device() != prepared.x2.device() {
             return Err(FerrotorchError::DeviceMismatch {
-                expected: x1.device(),
-                got: x2.device(),
+                expected: prepared.x1.device(),
+                got: prepared.x2.device(),
             });
         }
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            // Originals (NOT the contiguous copies below) are what the
-            // backward saves: gradient accumulation must reach the caller's
-            // leaves (CORE-123 / #1817).
-            let (orig_x1, orig_x2) = (x1.clone(), x2.clone());
-            // #1658: normalise BOTH narrowed-offset CUDA operands to packed
-            // offset-0 buffers before the distance kernel reads element 0.
-            let x1 = x1.contiguous()?;
-            let x2 = x2.contiguous()?;
+            let x1_packed = ensure_packed_cuda_f32_f64(&prepared.x1, backend, "cdist")?;
+            let x2_packed = ensure_packed_cuda_f32_f64(&prepared.x2, backend, "cdist")?;
             let handle = if is_f32::<T>() && crate::gpu_dispatch::cdist_supported_f32(p) {
                 Some(backend.cdist_f32(
-                    x1.gpu_handle()?,
-                    x2.gpu_handle()?,
-                    b,
-                    p_dim,
-                    r_dim,
-                    m,
+                    x1_packed.gpu_handle()?,
+                    x2_packed.gpu_handle()?,
+                    prepared.batch,
+                    prepared.p_dim,
+                    prepared.r_dim,
+                    prepared.m,
                     p,
                 )?)
             } else if is_f64::<T>() && crate::gpu_dispatch::cdist_supported_f64(p) {
                 Some(backend.cdist_f64(
-                    x1.gpu_handle()?,
-                    x2.gpu_handle()?,
-                    b,
-                    p_dim,
-                    r_dim,
-                    m,
+                    x1_packed.gpu_handle()?,
+                    x2_packed.gpu_handle()?,
+                    prepared.batch,
+                    prepared.p_dim,
+                    prepared.r_dim,
+                    prepared.m,
                     p,
                 )?)
             } else {
@@ -670,36 +731,45 @@ pub fn cdist<T: Float>(x1: &Tensor<T>, x2: &Tensor<T>, p: f64) -> FerrotorchResu
                 // GPU-resident; `CdistBackward` documents its host round
                 // trip). Pre-fix the GPU result was silently detached
                 // (CORE-123 / #1817).
-                return if is_grad_enabled() && (orig_x1.requires_grad() || orig_x2.requires_grad())
+                return if is_grad_enabled()
+                    && (prepared.x1.requires_grad() || prepared.x2.requires_grad())
                 {
                     let grad_fn = Arc::new(CdistBackward {
-                        x1: orig_x1,
-                        x2: orig_x2,
+                        x1: prepared.x1,
+                        x2: prepared.x2,
                         p,
                     });
-                    Tensor::from_operation(storage, out_shape, grad_fn)
+                    Tensor::from_operation(storage, prepared.out_shape, grad_fn)
                 } else {
-                    Tensor::from_storage(storage, out_shape, false)
+                    Tensor::from_storage(storage, prepared.out_shape, false)
                 };
             }
         }
         return Err(FerrotorchError::NotImplementedOnCuda { op: "cdist" });
     }
 
-    let d1 = x1.data()?;
-    let d2 = x2.data()?;
-    let out = cdist_cpu_distances(d1, d2, b, p_dim, r_dim, m, norm_for_p::<T>(p));
+    let d1 = prepared.x1.data_vec()?;
+    let d2 = prepared.x2.data_vec()?;
+    let out = cdist_cpu_distances(
+        &d1,
+        &d2,
+        prepared.batch,
+        prepared.p_dim,
+        prepared.r_dim,
+        prepared.m,
+        norm_for_p::<T>(p),
+    );
 
     let storage = TensorStorage::cpu(out);
-    if is_grad_enabled() && (x1.requires_grad() || x2.requires_grad()) {
+    if is_grad_enabled() && (prepared.x1.requires_grad() || prepared.x2.requires_grad()) {
         let grad_fn = Arc::new(CdistBackward {
-            x1: x1.clone(),
-            x2: x2.clone(),
+            x1: prepared.x1,
+            x2: prepared.x2,
             p,
         });
-        Tensor::from_operation(storage, out_shape, grad_fn)
+        Tensor::from_operation(storage, prepared.out_shape, grad_fn)
     } else {
-        Tensor::from_storage(storage, out_shape, false)
+        Tensor::from_storage(storage, prepared.out_shape, false)
     }
 }
 
@@ -882,19 +952,15 @@ impl<T: Float> GradFn<T> for CdistBackward<T> {
 
         let s1 = self.x1.shape();
         let s2 = self.x2.shape();
-        let (b, p_dim, m) = if s1.len() == 3 {
-            (s1[0], s1[1], s1[2])
-        } else {
-            (1, s1[0], s1[1])
-        };
-        let r_dim = s2[s2.len() - 2];
+        let (b, p_dim, m) = (s1[0], s1[1], s1[2]);
+        let r_dim = s2[1];
 
-        let d1 = x1_host.data()?;
-        let d2 = x2_host.data()?;
-        let g = g_host.data()?;
+        let d1 = x1_host.data_vec()?;
+        let d2 = x2_host.data_vec()?;
+        let g = g_host.data_vec()?;
         let norm = norm_for_p::<T>(self.p);
         // Recompute the forward distances (same kernel ⇒ bit-identical).
-        let dists = cdist_cpu_distances(d1, d2, b, p_dim, r_dim, m, norm);
+        let dists = cdist_cpu_distances(&d1, &d2, b, p_dim, r_dim, m, norm);
 
         let zero = <T as num_traits::Zero>::zero();
         let one = <T as num_traits::One>::one();
