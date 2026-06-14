@@ -35,7 +35,8 @@ classical observers (MinMax, PerChannelMinMax, Histogram) and a
   `x = (q - zp) * scale`. Mirrors `torch.qint8` / `torch.qint4` /
   `torch.quint8` storage.
 - REQ-3: `quantize(input, scheme, dtype)` — compute scale + zero-point
-  from min/max, clip, round to int. Mirrors
+  from min/max using PyTorch observer formulas, clip, and round to int
+  with round-half-to-even. Mirrors
   `torch.quantize_per_tensor` / `torch.quantize_per_channel`.
 - REQ-4: `dequantize(qtensor) -> Tensor<T>` — inverse of REQ-3.
   Mirrors `torch.dequantize`.
@@ -89,7 +90,9 @@ The 1700+ LOC file is organised as:
   4-bit values per `i8` storage byte (low 4 bits significant).
 - **Quantize / dequantize** (`quantize.rs:222-371`):
   - `quantize(input, scheme, dtype)` — computes per-tensor or
-    per-channel min/max, derives `(scale, zp)`, rounds + clips.
+    per-channel min/max, derives `(scale, zp)` with
+    `MinMaxObserver._calculate_qparams` parity, then rounds via
+    inverse-scale multiply plus nearest-even rounding and clips.
   - `dequantize(q)` — inverse using `(q - zp) * scale` per element.
 - **`quantized_matmul`** (`quantize.rs:372-477`) — dequantize on the
   fly inside the inner-product loop, output is a float tensor. The
@@ -135,16 +138,20 @@ Non-test production consumers:
 (`fake_quantize_per_tensor_affine`, `fake_quantize_per_channel_affine`
 in the `grad_fns/quantize_grad.rs` parity-sweep entries documented in
 that module's REQ table). The PTQ flow (this file) is exercised by
-the round-trip test `dequantize(quantize(t)) ≈ t` which catches
-scale / zero-point / rounding bugs.
+`tests/conformance_quantize_prune.rs` fixtures generated from live
+PyTorch observer and quantized tensor APIs. The conformance suite pins
+bit-exact integer codes, all-zero scale floors, affine zero-point
+rounding/clamping, unobserved observer defaults, symmetric scale
+denominators, and dequantized round-trips.
 
 ## Verification
 
 ```bash
+cargo test -p ferrotorch-core --test conformance_quantize_prune
 cargo test -p ferrotorch-core --lib quantize
 ```
 
-Expected: round-trip + observer tests pass.
+Expected: PyTorch fixture conformance, round-trip, and observer tests pass.
 
 ## REQ status table
 

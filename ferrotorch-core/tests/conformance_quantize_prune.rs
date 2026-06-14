@@ -25,7 +25,7 @@
 //!     INT8 error bound derived in `quantized_matmul_real_value_parity`)
 //! * **QParams** symmetric & asymmetric for the boundary zp values
 //!   `0`, `128`, and the all-positive-range cases that exercise the
-//!   non-clamped `zp` path.
+//!   clamped `qmin`/`qmax` zero-point boundaries.
 //! * **fake_quantize_differentiable** forward + STE backward against
 //!   PyTorch's `torch.fake_quantize_per_tensor_affine`. Post-#1238 close,
 //!   `fake_quantize_differentiable` is a back-compat alias for
@@ -81,13 +81,8 @@
 //! ferrotorch's CURRENT observed behavior with the tracking issue number
 //! and keeps the torch value in the fixture/comment. Each pin is written to
 //! FAIL when the divergence is fixed, so it retires loudly:
-//!   - #1906: `compute_scale_zp` eps floor on range (all-zero scale) and
-//!     zero-point rounding at half-boundaries.
-//!   - #1907: `QParams::symmetric` denominator (qmax vs (qmax-qmin)/2).
 //!   - #1908: prune-count rounding (half-away vs Python round-half-even).
 //!   - #1910: 2:4 in-group tie selection differs from the torch sparsifier.
-//!   - #1911: quantize codes at half-step boundaries (divide + round-half-
-//!     away vs torch inv_scale multiply + round-half-even).
 //!
 //! Retired pins (now live assertions):
 //!   - #1777 (CORE-083): magnitude_prune prunes EXACTLY n via torch CPU
@@ -97,6 +92,13 @@
 //!     is not a multiple of 4, matching the torch sparsifier's rejection.
 //!   - #1909: pruning is a real mask multiplication (CORE-082 -> #1776),
 //!     so pruned negative slots carry torch's -0.0 sign bit.
+//!   - #1906: `compute_scale_zp` floors scale after division at `f32::EPSILON`
+//!     and computes affine zero-point as
+//!     `clamp(qmin - round_ties_even(min / scale), qmin, qmax)`.
+//!   - #1907: `QParams::symmetric` uses PyTorch's
+//!     `max_abs / ((qmax - qmin) / 2)` denominator and eps scale floor.
+//!   - #1911: quantize code generation uses inverse-scale multiply plus
+//!     round-half-to-even.
 //!
 //! GPU note (per the dispatch's most-likely-failure-mode):
 //! `quantize`, `dequantize`, `quantized_matmul`, `magnitude_prune` and
@@ -436,32 +438,13 @@ fn quantize_per_tensor_bit_exact_codes() {
         // Scale parity (within F32_REDUCTION).
         let actual_scale = qt.scale();
         assert_eq!(actual_scale.len(), 1, "{label}: per-tensor scale len != 1");
-        if f.tag.as_deref() == Some("int8_all_zero") {
-            // KNOWN DIVERGENCE #1906 (compute_scale_zp eps floor): torch's
-            // MinMaxObserver floors the SCALE at f32 eps, giving
-            // 1.1920928955078125e-7 (the fixture value); ferrotorch floors
-            // the RANGE at f32::EPSILON then divides by (qmax - qmin),
-            // giving 4.6748744e-10 (255x smaller). The relative-tolerance
-            // check below would silently absorb this because both values
-            // are far below its 1.0 floor, so the divergence is pinned
-            // explicitly. This assertion FAILS when #1906 is fixed —
-            // retire the pin and fall through to the parity check.
-            assert!(
-                actual_scale[0] < expected_scale / 2.0,
-                "{label}: #1906 appears fixed (scale {} now matches torch {}) — \
-                 retire this pin",
-                actual_scale[0],
-                expected_scale
-            );
-        } else {
-            let scale_diff = (actual_scale[0] - expected_scale).abs();
-            assert!(
-                scale_diff <= tolerance::F32_REDUCTION * expected_scale.abs().max(1.0),
-                "{label}: scale {} vs expected {}",
-                actual_scale[0],
-                expected_scale
-            );
-        }
+        let scale_diff = (actual_scale[0] - expected_scale).abs();
+        assert!(
+            scale_diff <= tolerance::F32_REDUCTION * expected_scale.abs().max(1.0),
+            "{label}: scale {} vs expected {}",
+            actual_scale[0],
+            expected_scale
+        );
 
         // Zero-point parity (exact i32).
         let actual_zp = qt.zero_point();
@@ -535,37 +518,6 @@ fn quantize_per_channel_bit_exact_codes() {
         let t = make_cpu_f32(x_data, shape, false);
         let qt = quantize(&t, QuantScheme::PerChannel(axis), qdtype).expect("quantize");
 
-        // KNOWN DIVERGENCES — pinned ferrotorch outputs, observed at HEAD.
-        // The fixture holds the torch-oracle truth; these pins assert the
-        // CURRENT divergent behavior and FAIL (retire) when the underlying
-        // issue is fixed.
-        let (pinned_codes, pinned_zps): (Option<Vec<i32>>, Option<Vec<i32>>) =
-            match f.tag.as_deref() {
-                // #1911 (half-step code rounding): channel [100..200]
-                // value 100 -> code -1 (torch: 0), channel [-10..10]
-                // value 10 -> code 126 (torch: 127).
-                Some("int8_axis0") => (
-                    Some(vec![
-                        -128, -43, 42, 127, -128, -65, 63, 126, -1, 38, 89, 127,
-                    ]),
-                    None,
-                ),
-                // #1906 (zp rounding: ch [-10,10] -> zp -1, torch: 0) plus
-                // #1911 knock-on codes (torch: [-8,-3,2,7,-8,-4,4,7,0,2,5,7]).
-                Some("int4_axis0") => (
-                    Some(vec![-8, -3, 2, 7, -8, -5, 3, 7, -1, 2, 5, 7]),
-                    Some(vec![-8, -1, -8]),
-                ),
-                _ => (None, None),
-            };
-        if let Some(pins) = &pinned_codes {
-            assert_ne!(
-                pins, expected_codes,
-                "{label}: pinned codes now equal the torch fixture — \
-                 #1906/#1911 appear fixed; retire this pin"
-            );
-        }
-
         // Shape and per-channel param length.
         assert_eq!(qt.shape(), shape.as_slice(), "{label}: shape");
         assert_eq!(
@@ -589,17 +541,14 @@ fn quantize_per_channel_bit_exact_codes() {
             );
         }
 
-        // Per-channel zp parity (exact) — or the pinned divergent zps.
-        let zp_reference: &[i32] = pinned_zps.as_deref().unwrap_or(expected_zps);
-        for (i, (&actual, &expected)) in qt.zero_point().iter().zip(zp_reference.iter()).enumerate()
+        // Per-channel zp parity (exact).
+        for (i, (&actual, &expected)) in qt.zero_point().iter().zip(expected_zps.iter()).enumerate()
         {
             assert_eq!(actual, expected, "{label}: channel {i} zero_point mismatch");
         }
 
-        // Bit-exact codes in the original flat order — or the pinned
-        // divergent codes (#1906/#1911; torch truth stays in the fixture).
-        let code_reference: &[i32] = pinned_codes.as_deref().unwrap_or(expected_codes);
-        for (i, (&stored, &expected)) in qt.data().iter().zip(code_reference.iter()).enumerate() {
+        // Bit-exact codes in the original flat order.
+        for (i, (&stored, &expected)) in qt.data().iter().zip(expected_codes.iter()).enumerate() {
             let actual = stored_to_code(stored, qdtype);
             assert_eq!(actual, expected, "{label}: index {i} code mismatch");
         }
@@ -627,38 +576,7 @@ fn dequantize_per_channel_within_tolerance() {
         let rt: Tensor<f32> = dequantize(&qt).expect("dequantize");
 
         let actual = rt.data().expect("dequant").to_vec();
-        // KNOWN DIVERGENCES — pinned dequant outputs, observed at HEAD,
-        // downstream of the pinned codes/zps in
-        // `quantize_per_channel_bit_exact_codes` (#1906/#1911). The torch
-        // truth stays in the fixture `dequant` field; these pins FAIL
-        // (retire) when the divergence is fixed.
-        let pinned_dequant: Option<Vec<f32>> = match f.tag.as_deref() {
-            // torch: [..., 10.039216, 100.392159, ...] (fixture).
-            Some("int8_axis0") => Some(vec![
-                0.0, 1.0, 2.0, 3.0, -9.960785, -5.019608, 5.019608, 9.960785, 99.60784, 130.19608,
-                170.19608, 200.0,
-            ]),
-            // torch: [..., -10.666667, ..., 9.333334, 106.666664, ...] (fixture).
-            Some("int4_axis0") => Some(vec![
-                0.0,
-                1.0,
-                2.0,
-                3.0,
-                -9.333334,
-                -5.333_333_5,
-                5.333_333_5,
-                10.666667,
-                93.33333,
-                133.33333,
-                173.33333,
-                200.0,
-            ]),
-            _ => None,
-        };
-        let expected_f32: Vec<f32> = match pinned_dequant {
-            Some(p) => p,
-            None => expected_dequant.iter().map(|&v| v as f32).collect(),
-        };
+        let expected_f32: Vec<f32> = expected_dequant.iter().map(|&v| v as f32).collect();
         tolerance::assert_close_f32(&actual, &expected_f32, tolerance::F32_REDUCTION, &label);
     }
 }
@@ -694,37 +612,11 @@ fn qparams_symmetric_parity() {
         // Zero points match torch (0 for signed, 128 for uint8).
         assert_eq!(qp.zero_point[0], expected_zp, "{label}: zp");
 
-        // KNOWN DIVERGENCE #1907: ferrotorch's `QParams::symmetric` divides
-        // by qmax (127 / 128 / 7); torch's symmetric observer divides by
-        // (qmax - qmin) / 2 (127.5 / 127.5 / 7.5). EVERY symmetric case
-        // therefore diverges from the torch-oracle `scale` in the fixture
-        // (e.g. max_abs=5.0 int8: ferrotorch 0.03937008, torch 0.039215688).
-        // Pinned to the observed ferrotorch value; FAILS (retire) when
-        // #1907 is fixed.
-        let pinned_scale: f32 = match f.tag.as_deref().expect("tag") {
-            "int8_maxabs5.0" => 0.039_370_08,
-            "uint8_maxabs5.0" => 0.039_062_5,
-            "int4_maxabs5.0" => 0.714_285_73,
-            "int8_maxabs1.0" => 0.007_874_016,
-            "uint8_maxabs1.0" => 0.007_812_5,
-            "int4_maxabs1.0" => 0.142_857_15,
-            "int8_maxabs100.0" => 0.787_401_56,
-            "uint8_maxabs100.0" => 0.781_25,
-            "int4_maxabs100.0" => 14.285_714,
-            other => panic!("{label}: no pinned scale for tag {other:?}"),
-        };
-        let pin_diff = (qp.scale[0] - pinned_scale).abs();
-        assert!(
-            pin_diff <= tolerance::F32_REDUCTION * pinned_scale,
-            "{label}: scale {} != pinned divergent value {pinned_scale} \
-             (torch oracle: {expected_scale}; #1907)",
-            qp.scale[0]
-        );
         let torch_diff = (qp.scale[0] - expected_scale).abs();
         assert!(
-            torch_diff > tolerance::F32_REDUCTION * expected_scale.abs(),
-            "{label}: scale now matches the torch oracle {expected_scale} — \
-             #1907 appears fixed; retire this pin"
+            torch_diff <= tolerance::F32_REDUCTION * expected_scale.abs().max(1.0),
+            "{label}: scale {} vs torch oracle {expected_scale}",
+            qp.scale[0]
         );
     }
 }
@@ -744,23 +636,7 @@ fn qparams_asymmetric_parity() {
         let expected_zp = f.zero_point.expect("zero_point");
 
         let qp = QParams::asymmetric(mn, mx, qdtype);
-        if f.tag.as_deref() == Some("int8_signed") {
-            // KNOWN DIVERGENCE #1906 (compute_scale_zp zero-point rounding):
-            // for (min, max) = (-3, 3), min/scale lands on the -127.5
-            // half-boundary; torch's observer rounds half-to-even at higher
-            // effective precision and returns zp = 0 (the fixture value);
-            // ferrotorch computes (qmin - min/scale).round() in f32
-            // (half-away-from-zero) and returns -1. FAILS (retire) when
-            // #1906 is fixed.
-            assert_eq!(
-                qp.zero_point[0], -1,
-                "{label}: zp no longer matches the pinned divergent value -1 \
-                 (torch oracle: {expected_zp}; #1906) — if it now equals the \
-                 torch value, retire this pin"
-            );
-        } else {
-            assert_eq!(qp.zero_point[0], expected_zp, "{label}: zp");
-        }
+        assert_eq!(qp.zero_point[0], expected_zp, "{label}: zp");
         let diff = (qp.scale[0] - expected_scale).abs();
         assert!(
             diff <= tolerance::F32_REDUCTION * expected_scale.abs().max(1.0),
@@ -923,70 +799,7 @@ fn quantize_dequantize_round_trip_within_step() {
 
         let actual = rt.data().expect("rt data").to_vec();
 
-        // KNOWN DIVERGENCE #1911 (half-step code rounding): inputs that
-        // land exactly on a half code step (the 0.5-grid points of these
-        // ranges) quantize to a different code than torch (divide +
-        // round-half-away vs torch inv_scale multiply + round-half-even).
-        // Pinned to the observed ferrotorch outputs; the torch truth stays
-        // in the fixture `recovered` field. The pin FAILS (retire) when
-        // #1911 is fixed. (`rt_int4` has no half-step hits and stays on
-        // the torch-parity path.)
-        let pinned_recovered: Option<(Vec<f32>, usize)> = match f.tag.as_deref() {
-            // torch: [-5.0, -4.5098042, -4.0, -3.4901962, -3.0, -2.509804,
-            //         -2.0, -1.4901961, -1.0, -0.509804, 0.0] (fixture).
-            Some("rt_int8") => Some((
-                vec![
-                    -5.0,
-                    -4.490_196,
-                    -4.0,
-                    -3.509_804,
-                    -3.0,
-                    -2.490_196_2,
-                    -2.0,
-                    -1.490_196_1,
-                    -1.0,
-                    -0.490_196_1,
-                    0.0,
-                ],
-                1,
-            )),
-            // torch: [0.0, 0.1960784, 0.4, 0.5960785, 0.8000001, 0.9960785,
-            //         1.2, 1.3960785, 1.6000001, 1.7960786, 2.0] (fixture).
-            Some("rt_uint8") => Some((
-                vec![
-                    0.0,
-                    0.196_078_45,
-                    0.400_000_04,
-                    0.603_921_6,
-                    0.800_000_1,
-                    0.996_078_5,
-                    1.2,
-                    1.396_078_5,
-                    1.600_000_1,
-                    // Index 9 (1.8) matches torch with the fixture's exact
-                    // f64-sourced input; only index 3 (0.6) diverges.
-                    1.796_078_6,
-                    2.0,
-                ],
-                3,
-            )),
-            _ => None,
-        };
-        let expected_f32: Vec<f32> = match &pinned_recovered {
-            Some((p, retire_idx)) => {
-                // Retire check: if the divergent index now matches torch,
-                // #1911 is fixed for this case.
-                let torch_v = expected_recovered[*retire_idx] as f32;
-                assert!(
-                    (actual[*retire_idx] - torch_v).abs()
-                        > tolerance::F32_REDUCTION * torch_v.abs().max(1.0),
-                    "{label}: index {retire_idx} now matches the torch oracle \
-                     ({torch_v}) — #1911 appears fixed; retire this pin"
-                );
-                p.clone()
-            }
-            None => expected_recovered.iter().map(|&v| v as f32).collect(),
-        };
+        let expected_f32: Vec<f32> = expected_recovered.iter().map(|&v| v as f32).collect();
 
         // Recovered must equal the reference dequantize; tolerance
         // F32_REDUCTION (multiplication by scale).
@@ -1416,9 +1229,9 @@ fn minmax_observer_filters_nan_inf() {
     // reset() clears the observer state.
     obs.reset();
     let qp2 = obs.calculate_qparams(QuantDtype::Int8);
-    // After reset, min=+Inf, max=-Inf, computed scale falls back to the
-    // EPSILON floor; we just check it doesn't panic.
-    assert_eq!(qp2.scale.len(), 1);
+    // PyTorch MinMaxObserver returns default qparams after reset.
+    assert_eq!(qp2.scale, vec![1.0]);
+    assert_eq!(qp2.zero_point, vec![0]);
 }
 
 #[test]

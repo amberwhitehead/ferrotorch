@@ -152,32 +152,30 @@ impl QuantizedTensor {
 
 /// Compute scale and zero_point for a given (min, max) range and target dtype.
 ///
-/// Uses the standard asymmetric affine quantization formula:
-///   scale = (max - min) / (qmax - qmin)
-///   zero_point = round(qmin - min / scale)
+/// Mirrors PyTorch's `MinMaxObserver._calculate_qparams` affine branch:
+///   scale = max((max_pos - min_neg) / (qmax - qmin), eps)
+///   zero_point = clamp(qmin - round(min_neg / scale), qmin, qmax)
 ///
 /// The range is always expanded to include zero so that `0.0` maps exactly
 /// to an integer quantized value (important for zero-padding and ReLU outputs).
-/// When min == max the range would collapse to zero, so this expansion also
-/// prevents division-by-zero.
+/// When min == max == 0, PyTorch floors the scale itself at `f32::EPSILON`.
+/// If the observer was never populated, PyTorch returns default qparams
+/// `(scale=1.0, zero_point=0)`.
 fn compute_scale_zp(min_val: f32, max_val: f32, dtype: QuantDtype) -> (f32, i32) {
     let qmin = dtype.qmin();
     let qmax = dtype.qmax();
+
+    if min_val == f32::INFINITY && max_val == f32::NEG_INFINITY {
+        return (1.0, 0);
+    }
 
     // Ensure the range includes zero (standard PyTorch behaviour).
     let min_val = min_val.min(0.0);
     let max_val = max_val.max(0.0);
 
-    // After including zero the range is at least max(|min|, |max|) > 0,
-    // but guard against the degenerate all-zeros case.
-    let range = (max_val - min_val).max(f32::EPSILON);
-    let scale = range / (qmax - qmin) as f32;
-
-    // zero_point is intentionally NOT clamped to [qmin, qmax]. It is stored
-    // as i32 and may lie outside the quantized integer range. This is correct
-    // for asymmetric affine quantization — clamping the zero_point distorts
-    // the mapping when the float range doesn't straddle zero.
-    let zp = (qmin as f32 - min_val / scale).round() as i32;
+    let range = max_val - min_val;
+    let scale = (range / (qmax - qmin) as f32).max(f32::EPSILON);
+    let zp = (qmin - (min_val / scale).round_ties_even() as i32).clamp(qmin, qmax);
 
     (scale, zp)
 }
@@ -189,7 +187,7 @@ fn compute_scale_zp(min_val: f32, max_val: f32, dtype: QuantDtype) -> (f32, i32)
 /// so that values 128..=255 are preserved through the bit pattern.
 #[inline]
 fn quantize_val(x: f32, scale: f32, zp: i32, qmin: i32, qmax: i32, is_unsigned: bool) -> i8 {
-    let q = (x / scale + zp as f32).round() as i32;
+    let q = (x * (1.0 / scale)).round_ties_even() as i32 + zp;
     let clamped = q.clamp(qmin, qmax);
     if is_unsigned {
         (clamped as u8) as i8
@@ -519,25 +517,19 @@ pub struct QParams {
 impl QParams {
     /// Compute symmetric quantization parameters.
     ///
-    /// For symmetric quantization the range is `[-max_abs, max_abs]` and:
-    /// - INT8: `zero_point = 0`, `scale = max_abs / 127`
-    /// - INT4: `zero_point = 0`, `scale = max_abs / 7`
-    /// - UINT8: `zero_point = 128`, `scale = max_abs / 128`
+    /// For symmetric quantization PyTorch derives the scale from
+    /// `max_abs / ((qmax - qmin) / 2)` and floors the scale at `f32::EPSILON`.
+    /// Signed dtypes use zero-point `0`; UINT8 uses `128`.
     pub fn symmetric(max_abs: f32, dtype: QuantDtype) -> Self {
-        let max_abs = max_abs.max(f32::EPSILON);
-        match dtype {
-            QuantDtype::Int8 => QParams {
-                scale: vec![max_abs / 127.0],
-                zero_point: vec![0],
-            },
-            QuantDtype::Int4 => QParams {
-                scale: vec![max_abs / 7.0],
-                zero_point: vec![0],
-            },
-            QuantDtype::Uint8 => QParams {
-                scale: vec![max_abs / 128.0],
-                zero_point: vec![128],
-            },
+        let denom = (dtype.qmax() - dtype.qmin()) as f32 / 2.0;
+        let scale = (max_abs / denom).max(f32::EPSILON);
+        let zero_point = match dtype {
+            QuantDtype::Uint8 => 128,
+            QuantDtype::Int8 | QuantDtype::Int4 => 0,
+        };
+        QParams {
+            scale: vec![scale],
+            zero_point: vec![zero_point],
         }
     }
 
@@ -952,12 +944,11 @@ impl FakeQuantize {
 
         let mut output = Vec::with_capacity(data.len());
         let mut grad_mask = Vec::with_capacity(data.len());
+        let inv_scale = 1.0 / scale;
 
         for &x in data {
             // Fake quantize: quantize then dequantize.
-            let q = (x / scale + zp as f32)
-                .round()
-                .clamp(qmin as f32, qmax as f32);
+            let q = (zp as f32 + (x * inv_scale).round_ties_even()).clamp(qmin as f32, qmax as f32);
             let dq = (q - zp as f32) * scale;
             output.push(dq);
 
@@ -1467,21 +1458,28 @@ mod tests {
     fn test_qparams_symmetric_int8() {
         let qp = QParams::symmetric(5.0, QuantDtype::Int8);
         assert_eq!(qp.zero_point, vec![0]);
-        assert!((qp.scale[0] - 5.0 / 127.0).abs() < 1e-7);
+        assert!((qp.scale[0] - 5.0 / 127.5).abs() < 1e-7);
     }
 
     #[test]
     fn test_qparams_symmetric_uint8() {
         let qp = QParams::symmetric(5.0, QuantDtype::Uint8);
         assert_eq!(qp.zero_point, vec![128]);
-        assert!((qp.scale[0] - 5.0 / 128.0).abs() < 1e-7);
+        assert!((qp.scale[0] - 5.0 / 127.5).abs() < 1e-7);
     }
 
     #[test]
     fn test_qparams_symmetric_int4() {
         let qp = QParams::symmetric(7.0, QuantDtype::Int4);
         assert_eq!(qp.zero_point, vec![0]);
-        assert!((qp.scale[0] - 1.0).abs() < 1e-7);
+        assert!((qp.scale[0] - 7.0 / 7.5).abs() < 1e-7);
+    }
+
+    #[test]
+    fn test_qparams_symmetric_zero_scale_floor() {
+        let qp = QParams::symmetric(0.0, QuantDtype::Int8);
+        assert_eq!(qp.zero_point, vec![0]);
+        assert_eq!(qp.scale, vec![f32::EPSILON]);
     }
 
     // ----- MinMaxObserver -----
@@ -1495,6 +1493,14 @@ mod tests {
         // Range includes zero: min=-1, max=5.
         assert_eq!(qp.scale.len(), 1);
         assert_eq!(qp.zero_point.len(), 1);
+    }
+
+    #[test]
+    fn test_minmax_observer_unobserved_defaults_to_torch_qparams() {
+        let obs = MinMaxObserver::new();
+        let qp = obs.calculate_qparams(QuantDtype::Int8);
+        assert_eq!(qp.scale, vec![1.0]);
+        assert_eq!(qp.zero_point, vec![0]);
     }
 
     #[test]
