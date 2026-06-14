@@ -17,6 +17,7 @@
 use ferrotorch_core::ops::search::{bucketize, searchsorted};
 use ferrotorch_core::{Device, Tensor, TensorStorage};
 use ferrotorch_gpu::init_cuda_backend;
+use half::{bf16, f16};
 
 fn ensure_cuda() {
     use std::sync::Once;
@@ -31,6 +32,14 @@ fn cpu_f32(data: &[f32]) -> Tensor<f32> {
 }
 
 fn cpu_f64(data: &[f64]) -> Tensor<f64> {
+    Tensor::from_storage(TensorStorage::cpu(data.to_vec()), vec![data.len()], false).unwrap()
+}
+
+fn cpu_f16(data: &[f16]) -> Tensor<f16> {
+    Tensor::from_storage(TensorStorage::cpu(data.to_vec()), vec![data.len()], false).unwrap()
+}
+
+fn cpu_bf16(data: &[bf16]) -> Tensor<bf16> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), vec![data.len()], false).unwrap()
 }
 
@@ -139,4 +148,85 @@ fn searchsorted_f32_gpu_equals_cpu_path_on_same_data() {
         let gpu = searchsorted(&bounds_gpu, &vals_gpu, right).unwrap();
         assert_eq!(gpu, cpu, "right={right}");
     }
+}
+
+#[test]
+fn searchsorted_f16_gpu_matches_torch_nan_inf_ties() {
+    // Live PyTorch 2.11.0+cu130 CUDA oracle for dtype=torch.float16:
+    // bounds=[-2,-1,0,0,2,inf], vals=[-inf,-1,0,1,2,nan,inf].
+    ensure_cuda();
+    let bounds_h = [
+        f16::from_f32(-2.0),
+        f16::from_f32(-1.0),
+        f16::from_f32(0.0),
+        f16::from_f32(0.0),
+        f16::from_f32(2.0),
+        f16::from_f32(f32::INFINITY),
+    ];
+    let vals_h = [
+        f16::from_f32(f32::NEG_INFINITY),
+        f16::from_f32(-1.0),
+        f16::from_f32(0.0),
+        f16::from_f32(1.0),
+        f16::from_f32(2.0),
+        f16::from_f32(f32::NAN),
+        f16::from_f32(f32::INFINITY),
+    ];
+    let bounds = cpu_f16(&bounds_h).to(Device::Cuda(0)).unwrap();
+    let vals = cpu_f16(&vals_h).to(Device::Cuda(0)).unwrap();
+    assert!(bounds.is_cuda() && vals.is_cuda());
+
+    let left = searchsorted(&bounds, &vals, false).unwrap();
+    assert_eq!(left, vec![0, 1, 2, 4, 4, 6, 5]);
+
+    let right = searchsorted(&bounds, &vals, true).unwrap();
+    assert_eq!(right, vec![0, 2, 4, 4, 5, 6, 6]);
+}
+
+#[test]
+fn bucketize_bf16_gpu_matches_torch_nan_inf_ties() {
+    // Same live PyTorch 2.11.0+cu130 CUDA oracle for dtype=torch.bfloat16.
+    ensure_cuda();
+    let bounds_h = [
+        bf16::from_f32(-2.0),
+        bf16::from_f32(-1.0),
+        bf16::from_f32(0.0),
+        bf16::from_f32(0.0),
+        bf16::from_f32(2.0),
+        bf16::from_f32(f32::INFINITY),
+    ];
+    let vals_h = [
+        bf16::from_f32(f32::NEG_INFINITY),
+        bf16::from_f32(-1.0),
+        bf16::from_f32(0.0),
+        bf16::from_f32(1.0),
+        bf16::from_f32(2.0),
+        bf16::from_f32(f32::NAN),
+        bf16::from_f32(f32::INFINITY),
+    ];
+    let bounds = cpu_bf16(&bounds_h).to(Device::Cuda(0)).unwrap();
+    let vals = cpu_bf16(&vals_h).to(Device::Cuda(0)).unwrap();
+    assert!(bounds.is_cuda() && vals.is_cuda());
+
+    let left = bucketize(&vals, &bounds, false).unwrap();
+    assert_eq!(left, vec![0, 1, 2, 4, 4, 6, 5]);
+
+    let right = bucketize(&vals, &bounds, true).unwrap();
+    assert_eq!(right, vec![0, 2, 4, 4, 5, 6, 6]);
+}
+
+#[test]
+fn searchsorted_f16_gpu_empty_boundaries_returns_zeros() {
+    ensure_cuda();
+    let bounds = cpu_f16(&[]).to(Device::Cuda(0)).unwrap();
+    let vals_h = [
+        f16::from_f32(-3.0),
+        f16::from_f32(0.0),
+        f16::from_f32(f32::NAN),
+    ];
+    let vals = cpu_f16(&vals_h).to(Device::Cuda(0)).unwrap();
+    assert!(bounds.is_cuda() && vals.is_cuda());
+
+    assert_eq!(searchsorted(&bounds, &vals, false).unwrap(), vec![0, 0, 0]);
+    assert_eq!(searchsorted(&bounds, &vals, true).unwrap(), vec![0, 0, 0]);
 }

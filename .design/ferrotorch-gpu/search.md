@@ -68,7 +68,8 @@ against torch 2.11 CUDA (values exact in all cases; gathered values exact).
 
 ## Requirements
 
-- REQ-1: `gpu_searchsorted_f32` / `gpu_searchsorted_f64` — given a device
+- REQ-1: `gpu_searchsorted_f32` / `gpu_searchsorted_f64` /
+  `gpu_searchsorted_f16` / `gpu_searchsorted_bf16` — given a device
   `values` buffer of length `n_vals`, a device 1-D `boundaries` buffer of
   length `n_bounds`, and a `right: bool`, return a fresh device
   `CudaSlice<i64>` of length `n_vals` holding the per-value insertion index.
@@ -76,7 +77,8 @@ against torch 2.11 CUDA (values exact in all cases; gathered values exact).
   boundaries → every index is 0 (matches `partition_point` on an empty slice
   and upstream `start == end == 0`). Mirrors `searchsorted_cuda_kernel`.
 - REQ-2: PTX template + ABI. A single `SEARCHSORTED_F32_PTX` /
-  `SEARCHSORTED_F64_PTX` carrying ABI
+  `SEARCHSORTED_F64_PTX` / `SEARCHSORTED_F16_PTX` /
+  `SEARCHSORTED_BF16_PTX` carrying ABI
   `(vals_ptr, bounds_ptr, out_ptr, n_vals, n_bounds, right)` where `right`
   is a `u32` flag (0 = lower_bound, 1 = upper_bound). Loaded via
   `module_cache::get_or_compile`.
@@ -86,15 +88,16 @@ against torch 2.11 CUDA (values exact in all cases; gathered values exact).
   the CUDA backend overrides. Output dtype tag is int64 (PyTorch
   `ScalarType::Long`).
 - REQ-4: Dispatch wiring in `CudaBackendImpl::searchsorted_1d`
-  (`ferrotorch-gpu/src/backend_impl.rs`) — `match dtype { F32, F64 }`,
+  (`ferrotorch-gpu/src/backend_impl.rs`) — `match dtype { F32, F64, F16, BF16 }`,
   wrapping the resulting `CudaSlice<i64>` as an `I64` handle.
 - REQ-5: Re-export + non-test production consumer. `pub use
-  search::{gpu_searchsorted_f32, gpu_searchsorted_f64}` in
+  search::{gpu_searchsorted_f32, gpu_searchsorted_f64, gpu_searchsorted_f16,
+  gpu_searchsorted_bf16}` in
   `ferrotorch-gpu/src/lib.rs`; the production consumer is
   `ferrotorch-core/src/ops/search.rs::searchsorted`, which dispatches CUDA
-  f32/f64 inputs through `GpuBackend::searchsorted_1d` and reads back ONLY
-  the i64 result indices (the value/boundary data never leaves the device —
-  no R-CODE-4 round trip).
+  f32/f64/f16/bf16 inputs through `GpuBackend::searchsorted_1d` and reads
+  back ONLY the i64 result indices (the value/boundary data never leaves the
+  device — no R-CODE-4 round trip).
 - REQ-6: `gpu_topk_f32` / `gpu_topk_f64` — given a device `[outer, dim]`
   value buffer and `(k, largest)`, return `(values, indices)`: a fresh
   device `CudaSlice<V>` of `outer * k` extrema (same dtype) and a
@@ -337,11 +340,11 @@ against torch 2.11 CUDA (values exact in all cases; gathered values exact).
 6. Each thread loops `lo=0, hi=n_bounds`; mid-value compare per `right`
    flag; writes `lo` (the converged insertion point) as `s64`.
 
-`searchsorted_1d` (`backend_impl.rs`): unwrap f32/f64 value+boundary
+`searchsorted_1d` (`backend_impl.rs`): unwrap f32/f64/f16/bf16 value+boundary
 buffers, call the matching `gpu_searchsorted_*`, wrap result via
 `wrap_slice_i64`.
 
-Non-test consumer (`ops/search.rs::searchsorted`): on CUDA f32/f64,
+Non-test consumer (`ops/search.rs::searchsorted`): on CUDA f32/f64/f16/bf16,
 `backend.searchsorted_1d(values.gpu_handle()?, boundaries.gpu_handle()?,
 right)?`, then `gpu_to_cpu` the i64 handle, decode 8-byte LE chunks to
 `Vec<usize>`. `bucketize` inherits the GPU path through its existing
@@ -380,11 +383,11 @@ consumer path (result `is_cuda()` + torch value-match) is pinned by
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | `pub fn gpu_searchsorted_f32` / `gpu_searchsorted_f64 in search.rs` mirror `lower_bound`/`upper_bound` in `aten/src/ATen/native/cuda/Bucketization.cu:26,44`; consumer `CudaBackendImpl::searchsorted_1d in backend_impl.rs` |
-| REQ-2 | SHIPPED | `SEARCHSORTED_F32_PTX` / `SEARCHSORTED_F64_PTX in search.rs` carry the 6-arg ABI; launch site binds args in matching order |
+| REQ-1 | SHIPPED | `pub fn gpu_searchsorted_f32` / `gpu_searchsorted_f64` / `gpu_searchsorted_f16` / `gpu_searchsorted_bf16 in search.rs` mirror `lower_bound`/`upper_bound` in `aten/src/ATen/native/cuda/Bucketization.cu:26,44`; consumer `CudaBackendImpl::searchsorted_1d in backend_impl.rs` |
+| REQ-2 | SHIPPED | `SEARCHSORTED_F32_PTX` / `SEARCHSORTED_F64_PTX` / `SEARCHSORTED_F16_PTX` / `SEARCHSORTED_BF16_PTX in search.rs` carry the 6-arg ABI; launch site binds args in matching order |
 | REQ-3 | SHIPPED | `fn searchsorted_1d in gpu_dispatch.rs` (`GpuBackend` trait method, `DType::I64` output); consumer `ops::search::searchsorted` GPU branch |
-| REQ-4 | SHIPPED | `CudaBackendImpl::searchsorted_1d in backend_impl.rs` dispatches `match dtype { F32, F64 }` and wraps via `wrap_slice_i64` |
-| REQ-5 | SHIPPED | `pub use search::{gpu_searchsorted_f32, gpu_searchsorted_f64} in lib.rs`; non-test consumer `ferrotorch_core::ops::search::searchsorted` CUDA f32/f64 branch (`searchsorted in ops/search.rs`) |
+| REQ-4 | SHIPPED | `CudaBackendImpl::searchsorted_1d in backend_impl.rs` dispatches `match dtype { F32, F64, F16, BF16 }` and wraps via `wrap_slice_i64` |
+| REQ-5 | SHIPPED | `pub use search::{gpu_searchsorted_f32, gpu_searchsorted_f64, gpu_searchsorted_f16, gpu_searchsorted_bf16} in lib.rs`; non-test consumer `ferrotorch_core::ops::search::searchsorted` CUDA f32/f64/f16/bf16 branch (`searchsorted in ops/search.rs`) |
 | REQ-6 | SHIPPED | `pub fn gpu_topk_f32` / `gpu_topk_f64 in search.rs` select k extrema mirroring `topk_out_cuda` gather+`sortKeyValueInplace` at `aten/src/ATen/native/cuda/TensorTopK.cpp:97,106`; consumer `CudaBackendImpl::topk_1d in backend_impl.rs` |
 | REQ-7 | SHIPPED | `TOPK_F32_PTX` / `TOPK_F64_PTX in search.rs` (via `topk_ptx!` macro) carry the 7-arg ABI `(in_ptr, vals_ptr, idx_ptr, outer, dim, k, largest)`; launch site binds args in matching order |
 | REQ-8 | SHIPPED | `fn topk_1d in gpu_dispatch.rs` (`GpuBackend` trait method, `(values, I64 indices)` output); consumer `ops::search::topk` GPU branch |

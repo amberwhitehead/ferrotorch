@@ -9,7 +9,7 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `searchsorted` at `ops/search.rs:36`; consumer: re-export `ferrotorch_core::searchsorted` at `lib.rs:176`. CUDA f32/f64 lower on-device via `GpuBackend::searchsorted_1d` (#1545). |
+//! | REQ-1 | SHIPPED | `searchsorted` at `ops/search.rs:36`; consumer: re-export `ferrotorch_core::searchsorted` at `lib.rs:176`. CUDA f32/f64/f16/bf16 lower on-device via `GpuBackend::searchsorted_1d` (#1545). |
 //! | REQ-2 | SHIPPED | `bucketize` at `ops/search.rs:140`; consumer: re-export at `lib.rs:176`. Inherits the CUDA GPU path through its delegation to `searchsorted`. |
 //! | REQ-3 | SHIPPED | `unique`; consumer: re-export `ferrotorch_core::unique`. CUDA f32/f64 lower the SORTED sort-by-key dedup on-device via `GpuBackend::unique_1d` (#1545); SORTED-unique values stay GPU-resident, only index/run metadata read back. NaN NOT collapsed (each distinct, sorted last), matching live torch 2.11. |
 //! | REQ-4 | SHIPPED | `unique_consecutive` at `ops/search.rs:260`; consumer: re-export at `lib.rs:176`. CUDA f32/f64 lower the data-dependent run compaction on-device via `GpuBackend::unique_consecutive_1d` (#1545); values stay GPU-resident, only run-position metadata read back. |
@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use crate::autograd::no_grad::is_grad_enabled;
 use crate::dtype::Float;
-use crate::dtype_dispatch::{is_f32, is_f64};
+use crate::dtype_dispatch::{is_bf16, is_f16, is_f32, is_f64};
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
@@ -53,13 +53,16 @@ pub fn searchsorted<T: Float>(
         });
     }
 
-    // GPU fast path (#1545): when both tensors are CUDA-resident f32/f64, run
-    // the binary search on-device via `GpuBackend::searchsorted_1d` and read
-    // back ONLY the int64 result indices. The value/boundary data never leaves
-    // the device, so this is not a CPU<->GPU round trip (R-CODE-4): only the
-    // freshly-computed indices are copied to host to satisfy this function's
-    // `Vec<usize>` contract.
-    if boundaries.is_cuda() && values.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    // GPU fast path (#1545): when both tensors are CUDA-resident supported
+    // floating dtypes, run the binary search on-device via
+    // `GpuBackend::searchsorted_1d` and read back ONLY the int64 result
+    // indices. The value/boundary data never leaves the device, so this is not
+    // a CPU<->GPU round trip (R-CODE-4): only the freshly-computed indices are
+    // copied to host to satisfy this function's `Vec<usize>` contract.
+    if boundaries.is_cuda()
+        && values.is_cuda()
+        && (is_f32::<T>() || is_f64::<T>() || is_f16::<T>() || is_bf16::<T>())
+    {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         // #1658: normalise BOTH narrowed-offset CUDA operands to packed offset-0

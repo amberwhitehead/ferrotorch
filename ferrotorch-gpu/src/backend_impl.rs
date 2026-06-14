@@ -8164,6 +8164,22 @@ impl GpuBackend for CudaBackendImpl {
                 right,
                 dev,
             ),
+            DType::F16 => crate::search::gpu_searchsorted_f16(
+                Self::unwrap_buffer_f16(values)?,
+                Self::unwrap_buffer_f16(boundaries)?,
+                n_vals,
+                n_bounds,
+                right,
+                dev,
+            ),
+            DType::BF16 => crate::search::gpu_searchsorted_bf16(
+                Self::unwrap_buffer_bf16(values)?,
+                Self::unwrap_buffer_bf16(boundaries)?,
+                n_vals,
+                n_bounds,
+                right,
+                dev,
+            ),
             other => {
                 return Err(FerrotorchError::InvalidArgument {
                     message: format!("searchsorted_1d: unsupported value dtype {other}"),

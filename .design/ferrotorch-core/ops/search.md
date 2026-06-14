@@ -16,9 +16,8 @@ upstream-paths:
 `ferrotorch-core/src/ops/search.rs` ships the searching / sorting /
 discretization primitives: `searchsorted`, `bucketize`, `unique`,
 `unique_consecutive`, `histc`, `meshgrid`, and `topk`. Each mirrors
-the same-named `torch.*` function. All paths are CPU-only — CUDA
-inputs error with `NotImplementedOnCuda` (GPU lowerings tracked
-under #1545).
+the same-named `torch.*` function. CUDA lowerings are implemented for
+the dtypes documented per operation below.
 
 ## Requirements
 
@@ -78,7 +77,8 @@ under #1545).
   `min == max` (`test_histc_skips_out_of_range`,
   `divergence_histc_default_minmax_*`).
 - [x] AC-7: `topk(input, k>last_dim)` errors with `InvalidArgument`.
-- [x] AC-8: GPU paths for `searchsorted` / `bucketize` (f32/f64) — SHIPPED
+- [x] AC-8: GPU paths for `searchsorted` / `bucketize`
+  (f32/f64/f16/bf16) — SHIPPED
   (#1545). CUDA inputs lower the binary search on-device via
   `GpuBackend::searchsorted_1d` (`ferrotorch-gpu/src/search.rs`); only the
   int64 result indices are read back.
@@ -170,7 +170,7 @@ clamping) paths.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `searchsorted in ops/search.rs`; non-test consumer: re-exported as `ferrotorch_core::searchsorted` (boundary public API per goal.md S5). CUDA f32/f64 lower on-device via `GpuBackend::searchsorted_1d` (`gpu_searchsorted_f32`/`_f64 in ferrotorch-gpu/src/search.rs`); #1545. |
+| REQ-1 | SHIPPED | impl: `searchsorted in ops/search.rs`; non-test consumer: re-exported as `ferrotorch_core::searchsorted` (boundary public API per goal.md S5). CUDA f32/f64/f16/bf16 lower on-device via `GpuBackend::searchsorted_1d` (`gpu_searchsorted_f32`/`_f64`/`_f16`/`_bf16 in ferrotorch-gpu/src/search.rs`); #1545. |
 | REQ-2 | SHIPPED | impl: `bucketize in ops/search.rs`; non-test consumer: re-exported as `ferrotorch_core::bucketize`. Inherits the CUDA GPU path through its delegation to `searchsorted`. |
 | REQ-3 | SHIPPED | impl: `unique in ops/search.rs`; non-test consumer: re-exported as `ferrotorch_core::unique`. CUDA f32/f64 lower the SORTED sort-by-key dedup on-device via `GpuBackend::unique_1d` (#1545); GPU impl `gpu_unique_f32`/`_f64 in ferrotorch-gpu/src/search.rs` (bitonic sort-by-key + run-flag/prefix-sum/compaction, mirroring `aten/src/ATen/native/cuda/Unique.cu:51-85`), GPU consumer `CudaBackendImpl::unique_1d in ferrotorch-gpu/src/backend_impl.rs`; SORTED-unique values stay GPU-resident, only index/run metadata read back. NaN NOT collapsed (each distinct, sorted last) — matches live torch 2.11. |
 | REQ-4 | SHIPPED | impl: `unique_consecutive in ops/search.rs`; non-test consumer: re-exported as `ferrotorch_core::unique_consecutive`. CUDA f32/f64 lower the run compaction on-device via `GpuBackend::unique_consecutive_1d` (#1545); GPU impl `gpu_unique_consecutive_f32`/`_f64 in ferrotorch-gpu/src/search.rs`, GPU consumer `CudaBackendImpl::unique_consecutive_1d in ferrotorch-gpu/src/backend_impl.rs`; values stay GPU-resident, only run-position metadata read back. |

@@ -1,5 +1,7 @@
-//! GPU `searchsorted` / `bucketize` binary-search + `topk` selection kernels
-//! (f32 / f64).
+//! GPU `searchsorted` / `bucketize` binary-search + `topk` selection kernels.
+//!
+//! `searchsorted` supports f32 / f64 / f16 / bf16. Other kernels in this
+//! module document their dtype coverage at the relevant launch surface.
 //!
 //! Mirrors `aten/src/ATen/native/cuda/Bucketization.cu` for the 1-D
 //! `boundaries` case (`is_1d_boundaries == true`, so `start_bd == 0` and the
@@ -42,11 +44,11 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (`gpu_searchsorted_f32`/`_f64`) | SHIPPED | `pub fn gpu_searchsorted_f32`/`_f64 in search.rs` mirror `lower_bound`/`upper_bound` at `aten/src/ATen/native/cuda/Bucketization.cu:26,44`; consumer `CudaBackendImpl::searchsorted_1d in backend_impl.rs` |
-//! | REQ-2 (PTX template + ABI) | SHIPPED | `SEARCHSORTED_F32_PTX`/`SEARCHSORTED_F64_PTX in search.rs` carry the 6-arg ABI; launch site binds args in matching order |
+//! | REQ-1 (`gpu_searchsorted_*`) | SHIPPED | `pub fn gpu_searchsorted_f32`/`_f64`/`_f16`/`_bf16 in search.rs` mirror `lower_bound`/`upper_bound` at `aten/src/ATen/native/cuda/Bucketization.cu:26,44`; consumer `CudaBackendImpl::searchsorted_1d in backend_impl.rs` |
+//! | REQ-2 (PTX template + ABI) | SHIPPED | `SEARCHSORTED_F32_PTX`/`SEARCHSORTED_F64_PTX`/`SEARCHSORTED_F16_PTX`/`SEARCHSORTED_BF16_PTX in search.rs` carry the 6-arg ABI; launch site binds args in matching order |
 //! | REQ-3 (trait surface) | SHIPPED | `fn searchsorted_1d in gpu_dispatch.rs`; consumer `ops::search::searchsorted` GPU branch |
-//! | REQ-4 (dispatch wiring) | SHIPPED | `CudaBackendImpl::searchsorted_1d in backend_impl.rs` dispatches `match dtype { F32, F64 }` |
-//! | REQ-5 (re-export + consumer) | SHIPPED | `pub use search::{gpu_searchsorted_f32, gpu_searchsorted_f64} in lib.rs`; consumer `ferrotorch_core::ops::search::searchsorted` CUDA branch |
+//! | REQ-4 (dispatch wiring) | SHIPPED | `CudaBackendImpl::searchsorted_1d in backend_impl.rs` dispatches `match dtype { F32, F64, F16, BF16 }` |
+//! | REQ-5 (re-export + consumer) | SHIPPED | `pub use search::{gpu_searchsorted_f32, gpu_searchsorted_f64, gpu_searchsorted_f16, gpu_searchsorted_bf16} in lib.rs`; consumer `ferrotorch_core::ops::search::searchsorted` CUDA branch |
 //! | REQ-6 (`gpu_topk_f32`/`_f64`) | SHIPPED | `pub fn gpu_topk_f32`/`_f64 in search.rs` mirror `topk_out_cuda` gather+`sortKeyValueInplace` at `aten/src/ATen/native/cuda/TensorTopK.cpp:97,106`; consumer `CudaBackendImpl::topk_1d in backend_impl.rs` |
 //! | REQ-7 (topk PTX + ABI) | SHIPPED | `TOPK_F32_PTX`/`TOPK_F64_PTX in search.rs` (via `topk_ptx!`) carry the 7-arg ABI; launch site binds args in matching order |
 //! | REQ-8 (topk trait surface) | SHIPPED | `fn topk_1d in gpu_dispatch.rs`; consumer `ops::search::topk` GPU branch |
@@ -302,6 +304,111 @@ DONE:
 }
 ";
 
+// ===========================================================================
+// 16-bit float searchsorted — f16 and bf16 share u16 storage but use distinct
+// decode paths. Both widen each lane to f32 for the comparison predicates,
+// matching PyTorch's CUDA bucketization behavior for half/bfloat16 values.
+// ===========================================================================
+macro_rules! searchsorted_16_ptx {
+    ($entry:literal, $version:literal, $target:literal, $decode_v:literal, $decode_bv:literal) => {
+        concat!(
+            ".version ",
+            $version,
+            "\n.target ",
+            $target,
+            "\n.address_size 64\n\n.visible .entry ",
+            $entry,
+            "(\n",
+            "    .param .u64 vals_ptr,\n",
+            "    .param .u64 bounds_ptr,\n",
+            "    .param .u64 out_ptr,\n",
+            "    .param .u32 n_vals,\n",
+            "    .param .u32 n_bounds,\n",
+            "    .param .u32 right\n",
+            ") {\n",
+            "    .reg .u32 %tid_r, %bid_r, %bdim_r, %t, %nv, %nb, %rt;\n",
+            "    .reg .u32 %lo, %hi, %mid, %half, %mid1, %v_bits, %bv_bits;\n",
+            "    .reg .u64 %vals_p, %bnd_p, %out_p, %off, %addr;\n",
+            "    .reg .b16 %v_h, %bv_h, %zero16;\n",
+            "    .reg .f32 %v, %bv;\n",
+            "    .reg .s64 %res;\n",
+            "    .reg .pred %p_oob, %p_loop, %p_is_right, %p_not_right, %p_adv;\n",
+            "    .reg .pred %p_ge, %p_gt, %p_nge, %p_ngt, %p_a, %p_b;\n\n",
+            "    ld.param.u64 %vals_p, [vals_ptr];\n",
+            "    ld.param.u64 %bnd_p,  [bounds_ptr];\n",
+            "    ld.param.u64 %out_p,  [out_ptr];\n",
+            "    ld.param.u32 %nv,     [n_vals];\n",
+            "    ld.param.u32 %nb,     [n_bounds];\n",
+            "    ld.param.u32 %rt,     [right];\n\n",
+            "    mov.u32 %tid_r,  %tid.x;\n",
+            "    mov.u32 %bid_r,  %ctaid.x;\n",
+            "    mov.u32 %bdim_r, %ntid.x;\n",
+            "    mad.lo.u32 %t, %bid_r, %bdim_r, %tid_r;\n\n",
+            "    setp.ge.u32 %p_oob, %t, %nv;\n",
+            "    @%p_oob bra DONE;\n",
+            "    mov.b16 %zero16, 0;\n\n",
+            "    cvt.u64.u32 %off, %t;\n",
+            "    shl.b64 %off, %off, 1;\n",
+            "    add.u64 %addr, %vals_p, %off;\n",
+            "    ld.global.b16 %v_h, [%addr];\n",
+            $decode_v,
+            "\n\n",
+            "    setp.ne.u32 %p_is_right, %rt, 0;\n",
+            "    setp.eq.u32 %p_not_right, %rt, 0;\n\n",
+            "    mov.u32 %lo, 0;\n",
+            "    mov.u32 %hi, %nb;\n\n",
+            "LOOP:\n",
+            "    setp.ge.u32 %p_loop, %lo, %hi;\n",
+            "    @%p_loop bra STORE;\n\n",
+            "    sub.u32 %half, %hi, %lo;\n",
+            "    shr.u32 %half, %half, 1;\n",
+            "    add.u32 %mid, %lo, %half;\n\n",
+            "    cvt.u64.u32 %off, %mid;\n",
+            "    shl.b64 %off, %off, 1;\n",
+            "    add.u64 %addr, %bnd_p, %off;\n",
+            "    ld.global.b16 %bv_h, [%addr];\n",
+            $decode_bv,
+            "\n\n",
+            "    setp.ge.f32 %p_ge, %bv, %v;\n",
+            "    setp.gt.f32 %p_gt, %bv, %v;\n",
+            "    not.pred %p_nge, %p_ge;\n",
+            "    not.pred %p_ngt, %p_gt;\n",
+            "    and.pred %p_a, %p_is_right, %p_ngt;\n",
+            "    and.pred %p_b, %p_not_right, %p_nge;\n",
+            "    or.pred %p_adv, %p_a, %p_b;\n\n",
+            "    add.u32 %mid1, %mid, 1;\n",
+            "    @%p_adv mov.u32 %lo, %mid1;\n",
+            "    @!%p_adv mov.u32 %hi, %mid;\n",
+            "    bra LOOP;\n\n",
+            "STORE:\n",
+            "    cvt.s64.u32 %res, %lo;\n",
+            "    cvt.u64.u32 %off, %t;\n",
+            "    shl.b64 %off, %off, 3;\n",
+            "    add.u64 %addr, %out_p, %off;\n",
+            "    st.global.s64 [%addr], %res;\n\n",
+            "DONE:\n",
+            "    ret;\n",
+            "}\n"
+        )
+    };
+}
+
+const SEARCHSORTED_F16_PTX: &str = searchsorted_16_ptx!(
+    "searchsorted_f16_kernel",
+    "7.0",
+    "sm_60",
+    "    cvt.f32.f16 %v, %v_h;",
+    "    cvt.f32.f16 %bv, %bv_h;"
+);
+
+const SEARCHSORTED_BF16_PTX: &str = searchsorted_16_ptx!(
+    "searchsorted_bf16_kernel",
+    "7.8",
+    "sm_80",
+    "    mov.b32 %v_bits, {%zero16, %v_h}; mov.b32 %v, %v_bits;",
+    "    mov.b32 %bv_bits, {%zero16, %bv_h}; mov.b32 %bv, %bv_bits;"
+);
+
 /// Launch one of the searchsorted kernels over device-resident value /
 /// boundary slices, returning a fresh `CudaSlice<i64>` of insertion indices.
 ///
@@ -455,6 +562,63 @@ pub fn gpu_searchsorted_f64(
         device,
         SEARCHSORTED_F64_PTX,
         "searchsorted_f64_kernel",
+    )
+}
+
+/// On-device `searchsorted` over an IEEE f16 sorted 1-D boundary buffer.
+///
+/// f16 values are stored as raw `u16` lanes and widened to f32 inside the PTX
+/// kernel before applying the same ordered `!(bv >= v)` / `!(bv > v)`
+/// predicates used by the f32/f64 kernels.
+///
+/// # Errors
+///
+/// See [`gpu_searchsorted_f32`].
+pub fn gpu_searchsorted_f16(
+    values: &CudaSlice<u16>,
+    boundaries: &CudaSlice<u16>,
+    n_vals: usize,
+    n_bounds: usize,
+    right: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
+    launch_searchsorted(
+        values,
+        boundaries,
+        n_vals,
+        n_bounds,
+        right,
+        device,
+        SEARCHSORTED_F16_PTX,
+        "searchsorted_f16_kernel",
+    )
+}
+
+/// On-device `searchsorted` over a bfloat16 sorted 1-D boundary buffer.
+///
+/// bf16 values are stored as raw `u16` lanes and widened to f32 by placing the
+/// lane in the high half of a 32-bit float before comparison.
+///
+/// # Errors
+///
+/// See [`gpu_searchsorted_f32`].
+pub fn gpu_searchsorted_bf16(
+    values: &CudaSlice<u16>,
+    boundaries: &CudaSlice<u16>,
+    n_vals: usize,
+    n_bounds: usize,
+    right: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
+    launch_searchsorted(
+        values,
+        boundaries,
+        n_vals,
+        n_bounds,
+        right,
+        device,
+        SEARCHSORTED_BF16_PTX,
+        "searchsorted_bf16_kernel",
     )
 }
 
@@ -2747,6 +2911,7 @@ pub fn gpu_unique_f64(
 mod tests {
     use super::*;
     use crate::transfer::cpu_to_gpu;
+    use half::{bf16, f16};
 
     /// Read a device-resident `CudaSlice<i64>` back to a host `Vec<i64>`,
     /// truncated to its logical length. Only the result indices are read; the
@@ -2894,6 +3059,102 @@ mod tests {
             let got = read_i64(&og, &device);
             assert_eq!(got, cpu_searchsorted_ref(&bounds, &vals, right));
         }
+    }
+
+    #[test]
+    fn searchsorted_f16_nan_inf_ties_match_torch_probe() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let bounds: Vec<u16> = [-2.0, -1.0, 0.0, 0.0, 2.0, f32::INFINITY]
+            .into_iter()
+            .map(|x| f16::from_f32(x).to_bits())
+            .collect();
+        let vals: Vec<u16> = [
+            f32::NEG_INFINITY,
+            -1.0,
+            0.0,
+            1.0,
+            2.0,
+            f32::NAN,
+            f32::INFINITY,
+        ]
+        .into_iter()
+        .map(|x| f16::from_f32(x).to_bits())
+        .collect();
+        let bg = cpu_to_gpu(&bounds, &device).unwrap();
+        let vg = cpu_to_gpu(&vals, &device).unwrap();
+
+        let left = gpu_searchsorted_f16(
+            vg.inner(),
+            bg.inner(),
+            vals.len(),
+            bounds.len(),
+            false,
+            &device,
+        )
+        .unwrap();
+        assert_eq!(read_i64(&left, &device), vec![0, 1, 2, 4, 4, 6, 5]);
+
+        let right = gpu_searchsorted_f16(
+            vg.inner(),
+            bg.inner(),
+            vals.len(),
+            bounds.len(),
+            true,
+            &device,
+        )
+        .unwrap();
+        assert_eq!(read_i64(&right, &device), vec![0, 2, 4, 4, 5, 6, 6]);
+    }
+
+    #[test]
+    fn searchsorted_bf16_nan_inf_ties_match_torch_probe() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let bounds: Vec<u16> = [-2.0, -1.0, 0.0, 0.0, 2.0, f32::INFINITY]
+            .into_iter()
+            .map(|x| bf16::from_f32(x).to_bits())
+            .collect();
+        let vals: Vec<u16> = [
+            f32::NEG_INFINITY,
+            -1.0,
+            0.0,
+            1.0,
+            2.0,
+            f32::NAN,
+            f32::INFINITY,
+        ]
+        .into_iter()
+        .map(|x| bf16::from_f32(x).to_bits())
+        .collect();
+        let bg = cpu_to_gpu(&bounds, &device).unwrap();
+        let vg = cpu_to_gpu(&vals, &device).unwrap();
+
+        let left = gpu_searchsorted_bf16(
+            vg.inner(),
+            bg.inner(),
+            vals.len(),
+            bounds.len(),
+            false,
+            &device,
+        )
+        .unwrap();
+        assert_eq!(read_i64(&left, &device), vec![0, 1, 2, 4, 4, 6, 5]);
+
+        let right = gpu_searchsorted_bf16(
+            vg.inner(),
+            bg.inner(),
+            vals.len(),
+            bounds.len(),
+            true,
+            &device,
+        )
+        .unwrap();
+        assert_eq!(read_i64(&right, &device), vec![0, 2, 4, 4, 5, 6, 6]);
     }
 
     // --- topk ---

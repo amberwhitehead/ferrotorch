@@ -5779,7 +5779,7 @@ pub trait GpuBackend: Send + Sync {
     ///   `boundaries[i] > v` (upper_bound).
     ///
     /// Both `values` and `boundaries` are GPU-resident value buffers of the
-    /// same `DType` (∈ {F32, F64}); the result is an `I64`-tagged handle of
+    /// same `DType` (∈ {F32, F64, F16, BF16}); the result is an `I64`-tagged handle of
     /// `values.len()` indices (PyTorch returns `ScalarType::Long`). Mirrors
     /// `searchsorted_cuda_kernel` (`is_1d_boundaries == true`) in
     /// `aten/src/ATen/native/cuda/Bucketization.cu`. The default impl errors;
