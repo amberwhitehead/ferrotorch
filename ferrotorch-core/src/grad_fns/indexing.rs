@@ -30,11 +30,11 @@
 
 use std::sync::Arc;
 
-use crate::autograd::no_grad::is_grad_enabled;
+use crate::autograd::no_grad::{is_grad_enabled, no_grad};
 use crate::device::Device;
-use crate::dtype::Float;
+use crate::dtype::{DType, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
-use crate::gpu_dispatch::gpu_backend;
+use crate::gpu_dispatch::{GpuBufferHandle, gpu_backend};
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
 
@@ -69,6 +69,137 @@ fn increment_coords(coords: &mut [usize], shape: &[usize]) -> bool {
         coords[d] = 0;
     }
     false
+}
+
+#[inline]
+fn cuda_f32_f64<T: Float>() -> bool {
+    matches!(T::dtype(), DType::F32 | DType::F64)
+}
+
+fn cuda_ordinal(device: Device, op: &'static str) -> FerrotorchResult<usize> {
+    match device {
+        Device::Cuda(ordinal) => Ok(ordinal),
+        got => Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: expected CUDA device, got {got:?}"),
+        }),
+    }
+}
+
+fn expanded_dim_indices(indices: &[usize], outer: usize, inner: usize) -> Vec<usize> {
+    let mut expanded =
+        Vec::with_capacity(outer.saturating_mul(indices.len()).saturating_mul(inner));
+    for _ in 0..outer {
+        for &idx in indices {
+            for _ in 0..inner {
+                expanded.push(idx);
+            }
+        }
+    }
+    expanded
+}
+
+fn upload_expanded_dim_indices(
+    indices: &[usize],
+    outer: usize,
+    inner: usize,
+    ordinal: usize,
+) -> FerrotorchResult<GpuBufferHandle> {
+    let expanded = expanded_dim_indices(indices, outer, inner);
+    crate::ops::indexing::upload_index_i64(&expanded, ordinal)
+}
+
+fn clone_cuda_tensor<T: Float>(
+    input: &Tensor<T>,
+    shape: Vec<usize>,
+) -> FerrotorchResult<Tensor<T>> {
+    let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let input_c = no_grad(|| input.contiguous())?;
+    let handle = backend.clone_buffer(input_c.gpu_handle()?)?;
+    Tensor::from_storage(TensorStorage::gpu(handle), shape, false)
+}
+
+fn scale_cuda_tensor<T: Float>(
+    input: &Tensor<T>,
+    alpha: f64,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let alpha_t = <T as num_traits::NumCast>::from(alpha).ok_or_else(|| {
+        FerrotorchError::InvalidArgument {
+            message: format!("{op}: alpha {alpha} not representable in target dtype"),
+        }
+    })?;
+    let input_c = no_grad(|| input.contiguous())?;
+    if alpha_t == <T as num_traits::One>::one() {
+        return Ok(input_c);
+    }
+
+    let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let handle = match T::dtype() {
+        DType::F32 => backend.scale_f32(
+            input_c.gpu_handle()?,
+            alpha_t
+                .to_f32()
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!("{op}: alpha {alpha} not representable as f32"),
+                })?,
+        )?,
+        DType::F64 => backend.scale_f64(
+            input_c.gpu_handle()?,
+            alpha_t
+                .to_f64()
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!("{op}: alpha {alpha} not representable as f64"),
+                })?,
+        )?,
+        _ => {
+            return Err(FerrotorchError::NotImplementedOnCuda { op });
+        }
+    };
+    Tensor::from_storage(TensorStorage::gpu(handle), input_c.shape().to_vec(), false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gather_dim_cuda<T: Float>(
+    input: &Tensor<T>,
+    indices: &[usize],
+    outer: usize,
+    in_dim_size: usize,
+    out_dim_size: usize,
+    inner: usize,
+    output_shape: Vec<usize>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    if out_dim_size == 0 || outer == 0 || inner == 0 {
+        let ordinal = cuda_ordinal(input.device(), op)?;
+        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let empty = backend.alloc_zeros(0, T::dtype(), ordinal)?;
+        return Tensor::from_storage(TensorStorage::gpu(empty), output_shape, false);
+    }
+
+    let input_c = no_grad(|| input.contiguous())?;
+    let ordinal = cuda_ordinal(input_c.device(), op)?;
+    let idx_handle = upload_expanded_dim_indices(indices, outer, inner, ordinal)?;
+    let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let handle = match T::dtype() {
+        DType::F32 => backend.gather_dim_f32(
+            input_c.gpu_handle()?,
+            &idx_handle,
+            outer,
+            in_dim_size,
+            out_dim_size,
+            inner,
+        )?,
+        DType::F64 => backend.gather_dim_f64(
+            input_c.gpu_handle()?,
+            &idx_handle,
+            outer,
+            in_dim_size,
+            out_dim_size,
+            inner,
+        )?,
+        _ => return Err(FerrotorchError::NotImplementedOnCuda { op }),
+    };
+    Tensor::from_storage(TensorStorage::gpu(handle), output_shape, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1942,11 +2073,11 @@ pub fn where_cond_bcast<T: Float>(
 // from other tensors on cuda:0 (...)`; the all-same-device forms return
 // outputs on that device and deliver gradients on the leaves' devices.
 // ferrotorch surfaces the structured `DeviceMismatch` equivalent at entry
-// (R-LOUD-1) and preserves residency on the way out: `take`/`put` run the
-// dim-aware CUDA kernels (flat == outer=1/inner=1), while `scatter_reduce`/
-// `index_add`/`index_copy` (and non-f32/f64 `masked_scatter`) perform a
-// DOCUMENTED host round trip and re-upload the result (R-LOUD-2; see each
-// op's doc-comment).
+// (R-LOUD-1) and preserves residency where kernels exist: `take`/`put` run
+// dim-aware CUDA kernels for f32/f64 flat gathers/scatters, and `index_add`/
+// `index_copy` run resident f32/f64 dim-aware scatter paths. Remaining
+// unsupported CUDA dtype/operation combinations surface `NotImplementedOnCuda`
+// rather than silently detouring through host code; see each op's doc-comment.
 // ---------------------------------------------------------------------------
 
 /// Strict same-device operand check (CORE-048 / #1742). `expected` is the
@@ -2806,14 +2937,13 @@ fn apply_reduce<T: Float>(mode: ScatterReduce, a: T, b: T) -> T {
 ///   0` the erase is skipped, so the equality check `self_sizes == []`
 ///   fails immediately. Caller passes `accept_0d_source: false`.
 ///
-/// - **`index_copy`** ACCEPTS 0-d source on N-D self — the upstream meta at
-///   `:285-300` only errors when `source.dim() == 0 && numIndices != 1`;
-///   the dimensionality-mismatch check at `:291-300` explicitly excludes
-///   the `source.dim() == 0` case. Live oracle:
+/// - **`index_copy`** accepts 0-d source only when the destination slice is
+///   scalar (`self.dim() == 1`) and `numIndices == 1`; 2-D+ destinations are
+///   rejected because the destination slice has non-empty shape. Live oracle:
 ///   `torch.tensor([1.,2.,3.,4.]).index_copy(0, t([1]), t(99.))` ->
-///   `tensor([1., 99., 3., 4.])` (broadcasts the scalar). Caller passes
-///   `accept_0d_source: true`; index_copy's main loop reads the scalar
-///   source element once per index slot.
+///   `tensor([1., 99., 3., 4.])`, while a 2-D destination with scalar source
+///   raises "Source/destination tensor must have same slice shapes".
+///   Caller passes `accept_0d_source: true`.
 ///
 /// Validates:
 /// 1. `dim` ∈ `[-input.ndim, input.ndim)` and normalizes to non-negative.
@@ -2828,8 +2958,8 @@ fn apply_reduce<T: Float>(mode: ScatterReduce, a: T, b: T) -> T {
 /// 5. `source.dim() == 0 || self.dim() == 0 || self_sizes-dim ==
 ///    source_sizes-dim` — strict shape match on the non-dim axes.
 /// 6. 0-d `source` on N-D `self` with N >= 1: REJECTED when
-///    `accept_0d_source = false` (index_add); ACCEPTED with `n_indices ==
-///    1` when `accept_0d_source = true` (index_copy).
+///    `accept_0d_source = false` (index_add); accepted only for 1-D
+///    `index_copy` with `n_indices == 1`.
 ///
 /// Returns `(dim_usize, idx_usize)` where `idx_usize` is the validated
 /// non-negative index vector (length == `index.numel()`).
@@ -2924,12 +3054,11 @@ fn strict_index_add_copy_validate<T: Float>(
     //   - index_add: rejected (the conditional erase at `:406` is skipped,
     //     so self_sizes stays non-empty and the `self_sizes == source_sizes`
     //     equality at `:410-415` fails).
-    //   - index_copy: ACCEPTED — upstream meta at `:285-300` only errors when
-    //     `source.dim() == 0 && numIndices != 1`; the dimensionality-match
-    //     check at `:291-300` explicitly excludes the `source.dim() == 0`
-    //     case (`source.dim() != 0 && self.dim() != 0`). The forward then
-    //     broadcasts the scalar source per index slot.
-    if source_ndim == 0 && ndim > 0 && n_indices > 0 {
+    //   - index_copy: accepted only when the destination slice is scalar
+    //     (`self.dim() == 1`) and `numIndices == 1`; PyTorch rejects scalar
+    //     source for 2-D+ destinations because the destination slice has
+    //     non-empty shape.
+    if source_ndim == 0 && ndim > 0 {
         if !accept_0d_source {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
@@ -2939,9 +3068,9 @@ fn strict_index_add_copy_validate<T: Float>(
                 ),
             });
         }
-        // accept_0d_source (index_copy): the 0-d source contract only allows
-        // `numIndices == 1` per upstream `:285-290`:
-        //   if (source.dim() == 0 && numIndices != 1) error
+        // accept_0d_source (index_copy): the 0-d source contract requires one
+        // index and a scalar destination slice. Live PyTorch 2.11 rejects a
+        // scalar source with empty index, and rejects 2-D+ destination slices.
         if n_indices != 1 {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
@@ -2950,7 +3079,15 @@ fn strict_index_add_copy_validate<T: Float>(
                 ),
             });
         }
-        // 0-d source on N-D self, n_indices == 1: validated. Skip the
+        if ndim != 1 {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "{op_name}: source tensor shape must match destination slice shape. \
+                     Got self.shape = {input_shape:?} source.shape = {source_shape:?}"
+                ),
+            });
+        }
+        // 0-d source on 1-D self, n_indices == 1: validated. Skip the
         // remaining non-dim shape walk below (source has no non-dim axes).
         return Ok((dim_usize, idx_usize));
     }
@@ -3042,16 +3179,21 @@ impl<T: Float> GradFn<T> for IndexAddBackward<T> {
         }
         let input_shape = self.input.shape();
         let ndim = input_shape.len();
+        let gpu_fast = grad_output.is_cuda() && cuda_f32_f64::<T>();
 
         // grad for input: identity.
         let grad_input = if self.input.requires_grad() {
-            let go = grad_output.data_vec()?;
-            Some(Tensor::from_storage(
-                // CORE-048 (#1742): gradient on the input leaf's device.
-                TensorStorage::on_device(go, self.input.device())?,
-                input_shape.to_vec(),
-                false,
-            )?)
+            if gpu_fast {
+                Some(clone_cuda_tensor(grad_output, input_shape.to_vec())?)
+            } else {
+                let go = grad_output.data_vec()?;
+                Some(Tensor::from_storage(
+                    // CORE-048 (#1742): gradient on the input leaf's device.
+                    TensorStorage::on_device(go, self.input.device())?,
+                    input_shape.to_vec(),
+                    false,
+                )?)
+            }
         } else {
             None
         };
@@ -3061,58 +3203,88 @@ impl<T: Float> GradFn<T> for IndexAddBackward<T> {
         // at index positions, multiply by alpha. For 0-d source we copy the
         // single scalar at index[0] (upstream squeeze-on-zero-d path).
         let grad_source = if self.source.requires_grad() {
-            let go = grad_output.data_vec()?;
             let source_shape = self.source.shape();
-            let alpha_t = <T as num_traits::NumCast>::from(self.alpha).ok_or_else(|| {
-                FerrotorchError::InvalidArgument {
-                    message: format!(
-                        "IndexAddBackward: alpha {} not representable in target dtype",
-                        self.alpha
-                    ),
-                }
-            })?;
-            let gs = if ndim == 0 || source_shape.is_empty() {
-                // 0-d input or 0-d source: scalar copy of grad_output[0] * alpha.
-                let v = if go.is_empty() {
-                    <T as num_traits::Zero>::zero()
+            if gpu_fast {
+                let gathered = if ndim == 0 || source_shape.is_empty() {
+                    clone_cuda_tensor(grad_output, source_shape.to_vec())?
                 } else {
-                    go[0] * alpha_t
+                    let outer: usize = input_shape[..self.dim].iter().product();
+                    let inner: usize = input_shape[self.dim + 1..].iter().product();
+                    let in_dim_size = input_shape[self.dim];
+                    let src_dim_size = if source_shape.len() == ndim {
+                        source_shape[self.dim]
+                    } else {
+                        self.index.len()
+                    };
+                    gather_dim_cuda(
+                        grad_output,
+                        &self.index,
+                        outer,
+                        in_dim_size,
+                        src_dim_size,
+                        inner,
+                        source_shape.to_vec(),
+                        "IndexAddBackward",
+                    )?
                 };
-                vec![v]
+                Some(scale_cuda_tensor(
+                    &gathered,
+                    self.alpha,
+                    "IndexAddBackward",
+                )?)
             } else {
-                let outer: usize = input_shape[..self.dim].iter().product();
-                let inner: usize = input_shape[self.dim + 1..].iter().product();
-                let in_dim_size = input_shape[self.dim];
-                let src_dim_size = if source_shape.len() == ndim {
-                    source_shape[self.dim]
+                let go = grad_output.data_vec()?;
+                let alpha_t = <T as num_traits::NumCast>::from(self.alpha).ok_or_else(|| {
+                    FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "IndexAddBackward: alpha {} not representable in target dtype",
+                            self.alpha
+                        ),
+                    }
+                })?;
+                let gs = if ndim == 0 || source_shape.is_empty() {
+                    // 0-d input or 0-d source: scalar copy of grad_output[0] * alpha.
+                    let v = if go.is_empty() {
+                        <T as num_traits::Zero>::zero()
+                    } else {
+                        go[0] * alpha_t
+                    };
+                    vec![v]
                 } else {
-                    self.index.len()
-                };
-                let src_numel = if source_shape.is_empty() {
-                    1
-                } else {
-                    source_shape.iter().product::<usize>()
-                };
-                let mut out = vec![<T as num_traits::Zero>::zero(); src_numel];
-                // gather: source[o, i, k] = grad_output[o, index[i], k] * alpha
-                for o in 0..outer {
-                    for i in 0..src_dim_size.min(self.index.len()) {
-                        let dst_i = self.index[i];
-                        let go_base = o * in_dim_size * inner + dst_i * inner;
-                        let src_base = o * src_dim_size * inner + i * inner;
-                        for k in 0..inner {
-                            out[src_base + k] = go[go_base + k] * alpha_t;
+                    let outer: usize = input_shape[..self.dim].iter().product();
+                    let inner: usize = input_shape[self.dim + 1..].iter().product();
+                    let in_dim_size = input_shape[self.dim];
+                    let src_dim_size = if source_shape.len() == ndim {
+                        source_shape[self.dim]
+                    } else {
+                        self.index.len()
+                    };
+                    let src_numel = if source_shape.is_empty() {
+                        1
+                    } else {
+                        source_shape.iter().product::<usize>()
+                    };
+                    let mut out = vec![<T as num_traits::Zero>::zero(); src_numel];
+                    // gather: source[o, i, k] = grad_output[o, index[i], k] * alpha
+                    for o in 0..outer {
+                        for i in 0..src_dim_size.min(self.index.len()) {
+                            let dst_i = self.index[i];
+                            let go_base = o * in_dim_size * inner + dst_i * inner;
+                            let src_base = o * src_dim_size * inner + i * inner;
+                            for k in 0..inner {
+                                out[src_base + k] = go[go_base + k] * alpha_t;
+                            }
                         }
                     }
-                }
-                out
-            };
-            Some(Tensor::from_storage(
-                // CORE-048 (#1742): gradient on the source leaf's device.
-                TensorStorage::on_device(gs, self.source.device())?,
-                source_shape.to_vec(),
-                false,
-            )?)
+                    out
+                };
+                Some(Tensor::from_storage(
+                    // CORE-048 (#1742): gradient on the source leaf's device.
+                    TensorStorage::on_device(gs, self.source.device())?,
+                    source_shape.to_vec(),
+                    false,
+                )?)
+            }
         } else {
             None
         };
@@ -3152,14 +3324,13 @@ impl<T: Float> GradFn<T> for IndexAddBackward<T> {
 /// `index` and `source` must live on `input`'s device — a mix returns
 /// [`FerrotorchError::DeviceMismatch`] (torch: "Expected all tensors to be
 /// on the same device, but got index is on cpu, different from other
-/// tensors on cuda:0"). For CUDA operands the op is an EXPLICIT host round
-/// trip (R-LOUD-2): the index downloads for value validation, the operands
-/// download via `data_vec`, the accumulation runs on host (identical to the
-/// CPU path), and the result re-uploads to `input`'s device (no
-/// `index_add` kernel in the backend trait; the expanded-index
-/// `scatter_add_dim_*` composition additionally needs an on-device alpha
-/// scale — kernel work tracked in #1954, the residency contract holds
-/// either way). Gradients are delivered on the leaves' devices.
+/// tensors on cuda:0"). CUDA f32/f64 operands run resident: source is
+/// alpha-scaled on-device when needed, the 1-D index is expanded to the
+/// dim-aware kernel layout, and `scatter_add_dim_*` accumulates without
+/// downloading input/source values. Unsupported CUDA dtypes return
+/// `NotImplementedOnCuda` instead of falling through to a host walk.
+/// Gradients are delivered on the leaves' devices; f32/f64 CUDA backward uses
+/// resident clone/gather/scale kernels.
 pub fn index_add<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -3170,8 +3341,8 @@ pub fn index_add<T: Float>(
     // CORE-048 (#1742): strict same-device operands at entry.
     same_device(input.device(), index.device())?;
     same_device(input.device(), source.device())?;
-    // Host copy of a CUDA index for value validation (part of the documented
-    // round trip above; the same-device check has already passed).
+    // CUDA index values are copied to host for bounds/shape validation; tensor
+    // payloads stay resident on the f32/f64 CUDA fast path.
     let index_host;
     let index: &IntTensor<i64> = if index.is_cuda() {
         index_host = index.to(Device::Cpu)?;
@@ -3220,17 +3391,15 @@ pub fn index_add<T: Float>(
                 ),
             });
         }
-        let scalar_val = input.data_vec()?[0];
         let alpha_t = <T as num_traits::NumCast>::from(alpha).ok_or_else(|| {
             FerrotorchError::InvalidArgument {
                 message: format!("index_add: alpha {alpha} not representable"),
             }
         })?;
-        let src_data = source.data_vec()?;
         // Upstream requires `numel == 1` for source.dim() == 0. For 0-d
         // self + 0-d source: index must be 1-element.
         let n_indices = index.numel();
-        if n_indices != 1 && n_indices != 0 {
+        if n_indices != 1 {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
                     "index_add: Number of indices ({n_indices}) should be equal to \
@@ -3238,7 +3407,6 @@ pub fn index_add<T: Float>(
                 ),
             });
         }
-        let mut acc = scalar_val;
         let mut saved_index: Vec<usize> = Vec::new();
         for v in index.data()? {
             let i_raw = v.to_i64();
@@ -3255,14 +3423,47 @@ pub fn index_add<T: Float>(
                     size: 1,
                 });
             }
-            let src_v = if src_data.is_empty() {
-                <T as num_traits::Zero>::zero()
-            } else {
-                src_data[0]
-            };
-            acc += alpha_t * src_v;
             saved_index.push(0);
         }
+
+        if input.is_cuda() || source.is_cuda() {
+            if !cuda_f32_f64::<T>() {
+                return Err(FerrotorchError::NotImplementedOnCuda { op: "index_add" });
+            }
+            let input_c = no_grad(|| input.contiguous())?;
+            let source_c = no_grad(|| source.contiguous())?;
+            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let handle = match T::dtype() {
+                DType::F32 => {
+                    backend.add_scaled_f32(input_c.gpu_handle()?, source_c.gpu_handle()?, alpha)?
+                }
+                DType::F64 => {
+                    backend.add_scaled_f64(input_c.gpu_handle()?, source_c.gpu_handle()?, alpha)?
+                }
+                _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "index_add" }),
+            };
+            let storage = TensorStorage::gpu(handle);
+            if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {
+                let grad_fn = Arc::new(IndexAddBackward {
+                    input: input.clone(),
+                    source: source.clone(),
+                    dim: 0,
+                    index: saved_index,
+                    alpha,
+                });
+                return Tensor::from_operation(storage, vec![], grad_fn);
+            }
+            return Tensor::from_storage(storage, vec![], false);
+        }
+
+        let scalar_val = input.data_vec()?[0];
+        let src_data = source.data_vec()?;
+        let src_v = if src_data.is_empty() {
+            <T as num_traits::Zero>::zero()
+        } else {
+            src_data[0]
+        };
+        let acc = scalar_val + alpha_t * src_v;
         // CORE-048 (#1742): result on input's device.
         let storage = TensorStorage::on_device(vec![acc], input.device())?;
         if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {
@@ -3294,8 +3495,6 @@ pub fn index_add<T: Float>(
 
     let outer: usize = input_shape[..dim_usize].iter().product();
     let inner: usize = input_shape[dim_usize + 1..].iter().product();
-    let mut out = input.data_vec()?;
-    let src_data = source.data_vec()?;
     let source_shape = source.shape();
 
     // Post-validate: src_dim_size == idx_usize.len() (strict check ensured
@@ -3309,6 +3508,63 @@ pub fn index_add<T: Float>(
     } else {
         source_shape[dim_usize]
     };
+
+    if input.is_cuda() && source.is_cuda() && cuda_f32_f64::<T>() {
+        let output_shape = input_shape.to_vec();
+        let input_c = no_grad(|| input.contiguous())?;
+        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = if idx_usize.is_empty() || outer == 0 || inner == 0 || input.numel() == 0 {
+            backend.clone_buffer(input_c.gpu_handle()?)?
+        } else {
+            let source_c = no_grad(|| source.contiguous())?;
+            let source_scaled = if alpha_t == <T as num_traits::One>::one() {
+                source_c
+            } else {
+                scale_cuda_tensor(&source_c, alpha, "index_add")?
+            };
+            let ordinal = cuda_ordinal(input_c.device(), "index_add")?;
+            let idx_handle = upload_expanded_dim_indices(&idx_usize, outer, inner, ordinal)?;
+            match T::dtype() {
+                DType::F32 => backend.scatter_add_dim_f32(
+                    input_c.gpu_handle()?,
+                    &idx_handle,
+                    source_scaled.gpu_handle()?,
+                    outer,
+                    in_dim_size,
+                    src_dim_size,
+                    inner,
+                )?,
+                DType::F64 => backend.scatter_add_dim_f64(
+                    input_c.gpu_handle()?,
+                    &idx_handle,
+                    source_scaled.gpu_handle()?,
+                    outer,
+                    in_dim_size,
+                    src_dim_size,
+                    inner,
+                )?,
+                _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "index_add" }),
+            }
+        };
+        let storage = TensorStorage::gpu(handle);
+        if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {
+            let grad_fn = Arc::new(IndexAddBackward {
+                input: input.clone(),
+                source: source.clone(),
+                dim: dim_usize,
+                index: idx_usize,
+                alpha,
+            });
+            return Tensor::from_operation(storage, output_shape, grad_fn);
+        }
+        return Tensor::from_storage(storage, output_shape, false);
+    }
+    if input.is_cuda() || source.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "index_add" });
+    }
+
+    let mut out = input.data_vec()?;
+    let src_data = source.data_vec()?;
 
     for o in 0..outer {
         for (i, &dst_i) in idx_usize.iter().enumerate() {
@@ -3386,72 +3642,172 @@ impl<T: Float> GradFn<T> for IndexCopyBackward<T> {
         let input_shape = self.input.shape();
         let ndim = input_shape.len();
         let zero = <T as num_traits::Zero>::zero();
+        let gpu_fast = grad_output.is_cuda() && cuda_f32_f64::<T>();
 
         // grad for input: zero positions the copy overwrote.
         let grad_input = if self.input.requires_grad() {
-            let mut gi = grad_output.data_vec()?;
-            if ndim == 0 {
-                if !self.index.is_empty() {
-                    gi[0] = zero;
+            if gpu_fast {
+                if self.index.is_empty() {
+                    Some(clone_cuda_tensor(grad_output, input_shape.to_vec())?)
+                } else if ndim == 0 {
+                    let ordinal = cuda_ordinal(grad_output.device(), "IndexCopyBackward")?;
+                    let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+                    let handle = match T::dtype() {
+                        DType::F32 => backend.fill_f32(1, 0.0, ordinal)?,
+                        DType::F64 => backend.fill_f64(1, 0.0, ordinal)?,
+                        _ => {
+                            return Err(FerrotorchError::NotImplementedOnCuda {
+                                op: "IndexCopyBackward",
+                            });
+                        }
+                    };
+                    Some(Tensor::from_storage(
+                        TensorStorage::gpu(handle),
+                        input_shape.to_vec(),
+                        false,
+                    )?)
+                } else {
+                    let outer: usize = input_shape[..self.dim].iter().product();
+                    let inner: usize = input_shape[self.dim + 1..].iter().product();
+                    let dim_size = input_shape[self.dim];
+                    let ordinal = cuda_ordinal(grad_output.device(), "IndexCopyBackward")?;
+                    let idx_handle =
+                        upload_expanded_dim_indices(&self.index, outer, inner, ordinal)?;
+                    let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+                    let go_c = no_grad(|| grad_output.contiguous())?;
+                    let handle = match T::dtype() {
+                        DType::F32 => backend.scatter_value_dim_f32(
+                            go_c.gpu_handle()?,
+                            &idx_handle,
+                            0.0,
+                            outer,
+                            dim_size,
+                            self.index.len(),
+                            inner,
+                        )?,
+                        DType::F64 => backend.scatter_value_dim_f64(
+                            go_c.gpu_handle()?,
+                            &idx_handle,
+                            0.0,
+                            outer,
+                            dim_size,
+                            self.index.len(),
+                            inner,
+                        )?,
+                        _ => {
+                            return Err(FerrotorchError::NotImplementedOnCuda {
+                                op: "IndexCopyBackward",
+                            });
+                        }
+                    };
+                    Some(Tensor::from_storage(
+                        TensorStorage::gpu(handle),
+                        input_shape.to_vec(),
+                        false,
+                    )?)
                 }
             } else {
-                let outer: usize = input_shape[..self.dim].iter().product();
-                let inner: usize = input_shape[self.dim + 1..].iter().product();
-                let dim_size = input_shape[self.dim];
-                for o in 0..outer {
-                    for &idx in &self.index {
-                        let base = o * dim_size * inner + idx * inner;
-                        for k in 0..inner {
-                            gi[base + k] = zero;
+                let mut gi = grad_output.data_vec()?;
+                if ndim == 0 {
+                    if !self.index.is_empty() {
+                        gi[0] = zero;
+                    }
+                } else {
+                    let outer: usize = input_shape[..self.dim].iter().product();
+                    let inner: usize = input_shape[self.dim + 1..].iter().product();
+                    let dim_size = input_shape[self.dim];
+                    for o in 0..outer {
+                        for &idx in &self.index {
+                            let base = o * dim_size * inner + idx * inner;
+                            for k in 0..inner {
+                                gi[base + k] = zero;
+                            }
                         }
                     }
                 }
+                Some(Tensor::from_storage(
+                    // CORE-048 (#1742): gradient on the input leaf's device.
+                    TensorStorage::on_device(gi, self.input.device())?,
+                    input_shape.to_vec(),
+                    false,
+                )?)
             }
-            Some(Tensor::from_storage(
-                // CORE-048 (#1742): gradient on the input leaf's device.
-                TensorStorage::on_device(gi, self.input.device())?,
-                input_shape.to_vec(),
-                false,
-            )?)
         } else {
             None
         };
 
         // grad for source: gather grad_output at the index-mapped positions.
         let grad_source = if self.source.requires_grad() {
-            let go = grad_output.data_vec()?;
             let source_shape = self.source.shape();
-            let gs = if ndim == 0 || source_shape.is_empty() {
-                let v = if go.is_empty() { zero } else { go[0] };
-                vec![v]
-            } else {
-                let outer: usize = input_shape[..self.dim].iter().product();
-                let inner: usize = input_shape[self.dim + 1..].iter().product();
-                let in_dim_size = input_shape[self.dim];
-                let src_dim_size = if source_shape.len() == ndim {
-                    source_shape[self.dim]
+            if gpu_fast {
+                let gathered = if ndim == 0 {
+                    clone_cuda_tensor(grad_output, source_shape.to_vec())?
+                } else if source_shape.is_empty() {
+                    gather_dim_cuda(
+                        grad_output,
+                        &self.index,
+                        1,
+                        input_shape[self.dim],
+                        1,
+                        1,
+                        source_shape.to_vec(),
+                        "IndexCopyBackward",
+                    )?
                 } else {
-                    self.index.len()
+                    let outer: usize = input_shape[..self.dim].iter().product();
+                    let inner: usize = input_shape[self.dim + 1..].iter().product();
+                    let in_dim_size = input_shape[self.dim];
+                    let src_dim_size = if source_shape.len() == ndim {
+                        source_shape[self.dim]
+                    } else {
+                        self.index.len()
+                    };
+                    gather_dim_cuda(
+                        grad_output,
+                        &self.index,
+                        outer,
+                        in_dim_size,
+                        src_dim_size,
+                        inner,
+                        source_shape.to_vec(),
+                        "IndexCopyBackward",
+                    )?
                 };
-                let src_numel = source_shape.iter().product::<usize>();
-                let mut out = vec![zero; src_numel];
-                for o in 0..outer {
-                    for i in 0..src_dim_size.min(self.index.len()) {
-                        let dst_i = self.index[i];
-                        let go_base = o * in_dim_size * inner + dst_i * inner;
-                        let src_base = o * src_dim_size * inner + i * inner;
-                        out[src_base..src_base + inner]
-                            .copy_from_slice(&go[go_base..go_base + inner]);
+                Some(gathered)
+            } else {
+                let go = grad_output.data_vec()?;
+                let gs = if ndim == 0 || source_shape.is_empty() {
+                    let v = if go.is_empty() { zero } else { go[0] };
+                    vec![v]
+                } else {
+                    let outer: usize = input_shape[..self.dim].iter().product();
+                    let inner: usize = input_shape[self.dim + 1..].iter().product();
+                    let in_dim_size = input_shape[self.dim];
+                    let src_dim_size = if source_shape.len() == ndim {
+                        source_shape[self.dim]
+                    } else {
+                        self.index.len()
+                    };
+                    let src_numel = source_shape.iter().product::<usize>();
+                    let mut out = vec![zero; src_numel];
+                    for o in 0..outer {
+                        for i in 0..src_dim_size.min(self.index.len()) {
+                            let dst_i = self.index[i];
+                            let go_base = o * in_dim_size * inner + dst_i * inner;
+                            let src_base = o * src_dim_size * inner + i * inner;
+                            out[src_base..src_base + inner]
+                                .copy_from_slice(&go[go_base..go_base + inner]);
+                        }
                     }
-                }
-                out
-            };
-            Some(Tensor::from_storage(
-                // CORE-048 (#1742): gradient on the source leaf's device.
-                TensorStorage::on_device(gs, self.source.device())?,
-                source_shape.to_vec(),
-                false,
-            )?)
+                    out
+                };
+                Some(Tensor::from_storage(
+                    // CORE-048 (#1742): gradient on the source leaf's device.
+                    TensorStorage::on_device(gs, self.source.device())?,
+                    source_shape.to_vec(),
+                    false,
+                )?)
+            }
         } else {
             None
         };
@@ -3489,14 +3845,12 @@ impl<T: Float> GradFn<T> for IndexCopyBackward<T> {
 /// `index` and `source` must live on `input`'s device — a mix returns
 /// [`FerrotorchError::DeviceMismatch`] (torch: "Expected all tensors to be
 /// on the same device, but got source is on cpu, different from other
-/// tensors on cuda:0"). For CUDA operands the op is an EXPLICIT host round
-/// trip (R-LOUD-2): the index downloads for value validation, the operands
-/// download via `data_vec`, the copy runs on host (identical to the CPU
-/// path), and the result re-uploads to `input`'s device (no `index_copy`
-/// kernel in the backend trait; the expanded-index `scatter_dim_*`
-/// composition needs 0-d-source broadcast glue — kernel work tracked in
-/// #1954, the residency contract holds either way). Gradients are delivered
-/// on the leaves' devices.
+/// tensors on cuda:0"). CUDA f32/f64 operands run resident via the existing
+/// dim-aware `scatter_dim_*` kernels after expanding the 1-D index to the
+/// per-element kernel layout. Unsupported CUDA dtypes return
+/// `NotImplementedOnCuda` instead of falling through to a host walk.
+/// Gradients are delivered on the leaves' devices; f32/f64 CUDA backward uses
+/// resident scatter-zero/gather kernels.
 pub fn index_copy<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -3506,8 +3860,8 @@ pub fn index_copy<T: Float>(
     // CORE-048 (#1742): strict same-device operands at entry.
     same_device(input.device(), index.device())?;
     same_device(input.device(), source.device())?;
-    // Host copy of a CUDA index for value validation (part of the documented
-    // round trip above; the same-device check has already passed).
+    // CUDA index values are copied to host for bounds/shape validation; tensor
+    // payloads stay resident on the f32/f64 CUDA fast path.
     let index_host;
     let index: &IntTensor<i64> = if index.is_cuda() {
         index_host = index.to(Device::Cpu)?;
@@ -3549,17 +3903,24 @@ pub fn index_copy<T: Float>(
             });
         }
         let n_indices = index.numel();
-        if source_shape.is_empty() && n_indices != 1 && n_indices != 0 {
+        if source_shape.is_empty() {
+            if n_indices != 1 {
+                return Err(FerrotorchError::ShapeMismatch {
+                    message: format!(
+                        "index_copy: When source is scalar, index should have one element \
+                         (got {n_indices})"
+                    ),
+                });
+            }
+        } else if source_shape.len() == 1 && n_indices != source_shape[0] {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
-                    "index_copy: When source is scalar, index should have one element \
-                     (got {n_indices})"
+                    "index_copy: Number of indices ({n_indices}) should be equal to \
+                     source.size(dim) ({})",
+                    source_shape[0]
                 ),
             });
         }
-        let scalar_val = input.data_vec()?[0];
-        let src_data = source.data_vec()?;
-        let mut result_val = scalar_val;
         let mut saved_index: Vec<usize> = Vec::new();
         for v in index.data()? {
             let i_raw = v.to_i64();
@@ -3575,13 +3936,41 @@ pub fn index_copy<T: Float>(
                     size: 1,
                 });
             }
-            result_val = if src_data.is_empty() {
-                <T as num_traits::Zero>::zero()
-            } else {
-                src_data[0]
-            };
             saved_index.push(0);
         }
+
+        if input.is_cuda() || source.is_cuda() {
+            if !cuda_f32_f64::<T>() {
+                return Err(FerrotorchError::NotImplementedOnCuda { op: "index_copy" });
+            }
+            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let handle = if saved_index.is_empty() {
+                let input_c = no_grad(|| input.contiguous())?;
+                backend.clone_buffer(input_c.gpu_handle()?)?
+            } else {
+                let source_c = no_grad(|| source.contiguous())?;
+                backend.clone_buffer(source_c.gpu_handle()?)?
+            };
+            let storage = TensorStorage::gpu(handle);
+            if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {
+                let grad_fn = Arc::new(IndexCopyBackward {
+                    input: input.clone(),
+                    source: source.clone(),
+                    dim: 0,
+                    index: saved_index,
+                });
+                return Tensor::from_operation(storage, vec![], grad_fn);
+            }
+            return Tensor::from_storage(storage, vec![], false);
+        }
+
+        let scalar_val = input.data_vec()?[0];
+        let src_data = source.data_vec()?;
+        let result_val = if saved_index.is_empty() || src_data.is_empty() {
+            scalar_val
+        } else {
+            src_data[0]
+        };
         // CORE-048 (#1742): result on input's device.
         let storage = TensorStorage::on_device(vec![result_val], input.device())?;
         if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {
@@ -3606,9 +3995,63 @@ pub fn index_copy<T: Float>(
     let in_dim_size = input_shape[dim_usize];
     let outer: usize = input_shape[..dim_usize].iter().product();
     let inner: usize = input_shape[dim_usize + 1..].iter().product();
+    let source_shape = source.shape();
+    let src_dim_size = if source_shape.is_empty() {
+        1
+    } else {
+        source_shape[dim_usize]
+    };
+
+    if input.is_cuda() && source.is_cuda() && cuda_f32_f64::<T>() {
+        let output_shape = input_shape.to_vec();
+        let input_c = no_grad(|| input.contiguous())?;
+        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = if idx_usize.is_empty() || outer == 0 || inner == 0 || input.numel() == 0 {
+            backend.clone_buffer(input_c.gpu_handle()?)?
+        } else {
+            let source_c = no_grad(|| source.contiguous())?;
+            let ordinal = cuda_ordinal(input_c.device(), "index_copy")?;
+            let idx_handle = upload_expanded_dim_indices(&idx_usize, outer, inner, ordinal)?;
+            match T::dtype() {
+                DType::F32 => backend.scatter_dim_f32(
+                    input_c.gpu_handle()?,
+                    &idx_handle,
+                    source_c.gpu_handle()?,
+                    outer,
+                    in_dim_size,
+                    src_dim_size,
+                    inner,
+                )?,
+                DType::F64 => backend.scatter_dim_f64(
+                    input_c.gpu_handle()?,
+                    &idx_handle,
+                    source_c.gpu_handle()?,
+                    outer,
+                    in_dim_size,
+                    src_dim_size,
+                    inner,
+                )?,
+                _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "index_copy" }),
+            }
+        };
+        let storage = TensorStorage::gpu(handle);
+        if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {
+            let grad_fn = Arc::new(IndexCopyBackward {
+                input: input.clone(),
+                source: source.clone(),
+                dim: dim_usize,
+                index: idx_usize,
+            });
+            return Tensor::from_operation(storage, output_shape, grad_fn);
+        }
+        return Tensor::from_storage(storage, output_shape, false);
+    }
+    if input.is_cuda() || source.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "index_copy" });
+    }
+
     let mut out = input.data_vec()?;
     let src_data = source.data_vec()?;
-    let source_shape = source.shape();
 
     if source_shape.is_empty() {
         // 0-d source on N-D self: broadcast the single scalar to each
@@ -3632,7 +4075,6 @@ pub fn index_copy<T: Float>(
             }
         }
     } else {
-        let src_dim_size = source_shape[dim_usize];
         for o in 0..outer {
             for (i, &dst_i) in idx_usize.iter().enumerate() {
                 let dst_base = o * in_dim_size * inner + dst_i * inner;
