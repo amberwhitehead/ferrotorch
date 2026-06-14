@@ -1,18 +1,13 @@
-//! Red regression tests for CORE-151 (#1845) — CLASS-V, High.
+//! Regression tests for CORE-151 (#1845) — CLASS-V, High.
 //!
-//! `split_t`'s GPU fast path (`src/methods.rs`) is gated only on
-//! device / dtype / backend presence — there is no `is_contiguous()`
-//! or `storage_offset() == 0` check. It passes the raw base buffer
-//! (`gpu_handle()`, which points at storage element 0) plus
-//! logical-shape-derived extents to `strided_split_f32`, whose trait
-//! signature carries no source strides and no base offset
-//! (`src/gpu_dispatch.rs`). Calling `.split()` / `.chunk()` on any CUDA
-//! f32 view — a `narrow` (offset != 0), `transpose` / `permute`
-//! (non-contiguous strides) — therefore silently returns chunks
-//! gathered from the wrong elements. The CPU path (via `data_vec`,
-//! which honours view geometry) is correct, so CPU and CUDA disagree
-//! and CUDA is wrong. Same `gpu_handle()`-drops-view-geometry class as
-//! #1657 (fixed in `contiguous_t` only).
+//! `split_t` / `chunk_t` must be PyTorch-style view operations:
+//! metadata-only, storage-sharing, dtype-generic, and resident on the
+//! input device. The old CUDA f32 fast path passed only a raw base
+//! buffer plus logical extents to `strided_split_f32`, so non-zero
+//! storage offsets and non-contiguous strides were dropped. These
+//! probes pin the corrected behavior: the split/chunk outputs preserve
+//! view geometry and only the explicit `.cpu()` readback materializes
+//! the logical values.
 //!
 //! Oracle (R-ORACLE-1(b)): live torch 2.11.0+cu130 on cuda:0
 //! (RTX 3090), 2026-06-11:
@@ -31,7 +26,7 @@
 
 #![cfg(feature = "gpu")]
 
-use std::sync::Once;
+use std::sync::{Arc, Once};
 
 use ferrotorch_core::creation::from_vec;
 use ferrotorch_core::{Device, Tensor};
@@ -82,6 +77,10 @@ fn split_of_cuda_narrow_view_matches_torch() {
             part.is_cuda(),
             "split chunk {i} of a CUDA view must stay on CUDA"
         );
+        assert!(
+            Arc::ptr_eq(v.inner_storage_arc(), part.inner_storage_arc()),
+            "split chunk {i} must share storage with the input view"
+        );
         assert_eq!(part.shape(), &[2, 3], "chunk {i} shape");
         let host = part.cpu().expect("gpu->cpu readback");
         assert_eq!(
@@ -123,6 +122,10 @@ fn chunk_of_cuda_transpose_view_matches_torch() {
         assert!(
             chunk.is_cuda(),
             "chunk {i} of a CUDA view must stay on CUDA"
+        );
+        assert!(
+            Arc::ptr_eq(w.inner_storage_arc(), chunk.inner_storage_arc()),
+            "chunk {i} must share storage with the input view"
         );
         assert_eq!(chunk.shape(), &[3, 4], "chunk {i} shape");
         let host = chunk.cpu().expect("gpu->cpu readback");

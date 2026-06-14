@@ -1452,127 +1452,25 @@ impl<T: Float> CatBackward<T> {
 
 impl<T: Float> GradFn<T> for CatBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        // Packed-buffer gate (CORE-055 / #1749): both consumers below
-        // require a packed offset-0 `grad_output` — the GPU `strided_split_*`
-        // fast path reads the raw base handle (no strides / offset in its
-        // trait signature) and the CPU path reads `data()` (which rejects
-        // non-contiguous tensors). A non-conforming upstream gradient is
-        // staged ONCE via `contiguous()` (device-aware per #1657).
-        let staged_go;
-        let grad_output = if grad_output.is_contiguous() && grad_output.storage_offset() == 0 {
-            grad_output
-        } else {
-            staged_go = crate::autograd::no_grad::no_grad(|| grad_output.contiguous())?;
-            &staged_go
-        };
-
-        // GPU fast path: use strided_split to extract each chunk directly on GPU.
-        if grad_output.is_cuda()
-            && (is_f32::<T>() || is_f64::<T>())
-            && let Some(backend) = crate::gpu_dispatch::gpu_backend()
-        {
-            let go_shape = grad_output.shape();
-            let ndim = go_shape.len();
-            let axis = self.axis;
-            let total_along_axis = go_shape[axis];
-            let inner: usize = if axis + 1 < ndim {
-                go_shape[axis + 1..].iter().product()
-            } else {
-                1
-            };
-            let go_handle = grad_output.gpu_handle()?;
-            let f64_path = is_f64::<T>();
-
-            let mut result = Vec::with_capacity(self.inputs.len());
-            let mut offset = 0usize;
-
-            for (i, &split_size) in self.split_sizes.iter().enumerate() {
-                if !self.inputs[i].requires_grad() {
-                    result.push(None);
-                    offset += split_size;
-                    continue;
-                }
-
-                let chunk_numel = self.inputs[i].numel();
-                let chunk_handle = if f64_path {
-                    backend.strided_split_f64(
-                        go_handle,
-                        total_along_axis,
-                        offset,
-                        split_size,
-                        inner,
-                        chunk_numel,
-                    )?
+        // PyTorch's cat backward slices the incoming gradient. Use the same
+        // metadata-only split views here: dtype/device/layout generic, no CUDA
+        // split kernel, no CPU fallback. The returned gradients are leaf-like
+        // view tensors, so build them under no_grad.
+        let chunks = crate::autograd::no_grad::no_grad(|| {
+            crate::methods::split_t(grad_output, &self.split_sizes, self.axis)
+        })?;
+        Ok(self
+            .inputs
+            .iter()
+            .zip(chunks)
+            .map(|(input, chunk)| {
+                if input.requires_grad() {
+                    Some(chunk)
                 } else {
-                    backend.strided_split_f32(
-                        go_handle,
-                        total_along_axis,
-                        offset,
-                        split_size,
-                        inner,
-                        chunk_numel,
-                    )?
-                };
-
-                let grad_tensor = Tensor::from_storage(
-                    TensorStorage::gpu(chunk_handle),
-                    self.inputs[i].shape().to_vec(),
-                    false,
-                )?;
-                result.push(Some(grad_tensor));
-                offset += split_size;
-            }
-
-            return Ok(result);
-        }
-
-        // CPU path (also serves as fallback for non-f32 or missing backend).
-        let (cpu_go, device) = ensure_cpu(grad_output)?;
-        let grad_data = cpu_go.data()?;
-        let out_shape = cpu_go.shape();
-        let ndim = out_shape.len();
-        let axis = self.axis;
-
-        // Compute the product of dimensions before and after the cat axis.
-        let outer: usize = out_shape[..axis].iter().product();
-        let inner: usize = if axis + 1 < ndim {
-            out_shape[axis + 1..].iter().product()
-        } else {
-            1
-        };
-
-        let mut result = Vec::with_capacity(self.inputs.len());
-        let mut offset = 0usize;
-
-        for (i, split_size) in self.split_sizes.iter().enumerate() {
-            if !self.inputs[i].requires_grad() {
-                result.push(None);
-                offset += split_size * inner;
-                continue;
-            }
-
-            let chunk_numel: usize = self.inputs[i].numel();
-            let mut grad_chunk = vec![<T as num_traits::Zero>::zero(); chunk_numel];
-
-            // Copy the appropriate slice from grad_output for each "outer" row.
-            for o in 0..outer {
-                let src_row_start = o * out_shape[axis] * inner + offset;
-                let dst_row_start = o * split_size * inner;
-                let row_len = split_size * inner;
-                grad_chunk[dst_row_start..dst_row_start + row_len]
-                    .copy_from_slice(&grad_data[src_row_start..src_row_start + row_len]);
-            }
-
-            let grad_tensor = Tensor::from_storage(
-                TensorStorage::cpu(grad_chunk),
-                self.inputs[i].shape().to_vec(),
-                false,
-            )?;
-            result.push(Some(restore_device(grad_tensor, device)?));
-            offset += split_size * inner;
-        }
-
-        Ok(result)
+                    None
+                }
+            })
+            .collect())
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {

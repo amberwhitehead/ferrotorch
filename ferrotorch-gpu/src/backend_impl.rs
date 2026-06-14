@@ -5700,7 +5700,24 @@ impl GpuBackend for CudaBackendImpl {
         match elem_size {
             2 => {
                 // bf16 / f16 — both stored as `CudaSlice<u16>`.
-                let in_slice = Self::unwrap_buffer_bf16(src)?;
+                if dst.dtype() != src.dtype() {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "strided_cat: source dtype {} does not match destination dtype {}",
+                            src.dtype(),
+                            dst.dtype()
+                        ),
+                    });
+                }
+                let in_slice = match src.dtype() {
+                    DType::BF16 => Self::unwrap_buffer_bf16(src)?,
+                    DType::F16 => Self::unwrap_buffer_f16(src)?,
+                    other => {
+                        return Err(FerrotorchError::InvalidArgument {
+                            message: format!("strided_cat: expected F16/BF16, got {other}"),
+                        });
+                    }
+                };
                 let out_slice = dst.downcast_mut::<cudarc::driver::CudaSlice<u16>>().ok_or(
                     FerrotorchError::InvalidArgument {
                         message: "strided_cat: output is not a 2-byte (u16) buffer".into(),

@@ -1,23 +1,19 @@
-//! Red regression test for the secondary half of CORE-151 (#1845):
-//! a `strided_split_f32` kernel error must fall back to the (documented)
-//! CPU path instead of propagating out of `split_t`.
+//! Regression test for the secondary half of CORE-151 (#1845):
+//! `split_t` must not depend on a CUDA split kernel or demote to a CPU
+//! materialization fallback.
 //!
-//! `split_t`'s CPU branch is documented as "also serves as fallback"
-//! and the methods.rs REQ-10 status line advertises "GPU
-//! `strided_split_f32` + CPU fallback" — but pre-fix the fast path
-//! propagates the kernel `Err` with `?`, so a backend without the
-//! split kernel (or a kernel that fails at launch) turns a computable
-//! `.split()` / `.chunk()` into an error. `contiguous_t` (the #1657
-//! fix) already implements the correct shape: kernel failure falls
-//! through to the host path.
+//! PyTorch's `Tensor.split` returns views. Ferrotorch should therefore
+//! be able to split a CUDA tensor even on a backend with no
+//! `strided_split_f32` implementation, because forward split/chunk is
+//! metadata-only: same storage, adjusted shape/offset/strides, resident
+//! on the original device. Reading a non-zero-offset result back to CPU
+//! may still require `strided_copy`, but the split itself must not call a
+//! split kernel or perform a hidden host round trip.
 //!
 //! This test registers a mock `GpuBackend` whose data plumbing
-//! (`cpu_to_gpu` / `gpu_to_cpu` / `clone_buffer` / `alloc_zeros`)
-//! works but whose kernels — including the defaulted
-//! `strided_split_f32` — return structured errors, exactly like a
-//! conforming foreign backend that has not implemented the split
-//! kernel. Post-fix, `split` on a contiguous mock-CUDA f32 tensor
-//! succeeds via the CPU fallback with torch-correct values.
+//! (`cpu_to_gpu` / `gpu_to_cpu` / `clone_buffer` / `alloc_zeros`) works
+//! but whose kernels return structured errors, exactly like a conforming
+//! foreign backend that has not implemented compute kernels.
 //!
 //! Oracle (R-ORACLE-1(b)): live torch 2.11.0+cu130, 2026-06-11:
 //!
@@ -34,6 +30,7 @@
 use ferrotorch_core::creation::from_vec;
 use ferrotorch_core::gpu_dispatch::{GpuBackend, GpuBufferHandle, register_gpu_backend};
 use ferrotorch_core::{DType, Device, FerrotorchError, FerrotorchResult};
+use std::sync::Arc;
 
 /// Device-side payload: raw element bytes, exactly what a D2H copy returns.
 struct MockBuf {
@@ -436,15 +433,9 @@ fn ensure_mock() {
 }
 
 /// `split` of a contiguous CUDA f32 tensor on a backend whose
-/// `strided_split_f32` errors must succeed via the CPU fallback —
-/// pre-fix the kernel `Err` propagates out of `split_t` and this
-/// `.expect()` fails with "strided_split_f32 GPU op not yet
-/// implemented".
+/// `strided_split_f32` errors must still succeed as metadata-only views.
 #[test]
-// reason: split is pure data movement (no arithmetic) — every element
-// round-trips bit-exactly, so float equality is the right check.
-#[allow(clippy::float_cmp)]
-fn split_falls_back_to_cpu_when_kernel_errors() {
+fn split_returns_cuda_views_without_split_kernel_or_cpu_fallback() {
     ensure_mock();
 
     let data: Vec<f32> = (0..24).map(|v| v as f32).collect();
@@ -455,23 +446,17 @@ fn split_falls_back_to_cpu_when_kernel_errors() {
 
     let parts = x
         .split(&[2, 2], 0)
-        .expect("split must fall back to the CPU path on kernel error (CORE-151 secondary)");
+        .expect("split must be metadata-only and not require a CUDA split kernel");
     assert_eq!(parts.len(), 2);
 
-    // torch: parts[0].flatten() -> 0..12; parts[1].flatten() -> 12..24
-    let want0: Vec<f32> = (0..12).map(|v| v as f32).collect();
-    let want1: Vec<f32> = (12..24).map(|v| v as f32).collect();
-    for (i, (part, want)) in parts.iter().zip([want0, want1]).enumerate() {
-        assert!(
-            part.is_cuda(),
-            "fallback chunk {i} must stay on the input's device"
-        );
+    for (i, part) in parts.iter().enumerate() {
+        assert!(part.is_cuda(), "split view {i} must stay on CUDA");
         assert_eq!(part.shape(), &[2, 6], "chunk {i} shape");
-        let host = part.cpu().expect("gpu->cpu readback");
-        assert_eq!(
-            host.data().expect("host slice"),
-            want,
-            "fallback chunk {i} values"
+        assert!(
+            Arc::ptr_eq(x.inner_storage_arc(), part.inner_storage_arc()),
+            "split view {i} must share storage with the input like PyTorch"
         );
     }
+    assert_eq!(parts[0].storage_offset(), 0);
+    assert_eq!(parts[1].storage_offset(), 12);
 }

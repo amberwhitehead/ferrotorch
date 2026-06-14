@@ -931,11 +931,11 @@ impl<T: Float> Tensor<T> {
                 //
                 // PyTorch parity (rust-gpu-discipline §3): `tensor.cpu()`
                 // must materialize the view. We do this by gathering the
-                // view on-device via the existing `strided_copy_{f32,f64}`
-                // kernel (rank ≤ 8, positive strides, f32/f64) into a
+                // view on-device via the existing `strided_copy_{f32,f64,u16}`
+                // kernel (rank ≤ 8, positive strides, float dtypes) into a
                 // fresh contiguous device buffer, *then* D2H. This mirrors
                 // the GPU fast path already used by `methods::contiguous_t`
-                // for f32/f64 CUDA tensors — there is no new kernel.
+                // for CUDA tensors — there is no host-side gather.
                 //
                 // The fast path is only taken when the view is *already*
                 // a full contiguous representation of the underlying
@@ -944,18 +944,27 @@ impl<T: Float> Tensor<T> {
                 let needs_materialize =
                     !self.is_contiguous() || self.storage_offset() != 0 || handle.len() != numel;
 
-                let bytes = if needs_materialize
-                    && self.shape().len() <= 8
-                    && (TypeId::of::<T>() == TypeId::of::<f32>()
-                        || TypeId::of::<T>() == TypeId::of::<f64>())
-                {
+                let bytes = if needs_materialize {
+                    if self.shape().len() > 8 {
+                        return Err(FerrotorchError::NotImplementedOnCuda {
+                            op: "Tensor::to(Cpu): materialize CUDA view with rank > 8",
+                        });
+                    }
                     let view_shape = self.shape().to_vec();
                     let src_strides = self.strides().to_vec();
                     let src_offset = self.storage_offset();
                     let materialized = if TypeId::of::<T>() == TypeId::of::<f32>() {
                         backend.strided_copy_f32(handle, &view_shape, &src_strides, src_offset)?
-                    } else {
+                    } else if TypeId::of::<T>() == TypeId::of::<f64>() {
                         backend.strided_copy_f64(handle, &view_shape, &src_strides, src_offset)?
+                    } else if TypeId::of::<T>() == TypeId::of::<half::f16>()
+                        || TypeId::of::<T>() == TypeId::of::<half::bf16>()
+                    {
+                        backend.strided_copy_u16(handle, &view_shape, &src_strides, src_offset)?
+                    } else {
+                        return Err(FerrotorchError::NotImplementedOnCuda {
+                            op: "Tensor::to(Cpu): materialize CUDA view for dtype",
+                        });
                     };
                     backend.gpu_to_cpu(&materialized)?
                 } else {
@@ -2149,24 +2158,36 @@ impl<T: Float> Tensor<T> {
                     &permuted_src_strides,
                     src_offset,
                 )
+            } else if TypeId::of::<T>() == TypeId::of::<half::f16>()
+                || TypeId::of::<T>() == TypeId::of::<half::bf16>()
+            {
+                backend.strided_copy_u16(
+                    in_handle,
+                    &permuted_shape,
+                    &permuted_src_strides,
+                    src_offset,
+                )
             } else {
-                // Unsupported dtype — fall through to CPU path.
-                return self.materialize_format_cpu(format, target_strides);
+                return Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "materialize_format: CUDA dtype",
+                });
             };
 
-            if let Ok(handle) = out_handle {
-                let storage = TensorStorage::gpu(handle);
-                return Ok(self.format_materialized(storage, target_strides));
-            }
-            // Kernel failure — fall through to CPU.
+            let handle = out_handle?;
+            let storage = TensorStorage::gpu(handle);
+            return Ok(self.format_materialized(storage, target_strides));
+        }
+
+        if self.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "materialize_format: CUDA rank > 8 or missing backend",
+            });
         }
 
         self.materialize_format_cpu(format, target_strides)
     }
 
-    /// CPU path for [`materialize_format`]. Always valid for any
-    /// layout; used as a fallback when the GPU fast path declines or
-    /// errors. CL-455.
+    /// CPU path for [`materialize_format`]. Always valid for CPU tensors.
     fn materialize_format_cpu(
         &self,
         _format: MemoryFormat,
