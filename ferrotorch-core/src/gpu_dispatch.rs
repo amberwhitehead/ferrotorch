@@ -219,6 +219,27 @@ impl GpuBufferHandle {
     }
 }
 
+/// Reduction selector for CUDA `scatter_reduce` kernels.
+///
+/// Mirrors [`crate::grad_fns::indexing::ScatterReduce`] without making the
+/// backend dispatch layer depend on the autograd module. Values are passed to
+/// PTX as a compact `u32` ABI tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuScatterReduce {
+    Sum = 0,
+    Prod = 1,
+    Amax = 2,
+    Amin = 3,
+}
+
+impl GpuScatterReduce {
+    #[inline]
+    #[must_use]
+    pub fn as_u32(self) -> u32 {
+        self as u32
+    }
+}
+
 impl std::fmt::Debug for GpuBufferHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GpuBufferHandle")
@@ -6218,6 +6239,44 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "scatter_add_nd_f64",
+        })
+    }
+
+    /// Rank-aware f32 `scatter_reduce` for `sum`, `prod`, `amax`, and `amin`.
+    /// The CUDA backend keeps `input`, `index`, `src`, and result resident.
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_reduce_nd_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+        _reduce: GpuScatterReduce,
+        _include_self: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_reduce_nd_f32",
+        })
+    }
+
+    /// Rank-aware f64 `scatter_reduce`; companion of
+    /// [`Self::scatter_reduce_nd_f32`].
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_reduce_nd_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+        _reduce: GpuScatterReduce,
+        _include_self: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_reduce_nd_f64",
         })
     }
 

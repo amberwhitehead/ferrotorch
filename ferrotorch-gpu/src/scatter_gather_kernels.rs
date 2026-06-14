@@ -576,6 +576,161 @@ DONE:
     };
 }
 
+macro_rules! scatter_reduce_nd_ptx {
+    (
+        $kname:literal, $wsh:literal, $ldv:literal, $stv:literal, $vreg:literal,
+        $mov:literal, $add:literal, $mul:literal, $setlt:literal
+    ) => {
+        concat!(
+            ".version 7.0\n.target sm_60\n.address_size 64\n",
+            ".visible .entry ",
+            $kname,
+            "(
+    .param .u64 in_ptr, .param .u64 idx_ptr, .param .u64 src_ptr,
+    .param .u64 out_ptr,
+    .param .u64 input_strides_ptr, .param .u64 index_shape_ptr,
+    .param .u32 rank, .param .u32 dim,
+    .param .u32 input_total, .param .u32 index_total,
+    .param .u32 reduce, .param .u32 include_self
+) {
+    .reg .u32 %gtid, %bid, %bdim, %rank, %dim, %in_tot, %idx_tot, %red, %inc;
+    .reg .u32 %j, %axis, %rem, %size, %coord, %sel, %stride, %dstelem, %touched;
+    .reg .u64 %in, %idx, %src, %out, %istr, %ishape, %off, %addr;
+    .reg .s64 %selv;
+    .reg ",
+            $vreg,
+            " %acc, %v;
+    .reg .pred %p, %p_match, %p_first, %p_mode, %p_cmp;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %idx, [idx_ptr];
+    ld.param.u64 %src, [src_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %istr, [input_strides_ptr];
+    ld.param.u64 %ishape, [index_shape_ptr];
+    ld.param.u32 %rank, [rank];
+    ld.param.u32 %dim, [dim];
+    ld.param.u32 %in_tot, [input_total];
+    ld.param.u32 %idx_tot, [index_total];
+    ld.param.u32 %red, [reduce];
+    ld.param.u32 %inc, [include_self];
+
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %in_tot; @%p bra DONE;
+
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, ",
+            $wsh,
+            "; add.u64 %addr, %in, %off;
+    ",
+            $ldv,
+            " %acc, [%addr];
+
+    mov.u32 %touched, 0;
+    mov.u32 %j, 0;
+
+J_LOOP:
+    setp.ge.u32 %p, %j, %idx_tot; @%p bra STORE;
+
+    mov.u32 %axis, %rank;
+    mov.u32 %rem, %j;
+    mov.u32 %dstelem, 0;
+AXIS_LOOP:
+    setp.eq.u32 %p, %axis, 0; @%p bra AXIS_DONE;
+    sub.u32 %axis, %axis, 1;
+
+    cvt.u64.u32 %off, %axis; shl.b64 %off, %off, 2; add.u64 %addr, %ishape, %off;
+    ld.global.u32 %size, [%addr];
+    rem.u32 %coord, %rem, %size;
+    div.u32 %rem, %rem, %size;
+
+    setp.ne.u32 %p, %axis, %dim; @%p bra USE_INDEX_COORD;
+    cvt.u64.u32 %off, %j; shl.b64 %off, %off, 3; add.u64 %addr, %idx, %off;
+    ld.global.s64 %selv, [%addr];
+    cvt.u32.s64 %sel, %selv;
+    mov.u32 %coord, %sel;
+USE_INDEX_COORD:
+    cvt.u64.u32 %off, %axis; shl.b64 %off, %off, 2; add.u64 %addr, %istr, %off;
+    ld.global.u32 %stride, [%addr];
+    mad.lo.u32 %dstelem, %coord, %stride, %dstelem;
+    bra AXIS_LOOP;
+
+AXIS_DONE:
+    setp.eq.u32 %p_match, %dstelem, %gtid;
+    @!%p_match bra NEXT_J;
+
+    cvt.u64.u32 %off, %j; shl.b64 %off, %off, ",
+            $wsh,
+            "; add.u64 %addr, %src, %off;
+    ",
+            $ldv,
+            " %v, [%addr];
+
+    setp.ne.u32 %p_first, %inc, 0;
+    @%p_first bra DO_REDUCE;
+    setp.ne.u32 %p_first, %touched, 0;
+    @%p_first bra DO_REDUCE;
+    ",
+            $mov,
+            " %acc, %v;
+    mov.u32 %touched, 1;
+    bra NEXT_J;
+
+DO_REDUCE:
+    mov.u32 %touched, 1;
+    setp.eq.u32 %p_mode, %red, 0;
+    @%p_mode bra RED_SUM;
+    setp.eq.u32 %p_mode, %red, 1;
+    @%p_mode bra RED_PROD;
+    setp.eq.u32 %p_mode, %red, 2;
+    @%p_mode bra RED_AMAX;
+    bra RED_AMIN;
+
+RED_SUM:
+    ",
+            $add,
+            " %acc, %acc, %v;
+    bra NEXT_J;
+RED_PROD:
+    ",
+            $mul,
+            " %acc, %acc, %v;
+    bra NEXT_J;
+RED_AMAX:
+    ",
+            $setlt,
+            " %p_cmp, %acc, %v;
+    @%p_cmp ",
+            $mov,
+            " %acc, %v;
+    bra NEXT_J;
+RED_AMIN:
+    ",
+            $setlt,
+            " %p_cmp, %v, %acc;
+    @%p_cmp ",
+            $mov,
+            " %acc, %v;
+
+NEXT_J:
+    add.u32 %j, %j, 1;
+    bra J_LOOP;
+
+STORE:
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, ",
+            $wsh,
+            "; add.u64 %addr, %out, %off;
+    ",
+            $stv,
+            " [%addr], %acc;
+DONE:
+    ret;
+}
+"
+        )
+    };
+}
+
 macro_rules! scatter_value_nd_ptx {
     ($kname:literal, $wsh:literal, $stv:literal, $vreg:literal, $ptype:literal, $ldp:literal) => {
         concat!(
@@ -753,6 +908,28 @@ const SCATTER_ADD_ND_F64_PTX: &str = scatter_add_nd_ptx!(
     "ld.global.f64",
     "atom.global.add.f64",
     ".f64"
+);
+const SCATTER_REDUCE_ND_F32_PTX: &str = scatter_reduce_nd_ptx!(
+    "scatter_reduce_nd_f32_kernel",
+    "2",
+    "ld.global.f32",
+    "st.global.f32",
+    ".f32",
+    "mov.f32",
+    "add.rn.f32",
+    "mul.rn.f32",
+    "setp.lt.f32"
+);
+const SCATTER_REDUCE_ND_F64_PTX: &str = scatter_reduce_nd_ptx!(
+    "scatter_reduce_nd_f64_kernel",
+    "3",
+    "ld.global.f64",
+    "st.global.f64",
+    ".f64",
+    "mov.f64",
+    "add.rn.f64",
+    "mul.rn.f64",
+    "setp.lt.f64"
 );
 
 // ===========================================================================
@@ -1492,6 +1669,152 @@ pub fn gpu_scatter_add_nd_f64(
         device,
         SCATTER_ADD_ND_F64_PTX,
         "scatter_add_nd_f64_kernel",
+    )?;
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_scatter_reduce_nd<V: DeviceRepr + ValidAsZeroBits>(
+    input: &CudaSlice<V>,
+    idx: &CudaSlice<i64>,
+    src: &CudaSlice<V>,
+    out: &mut CudaSlice<V>,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    reduce: u32,
+    include_self: bool,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<()> {
+    let (index_total, input_strides, index_dims) = scatter_nd_metadata(
+        input.len(),
+        idx.len(),
+        Some(src.len()),
+        input_shape,
+        index_shape,
+        dim,
+    )?;
+    let input_total = input_shape.iter().try_fold(1usize, |acc, &d| {
+        acc.checked_mul(d)
+            .ok_or(GpuError::LengthMismatch { a: acc, b: d })
+    })?;
+    if input_total == 0 {
+        return Ok(());
+    }
+    if out.len() < input_total {
+        return Err(GpuError::LengthMismatch {
+            a: input_total,
+            b: out.len(),
+        });
+    }
+    let stream = device.stream();
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|err| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: err,
+        }
+    })?;
+    let input_strides_dev = stream.clone_htod(&input_strides)?;
+    let index_dims_dev = stream.clone_htod(&index_dims)?;
+    let cfg = launch_1d(input_total);
+    let rank_u = checked_u32("rank", index_shape.len())?;
+    let dim_u = checked_u32("dim", dim)?;
+    let input_total_u = checked_u32("input_total", input_total)?;
+    let index_total_u = checked_u32("index_total", index_total)?;
+    let include_self_u = u32::from(include_self);
+    // SAFETY:
+    // - `f` is the rank-aware scatter_reduce entry with the 12-argument ABI
+    //   pushed below.
+    // - Each thread owns one output element and only writes `out[gtid]`, so no
+    //   atomics are required. It scans the compact index/source coordinate
+    //   space, computes each candidate destination with the same metadata as
+    //   `scatter_nd`, and folds matching src values locally.
+    // - Core validation guarantees index values are in bounds and `src` is the
+    //   compact prefix slab of `index_shape`, so all reads are in bounds.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(idx)
+            .arg(src)
+            .arg(out)
+            .arg(&input_strides_dev)
+            .arg(&index_dims_dev)
+            .arg(&rank_u)
+            .arg(&dim_u)
+            .arg(&input_total_u)
+            .arg(&index_total_u)
+            .arg(&reduce)
+            .arg(&include_self_u)
+            .launch(cfg)?;
+    }
+    Ok(())
+}
+
+/// f32 rank-aware `scatter_reduce` for sum/prod/amax/amin. The resident kernel
+/// computes one output element per thread and scans the compact index/source
+/// space, preserving PyTorch's include_self and NaN comparison semantics.
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_scatter_reduce_nd_f32(
+    input: &CudaBuffer<f32>,
+    idx: &CudaSlice<i64>,
+    src: &CudaBuffer<f32>,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    reduce: u32,
+    include_self: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let mut out = clone_f32(input, input.len(), device)?;
+    launch_scatter_reduce_nd(
+        input.inner(),
+        idx,
+        src.inner(),
+        out.inner_mut(),
+        input_shape,
+        index_shape,
+        dim,
+        reduce,
+        include_self,
+        device,
+        SCATTER_REDUCE_ND_F32_PTX,
+        "scatter_reduce_nd_f32_kernel",
+    )?;
+    Ok(out)
+}
+
+/// f64 rank-aware `scatter_reduce`; companion of
+/// [`gpu_scatter_reduce_nd_f32`].
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_scatter_reduce_nd_f64(
+    input: &CudaBuffer<f64>,
+    idx: &CudaSlice<i64>,
+    src: &CudaBuffer<f64>,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    reduce: u32,
+    include_self: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    let mut out = clone_f64(input, input.len(), device)?;
+    launch_scatter_reduce_nd(
+        input.inner(),
+        idx,
+        src.inner(),
+        out.inner_mut(),
+        input_shape,
+        index_shape,
+        dim,
+        reduce,
+        include_self,
+        device,
+        SCATTER_REDUCE_ND_F64_PTX,
+        "scatter_reduce_nd_f64_kernel",
     )?;
     Ok(out)
 }

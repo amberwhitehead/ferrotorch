@@ -92,6 +92,7 @@ fn bw_1d(
     let sl = src.len();
     let srct = Tensor::from_storage(TensorStorage::cpu(src), vec![sl], true).unwrap();
     let got = Tensor::from_storage(TensorStorage::cpu(go), vec![n], false).unwrap();
+    let result = Tensor::from_storage(TensorStorage::cpu(result), vec![n], false).unwrap();
     let bw: ScatterReduceBackward<f64> = ScatterReduceBackward {
         input,
         src: srct,
@@ -335,7 +336,12 @@ fn scatter_reduce_2d_amax_tie_matches_torch() {
         index_shape: vec![2, 3],
         reduce: ScatterReduce::Amax,
         include_self: true,
-        result: vec![9., 2., 7., 4., 8., 6.],
+        result: Tensor::from_storage(
+            TensorStorage::cpu(vec![9., 2., 7., 4., 8., 6.]),
+            vec![2, 3],
+            false,
+        )
+        .unwrap(),
     };
     let grads = GradFn::<f64>::backward(&bw, &go).unwrap();
     let gi = grads[0].as_ref().unwrap().data_vec().unwrap();

@@ -34,7 +34,7 @@ use crate::autograd::no_grad::{is_grad_enabled, no_grad};
 use crate::device::Device;
 use crate::dtype::{DType, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
-use crate::gpu_dispatch::{GpuBufferHandle, gpu_backend};
+use crate::gpu_dispatch::{GpuBufferHandle, GpuScatterReduce, gpu_backend};
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
 
@@ -2129,6 +2129,196 @@ impl ScatterReduce {
             _ => None,
         }
     }
+
+    #[inline]
+    fn gpu(self) -> GpuScatterReduce {
+        match self {
+            Self::Sum => GpuScatterReduce::Sum,
+            Self::Prod => GpuScatterReduce::Prod,
+            Self::Amax => GpuScatterReduce::Amax,
+            Self::Amin => GpuScatterReduce::Amin,
+        }
+    }
+}
+
+fn checked_shape_numel(op: &'static str, shape: &[usize]) -> FerrotorchResult<usize> {
+    shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("{op}: shape {shape:?} element count overflows usize"),
+        })
+}
+
+fn validate_scatter_reduce_shapes<T: Float>(
+    input_shape: &[usize],
+    dim: usize,
+    index: &[usize],
+    index_shape: &[usize],
+    src: &Tensor<T>,
+) -> FerrotorchResult<usize> {
+    let ndim = input_shape.len();
+    if index_shape.len() != ndim {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "scatter_reduce: index ndim {} != input ndim {}",
+                index_shape.len(),
+                ndim
+            ),
+        });
+    }
+    let index_numel = checked_shape_numel("scatter_reduce", index_shape)?;
+    if index.len() != index_numel {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "scatter_reduce: index slice has {} elements but index_shape {:?} implies {}",
+                index.len(),
+                index_shape,
+                index_numel
+            ),
+        });
+    }
+    for (axis, (&idx_d, &input_d)) in index_shape.iter().zip(input_shape).enumerate() {
+        if axis != dim && idx_d > input_d {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "scatter_reduce: expected index {index_shape:?} to be no larger than \
+                     input {input_shape:?} apart from dimension {dim} \
+                     (axis {axis}: {idx_d} > {input_d})"
+                ),
+            });
+        }
+    }
+    for &idx in index {
+        if idx >= input_shape[dim] {
+            return Err(FerrotorchError::IndexOutOfBounds {
+                index: idx,
+                axis: dim,
+                size: input_shape[dim],
+            });
+        }
+    }
+
+    let src_shape = src.shape();
+    if src_shape.len() != ndim {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "scatter_reduce: index tensor must have the same number of dimensions as src \
+                 tensor (index_shape {index_shape:?} is rank {}, src shape {:?} is rank {})",
+                index_shape.len(),
+                src_shape,
+                src_shape.len()
+            ),
+        });
+    }
+    for (axis, (&idx_d, &src_d)) in index_shape.iter().zip(src_shape).enumerate() {
+        if idx_d > src_d {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "scatter_reduce: expected index {index_shape:?} to be no larger size than \
+                     src {src_shape:?} (axis {axis}: {idx_d} > {src_d})"
+                ),
+            });
+        }
+    }
+    Ok(index_numel)
+}
+
+fn cuda_src_prefix_slab_for_index<T: Float>(
+    src: &Tensor<T>,
+    index_shape: &[usize],
+) -> FerrotorchResult<Tensor<T>> {
+    if src.shape() == index_shape {
+        return Ok(src.clone());
+    }
+    no_grad(|| {
+        let mut slab = src.clone();
+        for (axis, &len) in index_shape.iter().enumerate() {
+            if slab.shape()[axis] != len {
+                slab = slab.narrow(axis, 0, len)?;
+            }
+        }
+        slab.contiguous()
+    })
+}
+
+fn scatter_reduce_cuda_forward<T: Float>(
+    input: &Tensor<T>,
+    dim: usize,
+    index: &[usize],
+    index_shape: &[usize],
+    src: &Tensor<T>,
+    reduce: ScatterReduce,
+    include_self: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    if !cuda_f32_f64::<T>() {
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_reduce",
+        });
+    }
+    let input_c = no_grad(|| input.contiguous())?;
+    let src_slab = cuda_src_prefix_slab_for_index(src, index_shape)?.contiguous()?;
+    let ordinal = cuda_ordinal(input_c.device(), "scatter_reduce")?;
+    let idx_handle = crate::ops::indexing::upload_index_i64(index, ordinal)?;
+    let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let handle = match T::dtype() {
+        DType::F32 => backend.scatter_reduce_nd_f32(
+            input_c.gpu_handle()?,
+            &idx_handle,
+            src_slab.gpu_handle()?,
+            input_c.shape(),
+            index_shape,
+            dim,
+            reduce.gpu(),
+            include_self,
+        )?,
+        DType::F64 => backend.scatter_reduce_nd_f64(
+            input_c.gpu_handle()?,
+            &idx_handle,
+            src_slab.gpu_handle()?,
+            input_c.shape(),
+            index_shape,
+            dim,
+            reduce.gpu(),
+            include_self,
+        )?,
+        _ => {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "scatter_reduce",
+            });
+        }
+    };
+    Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attach_scatter_reduce_grad<T: Float>(
+    output: Tensor<T>,
+    input: &Tensor<T>,
+    src: &Tensor<T>,
+    dim: usize,
+    index: &[usize],
+    index_shape: &[usize],
+    reduce: ScatterReduce,
+    include_self: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    if (input.requires_grad() || src.requires_grad()) && is_grad_enabled() {
+        let saved_result = output.clone();
+        let (storage, shape) = output.into_storage_and_shape()?;
+        let grad_fn = Arc::new(ScatterReduceBackward {
+            input: input.clone(),
+            src: src.clone(),
+            dim,
+            index: index.to_vec(),
+            index_shape: index_shape.to_vec(),
+            reduce,
+            include_self,
+            result: saved_result,
+        });
+        Tensor::from_operation(storage, shape, grad_fn)
+    } else {
+        Ok(output)
+    }
 }
 
 /// Backward function for `scatter_reduce` (all reduce modes).
@@ -2170,11 +2360,11 @@ pub struct ScatterReduceBackward<T: Float> {
     pub reduce: ScatterReduce,
     /// Whether `include_self` was set in the forward.
     pub include_self: bool,
-    /// Saved forward result (host-side flat buffer). Required by the
+    /// Saved forward result. Required by the
     /// value-aware VJPs for `prod`/`amax`/`amin` per upstream
     /// `FunctionsManual.cpp:7216-7265` (which read `result` to identify
     /// max/min positions and compute the prod chain rule).
-    pub result: Vec<T>,
+    pub result: Tensor<T>,
 }
 
 impl<T: Float> GradFn<T> for ScatterReduceBackward<T> {
@@ -2273,7 +2463,6 @@ impl<T: Float> ScatterReduceBackward<T> {
         let input_shape = self.input.shape();
         let go_data = grad_output.data_vec()?;
         let zero = <T as num_traits::Zero>::zero();
-        let index_numel: usize = self.index_shape.iter().product();
 
         let grad_input = if self.input.requires_grad() {
             let mut gi = go_data.clone();
@@ -2293,14 +2482,15 @@ impl<T: Float> ScatterReduceBackward<T> {
         };
 
         let grad_src = if self.src.requires_grad() {
-            let mut gs = vec![zero; index_numel];
-            self.for_each_index(|i, _, _, dst_flat| {
-                gs[i] = go_data[dst_flat];
+            let src_shape = self.src.shape();
+            let mut gs = vec![zero; self.src.numel()];
+            self.for_each_index(|_, _, coords, dst_flat| {
+                gs[flat_index(coords, src_shape)] = go_data[dst_flat];
             });
             Some(Tensor::from_storage(
                 // CORE-048 (#1742): gradient on the src leaf's device.
                 TensorStorage::on_device(gs, self.src.device())?,
-                self.index_shape.clone(),
+                src_shape.to_vec(),
                 false,
             )?)
         } else {
@@ -2332,6 +2522,7 @@ impl<T: Float> ScatterReduceBackward<T> {
         let go_data = grad_output.data_vec()?;
         let in_data = self.input.data_vec()?;
         let src_data = self.src.data_vec()?;
+        let result_data = self.result.data_vec()?;
         let src_shape = self.src.shape();
         let zero = <T as num_traits::Zero>::zero();
         let one = <T as num_traits::One>::one();
@@ -2341,7 +2532,7 @@ impl<T: Float> ScatterReduceBackward<T> {
         // self_is_result[p] = 1 iff input[p] == result[p].
         let mut self_is_result = vec![zero; input_numel];
         for p in 0..input_numel {
-            if in_data[p] == self.result[p] {
+            if in_data[p] == result_data[p] {
                 self_is_result[p] = one;
             }
         }
@@ -2353,7 +2544,7 @@ impl<T: Float> ScatterReduceBackward<T> {
         let mut src_is_result = vec![zero; index_numel];
         let mut value = vec![zero; index_numel];
         self.for_each_index(|i, _, coords, dst_flat| {
-            let v = self.result[dst_flat];
+            let v = result_data[dst_flat];
             value[i] = v;
             if read_src_at(coords) == v {
                 src_is_result[i] = one;
@@ -2402,16 +2593,16 @@ impl<T: Float> ScatterReduceBackward<T> {
         };
 
         let grad_src = if self.src.requires_grad() {
-            let mut gs = vec![zero; index_numel];
-            self.for_each_index(|i, _, _, dst_flat| {
+            let mut gs = vec![zero; self.src.numel()];
+            self.for_each_index(|i, _, coords, dst_flat| {
                 if src_is_result[i] != zero {
-                    gs[i] = grad_distributed[dst_flat];
+                    gs[flat_index(coords, src_shape)] = grad_distributed[dst_flat];
                 }
             });
             Some(Tensor::from_storage(
                 // CORE-048 (#1742): gradient on the src leaf's device.
                 TensorStorage::on_device(gs, self.src.device())?,
-                self.index_shape.clone(),
+                src_shape.to_vec(),
                 false,
             )?)
         } else {
@@ -2449,6 +2640,7 @@ impl<T: Float> ScatterReduceBackward<T> {
         let go_data = grad_output.data_vec()?;
         let in_data = self.input.data_vec()?;
         let src_data = self.src.data_vec()?;
+        let result_data = self.result.data_vec()?;
         let src_shape = self.src.shape();
         let zero = <T as num_traits::Zero>::zero();
         let one = <T as num_traits::One>::one();
@@ -2567,13 +2759,13 @@ impl<T: Float> ScatterReduceBackward<T> {
         //   (grad * result)[dst_flat] / (src_at(i) if !src_zero[i] else 1)
         // )
         let grad_src = if self.src.requires_grad() {
-            let mut gs = vec![zero; index_numel];
+            let mut gs = vec![zero; self.src.numel()];
             self.for_each_index(|i, _, coords, dst_flat| {
                 let s_raw = read_src_at(coords);
                 let denom = if s_raw == zero { one } else { s_raw };
-                let primary = (go_data[dst_flat] * self.result[dst_flat]) / denom;
+                let primary = (go_data[dst_flat] * result_data[dst_flat]) / denom;
                 let single_zero_branch = go_data[dst_flat] * masked_src_result[dst_flat];
-                gs[i] = if src_single_zero[i] == zero {
+                gs[flat_index(coords, src_shape)] = if src_single_zero[i] == zero {
                     primary
                 } else {
                     single_zero_branch
@@ -2582,7 +2774,7 @@ impl<T: Float> ScatterReduceBackward<T> {
             Some(Tensor::from_storage(
                 // CORE-048 (#1742): gradient on the src leaf's device.
                 TensorStorage::on_device(gs, self.src.device())?,
-                self.index_shape.clone(),
+                src_shape.to_vec(),
                 false,
             )?)
         } else {
@@ -2626,14 +2818,11 @@ impl<T: Float> ScatterReduceBackward<T> {
 ///
 /// `src` must live on `input`'s device — a mix returns
 /// [`FerrotorchError::DeviceMismatch`] (torch: "Expected all tensors to be
-/// on the same device, but got src is on cpu, different from other tensors
-/// on cuda:0"). For CUDA operands the reduction is an EXPLICIT host round
-/// trip (R-LOUD-2): operands download via `data_vec`, the fold runs on host
-/// (identical to the CPU path), and the result re-uploads to `input`'s
-/// device. Rationale: the backend trait has no `scatter_reduce` kernels for
-/// `prod`/`amax`/`amin`, and routing only `sum` through `scatter_add_dim_*`
-/// would make residency mode-dependent within one op (on-device kernels
-/// tracked in #1954). Gradients are delivered on the leaves' devices.
+/// on the same device, but got ..."). CUDA f32/f64 operands lower through a
+/// resident `scatter_reduce_nd` kernel for every shipped reduce mode (`sum`,
+/// `prod`, `amax`, `amin`); unsupported CUDA dtypes return
+/// `NotImplementedOnCuda` instead of falling through to a host fold. Gradients
+/// are delivered on the leaves' devices.
 pub fn scatter_reduce<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -2669,23 +2858,21 @@ pub fn scatter_reduce<T: Float>(
             let s = src_data[i.min(src_data.len() - 1)];
             out = apply_reduce(reduce, out, s);
         }
-        // CORE-048 (#1742): result lands on input's device (host round trip
-        // for CUDA — see the device-contract doc-comment).
-        let out_storage = TensorStorage::on_device(vec![out], input.device())?;
-        if (input.requires_grad() || src.requires_grad()) && is_grad_enabled() {
-            let grad_fn = Arc::new(ScatterReduceBackward {
-                input: input.clone(),
-                src: src.clone(),
-                dim: 0,
-                index: index.to_vec(),
-                index_shape: index_shape.to_vec(),
-                reduce,
-                include_self,
-                result: vec![out],
-            });
-            return Tensor::from_operation(out_storage, vec![], grad_fn);
-        }
-        return Tensor::from_storage(out_storage, vec![], false);
+        let output = Tensor::from_storage(
+            TensorStorage::on_device(vec![out], input.device())?,
+            vec![],
+            false,
+        )?;
+        return attach_scatter_reduce_grad(
+            output,
+            input,
+            src,
+            0,
+            index,
+            index_shape,
+            reduce,
+            include_self,
+        );
     }
 
     // Normalize negative dim per `at::maybe_wrap_dim` at `:2362`.
@@ -2698,26 +2885,34 @@ pub fn scatter_reduce<T: Float>(
     }
     let dim_usize = dim_norm as usize;
 
-    // Validate index ndim matches input ndim (upstream `TORCH_CHECK` chain
-    // inside `scatter_impl`).
-    if index_shape.len() != ndim {
-        return Err(FerrotorchError::ShapeMismatch {
-            message: format!(
-                "scatter_reduce: index ndim {} != input ndim {}",
-                index_shape.len(),
-                ndim
-            ),
-        });
-    }
-    let index_numel: usize = index_shape.iter().product();
-    if src.numel() < index_numel {
-        return Err(FerrotorchError::ShapeMismatch {
-            message: format!(
-                "scatter_reduce: src numel {} < index numel {}",
-                src.numel(),
-                index_numel
-            ),
-        });
+    let index_numel =
+        validate_scatter_reduce_shapes(input_shape, dim_usize, index, index_shape, src)?;
+
+    if input.is_cuda() || src.is_cuda() {
+        if !input.is_cuda() || !src.is_cuda() || !cuda_f32_f64::<T>() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "scatter_reduce",
+            });
+        }
+        let output = scatter_reduce_cuda_forward(
+            input,
+            dim_usize,
+            index,
+            index_shape,
+            src,
+            reduce,
+            include_self,
+        )?;
+        return attach_scatter_reduce_grad(
+            output,
+            input,
+            src,
+            dim_usize,
+            index,
+            index_shape,
+            reduce,
+            include_self,
+        );
     }
 
     let in_data = input.data_vec()?;
@@ -2790,36 +2985,20 @@ pub fn scatter_reduce<T: Float>(
                     increment_coords(&mut coords, index_shape);
                 }
             }
-            let output_shape = input_shape.to_vec();
-            // Attach a grad_fn for ALL reduce modes per upstream
-            // `derivatives.yaml:3074-3077` — the live oracle confirms torch
-            // sets `r.grad_fn = <ScatterReduceBackward0 ...>` for amax/amin
-            // as well as sum/prod. The backward implements every mode via
-            // the per-mode branches in `ScatterReduceBackward::backward`
-            // (sum/prod/amax/amin) mirroring
-            // `FunctionsManual.cpp:7194-7279`.
-            if (input.requires_grad() || src.requires_grad()) && is_grad_enabled() {
-                let grad_fn = Arc::new(ScatterReduceBackward {
-                    input: input.clone(),
-                    src: src.clone(),
-                    dim: dim_usize,
-                    index: index.to_vec(),
-                    index_shape: index_shape.to_vec(),
-                    reduce,
-                    include_self,
-                    result: out.clone(),
-                });
-                // CORE-048 (#1742): result on input's device.
-                return Tensor::from_operation(
-                    TensorStorage::on_device(out, input.device())?,
-                    output_shape,
-                    grad_fn,
-                );
-            }
-            return Tensor::from_storage(
+            let output = Tensor::from_storage(
                 TensorStorage::on_device(out, input.device())?,
-                output_shape,
+                input_shape.to_vec(),
                 false,
+            )?;
+            return attach_scatter_reduce_grad(
+                output,
+                input,
+                src,
+                dim_usize,
+                index,
+                index_shape,
+                reduce,
+                include_self,
             );
         }
     }
@@ -2837,35 +3016,21 @@ pub fn scatter_reduce<T: Float>(
         }
     }
 
-    let output_shape = input_shape.to_vec();
-    // Attach a grad_fn for ALL reduce modes per upstream
-    // `derivatives.yaml:3074-3077` — torch's `ScatterReduceBackward0`
-    // attaches unconditionally and `FunctionsManual.cpp:7194-7279`
-    // implements per-mode VJPs for sum/prod/amax/amin/mean.
-    if (input.requires_grad() || src.requires_grad()) && is_grad_enabled() {
-        let grad_fn = Arc::new(ScatterReduceBackward {
-            input: input.clone(),
-            src: src.clone(),
-            dim: dim_usize,
-            index: index.to_vec(),
-            index_shape: index_shape.to_vec(),
-            reduce,
-            include_self,
-            result: out.clone(),
-        });
-        // CORE-048 (#1742): result on input's device.
-        Tensor::from_operation(
-            TensorStorage::on_device(out, input.device())?,
-            output_shape,
-            grad_fn,
-        )
-    } else {
-        Tensor::from_storage(
-            TensorStorage::on_device(out, input.device())?,
-            output_shape,
-            false,
-        )
-    }
+    let output = Tensor::from_storage(
+        TensorStorage::on_device(out, input.device())?,
+        input_shape.to_vec(),
+        false,
+    )?;
+    attach_scatter_reduce_grad(
+        output,
+        input,
+        src,
+        dim_usize,
+        index,
+        index_shape,
+        reduce,
+        include_self,
+    )
 }
 
 /// Apply the per-mode binary reduction. `a` is the running accumulator,
