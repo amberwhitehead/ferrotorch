@@ -58,10 +58,10 @@
 //! | REQ-12 (histc PTX + ABI) | SHIPPED | `HISTC_F32_PTX`/`HISTC_F64_PTX in search.rs` carry the 6-arg ABI `(in,out,n,nbins,minv,maxv)`; f32 uses `red.global.add.f32`, f64 `red.global.add.f64` (sm_60) |
 //! | REQ-13 (histc trait surface) | SHIPPED | `fn histc_1d in gpu_dispatch.rs`; consumer `ops::search::histc` GPU branch |
 //! | REQ-14 (histc dispatch + consumer) | SHIPPED | `CudaBackendImpl::histc_1d in backend_impl.rs` dispatches `match dtype { F32, F64 }`; non-test consumer `ferrotorch_core::ops::search::histc` CUDA branch keeps counts GPU-resident (`TensorStorage::gpu`) |
-//! | REQ-15 (`gpu_meshgrid_f32`/`_f64`) | SHIPPED | `pub fn gpu_meshgrid_f32`/`_f64 in search.rs` mirror `view(view_shape).expand(shape)` at `aten/src/ATen/native/TensorShape.cpp:4462`; consumer `CudaBackendImpl::meshgrid_grid in backend_impl.rs` |
-//! | REQ-16 (meshgrid PTX + ABI) | SHIPPED | `MESHGRID_F32_PTX`/`MESHGRID_F64_PTX in search.rs` carry the 5-arg ABI `(in,out,total,inner,axis_len)`; one thread per output element gathers `in[(flat/inner)%axis_len]` |
+//! | REQ-15 (`gpu_meshgrid_*`) | SHIPPED | `pub fn gpu_meshgrid_f32`/`_f64`/`_f16`/`_bf16 in search.rs` mirror `view(view_shape).expand(shape)` at `aten/src/ATen/native/TensorShape.cpp:4462`; consumer `CudaBackendImpl::meshgrid_grid in backend_impl.rs` |
+//! | REQ-16 (meshgrid PTX + ABI) | SHIPPED | `MESHGRID_F32_PTX`/`MESHGRID_F64_PTX`/`MESHGRID_U16_PTX in search.rs` carry the 5-arg ABI `(in,out,total,inner,axis_len)`; one thread per output element gathers `in[(flat/inner)%axis_len]` |
 //! | REQ-17 (meshgrid trait surface) | SHIPPED | `fn meshgrid_grid in gpu_dispatch.rs`; consumer `ops::search::meshgrid` GPU branch |
-//! | REQ-18 (meshgrid dispatch + consumer) | SHIPPED | `CudaBackendImpl::meshgrid_grid in backend_impl.rs` dispatches `match dtype { F32, F64 }`; non-test consumer `ferrotorch_core::ops::search::meshgrid` CUDA branch keeps each grid GPU-resident (`TensorStorage::gpu`) |
+//! | REQ-18 (meshgrid dispatch + consumer) | SHIPPED | `CudaBackendImpl::meshgrid_grid in backend_impl.rs` dispatches `match dtype { F32, F64, F16, BF16 }`; non-test consumer `ferrotorch_core::ops::search::meshgrid` CUDA branch keeps each grid GPU-resident (`TensorStorage::gpu`) |
 //! | REQ-21 (`gpu_unique_f32`/`_f64`) | SHIPPED | `pub fn gpu_unique_f32`/`_f64 in search.rs` run init → bitonic sort-by-key → run-flag → `gpu_cumsum` → compaction mirroring `compute_unique` at `aten/src/ATen/native/cuda/Unique.cu:51-85` (sort-by-key `radix_sort_pairs` `UniqueCub.cu:175`, inverse scatter `:63-66`, run-length counts `:75-81`); consumer `CudaBackendImpl::unique_1d in backend_impl.rs` |
 //! | REQ-22 (unique PTX + ABI) | SHIPPED | `UNIQUE_INIT_F32_PTX`/`_F64_PTX` (5-arg `(in,key,idx,n,npad)`) + `UNIQUE_BITONIC_F32_PTX`/`_F64_PTX` (5-arg `(key,idx,npad,j,k)`, via `unique_bitonic_ptx!`) `in search.rs`; comparator ranks pads (`idx==i32::MAX`) + NaN (`setp.neu`) last via `selp.u32`/`setp.*.u32` (no `.pred` arithmetic); dedup/compaction reuse `RUN_FLAG_*`/`COMPACT_*`/`gpu_cumsum` |
 //! | REQ-23 (unique trait + dispatch + consumer) | SHIPPED | `fn unique_1d in gpu_dispatch.rs`; `CudaBackendImpl::unique_1d in backend_impl.rs` (`match dtype { F32, F64 }`); `pub use search::{gpu_unique_f32, gpu_unique_f64} in lib.rs`; non-test consumer `ferrotorch_core::ops::search::unique` CUDA branch keeps SORTED-unique VALUES GPU-resident (`TensorStorage::gpu`), reads back only index/run metadata; bf16/f16 reject |
@@ -1694,6 +1694,57 @@ DONE:
 }
 ";
 
+// Raw 16-bit meshgrid gather for f16 / bf16. Both dtypes are represented as
+// `CudaSlice<u16>` and are distinguished by the surrounding `GpuBufferHandle`
+// dtype tag, so this kernel deliberately performs a bit-preserving copy.
+const MESHGRID_U16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry meshgrid_u16_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total,
+    .param .u32 inner,
+    .param .u32 axis_len
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %t, %tot, %inr, %al, %q, %coord;
+    .reg .u64 %in_p, %out_p, %off, %addr;
+    .reg .b16 %v;
+    .reg .pred %p_oob;
+
+    ld.param.u64 %in_p,  [in_ptr];
+    ld.param.u64 %out_p, [out_ptr];
+    ld.param.u32 %tot,   [total];
+    ld.param.u32 %inr,   [inner];
+    ld.param.u32 %al,    [axis_len];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %t, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %p_oob, %t, %tot;
+    @%p_oob bra DONE;
+
+    div.u32 %q, %t, %inr;
+    rem.u32 %coord, %q, %al;
+
+    cvt.u64.u32 %off, %coord;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %in_p, %off;
+    ld.global.b16 %v, [%addr];
+
+    cvt.u64.u32 %off, %t;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %out_p, %off;
+    st.global.b16 [%addr], %v;
+
+DONE:
+    ret;
+}
+";
+
 /// Launch a meshgrid gather kernel producing the grid for ONE axis.
 ///
 /// `input` is the axis's 1-D coordinate vector (length `axis_len`); the output
@@ -1827,6 +1878,52 @@ pub fn gpu_meshgrid_f64(
         device,
         MESHGRID_F64_PTX,
         "meshgrid_f64_kernel",
+    )
+}
+
+/// On-device `meshgrid` grid for one axis over an f16 coordinate vector.
+///
+/// The value data is copied as raw IEEE-f16 bits (`CudaSlice<u16>`) so this is
+/// dtype-preserving and does not widen through f32. See [`gpu_meshgrid_f32`]
+/// for semantics and errors.
+pub fn gpu_meshgrid_f16(
+    input: &CudaSlice<u16>,
+    total: usize,
+    inner: usize,
+    axis_len: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    launch_meshgrid(
+        input,
+        total,
+        inner,
+        axis_len,
+        device,
+        MESHGRID_U16_PTX,
+        "meshgrid_u16_kernel",
+    )
+}
+
+/// On-device `meshgrid` grid for one axis over a bf16 coordinate vector.
+///
+/// bf16 shares raw `CudaSlice<u16>` storage with f16, and the dtype tag lives
+/// in the backend wrapper. This kernel only performs a bit-preserving gather.
+/// See [`gpu_meshgrid_f32`] for semantics and errors.
+pub fn gpu_meshgrid_bf16(
+    input: &CudaSlice<u16>,
+    total: usize,
+    inner: usize,
+    axis_len: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    launch_meshgrid(
+        input,
+        total,
+        inner,
+        axis_len,
+        device,
+        MESHGRID_U16_PTX,
+        "meshgrid_u16_kernel",
     )
 }
 
@@ -3768,6 +3865,77 @@ mod tests {
         // first 6 elements come from a[0]=10, next 6 from a[1]=20.
         assert_eq!(
             h0,
+            vec![
+                10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0
+            ]
+        );
+    }
+
+    #[test]
+    fn meshgrid_f16_two_axis_ij_bitcopy() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let a: Vec<u16> = [1.0_f32, 2.0, 3.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x).to_bits())
+            .collect();
+        let b: Vec<u16> = [4.0_f32, 5.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x).to_bits())
+            .collect();
+        let ga = cpu_to_gpu(&a, &device).unwrap();
+        let gb = cpu_to_gpu(&b, &device).unwrap();
+
+        let g0 = gpu_meshgrid_f16(ga.inner(), 6, 2, 3, &device).unwrap();
+        let h0 = read_u16(&g0, &device);
+        let expected0: Vec<u16> = [1.0_f32, 1.0, 2.0, 2.0, 3.0, 3.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x).to_bits())
+            .collect();
+        assert_eq!(h0, expected0);
+        assert_eq!(
+            h0.iter()
+                .map(|&x| f16::from_bits(x).to_f32())
+                .collect::<Vec<_>>(),
+            vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0]
+        );
+
+        let g1 = gpu_meshgrid_f16(gb.inner(), 6, 1, 2, &device).unwrap();
+        let h1 = read_u16(&g1, &device);
+        let expected1: Vec<u16> = [4.0_f32, 5.0, 4.0, 5.0, 4.0, 5.0]
+            .into_iter()
+            .map(|x| f16::from_f32(x).to_bits())
+            .collect();
+        assert_eq!(h1, expected1);
+    }
+
+    #[test]
+    fn meshgrid_bf16_three_axis_ij_bitcopy() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let a: Vec<u16> = [10.0_f32, 20.0]
+            .into_iter()
+            .map(|x| bf16::from_f32(x).to_bits())
+            .collect();
+        let ga = cpu_to_gpu(&a, &device).unwrap();
+
+        let g0 = gpu_meshgrid_bf16(ga.inner(), 12, 6, 2, &device).unwrap();
+        let h0 = read_u16(&g0, &device);
+        let expected0: Vec<u16> = [
+            10.0_f32, 10.0, 10.0, 10.0, 10.0, 10.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0,
+        ]
+        .into_iter()
+        .map(|x| bf16::from_f32(x).to_bits())
+        .collect();
+        assert_eq!(h0, expected0);
+        assert_eq!(
+            h0.iter()
+                .map(|&x| bf16::from_bits(x).to_f32())
+                .collect::<Vec<_>>(),
             vec![
                 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0
             ]

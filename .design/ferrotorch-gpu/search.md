@@ -153,26 +153,32 @@ against torch 2.11 CUDA (values exact in all cases; gathered values exact).
   `ferrotorch-core/src/ops/search.rs::histc`, which on CUDA f32/f64 dispatches
   through `GpuBackend::histc_1d` and keeps the counts GPU-resident
   (`TensorStorage::gpu`) — no R-CODE-4 round trip.
-- REQ-15: `gpu_meshgrid_f32` / `gpu_meshgrid_f64` — given an axis's 1-D
+- REQ-15: `gpu_meshgrid_f32` / `gpu_meshgrid_f64` / `gpu_meshgrid_f16` /
+  `gpu_meshgrid_bf16` — given an axis's 1-D
   coordinate buffer (length `axis_len`), `total = product(shapes)`, and
   `inner = product(shapes[axis+1..])`, return a fresh device `CudaSlice<V>` of
   `total` elements with `out[flat] = input[(flat / inner) % axis_len]`. One
   thread per output element does the index arithmetic and a single gather load —
   no `expand` materialisation. Mirrors the `view(view_shape).expand(shape)`
   decomposition of upstream `meshgrid` (`indexing='ij'`).
-- REQ-16: meshgrid PTX + ABI. `MESHGRID_F32_PTX` / `MESHGRID_F64_PTX` carry the
-  5-arg ABI `(in_ptr, out_ptr, total, inner, axis_len)`. The launcher forces
-  `inner >= 1` so the `div.u32` divisor is never zero (last axis).
+- REQ-16: meshgrid PTX + ABI. `MESHGRID_F32_PTX` / `MESHGRID_F64_PTX` /
+  `MESHGRID_U16_PTX` carry the 5-arg ABI
+  `(in_ptr, out_ptr, total, inner, axis_len)`. The launcher forces `inner >= 1`
+  so the `div.u32` divisor is never zero (last axis). `MESHGRID_U16_PTX`
+  bit-copies raw f16/bf16 `u16` payloads without widening through f32; the
+  surrounding `GpuBufferHandle` dtype tag distinguishes f16 from bf16.
 - REQ-17: `GpuBackend::meshgrid_grid` trait surface in
   `ferrotorch-core/src/gpu_dispatch.rs` — `(input, total, inner, axis_len)` →
   same-dtype `GpuBufferHandle` of `total` elements. Default impl returns
   `NotImplementedOnCuda`; the CUDA backend overrides.
 - REQ-18: Dispatch wiring + non-test consumer. `CudaBackendImpl::meshgrid_grid`
-  (`ferrotorch-gpu/src/backend_impl.rs`) — `match dtype { F32, F64 }`, wrapping
-  via `wrap_slice_{f32,f64}`. The production consumer is
+  (`ferrotorch-gpu/src/backend_impl.rs`) — `match dtype { F32, F64, F16, BF16 }`,
+  wrapping via `wrap_slice_{f32,f64}` or the half/bf16 `wrap_buffer_*` helpers.
+  The production consumer is
   `ferrotorch-core/src/ops/search.rs::meshgrid`, which when ALL inputs are CUDA
-  f32/f64 produces each axis grid through `GpuBackend::meshgrid_grid` and keeps
-  every grid GPU-resident (`TensorStorage::gpu`) — no R-CODE-4 round trip.
+  f32/f64/f16/bf16 produces each axis grid through `GpuBackend::meshgrid_grid`
+  and keeps every grid GPU-resident (`TensorStorage::gpu`) — no R-CODE-4 round
+  trip.
 - REQ-19: `gpu_unique_consecutive_f32` / `gpu_unique_consecutive_f64` — given a
   device value buffer of `n` elements, collapse each maximal RUN of equal
   ADJACENT elements into a single output element. The output length is
@@ -283,11 +289,13 @@ against torch 2.11 CUDA (values exact in all cases; gathered values exact).
   atomic path; `1.0 == max` in the closed last bin), matching live torch.
 - [x] AC-14: the histc result buffer `is_cuda()` (lives on device); the
   consumer `ferrotorch_core::histc` returns a CUDA tensor (no value round trip).
-- [x] AC-15: `gpu_meshgrid_f32([1,2,3],[4,5], indexing='ij')` → grid0
-  `[1,1,2,2,3,3]`, grid1 `[4,5,4,5,4,5]` (shape `[3,2]`), matching live
-  `torch.meshgrid(..., indexing='ij')`.
-- [x] AC-16: `gpu_meshgrid_f64` 3-axis grid matches the
-  `view(view_shape).expand(shape)` CPU reference per axis.
+- [x] AC-15: `gpu_meshgrid_f32` and `gpu_meshgrid_f16`
+  `([1,2,3],[4,5], indexing='ij')` → grid0 `[1,1,2,2,3,3]`, grid1
+  `[4,5,4,5,4,5]` (shape `[3,2]`), matching live
+  `torch.meshgrid(..., indexing='ij')`; the f16 test checks raw u16 bits.
+- [x] AC-16: `gpu_meshgrid_f64` and `gpu_meshgrid_bf16` 3-axis grids match the
+  `view(view_shape).expand(shape)` CPU reference per axis; the bf16 test checks
+  raw u16 bits.
 - [x] AC-17: the meshgrid result grids `is_cuda()`; the consumer
   `ferrotorch_core::meshgrid` returns CUDA tensors when all inputs are CUDA.
 - [x] AC-18: `unique_consecutive([1,1,2,3,3,3,1])` → values `[1,2,3,1]`,
@@ -399,10 +407,10 @@ consumer path (result `is_cuda()` + torch value-match) is pinned by
 | REQ-12 | SHIPPED | `HISTC_F32_PTX` / `HISTC_F64_PTX in search.rs` carry the 6-arg ABI `(in,out,n,nbins,minv,maxv)`; f32 `red.global.add.f32` (sm_52), f64 `red.global.add.f64` (sm_60) |
 | REQ-13 | SHIPPED | `fn histc_1d in gpu_dispatch.rs` (`GpuBackend` trait method, same-dtype counts output); consumer `ops::search::histc` GPU branch |
 | REQ-14 | SHIPPED | `CudaBackendImpl::histc_1d in backend_impl.rs` dispatches `match dtype { F32, F64 }`, wraps via `wrap_slice_{f32,f64}`; non-test consumer `ferrotorch_core::ops::search::histc` CUDA f32/f64 branch keeps counts GPU-resident (`TensorStorage::gpu`, `histc in ops/search.rs`) |
-| REQ-15 | SHIPPED | `pub fn gpu_meshgrid_f32` / `gpu_meshgrid_f64 in search.rs` mirror `view(view_shape).expand(shape)` at `aten/src/ATen/native/TensorShape.cpp:4462`; consumer `CudaBackendImpl::meshgrid_grid in backend_impl.rs` |
-| REQ-16 | SHIPPED | `MESHGRID_F32_PTX` / `MESHGRID_F64_PTX in search.rs` carry the 5-arg ABI `(in,out,total,inner,axis_len)`; launcher forces `inner >= 1` (no zero-divisor) |
+| REQ-15 | SHIPPED | `pub fn gpu_meshgrid_f32` / `gpu_meshgrid_f64` / `gpu_meshgrid_f16` / `gpu_meshgrid_bf16 in search.rs` mirror `view(view_shape).expand(shape)` at `aten/src/ATen/native/TensorShape.cpp:4462`; consumer `CudaBackendImpl::meshgrid_grid in backend_impl.rs` |
+| REQ-16 | SHIPPED | `MESHGRID_F32_PTX` / `MESHGRID_F64_PTX` / `MESHGRID_U16_PTX in search.rs` carry the 5-arg ABI `(in,out,total,inner,axis_len)`; launcher forces `inner >= 1` (no zero-divisor); u16 path bit-copies f16/bf16 payloads |
 | REQ-17 | SHIPPED | `fn meshgrid_grid in gpu_dispatch.rs` (`GpuBackend` trait method, same-dtype grid output); consumer `ops::search::meshgrid` GPU branch |
-| REQ-18 | SHIPPED | `CudaBackendImpl::meshgrid_grid in backend_impl.rs` dispatches `match dtype { F32, F64 }`, wraps via `wrap_slice_{f32,f64}`; non-test consumer `ferrotorch_core::ops::search::meshgrid` CUDA f32/f64 branch keeps each grid GPU-resident (`TensorStorage::gpu`, `meshgrid in ops/search.rs`) |
+| REQ-18 | SHIPPED | `CudaBackendImpl::meshgrid_grid in backend_impl.rs` dispatches `match dtype { F32, F64, F16, BF16 }`, wraps via `wrap_slice_{f32,f64}` / `wrap_buffer_{f16,bf16}`; non-test consumer `ferrotorch_core::ops::search::meshgrid` CUDA f32/f64/f16/bf16 branch keeps each grid GPU-resident (`TensorStorage::gpu`, `meshgrid in ops/search.rs`) |
 | REQ-19 | SHIPPED | `pub fn gpu_unique_consecutive_f32` / `gpu_unique_consecutive_f64 in ferrotorch-gpu/src/search.rs` run the on-device run-flag → `gpu_cumsum` prefix-sum → compaction pipeline; consumer `CudaBackendImpl::unique_consecutive_1d in ferrotorch-gpu/src/backend_impl.rs` dispatches `match dtype { F32, F64 }` and wraps values via `wrap_buffer{,_f64}` |
 | REQ-20 | SHIPPED | `RUN_FLAG_F32_PTX`/`RUN_FLAG_F64_PTX` (3-arg `(in,flag,n)`) + `COMPACT_F32_PTX`/`COMPACT_F64_PTX` (4-arg `(in,incl,out,n)`) `in ferrotorch-gpu/src/search.rs`; trait `fn unique_consecutive_1d in ferrotorch-core/src/gpu_dispatch.rs`; re-export `pub use search::{gpu_unique_consecutive_f32, gpu_unique_consecutive_f64} in ferrotorch-gpu/src/lib.rs`; non-test consumer `ferrotorch_core::ops::search::unique_consecutive` CUDA f32/f64 branch keeps the deduplicated VALUES GPU-resident (`TensorStorage::gpu`, `unique_consecutive in ferrotorch-core/src/ops/search.rs`), reads back only run-position metadata for the host `inverse`/`counts` vectors (no R-CODE-4 value round trip) |
 | REQ-21 | SHIPPED | `pub fn gpu_unique_f32` / `gpu_unique_f64 in ferrotorch-gpu/src/search.rs` run the on-device init → bitonic sort-by-key → run-flag → `gpu_cumsum` → compaction pipeline mirroring `compute_unique` at `aten/src/ATen/native/cuda/Unique.cu:51-85` (sort-by-key `radix_sort_pairs` `UniqueCub.cu:175`, inverse scatter `Unique.cu:63-66`, run-length counts `:75-81`); non-test consumer `CudaBackendImpl::unique_1d in ferrotorch-gpu/src/backend_impl.rs` dispatches `match dtype { F32, F64 }` and wraps values via `wrap_buffer{,_f64}` |

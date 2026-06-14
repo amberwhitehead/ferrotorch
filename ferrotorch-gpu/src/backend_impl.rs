@@ -8343,6 +8343,28 @@ impl GpuBackend for CudaBackendImpl {
                 .map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_slice_f64(out, ord))
             }
+            DType::F16 => {
+                let out = crate::search::gpu_meshgrid_f16(
+                    Self::unwrap_buffer_f16(input)?,
+                    total,
+                    inner,
+                    axis_len,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_f16(out, ord))
+            }
+            DType::BF16 => {
+                let out = crate::search::gpu_meshgrid_bf16(
+                    Self::unwrap_buffer_bf16(input)?,
+                    total,
+                    inner,
+                    axis_len,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_bf16(out, ord))
+            }
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!("meshgrid_grid: unsupported value dtype {other}"),
             }),

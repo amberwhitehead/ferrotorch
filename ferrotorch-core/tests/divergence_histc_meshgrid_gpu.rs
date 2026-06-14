@@ -1,6 +1,6 @@
 //! GPU consumer-path audit (#1545 / sub #1535): the on-device `histc` /
 //! `meshgrid` kernels added in `ferrotorch-gpu/src/search.rs`
-//! (`gpu_histc_f{32,64}` / `gpu_meshgrid_f{32,64}`) and wired through
+//! (`gpu_histc_f{32,64}` / the original `gpu_meshgrid_f{32,64}` coverage) and wired through
 //! `ferrotorch-core/src/ops/search.rs` (`histc` / `meshgrid` CUDA branches via
 //! `GpuBackend::histc_1d` / `meshgrid_grid`).
 //!
