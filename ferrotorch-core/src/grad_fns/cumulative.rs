@@ -155,12 +155,12 @@ enum ScalarBackwardKind {
 /// only normalized scalar dim is `0`.
 ///
 /// Device contract (CORE-042 / #1736, R-LOUD-2): the output lands on the
-/// INPUT's device. For a CUDA scalar this is a DOCUMENTED host round trip —
-/// the single element is read via `data_vec` (D2H) and the identity result
-/// is re-uploaded with `TensorStorage::on_device`. The identity backward
-/// passes `grad_output` through unchanged, which is device-consistent with
-/// the device-preserving forward. Live torch 2.11.0+cu130 succeeds on 0-D
-/// CUDA tensors for all three ops, returning 0-D outputs on `cuda:0`.
+/// INPUT's device. CUDA scalars are materialised with the existing on-device
+/// strided-copy path under `no_grad`, so offset scalar views are gathered
+/// correctly into fresh storage without a host readback. The identity backward
+/// passes `grad_output` through unchanged, which is device-consistent with the
+/// device-preserving forward. Live torch 2.11.0+cu130 succeeds on 0-D CUDA
+/// tensors for all three ops, returning 0-D outputs on `cuda:0`.
 fn cumulative_scalar_identity<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -186,20 +186,12 @@ fn cumulative_scalar_identity<T: Float>(
         });
     }
 
-    // Materialize a fresh storage with the input's single element so the
-    // returned tensor has a distinct identity from `input` (autograd
-    // graph invariant — Tensor::from_operation needs a new TensorId).
-    //
-    // CORE-042 (#1736): the element is read via `data_vec` (the documented
-    // D2H half of the round trip — `item()`'s `data()` refuses GPU storage)
-    // and the result is re-uploaded to the INPUT's device. Previously this
-    // path materialized `TensorStorage::cpu` unconditionally.
-    let scalar_val = input.data_vec()?[0];
-    let result = Tensor::from_storage(
-        TensorStorage::on_device(vec![scalar_val], input.device())?,
-        Vec::new(),
-        false,
-    )?;
+    // Materialize a fresh scalar storage with the input's logical element so
+    // the returned tensor has a distinct identity from `input` (autograd graph
+    // invariant: Tensor::from_operation needs a new TensorId). CUDA uses the
+    // on-device strided gather, which is critical for 0-D views with a
+    // non-zero storage offset.
+    let result = scalar_identity_value(input)?;
 
     if !(is_grad_enabled() && input.requires_grad()) {
         return Ok(result);
@@ -218,15 +210,10 @@ fn cumulative_scalar_identity<T: Float>(
         }
         ScalarBackwardKind::Cumprod => {
             // CumprodBackward saves `output` too; on 0-D the output
-            // equals the input. Materialize a fresh scalar tensor for
-            // it (semantically identical, distinct identity) on the
-            // input's device (CORE-042 / #1736 — keep the saved pair
-            // device-consistent; the 0-D backward never reads it).
-            let saved_output = Tensor::from_storage(
-                TensorStorage::on_device(vec![scalar_val], input.device())?,
-                Vec::new(),
-                false,
-            )?;
+            // equals the input. Materialize a second device-resident scalar;
+            // the 0-D backward never reads it, but keeping it on the same
+            // device matches the non-scalar saved-output contract.
+            let saved_output = result_for_saved_output(input)?;
             let grad_fn = Arc::new(CumprodBackward {
                 input: input.clone(),
                 output: saved_output,
@@ -235,11 +222,7 @@ fn cumulative_scalar_identity<T: Float>(
             Tensor::from_operation(storage, shape, grad_fn)
         }
         ScalarBackwardKind::Logcumsumexp => {
-            let saved_output = Tensor::from_storage(
-                TensorStorage::on_device(vec![scalar_val], input.device())?,
-                Vec::new(),
-                false,
-            )?;
+            let saved_output = result_for_saved_output(input)?;
             let grad_fn = Arc::new(LogcumsumexpBackward {
                 input: input.clone(),
                 output: saved_output,
@@ -248,6 +231,38 @@ fn cumulative_scalar_identity<T: Float>(
             Tensor::from_operation(storage, shape, grad_fn)
         }
     }
+}
+
+fn scalar_identity_value<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = input.gpu_handle()?;
+        let shape: &[usize] = &[];
+        let strides: &[isize] = &[];
+        let offset = input.storage_offset();
+        let out_handle = match T::dtype() {
+            DType::F32 => backend.strided_copy_f32(handle, shape, strides, offset)?,
+            DType::F64 => backend.strided_copy_f64(handle, shape, strides, offset)?,
+            DType::F16 | DType::BF16 => backend.strided_copy_u16(handle, shape, strides, offset)?,
+            _ => {
+                return Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "cumulative scalar identity",
+                });
+            }
+        };
+        return Tensor::from_storage(TensorStorage::gpu(out_handle), Vec::new(), false);
+    }
+    let scalar_val = input.data_vec()?[0];
+    Tensor::from_storage(
+        TensorStorage::on_device(vec![scalar_val], input.device())?,
+        Vec::new(),
+        false,
+    )
+}
+
+fn result_for_saved_output<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    scalar_identity_value(input)
 }
 
 // ---------------------------------------------------------------------------
@@ -741,11 +756,12 @@ enum ScalarExtremeKind {
 /// ```
 ///
 /// Device contract (CORE-042 / #1736, R-LOUD-2): `values` lands on the
-/// INPUT's device — for a CUDA scalar the element is read via `data_vec`
-/// (documented D2H) and re-uploaded with `TensorStorage::on_device`. Live
-/// torch 2.11.0+cu130 returns `(tensor(5., device='cuda:0'), tensor(0,
-/// device='cuda:0'))` for a 0-D CUDA input; ferrotorch's `indices` carrier
-/// stays the documented `Vec<usize>` deviation (no device dimension).
+/// INPUT's device. CUDA scalar values are gathered with on-device strided
+/// copy, and CUDA scalar indices are allocated directly as an i64
+/// zero buffer. Live torch 2.11.0+cu130 returns `(tensor(5.,
+/// device='cuda:0'), tensor(0, device='cuda:0'))` for a 0-D CUDA input;
+/// ferrotorch's `indices` carrier stays the documented `Vec<usize>` deviation
+/// (no device dimension).
 ///
 /// Autograd (CORE-042 / #1736 companion): when gradient tracking is
 /// enabled, `values` carries the op's `*Backward` node (whose existing
@@ -774,16 +790,11 @@ fn cumextreme_scalar_identity<T: Float>(
             ),
         });
     }
-    // CORE-042 (#1736): device-transparent read + re-upload to the input's
-    // device (documented host round trip, R-LOUD-2 — see the device-contract
-    // note above). Previously `item()` + unconditional `TensorStorage::cpu`.
-    let scalar_val = input.data_vec()?[0];
-    let values = Tensor::from_storage(
-        TensorStorage::on_device(vec![scalar_val], input.device())?,
-        Vec::new(),
-        false,
-    )?;
-    let indices_tensor = IntTensor::<i64>::from_vec(vec![0], Vec::new())?.to(input.device())?;
+    // CORE-042 (#1736): device-transparent scalar identity. CUDA offset scalar
+    // views are gathered directly on device and the i64 index scalar is
+    // allocated on device.
+    let values = scalar_identity_value(input)?;
+    let indices_tensor = scalar_zero_i64(input.device())?;
 
     if !(is_grad_enabled() && input.requires_grad()) {
         return Ok(CumExtremeResult {
@@ -826,6 +837,16 @@ fn cumextreme_scalar_identity<T: Float>(
         indices_tensor,
         indices: vec![0],
     })
+}
+
+fn scalar_zero_i64(device: crate::device::Device) -> FerrotorchResult<IntTensor<i64>> {
+    if let crate::device::Device::Cuda(ordinal) = device {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = backend.alloc_zeros(1, DType::I64, ordinal)?;
+        return Ok(IntTensor::<i64>::from_gpu_handle(handle, Vec::new()));
+    }
+    IntTensor::<i64>::from_vec(vec![0], Vec::new())?.to(device)
 }
 
 // ---------------------------------------------------------------------------
