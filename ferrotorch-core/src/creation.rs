@@ -76,26 +76,99 @@ pub fn eye<T: Float>(n: usize) -> FerrotorchResult<Tensor<T>> {
     Tensor::from_storage(TensorStorage::cpu(data), vec![n, n], false)
 }
 
-/// Create a 1-D tensor with values from `start` to `end` (exclusive) with step `step`.
-pub fn arange<T: Float>(start: T, end: T, step: T) -> FerrotorchResult<Tensor<T>> {
-    let mut data = Vec::new();
-    let mut val = start;
-    if step > <T as num_traits::Zero>::zero() {
-        while val < end {
-            data.push(val);
-            val += step;
-        }
-    } else if step < <T as num_traits::Zero>::zero() {
-        while val > end {
-            data.push(val);
-            val += step;
-        }
-    } else {
-        return Err(crate::error::FerrotorchError::InvalidArgument {
-            message: "arange: step cannot be zero".into(),
+fn arange_arg<T: Float>(value: T) -> String {
+    value.to_f64().map_or_else(
+        || "<not representable as f64>".to_string(),
+        |v| v.to_string(),
+    )
+}
+
+fn arange_len<T: Float>(start: T, end: T, step: T) -> FerrotorchResult<usize> {
+    let zero = <T as num_traits::Zero>::zero();
+
+    if !start.is_finite() || !end.is_finite() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "arange: unsupported range: {} -> {}",
+                arange_arg(start),
+                arange_arg(end)
+            ),
         });
     }
-    let len = data.len();
+    if step == zero || step.is_nan() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "arange: step must be nonzero".into(),
+        });
+    }
+    if start == end {
+        return Ok(0);
+    }
+
+    let ascending = start < end;
+    if (ascending && step < zero) || (!ascending && step > zero) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "arange: upper bound and lower bound inconsistent with step sign".into(),
+        });
+    }
+    if step.is_infinite() {
+        return Ok(0);
+    }
+
+    let start_f = start
+        .to_f64()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "arange: start is not representable as f64".into(),
+        })?;
+    let end_f = end
+        .to_f64()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "arange: end is not representable as f64".into(),
+        })?;
+    let step_f = step
+        .to_f64()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "arange: step is not representable as f64".into(),
+        })?;
+
+    let len_f = ((end_f - start_f) / step_f).ceil();
+    if !len_f.is_finite() || len_f < 0.0 || len_f >= usize::MAX as f64 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "arange: length is not representable for range {} -> {} with step {}",
+                arange_arg(start),
+                arange_arg(end),
+                arange_arg(step)
+            ),
+        });
+    }
+
+    let len = len_f as usize;
+    let bytes = checked_byte_count(len, std::mem::size_of::<T>(), "arange")?;
+    if isize::try_from(bytes).is_err() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "arange: storage size calculation overflowed for {len} elements of {} bytes",
+                std::mem::size_of::<T>()
+            ),
+        });
+    }
+    Ok(len)
+}
+
+/// Create a 1-D tensor with values from `start` to `end` (exclusive) with step `step`.
+pub fn arange<T: Float>(start: T, end: T, step: T) -> FerrotorchResult<Tensor<T>> {
+    let len = arange_len(start, end, step)?;
+    let mut data = Vec::new();
+    data.try_reserve_exact(len)
+        .map_err(|err| FerrotorchError::InvalidArgument {
+            message: format!("arange: could not allocate {len} elements: {err}"),
+        })?;
+    for i in 0..len {
+        let idx = T::from(i).ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("arange: index {i} is not representable in output dtype"),
+        })?;
+        data.push(start + step * idx);
+    }
     Tensor::from_storage(TensorStorage::cpu(data), vec![len], false)
 }
 
@@ -425,9 +498,95 @@ mod tests {
     }
 
     #[test]
+    fn test_arange_negative_step() {
+        let t: Tensor<f32> = arange(5.0, 1.0, -1.5).unwrap();
+        assert_eq!(t.shape(), &[3]);
+        assert_eq!(t.data().unwrap(), &[5.0, 3.5, 2.0]);
+    }
+
+    #[test]
+    fn test_arange_wrong_step_sign_errors() {
+        let forward: Result<Tensor<f32>, _> = arange(5.0, 1.0, 1.0);
+        let backward: Result<Tensor<f32>, _> = arange(1.0, 5.0, -1.0);
+        for result in [forward, backward] {
+            let err = result.expect_err("wrong-sign arange must error");
+            assert!(
+                err.to_string()
+                    .contains("upper bound and lower bound inconsistent with step sign"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
     fn test_arange_zero_step() {
         let result: Result<Tensor<f32>, _> = arange(0.0, 5.0, 0.0);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_arange_nonfinite_bounds_error() {
+        let result: Result<Tensor<f32>, _> = arange(0.0, f32::INFINITY, 1.0);
+        let err = result.expect_err("infinite end must error");
+        assert!(err.to_string().contains("unsupported range"), "{err}");
+
+        let result: Result<Tensor<f32>, _> = arange(f32::NAN, 5.0, 1.0);
+        let err = result.expect_err("NaN start must error");
+        assert!(err.to_string().contains("unsupported range"), "{err}");
+    }
+
+    #[test]
+    fn test_arange_nan_step_errors() {
+        let result: Result<Tensor<f32>, _> = arange(0.0, 5.0, f32::NAN);
+        let err = result.expect_err("NaN step must error");
+        assert!(err.to_string().contains("step must be nonzero"), "{err}");
+    }
+
+    #[test]
+    fn test_arange_infinite_step_matching_sign_is_empty() {
+        let forward: Tensor<f32> = arange(0.0, 5.0, f32::INFINITY).unwrap();
+        let backward: Tensor<f32> = arange(5.0, 0.0, f32::NEG_INFINITY).unwrap();
+        assert_eq!(forward.shape(), &[0]);
+        assert_eq!(backward.shape(), &[0]);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_arange_f32_sub_ulp_step_uses_index_generation() {
+        let t: Tensor<f32> = arange(16_777_216.0, 16_777_220.0, 1.0).unwrap();
+        assert_eq!(t.shape(), &[4]);
+        assert_eq!(
+            t.data().unwrap(),
+            &[16_777_216.0, 16_777_216.0, 16_777_218.0, 16_777_220.0]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_arange_f16_sub_ulp_step_uses_index_generation() {
+        let t: Tensor<half::f16> = arange(
+            half::f16::from_f32(2048.0),
+            half::f16::from_f32(2052.0),
+            half::f16::from_f32(0.5),
+        )
+        .unwrap();
+        let data: Vec<f32> = t.data().unwrap().iter().map(|v| v.to_f32()).collect();
+        assert_eq!(
+            data,
+            vec![
+                2048.0, 2048.0, 2048.0, 2050.0, 2050.0, 2050.0, 2052.0, 2052.0
+            ]
+        );
+    }
+
+    #[test]
+    fn test_arange_rejects_unrepresentable_length_without_allocation() {
+        let err = arange_len(0.0f64, f64::MAX, f64::MIN_POSITIVE)
+            .expect_err("unrepresentable length must error before allocation");
+        assert!(
+            err.to_string().contains("length is not representable"),
+            "{err}"
+        );
     }
 
     #[test]
