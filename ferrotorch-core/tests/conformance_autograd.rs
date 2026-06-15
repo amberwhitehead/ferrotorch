@@ -3885,10 +3885,6 @@ mod gpu {
     }
 
     #[test]
-    #[ignore = "blocked by #1961: CUDA whole-tensor reductions over an \
-                offset-0 view shorter than its storage reduce the WHOLE \
-                buffer (sum(select(x,0,0)) == sum of all of x). Pinned red \
-                2026-06-11; un-ignore when #1961 closes."]
     fn gpu_vmap_multi_output_cuda_sum_closure_pinned() {
         // R-RED-1 pin for #1961 (discovered during the CORE-056 / #1750
         // remediation — R-AHON-4). torch oracle on cuda:0:

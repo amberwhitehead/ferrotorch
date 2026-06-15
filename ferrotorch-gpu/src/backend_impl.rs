@@ -38,6 +38,7 @@ use crate::buffer::CudaBuffer;
 #[cfg(all(feature = "cuda", feature = "cusparselt"))]
 use crate::cusparselt::CusparseLtHandle;
 use crate::device::GpuDevice;
+use crate::error::GpuResult;
 #[cfg(feature = "cuda")]
 use crate::sparse::CusparseHandle;
 
@@ -214,6 +215,55 @@ impl CudaBackendImpl {
             .ok_or(FerrotorchError::InvalidArgument {
                 message: "GPU handle does not contain a CudaBuffer<f64>".into(),
             })
+    }
+
+    fn validate_reduce_len(
+        op: &'static str,
+        buffer_len: usize,
+        len: usize,
+    ) -> FerrotorchResult<()> {
+        if len > buffer_len {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "{op}: requested logical reduction length {len} exceeds GPU buffer length {buffer_len}"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn reduce_f32_prefix(
+        op: &'static str,
+        input: &CudaBuffer<f32>,
+        len: usize,
+        device: &GpuDevice,
+        reduce: impl FnOnce(&CudaBuffer<f32>, &GpuDevice) -> GpuResult<CudaBuffer<f32>>,
+    ) -> FerrotorchResult<CudaBuffer<f32>> {
+        Self::validate_reduce_len(op, input.len(), len)?;
+        if len == input.len() {
+            return reduce(input, device).map_err(Self::map_gpu_err);
+        }
+
+        let packed = crate::kernels::gpu_strided_copy(input, &[len], &[1], 0, device)
+            .map_err(Self::map_gpu_err)?;
+        reduce(&packed, device).map_err(Self::map_gpu_err)
+    }
+
+    fn reduce_f64_prefix(
+        op: &'static str,
+        input: &CudaBuffer<f64>,
+        len: usize,
+        device: &GpuDevice,
+        reduce: impl FnOnce(&CudaBuffer<f64>, &GpuDevice) -> GpuResult<CudaBuffer<f64>>,
+    ) -> FerrotorchResult<CudaBuffer<f64>> {
+        Self::validate_reduce_len(op, input.len(), len)?;
+        if len == input.len() {
+            return reduce(input, device).map_err(Self::map_gpu_err);
+        }
+
+        let packed = crate::kernels::gpu_strided_copy_f64(input, &[len], &[1], 0, device)
+            .map_err(Self::map_gpu_err)?;
+        reduce(&packed, device).map_err(Self::map_gpu_err)
     }
 
     /// Wrap a `CudaSlice<u16>` (bf16 bit-pattern storage) into a type-erased
@@ -2474,17 +2524,21 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     // f64 reduction ops
-    fn sum_f64(&self, a: &GpuBufferHandle, _n: usize) -> FerrotorchResult<GpuBufferHandle> {
+    fn sum_f64(&self, a: &GpuBufferHandle, n: usize) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::kernels::gpu_reduce_sum_f64(a_buf, dev).map_err(Self::map_gpu_err)?;
+        let result = Self::reduce_f64_prefix("sum_f64", a_buf, n, dev, |buf, dev| {
+            crate::kernels::gpu_reduce_sum_f64(buf, dev)
+        })?;
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
-    fn prod_f64(&self, a: &GpuBufferHandle, _n: usize) -> FerrotorchResult<GpuBufferHandle> {
+    fn prod_f64(&self, a: &GpuBufferHandle, n: usize) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::kernels::gpu_reduce_prod_f64(a_buf, dev).map_err(Self::map_gpu_err)?;
+        let result = Self::reduce_f64_prefix("prod_f64", a_buf, n, dev, |buf, dev| {
+            crate::kernels::gpu_reduce_prod_f64(buf, dev)
+        })?;
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
@@ -2626,17 +2680,21 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, input.device_ordinal()))
     }
 
-    fn min_f64(&self, a: &GpuBufferHandle, _n: usize) -> FerrotorchResult<GpuBufferHandle> {
+    fn min_f64(&self, a: &GpuBufferHandle, n: usize) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::kernels::gpu_reduce_min_f64(a_buf, dev).map_err(Self::map_gpu_err)?;
+        let result = Self::reduce_f64_prefix("min_f64", a_buf, n, dev, |buf, dev| {
+            crate::kernels::gpu_reduce_min_f64(buf, dev)
+        })?;
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
-    fn max_f64(&self, a: &GpuBufferHandle, _n: usize) -> FerrotorchResult<GpuBufferHandle> {
+    fn max_f64(&self, a: &GpuBufferHandle, n: usize) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::kernels::gpu_reduce_max_f64(a_buf, dev).map_err(Self::map_gpu_err)?;
+        let result = Self::reduce_f64_prefix("max_f64", a_buf, n, dev, |buf, dev| {
+            crate::kernels::gpu_reduce_max_f64(buf, dev)
+        })?;
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
@@ -3467,17 +3525,21 @@ impl GpuBackend for CudaBackendImpl {
 
     // -- Reduction f32 --------------------------------------------------------
 
-    fn sum_f32(&self, a: &GpuBufferHandle, _len: usize) -> FerrotorchResult<GpuBufferHandle> {
+    fn sum_f32(&self, a: &GpuBufferHandle, len: usize) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::kernels::gpu_reduce_sum(a_buf, dev).map_err(Self::map_gpu_err)?;
+        let result = Self::reduce_f32_prefix("sum_f32", a_buf, len, dev, |buf, dev| {
+            crate::kernels::gpu_reduce_sum(buf, dev)
+        })?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
-    fn prod_f32(&self, a: &GpuBufferHandle, _len: usize) -> FerrotorchResult<GpuBufferHandle> {
+    fn prod_f32(&self, a: &GpuBufferHandle, len: usize) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::kernels::gpu_reduce_prod(a_buf, dev).map_err(Self::map_gpu_err)?;
+        let result = Self::reduce_f32_prefix("prod_f32", a_buf, len, dev, |buf, dev| {
+            crate::kernels::gpu_reduce_prod(buf, dev)
+        })?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
@@ -3659,17 +3721,21 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(result, input.device_ordinal()))
     }
 
-    fn min_f32(&self, a: &GpuBufferHandle, _len: usize) -> FerrotorchResult<GpuBufferHandle> {
+    fn min_f32(&self, a: &GpuBufferHandle, len: usize) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::kernels::gpu_reduce_min(a_buf, dev).map_err(Self::map_gpu_err)?;
+        let result = Self::reduce_f32_prefix("min_f32", a_buf, len, dev, |buf, dev| {
+            crate::kernels::gpu_reduce_min(buf, dev)
+        })?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
-    fn max_f32(&self, a: &GpuBufferHandle, _len: usize) -> FerrotorchResult<GpuBufferHandle> {
+    fn max_f32(&self, a: &GpuBufferHandle, len: usize) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let result = crate::kernels::gpu_reduce_max(a_buf, dev).map_err(Self::map_gpu_err)?;
+        let result = Self::reduce_f32_prefix("max_f32", a_buf, len, dev, |buf, dev| {
+            crate::kernels::gpu_reduce_max(buf, dev)
+        })?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
@@ -12202,6 +12268,22 @@ mod tests {
         }
     }
 
+    fn f32_bytes(values: &[f32]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_ne_bytes()).collect()
+    }
+
+    fn f64_bytes(values: &[f64]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_ne_bytes()).collect()
+    }
+
+    fn scalar_f32(bytes: &[u8]) -> f32 {
+        f32::from_ne_bytes(bytes.try_into().expect("one f32 scalar"))
+    }
+
+    fn scalar_f64(bytes: &[u8]) -> f64 {
+        f64::from_ne_bytes(bytes.try_into().expect("one f64 scalar"))
+    }
+
     #[test]
     fn test_init_cuda_backend() {
         // First call succeeds (or backend was already registered by another test).
@@ -12213,6 +12295,116 @@ mod tests {
     fn test_gpu_backend_returns_some() {
         ensure_init();
         assert!(gpu_dispatch::gpu_backend().is_some());
+    }
+
+    #[test]
+    fn reduction_methods_respect_logical_len_f32() {
+        ensure_init();
+        let backend = gpu_dispatch::gpu_backend().expect("backend registered");
+
+        let handle = backend
+            .cpu_to_gpu(&f32_bytes(&[2.0, 3.0, 4.0, -10.0, 100.0]), DType::F32, 0)
+            .expect("cpu_to_gpu");
+
+        let sum = backend.sum_f32(&handle, 3).expect("sum_f32 len");
+        let prod = backend.prod_f32(&handle, 3).expect("prod_f32 len");
+        let min = backend.min_f32(&handle, 3).expect("min_f32 len");
+        let max = backend.max_f32(&handle, 3).expect("max_f32 len");
+
+        assert_eq!(
+            scalar_f32(&backend.gpu_to_cpu(&sum).expect("sum readback")),
+            9.0
+        );
+        assert_eq!(
+            scalar_f32(&backend.gpu_to_cpu(&prod).expect("prod readback")),
+            24.0
+        );
+        assert_eq!(
+            scalar_f32(&backend.gpu_to_cpu(&min).expect("min readback")),
+            2.0
+        );
+        assert_eq!(
+            scalar_f32(&backend.gpu_to_cpu(&max).expect("max readback")),
+            4.0
+        );
+
+        let empty_sum = backend.sum_f32(&handle, 0).expect("sum_f32 empty prefix");
+        let empty_prod = backend.prod_f32(&handle, 0).expect("prod_f32 empty prefix");
+        assert_eq!(
+            scalar_f32(&backend.gpu_to_cpu(&empty_sum).expect("empty sum readback")),
+            0.0
+        );
+        assert_eq!(
+            scalar_f32(
+                &backend
+                    .gpu_to_cpu(&empty_prod)
+                    .expect("empty prod readback")
+            ),
+            1.0
+        );
+
+        let err = backend
+            .sum_f32(&handle, 6)
+            .expect_err("len > buffer must error");
+        assert!(
+            matches!(err, FerrotorchError::ShapeMismatch { .. }),
+            "expected ShapeMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn reduction_methods_respect_logical_len_f64() {
+        ensure_init();
+        let backend = gpu_dispatch::gpu_backend().expect("backend registered");
+
+        let handle = backend
+            .cpu_to_gpu(&f64_bytes(&[2.0, 3.0, 4.0, -10.0, 100.0]), DType::F64, 0)
+            .expect("cpu_to_gpu");
+
+        let sum = backend.sum_f64(&handle, 3).expect("sum_f64 len");
+        let prod = backend.prod_f64(&handle, 3).expect("prod_f64 len");
+        let min = backend.min_f64(&handle, 3).expect("min_f64 len");
+        let max = backend.max_f64(&handle, 3).expect("max_f64 len");
+
+        assert_eq!(
+            scalar_f64(&backend.gpu_to_cpu(&sum).expect("sum readback")),
+            9.0
+        );
+        assert_eq!(
+            scalar_f64(&backend.gpu_to_cpu(&prod).expect("prod readback")),
+            24.0
+        );
+        assert_eq!(
+            scalar_f64(&backend.gpu_to_cpu(&min).expect("min readback")),
+            2.0
+        );
+        assert_eq!(
+            scalar_f64(&backend.gpu_to_cpu(&max).expect("max readback")),
+            4.0
+        );
+
+        let empty_sum = backend.sum_f64(&handle, 0).expect("sum_f64 empty prefix");
+        let empty_prod = backend.prod_f64(&handle, 0).expect("prod_f64 empty prefix");
+        assert_eq!(
+            scalar_f64(&backend.gpu_to_cpu(&empty_sum).expect("empty sum readback")),
+            0.0
+        );
+        assert_eq!(
+            scalar_f64(
+                &backend
+                    .gpu_to_cpu(&empty_prod)
+                    .expect("empty prod readback")
+            ),
+            1.0
+        );
+
+        let err = backend
+            .sum_f64(&handle, 6)
+            .expect_err("len > buffer must error");
+        assert!(
+            matches!(err, FerrotorchError::ShapeMismatch { .. }),
+            "expected ShapeMismatch, got {err:?}"
+        );
     }
 
     #[test]
