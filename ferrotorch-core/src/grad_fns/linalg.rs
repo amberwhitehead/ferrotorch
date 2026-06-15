@@ -48,7 +48,7 @@ use std::sync::Arc;
 
 use crate::autograd::autocast_ops::{AutocastCategory, autocast_guard};
 use crate::autograd::no_grad::is_grad_enabled;
-use crate::dtype::Float;
+use crate::dtype::{DType, Element, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::gpu_dispatch::gpu_backend;
 use crate::linalg as linalg_fwd;
@@ -5334,6 +5334,73 @@ pub fn kron_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> Ferrotorch
 // DiagonalBackward — d = diagonal(A, offset)  (2D -> 1D)
 // ---------------------------------------------------------------------------
 
+fn diag_scatter_to_shape<T: Float>(
+    grad_output: &Tensor<T>,
+    rows: usize,
+    cols: usize,
+    offset: i64,
+) -> FerrotorchResult<Tensor<T>> {
+    if grad_output.is_cuda() {
+        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = match <T as Element>::dtype() {
+            DType::F32 => {
+                backend.diag_scatter_f32(grad_output.gpu_handle()?, rows, cols, offset)?
+            }
+            DType::F64 => {
+                backend.diag_scatter_f64(grad_output.gpu_handle()?, rows, cols, offset)?
+            }
+            DType::F16 | DType::BF16 => {
+                backend.diag_scatter_u16(grad_output.gpu_handle()?, rows, cols, offset)?
+            }
+            _ => {
+                return Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "diag scatter backward",
+                });
+            }
+        };
+        return Tensor::from_storage(TensorStorage::gpu(handle), vec![rows, cols], false);
+    }
+
+    let g = grad_output.data_vec()?;
+    let zero = <T as num_traits::Zero>::zero();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("diagonal backward: shape [{rows}, {cols}] overflows storage size"),
+        })?;
+    let mut out = vec![zero; total];
+    let (row_start, col_start) = if offset >= 0 {
+        (0usize, offset as usize)
+    } else {
+        let row_start = usize::try_from(offset.unsigned_abs()).map_err(|_| {
+            FerrotorchError::InvalidArgument {
+                message: format!("diagonal backward: offset {offset} overflows usize"),
+            }
+        })?;
+        (row_start, 0usize)
+    };
+    for (i, &gv) in g.iter().enumerate() {
+        let r = row_start + i;
+        let c = col_start + i;
+        let idx = r
+            .checked_mul(cols)
+            .and_then(|base| base.checked_add(c))
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "diagonal backward: diagonal index overflows storage size".into(),
+            })?;
+        if idx >= out.len() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "diagonal backward: grad length {} exceeds target diagonal in shape [{rows}, {cols}] at offset {offset}",
+                    g.len()
+                ),
+            });
+        }
+        out[idx] = gv;
+    }
+    from_cpu(out, vec![rows, cols])
+}
+
 /// Backward for `diagonal(A, offset)`.
 ///
 /// VJP (`tools/autograd/derivatives.yaml:572` `diagonal` →
@@ -5349,20 +5416,8 @@ pub struct DiagonalBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for DiagonalBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let g = grad_output.data()?;
-        let zero = <T as num_traits::Zero>::zero();
-        let mut out = vec![zero; self.rows * self.cols];
-        let (row_start, col_start) = if self.offset >= 0 {
-            (0usize, self.offset as usize)
-        } else {
-            ((-self.offset) as usize, 0usize)
-        };
-        for (i, &gv) in g.iter().enumerate() {
-            let r = row_start + i;
-            let c = col_start + i;
-            out[r * self.cols + c] = gv;
-        }
-        Ok(vec![Some(from_cpu(out, vec![self.rows, self.cols])?)])
+        let grad_input = diag_scatter_to_shape(grad_output, self.rows, self.cols, self.offset)?;
+        Ok(vec![Some(grad_input)])
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -5441,39 +5496,21 @@ pub struct DiagBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for DiagBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let g = grad_output.data()?;
-        let zero = <T as num_traits::Zero>::zero();
         if self.construct {
             // Forward was 1-D -> 2-D diagonal matrix; grad is 2-D, grad_input
-            // is the diagonal of grad (1-D).
-            let n = self.in_shape[0];
-            let offset = self.diagonal.unsigned_abs() as usize;
-            let size = n + offset;
-            let mut out = vec![zero; n];
-            for (i, slot) in out.iter_mut().enumerate() {
-                let (r, c) = if self.diagonal >= 0 {
-                    (i, i + offset)
-                } else {
-                    (i + offset, i)
-                };
-                *slot = g[r * size + c];
-            }
-            Ok(vec![Some(from_cpu(out, vec![n])?)])
+            // is the same diagonal extracted from grad (1-D). Reuse the public
+            // structural kernel under no_grad so CUDA gradients stay resident.
+            let grad_input = crate::autograd::no_grad::no_grad(|| {
+                crate::ops::tensor_ops::diag(grad_output, self.diagonal)
+            })?;
+            Ok(vec![Some(grad_input)])
         } else {
             // Forward was 2-D -> 1-D extract; grad is 1-D, grad_input scatters
             // grad onto the `diagonal`-th diagonal of a zero matrix.
             let rows = self.in_shape[0];
             let cols = self.in_shape[1];
-            let mut out = vec![zero; rows * cols];
-            let (start_r, start_c) = if self.diagonal >= 0 {
-                (0usize, self.diagonal as usize)
-            } else {
-                ((-self.diagonal) as usize, 0usize)
-            };
-            for (i, &gv) in g.iter().enumerate() {
-                out[(start_r + i) * cols + (start_c + i)] = gv;
-            }
-            Ok(vec![Some(from_cpu(out, vec![rows, cols])?)])
+            let grad_input = diag_scatter_to_shape(grad_output, rows, cols, self.diagonal)?;
+            Ok(vec![Some(grad_input)])
         }
     }
 
@@ -5542,8 +5579,6 @@ pub fn diag_differentiable<T: Float>(a: &Tensor<T>, diagonal: i64) -> Ferrotorch
 /// the full input shape (matching the now-batched forward + torch).
 #[derive(Debug)]
 pub struct TriangularBackward<T: Float> {
-    /// Full input shape (N-D, last two dims are the matrix axes).
-    in_shape: Vec<usize>,
     diagonal: i64,
     /// `true` for `tril` (keep `c <= r + diag`), `false` for `triu`
     /// (keep `c >= r + diag`).
@@ -5553,34 +5588,14 @@ pub struct TriangularBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for TriangularBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let g = grad_output.data()?;
-        let ndim = self.in_shape.len();
-        // Matrix axes are the last two dims; everything before is batch. For a
-        // 2-D input this collapses to a single matrix (batch == 1), reproducing
-        // the prior 2-D behaviour bit-for-bit.
-        let rows = self.in_shape[ndim - 2];
-        let cols = self.in_shape[ndim - 1];
-        let mat = rows * cols;
-        let batch: usize = self.in_shape[..ndim - 2].iter().product();
-        let zero = <T as num_traits::Zero>::zero();
-        let mut out = vec![zero; batch * mat];
-        for b in 0..batch {
-            let base = b * mat;
-            for r in 0..rows {
-                for c in 0..cols {
-                    let keep = if self.lower {
-                        (c as i64) <= (r as i64) + self.diagonal
-                    } else {
-                        (c as i64) >= (r as i64) + self.diagonal
-                    };
-                    if keep {
-                        let idx = base + r * cols + c;
-                        out[idx] = g[idx];
-                    }
-                }
+        let grad_input = crate::autograd::no_grad::no_grad(|| {
+            if self.lower {
+                crate::ops::tensor_ops::tril(grad_output, self.diagonal)
+            } else {
+                crate::ops::tensor_ops::triu(grad_output, self.diagonal)
             }
-        }
-        Ok(vec![Some(from_cpu(out, self.in_shape.clone())?)])
+        })?;
+        Ok(vec![Some(grad_input)])
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -5625,7 +5640,6 @@ pub fn tril_differentiable<T: Float>(a: &Tensor<T>, diagonal: i64) -> Ferrotorch
         let grad_fn = Arc::new(TriangularForward {
             input: a.clone(),
             inner: TriangularBackward {
-                in_shape: a.shape().to_vec(),
                 diagonal,
                 lower: true,
                 _marker: std::marker::PhantomData,
@@ -5648,7 +5662,6 @@ pub fn triu_differentiable<T: Float>(a: &Tensor<T>, diagonal: i64) -> Ferrotorch
         let grad_fn = Arc::new(TriangularForward {
             input: a.clone(),
             inner: TriangularBackward {
-                in_shape: a.shape().to_vec(),
                 diagonal,
                 lower: false,
                 _marker: std::marker::PhantomData,

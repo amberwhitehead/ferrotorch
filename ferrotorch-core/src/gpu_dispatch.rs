@@ -2918,6 +2918,35 @@ pub trait GpuBackend: Send + Sync {
         Err(FerrotorchError::NotImplementedOnCuda { op: "tril_f64" })
     }
 
+    /// Upper-triangular mask over an f16/bf16 `[batch.., rows, cols]` buffer.
+    ///
+    /// The CUDA backend copies raw 16-bit payloads and preserves the input
+    /// handle's dtype tag (`F16` vs `BF16`) on the result.
+    fn triu_u16(
+        &self,
+        _a: &GpuBufferHandle,
+        _batch: usize,
+        _rows: usize,
+        _cols: usize,
+        _k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "triu_u16" })
+    }
+
+    /// Lower-triangular mask over an f16/bf16 `[batch.., rows, cols]` buffer.
+    ///
+    /// See [`Self::triu_u16`] for dtype-tag preservation.
+    fn tril_u16(
+        &self,
+        _a: &GpuBufferHandle,
+        _batch: usize,
+        _rows: usize,
+        _cols: usize,
+        _k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "tril_u16" })
+    }
+
     // -- Diagonal: diag_embed / diag_extract (#1545 / sub #1535) -------------
     //
     // `torch.diag` is `diag_embed` (1-D -> 2-D scatter onto the k-th diagonal)
@@ -2957,6 +2986,19 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// `diag` of a 1-D f16/bf16 buffer. Copies raw 16-bit payloads and preserves
+    /// the input handle's dtype tag on the result.
+    fn diag_embed_u16(
+        &self,
+        _a: &GpuBufferHandle,
+        _n: usize,
+        _k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "diag_embed_u16",
+        })
+    }
+
     /// `diag` of a 2-D f32 `[rows, cols]` buffer: gather the `k`-th diagonal
     /// into a 1-D vector of `min(rows-start_r, cols-start_c)` elements.
     fn diag_extract_f32(
@@ -2981,6 +3023,62 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "diag_extract_f64",
+        })
+    }
+
+    /// `diag` of a 2-D f16/bf16 `[rows, cols]` buffer. Copies raw 16-bit
+    /// payloads and preserves the input handle's dtype tag on the result.
+    fn diag_extract_u16(
+        &self,
+        _a: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+        _k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "diag_extract_u16",
+        })
+    }
+
+    /// Scatter a 1-D f32 gradient onto the `k`-th diagonal of a zero
+    /// `[rows, cols]` buffer. This is the resident CUDA VJP for `diagonal` and
+    /// 2-D `diag` extraction.
+    fn diag_scatter_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+        _k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "diag_scatter_f32",
+        })
+    }
+
+    /// f64 variant of [`Self::diag_scatter_f32`].
+    fn diag_scatter_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+        _k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "diag_scatter_f64",
+        })
+    }
+
+    /// f16/bf16 raw-payload variant of [`Self::diag_scatter_f32`]. The CUDA
+    /// backend preserves the input handle's dtype tag on the result.
+    fn diag_scatter_u16(
+        &self,
+        _a: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+        _k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "diag_scatter_u16",
         })
     }
 

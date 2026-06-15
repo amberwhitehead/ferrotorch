@@ -1939,7 +1939,6 @@ pub fn multi_dot<T: Float>(matrices: &[&Tensor<T>]) -> FerrotorchResult<Tensor<T
 /// scatters `grad` back onto the `offset`-th diagonal of a zero matrix, per
 /// `diagonal_backward_symint`, upstream `tools/autograd/derivatives.yaml:573`).
 pub fn diagonal<T: Float>(a: &Tensor<T>, offset: i64) -> FerrotorchResult<Tensor<T>> {
-    require_cpu(a, "diagonal")?;
     let shape = a.shape();
     if shape.len() != 2 {
         return Err(FerrotorchError::InvalidArgument {
@@ -1953,25 +1952,30 @@ pub fn diagonal<T: Float>(a: &Tensor<T>, offset: i64) -> FerrotorchResult<Tensor
     if crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
         return crate::grad_fns::linalg::diagonal_differentiable(a, offset);
     }
-    let (m, n) = (shape[0] as i64, shape[1] as i64);
-    let row_start: i64;
-    let col_start: i64;
-    if offset >= 0 {
-        row_start = 0;
-        col_start = offset;
-    } else {
-        row_start = -offset;
-        col_start = 0;
+
+    if a.is_cuda() {
+        return crate::ops::tensor_ops::diag(a, offset);
     }
-    if col_start >= n || row_start >= m {
+
+    let (row_start, col_start) = if offset >= 0 {
+        (0usize, offset as usize)
+    } else {
+        let row_start = usize::try_from(offset.unsigned_abs()).map_err(|_| {
+            FerrotorchError::InvalidArgument {
+                message: format!("diagonal: offset {offset} overflows usize"),
+            }
+        })?;
+        (row_start, 0usize)
+    };
+    if col_start >= shape[1] || row_start >= shape[0] {
         return Tensor::from_storage(TensorStorage::cpu(Vec::<T>::new()), vec![0], false);
     }
-    let len = (m - row_start).min(n - col_start) as usize;
-    let data = a.data()?;
+    let len = (shape[0] - row_start).min(shape[1] - col_start);
+    let data = a.data_vec()?;
     let mut out: Vec<T> = Vec::with_capacity(len);
-    for i in 0..len as i64 {
-        let r = (row_start + i) as usize;
-        let c = (col_start + i) as usize;
+    for i in 0..len {
+        let r = row_start + i;
+        let c = col_start + i;
         out.push(data[r * shape[1] + c]);
     }
     Tensor::from_storage(TensorStorage::cpu(out), vec![len], false)

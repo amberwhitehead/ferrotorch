@@ -46,7 +46,7 @@ use crate::buffer::CudaBuffer;
 use crate::device::GpuDevice;
 use crate::error::{GpuError, GpuResult};
 use crate::module_cache::get_or_compile;
-use crate::transfer::{alloc_zeros_f32, alloc_zeros_f64};
+use crate::transfer::{alloc_zeros_bf16, alloc_zeros_f32, alloc_zeros_f64};
 
 const BLOCK_SIZE: u32 = 256;
 
@@ -186,6 +186,62 @@ DONE:
 }
 ";
 
+const DIAG_EMBED_U16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry diag_embed_u16_kernel(
+    .param .u64 in_ptr, .param .u64 out_ptr,
+    .param .u32 n, .param .u32 size, .param .s32 k
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tdx, %n, %size, %r, %c, %lin;
+    .reg .s32 %k_r, %i_s, %absk;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .b16 %v;
+    .reg .pred %p, %kneg;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n, [n];
+    ld.param.u32 %size, [size];
+    ld.param.s32 %k_r, [k];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %tdx, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %tdx;
+    setp.ge.u32 %p, %gtid, %n;
+    @%p bra DONE;
+
+    cvt.s32.u32 %i_s, %gtid;
+    setp.lt.s32 %kneg, %k_r, 0;
+    @%kneg bra KNEG;
+    mov.u32 %r, %gtid;
+    add.s32 %i_s, %i_s, %k_r;
+    cvt.u32.s32 %c, %i_s;
+    bra COMPUTE;
+KNEG:
+    sub.s32 %absk, 0, %k_r;
+    add.s32 %i_s, %i_s, %absk;
+    cvt.u32.s32 %r, %i_s;
+    mov.u32 %c, %gtid;
+COMPUTE:
+    mad.lo.u32 %lin, %r, %size, %c;
+
+    cvt.u64.u32 %off, %gtid;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %in, %off;
+    ld.global.b16 %v, [%addr];
+    cvt.u64.u32 %off, %lin;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %out, %off;
+    st.global.b16 [%addr], %v;
+DONE:
+    ret;
+}
+";
+
 // ===========================================================================
 // diag_extract (2-D -> 1-D gather)
 //
@@ -283,6 +339,222 @@ DONE:
     ret;
 }
 ";
+
+const DIAG_EXTRACT_U16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry diag_extract_u16_kernel(
+    .param .u64 in_ptr, .param .u64 out_ptr,
+    .param .u32 diag_len, .param .u32 cols, .param .u32 start_r, .param .u32 start_c
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tdx, %dl, %cols, %sr, %sc, %row, %col, %lin;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .b16 %v;
+    .reg .pred %p;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %dl, [diag_len];
+    ld.param.u32 %cols, [cols];
+    ld.param.u32 %sr, [start_r];
+    ld.param.u32 %sc, [start_c];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %tdx, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %tdx;
+    setp.ge.u32 %p, %gtid, %dl;
+    @%p bra DONE;
+
+    add.u32 %row, %sr, %gtid;
+    add.u32 %col, %sc, %gtid;
+    mad.lo.u32 %lin, %row, %cols, %col;
+
+    cvt.u64.u32 %off, %lin;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %in, %off;
+    ld.global.b16 %v, [%addr];
+    cvt.u64.u32 %off, %gtid;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %out, %off;
+    st.global.b16 [%addr], %v;
+DONE:
+    ret;
+}
+";
+
+// diag_scatter is the VJP of diag_extract / diagonal: scatter a 1-D gradient
+// onto a rectangular zero matrix.
+const DIAG_SCATTER_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry diag_scatter_f32_kernel(
+    .param .u64 in_ptr, .param .u64 out_ptr,
+    .param .u32 diag_len, .param .u32 cols, .param .u32 start_r, .param .u32 start_c
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tdx, %dl, %cols, %sr, %sc, %row, %col, %lin;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .f32 %v;
+    .reg .pred %p;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %dl, [diag_len];
+    ld.param.u32 %cols, [cols];
+    ld.param.u32 %sr, [start_r];
+    ld.param.u32 %sc, [start_c];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %tdx, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %tdx;
+    setp.ge.u32 %p, %gtid, %dl;
+    @%p bra DONE;
+
+    add.u32 %row, %sr, %gtid;
+    add.u32 %col, %sc, %gtid;
+    mad.lo.u32 %lin, %row, %cols, %col;
+
+    cvt.u64.u32 %off, %gtid;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %v, [%addr];
+    cvt.u64.u32 %off, %lin;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out, %off;
+    st.global.f32 [%addr], %v;
+DONE:
+    ret;
+}
+";
+
+const DIAG_SCATTER_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry diag_scatter_f64_kernel(
+    .param .u64 in_ptr, .param .u64 out_ptr,
+    .param .u32 diag_len, .param .u32 cols, .param .u32 start_r, .param .u32 start_c
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tdx, %dl, %cols, %sr, %sc, %row, %col, %lin;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .f64 %v;
+    .reg .pred %p;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %dl, [diag_len];
+    ld.param.u32 %cols, [cols];
+    ld.param.u32 %sr, [start_r];
+    ld.param.u32 %sc, [start_c];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %tdx, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %tdx;
+    setp.ge.u32 %p, %gtid, %dl;
+    @%p bra DONE;
+
+    add.u32 %row, %sr, %gtid;
+    add.u32 %col, %sc, %gtid;
+    mad.lo.u32 %lin, %row, %cols, %col;
+
+    cvt.u64.u32 %off, %gtid;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %in, %off;
+    ld.global.f64 %v, [%addr];
+    cvt.u64.u32 %off, %lin;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %out, %off;
+    st.global.f64 [%addr], %v;
+DONE:
+    ret;
+}
+";
+
+const DIAG_SCATTER_U16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry diag_scatter_u16_kernel(
+    .param .u64 in_ptr, .param .u64 out_ptr,
+    .param .u32 diag_len, .param .u32 cols, .param .u32 start_r, .param .u32 start_c
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tdx, %dl, %cols, %sr, %sc, %row, %col, %lin;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .b16 %v;
+    .reg .pred %p;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %dl, [diag_len];
+    ld.param.u32 %cols, [cols];
+    ld.param.u32 %sr, [start_r];
+    ld.param.u32 %sc, [start_c];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %tdx, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %tdx;
+    setp.ge.u32 %p, %gtid, %dl;
+    @%p bra DONE;
+
+    add.u32 %row, %sr, %gtid;
+    add.u32 %col, %sc, %gtid;
+    mad.lo.u32 %lin, %row, %cols, %col;
+
+    cvt.u64.u32 %off, %gtid;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %in, %off;
+    ld.global.b16 %v, [%addr];
+    cvt.u64.u32 %off, %lin;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %out, %off;
+    st.global.b16 [%addr], %v;
+DONE:
+    ret;
+}
+";
+
+fn diag_start_len(rows: usize, cols: usize, k: i64) -> (usize, usize, usize) {
+    let (start_r, start_c) = if k >= 0 {
+        (0usize, k as usize)
+    } else {
+        (k.unsigned_abs() as usize, 0usize)
+    };
+    let diag_len = rows
+        .saturating_sub(start_r)
+        .min(cols.saturating_sub(start_c));
+    (start_r, start_c, diag_len)
+}
+
+fn checked_diag_embed_size(n: usize, k: i64) -> GpuResult<usize> {
+    let offset = usize::try_from(k.unsigned_abs()).map_err(|_| GpuError::ShapeMismatch {
+        op: "diag_embed",
+        expected: vec![usize::MAX],
+        got: vec![n],
+    })?;
+    let size = n
+        .checked_add(offset)
+        .ok_or_else(|| GpuError::ShapeMismatch {
+            op: "diag_embed",
+            expected: vec![usize::MAX],
+            got: vec![n, offset],
+        })?;
+    size.checked_mul(size)
+        .ok_or_else(|| GpuError::ShapeMismatch {
+            op: "diag_embed",
+            expected: vec![usize::MAX],
+            got: vec![size, size],
+        })?;
+    Ok(size)
+}
 
 /// Scatter a 1-D `n`-element buffer onto the `k`-th diagonal of a fresh
 /// zero-initialised `[size, size]` buffer (`size = n + |k|`). One thread per
@@ -420,6 +692,74 @@ fn launch_diag_extract<V: DeviceRepr + ValidAsZeroBits>(
     Ok(())
 }
 
+/// Scatter a 1-D `diag_len`-element gradient into a fresh zeroed rectangular
+/// `[rows, cols]` output. One thread per input element.
+#[allow(clippy::too_many_arguments)]
+fn launch_diag_scatter<V: DeviceRepr + ValidAsZeroBits>(
+    in_slice: &CudaSlice<V>,
+    out_slice: &mut CudaSlice<V>,
+    rows: usize,
+    cols: usize,
+    diag_len: usize,
+    start_r: usize,
+    start_c: usize,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<()> {
+    if diag_len == 0 {
+        return Ok(());
+    }
+    if in_slice.len() < diag_len {
+        return Err(GpuError::LengthMismatch {
+            a: in_slice.len(),
+            b: diag_len,
+        });
+    }
+    let out_total = rows
+        .checked_mul(cols)
+        .ok_or(GpuError::LengthMismatch { a: rows, b: cols })?;
+    if out_slice.len() < out_total {
+        return Err(GpuError::LengthMismatch {
+            a: out_slice.len(),
+            b: out_total,
+        });
+    }
+    let stream = device.stream();
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        }
+    })?;
+    let cfg = launch_1d(diag_len);
+    let dl_u = diag_len as u32;
+    let cols_u = cols as u32;
+    let sr_u = start_r as u32;
+    let sc_u = start_c as u32;
+    // SAFETY:
+    // - `f` is the PTX entry `kernel_name`; its 6-arg signature
+    //   (in_ptr, out_ptr, diag_len, cols, start_r, start_c) matches the pushed
+    //   args.
+    // - `in_slice` holds >= `diag_len`; `out_slice` holds >= `rows*cols` and is
+    //   a fresh zeroed output.
+    // - Each thread writes one in-bounds diagonal slot because `diag_len` was
+    //   derived as `min(rows-start_r, cols-start_c)`.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(in_slice)
+            .arg(out_slice)
+            .arg(&dl_u)
+            .arg(&cols_u)
+            .arg(&sr_u)
+            .arg(&sc_u)
+            .launch(cfg)?;
+    }
+    Ok(())
+}
+
 /// `diag` for a 1-D f32 input: scatter `n` elements onto the `k`-th diagonal
 /// of a `[size, size]` matrix (`size = n + |k|`). Returns the resident output.
 pub fn gpu_diag_embed_f32(
@@ -428,7 +768,7 @@ pub fn gpu_diag_embed_f32(
     k: i64,
     device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<f32>> {
-    let size = n + k.unsigned_abs() as usize;
+    let size = checked_diag_embed_size(n, k)?;
     let mut out = alloc_zeros_f32(size * size, device)?;
     launch_diag_embed(
         input.inner(),
@@ -450,7 +790,7 @@ pub fn gpu_diag_embed_f64(
     k: i64,
     device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<f64>> {
-    let size = n + k.unsigned_abs() as usize;
+    let size = checked_diag_embed_size(n, k)?;
     let mut out = alloc_zeros_f64(size * size, device)?;
     launch_diag_embed(
         input.inner(),
@@ -465,6 +805,28 @@ pub fn gpu_diag_embed_f64(
     Ok(out)
 }
 
+/// `diag` for a 1-D raw f16/bf16 payload buffer.
+pub fn gpu_diag_embed_u16(
+    input: &CudaSlice<u16>,
+    n: usize,
+    k: i64,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let size = checked_diag_embed_size(n, k)?;
+    let mut out = alloc_zeros_bf16(size * size, device)?;
+    launch_diag_embed(
+        input,
+        &mut out,
+        n,
+        size,
+        k,
+        device,
+        DIAG_EMBED_U16_PTX,
+        "diag_embed_u16_kernel",
+    )?;
+    Ok(out)
+}
+
 /// `diag` for a 2-D f32 input: gather the `k`-th diagonal of `[rows, cols]`
 /// into a `diag_len`-element vector. `start`/`diag_len` follow the ferrotorch
 /// CPU `diag` 2-D path.
@@ -475,14 +837,7 @@ pub fn gpu_diag_extract_f32(
     k: i64,
     device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<f32>> {
-    let (start_r, start_c) = if k >= 0 {
-        (0usize, k as usize)
-    } else {
-        (k.unsigned_abs() as usize, 0usize)
-    };
-    let diag_len = rows
-        .saturating_sub(start_r)
-        .min(cols.saturating_sub(start_c));
+    let (start_r, start_c, diag_len) = diag_start_len(rows, cols, k);
     let mut out = alloc_zeros_f32(diag_len.max(1), device)?;
     launch_diag_extract(
         input.inner(),
@@ -507,14 +862,7 @@ pub fn gpu_diag_extract_f64(
     k: i64,
     device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<f64>> {
-    let (start_r, start_c) = if k >= 0 {
-        (0usize, k as usize)
-    } else {
-        (k.unsigned_abs() as usize, 0usize)
-    };
-    let diag_len = rows
-        .saturating_sub(start_r)
-        .min(cols.saturating_sub(start_c));
+    let (start_r, start_c, diag_len) = diag_start_len(rows, cols, k);
     let mut out = alloc_zeros_f64(diag_len.max(1), device)?;
     launch_diag_extract(
         input.inner(),
@@ -527,6 +875,107 @@ pub fn gpu_diag_extract_f64(
         device,
         DIAG_EXTRACT_F64_PTX,
         "diag_extract_f64_kernel",
+    )?;
+    Ok(out)
+}
+
+/// `diag` for a 2-D raw f16/bf16 payload buffer.
+pub fn gpu_diag_extract_u16(
+    input: &CudaSlice<u16>,
+    rows: usize,
+    cols: usize,
+    k: i64,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let (start_r, start_c, diag_len) = diag_start_len(rows, cols, k);
+    let mut out = alloc_zeros_bf16(diag_len.max(1), device)?;
+    launch_diag_extract(
+        input,
+        &mut out,
+        rows,
+        cols,
+        diag_len,
+        start_r,
+        start_c,
+        device,
+        DIAG_EXTRACT_U16_PTX,
+        "diag_extract_u16_kernel",
+    )?;
+    Ok(out)
+}
+
+/// Scatter a 1-D f32 gradient onto the `k`-th diagonal of a zero `[rows, cols]`.
+pub fn gpu_diag_scatter_f32(
+    input: &CudaBuffer<f32>,
+    rows: usize,
+    cols: usize,
+    k: i64,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let (start_r, start_c, diag_len) = diag_start_len(rows, cols, k);
+    let mut out = alloc_zeros_f32(rows * cols, device)?;
+    launch_diag_scatter(
+        input.inner(),
+        out.inner_mut(),
+        rows,
+        cols,
+        diag_len,
+        start_r,
+        start_c,
+        device,
+        DIAG_SCATTER_F32_PTX,
+        "diag_scatter_f32_kernel",
+    )?;
+    Ok(out)
+}
+
+/// Scatter a 1-D f64 gradient onto the `k`-th diagonal of a zero `[rows, cols]`.
+pub fn gpu_diag_scatter_f64(
+    input: &CudaBuffer<f64>,
+    rows: usize,
+    cols: usize,
+    k: i64,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    let (start_r, start_c, diag_len) = diag_start_len(rows, cols, k);
+    let mut out = alloc_zeros_f64(rows * cols, device)?;
+    launch_diag_scatter(
+        input.inner(),
+        out.inner_mut(),
+        rows,
+        cols,
+        diag_len,
+        start_r,
+        start_c,
+        device,
+        DIAG_SCATTER_F64_PTX,
+        "diag_scatter_f64_kernel",
+    )?;
+    Ok(out)
+}
+
+/// Scatter a 1-D raw f16/bf16 gradient onto the `k`-th diagonal of a zero
+/// `[rows, cols]` payload buffer.
+pub fn gpu_diag_scatter_u16(
+    input: &CudaSlice<u16>,
+    rows: usize,
+    cols: usize,
+    k: i64,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let (start_r, start_c, diag_len) = diag_start_len(rows, cols, k);
+    let mut out = alloc_zeros_bf16(rows * cols, device)?;
+    launch_diag_scatter(
+        input,
+        &mut out,
+        rows,
+        cols,
+        diag_len,
+        start_r,
+        start_c,
+        device,
+        DIAG_SCATTER_U16_PTX,
+        "diag_scatter_u16_kernel",
     )?;
     Ok(out)
 }

@@ -21,7 +21,7 @@ use std::any::TypeId;
 use std::sync::Arc;
 
 use crate::autograd::no_grad::is_grad_enabled;
-use crate::dtype::Float;
+use crate::dtype::{DType, Element, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
@@ -59,6 +59,39 @@ fn ensure_packed_cuda_f32_f64<T: Float>(
         backend.strided_copy_f32(input.gpu_handle()?, &shape, &strides, offset)?
     } else {
         backend.strided_copy_f64(input.gpu_handle()?, &shape, &strides, offset)?
+    };
+    Tensor::from_storage(TensorStorage::gpu(handle), shape, false)
+}
+
+fn ensure_packed_cuda_float<T: Float>(
+    input: &Tensor<T>,
+    backend: &dyn crate::gpu_dispatch::GpuBackend,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    if !matches!(
+        <T as Element>::dtype(),
+        DType::F32 | DType::F64 | DType::F16 | DType::BF16
+    ) {
+        return Err(FerrotorchError::NotImplementedOnCuda { op });
+    }
+    if input.is_contiguous() && input.storage_offset() == 0 && input.storage_len() == input.numel()
+    {
+        return Ok(input.clone());
+    }
+    if input.ndim() > 8 {
+        return Err(FerrotorchError::NotImplementedOnCuda { op });
+    }
+
+    let shape = input.shape().to_vec();
+    let strides = input.strides().to_vec();
+    let offset = input.storage_offset();
+    let handle = match <T as Element>::dtype() {
+        DType::F32 => backend.strided_copy_f32(input.gpu_handle()?, &shape, &strides, offset)?,
+        DType::F64 => backend.strided_copy_f64(input.gpu_handle()?, &shape, &strides, offset)?,
+        DType::F16 | DType::BF16 => {
+            backend.strided_copy_u16(input.gpu_handle()?, &shape, &strides, offset)?
+        }
+        _ => unreachable!("dtype checked above"),
     };
     Tensor::from_storage(TensorStorage::gpu(handle), shape, false)
 }
@@ -204,25 +237,26 @@ pub fn triu<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     let cols = shape[ndim - 1];
     let batch: usize = shape[..ndim - 2].iter().product();
 
-    // GPU fast path: f32/f64 resident kernel (crosslink #1545 / sub #1535).
+    // GPU fast path: resident kernel for every floating dtype supported by
+    // Tensor<T> (f32/f64/f16/bf16). f16 and bf16 use raw u16 payload kernels and
+    // keep the dtype tag in `GpuBufferHandle`.
     // One thread per element; predicate `col - row >= diagonal` mirrors
     // `aten/src/ATen/native/cuda/TriangularOps.cu:100`, batched per trailing
     // `[rows, cols]` matrix per `:120`. Result stays GPU-resident — NO host
     // round-trip. Other GPU dtypes keep the `NotImplementedOnCuda` contract.
     if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            let input = ensure_packed_cuda_f32_f64(input, backend, "triu")?;
-            let handle = if is_f32::<T>() {
-                Some(backend.triu_f32(input.gpu_handle()?, batch, rows, cols, diagonal)?)
-            } else if is_f64::<T>() {
-                Some(backend.triu_f64(input.gpu_handle()?, batch, rows, cols, diagonal)?)
-            } else {
-                None
+            let input = ensure_packed_cuda_float(input, backend, "triu")?;
+            let handle = match <T as Element>::dtype() {
+                DType::F32 => backend.triu_f32(input.gpu_handle()?, batch, rows, cols, diagonal)?,
+                DType::F64 => backend.triu_f64(input.gpu_handle()?, batch, rows, cols, diagonal)?,
+                DType::F16 | DType::BF16 => {
+                    backend.triu_u16(input.gpu_handle()?, batch, rows, cols, diagonal)?
+                }
+                _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "triu" }),
             };
-            if let Some(handle) = handle {
-                let storage = TensorStorage::gpu(handle);
-                return Tensor::from_storage(storage, shape.to_vec(), false);
-            }
+            let storage = TensorStorage::gpu(handle);
+            return Tensor::from_storage(storage, shape.to_vec(), false);
         }
         return Err(FerrotorchError::NotImplementedOnCuda { op: "triu" });
     }
@@ -293,25 +327,25 @@ pub fn tril<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     let cols = shape[ndim - 1];
     let batch: usize = shape[..ndim - 2].iter().product();
 
-    // GPU fast path: f32/f64 resident kernel (crosslink #1545 / sub #1535).
+    // GPU fast path: resident kernel for f32/f64/f16/bf16. f16 and bf16 use raw
+    // u16 payload kernels and keep the dtype tag in `GpuBufferHandle`.
     // Predicate `col - row <= diagonal` mirrors
     // `aten/src/ATen/native/cuda/TriangularOps.cu:100`, batched per trailing
     // `[rows, cols]` matrix per `:120`. Result stays GPU-resident — NO host
     // round-trip.
     if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            let input = ensure_packed_cuda_f32_f64(input, backend, "tril")?;
-            let handle = if is_f32::<T>() {
-                Some(backend.tril_f32(input.gpu_handle()?, batch, rows, cols, diagonal)?)
-            } else if is_f64::<T>() {
-                Some(backend.tril_f64(input.gpu_handle()?, batch, rows, cols, diagonal)?)
-            } else {
-                None
+            let input = ensure_packed_cuda_float(input, backend, "tril")?;
+            let handle = match <T as Element>::dtype() {
+                DType::F32 => backend.tril_f32(input.gpu_handle()?, batch, rows, cols, diagonal)?,
+                DType::F64 => backend.tril_f64(input.gpu_handle()?, batch, rows, cols, diagonal)?,
+                DType::F16 | DType::BF16 => {
+                    backend.tril_u16(input.gpu_handle()?, batch, rows, cols, diagonal)?
+                }
+                _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "tril" }),
             };
-            if let Some(handle) = handle {
-                let storage = TensorStorage::gpu(handle);
-                return Tensor::from_storage(storage, shape.to_vec(), false);
-            }
+            let storage = TensorStorage::gpu(handle);
+            return Tensor::from_storage(storage, shape.to_vec(), false);
         }
         return Err(FerrotorchError::NotImplementedOnCuda { op: "tril" });
     }
@@ -399,7 +433,8 @@ pub fn diag<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
         });
     }
 
-    // GPU fast path: f32/f64 resident kernel (crosslink #1545 / sub #1535).
+    // GPU fast path: resident kernel for f32/f64/f16/bf16. f16 and bf16 copy raw
+    // 16-bit payloads and preserve the dtype tag.
     // 1-D → `diag_embed` scatter onto the k-th diagonal of a `[size, size]`
     // matrix (`size = n + |k|`); 2-D → `diag_extract` gather of the k-th
     // diagonal. Both mirror `torch.diag` (`TensorShape.cpp:4610`); pure
@@ -408,21 +443,22 @@ pub fn diag<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     // `NotImplementedOnCuda` contract.
     if input.is_cuda() {
         if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            let input = ensure_packed_cuda_f32_f64(input, backend, "diag")?;
-            let result = if ndim == 1 {
+            let input = ensure_packed_cuda_float(input, backend, "diag")?;
+            let (handle, out_shape) = if ndim == 1 {
                 let n = input.shape()[0];
                 // Checked BEFORE kernel dispatch: pre-fix a wrapped size
                 // reached the backend and sized the scatter kernel from the
                 // wrapped count (CORE-121 / #1815).
                 let size = diag_embed_size::<T>(n, diagonal)?;
-                let handle = if is_f32::<T>() {
-                    Some(backend.diag_embed_f32(input.gpu_handle()?, n, diagonal)?)
-                } else if is_f64::<T>() {
-                    Some(backend.diag_embed_f64(input.gpu_handle()?, n, diagonal)?)
-                } else {
-                    None
+                let handle = match <T as Element>::dtype() {
+                    DType::F32 => backend.diag_embed_f32(input.gpu_handle()?, n, diagonal)?,
+                    DType::F64 => backend.diag_embed_f64(input.gpu_handle()?, n, diagonal)?,
+                    DType::F16 | DType::BF16 => {
+                        backend.diag_embed_u16(input.gpu_handle()?, n, diagonal)?
+                    }
+                    _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "diag" }),
                 };
-                handle.map(|h| (h, vec![size, size]))
+                (handle, vec![size, size])
             } else {
                 let rows = input.shape()[0];
                 let cols = input.shape()[1];
@@ -436,19 +472,22 @@ pub fn diag<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
                 let diag_len = rows
                     .saturating_sub(start_r)
                     .min(cols.saturating_sub(start_c));
-                let handle = if is_f32::<T>() {
-                    Some(backend.diag_extract_f32(input.gpu_handle()?, rows, cols, diagonal)?)
-                } else if is_f64::<T>() {
-                    Some(backend.diag_extract_f64(input.gpu_handle()?, rows, cols, diagonal)?)
-                } else {
-                    None
+                let handle = match <T as Element>::dtype() {
+                    DType::F32 => {
+                        backend.diag_extract_f32(input.gpu_handle()?, rows, cols, diagonal)?
+                    }
+                    DType::F64 => {
+                        backend.diag_extract_f64(input.gpu_handle()?, rows, cols, diagonal)?
+                    }
+                    DType::F16 | DType::BF16 => {
+                        backend.diag_extract_u16(input.gpu_handle()?, rows, cols, diagonal)?
+                    }
+                    _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "diag" }),
                 };
-                handle.map(|h| (h, vec![diag_len]))
+                (handle, vec![diag_len])
             };
-            if let Some((handle, shape)) = result {
-                let storage = TensorStorage::gpu(handle);
-                return Tensor::from_storage(storage, shape, false);
-            }
+            let storage = TensorStorage::gpu(handle);
+            return Tensor::from_storage(storage, out_shape, false);
         }
         return Err(FerrotorchError::NotImplementedOnCuda { op: "diag" });
     }

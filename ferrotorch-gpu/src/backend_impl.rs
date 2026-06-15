@@ -5737,6 +5737,62 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
+    #[cfg(feature = "cuda")]
+    fn triu_u16(
+        &self,
+        a: &GpuBufferHandle,
+        batch: usize,
+        rows: usize,
+        cols: usize,
+        k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = match a.dtype() {
+            DType::F16 => Self::unwrap_buffer_f16(a)?,
+            DType::BF16 => Self::unwrap_buffer_bf16(a)?,
+            other => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("triu_u16 expected F16/BF16, got {other}"),
+                });
+            }
+        };
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::triangular::gpu_triu_u16(a_buf, batch, rows, cols, k, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(match a.dtype() {
+            DType::F16 => Self::wrap_buffer_f16(result, a.device_ordinal()),
+            DType::BF16 => Self::wrap_buffer_bf16(result, a.device_ordinal()),
+            _ => unreachable!("dtype checked above"),
+        })
+    }
+
+    #[cfg(feature = "cuda")]
+    fn tril_u16(
+        &self,
+        a: &GpuBufferHandle,
+        batch: usize,
+        rows: usize,
+        cols: usize,
+        k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = match a.dtype() {
+            DType::F16 => Self::unwrap_buffer_f16(a)?,
+            DType::BF16 => Self::unwrap_buffer_bf16(a)?,
+            other => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("tril_u16 expected F16/BF16, got {other}"),
+                });
+            }
+        };
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::triangular::gpu_tril_u16(a_buf, batch, rows, cols, k, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(match a.dtype() {
+            DType::F16 => Self::wrap_buffer_f16(result, a.device_ordinal()),
+            DType::BF16 => Self::wrap_buffer_bf16(result, a.device_ordinal()),
+            _ => unreachable!("dtype checked above"),
+        })
+    }
+
     // -- Diagonal: diag_embed / diag_extract (#1545 / sub #1535) -------------
     //
     // Gated `#[cfg(feature = "cuda")]` (the `diag` module is cuda-only,
@@ -5773,6 +5829,32 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
+    fn diag_embed_u16(
+        &self,
+        a: &GpuBufferHandle,
+        n: usize,
+        k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = match a.dtype() {
+            DType::F16 => Self::unwrap_buffer_f16(a)?,
+            DType::BF16 => Self::unwrap_buffer_bf16(a)?,
+            other => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("diag_embed_u16 expected F16/BF16, got {other}"),
+                });
+            }
+        };
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::diag::gpu_diag_embed_u16(a_buf, n, k, dev).map_err(Self::map_gpu_err)?;
+        Ok(match a.dtype() {
+            DType::F16 => Self::wrap_buffer_f16(result, a.device_ordinal()),
+            DType::BF16 => Self::wrap_buffer_bf16(result, a.device_ordinal()),
+            _ => unreachable!("dtype checked above"),
+        })
+    }
+
+    #[cfg(feature = "cuda")]
     fn diag_extract_f32(
         &self,
         a: &GpuBufferHandle,
@@ -5800,6 +5882,90 @@ impl GpuBackend for CudaBackendImpl {
         let result = crate::diag::gpu_diag_extract_f64(a_buf, rows, cols, k, dev)
             .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn diag_extract_u16(
+        &self,
+        a: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+        k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = match a.dtype() {
+            DType::F16 => Self::unwrap_buffer_f16(a)?,
+            DType::BF16 => Self::unwrap_buffer_bf16(a)?,
+            other => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("diag_extract_u16 expected F16/BF16, got {other}"),
+                });
+            }
+        };
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::diag::gpu_diag_extract_u16(a_buf, rows, cols, k, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(match a.dtype() {
+            DType::F16 => Self::wrap_buffer_f16(result, a.device_ordinal()),
+            DType::BF16 => Self::wrap_buffer_bf16(result, a.device_ordinal()),
+            _ => unreachable!("dtype checked above"),
+        })
+    }
+
+    #[cfg(feature = "cuda")]
+    fn diag_scatter_f32(
+        &self,
+        a: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+        k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::diag::gpu_diag_scatter_f32(a_buf, rows, cols, k, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn diag_scatter_f64(
+        &self,
+        a: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+        k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::diag::gpu_diag_scatter_f64(a_buf, rows, cols, k, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn diag_scatter_u16(
+        &self,
+        a: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+        k: i64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = match a.dtype() {
+            DType::F16 => Self::unwrap_buffer_f16(a)?,
+            DType::BF16 => Self::unwrap_buffer_bf16(a)?,
+            other => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("diag_scatter_u16 expected F16/BF16, got {other}"),
+                });
+            }
+        };
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::diag::gpu_diag_scatter_u16(a_buf, rows, cols, k, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(match a.dtype() {
+            DType::F16 => Self::wrap_buffer_f16(result, a.device_ordinal()),
+            DType::BF16 => Self::wrap_buffer_bf16(result, a.device_ordinal()),
+            _ => unreachable!("dtype checked above"),
+        })
     }
 
     // -- Pairwise distance: cdist (#1545 / sub #1535) ------------------------

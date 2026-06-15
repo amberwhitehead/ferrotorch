@@ -61,7 +61,7 @@ use crate::buffer::CudaBuffer;
 use crate::device::GpuDevice;
 use crate::error::{GpuError, GpuResult};
 use crate::module_cache::get_or_compile;
-use crate::transfer::{alloc_zeros_f32, alloc_zeros_f64};
+use crate::transfer::{alloc_zeros_bf16, alloc_zeros_f32, alloc_zeros_f64};
 
 const BLOCK_SIZE: u32 = 256;
 
@@ -215,6 +215,72 @@ const TRIANGULAR_F64_PTX: &str = "\
 
     add.u64 %addr, %out, %off;
     st.global.f64 [%addr], %v;
+DONE:
+    ret;
+}
+";
+
+// ===========================================================================
+// u16 — raw f16/bf16 payload copy/zero. The dtype tag is preserved by
+// CudaBackendImpl, so one raw-bit kernel covers both 16-bit float formats.
+// ===========================================================================
+const TRIANGULAR_U16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry triangular_u16_kernel(
+    .param .u64 in_ptr, .param .u64 out_ptr,
+    .param .u32 batch, .param .u32 rows, .param .u32 cols, .param .s32 k, .param .u32 op
+) {
+    .reg .u32 %gtid, %bid, %bdim, %batch, %rows, %cols, %op_r, %row_u, %col_u, %total, %tmp;
+    .reg .s32 %row_s, %col_s, %diff, %k_r;
+    .reg .u64 %in, %out, %off, %addr;
+    .reg .b16 %v, %zero;
+    .reg .pred %p, %is_triu, %not_triu, %keep, %ge, %le, %a, %b;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %batch, [batch];
+    ld.param.u32 %rows, [rows];
+    ld.param.u32 %cols, [cols];
+    ld.param.s32 %k_r, [k];
+    ld.param.u32 %op_r, [op];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+
+    mul.lo.u32 %total, %rows, %cols;
+    mul.lo.u32 %total, %total, %batch;
+    setp.ge.u32 %p, %gtid, %total;
+    @%p bra DONE;
+
+    rem.u32 %col_u, %gtid, %cols;
+    div.u32 %tmp, %gtid, %cols;
+    rem.u32 %row_u, %tmp, %rows;
+    cvt.s32.u32 %row_s, %row_u;
+    cvt.s32.u32 %col_s, %col_u;
+    sub.s32 %diff, %col_s, %row_s;
+
+    setp.eq.u32 %is_triu, %op_r, 0;
+    not.pred %not_triu, %is_triu;
+    setp.ge.s32 %ge, %diff, %k_r;
+    setp.le.s32 %le, %diff, %k_r;
+    and.pred %a, %ge, %is_triu;
+    and.pred %b, %le, %not_triu;
+    or.pred %keep, %a, %b;
+
+    cvt.u64.u32 %off, %gtid;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %in, %off;
+    ld.global.b16 %v, [%addr];
+    mov.b16 %zero, 0;
+    selp.b16 %v, %v, %zero, %keep;
+
+    add.u64 %addr, %out, %off;
+    st.global.b16 [%addr], %v;
 DONE:
     ret;
 }
@@ -406,6 +472,59 @@ pub fn gpu_tril_f64(
         "triangular_f64_kernel",
         OP_TRIL,
         8,
+    )?;
+    Ok(out)
+}
+
+/// `triu` over a raw f16/bf16 `[batch.., rows, cols]` payload buffer. Masks each
+/// trailing `[rows, cols]` matrix and returns a fresh resident `u16` buffer.
+pub fn gpu_triu_u16(
+    input: &CudaSlice<u16>,
+    batch: usize,
+    rows: usize,
+    cols: usize,
+    k: i64,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let mut out = alloc_zeros_bf16(batch * rows * cols, device)?;
+    launch_triangular(
+        input,
+        &mut out,
+        batch,
+        rows,
+        cols,
+        k,
+        device,
+        TRIANGULAR_U16_PTX,
+        "triangular_u16_kernel",
+        OP_TRIU,
+        2,
+    )?;
+    Ok(out)
+}
+
+/// `tril` over a raw f16/bf16 `[batch.., rows, cols]` payload buffer.
+pub fn gpu_tril_u16(
+    input: &CudaSlice<u16>,
+    batch: usize,
+    rows: usize,
+    cols: usize,
+    k: i64,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let mut out = alloc_zeros_bf16(batch * rows * cols, device)?;
+    launch_triangular(
+        input,
+        &mut out,
+        batch,
+        rows,
+        cols,
+        k,
+        device,
+        TRIANGULAR_U16_PTX,
+        "triangular_u16_kernel",
+        OP_TRIL,
+        2,
     )?;
     Ok(out)
 }
