@@ -37,7 +37,7 @@
 //! | REQ-26 (`trunc`) | SHIPPED | `trunc` + shared `ZerosLikeBackward` consumed by `Tensor::trunc_t`; closes #1329. |
 //! | REQ-27 (`frac`) | SHIPPED | `frac` + `FracBackward` (pass-through gradient) consumed by `Tensor::frac_t`; closes #1330. |
 //! | REQ-28 (`sign`) | SHIPPED | `sign` (NaN-propagating, `sign(0) = 0`) + shared `ZerosLikeBackward` consumed by `Tensor::sign_t`; closes #1331. |
-//! | REQ-29 (`signbit`) | SHIPPED | `signbit` returns `BoolTensor` via `num_traits::Float::is_sign_negative`; non-diff per upstream; consumed by `lib.rs:186` re-export; closes #1332. |
+//! | REQ-29 (`signbit`) | SHIPPED | `signbit` returns `BoolTensor`; CPU uses `num_traits::Float::is_sign_negative`, CUDA uses `GpuBackend::signbit_mask` for f32/f64/f16/bf16 including PyTorch's f16 CUDA NaN handling; non-diff per upstream; consumed by `lib.rs:186` re-export; closes #1332. |
 //! | REQ-30 (`clip`) | SHIPPED | `Tensor::clip_t` delegates to `clamp` per upstream's literal pass-through; closes #1333. |
 //! | REQ-31 (`copysign`) | SHIPPED | `copysign` + `CopysignBackward` (grad to magnitude only, `magnitude==0 → 0` mask) consumed by `lib.rs:186` re-export; closes #1334. |
 //! | REQ-32 (`nextafter`) | SHIPPED | `nextafter` + `NextafterBackward` (native-width IEEE-754 one-ULP step: `f32_one_ulp`/`f64_one_ulp`/`u16_one_ulp` per dtype — MSRV 1.85 precludes `f32::next_up`/`next_down`, stable in 1.86); VJP `self: where(self != other, grad, 0)`, `other: zeros_like` per `derivatives.yaml:1322-1324`; consumed by `lib.rs:183` re-export; closes #1335 #1556. |
@@ -1879,12 +1879,17 @@ pub fn atan2<T: Float>(y: &Tensor<T>, x: &Tensor<T>) -> FerrotorchResult<Tensor<
 /// Non-differentiable element-wise `signbit(x)`. Returns a [`BoolTensor`]
 /// where each element is `true` iff the corresponding input is negative
 /// (sign bit set), matching `f32::is_sign_negative` / `f64::is_sign_negative`.
+/// CUDA f16 follows PyTorch CUDA's NaN behavior: every NaN payload reports
+/// `false`, while `-0.0`, finite negatives, and `-inf` report `true`.
 /// Bool output is not differentiable — there is no `derivatives.yaml` entry.
 pub fn signbit<T: Float>(input: &Tensor<T>) -> FerrotorchResult<BoolTensor> {
     if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "signbit" });
+        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let input_c = input.contiguous()?;
+        let handle = backend.signbit_mask(input_c.gpu_handle()?)?;
+        return BoolTensor::from_gpu_handle(handle, input.shape().to_vec());
     }
-    let data = input.data()?;
+    let data = input.data_vec()?;
     // `num_traits::Float::is_sign_negative` is the canonical IEEE-754 sign-bit
     // check: returns `true` for `-0.0` (sign bit set, value compares equal to
     // +0.0) and honors the sign bit of NaN. Matches upstream

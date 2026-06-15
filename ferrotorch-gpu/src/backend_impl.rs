@@ -7612,6 +7612,14 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
     }
 
+    #[cfg(feature = "cuda")]
+    fn sqrt_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_sqrt_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
     // ── IEEE float16 (f16) ops — crosslink #1185 Phase 1 ─────────────────────
     //
     // Each unwraps with `unwrap_buffer_f16` (asserts the F16 tag, rejecting a
@@ -10130,6 +10138,24 @@ impl GpuBackend for CudaBackendImpl {
         let r = crate::bool_kernels::gpu_not_bool(Self::unwrap_buffer_bool(a)?.inner(), dev)
             .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_slice_bool(r, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn signbit_mask(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        use crate::bool_kernels as bk;
+        let dev = self.device(a.device_ordinal())?;
+        let ord = a.device_ordinal();
+        let n = a.len();
+        let r = match a.dtype() {
+            DType::F32 => bk::gpu_signbit_f32(Self::unwrap_buffer(a)?.inner(), n, dev),
+            DType::F64 => bk::gpu_signbit_f64(Self::unwrap_buffer_f64(a)?.inner(), n, dev),
+            DType::F16 => bk::gpu_signbit_f16(Self::unwrap_buffer_f16(a)?, n, dev),
+            DType::BF16 => bk::gpu_signbit_bf16(Self::unwrap_buffer_bf16(a)?, n, dev),
+            _ => {
+                return Err(FerrotorchError::NotImplementedOnCuda { op: "signbit_mask" });
+            }
+        };
+        Ok(Self::wrap_slice_bool(r.map_err(Self::map_gpu_err)?, ord))
     }
 
     #[cfg(feature = "cuda")]

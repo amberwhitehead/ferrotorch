@@ -158,6 +158,44 @@ fn needs_grad_unary<T: Float>(a: &Tensor<T>) -> bool {
     is_grad_enabled() && a.requires_grad()
 }
 
+#[inline]
+fn cuda_scalar_to_f32<T: Float>(value: T, op: &str) -> FerrotorchResult<f32> {
+    <T as num_traits::ToPrimitive>::to_f32(&value).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: format!("{op}: scalar is not representable as f32"),
+    })
+}
+
+#[inline]
+fn cuda_scalar_to_f64<T: Float>(value: T, op: &str) -> FerrotorchResult<f64> {
+    <T as num_traits::ToPrimitive>::to_f64(&value).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: format!("{op}: scalar is not representable as f64"),
+    })
+}
+
+fn cuda_full_like_shape<T: Float>(
+    shape: &[usize],
+    numel: usize,
+    value: T,
+    device: crate::device::Device,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let crate::device::Device::Cuda(ordinal) = device else {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: expected CUDA device, got {device:?}"),
+        });
+    };
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+        T,
+        "arithmetic_cuda_fill",
+        f32 => backend.fill_f32(numel, cuda_scalar_to_f32(value, op)?, ordinal),
+        f64 => backend.fill_f64(numel, cuda_scalar_to_f64(value, op)?, ordinal),
+        bf16 => backend.fill_bf16_bf16(numel, cuda_scalar_to_f32(value, op)?, ordinal),
+        f16 => backend.fill_f16(numel, cuda_scalar_to_f32(value, op)?, ordinal),
+    )?;
+    Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), false)
+}
+
 /// Reduce a gradient tensor to a target shape by summing over broadcast
 /// dimensions.
 ///
@@ -1483,13 +1521,23 @@ impl<T: Float> GradFn<T> for PowBackward<T> {
             // guard covers all three branches below — higher-order, GPU,
             // and CPU — identically.
             if self.exp == 0.0 {
-                let zeros = vec![<T as num_traits::Zero>::zero(); self.a.numel().max(1)];
-                let storage = TensorStorage::on_device(zeros, self.a.device())?;
-                Some(Tensor::from_storage(
-                    storage,
-                    self.a.shape().to_vec(),
-                    false,
-                )?)
+                if self.a.is_cuda() {
+                    Some(cuda_full_like_shape(
+                        self.a.shape(),
+                        self.a.numel(),
+                        <T as num_traits::Zero>::zero(),
+                        self.a.device(),
+                        "pow_backward_zero_fill",
+                    )?)
+                } else {
+                    let zeros = vec![<T as num_traits::Zero>::zero(); self.a.numel()];
+                    let storage = TensorStorage::on_device(zeros, self.a.device())?;
+                    Some(Tensor::from_storage(
+                        storage,
+                        self.a.shape().to_vec(),
+                        false,
+                    )?)
+                }
             } else if grad_output.requires_grad() || grad_output.grad_fn().is_some() {
                 // When grad_output requires_grad (create_graph=true), use
                 // differentiable operations so the backward pass itself is
@@ -1498,16 +1546,21 @@ impl<T: Float> GradFn<T> for PowBackward<T> {
                 // Using differentiable pow and mul.
                 let a_pow = pow(&self.a, self.exp - 1.0)?; // a^(exp-1)
                 let exp_t = T::from(self.exp).unwrap();
-                let exp_tensor = Tensor::from_storage(
-                    TensorStorage::cpu(vec![exp_t; self.a.numel().max(1)]),
-                    self.a.shape().to_vec(),
-                    false,
-                )?;
-                // Build the exponent constant on `a`'s device — same hop as
-                // the non-higher-order GPU branch below. Without it, a CUDA
-                // `pow` under `create_graph=true` fails `mul`'s device
-                // guard with DeviceMismatch (CORE-182, crosslink #1876).
-                let exp_tensor = exp_tensor.to(self.a.device())?;
+                let exp_tensor = if self.a.is_cuda() {
+                    cuda_full_like_shape(
+                        self.a.shape(),
+                        self.a.numel(),
+                        exp_t,
+                        self.a.device(),
+                        "pow_backward_exp_fill",
+                    )?
+                } else {
+                    Tensor::from_storage(
+                        TensorStorage::cpu(vec![exp_t; self.a.numel()]),
+                        self.a.shape().to_vec(),
+                        false,
+                    )?
+                };
                 let scaled = mul(&exp_tensor, &a_pow)?; // exp * a^(exp-1)
                 Some(mul(grad_output, &scaled)?) // grad_output * exp * a^(exp-1)
             } else if grad_output.is_cuda() {
@@ -1516,12 +1569,13 @@ impl<T: Float> GradFn<T> for PowBackward<T> {
                 let da = no_grad(|| {
                     let a_pow = pow(&self.a, self.exp - 1.0)?;
                     let exp_t = T::from(self.exp).unwrap();
-                    let exp_tensor = Tensor::from_storage(
-                        TensorStorage::cpu(vec![exp_t; self.a.numel().max(1)]),
-                        self.a.shape().to_vec(),
-                        false,
+                    let exp_gpu = cuda_full_like_shape(
+                        self.a.shape(),
+                        self.a.numel(),
+                        exp_t,
+                        self.a.device(),
+                        "pow_backward_exp_fill",
                     )?;
-                    let exp_gpu = exp_tensor.to(self.a.device())?;
                     let scaled = mul(&exp_gpu, &a_pow)?;
                     mul(grad_output, &scaled)
                 })?;
@@ -1626,12 +1680,13 @@ impl<T: Float> GradFn<T> for SqrtBackward<T> {
                 let da = no_grad(|| {
                     let sqrt_a = sqrt(&self.a)?;
                     let two_t = T::from(2.0).unwrap();
-                    let two_tensor = Tensor::from_storage(
-                        TensorStorage::cpu(vec![two_t; self.a.numel().max(1)]),
-                        self.a.shape().to_vec(),
-                        false,
+                    let two_gpu = cuda_full_like_shape(
+                        self.a.shape(),
+                        self.a.numel(),
+                        two_t,
+                        self.a.device(),
+                        "sqrt_backward_fill",
                     )?;
-                    let two_gpu = two_tensor.to(self.a.device())?;
                     let denom = mul(&two_gpu, &sqrt_a)?;
                     div(grad_output, &denom)
                 })?;
@@ -1676,17 +1731,19 @@ pub fn sqrt<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 }
 
 fn sqrt_inner<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if a.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_f16::<T>()) {
+    if a.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         // #812 cluster: materialize non-contiguous CUDA views before kernel.
         let a_c = ensure_contig_for_gpu(a)?;
-        // crosslink #1185 Phase 1: f16 routes to the native `sqrt_f16` PTX
-        // kernel (sqrt.approx.f32, f16 RNE store) — no CPU fallthrough.
+        // bf16/f16 route to native PTX kernels (sqrt.rn.f32, half RNE
+        // store) — no CPU fallthrough.
         let handle = if is_f32::<T>() {
             backend.sqrt_f32(a_c.gpu_handle()?)?
         } else if is_f64::<T>() {
             backend.sqrt_f64(a_c.gpu_handle()?)?
+        } else if is_bf16::<T>() {
+            backend.sqrt_bf16_bf16(a_c.gpu_handle()?)?
         } else {
             backend.sqrt_f16(a_c.gpu_handle()?)?
         };
@@ -1758,12 +1815,13 @@ impl<T: Float> GradFn<T> for RsqrtBackward<T> {
                         T::from(-0.5).ok_or_else(|| FerrotorchError::InvalidArgument {
                             message: "RsqrtBackward: -0.5 not representable in tensor dtype".into(),
                         })?;
-                    let nh_tensor = Tensor::from_storage(
-                        TensorStorage::cpu(vec![neg_half; self.c.numel().max(1)]),
-                        self.c.shape().to_vec(),
-                        false,
+                    let nh_gpu = cuda_full_like_shape(
+                        self.c.shape(),
+                        self.c.numel(),
+                        neg_half,
+                        self.c.device(),
+                        "rsqrt_backward_fill",
                     )?;
-                    let nh_gpu = nh_tensor.to(self.c.device())?;
                     let c_sq = mul(&self.c, &self.c)?;
                     let c_cu = mul(&c_sq, &self.c)?;
                     let neg_half_c_cu = mul(&nh_gpu, &c_cu)?;
@@ -1840,12 +1898,8 @@ fn rsqrt_inner<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         let c = no_grad(|| {
             let sqrt_a = sqrt(a)?;
             let one = <T as num_traits::One>::one();
-            let ones = Tensor::from_storage(
-                TensorStorage::cpu(vec![one; a.numel().max(1)]),
-                a.shape().to_vec(),
-                false,
-            )?;
-            let ones_gpu = ones.to(a.device())?;
+            let ones_gpu =
+                cuda_full_like_shape(a.shape(), a.numel(), one, a.device(), "rsqrt_forward_fill")?;
             div(&ones_gpu, &sqrt_a)
         })?;
         let (storage, shape) = c.clone().into_storage_and_shape()?;
@@ -1990,12 +2044,13 @@ fn reciprocal_inner<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         // output (mirroring the rsqrt GPU compose pattern).
         let c = no_grad(|| {
             let one = <T as num_traits::One>::one();
-            let ones = Tensor::from_storage(
-                TensorStorage::cpu(vec![one; a.numel().max(1)]),
-                a.shape().to_vec(),
-                false,
+            let ones_gpu = cuda_full_like_shape(
+                a.shape(),
+                a.numel(),
+                one,
+                a.device(),
+                "reciprocal_forward_fill",
             )?;
-            let ones_gpu = ones.to(a.device())?;
             div(&ones_gpu, a)
         })?;
         let (storage, shape) = c.clone().into_storage_and_shape()?;

@@ -5607,6 +5607,13 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// bf16 elementwise `out = sqrt(a)`. f32 internal, bf16 RNE store.
+    fn sqrt_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "sqrt_bf16_bf16",
+        })
+    }
+
     // ── IEEE float16 (f16) ops — crosslink #1185 Phase 1 ─────────────────────
     //
     // f16 storage is `CudaSlice<u16>` (same width as bf16) but the
@@ -6904,6 +6911,13 @@ pub trait GpuBackend: Send + Sync {
     /// Elementwise logical NOT of a Bool (u8) buffer → Bool (u8).
     fn bool_not(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda { op: "bool_not" })
+    }
+
+    /// Elementwise sign-bit predicate over a float value buffer → Bool (u8).
+    /// Preserves `-0.0`; f32/f64/bf16 inspect signed NaN bits, while f16
+    /// mirrors PyTorch CUDA's NaN-false behavior.
+    fn signbit_mask(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "signbit_mask" })
     }
 
     /// Global OR-reduction (`torch.any`) of a Bool (u8) buffer → 1-element

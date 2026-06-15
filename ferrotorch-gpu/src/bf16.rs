@@ -35,7 +35,7 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 (elementwise binary) | SHIPPED | `pub fn gpu_mul_bf16 / gpu_add_bf16 / gpu_sub_bf16 / gpu_div_bf16 in bf16.rs`; consumer `CudaBackendImpl::add_bf16 / mul_bf16 / sub_bf16 / div_bf16 in backend_impl.rs` |
-//! | REQ-2 (unary activations) | SHIPPED | `pub fn gpu_silu_bf16 / gpu_relu_bf16 / gpu_fatrelu_bf16 / gpu_gelu_bf16 / gpu_exp_bf16 / gpu_log_bf16 / gpu_tanh_bf16 / gpu_sigmoid_bf16 / gpu_neg_bf16 in bf16.rs`; consumer the bf16 arm of activation dispatchers in `backend_impl.rs` |
+//! | REQ-2 (unary activations) | SHIPPED | `pub fn gpu_silu_bf16 / gpu_relu_bf16 / gpu_fatrelu_bf16 / gpu_gelu_bf16 / gpu_exp_bf16 / gpu_log_bf16 / gpu_tanh_bf16 / gpu_sigmoid_bf16 / gpu_sqrt_bf16 / gpu_neg_bf16 in bf16.rs`; consumer the bf16 arm of activation/arithmetic dispatchers in `backend_impl.rs` |
 //! | REQ-3 (`gpu_scale_bf16` / `gpu_fill_bf16`) | SHIPPED | `pub fn gpu_scale_bf16 / gpu_fill_bf16 in bf16.rs`; consumers `CudaBackendImpl::scale_bf16 / fill_bf16_bf16 in backend_impl.rs` |
 //! | REQ-4 (broadcast binary) | SHIPPED | `pub fn gpu_broadcast_add_bf16 / gpu_broadcast_sub_bf16 / gpu_broadcast_mul_bf16 / gpu_broadcast_div_bf16 in bf16.rs`; consumer the bf16 broadcast arms in `backend_impl.rs` |
 //! | REQ-5 (reductions) | SHIPPED | `pub fn gpu_sum_bf16 / gpu_mean_bf16 / gpu_prod_bf16 / gpu_sum_axis_bf16_bf16 / gpu_mean_axis_bf16_bf16 / gpu_prod_axis_bf16 in bf16.rs`; consumer bf16 reduction arms in `backend_impl.rs` |
@@ -3352,7 +3352,7 @@ const DIV_BF16_PTX: &str = "\
     .reg .b16 %a_b16, %b_b16, %zero16;
     .reg .b32 %a_u32, %b_u32, %bits, %round, %lsb;
     .reg .f32 %va, %vb, %vr;
-    .reg .pred %p;
+    .reg .pred %p, %nan_a, %nan_b, %store_nan;
 
     ld.param.u64 %a, [a_ptr];
     ld.param.u64 %b, [b_ptr];
@@ -3381,7 +3381,12 @@ const DIV_BF16_PTX: &str = "\
     mov.b32 %va, %a_u32;
     mov.b32 %vb, %b_u32;
 
-    div.approx.f32 %vr, %va, %vb;
+    setp.nan.f32 %nan_a, %va, %va;
+    setp.nan.f32 %nan_b, %vb, %vb;
+    or.pred %store_nan, %nan_a, %nan_b;
+    @%store_nan bra STORE_NAN;
+
+    div.rn.f32 %vr, %va, %vb;
 
     mov.b32 %bits, %vr;
     shr.u32 %lsb, %bits, 16;
@@ -3389,6 +3394,11 @@ const DIV_BF16_PTX: &str = "\
     add.u32 %round, %bits, 0x7FFF;
     add.u32 %round, %round, %lsb;
     shr.u32 %bits, %round, 16;
+    st.global.u16 [%out], %bits;
+    bra DONE;
+
+STORE_NAN:
+    mov.u32 %bits, 0x7FC0;
     st.global.u16 [%out], %bits;
 
 DONE:
@@ -3428,10 +3438,10 @@ pub fn gpu_neg_bf16(
     gpu_scale_bf16(a, -1.0_f32, device)
 }
 
-// ─── Unary elementwise transcendentals (#23: exp, log, tanh, sigmoid) ───────
+// ─── Unary elementwise transcendentals (#23: exp, log, tanh, sigmoid, sqrt) ─
 
 // Helper that launches a unary u16-in / u16-out PTX with a `(a_ptr, out_ptr, n)`
-// signature. exp/log/tanh/sigmoid all share this shape.
+// signature. exp/log/tanh/sigmoid/sqrt all share this shape.
 fn launch_unary(
     a: &cudarc::driver::CudaSlice<u16>,
     device: &GpuDevice,
@@ -3456,8 +3466,8 @@ fn launch_unary(
     // SAFETY:
     // - `f` resolves to a PTX entry with the unary `(a_ptr, out_ptr, n)`
     //   signature shared by `exp_bf16_kernel` / `log_bf16_kernel` /
-    //   `tanh_bf16_kernel` / `sigmoid_bf16_kernel`. (See the PTX literals
-    //   below — all three params, in this exact order.)
+    //   `tanh_bf16_kernel` / `sigmoid_bf16_kernel` / `sqrt_bf16_kernel`.
+    //   (See the PTX literals below — all three params, in this exact order.)
     // - `a` is the caller's bf16 input buffer of length `n`; bound-check in
     //   PTX ensures only `[0, n)` is read.
     // - `out` is freshly alloc'd above with `n` elements and exclusively
@@ -3724,6 +3734,75 @@ DONE:
 }
 ";
 
+// sqrt uses the native f32 square-root instruction after bf16 -> f32 decode,
+// then stores back to bf16 with the same RNE bit path as the other kernels.
+// This mirrors PyTorch's dtype-preserving CUDA behavior for bf16 sqrt: math
+// happens in f32 registers, output storage remains bf16.
+const SQRT_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry sqrt_bf16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %out, %off;
+    .reg .b16 %a_b16, %zero16;
+    .reg .b32 %a_u32, %bits, %round, %lsb;
+    .reg .f32 %va, %vr, %zero;
+    .reg .pred %p, %is_nan, %is_neg;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.b16 %a_b16, [%a];
+    mov.b16 %zero16, 0;
+    mov.b32 %a_u32, {%zero16, %a_b16};
+    mov.b32 %va, %a_u32;
+
+    setp.nan.f32 %is_nan, %va, %va;
+    @%is_nan bra STORE_NAN;
+    mov.f32 %zero, 0f00000000;
+    setp.lt.f32 %is_neg, %va, %zero;
+    @%is_neg bra STORE_NAN;
+
+    sqrt.rn.f32 %vr, %va;
+
+    mov.b32 %bits, %vr;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    st.global.u16 [%out], %bits;
+    bra DONE;
+
+STORE_NAN:
+    mov.u32 %bits, 0x7FC0;
+    st.global.u16 [%out], %bits;
+
+DONE:
+    ret;
+}
+";
+
 /// Elementwise `out = exp(a)` on bf16 (u16-stored) GPU buffers. (#23)
 pub fn gpu_exp_bf16(
     a: &cudarc::driver::CudaSlice<u16>,
@@ -3754,6 +3833,14 @@ pub fn gpu_sigmoid_bf16(
     device: &GpuDevice,
 ) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
     launch_unary(a, device, SIGMOID_BF16_PTX, "sigmoid_bf16_kernel")
+}
+
+/// Elementwise `out = sqrt(a)` on bf16 GPU buffers with f32 internal math.
+pub fn gpu_sqrt_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_unary(a, device, SQRT_BF16_PTX, "sqrt_bf16_kernel")
 }
 
 // ─── Reductions (sum, mean) on bf16 with f32 accumulator (#23) ──────────────
@@ -5092,7 +5179,7 @@ const BROADCAST_DIV_BF16_PTX: &str = "\
     .reg .b16 %a_b16, %b_b16, %zero16;
     .reg .b32 %a_u32, %b_u32, %bits, %round, %lsb;
     .reg .f32 %va, %vb, %vr;
-    .reg .pred %p, %loop_p;
+    .reg .pred %p, %loop_p, %nan_a, %nan_b, %store_nan;
 
     ld.param.u64 %a, [a_ptr];
     ld.param.u64 %b, [b_ptr];
@@ -5144,13 +5231,25 @@ END_LOOP:
     mov.b32 %b_u32, {%zero16, %b_b16};
     mov.b32 %va, %a_u32;
     mov.b32 %vb, %b_u32;
-    div.approx.f32 %vr, %va, %vb;
+    setp.nan.f32 %nan_a, %va, %va;
+    setp.nan.f32 %nan_b, %vb, %vb;
+    or.pred %store_nan, %nan_a, %nan_b;
+    @%store_nan bra STORE_NAN;
+    div.rn.f32 %vr, %va, %vb;
     mov.b32 %bits, %vr;
     shr.u32 %lsb, %bits, 16;
     and.b32 %lsb, %lsb, 1;
     add.u32 %round, %bits, 0x7FFF;
     add.u32 %round, %round, %lsb;
     shr.u32 %bits, %round, 16;
+    cvt.u64.u32 %off_out, %r_tid;
+    shl.b64 %off_out, %off_out, 1;
+    add.u64 %off_out, %out, %off_out;
+    st.global.u16 [%off_out], %bits;
+    bra DONE;
+
+STORE_NAN:
+    mov.u32 %bits, 0x7FC0;
     cvt.u64.u32 %off_out, %r_tid;
     shl.b64 %off_out, %off_out, 1;
     add.u64 %off_out, %out, %off_out;

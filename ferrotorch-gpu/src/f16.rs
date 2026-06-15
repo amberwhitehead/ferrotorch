@@ -227,8 +227,8 @@ const DIV_F16_PTX: &str = "\
     .reg .u32 %r_tid, %bid, %bdim, %n_reg;
     .reg .u64 %a, %b, %out, %off;
     .reg .b16 %a_b16, %b_b16, %out_h;
-    .reg .f32 %va, %vb, %vr;
-    .reg .pred %p;
+    .reg .f32 %va, %vb, %vr, %nan;
+    .reg .pred %p, %nan_a, %nan_b, %store_nan;
 
     ld.param.u64 %a, [a_ptr];
     ld.param.u64 %b, [b_ptr];
@@ -254,9 +254,20 @@ const DIV_F16_PTX: &str = "\
     cvt.f32.f16 %va, %a_b16;
     cvt.f32.f16 %vb, %b_b16;
 
-    div.approx.f32 %vr, %va, %vb;
+    setp.nan.f32 %nan_a, %va, %va;
+    setp.nan.f32 %nan_b, %vb, %vb;
+    or.pred %store_nan, %nan_a, %nan_b;
+    @%store_nan bra STORE_NAN;
+
+    div.rn.f32 %vr, %va, %vb;
 
     cvt.rn.f16.f32 %out_h, %vr;
+    st.global.b16 [%out], %out_h;
+    bra DONE;
+
+STORE_NAN:
+    mov.f32 %nan, 0f7FC00000;
+    cvt.rn.f16.f32 %out_h, %nan;
     st.global.b16 [%out], %out_h;
 
 DONE:
@@ -796,7 +807,7 @@ DONE:
 }
 ";
 
-// sqrt(x) via sqrt.approx.f32. Inputs/outputs round-trip through f16.
+// sqrt(x) via sqrt.rn.f32. Inputs/outputs round-trip through f16.
 const SQRT_F16_PTX: &str = "\
 .version 7.0
 .target sm_53
@@ -810,8 +821,8 @@ const SQRT_F16_PTX: &str = "\
     .reg .u32 %r_tid, %bid, %bdim, %n_reg;
     .reg .u64 %a, %out, %off;
     .reg .b16 %a_b16, %out_h;
-    .reg .f32 %va, %vr;
-    .reg .pred %p;
+    .reg .f32 %va, %vr, %zero, %nan;
+    .reg .pred %p, %is_nan, %is_neg;
 
     ld.param.u64 %a, [a_ptr];
     ld.param.u64 %out, [out_ptr];
@@ -833,9 +844,21 @@ const SQRT_F16_PTX: &str = "\
     ld.global.b16 %a_b16, [%a];
     cvt.f32.f16 %va, %a_b16;
 
-    sqrt.approx.f32 %vr, %va;
+    setp.nan.f32 %is_nan, %va, %va;
+    @%is_nan bra STORE_NAN;
+    mov.f32 %zero, 0f00000000;
+    setp.lt.f32 %is_neg, %va, %zero;
+    @%is_neg bra STORE_NAN;
+
+    sqrt.rn.f32 %vr, %va;
 
     cvt.rn.f16.f32 %out_h, %vr;
+    st.global.b16 [%out], %out_h;
+    bra DONE;
+
+STORE_NAN:
+    mov.f32 %nan, 0f7FC00000;
+    cvt.rn.f16.f32 %out_h, %nan;
     st.global.b16 [%out], %out_h;
 
 DONE:
@@ -3104,8 +3127,8 @@ const BROADCAST_DIV_F16_PTX: &str = "\
     .reg .u64 %a, %b, %out, %a_str, %b_str, %oshape;
     .reg .u64 %off_a, %off_b, %off_out, %d64, %tmp;
     .reg .b16 %a_b16, %b_b16, %out_h;
-    .reg .f32 %va, %vb, %vr;
-    .reg .pred %p, %loop_p;
+    .reg .f32 %va, %vb, %vr, %nan;
+    .reg .pred %p, %loop_p, %nan_a, %nan_b, %store_nan;
 
     ld.param.u64 %a, [a_ptr];
     ld.param.u64 %b, [b_ptr];
@@ -3161,9 +3184,22 @@ END_LOOP:
 
     cvt.f32.f16 %va, %a_b16;
     cvt.f32.f16 %vb, %b_b16;
-    div.approx.f32 %vr, %va, %vb;
+    setp.nan.f32 %nan_a, %va, %va;
+    setp.nan.f32 %nan_b, %vb, %vb;
+    or.pred %store_nan, %nan_a, %nan_b;
+    @%store_nan bra STORE_NAN;
+    div.rn.f32 %vr, %va, %vb;
 
     cvt.rn.f16.f32 %out_h, %vr;
+    cvt.u64.u32 %off_out, %r_tid;
+    shl.b64 %off_out, %off_out, 1;
+    add.u64 %off_out, %out, %off_out;
+    st.global.b16 [%off_out], %out_h;
+    bra DONE;
+
+STORE_NAN:
+    mov.f32 %nan, 0f7FC00000;
+    cvt.rn.f16.f32 %out_h, %nan;
     cvt.u64.u32 %off_out, %r_tid;
     shl.b64 %off_out, %off_out, 1;
     add.u64 %off_out, %out, %off_out;

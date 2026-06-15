@@ -16,6 +16,9 @@
 //!   kernels). The output buffer is `CudaSlice<u8>` (1 byte per element).
 //! - **Logical** (u8 in, u8 out): `and / or / xor` (binary), `not` (unary).
 //!   Inputs are treated as "nonzero == true"; outputs are canonical 0/1.
+//! - **signbit** (value dtype in, u8 0/1 out): reads the raw sign bit for
+//!   `f32 / f64 / bf16`; for f16, mirrors PyTorch CUDA by returning false for
+//!   all NaN payloads while preserving signed zero and finite negative values.
 //! - **Reductions** to a 1-element u8 buffer: `any` (OR-reduce), `all`
 //!   (AND-reduce), global. One launched thread folds all `n` elements serially
 //!   (matching `int_kernels`' reduction harness), so the result equals a
@@ -43,9 +46,10 @@
 //! | REQ-4 (`gpu_any_bool`/`gpu_all_bool`) | SHIPPED | `pub fn gpu_any_bool / gpu_all_bool in bool_kernels.rs`; consumer `CudaBackendImpl::any_bool / all_bool in backend_impl.rs` |
 //! | REQ-5 (NaN comparison semantics) | SHIPPED | PTX `setp.{eq,lt,le,gt,ge}.f32` (unordered-false) and `setp.ne.f32` (unordered-true) inside the comparison kernels in `bool_kernels.rs`; consumer bool-comparison ops in `backend_impl.rs` rely on this for IEEE-NaN parity |
 //! | REQ-6 (half-precision compare) | SHIPPED | `fn cmp_half_ptx in bool_kernels.rs` decodes bf16 via `mov.b32 %ua, {%zero16, %ha}` and f16 via `cvt.f32.f16 %fa, %ha` then `setp.{op}.f32`; consumer `pub fn gpu_cmp_bf16 / gpu_cmp_f16` invoke `launch_cmp_half` from bool-comparison arms of `backend_impl.rs` |
-//! | REQ-7 (SAFETY annotations) | SHIPPED | every `unsafe { stream.launch_builder(&f)... }` in `bool_kernels.rs` (`launch_cmp`, `launch_not`, `launch_reduce_bool`) carries a multi-line `SAFETY:` comment; consumer SAFETY contract inherited via each public wrapper |
+//! | REQ-7 (SAFETY annotations) | SHIPPED | every `unsafe { stream.launch_builder(&f)... }` in `bool_kernels.rs` (`launch_cmp`, `launch_not`, `launch_signbit`, `launch_reduce_bool`) carries a multi-line `SAFETY:` comment; consumer SAFETY contract inherited via each public wrapper |
 //! | REQ-8 (empty-input short-circuit) | SHIPPED | `launch_cmp` and `launch_not` short-circuit `n == 0` via `if n == 0 { return Ok(stream.alloc_zeros::<u8>(0)?); }`; `launch_reduce_bool` short-circuits with empty-identity clone_htod; consumer backend dispatch path (`torch.any(empty)`) |
 //! | REQ-9 (on-device bool broadcast, #1663) | SHIPPED | `pub fn gpu_broadcast_bool in bool_kernels.rs` (u8 strided gather over `BOOL_BROADCAST_PTX`, 8-dim unrolled); consumer `CudaBackendImpl::broadcast_bool in backend_impl.rs`, itself consumed by `grad_fns::indexing::broadcast_bool_tensor`'s CUDA branch (the path `masked_scatter` / `masked_fill_bcast` / `masked_select_bcast` / `where_cond_bcast` flow through). Mirrors `expand_outplace` at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2406`. |
+//! | REQ-10 (`signbit`) | SHIPPED | `pub fn gpu_signbit_f32 / gpu_signbit_f64 / gpu_signbit_f16 / gpu_signbit_bf16 in bool_kernels.rs`; consumer `CudaBackendImpl::signbit_mask` and `grad_fns::transcendental::signbit` CUDA branch. |
 
 #![cfg(feature = "cuda")]
 
@@ -288,6 +292,170 @@ const NOT_BOOL_PTX: &str = "\
     // res = (va == 0) ? 1 : 0
     setp.eq.u16 %pa, %va, 0;
     selp.u16 %res, 1, 0, %pa;
+    st.global.u8 [%out], %res;
+DONE:
+    ret;
+}
+";
+
+const SIGNBIT_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry signbit_f32_kernel(
+    .param .u64 a_ptr, .param .u64 out_ptr, .param .u32 n
+) {
+    .reg .u32 %idx, %bid, %bdim, %nr, %bits, %sign;
+    .reg .u64 %a, %out, %ioff, %ooff;
+    .reg .u16 %res;
+    .reg .pred %p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %nr, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr;
+    @%p bra DONE;
+
+    cvt.u64.u32 %ioff, %idx;
+    shl.b64 %ioff, %ioff, 2;
+    add.u64 %a, %a, %ioff;
+    cvt.u64.u32 %ooff, %idx;
+    add.u64 %out, %out, %ooff;
+
+    ld.global.u32 %bits, [%a];
+    shr.u32 %sign, %bits, 31;
+    cvt.u16.u32 %res, %sign;
+    st.global.u8 [%out], %res;
+DONE:
+    ret;
+}
+";
+
+const SIGNBIT_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry signbit_f64_kernel(
+    .param .u64 a_ptr, .param .u64 out_ptr, .param .u32 n
+) {
+    .reg .u32 %idx, %bid, %bdim, %nr;
+    .reg .u64 %a, %out, %ioff, %ooff, %bits, %sign;
+    .reg .u16 %res;
+    .reg .pred %p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %nr, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr;
+    @%p bra DONE;
+
+    cvt.u64.u32 %ioff, %idx;
+    shl.b64 %ioff, %ioff, 3;
+    add.u64 %a, %a, %ioff;
+    cvt.u64.u32 %ooff, %idx;
+    add.u64 %out, %out, %ooff;
+
+    ld.global.u64 %bits, [%a];
+    shr.u64 %sign, %bits, 63;
+    cvt.u16.u64 %res, %sign;
+    st.global.u8 [%out], %res;
+DONE:
+    ret;
+}
+";
+
+const SIGNBIT_F16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry signbit_f16_kernel(
+    .param .u64 a_ptr, .param .u64 out_ptr, .param .u32 n
+) {
+    .reg .u32 %idx, %bid, %bdim, %nr, %bits, %exp, %mant, %sign;
+    .reg .u64 %a, %out, %ioff, %ooff;
+    .reg .u16 %h, %res;
+    .reg .pred %p, %exp_all, %mant_nz, %is_nan;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %nr, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr;
+    @%p bra DONE;
+
+    cvt.u64.u32 %ioff, %idx;
+    shl.b64 %ioff, %ioff, 1;
+    add.u64 %a, %a, %ioff;
+    cvt.u64.u32 %ooff, %idx;
+    add.u64 %out, %out, %ooff;
+
+    ld.global.u16 %h, [%a];
+    cvt.u32.u16 %bits, %h;
+    and.b32 %exp, %bits, 0x7C00;
+    and.b32 %mant, %bits, 0x03FF;
+    setp.eq.u32 %exp_all, %exp, 0x7C00;
+    setp.ne.u32 %mant_nz, %mant, 0;
+    and.pred %is_nan, %exp_all, %mant_nz;
+    shr.u32 %sign, %bits, 15;
+    cvt.u16.u32 %res, %sign;
+    selp.u16 %res, 0, %res, %is_nan;
+    st.global.u8 [%out], %res;
+DONE:
+    ret;
+}
+";
+
+const SIGNBIT_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry signbit_bf16_kernel(
+    .param .u64 a_ptr, .param .u64 out_ptr, .param .u32 n
+) {
+    .reg .u32 %idx, %bid, %bdim, %nr, %bits, %sign;
+    .reg .u64 %a, %out, %ioff, %ooff;
+    .reg .u16 %h, %res;
+    .reg .pred %p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %nr, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr;
+    @%p bra DONE;
+
+    cvt.u64.u32 %ioff, %idx;
+    shl.b64 %ioff, %ioff, 1;
+    add.u64 %a, %a, %ioff;
+    cvt.u64.u32 %ooff, %idx;
+    add.u64 %out, %out, %ooff;
+
+    ld.global.u16 %h, [%a];
+    cvt.u32.u16 %bits, %h;
+    shr.u32 %sign, %bits, 15;
+    cvt.u16.u32 %res, %sign;
     st.global.u8 [%out], %res;
 DONE:
     ret;
@@ -1076,6 +1244,48 @@ fn launch_not(a: &CudaSlice<u8>, device: &GpuDevice) -> GpuResult<CudaSlice<u8>>
     Ok(out)
 }
 
+/// Launch a raw sign-bit predicate over a value buffer, producing u8 0/1.
+fn launch_signbit<T: DeviceRepr + ValidAsZeroBits>(
+    a: &CudaSlice<T>,
+    n: usize,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<CudaSlice<u8>> {
+    if a.len() < n {
+        return Err(GpuError::LengthMismatch { a: a.len(), b: n });
+    }
+    let stream = device.stream();
+    if n == 0 {
+        return Ok(stream.alloc_zeros::<u8>(0)?);
+    }
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        }
+    })?;
+    let mut out = stream.alloc_zeros::<u8>(n)?;
+    let cfg = launch_1d(n);
+    let n_u32 = n as u32;
+    // SAFETY:
+    // - `f` resolves to `(a_ptr, out_ptr, n)` and the pushed args match.
+    // - `a` backs at least the logical `n` elements; pooled over-allocation is
+    //   permitted, but the kernel reads only `[0, n)`.
+    // - `out` is freshly allocated for exactly `n` bool bytes and is the only
+    //   mutable buffer passed to the kernel.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a)
+            .arg(&mut out)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
 /// Launch the serial bool reduction `(a_ptr, out_ptr, n, op)`, returning a
 /// 1-element u8 buffer. `op` selects any (OR) / all (AND).
 fn launch_reduce_bool(
@@ -1373,6 +1583,27 @@ pub fn gpu_xor_bool(
 /// Logical NOT of a u8 bool buffer → u8 0/1 buffer.
 pub fn gpu_not_bool(a: &CudaSlice<u8>, d: &GpuDevice) -> GpuResult<CudaSlice<u8>> {
     launch_not(a, d)
+}
+
+/// f32 `signbit`: raw bit 31 → u8 0/1, preserving signed zero and signed NaN.
+pub fn gpu_signbit_f32(a: &CudaSlice<f32>, n: usize, d: &GpuDevice) -> GpuResult<CudaSlice<u8>> {
+    launch_signbit(a, n, d, SIGNBIT_F32_PTX, "signbit_f32_kernel")
+}
+
+/// f64 `signbit`: raw bit 63 → u8 0/1.
+pub fn gpu_signbit_f64(a: &CudaSlice<f64>, n: usize, d: &GpuDevice) -> GpuResult<CudaSlice<u8>> {
+    launch_signbit(a, n, d, SIGNBIT_F64_PTX, "signbit_f64_kernel")
+}
+
+/// f16 `signbit`: bit 15 for non-NaN values; NaN payloads return 0 per CUDA
+/// PyTorch parity.
+pub fn gpu_signbit_f16(a: &CudaSlice<u16>, n: usize, d: &GpuDevice) -> GpuResult<CudaSlice<u8>> {
+    launch_signbit(a, n, d, SIGNBIT_F16_PTX, "signbit_f16_kernel")
+}
+
+/// bf16 `signbit`: raw u16 bit 15 → u8 0/1.
+pub fn gpu_signbit_bf16(a: &CudaSlice<u16>, n: usize, d: &GpuDevice) -> GpuResult<CudaSlice<u8>> {
+    launch_signbit(a, n, d, SIGNBIT_BF16_PTX, "signbit_bf16_kernel")
 }
 
 /// Global OR-reduction (`torch.any`) → 1-element u8 buffer (0/1).
