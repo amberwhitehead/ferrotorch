@@ -53,6 +53,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- ops/search.rs topk: CPU tie order diverges from torch CPU topk (stable sort vs libstdc++ partial_sort/nth_element selection) (#1968)
 - CORE-003: `Tensor::to_dtype` silently severs autograd graphs (#1697)
 - CUDA cummax/cummin kernels break ties to the FIRST occurrence; torch and ferrotorch CPU keep the LAST (>=/<=) (#1925)
 - gather: off-axis-smaller index (valid per torch) panics on CPU / OOB-reads index buffer on CUDA — output geometry derived from input factorization (#1935)
