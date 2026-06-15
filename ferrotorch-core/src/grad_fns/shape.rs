@@ -1719,8 +1719,16 @@ impl<T: Float> GradFn<T> for SplitBackward<T> {
 
             let mut zeros_handle = backend.alloc_zeros(orig_numel, T::dtype(), device_ord)?;
 
-            let go_handle = grad_output.gpu_handle()?;
-            let chunk_numel = grad_output.numel();
+            let grad_packed = if grad_output.is_contiguous()
+                && grad_output.storage_offset() == 0
+                && grad_output.storage_len() == grad_output.numel()
+            {
+                grad_output.clone()
+            } else {
+                crate::autograd::no_grad::no_grad(|| crate::methods::contiguous_t(grad_output))?
+            };
+            let go_handle = grad_packed.gpu_handle()?;
+            let chunk_numel = grad_packed.numel();
             backend.strided_cat(
                 go_handle,
                 &mut zeros_handle,
@@ -1737,9 +1745,17 @@ impl<T: Float> GradFn<T> for SplitBackward<T> {
             return Ok(vec![Some(grad_tensor)]);
         }
 
-        // CPU path (also serves as fallback for non-f32 or missing backend).
+        if grad_output.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "split backward",
+            });
+        }
+
+        // CPU path. The incoming gradient may itself be a view (for example
+        // `split(x)[i].t().sum().backward()`), so read logical order rather
+        // than borrowing only contiguous storage.
         let (cpu_go, device) = ensure_cpu(grad_output)?;
-        let grad_data = cpu_go.data()?;
+        let grad_data = cpu_go.data_vec()?;
         let orig_shape = self.input.shape();
         let ndim = orig_shape.len();
 
@@ -3311,6 +3327,19 @@ mod tests {
         backward(&loss).unwrap();
         let g = x.grad().unwrap().expect("x should have gradient");
         assert_eq!(g.data().unwrap(), &[0.0, 0.0, 1.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_split_backward_accepts_noncontiguous_grad_view() {
+        let x = leaf(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], &[4, 2], true);
+        let parts = crate::methods::split_t(&x, &[2, 2], 0).unwrap();
+        let y = transpose_2d(&parts[1]).unwrap();
+        assert!(!y.is_contiguous());
+
+        let loss = sum_to_scalar(&y);
+        backward(&loss).unwrap();
+        let g = x.grad().unwrap().expect("x should have gradient");
+        assert_eq!(g.data().unwrap(), &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]);
     }
 
     // -- vstack / hstack / dstack / column_stack (REQ-17/18/19/20, #1342) --

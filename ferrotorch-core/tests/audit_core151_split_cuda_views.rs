@@ -49,6 +49,13 @@ fn arange_4x6_cuda() -> Tensor<f32> {
         .expect("cpu->gpu upload")
 }
 
+fn cuda(data: &[f32], shape: &[usize]) -> Tensor<f32> {
+    from_vec(data.to_vec(), shape)
+        .expect("construct cpu tensor")
+        .to(Device::Cuda(0))
+        .expect("cpu->gpu upload")
+}
+
 /// `split` of a `narrow` view (contiguous strides, storage_offset = 6).
 /// Pre-fix the fast path reads from storage element 0 and returns the
 /// first two ROWS' columns (`[0,1,2,6,7,8]` / `[3,4,5,9,10,11]`)
@@ -135,4 +142,42 @@ fn chunk_of_cuda_transpose_view_matches_torch() {
             "chunk {i} of a CUDA transpose view gathered wrong elements (CORE-151)"
         );
     }
+}
+
+/// `SplitBackward` fed a non-contiguous CUDA `grad_output` must copy the
+/// gradient's logical order into the original tensor, not raw storage order.
+/// Torch oracle:
+/// ```python
+/// x = torch.arange(8., device='cuda:0').reshape(4,2).requires_grad_()
+/// y = x.split([2,2], 0)[1]
+/// y.backward(torch.arange(4., device='cuda:0').reshape(2,2).t())
+/// x.grad.flatten()  # [0,0,0,0,0,2,1,3]
+/// ```
+#[test]
+// reason: split backward is pure data movement, so exact float comparison is appropriate.
+#[allow(clippy::float_cmp)]
+fn split_cuda_backward_with_noncontiguous_grad_output_matches_torch() {
+    ensure_cuda_backend();
+    let data: Vec<f32> = (0..8).map(|v| v as f32).collect();
+    let x = cuda(&data, &[4, 2]).requires_grad_(true);
+    let parts = x.split(&[2, 2], 0).expect("split along dim 0");
+    let go_base = cuda(&[0.0, 1.0, 2.0, 3.0], &[2, 2]);
+    let go_t = go_base.transpose(0, 1).expect("transposed grad_output");
+    assert!(!go_t.is_contiguous());
+
+    parts[1]
+        .backward_with_gradient(&go_t)
+        .expect("backward with non-contiguous CUDA grad_output");
+
+    let grad = x.grad().unwrap().expect("grad must reach CUDA leaf");
+    assert_eq!(
+        grad.device(),
+        Device::Cuda(0),
+        "split backward grad must remain CUDA-resident"
+    );
+    assert_eq!(grad.shape(), &[4, 2]);
+    assert_eq!(
+        grad.data_vec().expect("gpu readback"),
+        &[0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 1.0, 3.0]
+    );
 }
