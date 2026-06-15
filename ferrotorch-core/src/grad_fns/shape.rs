@@ -1604,6 +1604,11 @@ fn atleast_3d<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 // CatBackward
 // ---------------------------------------------------------------------------
 
+#[inline]
+fn is_legacy_cat_empty<T: Float>(tensor: &Tensor<T>) -> bool {
+    tensor.ndim() == 1 && tensor.shape()[0] == 0
+}
+
 /// Backward for `cat(tensors, axis)`.
 ///
 /// VJP: split `grad_output` along `axis` at the original sizes, yielding
@@ -1635,18 +1640,24 @@ impl<T: Float> GradFn<T> for CatBackward<T> {
         let chunks = crate::autograd::no_grad::no_grad(|| {
             crate::methods::split_t(grad_output, &self.split_sizes, self.axis)
         })?;
-        Ok(self
-            .inputs
+        self.inputs
             .iter()
             .zip(chunks)
             .map(|(input, chunk)| {
-                if input.requires_grad() {
-                    Some(chunk)
+                if !input.requires_grad() {
+                    Ok(None)
+                } else if is_legacy_cat_empty(input) {
+                    let zeros = vec![<T as num_traits::Zero>::zero(); input.numel()];
+                    Ok(Some(Tensor::from_storage(
+                        TensorStorage::on_device(zeros, input.device())?,
+                        input.shape().to_vec(),
+                        false,
+                    )?))
                 } else {
-                    None
+                    Ok(Some(chunk))
                 }
             })
-            .collect())
+            .collect::<FerrotorchResult<Vec<_>>>()
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -1804,50 +1815,10 @@ pub fn cat<T: Float>(tensors: &[Tensor<T>], axis: isize) -> FerrotorchResult<Ten
         });
     }
 
-    let ndim = tensors[0].ndim();
-    if ndim == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "cat: cannot concatenate scalar (0-D) tensors".into(),
-        });
-    }
-
-    let norm_axis = crate::shape::normalize_axis(axis, ndim)?;
-
-    // Validate shapes: all dims except `axis` must match.
-    for (i, t) in tensors.iter().enumerate().skip(1) {
-        if t.ndim() != ndim {
-            return Err(FerrotorchError::ShapeMismatch {
-                message: format!("cat: tensor {} has {} dims, expected {}", i, t.ndim(), ndim),
-            });
-        }
-        for d in 0..ndim {
-            if d != norm_axis && t.shape()[d] != tensors[0].shape()[d] {
-                return Err(FerrotorchError::ShapeMismatch {
-                    message: format!(
-                        "cat: tensor {} has shape {:?}, incompatible with {:?} on axis {}",
-                        i,
-                        t.shape(),
-                        tensors[0].shape(),
-                        d
-                    ),
-                });
-            }
-        }
-    }
-
-    // Build output shape.
-    let mut out_shape = tensors[0].shape().to_vec();
-    let split_sizes: Vec<usize> = tensors.iter().map(|t| t.shape()[norm_axis]).collect();
-    let total_along_axis: usize = split_sizes.iter().sum();
-    out_shape[norm_axis] = total_along_axis;
-
+    // Device validation up front (CORE-055 / #1749, CORE-1957 / #1957): torch
+    // requires all cat operands on one device even when an operand is a legacy
+    // skipped `[0]` tensor.
     let device = tensors[0].device();
-
-    // Device validation up front (CORE-055 / #1749): torch requires all cat
-    // inputs on one device ("Expected all tensors to be on the same
-    // device"). Without this check the failure mode depended on which path
-    // happened to choke on the foreign tensor (raw `gpu_handle()` error on
-    // the GPU path, `data()` error on the CPU path).
     for t in tensors.iter().skip(1) {
         if t.device() != device {
             return Err(FerrotorchError::DeviceMismatch {
@@ -1856,6 +1827,75 @@ pub fn cat<T: Float>(tensors: &[Tensor<T>], axis: isize) -> FerrotorchResult<Ten
             });
         }
     }
+
+    if let Some((i, _)) = tensors.iter().enumerate().find(|(_, t)| t.ndim() == 0) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("cat: cannot concatenate scalar (0-D) tensor at position {i}"),
+        });
+    }
+
+    let legacy_empty: Vec<bool> = tensors.iter().map(is_legacy_cat_empty).collect();
+    let valid_idx = legacy_empty.iter().position(|&skip| !skip);
+
+    // PyTorch legacy behaviour: when every input is exactly shape `[0]`, `cat`
+    // returns a `[0]` tensor and accepts any dim value (TensorShape.cpp
+    // `cat_should_skip_tensor` / fallback `sizes{0}` path).
+    let Some(valid_idx) = valid_idx else {
+        let out_shape = vec![0];
+        let split_sizes = vec![0; tensors.len()];
+        let any_requires_grad = tensors.iter().any(|t| t.requires_grad());
+        let storage = TensorStorage::on_device(Vec::<T>::new(), device)?;
+        return if is_grad_enabled() && any_requires_grad {
+            let grad_fn = Arc::new(CatBackward::new(tensors.to_vec(), 0, split_sizes));
+            Tensor::from_operation(storage, out_shape, grad_fn)
+        } else {
+            Tensor::from_storage(storage, out_shape, false)
+        };
+    };
+
+    let ndim = tensors[valid_idx].ndim();
+    let norm_axis = crate::shape::normalize_axis(axis, ndim)?;
+
+    // Validate shapes: all dims except `axis` must match.
+    for (i, t) in tensors.iter().enumerate() {
+        if legacy_empty[i] {
+            continue;
+        }
+        if t.ndim() != ndim {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!("cat: tensor {} has {} dims, expected {}", i, t.ndim(), ndim),
+            });
+        }
+        for d in 0..ndim {
+            if d != norm_axis && t.shape()[d] != tensors[valid_idx].shape()[d] {
+                return Err(FerrotorchError::ShapeMismatch {
+                    message: format!(
+                        "cat: tensor {} has shape {:?}, incompatible with {:?} on axis {}",
+                        i,
+                        t.shape(),
+                        tensors[valid_idx].shape(),
+                        d
+                    ),
+                });
+            }
+        }
+    }
+
+    // Build output shape.
+    let mut out_shape = tensors[valid_idx].shape().to_vec();
+    let split_sizes: Vec<usize> = tensors
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            if legacy_empty[i] {
+                0
+            } else {
+                t.shape()[norm_axis]
+            }
+        })
+        .collect();
+    let total_along_axis: usize = split_sizes.iter().sum();
+    out_shape[norm_axis] = total_along_axis;
 
     // View-geometry staging (CORE-055 / #1749 — same `gpu_handle()`-drops-
     // view-geometry class as #1657 / #1845): both consumers below require a
@@ -1902,9 +1942,13 @@ pub fn cat<T: Float>(tensors: &[Tensor<T>], axis: isize) -> FerrotorchResult<Ten
         let mut offset = 0usize;
         // Read from the STAGED (packed, offset-0) copies — `strided_cat`
         // sees no view geometry (CORE-055 / #1749).
-        for t in &staged {
-            let t_axis_size = t.shape()[norm_axis];
+        for (i, t) in staged.iter().enumerate() {
+            let t_axis_size = split_sizes[i];
             let t_numel = t.numel();
+            if t_numel == 0 {
+                offset += t_axis_size;
+                continue;
+            }
             let t_handle = t.gpu_handle()?;
             backend.strided_cat(
                 t_handle,
@@ -1952,9 +1996,9 @@ pub fn cat<T: Float>(tensors: &[Tensor<T>], axis: isize) -> FerrotorchResult<Ten
     let mut out_data = vec![<T as num_traits::Zero>::zero(); out_numel];
 
     let mut offset = 0usize;
-    for t in &cpu_tensors {
+    for (i, t) in cpu_tensors.iter().enumerate() {
         let t_data = t.data()?;
-        let t_axis_size = t.shape()[norm_axis];
+        let t_axis_size = split_sizes[i];
         for o in 0..outer {
             let src_start = o * t_axis_size * inner;
             let dst_start = o * total_along_axis * inner + offset;

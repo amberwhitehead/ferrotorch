@@ -53,6 +53,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- cat: torch legacy zero-size 1-D inputs are not skipped (parity-sweep cat case i=5 fails all seeds) (#1957)
 - fake_quantize tensor-qparams/per-channel silently accept mixed-device qparams; torch rejects with same-device RuntimeError (#1955)
 - ops/search.rs topk: CPU tie order diverges from torch CPU topk (stable sort vs libstdc++ partial_sort/nth_element selection) (#1968)
 - CORE-003: `Tensor::to_dtype` silently severs autograd graphs (#1697)
