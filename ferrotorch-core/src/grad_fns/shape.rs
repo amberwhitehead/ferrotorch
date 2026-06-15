@@ -2869,7 +2869,11 @@ mod tests {
         let g = x.grad().unwrap().expect("x should have gradient");
         // The size-1 axis was broadcast to 4, so each element accumulates 4×1.
         assert_eq!(g.shape(), &[1, 3]);
-        for &v in &g.data_vec().unwrap() {
+        assert!(
+            g.is_contiguous(),
+            "expand_as backward must materialize the leaf grad"
+        );
+        for &v in g.data().unwrap() {
             assert!((v - 4.0).abs() < 1e-6, "expected 4.0, got {v}");
         }
     }
