@@ -650,11 +650,15 @@ fn scale_tensor<T: Float>(t: &Tensor<T>, alpha: T) -> FerrotorchResult<Tensor<T>
 //
 //   1. `out.shape()` must equal the broadcast shape of `a` and `b`. PyTorch
 //      raises `RuntimeError: shape mismatch` otherwise.
-//   2. `out` may not be in the autograd graph (no grad_fn) and may not be a
+//   2. When grad mode is enabled, no source input may require grad. PyTorch
+//      rejects `out=` calls instead of silently detaching the destination
+//      from the input graph. Under `no_grad`, source inputs are accepted
+//      because no graph edge is being requested.
+//   3. `out` may not be in the autograd graph (no grad_fn) and may not be a
 //      leaf with requires_grad=true — the write is not autograd-tracked.
 //      (PyTorch raises here too, with the same message as `add_`.)
-//   3. Devices of `a`, `b`, and `out` must match.
-//   4. NaN/Inf already present in `out` must be fully overwritten (no leak).
+//   4. Devices of `a`, `b`, and `out` must match.
+//   5. NaN/Inf already present in `out` must be fully overwritten (no leak).
 //
 // Forward-only: `out=` is incompatible with attaching a grad_fn to `out`
 // (autograd ops never accept a pre-allocated `out`), so no backward node
@@ -697,6 +701,36 @@ fn check_out_allowed<T: Float>(out: &Tensor<T>, op_name: &str) -> FerrotorchResu
     Ok(())
 }
 
+#[inline]
+fn tensor_tracks_autograd<T: Float>(tensor: &Tensor<T>) -> bool {
+    tensor.requires_grad() || tensor.grad_fn().is_some()
+}
+
+/// Validate PyTorch's source-input autograd rule for `out=` operations.
+///
+/// PyTorch raises
+/// "functions with out=... arguments don't support automatic differentiation"
+/// when grad mode is enabled and any source argument participates in autograd,
+/// including non-leaf results. The check is deliberately separate from
+/// [`check_out_allowed`]: `no_grad` disables graph construction for sources,
+/// but the destination write still uses ferrotorch's stricter `out`-mutation
+/// guard until shared version counters land.
+fn check_out_sources_allowed<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    op_name: &str,
+) -> FerrotorchResult<()> {
+    if is_grad_enabled() && (tensor_tracks_autograd(a) || tensor_tracks_autograd(b)) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op_name}: functions with out=... arguments don't support \
+                 automatic differentiation, but one of the arguments requires grad"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// `torch.add(a, b, *, out=out)` — write `a + b` into `out` in-place.
 ///
 /// Thin `alpha = 1.0` wrapper over [`add_scaled_out`].
@@ -732,6 +766,11 @@ pub fn add_out<T: Float>(out: &Tensor<T>, a: &Tensor<T>, b: &Tensor<T>) -> Ferro
 ///   different devices.
 /// - [`FerrotorchError::ShapeMismatch`] if `out.shape()` does not equal
 ///   `broadcast_shapes(a.shape(), b.shape())`.
+/// - [`FerrotorchError::InvalidArgument`] if grad mode is enabled and `a`
+///   or `b` participates in autograd (leaf `requires_grad` tensor or
+///   non-leaf `grad_fn` result). PyTorch rejects `out=` in this case because
+///   the destination write is not differentiable. Source tensors are allowed
+///   inside [`no_grad`].
 /// - [`FerrotorchError::InvalidArgument`] if `out` has a `grad_fn` or is
 ///   a leaf with `requires_grad = true` (matches PyTorch's `out=` rule).
 /// - [`FerrotorchError::InvalidArgument`] if `alpha` is not representable
@@ -756,6 +795,7 @@ pub fn add_scaled_out<T: Float>(
     alpha: f64,
 ) -> FerrotorchResult<()> {
     check_out_allowed(out, "add_scaled_out")?;
+    check_out_sources_allowed(a, b, "add_scaled_out")?;
 
     if a.device() != b.device() {
         return Err(FerrotorchError::DeviceMismatch {

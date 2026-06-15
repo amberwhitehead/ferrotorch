@@ -215,12 +215,14 @@ mod gpu {
         assert_eq!(v_host.data_vec().unwrap(), &[110.0, 220.0]);
     }
 
-    /// CUDA sub-view `out=` for a dtype WITHOUT a strided-scatter kernel
-    /// (bf16) must return a structured error (R-LOUD-1), never a silent
-    /// wrong path. Follow-up kernel tracked in the issue cross-linked
-    /// from #1938.
+    /// CUDA sub-view `out=` for bf16 must use the u16 strided-scatter
+    /// kernel and preserve all non-view elements in the shared base
+    /// storage. This mirrors torch 2.11 CUDA:
+    /// `base=[1,2,3,4] (bf16 cuda); v=base.narrow(0,2,2);
+    ///  torch.add([10,20],[100,200], out=v)`
+    /// -> `base == [1,2,110,220]`.
     #[test]
-    fn add_out_subview_cuda_bf16_structured_error() {
+    fn add_out_subview_cuda_bf16_writes_in_place() {
         ensure_cuda_backend();
 
         let mk = |vals: &[f32], shape: &[usize]| {
@@ -235,21 +237,28 @@ mod gpu {
         let a = mk(&[10.0, 20.0], &[2]);
         let b = mk(&[100.0, 200.0], &[2]);
 
-        let res = add_out(&v, &a, &b);
-        assert!(
-            res.is_err(),
-            "bf16 CUDA sub-view out= has no strided-scatter kernel; it must \
-             return a structured error, not corrupt the shared buffer; got {res:?}"
-        );
-        // The error must fire before any storage mutation: base intact.
+        add_out(&v, &a, &b).unwrap();
+
+        assert!(v.is_cuda(), "out view must stay CUDA-resident");
+        assert!(base.is_cuda(), "base must stay CUDA-resident");
         assert_eq!(base.storage().len(), 4);
+
         let base_host = base.to(Device::Cpu).unwrap();
-        let host: Vec<f32> = base_host
+        let base_vals: Vec<f32> = base_host
             .data_vec()
             .unwrap()
             .iter()
             .map(|x| x.to_f32())
             .collect();
-        assert_eq!(host, vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(base_vals, vec![1.0, 2.0, 110.0, 220.0]);
+
+        let v_host = v.to(Device::Cpu).unwrap();
+        let v_vals: Vec<f32> = v_host
+            .data_vec()
+            .unwrap()
+            .iter()
+            .map(|x| x.to_f32())
+            .collect();
+        assert_eq!(v_vals, vec![110.0, 220.0]);
     }
 }
