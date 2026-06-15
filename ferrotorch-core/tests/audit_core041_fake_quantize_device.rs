@@ -29,7 +29,7 @@ use ferrotorch_core::grad_fns::quantize_grad::{
     fake_quantize_per_channel_affine, fake_quantize_per_tensor_affine,
     fake_quantize_per_tensor_affine_tensor_qparams,
 };
-use ferrotorch_core::{Device, Float, IntTensor, Tensor, TensorStorage};
+use ferrotorch_core::{Device, FerrotorchError, Float, IntTensor, Tensor, TensorStorage};
 use std::sync::Once;
 
 static GPU_INIT: Once = Once::new();
@@ -54,6 +54,22 @@ fn t_cuda<T: Float>(data: &[f64], shape: &[usize], rg: bool) -> Tensor<T> {
         .requires_grad_(rg)
 }
 
+fn t_cpu<T: Float>(data: &[f64], shape: &[usize], rg: bool) -> Tensor<T> {
+    let cast: Vec<T> = data
+        .iter()
+        .map(|&v| <T as num_traits::NumCast>::from(v).unwrap())
+        .collect();
+    Tensor::from_storage(TensorStorage::cpu(cast), shape.to_vec(), rg).unwrap()
+}
+
+fn zp_cpu(data: &[i64], shape: &[usize]) -> IntTensor<i64> {
+    IntTensor::from_vec(data.to_vec(), shape.to_vec()).unwrap()
+}
+
+fn zp_cuda(data: &[i64], shape: &[usize]) -> IntTensor<i64> {
+    zp_cpu(data, shape).to(Device::Cuda(0)).unwrap()
+}
+
 /// Read any-device tensor back as exact f64 values for oracle comparison.
 fn host_f64<T: Float>(t: &Tensor<T>) -> Vec<f64> {
     t.data_vec()
@@ -76,6 +92,25 @@ fn grad_of<T: Float>(leaf: &Tensor<T>) -> Tensor<T> {
     leaf.grad()
         .unwrap()
         .expect("grad must reach the leaf (R-ORACLE-3)")
+}
+
+fn assert_device_mismatch<T>(
+    result: Result<T, FerrotorchError>,
+    expected: Device,
+    got: Device,
+    label: &str,
+) {
+    match result {
+        Err(FerrotorchError::DeviceMismatch {
+            expected: e,
+            got: g,
+        }) => {
+            assert_eq!(e, expected, "{label}: expected-device field");
+            assert_eq!(g, got, "{label}: got-device field");
+        }
+        Err(other) => panic!("{label}: expected DeviceMismatch, got {other:?}"),
+        Ok(_) => panic!("{label}: expected DeviceMismatch, got Ok"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +245,47 @@ fn fake_quantize_tensor_qparams_cuda_resident_f32() {
     );
 }
 
+/// Live torch 2.11.0+cu130 rejects every mixed-device tensor-qparams operand
+/// set at the wrapper boundary before reading qparam data:
+///   x cuda, scale cpu, zp cpu  -> scale is on cpu, other tensors cuda:0
+///   x cuda, scale cuda, zp cpu -> zero_point is on cpu, other tensors cuda:0
+///   x cpu,  scale cuda, zp cuda -> scale is on cuda:0, other tensors cpu
+#[test]
+fn fake_quantize_tensor_qparams_rejects_mixed_devices() {
+    ensure_cuda_backend();
+    let x_cuda = t_cuda::<f32>(&[1.0, 2.0], &[2], false);
+    let x_cpu = t_cpu::<f32>(&[1.0, 2.0], &[2], false);
+    let scale_cuda = t_cuda::<f32>(&[0.25], &[1], false);
+    let scale_cpu = t_cpu::<f32>(&[0.25], &[1], false);
+    let zp_cuda = zp_cuda(&[0], &[1]);
+    let zp_cpu = zp_cpu(&[0], &[1]);
+
+    assert_device_mismatch(
+        fake_quantize_per_tensor_affine_tensor_qparams(&x_cuda, &scale_cpu, &zp_cpu, -128, 127),
+        Device::Cuda(0),
+        Device::Cpu,
+        "x cuda, scale cpu, zp cpu",
+    );
+    assert_device_mismatch(
+        fake_quantize_per_tensor_affine_tensor_qparams(&x_cuda, &scale_cuda, &zp_cpu, -128, 127),
+        Device::Cuda(0),
+        Device::Cpu,
+        "x cuda, scale cuda, zp cpu",
+    );
+    assert_device_mismatch(
+        fake_quantize_per_tensor_affine_tensor_qparams(&x_cuda, &scale_cpu, &zp_cuda, -128, 127),
+        Device::Cuda(0),
+        Device::Cpu,
+        "x cuda, scale cpu, zp cuda",
+    );
+    assert_device_mismatch(
+        fake_quantize_per_tensor_affine_tensor_qparams(&x_cpu, &scale_cuda, &zp_cuda, -128, 127),
+        Device::Cpu,
+        Device::Cuda(0),
+        "x cpu, scale cuda, zp cuda",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // per-channel
 // ---------------------------------------------------------------------------
@@ -272,4 +348,43 @@ fn fake_quantize_per_channel_cuda_resident_no_grad_f32() {
         &[-32.0, 0.0, 1.0, 2.0, -0.5, 0.5],
     );
     assert!(out.grad_fn().is_none());
+}
+
+/// Live torch 2.11.0+cu130 rejects every mixed-device per-channel qparam set
+/// at the wrapper/TensorIterator boundary; no qparam host readback is allowed
+/// to make invalid mixed placement appear to work.
+#[test]
+fn fake_quantize_per_channel_rejects_mixed_devices() {
+    ensure_cuda_backend();
+    let x_cuda = t_cuda::<f32>(&[1.0, 2.0], &[1, 2], false);
+    let x_cpu = t_cpu::<f32>(&[1.0, 2.0], &[1, 2], false);
+    let scale_cuda = t_cuda::<f32>(&[0.25, 0.5], &[2], false);
+    let scale_cpu = t_cpu::<f32>(&[0.25, 0.5], &[2], false);
+    let zp_cuda = zp_cuda(&[0, 1], &[2]);
+    let zp_cpu = zp_cpu(&[0, 1], &[2]);
+
+    assert_device_mismatch(
+        fake_quantize_per_channel_affine(&x_cuda, &scale_cpu, &zp_cpu, 1, -128, 127),
+        Device::Cuda(0),
+        Device::Cpu,
+        "x cuda, scale cpu, zp cpu",
+    );
+    assert_device_mismatch(
+        fake_quantize_per_channel_affine(&x_cuda, &scale_cuda, &zp_cpu, 1, -128, 127),
+        Device::Cuda(0),
+        Device::Cpu,
+        "x cuda, scale cuda, zp cpu",
+    );
+    assert_device_mismatch(
+        fake_quantize_per_channel_affine(&x_cuda, &scale_cpu, &zp_cuda, 1, -128, 127),
+        Device::Cuda(0),
+        Device::Cpu,
+        "x cuda, scale cpu, zp cuda",
+    );
+    assert_device_mismatch(
+        fake_quantize_per_channel_affine(&x_cpu, &scale_cuda, &zp_cuda, 1, -128, 127),
+        Device::Cpu,
+        Device::Cuda(0),
+        "x cpu, scale cuda, zp cuda",
+    );
 }

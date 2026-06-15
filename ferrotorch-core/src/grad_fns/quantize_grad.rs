@@ -45,7 +45,7 @@ use std::sync::Arc;
 
 use crate::device::Device;
 use crate::dtype::Float;
-use crate::error::FerrotorchResult;
+use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::int_tensor::IntTensor;
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
@@ -63,6 +63,15 @@ fn zp_host_vec(zero_point: &IntTensor<i64>) -> FerrotorchResult<Vec<i64>> {
         Ok(zero_point.to(Device::Cpu)?.data()?.to_vec())
     } else {
         Ok(zero_point.data()?.to_vec())
+    }
+}
+
+#[inline]
+fn same_device(expected: Device, got: Device) -> FerrotorchResult<()> {
+    if got == expected {
+        Ok(())
+    } else {
+        Err(FerrotorchError::DeviceMismatch { expected, got })
     }
 }
 
@@ -167,14 +176,17 @@ pub fn fake_quantize_differentiable<T: Float>(
 /// `Tensor<T: Float>` would silently allow non-integer zero-points and
 /// diverge from upstream's `int64_t` extraction).
 ///
-/// Device contract: same documented host round trip as
-/// [`fake_quantize_per_tensor_affine`] (CORE-041 / #1735, R-LOUD-2) — CUDA
-/// `input`/`scale`/`zero_point` are read via D2H and the output is
-/// re-uploaded to the input's device.
+/// Device contract: `input`, `scale`, and `zero_point` must live on the same
+/// device, matching PyTorch's generated wrapper check (#1955). After that
+/// check, same-device CUDA operands use the documented host round trip from
+/// [`fake_quantize_per_tensor_affine`] (CORE-041 / #1735, R-LOUD-2): qparams
+/// are read via D2H and the output is re-uploaded to the input's device.
 ///
 /// # Errors
 ///
 /// - All errors from `fake_quantize_per_tensor_affine`.
+/// - `FerrotorchError::DeviceMismatch` if `scale` or `zero_point` is not on
+///   `input.device()`.
 /// - `FerrotorchError::InvalidArgument` if `scale.numel() != 1` or
 ///   `zero_point.numel() != 1`.
 pub fn fake_quantize_per_tensor_affine_tensor_qparams<T: Float>(
@@ -184,7 +196,9 @@ pub fn fake_quantize_per_tensor_affine_tensor_qparams<T: Float>(
     quant_min: i64,
     quant_max: i64,
 ) -> FerrotorchResult<Tensor<T>> {
-    use crate::error::FerrotorchError;
+    same_device(input.device(), scale.device())?;
+    same_device(input.device(), zero_point.device())?;
+
     let scale_data = scale.data_vec()?;
     if scale_data.len() != 1 {
         return Err(FerrotorchError::InvalidArgument {
@@ -235,7 +249,6 @@ fn fake_quantize_per_tensor_affine_impl<T: Float>(
     quant_min: i64,
     quant_max: i64,
 ) -> FerrotorchResult<Tensor<T>> {
-    use crate::error::FerrotorchError;
     // Mirror upstream validation order.
     // 1. quant_min <= quant_max per `FakeQuantPerTensorAffine.cpp:75-78`.
     if quant_min > quant_max {
@@ -481,14 +494,18 @@ fn per_channel_mask_in_range(
 ///
 /// # Device contract (CORE-041 / #1735, R-LOUD-2)
 ///
-/// CUDA inputs are computed via a DOCUMENTED host round trip: `input`,
-/// `scale`, and `zero_point` are downloaded to the host, fake-quantized
-/// with the exact upstream cast-first formula, and the output is
-/// re-uploaded to the input's device. The backward node returns its
-/// per-channel STE gradient on the saved input's device the same way.
+/// `input`, `scale`, and `zero_point` must live on the same device, matching
+/// PyTorch's wrapper/TensorIterator same-device contract (#1955). Same-device
+/// CUDA operands are then computed via a DOCUMENTED host round trip: operands
+/// are downloaded to the host, fake-quantized with the exact upstream
+/// cast-first formula, and the output is re-uploaded to the input's device.
+/// The backward node returns its per-channel STE gradient on the saved input's
+/// device the same way.
 ///
 /// # Errors
 ///
+/// - `FerrotorchError::DeviceMismatch` if `scale` or `zero_point` is not on
+///   `input.device()`.
 /// - `FerrotorchError::InvalidArgument` if `scale.ndim() != 1`
 ///   (upstream `:55`).
 /// - `FerrotorchError::InvalidArgument` if `zero_point.ndim() != 1`
@@ -522,8 +539,6 @@ pub fn fake_quantize_per_channel_affine<T: Float>(
 ) -> FerrotorchResult<Tensor<T>> {
     use std::any::TypeId;
 
-    use crate::error::FerrotorchError;
-
     // 0. scale.scalar_type() in {Float, BFloat16}
     //    (FakeQuantPerChannelAffine.cpp:51-52
     //     `TORCH_CHECK(scale.scalar_type() == ScalarType::Float
@@ -548,6 +563,9 @@ pub fn fake_quantize_per_channel_affine<T: Float>(
             message: format!("Scale must be Float or BFloat16, found {found}"),
         });
     }
+
+    same_device(input.device(), scale.device())?;
+    same_device(input.device(), zero_point.device())?;
 
     // Upstream validation order:
     // 1. scale.dim() == 1 (FakeQuantPerChannelAffine.cpp:55)
