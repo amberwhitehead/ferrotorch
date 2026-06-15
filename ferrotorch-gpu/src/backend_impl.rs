@@ -664,6 +664,72 @@ impl CudaBackendImpl {
         Ok((input_strides, index_dims))
     }
 
+    fn checked_shape_numel(shape: &[usize], op: &'static str) -> FerrotorchResult<usize> {
+        if shape.is_empty() {
+            return Ok(1);
+        }
+        shape.iter().try_fold(1usize, |acc, &d| {
+            acc.checked_mul(d)
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!("{op}: shape {shape:?} element count overflows usize"),
+                })
+        })
+    }
+
+    fn broadcast_compare_strides(
+        in_shape: &[usize],
+        out_shape: &[usize],
+        op: &'static str,
+    ) -> FerrotorchResult<Vec<usize>> {
+        let out_ndim = out_shape.len();
+        let in_ndim = in_shape.len();
+        if in_ndim > out_ndim {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "{op}: input ndim {in_ndim} > output ndim {out_ndim} \
+                     (shapes {in_shape:?} -> {out_shape:?})"
+                ),
+            });
+        }
+
+        let mut in_contig = vec![0usize; in_ndim];
+        if in_ndim > 0 {
+            let mut stride = 1usize;
+            for d in (0..in_ndim).rev() {
+                in_contig[d] = stride;
+                stride = stride.checked_mul(in_shape[d]).ok_or_else(|| {
+                    FerrotorchError::InvalidArgument {
+                        message: format!("{op}: stride for shape {in_shape:?} overflows usize"),
+                    }
+                })?;
+            }
+        }
+
+        let mut src_strides = vec![0usize; out_ndim];
+        for (d_off, src_stride_slot) in src_strides.iter_mut().rev().enumerate() {
+            let out_dim = out_shape[out_ndim - 1 - d_off];
+            if d_off < in_ndim {
+                let d_in = in_ndim - 1 - d_off;
+                let in_dim = in_shape[d_in];
+                if in_dim == 1 {
+                    // Broadcast axis: stride stays zero.
+                } else if in_dim == out_dim {
+                    *src_stride_slot = in_contig[d_in];
+                } else {
+                    return Err(FerrotorchError::ShapeMismatch {
+                        message: format!(
+                            "{op}: cannot broadcast {in_shape:?} -> {out_shape:?} \
+                             (axis {} mismatch: {in_dim} vs {out_dim})",
+                            out_ndim - 1 - d_off
+                        ),
+                    });
+                }
+            }
+            // Missing leading dimensions broadcast with stride zero.
+        }
+        Ok(src_strides)
+    }
+
     /// Convert a [`crate::error::GpuError`] into a [`FerrotorchError`].
     fn map_gpu_err(e: crate::error::GpuError) -> FerrotorchError {
         FerrotorchError::InvalidArgument {
@@ -10348,6 +10414,85 @@ impl GpuBackend for CudaBackendImpl {
                 dev,
             ),
             _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "compare" }),
+        };
+        Ok(Self::wrap_slice_bool(r.map_err(Self::map_gpu_err)?, ord))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn compare_broadcast(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        a_shape: &[usize],
+        b_shape: &[usize],
+        out_shape: &[usize],
+        op: ferrotorch_core::gpu_dispatch::CompareOp,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        use crate::bool_kernels as bk;
+        if a.dtype() != b.dtype() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "compare_broadcast: operand dtypes differ ({} vs {})",
+                    a.dtype(),
+                    b.dtype()
+                ),
+            });
+        }
+        if a.device_ordinal() != b.device_ordinal() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "compare_broadcast: operand devices differ (cuda:{} vs cuda:{})",
+                    a.device_ordinal(),
+                    b.device_ordinal()
+                ),
+            });
+        }
+        let a_numel = Self::checked_shape_numel(a_shape, "compare_broadcast")?;
+        let b_numel = Self::checked_shape_numel(b_shape, "compare_broadcast")?;
+        let _out_numel = Self::checked_shape_numel(out_shape, "compare_broadcast")?;
+        if a.len() != a_numel || b.len() != b_numel {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "compare_broadcast: handle numel does not match logical shapes \
+                     (a len {} vs {a_shape:?} numel {a_numel}, b len {} vs {b_shape:?} numel {b_numel})",
+                    a.len(),
+                    b.len()
+                ),
+            });
+        }
+        let a_strides = Self::broadcast_compare_strides(a_shape, out_shape, "compare_broadcast")?;
+        let b_strides = Self::broadcast_compare_strides(b_shape, out_shape, "compare_broadcast")?;
+        let dev = self.device(a.device_ordinal())?;
+        let ord = a.device_ordinal();
+        let suffix = op.suffix();
+        let r = match a.dtype() {
+            DType::I32 => bk::gpu_cmp_broadcast_i32(
+                Self::unwrap_buffer_i32(a)?.inner(),
+                Self::unwrap_buffer_i32(b)?.inner(),
+                a_numel,
+                b_numel,
+                out_shape,
+                &a_strides,
+                &b_strides,
+                suffix,
+                dev,
+            ),
+            DType::I64 => bk::gpu_cmp_broadcast_i64(
+                Self::unwrap_buffer_i64(a)?.inner(),
+                Self::unwrap_buffer_i64(b)?.inner(),
+                a_numel,
+                b_numel,
+                out_shape,
+                &a_strides,
+                &b_strides,
+                suffix,
+                dev,
+            ),
+            _ => {
+                return Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "compare_broadcast",
+                });
+            }
         };
         Ok(Self::wrap_slice_bool(r.map_err(Self::map_gpu_err)?, ord))
     }

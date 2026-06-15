@@ -14,6 +14,8 @@
 //!   `eq / ne / lt / le / gt / ge`. bf16/f16 inputs (u16 bit patterns) are
 //!   decoded to f32 first, then compared (matching the bf16/f16 elementwise
 //!   kernels). The output buffer is `CudaSlice<u8>` (1 byte per element).
+//!   Broadcasted i32/i64 comparisons use the rank-general broadcast comparison
+//!   launcher below, matching PyTorch's TensorIterator CUDA residency.
 //! - **Logical** (u8 in, u8 out): `and / or / xor` (binary), `not` (unary).
 //!   Inputs are treated as "nonzero == true"; outputs are canonical 0/1.
 //! - **signbit** (value dtype in, u8 0/1 out): reads the raw sign bit for
@@ -50,6 +52,7 @@
 //! | REQ-8 (empty-input short-circuit) | SHIPPED | `launch_cmp` and `launch_not` short-circuit `n == 0` via `if n == 0 { return Ok(stream.alloc_zeros::<u8>(0)?); }`; `launch_reduce_bool` short-circuits with empty-identity clone_htod; consumer backend dispatch path (`torch.any(empty)`) |
 //! | REQ-9 (on-device bool broadcast, #1663) | SHIPPED | `pub fn gpu_broadcast_bool in bool_kernels.rs` (u8 strided gather over `BOOL_BROADCAST_PTX`, 8-dim unrolled); consumer `CudaBackendImpl::broadcast_bool in backend_impl.rs`, itself consumed by `grad_fns::indexing::broadcast_bool_tensor`'s CUDA branch (the path `masked_scatter` / `masked_fill_bcast` / `masked_select_bcast` / `where_cond_bcast` flow through). Mirrors `expand_outplace` at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2406`. |
 //! | REQ-10 (`signbit`) | SHIPPED | `pub fn gpu_signbit_f32 / gpu_signbit_f64 / gpu_signbit_f16 / gpu_signbit_bf16 in bool_kernels.rs`; consumer `CudaBackendImpl::signbit_mask` and `grad_fns::transcendental::signbit` CUDA branch. |
+//! | REQ-11 (integer broadcast comparison) | SHIPPED | `pub fn gpu_cmp_broadcast_i32 / gpu_cmp_broadcast_i64 in bool_kernels.rs` use rank-general shape/stride metadata buffers; consumer `CudaBackendImpl::compare_broadcast`, so `BoolTensor::compare_int` keeps broadcasted integer operands and bool outputs CUDA-resident. |
 
 #![cfg(feature = "cuda")]
 
@@ -133,6 +136,111 @@ fn cmp_ptx(
     {setp}
     selp.u16 %res, 1, 0, %c;
     st.global.u8 [%out], %res;
+DONE:
+    ret;
+}}
+"
+    )
+}
+
+/// PTX for rank-general broadcast comparison over i32/i64 buffers.
+///
+/// Each thread maps its flat output index through `out_shape` and per-input
+/// broadcast strides to load one element from `a` and `b`, then writes one bool
+/// byte. Strides are element strides, not byte strides; `in_shift` selects the
+/// byte shift for the value dtype.
+fn cmp_broadcast_ptx(
+    kernel_name: &str,
+    in_shift: u32,  // log2(IN_BYTES): i32→2, i64→3
+    load_ty: &str,  // "s32" | "s64"
+    reg_decl: &str, // register decls for the value regs
+    setp: &str,     // e.g. "setp.lt.s32 %c, %va, %vb;"
+) -> String {
+    format!(
+        "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry {kernel_name}(
+    .param .u64 a_ptr,
+    .param .u64 b_ptr,
+    .param .u64 out_ptr,
+    .param .u64 a_strides_ptr,
+    .param .u64 b_strides_ptr,
+    .param .u64 out_shape_ptr,
+    .param .u32 n,
+    .param .u32 ndim
+) {{
+    .reg .u32 %idx, %bid, %bdim, %nr, %ndim_r;
+    .reg .u32 %remaining, %a_idx, %b_idx, %d;
+    .reg .u32 %shape_d, %a_str_d, %b_str_d, %coord;
+    .reg .u64 %a, %b, %out, %a_str, %b_str, %oshape;
+    .reg .u64 %off_a, %off_b, %off_out, %d64, %tmp;
+    {reg_decl}
+    .reg .u16 %res;
+    .reg .pred %p, %loop_p, %c;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %b, [b_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %a_str, [a_strides_ptr];
+    ld.param.u64 %b_str, [b_strides_ptr];
+    ld.param.u64 %oshape, [out_shape_ptr];
+    ld.param.u32 %nr, [n];
+    ld.param.u32 %ndim_r, [ndim];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr;
+    @%p bra DONE;
+
+    mov.u32 %remaining, %idx;
+    mov.u32 %a_idx, 0;
+    mov.u32 %b_idx, 0;
+    mov.u32 %d, %ndim_r;
+
+LOOP:
+    setp.eq.u32 %loop_p, %d, 0;
+    @%loop_p bra END_LOOP;
+    sub.u32 %d, %d, 1;
+
+    cvt.u64.u32 %d64, %d;
+    shl.b64 %d64, %d64, 2;
+
+    add.u64 %tmp, %oshape, %d64;
+    ld.global.u32 %shape_d, [%tmp];
+    add.u64 %tmp, %a_str, %d64;
+    ld.global.u32 %a_str_d, [%tmp];
+    add.u64 %tmp, %b_str, %d64;
+    ld.global.u32 %b_str_d, [%tmp];
+
+    rem.u32 %coord, %remaining, %shape_d;
+    div.u32 %remaining, %remaining, %shape_d;
+    mad.lo.u32 %a_idx, %coord, %a_str_d, %a_idx;
+    mad.lo.u32 %b_idx, %coord, %b_str_d, %b_idx;
+
+    bra LOOP;
+END_LOOP:
+
+    cvt.u64.u32 %off_a, %a_idx;
+    shl.b64 %off_a, %off_a, {in_shift};
+    add.u64 %off_a, %a, %off_a;
+    ld.global.{load_ty} %va, [%off_a];
+
+    cvt.u64.u32 %off_b, %b_idx;
+    shl.b64 %off_b, %off_b, {in_shift};
+    add.u64 %off_b, %b, %off_b;
+    ld.global.{load_ty} %vb, [%off_b];
+
+    {setp}
+    selp.u16 %res, 1, 0, %c;
+
+    cvt.u64.u32 %off_out, %idx;
+    add.u64 %off_out, %out, %off_out;
+    st.global.u8 [%off_out], %res;
 DONE:
     ret;
 }}
@@ -1163,6 +1271,131 @@ fn launch_cmp<T: DeviceRepr + ValidAsZeroBits>(
     Ok(out)
 }
 
+fn checked_product_u32(shape: &[usize], op: &'static str) -> GpuResult<usize> {
+    let n = if shape.is_empty() {
+        1
+    } else {
+        shape.iter().try_fold(1usize, |acc, &d| {
+            acc.checked_mul(d).ok_or(GpuError::ShapeMismatch {
+                op,
+                expected: vec![usize::MAX],
+                got: shape.to_vec(),
+            })
+        })?
+    };
+    if n > u32::MAX as usize {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![u32::MAX as usize],
+            got: vec![n],
+        });
+    }
+    Ok(n)
+}
+
+fn checked_u32_vec(values: &[usize], op: &'static str) -> GpuResult<Vec<u32>> {
+    values
+        .iter()
+        .map(|&v| {
+            u32::try_from(v).map_err(|_| GpuError::ShapeMismatch {
+                op,
+                expected: vec![u32::MAX as usize],
+                got: vec![v],
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_cmp_broadcast<T: DeviceRepr + ValidAsZeroBits>(
+    a: &CudaSlice<T>,
+    b: &CudaSlice<T>,
+    a_numel: usize,
+    b_numel: usize,
+    out_shape: &[usize],
+    a_src_strides: &[usize],
+    b_src_strides: &[usize],
+    device: &GpuDevice,
+    ptx: String,
+    kernel_name: String,
+    err_label: &'static str,
+) -> GpuResult<CudaSlice<u8>> {
+    if out_shape.len() != a_src_strides.len() || out_shape.len() != b_src_strides.len() {
+        return Err(GpuError::ShapeMismatch {
+            op: err_label,
+            expected: vec![out_shape.len()],
+            got: vec![a_src_strides.len(), b_src_strides.len()],
+        });
+    }
+    if a.len() != a_numel {
+        return Err(GpuError::LengthMismatch {
+            a: a.len(),
+            b: a_numel,
+        });
+    }
+    if b.len() != b_numel {
+        return Err(GpuError::LengthMismatch {
+            a: b.len(),
+            b: b_numel,
+        });
+    }
+    let n = checked_product_u32(out_shape, err_label)?;
+    let ndim_u32 = u32::try_from(out_shape.len()).map_err(|_| GpuError::ShapeMismatch {
+        op: err_label,
+        expected: vec![u32::MAX as usize],
+        got: vec![out_shape.len()],
+    })?;
+    let stream = device.stream();
+    if n == 0 {
+        return Ok(stream.alloc_zeros::<u8>(0)?);
+    }
+    let out_shape_u32 = checked_u32_vec(out_shape, err_label)?;
+    let a_stride_u32 = checked_u32_vec(a_src_strides, err_label)?;
+    let b_stride_u32 = checked_u32_vec(b_src_strides, err_label)?;
+
+    let ctx = device.context();
+    let f = get_or_compile_owned(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: err_label,
+            source: e,
+        }
+    })?;
+    let a_str_buf = stream.clone_htod(&a_stride_u32)?;
+    let b_str_buf = stream.clone_htod(&b_stride_u32)?;
+    let shape_buf = stream.clone_htod(&out_shape_u32)?;
+    let mut out = stream.alloc_zeros::<u8>(n)?;
+    let cfg = launch_1d(n);
+    let n_u32 = n as u32;
+    // SAFETY:
+    // - `f` is the broadcast-comparison PTX entry compiled from `ptx`; its ABI
+    //   is `(a, b, out, a_strides, b_strides, out_shape, n, ndim)`, matching
+    //   the eight arguments below.
+    // - `a_str_buf`, `b_str_buf`, and `shape_buf` are fresh u32 device buffers
+    //   with length `ndim`. The kernel reads exactly `ndim` entries from each.
+    // - `a` and `b` exactly back their logical shape products
+    //   (`a_numel`/`b_numel`). The stride arrays are produced from valid
+    //   PyTorch broadcast rules by the caller, so each collapsed source offset
+    //   stays within `[0, a_numel)` or `[0, b_numel)`.
+    // - `out` is freshly allocated for `n` bool bytes and is the only mutable
+    //   buffer passed to the launch.
+    // - The PTX checks `tid >= n` before any memory access.
+    // - `n_u32` and every metadata entry are checked above before narrowing.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a)
+            .arg(b)
+            .arg(&mut out)
+            .arg(&a_str_buf)
+            .arg(&b_str_buf)
+            .arg(&shape_buf)
+            .arg(&n_u32)
+            .arg(&ndim_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
 /// Launch a comparison over a half-precision (u16 bit-pattern) value buffer.
 /// Identical contract to [`launch_cmp`], specialised to `CudaSlice<u16>`.
 fn launch_cmp_half(
@@ -1520,6 +1753,66 @@ pub fn gpu_cmp_i64(
     let name = format!("cmp_{op}_i64_kernel");
     let ptx = cmp_ptx(&name, 3, "s64", ".reg .s64 %va, %vb;", &setp_for(op, "s64"));
     launch_cmp::<i64>(a, b, n, d, ptx, name, "cmp_i64")
+}
+
+/// Broadcasted i32 comparison → u8 0/1 buffer.
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_cmp_broadcast_i32(
+    a: &CudaSlice<i32>,
+    b: &CudaSlice<i32>,
+    a_numel: usize,
+    b_numel: usize,
+    out_shape: &[usize],
+    a_src_strides: &[usize],
+    b_src_strides: &[usize],
+    op: &str,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    let name = format!("cmp_broadcast_{op}_i32_kernel");
+    let ptx = cmp_broadcast_ptx(&name, 2, "s32", ".reg .s32 %va, %vb;", &setp_for(op, "s32"));
+    launch_cmp_broadcast::<i32>(
+        a,
+        b,
+        a_numel,
+        b_numel,
+        out_shape,
+        a_src_strides,
+        b_src_strides,
+        d,
+        ptx,
+        name,
+        "cmp_broadcast_i32",
+    )
+}
+
+/// Broadcasted i64 comparison → u8 0/1 buffer.
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_cmp_broadcast_i64(
+    a: &CudaSlice<i64>,
+    b: &CudaSlice<i64>,
+    a_numel: usize,
+    b_numel: usize,
+    out_shape: &[usize],
+    a_src_strides: &[usize],
+    b_src_strides: &[usize],
+    op: &str,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<u8>> {
+    let name = format!("cmp_broadcast_{op}_i64_kernel");
+    let ptx = cmp_broadcast_ptx(&name, 3, "s64", ".reg .s64 %va, %vb;", &setp_for(op, "s64"));
+    launch_cmp_broadcast::<i64>(
+        a,
+        b,
+        a_numel,
+        b_numel,
+        out_shape,
+        a_src_strides,
+        b_src_strides,
+        d,
+        ptx,
+        name,
+        "cmp_broadcast_i64",
+    )
 }
 
 /// bf16 comparison (u16 bit patterns decoded to f32) → u8 0/1 buffer.

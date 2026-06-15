@@ -27,11 +27,12 @@ legacy `WhereBackward<T>` node; broadcasted and CUDA cases use
 Notwithstanding the file's name (`comparison.rs`) and the parity-sweep
 route's declared `parity_ops` list (`eq, ne, lt, le, gt, ge, logical_and,
 logical_or, logical_xor, logical_not, max, min, maximum, minimum, isnan,
-isinf, isfinite`), **the implementations of those 17 comparison ops do
-not live in this file**. They live in `ferrotorch-core/src/bool_tensor.rs`
-(see `pub fn gt`, `pub fn lt`, `pub fn ge`, `pub fn le`, `pub fn eq_t`,
-`pub fn ne` in `BoolTensor` at `ne in bool_tensor.rs`). Discrepancy
-tracked by blocker #1293.
+isinf, isfinite`), **this file owns differentiable `where` only**. Float
+and integer bool-producing comparisons plus bool logical ops live in
+`ferrotorch-core/src/bool_tensor.rs`; CUDA broadcasted i32/i64 comparisons
+route through `GpuBackend::compare_broadcast` and stay device-resident.
+Value-returning extrema and value-predicate APIs are owned by their dedicated
+modules. Discrepancy in the route ownership is tracked by blocker #1293.
 
 ## Requirements
 
@@ -66,14 +67,14 @@ tracked by blocker #1293.
   host-mask `where_` uploads only the host mask before launching the resident
   where kernel.
 
-- REQ-4: 17 routed parity ops (`eq, ne, lt, le, gt, ge, logical_and,
-  logical_or, logical_xor, logical_not, max, min, maximum, minimum,
-  isnan, isinf, isfinite`) are NOT implemented in this file. They are
-  implemented in `ferrotorch-core/src/bool_tensor.rs` (the comparison
-  cluster at `bool_tensor.rs:450-475`) and as `BoolTensor::*` methods —
-  outside the routing of this `.rs` file. The route's `parity_ops` list
-  is mis-targeted; the actual file ships `where_` / `where_bt` only.
-  Blocker #1293 covers retargeting the route or relocating the ops.
+- REQ-4: Comparison/logical predicate surface is split across owners. This
+  file intentionally ships `where_` / `where_bt` only. Float and integer
+  `eq/ne/lt/le/gt/ge` plus bool `logical_and` / `logical_or` /
+  `logical_xor` / `logical_not` live in `bool_tensor.rs`; CUDA broadcasted
+  i32/i64 comparisons route through `GpuBackend::compare_broadcast` rather
+  than a CPU value round trip. Other value-returning extrema / predicate APIs
+  are owned by their dedicated modules. Blocker #1293 covers retargeting the
+  route metadata.
 
 ## Acceptance Criteria
 
@@ -329,4 +330,4 @@ returning no matches in the dispatch table.
 | REQ-1 (where_ forward + backward) | SHIPPED | `Tensor::where_t` in `methods.rs` calls `grad_fns::comparison::where_`. Same-shape CPU uses `WhereBackward`; CUDA or broadcasted value operands build a full-output BoolTensor mask and route through `where_cond_bcast`, preserving CUDA residency and broadcast-gradient reductions. Pinned by `test_where_forward`, `test_where_backward`, `test_where_host_mask_broadcasts_operands`, and GPU public-method probes. |
 | REQ-2 (where_bt BoolTensor variant) | SHIPPED | `Tensor::where_bt_t` in `methods.rs` calls `grad_fns::comparison::where_bt`, which delegates to `grad_fns::indexing::where_cond_bcast`. Condition/self/other broadcast by PyTorch rules. Pinned by `where_bt_broadcasts_three_inputs_and_reduces_grads` and `tensor_where_bt_broadcast_cuda_condition_stays_resident_and_reduces_grads`. |
 | REQ-3 (device handling + NaN/Inf passthrough) | SHIPPED | CUDA `where_t` uploads only the host mask; CUDA `where_bt_t` keeps condition/value tensors resident; both produce resident gradients. NaN/Inf/denormals pass through because selection returns input elements unmodified. |
-| REQ-4 (17 comparison parity ops the route declares) | NOT-STARTED | The 17 ops named in `tooling/translate-routes.toml` for this file (`eq, ne, lt, le, gt, ge, logical_and, logical_or, logical_xor, logical_not, max, min, maximum, minimum, isnan, isinf, isfinite`) are not implemented in `grad_fns/comparison.rs`. They are implemented elsewhere (eq/ne/lt/le/gt/ge in `bool_tensor.rs:450-475`; logical_*/max/min/maximum/minimum/isnan/isinf/isfinite either elsewhere or absent). The parity-sweep runner has no dispatch arms for them (every op returns `0/N passed (N skipped, 0 failed)`). Open prereq blocker #1293 (retarget the route or relocate the ops). |
+| REQ-4 (comparison / logical predicate surface) | SPLIT-OWNERSHIP | This module owns differentiable `where` only. Float and integer `eq/ne/lt/le/gt/ge` plus bool `logical_and` / `logical_or` / `logical_xor` / `logical_not` live in `bool_tensor.rs`; CUDA broadcasted i32/i64 comparisons route through `GpuBackend::compare_broadcast` and stay CUDA-resident. Other value-returning extrema / predicate APIs are owned by their dedicated modules. Open prereq blocker #1293 covers route retargeting. |

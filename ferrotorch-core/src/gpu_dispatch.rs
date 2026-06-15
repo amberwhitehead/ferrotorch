@@ -7019,6 +7019,26 @@ pub trait GpuBackend: Send + Sync {
         Err(FerrotorchError::NotImplementedOnCuda { op: "compare" })
     }
 
+    /// Elementwise comparison with PyTorch broadcasting.
+    ///
+    /// `a_shape`, `b_shape`, and `out_shape` are logical C-contiguous shapes.
+    /// Implementations must keep operand values and the bool result resident on
+    /// the device; this slot exists specifically to avoid CPU round trips for
+    /// broadcasted comparison operands.
+    fn compare_broadcast(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+        _op: CompareOp,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "compare_broadcast",
+        })
+    }
+
     /// Elementwise logical AND of two Bool (u8) buffers → Bool (u8).
     fn bool_and(
         &self,

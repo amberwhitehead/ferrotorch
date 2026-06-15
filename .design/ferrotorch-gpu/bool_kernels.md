@@ -61,6 +61,19 @@ integer. Mirrors PyTorch's `aten/src/ATen/native/cuda/CompareKernels.cu`,
   the empty-identity (0 for `any`, 1 for `all`) is allocated and
   returned without launching.
 
+- REQ-9: On-device bool broadcast — `gpu_broadcast_bool` expands a
+  CUDA-resident bool mask by PyTorch right-aligned broadcasting without a
+  host round trip.
+
+- REQ-10: Signbit predicates — `gpu_signbit_*` produce bool masks for
+  supported value dtypes, including half-precision payload handling.
+
+- REQ-11: Integer broadcast comparison — `gpu_cmp_broadcast_i32` and
+  `gpu_cmp_broadcast_i64` compare right-aligned broadcast-compatible integer
+  operands on CUDA and produce a CUDA-resident bool buffer. This mirrors
+  PyTorch TensorIterator comparison behavior for int32/int64 and must not
+  materialize expanded integer operands on the host.
+
 ## Acceptance Criteria
 
 - [x] AC-1: `gpu_cmp_{f32,f64,i32,i64,bf16,f16}` exist with the
@@ -73,6 +86,9 @@ integer. Mirrors PyTorch's `aten/src/ATen/native/cuda/CompareKernels.cu`,
 - [x] AC-5: `cargo test -p ferrotorch-gpu --features cuda` exercises
   these kernels through the backend dispatch in
   `tests/conformance_gpu_kernels.rs`.
+- [x] AC-6: Broadcasted CUDA integer comparisons are exercised through
+  `ferrotorch-core/tests/audit_core090_int_compare_cuda_broadcast.rs` for
+  i32/i64 matrix, scalar, high-rank, and zero-size outputs.
 
 ## Architecture
 
@@ -165,6 +181,25 @@ self)` at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2406`. Before
 (or any masked op) with a CUDA mask whose shape required broadcasting
 diverged from torch.
 
+### Integer broadcast comparison (REQ-11)
+
+`fn cmp_broadcast_ptx in bool_kernels.rs` builds a rank-general comparison
+kernel for i32/i64 operands. Each thread decodes its flat output index through
+the output shape metadata, accumulates one source flat index per operand using
+right-aligned broadcast strides, loads the two integer values, applies the
+same signed `setp.{eq,ne,lt,le,gt,ge}.s{32,64}` predicate forms as the
+same-shape comparison kernels, and stores one canonical u8 bool byte.
+
+The Rust launcher uploads only compact shape/stride metadata (`u32` vectors)
+and never copies operand values to the host. It validates exact logical
+operand lengths, metadata rank agreement, `u32` narrowing for `n`, ndim,
+shape, and strides, and returns an empty bool buffer without launching when
+the broadcasted output numel is zero. Public entry points:
+`pub fn gpu_cmp_broadcast_i32` and `pub fn gpu_cmp_broadcast_i64 in
+bool_kernels.rs`. Non-test consumer: `CudaBackendImpl::compare_broadcast`,
+which is called by `BoolTensor::compare_int` whenever CUDA i32/i64 operands
+have broadcast-compatible but different shapes.
+
 ### Logical-length launch contract (#1660)
 
 `launch_cmp` (and its forwarders `launch_cmp_half` / the `gpu_cmp_*`
@@ -186,8 +221,8 @@ strict raw-len equality guard (logical == raw there).
 
 ### SAFETY discipline (REQ-7)
 
-`fn launch_cmp / launch_cmp_half / launch_logic_bin / launch_not /
-launch_reduce_bool in bool_kernels.rs` each wrap a single `unsafe {
+`fn launch_cmp / launch_cmp_broadcast / launch_cmp_half / launch_logic_bin /
+launch_not / launch_reduce_bool in bool_kernels.rs` each wrap a single `unsafe {
 stream.launch_builder(&f)...launch(cfg)? }` block. Every such block is
 preceded by a multi-line SAFETY comment naming: (a) the PTX entry's
 parameter signature matching argument push order, (b) the input buffer
@@ -221,6 +256,10 @@ Edge cases preserved:
   short-circuits the launch and returns a 1-element u8 buffer holding
   the empty-identity via `clone_htod`. Matches PyTorch's `torch.any(
   torch.empty(0, dtype=torch.bool))` / `torch.all(...)`.
+- **Broadcasted integer comparison**: i32/i64 operands follow PyTorch
+  right-aligned broadcasting, including scalar operands, missing leading
+  dimensions, broadcast axes with stride zero, and zero-sized outputs. Values
+  and bool output stay on CUDA.
 
 ## Verification
 
@@ -228,6 +267,10 @@ Integration tests in `ferrotorch-gpu/tests/conformance_gpu_kernels.rs`
 exercise the bool path through the backend's comparison and logical
 op dispatchers. The `backend_impl::tests` and `conformance_gpu_backend.rs`
 suites further exercise the empty-input and NaN-compare edge cases.
+Broadcasted integer comparison is pinned through the core-facing CUDA audit
+`ferrotorch-core/tests/audit_core090_int_compare_cuda_broadcast.rs`, because
+the production call chain starts at `BoolTensor::compare_int` and reaches
+`CudaBackendImpl::compare_broadcast`.
 
 Smoke command:
 
@@ -251,3 +294,5 @@ Expected: `test result: ok` on a host with a CUDA device. The
 | REQ-7 | SHIPPED | impl: every `unsafe { stream.launch_builder(&f)... }` in `bool_kernels.rs` (in `launch_cmp`, `launch_not`, `launch_reduce_bool`) is preceded by a multi-line SAFETY comment naming entry signature, length binding, alloc, bound check, and `n as u32` non-truncation. Non-test consumer inherits the contract via each public wrapper. |
 | REQ-8 | SHIPPED | impl: `launch_cmp` and `launch_not` short-circuit on `n == 0` via `if n == 0 { return Ok(stream.alloc_zeros::<u8>(0)?); }`; `launch_reduce_bool` short-circuits with `let host = [empty_identity]; return Ok(stream.clone_htod(&host)?);`. Non-test consumer relies on the no-launch short circuit via backend dispatch (e.g. `torch.any(empty)` returning a 1-element false). |
 | REQ-9 (on-device bool broadcast, #1663) | SHIPPED | impl: `pub fn gpu_broadcast_bool in ferrotorch-gpu/src/bool_kernels.rs` (u8 strided-gather over `BOOL_BROADCAST_PTX`, 8-dim unrolled, `pad_bool_broadcast_params` computes the contiguous output strides + pads unused dims). Non-test consumer: `CudaBackendImpl::broadcast_bool in ferrotorch-gpu/src/backend_impl.rs` computes the per-dim broadcast input strides and invokes `gpu_broadcast_bool`; that backend slot is itself consumed by `grad_fns::indexing::broadcast_bool_tensor`'s CUDA branch in `ferrotorch-core/src/grad_fns/indexing.rs`, which `masked_scatter` / `masked_fill_bcast` / `masked_select_bcast` / `where_cond_bcast` all flow through. Mirrors PyTorch `expand_outplace(mask, self)` at `aten/src/ATen/native/TensorAdvancedIndexing.cpp:2406`. |
+| REQ-10 (`signbit`) | SHIPPED | impl: `pub fn gpu_signbit_f32 / gpu_signbit_f64 / gpu_signbit_f16 / gpu_signbit_bf16 in bool_kernels.rs`; non-test consumer: `CudaBackendImpl::signbit_mask` and the CUDA branch of `ferrotorch_core::grad_fns::transcendental::signbit`. |
+| REQ-11 (integer broadcast comparison) | SHIPPED | impl: `pub fn gpu_cmp_broadcast_i32 / gpu_cmp_broadcast_i64 in bool_kernels.rs` with rank-general output-shape and per-input broadcast-stride metadata. Non-test consumer: `CudaBackendImpl::compare_broadcast`, reached from `BoolTensor::compare_int` for CUDA broadcast-compatible i32/i64 operands whose shapes differ. Runtime proof: `audit_core090_int_compare_cuda_broadcast` exercises i32/i64 matrix, scalar, high-rank, and empty broadcast cases against PyTorch-observed bool results. |

@@ -41,7 +41,7 @@
 //! | REQ-3 (logical ops) | SHIPPED | `not` at `bool_tensor.rs:353`, `and` / `or` / `xor` at `:377-389`; consumer `grad_fns/indexing.rs` consumes mask buffers — `binary_op` helper at `:416` dispatches GPU PTX kernels (`bool_and` / `bool_or` / `bool_xor` / `bool_not`) |
 //! | REQ-4 (reductions) | SHIPPED | `count_true` at `bool_tensor.rs:516`, `any` at `:525`, `all` at `:536`; consumer `grad_fns/indexing.rs` uses `BoolTensor::any` to detect empty-mask before dependent kernel launches |
 //! | REQ-5 (float comparisons) | SHIPPED | `gt` / `lt` / `ge` / `le` / `eq_t` / `ne` at `bool_tensor.rs:573-598` + `compare_float` at `:636`; consumer `grad_fns/comparison.rs` invokes `BoolTensor::eq_t` etc. mirroring `torch.gt(a, b)` (`aten/src/ATen/native/Compare.cpp`) |
-//! | REQ-6 (integer comparisons) | SHIPPED | `gt_int` / `lt_int` / `ge_int` / `le_int` / `eq_int` / `ne_int` at `bool_tensor.rs:721-761` + `compare_int` at `:782`; consumer `lib.rs:135` re-export; downstream integer-tensor predicate code |
+//! | REQ-6 (integer comparisons) | SHIPPED | `gt_int` / `lt_int` / `ge_int` / `le_int` / `eq_int` / `ne_int` at `bool_tensor.rs:721-761` + `compare_int` at `:782`; CUDA same-shape and broadcasted i32/i64 operands stay resident through `GpuBackend::compare` / `compare_broadcast`; consumer `lib.rs:135` re-export; downstream integer-tensor predicate code |
 //! | REQ-7 (to_float) | SHIPPED | `to_float<T: Float>` at `bool_tensor.rs:843`; consumer `grad_fns/indexing.rs` `masked_select` materializes float tensors from `BoolTensor` masks; test `to_float_emits_zeros_and_ones` at `:989` |
 //! | REQ-8 (reshape) | SHIPPED | `reshape` at `bool_tensor.rs:487`; consumer `grad_fns/indexing.rs` reshapes mask buffers to match broadcast shape; test `reshape_preserves_data` at `:981` |
 //! | REQ-9 (gpu_handle) | SHIPPED | `from_gpu_handle` at `bool_tensor.rs:250` (fallible — CORE-104/#1798), `gpu_handle` at `:225`; consumer every GPU comparison-op return path (`compare_float` at `:682`, `binary_op` at `:453`, `unary_gpu` at `:404`) |
@@ -712,10 +712,9 @@ impl BoolTensor {
     //
     // Parallel to the float constructors, taking `&IntTensor<I>`, with the
     // same broadcasting semantics (CORE-106 / #1800). On CUDA, same-shape
-    // operands launch the i32/i64 comparison kernel (dispatched on the
-    // handle's tag); differing (broadcast-compatible) shapes take the
-    // documented host round trip described on `compare_int`. On CPU they
-    // compare the host slices.
+    // operands launch the i32/i64 comparison kernel and broadcasted operands
+    // launch the rank-general comparison-broadcast kernel; the bool mask stays
+    // GPU-resident in both cases.
 
     /// Pointwise `a > b` over two integer tensors → `BoolTensor`. (#1185)
     pub fn gt_int<I: crate::int_tensor::IntElement>(
@@ -768,17 +767,13 @@ impl BoolTensor {
     /// Shared integer comparison dispatch. Broadcasts compatible shapes to
     /// their common shape (CORE-106 / #1800).
     ///
-    /// # Device behavior (R-LOUD-2)
+    /// # Device behavior
     ///
-    /// Same-shape CUDA operands run the on-device comparison kernel and the
-    /// mask stays resident — unchanged. CUDA operands with DIFFERENT
-    /// (broadcast-compatible) shapes take an explicit, DOCUMENTED host round
-    /// trip: ferrotorch-gpu has no integer broadcast/expand kernel yet, so
-    /// the operands are read back, the broadcast comparison runs on the
-    /// host, and the Bool mask is re-uploaded to the operands' device (the
-    /// result device always equals the input device). The resident integer
-    /// broadcast path is tracked as a follow-up issue (see #1800's result
-    /// comment for the cross-link).
+    /// CUDA operands run entirely on-device. Equal-shape operands use the
+    /// ordinary comparison kernel; broadcast-compatible differing shapes use
+    /// the rank-general integer broadcast-comparison kernel. The result is a
+    /// CUDA-resident `BoolTensor`, matching PyTorch's comparison TensorIterator
+    /// behavior without CPU fallback or value round trips.
     fn compare_int<I: crate::int_tensor::IntElement>(
         a: &crate::int_tensor::IntTensor<I>,
         b: &crate::int_tensor::IntTensor<I>,
@@ -795,19 +790,21 @@ impl BoolTensor {
         // shapes get broadcast_shapes' structured ShapeMismatch.
         let common = crate::shape::broadcast_shapes(a.shape(), b.shape())?;
         if a.is_cuda() {
-            if a.shape() == b.shape() {
-                // Equal shapes: on-device kernel, resident result (unchanged).
-                let backend =
-                    crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-                let h = backend.compare(a.gpu_handle()?, b.gpu_handle()?, op)?;
-                return Self::from_gpu_handle(h, common);
-            }
-            // DOCUMENTED host round trip (see doc-comment): no integer
-            // broadcast kernel exists; compute on host, re-upload the mask.
-            let device = a.device();
-            let a_cpu = a.to(Device::Cpu)?;
-            let b_cpu = b.to(Device::Cpu)?;
-            return Self::compare_int(&a_cpu, &b_cpu, op, f)?.to(device);
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let h = if a.shape() == b.shape() {
+                backend.compare(a.gpu_handle()?, b.gpu_handle()?, op)?
+            } else {
+                backend.compare_broadcast(
+                    a.gpu_handle()?,
+                    b.gpu_handle()?,
+                    a.shape(),
+                    b.shape(),
+                    &common,
+                    op,
+                )?
+            };
+            return Self::from_gpu_handle(h, common);
         }
         let a_data = a.data()?;
         let b_data = b.data()?;

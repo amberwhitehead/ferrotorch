@@ -47,8 +47,11 @@ awareness + GPU kernels) + #615 (comparison constructors).
   return a `BoolTensor`. Mirrors `torch.gt(a, b)` / `torch.eq(a, b)`
   returning a bool tensor (`aten/src/ATen/native/Compare.cpp`).
 - REQ-6: Integer comparison constructors `gt_int`, `lt_int`, `ge_int`,
-  `le_int`, `eq_int`, `ne_int` — same shape over `IntTensor<I>`.
-  #1185 Phase 3b.
+  `le_int`, `eq_int`, `ne_int` over `IntTensor<I>` with PyTorch
+  broadcasting. CPU uses host broadcast indexing; CUDA same-shape i32/i64
+  uses the ordinary comparison kernel, and CUDA broadcasted i32/i64 uses
+  `GpuBackend::compare_broadcast` so operand values and bool output stay
+  resident. #1185 Phase 3b.
 - REQ-7: Cast back to float: `to_float<T: Float>() ->
   FerrotorchResult<Tensor<T>>` mapping `true -> 1.0`, `false -> 0.0`.
   Mirrors `tensor.to(torch.float32)` on a bool tensor.
@@ -83,7 +86,8 @@ awareness + GPU kernels) + #615 (comparison constructors).
   `bool_tensor.rs:1020`, `compare_lt_basic`, `compare_ge_le`,
   `compare_eq_ne`, `compare_rejects_shape_mismatch` (`:1083`).
 - [x] AC-11: Integer comparison constructors `compare_int_basic` at
-  `bool_tensor.rs:1064`.
+  `bool_tensor.rs:1064`; CUDA broadcast parity covered by
+  `tests/audit_core090_int_compare_cuda_broadcast.rs`.
 
 ## Architecture
 
@@ -144,9 +148,14 @@ once; `unary_gpu` + `reduce_gpu` are the per-shape GPU-specific helpers.
 
 Six float comparison constructors (REQ-5) + six integer comparison
 constructors (REQ-6). Each takes two operand tensors, validates
-shape + device parity, dispatches GPU or CPU. The `CompareOp` enum
+device parity, computes PyTorch right-aligned broadcast output shape, and
+dispatches GPU or CPU. Equal-shape CUDA integer operands call
+`GpuBackend::compare`; broadcast-compatible differing CUDA integer operands
+call `GpuBackend::compare_broadcast`, whose CUDA implementation launches
+rank-general i32/i64 broadcast comparison PTX and returns a `DType::Bool`
+handle without reading operand values back to CPU. The `CompareOp` enum
 (declared in `gpu_dispatch.rs`) is the on-device discriminator the
-PTX kernel switches on; the same kernel handles all 6 ops.
+PTX kernels switch on.
 
 ### Production consumers
 
@@ -200,7 +209,7 @@ GPU-kernel paths are exercised by the integration probe
 | REQ-3 | SHIPPED | impl: `not` at `ferrotorch-core/src/bool_tensor.rs:353`, `and` at `:377`, `or` at `:383`, `xor` at `:389`; binary helper `binary_op` at `:416`, unary helper `unary_gpu` at `:394`. Non-test production consumer: `ferrotorch-core/src/grad_fns/indexing.rs` consumes `BoolTensor` masks; the GPU PTX kernels for `bool_and` / `bool_or` / `bool_xor` / `bool_not` are invoked from the `binary_op` / `unary_gpu` helpers. |
 | REQ-4 | SHIPPED | impl: `count_true` at `ferrotorch-core/src/bool_tensor.rs:516` (errors on CUDA), `any` at `:525` (GPU-resident OR-reduction), `all` at `:536` (GPU-resident AND-reduction), `reduce_gpu` helper at `:545`. Non-test production consumer: `ferrotorch-core/src/grad_fns/indexing.rs` uses `BoolTensor::any` to detect "no elements selected" before launching dependent kernels. |
 | REQ-5 | SHIPPED | impl: 6 float comparison constructors at `ferrotorch-core/src/bool_tensor.rs:573-598` (`gt`, `lt`, `ge`, `le`, `eq_t`, `ne`); `compare_float` helper at `:636`. Non-test production consumer: `ferrotorch-core/src/grad_fns/comparison.rs` (the autograd-layer `eq` / `gt` / … paths invoke `BoolTensor::eq_t` etc. internally — same module that exports `pub use crate::bool_tensor::BoolTensor` re-exports through the float→bool comparison path); mirrors `torch.gt(a, b) -> Tensor[Bool]` at `aten/src/ATen/native/Compare.cpp`. |
-| REQ-6 | SHIPPED | impl: 6 integer comparison constructors at `ferrotorch-core/src/bool_tensor.rs:721-761` (`gt_int`, `lt_int`, `ge_int`, `le_int`, `eq_int`, `ne_int`); `compare_int` helper at `:782`. Non-test production consumer: re-exported through `lib.rs:135` `pub use bool_tensor::BoolTensor`; the integer-tensor comparison path is one of the IntTensor consumer surfaces (e.g. argmax-validation downstream). #1185 Phase 3b closure. |
+| REQ-6 | SHIPPED | impl: 6 integer comparison constructors at `ferrotorch-core/src/bool_tensor.rs:721-761` (`gt_int`, `lt_int`, `ge_int`, `le_int`, `eq_int`, `ne_int`); `compare_int` helper at `:782` computes PyTorch broadcast shape, uses CPU broadcast indexing on CPU, uses `GpuBackend::compare` for same-shape CUDA i32/i64, and uses `GpuBackend::compare_broadcast` for broadcast-compatible differing CUDA i32/i64. Non-test production consumer: re-exported through `lib.rs:135` `pub use bool_tensor::BoolTensor`; the integer-tensor comparison path is one of the IntTensor consumer surfaces (e.g. argmax-validation downstream). Runtime proof: `tests/audit_core090_int_compare_cuda_broadcast.rs` covers CUDA i32/i64 matrix, scalar, high-rank, and zero-size broadcast outputs against PyTorch-observed bool results. #1185 Phase 3b closure. |
 | REQ-7 | SHIPPED | impl: `to_float<T: Float>` at `ferrotorch-core/src/bool_tensor.rs:843`. Non-test production consumer: `ferrotorch-core/src/grad_fns/indexing.rs` `masked_select`'s output construction path materializes a `Tensor<T>` from a `BoolTensor` mask via this `to_float` analog (the bool→float cast is the canonical `tensor[mask] = …` exit). Test: `to_float_emits_zeros_and_ones` at `:989`. |
 | REQ-8 | SHIPPED | impl: `reshape` at `ferrotorch-core/src/bool_tensor.rs:487`. Non-test production consumer: `ferrotorch-core/src/grad_fns/indexing.rs` reshapes mask buffers to match the broadcast shape of the operand tensors. Test: `reshape_preserves_data` at `:981`. |
 | REQ-9 | SHIPPED | impl: `from_gpu_handle` at `ferrotorch-core/src/bool_tensor.rs:250` (fallible since CORE-104/#1798: validates the `DType::Bool` tag, checked shape product, and `handle.len()`), `gpu_handle` at `:225`. Non-test production consumer: every GPU comparison-op return path (`compare_float` at `:682` invokes `Self::from_gpu_handle(h, common)`); every GPU `binary_op`/`unary_gpu` at `:453 / :404` invokes `from_gpu_handle`. |
