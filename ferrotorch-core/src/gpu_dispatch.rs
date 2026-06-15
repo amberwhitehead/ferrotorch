@@ -2755,6 +2755,104 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// Scalar-repeat `repeat_interleave` forward for f32 buffers.
+    fn repeat_interleave_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+        _repeats: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "repeat_interleave_f32 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// Scalar-repeat `repeat_interleave` forward for f64 buffers.
+    fn repeat_interleave_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+        _repeats: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "repeat_interleave_f64 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// Scalar-repeat `repeat_interleave` forward for F16/BF16 bit-pattern buffers.
+    fn repeat_interleave_u16(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+        _repeats: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "repeat_interleave_u16 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// VJP for scalar-repeat `repeat_interleave` over f32 gradients.
+    fn repeat_interleave_backward_f32(
+        &self,
+        _grad: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+        _repeats: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "repeat_interleave_backward_f32 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// VJP for scalar-repeat `repeat_interleave` over f64 gradients.
+    fn repeat_interleave_backward_f64(
+        &self,
+        _grad: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+        _repeats: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "repeat_interleave_backward_f64 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// VJP for scalar-repeat `repeat_interleave` over f16 gradients.
+    fn repeat_interleave_backward_f16(
+        &self,
+        _grad: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+        _repeats: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "repeat_interleave_backward_f16 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// VJP for scalar-repeat `repeat_interleave` over bf16 gradients.
+    fn repeat_interleave_backward_bf16(
+        &self,
+        _grad: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+        _repeats: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "repeat_interleave_backward_bf16 GPU op not yet implemented".into(),
+        })
+    }
+
     // -- Triangular masks: triu / tril (#1545 / sub #1535) -------------------
     //
     // `[batch.., rows, cols]` C-contiguous masks (`batch` = product of the

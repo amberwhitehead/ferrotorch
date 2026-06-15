@@ -5536,6 +5536,137 @@ impl GpuBackend for CudaBackendImpl {
         })
     }
 
+    fn repeat_interleave_f32(
+        &self,
+        a: &GpuBufferHandle,
+        outer: usize,
+        dim_size: usize,
+        inner: usize,
+        repeats: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::repeat_interleave::gpu_repeat_interleave_f32(
+            a_buf, outer, dim_size, inner, repeats, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn repeat_interleave_f64(
+        &self,
+        a: &GpuBufferHandle,
+        outer: usize,
+        dim_size: usize,
+        inner: usize,
+        repeats: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::repeat_interleave::gpu_repeat_interleave_f64(
+            a_buf, outer, dim_size, inner, repeats, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    fn repeat_interleave_u16(
+        &self,
+        a: &GpuBufferHandle,
+        outer: usize,
+        dim_size: usize,
+        inner: usize,
+        repeats: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = match a.dtype() {
+            DType::F16 => Self::unwrap_buffer_f16(a)?,
+            DType::BF16 => Self::unwrap_buffer_bf16(a)?,
+            other => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("repeat_interleave_u16 expected F16/BF16, got {other}"),
+                });
+            }
+        };
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::repeat_interleave::gpu_repeat_interleave_u16(
+            a_buf, outer, dim_size, inner, repeats, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(match a.dtype() {
+            DType::F16 => Self::wrap_buffer_f16(result, a.device_ordinal()),
+            DType::BF16 => Self::wrap_buffer_bf16(result, a.device_ordinal()),
+            _ => unreachable!("dtype checked above"),
+        })
+    }
+
+    fn repeat_interleave_backward_f32(
+        &self,
+        grad: &GpuBufferHandle,
+        outer: usize,
+        dim_size: usize,
+        inner: usize,
+        repeats: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = Self::unwrap_buffer(grad)?;
+        let dev = self.device(grad.device_ordinal())?;
+        let result = crate::repeat_interleave::gpu_repeat_interleave_backward_f32(
+            grad_buf, outer, dim_size, inner, repeats, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, grad.device_ordinal()))
+    }
+
+    fn repeat_interleave_backward_f64(
+        &self,
+        grad: &GpuBufferHandle,
+        outer: usize,
+        dim_size: usize,
+        inner: usize,
+        repeats: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = Self::unwrap_buffer_f64(grad)?;
+        let dev = self.device(grad.device_ordinal())?;
+        let result = crate::repeat_interleave::gpu_repeat_interleave_backward_f64(
+            grad_buf, outer, dim_size, inner, repeats, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, grad.device_ordinal()))
+    }
+
+    fn repeat_interleave_backward_f16(
+        &self,
+        grad: &GpuBufferHandle,
+        outer: usize,
+        dim_size: usize,
+        inner: usize,
+        repeats: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = Self::unwrap_buffer_f16(grad)?;
+        let dev = self.device(grad.device_ordinal())?;
+        let result = crate::repeat_interleave::gpu_repeat_interleave_backward_f16(
+            grad_buf, outer, dim_size, inner, repeats, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, grad.device_ordinal()))
+    }
+
+    fn repeat_interleave_backward_bf16(
+        &self,
+        grad: &GpuBufferHandle,
+        outer: usize,
+        dim_size: usize,
+        inner: usize,
+        repeats: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = Self::unwrap_buffer_bf16(grad)?;
+        let dev = self.device(grad.device_ordinal())?;
+        let result = crate::repeat_interleave::gpu_repeat_interleave_backward_bf16(
+            grad_buf, outer, dim_size, inner, repeats, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, grad.device_ordinal()))
+    }
+
     // -- Triangular masks: triu / tril (#1545 / sub #1535) -------------------
     //
     // Gated `#[cfg(feature = "cuda")]` (the `triangular` module is cuda-only,

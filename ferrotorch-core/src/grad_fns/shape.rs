@@ -1201,32 +1201,54 @@ impl<T: Float> GradFn<T> for RepeatInterleaveBackward<T> {
         if !self.input.requires_grad() {
             return Ok(vec![None]);
         }
-        let (cpu_go, device) = ensure_cpu(grad_output)?;
-        let go_data = cpu_go.data()?;
         let in_shape = self.input.shape();
         let dim = self.dim;
-        let dim_size = in_shape[dim];
+        let factors = repeat_interleave_factors(in_shape, dim, self.repeats)?;
+        let mut expected_grad_shape = in_shape.to_vec();
+        expected_grad_shape[dim] = factors.out_dim_size;
+        if grad_output.shape() != expected_grad_shape.as_slice() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "repeat_interleave backward: expected grad_output shape {:?}, got {:?}",
+                    expected_grad_shape,
+                    grad_output.shape()
+                ),
+            });
+        }
 
-        let outer: usize = in_shape[..dim].iter().product();
-        let inner: usize = if dim + 1 < in_shape.len() {
-            in_shape[dim + 1..].iter().product()
-        } else {
-            1
-        };
-        let out_dim_size = dim_size * self.repeats;
+        if grad_output.is_cuda() {
+            let grad_input = repeat_interleave_backward_cuda(
+                grad_output,
+                in_shape,
+                factors.outer,
+                factors.dim_size,
+                factors.inner,
+                self.repeats,
+            )?;
+            return Ok(vec![Some(grad_input)]);
+        }
 
-        let in_numel: usize = in_shape.iter().product();
-        let mut grad = vec![<T as num_traits::Zero>::zero(); in_numel];
+        let go_data = grad_output.data_vec()?;
+        if go_data.len() != factors.out_numel {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "repeat_interleave backward: expected {} grad elements, got {}",
+                    factors.out_numel,
+                    go_data.len()
+                ),
+            });
+        }
+        let mut grad = vec![<T as num_traits::Zero>::zero(); factors.in_numel];
 
         // For each input index `d`, sum the `repeats` consecutive output rows
         // `[d*repeats .. (d+1)*repeats)` back onto it.
-        for o in 0..outer {
-            for d in 0..dim_size {
+        for o in 0..factors.outer {
+            for d in 0..factors.dim_size {
                 for r in 0..self.repeats {
                     let od = d * self.repeats + r;
-                    let src_base = o * out_dim_size * inner + od * inner;
-                    let dst_base = o * dim_size * inner + d * inner;
-                    for i in 0..inner {
+                    let src_base = o * factors.out_dim_size * factors.inner + od * factors.inner;
+                    let dst_base = o * factors.dim_size * factors.inner + d * factors.inner;
+                    for i in 0..factors.inner {
                         grad[dst_base + i] += go_data[src_base + i];
                     }
                 }
@@ -1234,7 +1256,7 @@ impl<T: Float> GradFn<T> for RepeatInterleaveBackward<T> {
         }
 
         let grad_tensor = Tensor::from_storage(TensorStorage::cpu(grad), in_shape.to_vec(), false)?;
-        Ok(vec![Some(restore_device(grad_tensor, device)?)])
+        Ok(vec![Some(grad_tensor)])
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -1267,38 +1289,35 @@ pub fn repeat_interleave<T: Float>(
         });
     }
     let norm_dim = crate::shape::normalize_axis(dim, ndim)?;
+    let factors = repeat_interleave_factors(input.shape(), norm_dim, repeats)?;
+    let mut out_shape = input.shape().to_vec();
+    out_shape[norm_dim] = factors.out_dim_size;
 
     if input.is_cuda() {
-        return Err(crate::error::FerrotorchError::NotImplementedOnCuda {
-            op: "repeat_interleave",
-        });
+        return repeat_interleave_cuda(input, norm_dim, repeats, &factors, out_shape);
     }
 
     // Gather logical C-order so a strided view input is handled correctly.
     let in_data = input.data_vec()?;
-    let in_shape = input.shape();
-    let dim_size = in_shape[norm_dim];
-    let outer: usize = in_shape[..norm_dim].iter().product();
-    let inner: usize = if norm_dim + 1 < ndim {
-        in_shape[norm_dim + 1..].iter().product()
-    } else {
-        1
-    };
+    if in_data.len() != factors.in_numel {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "repeat_interleave: expected {} input elements, got {}",
+                factors.in_numel,
+                in_data.len()
+            ),
+        });
+    }
 
-    let out_dim_size = dim_size * repeats;
-    let out_numel = outer * out_dim_size * inner;
-    let mut out_data = Vec::with_capacity(out_numel);
-    for o in 0..outer {
-        for d in 0..dim_size {
-            let src_base = o * dim_size * inner + d * inner;
+    let mut out_data = Vec::with_capacity(factors.out_numel);
+    for o in 0..factors.outer {
+        for d in 0..factors.dim_size {
+            let src_base = o * factors.dim_size * factors.inner + d * factors.inner;
             for _ in 0..repeats {
-                out_data.extend_from_slice(&in_data[src_base..src_base + inner]);
+                out_data.extend_from_slice(&in_data[src_base..src_base + factors.inner]);
             }
         }
     }
-
-    let mut out_shape = in_shape.to_vec();
-    out_shape[norm_dim] = out_dim_size;
 
     if is_grad_enabled() && input.requires_grad() {
         let grad_fn = Arc::new(RepeatInterleaveBackward::new(
@@ -1310,6 +1329,154 @@ pub fn repeat_interleave<T: Float>(
     } else {
         Tensor::from_storage(TensorStorage::cpu(out_data), out_shape, false)
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RepeatInterleaveFactors {
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    out_dim_size: usize,
+    in_numel: usize,
+    out_numel: usize,
+}
+
+fn checked_shape_mul(op: &'static str, a: usize, b: usize) -> FerrotorchResult<usize> {
+    a.checked_mul(b)
+        .ok_or_else(|| FerrotorchError::ShapeMismatch {
+            message: format!("{op}: size overflow while multiplying {a} by {b}"),
+        })
+}
+
+fn repeat_interleave_factors(
+    shape: &[usize],
+    dim: usize,
+    repeats: usize,
+) -> FerrotorchResult<RepeatInterleaveFactors> {
+    let dim_size = shape[dim];
+    let outer = shape[..dim].iter().try_fold(1usize, |acc, &value| {
+        checked_shape_mul("repeat_interleave", acc, value)
+    })?;
+    let inner = if dim + 1 < shape.len() {
+        shape[dim + 1..].iter().try_fold(1usize, |acc, &value| {
+            checked_shape_mul("repeat_interleave", acc, value)
+        })?
+    } else {
+        1
+    };
+    let out_dim_size = checked_shape_mul("repeat_interleave", dim_size, repeats)?;
+    let in_numel = checked_shape_mul(
+        "repeat_interleave",
+        checked_shape_mul("repeat_interleave", outer, dim_size)?,
+        inner,
+    )?;
+    let out_numel = checked_shape_mul(
+        "repeat_interleave",
+        checked_shape_mul("repeat_interleave", outer, out_dim_size)?,
+        inner,
+    )?;
+    Ok(RepeatInterleaveFactors {
+        outer,
+        dim_size,
+        inner,
+        out_dim_size,
+        in_numel,
+        out_numel,
+    })
+}
+
+fn exact_contiguous_clone<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_contiguous() && input.storage_offset() == 0 && input.storage_len() == input.numel()
+    {
+        Ok(input.clone())
+    } else {
+        crate::autograd::no_grad::no_grad(|| input.contiguous())
+    }
+}
+
+fn repeat_interleave_cuda<T: Float>(
+    input: &Tensor<T>,
+    norm_dim: usize,
+    repeats: usize,
+    factors: &RepeatInterleaveFactors,
+    out_shape: Vec<usize>,
+) -> FerrotorchResult<Tensor<T>> {
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let input_c = exact_contiguous_clone(input)?;
+    let handle = input_c.gpu_handle()?;
+    let out_handle = match <T as Element>::dtype() {
+        DType::F32 => backend.repeat_interleave_f32(
+            handle,
+            factors.outer,
+            factors.dim_size,
+            factors.inner,
+            repeats,
+        )?,
+        DType::F64 => backend.repeat_interleave_f64(
+            handle,
+            factors.outer,
+            factors.dim_size,
+            factors.inner,
+            repeats,
+        )?,
+        DType::F16 | DType::BF16 => backend.repeat_interleave_u16(
+            handle,
+            factors.outer,
+            factors.dim_size,
+            factors.inner,
+            repeats,
+        )?,
+        _ => {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "repeat_interleave dtype",
+            });
+        }
+    };
+    let storage = TensorStorage::gpu(out_handle);
+
+    if is_grad_enabled() && input.requires_grad() {
+        let grad_fn = Arc::new(RepeatInterleaveBackward::new(
+            input.clone(),
+            norm_dim,
+            repeats,
+        ));
+        Tensor::from_operation(storage, out_shape, grad_fn)
+    } else {
+        Tensor::from_storage(storage, out_shape, false)
+    }
+}
+
+fn repeat_interleave_backward_cuda<T: Float>(
+    grad_output: &Tensor<T>,
+    in_shape: &[usize],
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    repeats: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let grad_c = exact_contiguous_clone(grad_output)?;
+    let handle = grad_c.gpu_handle()?;
+    let out_handle = match <T as Element>::dtype() {
+        DType::F32 => {
+            backend.repeat_interleave_backward_f32(handle, outer, dim_size, inner, repeats)?
+        }
+        DType::F64 => {
+            backend.repeat_interleave_backward_f64(handle, outer, dim_size, inner, repeats)?
+        }
+        DType::F16 => {
+            backend.repeat_interleave_backward_f16(handle, outer, dim_size, inner, repeats)?
+        }
+        DType::BF16 => {
+            backend.repeat_interleave_backward_bf16(handle, outer, dim_size, inner, repeats)?
+        }
+        _ => {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "repeat_interleave backward dtype",
+            });
+        }
+    };
+    Tensor::from_storage(TensorStorage::gpu(out_handle), in_shape.to_vec(), false)
 }
 
 /// `vstack(tensors)` — stack tensors row-wise (along dim 0 after promoting

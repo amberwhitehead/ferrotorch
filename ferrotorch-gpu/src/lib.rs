@@ -199,6 +199,8 @@ pub mod nan_reductions;
 pub mod pool;
 #[cfg(feature = "cuda")]
 pub mod reduce_arg;
+#[cfg(feature = "cuda")]
+pub mod repeat_interleave;
 pub mod rng;
 #[cfg(feature = "cuda")]
 pub mod roll;
@@ -280,6 +282,12 @@ pub use memory_guard::{
     MemoryReservation, MemoryStats, MemoryWatchdog, OomPolicy, PressureLevel,
 };
 pub use pool::{cached_bytes, empty_cache, empty_cache_all, round_len};
+#[cfg(feature = "cuda")]
+pub use repeat_interleave::{
+    gpu_repeat_interleave_backward_bf16, gpu_repeat_interleave_backward_f16,
+    gpu_repeat_interleave_backward_f32, gpu_repeat_interleave_backward_f64,
+    gpu_repeat_interleave_f32, gpu_repeat_interleave_f64, gpu_repeat_interleave_u16,
+};
 pub use rng::{CudaRngManager, PhiloxGenerator, PhiloxState, cuda_rng_manager, fork_rng, join_rng};
 #[cfg(feature = "cuda")]
 pub use roll::{gpu_roll_f32, gpu_roll_f64};
