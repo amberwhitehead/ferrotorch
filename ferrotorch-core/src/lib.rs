@@ -131,6 +131,7 @@ pub mod special;
 pub mod storage;
 pub mod stride_tricks;
 pub mod tensor;
+mod torch_topk_cpu;
 pub mod vmap;
 
 // Public re-exports for ergonomic use.

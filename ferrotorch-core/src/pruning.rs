@@ -12,6 +12,7 @@ use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
+use crate::torch_topk_cpu::torch_cpu_topk_indices;
 
 // ---------------------------------------------------------------------------
 // torch CPU bottom-k selection-order port (CORE-083 -> #1777)
@@ -31,217 +32,17 @@ use crate::tensor::Tensor;
 // `bits/stl_algo.h` `__introselect` and `bits/stl_heap.h` `__heap_select`
 // family) over `(magnitude, index)` pairs.
 //
-// Only SET membership of the first `k` slots feeds the mask, so the final
-// in-place orderings (`std::sort_heap` inside `partial_sort`, the
-// `if (sorted) std::sort(..)` re-sort in `TopKImpl.h`) are omitted: they
-// permute `queue[0..k]` but never change which elements are in it.
+// The shared helper in `torch_topk_cpu` ports that selection order for both
+// public `topk` and pruning masks. Only SET membership of the first `k` slots
+// feeds the pruning mask, so callers here request `sorted=false`; this may
+// permute the selected prefix in the `nth_element` branch but never changes
+// which elements are pruned.
 //
 // Verified live on torch 2.11.0+cu130:
 //   topk([1,1,1,1], k=2, largest=False).indices  -> [2, 3]
 //   topk([1,2,2,3], k=2, largest=False).indices  -> [0, 1]
 //   topk(|[2,-2,2,5,-2,7]|, k=3, largest=False).indices -> [2, 4, 0]
 //   topk([1,1,1,1], k=1, largest=False).indices  -> [2]
-
-/// `largest=False` comparator from `TopKImpl.h:78-79`:
-/// `(!isnan(x) && isnan(y)) || (x.first < y.first)`. Values only; the index
-/// component never participates in the comparison.
-#[inline]
-fn bottomk_lt<T: Float>(x: &(T, usize), y: &(T, usize)) -> bool {
-    (!x.0.is_nan() && y.0.is_nan()) || x.0 < y.0
-}
-
-/// `std::__push_heap` (libstdc++ `bits/stl_heap.h`): sift `value` up from
-/// `hole` toward `top` in the max-heap rooted at `top`.
-fn sift_up<T: Float>(v: &mut [(T, usize)], mut hole: usize, top: usize, value: (T, usize)) {
-    while hole > top {
-        let parent = (hole - 1) / 2;
-        if !bottomk_lt(&v[parent], &value) {
-            break;
-        }
-        v[hole] = v[parent];
-        hole = parent;
-    }
-    v[hole] = value;
-}
-
-/// `std::__adjust_heap` (libstdc++ `bits/stl_heap.h`): walk the hole down to
-/// a leaf along the larger-child path, then sift `value` back up.
-fn adjust_heap<T: Float>(v: &mut [(T, usize)], mut hole: usize, len: usize, value: (T, usize)) {
-    let top = hole;
-    let mut second = hole;
-    while second < (len - 1) / 2 {
-        second = 2 * (second + 1);
-        if bottomk_lt(&v[second], &v[second - 1]) {
-            second -= 1;
-        }
-        v[hole] = v[second];
-        hole = second;
-    }
-    if len & 1 == 0 && second == (len - 2) / 2 {
-        second = 2 * (second + 1);
-        v[hole] = v[second - 1];
-        hole = second - 1;
-    }
-    sift_up(v, hole, top, value);
-}
-
-/// `std::__make_heap` (libstdc++ `bits/stl_heap.h`) over `v[..len]`.
-fn make_heap<T: Float>(v: &mut [(T, usize)], len: usize) {
-    if len < 2 {
-        return;
-    }
-    let mut parent = (len - 2) / 2;
-    loop {
-        let value = v[parent];
-        adjust_heap(v, parent, len, value);
-        if parent == 0 {
-            return;
-        }
-        parent -= 1;
-    }
-}
-
-/// `std::__heap_select(first, middle, last)` (libstdc++ `bits/stl_algo.h`)
-/// over the subrange `v[..]` with `middle` relative to the slice start:
-/// after the call, `v[..middle]` holds the `middle` smallest elements
-/// (as a max-heap; internal order irrelevant to callers here).
-fn heap_select<T: Float>(v: &mut [(T, usize)], middle: usize) {
-    make_heap(v, middle);
-    for i in middle..v.len() {
-        if bottomk_lt(&v[i], &v[0]) {
-            // `std::__pop_heap(first, middle, i)`.
-            let value = v[i];
-            v[i] = v[0];
-            adjust_heap(&mut v[..middle], 0, middle, value);
-        }
-    }
-}
-
-/// `std::__insertion_sort` (libstdc++ `bits/stl_algo.h`) over the slice.
-/// Stable for ties, exactly like the original.
-fn insertion_sort<T: Float>(v: &mut [(T, usize)]) {
-    for i in 1..v.len() {
-        let value = v[i];
-        if bottomk_lt(&value, &v[0]) {
-            for j in (1..=i).rev() {
-                v[j] = v[j - 1];
-            }
-            v[0] = value;
-        } else {
-            // `std::__unguarded_linear_insert`.
-            let mut j = i;
-            while bottomk_lt(&value, &v[j - 1]) {
-                v[j] = v[j - 1];
-                j -= 1;
-            }
-            v[j] = value;
-        }
-    }
-}
-
-/// `std::__move_median_to_first` (libstdc++ `bits/stl_algo.h`).
-fn move_median_to_first<T: Float>(
-    v: &mut [(T, usize)],
-    result: usize,
-    a: usize,
-    b: usize,
-    c: usize,
-) {
-    if bottomk_lt(&v[a], &v[b]) {
-        if bottomk_lt(&v[b], &v[c]) {
-            v.swap(result, b);
-        } else if bottomk_lt(&v[a], &v[c]) {
-            v.swap(result, c);
-        } else {
-            v.swap(result, a);
-        }
-    } else if bottomk_lt(&v[a], &v[c]) {
-        v.swap(result, a);
-    } else if bottomk_lt(&v[b], &v[c]) {
-        v.swap(result, c);
-    } else {
-        v.swap(result, b);
-    }
-}
-
-/// `std::__unguarded_partition(first, last, pivot)` (libstdc++
-/// `bits/stl_algo.h`). The pivot element sits at index `pivot`, outside
-/// `[first, last)`, so the inner scans need no bounds guards.
-fn unguarded_partition<T: Float>(
-    v: &mut [(T, usize)],
-    mut first: usize,
-    mut last: usize,
-    pivot: usize,
-) -> usize {
-    loop {
-        while bottomk_lt(&v[first], &v[pivot]) {
-            first += 1;
-        }
-        last -= 1;
-        while bottomk_lt(&v[pivot], &v[last]) {
-            last -= 1;
-        }
-        if first >= last {
-            return first;
-        }
-        v.swap(first, last);
-        first += 1;
-    }
-}
-
-/// `std::nth_element` == `std::__introselect` with `depth_limit = 2*__lg(n)`
-/// (libstdc++ `bits/stl_algo.h`): median-of-3 quickselect with an
-/// insertion-sort tail (ranges of <= 3) and a heap-select fallback when the
-/// recursion-depth budget is exhausted.
-fn nth_element<T: Float>(v: &mut [(T, usize)], nth: usize) {
-    let len = v.len();
-    if len == 0 || nth == len {
-        return;
-    }
-    // `std::__lg(n) * 2`.
-    let mut depth_limit = 2 * (usize::BITS - 1 - len.leading_zeros()) as usize;
-    let mut first = 0usize;
-    let mut last = len;
-    while last - first > 3 {
-        if depth_limit == 0 {
-            // `std::__heap_select(first, nth + 1, last)` then
-            // `std::iter_swap(first, nth)`.
-            heap_select(&mut v[first..last], nth + 1 - first);
-            v.swap(first, nth);
-            return;
-        }
-        depth_limit -= 1;
-        // `std::__unguarded_partition_pivot`.
-        let mid = first + (last - first) / 2;
-        move_median_to_first(v, first, first + 1, mid, last - 1);
-        let cut = unguarded_partition(v, first + 1, last, first);
-        if cut <= nth {
-            first = cut;
-        } else {
-            last = cut;
-        }
-    }
-    insertion_sort(&mut v[first..last]);
-}
-
-/// The index SET torch CPU `topk(values, k, largest=False)` selects —
-/// `pytorch/aten/src/ATen/native/TopKImpl.h:44-88` ported faithfully so the
-/// kept/pruned split among magnitude ties is bit-identical to torch.
-///
-/// Preconditions: `1 <= k <= values.len()`.
-fn torch_cpu_bottomk_indices<T: Float>(values: &[T], k: usize) -> Vec<usize> {
-    debug_assert!(k >= 1 && k <= values.len());
-    let mut queue: Vec<(T, usize)> = values.iter().copied().zip(0..).collect();
-    // `use_partial_sort = k * 64 <= n` (TopKImpl.h:44).
-    if (k as u128) * 64 <= values.len() as u128 {
-        // `std::partial_sort` = `__heap_select` + `__sort_heap`; the sort
-        // only permutes the already-selected prefix.
-        heap_select(&mut queue, k);
-    } else {
-        nth_element(&mut queue, k - 1);
-    }
-    queue[..k].iter().map(|&(_, i)| i).collect()
-}
 
 /// Unstructured magnitude pruning: zero out the smallest weights.
 ///
@@ -251,7 +52,7 @@ fn torch_cpu_bottomk_indices<T: Float>(values: &[T], k: usize) -> Vec<usize> {
 /// the cut split exactly as
 /// `torch.nn.utils.prune.l1_unstructured` does (torch CPU
 /// `topk(|w|, k, largest=False)` selection order; see
-/// `torch_cpu_bottomk_indices`).
+/// `torch_cpu_topk_indices`).
 ///
 /// # Arguments
 ///
@@ -284,7 +85,7 @@ pub fn magnitude_prune<T: Float>(
     let mut mask = vec![<T as num_traits::One>::one(); numel];
     if n_prune > 0 {
         let magnitudes: Vec<T> = data.iter().map(|&v| v.abs()).collect();
-        for idx in torch_cpu_bottomk_indices(&magnitudes, n_prune) {
+        for idx in torch_cpu_topk_indices(&magnitudes, n_prune, false, false) {
             mask[idx] = <T as num_traits::Zero>::zero();
         }
     }
@@ -365,7 +166,7 @@ pub fn apply_2_4_mask<T: Float>(weights: &Tensor<T>) -> FerrotorchResult<Tensor<
             // zeroes `torch.topk(scores, k=2, largest=False).indices` inside
             // each sparse block.
             let scores: Vec<T> = group.iter().map(|&v| v * v).collect();
-            for idx in torch_cpu_bottomk_indices(&scores, 2) {
+            for idx in torch_cpu_topk_indices(&scores, 2, false, false) {
                 mask_group[idx] = <T as num_traits::Zero>::zero();
             }
         }

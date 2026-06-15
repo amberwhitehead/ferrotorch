@@ -1026,26 +1026,9 @@ pub fn topk<T: Float>(
 
     for o in 0..outer {
         let slice = &data[o * last_dim..(o + 1) * last_dim];
-        let mut idx: Vec<usize> = (0..last_dim).collect();
-
-        // NaN-ordering mirrors torch's sort/topk comparator
-        // (`aten/src/ATen/native/cuda/SortingCommon.cuh:47-60`, `GTOp`/`LTOp`
-        // with `handleNaN=true`): NaN compares GREATER than every finite/inf
-        // value. So `topk(largest=true)` selects NaN-bearing elements first
-        // (`[NaN, NaN, 5, 3]`), and `topk(largest=false)` ranks NaN LAST and
-        // only picks it once the finite values are exhausted (`[1,2,3,5,NaN,NaN]`
-        // at k=numel). Verified live on torch 2.11.0+cu130 (RTX 3090). Replaces
-        // the old `partial_cmp(..).unwrap_or(Equal)` which treated NaN as equal
-        // to its neighbours, dropping NaN out of the top-k entirely.
-        if largest {
-            idx.sort_by(|&a, &b| nan_is_max_cmp(slice[b], slice[a]));
-        } else {
-            idx.sort_by(|&a, &b| nan_is_max_cmp(slice[a], slice[b]));
-        }
-
-        for &i in &idx[..k] {
-            out_values.push(slice[i]);
-            out_indices.push(i);
+        for (value, index) in crate::torch_topk_cpu::torch_cpu_topk_pairs(slice, k, largest, true) {
+            out_values.push(value);
+            out_indices.push(index);
         }
     }
 
@@ -1324,7 +1307,7 @@ mod tests {
 
     /// largest=False ranks NaN LAST under the same comparator. Verified live:
     ///   topk(.., k=4, largest=False) -> [1,2,3,5]              idx [2,5,0,3]
-    ///   topk(.., k=6, largest=False) -> [1,2,3,5,NaN,NaN]      idx [2,5,0,3,1,4]
+    ///   topk(.., k=6, largest=False) -> [1,2,3,5,NaN,NaN]      idx [2,5,0,3,4,1]
     #[test]
     fn test_topk_smallest_nan_is_last() {
         let input = tensor_1d(&[3.0, f32::NAN, 1.0, 5.0, f32::NAN, 2.0]);
@@ -1338,6 +1321,6 @@ mod tests {
         let v6d = v6.data().unwrap();
         assert_eq!(&v6d[..4], &[1.0, 2.0, 3.0, 5.0]);
         assert!(v6d[4].is_nan() && v6d[5].is_nan(), "NaNs last: {v6d:?}");
-        assert_eq!(i6, vec![2, 5, 0, 3, 1, 4]);
+        assert_eq!(i6, vec![2, 5, 0, 3, 4, 1]);
     }
 }

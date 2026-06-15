@@ -6721,11 +6721,10 @@ pub trait GpuBackend: Send + Sync {
     /// - `indices` — an `I64`-tagged `GpuBufferHandle` of `outer * k` original
     ///   indices into `[0, last_dim)` (PyTorch returns `ScalarType::Long`).
     ///
-    /// `largest == true` → descending value order; else ascending. Ties are
-    /// broken by ascending original index, which is a valid `torch.topk`
-    /// result (upstream `topk_out_cuda` gathers then sorts the top-k with
-    /// `stable=false`, leaving the per-tie index order unspecified) and matches
-    /// the CPU `ops::search::topk` path bit-for-bit. Mirrors
+    /// `largest == true` → descending value order; else ascending. The CUDA
+    /// backend's tie order is deterministic but backend-specific; the CPU
+    /// `ops::search::topk` path separately mirrors PyTorch CPU's concrete
+    /// `TopKImpl.h` selection order. Mirrors
     /// `topk_out_cuda` in `aten/src/ATen/native/cuda/TensorTopK.cpp` for the
     /// last-dim, sorted case. The default impl errors; the CUDA backend
     /// overrides it with the `gpu_topk_*` PTX kernel.
