@@ -184,7 +184,7 @@ fn clamp_tensor_from_storage<T: Float>(
             storage,
             input.shape().to_vec(),
             Arc::new(ClampBackward {
-                input: input.saved_for_backward(),
+                input: input.saved_for_backward()?,
                 min,
                 max,
             }),
@@ -305,10 +305,10 @@ fn exp_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 
         if needs_grad_unary(&input) {
             Tensor::from_operation_saving_output(storage, shape, |output| {
-                Arc::new(ExpBackward {
+                Ok(Arc::new(ExpBackward {
                     input: input.clone(),
                     output,
-                })
+                }))
             })
         } else {
             Tensor::from_storage(storage, shape, false)
@@ -319,10 +319,10 @@ fn exp_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         if needs_grad_unary(input) {
             let (storage, shape) = output.into_storage_and_shape()?;
             Tensor::from_operation_saving_output(storage, shape, |output| {
-                Arc::new(ExpBackward {
+                Ok(Arc::new(ExpBackward {
                     input: input.clone(),
                     output,
-                })
+                }))
             })
         } else {
             Ok(output)
@@ -411,7 +411,7 @@ fn log_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
                 storage,
                 shape,
                 Arc::new(LogBackward {
-                    input: input.saved_for_backward(),
+                    input: input.saved_for_backward()?,
                 }),
             )
         } else {
@@ -426,7 +426,7 @@ fn log_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
                 storage,
                 shape,
                 Arc::new(LogBackward {
-                    input: input.saved_for_backward(),
+                    input: input.saved_for_backward()?,
                 }),
             )
         } else {
@@ -503,7 +503,7 @@ fn sin_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
             storage,
             shape,
             Arc::new(SinBackward {
-                input: input.saved_for_backward(),
+                input: input.saved_for_backward()?,
             }),
         )
     } else {
@@ -580,7 +580,7 @@ fn cos_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
             storage,
             shape,
             Arc::new(CosBackward {
-                input: input.saved_for_backward(),
+                input: input.saved_for_backward()?,
             }),
         )
     } else {
@@ -902,7 +902,7 @@ fn clamp_with_forward_and_backward_bounds<T: Float>(
                 TensorStorage::gpu(handle),
                 input.shape().to_vec(),
                 Arc::new(ClampBackward {
-                    input: input.saved_for_backward(),
+                    input: input.saved_for_backward()?,
                     min: backward_min,
                     max: backward_max,
                 }),
@@ -919,7 +919,7 @@ fn clamp_with_forward_and_backward_bounds<T: Float>(
             storage,
             shape,
             Arc::new(ClampBackward {
-                input: input.saved_for_backward(),
+                input: input.saved_for_backward()?,
                 min: backward_min,
                 max: backward_max,
             }),
@@ -1134,9 +1134,9 @@ fn attach_clamp_tensor_backward<T: Float>(
         storage,
         shape,
         Arc::new(ClampTensorBackward {
-            input: input.saved_for_backward(),
-            min: min.map(Tensor::saved_for_backward),
-            max: max.map(Tensor::saved_for_backward),
+            input: input.saved_for_backward()?,
+            min: min.map(Tensor::saved_for_backward).transpose()?,
+            max: max.map(Tensor::saved_for_backward).transpose()?,
         }),
     )
 }
@@ -1262,11 +1262,11 @@ fn cuda_unary_vjp<T: Float>(
 fn finish_unary<T: Float, G: GradFn<T> + 'static>(
     output: Tensor<T>,
     input: &Tensor<T>,
-    make_grad: impl FnOnce() -> G,
+    make_grad: impl FnOnce() -> FerrotorchResult<G>,
 ) -> FerrotorchResult<Tensor<T>> {
     if needs_grad_unary(input) {
         let (storage, shape) = output.into_storage_and_shape()?;
-        Tensor::from_operation(storage, shape, Arc::new(make_grad()))
+        Tensor::from_operation(storage, shape, Arc::new(make_grad()?))
     } else {
         Ok(output)
     }
@@ -1276,12 +1276,12 @@ fn finish_unary<T: Float, G: GradFn<T> + 'static>(
 fn finish_unary_saving_output<T: Float, G: GradFn<T> + 'static>(
     output: Tensor<T>,
     input: &Tensor<T>,
-    make_grad: impl FnOnce(Tensor<T>) -> G,
+    make_grad: impl FnOnce(Tensor<T>) -> FerrotorchResult<G>,
 ) -> FerrotorchResult<Tensor<T>> {
     if needs_grad_unary(input) {
         let (storage, shape) = output.into_storage_and_shape()?;
         Tensor::from_operation_saving_output(storage, shape, |saved_output| {
-            Arc::new(make_grad(saved_output))
+            Ok(Arc::new(make_grad(saved_output)?))
         })
     } else {
         Ok(output)
@@ -1342,9 +1342,11 @@ impl<T: Float> GradFn<T> for TanBackward<T> {
 /// `aten/src/ATen/native/UnaryOps.cpp:360 CREATE_UNARY_TORCH_IMPL_FUNC(tan_out, tan_stub)`.
 pub fn tan<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.tan())?;
-    finish_unary_saving_output(output, input, |output| TanBackward {
-        input: input.clone(),
-        output,
+    finish_unary_saving_output(output, input, |output| {
+        Ok(TanBackward {
+            input: input.clone(),
+            output,
+        })
     })
 }
 
@@ -1399,8 +1401,10 @@ impl<T: Float> GradFn<T> for AsinBackward<T> {
 /// `UnaryOps.cpp:323 CREATE_UNARY_TORCH_IMPL_FUNC(asin_out, asin_stub)`.
 pub fn asin<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.asin())?;
-    finish_unary(output, input, || AsinBackward {
-        input: input.saved_for_backward(),
+    finish_unary(output, input, || {
+        Ok(AsinBackward {
+            input: input.saved_for_backward()?,
+        })
     })
 }
 
@@ -1451,8 +1455,10 @@ impl<T: Float> GradFn<T> for AcosBackward<T> {
 /// `UnaryOps.cpp:321 CREATE_UNARY_TORCH_IMPL_FUNC(acos_out, acos_stub)`.
 pub fn acos<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.acos())?;
-    finish_unary(output, input, || AcosBackward {
-        input: input.saved_for_backward(),
+    finish_unary(output, input, || {
+        Ok(AcosBackward {
+            input: input.saved_for_backward()?,
+        })
     })
 }
 
@@ -1503,8 +1509,10 @@ impl<T: Float> GradFn<T> for AtanBackward<T> {
 /// `UnaryOps.cpp:325 CREATE_UNARY_TORCH_IMPL_FUNC(atan_out, atan_stub)`.
 pub fn atan<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.atan())?;
-    finish_unary(output, input, || AtanBackward {
-        input: input.saved_for_backward(),
+    finish_unary(output, input, || {
+        Ok(AtanBackward {
+            input: input.saved_for_backward()?,
+        })
     })
 }
 
@@ -1558,8 +1566,10 @@ impl<T: Float> GradFn<T> for SinhBackward<T> {
 /// `UnaryOps.cpp:351 CREATE_UNARY_TORCH_IMPL_FUNC(sinh_out, sinh_stub)`.
 pub fn sinh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.sinh())?;
-    finish_unary(output, input, || SinhBackward {
-        input: input.saved_for_backward(),
+    finish_unary(output, input, || {
+        Ok(SinhBackward {
+            input: input.saved_for_backward()?,
+        })
     })
 }
 
@@ -1609,8 +1619,10 @@ impl<T: Float> GradFn<T> for CoshBackward<T> {
 /// `UnaryOps.cpp:329 CREATE_UNARY_TORCH_IMPL_FUNC(cosh_out, cosh_stub)`.
 pub fn cosh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.cosh())?;
-    finish_unary(output, input, || CoshBackward {
-        input: input.saved_for_backward(),
+    finish_unary(output, input, || {
+        Ok(CoshBackward {
+            input: input.saved_for_backward()?,
+        })
     })
 }
 
@@ -1665,8 +1677,10 @@ impl<T: Float> GradFn<T> for AsinhBackward<T> {
 /// `UnaryOps.cpp:324 CREATE_UNARY_TORCH_IMPL_FUNC(asinh_out, asinh_stub)`.
 pub fn asinh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.asinh())?;
-    finish_unary(output, input, || AsinhBackward {
-        input: input.saved_for_backward(),
+    finish_unary(output, input, || {
+        Ok(AsinhBackward {
+            input: input.saved_for_backward()?,
+        })
     })
 }
 
@@ -1717,8 +1731,10 @@ impl<T: Float> GradFn<T> for AcoshBackward<T> {
 /// `UnaryOps.cpp:322 CREATE_UNARY_TORCH_IMPL_FUNC(acosh_out, acosh_stub)`.
 pub fn acosh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.acosh())?;
-    finish_unary(output, input, || AcoshBackward {
-        input: input.saved_for_backward(),
+    finish_unary(output, input, || {
+        Ok(AcoshBackward {
+            input: input.saved_for_backward()?,
+        })
     })
 }
 
@@ -1769,8 +1785,10 @@ impl<T: Float> GradFn<T> for AtanhBackward<T> {
 /// `UnaryOps.cpp:326 CREATE_UNARY_TORCH_IMPL_FUNC(atanh_out, atanh_stub)`.
 pub fn atanh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.atanh())?;
-    finish_unary(output, input, || AtanhBackward {
-        input: input.saved_for_backward(),
+    finish_unary(output, input, || {
+        Ok(AtanhBackward {
+            input: input.saved_for_backward()?,
+        })
     })
 }
 
@@ -1830,9 +1848,11 @@ impl<T: Float> GradFn<T> for Exp2Backward<T> {
 /// `UnaryOps.cpp:335 CREATE_UNARY_TORCH_IMPL_FUNC(exp2_out, exp2_stub)`.
 pub fn exp2<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.exp2())?;
-    finish_unary_saving_output(output, input, |output| Exp2Backward {
-        input: input.clone(),
-        output,
+    finish_unary_saving_output(output, input, |output| {
+        Ok(Exp2Backward {
+            input: input.clone(),
+            output,
+        })
     })
 }
 
@@ -1886,9 +1906,11 @@ impl<T: Float> GradFn<T> for Expm1Backward<T> {
 /// Mirrors `UnaryOps.cpp:336 CREATE_UNARY_TORCH_IMPL_FUNC(expm1_out, expm1_stub)`.
 pub fn expm1<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.exp_m1())?;
-    finish_unary_saving_output(output, input, |output| Expm1Backward {
-        input: input.clone(),
-        output,
+    finish_unary_saving_output(output, input, |output| {
+        Ok(Expm1Backward {
+            input: input.clone(),
+            output,
+        })
     })
 }
 
@@ -1944,8 +1966,10 @@ impl<T: Float> GradFn<T> for Log2Backward<T> {
 /// `UnaryOps.cpp:343 CREATE_UNARY_TORCH_IMPL_FUNC(log2_out, log2_stub)`.
 pub fn log2<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.log2())?;
-    finish_unary(output, input, || Log2Backward {
-        input: input.saved_for_backward(),
+    finish_unary(output, input, || {
+        Ok(Log2Backward {
+            input: input.saved_for_backward()?,
+        })
     })
 }
 
@@ -1998,8 +2022,10 @@ impl<T: Float> GradFn<T> for Log10Backward<T> {
 /// `UnaryOps.cpp:341 CREATE_UNARY_TORCH_IMPL_FUNC(log10_out, log10_stub)`.
 pub fn log10<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.log10())?;
-    finish_unary(output, input, || Log10Backward {
-        input: input.saved_for_backward(),
+    finish_unary(output, input, || {
+        Ok(Log10Backward {
+            input: input.saved_for_backward()?,
+        })
     })
 }
 
@@ -2050,8 +2076,10 @@ impl<T: Float> GradFn<T> for Log1pBackward<T> {
 /// Mirrors `UnaryOps.cpp:342 CREATE_UNARY_TORCH_IMPL_FUNC(log1p_out, log1p_stub)`.
 pub fn log1p<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.ln_1p())?;
-    finish_unary(output, input, || Log1pBackward {
-        input: input.saved_for_backward(),
+    finish_unary(output, input, || {
+        Ok(Log1pBackward {
+            input: input.saved_for_backward()?,
+        })
     })
 }
 
@@ -2091,9 +2119,11 @@ impl<T: Float> GradFn<T> for ZerosLikeBackward<T> {
 /// Backward: `zeros_like(grad)` (gradient is zero a.e.).
 pub fn ceil<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.ceil())?;
-    finish_unary(output, input, || ZerosLikeBackward {
-        input: input.clone(),
-        name: "CeilBackward",
+    finish_unary(output, input, || {
+        Ok(ZerosLikeBackward {
+            input: input.clone(),
+            name: "CeilBackward",
+        })
     })
 }
 
@@ -2101,9 +2131,11 @@ pub fn ceil<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// `UnaryOps.cpp:317 CREATE_UNARY_TORCH_IMPL_INTEGER_NO_OP_FUNC(floor_out, floor_stub)`.
 pub fn floor<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.floor())?;
-    finish_unary(output, input, || ZerosLikeBackward {
-        input: input.clone(),
-        name: "FloorBackward",
+    finish_unary(output, input, || {
+        Ok(ZerosLikeBackward {
+            input: input.clone(),
+            name: "FloorBackward",
+        })
     })
 }
 
@@ -2116,9 +2148,11 @@ pub fn floor<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// and break ties toward even.
 pub fn round<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, round_half_to_even)?;
-    finish_unary(output, input, || ZerosLikeBackward {
-        input: input.clone(),
-        name: "RoundBackward",
+    finish_unary(output, input, || {
+        Ok(ZerosLikeBackward {
+            input: input.clone(),
+            name: "RoundBackward",
+        })
     })
 }
 
@@ -2152,9 +2186,11 @@ fn round_half_to_even<T: Float>(x: T) -> T {
 /// `UnaryOps.cpp:319 CREATE_UNARY_TORCH_IMPL_INTEGER_NO_OP_FUNC(trunc_out, trunc_stub)`.
 pub fn trunc<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x.trunc())?;
-    finish_unary(output, input, || ZerosLikeBackward {
-        input: input.clone(),
-        name: "TruncBackward",
+    finish_unary(output, input, || {
+        Ok(ZerosLikeBackward {
+            input: input.clone(),
+            name: "TruncBackward",
+        })
     })
 }
 
@@ -2207,8 +2243,10 @@ impl<T: Float> GradFn<T> for FracBackward<T> {
 /// Mirrors `UnaryOps.cpp:337 CREATE_UNARY_TORCH_IMPL_FUNC(frac_out, frac_stub)`.
 pub fn frac<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, |x| x - x.trunc())?;
-    finish_unary(output, input, || FracBackward {
-        input: input.clone(),
+    finish_unary(output, input, || {
+        Ok(FracBackward {
+            input: input.clone(),
+        })
     })
 }
 
@@ -2236,9 +2274,11 @@ pub fn sign<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
             x.signum()
         }
     })?;
-    finish_unary(output, input, || ZerosLikeBackward {
-        input: input.clone(),
-        name: "SignBackward",
+    finish_unary(output, input, || {
+        Ok(ZerosLikeBackward {
+            input: input.clone(),
+            name: "SignBackward",
+        })
     })
 }
 
@@ -2323,8 +2363,10 @@ pub fn sinc<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
             px.sin() / px
         }
     })?;
-    finish_unary(output, input, || SincBackward {
-        input: input.saved_for_backward(),
+    finish_unary(output, input, || {
+        Ok(SincBackward {
+            input: input.saved_for_backward()?,
+        })
     })
 }
 
@@ -2446,8 +2488,8 @@ pub fn atan2<T: Float>(y: &Tensor<T>, x: &Tensor<T>) -> FerrotorchResult<Tensor<
             storage,
             shape,
             Arc::new(Atan2Backward {
-                y: y.saved_for_backward(),
-                x: x.saved_for_backward(),
+                y: y.saved_for_backward()?,
+                x: x.saved_for_backward()?,
             }),
         )
     } else {
@@ -2715,11 +2757,11 @@ pub fn copysign<T: Float>(magnitude: &Tensor<T>, sign: &Tensor<T>) -> Ferrotorch
         let storage = TensorStorage::gpu(handle);
         if needs_grad_binary(magnitude, sign) {
             Tensor::from_operation_saving_output(storage, out_shape, |result| {
-                Arc::new(CopysignBackward {
-                    magnitude: magnitude.saved_for_backward(),
+                Ok(Arc::new(CopysignBackward {
+                    magnitude: magnitude.saved_for_backward()?,
                     sign: sign.clone(),
                     result,
-                })
+                }))
             })
         } else {
             Tensor::from_storage(storage, out_shape, false)
@@ -2733,11 +2775,11 @@ pub fn copysign<T: Float>(magnitude: &Tensor<T>, sign: &Tensor<T>) -> Ferrotorch
         if needs_grad_binary(magnitude, sign) {
             let (storage, shape) = output.into_storage_and_shape()?;
             Tensor::from_operation_saving_output(storage, shape, |result| {
-                Arc::new(CopysignBackward {
-                    magnitude: magnitude.saved_for_backward(),
+                Ok(Arc::new(CopysignBackward {
+                    magnitude: magnitude.saved_for_backward()?,
                     sign: sign.clone(),
                     result,
-                })
+                }))
             })
         } else {
             Ok(output)
@@ -2829,11 +2871,11 @@ pub fn hypot<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
     if needs_grad_binary(a, b) {
         let (storage, shape) = output.into_storage_and_shape()?;
         Tensor::from_operation_saving_output(storage, shape, |result| {
-            Arc::new(HypotBackward {
-                a: a.saved_for_backward(),
-                b: b.saved_for_backward(),
+            Ok(Arc::new(HypotBackward {
+                a: a.saved_for_backward()?,
+                b: b.saved_for_backward()?,
                 result,
-            })
+            }))
         })
     } else {
         Ok(output)
@@ -3089,8 +3131,8 @@ pub fn nextafter<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Ten
         let (storage, shape) = output.into_storage_and_shape()?;
         let out_tensor = Tensor::from_storage(storage, shape, false)?;
         let grad_fn = Arc::new(NextafterBackward {
-            a: a.saved_for_backward(),
-            b: b.saved_for_backward(),
+            a: a.saved_for_backward()?,
+            b: b.saved_for_backward()?,
         });
         let (s, sh) = out_tensor.into_storage_and_shape()?;
         Tensor::from_operation(s, sh, grad_fn)

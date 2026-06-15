@@ -12,10 +12,10 @@
 //! (tensor([2., 4., 6.]), torch.float32)
 //! ```
 
+use ferrotorch_core::Tensor;
 use ferrotorch_core::grad_fns::arithmetic::mul;
 use ferrotorch_core::grad_fns::reduction::sum;
 use ferrotorch_core::storage::TensorStorage;
-use ferrotorch_core::{Device, Tensor};
 
 #[test]
 fn cpu_to_dtype_leaf_backward_reaches_source() {
@@ -43,6 +43,7 @@ fn cpu_to_dtype_leaf_backward_reaches_source() {
 #[cfg(feature = "gpu")]
 mod gpu {
     use super::*;
+    use ferrotorch_core::Device;
     use ferrotorch_core::dtype::Float;
     use std::sync::Once;
 

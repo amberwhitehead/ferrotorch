@@ -27,6 +27,9 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use once_cell::sync::OnceCell;
+
+use crate::autograd::saved_tensors::UnpackHook;
 use crate::device::Device;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
@@ -181,6 +184,21 @@ struct TensorInner<T: Float> {
     hooks: Mutex<crate::autograd::hooks::HookStorage<T>>,
 }
 
+struct SavedTensorHookState<T: Float> {
+    packed: Tensor<T>,
+    unpack: UnpackHook<T>,
+    unpacked: OnceCell<Tensor<T>>,
+}
+
+impl<T: Float> fmt::Debug for SavedTensorHookState<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SavedTensorHookState")
+            .field("packed", &self.packed)
+            .field("unpacked", &self.unpacked.get())
+            .finish_non_exhaustive()
+    }
+}
+
 /// The central type. A dynamically-shaped tensor with gradient tracking
 /// and device placement.
 ///
@@ -195,6 +213,7 @@ struct TensorInner<T: Float> {
 pub struct Tensor<T: Float = f32> {
     inner: Arc<TensorInner<T>>,
     saved_version: Option<u64>,
+    saved_hook_state: Option<Arc<SavedTensorHookState<T>>>,
 }
 
 // --- Construction ---
@@ -235,6 +254,7 @@ impl<T: Float> Tensor<T> {
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
+            saved_hook_state: None,
         })
     }
 
@@ -284,6 +304,7 @@ impl<T: Float> Tensor<T> {
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
+            saved_hook_state: None,
         })
     }
 
@@ -339,6 +360,7 @@ impl<T: Float> Tensor<T> {
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
+            saved_hook_state: None,
         })
     }
 
@@ -402,6 +424,7 @@ impl<T: Float> Tensor<T> {
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
+            saved_hook_state: None,
         }
     }
 
@@ -485,6 +508,7 @@ impl<T: Float> Tensor<T> {
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
+            saved_hook_state: None,
         })
     }
 
@@ -500,7 +524,7 @@ impl<T: Float> Tensor<T> {
         make_grad_fn: F,
     ) -> FerrotorchResult<Self>
     where
-        F: FnOnce(Tensor<T>) -> Arc<dyn GradFn<T>>,
+        F: FnOnce(Tensor<T>) -> FerrotorchResult<Arc<dyn GradFn<T>>>,
     {
         if crate::autograd::no_grad::is_inference_mode() {
             return Self::from_storage(storage, shape, false);
@@ -533,9 +557,11 @@ impl<T: Float> Tensor<T> {
                 is_leaf: AtomicBool::new(true),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
-            saved_version: Some(storage.version()),
+            saved_version: None,
+            saved_hook_state: None,
         };
-        let grad_fn = make_grad_fn(saved_output);
+        let saved_output = saved_output.saved_for_backward()?;
+        let grad_fn = make_grad_fn(saved_output)?;
 
         Ok(Self {
             inner: Arc::new(TensorInner {
@@ -551,6 +577,7 @@ impl<T: Float> Tensor<T> {
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
+            saved_hook_state: None,
         })
     }
 }
@@ -736,14 +763,50 @@ impl<T: Float> Tensor<T> {
         self.inner.storage.version()
     }
 
-    /// Clone this tensor as a value saved for backward, recording the shared
-    /// storage version PyTorch's SavedVariable would expect during backward.
-    #[inline]
-    pub(crate) fn saved_for_backward(&self) -> Self {
-        Self {
+    /// Clone this tensor as a value saved for backward.
+    ///
+    /// Without saved-tensor hooks, this records the shared storage version
+    /// PyTorch's `SavedVariable` would check during backward. With hooks, the
+    /// returned tensor keeps the original graph metadata but stores the packed
+    /// hook result separately; accessors lazily unpack that payload when the
+    /// backward formula reads tensor data.
+    pub(crate) fn saved_for_backward(&self) -> FerrotorchResult<Self> {
+        let saved_version = self.storage_version();
+        let saved = Self {
             inner: Arc::clone(&self.inner),
-            saved_version: Some(self.storage_version()),
+            saved_version: Some(saved_version),
+            saved_hook_state: None,
+        };
+
+        let Some((pack, unpack)) =
+            crate::autograd::saved_tensors::current_saved_tensor_hooks::<T>()
+        else {
+            return Ok(saved);
+        };
+
+        let pack_input = Self {
+            inner: Arc::clone(&self.inner),
+            saved_version: None,
+            saved_hook_state: None,
+        };
+        let packed = crate::autograd::no_grad::no_grad(|| pack(pack_input))?;
+        let current_version = self.storage_version();
+        if current_version != saved_version {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "a saved tensor pack hook modified its input in place; \
+                          pack hooks must not mutate tensors saved for backward"
+                    .into(),
+            });
         }
+
+        Ok(Self {
+            saved_hook_state: Some(Arc::new(SavedTensorHookState {
+                packed,
+                unpack,
+                unpacked: OnceCell::new(),
+            })),
+            ..saved
+        })
     }
 
     #[inline]
@@ -753,6 +816,9 @@ impl<T: Float> Tensor<T> {
 
     #[inline]
     fn check_saved_version(&self, access: &'static str) -> FerrotorchResult<()> {
+        if self.saved_hook_state.is_some() {
+            return Ok(());
+        }
         if let Some(expected) = self.saved_version {
             let current = self.storage_version();
             if current != expected {
@@ -766,6 +832,17 @@ impl<T: Float> Tensor<T> {
             }
         }
         Ok(())
+    }
+
+    fn unpack_hooked_saved_tensor(&self) -> FerrotorchResult<Option<&Tensor<T>>> {
+        let Some(state) = &self.saved_hook_state else {
+            return Ok(None);
+        };
+        let unpacked = state.unpacked.get_or_try_init(|| {
+            let tensor = (state.unpack)(state.packed.clone())?;
+            Ok::<Tensor<T>, FerrotorchError>(tensor)
+        })?;
+        Ok(Some(unpacked))
     }
 
     #[inline]
@@ -810,6 +887,7 @@ impl<T: Float> Tensor<T> {
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
+            saved_hook_state: None,
         })
     }
 
@@ -1052,6 +1130,9 @@ impl<T: Float> Tensor<T> {
     /// additionally requires external synchronization. See the
     /// synchronization contract on [`crate::storage::TensorStorage`].
     pub fn data(&self) -> FerrotorchResult<&[T]> {
+        if let Some(unpacked) = self.unpack_hooked_saved_tensor()? {
+            return unpacked.data();
+        }
         self.check_saved_version("Tensor::data")?;
         if self.inner.storage.is_gpu() {
             return Err(FerrotorchError::GpuTensorNotAccessible);
@@ -1109,6 +1190,9 @@ impl<T: Float> Tensor<T> {
     /// CPU tensors it gathers elements in logical (C-order) sequence. For
     /// GPU tensors it performs a device-to-host transfer.
     pub fn data_vec(&self) -> FerrotorchResult<Vec<T>> {
+        if let Some(unpacked) = self.unpack_hooked_saved_tensor()? {
+            return unpacked.data_vec();
+        }
         self.check_saved_version("Tensor::data_vec")?;
         if self.inner.storage.is_meta() {
             return Err(FerrotorchError::InvalidArgument {
@@ -1163,6 +1247,9 @@ impl<T: Float> Tensor<T> {
     /// is extracted without copying. Otherwise falls back to cloning.
     /// Used internally to avoid double-copies when rewrapping op results.
     pub fn into_storage_and_shape(self) -> FerrotorchResult<(TensorStorage<T>, Vec<usize>)> {
+        if let Some(unpacked) = self.unpack_hooked_saved_tensor()? {
+            return unpacked.clone().into_storage_and_shape();
+        }
         // Non-contiguous tensors must be materialized — the raw storage
         // does not match the logical element order.
         if !self.is_contiguous() {
@@ -1726,6 +1813,9 @@ impl<T: Float> Tensor<T> {
 
     /// Get the GPU buffer handle. Returns `Err` for CPU tensors.
     pub fn gpu_handle(&self) -> FerrotorchResult<&crate::gpu_dispatch::GpuBufferHandle> {
+        if let Some(unpacked) = self.unpack_hooked_saved_tensor()? {
+            return unpacked.gpu_handle();
+        }
         self.check_saved_version("Tensor::gpu_handle")?;
         self.inner
             .storage
@@ -2368,6 +2458,7 @@ impl<T: Float> Tensor<T> {
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
+            saved_hook_state: None,
         }
     }
 
@@ -2388,6 +2479,7 @@ impl<T: Float> Tensor<T> {
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
+            saved_hook_state: None,
         }
     }
 
@@ -2521,6 +2613,7 @@ impl<T: Float> Tensor<T> {
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
+            saved_hook_state: None,
         }
     }
 
@@ -2801,6 +2894,7 @@ impl<T: Float> Clone for Tensor<T> {
         Self {
             inner: Arc::clone(&self.inner),
             saved_version: self.saved_version,
+            saved_hook_state: self.saved_hook_state.clone(),
         }
     }
 }
@@ -2815,6 +2909,7 @@ impl<T: Float> fmt::Debug for Tensor<T> {
             .field("is_leaf", &self.is_leaf())
             .field("grad_fn", &self.grad_fn().as_ref().map(|gf| gf.name()))
             .field("saved_version", &self.saved_version)
+            .field("saved_hook_state", &self.saved_hook_state)
             .finish()
     }
 }

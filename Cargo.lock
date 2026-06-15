@@ -2507,6 +2507,7 @@ dependencies = [
  "ferrotorch-gpu",
  "half",
  "num-traits",
+ "once_cell",
  "quote",
  "rayon",
  "rustc-hash 2.1.2",

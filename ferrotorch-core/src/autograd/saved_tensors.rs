@@ -62,6 +62,18 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
+// Thread-local saved-tensors hook state for bfloat16.
+thread_local! {
+    static HOOKS_BF16: RefCell<Option<(PackHook<half::bf16>, UnpackHook<half::bf16>)>> =
+        const { RefCell::new(None) };
+}
+
+// Thread-local saved-tensors hook state for IEEE float16.
+thread_local! {
+    static HOOKS_F16: RefCell<Option<(PackHook<half::f16>, UnpackHook<half::f16>)>> =
+        const { RefCell::new(None) };
+}
+
 /// Run a closure with saved-tensors hooks active on the current thread.
 ///
 /// The `pack` hook is called on every tensor saved for backward during `f()`.
@@ -110,9 +122,105 @@ where
         let result = f();
         HOOKS_F64.with(|h| *h.borrow_mut() = prev);
         result
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<half::bf16>() {
+        // SAFETY: TypeId equality above proves T == half::bf16; see the f32
+        // arm for the ownership/layout argument.
+        let pack_bf16: PackHook<half::bf16> = unsafe { std::mem::transmute(pack) };
+        // SAFETY: same as pack_bf16 above (T == half::bf16 by TypeId guard).
+        let unpack_bf16: UnpackHook<half::bf16> = unsafe { std::mem::transmute(unpack) };
+
+        let prev = HOOKS_BF16.with(|h| h.borrow_mut().replace((pack_bf16, unpack_bf16)));
+        let result = f();
+        HOOKS_BF16.with(|h| *h.borrow_mut() = prev);
+        result
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<half::f16>() {
+        // SAFETY: TypeId equality above proves T == half::f16; see the f32
+        // arm for the ownership/layout argument.
+        let pack_f16: PackHook<half::f16> = unsafe { std::mem::transmute(pack) };
+        // SAFETY: same as pack_f16 above (T == half::f16 by TypeId guard).
+        let unpack_f16: UnpackHook<half::f16> = unsafe { std::mem::transmute(unpack) };
+
+        let prev = HOOKS_F16.with(|h| h.borrow_mut().replace((pack_f16, unpack_f16)));
+        let result = f();
+        HOOKS_F16.with(|h| *h.borrow_mut() = prev);
+        result
     } else {
         // No hooks for other types — just run the closure.
         f()
+    }
+}
+
+/// Capture the currently active saved-tensor hooks for a tensor dtype.
+///
+/// Production saved tensors must store the unpack hook with the packed value:
+/// PyTorch calls the pack hook while constructing the forward node, then calls
+/// the matching unpack hook later during backward even after the context manager
+/// has exited. This helper is intentionally crate-private; public callers keep
+/// using [`saved_tensors_hooks`], [`pack_saved_tensor`], and
+/// [`unpack_saved_tensor`].
+pub(crate) fn current_saved_tensor_hooks<T: Float>() -> Option<(PackHook<T>, UnpackHook<T>)> {
+    if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>() {
+        HOOKS_F32.with(|h| {
+            let guard = h.borrow();
+            guard.as_ref().map(|(pack, unpack)| {
+                // SAFETY: TypeId equality above proves T == f32, so the hook
+                // trait objects have identical concrete Tensor parameter types.
+                // The Arcs are cloned before transmute, preserving ownership.
+                let pack_t: PackHook<T> =
+                    unsafe { std::mem::transmute::<PackHook<f32>, PackHook<T>>(pack.clone()) };
+                // SAFETY: same TypeId guard as above.
+                let unpack_t: UnpackHook<T> = unsafe {
+                    std::mem::transmute::<UnpackHook<f32>, UnpackHook<T>>(unpack.clone())
+                };
+                (pack_t, unpack_t)
+            })
+        })
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>() {
+        HOOKS_F64.with(|h| {
+            let guard = h.borrow();
+            guard.as_ref().map(|(pack, unpack)| {
+                // SAFETY: TypeId equality above proves T == f64; see f32 arm.
+                let pack_t: PackHook<T> =
+                    unsafe { std::mem::transmute::<PackHook<f64>, PackHook<T>>(pack.clone()) };
+                // SAFETY: same TypeId guard as above.
+                let unpack_t: UnpackHook<T> = unsafe {
+                    std::mem::transmute::<UnpackHook<f64>, UnpackHook<T>>(unpack.clone())
+                };
+                (pack_t, unpack_t)
+            })
+        })
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<half::bf16>() {
+        HOOKS_BF16.with(|h| {
+            let guard = h.borrow();
+            guard.as_ref().map(|(pack, unpack)| {
+                // SAFETY: TypeId equality above proves T == half::bf16; see f32 arm.
+                let pack_t: PackHook<T> = unsafe {
+                    std::mem::transmute::<PackHook<half::bf16>, PackHook<T>>(pack.clone())
+                };
+                // SAFETY: same TypeId guard as above.
+                let unpack_t: UnpackHook<T> = unsafe {
+                    std::mem::transmute::<UnpackHook<half::bf16>, UnpackHook<T>>(unpack.clone())
+                };
+                (pack_t, unpack_t)
+            })
+        })
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<half::f16>() {
+        HOOKS_F16.with(|h| {
+            let guard = h.borrow();
+            guard.as_ref().map(|(pack, unpack)| {
+                // SAFETY: TypeId equality above proves T == half::f16; see f32 arm.
+                let pack_t: PackHook<T> = unsafe {
+                    std::mem::transmute::<PackHook<half::f16>, PackHook<T>>(pack.clone())
+                };
+                // SAFETY: same TypeId guard as above.
+                let unpack_t: UnpackHook<T> = unsafe {
+                    std::mem::transmute::<UnpackHook<half::f16>, UnpackHook<T>>(unpack.clone())
+                };
+                (pack_t, unpack_t)
+            })
+        })
+    } else {
+        None
     }
 }
 
@@ -151,6 +259,34 @@ pub fn pack_saved_tensor<T: Float>(tensor: Tensor<T>) -> FerrotorchResult<Tensor
                 let result = pack(t_f64)?;
                 // SAFETY: T == f64 by the same TypeId guard; transmute is a no-op.
                 Ok(unsafe { std::mem::transmute::<Tensor<f64>, Tensor<T>>(result) })
+            } else {
+                Ok(tensor)
+            }
+        })
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<half::bf16>() {
+        HOOKS_BF16.with(|h| {
+            let guard = h.borrow();
+            if let Some((ref pack, _)) = *guard {
+                // SAFETY: TypeId equality above proves T == half::bf16.
+                let t_bf16: Tensor<half::bf16> =
+                    unsafe { std::mem::transmute::<Tensor<T>, Tensor<half::bf16>>(tensor) };
+                let result = pack(t_bf16)?;
+                // SAFETY: T == half::bf16 by the same TypeId guard.
+                Ok(unsafe { std::mem::transmute::<Tensor<half::bf16>, Tensor<T>>(result) })
+            } else {
+                Ok(tensor)
+            }
+        })
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<half::f16>() {
+        HOOKS_F16.with(|h| {
+            let guard = h.borrow();
+            if let Some((ref pack, _)) = *guard {
+                // SAFETY: TypeId equality above proves T == half::f16.
+                let t_f16: Tensor<half::f16> =
+                    unsafe { std::mem::transmute::<Tensor<T>, Tensor<half::f16>>(tensor) };
+                let result = pack(t_f16)?;
+                // SAFETY: T == half::f16 by the same TypeId guard.
+                Ok(unsafe { std::mem::transmute::<Tensor<half::f16>, Tensor<T>>(result) })
             } else {
                 Ok(tensor)
             }
@@ -197,6 +333,34 @@ pub fn unpack_saved_tensor<T: Float>(tensor: Tensor<T>) -> FerrotorchResult<Tens
                 Ok(tensor)
             }
         })
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<half::bf16>() {
+        HOOKS_BF16.with(|h| {
+            let guard = h.borrow();
+            if let Some((_, ref unpack)) = *guard {
+                // SAFETY: TypeId equality above proves T == half::bf16.
+                let t_bf16: Tensor<half::bf16> =
+                    unsafe { std::mem::transmute::<Tensor<T>, Tensor<half::bf16>>(tensor) };
+                let result = unpack(t_bf16)?;
+                // SAFETY: T == half::bf16 by the same TypeId guard.
+                Ok(unsafe { std::mem::transmute::<Tensor<half::bf16>, Tensor<T>>(result) })
+            } else {
+                Ok(tensor)
+            }
+        })
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<half::f16>() {
+        HOOKS_F16.with(|h| {
+            let guard = h.borrow();
+            if let Some((_, ref unpack)) = *guard {
+                // SAFETY: TypeId equality above proves T == half::f16.
+                let t_f16: Tensor<half::f16> =
+                    unsafe { std::mem::transmute::<Tensor<T>, Tensor<half::f16>>(tensor) };
+                let result = unpack(t_f16)?;
+                // SAFETY: T == half::f16 by the same TypeId guard.
+                Ok(unsafe { std::mem::transmute::<Tensor<half::f16>, Tensor<T>>(result) })
+            } else {
+                Ok(tensor)
+            }
+        })
     } else {
         Ok(tensor)
     }
@@ -204,7 +368,10 @@ pub fn unpack_saved_tensor<T: Float>(tensor: Tensor<T>) -> FerrotorchResult<Tens
 
 /// Returns `true` if saved-tensors hooks are currently active on this thread.
 pub fn has_saved_tensor_hooks() -> bool {
-    HOOKS_F32.with(|h| h.borrow().is_some()) || HOOKS_F64.with(|h| h.borrow().is_some())
+    HOOKS_F32.with(|h| h.borrow().is_some())
+        || HOOKS_F64.with(|h| h.borrow().is_some())
+        || HOOKS_BF16.with(|h| h.borrow().is_some())
+        || HOOKS_F16.with(|h| h.borrow().is_some())
 }
 
 #[cfg(test)]
