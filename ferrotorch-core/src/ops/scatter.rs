@@ -23,11 +23,13 @@
 //!
 //! # Autograd
 //!
-//! Forward only — the GCN inference harness in `ferrotorch-graph` runs
-//! under `no_grad`. The grad of a segmented scatter-add is a simple
-//! `gather` (`grad_src[e, :] = grad_out[index[e], :]`), which can be
-//! added in a follow-up if/when an autograd-based GCN training path is
-//! needed.
+//! Autograd-aware for `src`: the VJP is the same gather rule PyTorch uses for
+//! `scatter_add` (`tools/autograd/derivatives.yaml:1519-1523`):
+//! `grad_src[e, :] = grad_out[index[e], :]`. Segment ids are integer routing
+//! metadata and are non-differentiable. CUDA backward uploads the saved host
+//! segment index once and gathers rows from the resident `grad_out` buffer with
+//! `GpuBackend::index_select_intidx`; tensor values do not round-trip through
+//! the CPU.
 //!
 //! ## REQ status (per `.design/ferrotorch-core/ops/scatter.md`)
 //!
@@ -39,11 +41,106 @@
 //! | REQ-4 | SHIPPED | zero-init `out` at `ops/scatter.rs:101-102`; consumer: `scatter_add_segments` |
 //! | REQ-5 | SHIPPED | CPU row-loop + CUDA `scatter_add_segments_cuda` (host-`&[i64]` index upload, atomic GPU kernel via `GpuBackend::scatter_add_segments_f{32,64,16,bf16}`, GPU-resident result). Consumer: the `is_cuda()` branch of `scatter_add_segments`. GPU lowering landed #1545 / sub #1535 |
 //! | REQ-6 | SHIPPED | module `//!` at `ops/scatter.rs:24-30`; consumer: `ferrotorch-graph` inference harness under `no_grad` |
+//! | REQ-7 | SHIPPED | `ScatterAddSegmentsBackward` attaches when `src` tracks grads; CPU and CUDA VJP gather rows with saved segment ids (`grad_src[e, :] = grad_out[index[e], :]`), matching PyTorch `scatter_add` autograd. |
 
+use std::sync::Arc;
+
+use crate::autograd::no_grad::{is_grad_enabled, no_grad};
 use crate::dtype::{DType, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
+use crate::gpu_dispatch::GpuBufferHandle;
 use crate::storage::TensorStorage;
-use crate::tensor::Tensor;
+use crate::tensor::{GradFn, Tensor};
+
+#[derive(Debug)]
+struct ScatterAddSegmentsBackward<T: Float> {
+    src: Tensor<T>,
+    index: Vec<usize>,
+    dim_size: usize,
+    d: usize,
+}
+
+impl<T: Float> GradFn<T> for ScatterAddSegmentsBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !is_grad_enabled() {
+            return Ok(vec![None]);
+        }
+
+        let expected_shape = [self.dim_size, self.d];
+        if grad_output.shape() != expected_shape {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "ScatterAddSegmentsBackward: grad_output shape {:?} != expected {:?}",
+                    grad_output.shape(),
+                    expected_shape
+                ),
+            });
+        }
+        if grad_output.device() != self.src.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: self.src.device(),
+                got: grad_output.device(),
+            });
+        }
+
+        let e = self.index.len();
+        if grad_output.is_cuda() {
+            let ordinal = match grad_output.device() {
+                crate::device::Device::Cuda(ordinal) => ordinal,
+                got => {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "ScatterAddSegmentsBackward: expected CUDA grad_output, got {got:?}"
+                        ),
+                    });
+                }
+            };
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            if e == 0 || self.d == 0 {
+                let h = backend.alloc_zeros(0, T::dtype(), ordinal)?;
+                let grad_src =
+                    Tensor::from_storage(TensorStorage::gpu(h), self.src.shape().to_vec(), false)?;
+                return Ok(vec![Some(grad_src)]);
+            }
+            let grad_output = no_grad(|| grad_output.contiguous())?;
+            let idx_handle = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
+            let h = backend.index_select_intidx(
+                grad_output.gpu_handle()?,
+                &idx_handle,
+                1,
+                self.dim_size,
+                e,
+                self.d,
+            )?;
+            let grad_src =
+                Tensor::from_storage(TensorStorage::gpu(h), self.src.shape().to_vec(), false)?;
+            return Ok(vec![Some(grad_src)]);
+        }
+
+        let go = grad_output.data_vec()?;
+        let mut grad_src = vec![<T as num_traits::Zero>::zero(); e * self.d];
+        for (edge, &segment) in self.index.iter().enumerate() {
+            let src_row = edge * self.d;
+            let out_row = segment * self.d;
+            grad_src[src_row..src_row + self.d].copy_from_slice(&go[out_row..out_row + self.d]);
+        }
+        let grad_src = Tensor::from_storage(
+            TensorStorage::cpu(grad_src),
+            self.src.shape().to_vec(),
+            false,
+        )?;
+        Ok(vec![Some(grad_src)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.src]
+    }
+
+    fn name(&self) -> &'static str {
+        "ScatterAddSegmentsBackward"
+    }
+}
 
 /// Segmented scatter-add of a `[E, D]` source into an `[dim_size, D]`
 /// output, indexed along dim 0 by `index[e]`.
@@ -110,6 +207,7 @@ pub fn scatter_add_segments<T: Float>(
     // validate would defeat the no-CPU contract for the data buffers), so the
     // host must reject negative / out-of-range segment ids before the index is
     // uploaded — exactly as the CPU loop does below.
+    let mut index_usize = Vec::with_capacity(index.len());
     for (e_idx, &dst_i64) in index.iter().enumerate() {
         if dst_i64 < 0 {
             return Err(FerrotorchError::InvalidArgument {
@@ -123,27 +221,40 @@ pub fn scatter_add_segments<T: Float>(
                 ),
             });
         }
+        index_usize.push(dst_i64 as usize);
     }
 
-    if src.is_cuda() {
-        return scatter_add_segments_cuda(src, index, e, d, dim_size);
-    }
+    let result = if src.is_cuda() {
+        scatter_add_segments_cuda(src, &index_usize, e, d, dim_size)?
+    } else {
+        let zero = <T as num_traits::Zero>::zero();
+        let mut out = vec![zero; dim_size * d];
 
-    let zero = <T as num_traits::Zero>::zero();
-    let mut out = vec![zero; dim_size * d];
+        let src_data = src.data_vec()?;
 
-    let src_data = src.data_vec()?;
-
-    for (e_idx, &dst_i64) in index.iter().enumerate() {
-        let dst = dst_i64 as usize;
-        let src_row = &src_data[e_idx * d..(e_idx + 1) * d];
-        let out_row = &mut out[dst * d..(dst + 1) * d];
-        for (o, &v) in out_row.iter_mut().zip(src_row.iter()) {
-            *o += v;
+        for (e_idx, &dst) in index_usize.iter().enumerate() {
+            let src_row = &src_data[e_idx * d..(e_idx + 1) * d];
+            let out_row = &mut out[dst * d..(dst + 1) * d];
+            for (o, &v) in out_row.iter_mut().zip(src_row.iter()) {
+                *o += v;
+            }
         }
-    }
 
-    Tensor::from_storage(TensorStorage::cpu(out), vec![dim_size, d], false)
+        Tensor::from_storage(TensorStorage::cpu(out), vec![dim_size, d], false)?
+    };
+
+    if is_grad_enabled() && src.requires_grad() {
+        let grad_fn = Arc::new(ScatterAddSegmentsBackward {
+            src: src.clone(),
+            index: index_usize,
+            dim_size,
+            d,
+        });
+        let (storage, shape) = result.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, grad_fn)
+    } else {
+        Ok(result)
+    }
 }
 
 /// CUDA lowering of [`scatter_add_segments`] (crosslink #1545 / sub #1535).
@@ -156,7 +267,7 @@ pub fn scatter_add_segments<T: Float>(
 /// atomic add with f32 accumulation and round back to the storage dtype.
 fn scatter_add_segments_cuda<T: Float>(
     src: &Tensor<T>,
-    index: &[i64],
+    index: &[usize],
     e: usize,
     d: usize,
     dim_size: usize,
@@ -170,17 +281,10 @@ fn scatter_add_segments_cuda<T: Float>(
 
     let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
 
-    // Upload the host `&[i64]` segment index once to a resident `i64` buffer.
+    // Upload the host segment index once to a resident `i64` buffer.
     // This is uploading a freshly-provided host INPUT (the index is not a CUDA
     // tensor), not a forbidden host round trip of device data.
-    // SAFETY: `index: &[i64]` is fully initialized and borrowed for the
-    // duration of this call. `i64` has no padding/niches, so reading its
-    // backing store as `&[u8]` of length `index.len() * 8` (==
-    // `index.len() * size_of::<i64>()`) is sound and exactly covers the
-    // slice; the byte view does not outlive `index`.
-    let idx_bytes: &[u8] =
-        unsafe { std::slice::from_raw_parts(index.as_ptr().cast::<u8>(), index.len() * 8) };
-    let idx_handle = backend.cpu_to_gpu(idx_bytes, DType::I64, ordinal)?;
+    let idx_handle = upload_segment_index_i64(index, ordinal)?;
 
     let h = match T::dtype() {
         DType::F32 => backend.scatter_add_segments_f32(src_handle, &idx_handle, e, d, dim_size)?,
@@ -197,6 +301,10 @@ fn scatter_add_segments_cuda<T: Float>(
     };
 
     Tensor::from_storage(TensorStorage::gpu(h), vec![dim_size, d], false)
+}
+
+fn upload_segment_index_i64(index: &[usize], ordinal: usize) -> FerrotorchResult<GpuBufferHandle> {
+    crate::ops::indexing::upload_index_i64(index, ordinal)
 }
 
 #[cfg(test)]
