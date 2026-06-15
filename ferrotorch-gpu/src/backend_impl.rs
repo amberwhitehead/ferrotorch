@@ -144,14 +144,18 @@ impl CudaBackendImpl {
     /// tagging it `DType::F32` (the authoritative element-type tag).
     fn wrap_buffer(buf: CudaBuffer<f32>, ordinal: usize) -> GpuBufferHandle {
         let len = buf.len();
-        GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::F32)
+        // SAFETY: `buf` is a `CudaBuffer<f32>`, `len` is its element count,
+        // and the handle tag names that same scalar type/device ordinal.
+        unsafe { GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::F32) }
     }
 
     /// Wrap a `CudaBuffer<f64>` into a type-erased [`GpuBufferHandle`],
     /// tagging it `DType::F64`.
     fn wrap_buffer_f64(buf: CudaBuffer<f64>, ordinal: usize) -> GpuBufferHandle {
         let len = buf.len();
-        GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::F64)
+        // SAFETY: `buf` is a `CudaBuffer<f64>`, `len` is its element count,
+        // and the handle tag names that same scalar type/device ordinal.
+        unsafe { GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::F64) }
     }
 
     /// Extract a `&CudaBuffer<f32>` from a [`GpuBufferHandle`].
@@ -277,7 +281,9 @@ impl CudaBackendImpl {
         // bf16 storage is a `CudaSlice<u16>` bit pattern; the `DType::BF16` tag
         // is what tells it apart from a (future) f16 `CudaSlice<u16>` — same
         // byte width, distinguished only by the tag (PyTorch parity).
-        GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::BF16)
+        // SAFETY: `buf` stores one u16 bf16 bit pattern per logical element,
+        // and the BF16 tag is the authoritative scalar-type discriminator.
+        unsafe { GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::BF16) }
     }
 
     /// Extract a `&CudaSlice<u16>` (bf16 bit-pattern storage) from a
@@ -309,7 +315,9 @@ impl CudaBackendImpl {
     #[cfg(feature = "cuda")]
     fn wrap_buffer_f16(buf: cudarc::driver::CudaSlice<u16>, ordinal: usize) -> GpuBufferHandle {
         let len = buf.len();
-        GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::F16)
+        // SAFETY: `buf` stores one u16 f16 bit pattern per logical element,
+        // and the F16 tag is the authoritative scalar-type discriminator.
+        unsafe { GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::F16) }
     }
 
     /// Extract a `&CudaSlice<u16>` (IEEE f16 bit-pattern storage) from a
@@ -348,7 +356,9 @@ impl CudaBackendImpl {
     /// 2b); this is storage/transport only.
     fn wrap_buffer_i32(buf: CudaBuffer<i32>, ordinal: usize) -> GpuBufferHandle {
         let len = buf.len();
-        GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::I32)
+        // SAFETY: `buf` is a `CudaBuffer<i32>`, `len` is its element count,
+        // and the handle tag names that same scalar type/device ordinal.
+        unsafe { GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::I32) }
     }
 
     /// Extract a `&CudaBuffer<i32>` from a [`GpuBufferHandle`], asserting the
@@ -373,7 +383,9 @@ impl CudaBackendImpl {
     /// 8-byte width).
     fn wrap_buffer_i64(buf: CudaBuffer<i64>, ordinal: usize) -> GpuBufferHandle {
         let len = buf.len();
-        GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::I64)
+        // SAFETY: `buf` is a `CudaBuffer<i64>`, `len` is its element count,
+        // and the handle tag names that same scalar type/device ordinal.
+        unsafe { GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::I64) }
     }
 
     /// Extract a `&CudaBuffer<i64>` from a [`GpuBufferHandle`], asserting the
@@ -400,7 +412,9 @@ impl CudaBackendImpl {
     /// same role the F16/BF16 tags play for the two 2-byte float types.
     fn wrap_buffer_bool(buf: CudaBuffer<u8>, ordinal: usize) -> GpuBufferHandle {
         let len = buf.len();
-        GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::Bool)
+        // SAFETY: bool device buffers use one u8 per logical Bool element,
+        // and the Bool tag names that storage convention and ordinal.
+        unsafe { GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::Bool) }
     }
 
     /// Extract a `&CudaBuffer<u8>` (boolean storage) from a [`GpuBufferHandle`],

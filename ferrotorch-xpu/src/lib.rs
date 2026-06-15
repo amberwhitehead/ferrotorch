@@ -265,7 +265,7 @@ pub fn make_xpu_tensor(
     xpu: &XpuDevice,
 ) -> FerrotorchResult<Tensor<f32>> {
     let handle = upload_f32(&data, Arc::clone(xpu.runtime()), xpu.ordinal())?;
-    let storage = TensorStorage::xpu_from_handle(Box::new(handle), xpu.ordinal());
+    let storage = TensorStorage::try_xpu_from_handle(Box::new(handle))?;
     Tensor::from_storage(storage, shape.to_vec(), false)
 }
 
@@ -314,7 +314,7 @@ macro_rules! xpu_binary {
             let (handle, shape) = $cubecl(a, b, xpu.runtime())?;
             let cube_handle =
                 wrap_kernel_output(handle, &shape, Arc::clone(xpu.runtime()), xpu.ordinal());
-            let storage = TensorStorage::xpu_from_handle(Box::new(cube_handle), xpu.ordinal());
+            let storage = TensorStorage::try_xpu_from_handle(Box::new(cube_handle))?;
             Tensor::from_storage(storage, shape, false)
         }
     };
@@ -337,7 +337,7 @@ macro_rules! xpu_unary {
             let (handle, shape) = $cubecl(x, xpu.runtime())?;
             let cube_handle =
                 wrap_kernel_output(handle, &shape, Arc::clone(xpu.runtime()), xpu.ordinal());
-            let storage = TensorStorage::xpu_from_handle(Box::new(cube_handle), xpu.ordinal());
+            let storage = TensorStorage::try_xpu_from_handle(Box::new(cube_handle))?;
             Tensor::from_storage(storage, shape, false)
         }
     };
@@ -362,7 +362,7 @@ macro_rules! xpu_polynomial {
             let (handle, shape) = $cubecl(x, n, xpu.runtime())?;
             let cube_handle =
                 wrap_kernel_output(handle, &shape, Arc::clone(xpu.runtime()), xpu.ordinal());
-            let storage = TensorStorage::xpu_from_handle(Box::new(cube_handle), xpu.ordinal());
+            let storage = TensorStorage::try_xpu_from_handle(Box::new(cube_handle))?;
             Tensor::from_storage(storage, shape, false)
         }
     };

@@ -27,10 +27,17 @@ use ferrotorch_core::dtype::DType;
 use ferrotorch_core::error::FerrotorchError;
 use ferrotorch_core::gpu_dispatch::GpuBufferHandle;
 
+fn fake_handle(len: usize, dtype: DType) -> GpuBufferHandle {
+    // SAFETY: these tests intentionally forge metadata-only handles to probe
+    // BoolTensor::from_gpu_handle validation. The handles are never submitted
+    // to a CUDA backend or dereferenced as device memory.
+    unsafe { GpuBufferHandle::new(Box::new(()), 0, len, dtype) }
+}
+
 /// (a) `handle.len()` must equal the shape's element count.
 #[test]
 fn from_gpu_handle_rejects_wrong_length() {
-    let handle = GpuBufferHandle::new(Box::new(()), 0, 3, DType::Bool);
+    let handle = fake_handle(3, DType::Bool);
     match BoolTensor::from_gpu_handle(handle, vec![4]) {
         Err(FerrotorchError::ShapeMismatch { message }) => {
             assert!(
@@ -46,7 +53,7 @@ fn from_gpu_handle_rejects_wrong_length() {
 /// release builds accepted any tag).
 #[test]
 fn from_gpu_handle_rejects_wrong_dtype() {
-    let handle = GpuBufferHandle::new(Box::new(()), 0, 4, DType::F32);
+    let handle = fake_handle(4, DType::F32);
     match BoolTensor::from_gpu_handle(handle, vec![4]) {
         Err(FerrotorchError::DtypeMismatch { expected, got }) => {
             assert_eq!(expected, "Bool");
@@ -60,7 +67,7 @@ fn from_gpu_handle_rejects_wrong_dtype() {
 /// an overflowing shape is a structured error, never a wrapped product.
 #[test]
 fn from_gpu_handle_rejects_shape_product_overflow() {
-    let handle = GpuBufferHandle::new(Box::new(()), 0, 4, DType::Bool);
+    let handle = fake_handle(4, DType::Bool);
     match BoolTensor::from_gpu_handle(handle, vec![usize::MAX, 2]) {
         Err(FerrotorchError::ShapeMismatch { message }) => {
             assert!(
@@ -77,12 +84,12 @@ fn from_gpu_handle_rejects_shape_product_overflow() {
 /// 0-element handle is rejected.
 #[test]
 fn from_gpu_handle_zero_dim_uses_numel_one() {
-    let ok = GpuBufferHandle::new(Box::new(()), 0, 1, DType::Bool);
+    let ok = fake_handle(1, DType::Bool);
     let t = BoolTensor::from_gpu_handle(ok, vec![]).expect("0-d scalar handle (len 1)");
     assert_eq!(t.shape(), &[] as &[usize]);
     assert_eq!(t.numel(), 1);
 
-    let bad = GpuBufferHandle::new(Box::new(()), 0, 0, DType::Bool);
+    let bad = fake_handle(0, DType::Bool);
     assert!(
         matches!(
             BoolTensor::from_gpu_handle(bad, vec![]),

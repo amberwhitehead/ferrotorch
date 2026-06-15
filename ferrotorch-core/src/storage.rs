@@ -44,7 +44,7 @@
 use std::cell::UnsafeCell;
 
 use crate::device::Device;
-use crate::dtype::Element;
+use crate::dtype::{DType, Element};
 use crate::gpu_dispatch::GpuBufferHandle;
 use crate::shape::checked_byte_count;
 
@@ -418,7 +418,7 @@ impl<T: Element> TensorStorage<T> {
                     )
                 };
                 let handle = backend.cpu_to_gpu(bytes, T::dtype(), ordinal)?;
-                Ok(Self::gpu(handle))
+                Self::try_gpu(handle)
             }
             Device::Xpu(_) => Err(crate::error::FerrotorchError::InvalidArgument {
                 message: "XPU storage requires a CubeRuntime; use Tensor::to(Device::Xpu(n)) \
@@ -462,7 +462,7 @@ impl<T: Element> TensorStorage<T> {
                     )
                 };
                 let handle = backend.cpu_to_gpu_pinned(bytes, T::dtype(), ordinal)?;
-                Ok(Self::gpu(handle))
+                Self::try_gpu(handle)
             }
             Device::Xpu(_) => Err(crate::error::FerrotorchError::InvalidArgument {
                 message: "XPU storage requires a CubeRuntime; use Tensor::to(Device::Xpu(n)) \
@@ -476,28 +476,96 @@ impl<T: Element> TensorStorage<T> {
         }
     }
 
-    /// Create XPU (CubeCL device-resident) storage from a trait-erased handle.
+    /// Try to create XPU (CubeCL device-resident) storage from a trait-erased
+    /// handle.
     ///
     /// The handle wraps a `cubecl::server::Handle` and holds an `Arc<CubeRuntime>`
     /// so the device stays alive. This is the correct post-#673 constructor:
     /// XPU storage is truly device-resident, not a CPU `Vec<T>`.
     ///
+    /// The current CubeCL storage ABI carries `f32` elements only. Keep that
+    /// invariant at the storage boundary so safe callers cannot manufacture
+    /// a `TensorStorage<half::bf16>` or `TensorStorage<f64>` over an f32
+    /// CubeCL allocation. The storage device ordinal is derived from the
+    /// handle itself.
+    ///
     /// Called by `ferrotorch-xpu` (and `ferrotorch-cubecl`) after uploading data
     /// to the device.
-    pub fn xpu_from_handle(handle: Box<dyn CubeStorageHandle>, ordinal: usize) -> Self {
-        Self {
+    pub fn try_xpu_from_handle(
+        handle: Box<dyn CubeStorageHandle>,
+    ) -> crate::error::FerrotorchResult<Self> {
+        let tensor_dtype = T::dtype();
+        if tensor_dtype != DType::F32 {
+            return Err(crate::error::FerrotorchError::DtypeMismatch {
+                expected: "F32 CubeCL storage".into(),
+                got: format!("{tensor_dtype:?}"),
+            });
+        }
+        let ordinal = handle.ordinal();
+        Ok(Self {
             data: UnsafeCell::new(StorageBuffer::Cubecl(handle)),
             device: Device::Xpu(ordinal),
-        }
+        })
     }
 
-    /// Create a new CUDA storage from a handle.
-    pub fn gpu(handle: GpuBufferHandle) -> Self {
+    /// Create XPU (CubeCL device-resident) storage from a trait-erased handle.
+    ///
+    /// Compatibility wrapper for trusted XPU call sites. Prefer
+    /// [`Self::try_xpu_from_handle`] when accepting handles from outside the
+    /// backend boundary.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ordinal` disagrees with `handle.ordinal()` or if `T` is not
+    /// `f32`, because returning storage with contradictory metadata would
+    /// violate the tensor invariants every downstream operation relies on.
+    #[track_caller]
+    pub fn xpu_from_handle(handle: Box<dyn CubeStorageHandle>, ordinal: usize) -> Self {
+        assert_eq!(
+            ordinal,
+            handle.ordinal(),
+            "TensorStorage::xpu_from_handle ordinal mismatch"
+        );
+        Self::try_xpu_from_handle(handle)
+            .expect("TensorStorage::xpu_from_handle received invalid CubeCL handle metadata")
+    }
+
+    /// Try to create CUDA storage from a typed, erased GPU handle.
+    ///
+    /// The tensor element type `T` and the handle's authoritative dtype tag
+    /// must agree. Enforcing this at the safe storage boundary mirrors
+    /// PyTorch's `TensorImpl` invariant that storage bytes and scalar type
+    /// metadata are interpreted consistently by all kernels.
+    pub fn try_gpu(handle: GpuBufferHandle) -> crate::error::FerrotorchResult<Self> {
+        let handle_dtype = handle.dtype();
+        let tensor_dtype = T::dtype();
+        if handle_dtype != tensor_dtype {
+            return Err(crate::error::FerrotorchError::DtypeMismatch {
+                expected: format!("{tensor_dtype:?}"),
+                got: format!("{handle_dtype:?}"),
+            });
+        }
         let device = Device::Cuda(handle.device_ordinal());
-        Self {
+        Ok(Self {
             data: UnsafeCell::new(StorageBuffer::Gpu(handle)),
             device,
-        }
+        })
+    }
+
+    /// Create CUDA storage from a handle.
+    ///
+    /// Compatibility wrapper for trusted backend-produced handles. Prefer
+    /// [`Self::try_gpu`] when accepting a handle from outside the backend
+    /// boundary.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `handle.dtype()` does not match `T::dtype()`, because a safe
+    /// constructor must not return contradictory storage metadata.
+    #[track_caller]
+    pub fn gpu(handle: GpuBufferHandle) -> Self {
+        Self::try_gpu(handle)
+            .expect("TensorStorage::gpu received handle dtype that does not match T::dtype()")
     }
 
     /// The device this storage resides on.
@@ -878,10 +946,7 @@ impl<T: Element> TensorStorage<T> {
                 let backend = crate::gpu_dispatch::gpu_backend()
                     .ok_or(crate::error::FerrotorchError::DeviceUnavailable)?;
                 let cloned = backend.clone_buffer(h)?;
-                Ok(Self {
-                    data: UnsafeCell::new(StorageBuffer::Gpu(cloned)),
-                    device: self.device,
-                })
+                Self::try_gpu(cloned)
             }
             StorageBuffer::Cubecl(h) => {
                 let cloned = h.clone_handle();
@@ -963,10 +1028,7 @@ impl<T: Element> TensorStorage<T> {
                 // tag so the subregion preserves the original ScalarType.
                 let handle =
                     backend.cpu_to_gpu(&bytes[start..end], h.dtype(), h.device_ordinal())?;
-                Ok(Self {
-                    data: UnsafeCell::new(StorageBuffer::Gpu(handle)),
-                    device: self.device,
-                })
+                Self::try_gpu(handle)
             }
             StorageBuffer::Cubecl(h) => {
                 // D2H readback, slice, then re-upload via a new handle.
@@ -1056,5 +1118,84 @@ impl<T: Element> std::fmt::Debug for StorageBuffer<T> {
             }
             StorageBuffer::Meta { numel, .. } => write!(f, "Meta({numel} elements)"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::FerrotorchError;
+
+    #[derive(Clone, Debug)]
+    struct FakeCubeHandle {
+        len: usize,
+        ordinal: usize,
+    }
+
+    impl CubeStorageHandle for FakeCubeHandle {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn len(&self) -> usize {
+            self.len
+        }
+
+        fn ordinal(&self) -> usize {
+            self.ordinal
+        }
+
+        fn read_to_host(&self) -> crate::error::FerrotorchResult<Vec<f32>> {
+            Ok(vec![0.0; self.len])
+        }
+
+        fn clone_handle(&self) -> Box<dyn CubeStorageHandle> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[test]
+    fn try_gpu_rejects_handle_dtype_that_disagrees_with_tensor_dtype() {
+        // SAFETY: this test intentionally forges a metadata-only handle to
+        // exercise TensorStorage's safe validation boundary. The handle is
+        // never passed to a backend or dereferenced as device memory.
+        let handle = unsafe { GpuBufferHandle::new(Box::new(()), 0, 4, DType::F64) };
+        match TensorStorage::<f32>::try_gpu(handle) {
+            Err(FerrotorchError::DtypeMismatch { expected, got }) => {
+                assert_eq!(expected, "F32");
+                assert_eq!(got, "F64");
+            }
+            other => panic!("F64 handle must not construct TensorStorage<f32>: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_gpu_accepts_matching_dtype_and_derives_cuda_device() {
+        // SAFETY: metadata-only fake handle used only for storage invariant
+        // checks; it is never submitted to CUDA backend operations.
+        let handle = unsafe { GpuBufferHandle::new(Box::new(()), 3, 4, DType::F32) };
+        let storage = TensorStorage::<f32>::try_gpu(handle).expect("matching dtype");
+        assert_eq!(storage.device(), Device::Cuda(3));
+        assert_eq!(storage.len(), 4);
+    }
+
+    #[test]
+    fn try_xpu_from_handle_rejects_non_f32_tensor_dtype() {
+        let handle = Box::new(FakeCubeHandle { len: 2, ordinal: 7 });
+        match TensorStorage::<f64>::try_xpu_from_handle(handle) {
+            Err(FerrotorchError::DtypeMismatch { expected, got }) => {
+                assert_eq!(expected, "F32 CubeCL storage");
+                assert_eq!(got, "F64");
+            }
+            other => panic!("CubeCL handle must not construct TensorStorage<f64>: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_xpu_from_handle_derives_device_ordinal_from_handle() {
+        let handle = Box::new(FakeCubeHandle { len: 5, ordinal: 9 });
+        let storage = TensorStorage::<f32>::try_xpu_from_handle(handle).expect("f32 CubeCL");
+        assert_eq!(storage.device(), Device::Xpu(9));
+        assert_eq!(storage.len(), 5);
     }
 }

@@ -167,7 +167,22 @@ pub struct GpuBufferHandle {
 }
 
 impl GpuBufferHandle {
-    pub fn new(
+    /// Construct a type-erased GPU handle from raw backend storage metadata.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that:
+    ///
+    /// - `inner` is the concrete backend allocation type expected for `dtype`;
+    /// - `len` is the number of logical elements of that `dtype`, not bytes;
+    /// - `device_ordinal` names the device that owns `inner`;
+    /// - the allocation remains valid for the lifetime of the handle and will
+    ///   be dropped by the erased value's destructor.
+    ///
+    /// Safe tensor/storage constructors validate the metadata they can see
+    /// (`dtype`, `len`, and ordinal), but only the backend that owns `inner`
+    /// can prove the erased allocation really matches the tag.
+    pub unsafe fn new(
         inner: Box<dyn Any + Send + Sync>,
         device_ordinal: usize,
         len: usize,
@@ -7725,7 +7740,9 @@ mod tests {
     fn test_gpu_buffer_handle() {
         // Inner type is arbitrary here (this exercises the type-erasure
         // mechanics, not dtype dispatch); tag with F32 as a placeholder.
-        let handle = GpuBufferHandle::new(Box::new(42u64), 0, 100, DType::F32);
+        // SAFETY: this unit test never hands the fake handle to a backend; it
+        // exercises metadata accessors and type-erasure only.
+        let handle = unsafe { GpuBufferHandle::new(Box::new(42u64), 0, 100, DType::F32) };
         assert_eq!(handle.device_ordinal(), 0);
         assert_eq!(handle.len(), 100);
         assert!(!handle.is_empty());
@@ -7735,7 +7752,9 @@ mod tests {
 
     #[test]
     fn test_gpu_buffer_handle_debug() {
-        let handle = GpuBufferHandle::new(Box::new(()), 1, 50, DType::F64);
+        // SAFETY: this fake handle is formatted only and never dereferenced
+        // by a backend as device memory.
+        let handle = unsafe { GpuBufferHandle::new(Box::new(()), 1, 50, DType::F64) };
         let s = format!("{handle:?}");
         assert!(s.contains("device: 1"));
         // The Debug impl now surfaces the dtype tag.

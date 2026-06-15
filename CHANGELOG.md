@@ -53,6 +53,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-015: Safe storage constructors allow contradictory dtype and device metadata (#1709)
 - CORE-014: Floating-point `arange` can loop forever (#1708)
 - CORE-007: Foundational shape arithmetic can overflow silently (#1701)
 - CORE-004: Safe stride-view constructors permit out-of-bounds layouts (#1698)

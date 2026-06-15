@@ -54,14 +54,19 @@ impl GpuBackend for MockNoKernelBackend {
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
         let elem = dtype.size_of().max(1);
-        Ok(GpuBufferHandle::new(
-            Box::new(MockBuf {
-                bytes: data.to_vec(),
-            }),
-            device,
-            data.len() / elem,
-            dtype,
-        ))
+        // SAFETY: `MockBuf` is the concrete allocation type this fake backend
+        // owns; len is computed in logical elements for the supplied dtype,
+        // and `device` is the fake ordinal recorded in the handle.
+        Ok(unsafe {
+            GpuBufferHandle::new(
+                Box::new(MockBuf {
+                    bytes: data.to_vec(),
+                }),
+                device,
+                data.len() / elem,
+                dtype,
+            )
+        })
     }
 
     fn gpu_to_cpu(&self, handle: &GpuBufferHandle) -> FerrotorchResult<Vec<u8>> {
@@ -79,14 +84,18 @@ impl GpuBackend for MockNoKernelBackend {
             .ok_or(FerrotorchError::InvalidArgument {
                 message: "MockNoKernelBackend: foreign handle".into(),
             })?;
-        Ok(GpuBufferHandle::new(
-            Box::new(MockBuf {
-                bytes: buf.bytes.clone(),
-            }),
-            handle.device_ordinal(),
-            handle.len(),
-            handle.dtype(),
-        ))
+        // SAFETY: cloning preserves the mock allocation type, logical length,
+        // dtype tag, and fake device ordinal from the source handle.
+        Ok(unsafe {
+            GpuBufferHandle::new(
+                Box::new(MockBuf {
+                    bytes: buf.bytes.clone(),
+                }),
+                handle.device_ordinal(),
+                handle.len(),
+                handle.dtype(),
+            )
+        })
     }
 
     fn alloc_zeros(
@@ -95,14 +104,18 @@ impl GpuBackend for MockNoKernelBackend {
         dtype: DType,
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Ok(GpuBufferHandle::new(
-            Box::new(MockBuf {
-                bytes: vec![0u8; len * dtype.size_of().max(1)],
-            }),
-            device,
-            len,
-            dtype,
-        ))
+        // SAFETY: the mock buffer owns exactly `len * itemsize` bytes for the
+        // requested dtype and fake device ordinal.
+        Ok(unsafe {
+            GpuBufferHandle::new(
+                Box::new(MockBuf {
+                    bytes: vec![0u8; len * dtype.size_of().max(1)],
+                }),
+                device,
+                len,
+                dtype,
+            )
+        })
     }
 
     // ------------------------------------------------------------------

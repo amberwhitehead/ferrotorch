@@ -36,7 +36,9 @@ fn cpu_f32(data: &[f32], shape: &[usize]) -> Tensor<f32> {
 /// device metadata) fails loudly on the downcast — which is the point.
 fn cuda_tagged_f32(ordinal: usize, shape: &[usize]) -> Tensor<f32> {
     let len: usize = shape.iter().product();
-    let handle = GpuBufferHandle::new(Box::new(()), ordinal, len, DType::F32);
+    // SAFETY: metadata-only fake CUDA handle used to prove device-ordinal
+    // validation fires before any backend touches the erased allocation.
+    let handle = unsafe { GpuBufferHandle::new(Box::new(()), ordinal, len, DType::F32) };
     Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), false)
         .expect("cuda-tagged tensor")
 }

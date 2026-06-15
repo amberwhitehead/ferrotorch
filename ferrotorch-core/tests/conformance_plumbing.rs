@@ -1467,7 +1467,10 @@ fn gpu_buffer_handle_any_round_trip() {
     let inner: Vec<u8> = vec![0u8; 16];
     // Inner type is arbitrary (this tests type-erasure mechanics, not dtype
     // dispatch); tag with F32 as a placeholder.
-    let mut h = GpuBufferHandle::new(Box::new(inner), 0, 16, ferrotorch_core::DType::F32);
+    // SAFETY: this test uses a heap `Vec<u8>` only to exercise handle
+    // type-erasure APIs; it is never submitted to a GPU backend.
+    let mut h =
+        unsafe { GpuBufferHandle::new(Box::new(inner), 0, 16, ferrotorch_core::DType::F32) };
     assert_eq!(h.len(), 16);
     assert!(!h.is_empty());
     assert_eq!(h.device_ordinal(), 0);
@@ -1483,12 +1486,16 @@ fn gpu_buffer_handle_any_round_trip() {
 
 #[test]
 fn gpu_buffer_handle_empty() {
-    let h = GpuBufferHandle::new(
-        Box::new(Vec::<u8>::new()),
-        0,
-        0,
-        ferrotorch_core::DType::F32,
-    );
+    // SAFETY: metadata-only empty fake handle used only for accessor checks,
+    // never submitted to a GPU backend.
+    let h = unsafe {
+        GpuBufferHandle::new(
+            Box::new(Vec::<u8>::new()),
+            0,
+            0,
+            ferrotorch_core::DType::F32,
+        )
+    };
     assert!(h.is_empty());
     assert_eq!(h.len(), 0);
 }

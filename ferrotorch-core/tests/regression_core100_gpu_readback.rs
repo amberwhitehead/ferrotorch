@@ -83,16 +83,21 @@ impl GpuBackend for MockByteBackend {
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
         let elem = dtype.size_of().max(1);
-        Ok(GpuBufferHandle::new(
-            Box::new(MockBuf {
-                bytes: data.to_vec(),
-                extra_capacity: 0,
-                pad_bytes: usize::from(device == CORRUPT_ORDINAL),
-            }),
-            device,
-            data.len() / elem,
-            dtype,
-        ))
+        // SAFETY: `MockBuf` is the concrete allocation type this fake backend
+        // owns; len is computed in logical elements for the supplied dtype,
+        // and `device` is the fake ordinal recorded in the handle.
+        Ok(unsafe {
+            GpuBufferHandle::new(
+                Box::new(MockBuf {
+                    bytes: data.to_vec(),
+                    extra_capacity: 0,
+                    pad_bytes: usize::from(device == CORRUPT_ORDINAL),
+                }),
+                device,
+                data.len() / elem,
+                dtype,
+            )
+        })
     }
 
     fn gpu_to_cpu(&self, handle: &GpuBufferHandle) -> FerrotorchResult<Vec<u8>> {
@@ -118,16 +123,20 @@ impl GpuBackend for MockByteBackend {
             .ok_or(FerrotorchError::InvalidArgument {
                 message: "MockByteBackend: foreign handle".into(),
             })?;
-        Ok(GpuBufferHandle::new(
-            Box::new(MockBuf {
-                bytes: buf.bytes.clone(),
-                extra_capacity: buf.extra_capacity,
-                pad_bytes: buf.pad_bytes,
-            }),
-            handle.device_ordinal(),
-            handle.len(),
-            handle.dtype(),
-        ))
+        // SAFETY: cloning preserves the mock allocation type, logical length,
+        // dtype tag, and fake device ordinal from the source handle.
+        Ok(unsafe {
+            GpuBufferHandle::new(
+                Box::new(MockBuf {
+                    bytes: buf.bytes.clone(),
+                    extra_capacity: buf.extra_capacity,
+                    pad_bytes: buf.pad_bytes,
+                }),
+                handle.device_ordinal(),
+                handle.len(),
+                handle.dtype(),
+            )
+        })
     }
 
     fn alloc_zeros(
@@ -136,16 +145,20 @@ impl GpuBackend for MockByteBackend {
         dtype: DType,
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        Ok(GpuBufferHandle::new(
-            Box::new(MockBuf {
-                bytes: vec![0u8; len * dtype.size_of().max(1)],
-                extra_capacity: 0,
-                pad_bytes: 0,
-            }),
-            device,
-            len,
-            dtype,
-        ))
+        // SAFETY: the mock buffer owns exactly `len * itemsize` bytes for the
+        // requested dtype and fake device ordinal.
+        Ok(unsafe {
+            GpuBufferHandle::new(
+                Box::new(MockBuf {
+                    bytes: vec![0u8; len * dtype.size_of().max(1)],
+                    extra_capacity: 0,
+                    pad_bytes: 0,
+                }),
+                device,
+                len,
+                dtype,
+            )
+        })
     }
 
     // ------------------------------------------------------------------
@@ -484,16 +497,20 @@ fn mock_gpu_tensor_f32(values: &[f32], shape: &[usize], extra_capacity: usize) -
     for v in values {
         bytes.extend_from_slice(&v.to_le_bytes());
     }
-    let handle = GpuBufferHandle::new(
-        Box::new(MockBuf {
-            bytes,
-            extra_capacity,
-            pad_bytes: 0,
-        }),
-        0,
-        values.len(),
-        DType::F32,
-    );
+    // SAFETY: the mock buffer bytes are the little-endian representation of
+    // `values`, with one logical F32 element per value and fake ordinal 0.
+    let handle = unsafe {
+        GpuBufferHandle::new(
+            Box::new(MockBuf {
+                bytes,
+                extra_capacity,
+                pad_bytes: 0,
+            }),
+            0,
+            values.len(),
+            DType::F32,
+        )
+    };
     Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), false)
         .expect("mock gpu tensor")
 }
@@ -586,16 +603,20 @@ fn truncated_byte_count_is_structured_err_f32() {
         bytes.extend_from_slice(&v.to_le_bytes());
     }
     bytes.push(0xAB); // 25 bytes: NOT a multiple of size_of::<f32>()
-    let handle = GpuBufferHandle::new(
-        Box::new(MockBuf {
-            bytes,
-            extra_capacity: 0,
-            pad_bytes: 0,
-        }),
-        0,
-        6,
-        DType::F32,
-    );
+    // SAFETY: intentionally malformed byte length for a metadata-consistent
+    // mock F32 handle; the fake backend readback path is what rejects it.
+    let handle = unsafe {
+        GpuBufferHandle::new(
+            Box::new(MockBuf {
+                bytes,
+                extra_capacity: 0,
+                pad_bytes: 0,
+            }),
+            0,
+            6,
+            DType::F32,
+        )
+    };
     let gpu = Tensor::<f32>::from_storage(TensorStorage::gpu(handle), vec![2, 3], false)
         .expect("mock gpu tensor");
     match gpu.to(Device::Cpu) {
