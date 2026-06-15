@@ -43,6 +43,9 @@ homepage = "https://github.com/dollspace-gay/ferrotorch"
 keywords = ["deep-learning", "machine-learning", "autograd", "neural-network", "tensor"]
 categories = ["science", "mathematics", "algorithms"]
 
+[profile.dev]
+debug = "line-tables-only"
+
 [workspace.dependencies]
 # Internal crates (version for crates.io, path for local dev)
 ferrotorch-core = { version = "0.6.2", path = "ferrotorch-core" }
