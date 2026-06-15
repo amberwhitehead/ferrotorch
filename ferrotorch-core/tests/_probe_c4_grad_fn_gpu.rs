@@ -437,6 +437,7 @@ fn gather_backward_f32_gpu_stays_on_device() {
         input: inp_gpu.clone(),
         dim: 1,
         index: idx_data.clone(),
+        index_cuda: None,
         index_shape: idx_shape.clone(),
     };
     let grads = grad_fn.backward(&go_gpu).expect("gather backward gpu");
@@ -451,6 +452,7 @@ fn gather_backward_f32_gpu_stays_on_device() {
         input: inp_cpu.clone(),
         dim: 1,
         index: idx_data.clone(),
+        index_cuda: None,
         index_shape: idx_shape.clone(),
     };
     let grads_cpu = grad_fn_cpu.backward(&go_cpu).expect("gather backward cpu");

@@ -9257,6 +9257,69 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
+    fn check_int_indices_in_bounds(
+        &self,
+        index: &GpuBufferHandle,
+        dim: usize,
+        dim_size: usize,
+        op: &'static str,
+    ) -> FerrotorchResult<()> {
+        use crate::gather_int as gi;
+        let dev = self.device(index.device_ordinal())?;
+        match index.dtype() {
+            DType::I32 => gi::check_indices_i32_in_bounds(
+                Self::unwrap_buffer_i32(index)?.inner(),
+                index.len(),
+                dim,
+                dim_size,
+                op,
+                dev,
+            )
+            .map_err(Self::map_gpu_err),
+            DType::I64 => gi::check_indices_i64_in_bounds(
+                Self::unwrap_buffer_i64(index)?.inner(),
+                index.len(),
+                dim,
+                dim_size,
+                op,
+                dev,
+            )
+            .map_err(Self::map_gpu_err),
+            other => Err(FerrotorchError::InvalidArgument {
+                message: format!("{op}: index dtype must be I32/I64, got {other}"),
+            }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn expand_index_select_indices_i64(
+        &self,
+        index: &GpuBufferHandle,
+        outer: usize,
+        out_dim: usize,
+        inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(index.device_ordinal())?;
+        if index.dtype() != DType::I64 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "expand_index_select_indices_i64: index dtype must be I64, got {}",
+                    index.dtype()
+                ),
+            });
+        }
+        let expanded = crate::gather_int::expand_index_select_i64(
+            Self::unwrap_buffer_i64(index)?.inner(),
+            outer,
+            out_dim,
+            inner,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_slice_i64(expanded, index.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
     fn gather_intidx(
         &self,
         src: &GpuBufferHandle,

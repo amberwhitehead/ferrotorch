@@ -24,6 +24,9 @@ The file holds:
    `IndexSelectBackward` (1-D), `MaskedFillBackward`, `GatherBackward`,
    `ScatterBackward`, `ScatterAddBackward`, `WhereCondBackward`,
    `MaskedSelectBackward`, plus the N-D `IndexSelectDimBackward`.
+   `GatherBackward` and `IndexSelectDimBackward` can save CUDA-resident i64
+   index tensors for phase2c CUDA forwards, so tracked CUDA backward no longer
+   depends on a full index download/re-upload cycle.
 2. A handful of forward `pub fn`s that build their backward struct in place
    rather than living in the kernel layer: `index_select_1d`, `masked_fill`,
    `masked_fill_bt` (BoolTensor variant), `index_select_1d_it` (IntTensor
@@ -67,8 +70,10 @@ blockers, not parity failures.
   the forward as `pub fn gather` in `ferrotorch-core/src/ops/indexing.rs`,
   which Arc-attaches `GatherBackward` from `grad_fns/indexing.rs`; the
   backward is `pub struct GatherBackward` in
-  `ferrotorch-core/src/grad_fns/indexing.rs` (CPU scatter-add walk + a
-  GPU-resident path via `backend.scatter_add_1d_f32`).
+  `ferrotorch-core/src/grad_fns/indexing.rs` (CPU scatter-add walk +
+  GPU-resident `scatter_add_nd_{f32,f64,f16,bf16}` path). CUDA phase2c
+  forwards save the index as a resident i64 `IntTensor`, and the backward
+  consumes that handle directly.
   **Divergence (sparse_grad kwarg)**: the
   `sparse_grad=True` branch (`TensorAdvancedIndexing.cpp:2093-2095
   return at::_gather_sparse_backward(self, dim, index, grad)`) has no
@@ -551,11 +556,14 @@ The backward walks `grad_output` and scatters into `grad_input[idx] +=
 grad_output[i]`. GPU path: f32 only, via `backend.scatter_add_1d_f32`.
 
 `pub struct IndexSelectDimBackward` (in `grad_fns/indexing.rs`) is the N-D
-backward used by `pub fn index_select_dim` (also in `grad_fns/indexing.rs`).
-The backward computes per-element flat
+backward used by `pub fn index_select_dim` (also in `grad_fns/indexing.rs`)
+and by phase2c `Tensor::index_select`. The backward computes per-element
 destination indices for the scatter-add via the
 `outer * out_dim_size * inner` decomposition, supporting both f32 and
-f64 GPU paths. The CPU path inlines the `scatter_add` walk.
+f64 GPU paths. When the forward saved a CUDA i64 index, it calls
+`GpuBackend::expand_index_select_indices_i64` to build that per-output
+scatter index buffer on device. The CPU path inlines the `scatter_add`
+walk over the host saved indices.
 
 **Non-test production consumer**: `index_select_dim` is called inside
 `RandomHorizontalFlip::apply` in `ferrotorch-data/src/transforms.rs`

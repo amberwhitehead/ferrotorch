@@ -35,11 +35,14 @@
 //!
 //! # Out-of-range indices
 //!
-//! Match PyTorch CUDA: an out-of-range index is undefined behaviour on the
-//! device (no host round-trip to validate — that would defeat the no-CPU
-//! contract). The kernels compute the address from `index[..]` without a bound
-//! check, exactly as PyTorch's CUDA `index_select` / `gather` do. Documented;
-//! not silently clamped.
+//! PyTorch CUDA checks index bounds on the device: `index_select` uses a
+//! device assert in `aten/src/ATen/native/cuda/Indexing.cu`, and `gather`
+//! checks `0 <= idx_dim < index_size` in
+//! `aten/src/ATen/native/cuda/ScatterGatherKernel.cu`. The value-copy kernels
+//! below still compute unchecked addresses for speed, but this module also
+//! exposes `check_indices_*_in_bounds` validator kernels. Core calls that
+//! resident scan before the unchecked copy kernel and reads back only a tiny
+//! status payload, never the full index buffer.
 //!
 //! ## REQ status (per `.design/ferrotorch-gpu/gather_int.md`)
 //!
@@ -52,8 +55,9 @@
 //! | REQ-1 (20 isel/gather entries) | SHIPPED | 20 `pub fn isel_* / gather_*` entries in `gather_int.rs` (via `select_entry!` macro invocations); consumer `CudaBackendImpl::gather_or_select in backend_impl.rs` dispatches all 20 cells through the `run!` macro |
 //! | REQ-2 (12 PTX macro-expansions) | SHIPPED | `index_select_ptx!` and `gather_ptx!` macros in `gather_int.rs` expand 12 PTX entries (6 select × {W2,W4,W8} × {I32,I64} + 6 gather × ditto), resolved by `isel_ptx / gathr_ptx` in the same file |
 //! | REQ-3 (C-order layout contract) | SHIPPED | layout contract documented in `gather_int.rs` module `//!` block and reflected in the PTX address math; verified by unit tests' expected-output construction |
-//! | REQ-4 (out-of-range UB contract) | SHIPPED | out-of-range UB contract documented in `gather_int.rs` module `//!` block; PTX templates omit any bounds check on the loaded index, matching upstream `at::native::index_select_cuda` in `aten/src/ATen/native/cuda/Indexing.cu` |
+//! | REQ-4 (device-side bounds gate) | SHIPPED | `check_indices_i32_in_bounds` / `check_indices_i64_in_bounds` scan index tensors on CUDA and return a scalar status before unchecked copy kernels launch, matching upstream device-side bound checks in `Indexing.cu` / `ScatterGatherKernel.cu` without full index D2H |
 //! | REQ-5 (consumer wiring) | SHIPPED | `CudaBackendImpl::gather_or_select in backend_impl.rs` is the production consumer; ferrotorch-core's `Tensor::index_select / Tensor::gather` dispatch through it via the `GpuBackend::gather_or_select` trait method when source is CUDA-resident |
+//! | REQ-6 (resident index_select backward expansion) | SHIPPED | `expand_index_select_i64` expands a saved 1-D CUDA i64 index to the per-output scatter index buffer consumed by `IndexSelectDimBackward`, with unit coverage in `expand_index_select_i64_repeats_index_across_outer_and_inner` |
 
 #![cfg(feature = "cuda")]
 
@@ -332,6 +336,111 @@ DONE:
     };
 }
 
+// Device-resident bounds validator for i32/i64 index tensors. One thread
+// checks one index value; the first invalid thread atomically claims `flag`
+// and stores its flat position plus offending value into `bad`.
+macro_rules! check_bounds_ptx {
+    ($kname:literal, $ish:literal, $load:literal) => {
+        concat!(
+            ".version 7.0\n.target sm_52\n.address_size 64\n",
+            ".visible .entry ",
+            $kname,
+            "(
+    .param .u64 idx_ptr,
+    .param .u64 flag_ptr,
+    .param .u64 bad_ptr,
+    .param .u32 total,
+    .param .s64 dim_size
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %old;
+    .reg .u64 %idx, %flag, %bad, %off, %addr, %bad_value_addr;
+    .reg .s32 %val32;
+    .reg .s64 %val, %dim, %pos;
+    .reg .pred %p, %neg, %too_hi, %invalid, %already_claimed;
+
+    ld.param.u64 %idx, [idx_ptr];
+    ld.param.u64 %flag, [flag_ptr];
+    ld.param.u64 %bad, [bad_ptr];
+    ld.param.u32 %tot, [total];
+    ld.param.s64 %dim, [dim_size];
+
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot; @%p bra DONE;
+
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, ",
+            $ish,
+            "; add.u64 %addr, %idx, %off;
+    ",
+            $load,
+            "
+    setp.lt.s64 %neg, %val, 0;
+    setp.ge.s64 %too_hi, %val, %dim;
+    or.pred %invalid, %neg, %too_hi;
+    @!%invalid bra DONE;
+
+    atom.global.cas.b32 %old, [%flag], 0, 1;
+    setp.ne.u32 %already_claimed, %old, 0;
+    @%already_claimed bra DONE;
+
+    cvt.s64.u32 %pos, %gtid;
+    st.global.s64 [%bad], %pos;
+    add.u64 %bad_value_addr, %bad, 8;
+    st.global.s64 [%bad_value_addr], %val;
+DONE:
+    ret;
+}
+"
+        )
+    };
+}
+
+// Expand a 1-D i64 index_select index into the per-output i64 index buffer
+// consumed by dim-aware scatter-add backward kernels.
+macro_rules! expand_index_select_i64_ptx {
+    () => {
+        concat!(
+            ".version 7.0\n.target sm_52\n.address_size 64\n",
+            ".visible .entry expand_index_select_i64_kernel(
+    .param .u64 idx_ptr,
+    .param .u64 out_ptr,
+    .param .u32 out_dim,
+    .param .u32 inner,
+    .param .u32 total
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tot, %outdim, %inn;
+    .reg .u32 %rem, %i, %slab;
+    .reg .u64 %idx, %out, %off, %addr;
+    .reg .s64 %val;
+    .reg .pred %p;
+
+    ld.param.u64 %idx, [idx_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %outdim, [out_dim];
+    ld.param.u32 %inn, [inner];
+    ld.param.u32 %tot, [total];
+
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %tot; @%p bra DONE;
+
+    mul.lo.u32 %slab, %outdim, %inn;
+    rem.u32 %rem, %gtid, %slab;
+    div.u32 %i, %rem, %inn;
+
+    cvt.u64.u32 %off, %i; shl.b64 %off, %off, 3; add.u64 %addr, %idx, %off;
+    ld.global.s64 %val, [%addr];
+
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, 3; add.u64 %addr, %out, %off;
+    st.global.s64 [%addr], %val;
+DONE:
+    ret;
+}
+"
+        )
+    };
+}
+
 // ── index_select PTX constants (value width × index width) ──────────────────
 const ISEL_W2_I32_PTX: &str = index_select_ptx!(
     "isel_w2_i32_kernel",
@@ -536,6 +645,19 @@ const GATHER_ND_W8_I64_PTX: &str = gather_nd_ptx!(
     ".s64"
 );
 
+const CHECK_BOUNDS_I32_PTX: &str = check_bounds_ptx!(
+    "check_bounds_i32_kernel",
+    "2",
+    "ld.global.s32 %val32, [%addr];
+    cvt.s64.s32 %val, %val32;"
+);
+const CHECK_BOUNDS_I64_PTX: &str = check_bounds_ptx!(
+    "check_bounds_i64_kernel",
+    "3",
+    "ld.global.s64 %val, [%addr];"
+);
+const EXPAND_INDEX_SELECT_I64_PTX: &str = expand_index_select_i64_ptx!();
+
 /// Byte width of a value element, used to pick the copy kernel.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ValWidth {
@@ -588,13 +710,11 @@ fn launch_select<V: DeviceRepr + ValidAsZeroBits, I: DeviceRepr + ValidAsZeroBit
     })?;
     let mut out = stream.alloc_zeros::<V>(total)?;
     let cfg = launch_1d(total);
-    let (outer_u, indim_u, outdim_u, inner_u, total_u) = (
-        outer as u32,
-        in_dim as u32,
-        out_dim as u32,
-        inner as u32,
-        total as u32,
-    );
+    let outer_u = checked_u32("outer", outer)?;
+    let indim_u = checked_u32("in_dim", in_dim)?;
+    let outdim_u = checked_u32("out_dim", out_dim)?;
+    let inner_u = checked_u32("inner", inner)?;
+    let total_u = checked_u32("total", total)?;
     // SAFETY:
     // - `f` is the PTX entry `kernel_name`; its 8-arg signature
     //   (in, idx, out, outer, in_dim, out_dim, inner, total) matches the args
@@ -602,10 +722,9 @@ fn launch_select<V: DeviceRepr + ValidAsZeroBits, I: DeviceRepr + ValidAsZeroBit
     // - `input` (V-elements) and `idx` (I-elements) are immutable inputs; `out`
     //   is the fresh `total`-element V buffer, the only `&mut`, non-aliased.
     // - Each thread writes one `out[t]` for `t in [0,total)` (bound-checked).
-    //   The source element is computed from `idx[..]`; an out-of-range index is
-    //   documented UB matching PyTorch CUDA (module note), not a memory-safety
-    //   bug of this harness — the buffers passed are exactly those sized by the
-    //   caller and `total` bounds the writes.
+    //   The source element is computed from `idx[..]`; callers must run the
+    //   resident `check_indices_*_in_bounds` gate before launching so invalid
+    //   indices cannot reach this unchecked address math.
     unsafe {
         stream
             .launch_builder(&f)
@@ -626,6 +745,145 @@ fn checked_u32(name: &'static str, value: usize) -> GpuResult<u32> {
     u32::try_from(value).map_err(|_| GpuError::InvalidState {
         message: format!("{name}={value} exceeds gather kernel u32 indexing limit"),
     })
+}
+
+fn checked_i64(name: &'static str, value: usize) -> GpuResult<i64> {
+    i64::try_from(value).map_err(|_| GpuError::InvalidState {
+        message: format!("{name}={value} exceeds signed 64-bit indexing limit"),
+    })
+}
+
+fn launch_check_bounds<I: DeviceRepr + ValidAsZeroBits>(
+    idx: &CudaSlice<I>,
+    n: usize,
+    dim: usize,
+    dim_size: usize,
+    op: &'static str,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<()> {
+    if n > idx.len() {
+        return Err(GpuError::LengthMismatch { a: n, b: idx.len() });
+    }
+    if n == 0 {
+        return Ok(());
+    }
+    let total_u = checked_u32("index_len", n)?;
+    let dim_size_i = checked_i64("dim_size", dim_size)?;
+    let stream = device.stream();
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        }
+    })?;
+    let flag_init = [0_u32];
+    let bad_init = [-1_i64, 0_i64];
+    let mut flag = stream.clone_htod(&flag_init)?;
+    let mut bad = stream.clone_htod(&bad_init)?;
+    let cfg = launch_1d(n);
+    // SAFETY:
+    // - `f` is one of the `check_bounds_*` PTX entries; the pushed arguments
+    //   match `(idx, flag, bad, total, dim_size)` exactly.
+    // - `idx` is read-only. `flag` is a one-element u32 status buffer claimed
+    //   with `atom.global.cas.b32`; `bad` is a two-element i64 buffer written
+    //   only by the winner. Stream ordering makes the later D2H status read
+    //   observe these writes after the kernel completes.
+    // - Each active thread reads `idx[t]` for `t < n`; `n <= idx.len()` was
+    //   checked above, and there are no writes into the index tensor.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(idx)
+            .arg(&mut flag)
+            .arg(&mut bad)
+            .arg(&total_u)
+            .arg(&dim_size_i)
+            .launch(cfg)?;
+    }
+    let flag_host = stream.clone_dtoh(&flag)?;
+    if flag_host[0] == 0 {
+        return Ok(());
+    }
+    let bad_host = stream.clone_dtoh(&bad)?;
+    Err(GpuError::InvalidState {
+        message: format!(
+            "{op}: index {} is out of bounds for dimension {dim} with size {dim_size} \
+             (flat index position {}, valid range 0..{dim_size})",
+            bad_host[1], bad_host[0]
+        ),
+    })
+}
+
+/// Expand a 1-D i64 `index_select(dim)` index into the per-output i64 index
+/// buffer used by dim-aware scatter-add backward kernels.
+///
+/// For output layout `[outer, out_dim, inner]`, element
+/// `t = ((o * out_dim + i) * inner + k)` receives `out[t] = idx[i]`. The result
+/// stays CUDA-resident and is intended for autograd backward wiring; it does not
+/// validate index bounds because the forward path already ran the resident
+/// bounds gate before saving the index.
+pub fn expand_index_select_i64(
+    idx: &CudaSlice<i64>,
+    outer: usize,
+    out_dim: usize,
+    inner: usize,
+    d: &GpuDevice,
+) -> GpuResult<CudaSlice<i64>> {
+    if idx.len() != out_dim {
+        return Err(GpuError::LengthMismatch {
+            a: out_dim,
+            b: idx.len(),
+        });
+    }
+    let total = outer
+        .checked_mul(out_dim)
+        .and_then(|x| x.checked_mul(inner))
+        .ok_or(GpuError::LengthMismatch {
+            a: outer,
+            b: out_dim,
+        })?;
+    let stream = d.stream();
+    if total == 0 {
+        return Ok(stream.alloc_zeros::<i64>(0)?);
+    }
+    let ctx = d.context();
+    let f = get_or_compile(
+        ctx,
+        EXPAND_INDEX_SELECT_I64_PTX,
+        "expand_index_select_i64_kernel",
+        d.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "expand_index_select_i64_kernel",
+        source: e,
+    })?;
+    let mut out = stream.alloc_zeros::<i64>(total)?;
+    let cfg = launch_1d(total);
+    let out_dim_u = checked_u32("out_dim", out_dim)?;
+    let inner_u = checked_u32("inner", inner)?;
+    let total_u = checked_u32("total", total)?;
+    // SAFETY:
+    // - `f` is `expand_index_select_i64_kernel`; its 5-arg signature
+    //   `(idx, out, out_dim, inner, total)` matches the pushed args.
+    // - `idx` is read-only and has exactly `out_dim` elements. `out` is freshly
+    //   allocated with `total = outer*out_dim*inner` elements and is the only
+    //   mutable buffer.
+    // - Each active thread writes one `out[t]`; `total > 0` implies
+    //   `out_dim > 0` and `inner > 0`, so the PTX div/rem operands are nonzero.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(idx)
+            .arg(&mut out)
+            .arg(&out_dim_u)
+            .arg(&inner_u)
+            .arg(&total_u)
+            .launch(cfg)?;
+    }
+    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -767,6 +1025,48 @@ macro_rules! gather_nd_entry {
             launch_gather_nd(input, idx, input_strides, index_shape, dim, d, ptx, name)
         }
     };
+}
+
+/// Validate an `i32` index buffer against `0 <= idx < dim_size` on CUDA.
+pub fn check_indices_i32_in_bounds(
+    idx: &CudaSlice<i32>,
+    n: usize,
+    dim: usize,
+    dim_size: usize,
+    op: &'static str,
+    d: &GpuDevice,
+) -> GpuResult<()> {
+    launch_check_bounds(
+        idx,
+        n,
+        dim,
+        dim_size,
+        op,
+        d,
+        CHECK_BOUNDS_I32_PTX,
+        "check_bounds_i32_kernel",
+    )
+}
+
+/// Validate an `i64` index buffer against `0 <= idx < dim_size` on CUDA.
+pub fn check_indices_i64_in_bounds(
+    idx: &CudaSlice<i64>,
+    n: usize,
+    dim: usize,
+    dim_size: usize,
+    op: &'static str,
+    d: &GpuDevice,
+) -> GpuResult<()> {
+    launch_check_bounds(
+        idx,
+        n,
+        dim,
+        dim_size,
+        op,
+        d,
+        CHECK_BOUNDS_I64_PTX,
+        "check_bounds_i64_kernel",
+    )
 }
 
 // index_select: value f32/f64/i32/i64/u16(f16,bf16) × index i32/i64
@@ -1028,6 +1328,17 @@ mod tests {
         let idx = d.stream().clone_htod(&vec![1i32, 0]).unwrap();
         let out = gather_nd_i64_i32(&inp, &idx, &[3, 1], &[1, 2], 1, &d).unwrap();
         assert_eq!(d.stream().clone_dtoh(&out).unwrap(), vec![2i64, 1]);
+    }
+
+    #[test]
+    fn expand_index_select_i64_repeats_index_across_outer_and_inner() {
+        let d = dev();
+        let idx = d.stream().clone_htod(&vec![2i64, 0]).unwrap();
+        let out = expand_index_select_i64(&idx, 2, 2, 3, &d).unwrap();
+        assert_eq!(
+            d.stream().clone_dtoh(&out).unwrap(),
+            vec![2i64, 2, 2, 0, 0, 0, 2, 2, 2, 0, 0, 0]
+        );
     }
 
     #[test]

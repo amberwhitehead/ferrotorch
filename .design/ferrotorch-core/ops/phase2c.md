@@ -27,8 +27,11 @@ otherwise via a reference loop. `gather` uses the compact
 `backend.gather_intidx` CUDA path when non-gather dimensions match the
 input, and the rank-aware `backend.gather_intidx_nd` CUDA path when
 PyTorch-legal index shapes are smaller on non-gather axes. In both
-cases the value buffer stays GPU-resident; only the integer index
-buffer is read back for the existing bounds-validation gate.
+cases the value buffer stays GPU-resident. CUDA float and integer
+forwards validate the integer index on device and read back only a
+small status payload. Tracked float forwards save an i64 CUDA index
+for backward, so `Tensor::index_select` / `Tensor::gather` no longer
+download the full index tensor just to build autograd state.
 
 ## Requirements
 
@@ -118,6 +121,17 @@ inner]` layout is valid. If `index.shape()` is smaller than
 contract by making index/output shape authoritative while keeping the
 value buffer on device.
 
+Before either CUDA copy kernel launches, float and integer paths call
+`GpuBackend::check_int_indices_in_bounds`. The CUDA backend implements
+that as a resident scan over the I32/I64 index buffer, mirroring
+PyTorch's device-side bound checks in `Indexing.cu` /
+`ScatterGatherKernel.cu` without copying the full index tensor to CPU.
+Tracked float paths then save `indices.cast::<i64>()` / `index.cast::<i64>()`
+as CUDA-resident autograd metadata. `GatherBackward` consumes that
+resident index directly in `scatter_add_nd_*`; `IndexSelectDimBackward`
+uses `GpuBackend::expand_index_select_indices_i64` to expand the 1-D
+forward index into the per-output scatter index buffer on device.
+
 The public methods on `Tensor` at `:212-350` and on `IntTensor` at
 `gpu_backend in ops/phase2c.rs` dispatch through the helpers + `gpu_dispatch::gpu_backend()`
 on the CUDA branch.
@@ -170,8 +184,8 @@ conformance lives in `ferrotorch-core/tests/conformance_phase2c.rs`
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `Tensor::argmax` at `argmax in ops/phase2c.rs`; non-test consumer: `crate::methods::Tensor::argmax_t` at `argmax_t in methods.rs` (the autograd-wrapper) and `crate::grad_fns::reduction::argmax` at `argmax in grad_fns/reduction.rs` route through `Tensor::argmax` |
 | REQ-2 | SHIPPED | impl: `Tensor::argmin` at `argmin in ops/phase2c.rs`; non-test consumer: `Tensor::argmin_t` at `argmin_t in methods.rs` |
-| REQ-3 | SHIPPED | impl: `Tensor::index_select` at `index_select in ops/phase2c.rs`; non-test consumer: `crate::grad_fns::indexing::index_select_differentiable` at `index_select in grad_fns/indexing.rs` invokes `Tensor::index_select` for its forward |
-| REQ-4 | SHIPPED | impl: `Tensor::gather` at `ops/phase2c.rs:283`; non-test consumer: `crate::grad_fns::indexing::GatherBackward::backward` recurses through `Tensor::gather` for the VJP construction |
+| REQ-3 | SHIPPED | impl: `Tensor::index_select` at `index_select in ops/phase2c.rs`; non-test consumer: `crate::grad_fns::indexing::index_select_differentiable` at `index_select in grad_fns/indexing.rs` invokes `Tensor::index_select` for its forward. CUDA tracked forwards run resident index bounds validation and save a CUDA i64 index for `IndexSelectDimBackward`; audit `tracked_index_select_cuda_backward_keeps_saved_index_resident` covers the resident backward path. |
+| REQ-4 | SHIPPED | impl: `Tensor::gather` at `ops/phase2c.rs:283`; non-test consumer: `crate::grad_fns::indexing::GatherBackward::backward` recurses through `Tensor::gather` for the VJP construction. CUDA tracked forwards run resident index bounds validation and save a CUDA i64 index for `GatherBackward`; audit `tracked_gather_cuda_backward_keeps_saved_index_resident` covers the resident backward path. |
 | REQ-5 | SHIPPED | impl: `Tensor::to_int` at `ops/phase2c.rs:326`; non-test consumer: `crate::int_tensor::Tensor::to_int` re-export path used by quantization / discretization paths in `ferrotorch-llama` and `ferrotorch-quant` |
 | REQ-6 | SHIPPED | impl: `IntTensor::argmax`/`argmin` at `ops/phase2c.rs:369,374`; non-test consumer: every downstream caller that argmax's a logit-index tensor goes through this |
 | REQ-7 | SHIPPED | impl: `IntTensor::index_select`/`gather` at `ops/phase2c.rs:380,423`; non-test consumer: re-exported via the `IntTensor` method surface |

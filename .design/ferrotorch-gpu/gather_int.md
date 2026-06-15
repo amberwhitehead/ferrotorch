@@ -21,8 +21,13 @@ index-widths × 3 op/layout matrix: `index_select`, compact gather,
 and rank-aware gather for PyTorch-legal index shapes whose non-gather
 dimensions are smaller than the input. Mirrors PyTorch's CUDA
 `index_select` (in `Indexing.cu`) and `gather` (in
-`ScatterGatherKernel.cu`), with the same checked-before-launch index
-contract at the core layer.
+`ScatterGatherKernel.cu`). The data-movement kernels keep unchecked
+address math for speed, and the exposed CUDA path is guarded by
+resident `check_indices_i{32,64}_in_bounds` validator kernels that
+read back only a tiny status payload. The same module also provides
+`expand_index_select_i64`, a CUDA-resident helper that expands a saved
+1-D `index_select` index into the per-output i64 index buffer consumed
+by dim-aware scatter-add backward kernels.
 
 ## Requirements
 
@@ -46,9 +51,11 @@ contract at the core layer.
   `[outer, out_dim, inner]`. `gather(dim)` uses input
   `[outer, in_dim, inner]`, index AND output both
   `[outer, out_dim, inner]` (per-output-element index lookup).
-- REQ-4: Out-of-range index contract: PyTorch CUDA parity — no
-  device-side bounds check, no host round-trip to validate. Out-of-range
-  indices are documented undefined behaviour on the device.
+- REQ-4: Out-of-range index contract: PyTorch CUDA parity with a
+  device-side bounds gate. `check_indices_i32_in_bounds` /
+  `check_indices_i64_in_bounds` scan resident index tensors on CUDA
+  and return a structured status before the unchecked copy kernels
+  can launch; no full index host round-trip is used.
 - REQ-5: Non-test production consumer at
   `ferrotorch-gpu/src/backend_impl.rs:442-568` — the
   `CudaBackendImpl::gather_or_select` trait method dispatches all
@@ -60,6 +67,10 @@ contract at the core layer.
   CORE-112 branch in `ferrotorch-core/src/ops/phase2c.rs` calls it
   when `index.shape()` is smaller than `input.shape()` on a
   non-gather axis.
+- REQ-7: `expand_index_select_i64` — expand a CUDA-resident 1-D i64
+  `index_select` index to the `[outer, out_dim, inner]` per-output
+  index buffer required by `scatter_add_dim_*` backward kernels. No
+  index data crosses to host.
 
 ## Acceptance Criteria
 
@@ -75,21 +86,30 @@ contract at the core layer.
 - [x] AC-4: `CudaBackendImpl::gather_or_select` dispatches all 20
   (vty, ity, op) cells via the `match src.dtype()` + `run!` macro
   expansion at `backend_impl.rs`.
-- [x] AC-5: Out-of-range UB contract documented in the module `//!`
-  block at lines 33-39, matching upstream.
+- [x] AC-5: Resident bounds-validator contract documented in the
+  module `//!` block; invalid indices are caught before the unchecked
+  copy kernels, matching upstream's device-side checks without full
+  index D2H.
+- [x] AC-6: `expand_index_select_i64_repeats_index_across_outer_and_inner`
+  verifies the CUDA-resident backward helper's output layout.
 
 ## Architecture
 
 `gather_int.rs` organises around two pillars:
 
-1. **PTX template macros** (`index_select_ptx!` and `gather_ptx!`) at
-   the top of the file expand 12 hand-written PTX strings sharing
+1. **PTX template macros** (`index_select_ptx!`, `gather_ptx!`,
+   `gather_nd_ptx!`, `check_bounds_ptx!`, and
+   `expand_index_select_i64_ptx!`) at the top of the file expand the
+   hand-written PTX strings sharing
    the same scaffolding — value load/store via raw `ld.global.uXX`
    / `st.global.uXX` instructions, index load via
    `ld.global.s32` / `ld.global.s64`, address math via
    `mul.lo.s64` + `add.s64`. Value width-shift `$wsh` (1/2/3) and
    index width-shift `$ish` (2/3) parameterise the byte-offset
-   shifts. No dtype-specific arithmetic — just byte copies.
+   shifts. No dtype-specific arithmetic — just byte copies. The
+   bounds validator uses one thread per index and `atom.global.cas.b32`
+   to record the first invalid flat position/value in a two-scalar
+   status buffer.
 
 2. **Launch wrapper `fn launch_select<V: DeviceRepr, I: DeviceRepr>`**
    resolves the named PTX via `module_cache::get_or_compile`,
@@ -135,8 +155,9 @@ GPU primitive layer.
 
 Edge cases preserved:
 
-- **Out-of-range index**: device UB, matches upstream CUDA. No host
-  round-trip to validate (would defeat the no-CPU-detour contract).
+- **Out-of-range index**: validated on-device before unchecked copy
+  launch. The host reads back only status scalars, not the full index
+  tensor.
 - **f16 / bf16**: handled via the `u16` byte-width path — the kernel
   never inspects the value bits.
 - **i32 vs i64 index**: separate kernel per width; the resolver picks
@@ -152,12 +173,14 @@ Edge cases preserved:
 
 ## Verification
 
-Unit tests in `ferrotorch-gpu/src/gather_int.rs` `mod tests` (7
+Unit tests in `ferrotorch-gpu/src/gather_int.rs` `mod tests` (8
 tests): each covers a `(value_dtype, index_dtype)` combination with
 a `cpu_to_gpu` upload, kernel call, and `gpu_to_cpu` verification
 against a hand-computed expected output. Three tests specifically
-cover rank-aware gather with smaller non-gather dimensions. Run on
-hardware via the `GpuDevice::new(0)` graceful-skip pattern.
+cover rank-aware gather with smaller non-gather dimensions; one test
+covers resident expansion of a saved `index_select` index for
+backward. Run on hardware via the `GpuDevice::new(0)` graceful-skip
+pattern.
 
 Smoke command (no parity ops):
 
@@ -179,6 +202,7 @@ The fuller integration tests live at
 | REQ-2 | SHIPPED | impl: `index_select_ptx!` and `gather_ptx!` macros at `isel_ptx in gather_int.rs` expand 12 PTX entries (6 select × {W2,W4,W8} × {I32,I64} + 6 gather × ditto), resolved by `isel_ptx`/`gathr_ptx` at lines 449-470. |
 | REQ-2b | SHIPPED | impl: `gather_nd_ptx!` expands six rank-aware PTX entries selected by `gather_nd_ptx_for`; tests `gather_nd_dim1_smaller_batch_f32_i64`, `gather_nd_dim0_smaller_column_f32_i64`, and `gather_nd_dim1_smaller_batch_i64_values` exercise the PyTorch-legal smaller non-axis layouts without a value-buffer host round trip. |
 | REQ-3 | SHIPPED | impl: layout contract documented at `gather_int.rs` (the module `//!` block) and reflected in the PTX address math; verified by the unit tests' expected-output construction. |
-| REQ-4 | SHIPPED | impl: out-of-range UB contract documented at `gather_int.rs`; the PTX templates omit any bounds check on the loaded index, matching upstream `at::native::index_select_cuda` in `aten/src/ATen/native/cuda/Indexing.cu`. |
+| REQ-4 | SHIPPED | impl: `check_bounds_ptx!` plus `check_indices_i32_in_bounds` / `check_indices_i64_in_bounds` in `ferrotorch-gpu/src/gather_int.rs`; production consumer: `CudaBackendImpl::check_int_indices_in_bounds` in `backend_impl.rs`, called by `Tensor::index_select` / `Tensor::gather` and `IntTensor::{index_select,gather}` before unchecked copy kernels. |
 | REQ-5 | SHIPPED | impl: `CudaBackendImpl::gather_or_select` at `gather_or_select in backend_impl.rs` is the production consumer; ferrotorch-core's `Tensor::index_select` / `Tensor::gather` dispatch through it via the `GpuBackend::gather_or_select` trait method when the source is CUDA-resident. |
 | REQ-6 | SHIPPED | impl: `CudaBackendImpl::gather_intidx_nd` dispatches rank-aware gather through the `gather_nd_*` entries; production consumer: `Tensor::gather` and `IntTensor::gather` in `ops/phase2c.rs` call `GpuBackend::gather_intidx_nd` for CORE-112 smaller non-axis index shapes. |
+| REQ-7 | SHIPPED | impl: `expand_index_select_i64_ptx!` plus `expand_index_select_i64` in `gather_int.rs`; production consumer: `CudaBackendImpl::expand_index_select_indices_i64`, called by `IndexSelectDimBackward` when the forward saved a CUDA i64 index. Unit coverage: `expand_index_select_i64_repeats_index_across_outer_and_inner`. |

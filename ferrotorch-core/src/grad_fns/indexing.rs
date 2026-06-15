@@ -588,6 +588,8 @@ pub struct GatherBackward<T: Float> {
     pub dim: usize,
     /// The flat index data used during the forward pass.
     pub index: Vec<usize>,
+    /// CUDA-resident i64 index saved by CUDA forwards.
+    pub index_cuda: Option<IntTensor<i64>>,
     /// The shape of the index tensor.
     pub index_shape: Vec<usize>,
 }
@@ -600,12 +602,22 @@ impl<T: Float> GradFn<T> for GatherBackward<T> {
 
         let input_shape = self.input.shape();
         let input_numel: usize = input_shape.iter().product();
+        let index_numel: usize = self.index_shape.iter().product();
+        if grad_output.numel() != index_numel {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "GatherBackward: grad_output numel {} != saved index numel {}",
+                    grad_output.numel(),
+                    index_numel
+                ),
+            });
+        }
 
         // §3 GPU-native path (#1822/#1823): scatter-add grad_output into a
         // zeroed input-shaped buffer via the rank-aware kernel, dispatched on
-        // T::dtype() with the SAME forward index uploaded as i64 —
-        // the kernel computes destinations from integer thread math, so no
-        // flat offset is ever f32-encoded (offsets above 2^24 stay exact).
+        // T::dtype() with the SAME forward i64 index. CUDA forwards save that
+        // index resident; legacy CPU/kernel-layer callers still upload their
+        // host Vec when explicitly constructing this node outside phase2c.
         if grad_output.is_cuda() {
             let dt = T::dtype();
             let ordinal = match grad_output.device() {
@@ -613,13 +625,43 @@ impl<T: Float> GradFn<T> for GatherBackward<T> {
                 _ => unreachable!(),
             };
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let idx_handle = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
+            let uploaded_idx;
+            let idx_handle = if let Some(index_cuda) = &self.index_cuda {
+                if index_cuda.numel() != index_numel {
+                    return Err(FerrotorchError::ShapeMismatch {
+                        message: format!(
+                            "GatherBackward: CUDA saved index numel {} != saved index shape numel {}",
+                            index_cuda.numel(),
+                            index_numel
+                        ),
+                    });
+                }
+                if index_cuda.device() != grad_output.device() {
+                    return Err(FerrotorchError::DeviceMismatch {
+                        expected: grad_output.device(),
+                        got: index_cuda.device(),
+                    });
+                }
+                index_cuda.gpu_handle()?
+            } else {
+                if self.index.len() != index_numel {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "GatherBackward: host saved index length {} != saved index shape numel {}",
+                            self.index.len(),
+                            index_numel
+                        ),
+                    });
+                }
+                uploaded_idx = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
+                &uploaded_idx
+            };
             let zeros = backend.alloc_zeros(input_numel, dt, ordinal)?;
             let go_handle = grad_output.gpu_handle()?;
             let result_handle = match dt {
                 DType::F32 => backend.scatter_add_nd_f32(
                     &zeros,
-                    &idx_handle,
+                    idx_handle,
                     go_handle,
                     input_shape,
                     &self.index_shape,
@@ -627,7 +669,7 @@ impl<T: Float> GradFn<T> for GatherBackward<T> {
                 )?,
                 DType::F64 => backend.scatter_add_nd_f64(
                     &zeros,
-                    &idx_handle,
+                    idx_handle,
                     go_handle,
                     input_shape,
                     &self.index_shape,
@@ -635,7 +677,7 @@ impl<T: Float> GradFn<T> for GatherBackward<T> {
                 )?,
                 DType::F16 => backend.scatter_add_nd_f16(
                     &zeros,
-                    &idx_handle,
+                    idx_handle,
                     go_handle,
                     input_shape,
                     &self.index_shape,
@@ -643,7 +685,7 @@ impl<T: Float> GradFn<T> for GatherBackward<T> {
                 )?,
                 DType::BF16 => backend.scatter_add_nd_bf16(
                     &zeros,
-                    &idx_handle,
+                    idx_handle,
                     go_handle,
                     input_shape,
                     &self.index_shape,
@@ -665,7 +707,15 @@ impl<T: Float> GradFn<T> for GatherBackward<T> {
 
         let go_data = grad_output.data_vec()?;
         let ndim = input_shape.len();
-        let index_numel: usize = self.index_shape.iter().product();
+        if self.index.len() != index_numel {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "GatherBackward: CPU backward requires a host saved index of length {}, got {}",
+                    index_numel,
+                    self.index.len()
+                ),
+            });
+        }
 
         let mut grad_input = vec![<T as num_traits::Zero>::zero(); input_numel];
 
@@ -1371,6 +1421,8 @@ pub struct IndexSelectDimBackward<T: Float> {
     pub dim: usize,
     /// The 1-D index vector used during the forward pass.
     pub indices: Vec<usize>,
+    /// CUDA-resident i64 index saved by CUDA forwards.
+    pub indices_cuda: Option<IntTensor<i64>>,
 }
 
 impl<T: Float> GradFn<T> for IndexSelectDimBackward<T> {
@@ -1388,15 +1440,36 @@ impl<T: Float> GradFn<T> for IndexSelectDimBackward<T> {
         let outer: usize = input_shape[..dim].iter().product();
         let inner: usize = input_shape[dim + 1..].iter().product();
         let in_dim_size = input_shape[dim];
-        let out_dim_size = self.indices.len();
+        let out_dim_size = self
+            .indices_cuda
+            .as_ref()
+            .map_or(self.indices.len(), IntTensor::numel);
+        let expected_go_numel = outer
+            .checked_mul(out_dim_size)
+            .and_then(|x| x.checked_mul(inner))
+            .ok_or(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "IndexSelectDimBackward: output numel overflow for outer={outer}, out_dim={out_dim_size}, inner={inner}"
+                ),
+            })?;
+        if grad_output.numel() != expected_go_numel {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "IndexSelectDimBackward: grad_output numel {} != expected {} from input shape {:?}, dim {}, and saved index length {}",
+                    grad_output.numel(),
+                    expected_go_numel,
+                    input_shape,
+                    dim,
+                    out_dim_size
+                ),
+            });
+        }
 
         // GPU path (#1822/#1823 mechanism): scatter-add grad_output into a
         // zeroed input-shaped buffer via the dim-aware kernel, dispatched on
         // T::dtype(). The kernel index is parallel to grad_output's
-        // `[outer, out_dim_size, inner]` t-space, so the 1-D `self.indices`
-        // expands across `(o, k)` — uploaded as i64 (the previous f32 FLAT
-        // destination encoding silently rounded offsets above 2^24, CORE-129).
-        // Destinations are computed from integer thread math in-kernel.
+        // `[outer, out_dim_size, inner]` t-space. CUDA forwards save the 1-D
+        // index resident and expand it resident before the scatter-add launch.
         if grad_output.is_cuda() {
             let dt = T::dtype();
             if !matches!(dt, crate::dtype::DType::F32 | crate::dtype::DType::F64) {
@@ -1411,24 +1484,59 @@ impl<T: Float> GradFn<T> for IndexSelectDimBackward<T> {
             };
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
 
-            let go_numel = outer * out_dim_size * inner;
-            let mut axis_indices: Vec<usize> = Vec::with_capacity(go_numel);
-            for _o in 0..outer {
-                for i in 0..out_dim_size {
-                    let dst_i = self.indices[i];
-                    for _k in 0..inner {
-                        axis_indices.push(dst_i);
+            let uploaded_idx;
+            let expanded_idx;
+            let idx_handle = if let Some(indices_cuda) = &self.indices_cuda {
+                if indices_cuda.numel() != out_dim_size {
+                    return Err(FerrotorchError::ShapeMismatch {
+                        message: format!(
+                            "IndexSelectDimBackward: CUDA saved index numel {} != saved index length {}",
+                            indices_cuda.numel(),
+                            out_dim_size
+                        ),
+                    });
+                }
+                if indices_cuda.device() != grad_output.device() {
+                    return Err(FerrotorchError::DeviceMismatch {
+                        expected: grad_output.device(),
+                        got: indices_cuda.device(),
+                    });
+                }
+                expanded_idx = backend.expand_index_select_indices_i64(
+                    indices_cuda.gpu_handle()?,
+                    outer,
+                    out_dim_size,
+                    inner,
+                )?;
+                &expanded_idx
+            } else {
+                if self.indices.len() != out_dim_size {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "IndexSelectDimBackward: host saved index length {} != saved index length {}",
+                            self.indices.len(),
+                            out_dim_size
+                        ),
+                    });
+                }
+                let mut axis_indices: Vec<usize> = Vec::with_capacity(expected_go_numel);
+                for _o in 0..outer {
+                    for i in 0..out_dim_size {
+                        let dst_i = self.indices[i];
+                        for _k in 0..inner {
+                            axis_indices.push(dst_i);
+                        }
                     }
                 }
-            }
-
-            let idx_handle = crate::ops::indexing::upload_index_i64(&axis_indices, ordinal)?;
+                uploaded_idx = crate::ops::indexing::upload_index_i64(&axis_indices, ordinal)?;
+                &uploaded_idx
+            };
             let zeros = backend.alloc_zeros(input_numel, dt, ordinal)?;
             let go_handle = grad_output.gpu_handle()?;
             let result_handle = if dt == crate::dtype::DType::F32 {
                 backend.scatter_add_dim_f32(
                     &zeros,
-                    &idx_handle,
+                    idx_handle,
                     go_handle,
                     outer,
                     in_dim_size,
@@ -1438,7 +1546,7 @@ impl<T: Float> GradFn<T> for IndexSelectDimBackward<T> {
             } else {
                 backend.scatter_add_dim_f64(
                     &zeros,
-                    &idx_handle,
+                    idx_handle,
                     go_handle,
                     outer,
                     in_dim_size,
@@ -1456,6 +1564,15 @@ impl<T: Float> GradFn<T> for IndexSelectDimBackward<T> {
 
         // CPU path: scatter-add directly.
         let go_data = grad_output.data_vec()?;
+        if self.indices.len() != out_dim_size {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "IndexSelectDimBackward: CPU backward requires a host saved index of length {}, got {}",
+                    out_dim_size,
+                    self.indices.len()
+                ),
+            });
+        }
         let mut grad_input = vec![<T as num_traits::Zero>::zero(); input_numel];
         for o in 0..outer {
             for i in 0..out_dim_size {
@@ -1585,6 +1702,7 @@ pub fn index_select_dim<T: Float, I: IntElement>(
                     input: input.clone(),
                     dim,
                     indices: idx_usize,
+                    indices_cuda: None,
                 });
                 Tensor::from_operation(storage, output_shape, grad_fn)
             } else {
@@ -1617,6 +1735,7 @@ pub fn index_select_dim<T: Float, I: IntElement>(
             input: input.clone(),
             dim,
             indices: idx_usize,
+            indices_cuda: None,
         });
         Tensor::from_operation(TensorStorage::cpu(out), output_shape, grad_fn)
     } else {
@@ -5684,6 +5803,7 @@ mod tests {
             input,
             dim: 0,
             index: vec![0, 1],
+            index_cuda: None,
             index_shape: vec![2],
         };
         let grad_output =

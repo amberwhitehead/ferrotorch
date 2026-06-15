@@ -22,7 +22,7 @@
 //! | REQ-12 | SHIPPED | impl recurrent trait slots; non-test consumer `ferrotorch-nn::LSTM`/`GRU`/`RNN`. |
 //! | REQ-13 | SHIPPED | impl FFT trait slots; non-test consumer `ferrotorch-core::fft`. |
 //! | REQ-14 | SHIPPED | impl dropout/RNG/`save_rng_state`/`restore_rng_state` trait slots; non-test consumer `nn::Dropout`, `creation::randn`. |
-//! | REQ-15 | SHIPPED | impl `masked_fill_dt`, `where_cond`, `masked_select`, `masked_scatter`, `argmax`, `argmin`, `index_select_intidx`, `gather_intidx`; non-test consumer `Tensor::masked_fill`/`masked_select`, `grad_fns::indexing`. |
+//! | REQ-15 | SHIPPED | impl `masked_fill_dt`, `where_cond`, `masked_select`, `masked_scatter`, `argmax`, `argmin`, `check_int_indices_in_bounds`, `expand_index_select_indices_i64`, `index_select_intidx`, `gather_intidx`; non-test consumer `Tensor::masked_fill`/`masked_select`, `grad_fns::indexing`. |
 //! | REQ-16 | SHIPPED | impl cuSPARSE dispatch slots; non-test consumer `SparseTensor::from_dense` CUDA path. |
 //! | REQ-17 | SHIPPED | impl int_* trait slots; non-test consumer `int_tensor.rs` op forwarders. |
 //! | REQ-18 | SHIPPED | impl `compare`, `bool_*`, cast slots; non-test consumer `bool_tensor.rs` op forwarders. |
@@ -6388,6 +6388,46 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "index_select_intidx",
+        })
+    }
+
+    /// Validate a GPU-resident integer index handle before unchecked
+    /// `index_select_intidx` / `gather_intidx` address math.
+    ///
+    /// PyTorch CUDA performs this test on device (`CUDA_KERNEL_ASSERT` in
+    /// `Indexing.cu` / `ScatterGatherKernel.cu`). Backends that implement this
+    /// method should scan the resident `I32/I64` index tensor on the GPU and
+    /// return a structured host error after copying back only a tiny status
+    /// payload, never the full index buffer.
+    fn check_int_indices_in_bounds(
+        &self,
+        _index: &GpuBufferHandle,
+        _dim: usize,
+        _dim_size: usize,
+        _op: &'static str,
+    ) -> FerrotorchResult<()> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "check_int_indices_in_bounds",
+        })
+    }
+
+    /// Expand a 1-D i64 `index_select(dim)` index into the per-output i64
+    /// index buffer consumed by dim-aware scatter-add backward kernels.
+    ///
+    /// For output layout `[outer, out_dim, inner]`, each output element
+    /// `t = ((o * out_dim + i) * inner + k)` receives `out[t] = index[i]`.
+    /// CUDA backends use this to keep tracked `index_select` backward fully
+    /// resident instead of reading the forward index back to host just to
+    /// rebuild this expanded vector.
+    fn expand_index_select_indices_i64(
+        &self,
+        _index: &GpuBufferHandle,
+        _outer: usize,
+        _out_dim: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "expand_index_select_indices_i64",
         })
     }
 

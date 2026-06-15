@@ -6,11 +6,12 @@
 //! the input is `is_cuda()` (real PTX kernel; the result stays GPU-resident —
 //! no `.to(Cpu)`, no host readback of the DATA) and on CPU otherwise via a
 //! reference loop matching the same PyTorch semantics the GPU kernels
-//! implement. Deliberate, documented exception: CORE-111 / #1805:
-//! `index_select` / `gather` copy the INDEX buffer back to host before kernel
-//! launch to validate every index value — the PTX kernels compute unchecked
-//! addresses, so out-of-bounds values must be rejected with `InvalidArgument`
-//! (PyTorch parity: negative indices are NOT wrapped) before any launch.
+//! implement. CORE-111 / #1805: CUDA `index_select` / `gather` validate index
+//! values before the unchecked copy kernels can compute addresses. Non-grad
+//! float forwards and integer tensor forwards validate on the GPU and read
+//! back only a tiny status payload; tracked float forwards currently also save
+//! a host copy of the index because the existing backward nodes store
+//! `Vec<usize>` indices.
 //!
 //! These unblock the Llama generation loop, which today round-trips to CPU for
 //! argmax sampling and uses raw cudarc slices for token-id embedding gather.
@@ -258,11 +259,10 @@ fn gather_matches_dim_kernel_layout(
         .all(|(axis, (&input, &index))| axis == dim || input == index)
 }
 
-/// Read an `IntTensor<I>` index as host `Vec<i64>`. The CPU references
-/// consume this directly; the GPU dispatch paths call it ONLY to validate the
-/// index values host-side before kernel launch (a device→host copy of the
-/// index buffer alone — the data tensor never leaves the GPU, and the
-/// validated index stays resident for the kernel).
+/// Read an `IntTensor<I>` index as host `Vec<i64>`. CPU references consume this
+/// directly. CUDA no-grad and integer paths validate resident indices on the
+/// GPU; tracked float CUDA forwards still use this to build the legacy
+/// `Vec<usize>` autograd payload after validating the same values.
 fn index_as_i64<I: IntElement>(index: &IntTensor<I>) -> FerrotorchResult<Vec<i64>> {
     Ok(index.data()?.iter().map(|v| v.to_i64()).collect())
 }
@@ -329,10 +329,10 @@ impl<T: Float> Tensor<T> {
     /// Every index value must satisfy `0 <= idx < self.shape()[dim]` (PyTorch
     /// parity — negative indices are NOT wrapped); otherwise returns
     /// [`FerrotorchError::InvalidArgument`] carrying the offending value, its
-    /// position, and the valid range. On CUDA this validation copies ONLY the
-    /// index buffer back to host before kernel launch (the data tensor stays
-    /// resident) — the GPU kernels compute unchecked addresses, so the gate
-    /// here is what keeps them unreachable with invalid indices (CORE-111).
+    /// position, and the valid range. On CUDA, forwards validate on device and
+    /// read back only a small status payload before the unchecked copy kernel
+    /// launches; tracked forwards save an i64 CUDA index for backward without
+    /// downloading the full index tensor.
     pub fn index_select<I: IntElement>(
         &self,
         dim: isize,
@@ -355,13 +355,19 @@ impl<T: Float> Tensor<T> {
 
         if input.is_cuda() {
             check_same_device(input.device(), indices.device(), "index_select")?;
-            // Host-side index validation (CORE-111): the PTX kernels omit
-            // bounds checks, so invalid values must never reach the launch.
-            // Reads back only the index buffer; data stays GPU-resident.
-            let idx_host = index_as_i64(&indices.to(Device::Cpu)?)?;
-            check_index_bounds(&idx_host, d, in_dim, "index_select")?;
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            backend.check_int_indices_in_bounds(
+                indices.gpu_handle()?,
+                d,
+                in_dim,
+                "index_select",
+            )?;
+            let saved_index_cuda = if input.requires_grad() && is_grad_enabled() {
+                Some(indices.cast::<i64>()?)
+            } else {
+                None
+            };
             let h = backend.index_select_intidx(
                 input.gpu_handle()?,
                 indices.gpu_handle()?,
@@ -371,15 +377,12 @@ impl<T: Float> Tensor<T> {
                 inner,
             )?;
             let storage = TensorStorage::gpu(h);
-            if input.requires_grad() && is_grad_enabled() {
-                let idx_usize: Vec<usize> = idx_host
-                    .iter()
-                    .map(|&v| usize::try_from(v).expect("validated non-negative index"))
-                    .collect();
+            if let Some(indices_cuda) = saved_index_cuda {
                 let grad_fn = Arc::new(indexing::IndexSelectDimBackward {
                     input: input.clone(),
                     dim: d,
-                    indices: idx_usize,
+                    indices: Vec::new(),
+                    indices_cuda: Some(indices_cuda),
                 });
                 Tensor::from_operation(storage, out_shape, grad_fn)
             } else {
@@ -407,6 +410,7 @@ impl<T: Float> Tensor<T> {
                     input: input.clone(),
                     dim: d,
                     indices: idx_usize,
+                    indices_cuda: None,
                 });
                 Tensor::from_operation(storage, out_shape, grad_fn)
             } else {
@@ -422,10 +426,10 @@ impl<T: Float> Tensor<T> {
     /// Every index value must satisfy `0 <= idx < self.shape()[dim]` (PyTorch
     /// parity — negative indices are NOT wrapped); otherwise returns
     /// [`FerrotorchError::InvalidArgument`] carrying the offending value, its
-    /// position, and the valid range. On CUDA this validation copies ONLY the
-    /// index buffer back to host before kernel launch (the data tensor stays
-    /// resident) — the GPU kernels compute unchecked addresses, so the gate
-    /// here is what keeps them unreachable with invalid indices (CORE-111).
+    /// position, and the valid range. On CUDA, forwards validate on device and
+    /// read back only a small status payload before the unchecked copy kernel
+    /// launches; tracked forwards save an i64 CUDA index for backward without
+    /// downloading the full index tensor.
     pub fn gather<I: IntElement>(
         &self,
         dim: isize,
@@ -440,13 +444,14 @@ impl<T: Float> Tensor<T> {
 
         if input.is_cuda() {
             check_same_device(input.device(), index.device(), "gather")?;
-            // Host-side index validation (CORE-111): the PTX kernels omit
-            // bounds checks, so invalid values must never reach the launch.
-            // Reads back only the index buffer; data stays GPU-resident.
-            let idx_host = index_as_i64(&index.to(Device::Cpu)?)?;
-            check_index_bounds(&idx_host, d, in_dim, "gather")?;
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            backend.check_int_indices_in_bounds(index.gpu_handle()?, d, in_dim, "gather")?;
+            let saved_index_cuda = if input.requires_grad() && is_grad_enabled() {
+                Some(index.cast::<i64>()?)
+            } else {
+                None
+            };
             let h = if gather_matches_dim_kernel_layout(input.shape(), index.shape(), d) {
                 backend.gather_intidx(
                     input.gpu_handle()?,
@@ -466,15 +471,12 @@ impl<T: Float> Tensor<T> {
                 )?
             };
             let storage = TensorStorage::gpu(h);
-            if input.requires_grad() && is_grad_enabled() {
-                let idx_usize: Vec<usize> = idx_host
-                    .iter()
-                    .map(|&v| usize::try_from(v).expect("validated non-negative index"))
-                    .collect();
+            if let Some(index_cuda) = saved_index_cuda {
                 let grad_fn = Arc::new(indexing::GatherBackward {
                     input: input.clone(),
                     dim: d,
-                    index: idx_usize,
+                    index: Vec::new(),
+                    index_cuda: Some(index_cuda),
                     index_shape: index.shape().to_vec(),
                 });
                 Tensor::from_operation(storage, out_shape, grad_fn)
@@ -503,6 +505,7 @@ impl<T: Float> Tensor<T> {
                     input: input.clone(),
                     dim: d,
                     index: idx_usize,
+                    index_cuda: None,
                     index_shape: index.shape().to_vec(),
                 });
                 Tensor::from_operation(storage, out_shape, grad_fn)
@@ -571,8 +574,9 @@ impl<I: IntElement> IntTensor<I> {
     ///
     /// Index values are validated against `self.shape()[dim]` exactly like
     /// [`Tensor::index_select`](crate::tensor::Tensor::index_select) (PyTorch
-    /// parity: no negative wrapping; `InvalidArgument` on out-of-bounds; on
-    /// CUDA only the index buffer round-trips to host for the check).
+    /// parity: no negative wrapping; `InvalidArgument` on out-of-bounds). On
+    /// CUDA, validation runs on the device and reads back only a small status
+    /// payload before the unchecked copy kernel launches.
     pub fn index_select<J: IntElement>(
         &self,
         dim: isize,
@@ -594,12 +598,14 @@ impl<I: IntElement> IntTensor<I> {
 
         if self.is_cuda() {
             check_same_device(self.device(), indices.device(), "index_select")?;
-            // Host-side index validation (CORE-111): the PTX kernels omit
-            // bounds checks, so invalid values must never reach the launch.
-            let idx_host = index_as_i64(&indices.to(Device::Cpu)?)?;
-            check_index_bounds(&idx_host, d, in_dim, "index_select")?;
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            backend.check_int_indices_in_bounds(
+                indices.gpu_handle()?,
+                d,
+                in_dim,
+                "index_select",
+            )?;
             let h = backend.index_select_intidx(
                 self.gpu_handle()?,
                 indices.gpu_handle()?,
@@ -624,8 +630,9 @@ impl<I: IntElement> IntTensor<I> {
     ///
     /// Index values are validated against `self.shape()[dim]` exactly like
     /// [`Tensor::gather`](crate::tensor::Tensor::gather) (PyTorch parity: no
-    /// negative wrapping; `InvalidArgument` on out-of-bounds; on CUDA only
-    /// the index buffer round-trips to host for the check).
+    /// negative wrapping; `InvalidArgument` on out-of-bounds). On CUDA,
+    /// validation runs on the device and reads back only a small status
+    /// payload before the unchecked copy kernel launches.
     pub fn gather<J: IntElement>(
         &self,
         dim: isize,
@@ -639,12 +646,9 @@ impl<I: IntElement> IntTensor<I> {
 
         if self.is_cuda() {
             check_same_device(self.device(), index.device(), "gather")?;
-            // Host-side index validation (CORE-111): the PTX kernels omit
-            // bounds checks, so invalid values must never reach the launch.
-            let idx_host = index_as_i64(&index.to(Device::Cpu)?)?;
-            check_index_bounds(&idx_host, d, in_dim, "gather")?;
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            backend.check_int_indices_in_bounds(index.gpu_handle()?, d, in_dim, "gather")?;
             let h = if gather_matches_dim_kernel_layout(self.shape(), index.shape(), d) {
                 backend.gather_intidx(
                     self.gpu_handle()?,

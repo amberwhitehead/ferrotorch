@@ -385,6 +385,7 @@ pub fn gather<T: Float>(
                         input: original_input,
                         dim,
                         index: index.to_vec(),
+                        index_cuda: None,
                         index_shape: index_shape.to_vec(),
                     });
                     return Tensor::from_operation(storage, output_shape, grad_fn);
@@ -423,6 +424,7 @@ pub fn gather<T: Float>(
             input: input.clone(),
             dim,
             index: index.to_vec(),
+            index_cuda: None,
             index_shape: index_shape.to_vec(),
         });
         Tensor::from_operation(TensorStorage::cpu(output), output_shape, grad_fn)
