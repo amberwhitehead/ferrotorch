@@ -3082,6 +3082,45 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// VJP for CUDA `trace`: scatter scalar `grad` onto the main diagonal of a
+    /// zero `[rows, cols]` f32 matrix. Mirrors PyTorch's
+    /// `trace_backward_symint` without a host scalar read.
+    fn trace_backward_f32(
+        &self,
+        _grad: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "trace_backward_f32",
+        })
+    }
+
+    /// f64 variant of [`Self::trace_backward_f32`].
+    fn trace_backward_f64(
+        &self,
+        _grad: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "trace_backward_f64",
+        })
+    }
+
+    /// f16/bf16 raw-payload variant of [`Self::trace_backward_f32`]. The CUDA
+    /// backend preserves the scalar grad handle's dtype tag on the result.
+    fn trace_backward_u16(
+        &self,
+        _grad: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "trace_backward_u16",
+        })
+    }
+
     // -- Pairwise distance: cdist (#1545 / sub #1535) ------------------------
     //
     // `torch.cdist(x1, x2, p)` is the batched Lp pairwise distance matrix:

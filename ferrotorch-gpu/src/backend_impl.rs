@@ -5968,6 +5968,60 @@ impl GpuBackend for CudaBackendImpl {
         })
     }
 
+    #[cfg(feature = "cuda")]
+    fn trace_backward_f32(
+        &self,
+        grad: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = Self::unwrap_buffer(grad)?;
+        let dev = self.device(grad.device_ordinal())?;
+        let result = crate::diag::gpu_trace_backward_f32(grad_buf, rows, cols, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, grad.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn trace_backward_f64(
+        &self,
+        grad: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = Self::unwrap_buffer_f64(grad)?;
+        let dev = self.device(grad.device_ordinal())?;
+        let result = crate::diag::gpu_trace_backward_f64(grad_buf, rows, cols, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, grad.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn trace_backward_u16(
+        &self,
+        grad: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = match grad.dtype() {
+            DType::F16 => Self::unwrap_buffer_f16(grad)?,
+            DType::BF16 => Self::unwrap_buffer_bf16(grad)?,
+            other => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("trace_backward_u16 expected F16/BF16, got {other}"),
+                });
+            }
+        };
+        let dev = self.device(grad.device_ordinal())?;
+        let result = crate::diag::gpu_trace_backward_u16(grad_buf, rows, cols, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(match grad.dtype() {
+            DType::F16 => Self::wrap_buffer_f16(result, grad.device_ordinal()),
+            DType::BF16 => Self::wrap_buffer_bf16(result, grad.device_ordinal()),
+            _ => unreachable!("dtype checked above"),
+        })
+    }
+
     // -- Pairwise distance: cdist (#1545 / sub #1535) ------------------------
 
     #[cfg(feature = "cuda")]

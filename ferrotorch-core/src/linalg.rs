@@ -1988,15 +1988,16 @@ pub fn diagonal<T: Float>(a: &Tensor<T>, offset: i64) -> FerrotorchResult<Tensor
 /// Sum of the main-diagonal elements of a 2-D tensor: `sum_i A[i, i]`.
 ///
 /// Returns a scalar tensor. Mirrors `torch.trace` (`aten/src/ATen/native/
-/// LinearAlgebra.cpp` `Tensor trace_cpu`); `torch.trace` requires a 2-D
-/// input, so a non-2-D tensor is an error here too.
+/// ReduceOps.cpp` `Tensor trace_cpu` and `cuda/TriangularOps.cu`
+/// `trace_cuda`); `torch.trace` requires a 2-D input, so a non-2-D tensor is an
+/// error here too. CUDA follows upstream and computes `self.diagonal().sum()`
+/// on device.
 ///
 /// # Backward
-/// Autograd-aware (CPU): when grad tracking is active for `a`, this routes
+/// Autograd-aware: when grad tracking is active for `a`, this routes
 /// through `crate::grad_fns::linalg::trace_differentiable` (the VJP
 /// `dA = grad * I`, `trace_backward_symint`).
 pub fn trace<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    require_cpu(a, "trace")?;
     let shape = a.shape();
     if shape.len() != 2 {
         return Err(FerrotorchError::InvalidArgument {
@@ -2011,9 +2012,20 @@ pub fn trace<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         return crate::grad_fns::linalg::trace_differentiable(a);
     }
 
+    if a.is_cuda() {
+        if shape[0].min(shape[1]) == 0 {
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let handle = backend.alloc_zeros(1, T::dtype(), a.gpu_handle()?.device_ordinal())?;
+            return Tensor::from_storage(TensorStorage::gpu(handle), vec![], false);
+        }
+        let diagonal = crate::ops::tensor_ops::diag(a, 0)?;
+        return crate::grad_fns::reduction::sum(&diagonal);
+    }
+
     let (m, n) = (shape[0], shape[1]);
     let k = m.min(n);
-    let data = a.data()?;
+    let data = a.data_vec()?;
     let mut acc = <T as num_traits::Zero>::zero();
     for i in 0..k {
         acc += data[i * n + i];

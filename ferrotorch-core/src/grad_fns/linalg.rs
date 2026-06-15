@@ -2055,9 +2055,44 @@ pub struct TraceBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for TraceBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() {
+            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let handle = match <T as Element>::dtype() {
+                DType::F32 => {
+                    backend.trace_backward_f32(grad_output.gpu_handle()?, self.rows, self.cols)?
+                }
+                DType::F64 => {
+                    backend.trace_backward_f64(grad_output.gpu_handle()?, self.rows, self.cols)?
+                }
+                DType::F16 | DType::BF16 => {
+                    backend.trace_backward_u16(grad_output.gpu_handle()?, self.rows, self.cols)?
+                }
+                _ => {
+                    return Err(FerrotorchError::NotImplementedOnCuda {
+                        op: "trace backward",
+                    });
+                }
+            };
+            let grad_a = Tensor::from_storage(
+                TensorStorage::gpu(handle),
+                vec![self.rows, self.cols],
+                false,
+            )?;
+            return Ok(vec![Some(grad_a)]);
+        }
+
         let g: T = grad_output.item()?;
         let zero = <T as num_traits::Zero>::zero();
-        let mut out = vec![zero; self.rows * self.cols];
+        let total =
+            self.rows
+                .checked_mul(self.cols)
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "trace backward: shape [{}, {}] overflows storage size",
+                        self.rows, self.cols
+                    ),
+                })?;
+        let mut out = vec![zero; total];
         let k = self.rows.min(self.cols);
         for i in 0..k {
             out[i * self.cols + i] = g;

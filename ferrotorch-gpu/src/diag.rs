@@ -522,6 +522,129 @@ DONE:
 }
 ";
 
+// trace backward is scalar-grad diag_scatter on the main diagonal. The scalar
+// is read from device memory (`grad_ptr[0]`) so CUDA autograd does not need a
+// host scalar round trip.
+const TRACE_BACKWARD_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry trace_backward_f32_kernel(
+    .param .u64 grad_ptr, .param .u64 out_ptr,
+    .param .u32 diag_len, .param .u32 cols
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tdx, %dl, %cols;
+    .reg .u64 %grad, %out, %off, %addr, %stride64, %idx64;
+    .reg .f32 %v;
+    .reg .pred %p;
+
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %dl, [diag_len];
+    ld.param.u32 %cols, [cols];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %tdx, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %tdx;
+    setp.ge.u32 %p, %gtid, %dl;
+    @%p bra DONE;
+
+    ld.global.f32 %v, [%grad];
+    cvt.u64.u32 %stride64, %cols;
+    add.u64 %stride64, %stride64, 1;
+    cvt.u64.u32 %idx64, %gtid;
+    mul.lo.u64 %off, %idx64, %stride64;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out, %off;
+    st.global.f32 [%addr], %v;
+
+DONE:
+    ret;
+}
+";
+
+const TRACE_BACKWARD_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry trace_backward_f64_kernel(
+    .param .u64 grad_ptr, .param .u64 out_ptr,
+    .param .u32 diag_len, .param .u32 cols
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tdx, %dl, %cols;
+    .reg .u64 %grad, %out, %off, %addr, %stride64, %idx64;
+    .reg .f64 %v;
+    .reg .pred %p;
+
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %dl, [diag_len];
+    ld.param.u32 %cols, [cols];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %tdx, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %tdx;
+    setp.ge.u32 %p, %gtid, %dl;
+    @%p bra DONE;
+
+    ld.global.f64 %v, [%grad];
+    cvt.u64.u32 %stride64, %cols;
+    add.u64 %stride64, %stride64, 1;
+    cvt.u64.u32 %idx64, %gtid;
+    mul.lo.u64 %off, %idx64, %stride64;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %out, %off;
+    st.global.f64 [%addr], %v;
+
+DONE:
+    ret;
+}
+";
+
+const TRACE_BACKWARD_U16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry trace_backward_u16_kernel(
+    .param .u64 grad_ptr, .param .u64 out_ptr,
+    .param .u32 diag_len, .param .u32 cols
+) {
+    .reg .u32 %gtid, %bid, %bdim, %tdx, %dl, %cols;
+    .reg .u64 %grad, %out, %off, %addr, %stride64, %idx64;
+    .reg .b16 %v;
+    .reg .pred %p;
+
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %dl, [diag_len];
+    ld.param.u32 %cols, [cols];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %tdx, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %tdx;
+    setp.ge.u32 %p, %gtid, %dl;
+    @%p bra DONE;
+
+    ld.global.b16 %v, [%grad];
+    cvt.u64.u32 %stride64, %cols;
+    add.u64 %stride64, %stride64, 1;
+    cvt.u64.u32 %idx64, %gtid;
+    mul.lo.u64 %off, %idx64, %stride64;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %out, %off;
+    st.global.b16 [%addr], %v;
+
+DONE:
+    ret;
+}
+";
+
 fn diag_start_len(rows: usize, cols: usize, k: i64) -> (usize, usize, usize) {
     let (start_r, start_c) = if k >= 0 {
         (0usize, k as usize)
@@ -554,6 +677,15 @@ fn checked_diag_embed_size(n: usize, k: i64) -> GpuResult<usize> {
             got: vec![size, size],
         })?;
     Ok(size)
+}
+
+fn checked_matrix_numel(rows: usize, cols: usize, op: &'static str) -> GpuResult<usize> {
+    rows.checked_mul(cols)
+        .ok_or_else(|| GpuError::ShapeMismatch {
+            op,
+            expected: vec![usize::MAX],
+            got: vec![rows, cols],
+        })
 }
 
 /// Scatter a 1-D `n`-element buffer onto the `k`-th diagonal of a fresh
@@ -663,9 +795,17 @@ fn launch_diag_extract<V: DeviceRepr + ValidAsZeroBits>(
             source: e,
         }
     })?;
+    let dl_u = u32::try_from(diag_len).map_err(|_| GpuError::ShapeMismatch {
+        op: "trace_backward",
+        expected: vec![u32::MAX as usize],
+        got: vec![diag_len],
+    })?;
+    let cols_u = u32::try_from(cols).map_err(|_| GpuError::ShapeMismatch {
+        op: "trace_backward",
+        expected: vec![u32::MAX as usize],
+        got: vec![cols],
+    })?;
     let cfg = launch_1d(diag_len);
-    let dl_u = diag_len as u32;
-    let cols_u = cols as u32;
     let sr_u = start_r as u32;
     let sc_u = start_c as u32;
     // SAFETY:
@@ -755,6 +895,61 @@ fn launch_diag_scatter<V: DeviceRepr + ValidAsZeroBits>(
             .arg(&cols_u)
             .arg(&sr_u)
             .arg(&sc_u)
+            .launch(cfg)?;
+    }
+    Ok(())
+}
+
+fn launch_trace_backward<V: DeviceRepr + ValidAsZeroBits>(
+    grad_scalar: &CudaSlice<V>,
+    out_slice: &mut CudaSlice<V>,
+    rows: usize,
+    cols: usize,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<()> {
+    if grad_scalar.len() != 1 {
+        return Err(GpuError::LengthMismatch {
+            a: grad_scalar.len(),
+            b: 1,
+        });
+    }
+    let diag_len = rows.min(cols);
+    if diag_len == 0 {
+        return Ok(());
+    }
+    let out_total = checked_matrix_numel(rows, cols, "trace_backward")?;
+    if out_slice.len() < out_total {
+        return Err(GpuError::LengthMismatch {
+            a: out_slice.len(),
+            b: out_total,
+        });
+    }
+    let stream = device.stream();
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        }
+    })?;
+    let cfg = launch_1d(diag_len);
+    let dl_u = diag_len as u32;
+    let cols_u = cols as u32;
+    // SAFETY:
+    // - `f` is the PTX entry `kernel_name`; its 4-arg signature
+    //   (grad_ptr, out_ptr, diag_len, cols) matches the pushed args.
+    // - `grad_scalar` has exactly one element; `out_slice` holds >= rows*cols.
+    // - Each thread writes one main-diagonal slot `i*(cols+1)`, in bounds for
+    //   `i < min(rows, cols)`.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(grad_scalar)
+            .arg(out_slice)
+            .arg(&dl_u)
+            .arg(&cols_u)
             .launch(cfg)?;
     }
     Ok(())
@@ -929,6 +1124,28 @@ pub fn gpu_diag_scatter_f32(
     Ok(out)
 }
 
+/// Scatter a scalar f32 trace gradient onto the main diagonal of a zero
+/// `[rows, cols]` matrix.
+pub fn gpu_trace_backward_f32(
+    grad_scalar: &CudaBuffer<f32>,
+    rows: usize,
+    cols: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let total = checked_matrix_numel(rows, cols, "trace_backward")?;
+    let mut out = alloc_zeros_f32(total, device)?;
+    launch_trace_backward(
+        grad_scalar.inner(),
+        out.inner_mut(),
+        rows,
+        cols,
+        device,
+        TRACE_BACKWARD_F32_PTX,
+        "trace_backward_f32_kernel",
+    )?;
+    Ok(out)
+}
+
 /// Scatter a 1-D f64 gradient onto the `k`-th diagonal of a zero `[rows, cols]`.
 pub fn gpu_diag_scatter_f64(
     input: &CudaBuffer<f64>,
@@ -950,6 +1167,28 @@ pub fn gpu_diag_scatter_f64(
         device,
         DIAG_SCATTER_F64_PTX,
         "diag_scatter_f64_kernel",
+    )?;
+    Ok(out)
+}
+
+/// Scatter a scalar f64 trace gradient onto the main diagonal of a zero
+/// `[rows, cols]` matrix.
+pub fn gpu_trace_backward_f64(
+    grad_scalar: &CudaBuffer<f64>,
+    rows: usize,
+    cols: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    let total = checked_matrix_numel(rows, cols, "trace_backward")?;
+    let mut out = alloc_zeros_f64(total, device)?;
+    launch_trace_backward(
+        grad_scalar.inner(),
+        out.inner_mut(),
+        rows,
+        cols,
+        device,
+        TRACE_BACKWARD_F64_PTX,
+        "trace_backward_f64_kernel",
     )?;
     Ok(out)
 }
@@ -976,6 +1215,28 @@ pub fn gpu_diag_scatter_u16(
         device,
         DIAG_SCATTER_U16_PTX,
         "diag_scatter_u16_kernel",
+    )?;
+    Ok(out)
+}
+
+/// Scatter a scalar raw f16/bf16 trace gradient onto the main diagonal of a
+/// zero `[rows, cols]` payload buffer.
+pub fn gpu_trace_backward_u16(
+    grad_scalar: &CudaSlice<u16>,
+    rows: usize,
+    cols: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let total = checked_matrix_numel(rows, cols, "trace_backward")?;
+    let mut out = alloc_zeros_bf16(total, device)?;
+    launch_trace_backward(
+        grad_scalar,
+        &mut out,
+        rows,
+        cols,
+        device,
+        TRACE_BACKWARD_U16_PTX,
+        "trace_backward_u16_kernel",
     )?;
     Ok(out)
 }
