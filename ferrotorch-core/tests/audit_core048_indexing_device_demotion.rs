@@ -3,7 +3,7 @@
 //! `masked_scatter`) must
 //!
 //!   1. preserve device residency — CUDA operands in, CUDA output out
-//!      (kernel or documented host round trip + re-upload, R-LOUD-2);
+//!      (resident kernel/composite path, R-LOUD-2);
 //!   2. reject mixed-device operand sets with a structured
 //!      `FerrotorchError::DeviceMismatch` (R-LOUD-1) — torch contract:
 //!      "Expected all tensors to be on the same device, but got index is on
@@ -187,28 +187,28 @@ fn scatter_reduce_sum_include_self_false_cuda_resident_f64() {
     scatter_reduce_sum_include_self_false_cuda_resident::<f64>();
 }
 
-/// The value-aware reduce modes (amax / prod) share the documented host
-/// round trip; residency and gradient devices must still be preserved.
-///
-/// Live torch (cuda, f32):
+/// The value-aware reduce modes run their backward formulas on CUDA-resident
+/// tensors. Live torch (cuda, both dtypes):
 ///   x = tensor([5.,2.,30.,4.], requires_grad=True); s = tensor([5.,20.], rg)
 ///   out = x.scatter_reduce(0, tensor([0,2]), s, 'amax', include_self=True)
 ///   out.backward(tensor([1.,2.,3.,4.]))
 ///   -> out [5., 2., 30., 4.]; x.grad [0.5, 2., 3., 4.]; s.grad [0.5, 0.]
 ///   (the tie at slot 0 splits grad 1.0 evenly between self and src).
-///   x = tensor([2.,3.,4.,5.], rg); s = tensor([6.,7.], rg)
-///   out = x.scatter_reduce(0, tensor([0,2]), s, 'prod', include_self=True)
-///   out.backward(tensor([1.,2.,3.,4.]))
-///   -> out [12., 3., 28., 5.]; x.grad [6., 2., 21., 4.]; s.grad [2., 12.].
-#[test]
-fn scatter_reduce_amax_prod_cuda_resident_f32() {
+///   amin include_self=false with self/src ties at the touched slot counts self
+///   in PyTorch's denominator, then zeros grad_self at touched positions:
+///   x=[1,2,3,4], s=[1,1], idx=[0,0], seed=[6,7,8,9]
+///   -> out [1,2,3,4]; x.grad [0,7,8,9]; s.grad [2,2].
+///   prod zero cases:
+///   x=[2,3,4,5], s=[0,7], idx=[0,2], seed=[1,2,3,4]
+///   -> x.grad [0,2,21,4], s.grad [2,12].
+fn scatter_reduce_value_aware_cuda_resident<T: Float>() {
     ensure_cuda_backend();
     // amax with a self/src tie at slot 0.
-    let x = t_cuda::<f32>(&[5.0, 2.0, 30.0, 4.0], &[4], true);
-    let s = t_cuda::<f32>(&[5.0, 20.0], &[2], true);
+    let x = t_cuda::<T>(&[5.0, 2.0, 30.0, 4.0], &[4], true);
+    let s = t_cuda::<T>(&[5.0, 20.0], &[2], true);
     let out = scatter_reduce(&x, 0, &[0, 2], &[2], &s, ScatterReduce::Amax, true).unwrap();
     assert_cuda_with(&out, "scatter_reduce(amax) output", &[5.0, 2.0, 30.0, 4.0]);
-    let seed = t_cuda::<f32>(&[1.0, 2.0, 3.0, 4.0], &[4], false);
+    let seed = t_cuda::<T>(&[1.0, 2.0, 3.0, 4.0], &[4], false);
     backward_with_grad(&out, Some(&seed)).unwrap();
     assert_cuda_with(
         &grad_of(&x),
@@ -217,12 +217,35 @@ fn scatter_reduce_amax_prod_cuda_resident_f32() {
     );
     assert_cuda_with(&grad_of(&s), "scatter_reduce(amax) grad_src", &[0.5, 0.0]);
 
-    // prod.
-    let x = t_cuda::<f32>(&[2.0, 3.0, 4.0, 5.0], &[4], true);
-    let s = t_cuda::<f32>(&[6.0, 7.0], &[2], true);
+    // amin with include_self=false: self contributes to PyTorch's tie count,
+    // then grad_self is zeroed at touched positions.
+    let x = t_cuda::<T>(&[1.0, 2.0, 3.0, 4.0], &[4], true);
+    let s = t_cuda::<T>(&[1.0, 1.0], &[2], true);
+    let out = scatter_reduce(&x, 0, &[0, 0], &[2], &s, ScatterReduce::Amin, false).unwrap();
+    assert_cuda_with(
+        &out,
+        "scatter_reduce(amin,!include_self) output",
+        &[1.0, 2.0, 3.0, 4.0],
+    );
+    let seed = t_cuda::<T>(&[6.0, 7.0, 8.0, 9.0], &[4], false);
+    backward_with_grad(&out, Some(&seed)).unwrap();
+    assert_cuda_with(
+        &grad_of(&x),
+        "scatter_reduce(amin,!include_self) grad_input",
+        &[0.0, 7.0, 8.0, 9.0],
+    );
+    assert_cuda_with(
+        &grad_of(&s),
+        "scatter_reduce(amin,!include_self) grad_src",
+        &[2.0, 2.0],
+    );
+
+    // prod with ordinary nonzero factors.
+    let x = t_cuda::<T>(&[2.0, 3.0, 4.0, 5.0], &[4], true);
+    let s = t_cuda::<T>(&[6.0, 7.0], &[2], true);
     let out = scatter_reduce(&x, 0, &[0, 2], &[2], &s, ScatterReduce::Prod, true).unwrap();
     assert_cuda_with(&out, "scatter_reduce(prod) output", &[12.0, 3.0, 28.0, 5.0]);
-    let seed = t_cuda::<f32>(&[1.0, 2.0, 3.0, 4.0], &[4], false);
+    let seed = t_cuda::<T>(&[1.0, 2.0, 3.0, 4.0], &[4], false);
     backward_with_grad(&out, Some(&seed)).unwrap();
     assert_cuda_with(
         &grad_of(&x),
@@ -230,6 +253,39 @@ fn scatter_reduce_amax_prod_cuda_resident_f32() {
         &[6.0, 2.0, 21.0, 4.0],
     );
     assert_cuda_with(&grad_of(&s), "scatter_reduce(prod) grad_src", &[2.0, 12.0]);
+
+    // prod with one zero in a scatter bucket: PyTorch uses the exclusive
+    // product branch for that zero source.
+    let x = t_cuda::<T>(&[2.0, 3.0, 4.0, 5.0], &[4], true);
+    let s = t_cuda::<T>(&[0.0, 7.0], &[2], true);
+    let out = scatter_reduce(&x, 0, &[0, 2], &[2], &s, ScatterReduce::Prod, true).unwrap();
+    assert_cuda_with(
+        &out,
+        "scatter_reduce(prod zero) output",
+        &[0.0, 3.0, 28.0, 5.0],
+    );
+    let seed = t_cuda::<T>(&[1.0, 2.0, 3.0, 4.0], &[4], false);
+    backward_with_grad(&out, Some(&seed)).unwrap();
+    assert_cuda_with(
+        &grad_of(&x),
+        "scatter_reduce(prod zero) grad_input",
+        &[0.0, 2.0, 21.0, 4.0],
+    );
+    assert_cuda_with(
+        &grad_of(&s),
+        "scatter_reduce(prod zero) grad_src",
+        &[2.0, 12.0],
+    );
+}
+
+#[test]
+fn scatter_reduce_value_aware_cuda_resident_f32() {
+    scatter_reduce_value_aware_cuda_resident::<f32>();
+}
+
+#[test]
+fn scatter_reduce_value_aware_cuda_resident_f64() {
+    scatter_reduce_value_aware_cuda_resident::<f64>();
 }
 
 /// torch: `cuda_x.scatter_reduce(0, cuda_idx, cpu_src, 'sum')` ->

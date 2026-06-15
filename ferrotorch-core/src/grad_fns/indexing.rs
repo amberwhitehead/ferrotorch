@@ -2242,6 +2242,106 @@ fn same_device(expected: Device, got: Device) -> FerrotorchResult<()> {
     }
 }
 
+fn cuda_full<T: Float>(
+    shape: &[usize],
+    value: T,
+    device: Device,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    if !cuda_f32_f64::<T>() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op });
+    }
+    let ordinal = cuda_ordinal(device, op)?;
+    let numel = crate::shape::checked_numel(shape, op)?;
+    let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let handle = match T::dtype() {
+        DType::F32 => backend.fill_f32(
+            numel,
+            value
+                .to_f32()
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!("{op}: value is not representable as f32"),
+                })?,
+            ordinal,
+        )?,
+        DType::F64 => backend.fill_f64(
+            numel,
+            value
+                .to_f64()
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!("{op}: value is not representable as f64"),
+                })?,
+            ordinal,
+        )?,
+        _ => return Err(FerrotorchError::NotImplementedOnCuda { op }),
+    };
+    Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), false)
+}
+
+fn cuda_gather_index_shape<T: Float>(
+    src: &Tensor<T>,
+    idx_handle: &GpuBufferHandle,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    if !cuda_f32_f64::<T>() {
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "ScatterReduceBackward",
+        });
+    }
+    let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let src_c = src.contiguous()?;
+    let handle = backend.gather_intidx_nd(
+        src_c.gpu_handle()?,
+        idx_handle,
+        input_shape,
+        index_shape,
+        dim,
+    )?;
+    Tensor::from_storage(TensorStorage::gpu(handle), index_shape.to_vec(), false)
+}
+
+fn cuda_scatter_zero_at_index<T: Float>(
+    input: &Tensor<T>,
+    idx_handle: &GpuBufferHandle,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    if !cuda_f32_f64::<T>() {
+        return Err(FerrotorchError::NotImplementedOnCuda {
+            op: "ScatterReduceBackward",
+        });
+    }
+    let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let input_c = input.contiguous()?;
+    let handle = match T::dtype() {
+        DType::F32 => backend.scatter_value_nd_f32(
+            input_c.gpu_handle()?,
+            idx_handle,
+            0.0,
+            input_shape,
+            index_shape,
+            dim,
+        )?,
+        DType::F64 => backend.scatter_value_nd_f64(
+            input_c.gpu_handle()?,
+            idx_handle,
+            0.0,
+            input_shape,
+            index_shape,
+            dim,
+        )?,
+        _ => {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "ScatterReduceBackward",
+            });
+        }
+    };
+    Tensor::from_storage(TensorStorage::gpu(handle), input_shape.to_vec(), false)
+}
+
 /// Reduce mode for `scatter_reduce` mirroring upstream `ReductionType` at
 /// `aten/src/ATen/native/ReductionType.h` (enum SUM / PROD / MAX / MIN /
 /// MEAN). PyTorch's user-facing string-keyword `reduce` arg per
@@ -2762,6 +2862,10 @@ impl<T: Float> ScatterReduceBackward<T> {
         grad_output: &Tensor<T>,
     ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let input_shape = self.input.shape();
+        if grad_output.is_cuda() {
+            return no_grad(|| self.backward_amax_amin_cuda(grad_output));
+        }
+
         let go_data = grad_output.data_vec()?;
         let in_data = self.input.data_vec()?;
         let src_data = self.src.data_vec()?;
@@ -2856,6 +2960,89 @@ impl<T: Float> ScatterReduceBackward<T> {
         Ok(vec![grad_input, grad_src])
     }
 
+    fn backward_amax_amin_cuda(
+        &self,
+        grad_output: &Tensor<T>,
+    ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !cuda_f32_f64::<T>() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "ScatterReduceBackward",
+            });
+        }
+        same_device(self.input.device(), grad_output.device())?;
+        same_device(self.input.device(), self.src.device())?;
+        same_device(self.input.device(), self.result.device())?;
+
+        let input_shape = self.input.shape();
+        let zero = <T as num_traits::Zero>::zero();
+        let input_c = self.input.contiguous()?;
+        let src_slab =
+            cuda_src_prefix_slab_for_index(&self.src, &self.index_shape)?.contiguous()?;
+        let result_c = self.result.contiguous()?;
+        let grad_c = grad_output.contiguous()?;
+        let ordinal = cuda_ordinal(grad_c.device(), "ScatterReduceBackward")?;
+        let idx_handle = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
+
+        let value = cuda_gather_index_shape(
+            &result_c,
+            &idx_handle,
+            input_shape,
+            &self.index_shape,
+            self.dim,
+        )?;
+        let self_is_result = BoolTensor::eq_t(&input_c, &result_c)?;
+        let src_is_result = BoolTensor::eq_t(&src_slab, &value)?;
+        let self_is_result_f = self_is_result.to_float::<T>()?;
+        let src_is_result_f = src_is_result.to_float::<T>()?;
+
+        let zero_input = cuda_full(input_shape, zero, grad_c.device(), "ScatterReduceBackward")?;
+        let src_hits = crate::ops::indexing::scatter_add(
+            &zero_input,
+            self.dim as isize,
+            &self.index,
+            &self.index_shape,
+            &src_is_result_f,
+        )?;
+        let n_to_distribute = crate::grad_fns::arithmetic::add(&self_is_result_f, &src_hits)?;
+        let grad_distributed = crate::grad_fns::arithmetic::div(&grad_c, &n_to_distribute)?;
+
+        let grad_input = if self.input.requires_grad() {
+            let gi = crate::grad_fns::arithmetic::mul(&self_is_result_f, &grad_distributed)?;
+            let gi = if self.include_self {
+                gi
+            } else {
+                cuda_scatter_zero_at_index(
+                    &gi,
+                    &idx_handle,
+                    input_shape,
+                    &self.index_shape,
+                    self.dim,
+                )?
+            };
+            Some(gi)
+        } else {
+            None
+        };
+
+        let grad_src = if self.src.requires_grad() {
+            let gathered = cuda_gather_index_shape(
+                &grad_distributed,
+                &idx_handle,
+                input_shape,
+                &self.index_shape,
+                self.dim,
+            )?;
+            Some(crate::grad_fns::arithmetic::mul(
+                &src_is_result_f,
+                &gathered,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_input, grad_src])
+    }
+
     /// VJP for `reduce='prod'` per upstream `FunctionsManual.cpp:7216-7248`:
     ///
     ///   masked_self = self.masked_fill(self == 0, 1)
@@ -2880,6 +3067,10 @@ impl<T: Float> ScatterReduceBackward<T> {
     /// gradient (the exclusive-product over the non-zero entries).
     fn backward_prod(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let input_shape = self.input.shape();
+        if grad_output.is_cuda() {
+            return no_grad(|| self.backward_prod_cuda(grad_output));
+        }
+
         let go_data = grad_output.data_vec()?;
         let in_data = self.input.data_vec()?;
         let src_data = self.src.data_vec()?;
@@ -3019,6 +3210,135 @@ impl<T: Float> ScatterReduceBackward<T> {
                 TensorStorage::on_device(gs, self.src.device())?,
                 src_shape.to_vec(),
                 false,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_input, grad_src])
+    }
+
+    fn backward_prod_cuda(
+        &self,
+        grad_output: &Tensor<T>,
+    ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !cuda_f32_f64::<T>() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "ScatterReduceBackward",
+            });
+        }
+        same_device(self.input.device(), grad_output.device())?;
+        same_device(self.input.device(), self.src.device())?;
+        same_device(self.input.device(), self.result.device())?;
+
+        let input_shape = self.input.shape();
+        let zero = <T as num_traits::Zero>::zero();
+        let one = <T as num_traits::One>::one();
+        let input_c = self.input.contiguous()?;
+        let src_slab =
+            cuda_src_prefix_slab_for_index(&self.src, &self.index_shape)?.contiguous()?;
+        let result_c = self.result.contiguous()?;
+        let grad_c = grad_output.contiguous()?;
+        let ordinal = cuda_ordinal(grad_c.device(), "ScatterReduceBackward")?;
+        let idx_handle = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
+
+        let zero_input = cuda_full(input_shape, zero, grad_c.device(), "ScatterReduceBackward")?;
+
+        let self_zero = BoolTensor::eq_t(&input_c, &zero_input)?;
+        let masked_self = masked_fill_bt(&input_c, &self_zero, one)?;
+        let masked_self_result = scatter_reduce_cuda_forward(
+            &masked_self,
+            self.dim,
+            &self.index,
+            &self.index_shape,
+            &src_slab,
+            ScatterReduce::Prod,
+            self.include_self,
+        )?;
+
+        let grad_input = if self.input.requires_grad() {
+            let numerator = crate::grad_fns::arithmetic::mul(&grad_c, &masked_self_result)?;
+            let gi = crate::grad_fns::arithmetic::div(&numerator, &masked_self)?;
+            let gi = if self.include_self {
+                gi
+            } else {
+                cuda_scatter_zero_at_index(
+                    &gi,
+                    &idx_handle,
+                    input_shape,
+                    &self.index_shape,
+                    self.dim,
+                )?
+            };
+            Some(gi)
+        } else {
+            None
+        };
+
+        let grad_src = if self.src.requires_grad() {
+            let zero_src = cuda_full(
+                &self.index_shape,
+                zero,
+                grad_c.device(),
+                "ScatterReduceBackward",
+            )?;
+            let one_src = cuda_full(
+                &self.index_shape,
+                one,
+                grad_c.device(),
+                "ScatterReduceBackward",
+            )?;
+            let src_zero = BoolTensor::eq_t(&src_slab, &zero_src)?;
+            let src_zero_f = src_zero.to_float::<T>()?;
+            let zero_count_per_dst = crate::ops::indexing::scatter_add(
+                &zero_input,
+                self.dim as isize,
+                &self.index,
+                &self.index_shape,
+                &src_zero_f,
+            )?;
+            let src_num_zeros = cuda_gather_index_shape(
+                &zero_count_per_dst,
+                &idx_handle,
+                input_shape,
+                &self.index_shape,
+                self.dim,
+            )?;
+            let src_one_zero_count = BoolTensor::eq_t(&src_num_zeros, &one_src)?;
+            let src_single_zero = src_zero.and(&src_one_zero_count)?;
+            let masked_src = masked_fill_bt(&src_slab, &src_single_zero, one)?;
+            let masked_src_result = scatter_reduce_cuda_forward(
+                &input_c,
+                self.dim,
+                &self.index,
+                &self.index_shape,
+                &masked_src,
+                ScatterReduce::Prod,
+                self.include_self,
+            )?;
+
+            let single_zero_num = crate::grad_fns::arithmetic::mul(&grad_c, &masked_src_result)?;
+            let single_zero_branch = cuda_gather_index_shape(
+                &single_zero_num,
+                &idx_handle,
+                input_shape,
+                &self.index_shape,
+                self.dim,
+            )?;
+            let result_num = crate::grad_fns::arithmetic::mul(&grad_c, &result_c)?;
+            let result_branch_num = cuda_gather_index_shape(
+                &result_num,
+                &idx_handle,
+                input_shape,
+                &self.index_shape,
+                self.dim,
+            )?;
+            let denom = masked_fill_bt(&src_slab, &src_zero, one)?;
+            let result_branch = crate::grad_fns::arithmetic::div(&result_branch_num, &denom)?;
+            Some(crate::ops::indexing::where_cond_bt(
+                &src_single_zero,
+                &single_zero_branch,
+                &result_branch,
             )?)
         } else {
             None
