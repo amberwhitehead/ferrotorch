@@ -7644,6 +7644,36 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
+    fn clamp_bf16_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        min_val: f32,
+        max_val: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::bf16::gpu_clamp_bf16(buf, min_val, max_val, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn clamp_backward_bf16_bf16(
+        &self,
+        grad: &GpuBufferHandle,
+        input: &GpuBufferHandle,
+        min_val: f32,
+        max_val: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let g_buf = Self::unwrap_buffer_bf16(grad)?;
+        let i_buf = Self::unwrap_buffer_bf16(input)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::bf16::gpu_clamp_backward_bf16(g_buf, i_buf, min_val, max_val, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, input.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
     fn add_bf16_bf16(
         &self,
         a: &GpuBufferHandle,
@@ -8304,6 +8334,36 @@ impl GpuBackend for CudaBackendImpl {
         let dev = self.device(a.device_ordinal())?;
         let result = crate::f16::gpu_relu_f16(buf, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn clamp_f16(
+        &self,
+        a: &GpuBufferHandle,
+        min_val: f32,
+        max_val: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::f16::gpu_clamp_f16(buf, min_val, max_val, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn clamp_backward_f16(
+        &self,
+        grad: &GpuBufferHandle,
+        input: &GpuBufferHandle,
+        min_val: f32,
+        max_val: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let g_buf = Self::unwrap_buffer_f16(grad)?;
+        let i_buf = Self::unwrap_buffer_f16(input)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::f16::gpu_clamp_backward_f16(g_buf, i_buf, min_val, max_val, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, input.device_ordinal()))
     }
 
     #[cfg(feature = "cuda")]

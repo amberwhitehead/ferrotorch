@@ -379,6 +379,114 @@ DONE:
 }
 ";
 
+const CLAMP_F16_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry clamp_f16_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n,
+    .param .f32 min_val,
+    .param .f32 max_val
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %in, %out, %off;
+    .reg .b16 %x_h, %out_h;
+    .reg .f32 %x, %mn, %mx, %result;
+    .reg .pred %p;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+    ld.param.f32 %mn, [min_val];
+    ld.param.f32 %mx, [max_val];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %in, %in, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.b16 %x_h, [%in];
+    cvt.f32.f16 %x, %x_h;
+    max.f32 %result, %x, %mn;
+    min.f32 %result, %result, %mx;
+    cvt.rn.f16.f32 %out_h, %result;
+    st.global.b16 [%out], %out_h;
+
+DONE:
+    ret;
+}
+";
+
+const CLAMP_BACKWARD_F16_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry clamp_backward_f16_kernel(
+    .param .u64 grad_ptr,
+    .param .u64 input_ptr,
+    .param .u64 out_ptr,
+    .param .f32 min_val,
+    .param .f32 max_val,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %g, %x, %out, %off;
+    .reg .b16 %g_h, %x_h, %out_h;
+    .reg .f32 %vg, %vx, %vmin, %vmax, %vr;
+    .reg .pred %p, %plo, %phi, %pin;
+
+    ld.param.u64 %g, [grad_ptr];
+    ld.param.u64 %x, [input_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.f32 %vmin, [min_val];
+    ld.param.f32 %vmax, [max_val];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %g, %g, %off;
+    add.u64 %x, %x, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.b16 %g_h, [%g];
+    ld.global.b16 %x_h, [%x];
+    cvt.f32.f16 %vg, %g_h;
+    cvt.f32.f16 %vx, %x_h;
+
+    setp.ge.f32 %plo, %vx, %vmin;
+    setp.le.f32 %phi, %vx, %vmax;
+    and.pred %pin, %plo, %phi;
+
+    mov.f32 %vr, 0f00000000;
+    @%pin mov.f32 %vr, %vg;
+    cvt.rn.f16.f32 %out_h, %vr;
+    st.global.b16 [%out], %out_h;
+
+DONE:
+    ret;
+}
+";
+
 // GELU: 0.5 * x * (1 + erf(x / sqrt(2))). Hastings erf approximation in f32.
 const GELU_F16_PTX: &str = "\
 .version 7.0
@@ -586,6 +694,106 @@ fn launch_unary(
     Ok(out)
 }
 
+fn launch_clamp(
+    a: &cudarc::driver::CudaSlice<u16>,
+    min_val: f32,
+    max_val: f32,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let n = a.len();
+    if n == 0 {
+        return Ok(device.stream().alloc_zeros::<u16>(0)?);
+    }
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = get_or_compile(
+        ctx,
+        CLAMP_F16_PTX,
+        "clamp_f16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "clamp_f16_kernel",
+        source: e,
+    })?;
+    let mut out = stream.alloc_zeros::<u16>(n)?;
+    let cfg = launch_1d(n);
+    let n_u32 = n as u32;
+    // SAFETY:
+    // - `f` is the `clamp_f16_kernel` PTX entry with ABI
+    //   `(in_ptr, out_ptr, n, min_val, max_val)`, matching the args below.
+    // - `a` is an f16 u16 buffer of length `n`; `out` is freshly allocated
+    //   with `n` u16 elements and cannot alias `a`.
+    // - The kernel guards `i < n` before reading or writing; `n_u32` is the
+    //   same cast used by `launch_1d`.
+    // - Scalar args are stack f32 values whose lifetimes cover the launch call.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a)
+            .arg(&mut out)
+            .arg(&n_u32)
+            .arg(&min_val)
+            .arg(&max_val)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+fn launch_clamp_backward(
+    grad: &cudarc::driver::CudaSlice<u16>,
+    input: &cudarc::driver::CudaSlice<u16>,
+    min_val: f32,
+    max_val: f32,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    if grad.len() != input.len() {
+        return Err(GpuError::LengthMismatch {
+            a: grad.len(),
+            b: input.len(),
+        });
+    }
+    let n = input.len();
+    if n == 0 {
+        return Ok(device.stream().alloc_zeros::<u16>(0)?);
+    }
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = get_or_compile(
+        ctx,
+        CLAMP_BACKWARD_F16_PTX,
+        "clamp_backward_f16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "clamp_backward_f16_kernel",
+        source: e,
+    })?;
+    let mut out = stream.alloc_zeros::<u16>(n)?;
+    let cfg = launch_1d(n);
+    let n_u32 = n as u32;
+    // SAFETY:
+    // - `f` is the `clamp_backward_f16_kernel` entry with ABI
+    //   `(grad_ptr, input_ptr, out_ptr, min_val, max_val, n)`.
+    // - `grad.len() == input.len() == n` is checked above; `out` is freshly
+    //   allocated for `n` u16 elements and cannot alias either input.
+    // - The PTX bounds-check guards every read/write with `i < n`.
+    // - Scalar arg lifetimes cover the launch call, and `n_u32` matches
+    //   `launch_1d`'s cast.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(grad)
+            .arg(input)
+            .arg(&mut out)
+            .arg(&min_val)
+            .arg(&max_val)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
 /// Elementwise `out = a * b` on f16 (u16-stored) GPU buffers.
 pub fn gpu_mul_f16(
     a: &cudarc::driver::CudaSlice<u16>,
@@ -636,6 +844,29 @@ pub fn gpu_relu_f16(
     device: &GpuDevice,
 ) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
     launch_unary(a, device, RELU_F16_PTX, "relu_f16_kernel")
+}
+
+/// Elementwise scalar clamp on f16 GPU buffers. Computed in f32 opmath and
+/// rounded back to f16 with round-to-nearest-even.
+pub fn gpu_clamp_f16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    min_val: f32,
+    max_val: f32,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_clamp(a, min_val, max_val, device)
+}
+
+/// Backward for scalar f16 clamp. Grad/input are f16 buffers; comparisons use
+/// f32 opmath and output is rounded back to f16.
+pub fn gpu_clamp_backward_f16(
+    grad: &cudarc::driver::CudaSlice<u16>,
+    input: &cudarc::driver::CudaSlice<u16>,
+    min_val: f32,
+    max_val: f32,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_clamp_backward(grad, input, min_val, max_val, device)
 }
 
 /// Apply GELU activation `gelu(x) = 0.5 * x * (1 + erf(x / sqrt(2)))`

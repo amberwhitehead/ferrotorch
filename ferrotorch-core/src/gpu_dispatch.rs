@@ -3127,6 +3127,24 @@ pub trait GpuBackend: Send + Sync {
             message: "clamp_f64 GPU op not yet implemented".into(),
         })
     }
+    fn clamp_bf16_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _min_val: f32,
+        _max_val: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "clamp_bf16_bf16",
+        })
+    }
+    fn clamp_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _min_val: f32,
+        _max_val: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "clamp_f16" })
+    }
 
     /// VJP for `clamp(x, min, max)`: `out[i] = grad[i]` when `x[i]` is in
     /// `[min, max]`, else `0`. (#524)
@@ -3152,6 +3170,32 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::InvalidArgument {
             message: "clamp_backward_f64 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// bf16 counterpart. Bounds are supplied in f32 opmath width.
+    fn clamp_backward_bf16_bf16(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+        _min_val: f32,
+        _max_val: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "clamp_backward_bf16_bf16",
+        })
+    }
+
+    /// f16 counterpart. Bounds are supplied in f32 opmath width.
+    fn clamp_backward_f16(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+        _min_val: f32,
+        _max_val: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "clamp_backward_f16",
         })
     }
 

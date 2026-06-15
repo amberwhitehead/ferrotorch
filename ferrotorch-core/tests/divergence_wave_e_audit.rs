@@ -14,7 +14,7 @@
 #![allow(clippy::approx_constant)]
 
 use ferrotorch_core::grad_fns::reduction::sum;
-use ferrotorch_core::grad_fns::transcendental::clamp;
+use ferrotorch_core::grad_fns::transcendental::{clamp, clamp_max, clamp_min, clamp_opt, clip_opt};
 use ferrotorch_core::{Tensor, TensorStorage, gather};
 
 fn t<T: ferrotorch_core::Float>(data: Vec<T>, shape: Vec<usize>) -> Tensor<T> {
@@ -166,6 +166,32 @@ fn audit_1214_clamp_opt_nan_bound_fills_with_nan() {
 }
 
 #[test]
+fn audit_1214_clamp_opt_one_sided_nan_preserves_values() {
+    // Live torch 2.11.0+cu130: `x.clamp(min=nan)` and `x.clamp(max=nan)`
+    // leave the forward values unchanged, while the dedicated
+    // `clamp_min/max(nan)` APIs fill with NaN.
+    let a = t::<f32>(vec![-1.0, 0.5, 2.0], vec![3]);
+    a.clamp_opt_(Some(f32::NAN), None)
+        .expect("torch Tensor.clamp_(min=nan) accepts the bound");
+    assert_eq!(a.data_vec().unwrap(), vec![-1.0, 0.5, 2.0]);
+
+    let b = t::<f32>(vec![-1.0, 0.5, 2.0], vec![3]);
+    b.clamp_opt_(None, Some(f32::NAN))
+        .expect("torch Tensor.clamp_(max=nan) accepts the bound");
+    assert_eq!(b.data_vec().unwrap(), vec![-1.0, 0.5, 2.0]);
+
+    let c = t::<f32>(vec![-1.0, 0.5, 2.0], vec![3]);
+    c.clamp_min_(f32::NAN)
+        .expect("torch Tensor.clamp_min_(nan) accepts the bound");
+    assert!(c.data_vec().unwrap().iter().all(|x| x.is_nan()));
+
+    let d = t::<f32>(vec![-1.0, 0.5, 2.0], vec![3]);
+    d.clamp_max_(f32::NAN)
+        .expect("torch Tensor.clamp_max_(nan) accepts the bound");
+    assert!(d.data_vec().unwrap().iter().all(|x| x.is_nan()));
+}
+
+#[test]
 fn audit_1214_clamp_opt_min_greater_than_max_matches_torch_scalar_kernel() {
     let a = t::<f32>(vec![1.0], vec![1]);
     a.clamp_opt_(Some(5.0_f32), Some(1.0_f32))
@@ -209,6 +235,102 @@ fn audit_1214_out_of_place_clamp_min_greater_than_max_matches_torch_scalar_kerne
     let a = t::<f32>(vec![-1.0, 0.5, 2.0], vec![3]);
     let out = clamp(&a, 5.0, 1.0).expect("torch scalar clamp accepts min > max");
     assert_eq!(out.data_vec().unwrap(), vec![1.0, 1.0, 1.0]);
+}
+
+#[test]
+fn audit_1214_out_of_place_clamp_opt_lower_only() {
+    let a = t::<f32>(vec![-1.0, 0.0, 0.5, 2.0], vec![4]);
+    let out = clamp_opt(&a, Some(0.0), None).expect("torch clamp(min=...) succeeds");
+    assert_eq!(out.data_vec().unwrap(), vec![0.0, 0.0, 0.5, 2.0]);
+
+    let via_method = a
+        .clamp_opt_t(Some(0.0), None)
+        .expect("Tensor.clamp(min=...) method succeeds");
+    assert_eq!(via_method.data_vec().unwrap(), vec![0.0, 0.0, 0.5, 2.0]);
+
+    let via_clip = clip_opt(&a, Some(0.0), None).expect("torch clip aliases clamp");
+    assert_eq!(via_clip.data_vec().unwrap(), vec![0.0, 0.0, 0.5, 2.0]);
+}
+
+#[test]
+fn audit_1214_out_of_place_clamp_opt_upper_only() {
+    let a = t::<f32>(vec![-1.0, 0.5, 1.0, 2.0], vec![4]);
+    let out = clamp_opt(&a, None, Some(1.0)).expect("torch clamp(max=...) succeeds");
+    assert_eq!(out.data_vec().unwrap(), vec![-1.0, 0.5, 1.0, 1.0]);
+
+    let via_method = a
+        .clamp_opt_t(None, Some(1.0))
+        .expect("Tensor.clamp(max=...) method succeeds");
+    assert_eq!(via_method.data_vec().unwrap(), vec![-1.0, 0.5, 1.0, 1.0]);
+}
+
+#[test]
+fn audit_1214_out_of_place_clamp_opt_both_none_rejected() {
+    let a = t::<f32>(vec![1.0], vec![1]);
+    assert!(
+        clamp_opt(&a, None, None).is_err(),
+        "torch.clamp(min=None, max=None) errors"
+    );
+    assert!(
+        a.clamp_opt_t(None, None).is_err(),
+        "Tensor.clamp(min=None, max=None) errors"
+    );
+}
+
+#[test]
+fn audit_1214_out_of_place_one_sided_nan_split_matches_torch() {
+    let a = tracked_t::<f32>(vec![-1.0, 0.5, 2.0], vec![3]);
+    let out =
+        clamp_opt(&a, Some(f32::NAN), None).expect("torch.clamp(input, min=nan) accepts the bound");
+    assert_eq!(out.data_vec().unwrap(), vec![-1.0, 0.5, 2.0]);
+    let loss = sum(&out).expect("sum");
+    loss.backward().expect("backward");
+    assert_eq!(
+        a.grad().unwrap().unwrap().data_vec().unwrap(),
+        vec![0.0, 0.0, 0.0],
+        "torch zeros the gradient when the single supplied clamp bound is NaN"
+    );
+
+    let b = t::<f32>(vec![-1.0, 0.5, 2.0], vec![3]);
+    let min_out = clamp_min(&b, f32::NAN).expect("torch.clamp_min accepts NaN");
+    assert!(min_out.data_vec().unwrap().iter().all(|x| x.is_nan()));
+
+    let max_out = clamp_max(&b, f32::NAN).expect("torch.clamp_max accepts NaN");
+    assert!(max_out.data_vec().unwrap().iter().all(|x| x.is_nan()));
+}
+
+#[test]
+fn audit_1214_out_of_place_clamp_min_max_backward_boundaries() {
+    let x = tracked_t::<f32>(vec![-1.0, 0.0, 0.5, 1.0, 2.0], vec![5]);
+    let y = clamp_min(&x, 0.0).expect("clamp_min");
+    sum(&y).expect("sum").backward().expect("backward");
+    assert_eq!(
+        x.grad().unwrap().unwrap().data_vec().unwrap(),
+        vec![0.0, 1.0, 1.0, 1.0, 1.0],
+        "torch keeps the boundary gradient for clamp_min"
+    );
+
+    let z = tracked_t::<f32>(vec![-1.0, 0.0, 0.5, 1.0, 2.0], vec![5]);
+    let y = clamp_max(&z, 1.0).expect("clamp_max");
+    sum(&y).expect("sum").backward().expect("backward");
+    assert_eq!(
+        z.grad().unwrap().unwrap().data_vec().unwrap(),
+        vec![1.0, 1.0, 1.0, 1.0, 0.0],
+        "torch keeps the boundary gradient for clamp_max"
+    );
+}
+
+#[test]
+fn audit_1214_out_of_place_clamp_min_max_methods() {
+    let a = t::<f32>(vec![-1.0, 0.5, 2.0], vec![3]);
+    assert_eq!(
+        a.clamp_min_t(0.0).unwrap().data_vec().unwrap(),
+        vec![0.0, 0.5, 2.0]
+    );
+    assert_eq!(
+        a.clamp_max_t(1.0).unwrap().data_vec().unwrap(),
+        vec![-1.0, 0.5, 1.0]
+    );
 }
 
 #[test]

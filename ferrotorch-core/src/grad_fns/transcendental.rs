@@ -13,7 +13,7 @@
 //! | REQ-2 (`log`) | SHIPPED | `log` + `LogBackward` consumed by `Tensor::log_t`, forward-AD primal, JIT interpreter, `MultivariateNormal`, `ExpTransform` inverse, Dirichlet log-prob. |
 //! | REQ-3 (`sin`) | SHIPPED | `sin` + `SinBackward` consumed by `Tensor::sin_t`, forward-AD primal, and `CosBackward`'s GPU path. |
 //! | REQ-4 (`cos`) | SHIPPED | `cos` + `CosBackward` consumed by `Tensor::cos_t`, forward-AD primal, and `SinBackward`'s GPU path. |
-//! | REQ-5 (`clamp`) | SHIPPED | `clamp` + `ClampBackward` (GPU fast path per #524) consumed by `Tensor::clamp_t`, `SigmoidTransform`, `BCEWithLogitsLoss`, `ReLU6`, and `Hardtanh`. |
+//! | REQ-5 (`clamp`) | SHIPPED | `clamp` / `clamp_opt` / `clamp_min` / `clamp_max` + `ClampBackward` (CUDA f32/f64/f16/bf16 fast paths) consumed by tensor clamp/clip methods, `SigmoidTransform`, `BCEWithLogitsLoss`, `ReLU6`, and `Hardtanh`. |
 //! | REQ-6 (`exp2`) | SHIPPED | `exp2` + `Exp2Backward` consumed by `Tensor::exp2_t`; closes #1303. |
 //! | REQ-7 (`expm1`) | SHIPPED | `expm1` + `Expm1Backward` consumed by `Tensor::expm1_t`; closes #1305. |
 //! | REQ-8 (`log2`) | SHIPPED | `log2` + `Log2Backward` consumed by `Tensor::log2_t`; closes #1307. |
@@ -179,6 +179,13 @@ fn clamp_tensor_from_storage<T: Float>(
     } else {
         Tensor::from_storage(storage, input.shape().to_vec(), false)
     }
+}
+
+fn clone_logical_storage<T: Float>(
+    input: &Tensor<T>,
+) -> FerrotorchResult<(TensorStorage<T>, Vec<usize>)> {
+    let packed = crate::methods::contiguous_t(input)?;
+    packed.into_storage_and_shape()
 }
 
 // ===========================================================================
@@ -572,8 +579,11 @@ struct ClampBackward<T: Float> {
 impl<T: Float> GradFn<T> for ClampBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.input.requires_grad() {
-            // GPU-native path for f32/f64 (#524).
-            if grad_output.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+            // GPU-native path for all CUDA floating dtypes this crate stores
+            // (`f32`, `f64`, `f16`, `bf16`). Boundaries are compared in the
+            // dtype's opmath width: f32 for reduced-precision lanes, f64 for
+            // f64.
+            if grad_output.is_cuda() {
                 let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                 let result_h = if is_f32::<T>() {
                     let min_f = self.min.to_f64().unwrap_or(f64::NEG_INFINITY) as f32;
@@ -584,7 +594,7 @@ impl<T: Float> GradFn<T> for ClampBackward<T> {
                         min_f,
                         max_f,
                     )?
-                } else {
+                } else if is_f64::<T>() {
                     let min_f = self.min.to_f64().unwrap_or(f64::NEG_INFINITY);
                     let max_f = self.max.to_f64().unwrap_or(f64::INFINITY);
                     backend.clamp_backward_f64(
@@ -593,6 +603,28 @@ impl<T: Float> GradFn<T> for ClampBackward<T> {
                         min_f,
                         max_f,
                     )?
+                } else if is_f16::<T>() {
+                    let min_f = scalar_to_f32(self.min, "ClampBackward")?;
+                    let max_f = scalar_to_f32(self.max, "ClampBackward")?;
+                    backend.clamp_backward_f16(
+                        grad_output.gpu_handle()?,
+                        self.input.gpu_handle()?,
+                        min_f,
+                        max_f,
+                    )?
+                } else if is_bf16::<T>() {
+                    let min_f = scalar_to_f32(self.min, "ClampBackward")?;
+                    let max_f = scalar_to_f32(self.max, "ClampBackward")?;
+                    backend.clamp_backward_bf16_bf16(
+                        grad_output.gpu_handle()?,
+                        self.input.gpu_handle()?,
+                        min_f,
+                        max_f,
+                    )?
+                } else {
+                    return Err(FerrotorchError::NotImplementedOnCuda {
+                        op: "ClampBackward",
+                    });
                 };
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
@@ -640,42 +672,74 @@ impl<T: Float> GradFn<T> for ClampBackward<T> {
     }
 }
 
-/// Differentiable elementwise scalar clamp using PyTorch's
-/// `min(max(x, min), max)` order.
-///
-/// Gradient flows through where `min <= x[i] <= max`; degenerate scalar
-/// bounds such as `min > max` and NaN bounds produce zero input gradient
-/// through the same `ClampBackward` predicate.
-pub fn clamp<T: Float>(input: &Tensor<T>, min: T, max: T) -> FerrotorchResult<Tensor<T>> {
-    let min_is_nan = num_traits::Float::is_nan(min);
-    let max_is_nan = num_traits::Float::is_nan(max);
-    if min_is_nan || max_is_nan {
-        let nan = <T as num_traits::Float>::nan();
-        if input.is_cuda()
-            && let Some(storage) = cuda_fill_storage(input, nan, "clamp")?
-        {
-            return clamp_tensor_from_storage(input, storage, min, max);
+fn clamp_fill_nan<T: Float>(
+    input: &Tensor<T>,
+    backward_min: T,
+    backward_max: T,
+    op_name: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let nan = <T as num_traits::Float>::nan();
+    if input.is_cuda() {
+        if let Some(storage) = cuda_fill_storage(input, nan, op_name)? {
+            return clamp_tensor_from_storage(input, storage, backward_min, backward_max);
         }
-        let storage = TensorStorage::cpu(vec![nan; input.numel()]);
-        return clamp_tensor_from_storage(input, storage, min, max);
+        return Err(FerrotorchError::NotImplementedOnCuda { op: op_name });
     }
+    let storage = TensorStorage::cpu(vec![nan; input.numel()]);
+    clamp_tensor_from_storage(input, storage, backward_min, backward_max)
+}
 
-    // GPU fast path for f32/f64
-    if input.is_cuda()
-        && (is_f32::<T>() || is_f64::<T>())
-        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
-    {
-        // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
-        // buffer before the elementwise kernel reads element 0.
-        let input = input.contiguous()?;
+fn clamp_identity_forward<T: Float>(
+    input: &Tensor<T>,
+    backward_min: T,
+    backward_max: T,
+) -> FerrotorchResult<Tensor<T>> {
+    let (storage, shape) = clone_logical_storage(input)?;
+    debug_assert_eq!(shape, input.shape());
+    clamp_tensor_from_storage(input, storage, backward_min, backward_max)
+}
+
+fn clamp_with_forward_and_backward_bounds<T: Float>(
+    input: &Tensor<T>,
+    forward_min: T,
+    forward_max: T,
+    backward_min: T,
+    backward_max: T,
+    op_name: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        // Materialize narrowed/non-contiguous CUDA views to a packed device
+        // buffer before handing only a raw buffer handle to the elementwise
+        // kernel. `methods::contiguous_t` uses CUDA strided-copy kernels for
+        // rank <= 8 and refuses unsupported CUDA materializations loudly.
+        let input = crate::methods::contiguous_t(input)?;
         let handle = if is_f32::<T>() {
-            let min_f32 = scalar_to_f32(min, "clamp")?;
-            let max_f32 = scalar_to_f32(max, "clamp")?;
-            backend.clamp_f32(input.gpu_handle()?, min_f32, max_f32)?
+            backend.clamp_f32(
+                input.gpu_handle()?,
+                scalar_to_f32(forward_min, op_name)?,
+                scalar_to_f32(forward_max, op_name)?,
+            )?
+        } else if is_f64::<T>() {
+            backend.clamp_f64(
+                input.gpu_handle()?,
+                scalar_to_f64(forward_min, op_name)?,
+                scalar_to_f64(forward_max, op_name)?,
+            )?
+        } else if is_f16::<T>() {
+            backend.clamp_f16(
+                input.gpu_handle()?,
+                scalar_to_f32(forward_min, op_name)?,
+                scalar_to_f32(forward_max, op_name)?,
+            )?
+        } else if is_bf16::<T>() {
+            backend.clamp_bf16_bf16(
+                input.gpu_handle()?,
+                scalar_to_f32(forward_min, op_name)?,
+                scalar_to_f32(forward_max, op_name)?,
+            )?
         } else {
-            let min_f64 = scalar_to_f64(min, "clamp")?;
-            let max_f64 = scalar_to_f64(max, "clamp")?;
-            backend.clamp_f64(input.gpu_handle()?, min_f64, max_f64)?
+            return Err(FerrotorchError::NotImplementedOnCuda { op: op_name });
         };
         return if needs_grad_unary(&input) {
             Tensor::from_operation(
@@ -683,8 +747,8 @@ pub fn clamp<T: Float>(input: &Tensor<T>, min: T, max: T) -> FerrotorchResult<Te
                 input.shape().to_vec(),
                 Arc::new(ClampBackward {
                     input: input.clone(),
-                    min,
-                    max,
+                    min: backward_min,
+                    max: backward_max,
                 }),
             )
         } else {
@@ -692,9 +756,7 @@ pub fn clamp<T: Float>(input: &Tensor<T>, min: T, max: T) -> FerrotorchResult<Te
         };
     }
 
-    // CPU path
-    let output = unary_map(input, |x| clamp_scalar_pair(x, min, max))?;
-
+    let output = unary_map(input, |x| clamp_scalar_pair(x, forward_min, forward_max))?;
     if needs_grad_unary(input) {
         let (storage, shape) = output.into_storage_and_shape()?;
         Tensor::from_operation(
@@ -702,13 +764,99 @@ pub fn clamp<T: Float>(input: &Tensor<T>, min: T, max: T) -> FerrotorchResult<Te
             shape,
             Arc::new(ClampBackward {
                 input: input.clone(),
-                min,
-                max,
+                min: backward_min,
+                max: backward_max,
             }),
         )
     } else {
         Ok(output)
     }
+}
+
+/// Differentiable elementwise scalar clamp using PyTorch's optional-bound
+/// `torch.clamp(input, min=None, max=None)` contract.
+///
+/// Two supplied bounds use `min(max(x, min), max)` order. Single supplied
+/// NaN bounds mirror live PyTorch's `torch.clamp(x, min=nan)` /
+/// `torch.clamp(x, max=nan)` behavior: forward values are preserved, while the
+/// saved NaN bound makes the backward predicate false for every input.
+pub fn clamp_opt<T: Float>(
+    input: &Tensor<T>,
+    min: Option<T>,
+    max: Option<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    if min.is_none() && max.is_none() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "torch.clamp: At least one of 'min' or 'max' must not be None".into(),
+        });
+    }
+
+    let neg_inf = <T as num_traits::Float>::neg_infinity();
+    let inf = <T as num_traits::Float>::infinity();
+    match (min, max) {
+        (Some(lo), Some(hi)) => {
+            if num_traits::Float::is_nan(lo) || num_traits::Float::is_nan(hi) {
+                clamp_fill_nan(input, lo, hi, "clamp")
+            } else {
+                clamp_with_forward_and_backward_bounds(input, lo, hi, lo, hi, "clamp")
+            }
+        }
+        (Some(lo), None) => {
+            if num_traits::Float::is_nan(lo) {
+                clamp_identity_forward(input, lo, inf)
+            } else {
+                clamp_with_forward_and_backward_bounds(input, lo, inf, lo, inf, "clamp")
+            }
+        }
+        (None, Some(hi)) => {
+            if num_traits::Float::is_nan(hi) {
+                clamp_identity_forward(input, neg_inf, hi)
+            } else {
+                clamp_with_forward_and_backward_bounds(input, neg_inf, hi, neg_inf, hi, "clamp")
+            }
+        }
+        (None, None) => unreachable!("checked above"),
+    }
+}
+
+/// Differentiable elementwise scalar clamp using PyTorch's
+/// `min(max(x, min), max)` order.
+pub fn clamp<T: Float>(input: &Tensor<T>, min: T, max: T) -> FerrotorchResult<Tensor<T>> {
+    clamp_opt(input, Some(min), Some(max))
+}
+
+/// Differentiable `torch.clamp_min(input, min)` scalar overload.
+pub fn clamp_min<T: Float>(input: &Tensor<T>, min: T) -> FerrotorchResult<Tensor<T>> {
+    let max = <T as num_traits::Float>::infinity();
+    if num_traits::Float::is_nan(min) {
+        clamp_fill_nan(input, min, max, "clamp_min")
+    } else {
+        clamp_with_forward_and_backward_bounds(input, min, max, min, max, "clamp_min")
+    }
+}
+
+/// Differentiable `torch.clamp_max(input, max)` scalar overload.
+pub fn clamp_max<T: Float>(input: &Tensor<T>, max: T) -> FerrotorchResult<Tensor<T>> {
+    let min = <T as num_traits::Float>::neg_infinity();
+    if num_traits::Float::is_nan(max) {
+        clamp_fill_nan(input, min, max, "clamp_max")
+    } else {
+        clamp_with_forward_and_backward_bounds(input, min, max, min, max, "clamp_max")
+    }
+}
+
+/// `torch.clip` alias for `torch.clamp`.
+pub fn clip_opt<T: Float>(
+    input: &Tensor<T>,
+    min: Option<T>,
+    max: Option<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    clamp_opt(input, min, max)
+}
+
+/// Two-bound `torch.clip` alias for `torch.clamp`.
+pub fn clip<T: Float>(input: &Tensor<T>, min: T, max: T) -> FerrotorchResult<Tensor<T>> {
+    clamp(input, min, max)
 }
 
 // ===========================================================================

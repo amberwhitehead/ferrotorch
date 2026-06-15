@@ -31,7 +31,7 @@
 //! | REQ-7 (`sub_`) | NOT-STARTED | shape-strict, no `alpha` kwarg, no broadcasting. Blocker #1211. |
 //! | REQ-8 (`mul_`) | NOT-STARTED | shape-strict; no broadcasting; no non-test consumer. Blocker #1212. |
 //! | REQ-9 (`div_`) | NOT-STARTED | shape-strict; missing `rounding_mode` kwarg; no non-test consumer. Blocker #1213. |
-//! | REQ-10 (`clamp_`) | NOT-STARTED | `clamp_` delegates to `clamp_opt_`, which supports PyTorch scalar optional-bound semantics, NaN-bound fill, `min > max`, and f32/f64 CUDA-resident two-bound/one-sided paths; no non-test consumer. Blocker #1214. |
+//! | REQ-10 (`clamp_`) | NOT-STARTED | `clamp_` delegates to `clamp_opt_`, which supports PyTorch scalar optional-bound semantics, live-torch one-sided NaN behavior, dedicated `clamp_min_`/`clamp_max_`, `min > max`, and f32/f64/f16/bf16 CUDA-resident two-bound/one-sided paths; no non-test consumer. Blocker #1214. |
 //! | REQ-11 (`sub_scaled_`) | SHIPPED | `Tensor::sub_scaled_` delegates to `self.add_scaled_(other, -alpha)` mirroring upstream's `TORCH_IMPL_FUNC(sub_out) { add_stub(device_type(), *this, -alpha); }`; the out-of-place sibling `arithmetic::sub_scaled` is the symmetric production consumer that establishes torch's `sub(alpha=k)` parity across both surfaces; parity-sweep `[sub] 88/88 passed (0 skipped, 0 failed)` (closes #1192). |
 //!
 //! # Autograd safety
@@ -137,7 +137,7 @@ fn scalar_to_f64<T: Float>(value: T, op_name: &str) -> FerrotorchResult<f64> {
 fn cuda_fill_storage<T: Float>(
     tensor: &Tensor<T>,
     value: T,
-    op_name: &str,
+    op_name: &'static str,
 ) -> FerrotorchResult<Option<TensorStorage<T>>> {
     if !tensor.is_cuda() {
         return Ok(None);
@@ -155,7 +155,7 @@ fn cuda_fill_storage<T: Float>(
     } else if is_f16::<T>() {
         backend.fill_f16(tensor.numel(), scalar_to_f32(value, op_name)?, ordinal)?
     } else {
-        return Ok(None);
+        return Err(FerrotorchError::NotImplementedOnCuda { op: op_name });
     };
     Ok(Some(TensorStorage::gpu(handle)))
 }
@@ -164,7 +164,7 @@ fn cuda_clamp_pair_storage<T: Float>(
     tensor: &Tensor<T>,
     min: T,
     max: T,
-    op_name: &str,
+    op_name: &'static str,
 ) -> FerrotorchResult<Option<TensorStorage<T>>> {
     if !tensor.is_cuda() {
         return Ok(None);
@@ -182,10 +182,42 @@ fn cuda_clamp_pair_storage<T: Float>(
             scalar_to_f64(min, op_name)?,
             scalar_to_f64(max, op_name)?,
         )?
+    } else if is_f16::<T>() {
+        backend.clamp_f16(
+            tensor.gpu_handle()?,
+            scalar_to_f32(min, op_name)?,
+            scalar_to_f32(max, op_name)?,
+        )?
+    } else if is_bf16::<T>() {
+        backend.clamp_bf16_bf16(
+            tensor.gpu_handle()?,
+            scalar_to_f32(min, op_name)?,
+            scalar_to_f32(max, op_name)?,
+        )?
     } else {
-        return Ok(None);
+        return Err(FerrotorchError::NotImplementedOnCuda { op: op_name });
     };
     Ok(Some(TensorStorage::gpu(handle)))
+}
+
+fn fill_inplace_after_allowed<T: Float>(
+    tensor: &Tensor<T>,
+    value: T,
+    op_name: &'static str,
+) -> FerrotorchResult<()> {
+    if let Some(storage) = cuda_fill_storage(tensor, value, op_name)? {
+        // SAFETY: callers invoke this helper only after `check_inplace_allowed`;
+        // storage has exactly tensor.numel() elements on tensor.device().
+        unsafe { tensor.update_storage(storage)? };
+    } else if !tensor.is_cuda() {
+        let data = vec![value; tensor.numel()];
+        // SAFETY: callers invoke this helper only after `check_inplace_allowed`;
+        // `data` has exactly tensor.numel() elements.
+        unsafe { tensor.update_data(&data)? };
+    } else {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: op_name });
+    }
+    Ok(())
 }
 
 impl<T: Float> Tensor<T> {
@@ -707,9 +739,11 @@ impl<T: Float> Tensor<T> {
     ///   matching upstream "torch.clamp: At least one of 'min' or 'max' must
     ///   not be None" (`TensorCompare.cpp:106`).
     ///
-    /// NaN-bound parity: if either supplied bound is NaN, the entire tensor
-    /// is filled with NaN (PyTorch's `at::fill_(result, NaN)` branch at
-    /// `TensorCompare.cpp:844`, executed when `min.isNan() || max.isNan()`).
+    /// NaN-bound parity is intentionally split to match live PyTorch:
+    /// two-bound `clamp_(min=nan, max=...)` / `clamp_(..., max=nan)` fills
+    /// the tensor with NaN, while one-sided `clamp_(min=nan)` or
+    /// `clamp_(max=nan)` leaves forward values unchanged. The dedicated
+    /// `clamp_min_(nan)` / `clamp_max_(nan)` wrappers fill with NaN.
     ///
     /// Per-element NaN inputs propagate (matching the kernel's
     /// `std::min(std::max(a, min), max)` semantics — when `a` is NaN, both
@@ -730,25 +764,11 @@ impl<T: Float> Tensor<T> {
 
         check_inplace_allowed(self, "clamp_opt_")?;
 
-        // NaN-bound special case: PyTorch's `TORCH_IMPL_FUNC(clamp_out)` at
-        // `aten/src/ATen/native/TensorCompare.cpp:844` fills the entire
-        // result with NaN if any bound is NaN. Mirror that here.
         let min_is_nan = min.is_some_and(num_traits::Float::is_nan);
         let max_is_nan = max.is_some_and(num_traits::Float::is_nan);
-        if min_is_nan || max_is_nan {
+        if min.is_some() && max.is_some() && (min_is_nan || max_is_nan) {
             let nan = <T as num_traits::Float>::nan();
-            if let Some(storage) = cuda_fill_storage(self, nan, "clamp_opt_")? {
-                // SAFETY: check_inplace_allowed above ensures `self` is not in
-                // the autograd graph and not a requires_grad leaf; storage
-                // has exactly self.numel() elements on self.device().
-                unsafe { self.update_storage(storage)? };
-                return Ok(self);
-            }
-            let new_data = vec![nan; self.numel()];
-            // SAFETY: check_inplace_allowed above ensures `self` is not in
-            // the autograd graph and not a requires_grad leaf; new_data
-            // matches self.numel() by construction.
-            unsafe { self.update_data(&new_data)? };
+            fill_inplace_after_allowed(self, nan, "clamp_opt_")?;
             return Ok(self);
         }
 
@@ -774,6 +794,9 @@ impl<T: Float> Tensor<T> {
                 unsafe { self.update_data(&data)? };
             }
             (Some(lo), None) => {
+                if num_traits::Float::is_nan(lo) {
+                    return Ok(self);
+                }
                 if let Some(storage) = cuda_clamp_pair_storage(
                     self,
                     lo,
@@ -794,6 +817,9 @@ impl<T: Float> Tensor<T> {
                 unsafe { self.update_data(&data)? };
             }
             (None, Some(hi)) => {
+                if num_traits::Float::is_nan(hi) {
+                    return Ok(self);
+                }
                 if let Some(storage) = cuda_clamp_pair_storage(
                     self,
                     <T as num_traits::Float>::neg_infinity(),
@@ -820,6 +846,32 @@ impl<T: Float> Tensor<T> {
             }
         }
         Ok(self)
+    }
+
+    /// In-place scalar `torch.clamp_min_(min)` parity. Unlike
+    /// `clamp_opt_(Some(NaN), None)`, PyTorch's dedicated one-sided API fills
+    /// the tensor with NaN when `min` is NaN.
+    pub fn clamp_min_(&self, min: T) -> FerrotorchResult<&Self> {
+        if num_traits::Float::is_nan(min) {
+            check_inplace_allowed(self, "clamp_min_")?;
+            fill_inplace_after_allowed(self, <T as num_traits::Float>::nan(), "clamp_min_")?;
+            Ok(self)
+        } else {
+            self.clamp_opt_(Some(min), None)
+        }
+    }
+
+    /// In-place scalar `torch.clamp_max_(max)` parity. Unlike
+    /// `clamp_opt_(None, Some(NaN))`, PyTorch's dedicated one-sided API fills
+    /// the tensor with NaN when `max` is NaN.
+    pub fn clamp_max_(&self, max: T) -> FerrotorchResult<&Self> {
+        if num_traits::Float::is_nan(max) {
+            check_inplace_allowed(self, "clamp_max_")?;
+            fill_inplace_after_allowed(self, <T as num_traits::Float>::nan(), "clamp_max_")?;
+            Ok(self)
+        } else {
+            self.clamp_opt_(None, Some(max))
+        }
     }
 }
 

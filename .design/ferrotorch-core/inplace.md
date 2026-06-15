@@ -127,15 +127,17 @@ REQ in the table below is therefore NOT-STARTED.
   in-place scalar clamp. Per torch's `Tensor.clamp_(min=None, max=None) -> Tensor`
   at `torch/_tensor_docs.py:1141` and the C++ structured kernel
   `TORCH_IMPL_FUNC(clamp_out)` at `aten/src/ATen/native/TensorCompare.cpp:831
-  -854`, which: (a) if either bound is NaN, fills the entire result with
-  NaN via `at::fill_(result, NaN)`; (b) otherwise dispatches to one of
+  -854`, which dispatches to one of
   `clamp_scalar_stub` / `clamp_max_scalar_stub` / `clamp_min_scalar_stub`
   depending on which bounds are provided. PyTorch's scalar path accepts
   `min > max` and evaluates `min(max(x, min), max)`, yielding `max` for every
   non-NaN input. ferrotorch's `clamp_` delegates to `clamp_opt_(Some, Some)`;
   `clamp_opt_` implements one-sided scalar bounds, rejects only the both-None
-  case, fills with NaN when either scalar bound is NaN, and uses resident
-  f32/f64 CUDA kernels for two-bound and one-sided clamps.
+  case, fills with NaN for two-bound NaN scalar clamps, preserves values for
+  live-torch one-sided `clamp_(min=nan)` / `clamp_(max=nan)`, and exposes
+  dedicated `clamp_min_` / `clamp_max_` wrappers that fill with NaN for NaN
+  bounds. f32/f64/f16/bf16 CUDA kernels cover two-bound and one-sided clamps
+  without a CPU round trip.
 
 - REQ-11: `Tensor::sub_scaled_(other, alpha)` — elementwise in-place
   `self -= alpha * other` with broadcasting. This is the full
@@ -198,8 +200,9 @@ REQ in the table below is therefore NOT-STARTED.
 - [ ] AC-10: `mul_(other)` and `div_(other)` accept broadcasting (e.g. `[B,
   T, C].mul_([1, T, 1])`). Blocked by #1212 / #1213.
 - [x] AC-11: `clamp_(NaN, max)` or `clamp_(min, NaN)` fills `self` with NaN
-  (parity with `TORCH_IMPL_FUNC(clamp_out)` at TensorCompare.cpp:844-846).
-  Covered by `test_clamp_nan_bound_fills_all_values_like_torch`,
+  for two supplied bounds; `clamp_(min=NaN)` / `clamp_(max=NaN)` preserve
+  values, while `clamp_min_(NaN)` / `clamp_max_(NaN)` fill with NaN. Covered by
+  `test_clamp_nan_bound_fills_all_values_like_torch`,
   `audit_1214_clamp_legacy_nan_bound_fills_with_nan`, and
   `inplace_clamp_cuda_nan_bound_fills_resident_f32_and_f64`.
 - [x] AC-12: `clamp_(min=None, max=None)` errors; `clamp_(min, None)` clamps
@@ -307,13 +310,14 @@ torch's `at::AutogradMeta`-driven check in
 
 - `clamp_(min, max)` delegates to `clamp_opt_(Some(min), Some(max))`.
   `clamp_opt_` rejects only `(None, None)`, fills the whole tensor with NaN
-  when any supplied bound is NaN, and otherwise evaluates
+  for two-bound NaN scalar clamps, preserves values for one-sided NaN optional
+  clamps, and otherwise evaluates
   `min(max(x, min), max)`. That order is required for PyTorch parity when
   `min > max`; the scalar kernel returns `max` for every non-NaN input instead
-  of erroring. f32/f64 CUDA tensors use `backend.clamp_f32` /
-  `backend.clamp_f64` for two-bound and one-sided clamps and `backend.fill_*`
-  for NaN-bound fill before `update_storage`, so those paths stay device
-  resident. CPU and reduced-precision CUDA paths use `update_data`'s documented
+  of erroring. CUDA tensors use `backend.clamp_f32` / `backend.clamp_f64` /
+  `backend.clamp_f16` / `backend.clamp_bf16_bf16` for two-bound and one-sided
+  clamps and `backend.fill_*` for NaN-bound fill before `update_storage`, so
+  those paths stay device resident. CPU paths use `update_data`'s documented
   device-transparent mutation path. REQ-10 remains NOT-STARTED only because
   there is still no non-test production consumer. Blocker #1214.
 
@@ -429,5 +433,5 @@ cargo test -p ferrotorch-core --lib inplace   # → 20 passed, 0 failed
 | REQ-7 (sub_) | NOT-STARTED | open prereq blocker #1211. impl: `pub fn sub_` in `ferrotorch-core/src/inplace.rs` (post-commit 2f792bfc5) is a one-line delegation `self.sub_scaled_(other, 1.0)` mirroring `aten/src/ATen/native/BinaryOps.cpp:1157 Tensor& sub_(Tensor& self, const Tensor& other, const Scalar& alpha)` and docstring `torch/_tensor_docs.py:5113 sub_(other, *, alpha=1) -> Tensor`. Broadcasting and GPU dispatch are inherited from `add_scaled_` via `sub_scaled_`. The `alpha` kwarg gap is now closed by `sub_scaled_` (REQ-11 SHIPPED). REQ-7 remains NOT-STARTED solely because there is no non-test production consumer — parity-sweep `sub` arm now passes 88/88 after #1192 closed (the prior 16/88 failures on `alpha != 1` are resolved via `sub_scaled_`). |
 | REQ-8 (mul_) | NOT-STARTED | open prereq blocker #1212. impl at `ferrotorch-core/src/inplace.rs:292` mirrors `aten/src/ATen/native/BinaryOps.cpp:441 TORCH_IMPL_FUNC(mul_out)` only on the same-shape path (shape-strict at lines 294-302) — torch's `mul_` inherits broadcasting from `mul_out` per docstring `torch/_tensor_docs.py:3441 mul_(value)`. No non-test production consumer. |
 | REQ-9 (div_) | NOT-STARTED | open prereq blocker #1213. impl: `pub fn div_ in inplace.rs` mirrors `aten/src/ATen/native/BinaryOps.cpp:447 TORCH_IMPL_FUNC(div_out)` only on the same-shape path (shape-strict early return); missing `rounding_mode` kwarg per docstring `torch/_tensor_docs.py:1746 div_(value, *, rounding_mode=None) -> Tensor`. No non-test production consumer. |
-| REQ-10 (clamp_) | NOT-STARTED | open prereq blocker #1214. impl: `pub fn clamp_` delegates to `pub fn clamp_opt_` in `inplace.rs`, mirroring the scalar Optional-bound paths of `aten/src/ATen/native/TensorCompare.cpp:831-854 TORCH_IMPL_FUNC(clamp_out)` and docstring `torch/_tensor_docs.py:1141 clamp_(min=None, max=None) -> Tensor`. Covers `(None, None)` error, lower-only, upper-only, NaN-bound fill, and `min > max` scalar behavior; f32/f64 CUDA two-bound and one-sided paths stay resident through `backend.clamp_f32` / `backend.clamp_f64`. No non-test production consumer (natural caller is gradient-clipping in `optim::utils`). |
+| REQ-10 (clamp_) | NOT-STARTED | open prereq blocker #1214. impl: `pub fn clamp_` delegates to `pub fn clamp_opt_` in `inplace.rs`, mirroring the scalar Optional-bound paths of `aten/src/ATen/native/TensorCompare.cpp:831-854 TORCH_IMPL_FUNC(clamp_out)` and docstring `torch/_tensor_docs.py:1141 clamp_(min=None, max=None) -> Tensor`. Covers `(None, None)` error, lower-only, upper-only, two-bound NaN fill, live-torch one-sided NaN preservation, dedicated `clamp_min_`/`clamp_max_` NaN fill, and `min > max` scalar behavior; f32/f64/f16/bf16 CUDA two-bound and one-sided paths stay resident through backend clamp kernels. No non-test production consumer (natural caller is gradient-clipping in `optim::utils`). |
 | REQ-11 (sub_scaled_) | SHIPPED | impl: `Tensor::sub_scaled_` at `ferrotorch-core/src/inplace.rs:265` delegates to `self.add_scaled_(other, -alpha)` mirroring `aten/src/ATen/native/BinaryOps.cpp:434-439 TORCH_IMPL_FUNC(sub_out) { add_stub(device_type(), *this, -alpha); }` and docstring `torch/_tensor_docs.py:5113 sub_(other, *, alpha=1) -> Tensor`. Non-test production consumer: `ferrotorch-core/src/grad_fns/arithmetic.rs:923-936 pub fn sub_scaled` IS the out-of-place sibling and itself delegates to `add_scaled(a, b, -alpha)` — the symmetric pair establishes torch's `sub` alpha-kwarg path across both surfaces. Parity-sweep `[sub] 88/88 passed (0 skipped, 0 failed)` at seeds=8 covers the in-place samples too (closes #1192). NB: this is distinct from REQ-7 (`sub_`, no alpha kwarg) which remains NOT-STARTED for unrelated consumer-wiring (blocker #1211). |
