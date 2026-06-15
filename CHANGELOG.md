@@ -53,6 +53,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-021: Parallel backward deadlocks when a backward node returns an error (#1715)
 - CORE-020: `add_out` silently bypasses autograd for tracking inputs (#1714)
 - CORE-015: Safe storage constructors allow contradictory dtype and device metadata (#1709)
 - CORE-014: Floating-point `arange` can loop forever (#1708)

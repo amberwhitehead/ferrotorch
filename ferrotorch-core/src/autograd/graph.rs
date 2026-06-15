@@ -249,7 +249,7 @@ pub fn backward_parallel<T: Float>(
     gradient: Option<&Tensor<T>>,
     num_workers: usize,
 ) -> FerrotorchResult<()> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
 
     let seed = if let Some(ext_grad) = gradient {
@@ -322,8 +322,12 @@ pub fn backward_parallel<T: Float>(
     // Counter of processed nodes — workers exit when this reaches total.
     let processed = Arc::new(AtomicUsize::new(0));
 
-    // Error collector.
-    let errors: Arc<Mutex<Vec<FerrotorchError>>> = Arc::new(Mutex::new(Vec::new()));
+    // Fail-fast cancellation. A backward node, hook, device op, or gradient
+    // accumulation can fail before it decrements the node's input in-degrees.
+    // Without cancellation, those inputs never become ready and waiters sleep
+    // forever with `processed < total_nodes` (CORE-021 / #1715).
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let first_error: Arc<Mutex<Option<FerrotorchError>>> = Arc::new(Mutex::new(None));
 
     // Phase 3: Parallel backward.
     let node_map_ref = &node_map;
@@ -335,7 +339,8 @@ pub fn backward_parallel<T: Float>(
             let ready = Arc::clone(&ready);
             let condvar = Arc::clone(&condvar);
             let processed = Arc::clone(&processed);
-            let errors = Arc::clone(&errors);
+            let cancelled = Arc::clone(&cancelled);
+            let first_error = Arc::clone(&first_error);
 
             s.spawn(move || {
                 loop {
@@ -343,6 +348,9 @@ pub fn backward_parallel<T: Float>(
                     let id = {
                         let mut rq = ready.lock().unwrap();
                         loop {
+                            if cancelled.load(Ordering::Acquire) {
+                                return;
+                            }
                             if let Some(id) = rq.pop_front() {
                                 break id;
                             }
@@ -350,11 +358,16 @@ pub fn backward_parallel<T: Float>(
                                 return;
                             }
                             rq = condvar.wait(rq).unwrap();
-                            if processed.load(Ordering::Relaxed) >= total_nodes {
+                            if cancelled.load(Ordering::Acquire)
+                                || processed.load(Ordering::Relaxed) >= total_nodes
+                            {
                                 return;
                             }
                         }
                     };
+                    if cancelled.load(Ordering::Acquire) {
+                        return;
+                    }
 
                     // Process this node.
                     let result = (|| -> FerrotorchResult<()> {
@@ -423,13 +436,20 @@ pub fn backward_parallel<T: Float>(
                             }
 
                             // Decrement in-degrees of inputs; push newly ready.
-                            for input in grad_fn.inputs() {
-                                if let Some(deg) = in_degrees.get(&input.id()) {
-                                    let prev = deg.fetch_sub(1, Ordering::AcqRel);
-                                    if prev == 1 {
-                                        let mut rq = ready.lock().unwrap();
-                                        rq.push_back(input.id());
-                                        condvar.notify_one();
+                            // If another worker has already failed, do not
+                            // schedule more work: waiters will observe
+                            // `cancelled` and return after `notify_all`.
+                            if !cancelled.load(Ordering::Acquire) {
+                                for input in grad_fn.inputs() {
+                                    if let Some(deg) = in_degrees.get(&input.id()) {
+                                        let prev = deg.fetch_sub(1, Ordering::AcqRel);
+                                        if prev == 1 {
+                                            let mut rq = ready.lock().unwrap();
+                                            if !cancelled.load(Ordering::Acquire) {
+                                                rq.push_back(input.id());
+                                                condvar.notify_one();
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -439,11 +459,18 @@ pub fn backward_parallel<T: Float>(
                     })();
 
                     if let Err(e) = result {
-                        errors.lock().unwrap().push(e);
+                        {
+                            let mut err = first_error.lock().unwrap();
+                            if err.is_none() {
+                                *err = Some(e);
+                            }
+                        }
+                        cancelled.store(true, Ordering::Release);
+                        condvar.notify_all();
                     }
 
                     let prev = processed.fetch_add(1, Ordering::AcqRel);
-                    if prev + 1 >= total_nodes {
+                    if prev + 1 >= total_nodes || cancelled.load(Ordering::Acquire) {
                         condvar.notify_all();
                     }
                 }
@@ -451,14 +478,14 @@ pub fn backward_parallel<T: Float>(
         }
     });
 
-    let errs = match Arc::try_unwrap(errors) {
+    let err = match Arc::try_unwrap(first_error) {
         Ok(mutex) => mutex.into_inner().unwrap(),
         Err(arc) => {
             let mut guard = arc.lock().unwrap();
             std::mem::take(&mut *guard)
         }
     };
-    if let Some(e) = errs.into_iter().next() {
+    if let Some(e) = err {
         return Err(e);
     }
 

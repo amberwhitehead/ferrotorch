@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use std::{env, process::Command, thread};
 
 use ferrotorch_core::autograd::gradcheck::gradcheck;
 use ferrotorch_core::autograd::graph::backward_parallel;
@@ -7,6 +9,7 @@ use ferrotorch_core::autograd::higher_order::grad;
 use ferrotorch_core::autograd::hooks::HookHandle;
 use ferrotorch_core::grad_fns::arithmetic::{add, mul};
 use ferrotorch_core::grad_fns::reduction::sum;
+use ferrotorch_core::tensor::GradFn;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor, TensorStorage};
 
 fn leaf(data: &[f32], shape: &[usize]) -> Tensor<f32> {
@@ -15,6 +18,62 @@ fn leaf(data: &[f32], shape: &[usize]) -> Tensor<f32> {
 
 fn constant(data: &[f32], shape: &[usize]) -> Tensor<f32> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false).unwrap()
+}
+
+#[derive(Debug)]
+struct PassThroughBackward {
+    input: Tensor<f32>,
+}
+
+impl GradFn<f32> for PassThroughBackward {
+    fn backward(&self, grad_output: &Tensor<f32>) -> FerrotorchResult<Vec<Option<Tensor<f32>>>> {
+        Ok(vec![Some(grad_output.clone())])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<f32>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        "PassThroughBackward"
+    }
+}
+
+#[derive(Debug)]
+struct IntentionalFailBackward {
+    inputs: Vec<Tensor<f32>>,
+}
+
+impl GradFn<f32> for IntentionalFailBackward {
+    fn backward(&self, _grad_output: &Tensor<f32>) -> FerrotorchResult<Vec<Option<Tensor<f32>>>> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "CORE-021 intentional backward failure".into(),
+        })
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<f32>> {
+        self.inputs.iter().collect()
+    }
+
+    fn name(&self) -> &'static str {
+        "IntentionalFailBackward"
+    }
+}
+
+fn parallel_failure_graph() -> Tensor<f32> {
+    let leaves: Vec<_> = (0..8).map(|idx| leaf(&[idx as f32], &[1])).collect();
+    let failing = Tensor::from_operation(
+        TensorStorage::cpu(vec![0.0]),
+        vec![1],
+        Arc::new(IntentionalFailBackward { inputs: leaves }),
+    )
+    .unwrap();
+    Tensor::from_operation(
+        TensorStorage::cpu(vec![0.0]),
+        vec![1],
+        Arc::new(PassThroughBackward { input: failing }),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -30,6 +89,49 @@ fn backward_parallel_implicit_seed_preserves_singleton_root_shape() {
     let grad = x.grad().expect("grad lookup").expect("x grad");
     assert_eq!(grad.shape(), &[1]);
     assert_eq!(grad.data().expect("grad data"), &[9.0]);
+}
+
+#[test]
+fn backward_parallel_error_path_returns_before_timeout() {
+    let exe = env::current_exe().expect("current test binary");
+    let mut child = Command::new(exe)
+        .arg("--exact")
+        .arg("backward_parallel_error_path_child")
+        .arg("--nocapture")
+        .env("FERROTORCH_CORE021_CHILD", "1")
+        .spawn()
+        .expect("spawn CORE-021 child test");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().expect("poll child") {
+            assert!(status.success(), "CORE-021 child exited with {status}");
+            return;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("backward_parallel did not return after a worker failure");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn backward_parallel_error_path_child() {
+    if env::var_os("FERROTORCH_CORE021_CHILD").is_none() {
+        return;
+    }
+
+    let root = parallel_failure_graph();
+    let err = backward_parallel(&root, None, 4).expect_err("parallel backward must return failure");
+    let FerrotorchError::InvalidArgument { message } = err else {
+        panic!("expected InvalidArgument, got {err:?}");
+    };
+    assert!(
+        message.contains("CORE-021 intentional backward failure"),
+        "unexpected error message: {message}"
+    );
 }
 
 #[test]
