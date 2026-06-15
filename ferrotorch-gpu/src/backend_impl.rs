@@ -5243,6 +5243,86 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
     }
 
+    fn logcumsumexp_backward_f32(
+        &self,
+        input: &GpuBufferHandle,
+        result: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+        outer: usize,
+        dim_size: usize,
+        inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer(input)?;
+        let result_buf = Self::unwrap_buffer(result)?;
+        let grad_buf = Self::unwrap_buffer(grad_output)?;
+        let dev = self.device(input.device_ordinal())?;
+        let out = crate::cumulative_kernels::gpu_logcumsumexp_backward_f32(
+            input_buf, result_buf, grad_buf, outer, dim_size, inner, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(out, input.device_ordinal()))
+    }
+
+    fn logcumsumexp_backward_f64(
+        &self,
+        input: &GpuBufferHandle,
+        result: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+        outer: usize,
+        dim_size: usize,
+        inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f64(input)?;
+        let result_buf = Self::unwrap_buffer_f64(result)?;
+        let grad_buf = Self::unwrap_buffer_f64(grad_output)?;
+        let dev = self.device(input.device_ordinal())?;
+        let out = crate::cumulative_kernels::gpu_logcumsumexp_backward_f64(
+            input_buf, result_buf, grad_buf, outer, dim_size, inner, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(out, input.device_ordinal()))
+    }
+
+    fn logcumsumexp_backward_f16(
+        &self,
+        input: &GpuBufferHandle,
+        result: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+        outer: usize,
+        dim_size: usize,
+        inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f16(input)?;
+        let result_buf = Self::unwrap_buffer_f16(result)?;
+        let grad_buf = Self::unwrap_buffer_f16(grad_output)?;
+        let dev = self.device(input.device_ordinal())?;
+        let out = crate::cumulative_kernels::gpu_logcumsumexp_backward_f16(
+            input_buf, result_buf, grad_buf, outer, dim_size, inner, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(out, input.device_ordinal()))
+    }
+
+    fn logcumsumexp_backward_bf16(
+        &self,
+        input: &GpuBufferHandle,
+        result: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+        outer: usize,
+        dim_size: usize,
+        inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_bf16(input)?;
+        let result_buf = Self::unwrap_buffer_bf16(result)?;
+        let grad_buf = Self::unwrap_buffer_bf16(grad_output)?;
+        let dev = self.device(input.device_ordinal())?;
+        let out = crate::cumulative_kernels::gpu_logcumsumexp_backward_bf16(
+            input_buf, result_buf, grad_buf, outer, dim_size, inner, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(out, input.device_ordinal()))
+    }
+
     fn reverse_cumsum_f32(
         &self,
         a: &GpuBufferHandle,

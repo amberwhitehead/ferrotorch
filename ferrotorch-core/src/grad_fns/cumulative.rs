@@ -20,7 +20,7 @@
 //! | REQ-2 (cumprod) | SHIPPED | `cumprod` at `cumulative.rs:379` + `CumprodBackward` at `:267` (O(n^3) zeros-path); consumer `Tensor::cumprod_t` in `methods.rs`; parity `[cumprod] 80/80` (grep=1) |
 //! | REQ-3 (cummax) | SHIPPED | `cummax` at `cumulative.rs:549` + `CummaxBackward` at `:438` via private helper `cummaxmin_backward_impl` (scatter_add VJP per `derivatives.yaml:533-535`); consumer `einops.rs:796` (`EinopsReduction::Max`); parity `[cummax] 24/24` (grep=1) |
 //! | REQ-4 (cummin) | SHIPPED | `cummin` at `cumulative.rs:581` + `CumminBackward` at `:472` shares the private `cummaxmin_backward_impl` helper; consumer `einops.rs:802` (`EinopsReduction::Min`); parity `[cummin] 24/24` (grep=1) |
-//! | REQ-5 (logcumsumexp) | SHIPPED | `logcumsumexp` at `cumulative.rs:803` + `LogcumsumexpBackward` at `:732` (`exp(input) * reverse_cumsum(grad * exp(-output))` per `derivatives.yaml:521-523`); consumer `Tensor::logcumsumexp_t` at `methods.rs:342`; parity `[logcumsumexp] 48/48` (grep=1) |
+//! | REQ-5 (logcumsumexp) | SHIPPED | `logcumsumexp` + `LogcumsumexpBackward` use PyTorch's signed log-space VJP from `FunctionsManual.cpp::logcumsumexp_backward`, with resident CUDA kernels for f32/f64/f16/bf16 and CPU logical-view handling; consumer `Tensor::logcumsumexp_t`; parity `[logcumsumexp] 48/48` (grep=1) |
 //! | REQ-6 (dim normalization) | SHIPPED | `normalize_axis(dim as isize, ndim)` calls at `cumulative.rs:108, :383, :553, :585, :812` mirroring `maybe_wrap_dim` at `ReduceOps.cpp:506, :622, :851, :890`; consumers are the five `pub fn` bodies themselves (reached through `einops.rs:796 / :802` and the `methods.rs` `*_t` surfaces) |
 //! | REQ-7 (reverse_cumsum helper) | SHIPPED | impl `ops/cumulative.rs:109` mirroring `static Tensor reversed_cumsum(...)` at `ReduceOps.cpp:527-529`; non-test consumers `CumsumBackward::backward` at `cumulative.rs:57` and `LogcumsumexpBackward::backward` at `:746` |
 
@@ -867,18 +867,17 @@ fn scalar_zero_i64(device: crate::device::Device) -> FerrotorchResult<IntTensor<
 /// Backward node for `logcumsumexp(input, dim)`.
 ///
 /// VJP: `grad_input[i] = sum_{j >= i} grad_output[j] * softmax_weight(i, j)`
-///
 /// where `softmax_weight(i, j) = exp(input[i] - logcumsumexp_output[j])`.
 ///
-/// This is equivalent to:
-///   `grad_input = reverse_cumsum(grad_output * exp(input - output), dim)`
-///   Wait — that's not quite right because the output at position j uses input
-///   positions 0..=j. The correct form is:
-///   `grad_input[i] = exp(input[i]) * reverse_cumsum(grad_output * exp(-output), dim)[i]`
+/// PyTorch does not implement this as the visually simple
+/// `exp(input) * reverse_cumsum(grad * exp(-output))` for real tensors. That
+/// expression is algebraically correct but overflows/underflows and propagates
+/// NaN upstream gradients differently. `FunctionsManual.cpp:
+/// logcumsumexp_backward` splits positive and negative upstream gradients in
+/// log-space:
 ///
-/// Which factors as: `grad_input = exp(input) * reverse_cumsum(grad_output / exp(output))`.
-/// Since `exp(output)` = `cumsumexp(input)`, this becomes:
-///   `grad_input = exp(input) * reverse_cumsum(grad_output * exp(-output))`
+/// `exp(input + reverse_logcumsumexp(log(abs(grad_pos)) - output))
+///  - exp(input + reverse_logcumsumexp(log(abs(grad_neg)) - output))`.
 #[derive(Debug)]
 pub struct LogcumsumexpBackward<T: Float> {
     input: Tensor<T>,
@@ -904,37 +903,16 @@ impl<T: Float> GradFn<T> for LogcumsumexpBackward<T> {
                 });
             }
             let grad_input = no_grad(|| {
-                let neg_output = crate::grad_fns::arithmetic::neg(&self.output)?;
-                let exp_neg_output = crate::grad_fns::transcendental::exp(&neg_output)?;
-                let weighted = crate::grad_fns::arithmetic::mul(grad_output, &exp_neg_output)?;
-                let rev = reverse_cumsum_cuda(&weighted, self.dim)?;
-                let exp_input = crate::grad_fns::transcendental::exp(&self.input)?;
-                crate::grad_fns::arithmetic::mul(&exp_input, &rev)
+                logcumsumexp_backward_cuda(&self.input, &self.output, grad_output, self.dim)
             })?;
             return Ok(vec![Some(grad_input)]);
         }
 
-        let go_data = grad_output.data()?;
-        let in_data = self.input.data()?;
-        let out_data = self.output.data()?;
+        let go_data = grad_output.data_vec()?;
+        let in_data = self.input.data_vec()?;
+        let out_data = self.output.data_vec()?;
         let shape = self.input.shape();
-
-        // Compute: product[i] = grad_output[i] * exp(-output[i])
-        let product: Vec<T> = go_data
-            .iter()
-            .zip(out_data.iter())
-            .map(|(&g, &o)| g * (-o).exp())
-            .collect();
-
-        // Reverse cumsum of product along dim.
-        let rev = reverse_cumsum(&product, shape, self.dim);
-
-        // grad_input[i] = exp(input[i]) * rev[i]
-        let grad_data: Vec<T> = in_data
-            .iter()
-            .zip(rev.iter())
-            .map(|(&x, &r)| x.exp() * r)
-            .collect();
+        let grad_data = logcumsumexp_backward_cpu(&in_data, &out_data, &go_data, shape, self.dim);
 
         let grad_input =
             Tensor::from_storage(TensorStorage::cpu(grad_data), shape.to_vec(), false)?;
@@ -948,6 +926,57 @@ impl<T: Float> GradFn<T> for LogcumsumexpBackward<T> {
     fn name(&self) -> &'static str {
         "LogcumsumexpBackward"
     }
+}
+
+#[inline]
+fn log_add_exp_stable<T: Float>(x: T, y: T) -> T {
+    let (min, max) = if y.is_nan() {
+        (y, y)
+    } else if x.is_nan() {
+        (x, x)
+    } else if x < y {
+        (x, y)
+    } else {
+        (y, x)
+    };
+    if min != max || min.is_finite() {
+        (min - max).exp().ln_1p() + max
+    } else {
+        x
+    }
+}
+
+fn logcumsumexp_backward_cpu<T: Float>(
+    input: &[T],
+    output: &[T],
+    grad_output: &[T],
+    shape: &[usize],
+    dim: usize,
+) -> Vec<T> {
+    let (outer, dim_size, inner) = dim_strides(shape, dim);
+    let mut grad_input = vec![<T as num_traits::Zero>::zero(); input.len()];
+    let zero = <T as num_traits::Zero>::zero();
+    let neg_inf = <T as num_traits::Float>::neg_infinity();
+
+    for o in 0..outer {
+        for i in 0..inner {
+            let base = o * dim_size * inner + i;
+            let mut acc_pos = neg_inf;
+            let mut acc_neg = neg_inf;
+            for k in (0..dim_size).rev() {
+                let idx = base + k * inner;
+                let g = grad_output[idx];
+                if g > zero {
+                    acc_pos = log_add_exp_stable(acc_pos, g.abs().ln() - output[idx]);
+                } else if g < zero {
+                    acc_neg = log_add_exp_stable(acc_neg, g.abs().ln() - output[idx]);
+                }
+                grad_input[idx] = (input[idx] + acc_pos).exp() - (input[idx] + acc_neg).exp();
+            }
+        }
+    }
+
+    grad_input
 }
 
 /// Differentiable log-cumulative-sum-exp along `dim`.
@@ -1014,6 +1043,83 @@ fn reverse_cumsum_cuda<T: Float>(input: &Tensor<T>, dim: usize) -> FerrotorchRes
         _ => {
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "reverse_cumsum",
+            });
+        }
+    };
+    Tensor::from_storage(TensorStorage::gpu(out_h), shape, false)
+}
+
+fn logcumsumexp_backward_cuda<T: Float>(
+    input: &Tensor<T>,
+    output: &Tensor<T>,
+    grad_output: &Tensor<T>,
+    dim: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    if input.device() != output.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: input.device(),
+            got: output.device(),
+        });
+    }
+    if input.device() != grad_output.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: input.device(),
+            got: grad_output.device(),
+        });
+    }
+    if input.shape() != output.shape() || input.shape() != grad_output.shape() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "LogcumsumexpBackward: input shape {:?}, output shape {:?}, grad_output shape {:?}",
+                input.shape(),
+                output.shape(),
+                grad_output.shape()
+            ),
+        });
+    }
+
+    let shape = input.shape().to_vec();
+    let (outer, dim_size, inner) = dim_strides(&shape, dim);
+    let input = input.contiguous()?;
+    let output = output.contiguous()?;
+    let grad_output = grad_output.contiguous()?;
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let out_h = match T::dtype() {
+        DType::F32 => backend.logcumsumexp_backward_f32(
+            input.gpu_handle()?,
+            output.gpu_handle()?,
+            grad_output.gpu_handle()?,
+            outer,
+            dim_size,
+            inner,
+        )?,
+        DType::F64 => backend.logcumsumexp_backward_f64(
+            input.gpu_handle()?,
+            output.gpu_handle()?,
+            grad_output.gpu_handle()?,
+            outer,
+            dim_size,
+            inner,
+        )?,
+        DType::F16 => backend.logcumsumexp_backward_f16(
+            input.gpu_handle()?,
+            output.gpu_handle()?,
+            grad_output.gpu_handle()?,
+            outer,
+            dim_size,
+            inner,
+        )?,
+        DType::BF16 => backend.logcumsumexp_backward_bf16(
+            input.gpu_handle()?,
+            output.gpu_handle()?,
+            grad_output.gpu_handle()?,
+            outer,
+            dim_size,
+            inner,
+        )?,
+        _ => {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "logcumsumexp_backward",
             });
         }
     };

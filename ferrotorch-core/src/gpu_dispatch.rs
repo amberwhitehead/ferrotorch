@@ -2532,6 +2532,58 @@ pub trait GpuBackend: Send + Sync {
             op: "logcumsumexp_bf16",
         })
     }
+    fn logcumsumexp_backward_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _result: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "logcumsumexp_backward_f32",
+        })
+    }
+    fn logcumsumexp_backward_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _result: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "logcumsumexp_backward_f64",
+        })
+    }
+    fn logcumsumexp_backward_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _result: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "logcumsumexp_backward_f16",
+        })
+    }
+    fn logcumsumexp_backward_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _result: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "logcumsumexp_backward_bf16",
+        })
+    }
     fn reverse_cumsum_f32(
         &self,
         _a: &GpuBufferHandle,

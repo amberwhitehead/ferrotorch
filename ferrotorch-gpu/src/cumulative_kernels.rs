@@ -517,6 +517,615 @@ DONE:
     )
 }
 
+fn logcumsumexp_backward_float_ptx(entry: &str) -> String {
+    let template = r"
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry $ENTRY(
+    .param .u64 input_ptr,
+    .param .u64 result_ptr,
+    .param .u64 grad_ptr,
+    .param .u64 output_ptr,
+    .param .u32 outer_size,
+    .param .u32 dim_size,
+    .param .u32 inner_size,
+    .param .u32 total_threads
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %outer_sz, %dim_sz, %inner_sz;
+    .reg .u32 %outer_idx, %inner_idx, %k, %base, %idx, %tmp;
+    .reg .u64 %in, %res, %grad, %out, %off, %addr;
+    .reg .f32 %x, %g, %r, %abs_g, %term, %acc_pos, %acc_neg, %m;
+    .reg .f32 %ea, %et, %s, %ls, %sum_pos, %sum_neg, %pos, %neg, %outv;
+    .reg .f32 %log2e, %ln2, %abs_m;
+    .reg .pred %p, %done, %take_pos, %take_neg, %skip, %inf, %sum_is_neg_inf, %sum_is_pos_inf;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %res, [result_ptr];
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %out, [output_ptr];
+    ld.param.u32 %outer_sz, [outer_size];
+    ld.param.u32 %dim_sz, [dim_size];
+    ld.param.u32 %inner_sz, [inner_size];
+    ld.param.u32 %tmp, [total_threads];
+
+    mov.b32 %log2e, 0x3FB8AA3B;
+    mov.b32 %ln2, 0x3F317218;
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+    setp.ge.u32 %p, %r_tid, %tmp;
+    @%p bra DONE;
+
+    div.u32 %outer_idx, %r_tid, %inner_sz;
+    rem.u32 %inner_idx, %r_tid, %inner_sz;
+    mul.lo.u32 %base, %outer_idx, %dim_sz;
+    mul.lo.u32 %base, %base, %inner_sz;
+    add.u32 %base, %base, %inner_idx;
+
+    mov.f32 %acc_pos, 0fFF800000;
+    mov.f32 %acc_neg, 0fFF800000;
+    mov.u32 %k, %dim_sz;
+SCAN_LOOP:
+    setp.eq.u32 %done, %k, 0;
+    @%done bra DONE;
+    sub.u32 %k, %k, 1;
+    mul.lo.u32 %idx, %k, %inner_sz;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %x, [%addr];
+    add.u64 %addr, %res, %off;
+    ld.global.f32 %r, [%addr];
+    add.u64 %addr, %grad, %off;
+    ld.global.f32 %g, [%addr];
+
+    setp.gt.f32 %take_pos, %g, 0f00000000;
+    not.pred %skip, %take_pos;
+    @%skip bra CHECK_NEG;
+    abs.f32 %abs_g, %g;
+    lg2.approx.f32 %term, %abs_g;
+    mul.f32 %term, %term, %ln2;
+    sub.f32 %term, %term, %r;
+
+    max.f32 %m, %acc_pos, %term;
+    abs.f32 %abs_m, %m;
+    setp.eq.f32 %inf, %abs_m, 0f7F800000;
+    @%inf bra POS_LOGADD_MAX;
+    sub.f32 %ea, %acc_pos, %m;
+    mul.f32 %ea, %ea, %log2e;
+    ex2.approx.f32 %ea, %ea;
+    sub.f32 %et, %term, %m;
+    mul.f32 %et, %et, %log2e;
+    ex2.approx.f32 %et, %et;
+    add.f32 %s, %ea, %et;
+    lg2.approx.f32 %ls, %s;
+    mul.f32 %ls, %ls, %ln2;
+    add.f32 %acc_pos, %m, %ls;
+    bra CHECK_NEG;
+POS_LOGADD_MAX:
+    mov.f32 %acc_pos, %m;
+
+CHECK_NEG:
+    setp.lt.f32 %take_neg, %g, 0f00000000;
+    not.pred %skip, %take_neg;
+    @%skip bra WRITE_GRAD;
+    neg.f32 %abs_g, %g;
+    lg2.approx.f32 %term, %abs_g;
+    mul.f32 %term, %term, %ln2;
+    sub.f32 %term, %term, %r;
+
+    max.f32 %m, %acc_neg, %term;
+    abs.f32 %abs_m, %m;
+    setp.eq.f32 %inf, %abs_m, 0f7F800000;
+    @%inf bra NEG_LOGADD_MAX;
+    sub.f32 %ea, %acc_neg, %m;
+    mul.f32 %ea, %ea, %log2e;
+    ex2.approx.f32 %ea, %ea;
+    sub.f32 %et, %term, %m;
+    mul.f32 %et, %et, %log2e;
+    ex2.approx.f32 %et, %et;
+    add.f32 %s, %ea, %et;
+    lg2.approx.f32 %ls, %s;
+    mul.f32 %ls, %ls, %ln2;
+    add.f32 %acc_neg, %m, %ls;
+    bra WRITE_GRAD;
+NEG_LOGADD_MAX:
+    mov.f32 %acc_neg, %m;
+
+WRITE_GRAD:
+    add.f32 %sum_pos, %x, %acc_pos;
+    setp.eq.f32 %sum_is_neg_inf, %sum_pos, 0fFF800000;
+    @%sum_is_neg_inf bra POS_EXP_ZERO;
+    setp.eq.f32 %sum_is_pos_inf, %sum_pos, 0f7F800000;
+    @%sum_is_pos_inf bra POS_EXP_INF;
+    mul.f32 %pos, %sum_pos, %log2e;
+    ex2.approx.f32 %pos, %pos;
+    bra POS_EXP_DONE;
+POS_EXP_ZERO:
+    mov.f32 %pos, 0f00000000;
+    bra POS_EXP_DONE;
+POS_EXP_INF:
+    mov.f32 %pos, 0f7F800000;
+POS_EXP_DONE:
+
+    add.f32 %sum_neg, %x, %acc_neg;
+    setp.eq.f32 %sum_is_neg_inf, %sum_neg, 0fFF800000;
+    @%sum_is_neg_inf bra NEG_EXP_ZERO;
+    setp.eq.f32 %sum_is_pos_inf, %sum_neg, 0f7F800000;
+    @%sum_is_pos_inf bra NEG_EXP_INF;
+    mul.f32 %neg, %sum_neg, %log2e;
+    ex2.approx.f32 %neg, %neg;
+    bra NEG_EXP_DONE;
+NEG_EXP_ZERO:
+    mov.f32 %neg, 0f00000000;
+    bra NEG_EXP_DONE;
+NEG_EXP_INF:
+    mov.f32 %neg, 0f7F800000;
+NEG_EXP_DONE:
+
+    sub.f32 %outv, %pos, %neg;
+    add.u64 %addr, %out, %off;
+    st.global.f32 [%addr], %outv;
+    bra SCAN_LOOP;
+
+DONE:
+    ret;
+}
+"
+    .to_string();
+    replace_all(template, &[("$ENTRY", entry.to_string())])
+}
+
+fn logcumsumexp_backward16_ptx(entry: &str, kind: HalfKind) -> String {
+    let load_x = kind.load_raw_to_val().replace("%val", "%x");
+    let load_r = kind.load_raw_to_val().replace("%val", "%r");
+    let load_g = kind.load_raw_to_val().replace("%val", "%g");
+    let template = r"
+.version $VERSION
+.target $TARGET
+.address_size 64
+
+.visible .entry $ENTRY(
+    .param .u64 input_ptr,
+    .param .u64 result_ptr,
+    .param .u64 grad_ptr,
+    .param .u64 output_ptr,
+    .param .u32 outer_size,
+    .param .u32 dim_size,
+    .param .u32 inner_size,
+    .param .u32 total_threads
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %outer_sz, %dim_sz, %inner_sz;
+    .reg .u32 %outer_idx, %inner_idx, %k, %base, %idx, %tmp;
+    .reg .u64 %in, %res, %grad, %out, %off, %addr;
+    .reg .b16 %raw, %acc_h, %zero16;
+    .reg .b32 %bits;
+    .reg .f32 %x, %g, %r, %abs_g, %term, %acc_pos, %acc_neg, %m, %acc;
+    .reg .f32 %ea, %et, %s, %ls, %sum_pos, %sum_neg, %pos, %neg, %outv;
+    .reg .f32 %log2e, %ln2, %abs_m;
+    .reg .pred %p, %done, %take_pos, %take_neg, %skip, %inf, %sum_is_neg_inf, %sum_is_pos_inf;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %res, [result_ptr];
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %out, [output_ptr];
+    ld.param.u32 %outer_sz, [outer_size];
+    ld.param.u32 %dim_sz, [dim_size];
+    ld.param.u32 %inner_sz, [inner_size];
+    ld.param.u32 %tmp, [total_threads];
+
+    mov.b32 %log2e, 0x3FB8AA3B;
+    mov.b32 %ln2, 0x3F317218;
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+    setp.ge.u32 %p, %r_tid, %tmp;
+    @%p bra DONE;
+
+    div.u32 %outer_idx, %r_tid, %inner_sz;
+    rem.u32 %inner_idx, %r_tid, %inner_sz;
+    mul.lo.u32 %base, %outer_idx, %dim_sz;
+    mul.lo.u32 %base, %base, %inner_sz;
+    add.u32 %base, %base, %inner_idx;
+
+    mov.f32 %acc_pos, 0fFF800000;
+    mov.f32 %acc_neg, 0fFF800000;
+    mov.u32 %k, %dim_sz;
+SCAN_LOOP:
+    setp.eq.u32 %done, %k, 0;
+    @%done bra DONE;
+    sub.u32 %k, %k, 1;
+    mul.lo.u32 %idx, %k, %inner_sz;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 1;
+
+    add.u64 %addr, %in, %off;
+$LOAD_X
+    add.u64 %addr, %res, %off;
+$LOAD_R
+    add.u64 %addr, %grad, %off;
+$LOAD_G
+
+    setp.gt.f32 %take_pos, %g, 0f00000000;
+    not.pred %skip, %take_pos;
+    @%skip bra CHECK_NEG;
+    abs.f32 %abs_g, %g;
+    lg2.approx.f32 %term, %abs_g;
+    mul.f32 %term, %term, %ln2;
+    sub.f32 %term, %term, %r;
+
+    max.f32 %m, %acc_pos, %term;
+    abs.f32 %abs_m, %m;
+    setp.eq.f32 %inf, %abs_m, 0f7F800000;
+    @%inf bra POS_LOGADD_MAX;
+    sub.f32 %ea, %acc_pos, %m;
+    mul.f32 %ea, %ea, %log2e;
+    ex2.approx.f32 %ea, %ea;
+    sub.f32 %et, %term, %m;
+    mul.f32 %et, %et, %log2e;
+    ex2.approx.f32 %et, %et;
+    add.f32 %s, %ea, %et;
+    lg2.approx.f32 %ls, %s;
+    mul.f32 %ls, %ls, %ln2;
+    add.f32 %acc_pos, %m, %ls;
+    bra CHECK_NEG;
+POS_LOGADD_MAX:
+    mov.f32 %acc_pos, %m;
+
+CHECK_NEG:
+    setp.lt.f32 %take_neg, %g, 0f00000000;
+    not.pred %skip, %take_neg;
+    @%skip bra WRITE_GRAD;
+    neg.f32 %abs_g, %g;
+    lg2.approx.f32 %term, %abs_g;
+    mul.f32 %term, %term, %ln2;
+    sub.f32 %term, %term, %r;
+
+    max.f32 %m, %acc_neg, %term;
+    abs.f32 %abs_m, %m;
+    setp.eq.f32 %inf, %abs_m, 0f7F800000;
+    @%inf bra NEG_LOGADD_MAX;
+    sub.f32 %ea, %acc_neg, %m;
+    mul.f32 %ea, %ea, %log2e;
+    ex2.approx.f32 %ea, %ea;
+    sub.f32 %et, %term, %m;
+    mul.f32 %et, %et, %log2e;
+    ex2.approx.f32 %et, %et;
+    add.f32 %s, %ea, %et;
+    lg2.approx.f32 %ls, %s;
+    mul.f32 %ls, %ls, %ln2;
+    add.f32 %acc_neg, %m, %ls;
+    bra WRITE_GRAD;
+NEG_LOGADD_MAX:
+    mov.f32 %acc_neg, %m;
+
+WRITE_GRAD:
+    add.f32 %sum_pos, %x, %acc_pos;
+    setp.eq.f32 %sum_is_neg_inf, %sum_pos, 0fFF800000;
+    @%sum_is_neg_inf bra POS_EXP_ZERO;
+    setp.eq.f32 %sum_is_pos_inf, %sum_pos, 0f7F800000;
+    @%sum_is_pos_inf bra POS_EXP_INF;
+    mul.f32 %pos, %sum_pos, %log2e;
+    ex2.approx.f32 %pos, %pos;
+    bra POS_EXP_DONE;
+POS_EXP_ZERO:
+    mov.f32 %pos, 0f00000000;
+    bra POS_EXP_DONE;
+POS_EXP_INF:
+    mov.f32 %pos, 0f7F800000;
+POS_EXP_DONE:
+
+    add.f32 %sum_neg, %x, %acc_neg;
+    setp.eq.f32 %sum_is_neg_inf, %sum_neg, 0fFF800000;
+    @%sum_is_neg_inf bra NEG_EXP_ZERO;
+    setp.eq.f32 %sum_is_pos_inf, %sum_neg, 0f7F800000;
+    @%sum_is_pos_inf bra NEG_EXP_INF;
+    mul.f32 %neg, %sum_neg, %log2e;
+    ex2.approx.f32 %neg, %neg;
+    bra NEG_EXP_DONE;
+NEG_EXP_ZERO:
+    mov.f32 %neg, 0f00000000;
+    bra NEG_EXP_DONE;
+NEG_EXP_INF:
+    mov.f32 %neg, 0f7F800000;
+NEG_EXP_DONE:
+
+    sub.f32 %outv, %pos, %neg;
+    mov.f32 %acc, %outv;
+    add.u64 %addr, %out, %off;
+$STORE
+    bra SCAN_LOOP;
+
+DONE:
+    ret;
+}
+"
+    .to_string();
+    replace_all(
+        template,
+        &[
+            ("$VERSION", kind.ptx_version().to_string()),
+            ("$TARGET", kind.target().to_string()),
+            ("$ENTRY", entry.to_string()),
+            ("$LOAD_X", load_x),
+            ("$LOAD_R", load_r),
+            ("$LOAD_G", load_g),
+            ("$STORE", kind.narrow_result_store().to_string()),
+        ],
+    )
+}
+
+fn f64_exp_code(input: &str, output: &str) -> String {
+    format!(
+        r"
+    mov.f64 %e_one, 0d3FF0000000000000;
+    mov.f64 %e_half, 0d3FE0000000000000;
+    mul.f64 %e_nf, {input}, 0d3FF71547652B82FE;
+    cvt.rni.f64.f64 %e_nf, %e_nf;
+    cvt.rni.s32.f64 %e_ni, %e_nf;
+    fma.rn.f64 %e_r, %e_nf, 0dBFE62E42FEFA3800, {input};
+    fma.rn.f64 %e_r, %e_nf, 0dBD2EF35793C76730, %e_r;
+    mov.f64 %e_p, 0d3E5AE64567F544E4;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3E927E4FB7789F5C;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3EC71DE3A556C734;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3EFA01A01A01A01A;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F2A01A01A01A01A;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F56C16C16C16C17;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F81111111111111;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3FA5555555555555;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3FC5555555555555;
+    fma.rn.f64 %e_p, %e_p, %e_r, %e_half;
+    fma.rn.f64 %e_p, %e_p, %e_r, %e_one;
+    fma.rn.f64 {output}, %e_p, %e_r, %e_one;
+    cvt.s64.s32 %e_ni64, %e_ni;
+    add.s64 %e_ni64, %e_ni64, 1023;
+    shl.b64 %e_bits, %e_ni64, 52;
+    mov.b64 %e_nf, %e_bits;
+    mul.f64 {output}, {output}, %e_nf;"
+    )
+}
+
+fn f64_ln_code(input: &str, output: &str) -> String {
+    format!(
+        r"
+    mov.f64 %e_one, 0d3FF0000000000000;
+    mov.b64 %l_xbits, {input};
+    shr.u64 %l_exp64, %l_xbits, 52;
+    and.b64 %l_exp64, %l_exp64, 2047;
+    setp.eq.s64 %p_sub, %l_exp64, 0;
+    @%p_sub mul.f64 %l_tmp, {input}, 0d4350000000000000;
+    @%p_sub mov.b64 %l_xbits, %l_tmp;
+    @%p_sub shr.u64 %l_exp64, %l_xbits, 52;
+    @%p_sub and.b64 %l_exp64, %l_exp64, 2047;
+    sub.s64 %l_exp64, %l_exp64, 1023;
+    @%p_sub sub.s64 %l_exp64, %l_exp64, 54;
+    cvt.rn.f64.s64 %l_nf, %l_exp64;
+    mov.u64 %l_bias, 0x3FF0000000000000;
+    and.b64 %l_mbits, %l_xbits, 0x000FFFFFFFFFFFFF;
+    or.b64 %l_mbits, %l_mbits, %l_bias;
+    mov.b64 %l_m, %l_mbits;
+    mov.f64 %l_sqrt2, 0d3FF6A09E667F3BCD;
+    mov.f64 %l_half_const, 0d3FE0000000000000;
+    setp.gt.f64 %p_shift, %l_m, %l_sqrt2;
+    @%p_shift mul.f64 %l_m, %l_m, %l_half_const;
+    @%p_shift add.f64 %l_nf, %l_nf, %e_one;
+    sub.f64 %l_f, %l_m, %e_one;
+    add.f64 %l_s, %l_m, %e_one;
+    div.rn.f64 %l_f, %l_f, %l_s;
+    mul.f64 %l_f2, %l_f, %l_f;
+    mov.f64 %l_p, 0d3FB1111111111111;
+    fma.rn.f64 %l_p, %l_p, %l_f2, 0d3FB3B13B13B13B14;
+    fma.rn.f64 %l_p, %l_p, %l_f2, 0d3FB745D1745D1746;
+    fma.rn.f64 %l_p, %l_p, %l_f2, 0d3FBC71C71C71C71C;
+    fma.rn.f64 %l_p, %l_p, %l_f2, 0d3FC2492492492492;
+    fma.rn.f64 %l_p, %l_p, %l_f2, 0d3FC999999999999A;
+    fma.rn.f64 %l_p, %l_p, %l_f2, 0d3FD5555555555555;
+    fma.rn.f64 %l_p, %l_p, %l_f2, %e_one;
+    mul.f64 %l_p, %l_p, %l_f;
+    add.f64 %l_p, %l_p, %l_p;
+    mov.f64 %l_ln2_hi, 0d3FE62E42FEFA3800;
+    mov.f64 %l_ln2_lo, 0d3D2EF35793C76730;
+    fma.rn.f64 {output}, %l_nf, %l_ln2_hi, %l_p;
+    fma.rn.f64 {output}, %l_nf, %l_ln2_lo, {output};"
+    )
+}
+
+fn f64_logadd_code(acc: &str, suffix: &str) -> String {
+    format!(
+        r"
+    max.f64 %m, {acc}, %term;
+    abs.f64 %abs_m, %m;
+    setp.eq.f64 %inf, %abs_m, 0d7FF0000000000000;
+    @%inf bra LOGADD_MAX_{suffix};
+    sub.f64 %ea, {acc}, %m;
+{exp_ea}
+    sub.f64 %et, %term, %m;
+{exp_et}
+    add.f64 %s, %ea, %et;
+{ln_s}
+    add.f64 {acc}, %m, %ls;
+    bra LOGADD_DONE_{suffix};
+LOGADD_MAX_{suffix}:
+    mov.f64 {acc}, %m;
+LOGADD_DONE_{suffix}:",
+        acc = acc,
+        suffix = suffix,
+        exp_ea = f64_exp_guard_code("%ea", "%ea", &format!("EA_{suffix}")),
+        exp_et = f64_exp_guard_code("%et", "%et", &format!("ET_{suffix}")),
+        ln_s = f64_ln_code("%s", "%ls")
+    )
+}
+
+fn f64_exp_guard_code(input: &str, output: &str, suffix: &str) -> String {
+    format!(
+        r"
+    setp.nan.f64 %sum_is_nan, {input}, {input};
+    @%sum_is_nan bra EXP_NAN_{suffix};
+    setp.eq.f64 %sum_is_neg_inf, {input}, 0dFFF0000000000000;
+    @%sum_is_neg_inf bra EXP_ZERO_{suffix};
+    setp.eq.f64 %sum_is_pos_inf, {input}, 0d7FF0000000000000;
+    @%sum_is_pos_inf bra EXP_INF_{suffix};
+    setp.le.f64 %sum_underflows, {input}, 0dC0874385446D71C3;
+    @%sum_underflows bra EXP_ZERO_{suffix};
+    setp.ge.f64 %sum_overflows, {input}, 0d40862E42FEFA39EF;
+    @%sum_overflows bra EXP_INF_{suffix};
+{exp}
+    bra EXP_DONE_{suffix};
+EXP_NAN_{suffix}:
+    mov.f64 {output}, {input};
+    bra EXP_DONE_{suffix};
+EXP_ZERO_{suffix}:
+    mov.f64 {output}, 0d0000000000000000;
+    bra EXP_DONE_{suffix};
+EXP_INF_{suffix}:
+    mov.f64 {output}, 0d7FF0000000000000;
+EXP_DONE_{suffix}:",
+        input = input,
+        output = output,
+        suffix = suffix,
+        exp = f64_exp_code(input, output)
+    )
+}
+
+fn logcumsumexp_backward_f64_ptx(entry: &str) -> String {
+    let template = r"
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry $ENTRY(
+    .param .u64 input_ptr,
+    .param .u64 result_ptr,
+    .param .u64 grad_ptr,
+    .param .u64 output_ptr,
+    .param .u32 outer_size,
+    .param .u32 dim_size,
+    .param .u32 inner_size,
+    .param .u32 total_threads
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %outer_sz, %dim_sz, %inner_sz;
+    .reg .u32 %outer_idx, %inner_idx, %k, %base, %idx, %tmp;
+    .reg .u64 %in, %res, %grad, %out, %off, %addr;
+    .reg .f64 %x, %g, %r, %abs_g, %term, %acc_pos, %acc_neg, %m;
+    .reg .f64 %ea, %et, %s, %ls, %sum_pos, %sum_neg, %pos, %neg, %outv, %abs_m;
+    .reg .f64 %e_nf, %e_r, %e_p, %e_half, %e_one;
+    .reg .s32 %e_ni;
+    .reg .s64 %e_ni64, %e_bits;
+    .reg .u64 %l_xbits, %l_mbits, %l_bias;
+    .reg .s64 %l_exp64;
+    .reg .f64 %l_m, %l_f, %l_f2, %l_s, %l_p, %l_nf, %l_tmp;
+    .reg .f64 %l_ln2_hi, %l_ln2_lo, %l_sqrt2, %l_half_const;
+    .reg .pred %p, %done, %take_pos, %take_neg, %skip, %inf, %g_inf;
+    .reg .pred %sum_is_neg_inf, %sum_is_pos_inf, %sum_is_nan, %sum_underflows, %sum_overflows;
+    .reg .pred %p_shift, %p_sub;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %res, [result_ptr];
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %out, [output_ptr];
+    ld.param.u32 %outer_sz, [outer_size];
+    ld.param.u32 %dim_sz, [dim_size];
+    ld.param.u32 %inner_sz, [inner_size];
+    ld.param.u32 %tmp, [total_threads];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+    setp.ge.u32 %p, %r_tid, %tmp;
+    @%p bra DONE;
+
+    div.u32 %outer_idx, %r_tid, %inner_sz;
+    rem.u32 %inner_idx, %r_tid, %inner_sz;
+    mul.lo.u32 %base, %outer_idx, %dim_sz;
+    mul.lo.u32 %base, %base, %inner_sz;
+    add.u32 %base, %base, %inner_idx;
+
+    mov.f64 %acc_pos, 0dFFF0000000000000;
+    mov.f64 %acc_neg, 0dFFF0000000000000;
+    mov.u32 %k, %dim_sz;
+SCAN_LOOP:
+    setp.eq.u32 %done, %k, 0;
+    @%done bra DONE;
+    sub.u32 %k, %k, 1;
+    mul.lo.u32 %idx, %k, %inner_sz;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 3;
+
+    add.u64 %addr, %in, %off;
+    ld.global.f64 %x, [%addr];
+    add.u64 %addr, %res, %off;
+    ld.global.f64 %r, [%addr];
+    add.u64 %addr, %grad, %off;
+    ld.global.f64 %g, [%addr];
+
+    setp.gt.f64 %take_pos, %g, 0d0000000000000000;
+    not.pred %skip, %take_pos;
+    @%skip bra CHECK_NEG;
+    abs.f64 %abs_g, %g;
+    setp.eq.f64 %g_inf, %abs_g, 0d7FF0000000000000;
+    @%g_inf bra POS_TERM_INF;
+$LN_ABS_G
+    bra POS_TERM_READY;
+POS_TERM_INF:
+    mov.f64 %term, 0d7FF0000000000000;
+POS_TERM_READY:
+    sub.f64 %term, %term, %r;
+$LOGADD_POS
+
+CHECK_NEG:
+    setp.lt.f64 %take_neg, %g, 0d0000000000000000;
+    not.pred %skip, %take_neg;
+    @%skip bra WRITE_GRAD;
+    neg.f64 %abs_g, %g;
+    setp.eq.f64 %g_inf, %abs_g, 0d7FF0000000000000;
+    @%g_inf bra NEG_TERM_INF;
+$LN_ABS_G
+    bra NEG_TERM_READY;
+NEG_TERM_INF:
+    mov.f64 %term, 0d7FF0000000000000;
+NEG_TERM_READY:
+    sub.f64 %term, %term, %r;
+$LOGADD_NEG
+
+WRITE_GRAD:
+    add.f64 %sum_pos, %x, %acc_pos;
+$EXP_POS
+    add.f64 %sum_neg, %x, %acc_neg;
+$EXP_NEG
+    sub.f64 %outv, %pos, %neg;
+    add.u64 %addr, %out, %off;
+    st.global.f64 [%addr], %outv;
+    bra SCAN_LOOP;
+
+DONE:
+    ret;
+}
+"
+    .to_string();
+    replace_all(
+        template,
+        &[
+            ("$ENTRY", entry.to_string()),
+            ("$LN_ABS_G", f64_ln_code("%abs_g", "%term")),
+            ("$LOGADD_POS", f64_logadd_code("%acc_pos", "POS")),
+            ("$LOGADD_NEG", f64_logadd_code("%acc_neg", "NEG")),
+            ("$EXP_POS", f64_exp_guard_code("%sum_pos", "%pos", "POS")),
+            ("$EXP_NEG", f64_exp_guard_code("%sum_neg", "%neg", "NEG")),
+        ],
+    )
+}
+
 fn cumprod_backward16_ptx(entry: &str, kind: HalfKind) -> String {
     let load_x = kind.load_raw_to_val().replace("%val", "%x");
     let load_g = kind.load_raw_to_val().replace("%val", "%g");
@@ -866,6 +1475,56 @@ fn launch16_binary_backward(
             .stream()
             .launch_builder(&f)
             .arg(input)
+            .arg(grad)
+            .arg(&mut out)
+            .arg(&o)
+            .arg(&d)
+            .arg(&i)
+            .arg(&t)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+fn launch16_ternary_backward(
+    input: &CudaSlice<u16>,
+    result: &CudaSlice<u16>,
+    grad: &CudaSlice<u16>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+    ptx: String,
+    entry: &str,
+) -> GpuResult<CudaSlice<u16>> {
+    let (threads, total) = checked_dims(entry, outer, dim_size, inner)?;
+    validate_len(entry, input.len(), total)?;
+    validate_len(entry, result.len(), total)?;
+    validate_len(entry, grad.len(), total)?;
+    let mut out = alloc_zeros_bf16(total, device)?;
+    if total == 0 {
+        return Ok(out);
+    }
+    let f = crate::module_cache::get_or_compile_owned(
+        device.context(),
+        ptx,
+        entry.to_string(),
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "logcumsumexp_backward16_kernel",
+        source: e,
+    })?;
+    let cfg = launch_cfg(threads)?;
+    let (o, d, i, t) = (outer as u32, dim_size as u32, inner as u32, threads as u32);
+    // SAFETY: all buffers are validated against the same scan domain, and
+    // the kernel maps one thread to one `(outer, inner)` line.
+    unsafe {
+        device
+            .stream()
+            .launch_builder(&f)
+            .arg(input)
+            .arg(result)
             .arg(grad)
             .arg(&mut out)
             .arg(&o)
@@ -1359,6 +2018,124 @@ fn launch_double_binary_backward(
     Ok(out)
 }
 
+fn launch_float_ternary_backward(
+    input: &CudaBuffer<f32>,
+    result: &CudaBuffer<f32>,
+    grad: &CudaBuffer<f32>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+    ptx: String,
+    entry: &str,
+) -> GpuResult<CudaBuffer<f32>> {
+    if input.device_ordinal() != device.ordinal()
+        || result.device_ordinal() != device.ordinal()
+        || grad.device_ordinal() != device.ordinal()
+    {
+        return Err(GpuError::DeviceMismatch {
+            expected: input.device_ordinal(),
+            got: device.ordinal(),
+        });
+    }
+    let (threads, total) = checked_dims(entry, outer, dim_size, inner)?;
+    validate_len(entry, input.len(), total)?;
+    validate_len(entry, result.len(), total)?;
+    validate_len(entry, grad.len(), total)?;
+    let mut out = alloc_zeros_f32(total, device)?;
+    if total == 0 {
+        return Ok(out);
+    }
+    let f = crate::module_cache::get_or_compile_owned(
+        device.context(),
+        ptx,
+        entry.to_string(),
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "logcumsumexp_backward_f32_kernel",
+        source: e,
+    })?;
+    let cfg = launch_cfg(threads)?;
+    let (o, d, i, t) = (outer as u32, dim_size as u32, inner as u32, threads as u32);
+    // SAFETY: input/result/grad/output lengths are validated against the same
+    // scan-line domain.
+    unsafe {
+        device
+            .stream()
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(result.inner())
+            .arg(grad.inner())
+            .arg(out.inner_mut())
+            .arg(&o)
+            .arg(&d)
+            .arg(&i)
+            .arg(&t)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+fn launch_double_ternary_backward(
+    input: &CudaBuffer<f64>,
+    result: &CudaBuffer<f64>,
+    grad: &CudaBuffer<f64>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+    ptx: String,
+    entry: &str,
+) -> GpuResult<CudaBuffer<f64>> {
+    if input.device_ordinal() != device.ordinal()
+        || result.device_ordinal() != device.ordinal()
+        || grad.device_ordinal() != device.ordinal()
+    {
+        return Err(GpuError::DeviceMismatch {
+            expected: input.device_ordinal(),
+            got: device.ordinal(),
+        });
+    }
+    let (threads, total) = checked_dims(entry, outer, dim_size, inner)?;
+    validate_len(entry, input.len(), total)?;
+    validate_len(entry, result.len(), total)?;
+    validate_len(entry, grad.len(), total)?;
+    let mut out = alloc_zeros_f64(total, device)?;
+    if total == 0 {
+        return Ok(out);
+    }
+    let f = crate::module_cache::get_or_compile_owned(
+        device.context(),
+        ptx,
+        entry.to_string(),
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "logcumsumexp_backward_f64_kernel",
+        source: e,
+    })?;
+    let cfg = launch_cfg(threads)?;
+    let (o, d, i, t) = (outer as u32, dim_size as u32, inner as u32, threads as u32);
+    // SAFETY: input/result/grad/output lengths are validated against the same
+    // scan-line domain.
+    unsafe {
+        device
+            .stream()
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(result.inner())
+            .arg(grad.inner())
+            .arg(out.inner_mut())
+            .arg(&o)
+            .arg(&d)
+            .arg(&i)
+            .arg(&t)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
 /// f32 reverse cumulative sum.
 pub fn gpu_reverse_cumsum_f32(
     input: &CudaBuffer<f32>,
@@ -1448,6 +2225,52 @@ pub fn gpu_cumprod_backward_f64(
             "0d3FF0000000000000",
         ),
         "cumprod_backward_f64_kernel",
+    )
+}
+
+/// f32 logcumsumexp backward, matching PyTorch's signed log-space split.
+pub fn gpu_logcumsumexp_backward_f32(
+    input: &CudaBuffer<f32>,
+    result: &CudaBuffer<f32>,
+    grad: &CudaBuffer<f32>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    launch_float_ternary_backward(
+        input,
+        result,
+        grad,
+        outer,
+        dim_size,
+        inner,
+        device,
+        logcumsumexp_backward_float_ptx("logcumsumexp_backward_f32_kernel"),
+        "logcumsumexp_backward_f32_kernel",
+    )
+}
+
+/// f64 logcumsumexp backward, matching PyTorch's signed log-space split.
+pub fn gpu_logcumsumexp_backward_f64(
+    input: &CudaBuffer<f64>,
+    result: &CudaBuffer<f64>,
+    grad: &CudaBuffer<f64>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    launch_double_ternary_backward(
+        input,
+        result,
+        grad,
+        outer,
+        dim_size,
+        inner,
+        device,
+        logcumsumexp_backward_f64_ptx("logcumsumexp_backward_f64_kernel"),
+        "logcumsumexp_backward_f64_kernel",
     )
 }
 
@@ -1718,5 +2541,51 @@ pub fn gpu_cumprod_backward_bf16(
         device,
         cumprod_backward16_ptx("cumprod_backward_bf16_kernel", HalfKind::BF16),
         "cumprod_backward_bf16_kernel",
+    )
+}
+
+/// f16 logcumsumexp backward with PyTorch's signed log-space split.
+pub fn gpu_logcumsumexp_backward_f16(
+    input: &CudaSlice<u16>,
+    result: &CudaSlice<u16>,
+    grad: &CudaSlice<u16>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    launch16_ternary_backward(
+        input,
+        result,
+        grad,
+        outer,
+        dim_size,
+        inner,
+        device,
+        logcumsumexp_backward16_ptx("logcumsumexp_backward_f16_kernel", HalfKind::F16),
+        "logcumsumexp_backward_f16_kernel",
+    )
+}
+
+/// bf16 logcumsumexp backward with PyTorch's signed log-space split.
+pub fn gpu_logcumsumexp_backward_bf16(
+    input: &CudaSlice<u16>,
+    result: &CudaSlice<u16>,
+    grad: &CudaSlice<u16>,
+    outer: usize,
+    dim_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    launch16_ternary_backward(
+        input,
+        result,
+        grad,
+        outer,
+        dim_size,
+        inner,
+        device,
+        logcumsumexp_backward16_ptx("logcumsumexp_backward_bf16_kernel", HalfKind::BF16),
+        "logcumsumexp_backward_bf16_kernel",
     )
 }
