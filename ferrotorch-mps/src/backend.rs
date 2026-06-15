@@ -1346,7 +1346,9 @@ mod tests {
             .expect_err("partial f32 element must be rejected");
         match err {
             FerrotorchError::InvalidArgument { message } => {
-                assert!(message.contains("not divisible by dtype F32 element size 4"));
+                assert!(message.contains("cpu_to_gpu: 3 bytes is not divisible"));
+                assert!(message.contains("dtype"));
+                assert!(message.contains("element size 4"));
             }
             other => panic!("unexpected error: {other:?}"),
         }

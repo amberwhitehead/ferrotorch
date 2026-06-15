@@ -6773,31 +6773,45 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
-    /// On-device `topk` over a GPU-resident `[outer, last_dim]` value buffer
-    /// (#1545). Selects the `k` extrema along the last dim for every one of the
-    /// `outer` slices, returning `(values, indices)`:
+    /// On-device `topk` over a GPU-resident row-major `[outer, dim, inner]`
+    /// value buffer (#1545). Selects the `k` extrema along `dim` for every
+    /// `(outer, inner)` lane, returning `(values, indices)` laid out as
+    /// `[outer, k, inner]`:
     ///
-    /// - `values` — a `GpuBufferHandle` of `outer * k` elements with the SAME
+    /// - `values` — a `GpuBufferHandle` of `outer * k * inner` elements with the SAME
     ///   `DType` as `values_in` (∈ {F32, F64, F16, BF16}), in sorted order.
-    /// - `indices` — an `I64`-tagged `GpuBufferHandle` of `outer * k` original
-    ///   indices into `[0, last_dim)` (PyTorch returns `ScalarType::Long`).
+    /// - `indices` — an `I64`-tagged `GpuBufferHandle` of `outer * k * inner`
+    ///   original indices into `[0, dim)` (PyTorch returns `ScalarType::Long`).
     ///
     /// `largest == true` → descending value order; else ascending. The CUDA
     /// backend's tie order is deterministic but backend-specific; the CPU
     /// `ops::search::topk` path separately mirrors PyTorch CPU's concrete
     /// `TopKImpl.h` selection order. Mirrors
     /// `topk_out_cuda` in `aten/src/ATen/native/cuda/TensorTopK.cpp` for the
-    /// last-dim, sorted case. The default impl errors; the CUDA backend
-    /// overrides it with the `gpu_topk_*` PTX kernel.
-    fn topk_1d(
+    /// sorted case. The default impl errors; the CUDA backend overrides it with
+    /// the `gpu_topk_nd_*` PTX kernel.
+    fn topk_nd(
         &self,
         _values_in: &GpuBufferHandle,
         _outer: usize,
-        _last_dim: usize,
+        _dim: usize,
+        _inner: usize,
         _k: usize,
         _largest: bool,
     ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
-        Err(FerrotorchError::NotImplementedOnCuda { op: "topk_1d" })
+        Err(FerrotorchError::NotImplementedOnCuda { op: "topk_nd" })
+    }
+
+    /// Compatibility wrapper for last-dimension topk (`inner == 1`).
+    fn topk_1d(
+        &self,
+        values_in: &GpuBufferHandle,
+        outer: usize,
+        last_dim: usize,
+        k: usize,
+        largest: bool,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        self.topk_nd(values_in, outer, last_dim, 1, k, largest)
     }
 
     /// On-device `histc` over a GPU-resident value buffer (#1545). Counts the

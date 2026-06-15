@@ -15,7 +15,7 @@
 //! | REQ-4 | SHIPPED | `unique_consecutive` at `ops/search.rs:260`; consumer: re-export at `lib.rs:176`. CUDA f32/f64/f16/bf16 lower the data-dependent run compaction on-device via `GpuBackend::unique_consecutive_1d` (#1545); values stay GPU-resident, only run-position metadata read back. |
 //! | REQ-5 | SHIPPED | `histc`; consumer: re-export `ferrotorch_core::histc`. Out-of-range/NaN values are SKIPPED (not clamped), matching torch `SummaryOps.cu:92` (#1650); default `min==max` infers the range from data `aminmax`, widening all-equal data to `[v-1,v+1]` per `SummaryOps.cu:328-336` (#1652). CUDA f32/f64 accumulate the histogram on-device via `GpuBackend::histc_1d` (#1545); counts stay GPU-resident. |
 //! | REQ-6 | SHIPPED | `meshgrid` (= `meshgrid_indexing(.., Ij)`) + `meshgrid_indexing(tensors, MeshIndexing)`; consumer: `meshgrid` delegates to `meshgrid_indexing`, both re-exported. `MeshIndexing::Xy` swaps the first two inputs+output grids per torch `TensorShape.cpp:4433-4438,4470-4472` (#1652). CUDA f32/f64/f16/bf16 produce each axis grid on-device via `GpuBackend::meshgrid_grid` (#1545); grids stay GPU-resident. Grid `i` is differentiable w.r.t. coordinate tensor `i` via `MeshgridBackward` (CORE-110, #1804). |
-//! | REQ-7 | SHIPPED | `topk` at `ops/search.rs:814`; consumer: re-export `ferrotorch_core::topk` at `lib.rs:176`. CUDA f32/f64/f16/bf16 lower the k-selection on-device via `GpuBackend::topk_1d` (#1545); values stay GPU-resident, only int64 indices read back. Zero-width last dim short-circuits to shaped empty results (CORE-108, #1802); values carry `TopkBackward` for tracking inputs (CORE-109, #1803). |
+//! | REQ-7 | SHIPPED | `topk`/`topk_dim`/`topk_dim_sorted`; consumer: re-export `ferrotorch_core::{topk, topk_dim, topk_dim_sorted}`. CUDA f32/f64/f16/bf16 lower the k-selection on-device via `GpuBackend::topk_nd` (#1545); values stay GPU-resident, only int64 indices read back. Zero-width dims short-circuit to shaped empty results (CORE-108, #1802); scalar topk follows torch's 0-D special case; values carry `TopkBackward` for tracking inputs (CORE-109, #1803). |
 
 use std::sync::Arc;
 
@@ -838,12 +838,13 @@ fn histc_infer_data_range<T: Float>(input: &Tensor<T>) -> FerrotorchResult<(f64,
 #[derive(Debug)]
 pub struct TopkBackward<T: Float> {
     input: Tensor<T>,
-    /// Row-major `[outer, k]` indices into the last dimension, exactly the
+    /// Row-major output indices into the selected dimension, exactly the
     /// `indices` half of the forward's return value.
     indices: Vec<usize>,
     outer: usize,
     k: usize,
-    last_dim: usize,
+    dim_size: usize,
+    inner: usize,
 }
 
 impl<T: Float> GradFn<T> for TopkBackward<T> {
@@ -851,9 +852,15 @@ impl<T: Float> GradFn<T> for TopkBackward<T> {
         let go = grad_output.data_vec()?;
         let mut grad = vec![<T as num_traits::Zero>::zero(); self.input.numel()];
         for o in 0..self.outer {
+            let input_outer_base = o * self.dim_size * self.inner;
+            let output_outer_base = o * self.k * self.inner;
             for j in 0..self.k {
-                let idx = self.indices[o * self.k + j];
-                grad[o * self.last_dim + idx] += go[o * self.k + j];
+                for inner in 0..self.inner {
+                    let out_flat = output_outer_base + j * self.inner + inner;
+                    let idx = self.indices[out_flat];
+                    let input_flat = input_outer_base + idx * self.inner + inner;
+                    grad[input_flat] += go[out_flat];
+                }
             }
         }
         let grad_tensor = Tensor::from_storage(
@@ -885,7 +892,8 @@ fn topk_values_tensor<T: Float>(
     indices: &[usize],
     outer: usize,
     k: usize,
-    last_dim: usize,
+    dim_size: usize,
+    inner: usize,
 ) -> FerrotorchResult<Tensor<T>> {
     if is_grad_enabled() && input.requires_grad() {
         Tensor::from_operation(
@@ -896,7 +904,8 @@ fn topk_values_tensor<T: Float>(
                 indices: indices.to_vec(),
                 outer,
                 k,
-                last_dim,
+                dim_size,
+                inner,
             }),
         )
     } else {
@@ -919,6 +928,71 @@ pub fn topk<T: Float>(
     k: usize,
     largest: bool,
 ) -> FerrotorchResult<(Tensor<T>, Vec<usize>)> {
+    topk_dim(input, k, -1, largest)
+}
+
+/// Return the `k` largest/smallest elements and their indices along `dim`.
+///
+/// This is the dim-aware form of [`topk`], matching `torch.topk(input, k,
+/// dim=dim, largest=largest, sorted=True)`. The output tensor is row-major
+/// contiguous with `dim` replaced by `k`; the returned `Vec<usize>` stores the
+/// same row-major logical index tensor, with each entry an index into the
+/// selected input dimension.
+///
+/// PyTorch's 0-D special case is preserved: `k == 0` and `k == 1` both return
+/// the scalar value with scalar index `0`; `k > 1` errors.
+pub fn topk_dim<T: Float>(
+    input: &Tensor<T>,
+    k: usize,
+    dim: isize,
+    largest: bool,
+) -> FerrotorchResult<(Tensor<T>, Vec<usize>)> {
+    topk_dim_sorted(input, k, dim, largest, true)
+}
+
+/// Full `torch.topk` option surface for ferrotorch's host-index return API.
+///
+/// CPU `sorted=false` mirrors PyTorch CPU's concrete selection order via
+/// [`crate::torch_topk_cpu`]. CUDA currently returns a deterministic sorted
+/// selected set for both `sorted` values; PyTorch documents `sorted=false` order
+/// as unspecified, and the values remain GPU-resident either way.
+pub fn topk_dim_sorted<T: Float>(
+    input: &Tensor<T>,
+    k: usize,
+    dim: isize,
+    largest: bool,
+    sorted: bool,
+) -> FerrotorchResult<(Tensor<T>, Vec<usize>)> {
+    if input.ndim() == 0 {
+        if dim != 0 && dim != -1 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("axis {dim} is out of bounds for tensor with 0 dimensions"),
+            });
+        }
+        if k > 1 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "topk: selected index k out of range".into(),
+            });
+        }
+        let storage = input
+            .storage()
+            .try_clone_subregion(input.storage_offset(), 1)?;
+        let values = topk_values_tensor(storage, vec![], input, &[0], 1, 1, 1, 1)?;
+        return Ok((values, vec![0]));
+    }
+
+    let norm_dim = crate::shape::normalize_axis(dim, input.ndim())?;
+
+    topk_dim_sorted_inner(input, k, norm_dim, largest, sorted)
+}
+
+fn topk_dim_sorted_inner<T: Float>(
+    input: &Tensor<T>,
+    k: usize,
+    dim: usize,
+    largest: bool,
+    sorted: bool,
+) -> FerrotorchResult<(Tensor<T>, Vec<usize>)> {
     if input.ndim() == 0 {
         return Err(FerrotorchError::InvalidArgument {
             message: "topk: input must have at least 1 dimension".into(),
@@ -926,58 +1000,57 @@ pub fn topk<T: Float>(
     }
 
     let shape = input.shape();
-    let last_dim = *shape.last().unwrap();
-    if k > last_dim {
+    let dim_size = shape[dim];
+    if k > dim_size {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!("topk: k ({k}) > last dimension size ({last_dim})"),
+            message: format!("topk: k ({k}) > selected dimension size ({dim_size})"),
         });
     }
+    let outer: usize = crate::shape::numel(&shape[..dim]);
+    let inner: usize = crate::shape::numel(&shape[dim + 1..]);
+    let mut out_shape = shape.to_vec();
+    out_shape[dim] = k;
 
-    // CORE-108 (#1802): a zero-width last dimension admits ONLY `k == 0`
+    // CORE-108 (#1802): a zero-width selected dimension admits ONLY `k == 0`
     // (the `k > last_dim` check above already rejected `k > 0`). Both device
-    // paths below compute `numel / last_dim`, an integer divide-by-zero, so
-    // short-circuit to the correctly shaped empty result: torch preserves
-    // every outer dimension and returns empty values + indices on the
-    // input's device (`torch.topk(torch.empty(2,3,0), 0)` -> values/indices
-    // shape [2,3,0]; CUDA input -> cuda:0 outputs; verified live on torch
-    // 2.11.0+cu130). `TensorStorage::on_device` keeps a CUDA input's empty
-    // values CUDA-resident (no silent CPU demotion, R-LOUD-1).
-    if last_dim == 0 {
+    // paths below need a nonzero scan extent, so short-circuit to the correctly
+    // shaped empty result: torch preserves every outer dimension and returns
+    // empty values + indices on the input's device.
+    if dim_size == 0 {
         let values = topk_values_tensor(
             TensorStorage::on_device(Vec::new(), input.device())?,
-            shape.to_vec(),
+            out_shape,
             input,
             &[],
+            outer,
             0,
             0,
-            0,
+            inner,
         )?;
         return Ok((values, Vec::new()));
     }
 
     // GPU fast path (#1545): for CUDA-resident supported floating inputs the
-    // k-selection runs on-device via `GpuBackend::topk_1d` over the
-    // `[outer, last_dim]` layout (the input is contiguous, so the last dim is
-    // the innermost run). The VALUES tensor stays GPU-resident — it is wrapped
-    // straight back into a CUDA `Tensor` with no host crossing — and ONLY the
-    // freshly-computed int64 indices are read to host to satisfy this
-    // function's `Vec<usize>` contract (R-CODE-4: no CPU<->GPU round trip of
-    // the value data).
+    // k-selection runs on-device via `GpuBackend::topk_nd` over the row-major
+    // `[outer, dim_size, inner]` logical layout. The VALUES tensor stays
+    // GPU-resident — it is wrapped straight back into a CUDA `Tensor` with no
+    // host crossing — and ONLY the freshly-computed int64 indices are read to
+    // host to satisfy this function's `Vec<usize>` contract (R-CODE-4: no
+    // CPU<->GPU round trip of the value data).
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_f16::<T>() || is_bf16::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
         // buffer before the on-device k-selection reads element 0 (the
-        // `[outer, last_dim]` layout assumption now also guarantees offset 0).
+        // `[outer, dim_size, inner]` layout assumption now also guarantees offset 0).
         // Kept as a separate binding (NOT shadowing `input`) so the backward
         // node below references the ORIGINAL input tensor for graph
         // traversal to the leaf.
         let input_c = input.contiguous()?;
-        let outer = input_c.numel() / last_dim;
         let (val_handle, idx_handle) =
-            backend.topk_1d(input_c.gpu_handle()?, outer, last_dim, k, largest)?;
+            backend.topk_nd(input_c.gpu_handle()?, outer, dim_size, inner, k, largest)?;
         let bytes = backend.gpu_to_cpu(&idx_handle)?;
-        let n = outer * k;
+        let n = outer * k * inner;
         if bytes.len() < n * 8 {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
@@ -996,8 +1069,6 @@ pub fn topk<T: Float>(
                 i64::from_le_bytes(buf) as usize
             })
             .collect();
-        let mut out_shape = shape.to_vec();
-        *out_shape.last_mut().unwrap() = k;
         let values = topk_values_tensor(
             crate::storage::TensorStorage::gpu(val_handle),
             out_shape,
@@ -1005,7 +1076,8 @@ pub fn topk<T: Float>(
             &out_indices,
             outer,
             k,
-            last_dim,
+            dim_size,
+            inner,
         )?;
         return Ok((values, out_indices));
     }
@@ -1015,21 +1087,29 @@ pub fn topk<T: Float>(
     }
 
     let data = input.data_vec()?;
-    let outer: usize = data.len() / last_dim;
 
-    let mut out_values = Vec::with_capacity(outer * k);
-    let mut out_indices = Vec::with_capacity(outer * k);
+    let n_out = outer * k * inner;
+    let mut out_values = vec![<T as num_traits::Zero>::zero(); n_out];
+    let mut out_indices = vec![0usize; n_out];
 
     for o in 0..outer {
-        let slice = &data[o * last_dim..(o + 1) * last_dim];
-        for (value, index) in crate::torch_topk_cpu::torch_cpu_topk_pairs(slice, k, largest, true) {
-            out_values.push(value);
-            out_indices.push(index);
+        for inner_idx in 0..inner {
+            let mut slice = Vec::with_capacity(dim_size);
+            for d in 0..dim_size {
+                slice.push(data[(o * dim_size + d) * inner + inner_idx]);
+            }
+            for (j, (value, index)) in
+                crate::torch_topk_cpu::torch_cpu_topk_pairs(&slice, k, largest, sorted)
+                    .into_iter()
+                    .enumerate()
+            {
+                let out_flat = (o * k + j) * inner + inner_idx;
+                out_values[out_flat] = value;
+                out_indices[out_flat] = index;
+            }
         }
     }
 
-    let mut out_shape = shape.to_vec();
-    *out_shape.last_mut().unwrap() = k;
     let values = topk_values_tensor(
         TensorStorage::cpu(out_values),
         out_shape,
@@ -1037,7 +1117,8 @@ pub fn topk<T: Float>(
         &out_indices,
         outer,
         k,
-        last_dim,
+        dim_size,
+        inner,
     )?;
 
     Ok((values, out_indices))
@@ -1280,6 +1361,108 @@ mod tests {
         let input = tensor_1d(&[1.0, 2.0]);
         let result = topk(&input, 5, true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_topk_dim_3d_middle_dim_matches_torch() {
+        // Live torch 2.11:
+        // torch.topk(x.reshape(2,3,4), 2, dim=1, largest=True, sorted=True)
+        // values flatten:
+        // [8,7,6,9, 4,5,3,6, 5,10,11,11, 2,5,5,3]
+        // indices flatten:
+        // [2,2,2,1, 1,0,0,2, 1,0,2,2, 0,1,1,0]
+        let input = Tensor::from_storage(
+            TensorStorage::cpu(vec![
+                1.0_f32, 5.0, 3.0, 2.0, 4.0, 4.0, 0.0, 9.0, 8.0, 7.0, 6.0, 6.0, 2.0, 10.0, -1.0,
+                3.0, 5.0, 5.0, 5.0, 1.0, 0.0, -2.0, 11.0, 11.0,
+            ]),
+            vec![2, 3, 4],
+            false,
+        )
+        .unwrap();
+
+        let (values, indices) = topk_dim(&input, 2, 1, true).unwrap();
+
+        assert_eq!(values.shape(), &[2, 2, 4]);
+        assert_eq!(
+            values.data().unwrap(),
+            &[
+                8.0, 7.0, 6.0, 9.0, 4.0, 5.0, 3.0, 6.0, 5.0, 10.0, 11.0, 11.0, 2.0, 5.0, 5.0, 3.0
+            ]
+        );
+        assert_eq!(
+            indices,
+            vec![2, 2, 2, 1, 1, 0, 0, 2, 1, 0, 2, 2, 0, 1, 1, 0]
+        );
+    }
+
+    #[test]
+    fn test_topk_dim_zero_smallest_matches_torch() {
+        // Live torch 2.11:
+        // torch.topk([[3,1,4],[2,5,0]], 2, dim=0, largest=False)
+        // -> values [[2,1,0],[3,5,4]], indices [[1,0,1],[0,1,0]]
+        let input = Tensor::from_storage(
+            TensorStorage::cpu(vec![3.0_f32, 1.0, 4.0, 2.0, 5.0, 0.0]),
+            vec![2, 3],
+            false,
+        )
+        .unwrap();
+
+        let (values, indices) = topk_dim(&input, 2, 0, false).unwrap();
+
+        assert_eq!(values.shape(), &[2, 3]);
+        assert_eq!(values.data().unwrap(), &[2.0, 1.0, 0.0, 3.0, 5.0, 4.0]);
+        assert_eq!(indices, vec![1, 0, 1, 0, 1, 0]);
+    }
+
+    #[test]
+    fn test_topk_scalar_matches_torch_special_case() {
+        // Live torch 2.11: torch.topk(torch.tensor(7.), k=0|1) returns scalar
+        // value 7 and scalar index 0; only k > 1 errors.
+        let input = Tensor::from_storage(TensorStorage::cpu(vec![7.0_f32]), vec![], false).unwrap();
+
+        for k in [0, 1] {
+            let (values, indices) = topk_dim(&input, k, 0, true).unwrap();
+            assert_eq!(values.shape(), &[] as &[usize]);
+            assert_eq!(values.data().unwrap(), &[7.0]);
+            assert_eq!(indices, vec![0]);
+        }
+
+        assert!(topk_dim(&input, 2, 0, true).is_err());
+    }
+
+    #[test]
+    fn test_topk_dim_backward_scatters_along_selected_dim() {
+        // Live torch 2.11 for x.reshape(2,3,4), v=topk(x,2,dim=1), weighted
+        // cotangent 1..=16 gives flattened grad:
+        // [0,6,7,0, 5,0,0,4, 1,2,3,8, 13,10,0,16, 9,14,15,0, 0,0,11,12]
+        let input = Tensor::from_storage(
+            TensorStorage::cpu(vec![
+                1.0_f32, 5.0, 3.0, 2.0, 4.0, 4.0, 0.0, 9.0, 8.0, 7.0, 6.0, 6.0, 2.0, 10.0, -1.0,
+                3.0, 5.0, 5.0, 5.0, 1.0, 0.0, -2.0, 11.0, 11.0,
+            ]),
+            vec![2, 3, 4],
+            true,
+        )
+        .unwrap();
+        let (values, _indices) = topk_dim(&input, 2, 1, true).unwrap();
+        let cotangent = Tensor::from_storage(
+            TensorStorage::cpu((1..=16).map(|v| v as f32).collect()),
+            vec![2, 2, 4],
+            false,
+        )
+        .unwrap();
+
+        values.backward_with_gradient(&cotangent).unwrap();
+
+        let grad = input.grad().unwrap().unwrap();
+        assert_eq!(
+            grad.data().unwrap(),
+            &[
+                0.0, 6.0, 7.0, 0.0, 5.0, 0.0, 0.0, 4.0, 1.0, 2.0, 3.0, 8.0, 13.0, 10.0, 0.0, 16.0,
+                9.0, 14.0, 15.0, 0.0, 0.0, 0.0, 11.0, 12.0,
+            ]
+        );
     }
 
     /// NaN ordering matches torch's sort/topk comparator (`GTOp`/`LTOp`,

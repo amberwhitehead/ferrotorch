@@ -49,11 +49,11 @@
 //! | REQ-3 (trait surface) | SHIPPED | `fn searchsorted_1d in gpu_dispatch.rs`; consumer `ops::search::searchsorted` GPU branch |
 //! | REQ-4 (dispatch wiring) | SHIPPED | `CudaBackendImpl::searchsorted_1d in backend_impl.rs` dispatches `match dtype { F32, F64, F16, BF16 }` |
 //! | REQ-5 (re-export + consumer) | SHIPPED | `pub use search::{gpu_searchsorted_f32, gpu_searchsorted_f64, gpu_searchsorted_f16, gpu_searchsorted_bf16} in lib.rs`; consumer `ferrotorch_core::ops::search::searchsorted` CUDA branch |
-//! | REQ-6 (`gpu_topk_*`) | SHIPPED | `pub fn gpu_topk_f32`/`_f64`/`_f16`/`_bf16 in search.rs` mirror `topk_out_cuda` gather+`sortKeyValueInplace` at `aten/src/ATen/native/cuda/TensorTopK.cpp:97,106`; consumer `CudaBackendImpl::topk_1d in backend_impl.rs` |
-//! | REQ-7 (topk PTX + ABI) | SHIPPED | `TOPK_F32_PTX`/`TOPK_F64_PTX`/`TOPK_F16_PTX`/`TOPK_BF16_PTX in search.rs` carry the 7-arg ABI; launch site binds args in matching order |
-//! | REQ-8 (topk trait surface) | SHIPPED | `fn topk_1d in gpu_dispatch.rs`; consumer `ops::search::topk` GPU branch |
-//! | REQ-9 (topk dispatch wiring) | SHIPPED | `CudaBackendImpl::topk_1d in backend_impl.rs` dispatches `match dtype { F32, F64, F16, BF16 }` |
-//! | REQ-10 (topk re-export + consumer) | SHIPPED | `pub use search::{gpu_topk_f32, gpu_topk_f64, gpu_topk_f16, gpu_topk_bf16} in lib.rs`; consumer `ferrotorch_core::ops::search::topk` CUDA branch (values stay GPU-resident) |
+//! | REQ-6 (`gpu_topk_nd_*`) | SHIPPED | `pub fn gpu_topk_nd_f32`/`_f64`/`_f16`/`_bf16 in search.rs` mirror `topk_out_cuda` gather+`sortKeyValueInplace` at `aten/src/ATen/native/cuda/TensorTopK.cpp:97,106` over `[outer, dim, inner]`; consumer `CudaBackendImpl::topk_nd in backend_impl.rs` |
+//! | REQ-7 (topk PTX + ABI) | SHIPPED | `TOPK_F32_PTX`/`TOPK_F64_PTX`/`TOPK_F16_PTX`/`TOPK_BF16_PTX in search.rs` carry the 8-arg ABI; launch site binds args in matching order |
+//! | REQ-8 (topk trait surface) | SHIPPED | `fn topk_nd in gpu_dispatch.rs`, with `topk_1d` as the `inner == 1` wrapper; consumer `ops::search::topk_dim_sorted` GPU branch |
+//! | REQ-9 (topk dispatch wiring) | SHIPPED | `CudaBackendImpl::topk_nd in backend_impl.rs` dispatches `match dtype { F32, F64, F16, BF16 }` |
+//! | REQ-10 (topk re-export + consumer) | SHIPPED | `pub use search::{gpu_topk_f32, gpu_topk_f64, gpu_topk_f16, gpu_topk_bf16, gpu_topk_nd_f32, gpu_topk_nd_f64, gpu_topk_nd_f16, gpu_topk_nd_bf16} in lib.rs`; consumer `ferrotorch_core::ops::search::topk_dim_sorted` CUDA branch (values stay GPU-resident) |
 //! | REQ-11 (`gpu_histc_f32`/`_f64`) | SHIPPED | `pub fn gpu_histc_f32`/`_f64 in search.rs` mirror getBin + last-bin clamp + range guard at `aten/src/ATen/native/cuda/SummaryOps.cu:41,47,92`; consumer `CudaBackendImpl::histc_1d in backend_impl.rs` |
 //! | REQ-12 (histc PTX + ABI) | SHIPPED | `HISTC_F32_PTX`/`HISTC_F64_PTX in search.rs` carry the 6-arg ABI `(in,out,n,nbins,minv,maxv)`; f32 uses `red.global.add.f32`, f64 `red.global.add.f64` (sm_60) |
 //! | REQ-13 (histc trait surface) | SHIPPED | `fn histc_1d in gpu_dispatch.rs`; consumer `ops::search::histc` GPU branch |
@@ -625,12 +625,13 @@ pub fn gpu_searchsorted_bf16(
 }
 
 // ===========================================================================
-// topk — k extrema along the last dim, with int64 indices
+// topk — k extrema along the selected dim, with int64 indices
 //
-// Layout: input is logically `[outer, dim]` (row-major, contiguous). One CUDA
-// thread per output slice (`outer` threads). Each thread does a serial
+// Layout: input is logically `[outer, dim, inner]` (row-major, contiguous). One
+// CUDA thread per `(outer, inner)` output lane. Each thread does a serial
 // selection of `k` extrema over its `dim`-length slice and writes `k` values
-// (same dtype) + `k` int64 indices in *sorted* order:
+// (same dtype) + `k` int64 indices into a `[outer, k, inner]` output in *sorted*
+// order:
 //
 //   - largest == 1: descending value; ties broken by ascending original index.
 //   - largest == 0: ascending value;  ties broken by ascending original index.
@@ -662,10 +663,10 @@ pub fn gpu_searchsorted_bf16(
 // `torch.topk` — verified live on torch 2.11.0+cu130 (RTX 3090):
 //   topk([3,NaN,1,5,NaN,2], k=4, largest=True) -> [NaN,NaN,5,3] idx [1,4,3,0].
 //
-// ABI: (in_ptr, vals_ptr, idx_ptr, outer, dim, k, largest)
-//   in    : V[outer * dim]
-//   vals  : V[outer * k]    (output values)
-//   idx   : i64[outer * k]  (output indices into [0, dim))
+// ABI: (in_ptr, vals_ptr, idx_ptr, outer, dim, inner, k, largest)
+//   in    : V[outer * dim * inner]
+//   vals  : V[outer * k * inner]    (output values)
+//   idx   : i64[outer * k * inner]  (output indices into [0, dim))
 //   largest : u32 (1 = largest, 0 = smallest)
 // ===========================================================================
 
@@ -685,12 +686,13 @@ macro_rules! topk_ptx {
             "    .param .u64 idx_ptr,\n",
             "    .param .u32 outer,\n",
             "    .param .u32 dim,\n",
+            "    .param .u32 inner,\n",
             "    .param .u32 k,\n",
             "    .param .u32 largest\n",
             ") {\n",
-            "    .reg .u32 %tid_r, %bid_r, %bdim_r, %s, %no, %nd, %nk, %lg;\n",
-            "    .reg .u32 %j, %i, %prev_idx, %best_idx, %cur_idx;\n",
-            "    .reg .u64 %in_p, %vp, %ip, %slice_off, %off, %addr, %tmp64;\n",
+            "    .reg .u32 %tid_r, %bid_r, %bdim_r, %s, %no, %nd, %ni, %nlanes, %nk, %lg;\n",
+            "    .reg .u32 %j, %i, %prev_idx, %best_idx, %cur_idx, %outer_idx, %inner_idx, %tmpu;\n",
+            "    .reg .u64 %in_p, %vp, %ip, %elem_off, %off, %addr, %tmp64;\n",
             "    .reg .",
             $tyld,
             " %prev_val, %best_val, %cur_val;\n",
@@ -705,6 +707,7 @@ macro_rules! topk_ptx {
             "    ld.param.u64 %ip,   [idx_ptr];\n",
             "    ld.param.u32 %no,   [outer];\n",
             "    ld.param.u32 %nd,   [dim];\n",
+            "    ld.param.u32 %ni,   [inner];\n",
             "    ld.param.u32 %nk,   [k];\n",
             "    ld.param.u32 %lg,   [largest];\n",
             "\n",
@@ -712,16 +715,13 @@ macro_rules! topk_ptx {
             "    mov.u32 %bid_r,  %ctaid.x;\n",
             "    mov.u32 %bdim_r, %ntid.x;\n",
             "    mad.lo.u32 %s, %bid_r, %bdim_r, %tid_r;\n",
-            "    setp.ge.u32 %p_oob, %s, %no;\n",
+            "    mul.lo.u32 %nlanes, %no, %ni;\n",
+            "    setp.ge.u32 %p_oob, %s, %nlanes;\n",
             "    @%p_oob bra DONE;\n",
             "\n",
             "    setp.ne.u32 %p_lg, %lg, 0;          // p_lg = largest\n",
-            "    // slice_off = s * dim (in elements)\n",
-            "    mul.lo.u32 %i, %s, %nd;\n",
-            "    cvt.u64.u32 %slice_off, %i;\n",
-            "    shl.b64 %slice_off, %slice_off, ",
-            $shift,
-            ";\n",
+            "    div.u32 %outer_idx, %s, %ni;\n",
+            "    rem.u32 %inner_idx, %s, %ni;\n",
             "\n",
             "    mov.u32 %j, 0;\n",
             "JLOOP:\n",
@@ -735,13 +735,16 @@ macro_rules! topk_ptx {
             "    setp.ge.u32 %p_iloop, %i, %nd;\n",
             "    @%p_iloop bra ISTORE;\n",
             "\n",
-            "    // cur_val = in[slice + i]\n",
-            "    cvt.u64.u32 %off, %i;\n",
-            "    shl.b64 %off, %off, ",
+            "    // cur_val = in[(outer_idx * dim + i) * inner + inner_idx]\n",
+            "    mul.lo.u32 %tmpu, %outer_idx, %nd;\n",
+            "    add.u32 %tmpu, %tmpu, %i;\n",
+            "    mul.lo.u32 %tmpu, %tmpu, %ni;\n",
+            "    add.u32 %tmpu, %tmpu, %inner_idx;\n",
+            "    cvt.u64.u32 %elem_off, %tmpu;\n",
+            "    shl.b64 %off, %elem_off, ",
             $shift,
             ";\n",
-            "    add.u64 %addr, %in_p, %slice_off;\n",
-            "    add.u64 %addr, %addr, %off;\n",
+            "    add.u64 %addr, %in_p, %off;\n",
             "    ld.global.",
             $tyld,
             " %cur_val, [%addr];\n",
@@ -842,9 +845,11 @@ macro_rules! topk_ptx {
             "    bra ILOOP;\n",
             "\n",
             "ISTORE:\n",
-            "    // out position = s * k + j\n",
-            "    mul.lo.u32 %cur_idx, %s, %nk;\n",
+            "    // out position = (outer_idx * k + j) * inner + inner_idx\n",
+            "    mul.lo.u32 %cur_idx, %outer_idx, %nk;\n",
             "    add.u32 %cur_idx, %cur_idx, %j;\n",
+            "    mul.lo.u32 %cur_idx, %cur_idx, %ni;\n",
+            "    add.u32 %cur_idx, %cur_idx, %inner_idx;\n",
             "    cvt.u64.u32 %off, %cur_idx;\n",
             "    // store value\n",
             "    shl.b64 %addr, %off, ",
@@ -899,12 +904,13 @@ macro_rules! topk_16_ptx {
             "    .param .u64 idx_ptr,\n",
             "    .param .u32 outer,\n",
             "    .param .u32 dim,\n",
+            "    .param .u32 inner,\n",
             "    .param .u32 k,\n",
             "    .param .u32 largest\n",
             ") {\n",
-            "    .reg .u32 %tid_r, %bid_r, %bdim_r, %s, %no, %nd, %nk, %lg;\n",
-            "    .reg .u32 %j, %i, %prev_idx, %best_idx, %cur_idx, %cur_bits;\n",
-            "    .reg .u64 %in_p, %vp, %ip, %slice_off, %off, %addr, %tmp64;\n",
+            "    .reg .u32 %tid_r, %bid_r, %bdim_r, %s, %no, %nd, %ni, %nlanes, %nk, %lg;\n",
+            "    .reg .u32 %j, %i, %prev_idx, %best_idx, %cur_idx, %cur_bits, %outer_idx, %inner_idx, %tmpu;\n",
+            "    .reg .u64 %in_p, %vp, %ip, %elem_off, %off, %addr, %tmp64;\n",
             "    .reg .b16 %cur_raw, %best_raw, %zero16;\n",
             "    .reg .f32 %prev_val, %best_val, %cur_val;\n",
             "    .reg .s64 %ridx;\n",
@@ -917,19 +923,20 @@ macro_rules! topk_16_ptx {
             "    ld.param.u64 %ip,   [idx_ptr];\n",
             "    ld.param.u32 %no,   [outer];\n",
             "    ld.param.u32 %nd,   [dim];\n",
+            "    ld.param.u32 %ni,   [inner];\n",
             "    ld.param.u32 %nk,   [k];\n",
             "    ld.param.u32 %lg,   [largest];\n\n",
             "    mov.u32 %tid_r,  %tid.x;\n",
             "    mov.u32 %bid_r,  %ctaid.x;\n",
             "    mov.u32 %bdim_r, %ntid.x;\n",
             "    mad.lo.u32 %s, %bid_r, %bdim_r, %tid_r;\n",
-            "    setp.ge.u32 %p_oob, %s, %no;\n",
+            "    mul.lo.u32 %nlanes, %no, %ni;\n",
+            "    setp.ge.u32 %p_oob, %s, %nlanes;\n",
             "    @%p_oob bra DONE;\n",
             "    mov.b16 %zero16, 0;\n\n",
             "    setp.ne.u32 %p_lg, %lg, 0;\n",
-            "    mul.lo.u32 %i, %s, %nd;\n",
-            "    cvt.u64.u32 %slice_off, %i;\n",
-            "    shl.b64 %slice_off, %slice_off, 1;\n\n",
+            "    div.u32 %outer_idx, %s, %ni;\n",
+            "    rem.u32 %inner_idx, %s, %ni;\n\n",
             "    mov.u32 %j, 0;\n",
             "JLOOP:\n",
             "    setp.ge.u32 %p_jloop, %j, %nk;\n",
@@ -940,10 +947,13 @@ macro_rules! topk_16_ptx {
             "ILOOP:\n",
             "    setp.ge.u32 %p_iloop, %i, %nd;\n",
             "    @%p_iloop bra ISTORE;\n\n",
-            "    cvt.u64.u32 %off, %i;\n",
-            "    shl.b64 %off, %off, 1;\n",
-            "    add.u64 %addr, %in_p, %slice_off;\n",
-            "    add.u64 %addr, %addr, %off;\n",
+            "    mul.lo.u32 %tmpu, %outer_idx, %nd;\n",
+            "    add.u32 %tmpu, %tmpu, %i;\n",
+            "    mul.lo.u32 %tmpu, %tmpu, %ni;\n",
+            "    add.u32 %tmpu, %tmpu, %inner_idx;\n",
+            "    cvt.u64.u32 %elem_off, %tmpu;\n",
+            "    shl.b64 %off, %elem_off, 1;\n",
+            "    add.u64 %addr, %in_p, %off;\n",
             "    ld.global.b16 %cur_raw, [%addr];\n",
             $decode_cur,
             "\n",
@@ -1001,8 +1011,10 @@ macro_rules! topk_16_ptx {
             "    add.u32 %i, %i, 1;\n",
             "    bra ILOOP;\n\n",
             "ISTORE:\n",
-            "    mul.lo.u32 %cur_idx, %s, %nk;\n",
+            "    mul.lo.u32 %cur_idx, %outer_idx, %nk;\n",
             "    add.u32 %cur_idx, %cur_idx, %j;\n",
+            "    mul.lo.u32 %cur_idx, %cur_idx, %ni;\n",
+            "    add.u32 %cur_idx, %cur_idx, %inner_idx;\n",
             "    cvt.u64.u32 %off, %cur_idx;\n",
             "    shl.b64 %addr, %off, 1;\n",
             "    add.u64 %addr, %vp, %addr;\n",
@@ -1036,8 +1048,8 @@ const TOPK_BF16_PTX: &str = topk_16_ptx!(
     "    mov.b32 %cur_bits, {%zero16, %cur_raw}; mov.b32 %cur_val, %cur_bits;"
 );
 
-fn launch_topk_config(outer: usize) -> LaunchConfig {
-    let grid = ((outer as u32).saturating_add(BLOCK_SIZE - 1)) / BLOCK_SIZE;
+fn launch_topk_config(lanes: usize) -> LaunchConfig {
+    let grid = ((lanes as u32).saturating_add(BLOCK_SIZE - 1)) / BLOCK_SIZE;
     LaunchConfig {
         grid_dim: (grid.max(1), 1, 1),
         block_dim: (BLOCK_SIZE, 1, 1),
@@ -1045,10 +1057,11 @@ fn launch_topk_config(outer: usize) -> LaunchConfig {
     }
 }
 
-/// Launch a topk kernel over a device-resident `[outer, dim]` value buffer,
-/// returning `(values, indices)`: a fresh `CudaSlice<V>` of `outer * k` extrema
-/// (same dtype as the input) and a `CudaSlice<i64>` of the matching original
-/// indices into `[0, dim)`. Both outputs stay GPU-resident.
+/// Launch a topk kernel over a device-resident `[outer, dim, inner]` row-major
+/// value buffer, returning `(values, indices)`: fresh `outer * k * inner`
+/// buffers laid out as `[outer, k, inner]`. Values keep the input dtype and
+/// indices are original positions into `[0, dim)`. Both outputs stay
+/// GPU-resident.
 ///
 /// One thread per output slice; each thread serially selects `k` extrema in
 /// sorted order with an ascending-index tie-break (see the module-level note).
@@ -1057,6 +1070,7 @@ fn launch_topk<V>(
     input: &CudaSlice<V>,
     outer: usize,
     dim: usize,
+    inner: usize,
     k: usize,
     largest: bool,
     device: &GpuDevice,
@@ -1069,10 +1083,16 @@ where
     if k > dim {
         return Err(GpuError::LengthMismatch { a: k, b: dim });
     }
+    let lanes = outer
+        .checked_mul(inner)
+        .ok_or_else(|| GpuError::InvalidState {
+            message: format!("launch_topk: lane extent {outer} * {inner} overflows usize"),
+        })?;
     let expected_input = outer
         .checked_mul(dim)
+        .and_then(|n| n.checked_mul(inner))
         .ok_or_else(|| GpuError::InvalidState {
-            message: format!("launch_topk: input extent {outer} * {dim} overflows usize"),
+            message: format!("launch_topk: input extent {outer} * {dim} * {inner} overflows usize"),
         })?;
     if input.len() < expected_input {
         return Err(GpuError::LengthMismatch {
@@ -1080,17 +1100,33 @@ where
             b: expected_input,
         });
     }
-    if outer > u32::MAX as usize || dim > u32::MAX as usize || k > u32::MAX as usize {
+    let stream = device.stream();
+    let n_out = outer
+        .checked_mul(k)
+        .and_then(|n| n.checked_mul(inner))
+        .ok_or_else(|| GpuError::InvalidState {
+            message: format!("launch_topk: output extent {outer} * {k} * {inner} overflows usize"),
+        })?;
+    if outer > u32::MAX as usize
+        || dim > u32::MAX as usize
+        || inner > u32::MAX as usize
+        || k > u32::MAX as usize
+        || lanes > u32::MAX as usize
+        || expected_input > u32::MAX as usize
+        || n_out > u32::MAX as usize
+    {
         return Err(GpuError::LengthMismatch {
-            a: outer.max(dim).max(k),
+            a: outer
+                .max(dim)
+                .max(inner)
+                .max(k)
+                .max(lanes)
+                .max(expected_input)
+                .max(n_out),
             b: u32::MAX as usize,
         });
     }
 
-    let stream = device.stream();
-    let n_out = outer.checked_mul(k).ok_or_else(|| GpuError::InvalidState {
-        message: format!("launch_topk: output extent {outer} * {k} overflows usize"),
-    })?;
     if n_out == 0 {
         return Ok((stream.alloc_zeros::<V>(0)?, stream.alloc_zeros::<i64>(0)?));
     }
@@ -1105,26 +1141,27 @@ where
 
     let mut out_vals = stream.alloc_zeros::<V>(n_out)?;
     let mut out_idx = stream.alloc_zeros::<i64>(n_out)?;
-    let cfg = launch_topk_config(outer);
+    let cfg = launch_topk_config(lanes);
     let outer_u = outer as u32;
     let dim_u = dim as u32;
+    let inner_u = inner as u32;
     let k_u = k as u32;
     let largest_u: u32 = u32::from(largest);
 
     // SAFETY:
-    // - `f` is the PTX entry `kernel_name`; its 7-arg signature
-    //   (in_ptr, vals_ptr, idx_ptr, outer, dim, k, largest) matches the args
+    // - `f` is the PTX entry `kernel_name`; its 8-arg signature
+    //   (in_ptr, vals_ptr, idx_ptr, outer, dim, inner, k, largest) matches the args
     //   pushed below in order.
-    // - `input` holds at least `outer * dim` `V`-elements (checked above); each
-    //   thread `s in [0, outer)` reads `in[s*dim + i]` for `i in [0, dim)`,
-    //   strictly in range.
-    // - `out_vals` (V) and `out_idx` (i64) are fresh `outer*k`-element buffers
-    //   (just allocated), the only `&mut` args; the kernel writes
-    //   `out[s*k + j]` for `j in [0, k)`, all in range. They are distinct
-    //   cudarc allocations and cannot alias `input` or each other.
-    // - Threads with `s >= outer` exit via the leading `setp.ge.u32 %p_oob`.
-    // - `outer`/`dim`/`k` are range-checked against `u32::MAX`, so the kernel's
-    //   u32 index arithmetic cannot overflow.
+    // - `input` holds at least `outer * dim * inner` `V`-elements (checked
+    //   above); each thread lane `(o, inner_idx)` reads
+    //   `in[(o*dim+i)*inner + inner_idx]` for `i in [0, dim)`, strictly in range.
+    // - `out_vals` (V) and `out_idx` (i64) are fresh `outer*k*inner`-element
+    //   buffers (just allocated), the only `&mut` args; the kernel writes
+    //   `out[(o*k+j)*inner + inner_idx]` for `j in [0, k)`, all in range. They
+    //   are distinct cudarc allocations and cannot alias `input` or each other.
+    // - Threads with `s >= outer * inner` exit via the leading `setp.ge.u32 %p_oob`.
+    // - `outer`/`dim`/`inner`/`k` and their products are range-checked against
+    //   `u32::MAX`, so the kernel's u32 index arithmetic cannot overflow.
     // - cudarc copies the by-reference `u32` params into the launch parameter
     //   buffer; their lifetime spans this synchronous frame. Stream sync is the
     //   caller's responsibility (matches the other kernel modules).
@@ -1136,6 +1173,7 @@ where
             .arg(&mut out_idx)
             .arg(&outer_u)
             .arg(&dim_u)
+            .arg(&inner_u)
             .arg(&k_u)
             .arg(&largest_u)
             .launch(cfg)?;
@@ -1171,6 +1209,34 @@ pub fn gpu_topk_f32(
         input,
         outer,
         dim,
+        1,
+        k,
+        largest,
+        device,
+        TOPK_F32_PTX,
+        "topk_f32_kernel",
+    )
+}
+
+/// On-device `topk` over an f32 `[outer, dim, inner]` row-major buffer.
+///
+/// Returns `[outer, k, inner]` values and index buffers. See [`gpu_topk_f32`]
+/// for the ordering and error contract.
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_topk_nd_f32(
+    input: &CudaSlice<f32>,
+    outer: usize,
+    dim: usize,
+    inner: usize,
+    k: usize,
+    largest: bool,
+    device: &GpuDevice,
+) -> GpuResult<(CudaSlice<f32>, CudaSlice<i64>)> {
+    launch_topk(
+        input,
+        outer,
+        dim,
+        inner,
         k,
         largest,
         device,
@@ -1197,6 +1263,31 @@ pub fn gpu_topk_f64(
         input,
         outer,
         dim,
+        1,
+        k,
+        largest,
+        device,
+        TOPK_F64_PTX,
+        "topk_f64_kernel",
+    )
+}
+
+/// On-device `topk` over an f64 `[outer, dim, inner]` row-major buffer.
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_topk_nd_f64(
+    input: &CudaSlice<f64>,
+    outer: usize,
+    dim: usize,
+    inner: usize,
+    k: usize,
+    largest: bool,
+    device: &GpuDevice,
+) -> GpuResult<(CudaSlice<f64>, CudaSlice<i64>)> {
+    launch_topk(
+        input,
+        outer,
+        dim,
+        inner,
         k,
         largest,
         device,
@@ -1225,6 +1316,31 @@ pub fn gpu_topk_f16(
         input,
         outer,
         dim,
+        1,
+        k,
+        largest,
+        device,
+        TOPK_F16_PTX,
+        "topk_f16_kernel",
+    )
+}
+
+/// On-device `topk` over a raw f16 `[outer, dim, inner]` row-major buffer.
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_topk_nd_f16(
+    input: &CudaSlice<u16>,
+    outer: usize,
+    dim: usize,
+    inner: usize,
+    k: usize,
+    largest: bool,
+    device: &GpuDevice,
+) -> GpuResult<(CudaSlice<u16>, CudaSlice<i64>)> {
+    launch_topk(
+        input,
+        outer,
+        dim,
+        inner,
         k,
         largest,
         device,
@@ -1253,6 +1369,31 @@ pub fn gpu_topk_bf16(
         input,
         outer,
         dim,
+        1,
+        k,
+        largest,
+        device,
+        TOPK_BF16_PTX,
+        "topk_bf16_kernel",
+    )
+}
+
+/// On-device `topk` over a raw bf16 `[outer, dim, inner]` row-major buffer.
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_topk_nd_bf16(
+    input: &CudaSlice<u16>,
+    outer: usize,
+    dim: usize,
+    inner: usize,
+    k: usize,
+    largest: bool,
+    device: &GpuDevice,
+) -> GpuResult<(CudaSlice<u16>, CudaSlice<i64>)> {
+    launch_topk(
+        input,
+        outer,
+        dim,
+        inner,
         k,
         largest,
         device,
@@ -4285,6 +4426,40 @@ mod tests {
     }
 
     #[test]
+    fn topk_nd_f32_middle_dim_matches_torch_probe() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        // Live torch 2.11.0+cu130:
+        // torch.topk(x.reshape(2,3,4), 2, dim=1, largest=True, sorted=True)
+        // values flatten:
+        // [8,7,6,9, 4,5,3,6, 5,10,11,11, 2,5,5,3]
+        // indices flatten:
+        // [2,2,2,1, 1,0,0,2, 1,0,2,2, 0,1,1,0]
+        let data = [
+            1.0_f32, 5.0, 3.0, 2.0, 4.0, 4.0, 0.0, 9.0, 8.0, 7.0, 6.0, 6.0, 2.0, 10.0, -1.0, 3.0,
+            5.0, 5.0, 5.0, 1.0, 0.0, -2.0, 11.0, 11.0,
+        ];
+        let g = cpu_to_gpu(&data, &device).unwrap();
+
+        let (vals, idx) = gpu_topk_nd_f32(g.inner(), 2, 3, 4, 2, true, &device).unwrap();
+
+        assert_eq!(vals.len(), 16);
+        assert_eq!(idx.len(), 16);
+        assert_eq!(
+            read_f32(&vals, &device),
+            vec![
+                8.0, 7.0, 6.0, 9.0, 4.0, 5.0, 3.0, 6.0, 5.0, 10.0, 11.0, 11.0, 2.0, 5.0, 5.0, 3.0,
+            ]
+        );
+        assert_eq!(
+            read_i64(&idx, &device),
+            vec![2, 2, 2, 1, 1, 0, 0, 2, 1, 0, 2, 2, 0, 1, 1, 0]
+        );
+    }
+
+    #[test]
     fn topk_f32_k_equals_dim() {
         let device = match GpuDevice::new(0) {
             Ok(d) => d,
@@ -4375,6 +4550,31 @@ mod tests {
     }
 
     #[test]
+    fn topk_nd_f16_middle_dim_matches_torch_probe() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        // Shape [1,3,2], top-2 along dim=1:
+        // torch.float16 values [[2,5],[1,4]], indices [[2,2],[0,0]].
+        let data_f32 = [1.0_f32, 4.0, -1.0, 3.0, 2.0, 5.0];
+        let data: Vec<u16> = data_f32
+            .into_iter()
+            .map(|x| f16::from_f32(x).to_bits())
+            .collect();
+        let g = cpu_to_gpu(&data, &device).unwrap();
+
+        let (vals, idx) = gpu_topk_nd_f16(g.inner(), 1, 3, 2, 2, true, &device).unwrap();
+
+        let got: Vec<f32> = read_u16(&vals, &device)
+            .into_iter()
+            .map(|bits| f16::from_bits(bits).to_f32())
+            .collect();
+        assert_eq!(got, vec![2.0, 5.0, 1.0, 4.0]);
+        assert_eq!(read_i64(&idx, &device), vec![2, 2, 0, 0]);
+    }
+
+    #[test]
     fn topk_bf16_multi_row_matches_cpu_ref() {
         let device = match GpuDevice::new(0) {
             Ok(d) => d,
@@ -4396,6 +4596,31 @@ mod tests {
         assert_eq!(got, vec![4.0, 3.0, 7.0, 7.0]);
         // Equal 7.0 values use ferrotorch's documented ascending-index tie.
         assert_eq!(got_idx, vec![2, 3, 1, 2]);
+    }
+
+    #[test]
+    fn topk_nd_bf16_middle_dim_matches_torch_probe() {
+        let device = match GpuDevice::new(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        // Shape [1,3,2], top-2 along dim=1:
+        // torch.bfloat16 values [[2,5],[1,4]], indices [[2,2],[0,0]].
+        let data_f32 = [1.0_f32, 4.0, -1.0, 3.0, 2.0, 5.0];
+        let data: Vec<u16> = data_f32
+            .into_iter()
+            .map(|x| bf16::from_f32(x).to_bits())
+            .collect();
+        let g = cpu_to_gpu(&data, &device).unwrap();
+
+        let (vals, idx) = gpu_topk_nd_bf16(g.inner(), 1, 3, 2, 2, true, &device).unwrap();
+
+        let got: Vec<f32> = read_u16(&vals, &device)
+            .into_iter()
+            .map(|bits| bf16::from_bits(bits).to_f32())
+            .collect();
+        assert_eq!(got, vec![2.0, 5.0, 1.0, 4.0]);
+        assert_eq!(read_i64(&idx, &device), vec![2, 2, 0, 0]);
     }
 
     #[test]

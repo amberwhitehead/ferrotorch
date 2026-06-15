@@ -211,8 +211,8 @@ pub use ops::cumulative::CumExtremeResult;
 pub use ops::indexing::{gather, masked_select, scatter, scatter_add, where_cond, where_cond_bt};
 pub use ops::scatter::scatter_add_segments;
 pub use ops::search::{
-    MeshIndexing, bucketize, histc, meshgrid, meshgrid_indexing, searchsorted, topk, unique,
-    unique_consecutive,
+    MeshIndexing, bucketize, histc, meshgrid, meshgrid_indexing, searchsorted, topk, topk_dim,
+    topk_dim_sorted, unique, unique_consecutive,
 };
 pub use ops::tensor_ops::{cdist, diag, diagflat, roll, tril, triu};
 pub use pruning::{apply_2_4_mask, magnitude_prune, sparsity_ratio};

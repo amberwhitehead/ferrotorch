@@ -9831,11 +9831,12 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
-    fn topk_1d(
+    fn topk_nd(
         &self,
         values_in: &GpuBufferHandle,
         outer: usize,
-        last_dim: usize,
+        dim: usize,
+        inner: usize,
         k: usize,
         largest: bool,
     ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
@@ -9843,10 +9844,11 @@ impl GpuBackend for CudaBackendImpl {
         let ord = values_in.device_ordinal();
         match values_in.dtype() {
             DType::F32 => {
-                let (vals, idx) = crate::search::gpu_topk_f32(
+                let (vals, idx) = crate::search::gpu_topk_nd_f32(
                     Self::unwrap_buffer(values_in)?.inner(),
                     outer,
-                    last_dim,
+                    dim,
+                    inner,
                     k,
                     largest,
                     dev,
@@ -9858,10 +9860,11 @@ impl GpuBackend for CudaBackendImpl {
                 ))
             }
             DType::F64 => {
-                let (vals, idx) = crate::search::gpu_topk_f64(
+                let (vals, idx) = crate::search::gpu_topk_nd_f64(
                     Self::unwrap_buffer_f64(values_in)?.inner(),
                     outer,
-                    last_dim,
+                    dim,
+                    inner,
                     k,
                     largest,
                     dev,
@@ -9873,10 +9876,11 @@ impl GpuBackend for CudaBackendImpl {
                 ))
             }
             DType::F16 => {
-                let (vals, idx) = crate::search::gpu_topk_f16(
+                let (vals, idx) = crate::search::gpu_topk_nd_f16(
                     Self::unwrap_buffer_f16(values_in)?,
                     outer,
-                    last_dim,
+                    dim,
+                    inner,
                     k,
                     largest,
                     dev,
@@ -9888,10 +9892,11 @@ impl GpuBackend for CudaBackendImpl {
                 ))
             }
             DType::BF16 => {
-                let (vals, idx) = crate::search::gpu_topk_bf16(
+                let (vals, idx) = crate::search::gpu_topk_nd_bf16(
                     Self::unwrap_buffer_bf16(values_in)?,
                     outer,
-                    last_dim,
+                    dim,
+                    inner,
                     k,
                     largest,
                     dev,
@@ -9903,7 +9908,7 @@ impl GpuBackend for CudaBackendImpl {
                 ))
             }
             other => Err(FerrotorchError::InvalidArgument {
-                message: format!("topk_1d: unsupported value dtype {other}"),
+                message: format!("topk_nd: unsupported value dtype {other}"),
             }),
         }
     }

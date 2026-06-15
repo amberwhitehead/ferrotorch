@@ -17,7 +17,7 @@
 //!   - tensor_ops.rs         -> `diag`       (`diag_extract` gather)
 //!   - grad_fns/reduction.rs -> `sum_dim`    (`sum_axis` strided reduce)
 //!   - ops/cumulative.rs     -> `cumsum`     (`cumsum` strided scan)
-//!   - ops/search.rs         -> `topk`       (`topk_1d` k-selection)
+//!   - ops/search.rs         -> `topk`       (`topk_nd` k-selection)
 //!   - masked.rs             -> `masked_min` (the `masked_min_gpu` fused reduce)
 //!
 //! # R-CHAR-3 provenance (live torch 2.11.0+cu130, this env)
@@ -284,7 +284,7 @@ fn cumsum_narrowed_offset_view_gpu_matches_torch() {
 
 // ===========================================================================
 // ops/search.rs — `topk(2)` over the last dim on a narrowed-offset CUDA view
-// (`topk_1d` k-selection). Rows [3,4],[5,6],[7,8] -> largest-2 [4,3],[6,5],[8,7].
+// (`topk_nd` k-selection). Rows [3,4],[5,6],[7,8] -> largest-2 [4,3],[6,5],[8,7].
 // ===========================================================================
 #[test]
 fn topk_narrowed_offset_view_gpu_matches_torch() {

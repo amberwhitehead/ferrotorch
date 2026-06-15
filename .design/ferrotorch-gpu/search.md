@@ -52,8 +52,8 @@ where a value equals a boundary.
 
 ### topk tie-break (the bug-prone part)
 
-`torch.topk(input, k, dim=-1, largest, sorted=True)` on CUDA gathers the
-top-k (unordered) then sorts the gathered slice with
+`torch.topk(input, k, dim, largest, sorted=True)` on CUDA gathers the
+top-k (unordered) along the selected dimension, then sorts the gathered slice with
 `sortKeyValueInplace(.., stable=false)` (`topk_out_cuda`,
 `aten/src/ATen/native/cuda/TensorTopK.cpp:101`). Because the post-gather sort
 is NOT stable, the per-tie ORDER of original indices is unspecified by torch
@@ -98,36 +98,41 @@ against torch 2.11 CUDA (values exact in all cases; gathered values exact).
   f32/f64/f16/bf16 inputs through `GpuBackend::searchsorted_1d` and reads
   back ONLY the i64 result indices (the value/boundary data never leaves the
   device — no R-CODE-4 round trip).
-- REQ-6: `gpu_topk_f32` / `gpu_topk_f64` / `gpu_topk_f16` /
-  `gpu_topk_bf16` — given a device `[outer, dim]` value buffer and
-  `(k, largest)`, return `(values, indices)`: a fresh device value buffer of
-  `outer * k` extrema (same dtype) and a `CudaSlice<i64>` of `outer * k`
-  original indices into `[0, dim)`, both in sorted order. One thread per
-  output slice; serial selection of `k` extrema (`largest` → descending value,
-  else ascending; ties broken by ascending original index). Mirrors the gather
-  + `sortKeyValueInplace(stable=false)` contract of `topk_out_cuda` for the
-  last-dim, sorted case.
+- REQ-6: `gpu_topk_nd_f32` / `gpu_topk_nd_f64` / `gpu_topk_nd_f16` /
+  `gpu_topk_nd_bf16` — given a device `[outer, dim, inner]` row-major value
+  buffer and `(k, largest)`, return `(values, indices)`: a fresh device value
+  buffer of `outer * k * inner` extrema (same dtype) and a `CudaSlice<i64>` of
+  `outer * k * inner` original indices into `[0, dim)`, laid out as
+  `[outer, k, inner]` in sorted order. One thread per `(outer, inner)` lane;
+  serial selection of `k` extrema (`largest` -> descending value, else
+  ascending; ties broken by ascending original index). Mirrors the gather +
+  `sortKeyValueInplace(stable=false)` contract of `topk_out_cuda` for the
+  selected-dim, sorted case. The `gpu_topk_f32` / `_f64` / `_f16` / `_bf16`
+  wrappers remain as last-dim compatibility entry points with `inner == 1`.
 - REQ-7: PTX template + ABI for topk. `TOPK_F32_PTX` / `TOPK_F64_PTX` /
-  `TOPK_F16_PTX` / `TOPK_BF16_PTX` carry the 7-arg ABI
-  `(in_ptr, vals_ptr, idx_ptr, outer, dim, k, largest)` where `largest` is a
-  `u32` flag (1 = largest, 0 = smallest). Loaded via
+  `TOPK_F16_PTX` / `TOPK_BF16_PTX` carry the 8-arg ABI
+  `(in_ptr, vals_ptr, idx_ptr, outer, dim, inner, k, largest)` where `largest`
+  is a `u32` flag (1 = largest, 0 = smallest). Loaded via
   `module_cache::get_or_compile`.
-- REQ-8: `GpuBackend::topk_1d` trait surface in
-  `ferrotorch-core/src/gpu_dispatch.rs` — `(values_in, outer, last_dim, k,
-  largest)` → `(values handle same dtype, I64 indices handle)`. Default impl
-  returns `NotImplementedOnCuda`; the CUDA backend overrides. The indices
+- REQ-8: `GpuBackend::topk_nd` trait surface in
+  `ferrotorch-core/src/gpu_dispatch.rs` — `(values_in, outer, dim, inner, k,
+  largest)` -> `(values handle same dtype, I64 indices handle)`. Default impl
+  returns `NotImplementedOnCuda`; the CUDA backend overrides. The legacy
+  `topk_1d` trait method delegates to `topk_nd(..., inner=1)`. The indices
   handle is `DType::I64` (PyTorch `ScalarType::Long`).
-- REQ-9: Dispatch wiring in `CudaBackendImpl::topk_1d`
+- REQ-9: Dispatch wiring in `CudaBackendImpl::topk_nd`
   (`ferrotorch-gpu/src/backend_impl.rs`) — `match dtype { F32, F64, F16, BF16 }`,
   wrapping the value buffer with the same dtype tag and the index
   `CudaSlice<i64>` via `wrap_slice_i64`.
 - REQ-10: Re-export + non-test production consumer for topk. `pub use
-  search::{gpu_topk_f32, gpu_topk_f64, gpu_topk_f16, gpu_topk_bf16}` in
+  search::{gpu_topk_f32, gpu_topk_f64, gpu_topk_f16, gpu_topk_bf16,
+  gpu_topk_nd_f32, gpu_topk_nd_f64, gpu_topk_nd_f16, gpu_topk_nd_bf16}` in
   `ferrotorch-gpu/src/lib.rs`; the production consumer is
-  `ferrotorch-core/src/ops/search.rs::topk`, which on CUDA
-  f32/f64/f16/bf16 dispatches through `GpuBackend::topk_1d`, keeps the VALUES
+  `ferrotorch-core/src/ops/search.rs::topk_dim_sorted`, which on CUDA
+  f32/f64/f16/bf16 dispatches through `GpuBackend::topk_nd`, keeps the VALUES
   tensor GPU-resident (`TensorStorage::gpu`), and reads back ONLY the i64
-  indices (no R-CODE-4 round trip of the value data).
+  indices (no R-CODE-4 round trip of the value data). `topk` delegates through
+  `topk_dim(..., dim=-1)`.
 - REQ-11: `gpu_histc_f32` / `gpu_histc_f64` — given a device value buffer of
   `n` elements, `bins`, and inclusive range bounds `(min_val, max_val)`,
   return a fresh pre-zeroed device `CudaSlice<V>` of `bins` counts (same dtype
@@ -414,10 +419,10 @@ consumer path (result `is_cuda()` + torch value-match) is pinned by
 | REQ-3 | SHIPPED | `fn searchsorted_1d in gpu_dispatch.rs` (`GpuBackend` trait method, `DType::I64` output); consumer `ops::search::searchsorted` GPU branch |
 | REQ-4 | SHIPPED | `CudaBackendImpl::searchsorted_1d in backend_impl.rs` dispatches `match dtype { F32, F64, F16, BF16 }` and wraps via `wrap_slice_i64` |
 | REQ-5 | SHIPPED | `pub use search::{gpu_searchsorted_f32, gpu_searchsorted_f64, gpu_searchsorted_f16, gpu_searchsorted_bf16} in lib.rs`; non-test consumer `ferrotorch_core::ops::search::searchsorted` CUDA f32/f64/f16/bf16 branch (`searchsorted in ops/search.rs`) |
-| REQ-6 | SHIPPED | `pub fn gpu_topk_f32` / `gpu_topk_f64` / `gpu_topk_f16` / `gpu_topk_bf16 in search.rs` select k extrema mirroring `topk_out_cuda` gather+`sortKeyValueInplace` at `aten/src/ATen/native/cuda/TensorTopK.cpp:97,106`; consumer `CudaBackendImpl::topk_1d in backend_impl.rs` |
-| REQ-7 | SHIPPED | `TOPK_F32_PTX` / `TOPK_F64_PTX` / `TOPK_F16_PTX` / `TOPK_BF16_PTX in search.rs` carry the 7-arg ABI `(in_ptr, vals_ptr, idx_ptr, outer, dim, k, largest)`; launch site binds args in matching order |
-| REQ-8 | SHIPPED | `fn topk_1d in gpu_dispatch.rs` (`GpuBackend` trait method, `(values, I64 indices)` output); consumer `ops::search::topk` GPU branch |
-| REQ-9 | SHIPPED | `CudaBackendImpl::topk_1d in backend_impl.rs` dispatches `match dtype { F32, F64, F16, BF16 }`, wraps values with the original dtype tag and indices via `wrap_slice_i64` |
+| REQ-6 | SHIPPED | `pub fn gpu_topk_nd_f32` / `gpu_topk_nd_f64` / `gpu_topk_nd_f16` / `gpu_topk_nd_bf16 in search.rs` select k extrema over `[outer, dim, inner]`, with `gpu_topk_f32` / `_f64` / `_f16` / `_bf16` preserved as `inner == 1` wrappers, mirroring `topk_out_cuda` gather+`sortKeyValueInplace` at `aten/src/ATen/native/cuda/TensorTopK.cpp:97,106`; consumer `CudaBackendImpl::topk_nd in backend_impl.rs` |
+| REQ-7 | SHIPPED | `TOPK_F32_PTX` / `TOPK_F64_PTX` / `TOPK_F16_PTX` / `TOPK_BF16_PTX in search.rs` carry the 8-arg ABI `(in_ptr, vals_ptr, idx_ptr, outer, dim, inner, k, largest)`; launch site binds args in matching order |
+| REQ-8 | SHIPPED | `fn topk_nd in gpu_dispatch.rs` (`GpuBackend` trait method, `(values, I64 indices)` output), plus `topk_1d` compatibility wrapper; consumer `ops::search::topk_dim_sorted` GPU branch |
+| REQ-9 | SHIPPED | `CudaBackendImpl::topk_nd in backend_impl.rs` dispatches `match dtype { F32, F64, F16, BF16 }`, wraps values with the original dtype tag and indices via `wrap_slice_i64` |
 | REQ-10 | SHIPPED | `pub use search::{gpu_topk_f32, gpu_topk_f64, gpu_topk_f16, gpu_topk_bf16} in lib.rs`; non-test consumer `ferrotorch_core::ops::search::topk` CUDA f32/f64/f16/bf16 branch keeps VALUES GPU-resident (`TensorStorage::gpu`), reads back only i64 indices (`topk in ops/search.rs`) |
 | REQ-11 | SHIPPED | `pub fn gpu_histc_f32` / `gpu_histc_f64 in search.rs` mirror getBin + last-bin clamp + range guard at `aten/src/ATen/native/cuda/SummaryOps.cu:41,47,92`; consumer `CudaBackendImpl::histc_1d in backend_impl.rs` |
 | REQ-12 | SHIPPED | `HISTC_F32_PTX` / `HISTC_F64_PTX in search.rs` carry the 6-arg ABI `(in,out,n,nbins,minv,maxv)`; f32 `red.global.add.f32` (sm_52), f64 `red.global.add.f64` (sm_60) |

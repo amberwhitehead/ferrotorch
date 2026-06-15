@@ -1,14 +1,14 @@
 //! End-to-end CUDA `topk` coverage for f16 / bf16.
 //!
 //! These tests exercise the production `ferrotorch_core::topk` path: CUDA
-//! tensors dispatch through `GpuBackend::topk_1d`, values remain GPU-resident
+//! tensors dispatch through `GpuBackend::topk_nd`, values remain GPU-resident
 //! with their original half dtype, and only the int64 indices are decoded to
 //! the public `Vec<usize>`.
 
 #![cfg(feature = "cuda")]
 
-use ferrotorch_core::topk;
 use ferrotorch_core::{Device, Tensor, TensorStorage};
+use ferrotorch_core::{topk, topk_dim};
 use ferrotorch_gpu::init_cuda_backend;
 use half::{bf16, f16};
 
@@ -108,4 +108,54 @@ fn topk_bf16_cuda_multirow_smallest_resident() {
         .collect::<Vec<_>>();
     assert_eq!(host, vec![1.0, 2.0, -1.0, 0.0]);
     assert_eq!(indices, vec![1, 3, 1, 0]);
+}
+
+#[test]
+fn topk_dim_f16_cuda_middle_axis_resident() {
+    ensure_cuda();
+    let data_f32 = [1.0_f32, 4.0, -1.0, 3.0, 2.0, 5.0];
+    let data: Vec<f16> = data_f32.into_iter().map(f16::from_f32).collect();
+    let input = cpu_f16(&data, &[1, 3, 2], false)
+        .to(Device::Cuda(0))
+        .expect("upload f16");
+
+    let (values, indices) = topk_dim(&input, 2, 1, true).expect("topk_dim f16 cuda");
+
+    assert_eq!(values.device(), Device::Cuda(0));
+    assert_eq!(values.shape(), &[1, 2, 2]);
+    let host = values
+        .to(Device::Cpu)
+        .expect("read values")
+        .data()
+        .expect("host values")
+        .iter()
+        .map(|v| v.to_f32())
+        .collect::<Vec<_>>();
+    assert_eq!(host, vec![2.0, 5.0, 1.0, 4.0]);
+    assert_eq!(indices, vec![2, 2, 0, 0]);
+}
+
+#[test]
+fn topk_dim_bf16_cuda_middle_axis_resident() {
+    ensure_cuda();
+    let data_f32 = [1.0_f32, 4.0, -1.0, 3.0, 2.0, 5.0];
+    let data: Vec<bf16> = data_f32.into_iter().map(bf16::from_f32).collect();
+    let input = cpu_bf16(&data, &[1, 3, 2], false)
+        .to(Device::Cuda(0))
+        .expect("upload bf16");
+
+    let (values, indices) = topk_dim(&input, 2, 1, true).expect("topk_dim bf16 cuda");
+
+    assert_eq!(values.device(), Device::Cuda(0));
+    assert_eq!(values.shape(), &[1, 2, 2]);
+    let host = values
+        .to(Device::Cpu)
+        .expect("read values")
+        .data()
+        .expect("host values")
+        .iter()
+        .map(|v| v.to_f32())
+        .collect::<Vec<_>>();
+    assert_eq!(host, vec![2.0, 5.0, 1.0, 4.0]);
+    assert_eq!(indices, vec![2, 2, 0, 0]);
 }
