@@ -51,7 +51,7 @@ use std::sync::Arc;
 
 use crate::autograd::no_grad::is_grad_enabled;
 use crate::device::Device;
-use crate::dtype::Float;
+use crate::dtype::{DType, Element, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
@@ -673,14 +673,13 @@ impl<T: Float> GradFn<T> for FlipBackward<T> {
             return Ok(vec![None]);
         }
         // Flip is its own inverse: re-flip the incoming gradient along the
-        // same dims to reverse the permutation. Re-use the host kernel so the
-        // grad tensor is unconditionally a leaf (no nested grad_fn).
-        let (cpu_go, device) = ensure_cpu(grad_output)?;
-        let go_data = cpu_go.data_vec()?;
-        let shape = cpu_go.shape();
-        let flipped = flip_cpu_inner(&go_data, shape, &self.dims);
-        let grad_tensor = Tensor::from_storage(TensorStorage::cpu(flipped), shape.to_vec(), false)?;
-        Ok(vec![Some(restore_device(grad_tensor, device)?)])
+        // same dims. Run under no_grad so backward does not create a nested
+        // autograd edge, while still using the same CPU/CUDA implementation as
+        // forward. This keeps CUDA gradients resident instead of forcing a host
+        // round trip.
+        let dims: Vec<isize> = self.dims.iter().map(|&dim| dim as isize).collect();
+        let grad_input = crate::autograd::no_grad::no_grad(|| flip(grad_output, &dims))?;
+        Ok(vec![Some(grad_input)])
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -700,22 +699,10 @@ impl<T: Float> GradFn<T> for FlipBackward<T> {
 /// listed axis reversed. Backward re-applies the same flip (`FlipBackward`,
 /// flip is its own inverse).
 pub fn flip<T: Float>(input: &Tensor<T>, dims: &[isize]) -> FerrotorchResult<Tensor<T>> {
-    let ndim = input.ndim();
-    // Normalize + validate dims, rejecting duplicates (upstream
-    // `dim_list_to_bitset` sets one bit per dim and errors on a repeat).
-    let mut norm: Vec<usize> = Vec::with_capacity(dims.len());
-    for &d in dims {
-        let nd = crate::shape::normalize_axis(d, ndim)?;
-        if norm.contains(&nd) {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!("flip: dim {nd} appears multiple times in the list of dims"),
-            });
-        }
-        norm.push(nd);
-    }
+    let norm = normalize_flip_dims(dims, input.ndim())?;
 
     if input.is_cuda() {
-        return Err(crate::error::FerrotorchError::NotImplementedOnCuda { op: "flip" });
+        return flip_cuda(input, &norm);
     }
 
     // `data_vec` gathers a (possibly strided) view into logical C-order, so
@@ -730,6 +717,73 @@ pub fn flip<T: Float>(input: &Tensor<T>, dims: &[isize]) -> FerrotorchResult<Ten
         Tensor::from_operation(TensorStorage::cpu(out_data), shape.to_vec(), grad_fn)
     } else {
         Tensor::from_storage(TensorStorage::cpu(out_data), shape.to_vec(), false)
+    }
+}
+
+/// Normalize `flip` dims to PyTorch semantics.
+///
+/// Unlike most axis-taking ops, PyTorch accepts scalar `flip(x, [0])` and
+/// `flip(x, [-1])` as no-op copies while still treating them as the same dim
+/// for duplicate detection. The returned dim list is empty for rank-0 tensors
+/// because there is no physical axis for the CPU/GPU kernels to mark.
+fn normalize_flip_dims(dims: &[isize], ndim: usize) -> FerrotorchResult<Vec<usize>> {
+    let mut norm: Vec<usize> = Vec::with_capacity(dims.len());
+    for &dim in dims {
+        let nd = if ndim == 0 {
+            if dim == 0 || dim == -1 {
+                0
+            } else {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "flip: dimension out of range for 0-D tensor (expected [-1, 0], got {dim})"
+                    ),
+                });
+            }
+        } else {
+            crate::shape::normalize_axis(dim, ndim)?
+        };
+        if norm.contains(&nd) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("flip: dim {nd} appears multiple times in the list of dims"),
+            });
+        }
+        norm.push(nd);
+    }
+
+    if ndim == 0 { Ok(Vec::new()) } else { Ok(norm) }
+}
+
+fn flip_cuda<T: Float>(input: &Tensor<T>, dims: &[usize]) -> FerrotorchResult<Tensor<T>> {
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+
+    // GPU kernels consume a packed C-order logical buffer. Materialize CUDA
+    // views on device first; the public flip output still points its autograd
+    // edge at the original input, matching PyTorch's `grad.flip(dims)` VJP.
+    let input_c = if input.is_contiguous()
+        && input.storage_offset() == 0
+        && input.storage_len() == input.numel()
+    {
+        input.clone()
+    } else {
+        crate::autograd::no_grad::no_grad(|| input.contiguous())?
+    };
+    let handle = input_c.gpu_handle()?;
+    let shape = input.shape().to_vec();
+    let out_handle = match <T as Element>::dtype() {
+        DType::F32 => backend.flip_f32(handle, &shape, dims)?,
+        DType::F64 => backend.flip_f64(handle, &shape, dims)?,
+        DType::F16 | DType::BF16 => backend.flip_u16(handle, &shape, dims)?,
+        _ => {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "flip dtype" });
+        }
+    };
+    let storage = TensorStorage::gpu(out_handle);
+
+    if is_grad_enabled() && input.requires_grad() {
+        let grad_fn = Arc::new(FlipBackward::new(input.clone(), dims.to_vec()));
+        Tensor::from_operation(storage, shape, grad_fn)
+    } else {
+        Tensor::from_storage(storage, shape, false)
     }
 }
 

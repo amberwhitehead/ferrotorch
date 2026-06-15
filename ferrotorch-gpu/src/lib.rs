@@ -181,6 +181,8 @@ pub mod error;
 pub mod f16;
 pub mod flash_attention;
 #[cfg(feature = "cuda")]
+pub mod flip;
+#[cfg(feature = "cuda")]
 pub mod gather_int;
 pub mod graph;
 #[cfg(feature = "cuda")]
@@ -241,6 +243,8 @@ pub use conv::gpu_conv2d_f32;
 pub use device::GpuDevice;
 pub use error::{GpuError, GpuResult};
 pub use flash_attention::{gpu_flash_attention_f32, gpu_flash_attention_f64};
+#[cfg(feature = "cuda")]
+pub use flip::{gpu_flip_f32, gpu_flip_f64, gpu_flip_u16};
 pub use graph::{
     CaptureMode, CapturePool, CaptureStatus, CapturedGraph, GraphPoolHandle, PrivateMemPool,
     begin_capture, capture_into_private_pool, capture_pool_for_handle, end_capture,

@@ -2711,6 +2711,50 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// Flip a contiguous f32 buffer along normalized dimensions.
+    ///
+    /// `shape` is the logical C-contiguous shape of `_a`; `dims` must contain
+    /// de-duplicated axes in `[0, shape.len())`. The output must be a fresh
+    /// CUDA buffer on the same device, matching PyTorch's materializing
+    /// `torch.flip` semantics.
+    fn flip_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _shape: &[usize],
+        _dims: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "flip_f32 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// f64 sibling of [`GpuBackend::flip_f32`].
+    fn flip_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _shape: &[usize],
+        _dims: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "flip_f64 GPU op not yet implemented".into(),
+        })
+    }
+
+    /// f16/bf16 bit-pattern sibling of [`GpuBackend::flip_f32`].
+    ///
+    /// Backends dispatch on `_a.dtype()` and preserve that dtype tag when
+    /// wrapping the returned `u16` storage, so F16 and BF16 never collide.
+    fn flip_u16(
+        &self,
+        _a: &GpuBufferHandle,
+        _shape: &[usize],
+        _dims: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "flip_u16 GPU op not yet implemented".into(),
+        })
+    }
+
     // -- Triangular masks: triu / tril (#1545 / sub #1535) -------------------
     //
     // `[batch.., rows, cols]` C-contiguous masks (`batch` = product of the

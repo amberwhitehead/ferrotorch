@@ -5485,6 +5485,57 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
+    fn flip_f32(
+        &self,
+        a: &GpuBufferHandle,
+        shape: &[usize],
+        dims: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::flip::gpu_flip_f32(a_buf, shape, dims, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn flip_f64(
+        &self,
+        a: &GpuBufferHandle,
+        shape: &[usize],
+        dims: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::flip::gpu_flip_f64(a_buf, shape, dims, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    fn flip_u16(
+        &self,
+        a: &GpuBufferHandle,
+        shape: &[usize],
+        dims: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = match a.dtype() {
+            DType::F16 => Self::unwrap_buffer_f16(a)?,
+            DType::BF16 => Self::unwrap_buffer_bf16(a)?,
+            other => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!("flip_u16 expected F16/BF16, got {other}"),
+                });
+            }
+        };
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::flip::gpu_flip_u16(a_buf, shape, dims, dev).map_err(Self::map_gpu_err)?;
+        Ok(match a.dtype() {
+            DType::F16 => Self::wrap_buffer_f16(result, a.device_ordinal()),
+            DType::BF16 => Self::wrap_buffer_bf16(result, a.device_ordinal()),
+            _ => unreachable!("dtype checked above"),
+        })
+    }
+
     // -- Triangular masks: triu / tril (#1545 / sub #1535) -------------------
     //
     // Gated `#[cfg(feature = "cuda")]` (the `triangular` module is cuda-only,
