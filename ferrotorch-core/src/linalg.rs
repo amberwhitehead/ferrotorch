@@ -7,9 +7,9 @@
 //! **Backward support**: `solve`, `det`, `inv`, `trace`, `outer` (here),
 //! `qr`, `cholesky`, `slogdet`, and `svd` are autograd-aware: when grad
 //! tracking is active they delegate to the matching
-//! `crate::grad_fns::linalg::*_differentiable` wrapper (which computes the
-//! forward under `no_grad` to avoid re-entry and attaches the closed-form
-//! `*Backward` VJP). The remaining factorizations
+//! `crate::grad_fns::linalg::*_differentiable` wrapper (most attach a
+//! closed-form `*Backward` VJP; `outer` mirrors PyTorch as a composite
+//! reshape-plus-mul graph). The remaining factorizations
 //! (eig/eigh/eigvals/eigvalsh/pinv/lstsq/lu/lu_factor/norm/matrix_rank/
 //! householder_product) return non-grad tensors (research-grade VJPs tracked
 //! under #1577/#1345).
@@ -2036,16 +2036,26 @@ pub fn trace<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// Outer product of two 1-D tensors: `out[i, j] = a[i] * b[j]`.
 ///
 /// `a` is length `m`, `b` is length `n`; the result is `[m, n]`. Mirrors
-/// `torch.outer` (`aten/src/ATen/native/LinearAlgebra.cpp` `Tensor outer`,
-/// itself an alias of `ger`); both operands must be 1-D.
+/// `torch.outer` (`aten/src/ATen/native/LinearAlgebra.cpp:1337-1342`):
+/// check both operands are 1-D, then compute `a.reshape({m, 1}) * b`.
 ///
 /// # Backward
-/// Autograd-aware (CPU): when grad tracking is active for `a` or `b`, this
-/// routes through `crate::grad_fns::linalg::outer_differentiable` (the VJP
-/// `da = grad_C @ b`, `db = grad_C^T @ a`).
+/// Autograd-aware on CPU and CUDA: the differentiable wrapper builds the same
+/// composite reshape/broadcast-mul graph PyTorch uses, so gradients stay on
+/// the original device and reduce over broadcast axes through `MulBackward`
+/// and `ReshapeBackward`.
 pub fn outer<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    require_cpu(a, "outer")?;
-    require_cpu(b, "outer")?;
+    if crate::autograd::no_grad::is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
+        return crate::grad_fns::linalg::outer_differentiable(a, b);
+    }
+
+    outer_composite(a, b)
+}
+
+pub(crate) fn outer_composite<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
     if a.ndim() != 1 || b.ndim() != 1 {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
@@ -2055,27 +2065,19 @@ pub fn outer<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
             ),
         });
     }
-
-    // Autograd path: delegate to the differentiable wrapper, which computes
-    // the forward inside `no_grad` (preventing re-entry here) and attaches
-    // `OuterBackward`.
-    if crate::autograd::no_grad::is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
-        return crate::grad_fns::linalg::outer_differentiable(a, b);
+    if a.device() != b.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        });
     }
 
     let m = a.shape()[0];
-    let n = b.shape()[0];
-    let a_data = a.data()?;
-    let b_data = b.data()?;
-    let mut out = vec![<T as num_traits::Zero>::zero(); m * n];
-    for i in 0..m {
-        let ai = a_data[i];
-        let row = i * n;
-        for j in 0..n {
-            out[row + j] = ai * b_data[j];
-        }
-    }
-    Tensor::from_storage(TensorStorage::cpu(out), vec![m, n], false)
+    let m_dim = isize::try_from(m).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!("outer: dimension {m} exceeds supported reshape bound"),
+    })?;
+    let lhs = crate::grad_fns::shape::reshape(a, &[m_dim, 1])?;
+    crate::grad_fns::arithmetic::mul(&lhs, b)
 }
 
 // ---------------------------------------------------------------------------

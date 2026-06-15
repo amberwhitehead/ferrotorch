@@ -41,7 +41,7 @@
 //! | REQ-32 (`tril`) | SHIPPED | `TriangularBackward` + `tril_differentiable` (VJP masks grad by the kept lower triangle per `derivatives.yaml:1805` `grad.tril_symint`); FD-verified `grad_fns::linalg::tests::tril_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the now-grad-aware `crate::ops::tensor_ops::tril` forward delegates here. Closes #1583. |
 //! | REQ-33 (`triu`) | SHIPPED | `triu_differentiable` (sharing `TriangularBackward`; VJP masks grad by the kept upper triangle per `derivatives.yaml:1809` `grad.triu_symint`); FD-verified `grad_fns::linalg::tests::triu_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the now-grad-aware `crate::ops::tensor_ops::triu` forward delegates here. Closes #1583. |
 //! | REQ-34 (`kron`) | SHIPPED | `KronBackward` + `kron_differentiable` (per-Kron-block VJP per `LinearAlgebra.cpp:3530` `kron`); FD-verified `grad_fns::linalg::tests::kron_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the new grad-aware `crate::linalg::kron` forward delegates here. Closes #1583. |
-//! | REQ-35 (`outer`) | SHIPPED | `OuterBackward` + `outer_differentiable` (VJP `da = grad @ b`, `db = grad^T @ a` per `derivatives.yaml:275-276`), forward `crate::linalg::outer`; FD-verified `tests/divergence_linalg_grad_audit.rs:outer_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"outer"` arm (parity 8/8, 0 failed). Blocker #1345. |
+//! | REQ-35 (`outer`) | SHIPPED | `outer_differentiable` mirrors PyTorch's composite `self.reshape({m,1}) * vec2` graph (`LinearAlgebra.cpp:1337-1342`) instead of a CPU-only closed-form VJP; gradients flow through `MulBackward`/`ReshapeBackward` on CPU and CUDA. Forward `crate::linalg::outer`; FD-verified `tests/divergence_linalg_grad_audit.rs:outer_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"outer"` arm. |
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -2207,20 +2207,16 @@ impl<T: Float> GradFn<T> for OuterBackward<T> {
     }
 }
 
-/// Differentiable `outer`. Attaches `OuterBackward` when grad is needed.
+/// Differentiable `outer`.
 ///
-/// Forward computed under `no_grad`: `linalg_fwd::outer` (the public
-/// `crate::linalg::outer` forward) delegates back here when grad is enabled,
-/// so the guard prevents infinite re-entry.
+/// PyTorch implements `outer` as the composite
+/// `self.reshape({self.size(0), 1}) * vec2`
+/// (`aten/src/ATen/native/LinearAlgebra.cpp:1337-1342`). Returning the same
+/// reshape/broadcast-mul graph is important for CUDA: the old closed-form
+/// `OuterBackward` expressed the VJP through `ops::linalg::mv`, which is a
+/// CPU leaf kernel and would force CUDA gradients into host-only data access.
 pub fn outer_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let result = crate::autograd::no_grad::no_grad(|| linalg_fwd::outer(a, b))?;
-    if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
-        let grad_fn = Arc::new(OuterBackward::new(a.clone(), b.clone()));
-        let (storage, shape) = result.into_storage_and_shape()?;
-        Tensor::from_operation(storage, shape, grad_fn)
-    } else {
-        Ok(result)
-    }
+    linalg_fwd::outer_composite(a, b)
 }
 
 // ---------------------------------------------------------------------------
