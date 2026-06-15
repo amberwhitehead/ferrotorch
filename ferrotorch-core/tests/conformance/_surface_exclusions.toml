@@ -3259,30 +3259,6 @@ path = "ferrotorch_core::where_cond_bt"
 kind = "permanent"
 reason = "Re-export covered transitively by the Phase 2.3-shape conformance test that exercises the underlying item; the gate has no auto-coverage for re-exports whose short ident is absent from conformance sources."
 
-[[exclusion]]
-path = "ferrotorch_core::creation::rand_on_device"
-kind = "deferred"
-reason = "GPU-only initializer; conformance exercise requires a live CUDA host. Will be covered by a `tests/conformance_creation_gpu.rs` test under the gated CUDA workflow (#32)."
-tracking_issue = "#1682"
-
-[[exclusion]]
-path = "ferrotorch_core::creation::randn_on_device"
-kind = "deferred"
-reason = "GPU-only initializer; conformance exercise requires a live CUDA host. Will be covered by a `tests/conformance_creation_gpu.rs` test under the gated CUDA workflow (#32)."
-tracking_issue = "#1682"
-
-[[exclusion]]
-path = "ferrotorch_core::rand_on_device"
-kind = "deferred"
-reason = "Re-export of `creation::rand_on_device`; the underlying item is excluded above with the same tracking issue (#1682) pending a CUDA conformance test in the gated workflow (#32)."
-tracking_issue = "#1682"
-
-[[exclusion]]
-path = "ferrotorch_core::randn_on_device"
-kind = "deferred"
-reason = "Re-export of `creation::randn_on_device`; the underlying item is excluded above with the same tracking issue (#1682) pending a CUDA conformance test in the gated workflow (#32)."
-tracking_issue = "#1682"
-
 # ---------------------------------------------------------------------------
 # CORE-202 (#1896) triage block: the gate now strips comments and string
 # literals before its substring scan, which exposed 219 items whose only
