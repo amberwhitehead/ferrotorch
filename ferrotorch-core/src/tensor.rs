@@ -193,6 +193,7 @@ struct TensorInner<T: Float> {
 /// ensures the tensor can participate in gradient computation.
 pub struct Tensor<T: Float = f32> {
     inner: Arc<TensorInner<T>>,
+    saved_version: Option<u64>,
 }
 
 // --- Construction ---
@@ -232,6 +233,7 @@ impl<T: Float> Tensor<T> {
                 is_leaf: true,
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
+            saved_version: None,
         })
     }
 
@@ -280,6 +282,7 @@ impl<T: Float> Tensor<T> {
                 is_leaf: true,
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
+            saved_version: None,
         })
     }
 
@@ -334,6 +337,7 @@ impl<T: Float> Tensor<T> {
                 is_leaf: false,
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
+            saved_version: None,
         })
     }
 
@@ -396,6 +400,7 @@ impl<T: Float> Tensor<T> {
                 is_leaf,
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
+            saved_version: None,
         }
     }
 
@@ -478,6 +483,73 @@ impl<T: Float> Tensor<T> {
                 is_leaf: false,
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
+            saved_version: None,
+        })
+    }
+
+    /// Create a non-leaf operation result while also handing the backward node
+    /// a saved output tensor that shares the result's storage and version
+    /// counter. This mirrors PyTorch formulas such as `sqrt_backward(grad,
+    /// result)`: mutating `result.detach()` after forward must invalidate the
+    /// saved result observed during backward, without making the grad_fn hold a
+    /// strong reference cycle to the output tensor itself.
+    pub(crate) fn from_operation_saving_output<F>(
+        storage: TensorStorage<T>,
+        shape: Vec<usize>,
+        make_grad_fn: F,
+    ) -> FerrotorchResult<Self>
+    where
+        F: FnOnce(Tensor<T>) -> Arc<dyn GradFn<T>>,
+    {
+        if crate::autograd::no_grad::is_inference_mode() {
+            return Self::from_storage(storage, shape, false);
+        }
+
+        let numel = checked_numel(&shape, "Tensor::from_operation_saving_output")?;
+        if numel > storage.len() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "shape {:?} requires {} elements but storage has {}",
+                    shape,
+                    numel,
+                    storage.len()
+                ),
+            });
+        }
+
+        let strides = checked_c_contiguous_strides(&shape, "Tensor::from_operation_saving_output")?;
+        let storage = Arc::new(storage);
+        let saved_output = Tensor {
+            inner: Arc::new(TensorInner {
+                id: TensorId::next(),
+                storage: Arc::clone(&storage),
+                shape: shape.clone(),
+                strides: strides.clone(),
+                offset: 0,
+                grad: Mutex::new(None),
+                grad_fn: None,
+                requires_grad: false,
+                is_leaf: true,
+                hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
+            }),
+            saved_version: Some(storage.version()),
+        };
+        let grad_fn = make_grad_fn(saved_output);
+
+        Ok(Self {
+            inner: Arc::new(TensorInner {
+                id: TensorId::next(),
+                storage,
+                shape,
+                strides,
+                offset: 0,
+                grad: Mutex::new(None),
+                grad_fn: Some(grad_fn),
+                requires_grad: true,
+                is_leaf: false,
+                hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
+            }),
+            saved_version: None,
         })
     }
 }
@@ -655,6 +727,44 @@ impl<T: Float> Tensor<T> {
     #[inline]
     pub fn storage(&self) -> &TensorStorage<T> {
         &self.inner.storage
+    }
+
+    /// Current shared in-place version for this tensor's storage.
+    #[inline]
+    pub(crate) fn storage_version(&self) -> u64 {
+        self.inner.storage.version()
+    }
+
+    /// Clone this tensor as a value saved for backward, recording the shared
+    /// storage version PyTorch's SavedVariable would expect during backward.
+    #[inline]
+    pub(crate) fn saved_for_backward(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            saved_version: Some(self.storage_version()),
+        }
+    }
+
+    #[inline]
+    fn bump_storage_version(&self) {
+        self.inner.storage.bump_version();
+    }
+
+    #[inline]
+    fn check_saved_version(&self, access: &'static str) -> FerrotorchResult<()> {
+        if let Some(expected) = self.saved_version {
+            let current = self.storage_version();
+            if current != expected {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "one of the variables needed for gradient computation has been modified \
+                         by an inplace operation: tensor is at version {current}; expected \
+                         version {expected} instead ({access})"
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     #[inline]
@@ -890,6 +1000,7 @@ impl<T: Float> Tensor<T> {
     /// additionally requires external synchronization. See the
     /// synchronization contract on [`crate::storage::TensorStorage`].
     pub fn data(&self) -> FerrotorchResult<&[T]> {
+        self.check_saved_version("Tensor::data")?;
         if self.inner.storage.is_gpu() {
             return Err(FerrotorchError::GpuTensorNotAccessible);
         }
@@ -946,6 +1057,7 @@ impl<T: Float> Tensor<T> {
     /// CPU tensors it gathers elements in logical (C-order) sequence. For
     /// GPU tensors it performs a device-to-host transfer.
     pub fn data_vec(&self) -> FerrotorchResult<Vec<T>> {
+        self.check_saved_version("Tensor::data_vec")?;
         if self.inner.storage.is_meta() {
             return Err(FerrotorchError::InvalidArgument {
                 message: "cannot read data from a meta tensor; meta tensors carry shape only. \
@@ -1562,6 +1674,7 @@ impl<T: Float> Tensor<T> {
 
     /// Get the GPU buffer handle. Returns `Err` for CPU tensors.
     pub fn gpu_handle(&self) -> FerrotorchResult<&crate::gpu_dispatch::GpuBufferHandle> {
+        self.check_saved_version("Tensor::gpu_handle")?;
         self.inner
             .storage
             .gpu_handle()
@@ -1656,6 +1769,7 @@ impl<T: Float> Tensor<T> {
                 message: "tensor view extends beyond storage".into(),
             });
         }
+        self.bump_storage_version();
         Ok(&mut slice[self.inner.offset..end])
     }
 
@@ -1738,6 +1852,7 @@ impl<T: Float> Tensor<T> {
             unsafe {
                 self.update_storage(TensorStorage::gpu(new_handle))?;
             }
+            return Ok(());
         } else if self.is_contiguous() {
             // is_gpu() branch above already routed Gpu storage; cpu_write_at
             // here Errs only on Cubecl/Meta — neither of which an update_data
@@ -1763,6 +1878,7 @@ impl<T: Float> Tensor<T> {
             }
         }
 
+        self.bump_storage_version();
         Ok(())
     }
 
@@ -1872,6 +1988,7 @@ impl<T: Float> Tensor<T> {
             (*inner_ptr).offset = 0;
         }
 
+        self.bump_storage_version();
         Ok(())
     }
 
@@ -1975,6 +2092,7 @@ impl<T: Float> Tensor<T> {
             unsafe {
                 storage.replace_buffer_aliased(new_storage)?;
             }
+            self.bump_storage_version();
             return Ok(());
         }
 
@@ -2026,6 +2144,7 @@ impl<T: Float> Tensor<T> {
                     });
                 }
             }
+            self.bump_storage_version();
             return Ok(());
         }
 
@@ -2046,6 +2165,7 @@ impl<T: Float> Tensor<T> {
                 self.cpu_scatter_through_view(src)?;
             }
         }
+        self.bump_storage_version();
         Ok(())
     }
 
@@ -2175,6 +2295,7 @@ impl<T: Float> Tensor<T> {
         // no reference produced here outlives the call.
         let handle = unsafe { self.inner.storage.gpu_handle_mut_aliased() }
             .ok_or(FerrotorchError::DeviceUnavailable)?;
+        self.bump_storage_version();
         f(handle)
     }
 
@@ -2194,6 +2315,7 @@ impl<T: Float> Tensor<T> {
                 is_leaf: true,
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
+            saved_version: None,
         }
     }
 
@@ -2213,6 +2335,7 @@ impl<T: Float> Tensor<T> {
                 is_leaf: self.inner.is_leaf,
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
+            saved_version: None,
         }
     }
 
@@ -2345,6 +2468,7 @@ impl<T: Float> Tensor<T> {
                 is_leaf: !track,
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
+            saved_version: None,
         }
     }
 
@@ -2624,6 +2748,7 @@ impl<T: Float> Clone for Tensor<T> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            saved_version: self.saved_version,
         }
     }
 }
@@ -2637,6 +2762,7 @@ impl<T: Float> fmt::Debug for Tensor<T> {
             .field("requires_grad", &self.inner.requires_grad)
             .field("is_leaf", &self.inner.is_leaf)
             .field("grad_fn", &self.inner.grad_fn.as_ref().map(|gf| gf.name()))
+            .field("saved_version", &self.saved_version)
             .finish()
     }
 }

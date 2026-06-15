@@ -42,6 +42,7 @@
 //! returns a structured error instead (`Tensor::update_storage_and_shape`).
 
 use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::device::Device;
 use crate::dtype::{DType, Element};
@@ -274,6 +275,7 @@ pub trait CubeStorageHandle: std::fmt::Debug + Send + Sync {
 pub struct TensorStorage<T: Element> {
     pub(crate) data: UnsafeCell<StorageBuffer<T>>,
     pub(crate) device: Device,
+    version: AtomicU64,
 }
 
 // SAFETY: `StorageBuffer<T: Element>` is `Send + Sync` by composition
@@ -336,11 +338,23 @@ impl<T: Element> TensorStorage<T> {
         self.data.get_mut()
     }
 
+    /// Shared autograd version counter, incremented by in-place writes through
+    /// any tensor alias that reaches this storage.
+    pub(crate) fn version(&self) -> u64 {
+        self.version.load(Ordering::Acquire)
+    }
+
+    /// Mark this storage as modified by an in-place operation.
+    pub(crate) fn bump_version(&self) {
+        self.version.fetch_add(1, Ordering::AcqRel);
+    }
+
     /// Create a new CPU storage from a `Vec<T>`.
     pub fn cpu(data: Vec<T>) -> Self {
         Self {
             data: UnsafeCell::new(StorageBuffer::Cpu(CpuBuffer::from_vec(data))),
             device: Device::Cpu,
+            version: AtomicU64::new(0),
         }
     }
 
@@ -354,6 +368,7 @@ impl<T: Element> TensorStorage<T> {
                 fill_value: None,
             }),
             device: Device::Meta,
+            version: AtomicU64::new(0),
         }
     }
 
@@ -370,6 +385,7 @@ impl<T: Element> TensorStorage<T> {
                 fill_value: Some(value),
             }),
             device: Device::Meta,
+            version: AtomicU64::new(0),
         }
     }
 
@@ -505,6 +521,7 @@ impl<T: Element> TensorStorage<T> {
         Ok(Self {
             data: UnsafeCell::new(StorageBuffer::Cubecl(handle)),
             device: Device::Xpu(ordinal),
+            version: AtomicU64::new(0),
         })
     }
 
@@ -549,6 +566,7 @@ impl<T: Element> TensorStorage<T> {
         Ok(Self {
             data: UnsafeCell::new(StorageBuffer::Gpu(handle)),
             device,
+            version: AtomicU64::new(0),
         })
     }
 
@@ -913,6 +931,7 @@ impl<T: Element> TensorStorage<T> {
         drop(Self {
             data: UnsafeCell::new(old_buffer),
             device: self.device,
+            version: AtomicU64::new(0),
         });
         Ok(())
     }
@@ -941,6 +960,7 @@ impl<T: Element> TensorStorage<T> {
                     v.as_slice().to_vec(),
                 ))),
                 device: self.device,
+                version: AtomicU64::new(0),
             }),
             StorageBuffer::Gpu(h) => {
                 let backend = crate::gpu_dispatch::gpu_backend()
@@ -953,6 +973,7 @@ impl<T: Element> TensorStorage<T> {
                 Ok(Self {
                     data: UnsafeCell::new(StorageBuffer::Cubecl(cloned)),
                     device: self.device,
+                    version: AtomicU64::new(0),
                 })
             }
             StorageBuffer::Meta { numel, fill_value } => Ok(Self {
@@ -961,6 +982,7 @@ impl<T: Element> TensorStorage<T> {
                     fill_value: fill_value.clone(),
                 }),
                 device: self.device,
+                version: AtomicU64::new(0),
             }),
         }
     }

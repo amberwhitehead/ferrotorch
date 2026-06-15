@@ -1268,8 +1268,8 @@ fn mul_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
                 storage,
                 out_shape,
                 Arc::new(MulBackward {
-                    a: a.clone(),
-                    b: b.clone(),
+                    a: a.saved_for_backward(),
+                    b: b.saved_for_backward(),
                 }),
             )
         } else {
@@ -1284,8 +1284,8 @@ fn mul_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
                 storage,
                 shape,
                 Arc::new(MulBackward {
-                    a: a.clone(),
-                    b: b.clone(),
+                    a: a.saved_for_backward(),
+                    b: b.saved_for_backward(),
                 }),
             )
         } else {
@@ -1438,8 +1438,8 @@ fn div_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
                 storage,
                 out_shape,
                 Arc::new(DivBackward {
-                    a: a.clone(),
-                    b: b.clone(),
+                    a: a.saved_for_backward(),
+                    b: b.saved_for_backward(),
                 }),
             )
         } else {
@@ -1454,8 +1454,8 @@ fn div_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
                 storage,
                 shape,
                 Arc::new(DivBackward {
-                    a: a.clone(),
-                    b: b.clone(),
+                    a: a.saved_for_backward(),
+                    b: b.saved_for_backward(),
                 }),
             )
         } else {
@@ -1687,7 +1687,14 @@ fn pow_inner<T: Float>(a: &Tensor<T>, exp: f64) -> FerrotorchResult<Tensor<T>> {
         let shape = a_c.shape().to_vec();
 
         if needs_grad_unary(a) {
-            Tensor::from_operation(storage, shape, Arc::new(PowBackward { a: a.clone(), exp }))
+            Tensor::from_operation(
+                storage,
+                shape,
+                Arc::new(PowBackward {
+                    a: a.saved_for_backward(),
+                    exp,
+                }),
+            )
         } else {
             Tensor::from_storage(storage, shape, false)
         }
@@ -1697,7 +1704,14 @@ fn pow_inner<T: Float>(a: &Tensor<T>, exp: f64) -> FerrotorchResult<Tensor<T>> {
 
         if needs_grad_unary(a) {
             let (storage, shape) = result.into_storage_and_shape()?;
-            Tensor::from_operation(storage, shape, Arc::new(PowBackward { a: a.clone(), exp }))
+            Tensor::from_operation(
+                storage,
+                shape,
+                Arc::new(PowBackward {
+                    a: a.saved_for_backward(),
+                    exp,
+                }),
+            )
         } else {
             Ok(result)
         }
@@ -1710,40 +1724,43 @@ fn pow_inner<T: Float>(a: &Tensor<T>, exp: f64) -> FerrotorchResult<Tensor<T>> {
 
 /// Backward node for `c = sqrt(a)`.
 ///
-/// VJP: da = grad / (2 * sqrt(a)).
+/// VJP: da = grad / (2 * c), where `c = sqrt(a)` is the saved output.
 #[derive(Debug)]
 struct SqrtBackward<T: Float> {
+    /// The input `a` is used for graph traversal; the gradient formula uses
+    /// the saved output so mutating `a.detach()` after forward does not
+    /// invalidate `sqrt` backward, matching PyTorch.
     a: Tensor<T>,
+    c: Tensor<T>,
 }
 
 impl<T: Float> GradFn<T> for SqrtBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.a.requires_grad() {
             if grad_output.is_cuda() {
-                // GPU path: da = grad / (2 * sqrt(a))
+                // GPU path: da = grad / (2 * c)
                 let da = no_grad(|| {
-                    let sqrt_a = sqrt(&self.a)?;
                     let two_t = T::from(2.0).unwrap();
                     let two_gpu = cuda_full_like_shape(
-                        self.a.shape(),
-                        self.a.numel(),
+                        self.c.shape(),
+                        self.c.numel(),
                         two_t,
-                        self.a.device(),
+                        self.c.device(),
                         "sqrt_backward_fill",
                     )?;
-                    let denom = mul(&two_gpu, &sqrt_a)?;
+                    let denom = mul(&two_gpu, &self.c)?;
                     div(grad_output, &denom)
                 })?;
                 Some(da)
             } else {
                 // CPU path: direct data access for performance.
                 let go_data = grad_output.data()?;
-                let a_data = self.a.data()?;
+                let c_data = self.c.data()?;
                 let two = T::from(2.0).unwrap();
                 let grad_a: Vec<T> = go_data
                     .iter()
-                    .zip(a_data.iter())
-                    .map(|(&g, &a)| g / (two * a.sqrt()))
+                    .zip(c_data.iter())
+                    .map(|(&g, &c)| g / (two * c))
                     .collect();
                 Some(Tensor::from_storage(
                     TensorStorage::cpu(grad_a),
@@ -1795,7 +1812,9 @@ fn sqrt_inner<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         let shape = a_c.shape().to_vec();
 
         if needs_grad_unary(a) {
-            Tensor::from_operation(storage, shape, Arc::new(SqrtBackward { a: a.clone() }))
+            Tensor::from_operation_saving_output(storage, shape, |c| {
+                Arc::new(SqrtBackward { a: a.clone(), c })
+            })
         } else {
             Tensor::from_storage(storage, shape, false)
         }
@@ -1804,7 +1823,9 @@ fn sqrt_inner<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 
         if needs_grad_unary(a) {
             let (storage, shape) = result.into_storage_and_shape()?;
-            Tensor::from_operation(storage, shape, Arc::new(SqrtBackward { a: a.clone() }))
+            Tensor::from_operation_saving_output(storage, shape, |c| {
+                Arc::new(SqrtBackward { a: a.clone(), c })
+            })
         } else {
             Ok(result)
         }
@@ -1946,10 +1967,12 @@ fn rsqrt_inner<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
                 cuda_full_like_shape(a.shape(), a.numel(), one, a.device(), "rsqrt_forward_fill")?;
             div(&ones_gpu, &sqrt_a)
         })?;
-        let (storage, shape) = c.clone().into_storage_and_shape()?;
+        let (storage, shape) = c.into_storage_and_shape()?;
 
         if needs_grad_unary(a) {
-            Tensor::from_operation(storage, shape, Arc::new(RsqrtBackward { a: a.clone(), c }))
+            Tensor::from_operation_saving_output(storage, shape, |c| {
+                Arc::new(RsqrtBackward { a: a.clone(), c })
+            })
         } else {
             Tensor::from_storage(storage, shape, false)
         }
@@ -1961,9 +1984,10 @@ fn rsqrt_inner<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         if needs_grad_unary(a) {
             // Save the output for backward (per derivatives.yaml:1505
             // `-0.5 * grad * result.pow(3)`).
-            let c = result.clone();
             let (storage, shape) = result.into_storage_and_shape()?;
-            Tensor::from_operation(storage, shape, Arc::new(RsqrtBackward { a: a.clone(), c }))
+            Tensor::from_operation_saving_output(storage, shape, |c| {
+                Arc::new(RsqrtBackward { a: a.clone(), c })
+            })
         } else {
             Ok(result)
         }
@@ -2097,14 +2121,12 @@ fn reciprocal_inner<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
             )?;
             div(&ones_gpu, a)
         })?;
-        let (storage, shape) = c.clone().into_storage_and_shape()?;
+        let (storage, shape) = c.into_storage_and_shape()?;
 
         if needs_grad_unary(a) {
-            Tensor::from_operation(
-                storage,
-                shape,
-                Arc::new(ReciprocalBackward { a: a.clone(), c }),
-            )
+            Tensor::from_operation_saving_output(storage, shape, |c| {
+                Arc::new(ReciprocalBackward { a: a.clone(), c })
+            })
         } else {
             Tensor::from_storage(storage, shape, false)
         }
@@ -2116,13 +2138,10 @@ fn reciprocal_inner<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         if needs_grad_unary(a) {
             // Save the output for backward (per derivatives.yaml:1448
             // `-grad * (result * result).conj()`).
-            let c = result.clone();
             let (storage, shape) = result.into_storage_and_shape()?;
-            Tensor::from_operation(
-                storage,
-                shape,
-                Arc::new(ReciprocalBackward { a: a.clone(), c }),
-            )
+            Tensor::from_operation_saving_output(storage, shape, |c| {
+                Arc::new(ReciprocalBackward { a: a.clone(), c })
+            })
         } else {
             Ok(result)
         }
@@ -2424,8 +2443,8 @@ fn remainder_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<T
             storage,
             shape,
             Arc::new(RemainderBackward {
-                a: a.clone(),
-                b: b.clone(),
+                a: a.saved_for_backward(),
+                b: b.saved_for_backward(),
             }),
         )
     } else {
@@ -2716,8 +2735,8 @@ fn fmod_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor
             storage,
             shape,
             Arc::new(FmodBackward {
-                a: a.clone(),
-                b: b.clone(),
+                a: a.saved_for_backward(),
+                b: b.saved_for_backward(),
             }),
         )
     } else {
@@ -3394,8 +3413,8 @@ fn addcmul_inner<T: Float>(
             shape,
             Arc::new(AddcmulBackward {
                 input: input.clone(),
-                tensor1: tensor1.clone(),
-                tensor2: tensor2.clone(),
+                tensor1: tensor1.saved_for_backward(),
+                tensor2: tensor2.saved_for_backward(),
                 value,
             }),
         )
@@ -3711,8 +3730,8 @@ fn addcdiv_inner<T: Float>(
             shape,
             Arc::new(AddcdivBackward {
                 input: input.clone(),
-                tensor1: tensor1.clone(),
-                tensor2: tensor2.clone(),
+                tensor1: tensor1.saved_for_backward(),
+                tensor2: tensor2.saved_for_backward(),
                 value,
             }),
         )
@@ -3822,7 +3841,13 @@ fn abs_inner<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         let shape = a_c.shape().to_vec();
 
         if needs_grad_unary(a) {
-            Tensor::from_operation(storage, shape, Arc::new(AbsBackward { a: a.clone() }))
+            Tensor::from_operation(
+                storage,
+                shape,
+                Arc::new(AbsBackward {
+                    a: a.saved_for_backward(),
+                }),
+            )
         } else {
             Tensor::from_storage(storage, shape, false)
         }
@@ -3831,7 +3856,13 @@ fn abs_inner<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 
         if needs_grad_unary(a) {
             let (storage, shape) = result.into_storage_and_shape()?;
-            Tensor::from_operation(storage, shape, Arc::new(AbsBackward { a: a.clone() }))
+            Tensor::from_operation(
+                storage,
+                shape,
+                Arc::new(AbsBackward {
+                    a: a.saved_for_backward(),
+                }),
+            )
         } else {
             Ok(result)
         }
