@@ -11101,16 +11101,26 @@ impl GpuBackend for CudaBackendImpl {
         }
     }
 
-    // REQ-8 / issue #29: cross-float cast. This covers bf16/f16 ↔ f32;
-    // f32↔f64, bf16↔f16 etc. are tracked in the #29 follow-up issue.
-    // Same-dtype is not exposed here — `Tensor::to_dtype<U>()` short-circuits
-    // T == U at the public API boundary before this dispatch is reached.
+    // REQ-8 / issue #29: cross-float cast. Covers every float pair in
+    // {f32, f64, f16, bf16}; half/bfloat pairs not directly supported by PTX are
+    // composed through f32 with resident kernels only.
     #[cfg(feature = "cuda")]
     fn cast_f_to_f(&self, src: &GpuBufferHandle, dst: DType) -> FerrotorchResult<GpuBufferHandle> {
         use crate::cast_kernels as ck;
         let dev = self.device(src.device_ordinal())?;
         let ord = src.device_ordinal();
         match (src.dtype(), dst) {
+            (s, d) if s == d => self.clone_buffer(src),
+            (DType::F32, DType::F64) => Ok(Self::wrap_slice_f64(
+                ck::cast_f32_to_f64(Self::unwrap_buffer(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
+            (DType::F64, DType::F32) => Ok(Self::wrap_slice_f32(
+                ck::cast_f64_to_f32(Self::unwrap_buffer_f64(src)?.inner(), src.len(), dev)
+                    .map_err(Self::map_gpu_err)?,
+                ord,
+            )),
             (DType::BF16, DType::F32) => Ok(Self::wrap_slice_f32(
                 ck::cast_bf16_to_f32(Self::unwrap_buffer_bf16(src)?, src.len(), dev)
                     .map_err(Self::map_gpu_err)?,
@@ -11131,10 +11141,58 @@ impl GpuBackend for CudaBackendImpl {
                     .map_err(Self::map_gpu_err)?,
                 ord,
             )),
+            (DType::F64, DType::F16) => {
+                let f32_tmp =
+                    ck::cast_f64_to_f32(Self::unwrap_buffer_f64(src)?.inner(), src.len(), dev)
+                        .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_f16(
+                    ck::cast_f32_to_f16(&f32_tmp, src.len(), dev).map_err(Self::map_gpu_err)?,
+                    ord,
+                ))
+            }
+            (DType::F64, DType::BF16) => {
+                let f32_tmp =
+                    ck::cast_f64_to_f32(Self::unwrap_buffer_f64(src)?.inner(), src.len(), dev)
+                        .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_bf16(
+                    ck::cast_f32_to_bf16(&f32_tmp, src.len(), dev).map_err(Self::map_gpu_err)?,
+                    ord,
+                ))
+            }
+            (DType::F16, DType::F64) => {
+                let f32_tmp = ck::cast_f16_to_f32(Self::unwrap_buffer_f16(src)?, src.len(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_f64(
+                    ck::cast_f32_to_f64(&f32_tmp, src.len(), dev).map_err(Self::map_gpu_err)?,
+                    ord,
+                ))
+            }
+            (DType::BF16, DType::F64) => {
+                let f32_tmp = ck::cast_bf16_to_f32(Self::unwrap_buffer_bf16(src)?, src.len(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_slice_f64(
+                    ck::cast_f32_to_f64(&f32_tmp, src.len(), dev).map_err(Self::map_gpu_err)?,
+                    ord,
+                ))
+            }
+            (DType::F16, DType::BF16) => {
+                let f32_tmp = ck::cast_f16_to_f32(Self::unwrap_buffer_f16(src)?, src.len(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_bf16(
+                    ck::cast_f32_to_bf16(&f32_tmp, src.len(), dev).map_err(Self::map_gpu_err)?,
+                    ord,
+                ))
+            }
+            (DType::BF16, DType::F16) => {
+                let f32_tmp = ck::cast_bf16_to_f32(Self::unwrap_buffer_bf16(src)?, src.len(), dev)
+                    .map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_f16(
+                    ck::cast_f32_to_f16(&f32_tmp, src.len(), dev).map_err(Self::map_gpu_err)?,
+                    ord,
+                ))
+            }
             (s, d) => Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "cast_f_to_f: unsupported {s} -> {d} (tracked in ferrotorch#29 follow-up)"
-                ),
+                message: format!("cast_f_to_f: unsupported {s} -> {d}"),
             }),
         }
     }

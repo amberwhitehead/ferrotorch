@@ -7503,8 +7503,9 @@ pub trait GpuBackend: Send + Sync {
     /// each ∈ {F32,F64,BF16,F16}). Widening (e.g. bf16 → f32) is exact;
     /// narrowing (e.g. f32 → bf16/f16) is round-to-nearest-even via PTX
     /// `cvt.rn.<narrow>.<wide>`. PyTorch parity: `tensor.to(<dtype>)` on CUDA.
-    /// Current implementation covers bf16/f16 ↔ f32 (issue #29); other float
-    /// pairs return `Err` until the follow-up issue lands.
+    /// CUDA backend covers all float pairs; half/bfloat pairs not directly
+    /// represented by one PTX conversion are composed through f32 without host
+    /// staging.
     fn cast_f_to_f(
         &self,
         _src: &GpuBufferHandle,

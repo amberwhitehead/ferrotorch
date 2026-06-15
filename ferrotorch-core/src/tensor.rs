@@ -512,6 +512,64 @@ impl<T: Float> GradFn<T> for ToDeviceBackward<T> {
     }
 }
 
+// --- CastBackward ---
+
+/// Backward for `Tensor::to_dtype`.
+///
+/// The core autograd engine is monomorphized by tensor dtype, so a normal
+/// `GradFn<U>` cannot list a `Tensor<T>` source in `inputs()` when `T != U`.
+/// This bridge keeps the public PyTorch contract anyway: it casts the upstream
+/// gradient back to the source dtype, runs the source's hooks, then either
+/// accumulates on the source leaf or recursively drives the source graph.
+#[derive(Debug)]
+struct CastBackward<Src: Float, Dst: Float> {
+    source: Tensor<Src>,
+    _dst: std::marker::PhantomData<Dst>,
+}
+
+impl<Src: Float, Dst: Float> CastBackward<Src, Dst> {
+    fn propagate_source_grad(&self, grad: Tensor<Src>) -> FerrotorchResult<()> {
+        let hooks = self.source.hooks();
+        let has_hooks = {
+            let guard = hooks.lock().map_err(|e| FerrotorchError::LockPoisoned {
+                message: format!("hook storage mutex: {e}"),
+            })?;
+            (guard.has_grad_hooks(), guard.has_post_accumulate_hooks())
+        };
+        let grad = if has_hooks.0 {
+            crate::autograd::hooks::run_grad_hooks(hooks, grad)?
+        } else {
+            grad
+        };
+
+        if self.source.is_leaf() {
+            self.source.accumulate_grad(&grad)?;
+            if has_hooks.1 {
+                crate::autograd::hooks::run_post_accumulate_hooks(hooks, &self.source)?;
+            }
+        } else {
+            crate::autograd::graph::backward_with_grad(&self.source, Some(&grad))?;
+        }
+        Ok(())
+    }
+}
+
+impl<Src: Float, Dst: Float> GradFn<Dst> for CastBackward<Src, Dst> {
+    fn backward(&self, grad_output: &Tensor<Dst>) -> FerrotorchResult<Vec<Option<Tensor<Dst>>>> {
+        let source_grad = grad_output.to_dtype_backward::<Src>()?;
+        self.propagate_source_grad(source_grad)?;
+        Ok(Vec::new())
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<Dst>> {
+        Vec::new()
+    }
+
+    fn name(&self) -> &'static str {
+        "CastBackward"
+    }
+}
+
 // --- MemoryFormatBackward ---
 
 /// Backward for the physical materialization in
@@ -1311,25 +1369,82 @@ impl<T: Float> Tensor<T> {
         self.to(Device::Cpu)
     }
 
+    fn to_dtype_backward<U: Float>(&self) -> FerrotorchResult<Tensor<U>> {
+        use std::any::TypeId;
+
+        if TypeId::of::<T>() == TypeId::of::<U>() {
+            let cloned = self.clone();
+            // SAFETY: `T == U` at this monomorphisation, so the tensor layout is
+            // identical. This path is used only for detached gradient values.
+            return Ok(unsafe {
+                let md = std::mem::ManuallyDrop::new(cloned);
+                std::mem::transmute_copy::<Tensor<T>, Tensor<U>>(&md)
+            });
+        }
+
+        match self.device() {
+            Device::Cpu => {
+                let materialised = if self.is_contiguous() {
+                    self.clone()
+                } else {
+                    crate::methods::contiguous_t(self)?
+                };
+                let src = materialised.data()?;
+                let mut out: Vec<U> = Vec::with_capacity(src.len());
+                for (i, &v) in src.iter().enumerate() {
+                    out.push(<U as num_traits::NumCast>::from(v).ok_or_else(|| {
+                        FerrotorchError::InvalidArgument {
+                            message: format!(
+                                "Tensor::to_dtype backward: gradient element {i} = {v:?} not castable to {}",
+                                U::dtype()
+                            ),
+                        }
+                    })?);
+                }
+                Tensor::<U>::from_storage(TensorStorage::cpu(out), self.shape().to_vec(), false)
+            }
+            Device::Cuda(_) => {
+                let materialised = if self.is_contiguous() {
+                    self.clone()
+                } else {
+                    crate::methods::contiguous_t(self)?
+                };
+                let backend =
+                    crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+                let new_handle = backend.cast_f_to_f(materialised.gpu_handle()?, U::dtype())?;
+                Tensor::<U>::from_storage(
+                    TensorStorage::gpu(new_handle),
+                    self.shape().to_vec(),
+                    false,
+                )
+            }
+            _ => Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "Tensor::to_dtype backward: unsupported source device {:?}",
+                    self.device()
+                ),
+            }),
+        }
+    }
+
     /// Cast this tensor to a different float dtype, preserving device + shape.
     ///
     /// `U: Float` — any of `f32` / `f64` / `bf16` / `f16`. PyTorch parity:
     /// `tensor.to(dtype)` / `tensor.to(torch.float32)`.
     ///
     /// - **Same dtype (`T == U`)**: zero-copy `Arc`-shared clone.
-    /// - **CPU**: per-element cast via [`crate::numeric_cast::cast`] (fallible —
-    ///   returns `Err(InvalidArgument)` if a finite source value saturates to
-    ///   `±∞` in a narrower target, per issue #815).
+    /// - **CPU**: per-element cast with Rust numeric conversion semantics for
+    ///   the target float. Narrowing overflow becomes `±∞`, matching PyTorch.
     /// - **GPU**: dispatched through [`crate::gpu_dispatch::GpuBackend::cast_f_to_f`];
-    ///   stays GPU-resident. Initial implementation covers `bf16 ↔ f32`
-    ///   (issue #29); other float pairs return `Err` until the follow-up
-    ///   issue lands.
+    ///   stays GPU-resident and covers every float pair in
+    ///   `{f32, f64, f16, bf16}`.
     ///
     /// # Autograd
     ///
-    /// The returned tensor has `requires_grad = false` regardless of `self`.
-    /// A `CastBackward` grad_fn that propagates gradients through the cast is
-    /// follow-up work tracked alongside the remaining float-pair kernels.
+    /// When gradient tracking is enabled and the source requires gradients,
+    /// the returned tensor is a non-leaf carrying `CastBackward`. Backward
+    /// casts the upstream gradient back to the source dtype, matching PyTorch's
+    /// `ToCopyBackward0` behavior for floating dtype conversions.
     pub fn to_dtype<U: Float>(&self) -> FerrotorchResult<Tensor<U>> {
         use std::any::TypeId;
 
@@ -1347,7 +1462,9 @@ impl<T: Float> Tensor<T> {
             });
         }
 
-        match self.device() {
+        let needs_grad_fn = self.requires_grad() && crate::autograd::no_grad::is_grad_enabled();
+        let shape = self.shape().to_vec();
+        let storage = match self.device() {
             Device::Cpu => {
                 // Non-contiguous source: materialise so `.data()` is logical order.
                 let materialised = if self.is_contiguous() {
@@ -1358,17 +1475,16 @@ impl<T: Float> Tensor<T> {
                 let src = materialised.data()?;
                 let mut out: Vec<U> = Vec::with_capacity(src.len());
                 for (i, &v) in src.iter().enumerate() {
-                    out.push(crate::numeric_cast::cast::<T, U>(v).map_err(|_| {
+                    out.push(<U as num_traits::NumCast>::from(v).ok_or_else(|| {
                         FerrotorchError::InvalidArgument {
                             message: format!(
-                                "Tensor::to_dtype: element {i} = {v:?} not representable in {}",
+                                "Tensor::to_dtype: element {i} = {v:?} not castable to {}",
                                 U::dtype()
                             ),
                         }
                     })?);
                 }
-                let storage = TensorStorage::cpu(out);
-                Tensor::<U>::from_storage(storage, self.shape().to_vec(), false)
+                TensorStorage::cpu(out)
             }
             Device::Cuda(_) => {
                 // Non-contiguous GPU view: materialise via the existing
@@ -1383,15 +1499,26 @@ impl<T: Float> Tensor<T> {
                     crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                 let src_handle = materialised.gpu_handle()?;
                 let new_handle = backend.cast_f_to_f(src_handle, U::dtype())?;
-                let storage = TensorStorage::gpu(new_handle);
-                Tensor::<U>::from_storage(storage, self.shape().to_vec(), false)
+                TensorStorage::gpu(new_handle)
             }
-            _ => Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "Tensor::to_dtype: unsupported source device {:?}",
-                    self.device()
-                ),
-            }),
+            _ => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "Tensor::to_dtype: unsupported source device {:?}",
+                        self.device()
+                    ),
+                });
+            }
+        };
+
+        if needs_grad_fn {
+            let grad_fn = Arc::new(CastBackward::<T, U> {
+                source: self.clone(),
+                _dst: std::marker::PhantomData,
+            });
+            Tensor::<U>::from_operation(storage, shape, grad_fn)
+        } else {
+            Tensor::<U>::from_storage(storage, shape, false)
         }
     }
 
@@ -2677,19 +2804,11 @@ mod tests {
     }
 
     #[test]
-    fn to_dtype_cpu_saturating_cast_errors() {
-        // f32 value far beyond bf16's max exponent range (~3.4e38) wouldn't
-        // overflow bf16 (same 8-bit exponent), so use f64 -> bf16 saturation
-        // through an intermediate widening path is tricky to trigger via this
-        // API. Instead test that f64 -> bf16 with a value that's in-range for
-        // bf16 succeeds, then test that f64 -> f32 saturates for huge values.
+    fn to_dtype_cpu_narrow_overflow_matches_torch_inf() {
         let big = TensorStorage::cpu(vec![1e300_f64, -1e300_f64]);
         let t = Tensor::from_storage(big, vec![2], false).unwrap();
-        let result = t.to_dtype::<f32>();
-        assert!(
-            result.is_err(),
-            "expected saturation error casting 1e300_f64 to f32, got Ok"
-        );
+        let result = t.to_dtype::<f32>().unwrap();
+        assert_eq!(result.data().unwrap(), &[f32::INFINITY, f32::NEG_INFINITY]);
     }
 
     #[test]
@@ -2699,5 +2818,55 @@ mod tests {
         let bf16 = t.to_dtype::<half::bf16>().unwrap();
         assert_eq!(bf16.shape(), &[2usize, 3]);
         assert_eq!(bf16.numel(), 6);
+    }
+
+    #[test]
+    fn to_dtype_cpu_leaf_backward_reaches_source() {
+        let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 2.0, 3.0]), vec![3], true)
+            .unwrap();
+        let y = x.to_dtype::<f64>().unwrap();
+        assert!(y.requires_grad(), "torch: cast output tracks gradients");
+        assert!(
+            !y.is_leaf(),
+            "torch: cast output is a non-leaf ToCopyBackward0"
+        );
+        let loss = crate::grad_fns::reduction::sum(
+            &crate::grad_fns::arithmetic::mul(&y, &y).expect("mul cast output"),
+        )
+        .expect("sum cast output");
+        loss.backward().expect("backward through dtype cast");
+        let grad = x
+            .grad()
+            .expect("grad lookup")
+            .expect("cast backward must reach the original f32 leaf");
+        assert_eq!(grad.data().expect("grad data"), &[2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn to_dtype_cpu_nonleaf_backward_reaches_source_leaf() {
+        let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 2.0, 3.0]), vec![3], true)
+            .unwrap();
+        let z = crate::grad_fns::arithmetic::mul(&x, &x).expect("x*x");
+        let y = z.to_dtype::<f64>().unwrap();
+        assert!(y.requires_grad());
+        assert!(!y.is_leaf());
+        crate::grad_fns::reduction::sum(&y)
+            .expect("sum cast nonleaf")
+            .backward()
+            .expect("backward through nonleaf dtype cast");
+        let grad = x
+            .grad()
+            .expect("grad lookup")
+            .expect("cast backward must traverse the source f32 graph");
+        assert_eq!(grad.data().expect("grad data"), &[2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn to_dtype_cpu_under_no_grad_does_not_track() {
+        let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32]), vec![1], true).unwrap();
+        let y = crate::autograd::no_grad::no_grad(|| x.to_dtype::<f64>()).unwrap();
+        assert!(!y.requires_grad(), "torch no_grad cast does not track");
+        assert!(y.is_leaf());
+        assert!(y.grad_fn().is_none());
     }
 }

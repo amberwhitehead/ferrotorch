@@ -20,10 +20,10 @@
 //!   cast; the CPU reference path in `IntTensor::cast` errors on out-of-range,
 //!   so the GPU narrow path documents the wrapping divergence: an out-of-range
 //!   i64→i32 on CUDA wraps, mirroring PyTorch's CUDA `.to(torch.int)`).
-//! - **float → float** (`bf16`/`f16` ↔ `f32`): widen exactly to f32; narrow via
-//!   hardware `cvt.rn.bf16.f32` / `cvt.rn.f16.f32`. Round mode is
-//!   round-to-nearest-even on narrowing, exact on widening. Other float pairs
-//!   (f32↔f64, bf16↔f16, etc.) follow the same pattern; see #29 follow-up.
+//! - **float → float** (`f32`/`f64`/`bf16`/`f16`): widening is exact where the
+//!   destination can represent the source, and narrowing uses PTX
+//!   round-to-nearest-even. Half/bfloat cross-casts are composed through f32 by
+//!   the backend while staying entirely device-resident.
 //!
 //! bf16: a bf16 is the high 16 bits of an f32. Decode = splat into the high
 //! half of a b32 register (`shl 16`) + reinterpret (`mov.b32`). Encode uses the
@@ -44,7 +44,7 @@
 //! | REQ-5 (bool→float) | SHIPPED | `pub fn cast_bool_to_f32 / cast_bool_to_f64 / cast_bool_to_f16 / cast_bool_to_bf16 in cast_kernels.rs` (each normalises via `setp.ne %nz, %bv, 0; selp 1, 0, %nz` then `cvt.rn.f*.u32`); consumer four bool→float arms of the `to_dtype` handler in `backend_impl.rs` |
 //! | REQ-6 (SAFETY annotation) | SHIPPED | the single `unsafe { stream.launch_builder(&f)...launch(cfg)? }` block in `fn launch_cast in cast_kernels.rs` carries a multi-line `SAFETY:` comment; consumer SAFETY contract inherited via every `pub fn cast_*` wrapper called from `backend_impl.rs` |
 //! | REQ-7 (empty-input short-circuit) | SHIPPED | `fn launch_cast in cast_kernels.rs` opens with `if n == 0 { return Ok(stream.alloc_zeros::<OUT>(0)?); }` plus `debug_assert!(input.len() >= n)`; consumer backend dispatch path relies on this for empty dtype casts |
-//! | REQ-8 (bf16/f16 ↔ f32 float cast) | SHIPPED | `pub fn cast_{bf16,f16}_to_f32 / cast_f32_to_{bf16,f16} in cast_kernels.rs` (widen exactly; narrow via hardware round-to-nearest-even); consumer four arms of `CudaBackendImpl::cast_f_to_f in backend_impl.rs` plus the `Tensor::to_dtype<U>()` entry point in `ferrotorch-core/src/tensor.rs` — closes upstream #29 (decode-side consumer: `forecast-bio/decode#27`) |
+//! | REQ-8 (all float↔float casts) | SHIPPED | `pub fn cast_f32_to_f64 / cast_f64_to_f32 / cast_{bf16,f16}_to_f32 / cast_f32_to_{bf16,f16} in cast_kernels.rs`; composed bf16/f16/f64 pair routing in `CudaBackendImpl::cast_f_to_f`; consumer `Tensor::to_dtype<U>()` and `CastBackward` in `ferrotorch-core/src/tensor.rs` — closes upstream #29 (decode-side consumer: `forecast-bio/decode#27`) |
 
 #![cfg(feature = "cuda")]
 
@@ -575,10 +575,49 @@ DONE: ret;
 }
 ";
 
-// ── float → float (bf16/f16 ↔ f32) ─────────────────────────────────────────
-//
-// REQ-8 / issue #29. Other float pairs (f32↔f64, bf16↔f16, …) follow the
-// same pattern; tracked in the #29 follow-up issue.
+// ── float → float ──────────────────────────────────────────────────────────
+
+// f32 → f64: widening, exact for every f32 value.
+const F32_TO_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+.visible .entry f32_to_f64_kernel(.param .u64 in_ptr, .param .u64 out_ptr, .param .u32 n) {
+    .reg .u32 %idx, %bid, %bdim, %nr;
+    .reg .u64 %in, %out, %ioff, %ooff;
+    .reg .f32 %v; .reg .f64 %r; .reg .pred %p;
+    ld.param.u64 %in, [in_ptr]; ld.param.u64 %out, [out_ptr]; ld.param.u32 %nr, [n];
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr; @%p bra DONE;
+    cvt.u64.u32 %ioff, %idx; shl.b64 %ioff, %ioff, 2; add.u64 %in, %in, %ioff;
+    ld.global.f32 %v, [%in]; cvt.f64.f32 %r, %v;
+    cvt.u64.u32 %ooff, %idx; shl.b64 %ooff, %ooff, 3; add.u64 %out, %out, %ooff;
+    st.global.f64 [%out], %r;
+DONE: ret;
+}
+";
+
+// f64 → f32: narrowing with PTX round-to-nearest-even, matching CUDA casts.
+const F64_TO_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+.visible .entry f64_to_f32_kernel(.param .u64 in_ptr, .param .u64 out_ptr, .param .u32 n) {
+    .reg .u32 %idx, %bid, %bdim, %nr;
+    .reg .u64 %in, %out, %ioff, %ooff;
+    .reg .f64 %v; .reg .f32 %r; .reg .pred %p;
+    ld.param.u64 %in, [in_ptr]; ld.param.u64 %out, [out_ptr]; ld.param.u32 %nr, [n];
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %idx, %tid.x;
+    mad.lo.u32 %idx, %bid, %bdim, %idx;
+    setp.ge.u32 %p, %idx, %nr; @%p bra DONE;
+    cvt.u64.u32 %ioff, %idx; shl.b64 %ioff, %ioff, 3; add.u64 %in, %in, %ioff;
+    ld.global.f64 %v, [%in]; cvt.rn.f32.f64 %r, %v;
+    cvt.u64.u32 %ooff, %idx; shl.b64 %ooff, %ooff, 2; add.u64 %out, %out, %ooff;
+    st.global.f32 [%out], %r;
+DONE: ret;
+}
+";
 
 // bf16 → f32: a bf16 is the high 16 bits of an f32. Decode = widen u16 to u32,
 // shl 16 to splat into the high half, reinterpret as f32. No precision loss
@@ -818,6 +857,14 @@ pub fn cast_bool_to_bf16(x: &CudaSlice<u8>, n: usize, d: &GpuDevice) -> GpuResul
     launch_cast(x, n, d, BOOL_TO_BF16_PTX, "bool_to_bf16_kernel")
 }
 // float ↔ float (REQ-8 / issue #29)
+/// Cast f32 → f64 (widening, lossless).
+pub fn cast_f32_to_f64(x: &CudaSlice<f32>, n: usize, d: &GpuDevice) -> GpuResult<CudaSlice<f64>> {
+    launch_cast(x, n, d, F32_TO_F64_PTX, "f32_to_f64_kernel")
+}
+/// Cast f64 → f32 (round-to-nearest-even via `cvt.rn.f32.f64`).
+pub fn cast_f64_to_f32(x: &CudaSlice<f64>, n: usize, d: &GpuDevice) -> GpuResult<CudaSlice<f32>> {
+    launch_cast(x, n, d, F64_TO_F32_PTX, "f64_to_f32_kernel")
+}
 /// Cast bf16 (u16 bits) → f32 (widening, lossless).
 pub fn cast_bf16_to_f32(x: &CudaSlice<u16>, n: usize, d: &GpuDevice) -> GpuResult<CudaSlice<f32>> {
     launch_cast(x, n, d, BF16_TO_F32_PTX, "bf16_to_f32_kernel")
