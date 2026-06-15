@@ -5,7 +5,8 @@
 //!   coordinates, not as a flat prefix.
 //! - `include_self=false` overwrites only touched output slots; untouched
 //!   slots keep `self`.
-//! - `src.grad` keeps `src.shape()` and unused larger-source positions get 0.
+//! - if `src.requires_grad=True` and `src.shape != index.shape`, backward
+//!   errors because PyTorch's `grad.gather(dim, index)` VJP is index-shaped.
 
 use ferrotorch_core::grad_fns::indexing::{ScatterReduce, scatter_reduce};
 use ferrotorch_core::{Tensor, TensorStorage};
@@ -58,7 +59,7 @@ fn scatter_reduce_include_self_false_keeps_untouched_self_slots() {
 }
 
 #[test]
-fn scatter_reduce_larger_src_backward_keeps_src_shape_and_zeroes_unused() {
+fn scatter_reduce_larger_src_backward_rejects_incompatible_src_grad_shape() {
     let input = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true);
     let src = t(&[10.0, 20.0, 99.0, 40.0, 50.0, 99.0], &[2, 3], true);
     let index = [0, 1, 1, 0];
@@ -74,18 +75,16 @@ fn scatter_reduce_larger_src_backward_keeps_src_shape_and_zeroes_unused() {
     )
     .unwrap();
     let go = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false);
-    let grads = out
+    let err = out
         .grad_fn()
         .expect("scatter_reduce grad_fn")
         .backward(&go)
-        .unwrap();
-    let grad_input = grads[0].as_ref().unwrap();
-    let grad_src = grads[1].as_ref().unwrap();
-
-    assert_eq!(grad_input.shape(), &[2, 3]);
-    assert_eq!(grad_input.data().unwrap(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-    assert_eq!(grad_src.shape(), &[2, 3]);
-    assert_eq!(grad_src.data().unwrap(), &[1.0, 5.0, 0.0, 4.0, 2.0, 0.0]);
+        .expect_err("PyTorch rejects index-shaped grad_src for larger src");
+    assert!(
+        format!("{err:?}").contains("ScatterReduceBackward0")
+            || format!("{err:?}").contains("scatter_reduce backward"),
+        "expected source-gradient shape contract error, got {err:?}"
+    );
 }
 
 #[test]

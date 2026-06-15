@@ -2535,6 +2535,25 @@ impl<T: Float> GradFn<T> for ScatterReduceBackward<T> {
             return self.backward_0d(grad_output);
         }
 
+        // PyTorch's `scatter_reduce_backward` returns
+        // `grad_src = grad.gather(dim, index)` for every reduce mode. That
+        // tensor is index-shaped; if the forward used a larger `src` (allowed
+        // by the meta function for forward reads), the autograd engine rejects
+        // the gradient as incompatible with `src`. Match that contract instead
+        // of padding zeros into a shape PyTorch never returns.
+        if self.src.requires_grad() && self.src.shape() != self.index_shape.as_slice() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "scatter_reduce backward: gradient for src is only defined when src.shape \
+                     ({:?}) equals index.shape ({:?}); PyTorch raises here too \
+                     (ScatterReduceBackward0 returns an index-shaped gradient the engine \
+                     rejects)",
+                    self.src.shape(),
+                    self.index_shape
+                ),
+            });
+        }
+
         match self.reduce {
             ScatterReduce::Sum => self.backward_sum(grad_output),
             ScatterReduce::Prod => self.backward_prod(grad_output),
@@ -2612,8 +2631,81 @@ impl<T: Float> ScatterReduceBackward<T> {
     /// the index-mapped positions.
     fn backward_sum(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let input_shape = self.input.shape();
-        let go_data = grad_output.data_vec()?;
         let zero = <T as num_traits::Zero>::zero();
+
+        if grad_output.is_cuda() {
+            if !cuda_f32_f64::<T>() {
+                return Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "ScatterReduceBackward",
+                });
+            }
+            same_device(self.input.device(), grad_output.device())?;
+            same_device(self.input.device(), self.src.device())?;
+
+            let ordinal = cuda_ordinal(grad_output.device(), "ScatterReduceBackward")?;
+            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let idx_handle = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
+            let go_c = no_grad(|| grad_output.contiguous())?;
+            let go_handle = go_c.gpu_handle()?;
+
+            let grad_input = if self.input.requires_grad() {
+                let result_h = if self.include_self {
+                    backend.clone_buffer(go_handle)?
+                } else {
+                    match T::dtype() {
+                        DType::F32 => backend.scatter_value_nd_f32(
+                            go_handle,
+                            &idx_handle,
+                            0.0,
+                            input_shape,
+                            &self.index_shape,
+                            self.dim,
+                        )?,
+                        DType::F64 => backend.scatter_value_nd_f64(
+                            go_handle,
+                            &idx_handle,
+                            0.0,
+                            input_shape,
+                            &self.index_shape,
+                            self.dim,
+                        )?,
+                        _ => {
+                            return Err(FerrotorchError::NotImplementedOnCuda {
+                                op: "ScatterReduceBackward",
+                            });
+                        }
+                    }
+                };
+                Some(Tensor::from_storage(
+                    TensorStorage::gpu(result_h),
+                    input_shape.to_vec(),
+                    false,
+                )?)
+            } else {
+                None
+            };
+
+            let grad_src = if self.src.requires_grad() {
+                let result_h = backend.gather_intidx_nd(
+                    go_handle,
+                    &idx_handle,
+                    input_shape,
+                    &self.index_shape,
+                    self.dim,
+                )?;
+                Some(Tensor::from_storage(
+                    TensorStorage::gpu(result_h),
+                    self.index_shape.clone(),
+                    false,
+                )?)
+            } else {
+                None
+            };
+
+            return Ok(vec![grad_input, grad_src]);
+        }
+
+        let go_data = grad_output.data_vec()?;
 
         let grad_input = if self.input.requires_grad() {
             let mut gi = go_data.clone();

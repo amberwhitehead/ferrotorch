@@ -137,6 +137,56 @@ fn scatter_reduce_sum_cuda_resident_f64() {
     scatter_reduce_sum_cuda_resident::<f64>();
 }
 
+/// Live torch (cuda, both dtypes):
+///   x = tensor([[1.,2.,3.],[4.,5.,6.]], requires_grad=True)
+///   s = tensor([[10.,20.],[30.,40.]], requires_grad=True)
+///   idx = tensor([[0,1],[1,0]])
+///   out = x.scatter_reduce(0, idx, s, 'sum', include_self=False)
+///   out.backward(tensor([[1.,2.,3.],[4.,5.,6.]]))
+///   -> out [[10.,40.,3.],[30.,20.,6.]];
+///      x.grad [[0.,0.,3.],[0.,0.,6.]];
+///      s.grad [[1.,5.],[4.,2.]].
+///
+/// This pins the resident sum backward path: `grad_self.scatter(dim,index,0)`
+/// and `grad.gather(dim,index)` both operate over an index shape smaller than
+/// the input's non-dim axis, so a rectangular dim-only shortcut would be wrong.
+fn scatter_reduce_sum_include_self_false_cuda_resident<T: Float>() {
+    ensure_cuda_backend();
+    let x = t_cuda::<T>(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true);
+    let s = t_cuda::<T>(&[10.0, 20.0, 30.0, 40.0], &[2, 2], true);
+    let index = [0, 1, 1, 0];
+    let index_shape = [2, 2];
+    let out = scatter_reduce(&x, 0, &index, &index_shape, &s, ScatterReduce::Sum, false).unwrap();
+    assert_cuda_with(
+        &out,
+        "scatter_reduce(sum,!include_self) output",
+        &[10.0, 40.0, 3.0, 30.0, 20.0, 6.0],
+    );
+
+    let seed = t_cuda::<T>(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false);
+    backward_with_grad(&out, Some(&seed)).unwrap();
+    assert_cuda_with(
+        &grad_of(&x),
+        "scatter_reduce(sum,!include_self) grad_input",
+        &[0.0, 0.0, 3.0, 0.0, 0.0, 6.0],
+    );
+    assert_cuda_with(
+        &grad_of(&s),
+        "scatter_reduce(sum,!include_self) grad_src",
+        &[1.0, 5.0, 4.0, 2.0],
+    );
+}
+
+#[test]
+fn scatter_reduce_sum_include_self_false_cuda_resident_f32() {
+    scatter_reduce_sum_include_self_false_cuda_resident::<f32>();
+}
+
+#[test]
+fn scatter_reduce_sum_include_self_false_cuda_resident_f64() {
+    scatter_reduce_sum_include_self_false_cuda_resident::<f64>();
+}
+
 /// The value-aware reduce modes (amax / prod) share the documented host
 /// round trip; residency and gradient devices must still be preserved.
 ///
