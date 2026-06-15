@@ -24,9 +24,10 @@
 //! regression of the broadcast path.
 
 use ferrotorch_core::bool_tensor::BoolTensor;
-use ferrotorch_core::grad_fns::indexing::masked_scatter;
+use ferrotorch_core::error::FerrotorchError;
+use ferrotorch_core::grad_fns::indexing::{MaskedScatterBackward, masked_scatter};
 use ferrotorch_core::storage::TensorStorage;
-use ferrotorch_core::tensor::Tensor;
+use ferrotorch_core::tensor::{GradFn, Tensor};
 
 /// Forward parity pin: mask broadcasts to input shape, source consumed
 /// in C-order at every mask-true position.
@@ -129,4 +130,32 @@ fn masked_scatter_non_broadcast_backward_pin() {
     assert_eq!(g_inp.data().unwrap(), &[0.0_f32, 1.0, 0.0, 1.0]);
     let g_src = grads[1].as_ref().expect("Some(g_src)");
     assert_eq!(g_src.data().unwrap(), &[1.0_f32, 1.0]);
+}
+
+/// Direct backward-node invariant: if a malformed saved state has more
+/// mask-true positions than source elements, PyTorch's
+/// `masked_scatter_backward_symint` cannot `view` the selected gradient back
+/// to `source.sizes()`. ferrotorch must fail loudly, not silently truncate the
+/// extra selected gradients.
+#[test]
+fn masked_scatter_backward_rejects_mask_select_longer_than_source() {
+    let input =
+        Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32, 2.0, 3.0]), vec![3], false).unwrap();
+    let source = Tensor::from_storage(TensorStorage::cpu(vec![10.0_f32]), vec![1], true).unwrap();
+    let mask = BoolTensor::from_vec(vec![true, false, true], vec![3]).unwrap();
+    let node = MaskedScatterBackward {
+        input,
+        source,
+        mask,
+    };
+    let grad_output =
+        Tensor::from_storage(TensorStorage::cpu(vec![1.0_f32, 2.0, 3.0]), vec![3], false).unwrap();
+
+    let err = node
+        .backward(&grad_output)
+        .expect_err("mask selecting more gradients than source.numel must error");
+    assert!(
+        matches!(err, FerrotorchError::ShapeMismatch { .. }),
+        "expected ShapeMismatch, got {err:?}"
+    );
 }

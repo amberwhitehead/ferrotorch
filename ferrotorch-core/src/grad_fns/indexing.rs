@@ -4462,19 +4462,97 @@ impl<T: Float> GradFn<T> for MaskedScatterBackward<T> {
         if !is_grad_enabled() {
             return Ok(vec![None, None]);
         }
-        // The mask may be CUDA-resident (the #1662 on-device forward saves the
-        // resident mask in the grad_fn). `.data()` errors on a CUDA bool tensor,
-        // so read it host-side via `.cpu()` first; for an already-host mask
-        // `.cpu()` is a cheap no-op clone. The VJP is a serial host walk in
-        // either case (matching the pre-#1662 CPU backward exactly), so this is
-        // the existing backward semantics — no behavioural change for the
-        // all-CPU path.
-        let mask_cpu = if self.mask.is_cuda() {
-            self.mask.to(Device::Cpu)?
-        } else {
-            self.mask.clone()
-        };
-        let mask_h = mask_cpu.data()?;
+        if grad_output.numel() != self.mask.numel() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "masked_scatter backward: grad_output numel {} != mask numel {}",
+                    grad_output.numel(),
+                    self.mask.numel()
+                ),
+            });
+        }
+
+        // CUDA-resident VJP: PyTorch's derivatives are exactly
+        //   self   = grad.masked_fill(mask, 0)
+        //   source = grad.masked_select(mask).pad_to(source.numel()).view(source.sizes())
+        // The backend already exposes those resident primitives. Any CUDA
+        // operand reaches this branch; mixed CPU/CUDA state is rejected instead
+        // of detouring through host memory.
+        if grad_output.is_cuda()
+            || self.input.is_cuda()
+            || self.source.is_cuda()
+            || self.mask.is_cuda()
+        {
+            same_device(self.input.device(), grad_output.device())?;
+            same_device(self.input.device(), self.source.device())?;
+            same_device(self.input.device(), self.mask.device())?;
+            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let grad_c = no_grad(|| grad_output.contiguous())?;
+
+            let grad_input = if self.input.requires_grad() {
+                let result_handle =
+                    backend.masked_fill_dt(grad_c.gpu_handle()?, self.mask.gpu_handle()?, 0.0)?;
+                Some(Tensor::from_storage(
+                    TensorStorage::gpu(result_handle),
+                    self.input.shape().to_vec(),
+                    false,
+                )?)
+            } else {
+                None
+            };
+
+            let grad_source = if self.source.requires_grad() {
+                let (selected_handle, selected_len) =
+                    backend.masked_select(grad_c.gpu_handle()?, self.mask.gpu_handle()?)?;
+                let source_numel = self.source.numel();
+                if selected_len > source_numel {
+                    return Err(FerrotorchError::ShapeMismatch {
+                        message: format!(
+                            "masked_scatter backward: mask selected {selected_len} gradients, \
+                             but source has {source_numel} elements"
+                        ),
+                    });
+                }
+
+                let flat = if selected_len == source_numel {
+                    Tensor::from_storage(
+                        TensorStorage::gpu(selected_handle),
+                        vec![selected_len],
+                        false,
+                    )?
+                } else {
+                    let ordinal = cuda_ordinal(self.source.device(), "masked_scatter backward")?;
+                    let pad_len = source_numel - selected_len;
+                    let zeros = Tensor::from_storage(
+                        TensorStorage::gpu(backend.alloc_zeros(pad_len, T::dtype(), ordinal)?),
+                        vec![pad_len],
+                        false,
+                    )?;
+                    if selected_len == 0 {
+                        zeros
+                    } else {
+                        let selected = Tensor::from_storage(
+                            TensorStorage::gpu(selected_handle),
+                            vec![selected_len],
+                            false,
+                        )?;
+                        no_grad(|| crate::grad_fns::shape::cat(&[selected, zeros], 0))?
+                    }
+                };
+                let (storage, _) = flat.into_storage_and_shape()?;
+                Some(Tensor::from_storage(
+                    storage,
+                    self.source.shape().to_vec(),
+                    false,
+                )?)
+            } else {
+                None
+            };
+
+            return Ok(vec![grad_input, grad_source]);
+        }
+
+        let mask_h = self.mask.data()?;
         let go = grad_output.data_vec()?;
         let zero = <T as num_traits::Zero>::zero();
 
@@ -4502,10 +4580,19 @@ impl<T: Float> GradFn<T> for MaskedScatterBackward<T> {
         // `TensorAdvancedIndexing.cpp:2411-2430`).
         let grad_source = if self.source.requires_grad() {
             let source_numel = self.source.numel();
+            let true_count = mask_h.iter().filter(|&&m| m).count();
+            if true_count > source_numel {
+                return Err(FerrotorchError::ShapeMismatch {
+                    message: format!(
+                        "masked_scatter backward: mask selected {true_count} gradients, \
+                         but source has {source_numel} elements"
+                    ),
+                });
+            }
             let mut gs = vec![zero; source_numel];
             let mut j = 0usize;
             for (i, &m) in mask_h.iter().enumerate() {
-                if m && j < source_numel {
+                if m {
                     gs[j] = go[i];
                     j += 1;
                 }

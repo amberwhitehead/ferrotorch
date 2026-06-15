@@ -666,6 +666,60 @@ fn masked_scatter_cuda_resident_f64() {
     masked_scatter_cuda_resident::<f64>();
 }
 
+/// Live torch (cuda, f16/bf16):
+///   x = tensor([[1,2,3],[4,5,6]], dtype=d, device='cuda', requires_grad=True)
+///   s = tensor([10,20,30,40,50], dtype=d, device='cuda', requires_grad=True)
+///   m = tensor([True,False,True], device='cuda')
+///   out = x.masked_scatter(m, s)
+///   out.backward(tensor([[1,2,3],[4,5,6]], dtype=d, device='cuda'))
+///   -> out [[10,2,20],[30,5,40]];
+///      x.grad [[0,2,0],[0,5,0]];
+///      s.grad [1,3,4,6,0].
+///
+/// The tail zero is important: PyTorch's
+/// `masked_scatter_backward_symint` pads `grad.masked_select(mask)` back to
+/// `source.sizes()` before `view`. This also proves the half/bfloat CUDA
+/// backward path is not limited to exact `source.numel()==mask.sum()` cases.
+fn masked_scatter_cuda_broadcast_padded_source_16bit<T: Float>() {
+    ensure_cuda_backend();
+    let x = t_cuda::<T>(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true);
+    let s = t_cuda::<T>(&[10.0, 20.0, 30.0, 40.0, 50.0], &[5], true);
+    let mask = BoolTensor::from_vec(vec![true, false, true], vec![3])
+        .unwrap()
+        .to(Device::Cuda(0))
+        .unwrap();
+
+    let out = masked_scatter(&x, &mask, &s).unwrap();
+    assert_cuda_with(
+        &out,
+        "masked_scatter broadcast output",
+        &[10.0, 2.0, 20.0, 30.0, 5.0, 40.0],
+    );
+
+    let seed = t_cuda::<T>(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false);
+    backward_with_grad(&out, Some(&seed)).unwrap();
+    assert_cuda_with(
+        &grad_of(&x),
+        "masked_scatter broadcast grad_input",
+        &[0.0, 2.0, 0.0, 0.0, 5.0, 0.0],
+    );
+    assert_cuda_with(
+        &grad_of(&s),
+        "masked_scatter broadcast padded grad_source",
+        &[1.0, 3.0, 4.0, 6.0, 0.0],
+    );
+}
+
+#[test]
+fn masked_scatter_cuda_broadcast_padded_source_f16() {
+    masked_scatter_cuda_broadcast_padded_source_16bit::<f16>();
+}
+
+#[test]
+fn masked_scatter_cuda_broadcast_padded_source_bf16() {
+    masked_scatter_cuda_broadcast_padded_source_16bit::<bf16>();
+}
+
 /// torch rejects all mixes incl. the host-accessible-mask fallback the audit
 /// flagged: `cuda_x.masked_scatter(cpu_mask, cuda_src)` -> "Expected all
 /// tensors to be on the same device, but got mask is on cpu...".
