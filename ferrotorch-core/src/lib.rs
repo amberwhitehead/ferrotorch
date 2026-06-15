@@ -196,7 +196,9 @@ pub use grad_fns::shape::{
     tile, unbind, unflatten, vstack,
 };
 pub use grad_fns::transcendental::{
-    atan2, clamp, copysign, cos, exp, hypot, log, nextafter, signbit, sin,
+    atan2, clamp, clamp_max, clamp_max_tensor, clamp_min, clamp_min_tensor, clamp_opt,
+    clamp_tensor, clip, clip_opt, clip_tensor, copysign, cos, exp, hypot, log, nextafter, signbit,
+    sin,
 };
 pub use masked::{
     MaskedTensor, masked_count, masked_equal, masked_invalid, masked_max, masked_mean, masked_min,

@@ -3441,6 +3441,29 @@ DONE:
 }
 ";
 
+fn broadcast_extreme_f16_ptx(kernel_name: &str, instruction: &str) -> String {
+    let op_block = format!(
+        "\
+    setp.nan.f32 %nan_a, %va, %va;
+    setp.nan.f32 %nan_b, %vb, %vb;
+    or.pred %store_nan, %nan_a, %nan_b;
+    @%store_nan bra STORE_NAN;
+    {instruction} %vr, %va, %vb;
+    bra STORE_RESULT;
+
+STORE_NAN:
+    mov.f32 %vr, 0f7FC00000;
+STORE_RESULT:"
+    );
+    BROADCAST_ADD_F16_PTX
+        .replace("broadcast_add_f16_kernel", kernel_name)
+        .replace(
+            ".reg .pred %p, %loop_p;",
+            ".reg .pred %p, %loop_p, %nan_a, %nan_b, %store_nan;",
+        )
+        .replace("    add.f32 %vr, %va, %vb;", &op_block)
+}
+
 // Computes row-major contiguous strides for `shape`, with broadcast (0)
 // stride for dims of size 1. Mirrors the helper in `bf16.rs`.
 fn broadcast_strides_f16(shape: &[usize], out_shape: &[usize]) -> Vec<u32> {
@@ -3616,5 +3639,55 @@ pub fn gpu_broadcast_div_f16(
         device,
         BROADCAST_DIV_F16_PTX,
         "broadcast_div_f16_kernel",
+    )
+}
+
+/// Broadcast max `out[i] = maximum(a[bcast_a(i)], b[bcast_b(i)])` on f16 buffers.
+pub fn gpu_broadcast_maximum_f16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ptx: &'static str = CACHE
+        .get_or_init(|| broadcast_extreme_f16_ptx("broadcast_maximum_f16_kernel", "max.f32"))
+        .as_str();
+    launch_broadcast_binary_f16(
+        a,
+        b,
+        a_shape,
+        b_shape,
+        out_shape,
+        device,
+        ptx,
+        "broadcast_maximum_f16_kernel",
+    )
+}
+
+/// Broadcast min `out[i] = minimum(a[bcast_a(i)], b[bcast_b(i)])` on f16 buffers.
+pub fn gpu_broadcast_minimum_f16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ptx: &'static str = CACHE
+        .get_or_init(|| broadcast_extreme_f16_ptx("broadcast_minimum_f16_kernel", "min.f32"))
+        .as_str();
+    launch_broadcast_binary_f16(
+        a,
+        b,
+        a_shape,
+        b_shape,
+        out_shape,
+        device,
+        ptx,
+        "broadcast_minimum_f16_kernel",
     )
 }

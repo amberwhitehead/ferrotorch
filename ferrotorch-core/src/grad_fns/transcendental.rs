@@ -109,6 +109,19 @@ fn cuda_zeros_like<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)
 }
 
+fn zeros_like_grad<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        cuda_zeros_like(input)
+    } else {
+        let zero = <T as num_traits::Zero>::zero();
+        Tensor::from_storage(
+            TensorStorage::cpu(vec![zero; input.numel()]),
+            input.shape().to_vec(),
+            false,
+        )
+    }
+}
+
 #[inline]
 fn clamp_scalar_pair<T: Float>(x: T, min: T, max: T) -> T {
     let mut y = x;
@@ -178,6 +191,30 @@ fn clamp_tensor_from_storage<T: Float>(
         )
     } else {
         Tensor::from_storage(storage, input.shape().to_vec(), false)
+    }
+}
+
+fn torch_cpu_maximum<T: Float>(x: T, y: T) -> T {
+    if num_traits::Float::is_nan(x) {
+        x
+    } else if num_traits::Float::is_nan(y) {
+        y
+    } else if x >= y {
+        x
+    } else {
+        y
+    }
+}
+
+fn torch_cpu_minimum<T: Float>(x: T, y: T) -> T {
+    if num_traits::Float::is_nan(x) {
+        x
+    } else if num_traits::Float::is_nan(y) {
+        y
+    } else if x <= y {
+        x
+    } else {
+        y
     }
 }
 
@@ -672,6 +709,127 @@ impl<T: Float> GradFn<T> for ClampBackward<T> {
     }
 }
 
+/// Backward node for tensor-bound `torch.clamp` / `clamp_min` / `clamp_max`.
+///
+/// PyTorch routes tensor-bound gradients with custom predicates rather than
+/// the derivative of a spelled-out `where(maximum/minimum)` expression:
+///
+/// - self: `(self >= min) & (self <= max)`
+/// - min: `(self < min) & (min < max)`
+/// - max: `(self > max) | (max < min)`
+///
+/// One-sided overloads use the corresponding subset. The `max < min` arm is
+/// important: when tensor bounds are degenerate (`min > max`), forward returns
+/// `max` and all upstream gradient flows to `max`, never to `min`.
+#[derive(Debug)]
+struct ClampTensorBackward<T: Float> {
+    input: Tensor<T>,
+    min: Option<Tensor<T>>,
+    max: Option<Tensor<T>>,
+}
+
+impl<T: Float> ClampTensorBackward<T> {
+    fn masked_grad_to_shape(
+        mask: &BoolTensor,
+        grad_output: &Tensor<T>,
+        target_shape: &[usize],
+    ) -> FerrotorchResult<Tensor<T>> {
+        no_grad(|| {
+            let zero = zeros_like_grad(grad_output)?;
+            let grad = crate::grad_fns::comparison::where_bt(mask, grad_output, &zero)?;
+            reduce_grad_to_shape(&grad, target_shape)
+        })
+    }
+}
+
+impl<T: Float> GradFn<T> for ClampTensorBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let grad_input = if self.input.requires_grad() {
+            let mask = match (&self.min, &self.max) {
+                (Some(min), Some(max)) => {
+                    let ge_min = BoolTensor::ge(&self.input, min)?;
+                    let le_max = BoolTensor::le(&self.input, max)?;
+                    ge_min.and(&le_max)?
+                }
+                (Some(min), None) => BoolTensor::ge(&self.input, min)?,
+                (None, Some(max)) => BoolTensor::le(&self.input, max)?,
+                (None, None) => {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: "ClampTensorBackward: at least one bound is required".into(),
+                    });
+                }
+            };
+            Some(Self::masked_grad_to_shape(
+                &mask,
+                grad_output,
+                self.input.shape(),
+            )?)
+        } else {
+            None
+        };
+
+        let grad_min = if let Some(min) = &self.min {
+            if min.requires_grad() {
+                let mask = if let Some(max) = &self.max {
+                    let self_lt_min = BoolTensor::lt(&self.input, min)?;
+                    let min_lt_max = BoolTensor::lt(min, max)?;
+                    self_lt_min.and(&min_lt_max)?
+                } else {
+                    BoolTensor::lt(&self.input, min)?
+                };
+                Some(Self::masked_grad_to_shape(&mask, grad_output, min.shape())?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let grad_max = if let Some(max) = &self.max {
+            if max.requires_grad() {
+                let mask = if let Some(min) = &self.min {
+                    let self_gt_max = BoolTensor::gt(&self.input, max)?;
+                    let max_lt_min = BoolTensor::lt(max, min)?;
+                    self_gt_max.or(&max_lt_min)?
+                } else {
+                    BoolTensor::gt(&self.input, max)?
+                };
+                Some(Self::masked_grad_to_shape(&mask, grad_output, max.shape())?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut grads = Vec::with_capacity(3);
+        grads.push(grad_input);
+        if self.min.is_some() {
+            grads.push(grad_min);
+        }
+        if self.max.is_some() {
+            grads.push(grad_max);
+        }
+        Ok(grads)
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        let mut inputs = Vec::with_capacity(3);
+        inputs.push(&self.input);
+        if let Some(min) = &self.min {
+            inputs.push(min);
+        }
+        if let Some(max) = &self.max {
+            inputs.push(max);
+        }
+        inputs
+    }
+
+    fn name(&self) -> &'static str {
+        "ClampTensorBackward"
+    }
+}
+
 fn clamp_fill_nan<T: Float>(
     input: &Tensor<T>,
     backward_min: T,
@@ -845,6 +1003,191 @@ pub fn clamp_max<T: Float>(input: &Tensor<T>, max: T) -> FerrotorchResult<Tensor
     }
 }
 
+fn cuda_tensor_maximum_minimum<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    is_maximum: bool,
+    op_name: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    if a.device() != b.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        });
+    }
+    let common = broadcast_shapes(a.shape(), b.shape())?;
+    if !a.is_cuda() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op_name}: expected CUDA tensors"),
+        });
+    }
+
+    let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let a = crate::methods::contiguous_t(a)?;
+    let b = crate::methods::contiguous_t(b)?;
+    let handle = if is_f32::<T>() {
+        if is_maximum {
+            backend.broadcast_maximum_f32(
+                a.gpu_handle()?,
+                b.gpu_handle()?,
+                a.shape(),
+                b.shape(),
+                &common,
+            )?
+        } else {
+            backend.broadcast_minimum_f32(
+                a.gpu_handle()?,
+                b.gpu_handle()?,
+                a.shape(),
+                b.shape(),
+                &common,
+            )?
+        }
+    } else if is_f64::<T>() {
+        if is_maximum {
+            backend.broadcast_maximum_f64(
+                a.gpu_handle()?,
+                b.gpu_handle()?,
+                a.shape(),
+                b.shape(),
+                &common,
+            )?
+        } else {
+            backend.broadcast_minimum_f64(
+                a.gpu_handle()?,
+                b.gpu_handle()?,
+                a.shape(),
+                b.shape(),
+                &common,
+            )?
+        }
+    } else if is_f16::<T>() {
+        if is_maximum {
+            backend.broadcast_maximum_f16(
+                a.gpu_handle()?,
+                b.gpu_handle()?,
+                a.shape(),
+                b.shape(),
+                &common,
+            )?
+        } else {
+            backend.broadcast_minimum_f16(
+                a.gpu_handle()?,
+                b.gpu_handle()?,
+                a.shape(),
+                b.shape(),
+                &common,
+            )?
+        }
+    } else if is_bf16::<T>() {
+        if is_maximum {
+            backend.broadcast_maximum_bf16(
+                a.gpu_handle()?,
+                b.gpu_handle()?,
+                a.shape(),
+                b.shape(),
+                &common,
+            )?
+        } else {
+            backend.broadcast_minimum_bf16(
+                a.gpu_handle()?,
+                b.gpu_handle()?,
+                a.shape(),
+                b.shape(),
+                &common,
+            )?
+        }
+    } else {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: op_name });
+    };
+
+    Tensor::from_storage(TensorStorage::gpu(handle), common, false)
+}
+
+fn tensor_maximum_forward<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if a.is_cuda() || b.is_cuda() {
+        return cuda_tensor_maximum_minimum(a, b, true, "maximum.Tensor");
+    }
+    binary_map(a, b, torch_cpu_maximum)
+}
+
+fn tensor_minimum_forward<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if a.is_cuda() || b.is_cuda() {
+        return cuda_tensor_maximum_minimum(a, b, false, "minimum.Tensor");
+    }
+    binary_map(a, b, torch_cpu_minimum)
+}
+
+fn attach_clamp_tensor_backward<T: Float>(
+    input: &Tensor<T>,
+    min: Option<&Tensor<T>>,
+    max: Option<&Tensor<T>>,
+    output: Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    let needs_grad = is_grad_enabled()
+        && (input.requires_grad()
+            || min.is_some_and(Tensor::requires_grad)
+            || max.is_some_and(Tensor::requires_grad));
+    if !needs_grad {
+        return Ok(output);
+    }
+    let (storage, shape) = output.into_storage_and_shape()?;
+    Tensor::from_operation(
+        storage,
+        shape,
+        Arc::new(ClampTensorBackward {
+            input: input.clone(),
+            min: min.cloned(),
+            max: max.cloned(),
+        }),
+    )
+}
+
+/// Differentiable `torch.clamp(input, min=<Tensor?>, max=<Tensor?>)`.
+///
+/// This is the tensor-bound overload, not the scalar-bound [`clamp_opt`].
+/// Forward follows PyTorch's tensor maximum/minimum path, so tensor NaN bounds
+/// propagate to the result and CUDA signed-zero behavior is preserved by the
+/// backend kernels. Backward mirrors `clamp_backward` and
+/// `clamp_backward_min_max` from PyTorch's `FunctionsManual.cpp`.
+pub fn clamp_tensor<T: Float>(
+    input: &Tensor<T>,
+    min: Option<&Tensor<T>>,
+    max: Option<&Tensor<T>>,
+) -> FerrotorchResult<Tensor<T>> {
+    if min.is_none() && max.is_none() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "torch.clamp: At least one of 'min' or 'max' must not be None".into(),
+        });
+    }
+    let output = no_grad(|| match (min, max) {
+        (Some(lo), Some(hi)) => {
+            let lower = tensor_maximum_forward(input, lo)?;
+            tensor_minimum_forward(&lower, hi)
+        }
+        (Some(lo), None) => tensor_maximum_forward(input, lo),
+        (None, Some(hi)) => tensor_minimum_forward(input, hi),
+        (None, None) => unreachable!("checked above"),
+    })?;
+    attach_clamp_tensor_backward(input, min, max, output)
+}
+
+/// Differentiable `torch.clamp_min(input, min)` tensor overload.
+pub fn clamp_min_tensor<T: Float>(
+    input: &Tensor<T>,
+    min: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    clamp_tensor(input, Some(min), None)
+}
+
+/// Differentiable `torch.clamp_max(input, max)` tensor overload.
+pub fn clamp_max_tensor<T: Float>(
+    input: &Tensor<T>,
+    max: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    clamp_tensor(input, None, Some(max))
+}
+
 /// `torch.clip` alias for `torch.clamp`.
 pub fn clip_opt<T: Float>(
     input: &Tensor<T>,
@@ -857,6 +1200,15 @@ pub fn clip_opt<T: Float>(
 /// Two-bound `torch.clip` alias for `torch.clamp`.
 pub fn clip<T: Float>(input: &Tensor<T>, min: T, max: T) -> FerrotorchResult<Tensor<T>> {
     clamp(input, min, max)
+}
+
+/// Tensor-bound `torch.clip` alias for [`clamp_tensor`].
+pub fn clip_tensor<T: Float>(
+    input: &Tensor<T>,
+    min: Option<&Tensor<T>>,
+    max: Option<&Tensor<T>>,
+) -> FerrotorchResult<Tensor<T>> {
+    clamp_tensor(input, min, max)
 }
 
 // ===========================================================================

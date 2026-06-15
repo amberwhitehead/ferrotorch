@@ -395,6 +395,22 @@ impl<T: Float> Tensor<T> {
         crate::grad_fns::transcendental::clamp_max(self, max)
     }
 
+    pub fn clamp_tensor_t(
+        &self,
+        min: Option<&Tensor<T>>,
+        max: Option<&Tensor<T>>,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::clamp_tensor(self, min, max)
+    }
+
+    pub fn clamp_min_tensor_t(&self, min: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::clamp_min_tensor(self, min)
+    }
+
+    pub fn clamp_max_tensor_t(&self, max: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::clamp_max_tensor(self, max)
+    }
+
     /// `clip` is a literal alias of `clamp` per upstream
     /// `aten/src/ATen/native/TensorCompare.cpp:918-930 Tensor clip(...)`
     /// (pass-through to `at::clamp(self, min, max)`).
@@ -404,6 +420,14 @@ impl<T: Float> Tensor<T> {
 
     pub fn clip_opt_t(&self, min: Option<T>, max: Option<T>) -> FerrotorchResult<Tensor<T>> {
         crate::grad_fns::transcendental::clip_opt(self, min, max)
+    }
+
+    pub fn clip_tensor_t(
+        &self,
+        min: Option<&Tensor<T>>,
+        max: Option<&Tensor<T>>,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::transcendental::clip_tensor(self, min, max)
     }
 
     // --- Transcendental: extended unary family

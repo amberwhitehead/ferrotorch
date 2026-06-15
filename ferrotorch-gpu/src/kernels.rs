@@ -195,6 +195,7 @@ pub(crate) fn ptx_f32_to_f64(
         .replace("0f3F000000", "0d3FE0000000000000") // 0.5
         .replace("0fFF800000", "0dFFF0000000000000") // -inf
         .replace("0f7F800000", "0d7FF0000000000000") // +inf
+        .replace("0f7FC00000", "0d7FF8000000000000") // qNaN
         .replace("0f3FB8AA3B", "0d3FF71547652B82FE") // log2(e)
         .replace("0f3F317218", "0d3FE62E42FEFA39EF") // ln(2)
 }
@@ -12029,6 +12030,33 @@ DONE:
 }
 ";
 
+#[cfg(feature = "cuda")]
+fn broadcast_extreme_ptx(kernel_name: &str, instruction: &str) -> String {
+    let op_block = format!(
+        "\
+    setp.nan.f32 %nan_a, %va, %va;
+    setp.nan.f32 %nan_b, %vb, %vb;
+    or.pred %store_nan, %nan_a, %nan_b;
+    @%store_nan bra STORE_NAN;
+    {instruction} %vr, %va, %vb;
+    bra STORE_RESULT;
+
+STORE_NAN:
+    mov.f32 %vr, 0f7FC00000;
+STORE_RESULT:"
+    );
+    BROADCAST_ADD_PTX
+        .replace("broadcast_add_kernel", kernel_name)
+        .replace(
+            ".reg .pred %p, %loop_p;",
+            ".reg .pred %p, %loop_p, %nan_a, %nan_b, %store_nan;",
+        )
+        .replace(
+            "    // Operation: add.\n    add.f32 %vr, %va, %vb;",
+            &op_block,
+        )
+}
+
 /// PTX source for `strided_split_kernel`: extract a sub-tensor along a given axis.
 ///
 /// Thread `i` computes:
@@ -15076,6 +15104,72 @@ pub fn gpu_broadcast_div(
         device,
         BROADCAST_DIV_PTX,
         "broadcast_div_kernel",
+    )
+}
+
+/// Broadcast maximum with PyTorch tensor semantics: NaNs propagate, and CUDA
+/// signed-zero behavior follows PTX `max.f32` (`max(-0,+0) == +0`).
+#[cfg(feature = "cuda")]
+pub fn gpu_broadcast_maximum(
+    a: &CudaBuffer<f32>,
+    b: &CudaBuffer<f32>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let a_str = broadcast_strides(a_shape, out_shape);
+    let b_str = broadcast_strides(b_shape, out_shape);
+    let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
+    let out_numel: usize = out_shape.iter().product();
+
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ptx: &'static str = CACHE
+        .get_or_init(|| broadcast_extreme_ptx("broadcast_maximum_kernel", "max.f32"))
+        .as_str();
+    try_launch_broadcast_binary(
+        a,
+        b,
+        &a_str,
+        &b_str,
+        &shape_u32,
+        out_numel,
+        device,
+        ptx,
+        "broadcast_maximum_kernel",
+    )
+}
+
+/// Broadcast minimum with PyTorch tensor semantics: NaNs propagate, and CUDA
+/// signed-zero behavior follows PTX `min.f32` (`min(-0,+0) == -0`).
+#[cfg(feature = "cuda")]
+pub fn gpu_broadcast_minimum(
+    a: &CudaBuffer<f32>,
+    b: &CudaBuffer<f32>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let a_str = broadcast_strides(a_shape, out_shape);
+    let b_str = broadcast_strides(b_shape, out_shape);
+    let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
+    let out_numel: usize = out_shape.iter().product();
+
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ptx: &'static str = CACHE
+        .get_or_init(|| broadcast_extreme_ptx("broadcast_minimum_kernel", "min.f32"))
+        .as_str();
+    try_launch_broadcast_binary(
+        a,
+        b,
+        &a_str,
+        &b_str,
+        &shape_u32,
+        out_numel,
+        device,
+        ptx,
+        "broadcast_minimum_kernel",
     )
 }
 
@@ -22207,6 +22301,84 @@ pub fn gpu_broadcast_div_f64(
         device,
         ptx,
         "broadcast_div_f64_kernel",
+    )
+}
+
+/// Broadcast maximum (f64): NaNs propagate; signed zero follows CUDA `max.f64`.
+#[cfg(feature = "cuda")]
+pub fn gpu_broadcast_maximum_f64(
+    a: &CudaBuffer<f64>,
+    b: &CudaBuffer<f64>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    let a_str = broadcast_strides(a_shape, out_shape);
+    let b_str = broadcast_strides(b_shape, out_shape);
+    let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
+    let out_numel: usize = out_shape.iter().product();
+
+    static F32_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let f32_ptx: &'static str = F32_CACHE
+        .get_or_init(|| broadcast_extreme_ptx("broadcast_maximum_kernel", "max.f32"))
+        .as_str();
+    static F64_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ptx = get_f64_ptx(
+        &F64_CACHE,
+        f32_ptx,
+        "broadcast_maximum_kernel",
+        "broadcast_maximum_f64_kernel",
+    );
+    try_launch_broadcast_binary_f64(
+        a,
+        b,
+        &a_str,
+        &b_str,
+        &shape_u32,
+        out_numel,
+        device,
+        ptx,
+        "broadcast_maximum_f64_kernel",
+    )
+}
+
+/// Broadcast minimum (f64): NaNs propagate; signed zero follows CUDA `min.f64`.
+#[cfg(feature = "cuda")]
+pub fn gpu_broadcast_minimum_f64(
+    a: &CudaBuffer<f64>,
+    b: &CudaBuffer<f64>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    let a_str = broadcast_strides(a_shape, out_shape);
+    let b_str = broadcast_strides(b_shape, out_shape);
+    let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
+    let out_numel: usize = out_shape.iter().product();
+
+    static F32_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let f32_ptx: &'static str = F32_CACHE
+        .get_or_init(|| broadcast_extreme_ptx("broadcast_minimum_kernel", "min.f32"))
+        .as_str();
+    static F64_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ptx = get_f64_ptx(
+        &F64_CACHE,
+        f32_ptx,
+        "broadcast_minimum_kernel",
+        "broadcast_minimum_f64_kernel",
+    );
+    try_launch_broadcast_binary_f64(
+        a,
+        b,
+        &a_str,
+        &b_str,
+        &shape_u32,
+        out_numel,
+        device,
+        ptx,
+        "broadcast_minimum_f64_kernel",
     )
 }
 

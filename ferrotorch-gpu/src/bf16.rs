@@ -5509,6 +5509,35 @@ DONE:
 }
 ";
 
+fn broadcast_extreme_bf16_ptx(kernel_name: &str, instruction: &str) -> String {
+    let op_block = format!(
+        "\
+    setp.nan.f32 %nan_a, %va, %va;
+    setp.nan.f32 %nan_b, %vb, %vb;
+    or.pred %store_nan, %nan_a, %nan_b;
+    @%store_nan bra STORE_NAN;
+    {instruction} %vr, %va, %vb;
+    bra STORE_RESULT;
+
+STORE_NAN:
+    mov.u32 %bits, 0x7FC0;
+    bra STORE_BITS;
+
+STORE_RESULT:"
+    );
+    BROADCAST_ADD_BF16_PTX
+        .replace("broadcast_add_bf16_kernel", kernel_name)
+        .replace(
+            ".reg .pred %p, %loop_p;",
+            ".reg .pred %p, %loop_p, %nan_a, %nan_b, %store_nan;",
+        )
+        .replace("    add.f32 %vr, %va, %vb;", &op_block)
+        .replace(
+            "    cvt.u64.u32 %off_out, %r_tid;",
+            "STORE_BITS:\n    cvt.u64.u32 %off_out, %r_tid;",
+        )
+}
+
 // Computes row-major contiguous strides for `shape`, with broadcast (0)
 // stride for dims of size 1. Mirrors the helper in `kernels.rs`.
 fn broadcast_strides_bf16(shape: &[usize], out_shape: &[usize]) -> Vec<u32> {
@@ -5687,6 +5716,56 @@ pub fn gpu_broadcast_div_bf16(
         device,
         BROADCAST_DIV_BF16_PTX,
         "broadcast_div_bf16_kernel",
+    )
+}
+
+/// Broadcast max `out[i] = maximum(a[bcast_a(i)], b[bcast_b(i)])` on bf16 buffers.
+pub fn gpu_broadcast_maximum_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ptx: &'static str = CACHE
+        .get_or_init(|| broadcast_extreme_bf16_ptx("broadcast_maximum_bf16_kernel", "max.f32"))
+        .as_str();
+    launch_broadcast_binary_bf16(
+        a,
+        b,
+        a_shape,
+        b_shape,
+        out_shape,
+        device,
+        ptx,
+        "broadcast_maximum_bf16_kernel",
+    )
+}
+
+/// Broadcast min `out[i] = minimum(a[bcast_a(i)], b[bcast_b(i)])` on bf16 buffers.
+pub fn gpu_broadcast_minimum_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ptx: &'static str = CACHE
+        .get_or_init(|| broadcast_extreme_bf16_ptx("broadcast_minimum_bf16_kernel", "min.f32"))
+        .as_str();
+    launch_broadcast_binary_bf16(
+        a,
+        b,
+        a_shape,
+        b_shape,
+        out_shape,
+        device,
+        ptx,
+        "broadcast_minimum_bf16_kernel",
     )
 }
 

@@ -87,12 +87,14 @@ by dtype (the MSRV-1.85-safe alternative to
   `CosBackward` saves the input and computes `dx = grad * (-sin(x))`.
   CPU/GPU dispatch is delegated to `crate::ops::elementwise::fast_cos`.
 
-- REQ-5: `clamp(x, min, max)` — forward `c = x.clamp(min, max)` (Scalar
-  bounds only) with autograd. Mirrors
+- REQ-5: `clamp(x, min, max)` — forward `c = x.clamp(min, max)` with
+  scalar and tensor bounds plus autograd. Scalar bounds mirror
   `aten/src/ATen/native/TensorCompare.cpp:831 TORCH_IMPL_FUNC(clamp_out)`
   which dispatches via `clamp_scalar_stub` / `clamp_max_scalar_stub` /
-  `clamp_min_scalar_stub` based on which bounds are present. Backward
-  per `tools/autograd/derivatives.yaml
+  `clamp_min_scalar_stub` based on which bounds are present. Tensor bounds
+  mirror `TORCH_IMPL_FUNC(clamp_Tensor_out)` at `TensorCompare.cpp:856`,
+  which dispatches to the tensor `clamp_stub` / `maximum_stub` /
+  `minimum_stub` family. Backward per `tools/autograd/derivatives.yaml
   - name: clamp(Tensor self, Scalar? min=None, Scalar? max=None) -> Tensor
     self: clamp_backward(grad, self, min, max)` — `ClampBackward` saves
   the input and both bounds and computes
@@ -107,12 +109,14 @@ by dtype (the MSRV-1.85-safe alternative to
   Live torch 2.11.0+cu130 distinguishes `clamp(x, min=nan)` /
   `clamp(x, max=nan)` from `clamp_min/max(x, nan)`: the former preserves
   forward values but zeros input gradient; the latter fills with NaN. ferrotorch
-  mirrors that split.
-  **Diverges from upstream**: ferrotorch's `clamp` does NOT support tensor-valued
-  bounds (`TORCH_IMPL_FUNC(clamp_Tensor_out)` at
-  `TensorCompare.cpp:856`); the `clamp.Tensor` derivative-yaml entry
-  is unreachable. See blocker #1298 for the parity-sweep arm that would
-  exercise the shipped scalar-bound behavior.
+  mirrors that split. Tensor-bound forward propagates tensor NaNs like
+  `torch.maximum` / `torch.minimum`; CUDA tensor-bound forward uses resident
+  f32/f64/f16/bf16 broadcast min/max kernels so signed-zero behavior matches
+  CUDA PyTorch (`maximum(-0,+0) -> +0`, `minimum(-0,+0) -> -0`). Tensor-bound
+  backward mirrors `FunctionsManual.cpp clamp_backward_min_max`: `self` gets
+  `(self >= min) & (self <= max)`, `min` gets `(self < min) & (min < max)`,
+  and `max` gets `(self > max) | (max < min)`, with broadcast reductions back
+  to each original operand shape.
 
 - REQ-6: `exp2(x)` — `c = 2^x`, mirror of
   `UnaryOps.cpp:335 CREATE_UNARY_TORCH_IMPL_FUNC(exp2_out, exp2_stub)`.
@@ -637,7 +641,7 @@ table).
 | `log` | impl SHIPPED, parity arm BLOCKED #1298 | `UnaryOps.cpp:340 CREATE_UNARY_TORCH_IMPL_FUNC(log_out, log_stub)` | `derivatives.yaml` `log: grad.div(self.conj())` | `log(0) = -inf`, `log(negative) = NaN`, `log(NaN) = NaN`. Backward at `x=0` produces `grad / 0 = +/-inf` per IEEE-754 — matches upstream. bf16 path uses PTX `lg2.approx.f32 * ln(2)` per #23. |
 | `sin` | impl SHIPPED, parity arm BLOCKED #1298 | `UnaryOps.cpp:349 CREATE_UNARY_TORCH_IMPL_FUNC(sin_out, sin_stub)` | `derivatives.yaml` `sin: grad * self.cos().conj()` | NaN/Inf propagates. Large-magnitude inputs lose precision from argument reduction; `fast_sin` documents its reduction algorithm. Backward re-computes `cos` rather than saving it. |
 | `cos` | impl SHIPPED, parity arm BLOCKED #1298 | `UnaryOps.cpp:328 CREATE_UNARY_TORCH_IMPL_FUNC(cos_out, cos_stub)` | `derivatives.yaml` `cos: grad * -self.sin().conj()` | Symmetric to sin. |
-| `clamp` | impl SHIPPED, parity arm BLOCKED #1298 | `TensorCompare.cpp:831 TORCH_IMPL_FUNC(clamp_out)` | `derivatives.yaml` `clamp: clamp_backward(grad, self, min, max)` | NaN inputs propagate. Two-bound NaN scalar bounds fill the entire output with NaN; one-sided `clamp(min=nan)` / `clamp(max=nan)` preserves forward values and zeros input gradient on live torch 2.11.0+cu130. `clamp_min/max(nan)` fill with NaN. `min > max` is accepted and returns `max` for every non-NaN input. Boundary tie at `x == min` and `x == max` returns `g` per upstream derivative formulas. CUDA f32/f64/f16/bf16 forward and backward stay resident. |
+| `clamp` | impl SHIPPED, parity arm BLOCKED #1298 | `TensorCompare.cpp:831 TORCH_IMPL_FUNC(clamp_out)` and `TensorCompare.cpp:856 TORCH_IMPL_FUNC(clamp_Tensor_out)` | `derivatives.yaml` `clamp: clamp_backward(grad, self, min, max)` plus `clamp_backward_min_max` in `FunctionsManual.cpp` | NaN inputs propagate. Two-bound NaN scalar bounds fill the entire output with NaN; one-sided `clamp(min=nan)` / `clamp(max=nan)` preserves forward values and zeros input gradient on live torch 2.11.0+cu130. `clamp_min/max(nan)` fill with NaN. Tensor bounds propagate tensor NaNs via maximum/minimum semantics. `min > max` is accepted and returns `max`; tensor-bound backward sends that gradient to `max`, not `min`. Boundary tie at `x == min` and `x == max` returns `g` to `self` per upstream derivative formulas. CUDA f32/f64/f16/bf16 forward and backward stay resident. |
 | All 28 NOT-STARTED ops | — | (see upstream cites in REQ list) | (see derivatives.yaml cites in REQ list) | No implementation — edge-case parity is by definition not yet defined for the ferrotorch side. Each op has a dedicated open prereq blocker referenced in the REQ status table. |
 
 Parity-sweep audit reference: all 33 op entries are **MISSING** from
@@ -717,7 +721,7 @@ NOT-STARTED (concrete prereq blocker filed for each).
 | REQ-2 (log) | SHIPPED | impl: `pub fn log` in `transcendental.rs` + `struct LogBackward<T>` mirroring `UnaryOps.cpp:340 CREATE_UNARY_TORCH_IMPL_FUNC(log_out, log_stub)` with backward `grad / x` per `derivatives.yaml` `log`. Non-test production consumers: `pub fn log_t` in `methods.rs` (S5), `pub fn dual_log` in `autograd/forward_ad.rs`, `pub fn interpret` and `fn apply_elementwise_op` in `ferrotorch-jit/src/interpreter.rs` (JIT `IrOpKind::Log` two sites), `impl<T> MultivariateNormal<T>` in `ferrotorch-distributions/src/multivariate_normal.rs`, `impl Transform<T> for ExpTransform` in `ferrotorch-distributions/src/transforms.rs`, `ferrotorch-distributions/src/dirichlet.rs` (file-level `use` consumer). Parity-sweep arm BLOCKED #1298 (currently `[log] 0/12 passed`). |
 | REQ-3 (sin) | SHIPPED | impl: `pub fn sin` in `transcendental.rs` + `struct SinBackward<T>` mirroring `UnaryOps.cpp:349 CREATE_UNARY_TORCH_IMPL_FUNC(sin_out, sin_stub)` with backward `grad * cos(x)` per `derivatives.yaml` `sin`. Non-test production consumers: `pub fn sin_t` in `methods.rs` (S5), `pub fn dual_sin` in `autograd/forward_ad.rs`, plus recursive consumer through `CosBackward::backward` GPU path which invokes `transcendental::sin`. Parity-sweep arm BLOCKED #1298 (currently `[sin] 0/4 passed`). |
 | REQ-4 (cos) | SHIPPED | impl: `pub fn cos` in `transcendental.rs` + `struct CosBackward<T>` mirroring `UnaryOps.cpp:328 CREATE_UNARY_TORCH_IMPL_FUNC(cos_out, cos_stub)` with backward `grad * (-sin(x))` per `derivatives.yaml` `cos`. Non-test production consumers: `pub fn cos_t` in `methods.rs` (S5), `pub fn dual_cos` in `autograd/forward_ad.rs`, plus recursive consumer through `SinBackward::backward` GPU path which invokes `transcendental::cos`. Parity-sweep arm BLOCKED #1298 (currently `[cos] 0/12 passed`). |
-| REQ-5 (clamp) | SHIPPED | impl: `pub fn clamp`, `pub fn clamp_opt`, `pub fn clamp_min`, `pub fn clamp_max`, and `struct ClampBackward<T>` in `transcendental.rs` mirroring `aten/src/ATen/native/TensorCompare.cpp:831 TORCH_IMPL_FUNC(clamp_out)` plus scalar `clamp_min` / `clamp_max` entries, with backward `clamp_backward(grad, self, min, max)` per `derivatives.yaml` `clamp` and one-sided formulas at `derivatives.yaml` `clamp_min` / `clamp_max`. Scalar-bound forward covers optional one-sided bounds, live-torch one-sided NaN behavior, two-bound NaN fill, and `min > max`; GPU fast path via `backend.clamp_f32`/`backend.clamp_f64`/`backend.clamp_f16`/`backend.clamp_bf16_bf16` and matching backward dispatch. Non-test production consumers: `pub fn clamp_t`, `clamp_opt_t`, `clamp_min_t`, `clamp_max_t`, `clip_t`, and `clip_opt_t` in `methods.rs`, plus existing `SigmoidTransform`, `BCEWithLogitsLoss`, `ReLU6`, and `Hardtanh` callers. Remaining divergence: tensor-valued bounds are not implemented. Parity-sweep arm BLOCKED #1298 (currently `[clamp] 0/28 passed`). |
+| REQ-5 (clamp) | SHIPPED | impl: scalar-bound `pub fn clamp`, `clamp_opt`, `clamp_min`, `clamp_max`, `ClampBackward<T>`, plus tensor-bound `clamp_tensor`, `clamp_min_tensor`, `clamp_max_tensor`, `clip_tensor`, and `ClampTensorBackward<T>` in `transcendental.rs`. Scalar arm mirrors `TensorCompare.cpp:831 TORCH_IMPL_FUNC(clamp_out)` and tensor arm mirrors `TensorCompare.cpp:856 TORCH_IMPL_FUNC(clamp_Tensor_out)`. Backward mirrors `derivatives.yaml` `clamp`, `clamp_min.Tensor`, `clamp_max.Tensor`, and `FunctionsManual.cpp clamp_backward_min_max`. Scalar-bound forward covers optional one-sided bounds, live-torch one-sided NaN behavior, two-bound NaN fill, and `min > max`; scalar CUDA fast path uses `backend.clamp_f32`/`backend.clamp_f64`/`backend.clamp_f16`/`backend.clamp_bf16_bf16` with matching backward dispatch. Tensor-bound CUDA forward uses resident broadcast maximum/minimum kernels for f32/f64/f16/bf16 and custom backward masks plus resident `where`/bool/reduce paths. Non-test production consumers: `pub fn clamp_t`, `clamp_opt_t`, `clamp_min_t`, `clamp_max_t`, `clamp_tensor_t`, `clamp_min_tensor_t`, `clamp_max_tensor_t`, `clip_t`, `clip_opt_t`, and `clip_tensor_t` in `methods.rs`, plus existing `SigmoidTransform`, `BCEWithLogitsLoss`, `ReLU6`, and `Hardtanh` callers. Parity-sweep arm BLOCKED #1298 (currently `[clamp] 0/28 passed`). |
 | REQ-6 (exp2) | SHIPPED | impl: `pub fn exp2` + `struct Exp2Backward` in `transcendental.rs` mirroring `aten/src/ATen/native/UnaryOps.cpp:335 CREATE_UNARY_TORCH_IMPL_FUNC(exp2_out, exp2_stub)` with backward `grad * result * ln(2)` per `derivatives.yaml` `exp2`. Consumer: `pub fn exp2_t` in `methods.rs` (S5 boundary). Parity-sweep arm wired (`tools/parity-sweep/runner/src/main.rs` `"exp2" =>` arm). Closes #1303. |
 | REQ-7 (expm1) | SHIPPED | impl: `pub fn expm1` + `struct Expm1Backward` in `transcendental.rs` mirroring `UnaryOps.cpp:336 CREATE_UNARY_TORCH_IMPL_FUNC(expm1_out, expm1_stub)` with backward `grad * (result + 1)`. Consumer: `pub fn expm1_t` in `methods.rs`. Closes #1305. |
 | REQ-8 (log2) | SHIPPED | impl: `pub fn log2` + `struct Log2Backward` in `transcendental.rs` mirroring `UnaryOps.cpp:343` with backward `grad / (x * ln(2))`. Consumer: `pub fn log2_t` in `methods.rs`. Closes #1307. |
