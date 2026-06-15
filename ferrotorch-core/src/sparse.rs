@@ -20,6 +20,7 @@ use crate::autograd::no_grad::is_grad_enabled;
 use crate::device::Device;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
+use crate::shape::checked_byte_count;
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
 
@@ -509,7 +510,7 @@ impl<T: Float> SparseTensor<T> {
     /// CPU dense materialization. Pulled out from the inlined body so
     /// `to_dense_on` can call it as the composite fallback.
     fn to_dense_cpu(&self) -> FerrotorchResult<Tensor<T>> {
-        let numel: usize = self.shape.iter().product();
+        let numel: usize = crate::shape::numel(&self.shape);
         let mut data = vec![<T as num_traits::Zero>::zero(); numel];
         let ndim = self.shape.len();
 
@@ -1740,7 +1741,7 @@ impl<T: Float> SemiStructuredSparseTensor<T> {
     /// same shape as the original and zeros at every position
     /// that was masked out.
     pub fn decompress(&self) -> FerrotorchResult<Tensor<T>> {
-        let numel = self.shape.iter().product::<usize>();
+        let numel = crate::shape::numel(&self.shape);
         let mut out = vec![<T as num_traits::Zero>::zero(); numel];
         let num_groups = numel / 4;
 
@@ -1782,7 +1783,7 @@ impl<T: Float> SemiStructuredSparseTensor<T> {
     /// Number of 4-element groups in the original tensor.
     #[inline]
     pub fn num_groups(&self) -> usize {
-        self.shape.iter().product::<usize>() / 4
+        crate::shape::numel(&self.shape) / 4
     }
 
     /// Compressed byte count vs. dense byte count, as a ratio in
@@ -1790,11 +1791,24 @@ impl<T: Float> SemiStructuredSparseTensor<T> {
     /// the mask adds ~1 byte per 8 elements, so the steady-state
     /// ratio is ≈ 0.5 + 1/16 = 0.5625 of the dense size (for f32).
     pub fn compression_ratio(&self) -> f64 {
-        let dense_bytes = (self.shape.iter().product::<usize>()) * std::mem::size_of::<T>();
+        let dense_bytes = checked_byte_count(
+            crate::shape::numel(&self.shape),
+            std::mem::size_of::<T>(),
+            "SemiStructuredSparseTensor::compression_ratio",
+        )
+        .expect("SemiStructuredSparseTensor::compression_ratio: dense byte count overflows usize");
         if dense_bytes == 0 {
             return 1.0;
         }
-        let compressed = self.values.len() * std::mem::size_of::<T>() + self.mask.len();
+        let values_bytes = checked_byte_count(
+            self.values.len(),
+            std::mem::size_of::<T>(),
+            "SemiStructuredSparseTensor::compression_ratio",
+        )
+        .expect("SemiStructuredSparseTensor::compression_ratio: values byte count overflows usize");
+        let compressed = values_bytes.checked_add(self.mask.len()).expect(
+            "SemiStructuredSparseTensor::compression_ratio: compressed byte count overflows usize",
+        );
         compressed as f64 / dense_bytes as f64
     }
 
@@ -2465,7 +2479,7 @@ impl<T: Float> SparseGrad<T> {
         values: Vec<T>,
         slab_shape: Vec<usize>,
     ) -> FerrotorchResult<Self> {
-        let slab_size: usize = slab_shape.iter().product::<usize>();
+        let slab_size: usize = crate::shape::numel(&slab_shape);
         if values.len() != indices.len() * slab_size {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
@@ -2509,7 +2523,7 @@ impl<T: Float> SparseGrad<T> {
     ///
     /// [`slab_shape`]: Self::slab_shape
     pub fn slab_size(&self) -> usize {
-        self.slab_shape.iter().product::<usize>()
+        crate::shape::numel(&self.slab_shape)
     }
 
     /// Whether this gradient uses a sparse layout.

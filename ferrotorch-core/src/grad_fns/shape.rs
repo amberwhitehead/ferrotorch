@@ -1720,12 +1720,12 @@ impl<T: Float> GradFn<T> for SplitBackward<T> {
             let orig_shape = self.input.shape();
             let ndim = orig_shape.len();
             let inner: usize = if self.dim + 1 < ndim {
-                orig_shape[self.dim + 1..].iter().product()
+                crate::shape::numel(&orig_shape[self.dim + 1..])
             } else {
                 1
             };
             let total_along_dim = orig_shape[self.dim];
-            let orig_numel: usize = orig_shape.iter().product();
+            let orig_numel: usize = crate::shape::numel(orig_shape);
             let device_ord = grad_output.gpu_handle()?.device_ordinal();
 
             let mut zeros_handle = backend.alloc_zeros(orig_numel, T::dtype(), device_ord)?;
@@ -1770,9 +1770,9 @@ impl<T: Float> GradFn<T> for SplitBackward<T> {
         let orig_shape = self.input.shape();
         let ndim = orig_shape.len();
 
-        let outer: usize = orig_shape[..self.dim].iter().product();
+        let outer: usize = crate::shape::numel(&orig_shape[..self.dim]);
         let inner: usize = if self.dim + 1 < ndim {
-            orig_shape[self.dim + 1..].iter().product()
+            crate::shape::numel(&orig_shape[self.dim + 1..])
         } else {
             1
         };
@@ -1780,7 +1780,7 @@ impl<T: Float> GradFn<T> for SplitBackward<T> {
 
         // Build a zero tensor with the original shape, then copy the gradient
         // into the correct slice.
-        let orig_numel: usize = orig_shape.iter().product();
+        let orig_numel: usize = crate::shape::numel(orig_shape);
         let mut result = vec![<T as num_traits::Zero>::zero(); orig_numel];
 
         for o in 0..outer {
@@ -1930,11 +1930,11 @@ pub fn cat<T: Float>(tensors: &[Tensor<T>], axis: isize) -> FerrotorchResult<Ten
         && let Some(backend) = crate::gpu_dispatch::gpu_backend()
     {
         let inner: usize = if norm_axis + 1 < ndim {
-            out_shape[norm_axis + 1..].iter().product()
+            crate::shape::numel(&out_shape[norm_axis + 1..])
         } else {
             1
         };
-        let out_numel: usize = out_shape.iter().product();
+        let out_numel: usize = crate::shape::numel(&out_shape);
         let device_ord = staged[0].gpu_handle()?.device_ordinal();
 
         let mut out_handle = backend.alloc_zeros(out_numel, T::dtype(), device_ord)?;
@@ -1985,14 +1985,14 @@ pub fn cat<T: Float>(tensors: &[Tensor<T>], axis: isize) -> FerrotorchResult<Ten
     let cpu_tensors: Vec<Tensor<T>> = staged;
 
     // Compute strides for the interleaved copy.
-    let outer: usize = out_shape[..norm_axis].iter().product();
+    let outer: usize = crate::shape::numel(&out_shape[..norm_axis]);
     let inner: usize = if norm_axis + 1 < ndim {
-        out_shape[norm_axis + 1..].iter().product()
+        crate::shape::numel(&out_shape[norm_axis + 1..])
     } else {
         1
     };
 
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape::numel(&out_shape);
     let mut out_data = vec![<T as num_traits::Zero>::zero(); out_numel];
 
     let mut offset = 0usize;
@@ -2101,8 +2101,8 @@ impl<T: Float> GradFn<T> for RollBackward<T> {
                     )?;
                     return Ok(vec![Some(grad_tensor)]);
                 }
-                let outer: usize = shape[..self.dim].iter().product();
-                let inner: usize = shape[self.dim + 1..].iter().product();
+                let outer: usize = crate::shape::numel(&shape[..self.dim]);
+                let inner: usize = crate::shape::numel(&shape[self.dim + 1..]);
                 let handle = backend.roll_f32(
                     grad_output.gpu_handle()?,
                     outer,

@@ -71,6 +71,30 @@ const TILE_K: usize = 32;
 /// uses 64, LLaMA uses 128).
 const D_MAX: usize = 128;
 
+fn checked_smem_bytes(
+    d: usize,
+    d_v: usize,
+    elem_size: usize,
+    op: &'static str,
+) -> GpuResult<usize> {
+    let k_elems = TILE_K
+        .checked_mul(d)
+        .ok_or_else(|| GpuError::InvalidState {
+            message: format!("{op}: shared K tile {TILE_K} * {d} overflows usize"),
+        })?;
+    let v_elems = TILE_K
+        .checked_mul(d_v)
+        .ok_or_else(|| GpuError::InvalidState {
+            message: format!("{op}: shared V tile {TILE_K} * {d_v} overflows usize"),
+        })?;
+    let total_elems = k_elems
+        .checked_add(v_elems)
+        .ok_or_else(|| GpuError::InvalidState {
+            message: format!("{op}: shared tile element count overflows usize"),
+        })?;
+    crate::shape_math::checked_byte_count(total_elems, elem_size, op)
+}
+
 // ---------------------------------------------------------------------------
 // PTX kernel
 // ---------------------------------------------------------------------------
@@ -509,7 +533,7 @@ pub fn gpu_flash_attention_f32(
 
     // Validate shared memory requirement fits in 48 KiB.
     // smem = (TILE_K * d + TILE_K * d_v) * sizeof(f32)
-    let smem_required = (TILE_K * d + TILE_K * d_v) * std::mem::size_of::<f32>();
+    let smem_required = checked_smem_bytes(d, d_v, std::mem::size_of::<f32>(), "flash_attention")?;
     const SMEM_LIMIT: usize = 48 * 1024; // 48 KiB
     if smem_required > SMEM_LIMIT {
         return Err(GpuError::ShapeMismatch {
@@ -519,7 +543,7 @@ pub fn gpu_flash_attention_f32(
         });
     }
 
-    let expected_q = batch_heads * n_q * d;
+    let expected_q = crate::shape_math::checked_mul3(batch_heads, n_q, d, "flash_attention")?;
     if query.len() != expected_q {
         return Err(GpuError::ShapeMismatch {
             op: "flash_attention",
@@ -528,7 +552,7 @@ pub fn gpu_flash_attention_f32(
         });
     }
 
-    let expected_k = batch_heads * n_k * d;
+    let expected_k = crate::shape_math::checked_mul3(batch_heads, n_k, d, "flash_attention")?;
     if key.len() != expected_k {
         return Err(GpuError::ShapeMismatch {
             op: "flash_attention",
@@ -537,7 +561,7 @@ pub fn gpu_flash_attention_f32(
         });
     }
 
-    let expected_v = batch_heads * n_k * d_v;
+    let expected_v = crate::shape_math::checked_mul3(batch_heads, n_k, d_v, "flash_attention")?;
     if value.len() != expected_v {
         return Err(GpuError::ShapeMismatch {
             op: "flash_attention",
@@ -569,7 +593,7 @@ pub fn gpu_flash_attention_f32(
 
     // --- Handle degenerate cases -------------------------------------------
 
-    let total_out = batch_heads * n_q * d_v;
+    let total_out = crate::shape_math::checked_mul3(batch_heads, n_q, d_v, "flash_attention")?;
     if batch_heads == 0 || n_q == 0 || d_v == 0 {
         return crate::transfer::alloc_zeros_f32(0, device);
     }
@@ -594,7 +618,7 @@ pub fn gpu_flash_attention_f32(
     //
     // smem = (TILE_K * d + TILE_K * d_v) * sizeof(f32)
 
-    let smem_bytes = (TILE_K * d + TILE_K * d_v) * std::mem::size_of::<f32>();
+    let smem_bytes = checked_smem_bytes(d, d_v, std::mem::size_of::<f32>(), "flash_attention")?;
 
     // --- Launch config -----------------------------------------------------
     //
@@ -1068,7 +1092,8 @@ pub fn gpu_flash_attention_f64(
     }
 
     // 8-byte elements -> twice the shared-memory footprint.
-    let smem_required = (TILE_K * d + TILE_K * d_v) * std::mem::size_of::<f64>();
+    let smem_required =
+        checked_smem_bytes(d, d_v, std::mem::size_of::<f64>(), "flash_attention_f64")?;
     const SMEM_LIMIT: usize = 48 * 1024;
     if smem_required > SMEM_LIMIT {
         return Err(GpuError::ShapeMismatch {
@@ -1078,7 +1103,7 @@ pub fn gpu_flash_attention_f64(
         });
     }
 
-    let expected_q = batch_heads * n_q * d;
+    let expected_q = crate::shape_math::checked_mul3(batch_heads, n_q, d, "flash_attention_f64")?;
     if query.len() != expected_q {
         return Err(GpuError::ShapeMismatch {
             op: "flash_attention_f64",
@@ -1086,7 +1111,7 @@ pub fn gpu_flash_attention_f64(
             got: vec![query.len()],
         });
     }
-    let expected_k = batch_heads * n_k * d;
+    let expected_k = crate::shape_math::checked_mul3(batch_heads, n_k, d, "flash_attention_f64")?;
     if key.len() != expected_k {
         return Err(GpuError::ShapeMismatch {
             op: "flash_attention_f64",
@@ -1094,7 +1119,7 @@ pub fn gpu_flash_attention_f64(
             got: vec![key.len()],
         });
     }
-    let expected_v = batch_heads * n_k * d_v;
+    let expected_v = crate::shape_math::checked_mul3(batch_heads, n_k, d_v, "flash_attention_f64")?;
     if value.len() != expected_v {
         return Err(GpuError::ShapeMismatch {
             op: "flash_attention_f64",
@@ -1122,7 +1147,7 @@ pub fn gpu_flash_attention_f64(
         });
     }
 
-    let total_out = batch_heads * n_q * d_v;
+    let total_out = crate::shape_math::checked_mul3(batch_heads, n_q, d_v, "flash_attention_f64")?;
     if batch_heads == 0 || n_q == 0 || d_v == 0 {
         return crate::transfer::alloc_zeros_f64(0, device);
     }
@@ -1139,7 +1164,7 @@ pub fn gpu_flash_attention_f64(
         device.ordinal() as u32,
     )?;
 
-    let smem_bytes = (TILE_K * d + TILE_K * d_v) * std::mem::size_of::<f64>();
+    let smem_bytes = checked_smem_bytes(d, d_v, std::mem::size_of::<f64>(), "flash_attention_f64")?;
 
     const BLOCK: u32 = 256;
 

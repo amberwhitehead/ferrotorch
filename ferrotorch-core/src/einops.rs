@@ -335,12 +335,18 @@ fn resolve_sizes(
 
 /// Compute the output shape from the right side of the pattern and the
 /// resolved axis sizes.
-fn output_shape(right: &[AxisSpec], sizes: &HashMap<String, usize>) -> Vec<usize> {
+fn output_shape(
+    right: &[AxisSpec],
+    sizes: &HashMap<String, usize>,
+) -> FerrotorchResult<Vec<usize>> {
     right
         .iter()
         .map(|spec| match spec {
-            AxisSpec::Single(name) => *sizes.get(name).unwrap(),
-            AxisSpec::Group(names) => names.iter().map(|n| sizes.get(n).unwrap()).product(),
+            AxisSpec::Single(name) => Ok(*sizes.get(name).unwrap()),
+            AxisSpec::Group(names) => {
+                let dims: Vec<usize> = names.iter().map(|n| *sizes.get(n).unwrap()).collect();
+                crate::shape::checked_numel(&dims, "einops output_shape")
+            }
         })
         .collect()
 }
@@ -446,7 +452,7 @@ pub fn rearrange_with<T: Float>(
         });
     }
 
-    let out_shape = output_shape(&parsed.right, &sizes);
+    let out_shape = output_shape(&parsed.right, &sizes)?;
     let left_elem_shape = elementary_shape(&parsed.left, &sizes);
 
     // Compute the permutation from left elementary order to right elementary
@@ -537,7 +543,7 @@ pub fn repeat<T: Float>(
     // Build the elementary shapes and the output shape.
     let left_elem_shape = elementary_shape(&parsed.left, &sizes);
     let right_elem_shape = elementary_shape(&parsed.right, &sizes);
-    let out_shape = output_shape(&parsed.right, &sizes);
+    let out_shape = output_shape(&parsed.right, &sizes)?;
 
     // Differentiable composition (CORE-061 / #1755). Coordinate mapping is BY
     // AXIS NAME (CORE-062 / #1756): the kept-axis permutation is derived from
@@ -650,7 +656,7 @@ pub fn reduce<T: Float>(
     // Build the elementary shapes and the output shape.
     let left_elem_shape = elementary_shape(&parsed.left, &sizes);
     let right_elem_shape = elementary_shape(&parsed.right, &sizes);
-    let out_shape = output_shape(&parsed.right, &sizes);
+    let out_shape = output_shape(&parsed.right, &sizes)?;
 
     // ----------------------------------------------------------------------
     // Single differentiable composition (CORE-061 / #1755) — one path for

@@ -556,7 +556,7 @@ fn einsum_single<T: Float>(
     let out_numel: usize = if out_shape.is_empty() {
         1
     } else {
-        out_shape.iter().product()
+        crate::shape::numel(&out_shape)
     };
 
     let data = input.data_vec()?;
@@ -594,7 +594,7 @@ fn einsum_single<T: Float>(
     let summed_numel: usize = if summed_sizes.is_empty() {
         1
     } else {
-        summed_sizes.iter().product()
+        crate::shape::numel(&summed_sizes)
     };
 
     let mut result = vec![<T as num_traits::Zero>::zero(); out_numel];
@@ -1108,10 +1108,10 @@ fn einsum_two_gpu_general<T: Float>(
     let free_b_sizes: Vec<usize> = free_b_chars.iter().map(|c| dim_map[c]).collect();
     let contract_sizes: Vec<usize> = contract_chars.iter().map(|c| dim_map[c]).collect();
 
-    let batch_total: usize = batch_sizes.iter().product::<usize>().max(1);
-    let free_a_total: usize = free_a_sizes.iter().product::<usize>().max(1);
-    let free_b_total: usize = free_b_sizes.iter().product::<usize>().max(1);
-    let contract_total: usize = contract_sizes.iter().product::<usize>().max(1);
+    let batch_total: usize = crate::shape::numel(&batch_sizes).max(1);
+    let free_a_total: usize = crate::shape::numel(&free_a_sizes).max(1);
+    let free_b_total: usize = crate::shape::numel(&free_b_sizes).max(1);
+    let contract_total: usize = crate::shape::numel(&contract_sizes).max(1);
 
     // Reshape A to [batch_total, free_a_total, contract_total]. Use raw
     // usize shapes so reshape's no-op fast path works on every device.
@@ -1325,9 +1325,9 @@ fn einsum_two<T: Float>(
         return Tensor::from_storage(TensorStorage::cpu(Vec::new()), out_shape_empty, false);
     }
 
-    let batch_total: usize = batch_sizes.iter().product::<usize>().max(1);
-    let free_a_total: usize = free_a_sizes.iter().product::<usize>().max(1);
-    let free_b_total: usize = free_b_sizes.iter().product::<usize>().max(1);
+    let batch_total: usize = crate::shape::numel(&batch_sizes).max(1);
+    let free_a_total: usize = crate::shape::numel(&free_a_sizes).max(1);
+    let free_b_total: usize = crate::shape::numel(&free_b_sizes).max(1);
     // `.max(1)` collapses an EMPTY contraction group (no contract chars ->
     // product of [] == 1, the "single dot-product term" slot) to 1, but a
     // GENUINE zero-size contracted dim must give 0 terms: the sum over an empty
@@ -1338,7 +1338,7 @@ fn einsum_two<T: Float>(
     let contract_total: usize = if contract_sizes.is_empty() {
         1
     } else {
-        contract_sizes.iter().product::<usize>()
+        crate::shape::numel(&contract_sizes)
     };
 
     let a_data = a.data_vec()?;
@@ -1536,7 +1536,7 @@ fn einsum_two<T: Float>(
     let out_numel: usize = if out_shape.is_empty() {
         1
     } else {
-        out_shape.iter().product()
+        crate::shape::numel(&out_shape)
     };
 
     // Build permutation: for each output axis, find which intermediate axis it corresponds to.
@@ -2104,7 +2104,7 @@ impl<T: Float> EinsumBackwardTwo<T> {
 /// same coordinate on all of its axes (CORE-162 / #1856). Host-built
 /// constant; the caller uploads it when the operand lives on CUDA.
 fn diagonal_mask<T: Float>(subs: &[char], shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
-    let numel: usize = shape.iter().product();
+    let numel: usize = crate::shape::numel(shape);
     let mut data = vec![<T as num_traits::Zero>::zero(); numel];
     for (flat, slot) in data.iter_mut().enumerate() {
         let mut coords = vec![0usize; shape.len()];

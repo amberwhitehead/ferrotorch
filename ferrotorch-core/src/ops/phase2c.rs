@@ -45,9 +45,9 @@ use std::sync::Arc;
 /// `[outer, dim_size, inner]` kernel layout. `outer = prod(shape[..dim])`,
 /// `inner = prod(shape[dim+1..])`.
 fn factor(shape: &[usize], dim: usize) -> (usize, usize, usize) {
-    let outer: usize = shape[..dim].iter().product();
+    let outer: usize = crate::shape::numel(&shape[..dim]);
     let dim_size = shape[dim];
-    let inner: usize = shape[dim + 1..].iter().product();
+    let inner: usize = crate::shape::numel(&shape[dim + 1..]);
     (outer, dim_size, inner)
 }
 

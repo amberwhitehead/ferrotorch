@@ -203,7 +203,7 @@ pub fn gpu_roll_f32(
         });
     }
 
-    let expected_len = outer.saturating_mul(dim_size).saturating_mul(inner);
+    let expected_len = crate::shape_math::checked_mul3(outer, dim_size, inner, "roll_f32")?;
     if input.len() != expected_len {
         return Err(GpuError::ShapeMismatch {
             op: "roll_f32",
@@ -427,7 +427,7 @@ pub fn gpu_roll_f64(
         });
     }
 
-    let expected_len = outer.saturating_mul(dim_size).saturating_mul(inner);
+    let expected_len = crate::shape_math::checked_mul3(outer, dim_size, inner, "roll_f64")?;
     if input.len() != expected_len {
         return Err(GpuError::ShapeMismatch {
             op: "roll_f64",

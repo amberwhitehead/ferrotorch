@@ -722,7 +722,7 @@ pub fn scatter_value<T: Float>(
                 if is_grad_enabled() && original_input.requires_grad() {
                     let zero = <T as num_traits::Zero>::zero();
                     let zeros_src = Tensor::from_storage(
-                        TensorStorage::cpu(vec![zero; index_shape.iter().product()]),
+                        TensorStorage::cpu(vec![zero; crate::shape::numel(index_shape)]),
                         index_shape.to_vec(),
                         false,
                     )?;

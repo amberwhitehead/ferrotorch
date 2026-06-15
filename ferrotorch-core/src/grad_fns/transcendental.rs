@@ -1224,7 +1224,7 @@ pub fn clip_tensor<T: Float>(
 /// host and uploaded to `like`'s device when it is CUDA-resident.
 fn zeros_like_tensor<T: Float>(like: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let zero = <T as num_traits::Zero>::zero();
-    let n: usize = like.shape().iter().product::<usize>().max(1);
+    let n = crate::shape::numel(like.shape()).max(1);
     let zeros = Tensor::from_storage(
         TensorStorage::cpu(vec![zero; n]),
         like.shape().to_vec(),
@@ -3073,7 +3073,7 @@ impl<T: Float> GradFn<T> for NextafterBackward<T> {
         };
         // other: zeros_like(other).
         let db = if self.b.requires_grad() {
-            let n: usize = self.b.shape().iter().product::<usize>().max(1);
+            let n = crate::shape::numel(self.b.shape()).max(1);
             Some(Tensor::from_storage(
                 TensorStorage::cpu(vec![zero; n]),
                 self.b.shape().to_vec(),

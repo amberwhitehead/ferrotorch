@@ -268,7 +268,7 @@ impl<T: Float> GradFn<T> for RfftBackward<T> {
             let k = go_shape[go_shape.len() - 2];
             let n = self.fft_n;
             let batch_shape = &go_shape[..go_shape.len() - 2];
-            let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
+            let batch_size: usize = crate::shape::numel(batch_shape).max(1);
             let go_data = grad_output.data_vec()?;
 
             let mut padded = vec![T::from(0.0).unwrap(); batch_size * n * 2];
@@ -894,7 +894,7 @@ impl<T: Float> GradFn<T> for RfftnBackward<T> {
             // out_shape layout: [..., last_axis_K, 2]. last_axis_logical is the
             // index of the K dim within this layout (relative to the trailing 2).
             padded_shape[self.last_axis_logical] = self.last_axis_n;
-            let padded_total: usize = padded_shape.iter().product();
+            let padded_total: usize = crate::shape::numel(&padded_shape);
             let mut padded = vec![T::from(0.0).unwrap(); padded_total];
             // Compute strides for both shapes (row-major).
             let go_strides = row_major_strides(go_shape);
@@ -1092,7 +1092,7 @@ impl<T: Float> GradFn<T> for IrfftnBackward<T> {
 
             // Iterate every complex pair and apply the right factor.
             let strides_logical = row_major_strides(&f_shape[..f_shape.len() - 1]);
-            let logical_total: usize = f_shape[..f_shape.len() - 1].iter().product();
+            let logical_total: usize = crate::shape::numel(&f_shape[..f_shape.len() - 1]);
             let mut out = vec![T::from(0.0).unwrap(); f_data.len()];
             for flat in 0..logical_total {
                 let mut rem = flat;
@@ -1297,7 +1297,7 @@ impl<T: Float> GradFn<T> for IhfftBackward<T> {
             }
             let k = go_shape[go_shape.len() - 2];
             let batch_shape = &go_shape[..go_shape.len() - 2];
-            let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
+            let batch_size: usize = crate::shape::numel(batch_shape).max(1);
             let go_data = grad_output.data_vec()?;
 
             // Zero-pad conj(grad_y) from [..., K, 2] to [..., N, 2].
@@ -1358,12 +1358,12 @@ impl<T: Float> GradFn<T> for IhfftBackward<T> {
 ///   - Else multiply the inner dims (excluding the trailing complex pair).
 fn fftn_norm_n<T: Float>(input: &Tensor<T>, s: Option<&[usize]>, axes: Option<&[isize]>) -> usize {
     if let Some(s_slice) = s {
-        return s_slice.iter().copied().product::<usize>().max(1);
+        return crate::shape::numel(s_slice).max(1);
     }
     let shape = input.shape();
     let ndim = shape.len();
     if let Some(axes_slice) = axes {
-        let mut prod: usize = 1;
+        let mut dims = Vec::with_capacity(axes_slice.len());
         for &a in axes_slice {
             // Resolve negative axes against `ndim - 1` (excluding trailing
             // complex pair).
@@ -1373,15 +1373,15 @@ fn fftn_norm_n<T: Float>(input: &Tensor<T>, s: Option<&[usize]>, axes: Option<&[
             } else {
                 a as usize
             };
-            prod = prod.saturating_mul(shape[resolved]);
+            dims.push(shape[resolved]);
         }
-        return prod.max(1);
+        return crate::shape::numel(&dims).max(1);
     }
     // Default: all inner dims (skip the trailing 2).
     if ndim < 2 {
         1
     } else {
-        shape[..ndim - 1].iter().product::<usize>().max(1)
+        crate::shape::numel(&shape[..ndim - 1]).max(1)
     }
 }
 
@@ -1389,23 +1389,23 @@ fn fftn_norm_n<T: Float>(input: &Tensor<T>, s: Option<&[usize]>, axes: Option<&[
 /// pair, so all dims except the leading batch are candidates.
 fn rfftn_norm_n<T: Float>(input: &Tensor<T>, s: Option<&[usize]>, axes: Option<&[isize]>) -> usize {
     if let Some(s_slice) = s {
-        return s_slice.iter().copied().product::<usize>().max(1);
+        return crate::shape::numel(s_slice).max(1);
     }
     let shape = input.shape();
     let ndim = shape.len();
     if let Some(axes_slice) = axes {
-        let mut prod: usize = 1;
+        let mut dims = Vec::with_capacity(axes_slice.len());
         for &a in axes_slice {
             let resolved = if a < 0 {
                 (ndim as isize + a) as usize
             } else {
                 a as usize
             };
-            prod = prod.saturating_mul(shape[resolved]);
+            dims.push(shape[resolved]);
         }
-        return prod.max(1);
+        return crate::shape::numel(&dims).max(1);
     }
-    shape.iter().product::<usize>().max(1)
+    crate::shape::numel(shape).max(1)
 }
 
 /// Differentiable N-D FFT (default `norm`). Attaches `FftnBackward`.
@@ -1538,7 +1538,7 @@ pub fn rfftn_differentiable_norm<T: Float>(
             .last()
             .copied()
             .unwrap_or(in_shape[last_axis_logical]);
-        let norm_n: usize = s_back.iter().product::<usize>().max(1);
+        let norm_n: usize = crate::shape::numel(&s_back).max(1);
         let out_shape = result.shape().to_vec();
         let grad_fn = Arc::new(RfftnBackward::new_norm(
             input.clone(),
@@ -1605,7 +1605,7 @@ pub fn irfftn_differentiable_norm<T: Float>(
         // the freq axis maps 1:1 with the real output's last transform axis.
         let last_axis_logical = last_axis_logical_real;
         let last_axis_n = *s_back.last().unwrap_or(&res_shape[last_axis_logical_real]);
-        let norm_n: usize = s_back.iter().product::<usize>().max(1);
+        let norm_n: usize = crate::shape::numel(&s_back).max(1);
         let grad_fn = Arc::new(IrfftnBackward::new_norm(
             input.clone(),
             Some(s_back),
@@ -2198,7 +2198,7 @@ mod tests {
         let input = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
         let result = rfftn_differentiable_norm(&input, None, None, FftNorm::Ortho).unwrap();
         assert_eq!(result.grad_fn().unwrap().name(), "RfftnBackward");
-        let go: Vec<f64> = vec![0.5; result.shape().iter().product::<usize>()];
+        let go: Vec<f64> = vec![0.5; crate::shape::numel(result.shape())];
         let grad_out = no_grad_leaf(&go, result.shape());
         let grads = result.grad_fn().unwrap().backward(&grad_out).unwrap();
         assert_eq!(grads[0].as_ref().unwrap().shape(), &[2, 2]);

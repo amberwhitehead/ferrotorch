@@ -788,7 +788,7 @@ impl<T: Float> GradFn<T> for SumDimBackward<T> {
                 s.insert(self.dim, 1);
                 s
             };
-            let input_numel: usize = input_shape.iter().product();
+            let input_numel: usize = crate::shape::numel(input_shape);
             let grad_handle = grad_on_device.gpu_handle()?;
             let result_h: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
                 T,
@@ -853,7 +853,7 @@ impl<T: Float> GradFn<T> for SumDimBackward<T> {
         let grad_data = grad.data()?;
         let grad_shape = grad.shape();
 
-        let out_numel: usize = input_shape.iter().product();
+        let out_numel: usize = crate::shape::numel(input_shape);
         let mut result = Vec::with_capacity(out_numel);
 
         for flat in 0..out_numel {
@@ -1012,9 +1012,9 @@ fn reduce_axis_sum_contiguous<T: Float>(
 /// over a row-major shape. `outer = prod(shape[..norm_dim])`,
 /// `axis = shape[norm_dim]`, `inner = prod(shape[norm_dim+1..])`.
 fn outer_axis_inner(in_shape: &[usize], norm_dim: usize) -> (usize, usize, usize) {
-    let outer: usize = in_shape[..norm_dim].iter().product();
+    let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
     let axis: usize = in_shape[norm_dim];
-    let inner: usize = in_shape[norm_dim + 1..].iter().product();
+    let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
     (outer, axis, inner)
 }
 
@@ -1072,8 +1072,10 @@ fn prepare_multi_dim_reduction<T: Float>(
     let mut order = kept_dims.clone();
     order.extend(norm_dims.iter().copied());
 
-    let reduce_len: usize = norm_dims.iter().map(|&d| shape[d]).product();
-    let kept_len: usize = kept_dims.iter().map(|&d| shape[d]).product();
+    let reduce_dims: Vec<usize> = norm_dims.iter().map(|&d| shape[d]).collect();
+    let kept_shape: Vec<usize> = kept_dims.iter().map(|&d| shape[d]).collect();
+    let reduce_len = crate::shape::checked_numel(&reduce_dims, "prepare_multi_dim_reduction")?;
+    let kept_len = crate::shape::checked_numel(&kept_shape, "prepare_multi_dim_reduction")?;
     let out_shape = if keepdim {
         let mut s = shape.to_vec();
         for &d in &norm_dims {
@@ -1081,7 +1083,7 @@ fn prepare_multi_dim_reduction<T: Float>(
         }
         s
     } else {
-        kept_dims.iter().map(|&d| shape[d]).collect()
+        kept_shape
     };
 
     let moved = if order.iter().enumerate().all(|(i, &d)| i == d) {
@@ -1090,7 +1092,15 @@ fn prepare_multi_dim_reduction<T: Float>(
         crate::methods::permute_t(input, &order)?
     };
     let contiguous = crate::methods::contiguous_t(&moved)?;
-    let flattened = contiguous.reshape_t(&[kept_len as isize, reduce_len as isize])?;
+    let kept_len = isize::try_from(kept_len).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!("prepare_multi_dim_reduction: kept size {kept_len} exceeds isize::MAX"),
+    })?;
+    let reduce_len = isize::try_from(reduce_len).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!(
+            "prepare_multi_dim_reduction: reduced size {reduce_len} exceeds isize::MAX"
+        ),
+    })?;
+    let flattened = contiguous.reshape_t(&[kept_len, reduce_len])?;
     Ok(MultiDimReductionInput {
         flattened,
         out_shape,
@@ -1302,7 +1312,7 @@ impl<T: Float> GradFn<T> for MeanDimBackward<T> {
                 s.insert(self.dim, 1);
                 s
             };
-            let input_numel: usize = input_shape.iter().product();
+            let input_numel: usize = crate::shape::numel(input_shape);
             let inv_n_f32 = if dim_size == 0 {
                 0.0
             } else {
@@ -1382,7 +1392,7 @@ impl<T: Float> GradFn<T> for MeanDimBackward<T> {
         let grad_data = grad.data()?;
         let grad_shape = grad.shape();
 
-        let out_numel: usize = input_shape.iter().product();
+        let out_numel: usize = crate::shape::numel(input_shape);
         let mut result = Vec::with_capacity(out_numel);
 
         for flat in 0..out_numel {
@@ -2079,7 +2089,7 @@ impl<T: Float> GradFn<T> for LogsumexpDimBackward<T> {
         // size-1 dim at position `self.dim` for the broadcast walk.
         let grad_keepdim_data = grad_output.data()?.to_vec();
 
-        let in_numel: usize = input_shape.iter().product();
+        let in_numel: usize = crate::shape::numel(input_shape);
         let mut out = Vec::with_capacity(in_numel);
         for flat in 0..in_numel {
             // Decompose flat -> per-axis coords of the input.
@@ -2176,9 +2186,9 @@ pub fn logsumexp_dim<T: Float>(
             input.contiguous()?
         };
         let in_shape = input_ref.shape().to_vec();
-        let outer: usize = in_shape[..norm_dim].iter().product();
+        let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
         let axis_size = in_shape[norm_dim];
-        let inner: usize = in_shape[norm_dim + 1..].iter().product();
+        let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let handle = crate::dispatch_floating_dtype!(
@@ -2319,8 +2329,8 @@ fn argmax_argmin_dim<T: Float>(
     };
     let in_shape = input_ref.shape();
     let dim_size = in_shape[norm_dim];
-    let outer: usize = in_shape[..norm_dim].iter().product();
-    let inner: usize = in_shape[norm_dim + 1..].iter().product();
+    let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
+    let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
     let out_numel = outer * inner;
 
     if dim_size == 0 && out_numel != 0 {
@@ -2995,8 +3005,8 @@ fn std_var_dim_forward<T: Float>(
     let in_data = input_ref.data()?;
     let in_shape = input_ref.shape().to_vec();
     let dim_size = in_shape[norm_dim];
-    let outer: usize = in_shape[..norm_dim].iter().product();
-    let inner: usize = in_shape[norm_dim + 1..].iter().product();
+    let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
+    let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
 
     let denom = (dim_size as f64 - correction).max(0.0);
     let mut result = Vec::with_capacity(outer * inner);
@@ -3082,9 +3092,9 @@ impl<T: Float> GradFn<T> for VarDimBackward<T> {
                 (1, 1, 1)
             } else {
                 (
-                    in_shape[..self.norm_dim].iter().product(),
+                    crate::shape::numel(&in_shape[..self.norm_dim]),
                     in_shape[self.norm_dim],
-                    in_shape[self.norm_dim + 1..].iter().product(),
+                    crate::shape::numel(&in_shape[self.norm_dim + 1..]),
                 )
             };
             let result_handle = crate::dispatch_floating_dtype!(
@@ -3203,8 +3213,8 @@ impl<T: Float> GradFn<T> for VarDimBackward<T> {
             return Ok(vec![Some(grad_input)]);
         }
         let dim_size = in_shape[self.norm_dim];
-        let outer: usize = in_shape[..self.norm_dim].iter().product();
-        let inner: usize = in_shape[self.norm_dim + 1..].iter().product();
+        let outer: usize = crate::shape::numel(&in_shape[..self.norm_dim]);
+        let inner: usize = crate::shape::numel(&in_shape[self.norm_dim + 1..]);
         // May be +inf when denom == 0 — the NaN-propagation path above.
         let scale = 2.0 / self.denom;
         let mut dx = vec![<T as num_traits::Zero>::zero(); in_data.len()];
@@ -3278,9 +3288,9 @@ impl<T: Float> GradFn<T> for StdDimBackward<T> {
                 (1, 1, 1)
             } else {
                 (
-                    in_shape[..self.norm_dim].iter().product(),
+                    crate::shape::numel(&in_shape[..self.norm_dim]),
                     in_shape[self.norm_dim],
-                    in_shape[self.norm_dim + 1..].iter().product(),
+                    crate::shape::numel(&in_shape[self.norm_dim + 1..]),
                 )
             };
             let result_handle = crate::dispatch_floating_dtype!(
@@ -3403,8 +3413,8 @@ impl<T: Float> GradFn<T> for StdDimBackward<T> {
             return Ok(vec![Some(grad_input)]);
         }
         let dim_size = in_shape[self.norm_dim];
-        let outer: usize = in_shape[..self.norm_dim].iter().product();
-        let inner: usize = in_shape[self.norm_dim + 1..].iter().product();
+        let outer: usize = crate::shape::numel(&in_shape[..self.norm_dim]);
+        let inner: usize = crate::shape::numel(&in_shape[self.norm_dim + 1..]);
         let zero = <T as num_traits::Zero>::zero();
         let mut dx = vec![zero; in_data.len()];
         for o in 0..outer {
@@ -3482,9 +3492,9 @@ pub fn var_dim<T: Float>(
             (1, 1, 1)
         } else {
             (
-                in_shape[..norm_dim].iter().product(),
+                crate::shape::numel(&in_shape[..norm_dim]),
                 in_shape[norm_dim],
-                in_shape[norm_dim + 1..].iter().product(),
+                crate::shape::numel(&in_shape[norm_dim + 1..]),
             )
         };
         let backend =
@@ -3596,9 +3606,9 @@ pub fn std_dim<T: Float>(
             (1, 1, 1)
         } else {
             (
-                in_shape[..norm_dim].iter().product(),
+                crate::shape::numel(&in_shape[..norm_dim]),
                 in_shape[norm_dim],
-                in_shape[norm_dim + 1..].iter().product(),
+                crate::shape::numel(&in_shape[norm_dim + 1..]),
             )
         };
         let backend =
@@ -3846,8 +3856,8 @@ where
     };
     let in_shape = input_ref.shape();
     let dim_size = in_shape[norm_dim];
-    let outer: usize = in_shape[..norm_dim].iter().product();
-    let inner: usize = in_shape[norm_dim + 1..].iter().product();
+    let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
+    let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
 
     let mut out_shape: Vec<usize> = in_shape.to_vec();
     if keepdim {
@@ -3936,8 +3946,8 @@ pub fn count_nonzero_dim<T: Float>(
     };
     let in_shape = input_ref.shape();
     let dim_size = in_shape[norm_dim];
-    let outer: usize = in_shape[..norm_dim].iter().product();
-    let inner: usize = in_shape[norm_dim + 1..].iter().product();
+    let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
+    let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
 
     let mut out_shape: Vec<usize> = in_shape.to_vec();
     out_shape.remove(norm_dim);
@@ -4054,8 +4064,8 @@ fn amin_amax_dim_backward<T: Float>(
     let result_data = result.data()?;
     let in_shape = input.shape();
     let dim_size = in_shape[dim];
-    let outer: usize = in_shape[..dim].iter().product();
-    let inner: usize = in_shape[dim + 1..].iter().product();
+    let outer: usize = crate::shape::numel(&in_shape[..dim]);
+    let inner: usize = crate::shape::numel(&in_shape[dim + 1..]);
 
     // For each (o, i) slice, count how many positions match the extremum.
     let mut counts = vec![0i64; outer * inner];
@@ -4081,7 +4091,7 @@ fn amin_amax_dim_backward<T: Float>(
     let grad_data = grad_output.data()?;
     let _ = keepdim; // shape info absorbed via the o*inner+i indexing
 
-    let in_numel: usize = in_shape.iter().product();
+    let in_numel: usize = crate::shape::numel(in_shape);
     let mut out = Vec::with_capacity(in_numel);
     for o in 0..outer {
         for d in 0..dim_size {
@@ -4181,8 +4191,8 @@ fn amin_amax_dim_forward<T: Float>(
             message: "amin/amax_dim: cannot reduce over an empty dimension".into(),
         });
     }
-    let outer: usize = in_shape[..norm_dim].iter().product();
-    let inner: usize = in_shape[norm_dim + 1..].iter().product();
+    let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
+    let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
 
     let mut result = Vec::with_capacity(outer * inner);
     // First pass: compute per-slice extremum, NaN-poisoning per upstream
@@ -4387,8 +4397,8 @@ impl<T: Float> GradFn<T> for ProdDimBackward<T> {
         }
         if self.input.is_cuda() {
             let dim_size = in_shape[self.dim];
-            let outer: usize = in_shape[..self.dim].iter().product();
-            let inner: usize = in_shape[self.dim + 1..].iter().product();
+            let outer: usize = crate::shape::numel(&in_shape[..self.dim]);
+            let inner: usize = crate::shape::numel(&in_shape[self.dim + 1..]);
             let grad_output = if grad_output.is_cuda() {
                 grad_output.contiguous()?
             } else {
@@ -4434,15 +4444,15 @@ impl<T: Float> GradFn<T> for ProdDimBackward<T> {
         }
         let input_data = self.input.data()?;
         let dim_size = in_shape[self.dim];
-        let outer: usize = in_shape[..self.dim].iter().product();
-        let inner: usize = in_shape[self.dim + 1..].iter().product();
+        let outer: usize = crate::shape::numel(&in_shape[..self.dim]);
+        let inner: usize = crate::shape::numel(&in_shape[self.dim + 1..]);
         let _ = self.keepdim; // grad_output's shape carries the keepdim info
 
         let go_data = grad_output.data()?;
         // Per-slice prefix-suffix scan: for slice (o, i), gradient w.r.t.
         // position d is grad_output[o, i] * prefix[d] * suffix[d].
         let one = <T as num_traits::One>::one();
-        let mut out = vec![<T as num_traits::Zero>::zero(); in_shape.iter().product()];
+        let mut out = vec![<T as num_traits::Zero>::zero(); crate::shape::numel(in_shape)];
         for o in 0..outer {
             for i in 0..inner {
                 let mut prefix = vec![one; dim_size];
@@ -4512,8 +4522,8 @@ pub fn prod_dim<T: Float>(
     };
     let in_shape = input_ref.shape();
     let dim_size = in_shape[norm_dim];
-    let outer: usize = in_shape[..norm_dim].iter().product();
-    let inner: usize = in_shape[norm_dim + 1..].iter().product();
+    let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
+    let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
     let mut out_shape: Vec<usize> = in_shape.to_vec();
     if keepdim {
         out_shape[norm_dim] = 1;
@@ -4620,13 +4630,13 @@ impl<T: Float> GradFn<T> for MaxMinDimBackward<T> {
             );
         }
         let dim_size = in_shape[self.dim];
-        let outer: usize = in_shape[..self.dim].iter().product();
-        let inner: usize = in_shape[self.dim + 1..].iter().product();
+        let outer: usize = crate::shape::numel(&in_shape[..self.dim]);
+        let inner: usize = crate::shape::numel(&in_shape[self.dim + 1..]);
         let go = grad_output.data()?;
         let _ = self.keepdim; // shape info absorbed via the (o*inner + i) flat layout
 
         let zero = <T as num_traits::Zero>::zero();
-        let in_numel: usize = in_shape.iter().product();
+        let in_numel: usize = crate::shape::numel(in_shape);
         let mut out = vec![zero; in_numel];
         // For each output slot (o, i), drop grad_output[o*inner+i] at
         // input position (o, indices_flat[o*inner+i], i).
@@ -4702,7 +4712,7 @@ fn max_min_with_dim_backward_cuda<T: Float>(
     let grad_handle = grad_output.gpu_handle()?;
     let ordinal = grad_handle.device_ordinal();
     let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-    let numel: usize = input_shape.iter().product();
+    let numel: usize = crate::shape::numel(input_shape);
     let zeros_h = backend.alloc_zeros(numel, T::dtype(), ordinal)?;
     let out_h = match T::dtype() {
         DType::F32 => backend.scatter_add_nd_f32(
@@ -4773,8 +4783,8 @@ fn max_min_with_dim_forward<T: Float>(
     let in_data = input_ref.data()?;
     let in_shape = input_ref.shape();
     let dim_size = in_shape[norm_dim];
-    let outer: usize = in_shape[..norm_dim].iter().product();
-    let inner: usize = in_shape[norm_dim + 1..].iter().product();
+    let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
+    let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
     if dim_size == 0 && outer * inner != 0 {
         let op = if find_max { "max" } else { "min" };
         return Err(FerrotorchError::InvalidArgument {
@@ -4860,8 +4870,8 @@ fn max_min_with_dim_cuda<T: Float>(
     let input_ref = input.contiguous()?;
     let in_shape = input_ref.shape();
     let dim_size = in_shape[norm_dim];
-    let outer: usize = in_shape[..norm_dim].iter().product();
-    let inner: usize = in_shape[norm_dim + 1..].iter().product();
+    let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
+    let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
     if dim_size == 0 && outer * inner != 0 {
         let op = if find_max { "max" } else { "min" };
         return Err(FerrotorchError::InvalidArgument {
@@ -5078,8 +5088,8 @@ fn median_with_dim_forward<T: Float>(
     let in_data = input_ref.data()?;
     let in_shape = input_ref.shape();
     let dim_size = in_shape[norm_dim];
-    let outer: usize = in_shape[..norm_dim].iter().product();
-    let inner: usize = in_shape[norm_dim + 1..].iter().product();
+    let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
+    let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
 
     let mut values = Vec::with_capacity(outer * inner);
     let mut indices = Vec::with_capacity(outer * inner);
@@ -5257,8 +5267,8 @@ impl<T: Float> GradFn<T> for NormDimBackward<T> {
         }
         let in_shape = self.input.shape();
         let dim_size = in_shape[self.dim];
-        let outer: usize = in_shape[..self.dim].iter().product();
-        let inner: usize = in_shape[self.dim + 1..].iter().product();
+        let outer: usize = crate::shape::numel(&in_shape[..self.dim]);
+        let inner: usize = crate::shape::numel(&in_shape[self.dim + 1..]);
 
         let in_data = self.input.data()?;
         let go = grad_output.data()?;
@@ -5266,7 +5276,7 @@ impl<T: Float> GradFn<T> for NormDimBackward<T> {
         let p = self.p;
         let zero = <T as num_traits::Zero>::zero();
         let one_f64 = 1.0_f64;
-        let in_numel: usize = in_shape.iter().product();
+        let in_numel: usize = crate::shape::numel(in_shape);
         let mut out = vec![zero; in_numel];
 
         for o in 0..outer {
@@ -5354,8 +5364,8 @@ pub fn norm_with_dim<T: Float>(
     let in_data = input_ref.data()?;
     let in_shape = input_ref.shape();
     let dim_size = in_shape[norm_dim];
-    let outer: usize = in_shape[..norm_dim].iter().product();
-    let inner: usize = in_shape[norm_dim + 1..].iter().product();
+    let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
+    let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
     let mut result_keepdim_data = Vec::with_capacity(outer * inner);
 
     // L2 fast path (#1614): for `p == 2.0` over a CONTIGUOUS last-dim slice

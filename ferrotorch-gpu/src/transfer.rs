@@ -86,7 +86,8 @@ where
 pub fn alloc_zeros_f32(len: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
     use cudarc::driver::CudaSlice;
 
-    let rounded = crate::pool::round_len(len);
+    let rounded = crate::pool::checked_round_len(len)?;
+    let _bytes = crate::shape_math::checked_alloc_bytes::<f32>(rounded, "alloc_zeros_f32")?;
 
     // Pool hit: reuse a cached CudaSlice — no cuMemAllocAsync, no cuEventCreate.
     if let Some(mut slice) = crate::pool::pool_take::<CudaSlice<f32>>(device.ordinal(), rounded, 4)
@@ -142,6 +143,7 @@ pub fn alloc_zeros_bf16(
     len: usize,
     device: &GpuDevice,
 ) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let _bytes = crate::shape_math::checked_alloc_bytes::<u16>(len, "alloc_zeros_bf16")?;
     Ok(device.stream().alloc_zeros::<u16>(len)?)
 }
 
@@ -158,7 +160,8 @@ pub fn alloc_zeros_bf16(_len: usize, _device: &GpuDevice) -> GpuResult<()> {
 pub fn alloc_zeros_f64(len: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
     use cudarc::driver::CudaSlice;
 
-    let rounded = crate::pool::round_len(len);
+    let rounded = crate::pool::checked_round_len(len)?;
+    let _bytes = crate::shape_math::checked_alloc_bytes::<f64>(rounded, "alloc_zeros_f64")?;
 
     if let Some(mut slice) = crate::pool::pool_take::<CudaSlice<f64>>(device.ordinal(), rounded, 8)
     {
@@ -187,6 +190,7 @@ pub fn alloc_zeros<T>(len: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<T>
 where
     T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits,
 {
+    let _bytes = crate::shape_math::checked_alloc_bytes::<T>(len, "alloc_zeros")?;
     let slice = device.stream().alloc_zeros::<T>(len)?;
     Ok(CudaBuffer {
         data: Some(slice),

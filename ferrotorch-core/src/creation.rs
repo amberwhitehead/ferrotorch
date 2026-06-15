@@ -16,7 +16,7 @@
 use crate::dtype::{DType, Element, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::rng::with_thread_rng;
-use crate::shape::checked_numel;
+use crate::shape::{checked_byte_count, checked_numel};
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
 
@@ -214,9 +214,11 @@ pub fn rand_on_device<T: Float>(
     match device {
         Device::Cuda(_) => {
             let numel = checked_numel(shape, "rand_on_device")?;
+            let dtype = <T as Element>::dtype();
+            checked_byte_count(numel, dtype.size_of(), "rand_on_device")?;
             let backend = crate::gpu_dispatch::gpu_backend()
                 .ok_or(crate::error::FerrotorchError::DeviceUnavailable)?;
-            let handle = match <T as Element>::dtype() {
+            let handle = match dtype {
                 DType::F32 => backend.rand_uniform_f32(numel)?,
                 DType::F64 => backend.rand_uniform_f64(numel)?,
                 DType::F16 => backend.rand_uniform_f16(numel)?,
@@ -251,9 +253,11 @@ pub fn randn_on_device<T: Float>(
     match device {
         Device::Cuda(_) => {
             let numel = checked_numel(shape, "randn_on_device")?;
+            let dtype = <T as Element>::dtype();
+            checked_byte_count(numel, dtype.size_of(), "randn_on_device")?;
             let backend = crate::gpu_dispatch::gpu_backend()
                 .ok_or(crate::error::FerrotorchError::DeviceUnavailable)?;
-            let handle = match <T as Element>::dtype() {
+            let handle = match dtype {
                 DType::F32 => backend.randn_normal_f32(numel)?,
                 DType::F64 => backend.randn_normal_f64(numel)?,
                 DType::F16 => backend.randn_normal_f16(numel)?,

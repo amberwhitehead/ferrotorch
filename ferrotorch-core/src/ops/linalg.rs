@@ -522,7 +522,7 @@ fn broadcast_matmul<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<
     // output is returned (torch: `(0,2,3) @ (0,3,2) -> (0,2,2)`). The old
     // `.max(1)` forced one iteration whose `batch_linear_index` evaluated
     // `remaining % 0` — a panic inside this Result-returning API.
-    let batch_size: usize = batch_shape.iter().product::<usize>();
+    let batch_size: usize = crate::shape::numel(&batch_shape);
 
     // Compute strides for broadcasting iteration.
     let a_batch_strides = broadcast_strides(a_batch, &batch_shape);

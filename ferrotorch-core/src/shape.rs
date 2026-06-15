@@ -50,7 +50,7 @@ pub fn broadcast_shapes(a: &[usize], b: &[usize]) -> FerrotorchResult<Vec<usize>
 /// Total number of elements for a given shape.
 #[inline]
 pub fn numel(shape: &[usize]) -> usize {
-    shape.iter().product()
+    checked_numel(shape, "numel").expect("numel: shape element count overflows usize")
 }
 
 /// Checked total number of elements for a given shape.
@@ -69,17 +69,34 @@ pub fn checked_numel(shape: &[usize], op: &'static str) -> FerrotorchResult<usiz
         })
 }
 
+/// Checked storage byte count for a logical element count and dtype width.
+///
+/// PyTorch rejects oversized allocations while calculating storage size.
+/// Keep that check explicit at Rust allocation/upload boundaries instead of
+/// letting `numel * itemsize` wrap in release mode.
+pub fn checked_byte_count(
+    numel: usize,
+    elem_size: usize,
+    op: &'static str,
+) -> FerrotorchResult<usize> {
+    if elem_size == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: element size must be nonzero"),
+        });
+    }
+    numel
+        .checked_mul(elem_size)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: storage size calculation overflowed for {numel} elements of {elem_size} bytes"
+            ),
+        })
+}
+
 /// Compute C-contiguous (row-major) strides for a given shape.
 pub fn c_contiguous_strides(shape: &[usize]) -> Vec<isize> {
-    let ndim = shape.len();
-    if ndim == 0 {
-        return vec![];
-    }
-    let mut strides = vec![1isize; ndim];
-    for i in (0..ndim - 1).rev() {
-        strides[i] = strides[i + 1] * shape[i + 1] as isize;
-    }
-    strides
+    checked_c_contiguous_strides(shape, "c_contiguous_strides")
+        .expect("c_contiguous_strides: shape cannot be represented as signed strides")
 }
 
 /// Checked C-contiguous (row-major) strides for a given shape.
@@ -91,13 +108,7 @@ pub fn checked_c_contiguous_strides(
     shape: &[usize],
     op: &'static str,
 ) -> FerrotorchResult<Vec<isize>> {
-    for (axis, &dim) in shape.iter().enumerate() {
-        if dim > isize::MAX as usize {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!("{op}: shape dimension {axis} value {dim} exceeds isize::MAX"),
-            });
-        }
-    }
+    validate_signed_shape_dims(shape, op)?;
 
     let ndim = shape.len();
     if ndim == 0 {
@@ -121,6 +132,51 @@ pub fn checked_c_contiguous_strides(
     Ok(strides)
 }
 
+fn validate_signed_shape_dims(shape: &[usize], op: &'static str) -> FerrotorchResult<()> {
+    for (axis, &dim) in shape.iter().enumerate() {
+        if dim > isize::MAX as usize {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("{op}: shape dimension {axis} value {dim} exceeds isize::MAX"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn check_rank(
+    shape: &[usize],
+    expected: usize,
+    layout: &'static str,
+    op: &'static str,
+) -> FerrotorchResult<()> {
+    if shape.len() != expected {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: {layout} requires a {expected}D shape, got {}D",
+                shape.len()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn checked_stride_product(
+    shape: &[usize],
+    axes: &[usize],
+    context: &'static str,
+    op: &'static str,
+) -> FerrotorchResult<isize> {
+    let product = axes
+        .iter()
+        .try_fold(1usize, |acc, &axis| acc.checked_mul(shape[axis]))
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("{op}: shape {shape:?} {context} overflows usize"),
+        })?;
+    isize::try_from(product).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!("{op}: shape {shape:?} {context} exceeds isize::MAX"),
+    })
+}
+
 /// Compute channels-last (NHWC) strides for a 4D shape `[N, C, H, W]`.
 ///
 /// The physical memory order becomes `[N, H, W, C]`, so the strides for
@@ -128,14 +184,29 @@ pub fn checked_c_contiguous_strides(
 ///
 /// [CL-309] WU-05: channels-last memory format support
 pub fn channels_last_strides(shape: &[usize]) -> Vec<isize> {
-    debug_assert_eq!(shape.len(), 4, "channels_last_strides requires a 4D shape");
-    let [_n, c, h, w] = [shape[0], shape[1], shape[2], shape[3]];
-    vec![
-        (h * w * c) as isize, // N stride
-        1,                    // C stride (innermost in NHWC)
-        (w * c) as isize,     // H stride
-        c as isize,           // W stride
-    ]
+    checked_channels_last_strides(shape, "channels_last_strides")
+        .expect("channels_last_strides: shape cannot be represented as signed strides")
+}
+
+/// Checked channels-last (NHWC) strides for a 4D shape `[N, C, H, W]`.
+pub fn checked_channels_last_strides(
+    shape: &[usize],
+    op: &'static str,
+) -> FerrotorchResult<Vec<isize>> {
+    check_rank(shape, 4, "channels-last", op)?;
+    validate_signed_shape_dims(shape, op)?;
+    let c = isize::try_from(shape[1]).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!(
+            "{op}: shape dimension 1 value {} exceeds isize::MAX",
+            shape[1]
+        ),
+    })?;
+    Ok(vec![
+        checked_stride_product(shape, &[2, 3, 1], "channels-last N stride", op)?,
+        1,
+        checked_stride_product(shape, &[3, 1], "channels-last H stride", op)?,
+        c,
+    ])
 }
 
 /// Compute channels-last-3d (NDHWC) strides for a 5D shape `[N, C, D, H, W]`.
@@ -145,19 +216,30 @@ pub fn channels_last_strides(shape: &[usize]) -> Vec<isize> {
 ///
 /// [CL-309] WU-05: channels-last memory format support
 pub fn channels_last_3d_strides(shape: &[usize]) -> Vec<isize> {
-    debug_assert_eq!(
-        shape.len(),
-        5,
-        "channels_last_3d_strides requires a 5D shape"
-    );
-    let [_n, c, d, h, w] = [shape[0], shape[1], shape[2], shape[3], shape[4]];
-    vec![
-        (d * h * w * c) as isize, // N stride
-        1,                        // C stride (innermost in NDHWC)
-        (h * w * c) as isize,     // D stride
-        (w * c) as isize,         // H stride
-        c as isize,               // W stride
-    ]
+    checked_channels_last_3d_strides(shape, "channels_last_3d_strides")
+        .expect("channels_last_3d_strides: shape cannot be represented as signed strides")
+}
+
+/// Checked channels-last-3d (NDHWC) strides for a 5D shape `[N, C, D, H, W]`.
+pub fn checked_channels_last_3d_strides(
+    shape: &[usize],
+    op: &'static str,
+) -> FerrotorchResult<Vec<isize>> {
+    check_rank(shape, 5, "channels-last-3d", op)?;
+    validate_signed_shape_dims(shape, op)?;
+    let c = isize::try_from(shape[1]).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!(
+            "{op}: shape dimension 1 value {} exceeds isize::MAX",
+            shape[1]
+        ),
+    })?;
+    Ok(vec![
+        checked_stride_product(shape, &[2, 3, 4, 1], "channels-last-3d N stride", op)?,
+        1,
+        checked_stride_product(shape, &[3, 4, 1], "channels-last-3d D stride", op)?,
+        checked_stride_product(shape, &[4, 1], "channels-last-3d H stride", op)?,
+        c,
+    ])
 }
 
 /// Normalize a possibly-negative axis index to a positive one.

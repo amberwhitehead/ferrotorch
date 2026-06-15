@@ -15008,7 +15008,7 @@ pub fn gpu_broadcast_add(
     let a_str = broadcast_strides(a_shape, out_shape);
     let b_str = broadcast_strides(b_shape, out_shape);
     let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
 
     try_launch_broadcast_binary(
         a,
@@ -15036,7 +15036,7 @@ pub fn gpu_broadcast_sub(
     let a_str = broadcast_strides(a_shape, out_shape);
     let b_str = broadcast_strides(b_shape, out_shape);
     let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
 
     try_launch_broadcast_binary(
         a,
@@ -15064,7 +15064,7 @@ pub fn gpu_broadcast_mul(
     let a_str = broadcast_strides(a_shape, out_shape);
     let b_str = broadcast_strides(b_shape, out_shape);
     let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
 
     try_launch_broadcast_binary(
         a,
@@ -15092,7 +15092,7 @@ pub fn gpu_broadcast_div(
     let a_str = broadcast_strides(a_shape, out_shape);
     let b_str = broadcast_strides(b_shape, out_shape);
     let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
 
     try_launch_broadcast_binary(
         a,
@@ -15121,7 +15121,7 @@ pub fn gpu_broadcast_maximum(
     let a_str = broadcast_strides(a_shape, out_shape);
     let b_str = broadcast_strides(b_shape, out_shape);
     let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
 
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let ptx: &'static str = CACHE
@@ -15154,7 +15154,7 @@ pub fn gpu_broadcast_minimum(
     let a_str = broadcast_strides(a_shape, out_shape);
     let b_str = broadcast_strides(b_shape, out_shape);
     let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
 
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let ptx: &'static str = CACHE
@@ -19486,7 +19486,13 @@ fn pad_strided_copy_params(
                 });
             }
             out_stride[d] = acc as u32;
-            acc = acc.saturating_mul(out_shape[d]);
+            acc = acc
+                .checked_mul(out_shape[d])
+                .ok_or_else(|| GpuError::ShapeMismatch {
+                    op: "strided_copy_stride_overflow",
+                    expected: vec![usize::MAX],
+                    got: vec![acc, out_shape[d]],
+                })?;
         }
     }
 
@@ -19548,7 +19554,7 @@ pub fn gpu_strided_copy(
 
     validate_unary(input, device)?;
 
-    let n: usize = out_shape.iter().product();
+    let n: usize = crate::shape_math::numel(out_shape);
     let (out_stride, src_stride) = pad_strided_copy_params(out_shape, src_strides, n)?;
 
     if n == 0 {
@@ -19652,7 +19658,7 @@ pub fn gpu_strided_copy_f64(
 
     validate_device(input, device)?;
 
-    let n: usize = out_shape.iter().product();
+    let n: usize = crate::shape_math::numel(out_shape);
     let (out_stride, src_stride) = pad_strided_copy_params(out_shape, src_strides, n)?;
 
     if n == 0 {
@@ -19756,7 +19762,7 @@ pub fn gpu_strided_copy_u16(
     use cudarc::driver::PushKernelArg;
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-    let n: usize = out_shape.iter().product();
+    let n: usize = crate::shape_math::numel(out_shape);
     let (out_stride, src_stride) = pad_strided_copy_params(out_shape, src_strides, n)?;
 
     if n == 0 {
@@ -19875,7 +19881,7 @@ pub fn gpu_strided_scatter(
     validate_device(src, device)?;
     validate_device(dst, device)?;
 
-    let n: usize = view_shape.iter().product();
+    let n: usize = crate::shape_math::numel(view_shape);
     if n == 0 {
         return Ok(());
     }
@@ -19977,7 +19983,7 @@ pub fn gpu_strided_scatter_f64(
     validate_device(src, device)?;
     validate_device(dst, device)?;
 
-    let n: usize = view_shape.iter().product();
+    let n: usize = crate::shape_math::numel(view_shape);
     if n == 0 {
         return Ok(());
     }
@@ -20071,7 +20077,7 @@ pub fn gpu_strided_scatter_u16(
     use cudarc::driver::PushKernelArg;
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-    let n: usize = view_shape.iter().product();
+    let n: usize = crate::shape_math::numel(view_shape);
     if n == 0 {
         return Ok(());
     }
@@ -22177,7 +22183,7 @@ pub fn gpu_broadcast_add_f64(
     let a_str = broadcast_strides(a_shape, out_shape);
     let b_str = broadcast_strides(b_shape, out_shape);
     let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
 
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let ptx = get_f64_ptx(
@@ -22212,7 +22218,7 @@ pub fn gpu_broadcast_sub_f64(
     let a_str = broadcast_strides(a_shape, out_shape);
     let b_str = broadcast_strides(b_shape, out_shape);
     let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
 
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let ptx = get_f64_ptx(
@@ -22247,7 +22253,7 @@ pub fn gpu_broadcast_mul_f64(
     let a_str = broadcast_strides(a_shape, out_shape);
     let b_str = broadcast_strides(b_shape, out_shape);
     let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
 
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let ptx = get_f64_ptx(
@@ -22282,7 +22288,7 @@ pub fn gpu_broadcast_div_f64(
     let a_str = broadcast_strides(a_shape, out_shape);
     let b_str = broadcast_strides(b_shape, out_shape);
     let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
 
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let ptx = get_f64_ptx(
@@ -22317,7 +22323,7 @@ pub fn gpu_broadcast_maximum_f64(
     let a_str = broadcast_strides(a_shape, out_shape);
     let b_str = broadcast_strides(b_shape, out_shape);
     let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
 
     static F32_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let f32_ptx: &'static str = F32_CACHE
@@ -22356,7 +22362,7 @@ pub fn gpu_broadcast_minimum_f64(
     let a_str = broadcast_strides(a_shape, out_shape);
     let b_str = broadcast_strides(b_shape, out_shape);
     let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
 
     static F32_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let f32_ptx: &'static str = F32_CACHE
@@ -31804,7 +31810,7 @@ mod tests {
     fn strided_copy_4d_max_rank_supported() {
         // Rank 4 identity copy works.
         let shape = [2usize, 3, 2, 2];
-        let n: usize = shape.iter().product();
+        let n: usize = crate::shape_math::numel(&shape);
         let data: Vec<f32> = (0..n).map(|i| i as f32).collect();
         let (dev, input) = setup(&data);
         // C-contiguous strides: [12, 4, 2, 1]

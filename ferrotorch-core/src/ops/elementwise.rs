@@ -972,7 +972,7 @@ pub fn binary_map<T: Float>(
 
     // Broadcasting path with stride-based N-D counter (odometer pattern).
     let out_shape = broadcast_shapes(a.shape(), b.shape())?;
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape::numel(&out_shape);
     // strides: outermost-first, (a_stride, b_stride, out_dim)
     let strides = precompute_broadcast_strides(a.shape(), b.shape(), &out_shape);
     let ndim = strides.len();
@@ -1115,7 +1115,7 @@ pub fn sum_axis<T: Float>(input: &Tensor<T>, axis: usize) -> FerrotorchResult<Te
 
     let data = input.data_vec()?;
 
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape::numel(&out_shape);
     let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
 
     for (i, &val) in data.iter().enumerate() {
@@ -1271,8 +1271,8 @@ pub fn logsumexp_dim<T: Float>(
 
     let data = input.data_vec()?;
     let dim_size = shape[dim];
-    let outer: usize = shape[..dim].iter().product();
-    let inner: usize = shape[dim + 1..].iter().product();
+    let outer: usize = crate::shape::numel(&shape[..dim]);
+    let inner: usize = crate::shape::numel(&shape[dim + 1..]);
     let out_numel = outer * inner;
 
     let mut result = Vec::with_capacity(out_numel);

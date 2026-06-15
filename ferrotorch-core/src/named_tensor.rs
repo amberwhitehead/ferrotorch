@@ -209,7 +209,7 @@ mod tests {
     use crate::storage::TensorStorage;
 
     fn t_f32(shape: &[usize]) -> Tensor<f32> {
-        let n: usize = shape.iter().product::<usize>().max(1);
+        let n: usize = crate::shape::numel(shape).max(1);
         let data: Vec<f32> = (0..n).map(|i| i as f32).collect();
         Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false).unwrap()
     }

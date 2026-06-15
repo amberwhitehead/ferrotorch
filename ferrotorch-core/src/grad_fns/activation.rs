@@ -2470,9 +2470,9 @@ impl<T: Float> GradFn<T> for GluBackward<T> {
         let stride_dim = strides[self.dim];
 
         // Outer dims contribution (product of dims < self.dim).
-        let outer: usize = in_shape[..self.dim].iter().product();
+        let outer: usize = crate::shape::numel(&in_shape[..self.dim]);
         // Inner dims contribution (product of dims > self.dim).
-        let inner: usize = in_shape[(self.dim + 1)..].iter().product();
+        let inner: usize = crate::shape::numel(&in_shape[(self.dim + 1)..]);
 
         // Walk every (outer, k_in_dim, inner) cell.
         for o in 0..outer {
@@ -2543,11 +2543,11 @@ pub fn glu<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<Tensor<T>>
     // Output shape = input shape with dim halved.
     let mut out_shape = shape.to_vec();
     out_shape[resolved] = half;
-    let n_out: usize = out_shape.iter().product();
+    let n_out: usize = crate::shape::numel(&out_shape);
 
     let in_data = input.data()?;
-    let outer: usize = shape[..resolved].iter().product();
-    let inner: usize = shape[(resolved + 1)..].iter().product();
+    let outer: usize = crate::shape::numel(&shape[..resolved]);
+    let inner: usize = crate::shape::numel(&shape[(resolved + 1)..]);
 
     let mut a_vals = Vec::with_capacity(n_out);
     let mut b_vals = Vec::with_capacity(n_out);

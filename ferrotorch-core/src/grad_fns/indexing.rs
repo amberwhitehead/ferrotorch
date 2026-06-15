@@ -85,9 +85,21 @@ fn cuda_ordinal(device: Device, op: &'static str) -> FerrotorchResult<usize> {
     }
 }
 
-fn expanded_dim_indices(indices: &[usize], outer: usize, inner: usize) -> Vec<usize> {
-    let mut expanded =
-        Vec::with_capacity(outer.saturating_mul(indices.len()).saturating_mul(inner));
+fn expanded_dim_indices(
+    indices: &[usize],
+    outer: usize,
+    inner: usize,
+) -> FerrotorchResult<Vec<usize>> {
+    let capacity = outer
+        .checked_mul(indices.len())
+        .and_then(|n| n.checked_mul(inner))
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!(
+                "expanded_dim_indices: expanded index count overflowed for outer={outer}, indices={}, inner={inner}",
+                indices.len()
+            ),
+        })?;
+    let mut expanded = Vec::with_capacity(capacity);
     for _ in 0..outer {
         for &idx in indices {
             for _ in 0..inner {
@@ -95,7 +107,7 @@ fn expanded_dim_indices(indices: &[usize], outer: usize, inner: usize) -> Vec<us
             }
         }
     }
-    expanded
+    Ok(expanded)
 }
 
 fn upload_expanded_dim_indices(
@@ -104,7 +116,7 @@ fn upload_expanded_dim_indices(
     inner: usize,
     ordinal: usize,
 ) -> FerrotorchResult<GpuBufferHandle> {
-    let expanded = expanded_dim_indices(indices, outer, inner);
+    let expanded = expanded_dim_indices(indices, outer, inner)?;
     crate::ops::indexing::upload_index_i64(&expanded, ordinal)
 }
 
@@ -567,8 +579,8 @@ impl<T: Float> GradFn<T> for GatherBackward<T> {
         }
 
         let input_shape = self.input.shape();
-        let input_numel: usize = input_shape.iter().product();
-        let index_numel: usize = self.index_shape.iter().product();
+        let input_numel: usize = crate::shape::numel(input_shape);
+        let index_numel: usize = crate::shape::numel(&self.index_shape);
         if grad_output.numel() != index_numel {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
@@ -766,7 +778,7 @@ impl<T: Float> GradFn<T> for ScatterBackward<T> {
         }
 
         let input_shape = self.input.shape();
-        let index_numel: usize = self.index_shape.iter().product();
+        let index_numel: usize = crate::shape::numel(&self.index_shape);
 
         // §3 GPU-native path (#1822/#1823), dispatched on T::dtype() with the
         // forward index uploaded as i64 (no f32 offset/mask encoding):
@@ -964,7 +976,7 @@ impl<T: Float> GradFn<T> for ScatterAddBackward<T> {
         }
 
         let input_shape = self.input.shape();
-        let index_numel: usize = self.index_shape.iter().product();
+        let index_numel: usize = crate::shape::numel(&self.index_shape);
 
         // §3 GPU-native path (#1822/#1823), dispatched on T::dtype():
         //   grad_input = grad_output  (identity — addition passes grad
@@ -1216,7 +1228,7 @@ impl<T: Float> GradFn<T> for MaskedSelectBackward<T> {
         }
 
         let input_shape = self.input.shape().to_vec();
-        let input_numel: usize = input_shape.iter().product();
+        let input_numel: usize = crate::shape::numel(&input_shape);
 
         // GPU-resident path (crosslink #1187 Phase 3d): scatter the compacted
         // grad back into a zeros buffer of input.numel() at the true positions,
@@ -1401,10 +1413,10 @@ impl<T: Float> GradFn<T> for IndexSelectDimBackward<T> {
         }
 
         let input_shape = self.input.shape();
-        let input_numel: usize = input_shape.iter().product();
+        let input_numel: usize = crate::shape::numel(input_shape);
         let dim = self.dim;
-        let outer: usize = input_shape[..dim].iter().product();
-        let inner: usize = input_shape[dim + 1..].iter().product();
+        let outer: usize = crate::shape::numel(&input_shape[..dim]);
+        let inner: usize = crate::shape::numel(&input_shape[dim + 1..]);
         let in_dim_size = input_shape[dim];
         let out_dim_size = self
             .indices_cuda
@@ -1596,8 +1608,8 @@ pub fn index_select_dim<T: Float, I: IntElement>(
     let mut output_shape = input_shape.to_vec();
     output_shape[dim] = indices.numel();
 
-    let outer: usize = input_shape[..dim].iter().product();
-    let inner: usize = input_shape[dim + 1..].iter().product();
+    let outer: usize = crate::shape::numel(&input_shape[..dim]);
+    let inner: usize = crate::shape::numel(&input_shape[dim + 1..]);
     let out_dim_size = indices.numel();
 
     // GPU path: device-resident gather through `index_select_intidx`, which
@@ -1615,9 +1627,9 @@ pub fn index_select_dim<T: Float, I: IntElement>(
         let (outer, in_dim_size, inner) = {
             let shape = input_c.shape();
             (
-                shape[..dim].iter().product(),
+                crate::shape::numel(&shape[..dim]),
                 shape[dim],
-                shape[dim + 1..].iter().product(),
+                crate::shape::numel(&shape[dim + 1..]),
             )
         };
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -1678,7 +1690,7 @@ pub fn index_select_dim<T: Float, I: IntElement>(
     }
 
     // CPU path: dense memcpy along axis.
-    let out_numel: usize = output_shape.iter().product();
+    let out_numel: usize = crate::shape::numel(&output_shape);
     let in_data = input.data_vec()?;
     let mut out = vec![<T as num_traits::Zero>::zero(); out_numel];
     for o in 0..outer {
@@ -1778,8 +1790,8 @@ impl<T: Float> GradFn<T> for IndexFillBackward<T> {
             return Ok(vec![Some(grad_tensor)]);
         }
 
-        let outer: usize = input_shape[..dim].iter().product();
-        let inner: usize = input_shape[dim + 1..].iter().product();
+        let outer: usize = crate::shape::numel(&input_shape[..dim]);
+        let inner: usize = crate::shape::numel(&input_shape[dim + 1..]);
         let dim_size = input_shape[dim];
 
         let go_data = grad_output.data_vec()?;
@@ -1964,8 +1976,8 @@ pub fn index_fill<T: Float>(
     // Forward: clone input and overwrite slices at index positions with value.
     // The outer/inner decomposition mirrors `index_select_dim` (axis `dim`):
     //   flat positions to fill = o * dim_size * inner + idx * inner + k
-    let outer: usize = input_shape[..dim_usize].iter().product();
-    let inner: usize = input_shape[dim_usize + 1..].iter().product();
+    let outer: usize = crate::shape::numel(&input_shape[..dim_usize]);
+    let inner: usize = crate::shape::numel(&input_shape[dim_usize + 1..]);
     let in_data = input.data_vec()?;
     let mut out = in_data.clone();
     let value_t = <T as num_traits::NumCast>::from(value).ok_or_else(|| {
@@ -2099,7 +2111,7 @@ pub(crate) fn broadcast_bool_tensor(
     let out_numel: usize = if out_shape.is_empty() {
         1
     } else {
-        out_shape.iter().product()
+        crate::shape::numel(out_shape)
     };
     // Validate that mask is broadcast-compatible with out_shape — every input
     // axis must either equal the matching output axis (right-aligned) or be 1.
@@ -2574,9 +2586,9 @@ fn scatter_reduce_mean_counts_cpu<T: Float>(
 ) -> Vec<T> {
     let zero = <T as num_traits::Zero>::zero();
     let one = <T as num_traits::One>::one();
-    let input_numel: usize = input_shape.iter().product();
+    let input_numel: usize = crate::shape::numel(input_shape);
     let mut counts = vec![if include_self { one } else { zero }; input_numel];
-    let index_numel: usize = index_shape.iter().product();
+    let index_numel: usize = crate::shape::numel(index_shape);
     let mut coords = vec![0usize; input_shape.len()];
     for i in 0..index_numel {
         let mut dst_coords = coords.clone();
@@ -2755,7 +2767,7 @@ impl<T: Float> ScatterReduceBackward<T> {
     fn for_each_index<F: FnMut(usize, usize, &[usize], usize)>(&self, mut f: F) {
         let input_shape = self.input.shape();
         let ndim = input_shape.len();
-        let index_numel: usize = self.index_shape.iter().product();
+        let index_numel: usize = crate::shape::numel(&self.index_shape);
         let mut coords = vec![0usize; ndim];
         for i in 0..index_numel {
             let idx_val = self.index[i];
@@ -3081,8 +3093,8 @@ impl<T: Float> ScatterReduceBackward<T> {
         let src_shape = self.src.shape();
         let zero = <T as num_traits::Zero>::zero();
         let one = <T as num_traits::One>::one();
-        let input_numel: usize = input_shape.iter().product();
-        let index_numel: usize = self.index_shape.iter().product();
+        let input_numel: usize = crate::shape::numel(input_shape);
+        let index_numel: usize = crate::shape::numel(&self.index_shape);
 
         // self_is_result[p] = 1 iff input[p] == result[p].
         let mut self_is_result = vec![zero; input_numel];
@@ -3286,8 +3298,8 @@ impl<T: Float> ScatterReduceBackward<T> {
         let src_shape = self.src.shape();
         let zero = <T as num_traits::Zero>::zero();
         let one = <T as num_traits::One>::one();
-        let input_numel: usize = input_shape.iter().product();
-        let index_numel: usize = self.index_shape.iter().product();
+        let input_numel: usize = crate::shape::numel(input_shape);
+        let index_numel: usize = crate::shape::numel(&self.index_shape);
 
         // masked_self[p] = self[p] == 0 ? 1 : self[p]
         let mut masked_self = in_data.clone();
@@ -3727,7 +3739,7 @@ pub fn scatter_reduce<T: Float>(
     let mut mean_counts = if reduce == ScatterReduce::Mean {
         Some(vec![
             if include_self { one } else { zero };
-            input_shape.iter().product()
+            crate::shape::numel(input_shape)
         ])
     } else {
         None
@@ -3755,7 +3767,7 @@ pub fn scatter_reduce<T: Float>(
         } else {
             // amax/amin with include_self=false: track first-touch per output
             // slot and seed with the first src write rather than identity.
-            let input_numel: usize = input_shape.iter().product();
+            let input_numel: usize = crate::shape::numel(input_shape);
             let mut touched = vec![false; input_numel];
             let mut coords = vec![0usize; ndim];
             for i in 0..index_numel {
@@ -4173,8 +4185,8 @@ impl<T: Float> GradFn<T> for IndexAddBackward<T> {
                 let gathered = if ndim == 0 || source_shape.is_empty() {
                     clone_cuda_tensor(grad_output, source_shape.to_vec())?
                 } else {
-                    let outer: usize = input_shape[..self.dim].iter().product();
-                    let inner: usize = input_shape[self.dim + 1..].iter().product();
+                    let outer: usize = crate::shape::numel(&input_shape[..self.dim]);
+                    let inner: usize = crate::shape::numel(&input_shape[self.dim + 1..]);
                     let in_dim_size = input_shape[self.dim];
                     let src_dim_size = if source_shape.len() == ndim {
                         source_shape[self.dim]
@@ -4216,8 +4228,8 @@ impl<T: Float> GradFn<T> for IndexAddBackward<T> {
                     };
                     vec![v]
                 } else {
-                    let outer: usize = input_shape[..self.dim].iter().product();
-                    let inner: usize = input_shape[self.dim + 1..].iter().product();
+                    let outer: usize = crate::shape::numel(&input_shape[..self.dim]);
+                    let inner: usize = crate::shape::numel(&input_shape[self.dim + 1..]);
                     let in_dim_size = input_shape[self.dim];
                     let src_dim_size = if source_shape.len() == ndim {
                         source_shape[self.dim]
@@ -4227,7 +4239,7 @@ impl<T: Float> GradFn<T> for IndexAddBackward<T> {
                     let src_numel = if source_shape.is_empty() {
                         1
                     } else {
-                        source_shape.iter().product::<usize>()
+                        crate::shape::numel(source_shape)
                     };
                     let mut out = vec![<T as num_traits::Zero>::zero(); src_numel];
                     // gather: source[o, i, k] = grad_output[o, index[i], k] * alpha
@@ -4458,8 +4470,8 @@ pub fn index_add<T: Float>(
         }
     })?;
 
-    let outer: usize = input_shape[..dim_usize].iter().product();
-    let inner: usize = input_shape[dim_usize + 1..].iter().product();
+    let outer: usize = crate::shape::numel(&input_shape[..dim_usize]);
+    let inner: usize = crate::shape::numel(&input_shape[dim_usize + 1..]);
     let source_shape = source.shape();
 
     // Post-validate: src_dim_size == idx_usize.len() (strict check ensured
@@ -4632,8 +4644,8 @@ impl<T: Float> GradFn<T> for IndexCopyBackward<T> {
                         false,
                     )?)
                 } else {
-                    let outer: usize = input_shape[..self.dim].iter().product();
-                    let inner: usize = input_shape[self.dim + 1..].iter().product();
+                    let outer: usize = crate::shape::numel(&input_shape[..self.dim]);
+                    let inner: usize = crate::shape::numel(&input_shape[self.dim + 1..]);
                     let dim_size = input_shape[self.dim];
                     let ordinal = cuda_ordinal(grad_output.device(), "IndexCopyBackward")?;
                     let idx_handle =
@@ -4678,8 +4690,8 @@ impl<T: Float> GradFn<T> for IndexCopyBackward<T> {
                         gi[0] = zero;
                     }
                 } else {
-                    let outer: usize = input_shape[..self.dim].iter().product();
-                    let inner: usize = input_shape[self.dim + 1..].iter().product();
+                    let outer: usize = crate::shape::numel(&input_shape[..self.dim]);
+                    let inner: usize = crate::shape::numel(&input_shape[self.dim + 1..]);
                     let dim_size = input_shape[self.dim];
                     for o in 0..outer {
                         for &idx in &self.index {
@@ -4719,8 +4731,8 @@ impl<T: Float> GradFn<T> for IndexCopyBackward<T> {
                         "IndexCopyBackward",
                     )?
                 } else {
-                    let outer: usize = input_shape[..self.dim].iter().product();
-                    let inner: usize = input_shape[self.dim + 1..].iter().product();
+                    let outer: usize = crate::shape::numel(&input_shape[..self.dim]);
+                    let inner: usize = crate::shape::numel(&input_shape[self.dim + 1..]);
                     let in_dim_size = input_shape[self.dim];
                     let src_dim_size = if source_shape.len() == ndim {
                         source_shape[self.dim]
@@ -4745,15 +4757,15 @@ impl<T: Float> GradFn<T> for IndexCopyBackward<T> {
                     let v = if go.is_empty() { zero } else { go[0] };
                     vec![v]
                 } else {
-                    let outer: usize = input_shape[..self.dim].iter().product();
-                    let inner: usize = input_shape[self.dim + 1..].iter().product();
+                    let outer: usize = crate::shape::numel(&input_shape[..self.dim]);
+                    let inner: usize = crate::shape::numel(&input_shape[self.dim + 1..]);
                     let in_dim_size = input_shape[self.dim];
                     let src_dim_size = if source_shape.len() == ndim {
                         source_shape[self.dim]
                     } else {
                         self.index.len()
                     };
-                    let src_numel = source_shape.iter().product::<usize>();
+                    let src_numel = crate::shape::numel(source_shape);
                     let mut out = vec![zero; src_numel];
                     for o in 0..outer {
                         for i in 0..src_dim_size.min(self.index.len()) {
@@ -4958,8 +4970,8 @@ pub fn index_copy<T: Float>(
         strict_index_add_copy_validate("index_copy", input, dim, index, source, true)?;
 
     let in_dim_size = input_shape[dim_usize];
-    let outer: usize = input_shape[..dim_usize].iter().product();
-    let inner: usize = input_shape[dim_usize + 1..].iter().product();
+    let outer: usize = crate::shape::numel(&input_shape[..dim_usize]);
+    let inner: usize = crate::shape::numel(&input_shape[dim_usize + 1..]);
     let source_shape = source.shape();
     let src_dim_size = if source_shape.is_empty() {
         1
@@ -5470,7 +5482,7 @@ impl<T: Float> GradFn<T> for TakeBackward<T> {
         let input_numel: usize = if input_shape.is_empty() {
             1
         } else {
-            input_shape.iter().product()
+            crate::shape::numel(&input_shape)
         };
         if grad_output.is_cuda() {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -5552,12 +5564,11 @@ pub fn take<T: Float>(input: &Tensor<T>, index: &IntTensor<i64>) -> FerrotorchRe
         index
     };
 
-    let input_numel: usize = if input.shape().is_empty() {
-        1
-    } else {
-        input.shape().iter().product()
-    };
-    let input_numel_i64 = input_numel as i64;
+    let input_numel = input.numel();
+    let input_numel_i64 =
+        i64::try_from(input_numel).map_err(|_| FerrotorchError::InvalidArgument {
+            message: format!("take: input numel {input_numel} exceeds i64::MAX"),
+        })?;
 
     let mut idx_usize: Vec<usize> = Vec::with_capacity(index.numel());
     for v in index.data()? {
@@ -5586,7 +5597,7 @@ pub fn take<T: Float>(input: &Tensor<T>, index: &IntTensor<i64>) -> FerrotorchRe
     let output_numel = if output_shape.is_empty() {
         1
     } else {
-        output_shape.iter().product()
+        crate::shape::numel(&output_shape)
     };
 
     // CUDA-resident path. `.contiguous()` materialises the logical [0, n)
@@ -5696,7 +5707,7 @@ impl<T: Float> GradFn<T> for PutBackward<T> {
         let input_numel: usize = if input_shape.is_empty() {
             1
         } else {
-            input_shape.iter().product()
+            crate::shape::numel(&input_shape)
         };
         if grad_output.is_cuda() {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -5851,7 +5862,7 @@ pub fn put<T: Float>(
     let input_numel: usize = if input_shape.is_empty() {
         1
     } else {
-        input_shape.iter().product()
+        crate::shape::numel(&input_shape)
     };
     let input_numel_i64 = input_numel as i64;
 

@@ -21,8 +21,10 @@
 //! - `ferrotorch-core/src/ops/search.rs` — `searchsorted`, `bucketize`,
 //!   `unique`, `unique_consecutive`, `histc`, `meshgrid`, `topk`.
 //! - `ferrotorch-core/src/shape.rs` — pure shape utility helpers
-//!   (`broadcast_shapes`, `numel`, `c_contiguous_strides`,
-//!   `channels_last_strides`, `channels_last_3d_strides`,
+//!   (`broadcast_shapes`, `numel`, `checked_numel`, `checked_byte_count`,
+//!   `c_contiguous_strides`, `checked_c_contiguous_strides`,
+//!   `channels_last_strides`, `checked_channels_last_strides`,
+//!   `channels_last_3d_strides`, `checked_channels_last_3d_strides`,
 //!   `normalize_axis`, `check_shapes_match`).
 //! - `ferrotorch-core/src/stride_tricks.rs` — `as_strided`,
 //!   `as_strided_copy`, `as_strided_scatter` and `AsStridedBackward`.
@@ -84,7 +86,9 @@ use ferrotorch_core::ops::search::{
 use ferrotorch_core::ops::tensor_ops::{cdist, diag, diagflat, roll, tril, triu};
 use ferrotorch_core::shape::{
     broadcast_shapes, c_contiguous_strides, channels_last_3d_strides, channels_last_strides,
-    check_shapes_match, normalize_axis, numel,
+    check_shapes_match, checked_byte_count, checked_c_contiguous_strides,
+    checked_channels_last_3d_strides, checked_channels_last_strides, checked_numel, normalize_axis,
+    numel,
 };
 use ferrotorch_core::stride_tricks::{
     AsStridedBackward, AsStridedScatterBackward, as_strided, as_strided_copy, as_strided_scatter,
@@ -3032,6 +3036,25 @@ fn shape_helpers_numel() {
 }
 
 #[test]
+fn shape_helpers_checked_numel_and_byte_count_reject_overflow() {
+    assert_eq!(checked_numel(&[2, 3, 4], "checked_numel").unwrap(), 24);
+    let numel_err = checked_numel(&[usize::MAX, 2], "checked_numel")
+        .expect_err("checked_numel must reject overflowing products");
+    assert!(
+        format!("{numel_err:?}").contains("overflows usize"),
+        "unexpected error: {numel_err:?}"
+    );
+
+    assert_eq!(checked_byte_count(6, 4, "checked_byte_count").unwrap(), 24);
+    let byte_err = checked_byte_count((usize::MAX / 2) + 1, 2, "checked_byte_count")
+        .expect_err("checked_byte_count must reject overflowing storage sizes");
+    assert!(
+        format!("{byte_err:?}").contains("storage size calculation overflowed"),
+        "unexpected error: {byte_err:?}"
+    );
+}
+
+#[test]
 fn shape_helpers_c_contiguous_strides() {
     let file = load_fixtures();
     for f in cases_op_only(&file, "c_contiguous_strides") {
@@ -3046,6 +3069,13 @@ fn shape_helpers_c_contiguous_strides() {
         let got = c_contiguous_strides(shape);
         assert_eq!(got, expected, "c_contiguous_strides({shape:?})");
     }
+
+    let err = checked_c_contiguous_strides(&[0, usize::MAX], "checked_c_contiguous_strides")
+        .expect_err("checked C strides must reject dimensions outside signed metadata");
+    assert!(
+        format!("{err:?}").contains("exceeds isize::MAX"),
+        "unexpected error: {err:?}"
+    );
 }
 
 #[test]
@@ -3063,6 +3093,16 @@ fn shape_helpers_channels_last_strides() {
         let got = channels_last_strides(shape);
         assert_eq!(got, expected, "channels_last_strides({shape:?})");
     }
+
+    let err = checked_channels_last_strides(
+        &[1, isize::MAX as usize, 1, 2],
+        "checked_channels_last_strides",
+    )
+    .expect_err("checked channels-last strides must reject signed overflow");
+    assert!(
+        format!("{err:?}").contains("exceeds isize::MAX"),
+        "unexpected error: {err:?}"
+    );
 }
 
 #[test]
@@ -3080,6 +3120,16 @@ fn shape_helpers_channels_last_3d_strides() {
         let got = channels_last_3d_strides(shape);
         assert_eq!(got, expected, "channels_last_3d_strides({shape:?})");
     }
+
+    let err = checked_channels_last_3d_strides(
+        &[1, isize::MAX as usize, 1, 1, 2],
+        "checked_channels_last_3d_strides",
+    )
+    .expect_err("checked channels-last-3d strides must reject signed overflow");
+    assert!(
+        format!("{err:?}").contains("exceeds isize::MAX"),
+        "unexpected error: {err:?}"
+    );
 }
 
 #[test]

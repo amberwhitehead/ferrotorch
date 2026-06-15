@@ -1069,10 +1069,15 @@ where
     if k > dim {
         return Err(GpuError::LengthMismatch { a: k, b: dim });
     }
-    if input.len() < outer.saturating_mul(dim) {
+    let expected_input = outer
+        .checked_mul(dim)
+        .ok_or_else(|| GpuError::InvalidState {
+            message: format!("launch_topk: input extent {outer} * {dim} overflows usize"),
+        })?;
+    if input.len() < expected_input {
         return Err(GpuError::LengthMismatch {
             a: input.len(),
-            b: outer.saturating_mul(dim),
+            b: expected_input,
         });
     }
     if outer > u32::MAX as usize || dim > u32::MAX as usize || k > u32::MAX as usize {
@@ -1083,7 +1088,9 @@ where
     }
 
     let stream = device.stream();
-    let n_out = outer.saturating_mul(k);
+    let n_out = outer.checked_mul(k).ok_or_else(|| GpuError::InvalidState {
+        message: format!("launch_topk: output extent {outer} * {k} overflows usize"),
+    })?;
     if n_out == 0 {
         return Ok((stream.alloc_zeros::<V>(0)?, stream.alloc_zeros::<i64>(0)?));
     }
@@ -4537,8 +4544,8 @@ mod tests {
     /// `view(view_shape).expand(shape)` decomposition of upstream `meshgrid`
     /// (`aten/src/ATen/native/TensorShape.cpp:4462-4467`).
     fn cpu_meshgrid_axis(vec: &[f64], shapes: &[usize], axis: usize) -> Vec<f64> {
-        let total: usize = shapes.iter().product();
-        let inner: usize = shapes[axis + 1..].iter().product();
+        let total: usize = crate::shape_math::numel(shapes);
+        let inner: usize = crate::shape_math::numel(&shapes[axis + 1..]);
         (0..total)
             .map(|flat| vec[(flat / inner.max(1)) % shapes[axis]])
             .collect()

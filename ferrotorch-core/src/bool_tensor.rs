@@ -84,11 +84,7 @@ impl BoolTensor {
         // PyTorch parity: shape=[] is a 0-d scalar (numel=1); shape=[0]
         // (or any shape with a zero axis) is empty (numel=0). The previous
         // `.max(1)` conflated these. (#805)
-        let expected: usize = if shape.is_empty() {
-            1
-        } else {
-            shape.iter().product()
-        };
+        let expected = crate::shape::checked_numel(&shape, "BoolTensor::from_vec")?;
         if data.len() != expected {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
@@ -113,11 +109,7 @@ impl BoolTensor {
     /// All-false tensor of the given shape.
     pub fn zeros(shape: &[usize]) -> Self {
         // shape=[] -> 0-d scalar (numel 1); shape=[0] -> empty (numel 0). (#805)
-        let total: usize = if shape.is_empty() {
-            1
-        } else {
-            shape.iter().product()
-        };
+        let total = crate::shape::numel(shape);
         Self {
             storage: TensorStorage::cpu(vec![false; total]),
             shape: shape.to_vec(),
@@ -127,11 +119,7 @@ impl BoolTensor {
     /// All-true tensor of the given shape.
     pub fn ones(shape: &[usize]) -> Self {
         // shape=[] -> 0-d scalar (numel 1); shape=[0] -> empty (numel 0). (#805)
-        let total: usize = if shape.is_empty() {
-            1
-        } else {
-            shape.iter().product()
-        };
+        let total = crate::shape::numel(shape);
         Self {
             storage: TensorStorage::cpu(vec![true; total]),
             shape: shape.to_vec(),
@@ -469,7 +457,7 @@ impl BoolTensor {
         let numel: usize = if common.is_empty() {
             1
         } else {
-            common.iter().product()
+            crate::shape::numel(&common)
         };
         let out: Vec<bool> = (0..numel)
             .map(|i| {
@@ -486,11 +474,7 @@ impl BoolTensor {
     /// (cheap for CPU; a `clone_buffer` for GPU — no host readback).
     pub fn reshape(&self, shape: &[usize]) -> FerrotorchResult<Self> {
         // shape=[] -> 0-d scalar (numel 1); shape=[0,...] -> empty (numel 0). (#805)
-        let new_total: usize = if shape.is_empty() {
-            1
-        } else {
-            shape.iter().product()
-        };
+        let new_total = crate::shape::checked_numel(shape, "BoolTensor::reshape")?;
         let cur = self.storage.len();
         if new_total != cur {
             return Err(FerrotorchError::ShapeMismatch {
@@ -695,7 +679,7 @@ impl BoolTensor {
         let numel: usize = if common.is_empty() {
             1
         } else {
-            common.iter().product()
+            crate::shape::numel(&common)
         };
         let result: Vec<bool> = (0..numel)
             .map(|i| {
@@ -820,7 +804,7 @@ impl BoolTensor {
         let numel: usize = if common.is_empty() {
             1
         } else {
-            common.iter().product()
+            crate::shape::numel(&common)
         };
         let result: Vec<bool> = (0..numel)
             .map(|i| {

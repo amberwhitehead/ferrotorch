@@ -480,7 +480,10 @@ impl MemoryGuard {
     where
         T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits,
     {
-        let alloc_bytes = count.saturating_mul(std::mem::size_of::<T>());
+        let alloc_bytes = crate::shape_math::checked_alloc_bytes::<T>(
+            count,
+            "MemoryGuard::safe_alloc_with_hooks",
+        )?;
 
         // Fast path: fits within budget.
         if self.check_budget(alloc_bytes).is_ok() {
@@ -649,7 +652,8 @@ impl MemoryGuard {
     where
         T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits,
     {
-        let alloc_bytes = count.saturating_mul(std::mem::size_of::<T>());
+        let alloc_bytes =
+            crate::shape_math::checked_alloc_bytes::<T>(count, "MemoryGuard::safe_alloc")?;
 
         // --- Layer 1: budget check ---
         self.check_budget(alloc_bytes)?;
@@ -669,7 +673,10 @@ impl MemoryGuard {
     where
         T: cudarc::driver::DeviceRepr,
     {
-        let alloc_bytes = data.len().saturating_mul(std::mem::size_of::<T>());
+        let alloc_bytes = crate::shape_math::checked_alloc_bytes::<T>(
+            data.len(),
+            "MemoryGuard::safe_alloc_copy",
+        )?;
 
         self.check_budget(alloc_bytes)?;
 

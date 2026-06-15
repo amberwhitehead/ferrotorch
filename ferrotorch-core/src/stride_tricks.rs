@@ -335,7 +335,7 @@ fn for_each_strided_offset(
     base_offset: i64,
     mut f: impl FnMut(usize, i64),
 ) {
-    let numel: usize = shape.iter().product();
+    let numel: usize = crate::shape::numel(shape);
     if numel == 0 {
         return;
     }
@@ -929,7 +929,7 @@ impl<T: Float> GradFn<T> for AsStridedBackward<T> {
         }
 
         let inp_shape = self.input.shape();
-        let out_numel: usize = self.size.iter().product();
+        let out_numel: usize = crate::shape::numel(&self.size);
 
         // Empty output view (or empty input): nothing was read, so the
         // gradient is identically zero (torch returns

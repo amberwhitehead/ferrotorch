@@ -30,8 +30,8 @@ use crate::device::Device;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::shape::{
-    c_contiguous_strides, channels_last_3d_strides, channels_last_strides,
-    checked_c_contiguous_strides, checked_numel,
+    checked_byte_count, checked_c_contiguous_strides, checked_channels_last_3d_strides,
+    checked_channels_last_strides, checked_numel,
 };
 use crate::storage::TensorStorage;
 
@@ -622,7 +622,8 @@ impl<T: Float> Tensor<T> {
 
     #[inline]
     pub fn numel(&self) -> usize {
-        self.inner.shape.iter().product()
+        checked_numel(&self.inner.shape, "Tensor::numel")
+            .expect("Tensor::numel: stored shape element count overflows usize")
     }
 
     #[inline]
@@ -1080,14 +1081,11 @@ impl<T: Float> Tensor<T> {
                 // duration of this scope. Reinterpreting as `&[u8]` is sound
                 // because every value of T is fully initialized (it's a
                 // numeric Float type with no padding bytes); the byte length
-                // is computed from `size_of_val(cpu_data) = cpu_data.len() *
-                // size_of::<T>()`, which matches the underlying allocation.
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        cpu_data.as_ptr().cast::<u8>(),
-                        std::mem::size_of_val(cpu_data),
-                    )
-                };
+                // is checked before building the raw slice.
+                let byte_len =
+                    checked_byte_count(cpu_data.len(), std::mem::size_of::<T>(), "Tensor::to")?;
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(cpu_data.as_ptr().cast::<u8>(), byte_len) };
                 let handle = backend.cpu_to_gpu(bytes, T::dtype(), ordinal)?;
                 let storage = TensorStorage::gpu(handle);
                 if needs_grad_fn {
@@ -2258,14 +2256,23 @@ impl<T: Float> Tensor<T> {
                 if self.ndim() != 4 {
                     return false;
                 }
-                let expected = channels_last_strides(&self.inner.shape);
+                let Ok(expected) =
+                    checked_channels_last_strides(&self.inner.shape, "Tensor::is_contiguous_for")
+                else {
+                    return false;
+                };
                 strides_match_with_size1(&self.inner.shape, &self.inner.strides, &expected)
             }
             MemoryFormat::ChannelsLast3d => {
                 if self.ndim() != 5 {
                     return false;
                 }
-                let expected = channels_last_3d_strides(&self.inner.shape);
+                let Ok(expected) = checked_channels_last_3d_strides(
+                    &self.inner.shape,
+                    "Tensor::is_contiguous_for",
+                ) else {
+                    return false;
+                };
                 strides_match_with_size1(&self.inner.shape, &self.inner.strides, &expected)
             }
         }
@@ -2367,9 +2374,15 @@ impl<T: Float> Tensor<T> {
         }
 
         let target_strides = match format {
-            MemoryFormat::Contiguous => c_contiguous_strides(shape),
-            MemoryFormat::ChannelsLast => channels_last_strides(shape),
-            MemoryFormat::ChannelsLast3d => channels_last_3d_strides(shape),
+            MemoryFormat::Contiguous => {
+                checked_c_contiguous_strides(shape, "Tensor::materialize_format")?
+            }
+            MemoryFormat::ChannelsLast => {
+                checked_channels_last_strides(shape, "Tensor::materialize_format")?
+            }
+            MemoryFormat::ChannelsLast3d => {
+                checked_channels_last_3d_strides(shape, "Tensor::materialize_format")?
+            }
         };
 
         // GPU fast path (CL-455): for non-meta CUDA tensors of rank

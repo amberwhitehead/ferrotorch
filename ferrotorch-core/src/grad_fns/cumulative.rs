@@ -549,7 +549,7 @@ fn cummaxmin_backward_impl<T: Float>(
     }
     // Empty-input fast path mirrors upstream
     // `ReduceOps.cpp:907-908 if (input.sym_numel() == 0) { return input; }`
-    let numel: usize = input_shape.iter().product();
+    let numel: usize = crate::shape::numel(input_shape);
     if numel == 0 {
         let empty = Tensor::from_storage(
             TensorStorage::cpu(Vec::<T>::new()),
@@ -604,7 +604,7 @@ fn cummaxmin_backward_cuda<T: Float>(
     let grad_handle = grad_output.gpu_handle()?;
     let ordinal = grad_handle.device_ordinal();
     let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-    let numel: usize = input_shape.iter().product();
+    let numel: usize = crate::shape::numel(input_shape);
     let zeros_h = backend.alloc_zeros(numel, T::dtype(), ordinal)?;
     let out_h = match T::dtype() {
         DType::F32 => backend.scatter_add_nd_f32(
@@ -1023,9 +1023,9 @@ pub fn logcumsumexp<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<T
 
 /// Compute (outer_size, dim_size, inner_size) — mirrors the one in `ops::cumulative`.
 fn dim_strides(shape: &[usize], dim: usize) -> (usize, usize, usize) {
-    let outer: usize = shape[..dim].iter().product();
+    let outer: usize = crate::shape::numel(&shape[..dim]);
     let dim_size = shape[dim];
-    let inner: usize = shape[dim + 1..].iter().product();
+    let inner: usize = crate::shape::numel(&shape[dim + 1..]);
     (outer, dim_size, inner)
 }
 

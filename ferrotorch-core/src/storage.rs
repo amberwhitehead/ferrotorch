@@ -46,6 +46,7 @@ use std::cell::UnsafeCell;
 use crate::device::Device;
 use crate::dtype::Element;
 use crate::gpu_dispatch::GpuBufferHandle;
+use crate::shape::checked_byte_count;
 
 // ---------------------------------------------------------------------------
 // CpuBuffer — interior-mutable CPU element buffer
@@ -400,14 +401,20 @@ impl<T: Element> TensorStorage<T> {
             Device::Cuda(ordinal) => {
                 let backend = crate::gpu_dispatch::gpu_backend()
                     .ok_or(crate::error::FerrotorchError::DeviceUnavailable)?;
+                let byte_len = checked_byte_count(
+                    data.len(),
+                    std::mem::size_of::<T>(),
+                    "TensorStorage::on_device",
+                )?;
                 let bytes: &[u8] = unsafe {
                     // SAFETY: `data` is a valid, aligned `Vec<T>` on the heap.
                     // Reinterpreting as `&[u8]` is safe because we only use
                     // the bytes to copy to the GPU; the vec is not dropped
-                    // until after `cpu_to_gpu` returns.
+                    // until after `cpu_to_gpu` returns. `byte_len` is checked
+                    // before constructing this raw byte view.
                     std::slice::from_raw_parts(
                         data.as_ptr().cast::<u8>(),
-                        data.len() * std::mem::size_of::<T>(),
+                        byte_len,
                     )
                 };
                 let handle = backend.cpu_to_gpu(bytes, T::dtype(), ordinal)?;
@@ -441,11 +448,17 @@ impl<T: Element> TensorStorage<T> {
             Device::Cuda(ordinal) => {
                 let backend = crate::gpu_dispatch::gpu_backend()
                     .ok_or(crate::error::FerrotorchError::DeviceUnavailable)?;
+                let byte_len = checked_byte_count(
+                    data.len(),
+                    std::mem::size_of::<T>(),
+                    "TensorStorage::on_device_pinned",
+                )?;
                 let bytes: &[u8] = unsafe {
-                    // SAFETY: same invariant as in `on_device`.
+                    // SAFETY: same invariant as in `on_device`; `byte_len`
+                    // is checked before constructing this raw byte view.
                     std::slice::from_raw_parts(
                         data.as_ptr().cast::<u8>(),
-                        data.len() * std::mem::size_of::<T>(),
+                        byte_len,
                     )
                 };
                 let handle = backend.cpu_to_gpu_pinned(bytes, T::dtype(), ordinal)?;

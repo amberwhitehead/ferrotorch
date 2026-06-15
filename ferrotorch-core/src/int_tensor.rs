@@ -132,11 +132,7 @@ impl<I: IntElement> IntTensor<I> {
         // PyTorch parity: shape=[] is a 0-d scalar (numel=1); shape=[0]
         // (or any shape with a zero axis) is empty (numel=0). The previous
         // `.max(1)` conflated these. (#805)
-        let expected: usize = if shape.is_empty() {
-            1
-        } else {
-            shape.iter().product()
-        };
+        let expected = crate::shape::checked_numel(&shape, "IntTensor::from_vec")?;
         if data.len() != expected {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
@@ -161,11 +157,7 @@ impl<I: IntElement> IntTensor<I> {
     /// Zeros of the given shape (CPU-resident).
     pub fn zeros(shape: &[usize]) -> Self {
         // shape=[] -> 0-d scalar (numel 1); shape=[0] -> empty (numel 0). (#805)
-        let total: usize = if shape.is_empty() {
-            1
-        } else {
-            shape.iter().product()
-        };
+        let total = crate::shape::numel(shape);
         let zero = I::try_from_i64(0).expect("0 fits in any IntElement");
         Self {
             storage: TensorStorage::cpu(vec![zero; total]),
@@ -413,11 +405,7 @@ impl<I: IntElement> IntTensor<I> {
     /// existing `Clone` semantics — no host readback).
     pub fn reshape(&self, shape: &[usize]) -> FerrotorchResult<Self> {
         // shape=[] -> 0-d scalar (numel 1); shape=[0,...] -> empty (numel 0). (#805)
-        let new_total: usize = if shape.is_empty() {
-            1
-        } else {
-            shape.iter().product()
-        };
+        let new_total = crate::shape::checked_numel(shape, "IntTensor::reshape")?;
         let cur = self.storage.len();
         if new_total != cur {
             return Err(FerrotorchError::ShapeMismatch {

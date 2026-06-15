@@ -1470,6 +1470,19 @@ impl GpuBackend for CudaBackendImpl {
         dtype: DType,
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
+        let elem_size = dtype.size_of();
+        if elem_size == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("alloc_zeros: dtype {dtype} has zero element size"),
+            });
+        }
+        len.checked_mul(elem_size).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: format!(
+                    "alloc_zeros: storage size calculation overflowed for {len} elements of {elem_size} bytes"
+                ),
+            }
+        })?;
         let dev = self.device(device)?;
         match dtype {
             DType::BF16 => {
@@ -2875,9 +2888,9 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let outer: usize = shape[..axis].iter().product();
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
         let axis_size = shape[axis];
-        let inner: usize = shape[axis + 1..].iter().product();
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
         let result = crate::kernels::gpu_sum_axis_f64(a_buf, outer, axis_size, inner, dev)
             .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
@@ -2891,9 +2904,9 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let outer: usize = shape[..axis].iter().product();
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
         let axis_size = shape[axis];
-        let inner: usize = shape[axis + 1..].iter().product();
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
         let result =
             crate::kernels::gpu_extreme_axis_f64(a_buf, outer, axis_size, inner, false, dev)
                 .map_err(Self::map_gpu_err)?;
@@ -2908,9 +2921,9 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let outer: usize = shape[..axis].iter().product();
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
         let axis_size = shape[axis];
-        let inner: usize = shape[axis + 1..].iter().product();
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
         let result =
             crate::kernels::gpu_extreme_axis_f64(a_buf, outer, axis_size, inner, true, dev)
                 .map_err(Self::map_gpu_err)?;
@@ -2929,9 +2942,9 @@ impl GpuBackend for CudaBackendImpl {
         let result_buf = Self::unwrap_buffer_f64(result)?;
         let grad_buf = Self::unwrap_buffer_f64(grad_output)?;
         let dev = self.device(input.device_ordinal())?;
-        let outer: usize = shape[..axis].iter().product();
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
         let axis_size = shape[axis];
-        let inner: usize = shape[axis + 1..].iter().product();
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
         let out = crate::kernels::gpu_extreme_axis_backward_f64(
             input_buf, result_buf, grad_buf, outer, axis_size, inner, dev,
         )
@@ -4259,7 +4272,7 @@ impl GpuBackend for CudaBackendImpl {
         // Per-batch matrix element counts.
         let a_mat = m * k;
         let b_mat = k * n;
-        let batch: usize = out_lead.iter().product();
+        let batch: usize = crate::shape_math::numel(out_lead);
 
         // Shape contracts: `a_buf.len() == product(a_lead) * a_mat` (1 when
         // `a_lead` is empty), similarly for `b_buf`. These mirror the f32
@@ -4268,12 +4281,12 @@ impl GpuBackend for CudaBackendImpl {
         let a_batch_count: usize = if a_lead.is_empty() {
             1
         } else {
-            a_lead.iter().product()
+            crate::shape_math::numel(a_lead)
         };
         let b_batch_count: usize = if b_lead.is_empty() {
             1
         } else {
-            b_lead.iter().product()
+            crate::shape_math::numel(b_lead)
         };
         let expected_a = a_batch_count * a_mat;
         let expected_b = b_batch_count * b_mat;
@@ -6735,9 +6748,9 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let outer: usize = shape[..axis].iter().product();
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
         let axis_size = shape[axis];
-        let inner: usize = shape[axis + 1..].iter().product::<usize>().max(1);
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]).max(1);
         let result = crate::kernels::gpu_sum_axis(a_buf, outer, axis_size, inner, dev)
             .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
@@ -6751,9 +6764,9 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let outer: usize = shape[..axis].iter().product();
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
         let axis_size = shape[axis];
-        let inner: usize = shape[axis + 1..].iter().product::<usize>().max(1);
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]).max(1);
         let result =
             crate::kernels::gpu_extreme_axis_f32(a_buf, outer, axis_size, inner, false, dev)
                 .map_err(Self::map_gpu_err)?;
@@ -6768,9 +6781,9 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(a.device_ordinal())?;
-        let outer: usize = shape[..axis].iter().product();
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
         let axis_size = shape[axis];
-        let inner: usize = shape[axis + 1..].iter().product::<usize>().max(1);
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]).max(1);
         let result =
             crate::kernels::gpu_extreme_axis_f32(a_buf, outer, axis_size, inner, true, dev)
                 .map_err(Self::map_gpu_err)?;
@@ -6789,9 +6802,9 @@ impl GpuBackend for CudaBackendImpl {
         let result_buf = Self::unwrap_buffer(result)?;
         let grad_buf = Self::unwrap_buffer(grad_output)?;
         let dev = self.device(input.device_ordinal())?;
-        let outer: usize = shape[..axis].iter().product();
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
         let axis_size = shape[axis];
-        let inner: usize = shape[axis + 1..].iter().product::<usize>().max(1);
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]).max(1);
         let out = crate::kernels::gpu_extreme_axis_backward_f32(
             input_buf, result_buf, grad_buf, outer, axis_size, inner, dev,
         )
@@ -8530,9 +8543,9 @@ impl GpuBackend for CudaBackendImpl {
                 ),
             });
         }
-        let outer: usize = shape[..axis].iter().product();
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
         let axis_size = shape[axis];
-        let inner: usize = shape[axis + 1..].iter().product();
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
         let buf = Self::unwrap_buffer_bf16(a)?;
         let dev = self.device(a.device_ordinal())?;
         let result = crate::bf16::gpu_sum_axis_bf16_bf16(buf, outer, axis_size, inner, dev)
@@ -8554,9 +8567,9 @@ impl GpuBackend for CudaBackendImpl {
                 ),
             });
         }
-        let outer: usize = shape[..axis].iter().product();
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
         let axis_size = shape[axis];
-        let inner: usize = shape[axis + 1..].iter().product();
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
         let buf = Self::unwrap_buffer_bf16(a)?;
         let dev = self.device(a.device_ordinal())?;
         let result = crate::bf16::gpu_mean_axis_bf16_bf16(buf, outer, axis_size, inner, dev)
@@ -8870,9 +8883,9 @@ impl GpuBackend for CudaBackendImpl {
                 message: format!("sum_axis_f16: axis {axis} out of bounds for shape {shape:?}"),
             });
         }
-        let outer: usize = shape[..axis].iter().product();
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
         let axis_size = shape[axis];
-        let inner: usize = shape[axis + 1..].iter().product();
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
         let buf = Self::unwrap_buffer_f16(a)?;
         let dev = self.device(a.device_ordinal())?;
         let result = crate::f16::gpu_sum_axis_f16(buf, outer, axis_size, inner, dev)
@@ -8892,9 +8905,9 @@ impl GpuBackend for CudaBackendImpl {
                 message: format!("mean_axis_f16: axis {axis} out of bounds for shape {shape:?}"),
             });
         }
-        let outer: usize = shape[..axis].iter().product();
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
         let axis_size = shape[axis];
-        let inner: usize = shape[axis + 1..].iter().product();
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
         let buf = Self::unwrap_buffer_f16(a)?;
         let dev = self.device(a.device_ordinal())?;
         let result = crate::f16::gpu_mean_axis_f16(buf, outer, axis_size, inner, dev)
@@ -12190,7 +12203,7 @@ impl GpuBackend for CudaBackendImpl {
         let in_numel: usize = if in_shape.is_empty() {
             1
         } else {
-            in_shape.iter().product()
+            crate::shape_math::numel(in_shape)
         };
         if mask.len() != in_numel {
             return Err(FerrotorchError::InvalidArgument {
@@ -12488,12 +12501,11 @@ mod tests {
         //   test scope); `host` is not dropped before line 3176.
         // - No `&mut` aliases: `host` is read via `host.as_ptr()` (shared);
         //   no `&mut [f32]` to the same allocation exists.
-        let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(
-                host.as_ptr() as *const u8,
-                host.len() * std::mem::size_of::<f32>(),
-            )
-        };
+        let byte_len =
+            crate::shape_math::checked_alloc_bytes::<f32>(host.len(), "backend_impl f32 probe")
+                .expect("backend_impl f32 probe: byte count overflow");
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(host.as_ptr() as *const u8, byte_len) };
 
         let handle = backend
             .cpu_to_gpu(bytes, DType::F32, 0)
@@ -12694,12 +12706,11 @@ mod tests {
         //   `*const u8` is sound (u8 align 1 ≤ u16 align 2).
         // - `host.len() * 2 == 12` matches the u16 byte extent exactly.
         // - The slice is consumed by `cpu_to_gpu` before `host` is reused.
-        let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(
-                host.as_ptr() as *const u8,
-                host.len() * std::mem::size_of::<u16>(),
-            )
-        };
+        let byte_len =
+            crate::shape_math::checked_alloc_bytes::<u16>(host.len(), "backend_impl bf16 probe")
+                .expect("backend_impl bf16 probe: byte count overflow");
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(host.as_ptr() as *const u8, byte_len) };
 
         let handle = backend
             .cpu_to_gpu(bytes, DType::BF16, 0)
@@ -12757,12 +12768,11 @@ mod tests {
         // SAFETY: `host` is a 2-byte-aligned `Vec<u16>`; cast to `*const u8`
         // is sound and `host.len() * 2` matches the byte extent exactly. The
         // slice is consumed by `cpu_to_gpu` before `host` is reused.
-        let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(
-                host.as_ptr() as *const u8,
-                host.len() * std::mem::size_of::<u16>(),
-            )
-        };
+        let byte_len =
+            crate::shape_math::checked_alloc_bytes::<u16>(host.len(), "backend_impl f16 probe")
+                .expect("backend_impl f16 probe: byte count overflow");
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(host.as_ptr() as *const u8, byte_len) };
 
         let f16_handle = backend
             .cpu_to_gpu(bytes, DType::F16, 0)
@@ -12803,12 +12813,13 @@ mod tests {
             .map(|&x| half::bf16::from_f32(x).to_bits())
             .collect();
         // SAFETY: same as `bytes` above with a 2-element u16 source.
-        let bf16_bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(
-                bf16_host.as_ptr() as *const u8,
-                bf16_host.len() * std::mem::size_of::<u16>(),
-            )
-        };
+        let bf16_byte_len = crate::shape_math::checked_alloc_bytes::<u16>(
+            bf16_host.len(),
+            "backend_impl mixed bf16 probe",
+        )
+        .expect("backend_impl mixed bf16 probe: byte count overflow");
+        let bf16_bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(bf16_host.as_ptr() as *const u8, bf16_byte_len) };
         let bf16_handle = backend
             .cpu_to_gpu(bf16_bytes, DType::BF16, 0)
             .expect("cpu_to_gpu bf16");
@@ -12870,10 +12881,16 @@ mod tests {
 
         // SAFETY: u16 → u8 byte view (u8 align 1 ≤ u16 align 2; byte length
         // exactly matches u16 byte extent; slice consumed before reuse).
+        let a_byte_len =
+            crate::shape_math::checked_alloc_bytes::<u16>(a_bf16.len(), "backend_impl bf16 a")
+                .expect("backend_impl bf16 a: byte count overflow");
+        let b_byte_len =
+            crate::shape_math::checked_alloc_bytes::<u16>(b_bf16.len(), "backend_impl bf16 b")
+                .expect("backend_impl bf16 b: byte count overflow");
         let a_bytes: &[u8] =
-            unsafe { std::slice::from_raw_parts(a_bf16.as_ptr() as *const u8, a_bf16.len() * 2) };
+            unsafe { std::slice::from_raw_parts(a_bf16.as_ptr() as *const u8, a_byte_len) };
         let b_bytes: &[u8] =
-            unsafe { std::slice::from_raw_parts(b_bf16.as_ptr() as *const u8, b_bf16.len() * 2) };
+            unsafe { std::slice::from_raw_parts(b_bf16.as_ptr() as *const u8, b_byte_len) };
 
         let a_handle = backend
             .cpu_to_gpu(a_bytes, DType::BF16, 0)

@@ -746,7 +746,7 @@ fn broadcast_matmul_backward<T: Float>(
         // CORE-139 (#1833): no `.max(1)` — an empty batch prefix already has
         // product 1; a zero-sized batch dim must skip the loop (the data
         // slice is empty, so a forced iteration would index out of bounds).
-        let n_mats: usize = shape[..nd - 2].iter().product::<usize>();
+        let n_mats: usize = crate::shape::numel(&shape[..nd - 2]);
         let mut out = vec![<T as num_traits::Zero>::zero(); data.len()];
         for m in 0..n_mats {
             let off = m * mat_size;
@@ -813,10 +813,10 @@ fn broadcast_matmul_backward<T: Float>(
         // scalar (empty) target already has product 1; a zero-sized target
         // dim must produce a zero-length buffer, not a spurious 1-element
         // one (`from_storage` would reject the length/shape mismatch).
-        let target_size: usize = target.iter().product::<usize>();
+        let target_size: usize = crate::shape::numel(target);
         let mut result = vec![<T as num_traits::Zero>::zero(); target_size];
 
-        let grad_total: usize = grad_shape.iter().product::<usize>();
+        let grad_total: usize = crate::shape::numel(&grad_shape);
 
         // For each element in the gradient, compute which element in the
         // target it maps to, and accumulate.
@@ -4359,7 +4359,7 @@ fn reduce_grad_to_shape<T: Float>(grad: &[T], grad_shape: &[usize], target: &[us
         return grad.to_vec();
     }
     let zero = <T as num_traits::Zero>::zero();
-    let target_size: usize = target.iter().product::<usize>().max(1);
+    let target_size: usize = crate::shape::numel(target).max(1);
     let mut out = vec![zero; target_size];
 
     let grad_nd = grad_shape.len();
@@ -4371,7 +4371,7 @@ fn reduce_grad_to_shape<T: Float>(grad: &[T], grad_shape: &[usize], target: &[us
         target_strides[i] = target_strides[i + 1] * target[i + 1];
     }
 
-    let grad_total: usize = grad_shape.iter().product::<usize>().max(1);
+    let grad_total: usize = crate::shape::numel(grad_shape).max(1);
     for (flat, &g) in grad.iter().enumerate().take(grad_total) {
         let mut remaining = flat;
         let mut tgt_flat = 0usize;
@@ -4558,7 +4558,7 @@ fn broadcast_data_to<T: Float>(t: &Tensor<T>, target: &[usize]) -> FerrotorchRes
     if src_shape == target {
         return Ok(src.to_vec());
     }
-    let target_size: usize = target.iter().product::<usize>().max(1);
+    let target_size: usize = crate::shape::numel(target).max(1);
     let tnd = target.len();
     let snd = src_shape.len();
     if snd > tnd {

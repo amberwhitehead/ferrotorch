@@ -145,7 +145,7 @@ fn normalize_cdist_inputs<T: Float>(
     let p_dim = s1[s1.len() - 2];
     let r_dim = s2[s2.len() - 2];
     let batch = crate::shape::broadcast_shapes(&s1[..s1.len() - 2], &s2[..s2.len() - 2])?;
-    let b = batch.iter().product();
+    let b = crate::shape::numel(&batch);
     let out_shape = if s1.len() == 2 && s2.len() == 2 {
         vec![p_dim, r_dim]
     } else {
@@ -235,7 +235,7 @@ pub fn triu<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     let ndim = shape.len();
     let rows = shape[ndim - 2];
     let cols = shape[ndim - 1];
-    let batch: usize = shape[..ndim - 2].iter().product();
+    let batch: usize = crate::shape::numel(&shape[..ndim - 2]);
 
     // GPU fast path: resident kernel for every floating dtype supported by
     // Tensor<T> (f32/f64/f16/bf16). f16 and bf16 use raw u16 payload kernels and
@@ -325,7 +325,7 @@ pub fn tril<T: Float>(input: &Tensor<T>, diagonal: i64) -> FerrotorchResult<Tens
     let ndim = shape.len();
     let rows = shape[ndim - 2];
     let cols = shape[ndim - 1];
-    let batch: usize = shape[..ndim - 2].iter().product();
+    let batch: usize = crate::shape::numel(&shape[..ndim - 2]);
 
     // GPU fast path: resident kernel for f32/f64/f16/bf16. f16 and bf16 use raw
     // u16 payload kernels and keep the dtype tag in `GpuBufferHandle`.
@@ -612,8 +612,8 @@ pub fn roll<T: Float>(input: &Tensor<T>, shifts: i64, dim: usize) -> FerrotorchR
             && let Some(backend) = crate::gpu_dispatch::gpu_backend()
         {
             let input_packed = ensure_packed_cuda_f32_f64(input, backend, "roll")?;
-            let outer: usize = shape[..dim].iter().product();
-            let inner: usize = shape[dim + 1..].iter().product();
+            let outer: usize = crate::shape::numel(&shape[..dim]);
+            let inner: usize = crate::shape::numel(&shape[dim + 1..]);
             let handle = if is_f32::<T>() {
                 backend.roll_f32(
                     input_packed.gpu_handle()?,
@@ -676,7 +676,7 @@ pub(crate) fn roll_cpu_inner<T: Float>(
 ) -> Vec<T> {
     let numel = data.len();
     let dim_size = shape[dim];
-    let inner: usize = shape[dim + 1..].iter().product();
+    let inner: usize = crate::shape::numel(&shape[dim + 1..]);
     let outer: usize = numel / (dim_size * inner);
     let mut out = vec![<T as num_traits::Zero>::zero(); numel];
 

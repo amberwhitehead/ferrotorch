@@ -106,7 +106,7 @@ impl QuantizedTensor {
     /// Number of elements.
     #[inline]
     pub fn numel(&self) -> usize {
-        self.shape.iter().product()
+        crate::shape::numel(&self.shape)
     }
 
     /// Borrow the shape.
@@ -214,7 +214,7 @@ fn stored_to_i32(val: i8, is_unsigned: bool) -> i32 {
 #[inline]
 fn channel_index(flat_index: usize, shape: &[usize], axis: usize) -> usize {
     // stride of the channel axis = product of dims after axis.
-    let stride: usize = shape[axis + 1..].iter().product();
+    let stride: usize = crate::shape::numel(&shape[axis + 1..]);
     (flat_index / stride) % shape[axis]
 }
 

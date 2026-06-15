@@ -802,7 +802,7 @@ fn flat_offset(flat: usize, src_lead: &[usize], out_lead: &[usize]) -> usize {
     let mut idx = vec![0usize; nd];
     let mut rem = flat;
     for i in 0..nd {
-        let stride: usize = out_lead[i + 1..].iter().product();
+        let stride: usize = crate::shape_math::numel(&out_lead[i + 1..]);
         let s = stride.max(1);
         idx[i] = rem / s;
         rem %= s;
@@ -847,7 +847,7 @@ fn compute_stride_runs(
     k: usize,
     n: usize,
 ) -> Vec<StrideRun> {
-    let total: usize = out_lead.iter().product();
+    let total: usize = crate::shape_math::numel(out_lead);
     if total == 0 {
         return Vec::new();
     }
@@ -932,12 +932,12 @@ fn validate_broadcast_shapes(
     let a_batch_count: usize = if a_lead.is_empty() {
         1
     } else {
-        a_lead.iter().product()
+        crate::shape_math::numel(a_lead)
     };
     let b_batch_count: usize = if b_lead.is_empty() {
         1
     } else {
-        b_lead.iter().product()
+        crate::shape_math::numel(b_lead)
     };
     let expected_a = a_batch_count * m * k;
     let expected_b = b_batch_count * k * n;
@@ -1010,7 +1010,7 @@ pub fn gpu_broadcast_bmm_f32(
         k,
         n,
     )?;
-    let total: usize = out_lead.iter().product();
+    let total: usize = crate::shape_math::numel(out_lead);
     let out_numel = total * m * n;
     if total == 0 || m == 0 || k == 0 || n == 0 {
         return alloc_zeros_f32(out_numel, device);
@@ -1124,7 +1124,7 @@ pub fn gpu_broadcast_bmm_f64(
         k,
         n,
     )?;
-    let total: usize = out_lead.iter().product();
+    let total: usize = crate::shape_math::numel(out_lead);
     let out_numel = total * m * n;
     if total == 0 || m == 0 || k == 0 || n == 0 {
         return alloc_zeros_f64(out_numel, device);

@@ -64,9 +64,9 @@ fn is_bf16<T: Float>() -> bool {
 /// The flat index of element `(outer, i, inner)` is:
 ///   `outer * dim_size * inner_size + i * inner_size + inner`
 fn dim_strides(shape: &[usize], dim: usize) -> (usize, usize, usize) {
-    let outer: usize = shape[..dim].iter().product();
+    let outer: usize = crate::shape::numel(&shape[..dim]);
     let dim_size = shape[dim];
-    let inner: usize = shape[dim + 1..].iter().product();
+    let inner: usize = crate::shape::numel(&shape[dim + 1..]);
     (outer, dim_size, inner)
 }
 

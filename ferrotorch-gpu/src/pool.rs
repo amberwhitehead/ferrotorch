@@ -41,6 +41,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 use crate::allocator::StreamId;
+use crate::error::{GpuError, GpuResult};
 
 static POOL_HITS: AtomicUsize = AtomicUsize::new(0);
 static POOL_MISSES: AtomicUsize = AtomicUsize::new(0);
@@ -115,16 +116,27 @@ const ROUND_ELEMENTS: usize = 256;
 
 /// Round `len` up to the nearest multiple of the `ROUND_ELEMENTS` constant (256).
 ///
-/// Uses saturating arithmetic to avoid overflow on extreme inputs.
+/// Panics if rounding would overflow. Fallible allocation paths should use
+/// [`checked_round_len`] so extreme requests become structured errors.
 pub fn round_len(len: usize) -> usize {
+    checked_round_len(len).expect("round_len: rounded allocation length overflows usize")
+}
+
+/// Checked variant of [`round_len`] for fallible allocation paths.
+pub fn checked_round_len(len: usize) -> GpuResult<usize> {
     if len == 0 {
-        return 0;
+        return Ok(0);
     }
     let remainder = len % ROUND_ELEMENTS;
     if remainder == 0 {
-        return len;
+        return Ok(len);
     }
-    len.saturating_add(ROUND_ELEMENTS - remainder)
+    len.checked_add(ROUND_ELEMENTS - remainder)
+        .ok_or_else(|| GpuError::InvalidState {
+            message: format!(
+                "round_len: rounded allocation length overflows usize for {len} elements"
+            ),
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -154,7 +166,10 @@ pub fn pool_take<T: Any + Send + Sync>(
     if is_empty {
         pool.free.remove(&key);
     }
-    pool.cached_bytes = pool.cached_bytes.saturating_sub(rounded_len * elem_size);
+    let bytes = rounded_len
+        .checked_mul(elem_size)
+        .expect("pool_take: cached byte count overflows usize");
+    pool.cached_bytes = pool.cached_bytes.saturating_sub(bytes);
     POOL_HITS.fetch_add(1, Ordering::Relaxed);
     // Downcast is guaranteed to succeed because the key includes TypeId.
     Some(*entry.data.downcast::<T>().expect("pool type mismatch"))
@@ -185,7 +200,10 @@ pub fn pool_take_stream<T: Any + Send + Sync>(
     if bucket.is_empty() {
         pool.free.remove(&key);
     }
-    pool.cached_bytes = pool.cached_bytes.saturating_sub(rounded_len * elem_size);
+    let bytes = rounded_len
+        .checked_mul(elem_size)
+        .expect("pool_take_stream: cached byte count overflows usize");
+    pool.cached_bytes = pool.cached_bytes.saturating_sub(bytes);
     POOL_HITS.fetch_add(1, Ordering::Relaxed);
     Some(*entry.data.downcast::<T>().expect("pool type mismatch"))
 }
@@ -220,7 +238,13 @@ pub fn pool_return_with_stream<T: Any + Send + Sync>(
 ) {
     let key = (device_ordinal, rounded_len, TypeId::of::<T>());
     let Ok(mut pool) = POOL.lock() else { return };
-    pool.cached_bytes += rounded_len * elem_size;
+    let bytes = rounded_len
+        .checked_mul(elem_size)
+        .expect("pool_return: cached byte count overflows usize");
+    pool.cached_bytes = pool
+        .cached_bytes
+        .checked_add(bytes)
+        .expect("pool_return: cached byte accounting overflows usize");
     let entry = CachedEntry {
         data: Box::new(value),
         alloc_stream,
@@ -334,6 +358,23 @@ mod tests {
         assert_eq!(round_len(1), 256);
         assert_eq!(round_len(255), 256);
         assert_eq!(round_len(257), 512);
+    }
+
+    #[test]
+    fn checked_round_len_rejects_overflow() {
+        let err = checked_round_len(usize::MAX).expect_err("rounding must not saturate");
+        assert!(
+            format!("{err:?}").contains("overflows usize"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn public_round_len_panics_on_overflow_instead_of_saturating() {
+        let result = std::panic::catch_unwind(|| {
+            let _ = round_len(usize::MAX);
+        });
+        assert!(result.is_err(), "round_len must fail loudly on overflow");
     }
 
     #[test]

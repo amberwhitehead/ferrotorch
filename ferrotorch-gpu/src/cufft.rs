@@ -1211,7 +1211,7 @@ pub fn gpu_fftn2d_c2c_f32(
 //   n[i]    = shape[a[i]]          -- transform length along each axis
 //   inembed = shape (spatial dims) -- embedding array (full tensor shape)
 //   istride = product of shape[a[i]+1..] for the innermost axis stride
-//   idist   = total spatial elements (shape.iter().product())
+//   idist   = total spatial elements (crate::shape_math::numel(&shape))
 //   batch   = product of shape[j] for j NOT in axes (outer batch dims)
 //
 // For contiguous complex layout `[..., 2]`, the batch stride is the total
@@ -1256,8 +1256,14 @@ pub fn gpu_fftn_axes_c2c_f32(
             got: vec![axes.len()],
         });
     }
-    let spatial_total: usize = shape.iter().product();
-    let total = spatial_total * 2; // interleaved complex
+    let spatial_total: usize = crate::shape_math::numel(shape);
+    let total = spatial_total
+        .checked_mul(2)
+        .ok_or_else(|| GpuError::InvalidState {
+            message: format!(
+                "gpu_fftn_axes_c2c_f32: interleaved length {spatial_total} * 2 overflows usize"
+            ),
+        })?; // interleaved complex
     if input.len() != total {
         return Err(GpuError::ShapeMismatch {
             op: "gpu_fftn_axes_c2c_f32",
@@ -1267,7 +1273,14 @@ pub fn gpu_fftn_axes_c2c_f32(
     }
 
     // Transform dims: product of shape[axes[i]].
-    let transform_vol: usize = axes.iter().map(|&a| shape[a]).product();
+    let transform_shape: Vec<usize> = axes.iter().map(|&a| shape[a]).collect();
+    let transform_vol =
+        crate::shape_math::checked_numel(&transform_shape, "gpu_fftn_axes_c2c_f32")?;
+    if transform_vol == 0 {
+        return Err(GpuError::InvalidState {
+            message: "gpu_fftn_axes_c2c_f32: transform volume must be nonzero".into(),
+        });
+    }
     let batch = spatial_total / transform_vol;
     let n_dims: Vec<c_int> = axes.iter().map(|&a| shape[a] as c_int).collect();
 
@@ -1346,8 +1359,14 @@ pub fn gpu_fftn_axes_c2c_f64(
             got: vec![axes.len()],
         });
     }
-    let spatial_total: usize = shape.iter().product();
-    let total = spatial_total * 2;
+    let spatial_total: usize = crate::shape_math::numel(shape);
+    let total = spatial_total
+        .checked_mul(2)
+        .ok_or_else(|| GpuError::InvalidState {
+            message: format!(
+                "gpu_fftn_axes_c2c_f64: interleaved length {spatial_total} * 2 overflows usize"
+            ),
+        })?;
     if input.len() != total {
         return Err(GpuError::ShapeMismatch {
             op: "gpu_fftn_axes_c2c_f64",
@@ -1356,7 +1375,14 @@ pub fn gpu_fftn_axes_c2c_f64(
         });
     }
 
-    let transform_vol: usize = axes.iter().map(|&a| shape[a]).product();
+    let transform_shape: Vec<usize> = axes.iter().map(|&a| shape[a]).collect();
+    let transform_vol =
+        crate::shape_math::checked_numel(&transform_shape, "gpu_fftn_axes_c2c_f64")?;
+    if transform_vol == 0 {
+        return Err(GpuError::InvalidState {
+            message: "gpu_fftn_axes_c2c_f64: transform volume must be nonzero".into(),
+        });
+    }
     let batch = spatial_total / transform_vol;
     let n_dims: Vec<c_int> = axes.iter().map(|&a| shape[a] as c_int).collect();
 

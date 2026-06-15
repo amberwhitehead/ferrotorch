@@ -2347,7 +2347,13 @@ fn pad_bool_broadcast_params(
                 });
             }
             out_stride[d] = acc as u32;
-            acc = acc.saturating_mul(out_shape[d]);
+            acc = acc
+                .checked_mul(out_shape[d])
+                .ok_or_else(|| GpuError::ShapeMismatch {
+                    op: "bool_broadcast_stride_overflow",
+                    expected: vec![usize::MAX],
+                    got: vec![acc, out_shape[d]],
+                })?;
         }
     }
     // Pad unused dims with `n + 1` so `flat / out_stride[d] == 0`.
@@ -2389,7 +2395,7 @@ pub fn gpu_broadcast_bool(
     let n: usize = if out_shape.is_empty() {
         1
     } else {
-        out_shape.iter().product()
+        crate::shape_math::numel(out_shape)
     };
     let (out_stride, src_stride) = pad_bool_broadcast_params(out_shape, src_strides, n)?;
     let stream = device.stream();

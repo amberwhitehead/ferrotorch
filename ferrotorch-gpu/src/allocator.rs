@@ -540,7 +540,8 @@ impl CudaAllocator {
     where
         T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits,
     {
-        let bytes = count.saturating_mul(std::mem::size_of::<T>());
+        let bytes =
+            crate::shape_math::checked_alloc_bytes::<T>(count, "CudaAllocator::alloc_zeros")?;
         let slice = self.device.stream().alloc_zeros::<T>(count)?;
 
         // Update statistics after the allocation succeeds.
@@ -548,7 +549,7 @@ impl CudaAllocator {
             .allocated_bytes_atomic
             .fetch_add(bytes, Ordering::Relaxed);
         self.peak_bytes_atomic
-            .fetch_max(prev + bytes, Ordering::Relaxed);
+            .fetch_max(prev.saturating_add(bytes), Ordering::Relaxed);
 
         Ok(CudaBuffer {
             data: Some(slice),
@@ -571,14 +572,15 @@ impl CudaAllocator {
     where
         T: cudarc::driver::DeviceRepr,
     {
-        let bytes = data.len().saturating_mul(std::mem::size_of::<T>());
+        let bytes =
+            crate::shape_math::checked_alloc_bytes::<T>(data.len(), "CudaAllocator::alloc_copy")?;
         let slice = self.device.stream().clone_htod(data)?;
 
         let prev = self
             .allocated_bytes_atomic
             .fetch_add(bytes, Ordering::Relaxed);
         self.peak_bytes_atomic
-            .fetch_max(prev + bytes, Ordering::Relaxed);
+            .fetch_max(prev.saturating_add(bytes), Ordering::Relaxed);
 
         Ok(CudaBuffer {
             data: Some(slice),

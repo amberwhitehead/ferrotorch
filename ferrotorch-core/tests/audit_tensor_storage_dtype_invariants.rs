@@ -1,4 +1,11 @@
-use ferrotorch_core::{Tensor, TensorStorage, creation::zeros_meta};
+use ferrotorch_core::{
+    BoolTensor, ComplexTensor, IntTensor, Tensor, TensorStorage,
+    creation::zeros_meta,
+    shape::{
+        c_contiguous_strides, channels_last_3d_strides, channels_last_strides, checked_byte_count,
+        checked_channels_last_3d_strides, checked_channels_last_strides, numel,
+    },
+};
 
 #[test]
 fn fallible_stride_view_rejects_out_of_bounds_nonempty_view() {
@@ -100,10 +107,123 @@ fn zero_numel_shape_still_rejects_unrepresentable_stride_metadata() {
     );
 }
 
+#[test]
+fn checked_storage_byte_count_rejects_itemsize_overflow() {
+    let err = checked_byte_count((usize::MAX / 2) + 1, 2, "byte_probe")
+        .expect_err("byte count must not wrap");
+    assert!(
+        format!("{err:?}").contains("storage size calculation overflowed"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn public_numel_panics_on_overflow_instead_of_wrapping() {
+    let result = std::panic::catch_unwind(|| {
+        let _ = numel(&[usize::MAX, 2]);
+    });
+    assert!(result.is_err(), "overflowed numel must fail loudly");
+}
+
+#[test]
+fn public_c_contiguous_strides_panics_on_unrepresentable_dimension() {
+    let result = std::panic::catch_unwind(|| {
+        let _ = c_contiguous_strides(&[0, usize::MAX]);
+    });
+    assert!(
+        result.is_err(),
+        "signed stride helper must not cast usize::MAX to a negative stride"
+    );
+}
+
+#[test]
+fn checked_channels_last_strides_rejects_signed_stride_overflow() {
+    let err = checked_channels_last_strides(&[1, isize::MAX as usize, 1, 2], "channels_last_probe")
+        .expect_err("channels-last N stride cannot fit isize");
+    assert!(
+        format!("{err:?}").contains("exceeds isize::MAX"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn checked_channels_last_3d_strides_rejects_signed_stride_overflow() {
+    let err = checked_channels_last_3d_strides(
+        &[1, isize::MAX as usize, 1, 1, 2],
+        "channels_last_3d_probe",
+    )
+    .expect_err("channels-last-3d N stride cannot fit isize");
+    assert!(
+        format!("{err:?}").contains("exceeds isize::MAX"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn public_channels_last_helpers_panic_instead_of_wrapping() {
+    let cl = std::panic::catch_unwind(|| {
+        let _ = channels_last_strides(&[1, isize::MAX as usize, 1, 2]);
+    });
+    assert!(cl.is_err(), "channels-last helper must not wrap N stride");
+
+    let cl3d = std::panic::catch_unwind(|| {
+        let _ = channels_last_3d_strides(&[1, isize::MAX as usize, 1, 1, 2]);
+    });
+    assert!(
+        cl3d.is_err(),
+        "channels-last-3d helper must not wrap N stride"
+    );
+}
+
+#[test]
+fn wrapper_tensor_constructors_reject_shape_product_overflow() {
+    let bool_err = BoolTensor::from_vec(Vec::new(), vec![usize::MAX, 2])
+        .expect_err("BoolTensor shape product overflow");
+    assert!(
+        format!("{bool_err:?}").contains("overflows usize"),
+        "unexpected error: {bool_err:?}"
+    );
+
+    let int_err = IntTensor::<i64>::from_vec(Vec::new(), vec![usize::MAX, 2])
+        .expect_err("IntTensor shape product overflow");
+    assert!(
+        format!("{int_err:?}").contains("overflows usize"),
+        "unexpected error: {int_err:?}"
+    );
+
+    let complex_err = ComplexTensor::<f32>::from_re_im(Vec::new(), Vec::new(), vec![usize::MAX, 2])
+        .expect_err("ComplexTensor shape product overflow");
+    assert!(
+        format!("{complex_err:?}").contains("overflows usize"),
+        "unexpected error: {complex_err:?}"
+    );
+}
+
+#[test]
+fn wrapper_infallible_zeros_helpers_panic_on_shape_product_overflow() {
+    let bool_result = std::panic::catch_unwind(|| {
+        let _ = BoolTensor::zeros(&[usize::MAX, 2]);
+    });
+    assert!(bool_result.is_err(), "BoolTensor::zeros must not wrap");
+
+    let int_result = std::panic::catch_unwind(|| {
+        let _ = IntTensor::<i64>::zeros(&[usize::MAX, 2]);
+    });
+    assert!(int_result.is_err(), "IntTensor::zeros must not wrap");
+
+    let complex_result = std::panic::catch_unwind(|| {
+        let _ = ComplexTensor::<f32>::zeros(&[usize::MAX, 2]);
+    });
+    assert!(
+        complex_result.is_err(),
+        "ComplexTensor::zeros must not wrap"
+    );
+}
+
 #[cfg(feature = "gpu")]
 mod gpu {
     use super::*;
-    use ferrotorch_core::{Device, FerrotorchError};
+    use ferrotorch_core::{DType, Device, FerrotorchError, gpu_dispatch::gpu_backend};
     use std::sync::Once;
 
     static GPU_INIT: Once = Once::new();
@@ -160,5 +280,20 @@ mod gpu {
         assert_eq!(view.storage_offset(), 100);
         let host = view.to(Device::Cpu).expect("copy empty CUDA view to CPU");
         assert_eq!(host.data_vec().expect("empty host data"), Vec::<f32>::new());
+    }
+
+    #[test]
+    fn cuda_alloc_zeros_rejects_byte_count_overflow_before_driver_call() {
+        ensure_cuda_backend();
+        let backend = gpu_backend().expect("registered CUDA backend");
+
+        let err = backend
+            .alloc_zeros(usize::MAX, DType::F16, 0)
+            .expect_err("byte-count overflow must reject before CUDA allocation");
+
+        assert!(
+            format!("{err:?}").contains("storage size calculation overflowed"),
+            "unexpected error: {err:?}"
+        );
     }
 }

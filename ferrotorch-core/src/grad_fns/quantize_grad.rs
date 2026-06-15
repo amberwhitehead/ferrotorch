@@ -665,7 +665,7 @@ pub fn fake_quantize_per_channel_affine<T: Float>(
 
     // outer / inner strides around `axis` so that the channel index for
     // flat index `i` is `(i / inner) % channel_dim`.
-    let inner: usize = shape[axis_us + 1..].iter().product();
+    let inner: usize = crate::shape::numel(&shape[axis_us + 1..]);
 
     let data = input.data_vec()?;
 
@@ -742,7 +742,7 @@ impl<T: Float> GradFn<T> for FakeQuantizePerChannelBackward<T> {
         let input_data = self.input.data_vec()?;
         let shape = self.input.shape().to_vec();
         let channel_dim = shape[self.axis];
-        let inner: usize = shape[self.axis + 1..].iter().product();
+        let inner: usize = crate::shape::numel(&shape[self.axis + 1..]);
         let zero = <T as num_traits::Zero>::zero();
         let grad: Vec<T> = input_data
             .iter()

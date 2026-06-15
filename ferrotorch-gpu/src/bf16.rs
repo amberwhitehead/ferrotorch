@@ -4985,7 +4985,9 @@ pub fn gpu_std_var_axis_bf16(
         expected: vec![outer, inner],
         got: vec![usize::MAX],
     })?;
-    if input.len() != outer.saturating_mul(axis_size).saturating_mul(inner) {
+    let expected_len =
+        crate::shape_math::checked_mul3(outer, axis_size, inner, "std_var_axis_bf16")?;
+    if input.len() != expected_len {
         return Err(GpuError::ShapeMismatch {
             op: "std_var_axis_bf16",
             expected: vec![outer, axis_size, inner],
@@ -5575,7 +5577,7 @@ fn launch_broadcast_binary_bf16(
     ptx: &'static str,
     kernel_name: &'static str,
 ) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
     let stream = device.stream();
     if out_numel == 0 {
         return Ok(stream.alloc_zeros::<u16>(0)?);

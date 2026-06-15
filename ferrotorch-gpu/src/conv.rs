@@ -1028,8 +1028,8 @@ mod tests {
         let stride = (1, 1);
         let padding = (1, 1);
 
-        let input_len: usize = input_shape.iter().product();
-        let weight_len: usize = weight_shape.iter().product();
+        let input_len: usize = crate::shape_math::numel(&input_shape);
+        let weight_len: usize = crate::shape_math::numel(&weight_shape);
 
         // Deterministic non-trivial data.
         let input_data: Vec<f32> = (0..input_len)
@@ -1085,8 +1085,8 @@ mod tests {
         let stride = (1, 1);
         let padding = (0, 0);
 
-        let input_len: usize = input_shape.iter().product();
-        let weight_len: usize = weight_shape.iter().product();
+        let input_len: usize = crate::shape_math::numel(&input_shape);
+        let weight_len: usize = crate::shape_math::numel(&weight_shape);
 
         let input_data: Vec<f32> = (0..input_len)
             .map(|i| ((i * 3 + 7) % 50) as f32 / 50.0)
@@ -1140,8 +1140,8 @@ mod tests {
         let stride = (1, 1);
         let padding = (0, 0);
 
-        let input_len: usize = input_shape.iter().product();
-        let weight_len: usize = weight_shape.iter().product();
+        let input_len: usize = crate::shape_math::numel(&input_shape);
+        let weight_len: usize = crate::shape_math::numel(&weight_shape);
 
         let input_data: Vec<f32> = (0..input_len)
             .map(|i| i as f32 / input_len as f32)
@@ -1197,8 +1197,8 @@ mod tests {
         let stride = (1, 1);
         let padding = (1, 1);
 
-        let input_len: usize = input_shape.iter().product();
-        let weight_len: usize = weight_shape.iter().product();
+        let input_len: usize = crate::shape_math::numel(&input_shape);
+        let weight_len: usize = crate::shape_math::numel(&weight_shape);
 
         let input_data: Vec<f32> = (0..input_len)
             .map(|i| ((i * 13 + 5) % 200) as f32 / 200.0 - 0.5)
@@ -1398,8 +1398,8 @@ mod tests {
         let stride = (1, 1);
         let padding = (1, 1);
 
-        let input_len: usize = input_shape.iter().product();
-        let weight_len: usize = weight_shape.iter().product();
+        let input_len: usize = crate::shape_math::numel(&input_shape);
+        let weight_len: usize = crate::shape_math::numel(&weight_shape);
 
         let input_data: Vec<f32> = (0..input_len)
             .map(|i| ((i * 7 + 13) % 256) as f32 / 256.0 - 0.5)
@@ -1550,8 +1550,8 @@ mod tests {
         let input_shape = [batch, c_in, h, w];
         let weight_shape = [c_out, c_in / groups, kh, kw];
 
-        let input_len: usize = input_shape.iter().product();
-        let weight_len: usize = weight_shape.iter().product();
+        let input_len: usize = crate::shape_math::numel(&input_shape);
+        let weight_len: usize = crate::shape_math::numel(&weight_shape);
 
         // Deterministic non-trivial data.
         let input_data: Vec<f32> = (0..input_len)

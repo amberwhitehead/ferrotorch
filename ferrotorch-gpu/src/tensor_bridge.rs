@@ -100,7 +100,7 @@ impl<T: GpuFloat> GpuTensor<T> {
     /// Total number of elements.
     #[inline]
     pub fn numel(&self) -> usize {
-        self.shape.iter().product()
+        crate::shape_math::numel(&self.shape)
     }
 
     /// The GPU device that holds this tensor's data.

@@ -249,7 +249,7 @@ impl<T: Float> NestedTensor<T> {
         }
 
         // CPU path — original semantics preserved verbatim.
-        let numel: usize = out_shape.iter().product();
+        let numel: usize = crate::shape::numel(&out_shape);
         let mut data = vec![pad_value; numel];
 
         // Convert isize strides to usize for index math (CPU path).
@@ -277,7 +277,7 @@ impl<T: Float> NestedTensor<T> {
                 }
             }
 
-            let t_numel: usize = t_shape.iter().product();
+            let t_numel: usize = crate::shape::numel(t_shape);
             for (flat, &val) in t_data.iter().enumerate().take(t_numel) {
                 // Convert flat index to multi-dim coords in the component.
                 let mut remaining = flat;
@@ -385,7 +385,7 @@ impl<T: Float> NestedTensor<T> {
             None => return Ok(None),
         };
 
-        let numel: usize = out_shape.iter().product();
+        let numel: usize = crate::shape::numel(out_shape);
 
         // Step 1: allocate padded output buffer pre-filled with pad_value.
         let mut out_handle = if is_f32 {
@@ -615,7 +615,7 @@ impl<T: Float> NestedTensor<T> {
                 }
             }
 
-            let comp_numel: usize = comp_shape.iter().product();
+            let comp_numel: usize = crate::shape::numel(&comp_shape);
             let mut comp_data = Vec::with_capacity(comp_numel);
 
             for flat in 0..comp_numel {
@@ -707,7 +707,7 @@ impl<T: Float> NestedTensor<T> {
 
             // Sanity check: the linear extent must match the materialised
             // tensor's numel (size-1 leading dim trivially preserves it).
-            let comp_numel: usize = comp_shape.iter().product();
+            let comp_numel: usize = crate::shape::numel(&comp_shape);
             debug_assert_eq!(comp_numel, materialised.numel());
 
             // Rewrap into the trimmed shape via `view_reshape` (no copy:
@@ -1214,7 +1214,7 @@ fn validate_packed_layout(
             ),
         });
     }
-    let tail_numel: usize = tail_shape.iter().product::<usize>();
+    let tail_numel: usize = crate::shape::numel(tail_shape);
     for (i, w) in offsets.windows(2).enumerate() {
         let extent = w[1] - w[0];
         let expected =
@@ -1279,7 +1279,7 @@ impl<T: Float> PackedNestedTensor<T> {
         // scalar tail (empty product = 1); a tail containing a zero dim
         // means every row holds ZERO elements — conflating the two via
         // `.max(1)` accepted phantom data for `[L, 0]`-shaped components.
-        let tail_numel: usize = tail_shape.iter().product::<usize>();
+        let tail_numel: usize = crate::shape::numel(tail_shape);
 
         let mut total = 0usize;
         for (i, seq) in sequences.iter().enumerate() {
@@ -1515,7 +1515,7 @@ impl<T: Float> PackedNestedTensor<T> {
         // spans zero elements, so the per-component ragged lengths are NOT
         // derivable from element offsets. The honest contract is a
         // structured error pointing at the constructor that carries them.
-        let tail_numel: usize = tail_shape.iter().product::<usize>();
+        let tail_numel: usize = crate::shape::numel(&tail_shape);
         if tail_numel == 0 {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
@@ -1739,7 +1739,7 @@ impl<T: Float> PackedNestedTensor<T> {
         // yields a zero row stride and an all-pad-free [n, max_len, ..0..]
         // output with numel 0 (torch jagged oracle: to_padded of
         // [zeros(3,0), zeros(2,0)] has shape (2, 3, 0)).
-        let tail_numel: usize = self.tail_shape.iter().product::<usize>();
+        let tail_numel: usize = crate::shape::numel(&self.tail_shape);
         let row_stride = max_len * tail_numel;
 
         let mut out = vec![pad_value; n * row_stride];
@@ -1779,7 +1779,7 @@ impl<T: Float> PackedNestedTensor<T> {
         let tail_shape: Vec<usize> = shape[2..].to_vec();
         // CORE-069 (#1763): actual tail product (0 for zero-containing
         // tails) — see `to_padded`.
-        let tail_numel: usize = tail_shape.iter().product::<usize>();
+        let tail_numel: usize = crate::shape::numel(&tail_shape);
 
         if lengths.len() != n {
             return Err(FerrotorchError::InvalidArgument {

@@ -590,7 +590,7 @@ pub fn matrix_norm<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let buf = input.gpu_handle()?;
-        let numel = shape.iter().product::<usize>();
+        let numel = crate::shape::numel(shape);
         let h = if is_f32::<T>() {
             let sq = backend.mul_f32(buf, buf)?;
             let s = backend.sum_f32(&sq, numel)?;
@@ -1808,7 +1808,7 @@ pub fn cross<T: Float>(a: &Tensor<T>, b: &Tensor<T>, dim: i64) -> FerrotorchResu
     let stride_axis = strides[axis];
 
     // Number of independent cross products to compute = numel / 3.
-    let numel: usize = a_shape.iter().product();
+    let numel: usize = crate::shape::numel(a_shape);
     let groups = numel / 3;
 
     // Enumerate the base offset of each group (one fixed element along the
@@ -2869,7 +2869,7 @@ fn ex_info_scalar<T: Float>(value: i32, like: &Tensor<T>) -> FerrotorchResult<Te
 /// torch documents the value output as UNDEFINED when `info != 0` (it
 /// returns the partial factor); deterministic zeros are a legal choice.
 fn ex_zeros_like<T: Float>(shape: Vec<usize>, like: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let total: usize = shape.iter().product();
+    let total: usize = crate::shape::numel(&shape);
     let t = Tensor::from_storage(
         TensorStorage::cpu(vec![T::from(0.0).unwrap(); total]),
         shape,

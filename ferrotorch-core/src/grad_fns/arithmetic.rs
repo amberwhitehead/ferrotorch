@@ -295,8 +295,8 @@ pub(crate) fn reduce_grad_to_shape<T: Float>(
     //                                       handled here for symmetry)
     // Numel-mismatch (e.g. `[1] -> [2]`) still falls through to the
     // existing rejection guard and broadcast-reduction logic.
-    let grad_numel: usize = grad_shape.iter().product();
-    let target_numel: usize = target_shape.iter().product();
+    let grad_numel: usize = crate::shape::numel(grad_shape);
+    let target_numel: usize = crate::shape::numel(target_shape);
     if grad_numel == target_numel {
         // Pure reshape: same elements, different rank. The CPU storage is
         // already row-major contiguous over `grad_data`, so we can rebuild
@@ -329,7 +329,7 @@ pub(crate) fn reduce_grad_to_shape<T: Float>(
         target_shape.to_vec()
     };
 
-    let out_numel: usize = target_shape.iter().product();
+    let out_numel: usize = crate::shape::numel(target_shape);
     let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
 
     // Precompute target strides for flat index calculation.
@@ -2312,7 +2312,7 @@ fn remainder_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<T
     let b_data = b.data_vec()?;
     let a_shape = a.shape().to_vec();
     let b_shape = b.shape().to_vec();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape::numel(&out_shape);
 
     let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
 
@@ -2606,7 +2606,7 @@ fn fmod_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor
     let b_data = b.data_vec()?;
     let a_shape = a.shape().to_vec();
     let b_shape = b.shape().to_vec();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape::numel(&out_shape);
 
     let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
 
@@ -2996,7 +2996,7 @@ fn floor_divide_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResul
     let b_data = b.data_vec()?;
     let a_shape = a.shape().to_vec();
     let b_shape = b.shape().to_vec();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape::numel(&out_shape);
 
     let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
 
@@ -3286,7 +3286,7 @@ fn addcmul_inner<T: Float>(
     let input_shape = input.shape().to_vec();
     let t1_shape = tensor1.shape().to_vec();
     let t2_shape = tensor2.shape().to_vec();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape::numel(&out_shape);
 
     let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
 
@@ -3601,7 +3601,7 @@ fn addcdiv_inner<T: Float>(
     let input_shape = input.shape().to_vec();
     let t1_shape = tensor1.shape().to_vec();
     let t2_shape = tensor2.shape().to_vec();
-    let out_numel: usize = out_shape.iter().product();
+    let out_numel: usize = crate::shape::numel(&out_shape);
 
     let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
 

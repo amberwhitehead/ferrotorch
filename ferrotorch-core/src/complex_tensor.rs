@@ -57,11 +57,7 @@ impl<T: Float> ComplexTensor<T> {
     /// Build from separate real and imaginary buffers + shape.
     pub fn from_re_im(re: Vec<T>, im: Vec<T>, shape: Vec<usize>) -> FerrotorchResult<Self> {
         // shape=[] -> 0-d scalar (numel 1); shape=[0] -> empty (numel 0). (#805)
-        let expected: usize = if shape.is_empty() {
-            1
-        } else {
-            shape.iter().product()
-        };
+        let expected = crate::shape::checked_numel(&shape, "ComplexTensor::from_re_im")?;
         if re.len() != expected || im.len() != expected {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
@@ -95,11 +91,7 @@ impl<T: Float> ComplexTensor<T> {
     /// Zero-filled complex tensor of the given shape.
     pub fn zeros(shape: &[usize]) -> Self {
         // shape=[] -> 0-d scalar (numel 1); shape=[0] -> empty (numel 0). (#805)
-        let total: usize = if shape.is_empty() {
-            1
-        } else {
-            shape.iter().product()
-        };
+        let total = crate::shape::numel(shape);
         let zero = <T as num_traits::Zero>::zero();
         Self {
             re: Arc::new(vec![zero; total]),
@@ -132,11 +124,7 @@ impl<T: Float> ComplexTensor<T> {
         // Leading dims form the complex shape; empty leading -> 0-d scalar
         // (numel 1), but any zero leading dim -> empty (numel 0). (#805)
         let leading = &shape[..shape.len() - 1];
-        let n = if leading.is_empty() {
-            1
-        } else {
-            leading.iter().product()
-        };
+        let n = crate::shape::checked_numel(leading, "ComplexTensor::from_interleaved")?;
         let data = t.data_vec()?;
         let mut re = Vec::with_capacity(n);
         let mut im = Vec::with_capacity(n);
@@ -378,11 +366,7 @@ impl<T: Float> ComplexTensor<T> {
     /// Reshape (must preserve numel; no data copy).
     pub fn reshape(&self, shape: &[usize]) -> FerrotorchResult<Self> {
         // shape=[] -> 0-d scalar (numel 1); shape=[0,...] -> empty (numel 0). (#805)
-        let new_total: usize = if shape.is_empty() {
-            1
-        } else {
-            shape.iter().product()
-        };
+        let new_total = crate::shape::checked_numel(shape, "ComplexTensor::reshape")?;
         if new_total != self.re.len() {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(

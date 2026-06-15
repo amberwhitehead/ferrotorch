@@ -508,7 +508,7 @@ impl<T: Float> GradFn<T> for MeshgridBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let go = grad_output.data_vec()?;
         let len = self.shapes[self.dim];
-        let inner: usize = self.shapes[self.dim + 1..].iter().product();
+        let inner: usize = crate::shape::numel(&self.shapes[self.dim + 1..]);
         // grad[c] = sum of grad_output over every flat position whose
         // coordinate along `dim` is `c` — the inverse of the forward gather
         // `grid[flat] = input[(flat / inner) % len]`. An empty axis anywhere
@@ -637,7 +637,7 @@ pub fn meshgrid_indexing<T: Float>(
 
     let shapes: Vec<usize> = tensors.iter().map(|t| t.shape()[0]).collect();
     let ndim = shapes.len();
-    let total: usize = shapes.iter().product();
+    let total: usize = crate::shape::numel(&shapes);
 
     // GPU fast path (#1545): when every input is CUDA-resident float dtype, each
     // axis's broadcast grid is produced on-device via `GpuBackend::meshgrid_grid`
@@ -651,7 +651,7 @@ pub fn meshgrid_indexing<T: Float>(
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let mut result = Vec::with_capacity(ndim);
         for (dim, t) in tensors.iter().enumerate() {
-            let inner: usize = shapes[dim + 1..].iter().product();
+            let inner: usize = crate::shape::numel(&shapes[dim + 1..]);
             // #1658: normalise a possibly narrowed-offset CUDA input to a packed
             // offset-0 buffer before the per-axis gather reads element 0. Kept
             // as a separate binding (NOT shadowing `t`) so the backward node
@@ -682,7 +682,7 @@ pub fn meshgrid_indexing<T: Float>(
         // Stride pattern: for dimension `dim`, the value repeats every
         // `product(shapes[dim+1..])` elements and cycles every
         // `product(shapes[..dim]) * product(shapes[dim+1..])` elements.
-        let inner: usize = shapes[dim + 1..].iter().product();
+        let inner: usize = crate::shape::numel(&shapes[dim + 1..]);
         let outer_stride = shapes[dim] * inner;
 
         for flat in 0..total {

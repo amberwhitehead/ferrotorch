@@ -211,7 +211,7 @@ pub fn fft_norm<T: Float>(
             });
         }
         let batch_shape = &shape[..ndim - 2];
-        let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
+        let batch_size: usize = crate::shape::numel(batch_shape).max(1);
         // GPU C2C dispatch via cuFFT (#579), with on-device pad/truncate
         // when `fft_n != input_n` (#605). Fully on-device — no host bounce.
         let backend =
@@ -392,7 +392,7 @@ pub fn ifft_norm<T: Float>(
             });
         }
         let batch_shape = &shape[..ndim - 2];
-        let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
+        let batch_size: usize = crate::shape::numel(batch_shape).max(1);
         // GPU C2C dispatch via cuFFT, with on-device pad/truncate when
         // `fft_n != input_n` (#605).
         let backend =
@@ -469,7 +469,7 @@ pub fn rfft_norm<T: Float>(
     {
         let fft_n = input_n;
         let batch_shape = &shape[..ndim - 1];
-        let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
+        let batch_size: usize = crate::shape::numel(batch_shape).max(1);
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let buf = input.gpu_handle()?;
@@ -557,7 +557,7 @@ pub fn irfft_norm<T: Float>(
         };
         if half_n == output_n / 2 + 1 {
             let batch_shape = &shape[..ndim - 2];
-            let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
+            let batch_size: usize = crate::shape::numel(batch_shape).max(1);
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
             let buf = input.gpu_handle()?;
@@ -628,7 +628,7 @@ pub fn fft2_norm<T: Float>(
 
     let rows = shape[ndim - 3];
     let cols = shape[ndim - 2];
-    let batch_dims: usize = shape[..ndim - 3].iter().product::<usize>().max(1);
+    let batch_dims: usize = crate::shape::numel(&shape[..ndim - 3]).max(1);
 
     // GPU fast path via cufftPlan2d (#634): unbatched (or batch=1) f32/f64,
     // default last-two axes / backward-norm / no resize only.
@@ -695,7 +695,7 @@ pub fn ifft2_norm<T: Float>(
 
     let rows = shape[ndim - 3];
     let cols = shape[ndim - 2];
-    let batch_dims: usize = shape[..ndim - 3].iter().product::<usize>().max(1);
+    let batch_dims: usize = crate::shape::numel(&shape[..ndim - 3]).max(1);
 
     if input.is_cuda()
         && batch_dims == 1
@@ -823,7 +823,7 @@ fn complex_array_to_tensor<T: Float>(
     arr: &FerrayArray<Complex<f64>, FerrayIxDyn>,
 ) -> FerrotorchResult<Tensor<T>> {
     let shape = arr.shape().to_vec();
-    let total: usize = shape.iter().product();
+    let total: usize = crate::shape::numel(&shape);
     let mut out_data: Vec<T> = Vec::with_capacity(total * 2);
     for c in arr.iter() {
         out_data.push(f64_to_float_saturating(c.re));
@@ -1296,7 +1296,7 @@ pub fn hfft_norm<T: Float>(
             // GPU path only when half_in == n_out/2+1 (no pad/truncate needed).
             if half_in == n_out / 2 + 1 {
                 let batch_shape = &shape[..ndim - 2];
-                let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
+                let batch_size: usize = crate::shape::numel(batch_shape).max(1);
                 let backend =
                     crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                 let h_out = if is_f32::<T>() {
@@ -1360,7 +1360,7 @@ pub fn ihfft_norm<T: Float>(
             // GPU path only when fft_n == input_n (no pad/truncate).
             if fft_n == input_n {
                 let batch_shape = &shape[..ndim - 1];
-                let batch_size: usize = batch_shape.iter().product::<usize>().max(1);
+                let batch_size: usize = crate::shape::numel(batch_shape).max(1);
                 let backend =
                     crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                 let h_out = if is_f32::<T>() {

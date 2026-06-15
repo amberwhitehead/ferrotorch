@@ -208,6 +208,7 @@ pub mod roll;
 pub mod scatter_gather_kernels;
 #[cfg(feature = "cuda")]
 pub mod search;
+mod shape_math;
 #[cfg(feature = "cuda")]
 pub mod sparse;
 #[cfg(feature = "cuda")]
