@@ -99,8 +99,11 @@ by dtype (the MSRV-1.85-safe alternative to
   `dx[i] = grad[i] if (min <= x[i] <= max) else 0`. GPU fast path for
   `f32`/`f64` via `backend.clamp_f32` / `backend.clamp_f64` (forward) and
   `backend.clamp_backward_f32` / `backend.clamp_backward_f64` (backward,
-  closes #524). CPU path uses `unary_map` with the
-  `if x < min { min } else if x > max { max } else { x }` lambda.
+  closes #524). The forward path fills the entire result with NaN when either
+  scalar bound is NaN, matching `TensorCompare.cpp:839-846`, and otherwise
+  evaluates `min(max(x, min), max)` so `min > max` yields `max` for every
+  non-NaN input. CPU uses the same scalar helper; CUDA f32/f64 uses the
+  resident clamp kernels.
   **Diverges from upstream**: ferrotorch's `clamp` accepts BOTH bounds
   as required arguments (`T, T`), while upstream supports
   `Scalar? min=None` and `Scalar? max=None` Optional bounds; the
@@ -109,13 +112,8 @@ by dtype (the MSRV-1.85-safe alternative to
   upstream**: ferrotorch's `clamp` does NOT support tensor-valued
   bounds (`TORCH_IMPL_FUNC(clamp_Tensor_out)` at
   `TensorCompare.cpp:856`); the `clamp.Tensor` derivative-yaml entry
-  is unreachable. **Diverges from upstream**: ferrotorch's clamp does
-  NOT special-case `min == NaN` / `max == NaN` to fill the result with
-  NaN (upstream `clamp_out` at `TensorCompare.cpp:839-846` does this);
-  ferrotorch will compare with NaN bounds and produce a behavior the
-  IEEE-754 comparison predicates dictate (likely all-NaN-or-untouched
-  output depending on dtype) — see blocker #1298 for the parity-sweep
-  arm that would surface this divergence.
+  is unreachable. See blocker #1298 for the parity-sweep arm that would
+  exercise the shipped scalar-bound behavior.
 
 - REQ-6: `exp2(x)` — `c = 2^x`, mirror of
   `UnaryOps.cpp:335 CREATE_UNARY_TORCH_IMPL_FUNC(exp2_out, exp2_stub)`.
@@ -640,7 +638,7 @@ table).
 | `log` | impl SHIPPED, parity arm BLOCKED #1298 | `UnaryOps.cpp:340 CREATE_UNARY_TORCH_IMPL_FUNC(log_out, log_stub)` | `derivatives.yaml` `log: grad.div(self.conj())` | `log(0) = -inf`, `log(negative) = NaN`, `log(NaN) = NaN`. Backward at `x=0` produces `grad / 0 = +/-inf` per IEEE-754 — matches upstream. bf16 path uses PTX `lg2.approx.f32 * ln(2)` per #23. |
 | `sin` | impl SHIPPED, parity arm BLOCKED #1298 | `UnaryOps.cpp:349 CREATE_UNARY_TORCH_IMPL_FUNC(sin_out, sin_stub)` | `derivatives.yaml` `sin: grad * self.cos().conj()` | NaN/Inf propagates. Large-magnitude inputs lose precision from argument reduction; `fast_sin` documents its reduction algorithm. Backward re-computes `cos` rather than saving it. |
 | `cos` | impl SHIPPED, parity arm BLOCKED #1298 | `UnaryOps.cpp:328 CREATE_UNARY_TORCH_IMPL_FUNC(cos_out, cos_stub)` | `derivatives.yaml` `cos: grad * -self.sin().conj()` | Symmetric to sin. |
-| `clamp` | impl SHIPPED, parity arm BLOCKED #1298 | `TensorCompare.cpp:831 TORCH_IMPL_FUNC(clamp_out)` | `derivatives.yaml` `clamp: clamp_backward(grad, self, min, max)` | NaN inputs: `x.is_nan() && (NaN < min) == false && (NaN > max) == false` so the CPU `unary_map` passes NaN through unchanged. Upstream `clamp_out` fills with NaN when EITHER BOUND is NaN — ferrotorch does NOT replicate this special case. Boundary tie: at `x == min` and `x == max` ferrotorch's CPU backward returns `g` (interior gradient) because the test is `>=` and `<=`; upstream's `clamp_backward` may differ in edge handling. CUDA bf16/f16 backward: `NotImplementedOnCuda` (#524 deferred bf16 path). |
+| `clamp` | impl SHIPPED, parity arm BLOCKED #1298 | `TensorCompare.cpp:831 TORCH_IMPL_FUNC(clamp_out)` | `derivatives.yaml` `clamp: clamp_backward(grad, self, min, max)` | NaN inputs propagate. NaN scalar bounds fill the entire output with NaN. `min > max` is accepted and returns `max` for every non-NaN input. Boundary tie: at `x == min` and `x == max` ferrotorch's CPU backward returns `g` (interior gradient) because the test is `>=` and `<=`; upstream's `clamp_backward` may differ in edge handling. CUDA bf16/f16 backward: `NotImplementedOnCuda` (#524 deferred bf16 path). |
 | All 28 NOT-STARTED ops | — | (see upstream cites in REQ list) | (see derivatives.yaml cites in REQ list) | No implementation — edge-case parity is by definition not yet defined for the ferrotorch side. Each op has a dedicated open prereq blocker referenced in the REQ status table. |
 
 Parity-sweep audit reference: all 33 op entries are **MISSING** from
@@ -720,7 +718,7 @@ NOT-STARTED (concrete prereq blocker filed for each).
 | REQ-2 (log) | SHIPPED | impl: `pub fn log` in `transcendental.rs` + `struct LogBackward<T>` mirroring `UnaryOps.cpp:340 CREATE_UNARY_TORCH_IMPL_FUNC(log_out, log_stub)` with backward `grad / x` per `derivatives.yaml` `log`. Non-test production consumers: `pub fn log_t` in `methods.rs` (S5), `pub fn dual_log` in `autograd/forward_ad.rs`, `pub fn interpret` and `fn apply_elementwise_op` in `ferrotorch-jit/src/interpreter.rs` (JIT `IrOpKind::Log` two sites), `impl<T> MultivariateNormal<T>` in `ferrotorch-distributions/src/multivariate_normal.rs`, `impl Transform<T> for ExpTransform` in `ferrotorch-distributions/src/transforms.rs`, `ferrotorch-distributions/src/dirichlet.rs` (file-level `use` consumer). Parity-sweep arm BLOCKED #1298 (currently `[log] 0/12 passed`). |
 | REQ-3 (sin) | SHIPPED | impl: `pub fn sin` in `transcendental.rs` + `struct SinBackward<T>` mirroring `UnaryOps.cpp:349 CREATE_UNARY_TORCH_IMPL_FUNC(sin_out, sin_stub)` with backward `grad * cos(x)` per `derivatives.yaml` `sin`. Non-test production consumers: `pub fn sin_t` in `methods.rs` (S5), `pub fn dual_sin` in `autograd/forward_ad.rs`, plus recursive consumer through `CosBackward::backward` GPU path which invokes `transcendental::sin`. Parity-sweep arm BLOCKED #1298 (currently `[sin] 0/4 passed`). |
 | REQ-4 (cos) | SHIPPED | impl: `pub fn cos` in `transcendental.rs` + `struct CosBackward<T>` mirroring `UnaryOps.cpp:328 CREATE_UNARY_TORCH_IMPL_FUNC(cos_out, cos_stub)` with backward `grad * (-sin(x))` per `derivatives.yaml` `cos`. Non-test production consumers: `pub fn cos_t` in `methods.rs` (S5), `pub fn dual_cos` in `autograd/forward_ad.rs`, plus recursive consumer through `SinBackward::backward` GPU path which invokes `transcendental::cos`. Parity-sweep arm BLOCKED #1298 (currently `[cos] 0/12 passed`). |
-| REQ-5 (clamp) | SHIPPED | impl: `pub fn clamp` in `transcendental.rs` + `struct ClampBackward<T>` mirroring `aten/src/ATen/native/TensorCompare.cpp:831 TORCH_IMPL_FUNC(clamp_out)` with backward `clamp_backward(grad, self, min, max)` per `derivatives.yaml` `clamp`. GPU fast path via `backend.clamp_f32`/`backend.clamp_f64` (forward) and `backend.clamp_backward_f32`/`backend.clamp_backward_f64` (backward) per #524. Non-test production consumers: `pub fn clamp_t` in `methods.rs` (S5), `impl Transform<T> for SigmoidTransform` in `ferrotorch-distributions/src/transforms.rs`, `impl BCEWithLogitsLoss` family in `ferrotorch-nn/src/loss.rs`, `impl ReLU6` in `ferrotorch-nn/src/activation.rs` (the ReLU6 activation forward), `impl Hardtanh` in `ferrotorch-nn/src/activation.rs` (the Hardtanh activation forward). Diverges from upstream on three points documented in REQ-5: scalar-only bounds (no Tensor bounds), bilateral (no Optional one-sided), no NaN-bound special case. Parity-sweep arm BLOCKED #1298 (currently `[clamp] 0/28 passed`). |
+| REQ-5 (clamp) | SHIPPED | impl: `pub fn clamp` in `transcendental.rs` + `struct ClampBackward<T>` mirroring `aten/src/ATen/native/TensorCompare.cpp:831 TORCH_IMPL_FUNC(clamp_out)` with backward `clamp_backward(grad, self, min, max)` per `derivatives.yaml` `clamp`. Scalar-bound forward covers NaN-bound fill and `min > max` behavior; GPU fast path via `backend.clamp_f32`/`backend.clamp_f64` (forward) and `backend.clamp_backward_f32`/`backend.clamp_backward_f64` (backward) per #524. Non-test production consumers: `pub fn clamp_t` in `methods.rs` (S5), `impl Transform<T> for SigmoidTransform` in `ferrotorch-distributions/src/transforms.rs`, `impl BCEWithLogitsLoss` family in `ferrotorch-nn/src/loss.rs`, `impl ReLU6` in `ferrotorch-nn/src/activation.rs` (the ReLU6 activation forward), `impl Hardtanh` in `ferrotorch-nn/src/activation.rs` (the Hardtanh activation forward). Diverges from upstream only on the scalar API width documented in REQ-5: no Optional one-sided out-of-place overload and no tensor-valued bounds. Parity-sweep arm BLOCKED #1298 (currently `[clamp] 0/28 passed`). |
 | REQ-6 (exp2) | SHIPPED | impl: `pub fn exp2` + `struct Exp2Backward` in `transcendental.rs` mirroring `aten/src/ATen/native/UnaryOps.cpp:335 CREATE_UNARY_TORCH_IMPL_FUNC(exp2_out, exp2_stub)` with backward `grad * result * ln(2)` per `derivatives.yaml` `exp2`. Consumer: `pub fn exp2_t` in `methods.rs` (S5 boundary). Parity-sweep arm wired (`tools/parity-sweep/runner/src/main.rs` `"exp2" =>` arm). Closes #1303. |
 | REQ-7 (expm1) | SHIPPED | impl: `pub fn expm1` + `struct Expm1Backward` in `transcendental.rs` mirroring `UnaryOps.cpp:336 CREATE_UNARY_TORCH_IMPL_FUNC(expm1_out, expm1_stub)` with backward `grad * (result + 1)`. Consumer: `pub fn expm1_t` in `methods.rs`. Closes #1305. |
 | REQ-8 (log2) | SHIPPED | impl: `pub fn log2` + `struct Log2Backward` in `transcendental.rs` mirroring `UnaryOps.cpp:343` with backward `grad / (x * ln(2))`. Consumer: `pub fn log2_t` in `methods.rs`. Closes #1307. |

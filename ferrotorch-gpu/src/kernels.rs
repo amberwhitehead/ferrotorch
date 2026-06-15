@@ -28986,7 +28986,19 @@ pub fn gpu_clamp_f64(
                      FERROTORCH_ENABLE_GPU_FALLBACK to make this an error instead.",
                 );
                 let host = gpu_to_cpu(input, device)?;
-                let result: Vec<f64> = host.iter().map(|&x| x.max(min_val).min(max_val)).collect();
+                let result: Vec<f64> = host
+                    .iter()
+                    .map(|&x| {
+                        let mut y = x;
+                        if y < min_val {
+                            y = min_val;
+                        }
+                        if y > max_val {
+                            y = max_val;
+                        }
+                        y
+                    })
+                    .collect();
                 return cpu_to_gpu(&result, device);
             }
             Err(GpuError::PtxCompileFailed {

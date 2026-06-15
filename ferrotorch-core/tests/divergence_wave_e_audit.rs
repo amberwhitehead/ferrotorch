@@ -13,10 +13,16 @@
 
 #![allow(clippy::approx_constant)]
 
+use ferrotorch_core::grad_fns::reduction::sum;
+use ferrotorch_core::grad_fns::transcendental::clamp;
 use ferrotorch_core::{Tensor, TensorStorage, gather};
 
 fn t<T: ferrotorch_core::Float>(data: Vec<T>, shape: Vec<usize>) -> Tensor<T> {
     Tensor::from_storage(TensorStorage::cpu(data), shape, false).expect("cpu storage construction")
+}
+
+fn tracked_t<T: ferrotorch_core::Float>(data: Vec<T>, shape: Vec<usize>) -> Tensor<T> {
+    Tensor::from_storage(TensorStorage::cpu(data), shape, true).expect("cpu storage construction")
 }
 
 // ---------------------------------------------------------------------------
@@ -160,11 +166,60 @@ fn audit_1214_clamp_opt_nan_bound_fills_with_nan() {
 }
 
 #[test]
-fn audit_1214_clamp_opt_min_greater_than_max_rejected() {
+fn audit_1214_clamp_opt_min_greater_than_max_matches_torch_scalar_kernel() {
     let a = t::<f32>(vec![1.0], vec![1]);
+    a.clamp_opt_(Some(5.0_f32), Some(1.0_f32))
+        .expect("torch scalar clamp accepts min > max");
+    assert_eq!(a.data_vec().unwrap(), vec![1.0]);
+}
+
+#[test]
+fn audit_1214_clamp_legacy_nan_bound_fills_with_nan() {
+    let a = t::<f32>(vec![1.0, 2.0, 3.0], vec![3]);
+    a.clamp_(0.0, f32::NAN)
+        .expect("legacy clamp_ with NaN-bound must not error");
+    let got = a.data_vec().unwrap();
     assert!(
-        a.clamp_opt_(Some(5.0_f32), Some(1.0_f32)).is_err(),
-        "clamp_opt_ must reject min > max"
+        got.iter().all(|x| x.is_nan()),
+        "all outputs must be NaN, got {got:?}"
+    );
+}
+
+#[test]
+fn audit_1214_clamp_legacy_min_greater_than_max_matches_torch_scalar_kernel() {
+    let a = t::<f32>(vec![-1.0, 0.5, 2.0], vec![3]);
+    a.clamp_(5.0, 1.0)
+        .expect("torch scalar clamp accepts min > max");
+    assert_eq!(a.data_vec().unwrap(), vec![1.0, 1.0, 1.0]);
+}
+
+#[test]
+fn audit_1214_out_of_place_clamp_nan_bound_fills_with_nan() {
+    let a = t::<f32>(vec![1.0, 2.0, 3.0], vec![3]);
+    let out = clamp(&a, f32::NAN, 10.0).expect("torch scalar clamp accepts NaN bound");
+    let got = out.data_vec().unwrap();
+    assert!(
+        got.iter().all(|x| x.is_nan()),
+        "all outputs must be NaN, got {got:?}"
+    );
+}
+
+#[test]
+fn audit_1214_out_of_place_clamp_min_greater_than_max_matches_torch_scalar_kernel() {
+    let a = t::<f32>(vec![-1.0, 0.5, 2.0], vec![3]);
+    let out = clamp(&a, 5.0, 1.0).expect("torch scalar clamp accepts min > max");
+    assert_eq!(out.data_vec().unwrap(), vec![1.0, 1.0, 1.0]);
+}
+
+#[test]
+fn audit_1214_out_of_place_clamp_degenerate_bounds_backward_zero() {
+    let a = tracked_t::<f32>(vec![-1.0, 0.5, 2.0], vec![3]);
+    let out = clamp(&a, 5.0, 1.0).expect("torch scalar clamp accepts min > max");
+    let loss = sum(&out).expect("sum");
+    loss.backward().expect("backward");
+    assert_eq!(
+        a.grad().unwrap().unwrap().data_vec().unwrap(),
+        vec![0.0, 0.0, 0.0]
     );
 }
 

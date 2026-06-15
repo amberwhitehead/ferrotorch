@@ -31,7 +31,7 @@
 //! | REQ-7 (`sub_`) | NOT-STARTED | shape-strict, no `alpha` kwarg, no broadcasting. Blocker #1211. |
 //! | REQ-8 (`mul_`) | NOT-STARTED | shape-strict; no broadcasting; no non-test consumer. Blocker #1212. |
 //! | REQ-9 (`div_`) | NOT-STARTED | shape-strict; missing `rounding_mode` kwarg; no non-test consumer. Blocker #1213. |
-//! | REQ-10 (`clamp_`) | NOT-STARTED | both-bounds-required; missing Optional/None handling + NaN-bound special case; no non-test consumer. Blocker #1214. |
+//! | REQ-10 (`clamp_`) | NOT-STARTED | `clamp_` delegates to `clamp_opt_`, which supports PyTorch scalar optional-bound semantics, NaN-bound fill, `min > max`, and f32/f64 CUDA-resident two-bound/one-sided paths; no non-test consumer. Blocker #1214. |
 //! | REQ-11 (`sub_scaled_`) | SHIPPED | `Tensor::sub_scaled_` delegates to `self.add_scaled_(other, -alpha)` mirroring upstream's `TORCH_IMPL_FUNC(sub_out) { add_stub(device_type(), *this, -alpha); }`; the out-of-place sibling `arithmetic::sub_scaled` is the symmetric production consumer that establishes torch's `sub(alpha=k)` parity across both surfaces; parity-sweep `[sub] 88/88 passed (0 skipped, 0 failed)` (closes #1192). |
 //!
 //! # Autograd safety
@@ -50,8 +50,12 @@
 //!
 //! If either check fails, an [`FerrotorchError::InvalidArgument`] is returned.
 
+use std::any::TypeId;
+
+use crate::device::Device;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
+use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
 
 /// Validate that an in-place operation is safe to perform on `tensor`.
@@ -80,6 +84,108 @@ fn check_inplace_allowed<T: Float>(tensor: &Tensor<T>, op_name: &str) -> Ferroto
     }
 
     Ok(())
+}
+
+#[inline]
+fn is_f32<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<f32>()
+}
+
+#[inline]
+fn is_f64<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<f64>()
+}
+
+#[inline]
+fn is_bf16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::bf16>()
+}
+
+#[inline]
+fn is_f16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::f16>()
+}
+
+#[inline]
+fn clamp_scalar_pair<T: Float>(x: T, min: T, max: T) -> T {
+    let mut y = x;
+    if y < min {
+        y = min;
+    }
+    if y > max {
+        y = max;
+    }
+    y
+}
+
+fn scalar_to_f32<T: Float>(value: T, op_name: &str) -> FerrotorchResult<f32> {
+    value
+        .to_f32()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("{op_name}: scalar {value:?} cannot be represented as f32"),
+        })
+}
+
+fn scalar_to_f64<T: Float>(value: T, op_name: &str) -> FerrotorchResult<f64> {
+    value
+        .to_f64()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("{op_name}: scalar {value:?} cannot be represented as f64"),
+        })
+}
+
+fn cuda_fill_storage<T: Float>(
+    tensor: &Tensor<T>,
+    value: T,
+    op_name: &str,
+) -> FerrotorchResult<Option<TensorStorage<T>>> {
+    if !tensor.is_cuda() {
+        return Ok(None);
+    }
+    let Device::Cuda(ordinal) = tensor.device() else {
+        return Ok(None);
+    };
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let handle = if is_f32::<T>() {
+        backend.fill_f32(tensor.numel(), scalar_to_f32(value, op_name)?, ordinal)?
+    } else if is_f64::<T>() {
+        backend.fill_f64(tensor.numel(), scalar_to_f64(value, op_name)?, ordinal)?
+    } else if is_bf16::<T>() {
+        backend.fill_bf16_bf16(tensor.numel(), scalar_to_f32(value, op_name)?, ordinal)?
+    } else if is_f16::<T>() {
+        backend.fill_f16(tensor.numel(), scalar_to_f32(value, op_name)?, ordinal)?
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(TensorStorage::gpu(handle)))
+}
+
+fn cuda_clamp_pair_storage<T: Float>(
+    tensor: &Tensor<T>,
+    min: T,
+    max: T,
+    op_name: &str,
+) -> FerrotorchResult<Option<TensorStorage<T>>> {
+    if !tensor.is_cuda() {
+        return Ok(None);
+    }
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let handle = if is_f32::<T>() {
+        backend.clamp_f32(
+            tensor.gpu_handle()?,
+            scalar_to_f32(min, op_name)?,
+            scalar_to_f32(max, op_name)?,
+        )?
+    } else if is_f64::<T>() {
+        backend.clamp_f64(
+            tensor.gpu_handle()?,
+            scalar_to_f64(min, op_name)?,
+            scalar_to_f64(max, op_name)?,
+        )?
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(TensorStorage::gpu(handle)))
 }
 
 impl<T: Float> Tensor<T> {
@@ -551,7 +657,14 @@ impl<T: Float> Tensor<T> {
                     *x = num_traits::Float::floor(*x);
                 }
             }
-            _ => unreachable!("validated above"),
+            other_mode => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "div_rounding_: expected rounding_mode to be one of 'trunc' or 'floor' \
+                         but found '{other_mode}'"
+                    ),
+                });
+            }
         }
         // SAFETY: check_inplace_allowed above ensures `self` is not in the
         // autograd graph and not a requires_grad leaf; `data` has the same
@@ -560,10 +673,12 @@ impl<T: Float> Tensor<T> {
         Ok(self)
     }
 
-    /// Clamp every element to `[min, max]` in-place.
+    /// Clamp every element in-place using PyTorch's scalar two-bound kernel.
     ///
-    /// Each element `x` is replaced with `min.max(x.min(max))`, matching
-    /// PyTorch's `Tensor.clamp_()`.
+    /// Each element `x` is replaced with `min(max(x, min), max)`, matching
+    /// PyTorch's `Tensor.clamp_()` scalar path. PyTorch does not reject
+    /// `min > max`; that expression naturally returns `max` for every
+    /// non-NaN input.
     ///
     /// This is the both-bounds-required overload; for the
     /// `(Option<T>, Option<T>)` overload that mirrors torch's
@@ -571,31 +686,10 @@ impl<T: Float> Tensor<T> {
     ///
     /// # Errors
     ///
-    /// - Returns an error if `min > max`.
     /// - Returns an error if the tensor is part of the computation graph or is
     ///   a leaf with `requires_grad = true`.
     pub fn clamp_(&self, min: T, max: T) -> FerrotorchResult<&Self> {
-        if min > max {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!("clamp_ requires min <= max, got min={min:?}, max={max:?}"),
-            });
-        }
-
-        check_inplace_allowed(self, "clamp_")?;
-
-        let mut data = self.data_vec()?;
-        for x in &mut data {
-            if *x < min {
-                *x = min;
-            } else if *x > max {
-                *x = max;
-            }
-        }
-        // SAFETY: check_inplace_allowed ensures this tensor is not part of the
-        // computation graph and does not require grad, so no concurrent access.
-        unsafe { self.update_data(&data)? };
-
-        Ok(self)
+        self.clamp_opt_(Some(min), Some(max))
     }
 
     /// Clamp with optional bounds — `Tensor.clamp_(min=None, max=None)` parity.
@@ -625,20 +719,12 @@ impl<T: Float> Tensor<T> {
     /// # Errors
     ///
     /// - Returns an error if both `min` and `max` are `None`.
-    /// - Returns an error if `min > max` (when both are `Some`).
     /// - Returns an error if the tensor is part of the computation graph or
     ///   is a leaf with `requires_grad = true`.
     pub fn clamp_opt_(&self, min: Option<T>, max: Option<T>) -> FerrotorchResult<&Self> {
         if min.is_none() && max.is_none() {
             return Err(FerrotorchError::InvalidArgument {
                 message: "clamp_opt_: at least one of 'min' or 'max' must not be None".into(),
-            });
-        }
-        if let (Some(lo), Some(hi)) = (min, max)
-            && lo > hi
-        {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!("clamp_opt_ requires min <= max, got min={lo:?}, max={hi:?}"),
             });
         }
 
@@ -651,6 +737,13 @@ impl<T: Float> Tensor<T> {
         let max_is_nan = max.is_some_and(num_traits::Float::is_nan);
         if min_is_nan || max_is_nan {
             let nan = <T as num_traits::Float>::nan();
+            if let Some(storage) = cuda_fill_storage(self, nan, "clamp_opt_")? {
+                // SAFETY: check_inplace_allowed above ensures `self` is not in
+                // the autograd graph and not a requires_grad leaf; storage
+                // has exactly self.numel() elements on self.device().
+                unsafe { self.update_storage(storage)? };
+                return Ok(self);
+            }
             let new_data = vec![nan; self.numel()];
             // SAFETY: check_inplace_allowed above ensures `self` is not in
             // the autograd graph and not a requires_grad leaf; new_data
@@ -659,39 +752,73 @@ impl<T: Float> Tensor<T> {
             return Ok(self);
         }
 
-        let mut data = self.data_vec()?;
         match (min, max) {
             (Some(lo), Some(hi)) => {
+                if let Some(storage) = cuda_clamp_pair_storage(self, lo, hi, "clamp_opt_")? {
+                    // SAFETY: check_inplace_allowed above ensures `self` is
+                    // not in the autograd graph and not a requires_grad leaf;
+                    // update_storage enforces same device, same numel, and
+                    // view-aware region writes.
+                    unsafe { self.update_storage(storage)? };
+                    return Ok(self);
+                }
+                let mut data = self.data_vec()?;
                 for x in &mut data {
                     // NaN inputs propagate: `*x < lo` and `*x > hi` are both
                     // false when `*x` is NaN, leaving `*x` unchanged.
-                    if *x < lo {
-                        *x = lo;
-                    } else if *x > hi {
-                        *x = hi;
-                    }
+                    *x = clamp_scalar_pair(*x, lo, hi);
                 }
+                // SAFETY: check_inplace_allowed above ensures `self` is not in
+                // the autograd graph and not a requires_grad leaf; satisfies
+                // update_data's exclusive-access contract.
+                unsafe { self.update_data(&data)? };
             }
             (Some(lo), None) => {
+                if let Some(storage) = cuda_clamp_pair_storage(
+                    self,
+                    lo,
+                    <T as num_traits::Float>::infinity(),
+                    "clamp_opt_",
+                )? {
+                    // SAFETY: same as the both-bounds CUDA branch above.
+                    unsafe { self.update_storage(storage)? };
+                    return Ok(self);
+                }
+                let mut data = self.data_vec()?;
                 for x in &mut data {
                     if *x < lo {
                         *x = lo;
                     }
                 }
+                // SAFETY: same as the both-bounds CPU branch above.
+                unsafe { self.update_data(&data)? };
             }
             (None, Some(hi)) => {
+                if let Some(storage) = cuda_clamp_pair_storage(
+                    self,
+                    <T as num_traits::Float>::neg_infinity(),
+                    hi,
+                    "clamp_opt_",
+                )? {
+                    // SAFETY: same as the both-bounds CUDA branch above.
+                    unsafe { self.update_storage(storage)? };
+                    return Ok(self);
+                }
+                let mut data = self.data_vec()?;
                 for x in &mut data {
                     if *x > hi {
                         *x = hi;
                     }
                 }
+                // SAFETY: same as the both-bounds CPU branch above.
+                unsafe { self.update_data(&data)? };
             }
-            (None, None) => unreachable!("rejected above"),
+            (None, None) => {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: "clamp_opt_: at least one of 'min' or 'max' must not be None".into(),
+                });
+            }
         }
-        // SAFETY: check_inplace_allowed above ensures `self` is not in the
-        // autograd graph and not a requires_grad leaf; satisfies update_data's
-        // exclusive-access contract.
-        unsafe { self.update_data(&data)? };
         Ok(self)
     }
 }
@@ -903,13 +1030,28 @@ mod tests {
     }
 
     #[test]
-    fn test_clamp_invalid_range() {
+    fn test_clamp_min_greater_than_max_matches_torch_scalar_kernel() {
         let t =
             Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 2.0]), vec![2], false).unwrap();
 
-        let err = t.clamp_(10.0, 0.0).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("min <= max"), "got: {msg}");
+        t.clamp_(10.0, 0.0).unwrap();
+
+        let data = t.data().unwrap();
+        assert_eq!(data, &[0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_clamp_nan_bound_fills_all_values_like_torch() {
+        let t = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 2.0, 3.0]), vec![3], false)
+            .unwrap();
+
+        t.clamp_(f32::NAN, 10.0).unwrap();
+
+        let data = t.data().unwrap();
+        assert!(
+            data.iter().all(|x| x.is_nan()),
+            "NaN scalar bound must fill the whole tensor with NaN, got {data:?}"
+        );
     }
 
     #[test]

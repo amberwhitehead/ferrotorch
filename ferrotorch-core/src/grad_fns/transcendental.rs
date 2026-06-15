@@ -109,6 +109,78 @@ fn cuda_zeros_like<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)
 }
 
+#[inline]
+fn clamp_scalar_pair<T: Float>(x: T, min: T, max: T) -> T {
+    let mut y = x;
+    if y < min {
+        y = min;
+    }
+    if y > max {
+        y = max;
+    }
+    y
+}
+
+fn scalar_to_f32<T: Float>(value: T, op_name: &str) -> FerrotorchResult<f32> {
+    value
+        .to_f32()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("{op_name}: scalar {value:?} cannot be represented as f32"),
+        })
+}
+
+fn scalar_to_f64<T: Float>(value: T, op_name: &str) -> FerrotorchResult<f64> {
+    value
+        .to_f64()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("{op_name}: scalar {value:?} cannot be represented as f64"),
+        })
+}
+
+fn cuda_fill_storage<T: Float>(
+    input: &Tensor<T>,
+    value: T,
+    op_name: &str,
+) -> FerrotorchResult<Option<TensorStorage<T>>> {
+    let crate::device::Device::Cuda(ordinal) = input.device() else {
+        return Ok(None);
+    };
+    let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let handle = if is_f32::<T>() {
+        backend.fill_f32(input.numel(), scalar_to_f32(value, op_name)?, ordinal)?
+    } else if is_f64::<T>() {
+        backend.fill_f64(input.numel(), scalar_to_f64(value, op_name)?, ordinal)?
+    } else if is_bf16::<T>() {
+        backend.fill_bf16_bf16(input.numel(), scalar_to_f32(value, op_name)?, ordinal)?
+    } else if is_f16::<T>() {
+        backend.fill_f16(input.numel(), scalar_to_f32(value, op_name)?, ordinal)?
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(TensorStorage::gpu(handle)))
+}
+
+fn clamp_tensor_from_storage<T: Float>(
+    input: &Tensor<T>,
+    storage: TensorStorage<T>,
+    min: T,
+    max: T,
+) -> FerrotorchResult<Tensor<T>> {
+    if needs_grad_unary(input) {
+        Tensor::from_operation(
+            storage,
+            input.shape().to_vec(),
+            Arc::new(ClampBackward {
+                input: input.clone(),
+                min,
+                max,
+            }),
+        )
+    } else {
+        Tensor::from_storage(storage, input.shape().to_vec(), false)
+    }
+}
+
 // ===========================================================================
 // exp
 // ===========================================================================
@@ -568,11 +640,26 @@ impl<T: Float> GradFn<T> for ClampBackward<T> {
     }
 }
 
-/// Differentiable elementwise clamp: `c[i] = x[i].clamp(min, max)`.
+/// Differentiable elementwise scalar clamp using PyTorch's
+/// `min(max(x, min), max)` order.
 ///
-/// Gradient flows through only where `min <= x[i] <= max`; it is zero at
-/// the boundaries where the value was clamped.
+/// Gradient flows through where `min <= x[i] <= max`; degenerate scalar
+/// bounds such as `min > max` and NaN bounds produce zero input gradient
+/// through the same `ClampBackward` predicate.
 pub fn clamp<T: Float>(input: &Tensor<T>, min: T, max: T) -> FerrotorchResult<Tensor<T>> {
+    let min_is_nan = num_traits::Float::is_nan(min);
+    let max_is_nan = num_traits::Float::is_nan(max);
+    if min_is_nan || max_is_nan {
+        let nan = <T as num_traits::Float>::nan();
+        if input.is_cuda()
+            && let Some(storage) = cuda_fill_storage(input, nan, "clamp")?
+        {
+            return clamp_tensor_from_storage(input, storage, min, max);
+        }
+        let storage = TensorStorage::cpu(vec![nan; input.numel()]);
+        return clamp_tensor_from_storage(input, storage, min, max);
+    }
+
     // GPU fast path for f32/f64
     if input.is_cuda()
         && (is_f32::<T>() || is_f64::<T>())
@@ -582,12 +669,12 @@ pub fn clamp<T: Float>(input: &Tensor<T>, min: T, max: T) -> FerrotorchResult<Te
         // buffer before the elementwise kernel reads element 0.
         let input = input.contiguous()?;
         let handle = if is_f32::<T>() {
-            let min_f32 = min.to_f32().unwrap_or(f32::MIN);
-            let max_f32 = max.to_f32().unwrap_or(f32::MAX);
+            let min_f32 = scalar_to_f32(min, "clamp")?;
+            let max_f32 = scalar_to_f32(max, "clamp")?;
             backend.clamp_f32(input.gpu_handle()?, min_f32, max_f32)?
         } else {
-            let min_f64 = min.to_f64().unwrap_or(f64::MIN);
-            let max_f64 = max.to_f64().unwrap_or(f64::MAX);
+            let min_f64 = scalar_to_f64(min, "clamp")?;
+            let max_f64 = scalar_to_f64(max, "clamp")?;
             backend.clamp_f64(input.gpu_handle()?, min_f64, max_f64)?
         };
         return if needs_grad_unary(&input) {
@@ -606,15 +693,7 @@ pub fn clamp<T: Float>(input: &Tensor<T>, min: T, max: T) -> FerrotorchResult<Te
     }
 
     // CPU path
-    let output = unary_map(input, |x| {
-        if x < min {
-            min
-        } else if x > max {
-            max
-        } else {
-            x
-        }
-    })?;
+    let output = unary_map(input, |x| clamp_scalar_pair(x, min, max))?;
 
     if needs_grad_unary(input) {
         let (storage, shape) = output.into_storage_and_shape()?;
