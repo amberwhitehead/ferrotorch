@@ -2181,7 +2181,7 @@ mod tests {
 
     /// Helper: wrap a tensor in sum-to-scalar so backward() can be called.
     fn sum_to_scalar(t: &Tensor<f32>) -> Tensor<f32> {
-        let data = t.data().unwrap();
+        let data = t.data_vec().unwrap();
         let total: f32 = data.iter().sum();
         Tensor::from_operation(
             TensorStorage::cpu(vec![total]),

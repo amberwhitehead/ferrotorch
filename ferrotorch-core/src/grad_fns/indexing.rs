@@ -180,25 +180,14 @@ fn gather_dim_cuda<T: Float>(
     let ordinal = cuda_ordinal(input_c.device(), op)?;
     let idx_handle = upload_expanded_dim_indices(indices, outer, inner, ordinal)?;
     let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-    let handle = match T::dtype() {
-        DType::F32 => backend.gather_dim_f32(
-            input_c.gpu_handle()?,
-            &idx_handle,
-            outer,
-            in_dim_size,
-            out_dim_size,
-            inner,
-        )?,
-        DType::F64 => backend.gather_dim_f64(
-            input_c.gpu_handle()?,
-            &idx_handle,
-            outer,
-            in_dim_size,
-            out_dim_size,
-            inner,
-        )?,
-        _ => return Err(FerrotorchError::NotImplementedOnCuda { op }),
-    };
+    let handle = backend.gather_intidx(
+        input_c.gpu_handle()?,
+        &idx_handle,
+        outer,
+        in_dim_size,
+        out_dim_size,
+        inner,
+    )?;
     Tensor::from_storage(TensorStorage::gpu(handle), output_shape, false)
 }
 
@@ -277,11 +266,6 @@ impl<T: Float> GradFn<T> for IndexSelectBackward<T> {
             // case), dispatched on T::dtype() with the index uploaded as i64
             // (indices above 2^24 are not representable in f32).
             let dt = T::dtype();
-            if !matches!(dt, crate::dtype::DType::F32 | crate::dtype::DType::F64) {
-                return Err(FerrotorchError::NotImplementedOnCuda {
-                    op: "IndexSelectBackward",
-                });
-            }
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
             let ordinal = match grad_output.device() {
                 Device::Cuda(o) => o,
@@ -290,27 +274,17 @@ impl<T: Float> GradFn<T> for IndexSelectBackward<T> {
             let idx_handle = crate::ops::indexing::upload_index_i64(&self.indices, ordinal)?;
             let zeros = backend.alloc_zeros(input_len, dt, ordinal)?;
             let go_handle = grad_output.gpu_handle()?;
-            let result_handle = if dt == crate::dtype::DType::F32 {
-                backend.scatter_add_dim_f32(
-                    &zeros,
-                    &idx_handle,
-                    go_handle,
-                    1,
-                    input_len,
-                    self.indices.len(),
-                    1,
-                )?
-            } else {
-                backend.scatter_add_dim_f64(
-                    &zeros,
-                    &idx_handle,
-                    go_handle,
-                    1,
-                    input_len,
-                    self.indices.len(),
-                    1,
-                )?
-            };
+            let result_handle = scatter_dim_cuda_handle::<T>(
+                &zeros,
+                &idx_handle,
+                go_handle,
+                1,
+                input_len,
+                self.indices.len(),
+                1,
+                true,
+                "IndexSelectBackward",
+            )?;
             let grad_tensor = Tensor::from_storage(
                 TensorStorage::gpu(result_handle),
                 self.input.shape().to_vec(),
@@ -380,34 +354,26 @@ pub fn index_select_1d<T: Float>(
         // GPU path (#1822/#1823): 1-D gather via the dim-aware kernel
         // (outer=1, inner=1), dispatched on T::dtype() with an i64 index
         // upload — index values above 2^24 are not representable in f32.
-        let dt = T::dtype();
-        if !matches!(dt, crate::dtype::DType::F32 | crate::dtype::DType::F64) {
-            return Err(FerrotorchError::NotImplementedOnCuda {
-                op: "index_select_1d",
-            });
-        }
-        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let ordinal = match input.device() {
-            Device::Cuda(o) => o,
-            _ => unreachable!(),
-        };
-        let idx_handle = crate::ops::indexing::upload_index_i64(indices, ordinal)?;
-        let in_handle = input.gpu_handle()?;
-        let result_handle = if dt == crate::dtype::DType::F32 {
-            backend.gather_dim_f32(in_handle, &idx_handle, 1, input_len, indices.len(), 1)?
-        } else {
-            backend.gather_dim_f64(in_handle, &idx_handle, 1, input_len, indices.len(), 1)?
-        };
-        let storage = TensorStorage::gpu(result_handle);
+        let result = gather_dim_cuda(
+            input,
+            indices,
+            1,
+            input_len,
+            indices.len(),
+            1,
+            output_shape.clone(),
+            "index_select_1d",
+        )?;
 
         if input.requires_grad() && is_grad_enabled() {
             let grad_fn = Arc::new(IndexSelectBackward {
                 input: input.clone(),
                 indices: indices.to_vec(),
             });
+            let (storage, output_shape) = result.into_storage_and_shape()?;
             Tensor::from_operation(storage, output_shape, grad_fn)
         } else {
-            Tensor::from_storage(storage, output_shape, false)
+            Ok(result)
         }
     } else {
         // CPU path: direct gather.
@@ -1472,12 +1438,6 @@ impl<T: Float> GradFn<T> for IndexSelectDimBackward<T> {
         // index resident and expand it resident before the scatter-add launch.
         if grad_output.is_cuda() {
             let dt = T::dtype();
-            if !matches!(dt, crate::dtype::DType::F32 | crate::dtype::DType::F64) {
-                // Unsupported float dtype on CUDA: surface explicitly.
-                return Err(FerrotorchError::NotImplementedOnCuda {
-                    op: "IndexSelectDimBackward",
-                });
-            }
             let ordinal = match grad_output.device() {
                 Device::Cuda(o) => o,
                 _ => unreachable!(),
@@ -1533,27 +1493,17 @@ impl<T: Float> GradFn<T> for IndexSelectDimBackward<T> {
             };
             let zeros = backend.alloc_zeros(input_numel, dt, ordinal)?;
             let go_handle = grad_output.gpu_handle()?;
-            let result_handle = if dt == crate::dtype::DType::F32 {
-                backend.scatter_add_dim_f32(
-                    &zeros,
-                    idx_handle,
-                    go_handle,
-                    outer,
-                    in_dim_size,
-                    out_dim_size,
-                    inner,
-                )?
-            } else {
-                backend.scatter_add_dim_f64(
-                    &zeros,
-                    idx_handle,
-                    go_handle,
-                    outer,
-                    in_dim_size,
-                    out_dim_size,
-                    inner,
-                )?
-            };
+            let result_handle = scatter_dim_cuda_handle::<T>(
+                &zeros,
+                idx_handle,
+                go_handle,
+                outer,
+                in_dim_size,
+                out_dim_size,
+                inner,
+                true,
+                "IndexSelectDimBackward",
+            )?;
             let grad_tensor = Tensor::from_storage(
                 TensorStorage::gpu(result_handle),
                 input_shape.to_vec(),
@@ -1631,17 +1581,83 @@ pub fn index_select_dim<T: Float, I: IntElement>(
             message: format!("index_select_dim: dim {dim} out of range for shape {input_shape:?}"),
         });
     }
-    if indices.ndim() != 1 {
+    if indices.ndim() > 1 {
         return Err(FerrotorchError::ShapeMismatch {
             message: format!(
-                "index_select_dim: indices must be 1-D, got shape {:?}",
+                "index_select_dim: indices must be 0-D or 1-D, got shape {:?}",
                 indices.shape()
             ),
         });
     }
 
     let in_dim_size = input_shape[dim];
-    // Validate + widen indices.
+
+    // Compute output: same shape but axis `dim` replaced by indices.numel().
+    let mut output_shape = input_shape.to_vec();
+    output_shape[dim] = indices.numel();
+
+    let outer: usize = input_shape[..dim].iter().product();
+    let inner: usize = input_shape[dim + 1..].iter().product();
+    let out_dim_size = indices.numel();
+
+    // GPU path: device-resident gather through `index_select_intidx`, which
+    // dispatches on (src.dtype(), index.dtype()). The output buffer is
+    // allocated on-device; no host round-trip. The index tensor must already
+    // be resident on the same device, matching PyTorch's CUDA contract.
+    if input.is_cuda() {
+        if input.device() != indices.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: input.device(),
+                got: indices.device(),
+            });
+        }
+        let input_c = input.contiguous()?;
+        let (outer, in_dim_size, inner) = {
+            let shape = input_c.shape();
+            (
+                shape[..dim].iter().product(),
+                shape[dim],
+                shape[dim + 1..].iter().product(),
+            )
+        };
+        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        backend.check_int_indices_in_bounds(
+            indices.gpu_handle()?,
+            dim,
+            in_dim_size,
+            "index_select_dim",
+        )?;
+        let result_handle = backend.index_select_intidx(
+            input_c.gpu_handle()?,
+            indices.gpu_handle()?,
+            outer,
+            in_dim_size,
+            out_dim_size,
+            inner,
+        )?;
+
+        let storage = TensorStorage::gpu(result_handle);
+        return if input_c.requires_grad() && is_grad_enabled() {
+            let grad_fn = Arc::new(IndexSelectDimBackward {
+                input: input_c,
+                dim,
+                indices: Vec::new(),
+                indices_cuda: Some(indices.cast::<i64>()?),
+            });
+            Tensor::from_operation(storage, output_shape, grad_fn)
+        } else {
+            Tensor::from_storage(storage, output_shape, false)
+        };
+    }
+
+    if input.device() != indices.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: input.device(),
+            got: indices.device(),
+        });
+    }
+
+    // Validate + widen host indices.
     let mut idx_usize: Vec<usize> = Vec::with_capacity(indices.numel());
     for v in indices.data()? {
         let i = v.to_i64();
@@ -1659,62 +1675,6 @@ pub fn index_select_dim<T: Float, I: IntElement>(
             });
         }
         idx_usize.push(iu);
-    }
-
-    // Compute output: same shape but axis `dim` replaced by indices.len().
-    let mut output_shape = input_shape.to_vec();
-    output_shape[dim] = idx_usize.len();
-
-    let outer: usize = input_shape[..dim].iter().product();
-    let inner: usize = input_shape[dim + 1..].iter().product();
-    let out_dim_size = idx_usize.len();
-
-    // GPU path: device-resident gather through `index_select_intidx`, which
-    // dispatches on (src.dtype(), index.dtype()). The output buffer is
-    // allocated on-device; no host round-trip. Indices upload as a resident
-    // `i64` buffer (#1823/CORE-129: index values above 2^24 are not all
-    // representable in the previous f32 encoding, so a huge selected axis
-    // silently read the neighboring slice).
-    if input.is_cuda() {
-        use std::any::TypeId;
-        let is_t_f32 = TypeId::of::<T>() == TypeId::of::<f32>();
-        let is_t_f64 = TypeId::of::<T>() == TypeId::of::<f64>();
-        if is_t_f32 || is_t_f64 {
-            let ordinal = match input.device() {
-                Device::Cuda(o) => o,
-                _ => unreachable!("input.is_cuda() but device() not Cuda"),
-            };
-            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let idx_handle = crate::ops::indexing::upload_index_i64(&idx_usize, ordinal)?;
-
-            let result_handle = backend.index_select_intidx(
-                input.gpu_handle()?,
-                &idx_handle,
-                outer,
-                in_dim_size,
-                out_dim_size,
-                inner,
-            )?;
-
-            let storage = TensorStorage::gpu(result_handle);
-            return if input.requires_grad() && is_grad_enabled() {
-                let grad_fn = Arc::new(IndexSelectDimBackward {
-                    input: input.clone(),
-                    dim,
-                    indices: idx_usize,
-                    indices_cuda: None,
-                });
-                Tensor::from_operation(storage, output_shape, grad_fn)
-            } else {
-                Tensor::from_storage(storage, output_shape, false)
-            };
-        }
-        // Non-f32/f64 floats (e.g., bf16) still surface explicit
-        // NotImplementedOnCuda — preserves the "no silent fallback"
-        // contract for unsupported dtypes.
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: "index_select_dim",
-        });
     }
 
     // CPU path: dense memcpy along axis.
