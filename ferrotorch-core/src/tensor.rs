@@ -66,6 +66,71 @@ impl TensorId {
     }
 }
 
+fn decode_device_bytes<T: Float>(op: &str, bytes: &[u8]) -> FerrotorchResult<Vec<T>> {
+    let elem_size = std::mem::size_of::<T>();
+    if !bytes.len().is_multiple_of(elem_size) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: D2H readback of {} bytes is not a multiple of \
+                 size_of::<{}>()={elem_size}",
+                bytes.len(),
+                std::any::type_name::<T>()
+            ),
+        });
+    }
+
+    let len = bytes.len() / elem_size;
+    let mut data: Vec<T> = Vec::with_capacity(len);
+    // SAFETY: `data` was freshly allocated just above with capacity `len`
+    // under `Layout::array::<T>(len)`, so its pointer is valid for
+    // `len * elem_size` bytes of writes and correctly aligned for `T` by
+    // construction. The source `bytes` is valid for the same number of bytes
+    // of reads (checked above); `u8` copies impose no source alignment
+    // requirement, and the allocations are distinct. `T` is a plain numeric
+    // Float element type with no padding or invalid bit patterns.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            data.as_mut_ptr().cast::<u8>(),
+            len * elem_size,
+        );
+        data.set_len(len);
+    }
+    Ok(data)
+}
+
+fn gather_logical_from_slice<T: Float>(
+    op: &'static str,
+    storage: &[T],
+    shape: &[usize],
+    strides: &[isize],
+    offset: usize,
+) -> FerrotorchResult<Vec<T>> {
+    crate::stride_tricks::validate_bounds(op, shape, strides, offset, storage.len())?;
+    let numel = checked_numel(shape, op)?;
+    let ndim = shape.len();
+    let mut result = Vec::with_capacity(numel);
+    let mut indices = vec![0usize; ndim];
+
+    for _ in 0..numel {
+        let mut flat = offset as isize;
+        for d in 0..ndim {
+            flat += indices[d] as isize * strides[d];
+        }
+        result.push(storage[flat as usize]);
+
+        for d in (0..ndim).rev() {
+            indices[d] += 1;
+            if indices[d] < shape[d] {
+                break;
+            }
+            indices[d] = 0;
+        }
+    }
+
+    Ok(result)
+}
+
 /// The backward function trait for reverse-mode automatic differentiation.
 ///
 /// Every differentiable operation implements this trait. The autograd engine
@@ -1011,79 +1076,59 @@ impl<T: Float> Tensor<T> {
                 let needs_materialize =
                     !self.is_contiguous() || self.storage_offset() != 0 || handle.len() != numel;
 
-                let bytes = if needs_materialize {
+                let data = if needs_materialize {
                     if self.shape().len() > 8 {
-                        return Err(FerrotorchError::NotImplementedOnCuda {
-                            op: "Tensor::to(Cpu): materialize CUDA view with rank > 8",
-                        });
-                    }
-                    let view_shape = self.shape().to_vec();
-                    let src_strides = self.strides().to_vec();
-                    let src_offset = self.storage_offset();
-                    let materialized = if TypeId::of::<T>() == TypeId::of::<f32>() {
-                        backend.strided_copy_f32(handle, &view_shape, &src_strides, src_offset)?
-                    } else if TypeId::of::<T>() == TypeId::of::<f64>() {
-                        backend.strided_copy_f64(handle, &view_shape, &src_strides, src_offset)?
-                    } else if TypeId::of::<T>() == TypeId::of::<half::f16>()
-                        || TypeId::of::<T>() == TypeId::of::<half::bf16>()
-                    {
-                        backend.strided_copy_u16(handle, &view_shape, &src_strides, src_offset)?
+                        let bytes = backend.gpu_to_cpu(handle)?;
+                        let storage_data = decode_device_bytes::<T>(
+                            "Tensor::to(Cpu): high-rank CUDA storage readback",
+                            &bytes,
+                        )?;
+                        gather_logical_from_slice(
+                            "Tensor::to(Cpu): high-rank CUDA view materialization",
+                            &storage_data,
+                            self.shape(),
+                            self.strides(),
+                            self.storage_offset(),
+                        )?
                     } else {
-                        return Err(FerrotorchError::NotImplementedOnCuda {
-                            op: "Tensor::to(Cpu): materialize CUDA view for dtype",
-                        });
-                    };
-                    backend.gpu_to_cpu(&materialized)?
+                        let view_shape = self.shape().to_vec();
+                        let src_strides = self.strides().to_vec();
+                        let src_offset = self.storage_offset();
+                        let materialized = if TypeId::of::<T>() == TypeId::of::<f32>() {
+                            backend.strided_copy_f32(
+                                handle,
+                                &view_shape,
+                                &src_strides,
+                                src_offset,
+                            )?
+                        } else if TypeId::of::<T>() == TypeId::of::<f64>() {
+                            backend.strided_copy_f64(
+                                handle,
+                                &view_shape,
+                                &src_strides,
+                                src_offset,
+                            )?
+                        } else if TypeId::of::<T>() == TypeId::of::<half::f16>()
+                            || TypeId::of::<T>() == TypeId::of::<half::bf16>()
+                        {
+                            backend.strided_copy_u16(
+                                handle,
+                                &view_shape,
+                                &src_strides,
+                                src_offset,
+                            )?
+                        } else {
+                            return Err(FerrotorchError::NotImplementedOnCuda {
+                                op: "Tensor::to(Cpu): materialize CUDA view for dtype",
+                            });
+                        };
+                        let bytes = backend.gpu_to_cpu(&materialized)?;
+                        decode_device_bytes("Tensor::to(Cpu): CUDA view materialization", &bytes)?
+                    }
                 } else {
-                    backend.gpu_to_cpu(handle)?
+                    let bytes = backend.gpu_to_cpu(handle)?;
+                    decode_device_bytes("Tensor::to(Cpu): CUDA readback", &bytes)?
                 };
-                // CORE-100 (#1794): decode the D2H byte buffer BY COPY into a
-                // freshly allocated `Vec<T>` — never by reinterpreting the
-                // `Vec<u8>` allocation in place. `GpuBackend::gpu_to_cpu`
-                // only promises an ordinary `Vec<u8>`: no alignment guarantee
-                // for `T` and no allocation-layout compatibility (a conforming
-                // backend may return a normally allocated byte vector).
-                // Rebuilding a `Vec<T>` over that allocation with
-                // `Vec::from_raw_parts` was undefined behavior (misaligned
-                // reference + dealloc under the wrong layout, observed under
-                // MIRI). One extra host memcpy is the price of soundness; the
-                // D2H transfer itself already dominates this path.
-                let elem_size = std::mem::size_of::<T>();
-                if bytes.len() % elem_size != 0 {
-                    return Err(FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "Tensor::to(Cpu): D2H readback of {} bytes is not a \
-                             multiple of size_of::<{}>()={elem_size}",
-                            bytes.len(),
-                            std::any::type_name::<T>()
-                        ),
-                    });
-                }
-                let len = bytes.len() / elem_size;
-                let mut data: Vec<T> = Vec::with_capacity(len);
-                // SAFETY: `data` was freshly allocated just above with
-                // capacity `len` under `Layout::array::<T>(len)`, so its
-                // pointer is valid for `len * elem_size` bytes of writes and
-                // correctly aligned for `T` by construction. The source
-                // `bytes` is valid for `len * elem_size` bytes of reads (its
-                // length equals that product per the check above); `u8`-typed
-                // copies impose no alignment requirement on the source, and
-                // the two allocations are distinct, satisfying
-                // `copy_nonoverlapping`'s no-overlap contract. After the copy
-                // the first `len` elements are fully initialized, and `T` is
-                // a `Float` element type (f32 / f64 / half::f16 / half::bf16)
-                // — plain numeric types with no padding and no invalid bit
-                // patterns — so `set_len(len)` exposes only valid values.
-                // Nothing is assumed about `bytes`' alignment, capacity, or
-                // allocator.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        bytes.as_ptr(),
-                        data.as_mut_ptr().cast::<u8>(),
-                        len * elem_size,
-                    );
-                    data.set_len(len);
-                }
                 let storage = TensorStorage::cpu(data);
                 if needs_grad_fn {
                     let grad_fn = Arc::new(ToDeviceBackward {
