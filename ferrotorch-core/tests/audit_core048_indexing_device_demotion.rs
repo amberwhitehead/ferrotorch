@@ -288,6 +288,71 @@ fn scatter_reduce_value_aware_cuda_resident_f64() {
     scatter_reduce_value_aware_cuda_resident::<f64>();
 }
 
+/// Live torch (cuda, both dtypes):
+///   x=[0,2,3,4], s=[6,6,7], idx=[0,0,2], seed=[6,8,10,12]
+///   include_self=True:
+///     out=[4,2,5,4], x.grad=[2,8,5,12], s.grad=[2,2,5]
+///   include_self=False:
+///     out=[6,2,7,4], x.grad=[0,8,0,12], s.grad=[3,3,10]
+///
+/// Mean is a resident composite: sum scatter_reduce divided by a resident
+/// scatter_add count tensor. The exact integer-valued oracle still exercises
+/// duplicate-index denominators 2 and 3.
+fn scatter_reduce_mean_cuda_resident<T: Float>() {
+    ensure_cuda_backend();
+    let x = t_cuda::<T>(&[0.0, 2.0, 3.0, 4.0], &[4], true);
+    let s = t_cuda::<T>(&[6.0, 6.0, 7.0], &[3], true);
+    let out = x
+        .scatter_reduce_t(0, &[0, 0, 2], &[3], &s, "mean", true)
+        .unwrap();
+    assert_cuda_with(&out, "scatter_reduce(mean) output", &[4.0, 2.0, 5.0, 4.0]);
+    let seed = t_cuda::<T>(&[6.0, 8.0, 10.0, 12.0], &[4], false);
+    backward_with_grad(&out, Some(&seed)).unwrap();
+    assert_cuda_with(
+        &grad_of(&x),
+        "scatter_reduce(mean) grad_input",
+        &[2.0, 8.0, 5.0, 12.0],
+    );
+    assert_cuda_with(
+        &grad_of(&s),
+        "scatter_reduce(mean) grad_src",
+        &[2.0, 2.0, 5.0],
+    );
+
+    let x = t_cuda::<T>(&[0.0, 2.0, 3.0, 4.0], &[4], true);
+    let s = t_cuda::<T>(&[6.0, 6.0, 7.0], &[3], true);
+    let out = x
+        .scatter_reduce_t(0, &[0, 0, 2], &[3], &s, "mean", false)
+        .unwrap();
+    assert_cuda_with(
+        &out,
+        "scatter_reduce(mean,!include_self) output",
+        &[6.0, 2.0, 7.0, 4.0],
+    );
+    let seed = t_cuda::<T>(&[6.0, 8.0, 10.0, 12.0], &[4], false);
+    backward_with_grad(&out, Some(&seed)).unwrap();
+    assert_cuda_with(
+        &grad_of(&x),
+        "scatter_reduce(mean,!include_self) grad_input",
+        &[0.0, 8.0, 0.0, 12.0],
+    );
+    assert_cuda_with(
+        &grad_of(&s),
+        "scatter_reduce(mean,!include_self) grad_src",
+        &[3.0, 3.0, 10.0],
+    );
+}
+
+#[test]
+fn scatter_reduce_mean_cuda_resident_f32() {
+    scatter_reduce_mean_cuda_resident::<f32>();
+}
+
+#[test]
+fn scatter_reduce_mean_cuda_resident_f64() {
+    scatter_reduce_mean_cuda_resident::<f64>();
+}
+
 /// torch: `cuda_x.scatter_reduce(0, cuda_idx, cpu_src, 'sum')` ->
 /// RuntimeError "Expected all tensors to be on the same device, but got src
 /// is on cpu, different from other tensors on cuda:0".

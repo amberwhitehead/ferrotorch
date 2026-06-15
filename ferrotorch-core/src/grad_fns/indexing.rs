@@ -2345,14 +2345,13 @@ fn cuda_scatter_zero_at_index<T: Float>(
 /// Reduce mode for `scatter_reduce` mirroring upstream `ReductionType` at
 /// `aten/src/ATen/native/ReductionType.h` (enum SUM / PROD / MAX / MIN /
 /// MEAN). PyTorch's user-facing string-keyword `reduce` arg per
-/// `torch/_torch_docs.py` accepts `"sum" | "prod" | "amax" | "amin" | "mean"`;
-/// ferrotorch implements the four non-mean variants here (mean requires a
-/// per-bucket count which the upstream computes via a second `scatter_add` —
-/// out of scope for the 2026-05-25 sum-only op_db characterization sweep).
+/// `torch/_torch_docs.py` accepts `"sum" | "prod" | "amax" | "amin" | "mean"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScatterReduce {
     /// `output[idx] += src[i]` (matches `scatter_add` semantics for include_self=true).
     Sum,
+    /// `output[idx] = mean(output[idx], src values for the bucket)`.
+    Mean,
     /// `output[idx] *= src[i]`.
     Prod,
     /// `output[idx] = max(output[idx], src[i])`.
@@ -2364,8 +2363,7 @@ pub enum ScatterReduce {
 impl ScatterReduce {
     /// Parse the user-facing string (matches upstream `get_operator_enum` at
     /// `TensorAdvancedIndexing.cpp:2368` which dispatches by string). Returns
-    /// `None` for the upstream-accepted `"mean"` mode (ferrotorch hasn't
-    /// shipped MEAN yet — separate work item) and for unknown strings.
+    /// `None` for unknown strings.
     ///
     /// Named `parse_str` rather than `from_str` to avoid the
     /// `clippy::should_implement_trait` warning for `std::str::FromStr`
@@ -2374,6 +2372,7 @@ impl ScatterReduce {
     pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "sum" => Some(Self::Sum),
+            "mean" => Some(Self::Mean),
             "prod" => Some(Self::Prod),
             "amax" => Some(Self::Amax),
             "amin" => Some(Self::Amin),
@@ -2382,12 +2381,13 @@ impl ScatterReduce {
     }
 
     #[inline]
-    fn gpu(self) -> GpuScatterReduce {
+    fn gpu(self) -> Option<GpuScatterReduce> {
         match self {
-            Self::Sum => GpuScatterReduce::Sum,
-            Self::Prod => GpuScatterReduce::Prod,
-            Self::Amax => GpuScatterReduce::Amax,
-            Self::Amin => GpuScatterReduce::Amin,
+            Self::Sum => Some(GpuScatterReduce::Sum),
+            Self::Mean => None,
+            Self::Prod => Some(GpuScatterReduce::Prod),
+            Self::Amax => Some(GpuScatterReduce::Amax),
+            Self::Amin => Some(GpuScatterReduce::Amin),
         }
     }
 }
@@ -2507,11 +2507,34 @@ fn scatter_reduce_cuda_forward<T: Float>(
             op: "scatter_reduce",
         });
     }
+    if reduce == ScatterReduce::Mean {
+        let summed = scatter_reduce_cuda_forward(
+            input,
+            dim,
+            index,
+            index_shape,
+            src,
+            ScatterReduce::Sum,
+            include_self,
+        )?;
+        let counts = scatter_reduce_mean_counts_cuda::<T>(
+            input.shape(),
+            dim,
+            index,
+            index_shape,
+            include_self,
+            summed.device(),
+        )?;
+        return crate::grad_fns::arithmetic::div(&summed, &counts);
+    }
     let input_c = no_grad(|| input.contiguous())?;
     let src_slab = cuda_src_prefix_slab_for_index(src, index_shape)?.contiguous()?;
     let ordinal = cuda_ordinal(input_c.device(), "scatter_reduce")?;
     let idx_handle = crate::ops::indexing::upload_index_i64(index, ordinal)?;
     let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let gpu_reduce = reduce.gpu().ok_or(FerrotorchError::NotImplementedOnCuda {
+        op: "scatter_reduce",
+    })?;
     let handle = match T::dtype() {
         DType::F32 => backend.scatter_reduce_nd_f32(
             input_c.gpu_handle()?,
@@ -2520,7 +2543,7 @@ fn scatter_reduce_cuda_forward<T: Float>(
             input_c.shape(),
             index_shape,
             dim,
-            reduce.gpu(),
+            gpu_reduce,
             include_self,
         )?,
         DType::F64 => backend.scatter_reduce_nd_f64(
@@ -2530,7 +2553,7 @@ fn scatter_reduce_cuda_forward<T: Float>(
             input_c.shape(),
             index_shape,
             dim,
-            reduce.gpu(),
+            gpu_reduce,
             include_self,
         )?,
         _ => {
@@ -2540,6 +2563,59 @@ fn scatter_reduce_cuda_forward<T: Float>(
         }
     };
     Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)
+}
+
+fn scatter_reduce_mean_counts_cpu<T: Float>(
+    input_shape: &[usize],
+    dim: usize,
+    index: &[usize],
+    index_shape: &[usize],
+    include_self: bool,
+) -> Vec<T> {
+    let zero = <T as num_traits::Zero>::zero();
+    let one = <T as num_traits::One>::one();
+    let input_numel: usize = input_shape.iter().product();
+    let mut counts = vec![if include_self { one } else { zero }; input_numel];
+    let index_numel: usize = index_shape.iter().product();
+    let mut coords = vec![0usize; input_shape.len()];
+    for i in 0..index_numel {
+        let mut dst_coords = coords.clone();
+        dst_coords[dim] = index[i];
+        counts[flat_index(&dst_coords, input_shape)] += one;
+        if i + 1 < index_numel {
+            increment_coords(&mut coords, index_shape);
+        }
+    }
+    for count in &mut counts {
+        if *count == zero {
+            *count = one;
+        }
+    }
+    counts
+}
+
+fn scatter_reduce_mean_counts_cuda<T: Float>(
+    input_shape: &[usize],
+    dim: usize,
+    index: &[usize],
+    index_shape: &[usize],
+    include_self: bool,
+    device: Device,
+) -> FerrotorchResult<Tensor<T>> {
+    let zero = <T as num_traits::Zero>::zero();
+    let one = <T as num_traits::One>::one();
+    let start = cuda_full(
+        input_shape,
+        if include_self { one } else { zero },
+        device,
+        "scatter_reduce",
+    )?;
+    let ones = cuda_full(index_shape, one, device, "scatter_reduce")?;
+    let counts =
+        crate::ops::indexing::scatter_add(&start, dim as isize, index, index_shape, &ones)?;
+    let zeros = cuda_full(input_shape, zero, device, "scatter_reduce")?;
+    let zero_mask = BoolTensor::eq_t(&counts, &zeros)?;
+    masked_fill_bt(&counts, &zero_mask, one)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2586,6 +2662,7 @@ fn attach_scatter_reduce_grad<T: Float>(
 /// `tools/autograd/derivatives.yaml:3074-3077`:
 ///
 /// - `sum`: grad_self = grad; grad_src = grad.gather(dim, index).
+/// - `mean`: divide those gradients by the per-output scatter count.
 /// - `prod`: grad_self = grad * (masked_self_result / masked_self);
 ///   grad_src uses the result-over-src chain rule with masking for zeros
 ///   (`:7216-7248`).
@@ -2656,6 +2733,7 @@ impl<T: Float> GradFn<T> for ScatterReduceBackward<T> {
 
         match self.reduce {
             ScatterReduce::Sum => self.backward_sum(grad_output),
+            ScatterReduce::Mean => self.backward_mean(grad_output),
             ScatterReduce::Prod => self.backward_prod(grad_output),
             ScatterReduce::Amax | ScatterReduce::Amin => self.backward_amax_amin(grad_output),
         }
@@ -2691,13 +2769,22 @@ impl<T: Float> ScatterReduceBackward<T> {
         }
     }
 
-    /// VJP for the 0-d input degenerate case (input is a single scalar). All
-    /// reduce modes collapse to: grad_self = grad (or 0 for !include_self
-    /// with non-empty index), grad_src = grad broadcast to src shape.
+    /// VJP for the 0-d input degenerate case (input is a single scalar).
     fn backward_0d(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let go_data = grad_output.data_vec()?;
         let zero = <T as num_traits::Zero>::zero();
-        let mut grad_input_data = go_data.clone();
+        let one = <T as num_traits::One>::one();
+        let mut scale = one;
+        if self.reduce == ScatterReduce::Mean {
+            let mut count = if self.include_self { one } else { zero };
+            for _ in &self.index {
+                count += one;
+            }
+            if count != zero {
+                scale = count;
+            }
+        }
+        let mut grad_input_data: Vec<T> = go_data.iter().map(|&g| g / scale).collect();
         if !self.include_self && !self.index.is_empty() {
             grad_input_data[0] = zero;
         }
@@ -2712,15 +2799,136 @@ impl<T: Float> ScatterReduceBackward<T> {
             None
         };
         let grad_src = if self.src.requires_grad() {
+            let grad_src_data: Vec<T> = if self.reduce == ScatterReduce::Mean {
+                vec![go_data[0] / scale; self.src.numel()]
+            } else {
+                go_data
+            };
             Some(Tensor::from_storage(
                 // CORE-048 (#1742): gradient on the src leaf's device.
-                TensorStorage::on_device(go_data, self.src.device())?,
+                TensorStorage::on_device(grad_src_data, self.src.device())?,
                 self.src.shape().to_vec(),
                 false,
             )?)
         } else {
             None
         };
+        Ok(vec![grad_input, grad_src])
+    }
+
+    /// VJP for `reduce='mean'` per upstream
+    /// `FunctionsManual.cpp:7249-7255`:
+    ///   N = include_self ? ones_like(grad) : zeros_like(grad)
+    ///   N = N.scatter_add(dim, index, ones_like(src))
+    ///   N.masked_fill_(N == 0, 1)
+    ///   grad_self = grad / N
+    ///   grad_src = grad.gather(dim, index) / N.gather(dim, index)
+    /// then `:7274-7275`: if !include_self, scatter zeros into grad_self.
+    fn backward_mean(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let input_shape = self.input.shape();
+        if grad_output.is_cuda() {
+            return no_grad(|| self.backward_mean_cuda(grad_output));
+        }
+
+        let go_data = grad_output.data_vec()?;
+        let counts = scatter_reduce_mean_counts_cpu::<T>(
+            input_shape,
+            self.dim,
+            &self.index,
+            &self.index_shape,
+            self.include_self,
+        );
+        let zero = <T as num_traits::Zero>::zero();
+
+        let grad_input = if self.input.requires_grad() {
+            let mut gi: Vec<T> = go_data.iter().zip(&counts).map(|(&g, &n)| g / n).collect();
+            if !self.include_self {
+                self.for_each_index(|_, _, _, dst_flat| {
+                    gi[dst_flat] = zero;
+                });
+            }
+            Some(Tensor::from_storage(
+                TensorStorage::on_device(gi, self.input.device())?,
+                input_shape.to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        let grad_src = if self.src.requires_grad() {
+            let src_shape = self.src.shape();
+            let mut gs = vec![zero; self.src.numel()];
+            self.for_each_index(|_, _, coords, dst_flat| {
+                gs[flat_index(coords, src_shape)] = go_data[dst_flat] / counts[dst_flat];
+            });
+            Some(Tensor::from_storage(
+                TensorStorage::on_device(gs, self.src.device())?,
+                src_shape.to_vec(),
+                false,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_input, grad_src])
+    }
+
+    fn backward_mean_cuda(
+        &self,
+        grad_output: &Tensor<T>,
+    ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !cuda_f32_f64::<T>() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "ScatterReduceBackward",
+            });
+        }
+        same_device(self.input.device(), grad_output.device())?;
+        same_device(self.input.device(), self.src.device())?;
+
+        let input_shape = self.input.shape();
+        let grad_c = grad_output.contiguous()?;
+        let ordinal = cuda_ordinal(grad_c.device(), "ScatterReduceBackward")?;
+        let idx_handle = crate::ops::indexing::upload_index_i64(&self.index, ordinal)?;
+        let counts = scatter_reduce_mean_counts_cuda::<T>(
+            input_shape,
+            self.dim,
+            &self.index,
+            &self.index_shape,
+            self.include_self,
+            grad_c.device(),
+        )?;
+        let grad_distributed = crate::grad_fns::arithmetic::div(&grad_c, &counts)?;
+
+        let grad_input = if self.input.requires_grad() {
+            let gi = if self.include_self {
+                grad_distributed.clone()
+            } else {
+                cuda_scatter_zero_at_index(
+                    &grad_distributed,
+                    &idx_handle,
+                    input_shape,
+                    &self.index_shape,
+                    self.dim,
+                )?
+            };
+            Some(gi)
+        } else {
+            None
+        };
+
+        let grad_src = if self.src.requires_grad() {
+            Some(cuda_gather_index_shape(
+                &grad_distributed,
+                &idx_handle,
+                input_shape,
+                &self.index_shape,
+                self.dim,
+            )?)
+        } else {
+            None
+        };
+
         Ok(vec![grad_input, grad_src])
     }
 
@@ -3361,8 +3569,8 @@ impl<T: Float> ScatterReduceBackward<T> {
 /// `TensorAdvancedIndexing.cpp:2378-2386` via `scatter_impl<...>(..., reduce,
 /// include_self)` followed by include_self_ones masking.
 ///
-/// Backward is implemented for ALL reduce modes — `sum`, `prod`, `amax`,
-/// `amin` — per upstream `scatter_reduce_backward` at
+/// Backward is implemented for ALL reduce modes — `sum`, `mean`, `prod`,
+/// `amax`, `amin` — per upstream `scatter_reduce_backward` at
 /// `torch/csrc/autograd/FunctionsManual.cpp:7194-7279`, registered in
 /// `tools/autograd/derivatives.yaml:3074-3077`. Live oracle confirms torch
 /// attaches `ScatterReduceBackward0` for every reduce mode:
@@ -3381,8 +3589,8 @@ impl<T: Float> ScatterReduceBackward<T> {
 ///
 /// `src` must live on `input`'s device — a mix returns
 /// [`FerrotorchError::DeviceMismatch`] (torch: "Expected all tensors to be
-/// on the same device, but got ..."). CUDA f32/f64 operands lower through a
-/// resident `scatter_reduce_nd` kernel for every shipped reduce mode (`sum`,
+/// on the same device, but got ..."). CUDA f32/f64 operands lower through
+/// resident kernels/composites for every shipped reduce mode (`sum`, `mean`,
 /// `prod`, `amax`, `amin`); unsupported CUDA dtypes return
 /// `NotImplementedOnCuda` instead of falling through to a host fold. Gradients
 /// are delivered on the leaves' devices.
@@ -3410,9 +3618,10 @@ pub fn scatter_reduce<T: Float>(
         let zero = <T as num_traits::Zero>::zero();
         let one = <T as num_traits::One>::one();
         let mut out = in_data[0];
+        let mut mean_count = if include_self { one } else { zero };
         if !include_self && !index.is_empty() {
             out = match reduce {
-                ScatterReduce::Sum => zero,
+                ScatterReduce::Sum | ScatterReduce::Mean => zero,
                 ScatterReduce::Prod => one,
                 ScatterReduce::Amax | ScatterReduce::Amin => src_data[0],
             };
@@ -3420,6 +3629,15 @@ pub fn scatter_reduce<T: Float>(
         for (i, &_idx) in index.iter().enumerate() {
             let s = src_data[i.min(src_data.len() - 1)];
             out = apply_reduce(reduce, out, s);
+            if reduce == ScatterReduce::Mean {
+                mean_count += one;
+            }
+        }
+        if reduce == ScatterReduce::Mean {
+            if mean_count == zero {
+                mean_count = one;
+            }
+            out = out / mean_count;
         }
         let output = Tensor::from_storage(
             TensorStorage::on_device(vec![out], input.device())?,
@@ -3506,9 +3724,17 @@ pub fn scatter_reduce<T: Float>(
     // sum=0, prod=1, amax/amin=the first src element written).
     let zero = <T as num_traits::Zero>::zero();
     let one = <T as num_traits::One>::one();
+    let mut mean_counts = if reduce == ScatterReduce::Mean {
+        Some(vec![
+            if include_self { one } else { zero };
+            input_shape.iter().product()
+        ])
+    } else {
+        None
+    };
     if !include_self {
         let identity = match reduce {
-            ScatterReduce::Sum => Some(zero),
+            ScatterReduce::Sum | ScatterReduce::Mean => Some(zero),
             ScatterReduce::Prod => Some(one),
             // For amax/amin, identity is the first src write — handle below
             // by tracking first-touch positions.
@@ -3574,8 +3800,19 @@ pub fn scatter_reduce<T: Float>(
         dst_coords[dim_usize] = idx_val;
         let dst_flat = flat_index(&dst_coords, input_shape);
         out[dst_flat] = apply_reduce(reduce, out[dst_flat], read_src_at(&coords));
+        if let Some(counts) = mean_counts.as_mut() {
+            counts[dst_flat] += one;
+        }
         if i + 1 < index_numel {
             increment_coords(&mut coords, index_shape);
+        }
+    }
+    if let Some(counts) = mean_counts.as_mut() {
+        for (value, count) in out.iter_mut().zip(counts) {
+            if *count == zero {
+                *count = one;
+            }
+            *value = *value / *count;
         }
     }
 
@@ -3601,7 +3838,7 @@ pub fn scatter_reduce<T: Float>(
 #[inline]
 fn apply_reduce<T: Float>(mode: ScatterReduce, a: T, b: T) -> T {
     match mode {
-        ScatterReduce::Sum => a + b,
+        ScatterReduce::Sum | ScatterReduce::Mean => a + b,
         ScatterReduce::Prod => a * b,
         // Use `partial_cmp` to match upstream PyTorch's NaN-passes-through
         // contract: any NaN in either operand keeps the accumulator

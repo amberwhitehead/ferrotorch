@@ -1243,10 +1243,9 @@ impl<T: Float> Tensor<T> {
     /// — reduce-mode scatter onto a clone of `self`. Mirrors upstream
     /// `Tensor scatter_reduce(...)` at `aten/src/ATen/native/
     /// TensorAdvancedIndexing.cpp:2354 TORCH_IMPL_FUNC(scatter_reduce_two)`.
-    /// `reduce` ∈ {`"sum"` SHIPPED, `"prod"`, `"amax"`, `"amin"`}; backward
-    /// is implemented only for `"sum"` per `tools/autograd/derivatives.yaml:
-    /// 3074-3077` (other modes return a no-grad tensor — the
-    /// op_db characterization sweep emits only `"sum"`).
+    /// `reduce` ∈ {`"sum"`, `"mean"`, `"prod"`, `"amax"`, `"amin"`};
+    /// backward is implemented for all modes per
+    /// `tools/autograd/derivatives.yaml:3074-3077`.
     ///
     /// Non-test production consumer wiring for `grad_fns::indexing::
     /// scatter_reduce` per R-DEFER-1: this method is the chainable surface.
@@ -1265,7 +1264,7 @@ impl<T: Float> Tensor<T> {
                 crate::error::FerrotorchError::InvalidArgument {
                     message: format!(
                         "scatter_reduce_t: unknown reduce mode '{reduce}' \
-                     (expected sum|prod|amax|amin)"
+                     (expected sum|mean|prod|amax|amin)"
                     ),
                 }
             })?;
