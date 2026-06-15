@@ -2,8 +2,8 @@
 //!
 //! - `cumsum`       — backward is reverse cumsum of the gradient
 //! - `cumprod`      — backward uses the forward output and prefix/suffix products
-//! - `cummax`       — backward routes through saved `indices` via `scatter_add`
-//! - `cummin`       — backward routes through saved `indices` via `scatter_add`
+//! - `cummax`       — backward routes through saved indices tensor via `scatter_add`
+//! - `cummin`       — backward routes through saved indices tensor via `scatter_add`
 //! - `logcumsumexp` — backward via softmax-weighted reverse cumsum
 //!
 //! [CL-306]
@@ -444,10 +444,11 @@ pub fn cumprod<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult<Tensor
 ///   self: cummaxmin_backward(grad, self, indices, dim)
 /// ```
 ///
-/// The saved `indices` carries the position-along-dim at which each running
-/// max was attained; scatter_add accumulates grad_output at those positions
-/// so each input position receives gradient proportional to the number of
-/// output positions whose running max it "won".
+/// The saved `indices_tensor` carries the position-along-dim at which each
+/// running max was attained; CUDA keeps it resident and CPU keeps a host cache
+/// for the reference scatter path. `scatter_add` accumulates grad_output at
+/// those positions so each input position receives gradient proportional to
+/// the number of output positions whose running max it "won".
 ///
 /// Tie-break correctness: when two positions in the prefix carry equal
 /// values, upstream's `std::greater_equal` picks the LATER index. The
@@ -557,6 +558,14 @@ fn cummaxmin_backward_impl<T: Float>(
         )?;
         return Ok(vec![Some(empty)]);
     }
+    if indices.len() != numel {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "CummaxBackward/CumminBackward: CPU backward requires {numel} host saved indices, got {}",
+                indices.len()
+            ),
+        });
+    }
     let zeros = crate::creation::zeros::<T>(input_shape)?;
     let grad_input =
         crate::ops::indexing::scatter_add(&zeros, dim as isize, indices, input_shape, grad_output)?;
@@ -651,8 +660,10 @@ fn cummaxmin_backward_cuda<T: Float>(
 /// `tools/autograd/derivatives.yaml:533-535
 /// - name: cummax(Tensor self, int dim) -> (Tensor values, Tensor indices)
 ///   self: cummaxmin_backward(grad, self, indices, dim)`.
-/// The `indices` field is `Vec<usize>` (Rust-side; not part of the autograd
-/// graph since upstream's `indices` output is `at::kLong` non-differentiable).
+///
+/// `indices_tensor` is the authoritative PyTorch-style int64 result. The
+/// legacy `indices` Vec is populated for CPU/scalar results only; non-scalar
+/// CUDA results keep indices device-resident and leave that host cache empty.
 ///
 /// 0-D (scalar) inputs return `CumExtremeResult { values: scalar copy,
 /// indices: vec![0] }`, matching PyTorch's `impl_func_cum_ops` 0-D branch

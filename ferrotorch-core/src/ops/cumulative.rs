@@ -17,7 +17,7 @@
 //! | REQ-5 (`logcumsumexp_forward`) | SHIPPED | mirrors `logcumsumexp_cpu_kernel` (uses `_log_add_exp_helper` for stability); non-test consumer is the `logcumsumexp_forward` invocation inside `grad_fns::cumulative::logcumsumexp`; indirect parity `[logcumsumexp] 48/48 passed`. |
 //! | REQ-6 (`reverse_cumsum` helper) | SHIPPED | mirrors upstream's `w.flip(dim).cumsum(dim).flip(dim)` pattern unrolled into a single reverse triple-loop; non-test consumers are `CumsumBackward::backward` and `LogcumsumexpBackward::backward` in `grad_fns/cumulative.rs`. |
 //! | REQ-7 (`validate_dim`) | SHIPPED | wraps `crate::shape::normalize_axis` mirroring `maybe_wrap_dim` (with deliberate 0-D rejection as defense-in-depth — the autograd-layer fast paths short-circuit 0-D before reaching the kernel); consumed by all five `*_forward` entry points in this file. |
-//! | REQ-8 (`CumExtremeResult` struct) | SHIPPED | mirrors upstream's `std::tuple<Tensor, Tensor>` return; `Vec<usize>` indices (R-DEV-7 deviation since ferrotorch lacks an i64 tensor); re-exported as `pub use ops::cumulative::CumExtremeResult` at the crate root; non-test consumers `grad_fns::cumulative::cummax` / `cummin` / `cumextreme_scalar_identity`. |
+//! | REQ-8 (`CumExtremeResult` struct) | SHIPPED | mirrors upstream's `std::tuple<Tensor, Tensor>` return; `indices_tensor: IntTensor<i64>` is the authoritative PyTorch-style indices result and `indices: Vec<usize>` is only a host cache for CPU/scalar identity callers; re-exported as `pub use ops::cumulative::CumExtremeResult` at the crate root; non-test consumers `grad_fns::cumulative::cummax` / `cummin` / `cumextreme_scalar_identity`. |
 
 use std::any::TypeId;
 
@@ -96,10 +96,8 @@ fn indices_from_i64_tensor(idxs_tensor: &IntTensor<i64>) -> FerrotorchResult<Vec
 fn gpu_i64_indices(
     handle: crate::gpu_dispatch::GpuBufferHandle,
     shape: &[usize],
-) -> FerrotorchResult<(IntTensor<i64>, Vec<usize>)> {
-    let idxs_tensor = IntTensor::<i64>::from_gpu_handle(handle, shape.to_vec());
-    let indices = indices_from_i64_tensor(&idxs_tensor)?;
-    Ok((idxs_tensor, indices))
+) -> IntTensor<i64> {
+    IntTensor::<i64>::from_gpu_handle(handle, shape.to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -247,8 +245,28 @@ pub struct CumExtremeResult<T: Float> {
     pub values: Tensor<T>,
     /// PyTorch-style int64 tensor of dim-local indices.
     pub indices_tensor: IntTensor<i64>,
-    /// Legacy host copy of [`Self::indices_tensor`] retained for existing callers.
+    /// Legacy host cache of [`Self::indices_tensor`].
+    ///
+    /// CPU results populate this with one dim-local index per element. CUDA
+    /// non-scalar results leave it empty to match PyTorch's device-resident
+    /// `(values, indices)` contract and avoid an implicit D2H transfer during
+    /// forward. Use [`Self::indices_host`] when an explicit host copy is
+    /// required.
     pub indices: Vec<usize>,
+}
+
+impl<T: Float> CumExtremeResult<T> {
+    /// Return a host `Vec<usize>` copy of the indices.
+    ///
+    /// This is the explicit opt-in readback path for CUDA results. Forward
+    /// CUDA kernels keep [`Self::indices_tensor`] resident and intentionally
+    /// do not populate [`Self::indices`].
+    pub fn indices_host(&self) -> FerrotorchResult<Vec<usize>> {
+        if self.indices.len() == self.indices_tensor.numel() {
+            return Ok(self.indices.clone());
+        }
+        indices_from_i64_tensor(&self.indices_tensor)
+    }
 }
 
 /// Cumulative maximum along `dim`.
@@ -279,35 +297,34 @@ pub fn cummax_forward<T: Float>(
         // buffer before the strided cumulative kernel reads element 0.
         let input = input.contiguous()?;
         let values;
-        let indices: Vec<usize>;
         let indices_tensor: IntTensor<i64>;
         if is_f32::<T>() {
             let (vals_h, idxs_h) =
                 backend.cummax_f32(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
-            (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
+            indices_tensor = gpu_i64_indices(idxs_h, shape);
         } else if is_f64::<T>() {
             let (vals_h, idxs_h) =
                 backend.cummax_f64(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
-            (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
+            indices_tensor = gpu_i64_indices(idxs_h, shape);
         } else if is_f16::<T>() {
             let (vals_h, idxs_h) =
                 backend.cummax_f16(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
-            (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
+            indices_tensor = gpu_i64_indices(idxs_h, shape);
         } else if is_bf16::<T>() {
             let (vals_h, idxs_h) =
                 backend.cummax_bf16(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
-            (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
+            indices_tensor = gpu_i64_indices(idxs_h, shape);
         } else {
             return Err(FerrotorchError::NotImplementedOnCuda { op: "cummax" });
         }
         return Ok(CumExtremeResult {
             values,
             indices_tensor,
-            indices,
+            indices: Vec::new(),
         });
     }
 
@@ -400,35 +417,34 @@ pub fn cummin_forward<T: Float>(
         // buffer before the strided cumulative kernel reads element 0.
         let input = input.contiguous()?;
         let values;
-        let indices: Vec<usize>;
         let indices_tensor: IntTensor<i64>;
         if is_f32::<T>() {
             let (vals_h, idxs_h) =
                 backend.cummin_f32(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
-            (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
+            indices_tensor = gpu_i64_indices(idxs_h, shape);
         } else if is_f64::<T>() {
             let (vals_h, idxs_h) =
                 backend.cummin_f64(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
-            (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
+            indices_tensor = gpu_i64_indices(idxs_h, shape);
         } else if is_f16::<T>() {
             let (vals_h, idxs_h) =
                 backend.cummin_f16(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
-            (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
+            indices_tensor = gpu_i64_indices(idxs_h, shape);
         } else if is_bf16::<T>() {
             let (vals_h, idxs_h) =
                 backend.cummin_bf16(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
-            (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
+            indices_tensor = gpu_i64_indices(idxs_h, shape);
         } else {
             return Err(FerrotorchError::NotImplementedOnCuda { op: "cummin" });
         }
         return Ok(CumExtremeResult {
             values,
             indices_tensor,
-            indices,
+            indices: Vec::new(),
         });
     }
 

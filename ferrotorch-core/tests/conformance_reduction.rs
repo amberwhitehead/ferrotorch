@@ -46,6 +46,7 @@ use ferrotorch_core::grad_fns::reduction::{
     amax, amax_dim, amin, amin_dim, argmax_dim, argmin_dim, max_with_dim, mean, mean_dim,
     median_with_dim, min_with_dim, nanmedian_with_dim, prod, sum, sum_dim,
 };
+use ferrotorch_core::int_tensor::IntTensor;
 use ferrotorch_core::ops::cumulative::{
     CumExtremeResult, cummax_forward, cummin_forward, cumprod_forward, cumsum_forward,
     logcumsumexp_forward, reverse_cumsum,
@@ -1270,11 +1271,11 @@ fn cpu_logcumsumexp() {
 // Cat B — cummax / cummin (non-differentiable: values + indices)
 // ---------------------------------------------------------------------------
 //
-// `CumExtremeResult` carries `.values: Tensor<T>` and `.indices: Vec<usize>`.
-// PyTorch returns a NamedTuple of (values, indices). Our fixtures encode
-// dim-local int indices; ferrotorch stores indices as a Vec<usize> in the
-// same flat layout (length = numel), with each entry holding the
-// dim-local position of the running extremum.
+// `CumExtremeResult` carries `.values: Tensor<T>` and an authoritative
+// `.indices_tensor: IntTensor<i64>`, matching PyTorch's NamedTuple of
+// (values, indices). The legacy `.indices: Vec<usize>` host cache is populated
+// only for CPU/scalar results; non-scalar CUDA results intentionally leave it
+// empty so the forward path does not do an implicit D2H transfer.
 //
 // Base inputs in `_cumulative_input` use strictly distinct values along the
 // scan dim so they pinpoint the values+indices contract without tie noise.
@@ -1291,25 +1292,50 @@ fn cpu_logcumsumexp() {
 //     `isnan(curr) || (!isnan(out) && curr >= out)` / `<= out`, so ties keep
 //     the LAST tied index.
 
+fn indices_tensor_host(label: &str, indices_tensor: &IntTensor<i64>, device: Device) -> Vec<usize> {
+    assert_eq!(
+        indices_tensor.device(),
+        device,
+        "{label}: indices tensor device"
+    );
+    indices_tensor
+        .to(Device::Cpu)
+        .expect("indices to CPU")
+        .data()
+        .expect("indices data")
+        .iter()
+        .map(|&v| usize::try_from(v).expect("non-negative cummax/cummin index"))
+        .collect()
+}
+
 /// Indices assertion for cummax/cummin: torch contract on CPU and CUDA.
 fn check_cum_extreme_indices(
     label: &str,
-    _op_name: &str,
-    _tag: &str,
-    _on_gpu: bool,
-    actual: &[usize],
+    on_gpu: bool,
+    device: Device,
+    host_cache: &[usize],
+    indices_tensor: &IntTensor<i64>,
     torch_expected: &[usize],
 ) {
+    let actual = indices_tensor_host(label, indices_tensor, device);
     assert_eq!(
         actual.len(),
         torch_expected.len(),
-        "{label}: indices length mismatch"
+        "{label}: indices length"
     );
     for (i, (got, exp)) in actual.iter().zip(torch_expected.iter()).enumerate() {
         assert_eq!(
             got, exp,
             "{label}: indices[{i}] mismatch (actual={got}, expected={exp})"
         );
+    }
+    if on_gpu {
+        assert!(
+            host_cache.is_empty(),
+            "{label}: CUDA cummax/cummin must not populate a host indices cache"
+        );
+    } else {
+        assert_eq!(host_cache, torch_expected, "{label}: host indices cache");
     }
 }
 
@@ -1371,10 +1397,10 @@ fn run_cum_extreme_for_device(op_name: &str, device_label: &str, device: Device)
                 );
                 check_cum_extreme_indices(
                     &label,
-                    op_name,
-                    f.tag.as_deref().unwrap_or(""),
                     on_gpu,
+                    device,
                     &result.indices,
+                    &result.indices_tensor,
                     expected_idx,
                 );
             }
@@ -1393,10 +1419,10 @@ fn run_cum_extreme_for_device(op_name: &str, device_label: &str, device: Device)
                 );
                 check_cum_extreme_indices(
                     &label,
-                    op_name,
-                    f.tag.as_deref().unwrap_or(""),
                     on_gpu,
+                    device,
                     &result.indices,
+                    &result.indices_tensor,
                     expected_idx,
                 );
             }
@@ -2336,15 +2362,19 @@ mod gpu {
             Device::Cuda(0),
         );
         let result = cummax(&x, 0).expect("cummax");
-        let host_indices = result
-            .indices_tensor
-            .to(Device::Cpu)
-            .expect("indices cpu")
-            .data()
-            .expect("indices data")
-            .to_vec();
-        assert_eq!(host_indices, vec![0_i64, 1, 2, 2, 4]);
-        assert_eq!(result.indices, vec![0_usize, 1, 2, 2, 4]);
+        check_cum_extreme_indices(
+            "gpu cummax tie indices",
+            true,
+            Device::Cuda(0),
+            &result.indices,
+            &result.indices_tensor,
+            &[0, 1, 2, 2, 4],
+        );
+        assert_eq!(
+            result.indices_host().expect("explicit host indices"),
+            vec![0, 1, 2, 2, 4],
+            "gpu cummax explicit indices_host"
+        );
 
         sum(&result.values)
             .expect("sum values")
@@ -2367,15 +2397,19 @@ mod gpu {
             Device::Cuda(0),
         );
         let result = cummin(&x, 0).expect("cummin");
-        let host_indices = result
-            .indices_tensor
-            .to(Device::Cpu)
-            .expect("indices cpu")
-            .data()
-            .expect("indices data")
-            .to_vec();
-        assert_eq!(host_indices, vec![0_i64, 1, 2, 2, 4]);
-        assert_eq!(result.indices, vec![0_usize, 1, 2, 2, 4]);
+        check_cum_extreme_indices(
+            "gpu cummin tie indices",
+            true,
+            Device::Cuda(0),
+            &result.indices,
+            &result.indices_tensor,
+            &[0, 1, 2, 2, 4],
+        );
+        assert_eq!(
+            result.indices_host().expect("explicit host indices"),
+            vec![0, 1, 2, 2, 4],
+            "gpu cummin explicit indices_host"
+        );
 
         sum(&result.values)
             .expect("sum values")

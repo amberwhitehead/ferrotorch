@@ -3147,6 +3147,7 @@ fn grad_fn_struct_paths_link() {
         input: leaf.clone(),
         dim: 0,
         index: vec![0],
+        index_cuda: None,
         index_shape: vec![1],
     };
     let _is = IndexSelectBackward::<f32> {

@@ -116,16 +116,17 @@ functions.
   callers of the kernel layer (none today outside `grad_fns/cumulative.rs`)
   would see the rejection.
 
-- REQ-8: `CumExtremeResult<T: Float> { values: Tensor<T>, indices:
-  Vec<usize> }` public struct — Rust analog of upstream's
-  `std::tuple<Tensor, Tensor>` return type from `cummax`/`cummin` (see
-  `Tensor cummax(const Tensor& self, int64_t dim)` at `ReduceOps.cpp:860-865
-  return std::make_tuple(std::move(values), std::move(indices))`). The
-  `indices` field uses `Vec<usize>` rather than a second `Tensor<T>`
-  because ferrotorch does not yet have an `i64`-dtype tensor class; the
-  upstream indices tensor is `at::kLong` per
-  `aten/src/ATen/native/ReduceOps.cpp:838 self.options().dtype(at::kLong)`.
-  Re-exported from the crate root as `pub use
+- REQ-8: `CumExtremeResult<T: Float> { values: Tensor<T>,
+  indices_tensor: IntTensor<i64>, indices: Vec<usize> }` public struct —
+  Rust analog of upstream's `std::tuple<Tensor, Tensor>` return type from
+  `cummax`/`cummin` (see `Tensor cummax(const Tensor& self, int64_t dim)`
+  at `ReduceOps.cpp:860-865 return std::make_tuple(std::move(values),
+  std::move(indices))`). The authoritative indices result is an
+  `IntTensor<i64>`, matching upstream's `at::kLong` tensor allocated from
+  `self.options()` so it lives on the input device. The legacy
+  `indices: Vec<usize>` is a host cache populated for CPU/scalar results
+  only; non-scalar CUDA results leave it empty to avoid an implicit D2H
+  transfer. Re-exported from the crate root as `pub use
   ops::cumulative::CumExtremeResult in lib.rs`.
 
 ## Acceptance Criteria
@@ -247,32 +248,30 @@ All three follow the same scaffold (`ops/cumulative.rs:66-104, 135-173,
 
 ### REQ-3 / REQ-4: cummax/cummin kernels (`cummax_forward`, `cummin_forward`)
 
-Same scaffold but returns `CumExtremeResult { values, indices }`. The CPU
-loop at `:240-262` (cummax) and `:319-341` (cummin) carries:
+Same scaffold but returns `CumExtremeResult { values, indices_tensor,
+indices }`. The CPU loop carries the same NaN-poisoning and later-tie
+predicate as upstream:
 
 ```
-let mut cur_max = T::neg_infinity();
+let mut cur = in_data[base];
 let mut cur_idx = 0usize;
 for i in 0..dim_size {
     let idx = base + i * inner;
-    if in_data[idx] > cur_max {   // strict — diverges from upstream
-        cur_max = in_data[idx];
+    let curr = in_data[idx];
+    if curr.is_nan() || (!cur.is_nan() && curr >= cur) {
+        cur = curr;
         cur_idx = i;
     }
-    out_vals[idx] = cur_max;
+    out_vals[idx] = cur;
     out_idxs[idx] = cur_idx;
 }
 ```
 
-The strict `>` (resp. `<` for cummin) is the divergence from upstream's
-`std::greater_equal` / `std::less_equal` tracked under blocker #1231.
-
-The GPU fast path (`:200-228`, `:281-308`) is more involved: the kernel
-returns two GPU handles (values + indices). For f32 the indices are
-stored as f32 bits; for f64 the PTX converter rewrites
-`st.global.f32` → `st.global.f64` (per inline reference to #787 in the
-source) so the indices buffer is f64-width. Both are read back to host
-and cast to `Vec<usize>` for the `CumExtremeResult.indices` field.
+Cummin uses the symmetric `curr <= cur` predicate. The GPU fast path returns
+two GPU handles (values + i64 indices). The i64 indices handle is wrapped as
+`IntTensor<i64>` and kept resident; `CumExtremeResult.indices` is not
+populated on non-scalar CUDA outputs. Callers that need a host copy must use
+the explicit `indices_host()` readback method or `indices_tensor.to(Cpu)`.
 
 ### REQ-6: `reverse_cumsum` helper (`:109-125`)
 
@@ -314,18 +313,18 @@ the `ndim == 0` rejection is unreachable through the user-facing
 #[derive(Debug)]
 pub struct CumExtremeResult<T: Float> {
     pub values: Tensor<T>,
+    pub indices_tensor: IntTensor<i64>,
     pub indices: Vec<usize>,
 }
 ```
 
 Public struct re-exported as `pub use ops::cumulative::CumExtremeResult
-in lib.rs`. The `indices: Vec<usize>` rather than a second `Tensor<T>` is
-the Rust-ecosystem-better-fit deviation (R-DEV-7) — ferrotorch does not
-yet expose an integer-dtype tensor and the consumer
-(`grad_fns::cumulative::cummax` / `einops.rs`) only needs a flat usize
-vector along the scan axis. When CummaxBackward ships (blocker #1231)
-the indices will be saved into the grad-fn struct as `Vec<usize>` to
-drive a scatter_add VJP.
+in lib.rs`. `indices_tensor` is the PyTorch-equivalent `LongTensor`
+result. `indices: Vec<usize>` is retained as a CPU/scalar host cache for
+existing Rust callers, but CUDA forwards intentionally leave it empty so
+the kernel layer never performs an implicit GPU→CPU transfer. Autograd saves
+both fields: CPU backward uses the host cache, while CUDA backward scatters
+through the resident `indices_tensor`.
 
 ### `is_f32` / `is_f64` type-id helpers (`:17-25`)
 
@@ -417,4 +416,4 @@ a kernel-direct characterization test would land in the same fixer iter.
 | REQ-5 (logcumsumexp_forward) | SHIPPED | impl: `pub fn logcumsumexp_forward in ops/cumulative.rs` mirrors `logcumsumexp_cpu_kernel` at `aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:117-136` (registered as `logcumsumexp_stub` per `aten/src/ATen/native/cpu/ReduceOpsKernel.cpp:565`, dispatched via `_logcumsumexp_out_cpu` at `aten/src/ATen/native/ReduceOps.cpp:470-473`). Two-pass running-max numerical-stability trick matches the `_log_add_exp_helper` contract. Non-test production consumer: the `let result = logcumsumexp_forward(input, dim)?;` call inside `pub fn logcumsumexp in grad_fns/cumulative.rs`. Indirect parity: `[logcumsumexp] 48/48 passed (0 skipped, 0 failed)`. Numerical stability verified by `fn test_logcumsumexp_numerical_stability in grad_fns/cumulative.rs`. |
 | REQ-6 (reverse_cumsum helper) | SHIPPED | impl: `pub fn reverse_cumsum in ops/cumulative.rs` mirrors `static Tensor reversed_cumsum(const Tensor& w, int64_t dim) { return w.flip(dim).cumsum(dim).flip(dim); }` at `aten/src/ATen/native/ReduceOps.cpp:527-529`. Two non-test production consumers: the `let grad_data = reverse_cumsum(go_data, shape, self.dim);` call inside `impl GradFn for CumsumBackward in grad_fns/cumulative.rs`, and the `let rev = reverse_cumsum(&product, shape, self.dim);` call inside `impl GradFn for LogcumsumexpBackward in grad_fns/cumulative.rs`. End-to-end exercised by `fn test_cumsum_backward_numerical in grad_fns/cumulative.rs` and `fn test_logcumsumexp_backward_1d in grad_fns/cumulative.rs`. |
 | REQ-7 (validate_dim) | SHIPPED | impl: `fn validate_dim in ops/cumulative.rs` wraps `crate::shape::normalize_axis` mirroring `maybe_wrap_dim` at `c10/core/WrapDimMinimal.h:34-39` (used by upstream's `impl_func_cum_ops` at `aten/src/ATen/native/ReduceOps.cpp:506`, `cummax_out` at `aten/src/ATen/native/ReduceOps.cpp:851`, `cummin_out` at `aten/src/ATen/native/ReduceOps.cpp:890`, and `_logcumsumexp_out_cpu` implicitly via the kernel). Five non-test production consumers (one per `*_forward`): `pub fn cumsum_forward`, `pub fn cumprod_forward`, `pub fn cummax_forward`, `pub fn cummin_forward`, and `pub fn logcumsumexp_forward` (all in `ops/cumulative.rs`). Defense-in-depth 0-D rejection is the intentional deviation from upstream's `wrap_scalar=true` — the autograd layer's 0-D fast paths in `pub fn cumsum`, `pub fn cumprod`, `pub fn cummax`, `pub fn cummin`, and `pub fn logcumsumexp` (all in `grad_fns/cumulative.rs`) short-circuit before reaching the kernel. Exercised through `fn test_cumsum_dim_out_of_bounds in grad_fns/cumulative.rs`. |
-| REQ-8 (CumExtremeResult struct) | SHIPPED | impl: `pub struct CumExtremeResult in ops/cumulative.rs` (with fields `values: Tensor<T>` and `indices: Vec<usize>`) mirrors the `std::tuple<Tensor, Tensor>` return of `Tensor cummax(...)` at `aten/src/ATen/native/ReduceOps.cpp:860-865` (per R-DEV-7, using `Vec<usize>` rather than an integer tensor since ferrotorch lacks i64-dtype tensors). Re-exported as `pub use ops::cumulative::CumExtremeResult in lib.rs`. Non-test production consumers: `pub fn cummax in grad_fns/cumulative.rs`, `pub fn cummin in grad_fns/cumulative.rs`, and `fn cumextreme_scalar_identity in grad_fns/cumulative.rs` all construct or return this type. |
+| REQ-8 (CumExtremeResult struct) | SHIPPED | impl: `pub struct CumExtremeResult in ops/cumulative.rs` (with fields `values: Tensor<T>`, `indices_tensor: IntTensor<i64>`, and legacy `indices: Vec<usize>`) mirrors the `std::tuple<Tensor, Tensor>` return of `Tensor cummax(...)` at `aten/src/ATen/native/ReduceOps.cpp:860-865`; PyTorch allocates the indices tensor as `self.options().dtype(at::kLong)`, so CUDA indices stay CUDA-resident. Ferrotorch now keeps non-scalar CUDA indices resident in `indices_tensor` and leaves the host cache empty unless the caller explicitly requests `indices_host()` / `indices_tensor.to(Cpu)`. Re-exported as `pub use ops::cumulative::CumExtremeResult in lib.rs`. Non-test production consumers: `pub fn cummax in grad_fns/cumulative.rs`, `pub fn cummin in grad_fns/cumulative.rs`, and `fn cumextreme_scalar_identity in grad_fns/cumulative.rs` all construct or return this type. |

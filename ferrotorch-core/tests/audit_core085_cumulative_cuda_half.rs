@@ -6,6 +6,7 @@ use ferrotorch_core::creation::from_vec;
 use ferrotorch_core::device::Device;
 use ferrotorch_core::grad_fns::cumulative::{cummax, cummin, cumprod, cumsum, logcumsumexp};
 use ferrotorch_core::grad_fns::reduction::sum;
+use ferrotorch_core::int_tensor::IntTensor;
 use ferrotorch_core::tensor::Tensor;
 
 static GPU_INIT: Once = Once::new();
@@ -107,6 +108,19 @@ fn host_f64(t: &Tensor<f64>) -> Vec<f64> {
         .to_vec()
 }
 
+fn host_indices(t: &IntTensor<i64>) -> Vec<i64> {
+    assert_eq!(
+        t.device(),
+        Device::Cuda(0),
+        "indices tensor must stay CUDA-resident"
+    );
+    t.to(Device::Cpu)
+        .expect("D2H indices")
+        .data()
+        .expect("indices cpu data")
+        .to_vec()
+}
+
 fn assert_close(actual: &[f32], expected: &[f32], tol: f32, label: &str) {
     assert_eq!(actual.len(), expected.len(), "{label}: length");
     for (i, (&got, &want)) in actual.iter().zip(expected.iter()).enumerate() {
@@ -159,7 +173,11 @@ fn f16_cumulative_cuda_forward_and_backward() {
         0.0,
         "f16 cummax values",
     );
-    assert_eq!(cmx.indices, &[0, 0, 2, 2, 0, 1, 1, 3]);
+    assert_eq!(host_indices(&cmx.indices_tensor), &[0, 0, 2, 2, 0, 1, 1, 3]);
+    assert!(
+        cmx.indices.is_empty(),
+        "CUDA cummax must not populate a host indices cache"
+    );
 
     let cmn = cummin(&x, 1).expect("cummin f16");
     assert_close(
@@ -168,7 +186,11 @@ fn f16_cumulative_cuda_forward_and_backward() {
         0.0,
         "f16 cummin values",
     );
-    assert_eq!(cmn.indices, &[0, 1, 1, 1, 0, 1, 2, 2]);
+    assert_eq!(host_indices(&cmn.indices_tensor), &[0, 1, 1, 1, 0, 1, 2, 2]);
+    assert!(
+        cmn.indices.is_empty(),
+        "CUDA cummin must not populate a host indices cache"
+    );
 
     let x = f16_cuda(&data, &[2, 4], true);
     sum(&cumsum(&x, 1).expect("tracked cumsum f16"))
@@ -265,7 +287,11 @@ fn bf16_cumulative_cuda_forward_and_backward() {
         0.0,
         "bf16 cummax values",
     );
-    assert_eq!(cmx.indices, &[0, 0, 2, 2, 0, 1, 1, 3]);
+    assert_eq!(host_indices(&cmx.indices_tensor), &[0, 0, 2, 2, 0, 1, 1, 3]);
+    assert!(
+        cmx.indices.is_empty(),
+        "CUDA cummax must not populate a host indices cache"
+    );
 
     let cmn = cummin(&x, 1).expect("cummin bf16");
     assert_close(
@@ -274,7 +300,11 @@ fn bf16_cumulative_cuda_forward_and_backward() {
         0.0,
         "bf16 cummin values",
     );
-    assert_eq!(cmn.indices, &[0, 1, 1, 1, 0, 1, 2, 2]);
+    assert_eq!(host_indices(&cmn.indices_tensor), &[0, 1, 1, 1, 0, 1, 2, 2]);
+    assert!(
+        cmn.indices.is_empty(),
+        "CUDA cummin must not populate a host indices cache"
+    );
 
     let x = bf16_cuda(&data, &[2, 4], true);
     sum(&cumsum(&x, 1).expect("tracked cumsum bf16"))
