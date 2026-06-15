@@ -53,6 +53,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-019: Binary in-place operations discard gradients from tracking source operands (#1713)
 - CORE-018: Detached aliases can silently mutate tensors saved for backward (#1712)
 - CORE-021: Parallel backward deadlocks when a backward node returns an error (#1715)
 - CORE-020: `add_out` silently bypasses autograd for tracking inputs (#1714)

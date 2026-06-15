@@ -98,13 +98,13 @@ pub fn backward_with_grad<T: Float>(
     // `in_degree[id]` counts how many times a tensor is used as an input to
     // an operation — this is needed for Kahn's algorithm.
     let mut in_degree: HashMap<TensorId, usize> = HashMap::default();
-    let mut node_map: HashMap<TensorId, &Tensor<T>> = HashMap::default();
-    let mut queue: VecDeque<&Tensor<T>> = VecDeque::new();
+    let mut node_map: HashMap<TensorId, Tensor<T>> = HashMap::default();
+    let mut queue: VecDeque<Tensor<T>> = VecDeque::new();
 
     // Start from root.
-    queue.push_back(root);
+    queue.push_back(root.clone());
     in_degree.entry(root.id()).or_insert(0);
-    node_map.insert(root.id(), root);
+    node_map.insert(root.id(), root.clone());
 
     while let Some(node) = queue.pop_front() {
         if let Some(grad_fn) = node.grad_fn() {
@@ -113,7 +113,8 @@ pub fn backward_with_grad<T: Float>(
                 let count = in_degree.entry(input_id).or_insert(0);
                 *count += 1;
                 if let std::collections::hash_map::Entry::Vacant(e) = node_map.entry(input_id) {
-                    e.insert(input);
+                    let input = input.clone();
+                    e.insert(input.clone());
                     queue.push_back(input);
                 }
             }
@@ -160,7 +161,7 @@ pub fn backward_with_grad<T: Float>(
 
     for &id in &topo_order {
         let node = match node_map.get(&id) {
-            Some(n) => *n,
+            Some(n) => n,
             None => continue,
         };
 
@@ -261,12 +262,12 @@ pub fn backward_parallel<T: Float>(
 
     // Phase 1: Collect nodes and compute in-degree (same as sequential).
     let mut in_degree_map: HashMap<TensorId, usize> = HashMap::default();
-    let mut node_map: HashMap<TensorId, &Tensor<T>> = HashMap::default();
-    let mut queue: VecDeque<&Tensor<T>> = VecDeque::new();
+    let mut node_map: HashMap<TensorId, Tensor<T>> = HashMap::default();
+    let mut queue: VecDeque<Tensor<T>> = VecDeque::new();
 
-    queue.push_back(root);
+    queue.push_back(root.clone());
     in_degree_map.entry(root.id()).or_insert(0);
-    node_map.insert(root.id(), root);
+    node_map.insert(root.id(), root.clone());
 
     while let Some(node) = queue.pop_front() {
         if let Some(grad_fn) = node.grad_fn() {
@@ -275,7 +276,8 @@ pub fn backward_parallel<T: Float>(
                 let count = in_degree_map.entry(input_id).or_insert(0);
                 *count += 1;
                 if let std::collections::hash_map::Entry::Vacant(e) = node_map.entry(input_id) {
-                    e.insert(input);
+                    let input = input.clone();
+                    e.insert(input.clone());
                     queue.push_back(input);
                 }
             }
@@ -372,7 +374,7 @@ pub fn backward_parallel<T: Float>(
                     // Process this node.
                     let result = (|| -> FerrotorchResult<()> {
                         let node = match node_map_ref.get(&id) {
-                            Some(n) => *n,
+                            Some(n) => n,
                             None => return Ok(()),
                         };
 

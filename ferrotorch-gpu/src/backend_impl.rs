@@ -1639,6 +1639,20 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
+    fn div_rounding_f32(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        rounding_mode: &str,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let b_buf = Self::unwrap_buffer(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::kernels::gpu_div_rounding(a_buf, b_buf, rounding_mode, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
     fn exp_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(a.device_ordinal())?;
@@ -1752,6 +1766,20 @@ impl GpuBackend for CudaBackendImpl {
         let b_buf = Self::unwrap_buffer_f64(b)?;
         let dev = self.device(a.device_ordinal())?;
         let result = crate::kernels::gpu_div_f64(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    fn div_rounding_f64(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        rounding_mode: &str,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let b_buf = Self::unwrap_buffer_f64(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::kernels::gpu_div_rounding_f64(a_buf, b_buf, rounding_mode, dev)
+            .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
@@ -2243,6 +2271,31 @@ impl GpuBackend for CudaBackendImpl {
         let result =
             crate::kernels::gpu_broadcast_div_f64(a_buf, b_buf, a_shape, b_shape, out_shape, dev)
                 .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    fn broadcast_div_rounding_f64(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        a_shape: &[usize],
+        b_shape: &[usize],
+        out_shape: &[usize],
+        rounding_mode: &str,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let b_buf = Self::unwrap_buffer_f64(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::kernels::gpu_broadcast_div_rounding_f64(
+            a_buf,
+            b_buf,
+            a_shape,
+            b_shape,
+            out_shape,
+            rounding_mode,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
@@ -4018,6 +4071,31 @@ impl GpuBackend for CudaBackendImpl {
         let result =
             crate::kernels::gpu_broadcast_div(a_buf, b_buf, a_shape, b_shape, out_shape, dev)
                 .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn broadcast_div_rounding_f32(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        a_shape: &[usize],
+        b_shape: &[usize],
+        out_shape: &[usize],
+        rounding_mode: &str,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let b_buf = Self::unwrap_buffer(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::kernels::gpu_broadcast_div_rounding(
+            a_buf,
+            b_buf,
+            a_shape,
+            b_shape,
+            out_shape,
+            rounding_mode,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 

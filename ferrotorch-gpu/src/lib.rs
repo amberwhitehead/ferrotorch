@@ -264,7 +264,7 @@ pub use group_norm::gpu_group_norm_f32;
 pub use group_norm::{
     gpu_batch_norm_backward_f32, gpu_local_response_norm_backward_f32, gpu_local_response_norm_f32,
 };
-pub use kernels::{gpu_add, gpu_mul, gpu_neg, gpu_relu, gpu_sub};
+pub use kernels::{gpu_add, gpu_div_rounding, gpu_mul, gpu_neg, gpu_relu, gpu_sub};
 pub use kernels::{
     gpu_add_into, gpu_add_into_on_stream, gpu_embed_lookup_into, gpu_gelu_into, gpu_layernorm_into,
     gpu_mul_into, gpu_permute_0213_into, gpu_scale_into, gpu_slice_read_into,
@@ -272,7 +272,9 @@ pub use kernels::{
 };
 #[cfg(feature = "cuda")]
 pub use kernels::{gpu_add_scaled_f32, gpu_add_scaled_f64};
-pub use kernels::{gpu_broadcast_add, gpu_broadcast_mul, gpu_broadcast_sub};
+pub use kernels::{
+    gpu_broadcast_add, gpu_broadcast_div_rounding, gpu_broadcast_mul, gpu_broadcast_sub,
+};
 pub use kernels::{gpu_causal_mask_indirect, gpu_slice_write_indirect};
 pub use kernels::{
     gpu_dropout, gpu_embed_lookup, gpu_gelu, gpu_layernorm, gpu_permute_0213, gpu_slice_read,

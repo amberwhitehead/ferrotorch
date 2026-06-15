@@ -24,6 +24,7 @@
 //! | REQ-20 | SHIPPED | impl `enum MemoryFormat`; non-test consumer `Tensor::to_memory_format`, `ferrotorch-nn::Conv2d`. |
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::device::Device;
@@ -173,9 +174,9 @@ struct TensorInner<T: Float> {
     strides: Vec<isize>,
     offset: usize,
     grad: Mutex<Option<Box<Tensor<T>>>>,
-    grad_fn: Option<Arc<dyn GradFn<T>>>,
-    requires_grad: bool,
-    is_leaf: bool,
+    grad_fn: Mutex<Option<Arc<dyn GradFn<T>>>>,
+    requires_grad: AtomicBool,
+    is_leaf: AtomicBool,
     /// Hook storage for gradient hooks and post-accumulate-grad hooks.
     hooks: Mutex<crate::autograd::hooks::HookStorage<T>>,
 }
@@ -228,9 +229,9 @@ impl<T: Float> Tensor<T> {
                 strides,
                 offset: 0,
                 grad: Mutex::new(None),
-                grad_fn: None,
-                requires_grad,
-                is_leaf: true,
+                grad_fn: Mutex::new(None),
+                requires_grad: AtomicBool::new(requires_grad),
+                is_leaf: AtomicBool::new(true),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -277,9 +278,9 @@ impl<T: Float> Tensor<T> {
                 strides,
                 offset: self.inner.offset,
                 grad: Mutex::new(None),
-                grad_fn: None,
-                requires_grad: false,
-                is_leaf: true,
+                grad_fn: Mutex::new(None),
+                requires_grad: AtomicBool::new(false),
+                is_leaf: AtomicBool::new(true),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -332,9 +333,9 @@ impl<T: Float> Tensor<T> {
                 strides,
                 offset: self.inner.offset,
                 grad: Mutex::new(None),
-                grad_fn: Some(grad_fn),
-                requires_grad: true,
-                is_leaf: false,
+                grad_fn: Mutex::new(Some(grad_fn)),
+                requires_grad: AtomicBool::new(true),
+                is_leaf: AtomicBool::new(false),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -395,9 +396,9 @@ impl<T: Float> Tensor<T> {
                 strides: new_strides,
                 offset: new_offset,
                 grad: Mutex::new(None),
-                grad_fn,
-                requires_grad,
-                is_leaf,
+                grad_fn: Mutex::new(grad_fn),
+                requires_grad: AtomicBool::new(requires_grad),
+                is_leaf: AtomicBool::new(is_leaf),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -478,9 +479,9 @@ impl<T: Float> Tensor<T> {
                 strides,
                 offset: 0,
                 grad: Mutex::new(None),
-                grad_fn: Some(grad_fn),
-                requires_grad: true,
-                is_leaf: false,
+                grad_fn: Mutex::new(Some(grad_fn)),
+                requires_grad: AtomicBool::new(true),
+                is_leaf: AtomicBool::new(false),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -527,9 +528,9 @@ impl<T: Float> Tensor<T> {
                 strides: strides.clone(),
                 offset: 0,
                 grad: Mutex::new(None),
-                grad_fn: None,
-                requires_grad: false,
-                is_leaf: true,
+                grad_fn: Mutex::new(None),
+                requires_grad: AtomicBool::new(false),
+                is_leaf: AtomicBool::new(true),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: Some(storage.version()),
@@ -544,9 +545,9 @@ impl<T: Float> Tensor<T> {
                 strides,
                 offset: 0,
                 grad: Mutex::new(None),
-                grad_fn: Some(grad_fn),
-                requires_grad: true,
-                is_leaf: false,
+                grad_fn: Mutex::new(Some(grad_fn)),
+                requires_grad: AtomicBool::new(true),
+                is_leaf: AtomicBool::new(false),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -774,17 +775,68 @@ impl<T: Float> Tensor<T> {
 
     #[inline]
     pub fn requires_grad(&self) -> bool {
-        self.inner.requires_grad
+        self.inner.requires_grad.load(Ordering::Acquire)
     }
 
     #[inline]
     pub fn is_leaf(&self) -> bool {
-        self.inner.is_leaf
+        self.inner.is_leaf.load(Ordering::Acquire)
     }
 
     #[inline]
-    pub fn grad_fn(&self) -> Option<&Arc<dyn GradFn<T>>> {
-        self.inner.grad_fn.as_ref()
+    pub fn grad_fn(&self) -> Option<Arc<dyn GradFn<T>>> {
+        let guard = self
+            .inner
+            .grad_fn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.as_ref().cloned()
+    }
+
+    pub(crate) fn autograd_snapshot(&self) -> FerrotorchResult<Tensor<T>> {
+        let (storage, shape) = self.clone().into_storage_and_shape()?;
+        let strides = checked_c_contiguous_strides(&shape, "autograd_snapshot")?;
+        Ok(Tensor {
+            inner: Arc::new(TensorInner {
+                id: TensorId::next(),
+                storage: Arc::new(storage),
+                shape,
+                strides,
+                offset: 0,
+                grad: Mutex::new(None),
+                grad_fn: Mutex::new(self.grad_fn()),
+                requires_grad: AtomicBool::new(self.requires_grad()),
+                is_leaf: AtomicBool::new(self.is_leaf()),
+                hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
+            }),
+            saved_version: None,
+        })
+    }
+
+    pub(crate) fn replace_autograd_metadata(
+        &self,
+        requires_grad: bool,
+        is_leaf: bool,
+        grad_fn: Option<Arc<dyn GradFn<T>>>,
+    ) -> FerrotorchResult<()> {
+        {
+            let mut guard =
+                self.inner
+                    .grad_fn
+                    .lock()
+                    .map_err(|e| FerrotorchError::LockPoisoned {
+                        message: format!("grad_fn mutex: {e}"),
+                    })?;
+            *guard = grad_fn;
+        }
+        self.inner
+            .requires_grad
+            .store(requires_grad, Ordering::Release);
+        self.inner.is_leaf.store(is_leaf, Ordering::Release);
+        if !is_leaf {
+            self.set_grad(None)?;
+        }
+        Ok(())
     }
 
     /// Access the hook storage for this tensor.
@@ -2310,9 +2362,9 @@ impl<T: Float> Tensor<T> {
                 strides: self.inner.strides.clone(),
                 offset: self.inner.offset,
                 grad: Mutex::new(None),
-                grad_fn: None,
-                requires_grad: false,
-                is_leaf: true,
+                grad_fn: Mutex::new(None),
+                requires_grad: AtomicBool::new(false),
+                is_leaf: AtomicBool::new(true),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -2330,9 +2382,9 @@ impl<T: Float> Tensor<T> {
                 strides: self.inner.strides.clone(),
                 offset: self.inner.offset,
                 grad: Mutex::new(None),
-                grad_fn: self.inner.grad_fn.clone(),
-                requires_grad,
-                is_leaf: self.inner.is_leaf,
+                grad_fn: Mutex::new(self.grad_fn()),
+                requires_grad: AtomicBool::new(requires_grad),
+                is_leaf: AtomicBool::new(self.is_leaf()),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -2447,7 +2499,7 @@ impl<T: Float> Tensor<T> {
     fn format_materialized(&self, storage: TensorStorage<T>, target_strides: Vec<isize>) -> Self {
         let track = !crate::autograd::no_grad::is_inference_mode()
             && crate::autograd::no_grad::is_grad_enabled()
-            && self.inner.requires_grad;
+            && self.requires_grad();
         let grad_fn: Option<Arc<dyn GradFn<T>>> = if track {
             Some(Arc::new(MemoryFormatBackward {
                 source: self.clone(),
@@ -2463,9 +2515,9 @@ impl<T: Float> Tensor<T> {
                 strides: target_strides,
                 offset: 0,
                 grad: Mutex::new(None),
-                grad_fn,
-                requires_grad: track,
-                is_leaf: !track,
+                grad_fn: Mutex::new(grad_fn),
+                requires_grad: AtomicBool::new(track),
+                is_leaf: AtomicBool::new(!track),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -2759,9 +2811,9 @@ impl<T: Float> fmt::Debug for Tensor<T> {
             .field("id", &self.inner.id)
             .field("shape", &self.inner.shape)
             .field("device", &self.device())
-            .field("requires_grad", &self.inner.requires_grad)
-            .field("is_leaf", &self.inner.is_leaf)
-            .field("grad_fn", &self.inner.grad_fn.as_ref().map(|gf| gf.name()))
+            .field("requires_grad", &self.requires_grad())
+            .field("is_leaf", &self.is_leaf())
+            .field("grad_fn", &self.grad_fn().as_ref().map(|gf| gf.name()))
             .field("saved_version", &self.saved_version)
             .finish()
     }

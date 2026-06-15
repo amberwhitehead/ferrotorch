@@ -431,6 +431,16 @@ pub trait GpuBackend: Send + Sync {
             op: "add_scaled_f32",
         })
     }
+    fn div_rounding_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _rounding_mode: &str,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "div_rounding_f32",
+        })
+    }
     fn neg_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle>;
     fn relu_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle>;
 
@@ -596,6 +606,16 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "add_scaled_f64",
+        })
+    }
+    fn div_rounding_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _rounding_mode: &str,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "div_rounding_f64",
         })
     }
     fn neg_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
@@ -1122,6 +1142,19 @@ pub trait GpuBackend: Send + Sync {
         b_shape: &[usize],
         out_shape: &[usize],
     ) -> FerrotorchResult<GpuBufferHandle>;
+    fn broadcast_div_rounding_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+        _rounding_mode: &str,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_div_rounding_f32",
+        })
+    }
     fn broadcast_div_f64(
         &self,
         _a: &GpuBufferHandle,
@@ -1132,6 +1165,19 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::InvalidArgument {
             message: "broadcast_div_f64 GPU op not yet implemented".into(),
+        })
+    }
+    fn broadcast_div_rounding_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+        _rounding_mode: &str,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_div_rounding_f64",
         })
     }
 

@@ -101,12 +101,12 @@ pub fn grad<T: Float>(
 
     // Phase 1: Collect all nodes and compute in-degree via BFS.
     let mut in_degree: HashMap<TensorId, usize> = HashMap::new();
-    let mut node_map: HashMap<TensorId, &Tensor<T>> = HashMap::new();
-    let mut queue: VecDeque<&Tensor<T>> = VecDeque::new();
+    let mut node_map: HashMap<TensorId, Tensor<T>> = HashMap::new();
+    let mut queue: VecDeque<Tensor<T>> = VecDeque::new();
 
-    queue.push_back(outputs);
+    queue.push_back(outputs.clone());
     in_degree.entry(outputs.id()).or_insert(0);
-    node_map.insert(outputs.id(), outputs);
+    node_map.insert(outputs.id(), outputs.clone());
 
     while let Some(node) = queue.pop_front() {
         if let Some(grad_fn) = node.grad_fn() {
@@ -115,7 +115,8 @@ pub fn grad<T: Float>(
                 let count = in_degree.entry(input_id).or_insert(0);
                 *count += 1;
                 if let std::collections::hash_map::Entry::Vacant(e) = node_map.entry(input_id) {
-                    e.insert(input);
+                    let input = input.clone();
+                    e.insert(input.clone());
                     queue.push_back(input);
                 }
             }
@@ -164,7 +165,7 @@ pub fn grad<T: Float>(
 
     for &id in &topo_order {
         let node = match node_map.get(&id) {
-            Some(n) => *n,
+            Some(n) => n,
             None => continue,
         };
 

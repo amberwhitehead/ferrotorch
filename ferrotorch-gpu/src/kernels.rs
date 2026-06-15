@@ -110,6 +110,13 @@ pub(crate) fn ptx_f32_to_f64(
         // Conversions
         .replace("cvt.rn.f32.u32", "cvt.rn.f64.u32")
         .replace("cvt.rn.f32.s32", "cvt.rn.f64.s32")
+        .replace("cvt.rzi.f32.f32", "cvt.rzi.f64.f64")
+        .replace("cvt.rmi.f32.f32", "cvt.rmi.f64.f64")
+        // Float literals used by f32 templates that are valid operands for
+        // the promoted f64 arithmetic after conversion.
+        .replace("0f00000000", "0d0000000000000000")
+        .replace("0f3F000000", "0d3FE0000000000000")
+        .replace("0f3F800000", "0d3FF0000000000000")
         // Bit reinterpretation (for NaN/inf checks). Note: the literal
         // operand of `mov.b32 %reg, <imm32>` must also be promoted when
         // the immediate encodes a special-value bit pattern (e.g. f32 ±inf
@@ -12750,6 +12757,75 @@ DONE:
 }
 ";
 
+#[cfg(feature = "cuda")]
+const DIV_ROUNDING_EXTRA_F32_REGS: &str =
+    ".reg .f32 %va, %vb, %vr, %q, %trunc_q, %m, %divv, %floorv, %tmp;";
+
+#[cfg(feature = "cuda")]
+const DIV_ROUNDING_EXTRA_PREDS: &str = ".reg .pred %p, %loop_p, %p_zero_b, %p_m_nonzero, \
+     %p_b_neg, %p_m_neg, %p_b_nonneg, %p_m_nonneg, %p_sign_a, %p_sign_b, %p_adjust, \
+     %p_div_zero, %p_gt_half;";
+
+#[cfg(feature = "cuda")]
+const DIV_ROUNDING_TRUNC_BLOCK: &str = "\
+    div.rn.f32 %q, %va, %vb;
+    cvt.rzi.f32.f32 %vr, %q;";
+
+#[cfg(feature = "cuda")]
+const DIV_ROUNDING_FLOOR_BLOCK: &str = "\
+    div.rn.f32 %q, %va, %vb;
+    setp.eq.f32 %p_zero_b, %vb, 0f00000000;
+    @%p_zero_b mov.f32 %vr, %q;
+    @%p_zero_b bra DIV_ROUNDING_DONE;
+
+    cvt.rzi.f32.f32 %trunc_q, %q;
+    neg.f32 %tmp, %trunc_q;
+    fma.rn.f32 %m, %tmp, %vb, %va;
+    sub.f32 %tmp, %va, %m;
+    div.rn.f32 %divv, %tmp, %vb;
+
+    setp.ne.f32 %p_m_nonzero, %m, 0f00000000;
+    setp.lt.f32 %p_b_neg, %vb, 0f00000000;
+    setp.lt.f32 %p_m_neg, %m, 0f00000000;
+    not.pred %p_b_nonneg, %p_b_neg;
+    not.pred %p_m_nonneg, %p_m_neg;
+    and.pred %p_sign_a, %p_b_neg, %p_m_nonneg;
+    and.pred %p_sign_b, %p_b_nonneg, %p_m_neg;
+    or.pred %p_adjust, %p_sign_a, %p_sign_b;
+    and.pred %p_adjust, %p_adjust, %p_m_nonzero;
+    @%p_adjust sub.f32 %divv, %divv, 0f3F800000;
+
+    setp.eq.f32 %p_div_zero, %divv, 0f00000000;
+    @%p_div_zero mul.f32 %vr, %q, 0f00000000;
+    @%p_div_zero bra DIV_ROUNDING_DONE;
+
+    cvt.rmi.f32.f32 %floorv, %divv;
+    sub.f32 %tmp, %divv, %floorv;
+    setp.gt.f32 %p_gt_half, %tmp, 0f3F000000;
+    @%p_gt_half add.f32 %floorv, %floorv, 0f3F800000;
+    mov.f32 %vr, %floorv;
+DIV_ROUNDING_DONE:";
+
+#[cfg(feature = "cuda")]
+fn div_rounding_ptx(
+    base_ptx: &str,
+    f32_kernel_name: &str,
+    rounding_kernel_name: &str,
+    op_block: &str,
+) -> String {
+    base_ptx
+        .replace(f32_kernel_name, rounding_kernel_name)
+        .replace(".reg .f32 %va, %vb, %vr;", DIV_ROUNDING_EXTRA_F32_REGS)
+        .replace(".reg .pred %p, %loop_p;", DIV_ROUNDING_EXTRA_PREDS)
+        .replace(
+            ".reg .pred %p;",
+            ".reg .pred %p, %p_zero_b, %p_m_nonzero, \
+             %p_b_neg, %p_m_neg, %p_b_nonneg, %p_m_nonneg, %p_sign_a, %p_sign_b, \
+             %p_adjust, %p_div_zero, %p_gt_half;",
+        )
+        .replace("    div.rn.f32 %vr, %va, %vb;", op_block)
+}
+
 /// PTX source for `exp_kernel`: `out[i] = exp(a[i])`.
 #[cfg(feature = "cuda")]
 pub(crate) const EXP_PTX: &str = "\
@@ -15104,6 +15180,75 @@ pub fn gpu_broadcast_div(
         device,
         BROADCAST_DIV_PTX,
         "broadcast_div_kernel",
+    )
+}
+
+/// Broadcast division with PyTorch rounding mode: `trunc` or `floor`.
+#[cfg(feature = "cuda")]
+pub fn gpu_broadcast_div_rounding(
+    a: &CudaBuffer<f32>,
+    b: &CudaBuffer<f32>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    rounding_mode: &str,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let a_str = broadcast_strides(a_shape, out_shape);
+    let b_str = broadcast_strides(b_shape, out_shape);
+    let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
+
+    let (ptx, kernel_name) = match rounding_mode {
+        "trunc" => {
+            static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            (
+                CACHE
+                    .get_or_init(|| {
+                        div_rounding_ptx(
+                            BROADCAST_DIV_PTX,
+                            "broadcast_div_kernel",
+                            "broadcast_div_trunc_kernel",
+                            DIV_ROUNDING_TRUNC_BLOCK,
+                        )
+                    })
+                    .as_str(),
+                "broadcast_div_trunc_kernel",
+            )
+        }
+        "floor" => {
+            static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            (
+                CACHE
+                    .get_or_init(|| {
+                        div_rounding_ptx(
+                            BROADCAST_DIV_PTX,
+                            "broadcast_div_kernel",
+                            "broadcast_div_floor_kernel",
+                            DIV_ROUNDING_FLOOR_BLOCK,
+                        )
+                    })
+                    .as_str(),
+                "broadcast_div_floor_kernel",
+            )
+        }
+        other => {
+            return Err(GpuError::InvalidState {
+                message: format!("unsupported div rounding_mode {other:?}"),
+            });
+        }
+    };
+
+    try_launch_broadcast_binary(
+        a,
+        b,
+        &a_str,
+        &b_str,
+        &shape_u32,
+        out_numel,
+        device,
+        ptx,
+        kernel_name,
     )
 }
 
@@ -21589,6 +21734,59 @@ pub fn gpu_div(
     try_launch_binary(a, b, device, DIV_PTX, "div_kernel")
 }
 
+/// Elementwise division with PyTorch rounding mode: `trunc` or `floor`.
+#[cfg(feature = "cuda")]
+pub fn gpu_div_rounding(
+    a: &CudaBuffer<f32>,
+    b: &CudaBuffer<f32>,
+    rounding_mode: &str,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    validate_binary(a, b, device)?;
+
+    let (ptx, kernel_name) = match rounding_mode {
+        "trunc" => {
+            static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            (
+                CACHE
+                    .get_or_init(|| {
+                        div_rounding_ptx(
+                            DIV_PTX,
+                            "div_kernel",
+                            "div_trunc_kernel",
+                            DIV_ROUNDING_TRUNC_BLOCK,
+                        )
+                    })
+                    .as_str(),
+                "div_trunc_kernel",
+            )
+        }
+        "floor" => {
+            static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            (
+                CACHE
+                    .get_or_init(|| {
+                        div_rounding_ptx(
+                            DIV_PTX,
+                            "div_kernel",
+                            "div_floor_kernel",
+                            DIV_ROUNDING_FLOOR_BLOCK,
+                        )
+                    })
+                    .as_str(),
+                "div_floor_kernel",
+            )
+        }
+        other => {
+            return Err(GpuError::InvalidState {
+                message: format!("unsupported div rounding_mode {other:?}"),
+            });
+        }
+    };
+
+    try_launch_binary(a, b, device, ptx, kernel_name)
+}
+
 /// Elementwise exponential: `out[i] = exp(a[i])`.
 #[cfg(feature = "cuda")]
 pub fn gpu_exp(a: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
@@ -21862,6 +22060,74 @@ pub fn gpu_div_f64(
     }
     let ptx = get_f64_ptx(&CACHE, DIV_PTX, "div_kernel", "div_f64_kernel");
     try_launch_binary_f64(a, b, device, ptx, "div_f64_kernel")
+}
+
+/// Elementwise f64 division with PyTorch rounding mode: `trunc` or `floor`.
+#[cfg(feature = "cuda")]
+pub fn gpu_div_rounding_f64(
+    a: &CudaBuffer<f64>,
+    b: &CudaBuffer<f64>,
+    rounding_mode: &str,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    if a.len() != b.len() {
+        return Err(GpuError::LengthMismatch {
+            a: a.len(),
+            b: b.len(),
+        });
+    }
+
+    let (ptx, kernel_name) = match rounding_mode {
+        "trunc" => {
+            static F32_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            static F64_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            let f32_ptx = F32_CACHE.get_or_init(|| {
+                div_rounding_ptx(
+                    DIV_PTX,
+                    "div_kernel",
+                    "div_trunc_kernel",
+                    DIV_ROUNDING_TRUNC_BLOCK,
+                )
+            });
+            (
+                get_f64_ptx(
+                    &F64_CACHE,
+                    f32_ptx,
+                    "div_trunc_kernel",
+                    "div_trunc_f64_kernel",
+                ),
+                "div_trunc_f64_kernel",
+            )
+        }
+        "floor" => {
+            static F32_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            static F64_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            let f32_ptx = F32_CACHE.get_or_init(|| {
+                div_rounding_ptx(
+                    DIV_PTX,
+                    "div_kernel",
+                    "div_floor_kernel",
+                    DIV_ROUNDING_FLOOR_BLOCK,
+                )
+            });
+            (
+                get_f64_ptx(
+                    &F64_CACHE,
+                    f32_ptx,
+                    "div_floor_kernel",
+                    "div_floor_f64_kernel",
+                ),
+                "div_floor_f64_kernel",
+            )
+        }
+        other => {
+            return Err(GpuError::InvalidState {
+                message: format!("unsupported div rounding_mode {other:?}"),
+            });
+        }
+    };
+
+    try_launch_binary_f64(a, b, device, ptx, kernel_name)
 }
 
 /// Elementwise f64 negation: `out[i] = -a[i]`.
@@ -22307,6 +22573,85 @@ pub fn gpu_broadcast_div_f64(
         device,
         ptx,
         "broadcast_div_f64_kernel",
+    )
+}
+
+/// Broadcast f64 division with PyTorch rounding mode: `trunc` or `floor`.
+#[cfg(feature = "cuda")]
+pub fn gpu_broadcast_div_rounding_f64(
+    a: &CudaBuffer<f64>,
+    b: &CudaBuffer<f64>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    rounding_mode: &str,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    let a_str = broadcast_strides(a_shape, out_shape);
+    let b_str = broadcast_strides(b_shape, out_shape);
+    let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
+
+    let (ptx, kernel_name) = match rounding_mode {
+        "trunc" => {
+            static F32_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            static F64_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            let f32_ptx = F32_CACHE.get_or_init(|| {
+                div_rounding_ptx(
+                    BROADCAST_DIV_PTX,
+                    "broadcast_div_kernel",
+                    "broadcast_div_trunc_kernel",
+                    DIV_ROUNDING_TRUNC_BLOCK,
+                )
+            });
+            (
+                get_f64_ptx(
+                    &F64_CACHE,
+                    f32_ptx,
+                    "broadcast_div_trunc_kernel",
+                    "broadcast_div_trunc_f64_kernel",
+                ),
+                "broadcast_div_trunc_f64_kernel",
+            )
+        }
+        "floor" => {
+            static F32_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            static F64_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            let f32_ptx = F32_CACHE.get_or_init(|| {
+                div_rounding_ptx(
+                    BROADCAST_DIV_PTX,
+                    "broadcast_div_kernel",
+                    "broadcast_div_floor_kernel",
+                    DIV_ROUNDING_FLOOR_BLOCK,
+                )
+            });
+            (
+                get_f64_ptx(
+                    &F64_CACHE,
+                    f32_ptx,
+                    "broadcast_div_floor_kernel",
+                    "broadcast_div_floor_f64_kernel",
+                ),
+                "broadcast_div_floor_f64_kernel",
+            )
+        }
+        other => {
+            return Err(GpuError::InvalidState {
+                message: format!("unsupported div rounding_mode {other:?}"),
+            });
+        }
+    };
+
+    try_launch_broadcast_binary_f64(
+        a,
+        b,
+        &a_str,
+        &b_str,
+        &shape_u32,
+        out_numel,
+        device,
+        ptx,
+        kernel_name,
     )
 }
 

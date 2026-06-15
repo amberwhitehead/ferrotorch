@@ -36,27 +36,23 @@
 //!
 //! # Autograd safety
 //!
-//! In-place operations are **not** tracked by the autograd engine. To prevent
-//! silent gradient corruption, every method in this module checks two
-//! conditions before mutating:
-//!
-//! 1. The tensor must not have a `grad_fn` (i.e., it must not be the output
-//!    of a differentiable operation). Mutating a non-leaf node would
-//!    invalidate cached values needed by the backward pass.
-//!
-//! 2. The tensor must not be a leaf with `requires_grad = true`. PyTorch
-//!    raises `RuntimeError` in this case because the in-place modification
-//!    would not be recorded and the gradient would be silently wrong.
-//!
-//! If either check fails, an [`FerrotorchError::InvalidArgument`] is returned.
+//! Scalar/fill/clamp in-place operations are forward-only and reject tensors
+//! already participating in autograd. Binary tensor in-place operations follow
+//! PyTorch's graph-rebasing behavior for legal mutations: a non-tracking or
+//! non-leaf destination combined with a tracking source receives a `grad_fn`
+//! and propagates gradients through the old destination value and source.
+//! Leaf tensors with `requires_grad = true` are still rejected before mutation,
+//! matching PyTorch's leaf in-place rule.
 
 use std::any::TypeId;
+use std::sync::Arc;
 
+use crate::autograd::no_grad::{is_grad_enabled, no_grad};
 use crate::device::Device;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
-use crate::tensor::Tensor;
+use crate::tensor::{GradFn, Tensor};
 
 /// Validate that an in-place operation is safe to perform on `tensor`.
 ///
@@ -84,6 +80,198 @@ fn check_inplace_allowed<T: Float>(tensor: &Tensor<T>, op_name: &str) -> Ferroto
     }
 
     Ok(())
+}
+
+fn check_binary_inplace_allowed<T: Float>(
+    tensor: &Tensor<T>,
+    op_name: &str,
+) -> FerrotorchResult<()> {
+    if tensor.requires_grad() && tensor.is_leaf() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "in-place operation '{op_name}' not allowed on a leaf tensor \
+                 with requires_grad=true (the modification would not be tracked \
+                 by autograd)",
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+#[inline]
+fn needs_binary_inplace_autograd<T: Float>(lhs: &Tensor<T>, rhs: &Tensor<T>) -> bool {
+    is_grad_enabled() && (lhs.requires_grad() || rhs.requires_grad())
+}
+
+fn finish_tracked_binary_inplace<'a, T: Float>(
+    target: &'a Tensor<T>,
+    result: Tensor<T>,
+    op_name: &'static str,
+) -> FerrotorchResult<&'a Tensor<T>> {
+    if result.shape() != target.shape() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "{op_name}: broadcast result {:?} does not match self.shape() {:?} \
+                 — in-place operation cannot resize the target tensor",
+                result.shape(),
+                target.shape(),
+            ),
+        });
+    }
+
+    let requires_grad = result.requires_grad();
+    let is_leaf = result.is_leaf();
+    let grad_fn = result.grad_fn();
+    let (storage, _shape) = result.into_storage_and_shape()?;
+    // SAFETY: caller has already validated in-place eligibility. The result
+    // storage has the same shape/device as target and is freshly materialized.
+    unsafe { target.update_storage(storage)? };
+    target.replace_autograd_metadata(requires_grad, is_leaf, grad_fn)?;
+    Ok(target)
+}
+
+fn zeros_like_grad<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        let Device::Cuda(ordinal) = input.device() else {
+            unreachable!("input.is_cuda() implies Device::Cuda")
+        };
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = backend.alloc_zeros(
+            input.numel(),
+            <T as crate::dtype::Element>::dtype(),
+            ordinal,
+        )?;
+        Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)
+    } else {
+        Tensor::from_storage(
+            TensorStorage::cpu(vec![<T as num_traits::Zero>::zero(); input.numel()]),
+            input.shape().to_vec(),
+            false,
+        )
+    }
+}
+
+fn cuda_div_rounding_forward<T: Float>(
+    lhs: &Tensor<T>,
+    rhs: &Tensor<T>,
+    rounding_mode: &str,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !(lhs.is_cuda() || rhs.is_cuda()) {
+        return Ok(None);
+    }
+    if lhs.device() != rhs.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: lhs.device(),
+            got: rhs.device(),
+        });
+    }
+    if !(lhs.is_cuda() && rhs.is_cuda()) {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: lhs.device(),
+            got: rhs.device(),
+        });
+    }
+
+    let out_shape = crate::shape::broadcast_shapes(lhs.shape(), rhs.shape())?;
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let handle = if is_f32::<T>() {
+        if lhs.shape() == rhs.shape() {
+            backend.div_rounding_f32(lhs.gpu_handle()?, rhs.gpu_handle()?, rounding_mode)?
+        } else {
+            backend.broadcast_div_rounding_f32(
+                lhs.gpu_handle()?,
+                rhs.gpu_handle()?,
+                lhs.shape(),
+                rhs.shape(),
+                &out_shape,
+                rounding_mode,
+            )?
+        }
+    } else if is_f64::<T>() {
+        if lhs.shape() == rhs.shape() {
+            backend.div_rounding_f64(lhs.gpu_handle()?, rhs.gpu_handle()?, rounding_mode)?
+        } else {
+            backend.broadcast_div_rounding_f64(
+                lhs.gpu_handle()?,
+                rhs.gpu_handle()?,
+                lhs.shape(),
+                rhs.shape(),
+                &out_shape,
+                rounding_mode,
+            )?
+        }
+    } else {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "div_rounding" });
+    };
+
+    Tensor::from_storage(TensorStorage::gpu(handle), out_shape, false).map(Some)
+}
+
+fn div_rounding_forward<T: Float>(
+    lhs: &Tensor<T>,
+    rhs: &Tensor<T>,
+    rounding_mode: &str,
+) -> FerrotorchResult<Tensor<T>> {
+    if let Some(result) = cuda_div_rounding_forward(lhs, rhs, rounding_mode)? {
+        return Ok(result);
+    }
+
+    match rounding_mode {
+        "floor" => no_grad(|| crate::grad_fns::arithmetic::floor_divide(lhs, rhs)),
+        "trunc" => {
+            let result =
+                no_grad(|| crate::grad_fns::arithmetic::div(lhs, rhs)).map_err(|e| match e {
+                    FerrotorchError::ShapeMismatch { message } => FerrotorchError::ShapeMismatch {
+                        message: format!("div_rounding_: {message}"),
+                    },
+                    other => other,
+                })?;
+            let data: Vec<T> = result.data_vec()?.into_iter().map(|x| x.trunc()).collect();
+            Tensor::from_storage(
+                TensorStorage::on_device(data, result.device())?,
+                result.shape().to_vec(),
+                false,
+            )
+        }
+        other => Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "div_rounding_: expected rounding_mode to be one of 'trunc' or 'floor' \
+                 but found '{other}'"
+            ),
+        }),
+    }
+}
+
+#[derive(Debug)]
+struct RoundedDivInplaceBackward<T: Float> {
+    lhs: Tensor<T>,
+    rhs: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for RoundedDivInplaceBackward<T> {
+    fn backward(&self, _grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let lhs_grad = if self.lhs.requires_grad() {
+            Some(zeros_like_grad(&self.lhs)?)
+        } else {
+            None
+        };
+        let rhs_grad = if self.rhs.requires_grad() {
+            Some(zeros_like_grad(&self.rhs)?)
+        } else {
+            None
+        };
+        Ok(vec![lhs_grad, rhs_grad])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.lhs, &self.rhs]
+    }
+
+    fn name(&self) -> &'static str {
+        "DivBackward2"
+    }
 }
 
 #[inline]
@@ -306,8 +494,8 @@ impl<T: Float> Tensor<T> {
     /// # Errors
     ///
     /// Returns an error if `other` cannot be broadcast to `self.shape()`
-    /// (or if doing so would change `self.shape()`), or if the tensor is
-    /// part of the computation graph or is a leaf with `requires_grad = true`.
+    /// (or if doing so would change `self.shape()`), or if `self` is a leaf
+    /// tensor with `requires_grad = true`.
     pub fn add_(&self, other: &Tensor<T>) -> FerrotorchResult<&Self> {
         self.add_scaled_(other, 1.0)
     }
@@ -326,10 +514,23 @@ impl<T: Float> Tensor<T> {
     /// # Errors
     ///
     /// Returns an error if shapes are not broadcast-compatible, if the
-    /// broadcast result differs from `self.shape()`, or if the tensor is
-    /// part of the computation graph or is a leaf with `requires_grad = true`.
+    /// broadcast result differs from `self.shape()`, or if `self` is a leaf
+    /// tensor with `requires_grad = true`.
     pub fn add_scaled_(&self, other: &Tensor<T>, alpha: f64) -> FerrotorchResult<&Self> {
-        check_inplace_allowed(self, "add_scaled_")?;
+        check_binary_inplace_allowed(self, "add_scaled_")?;
+
+        if needs_binary_inplace_autograd(self, other) {
+            let lhs = self.autograd_snapshot()?;
+            let result = crate::grad_fns::arithmetic::add_scaled(&lhs, other, alpha).map_err(
+                |e| match e {
+                    FerrotorchError::ShapeMismatch { message } => FerrotorchError::ShapeMismatch {
+                        message: format!("add_scaled_: {message}"),
+                    },
+                    other => other,
+                },
+            )?;
+            return finish_tracked_binary_inplace(self, result, "add_scaled_");
+        }
 
         // Same-shape, alpha == 1.0 fast path: keep the GPU storage-swap
         // and SIMD CPU path that the previous `add_` had. Any other shape
@@ -345,12 +546,10 @@ impl<T: Float> Tensor<T> {
             {
                 let sum_handle = backend.add_f32(self.gpu_handle()?, other.gpu_handle()?)?;
                 let storage = crate::storage::TensorStorage::gpu(sum_handle);
-                // SAFETY: check_inplace_allowed above proved `self` has
-                // no grad_fn and is not a requires_grad leaf, so no
-                // autograd machinery references this storage; `&self` +
-                // `Float: 'static` ensure no concurrent reader/writer
-                // holds a borrow across this point on this thread,
-                // satisfying update_storage's exclusive-access contract.
+                // SAFETY: `check_binary_inplace_allowed` rejected requires-grad
+                // leaves, this no-grad fast path only runs when no binary
+                // autograd rebasing is needed, and the new storage has the same
+                // shape as `self`.
                 unsafe { self.update_storage(storage)? };
                 return Ok(self);
             }
@@ -360,9 +559,9 @@ impl<T: Float> Tensor<T> {
             for (a, &b) in data.iter_mut().zip(other_data.iter()) {
                 *a += b;
             }
-            // SAFETY: check_inplace_allowed above ensures `self` is not in
-            // the autograd graph and not a requires_grad leaf; satisfies
-            // update_data's exclusive-access contract.
+            // SAFETY: `check_binary_inplace_allowed` rejected requires-grad
+            // leaves and this fast path only runs when no binary autograd
+            // rebasing is needed. `data` has exactly `self.numel()` elements.
             unsafe { self.update_data(&data)? };
             return Ok(self);
         }
@@ -397,10 +596,9 @@ impl<T: Float> Tensor<T> {
         // copying it through CPU. `into_storage_and_shape` consumes the
         // Tensor and yields its TensorStorage.
         let (storage, _shape) = result.into_storage_and_shape()?;
-        // SAFETY: check_inplace_allowed above ensures `self` is not in the
-        // autograd graph and not a requires_grad leaf; `storage` was just
-        // produced from a freshly-allocated tensor with no aliases. numel
-        // matches because we asserted `result.shape() == self.shape()`.
+        // SAFETY: `check_binary_inplace_allowed` rejected requires-grad leaves.
+        // `storage` was just produced from a freshly-allocated tensor with no
+        // aliases and has the same numel because `result.shape() == self.shape()`.
         unsafe { self.update_storage(storage)? };
         Ok(self)
     }
@@ -424,8 +622,8 @@ impl<T: Float> Tensor<T> {
     /// # Errors
     ///
     /// Returns an error if shapes are not broadcast-compatible, if the
-    /// broadcast result differs from `self.shape()`, or if the tensor is
-    /// part of the computation graph or is a leaf with `requires_grad = true`.
+    /// broadcast result differs from `self.shape()`, or if `self` is a leaf
+    /// tensor with `requires_grad = true`.
     pub fn sub_scaled_(&self, other: &Tensor<T>, alpha: f64) -> FerrotorchResult<&Self> {
         // PyTorch parity: `sub_out` literally calls `add_stub` with
         // negated alpha. Delegate to `add_scaled_(other, -alpha)` and
@@ -453,8 +651,8 @@ impl<T: Float> Tensor<T> {
     /// # Errors
     ///
     /// Returns an error if `other` cannot be broadcast to `self.shape()`
-    /// (or if doing so would change `self.shape()`), or if the tensor is
-    /// part of the computation graph or is a leaf with `requires_grad = true`.
+    /// (or if doing so would change `self.shape()`), or if `self` is a leaf
+    /// tensor with `requires_grad = true`.
     pub fn sub_(&self, other: &Tensor<T>) -> FerrotorchResult<&Self> {
         self.sub_scaled_(other, 1.0)
     }
@@ -477,10 +675,21 @@ impl<T: Float> Tensor<T> {
     /// # Errors
     ///
     /// Returns an error if shapes are not broadcast-compatible, if the
-    /// broadcast result differs from `self.shape()`, or if the tensor is
-    /// part of the computation graph or is a leaf with `requires_grad = true`.
+    /// broadcast result differs from `self.shape()`, or if `self` is a leaf
+    /// tensor with `requires_grad = true`.
     pub fn mul_(&self, other: &Tensor<T>) -> FerrotorchResult<&Self> {
-        check_inplace_allowed(self, "mul_")?;
+        check_binary_inplace_allowed(self, "mul_")?;
+
+        if needs_binary_inplace_autograd(self, other) {
+            let lhs = self.autograd_snapshot()?;
+            let result = crate::grad_fns::arithmetic::mul(&lhs, other).map_err(|e| match e {
+                FerrotorchError::ShapeMismatch { message } => FerrotorchError::ShapeMismatch {
+                    message: format!("mul_: {message}"),
+                },
+                other => other,
+            })?;
+            return finish_tracked_binary_inplace(self, result, "mul_");
+        }
 
         // Same-shape fast paths (preserve previous behavior).
         if self.shape() == other.shape() {
@@ -491,10 +700,10 @@ impl<T: Float> Tensor<T> {
             {
                 let handle = backend.mul_f32(self.gpu_handle()?, other.gpu_handle()?)?;
                 let storage = crate::storage::TensorStorage::gpu(handle);
-                // SAFETY: check_inplace_allowed at the top of `mul_` already
-                // proved `self` has no grad_fn and is not a requires_grad leaf;
-                // single-threaded `&self` satisfies update_storage's
-                // exclusive-access contract.
+                // SAFETY: `check_binary_inplace_allowed` rejected requires-grad
+                // leaves, this no-grad fast path only runs when no binary
+                // autograd rebasing is needed, and the new storage has the same
+                // shape as `self`.
                 unsafe { self.update_storage(storage)? };
                 return Ok(self);
             }
@@ -504,9 +713,9 @@ impl<T: Float> Tensor<T> {
             for (a, &b) in data.iter_mut().zip(other_data.iter()) {
                 *a = *a * b;
             }
-            // SAFETY: check_inplace_allowed at the top of `mul_` ensures `self`
-            // is not part of the autograd graph; satisfies update_data's
-            // exclusive-access contract.
+            // SAFETY: `check_binary_inplace_allowed` rejected requires-grad
+            // leaves and this fast path only runs when no binary autograd
+            // rebasing is needed. `data` has exactly `self.numel()` elements.
             unsafe { self.update_data(&data)? };
             return Ok(self);
         }
@@ -533,10 +742,9 @@ impl<T: Float> Tensor<T> {
             });
         }
         let (storage, _shape) = result.into_storage_and_shape()?;
-        // SAFETY: check_inplace_allowed above ensures `self` is not in the
-        // autograd graph and not a requires_grad leaf; `storage` was just
-        // produced from a freshly-allocated tensor with no aliases; numel
-        // matches because we asserted `result.shape() == self.shape()`.
+        // SAFETY: `check_binary_inplace_allowed` rejected requires-grad leaves.
+        // `storage` was just produced from a freshly-allocated tensor with no
+        // aliases and has the same numel because `result.shape() == self.shape()`.
         unsafe { self.update_storage(storage)? };
         Ok(self)
     }
@@ -559,10 +767,21 @@ impl<T: Float> Tensor<T> {
     /// # Errors
     ///
     /// Returns an error if shapes are not broadcast-compatible, if the
-    /// broadcast result differs from `self.shape()`, or if the tensor is
-    /// part of the computation graph or is a leaf with `requires_grad = true`.
+    /// broadcast result differs from `self.shape()`, or if `self` is a leaf
+    /// tensor with `requires_grad = true`.
     pub fn div_(&self, other: &Tensor<T>) -> FerrotorchResult<&Self> {
-        check_inplace_allowed(self, "div_")?;
+        check_binary_inplace_allowed(self, "div_")?;
+
+        if needs_binary_inplace_autograd(self, other) {
+            let lhs = self.autograd_snapshot()?;
+            let result = crate::grad_fns::arithmetic::div(&lhs, other).map_err(|e| match e {
+                FerrotorchError::ShapeMismatch { message } => FerrotorchError::ShapeMismatch {
+                    message: format!("div_: {message}"),
+                },
+                other => other,
+            })?;
+            return finish_tracked_binary_inplace(self, result, "div_");
+        }
 
         if self.shape() == other.shape() {
             if self.is_cuda()
@@ -572,10 +791,10 @@ impl<T: Float> Tensor<T> {
             {
                 let handle = backend.div_f32(self.gpu_handle()?, other.gpu_handle()?)?;
                 let storage = crate::storage::TensorStorage::gpu(handle);
-                // SAFETY: check_inplace_allowed at the top of `div_` already
-                // proved `self` has no grad_fn and is not a requires_grad leaf;
-                // single-threaded `&self` satisfies update_storage's
-                // exclusive-access contract.
+                // SAFETY: `check_binary_inplace_allowed` rejected requires-grad
+                // leaves, this no-grad fast path only runs when no binary
+                // autograd rebasing is needed, and the new storage has the same
+                // shape as `self`.
                 unsafe { self.update_storage(storage)? };
                 return Ok(self);
             }
@@ -585,9 +804,9 @@ impl<T: Float> Tensor<T> {
             for (a, &b) in data.iter_mut().zip(other_data.iter()) {
                 *a = *a / b;
             }
-            // SAFETY: check_inplace_allowed at the top of `div_` ensures `self`
-            // is not part of the autograd graph; satisfies update_data's
-            // exclusive-access contract.
+            // SAFETY: `check_binary_inplace_allowed` rejected requires-grad
+            // leaves and this fast path only runs when no binary autograd
+            // rebasing is needed. `data` has exactly `self.numel()` elements.
             unsafe { self.update_data(&data)? };
             return Ok(self);
         }
@@ -637,10 +856,10 @@ impl<T: Float> Tensor<T> {
     /// # Errors
     ///
     /// Returns an error if `mode` is unrecognized, if shapes are not
-    /// broadcast-compatible, or if the tensor is part of the computation graph
-    /// or is a leaf with `requires_grad = true`.
+    /// broadcast-compatible, or if `self` is a leaf tensor with
+    /// `requires_grad = true`.
     pub fn div_rounding_(&self, other: &Tensor<T>, rounding_mode: &str) -> FerrotorchResult<&Self> {
-        check_inplace_allowed(self, "div_rounding_")?;
+        check_binary_inplace_allowed(self, "div_rounding_")?;
         match rounding_mode {
             "trunc" | "floor" => {}
             other_mode => {
@@ -653,14 +872,14 @@ impl<T: Float> Tensor<T> {
             }
         }
 
-        // Compute true-division result via the same broadcast-aware path as
-        // `div_`, then apply the rounding op element-wise on host data and
-        // swap back. We re-use `arithmetic::div` for shape correctness and
-        // bring the result down to host data for the rounding pass — GPU
-        // rounding kernels would be a separate dispatch arm; this CPU-side
-        // rounding is correct on both CPU and GPU operands because
-        // `data_vec()` is device-transparent.
-        let result = crate::grad_fns::arithmetic::div(self, other).map_err(|e| match e {
+        let lhs = if needs_binary_inplace_autograd(self, other) {
+            Some(self.autograd_snapshot()?)
+        } else {
+            None
+        };
+        let dividend = lhs.as_ref().unwrap_or(self);
+
+        let result = div_rounding_forward(dividend, other, rounding_mode).map_err(|e| match e {
             FerrotorchError::ShapeMismatch { message } => FerrotorchError::ShapeMismatch {
                 message: format!("div_rounding_: {message}"),
             },
@@ -676,33 +895,20 @@ impl<T: Float> Tensor<T> {
                 ),
             });
         }
-
-        let mut data = result.data_vec()?;
-        match rounding_mode {
-            "trunc" => {
-                for x in &mut data {
-                    *x = num_traits::Float::trunc(*x);
-                }
-            }
-            "floor" => {
-                for x in &mut data {
-                    *x = num_traits::Float::floor(*x);
-                }
-            }
-            other_mode => {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: format!(
-                        "div_rounding_: expected rounding_mode to be one of 'trunc' or 'floor' \
-                         but found '{other_mode}'"
-                    ),
-                });
-            }
-        }
-        // SAFETY: check_inplace_allowed above ensures `self` is not in the
-        // autograd graph and not a requires_grad leaf; `data` has the same
-        // numel as `self` (`result.shape() == self.shape()` was asserted).
-        unsafe { self.update_data(&data)? };
-        Ok(self)
+        let result = if let Some(lhs) = lhs {
+            let (storage, shape) = result.into_storage_and_shape()?;
+            Tensor::from_operation(
+                storage,
+                shape,
+                Arc::new(RoundedDivInplaceBackward {
+                    lhs,
+                    rhs: other.clone(),
+                }),
+            )?
+        } else {
+            result
+        };
+        finish_tracked_binary_inplace(self, result, "div_rounding_")
     }
 
     /// Clamp every element in-place using PyTorch's scalar two-bound kernel.
