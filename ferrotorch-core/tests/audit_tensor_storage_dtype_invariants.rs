@@ -99,3 +99,66 @@ fn zero_numel_shape_still_rejects_unrepresentable_stride_metadata() {
         "unexpected error: {err:?}"
     );
 }
+
+#[cfg(feature = "gpu")]
+mod gpu {
+    use super::*;
+    use ferrotorch_core::{Device, FerrotorchError};
+    use std::sync::Once;
+
+    static GPU_INIT: Once = Once::new();
+
+    fn ensure_cuda_backend() {
+        GPU_INIT.call_once(|| {
+            ferrotorch_gpu::init_cuda_backend()
+                .expect("CUDA backend must initialize for CORE-004 probes");
+        });
+    }
+
+    fn cuda_base() -> Tensor<f32> {
+        Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0f32, 2.0, 3.0, 4.0]),
+            vec![4],
+            false,
+        )
+        .expect("base tensor")
+        .to(Device::Cuda(0))
+        .expect("upload base tensor")
+    }
+
+    #[test]
+    fn cuda_fallible_stride_view_rejects_oob_before_strided_copy_can_read() {
+        ensure_cuda_backend();
+        let base = cuda_base();
+
+        let err = base
+            .try_stride_view(vec![3], vec![1], 2)
+            .expect_err("nonempty CUDA view must not extend past storage");
+
+        assert_eq!(base.device(), Device::Cuda(0));
+        assert!(
+            matches!(err, FerrotorchError::InvalidArgument { .. }),
+            "expected InvalidArgument, got {err:?}"
+        );
+        assert!(
+            format!("{err:?}").contains("beyond storage length"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn cuda_empty_stride_view_allows_arbitrary_offset_without_reading_storage() {
+        ensure_cuda_backend();
+        let base = cuda_base();
+
+        let view = base
+            .try_stride_view(vec![0], vec![1], 100)
+            .expect("empty CUDA view with arbitrary offset");
+
+        assert_eq!(view.device(), Device::Cuda(0));
+        assert_eq!(view.shape(), &[0]);
+        assert_eq!(view.storage_offset(), 100);
+        let host = view.to(Device::Cpu).expect("copy empty CUDA view to CPU");
+        assert_eq!(host.data_vec().expect("empty host data"), Vec::<f32>::new());
+    }
+}
