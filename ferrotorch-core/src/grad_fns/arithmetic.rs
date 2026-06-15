@@ -269,7 +269,12 @@ pub(crate) fn reduce_grad_to_shape<T: Float>(
         });
     }
 
-    let grad_data = grad.data()?;
+    // PyTorch's `at::sum_to(grad, target_shape)` iterates over the logical
+    // tensor, not only over flat contiguous storage. The CUDA path above
+    // already materializes strided views before reducing; the CPU path must do
+    // the same or expand/arithmetic backwards fail whenever an upstream grad is
+    // a transpose/narrow/expand view.
+    let grad_data = grad.data_vec()?;
     let grad_ndim = grad_shape.len();
     let target_ndim = target_shape.len();
 
@@ -296,11 +301,7 @@ pub(crate) fn reduce_grad_to_shape<T: Float>(
         // Pure reshape: same elements, different rank. The CPU storage is
         // already row-major contiguous over `grad_data`, so we can rebuild
         // a tensor of the target shape directly from the same data.
-        return Tensor::from_storage(
-            TensorStorage::cpu(grad_data.to_vec()),
-            target_shape.to_vec(),
-            false,
-        );
+        return Tensor::from_storage(TensorStorage::cpu(grad_data), target_shape.to_vec(), false);
     }
 
     // Standard broadcasting requires grad_ndim >= target_ndim. The reverse
@@ -3827,6 +3828,29 @@ mod tests {
             (val - expected).abs() < tol,
             "expected {expected}, got {val}"
         );
+    }
+
+    #[test]
+    fn reduce_grad_to_shape_reads_non_contiguous_cpu_grad_logically() {
+        let base = Tensor::from_storage(
+            TensorStorage::cpu(vec![
+                1.0, 2.0, 3.0, //
+                4.0, 5.0, 6.0, //
+                7.0, 8.0, 9.0, //
+                10.0, 11.0, 12.0,
+            ]),
+            vec![4, 3],
+            false,
+        )
+        .unwrap();
+        let grad = crate::grad_fns::shape::transpose_2d(&base).unwrap();
+        assert_eq!(grad.shape(), &[3, 4]);
+        assert!(!grad.is_contiguous());
+
+        let reduced = reduce_grad_to_shape(&grad, &[1, 4]).unwrap();
+
+        assert_eq!(reduced.shape(), &[1, 4]);
+        assert_eq!(reduced.data().unwrap(), &[6.0, 15.0, 24.0, 33.0]);
     }
 
     // -----------------------------------------------------------------------
