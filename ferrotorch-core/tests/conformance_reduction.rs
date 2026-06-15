@@ -19,9 +19,8 @@
 //!   plus autograd, with edge cases (empty tensor, 1D/2D/3D, every dim with
 //!   keepdim toggle for sum_dim/mean_dim, amax/amin tie mass distribution).
 //! * **Cat B** (cumsum/cumprod/cummax/cummin/logcumsumexp): CPU + GPU forward
-//!   (autograd CPU-only by design — every cumulative `*Backward` returns
-//!   `NotImplementedOnCuda`), plus edge cases (cumprod-with-zero,
-//!   logcumsumexp-stability, every dim, 1D/2D/3D).
+//!   plus resident CUDA autograd for supported floating dtypes, with edge
+//!   cases (cumprod-with-zero, logcumsumexp-stability, every dim, 1D/2D/3D).
 //! * **Cat C** forward-only helpers (`*_forward`): implicit coverage via
 //!   Cat B autograd path (the wrappers call them transitively).
 //! * **Cat D** backward grad_fn structs: implicit coverage via the relevant
@@ -1096,15 +1095,10 @@ fn cpu_amax_amin_tie_distribution() {
 // Cat B — cumulative forwards (cumsum / cumprod / logcumsumexp)
 // ---------------------------------------------------------------------------
 //
-// For the differentiable trio (cumsum/cumprod/logcumsumexp), the backward
-// node currently routes through CPU (the `*Backward` impls return
-// `NotImplementedOnCuda` if invoked with a CUDA grad_output). So:
-//   * Forward: CPU + GPU (the forward kernels dispatch to GPU when present);
-//     the GPU result is asserted CUDA-resident (CORE-196 / #1890).
-//   * Backward: CPU only — tracked as #1923 (torch differentiates all three
-//     on CUDA). The gpu lane pins the current behavior by asserting
-//     `.backward()` through a CUDA leaf returns `NotImplementedOnCuda`;
-//     gradient VALUES are verified through a CPU leaf.
+// For the differentiable trio (cumsum/cumprod/logcumsumexp), both forward and
+// backward are exercised on the requested device. CUDA lanes assert the result
+// and gradient stay CUDA-resident, matching PyTorch's no-host-round-trip
+// contract for cumulative autograd.
 //
 // `cummax` / `cummin` are not differentiable at all (they return indices);
 // we just compare values + indices.
@@ -1216,34 +1210,15 @@ fn run_diff_cum_for_device(op: DiffCumOp, device_label: &str, device: Device) {
                     tol_f32,
                 );
 
-                // #1923 pin (found via CORE-196 / #1890): the cumulative
-                // `*Backward` nodes return `NotImplementedOnCuda` for CUDA
-                // grads although torch differentiates these ops on CUDA.
-                // Assert that exact error on the gpu lane; retire this pin
-                // (run autograd on `device` and expect a CUDA grad) when
-                // #1923 lands the CUDA backwards.
-                if on_gpu {
-                    let a_pin = upload_f32(make_cpu_f32(a_data, shape, true), device);
-                    let out = op.apply_f32(&a_pin, axis);
-                    let loss = sum(&out).expect("sum-to-scalar loss");
-                    let err = loss.backward().expect_err(
-                        "cumulative backward on CUDA succeeded — #1923 \
-                         appears fixed; retire this pin and assert a \
-                         CUDA-resident gradient",
-                    );
-                    eprintln!("{label}: pinned to #1923 — got expected Err: {err}");
-                }
-
-                // Gradient VALUES verified through a CPU leaf (per #1923 the
-                // CUDA autograd path is pinned above).
-                let a_g = make_cpu_f32(a_data, shape, true);
+                let a_g = upload_f32(make_cpu_f32(a_data, shape, true), device);
                 let out = op.apply_f32(&a_g, axis);
                 let loss = sum(&out).expect("sum-to-scalar loss");
                 loss.backward().expect("backward");
                 let ga = a_g.grad().unwrap().expect("grad_a");
+                assert_eq!(ga.device(), device, "{label} grad device");
                 check_f32(
-                    &format!("{label} grad_a (cpu autograd)"),
-                    &read_back_f32(&ga, Device::Cpu),
+                    &format!("{label} grad_a"),
+                    &read_back_f32(&ga, device),
                     grad_a_exp,
                     tolerance::F32_REDUCTION_CPU.max(tol_f32),
                 );
@@ -1258,27 +1233,15 @@ fn run_diff_cum_for_device(op: DiffCumOp, device_label: &str, device: Device) {
                     tol_f64,
                 );
 
-                // #1923 pin — see the float32 arm above.
-                if on_gpu {
-                    let a_pin = upload_f64(make_cpu_f64(a_data, shape, true), device);
-                    let out = op.apply_f64(&a_pin, axis);
-                    let loss = sum(&out).expect("sum-to-scalar loss");
-                    let err = loss.backward().expect_err(
-                        "cumulative backward on CUDA succeeded — #1923 \
-                         appears fixed; retire this pin and assert a \
-                         CUDA-resident gradient",
-                    );
-                    eprintln!("{label}: pinned to #1923 — got expected Err: {err}");
-                }
-
-                let a_g = make_cpu_f64(a_data, shape, true);
+                let a_g = upload_f64(make_cpu_f64(a_data, shape, true), device);
                 let out = op.apply_f64(&a_g, axis);
                 let loss = sum(&out).expect("sum-to-scalar loss");
                 loss.backward().expect("backward");
                 let ga = a_g.grad().unwrap().expect("grad_a");
+                assert_eq!(ga.device(), device, "{label} grad device");
                 check_f64(
-                    &format!("{label} grad_a (cpu autograd)"),
-                    &read_back_f64(&ga, Device::Cpu),
+                    &format!("{label} grad_a"),
+                    &read_back_f64(&ga, device),
                     grad_a_exp,
                     tolerance::F64_REDUCTION_CPU.max(tol_f64),
                 );
@@ -2197,11 +2160,8 @@ fn fixture_file_covers_every_phase22_op() {
 //     forward + backward on GPU. ProdBackward routes to CPU internally
 //     (and re-uploads the grad via `.to(device)`) — that's the source's
 //     documented strategy. `AmaxBackward` / `AminBackward` do the same.
-//   * Cumulative Cat B (cumsum/cumprod/cummax/cummin/logcumsumexp) has
-//     forward GPU support but every backward returns
-//     `NotImplementedOnCuda`. So we exercise GPU forward only and run
-//     autograd separately on CPU (the run_diff_cum helper above already
-//     does this — it always builds the autograd leaf on CPU).
+//   * Cumulative Cat B (cumsum/cumprod/cummax/cummin/logcumsumexp) keeps both
+//     forward and autograd gradients resident on CUDA for supported dtypes.
 
 #[cfg(feature = "gpu")]
 mod gpu {
@@ -2308,19 +2268,9 @@ mod gpu {
 
     /// CUDA special-value lanes for logcumsumexp (CORE-133 family).
     ///
-    /// The CPU kernel is fixed (#1827: `_log_add_exp_helper` port, pytorch
-    /// `aten/src/ATen/native/cpu/LogAddExp.h:22-33`), but the PTX kernels in
-    /// `ferrotorch-gpu` (`LOGCUMSUMEXP_PTX` / `LOGCUMSUMEXP_F64_PTX`) still
-    /// run the unguarded `exp(x - max)` rescaling. Pins (single contract,
-    /// retire-on-fix, R-ORACLE-4) -> #1942:
-    ///   * f32 (both rows): the scan NaN-poisons after the infinity enters
-    ///     (torch cuda: [-inf, 0] -> [-inf, 0]; [0, inf] -> [0, inf]).
-    ///   * f64 sv_neg_inf_first: position 1 returns plausible finite garbage
-    ///     (~710.188) instead of torch's 0.0.
-    ///   * f64 sv_pos_inf_last: matches torch — value-asserted.
-    ///
-    /// When #1942 lands these pins fail — retire them and assert the
-    /// fixture for every row (as `cpu_logcumsumexp_special` now does).
+    /// The CUDA PTX kernels mirror PyTorch's equal-infinity guard: equal
+    /// infinities are carried through directly instead of evaluating
+    /// `inf - inf` / `-inf - -inf` inside the stable rescaling formula.
     #[test]
     fn gpu_logcumsumexp_special() {
         ensure_cuda_backend();
@@ -2349,33 +2299,13 @@ mod gpu {
                     let a = upload_f32(make_cpu_f32(a_data, shape, false), Device::Cuda(0));
                     let l = logcumsumexp(&a, axis).expect("logcumsumexp");
                     let actual = read_back_f32(&l, Device::Cuda(0));
-                    // #1942 pin: the f32 PTX scan NaN-poisons.
-                    assert!(
-                        actual.iter().any(|v| v.is_nan()),
-                        "{label}: scan no longer NaN-poisoned (got {actual:?}, \
-                         torch expects {exp:?}) — #1942 appears fixed; retire \
-                         this pin and assert the fixture values"
-                    );
+                    check_f32(&label, &actual, exp, tolerance::F32_LOGSCAN_GPU);
                 }
                 "float64" => {
                     let a = upload_f64(make_cpu_f64(a_data, shape, false), Device::Cuda(0));
                     let l = logcumsumexp(&a, axis).expect("logcumsumexp");
                     let actual = read_back_f64(&l, Device::Cuda(0));
-                    if f.tag.as_deref() == Some("sv_neg_inf_first") {
-                        // #1942 pin: torch's [-inf, 0] comes back as
-                        // [-inf, ~710.188] from the f64 PTX software
-                        // exp/log path.
-                        assert!(
-                            (actual[1] - exp[1]).abs() > 1.0,
-                            "{label}: position 1 now matches torch \
-                             (got {actual:?}, torch expects {exp:?}) — #1942 \
-                             appears fixed; retire this pin and assert the \
-                             fixture values"
-                        );
-                    } else {
-                        // sv_pos_inf_last matches torch on the f64 kernel.
-                        check_f64(&label, &actual, exp, tolerance::F64_LOGSCAN_GPU);
-                    }
+                    check_f64(&label, &actual, exp, tolerance::F64_LOGSCAN_GPU);
                 }
                 _ => unreachable!(),
             }

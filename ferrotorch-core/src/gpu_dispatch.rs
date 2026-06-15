@@ -2060,6 +2060,24 @@ pub trait GpuBackend: Send + Sync {
             message: "cumsum_f64 GPU op not yet implemented".into(),
         })
     }
+    fn cumsum_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cumsum_f16" })
+    }
+    fn cumsum_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cumsum_bf16" })
+    }
     fn cumprod_f32(
         &self,
         _a: &GpuBufferHandle,
@@ -2081,6 +2099,24 @@ pub trait GpuBackend: Send + Sync {
         Err(FerrotorchError::InvalidArgument {
             message: "cumprod_f64 GPU op not yet implemented".into(),
         })
+    }
+    fn cumprod_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cumprod_f16" })
+    }
+    fn cumprod_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cumprod_bf16" })
     }
     // Returns (values, indices_as_i64)
     fn cummax_f32(
@@ -2105,6 +2141,24 @@ pub trait GpuBackend: Send + Sync {
             message: "cummax_f64 GPU op not yet implemented".into(),
         })
     }
+    fn cummax_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cummax_f16" })
+    }
+    fn cummax_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cummax_bf16" })
+    }
     // Returns (values, indices_as_i64)
     fn cummin_f32(
         &self,
@@ -2127,6 +2181,24 @@ pub trait GpuBackend: Send + Sync {
         Err(FerrotorchError::InvalidArgument {
             message: "cummin_f64 GPU op not yet implemented".into(),
         })
+    }
+    fn cummin_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cummin_f16" })
+    }
+    fn cummin_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cummin_bf16" })
     }
     // Value-selecting reductions along a dimension. Returns (values, indices_as_i64)
     // with one output slot per `(outer, inner)` slice.
@@ -2194,6 +2266,120 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::InvalidArgument {
             message: "logcumsumexp_f64 GPU op not yet implemented".into(),
+        })
+    }
+    fn logcumsumexp_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "logcumsumexp_f16",
+        })
+    }
+    fn logcumsumexp_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "logcumsumexp_bf16",
+        })
+    }
+    fn reverse_cumsum_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "reverse_cumsum_f32",
+        })
+    }
+    fn reverse_cumsum_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "reverse_cumsum_f64",
+        })
+    }
+    fn reverse_cumsum_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "reverse_cumsum_f16",
+        })
+    }
+    fn reverse_cumsum_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "reverse_cumsum_bf16",
+        })
+    }
+    fn cumprod_backward_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "cumprod_backward_f32",
+        })
+    }
+    fn cumprod_backward_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "cumprod_backward_f64",
+        })
+    }
+    fn cumprod_backward_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "cumprod_backward_f16",
+        })
+    }
+    fn cumprod_backward_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "cumprod_backward_bf16",
         })
     }
 

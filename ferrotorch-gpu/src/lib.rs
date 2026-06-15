@@ -166,6 +166,8 @@ pub mod cast_kernels;
 pub mod conv;
 #[cfg(feature = "cuda")]
 pub mod cufft;
+#[cfg(feature = "cuda")]
+pub mod cumulative_kernels;
 pub mod cusolver;
 #[cfg(all(feature = "cuda", feature = "cusparselt"))]
 pub mod cusparselt;

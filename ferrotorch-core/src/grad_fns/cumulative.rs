@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use crate::autograd::no_grad::is_grad_enabled;
+use crate::autograd::no_grad::{is_grad_enabled, no_grad};
 use crate::dtype::DType;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
@@ -68,9 +68,8 @@ impl<T: Float> GradFn<T> for CumsumBackward<T> {
             return Ok(vec![Some(grad_output.clone())]);
         }
         if grad_output.is_cuda() {
-            return Err(crate::error::FerrotorchError::NotImplementedOnCuda {
-                op: "CumsumBackward",
-            });
+            let grad_input = reverse_cumsum_cuda(grad_output, self.dim)?;
+            return Ok(vec![Some(grad_input)]);
         }
         let go_data = grad_output.data()?;
         let shape = grad_output.shape();
@@ -284,9 +283,14 @@ impl<T: Float> GradFn<T> for CumprodBackward<T> {
             return Ok(vec![Some(grad_output.clone())]);
         }
         if grad_output.is_cuda() || self.input.is_cuda() || self.output.is_cuda() {
-            return Err(crate::error::FerrotorchError::NotImplementedOnCuda {
-                op: "CumprodBackward",
-            });
+            if !(grad_output.is_cuda() && self.input.is_cuda() && self.output.is_cuda()) {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected: self.input.device(),
+                    got: grad_output.device(),
+                });
+            }
+            let grad_input = cumprod_backward_cuda(&self.input, grad_output, self.dim)?;
+            return Ok(vec![Some(grad_input)]);
         }
 
         let go_data = grad_output.data()?;
@@ -595,6 +599,22 @@ fn cummaxmin_backward_cuda<T: Float>(
             input_shape,
             dim,
         )?,
+        DType::F16 => backend.scatter_add_nd_f16(
+            &zeros_h,
+            indices_tensor.gpu_handle()?,
+            grad_handle,
+            input_shape,
+            input_shape,
+            dim,
+        )?,
+        DType::BF16 => backend.scatter_add_nd_bf16(
+            &zeros_h,
+            indices_tensor.gpu_handle()?,
+            grad_handle,
+            input_shape,
+            input_shape,
+            dim,
+        )?,
         _ => {
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "CummaxBackward",
@@ -845,9 +865,21 @@ impl<T: Float> GradFn<T> for LogcumsumexpBackward<T> {
             return Ok(vec![Some(grad_output.clone())]);
         }
         if grad_output.is_cuda() || self.input.is_cuda() || self.output.is_cuda() {
-            return Err(crate::error::FerrotorchError::NotImplementedOnCuda {
-                op: "LogcumsumexpBackward",
-            });
+            if !(grad_output.is_cuda() && self.input.is_cuda() && self.output.is_cuda()) {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected: self.input.device(),
+                    got: grad_output.device(),
+                });
+            }
+            let grad_input = no_grad(|| {
+                let neg_output = crate::grad_fns::arithmetic::neg(&self.output)?;
+                let exp_neg_output = crate::grad_fns::transcendental::exp(&neg_output)?;
+                let weighted = crate::grad_fns::arithmetic::mul(grad_output, &exp_neg_output)?;
+                let rev = reverse_cumsum_cuda(&weighted, self.dim)?;
+                let exp_input = crate::grad_fns::transcendental::exp(&self.input)?;
+                crate::grad_fns::arithmetic::mul(&exp_input, &rev)
+            })?;
+            return Ok(vec![Some(grad_input)]);
         }
 
         let go_data = grad_output.data()?;
@@ -934,6 +966,89 @@ fn dim_strides(shape: &[usize], dim: usize) -> (usize, usize, usize) {
     let dim_size = shape[dim];
     let inner: usize = shape[dim + 1..].iter().product();
     (outer, dim_size, inner)
+}
+
+fn reverse_cumsum_cuda<T: Float>(input: &Tensor<T>, dim: usize) -> FerrotorchResult<Tensor<T>> {
+    let shape = input.shape().to_vec();
+    let (outer, dim_size, inner) = dim_strides(&shape, dim);
+    let input = input.contiguous()?;
+    let handle = input.gpu_handle()?;
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let out_h = match T::dtype() {
+        DType::F32 => backend.reverse_cumsum_f32(handle, outer, dim_size, inner)?,
+        DType::F64 => backend.reverse_cumsum_f64(handle, outer, dim_size, inner)?,
+        DType::F16 => backend.reverse_cumsum_f16(handle, outer, dim_size, inner)?,
+        DType::BF16 => backend.reverse_cumsum_bf16(handle, outer, dim_size, inner)?,
+        _ => {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "reverse_cumsum",
+            });
+        }
+    };
+    Tensor::from_storage(TensorStorage::gpu(out_h), shape, false)
+}
+
+fn cumprod_backward_cuda<T: Float>(
+    input: &Tensor<T>,
+    grad_output: &Tensor<T>,
+    dim: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    if input.device() != grad_output.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: input.device(),
+            got: grad_output.device(),
+        });
+    }
+    if input.shape() != grad_output.shape() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "CumprodBackward: grad_output shape {:?} != input shape {:?}",
+                grad_output.shape(),
+                input.shape()
+            ),
+        });
+    }
+    let shape = input.shape().to_vec();
+    let (outer, dim_size, inner) = dim_strides(&shape, dim);
+    let input = input.contiguous()?;
+    let grad_output = grad_output.contiguous()?;
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let out_h = match T::dtype() {
+        DType::F32 => backend.cumprod_backward_f32(
+            input.gpu_handle()?,
+            grad_output.gpu_handle()?,
+            outer,
+            dim_size,
+            inner,
+        )?,
+        DType::F64 => backend.cumprod_backward_f64(
+            input.gpu_handle()?,
+            grad_output.gpu_handle()?,
+            outer,
+            dim_size,
+            inner,
+        )?,
+        DType::F16 => backend.cumprod_backward_f16(
+            input.gpu_handle()?,
+            grad_output.gpu_handle()?,
+            outer,
+            dim_size,
+            inner,
+        )?,
+        DType::BF16 => backend.cumprod_backward_bf16(
+            input.gpu_handle()?,
+            grad_output.gpu_handle()?,
+            outer,
+            dim_size,
+            inner,
+        )?,
+        _ => {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "cumprod_backward",
+            });
+        }
+    };
+    Tensor::from_storage(TensorStorage::gpu(out_h), shape, false)
 }
 
 // ---------------------------------------------------------------------------

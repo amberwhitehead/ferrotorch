@@ -39,6 +39,16 @@ fn is_f64<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<f64>()
 }
 
+#[inline]
+fn is_f16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::f16>()
+}
+
+#[inline]
+fn is_bf16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::bf16>()
+}
+
 // ---------------------------------------------------------------------------
 // Stride helpers
 // ---------------------------------------------------------------------------
@@ -105,9 +115,8 @@ pub fn cumsum_forward<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult
     let shape = input.shape();
     let (outer, dim_size, inner) = dim_strides(shape, norm_dim);
 
-    // GPU fast path for f32/f64
+    // GPU fast path for floating dtypes PyTorch supports on CUDA.
     if input.is_cuda()
-        && (is_f32::<T>() || is_f64::<T>())
         && let Some(backend) = crate::gpu_dispatch::gpu_backend()
     {
         // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
@@ -115,8 +124,14 @@ pub fn cumsum_forward<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResult
         let input = input.contiguous()?;
         let handle = if is_f32::<T>() {
             backend.cumsum_f32(input.gpu_handle()?, outer, dim_size, inner)?
-        } else {
+        } else if is_f64::<T>() {
             backend.cumsum_f64(input.gpu_handle()?, outer, dim_size, inner)?
+        } else if is_f16::<T>() {
+            backend.cumsum_f16(input.gpu_handle()?, outer, dim_size, inner)?
+        } else if is_bf16::<T>() {
+            backend.cumsum_bf16(input.gpu_handle()?, outer, dim_size, inner)?
+        } else {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "cumsum" });
         };
         return Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), false);
     }
@@ -178,9 +193,8 @@ pub fn cumprod_forward<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResul
     let shape = input.shape();
     let (outer, dim_size, inner) = dim_strides(shape, norm_dim);
 
-    // GPU fast path for f32/f64
+    // GPU fast path for floating dtypes PyTorch supports on CUDA.
     if input.is_cuda()
-        && (is_f32::<T>() || is_f64::<T>())
         && let Some(backend) = crate::gpu_dispatch::gpu_backend()
     {
         // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
@@ -188,8 +202,14 @@ pub fn cumprod_forward<T: Float>(input: &Tensor<T>, dim: i64) -> FerrotorchResul
         let input = input.contiguous()?;
         let handle = if is_f32::<T>() {
             backend.cumprod_f32(input.gpu_handle()?, outer, dim_size, inner)?
-        } else {
+        } else if is_f64::<T>() {
             backend.cumprod_f64(input.gpu_handle()?, outer, dim_size, inner)?
+        } else if is_f16::<T>() {
+            backend.cumprod_f16(input.gpu_handle()?, outer, dim_size, inner)?
+        } else if is_bf16::<T>() {
+            backend.cumprod_bf16(input.gpu_handle()?, outer, dim_size, inner)?
+        } else {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "cumprod" });
         };
         return Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), false);
     }
@@ -251,9 +271,8 @@ pub fn cummax_forward<T: Float>(
     let shape = input.shape();
     let (outer, dim_size, inner) = dim_strides(shape, norm_dim);
 
-    // GPU fast path for f32/f64 — kernel returns both values and indices
+    // GPU fast path for floating dtypes PyTorch supports on CUDA.
     if input.is_cuda()
-        && (is_f32::<T>() || is_f64::<T>())
         && let Some(backend) = crate::gpu_dispatch::gpu_backend()
     {
         // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
@@ -267,11 +286,23 @@ pub fn cummax_forward<T: Float>(
                 backend.cummax_f32(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
             (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
-        } else {
+        } else if is_f64::<T>() {
             let (vals_h, idxs_h) =
                 backend.cummax_f64(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
             (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
+        } else if is_f16::<T>() {
+            let (vals_h, idxs_h) =
+                backend.cummax_f16(input.gpu_handle()?, outer, dim_size, inner)?;
+            values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
+            (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
+        } else if is_bf16::<T>() {
+            let (vals_h, idxs_h) =
+                backend.cummax_bf16(input.gpu_handle()?, outer, dim_size, inner)?;
+            values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
+            (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
+        } else {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "cummax" });
         }
         return Ok(CumExtremeResult {
             values,
@@ -361,9 +392,8 @@ pub fn cummin_forward<T: Float>(
     let shape = input.shape();
     let (outer, dim_size, inner) = dim_strides(shape, norm_dim);
 
-    // GPU fast path for f32/f64 — kernel returns both values and indices
+    // GPU fast path for floating dtypes PyTorch supports on CUDA.
     if input.is_cuda()
-        && (is_f32::<T>() || is_f64::<T>())
         && let Some(backend) = crate::gpu_dispatch::gpu_backend()
     {
         // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
@@ -377,11 +407,23 @@ pub fn cummin_forward<T: Float>(
                 backend.cummin_f32(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
             (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
-        } else {
+        } else if is_f64::<T>() {
             let (vals_h, idxs_h) =
                 backend.cummin_f64(input.gpu_handle()?, outer, dim_size, inner)?;
             values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
             (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
+        } else if is_f16::<T>() {
+            let (vals_h, idxs_h) =
+                backend.cummin_f16(input.gpu_handle()?, outer, dim_size, inner)?;
+            values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
+            (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
+        } else if is_bf16::<T>() {
+            let (vals_h, idxs_h) =
+                backend.cummin_bf16(input.gpu_handle()?, outer, dim_size, inner)?;
+            values = Tensor::from_storage(TensorStorage::gpu(vals_h), shape.to_vec(), false)?;
+            (indices_tensor, indices) = gpu_i64_indices(idxs_h, shape)?;
+        } else {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "cummin" });
         }
         return Ok(CumExtremeResult {
             values,
@@ -494,9 +536,8 @@ pub fn logcumsumexp_forward<T: Float>(input: &Tensor<T>, dim: i64) -> Ferrotorch
     let shape = input.shape();
     let (outer, dim_size, inner) = dim_strides(shape, norm_dim);
 
-    // GPU fast path for f32/f64
+    // GPU fast path for floating dtypes PyTorch supports on CUDA.
     if input.is_cuda()
-        && (is_f32::<T>() || is_f64::<T>())
         && let Some(backend) = crate::gpu_dispatch::gpu_backend()
     {
         // #1658: normalise a narrowed-offset CUDA view to a packed offset-0
@@ -504,8 +545,14 @@ pub fn logcumsumexp_forward<T: Float>(input: &Tensor<T>, dim: i64) -> Ferrotorch
         let input = input.contiguous()?;
         let handle = if is_f32::<T>() {
             backend.logcumsumexp_f32(input.gpu_handle()?, outer, dim_size, inner)?
-        } else {
+        } else if is_f64::<T>() {
             backend.logcumsumexp_f64(input.gpu_handle()?, outer, dim_size, inner)?
+        } else if is_f16::<T>() {
+            backend.logcumsumexp_f16(input.gpu_handle()?, outer, dim_size, inner)?
+        } else if is_bf16::<T>() {
+            backend.logcumsumexp_bf16(input.gpu_handle()?, outer, dim_size, inner)?
+        } else {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "logcumsumexp" });
         };
         return Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), false);
     }

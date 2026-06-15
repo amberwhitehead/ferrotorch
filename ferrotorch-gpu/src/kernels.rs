@@ -8685,8 +8685,8 @@ pub(crate) const LOGCUMSUMEXP_PTX: &str = "\
     .reg .u32 %r_tid, %bid, %bdim, %n_reg, %outer_sz, %dim_sz, %inner_sz;
     .reg .u32 %outer_idx, %inner_idx, %k, %base, %idx, %tmp;
     .reg .u64 %in, %out, %off, %addr;
-    .reg .f32 %val, %acc, %m, %ea, %ev, %s, %ls, %log2e, %ln2;
-    .reg .pred %p, %lp;
+    .reg .f32 %val, %acc, %m, %ea, %ev, %s, %ls, %log2e, %ln2, %abs_m;
+    .reg .pred %p, %lp, %inf, %acc_neg_inf, %val_neg_inf, %neg_inf;
 
     ld.param.u64 %in, [input_ptr];
     ld.param.u64 %out, [output_ptr];
@@ -8716,9 +8716,13 @@ pub(crate) const LOGCUMSUMEXP_PTX: &str = "\
     mul.lo.u32 %base, %base, %inner_sz;
     add.u32 %base, %base, %inner_idx;
 
-    // acc = -inf
-    mov.b32 %acc, 0xFF800000;
-    mov.u32 %k, 0;
+    cvt.u64.u32 %off, %base;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %in, %off;
+    ld.global.f32 %acc, [%addr];
+    add.u64 %addr, %out, %off;
+    st.global.f32 [%addr], %acc;
+    mov.u32 %k, 1;
 SCAN_LOOP:
     setp.ge.u32 %lp, %k, %dim_sz;
     @%lp bra SCAN_DONE;
@@ -8733,6 +8737,14 @@ SCAN_LOOP:
 
     // Numerically stable: m = max(acc, x)
     max.f32 %m, %acc, %val;
+    abs.f32 %abs_m, %m;
+    setp.eq.f32 %inf, %abs_m, 0f7F800000;
+    @%inf bra STORE_LOG_MAX;
+    setp.eq.f32 %acc_neg_inf, %acc, 0fFF800000;
+    setp.eq.f32 %val_neg_inf, %val, 0fFF800000;
+    or.pred %neg_inf, %acc_neg_inf, %val_neg_inf;
+    @%neg_inf bra STORE_LOG_MAX;
+
     // exp(acc - m): (acc - m) * log2(e) -> ex2
     sub.f32 %ea, %acc, %m;
     mul.f32 %ea, %ea, %log2e;
@@ -8748,7 +8760,11 @@ SCAN_LOOP:
     mul.f32 %ls, %ls, %ln2;
     // acc = m + log(sum)
     add.f32 %acc, %m, %ls;
+    bra STORE_LOG_ACC;
 
+STORE_LOG_MAX:
+    mov.f32 %acc, %m;
+STORE_LOG_ACC:
     add.u64 %addr, %out, %off;
     st.global.f32 [%addr], %acc;
 
@@ -8779,8 +8795,8 @@ pub(crate) const LOGCUMSUMEXP_F64_PTX: &str = "\
     .reg .u32 %r_tid, %bid, %bdim, %n_reg, %outer_sz, %dim_sz, %inner_sz;
     .reg .u32 %outer_idx, %inner_idx, %k, %base, %idx, %tmp;
     .reg .u64 %in, %out, %off, %addr;
-    .reg .f64 %val, %acc, %m, %ea, %ev, %s, %ls;
-    .reg .pred %p, %lp;
+    .reg .f64 %val, %acc, %m, %ea, %ev, %s, %ls, %abs_m;
+    .reg .pred %p, %lp, %inf, %acc_neg_inf, %val_neg_inf, %neg_inf;
     .reg .f64 %e_nf, %e_r, %e_p, %e_half, %e_one;
     .reg .s32 %e_ni;
     .reg .s64 %e_ni64, %e_bits;
@@ -8840,6 +8856,14 @@ SCAN_LOOP:
     ld.global.f64 %val, [%addr];
 
     max.f64 %m, %acc, %val;
+    abs.f64 %abs_m, %m;
+    setp.eq.f64 %inf, %abs_m, 0d7FF0000000000000;
+    @%inf bra STORE_LOG_MAX_F64;
+    setp.eq.f64 %acc_neg_inf, %acc, 0dFFF0000000000000;
+    setp.eq.f64 %val_neg_inf, %val, 0dFFF0000000000000;
+    or.pred %neg_inf, %acc_neg_inf, %val_neg_inf;
+    @%neg_inf bra STORE_LOG_MAX_F64;
+
     mov.f64 %e_one, 0d3FF0000000000000;
     mov.f64 %e_half, 0d3FE0000000000000;
     // --- inline exp(acc - m) -> %ea ---
@@ -8926,7 +8950,11 @@ SCAN_LOOP:
     fma.rn.f64 %ls, %l_nf, %l_ln2_hi, %l_p;
     fma.rn.f64 %ls, %l_nf, %l_ln2_lo, %ls;
     add.f64 %acc, %m, %ls;
+    bra STORE_LOG_ACC_F64;
 
+STORE_LOG_MAX_F64:
+    mov.f64 %acc, %m;
+STORE_LOG_ACC_F64:
     add.u64 %addr, %out, %off;
     st.global.f64 [%addr], %acc;
 
@@ -18417,6 +18445,9 @@ pub fn gpu_cumsum(
 
     let total = outer * dim_size * inner;
     let num_threads = outer * inner;
+    if total == 0 {
+        return alloc_zeros_f32(0, device);
+    }
     let ctx = device.context();
     let stream = device.stream();
 
