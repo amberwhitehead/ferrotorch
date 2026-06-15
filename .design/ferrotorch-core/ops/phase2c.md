@@ -20,10 +20,13 @@ implements the cross-world ops between `Tensor<T: Float>` and
 `IntTensor` index (GPU-resident on CUDA), and dtype casts
 `Tensor::to_int` / `IntTensor::to_float` / `IntTensor::cast_gpu`.
 These mirror `torch.argmax`, `torch.argmin`, `torch.index_select`,
-`torch.gather`, and `tensor.to(dtype)`. Each op runs on CUDA when
-the input is GPU-resident — real PTX kernels (`backend.argmax`,
-`backend.gather_intidx`, `backend.cast_f_to_i`, etc.) — and on CPU
-otherwise via a reference loop. `gather` uses the compact
+`torch.gather`, and `tensor.to(dtype)`. `index_select` and `gather`
+require the input and index tensors to be on the same device on both CPU
+and CUDA, matching PyTorch's operator wrappers; CPU inputs never silently
+download CUDA indices. Each op runs on CUDA when the input is GPU-resident
+— real PTX kernels (`backend.argmax`, `backend.gather_intidx`,
+`backend.cast_f_to_i`, etc.) — and on CPU otherwise via a reference loop.
+`gather` uses the compact
 `backend.gather_intidx` CUDA path when non-gather dimensions match the
 input, and the rank-aware `backend.gather_intidx_nd` CUDA path when
 PyTorch-legal index shapes are smaller on non-gather axes. In both
@@ -44,10 +47,11 @@ download the full index tensor just to build autograd state.
 - REQ-3: `Tensor::index_select(dim, indices)` —
   `indices: &IntTensor<I>` (1-D). Output keeps `self`'s dtype;
   shape is `self.shape` with `shape[dim]` replaced by
-  `indices.numel()`. GPU-resident on CUDA; same-device requirement
-  for `indices`. Mirrors `torch.index_select`.
+  `indices.numel()`. Same-device requirement for `indices` on CPU and
+  CUDA; output is GPU-resident on CUDA. Mirrors `torch.index_select`.
 - REQ-4: `Tensor::gather(dim, index)` — `index: &IntTensor<I>` with
   matching ndim. Output shape = `index.shape`; dtype = `self.dtype`.
+  Same-device requirement for `index` on CPU and CUDA; output is
   GPU-resident on CUDA. Mirrors `torch.gather`.
 - REQ-5: `Tensor::to_int::<I>()` — cast float to int dtype,
   TRUNCATE toward zero (PyTorch `tensor.to(int)` semantics). GPU-
@@ -78,6 +82,9 @@ download the full index tensor just to build autograd state.
   `InvalidArgument`.
 - [x] AC-5: `gather` rejects `index.ndim() != input.ndim()` with
   `ShapeMismatch`.
+- [x] AC-5b: `index_select` / `gather` reject mixed CPU/CUDA input-index
+  pairs with `DeviceMismatch`, matching PyTorch's same-device wrapper
+  checks.
 - [x] AC-6: `to_int` of `3.7` → `3`, `-3.7` → `-3` (truncate toward
   zero).
 - [x] AC-7: `to_int` of out-of-range float (e.g. `f32::INFINITY` for
@@ -142,9 +149,9 @@ PyTorch's `.to(int64)` clamp-on-overflow). For non-i64 targets
 (`i32`), `I::try_from_i64` reports `None` for out-of-range and the
 public path returns `InvalidArgument`.
 
-`check_same_device` at `:504` and `gather_check_shapes` at `:519`
-are shared validators — same-device requirement for `index_select`
-and `gather` on CUDA; gather requires matching ndim and per-axis
+`check_same_device` and `gather_check_shapes` are shared validators —
+same-device requirement for `index_select` and `gather` on CPU and CUDA;
+gather requires matching ndim and per-axis
 `index.shape[ax] <= input.shape[ax]` (PyTorch allows smaller index
 off the gather axis).
 
@@ -184,10 +191,10 @@ conformance lives in `ferrotorch-core/tests/conformance_phase2c.rs`
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `Tensor::argmax` at `argmax in ops/phase2c.rs`; non-test consumer: `crate::methods::Tensor::argmax_t` at `argmax_t in methods.rs` (the autograd-wrapper) and `crate::grad_fns::reduction::argmax` at `argmax in grad_fns/reduction.rs` route through `Tensor::argmax` |
 | REQ-2 | SHIPPED | impl: `Tensor::argmin` at `argmin in ops/phase2c.rs`; non-test consumer: `Tensor::argmin_t` at `argmin_t in methods.rs` |
-| REQ-3 | SHIPPED | impl: `Tensor::index_select` at `index_select in ops/phase2c.rs`; non-test consumer: `crate::grad_fns::indexing::index_select_differentiable` at `index_select in grad_fns/indexing.rs` invokes `Tensor::index_select` for its forward. CUDA tracked forwards run resident index bounds validation and save a CUDA i64 index for `IndexSelectDimBackward`; audit `tracked_index_select_cuda_backward_keeps_saved_index_resident` covers the resident backward path. |
-| REQ-4 | SHIPPED | impl: `Tensor::gather` at `ops/phase2c.rs:283`; non-test consumer: `crate::grad_fns::indexing::GatherBackward::backward` recurses through `Tensor::gather` for the VJP construction. CUDA tracked forwards run resident index bounds validation and save a CUDA i64 index for `GatherBackward`; audit `tracked_gather_cuda_backward_keeps_saved_index_resident` covers the resident backward path. |
+| REQ-3 | SHIPPED | impl: `Tensor::index_select` at `index_select in ops/phase2c.rs`; non-test consumer: `crate::grad_fns::indexing::index_select_differentiable` at `index_select in grad_fns/indexing.rs` invokes `Tensor::index_select` for its forward. CPU and CUDA paths reject mixed-device indices before any index transfer; audit `phase2c_index_select_gather_reject_mixed_devices_like_pytorch` covers the PyTorch same-device contract. CUDA tracked forwards run resident index bounds validation and save a CUDA i64 index for `IndexSelectDimBackward`; audit `tracked_index_select_cuda_backward_keeps_saved_index_resident` covers the resident backward path. |
+| REQ-4 | SHIPPED | impl: `Tensor::gather` at `ops/phase2c.rs:283`; non-test consumer: `crate::grad_fns::indexing::GatherBackward::backward` recurses through `Tensor::gather` for the VJP construction. CPU and CUDA paths reject mixed-device indices before any index transfer; audit `phase2c_index_select_gather_reject_mixed_devices_like_pytorch` covers the PyTorch same-device contract. CUDA tracked forwards run resident index bounds validation and save a CUDA i64 index for `GatherBackward`; audit `tracked_gather_cuda_backward_keeps_saved_index_resident` covers the resident backward path. |
 | REQ-5 | SHIPPED | impl: `Tensor::to_int` at `ops/phase2c.rs:326`; non-test consumer: `crate::int_tensor::Tensor::to_int` re-export path used by quantization / discretization paths in `ferrotorch-llama` and `ferrotorch-quant` |
 | REQ-6 | SHIPPED | impl: `IntTensor::argmax`/`argmin` at `ops/phase2c.rs:369,374`; non-test consumer: every downstream caller that argmax's a logit-index tensor goes through this |
-| REQ-7 | SHIPPED | impl: `IntTensor::index_select`/`gather` at `ops/phase2c.rs:380,423`; non-test consumer: re-exported via the `IntTensor` method surface |
+| REQ-7 | SHIPPED | impl: `IntTensor::index_select`/`gather` at `ops/phase2c.rs:380,423`; non-test consumer: re-exported via the `IntTensor` method surface. Audit `phase2c_inttensor_index_select_gather_reject_mixed_devices_like_pytorch` pins same-device parity for integer data and integer indices. |
 | REQ-8 | SHIPPED | impl: `IntTensor::to_float` at `ops/phase2c.rs:458`; non-test consumer: re-exported via the `IntTensor` method surface; embedding-table reverse-lookup paths |
 | REQ-9 | SHIPPED | impl: `IntTensor::cast_gpu` at `ops/phase2c.rs:481`; non-test consumer: `IntTensor::cast<J>` in `int_tensor.rs` invokes `cast_gpu` for the CUDA branch |

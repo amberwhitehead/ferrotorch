@@ -79,6 +79,91 @@ fn error_message<T>(result: FerrotorchResult<T>) -> String {
     }
 }
 
+fn assert_device_mismatch<T>(result: FerrotorchResult<T>, expected: Device, got: Device) {
+    match result {
+        Err(FerrotorchError::DeviceMismatch {
+            expected: actual_expected,
+            got: actual_got,
+        }) => {
+            assert_eq!(actual_expected, expected, "expected device");
+            assert_eq!(actual_got, got, "got device");
+        }
+        Err(other) => panic!("expected DeviceMismatch, got {other:?}"),
+        Ok(_) => panic!("expected operation to reject mixed devices"),
+    }
+}
+
+#[test]
+fn phase2c_index_select_gather_reject_mixed_devices_like_pytorch() {
+    ensure_cuda_backend();
+    let cpu_x = cpu_tensor(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
+    let cuda_x = cuda_tensor(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]);
+    let cpu_index_1d = IntTensor::<i64>::from_vec(vec![0, 2], vec![2]).expect("CPU index");
+    let cuda_index_1d = cpu_index_1d.to(Device::Cuda(0)).expect("upload index");
+    let cpu_index_gather =
+        IntTensor::<i64>::from_vec(vec![0, 2, 1, 0], vec![2, 2]).expect("CPU gather index");
+    let cuda_index_gather = cpu_index_gather
+        .to(Device::Cuda(0))
+        .expect("upload gather index");
+
+    assert_device_mismatch(
+        cpu_x.index_select(1, &cuda_index_1d),
+        Device::Cpu,
+        Device::Cuda(0),
+    );
+    assert_device_mismatch(
+        cuda_x.index_select(1, &cpu_index_1d),
+        Device::Cuda(0),
+        Device::Cpu,
+    );
+    assert_device_mismatch(
+        cpu_x.gather(1, &cuda_index_gather),
+        Device::Cpu,
+        Device::Cuda(0),
+    );
+    assert_device_mismatch(
+        cuda_x.gather(1, &cpu_index_gather),
+        Device::Cuda(0),
+        Device::Cpu,
+    );
+}
+
+#[test]
+fn phase2c_inttensor_index_select_gather_reject_mixed_devices_like_pytorch() {
+    ensure_cuda_backend();
+    let cpu_x =
+        IntTensor::<i64>::from_vec(vec![0, 1, 2, 3, 4, 5], vec![2, 3]).expect("CPU IntTensor");
+    let cuda_x = cpu_x.to(Device::Cuda(0)).expect("upload IntTensor");
+    let cpu_index_1d = IntTensor::<i64>::from_vec(vec![0, 2], vec![2]).expect("CPU index");
+    let cuda_index_1d = cpu_index_1d.to(Device::Cuda(0)).expect("upload index");
+    let cpu_index_gather =
+        IntTensor::<i64>::from_vec(vec![0, 2, 1, 0], vec![2, 2]).expect("CPU gather index");
+    let cuda_index_gather = cpu_index_gather
+        .to(Device::Cuda(0))
+        .expect("upload gather index");
+
+    assert_device_mismatch(
+        cpu_x.index_select(1, &cuda_index_1d),
+        Device::Cpu,
+        Device::Cuda(0),
+    );
+    assert_device_mismatch(
+        cuda_x.index_select(1, &cpu_index_1d),
+        Device::Cuda(0),
+        Device::Cpu,
+    );
+    assert_device_mismatch(
+        cpu_x.gather(1, &cuda_index_gather),
+        Device::Cpu,
+        Device::Cuda(0),
+    );
+    assert_device_mismatch(
+        cuda_x.gather(1, &cpu_index_gather),
+        Device::Cuda(0),
+        Device::Cpu,
+    );
+}
+
 #[test]
 fn tensor_index_select_i32_cuda_rejects_negative_and_context_survives() {
     ensure_cuda_backend();

@@ -6,12 +6,13 @@
 //! the input is `is_cuda()` (real PTX kernel; the result stays GPU-resident —
 //! no `.to(Cpu)`, no host readback of the DATA) and on CPU otherwise via a
 //! reference loop matching the same PyTorch semantics the GPU kernels
-//! implement. CORE-111 / #1805: CUDA `index_select` / `gather` validate index
-//! values before the unchecked copy kernels can compute addresses. Non-grad
-//! float forwards and integer tensor forwards validate on the GPU and read
-//! back only a tiny status payload; tracked float forwards currently also save
-//! a host copy of the index because the existing backward nodes store
-//! `Vec<usize>` indices.
+//! implement. `index_select` / `gather` require the input and index to be on
+//! the same device, matching PyTorch's operator wrappers; ferrotorch never
+//! downloads a CUDA index to make a CPU input work. CORE-111 / #1805: CUDA
+//! `index_select` / `gather` validate index values before the unchecked copy
+//! kernels can compute addresses. Non-grad float forwards and integer tensor
+//! forwards validate on the GPU and read back only a tiny status payload;
+//! tracked float forwards save a CUDA-resident i64 index for backward.
 //!
 //! These unblock the Llama generation loop, which today round-trips to CPU for
 //! argmax sampling and uses raw cudarc slices for token-id embedding gather.
@@ -323,8 +324,8 @@ impl<T: Float> Tensor<T> {
     /// `index_select(dim, indices)` (PyTorch `torch.index_select`) using a
     /// GPU-resident-or-CPU `IntTensor` index. The `indices` tensor must be 1-D.
     /// Output keeps `self`'s dtype; shape is `self.shape` with `shape[dim]`
-    /// replaced by `indices.numel()`. On CUDA, `self` and `indices` must be on
-    /// the same device; the result stays GPU-resident.
+    /// replaced by `indices.numel()`. `self` and `indices` must be on the same
+    /// device; CUDA results stay GPU-resident.
     ///
     /// Every index value must satisfy `0 <= idx < self.shape()[dim]` (PyTorch
     /// parity — negative indices are NOT wrapped); otherwise returns
@@ -346,15 +347,15 @@ impl<T: Float> Tensor<T> {
                 ),
             });
         }
+        let d = normalize_axis(dim, self.ndim())?;
+        check_same_device(self.device(), indices.device(), "index_select")?;
         let input = self.contiguous()?;
-        let d = normalize_axis(dim, input.ndim())?;
         let (outer, in_dim, inner) = factor(input.shape(), d);
         let out_dim = indices.numel();
         let mut out_shape = input.shape().to_vec();
         out_shape[d] = out_dim;
 
         if input.is_cuda() {
-            check_same_device(input.device(), indices.device(), "index_select")?;
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
             backend.check_int_indices_in_bounds(
@@ -390,7 +391,7 @@ impl<T: Float> Tensor<T> {
             }
         } else {
             let data = input.data_vec()?;
-            let idx = index_as_i64(&indices.to(Device::Cpu)?)?;
+            let idx = index_as_i64(indices)?;
             check_index_bounds(&idx, d, in_dim, "index_select")?;
             let out = index_select_ref(
                 &data,
@@ -421,7 +422,8 @@ impl<T: Float> Tensor<T> {
 
     /// `gather(dim, index)` (PyTorch `torch.gather`) using a GPU-resident-or-CPU
     /// `IntTensor` index. `index` must have the same ndim as `self`; output has
-    /// `index`'s shape and `self`'s dtype. On CUDA the result stays resident.
+    /// `index`'s shape and `self`'s dtype. `self` and `index` must be on the
+    /// same device; CUDA results stay resident.
     ///
     /// Every index value must satisfy `0 <= idx < self.shape()[dim]` (PyTorch
     /// parity — negative indices are NOT wrapped); otherwise returns
@@ -435,15 +437,15 @@ impl<T: Float> Tensor<T> {
         dim: isize,
         index: &IntTensor<I>,
     ) -> FerrotorchResult<Tensor<T>> {
+        let d = normalize_axis(dim, self.ndim())?;
+        gather_check_shapes(self.shape(), index.shape(), d, "gather")?;
+        check_same_device(self.device(), index.device(), "gather")?;
         let input = self.contiguous()?;
-        let d = normalize_axis(dim, input.ndim())?;
-        gather_check_shapes(input.shape(), index.shape(), d, "gather")?;
         let (outer, in_dim, inner) = factor(input.shape(), d);
         let out_dim = index.shape()[d];
         let out_shape = index.shape().to_vec();
 
         if input.is_cuda() {
-            check_same_device(input.device(), index.device(), "gather")?;
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
             backend.check_int_indices_in_bounds(index.gpu_handle()?, d, in_dim, "gather")?;
@@ -485,7 +487,7 @@ impl<T: Float> Tensor<T> {
             }
         } else {
             let data = input.data_vec()?;
-            let idx = index_as_i64(&index.to(Device::Cpu)?)?;
+            let idx = index_as_i64(index)?;
             check_index_bounds(&idx, d, in_dim, "gather")?;
             let out = gather_ref(
                 &data,
@@ -574,9 +576,10 @@ impl<I: IntElement> IntTensor<I> {
     ///
     /// Index values are validated against `self.shape()[dim]` exactly like
     /// [`Tensor::index_select`](crate::tensor::Tensor::index_select) (PyTorch
-    /// parity: no negative wrapping; `InvalidArgument` on out-of-bounds). On
-    /// CUDA, validation runs on the device and reads back only a small status
-    /// payload before the unchecked copy kernel launches.
+    /// parity: no negative wrapping; `InvalidArgument` on out-of-bounds).
+    /// `self` and `indices` must be on the same device. On CUDA, validation
+    /// runs on the device and reads back only a small status payload before
+    /// the unchecked copy kernel launches.
     pub fn index_select<J: IntElement>(
         &self,
         dim: isize,
@@ -591,13 +594,13 @@ impl<I: IntElement> IntTensor<I> {
             });
         }
         let d = normalize_axis(dim, self.ndim())?;
+        check_same_device(self.device(), indices.device(), "index_select")?;
         let (outer, in_dim, inner) = factor(self.shape(), d);
         let out_dim = indices.numel();
         let mut out_shape = self.shape().to_vec();
         out_shape[d] = out_dim;
 
         if self.is_cuda() {
-            check_same_device(self.device(), indices.device(), "index_select")?;
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
             backend.check_int_indices_in_bounds(
@@ -617,7 +620,7 @@ impl<I: IntElement> IntTensor<I> {
             Ok(IntTensor::from_gpu_handle(h, out_shape))
         } else {
             let data = self.data()?;
-            let idx = index_as_i64(&indices.to(Device::Cpu)?)?;
+            let idx = index_as_i64(indices)?;
             check_index_bounds(&idx, d, in_dim, "index_select")?;
             let zero = I::try_from_i64(0).expect("0 is in range for i32/i64");
             let out = index_select_ref(data, &idx, outer, in_dim, inner, zero);
@@ -630,9 +633,10 @@ impl<I: IntElement> IntTensor<I> {
     ///
     /// Index values are validated against `self.shape()[dim]` exactly like
     /// [`Tensor::gather`](crate::tensor::Tensor::gather) (PyTorch parity: no
-    /// negative wrapping; `InvalidArgument` on out-of-bounds). On CUDA,
-    /// validation runs on the device and reads back only a small status
-    /// payload before the unchecked copy kernel launches.
+    /// negative wrapping; `InvalidArgument` on out-of-bounds). `self` and
+    /// `index` must be on the same device. On CUDA, validation runs on the
+    /// device and reads back only a small status payload before the unchecked
+    /// copy kernel launches.
     pub fn gather<J: IntElement>(
         &self,
         dim: isize,
@@ -640,12 +644,12 @@ impl<I: IntElement> IntTensor<I> {
     ) -> FerrotorchResult<IntTensor<I>> {
         let d = normalize_axis(dim, self.ndim())?;
         gather_check_shapes(self.shape(), index.shape(), d, "gather")?;
+        check_same_device(self.device(), index.device(), "gather")?;
         let (outer, in_dim, inner) = factor(self.shape(), d);
         let out_dim = index.shape()[d];
         let out_shape = index.shape().to_vec();
 
         if self.is_cuda() {
-            check_same_device(self.device(), index.device(), "gather")?;
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
             backend.check_int_indices_in_bounds(index.gpu_handle()?, d, in_dim, "gather")?;
@@ -670,7 +674,7 @@ impl<I: IntElement> IntTensor<I> {
             Ok(IntTensor::from_gpu_handle(h, out_shape))
         } else {
             let data = self.data()?;
-            let idx = index_as_i64(&index.to(Device::Cpu)?)?;
+            let idx = index_as_i64(index)?;
             check_index_bounds(&idx, d, in_dim, "gather")?;
             let zero = I::try_from_i64(0).expect("0 is in range for i32/i64");
             let out = gather_ref(data, &idx, self.shape(), index.shape(), d, zero);
