@@ -104,7 +104,7 @@ and `meta_propagate.rs`.
   `transpose_2d`.
 
 - REQ-8: `transpose(input, dim0, dim1)` — `torch.transpose(input, dim0,
-  dim1)`. Per `TensorShape.cpp:3816 Tensor transpose(const Tensor&
+  dim1)`. Per `TensorShape.cpp:5116 Tensor transpose(const Tensor&
   self, int64_t dim0, int64_t dim1)` — `maybe_wrap_dim` both args,
   build a permutation swapping `dim0` ↔ `dim1`, return
   `as_strided_symint` view. The 2-D special case
@@ -175,7 +175,7 @@ and `meta_propagate.rs`.
   The backward is induced by the `unsqueeze` + `cat` composition
   (which carry their own grad-fns).
 
-- REQ-17: `vstack(tensors)` — `torch.vstack`. Per `TensorShape.cpp:3532
+- REQ-17: `vstack(tensors)` — `torch.vstack`. Per `TensorShape.cpp:3412
   Tensor vstack(TensorList tensors)` — equivalent to `cat` along
   axis 0 with 1-D inputs promoted to `[1, n]`. NOT implemented.
 
@@ -199,7 +199,7 @@ and `meta_propagate.rs`.
   incoming chunk-gradient into the original shape at the correct
   offset (`SplitBackward`). The forward pub fn `split_t` lives in
   `split_t in methods.rs`; it consumes `SplitBackward` from this file at
-  `methods.rs:1231 use crate::grad_fns::shape::SplitBackward`.
+  `methods.rs:1892 use crate::grad_fns::shape::SplitBackward`.
 
 - REQ-22: `chunk(input, chunks, dim)` — `torch.chunk`. Per
   `TensorShape.cpp:1077 std::vector<Tensor> chunk(const Tensor& self,
@@ -220,7 +220,7 @@ and `meta_propagate.rs`.
   dim, int64_t start, int64_t length)` — returns a zero-copy view of
   `length` elements starting at `start` along `dim` (uses
   `slice` internally). Backward zero-pads at the narrow offset. The
-  forward pub fn `narrow_t` lives in `methods.rs:1458`.
+  forward pub fn `narrow_t` lives in `methods.rs:1600`.
 
 - REQ-25: `unbind(input, dim)` — `torch.unbind`. Per
   `TensorShape.cpp:4367 std::vector<Tensor> unbind(const Tensor&
@@ -234,7 +234,7 @@ and `meta_propagate.rs`.
   NOT implemented as a free fn; the ingredients
   (`shape::broadcast_shapes` + `grad_fns::shape::expand`) are
   available individually and used in
-  `grad_fns/indexing.rs:1803/1825/1848/3572` to assemble the same
+  `grad_fns/indexing.rs:2092/2169/2206/5331` to assemble the same
   contract ad-hoc, but the named bundled op does not exist.
 
 - REQ-27: `broadcast_to(input, shape)` — `torch.broadcast_to(input,
@@ -330,30 +330,30 @@ and `meta_propagate.rs`.
   asserts `b.grad().is_none()`.
 - [x] AC-7: `expand` GPU fast path (f32/f64) dispatches to
   `broadcast_add` with a 1-element zeros scalar rather than spilling
-  to CPU — checked by `shape.rs:445-468`.
+  to CPU — checked by `shape.rs:482-507`.
 - [x] AC-8: `cat` GPU fast path dispatches to byte-width-dispatched
   `strided_cat` (elem_size ∈ {2, 4, 8}) per
-  `shape.rs:814-855` (matches `aten::cat_out_cuda` shape).
-- [x] AC-9: `narrow_t` (`methods.rs:1458`) returns a zero-copy view
+  `shape.rs:1856-1907` (matches `aten::cat_out_cuda` shape).
+- [x] AC-9: `narrow_t` (`methods.rs:1600`) returns a zero-copy view
   with the appropriate `NarrowBackward` for autograd.
 - [x] AC-10: `split_t` (`split_t in methods.rs`) returns one tensor per
   chunk, each carrying a `SplitBackward` from this module
-  (`methods.rs:1231 use crate::grad_fns::shape::SplitBackward`).
+  (`methods.rs:1892 use crate::grad_fns::shape::SplitBackward`).
 - [x] AC-11: `chunk_t` (`chunk_t in methods.rs`) computes per-chunk size
   via `(size + chunks - 1) / chunks` then delegates to the same
   `SplitBackward` machinery.
 - [x] AC-12: `permute_t` (`permute_t in methods.rs`) produces a zero-copy
   stride view with a `PermuteBackward` (`PermuteBackward in methods.rs`) that
   applies the inverse permutation on backward.
-- [x] AC-13: `Tensor::transpose(dim0, dim1)` (`methods.rs:528`)
+- [x] AC-13: `Tensor::transpose(dim0, dim1)` (`methods.rs:912`)
   builds a permutation vector swapping the two dims then delegates
   to `permute_t` — zero-copy n-D transpose with autograd.
-- [x] AC-14: `Tensor::t()` (`methods.rs:467`) delegates to
+- [x] AC-14: `Tensor::t()` (`methods.rs:683`) delegates to
   `shape::transpose_2d` which is itself a `permute_t(&[1, 0])`
   delegation — zero-copy 2-D transpose with autograd.
 - [x] AC-15: `view_t` rejects non-contiguous inputs with
   `InvalidArgument: "view: tensor must be contiguous; call
-  .contiguous() first"` (`methods.rs:1067-1071`) — matches
+  .contiguous() first"` (`methods.rs:1709-1712`) — matches
   upstream's `computeStride`-fails-then-error behavior.
 - [x] AC-16: `expand` errors when target has fewer dims than input
   (`shape.rs:419-425`) and when a non-1 input dim must be expanded
@@ -405,11 +405,11 @@ both helpers are zero-copy metadata changes implemented at the
 incoming gradient back to that shape. `view_t` (`view_t in methods.rs`)
 adds the contiguity gate then delegates to `crate::grad_fns::shape::
 reshape` — so the `view` API IS the `reshape` API plus a pre-check.
-**Non-test consumers**: `methods.rs:501 reshape_t`, `methods.rs:505
-flatten_t`, `methods.rs:555 view`, `flex_attention.rs:167-256` (four
+**Non-test consumers**: `methods.rs:885 reshape_t`, `methods.rs:889
+flatten_t`, `methods.rs:1094 view`, `flex_attention.rs:167-256` (four
 reshapes inside the SDP-attention forward), `einsum.rs:1072-1107`
 (reshape used to materialize batched matmul intermediates),
-`tensor.rs:2438` (FlattenBackward attached on the `Tensor::flatten`
+`tensor.rs:2488` (FlattenBackward attached on the `Tensor::flatten`
 method body).
 
 ### REQ-5 / REQ-6 — `squeeze`, `unsqueeze`
@@ -424,7 +424,7 @@ normalizes the axis, then inserts a 1 at that position.
 `SqueezeBackward` / `UnsqueezeBackward` (`UnsqueezeBackward in shape.rs`,
 `tensor.rs`) are exact inverses: squeeze backward unsqueezes the same
 axis; unsqueeze backward squeezes it. **Non-test consumers**:
-`methods.rs:509-514`, `einsum.rs:838-885` (insert size-1 dims to
+`methods.rs:889-912`, `einsum.rs:838-885` (insert size-1 dims to
 materialize matmul-friendly shapes then squeeze them back),
 `grad_fns/indexing.rs` (broadcast-prep for masked/where ops).
 
@@ -435,18 +435,18 @@ for any rank ≠ 2, then delegates to `crate::methods::permute_t(input,
 &[1, 0])` for the zero-copy stride swap. `TransposeBackward`
 (`TransposeBackward in shape.rs`) backward also goes through `permute_t(&[1, 0])`
 — transpose is its own inverse. n-D `Tensor::transpose(dim0, dim1)`
-lives at `methods.rs:528` (builds a perm vec swapping dim0 ↔ dim1).
+lives at `methods.rs:912` (builds a perm vec swapping dim0 ↔ dim1).
 `permute_t` itself with full `PermuteBackward` (inverse-perm)
 machinery is at `methods.rs:876` and `:941`. **Non-test consumers**:
-`methods.rs:467 t`, `methods.rs:521 permute`, `methods.rs:528
-transpose`, `einsum.rs:306` (intermediate reshape via permute +
+`methods.rs:683 t`, `methods.rs:1491 permute`, `methods.rs:912
+transpose`, `einsum.rs:294` (intermediate reshape via permute +
 contiguous), and pervasively across einsum / vmap / meta_propagate.
 
 ### REQ-11 — `expand`
 
 `pub fn expand` (`expand in shape.rs`) validates the target has at least
 input's ndim, validates each non-1 input dim matches its target,
-then takes the GPU fast path on CUDA f32/f64 (`shape.rs:445-468`:
+then takes the GPU fast path on CUDA f32/f64 (`shape.rs:482-507`:
 allocates a 1-element zeros scalar, calls
 `backend.broadcast_add_{f32,f64}(input, zeros, in_shape, &[1],
 new_shape)` to broadcast on-device — no CPU roundtrip), or the CPU
@@ -457,7 +457,7 @@ input flat-index, with size-1 dims clamped to 0). `ExpandBackward`
 `super::arithmetic::reduce_grad_to_shape(grad_output,
 &self.input_shape)` to sum-reduce the gradient over every
 broadcast axis — the shared backward primitive with arithmetic ops.
-**Non-test consumers**: `grad_fns/indexing.rs:1806/1826/1851/3577`
+**Non-test consumers**: `grad_fns/indexing.rs:2092/1826/1851/3577`
 (masked-fill/where prep), `einsum.rs:1725` (sum-grad expand).
 
 ### REQ-15 — `cat`
@@ -486,7 +486,7 @@ CPU does the inverse `copy_from_slice` loop. **Non-test consumers**:
 The forward `pub fn roll` lives at `roll in ops/tensor_ops.rs` (not
 this file). It builds a `RollBackward` from this file's `ops/tensor_ops.rs`
 implementation and attaches it via `Tensor::from_operation`.
-`RollBackward::backward` (`shape.rs:942-1011`) computes the inverse
+`RollBackward::backward` (`shape.rs:2047-2118`) computes the inverse
 shift `(((-shifts) % dim_size) + dim_size) % dim_size`, then on
 CUDA f32 dispatches to `backend.roll_f32` with the inverse shift
 (handles the `shift_norm == 0` collapse-to-identity via
@@ -497,14 +497,14 @@ inverse shift on a CPU buffer. Tests
 `test_roll_backward_negative_shift_2d` exercise both the 1-D
 positive-shift and 2-D negative-shift cases against
 hand-computed expected gradients. **Non-test consumer**: the
-forward `tensor_ops::roll` at `tensor_ops.rs:181` is the public
+forward `tensor_ops::roll` at `tensor_ops.rs:582` is the public
 API and itself the consumer — grandfathered under S5.
 
 ### REQ-21 / REQ-22 — `split`, `chunk`
 
 The forward `split_t` (`split_t in methods.rs`) and `chunk_t`
 (`chunk_t in methods.rs`) live in `methods.rs` and explicitly import
-`crate::grad_fns::shape::SplitBackward` at `methods.rs:1231`. Each
+`crate::grad_fns::shape::SplitBackward` at `methods.rs:1892`. Each
 chunk produced by `split_t` carries a fresh `SplitBackward`
 recording the chunk's `(dim, offset, chunk_size)`. On backward,
 `SplitBackward` (`SplitBackward in shape.rs`) allocates a zero-filled
@@ -512,12 +512,12 @@ buffer of the original shape, then copies the incoming chunk
 gradient into the correct slice — GPU fast path uses
 `backend.strided_cat` with the same byte-width dispatch as
 forward `cat`, CPU path runs the `(outer, total_along_dim,
-inner)` slice copy. **Non-test consumer**: `methods.rs:1231` is
+inner)` slice copy. **Non-test consumer**: `methods.rs:1892` is
 the production consumer of the exported `SplitBackward` struct.
 
 ### REQ-24 — `narrow`
 
-`narrow_t` (`methods.rs:1458`) returns a zero-copy view with
+`narrow_t` (`methods.rs:1600`) returns a zero-copy view with
 adjusted shape, strides, and storage offset. Backward
 (`NarrowBackward in methods.rs` and the implementation
 fn above it) zero-pads the incoming gradient at the offset along
@@ -704,7 +704,7 @@ tests above and indirect coverage through ops that USE them
 | REQ-5 (squeeze) | SHIPPED | impl: `pub fn squeeze` at `squeeze in shape.rs` + `SqueezeBackward` at `squeeze in shape.rs` mirrors upstream `TensorShape.cpp:4026 Tensor squeeze(self, dim)`; non-test consumers: `shape in methods.rs squeeze_t`, `einsum in einsum.rs`; lib tests `test_squeeze_forward/_non_one_error/_unsqueeze_roundtrip/_preserves_grad_fn/_backward_reaches_leaf/_in_longer_chain/_no_grad_is_view`; runner-arm gap #1340. |
 | REQ-6 (unsqueeze) | SHIPPED | impl: `pub fn unsqueeze` at `unsqueeze in shape.rs` + `UnsqueezeBackward` at `unsqueeze in shape.rs` mirrors upstream `TensorShape.cpp:4109 Tensor unsqueeze`; non-test consumers: `shape in methods.rs unsqueeze_t`, `einsum in einsum.rs`, `grad_fns/indexing.rs` (broadcast prep); lib tests `test_unsqueeze_forward/_preserves_grad_fn/_backward_reaches_leaf`; runner-arm gap #1340. |
 | REQ-7 (permute) | SHIPPED | impl: `pub fn permute_t` at `permute_t in methods.rs` + `PermuteBackward` at `permute_t in methods.rs` mirrors upstream `TensorShape.cpp:1829 Tensor permute`; non-test consumers: `Tensor::permute` at `permute in methods.rs`, `shape in shape.rs` (TransposeBackward and transpose_2d both delegate here), `einsum in einsum.rs` (intermediate permutation), `einsum in lib.rs` re-exports `permute_t`; runner-arm gap #1340. |
-| REQ-8 (transpose) | SHIPPED | impl: `Tensor::transpose(dim0, dim1)` at `transpose in methods.rs` (builds swap-perm + calls `permute_t`) + `pub fn transpose_2d` at `transpose_2d in shape.rs` + `TransposeBackward` at `transpose_2d in shape.rs` mirror upstream `TensorShape.cpp:3816 Tensor transpose` and `:3873 Tensor t`; non-test consumer: `Tensor::t` at `t in methods.rs`; lib test `test_transpose_2d_forward`; runner-arm gap #1340 (the existing runner arm at `t in runner/src/main.rs` produces 0/64 passed 64 skipped because dispatch is not wired). |
+| REQ-8 (transpose) | SHIPPED | impl: `Tensor::transpose(dim0, dim1)` at `transpose in methods.rs` (builds swap-perm + calls `permute_t`) + `pub fn transpose_2d` at `transpose_2d in shape.rs` + `TransposeBackward` at `transpose_2d in shape.rs` mirror upstream `TensorShape.cpp:5116 Tensor transpose` and `:5173 Tensor t`; non-test consumer: `Tensor::t` at `t in methods.rs`; lib test `test_transpose_2d_forward`; runner-arm gap #1340 (the existing runner arm at `t in runner/src/main.rs` produces 0/64 passed 64 skipped because dispatch is not wired). |
 | REQ-9 (swapaxes) | SHIPPED | impl: `pub fn swapaxes` in `grad_fns/shape.rs` (literal `input.transpose(axis0, axis1)` alias) mirrors upstream `TensorShape.cpp:4776 Tensor swapaxes(self, axis0, axis1) { return self.transpose(axis0, axis1); }`; autograd inherited from `Tensor::transpose`'s `PermuteBackward`; non-test consumer: `Tensor::swapaxes` in `methods.rs`; lib tests `test_swapaxes_equals_transpose` (byte-equality vs transpose), `test_swapaxes_backward_reaches_leaf`; runner-arm gap #1340. |
 | REQ-10 (swapdims) | SHIPPED | impl: `pub fn swapdims` in `grad_fns/shape.rs` (literal `input.transpose(dim0, dim1)` alias) mirrors upstream `TensorShape.cpp:4784 Tensor swapdims(self, dim0, dim1) { return self.transpose(dim0, dim1); }`; non-test consumer: `Tensor::swapdims` in `methods.rs`; lib test `test_swapdims_equals_transpose` (byte-equality vs transpose on a 3-D tensor); runner-arm gap #1340. |
 | REQ-11 (expand) | SHIPPED | impl: `pub fn expand` at `expand in shape.rs` + `ExpandBackward` at `expand in shape.rs` mirrors upstream `TensorShape.cpp:1344 Tensor expand`; non-test consumers: `shape in grad_fns/indexing.rs` (broadcast prep for masked_fill / where_cond), `einsum in einsum.rs` (sum-grad expand), `einsum in lib.rs` re-exports `expand`; runner-arm gap #1340 (existing arm at `expand in runner/src/main.rs` produces 0/72 passed 72 skipped). |
@@ -713,7 +713,7 @@ tests above and indirect coverage through ops that USE them
 | REQ-14 (repeat_interleave) | SHIPPED | impl: `pub fn repeat_interleave` + `RepeatInterleaveBackward` in `grad_fns/shape.rs` (CPU forward duplicates each index `repeats`× consecutively along `dim`; backward sums the `repeats` consecutive output slices back onto each input index) mirrors `torch.repeat_interleave(input, repeats, dim)`; non-test consumer: `Tensor::repeat_interleave_t` in `methods.rs`; lib tests `test_repeat_interleave_1d/_2d_dim1/_differs_from_repeat/_backward_sums_segments`; runner-arm gap #1340. |
 | REQ-15 (cat) | SHIPPED | impl: `pub fn cat` at `cat in shape.rs` + `CatBackward` at `cat in shape.rs` mirrors upstream `TensorShape.cpp:676 TORCH_IMPL_FUNC(cat_out_cpu)` + `:772 Tensor cat`; GPU fast path mirrors `aten::cat_out_cuda` via byte-width-dispatched `strided_cat`; non-test consumers: `flex_attention in flex_attention.rs` (head-grouped attention assembly), `flex_attention in lib.rs` re-exports `cat`; lib tests `test_cat_forward_axis0/_axis1`, `test_cat_backward_axis0/_axis1/_mixed_requires_grad`, `test_cat_empty_error`, `test_cat_1d`; runner-arm gap #1340. |
 | REQ-16 (stack) | SHIPPED | impl: `pub fn stack` at `stack in vmap.rs` mirrors upstream `TensorShape.cpp:3462 Tensor stack` via unsqueeze + cat composition (autograd inherited from REQ-6 + REQ-15); grandfathered as existing pub API across multiple prior commits per S5; runner-arm gap #1340. |
-| REQ-17 (vstack) | SHIPPED | impl: `pub fn vstack` in `grad_fns/shape.rs` (`atleast_2d` each input then `cat(_, 0)`) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:3532 Tensor vstack(TensorList)`; autograd inherited from `reshape`/`unsqueeze` + `CatBackward`; non-test consumer: `Tensor::vstack_t` in `methods.rs`; lib tests `test_vstack_1d_inputs/_backward`; runner-arm gap #1340. |
+| REQ-17 (vstack) | SHIPPED | impl: `pub fn vstack` in `grad_fns/shape.rs` (`atleast_2d` each input then `cat(_, 0)`) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:3412 Tensor vstack(TensorList)`; autograd inherited from `reshape`/`unsqueeze` + `CatBackward`; non-test consumer: `Tensor::vstack_t` in `methods.rs`; lib tests `test_vstack_1d_inputs/_backward`; runner-arm gap #1340. |
 | REQ-18 (hstack) | SHIPPED | impl: `pub fn hstack` in `grad_fns/shape.rs` (`atleast_1d` each input; `cat(_, 0)` if 1-D else `cat(_, 1)`) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:3514 Tensor hstack(TensorList)`; non-test consumer: `Tensor::hstack_t` in `methods.rs`; lib tests `test_hstack_1d_inputs/_2d_inputs`; runner-arm gap #1340. |
 | REQ-19 (dstack) | SHIPPED | impl: `pub fn dstack` in `grad_fns/shape.rs` (`atleast_3d` each input then `cat(_, 2)`) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:3544 Tensor dstack(TensorList)`; non-test consumer: `Tensor::dstack_t` in `methods.rs`; lib test `test_dstack_1d_inputs`; runner-arm gap #1340. |
 | REQ-20 (column_stack) | SHIPPED | impl: `pub fn column_stack` in `grad_fns/shape.rs` (reshape ≤1-D inputs to `(numel,1)` then `hstack`) mirrors upstream `aten/src/ATen/native/TensorShape.cpp:3628 Tensor column_stack(TensorList)`; non-test consumer: `Tensor::column_stack_t` in `methods.rs`; lib test `test_column_stack_1d_inputs`; runner-arm gap #1340. |

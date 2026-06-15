@@ -86,14 +86,14 @@ PyTorch ships under the same `Engine` class.
 
 - [x] AC-1: `c.backward()` on a 2-input addition `c = a + b` populates
   `a.grad() = 1.0`, `b.grad() = 1.0` — `test_backward_simple_add` at
-  `graph.rs:715-739`.
+  `graph.rs:761-785`.
 - [x] AC-2: Multiplication backward yields the upstream partial
-  derivatives — `test_backward_mul` at `graph.rs:741-765`.
+  derivatives — `test_backward_mul` at `graph.rs:787-811`.
 - [x] AC-3: Shared inputs accumulate correctly: `c = a + a` →
   `a.grad() = 2.0` — `test_backward_shared_input` at
-  `graph.rs:767-788`.
+  `graph.rs:813-837`.
 - [x] AC-4: Chained graphs (3+ ops) produce correct partials —
-  `test_backward_chain` at `graph.rs:790-836`.
+  `test_backward_chain` at `graph.rs:836-882`.
 - [x] AC-5: `backward()` on a non-scalar tensor errors with
   `FerrotorchError::BackwardNonScalar` — `test_backward_non_scalar_error`
   at `test_backward_non_scalar_error in graph.rs`.
@@ -103,13 +103,13 @@ PyTorch ships under the same `Engine` class.
   `test_backward_one_element_tensor_seed_has_same_shape in graph.rs`.
 - [x] AC-7: `pow` + `add` chain on `[1]`-shape produces correct
   partials — `test_backward_one_element_through_pow_and_add` at
-  `graph.rs:869-886`.
+  `graph.rs:915-946`.
 - [x] AC-8: `reduce_grad_to_shape` reshapes `[] -> [1]` when the
   numel matches — `test_reduce_grad_to_shape_reshape_when_same_numel`
   at `test_reduce_grad_to_shape_reshape_when_same_numel in graph.rs`.
 - [x] AC-9: `reduce_grad_to_shape` errors cleanly (does NOT panic) on
   `[] -> [2]` numel mismatch — `test_reduce_grad_to_shape_returns_error_on_numel_mismatch_underflow`
-  at `graph.rs:902-919`.
+  at `graph.rs:948-964`.
 
 ## Architecture
 
@@ -219,9 +219,9 @@ All ten tests pass in the workspace gauntlet.
 | REQ-2 | SHIPPED | impl: `pub fn backward_with_grad<T: Float>` at `backward_with_grad in graph.rs`; mirrors `torch.autograd.backward(tensors, grad_tensors=...)` per `torch/autograd/__init__.py:91 _make_grads`; non-test production consumer: `Tensor::backward_with_gradient(&self, gradient)` at `backward_with_gradient in graph.rs` is the public method form; called from internal grad_fn backward paths e.g. `backward in ferrotorch-core/src/grad_fns/shape.rs use crate::autograd::backward`. |
 | REQ-3 | SHIPPED | impl: three-phase Kahn algorithm at `graph.rs:67-205` mirroring `torch/csrc/autograd/engine.cpp` `compute_dependencies` + `evaluate_function`; non-test consumer: this is the dispatcher inside REQ-1/REQ-2 so its production consumer is the same one (`Tensor::backward`). |
 | REQ-4 | SHIPPED | impl: `accumulate_non_leaf_grad` at `graph.rs:530-629` (sequential) and `accumulate_non_leaf_grad_locked` at `:460-514` (parallel); non-test consumer: invoked from inside REQ-1/REQ-2 dispatch; the parallel variant invoked from REQ-9's parallel engine; production path: `Tensor::backward` and `Tensor::backward_with_gradient`. |
-| REQ-5 | SHIPPED | impl: `run_grad_hooks` + `run_post_accumulate_hooks` calls at `graph.rs:175-193` (sequential) and `:385-407` (parallel); mirrors PyTorch's hook chain in `torch/utils/hooks.py:93+`; non-test production consumer: every leaf tensor with `register_hook` registered via `Tensor::register_hook` at `ferrotorch-core/src/tensor.rs:460` flows through this path during user `loss.backward()` calls. |
+| REQ-5 | SHIPPED | impl: `run_grad_hooks` + `run_post_accumulate_hooks` calls at `graph.rs:175-193` (sequential) and `:515-407` (parallel); mirrors PyTorch's hook chain in `torch/utils/hooks.py:93+`; non-test production consumer: every leaf tensor with `register_hook` registered via `Tensor::register_hook` at `ferrotorch-core/src/tensor.rs:933` flows through this path during user `loss.backward()` calls. |
 | REQ-6 | SHIPPED | impl: `if grad_output.is_contiguous() { ... } else { contiguous_t(&grad_output)? }` at `graph.rs:148-152` (sequential) and `:363-367` (parallel); non-test consumer: inside REQ-1/REQ-2 dispatch — invoked on every backward step for non-contiguous gradients (permute/transpose/narrow inputs); production path: `Tensor::backward`. |
-| REQ-7 | SHIPPED | impl: GPU-native add at `graph.rs:551-569` (sequential) and `:480-496` (parallel) calling `backend.add_f32` / `add_f64`; mirrors PyTorch's same-device add fast-path in `engine.cpp`; non-test consumer: any model whose backward graph has multiple gradient-merge points on the same GPU device — e.g. `ferrotorch-nn/src/transformer.rs` multi-head attention output projection branch merging gradients from N heads. |
+| REQ-7 | SHIPPED | impl: GPU-native add at `graph.rs:551-569` (sequential) and `:953-496` (parallel) calling `backend.add_f32` / `add_f64`; mirrors PyTorch's same-device add fast-path in `engine.cpp`; non-test consumer: any model whose backward graph has multiple gradient-merge points on the same GPU device — e.g. `ferrotorch-nn/src/transformer.rs` multi-head attention output projection branch merging gradients from N heads. |
 | REQ-8 | SHIPPED | impl: gradient-count sanity check at `graph.rs:160-168` and `:372-380`; production consumer: same as REQ-3 (this is a defensive guard inside the dispatcher). Test coverage: every `GradFn` implementation in the workspace returns the correct count thanks to this guard catching mismatches at runtime (would surface as `InvalidArgument { message }`). |
 | REQ-9 | SHIPPED | impl: `pub fn backward_parallel<T: Float>` at `graph.rs:220-457`; mirrors PyTorch's multi-thread engine in `torch/csrc/autograd/engine.cpp` (`ReadyQueue` / worker threads); non-test consumer: this is the existing public API surface; **note** the small-graph fallback at `:276-278` (re-dispatches to sequential) is the primary consumer for graphs <8 nodes. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
 | REQ-10 | SHIPPED | impl: shape-preserving seed at `graph.rs:50-65`; CL-498 fix; non-test consumer: every user call to `Tensor::backward()` on a 1-D `[1]`-shape loss (e.g. AdamW convergence with single-element loss); regression-tested by `test_backward_one_element_tensor_seed_has_same_shape` (production path is the same `Tensor::backward` entry). |

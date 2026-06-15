@@ -190,7 +190,7 @@ REQ in the table below is therefore NOT-STARTED.
 - [x] AC-8: `add_scaled_` same-shape `alpha != 1.0` path mutates `self` to
   `self + alpha * other`. Covered by the conformance-sweep
   `inplace_add_scaled` arm in
-  `ferrotorch-core/tests/conformance_elementwise.rs:1880-1921` (calls
+  `ferrotorch-core/tests/conformance_elementwise.rs:2466-1921` (calls
   `t.add_(&other)`) and by the parity-sweep `add` arm
   `inplace=True, alpha=<various>` probes at
   `tools/parity-sweep/runner/src/main.rs:494-498` (the parity-sweep `add`
@@ -373,7 +373,7 @@ the ten public ops:
 - `clamp_`: `fn test_clamp_basic in inplace.rs`,
   `fn test_clamp_all_within_range in inplace.rs`,
   `fn test_clamp_single_value_range in inplace.rs`,
-  `fn test_clamp_invalid_range in inplace.rs`,
+  `fn test_clamp_min_greater_than_max_matches_torch_scalar_kernel in inplace.rs`,
   `fn test_clamp_rejects_requires_grad_leaf in inplace.rs`.
 - Cross-op integration: `fn test_detached_tensor_allows_inplace in inplace.rs`
   — detached tensors are mutable; `fn test_mixed_inplace_chaining in inplace.rs`
@@ -428,7 +428,7 @@ cargo test -p ferrotorch-core --lib inplace   # → 20 passed, 0 failed
 | REQ-2 (mul_scalar_) | NOT-STARTED | open prereq blocker #1206. impl at `ferrotorch-core/src/inplace.rs:89` mirroring `aten/src/ATen/native/BinaryOps.cpp:996 Tensor& mul_(Tensor& self, const Scalar& other)` and docstring `torch/_tensor_docs.py:3441 mul_(value) -> Tensor`; in-file tests pass; no non-test production consumer. |
 | REQ-3 (fill_) | NOT-STARTED | open prereq blocker #1207. impl at `ferrotorch-core/src/inplace.rs:109` mirroring `aten/src/ATen/native/Fill.cpp:47 Tensor& fill_(Tensor& self, const Scalar& value)` and docstring `torch/_tensor_docs.py:1955 fill_(value) -> Tensor`; in-file tests pass; no non-test production consumer (natural caller is `ferrotorch-nn::init::constant_` which currently builds storage directly). |
 | REQ-4 (zero_) | NOT-STARTED | open prereq blocker #1208. impl at `ferrotorch-core/src/inplace.rs:128` delegates to `self.fill_(T::zero())` mirroring `aten/src/ATen/native/Fill.cpp:150-158 Tensor& zero_(Tensor &self)` (which itself falls back to `self.fill_(0)`) and docstring `torch/_tensor_docs.py:6381 zero_() -> Tensor`; in-file tests pass; no non-test production consumer (natural caller is `optim::zero_grad`). |
-| REQ-5 (add_) | NOT-STARTED | open prereq blocker #1209. impl at `ferrotorch-core/src/inplace.rs:147` (`self.add_scaled_(other, 1.0)`) mirroring `aten/src/ATen/native/BinaryOps.cpp:434-439 TORCH_IMPL_FUNC(sub_out) → add_stub(..., 1.0)` and docstring `torch/_tensor_docs.py:379 add_(other, *, alpha=1) -> Tensor`; conformance test at `ferrotorch-core/tests/conformance_elementwise.rs:1880` exercises it; no non-test production consumer (natural caller is `optim::sgd` param-update path). |
+| REQ-5 (add_) | NOT-STARTED | open prereq blocker #1209. impl at `ferrotorch-core/src/inplace.rs:147` (`self.add_scaled_(other, 1.0)`) mirroring `aten/src/ATen/native/BinaryOps.cpp:434-439 TORCH_IMPL_FUNC(sub_out) → add_stub(..., 1.0)` and docstring `torch/_tensor_docs.py:379 add_(other, *, alpha=1) -> Tensor`; conformance test at `ferrotorch-core/tests/conformance_elementwise.rs:2466` exercises it; no non-test production consumer (natural caller is `optim::sgd` param-update path). |
 | REQ-6 (add_scaled_) | NOT-STARTED | open prereq blocker #1210. impl at `ferrotorch-core/src/inplace.rs:167` mirroring `aten/src/ATen/native/BinaryOps.cpp:437 add_stub(device_type(), *this, -alpha)` (with alpha-positive direction) and docstring `torch/_tensor_docs.py:379 add_(other, *, alpha=1) -> Tensor`; conformance sweep at `ferrotorch-core/tests/conformance_elementwise.rs` and parity-sweep `add` arm cover its behavior end-to-end (88/88 passed at seeds=8); the parity-sweep dispatch table at `tools/parity-sweep/runner/src/main.rs:495 a.add_scaled_(&b, alpha)` IS a non-test invocation but the parity-sweep runner is explicitly disqualified as a test-side consumer per the role spec; no other non-test consumer exists. |
 | REQ-7 (sub_) | NOT-STARTED | open prereq blocker #1211. impl: `pub fn sub_` in `ferrotorch-core/src/inplace.rs` (post-commit 2f792bfc5) is a one-line delegation `self.sub_scaled_(other, 1.0)` mirroring `aten/src/ATen/native/BinaryOps.cpp:1157 Tensor& sub_(Tensor& self, const Tensor& other, const Scalar& alpha)` and docstring `torch/_tensor_docs.py:5113 sub_(other, *, alpha=1) -> Tensor`. Broadcasting and GPU dispatch are inherited from `add_scaled_` via `sub_scaled_`. The `alpha` kwarg gap is now closed by `sub_scaled_` (REQ-11 SHIPPED). REQ-7 remains NOT-STARTED solely because there is no non-test production consumer — parity-sweep `sub` arm now passes 88/88 after #1192 closed (the prior 16/88 failures on `alpha != 1` are resolved via `sub_scaled_`). |
 | REQ-8 (mul_) | NOT-STARTED | open prereq blocker #1212. impl at `ferrotorch-core/src/inplace.rs:292` mirrors `aten/src/ATen/native/BinaryOps.cpp:441 TORCH_IMPL_FUNC(mul_out)` only on the same-shape path (shape-strict at lines 294-302) — torch's `mul_` inherits broadcasting from `mul_out` per docstring `torch/_tensor_docs.py:3441 mul_(value)`. No non-test production consumer. |

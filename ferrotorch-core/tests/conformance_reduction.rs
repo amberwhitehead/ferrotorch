@@ -43,15 +43,17 @@ use serde::de::{self, Deserializer, SeqAccess, Visitor};
 
 use ferrotorch_core::grad_fns::cumulative::{cummax, cummin, cumprod, cumsum, logcumsumexp};
 use ferrotorch_core::grad_fns::reduction::{
-    amax, amax_dim, amin, amin_dim, argmax_dim, argmin_dim, max_with_dim, mean, mean_dim,
-    median_with_dim, min_with_dim, nanmedian_with_dim, prod, sum, sum_dim,
+    amax, amax_dim, amin, amin_dim, argmax_dim, argmin_dim, logsumexp_dims, max_with_dim, mean,
+    mean_dim, mean_dims, median_with_dim, min_with_dim, nanmean_dim, nanmean_dims,
+    nanmedian_with_dim, nansum_dim, nansum_dims, prod, std_dim, std_dims, sum, sum_dim, sum_dims,
+    var_dim, var_dims,
 };
 use ferrotorch_core::int_tensor::IntTensor;
 use ferrotorch_core::ops::cumulative::{
     CumExtremeResult, cummax_forward, cummin_forward, cumprod_forward, cumsum_forward,
     logcumsumexp_forward, reverse_cumsum,
 };
-use ferrotorch_core::{Device, Tensor, TensorStorage};
+use ferrotorch_core::{Device, FerrotorchError, Tensor, TensorStorage};
 
 // ---------------------------------------------------------------------------
 // Tolerance helpers
@@ -429,6 +431,32 @@ fn check_f32(label: &str, actual: &[f32], expected: &[f64], tol: f32) {
 
 fn check_f64(label: &str, actual: &[f64], expected: &[f64], tol: f64) {
     tolerance::assert_close_f64(actual, expected, tol, label);
+}
+
+fn expect_invalid_arg_contains<T>(label: &str, result: Result<T, FerrotorchError>, needle: &str) {
+    match result {
+        Err(FerrotorchError::InvalidArgument { message }) => assert!(
+            message.contains(needle),
+            "{label}: InvalidArgument message {message:?} did not contain {needle:?}"
+        ),
+        Err(e) => panic!("{label}: expected InvalidArgument containing {needle:?}, got {e:?}"),
+        Ok(_) => panic!("{label}: expected InvalidArgument containing {needle:?}, got Ok"),
+    }
+}
+
+fn expect_invalid_arg_contains_any<T>(
+    label: &str,
+    result: Result<T, FerrotorchError>,
+    needles: &[&str],
+) {
+    match result {
+        Err(FerrotorchError::InvalidArgument { message }) => assert!(
+            needles.iter().any(|needle| message.contains(needle)),
+            "{label}: InvalidArgument message {message:?} did not contain any of {needles:?}"
+        ),
+        Err(e) => panic!("{label}: expected InvalidArgument containing {needles:?}, got {e:?}"),
+        Ok(_) => panic!("{label}: expected InvalidArgument containing {needles:?}, got Ok"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -887,10 +915,8 @@ fn cpu_empty_sum_mean_prod() {
     }
 }
 
-/// CORE-051 / #1745 pin — global `amax`/`amin` return false fold identities
-/// for empty tensors (single-contract rewrite of the former dual-accepting
-/// test, per the CORE-199 / #1893 dispatch and R-ORACLE-4: the old version
-/// passed on EITHER `Err` OR the ±inf sentinel, so it could never go red).
+/// CORE-051 / #1745 — global `amax`/`amin` reject empty tensors without an
+/// explicit dim.
 ///
 /// torch oracle (live session, torch 2.11.0+cu130):
 /// ```text
@@ -898,42 +924,19 @@ fn cpu_empty_sum_mean_prod() {
 /// RuntimeError: amax(): Expected reduction dim to be specified for
 /// input.numel() == 0. Specify the reduction dim with the 'dim' argument.
 /// ```
-/// (`amin` identical.) The contractual ferrotorch behavior once #1745 lands
-/// is a structured `Err` before dispatch on every device.
-///
-/// ferrotorch probed at HEAD (401233b56): `amax([]) == Ok([-inf])`,
-/// `amin([]) == Ok([+inf])` for both f32 and f64 — the fold identities leak
-/// out as values. Pin exactly that; when #1745 lands the `expect` calls
-/// below fire — retire this pin and assert the structured `Err`.
+/// (`amin` identical.) The contractual ferrotorch behavior is a structured
+/// `Err` before dispatch on every device.
 #[test]
-fn cpu_empty_amax_amin_pin_1745() {
-    macro_rules! pin {
-        ($label:literal, $call:expr, $read:ident, $negative:expr) => {{
-            let t = $call.expect(concat!(
-                $label,
-                " returned Err — #1745 appears fixed; retire this pin and \
-                 assert the structured error"
-            ));
-            let v = $read(&t, Device::Cpu);
-            assert_eq!(v.len(), 1, "{} must return a scalar", $label);
-            assert!(
-                v[0].is_infinite() && v[0].is_sign_negative() == $negative,
-                "{} returned {:?} — neither the pinned fold identity nor an \
-                 Err; re-probe #1745",
-                $label,
-                v[0]
-            );
-        }};
-    }
+fn cpu_empty_amax_amin_errors_1745() {
     let a32 = make_cpu_f32(&[], &[0], false);
-    pin!("amax_f32([])", amax(&a32), read_back_f32, true);
-    pin!("amin_f32([])", amin(&a32), read_back_f32, false);
+    expect_invalid_arg_contains("amax_f32([])", amax(&a32), "requires an explicit dim");
+    expect_invalid_arg_contains("amin_f32([])", amin(&a32), "requires an explicit dim");
     let a64 = make_cpu_f64(&[], &[0], false);
-    pin!("amax_f64([])", amax(&a64), read_back_f64, true);
-    pin!("amin_f64([])", amin(&a64), read_back_f64, false);
+    expect_invalid_arg_contains("amax_f64([])", amax(&a64), "requires an explicit dim");
+    expect_invalid_arg_contains("amin_f64([])", amin(&a64), "requires an explicit dim");
 
-    // Non-empty path (anti-stub): a stub returning a constant ±inf for
-    // every input would satisfy the fold-identity pins above. Pin the
+    // Non-empty path (anti-stub): a stub returning an error for every input
+    // would satisfy the empty-input assertions above. Pin the
     // actual reduction values for `[1.0, 2.0, 3.0]` so that shortcut does
     // not survive.
     let b = make_cpu_f32(&[1.0, 2.0, 3.0], &[3], false);
@@ -955,8 +958,8 @@ fn cpu_empty_amax_amin_pin_1745() {
     assert_eq!(amin_v[0], 1.0_f32, "amin([1,2,3]) must be 1.0");
 }
 
-/// CORE-052 / #1746 pin — dim-keyed value reductions PANIC on zero-length
-/// reduced slices (lane added per the CORE-199 / #1893 dispatch).
+/// CORE-052 / #1746 — dim-keyed value reductions reject zero-length reduced
+/// slices with structured errors.
 ///
 /// torch oracle (live session, torch 2.11.0+cu130, `z = torch.zeros(2,0,3)`):
 /// ```text
@@ -965,60 +968,26 @@ fn cpu_empty_amax_amin_pin_1745() {
 /// ```
 /// (amin/argmax/argmin/max/min identical with their own op names;
 /// median/nanmedian both report `median(): Expected reduction dim 1 to have
-/// non-zero size.`) The contractual ferrotorch behavior once #1746 lands is
-/// a structured `Err` from these `FerrotorchResult` APIs.
-///
-/// ferrotorch probed at HEAD (401233b56): all eight panic — slice
-/// index-out-of-bounds at `grad_fns/reduction.rs:2430` (amin/amax_dim),
-/// `:1619` (argmax/argmin_dim), `:2786` (max/min_with_dim), and a
-/// `dim_size - 1` usize underflow at `:2996` for median/nanmedian (debug:
-/// overflow panic; release: wraps and then indexes the empty `order` vec —
-/// still a panic, so the pin is build-profile stable).
-///
-/// Pin mechanics: `#[should_panic]` is forbidden here (it would accept ANY
-/// panic anywhere in the test body, including in tensor construction — a
-/// dual-accept in disguise), and a fixture-level expected-err row cannot
-/// express "panics" (the fixture runner itself would die). So the pin wraps
-/// EXACTLY the op call in `catch_unwind`: today only the panic outcome
-/// passes; a structured `Err` means #1746 landed (retire the pin and assert
-/// the error kind); an `Ok` is an instant failure (torch raises — there is
-/// no valid value).
+/// non-zero size.`) Ferrotorch returns a structured `Err` from these
+/// `FerrotorchResult` APIs instead of panicking or fabricating a value.
 #[test]
-fn cpu_zero_length_slice_dim_reductions_panic_pin_1746() {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-
-    macro_rules! pin_panic {
-        ($name:literal, $call:expr) => {{
-            let r = catch_unwind(AssertUnwindSafe(|| $call.map(|_| ())));
-            match r {
-                Err(_) => { /* pinned: panics at HEAD (see doc-comment) */ }
-                Ok(Err(e)) => panic!(
-                    "{}: returned structured Err({e}) — #1746 appears \
-                     fixed; retire this pin and assert the error kind",
-                    $name
-                ),
-                Ok(Ok(())) => panic!(
-                    "{}: returned Ok on a zero-length reduced slice — torch \
-                     raises IndexError; neither the pinned panic nor the \
-                     contractual Err",
-                    $name
-                ),
-            }
-        }};
+fn cpu_zero_length_slice_dim_reductions_error_1746() {
+    macro_rules! assert_empty_dim_err {
+        ($name:literal, $call:expr) => {{ expect_invalid_arg_contains_any($name, $call, &["empty", "non-zero size"]) }};
     }
 
     let z = make_cpu_f32(&[], &[2, 0, 3], false);
-    pin_panic!("amax_dim([2,0,3], dim=1)", amax_dim(&z, 1, false));
-    pin_panic!("amin_dim([2,0,3], dim=1)", amin_dim(&z, 1, false));
-    pin_panic!("argmax_dim([2,0,3], dim=1)", argmax_dim(&z, 1, false));
-    pin_panic!("argmin_dim([2,0,3], dim=1)", argmin_dim(&z, 1, false));
-    pin_panic!("max_with_dim([2,0,3], dim=1)", max_with_dim(&z, 1, false));
-    pin_panic!("min_with_dim([2,0,3], dim=1)", min_with_dim(&z, 1, false));
-    pin_panic!(
+    assert_empty_dim_err!("amax_dim([2,0,3], dim=1)", amax_dim(&z, 1, false));
+    assert_empty_dim_err!("amin_dim([2,0,3], dim=1)", amin_dim(&z, 1, false));
+    assert_empty_dim_err!("argmax_dim([2,0,3], dim=1)", argmax_dim(&z, 1, false));
+    assert_empty_dim_err!("argmin_dim([2,0,3], dim=1)", argmin_dim(&z, 1, false));
+    assert_empty_dim_err!("max_with_dim([2,0,3], dim=1)", max_with_dim(&z, 1, false));
+    assert_empty_dim_err!("min_with_dim([2,0,3], dim=1)", min_with_dim(&z, 1, false));
+    assert_empty_dim_err!(
         "median_with_dim([2,0,3], dim=1)",
         median_with_dim(&z, 1, false)
     );
-    pin_panic!(
+    assert_empty_dim_err!(
         "nanmedian_with_dim([2,0,3], dim=1)",
         nanmedian_with_dim(&z, 1, false)
     );
@@ -1026,10 +995,119 @@ fn cpu_zero_length_slice_dim_reductions_panic_pin_1746() {
     // The mechanism is dtype-generic (`<T: Float>`); one f64 lane guards
     // against a dtype-specialized early return sneaking in.
     let z64 = make_cpu_f64(&[], &[2, 0, 3], false);
-    pin_panic!("amax_dim f64([2,0,3], dim=1)", amax_dim(&z64, 1, false));
-    pin_panic!(
+    assert_empty_dim_err!("amax_dim f64([2,0,3], dim=1)", amax_dim(&z64, 1, false));
+    assert_empty_dim_err!(
         "median_with_dim f64([2,0,3], dim=1)",
         median_with_dim(&z64, 1, false)
+    );
+}
+
+#[test]
+fn cpu_nan_and_multi_dim_reductions_match_torch_edges() {
+    let x = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 2, 2], false);
+
+    let summed = sum_dims(&x, &[0, -1], false).expect("sum_dims");
+    assert_eq!(summed.shape(), &[2]);
+    check_f32(
+        "sum_dims",
+        &read_back_f32(&summed, Device::Cpu),
+        &[14.0, 22.0],
+        tolerance::F32_REDUCTION_CPU,
+    );
+
+    let meaned = mean_dims(&x, &[0, 2], true).expect("mean_dims");
+    assert_eq!(meaned.shape(), &[1, 2, 1]);
+    check_f32(
+        "mean_dims",
+        &read_back_f32(&meaned, Device::Cpu),
+        &[3.5, 5.5],
+        tolerance::F32_REDUCTION_CPU,
+    );
+
+    let nan_x = make_cpu_f32(
+        &[1.0, f64::NAN, 3.0, f64::NAN, f64::NAN, f64::NAN],
+        &[2, 3],
+        false,
+    );
+    let ns_dim = nansum_dim(&nan_x, 1, false).expect("nansum_dim");
+    check_f32(
+        "nansum_dim",
+        &read_back_f32(&ns_dim, Device::Cpu),
+        &[4.0, 0.0],
+        tolerance::F32_REDUCTION_CPU,
+    );
+    let nm_dim = nanmean_dim(&nan_x, 1, false).expect("nanmean_dim");
+    let nm_dim_values = read_back_f32(&nm_dim, Device::Cpu);
+    assert_eq!(nm_dim_values.len(), 2);
+    assert!((nm_dim_values[0] - 2.0).abs() < tolerance::F32_REDUCTION_CPU);
+    assert!(nm_dim_values[1].is_nan(), "nanmean_dim all-NaN lane");
+
+    let nan_multi = make_cpu_f32(
+        &[1.0, f64::NAN, 3.0, 4.0, 5.0, 6.0, f64::NAN, 8.0],
+        &[2, 2, 2],
+        false,
+    );
+    check_f32(
+        "nansum_dims",
+        &read_back_f32(
+            &nansum_dims(&nan_multi, &[0, 2], false).expect("nansum_dims"),
+            Device::Cpu,
+        ),
+        &[12.0, 15.0],
+        tolerance::F32_REDUCTION_CPU,
+    );
+    check_f32(
+        "nanmean_dims",
+        &read_back_f32(
+            &nanmean_dims(&nan_multi, &[0, 2], false).expect("nanmean_dims"),
+            Device::Cpu,
+        ),
+        &[4.0, 5.0],
+        tolerance::F32_REDUCTION_CPU,
+    );
+
+    let y = make_cpu_f64(&[1.0, 2.0, 3.0, 4.0], &[2, 2], false);
+    check_f64(
+        "var_dim",
+        &read_back_f64(&var_dim(&y, 1, 0.0, false).expect("var_dim"), Device::Cpu),
+        &[0.25, 0.25],
+        tolerance::F64_REDUCTION_CPU,
+    );
+    check_f64(
+        "std_dim",
+        &read_back_f64(&std_dim(&y, 1, 0.0, false).expect("std_dim"), Device::Cpu),
+        &[0.5, 0.5],
+        tolerance::F64_REDUCTION_CPU,
+    );
+    check_f64(
+        "var_dims",
+        &read_back_f64(
+            &var_dims(&y, &[0, 1], 0.0, false).expect("var_dims"),
+            Device::Cpu,
+        ),
+        &[1.25],
+        tolerance::F64_REDUCTION_CPU,
+    );
+    check_f64(
+        "std_dims",
+        &read_back_f64(
+            &std_dims(&y, &[0, 1], 0.0, false).expect("std_dims"),
+            Device::Cpu,
+        ),
+        &[1.25_f64.sqrt()],
+        tolerance::F64_REDUCTION_CPU,
+    );
+
+    let lse_input = make_cpu_f64(&[0.0, 1.0, 2.0, 3.0], &[2, 2], false);
+    let lse_expected = (0.0_f64.exp() + 1.0_f64.exp() + 2.0_f64.exp() + 3.0_f64.exp()).ln();
+    check_f64(
+        "logsumexp_dims",
+        &read_back_f64(
+            &logsumexp_dims(&lse_input, &[0, 1], false).expect("logsumexp_dims"),
+            Device::Cpu,
+        ),
+        &[lse_expected],
+        tolerance::F64_LOGSCAN_CPU,
     );
 }
 
@@ -1701,10 +1779,8 @@ fn forward_only_helpers_smoke() {
 // CORE-199 / #1893 — special-value lanes
 // ---------------------------------------------------------------------------
 //
-// Live-torch expectations (fixture). Pins (single contract, retire-on-fix,
-// R-ORACLE-4):
-//   * amax/amin NaN propagation        -> #1932 (torch: NaN; ferrotorch
-//     skips NaN and returns a finite extremum)
+// Live-torch expectations (fixture):
+//   * amax/amin NaN propagation        -> #1932
 //   * logcumsumexp inf scan poisoning  -> CORE-133 / #1827
 
 #[test]
@@ -1722,10 +1798,6 @@ fn cpu_amax_amin_special() {
                 .as_ref()
                 .map(F64ListSentinel::as_slice)
                 .unwrap();
-            // The sv_nan_* rows expect torch's NaN; ferrotorch returns the
-            // finite extremum (pin). The sv_inf row is finite-contract and
-            // value-asserted.
-            let pinned_nan = exp[0].is_nan();
             match f.dtype.as_str() {
                 "float32" => {
                     let a = make_cpu_f32(a_data, shape, false);
@@ -1734,19 +1806,7 @@ fn cpu_amax_amin_special() {
                         _ => amin(&a).expect("amin"),
                     };
                     let actual = read_back_f32(&r, Device::Cpu);
-                    if pinned_nan {
-                        // #1932 pin: torch propagates NaN (fixture);
-                        // ferrotorch's fold skips it. When #1932 lands this
-                        // assert fails — retire the pin and let the fixture
-                        // comparison below run for every row.
-                        assert!(
-                            !actual[0].is_nan(),
-                            "{label}: result is now NaN — #1932 appears \
-                             fixed; retire this pin and assert the fixture"
-                        );
-                    } else {
-                        check_f32(&label, &actual, exp, tolerance::F32_REDUCTION_CPU);
-                    }
+                    check_f32(&label, &actual, exp, tolerance::F32_REDUCTION_CPU);
                 }
                 "float64" => {
                     let a = make_cpu_f64(a_data, shape, false);
@@ -1755,16 +1815,7 @@ fn cpu_amax_amin_special() {
                         _ => amin(&a).expect("amin"),
                     };
                     let actual = read_back_f64(&r, Device::Cpu);
-                    if pinned_nan {
-                        // #1932 pin — same mechanism at f64.
-                        assert!(
-                            !actual[0].is_nan(),
-                            "{label}: result is now NaN — #1932 appears \
-                             fixed; retire this pin and assert the fixture"
-                        );
-                    } else {
-                        check_f64(&label, &actual, exp, tolerance::F64_REDUCTION_CPU);
-                    }
+                    check_f64(&label, &actual, exp, tolerance::F64_REDUCTION_CPU);
                 }
                 _ => unreachable!(),
             }

@@ -170,7 +170,7 @@ NumPy convention; this lets ferrotorch callers reach the wider
 ferray-ma op surface (`var`, `std`, masked sort, masked ufunc) by
 casting through.
 
-**Non-test consumer**: re-exported at `lib.rs:167-170` as the public
+**Non-test consumer**: re-exported at `lib.rs:204-170` as the public
 surface `ferrotorch_core::{MaskedTensor, masked_count, masked_equal,
 masked_invalid, masked_max, masked_mean, masked_min, masked_sum,
 masked_where}`. The boundary IS the public API per goal.md S5; users
@@ -203,7 +203,7 @@ backward path are covered by `tests/audit_core064_masked_autograd.rs`.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `MaskedTensor::new` at `masked in masked.rs` mirrors `torch.masked.MaskedTensor.__init__` (`torch/masked/__init__.py`); non-test consumer: re-exported as `ferrotorch_core::MaskedTensor` at `masked in lib.rs`. The constructor IS the entry-point public API |
-| REQ-2 | SHIPPED | impl: `MaskedTensor::from_data` at `masked.rs:78`; non-test consumer: re-exported as `MaskedTensor::from_data` via `lib.rs:167` |
+| REQ-2 | SHIPPED | impl: `MaskedTensor::from_data` at `masked.rs:122`; non-test consumer: re-exported as `MaskedTensor::from_data` via `lib.rs:204` |
 | REQ-3 | SHIPPED | impl: `with_fill_value` at `masked in masked.rs`; non-test consumer: re-exported via `MaskedTensor` builder at `masked in lib.rs` |
 | REQ-4 | SHIPPED | impl: `filled` / `to_tensor` at `masked in masked.rs,143`; non-test consumer: re-exported method on `MaskedTensor` at `masked in lib.rs` |
 | REQ-5 | SHIPPED | impl: `masked_sum`/`masked_mean`/`masked_min`/`masked_max`/`masked_count` at `masked in masked.rs,275,322,330,419`; non-test consumer: re-exported at `masked in lib.rs` |

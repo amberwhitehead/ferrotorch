@@ -5090,6 +5090,12 @@ fn median_with_dim_forward<T: Float>(
     let dim_size = in_shape[norm_dim];
     let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
     let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
+    if dim_size == 0 && outer * inner != 0 {
+        let op = if ignore_nan { "nanmedian" } else { "median" };
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}(): Expected reduction dim {norm_dim} to have non-zero size."),
+        });
+    }
 
     let mut values = Vec::with_capacity(outer * inner);
     let mut indices = Vec::with_capacity(outer * inner);

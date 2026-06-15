@@ -16,13 +16,13 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (cumsum) | SHIPPED | `cumsum` at `cumulative.rs:104` + `CumsumBackward` at `:51` (0-D fast path mirrors `ReduceOps.cpp:501-504`); consumer `Tensor::cumsum_t` in `methods.rs`; parity `[cumsum] 32/32` (grep=1) |
-//! | REQ-2 (cumprod) | SHIPPED | `cumprod` at `cumulative.rs:379` + `CumprodBackward` at `:267` (O(n^3) zeros-path); consumer `Tensor::cumprod_t` in `methods.rs`; parity `[cumprod] 80/80` (grep=1) |
-//! | REQ-3 (cummax) | SHIPPED | `cummax` at `cumulative.rs:549` + `CummaxBackward` at `:438` via private helper `cummaxmin_backward_impl` (scatter_add VJP per `derivatives.yaml:533-535`); consumer `einops.rs:796` (`EinopsReduction::Max`); parity `[cummax] 24/24` (grep=1) |
-//! | REQ-4 (cummin) | SHIPPED | `cummin` at `cumulative.rs:581` + `CumminBackward` at `:472` shares the private `cummaxmin_backward_impl` helper; consumer `einops.rs:802` (`EinopsReduction::Min`); parity `[cummin] 24/24` (grep=1) |
+//! | REQ-1 (cumsum) | SHIPPED | `cumsum` at `cumulative.rs:105` + `CumsumBackward` at `:53` (0-D fast path mirrors `ReduceOps.cpp:501-504`); consumer `Tensor::cumsum_t` in `methods.rs`; parity `[cumsum] 32/32` (grep=1) |
+//! | REQ-2 (cumprod) | SHIPPED | `cumprod` at `cumulative.rs:400` + `CumprodBackward` at `:283` (O(n^3) zeros-path); consumer `Tensor::cumprod_t` in `methods.rs`; parity `[cumprod] 80/80` (grep=1) |
+//! | REQ-3 (cummax) | SHIPPED | `cummax` at `cumulative.rs:671` + `CummaxBackward` at `:460` via private helper `cummaxmin_backward_impl` (scatter_add VJP per `derivatives.yaml:533-535`); consumer `einops.rs:796` (`EinopsReduction::Max`); parity `[cummax] 24/24` (grep=1) |
+//! | REQ-4 (cummin) | SHIPPED | `cummin` at `cumulative.rs:712` + `CumminBackward` at `:501` shares the private `cummaxmin_backward_impl` helper; consumer `einops.rs:802` (`EinopsReduction::Min`); parity `[cummin] 24/24` (grep=1) |
 //! | REQ-5 (logcumsumexp) | SHIPPED | `logcumsumexp` + `LogcumsumexpBackward` use PyTorch's signed log-space VJP from `FunctionsManual.cpp::logcumsumexp_backward`, with resident CUDA kernels for f32/f64/f16/bf16 and CPU logical-view handling; consumer `Tensor::logcumsumexp_t`; parity `[logcumsumexp] 48/48` (grep=1) |
-//! | REQ-6 (dim normalization) | SHIPPED | `normalize_axis(dim as isize, ndim)` calls at `cumulative.rs:108, :383, :553, :585, :812` mirroring `maybe_wrap_dim` at `ReduceOps.cpp:506, :622, :851, :890`; consumers are the five `pub fn` bodies themselves (reached through `einops.rs:796 / :802` and the `methods.rs` `*_t` surfaces) |
-//! | REQ-7 (reverse_cumsum helper) | SHIPPED | impl `ops/cumulative.rs:109` mirroring `static Tensor reversed_cumsum(...)` at `ReduceOps.cpp:527-529`; non-test consumers `CumsumBackward::backward` at `cumulative.rs:57` and `LogcumsumexpBackward::backward` at `:746` |
+//! | REQ-6 (dim normalization) | SHIPPED | `normalize_axis(dim as isize, ndim)` calls at `cumulative.rs:109, :404, :675, :716, :1004` mirroring `maybe_wrap_dim` at `ReduceOps.cpp:506, :622, :851, :890`; consumers are the five `pub fn` bodies themselves (reached through `einops.rs:796 / :802` and the `methods.rs` `*_t` surfaces) |
+//! | REQ-7 (reverse_cumsum helper) | SHIPPED | impl `ops/cumulative.rs:163` mirroring `static Tensor reversed_cumsum(...)` at `ReduceOps.cpp:527-529`; non-test consumer `CumsumBackward::backward` at `cumulative.rs:77` |
 
 use std::sync::Arc;
 

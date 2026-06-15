@@ -63,19 +63,19 @@ plus `mem::transmute` over `Arc<dyn Fn>` (each transmute carrying a
 ## Acceptance Criteria
 
 - [x] AC-1: No-hooks pack/unpack are identity — `test_pack_unpack_identity`
-  at `saved_tensors.rs:202-213`.
+  at `saved_tensors.rs:383-394`.
 - [x] AC-2: A pack hook that doubles, paired with an unpack hook
   that halves, round-trips correctly —
-  `test_saved_tensors_hooks_transform` at `saved_tensors.rs:215-246`.
+  `test_saved_tensors_hooks_transform` at `saved_tensors.rs:396-427`.
 - [x] AC-3: Hooks are cleared after scope exit —
-  `test_hooks_cleared_after_scope` at `saved_tensors.rs:248-262`.
+  `test_hooks_cleared_after_scope` at `saved_tensors.rs:429-437`.
 
 ## Architecture
 
 ### REQ-1 / REQ-2 type aliases
 
 `pub type PackHook<T>` at `saved_tensors in saved_tensors.rs` and `pub type
-UnpackHook<T>` at `:38` are 1-line aliases over `Arc<dyn Fn(Tensor<T>)
+UnpackHook<T>` at `:51` are 1-line aliases over `Arc<dyn Fn(Tensor<T>)
 -> FerrotorchResult<Tensor<T>> + Send + Sync>`. `Arc`-backed because
 hooks are shared between the scope guard and any nested storage; `dyn
 Fn` because callers want to register arbitrary closures (not just
@@ -83,8 +83,8 @@ function pointers).
 
 ### REQ-3 `saved_tensors_hooks` — scope guard with type dispatch
 
-`pub fn saved_tensors_hooks<T, F, R>` at `saved_tensors.rs:59-104`.
-Two parallel thread-locals at `:41-50`:
+`pub fn saved_tensors_hooks<T, F, R>` at `saved_tensors.rs:84-129`.
+Two parallel thread-locals at `:55-64`:
 
 - `HOOKS_F32: RefCell<Option<(PackHook<f32>, UnpackHook<f32>)>>`
 - `HOOKS_F64: RefCell<Option<(PackHook<f64>, UnpackHook<f64>)>>`
@@ -113,13 +113,13 @@ double-free risk.
 
 ### REQ-4 / REQ-5 `pack_saved_tensor` / `unpack_saved_tensor`
 
-`pub fn pack_saved_tensor<T: Float>` at `saved_tensors.rs:110-148` is
+`pub fn pack_saved_tensor<T: Float>` at `saved_tensors.rs:231-297` is
 the same type-dispatch pattern: check `TypeId::of::<T>()`, transmute
 `tensor: Tensor<T>` → `Tensor<f32>` (or f64), call the registered
-hook, transmute the result back. SAFETY comments at `:115-119,
-:122-123, :135-136, :139-140` justify each transmute.
+hook, transmute the result back. SAFETY comments at `:243-247,
+:259-263, :273-277, :287-291` justify each transmute.
 
-`pub fn unpack_saved_tensor<T: Float>` at `:154-190` is symmetric.
+`pub fn unpack_saved_tensor<T: Float>` at `saved_tensors.rs:303-369` is symmetric.
 
 ### REQ-6 `has_saved_tensor_hooks`
 
@@ -164,11 +164,11 @@ All 3 pass in the workspace gauntlet.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub type PackHook<T>` at `HOOKS_F32 in ferrotorch-core/src/autograd/saved_tensors.rs`; mirrors PyTorch's `pack_hook(tensor: Tensor) -> Any` signature per `torch/autograd/graph.py:288 pack_hook(tensor: Tensor) -> Any`; non-test production consumer: stored in `HOOKS_F32: RefCell<Option<(PackHook<f32>, UnpackHook<f32>)>>` at `:42-44` and `HOOKS_F64` at `:48-50` — the per-thread storage that production GradFn constructors will read via REQ-4 (`pack_saved_tensor`). Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5 (the type alias IS the public surface for hook authors). |
+| REQ-1 | SHIPPED | impl: `pub type PackHook<T>` at `HOOKS_F32 in ferrotorch-core/src/autograd/saved_tensors.rs`; mirrors PyTorch's `pack_hook(tensor: Tensor) -> Any` signature per `torch/autograd/graph.py:288 pack_hook(tensor: Tensor) -> Any`; non-test production consumer: stored in `HOOKS_F32: RefCell<Option<(PackHook<f32>, UnpackHook<f32>)>>` at `:55-58` and `HOOKS_F64` at `:61-64` — the per-thread storage that production GradFn constructors will read via REQ-4 (`pack_saved_tensor`). Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5 (the type alias IS the public surface for hook authors). |
 | REQ-2 | SHIPPED | impl: `pub type UnpackHook<T>` at `saved_tensors in saved_tensors.rs`; mirrors `unpack_hook(Any) -> Tensor` at `torch/autograd/graph.py:290`; non-test production consumer: stored in the same `HOOKS_F32` / `HOOKS_F64` tuples as REQ-1; consumed by REQ-5 (`unpack_saved_tensor`). Existing pub API — boundary-API grandfathering. |
-| REQ-3 | SHIPPED | impl: `pub fn saved_tensors_hooks<T, F, R>` at `saved_tensors.rs:59-104` with TypeId-dispatched scope guards; mirrors `class saved_tensors_hooks` at `torch/autograd/graph.py:265-370`; non-test production consumer: this is the public scope-guard API users call from training loops to install offloading hooks; existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. The 3 unit tests demonstrate the user-facing call shape. |
-| REQ-4 | SHIPPED | impl: `pub fn pack_saved_tensor<T: Float>` at `saved_tensors.rs:110-148`; non-test production consumer: every `GradFn` constructor that saves a tensor for backward will call this (today the pass-through behavior preserves correctness for all existing call sites that haven't been wired through this hook yet). Existing pub API — boundary-API grandfathering. |
-| REQ-5 | SHIPPED | impl: `pub fn unpack_saved_tensor<T: Float>` at `saved_tensors.rs:154-190`; non-test production consumer: every `GradFn::backward` implementation that reads a saved tensor will call this. Existing pub API — boundary-API grandfathering. |
+| REQ-3 | SHIPPED | impl: `pub fn saved_tensors_hooks<T, F, R>` at `saved_tensors.rs:84-129` with TypeId-dispatched scope guards; mirrors `class saved_tensors_hooks` at `torch/autograd/graph.py:265-370`; non-test production consumer: this is the public scope-guard API users call from training loops to install offloading hooks; existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. The 3 unit tests demonstrate the user-facing call shape. |
+| REQ-4 | SHIPPED | impl: `pub fn pack_saved_tensor<T: Float>` at `saved_tensors.rs:231-297`; non-test production consumer: every `GradFn` constructor that saves a tensor for backward will call this (today the pass-through behavior preserves correctness for all existing call sites that haven't been wired through this hook yet). Existing pub API — boundary-API grandfathering. |
+| REQ-5 | SHIPPED | impl: `pub fn unpack_saved_tensor<T: Float>` at `saved_tensors.rs:303-369`; non-test production consumer: every `GradFn::backward` implementation that reads a saved tensor will call this. Existing pub API — boundary-API grandfathering. |
 | REQ-6 | SHIPPED | impl: `pub fn has_saved_tensor_hooks() -> bool` at `has_saved_tensor_hooks in saved_tensors.rs`; non-test production consumer: `pack_saved_tensor` / `unpack_saved_tensor` short-circuit when no hooks are active (the early-return inside the closures at `, , , `). Existing pub API — boundary-API grandfathering. |
-| REQ-7 | SHIPPED | impl: the no-hooks branches at `saved_tensors.rs:125 Ok(tensor)`, `:142 Ok(tensor)`, `:167 Ok(tensor)`, `:184 Ok(tensor)` return the input unchanged when no hook is registered; non-test production consumer: every GradFn save/load cycle in the absence of hooks (the common case) routes through this identity passthrough. |
-| REQ-8 | SHIPPED | impl: the scope-guard's restore-on-exit at `saved_tensors.rs:84, :98` (`HOOKS_F32.with(|h| *h.borrow_mut() = prev;)`); the test `test_hooks_cleared_after_scope` at `:248-262` verifies the behavior; non-test production consumer: every nested `saved_tensors_hooks(...)` call relies on the restore-prior-on-exit guarantee. |
+| REQ-7 | SHIPPED | impl: the no-hooks branches at `saved_tensors.rs:247 Ok(tensor)`, `:263 Ok(tensor)`, `:317 Ok(tensor)`, `:333 Ok(tensor)` return the input unchanged when no hook is registered; non-test production consumer: every GradFn save/load cycle in the absence of hooks (the common case) routes through this identity passthrough. |
+| REQ-8 | SHIPPED | impl: the scope-guard's restore-on-exit at `saved_tensors.rs:109, :123` (`HOOKS_F32.with(|h| *h.borrow_mut() = prev;)`); the test `test_hooks_cleared_after_scope` at `:429-437` verifies the behavior; non-test production consumer: every nested `saved_tensors_hooks(...)` call relies on the restore-prior-on-exit guarantee. |

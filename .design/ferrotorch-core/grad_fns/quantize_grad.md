@@ -107,7 +107,7 @@ qmax)` + a private `FakeQuantizeBackward<T>` grad-fn struct.
   1-D `scale` / `zero_point` along `axis` per
   `aten/src/ATen/native/quantized/FakeQuantPerChannelAffine.cpp:32-42`
   (delegating to `fake_quantize_per_channel_affine_cachemask`). Backward
-  per `tools/autograd/derivatives.yaml:682-683
+  per `tools/autograd/derivatives.yaml:666-683
   - name: fake_quantize_per_channel_affine_cachemask(Tensor self, Tensor scale,
     Tensor zero_point, int axis, int quant_min, int quant_max) -> (Tensor output,
     Tensor mask)
@@ -202,7 +202,7 @@ qmax)` + a private `FakeQuantizeBackward<T>` grad-fn struct.
   Tensor fake_quantize_per_tensor_affine_cachemask_backward(const Tensor& dY,
   const Tensor& mask) { ...; return dY * mask; }` and is the consumer that
   `derivatives.yaml:673-674` wires into autograd. The current
-  `FakeQuantizeBackward` at `ferrotorch-core/src/grad_fns/quantize_grad.rs:727-788`
+  `FakeQuantizeBackward` at `ferrotorch-core/src/grad_fns/quantize_grad.rs:801-863`
   implements an equivalent STE — it computes the range boundary
   `[dequantize(qmin), dequantize(qmax)] = [(qmin - zp) * scale, (qmax - zp) *
   scale]` and zeros gradient outside it — but the consumer chain ends at
@@ -427,7 +427,7 @@ not a sufficient implementation — the autograd VJP also needs to be
 broadcast-aware so the gradient flows back to the per-channel scale /
 zero_point if learnable; the non-learnable variant
 (`fake_quantize_per_channel_affine_cachemask`,
-`derivatives.yaml:682-683`) gradients only the input via `dY * mask`,
+`derivatives.yaml:666-683`) gradients only the input via `dY * mask`,
 with mask broadcast along `axis`.
 
 ### Validation + error paths (lines 58-68)
@@ -456,7 +456,7 @@ when `scale.is_nan() || scale <= 0.0` (`:59-63`) and when `qmin >= qmax`
 | Op | Upstream entry | Backward formula source | Expected behavior on edge cases |
 |---|---|---|---|
 | `fake_quantize_per_tensor_affine` | `aten/src/ATen/native/quantized/FakeQuantPerTensorAffine.cpp:31-40 Tensor fake_quantize_per_tensor_affine(const Tensor& self, double scale, int64_t zero_point, int64_t quant_min, int64_t quant_max)` (scalar-qparams overload) and `:42-51` (tensor-qparams overload) | `tools/autograd/derivatives.yaml:673-674` (`fake_quantize_per_tensor_affine_cachemask_backward = dY * mask`) | NaN input: `(NaN / scale).round() = NaN`, then `clamp(NaN, qmin, qmax)` is implementation-defined under IEEE-754 — Rust's `f32::clamp` panics on NaN (`debug_assert!(!self.is_nan())`) whereas C `std::min/std::max` on NaN returns the non-NaN operand → output is NaN-poisoned in upstream but undefined in ferrotorch. Inf input: `(inf / scale).round() = inf` → clamp to qmax. Denormals: round-to-nearest may flush; both languages match here. Empty input: `numel() == 0` → upstream returns empty (`FakeQuantPerTensorAffine.cpp:128-130 if (dY.sym_numel() <= 0) { return dY; }`); ferrotorch's `data_vec()` iteration on an empty vec produces an empty output naturally. Non-contiguous: ferrotorch's `input.data_vec()` materializes contiguously, then writes contiguously — same numerical result as upstream's TensorIterator-based dispatch but lossy on the storage-layout side. Dtype promotion: upstream requires `self.scalar_type() == ScalarType::Float` (f32 only, no f64/bf16); ferrotorch generic `T: Float` admits f32 / f64 / bf16 / f16 — a strict super-set, which is a deliberate R-DEV-7 deviation but should be documented when REQ-1 lands. **Status: NOT-STARTED (oracle missing per #1240; signature mismatch per #1238).** |
-| `fake_quantize_per_channel_affine` | `aten/src/ATen/native/quantized/FakeQuantPerChannelAffine.cpp:32-42 Tensor fake_quantize_per_channel_affine(const Tensor& self, const Tensor& scale, const Tensor& zero_point, int64_t axis, int64_t quant_min, int64_t quant_max)` | `tools/autograd/derivatives.yaml:682-683` (`fake_quantize_per_channel_affine_cachemask_backward = dY * mask`, mask broadcast along `axis`) | Same elementwise NaN / Inf / denormal / empty cases as per-tensor, plus: `scale.dim() == 1` enforced at `FakeQuantPerChannelAffine.cpp:55`, `zero_point.dim() == 1` at `:56`, `scale.numel() == self.size(axis)` at `:61`. Axis out-of-bounds: `axis >= 0 && axis <= self.dim()` at `:76` — note the `<=` is upstream's actual contract (axis-on-the-trailing-dim is permitted for a degenerate broadcast); ferrotorch should match. Zero-point dtype: upstream accepts `kInt`, `kFloat`, `kHalf` for zero_point with the float types triggering a `_get_rounded_zero_point` round-then-clamp at `:133-139`; ferrotorch's int-only zero_point sidesteps this. **Status: NOT-STARTED (impl missing per #1239; oracle missing per #1240).** |
+| `fake_quantize_per_channel_affine` | `aten/src/ATen/native/quantized/FakeQuantPerChannelAffine.cpp:32-42 Tensor fake_quantize_per_channel_affine(const Tensor& self, const Tensor& scale, const Tensor& zero_point, int64_t axis, int64_t quant_min, int64_t quant_max)` | `tools/autograd/derivatives.yaml:666-683` (`fake_quantize_per_channel_affine_cachemask_backward = dY * mask`, mask broadcast along `axis`) | Same elementwise NaN / Inf / denormal / empty cases as per-tensor, plus: `scale.dim() == 1` enforced at `FakeQuantPerChannelAffine.cpp:55`, `zero_point.dim() == 1` at `:56`, `scale.numel() == self.size(axis)` at `:61`. Axis out-of-bounds: `axis >= 0 && axis <= self.dim()` at `:76` — note the `<=` is upstream's actual contract (axis-on-the-trailing-dim is permitted for a degenerate broadcast); ferrotorch should match. Zero-point dtype: upstream accepts `kInt`, `kFloat`, `kHalf` for zero_point with the float types triggering a `_get_rounded_zero_point` round-then-clamp at `:133-139`; ferrotorch's int-only zero_point sidesteps this. **Status: NOT-STARTED (impl missing per #1239; oracle missing per #1240).** |
 
 Parity-sweep audit reference: BOTH ops are **MISSING** from
 `tools/parity-sweep/parity_audit.json`. The PyTorch oracle previously

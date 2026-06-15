@@ -99,11 +99,11 @@ The 1700+ LOC file is organised as:
   upstream kernel does fused integer accumulation; ferrotorch
   currently dequantizes for correctness, with a documented
   performance follow-up.
-- **`quantize_named_tensors`** (`quantize.rs:478-496`) — bulk
+- **`quantize_named_tensors`** (`quantize.rs:491-496`) — bulk
   state-dict path; one entry per `(name, scheme, dtype)`.
 - **`QParams`** (`quantize.rs:497-543`) — `(scale, zp)` bundle plus
   the qmin/qmax for downstream consumers.
-- **`trait Observer`** (`quantize.rs:544-560`) — `observe(tensor)`
+- **`trait Observer`** (`quantize.rs:1023-560`) — `observe(tensor)`
   updates internal state; `calculate_qparams()` returns the
   `QParams`.
 - **`MinMaxObserver`** (`quantize.rs:561-615`): scalar running min /
@@ -117,18 +117,18 @@ The 1700+ LOC file is organised as:
 - **`FakeQuantize`** (`quantize.rs:878-966`): forward quantize-then-
   dequantize, backward STE (the gradient impl lives in
   `grad_fns/quantize_grad.rs`).
-- **`QatLayer` / `QatModel`** (`quantize.rs:967-1057`) — per-param
+- **`QatLayer` / `QatModel`** (`quantize.rs:973-1055`) — per-param
   observer + fake-quantize bundles. `prepare_qat` is a factory.
 
 Non-test production consumers:
 
-- `grad_fns/quantize_grad.rs:283, 632` instantiate
+- `grad_fns/quantize_grad.rs:334, 632` instantiate
   `FakeQuantizeBackward` and `FakeQuantizePerChannelBackward` which
   reference the forward output produced by the surfaces in this file.
 - `methods.rs:596, 628` route `Tensor::fake_quantize_per_tensor_affine_t`
   and `Tensor::fake_quantize_per_channel_affine_t` through the
   `FakeQuantize` forward + backward chain.
-- `lib.rs:179-181` re-exports the `Observer` trait + concrete
+- `lib.rs:219-227` re-exports the `Observer` trait + concrete
   observers + `QuantizedTensor` + `FakeQuantize` + the QAT helpers
   for downstream `ferrotorch-nn` callers.
 
@@ -161,9 +161,9 @@ Expected: PyTorch fixture conformance, round-trip, and observer tests pass.
 | REQ-2 | SHIPPED | impl: `QuantizedTensor in ferrotorch-core/src/quantize.rs`; non-test consumer: re-exported at `lib.rs`; threaded through `quantize_named_tensors`'s return type and bulk state-dict callers. |
 | REQ-3 | SHIPPED | impl: `quantize in ferrotorch-core/src/quantize.rs`; non-test consumer: re-exported at `quantize in lib.rs`; called by `quantize_named_tensors` at `quantize in lib.rs` and by `FakeQuantize::forward` (transitively, via `forward in grad_fns/quantize_grad.rs`). |
 | REQ-4 | SHIPPED | impl: `dequantize in ferrotorch-core/src/quantize.rs`; non-test consumer: re-exported at `lib.rs`; called by `quantized_matmul` at `lib.rs` and by `FakeQuantize::forward`. |
-| REQ-5 | SHIPPED | impl: `quantized_matmul` at `ferrotorch-core/src/quantize.rs:372`; non-test consumer: re-exported at `lib.rs:179-181`. |
+| REQ-5 | SHIPPED | impl: `quantized_matmul` at `ferrotorch-core/src/quantize.rs:385`; non-test consumer: re-exported at `lib.rs:219-227`. |
 | REQ-6 | SHIPPED | impl: `QParams in ferrotorch-core/src/quantize.rs`; non-test consumer: re-exported at `lib.rs`; produced by every observer and consumed by `QatModel.step()`. |
 | REQ-7 | SHIPPED | impl: `trait Observer` at `MinMaxObserver in ferrotorch-core/src/quantize.rs`, `MinMaxObserver in ferrotorch-core/src/quantize.rs`, `PerChannelMinMaxObserver in ferrotorch-core/src/quantize.rs`, `HistogramObserver in ferrotorch-core/src/quantize.rs`; non-test consumer: re-exported at `lib.rs`; threaded through `QatLayer` at `lib.rs`. |
 | REQ-8 | SHIPPED | impl: `FakeQuantize in ferrotorch-core/src/quantize.rs`; non-test consumer: `FakeQuantize in grad_fns/quantize_grad.rs` (`FakeQuantizeBackward` attaches via the forward op) — production autograd graph. Consumer chain `Tensor::fake_quantize_per_tensor_affine_t` at `fake_quantize_per_tensor_affine_t in methods.rs`. |
 | REQ-9 | SHIPPED | impl: `QatLayer in ferrotorch-core/src/quantize.rs`, `QatModel in ferrotorch-core/src/quantize.rs`, `prepare_qat in ferrotorch-core/src/quantize.rs`; non-test consumer: re-exported at `lib.rs`; entrypoint for the QAT training-loop API. |
-| REQ-10 | SHIPPED | impl: `quantize_named_tensors` at `ferrotorch-core/src/quantize.rs:478`; non-test consumer: re-exported at `lib.rs:179-181`; called by state-dict-save flows that emit a quantized checkpoint. |
+| REQ-10 | SHIPPED | impl: `quantize_named_tensors` at `ferrotorch-core/src/quantize.rs:491`; non-test consumer: re-exported at `lib.rs:219-227`; called by state-dict-save flows that emit a quantized checkpoint. |

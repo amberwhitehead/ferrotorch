@@ -119,7 +119,7 @@ which is the standard Rust pattern (documented at `error.rs:46-69` with
 a runnable code sample). Production consumer: every callsite in
 `ferrotorch-core/src/grad_fns/*.rs` that converts a backend error via
 `.map_err(|e| FerrotorchError::Gpu { source: Box::new(e) })` (e.g.
-`grad_fns/arithmetic.rs:413, :447, :997` `dispatch_floating_dtype!` arms
+`grad_fns/arithmetic.rs:467, :501, :1220` `dispatch_floating_dtype!` arms
 that wrap `GpuBackend::*` results — the underlying mapping happens in
 `gpu_dispatch.rs`'s `?` propagation).
 
@@ -134,11 +134,11 @@ test files) per `grep -rn FerrotorchError:: ferrotorch-core/src/`.
 
 Every non-test `.rs` file under `ferrotorch-core/src/` that returns
 `FerrotorchResult<T>` is a consumer. The most concentrated callsites are:
-- `ferrotorch-core/src/tensor.rs:1146` —
+- `ferrotorch-core/src/tensor.rs:1855` —
   `ops::indexing::masked_select(self, mask)` returns
   `FerrotorchResult<Tensor<T>>` and propagates via `?` through the
   `Tensor::masked_select` boundary method.
-- `ferrotorch-core/src/grad_fns/arithmetic.rs:413, :447, :997` —
+- `ferrotorch-core/src/grad_fns/arithmetic.rs:467, :501, :1220` —
   `dispatch_floating_dtype!` arms return
   `FerrotorchResult<GpuBufferHandle>` and rely on `FerrotorchError::Gpu`
   for backend-error wrapping.
@@ -194,6 +194,6 @@ block has 2 tests; both are listed above.)
 | REQ-2 | SHIPPED | impl: `#[error("...")]` attributes on every variant from `error.rs:7-89` produce stable Display output. Each variant's prefix encodes its tag (`"shape mismatch: "`, `"device mismatch: "`, `"gpu error: "`, …). Test: `gpu_variant_display` at `error.rs:117` pins the schema. Non-test production consumer: `ferrotorch-core/src/tensor.rs` — every Display invocation via `?`-propagated error formatting in the public API. |
 | REQ-3 | SHIPPED | impl: the `Box<dyn Error + Send + Sync + 'static>` source bound at `error.rs:82` propagates `Send + Sync` through the `Gpu` variant; every other variant carries only `Send + Sync` fields. Non-test production consumer: `ferrotorch-core/src/cpu_pool.rs` (worker-pool threads return `FerrotorchResult<T>` across thread boundaries; the `Send + Sync` bound is what makes `JoinHandle<FerrotorchResult<T>>` viable). |
 | REQ-4 | SHIPPED | impl: variant `Gpu { source: Box<dyn Error + Send + Sync + 'static> }` at `error in error.rs` with `#[source]` attribute exposing the inner error. Documented downcast pattern at `error in error.rs`. Test: `gpu_variant_preserves_source_chain` at `error in error.rs`. Non-test production consumer: `ferrotorch-core/src/gpu_dispatch.rs` (the `?` propagation path for `GpuBackend::*` results — every backend error is wrapped into `FerrotorchError::Gpu` before crossing the public API surface). |
-| REQ-5 | SHIPPED | impl: `pub type FerrotorchResult<T> = Result<T, FerrotorchError>` at `error.rs:93`. Re-exported at `ferrotorch-core/src/lib.rs:145`. Non-test production consumer: every fallible public fn in the workspace; concrete cite `ferrotorch-core/src/tensor.rs:1261` (`pub fn masked_fill -> FerrotorchResult<Tensor<T>>`). |
+| REQ-5 | SHIPPED | impl: `pub type FerrotorchResult<T> = Result<T, FerrotorchError>` at `error.rs:93`. Re-exported at `ferrotorch-core/src/lib.rs:145`. Non-test production consumer: every fallible public fn in the workspace; concrete cite `ferrotorch-core/src/tensor.rs:1839` (`pub fn masked_fill -> FerrotorchResult<Tensor<T>>`). |
 | REQ-6 | SHIPPED | impl: `NotImplementedOnCuda { op: &'static str }` variant at `error in error.rs`. Non-test production consumer: `ferrotorch-core/src/dtype_dispatch.rs` (`dispatch_floating_dtype!` macro emits `FerrotorchError::NotImplementedOnCuda` for unsupported dtypes); also `cast in ferrotorch-core/src/int_tensor.rs` (`IntTensor::cast` errors cross-width casts on CUDA). |
 | REQ-7 | SHIPPED | impl: `Ferray(#[from] ferray_core::FerrayError)` at `error in error.rs` — `#[from]` derives `From<FerrayError> for FerrotorchError`. Non-test production consumer: `ferrotorch-core/src/storage.rs` and `ferrotorch-core/src/tensor.rs` — wherever ferray returns its own error and `?` propagates it into a `FerrotorchResult`; concrete grep returns 30+ ferray callsites in the storage layer. |

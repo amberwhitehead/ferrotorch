@@ -50,11 +50,11 @@ fn divergence_cumulative_md_prose_pub_fn_cites_resolve_at_head() {
     // permanent regression coverage against future drift.
     let pub_fn_cites = vec![
         // (doc-line, cited rs line, op_name)
-        (154, 803, "logcumsumexp"), // "ferrotorch implements forward via `logcumsumexp` at `cumulative.rs:803-811`"
-        (226, 803, "logcumsumexp"), // AC-5: "`cumulative.rs:803-811 pub fn logcumsumexp`"
-        (288, 104, "cumsum"),       // "`pub fn cumsum` at `:104-121`"
-        (299, 379, "cumprod"),      // "`pub fn cumprod` at `:379-397`"
-        (327, 803, "logcumsumexp"), // "`pub fn logcumsumexp` at `:803-811`"
+        (154, 995, "logcumsumexp"), // "ferrotorch implements forward via `logcumsumexp` at `cumulative.rs:995-1018`"
+        (226, 995, "logcumsumexp"), // AC-5: "`cumulative.rs:995-1018 pub fn logcumsumexp`"
+        (288, 105, "cumsum"),       // "`pub fn cumsum` at `:105-122`"
+        (299, 400, "cumprod"),      // "`pub fn cumprod` at `:400-418`"
+        (327, 995, "logcumsumexp"), // "`pub fn logcumsumexp` at `:995-1018`"
     ];
 
     let mut errors: Vec<String> = Vec::new();
@@ -83,10 +83,10 @@ fn divergence_cumulative_md_prose_struct_backward_cites_resolve_at_head() {
     // Refreshed to HEAD line numbers post-#1267 (was: 103/264 pre-shift).
     let struct_cites = vec![
         // (doc-line, cited rs line, struct)
-        (72, 267, "CumprodBackward"), // "ferrotorch implements this as `CumprodBackward` at `cumulative.rs:267-367`"
-        (158, 732, "LogcumsumexpBackward"), // "Backward is `LogcumsumexpBackward` at `cumulative.rs:732-788`"
-        (295, 267, "CumprodBackward"),      // "`CumprodBackward<T>` at `:267-271` saves"
-        (317, 732, "LogcumsumexpBackward"), // "`LogcumsumexpBackward<T>` at `:732-736` saves"
+        (72, 283, "CumprodBackward"), // "ferrotorch implements this as `CumprodBackward` at `cumulative.rs:283-388`"
+        (158, 882, "LogcumsumexpBackward"), // "Backward is `LogcumsumexpBackward` at `cumulative.rs:882-927`"
+        (295, 283, "CumprodBackward"),      // "`CumprodBackward<T>` at `:283-287` saves"
+        (317, 882, "LogcumsumexpBackward"), // "`LogcumsumexpBackward<T>` at `:882-886` saves"
     ];
 
     let mut errors: Vec<String> = Vec::new();
@@ -112,7 +112,7 @@ fn divergence_cumulative_md_req6_normalize_axis_tuple_cite_stale() {
     // REQ-6 status table row at cumulative.md:442 (and architecture-section
     // sentences at :177 / :332) cites `cumulative.rs:73, :203, :231, :241,
     // :323` as the normalize_axis call sites. At HEAD the actual sites are
-    // `:108, :358, :528, :560, :721` (this is what the cumulative.rs //!
+    // `:109, :404, :675, :716, :1004` (this is what the cumulative.rs //!
     // doc-comment correctly reflects, refreshed by commit 6cfaeb115). Commit
     // 91ad29360 was advertised as refreshing cumulative.md prose ranges but
     // missed the REQ-6 row + the two duplicate citations in prose.
@@ -150,8 +150,8 @@ fn divergence_cumulative_md_req6_normalize_axis_tuple_cite_stale() {
         }
     }
 
-    // 3. confirm the actual sites :108, :358, :528, :560, :721 DO contain it.
-    let actual_sites: [usize; 5] = [108, 383, 553, 585, 812];
+    // 3. confirm the actual sites :109, :404, :675, :716, :1004 DO contain it.
+    let actual_sites: [usize; 5] = [109, 404, 675, 716, 1004];
     let mut missing: Vec<usize> = Vec::new();
     for site in actual_sites {
         let line = rs_text.lines().nth(site - 1).unwrap_or("");
@@ -162,49 +162,47 @@ fn divergence_cumulative_md_req6_normalize_axis_tuple_cite_stale() {
 
     assert!(
         stale_hits.is_empty() && wrongly_hits.is_empty() && missing.is_empty(),
-        "cumulative.md REQ-6 normalize_axis tuple-cite is stale (R-CITE-2):\n  - stale cite (subseq `{stale_substr}` or `{stale_substr_partial}`) still in cumulative.md at lines: {stale_hits:?}\n  - stale-cited rs lines that DON'T contain the call: {wrongly_hits:?} (good — confirms cite is stale)\n  - actual normalize_axis sites at HEAD :108/:383/:553/:585/:812 — any missing: {missing:?}\n  cumulative.rs's own //!-header REQ table (refreshed by commit 6cfaeb115 #1266) correctly cites the new sites, but cumulative.md was NOT updated by commit 91ad29360."
+        "cumulative.md REQ-6 normalize_axis tuple-cite is stale (R-CITE-2):\n  - stale cite (subseq `{stale_substr}` or `{stale_substr_partial}`) still in cumulative.md at lines: {stale_hits:?}\n  - stale-cited rs lines that DON'T contain the call: {wrongly_hits:?} (good — confirms cite is stale)\n  - actual normalize_axis sites at HEAD :109/:404/:675/:716/:1004 — any missing: {missing:?}\n  cumulative.rs's own //!-header REQ table (refreshed by commit 6cfaeb115 #1266) correctly cites the new sites, but cumulative.md was NOT updated by commit 91ad29360."
     );
 }
 
 #[test]
-#[allow(
-    clippy::nonminimal_bool,
-    reason = "the three-clause OR expresses three independent failure conditions (cite presence, stale-line miss, actual-line hit) that are easier to diagnose separately than after a clippy-style merge that would lose one of the clauses"
-)]
 fn divergence_cumulative_md_req7_reverse_cumsum_consumer_cite_stale() {
-    // REQ-7 status table row at cumulative.md:443 (and architecture-section
-    // sentence at :189-190 + :342) cites reverse_cumsum consumers at
-    // `cumulative.rs:50` (CumsumBackward) and `cumulative.rs:291`
-    // (LogcumsumexpBackward). Actual call sites at HEAD: :76 and :676.
+    // REQ-7 used to cite two stale consumers (:50 and :291). HEAD has one
+    // real consumer: CumsumBackward::backward at :77. LogcumsumexpBackward now
+    // uses the signed log-space implementation and must not be listed here.
     let root = workspace_root();
     let rs = root.join("ferrotorch-core/src/grad_fns/cumulative.rs");
     let md = root.join(".design/ferrotorch-core/grad_fns/cumulative.md");
     let rs_text = fs::read_to_string(&rs).expect("read cumulative.rs");
     let md_text = fs::read_to_string(&md).expect("read cumulative.md");
 
-    // 1. confirm the doc still cites :50 and :291 as consumer line numbers.
-    let cite_50 = md_text.contains("cumulative.rs:50");
-    let cite_291 = md_text.contains("cumulative.rs:291");
-
-    // 2. confirm stale-cited rs lines don't contain `reverse_cumsum(`.
-    let line50 = rs_text.lines().nth(49).unwrap_or(""); // 1-indexed :50
-    let line291 = rs_text.lines().nth(290).unwrap_or("");
-    let stale_50_ok = !line50.contains("reverse_cumsum(");
-    let stale_291_ok = !line291.contains("reverse_cumsum(");
-
-    // 3. confirm actual call sites :76 and :676 contain `reverse_cumsum(`.
-    let line76 = rs_text.lines().nth(75).unwrap_or("");
-    let line676 = rs_text.lines().nth(675).unwrap_or("");
-    let actual_76_ok = line76.contains("reverse_cumsum(");
-    let actual_676_ok = line676.contains("reverse_cumsum(");
+    let line77 = rs_text.lines().nth(76).unwrap_or("");
+    let line889 = rs_text.lines().nth(888).unwrap_or("");
 
     assert!(
-        !(cite_50 && cite_291)
-            || !(stale_50_ok && stale_291_ok)
-            || !(actual_76_ok && actual_676_ok),
-        // De-Morgan: this is the negation of the failure condition.
-        // Equivalently: assert that NOT all three conditions hold.
-        // The TRUE failure case is: cite present + stale lines don't have the call + actual lines do.
-        "cumulative.md REQ-7 reverse_cumsum consumer cites are stale (R-CITE-2):\n  - cumulative.md cite `cumulative.rs:50` present: {cite_50}\n  - cumulative.md cite `cumulative.rs:291` present: {cite_291}\n  - cumulative.rs:50 lacks reverse_cumsum call: {stale_50_ok} (line: `{line50}`)\n  - cumulative.rs:291 lacks reverse_cumsum call: {stale_291_ok} (line: `{line291}`)\n  - cumulative.rs:76 has reverse_cumsum call: {actual_76_ok} (line: `{line76}`)\n  - cumulative.rs:676 has reverse_cumsum call: {actual_676_ok} (line: `{line676}`)\n\nThe REQ-7 status-table row at cumulative.md:443 cites :50 and :291 for the two reverse_cumsum consumers, but the actual call sites at HEAD are :76 (CumsumBackward::backward) and :676 (LogcumsumexpBackward::backward) — drift not refreshed by commit 91ad29360 even though the row was advertised as refreshed."
+        md_text.contains("cumulative.rs:77"),
+        "cumulative.md REQ-7 must cite the current CumsumBackward reverse_cumsum consumer at cumulative.rs:77"
+    );
+    assert!(
+        !md_text.contains("`cumulative.rs:50`")
+            && !md_text.contains("`cumulative.rs:291`")
+            && !md_text.contains("`cumulative.rs:676`"),
+        "cumulative.md REQ-7 must not retain stale reverse_cumsum consumer cites :50/:291/:676"
+    );
+    let logcumsumexp_reverse_claim = md_text.lines().any(|line| {
+        line.contains("LogcumsumexpBackward::backward") && line.contains("reverse_cumsum")
+    });
+    assert!(
+        !logcumsumexp_reverse_claim,
+        "cumulative.md REQ-7 must not claim LogcumsumexpBackward consumes reverse_cumsum"
+    );
+    assert!(
+        line77.contains("reverse_cumsum("),
+        "expected cumulative.rs:77 to remain the reverse_cumsum call, got `{line77}`"
+    );
+    assert!(
+        !line889.contains("reverse_cumsum("),
+        "LogcumsumexpBackward::backward should not be the reverse_cumsum consumer, got `{line889}`"
     );
 }

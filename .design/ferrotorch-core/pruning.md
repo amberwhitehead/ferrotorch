@@ -38,7 +38,7 @@ parameter — exact zeros at pruned slots (CORE-082 -> #1776).
   `std::nth_element` at `k - 1`
   (`aten/src/ATen/native/TopKImpl.h:44-88`), so the tie split follows
   libstdc++'s heap-select / introselect order, ported faithfully in
-  `torch_cpu_bottomk_indices` (CORE-083 -> #1777). NaN values do not
+  `torch_cpu_topk_indices` (CORE-083 -> #1777). NaN values do not
   panic (the topk comparator ranks NaN last for `largest=False`).
 - REQ-2: `apply_2_4_mask(weights) -> Tensor<T>` — groups of 4 are formed
   along the FINAL dimension only (groups never span row boundaries); per
@@ -70,31 +70,31 @@ parameter — exact zeros at pruned slots (CORE-082 -> #1776).
 
 - [x] AC-1: `magnitude_prune([1,-4,2,-3], 0.5)` zeros the two
   smallest-magnitude entries and keeps `[-4, -3]`
-  (`test_magnitude_prune_50_percent`, `pruning.rs:413-427`).
+  (`test_magnitude_prune_50_percent`, `pruning.rs:207-221`).
 - [x] AC-2: `magnitude_prune([1,2,3,4], 0.0)` returns the input values
-  unchanged (`test_magnitude_prune_zero_sparsity`, `pruning.rs:450-456`).
+  unchanged (`test_magnitude_prune_zero_sparsity`, `pruning.rs:244-270`).
 - [x] AC-3: `magnitude_prune(_, 1.0)` and `_, -0.1` return
-  `InvalidArgument` (`test_magnitude_prune_invalid_sparsity`, `pruning.rs:458-464`).
+  `InvalidArgument` (`test_magnitude_prune_invalid_sparsity`, `pruning.rs:272-287`).
 - [x] AC-4: NaN inputs do not panic in `magnitude_prune` or
-  `apply_2_4_mask` (`pruning.rs:467-491`).
+  `apply_2_4_mask` (`pruning.rs:289-305`).
 - [x] AC-5: ties at the prune cut are split EXACTLY as live torch
   (`[1,1,1,1] @ 0.25 -> [1,1,0,1]`, `@ 0.5 -> [1,1,0,0]`;
-  `test_magnitude_prune_ties_prune_exact_count`, `pruning.rs:429-448`, plus the conformance tie fixtures).
+  `test_magnitude_prune_ties_prune_exact_count`, `pruning.rs:223-242`, plus the conformance tie fixtures).
 - [x] AC-6: `apply_2_4_mask` keeps exactly 2 of every 4 elements along
   the final dimension and never groups across rows
-  (`pruning.rs:493-565`).
+  (`pruning.rs:307-417`).
 - [x] AC-6b: `apply_2_4_mask` resolves in-block magnitude ties exactly
   as `WeightNormSparsifier` (`[2,2,2,2] -> [2,2,0,0]`,
   `[1,3,3,3] -> [0,3,0,3]`, `[-2,2,-2,2] -> [-2,2,-0,0]`).
 - [x] AC-7: `apply_2_4_mask` returns `InvalidArgument` for final dims
-  not divisible by 4 (`[2,6]`, `[6]`, scalar; `test_apply_2_4_mask_rejects_final_dim_not_multiple_of_4`, `pruning.rs:514-545`),
+  not divisible by 4 (`[2,6]`, `[6]`, scalar; `test_apply_2_4_mask_rejects_final_dim_not_multiple_of_4`, `pruning.rs:328-360`),
   matching the torch sparsifier's rejection.
 - [x] AC-8: backward through either pruning function reaches the
   ORIGINAL parameter with `grad * mask` — exact zeros at pruned slots
   (conformance `*_backward_flows_masked_gradient_to_original_leaf`,
   oracle: live torch `weight_orig.grad == [0, 20, 0, 40]`).
 - [x] AC-9: `sparsity_ratio` reports 0.5 for `[0, 1, 0, 2]`
-  (`test_sparsity_ratio`, `pruning.rs:581-585`).
+  (`test_sparsity_ratio`, `pruning.rs:418-423`).
 - [x] AC-10: `cargo test -p ferrotorch-core --lib pruning` passes.
 
 ## Architecture
@@ -103,7 +103,7 @@ All functions consume `tensor.data()?` (CPU-domain; GPU tensors return
 `Err(GpuTensorNotAccessible)`, the PyTorch-parity policy pinned in
 `conformance_quantize_prune.rs` `gpu_tensor_returns_error_*`).
 
-- `torch_cpu_bottomk_indices` (`pruning.rs:232`) — faithful port of the
+- `torch_cpu_topk_indices` (`pruning.rs:88`) — faithful port of the
   selection order of torch CPU `topk(largest=False)`
   (`aten/src/ATen/native/TopKImpl.h:44-88`): `heap_select`
   (libstdc++ `__heap_select`, the set-defining half of
@@ -114,24 +114,24 @@ All functions consume `tensor.data()?` (CPU-domain; GPU tensors return
   ranks last, never panics. Only SET membership of the first `k` slots
   feeds the mask, so the final orderings (`sort_heap` / the `sorted`
   re-sort) are omitted.
-- `magnitude_prune` (`pruning.rs:269`) — validate sparsity, compute
+- `magnitude_prune` (`pruning.rs:71`) — validate sparsity, compute
   `n_prune` with `round_ties_even` to mirror Python `round`, build a
   0/1 mask with zeros at the bottom-k indices, then `apply_constant_mask`.
-- `apply_constant_mask` (`pruning.rs:302`) — wraps the mask in a
+- `apply_constant_mask` (`pruning.rs:102`) — wraps the mask in a
   non-tracking CPU tensor and returns
   `grad_fns::arithmetic::mul(weights, mask)`; `MulBackward` provides
   the masked-gradient backward edge.
-- `apply_2_4_mask` (`pruning.rs:333`) — validate the final dimension
+- `apply_2_4_mask` (`pruning.rs:133`) — validate the final dimension
   (`InvalidArgument` unless a multiple of 4), build the mask row by row
-  in 4-element groups using `torch_cpu_bottomk_indices` over
+  in 4-element groups using `torch_cpu_topk_indices` over
   WeightNormSparsifier's default L2 scores (`w * w`) to zero the same
   two in-block entries as `torch.topk(..., k=2, largest=False)`, then
   `apply_constant_mask`.
-- `sparsity_ratio` (`pruning.rs:385`) — count exact zeros, divide by
+- `sparsity_ratio` (`pruning.rs:179`) — count exact zeros, divide by
   `numel`. Returns an `f64`. (`-0.0 == 0.0` counts as zero, matching
   torch's `(t == 0)`.)
 
-Non-test production consumers: top-level re-export at `lib.rs:178`
+Non-test production consumers: top-level re-export at `lib.rs:218`
 (`pub use pruning::{apply_2_4_mask, magnitude_prune, sparsity_ratio};`)
 for downstream `ferrotorch-nn` callers; `apply_2_4_mask` is
 cross-checked against the `SemiStructuredSparseTensor`
@@ -149,7 +149,7 @@ pruning divergences remain in this segment.
 
 ## Verification
 
-- Unit tests at `pruning.rs:395-586` cover exact-count tie behavior
+- Unit tests at `pruning.rs:207-423` cover exact-count tie behavior
   (live-torch-quoted), final-dim grouping/rejection, NaN-no-panic,
   `requires_grad` propagation, and the sparsity-ratio computation.
 - `conformance_quantize_prune.rs` asserts bit-exact parity against the
@@ -172,8 +172,8 @@ Expected: 13 lib tests + 31 conformance tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `magnitude_prune` at `ferrotorch-core/src/pruning.rs:269` — Python round-half-even count (`round_ties_even`, #1908) plus exact-count bottom-k via `torch_cpu_bottomk_indices` (`pruning.rs:232`, faithful `TopKImpl.h` selection-order port; CORE-083 -> #1777); non-test consumer: re-exported at `ferrotorch-core/src/lib.rs:178`, reachable by downstream `ferrotorch-nn` callers. |
-| REQ-2 | SHIPPED | impl: `apply_2_4_mask` at `ferrotorch-core/src/pruning.rs:333` — final-dim grouping with structured `InvalidArgument` for final dims not divisible by 4 (CORE-084 -> #1778), and in-block zeros selected by torch CPU `topk(largest=False)` over WeightNormSparsifier L2 scores (#1910), mirroring the torch sparsifier and the 2:4 innermost-dim layout of `aten/src/ATen/native/cuda/Sparse24.cu`; non-test consumer: cross-checked from `ferrotorch-core/src/sparse.rs` AND re-exported at `lib.rs:178`. |
-| REQ-3 | SHIPPED | impl: `sparsity_ratio` at `ferrotorch-core/src/pruning.rs:385`; non-test consumer: re-exported at `ferrotorch-core/src/lib.rs:178`; used by downstream `ferrotorch-nn` model-statistics utilities. Per S5 the pub API surface is grandfathered. |
-| REQ-4 | SHIPPED | impl: `magnitude_prune`'s validation guard at `ferrotorch-core/src/pruning.rs:273-277` — `if !(0.0..1.0).contains(&sparsity) { return Err(InvalidArgument) }`; non-test consumer: same as REQ-1 (the validation is part of the function contract). |
-| REQ-5 | SHIPPED | impl: `apply_constant_mask` at `ferrotorch-core/src/pruning.rs:302` returns `grad_fns::arithmetic::mul(weights, mask)` — a real `MulBackward` edge, so backward delivers `grad * mask` to the original parameter (CORE-082 -> #1776; replaces the old disconnected-leaf `requires_grad` flag copy); non-test consumer: any sparse-finetune workflow calling either pruning fn on a learnable parameter. Gradient-flow pins: conformance `*_backward_flows_masked_gradient_to_original_leaf`. |
+| REQ-1 | SHIPPED | impl: `magnitude_prune` at `ferrotorch-core/src/pruning.rs:71` — Python round-half-even count (`round_ties_even`, #1908) plus exact-count bottom-k via `torch_cpu_topk_indices` (`pruning.rs:88`, faithful `TopKImpl.h` selection-order port; CORE-083 -> #1777); non-test consumer: re-exported at `ferrotorch-core/src/lib.rs:218`, reachable by downstream `ferrotorch-nn` callers. |
+| REQ-2 | SHIPPED | impl: `apply_2_4_mask` at `ferrotorch-core/src/pruning.rs:133` — final-dim grouping with structured `InvalidArgument` for final dims not divisible by 4 (CORE-084 -> #1778), and in-block zeros selected by torch CPU `topk(largest=False)` over WeightNormSparsifier L2 scores (#1910), mirroring the torch sparsifier and the 2:4 innermost-dim layout of `aten/src/ATen/native/cuda/Sparse24.cu`; non-test consumer: cross-checked from `ferrotorch-core/src/sparse.rs` AND re-exported at `lib.rs:218`. |
+| REQ-3 | SHIPPED | impl: `sparsity_ratio` at `ferrotorch-core/src/pruning.rs:179`; non-test consumer: re-exported at `ferrotorch-core/src/lib.rs:218`; used by downstream `ferrotorch-nn` model-statistics utilities. Per S5 the pub API surface is grandfathered. |
+| REQ-4 | SHIPPED | impl: `magnitude_prune`'s validation guard at `ferrotorch-core/src/pruning.rs:75-79` — `if !(0.0..1.0).contains(&sparsity) { return Err(InvalidArgument) }`; non-test consumer: same as REQ-1 (the validation is part of the function contract). |
+| REQ-5 | SHIPPED | impl: `apply_constant_mask` at `ferrotorch-core/src/pruning.rs:102` returns `grad_fns::arithmetic::mul(weights, mask)` — a real `MulBackward` edge, so backward delivers `grad * mask` to the original parameter (CORE-082 -> #1776; replaces the old disconnected-leaf `requires_grad` flag copy); non-test consumer: any sparse-finetune workflow calling either pruning fn on a learnable parameter. Gradient-flow pins: conformance `*_backward_flows_masked_gradient_to_original_leaf`. |

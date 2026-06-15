@@ -46,7 +46,7 @@ Mirrors PyTorch's `torch.utils.checkpoint.checkpoint` at
   dropout mask used in the recompute would be different from the
   forward, and the gradients would be inconsistent. Mirrors upstream
   `_get_device_states` / `_set_device_states` in
-  `torch/utils/checkpoint.py:225-285`.
+  `torch/utils/checkpoint.py:213-285`.
 - REQ-5: RAII guard on RNG state — the recompute path must NOT
   permanently rewind the global RNG to the saved-forward state; it
   must restore the caller's pre-backward RNG state on completion.
@@ -72,18 +72,18 @@ Mirrors PyTorch's `torch.utils.checkpoint.checkpoint` at
 
 - [x] AC-1: Single-input checkpoint `f(x) = (x * x) + x` produces
   the correct forward AND correct backward partial `df/dx = 2x + 1`
-  — `test_checkpoint_single_input_basic` at `checkpoint.rs:381-403`.
+  — `test_checkpoint_single_input_basic` at `checkpoint.rs:407-430`.
 - [x] AC-2: When input does not require grad, no `grad_fn` is
   attached — `test_checkpoint_no_grad_input_returns_output_only` at
-  `checkpoint.rs:406-423`.
+  `checkpoint.rs:432-448`.
 - [x] AC-3: Multi-input checkpoint with both inputs requiring grad
   produces correct partials for `f(a, b) = a*b + a`:
   `df/da = b + 1`, `df/db = a` —
   `test_checkpoint_multi_two_inputs_both_grad` at
-  `checkpoint.rs:430-459`.
+  `checkpoint.rs:450-482`.
 - [x] AC-4: Multi-input partial-grad case (only second input
   requires grad) produces correct grad for that input —
-  `test_checkpoint_multi_partial_grad` at `checkpoint.rs:461-486`.
+  `test_checkpoint_multi_partial_grad` at `checkpoint.rs:484-507`.
 
 ## Architecture
 

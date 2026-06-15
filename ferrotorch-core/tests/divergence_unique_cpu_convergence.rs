@@ -169,6 +169,62 @@ fn convergence_f64_two_nan() {
     assert_eq!(counts, vec![1, 1]);
 }
 
+// --- Signed zero representative: torch.sort order decides the collapsed run --
+
+#[test]
+fn convergence_f32_signed_zero_representative_is_first_original_zero() {
+    let (vals, inv, counts) = unique(&cpu_f32(&[0.0, -0.0])).unwrap();
+    let v = vals.data_vec().unwrap();
+    assert_eq!(v, vec![0.0], "positive zero should seed [0,-0]: {v:?}");
+    assert!(
+        !v[0].is_sign_negative(),
+        "representative should be +0.0: {v:?}"
+    );
+    assert_eq!(inv, vec![0, 0]);
+    assert_eq!(counts, vec![2]);
+
+    let (vals, inv, counts) = unique(&cpu_f32(&[-0.0, 0.0])).unwrap();
+    let v = vals.data_vec().unwrap();
+    assert_eq!(
+        v,
+        vec![0.0],
+        "negative zero compares equal numerically: {v:?}"
+    );
+    assert!(
+        v[0].is_sign_negative(),
+        "representative should be -0.0: {v:?}"
+    );
+    assert_eq!(inv, vec![0, 0]);
+    assert_eq!(counts, vec![2]);
+}
+
+#[test]
+fn convergence_f64_signed_zero_representative_is_first_original_zero() {
+    let (vals, inv, counts) = unique(&cpu_f64(&[0.0, -0.0])).unwrap();
+    let v = vals.data_vec().unwrap();
+    assert_eq!(v, vec![0.0], "positive zero should seed [0,-0]: {v:?}");
+    assert!(
+        !v[0].is_sign_negative(),
+        "representative should be +0.0: {v:?}"
+    );
+    assert_eq!(inv, vec![0, 0]);
+    assert_eq!(counts, vec![2]);
+
+    let (vals, inv, counts) = unique(&cpu_f64(&[-0.0, 0.0])).unwrap();
+    let v = vals.data_vec().unwrap();
+    assert_eq!(
+        v,
+        vec![0.0],
+        "negative zero compares equal numerically: {v:?}"
+    );
+    assert!(
+        v[0].is_sign_negative(),
+        "representative should be -0.0: {v:?}"
+    );
+    assert_eq!(inv, vec![0, 0]);
+    assert_eq!(counts, vec![2]);
+}
+
 // --- MIXED: comprehensive convergence (NaN tail, -0/+0 collapse, inf order) -
 // Input:  [3, nan, -0.0, 3, inf, 0.0, nan, -inf]
 // Torch:  vals [-inf, -0.0, 3, inf, nan, nan]  inv [2,4,1,2,3,1,5,0]  counts [1,2,2,1,1,1]

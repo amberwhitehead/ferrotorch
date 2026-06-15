@@ -124,7 +124,7 @@ output). The data itself stays GPU-resident.
 
 **Non-test consumers**:
 
-- `crate::tensor::Tensor::masked_select` at `tensor.rs:1146`
+- `crate::tensor::Tensor::masked_select` at `tensor.rs:1855`
   invokes `crate::ops::indexing::masked_select(self, mask)` — the
   method-style entry point on `Tensor<T>`. REQ-6 consumer.
 - `crate::grad_fns::cumulative::cumsum_backward` at
@@ -139,7 +139,7 @@ output). The data itself stays GPU-resident.
 - `crate::grad_fns::indexing::where_cond_backward` at
   `grad_fns/indexing.rs:1845,1853` calls
   `crate::ops::indexing::where_cond_bt(cond, x, y)` — REQ-5 consumer.
-- Re-exported at `lib.rs:174` as
+- Re-exported at `lib.rs:211` as
   `ferrotorch_core::{gather, masked_select, scatter, scatter_add,
   where_cond, where_cond_bt}`.
 
@@ -164,12 +164,12 @@ the focused `ferrotorch-gpu` divergence tests.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `gather` at `ops/indexing.rs:112`; non-test consumer: re-exported as `ferrotorch_core::gather` at `lib.rs:174` (boundary public API per goal.md S5) |
-| REQ-2 | SHIPPED | impl: `scatter` at `ops/indexing.rs:183`; non-test consumer: re-exported as `ferrotorch_core::scatter` at `lib.rs:174` |
+| REQ-1 | SHIPPED | impl: `gather` at `ops/indexing.rs:112`; non-test consumer: re-exported as `ferrotorch_core::gather` at `lib.rs:211` (boundary public API per goal.md S5) |
+| REQ-2 | SHIPPED | impl: `scatter` at `ops/indexing.rs:183`; non-test consumer: re-exported as `ferrotorch_core::scatter` at `lib.rs:211` |
 | REQ-3 | SHIPPED | impl: `scatter_add` at `ops/indexing.rs:259`; non-test consumer: `crate::grad_fns::cumulative::cumsum_backward` at `grad_fns/cumulative.rs:503` invokes `crate::ops::indexing::scatter_add` for the cumulative-sum backward — production autograd consumer |
 | REQ-4 | SHIPPED | impl: `where_cond in ops/indexing.rs`; non-test consumer: re-exported as `ferrotorch_core::where_cond` at `ops in lib.rs`; called transitively from `where_cond_bt` CPU fallback at `ops in lib.rs` |
-| REQ-5 | SHIPPED | impl: `where_cond_bt` at `ops/indexing.rs:397`; non-test consumer: `crate::grad_fns::indexing::where_differentiable` at `grad_fns/indexing.rs:1845,1853` invokes `crate::ops::indexing::where_cond_bt(cond, x, y)` for both the residency-detected and CPU paths |
-| REQ-6 | SHIPPED | impl: `masked_select` at `ops/indexing.rs:1165`; non-test consumer: `crate::tensor::Tensor::masked_select` at `tensor.rs:1146` invokes `crate::ops::indexing::masked_select(self, mask)`; also `crate::grad_fns::indexing::masked_select_backward` at `grad_fns/indexing.rs:1983,1988` |
+| REQ-5 | SHIPPED | impl: `where_cond_bt` at `ops/indexing.rs:1039`; non-test consumer: `crate::grad_fns::indexing::where_differentiable` at `grad_fns/indexing.rs:1845,1853` invokes `crate::ops::indexing::where_cond_bt(cond, x, y)` for both the residency-detected and CPU paths |
+| REQ-6 | SHIPPED | impl: `masked_select` at `ops/indexing.rs:1165`; non-test consumer: `crate::tensor::Tensor::masked_select` at `tensor.rs:1855` invokes `crate::ops::indexing::masked_select(self, mask)`; also `crate::grad_fns::indexing::masked_select_backward` at `grad_fns/indexing.rs:1983,1988` |
 | REQ-7 | SHIPPED | impl: grad-fn attachment in each forward path (e.g. `gather` at `attachment in ops/indexing.rs`, `scatter in ops/indexing.rs`, `scatter_add in ops/indexing.rs`, `where_cond in ops/indexing.rs`); non-test consumer: every autograd-tracking caller of these forwards |
 | REQ-8 | SHIPPED | impl: `validate_gather_shapes in ops/indexing.rs` (the SAFETY-bounded i64 widening lives in `upload_index_i64 in ops/indexing.rs`); non-test consumer: invoked from `gather`, `scatter`, and `scatter_add` |
 | REQ-9 | SHIPPED | CUDA-resident dim-aware/rank-aware paths for `gather`/`scatter`/`scatter_value`/`scatter_add` (#1545 / sub #1535). impl: the `is_cuda()` f32/f64/f16/bf16 branches in each `ops/indexing.rs` pub fn, plus `upload_index_i64` (host `&[usize]` → resident `i64`); non-test consumer: each branch dispatches through `crate::gpu_dispatch::GpuBackend::{gather,scatter,scatter_value,scatter_add}_{dim,nd}_*`, implemented by `ferrotorch-gpu::CudaBackendImpl` over the PTX kernels in `ferrotorch-gpu/src/scatter_gather_kernels.rs`. The result stays GPU-resident (`TensorStorage::gpu`). The same-module non-CUDA callers (`ferrotorch_core::{gather,scatter,scatter_add}` re-exports at `lib.rs:207`, `Tensor::scatter_value_t`) reach the branch whenever their operands are CUDA-resident. |

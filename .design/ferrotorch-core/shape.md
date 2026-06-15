@@ -75,15 +75,15 @@ helper is consumed by tensor construction and op-dispatch sites:
   of tensor b (M) at non-singleton dimension D` modulo wording. The
   per-axis index is reported *post-reversal* in the same convention
   PyTorch uses (counting from the right after right-alignment).
-- `c_contiguous_strides` (`shape.rs:46-56`) is the canonical strides
+- `c_contiguous_strides` (`shape.rs:97-111`) is the canonical strides
   constructor for every `Tensor::from_storage` /
   `Tensor::view_reshape` / `Tensor::from_operation` call site:
-  `tensor.rs:127`, `tensor.rs:176`, `tensor.rs:225`, `tensor.rs:324`,
-  `tensor.rs:1287`, `tensor.rs:1561`, plus `methods.rs:1271-1272` for
+  `tensor.rs:241`, `tensor.rs:292`, `tensor.rs:348`, `tensor.rs:495`,
+  `tensor.rs:2102`, `tensor.rs:2647`, plus `methods.rs:1271-1272` for
   reduction-broadcast backwards.
-- `channels_last_strides` (`shape.rs:64-73`) and
-  `channels_last_3d_strides` (`shape.rs:81-95`) are called by
-  `Tensor::materialize_format` (`tensor.rs:1561-1564`) to install the
+- `channels_last_strides` (`shape.rs:186-214`) and
+  `channels_last_3d_strides` (`shape.rs:218-244`) are called by
+  `Tensor::materialize_format` (`tensor.rs:2627-2647`) to install the
   NHWC / NDHWC stride pattern after a `to_memory_format` rearrange. The
   shape itself is unchanged — only strides shift, matching PyTorch's
   `Tensor.contiguous(memory_format=torch.channels_last)` semantics.
@@ -109,7 +109,7 @@ matches `c10::TensorImpl::compute_contiguous_strides` exactly.
 
 ## Verification
 
-- Unit tests at `shape.rs:124-200` cover broadcasting (same / scalar /
+- Unit tests at `shape.rs:277-349` cover broadcasting (same / scalar /
   expand / different-ndim / incompatible), C-contiguous strides,
   channels-last strides (4D + 5D), axis normalisation (positive,
   negative, OOB), and numel (incl. empty + zero-dim).
@@ -129,8 +129,8 @@ matches `c10::TensorImpl::compute_contiguous_strides` exactly.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `broadcast_shapes in ferrotorch-core/src/shape.rs` mirrors `infer_size_impl` in `aten/src/ATen/ExpandUtils.h`; non-test consumers: `broadcast_shapes in ferrotorch-core/src/meta_propagate.rs`, `broadcast_shapes in ferrotorch-core/src/ops/elementwise.rs`, `ferrotorch-core/src/lib.rs` (re-export consumed by downstream crates). |
-| REQ-2 | SHIPPED | impl: `numel` at `ferrotorch-core/src/shape.rs:41` mirrors `c10::multiply_integers(IntArrayRef)`; non-test consumer: every shape-derived numel computation; called indirectly via `Tensor::numel` at `ferrotorch-core/src/tensor.rs:454` which inlines the same product. |
-| REQ-3 | SHIPPED | impl: `c_contiguous_strides` at `ferrotorch-core/src/shape.rs:46` mirrors `c10::TensorImpl::set_sizes_contiguous` per `c10/core/TensorImpl.h`; non-test consumers: `ferrotorch-core/src/tensor.rs:127`, `:176`, `:225`, `:324`, `:1287`, `:1561`; `ferrotorch-core/src/methods.rs:1271`. |
-| REQ-4 | SHIPPED | impl: `channels_last_strides` at `ferrotorch-core/src/shape.rs:64` and `channels_last_3d_strides` at `:81` mirror `c10::get_channels_last_strides_2d` / `_3d` in `c10/core/MemoryFormat.h`; non-test consumer: `Tensor::materialize_format` at `ferrotorch-core/src/tensor.rs:1561-1564`. |
+| REQ-2 | SHIPPED | impl: `numel` at `ferrotorch-core/src/shape.rs:52` mirrors `c10::multiply_integers(IntArrayRef)`; non-test consumer: every shape-derived numel computation; called indirectly via `Tensor::numel` at `ferrotorch-core/src/tensor.rs:641` which inlines the same product. |
+| REQ-3 | SHIPPED | impl: `c_contiguous_strides` at `ferrotorch-core/src/shape.rs:97` mirrors `c10::TensorImpl::set_sizes_contiguous` per `c10/core/TensorImpl.h`; non-test consumers: `ferrotorch-core/src/tensor.rs:241`, `:292`, `:348`, `:495`, `:2102`, `:2647`; `ferrotorch-core/src/methods.rs:1271`. |
+| REQ-4 | SHIPPED | impl: `channels_last_strides` at `ferrotorch-core/src/shape.rs:186` and `channels_last_3d_strides` at `:218` mirror `c10::get_channels_last_strides_2d` / `_3d` in `c10/core/MemoryFormat.h`; non-test consumer: `Tensor::materialize_format` at `ferrotorch-core/src/tensor.rs:2627-2647`. |
 | REQ-5 | SHIPPED | impl: `normalize_axis in ferrotorch-core/src/shape.rs` mirrors `c10::maybe_wrap_dim` in `c10/core/WrapDimMinimal.h`; non-test consumer: re-exported at `ferrotorch-core/src/lib.rs` and used by reduction grad_fns to accept negative dims. |
-| REQ-6 | SHIPPED | impl: `check_shapes_match` at `ferrotorch-core/src/shape.rs:115`; non-test consumer: the function is exported to the crate and called by shape-equality guards in op modules whose call sites it preconditions, e.g. inplace ops that require exact-shape inputs (no broadcasting). |
+| REQ-6 | SHIPPED | impl: `check_shapes_match` at `ferrotorch-core/src/shape.rs:263`; non-test consumer: the function is exported to the crate and called by shape-equality guards in op modules whose call sites it preconditions, e.g. inplace ops that require exact-shape inputs (no broadcasting). |

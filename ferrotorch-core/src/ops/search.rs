@@ -216,10 +216,10 @@ pub fn unique<T: Float>(
     // so NaN never moved — corrupting the sorted order, inverse map, and counts.
     // `unique_sort_index_cmp` uses `partial_cmp` for the non-NaN/non-NaN case,
     // so `-0.0` and `+0.0` stay equal+adjacent and dedup to ONE entry (torch).
-    // Its tie-break is intentionally NOT topk's stable ascending-index order:
-    // torch.unique's sorted implementation keeps the last original finite-equal
-    // representative (visible in signed-zero bits), while NaNs keep ascending
-    // original order as distinct unique entries.
+    // Equal values keep ascending original index order, matching live
+    // `torch.sort`; the first sorted value becomes the run representative
+    // (visible in signed-zero bits), while NaNs keep ascending original order as
+    // distinct unique entries.
     let mut indices: Vec<usize> = (0..n).collect();
     indices.sort_by(|&a, &b| unique_sort_index_cmp(&data, a, b));
 
@@ -725,20 +725,16 @@ fn nan_is_max_cmp<T: Float>(lhs: T, rhs: T) -> std::cmp::Ordering {
 /// Sort-key comparator for `torch.unique(sorted=True)`.
 ///
 /// Values use the same NaN-as-maximum ordering as [`nan_is_max_cmp`], but equal
-/// values need a different tie-break from `topk`: PyTorch's sorted unique keeps
-/// NaN payloads as distinct entries in ascending original order, while finite
-/// equal values compact to the last original representative. The latter is
-/// observable for `+0.0`/`-0.0` bit patterns.
+/// values use `torch.sort`'s ascending original-index tie behavior: NaN payloads
+/// remain distinct in ascending original order, while finite equal values compact
+/// to the first sorted representative. The latter is observable for
+/// `+0.0`/`-0.0` bit patterns.
 fn unique_sort_index_cmp<T: Float>(data: &[T], a: usize, b: usize) -> std::cmp::Ordering {
     let value_cmp = nan_is_max_cmp(data[a], data[b]);
     if value_cmp != std::cmp::Ordering::Equal {
         return value_cmp;
     }
-    if data[a].is_nan() && data[b].is_nan() {
-        a.cmp(&b)
-    } else {
-        b.cmp(&a)
-    }
+    a.cmp(&b)
 }
 
 fn histc_nonfinite_range_error(min_val: f64, max_val: f64) -> FerrotorchError {

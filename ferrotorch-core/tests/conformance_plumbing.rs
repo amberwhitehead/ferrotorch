@@ -195,14 +195,16 @@ use ferrotorch_core::device::Device;
 use ferrotorch_core::dispatch::{DispatchKey, DispatchKeySet, Dispatcher, Kernel};
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
-use ferrotorch_core::gpu_dispatch::{GpuBufferHandle, GpuRngState, gpu_backend, has_gpu_backend};
+use ferrotorch_core::gpu_dispatch::{
+    GpuBufferHandle, GpuRngState, GpuScatterReduce, gpu_backend, has_gpu_backend,
+};
 use ferrotorch_core::meta_propagate;
 use ferrotorch_core::named_tensor::NamedTensor;
 use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::profiler_hook::{
     OpProfiler, current as profiler_current, profile_op_scope, set_current as profiler_set_current,
 };
-use ferrotorch_core::storage::{StorageBuffer, TensorStorage};
+use ferrotorch_core::storage::{CubeStorageHandle, StorageBuffer, TensorStorage};
 use ferrotorch_core::tensor::{GradFn, MemoryFormat, Tensor, TensorId};
 use ferrotorch_core::{DType, Element, creation};
 
@@ -1176,6 +1178,35 @@ fn tensor_stride_view_zero_copy() {
     assert_eq!(v.shape(), &[2, 2]);
     assert_eq!(v.strides(), &[1, 2]);
     assert!(Arc::ptr_eq(a.inner_storage_arc(), v.inner_storage_arc()));
+
+    let fallible = a
+        .try_stride_view(vec![2, 2], vec![1, 2], 0)
+        .expect("try_stride_view valid metadata");
+    assert_eq!(fallible.shape(), v.shape());
+    assert_eq!(fallible.strides(), v.strides());
+    assert!(Arc::ptr_eq(
+        a.inner_storage_arc(),
+        fallible.inner_storage_arc()
+    ));
+
+    let grad_fn: Arc<dyn GradFn<f32>> = Arc::new(NoopGradFn);
+    let op_view = a
+        .try_stride_view_operation(vec![2, 2], vec![1, 2], 0, grad_fn)
+        .expect("try_stride_view_operation valid metadata");
+    assert_eq!(op_view.shape(), &[2, 2]);
+    assert_eq!(op_view.grad_fn().expect("grad_fn").name(), "NoopGradFn");
+    assert!(Arc::ptr_eq(
+        a.inner_storage_arc(),
+        op_view.inner_storage_arc()
+    ));
+
+    let err = a
+        .try_stride_view(vec![3], vec![1], 2)
+        .expect_err("view that extends beyond storage must fail");
+    assert!(
+        matches!(err, FerrotorchError::InvalidArgument { .. }),
+        "invalid stride view should return InvalidArgument, got {err:?}"
+    );
 }
 
 #[test]
@@ -1236,6 +1267,34 @@ fn tensor_from_operation_is_non_leaf_with_grad_fn() {
 // ---------------------------------------------------------------------------
 // TensorStorage — direct constructor coverage
 // ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct TestCubeHandle {
+    len: usize,
+    ordinal: usize,
+}
+
+impl CubeStorageHandle for TestCubeHandle {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn ordinal(&self) -> usize {
+        self.ordinal
+    }
+
+    fn read_to_host(&self) -> FerrotorchResult<Vec<f32>> {
+        Ok(vec![0.0; self.len])
+    }
+
+    fn clone_handle(&self) -> Box<dyn CubeStorageHandle> {
+        Box::new(self.clone())
+    }
+}
 
 #[test]
 fn tensor_storage_cpu_constructor() {
@@ -1309,6 +1368,49 @@ fn tensor_storage_buffer_variants_match() {
     // StorageBuffer is also `pub`; assert that the type is referenced
     // from this test (so the surface gate sees the literal substring).
     let _phantom: Option<&StorageBuffer<f32>> = None;
+}
+
+#[test]
+fn tensor_storage_try_gpu_validates_dtype_and_device() {
+    let mismatched = unsafe {
+        // SAFETY: metadata-only fake handle used only to exercise the safe
+        // storage validation boundary. It is never passed to a backend.
+        GpuBufferHandle::new(Box::new(()), 0, 4, DType::F64)
+    };
+    match TensorStorage::<f32>::try_gpu(mismatched) {
+        Err(FerrotorchError::DtypeMismatch { expected, got }) => {
+            assert_eq!(expected, "F32");
+            assert_eq!(got, "F64");
+        }
+        other => panic!("F64 handle must not construct TensorStorage<f32>: {other:?}"),
+    }
+
+    let matched = unsafe {
+        // SAFETY: metadata-only fake handle used only for storage invariant
+        // checks; it is never submitted to CUDA backend operations.
+        GpuBufferHandle::new(Box::new(()), 3, 4, DType::F32)
+    };
+    let storage = TensorStorage::<f32>::try_gpu(matched).expect("matching dtype");
+    assert_eq!(storage.device(), Device::Cuda(3));
+    assert_eq!(storage.len(), 4);
+}
+
+#[test]
+fn tensor_storage_try_xpu_from_handle_validates_dtype_and_device() {
+    let bad = Box::new(TestCubeHandle { len: 2, ordinal: 7 });
+    match TensorStorage::<f64>::try_xpu_from_handle(bad) {
+        Err(FerrotorchError::DtypeMismatch { expected, got }) => {
+            assert_eq!(expected, "F32 CubeCL storage");
+            assert_eq!(got, "F64");
+        }
+        other => panic!("CubeCL handle must not construct TensorStorage<f64>: {other:?}"),
+    }
+
+    let good = Box::new(TestCubeHandle { len: 5, ordinal: 9 });
+    let storage = TensorStorage::<f32>::try_xpu_from_handle(good).expect("f32 CubeCL");
+    assert_eq!(storage.device(), Device::Xpu(9));
+    assert_eq!(storage.len(), 5);
+    assert!(storage.is_cubecl());
 }
 
 #[test]
@@ -1498,6 +1600,14 @@ fn gpu_buffer_handle_empty() {
     };
     assert!(h.is_empty());
     assert_eq!(h.len(), 0);
+}
+
+#[test]
+fn gpu_scatter_reduce_abi_tags_match_kernel_contract() {
+    assert_eq!(GpuScatterReduce::Sum.as_u32(), 0);
+    assert_eq!(GpuScatterReduce::Prod.as_u32(), 1);
+    assert_eq!(GpuScatterReduce::Amax.as_u32(), 2);
+    assert_eq!(GpuScatterReduce::Amin.as_u32(), 3);
 }
 
 #[test]

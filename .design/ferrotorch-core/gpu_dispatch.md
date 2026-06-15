@@ -178,8 +178,8 @@ Non-test production consumers:
 - Inside `ferrotorch-core`, every CUDA-dispatched op routes through
   `gpu_backend()` — see e.g. `gpu_backend in tensor.rs`, `gpu_backend in tensor.rs`,
   `tensor.rs`, `tensor.rs`, `tensor in stride_tricks.rs`,
-  `stride_tricks.rs:440`, `storage.rs:153`, `storage.rs:404`,
-  `storage.rs:451`, `grad_fns/arithmetic.rs` CUDA branches.
+  `stride_tricks.rs:440`, `storage.rs:353`, `storage.rs:414`,
+  `storage.rs:556`, `grad_fns/arithmetic.rs` CUDA branches.
 
 ## Parity contract
 
@@ -215,10 +215,10 @@ indirectly exercises every backend method through the per-op sweeps.
 | REQ | Status | Evidence |
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `enum CompareOp` at `ferrotorch-core/src/gpu_dispatch.rs:22-35` with `suffix()` at `:41-50`; non-test consumer: `GpuBackend::compare(_, _, CompareOp)` method slot dispatches to the suffix-named PTX kernel; the concrete impl in `ferrotorch-gpu/src/backend_impl.rs` reads `op.suffix()` to pick the kernel. |
-| REQ-2 | SHIPPED | impl: `GpuRngState in ferrotorch-core/src/gpu_dispatch.rs` with accessors at `GpuRngState in ferrotorch-core/src/gpu_dispatch.rs`; non-test consumer: `GpuBackend::save_rng_state` / `restore_rng_state` at `, ` produce / consume this struct; `ferrotorch-core::checkpoint` (downstream) serialises it. |
-| REQ-3 | SHIPPED | impl: `GpuBufferHandle in ferrotorch-core/src/gpu_dispatch.rs` with `new in ferrotorch-core/src/gpu_dispatch.rs`, accessors at `new in ferrotorch-core/src/gpu_dispatch.rs`; non-test consumer: `TensorStorage::Gpu(GpuBufferHandle)` variant at `Gpu in storage.rs` plus every CUDA op that reads / writes the handle. |
+| REQ-2 | SHIPPED | impl: `GpuRngState` at `ferrotorch-core/src/gpu_dispatch.rs:94-145` with accessors at `:105-145`; non-test consumer: `GpuBackend::save_rng_state` / `restore_rng_state` produce / consume this struct; `ferrotorch-core::checkpoint` (downstream) serialises it. |
+| REQ-3 | SHIPPED | impl: `GpuBufferHandle` at `ferrotorch-core/src/gpu_dispatch.rs:162-235` with `new` at `:185-197`, accessors at `:199-233`; non-test consumer: `TensorStorage::Gpu(GpuBufferHandle)` variant plus every CUDA op that reads / writes the handle. |
 | REQ-4 | SHIPPED | impl: `trait GpuBackend` at `ferrotorch-core/src/gpu_dispatch.rs:211`; non-test consumer: `ferrotorch-gpu/src/backend_impl.rs:7037`'s `impl GpuBackend for CudaBackendImpl` registers via `register_gpu_backend(...)`. |
-| REQ-5 | SHIPPED | impl: elementwise method slots `add_f32` at `gpu_dispatch.rs:274`, `sub_f32` at `:279`, `mul_f32` at `:284`, `neg_f32` at `:289`, `relu_f32` at `:290` (plus the rest of the elementwise zoo throughout the file); non-test consumer: `Tensor::accumulate_grad` GPU path at `tensor.rs:588-592` calls `backend.add_f32` / `add_f64`; `grad_fns/arithmetic.rs::add_inner` dispatches the CUDA branches. |
+| REQ-5 | SHIPPED | impl: elementwise method slots `add_f32` at `gpu_dispatch.rs:401`, `sub_f32` at `:406`, `mul_f32` at `:411`, `neg_f32` at `:444`, `relu_f32` at `:445` (plus the rest of the elementwise zoo throughout the file); non-test consumer: `Tensor::accumulate_grad` GPU path at `tensor.rs:1049-1077` calls `backend.add_f32` / `add_f64`; `grad_fns/arithmetic.rs::add_inner` dispatches the CUDA branches. |
 | REQ-6 | SHIPPED | impl: broadcast variants are sibling slots on the trait alongside the non-broadcast methods (e.g. `broadcast_add_f32`); non-test consumer: `grad_fns/arithmetic.rs::add_inner` picks the broadcast variant via the dispatch macro when input shapes differ. |
 | REQ-7 | SHIPPED | impl: `scale_*` trait slots in the same elementwise section; non-test consumer: `grad_fns/arithmetic.rs::scale_tensor` (`:547-578`) dispatches `backend.scale_f32` / `scale_f64` for the `alpha`-kwarg path in `add_scaled` / `sub_scaled`. |
 | REQ-8 | SHIPPED | impl: `strided_copy_f32` / `strided_copy_f64` slots, `strided_scatter_f32` / `strided_scatter_f64` slots on the trait; non-test consumer: `strided_scatter_f64 in stride_tricks.rs, 470-472`, `strided_copy_f64 in tensor.rs, 1586-1597` route through these for materialise + CUDA→CPU readback + memory-format permute. |

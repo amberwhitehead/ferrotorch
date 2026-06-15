@@ -3,15 +3,15 @@
 //! Tracking issue: <https://github.com/dollspace-gay/ferrotorch/issues/759>.
 //!
 //! Loads `tests/conformance/_surface.json` (produced by
-//! `conformance_surface_inventory.rs`) and scans the `tests/conformance_*.rs`
-//! files for references to each `pub` item. Fails the build if any inventory
-//! item is neither (a) referenced by a conformance test, nor (b) explicitly
-//! excluded in `_surface_exclusions.toml`.
+//! `conformance_surface_inventory.rs`) and scans committed integration test
+//! code for references to each `pub` item. Fails the build if any inventory
+//! item is neither (a) referenced by a production integration test, nor
+//! (b) explicitly excluded in `_surface_exclusions.toml`.
 //!
 //! Exclusion contract (CORE-195 / #1889): every exclusion carries a `kind`:
 //!
 //! - `kind = "permanent"` — the item IS tested, but this gate's substring
-//!   scan over `tests/conformance_*.rs` cannot see the coverage (re-export,
+//!   scan over integration tests cannot see the coverage (re-export,
 //!   grad_fn struct exercised via its op's grad assertion, src-side
 //!   `#[cfg(test)]` live-torch suite, ...). The `reason` must name where the
 //!   coverage actually lives; `exclusion_tracking_issues_are_live` enforces
@@ -291,18 +291,26 @@ fn strip_comments_and_strings(src: &str) -> String {
     String::from_utf8(out).expect("stripper preserves UTF-8 validity")
 }
 
-/// Read every `tests/conformance_*.rs` (other than the inventory + this gate)
-/// and return their concatenated source, with comments and string literals
-/// stripped (see [`strip_comments_and_strings`]; CORE-202 / #1896). The
+fn is_surface_coverage_source(name: &str) -> bool {
+    name.ends_with(".rs")
+        && !name.starts_with('_')
+        && name != "conformance_surface_inventory.rs"
+        && name != "conformance_surface_coverage.rs"
+}
+
+/// Read every committed top-level integration test source that should count
+/// toward public-surface coverage and return their concatenated source, with
+/// comments and string literals stripped (see [`strip_comments_and_strings`];
+/// CORE-202 / #1896). Underscore-prefixed probe files are intentionally
+/// excluded; they are useful investigation artifacts, not production coverage.
+///
 /// coverage check is a substring grep — an item is "covered" iff its short
 /// identifier (or `Type::method` segment for methods) appears anywhere in any
-/// conformance test source CODE (not comments, not strings). Substring grep
+/// production integration test source CODE (not comments, not strings). Substring grep
 /// over the remaining code is intentional: we don't want to demand a specific
 /// call shape because tests may reference a type via `use`, a method call, or
-/// a `Debug` print. Known residual limit: a method exercised purely via
-/// method-call syntax (`x.foo()`) is not matched by its `Type::foo` key —
-/// unchanged from before CORE-202.
-fn read_conformance_test_sources() -> String {
+/// a `Debug` print.
+fn read_surface_test_sources() -> String {
     let mut combined = String::new();
     let root = tests_dir();
     let entries =
@@ -314,13 +322,7 @@ fn read_conformance_test_sources() -> String {
             continue;
         }
         let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if !name.starts_with("conformance_") {
-            continue;
-        }
-        if name == "conformance_surface_inventory.rs" || name == "conformance_surface_coverage.rs" {
-            continue;
-        }
-        if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+        if !is_surface_coverage_source(name) {
             continue;
         }
         let body =
@@ -336,9 +338,11 @@ fn short_ident(path: &str) -> &str {
 }
 
 /// Build the substrings that "prove" coverage for a given path. For methods
-/// (`...::Foo::bar`) we require `Foo::bar` (so that an unrelated `bar` symbol
-/// in some other module doesn't accidentally cover this one). For free
-/// functions / types / re-exports the short ident is enough.
+/// (`...::Foo::bar`) prefer `Foo::bar`, but also accept real method-call
+/// syntax (`.bar(`) and associated-call syntax (`::bar(`) after stripping
+/// comments/strings. This avoids fake witness comments for generic methods
+/// whose inventory key is `Tensor <T>::bar` while still requiring executable
+/// test code to call or name the method.
 fn coverage_keys(path: &str) -> Vec<String> {
     let segs: Vec<&str> = path.split("::").collect();
     if segs.len() >= 3
@@ -349,7 +353,7 @@ fn coverage_keys(path: &str) -> Vec<String> {
     {
         let ty = segs[segs.len() - 2];
         let m = segs[segs.len() - 1];
-        vec![format!("{ty}::{m}")]
+        vec![format!("{ty}::{m}"), format!(".{m}("), format!("::{m}(")]
     } else {
         vec![short_ident(path).to_string()]
     }
@@ -463,11 +467,10 @@ fn every_public_item_has_a_conformance_reference_or_tracking_issue() {
         .map(|e| (e.path.clone(), e))
         .collect();
 
-    let test_sources = read_conformance_test_sources();
+    let test_sources = read_surface_test_sources();
     assert!(
         !test_sources.is_empty(),
-        "no conformance test source files found in tests/. Phase 2.0 expects \
-         at least `tests/conformance_creation.rs` to exist."
+        "no production integration test source files found in tests/."
     );
 
     let mut covered: Vec<&str> = Vec::new();
@@ -519,9 +522,9 @@ fn every_public_item_has_a_conformance_reference_or_tracking_issue() {
 
     assert!(
         uncovered.is_empty(),
-        "{} ferrotorch-core public item(s) lack a conformance reference. \
-         Either author a test in tests/conformance_*.rs that references the \
-         item by name, OR add it to tests/conformance/_surface_exclusions.toml \
+        "{} ferrotorch-core public item(s) lack a production integration-test reference. \
+         Either author a real integration test that references the item in code, \
+         OR add it to tests/conformance/_surface_exclusions.toml \
          with `kind` (\"permanent\" | \"deferred\") and `reason` fields, plus \
          a `tracking_issue` pointing at an OPEN issue when deferred.",
         uncovered.len()

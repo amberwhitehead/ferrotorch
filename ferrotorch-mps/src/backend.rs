@@ -299,11 +299,13 @@ impl MtlBackend {
     }
 
     /// Wrap an `Arc<MtlBuffer>` in a `GpuBufferHandle`.
-    fn wrap_buffer(buf: Arc<MtlBuffer>, device_ordinal: usize) -> GpuBufferHandle {
+    fn wrap_buffer(buf: Arc<MtlBuffer>, device_ordinal: usize, dtype: DType) -> GpuBufferHandle {
         let len = buf.elem_count;
-        // This backend's buffers are always f32 (see `buffer_elem_size`); tag
-        // the handle accordingly so the authoritative dtype matches the bytes.
-        GpuBufferHandle::new(Box::new(buf), device_ordinal, len, DType::F32)
+        // SAFETY: `buf` is the MPS backend's concrete allocation type, `len`
+        // is its logical element count for `dtype`, and `device_ordinal`
+        // names the Metal device that owns it. The retained MTLBuffer remains
+        // valid until the erased Arc drops.
+        unsafe { GpuBufferHandle::new(Box::new(buf), device_ordinal, len, dtype) }
     }
 
     /// Downcast a `GpuBufferHandle` to `&Arc<MtlBuffer>`.
@@ -380,7 +382,7 @@ impl MtlBackend {
         }
 
         Self::commit_and_wait(&cmd_buf);
-        Ok(Self::wrap_buffer(out_buf, a.device_ordinal()))
+        Ok(Self::wrap_buffer(out_buf, a.device_ordinal(), DType::F32))
     }
 
     /// Launch a 1-D elementwise unary kernel (relu/sigmoid).
@@ -433,7 +435,7 @@ impl MtlBackend {
         }
 
         Self::commit_and_wait(&cmd_buf);
-        Ok(Self::wrap_buffer(out_buf, a.device_ordinal()))
+        Ok(Self::wrap_buffer(out_buf, a.device_ordinal(), DType::F32))
     }
 }
 
@@ -455,7 +457,20 @@ impl GpuBackend for MtlBackend {
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
         let elem_size = dtype.size_of();
-        let elem_count = data.len().checked_div(elem_size).unwrap_or(0);
+        if elem_size == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("cpu_to_gpu: dtype {dtype} has zero element size"),
+            });
+        }
+        if data.len() % elem_size != 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "cpu_to_gpu: {} bytes is not divisible by dtype {dtype} element size {elem_size}",
+                    data.len()
+                ),
+            });
+        }
+        let elem_count = data.len() / elem_size;
         let buf = self.alloc_buffer(data.len(), elem_count)?;
 
         // Shared-mode buffers expose a CPU-accessible pointer directly.
@@ -467,7 +482,7 @@ impl GpuBackend for MtlBackend {
             std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.as_ptr().cast::<u8>(), data.len());
         }
 
-        Ok(Self::wrap_buffer(buf, device))
+        Ok(Self::wrap_buffer(buf, device, dtype))
     }
 
     fn gpu_to_cpu(&self, handle: &GpuBufferHandle) -> FerrotorchResult<Vec<u8>> {
@@ -496,7 +511,19 @@ impl GpuBackend for MtlBackend {
         dtype: DType,
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle> {
-        let byte_len = len * dtype.size_of();
+        let elem_size = dtype.size_of();
+        if elem_size == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("alloc_zeros: dtype {dtype} has zero element size"),
+            });
+        }
+        let byte_len = len.checked_mul(elem_size).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: format!(
+                    "alloc_zeros: storage size calculation overflowed for {len} elements of {elem_size} bytes"
+                ),
+            }
+        })?;
         let buf = self.alloc_buffer(byte_len, len)?;
 
         // Shared-mode buffers are zero-initialised by the Metal runtime.
@@ -507,12 +534,13 @@ impl GpuBackend for MtlBackend {
             std::ptr::write_bytes(ptr.as_ptr().cast::<u8>(), 0u8, byte_len);
         }
 
-        Ok(Self::wrap_buffer(buf, device))
+        Ok(Self::wrap_buffer(buf, device, dtype))
     }
 
-    fn buffer_elem_size(&self, _handle: &GpuBufferHandle) -> usize {
-        // MPS buffers in this backend are always f32 (4 bytes).
-        4
+    fn buffer_elem_size(&self, handle: &GpuBufferHandle) -> usize {
+        // PyTorch parity: byte width follows the authoritative dtype tag,
+        // not the backend allocation type.
+        handle.dtype().size_of()
     }
 
     // -- Elementwise f32 binary ops ------------------------------------------
@@ -633,7 +661,7 @@ impl GpuBackend for MtlBackend {
         }
 
         Self::commit_and_wait(&cmd_buf);
-        Ok(Self::wrap_buffer(out_buf, a.device_ordinal()))
+        Ok(Self::wrap_buffer(out_buf, a.device_ordinal(), DType::F32))
     }
 
     fn bmm_f32(
@@ -709,7 +737,7 @@ impl GpuBackend for MtlBackend {
         }
 
         Self::commit_and_wait(&cmd_buf);
-        Ok(Self::wrap_buffer(out_buf, a.device_ordinal()))
+        Ok(Self::wrap_buffer(out_buf, a.device_ordinal(), DType::F32))
     }
 
     // -- Softmax f32 ---------------------------------------------------------
@@ -776,7 +804,7 @@ impl GpuBackend for MtlBackend {
         }
 
         Self::commit_and_wait(&cmd_buf);
-        Ok(Self::wrap_buffer(out_buf, a.device_ordinal()))
+        Ok(Self::wrap_buffer(out_buf, a.device_ordinal(), DType::F32))
     }
 
     // -- Reductions f32 ------------------------------------------------------
@@ -857,7 +885,7 @@ impl GpuBackend for MtlBackend {
         }
 
         Self::commit_and_wait(&cmd_buf);
-        Ok(Self::wrap_buffer(out_buf, a.device_ordinal()))
+        Ok(Self::wrap_buffer(out_buf, a.device_ordinal(), DType::F32))
     }
 
     // -- Required abstract methods without Sprint C.7 implementations --------
@@ -1256,5 +1284,71 @@ mod tests {
             .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
             .collect();
         assert_eq!(floats, src);
+    }
+
+    #[test]
+    fn mtl_memory_handles_preserve_dtype_tags() {
+        let backend = match MtlBackend::new() {
+            Ok(b) => b,
+            Err(FerrotorchError::DeviceUnavailable) => {
+                eprintln!(
+                    "  [cascade_skip] mtl_memory_handles_preserve_dtype_tags — no Metal device, \
+                     tracking issue #626"
+                );
+                return;
+            }
+            Err(e) => panic!("MtlBackend::new() error: {e:?}"),
+        };
+
+        for dtype in [
+            DType::F32,
+            DType::F64,
+            DType::BF16,
+            DType::F16,
+            DType::I32,
+            DType::I64,
+            DType::Bool,
+        ] {
+            let elem_size = dtype.size_of();
+            let bytes = vec![0u8; elem_size * 3];
+            let uploaded = backend
+                .cpu_to_gpu(&bytes, dtype, 0)
+                .expect("cpu_to_gpu dtype-tagged upload");
+            assert_eq!(uploaded.dtype(), dtype);
+            assert_eq!(uploaded.len(), 3);
+            assert_eq!(backend.buffer_elem_size(&uploaded), elem_size);
+
+            let zeros = backend
+                .alloc_zeros(3, dtype, 0)
+                .expect("alloc_zeros dtype-tagged upload");
+            assert_eq!(zeros.dtype(), dtype);
+            assert_eq!(zeros.len(), 3);
+            assert_eq!(backend.buffer_elem_size(&zeros), elem_size);
+        }
+    }
+
+    #[test]
+    fn mtl_cpu_to_gpu_rejects_partial_elements() {
+        let backend = match MtlBackend::new() {
+            Ok(b) => b,
+            Err(FerrotorchError::DeviceUnavailable) => {
+                eprintln!(
+                    "  [cascade_skip] mtl_cpu_to_gpu_rejects_partial_elements — no Metal device, \
+                     tracking issue #626"
+                );
+                return;
+            }
+            Err(e) => panic!("MtlBackend::new() error: {e:?}"),
+        };
+
+        let err = backend
+            .cpu_to_gpu(&[0u8; 3], DType::F32, 0)
+            .expect_err("partial f32 element must be rejected");
+        match err {
+            FerrotorchError::InvalidArgument { message } => {
+                assert!(message.contains("not divisible by dtype F32 element size 4"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

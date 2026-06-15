@@ -1585,7 +1585,7 @@
     { "path": "ferrotorch_core::tensor::Tensor <T>::from_storage", "kind": "method", "signature": "fn from_storage (storage : TensorStorage < T > , shape : Vec < usize > , requires_grad : bool ,) -> FerrotorchResult < Self >" },
     { "path": "ferrotorch_core::tensor::Tensor <T>::gpu_handle", "kind": "method", "signature": "fn gpu_handle (& self) -> FerrotorchResult < & crate :: gpu_dispatch :: GpuBufferHandle >" },
     { "path": "ferrotorch_core::tensor::Tensor <T>::grad", "kind": "method", "signature": "fn grad (& self) -> FerrotorchResult < Option < Tensor < T > > >" },
-    { "path": "ferrotorch_core::tensor::Tensor <T>::grad_fn", "kind": "method", "signature": "fn grad_fn (& self) -> Option < & Arc < dyn GradFn < T > > >" },
+    { "path": "ferrotorch_core::tensor::Tensor <T>::grad_fn", "kind": "method", "signature": "fn grad_fn (& self) -> Option < Arc < dyn GradFn < T > > >" },
     { "path": "ferrotorch_core::tensor::Tensor <T>::id", "kind": "method", "signature": "fn id (& self) -> TensorId" },
     { "path": "ferrotorch_core::tensor::Tensor <T>::inner_storage_arc", "kind": "method", "signature": "fn inner_storage_arc (& self) -> & Arc < TensorStorage < T > >" },
     { "path": "ferrotorch_core::tensor::Tensor <T>::into_storage_and_shape", "kind": "method", "signature": "fn into_storage_and_shape (self) -> FerrotorchResult < (TensorStorage < T > , Vec < usize >) >" },

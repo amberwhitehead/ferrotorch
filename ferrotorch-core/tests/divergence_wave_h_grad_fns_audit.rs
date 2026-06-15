@@ -13,6 +13,7 @@
 //! `aten/src/ATen/native/{Binary,Unary}Ops.cpp` ultimately dispatches to
 //! on CPU (`std::atan2`/`std::copysign`/`std::hypot`/`std::signbit`).
 
+use ferrotorch_core::grad_fns::reduction::sum;
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::{
     Tensor, atan2, copysign, hypot, max_with_dim, min_with_dim, norm_with_dim, signbit,
@@ -175,17 +176,52 @@ fn hypot_backward_partials_match_chain_rule() {
     fd_check(|x| (x * x + 16.0_f64).sqrt(), 3.0, g, 1e-4, "hypot da");
 }
 
+fn assert_nan(value: f64, label: &str) {
+    assert!(value.is_nan(), "{label}: got {value}, expected NaN");
+}
+
 #[test]
-fn hypot_origin_masked_grad_zero() {
-    // At a=0, b=0, result=0 → grad masked to 0 (avoids 0/0 NaN).
-    let a = leaf_scalar(0.0, true);
+fn hypot_origin_backward_preserves_pytorch_nan() {
+    // PyTorch 2.11: torch.hypot(0, 0).backward() uses grad * x / result
+    // literally, so 0/0 is NaN for both partials. Do not mask this to zero.
+    let a = leaf_vec(&[0.0, -0.0, 0.0, -0.0], true);
+    let b = leaf_vec(&[0.0, 0.0, -0.0, -0.0], true);
+    let c = hypot(&a, &b).unwrap();
+    sum(&c).unwrap().backward().unwrap();
+    let ga = a.grad().unwrap().unwrap();
+    let gb = b.grad().unwrap().unwrap();
+    let gad = ga.data().unwrap();
+    let gbd = gb.data().unwrap();
+
+    for (i, &g) in gad.iter().enumerate() {
+        assert_nan(g, &format!("grad a[{i}]"));
+    }
+    for (i, &g) in gbd.iter().enumerate() {
+        assert_nan(g, &format!("grad b[{i}]"));
+    }
+}
+
+#[test]
+fn hypot_infinite_inputs_backward_matches_pytorch_ieee_quotients() {
+    // PyTorch 2.11 follows the same quotient formula at infinities:
+    // inf/inf is NaN, finite/inf is signed zero.
+    let a = leaf_scalar(f64::INFINITY, true);
     let b = leaf_scalar(0.0, true);
     let c = hypot(&a, &b).unwrap();
     c.backward().unwrap();
     let ga = a.grad().unwrap().unwrap().item().unwrap();
     let gb = b.grad().unwrap().unwrap().item().unwrap();
-    assert_eq!(ga, 0.0);
+    assert_nan(ga, "grad a for hypot(inf, 0)");
     assert_eq!(gb, 0.0);
+
+    let a = leaf_scalar(1.0, true);
+    let b = leaf_scalar(f64::INFINITY, true);
+    let c = hypot(&a, &b).unwrap();
+    c.backward().unwrap();
+    let ga = a.grad().unwrap().unwrap().item().unwrap();
+    let gb = b.grad().unwrap().unwrap().item().unwrap();
+    assert_eq!(ga, 0.0);
+    assert_nan(gb, "grad b for hypot(1, inf)");
 }
 
 // =============================================================================

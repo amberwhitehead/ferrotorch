@@ -2,9 +2,9 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | impl `magnitude_prune` (Python round-half-even prune count + torch CPU topk tie order — CORE-083 -> #1777, #1908); non-test consumer re-exported at `lib.rs:178` for `ferrotorch-nn` callers. |
-//! | REQ-2 | SHIPPED | impl `apply_2_4_mask` (final-dim grouping, `InvalidArgument` when last dim % 4 != 0 — CORE-084 -> #1778; torch CPU topk in-block tie order — #1910); non-test consumer cross-checked at `sparse.rs` + re-exported at `lib.rs:178`. |
-//! | REQ-3 | SHIPPED | impl `sparsity_ratio`; non-test consumer re-exported at `lib.rs:178`. |
+//! | REQ-1 | SHIPPED | impl `magnitude_prune` (Python round-half-even prune count + torch CPU topk tie order — CORE-083 -> #1777, #1908); non-test consumer re-exported at `lib.rs:218` for `ferrotorch-nn` callers. |
+//! | REQ-2 | SHIPPED | impl `apply_2_4_mask` (final-dim grouping, `InvalidArgument` when last dim % 4 != 0 — CORE-084 -> #1778; torch CPU topk in-block tie order — #1910); non-test consumer cross-checked at `sparse.rs` + re-exported at `lib.rs:218`. |
+//! | REQ-3 | SHIPPED | impl `sparsity_ratio`; non-test consumer re-exported at `lib.rs:218`. |
 //! | REQ-4 | SHIPPED | validation guard in `magnitude_prune`; non-test consumer part of pub-function contract. |
 //! | REQ-5 | SHIPPED | differentiable mask multiplication via `apply_constant_mask` -> `grad_fns::arithmetic::mul` (`MulBackward` edge to the original parameter — CORE-082 -> #1776); non-test consumer sparse-finetune workflows. |
 

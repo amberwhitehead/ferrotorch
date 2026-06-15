@@ -72,11 +72,11 @@ process-wide `AtomicU64` counter. Mirrors PyTorch's
   — `test_run_grad_hooks_passthrough in hooks.rs`.
 - [x] AC-4: A hook returning `Some(replacement)` replaces the
   gradient downstream — `test_run_grad_hooks_replace` at
-  `hooks.rs:194-206`.
+  `hooks.rs:240-252`.
 - [x] AC-5: Multiple chained hooks see the output of the previous
-  hook — `test_run_grad_hooks_chain` at `hooks.rs:208-227`.
+  hook — `test_run_grad_hooks_chain` at `hooks.rs:254-273`.
 - [x] AC-6: Post-accumulate hooks fire on `run_post_accumulate_hooks`
-  — `test_post_accumulate_hook_fires` at `hooks.rs:229-246`.
+  — `test_post_accumulate_hook_fires` at `hooks.rs:275-294`.
 - [x] AC-7: `remove(fake_handle)` returns `false` cleanly — does NOT
   panic on a non-existent handle — `test_remove_nonexistent_handle`
   at `test_remove_nonexistent_handle in hooks.rs`.
@@ -97,7 +97,7 @@ in a `HashMap<HookHandle, _>` if needed.
 
 `pub(crate) struct HookStorage<T: Float>` at `HookStorage in hooks.rs` carries
 two `Vec`s. Crate-private — the public API for hook registration is
-`Tensor::register_hook` (`ferrotorch-core/src/tensor.rs:460`) and
+`Tensor::register_hook` (`ferrotorch-core/src/tensor.rs:933`) and
 `Tensor::register_post_accumulate_grad_hook`
 (`tensor.rs:483`), and the public API for removal is
 `Tensor::remove_hook(handle)` (`tensor.rs:502`). The
@@ -117,8 +117,8 @@ backward path (see REQ-9 of the graph.md doc).
 
 ### REQ-5 / REQ-6 add/remove
 
-`HookStorage::add_grad_hook<F>` at `hooks.rs:76-86` and
-`add_post_accumulate_hook<F>` at `:89-99` are generic over the
+`HookStorage::add_grad_hook<F>` at `hooks.rs:90-100` and
+`add_post_accumulate_hook<F>` at `:103-113` are generic over the
 closure type `F: Fn(...) + Send + Sync + 'static`, box the closure on
 push, and return the assigned `HookHandle`. `HookStorage::remove` at
 `:101-108` is a two-vec retain — short-circuit safe because the vecs
@@ -126,13 +126,13 @@ are tiny.
 
 ### REQ-7 / REQ-8 dispatch helpers
 
-`pub(crate) fn run_grad_hooks` at `hooks.rs:126-140` locks the mutex
+`pub(crate) fn run_grad_hooks` at `hooks.rs:140-180` locks the mutex
 (returning `FerrotorchError::LockPoisoned` on poisoning) and walks the
 `grad_hooks` vec, replacing `current` with the hook's return value
 when `Some`. `pub(crate) fn run_post_accumulate_hooks` at
-`:145-156` is the symmetric loop for side-effecting
+`:182-199` is the symmetric loop for side-effecting
 post-accumulate hooks. Both are called from the autograd engine at
-`graph.rs:175-193` (sequential) and `:385-407` (parallel).
+`graph.rs:175-193` (sequential) and `:515-407` (parallel).
 
 ## Parity contract
 
@@ -155,7 +155,7 @@ tensor-valued op. Behavioral parity vs upstream:
 
 ## Verification
 
-Tests in `hooks.rs:158-254` (7 tests):
+Tests in `hooks.rs:206-299` (7 tests):
 
 - `test_hook_handle_uniqueness` (`test_hook_handle_uniqueness in hooks.rs`)
 - `test_hook_storage_add_remove` (`test_hook_storage_add_remove in hooks.rs`)
@@ -175,7 +175,7 @@ All 7 pass in the workspace gauntlet.
 | REQ-2 | SHIPPED | impl: `pub(crate) struct HookStorage<T: Float>` at `HookStorage in hooks.rs` with `HookStorage::new` factory at `new in hooks.rs`; non-test production consumer: `TensorInner.hooks: Mutex<crate::autograd::hooks::HookStorage<T>>` at `new in ferrotorch-core/src/tensor.rs` and 7 `HookStorage::new()` call sites at `new in tensor.rs, , , , , , , , , ` (every tensor-construction path). |
 | REQ-3 | SHIPPED | impl: `pub(crate) struct GradHook<T>` at `GradHook in hooks.rs` plus the `GradHookFn<T>` type alias at `GradHook in hooks.rs`; mirrors hook signature `hook(grad) -> Optional[Tensor]` at `torch/utils/hooks.py:13`; non-test production consumer: stored inside `HookStorage.grad_hooks: Vec<GradHook<T>>` per REQ-2; populated by `Tensor::register_hook` calling `HookStorage::add_grad_hook` at `add_grad_hook in tensor.rs`. |
 | REQ-4 | SHIPPED | impl: `pub(crate) struct PostAccumulateGradHook<T>` at `PostAccumulateGradHook in hooks.rs` plus `PostAccumulateHookFn<T>` type alias at `PostAccumulateHookFn in hooks.rs`; mirrors `register_post_accumulate_grad_hook`; non-test production consumer: stored inside `HookStorage.post_accumulate_hooks: Vec<PostAccumulateGradHook<T>>` per REQ-2; populated by `Tensor::register_post_accumulate_grad_hook` at `register_post_accumulate_grad_hook in tensor.rs`. |
-| REQ-5 | SHIPPED | impl: `HookStorage::add_grad_hook<F>` at `hooks.rs:76-86` and `add_post_accumulate_hook<F>` at `:89-99`; non-test production consumer: `Tensor::register_hook` at `tensor.rs:460-475` invokes `add_grad_hook`; `Tensor::register_post_accumulate_grad_hook` at `:483-499` invokes `add_post_accumulate_hook`. |
-| REQ-6 | SHIPPED | impl: `HookStorage::remove(handle)` at `hooks.rs:101-108`; mirrors `RemovableHandle.remove` at `torch/utils/hooks.py:48-71`; non-test production consumer: `Tensor::remove_hook(handle)` at `ferrotorch-core/src/tensor.rs:502+` invokes `HookStorage::remove` — the public deregistration API the user calls when they want to clear a temporary hook (e.g. visualization hooks during training). |
+| REQ-5 | SHIPPED | impl: `HookStorage::add_grad_hook<F>` at `hooks.rs:90-100` and `add_post_accumulate_hook<F>` at `:103-113`; non-test production consumer: `Tensor::register_hook` at `tensor.rs:933-951` invokes `add_grad_hook`; `Tensor::register_post_accumulate_grad_hook` at `:953-977` invokes `add_post_accumulate_hook`. |
+| REQ-6 | SHIPPED | impl: `HookStorage::remove(handle)` at `hooks.rs:116-123`; mirrors `RemovableHandle.remove` at `torch/utils/hooks.py:48-71`; non-test production consumer: `Tensor::remove_hook(handle)` at `ferrotorch-core/src/tensor.rs:979` invokes `HookStorage::remove` — the public deregistration API the user calls when they want to clear a temporary hook (e.g. visualization hooks during training). |
 | REQ-7 | SHIPPED | impl: `pub(crate) fn run_grad_hooks` at `run_grad_hooks in hooks.rs`; non-test production consumer: `run_grad_hooks in ferrotorch-core/src/autograd/graph.rs let grad = run_grad_hooks(hooks, grad)?` inside the sequential backward dispatcher and `hooks in graph.rs` inside the parallel dispatcher — every user `loss.backward()` flows through this for any leaf with grad hooks. |
-| REQ-8 | SHIPPED | impl: `pub(crate) fn run_post_accumulate_hooks` at `hooks.rs:145-156`; non-test production consumer: `ferrotorch-core/src/autograd/graph.rs:193 run_post_accumulate_hooks(hooks, input)?` inside the sequential dispatcher and `graph.rs:406` inside the parallel dispatcher. |
+| REQ-8 | SHIPPED | impl: `pub(crate) fn run_post_accumulate_hooks` at `hooks.rs:182-199`; non-test production consumer: `ferrotorch-core/src/autograd/graph.rs:193 run_post_accumulate_hooks(hooks, input)?` inside the sequential dispatcher and `graph.rs:406` inside the parallel dispatcher. |
