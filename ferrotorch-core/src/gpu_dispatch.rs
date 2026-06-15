@@ -1120,6 +1120,144 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    fn copysign_f32(
+        &self,
+        _magnitude: &GpuBufferHandle,
+        _sign: &GpuBufferHandle,
+        _magnitude_shape: &[usize],
+        _magnitude_strides: &[isize],
+        _magnitude_offset: usize,
+        _sign_shape: &[usize],
+        _sign_strides: &[isize],
+        _sign_offset: usize,
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "copysign_f32" })
+    }
+
+    fn copysign_f64(
+        &self,
+        _magnitude: &GpuBufferHandle,
+        _sign: &GpuBufferHandle,
+        _magnitude_shape: &[usize],
+        _magnitude_strides: &[isize],
+        _magnitude_offset: usize,
+        _sign_shape: &[usize],
+        _sign_strides: &[isize],
+        _sign_offset: usize,
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "copysign_f64" })
+    }
+
+    fn copysign_bf16(
+        &self,
+        _magnitude: &GpuBufferHandle,
+        _sign: &GpuBufferHandle,
+        _magnitude_shape: &[usize],
+        _magnitude_strides: &[isize],
+        _magnitude_offset: usize,
+        _sign_shape: &[usize],
+        _sign_strides: &[isize],
+        _sign_offset: usize,
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "copysign_bf16",
+        })
+    }
+
+    fn copysign_f16(
+        &self,
+        _magnitude: &GpuBufferHandle,
+        _sign: &GpuBufferHandle,
+        _magnitude_shape: &[usize],
+        _magnitude_strides: &[isize],
+        _magnitude_offset: usize,
+        _sign_shape: &[usize],
+        _sign_strides: &[isize],
+        _sign_offset: usize,
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "copysign_f16" })
+    }
+
+    fn copysign_backward_f32(
+        &self,
+        _grad_output: &GpuBufferHandle,
+        _magnitude: &GpuBufferHandle,
+        _result: &GpuBufferHandle,
+        _grad_strides: &[isize],
+        _grad_offset: usize,
+        _magnitude_shape: &[usize],
+        _magnitude_strides: &[isize],
+        _magnitude_offset: usize,
+        _result_strides: &[isize],
+        _result_offset: usize,
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "copysign_backward_f32",
+        })
+    }
+
+    fn copysign_backward_f64(
+        &self,
+        _grad_output: &GpuBufferHandle,
+        _magnitude: &GpuBufferHandle,
+        _result: &GpuBufferHandle,
+        _grad_strides: &[isize],
+        _grad_offset: usize,
+        _magnitude_shape: &[usize],
+        _magnitude_strides: &[isize],
+        _magnitude_offset: usize,
+        _result_strides: &[isize],
+        _result_offset: usize,
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "copysign_backward_f64",
+        })
+    }
+
+    fn copysign_backward_bf16(
+        &self,
+        _grad_output: &GpuBufferHandle,
+        _magnitude: &GpuBufferHandle,
+        _result: &GpuBufferHandle,
+        _grad_strides: &[isize],
+        _grad_offset: usize,
+        _magnitude_shape: &[usize],
+        _magnitude_strides: &[isize],
+        _magnitude_offset: usize,
+        _result_strides: &[isize],
+        _result_offset: usize,
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "copysign_backward_bf16",
+        })
+    }
+
+    fn copysign_backward_f16(
+        &self,
+        _grad_output: &GpuBufferHandle,
+        _magnitude: &GpuBufferHandle,
+        _result: &GpuBufferHandle,
+        _grad_strides: &[isize],
+        _grad_offset: usize,
+        _magnitude_shape: &[usize],
+        _magnitude_strides: &[isize],
+        _magnitude_offset: usize,
+        _result_strides: &[isize],
+        _result_offset: usize,
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "copysign_backward_f16",
+        })
+    }
+
     // Softmax f32 (row-wise over last dim)
     fn softmax_f32(
         &self,

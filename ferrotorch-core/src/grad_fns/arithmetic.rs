@@ -87,7 +87,7 @@ fn is_f16<T: Float>() -> bool {
 /// `is_contiguous()` is true, which is insufficient here — a view that is
 /// "contiguous-by-strides" may still cover only part of the underlying
 /// buffer. So when the view is contiguous-by-strides but the buffer is
-/// oversize, we dispatch directly to `strided_copy_{f32,f64}` (mirroring
+/// oversize, we dispatch directly to `strided_copy_{f32,f64,u16}` (mirroring
 /// `methods::contiguous_t`'s GPU fast path / CL-496). The materialization
 /// stays on device, NEVER detours through host memory.
 ///
@@ -125,6 +125,10 @@ fn ensure_contig_for_gpu<T: Float>(t: &Tensor<T>) -> FerrotorchResult<Tensor<T>>
             backend
                 .strided_copy_f64(in_handle, &out_shape, &src_strides, src_offset)
                 .ok()
+        } else if is_f16::<T>() || is_bf16::<T>() {
+            backend
+                .strided_copy_u16(in_handle, &out_shape, &src_strides, src_offset)
+                .ok()
         } else {
             None
         };
@@ -137,8 +141,7 @@ fn ensure_contig_for_gpu<T: Float>(t: &Tensor<T>) -> FerrotorchResult<Tensor<T>>
     // Fallback (rank > 8, missing backend, or unsupported dtype): use
     // the public `contiguous` path. For genuinely non-contiguous views
     // this still routes through the on-device strided_copy in
-    // `contiguous_t`. For the "contiguous-but-oversized" edge case the
-    // host-memory fallback there is acceptable as a last resort.
+    // `contiguous_t` where that backend path is available.
     t.contiguous()
 }
 

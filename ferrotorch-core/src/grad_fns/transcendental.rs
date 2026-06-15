@@ -91,6 +91,24 @@ fn needs_grad_unary<T: Float>(a: &Tensor<T>) -> bool {
     is_grad_enabled() && a.requires_grad()
 }
 
+fn cuda_zeros_like<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let crate::device::Device::Cuda(ordinal) = input.device() else {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "cuda_zeros_like expected CUDA tensor, got {}",
+                input.device()
+            ),
+        });
+    };
+    let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let handle = backend.alloc_zeros(
+        input.numel(),
+        <T as crate::dtype::Element>::dtype(),
+        ordinal,
+    )?;
+    Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)
+}
+
 // ===========================================================================
 // exp
 // ===========================================================================
@@ -1928,10 +1946,93 @@ struct CopysignBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for CopysignBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        if grad_output.is_cuda() {
-            return Err(FerrotorchError::NotImplementedOnCuda {
-                op: "copysign backward",
-            });
+        if self.result.is_cuda() {
+            if !grad_output.is_cuda() {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected: self.result.device(),
+                    got: grad_output.device(),
+                });
+            }
+            let out_shape = broadcast_shapes(self.magnitude.shape(), self.sign.shape())?;
+            if grad_output.shape() != out_shape.as_slice() {
+                return Err(FerrotorchError::ShapeMismatch {
+                    message: format!(
+                        "copysign backward: grad_output shape {:?} does not match result shape {out_shape:?}",
+                        grad_output.shape()
+                    ),
+                });
+            }
+            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+
+            let da = if self.magnitude.requires_grad() {
+                let raw_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                    T,
+                    "copysign_backward",
+                    f32 => backend.copysign_backward_f32(
+                        grad_output.gpu_handle()?,
+                        self.magnitude.gpu_handle()?,
+                        self.result.gpu_handle()?,
+                        grad_output.strides(),
+                        grad_output.storage_offset(),
+                        self.magnitude.shape(),
+                        self.magnitude.strides(),
+                        self.magnitude.storage_offset(),
+                        self.result.strides(),
+                        self.result.storage_offset(),
+                        &out_shape,
+                    ),
+                    f64 => backend.copysign_backward_f64(
+                        grad_output.gpu_handle()?,
+                        self.magnitude.gpu_handle()?,
+                        self.result.gpu_handle()?,
+                        grad_output.strides(),
+                        grad_output.storage_offset(),
+                        self.magnitude.shape(),
+                        self.magnitude.strides(),
+                        self.magnitude.storage_offset(),
+                        self.result.strides(),
+                        self.result.storage_offset(),
+                        &out_shape,
+                    ),
+                    bf16 => backend.copysign_backward_bf16(
+                        grad_output.gpu_handle()?,
+                        self.magnitude.gpu_handle()?,
+                        self.result.gpu_handle()?,
+                        grad_output.strides(),
+                        grad_output.storage_offset(),
+                        self.magnitude.shape(),
+                        self.magnitude.strides(),
+                        self.magnitude.storage_offset(),
+                        self.result.strides(),
+                        self.result.storage_offset(),
+                        &out_shape,
+                    ),
+                    f16 => backend.copysign_backward_f16(
+                        grad_output.gpu_handle()?,
+                        self.magnitude.gpu_handle()?,
+                        self.result.gpu_handle()?,
+                        grad_output.strides(),
+                        grad_output.storage_offset(),
+                        self.magnitude.shape(),
+                        self.magnitude.strides(),
+                        self.magnitude.storage_offset(),
+                        self.result.strides(),
+                        self.result.storage_offset(),
+                        &out_shape,
+                    ),
+                )?;
+                let raw = Tensor::from_storage(TensorStorage::gpu(raw_handle), out_shape, false)?;
+                Some(reduce_grad_to_shape(&raw, self.magnitude.shape())?)
+            } else {
+                None
+            };
+
+            let db = if self.sign.requires_grad() {
+                Some(cuda_zeros_like(&self.sign)?)
+            } else {
+                None
+            };
+            return Ok(vec![da, db]);
         }
         let zero = <T as num_traits::Zero>::zero();
         let out_shape = broadcast_shapes(self.magnitude.shape(), self.sign.shape())?;
@@ -1953,7 +2054,7 @@ impl<T: Float> GradFn<T> for CopysignBackward<T> {
         };
         // Gradient to `sign` is zero (sign is non-diff per derivatives.yaml).
         let db = if self.sign.requires_grad() {
-            let n: usize = self.sign.shape().iter().product::<usize>().max(1);
+            let n = self.sign.numel();
             Some(Tensor::from_storage(
                 TensorStorage::cpu(vec![zero; n]),
                 self.sign.shape().to_vec(),
@@ -1980,26 +2081,102 @@ impl<T: Float> GradFn<T> for CopysignBackward<T> {
 /// flows to `magnitude` scaled by `sign_factor = result / magnitude` (zeroed
 /// where `magnitude == 0`); gradient to `sign` is identically zero.
 pub fn copysign<T: Float>(magnitude: &Tensor<T>, sign: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if magnitude.is_cuda() || sign.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "copysign" });
-    }
-    let output = binary_map(magnitude, sign, |m, s| {
-        // f64::copysign / f32::copysign do the right IEEE-754 thing. We
-        // route through num_traits::Float::copysign which dispatches to those.
-        <T as num_traits::Float>::copysign(m, s)
-    })?;
-    if needs_grad_binary(magnitude, sign) {
-        let (storage, shape) = output.into_storage_and_shape()?;
-        let out_tensor = Tensor::from_storage(storage, shape, false)?;
-        let grad_fn = Arc::new(CopysignBackward {
-            magnitude: magnitude.clone(),
-            sign: sign.clone(),
-            result: out_tensor.clone(),
+    if magnitude.device() != sign.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: magnitude.device(),
+            got: sign.device(),
         });
-        let (s, sh) = out_tensor.into_storage_and_shape()?;
-        Tensor::from_operation(s, sh, grad_fn)
+    }
+
+    if let Some(out) = crate::meta_propagate::binary_broadcast(magnitude, sign)? {
+        return Ok(out);
+    }
+
+    if magnitude.is_cuda() {
+        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let out_shape = broadcast_shapes(magnitude.shape(), sign.shape())?;
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "copysign",
+            f32 => backend.copysign_f32(
+                magnitude.gpu_handle()?,
+                sign.gpu_handle()?,
+                magnitude.shape(),
+                magnitude.strides(),
+                magnitude.storage_offset(),
+                sign.shape(),
+                sign.strides(),
+                sign.storage_offset(),
+                &out_shape,
+            ),
+            f64 => backend.copysign_f64(
+                magnitude.gpu_handle()?,
+                sign.gpu_handle()?,
+                magnitude.shape(),
+                magnitude.strides(),
+                magnitude.storage_offset(),
+                sign.shape(),
+                sign.strides(),
+                sign.storage_offset(),
+                &out_shape,
+            ),
+            bf16 => backend.copysign_bf16(
+                magnitude.gpu_handle()?,
+                sign.gpu_handle()?,
+                magnitude.shape(),
+                magnitude.strides(),
+                magnitude.storage_offset(),
+                sign.shape(),
+                sign.strides(),
+                sign.storage_offset(),
+                &out_shape,
+            ),
+            f16 => backend.copysign_f16(
+                magnitude.gpu_handle()?,
+                sign.gpu_handle()?,
+                magnitude.shape(),
+                magnitude.strides(),
+                magnitude.storage_offset(),
+                sign.shape(),
+                sign.strides(),
+                sign.storage_offset(),
+                &out_shape,
+            ),
+        )?;
+        let storage = TensorStorage::gpu(handle);
+        if needs_grad_binary(magnitude, sign) {
+            let out_tensor = Tensor::from_storage(storage, out_shape.clone(), false)?;
+            Tensor::from_operation(
+                TensorStorage::gpu(backend.clone_buffer(out_tensor.gpu_handle()?)?),
+                out_shape,
+                Arc::new(CopysignBackward {
+                    magnitude: magnitude.clone(),
+                    sign: sign.clone(),
+                    result: out_tensor,
+                }),
+            )
+        } else {
+            Tensor::from_storage(storage, out_shape, false)
+        }
     } else {
-        Ok(output)
+        let output = binary_map(magnitude, sign, |m, s| {
+            // f64::copysign / f32::copysign do the right IEEE-754 thing. We
+            // route through num_traits::Float::copysign which dispatches to those.
+            <T as num_traits::Float>::copysign(m, s)
+        })?;
+        if needs_grad_binary(magnitude, sign) {
+            let (storage, shape) = output.into_storage_and_shape()?;
+            let out_tensor = Tensor::from_storage(storage, shape, false)?;
+            let grad_fn = Arc::new(CopysignBackward {
+                magnitude: magnitude.clone(),
+                sign: sign.clone(),
+                result: out_tensor.clone(),
+            });
+            let (s, sh) = out_tensor.into_storage_and_shape()?;
+            Tensor::from_operation(s, sh, grad_fn)
+        } else {
+            Ok(output)
+        }
     }
 }
 

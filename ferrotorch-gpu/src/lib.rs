@@ -165,6 +165,8 @@ pub mod buffer;
 pub mod cast_kernels;
 pub mod conv;
 #[cfg(feature = "cuda")]
+pub mod copysign;
+#[cfg(feature = "cuda")]
 pub mod cufft;
 #[cfg(feature = "cuda")]
 pub mod cumulative_kernels;

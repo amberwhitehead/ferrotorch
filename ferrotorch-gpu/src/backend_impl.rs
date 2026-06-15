@@ -2103,6 +2103,274 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
+    fn copysign_f32(
+        &self,
+        magnitude: &GpuBufferHandle,
+        sign: &GpuBufferHandle,
+        magnitude_shape: &[usize],
+        magnitude_strides: &[isize],
+        magnitude_offset: usize,
+        sign_shape: &[usize],
+        sign_strides: &[isize],
+        sign_offset: usize,
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let mag_buf = Self::unwrap_buffer(magnitude)?;
+        let sign_buf = Self::unwrap_buffer(sign)?;
+        let dev = self.device(magnitude.device_ordinal())?;
+        let result = crate::copysign::gpu_copysign_f32(
+            mag_buf,
+            sign_buf,
+            magnitude_shape,
+            magnitude_strides,
+            magnitude_offset,
+            sign_shape,
+            sign_strides,
+            sign_offset,
+            out_shape,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, magnitude.device_ordinal()))
+    }
+
+    fn copysign_f64(
+        &self,
+        magnitude: &GpuBufferHandle,
+        sign: &GpuBufferHandle,
+        magnitude_shape: &[usize],
+        magnitude_strides: &[isize],
+        magnitude_offset: usize,
+        sign_shape: &[usize],
+        sign_strides: &[isize],
+        sign_offset: usize,
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let mag_buf = Self::unwrap_buffer_f64(magnitude)?;
+        let sign_buf = Self::unwrap_buffer_f64(sign)?;
+        let dev = self.device(magnitude.device_ordinal())?;
+        let result = crate::copysign::gpu_copysign_f64(
+            mag_buf,
+            sign_buf,
+            magnitude_shape,
+            magnitude_strides,
+            magnitude_offset,
+            sign_shape,
+            sign_strides,
+            sign_offset,
+            out_shape,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, magnitude.device_ordinal()))
+    }
+
+    fn copysign_bf16(
+        &self,
+        magnitude: &GpuBufferHandle,
+        sign: &GpuBufferHandle,
+        magnitude_shape: &[usize],
+        magnitude_strides: &[isize],
+        magnitude_offset: usize,
+        sign_shape: &[usize],
+        sign_strides: &[isize],
+        sign_offset: usize,
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let mag_buf = Self::unwrap_buffer_bf16(magnitude)?;
+        let sign_buf = Self::unwrap_buffer_bf16(sign)?;
+        let dev = self.device(magnitude.device_ordinal())?;
+        let result = crate::copysign::gpu_copysign_bf16(
+            mag_buf,
+            sign_buf,
+            magnitude_shape,
+            magnitude_strides,
+            magnitude_offset,
+            sign_shape,
+            sign_strides,
+            sign_offset,
+            out_shape,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, magnitude.device_ordinal()))
+    }
+
+    fn copysign_f16(
+        &self,
+        magnitude: &GpuBufferHandle,
+        sign: &GpuBufferHandle,
+        magnitude_shape: &[usize],
+        magnitude_strides: &[isize],
+        magnitude_offset: usize,
+        sign_shape: &[usize],
+        sign_strides: &[isize],
+        sign_offset: usize,
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let mag_buf = Self::unwrap_buffer_f16(magnitude)?;
+        let sign_buf = Self::unwrap_buffer_f16(sign)?;
+        let dev = self.device(magnitude.device_ordinal())?;
+        let result = crate::copysign::gpu_copysign_f16(
+            mag_buf,
+            sign_buf,
+            magnitude_shape,
+            magnitude_strides,
+            magnitude_offset,
+            sign_shape,
+            sign_strides,
+            sign_offset,
+            out_shape,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, magnitude.device_ordinal()))
+    }
+
+    fn copysign_backward_f32(
+        &self,
+        grad_output: &GpuBufferHandle,
+        magnitude: &GpuBufferHandle,
+        result: &GpuBufferHandle,
+        grad_strides: &[isize],
+        grad_offset: usize,
+        magnitude_shape: &[usize],
+        magnitude_strides: &[isize],
+        magnitude_offset: usize,
+        result_strides: &[isize],
+        result_offset: usize,
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = Self::unwrap_buffer(grad_output)?;
+        let mag_buf = Self::unwrap_buffer(magnitude)?;
+        let result_buf = Self::unwrap_buffer(result)?;
+        let dev = self.device(grad_output.device_ordinal())?;
+        let out = crate::copysign::gpu_copysign_backward_f32(
+            grad_buf,
+            mag_buf,
+            result_buf,
+            grad_strides,
+            grad_offset,
+            magnitude_shape,
+            magnitude_strides,
+            magnitude_offset,
+            result_strides,
+            result_offset,
+            out_shape,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(out, grad_output.device_ordinal()))
+    }
+
+    fn copysign_backward_f64(
+        &self,
+        grad_output: &GpuBufferHandle,
+        magnitude: &GpuBufferHandle,
+        result: &GpuBufferHandle,
+        grad_strides: &[isize],
+        grad_offset: usize,
+        magnitude_shape: &[usize],
+        magnitude_strides: &[isize],
+        magnitude_offset: usize,
+        result_strides: &[isize],
+        result_offset: usize,
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = Self::unwrap_buffer_f64(grad_output)?;
+        let mag_buf = Self::unwrap_buffer_f64(magnitude)?;
+        let result_buf = Self::unwrap_buffer_f64(result)?;
+        let dev = self.device(grad_output.device_ordinal())?;
+        let out = crate::copysign::gpu_copysign_backward_f64(
+            grad_buf,
+            mag_buf,
+            result_buf,
+            grad_strides,
+            grad_offset,
+            magnitude_shape,
+            magnitude_strides,
+            magnitude_offset,
+            result_strides,
+            result_offset,
+            out_shape,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(out, grad_output.device_ordinal()))
+    }
+
+    fn copysign_backward_bf16(
+        &self,
+        grad_output: &GpuBufferHandle,
+        magnitude: &GpuBufferHandle,
+        result: &GpuBufferHandle,
+        grad_strides: &[isize],
+        grad_offset: usize,
+        magnitude_shape: &[usize],
+        magnitude_strides: &[isize],
+        magnitude_offset: usize,
+        result_strides: &[isize],
+        result_offset: usize,
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = Self::unwrap_buffer_bf16(grad_output)?;
+        let mag_buf = Self::unwrap_buffer_bf16(magnitude)?;
+        let result_buf = Self::unwrap_buffer_bf16(result)?;
+        let dev = self.device(grad_output.device_ordinal())?;
+        let out = crate::copysign::gpu_copysign_backward_bf16(
+            grad_buf,
+            mag_buf,
+            result_buf,
+            grad_strides,
+            grad_offset,
+            magnitude_shape,
+            magnitude_strides,
+            magnitude_offset,
+            result_strides,
+            result_offset,
+            out_shape,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(out, grad_output.device_ordinal()))
+    }
+
+    fn copysign_backward_f16(
+        &self,
+        grad_output: &GpuBufferHandle,
+        magnitude: &GpuBufferHandle,
+        result: &GpuBufferHandle,
+        grad_strides: &[isize],
+        grad_offset: usize,
+        magnitude_shape: &[usize],
+        magnitude_strides: &[isize],
+        magnitude_offset: usize,
+        result_strides: &[isize],
+        result_offset: usize,
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = Self::unwrap_buffer_f16(grad_output)?;
+        let mag_buf = Self::unwrap_buffer_f16(magnitude)?;
+        let result_buf = Self::unwrap_buffer_f16(result)?;
+        let dev = self.device(grad_output.device_ordinal())?;
+        let out = crate::copysign::gpu_copysign_backward_f16(
+            grad_buf,
+            mag_buf,
+            result_buf,
+            grad_strides,
+            grad_offset,
+            magnitude_shape,
+            magnitude_strides,
+            magnitude_offset,
+            result_strides,
+            result_offset,
+            out_shape,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(out, grad_output.device_ordinal()))
+    }
+
     // f64 reduction ops
     fn sum_f64(&self, a: &GpuBufferHandle, _n: usize) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer_f64(a)?;
