@@ -60,8 +60,10 @@ clone.
   handling non-contiguous + GPU storage.
 - REQ-8: Autograd surface — `grad()`, `set_grad()`, `zero_grad()`,
   `accumulate_grad(incoming)`. Gradient accumulation has a GPU-native
-  fast path that dispatches `backend.add_f32` / `f64` when both
-  existing and incoming grads are on CUDA (#789/#788/#800).
+  fast path that dispatches dtype-specific backend add kernels when both
+  existing and incoming grads are on CUDA (#789/#788/#800). `set_grad`
+  and `accumulate_grad` validate PyTorch's same-shape / same-device grad
+  metadata contract before any accumulation fallback can run.
 - REQ-9: `detach()` — return a new tensor sharing storage but with
   no grad_fn / requires_grad. `requires_grad_(b)` — return a new
   tensor with the flag updated.
@@ -126,8 +128,9 @@ The file is ~1.97k LOC. Sections:
   `storage_offset`, `storage_len`, `storage`, `device`,
   `requires_grad`, `is_leaf`, `grad_fn`, hook registration,
   `grad`, `set_grad`, `zero_grad`.
-- **Lines 554-625**: `accumulate_grad` with the GPU-native fast path
-  (`backend.add_f32`/`add_f64` when both grads are on CUDA).
+- **Lines 1030-1119**: `accumulate_grad` with same-shape/device validation
+  and the GPU-native fast path (dtype-specific backend add when both grads
+  are on CUDA).
 - **Lines 627-781**: data access — `data`, `data_ref`, `data_vec`
   (incl. non-contiguous gather walk), `into_storage_and_shape`.
 - **Lines 783-1053**: device transfer — `to(device)` with the full
@@ -176,7 +179,7 @@ tests plus the indirect coverage of every op test.
 cargo test -p ferrotorch-core --lib tensor
 ```
 
-Expected: 10 tests pass.
+Expected: tensor-focused tests pass.
 
 ## REQ status table
 
@@ -187,9 +190,9 @@ Expected: 10 tests pass.
 | REQ-3 | SHIPPED | impl: `from_operation` at `ferrotorch-core/src/tensor.rs:299`; non-test consumer: every grad-attaching forward op (e.g. `grad_fns/arithmetic.rs:404` in `add_inner`). |
 | REQ-4 | SHIPPED | impl: `view_reshape in ferrotorch-core/src/tensor.rs`, `view_operation in ferrotorch-core/src/tensor.rs`, `stride_view in ferrotorch-core/src/tensor.rs`, `stride_view_operation in ferrotorch-core/src/tensor.rs`; non-test consumer: `grad_fns/shape.rs` reshape / flatten / squeeze / unsqueeze ops, `methods.rs::view_t`. |
 | REQ-5 | SHIPPED | impl: `to(device)` at `cuda in ferrotorch-core/src/tensor.rs` covers CPU/CUDA/XPU/Meta matrix incl. the #802 non-contiguous CUDA→CPU materialise path at `cuda in ferrotorch-core/src/tensor.rs`; non-test consumer: `Tensor::cuda` at `cuda in ferrotorch-core/src/tensor.rs`, `Tensor::cpu` at `cpu in ferrotorch-core/src/tensor.rs`, plus every model state-dict load that targets a device. |
-| REQ-6 | SHIPPED | impl: `to_pinned(device)` at `ferrotorch-core/src/tensor.rs:1573`; non-test consumer: `ferrotorch-data::DataLoader` calls this when `pin_memory(true)` is set. |
+| REQ-6 | SHIPPED | impl: `to_pinned(device)` at `to_pinned in ferrotorch-core/src/tensor.rs`; non-test consumer: `ferrotorch-data::DataLoader` calls this when `pin_memory(true)` is set. |
 | REQ-7 | SHIPPED | impl: `data` at `ferrotorch-core/src/tensor.rs:1132`, `data_ref` at `:1182`, `data_vec` at `:1192`; non-test consumer: every CPU op that reads tensor data (e.g. `pruning::magnitude_prune` at `pruning.rs:71`, `signal::windows`'s round-trip helper). |
-| REQ-8 | SHIPPED | impl: `grad` at `ferrotorch-core/src/tensor.rs:995`, `set_grad` at `:1007`, `zero_grad` at `:1023`, `accumulate_grad` at `:1033` with GPU-native path at `:1049-1075`; non-test consumer: `autograd::backward` engine writes via `accumulate_grad` for every leaf reachable in the graph. |
+| REQ-8 | SHIPPED | impl: `grad` at `ferrotorch-core/src/tensor.rs:995`, `set_grad` at `:1007` with shape/device validation, `zero_grad` at `:1023`, `accumulate_grad` at `:1036` with GPU-native path at `:1058-1085` and shared metadata guard at `:1121-1136`; non-test consumer: `autograd::backward` engine writes via `accumulate_grad` for every leaf reachable in the graph. |
 | REQ-9 | SHIPPED | impl: `detach` at `ferrotorch-core/src/tensor.rs:2446`, `requires_grad_` at `:2466`; non-test consumer: `autograd::no_grad` blocks call `detach`; downstream model init code calls `requires_grad_(true)` on parameters. |
 | REQ-10 | SHIPPED | impl: `is_contiguous in ferrotorch-core/src/tensor.rs`, `is_contiguous_for in ferrotorch-core/src/tensor.rs`, `to_memory_format in ferrotorch-core/src/tensor.rs`, `contiguous_in in ferrotorch-core/src/tensor.rs`, `materialize_format in ferrotorch-core/src/tensor.rs` (GPU fast path at `materialize_format in ferrotorch-core/src/tensor.rs`); non-test consumer: `ferrotorch-nn::Conv2d` calls `to_memory_format(MemoryFormat::ChannelsLast)` before cuDNN dispatch. |
 | REQ-11 | SHIPPED | impl: see `.design/ferrotorch-core/stride_tricks.md` — the inherent impl `impl Tensor` block at `stride_tricks.rs:183` defines `as_strided` / `as_strided_copy` / `as_strided_scatter`; non-test consumer: `crate::einsum`. |

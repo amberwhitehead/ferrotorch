@@ -98,6 +98,43 @@ fn cuda_gradient_hook_rejects_cpu_replacement() {
 }
 
 #[test]
+fn cuda_set_grad_rejects_cpu_grad_like_torch() {
+    ensure_cuda();
+    let x = cuda_leaf(&[2.0, 3.0], &[2]);
+    let cpu_grad = cpu_f32(&[10.0, 20.0], &[2], false);
+
+    let err = x
+        .set_grad(Some(cpu_grad))
+        .expect_err("CPU grad assignment to CUDA leaf must fail");
+
+    assert!(
+        matches!(err, FerrotorchError::DeviceMismatch { .. }),
+        "expected device mismatch, got {err:?}"
+    );
+    assert!(
+        x.grad().expect("grad lookup").is_none(),
+        "rejected set_grad must not mutate CUDA leaf gradients"
+    );
+}
+
+#[test]
+fn cuda_set_grad_existing_cuda_grad_accumulates_on_device() {
+    ensure_cuda();
+    let x = cuda_leaf(&[2.0, 3.0], &[2]);
+    let existing = cpu_f32(&[10.0, 20.0], &[2], false)
+        .to(Device::Cuda(0))
+        .expect("existing grad to cuda");
+    x.set_grad(Some(existing)).expect("set cuda grad");
+
+    let y = sum(&mul(&x, &x).expect("mul")).expect("sum");
+    y.backward().expect("backward");
+
+    let grad = x.grad().expect("grad lookup").expect("x grad");
+    assert!(grad.is_cuda(), "accumulated grad must stay on CUDA");
+    assert_eq!(host(&grad), &[14.0, 26.0]);
+}
+
+#[test]
 fn cuda_checkpoint_backward_keeps_grad_on_cuda() {
     ensure_cuda();
     let x = cuda_leaf(&[2.0, 3.0], &[2]);

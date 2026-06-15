@@ -1005,6 +1005,9 @@ impl<T: Float> Tensor<T> {
 
     /// Set or replace the accumulated gradient.
     pub fn set_grad(&self, grad: Option<Tensor<T>>) -> FerrotorchResult<()> {
+        if let Some(ref grad) = grad {
+            self.validate_grad_metadata(grad, "set_grad")?;
+        }
         let mut guard = self
             .inner
             .grad
@@ -1031,6 +1034,7 @@ impl<T: Float> Tensor<T> {
     /// same CUDA device, accumulation uses the dtype-specific GPU add kernel
     /// entirely on-device (`f32`, `f64`, `f16`, or `bf16`).
     pub(crate) fn accumulate_grad(&self, incoming: &Tensor<T>) -> FerrotorchResult<()> {
+        self.validate_grad_metadata(incoming, "gradient accumulation")?;
         let mut guard = self
             .inner
             .grad
@@ -1046,6 +1050,7 @@ impl<T: Float> Tensor<T> {
                 *guard = Some(Box::new(tensor));
             }
             Some(existing) => {
+                self.validate_grad_metadata(existing, "existing gradient accumulation")?;
                 // Accumulate: existing_grad += incoming_grad.
                 // GPU-native path: both grads on the same CUDA device. Dispatch
                 // by dtype tag, not Rust element size: f16 and bf16 are both
@@ -1079,8 +1084,12 @@ impl<T: Float> Tensor<T> {
                     let combined = Tensor::from_storage(storage, existing.shape().to_vec(), false)?;
                     *guard = Some(Box::new(combined));
                 } else {
-                    // CPU path (or mixed-device): download if needed and
-                    // accumulate on the host.
+                    if existing.is_cuda() || incoming.is_cuda() {
+                        return Err(FerrotorchError::NotImplementedOnCuda {
+                            op: "gradient accumulation fallback",
+                        });
+                    }
+                    // CPU path.
                     let incoming_data = incoming.data_vec()?;
                     let mut buf = existing.data_vec()?;
                     if buf.len() != incoming_data.len() {
@@ -1105,6 +1114,25 @@ impl<T: Float> Tensor<T> {
                     *guard = Some(Box::new(combined));
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn validate_grad_metadata(&self, grad: &Tensor<T>, op: &str) -> FerrotorchResult<()> {
+        if grad.shape() != self.shape() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "{op}: attempting to assign a gradient of shape {:?} to tensor shape {:?}",
+                    grad.shape(),
+                    self.shape()
+                ),
+            });
+        }
+        if grad.device() != self.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: self.device(),
+                got: grad.device(),
+            });
         }
         Ok(())
     }
@@ -3044,6 +3072,67 @@ mod tests {
         assert!((data[0] - 1.1).abs() < 1e-6);
         assert!((data[1] - 1.2).abs() < 1e-6);
         assert!((data[2] - 1.3).abs() < 1e-6);
+    }
+
+    fn fake_cuda_tensor(shape: &[usize], requires_grad: bool) -> Tensor<f32> {
+        let len = checked_numel(shape, "fake_cuda_tensor").unwrap();
+        // SAFETY: these tests only exercise tensor metadata validation before
+        // backend access. The fake handle is never handed to a GPU backend.
+        let handle = unsafe {
+            crate::gpu_dispatch::GpuBufferHandle::new(Box::new(()), 0, len, crate::DType::F32)
+        };
+        Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), requires_grad).unwrap()
+    }
+
+    #[test]
+    fn set_grad_rejects_wrong_shape_like_torch() {
+        let t = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 2.0]), vec![2], true).unwrap();
+        let grad = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 2.0, 3.0]), vec![3], false)
+            .unwrap();
+
+        let err = t.set_grad(Some(grad)).expect_err("wrong-shaped grad");
+
+        assert!(
+            matches!(err, FerrotorchError::ShapeMismatch { .. }),
+            "expected shape mismatch, got {err:?}"
+        );
+        assert!(t.grad().unwrap().is_none());
+    }
+
+    #[test]
+    fn set_grad_rejects_wrong_device_like_torch() {
+        let t = fake_cuda_tensor(&[2], true);
+        let grad =
+            Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 1.0]), vec![2], false).unwrap();
+
+        let err = t.set_grad(Some(grad)).expect_err("wrong-device grad");
+
+        assert!(
+            matches!(err, FerrotorchError::DeviceMismatch { .. }),
+            "expected device mismatch, got {err:?}"
+        );
+        assert!(t.grad().unwrap().is_none());
+    }
+
+    #[test]
+    fn accumulate_grad_rejects_stale_wrong_device_grad_before_readback() {
+        let t = fake_cuda_tensor(&[2], true);
+        let stale_cpu_grad =
+            Tensor::from_storage(TensorStorage::cpu(vec![10.0f32, 20.0]), vec![2], false).unwrap();
+        {
+            let mut guard = t.inner.grad.lock().unwrap();
+            *guard = Some(Box::new(stale_cpu_grad));
+        }
+        let incoming = fake_cuda_tensor(&[2], false);
+
+        let err = t
+            .accumulate_grad(&incoming)
+            .expect_err("stale CPU grad on CUDA leaf must be rejected");
+
+        assert!(
+            matches!(err, FerrotorchError::DeviceMismatch { .. }),
+            "expected device mismatch, got {err:?}"
+        );
     }
 
     // ── to_dtype (REQ-8 / issue #29) ─────────────────────────────────────────

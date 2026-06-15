@@ -36,9 +36,9 @@ fn ensure_cuda() {
 
 /// Create a leaf tensor on GPU with requires_grad.
 fn gpu_leaf(data: &[f32], shape: &[usize]) -> Tensor<f32> {
-    let t = Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), true)
+    let t = Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false)
         .expect("cpu tensor");
-    t.to(Device::Cuda(0)).expect("to GPU")
+    t.to(Device::Cuda(0)).expect("to GPU").requires_grad_(true)
 }
 
 /// Create a constant tensor on GPU (no grad).

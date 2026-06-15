@@ -2,24 +2,23 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub fn `backward`<T: Float>` at `graph.rs:20-22`; consumer: `Tensor::backward` convenience method at `:637-639` and `ferrotorch-core/src/stride_tricks.rs:671 backward(&loss)?`. |
-//! | REQ-2 | SHIPPED | `pub fn `backward_with_grad`<T: Float>` at `graph.rs:30-206`; consumer: `Tensor::backward_with_gradient` at `:647-649` and `ferrotorch-core/src/grad_fns/shape.rs:1112`. |
-//! | REQ-3 | SHIPPED | Kahn three-phase topo-sort at `graph.rs:67-205`; consumer: same as REQ-1 (engine inside `backward`). |
-//! | REQ-4 | SHIPPED | `accumulate_non_leaf_grad` at `graph.rs:530-629` and `accumulate_non_leaf_grad_locked` at `:460-514`; consumer: invoked from REQ-1/REQ-2 dispatch. |
-//! | REQ-5 | SHIPPED | `run_grad_hooks` and `run_post_accumulate_hooks` calls at `graph.rs:175-193` (sequential) and `:385-407` (parallel); consumer: every `Tensor::register_hook` user flowing through backward. |
-//! | REQ-6 | SHIPPED | Materialize-contiguous gradient at `graph.rs:148-152` (sequential) and `:363-367` (parallel); consumer: every non-contiguous gradient in backward. |
-//! | REQ-7 | SHIPPED | GPU-native add at `graph.rs:551-569` (sequential) and `:480-496` (parallel) via `backend.add_f32`/`add_f64`; consumer: any model with same-device gradient-merge points. |
-//! | REQ-8 | SHIPPED | Gradient-count sanity check at `graph.rs:160-168` and `:372-380`; consumer: defensive guard inside REQ-3 dispatch. |
-//! | REQ-9 | SHIPPED | `pub fn `backward_parallel`<T: Float>` at `graph.rs:220-457`; consumer: existing pub API across multiple prior commits — boundary-API grandfathering. |
-//! | REQ-10 | SHIPPED | Shape-preserving seed at `graph.rs:50-65`; consumer: every `Tensor::backward()` on a `[1]`-shape loss (regression test at `:854-867`). |
-//! | REQ-11 | SHIPPED | `impl<T: Float> Tensor<T>` with `pub fn `backward`` at `graph.rs:637-639` and `pub fn `backward_with_gradient`` at `:647-649`; consumer: `stride_tricks.rs:672`, `grad_fns/quantize_grad.rs:793`. |
+//! | REQ-1 | SHIPPED | `pub fn `backward`<T: Float>` at `graph.rs:73-75`; consumer: `Tensor::backward` convenience method at `:721-723` and `ferrotorch-core/src/stride_tricks.rs:671 backward(&loss)?`. |
+//! | REQ-2 | SHIPPED | `pub fn `backward_with_grad`<T: Float>` at `graph.rs:83-233`; consumer: `Tensor::backward_with_gradient` at `:731-733` and `ferrotorch-core/src/grad_fns/shape.rs:1112`. |
+//! | REQ-3 | SHIPPED | Kahn three-phase topo-sort at `graph.rs:94-159`; consumer: same as REQ-1 (engine inside `backward`). |
+//! | REQ-4 | SHIPPED | `accumulate_non_leaf_grad` at `graph.rs:581-690`, `accumulate_non_leaf_grad_locked` at `:497-565`, and same-shape/device guard `validate_non_leaf_grad` at `:692-713`; consumer: invoked from REQ-1/REQ-2 dispatch. |
+//! | REQ-5 | SHIPPED | `run_grad_hooks` and `run_post_accumulate_hooks` calls at `graph.rs:210-221` (sequential) and `:421-430` (parallel); consumer: every `Tensor::register_hook` user flowing through backward. |
+//! | REQ-6 | SHIPPED | Materialize-contiguous gradient at `graph.rs:176-180` (sequential) and `:389-393` (parallel); consumer: every non-contiguous gradient in backward. |
+//! | REQ-7 | SHIPPED | GPU-native add at `graph.rs:604-629` (sequential) and `:519-546` (parallel) via dtype-specific backend add; consumer: any model with same-device gradient-merge points. |
+//! | REQ-8 | SHIPPED | Gradient-count sanity check at `graph.rs:184-196` and `:398-406`; consumer: defensive guard inside REQ-3 dispatch. |
+//! | REQ-9 | SHIPPED | `pub fn `backward_parallel`<T: Float>` at `graph.rs:247-493`; consumer: existing pub API across multiple prior commits — boundary-API grandfathering. |
+//! | REQ-10 | SHIPPED | Shape-preserving seed at `graph.rs:48-60`; consumer: every `Tensor::backward()` on a `[1]`-shape loss (regression test at `:990-1003`). |
+//! | REQ-11 | SHIPPED | `impl<T: Float> Tensor<T>` with `pub fn `backward`` at `graph.rs:721-723` and `pub fn `backward_with_gradient`` at `:731-733`; consumer: `stride_tricks.rs:672`, `grad_fns/quantize_grad.rs:793`. |
 //!
 
 use rustc_hash::FxHashMap as HashMap;
 use std::collections::VecDeque;
 
 use crate::autograd::hooks::{run_grad_hooks, run_post_accumulate_hooks};
-use crate::device::Device;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::tensor::{Tensor, TensorId};
@@ -500,10 +499,12 @@ fn accumulate_non_leaf_grad_locked<T: Float>(
     input: &Tensor<T>,
     grad: Tensor<T>,
 ) -> FerrotorchResult<()> {
+    validate_non_leaf_grad(input, &grad, "non-leaf gradient accumulation")?;
     let Some(existing) = grads.remove(&input.id()) else {
         grads.insert(input.id(), grad);
         return Ok(());
     };
+    validate_non_leaf_grad(input, &existing, "existing non-leaf gradient accumulation")?;
 
     if existing.shape() != grad.shape() {
         return Err(FerrotorchError::ShapeMismatch {
@@ -515,11 +516,17 @@ fn accumulate_non_leaf_grad_locked<T: Float>(
         });
     }
 
-    // GPU-native accumulation when both on same GPU.
-    if let (Device::Cuda(_), Device::Cuda(_)) = (existing.device(), grad.device())
-        && existing.device() == grad.device()
-        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
-    {
+    // GPU-native accumulation when both on same GPU. CUDA operands must not
+    // reach the host `data_vec()` fallback below.
+    if existing.is_cuda() || grad.is_cuda() {
+        if existing.device() != grad.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: existing.device(),
+                got: grad.device(),
+            });
+        }
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let a_handle = existing.gpu_handle()?;
         let b_handle = grad.gpu_handle()?;
         let sum_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
@@ -576,10 +583,12 @@ fn accumulate_non_leaf_grad<T: Float>(
     input: &Tensor<T>,
     grad: Tensor<T>,
 ) -> FerrotorchResult<()> {
+    validate_non_leaf_grad(input, &grad, "non-leaf gradient accumulation")?;
     let Some(existing) = grads.remove(&input.id()) else {
         grads.insert(input.id(), grad);
         return Ok(());
     };
+    validate_non_leaf_grad(input, &existing, "existing non-leaf gradient accumulation")?;
 
     // Shape validation.
     if existing.shape() != grad.shape() {
@@ -593,10 +602,17 @@ fn accumulate_non_leaf_grad<T: Float>(
     }
 
     // B6 fix: GPU-native accumulation when both tensors are on the same GPU.
-    if let (Device::Cuda(_), Device::Cuda(_)) = (existing.device(), grad.device())
-        && existing.device() == grad.device()
-        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
-    {
+    // CUDA operands must fail loudly if the native path is unavailable; they
+    // must never flow into the CPU accumulation path below.
+    if existing.is_cuda() || grad.is_cuda() {
+        if existing.device() != grad.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: existing.device(),
+                got: grad.device(),
+            });
+        }
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let a_handle = existing.gpu_handle()?;
         let b_handle = grad.gpu_handle()?;
         let result_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
@@ -670,6 +686,29 @@ fn accumulate_non_leaf_grad<T: Float>(
     let storage = crate::storage::TensorStorage::cpu(existing_data);
     let combined = Tensor::from_storage(storage, existing.shape().to_vec(), false)?;
     grads.insert(input.id(), combined);
+    Ok(())
+}
+
+fn validate_non_leaf_grad<T: Float>(
+    input: &Tensor<T>,
+    grad: &Tensor<T>,
+    op: &str,
+) -> FerrotorchResult<()> {
+    if grad.shape() != input.shape() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "{op}: gradient shape {:?} does not match tensor shape {:?}",
+                grad.shape(),
+                input.shape()
+            ),
+        });
+    }
+    if grad.device() != input.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: input.device(),
+            got: grad.device(),
+        });
+    }
     Ok(())
 }
 
@@ -755,6 +794,57 @@ mod tests {
     /// Helper to make a leaf scalar tensor.
     fn leaf_scalar(val: f32, requires_grad: bool) -> Tensor<f32> {
         Tensor::from_storage(TensorStorage::cpu(vec![val]), vec![], requires_grad).unwrap()
+    }
+
+    fn fake_cuda_tensor(shape: &[usize], requires_grad: bool) -> Tensor<f32> {
+        let len = shape.iter().product();
+        // SAFETY: these tests exercise graph-side metadata validation before
+        // backend access. The fake handle is never handed to a GPU backend.
+        let handle = unsafe {
+            crate::gpu_dispatch::GpuBufferHandle::new(
+                Box::new(()),
+                0,
+                len,
+                crate::dtype::DType::F32,
+            )
+        };
+        Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), requires_grad).unwrap()
+    }
+
+    #[test]
+    fn non_leaf_locked_accumulation_rejects_wrong_device_before_readback() {
+        let input = fake_cuda_tensor(&[2], true);
+        let stale_cpu =
+            Tensor::from_storage(TensorStorage::cpu(vec![10.0f32, 20.0]), vec![2], false).unwrap();
+        let incoming = fake_cuda_tensor(&[2], false);
+        let mut grads = HashMap::default();
+        grads.insert(input.id(), stale_cpu);
+
+        let err = accumulate_non_leaf_grad_locked(&mut grads, &input, incoming)
+            .expect_err("wrong-device non-leaf grad");
+
+        assert!(
+            matches!(err, FerrotorchError::DeviceMismatch { .. }),
+            "expected device mismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn non_leaf_accumulation_rejects_wrong_device_before_readback() {
+        let input = fake_cuda_tensor(&[2], true);
+        let stale_cpu =
+            Tensor::from_storage(TensorStorage::cpu(vec![10.0f32, 20.0]), vec![2], false).unwrap();
+        let incoming = fake_cuda_tensor(&[2], false);
+        let mut grads = HashMap::default();
+        grads.insert(input.id(), stale_cpu);
+
+        let err = accumulate_non_leaf_grad(&mut grads, &input, incoming)
+            .expect_err("wrong-device non-leaf grad");
+
+        assert!(
+            matches!(err, FerrotorchError::DeviceMismatch { .. }),
+            "expected device mismatch, got {err:?}"
+        );
     }
 
     #[test]
