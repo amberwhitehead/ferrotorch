@@ -321,28 +321,31 @@ impl<T: Float> crate::tensor::GradFn<T> for CheckpointBackward<T> {
         let mut rng_guard = CheckpointRngGuard::activate(&self.saved_rng)?;
 
         // Run the recomputation inside an autocast context that exactly
-        // matches the forward pass. with_autocast_state uses an RAII guard,
-        // so the surrounding (caller's) autocast state is restored even if
-        // the recomputation panics.
-        let result = with_autocast_state(self.saved_autocast, || {
-            let input_with_grad = self.input.clone().requires_grad_(true);
-            let recomputed = (self.func)(&input_with_grad)?;
+        // matches the forward pass and force gradient tracking on even if
+        // the caller invoked backward from inside `no_grad`. Both guards are
+        // RAII-backed, so caller autocast and grad-mode state are restored
+        // after recomputation, including panic unwind.
+        let result = crate::autograd::no_grad::enable_grad(|| {
+            with_autocast_state(self.saved_autocast, || {
+                let input_with_grad = self.input.clone().requires_grad_(true);
+                let recomputed = (self.func)(&input_with_grad)?;
 
-            // Use autograd to compute gradients with grad_output as the
-            // upstream gradient. We compute the scalar
-            // sum(recomputed * grad_output) and backprop through that;
-            // this correctly propagates grad_output through chain rule.
-            use crate::grad_fns::arithmetic::mul;
-            use crate::grad_fns::reduction::sum;
-            let weighted = mul(
-                &recomputed,
-                &grad_output.clone().requires_grad_(false).detach(),
-            )?;
-            let scalar = sum(&weighted)?;
-            scalar.backward()?;
+                // Use autograd to compute gradients with grad_output as the
+                // upstream gradient. We compute the scalar
+                // sum(recomputed * grad_output) and backprop through that;
+                // this correctly propagates grad_output through chain rule.
+                use crate::grad_fns::arithmetic::mul;
+                use crate::grad_fns::reduction::sum;
+                let weighted = mul(
+                    &recomputed,
+                    &grad_output.clone().requires_grad_(false).detach(),
+                )?;
+                let scalar = sum(&weighted)?;
+                scalar.backward()?;
 
-            let input_grad = input_with_grad.grad()?;
-            Ok(vec![input_grad])
+                let input_grad = input_with_grad.grad()?;
+                Ok(vec![input_grad])
+            })
         });
 
         let restore = rng_guard.restore();
@@ -388,44 +391,47 @@ impl<T: Float> crate::tensor::GradFn<T> for CheckpointMultiBackward<T> {
         let mut rng_guard = CheckpointRngGuard::activate(&self.saved_rng)?;
 
         // Run recomputation under the same autocast state as the forward
-        // pass. The RAII guard inside with_autocast_state restores the
-        // caller's state on exit, including panic unwind.
-        let result = with_autocast_state(self.saved_autocast, || {
-            // Re-run forward with grad tracking on all inputs that need it.
-            let inputs_with_grad: Vec<Tensor<T>> = self
-                .inputs
-                .iter()
-                .map(|t| {
-                    if t.requires_grad() {
-                        t.clone().requires_grad_(true)
+        // pass and force gradient tracking on independent of the caller's
+        // ambient grad mode. Both guards restore caller state on exit,
+        // including panic unwind.
+        let result = crate::autograd::no_grad::enable_grad(|| {
+            with_autocast_state(self.saved_autocast, || {
+                // Re-run forward with grad tracking on all inputs that need it.
+                let inputs_with_grad: Vec<Tensor<T>> = self
+                    .inputs
+                    .iter()
+                    .map(|t| {
+                        if t.requires_grad() {
+                            t.clone().requires_grad_(true)
+                        } else {
+                            t.clone()
+                        }
+                    })
+                    .collect();
+
+                let recomputed = (self.func)(&inputs_with_grad)?;
+
+                // Backprop via weighted sum trick.
+                use crate::grad_fns::arithmetic::mul;
+                use crate::grad_fns::reduction::sum;
+                let weighted = mul(
+                    &recomputed,
+                    &grad_output.clone().requires_grad_(false).detach(),
+                )?;
+                let scalar = sum(&weighted)?;
+                scalar.backward()?;
+
+                // Collect gradients for each input.
+                let mut grads = Vec::with_capacity(self.inputs.len());
+                for (orig, with_grad) in self.inputs.iter().zip(inputs_with_grad.iter()) {
+                    if orig.requires_grad() {
+                        grads.push(with_grad.grad()?);
                     } else {
-                        t.clone()
+                        grads.push(None);
                     }
-                })
-                .collect();
-
-            let recomputed = (self.func)(&inputs_with_grad)?;
-
-            // Backprop via weighted sum trick.
-            use crate::grad_fns::arithmetic::mul;
-            use crate::grad_fns::reduction::sum;
-            let weighted = mul(
-                &recomputed,
-                &grad_output.clone().requires_grad_(false).detach(),
-            )?;
-            let scalar = sum(&weighted)?;
-            scalar.backward()?;
-
-            // Collect gradients for each input.
-            let mut grads = Vec::with_capacity(self.inputs.len());
-            for (orig, with_grad) in self.inputs.iter().zip(inputs_with_grad.iter()) {
-                if orig.requires_grad() {
-                    grads.push(with_grad.grad()?);
-                } else {
-                    grads.push(None);
                 }
-            }
-            Ok(grads)
+                Ok(grads)
+            })
         });
 
         let restore = rng_guard.restore();
