@@ -734,11 +734,10 @@ pub fn det<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// Matrix inverse of a square 2-D tensor.
 ///
 /// # Backward
-/// Autograd-aware (CPU): when grad tracking is active for `input`, this routes
+/// Autograd-aware (CPU and CUDA): when grad tracking is active for `input`, this routes
 /// through `crate::grad_fns::linalg::inv_differentiable` (the VJP
 /// `dA = -Y^T @ grad @ Y^T`, `Y = A^{-1}`).
 pub fn inv<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    require_cpu(input, "inv")?;
     let shape = input.shape();
     if shape.len() != 2 || shape[0] != shape[1] {
         return Err(FerrotorchError::InvalidArgument {
@@ -754,6 +753,16 @@ pub fn inv<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     }
 
     let n = shape[0];
+
+    if input.is_cuda() {
+        if !(is_f32::<T>() || is_f64::<T>()) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "inv requires f32 or f64".into(),
+            });
+        }
+        let eye = eye_on_device(n, input.device())?;
+        return solve(input, &eye);
+    }
 
     if is_f32::<T>() {
         let arr = tensor_to_array2_f32(input)?;
@@ -2738,15 +2747,10 @@ pub fn tensorinv<T: Float>(a: &Tensor<T>, ind: usize) -> FerrotorchResult<Tensor
 
 /// p-norm of a tensor.
 ///
-/// Returns a scalar tensor. `ord` may be `2.0` (L2/Frobenius), `1.0` (L1),
-/// `f64::INFINITY`, or any positive real. Matches `torch.linalg.vector_norm`'s
-/// scalar reduction (full-tensor) form.
-///
-/// CPU-only today.
+/// Returns a scalar tensor. `ord` may be `0.0`, `1.0`, `2.0`, `±inf`, or
+/// any finite real. Matches `torch.linalg.vector_norm`'s full-tensor
+/// (`dim=None`, `keepdim=false`) form.
 pub fn vector_norm<T: Float>(input: &Tensor<T>, ord: f64) -> FerrotorchResult<Tensor<T>> {
-    require_cpu(input, "vector_norm")?;
-    let order = float_to_norm_order(ord);
-
     // Autograd path: delegate to the differentiable wrapper, which attaches
     // `NormBackward` for EVERY accepted `ord` (per-ord `norm_backward`
     // branches; CORE-047 / #1741).
@@ -2754,6 +2758,11 @@ pub fn vector_norm<T: Float>(input: &Tensor<T>, ord: f64) -> FerrotorchResult<Te
         return crate::grad_fns::linalg::vector_norm_differentiable(input, ord);
     }
 
+    if input.is_cuda() || is_f16::<T>() || is_bf16::<T>() {
+        return vector_norm_composite(input, ord);
+    }
+
+    let order = float_to_norm_order(ord);
     if is_f32::<T>() {
         let arr = tensor_to_arraydyn_f32(input)?;
         let r = ferray_linalg::vector_norm(&arr, order, None, false)
@@ -2772,6 +2781,48 @@ pub fn vector_norm<T: Float>(input: &Tensor<T>, ord: f64) -> FerrotorchResult<Te
             message: "linalg op requires f32 or f64".into(),
         })
     }
+}
+
+#[allow(
+    clippy::float_cmp,
+    reason = "ord is a discrete norm selector matching torch.linalg.vector_norm"
+)]
+pub(crate) fn vector_norm_composite<T: Float>(
+    input: &Tensor<T>,
+    ord: f64,
+) -> FerrotorchResult<Tensor<T>> {
+    if input.numel() == 0 && (ord < 0.0 || ord == f64::INFINITY) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "linalg.vector_norm cannot compute the {ord} norm on an empty tensor because the operation does not have an identity"
+            ),
+        });
+    }
+
+    if ord == 0.0 {
+        return input.count_nonzero_t()?.to_float::<T>();
+    }
+
+    if is_f16::<T>() || is_bf16::<T>() {
+        let wide = input.to_dtype::<f32>()?;
+        return vector_norm_composite(&wide, ord)?.to_dtype::<T>();
+    }
+
+    let abs = input.abs_t()?;
+    if ord == f64::INFINITY {
+        return abs.amax();
+    }
+    if ord == f64::NEG_INFINITY {
+        return abs.amin();
+    }
+    if ord == 1.0 {
+        return abs.sum_all();
+    }
+    if ord == 2.0 {
+        return input.mul_t(input)?.sum_all()?.sqrt_t();
+    }
+
+    abs.pow_t(ord)?.sum_all()?.pow_t(1.0 / ord)
 }
 
 /// Sign and natural log of `|det(A)|`.
@@ -2834,13 +2885,10 @@ pub fn slogdet<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T
 
 /// Numerical rank of `a`.
 ///
-/// Returns a scalar (0-d) `i64`-valued tensor encoded as `T`. `tol`, when
-/// `Some(t)`, is the absolute tolerance below which singular values are
-/// treated as zero; default is `max(m, n) * eps * sigma_max`.
-///
-/// Mirrors `torch.linalg.matrix_rank`. CPU-only today.
-pub fn matrix_rank<T: Float>(a: &Tensor<T>, tol: Option<f64>) -> FerrotorchResult<Tensor<T>> {
-    require_cpu(a, "matrix_rank")?;
+/// Returns a scalar (0-d) `IntTensor<i64>` on the same device as `a`. `tol`,
+/// when `Some(t)`, is the legacy NumPy-compatible absolute tolerance; default
+/// is `max(m, n) * eps * sigma_max`.
+pub fn matrix_rank<T: Float>(a: &Tensor<T>, tol: Option<f64>) -> FerrotorchResult<IntTensor<i64>> {
     let shape = a.shape();
     if shape.len() != 2 {
         return Err(FerrotorchError::InvalidArgument {
@@ -2848,36 +2896,47 @@ pub fn matrix_rank<T: Float>(a: &Tensor<T>, tol: Option<f64>) -> FerrotorchResul
         });
     }
 
-    if is_f32::<T>() {
-        let arr = tensor_to_array2_f32(a)?;
-        let r = ferray_linalg::matrix_rank(&arr, tol.map(|t| t as f32))
-            .map_err(FerrotorchError::Ferray)?;
-        Tensor::from_storage(
-            TensorStorage::cpu(vec![T::from(r as f32).unwrap()]),
-            vec![],
-            false,
-        )
-    } else if is_f64::<T>() {
-        let arr = tensor_to_array2_f64(a)?;
-        let r = ferray_linalg::matrix_rank(&arr, tol).map_err(FerrotorchError::Ferray)?;
-        Tensor::from_storage(
-            TensorStorage::cpu(vec![T::from(r as f64).unwrap()]),
-            vec![],
-            false,
-        )
-    } else {
-        Err(FerrotorchError::InvalidArgument {
-            message: "linalg op requires f32 or f64".into(),
-        })
+    if !(is_f32::<T>() || is_f64::<T>()) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "matrix_rank requires f32 or f64".into(),
+        });
     }
+
+    if a.numel() == 0 {
+        return IntTensor::<i64>::scalar(0).to(a.device());
+    }
+
+    let s = svdvals(a)?;
+    let threshold = matrix_rank_threshold(&s, shape[0], shape[1], tol)?;
+    let keep = crate::bool_tensor::BoolTensor::gt(&s, &threshold)?;
+    keep.to_float::<T>()?.count_nonzero_t()
+}
+
+fn matrix_rank_threshold<T: Float>(
+    singular_values: &Tensor<T>,
+    m: usize,
+    n: usize,
+    tol: Option<f64>,
+) -> FerrotorchResult<Tensor<T>> {
+    if let Some(tol) = tol {
+        let tol_t = T::from(tol).ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("matrix_rank: tolerance {tol} not representable in dtype"),
+        })?;
+        return crate::creation::full_like(singular_values, tol_t);
+    }
+
+    let max_s = singular_values.amax()?;
+    let rtol = T::from(m.max(n)).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: "matrix_rank: matrix extent is not representable in dtype".into(),
+    })? * T::epsilon();
+    let rtol_t = crate::creation::full_like(&max_s, rtol)?;
+    max_s.mul_t(&rtol_t)
 }
 
 /// Condition number of `a` under the given norm order (`p = 2.0` for the
 /// 2-norm, `1.0`, `f64::INFINITY`, etc.).
 ///
-/// Mirrors `torch.linalg.cond`. CPU-only today.
 pub fn cond<T: Float>(a: &Tensor<T>, p: f64) -> FerrotorchResult<Tensor<T>> {
-    require_cpu(a, "cond")?;
     let shape = a.shape();
     if shape.len() != 2 {
         return Err(FerrotorchError::InvalidArgument {
@@ -2885,22 +2944,22 @@ pub fn cond<T: Float>(a: &Tensor<T>, p: f64) -> FerrotorchResult<Tensor<T>> {
         });
     }
     validate_cond_selector(p)?;
-    let order = float_to_norm_order(p);
 
-    if tracking_enabled_for(&[a]) {
-        if let Some(invert_ratio) = is_cond_svd_selector(p) {
-            let s = svdvals(a)?;
-            let max = s.amax()?;
-            let min = s.amin()?;
-            return if invert_ratio {
-                min.div_t(&max)
-            } else {
-                max.div_t(&min)
-            };
-        }
-        reject_forward_only_autograd("cond", &[a])?;
+    if !(is_f32::<T>() || is_f64::<T>()) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "cond requires f32 or f64".into(),
+        });
     }
 
+    if tracking_enabled_for(&[a]) {
+        return cond_composite(a, p);
+    }
+
+    if a.is_cuda() {
+        return cond_composite(a, p);
+    }
+
+    let order = float_to_norm_order(p);
     if is_f32::<T>() {
         let arr = tensor_to_array2_f32(a)?;
         let val: f32 = ferray_linalg::cond(&arr, order).map_err(FerrotorchError::Ferray)?;
@@ -2920,6 +2979,64 @@ pub fn cond<T: Float>(a: &Tensor<T>, p: f64) -> FerrotorchResult<Tensor<T>> {
     } else {
         Err(FerrotorchError::InvalidArgument {
             message: "linalg op requires f32 or f64".into(),
+        })
+    }
+}
+
+fn cond_composite<T: Float>(a: &Tensor<T>, p: f64) -> FerrotorchResult<Tensor<T>> {
+    if let Some(invert_ratio) = is_cond_svd_selector(p) {
+        if a.numel() == 0 {
+            return Tensor::from_storage(
+                TensorStorage::on_device(vec![<T as num_traits::Zero>::zero()], a.device())?,
+                vec![],
+                false,
+            );
+        }
+        let s = svdvals(a)?;
+        let max = s.amax()?;
+        let min = s.amin()?;
+        return if invert_ratio {
+            min.div_t(&max)
+        } else {
+            max.div_t(&min)
+        };
+    }
+
+    if a.shape()[0] != a.shape()[1] {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "cond(ord={p}) requires a square matrix, got {:?}",
+                a.shape()
+            ),
+        });
+    }
+
+    let inv_a = inv(a)?;
+    let norm_a = matrix_norm_for_cond(a, p)?;
+    let norm_inv = matrix_norm_for_cond(&inv_a, p)?;
+    norm_a.mul_t(&norm_inv)
+}
+
+#[allow(
+    clippy::float_cmp,
+    reason = "p is a validated discrete norm selector, matching torch.linalg.cond"
+)]
+fn matrix_norm_for_cond<T: Float>(a: &Tensor<T>, p: f64) -> FerrotorchResult<Tensor<T>> {
+    if p == 1.0 {
+        let col_sums = a.abs_t()?.sum_dim(0, false)?;
+        col_sums.amax()
+    } else if p == -1.0 {
+        let col_sums = a.abs_t()?.sum_dim(0, false)?;
+        col_sums.amin()
+    } else if p == f64::INFINITY {
+        let row_sums = a.abs_t()?.sum_dim(1, false)?;
+        row_sums.amax()
+    } else if p == f64::NEG_INFINITY {
+        let row_sums = a.abs_t()?.sum_dim(1, false)?;
+        row_sums.amin()
+    } else {
+        Err(FerrotorchError::InvalidArgument {
+            message: format!("linalg.cond got an invalid norm type: {p}"),
         })
     }
 }
@@ -4813,7 +4930,7 @@ mod tests {
     fn test_matrix_rank_full_rank_2x2() {
         let a = t(&[1.0, 2.0, 3.0, 5.0], &[2, 2]);
         let r = matrix_rank(&a, None).unwrap();
-        assert!((r.data().unwrap()[0] - 2.0).abs() < 1e-10);
+        assert_eq!(r.data().unwrap()[0], 2);
     }
 
     #[test]
@@ -4821,7 +4938,7 @@ mod tests {
         // Rows are scalar multiples — rank 1.
         let a = t(&[1.0, 2.0, 2.0, 4.0], &[2, 2]);
         let r = matrix_rank(&a, None).unwrap();
-        assert!((r.data().unwrap()[0] - 1.0).abs() < 1e-10);
+        assert_eq!(r.data().unwrap()[0], 1);
     }
 
     #[test]

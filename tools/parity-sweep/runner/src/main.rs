@@ -3861,7 +3861,9 @@ fn dispatch_f32(
         // (default tol). Compared directly.
         "matrix_rank" => {
             let a = unary("matrix_rank")?;
-            Ok(Some(ferrotorch_core::linalg::matrix_rank(&a, None)?))
+            Ok(Some(
+                ferrotorch_core::linalg::matrix_rank(&a, None)?.to_float::<f32>()?,
+            ))
         }
 
         // ===================================================================

@@ -84,6 +84,11 @@ fn is_bf16<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<half::bf16>()
 }
 
+#[inline]
+fn is_f16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::f16>()
+}
+
 fn ensure_same_device<T: Float>(expected: &Tensor<T>, got: &Tensor<T>) -> FerrotorchResult<()> {
     if expected.device() != got.device() {
         return Err(FerrotorchError::DeviceMismatch {
@@ -2138,9 +2143,9 @@ pub fn permute_0213<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> 
 // ===========================================================================
 
 /// Helper: 2-D matrix transpose of a non-grad tensor (used by the matrix
-/// VJPs below). Always materialises a contiguous CPU result.
+/// VJPs below). Materialises a contiguous result on the input device.
 fn mat_transpose<T: Float>(t: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    transpose(t)
+    t.transpose(0, 1)?.contiguous()
 }
 
 // ---------------------------------------------------------------------------
@@ -2341,14 +2346,13 @@ pub struct LinalgInvBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for LinalgInvBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        // dA = -Y^T @ grad_Y @ Y^T
-        let yt = mat_transpose(&self.inv)?;
-        let tmp = mm(&yt, grad_output)?; // Y^T @ grad
-        let prod = mm(&tmp, &yt)?; // (Y^T @ grad) @ Y^T
-        let data = prod.data()?;
-        let neg: Vec<T> = data.iter().map(|&v| -v).collect();
-        let grad_a = Tensor::from_storage(TensorStorage::cpu(neg), prod.shape().to_vec(), false)?;
-        Ok(vec![Some(grad_a)])
+        crate::autograd::no_grad::no_grad(|| {
+            // dA = -Y^T @ grad_Y @ Y^T
+            let yt = mat_transpose(&self.inv)?;
+            let tmp = yt.mm(grad_output)?; // Y^T @ grad
+            let prod = tmp.mm(&yt)?; // (Y^T @ grad) @ Y^T
+            Ok(vec![Some(prod.neg_t()?)])
+        })
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -5097,8 +5101,8 @@ pub fn cross_differentiable<T: Float>(
 pub struct NormBackward<T: Float> {
     /// Input `x` (any shape), retained.
     x: Tensor<T>,
-    /// Scalar norm value, retained.
-    norm: T,
+    /// Scalar norm tensor, retained on the forward device.
+    norm: Tensor<T>,
     /// Norm order saved at forward time — selects the `norm_backward`
     /// branch above.
     ord: f64,
@@ -5129,10 +5133,20 @@ impl<T: Float> GradFn<T> for NormBackward<T> {
         if p == 0.0 {
             return Ok(vec![None]);
         }
+        if self.x.is_cuda() {
+            return crate::autograd::no_grad::no_grad(|| {
+                Ok(vec![Some(norm_backward_tensor(
+                    &self.x,
+                    &self.norm,
+                    grad_output,
+                    p,
+                )?)])
+            });
+        }
         let g: T = grad_output.item()?;
         let zero = <T as num_traits::Zero>::zero();
         let xd = self.x.data()?;
-        let norm = self.norm;
+        let norm = self.norm.item()?;
 
         let dx: Vec<T> = if p == 2.0 {
             if norm == zero {
@@ -5211,15 +5225,94 @@ impl<T: Float> GradFn<T> for NormBackward<T> {
     }
 }
 
+fn norm_sign_and_nonzero<T: Float>(
+    x: &Tensor<T>,
+) -> FerrotorchResult<(Tensor<T>, crate::bool_tensor::BoolTensor)> {
+    let abs = x.abs_t()?;
+    let zeros = crate::creation::zeros_like(&abs)?;
+    let ones = crate::creation::ones_like(&abs)?;
+    let nonzero = crate::bool_tensor::BoolTensor::ne(&abs, &zeros)?;
+    let safe_abs = crate::grad_fns::comparison::where_bt(&nonzero, &abs, &ones)?;
+    Ok((x.div_t(&safe_abs)?, nonzero))
+}
+
+#[allow(
+    clippy::float_cmp,
+    reason = "ord is a discrete dispatch selector matching upstream norm_backward"
+)]
+fn norm_backward_tensor<T: Float>(
+    x: &Tensor<T>,
+    norm: &Tensor<T>,
+    grad_output: &Tensor<T>,
+    p: f64,
+) -> FerrotorchResult<Tensor<T>> {
+    if x.is_cuda() && (is_f16::<T>() || is_bf16::<T>()) {
+        let x32 = x.to_dtype::<f32>()?;
+        let norm32 = norm.to_dtype::<f32>()?;
+        let grad32 = grad_output.to_dtype::<f32>()?;
+        return norm_backward_tensor(&x32, &norm32, &grad32, p)?.to_dtype::<T>();
+    }
+
+    let zero_x = crate::creation::zeros_like(x)?;
+    if p == 1.0 {
+        let (sign, _nonzero) = norm_sign_and_nonzero(x)?;
+        return grad_output.mul_t(&sign);
+    }
+    if p == 2.0 {
+        let norm_zero = crate::creation::zeros_like(norm)?;
+        let norm_one = crate::creation::ones_like(norm)?;
+        let norm_nonzero = crate::bool_tensor::BoolTensor::ne(norm, &norm_zero)?;
+        let safe_norm = crate::grad_fns::comparison::where_bt(&norm_nonzero, norm, &norm_one)?;
+        let raw = grad_output.mul_t(x)?.div_t(&safe_norm)?;
+        return crate::grad_fns::comparison::where_bt(&norm_nonzero, &raw, &zero_x);
+    }
+    if p.is_infinite() {
+        let abs = x.abs_t()?;
+        let tie = crate::bool_tensor::BoolTensor::eq_t(&abs, norm)?;
+        let tie_f = tie.to_float::<T>()?;
+        let count = tie_f.count_nonzero_t()?.to_float::<T>()?;
+        let (sign, _nonzero) = norm_sign_and_nonzero(x)?;
+        return sign.mul_t(&tie_f)?.mul_t(grad_output)?.div_t(&count);
+    }
+
+    let (sign, nonzero) = norm_sign_and_nonzero(x)?;
+    let abs = x.abs_t()?;
+    if p < 1.0 {
+        let ones = crate::creation::ones_like(&abs)?;
+        let safe_abs = crate::grad_fns::comparison::where_bt(&nonzero, &abs, &ones)?;
+        let scale = norm.pow_t(1.0 - p)?;
+        let raw = sign
+            .mul_t(&safe_abs.pow_t(p - 1.0)?)?
+            .mul_t(grad_output)?
+            .mul_t(&scale)?;
+        return crate::grad_fns::comparison::where_bt(&nonzero, &raw, &zero_x);
+    }
+
+    let denom = norm.pow_t(p - 1.0)?;
+    let norm_zero = crate::creation::zeros_like(norm)?;
+    let norm_one = crate::creation::ones_like(norm)?;
+    let norm_nonzero = crate::bool_tensor::BoolTensor::ne(norm, &norm_zero)?;
+    let safe_denom = crate::grad_fns::comparison::where_bt(&norm_nonzero, &denom, &norm_one)?;
+    let raw = if p < 2.0 {
+        sign.mul_t(&abs.pow_t(p - 1.0)?)?
+            .mul_t(grad_output)?
+            .div_t(&safe_denom)?
+    } else {
+        x.mul_t(&abs.pow_t(p - 2.0)?)?
+            .mul_t(grad_output)?
+            .div_t(&safe_denom)?
+    };
+    crate::grad_fns::comparison::where_bt(&norm_nonzero, &raw, &zero_x)
+}
+
 /// Differentiable Frobenius `matrix_norm`. Attaches `NormBackward` when grad is
 /// needed. Forward computed under `no_grad` (re-entry guard).
 pub fn matrix_norm_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let n = crate::autograd::no_grad::no_grad(|| linalg_fwd::matrix_norm(a))?;
     if is_grad_enabled() && a.requires_grad() {
-        let norm_val: T = n.item()?;
         let grad_fn = Arc::new(NormBackward {
             x: a.clone(),
-            norm: norm_val,
+            norm: n.clone(),
             // Frobenius == 2-norm of the flattened entries.
             ord: 2.0,
         });
@@ -5241,10 +5334,9 @@ pub fn vector_norm_differentiable<T: Float>(
 ) -> FerrotorchResult<Tensor<T>> {
     let n = crate::autograd::no_grad::no_grad(|| linalg_fwd::vector_norm(a, ord))?;
     if is_grad_enabled() && a.requires_grad() {
-        let norm_val: T = n.item()?;
         let grad_fn = Arc::new(NormBackward {
             x: a.clone(),
-            norm: norm_val,
+            norm: n.clone(),
             ord,
         });
         let (storage, shape) = n.into_storage_and_shape()?;

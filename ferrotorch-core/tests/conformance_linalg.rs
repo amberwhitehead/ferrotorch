@@ -2893,10 +2893,11 @@ fn cpu_matrix_rank() {
         let expected = f.rank_expected.expect("rank_expected");
         let a = make_cpu_f64(a_data, a_shape, false);
         let r = matrix_rank(&a, None).expect("matrix_rank");
-        let r_v = read_back_f64(&r, Device::Cpu);
+        let r_cpu = r.to(Device::Cpu).expect("matrix_rank to cpu");
+        let r_v = r_cpu.data().expect("matrix_rank data");
         assert_eq!(r_v.len(), 1, "matrix_rank should return scalar");
         assert!(
-            (r_v[0] - expected as f64).abs() < 0.5,
+            r_v[0] == expected,
             "matrix_rank: expected {expected}, got {}",
             r_v[0]
         );
