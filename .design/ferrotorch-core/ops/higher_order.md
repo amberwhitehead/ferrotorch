@@ -30,8 +30,11 @@ PyTorch's higher-order autograd invariant.
 ## Requirements
 
 - REQ-1: `cond(pred, true_fn, false_fn, operands)` — evaluate
-  `true_fn(operands)` if `pred > 0.5`, else `false_fn(operands)`.
-  Only the taken branch is called. Mirrors `torch.cond`
+  `true_fn(operands)` if `pred` is nonzero, else
+  `false_fn(operands)`. A CUDA-resident scalar predicate is read by an
+  explicit one-element synchronization; branch outputs and operands are
+  not moved by predicate evaluation. Only the taken branch is called.
+  Mirrors `torch.cond`
   (`torch/_higher_order_ops/cond.py`).
 - REQ-2: `cond` autograd — gradients flow through the taken branch
   ONLY. When any operand requires grad, each branch output is wrapped
@@ -76,6 +79,9 @@ PyTorch's higher-order autograd invariant.
 - [x] AC-7: CUDA `cond` / `scan` outputs and backward gradients remain
   CUDA-resident when autograd is active; detached branch / step outputs
   produce explicit zero gradients for the original inputs.
+- [x] AC-8: CPU and CUDA `cond` predicates match PyTorch
+  single-element tensor truthiness: exact zero is false; nonzero,
+  including subunit values and NaN, is true.
 
 ## Architecture
 
@@ -90,13 +96,17 @@ operand gradients.
 
 `cond` at `:79-134` walks:
 
-1. Validate `pred.numel() == 1` (`:91`).
-2. Read scalar pred value at `:101`; compare against `T::from(0.5)`.
-3. Invoke `true_fn(operands)` or `false_fn(operands)` based on the
-   comparison (`:105-109`).
-4. If no operand requires grad / grad is disabled, return raw
+1. Validate `pred.numel() == 1`.
+2. Read the logical single element with `data_vec()`, which is an
+   explicit scalar D2H synchronization for CUDA predicates.
+3. Treat the predicate as true iff it is not exactly zero. This mirrors
+   PyTorch tensor truthiness for float predicates: `0.25`, `0.5`,
+   negative values, and `NaN` all take the true branch.
+4. Invoke `true_fn(operands)` or `false_fn(operands)` based on the
+   predicate.
+5. If no operand requires grad / grad is disabled, return raw
    outputs.
-5. Otherwise, wrap each output with `CondBackward { branch_output:
+6. Otherwise, wrap each output with `CondBackward { branch_output:
    out.clone(), operands }` through `wrap_control_flow_output`, which
    attaches the grad node to a stride view sharing the output's
    existing storage/device instead of copying through host memory.
@@ -162,6 +172,12 @@ audit_core116_117_higher_order_control_flow` exercises CPU and CUDA
 probes for PyTorch-style detached-output zero gradients, connected
 CUDA gradients, and non-contiguous CUDA branch outputs that must stay
 device-resident.
+
+`cargo test -p ferrotorch-core --features gpu --test
+audit_core119_cond_cuda_predicate` exercises CPU and CUDA predicate
+truthiness, including CUDA scalar predicates, f32/f64 branch execution,
+resident CUDA outputs, resident CUDA gradients, zero predicates, and
+NaN predicates.
 
 ## REQ status table
 

@@ -13,7 +13,7 @@
 //! | REQ-3 | SHIPPED | `validate_cond_branches` at `ops/higher_order.rs:142`; consumer: re-export at `autograd/mod.rs:26` |
 //! | REQ-4 | SHIPPED | `scan` at `ops/higher_order.rs:236`; consumer: re-export `ferrotorch_core::autograd::scan` at `autograd/mod.rs:26` |
 //! | REQ-5 | SHIPPED | `ScanBackward` at `ops/higher_order.rs:191` + zero-copy wrap; consumer: `scan` re-export |
-//! | REQ-6 | SHIPPED | `pred.numel() != 1` check at `ops/higher_order.rs:91`; consumer: `cond` entry |
+//! | REQ-6 | SHIPPED | `read_cond_predicate` scalar validation/read at `ops/higher_order.rs`; consumer: `cond` entry |
 
 use std::sync::Arc;
 
@@ -82,13 +82,15 @@ fn wrap_control_flow_output<T: Float>(
 
 /// Conditional subgraph execution.
 ///
-/// Evaluates `true_fn(operands)` if `pred > 0.5`, otherwise `false_fn(operands)`.
+/// Evaluates `true_fn(operands)` if `pred` is nonzero, otherwise
+/// `false_fn(operands)`.
 /// Only the taken branch is executed — the other branch is never called.
 ///
 /// # Arguments
 ///
 /// - `pred` - A scalar tensor (0-D or single-element) treated as boolean.
-///   Values > 0.5 are "true", <= 0.5 are "false".
+///   Values equal to zero are "false"; all nonzero values, including NaN,
+///   are "true", matching PyTorch single-element tensor truthiness.
 /// - `true_fn` - Function to call when pred is true. Takes operands, returns
 ///   a vector of output tensors.
 /// - `false_fn` - Function to call when pred is false. Same signature.
@@ -120,20 +122,7 @@ where
     TF: FnOnce(&[Tensor<T>]) -> Vec<Tensor<T>>,
     FF: FnOnce(&[Tensor<T>]) -> Vec<Tensor<T>>,
 {
-    // Validate pred is scalar.
-    if pred.numel() != 1 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "cond: pred must be a scalar tensor (1 element), got shape {:?} ({} elements)",
-                pred.shape(),
-                pred.numel()
-            ),
-        });
-    }
-
-    let pred_val = pred.data()?[0];
-    let threshold = T::from(0.5).expect("Float trait guarantees from(0.5) succeeds");
-    let take_true = pred_val > threshold;
+    let take_true = read_cond_predicate(pred)?;
 
     let branch_outputs = if take_true {
         true_fn(operands)
@@ -161,6 +150,25 @@ where
     }
 
     Ok(result)
+}
+
+fn read_cond_predicate<T: Float>(pred: &Tensor<T>) -> FerrotorchResult<bool> {
+    // PyTorch accepts 0-D or single-element tensor predicates. Its dense
+    // implementation uses tensor truthiness, so floating predicates are false
+    // only when exactly zero; NaN is true. `data_vec()` is intentional here:
+    // a CUDA predicate requires one explicit scalar synchronization.
+    if pred.numel() != 1 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "cond: pred must be a scalar tensor (1 element), got shape {:?} ({} elements)",
+                pred.shape(),
+                pred.numel()
+            ),
+        });
+    }
+
+    let values = pred.data_vec()?;
+    Ok(!values[0].is_zero())
 }
 
 /// Validate that two sets of outputs have matching shapes.
@@ -445,8 +453,8 @@ mod tests {
     }
 
     #[test]
-    fn test_cond_threshold_boundary() {
-        // pred = 0.5 exactly => false branch (> 0.5 is true, not >=)
+    fn test_cond_nonzero_predicate_truthiness() {
+        // PyTorch truthiness: any nonzero single-element tensor is true.
         let pred =
             Tensor::<f32>::from_storage(TensorStorage::cpu(vec![0.5]), vec![], false).unwrap();
 
@@ -461,14 +469,13 @@ mod tests {
         .unwrap();
 
         let data = result[0].data().unwrap();
-        assert_eq!(data, &[20.0, 20.0]); // false branch
+        assert_eq!(data, &[10.0, 10.0]); // true branch
     }
 
     #[test]
-    fn test_cond_just_above_threshold() {
-        // pred = 0.51 => true branch
+    fn test_cond_zero_predicate_is_false() {
         let pred =
-            Tensor::<f32>::from_storage(TensorStorage::cpu(vec![0.51]), vec![], false).unwrap();
+            Tensor::<f32>::from_storage(TensorStorage::cpu(vec![0.0]), vec![], false).unwrap();
 
         let x = ones::<f32>(&[2]).unwrap();
 
@@ -481,7 +488,7 @@ mod tests {
         .unwrap();
 
         let data = result[0].data().unwrap();
-        assert_eq!(data, &[10.0, 10.0]); // true branch
+        assert_eq!(data, &[20.0, 20.0]); // false branch
     }
 
     #[test]
