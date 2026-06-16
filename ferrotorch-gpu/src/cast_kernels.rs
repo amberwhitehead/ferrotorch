@@ -6,10 +6,12 @@
 //!
 //! # Matrix
 //!
-//! - **float → int** (`f32`/`f64`/`bf16`/`f16` → `i32`/`i64`): TRUNCATE toward
-//!   zero, matching PyTorch `.to(torch.int)` / `.to(torch.long)`. PTX
-//!   `cvt.rzi.s{32,64}.f{32,64}` does exactly this (`rzi` = round-to-zero,
-//!   integer). bf16/f16 are first widened to f32, then `cvt.rzi`.
+//! - **float → int** (`f32`/`f64`/`bf16`/`f16` → `i32`/`i64`): finite
+//!   in-range values truncate toward zero, matching CUDA PyTorch
+//!   `.to(torch.int)` / `.to(torch.long)`. Invalid conversions follow CUDA/PTX
+//!   target-width behavior, which intentionally differs from PyTorch CPU for
+//!   some NaN, infinity, and out-of-range cases. bf16/f16 are first widened to
+//!   f32, then `cvt.rzi`.
 //! - **int → float** (`i32`/`i64` → `f32`/`f64`/`bf16`/`f16`): PTX
 //!   `cvt.rn.f{32,64}.s{32,64}` (round-to-nearest-even). bf16/f16 outputs go
 //!   via f32 then `cvt.rn.bf16.f32` / `cvt.rn.f16.f32` (round-to-nearest-even,
@@ -907,6 +909,231 @@ mod tests {
         let h = d.stream().clone_htod(&vec![3.7f32, -3.7]).unwrap();
         let r = cast_f32_to_i64(&h, h.len(), &d).unwrap();
         assert_eq!(d.stream().clone_dtoh(&r).unwrap(), vec![3i64, -3]);
+    }
+
+    #[test]
+    fn float_to_int_exceptional_values_match_torch_cuda() {
+        let d = dev();
+
+        let f32_values = vec![
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            -0.0,
+            1.9,
+            -1.9,
+            2_147_483_648.0,
+            -2_147_483_648.0,
+            -2_147_483_904.0,
+            9_223_372_036_854_775_808.0,
+            -9_223_372_036_854_775_808.0,
+        ];
+        let f32_h = d.stream().clone_htod(&f32_values).unwrap();
+        assert_eq!(
+            d.stream()
+                .clone_dtoh(&cast_f32_to_i32(&f32_h, f32_h.len(), &d).unwrap())
+                .unwrap(),
+            vec![
+                0,
+                i32::MAX,
+                i32::MIN,
+                0,
+                0,
+                1,
+                -1,
+                i32::MAX,
+                i32::MIN,
+                i32::MIN,
+                i32::MAX,
+                i32::MIN,
+            ]
+        );
+        assert_eq!(
+            d.stream()
+                .clone_dtoh(&cast_f32_to_i64(&f32_h, f32_h.len(), &d).unwrap())
+                .unwrap(),
+            vec![
+                i64::MIN,
+                i64::MAX,
+                i64::MIN,
+                0,
+                0,
+                1,
+                -1,
+                2_147_483_648,
+                -2_147_483_648,
+                -2_147_483_904,
+                i64::MAX,
+                i64::MIN,
+            ]
+        );
+
+        let f64_values = vec![
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            -0.0,
+            1.9,
+            -1.9,
+            2_147_483_647.0,
+            2_147_483_648.0,
+            -2_147_483_648.0,
+            -2_147_483_649.0,
+            9_223_372_036_854_774_784.0,
+            9_223_372_036_854_775_808.0,
+            -9_223_372_036_854_775_808.0,
+            -9_223_372_036_854_777_856.0,
+            1.0e20,
+            -1.0e20,
+        ];
+        let f64_h = d.stream().clone_htod(&f64_values).unwrap();
+        assert_eq!(
+            d.stream()
+                .clone_dtoh(&cast_f64_to_i32(&f64_h, f64_h.len(), &d).unwrap())
+                .unwrap(),
+            vec![
+                i32::MIN,
+                i32::MAX,
+                i32::MIN,
+                0,
+                0,
+                1,
+                -1,
+                i32::MAX,
+                i32::MAX,
+                i32::MIN,
+                i32::MIN,
+                i32::MAX,
+                i32::MAX,
+                i32::MIN,
+                i32::MIN,
+                i32::MAX,
+                i32::MIN,
+            ]
+        );
+        assert_eq!(
+            d.stream()
+                .clone_dtoh(&cast_f64_to_i64(&f64_h, f64_h.len(), &d).unwrap())
+                .unwrap(),
+            vec![
+                i64::MIN,
+                i64::MAX,
+                i64::MIN,
+                0,
+                0,
+                1,
+                -1,
+                2_147_483_647,
+                2_147_483_648,
+                -2_147_483_648,
+                -2_147_483_649,
+                9_223_372_036_854_774_784,
+                i64::MAX,
+                i64::MIN,
+                i64::MIN,
+                i64::MAX,
+                i64::MIN,
+            ]
+        );
+
+        let reduced_values = [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            1.9,
+            -1.9,
+            65_504.0,
+            -65_504.0,
+            2_147_483_648.0,
+            -2_147_483_904.0,
+            1.0e20,
+            -1.0e20,
+        ];
+        let f16_bits: Vec<u16> = reduced_values
+            .iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
+        let f16_h = d.stream().clone_htod(&f16_bits).unwrap();
+        assert_eq!(
+            d.stream()
+                .clone_dtoh(&cast_f16_to_i32(&f16_h, f16_h.len(), &d).unwrap())
+                .unwrap(),
+            vec![
+                0,
+                i32::MAX,
+                i32::MIN,
+                1,
+                -1,
+                65_504,
+                -65_504,
+                i32::MAX,
+                i32::MIN,
+                i32::MAX,
+                i32::MIN,
+            ]
+        );
+        assert_eq!(
+            d.stream()
+                .clone_dtoh(&cast_f16_to_i64(&f16_h, f16_h.len(), &d).unwrap())
+                .unwrap(),
+            vec![
+                i64::MIN,
+                i64::MAX,
+                i64::MIN,
+                1,
+                -1,
+                65_504,
+                -65_504,
+                i64::MAX,
+                i64::MIN,
+                i64::MAX,
+                i64::MIN,
+            ]
+        );
+
+        let bf16_bits: Vec<u16> = reduced_values
+            .iter()
+            .map(|&v| half::bf16::from_f32(v).to_bits())
+            .collect();
+        let bf16_h = d.stream().clone_htod(&bf16_bits).unwrap();
+        assert_eq!(
+            d.stream()
+                .clone_dtoh(&cast_bf16_to_i32(&bf16_h, bf16_h.len(), &d).unwrap())
+                .unwrap(),
+            vec![
+                0,
+                i32::MAX,
+                i32::MIN,
+                1,
+                -1,
+                65_536,
+                -65_536,
+                i32::MAX,
+                i32::MIN,
+                i32::MAX,
+                i32::MIN,
+            ]
+        );
+        assert_eq!(
+            d.stream()
+                .clone_dtoh(&cast_bf16_to_i64(&bf16_h, bf16_h.len(), &d).unwrap())
+                .unwrap(),
+            vec![
+                i64::MIN,
+                i64::MAX,
+                i64::MIN,
+                1,
+                -1,
+                65_536,
+                -65_536,
+                2_147_483_648,
+                -2_147_483_648,
+                i64::MAX,
+                i64::MIN,
+            ]
+        );
     }
 
     #[test]

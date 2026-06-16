@@ -642,8 +642,12 @@ impl<T: Float> Tensor<T> {
         }
     }
 
-    /// Cast this float tensor to `IntTensor<I>` (PyTorch `.to(int)`):
-    /// **truncate toward zero**. GPU-resident result when `self` is on CUDA.
+    /// Cast this float tensor to `IntTensor<I>` (PyTorch `.to(int)`).
+    ///
+    /// Finite in-range values truncate toward zero. Non-finite and
+    /// out-of-range values follow PyTorch CPU's target-width cast result
+    /// instead of Rust's saturating `as` semantics, so i32 and i64 invalid
+    /// conversions are decided independently.
     pub fn to_int<I: IntElement>(&self) -> FerrotorchResult<IntTensor<I>> {
         let input = self.contiguous()?;
         let shape = input.shape().to_vec();
@@ -656,28 +660,65 @@ impl<T: Float> Tensor<T> {
             let data = input.data_vec()?;
             let mut out: Vec<I> = Vec::with_capacity(data.len());
             for &v in &data {
-                // Truncate toward zero (PyTorch `.to(int)`): drop the fraction.
-                let truncated = num_traits::Float::trunc(v);
-                let as_i64 = float_to_i64_trunc(truncated);
-                out.push(
-                    I::try_from_i64(as_i64).ok_or(FerrotorchError::InvalidArgument {
-                        message: format!("to_int: value out of range for {}", I::dtype_name()),
-                    })?,
-                );
+                out.push(cpu_float_to_int::<T, I>(v)?);
             }
             IntTensor::<I>::from_vec(out, shape)
         }
     }
 }
 
-/// Convert an already-truncated float to i64 (saturating at the i64 range,
-/// matching the CPU `as` cast which saturates rather than wraps).
-fn float_to_i64_trunc<T: Float>(v: T) -> i64 {
-    // `T: Float` -> f64 is lossless for f32/bf16/f16 and exact enough for the
-    // integer range here; `as i64` on f64 saturates (Rust 1.45+ semantics),
-    // matching PyTorch's clamp-on-overflow for `.to(int64)`.
-    let f: f64 = num_traits::ToPrimitive::to_f64(&v).unwrap_or(0.0);
-    f as i64
+fn target_width_invalid_int<I: IntElement>() -> FerrotorchResult<I> {
+    let value = match I::BITS {
+        32 => i64::from(i32::MIN),
+        64 => i64::MIN,
+        bits => {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("to_int: unsupported integer width {bits}"),
+            });
+        }
+    };
+    I::try_from_i64(value).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: format!(
+            "to_int: invalid sentinel out of range for {}",
+            I::dtype_name()
+        ),
+    })
+}
+
+fn cpu_float_to_int<T: Float, I: IntElement>(v: T) -> FerrotorchResult<I> {
+    let f = num_traits::ToPrimitive::to_f64(&v).unwrap_or(f64::NAN);
+    if !f.is_finite() {
+        return target_width_invalid_int::<I>();
+    }
+
+    let value = match I::BITS {
+        32 => {
+            if f < f64::from(i32::MIN) || f > f64::from(i32::MAX) {
+                return target_width_invalid_int::<I>();
+            }
+            f.trunc() as i64
+        }
+        64 => {
+            const I64_MIN_AS_F64: f64 = -9_223_372_036_854_775_808.0;
+            const I64_UPPER_EXCLUSIVE_AS_F64: f64 = 9_223_372_036_854_775_808.0;
+            if !(I64_MIN_AS_F64..I64_UPPER_EXCLUSIVE_AS_F64).contains(&f) {
+                return target_width_invalid_int::<I>();
+            }
+            f.trunc() as i64
+        }
+        bits => {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("to_int: unsupported integer width {bits}"),
+            });
+        }
+    };
+
+    I::try_from_i64(value).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: format!(
+            "to_int: converted value out of range for {}",
+            I::dtype_name()
+        ),
+    })
 }
 
 // ===========================================================================
