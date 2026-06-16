@@ -113,26 +113,15 @@ fn gather_logical_from_slice<T: Float>(
 ) -> FerrotorchResult<Vec<T>> {
     crate::stride_tricks::validate_bounds(op, shape, strides, offset, storage.len())?;
     let numel = checked_numel(shape, op)?;
-    let ndim = shape.len();
     let mut result = Vec::with_capacity(numel);
-    let mut indices = vec![0usize; ndim];
-
-    for _ in 0..numel {
-        let mut flat = offset as isize;
-        for d in 0..ndim {
-            flat += indices[d] as isize * strides[d];
-        }
-        result.push(storage[flat as usize]);
-
-        for d in (0..ndim).rev() {
-            indices[d] += 1;
-            if indices[d] < shape[d] {
-                break;
-            }
-            indices[d] = 0;
-        }
-    }
-
+    let base_offset = i64::try_from(offset).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!("{op}: storage_offset {offset} exceeds i64::MAX"),
+    })?;
+    crate::stride_tricks::for_each_strided_offset(op, shape, strides, base_offset, |_, flat| {
+        let storage_i = crate::stride_tricks::checked_flat_index(op, flat)?;
+        result.push(storage[storage_i]);
+        Ok(())
+    })?;
     Ok(result)
 }
 
@@ -1277,31 +1266,13 @@ impl<T: Float> Tensor<T> {
             // so try_as_slice on this CPU/Meta arm only Errs on Meta — which
             // the data_vec entry guard at the top of the function rejects.
             let slice = self.inner.storage.try_as_slice()?;
-            let shape = &self.inner.shape;
-            let strides = &self.inner.strides;
-            let offset = self.inner.offset;
-            let numel = self.numel();
-            let ndim = shape.len();
-            crate::stride_tricks::validate_bounds("data_vec", shape, strides, offset, slice.len())?;
-
-            let mut result = Vec::with_capacity(numel);
-            let mut indices = vec![0usize; ndim];
-            for _ in 0..numel {
-                let mut flat = offset as isize;
-                for d in 0..ndim {
-                    flat += indices[d] as isize * strides[d];
-                }
-                result.push(slice[flat as usize]);
-                // Increment multi-index (rightmost first).
-                for d in (0..ndim).rev() {
-                    indices[d] += 1;
-                    if indices[d] < shape[d] {
-                        break;
-                    }
-                    indices[d] = 0;
-                }
-            }
-            Ok(result)
+            gather_logical_from_slice(
+                "data_vec",
+                slice,
+                &self.inner.shape,
+                &self.inner.strides,
+                self.inner.offset,
+            )
         }
     }
 
@@ -2428,25 +2399,25 @@ impl<T: Float> Tensor<T> {
         // SAFETY: exclusivity is forwarded verbatim from this function's
         // own `# Safety` contract.
         let dst = unsafe { self.inner.storage.try_as_mut_slice_aliased()? };
-        let shape = &self.inner.shape;
-        let strides = &self.inner.strides;
-        let ndim = shape.len();
-        let mut idx = vec![0usize; ndim];
-        let mut off = self.inner.offset as isize;
-        for &v in src {
-            // In-bounds per the caller's `check_view_write` obligation
-            // (validate_bounds covered the full reachable extent).
-            dst[off as usize] = v;
-            for d in (0..ndim).rev() {
-                idx[d] += 1;
-                off += strides[d];
-                if idx[d] < shape[d] {
-                    break;
-                }
-                off -= shape[d] as isize * strides[d];
-                idx[d] = 0;
-            }
-        }
+        let base_offset =
+            i64::try_from(self.inner.offset).map_err(|_| FerrotorchError::InvalidArgument {
+                message: format!(
+                    "cpu_scatter_through_view: storage_offset {} exceeds i64::MAX",
+                    self.inner.offset
+                ),
+            })?;
+        crate::stride_tricks::for_each_strided_offset(
+            "cpu_scatter_through_view",
+            &self.inner.shape,
+            &self.inner.strides,
+            base_offset,
+            |src_i, flat| {
+                let dst_i =
+                    crate::stride_tricks::checked_flat_index("cpu_scatter_through_view", flat)?;
+                dst[dst_i] = src[src_i];
+                Ok(())
+            },
+        )?;
         Ok(())
     }
 
@@ -2566,7 +2537,13 @@ impl<T: Float> Tensor<T> {
                 return false;
             }
             if self.inner.shape[d] != 1 {
-                expected_stride *= self.inner.shape[d] as isize;
+                let Ok(dim) = isize::try_from(self.inner.shape[d]) else {
+                    return false;
+                };
+                let Some(next_stride) = expected_stride.checked_mul(dim) else {
+                    return false;
+                };
+                expected_stride = next_stride;
             }
         }
         true
@@ -2797,7 +2774,6 @@ impl<T: Float> Tensor<T> {
         target_strides: Vec<isize>,
     ) -> FerrotorchResult<Self> {
         let shape = &self.inner.shape;
-        let ndim = shape.len();
         let numel = self.numel();
         let src_strides = &self.inner.strides;
         let offset = self.inner.offset;
@@ -2816,23 +2792,53 @@ impl<T: Float> Tensor<T> {
 
         let mut dst = vec![<T as num_traits::Zero>::zero(); numel];
 
-        let mut indices = vec![0usize; ndim];
-        for _ in 0..numel {
-            let mut src_flat = offset as isize;
-            let mut dst_flat: isize = 0;
-            for d in 0..ndim {
-                src_flat += indices[d] as isize * src_strides[d];
-                dst_flat += indices[d] as isize * target_strides[d];
-            }
-            dst[dst_flat as usize] = src_ref[src_flat as usize];
-
-            for d in (0..ndim).rev() {
-                indices[d] += 1;
-                if indices[d] < shape[d] {
-                    break;
-                }
-                indices[d] = 0;
-            }
+        crate::stride_tricks::validate_bounds(
+            "materialize_format source",
+            shape,
+            src_strides,
+            offset,
+            src_ref.len(),
+        )?;
+        crate::stride_tricks::validate_bounds(
+            "materialize_format target",
+            shape,
+            &target_strides,
+            0,
+            numel,
+        )?;
+        let source_base = i64::try_from(offset).map_err(|_| FerrotorchError::InvalidArgument {
+            message: format!("materialize_format source: storage_offset {offset} exceeds i64::MAX"),
+        })?;
+        let mut src_offsets = Vec::with_capacity(numel);
+        crate::stride_tricks::for_each_strided_offset(
+            "materialize_format source",
+            shape,
+            src_strides,
+            source_base,
+            |_, flat| {
+                src_offsets.push(crate::stride_tricks::checked_flat_index(
+                    "materialize_format source",
+                    flat,
+                )?);
+                Ok(())
+            },
+        )?;
+        let mut dst_offsets = Vec::with_capacity(numel);
+        crate::stride_tricks::for_each_strided_offset(
+            "materialize_format target",
+            shape,
+            &target_strides,
+            0,
+            |_, flat| {
+                dst_offsets.push(crate::stride_tricks::checked_flat_index(
+                    "materialize_format target",
+                    flat,
+                )?);
+                Ok(())
+            },
+        )?;
+        for (dst_i, src_i) in dst_offsets.into_iter().zip(src_offsets) {
+            dst[dst_i] = src_ref[src_i];
         }
 
         let storage = TensorStorage::on_device(dst, device)?;

@@ -78,9 +78,9 @@
 //! | REQ-1 | SHIPPED | impl `Tensor::as_strided`; non-test consumer `crate::einsum`. |
 //! | REQ-2 | SHIPPED | impl `Tensor::as_strided_copy` (CUDA via `strided_copy_*`, CPU walk); non-test consumer `crate::einsum`. |
 //! | REQ-3 | SHIPPED | impl `Tensor::as_strided_scatter`; non-test consumer `AsStridedScatterBackward::backward` (base-grad masking). |
-//! | REQ-4 | SHIPPED | impl `validate_bounds` + `stride_extent`; non-test consumer invoked from `as_strided` / `as_strided_scatter`. |
+//! | REQ-4 | SHIPPED | impl `validate_bounds` + checked signed stride extent; non-test consumer invoked from `as_strided` / `as_strided_scatter`. |
 //! | REQ-5 | SHIPPED | impl `AsStridedBackward` + `GradFn::backward`; non-test consumer `Tensor::as_strided` attach path. |
-//! | REQ-6 | SHIPPED | negative-stride support via `stride_extent`; non-test consumer reverse views. |
+//! | REQ-6 | SHIPPED | negative-stride support via checked signed stride extent; non-test consumer reverse views. |
 //! | REQ-7 | SHIPPED | zero-stride broadcast support; non-test consumer `Tensor::expand` family. |
 //! | REQ-8 | SHIPPED | free-function wrappers `as_strided`, `as_strided_copy`, `as_strided_scatter`; non-test consumer downstream functional-style call sites. |
 
@@ -131,33 +131,6 @@ pub fn as_strided_scatter<T: Float>(
 // Internal: bounds validation
 // ---------------------------------------------------------------------------
 
-/// Compute the smallest and largest element offsets reachable by walking
-/// every position in a strided view.
-///
-/// Returns `(min_offset, max_offset)` in element units, both inclusive.
-/// For an empty view (`shape` contains a 0) returns `(0, 0)` to signal
-/// "no positions reached" — the caller should treat that as trivially
-/// in-bounds at any `storage_offset`.
-fn stride_extent(shape: &[usize], stride: &[isize]) -> (i64, i64) {
-    if shape.contains(&0) {
-        return (0, 0);
-    }
-    let mut min_off: i64 = 0;
-    let mut max_off: i64 = 0;
-    for (&dim, &s) in shape.iter().zip(stride.iter()) {
-        if dim == 0 {
-            continue;
-        }
-        let last = (dim as i64 - 1) * s as i64;
-        if last >= 0 {
-            max_off += last;
-        } else {
-            min_off += last;
-        }
-    }
-    (min_off, max_off)
-}
-
 fn checked_stride_extent(
     op: &'static str,
     shape: &[usize],
@@ -206,6 +179,24 @@ fn checked_stride_extent(
     Ok((min_off, max_off))
 }
 
+fn checked_logical_numel_i64(op: &'static str, shape: &[usize]) -> FerrotorchResult<i64> {
+    let mut numel: i64 = 1;
+    for (axis, &dim) in shape.iter().enumerate() {
+        let dim_i64 = i64::try_from(dim).map_err(|_| FerrotorchError::InvalidArgument {
+            message: format!("{op}: shape dimension {axis} value {dim} exceeds i64::MAX"),
+        })?;
+        if dim_i64 == 0 {
+            return Ok(0);
+        }
+        numel = numel
+            .checked_mul(dim_i64)
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!("{op}: shape {shape:?} element count overflows i64"),
+            })?;
+    }
+    Ok(numel)
+}
+
 /// Validate that the requested view fits within `storage_len`.
 ///
 /// Returns `Ok(())` if every reachable offset lies inside `[0, storage_len)`.
@@ -237,6 +228,7 @@ pub(crate) fn validate_bounds(
             });
         }
     }
+    checked_logical_numel_i64(op, shape)?;
 
     let storage_offset_i64 =
         i64::try_from(storage_offset).map_err(|_| FerrotorchError::InvalidArgument {
@@ -316,10 +308,20 @@ fn maybe_overlapping_memory(shape: &[usize], stride: &[isize]) -> bool {
     dims.sort_by_key(|&(_, st)| st);
     let mut max_reach: i64 = 0;
     for (sz, st) in dims {
-        if (st as i64) <= max_reach {
+        let st_i64 = st as i64;
+        if st_i64 <= max_reach {
             return true;
         }
-        max_reach += (st as i64) * (sz as i64 - 1);
+        let Some(sz_minus_one) = sz.checked_sub(1).and_then(|n| i64::try_from(n).ok()) else {
+            return true;
+        };
+        let Some(reach) = st_i64.checked_mul(sz_minus_one) else {
+            return true;
+        };
+        let Some(next_reach) = max_reach.checked_add(reach) else {
+            return true;
+        };
+        max_reach = next_reach;
     }
     false
 }
@@ -329,39 +331,101 @@ fn maybe_overlapping_memory(shape: &[usize], stride: &[isize]) -> bool {
 /// is added to every flat offset; strides may be zero or negative. The
 /// caller guarantees the geometry was bounds-validated against the buffer
 /// the flat offsets index into.
-fn for_each_strided_offset(
+pub(crate) fn for_each_strided_offset(
+    op: &'static str,
     shape: &[usize],
     stride: &[isize],
     base_offset: i64,
-    mut f: impl FnMut(usize, i64),
-) {
-    let numel: usize = crate::shape::numel(shape);
+    mut f: impl FnMut(usize, i64) -> FerrotorchResult<()>,
+) -> FerrotorchResult<()> {
+    if shape.len() != stride.len() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: shape and stride must have the same length (got {} vs {})",
+                shape.len(),
+                stride.len()
+            ),
+        });
+    }
+    let numel = crate::shape::checked_numel(shape, op)?;
     if numel == 0 {
-        return;
+        return Ok(());
     }
     let ndim = shape.len();
     let mut indices = vec![0usize; ndim];
     let mut flat = base_offset;
     for i in 0..numel {
-        f(i, flat);
+        f(i, flat)?;
+        if i == numel - 1 {
+            break;
+        }
         for d in (0..ndim).rev() {
             indices[d] += 1;
-            flat += stride[d] as i64;
+            let step = stride[d] as i64;
+            flat = flat
+                .checked_add(step)
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!("{op}: strided offset walk overflows signed offset range"),
+                })?;
             if indices[d] < shape[d] {
                 break;
             }
-            flat -= (shape[d] as i64) * (stride[d] as i64);
+            let dim_i64 =
+                i64::try_from(shape[d]).map_err(|_| FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "{op}: shape dimension {d} value {} exceeds i64::MAX",
+                        shape[d]
+                    ),
+                })?;
+            let rewind =
+                dim_i64
+                    .checked_mul(step)
+                    .ok_or_else(|| FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "{op}: strided offset rewind overflows signed offset range"
+                        ),
+                    })?;
+            flat = flat
+                .checked_sub(rewind)
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!("{op}: strided offset rewind overflows signed offset range"),
+                })?;
             indices[d] = 0;
         }
     }
+    Ok(())
 }
 
 /// Signed inclusive range `[lo, hi]` of storage offsets reachable by a
 /// strided geometry rooted at `offset`. Caller guarantees the shape is
 /// non-empty.
-fn reachable_span(shape: &[usize], stride: &[isize], offset: usize) -> (i64, i64) {
-    let (min_off, max_off) = stride_extent(shape, stride);
-    (offset as i64 + min_off, offset as i64 + max_off)
+fn reachable_span(
+    op: &'static str,
+    shape: &[usize],
+    stride: &[isize],
+    offset: usize,
+) -> FerrotorchResult<(i64, i64)> {
+    let offset_i64 = i64::try_from(offset).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!("{op}: storage_offset {offset} exceeds i64::MAX"),
+    })?;
+    let (min_off, max_off) = checked_stride_extent(op, shape, stride)?;
+    let lo = offset_i64
+        .checked_add(min_off)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("{op}: reachable lower offset overflows signed offset range"),
+        })?;
+    let hi = offset_i64
+        .checked_add(max_off)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("{op}: reachable upper offset overflows signed offset range"),
+        })?;
+    Ok((lo, hi))
+}
+
+pub(crate) fn checked_flat_index(op: &'static str, flat: i64) -> FerrotorchResult<usize> {
+    usize::try_from(flat).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!("{op}: strided offset {flat} cannot be represented as usize"),
+    })
 }
 
 /// Materialise `t` into a tensor whose backing buffer is EXACTLY its
@@ -577,9 +641,23 @@ impl<T: Float> Tensor<T> {
             let mut buf = self.data_vec()?;
             let src_data = src.data_vec()?;
             // Bounds were validated; every flat offset is in [0, storage_len).
-            for_each_strided_offset(size, stride, offset as i64, |src_i, flat| {
-                buf[flat as usize] = src_data[src_i];
-            });
+            let offset_i64 =
+                i64::try_from(offset).map_err(|_| FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "as_strided_scatter: storage_offset {offset} exceeds i64::MAX"
+                    ),
+                })?;
+            for_each_strided_offset(
+                "as_strided_scatter",
+                size,
+                stride,
+                offset_i64,
+                |src_i, flat| {
+                    let dst_i = checked_flat_index("as_strided_scatter", flat)?;
+                    buf[dst_i] = src_data[src_i];
+                    Ok(())
+                },
+            )?;
             TensorStorage::cpu(buf)
         };
 
@@ -674,16 +752,32 @@ impl<T: Float> AsStridedBackward<T> {
 
         // Step 2: scatter-ADD at the output geometry.
         let mut base = vec![zero; base_len];
-        for_each_strided_offset(&self.size, &self.stride, out_eff, |i, flat| {
-            base[flat as usize] += gdata[i];
-        });
+        for_each_strided_offset(
+            "as_strided backward output scatter",
+            &self.size,
+            &self.stride,
+            out_eff,
+            |i, flat| {
+                let dst_i = checked_flat_index("as_strided backward output scatter", flat)?;
+                base[dst_i] += gdata[i];
+                Ok(())
+            },
+        )?;
 
         // Step 3: divide by visit count where the input geometry overlaps.
         if inp_overlap {
             let mut count = vec![zero; base_len];
-            for_each_strided_offset(inp_shape, inp_strides, inp_eff, |_, flat| {
-                count[flat as usize] += one;
-            });
+            for_each_strided_offset(
+                "as_strided backward input count",
+                inp_shape,
+                inp_strides,
+                inp_eff,
+                |_, flat| {
+                    let dst_i = checked_flat_index("as_strided backward input count", flat)?;
+                    count[dst_i] += one;
+                    Ok(())
+                },
+            )?;
             for (b, c) in base.iter_mut().zip(count.iter()) {
                 // Cells with count 0 are never gathered below; skipping the
                 // division avoids materialising torch's 0/0 NaNs.
@@ -695,9 +789,17 @@ impl<T: Float> AsStridedBackward<T> {
 
         // Step 4: gather through the input geometry.
         let mut out = vec![zero; self.input.numel()];
-        for_each_strided_offset(inp_shape, inp_strides, inp_eff, |i, flat| {
-            out[i] = base[flat as usize];
-        });
+        for_each_strided_offset(
+            "as_strided backward input gather",
+            inp_shape,
+            inp_strides,
+            inp_eff,
+            |i, flat| {
+                let src_i = checked_flat_index("as_strided backward input gather", flat)?;
+                out[i] = base[src_i];
+                Ok(())
+            },
+        )?;
         Tensor::from_storage(TensorStorage::cpu(out), inp_shape.to_vec(), false)
     }
 
@@ -735,14 +837,26 @@ impl<T: Float> AsStridedBackward<T> {
         let inp_shape = self.input.shape().to_vec();
         let inp_strides = self.input.strides().to_vec();
         let out_overlap = maybe_overlapping_memory(&self.size, &self.stride);
+        let out_eff_usize =
+            checked_flat_index("as_strided backward CUDA output effective offset", out_eff)?;
+        let inp_eff_usize =
+            checked_flat_index("as_strided backward CUDA input effective offset", inp_eff)?;
 
         if is_f16_or_bf16 && (out_overlap || inp_overlap) {
             let grad_f32_h = backend.cast_f_to_f(grad_buf, DType::F32)?;
             let base_h = if out_overlap {
                 let mut idx = vec![0usize; grad.numel()];
-                for_each_strided_offset(&self.size, &self.stride, out_eff, |i, flat| {
-                    idx[i] = flat as usize;
-                });
+                for_each_strided_offset(
+                    "as_strided backward CUDA output indices",
+                    &self.size,
+                    &self.stride,
+                    out_eff,
+                    |i, flat| {
+                        idx[i] =
+                            checked_flat_index("as_strided backward CUDA output indices", flat)?;
+                        Ok(())
+                    },
+                )?;
                 let idx_h = crate::ops::indexing::upload_index_i64(&idx, ordinal)?;
                 let zeros_h = upload_scalar_fill::<f32>(0.0, base_len, ordinal)?;
                 backend.scatter_add_dim_f32(
@@ -761,7 +875,7 @@ impl<T: Float> AsStridedBackward<T> {
                     &mut base_h,
                     &self.size,
                     &self.stride,
-                    out_eff as usize,
+                    out_eff_usize,
                 )?;
                 base_h
             };
@@ -771,9 +885,17 @@ impl<T: Float> AsStridedBackward<T> {
             let base_t = if inp_overlap {
                 let inp_numel = self.input.numel();
                 let mut idx = vec![0usize; inp_numel];
-                for_each_strided_offset(&inp_shape, &inp_strides, inp_eff, |i, flat| {
-                    idx[i] = flat as usize;
-                });
+                for_each_strided_offset(
+                    "as_strided backward CUDA input indices",
+                    &inp_shape,
+                    &inp_strides,
+                    inp_eff,
+                    |i, flat| {
+                        idx[i] =
+                            checked_flat_index("as_strided backward CUDA input indices", flat)?;
+                        Ok(())
+                    },
+                )?;
                 let idx_h = crate::ops::indexing::upload_index_i64(&idx, ordinal)?;
                 let zeros_h = upload_scalar_fill::<f32>(0.0, base_len, ordinal)?;
                 let ones_h = upload_scalar_fill::<f32>(1.0, inp_numel, ordinal)?;
@@ -791,7 +913,7 @@ impl<T: Float> AsStridedBackward<T> {
                 .gpu_handle()
                 .ok_or(FerrotorchError::DeviceUnavailable)?;
             let out_f32_h =
-                backend.strided_copy_f32(base_buf, &inp_shape, &inp_strides, inp_eff as usize)?;
+                backend.strided_copy_f32(base_buf, &inp_shape, &inp_strides, inp_eff_usize)?;
             let out_h = backend.cast_f_to_f(&out_f32_h, dtype)?;
             return Tensor::from_storage(TensorStorage::gpu(out_h), inp_shape, false);
         }
@@ -806,11 +928,19 @@ impl<T: Float> AsStridedBackward<T> {
             // encoded indices round above 2^24 and the f64 PTX transform
             // fails to JIT — see the #1960 thread.)
             let mut idx = vec![0usize; grad.numel()];
-            for_each_strided_offset(&self.size, &self.stride, out_eff, |i, flat| {
-                // flat ∈ [0, base_len) by construction (bounds-validated
-                // geometry rebased to the shared minimum offset).
-                idx[i] = flat as usize;
-            });
+            for_each_strided_offset(
+                "as_strided backward CUDA output indices",
+                &self.size,
+                &self.stride,
+                out_eff,
+                |i, flat| {
+                    // flat is in [0, base_len) by construction
+                    // (bounds-validated geometry rebased to the shared
+                    // minimum offset).
+                    idx[i] = checked_flat_index("as_strided backward CUDA output indices", flat)?;
+                    Ok(())
+                },
+            )?;
             let idx_h = crate::ops::indexing::upload_index_i64(&idx, ordinal)?;
             let zeros_h = upload_scalar_fill::<T>(0.0, base_len, ordinal)?;
             let base_h = if is_f32 {
@@ -845,7 +975,7 @@ impl<T: Float> AsStridedBackward<T> {
                     &mut base_h,
                     &self.size,
                     &self.stride,
-                    out_eff as usize,
+                    out_eff_usize,
                 )?;
             } else {
                 match dtype {
@@ -854,14 +984,14 @@ impl<T: Float> AsStridedBackward<T> {
                         &mut base_h,
                         &self.size,
                         &self.stride,
-                        out_eff as usize,
+                        out_eff_usize,
                     )?,
                     DType::F16 | DType::BF16 => backend.strided_scatter_u16(
                         grad_buf,
                         &mut base_h,
                         &self.size,
                         &self.stride,
-                        out_eff as usize,
+                        out_eff_usize,
                     )?,
                     other => {
                         return Err(FerrotorchError::InvalidArgument {
@@ -877,9 +1007,16 @@ impl<T: Float> AsStridedBackward<T> {
         let base_t = if inp_overlap {
             let inp_numel = self.input.numel();
             let mut idx = vec![0usize; inp_numel];
-            for_each_strided_offset(&inp_shape, &inp_strides, inp_eff, |i, flat| {
-                idx[i] = flat as usize;
-            });
+            for_each_strided_offset(
+                "as_strided backward CUDA input indices",
+                &inp_shape,
+                &inp_strides,
+                inp_eff,
+                |i, flat| {
+                    idx[i] = checked_flat_index("as_strided backward CUDA input indices", flat)?;
+                    Ok(())
+                },
+            )?;
             let idx_h = crate::ops::indexing::upload_index_i64(&idx, ordinal)?;
             let zeros_h = upload_scalar_fill::<T>(0.0, base_len, ordinal)?;
             let ones_h = upload_scalar_fill::<T>(1.0, inp_numel, ordinal)?;
@@ -904,13 +1041,13 @@ impl<T: Float> AsStridedBackward<T> {
             .ok_or(FerrotorchError::DeviceUnavailable)?;
         let out_h = match dtype {
             DType::F32 => {
-                backend.strided_copy_f32(base_buf, &inp_shape, &inp_strides, inp_eff as usize)?
+                backend.strided_copy_f32(base_buf, &inp_shape, &inp_strides, inp_eff_usize)?
             }
             DType::F64 => {
-                backend.strided_copy_f64(base_buf, &inp_shape, &inp_strides, inp_eff as usize)?
+                backend.strided_copy_f64(base_buf, &inp_shape, &inp_strides, inp_eff_usize)?
             }
             DType::F16 | DType::BF16 => {
-                backend.strided_copy_u16(base_buf, &inp_shape, &inp_strides, inp_eff as usize)?
+                backend.strided_copy_u16(base_buf, &inp_shape, &inp_strides, inp_eff_usize)?
             }
             other => {
                 return Err(FerrotorchError::InvalidArgument {
@@ -947,13 +1084,60 @@ impl<T: Float> GradFn<T> for AsStridedBackward<T> {
         // Step 1: base-buffer geometry. Both spans were validated against
         // the SAME storage in their forwards, so the union is finite and
         // every effective offset is non-negative.
-        let (in_lo, in_hi) =
-            reachable_span(inp_shape, self.input.strides(), self.input.storage_offset());
-        let (out_lo, out_hi) = reachable_span(&self.size, &self.stride, self.storage_offset);
+        let (in_lo, in_hi) = reachable_span(
+            "as_strided backward input span",
+            inp_shape,
+            self.input.strides(),
+            self.input.storage_offset(),
+        )?;
+        let (out_lo, out_hi) = reachable_span(
+            "as_strided backward output span",
+            &self.size,
+            &self.stride,
+            self.storage_offset,
+        )?;
         let shared = in_lo.min(out_lo);
-        let base_len = (in_hi.max(out_hi) - shared + 1) as usize;
-        let inp_eff = self.input.storage_offset() as i64 - shared;
-        let out_eff = self.storage_offset as i64 - shared;
+        let base_len_i64 = in_hi
+            .max(out_hi)
+            .checked_sub(shared)
+            .and_then(|n| n.checked_add(1))
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "as_strided backward: base buffer span overflows signed offset range"
+                    .into(),
+            })?;
+        let base_len =
+            usize::try_from(base_len_i64).map_err(|_| FerrotorchError::InvalidArgument {
+                message: format!(
+                    "as_strided backward: base buffer length {base_len_i64} exceeds usize::MAX"
+                ),
+            })?;
+        let input_offset_i64 = i64::try_from(self.input.storage_offset()).map_err(|_| {
+            FerrotorchError::InvalidArgument {
+                message: format!(
+                    "as_strided backward: input storage_offset {} exceeds i64::MAX",
+                    self.input.storage_offset()
+                ),
+            }
+        })?;
+        let output_offset_i64 =
+            i64::try_from(self.storage_offset).map_err(|_| FerrotorchError::InvalidArgument {
+                message: format!(
+                    "as_strided backward: output storage_offset {} exceeds i64::MAX",
+                    self.storage_offset
+                ),
+            })?;
+        let inp_eff = input_offset_i64.checked_sub(shared).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "as_strided backward: input effective offset overflows signed range"
+                    .into(),
+            }
+        })?;
+        let out_eff = output_offset_i64.checked_sub(shared).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "as_strided backward: output effective offset overflows signed range"
+                    .into(),
+            }
+        })?;
         let inp_overlap = maybe_overlapping_memory(inp_shape, self.input.strides());
 
         let grad_input = if grad_output.is_cuda() {

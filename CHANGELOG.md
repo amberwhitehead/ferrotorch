@@ -48,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- CORE-063: `as_strided` bounds validation can overflow and approve invalid layouts (#1757)
 - GPU pool cache tests race on shared global cache (#1975)
 - Global amax/amin backward keeps CUDA leaf gradients resident on CUDA (#1922)
 - CORE: median/nanmedian dim lack non-scalar CUDA kernels (#1974)
