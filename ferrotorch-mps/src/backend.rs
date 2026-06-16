@@ -462,7 +462,7 @@ impl GpuBackend for MtlBackend {
                 message: format!("cpu_to_gpu: dtype {dtype} has zero element size"),
             });
         }
-        if data.len() % elem_size != 0 {
+        if !data.len().is_multiple_of(elem_size) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "cpu_to_gpu: {} bytes is not divisible by dtype {dtype} element size {elem_size}",

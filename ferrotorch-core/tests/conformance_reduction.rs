@@ -377,6 +377,7 @@ fn read_back_f64(t: &Tensor<f64>, expect: Device) -> Vec<f64> {
 
 /// See [`read_back_f32`] - device-checked readback for f16 values, widened
 /// only after the output has been proven resident on the expected device.
+#[cfg(feature = "gpu")]
 fn read_back_f16_as_f32(t: &Tensor<half::f16>, expect: Device) -> Vec<f32> {
     if expect.is_cuda() {
         assert_eq!(
@@ -401,6 +402,7 @@ fn read_back_f16_as_f32(t: &Tensor<half::f16>, expect: Device) -> Vec<f32> {
 
 /// See [`read_back_f32`] - device-checked readback for bf16 values, widened
 /// only after the output has been proven resident on the expected device.
+#[cfg(feature = "gpu")]
 fn read_back_bf16_as_f32(t: &Tensor<half::bf16>, expect: Device) -> Vec<f32> {
     if expect.is_cuda() {
         assert_eq!(
@@ -456,6 +458,7 @@ fn make_cpu_f64(data: &[f64], shape: &[usize], requires_grad: bool) -> Tensor<f6
     .expect("make_cpu_f64")
 }
 
+#[cfg(feature = "gpu")]
 fn make_cpu_f16(data: &[f64], shape: &[usize], requires_grad: bool) -> Tensor<half::f16> {
     let v: Vec<half::f16> = data
         .iter()
@@ -465,6 +468,7 @@ fn make_cpu_f16(data: &[f64], shape: &[usize], requires_grad: bool) -> Tensor<ha
         .expect("make_cpu_f16")
 }
 
+#[cfg(feature = "gpu")]
 fn make_cpu_bf16(data: &[f64], shape: &[usize], requires_grad: bool) -> Tensor<half::bf16> {
     let v: Vec<half::bf16> = data
         .iter()
@@ -508,6 +512,7 @@ fn upload_f64(t: Tensor<f64>, device: Device) -> Tensor<f64> {
     }
 }
 
+#[cfg(feature = "gpu")]
 fn upload_f16(t: Tensor<half::f16>, device: Device) -> Tensor<half::f16> {
     if matches!(device, Device::Cuda(_)) {
         let track = t.requires_grad();
@@ -520,6 +525,7 @@ fn upload_f16(t: Tensor<half::f16>, device: Device) -> Tensor<half::f16> {
     }
 }
 
+#[cfg(feature = "gpu")]
 fn upload_bf16(t: Tensor<half::bf16>, device: Device) -> Tensor<half::bf16> {
     if matches!(device, Device::Cuda(_)) {
         let track = t.requires_grad();
