@@ -275,6 +275,108 @@ DONE:
 }
 ";
 
+const CROSS_F16_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry cross_f16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 b_ptr,
+    .param .u64 out_ptr,
+    .param .u32 stride_axis,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %stride, %tmp, %coord, %base, %idx0, %idx1, %idx2, %two_stride;
+    .reg .u64 %a, %b, %out, %off, %addr;
+    .reg .b16 %a0_h, %a1_h, %a2_h, %b0_h, %b1_h, %b2_h, %out_h;
+    .reg .f32 %a0, %a1, %a2, %b0, %b1, %b2, %m0, %m1, %res;
+    .reg .pred %p, %is0, %is1;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %b, [b_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %stride, [stride_axis];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    div.u32 %tmp, %r_tid, %stride;
+    rem.u32 %coord, %tmp, 3;
+    mul.lo.u32 %tmp, %coord, %stride;
+    sub.u32 %base, %r_tid, %tmp;
+    add.u32 %idx0, %base, 0;
+    add.u32 %idx1, %base, %stride;
+    add.u32 %two_stride, %stride, %stride;
+    add.u32 %idx2, %base, %two_stride;
+
+    cvt.u64.u32 %off, %idx0;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %a, %off;
+    ld.global.b16 %a0_h, [%addr];
+    add.u64 %addr, %b, %off;
+    ld.global.b16 %b0_h, [%addr];
+    cvt.f32.f16 %a0, %a0_h;
+    cvt.f32.f16 %b0, %b0_h;
+
+    cvt.u64.u32 %off, %idx1;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %a, %off;
+    ld.global.b16 %a1_h, [%addr];
+    add.u64 %addr, %b, %off;
+    ld.global.b16 %b1_h, [%addr];
+    cvt.f32.f16 %a1, %a1_h;
+    cvt.f32.f16 %b1, %b1_h;
+
+    cvt.u64.u32 %off, %idx2;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %a, %off;
+    ld.global.b16 %a2_h, [%addr];
+    add.u64 %addr, %b, %off;
+    ld.global.b16 %b2_h, [%addr];
+    cvt.f32.f16 %a2, %a2_h;
+    cvt.f32.f16 %b2, %b2_h;
+
+    setp.eq.u32 %is0, %coord, 0;
+    @%is0 bra COORD0;
+    setp.eq.u32 %is1, %coord, 1;
+    @%is1 bra COORD1;
+
+COORD2:
+    mul.f32 %m0, %a0, %b1;
+    mul.f32 %m1, %a1, %b0;
+    sub.f32 %res, %m0, %m1;
+    bra STORE;
+
+COORD0:
+    mul.f32 %m0, %a1, %b2;
+    mul.f32 %m1, %a2, %b1;
+    sub.f32 %res, %m0, %m1;
+    bra STORE;
+
+COORD1:
+    mul.f32 %m0, %a2, %b0;
+    mul.f32 %m1, %a0, %b2;
+    sub.f32 %res, %m0, %m1;
+
+STORE:
+    cvt.rn.f16.f32 %out_h, %res;
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %out, %off;
+    st.global.b16 [%addr], %out_h;
+
+DONE:
+    ret;
+}
+";
+
 const ABS_F16_PTX: &str = "\
 .version 7.0
 .target sm_53
@@ -915,6 +1017,75 @@ pub fn gpu_sub_f16(
     device: &GpuDevice,
 ) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
     launch_binary(a, b, device, SUB_F16_PTX, "sub_f16_kernel")
+}
+
+/// Same-shape `torch.linalg.cross` on f16 (u16-stored) GPU buffers.
+///
+/// Operands must already be broadcast/materialized to the same contiguous
+/// output shape. `stride_axis` is the C-contiguous element stride for the
+/// size-3 cross dimension.
+pub fn gpu_cross_f16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    stride_axis: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    if a.len() != b.len() {
+        return Err(GpuError::LengthMismatch {
+            a: a.len(),
+            b: b.len(),
+        });
+    }
+    let n = a.len();
+    if n == 0 {
+        return Ok(device.stream().alloc_zeros::<u16>(0)?);
+    }
+    if stride_axis == 0 || stride_axis > u32::MAX as usize || n > u32::MAX as usize {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_cross_f16",
+            expected: vec![1, u32::MAX as usize],
+            got: vec![stride_axis, n],
+        });
+    }
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = get_or_compile(
+        ctx,
+        CROSS_F16_PTX,
+        "cross_f16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "cross_f16_kernel",
+        source: e,
+    })?;
+
+    let mut out = stream.alloc_zeros::<u16>(n)?;
+    let cfg = launch_1d(n);
+    let stride_u32 = stride_axis as u32;
+    let n_u32 = n as u32;
+    // SAFETY:
+    // - `f` is compiled from `CROSS_F16_PTX`; the entry signature is
+    //   `(a_ptr, b_ptr, out_ptr, stride_axis, n)`.
+    // - `a.len() == b.len() == n`, `out` is freshly allocated for `n`
+    //   u16 f16 bit-patterns, and `n > 0` here.
+    // - `stride_axis` is positive and both `stride_axis`/`n` fit in the
+    //   PTX `.u32` parameters by the guard above.
+    // - Caller validates `stride_axis` as the contiguous stride of a
+    //   length-3 axis, so `base + 2 * stride_axis` remains in-bounds for
+    //   every logical vector touched by a thread. The kernel also skips
+    //   threads with `tid >= n`.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a)
+            .arg(b)
+            .arg(&mut out)
+            .arg(&stride_u32)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
 }
 
 /// Elementwise `out = a / b` on f16 (u16-stored) GPU buffers.

@@ -4254,6 +4254,46 @@ pub trait GpuBackend: Send + Sync {
             message: "abs_f64 GPU op not yet implemented".into(),
         })
     }
+    /// Same-shape `torch.linalg.cross` primitive. Inputs must already be
+    /// broadcast/materialized to the common contiguous output shape; `stride_axis`
+    /// is the C-contiguous element stride for the size-3 cross dimension.
+    fn cross_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _stride_axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cross_f32" })
+    }
+    /// f64 counterpart of [`Self::cross_f32`].
+    fn cross_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _stride_axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cross_f64" })
+    }
+    /// f16 counterpart of [`Self::cross_f32`], using u16 half bit-pattern
+    /// storage and returning an F16-tagged buffer.
+    fn cross_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _stride_axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cross_f16" })
+    }
+    /// bf16 counterpart of [`Self::cross_f32`], using u16 bfloat bit-pattern
+    /// storage and returning a BF16-tagged buffer.
+    fn cross_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _stride_axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cross_bf16" })
+    }
     fn abs_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "abs_bf16_bf16",

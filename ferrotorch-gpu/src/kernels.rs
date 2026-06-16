@@ -13755,6 +13755,201 @@ DONE:
 }
 ";
 
+/// PTX source for same-shape `linalg.cross`.
+///
+/// `stride_axis` is the C-contiguous element stride of the length-3 cross
+/// dimension in operands that have already been broadcast/materialized.
+#[cfg(feature = "cuda")]
+pub(crate) const CROSS_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry cross_kernel(
+    .param .u64 a_ptr,
+    .param .u64 b_ptr,
+    .param .u64 out_ptr,
+    .param .u32 stride_axis,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %stride, %tmp, %coord, %base, %idx0, %idx1, %idx2, %two_stride;
+    .reg .u64 %a, %b, %out, %off, %addr;
+    .reg .f32 %a0, %a1, %a2, %b0, %b1, %b2, %m0, %m1, %res;
+    .reg .pred %p, %is0, %is1;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %b, [b_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %stride, [stride_axis];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    div.u32 %tmp, %r_tid, %stride;
+    rem.u32 %coord, %tmp, 3;
+    mul.lo.u32 %tmp, %coord, %stride;
+    sub.u32 %base, %r_tid, %tmp;
+    add.u32 %idx0, %base, 0;
+    add.u32 %idx1, %base, %stride;
+    add.u32 %two_stride, %stride, %stride;
+    add.u32 %idx2, %base, %two_stride;
+
+    cvt.u64.u32 %off, %idx0;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %a, %off;
+    ld.global.f32 %a0, [%addr];
+    add.u64 %addr, %b, %off;
+    ld.global.f32 %b0, [%addr];
+
+    cvt.u64.u32 %off, %idx1;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %a, %off;
+    ld.global.f32 %a1, [%addr];
+    add.u64 %addr, %b, %off;
+    ld.global.f32 %b1, [%addr];
+
+    cvt.u64.u32 %off, %idx2;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %a, %off;
+    ld.global.f32 %a2, [%addr];
+    add.u64 %addr, %b, %off;
+    ld.global.f32 %b2, [%addr];
+
+    setp.eq.u32 %is0, %coord, 0;
+    @%is0 bra COORD0;
+    setp.eq.u32 %is1, %coord, 1;
+    @%is1 bra COORD1;
+
+COORD2:
+    mul.rn.f32 %m0, %a0, %b1;
+    mul.rn.f32 %m1, %a1, %b0;
+    sub.rn.f32 %res, %m0, %m1;
+    bra STORE;
+
+COORD0:
+    mul.rn.f32 %m0, %a1, %b2;
+    mul.rn.f32 %m1, %a2, %b1;
+    sub.rn.f32 %res, %m0, %m1;
+    bra STORE;
+
+COORD1:
+    mul.rn.f32 %m0, %a2, %b0;
+    mul.rn.f32 %m1, %a0, %b2;
+    sub.rn.f32 %res, %m0, %m1;
+
+STORE:
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr, %out, %off;
+    st.global.f32 [%addr], %res;
+
+DONE:
+    ret;
+}
+";
+
+/// f64 counterpart of [`CROSS_PTX`].
+#[cfg(feature = "cuda")]
+pub(crate) const CROSS_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry cross_f64_kernel(
+    .param .u64 a_ptr,
+    .param .u64 b_ptr,
+    .param .u64 out_ptr,
+    .param .u32 stride_axis,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %stride, %tmp, %coord, %base, %idx0, %idx1, %idx2, %two_stride;
+    .reg .u64 %a, %b, %out, %off, %addr;
+    .reg .f64 %a0, %a1, %a2, %b0, %b1, %b2, %m0, %m1, %res;
+    .reg .pred %p, %is0, %is1;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %b, [b_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %stride, [stride_axis];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    div.u32 %tmp, %r_tid, %stride;
+    rem.u32 %coord, %tmp, 3;
+    mul.lo.u32 %tmp, %coord, %stride;
+    sub.u32 %base, %r_tid, %tmp;
+    add.u32 %idx0, %base, 0;
+    add.u32 %idx1, %base, %stride;
+    add.u32 %two_stride, %stride, %stride;
+    add.u32 %idx2, %base, %two_stride;
+
+    cvt.u64.u32 %off, %idx0;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %a, %off;
+    ld.global.f64 %a0, [%addr];
+    add.u64 %addr, %b, %off;
+    ld.global.f64 %b0, [%addr];
+
+    cvt.u64.u32 %off, %idx1;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %a, %off;
+    ld.global.f64 %a1, [%addr];
+    add.u64 %addr, %b, %off;
+    ld.global.f64 %b1, [%addr];
+
+    cvt.u64.u32 %off, %idx2;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %a, %off;
+    ld.global.f64 %a2, [%addr];
+    add.u64 %addr, %b, %off;
+    ld.global.f64 %b2, [%addr];
+
+    setp.eq.u32 %is0, %coord, 0;
+    @%is0 bra COORD0;
+    setp.eq.u32 %is1, %coord, 1;
+    @%is1 bra COORD1;
+
+COORD2:
+    mul.rn.f64 %m0, %a0, %b1;
+    mul.rn.f64 %m1, %a1, %b0;
+    sub.rn.f64 %res, %m0, %m1;
+    bra STORE;
+
+COORD0:
+    mul.rn.f64 %m0, %a1, %b2;
+    mul.rn.f64 %m1, %a2, %b1;
+    sub.rn.f64 %res, %m0, %m1;
+    bra STORE;
+
+COORD1:
+    mul.rn.f64 %m0, %a2, %b0;
+    mul.rn.f64 %m1, %a0, %b2;
+    sub.rn.f64 %res, %m0, %m1;
+
+STORE:
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr, %out, %off;
+    st.global.f64 [%addr], %res;
+
+DONE:
+    ret;
+}
+";
+
 /// PTX source for `sigmoid_kernel`: `out[i] = 1 / (1 + exp(-a[i]))`.
 #[cfg(feature = "cuda")]
 pub(crate) const SIGMOID_PTX: &str = "\
@@ -22510,6 +22705,73 @@ pub fn gpu_abs(a: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<
     try_launch_unary(a, device, ABS_PTX, "abs_kernel")
 }
 
+/// Same-shape `torch.linalg.cross` primitive for contiguous f32 operands.
+#[cfg(feature = "cuda")]
+pub fn gpu_cross_f32(
+    a: &CudaBuffer<f32>,
+    b: &CudaBuffer<f32>,
+    stride_axis: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_binary(a, b, device)?;
+    if stride_axis == 0 || stride_axis > u32::MAX as usize {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_cross_f32",
+            expected: vec![1, u32::MAX as usize],
+            got: vec![stride_axis],
+        });
+    }
+
+    let n = a.len();
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        CROSS_PTX,
+        "cross_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "cross_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = alloc_zeros_f32(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let stride_u32 = stride_axis as u32;
+    let n_u32 = n as u32;
+
+    // SAFETY:
+    // - `f` is the cached `cross_kernel` with ABI
+    //   `(a_ptr, b_ptr, out_ptr, stride_axis, n)`.
+    // - `validate_binary` proves `a` and `b` live on `device` and have equal
+    //   length `n`; `out` is freshly allocated with the same length.
+    // - `stride_axis` is a positive C-contiguous element stride for a size-3
+    //   dimension in the caller-validated logical shape, so each computed
+    //   component index stays inside the current 3-vector. The per-thread
+    //   bound check skips `tid >= n`.
+    // - `launch_cfg(n)?` rejects values that cannot be represented by the
+    //   `.u32 n` kernel parameter.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a.inner())
+            .arg(b.inner())
+            .arg(out.inner_mut())
+            .arg(&stride_u32)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
 /// Elementwise sigmoid: `out[i] = 1 / (1 + exp(-a[i]))`.
 #[cfg(feature = "cuda")]
 pub fn gpu_sigmoid(a: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
@@ -22953,6 +23215,77 @@ pub fn gpu_abs_f64(a: &CudaBuffer<f64>, device: &GpuDevice) -> GpuResult<CudaBuf
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let ptx = get_f64_ptx(&CACHE, ABS_PTX, "abs_kernel", "abs_f64_kernel");
     try_launch_unary_f64(a, device, ptx, "abs_f64_kernel")
+}
+
+/// Same-shape `torch.linalg.cross` primitive for contiguous f64 operands.
+#[cfg(feature = "cuda")]
+pub fn gpu_cross_f64(
+    a: &CudaBuffer<f64>,
+    b: &CudaBuffer<f64>,
+    stride_axis: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_device(a, device)?;
+    validate_device(b, device)?;
+    if a.len() != b.len() {
+        return Err(GpuError::LengthMismatch {
+            a: a.len(),
+            b: b.len(),
+        });
+    }
+    if stride_axis == 0 || stride_axis > u32::MAX as usize {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_cross_f64",
+            expected: vec![1, u32::MAX as usize],
+            got: vec![stride_axis],
+        });
+    }
+
+    let n = a.len();
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        CROSS_F64_PTX,
+        "cross_f64_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "cross_f64_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = alloc_zeros_f64(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let stride_u32 = stride_axis as u32;
+    let n_u32 = n as u32;
+
+    // SAFETY:
+    // - `f` is the cached `cross_f64_kernel` with ABI
+    //   `(a_ptr, b_ptr, out_ptr, stride_axis, n)`.
+    // - device and length checks above prove both inputs are valid for `n`
+    //   f64 loads; `out` is freshly allocated for `n` f64 stores.
+    // - `stride_axis` is positive and bounded for the `.u32` PTX parameter;
+    //   caller validates it as the C-contiguous stride of a size-3 axis.
+    // - `launch_cfg(n)?` rejects overlarge `n` before the `.u32 n` cast.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a.inner())
+            .arg(b.inner())
+            .arg(out.inner_mut())
+            .arg(&stride_u32)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
 }
 
 /// Elementwise f64 sigmoid: `out[i] = 1 / (1 + exp(-a[i]))`.
@@ -28933,6 +29266,17 @@ pub fn gpu_abs(_a: &CudaBuffer<f32>, _device: &GpuDevice) -> GpuResult<CudaBuffe
 
 /// Stub -- always returns [`GpuError::NoCudaFeature`].
 #[cfg(not(feature = "cuda"))]
+pub fn gpu_cross_f32(
+    _a: &CudaBuffer<f32>,
+    _b: &CudaBuffer<f32>,
+    _stride_axis: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+/// Stub -- always returns [`GpuError::NoCudaFeature`].
+#[cfg(not(feature = "cuda"))]
 pub fn gpu_sigmoid(_a: &CudaBuffer<f32>, _device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
     Err(GpuError::NoCudaFeature)
 }
@@ -29695,6 +30039,15 @@ pub fn gpu_pow_f64(
 }
 #[cfg(not(feature = "cuda"))]
 pub fn gpu_abs_f64(_a: &CudaBuffer<f64>, _device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_cross_f64(
+    _a: &CudaBuffer<f64>,
+    _b: &CudaBuffer<f64>,
+    _stride_axis: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
     Err(GpuError::NoCudaFeature)
 }
 #[cfg(not(feature = "cuda"))]

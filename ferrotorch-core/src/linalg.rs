@@ -48,12 +48,13 @@
 //! | REQ-28 | SHIPPED | impl `outer` (1-D × 1-D outer product; grad-aware: delegates to `grad_fns::linalg::outer_differentiable` when grad enabled). |
 
 use crate::device::Device;
-use crate::dtype::Float;
+use crate::dtype::{DType, Element, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::int_tensor::IntTensor;
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
 use libloading::Library;
+use std::any::TypeId;
 use std::ffi::OsString;
 use std::os::raw::{c_char, c_int};
 use std::sync::OnceLock;
@@ -168,12 +169,20 @@ fn slice_f32_to_vec<T: Float>(s: &[f32]) -> Vec<T> {
 
 /// True when `T` is f32 (4-byte float), used to pick the f32 vs f64 path.
 fn is_f32<T: Float>() -> bool {
-    std::mem::size_of::<T>() == 4
+    TypeId::of::<T>() == TypeId::of::<f32>()
 }
 
 /// True when `T` is f64 (8-byte float).
 fn is_f64<T: Float>() -> bool {
-    std::mem::size_of::<T>() == 8
+    TypeId::of::<T>() == TypeId::of::<f64>()
+}
+
+fn is_f16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::f16>()
+}
+
+fn is_bf16<T: Float>() -> bool {
+    TypeId::of::<T>() == TypeId::of::<half::bf16>()
 }
 
 const LAPACK_ROW_MAJOR: c_int = 101;
@@ -2956,24 +2965,26 @@ fn float_to_norm_order<T: Into<f64>>(ord: T) -> ferray_linalg::NormOrder {
 /// axis it produces the same shape with the cross product computed across
 /// the 3 elements along `dim`, mirroring `torch.linalg.cross`.
 ///
-/// CPU-only.
 pub fn cross<T: Float>(a: &Tensor<T>, b: &Tensor<T>, dim: i64) -> FerrotorchResult<Tensor<T>> {
-    require_cpu(a, "cross")?;
-    require_cpu(b, "cross")?;
-
-    // Autograd path: delegate to the differentiable wrapper, which computes
-    // the forward under `no_grad` (preventing re-entry here) and attaches
-    // `CrossBackward` (`da = cross(b, grad)`, `db = cross(grad, a)`).
-    if crate::autograd::no_grad::is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
-        return crate::grad_fns::linalg::cross_differentiable(a, b, dim);
+    if a.device() != b.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        });
     }
-
     let a_shape = a.shape();
     let b_shape = b.shape();
-    if a_shape != b_shape {
+    if !is_f32::<T>() && !is_f64::<T>() && !is_f16::<T>() && !is_bf16::<T>() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "cross requires f32, f64, f16, or bf16".into(),
+        });
+    }
+    if a_shape.len() != b_shape.len() {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
-                "cross: inputs must share the same shape, got {a_shape:?} and {b_shape:?}"
+                "linalg.cross: inputs must have the same number of dimensions, got {} and {}",
+                a_shape.len(),
+                b_shape.len()
             ),
         });
     }
@@ -2991,98 +3002,132 @@ pub fn cross<T: Float>(a: &Tensor<T>, b: &Tensor<T>, dim: i64) -> FerrotorchResu
         });
     }
     let axis = axis as usize;
-    if a_shape[axis] != 3 {
+    if a_shape[axis] != 3 || b_shape[axis] != 3 {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!("cross: axis {axis} must have size 3, got shape {a_shape:?}"),
+            message: format!(
+                "linalg.cross: inputs dimension {axis} must have length 3. Got {} and {}",
+                a_shape[axis], b_shape[axis]
+            ),
         });
     }
 
-    // Row-major strides for the input shape.
-    let strides = {
-        let mut s = vec![1usize; a_shape.len()];
-        for i in (0..a_shape.len().saturating_sub(1)).rev() {
-            s[i] = s[i + 1] * a_shape[i + 1];
-        }
-        s
-    };
-    let stride_axis = strides[axis];
+    let out_shape = crate::shape::broadcast_shapes(a_shape, b_shape)?;
 
-    // Number of independent cross products to compute = numel / 3.
-    let numel: usize = crate::shape::numel(a_shape);
-    let groups = numel / 3;
-
-    // Enumerate the base offset of each group (one fixed element along the
-    // chosen axis, varying over all other axes in row-major order).
-    let mut base_offsets: Vec<usize> = Vec::with_capacity(groups);
-    let other_dims: Vec<usize> = a_shape
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &d)| if i == axis { None } else { Some(d) })
-        .collect();
-    let other_strides: Vec<usize> = strides
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &s)| if i == axis { None } else { Some(s) })
-        .collect();
-    // CORE-147 / #1841: a zero-sized NON-cross dimension means there are no
-    // groups at all (`numel == 0`); skip the enumeration entirely — the
-    // multi-index loop below visits the all-zeros index BEFORE noticing a
-    // zero-sized dim, which used to push a bogus base offset (debug:
-    // `debug_assert` abort; release: out-of-bounds panic on the empty data
-    // slice). torch returns an empty tensor of the input shape here
-    // (`torch.linalg.cross` on `[0,3]`/`[3,0]`/`[2,0,3]`, live 2.11.0).
-    // With `base_offsets` left empty, `out` below is an empty buffer and the
-    // normal exit returns the empty same-shape tensor.
-    let mut idx = vec![0usize; other_dims.len()];
-    if numel > 0 {
-        'outer: loop {
-            let off: usize = idx
-                .iter()
-                .zip(other_strides.iter())
-                .map(|(i, s)| i * s)
-                .sum();
-            base_offsets.push(off);
-            // Increment the multi-index (last axis fastest).
-            if other_dims.is_empty() {
-                break;
-            }
-            for k in (0..other_dims.len()).rev() {
-                idx[k] += 1;
-                if idx[k] < other_dims[k] {
-                    continue 'outer;
-                }
-                idx[k] = 0;
-                if k == 0 {
-                    break 'outer;
-                }
-            }
-        }
+    // Autograd path: delegate to the differentiable wrapper, which computes
+    // the forward under `no_grad` (preventing re-entry here) and attaches
+    // `CrossBackward` (`da = cross(b, grad)`, `db = cross(grad, a)`).
+    if crate::autograd::no_grad::is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
+        return crate::grad_fns::linalg::cross_differentiable(a, b, dim);
     }
-    debug_assert_eq!(base_offsets.len(), groups);
 
-    let a_data = a.data()?;
-    let b_data = b.data()?;
+    if a.is_cuda() {
+        return cross_cuda(a, b, axis, &out_shape);
+    }
+
+    let stride_axis = cross_stride_axis(&out_shape, axis);
+    let numel: usize = crate::shape::numel(&out_shape);
+    let a_data = a.data_vec()?;
+    let b_data = b.data_vec()?;
     let mut out: Vec<T> = vec![<T as num_traits::Zero>::zero(); numel];
-    for &base in &base_offsets {
-        let a0 = a_data[base];
-        let a1 = a_data[base + stride_axis];
-        let a2 = a_data[base + 2 * stride_axis];
-        let b0 = b_data[base];
-        let b1 = b_data[base + stride_axis];
-        let b2 = b_data[base + 2 * stride_axis];
-        // c[i] = a[(i+1) % 3] * b[(i+2) % 3] - a[(i+2) % 3] * b[(i+1) % 3]
-        out[base] = a1 * b2 - a2 * b1;
-        out[base + stride_axis] = a2 * b0 - a0 * b2;
-        out[base + 2 * stride_axis] = a0 * b1 - a1 * b0;
+
+    for flat in 0..numel {
+        let coord = (flat / stride_axis) % 3;
+        let base = flat - coord * stride_axis;
+        let p0 = base;
+        let p1 = base + stride_axis;
+        let p2 = base + 2 * stride_axis;
+        let a0 = a_data[cross_broadcast_src_flat(p0, &out_shape, a_shape)];
+        let a1 = a_data[cross_broadcast_src_flat(p1, &out_shape, a_shape)];
+        let a2 = a_data[cross_broadcast_src_flat(p2, &out_shape, a_shape)];
+        let b0 = b_data[cross_broadcast_src_flat(p0, &out_shape, b_shape)];
+        let b1 = b_data[cross_broadcast_src_flat(p1, &out_shape, b_shape)];
+        let b2 = b_data[cross_broadcast_src_flat(p2, &out_shape, b_shape)];
+        out[flat] = match coord {
+            0 => a1 * b2 - a2 * b1,
+            1 => a2 * b0 - a0 * b2,
+            _ => a0 * b1 - a1 * b0,
+        };
     }
 
-    if is_f32::<T>() || is_f64::<T>() {
-        Tensor::from_storage(TensorStorage::cpu(out), a_shape.to_vec(), false)
-    } else {
-        Err(FerrotorchError::InvalidArgument {
-            message: "linalg op requires f32 or f64".into(),
-        })
+    Tensor::from_storage(TensorStorage::cpu(out), out_shape, false)
+}
+
+fn cross_stride_axis(shape: &[usize], axis: usize) -> usize {
+    shape[axis + 1..].iter().product::<usize>().max(1)
+}
+
+fn cross_broadcast_src_flat(mut out_flat: usize, out_shape: &[usize], in_shape: &[usize]) -> usize {
+    let out_ndim = out_shape.len();
+    let mut src = 0usize;
+    let mut stride = 1usize;
+    for i in (0..out_ndim).rev() {
+        let dim = out_shape[i];
+        let coord = out_flat.checked_rem(dim).unwrap_or(0);
+        out_flat = out_flat.checked_div(dim).unwrap_or(0);
+        let in_dim = in_shape[i];
+        if in_dim != 1 {
+            src += coord * stride;
+        }
+        stride *= in_dim;
     }
+    src
+}
+
+fn cross_cuda<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    axis: usize,
+    out_shape: &[usize],
+) -> FerrotorchResult<Tensor<T>> {
+    let numel = crate::shape::numel(out_shape);
+    if numel == 0 {
+        return Tensor::from_storage(
+            TensorStorage::on_device(Vec::<T>::new(), a.device())?,
+            out_shape.to_vec(),
+            false,
+        );
+    }
+
+    let a_expanded = if a.shape() == out_shape {
+        a.contiguous()?
+    } else {
+        crate::grad_fns::shape::expand(a, out_shape)?.contiguous()?
+    };
+    let b_expanded = if b.shape() == out_shape {
+        b.contiguous()?
+    } else {
+        crate::grad_fns::shape::expand(b, out_shape)?.contiguous()?
+    };
+    let stride_axis = cross_stride_axis(out_shape, axis);
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let handle = match <T as Element>::dtype() {
+        DType::F32 => backend.cross_f32(
+            a_expanded.gpu_handle()?,
+            b_expanded.gpu_handle()?,
+            stride_axis,
+        )?,
+        DType::F64 => backend.cross_f64(
+            a_expanded.gpu_handle()?,
+            b_expanded.gpu_handle()?,
+            stride_axis,
+        )?,
+        DType::F16 => backend.cross_f16(
+            a_expanded.gpu_handle()?,
+            b_expanded.gpu_handle()?,
+            stride_axis,
+        )?,
+        DType::BF16 => backend.cross_bf16(
+            a_expanded.gpu_handle()?,
+            b_expanded.gpu_handle()?,
+            stride_axis,
+        )?,
+        _ => {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "cross requires f32, f64, f16, or bf16".into(),
+            });
+        }
+    };
+    Tensor::from_storage(TensorStorage::gpu(handle), out_shape.to_vec(), false)
 }
 
 /// Chained matmul `A1 @ A2 @ ... @ Ak`, ordered to minimise intermediate

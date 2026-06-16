@@ -5014,14 +5014,16 @@ impl<T: Float> GradFn<T> for CrossBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_a = if self.a.requires_grad() {
             Some(crate::autograd::no_grad::no_grad(|| {
-                linalg_fwd::cross(&self.b, grad_output, self.dim)
+                let raw = linalg_fwd::cross(&self.b, grad_output, self.dim)?;
+                crate::grad_fns::arithmetic::reduce_grad_to_shape(&raw, self.a.shape())
             })?)
         } else {
             None
         };
         let grad_b = if self.b.requires_grad() {
             Some(crate::autograd::no_grad::no_grad(|| {
-                linalg_fwd::cross(grad_output, &self.a, self.dim)
+                let raw = linalg_fwd::cross(grad_output, &self.a, self.dim)?;
+                crate::grad_fns::arithmetic::reduce_grad_to_shape(&raw, self.b.shape())
             })?)
         } else {
             None
