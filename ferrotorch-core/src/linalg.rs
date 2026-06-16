@@ -751,9 +751,10 @@ pub fn matrix_norm<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// Moore-Penrose pseudo-inverse of a 2-D tensor.
 ///
 /// # Backward
-/// Not yet implemented. Returns non-grad tensors.
+/// Autograd-aware on CPU and CUDA f32/f64. CUDA forward composes the resident
+/// SVD path with tensor reductions/comparisons/where, so no host value round
+/// trip is needed for the singular-value cutoff or reconstruction.
 pub fn pinv<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    require_cpu(input, "pinv")?;
     let shape = input.shape();
     if shape.len() != 2 {
         return Err(FerrotorchError::InvalidArgument {
@@ -767,6 +768,11 @@ pub fn pinv<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     if crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
         return crate::grad_fns::linalg::pinv_differentiable(input);
     }
+
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        return pinv_svd_cuda(input);
+    }
+    require_cpu(input, "pinv")?;
 
     if is_f32::<T>() {
         let arr = tensor_to_array2_f32(input)?;
@@ -785,6 +791,36 @@ pub fn pinv<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
             message: "linalg op requires f32 or f64".into(),
         })
     }
+}
+
+fn pinv_svd_cuda<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let m = input.shape()[0];
+    let n = input.shape()[1];
+    if m == 0 || n == 0 {
+        return Tensor::from_storage(
+            TensorStorage::on_device(Vec::new(), input.device())?,
+            vec![n, m],
+            false,
+        );
+    }
+
+    let (u, s, vh) = svd(input)?;
+    let smax = crate::grad_fns::reduction::amax(&s)?;
+    let eps = T::epsilon();
+    let rtol = T::from((m.max(n)) as f64).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: "pinv: shape is not representable in dtype".into(),
+    })? * eps;
+    let rtol_t = crate::creation::full_like(&smax, rtol)?;
+    let threshold = smax.mul_t(&rtol_t)?;
+    let keep = crate::bool_tensor::BoolTensor::gt(&s, &threshold)?;
+    let ones = crate::creation::ones_like(&s)?;
+    let inv_s = ones.div_t(&s)?;
+    let zeros = crate::creation::zeros_like(&s)?;
+    let inv_s = crate::grad_fns::comparison::where_bt(&keep, &inv_s, &zeros)?;
+    let sigma_pinv = crate::ops::tensor_ops::diag(&inv_s, 0)?;
+    let v = vh.transpose(0, 1)?.contiguous()?;
+    let ut = u.transpose(0, 1)?.contiguous()?;
+    v.mm(&sigma_pinv)?.mm(&ut)
 }
 
 // ===========================================================================
@@ -1592,6 +1628,12 @@ pub fn lstsq_solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<T
             message: format!("lstsq_solve: `a` must be 2-D, got {:?}", a.shape()),
         });
     }
+    if a.device() != b.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        });
+    }
     let m = a.shape()[0];
     let n = a.shape()[1];
     let (b_is_1d, nrhs) = match b.ndim() {
@@ -1606,6 +1648,10 @@ pub fn lstsq_solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<T
             });
         }
     };
+
+    if crate::autograd::no_grad::is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
+        return crate::grad_fns::linalg::lstsq_solve_differentiable(a, b);
+    }
 
     if a.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         let backend =
@@ -1633,27 +1679,82 @@ pub fn lstsq_solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<T
 /// controls the singular-value cutoff for rank determination; if `None`,
 /// uses a sensible default (`max(m, n) * eps`).
 ///
-/// Mirrors `torch.linalg.lstsq`. CPU-only today.
+/// Mirrors `torch.linalg.lstsq` for the crate's current 2-D, real-valued
+/// surface. CUDA f32/f64 uses the same `gels`-style solution path as PyTorch's
+/// CUDA default and returns differentiable residuals for overdetermined
+/// systems; rank and singular values are empty on CUDA, matching `gels`.
 #[allow(clippy::type_complexity)]
 pub fn lstsq<T: Float>(
     a: &Tensor<T>,
     b: &Tensor<T>,
     rcond: Option<f64>,
 ) -> FerrotorchResult<(Tensor<T>, Tensor<T>, Tensor<T>, Tensor<T>)> {
-    require_cpu(a, "lstsq")?;
-    require_cpu(b, "lstsq")?;
     if a.ndim() != 2 {
         return Err(FerrotorchError::InvalidArgument {
             message: format!("lstsq: `a` must be 2-D, got {:?}", a.shape()),
         });
     }
+    if a.device() != b.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        });
+    }
 
     // Autograd path: delegate to the differentiable wrapper, which computes the
     // forward under `no_grad` (preventing re-entry here) and attaches
-    // `LstsqBackward` to the `solution` output (full-rank, via pinv_backward).
+    // `LstsqBackward` to the differentiable `solution` and `residuals` outputs
+    // (full-rank, via pinv_backward plus PyTorch's residual branch).
     if crate::autograd::no_grad::is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
         return crate::grad_fns::linalg::lstsq_differentiable(a, b, rcond);
     }
+
+    if a.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        let m = a.shape()[0];
+        let n = a.shape()[1];
+        let b_is_1d = b.ndim() == 1;
+        let sol = lstsq_solve(a, b)?;
+        let residuals = if m > n {
+            let nrhs = if b_is_1d { 1 } else { b.shape()[1] };
+            let sol_m = if b_is_1d {
+                sol.view_reshape(vec![n, 1])?
+            } else {
+                sol.clone()
+            };
+            let b_m = if b_is_1d {
+                b.view_reshape(vec![m, 1])?
+            } else {
+                b.clone()
+            };
+            let r = a.mm(&sol_m)?.sub_t(&b_m)?;
+            let r2 = r.mul_t(&r)?;
+            let residuals = crate::grad_fns::reduction::sum_dim(&r2, 0, false)?;
+            debug_assert_eq!(residuals.shape(), &[nrhs]);
+            residuals
+        } else {
+            Tensor::from_storage(
+                TensorStorage::on_device(Vec::new(), a.device())?,
+                vec![0],
+                false,
+            )?
+        };
+        let rank = Tensor::from_storage(
+            TensorStorage::on_device(Vec::new(), a.device())?,
+            vec![0],
+            false,
+        )?;
+        let sv = Tensor::from_storage(
+            TensorStorage::on_device(Vec::new(), a.device())?,
+            vec![0],
+            false,
+        )?;
+        return Ok((sol, residuals, rank, sv));
+    }
+    if a.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "lstsq" });
+    }
+    require_cpu(a, "lstsq")?;
+    require_cpu(b, "lstsq")?;
 
     if is_f32::<T>() {
         let a_arr = tensor_to_array2_f32(a)?;

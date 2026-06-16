@@ -809,6 +809,152 @@ mod gpu {
     }
 
     #[test]
+    fn pinv_cuda_backward_stays_on_device_and_matches_cpu() {
+        let data = [2.0, 0.3, -0.4, 1.7, 0.2, 0.8];
+        let weights = [0.7, -0.2, 1.1, 0.4, -0.8, 0.3];
+
+        let a_gpu = cuda_leaf(&data, &[3, 2]);
+        let w_gpu = plain(&weights, &[2, 3]).to(Device::Cuda(0)).unwrap();
+        let p_gpu = linalg::pinv(&a_gpu).unwrap();
+        assert_eq!(p_gpu.device(), Device::Cuda(0));
+        assert_eq!(p_gpu.shape(), &[2, 3]);
+        p_gpu
+            .mul_t(&w_gpu)
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .backward()
+            .unwrap();
+        let ga_gpu = a_gpu.grad().unwrap().unwrap();
+        assert_eq!(ga_gpu.device(), Device::Cuda(0));
+
+        let a_cpu = cpu_leaf(&data, &[3, 2]);
+        let w_cpu = plain(&weights, &[2, 3]);
+        linalg::pinv(&a_cpu)
+            .unwrap()
+            .mul_t(&w_cpu)
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .backward()
+            .unwrap();
+        assert_close(
+            &ga_gpu.data_vec().unwrap(),
+            &grad_vec(&a_cpu),
+            2e-8,
+            "pinv CUDA dA",
+        );
+    }
+
+    #[test]
+    fn lstsq_solve_cuda_backward_stays_on_device_and_matches_cpu() {
+        let a_data = [1.0, 0.5, 2.0, -1.0, 0.3, 1.5, -0.7, 2.0];
+        let b_data = [1.0, -0.5, 0.8, 1.2, -0.3, 0.6, 2.0, -1.0];
+        let weights = [0.7, -1.1, 0.4, 1.3];
+
+        let a_gpu = cuda_leaf(&a_data, &[4, 2]);
+        let b_gpu = cuda_leaf(&b_data, &[4, 2]);
+        let w_gpu = plain(&weights, &[2, 2]).to(Device::Cuda(0)).unwrap();
+        let x_gpu = linalg::lstsq_solve(&a_gpu, &b_gpu).unwrap();
+        assert_eq!(x_gpu.device(), Device::Cuda(0));
+        assert!(x_gpu.requires_grad());
+        x_gpu
+            .mul_t(&w_gpu)
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .backward()
+            .unwrap();
+        let ga_gpu = a_gpu.grad().unwrap().unwrap();
+        let gb_gpu = b_gpu.grad().unwrap().unwrap();
+        assert_eq!(ga_gpu.device(), Device::Cuda(0));
+        assert_eq!(gb_gpu.device(), Device::Cuda(0));
+
+        let a_cpu = cpu_leaf(&a_data, &[4, 2]);
+        let b_cpu = cpu_leaf(&b_data, &[4, 2]);
+        let w_cpu = plain(&weights, &[2, 2]);
+        linalg::lstsq_solve(&a_cpu, &b_cpu)
+            .unwrap()
+            .mul_t(&w_cpu)
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .backward()
+            .unwrap();
+
+        assert_close(
+            &ga_gpu.data_vec().unwrap(),
+            &grad_vec(&a_cpu),
+            5e-8,
+            "lstsq_solve CUDA dA",
+        );
+        assert_close(
+            &gb_gpu.data_vec().unwrap(),
+            &grad_vec(&b_cpu),
+            5e-8,
+            "lstsq_solve CUDA dB",
+        );
+    }
+
+    fn manual_lstsq_residual_loss(a: &Tensor<f64>, b: &Tensor<f64>, weights: &[f64]) -> f64 {
+        let x = linalg::lstsq_solve(a, b).unwrap();
+        let r = a.mm(&x).unwrap().sub_t(b).unwrap();
+        let r2 = r.mul_t(&r).unwrap();
+        let residuals = ferrotorch_core::grad_fns::reduction::sum_dim(&r2, 0, false).unwrap();
+        weighted_sum(&residuals, weights)
+    }
+
+    #[test]
+    fn lstsq_cuda_residuals_backward_stays_on_device_and_matches_finite_difference() {
+        let a_data = [1.0, 0.5, 2.0, -1.0, 0.3, 1.5, -0.7, 2.0];
+        let b_data = [1.0, -0.5, 0.8, 1.2, -0.3, 0.6, 2.0, -1.0];
+        let weights = [0.6, -0.4];
+
+        let a_gpu = cuda_leaf(&a_data, &[4, 2]);
+        let b_gpu = cuda_leaf(&b_data, &[4, 2]);
+        let w_gpu = plain(&weights, &[2]).to(Device::Cuda(0)).unwrap();
+        let (_x, residuals_gpu, rank_gpu, sv_gpu) = linalg::lstsq(&a_gpu, &b_gpu, None).unwrap();
+        assert_eq!(residuals_gpu.device(), Device::Cuda(0));
+        assert_eq!(residuals_gpu.shape(), &[2]);
+        assert!(residuals_gpu.requires_grad());
+        assert_eq!(rank_gpu.shape(), &[0]);
+        assert_eq!(sv_gpu.shape(), &[0]);
+        residuals_gpu
+            .mul_t(&w_gpu)
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .backward()
+            .unwrap();
+        let ga_gpu = a_gpu.grad().unwrap().unwrap();
+        let gb_gpu = b_gpu.grad().unwrap().unwrap();
+        assert_eq!(ga_gpu.device(), Device::Cuda(0));
+        assert_eq!(gb_gpu.device(), Device::Cuda(0));
+
+        let numeric_a = fd_grad(&a_data, &[4, 2], 1e-6, |aa| {
+            let bb = plain(&b_data, &[4, 2]);
+            manual_lstsq_residual_loss(aa, &bb, &weights)
+        });
+        let numeric_b = fd_grad(&b_data, &[4, 2], 1e-6, |bb| {
+            let aa = plain(&a_data, &[4, 2]);
+            manual_lstsq_residual_loss(&aa, bb, &weights)
+        });
+
+        assert_close(
+            &ga_gpu.data_vec().unwrap(),
+            &numeric_a,
+            2e-5,
+            "lstsq residual CUDA dA",
+        );
+        assert_close(
+            &gb_gpu.data_vec().unwrap(),
+            &numeric_b,
+            2e-5,
+            "lstsq residual CUDA dB",
+        );
+    }
+
+    #[test]
     fn lu_factor_cuda_tall_backward_stays_on_device_and_matches_cpu() {
         let data = [4.0, 0.2, 0.3, 3.0, 0.1, 0.4];
         let weights = [0.5, -0.8, 0.3, 1.2, -0.4, 0.9];

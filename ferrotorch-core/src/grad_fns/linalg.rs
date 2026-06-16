@@ -25,10 +25,10 @@
 //! | REQ-16 (`linalg.qr`) | SHIPPED | `QrBackwardQ`/`QrBackwardR` + `qr_differentiable` (reduced, m≥n; real `linalg_qr_backward` VJP split across the Q/R outputs, accumulated into `A.grad`) per `FunctionsManual.cpp:4166`; FD-verified `grad_fns::linalg::tests::qr_backward_matches_finite_difference_square` and `qr_backward_q_only_and_r_only`; non-test consumer: the grad-aware `crate::linalg::qr` forward delegates here when grad is enabled. Blocker #1345. |
 //! | REQ-17 (`linalg.cholesky`) | SHIPPED | `CholeskyBackward` + `cholesky_differentiable` (Phi-symmetrisation VJP `L^{-T} Φ(tril(L^T gL)) L^{-1}`) per `FunctionsManual.cpp:2048`; FD-verified `grad_fns::linalg::tests::cholesky_backward_matches_finite_difference` (symmetric-FD + symmetry check); non-test consumer: the grad-aware `crate::linalg::cholesky` forward delegates here when grad is enabled. Blocker #1345. |
 //! | REQ-18 (`linalg.inv`) | SHIPPED | `LinalgInvBackward` + `inv_differentiable` (VJP `dA = -Y^T @ grad @ Y^T` per `derivatives.yaml:917`); FD-verified `tests/divergence_linalg_grad_audit.rs:inv_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"linalg.inv"` arm. Blocker #1345. |
-//! | REQ-19 (`linalg.pinv`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-19 (`linalg.pinv`) | SHIPPED | `PinvBackward` + `pinv_differentiable` (PyTorch `pinv_backward` full-rank algebraic VJP) with a resident CUDA f32/f64 branch built from tensor `mm`/transpose/add/sub/neg; CUDA forward composes `svd` + resident `amax`/compare/where/diag so tracked `pinv` does not detach or host-round-trip. FD/CPU-vs-CUDA verified in `tests/audit_core146_linalg_autograd.rs`. |
 //! | REQ-20 (`linalg.det`) | SHIPPED | `LinalgDetBackward` + `det_differentiable` (VJP `dA = det * grad * inv(A)^T` per `FunctionsManual.cpp:4373` invertible branch); FD-verified `tests/divergence_linalg_grad_audit.rs:det_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"linalg.det"` arm. Blocker #1345. |
 //! | REQ-21 (`linalg.slogdet`) | SHIPPED | `SlogdetBackward` + `slogdet_differentiable` (real-case VJP `dA = grad_logabsdet * inv(A)^T`, attached to the differentiable `logabsdet` output; `sign` is non-diff) per `FunctionsManual.cpp:4471` + `derivatives.yaml:559`; FD-verified `grad_fns::linalg::tests::slogdet_backward_matches_finite_difference`; non-test consumer: the grad-aware `crate::linalg::slogdet` forward delegates here when grad is enabled. Blocker #1345. |
-//! | REQ-22 (`linalg.lstsq`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-22 (`linalg.lstsq`) | SHIPPED | `LstsqBackward` + `lstsq_differentiable`/`lstsq_solve_differentiable` mirror `FunctionsManual.cpp:4012` for both differentiable outputs (`solution`, `residuals`; rank/singular values non-diff). CUDA f32/f64 solution and residuals stay resident; tests cover solution VJP vs CPU and residual VJP vs finite difference. API-level driver/rank-dtype parity gap is tracked separately in crosslink #1988. |
 //! | REQ-23 (`linalg.norm`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-24 (`linalg.matrix_rank`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-25 (`linalg.cross`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
@@ -3504,9 +3504,9 @@ pub fn qr_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>
 // subset). Each is a closed-form / algebraic VJP grounded in a named PyTorch
 // `file:line` and FD-verified in this file's `#[cfg(test)] mod tests`.
 //
-// Older VJPs in this section operate on dense f32/f64 CPU matrices via
-// raw-slice GEMM helpers (`mm_rows`/`mm_bt_rows`/`mm_at_rows`) and the existing
-// `mat_transpose` / `solve_triangular` / `linalg_fwd::*` forwards. Newer LU
+// Some CPU VJPs in this section operate on dense f32/f64 matrices via raw-slice
+// GEMM helpers (`mm_rows`/`mm_bt_rows`/`mm_at_rows`) and the existing
+// `mat_transpose` / `solve_triangular` / `linalg_fwd::*` forwards. CUDA-capable
 // branches compose tensor operations directly so CUDA inputs remain resident.
 // All forward recomputation is guarded by `no_grad`.
 // ===========================================================================
@@ -4270,6 +4270,10 @@ pub struct PinvBackward<T: Float> {
 
 impl<T: Float> PinvBackward<T> {
     fn compute(&self, grad: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        if grad.is_cuda() {
+            return self.compute_cuda(grad);
+        }
+
         let m = self.a.shape()[0];
         let n = self.a.shape()[1];
         let a = self.a.data()?.to_vec(); // [m,n]
@@ -4328,6 +4332,48 @@ impl<T: Float> PinvBackward<T> {
         };
         from_cpu(out, vec![m, n])
     }
+
+    fn compute_cuda(&self, grad: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        if !(is_f32::<T>() || is_f64::<T>()) {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "PinvBackward" });
+        }
+
+        crate::autograd::no_grad::no_grad(|| {
+            let m = self.a.shape()[0];
+            let n = self.a.shape()[1];
+            let pa = &self.pinv; // [n,m]
+            let pah = pa.transpose(0, 1)?.contiguous()?; // [m,n]
+            let gh = grad.transpose(0, 1)?.contiguous()?; // [m,n]
+
+            if m <= n {
+                // K = gradh @ pinvA: [m,n]@[n,m] -> [m,m].
+                let k = gh.mm(pa)?;
+                let kpah = k.mm(&pah)?;
+                let pak = pa.mm(&k)?;
+                let neg_pak_h = pak.transpose(0, 1)?.contiguous()?.neg_t()?;
+                let apa = self.a.mm(pa)?;
+                let apa_kpah = apa.mm(&kpah)?;
+                let pahpa = pah.mm(pa)?;
+                let ka = k.mm(&self.a)?;
+                let gh_minus_ka = gh.sub_t(&ka)?;
+                let last = pahpa.mm(&gh_minus_ka)?;
+                neg_pak_h.add_t(&kpah)?.add_t(&last.sub_t(&apa_kpah)?)
+            } else {
+                // m > n branch.
+                let k = pa.mm(&gh)?;
+                let pahk = pah.mm(&k)?;
+                let kpa = k.mm(pa)?;
+                let neg_kpa_h = kpa.transpose(0, 1)?.contiguous()?.neg_t()?;
+                let ak = self.a.mm(&k)?;
+                let gh_minus_ak = gh.sub_t(&ak)?;
+                let t1 = gh_minus_ak.mm(pa)?;
+                let t2 = t1.mm(&pah)?;
+                let p1 = pahk.mm(pa)?;
+                let p2 = p1.mm(&self.a)?;
+                neg_kpa_h.add_t(&t2)?.add_t(&pahk.sub_t(&p2)?)
+            }
+        })
+    }
 }
 
 impl<T: Float> GradFn<T> for PinvBackward<T> {
@@ -4363,55 +4409,105 @@ pub fn pinv_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T
 // LstsqBackward — X = lstsq(A, B).solution  (full-rank least squares)
 // ---------------------------------------------------------------------------
 
-/// Backward for the `solution` output `X` of `lstsq(A, B)`.
+/// Which differentiable `torch.linalg.lstsq` output this node is attached to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LstsqBackwardOutput {
+    Solution,
+    Residuals,
+}
+
+/// Backward for the differentiable outputs of `lstsq(A, B)`.
 ///
 /// VJP (`torch/csrc/autograd/FunctionsManual.cpp:4038-4050`
-/// `linalg_lstsq_backward`, solution-from-`gX` branch — the `residuals`/`rank`/
-/// `singular_values` outputs are non-differentiable):
+/// `linalg_lstsq_backward`). The `solution` output contributes:
 ///   `gB = pinv(A)^H @ gX`
 ///   `gA = pinv_backward(gX @ B^H, pinv(A), A)`
-/// Full-rank only (`pinv_backward` is exact for full-rank `A`). `^H` is real
-/// transpose here. Promotes a 1-D RHS to a column matrix for the matmuls.
+/// The `residuals` output contributes, when non-empty:
+///   `R = A @ X - B`
+///   `gA = 2 * (gL.unsqueeze(-2) * R) @ X^H`
+///   `gB = -2 * gL.unsqueeze(-2) * R`
+///
+/// `rank` and `singular_values` are non-differentiable. Full-rank only
+/// (`pinv_backward` is exact for full-rank `A`). `^H` is real transpose here.
+/// Promotes a 1-D RHS to a column matrix for the matmuls.
 #[derive(Debug)]
 pub struct LstsqBackward<T: Float> {
     a: Tensor<T>,
     b: Tensor<T>,
     /// Retained pseudoinverse `pinv(A)` (`n×m`).
     pinv: Tensor<T>,
+    /// Retained solution `X` (`n×nrhs` or `[n]` for vector RHS).
+    solution: Tensor<T>,
     /// Whether `B` was a 1-D vector RHS (then `X` is 1-D too).
     vector_rhs: bool,
+    output: LstsqBackwardOutput,
 }
 
 impl<T: Float> GradFn<T> for LstsqBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        crate::autograd::no_grad::no_grad(|| match self.output {
+            LstsqBackwardOutput::Solution => self.backward_solution(grad_output),
+            LstsqBackwardOutput::Residuals => self.backward_residuals(grad_output),
+        })
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.a, &self.b]
+    }
+
+    fn name(&self) -> &'static str {
+        "LstsqBackward"
+    }
+}
+
+impl<T: Float> LstsqBackward<T> {
+    fn matrix_rhs(&self) -> FerrotorchResult<Tensor<T>> {
         let m = self.a.shape()[0];
-        let n = self.a.shape()[1];
-        // Promote vector forms to column matrices.
-        let nrhs = if self.vector_rhs {
-            1
+        if self.vector_rhs {
+            self.b.view_reshape(vec![m, 1])
         } else {
-            self.b.shape()[1]
-        };
+            Ok(self.b.clone())
+        }
+    }
+
+    fn matrix_solution(&self) -> FerrotorchResult<Tensor<T>> {
+        let n = self.a.shape()[1];
+        if self.vector_rhs {
+            self.solution.view_reshape(vec![n, 1])
+        } else {
+            Ok(self.solution.clone())
+        }
+    }
+
+    fn matrix_grad_solution(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        let n = self.a.shape()[1];
+        if self.vector_rhs {
+            grad_output.view_reshape(vec![n, 1])
+        } else {
+            Ok(grad_output.clone())
+        }
+    }
+
+    fn backward_solution(
+        &self,
+        grad_output: &Tensor<T>,
+    ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let m = self.a.shape()[0];
         let gx = if self.vector_rhs {
-            from_cpu(grad_output.data()?.to_vec(), vec![n, 1])?
+            self.matrix_grad_solution(grad_output)?
         } else {
             grad_output.clone()
         };
-        let bmat = if self.vector_rhs {
-            from_cpu(self.b.data()?.to_vec(), vec![m, 1])?
-        } else {
-            self.b.clone()
-        };
+        let bmat = self.matrix_rhs()?;
 
         // gB = pinv(A)^H @ gX:  pinvAh = pinv^T [m,n]; gB = [m,n]@[n,nrhs].
         let grad_b = if self.b.requires_grad() {
-            let pa = self.pinv.data()?; // [n,m]
-            let pah = transpose_rows(pa, n, m); // [m,n]
-            let gb = mm_rows(&pah, gx.data()?, m, n, nrhs); // [m,nrhs]
+            let pah = self.pinv.transpose(0, 1)?.contiguous()?; // [m,n]
+            let gb = pah.mm(&gx)?; // [m,nrhs]
             let gb = if self.vector_rhs {
-                from_cpu(gb, vec![m])?
+                gb.view_reshape(vec![m])?
             } else {
-                from_cpu(gb, vec![m, nrhs])?
+                gb
             };
             Some(gb)
         } else {
@@ -4420,10 +4516,7 @@ impl<T: Float> GradFn<T> for LstsqBackward<T> {
 
         // gA = pinv_backward(gX @ B^H, pinv, A).  gX@B^H = [n,nrhs]@[nrhs,m]->[n,m].
         let grad_a = if self.a.requires_grad() {
-            let gxd = gx.data()?; // [n,nrhs]
-            let bd = bmat.data()?; // [m,nrhs]
-            let pinv_a_grad = mm_bt_rows(gxd, bd, n, nrhs, m); // gX @ B^T -> [n,m]
-            let pinv_a_grad = from_cpu(pinv_a_grad, vec![n, m])?;
+            let pinv_a_grad = gx.mm_bt(&bmat)?; // [n,m]
             let pb = PinvBackward {
                 a: self.a.clone(),
                 pinv: self.pinv.clone(),
@@ -4436,20 +4529,65 @@ impl<T: Float> GradFn<T> for LstsqBackward<T> {
         Ok(vec![grad_a, grad_b])
     }
 
-    fn inputs(&self) -> Vec<&Tensor<T>> {
-        vec![&self.a, &self.b]
-    }
+    fn backward_residuals(
+        &self,
+        grad_output: &Tensor<T>,
+    ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.numel() == 0 {
+            let grad_a = if self.a.requires_grad() {
+                Some(crate::creation::zeros_like(&self.a)?)
+            } else {
+                None
+            };
+            let grad_b = if self.b.requires_grad() {
+                Some(crate::creation::zeros_like(&self.b)?)
+            } else {
+                None
+            };
+            return Ok(vec![grad_a, grad_b]);
+        }
 
-    fn name(&self) -> &'static str {
-        "LstsqBackward"
+        let nrhs = if self.vector_rhs {
+            1
+        } else {
+            self.b.shape()[1]
+        };
+        let x = self.matrix_solution()?;
+        let b = self.matrix_rhs()?;
+        let residual = self.a.mm(&x)?.sub_t(&b)?;
+        let gl = grad_output.view_reshape(vec![1, nrhs])?;
+        let two = T::from(2.0).ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "lstsq backward: 2.0 is not representable in dtype".into(),
+        })?;
+        let scale = crate::creation::full_like(&residual, two)?;
+        let weighted = residual.mul_t(&gl)?.mul_t(&scale)?;
+
+        let grad_a = if self.a.requires_grad() {
+            Some(weighted.mm_bt(&x)?)
+        } else {
+            None
+        };
+        let grad_b = if self.b.requires_grad() {
+            let gb = weighted.neg_t()?;
+            let gb = if self.vector_rhs {
+                gb.view_reshape(vec![self.b.shape()[0]])?
+            } else {
+                gb
+            };
+            Some(gb)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_a, grad_b])
     }
 }
 
 /// Differentiable `lstsq`. Returns the 4-tuple `(solution, residuals, rank,
-/// singular_values)`; only `solution` is differentiable (the others are
-/// non-differentiable — `output_differentiability: [True, False, False,
-/// False]` per `derivatives.yaml:1056`). Attaches `LstsqBackward` to the
-/// `solution` output when grad is needed.
+/// singular_values)`; `solution` and `residuals` are differentiable
+/// (`output_differentiability: [True, True, False, False]` per
+/// `derivatives.yaml:1056`). Attaches split `LstsqBackward` nodes when grad is
+/// needed.
 ///
 /// Forward computed under `no_grad` (re-entry guard).
 #[allow(
@@ -4465,17 +4603,53 @@ pub fn lstsq_differentiable<T: Float>(
         crate::autograd::no_grad::no_grad(|| linalg_fwd::lstsq(a, b, rcond))?;
     if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
         let pinv = crate::autograd::no_grad::no_grad(|| linalg_fwd::pinv(a))?;
+        let sol_grad_fn = Arc::new(LstsqBackward {
+            a: a.clone(),
+            b: b.clone(),
+            pinv: pinv.clone(),
+            solution: sol.clone(),
+            vector_rhs: b.ndim() == 1,
+            output: LstsqBackwardOutput::Solution,
+        });
+        let resid_grad_fn = Arc::new(LstsqBackward {
+            a: a.clone(),
+            b: b.clone(),
+            pinv,
+            solution: sol.clone(),
+            vector_rhs: b.ndim() == 1,
+            output: LstsqBackwardOutput::Residuals,
+        });
+        let (storage, shape) = sol.into_storage_and_shape()?;
+        let sol = Tensor::from_operation(storage, shape, sol_grad_fn)?;
+        let (storage, shape) = resid.into_storage_and_shape()?;
+        let resid = Tensor::from_operation(storage, shape, resid_grad_fn)?;
+        Ok((sol, resid, rank, sv))
+    } else {
+        Ok((sol, resid, rank, sv))
+    }
+}
+
+/// Differentiable solution-only `lstsq_solve`, backed by the same PyTorch VJP
+/// branch as `torch.linalg.lstsq(...).solution`.
+pub fn lstsq_solve_differentiable<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    let sol = crate::autograd::no_grad::no_grad(|| linalg_fwd::lstsq_solve(a, b))?;
+    if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
+        let pinv = crate::autograd::no_grad::no_grad(|| linalg_fwd::pinv(a))?;
         let grad_fn = Arc::new(LstsqBackward {
             a: a.clone(),
             b: b.clone(),
             pinv,
+            solution: sol.clone(),
             vector_rhs: b.ndim() == 1,
+            output: LstsqBackwardOutput::Solution,
         });
         let (storage, shape) = sol.into_storage_and_shape()?;
-        let sol = Tensor::from_operation(storage, shape, grad_fn)?;
-        Ok((sol, resid, rank, sv))
+        Tensor::from_operation(storage, shape, grad_fn)
     } else {
-        Ok((sol, resid, rank, sv))
+        Ok(sol)
     }
 }
 
