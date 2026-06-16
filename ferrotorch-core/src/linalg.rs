@@ -62,6 +62,60 @@ use std::sync::OnceLock;
 /// Return type for `torch.linalg.lstsq`-style calls.
 pub type LstsqResult<T> = (Tensor<T>, Tensor<T>, IntTensor<i64>, Tensor<T>);
 
+/// Tolerance input for [`matrix_rank_with_options`].
+///
+/// `torch.linalg.matrix_rank` has scalar and tensor tolerance overloads. This
+/// enum keeps the public Rust API explicit while preserving PyTorch's
+/// broadcast rules for tensor tolerances.
+#[derive(Debug, Clone, Copy)]
+pub enum MatrixRankTolerance<'a, Tolerance: Float = f64> {
+    /// Scalar tolerance (`float` overload in PyTorch).
+    Scalar(f64),
+    /// Tensor tolerance (`Tensor` overload in PyTorch). Must be on the same
+    /// device as the input and broadcasts with the input batch shape.
+    Tensor(&'a Tensor<Tolerance>),
+}
+
+/// Options for [`matrix_rank_with_options`].
+#[derive(Debug, Clone, Copy)]
+pub struct MatrixRankOptions<'a, Tolerance: Float = f64> {
+    /// Absolute tolerance. Defaults to zero.
+    pub atol: Option<MatrixRankTolerance<'a, Tolerance>>,
+    /// Relative tolerance. Defaults to `eps * max(m, n)`, except when an
+    /// explicit positive `atol` is supplied, matching PyTorch.
+    pub rtol: Option<MatrixRankTolerance<'a, Tolerance>>,
+    /// Use Hermitian eigenvalues instead of singular values.
+    pub hermitian: bool,
+}
+
+impl<Tolerance: Float> Default for MatrixRankOptions<'_, Tolerance> {
+    fn default() -> Self {
+        Self {
+            atol: None,
+            rtol: None,
+            hermitian: false,
+        }
+    }
+}
+
+impl<Tolerance: Float> MatrixRankOptions<'_, Tolerance> {
+    /// Legacy NumPy-compatible `tol` overload: the tolerance is absolute and
+    /// is not scaled by the largest singular/eigen value.
+    pub fn legacy_tol(tol: Option<f64>, hermitian: bool) -> Self {
+        match tol {
+            Some(tol) => Self {
+                atol: Some(MatrixRankTolerance::Scalar(tol)),
+                rtol: Some(MatrixRankTolerance::Scalar(0.0)),
+                hermitian,
+            },
+            None => Self {
+                hermitian,
+                ..Self::default()
+            },
+        }
+    }
+}
+
 /// LAPACK/cuSOLVER driver selection for [`lstsq_with_driver`].
 ///
 /// Mirrors `torch.linalg.lstsq(driver=...)`: CPU accepts all four LAPACK
@@ -2885,14 +2939,80 @@ pub fn slogdet<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T
 
 /// Numerical rank of `a`.
 ///
-/// Returns a scalar (0-d) `IntTensor<i64>` on the same device as `a`. `tol`,
-/// when `Some(t)`, is the legacy NumPy-compatible absolute tolerance; default
-/// is `max(m, n) * eps * sigma_max`.
+/// Returns an `IntTensor<i64>` on the same device as `a`; for a single matrix
+/// the result is a scalar, and for a batch of matrices the result shape is the
+/// broadcasted batch/tolerance shape. `tol`, when `Some(t)`, is the legacy
+/// NumPy-compatible absolute tolerance overload.
 pub fn matrix_rank<T: Float>(a: &Tensor<T>, tol: Option<f64>) -> FerrotorchResult<IntTensor<i64>> {
+    let options: MatrixRankOptions<'_, T> = MatrixRankOptions::legacy_tol(tol, false);
+    matrix_rank_with_options(a, options)
+}
+
+/// `torch.linalg.matrix_rank(input, *, atol=None, rtol=None, hermitian=False)`.
+///
+/// Supports matrices and batches of matrices, scalar and tensor tolerances,
+/// resident CUDA execution for f32/f64, and PyTorch's `atol`/`rtol`
+/// broadcasting semantics.
+pub fn matrix_rank_with_options<T: Float, Tolerance: Float>(
+    a: &Tensor<T>,
+    options: MatrixRankOptions<'_, Tolerance>,
+) -> FerrotorchResult<IntTensor<i64>> {
+    crate::autograd::no_grad::no_grad(|| matrix_rank_impl(a, options))
+}
+
+/// Scalar `atol`/`rtol` overload for [`matrix_rank_with_options`].
+pub fn matrix_rank_atol_rtol<T: Float>(
+    a: &Tensor<T>,
+    atol: Option<f64>,
+    rtol: Option<f64>,
+    hermitian: bool,
+) -> FerrotorchResult<IntTensor<i64>> {
+    let options: MatrixRankOptions<'_, T> = MatrixRankOptions {
+        atol: atol.map(MatrixRankTolerance::Scalar),
+        rtol: rtol.map(MatrixRankTolerance::Scalar),
+        hermitian,
+    };
+    matrix_rank_with_options(a, options)
+}
+
+/// Tensor `atol`/`rtol` overload for [`matrix_rank_with_options`].
+pub fn matrix_rank_atol_rtol_tensors<T: Float, Tolerance: Float>(
+    a: &Tensor<T>,
+    atol: Option<&Tensor<Tolerance>>,
+    rtol: Option<&Tensor<Tolerance>>,
+    hermitian: bool,
+) -> FerrotorchResult<IntTensor<i64>> {
+    let options: MatrixRankOptions<'_, Tolerance> = MatrixRankOptions {
+        atol: atol.map(MatrixRankTolerance::Tensor),
+        rtol: rtol.map(MatrixRankTolerance::Tensor),
+        hermitian,
+    };
+    matrix_rank_with_options(a, options)
+}
+
+/// Legacy tensor `tol` overload. Like PyTorch, `tol` is absolute and rtol is
+/// forced to zero.
+pub fn matrix_rank_tol_tensor<T: Float, Tolerance: Float>(
+    a: &Tensor<T>,
+    tol: &Tensor<Tolerance>,
+    hermitian: bool,
+) -> FerrotorchResult<IntTensor<i64>> {
+    let options: MatrixRankOptions<'_, Tolerance> = MatrixRankOptions {
+        atol: Some(MatrixRankTolerance::Tensor(tol)),
+        rtol: Some(MatrixRankTolerance::Scalar(0.0)),
+        hermitian,
+    };
+    matrix_rank_with_options(a, options)
+}
+
+fn matrix_rank_impl<T: Float, Tolerance: Float>(
+    a: &Tensor<T>,
+    options: MatrixRankOptions<'_, Tolerance>,
+) -> FerrotorchResult<IntTensor<i64>> {
     let shape = a.shape();
-    if shape.len() != 2 {
+    if shape.len() < 2 {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!("matrix_rank requires a 2-D tensor, got {shape:?}"),
+            message: format!("matrix_rank requires at least a 2-D tensor, got {shape:?}"),
         });
     }
 
@@ -2902,35 +3022,208 @@ pub fn matrix_rank<T: Float>(a: &Tensor<T>, tol: Option<f64>) -> FerrotorchResul
         });
     }
 
+    let ndim = shape.len();
+    let m = shape[ndim - 2];
+    let n = shape[ndim - 1];
+    let batch_shape = &shape[..ndim - 2];
+
+    // PyTorch returns zero for empty matrices before checking the Hermitian
+    // square precondition.
     if a.numel() == 0 {
-        return IntTensor::<i64>::scalar(0).to(a.device());
+        let out_numel = crate::shape::checked_numel(batch_shape, "matrix_rank empty output")?;
+        return IntTensor::<i64>::from_vec(vec![0; out_numel], batch_shape.to_vec())?
+            .to(a.device());
     }
 
-    let s = svdvals(a)?;
-    let threshold = matrix_rank_threshold(&s, shape[0], shape[1], tol)?;
-    let keep = crate::bool_tensor::BoolTensor::gt(&s, &threshold)?;
-    keep.to_float::<T>()?.count_nonzero_t()
+    if options.hermitian && m != n {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "matrix_rank(hermitian=true) requires square matrices, got {m} by {n}"
+            ),
+        });
+    }
+
+    let (values, max_values) = matrix_rank_spectrum(a, options.hermitian)?;
+    let values = values.to_dtype::<f64>()?;
+    let max_values = max_values.to_dtype::<f64>()?;
+    let (atol, rtol) = matrix_rank_resolve_tolerances(a, options, m, n)?;
+    let threshold = matrix_rank_threshold(&atol, &rtol, &max_values)?;
+    let keep = crate::bool_tensor::BoolTensor::gt(&values, &threshold)?;
+    let keep_f = keep.to_float::<f64>()?;
+    let counts = keep_f.sum_dim((keep_f.ndim() - 1) as i64, false)?;
+    counts.to_int::<i64>()
+}
+
+fn matrix_rank_spectrum<T: Float>(
+    a: &Tensor<T>,
+    hermitian: bool,
+) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
+    let shape = a.shape();
+    let ndim = shape.len();
+    let batch_shape = &shape[..ndim - 2];
+    let m = shape[ndim - 2];
+    let n = shape[ndim - 1];
+    let k = if hermitian { n } else { m.min(n) };
+    let batch_numel = crate::shape::checked_numel(batch_shape, "matrix_rank batch")?;
+
+    if batch_shape.is_empty() {
+        let values = if hermitian {
+            eigvalsh(a)?.abs_t()?
+        } else {
+            svdvals(a)?
+        };
+        let max_values = if hermitian {
+            values.amax()?.unsqueeze_t(0)?
+        } else {
+            values.narrow(0, 0, 1)?
+        };
+        return Ok((values, max_values));
+    }
+
+    let mut value_rows = Vec::with_capacity(batch_numel);
+    let mut max_rows = Vec::with_capacity(batch_numel);
+    for batch_flat in 0..batch_numel {
+        let matrix = matrix_rank_batch_matrix(a, batch_shape, batch_flat, m, n)?;
+        let values = if hermitian {
+            eigvalsh(&matrix)?.abs_t()?
+        } else {
+            svdvals(&matrix)?
+        };
+        let max_values = if hermitian {
+            values.amax()?.unsqueeze_t(0)?
+        } else {
+            values.narrow(0, 0, 1)?
+        };
+        value_rows.push(values.unsqueeze_t(0)?);
+        max_rows.push(max_values.reshape_t(&[1, 1])?);
+    }
+
+    let mut values_shape = batch_shape.to_vec();
+    values_shape.push(k);
+    let values_shape_i: Vec<isize> = values_shape.iter().map(|&d| d as isize).collect();
+    let values = crate::grad_fns::shape::cat(&value_rows, 0)?.reshape_t(&values_shape_i)?;
+
+    let mut max_shape = batch_shape.to_vec();
+    max_shape.push(1);
+    let max_shape_i: Vec<isize> = max_shape.iter().map(|&d| d as isize).collect();
+    let max_values = crate::grad_fns::shape::cat(&max_rows, 0)?.reshape_t(&max_shape_i)?;
+    Ok((values, max_values))
+}
+
+fn matrix_rank_batch_matrix<T: Float>(
+    a: &Tensor<T>,
+    batch_shape: &[usize],
+    batch_flat: usize,
+    m: usize,
+    n: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    let coords = matrix_rank_unravel_batch(batch_flat, batch_shape);
+    let mut view = a.clone();
+    for (axis, &coord) in coords.iter().enumerate() {
+        view = view.narrow(axis, coord, 1)?;
+    }
+    view.contiguous()?.reshape_t(&[m as isize, n as isize])
+}
+
+fn matrix_rank_unravel_batch(mut flat: usize, shape: &[usize]) -> Vec<usize> {
+    let mut coords = vec![0; shape.len()];
+    for axis in (0..shape.len()).rev() {
+        let dim = shape[axis];
+        coords[axis] = flat % dim;
+        flat /= dim;
+    }
+    coords
+}
+
+fn matrix_rank_resolve_tolerances<T: Float, Tolerance: Float>(
+    a: &Tensor<T>,
+    options: MatrixRankOptions<'_, Tolerance>,
+    m: usize,
+    n: usize,
+) -> FerrotorchResult<(Tensor<f64>, Tensor<f64>)> {
+    let default_rtol = matrix_rank_default_rtol::<T>(m, n)?;
+    let atol = match options.atol {
+        Some(tol) => matrix_rank_tolerance_to_tensor(a, tol, "atol")?,
+        None => matrix_rank_scalar_on_device(0.0, a.device(), "atol")?,
+    };
+
+    let rtol = match options.rtol {
+        Some(tol) => matrix_rank_tolerance_to_tensor(a, tol, "rtol"),
+        None => match options.atol {
+            Some(MatrixRankTolerance::Scalar(v)) if v > 0.0 => {
+                matrix_rank_scalar_on_device(0.0, a.device(), "rtol")
+            }
+            Some(MatrixRankTolerance::Tensor(_)) => {
+                let zeros = crate::creation::zeros_like(&atol)?;
+                let defaults = crate::creation::full_like(&atol, default_rtol)?;
+                let positive = crate::bool_tensor::BoolTensor::gt(&atol, &zeros)?;
+                crate::grad_fns::comparison::where_bt(&positive, &zeros, &defaults)
+            }
+            _ => matrix_rank_scalar_value_on_device(default_rtol, a.device()),
+        },
+    }?;
+
+    Ok((atol, rtol))
+}
+
+fn matrix_rank_tolerance_to_tensor<T: Float, Tolerance: Float>(
+    a: &Tensor<T>,
+    tolerance: MatrixRankTolerance<'_, Tolerance>,
+    name: &'static str,
+) -> FerrotorchResult<Tensor<f64>> {
+    match tolerance {
+        MatrixRankTolerance::Scalar(v) => matrix_rank_scalar_on_device(v, a.device(), name),
+        MatrixRankTolerance::Tensor(t) => {
+            if t.device() != a.device() {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected: a.device(),
+                    got: t.device(),
+                });
+            }
+            t.to_dtype::<f64>()
+        }
+    }
+}
+
+fn matrix_rank_scalar_on_device(
+    value: f64,
+    device: Device,
+    _name: &'static str,
+) -> FerrotorchResult<Tensor<f64>> {
+    Tensor::from_storage(
+        TensorStorage::on_device(vec![value], device)?,
+        vec![],
+        false,
+    )
+}
+
+fn matrix_rank_scalar_value_on_device(value: f64, device: Device) -> FerrotorchResult<Tensor<f64>> {
+    Tensor::from_storage(
+        TensorStorage::on_device(vec![value], device)?,
+        vec![],
+        false,
+    )
+}
+
+fn matrix_rank_default_rtol<T: Float>(m: usize, n: usize) -> FerrotorchResult<f64> {
+    let eps = T::epsilon()
+        .to_f64()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "matrix_rank: dtype epsilon is not representable as f64".into(),
+        })?;
+    Ok((m.max(n) as f64) * eps)
 }
 
 fn matrix_rank_threshold<T: Float>(
-    singular_values: &Tensor<T>,
-    m: usize,
-    n: usize,
-    tol: Option<f64>,
+    atol: &Tensor<T>,
+    rtol: &Tensor<T>,
+    max_values: &Tensor<T>,
 ) -> FerrotorchResult<Tensor<T>> {
-    if let Some(tol) = tol {
-        let tol_t = T::from(tol).ok_or_else(|| FerrotorchError::InvalidArgument {
-            message: format!("matrix_rank: tolerance {tol} not representable in dtype"),
-        })?;
-        return crate::creation::full_like(singular_values, tol_t);
-    }
-
-    let max_s = singular_values.amax()?;
-    let rtol = T::from(m.max(n)).ok_or_else(|| FerrotorchError::InvalidArgument {
-        message: "matrix_rank: matrix extent is not representable in dtype".into(),
-    })? * T::epsilon();
-    let rtol_t = crate::creation::full_like(&max_s, rtol)?;
-    max_s.mul_t(&rtol_t)
+    let atol = atol.unsqueeze_t(-1)?;
+    let rtol = rtol.unsqueeze_t(-1)?;
+    let scaled = rtol.mul_t(max_values)?;
+    let use_atol = crate::bool_tensor::BoolTensor::gt(&atol, &scaled)?;
+    crate::grad_fns::comparison::where_bt(&use_atol, &atol, &scaled)
 }
 
 /// Condition number of `a` under the given norm order (`p = 2.0` for the
