@@ -308,10 +308,7 @@ pub fn record_stream_on_buffer(
 // Cache management
 // ---------------------------------------------------------------------------
 
-/// Drop all cached buffers for a device, releasing GPU memory back to the
-/// CUDA driver.
-pub fn empty_cache(device_ordinal: usize) {
-    let Ok(mut pool) = POOL.lock() else { return };
+fn empty_cache_locked(pool: &mut PoolState, device_ordinal: usize) {
     pool.free.retain(|&(dev, _, _), _| dev != device_ordinal);
     // Recalculate cached_bytes from remaining entries.
     // Note: we don't store elem_size per entry, so we conservatively estimate
@@ -322,11 +319,22 @@ pub fn empty_cache(device_ordinal: usize) {
     pool.cached_bytes = 0;
 }
 
+fn empty_cache_all_locked(pool: &mut PoolState) {
+    pool.free.clear();
+    pool.cached_bytes = 0;
+}
+
+/// Drop all cached buffers for a device, releasing GPU memory back to the
+/// CUDA driver.
+pub fn empty_cache(device_ordinal: usize) {
+    let Ok(mut pool) = POOL.lock() else { return };
+    empty_cache_locked(&mut pool, device_ordinal);
+}
+
 /// Drop all cached buffers across all devices.
 pub fn empty_cache_all() {
     let Ok(mut pool) = POOL.lock() else { return };
-    pool.free.clear();
-    pool.cached_bytes = 0;
+    empty_cache_all_locked(&mut pool);
 }
 
 /// Total bytes currently cached (available for reuse).
@@ -341,6 +349,38 @@ pub fn cached_bytes(_device_ordinal: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn local_entry<T: Any + Send + Sync>(value: T) -> CachedEntry {
+        CachedEntry {
+            data: Box::new(value),
+            alloc_stream: StreamId(0),
+            stream_uses: Vec::new(),
+        }
+    }
+
+    fn local_return<T: Any + Send + Sync>(
+        pool: &mut PoolState,
+        device_ordinal: usize,
+        rounded_len: usize,
+        value: T,
+    ) {
+        pool.free
+            .entry((device_ordinal, rounded_len, TypeId::of::<T>()))
+            .or_default()
+            .push(local_entry(value));
+    }
+
+    fn local_take<T: Any + Send + Sync>(
+        pool: &mut PoolState,
+        device_ordinal: usize,
+        rounded_len: usize,
+    ) -> Option<T> {
+        let key = (device_ordinal, rounded_len, TypeId::of::<T>());
+        let bucket = pool.free.get_mut(&key)?;
+        let entry = bucket.pop()?;
+        let value = entry.data.downcast::<T>().ok()?;
+        Some(*value)
+    }
 
     #[test]
     fn round_len_zero() {
@@ -395,18 +435,15 @@ mod tests {
 
     #[test]
     fn pool_stats_tracking() {
-        reset_pool_stats();
-        let (h, _m, r) = pool_stats();
-        assert_eq!(h, 0);
-        assert_eq!(r, 0);
+        let (h0, _m0, r0) = pool_stats();
 
         pool_return::<u32>(98, 256, 4, 42u32);
-        let (_, _, r) = pool_stats();
-        assert!(r >= 1);
+        let (_, _, r1) = pool_stats();
+        assert!(r1 > r0);
 
         let _ = pool_take::<u32>(98, 256, 4);
-        let (h, _, _) = pool_stats();
-        assert!(h >= 1);
+        let (h1, _, _) = pool_stats();
+        assert!(h1 > h0);
     }
 
     #[test]
@@ -449,25 +486,27 @@ mod tests {
 
     #[test]
     fn empty_cache_clears_device() {
-        pool_return::<u32>(95, 256, 4, 11u32);
-        pool_return::<u32>(94, 256, 4, 22u32);
+        let mut pool = PoolState::new();
+        local_return::<u32>(&mut pool, 95, 256, 11u32);
+        local_return::<u32>(&mut pool, 94, 256, 22u32);
 
-        empty_cache(95);
+        empty_cache_locked(&mut pool, 95);
 
         // Device 95 cleared.
-        assert!(pool_take::<u32>(95, 256, 4).is_none());
+        assert!(local_take::<u32>(&mut pool, 95, 256).is_none());
         // Device 94 untouched.
-        assert_eq!(pool_take::<u32>(94, 256, 4), Some(22u32));
+        assert_eq!(local_take::<u32>(&mut pool, 94, 256), Some(22u32));
     }
 
     #[test]
     fn empty_cache_all_clears_everything() {
-        pool_return::<u32>(93, 256, 4, 33u32);
-        pool_return::<u32>(92, 256, 4, 44u32);
+        let mut pool = PoolState::new();
+        local_return::<u32>(&mut pool, 93, 256, 33u32);
+        local_return::<u32>(&mut pool, 92, 256, 44u32);
 
-        empty_cache_all();
+        empty_cache_all_locked(&mut pool);
 
-        assert!(pool_take::<u32>(93, 256, 4).is_none());
-        assert!(pool_take::<u32>(92, 256, 4).is_none());
+        assert!(local_take::<u32>(&mut pool, 93, 256).is_none());
+        assert!(local_take::<u32>(&mut pool, 92, 256).is_none());
     }
 }

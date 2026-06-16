@@ -2567,6 +2567,21 @@ pub trait GpuBackend: Send + Sync {
             message: "min_with_dim_f64 GPU op not yet implemented".into(),
         })
     }
+    /// Value-selecting median reduction along a dimension. Returns
+    /// `(values, indices_as_i64)` with one output slot per `(outer, inner)`
+    /// slice; `ignore_nan=true` selects `nanmedian` semantics.
+    fn median_with_dim(
+        &self,
+        _a: &GpuBufferHandle,
+        _outer: usize,
+        _dim_size: usize,
+        _inner: usize,
+        _ignore_nan: bool,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "median_with_dim",
+        })
+    }
     fn logcumsumexp_f32(
         &self,
         _a: &GpuBufferHandle,

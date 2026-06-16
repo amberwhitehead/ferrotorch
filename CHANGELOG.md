@@ -48,6 +48,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- GPU pool cache tests race on shared global cache (#1975)
+- Global amax/amin backward keeps CUDA leaf gradients resident on CUDA (#1922)
+- CORE: median/nanmedian dim lack non-scalar CUDA kernels (#1974)
+- CORE-052: Dimension-keyed value reductions panic on zero-length reduced slices (#1746)
 - CORE-050: Core linalg wrappers panic or silently compute truncated results for invalid shapes (#1744)
 - Backward skips register_hook on non-leaf root tensors (#1972)
 - CUDA f16/bf16 abs fell back to CPU path (#1971)

@@ -192,6 +192,8 @@ pub mod int_kernels;
 pub mod kernels;
 #[cfg(feature = "cuda")]
 pub mod masked_kernels;
+#[cfg(feature = "cuda")]
+pub mod median;
 pub mod memory_guard;
 pub mod module_cache;
 #[cfg(feature = "cuda")]

@@ -6864,7 +6864,7 @@ impl GpuBackend for CudaBackendImpl {
         let dev = self.device(a.device_ordinal())?;
         let outer: usize = crate::shape_math::numel(&shape[..axis]);
         let axis_size = shape[axis];
-        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]).max(1);
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
         let result = crate::kernels::gpu_sum_axis(a_buf, outer, axis_size, inner, dev)
             .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
@@ -6880,7 +6880,7 @@ impl GpuBackend for CudaBackendImpl {
         let dev = self.device(a.device_ordinal())?;
         let outer: usize = crate::shape_math::numel(&shape[..axis]);
         let axis_size = shape[axis];
-        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]).max(1);
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
         let result =
             crate::kernels::gpu_extreme_axis_f32(a_buf, outer, axis_size, inner, false, dev)
                 .map_err(Self::map_gpu_err)?;
@@ -6897,7 +6897,7 @@ impl GpuBackend for CudaBackendImpl {
         let dev = self.device(a.device_ordinal())?;
         let outer: usize = crate::shape_math::numel(&shape[..axis]);
         let axis_size = shape[axis];
-        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]).max(1);
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
         let result =
             crate::kernels::gpu_extreme_axis_f32(a_buf, outer, axis_size, inner, true, dev)
                 .map_err(Self::map_gpu_err)?;
@@ -6918,7 +6918,7 @@ impl GpuBackend for CudaBackendImpl {
         let dev = self.device(input.device_ordinal())?;
         let outer: usize = crate::shape_math::numel(&shape[..axis]);
         let axis_size = shape[axis];
-        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]).max(1);
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
         let out = crate::kernels::gpu_extreme_axis_backward_f32(
             input_buf, result_buf, grad_buf, outer, axis_size, inner, dev,
         )
@@ -9953,6 +9953,84 @@ impl GpuBackend for CudaBackendImpl {
             }
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!("topk_nd: unsupported value dtype {other}"),
+            }),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn median_with_dim(
+        &self,
+        values_in: &GpuBufferHandle,
+        outer: usize,
+        dim: usize,
+        inner: usize,
+        ignore_nan: bool,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        let dev = self.device(values_in.device_ordinal())?;
+        let ord = values_in.device_ordinal();
+        match values_in.dtype() {
+            DType::F32 => {
+                let (vals, idx) = crate::median::gpu_median_dim_f32(
+                    Self::unwrap_buffer(values_in)?.inner(),
+                    outer,
+                    dim,
+                    inner,
+                    ignore_nan,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok((
+                    Self::wrap_slice_f32(vals, ord),
+                    Self::wrap_slice_i64(idx, ord),
+                ))
+            }
+            DType::F64 => {
+                let (vals, idx) = crate::median::gpu_median_dim_f64(
+                    Self::unwrap_buffer_f64(values_in)?.inner(),
+                    outer,
+                    dim,
+                    inner,
+                    ignore_nan,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok((
+                    Self::wrap_slice_f64(vals, ord),
+                    Self::wrap_slice_i64(idx, ord),
+                ))
+            }
+            DType::F16 => {
+                let (vals, idx) = crate::median::gpu_median_dim_f16(
+                    Self::unwrap_buffer_f16(values_in)?,
+                    outer,
+                    dim,
+                    inner,
+                    ignore_nan,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok((
+                    Self::wrap_buffer_f16(vals, ord),
+                    Self::wrap_slice_i64(idx, ord),
+                ))
+            }
+            DType::BF16 => {
+                let (vals, idx) = crate::median::gpu_median_dim_bf16(
+                    Self::unwrap_buffer_bf16(values_in)?,
+                    outer,
+                    dim,
+                    inner,
+                    ignore_nan,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok((
+                    Self::wrap_buffer_bf16(vals, ord),
+                    Self::wrap_slice_i64(idx, ord),
+                ))
+            }
+            other => Err(FerrotorchError::InvalidArgument {
+                message: format!("median_with_dim: unsupported value dtype {other}"),
             }),
         }
     }

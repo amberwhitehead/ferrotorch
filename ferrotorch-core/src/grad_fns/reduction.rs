@@ -1129,6 +1129,19 @@ fn outer_axis_inner(in_shape: &[usize], norm_dim: usize) -> (usize, usize, usize
     (outer, axis, inner)
 }
 
+fn ensure_value_selecting_dim_non_empty(
+    op: &str,
+    norm_dim: usize,
+    dim_size: usize,
+) -> FerrotorchResult<()> {
+    if dim_size == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}(): Expected reduction dim {norm_dim} to have non-zero size."),
+        });
+    }
+    Ok(())
+}
+
 fn normalize_reduction_dims(dims: &[i64], ndim: usize, op: &str) -> FerrotorchResult<Vec<usize>> {
     let requested: Vec<i64> = if dims.is_empty() {
         if ndim == 0 {
@@ -2444,6 +2457,11 @@ fn argmax_argmin_dim<T: Float>(
         });
     }
     let norm_dim = crate::shape::normalize_axis(dim as isize, ndim)?;
+    ensure_value_selecting_dim_non_empty(
+        if find_max { "argmax" } else { "argmin" },
+        norm_dim,
+        input.shape()[norm_dim],
+    )?;
     let input_ref = if input.is_contiguous() {
         input.clone()
     } else {
@@ -2454,14 +2472,6 @@ fn argmax_argmin_dim<T: Float>(
     let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
     let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
     let out_numel = outer * inner;
-
-    if dim_size == 0 && out_numel != 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "argmax/argmin: expected reduction dim {norm_dim} to have non-zero size"
-            ),
-        });
-    }
 
     let mut out_shape: Vec<usize> = in_shape.to_vec();
     if keepdim {
@@ -4300,6 +4310,11 @@ fn amin_amax_dim_forward<T: Float>(
             message: format!("amin/amax_dim: dim {dim} out of bounds for {ndim}-D tensor"),
         });
     }
+    ensure_value_selecting_dim_non_empty(
+        if find_max { "amax" } else { "amin" },
+        norm_dim,
+        input.shape()[norm_dim],
+    )?;
     let input_ref = if input.is_contiguous() {
         input.clone()
     } else {
@@ -4308,11 +4323,6 @@ fn amin_amax_dim_forward<T: Float>(
     let in_data = input_ref.data()?;
     let in_shape = input_ref.shape();
     let dim_size = in_shape[norm_dim];
-    if dim_size == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "amin/amax_dim: cannot reduce over an empty dimension".into(),
-        });
-    }
     let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
     let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
 
@@ -4361,11 +4371,7 @@ pub fn amin_dim<T: Float>(
         return grad_clone(input);
     }
     let norm_dim = normalize_reduction_dim(dim, ndim, "amin_dim")?;
-    if input.shape()[norm_dim] == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "amin_dim: cannot reduce over an empty dimension".into(),
-        });
-    }
+    ensure_value_selecting_dim_non_empty("amin", norm_dim, input.shape()[norm_dim])?;
     let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
     let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
 
@@ -4429,11 +4435,7 @@ pub fn amax_dim<T: Float>(
         return grad_clone(input);
     }
     let norm_dim = normalize_reduction_dim(dim, ndim, "amax_dim")?;
-    if input.shape()[norm_dim] == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "amax_dim: cannot reduce over an empty dimension".into(),
-        });
-    }
+    ensure_value_selecting_dim_non_empty("amax", norm_dim, input.shape()[norm_dim])?;
     let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
     let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
 
@@ -4853,6 +4855,22 @@ fn max_min_with_dim_backward_cuda<T: Float>(
             &scatter_shape,
             dim,
         )?,
+        DType::F16 => backend.scatter_add_nd_f16(
+            &zeros_h,
+            indices_tensor.gpu_handle()?,
+            grad_handle,
+            input_shape,
+            &scatter_shape,
+            dim,
+        )?,
+        DType::BF16 => backend.scatter_add_nd_bf16(
+            &zeros_h,
+            indices_tensor.gpu_handle()?,
+            grad_handle,
+            input_shape,
+            &scatter_shape,
+            dim,
+        )?,
         _ => {
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "max_with_dim/min_with_dim backward",
@@ -4897,6 +4915,11 @@ fn max_min_with_dim_forward<T: Float>(
             message: format!("max/min_with_dim: dim {dim} out of bounds for {ndim}-D tensor"),
         });
     }
+    ensure_value_selecting_dim_non_empty(
+        if find_max { "max" } else { "min" },
+        norm_dim,
+        input.shape()[norm_dim],
+    )?;
     let input_ref = if input.is_contiguous() {
         input.clone()
     } else {
@@ -4907,12 +4930,6 @@ fn max_min_with_dim_forward<T: Float>(
     let dim_size = in_shape[norm_dim];
     let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
     let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
-    if dim_size == 0 && outer * inner != 0 {
-        let op = if find_max { "max" } else { "min" };
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!("{op}(): Expected reduction dim {norm_dim} to have non-zero size."),
-        });
-    }
 
     let mut values = Vec::with_capacity(outer * inner);
     let mut indices = Vec::with_capacity(outer * inner);
@@ -4950,16 +4967,15 @@ fn max_min_with_dim_forward<T: Float>(
     Ok((values, indices, indices_int, out_shape, norm_dim))
 }
 
-fn max_min_with_dim_scalar<T: Float>(
+fn value_selecting_with_dim_scalar<T: Float>(
     input: &Tensor<T>,
     dim: i64,
+    op: &str,
     name: &'static str,
 ) -> FerrotorchResult<(Tensor<T>, IntTensor<i64>)> {
     if dim != 0 && dim != -1 {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "max/min_with_dim: Expected reduction dim -1 or 0 for scalar but got {dim}"
-            ),
+            message: format!("{op}(): Expected reduction dim -1 or 0 for scalar but got {dim}"),
         });
     }
     let indices = IntTensor::<i64>::from_vec(vec![0], Vec::new())?.to(input.device())?;
@@ -4989,17 +5005,16 @@ fn max_min_with_dim_cuda<T: Float>(
 ) -> FerrotorchResult<(Tensor<T>, IntTensor<i64>, usize)> {
     let ndim = input.ndim();
     let norm_dim = crate::shape::normalize_axis(dim as isize, ndim)?;
+    ensure_value_selecting_dim_non_empty(
+        if find_max { "max" } else { "min" },
+        norm_dim,
+        input.shape()[norm_dim],
+    )?;
     let input_ref = input.contiguous()?;
     let in_shape = input_ref.shape();
     let dim_size = in_shape[norm_dim];
     let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
     let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
-    if dim_size == 0 && outer * inner != 0 {
-        let op = if find_max { "max" } else { "min" };
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!("{op}(): Expected reduction dim {norm_dim} to have non-zero size."),
-        });
-    }
 
     let mut out_shape: Vec<usize> = in_shape.to_vec();
     if keepdim {
@@ -5050,9 +5065,11 @@ pub fn max_with_dim<T: Float>(
     keepdim: bool,
 ) -> FerrotorchResult<(Tensor<T>, IntTensor<i64>)> {
     if input.ndim() == 0 {
-        return max_min_with_dim_scalar(input, dim, "MaxDimBackward");
+        return value_selecting_with_dim_scalar(input, dim, "max", "MaxDimBackward");
     }
     if input.is_cuda() {
+        let norm_dim = crate::shape::normalize_axis(dim as isize, input.ndim())?;
+        ensure_value_selecting_dim_non_empty("max", norm_dim, input.shape()[norm_dim])?;
         let input_ref = input.contiguous()?;
         let (values_t, indices_int, norm_dim) =
             max_min_with_dim_cuda(&input_ref, dim, keepdim, true)?;
@@ -5101,9 +5118,11 @@ pub fn min_with_dim<T: Float>(
     keepdim: bool,
 ) -> FerrotorchResult<(Tensor<T>, IntTensor<i64>)> {
     if input.ndim() == 0 {
-        return max_min_with_dim_scalar(input, dim, "MinDimBackward");
+        return value_selecting_with_dim_scalar(input, dim, "min", "MinDimBackward");
     }
     if input.is_cuda() {
+        let norm_dim = crate::shape::normalize_axis(dim as isize, input.ndim())?;
+        ensure_value_selecting_dim_non_empty("min", norm_dim, input.shape()[norm_dim])?;
         let input_ref = input.contiguous()?;
         let (values_t, indices_int, norm_dim) =
             max_min_with_dim_cuda(&input_ref, dim, keepdim, false)?;
@@ -5185,10 +5204,17 @@ fn median_with_dim_forward<T: Float>(
 ) -> FerrotorchResult<(Vec<T>, Vec<i64>, IntTensor<i64>, Vec<usize>, usize)> {
     let ndim = input.ndim();
     if ndim == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "median/nanmedian_with_dim: cannot reduce a 0-D tensor along a dimension"
-                .into(),
-        });
+        let (values, indices_int) = value_selecting_with_dim_scalar(
+            input,
+            dim,
+            if ignore_nan { "nanmedian" } else { "median" },
+            if ignore_nan {
+                "NanmedianDimBackward"
+            } else {
+                "MedianDimBackward"
+            },
+        )?;
+        return Ok((values.data_vec()?, vec![0], indices_int, Vec::new(), 0));
     }
     let norm_dim = if dim < 0 {
         (ndim as i64 + dim) as usize
@@ -5202,6 +5228,7 @@ fn median_with_dim_forward<T: Float>(
             ),
         });
     }
+    ensure_value_selecting_dim_non_empty("median", norm_dim, input.shape()[norm_dim])?;
     let input_ref = if input.is_contiguous() {
         input.clone()
     } else {
@@ -5212,12 +5239,6 @@ fn median_with_dim_forward<T: Float>(
     let dim_size = in_shape[norm_dim];
     let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
     let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
-    if dim_size == 0 && outer * inner != 0 {
-        let op = if ignore_nan { "nanmedian" } else { "median" };
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!("{op}(): Expected reduction dim {norm_dim} to have non-zero size."),
-        });
-    }
 
     let mut values = Vec::with_capacity(outer * inner);
     let mut indices = Vec::with_capacity(outer * inner);
@@ -5288,6 +5309,47 @@ fn median_with_dim_forward<T: Float>(
     Ok((values, indices, indices_int, out_shape, norm_dim))
 }
 
+fn median_with_dim_cuda<T: Float>(
+    input: &Tensor<T>,
+    dim: i64,
+    keepdim: bool,
+    ignore_nan: bool,
+) -> FerrotorchResult<(Tensor<T>, IntTensor<i64>, usize)> {
+    let ndim = input.ndim();
+    let norm_dim = crate::shape::normalize_axis(dim as isize, ndim)?;
+    ensure_value_selecting_dim_non_empty("median", norm_dim, input.shape()[norm_dim])?;
+    let input_ref = input.contiguous()?;
+    let in_shape = input_ref.shape();
+    let dim_size = in_shape[norm_dim];
+    let outer: usize = crate::shape::numel(&in_shape[..norm_dim]);
+    let inner: usize = crate::shape::numel(&in_shape[norm_dim + 1..]);
+
+    let mut out_shape: Vec<usize> = in_shape.to_vec();
+    if keepdim {
+        out_shape[norm_dim] = 1;
+    } else {
+        out_shape.remove(norm_dim);
+    }
+
+    let output_numel = outer * inner;
+    if output_numel == 0 {
+        let values = Tensor::from_storage(
+            TensorStorage::on_device(Vec::<T>::new(), input.device())?,
+            out_shape.clone(),
+            false,
+        )?;
+        let indices = IntTensor::<i64>::from_vec(Vec::new(), out_shape)?.to(input.device())?;
+        return Ok((values, indices, norm_dim));
+    }
+
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let (vals_h, idxs_h) =
+        backend.median_with_dim(input_ref.gpu_handle()?, outer, dim_size, inner, ignore_nan)?;
+    let values = Tensor::from_storage(TensorStorage::gpu(vals_h), out_shape.clone(), false)?;
+    let indices = IntTensor::<i64>::from_gpu_handle(idxs_h, out_shape);
+    Ok((values, indices, norm_dim))
+}
+
 /// Differentiable `(values, indices) = median(input, dim, keepdim)` with the
 /// PyTorch named-tuple return. Mirrors `torch.median(input, dim, keepdim)` at
 /// `aten/src/ATen/native/Sorting.cpp:503 median_with_indices_impl` (ignore_nan
@@ -5299,10 +5361,30 @@ pub fn median_with_dim<T: Float>(
     dim: i64,
     keepdim: bool,
 ) -> FerrotorchResult<(Tensor<T>, IntTensor<i64>)> {
+    if input.ndim() == 0 {
+        return value_selecting_with_dim_scalar(input, dim, "median", "MedianDimBackward");
+    }
+    let norm_dim = crate::shape::normalize_axis(dim as isize, input.ndim())?;
+    ensure_value_selecting_dim_non_empty("median", norm_dim, input.shape()[norm_dim])?;
     if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: "median_with_dim",
-        });
+        let input_ref = input.contiguous()?;
+        let (values_t, indices_int, norm_dim) =
+            median_with_dim_cuda(&input_ref, dim, keepdim, false)?;
+        let values_t = if is_grad_enabled() && input.requires_grad() {
+            let grad_fn = Arc::new(MaxMinDimBackward {
+                input: input_ref,
+                indices_flat: Vec::new(),
+                indices_tensor: indices_int.clone(),
+                dim: norm_dim,
+                keepdim,
+                name: "MedianDimBackward",
+            });
+            let (s, sh) = values_t.into_storage_and_shape()?;
+            Tensor::from_operation(s, sh, grad_fn)?
+        } else {
+            values_t
+        };
+        return Ok((values_t, indices_int));
     }
     let (values, indices_flat, indices_int, out_shape, norm_dim) =
         median_with_dim_forward(input, dim, keepdim, false)?;
@@ -5334,10 +5416,30 @@ pub fn nanmedian_with_dim<T: Float>(
     dim: i64,
     keepdim: bool,
 ) -> FerrotorchResult<(Tensor<T>, IntTensor<i64>)> {
+    if input.ndim() == 0 {
+        return value_selecting_with_dim_scalar(input, dim, "nanmedian", "NanmedianDimBackward");
+    }
+    let norm_dim = crate::shape::normalize_axis(dim as isize, input.ndim())?;
+    ensure_value_selecting_dim_non_empty("median", norm_dim, input.shape()[norm_dim])?;
     if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: "nanmedian_with_dim",
-        });
+        let input_ref = input.contiguous()?;
+        let (values_t, indices_int, norm_dim) =
+            median_with_dim_cuda(&input_ref, dim, keepdim, true)?;
+        let values_t = if is_grad_enabled() && input.requires_grad() {
+            let grad_fn = Arc::new(MaxMinDimBackward {
+                input: input_ref,
+                indices_flat: Vec::new(),
+                indices_tensor: indices_int.clone(),
+                dim: norm_dim,
+                keepdim,
+                name: "NanmedianDimBackward",
+            });
+            let (s, sh) = values_t.into_storage_and_shape()?;
+            Tensor::from_operation(s, sh, grad_fn)?
+        } else {
+            values_t
+        };
+        return Ok((values_t, indices_int));
     }
     let (values, indices_flat, indices_int, out_shape, norm_dim) =
         median_with_dim_forward(input, dim, keepdim, true)?;
