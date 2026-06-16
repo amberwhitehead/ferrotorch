@@ -64,23 +64,25 @@ forward-op produced the offending node.
   `test_detect_anomaly_scoped in anomaly.rs`.
 - [x] AC-4: Panic-safe — `detect_anomaly` restores state after a
   panic unwind — `test_detect_anomaly_panic_safety` at
-  `anomaly.rs:205-216`.
+  `anomaly.rs:242`.
 - [x] AC-5: Nestable — inner `detect_anomaly` restores to the outer's
-  enabled state — `test_detect_anomaly_nested` at `anomaly.rs:218-231`.
+  enabled state — `test_detect_anomaly_nested` at `anomaly.rs:255`.
 - [x] AC-6: `ForwardBacktrace::capture_if_enabled()` returns `None`
   when disabled (zero-overhead fast path) and `Some(bt)` when enabled —
   `test_forward_backtrace_capture_when_disabled` (`test_forward_backtrace_capture_when_disabled in anomaly.rs`)
   and `test_forward_backtrace_capture_when_enabled` (`test_forward_backtrace_capture_when_enabled in anomaly.rs`).
-- [x] AC-7: `check_gradient_anomaly` reports NaN / Inf cleanly —
-  `test_check_gradient_anomaly_nan` (`anomaly.rs:263-281`) and
-  `test_check_gradient_anomaly_inf` (`anomaly.rs:283-300`).
+- [x] AC-7: `check_gradient_anomaly` reports NaN cleanly and accepts
+  Inf gradients just like upstream —
+  `test_check_gradient_anomaly_nan` (`anomaly.rs:300`) and
+  `test_check_gradient_anomaly_inf_matches_torch_no_error`
+  (`anomaly.rs:320`).
 - [x] AC-8: When passed a `ForwardBacktrace`, the error message
   includes the trace — `test_check_gradient_anomaly_with_backtrace`
-  at `anomaly.rs:302-316`.
+  at `anomaly.rs:337`.
 - [x] AC-9: When anomaly mode is OFF, `check_gradient_anomaly` is a
   silent no-op (does NOT report NaN even on NaN input) —
   `test_check_gradient_anomaly_skipped_when_disabled` at
-  `anomaly.rs:318-328`.
+  `anomaly.rs:353`.
 
 ## Architecture
 
@@ -113,16 +115,15 @@ off. Implements `Clone, Debug, Display` (custom impls at `:111-123`).
 ### REQ-4 `check_gradient_anomaly`
 
 `pub fn check_gradient_anomaly<T: Float>(grad, op_name, forward_bt)`
-at `anomaly.rs:131-174`. Three guards on entry:
+at `anomaly.rs:142-180`. Three guards on entry:
 
 1. Defensive: returns `Ok(())` if anomaly mode is off (callers
    shouldn't invoke unless on, but the guard makes the function
    composable).
-2. GPU short-circuit: returns `Ok(())` if `grad.is_cuda()` — a full
-   D2H transfer just to scan for NaN is expensive; the documented
-   workaround at `:142-146` is for users to register a `.cpu()`-shaped
-   hook if they want GPU-side anomaly checking.
-3. Scan: walks `grad.data()` for NaN and Inf, builds a
+2. GPU NaN scan: CUDA gradients are checked with the resident
+   compare/bool-any path in `has_cuda_nan in anomaly.rs`, then only the
+   one-byte boolean result is copied back.
+3. Scan: walks CPU `grad.data_vec()` for NaN and builds a
    human-readable error message embedding the
    `ForwardBacktrace::Display` output when one was provided.
 
@@ -152,16 +153,14 @@ upstream:
 - Thread-local — enabling on one thread does not affect others.
 - Scope nesting restores prior state via RAII (PyTorch uses Python
   `try/finally`).
-- NaN AND Inf both flagged. The error-message kind string at
-  `:153-159` says `"NaN and Inf"` when both are present, otherwise
-  just one.
-- GPU short-circuits silently — documented at `:142-146`. Upstream
-  PyTorch also short-circuits when the gradient lives on a non-CPU
-  device unless the user explicitly opted into the slow path.
+- NaN gradients are flagged. Inf gradients are accepted, matching
+  current PyTorch anomaly detection behavior.
+- CUDA gradients are checked on device and only copy the final boolean
+  flag back to the host.
 
 ## Verification
 
-Tests in `anomaly.rs:176-328` (10 tests):
+Tests in `anomaly.rs:212-363` (12 tests):
 
 - `test_anomaly_mode_default_off` (`test_anomaly_mode_default_off in anomaly.rs`)
 - `test_anomaly_mode_enable_disable` (`test_anomaly_mode_enable_disable in anomaly.rs`)
@@ -172,12 +171,11 @@ Tests in `anomaly.rs:176-328` (10 tests):
 - `test_forward_backtrace_capture_when_enabled` (`test_forward_backtrace_capture_when_enabled in anomaly.rs`)
 - `test_check_gradient_anomaly_clean` (`test_check_gradient_anomaly_clean in anomaly.rs`)
 - `test_check_gradient_anomaly_nan` (`test_check_gradient_anomaly_nan in anomaly.rs`)
-- `test_check_gradient_anomaly_inf` (`test_check_gradient_anomaly_inf in anomaly.rs`)
+- `test_check_gradient_anomaly_inf_matches_torch_no_error` (`test_check_gradient_anomaly_inf_matches_torch_no_error in anomaly.rs`)
 - `test_check_gradient_anomaly_with_backtrace` (`test_check_gradient_anomaly_with_backtrace in anomaly.rs`)
 - `test_check_gradient_anomaly_skipped_when_disabled` (`test_check_gradient_anomaly_skipped_when_disabled in anomaly.rs`)
 
-All 12 (count includes `test_check_gradient_anomaly_clean`) pass in
-the workspace gauntlet.
+All 12 pass in the workspace gauntlet.
 
 ## REQ status table
 

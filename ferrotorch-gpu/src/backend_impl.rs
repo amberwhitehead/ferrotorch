@@ -8337,13 +8337,59 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(out, a.device_ordinal()))
     }
 
-    // f16 / bf16 trait methods inherit the default `Err(InvalidArgument)`
-    // because ferrotorch's `GpuBufferHandle` does not yet expose a
-    // `CudaBuffer<u16>` downcast convention for storing f16/bf16 bit
-    // patterns. Wiring those is a follow-up — the f32 path (TF32 mode)
-    // is the only one currently exercised through this trait surface,
-    // matching the SemiStructuredSparseTensor<T: Float> = f32/f64
-    // generic constraint.
+    #[cfg(feature = "cusparselt")]
+    fn sparse_matmul_24_f16(
+        &self,
+        a: &GpuBufferHandle,
+        b_dense_decompressed: &GpuBufferHandle,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f16(a)?;
+        let b_buf = Self::unwrap_buffer_f16(b_dense_decompressed)?;
+        let dev = self.device(a.device_ordinal())?;
+        let handle = self.cusparselt()?;
+        let out = crate::cusparselt::gpu_sparse_matmul_24_u16(
+            handle,
+            a_buf,
+            b_buf,
+            m,
+            k,
+            n,
+            crate::cusparselt::CuSpLtDType::F16,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(out, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cusparselt")]
+    fn sparse_matmul_24_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        b_dense_decompressed: &GpuBufferHandle,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_bf16(a)?;
+        let b_buf = Self::unwrap_buffer_bf16(b_dense_decompressed)?;
+        let dev = self.device(a.device_ordinal())?;
+        let handle = self.cusparselt()?;
+        let out = crate::cusparselt::gpu_sparse_matmul_24_u16(
+            handle,
+            a_buf,
+            b_buf,
+            m,
+            k,
+            n,
+            crate::cusparselt::CuSpLtDType::Bf16,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(out, a.device_ordinal()))
+    }
 
     // -- bf16 → bf16 native dispatch (#17) -----------------------------------
     //

@@ -53,12 +53,14 @@ integration path for dense↔sparse conversion + spmm on CUDA.
   layout. Compress / decompress round-trip matches
   `pruning::apply_2_4_mask` output (cross-checked in the
   `semi24_compress_then_decompress_matches_apply_2_4_mask` test in
-  `sparse.rs`). Mirrors `torch.sparse.SparseSemiStructuredTensor`
-  and the cuSPARSELt 2:4 layout at
-  `aten/src/ATen/native/cuda/Sparse24.cu`.
+  `sparse.rs`). This is the CPU/reference pruning-layout helper for the
+  `WeightNormSparsifier` 2:4 contract; it is not the packed CUDA
+  `torch.sparse.SparseSemiStructuredTensor` conversion surface. The true
+  CUDA packed values/metadata API is tracked in #1980.
 - REQ-8: `sparse_matmul_24(sparse, dense)` — matmul where the LHS is a
-  2:4 semi-structured sparse tensor. Mirrors the cuSPARSELt-accelerated
-  matmul behind `torch.sparse.SparseSemiStructuredTensor @ dense`.
+  2:4 semi-structured sparse tensor. On CUDA it must compute on-device
+  (cuSPARSELt when available, dense masked composite otherwise) and must
+  not silently return a CPU tensor.
 - REQ-9: `SparseGrad<T>` — sparse gradient accumulator used by
   `nn.Embedding.weight` when `sparse=True`. Stores indices + values
   and merges into the dense param at optimizer step time. Mirrors
@@ -136,10 +138,12 @@ Non-test production consumers:
 
 `parity_ops = []`. Sparse-tensor parity is currently enforced
 indirectly via the dense round-trip check (sparse-to-dense agrees
-with the dense input). The 2:4 layout is cross-checked against
-`pruning::apply_2_4_mask`. Future parity-sweep ops should target
-`spmm` (`SparseTensor.matmul(dense)`) against
-`torch.sparse.mm(sparse, dense)`.
+with the dense input). The CPU/reference 2:4 pruning layout is
+cross-checked against `pruning::apply_2_4_mask` and PyTorch's
+`WeightNormSparsifier` topk tie order. Future parity-sweep ops should
+target `spmm` (`SparseTensor.matmul(dense)`) against
+`torch.sparse.mm(sparse, dense)` and the #1980 CUDA packed
+`to_sparse_semi_structured` surface.
 
 ## Verification
 

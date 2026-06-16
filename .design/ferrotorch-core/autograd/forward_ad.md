@@ -77,14 +77,14 @@ at `torch/csrc/autograd/forward_grad.h`.
 - [x] AC-2: `DualTensor::constant` returns zero tangent —
   `test_dual_tensor_constant in forward_ad.rs`.
 - [x] AC-3: `dual_add` propagates tangents element-wise —
-  `test_dual_add` at `forward_ad.rs:515-529`.
-- [x] AC-4: `dual_sub` — `test_dual_sub` at `:531-545`.
+  `test_dual_add` at `forward_ad.rs:463`.
+- [x] AC-4: `dual_sub` — `test_dual_sub` at `:479`.
 - [x] AC-5: `dual_mul` — `test_dual_mul in forward_ad.rs`.
 - [x] AC-6: `dual_div` — `test_dual_div in forward_ad.rs`.
-- [x] AC-7: `dual_neg` — `test_dual_neg` at `:571-583`.
-- [x] AC-8: `dual_matmul` — `test_dual_matmul` at `:589-616`.
+- [x] AC-7: `dual_neg` — `test_dual_neg` at `:519`.
+- [x] AC-8: `dual_matmul` — `test_dual_matmul` at `:537`.
 - [x] AC-9: `dual_relu` on positive inputs (`d(relu) = dx`) —
-  `test_dual_relu_positive` at `:622-635`; and on negative
+  `test_dual_relu_positive` at `:570`; and on negative
   (`d(relu) = 0`) — `test_dual_relu_negative in forward_ad.rs`.
 
 ## Architecture
@@ -150,7 +150,7 @@ via `tangent = da * (1 - tanh^2)`.
 
 ### REQ-8 — `jvp_exact`
 
-`pub fn jvp_exact<T: Float, F>` at `forward_ad.rs:351-376`. Seed
+`pub fn jvp_exact<T: Float, F>` at `forward_ad.rs:282-308`. Seed
 `DualTensor::new(input.clone(), v.clone())` after shape-equality
 validation at `:359-367`, run `f(dual_input)` once at `:373`,
 return `(dual_output.primal, dual_output.tangent)`.
@@ -158,12 +158,12 @@ return `(dual_output.primal, dual_output.tangent)`.
 ### REQ-9 — `jacfwd`
 
 `pub fn jacfwd<T: Float, F>(f, input) -> FerrotorchResult<Tensor<T>>`
-at `forward_ad.rs:407-449`. Input must be 1-D (errors otherwise at
-`:411-416`). For each `j in 0..n`:
+at `forward_ad.rs:354-396`. Input must be 1-D (errors otherwise at
+`:358-363`). For each `j in 0..n`:
 
 1. Build basis vector `e_j` (zero everywhere except position `j`
-   which is `1`) at `:425-429`.
-2. Call `jvp_exact(&f, input, &e_j)` at `:431` — returns the
+   which is `1`) at `:383-385`.
+2. Call `jvp_exact(&f, input, &e_j)` at `:387` — returns the
    `j`-th column of the Jacobian as the tangent output.
 
 After the loop, reorganize the columns into a `[m, n]` matrix layout
@@ -194,7 +194,7 @@ op coverage today):
 
 ## Verification
 
-Tests in `forward_ad.rs:455-1032` (~580 LOC of test code).
+Tests in `forward_ad.rs:402-979` (~580 LOC of test code).
 Construction tests, arithmetic rule tests, matmul rule test,
 activation rule tests, transcendental rule tests, `jvp_exact`
 end-to-end tests, `jacfwd` end-to-end tests.

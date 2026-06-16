@@ -59,7 +59,7 @@
 #![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
 #![allow(dead_code)]
 
-use cudarc::driver::DevicePtr;
+use cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut};
 
 use crate::buffer::CudaBuffer;
 use crate::device::GpuDevice;
@@ -210,34 +210,17 @@ impl CuSpLtDType {
 // Structured matmul — generic over (sparse_b, dense_a) flavoured by dtype
 // ---------------------------------------------------------------------------
 
-/// Compute `D = alpha * A @ B + beta * C` where `B` is dense
-/// `[k, n]` row-major **but stored in 2:4 structured sparse layout**
-/// after compression, and `A` is dense `[m, k]` row-major. Returns a
-/// dense `[m, n]` row-major device buffer of element type matching
-/// `dtype`.
-///
-/// `b_dense_decompressed` must be the **decompressed** form of the 2:4
-/// matrix (i.e. dense values with the masked positions set to zero). We
-/// hand the dense form to cuSPARSELt's `cusparseLtSpMMACompress` which
-/// re-packs it into the Tensor-Core-friendly format internally.
-///
-/// `b_dense_decompressed.len() == k * n` (row-major, contiguous).
-/// `a.len() == m * k` (row-major, contiguous).
-///
-/// The element type is the same for A, B, C, D — set via `dtype`. Mixed-
-/// precision compute is selected automatically (FP32 accumulator for
-/// FP16/BF16, TF32 mode for FP32).
 #[allow(clippy::too_many_arguments)]
-pub fn gpu_sparse_matmul_24<T>(
+fn gpu_sparse_matmul_24_slices<T>(
     handle: &CusparseLtHandle,
-    a_dense: &CudaBuffer<T>,
-    b_dense_decompressed: &CudaBuffer<T>,
+    a_dense: &CudaSlice<T>,
+    b_dense_decompressed: &CudaSlice<T>,
     m: usize,
     k: usize,
     n: usize,
     dtype: CuSpLtDType,
     device: &GpuDevice,
-) -> GpuResult<CudaBuffer<T>>
+) -> GpuResult<CudaSlice<T>>
 where
     T: cudarc::driver::DeviceRepr + Default + Copy + 'static,
 {
@@ -258,13 +241,7 @@ where
     if m == 0 || n == 0 || k == 0 {
         let stream = device.stream();
         let slice = stream.alloc_zeros::<T>(m * n)?;
-        return Ok(CudaBuffer::<T> {
-            data: Some(slice),
-            len: m * n,
-            alloc_len: m * n,
-            device_ordinal: device.ordinal(),
-            pool_fn: None,
-        });
+        return Ok(slice);
     }
 
     // cuSPARSELt requires the structured-side leading dim to be a
@@ -326,7 +303,7 @@ where
         message: format!("cusparselt: k={k} exceeds i64::MAX"),
     })?;
 
-    let result = (|| -> GpuResult<CudaBuffer<T>> {
+    let result = (|| -> GpuResult<CudaSlice<T>> {
         // A: dense [m, k], row-major, ld = k.
         let status = unsafe {
             sys::cusparseLtDenseDescriptorInit(
@@ -447,14 +424,12 @@ where
         // the borrow lifetime to inner scopes so we can move
         // `out_slice` into the returned `CudaBuffer` once those guards
         // drop.
-        use cudarc::driver::DevicePtrMut;
-
         // Compress B (the dense decompressed form) into the
         // Tensor-Core-friendly cuSPARSELt layout. Scope the borrow on
         // `compressed` / `compressed_scratch` so we can re-borrow
         // `compressed` for the matmul below.
         {
-            let (b_dense_ptr, _b_dense_sync) = b_dense_decompressed.inner().device_ptr(&stream);
+            let (b_dense_ptr, _b_dense_sync) = b_dense_decompressed.device_ptr(&stream);
             let (compressed_ptr, _compressed_sync) = compressed.device_ptr_mut(&stream);
             let (compressed_scratch_ptr, _compressed_scratch_sync) =
                 compressed_scratch.device_ptr_mut(&stream);
@@ -482,7 +457,7 @@ where
         // Run the matmul in a tight scope so all `_sync` guards drop
         // before we move `out_slice` into the returned `CudaBuffer`.
         {
-            let (a_ptr, _a_sync) = a_dense.inner().device_ptr(&stream);
+            let (a_ptr, _a_sync) = a_dense.device_ptr(&stream);
             let (compressed_ptr_ro, _compressed_sync_ro) = compressed.device_ptr_mut(&stream);
             let (out_ptr, _out_sync) = out_slice.device_ptr_mut(&stream);
             let (workspace_ptr, _workspace_sync) = workspace.device_ptr_mut(&stream);
@@ -509,13 +484,7 @@ where
             check(status, "cusparseLtMatmul")?;
         }
 
-        Ok(CudaBuffer::<T> {
-            data: Some(out_slice),
-            len: m * n,
-            alloc_len: m * n,
-            device_ordinal: device.ordinal(),
-            pool_fn: None,
-        })
+        Ok(out_slice)
     })();
 
     // SAFETY: each *DescriptorDestroy / PlanDestroy is null-tolerant on
@@ -529,4 +498,80 @@ where
     }
 
     result
+}
+
+/// Compute `D = alpha * A @ B + beta * C` where `B` is dense
+/// `[k, n]` row-major **but stored in 2:4 structured sparse layout**
+/// after compression, and `A` is dense `[m, k]` row-major. Returns a
+/// dense `[m, n]` row-major device buffer of element type matching
+/// `dtype`.
+///
+/// `b_dense_decompressed` must be the **decompressed** form of the 2:4
+/// matrix (i.e. dense values with the masked positions set to zero). We
+/// hand the dense form to cuSPARSELt's `cusparseLtSpMMACompress` which
+/// re-packs it into the Tensor-Core-friendly format internally.
+///
+/// `b_dense_decompressed.len() == k * n` (row-major, contiguous).
+/// `a.len() == m * k` (row-major, contiguous).
+///
+/// The element type is the same for A, B, C, D — set via `dtype`. Mixed-
+/// precision compute is selected automatically (FP32 accumulator for
+/// FP16/BF16, TF32 mode for FP32).
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_sparse_matmul_24<T>(
+    handle: &CusparseLtHandle,
+    a_dense: &CudaBuffer<T>,
+    b_dense_decompressed: &CudaBuffer<T>,
+    m: usize,
+    k: usize,
+    n: usize,
+    dtype: CuSpLtDType,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<T>>
+where
+    T: cudarc::driver::DeviceRepr + Default + Copy + 'static,
+{
+    let out = gpu_sparse_matmul_24_slices(
+        handle,
+        a_dense.inner(),
+        b_dense_decompressed.inner(),
+        m,
+        k,
+        n,
+        dtype,
+        device,
+    )?;
+    Ok(CudaBuffer::<T> {
+        data: Some(out),
+        len: m * n,
+        alloc_len: m * n,
+        device_ordinal: device.ordinal(),
+        pool_fn: None,
+    })
+}
+
+/// u16 bit-pattern sibling used for f16/bf16 buffers. The `dtype` argument
+/// is authoritative: the bytes are identical for f16 and bf16, but
+/// cuSPARSELt must receive `CUDA_R_16F` vs `CUDA_R_16BF` explicitly.
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_sparse_matmul_24_u16(
+    handle: &CusparseLtHandle,
+    a_dense: &CudaSlice<u16>,
+    b_dense_decompressed: &CudaSlice<u16>,
+    m: usize,
+    k: usize,
+    n: usize,
+    dtype: CuSpLtDType,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    gpu_sparse_matmul_24_slices(
+        handle,
+        a_dense,
+        b_dense_decompressed,
+        m,
+        k,
+        n,
+        dtype,
+        device,
+    )
 }

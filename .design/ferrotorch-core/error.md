@@ -117,10 +117,10 @@ this by boxing any `Error + Send + Sync + 'static` value. Callers
 recover the concrete inner type with `source.downcast_ref::<GpuError>()`,
 which is the standard Rust pattern (documented at `error.rs:46-69` with
 a runnable code sample). Production consumer: every callsite in
-`ferrotorch-core/src/grad_fns/*.rs` that converts a backend error via
-`.map_err(|e| FerrotorchError::Gpu { source: Box::new(e) })` (e.g.
-`grad_fns/arithmetic.rs:467, :501, :1220` `dispatch_floating_dtype!` arms
-that wrap `GpuBackend::*` results — the underlying mapping happens in
+`ferrotorch-core/src/grad_fns/*.rs` that returns
+`FerrotorchResult<GpuBufferHandle>` from backend dispatch arms (e.g.
+`grad_fns/arithmetic.rs:549, :583, :1302` `dispatch_floating_dtype!`
+arms wrapping `GpuBackend::*` results — the underlying mapping happens in
 `gpu_dispatch.rs`'s `?` propagation).
 
 ### `FerrotorchResult<T>` alias
@@ -138,7 +138,7 @@ Every non-test `.rs` file under `ferrotorch-core/src/` that returns
   `ops::indexing::masked_select(self, mask)` returns
   `FerrotorchResult<Tensor<T>>` and propagates via `?` through the
   `Tensor::masked_select` boundary method.
-- `ferrotorch-core/src/grad_fns/arithmetic.rs:467, :501, :1220` —
+- `ferrotorch-core/src/grad_fns/arithmetic.rs:549, :583, :1302` —
   `dispatch_floating_dtype!` arms return
   `FerrotorchResult<GpuBufferHandle>` and rely on `FerrotorchError::Gpu`
   for backend-error wrapping.

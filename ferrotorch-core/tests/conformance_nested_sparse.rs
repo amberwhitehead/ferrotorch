@@ -33,9 +33,8 @@
 //!   come from a REAL torch oracle (CORE-194 -> #1888):
 //!   `torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0,
 //!   sparse_block_shape=(1, 4), zeros_per_block=2)`, the documented
-//!   PyTorch 2:4 pruning configuration. Tie-magnitude groups are covered;
-//!   the in-group tie-break divergence is pinned against #1910 in
-//!   `cpu_semi_structured_24_tie_groups` (written to FAIL when fixed).
+//!   PyTorch 2:4 pruning configuration. Tie-magnitude groups are covered
+//!   with exact CPU topk tie-order expectations (#1910).
 //! * **Cat A — sparse_matmul_24**: 2:4 matmul; reference is `torch.matmul`
 //!   on the sparsifier-masked dense B.
 //! * **Cat A — SparseGrad**: `new`, `coalesce`, `apply_sgd`, accessors
@@ -57,8 +56,10 @@
 //! The GPU lane (`mod gpu`, `--features gpu`) exercises the real
 //! cuSPARSE / composite on-device paths with device assertions on every
 //! result (no cascade skips remain — the last two vacuous skips were
-//! replaced under CORE-076 / #1770). The 2:4 layout itself is
-//! host-resident; `gpu_semi_structured_24` pins that contract explicitly.
+//! replaced under CORE-076 / #1770). `SemiStructuredSparseTensor::compress`
+//! is a CPU/reference pruning-layout helper; CUDA inputs are rejected so the
+//! helper cannot hide a host readback. A true CUDA packed
+//! `torch.sparse.to_sparse_semi_structured` equivalent is tracked in #1980.
 //!
 //! ## Tolerances
 //!
@@ -1415,7 +1416,7 @@ fn cpu_coo_coalesce_with_duplicates() {
 fn cpu_semi_structured_compress_decompress() {
     let file = load_fixtures();
     for dtype in ["float32", "float64"] {
-        let f = pick(&file, "semi_structured_24", dtype, Some("1d_8elem"));
+        let f = pick(&file, "semi_structured_24", dtype, Some("2d_1x8"));
         let dense_data = as_f64_list(&f["dense_data"]);
         let shape = as_usize_list(&f["shape"]);
         let expected_kept = as_f64_list(&f["expected_kept_values"]);
@@ -1494,87 +1495,41 @@ fn cpu_semi_structured_compress_decompress() {
 /// (`torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0,
 /// sparse_block_shape=(1, 4), zeros_per_block=2)`).
 ///
-/// * `tie_all_equal_1d4` (`[2, 2, 2, 2]`): torch keeps idx `{0, 1}`
-///   (nibble `0b0011`); ferrotorch's `compress` lower-index tie-break
-///   AGREES — torch-parity assertion.
-/// * `tie_three_equal_1d4` (`[1, 3, 3, 3]`): torch keeps idx `{1, 3}`
-///   (nibble `0b1010` = 10, fixture truth); ferrotorch's `compress`
-///   keeps idx `{1, 2}` (nibble `0b0110` = 6). KNOWN DIVERGENCE #1910 —
-///   pinned to the observed ferrotorch behavior; the pinned assertions
-///   FAIL (retire) when #1910 is fixed.
+/// * `tie_all_equal_1x4` (`[[2, 2, 2, 2]]`): torch keeps idx `{0, 1}`
+///   (nibble `0b0011`).
+/// * `tie_three_equal_1x4` (`[[1, 3, 3, 3]]`): torch keeps idx `{1, 3}`
+///   (nibble `0b1010` = 10).
 #[test]
 fn cpu_semi_structured_24_tie_groups() {
     let file = load_fixtures();
     for dtype in ["float32", "float64"] {
-        // --- tie_all_equal_1d4: ferrotorch matches torch. ---
-        let f = pick(
-            &file,
-            "semi_structured_24",
-            dtype,
-            Some("tie_all_equal_1d4"),
-        );
-        let dense_data = as_f64_list(&f["dense_data"]);
-        let expected_kept = as_f64_list(&f["expected_kept_values"]);
-        let expected_nibble = f["expected_nibbles"].as_array().expect("nibbles")[0]
-            .as_u64()
-            .expect("nibble") as u8;
-        let expected_decompressed = as_f64_list(&f["expected_decompressed"]);
+        for tag in ["tie_all_equal_1x4", "tie_three_equal_1x4"] {
+            let f = pick(&file, "semi_structured_24", dtype, Some(tag));
+            let dense_data = as_f64_list(&f["dense_data"]);
+            let shape = as_usize_list(&f["shape"]);
+            let expected_kept = as_f64_list(&f["expected_kept_values"]);
+            let expected_nibble = f["expected_nibbles"].as_array().expect("nibbles")[0]
+                .as_u64()
+                .expect("nibble") as u8;
+            let expected_decompressed = as_f64_list(&f["expected_decompressed"]);
 
-        let dense = make_tensor_f64(&dense_data, &[4]);
-        let sst = SemiStructuredSparseTensor::compress(&dense).expect("compress tie_all_equal");
-        assert_eq!(sst.group_mask(0), expected_nibble, "tie_all_equal nibble");
-        tolerance::assert_close_f64(
-            sst.values(),
-            &expected_kept,
-            tolerance::F64_ELEMENTWISE,
-            "tie_all_equal kept values",
-        );
-        let recovered = sst.decompress().expect("decompress tie_all_equal");
-        tolerance::assert_close_f64(
-            recovered.data().expect("decompressed"),
-            &expected_decompressed,
-            tolerance::F64_ELEMENTWISE,
-            "tie_all_equal decompressed",
-        );
-
-        // --- tie_three_equal_1d4: KNOWN DIVERGENCE #1910 (pinned). ---
-        let f = pick(
-            &file,
-            "semi_structured_24",
-            dtype,
-            Some("tie_three_equal_1d4"),
-        );
-        let dense_data = as_f64_list(&f["dense_data"]);
-        let torch_nibble = f["expected_nibbles"].as_array().expect("nibbles")[0]
-            .as_u64()
-            .expect("nibble") as u8;
-        assert_eq!(torch_nibble, 0b1010, "torch oracle nibble (fixture)");
-
-        let dense = make_tensor_f64(&dense_data, &[4]);
-        let sst = SemiStructuredSparseTensor::compress(&dense).expect("compress tie_three_equal");
-        // Pinned: ferrotorch keeps idx {1, 2} (nibble 0b0110); torch keeps
-        // idx {1, 3} (nibble 0b1010, fixture). FAILS (retire) when #1910
-        // is fixed.
-        assert_ne!(
-            sst.group_mask(0),
-            torch_nibble,
-            "tie_three_equal: nibble now matches the torch oracle — #1910 \
-             appears fixed; retire this pin"
-        );
-        assert_eq!(
-            sst.group_mask(0),
-            0b0110,
-            "tie_three_equal: nibble no longer matches the pinned divergent \
-             value 0b0110 (torch: 0b1010; #1910)"
-        );
-        // Decompressed: ferrotorch [0, 3, 3, 0]; torch [0, 3, 0, 3] (fixture).
-        let recovered = sst.decompress().expect("decompress tie_three_equal");
-        tolerance::assert_close_f64(
-            recovered.data().expect("decompressed"),
-            &[0.0, 3.0, 3.0, 0.0],
-            tolerance::F64_ELEMENTWISE,
-            "tie_three_equal decompressed (pinned divergent; #1910)",
-        );
+            let dense = make_tensor_f64(&dense_data, &shape);
+            let sst = SemiStructuredSparseTensor::compress(&dense).expect("compress tie group");
+            assert_eq!(sst.group_mask(0), expected_nibble, "{tag} nibble");
+            tolerance::assert_close_f64(
+                sst.values(),
+                &expected_kept,
+                tolerance::F64_ELEMENTWISE,
+                &format!("{tag} kept values"),
+            );
+            let recovered = sst.decompress().expect("decompress tie group");
+            tolerance::assert_close_f64(
+                recovered.data().expect("decompressed"),
+                &expected_decompressed,
+                tolerance::F64_ELEMENTWISE,
+                &format!("{tag} decompressed"),
+            );
+        }
     }
 }
 
@@ -2320,14 +2275,12 @@ mod gpu {
         }
     }
 
-    /// 2:4 layout from a CUDA dense input (CORE-076 / #1770 follow-on to
-    /// the old vacuous cascade skip). `SemiStructuredSparseTensor` is a
-    /// host-resident layout (like `SparseTensor`): `compress` reads the
-    /// CUDA tensor back to host and `decompress` materialises on CPU —
-    /// pinned here so a behavior change (e.g. an on-device 2:4 layout)
-    /// turns this test red and gets a real device-asserting test.
+    /// `SemiStructuredSparseTensor::compress` is a CPU/reference pruning
+    /// helper. CUDA input must be rejected rather than copied back to host;
+    /// a true packed CUDA `torch.sparse.to_sparse_semi_structured` surface is
+    /// tracked in #1980.
     #[test]
-    fn gpu_semi_structured_24() {
+    fn gpu_semi_structured_24_compress_rejects_cuda_host_readback() {
         ensure_cuda_backend();
 
         let dense_data: Vec<f64> = vec![1.0, 4.0, 2.0, 3.0, -5.0, 2.0, 0.0, 1.0];
@@ -2336,22 +2289,18 @@ mod gpu {
             .to(ferrotorch_core::Device::Cuda(0))
             .expect("dense->gpu");
 
-        let sp_gpu = SemiStructuredSparseTensor::compress(&dense_gpu)
-            .expect("compress reads a CUDA input back to host (host-resident layout)");
-        let sp_cpu = SemiStructuredSparseTensor::compress(&dense_cpu).expect("cpu compress");
-        assert_eq!(
-            sp_gpu.values(),
-            sp_cpu.values(),
-            "CUDA-origin compress must keep the same 2:4 selection as CPU"
-        );
-        assert_eq!(sp_gpu.mask(), sp_cpu.mask());
-
-        let d = sp_gpu.decompress().expect("decompress");
+        let err = SemiStructuredSparseTensor::compress(&dense_gpu)
+            .expect_err("compress must reject CUDA input instead of host-readback");
         assert!(
-            !d.is_cuda(),
-            "decompress materialises on CPU (host-resident layout contract)"
+            matches!(
+                &err,
+                ferrotorch_core::FerrotorchError::NotImplementedOnCuda { .. }
+            ),
+            "CUDA compress must return structured NotImplementedOnCuda, got {err:?}"
         );
-        assert_eq!(d.shape(), &[2, 4]);
+
+        let sp_cpu = SemiStructuredSparseTensor::compress(&dense_cpu).expect("cpu compress");
+        assert_eq!(sp_cpu.shape(), &[2, 4]);
     }
 
     /// Live GPU `sparse_matmul_24` (CORE-076 / #1770 — replaces the

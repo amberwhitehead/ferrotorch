@@ -143,7 +143,7 @@ fn core074_cpu_matmul24_backward_flows_to_a() {
 /// as autograd is involved; trainable 2:4 weights tracked in #1969).
 #[test]
 fn core074_compress_rejects_requires_grad_input() {
-    let w = mk_f32(vec![1.0, 4.0, 2.0, 3.0], vec![4], true);
+    let w = mk_f32(vec![1.0, 4.0, 2.0, 3.0], vec![1, 4], true);
     let r = SemiStructuredSparseTensor::compress(&w);
     assert!(
         matches!(r, Err(FerrotorchError::InvalidArgument { .. })),
@@ -152,8 +152,8 @@ fn core074_compress_rejects_requires_grad_input() {
         r.map(|s| s.values().to_vec())
     );
 
-    // Without grad tracking the same input keeps compressing.
-    let w2 = mk_f32(vec![1.0, 4.0, 2.0, 3.0], vec![4], false);
+    // Without grad tracking the same valid 2-D input keeps compressing.
+    let w2 = mk_f32(vec![1.0, 4.0, 2.0, 3.0], vec![1, 4], false);
     SemiStructuredSparseTensor::compress(&w2).expect("untracked input still compresses");
 }
 

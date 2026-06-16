@@ -99,14 +99,14 @@ PyTorch ships under the same `Engine` class.
 
 - [x] AC-1: `c.backward()` on a 2-input addition `c = a + b` populates
   `a.grad() = 1.0`, `b.grad() = 1.0` — `test_backward_simple_add` at
-  `graph.rs:850-874`.
+  `graph.rs:936`.
 - [x] AC-2: Multiplication backward yields the upstream partial
-  derivatives — `test_backward_mul` at `graph.rs:876-900`.
+  derivatives — `test_backward_mul` at `graph.rs:962`.
 - [x] AC-3: Shared inputs accumulate correctly: `c = a + a` →
   `a.grad() = 2.0` — `test_backward_shared_input` at
-  `graph.rs:902-923`.
+  `graph.rs:988`.
 - [x] AC-4: Chained graphs (3+ ops) produce correct partials —
-  `test_backward_chain` at `graph.rs:925-971`.
+  `test_backward_chain` at `graph.rs:1011`.
 - [x] AC-5: `backward()` on a non-scalar tensor errors with
   `FerrotorchError::BackwardNonScalar` — `test_backward_non_scalar_error`
   at `test_backward_non_scalar_error in graph.rs`.
@@ -116,13 +116,13 @@ PyTorch ships under the same `Engine` class.
   `test_backward_one_element_tensor_seed_has_same_shape in graph.rs`.
 - [x] AC-7: `pow` + `add` chain on `[1]`-shape produces correct
   partials — `test_backward_one_element_through_pow_and_add` at
-  `graph.rs:1004-1021`.
+  `graph.rs:1270`.
 - [x] AC-8: `reduce_grad_to_shape` reshapes `[] -> [1]` when the
   numel matches — `test_reduce_grad_to_shape_reshape_when_same_numel`
   at `test_reduce_grad_to_shape_reshape_when_same_numel in graph.rs`.
 - [x] AC-9: `reduce_grad_to_shape` errors cleanly (does NOT panic) on
   `[] -> [2]` numel mismatch — `test_reduce_grad_to_shape_returns_error_on_numel_mismatch_underflow`
-  at `graph.rs:1037-1054`.
+  at `graph.rs:1303`.
 - [x] AC-10: `backward()` directly on a scalar `requires_grad` leaf
   accumulates a scalar seed grad of `1` — `test_backward_leaf_scalar_accumulates_seed`.
 - [x] AC-11: `backward()` directly on a single-element shaped
@@ -191,8 +191,8 @@ non-leaf path handles three sub-cases:
 
 ### REQ-5 — hook execution
 
-Per-input gradient hooks fire at `graph.rs:210-214` via `run_grad_hooks`
-from `hooks.rs`. Post-accumulate hooks fire at `graph.rs:219-221`
+Per-input gradient hooks fire at `graph.rs:292-300` via `run_grad_hooks`
+from `hooks.rs`. Post-accumulate hooks fire at `graph.rs:301-304`
 after the leaf's `.grad()` is written.
 
 ### REQ-9 — parallel backward

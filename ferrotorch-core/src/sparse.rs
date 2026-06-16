@@ -23,6 +23,7 @@ use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::shape::{checked_byte_count, checked_numel};
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
+use crate::torch_topk_cpu::torch_cpu_topk_indices;
 
 /// Reinterpret a `Vec<U>` as a `Vec<T>` when `T == U` (TypeId-checked by the
 /// caller). Used by `SparseTensor::from_dense` to convert the typed cuSPARSE
@@ -1621,13 +1622,14 @@ impl<T: Float> CsrTensor<T> {
 // SemiStructuredSparseTensor — 2:4 structured sparsity. CL-292.
 // ===========================================================================
 
-/// A tensor stored in the NVIDIA 2:4 structured sparsity format.
+/// A CPU/reference tensor stored as a 2:4 structured pruning layout.
 ///
 /// In 2:4 structured sparsity, every contiguous group of 4 elements
 /// along the innermost dimension has exactly 2 non-zero values.
-/// This regular pattern is what NVIDIA's Sparse Tensor Cores
-/// consume (Ampere SM_80+) to deliver up to 2× matmul throughput
-/// on sparse weights.
+/// This regular pattern is the sparsity invariant NVIDIA's Sparse Tensor
+/// Cores consume (Ampere SM_80+) to deliver up to 2× matmul throughput on
+/// sparse weights, but this struct's public storage is a host values/mask
+/// reference layout rather than cuSPARSELt's packed CUDA metadata.
 ///
 /// # Storage
 ///
@@ -1642,9 +1644,9 @@ impl<T: Float> CsrTensor<T> {
 ///
 /// # Invariants
 ///
-/// - `original.shape().last()` exists and is a multiple of 4, so each
-///   2:4 group is contained within the innermost dimension and never spans
-///   adjacent rows/slices.
+/// - `original` is a non-empty 2-D CPU tensor whose final dimension is a
+///   multiple of 4, matching the public `WeightNormSparsifier` 2:4 contract
+///   used as this helper's PyTorch oracle.
 /// - Every group's mask has **exactly** 2 bits set.
 /// - `values.len() == num_groups * 2`.
 /// - `mask.len() == num_groups.div_ceil(2)`.
@@ -1662,17 +1664,25 @@ impl<T: Float> SemiStructuredSparseTensor<T> {
     /// Compress a dense tensor into 2:4 semi-structured format.
     ///
     /// For each contiguous group of 4 elements along the innermost
-    /// row-major dimension, keeps the 2 elements with the largest
-    /// absolute value and zeros the other two. Ties are broken
-    /// by position (lower index wins).
+    /// row-major dimension, zeros the 2 smallest L2 scores using the same
+    /// CPU `torch.topk(..., largest=False)` tie order as PyTorch's
+    /// `WeightNormSparsifier(sparse_block_shape=(1,4), zeros_per_block=2)`.
+    ///
+    /// This is a CPU/reference pruning-layout helper, not the packed CUDA
+    /// `torch.sparse.to_sparse_semi_structured` tensor API. A CUDA input is
+    /// rejected rather than read back to host so callers do not accidentally
+    /// get a CPU round trip under a sparse-looking API.
     ///
     /// # Errors
     ///
-    /// - `FerrotorchError::InvalidArgument` if `dense` is 0-dimensional or
-    ///   its innermost (last) dimension is not a multiple of 4 (CORE-075 /
-    ///   #1769: groups of 4 are taken along the innermost dimension and
-    ///   must never span rows, so the *last dim* — not the total size —
-    ///   carries the divisibility requirement).
+    /// - `FerrotorchError::InvalidArgument` if `dense` is not a non-empty
+    ///   2-D CPU tensor or its final dimension is not a multiple of 4
+    ///   (CORE-075 / #1769, CORE-084 / #1778): groups of 4 are taken along
+    ///   the final dimension and must never span rows.
+    /// - `FerrotorchError::InvalidArgument` if `dense` is non-contiguous.
+    /// - `FerrotorchError::NotImplementedOnCuda` if `dense` lives on CUDA;
+    ///   a true CUDA-resident packed sparse semi-structured tensor is
+    ///   tracked separately in #1980.
     /// - `FerrotorchError::InvalidArgument` if `dense` tracks gradients
     ///   while grad mode is enabled (CORE-074 / #1768): the 2:4 layout
     ///   extracts plain host vectors, so compressing a tracked tensor
@@ -1695,61 +1705,77 @@ impl<T: Float> SemiStructuredSparseTensor<T> {
             });
         }
         let shape = dense.shape();
-        match shape.last() {
-            None => {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: "SemiStructuredSparseTensor::compress: input must be \
-                              at least 1-D (2:4 groups run along the innermost \
-                              dimension; a scalar has none)"
-                        .into(),
-                });
-            }
-            Some(&last) if !last.is_multiple_of(4) => {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: format!(
-                        "SemiStructuredSparseTensor::compress: innermost dimension \
-                         must be a multiple of 4 (2:4 groups never span rows), got \
-                         shape {shape:?}"
-                    ),
-                });
-            }
-            Some(_) => {}
+        if shape.len() != 2 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "SemiStructuredSparseTensor::compress: PyTorch's 2:4 \
+                     WeightNormSparsifier oracle expects a 2-D weight tensor, \
+                     got shape {shape:?}"
+                ),
+            });
         }
-        let data = dense.data_vec()?;
+        let rows = shape[0];
+        let last_dim = shape[1];
+        if rows == 0 || last_dim == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "SemiStructuredSparseTensor::compress: empty dimensions are \
+                     invalid for the 2:4 layout, got shape {shape:?}"
+                ),
+            });
+        }
+        if !last_dim.is_multiple_of(4) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "SemiStructuredSparseTensor::compress: final dimension must \
+                     be a multiple of 4 (2:4 groups never span rows), got shape \
+                     {shape:?}"
+                ),
+            });
+        }
+        if dense.is_cuda() {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "SemiStructuredSparseTensor::compress_cuda",
+            });
+        }
+        if dense.device() != Device::Cpu {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "SemiStructuredSparseTensor::compress: CPU tensors only for \
+                     this host pruning-reference layout, got device {:?}",
+                    dense.device()
+                ),
+            });
+        }
+        let data = dense.data()?;
         let numel = data.len();
-        // last_dim % 4 == 0 implies numel % 4 == 0; flat grouping below is
-        // row-aligned because every row is a whole number of groups.
         let num_groups = numel / 4;
         let mut values = Vec::with_capacity(num_groups * 2);
         let mut mask = vec![0u8; num_groups.div_ceil(2)];
 
         for g in 0..num_groups {
             let base = g * 4;
-            // Find the 2 largest-magnitude positions.
-            let mut mags: [(usize, T); 4] = [
-                (0, data[base].abs()),
-                (1, data[base + 1].abs()),
-                (2, data[base + 2].abs()),
-                (3, data[base + 3].abs()),
-            ];
-            // Sort descending by magnitude; stable on ties so
-            // lower index wins.
-            mags.sort_by(|a, b| {
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0))
-            });
-            // Take positions [0] and [1] as kept, then sort those
-            // two ascending so values are stored in original
-            // position order.
-            let mut kept = [mags[0].0, mags[1].0];
-            kept.sort_unstable();
-            values.push(data[base + kept[0]]);
-            values.push(data[base + kept[1]]);
+            let group = &data[base..base + 4];
+            let scores: Vec<T> = group.iter().map(|&v| v * v).collect();
+            let mut keep = [true; 4];
+            for idx in torch_cpu_topk_indices(&scores, 2, false, false) {
+                keep[idx] = false;
+            }
+            for (pos, &is_kept) in keep.iter().enumerate() {
+                if is_kept {
+                    values.push(data[base + pos]);
+                }
+            }
 
             // Build the 4-bit mask for this group: set bit i if
             // position i was kept.
-            let nibble: u8 = (1 << kept[0]) | (1 << kept[1]);
+            let nibble =
+                keep.iter().enumerate().fold(
+                    0u8,
+                    |acc, (pos, &is_kept)| {
+                        if is_kept { acc | (1 << pos) } else { acc }
+                    },
+                );
             // Pack into the mask byte: group `g` uses bits
             // (g % 2) * 4 .. (g % 2) * 4 + 4.
             let byte = g / 2;
@@ -1965,20 +1991,22 @@ fn sparse_matmul_24_forward<T: Float>(
     //   documented host upload of `b` only).
     // - `T == f64`: cuSPARSELt has no f64 kernel; the on-device
     //   composite (`matmul_f64`) runs directly.
-    // - f16/bf16: structured `NotImplementedOnCuda` — the half wire
-    //   needs the u16 buffer-handle convention, tracked in #1967.
+    // - f16/bf16: try cuSPARSELt's 16-bit tensor-core kernel; when the
+    //   backend declines, fall back to the existing GPU-resident dense
+    //   half/bfloat matmul. No CUDA input returns to the CPU reference path.
     if a.is_cuda()
         && let Some(backend) = crate::gpu_dispatch::gpu_backend()
     {
         use std::any::TypeId;
         let is_f32 = TypeId::of::<T>() == TypeId::of::<f32>();
         let is_f64 = TypeId::of::<T>() == TypeId::of::<f64>();
-        if !is_f32 && !is_f64 {
+        let is_f16 = TypeId::of::<T>() == TypeId::of::<half::f16>();
+        let is_bf16 = TypeId::of::<T>() == TypeId::of::<half::bf16>();
+        if !is_f32 && !is_f64 && !is_f16 && !is_bf16 {
             return Err(FerrotorchError::NotImplementedOnCuda {
-                op: "sparse_matmul_24: CUDA lane supports f32/f64 only \
-                     (f16/bf16 u16 buffer-handle wire tracked in #1967); \
-                     the host reference path is not used for CUDA inputs \
-                     because it would silently return a CPU tensor",
+                op: "sparse_matmul_24: CUDA lane supports f32/f64/f16/bf16 only; \
+                     the host reference path is not used for CUDA inputs because \
+                     it would silently return a CPU tensor",
             });
         }
 
@@ -2005,8 +2033,12 @@ fn sparse_matmul_24_forward<T: Float>(
         };
         let b_dtype = if is_f32 {
             crate::dtype::DType::F32
-        } else {
+        } else if is_f64 {
             crate::dtype::DType::F64
+        } else if is_f16 {
+            crate::dtype::DType::F16
+        } else {
+            crate::dtype::DType::BF16
         };
         let b_handle = backend.cpu_to_gpu(b_bytes, b_dtype, ordinal)?;
 
@@ -2023,8 +2055,18 @@ fn sparse_matmul_24_forward<T: Float>(
                     backend.matmul_f32(a_handle, &b_handle, m, k, n)?
                 }
             }
-        } else {
+        } else if is_f64 {
             backend.matmul_f64(a_handle, &b_handle, m, k, n)?
+        } else if is_f16 {
+            match backend.sparse_matmul_24_f16(a_handle, &b_handle, m, k, n) {
+                Ok(h) => h,
+                Err(_) => backend.matmul_f16_f16(a_handle, &b_handle, m, k, n)?,
+            }
+        } else {
+            match backend.sparse_matmul_24_bf16(a_handle, &b_handle, m, k, n) {
+                Ok(h) => h,
+                Err(_) => backend.matmul_bf16_bf16(a_handle, &b_handle, m, k, n)?,
+            }
         };
         let storage = TensorStorage::gpu(out_handle);
         return Tensor::from_storage(storage, vec![m, n], false);
@@ -3384,7 +3426,7 @@ mod tests {
     fn semi24_compress_keeps_two_largest_magnitudes_per_group() {
         // Group 0: [1, 4, 2, 3] → keep 4 and 3 (positions 1, 3).
         // Group 1: [-5, 2, 0, 1] → keep -5 and 2 (positions 0, 1).
-        let t = mk(vec![1.0, 4.0, 2.0, 3.0, -5.0, 2.0, 0.0, 1.0], vec![8]);
+        let t = mk(vec![1.0, 4.0, 2.0, 3.0, -5.0, 2.0, 0.0, 1.0], vec![1, 8]);
         let sp = SemiStructuredSparseTensor::compress(&t).unwrap();
 
         // Values stored in original position order.
@@ -3402,14 +3444,14 @@ mod tests {
     fn semi24_decompress_roundtrips_compressed_values() {
         // After compress → decompress, retained positions have
         // their original values and dropped positions are zero.
-        let t = mk(vec![1.0, 4.0, 2.0, 3.0, -5.0, 2.0, 0.0, 1.0], vec![8]);
+        let t = mk(vec![1.0, 4.0, 2.0, 3.0, -5.0, 2.0, 0.0, 1.0], vec![1, 8]);
         let sp = SemiStructuredSparseTensor::compress(&t).unwrap();
         let dense = sp.decompress().unwrap();
         let data = dense.data().unwrap();
         // Group 0 [1,4,2,3] → kept pos 1,3 → [0,4,0,3].
         // Group 1 [-5,2,0,1] → kept pos 0,1 → [-5,2,0,0].
         assert_eq!(data, &[0.0, 4.0, 0.0, 3.0, -5.0, 2.0, 0.0, 0.0]);
-        assert_eq!(dense.shape(), &[8]);
+        assert_eq!(dense.shape(), &[1, 8]);
     }
 
     #[test]
@@ -3425,20 +3467,46 @@ mod tests {
 
     #[test]
     fn semi24_rejects_non_multiple_of_4() {
-        let t = mk(vec![1.0, 2.0, 3.0, 4.0, 5.0], vec![5]);
+        let t = mk(vec![1.0, 2.0, 3.0, 4.0, 5.0], vec![1, 5]);
         let result = SemiStructuredSparseTensor::compress(&t);
         assert!(result.is_err());
         assert!(format!("{}", result.unwrap_err()).contains("multiple of 4"));
     }
 
     #[test]
-    fn semi24_tie_breaking_prefers_lower_position() {
-        // All magnitudes equal → keep positions 0 and 1 (lowest indices).
-        let t = mk(vec![1.0, 1.0, 1.0, 1.0], vec![4]);
+    fn semi24_rejects_weight_norm_sparsifier_invalid_shapes() {
+        for (data, shape) in [
+            (vec![1.0, 1.0, 1.0, 1.0], vec![4]),
+            (Vec::new(), vec![0, 4]),
+            (Vec::new(), vec![1, 0]),
+            (vec![1.0; 8], vec![2, 2, 2]),
+        ] {
+            let t = mk(data, shape);
+            let result = SemiStructuredSparseTensor::compress(&t);
+            assert!(
+                matches!(result, Err(FerrotorchError::InvalidArgument { .. })),
+                "invalid WeightNormSparsifier 2:4 shape must be rejected, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn semi24_tie_breaking_matches_weight_norm_sparsifier() {
+        // All magnitudes equal: PyTorch CPU topk prunes positions 2 and 3.
+        let t = mk(vec![1.0, 1.0, 1.0, 1.0], vec![1, 4]);
         let sp = SemiStructuredSparseTensor::compress(&t).unwrap();
-        // Mask should be 0b0011 = 0x3 (positions 0 and 1).
         assert_eq!(sp.group_mask(0), 0x3);
         assert_eq!(sp.values(), &[1.0, 1.0]);
+
+        // [[1,3,3,3]]: PyTorch WeightNormSparsifier prunes positions 0 and 2.
+        let t = mk(vec![1.0, 3.0, 3.0, 3.0], vec![1, 4]);
+        let sp = SemiStructuredSparseTensor::compress(&t).unwrap();
+        assert_eq!(sp.group_mask(0), 0xA);
+        assert_eq!(sp.values(), &[3.0, 3.0]);
+        assert_eq!(
+            sp.decompress().unwrap().data().unwrap(),
+            &[0.0, 3.0, 0.0, 3.0]
+        );
     }
 
     #[test]
@@ -3448,7 +3516,7 @@ mod tests {
         // ≈ 0.5 + small overhead from the mask byte.
         let n = 1024usize;
         let data: Vec<f32> = (0..n).map(|i| i as f32).collect();
-        let t = mk(data, vec![n]);
+        let t = mk(data, vec![1, n]);
         let sp = SemiStructuredSparseTensor::compress(&t).unwrap();
         let ratio = sp.compression_ratio();
         // Values: 512 f32s = 2048 bytes. Mask: 128 bytes.
@@ -3460,7 +3528,7 @@ mod tests {
     fn semi24_zero_tensor_has_deterministic_mask() {
         // When all values are zero, the tie-breaker picks
         // positions 0 and 1 uniformly across every group.
-        let t = mk(vec![0.0; 16], vec![16]);
+        let t = mk(vec![0.0; 16], vec![4, 4]);
         let sp = SemiStructuredSparseTensor::compress(&t).unwrap();
         assert_eq!(sp.values(), &[0.0; 8]);
         for g in 0..4 {
@@ -3474,7 +3542,7 @@ mod tests {
         // top-2 are positions 0 (-10) and 3 (3). Values stored
         // in ascending position order: [-10, 3]. Mask bits 0, 3
         // → 0b1001 = 0x9.
-        let t = mk(vec![-10.0, 1.0, -2.0, 3.0], vec![4]);
+        let t = mk(vec![-10.0, 1.0, -2.0, 3.0], vec![1, 4]);
         let sp = SemiStructuredSparseTensor::compress(&t).unwrap();
         assert_eq!(sp.values(), &[-10.0, 3.0]);
         assert_eq!(sp.group_mask(0), 0x9);
@@ -3569,7 +3637,7 @@ mod tests {
     fn semi24_f64_parity() {
         let t = Tensor::<f64>::from_storage(
             TensorStorage::cpu(vec![1.0, 4.0, 2.0, 3.0, -5.0, 2.0, 0.0, 1.0]),
-            vec![8],
+            vec![1, 8],
             false,
         )
         .unwrap();

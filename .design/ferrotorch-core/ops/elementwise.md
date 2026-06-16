@@ -106,7 +106,7 @@ Reductions at `:1113-1342`:
   max` pattern; `logsumexp_dim` is the per-axis variant.
 
 **Non-test consumers**: `crate::grad_fns::arithmetic::add` / `mul` /
-`sub` / `div` at `grad_fns/arithmetic.rs:472`, `1056`, etc., call
+`sub` / `div` at `grad_fns/arithmetic.rs:608`, `1361`, etc., call
 `fast_add` / `fast_mul` / `fast_sub` / `crate::ops::elementwise::fast_div`
 directly. `crate::grad_fns::transcendental::exp` / `log` /
 `sin` / `cos` at `grad_fns/transcendental.rs:142,242,319,396` call
@@ -139,9 +139,9 @@ sweep coverage via `add` (88/88 passed), `mul` (72/72 passed),
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `simd_add_f32` at `ops/elementwise.rs:32` etc.; non-test consumer: `grad_fns::arithmetic::add_inner` and the per-dtype `dispatch_floating_dtype!` macro call into `fast_add` at `grad_fns/arithmetic.rs:472`, which routes to `simd_add_f32` for same-shape f32 inputs |
-| REQ-2 | SHIPPED | impl: `fast_add`/`fast_mul`/`fast_sub`/`fast_div` at `ops/elementwise.rs:139,239,338,439`; `fast_exp`/`fast_log`/`fast_sigmoid`/`fast_tanh`/`fast_sin`/`fast_cos` at `:610,653,750,789,836,884`; non-test consumer: `grad_fns::arithmetic::add` at `grad_fns/arithmetic.rs:472` (`fast_add`), `grad_fns::arithmetic::mul` at `:1056` (`fast_mul`), `grad_fns::transcendental::exp` at `grad_fns/transcendental.rs:142` (`fast_exp`), etc. |
-| REQ-3 | SHIPPED | impl: `unary_map`/`binary_map`/`scalar_map` at `ops/elementwise.rs:930,951,1038`; non-test consumer: `grad_fns::arithmetic::scale_tensor` at `grad_fns/arithmetic.rs:38` imports `unary_map`/`scalar_map`; every `crate::special::*` op uses `unary_map` (`special.rs:676` etc.) |
-| REQ-4 | SHIPPED | impl: `sum`/`sum_axis`/`mean`/`nansum`/`nanmean`/`logsumexp`/`logsumexp_dim` at `ops/elementwise.rs:1113,1123,1172,1189,1207,1233,1269`; non-test consumer: `grad_fns::reduction::sum` chains into `ops::elementwise::sum` for the CPU fallback path. The reduction surface is re-exported transitively via `grad_fns::reduction::*` |
+| REQ-1 | SHIPPED | impl: `simd_add_f32` at `ops/elementwise.rs:32` etc.; non-test consumer: `grad_fns::arithmetic::add_inner` calls into `fast_add` at `grad_fns/arithmetic.rs:608`, which routes to `simd_add_f32` for same-shape f32 inputs |
+| REQ-2 | SHIPPED | impl: `fast_add`/`fast_mul`/`fast_sub`/`fast_div` at `ops/elementwise.rs:185,266,351,437`; `fast_exp`/`fast_log`/`fast_sigmoid`/`fast_tanh`/`fast_sin`/`fast_cos` at `:610,653,750,789,836,884`; non-test consumer: `grad_fns::arithmetic::add_inner` at `grad_fns/arithmetic.rs:608` (`fast_add`), `grad_fns::arithmetic::mul_inner` at `:1361` (`fast_mul`), `grad_fns::transcendental::exp` at `grad_fns/transcendental.rs:282` (`fast_exp`), etc. |
+| REQ-3 | SHIPPED | impl: `unary_map`/`binary_map`/`scalar_map` at `ops/elementwise.rs:924,944,1027`; non-test consumer: `grad_fns::arithmetic::scale_tensor` at `grad_fns/arithmetic.rs:721` calls `scalar_map`; every `crate::special::*` op uses `unary_map` (`special.rs:676` etc.) |
+| REQ-4 | SHIPPED | impl: `sum`/`sum_axis`/`mean`/`nansum`/`nanmean`/`logsumexp`/`logsumexp_dim` at `ops/elementwise.rs:1091,1101,1150,1167,1185,1211,1255`; non-test consumer: `grad_fns::reduction::sum` chains into `ops::elementwise::sum` for the CPU fallback path. The reduction surface is re-exported transitively via `grad_fns::reduction::*` |
 | REQ-5 | SHIPPED | impl: `logsumexp` numerical-stability flow at `ops/elementwise.rs:1233-1262`; non-test consumer: `grad_fns::reduction::logsumexp` at `grad_fns/reduction.rs` invokes this for the CPU path |
 | REQ-6 | SHIPPED | impl: `nansum`/`nanmean` at `ops/elementwise.rs:1189,1207`; non-test consumer: re-exported via `ferrotorch_core::ops::elementwise::{nansum, nanmean}` public path |

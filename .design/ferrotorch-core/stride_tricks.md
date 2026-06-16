@@ -127,7 +127,7 @@ overlap multiplicity division, gather through the input geometry);
   through the input geometry. The `GradFn::backward` impl at `:925-972`
   (`strided_scatter_*` / i64-index `scatter_add_dim_*` / `strided_copy_*`
   — gradient data stays on device).
-- `AsStridedScatterBackward` (`stride_tricks.rs:1000-1068`) is the
+- `AsStridedScatterBackward` (`stride_tricks.rs:1184-1225`) is the
   two-input VJP of `as_strided_scatter` (CORE-060, #1754): `d/d src`
   gathers the upstream grad at the view geometry (matches torch);
   `d/d input` zeroes the view region of the upstream grad — the

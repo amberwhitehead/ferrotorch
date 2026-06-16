@@ -57,9 +57,10 @@ that composes them through `_matmul_impl` (`:2010-2188`).
   pure-Rust triple `(i, j, p)` accumulation loop on naive scalar `T` (CPU
   path only — GPU shapes route through `broadcast_bmm_*` cuBLAS strided
   batched GEMM in `grad_fns::linalg::matmul_differentiable` at
-  `grad_fns/linalg.rs:1582-1660` *before* reaching this kernel). The 1-D
+  `grad_fns/linalg.rs:1740` *before* reaching this kernel). The 1-D
   promotion at `:85-101` mirrors the `dim_tensor2 == 1` `unsqueeze(2)`
-  branch upstream at `:2156-2157` plus the row-prepend for the dual case.
+  branch upstream in `LinearAlgebra.cpp` lines 2156-2157 plus the
+  row-prepend for the dual case.
   Tracking blocker #1347 — the current naive triple loop accumulates in
   the input dtype rather than routing per-batch slices through
   `mm_raw` (which already block-sums via `faer::linalg::matmul`), producing

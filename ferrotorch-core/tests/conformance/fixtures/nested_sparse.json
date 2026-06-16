@@ -3,9 +3,9 @@
     "torch_version": "2.11.0+cu130",
     "cuda_version": "13.0",
     "cuda_available": true,
-    "python_executable": "/usr/sbin/python3",
+    "python_executable": "/usr/sbin/python",
     "python_platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
-    "generated_at": "2026-06-11T04:01:58.203169+00:00",
+    "generated_at": "2026-06-16T06:51:05.278905+00:00",
     "rng_seed": 195939070,
     "dtypes": [
       "float32",
@@ -4742,7 +4742,7 @@
     },
     {
       "op": "semi_structured_24",
-      "tag": "1d_8elem",
+      "tag": "2d_1x8",
       "dtype": "float32",
       "device": "cpu",
       "dense_data": [
@@ -4756,6 +4756,7 @@
         0.5
       ],
       "shape": [
+        1,
         8
       ],
       "expected_kept_values": [
@@ -4782,7 +4783,7 @@
     },
     {
       "op": "semi_structured_24",
-      "tag": "1d_8elem",
+      "tag": "2d_1x8",
       "dtype": "float64",
       "device": "cpu",
       "dense_data": [
@@ -4796,6 +4797,7 @@
         0.5
       ],
       "shape": [
+        1,
         8
       ],
       "expected_kept_values": [
@@ -4822,7 +4824,7 @@
     },
     {
       "op": "semi_structured_24",
-      "tag": "tie_all_equal_1d4",
+      "tag": "tie_all_equal_1x4",
       "dtype": "float32",
       "device": "cpu",
       "dense_data": [
@@ -4832,6 +4834,7 @@
         2.0
       ],
       "shape": [
+        1,
         4
       ],
       "expected_kept_values": [
@@ -4851,7 +4854,7 @@
     },
     {
       "op": "semi_structured_24",
-      "tag": "tie_all_equal_1d4",
+      "tag": "tie_all_equal_1x4",
       "dtype": "float64",
       "device": "cpu",
       "dense_data": [
@@ -4861,6 +4864,7 @@
         2.0
       ],
       "shape": [
+        1,
         4
       ],
       "expected_kept_values": [
@@ -4880,7 +4884,7 @@
     },
     {
       "op": "semi_structured_24",
-      "tag": "tie_three_equal_1d4",
+      "tag": "tie_three_equal_1x4",
       "dtype": "float32",
       "device": "cpu",
       "dense_data": [
@@ -4890,6 +4894,7 @@
         3.0
       ],
       "shape": [
+        1,
         4
       ],
       "expected_kept_values": [
@@ -4909,7 +4914,7 @@
     },
     {
       "op": "semi_structured_24",
-      "tag": "tie_three_equal_1d4",
+      "tag": "tie_three_equal_1x4",
       "dtype": "float64",
       "device": "cpu",
       "dense_data": [
@@ -4919,6 +4924,7 @@
         3.0
       ],
       "shape": [
+        1,
         4
       ],
       "expected_kept_values": [

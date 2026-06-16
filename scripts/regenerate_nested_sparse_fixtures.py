@@ -832,9 +832,9 @@ def _torch_24_selection(
     sparse_block_shape=(1, 4), zeros_per_block=2)` — PyTorch's documented
     2:4 semi-structured pruning configuration (see the PyTorch tutorial
     "Accelerating BERT with semi-structured (2:4) sparsity", which feeds
-    this exact sparsifier into `to_sparse_semi_structured`). 1-D inputs
-    are presented as a single row `[1, n]` (the 2:4 pattern groups along
-    the innermost dimension, so this is the identity mapping for 1-D).
+    this exact sparsifier into `to_sparse_semi_structured`). The input
+    shape is passed to PyTorch exactly as written: no 1-D reshape shim is
+    allowed, because PyTorch's public sparsifier path rejects 1-D weights.
 
     The torch-derived boolean keep-mask is then MAPPED into ferrotorch's
     fixture fields (kept values in original order, one 4-bit nibble per
@@ -847,9 +847,10 @@ def _torch_24_selection(
     from torch.ao.pruning import WeightNormSparsifier
 
     t = torch.tensor(data, dtype=torch.float64).reshape(shape)
-    t2d = t.reshape(1, -1) if t.dim() == 1 else t
-    m = nn.Linear(t2d.shape[-1], t2d.shape[0])
-    m.weight = nn.Parameter(t2d.clone().to(torch.float32))
+    assert t.dim() == 2, "WeightNormSparsifier 2:4 oracle requires real 2-D input"
+    assert t.shape[0] > 0 and t.shape[1] > 0
+    m = nn.Linear(t.shape[-1], t.shape[0])
+    m.weight = nn.Parameter(t.clone().to(torch.float32))
     sparsifier = WeightNormSparsifier(
         sparsity_level=1.0, sparse_block_shape=(1, 4), zeros_per_block=2
     )
@@ -881,19 +882,19 @@ def fixture_semi_structured() -> list[dict[str, Any]]:
     included — they are where the 2:4 tie-break can diverge."""
     out: list[dict[str, Any]] = []
 
-    # 1-D, 8 elements (2 groups of 4), distinct magnitudes per group.
+    # One 2-D row, 8 elements (2 groups of 4), distinct magnitudes per group.
     data = [3.0, -1.0, 2.0, -4.0, 5.0, -6.0, 1.5, 0.5]
-    values, nibbles, decompressed = _torch_24_selection(data, [8])
+    values, nibbles, decompressed = _torch_24_selection(data, [1, 8])
 
     for dtype in DTYPES:
         out.append(
             {
                 "op": "semi_structured_24",
-                "tag": "1d_8elem",
+                "tag": "2d_1x8",
                 "dtype": dtype,
                 "device": "cpu",
                 "dense_data": listf(data),
-                "shape": [8],
+                "shape": [1, 8],
                 "expected_kept_values": listf(values),
                 "expected_nibbles": nibbles,
                 "expected_decompressed": listf(decompressed),
@@ -901,15 +902,14 @@ def fixture_semi_structured() -> list[dict[str, Any]]:
             }
         )
 
-    # Tie-magnitude groups (single group of 4 each). Torch's sparsifier
-    # makes a deterministic keep/drop choice on ties; ferrotorch's
-    # `compress` tie-break ("lower index wins") can diverge — the suite
-    # pins any divergence against its tracking issue.
+    # Tie-magnitude groups (single row, one group of 4 each). Torch's
+    # sparsifier makes a deterministic keep/drop choice on ties; the suite
+    # asserts Ferrotorch uses the same CPU topk tie order.
     for tag, tie_data in [
-        ("tie_all_equal_1d4", [2.0, 2.0, 2.0, 2.0]),
-        ("tie_three_equal_1d4", [1.0, 3.0, 3.0, 3.0]),
+        ("tie_all_equal_1x4", [2.0, 2.0, 2.0, 2.0]),
+        ("tie_three_equal_1x4", [1.0, 3.0, 3.0, 3.0]),
     ]:
-        values, nibbles, decompressed = _torch_24_selection(tie_data, [4])
+        values, nibbles, decompressed = _torch_24_selection(tie_data, [1, 4])
         for dtype in DTYPES:
             out.append(
                 {
@@ -918,7 +918,7 @@ def fixture_semi_structured() -> list[dict[str, Any]]:
                     "dtype": dtype,
                     "device": "cpu",
                     "dense_data": listf(tie_data),
-                    "shape": [4],
+                    "shape": [1, 4],
                     "expected_kept_values": listf(values),
                     "expected_nibbles": nibbles,
                     "expected_decompressed": listf(decompressed),

@@ -63,12 +63,12 @@ package.
 
 - [x] AC-1: Affine fixed-point `f(x) = 0.5 * x + 1` converges to
   `x* = 2` — `test_fixed_point_affine` at
-  `fixed_point.rs:361-383`.
+  `fixed_point.rs:454`.
 - [x] AC-2: Contractive fixed-point `f(x, a) = a * x` with `a =
   0.5` from `x0 = 10` converges to `x* = 0` —
-  `test_fixed_point_contractive_to_zero` at `:386-402`.
+  `test_fixed_point_contractive_to_zero` at `:479`.
 - [x] AC-3: Looser tolerance terminates earlier with a close
-  approximation — `test_fixed_point_tolerance` at `:404-430`.
+  approximation — `test_fixed_point_tolerance` at `:498`.
 
 ## Architecture
 
@@ -100,7 +100,7 @@ without attaching a backward node at `:132-134`.
 
 ### REQ-4 `FixedPointBackward<T>` struct
 
-`struct FixedPointBackward<T: Float>` at `fixed_point.rs:147-158`:
+`struct FixedPointBackward<T: Float>` at `fixed_point.rs:253-264`:
 
 - `f_closure: FixedPointFn<T>` — `Arc<dyn Fn(&Tensor<T>,
   &[&Tensor<T>]) -> FerrotorchResult<Tensor<T>> + Send + Sync>`
@@ -188,10 +188,10 @@ All tests pass in the workspace gauntlet.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `pub fn fixed_point<T, F>` at `ferrotorch-core/src/autograd/fixed_point.rs:79-135`; the API mirrors DEQ / `torchdeq.solver.fixed_point` semantics from upstream's `torch/_higher_order_ops/` package; non-test production consumer: re-exported at `ferrotorch-core/src/autograd/mod.rs:27 pub use fixed_point::fixed_point` and `lib.rs:127 fixed_point`. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
-| REQ-2 | SHIPPED | impl: forward-iteration loop at `fixed_point.rs:91-109` with L1-norm convergence check at `:96-105`; non-test consumer: inside REQ-1 (the engine body). |
-| REQ-3 | SHIPPED | impl: `if params.iter().any(|p| p.requires_grad())` at `fixed_point.rs:113` with the no-grad return at `:132-134`; non-test consumer: every `fixed_point` call where none of the params require grad — the inference-time fast path. |
-| REQ-4 | SHIPPED | impl: `struct FixedPointBackward<T: Float>` at `fixed_point.rs:147-158` + `impl Debug` at `:160-170` + `impl GradFn` at `:172-322`; non-test consumer: instantiated inside REQ-1 at `:124-130` and dispatched from `Tensor::backward` whenever a `fixed_point`-produced output is differentiated. |
-| REQ-5 | SHIPPED | impl: Neumann series solve at `fixed_point.rs:177-245`; non-test consumer: inside REQ-4's `backward` impl — invoked on every backward of a `fixed_point`-produced tensor. |
-| REQ-6 | SHIPPED | impl: per-parameter gradient distribution at `fixed_point.rs:247-313`; non-test consumer: inside REQ-4's `backward` impl. |
+| REQ-1 | SHIPPED | impl: `pub fn fixed_point<T, F>` at `ferrotorch-core/src/autograd/fixed_point.rs:91-145`; the API mirrors DEQ / `torchdeq.solver.fixed_point` semantics from upstream's `torch/_higher_order_ops/` package; non-test production consumer: re-exported at `ferrotorch-core/src/autograd/mod.rs:27 pub use fixed_point::fixed_point` and `lib.rs:127 fixed_point`. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
+| REQ-2 | SHIPPED | impl: forward-iteration loop at `fixed_point.rs:104-126` with L1-norm convergence check at `:112-115`; non-test consumer: inside REQ-1 (the engine body). |
+| REQ-3 | SHIPPED | impl: `if params.iter().any(|p| p.requires_grad())` at `fixed_point.rs:130` with the no-grad return at `:145`; non-test consumer: every `fixed_point` call where none of the params require grad — the inference-time fast path. |
+| REQ-4 | SHIPPED | impl: `struct FixedPointBackward<T: Float>` at `fixed_point.rs:253-264` + `impl Debug` at `:266-276` + `impl GradFn` at `:278-424`; non-test consumer: instantiated inside REQ-1 at `:138-145` and dispatched from `Tensor::backward` whenever a `fixed_point`-produced output is differentiated. |
+| REQ-5 | SHIPPED | impl: Neumann series solve at `fixed_point.rs:288-358`; non-test consumer: inside REQ-4's `backward` impl — invoked on every backward of a `fixed_point`-produced tensor. |
+| REQ-6 | SHIPPED | impl: per-parameter gradient distribution at `fixed_point.rs:360-414`; non-test consumer: inside REQ-4's `backward` impl. |
 | REQ-7 | SHIPPED | impl: `fn elementwise_mul_sum<T: Float>` at `elementwise_mul_sum in fixed_point.rs`; non-test consumer: called twice inside REQ-5 (at `fixed_point in fixed_point.rs`) and REQ-6 (at `fixed_point in fixed_point.rs`) — the scalarization step every Neumann iteration and every parameter gradient pass relies on. |

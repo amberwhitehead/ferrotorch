@@ -132,7 +132,7 @@ are tiny.
 when `Some`. `pub(crate) fn run_post_accumulate_hooks` at
 `:182-199` is the symmetric loop for side-effecting
 post-accumulate hooks. Both are called from the autograd engine at
-`graph.rs:175-193` (sequential) and `:515-407` (parallel).
+`graph.rs:292-304` (sequential) and `:493-506` (parallel).
 
 ## Parity contract
 

@@ -73,16 +73,16 @@ parameter — exact zeros at pruned slots (CORE-082 -> #1776).
 
 - [x] AC-1: `magnitude_prune([1,-4,2,-3], 0.5)` zeros the two
   smallest-magnitude entries and keeps `[-4, -3]`
-  (`test_magnitude_prune_50_percent`, `pruning.rs:207-221`).
+  (`test_magnitude_prune_50_percent`, `pruning.rs:370`).
 - [x] AC-2: `magnitude_prune([1,2,3,4], 0.0)` returns the input values
-  unchanged (`test_magnitude_prune_zero_sparsity`, `pruning.rs:244-270`).
+  unchanged (`test_magnitude_prune_zero_sparsity`, `pruning.rs:407`).
 - [x] AC-3: `magnitude_prune(_, 1.0)` and `_, -0.1` return
-  `InvalidArgument` (`test_magnitude_prune_invalid_sparsity`, `pruning.rs:272-287`).
+  `InvalidArgument` (`test_magnitude_prune_invalid_sparsity`, `pruning.rs:435`).
 - [x] AC-4: NaN inputs do not panic in `magnitude_prune` or
-  `apply_2_4_mask` (`pruning.rs:289-305`).
+  `apply_2_4_mask` (`pruning.rs:444`).
 - [x] AC-5: ties at the prune cut are split EXACTLY as live torch
   (`[1,1,1,1] @ 0.25 -> [1,1,0,1]`, `@ 0.5 -> [1,1,0,0]`;
-  `test_magnitude_prune_ties_prune_exact_count`, `pruning.rs:223-242`, plus the conformance tie fixtures).
+  `test_magnitude_prune_ties_prune_exact_count`, `pruning.rs:386`, plus the conformance tie fixtures).
 - [x] AC-6: `apply_2_4_mask` keeps exactly 2 of every 4 elements along
   the final dimension and never groups across rows
   (`pruning.rs:307-417`).
@@ -99,7 +99,7 @@ parameter — exact zeros at pruned slots (CORE-082 -> #1776).
   (conformance `*_backward_flows_masked_gradient_to_original_leaf`,
   oracle: live torch `weight_orig.grad == [0, 20, 0, 40]`).
 - [x] AC-9: `sparsity_ratio` reports 0.5 for `[0, 1, 0, 2]`
-  (`test_sparsity_ratio`, `pruning.rs:418-423`).
+  (`test_sparsity_ratio`, `pruning.rs:607`).
 - [x] AC-10: `cargo test -p ferrotorch-core --lib pruning` passes.
 
 ## Architecture

@@ -134,12 +134,12 @@ arm must be present syntactically.
 
 ### Production consumers
 
-- `ferrotorch-core/src/grad_fns/arithmetic.rs:410-433` —
+- `ferrotorch-core/src/grad_fns/arithmetic.rs:549-580` —
   `dispatch_floating_dtype!(T, "add", f32 => …, f64 => …, bf16 => …,
   f16 => …)` selects the right CUDA `backend.add_*_*` kernel based on
   `T`. The `add` GPU path is the original site that motivated REQ-1
   (crosslink #1185 Phase 1 / issue #23).
-- `ferrotorch-core/src/grad_fns/arithmetic.rs:467, :1220` — additional
+- `ferrotorch-core/src/grad_fns/arithmetic.rs:583, :1302` — additional
   arithmetic ops using the macro.
 - `ferrotorch-core/src/fft.rs:139-160 / :229-260 / :313 / :406` —
   uses `is_f32::<T>()` / `is_f64::<T>()` to gate the GPU-accelerated FFT

@@ -181,8 +181,8 @@ type system rather than the user.
 implementation that makes `ferrotorch-core/src/grad_fns/*.rs`
 auto-profile. The trait is defined in `ferrotorch-core` (not
 this crate) so the core has no dependency cycle. Every tensor op
-in `ferrotorch-core/src/grad_fns/arithmetic.rs:388`,
-`grad_fns/transcendental.rs:107`, etc. wraps its body in
+in `ferrotorch-core/src/grad_fns/arithmetic.rs:524`,
+`grad_fns/transcendental.rs:282`, etc. wraps its body in
 `profile_op_scope("add", "tensor_op", &[...], || { ... })`,
 which checks the thread-local hook and (if set) calls
 `OpProfiler::record_op` with the measured duration. There are
@@ -204,12 +204,12 @@ code compiles identically against both feature configurations.
   `with_profiler` installs into; `profile_op_scope` at line 87
   reads it and dispatches every tensor op through the
   `OpProfiler::record_op` method this crate implements.
-- `ferrotorch-core/src/grad_fns/arithmetic.rs:388` —
+- `ferrotorch-core/src/grad_fns/arithmetic.rs:524` —
   `crate::profiler_hook::profile_op_scope("add", "tensor_op", &[a.shape(), b.shape()], || { ... })`.
-  Same pattern at `arithmetic.rs:799` (`add_scaled`), `arithmetic.rs:1107` (mul),
-  `arithmetic.rs:1267` (div), `arithmetic.rs:1401` (neg),
-  `arithmetic.rs:1532` (pow), plus `grad_fns/transcendental.rs:107` (exp),
-  line 209 (log), line 313 (sin), line 390 (cos), and ~26 more — 36
+  Same pattern at `arithmetic.rs:975` (`add_scaled`), `arithmetic.rs:1283` (mul),
+  `arithmetic.rs:1461` (div), `arithmetic.rs:1595` (neg),
+  `arithmetic.rs:1764` (pow), plus `grad_fns/transcendental.rs:282` (exp),
+  line 385 (log), line 492 (sin), line 569 (cos), and ~26 more — 36
   call sites total.
 - `ferrotorch/src/lib.rs:107` `pub use ferrotorch_profiler::*;`
   exposes `Profiler` / `ProfileConfig` / `with_profiler` to user
