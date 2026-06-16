@@ -18,6 +18,7 @@
 use rustc_hash::FxHashMap as HashMap;
 use std::collections::VecDeque;
 
+use crate::autograd::anomaly::{AnomalyMode, check_backward_output_anomaly};
 use crate::autograd::hooks::{run_grad_hooks, run_post_accumulate_hooks};
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
@@ -58,6 +59,32 @@ fn implicit_seed_like<T: Float>(root: &Tensor<T>) -> FerrotorchResult<Tensor<T>>
     let ones_storage = crate::storage::TensorStorage::cpu(vec![one; root.numel().max(1)]);
     let seed_cpu = Tensor::from_storage(ones_storage, root.shape().to_vec(), false)?;
     seed_cpu.to(root.device())
+}
+
+struct ScopedAnomalyMode {
+    prev: bool,
+}
+
+impl ScopedAnomalyMode {
+    fn set(enabled: bool) -> Self {
+        let prev = AnomalyMode::is_enabled();
+        if enabled {
+            AnomalyMode::enable();
+        } else {
+            AnomalyMode::disable();
+        }
+        Self { prev }
+    }
+}
+
+impl Drop for ScopedAnomalyMode {
+    fn drop(&mut self) {
+        if self.prev {
+            AnomalyMode::enable();
+        } else {
+            AnomalyMode::disable();
+        }
+    }
 }
 
 /// Compute gradients of all leaf tensors that contribute to `root`.
@@ -195,34 +222,42 @@ pub fn backward_with_grad<T: Float>(
                 });
             }
 
-            for (input, maybe_grad) in inputs.iter().zip(input_grads) {
-                if let Some(grad) = maybe_grad
-                    && input.requires_grad()
-                {
-                    // Run gradient hooks (if any), which may modify the gradient.
-                    let hooks = input.hooks();
-                    let has_hooks = {
-                        let guard = hooks.lock().map_err(|e| FerrotorchError::LockPoisoned {
-                            message: format!("hook storage mutex: {e}"),
-                        })?;
-                        (guard.has_grad_hooks(), guard.has_post_accumulate_hooks())
-                    };
-                    let grad = if has_hooks.0 {
-                        run_grad_hooks(hooks, grad)?
-                    } else {
-                        grad
-                    };
+            let forward_backtrace = node.forward_backtrace();
+            for (output_index, (input, maybe_grad)) in inputs.iter().zip(input_grads).enumerate() {
+                if let Some(grad) = maybe_grad {
+                    check_backward_output_anomaly(
+                        &grad,
+                        grad_fn.name(),
+                        output_index,
+                        forward_backtrace.as_ref(),
+                    )?;
+                    if input.requires_grad() {
+                        // Run gradient hooks (if any), which may modify the gradient.
+                        let hooks = input.hooks();
+                        let has_hooks = {
+                            let guard =
+                                hooks.lock().map_err(|e| FerrotorchError::LockPoisoned {
+                                    message: format!("hook storage mutex: {e}"),
+                                })?;
+                            (guard.has_grad_hooks(), guard.has_post_accumulate_hooks())
+                        };
+                        let grad = if has_hooks.0 {
+                            run_grad_hooks(hooks, grad)?
+                        } else {
+                            grad
+                        };
 
-                    if input.is_leaf() {
-                        // Leaf tensor: accumulate gradient on the tensor itself.
-                        input.accumulate_grad(&grad)?;
-                        // Run post-accumulate-grad hooks on the leaf (if any).
-                        if has_hooks.1 {
-                            run_post_accumulate_hooks(hooks, input)?;
+                        if input.is_leaf() {
+                            // Leaf tensor: accumulate gradient on the tensor itself.
+                            input.accumulate_grad(&grad)?;
+                            // Run post-accumulate-grad hooks on the leaf (if any).
+                            if has_hooks.1 {
+                                run_post_accumulate_hooks(hooks, input)?;
+                            }
+                        } else {
+                            // Non-leaf: accumulate into the grads map for the next iteration.
+                            accumulate_non_leaf_grad(&mut grads, input, grad)?;
                         }
-                    } else {
-                        // Non-leaf: accumulate into the grads map for the next iteration.
-                        accumulate_non_leaf_grad(&mut grads, input, grad)?;
                     }
                 }
             }
@@ -329,6 +364,7 @@ pub fn backward_parallel<T: Float>(
     // forever with `processed < total_nodes` (CORE-021 / #1715).
     let cancelled = Arc::new(AtomicBool::new(false));
     let first_error: Arc<Mutex<Option<FerrotorchError>>> = Arc::new(Mutex::new(None));
+    let anomaly_enabled = AnomalyMode::is_enabled();
 
     // Phase 3: Parallel backward.
     let node_map_ref = &node_map;
@@ -344,6 +380,7 @@ pub fn backward_parallel<T: Float>(
             let first_error = Arc::clone(&first_error);
 
             s.spawn(move || {
+                let _anomaly_guard = ScopedAnomalyMode::set(anomaly_enabled);
                 loop {
                     // Pull a ready node.
                     let id = {
@@ -405,33 +442,45 @@ pub fn backward_parallel<T: Float>(
                                 });
                             }
 
-                            for (input, maybe_grad) in inputs.iter().zip(input_grads) {
-                                if let Some(grad) = maybe_grad
-                                    && input.requires_grad()
-                                {
-                                    let hooks = input.hooks();
-                                    let has_hooks = {
-                                        let guard = hooks.lock().map_err(|e| {
-                                            FerrotorchError::LockPoisoned {
-                                                message: format!("hook storage mutex: {e}"),
-                                            }
-                                        })?;
-                                        (guard.has_grad_hooks(), guard.has_post_accumulate_hooks())
-                                    };
-                                    let grad = if has_hooks.0 {
-                                        run_grad_hooks(hooks, grad)?
-                                    } else {
-                                        grad
-                                    };
+                            let forward_backtrace = node.forward_backtrace();
+                            for (output_index, (input, maybe_grad)) in
+                                inputs.iter().zip(input_grads).enumerate()
+                            {
+                                if let Some(grad) = maybe_grad {
+                                    check_backward_output_anomaly(
+                                        &grad,
+                                        grad_fn.name(),
+                                        output_index,
+                                        forward_backtrace.as_ref(),
+                                    )?;
+                                    if input.requires_grad() {
+                                        let hooks = input.hooks();
+                                        let has_hooks = {
+                                            let guard = hooks.lock().map_err(|e| {
+                                                FerrotorchError::LockPoisoned {
+                                                    message: format!("hook storage mutex: {e}"),
+                                                }
+                                            })?;
+                                            (
+                                                guard.has_grad_hooks(),
+                                                guard.has_post_accumulate_hooks(),
+                                            )
+                                        };
+                                        let grad = if has_hooks.0 {
+                                            run_grad_hooks(hooks, grad)?
+                                        } else {
+                                            grad
+                                        };
 
-                                    if input.is_leaf() {
-                                        input.accumulate_grad(&grad)?;
-                                        if has_hooks.1 {
-                                            run_post_accumulate_hooks(hooks, input)?;
+                                        if input.is_leaf() {
+                                            input.accumulate_grad(&grad)?;
+                                            if has_hooks.1 {
+                                                run_post_accumulate_hooks(hooks, input)?;
+                                            }
+                                        } else {
+                                            let mut g = grads.lock().unwrap();
+                                            accumulate_non_leaf_grad_locked(&mut g, input, grad)?;
                                         }
-                                    } else {
-                                        let mut g = grads.lock().unwrap();
-                                        accumulate_non_leaf_grad_locked(&mut g, input, grad)?;
                                     }
                                 }
                             }

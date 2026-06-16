@@ -2322,7 +2322,10 @@ fn check_gradient_anomaly_detects_nan_grad_on_panic_lane() {
     AnomalyMode::disable();
     assert!(result.is_err(), "NaN grad must produce anomaly Err");
     let msg = format!("{}", result.unwrap_err());
-    assert!(msg.contains("NaN"), "error must name the kind: {msg}");
+    assert!(
+        msg.contains("nan values"),
+        "error must match PyTorch-style anomaly wording: {msg}"
+    );
 }
 
 #[test]

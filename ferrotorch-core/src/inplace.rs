@@ -123,11 +123,12 @@ fn finish_tracked_binary_inplace<'a, T: Float>(
     let requires_grad = result.requires_grad();
     let is_leaf = result.is_leaf();
     let grad_fn = result.grad_fn();
+    let forward_backtrace = result.forward_backtrace();
     let (storage, _shape) = result.into_storage_and_shape()?;
     // SAFETY: caller has already validated in-place eligibility. The result
     // storage has the same shape/device as target and is freshly materialized.
     unsafe { target.update_storage(storage)? };
-    target.replace_autograd_metadata(requires_grad, is_leaf, grad_fn)?;
+    target.replace_autograd_metadata(requires_grad, is_leaf, grad_fn, forward_backtrace)?;
     Ok(target)
 }
 

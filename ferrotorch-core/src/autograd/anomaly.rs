@@ -32,7 +32,7 @@ thread_local! {
 /// When enabled:
 /// - Forward operations capture a `std::backtrace::Backtrace` and store it
 ///   on the resulting tensor's metadata.
-/// - The backward pass checks gradients for NaN/Inf and reports the stored
+/// - The backward pass checks gradients for NaN and reports the stored
 ///   backtrace to help locate the source of numerical issues.
 ///
 /// Anomaly mode has significant runtime overhead (backtrace capture is slow),
@@ -134,15 +134,23 @@ impl fmt::Display for ForwardBacktrace {
     }
 }
 
-/// Check a gradient tensor for NaN or Inf values (anomaly check).
+/// Check a gradient tensor for NaN values (anomaly check).
 ///
 /// Called during backward when anomaly mode is enabled. If the gradient
-/// contains NaN or Inf, returns an error message including the
-/// `forward_backtrace` (if available) from the tensor that produced
-/// this gradient.
+/// contains NaN, returns an error message including the `forward_backtrace`
+/// (if available) from the tensor whose backward function produced it.
 pub fn check_gradient_anomaly<T: crate::dtype::Float>(
     grad: &crate::tensor::Tensor<T>,
     op_name: &str,
+    forward_bt: Option<&ForwardBacktrace>,
+) -> crate::error::FerrotorchResult<()> {
+    check_backward_output_anomaly(grad, op_name, 0, forward_bt)
+}
+
+pub(crate) fn check_backward_output_anomaly<T: crate::dtype::Float>(
+    grad: &crate::tensor::Tensor<T>,
+    op_name: &str,
+    output_index: usize,
     forward_bt: Option<&ForwardBacktrace>,
 ) -> crate::error::FerrotorchResult<()> {
     // Only check when anomaly mode is on — this function should only be
@@ -151,38 +159,54 @@ pub fn check_gradient_anomaly<T: crate::dtype::Float>(
         return Ok(());
     }
 
-    // For GPU tensors we skip the check (would require a D2H transfer
-    // just for validation). Users can call .cpu() in a hook if needed.
-    if grad.is_cuda() {
-        return Ok(());
-    }
+    let has_nan = if grad.is_cuda() {
+        has_cuda_nan(grad)?
+    } else {
+        grad.data_vec()?.iter().any(|v| v.is_nan())
+    };
 
-    let data = grad.data()?;
-    let has_nan = data.iter().any(|v| v.is_nan());
-    let has_inf = data.iter().any(|v| v.is_infinite());
-
-    if has_nan || has_inf {
-        let anomaly_kind = if has_nan && has_inf {
-            "NaN and Inf"
-        } else if has_nan {
-            "NaN"
-        } else {
-            "Inf"
-        };
-
+    if has_nan {
         let bt_msg = match forward_bt {
             Some(bt) => format!("\n\n{bt}"),
             None => String::from(
-                "\n\n(no forward backtrace available — was anomaly mode enabled during forward pass?)",
+                "\n\n(no forward backtrace available - was anomaly mode enabled during forward pass?)",
             ),
         };
 
         return Err(crate::error::FerrotorchError::InvalidArgument {
-            message: format!("anomaly detected: {anomaly_kind} in gradient of {op_name}{bt_msg}"),
+            message: format!(
+                "Function '{op_name}' returned nan values in its {output_index}th output.{bt_msg}"
+            ),
         });
     }
 
     Ok(())
+}
+
+fn has_cuda_nan<T: crate::dtype::Float>(
+    grad: &crate::tensor::Tensor<T>,
+) -> crate::error::FerrotorchResult<bool> {
+    let logical_grad = if grad.is_contiguous() {
+        grad.clone()
+    } else {
+        crate::methods::contiguous_t(grad)?
+    };
+    let backend = crate::gpu_dispatch::gpu_backend()
+        .ok_or(crate::error::FerrotorchError::DeviceUnavailable)?;
+    let handle = logical_grad.gpu_handle()?;
+    let eq_self_mask = backend.compare(handle, handle, crate::gpu_dispatch::CompareOp::Eq)?;
+    let nan_mask = backend.bool_not(&eq_self_mask)?;
+    let any_nan = backend.bool_any(&nan_mask)?;
+    let flag = backend.gpu_to_cpu(&any_nan)?;
+    match flag.as_slice() {
+        [value] => Ok(*value != 0),
+        _ => Err(crate::error::FerrotorchError::InvalidArgument {
+            message: format!(
+                "detect_anomaly CUDA nan reduction returned {} bytes, expected 1",
+                flag.len()
+            ),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -288,12 +312,12 @@ mod tests {
         AnomalyMode::disable();
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("NaN"));
+        assert!(msg.contains("nan values"));
         assert!(msg.contains("TestOp"));
     }
 
     #[test]
-    fn test_check_gradient_anomaly_inf() {
+    fn test_check_gradient_anomaly_inf_matches_torch_no_error() {
         use crate::storage::TensorStorage;
         use crate::tensor::Tensor;
 
@@ -306,9 +330,7 @@ mod tests {
         .unwrap();
         let result = check_gradient_anomaly(&grad, "TestOp", None);
         AnomalyMode::disable();
-        assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("Inf"));
+        assert!(result.is_ok());
     }
 
     #[test]

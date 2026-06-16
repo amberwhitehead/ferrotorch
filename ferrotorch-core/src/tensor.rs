@@ -29,6 +29,7 @@ use std::sync::{Arc, Mutex};
 
 use once_cell::sync::OnceCell;
 
+use crate::autograd::anomaly::ForwardBacktrace;
 use crate::autograd::saved_tensors::UnpackHook;
 use crate::device::Device;
 use crate::dtype::Float;
@@ -178,6 +179,7 @@ struct TensorInner<T: Float> {
     offset: usize,
     grad: Mutex<Option<Box<Tensor<T>>>>,
     grad_fn: Mutex<Option<Arc<dyn GradFn<T>>>>,
+    forward_backtrace: Mutex<Option<ForwardBacktrace>>,
     requires_grad: AtomicBool,
     is_leaf: AtomicBool,
     /// Hook storage for gradient hooks and post-accumulate-grad hooks.
@@ -249,6 +251,7 @@ impl<T: Float> Tensor<T> {
                 offset: 0,
                 grad: Mutex::new(None),
                 grad_fn: Mutex::new(None),
+                forward_backtrace: Mutex::new(None),
                 requires_grad: AtomicBool::new(requires_grad),
                 is_leaf: AtomicBool::new(true),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
@@ -299,6 +302,7 @@ impl<T: Float> Tensor<T> {
                 offset: self.inner.offset,
                 grad: Mutex::new(None),
                 grad_fn: Mutex::new(None),
+                forward_backtrace: Mutex::new(None),
                 requires_grad: AtomicBool::new(false),
                 is_leaf: AtomicBool::new(true),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
@@ -355,6 +359,7 @@ impl<T: Float> Tensor<T> {
                 offset: self.inner.offset,
                 grad: Mutex::new(None),
                 grad_fn: Mutex::new(Some(grad_fn)),
+                forward_backtrace: Mutex::new(ForwardBacktrace::capture_if_enabled()),
                 requires_grad: AtomicBool::new(true),
                 is_leaf: AtomicBool::new(false),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
@@ -410,6 +415,11 @@ impl<T: Float> Tensor<T> {
     ) -> Self {
         let requires_grad = grad_fn.is_some();
         let is_leaf = grad_fn.is_none();
+        let forward_backtrace = if requires_grad {
+            ForwardBacktrace::capture_if_enabled()
+        } else {
+            None
+        };
         Self {
             inner: Arc::new(TensorInner {
                 id: TensorId::next(),
@@ -419,6 +429,7 @@ impl<T: Float> Tensor<T> {
                 offset: new_offset,
                 grad: Mutex::new(None),
                 grad_fn: Mutex::new(grad_fn),
+                forward_backtrace: Mutex::new(forward_backtrace),
                 requires_grad: AtomicBool::new(requires_grad),
                 is_leaf: AtomicBool::new(is_leaf),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
@@ -503,6 +514,7 @@ impl<T: Float> Tensor<T> {
                 offset: 0,
                 grad: Mutex::new(None),
                 grad_fn: Mutex::new(Some(grad_fn)),
+                forward_backtrace: Mutex::new(ForwardBacktrace::capture_if_enabled()),
                 requires_grad: AtomicBool::new(true),
                 is_leaf: AtomicBool::new(false),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
@@ -553,6 +565,7 @@ impl<T: Float> Tensor<T> {
                 offset: 0,
                 grad: Mutex::new(None),
                 grad_fn: Mutex::new(None),
+                forward_backtrace: Mutex::new(None),
                 requires_grad: AtomicBool::new(false),
                 is_leaf: AtomicBool::new(true),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
@@ -562,6 +575,7 @@ impl<T: Float> Tensor<T> {
         };
         let saved_output = saved_output.saved_for_backward()?;
         let grad_fn = make_grad_fn(saved_output)?;
+        let forward_backtrace = ForwardBacktrace::capture_if_enabled();
 
         Ok(Self {
             inner: Arc::new(TensorInner {
@@ -572,6 +586,7 @@ impl<T: Float> Tensor<T> {
                 offset: 0,
                 grad: Mutex::new(None),
                 grad_fn: Mutex::new(Some(grad_fn)),
+                forward_backtrace: Mutex::new(forward_backtrace),
                 requires_grad: AtomicBool::new(true),
                 is_leaf: AtomicBool::new(false),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
@@ -870,6 +885,15 @@ impl<T: Float> Tensor<T> {
         guard.as_ref().cloned()
     }
 
+    pub(crate) fn forward_backtrace(&self) -> Option<ForwardBacktrace> {
+        let guard = self
+            .inner
+            .forward_backtrace
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.clone()
+    }
+
     pub(crate) fn autograd_snapshot(&self) -> FerrotorchResult<Tensor<T>> {
         let (storage, shape) = self.clone().into_storage_and_shape()?;
         let strides = checked_c_contiguous_strides(&shape, "autograd_snapshot")?;
@@ -882,6 +906,7 @@ impl<T: Float> Tensor<T> {
                 offset: 0,
                 grad: Mutex::new(None),
                 grad_fn: Mutex::new(self.grad_fn()),
+                forward_backtrace: Mutex::new(self.forward_backtrace()),
                 requires_grad: AtomicBool::new(self.requires_grad()),
                 is_leaf: AtomicBool::new(self.is_leaf()),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
@@ -896,6 +921,7 @@ impl<T: Float> Tensor<T> {
         requires_grad: bool,
         is_leaf: bool,
         grad_fn: Option<Arc<dyn GradFn<T>>>,
+        forward_backtrace: Option<ForwardBacktrace>,
     ) -> FerrotorchResult<()> {
         {
             let mut guard =
@@ -906,6 +932,16 @@ impl<T: Float> Tensor<T> {
                         message: format!("grad_fn mutex: {e}"),
                     })?;
             *guard = grad_fn;
+        }
+        {
+            let mut guard =
+                self.inner
+                    .forward_backtrace
+                    .lock()
+                    .map_err(|e| FerrotorchError::LockPoisoned {
+                        message: format!("forward_backtrace mutex: {e}"),
+                    })?;
+            *guard = forward_backtrace;
         }
         self.inner
             .requires_grad
@@ -2481,6 +2517,7 @@ impl<T: Float> Tensor<T> {
                 offset: self.inner.offset,
                 grad: Mutex::new(None),
                 grad_fn: Mutex::new(None),
+                forward_backtrace: Mutex::new(None),
                 requires_grad: AtomicBool::new(false),
                 is_leaf: AtomicBool::new(true),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
@@ -2502,6 +2539,7 @@ impl<T: Float> Tensor<T> {
                 offset: self.inner.offset,
                 grad: Mutex::new(None),
                 grad_fn: Mutex::new(self.grad_fn()),
+                forward_backtrace: Mutex::new(self.forward_backtrace()),
                 requires_grad: AtomicBool::new(requires_grad),
                 is_leaf: AtomicBool::new(self.is_leaf()),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
@@ -2627,6 +2665,11 @@ impl<T: Float> Tensor<T> {
         } else {
             None
         };
+        let forward_backtrace = if track {
+            ForwardBacktrace::capture_if_enabled()
+        } else {
+            None
+        };
         Self {
             inner: Arc::new(TensorInner {
                 id: TensorId::next(),
@@ -2636,6 +2679,7 @@ impl<T: Float> Tensor<T> {
                 offset: 0,
                 grad: Mutex::new(None),
                 grad_fn: Mutex::new(grad_fn),
+                forward_backtrace: Mutex::new(forward_backtrace),
                 requires_grad: AtomicBool::new(track),
                 is_leaf: AtomicBool::new(!track),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
