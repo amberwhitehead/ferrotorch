@@ -714,6 +714,16 @@ impl CudaBackendImpl {
                 ),
             });
         }
+        for (axis, (&index_dim, &input_dim)) in index_shape.iter().zip(input_shape).enumerate() {
+            if axis != dim && index_dim > input_dim {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "gather_intidx_nd: index shape {index_shape:?} exceeds input shape \
+                         {input_shape:?} on non-gather axis {axis} ({index_dim} > {input_dim})"
+                    ),
+                });
+            }
+        }
         let input_numel = input_shape.iter().try_fold(1usize, |acc, &d| {
             acc.checked_mul(d).ok_or(FerrotorchError::InvalidArgument {
                 message: "gather_intidx_nd: input shape product overflow".to_string(),

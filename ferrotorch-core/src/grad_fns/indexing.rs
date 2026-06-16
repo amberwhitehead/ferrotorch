@@ -590,6 +590,24 @@ impl<T: Float> GradFn<T> for GatherBackward<T> {
                 ),
             });
         }
+        if index_numel == 0 {
+            let grad_tensor = if grad_output.is_cuda() {
+                let ordinal = match grad_output.device() {
+                    Device::Cuda(o) => o,
+                    _ => unreachable!(),
+                };
+                let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+                let zeros = backend.alloc_zeros(input_numel, T::dtype(), ordinal)?;
+                Tensor::from_storage(TensorStorage::gpu(zeros), input_shape.to_vec(), false)?
+            } else {
+                Tensor::from_storage(
+                    TensorStorage::cpu(vec![<T as num_traits::Zero>::zero(); input_numel]),
+                    input_shape.to_vec(),
+                    false,
+                )?
+            };
+            return Ok(vec![Some(grad_tensor)]);
+        }
 
         // §3 GPU-native path (#1822/#1823): scatter-add grad_output into a
         // zeroed input-shaped buffer via the rank-aware kernel, dispatched on

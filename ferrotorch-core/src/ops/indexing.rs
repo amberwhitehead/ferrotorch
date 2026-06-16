@@ -311,14 +311,7 @@ pub fn gather<T: Float>(
     // index is also 0-D (rank-0 scalar index), promote it to shape `[1]` so
     // the ndim-equality validation succeeds; the output shape preserves the
     // caller's original `index_shape` (still `[]`) so 0-D in → 0-D out.
-    // (The 0-D promotion is only reachable on the CPU path — the CUDA branch
-    // below rejects 0-D inputs before dispatch.)
     let ndim = input.ndim();
-    if input.is_cuda() && ndim == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: "gather: 0-D CUDA input not supported".into(),
-        });
-    }
     let effective_input_shape: Vec<usize> = if ndim == 0 {
         vec![1]
     } else {
@@ -331,6 +324,48 @@ pub fn gather<T: Float>(
         index_shape.to_vec()
     };
     let dim = normalize_axis(dim, effective_ndim)?;
+
+    // PyTorch gather meta returns immediately for empty index tensors after
+    // normalizing `dim` and sizing the output (`TensorAdvancedIndexing.cpp`
+    // gather meta). That intentionally skips dtype and shape checks, so
+    // `index_shape=[999, 0]` is legal for an input shaped `[2, 3]`. Preserve
+    // that exact boundary here while still verifying the host slice coheres
+    // with its claimed empty shape.
+    let claimed_index_numel = checked_index_numel(index_shape)?;
+    if claimed_index_numel == 0 {
+        if !index.is_empty() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "gather: index slice has {} elements but index_shape {:?} implies 0",
+                    index.len(),
+                    index_shape
+                ),
+            });
+        }
+        let output_shape = index_shape.to_vec();
+        let storage = if input.is_cuda() {
+            let ordinal = match input.device() {
+                crate::device::Device::Cuda(ordinal) => ordinal,
+                _ => unreachable!(),
+            };
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            TensorStorage::gpu(backend.alloc_zeros(0, T::dtype(), ordinal)?)
+        } else {
+            TensorStorage::cpu(Vec::new())
+        };
+        if input.requires_grad() && is_grad_enabled() {
+            let grad_fn = Arc::new(crate::grad_fns::indexing::GatherBackward {
+                input: input.clone(),
+                dim,
+                index: Vec::new(),
+                index_cuda: None,
+                index_shape: output_shape.clone(),
+            });
+            return Tensor::from_operation(storage, output_shape, grad_fn);
+        }
+        return Tensor::from_storage(storage, output_shape, false);
+    }
 
     // CORE-125 (#1819): the host index slice and its claimed shape are
     // validated as ONE checked logical tensor (rank, exact length, value
@@ -365,7 +400,6 @@ pub fn gather<T: Float>(
                 // (strided_copy kernel — no host round trip).
                 let original_input = input.clone();
                 let input = input.contiguous()?;
-                let input_shape = input.shape().to_vec();
                 let input_handle = input.gpu_handle()?;
                 let ordinal = input_handle.device_ordinal();
                 let idx_handle = upload_index_i64(index, ordinal)?;
@@ -374,8 +408,8 @@ pub fn gather<T: Float>(
                 let h = backend.gather_intidx_nd(
                     input_handle,
                     &idx_handle,
-                    &input_shape,
-                    index_shape,
+                    &effective_input_shape,
+                    &effective_index_shape,
                     dim,
                 )?;
                 let output_shape = index_shape.to_vec();

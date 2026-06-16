@@ -100,6 +100,49 @@ fn core126_cpu_smaller_non_dim_axis_matches_torch_contract() {
     );
 }
 
+#[test]
+fn core126_cpu_gather_empty_index_skips_shape_checks_like_torch() {
+    let out = gather(&input_2x3(false), 1, &[], &[999, 0])
+        .expect("torch.gather returns empty output before rank/shape checks");
+
+    assert_eq!(out.shape(), &[999, 0]);
+    assert!(out.data_vec().unwrap().is_empty());
+}
+
+#[test]
+fn core126_cpu_gather_empty_index_rejects_incoherent_slice_metadata() {
+    let r = gather(&input_2x3(false), 1, &[0], &[999, 0]);
+    assert_shape_err(
+        r.map(|t| t.data_vec()),
+        "empty index_shape cannot be paired with non-empty host index data",
+    );
+}
+
+#[test]
+fn core126_cpu_gather_scalar_input_uses_nonempty_dim_contract() {
+    let input = cpu_f32(&[5.0], &[], false);
+
+    let scalar = gather(&input, 0, &[0], &[]).unwrap();
+    let vector = gather(&input, -1, &[0, 0, 0], &[3]).unwrap();
+
+    assert_eq!(scalar.shape(), &[] as &[usize]);
+    assert_eq!(scalar.data_vec().unwrap(), vec![5.0]);
+    assert_eq!(vector.shape(), &[3]);
+    assert_eq!(vector.data_vec().unwrap(), vec![5.0, 5.0, 5.0]);
+}
+
+#[test]
+fn core126_cpu_gather_empty_tracked_backward_is_zero() {
+    let input = input_2x3(true);
+    let out = gather(&input, 1, &[], &[999, 0]).unwrap();
+
+    ferrotorch_core::autograd::graph::backward(&out.sum_all().unwrap()).unwrap();
+
+    let grad = input.grad().unwrap().expect("empty gather still has a VJP");
+    assert_eq!(grad.shape(), &[2, 3]);
+    assert_eq!(grad.data_vec().unwrap(), vec![0.0; 6]);
+}
+
 #[cfg(feature = "gpu")]
 mod gpu {
     use super::*;
@@ -156,6 +199,52 @@ mod gpu {
             valued.cpu().unwrap().data_vec().unwrap(),
             vec![9.0, 0.0, 9.0, 0.0, 0.0, 0.0],
         );
+    }
+
+    #[test]
+    fn core126_cuda_gather_empty_index_returns_empty_cuda() {
+        ensure_cuda_backend();
+        let input = cuda(input_2x3(false), false);
+
+        let out = gather(&input, 1, &[], &[999, 0])
+            .expect("CUDA empty gather must mirror torch's early return");
+
+        assert!(out.is_cuda(), "empty gather result must stay CUDA-resident");
+        assert_eq!(out.shape(), &[999, 0]);
+        assert!(out.cpu().unwrap().data_vec().unwrap().is_empty());
+    }
+
+    #[test]
+    fn core126_cuda_gather_scalar_input_returns_cuda() {
+        ensure_cuda_backend();
+        let input = cuda(cpu_f32(&[5.0], &[], false), false);
+
+        let out = gather(&input, -1, &[0, 0, 0], &[3])
+            .expect("CUDA scalar gather must use torch's nonempty dim contract");
+
+        assert!(
+            out.is_cuda(),
+            "scalar gather result must stay CUDA-resident"
+        );
+        assert_eq!(out.shape(), &[3]);
+        assert_eq!(out.cpu().unwrap().data_vec().unwrap(), vec![5.0; 3]);
+    }
+
+    #[test]
+    fn core126_cuda_gather_empty_backward_is_resident_zero() {
+        ensure_cuda_backend();
+        let input = cuda(input_2x3(false), true);
+        let out = gather(&input, 1, &[], &[999, 0]).unwrap();
+        assert!(
+            out.is_cuda(),
+            "empty gather forward must stay CUDA-resident"
+        );
+
+        backward(&out.sum_all().unwrap()).unwrap();
+
+        let grad = input.grad().unwrap().expect("grad must reach input");
+        assert!(grad.is_cuda(), "empty gather grad must stay CUDA-resident");
+        assert_eq!(grad.cpu().unwrap().data_vec().unwrap(), vec![0.0; 6]);
     }
 
     #[test]

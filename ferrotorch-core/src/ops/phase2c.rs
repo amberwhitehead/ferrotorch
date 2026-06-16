@@ -260,6 +260,18 @@ fn gather_matches_dim_kernel_layout(
         .all(|(axis, (&input, &index))| axis == dim || input == index)
 }
 
+fn gather_effective_shape(shape: &[usize]) -> Vec<usize> {
+    if shape.is_empty() {
+        vec![1]
+    } else {
+        shape.to_vec()
+    }
+}
+
+fn normalize_gather_axis(axis: isize, input_ndim: usize) -> FerrotorchResult<usize> {
+    normalize_axis(axis, input_ndim.max(1))
+}
+
 /// Read an `IntTensor<I>` index as host `Vec<i64>`. CPU references consume this
 /// directly. CUDA no-grad and integer paths validate resident indices on the
 /// GPU; tracked float CUDA forwards still use this to build the legacy
@@ -437,12 +449,45 @@ impl<T: Float> Tensor<T> {
         dim: isize,
         index: &IntTensor<I>,
     ) -> FerrotorchResult<Tensor<T>> {
-        let d = normalize_axis(dim, self.ndim())?;
-        gather_check_shapes(self.shape(), index.shape(), d, "gather")?;
+        let input_shape = gather_effective_shape(self.shape());
+        let index_shape = gather_effective_shape(index.shape());
+        let d = normalize_gather_axis(dim, self.ndim())?;
         check_same_device(self.device(), index.device(), "gather")?;
         let input = self.contiguous()?;
-        let (outer, in_dim, inner) = factor(input.shape(), d);
-        let out_dim = index.shape()[d];
+        let input_shape = if input.shape().is_empty() {
+            input_shape
+        } else {
+            input.shape().to_vec()
+        };
+        let out_shape = index.shape().to_vec();
+        if index.numel() == 0 {
+            let storage = if input.is_cuda() {
+                let backend =
+                    crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+                let ordinal = match input.device() {
+                    Device::Cuda(ordinal) => ordinal,
+                    _ => unreachable!(),
+                };
+                TensorStorage::gpu(backend.alloc_zeros(0, T::dtype(), ordinal)?)
+            } else {
+                TensorStorage::cpu(Vec::new())
+            };
+            if input.requires_grad() && is_grad_enabled() {
+                let grad_fn = Arc::new(indexing::GatherBackward {
+                    input: input.clone(),
+                    dim: d,
+                    index: Vec::new(),
+                    index_cuda: None,
+                    index_shape: out_shape.clone(),
+                });
+                return Tensor::from_operation(storage, out_shape, grad_fn);
+            }
+            return Tensor::from_storage(storage, out_shape, false);
+        }
+
+        gather_check_shapes(&input_shape, &index_shape, d, "gather")?;
+        let (outer, in_dim, inner) = factor(&input_shape, d);
+        let out_dim = index_shape[d];
         let out_shape = index.shape().to_vec();
 
         if input.is_cuda() {
@@ -454,7 +499,7 @@ impl<T: Float> Tensor<T> {
             } else {
                 None
             };
-            let h = if gather_matches_dim_kernel_layout(input.shape(), index.shape(), d) {
+            let h = if gather_matches_dim_kernel_layout(&input_shape, &index_shape, d) {
                 backend.gather_intidx(
                     input.gpu_handle()?,
                     index.gpu_handle()?,
@@ -467,8 +512,8 @@ impl<T: Float> Tensor<T> {
                 backend.gather_intidx_nd(
                     input.gpu_handle()?,
                     index.gpu_handle()?,
-                    input.shape(),
-                    index.shape(),
+                    &input_shape,
+                    &index_shape,
                     d,
                 )?
             };
@@ -492,8 +537,8 @@ impl<T: Float> Tensor<T> {
             let out = gather_ref(
                 &data,
                 &idx,
-                input.shape(),
-                index.shape(),
+                &input_shape,
+                &index_shape,
                 d,
                 <T as num_traits::Zero>::zero(),
             );
@@ -642,18 +687,34 @@ impl<I: IntElement> IntTensor<I> {
         dim: isize,
         index: &IntTensor<J>,
     ) -> FerrotorchResult<IntTensor<I>> {
-        let d = normalize_axis(dim, self.ndim())?;
-        gather_check_shapes(self.shape(), index.shape(), d, "gather")?;
+        let input_shape = gather_effective_shape(self.shape());
+        let index_shape = gather_effective_shape(index.shape());
+        let d = normalize_gather_axis(dim, self.ndim())?;
         check_same_device(self.device(), index.device(), "gather")?;
-        let (outer, in_dim, inner) = factor(self.shape(), d);
-        let out_dim = index.shape()[d];
         let out_shape = index.shape().to_vec();
+        if index.numel() == 0 {
+            if self.is_cuda() {
+                let backend =
+                    crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+                let ordinal = match self.device() {
+                    Device::Cuda(ordinal) => ordinal,
+                    _ => unreachable!(),
+                };
+                let h = backend.alloc_zeros(0, I::dtype(), ordinal)?;
+                return Ok(IntTensor::from_gpu_handle(h, out_shape));
+            }
+            return IntTensor::<I>::from_vec(Vec::new(), out_shape);
+        }
+
+        gather_check_shapes(&input_shape, &index_shape, d, "gather")?;
+        let (outer, in_dim, inner) = factor(&input_shape, d);
+        let out_dim = index_shape[d];
 
         if self.is_cuda() {
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
             backend.check_int_indices_in_bounds(index.gpu_handle()?, d, in_dim, "gather")?;
-            let h = if gather_matches_dim_kernel_layout(self.shape(), index.shape(), d) {
+            let h = if gather_matches_dim_kernel_layout(&input_shape, &index_shape, d) {
                 backend.gather_intidx(
                     self.gpu_handle()?,
                     index.gpu_handle()?,
@@ -666,8 +727,8 @@ impl<I: IntElement> IntTensor<I> {
                 backend.gather_intidx_nd(
                     self.gpu_handle()?,
                     index.gpu_handle()?,
-                    self.shape(),
-                    index.shape(),
+                    &input_shape,
+                    &index_shape,
                     d,
                 )?
             };
@@ -677,7 +738,7 @@ impl<I: IntElement> IntTensor<I> {
             let idx = index_as_i64(index)?;
             check_index_bounds(&idx, d, in_dim, "gather")?;
             let zero = I::try_from_i64(0).expect("0 is in range for i32/i64");
-            let out = gather_ref(data, &idx, self.shape(), index.shape(), d, zero);
+            let out = gather_ref(data, &idx, &input_shape, &index_shape, d, zero);
             IntTensor::<I>::from_vec(out, out_shape)
         }
     }
