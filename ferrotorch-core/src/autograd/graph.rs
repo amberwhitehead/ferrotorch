@@ -13,6 +13,7 @@
 //! | REQ-9 | SHIPPED | `pub fn `backward_parallel`<T: Float>` at `graph.rs:247-493`; consumer: existing pub API across multiple prior commits — boundary-API grandfathering. |
 //! | REQ-10 | SHIPPED | Shape-preserving seed at `graph.rs:48-60`; consumer: every `Tensor::backward()` on a `[1]`-shape loss (regression test at `:990-1003`). |
 //! | REQ-11 | SHIPPED | `impl<T: Float> Tensor<T>` with `pub fn `backward`` at `graph.rs:721-723` and `pub fn `backward_with_gradient`` at `:731-733`; consumer: `stride_tricks.rs:672`, `grad_fns/quantize_grad.rs:793`. |
+//! | REQ-12 | SHIPPED | Root validation + root-seed hook handling via `backward_seed`, `validate_backward_root`, `run_tensor_grad_hooks`, and `accumulate_leaf_grad`; consumer: `backward_with_grad` and `backward_parallel`, matching PyTorch scalar/[1]/external-gradient leaf root and non-leaf root-hook semantics. |
 //!
 
 use rustc_hash::FxHashMap as HashMap;
@@ -59,6 +60,72 @@ fn implicit_seed_like<T: Float>(root: &Tensor<T>) -> FerrotorchResult<Tensor<T>>
     let ones_storage = crate::storage::TensorStorage::cpu(vec![one; root.numel().max(1)]);
     let seed_cpu = Tensor::from_storage(ones_storage, root.shape().to_vec(), false)?;
     seed_cpu.to(root.device())
+}
+
+fn validate_backward_root<T: Float>(root: &Tensor<T>) -> FerrotorchResult<()> {
+    let has_grad_fn = root.grad_fn().is_some();
+    if !root.requires_grad() && !has_grad_fn {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "element 0 of tensors does not require grad and does not have a grad_fn"
+                .into(),
+        });
+    }
+    if !root.is_leaf() && !has_grad_fn {
+        return Err(FerrotorchError::NoGradFn);
+    }
+    Ok(())
+}
+
+fn backward_seed<T: Float>(
+    root: &Tensor<T>,
+    gradient: Option<&Tensor<T>>,
+) -> FerrotorchResult<Tensor<T>> {
+    if let Some(ext_grad) = gradient {
+        // PyTorch validates explicit grad_outputs before reporting that an
+        // output is not differentiable.
+        validate_external_gradient(root, ext_grad)?;
+        validate_backward_root(root)?;
+        Ok(ext_grad.clone())
+    } else {
+        // For implicit roots, PyTorch reports non-differentiable outputs before
+        // scalar-shape errors.
+        validate_backward_root(root)?;
+        implicit_seed_like(root)
+    }
+}
+
+fn accumulate_leaf_grad<T: Float>(leaf: &Tensor<T>, grad: Tensor<T>) -> FerrotorchResult<()> {
+    let grad = run_tensor_grad_hooks(leaf, grad)?;
+    let hooks = leaf.hooks();
+    let has_post_hook = {
+        let guard = hooks.lock().map_err(|e| FerrotorchError::LockPoisoned {
+            message: format!("hook storage mutex: {e}"),
+        })?;
+        guard.has_post_accumulate_hooks()
+    };
+    leaf.accumulate_grad(&grad)?;
+    if has_post_hook {
+        run_post_accumulate_hooks(hooks, leaf)?;
+    }
+    Ok(())
+}
+
+fn run_tensor_grad_hooks<T: Float>(
+    tensor: &Tensor<T>,
+    grad: Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    let hooks = tensor.hooks();
+    let has_grad_hooks = {
+        let guard = hooks.lock().map_err(|e| FerrotorchError::LockPoisoned {
+            message: format!("hook storage mutex: {e}"),
+        })?;
+        guard.has_grad_hooks()
+    };
+    if has_grad_hooks {
+        run_grad_hooks(hooks, grad)
+    } else {
+        Ok(grad)
+    }
 }
 
 struct ScopedAnomalyMode {
@@ -111,12 +178,12 @@ pub fn backward_with_grad<T: Float>(
     root: &Tensor<T>,
     gradient: Option<&Tensor<T>>,
 ) -> FerrotorchResult<()> {
-    let seed = if let Some(ext_grad) = gradient {
-        validate_external_gradient(root, ext_grad)?;
-        ext_grad.clone()
-    } else {
-        implicit_seed_like(root)?
-    };
+    let seed = backward_seed(root, gradient)?;
+
+    if root.is_leaf() && root.requires_grad() {
+        return accumulate_leaf_grad(root, seed);
+    }
+    let seed = run_tensor_grad_hooks(root, seed)?;
 
     // Phase 1: Collect all nodes and compute in-degree via BFS.
     //
@@ -232,28 +299,9 @@ pub fn backward_with_grad<T: Float>(
                         forward_backtrace.as_ref(),
                     )?;
                     if input.requires_grad() {
-                        // Run gradient hooks (if any), which may modify the gradient.
-                        let hooks = input.hooks();
-                        let has_hooks = {
-                            let guard =
-                                hooks.lock().map_err(|e| FerrotorchError::LockPoisoned {
-                                    message: format!("hook storage mutex: {e}"),
-                                })?;
-                            (guard.has_grad_hooks(), guard.has_post_accumulate_hooks())
-                        };
-                        let grad = if has_hooks.0 {
-                            run_grad_hooks(hooks, grad)?
-                        } else {
-                            grad
-                        };
-
                         if input.is_leaf() {
                             // Leaf tensor: accumulate gradient on the tensor itself.
-                            input.accumulate_grad(&grad)?;
-                            // Run post-accumulate-grad hooks on the leaf (if any).
-                            if has_hooks.1 {
-                                run_post_accumulate_hooks(hooks, input)?;
-                            }
+                            accumulate_leaf_grad(input, grad)?;
                         } else {
                             // Non-leaf: accumulate into the grads map for the next iteration.
                             accumulate_non_leaf_grad(&mut grads, input, grad)?;
@@ -287,12 +335,11 @@ pub fn backward_parallel<T: Float>(
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
 
-    let seed = if let Some(ext_grad) = gradient {
-        validate_external_gradient(root, ext_grad)?;
-        ext_grad.clone()
-    } else {
-        implicit_seed_like(root)?
-    };
+    let seed = backward_seed(root, gradient)?;
+
+    if root.is_leaf() && root.requires_grad() {
+        return accumulate_leaf_grad(root, seed);
+    }
 
     // Phase 1: Collect nodes and compute in-degree (same as sequential).
     let mut in_degree_map: HashMap<TensorId, usize> = HashMap::default();
@@ -324,6 +371,7 @@ pub fn backward_parallel<T: Float>(
     if total_nodes < 8 || num_workers <= 1 {
         return backward_with_grad(root, gradient);
     }
+    let seed = run_tensor_grad_hooks(root, seed)?;
 
     // Phase 2: Build shared state for parallel processing.
 
@@ -454,29 +502,8 @@ pub fn backward_parallel<T: Float>(
                                         forward_backtrace.as_ref(),
                                     )?;
                                     if input.requires_grad() {
-                                        let hooks = input.hooks();
-                                        let has_hooks = {
-                                            let guard = hooks.lock().map_err(|e| {
-                                                FerrotorchError::LockPoisoned {
-                                                    message: format!("hook storage mutex: {e}"),
-                                                }
-                                            })?;
-                                            (
-                                                guard.has_grad_hooks(),
-                                                guard.has_post_accumulate_hooks(),
-                                            )
-                                        };
-                                        let grad = if has_hooks.0 {
-                                            run_grad_hooks(hooks, grad)?
-                                        } else {
-                                            grad
-                                        };
-
                                         if input.is_leaf() {
-                                            input.accumulate_grad(&grad)?;
-                                            if has_hooks.1 {
-                                                run_post_accumulate_hooks(hooks, input)?;
-                                            }
+                                            accumulate_leaf_grad(input, grad)?;
                                         } else {
                                             let mut g = grads.lock().unwrap();
                                             accumulate_non_leaf_grad_locked(&mut g, input, grad)?;
@@ -787,7 +814,7 @@ mod tests {
     use super::*;
     use crate::storage::TensorStorage;
     use crate::tensor::GradFn;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     /// A simple grad_fn for testing: output = a + b.
     /// backward: d(a+b)/da = 1, d(a+b)/db = 1.
@@ -843,6 +870,15 @@ mod tests {
     /// Helper to make a leaf scalar tensor.
     fn leaf_scalar(val: f32, requires_grad: bool) -> Tensor<f32> {
         Tensor::from_storage(TensorStorage::cpu(vec![val]), vec![], requires_grad).unwrap()
+    }
+
+    fn leaf_vec(data: &[f32], shape: &[usize], requires_grad: bool) -> Tensor<f32> {
+        Tensor::from_storage(
+            TensorStorage::cpu(data.to_vec()),
+            shape.to_vec(),
+            requires_grad,
+        )
+        .unwrap()
     }
 
     fn fake_cuda_tensor(shape: &[usize], requires_grad: bool) -> Tensor<f32> {
@@ -1021,10 +1057,190 @@ mod tests {
 
     #[test]
     fn test_backward_non_scalar_error() {
-        let t =
-            Tensor::<f32>::from_storage(TensorStorage::cpu(vec![1.0, 2.0, 3.0]), vec![3], false)
-                .unwrap();
-        assert!(t.backward().is_err());
+        let t = leaf_vec(&[1.0, 2.0, 3.0], &[3], true);
+        let err = t.backward().expect_err("tracking non-scalar root");
+        assert!(matches!(err, FerrotorchError::BackwardNonScalar { .. }));
+    }
+
+    #[test]
+    fn test_backward_leaf_scalar_accumulates_seed() {
+        let x = leaf_scalar(2.0, true);
+
+        x.backward().unwrap();
+
+        let grad = x.grad().unwrap().expect("leaf root grad");
+        assert_eq!(grad.shape(), &[] as &[usize]);
+        assert!((grad.item().unwrap() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_backward_leaf_single_element_shape_accumulates_seed() {
+        let x = leaf_vec(&[2.0], &[1], true);
+
+        x.backward().unwrap();
+
+        let grad = x.grad().unwrap().expect("[1] leaf root grad");
+        assert_eq!(grad.shape(), &[1]);
+        assert!((grad.data().unwrap()[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_backward_leaf_vector_with_external_gradient() {
+        let x = leaf_vec(&[1.0, 2.0], &[2], true);
+        let external = leaf_vec(&[3.0, 4.0], &[2], false);
+
+        x.backward_with_gradient(&external).unwrap();
+
+        let grad = x.grad().unwrap().expect("vector leaf root grad");
+        assert_eq!(grad.shape(), &[2]);
+        assert_eq!(grad.data().unwrap(), &[3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_backward_leaf_root_repeated_calls_accumulate() {
+        let x = leaf_scalar(2.0, true);
+
+        x.backward().unwrap();
+        x.backward().unwrap();
+
+        let grad = x.grad().unwrap().expect("leaf root grad");
+        assert!((grad.item().unwrap() - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_backward_leaf_root_runs_hooks() {
+        let x = leaf_scalar(2.0, true);
+        let grad_hook_seen = Arc::new(Mutex::new(Vec::new()));
+        let post_hook_seen = Arc::new(Mutex::new(Vec::new()));
+
+        let grad_hook_seen_clone = Arc::clone(&grad_hook_seen);
+        x.register_hook(move |grad| {
+            grad_hook_seen_clone
+                .lock()
+                .unwrap()
+                .push(grad.item().unwrap());
+            Some(Tensor::from_storage(TensorStorage::cpu(vec![5.0]), vec![], false).unwrap())
+        })
+        .unwrap();
+
+        let post_hook_seen_clone = Arc::clone(&post_hook_seen);
+        x.register_post_accumulate_grad_hook(move |tensor| {
+            let grad = tensor.grad().unwrap().expect("post hook leaf grad");
+            post_hook_seen_clone
+                .lock()
+                .unwrap()
+                .push(grad.item().unwrap());
+        })
+        .unwrap();
+
+        x.backward().unwrap();
+
+        let grad = x.grad().unwrap().expect("leaf root grad");
+        assert!((grad.item().unwrap() - 5.0).abs() < 1e-6);
+        assert_eq!(*grad_hook_seen.lock().unwrap(), vec![1.0]);
+        assert_eq!(*post_hook_seen.lock().unwrap(), vec![5.0]);
+    }
+
+    #[test]
+    fn test_backward_non_leaf_root_runs_hook_on_seed() {
+        let x = leaf_scalar(2.0, true);
+        let y = crate::grad_fns::arithmetic::mul(&x, &x).unwrap();
+        let grad_hook_seen = Arc::new(Mutex::new(Vec::new()));
+
+        let grad_hook_seen_clone = Arc::clone(&grad_hook_seen);
+        y.register_hook(move |grad| {
+            grad_hook_seen_clone
+                .lock()
+                .unwrap()
+                .push(grad.item().unwrap());
+            Some(Tensor::from_storage(TensorStorage::cpu(vec![5.0]), vec![], false).unwrap())
+        })
+        .unwrap();
+
+        y.backward().unwrap();
+
+        let grad = x.grad().unwrap().expect("source leaf grad");
+        assert!((grad.item().unwrap() - 20.0).abs() < 1e-6);
+        assert_eq!(*grad_hook_seen.lock().unwrap(), vec![1.0]);
+    }
+
+    #[test]
+    fn test_backward_parallel_non_leaf_root_runs_hook_on_seed() {
+        let x = leaf_scalar(2.0, true);
+        let mut y = x.clone();
+        for _ in 0..8 {
+            let two = leaf_scalar(2.0, false);
+            y = crate::grad_fns::arithmetic::mul(&y, &two).unwrap();
+        }
+        let grad_hook_seen = Arc::new(Mutex::new(Vec::new()));
+
+        let grad_hook_seen_clone = Arc::clone(&grad_hook_seen);
+        y.register_hook(move |grad| {
+            grad_hook_seen_clone
+                .lock()
+                .unwrap()
+                .push(grad.item().unwrap());
+            Some(Tensor::from_storage(TensorStorage::cpu(vec![3.0]), vec![], false).unwrap())
+        })
+        .unwrap();
+
+        backward_parallel(&y, None, 4).unwrap();
+
+        let grad = x.grad().unwrap().expect("source leaf grad");
+        assert!((grad.item().unwrap() - 768.0).abs() < 1e-4);
+        assert_eq!(*grad_hook_seen.lock().unwrap(), vec![1.0]);
+    }
+
+    #[test]
+    fn test_backward_non_tracking_leaf_errors_before_implicit_shape() {
+        let scalar = leaf_scalar(2.0, false);
+        let scalar_err = scalar.backward().expect_err("non-tracking scalar leaf");
+        assert!(
+            matches!(scalar_err, FerrotorchError::InvalidArgument { .. }),
+            "expected InvalidArgument for non-tracking scalar, got {scalar_err:?}"
+        );
+        assert!(format!("{scalar_err}").contains("does not require grad"));
+
+        let vector = leaf_vec(&[1.0, 2.0], &[2], false);
+        let vector_err = vector.backward().expect_err("non-tracking vector leaf");
+        assert!(
+            matches!(vector_err, FerrotorchError::InvalidArgument { .. }),
+            "expected InvalidArgument for non-tracking vector, got {vector_err:?}"
+        );
+        assert!(format!("{vector_err}").contains("does not require grad"));
+    }
+
+    #[test]
+    fn test_backward_non_tracking_leaf_external_gradient_precedence() {
+        let x = leaf_vec(&[1.0, 2.0], &[2], false);
+        let wrong_shape = leaf_vec(&[1.0], &[1], false);
+        let err = x
+            .backward_with_gradient(&wrong_shape)
+            .expect_err("wrong-shaped explicit gradient");
+        assert!(
+            matches!(err, FerrotorchError::ShapeMismatch { .. }),
+            "explicit gradient shape must be validated before requires_grad, got {err:?}"
+        );
+
+        let matching = leaf_vec(&[1.0, 1.0], &[2], false);
+        let err = x
+            .backward_with_gradient(&matching)
+            .expect_err("non-tracking leaf with matching explicit gradient");
+        assert!(
+            matches!(err, FerrotorchError::InvalidArgument { .. }),
+            "expected InvalidArgument for non-tracking explicit backward, got {err:?}"
+        );
+        assert!(format!("{err}").contains("does not require grad"));
+    }
+
+    #[test]
+    fn test_backward_parallel_leaf_root_accumulates_seed() {
+        let x = leaf_scalar(2.0, true);
+
+        backward_parallel(&x, None, 4).unwrap();
+
+        let grad = x.grad().unwrap().expect("parallel leaf root grad");
+        assert!((grad.item().unwrap() - 1.0).abs() < 1e-6);
     }
 
     // -----------------------------------------------------------------------

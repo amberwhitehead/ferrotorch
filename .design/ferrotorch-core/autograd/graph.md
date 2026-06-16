@@ -81,6 +81,19 @@ PyTorch ships under the same `Engine` class.
 - REQ-11: Convenience methods on `Tensor` — `Tensor::backward(&self)`
   and `Tensor::backward_with_gradient(&self, gradient)` so users write
   `loss.backward()` instead of `crate::autograd::backward(&loss)`.
+- REQ-12: Root autograd participation and leaf-root accumulation —
+  roots that neither require grad nor have a `grad_fn` MUST error like
+  PyTorch's "does not require grad and does not have a grad_fn" path.
+  With an explicit external gradient, validate gradient shape/device
+  first; without one, validate differentiability before scalar-ness.
+  When the root itself is a `requires_grad` leaf, accumulate the seed
+  directly onto that leaf, running normal gradient hooks before
+  accumulation and post-accumulate hooks after it. This covers scalar
+  leaves, single-element shaped leaves, vector leaves with external
+  gradients, repeated backward accumulation, and CUDA-resident leaf
+  roots. Hooks registered on non-leaf roots must also run on the initial
+  seed before the root's `grad_fn` executes, so hook replacements affect
+  downstream gradients exactly as in PyTorch.
 
 ## Acceptance Criteria
 
@@ -110,6 +123,29 @@ PyTorch ships under the same `Engine` class.
 - [x] AC-9: `reduce_grad_to_shape` errors cleanly (does NOT panic) on
   `[] -> [2]` numel mismatch — `test_reduce_grad_to_shape_returns_error_on_numel_mismatch_underflow`
   at `graph.rs:1037-1054`.
+- [x] AC-10: `backward()` directly on a scalar `requires_grad` leaf
+  accumulates a scalar seed grad of `1` — `test_backward_leaf_scalar_accumulates_seed`.
+- [x] AC-11: `backward()` directly on a single-element shaped
+  `requires_grad` leaf preserves `[1]` grad shape — `test_backward_leaf_single_element_shape_accumulates_seed`.
+- [x] AC-12: `backward_with_gradient()` directly on a vector
+  `requires_grad` leaf accumulates the supplied cotangent —
+  `test_backward_leaf_vector_with_external_gradient`.
+- [x] AC-13: Non-tracking roots error with PyTorch-compatible
+  differentiability precedence; explicit wrong-shaped gradients still
+  report shape mismatch first —
+  `test_backward_non_tracking_leaf_errors_before_implicit_shape` and
+  `test_backward_non_tracking_leaf_external_gradient_precedence`.
+- [x] AC-14: Leaf-root backward uses the same hook and
+  post-accumulate-hook path as ordinary leaf inputs —
+  `test_backward_leaf_root_runs_hooks`.
+- [x] AC-15: CUDA leaf-root gradients stay CUDA-resident for implicit
+  scalar roots, repeated accumulation, and explicit vector cotangents —
+  `audit_core037_leaf_backward_cuda`.
+- [x] AC-16: `register_hook` on a non-leaf root sees the implicit seed
+  and can replace it before the root's `grad_fn` runs, for both the
+  sequential engine and the non-fallback parallel engine —
+  `test_backward_non_leaf_root_runs_hook_on_seed` and
+  `test_backward_parallel_non_leaf_root_runs_hook_on_seed`.
 
 ## Architecture
 
@@ -179,6 +215,34 @@ nodes become ready or when total nodes have been processed.
 gradient)` so the user-facing API matches PyTorch's
 `tensor.backward()` directly (R-DEV-2: Python-API ABI parity).
 
+### REQ-12 — root validation and direct leaf-root accumulation
+
+`backward_seed` centralizes PyTorch-compatible root checks. Explicit
+external gradients are validated for shape/device before root
+differentiability, matching `torch.autograd.backward`'s `grad_tensors`
+error order. Implicit backward validates that the root requires grad or
+has a `grad_fn` before attempting scalar seed creation, so a
+non-tracking vector root reports the differentiability error rather than
+`BackwardNonScalar`.
+
+If the root is a `requires_grad` leaf, the engine does not enqueue it
+into the temporary non-leaf grad map. It calls `accumulate_leaf_grad`
+directly with the seed. That helper is also used for normal leaf inputs
+returned from a backward node, so root leaves run the same
+`register_hook` replacement chain, `Tensor::accumulate_grad` device-aware
+storage path, and post-accumulate hooks as any other leaf. Repeated
+backward on a leaf root therefore adds to `.grad()`; CUDA roots keep the
+gradient on CUDA and use the dtype-specific GPU add path on subsequent
+accumulations.
+
+For non-leaf roots, the same `register_hook` replacement chain runs on
+the initial seed before the seed enters the per-call grad map. This
+matches PyTorch's root hook behavior: for `y = x * x`, a hook on `y`
+that multiplies the seed by `5` changes `x.grad` from `4` to `20` when
+`x = 2`. The parallel engine applies root hooks only after its small
+graph fallback decision so the fallback path cannot run the same root
+hook twice.
+
 ## Parity contract
 
 `parity_ops = []` — `backward` is the engine; per-op parity coverage
@@ -212,8 +276,20 @@ Located at `ferrotorch-core/src/autograd/graph.rs:736-1071` (the
   (`test_reduce_grad_to_shape_returns_error_on_numel_mismatch_underflow in graph.rs`)
 - `test_reduce_grad_to_shape_reshape_branch_does_not_swallow_numel_mismatch`
   (`test_reduce_grad_to_shape_reshape_branch_does_not_swallow_numel_mismatch in graph.rs`)
+- `test_backward_leaf_scalar_accumulates_seed`
+- `test_backward_leaf_single_element_shape_accumulates_seed`
+- `test_backward_leaf_vector_with_external_gradient`
+- `test_backward_leaf_root_repeated_calls_accumulate`
+- `test_backward_leaf_root_runs_hooks`
+- `test_backward_non_tracking_leaf_errors_before_implicit_shape`
+- `test_backward_non_tracking_leaf_external_gradient_precedence`
+- `test_backward_parallel_leaf_root_accumulates_seed`
+- `test_backward_non_leaf_root_runs_hook_on_seed`
+- `test_backward_parallel_non_leaf_root_runs_hook_on_seed`
+- `audit_core037_leaf_backward_cuda` (CUDA integration test)
 
-All twelve tests pass in the workspace gauntlet.
+The graph-unit tests and CUDA leaf-root integration probe pass in the
+workspace verification.
 
 ## REQ status table
 
@@ -230,3 +306,4 @@ All twelve tests pass in the workspace gauntlet.
 | REQ-9 | SHIPPED | impl: `pub fn backward_parallel<T: Float>` at `graph.rs:247-493`; mirrors PyTorch's multi-thread engine in `torch/csrc/autograd/engine.cpp` (`ReadyQueue` / worker threads); non-test consumer: this is the existing public API surface; **note** the small-graph fallback at `small graph in graph.rs` (re-dispatches to sequential) is the primary consumer for graphs <8 nodes. Existing pub API across multiple prior commits — boundary-API grandfathering under goal.md S5. |
 | REQ-10 | SHIPPED | impl: shape-preserving seed at `graph.rs:48-60`; CL-498 fix; non-test consumer: every user call to `Tensor::backward()` on a 1-D `[1]`-shape loss (e.g. AdamW convergence with single-element loss); regression-tested by `test_backward_one_element_tensor_seed_has_same_shape` (production path is the same `Tensor::backward` entry). |
 | REQ-11 | SHIPPED | impl: `impl<T: Float> Tensor<T>` with `pub fn backward(&self)` at `backward in graph.rs` and `pub fn backward_with_gradient(&self, gradient)` at `backward_with_gradient in graph.rs`; mirrors `tensor.backward()` per `torch/_tensor.py:594` Python tensor method; non-test consumer: `tensor in ferrotorch-core/src/stride_tricks.rs backward(&loss)`, `tensor in ferrotorch-core/src/grad_fns/quantize_grad.rs` etc. — every production backward call site uses these convenience methods. |
+| REQ-12 | SHIPPED | impl: `backward_seed`, `validate_backward_root`, `run_tensor_grad_hooks`, and `accumulate_leaf_grad` in `graph.rs`; used by both `backward_with_grad` and `backward_parallel`. Mirrors PyTorch root behavior: scalar and `[1]` leaves get seed grad `1`, vector leaves accept explicit cotangents, non-tracking roots error, hooks on leaf and non-leaf roots fire on the initial seed, repeated backward accumulates, and CUDA leaf roots keep `.grad()` on CUDA. Tests: `test_backward_leaf_*`, `test_backward_non_tracking_leaf_*`, `test_backward_non_leaf_root_runs_hook_on_seed`, `test_backward_parallel_*root*`, and `audit_core037_leaf_backward_cuda`. |
