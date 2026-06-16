@@ -34,7 +34,7 @@
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
-use crate::storage::TensorStorage;
+use crate::int_tensor::IntTensor;
 use crate::tensor::Tensor;
 
 // ===========================================================================
@@ -58,7 +58,7 @@ pub struct DualTensor<T: Float> {
 impl<T: Float> DualTensor<T> {
     /// Create a new dual tensor from primal and tangent components.
     ///
-    /// Both tensors must have the same shape.
+    /// Both tensors must have the same shape and device.
     pub fn new(primal: Tensor<T>, tangent: Tensor<T>) -> FerrotorchResult<Self> {
         if primal.shape() != tangent.shape() {
             return Err(FerrotorchError::ShapeMismatch {
@@ -69,18 +69,19 @@ impl<T: Float> DualTensor<T> {
                 ),
             });
         }
+        if primal.device() != tangent.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: primal.device(),
+                got: tangent.device(),
+            });
+        }
         Ok(Self { primal, tangent })
     }
 
     /// Create a dual tensor with zero tangent (a constant in forward-mode AD).
     pub fn constant(primal: Tensor<T>) -> FerrotorchResult<Self> {
-        let zero_data = vec![<T as num_traits::Zero>::zero(); primal.numel()];
-        let tangent = Tensor::from_storage(
-            TensorStorage::cpu(zero_data),
-            primal.shape().to_vec(),
-            false,
-        )?;
-        Ok(Self { primal, tangent })
+        let tangent = crate::creation::zeros_like(&primal)?;
+        Self::new(primal, tangent)
     }
 
     /// Shape of the dual tensor (same as primal and tangent).
@@ -102,15 +103,14 @@ impl<T: Float> DualTensor<T> {
 pub fn dual_add<T: Float>(a: &DualTensor<T>, b: &DualTensor<T>) -> FerrotorchResult<DualTensor<T>> {
     let primal = crate::grad_fns::arithmetic::add(&a.primal, &b.primal)?;
     let tangent = crate::grad_fns::arithmetic::add(&a.tangent, &b.tangent)?;
-    // Shape guaranteed to match by broadcast semantics of add.
-    Ok(DualTensor { primal, tangent })
+    DualTensor::new(primal, tangent)
 }
 
 /// Forward rule for subtraction: `d(a - b) = da - db`.
 pub fn dual_sub<T: Float>(a: &DualTensor<T>, b: &DualTensor<T>) -> FerrotorchResult<DualTensor<T>> {
     let primal = crate::grad_fns::arithmetic::sub(&a.primal, &b.primal)?;
     let tangent = crate::grad_fns::arithmetic::sub(&a.tangent, &b.tangent)?;
-    Ok(DualTensor { primal, tangent })
+    DualTensor::new(primal, tangent)
 }
 
 /// Forward rule for multiplication: `d(a * b) = a * db + da * b`.
@@ -120,7 +120,7 @@ pub fn dual_mul<T: Float>(a: &DualTensor<T>, b: &DualTensor<T>) -> FerrotorchRes
     let term1 = crate::grad_fns::arithmetic::mul(&a.primal, &b.tangent)?;
     let term2 = crate::grad_fns::arithmetic::mul(&a.tangent, &b.primal)?;
     let tangent = crate::grad_fns::arithmetic::add(&term1, &term2)?;
-    Ok(DualTensor { primal, tangent })
+    DualTensor::new(primal, tangent)
 }
 
 /// Forward rule for division: `d(a / b) = (da * b - a * db) / b^2`.
@@ -132,14 +132,14 @@ pub fn dual_div<T: Float>(a: &DualTensor<T>, b: &DualTensor<T>) -> FerrotorchRes
     let numer = crate::grad_fns::arithmetic::sub(&da_b, &a_db)?;
     let b_sq = crate::grad_fns::arithmetic::mul(&b.primal, &b.primal)?;
     let tangent = crate::grad_fns::arithmetic::div(&numer, &b_sq)?;
-    Ok(DualTensor { primal, tangent })
+    DualTensor::new(primal, tangent)
 }
 
 /// Forward rule for negation: `d(-a) = -da`.
 pub fn dual_neg<T: Float>(a: &DualTensor<T>) -> FerrotorchResult<DualTensor<T>> {
     let primal = crate::grad_fns::arithmetic::neg(&a.primal)?;
     let tangent = crate::grad_fns::arithmetic::neg(&a.tangent)?;
-    Ok(DualTensor { primal, tangent })
+    DualTensor::new(primal, tangent)
 }
 
 // ===========================================================================
@@ -158,7 +158,7 @@ pub fn dual_matmul<T: Float>(
     let term1 = crate::grad_fns::linalg::matmul_differentiable(&a.tangent, &b.primal)?;
     let term2 = crate::grad_fns::linalg::matmul_differentiable(&a.primal, &b.tangent)?;
     let tangent = crate::grad_fns::arithmetic::add(&term1, &term2)?;
-    Ok(DualTensor { primal, tangent })
+    DualTensor::new(primal, tangent)
 }
 
 // ===========================================================================
@@ -171,22 +171,10 @@ pub fn dual_relu<T: Float>(a: &DualTensor<T>) -> FerrotorchResult<DualTensor<T>>
 
     // tangent = da * step(a), where step(a) = 1 if a > 0, else 0.
     // At x=0, relu'(0) = 0 following the standard PyTorch convention.
-    let a_data = a.primal.data_vec()?;
-    let da_data = a.tangent.data_vec()?;
-    let zero = <T as num_traits::Zero>::zero();
-
-    let tangent_data: Vec<T> = a_data
-        .iter()
-        .zip(da_data.iter())
-        .map(|(&x, &dx)| if x > zero { dx } else { zero })
-        .collect();
-
-    let tangent = Tensor::from_storage(
-        TensorStorage::cpu(tangent_data),
-        a.primal.shape().to_vec(),
-        false,
-    )?;
-    Ok(DualTensor { primal, tangent })
+    let zeros = crate::creation::zeros_like(&a.tangent)?;
+    let positive = crate::bool_tensor::BoolTensor::gt(&a.primal, &zeros)?;
+    let tangent = crate::grad_fns::comparison::where_bt(&positive, &a.tangent, &zeros)?;
+    DualTensor::new(primal, tangent)
 }
 
 /// Forward rule for sigmoid: `d(sigmoid(a)) = da * sigmoid(a) * (1 - sigmoid(a))`.
@@ -194,22 +182,11 @@ pub fn dual_sigmoid<T: Float>(a: &DualTensor<T>) -> FerrotorchResult<DualTensor<
     let primal = crate::grad_fns::activation::sigmoid(&a.primal)?;
 
     // tangent = da * sigma * (1 - sigma), where sigma = sigmoid(primal)
-    let sigma_data = primal.data_vec()?;
-    let da_data = a.tangent.data_vec()?;
-    let one = <T as num_traits::One>::one();
-
-    let tangent_data: Vec<T> = sigma_data
-        .iter()
-        .zip(da_data.iter())
-        .map(|(&s, &dx)| dx * s * (one - s))
-        .collect();
-
-    let tangent = Tensor::from_storage(
-        TensorStorage::cpu(tangent_data),
-        a.primal.shape().to_vec(),
-        false,
-    )?;
-    Ok(DualTensor { primal, tangent })
+    let ones = crate::creation::ones_like(&primal)?;
+    let one_minus_sigma = crate::grad_fns::arithmetic::sub(&ones, &primal)?;
+    let local = crate::grad_fns::arithmetic::mul(&primal, &one_minus_sigma)?;
+    let tangent = crate::grad_fns::arithmetic::mul(&a.tangent, &local)?;
+    DualTensor::new(primal, tangent)
 }
 
 /// Forward rule for tanh: `d(tanh(a)) = da * (1 - tanh(a)^2)`.
@@ -217,22 +194,11 @@ pub fn dual_tanh<T: Float>(a: &DualTensor<T>) -> FerrotorchResult<DualTensor<T>>
     let primal = crate::grad_fns::activation::tanh(&a.primal)?;
 
     // tangent = da * (1 - tanh^2)
-    let tanh_data = primal.data_vec()?;
-    let da_data = a.tangent.data_vec()?;
-    let one = <T as num_traits::One>::one();
-
-    let tangent_data: Vec<T> = tanh_data
-        .iter()
-        .zip(da_data.iter())
-        .map(|(&t, &dx)| dx * (one - t * t))
-        .collect();
-
-    let tangent = Tensor::from_storage(
-        TensorStorage::cpu(tangent_data),
-        a.primal.shape().to_vec(),
-        false,
-    )?;
-    Ok(DualTensor { primal, tangent })
+    let ones = crate::creation::ones_like(&primal)?;
+    let tanh_sq = crate::grad_fns::arithmetic::mul(&primal, &primal)?;
+    let local = crate::grad_fns::arithmetic::sub(&ones, &tanh_sq)?;
+    let tangent = crate::grad_fns::arithmetic::mul(&a.tangent, &local)?;
+    DualTensor::new(primal, tangent)
 }
 
 // ===========================================================================
@@ -244,21 +210,8 @@ pub fn dual_exp<T: Float>(a: &DualTensor<T>) -> FerrotorchResult<DualTensor<T>> 
     let primal = crate::grad_fns::transcendental::exp(&a.primal)?;
 
     // tangent = da * exp(a)
-    let exp_data = primal.data_vec()?;
-    let da_data = a.tangent.data_vec()?;
-
-    let tangent_data: Vec<T> = exp_data
-        .iter()
-        .zip(da_data.iter())
-        .map(|(&e, &dx)| dx * e)
-        .collect();
-
-    let tangent = Tensor::from_storage(
-        TensorStorage::cpu(tangent_data),
-        a.primal.shape().to_vec(),
-        false,
-    )?;
-    Ok(DualTensor { primal, tangent })
+    let tangent = crate::grad_fns::arithmetic::mul(&a.tangent, &primal)?;
+    DualTensor::new(primal, tangent)
 }
 
 /// Forward rule for log: `d(log(a)) = da / a`.
@@ -266,21 +219,8 @@ pub fn dual_log<T: Float>(a: &DualTensor<T>) -> FerrotorchResult<DualTensor<T>> 
     let primal = crate::grad_fns::transcendental::log(&a.primal)?;
 
     // tangent = da / a
-    let a_data = a.primal.data_vec()?;
-    let da_data = a.tangent.data_vec()?;
-
-    let tangent_data: Vec<T> = a_data
-        .iter()
-        .zip(da_data.iter())
-        .map(|(&x, &dx)| dx / x)
-        .collect();
-
-    let tangent = Tensor::from_storage(
-        TensorStorage::cpu(tangent_data),
-        a.primal.shape().to_vec(),
-        false,
-    )?;
-    Ok(DualTensor { primal, tangent })
+    let tangent = crate::grad_fns::arithmetic::div(&a.tangent, &a.primal)?;
+    DualTensor::new(primal, tangent)
 }
 
 /// Forward rule for sin: `d(sin(a)) = da * cos(a)`.
@@ -288,21 +228,9 @@ pub fn dual_sin<T: Float>(a: &DualTensor<T>) -> FerrotorchResult<DualTensor<T>> 
     let primal = crate::grad_fns::transcendental::sin(&a.primal)?;
 
     // tangent = da * cos(a)
-    let a_data = a.primal.data_vec()?;
-    let da_data = a.tangent.data_vec()?;
-
-    let tangent_data: Vec<T> = a_data
-        .iter()
-        .zip(da_data.iter())
-        .map(|(&x, &dx)| dx * x.cos())
-        .collect();
-
-    let tangent = Tensor::from_storage(
-        TensorStorage::cpu(tangent_data),
-        a.primal.shape().to_vec(),
-        false,
-    )?;
-    Ok(DualTensor { primal, tangent })
+    let cos_x = crate::grad_fns::transcendental::cos(&a.primal)?;
+    let tangent = crate::grad_fns::arithmetic::mul(&a.tangent, &cos_x)?;
+    DualTensor::new(primal, tangent)
 }
 
 /// Forward rule for cos: `d(cos(a)) = -da * sin(a)`.
@@ -310,21 +238,10 @@ pub fn dual_cos<T: Float>(a: &DualTensor<T>) -> FerrotorchResult<DualTensor<T>> 
     let primal = crate::grad_fns::transcendental::cos(&a.primal)?;
 
     // tangent = -da * sin(a)
-    let a_data = a.primal.data_vec()?;
-    let da_data = a.tangent.data_vec()?;
-
-    let tangent_data: Vec<T> = a_data
-        .iter()
-        .zip(da_data.iter())
-        .map(|(&x, &dx)| -dx * x.sin())
-        .collect();
-
-    let tangent = Tensor::from_storage(
-        TensorStorage::cpu(tangent_data),
-        a.primal.shape().to_vec(),
-        false,
-    )?;
-    Ok(DualTensor { primal, tangent })
+    let sin_x = crate::grad_fns::transcendental::sin(&a.primal)?;
+    let neg_da = crate::grad_fns::arithmetic::neg(&a.tangent)?;
+    let tangent = crate::grad_fns::arithmetic::mul(&neg_da, &sin_x)?;
+    DualTensor::new(primal, tangent)
 }
 
 // ===========================================================================
@@ -385,8 +302,21 @@ where
 
     // Single forward pass through the dual-number computation.
     let dual_output = f(dual_input)?;
+    let dual_output = DualTensor::new(dual_output.primal, dual_output.tangent)?;
 
     Ok((dual_output.primal, dual_output.tangent))
+}
+
+fn basis_tangent<T: Float>(input: &Tensor<T>, index: usize) -> FerrotorchResult<Tensor<T>> {
+    let zero = crate::creation::zeros_like(input)?;
+    let one = crate::creation::full_on_device(
+        &[1],
+        <T as num_traits::One>::one(),
+        input.device(),
+        "jacfwd basis",
+    )?;
+    let idx = IntTensor::from_slice(&[index as i64], &[1])?.to(input.device())?;
+    crate::grad_fns::indexing::put(&zero, &idx, &one, false)
 }
 
 // ===========================================================================
@@ -409,7 +339,10 @@ where
 ///
 /// # Returns
 ///
-/// A `[m, n]` tensor representing the Jacobian `J[i, j] = df_i / dx_j`.
+/// A tensor shaped as `output.shape() + input.shape()`, following
+/// `torch.func.jacfwd`. Because this implementation accepts only 1-D inputs,
+/// vector outputs produce `[m, n]`, scalar outputs produce `[n]`, and
+/// higher-rank outputs keep their output rank before the trailing input axis.
 ///
 /// # Example
 ///
@@ -430,36 +363,36 @@ where
     }
 
     let n = shape[0];
-    let zero = <T as num_traits::Zero>::zero();
-    let one = <T as num_traits::One>::one();
-
     // Compute one column of the Jacobian per forward pass.
     let mut columns: Vec<Tensor<T>> = Vec::with_capacity(n);
 
+    if n == 0 {
+        let zero_tangent = crate::creation::zeros_like(input)?;
+        let dual_output = f(DualTensor::new(input.clone(), zero_tangent)?)?;
+        let dual_output = DualTensor::new(dual_output.primal, dual_output.tangent)?;
+        let mut jac_shape = dual_output.primal.shape().to_vec();
+        jac_shape.push(0);
+        return crate::creation::full_on_device(
+            &jac_shape,
+            <T as num_traits::Zero>::zero(),
+            input.device(),
+            "jacfwd",
+        );
+    }
+
     for j in 0..n {
         // Standard basis vector e_j.
-        let mut basis = vec![zero; n];
-        basis[j] = one;
-        let e_j = Tensor::from_storage(TensorStorage::cpu(basis), vec![n], false)?;
+        let e_j = basis_tangent(input, j)?;
 
         let (_primal, tangent) = jvp_exact(&f, input, &e_j)?;
         columns.push(tangent);
     }
 
-    // Stack columns: each tangent has shape [m], we want [m, n].
-    // columns[j] = J[:, j] (the j-th column of the Jacobian).
-    // Stack along dim=1 to get [m, n].
-    let m = columns[0].numel();
-
-    let mut jac_data = vec![zero; m * n];
-    for j in 0..n {
-        let col_data = columns[j].data_vec()?;
-        for i in 0..m {
-            jac_data[i * n + j] = col_data[i];
-        }
-    }
-
-    Tensor::from_storage(TensorStorage::cpu(jac_data), vec![m, n], false)
+    // PyTorch `jacfwd` appends the input shape to the output shape. Because
+    // `input` is 1-D here, stacking tangent columns at the output rank gives
+    // `output_shape + [n]` directly and preserves the active device.
+    let output_rank = columns[0].ndim();
+    crate::vmap::stack(&columns, output_rank)
 }
 
 // ===========================================================================

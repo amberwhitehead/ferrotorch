@@ -13,6 +13,7 @@
 //! | REQ-7 | SHIPPED | `*_like` family at `creation.rs:288-314`; consumer: `grad_fns::cumulative` at `cumulative.rs:501` |
 //! | REQ-8 | SHIPPED | `zeros_meta`/`ones_meta`/`full_meta`/`meta_like` at `creation.rs:253-289`; consumer: `tensor::Tensor::meta_fill_value` at `tensor.rs:1078` (CL-395) |
 
+use crate::device::Device;
 use crate::dtype::{DType, Element, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::rng::with_thread_rng;
@@ -39,6 +40,76 @@ pub fn full<T: Float>(shape: &[usize], value: T) -> FerrotorchResult<Tensor<T>> 
     let numel = checked_numel(shape, "full")?;
     let data = vec![value; numel];
     Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)
+}
+
+pub(crate) fn full_on_device<T: Float>(
+    shape: &[usize],
+    value: T,
+    device: Device,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let numel = checked_numel(shape, op)?;
+    let storage = match device {
+        Device::Cpu => TensorStorage::cpu(vec![value; numel]),
+        Device::Meta => TensorStorage::meta_filled(numel, value),
+        Device::Cuda(ordinal) => {
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let handle = match T::dtype() {
+                DType::F32 => backend.fill_f32(
+                    numel,
+                    num_traits::ToPrimitive::to_f32(&value).ok_or_else(|| {
+                        FerrotorchError::InvalidArgument {
+                            message: format!("{op}: fill value is not representable as f32"),
+                        }
+                    })?,
+                    ordinal,
+                )?,
+                DType::F64 => backend.fill_f64(
+                    numel,
+                    num_traits::ToPrimitive::to_f64(&value).ok_or_else(|| {
+                        FerrotorchError::InvalidArgument {
+                            message: format!("{op}: fill value is not representable as f64"),
+                        }
+                    })?,
+                    ordinal,
+                )?,
+                DType::BF16 => backend.fill_bf16_bf16(
+                    numel,
+                    num_traits::ToPrimitive::to_f32(&value).ok_or_else(|| {
+                        FerrotorchError::InvalidArgument {
+                            message: format!("{op}: fill value is not representable as f32"),
+                        }
+                    })?,
+                    ordinal,
+                )?,
+                DType::F16 => backend.fill_f16(
+                    numel,
+                    num_traits::ToPrimitive::to_f32(&value).ok_or_else(|| {
+                        FerrotorchError::InvalidArgument {
+                            message: format!("{op}: fill value is not representable as f32"),
+                        }
+                    })?,
+                    ordinal,
+                )?,
+                dtype => {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!("{op}: unsupported floating dtype {dtype}"),
+                    });
+                }
+            };
+            TensorStorage::gpu(handle)
+        }
+        Device::Xpu(_) | Device::Mps(_) => {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "{op}: device-native tensor creation is not wired for {device}; \
+                     refusing to return a CPU fallback"
+                ),
+            });
+        }
+    };
+    Tensor::from_storage(storage, shape.to_vec(), false)
 }
 
 /// Create a tensor from a slice, copying the data.
@@ -394,27 +465,37 @@ pub fn meta_like<T: Float>(other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 
 /// Create a tensor of zeros with the same shape as `other`.
 pub fn zeros_like<T: Float>(other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    zeros(other.shape())
+    full_on_device(
+        other.shape(),
+        <T as num_traits::Zero>::zero(),
+        other.device(),
+        "zeros_like",
+    )
 }
 
 /// Create a tensor of ones with the same shape as `other`.
 pub fn ones_like<T: Float>(other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    ones(other.shape())
+    full_on_device(
+        other.shape(),
+        <T as num_traits::One>::one(),
+        other.device(),
+        "ones_like",
+    )
 }
 
 /// Create a tensor filled with `value` with the same shape as `other`.
 pub fn full_like<T: Float>(other: &Tensor<T>, value: T) -> FerrotorchResult<Tensor<T>> {
-    full(other.shape(), value)
+    full_on_device(other.shape(), value, other.device(), "full_like")
 }
 
 /// Create a random tensor [0,1) with the same shape as `other`.
 pub fn rand_like<T: Float>(other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    rand(other.shape())
+    rand_on_device(other.shape(), other.device())
 }
 
 /// Create a random normal tensor with the same shape as `other`.
 pub fn randn_like<T: Float>(other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    randn(other.shape())
+    randn_on_device(other.shape(), other.device())
 }
 
 #[cfg(test)]
