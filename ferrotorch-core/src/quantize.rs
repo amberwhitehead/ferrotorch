@@ -1273,11 +1273,36 @@ impl FakeQuantize {
     pub fn new(dtype: QuantDtype) -> Self {
         Self {
             dtype,
-            qparams: None,
+            qparams: Some(QParams::asymmetric(f32::INFINITY, f32::NEG_INFINITY, dtype)),
             observer_enabled: true,
             fake_quant_enabled: true,
             observer: MinMaxObserver::new(),
         }
+    }
+
+    /// Enable or disable fake quantization without changing observation.
+    pub fn enable_fake_quant(&mut self, enabled: bool) {
+        self.fake_quant_enabled = enabled;
+    }
+
+    /// Disable fake quantization without disabling observation.
+    pub fn disable_fake_quant(&mut self) {
+        self.enable_fake_quant(false);
+    }
+
+    /// Enable or disable observation without changing fake quantization.
+    pub fn enable_observer(&mut self, enabled: bool) {
+        self.observer_enabled = enabled;
+    }
+
+    /// Disable observation without disabling fake quantization.
+    pub fn disable_observer(&mut self) {
+        self.enable_observer(false);
+    }
+
+    /// Calculate qparams from the current observer state.
+    pub fn calculate_qparams(&self) -> QParams {
+        self.observer.calculate_qparams(self.dtype)
     }
 
     /// Forward pass: observe data, fake-quantize, and return the result.
@@ -1285,25 +1310,30 @@ impl FakeQuantize {
     /// Returns the fake-quantized data and a gradient mask for clipped STE.
     /// The mask is 1.0 for in-range values and 0.0 for out-of-range values.
     pub fn forward(&mut self, data: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let observed_qparams = if self.observer_enabled {
+            self.observer.observe(data);
+            let qp = self.calculate_qparams();
+            self.qparams = Some(qp.clone());
+            Some(qp)
+        } else {
+            None
+        };
+
         if !self.fake_quant_enabled {
             let ones = vec![1.0f32; data.len()];
             return (data.to_vec(), ones);
         }
 
-        // Observe if enabled.
-        if self.observer_enabled {
-            self.observer.observe(data);
-        }
-
-        // Calculate or use cached qparams.
-        // When observer is disabled and we have cached params, skip recalculation.
-        let qparams = if let Some(cached) = self.qparams.as_ref().filter(|_| !self.observer_enabled)
-        {
-            cached.clone()
-        } else {
-            let qp = self.observer.calculate_qparams(self.dtype);
-            self.qparams = Some(qp.clone());
-            qp
+        let qparams = match observed_qparams {
+            Some(qp) => qp,
+            None => match self.qparams.clone() {
+                Some(qp) => qp,
+                None => {
+                    let qp = QParams::asymmetric(f32::INFINITY, f32::NEG_INFINITY, self.dtype);
+                    self.qparams = Some(qp.clone());
+                    qp
+                }
+            },
         };
 
         let scale = qparams.scale[0];

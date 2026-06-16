@@ -1362,6 +1362,105 @@ fn fake_quantize_forward_returns_dequantized_values_and_mask() {
 }
 
 #[test]
+fn fake_quantize_observer_and_fake_quant_flags_are_independent() {
+    // PyTorch 2.11 FakeQuantize(observer=MinMaxObserver, dtype=qint8,
+    // qscheme=per_tensor_affine) for x=[0.25, 1.75, 3.25]:
+    // obs=1/fake=1 -> out=[0.25490198, 1.74607849, 3.25], scale=0.012745098, zp=-128
+    // obs=1/fake=0 -> identity output, same updated qparams
+    // obs=0/fake=1 -> default qparams scale=1/zp=0, out=[0, 2, 3]
+    // obs=0/fake=0 -> identity output, default qparams
+    let input = vec![0.25, 1.75, 3.25];
+
+    let mut observe_and_fake = FakeQuantize::new(QuantDtype::Int8);
+    let (out, mask) = observe_and_fake.forward(&input);
+    tolerance::assert_close_f32(
+        &out,
+        &[0.25490198, 1.7460785, 3.25],
+        tolerance::F32_REDUCTION,
+        "observer on, fake quant on output",
+    );
+    assert!(mask.iter().all(|&m| m.to_bits() == 1.0f32.to_bits()));
+    let qp = observe_and_fake.qparams.as_ref().expect("qparams updated");
+    tolerance::assert_close_f32(
+        &qp.scale,
+        &[0.012745098],
+        tolerance::F32_REDUCTION,
+        "observer on, fake quant on scale",
+    );
+    assert_eq!(qp.zero_point, vec![-128]);
+
+    let mut observe_without_fake = FakeQuantize::new(QuantDtype::Int8);
+    observe_without_fake.disable_fake_quant();
+    let (out, mask) = observe_without_fake.forward(&input);
+    assert_eq!(
+        out.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        input.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+    assert!(mask.iter().all(|&m| m.to_bits() == 1.0f32.to_bits()));
+    let qp = observe_without_fake
+        .qparams
+        .as_ref()
+        .expect("qparams updated even when fake quant is disabled");
+    tolerance::assert_close_f32(
+        &qp.scale,
+        &[0.012745098],
+        tolerance::F32_REDUCTION,
+        "observer on, fake quant off scale",
+    );
+    assert_eq!(qp.zero_point, vec![-128]);
+
+    let mut fake_without_observe = FakeQuantize::new(QuantDtype::Int8);
+    fake_without_observe.disable_observer();
+    let (out, mask) = fake_without_observe.forward(&input);
+    tolerance::assert_close_f32(
+        &out,
+        &[0.0, 2.0, 3.0],
+        tolerance::F32_REDUCTION,
+        "observer off, fake quant on output",
+    );
+    assert!(mask.iter().all(|&m| m.to_bits() == 1.0f32.to_bits()));
+    let qp = fake_without_observe
+        .qparams
+        .as_ref()
+        .expect("default qparams available");
+    assert_eq!(qp.scale.len(), 1);
+    assert_eq!(qp.scale[0].to_bits(), 1.0f32.to_bits());
+    assert_eq!(qp.zero_point, vec![0]);
+
+    let mut neither = FakeQuantize::new(QuantDtype::Int8);
+    neither.disable_observer();
+    neither.disable_fake_quant();
+    let (out, mask) = neither.forward(&input);
+    assert_eq!(
+        out.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        input.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+    assert!(mask.iter().all(|&m| m.to_bits() == 1.0f32.to_bits()));
+    let qp = neither.qparams.as_ref().expect("default qparams available");
+    assert_eq!(qp.scale.len(), 1);
+    assert_eq!(qp.scale[0].to_bits(), 1.0f32.to_bits());
+    assert_eq!(qp.zero_point, vec![0]);
+}
+
+#[test]
+fn fake_quantize_toggle_helpers_match_public_pytorch_surface() {
+    let mut fq = FakeQuantize::new(QuantDtype::Int8);
+    fq.disable_fake_quant();
+    assert!(!fq.fake_quant_enabled);
+    fq.enable_fake_quant(true);
+    assert!(fq.fake_quant_enabled);
+    fq.disable_observer();
+    assert!(!fq.observer_enabled);
+    fq.enable_observer(true);
+    assert!(fq.observer_enabled);
+
+    let qp = FakeQuantize::calculate_qparams(&fq);
+    assert_eq!(qp.scale.len(), 1);
+    assert_eq!(qp.scale[0].to_bits(), 1.0f32.to_bits());
+    assert_eq!(qp.zero_point, vec![0]);
+}
+
+#[test]
 fn qat_model_register_layer_and_fake_quantize_weights() {
     // QatLayer is constructed internally by QatModel::register_layer;
     // we exercise the public API and rely on the Debug/Clone derives to

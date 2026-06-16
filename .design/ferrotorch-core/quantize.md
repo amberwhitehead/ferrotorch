@@ -51,9 +51,11 @@ classical observers (MinMax, PerChannelMinMax, Histogram) and a
   `HistogramObserver`. Mirrors
   `torch.ao.quantization.observer.*`.
 - REQ-8: `struct FakeQuantize` — straight-through quantization op for
-  QAT. Forward: quantize-then-dequantize. Backward: identity (STE).
-  Mirrors `torch.fake_quantize_per_tensor_affine` (the backward is
-  implemented in `grad_fns/quantize_grad.rs`, not here).
+  QAT. Forward: observe/update qparams if observation is enabled, then
+  independently decide whether to quantize-then-dequantize. Backward:
+  identity (STE). Mirrors `torch.ao.quantization.FakeQuantize` flag
+  semantics plus `torch.fake_quantize_per_tensor_affine` numerics (the
+  backward is implemented in `grad_fns/quantize_grad.rs`, not here).
 - REQ-9: `struct QatLayer` / `struct QatModel` — high-level wrappers
   for managing per-parameter observers + fake-quantize during a QAT
   training run. `prepare_qat(param_names, dtype)` builds a fresh
@@ -71,7 +73,9 @@ classical observers (MinMax, PerChannelMinMax, Histogram) and a
 - [x] AC-3: `MinMaxObserver` after observing `t` produces
   `(scale, zp)` such that `quantize` clips to the observed range.
 - [x] AC-4: `FakeQuantize.forward(t)` is quantize-then-dequantize and
-  rounds via the same path as `quantize`.
+  rounds via the same path as `quantize`; observation and fake-quant
+  toggles are independent like PyTorch, including the calibration case
+  where fake quant is disabled but observation still updates qparams.
 - [x] AC-5: `quantized_matmul` matches the reference dequantize-matmul-
   requantize chain within INT8 rounding error.
 - [x] AC-6: `prepare_qat(["w"], Int8)` returns a `QatModel` with the
@@ -127,10 +131,15 @@ The 1700+ LOC file is organised as:
   PyTorch's delayed `torch.histogram` runtime error because ferrotorch's
   `Observer::observe` is infallible; invalid bin counts are rejected by
   the constructor instead.
-- **`FakeQuantize`** (`quantize.rs:1258`): forward quantize-then-
-  dequantize, backward STE (the gradient impl lives in
-  `grad_fns/quantize_grad.rs`).
-- **`QatLayer`** (`quantize.rs:1346`) / **`QatModel`** (`quantize.rs:1360`) —
+- **`FakeQuantize`** (`quantize.rs:1258`): PyTorch-default qparams
+  cache (`scale=1`, `zero_point=0`), independent enable/disable helpers
+  for fake quantization and observation (`quantize.rs:1284`,
+  `quantize.rs:1289`, `quantize.rs:1294`, `quantize.rs:1299`),
+  `calculate_qparams` (`quantize.rs:1304`), and `forward`
+  (`quantize.rs:1312`) that observes before the fake-quant branch.
+  Numerical fake quant is quantize-then-dequantize; backward STE lives in
+  `grad_fns/quantize_grad.rs`.
+- **`QatLayer`** (`quantize.rs:1376`) / **`QatModel`** (`quantize.rs:1390`) —
   per-param observer + fake-quantize bundles. `prepare_qat` is a factory.
 
 Non-test production consumers:
@@ -156,10 +165,11 @@ PyTorch observer and quantized tensor APIs. The conformance suite pins
 bit-exact integer codes, all-zero scale floors, affine zero-point
 rounding/clamping, unobserved observer defaults, symmetric scale
 denominators, dequantized round-trips, quantized-matmul accumulator
-behavior at and just beyond the `i32` boundary, and histogram-observer
-zero/one-bin construction boundaries plus histogram-based clipping
-qparams for PyTorch probe cases (`bins=3` over `[2, 8]`, sparse outlier
-`bins=16` over `[0, 100]`).
+behavior at and just beyond the `i32` boundary, fake-quant
+observer/fake-quant flag independence for all four PyTorch states, and
+histogram-observer zero/one-bin construction boundaries plus
+histogram-based clipping qparams for PyTorch probe cases (`bins=3` over
+`[2, 8]`, sparse outlier `bins=16` over `[0, 100]`).
 
 ## Verification
 
@@ -182,6 +192,6 @@ Expected: PyTorch fixture conformance, round-trip, and observer tests pass.
 | REQ-5 | SHIPPED | impl: `quantized_matmul` at `ferrotorch-core/src/quantize.rs:452`; non-test consumer: re-exported at `lib.rs:219-227`. Accumulator parity/safety: public conformance tests `quantized_matmul_accumulator_crosses_i32_boundary_without_wrapping` and `quantized_matmul_negative_accumulator_crosses_i32_boundary_without_wrapping` prove long-inner-dimension centered INT8 products do not debug-panic or release-wrap at the i32 boundary. |
 | REQ-6 | SHIPPED | impl: `QParams in ferrotorch-core/src/quantize.rs`; non-test consumer: re-exported at `lib.rs`; produced by every observer and consumed by `QatModel.step()`. |
 | REQ-7 | SHIPPED | impl: `trait Observer` at `MinMaxObserver in ferrotorch-core/src/quantize.rs`, `MinMaxObserver in ferrotorch-core/src/quantize.rs`, `PerChannelMinMaxObserver in ferrotorch-core/src/quantize.rs`, `HistogramObserver in ferrotorch-core/src/quantize.rs`; non-test consumer: re-exported at `lib.rs`; threaded through `QatLayer` at `lib.rs`. |
-| REQ-8 | SHIPPED | impl: `FakeQuantize in ferrotorch-core/src/quantize.rs`; non-test consumer: `FakeQuantize in grad_fns/quantize_grad.rs` (`FakeQuantizeBackward` attaches via the forward op) — production autograd graph. Consumer chain `Tensor::fake_quantize_per_tensor_affine_t` at `fake_quantize_per_tensor_affine_t in methods.rs`. |
+| REQ-8 | SHIPPED | impl: `FakeQuantize in ferrotorch-core/src/quantize.rs`; non-test consumer: `FakeQuantize in grad_fns/quantize_grad.rs` (`FakeQuantizeBackward` attaches via the forward op) — production autograd graph. Consumer chain `Tensor::fake_quantize_per_tensor_affine_t` at `fake_quantize_per_tensor_affine_t in methods.rs`. Public conformance pins all four PyTorch observer/fake-quant flag states and the enable/disable helper surface. |
 | REQ-9 | SHIPPED | impl: `QatLayer in ferrotorch-core/src/quantize.rs`, `QatModel in ferrotorch-core/src/quantize.rs`, `prepare_qat in ferrotorch-core/src/quantize.rs`; non-test consumer: re-exported at `lib.rs`; entrypoint for the QAT training-loop API. |
 | REQ-10 | SHIPPED | impl: `quantize_named_tensors` at `ferrotorch-core/src/quantize.rs:628`; non-test consumer: re-exported at `lib.rs:219-227`; called by state-dict-save flows that emit a quantized checkpoint. |
