@@ -1615,9 +1615,9 @@ impl<T: Float> CsrTensor<T> {
 ///
 /// # Invariants
 ///
-/// - `original.numel() % 4 == 0` (the innermost stride must cover
-///   full 4-element groups; non-multiples are rejected at
-///   construction time).
+/// - `original.shape().last()` exists and is a multiple of 4, so each
+///   2:4 group is contained within the innermost dimension and never spans
+///   adjacent rows/slices.
 /// - Every group's mask has **exactly** 2 bits set.
 /// - `values.len() == num_groups * 2`.
 /// - `mask.len() == num_groups.div_ceil(2)`.
@@ -1634,8 +1634,8 @@ pub struct SemiStructuredSparseTensor<T: Float> {
 impl<T: Float> SemiStructuredSparseTensor<T> {
     /// Compress a dense tensor into 2:4 semi-structured format.
     ///
-    /// For each contiguous group of 4 elements along the flat
-    /// row-major order, keeps the 2 elements with the largest
+    /// For each contiguous group of 4 elements along the innermost
+    /// row-major dimension, keeps the 2 elements with the largest
     /// absolute value and zeros the other two. Ties are broken
     /// by position (lower index wins).
     ///

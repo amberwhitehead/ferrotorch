@@ -48,6 +48,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- CORE-075: 2:4 compression validates total size instead of the innermost dimension (#1769)
+- CORE-074: Sparse operations on dense tensors silently sever autograd (#1768)
+- CORE-073: CSC dense materialization overwrites duplicate entries instead of summing them (#1767)
+- CORE-072: Public CSR and CSC constructors accept structurally invalid compressed layouts (#1766)
 - CORE-063: `as_strided` bounds validation can overflow and approve invalid layouts (#1757)
 - GPU pool cache tests race on shared global cache (#1975)
 - Global amax/amin backward keeps CUDA leaf gradients resident on CUDA (#1922)
