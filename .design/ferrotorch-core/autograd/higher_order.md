@@ -42,23 +42,29 @@ helper API surface from `torch.autograd.functional`.
   no leaf-accumulation. Recorded gradients are collected for the
   requested `inputs` only.
 - REQ-5: `pub fn jacobian<T: Float, F>(f, input) ->
-  FerrotorchResult<Tensor<T>>` — compute the `[m, n]` Jacobian of
-  `f: R^n -> R^m` by differentiating each output element
-  independently via `grad`. Mirrors `torch.autograd.functional.jacobian`
-  at `torch/autograd/functional.py:393+`.
+  FerrotorchResult<Tensor<T>>` — compute the Jacobian of `f` by
+  differentiating each output element independently via `grad`. The
+  returned shape is `f(input).shape + input.shape`, so scalar-output
+  functions return `input.shape` and vector-to-vector functions return
+  `[m, n]`. Mirrors `torch.autograd.functional.jacobian` at
+  `torch/autograd/functional.py:393+`.
 - REQ-6: `pub fn hessian<T: Float, F>(f, input) ->
-  FerrotorchResult<Tensor<T>>` — compute the `[n, n]` Hessian of
-  `f: R^n -> R` by taking the Jacobian of the gradient function
-  (using `create_graph=true` in the first-order pass to enable
-  second-order). Mirrors `torch.autograd.functional.hessian` at
-  `torch/autograd/functional.py:594+`.
-- REQ-7: `IndexSelectBackward` — internal helper that extracts a
-  single element from a tensor as a scalar tensor while preserving
-  the computation graph. Routes the scalar gradient back to the
-  correct position via a one-hot vector multiply.
-- REQ-8: `BroadcastScalarBackward` — internal helper that
-  broadcasts a scalar to a vector during the higher-order grad chain.
-  The VJP is `sum(grad_output)`, mirroring the broadcast pattern.
+  FerrotorchResult<Tensor<T>>` — compute the Hessian of scalar-valued
+  `f` with result shape `input.shape + input.shape` (the familiar
+  `[n, n]` matrix for a 1-D input) by taking the Jacobian of the
+  gradient function (using `create_graph=true` in the first-order pass
+  to enable second-order). Mirrors `torch.autograd.functional.hessian`
+  at `torch/autograd/functional.py:594+`.
+- REQ-7: `extract_element` / `IndexSelectBackward` — internal helper
+  that extracts one logical element from a tensor as a zero-copy scalar
+  stride view while preserving the computation graph. Routes the scalar
+  gradient back to the correct flattened input position via the same
+  device-resident `scatter` implementation used by indexing ops.
+- REQ-8: Device preservation — `grad`, `jacobian`, `hessian`, and the
+  element-extraction VJP construct seeds, zero rows, row concatenation,
+  and scatter gradients on the relevant tensor device. CUDA paths must
+  not call `data()` / `data_vec()` or synthesize CPU result storage for
+  gradient data.
 - REQ-9: `Tensor::grad_wrt(&self, inputs, retain_graph, create_graph)`
   convenience method on `Tensor` that delegates to `grad`.
 
@@ -119,45 +125,46 @@ indexed by `input_ids.get(&id)`.
 ### REQ-5 `jacobian`
 
 `pub fn jacobian<T: Float, F>(f, input)` at `higher_order.rs`.
-For an `f: R^n -> R^m`, loop `i in 0..m`: rebuild a fresh
-`x_fresh` with `requires_grad=true`, evaluate `f(&x_fresh)`,
+It first evaluates `f(input.detach().requires_grad_(true))` to
+discover `output.shape`, then loops `i in 0..output.numel()`: rebuild
+a fresh detached input on the same device, evaluate `f(&x_fresh)`,
 extract `y_i = extract_element(&y_fresh, i)`, then `grads =
-grad(&y_i, &[&x_fresh], false, false)?`. Concatenate the resulting
-`g.data()` slices into `jac_data`; return as a `[m, n]` tensor.
+grad(&y_i, &[&x_fresh], false, false)?`. Each gradient row is reshaped
+to `[1, input.numel()]`, concatenated with `cat` (CUDA uses the GPU
+`strided_cat` path), then reshaped to `output.shape + input.shape`.
+Missing gradients materialize as device-local zeros.
 
 ### REQ-6 `hessian`
 
 `pub fn hessian<T: Float, F>(f, input)` at `higher_order.rs`.
 For each row `i in 0..n`:
 
-1. Build fresh `x` with grad.
+1. Build fresh `x = input.detach().requires_grad_(true)` on the same
+   device.
 2. Forward `y = f(&x)`.
 3. First derivative `grads = grad(&y, &[&x], true, true)?` —
    `create_graph=true` records the gradient computation.
 4. Extract `grad_i = extract_element(&grad_vec, i)`.
 5. Second derivative `grads2 = grad(&grad_i, &[&x], false, false)?`
    yields row `i` of the Hessian.
+6. Rows are concatenated and reshaped to `input.shape + input.shape`
+   on the input device.
 
-### REQ-7 `IndexSelectBackward` (internal)
+### REQ-7 / REQ-8 `extract_element` and device-resident VJP
 
-`struct IndexSelectBackward<T> { input: Tensor<T>, index: usize }`
-at `higher_order.rs` with `impl GradFn` at `higher_order.rs`. The
-backward implementation has two branches:
+`extract_element` computes the logical C-order storage offset for the
+requested flat index and returns a zero-copy scalar stride view. When
+autograd is enabled, that view is attached to `IndexSelectBackward`.
 
-- `create_graph` branch at `:443-473`: build a one-hot basis
-  vector, broadcast `grad_output` through a tracked
-  `BroadcastScalarBackward` (REQ-8), multiply elementwise, return
-  — keeping the chain differentiable.
-- Plain branch at `:475-484`: produce a sparse gradient vector
-  (zeros + `go` at `index`) wrapped in a non-graph tensor.
-
-### REQ-8 `BroadcastScalarBackward` (internal)
-
-`struct BroadcastScalarBackward<T> { scalar_input: Tensor<T> }` at
-`higher_order.rs` with `impl GradFn` at `higher_order.rs`. The
-VJP `sum(grad_output)` is the broadcasting adjoint — when the
-forward replicated a scalar to a vector, the backward sums all
-the per-element gradients back into the scalar input.
+`IndexSelectBackward::backward` validates the upstream scalar gradient
+device and shape, reshapes it to `[1]`, creates a flat zeros tensor on
+the input device, scatters the scalar into the saved flat index with
+`ops::indexing::scatter`, then reshapes the result to the original
+input shape. If the scalar upstream gradient tracks autograd (the
+`create_graph=true` Hessian path), `scatter` attaches its normal
+`ScatterBackward` edge to the scalar source, so second-order gradients
+remain connected. CUDA f32/f64/f16/bf16 use the resident scatter
+kernels and upload only the integer index metadata.
 
 ### REQ-9 `Tensor::grad_wrt` convenience
 
@@ -177,9 +184,13 @@ graph-walks, not tensor-valued ops. Behavioral parity vs upstream:
   create_graph)`, modulo the Rust `Vec<Option<Tensor>>` vs Python
   `Tuple[Optional[Tensor], ...]` packaging.
 - `create_graph=true` enables second-order derivatives.
-- `jacobian` returns `[m, n]` shape (output-rows × input-cols),
-  matching upstream's default `vectorize=False` layout.
-- `hessian` returns `[n, n]`.
+- `jacobian` returns `output.shape + input.shape`, matching upstream's
+  default `vectorize=False` layout. The legacy `[m, n]` matrix is only
+  the special case where both output and input are 1-D.
+- `hessian` returns `input.shape + input.shape`.
+- CUDA inputs produce CUDA `grad` / `jacobian` / `hessian` results.
+  The implementation may upload host-computed constants or index
+  metadata, but tensor gradient data must not round-trip through CPU.
 
 The Rust `retain_graph` parameter is consumed semantically (the
 `Arc<dyn GradFn>` graph is immutable; the only thing
@@ -193,8 +204,13 @@ Key tests:
 
 - `test_grad_simple_pow` (`higher_order.rs`)
 - `test_grad_add` (`higher_order.rs`)
-- Jacobian / Hessian tests for elementwise and quadratic
-  functions later in the test module.
+- Jacobian / Hessian tests for elementwise and quadratic functions
+  later in the test module.
+- CUDA regression tests in
+  `ferrotorch-gpu/tests/divergence_autograd_engine_utilities_cuda.rs`
+  cover `grad`, vector-output `jacobian`, scalar-output `jacobian`,
+  non-contiguous rank-2 `jacobian`, and `hessian` device/value parity
+  against live PyTorch 2.11.0+cu130 probes.
 
 All tests pass in the workspace gauntlet.
 
@@ -208,6 +224,6 @@ All tests pass in the workspace gauntlet.
 | REQ-4 | SHIPPED | impl: three-phase BFS + Kahn at `higher_order.rs:93-224`; non-test production consumer: inside REQ-1 (the engine of `grad`). |
 | REQ-5 | SHIPPED | impl: `pub fn jacobian<T: Float, F>` at `higher_order.rs`; mirrors `torch.autograd.functional.jacobian` at `torch/autograd/functional.py:393+`; non-test production consumer: re-exported at `higher_order in ferrotorch-core/src/autograd/mod.rs pub use higher_order::{grad, hessian, jacobian}` and at `lib.rs jacobian`. Existing pub API — boundary-API grandfathering. |
 | REQ-6 | SHIPPED | impl: `pub fn hessian<T: Float, F>` at `higher_order.rs`; mirrors `torch.autograd.functional.hessian` at `torch/autograd/functional.py:594+`; non-test production consumer: re-exported at `mod.rs` and `lib.rs hessian`. Existing pub API — boundary-API grandfathering. |
-| REQ-7 | SHIPPED | impl: `struct IndexSelectBackward<T>` at `higher_order.rs` + `impl GradFn` at `higher_order.rs`; non-test production consumer: instantiated inside `extract_element` at `higher_order.rs` which is invoked by `jacobian` at `higher_order.rs` and `hessian` at `higher_order.rs` — every `jacobian`/`hessian` call routes through this helper. |
-| REQ-8 | SHIPPED | impl: `struct BroadcastScalarBackward<T>` at `backward in higher_order.rs` + `impl GradFn` at `backward in higher_order.rs`; non-test production consumer: instantiated inside the `create_graph` branch of `IndexSelectBackward::backward` at `backward in higher_order.rs` — every higher-order call (`hessian`, second-order `grad` chains) flows through this. |
+| REQ-7 | SHIPPED | impl: `extract_element` + `IndexSelectBackward<T>` at `higher_order.rs`; non-test production consumer: invoked by `jacobian` and `hessian` — every element row routes through this helper. |
+| REQ-8 | SHIPPED | impl: CUDA/CPU row zeros via `zeros_on_device`, `IndexSelectBackward` through `ops::indexing::scatter`, row concatenation through `grad_fns::shape::cat`; GPU regression tests cover vector/scalar/non-contiguous Jacobian and Hessian device parity. |
 | REQ-9 | SHIPPED | impl: `impl<T: Float> Tensor<T> pub fn grad_wrt` at `higher_order.rs`; non-test production consumer: re-exposed as a `Tensor` method to users of the crate (the chainable `loss.grad_wrt(&[&x], ...)` API). Existing pub API — boundary-API grandfathering. |

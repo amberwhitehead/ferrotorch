@@ -2,7 +2,7 @@
 
 use ferrotorch_core::autograd::checkpoint::checkpoint;
 use ferrotorch_core::autograd::graph::{backward_parallel, backward_with_grad};
-use ferrotorch_core::autograd::higher_order::grad;
+use ferrotorch_core::autograd::higher_order::{grad, hessian, jacobian};
 use ferrotorch_core::grad_fns::arithmetic::{add, mul};
 use ferrotorch_core::grad_fns::reduction::sum;
 use ferrotorch_core::{Device, FerrotorchError, FerrotorchResult, Tensor, TensorStorage};
@@ -166,4 +166,102 @@ fn cuda_higher_order_grad_branch_accumulation_stays_on_cuda() {
     let gx = grads[0].as_ref().expect("x grad");
     assert!(gx.is_cuda());
     assert_eq!(host(gx), &[8.0, 12.0]);
+}
+
+#[test]
+fn cuda_jacobian_square_stays_on_cuda_and_matches_torch() {
+    ensure_cuda();
+    let x = cuda_leaf(&[2.0, 3.0], &[2]);
+
+    let jac = jacobian(
+        |input: &Tensor<f32>| -> FerrotorchResult<Tensor<f32>> { mul(input, input) },
+        &x,
+    )
+    .expect("jacobian");
+
+    // torch 2.11.0+cu130:
+    // torch.autograd.functional.jacobian(lambda z: z*z, tensor([2,3], cuda))
+    // => device cuda:0, values [[4, 0], [0, 6]]
+    assert_eq!(jac.device(), Device::Cuda(0));
+    assert_eq!(jac.shape(), &[2, 2]);
+    assert_eq!(host(&jac), &[4.0, 0.0, 0.0, 6.0]);
+}
+
+#[test]
+fn cuda_jacobian_scalar_output_uses_pytorch_shape_on_cuda() {
+    ensure_cuda();
+    let x = cuda_leaf(&[2.0, 3.0], &[2]);
+
+    let jac = jacobian(
+        |input: &Tensor<f32>| -> FerrotorchResult<Tensor<f32>> {
+            sum(&mul(input, input).expect("mul"))
+        },
+        &x,
+    )
+    .expect("jacobian");
+
+    // torch 2.11.0+cu130:
+    // torch.autograd.functional.jacobian(lambda z: (z*z).sum(), tensor([2,3], cuda))
+    // => shape [2], device cuda:0, values [4, 6]
+    assert_eq!(jac.device(), Device::Cuda(0));
+    assert_eq!(jac.shape(), &[2]);
+    assert_eq!(host(&jac), &[4.0, 6.0]);
+}
+
+#[test]
+fn cuda_jacobian_noncontiguous_rank2_uses_output_plus_input_shape() {
+    ensure_cuda();
+    let base = cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false)
+        .to(Device::Cuda(0))
+        .expect("to cuda");
+    let x = base
+        .transpose(0, 1)
+        .expect("transpose")
+        .requires_grad_(true);
+    assert_eq!(x.shape(), &[3, 2]);
+    assert!(
+        !x.is_contiguous(),
+        "probe must exercise non-contiguous CUDA input"
+    );
+
+    let jac = jacobian(
+        |input: &Tensor<f32>| -> FerrotorchResult<Tensor<f32>> { mul(input, input) },
+        &x,
+    )
+    .expect("jacobian");
+
+    // torch 2.11.0+cu130 on base.reshape(2,3).t():
+    // jacobian(lambda z: z*z, x).shape == [3, 2, 3, 2].
+    // Logical input values are [1, 4, 2, 5, 3, 6], so the flattened
+    // Jacobian is diagonal with [2, 8, 4, 10, 6, 12].
+    assert_eq!(jac.device(), Device::Cuda(0));
+    assert_eq!(jac.shape(), &[3, 2, 3, 2]);
+    let got = host(&jac);
+    let diag = [2.0, 8.0, 4.0, 10.0, 6.0, 12.0];
+    let mut expected = vec![0.0f32; 36];
+    for (i, &v) in diag.iter().enumerate() {
+        expected[i * 6 + i] = v;
+    }
+    assert_eq!(got, expected);
+}
+
+#[test]
+fn cuda_hessian_sum_square_stays_on_cuda_and_matches_torch() {
+    ensure_cuda();
+    let x = cuda_leaf(&[2.0, 3.0], &[2]);
+
+    let hess = hessian(
+        |input: &Tensor<f32>| -> FerrotorchResult<Tensor<f32>> {
+            sum(&mul(input, input).expect("mul"))
+        },
+        &x,
+    )
+    .expect("hessian");
+
+    // torch 2.11.0+cu130:
+    // torch.autograd.functional.hessian(lambda z: (z*z).sum(), tensor([2,3], cuda))
+    // => device cuda:0, values [[2, 0], [0, 2]]
+    assert_eq!(hess.device(), Device::Cuda(0));
+    assert_eq!(hess.shape(), &[2, 2]);
+    assert_eq!(host(&hess), &[2.0, 0.0, 0.0, 2.0]);
 }

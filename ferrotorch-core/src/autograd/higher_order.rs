@@ -16,10 +16,10 @@
 //! | REQ-2 | SHIPPED | Scalar-output check at `higher_order.rs:62-67`; consumer: inside REQ-1. |
 //! | REQ-3 | SHIPPED | `create_graph=true` path with `differentiable_add` accumulation at `higher_order.rs:196-216`; consumer: `grad_penalty.rs:100` (WGAN-GP). |
 //! | REQ-4 | SHIPPED | Three-phase BFS + Kahn at `higher_order.rs:93-224`; consumer: inside REQ-1. |
-//! | REQ-5 | SHIPPED | `pub fn `jacobian`<T: Float, F>` at `higher_order.rs:273-327`; consumer: re-exported at `mod.rs:35` and `lib.rs:128`. Existing pub API — boundary-API grandfathering. |
-//! | REQ-6 | SHIPPED | `pub fn `hessian`<T: Float, F>` at `higher_order.rs:344-395`; consumer: re-exported at `mod.rs:35` and `lib.rs:127`. Existing pub API — boundary-API grandfathering. |
-//! | REQ-7 | SHIPPED | `struct `IndexSelectBackward`<T>` at `higher_order.rs:432-435` + `impl GradFn` at `:437-493`; consumer: instantiated inside `extract_element` at `:403-426` called by `jacobian` at `:306` and `hessian` at `:378`. |
-//! | REQ-8 | SHIPPED | `struct `BroadcastScalarBackward`<T>` at `higher_order.rs:500-502` + `impl GradFn` at `:504-523`; consumer: instantiated inside `IndexSelectBackward::backward` at `:463-466`. |
+//! | REQ-5 | SHIPPED | `pub fn `jacobian`<T: Float, F>` at `higher_order.rs`; consumer: re-exported at `mod.rs:35` and `lib.rs:128`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-6 | SHIPPED | `pub fn `hessian`<T: Float, F>` at `higher_order.rs`; consumer: re-exported at `mod.rs:35` and `lib.rs:127`. Existing pub API — boundary-API grandfathering. |
+//! | REQ-7 | SHIPPED | `extract_element` at `higher_order.rs` uses autograd-aware zero-copy scalar stride views; consumer: `jacobian` and `hessian`. |
+//! | REQ-8 | SHIPPED | `IndexSelectBackward` at `higher_order.rs` uses device-resident `scatter` for scalar VJP; consumer: `extract_element`. |
 //! | REQ-9 | SHIPPED | `impl<T: Float> Tensor<T> pub fn `grad_wrt`` at `higher_order.rs:534-541`. Existing pub API — boundary-API grandfathering. |
 //!
 
@@ -258,9 +258,9 @@ fn add_non_differentiable_grad<T: Float>(
         });
     }
 
-    if matches!(existing.device(), Device::Cuda(_))
-        && let Some(backend) = crate::gpu_dispatch::gpu_backend()
-    {
+    if existing.device().is_cuda() {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let a_handle = existing.gpu_handle()?;
         let b_handle = incoming.gpu_handle()?;
         let result_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
@@ -299,14 +299,17 @@ fn differentiable_add<T: Float>(
     crate::grad_fns::arithmetic::add(a, b)
 }
 
-/// Compute the Jacobian matrix of a function at a point.
+/// Compute the Jacobian tensor of a function at a point.
 ///
-/// Given a function `f: R^n -> R^m` and an input tensor of shape `[n]`,
-/// returns a tensor of shape `[m, n]` where `J[i, j] = df_i / dx_j`.
+/// Given a function `f`, returns a tensor with shape
+/// `f(input).shape + input.shape`, matching
+/// `torch.autograd.functional.jacobian`. For vector-to-vector functions this
+/// is the familiar `[m, n]` matrix where `J[i, j] = df_i / dx_j`.
 ///
-/// The function `f` must accept a tensor of shape `[n]` and return a tensor
-/// of shape `[m]`. Each output element is differentiated independently via
-/// the `grad` function with `create_graph=true`.
+/// Each output element is differentiated independently via `grad`. Temporary
+/// inputs, scalar element views, row gradients, and the final result remain on
+/// the input device; CUDA rows are concatenated by the GPU `cat` kernel rather
+/// than downloaded to host memory.
 ///
 /// # Example
 ///
@@ -322,31 +325,33 @@ where
 {
     let n = input.numel();
 
-    // Create a fresh input that requires grad.
-    let x = Tensor::from_storage(
-        TensorStorage::cpu(input.data()?.to_vec()),
-        input.shape().to_vec(),
-        true,
-    )?;
-
-    // Evaluate the function.
+    // Evaluate once to discover output shape without copying input data off
+    // device. Actual rows below use fresh graphs, matching PyTorch's
+    // non-vectorized functional.jacobian path.
+    let x = input.detach().requires_grad_(true);
     let y = f(&x)?;
     let m = y.numel();
-    let y_data = y.data()?.to_vec();
+    let y_shape = y.shape().to_vec();
+    let result_shape = jacobian_result_shape(&y_shape, input.shape());
 
-    // Build the Jacobian row by row.
-    // For each output element y_i, compute grad(y_i, x).
-    let mut jac_data: Vec<T> = Vec::with_capacity(m * n);
+    if m == 0 {
+        return empty_on_device(&result_shape, input.device());
+    }
+
+    let mut rows: Vec<Tensor<T>> = Vec::with_capacity(m);
 
     for i in 0..m {
-        // Create a scalar tensor for y_i by re-evaluating through the graph.
-        // We need a fresh forward pass for each row to get independent graphs.
-        let x_fresh = Tensor::from_storage(
-            TensorStorage::cpu(input.data()?.to_vec()),
-            input.shape().to_vec(),
-            true,
-        )?;
+        let x_fresh = input.detach().requires_grad_(true);
         let y_fresh = f(&x_fresh)?;
+        if y_fresh.shape() != y_shape.as_slice() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "jacobian: function output shape changed between evaluations: {:?} vs {:?}",
+                    y_shape,
+                    y_fresh.shape()
+                ),
+            });
+        }
 
         // Extract the i-th element as a scalar.
         let y_i = extract_element(&y_fresh, i)?;
@@ -354,28 +359,22 @@ where
         // Compute gradient of y_i w.r.t. x_fresh.
         let grads = grad(&y_i, &[&x_fresh], false, false)?;
 
-        match &grads[0] {
-            Some(g) => {
-                let g_data = g.data()?;
-                jac_data.extend_from_slice(g_data);
-            }
-            None => {
-                // No gradient means the output doesn't depend on the input.
-                jac_data.extend(std::iter::repeat_n(<T as num_traits::Zero>::zero(), n));
-            }
-        }
+        let row_base = match &grads[0] {
+            Some(g) => g.clone(),
+            None => zeros_on_device(input.shape(), input.device())?,
+        };
+        rows.push(flatten_jacobian_row(&row_base, n)?);
     }
 
-    // Verify forward values are consistent.
-    let _ = y_data;
-
-    Tensor::from_storage(TensorStorage::cpu(jac_data), vec![m, n], false)
+    finalize_stacked_rows(&rows, &result_shape, input.device())
 }
 
-/// Compute the Hessian matrix of a scalar function at a point.
+/// Compute the Hessian tensor of a scalar function at a point.
 ///
-/// Given a function `f: R^n -> R` and an input tensor of shape `[n]`,
-/// returns a tensor of shape `[n, n]` where `H[i, j] = d^2f / (dx_i dx_j)`.
+/// Given a scalar-valued function `f`, returns a tensor with shape
+/// `input.shape + input.shape`, matching
+/// `torch.autograd.functional.hessian`. For a 1-D input this is the familiar
+/// `[n, n]` matrix where `H[i, j] = d^2f / (dx_i dx_j)`.
 ///
 /// Internally computes the Jacobian of the gradient function, leveraging
 /// higher-order gradients via `create_graph=true`.
@@ -392,32 +391,23 @@ where
     F: Fn(&Tensor<T>) -> FerrotorchResult<Tensor<T>>,
 {
     let n = input.numel();
+    let result_shape = hessian_result_shape(input.shape());
 
-    // The Hessian is the Jacobian of the gradient function.
-    // For each row i, we:
-    // 1. Compute the gradient of f w.r.t. x with create_graph=true
-    // 2. Extract grad_i
-    // 3. Differentiate grad_i w.r.t. x to get row i of the Hessian
-    let mut hess_data: Vec<T> = Vec::with_capacity(n * n);
+    if n == 0 {
+        return empty_on_device(&result_shape, input.device());
+    }
+
+    let mut rows: Vec<Tensor<T>> = Vec::with_capacity(n);
 
     for i in 0..n {
-        // Fresh forward pass.
-        let x = Tensor::from_storage(
-            TensorStorage::cpu(input.data()?.to_vec()),
-            input.shape().to_vec(),
-            true,
-        )?;
+        let x = input.detach().requires_grad_(true);
         let y = f(&x)?;
 
         // First derivative with create_graph=true.
         let grads = grad(&y, &[&x], true, true)?;
         let grad_vec = match &grads[0] {
             Some(g) => g.clone(),
-            None => {
-                // Function doesn't depend on input => Hessian is all zeros.
-                hess_data.extend(std::iter::repeat_n(<T as num_traits::Zero>::zero(), n));
-                continue;
-            }
+            None => zeros_on_device(input.shape(), input.device())?,
         };
 
         // Extract the i-th element of the gradient as a scalar.
@@ -426,54 +416,164 @@ where
         // Second derivative: differentiate grad_i w.r.t. x.
         let grads2 = grad(&grad_i, &[&x], false, false)?;
 
-        match &grads2[0] {
-            Some(g2) => {
-                let g2_data = g2.data()?;
-                hess_data.extend_from_slice(g2_data);
-            }
-            None => {
-                hess_data.extend(std::iter::repeat_n(<T as num_traits::Zero>::zero(), n));
-            }
-        }
+        let row_base = match &grads2[0] {
+            Some(g2) => g2.clone(),
+            None => zeros_on_device(input.shape(), input.device())?,
+        };
+        rows.push(flatten_jacobian_row(&row_base, n)?);
     }
 
-    Tensor::from_storage(TensorStorage::cpu(hess_data), vec![n, n], false)
+    finalize_stacked_rows(&rows, &result_shape, input.device())
 }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Extract the `i`-th element of a tensor as a scalar tensor, preserving
-/// the computation graph (via an `IndexBackward` node).
-fn extract_element<T: Float>(tensor: &Tensor<T>, index: usize) -> FerrotorchResult<Tensor<T>> {
-    let data = tensor.data()?;
-    if index >= data.len() {
+fn zeros_on_device<T: Float>(shape: &[usize], device: Device) -> FerrotorchResult<Tensor<T>> {
+    let numel = crate::shape::checked_numel(shape, "higher-order zeros")?;
+    if let Device::Cuda(ordinal) = device {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = backend.alloc_zeros(numel, T::dtype(), ordinal)?;
+        return Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), false);
+    }
+    Tensor::from_storage(
+        TensorStorage::on_device(vec![<T as num_traits::Zero>::zero(); numel], device)?,
+        shape.to_vec(),
+        false,
+    )
+}
+
+fn empty_on_device<T: Float>(shape: &[usize], device: Device) -> FerrotorchResult<Tensor<T>> {
+    Tensor::from_storage(
+        TensorStorage::on_device(Vec::<T>::new(), device)?,
+        shape.to_vec(),
+        false,
+    )
+}
+
+fn jacobian_result_shape(output_shape: &[usize], input_shape: &[usize]) -> Vec<usize> {
+    let mut shape = Vec::with_capacity(output_shape.len() + input_shape.len());
+    shape.extend_from_slice(output_shape);
+    shape.extend_from_slice(input_shape);
+    shape
+}
+
+fn hessian_result_shape(input_shape: &[usize]) -> Vec<usize> {
+    jacobian_result_shape(input_shape, input_shape)
+}
+
+fn shape_to_isize(shape: &[usize], op: &'static str) -> FerrotorchResult<Vec<isize>> {
+    shape
+        .iter()
+        .map(|&dim| {
+            isize::try_from(dim).map_err(|_| FerrotorchError::InvalidArgument {
+                message: format!("{op}: dimension {dim} exceeds isize::MAX"),
+            })
+        })
+        .collect()
+}
+
+fn flatten_jacobian_row<T: Float>(row: &Tensor<T>, n: usize) -> FerrotorchResult<Tensor<T>> {
+    if row.numel() != n {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "higher-order row gradient has {} elements, expected {n}",
+                row.numel()
+            ),
+        });
+    }
+    let row_shape = [
+        1isize,
+        isize::try_from(n).map_err(|_| FerrotorchError::InvalidArgument {
+            message: format!("higher-order row width {n} exceeds isize::MAX"),
+        })?,
+    ];
+    crate::grad_fns::shape::reshape(row, &row_shape)
+}
+
+fn finalize_stacked_rows<T: Float>(
+    rows: &[Tensor<T>],
+    result_shape: &[usize],
+    device: Device,
+) -> FerrotorchResult<Tensor<T>> {
+    if rows.is_empty() {
+        return empty_on_device(result_shape, device);
+    }
+    let packed = crate::grad_fns::shape::cat(rows, 0)?;
+    crate::grad_fns::shape::reshape(
+        &packed,
+        &shape_to_isize(result_shape, "higher-order result")?,
+    )
+}
+
+fn logical_flat_storage_offset<T: Float>(
+    tensor: &Tensor<T>,
+    index: usize,
+) -> FerrotorchResult<usize> {
+    let numel = tensor.numel();
+    if index >= numel {
         return Err(FerrotorchError::IndexOutOfBounds {
             index,
             axis: 0,
-            size: data.len(),
+            size: numel,
         });
     }
-    let val = data[index];
-    let scalar = Tensor::from_storage(TensorStorage::cpu(vec![val]), vec![], false)?;
+    if tensor.shape().is_empty() {
+        return Ok(tensor.storage_offset());
+    }
 
-    if tensor.requires_grad() || tensor.grad_fn().is_some() {
-        // Attach a grad_fn that routes the scalar gradient back to the
-        // correct position in the input tensor.
+    let mut remaining = index;
+    let mut offset =
+        i64::try_from(tensor.storage_offset()).map_err(|_| FerrotorchError::InvalidArgument {
+            message: format!(
+                "extract_element: storage_offset {} exceeds i64::MAX",
+                tensor.storage_offset()
+            ),
+        })?;
+    for axis in (0..tensor.ndim()).rev() {
+        let dim = tensor.shape()[axis];
+        let coord = remaining % dim;
+        remaining /= dim;
+        let coord_i64 = i64::try_from(coord).map_err(|_| FerrotorchError::InvalidArgument {
+            message: format!("extract_element: index coordinate {coord} exceeds i64::MAX"),
+        })?;
+        offset = offset
+            .checked_add(coord_i64 * tensor.strides()[axis] as i64)
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "extract_element: storage offset calculation overflowed".into(),
+            })?;
+    }
+    usize::try_from(offset).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!("extract_element: computed negative storage offset {offset}"),
+    })
+}
+
+/// Extract the `i`-th logical C-order element as a scalar tensor, preserving
+/// storage and device. The autograd path uses a custom scatter-based VJP
+/// because Hessian construction needs the scalar-selection backward itself to
+/// stay differentiable when `create_graph=true`.
+fn extract_element<T: Float>(tensor: &Tensor<T>, index: usize) -> FerrotorchResult<Tensor<T>> {
+    let offset = logical_flat_storage_offset(tensor, index)?;
+    if crate::autograd::no_grad::is_grad_enabled() && tensor.requires_grad() {
         let grad_fn = std::sync::Arc::new(IndexSelectBackward {
             input: tensor.clone(),
             index,
         });
-        Tensor::from_operation(TensorStorage::cpu(vec![val]), vec![], grad_fn)
+        tensor.try_stride_view_operation(Vec::new(), Vec::new(), offset, grad_fn)
     } else {
-        Ok(scalar)
+        tensor.try_stride_view(Vec::new(), Vec::new(), offset)
     }
 }
 
-/// Backward node for extracting a single element from a tensor.
+/// Backward node for extracting one logical element from a tensor.
 ///
-/// Given `y = x[index]`, the VJP is: `grad_x[j] = grad_y if j == index, else 0`.
+/// Given `y = x.flatten()[index]`, the VJP is a zero tensor with the scalar
+/// upstream gradient scattered back into `index`. The implementation uses the
+/// same device-resident `scatter` path as user-facing indexing ops, so CUDA
+/// gradients do not fall back to host vectors and the `src` edge remains
+/// differentiable for Hessian construction.
 #[derive(Debug)]
 struct IndexSelectBackward<T: Float> {
     input: Tensor<T>,
@@ -482,50 +582,30 @@ struct IndexSelectBackward<T: Float> {
 
 impl<T: Float> crate::tensor::GradFn<T> for IndexSelectBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let numel = self.input.numel();
-
-        // When grad_output requires_grad (create_graph=true), use differentiable
-        // operations so the backward pass is tracked for higher-order gradients.
-        if grad_output.requires_grad() || grad_output.grad_fn().is_some() {
-            // Create one-hot basis vector: e_i = [0, ..., 1, ..., 0]
-            let one = <T as num_traits::One>::one();
-            let zero = <T as num_traits::Zero>::zero();
-            let mut basis = vec![zero; numel];
-            basis[self.index] = one;
-            let basis_tensor = Tensor::from_storage(
-                TensorStorage::cpu(basis),
-                self.input.shape().to_vec(),
-                false,
-            )?;
-
-            // Broadcast grad_output (scalar) to the input shape, then multiply
-            // by the basis vector. This is differentiable w.r.t. grad_output.
-            let go_val = grad_output.data()?[0];
-
-            // Attach a BroadcastScalarBackward that connects the broadcast
-            // tensor back to grad_output, preserving the computation graph.
-            let broadcast_tracked = Tensor::from_operation(
-                TensorStorage::cpu(vec![go_val; numel]),
-                self.input.shape().to_vec(),
-                std::sync::Arc::new(BroadcastScalarBackward {
-                    scalar_input: grad_output.clone(),
-                }),
-            )?;
-
-            // grad_input = broadcast_tracked * basis_tensor
-            // This multiplication is differentiable, connecting back to grad_output.
-            let grad_input = crate::grad_fns::arithmetic::mul(&broadcast_tracked, &basis_tensor)?;
-            return Ok(vec![Some(grad_input)]);
+        if !self.input.requires_grad() {
+            return Ok(vec![None]);
+        }
+        if grad_output.numel() != 1 {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "IndexSelectBackward expected a single-element grad_output, got shape {:?}",
+                    grad_output.shape()
+                ),
+            });
+        }
+        if grad_output.device() != self.input.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: self.input.device(),
+                got: grad_output.device(),
+            });
         }
 
-        let go = grad_output.data()?[0];
-        let mut grad_data = vec![<T as num_traits::Zero>::zero(); numel];
-        grad_data[self.index] = go;
-        let grad_input = Tensor::from_storage(
-            TensorStorage::cpu(grad_data),
-            self.input.shape().to_vec(),
-            false,
-        )?;
+        let flat_grad_output = crate::grad_fns::shape::reshape(grad_output, &[1])?;
+        let flat_zeros = zeros_on_device::<T>(&[self.input.numel()], self.input.device())?;
+        let flat_grad =
+            crate::ops::indexing::scatter(&flat_zeros, 0, &[self.index], &[1], &flat_grad_output)?;
+        let input_shape = shape_to_isize(self.input.shape(), "IndexSelectBackward input reshape")?;
+        let grad_input = crate::grad_fns::shape::reshape(&flat_grad, &input_shape)?;
         Ok(vec![Some(grad_input)])
     }
 
@@ -535,36 +615,6 @@ impl<T: Float> crate::tensor::GradFn<T> for IndexSelectBackward<T> {
 
     fn name(&self) -> &'static str {
         "IndexSelectBackward"
-    }
-}
-
-/// Backward node for broadcasting a scalar to a vector.
-///
-/// Given `y = broadcast(scalar, n)` where `y[i] = scalar` for all i,
-/// the VJP is: `grad_scalar = sum(grad_output)`.
-#[derive(Debug)]
-struct BroadcastScalarBackward<T: Float> {
-    scalar_input: Tensor<T>,
-}
-
-impl<T: Float> crate::tensor::GradFn<T> for BroadcastScalarBackward<T> {
-    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        // grad_scalar = sum of all elements of grad_output.
-        let go_data = grad_output.data()?;
-        let total: T = go_data
-            .iter()
-            .copied()
-            .fold(<T as num_traits::Zero>::zero(), |a, b| a + b);
-        let grad_scalar = Tensor::from_storage(TensorStorage::cpu(vec![total]), vec![], false)?;
-        Ok(vec![Some(grad_scalar)])
-    }
-
-    fn inputs(&self) -> Vec<&Tensor<T>> {
-        vec![&self.scalar_input]
-    }
-
-    fn name(&self) -> &'static str {
-        "BroadcastScalarBackward"
     }
 }
 
@@ -886,8 +936,9 @@ mod tests {
         )
         .unwrap();
 
-        // Jacobian of sum on a 1-element tensor = [[1]]
-        assert_eq!(jac.shape(), &[1, 1]);
+        // PyTorch returns output.shape + input.shape; scalar output drops the
+        // leading output axis, so this is shape [1], not legacy [1, 1].
+        assert_eq!(jac.shape(), &[1]);
         assert_approx(jac.data().unwrap()[0], 1.0, 1e-6, "J[0,0]");
     }
 
@@ -907,7 +958,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(jac.shape(), &[1, 1]);
+        assert_eq!(jac.shape(), &[1]);
         assert_approx(jac.data().unwrap()[0], 2.0, 1e-5, "J[0,0] = 2");
     }
 

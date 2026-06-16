@@ -1215,8 +1215,9 @@ fn cpu_jacobian_sum_square_returns_2x() {
             &input,
         )
         .expect("jacobian");
-        // jacobian returns shape [m, n] = [1, n] for scalar output
-        assert_eq!(jac.shape(), &[1, shape[0]], "{label}: shape");
+        // torch.autograd.functional.jacobian returns output.shape +
+        // input.shape; scalar output contributes no leading axis.
+        assert_eq!(jac.shape(), shape.as_slice(), "{label}: shape");
         check_f32(
             &label,
             jac.data().expect("jac"),
