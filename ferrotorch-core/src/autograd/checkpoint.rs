@@ -5,8 +5,8 @@
 //! | REQ-1 | SHIPPED | `pub fn `checkpoint`<T, F>` at `checkpoint.rs:64-102` + `struct `CheckpointBackward`<T>` at `:190-201` + `impl GradFn` at `:216-269`. Existing pub API — boundary-API grandfathering. |
 //! | REQ-2 | SHIPPED | `pub fn `checkpoint_multi`<T, F>` at `checkpoint.rs:110-145` + `struct `CheckpointMultiBackward`<T>` at `:275-281` + `impl GradFn` at `:296-358`. Existing pub API — boundary-API grandfathering. |
 //! | REQ-3 | SHIPPED | `saved_autocast: AutocastSnapshot` at `checkpoint.rs:200, :280`; `current_autocast_snapshot()` at `:81, :125`; `with_autocast_state` recompute wraps at `:240, :312`; consumer: every checkpoint call. |
-//! | REQ-4 | SHIPPED | `fn `save_gpu_rng_state`` at `checkpoint.rs:150-163`; consumer: every CUDA-resident checkpoint. |
-//! | REQ-5 | SHIPPED | `struct `GpuRngGuard`` at `checkpoint.rs:167-177` with `Drop` impl; consumer: `let _rng_guard = ...` at `:231, :305`. |
+//! | REQ-4 | SHIPPED | `fn `save_checkpoint_rng_state`` captures CPU plus CUDA input-device RNG state; consumer: every checkpoint. |
+//! | REQ-5 | SHIPPED | `struct `CheckpointRngGuard`` restores saved state for recompute and explicitly restores caller state after recompute. |
 //! | REQ-6 | SHIPPED | `CheckpointBackward.input` field at `checkpoint.rs:192` populated by `input.clone()` at `:93`; consumer: `input_with_grad.grad()` read at `:257`. |
 //! | REQ-7 | SHIPPED | Weighted-sum recompute trick at `checkpoint.rs:248-256`; consumer: every backward of a checkpointed output. |
 //! | REQ-8 | SHIPPED | Skip-attach at `checkpoint.rs:86-88, :129-132`; consumer: every inference-time checkpoint call. |
@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::autograd::autocast::{AutocastSnapshot, current_autocast_snapshot, with_autocast_state};
 use crate::dtype::Float;
-use crate::error::FerrotorchResult;
+use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::gpu_dispatch::GpuRngState;
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
@@ -56,16 +56,13 @@ type CheckpointMultiFn<T> = Arc<dyn Fn(&[Tensor<T>]) -> FerrotorchResult<Tensor<
 ///
 /// # RNG reproducibility
 ///
-/// If the input is on a CUDA device and a GPU backend is registered, the
-/// checkpoint saves the GPU RNG state before the forward pass and restores
-/// it during backward recomputation. This ensures stochastic operations
-/// like dropout produce identical masks during forward and recomputation,
-/// yielding correct gradients.
-///
-/// If no GPU backend is registered (CPU-only), GPU RNG state is not saved.
-/// CPU RNG state for dropout is not currently managed by this checkpoint
-/// (the CPU dropout path uses a time-seeded xorshift that is not deterministic
-/// across calls).
+/// The checkpoint saves the current thread's CPU RNG state before the forward
+/// pass and restores it during backward recomputation. If CUDA inputs are
+/// present, it also saves the RNG state for each distinct CUDA input device.
+/// This mirrors PyTorch's `preserve_rng_state=True` default: stochastic
+/// operations like dropout produce identical masks during forward and
+/// recomputation, while the caller's surrounding RNG state is restored after
+/// backward recomputation.
 ///
 /// # Thread-local state and rayon
 ///
@@ -83,9 +80,9 @@ where
 {
     use crate::autograd::no_grad::no_grad;
 
-    // Save GPU RNG state before the forward pass so we can restore it during
-    // backward recomputation. This ensures dropout masks are identical.
-    let saved_gpu_rng = save_gpu_rng_state(input);
+    // Save RNG state before the forward pass so we can restore it during
+    // backward recomputation. This ensures stochastic masks are identical.
+    let saved_rng = save_checkpoint_rng_state(std::slice::from_ref(input))?;
 
     // Capture the autocast state at forward time so the recomputation during
     // backward runs in the same mixed-precision context. Without this, a
@@ -106,7 +103,7 @@ where
         func: Arc::new(f),
         input: input.clone(),
         output_shape: output.shape().to_vec(),
-        saved_gpu_rng,
+        saved_rng,
         saved_autocast,
     });
 
@@ -119,7 +116,8 @@ where
 /// Like [`checkpoint`], but the function `f` receives a slice of tensors.
 /// Gradients are computed for all inputs that have `requires_grad = true`.
 ///
-/// GPU RNG state is saved/restored using the device of the first input.
+/// CPU RNG state is always saved/restored. CUDA RNG state is saved/restored
+/// for each distinct CUDA input device.
 pub fn checkpoint_multi<T, F>(f: F, inputs: &[Tensor<T>]) -> FerrotorchResult<Tensor<T>>
 where
     T: Float,
@@ -133,7 +131,7 @@ where
         });
     }
 
-    let saved_gpu_rng = save_gpu_rng_state(&inputs[0]);
+    let saved_rng = save_checkpoint_rng_state(inputs)?;
     let saved_autocast = current_autocast_snapshot();
 
     let output = no_grad(|| f(inputs))?;
@@ -147,7 +145,7 @@ where
         func: Arc::new(f),
         inputs: inputs.to_vec(),
         output_shape: output.shape().to_vec(),
-        saved_gpu_rng,
+        saved_rng,
         saved_autocast,
     });
 
@@ -169,35 +167,112 @@ fn checkpoint_output_storage<T: Float>(
     packed.into_storage_and_shape()
 }
 
-/// Save the GPU RNG state for the device the tensor lives on.
-///
-/// Returns `None` if no GPU backend is registered or the tensor is on CPU.
-fn save_gpu_rng_state<T: Float>(tensor: &Tensor<T>) -> Option<GpuRngState> {
-    let device_ordinal = match tensor.device() {
-        crate::device::Device::Cuda(id) => id,
-        // XPU has no CUDA-style RNG state to save: ferrotorch-xpu
-        // delegates to the cubecl wgpu runtime which manages its own
-        // RNG. Treat XPU like CPU here. CL-452.
-        crate::device::Device::Xpu(_)
-        | crate::device::Device::Cpu
-        | crate::device::Device::Mps(_)
-        | crate::device::Device::Meta => return None,
-    };
-    let backend = crate::gpu_dispatch::gpu_backend()?;
-    backend.save_rng_state(device_ordinal).ok()
+#[derive(Debug, Clone)]
+struct CheckpointRngState {
+    cpu: crate::rng::Generator,
+    gpu: Vec<GpuRngState>,
 }
 
-/// RAII guard that restores GPU RNG state on drop, ensuring cleanup happens
-/// on both success and panic paths.
-struct GpuRngGuard {
-    previous: GpuRngState,
-}
-
-impl Drop for GpuRngGuard {
-    fn drop(&mut self) {
-        if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-            let _ = backend.restore_rng_state(self.previous);
+/// Save CPU RNG plus every distinct CUDA input-device RNG state.
+fn save_checkpoint_rng_state<T: Float>(
+    tensors: &[Tensor<T>],
+) -> FerrotorchResult<CheckpointRngState> {
+    let mut cuda_devices = Vec::new();
+    for tensor in tensors {
+        if let crate::device::Device::Cuda(device) = tensor.device()
+            && !cuda_devices.contains(&device)
+        {
+            cuda_devices.push(device);
         }
+    }
+
+    Ok(CheckpointRngState {
+        cpu: crate::rng::thread_rng_state(),
+        gpu: save_gpu_rng_states(&cuda_devices)?,
+    })
+}
+
+fn save_gpu_rng_states(devices: &[usize]) -> FerrotorchResult<Vec<GpuRngState>> {
+    if devices.is_empty() {
+        return Ok(Vec::new());
+    }
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    devices
+        .iter()
+        .map(|&device| backend.save_rng_state(device))
+        .collect()
+}
+
+fn restore_gpu_rng_states(states: &[GpuRngState]) -> FerrotorchResult<()> {
+    if states.is_empty() {
+        return Ok(());
+    }
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    for &state in states {
+        backend.restore_rng_state(state)?;
+    }
+    Ok(())
+}
+
+fn finish_rng_guarded<R>(
+    result: FerrotorchResult<R>,
+    restore: FerrotorchResult<()>,
+    context: &'static str,
+) -> FerrotorchResult<R> {
+    match (result, restore) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(err), Ok(())) | (Ok(_), Err(err)) => Err(err),
+        (Err(work_err), Err(restore_err)) => Err(FerrotorchError::Internal {
+            message: format!(
+                "{context} failed ({work_err}); RNG state restore also failed ({restore_err})"
+            ),
+        }),
+    }
+}
+
+/// Fork-style RNG guard. `activate` restores the forward RNG state for
+/// recomputation; `restore` returns the caller's pre-backward RNG state and
+/// propagates restore errors. `Drop` is a best-effort fallback for panic paths.
+struct CheckpointRngGuard {
+    previous: CheckpointRngState,
+    restored: bool,
+}
+
+impl CheckpointRngGuard {
+    fn activate(saved: &CheckpointRngState) -> FerrotorchResult<Self> {
+        let devices: Vec<usize> = saved.gpu.iter().map(|state| state.device()).collect();
+        let previous = CheckpointRngState {
+            cpu: crate::rng::thread_rng_state(),
+            gpu: save_gpu_rng_states(&devices)?,
+        };
+
+        crate::rng::set_thread_rng_state(saved.cpu.clone());
+        if let Err(err) = restore_gpu_rng_states(&saved.gpu) {
+            crate::rng::set_thread_rng_state(previous.cpu.clone());
+            let _ = restore_gpu_rng_states(&previous.gpu);
+            return Err(err);
+        }
+
+        Ok(Self {
+            previous,
+            restored: false,
+        })
+    }
+
+    fn restore(&mut self) -> FerrotorchResult<()> {
+        if self.restored {
+            return Ok(());
+        }
+        crate::rng::set_thread_rng_state(self.previous.cpu.clone());
+        restore_gpu_rng_states(&self.previous.gpu)?;
+        self.restored = true;
+        Ok(())
+    }
+}
+
+impl Drop for CheckpointRngGuard {
+    fn drop(&mut self) {
+        let _ = self.restore();
     }
 }
 
@@ -216,9 +291,10 @@ struct CheckpointBackward<T: Float> {
     func: CheckpointFn<T>,
     input: Tensor<T>,
     output_shape: Vec<usize>,
-    /// GPU RNG state saved before the forward pass. Restored during backward
-    /// recomputation so that stochastic ops (dropout) produce identical masks.
-    saved_gpu_rng: Option<GpuRngState>,
+    /// CPU plus CUDA input-device RNG state saved before the forward pass.
+    /// Restored during backward recomputation so stochastic ops produce
+    /// identical masks.
+    saved_rng: CheckpointRngState,
     /// Autocast (enabled, dtype) state captured at forward time. Restored
     /// for the duration of the recomputation so mixed-precision ops produce
     /// numerically identical activations.
@@ -231,7 +307,7 @@ impl<T: Float> std::fmt::Debug for CheckpointBackward<T> {
             .field("func", &"<closure>")
             .field("input_shape", &self.input.shape())
             .field("output_shape", &self.output_shape)
-            .field("has_gpu_rng_state", &self.saved_gpu_rng.is_some())
+            .field("gpu_rng_states", &self.saved_rng.gpu.len())
             .field("autocast_enabled", &self.saved_autocast.enabled)
             .field("autocast_dtype", &self.saved_autocast.dtype)
             .finish()
@@ -242,27 +318,13 @@ impl<T: Float> crate::tensor::GradFn<T> for CheckpointBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         // Re-run the forward function WITH gradient tracking to build the graph.
         //
-        // If we saved GPU RNG state during the forward pass, restore it now so
-        // that stochastic ops (dropout) produce identical masks. The RAII guard
-        // saves the current state and restores it when dropped, ensuring the
-        // global RNG is not permanently rewound.
-        let _rng_guard = if let Some(saved_state) = self.saved_gpu_rng {
-            // Save current state to restore after recomputation.
-            let current_state = save_gpu_rng_state(&self.input);
-            // Restore the state from the forward pass.
-            if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-                let _ = backend.restore_rng_state(saved_state);
-            }
-            current_state.map(|prev| GpuRngGuard { previous: prev })
-        } else {
-            None
-        };
+        let mut rng_guard = CheckpointRngGuard::activate(&self.saved_rng)?;
 
         // Run the recomputation inside an autocast context that exactly
         // matches the forward pass. with_autocast_state uses an RAII guard,
         // so the surrounding (caller's) autocast state is restored even if
         // the recomputation panics.
-        with_autocast_state(self.saved_autocast, || {
+        let result = with_autocast_state(self.saved_autocast, || {
             let input_with_grad = self.input.clone().requires_grad_(true);
             let recomputed = (self.func)(&input_with_grad)?;
 
@@ -281,7 +343,10 @@ impl<T: Float> crate::tensor::GradFn<T> for CheckpointBackward<T> {
 
             let input_grad = input_with_grad.grad()?;
             Ok(vec![input_grad])
-        })
+        });
+
+        let restore = rng_guard.restore();
+        finish_rng_guarded(result, restore, "checkpoint backward recomputation")
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -301,7 +366,7 @@ struct CheckpointMultiBackward<T: Float> {
     func: CheckpointMultiFn<T>,
     inputs: Vec<Tensor<T>>,
     output_shape: Vec<usize>,
-    saved_gpu_rng: Option<GpuRngState>,
+    saved_rng: CheckpointRngState,
     saved_autocast: AutocastSnapshot,
 }
 
@@ -311,7 +376,7 @@ impl<T: Float> std::fmt::Debug for CheckpointMultiBackward<T> {
             .field("func", &"<closure>")
             .field("num_inputs", &self.inputs.len())
             .field("output_shape", &self.output_shape)
-            .field("has_gpu_rng_state", &self.saved_gpu_rng.is_some())
+            .field("gpu_rng_states", &self.saved_rng.gpu.len())
             .field("autocast_enabled", &self.saved_autocast.enabled)
             .field("autocast_dtype", &self.saved_autocast.dtype)
             .finish()
@@ -320,21 +385,12 @@ impl<T: Float> std::fmt::Debug for CheckpointMultiBackward<T> {
 
 impl<T: Float> crate::tensor::GradFn<T> for CheckpointMultiBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        // Restore GPU RNG state for deterministic recomputation.
-        let _rng_guard = if let Some(saved_state) = self.saved_gpu_rng {
-            let current_state = save_gpu_rng_state(&self.inputs[0]);
-            if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-                let _ = backend.restore_rng_state(saved_state);
-            }
-            current_state.map(|prev| GpuRngGuard { previous: prev })
-        } else {
-            None
-        };
+        let mut rng_guard = CheckpointRngGuard::activate(&self.saved_rng)?;
 
         // Run recomputation under the same autocast state as the forward
         // pass. The RAII guard inside with_autocast_state restores the
         // caller's state on exit, including panic unwind.
-        with_autocast_state(self.saved_autocast, || {
+        let result = with_autocast_state(self.saved_autocast, || {
             // Re-run forward with grad tracking on all inputs that need it.
             let inputs_with_grad: Vec<Tensor<T>> = self
                 .inputs
@@ -370,7 +426,10 @@ impl<T: Float> crate::tensor::GradFn<T> for CheckpointMultiBackward<T> {
                 }
             }
             Ok(grads)
-        })
+        });
+
+        let restore = rng_guard.restore();
+        finish_rng_guarded(result, restore, "checkpoint_multi backward recomputation")
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
@@ -390,7 +449,7 @@ impl<T: Float> crate::tensor::GradFn<T> for CheckpointMultiBackward<T> {
 mod tests {
     use super::*;
     use crate::autograd::autocast::{AutocastDtype, autocast, is_autocast_enabled};
-    use crate::creation::{from_slice, scalar};
+    use crate::creation::{from_slice, rand, randn, scalar};
     use crate::grad_fns::arithmetic::{add, mul};
     use crate::grad_fns::reduction::sum;
     use crate::storage::TensorStorage;
@@ -445,6 +504,89 @@ mod tests {
         assert_eq!(yd, &[2.0, 4.0, 6.0]);
         // No grad_fn since input had no grad.
         assert!(y.grad_fn().is_none());
+    }
+
+    #[test]
+    fn test_checkpoint_preserves_cpu_uniform_rng_for_recompute() {
+        crate::rng::manual_seed(123);
+        let x = leaf_grad(&[1.0; 6], &[6]);
+
+        let y = checkpoint(
+            |t: &Tensor<f32>| {
+                let mask = rand::<f32>(t.shape())?;
+                mul(t, &mask)
+            },
+            &x,
+        )
+        .unwrap();
+
+        let forward_mask = y.data().unwrap().to_vec();
+        sum(&y).unwrap().backward().unwrap();
+
+        let grad = x.grad().unwrap().expect("x should have a gradient");
+        assert_eq!(
+            grad.data().unwrap(),
+            forward_mask.as_slice(),
+            "checkpoint recompute must reuse the exact CPU uniform RNG stream"
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_preserves_cpu_normal_rng_cache_for_recompute() {
+        crate::rng::manual_seed(456);
+        // Prime the Box-Muller cache with one normal sample. A checkpoint
+        // snapshot must include cached normal state, not just seed/counter.
+        let _cached_sibling = randn::<f32>(&[1]).unwrap();
+        let x = leaf_grad(&[1.0; 5], &[5]);
+
+        let y = checkpoint(
+            |t: &Tensor<f32>| {
+                let noise = randn::<f32>(t.shape())?;
+                mul(t, &noise)
+            },
+            &x,
+        )
+        .unwrap();
+
+        let forward_noise = y.data().unwrap().to_vec();
+        sum(&y).unwrap().backward().unwrap();
+
+        let grad = x.grad().unwrap().expect("x should have a gradient");
+        assert_eq!(
+            grad.data().unwrap(),
+            forward_noise.as_slice(),
+            "checkpoint recompute must preserve cached CPU normal samples"
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_backward_does_not_advance_caller_cpu_rng_stream() {
+        crate::rng::manual_seed(789);
+        let x = leaf_grad(&[1.0; 6], &[6]);
+
+        let y = checkpoint(
+            |t: &Tensor<f32>| {
+                let mask = rand::<f32>(t.shape())?;
+                mul(t, &mask)
+            },
+            &x,
+        )
+        .unwrap();
+        let after_forward = rand::<f32>(&[4]).unwrap().data().unwrap().to_vec();
+
+        sum(&y).unwrap().backward().unwrap();
+        let after_backward = rand::<f32>(&[4]).unwrap().data().unwrap().to_vec();
+
+        crate::rng::manual_seed(789);
+        let _forward_mask = rand::<f32>(&[6]).unwrap();
+        let expected_after_forward = rand::<f32>(&[4]).unwrap().data().unwrap().to_vec();
+        let expected_after_backward = rand::<f32>(&[4]).unwrap().data().unwrap().to_vec();
+
+        assert_eq!(after_forward, expected_after_forward);
+        assert_eq!(
+            after_backward, expected_after_backward,
+            "checkpoint recompute should fork RNG and restore the caller stream"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -518,6 +660,33 @@ mod tests {
         let yd = y.data().unwrap();
         assert_eq!(yd, &[4.0, 6.0]);
         assert!(y.grad_fn().is_none());
+    }
+
+    #[test]
+    fn test_checkpoint_multi_preserves_cpu_uniform_rng_for_recompute() {
+        crate::rng::manual_seed(321);
+        let a = leaf_grad(&[1.0; 4], &[4]);
+        let b = from_slice(&[0.0f32; 4], &[4]).unwrap();
+
+        let y = checkpoint_multi(
+            |ts: &[Tensor<f32>]| {
+                let mask = rand::<f32>(ts[0].shape())?;
+                let masked = mul(&ts[0], &mask)?;
+                add(&masked, &ts[1])
+            },
+            &[a.clone(), b],
+        )
+        .unwrap();
+
+        let forward_mask = y.data().unwrap().to_vec();
+        sum(&y).unwrap().backward().unwrap();
+
+        let grad = a.grad().unwrap().expect("a should have a gradient");
+        assert_eq!(
+            grad.data().unwrap(),
+            forward_mask.as_slice(),
+            "checkpoint_multi recompute must reuse the exact CPU RNG stream"
+        );
     }
 
     // -----------------------------------------------------------------------

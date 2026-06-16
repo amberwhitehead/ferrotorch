@@ -15,10 +15,12 @@ memory-vs-compute trade-off layer for deep networks. The forward pass
 runs inside `no_grad` (NO activations saved on the graph), and a
 `CheckpointBackward` / `CheckpointMultiBackward` node attaches to the
 output instead. During backward, the function is re-executed WITH
-gradient tracking — but the re-execution is wrapped in
-`with_autocast_state(saved_autocast, ...)` (REQ-7 of `autocast.md`)
-and (when applicable) a saved-GPU-RNG-state restoration, so the
-recomputed activations are numerically identical to the originals.
+gradient tracking, with the same autocast snapshot and a forked RNG
+state. The checkpoint saves the current thread's CPU generator plus
+every distinct CUDA input-device generator state, restores them for
+recompute, and then restores the caller's pre-backward RNG state. This
+keeps stochastic recomputation numerically identical to the original
+forward without perturbing the surrounding random stream.
 Mirrors PyTorch's `torch.utils.checkpoint.checkpoint` at
 `torch/utils/checkpoint.py:25-540`.
 
@@ -39,19 +41,20 @@ Mirrors PyTorch's `torch.utils.checkpoint.checkpoint` at
   backward recomputation (via `with_autocast_state`). Without this,
   a checkpoint inside `autocast(F16, ...)` would recompute under f32
   and produce numerically inconsistent gradients.
-- REQ-4: Save GPU RNG state at forward time (when GPU backend is
-  registered and the input is on a CUDA device) and restore it
-  during backward recomputation, so stochastic ops (dropout) produce
-  identical masks across forward and recompute. Without this, the
-  dropout mask used in the recompute would be different from the
-  forward, and the gradients would be inconsistent. Mirrors upstream
-  `_get_device_states` / `_set_device_states` in
-  `torch/utils/checkpoint.py:213-285`.
+- REQ-4: Save CPU RNG state at forward time and save CUDA RNG state
+  for every distinct CUDA input device. Restore those states during
+  backward recomputation so stochastic ops (dropout, rand, randn,
+  rrelu training) produce identical masks/values across forward and
+  recompute. Without this, the recompute can use different random
+  values and produce incorrect gradients. Mirrors upstream
+  `torch.get_rng_state`, `_get_device_states`, `torch.set_rng_state`,
+  and `_set_device_states` in `torch/utils/checkpoint.py`.
 - REQ-5: RAII guard on RNG state — the recompute path must NOT
   permanently rewind the global RNG to the saved-forward state; it
   must restore the caller's pre-backward RNG state on completion.
-  Implemented via `GpuRngGuard { previous: GpuRngState }` `Drop`
-  impl.
+  Implemented via `CheckpointRngGuard`, with explicit error
+  propagation on normal restore and best-effort `Drop` only for panic
+  cleanup.
 - REQ-6: `TensorId` aliasing invariant — `CheckpointBackward.input`
   stores a clone of the user's input. `Tensor::clone()` is an `Arc`
   clone, so the stored `Tensor` shares its `TensorId` with the
@@ -84,6 +87,18 @@ Mirrors PyTorch's `torch.utils.checkpoint.checkpoint` at
 - [x] AC-4: Multi-input partial-grad case (only second input
   requires grad) produces correct grad for that input —
   `test_checkpoint_multi_partial_grad` at `checkpoint.rs:484-507`.
+- [x] AC-5: Single-input stochastic uniform checkpoint recomputes the
+  exact forward random values during backward —
+  `test_checkpoint_preserves_cpu_uniform_rng_for_recompute`.
+- [x] AC-6: Single-input stochastic normal checkpoint preserves the
+  full Box-Muller cached normal state, not just seed/counter —
+  `test_checkpoint_preserves_cpu_normal_rng_cache_for_recompute`.
+- [x] AC-7: Backward recomputation does not advance the caller's CPU
+  RNG stream —
+  `test_checkpoint_backward_does_not_advance_caller_cpu_rng_stream`.
+- [x] AC-8: Multi-input stochastic checkpoint saves/restores the CPU
+  RNG stream for recomputation —
+  `test_checkpoint_multi_preserves_cpu_uniform_rng_for_recompute`.
 
 ## Architecture
 
@@ -91,24 +106,24 @@ Mirrors PyTorch's `torch.utils.checkpoint.checkpoint` at
 
 `pub fn checkpoint<T, F>` at `checkpoint.rs:64-102`:
 
-1. Capture `saved_gpu_rng` via `save_gpu_rng_state(input)` at `:74`.
+1. Capture `saved_rng` via `save_checkpoint_rng_state([input])`.
 2. Capture `saved_autocast` via `current_autocast_snapshot()` at `:81`.
 3. Forward pass in `no_grad`: `let output = no_grad(|| f(input))?;`
    at `:84`.
 4. Fast path: if `!input.requires_grad()`, return `output` directly
    at `:86-88`.
 5. Build `CheckpointBackward { func, input.clone(), output_shape,
-   saved_gpu_rng, saved_autocast }` at `:91-97`.
+   saved_rng, saved_autocast }`.
 6. Wrap output's data in a fresh storage and attach the backward via
    `Tensor::from_operation` at `:99-101`.
 
 ### REQ-2 multi-input `checkpoint_multi`
 
 `pub fn checkpoint_multi<T, F>` at `checkpoint.rs:110-145` is the
-symmetric multi-input variant. Validates at `:118-122` that at least
-one input is provided. RNG state is saved using
-`save_gpu_rng_state(&inputs[0])` at `:124`. Skip-attach if no input
-requires grad at `:129-132`.
+symmetric multi-input variant. Validates that at least one input is
+provided. RNG state is saved using `save_checkpoint_rng_state(inputs)`,
+which includes CPU state plus every distinct CUDA input device rather
+than only the first input. Skip-attach if no input requires grad.
 
 ### REQ-3 autocast state preservation
 
@@ -119,27 +134,28 @@ implementations at `:240` and `:312` wrap the recompute closure in
 `with_autocast_state` RAII drop guard restores the caller's autocast
 state on completion (success or panic).
 
-### REQ-4 GPU RNG preservation
+### REQ-4 CPU/CUDA RNG preservation
 
-`fn save_gpu_rng_state<T: Float>(tensor: &Tensor<T>) ->
-Option<GpuRngState>` at `checkpoint.rs:150-163`:
+`save_checkpoint_rng_state<T: Float>(tensors: &[Tensor<T>]) ->
+FerrotorchResult<CheckpointRngState>` clones the current thread's CPU
+`Generator` state, including cached normal samples, and captures a
+`GpuRngState` for each distinct CUDA input device. CUDA save failures
+propagate instead of being converted to `None`.
 
-- Returns `None` for CPU / Xpu / Mps / Meta tensors.
-- Returns `None` if no GPU backend is registered.
-- Otherwise calls `backend.save_rng_state(device_ordinal).ok()`.
-
-Each backward impl at `:224-234` (single-input) and `:299-307`
-(multi-input) restores the saved state via
-`backend.restore_rng_state(saved_state)` before re-running `f`.
+During backward, `CheckpointRngGuard::activate` snapshots the caller's
+current CPU/CUDA states, restores the saved-forward states, and then
+the backward recomputation runs under those states. After recompute,
+`CheckpointRngGuard::restore` restores the caller states and propagates
+restore failures. This mirrors PyTorch's fork-style checkpoint RNG
+handling.
 
 ### REQ-5 RNG guard
 
-`struct GpuRngGuard { previous: GpuRngState }` at `GpuRngGuard in checkpoint.rs`
-with `impl Drop` that restores `previous` on scope exit. The
-`current_state` (the caller's pre-backward state) is saved at
-`:226` (single) / `:300` (multi), used as the `previous` field of
-the guard. The guard is `let _rng_guard = ...;` so its `Drop` fires
-at the end of the backward function.
+`struct CheckpointRngGuard { previous: CheckpointRngState, restored:
+bool }` restores the saved-forward RNG state for recomputation and
+then restores the caller's previous RNG state. Normal control flow
+calls `restore()` explicitly so errors are visible; `Drop` remains a
+panic/unwind cleanup fallback.
 
 ### REQ-6 `TensorId` aliasing
 
@@ -189,7 +205,7 @@ Behavioral parity:
   same `f` runs in both cases).
 - Backward gradients are bit-identical (modulo floating-point
   determinism) to non-checkpointed backward, ASSUMING:
-  - GPU RNG state was successfully saved + restored (REQ-4), and
+  - CPU/CUDA RNG state was successfully saved + restored (REQ-4), and
   - autocast snapshot was successfully captured + restored (REQ-3).
 - Caller's autocast and RNG state outside the backward call are
   unchanged (RAII restoration).
@@ -210,6 +226,10 @@ Tests in `checkpoint.rs:362-754` (~390 LOC of test code). Key tests:
 - `test_checkpoint_no_grad_input_returns_output_only` (`test_checkpoint_no_grad_input_returns_output_only in checkpoint.rs`)
 - `test_checkpoint_multi_two_inputs_both_grad` (`test_checkpoint_multi_two_inputs_both_grad in checkpoint.rs`)
 - `test_checkpoint_multi_partial_grad` (`test_checkpoint_multi_partial_grad in checkpoint.rs`)
+- `test_checkpoint_preserves_cpu_uniform_rng_for_recompute`
+- `test_checkpoint_preserves_cpu_normal_rng_cache_for_recompute`
+- `test_checkpoint_backward_does_not_advance_caller_cpu_rng_stream`
+- `test_checkpoint_multi_preserves_cpu_uniform_rng_for_recompute`
 - Autocast preservation tests verify the snapshot round-trip across
   the forward/backward boundary using `is_autocast_enabled()`
   / `autocast_dtype()` assertions inside the closure (see test mod's

@@ -5,7 +5,9 @@ use ferrotorch_core::autograd::graph::{backward_parallel, backward_with_grad};
 use ferrotorch_core::autograd::higher_order::{grad, hessian, jacobian};
 use ferrotorch_core::grad_fns::arithmetic::{add, mul};
 use ferrotorch_core::grad_fns::reduction::sum;
-use ferrotorch_core::{Device, FerrotorchError, FerrotorchResult, Tensor, TensorStorage};
+use ferrotorch_core::{
+    Device, FerrotorchError, FerrotorchResult, Tensor, TensorStorage, manual_seed, rand_on_device,
+};
 use ferrotorch_gpu::init_cuda_backend;
 
 fn ensure_cuda() {
@@ -34,6 +36,12 @@ fn cuda_leaf(data: &[f32], shape: &[usize]) -> Tensor<f32> {
 
 fn host(t: &Tensor<f32>) -> Vec<f32> {
     t.cpu().expect("to cpu").data_vec().expect("host data")
+}
+
+fn cuda_checkpoint_rng_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    // These tests assert exact process-global CUDA RNG stream positions.
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().expect("CUDA checkpoint RNG test lock")
 }
 
 #[test]
@@ -136,6 +144,7 @@ fn cuda_set_grad_existing_cuda_grad_accumulates_on_device() {
 
 #[test]
 fn cuda_checkpoint_backward_keeps_grad_on_cuda() {
+    let _rng_lock = cuda_checkpoint_rng_test_lock();
     ensure_cuda();
     let x = cuda_leaf(&[2.0, 3.0], &[2]);
     let y = checkpoint(
@@ -150,6 +159,52 @@ fn cuda_checkpoint_backward_keeps_grad_on_cuda() {
     let grad = x.grad().expect("grad lookup").expect("x grad");
     assert!(grad.is_cuda());
     assert_eq!(host(&grad), &[4.0, 6.0]);
+}
+
+#[test]
+fn cuda_checkpoint_preserves_rng_for_stochastic_recompute() {
+    let _rng_lock = cuda_checkpoint_rng_test_lock();
+    ensure_cuda();
+    manual_seed(2026);
+    let x = cuda_leaf(&[1.0; 6], &[6]);
+
+    let y = checkpoint(
+        |input: &Tensor<f32>| -> FerrotorchResult<Tensor<f32>> {
+            let mask = rand_on_device::<f32>(input.shape(), Device::Cuda(0))?;
+            mul(input, &mask)
+        },
+        &x,
+    )
+    .expect("checkpoint");
+    assert_eq!(y.device(), Device::Cuda(0));
+    let forward_mask = host(&y);
+    let after_forward = host(&rand_on_device::<f32>(&[4], Device::Cuda(0)).expect("after forward"));
+
+    sum(&y).expect("sum").backward().expect("backward");
+
+    let grad = x.grad().expect("grad lookup").expect("x grad");
+    assert_eq!(grad.device(), Device::Cuda(0));
+    assert_eq!(
+        host(&grad),
+        forward_mask,
+        "CUDA checkpoint recompute must reuse the exact forward RNG mask"
+    );
+    let after_backward =
+        host(&rand_on_device::<f32>(&[4], Device::Cuda(0)).expect("after backward"));
+
+    manual_seed(2026);
+    let expected_forward = host(&rand_on_device::<f32>(&[6], Device::Cuda(0)).expect("forward"));
+    let expected_after_forward =
+        host(&rand_on_device::<f32>(&[4], Device::Cuda(0)).expect("expected after forward"));
+    let expected_after_backward =
+        host(&rand_on_device::<f32>(&[4], Device::Cuda(0)).expect("expected after backward"));
+
+    assert_eq!(forward_mask, expected_forward);
+    assert_eq!(after_forward, expected_after_forward);
+    assert_eq!(
+        after_backward, expected_after_backward,
+        "CUDA checkpoint recompute must restore the caller RNG stream"
+    );
 }
 
 #[test]

@@ -289,6 +289,21 @@ pub fn with_thread_rng<R>(f: impl FnOnce(&mut Generator) -> R) -> R {
     THREAD_RNG.with(|rng| f(&mut rng.borrow_mut()))
 }
 
+/// Clone the current thread's full CPU RNG state, including cached normal
+/// samples. Checkpointing uses this to mirror `torch.get_rng_state()`.
+pub(crate) fn thread_rng_state() -> Generator {
+    THREAD_RNG.with(|rng| rng.borrow().clone())
+}
+
+/// Restore the current thread's full CPU RNG state. Checkpointing uses this
+/// inside a fork-style guard so stochastic recomputation sees the same stream
+/// as the original forward while the caller's surrounding stream is restored.
+pub(crate) fn set_thread_rng_state(state: Generator) {
+    THREAD_RNG.with(|rng| {
+        *rng.borrow_mut() = state;
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
