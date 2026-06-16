@@ -224,7 +224,11 @@ pub use quantize::{
 pub use rng::{Generator, manual_seed};
 pub use shape::{broadcast_shapes, normalize_axis};
 pub use sparse::{CooTensor, CscTensor, CsrTensor, SparseGrad, SparseTensor};
-pub use sparse::{SemiStructuredSparseTensor, sparse_matmul_24};
+pub use sparse::{
+    CudaSemiStructuredSparseTensor, SemiStructuredSparseBackend, SemiStructuredSparseTensor,
+    sparse_matmul_24, to_sparse_semi_structured, to_sparse_semi_structured_cusparselt,
+    to_sparse_semi_structured_cutlass,
+};
 pub use special::{
     airy_ai, beta, digamma, entr, erf, erfc, erfinv, expm1, gammainc, gammaincc, gammaln_sign, i0,
     i0e, i1, i1e, lgamma, log_beta, log1p, modified_bessel_k0, modified_bessel_k1, multigammaln,

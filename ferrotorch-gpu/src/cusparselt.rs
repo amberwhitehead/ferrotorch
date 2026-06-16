@@ -207,6 +207,163 @@ impl CuSpLtDType {
 }
 
 // ---------------------------------------------------------------------------
+// Public cuSPARSELt packed conversion — mirrors torch._cslt_compress
+// ---------------------------------------------------------------------------
+
+fn checked_i64_dim(name: &'static str, value: usize) -> GpuResult<i64> {
+    i64::try_from(value).map_err(|_| GpuError::InvalidState {
+        message: format!("cusparselt: {name}={value} exceeds i64::MAX"),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gpu_cslt_compress_slices<T>(
+    handle: &CusparseLtHandle,
+    sparse_input: &CudaSlice<T>,
+    rows: usize,
+    cols: usize,
+    dtype: CuSpLtDType,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<T>>
+where
+    T: cudarc::driver::DeviceRepr + Default + Copy + 'static,
+{
+    let expected_len = rows
+        .checked_mul(cols)
+        .ok_or(GpuError::LengthMismatch { a: rows, b: cols })?;
+    if sparse_input.len() != expected_len {
+        return Err(GpuError::ShapeMismatch {
+            op: "cusparselt::cslt_compress",
+            expected: vec![rows, cols],
+            got: vec![sparse_input.len()],
+        });
+    }
+    if rows == 0 || cols == 0 {
+        return Ok(device.stream().alloc_zeros::<T>(0)?);
+    }
+
+    let rows_i64 = checked_i64_dim("rows", rows)?;
+    let cols_i64 = checked_i64_dim("cols", cols)?;
+    let stream = device.stream();
+    let cu_stream = stream.cu_stream() as sys::cudaStream_t;
+
+    let mut descriptor: sys::cusparseLtMatDescriptor_t =
+        unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
+
+    let result = (|| -> GpuResult<CudaSlice<T>> {
+        let status = unsafe {
+            sys::cusparseLtStructuredDescriptorInit(
+                handle.raw(),
+                &mut descriptor as *mut _,
+                rows_i64,
+                cols_i64,
+                cols_i64,
+                16,
+                dtype.cuda_dtype(),
+                sys::cusparseOrder_t::CUSPARSE_ORDER_ROW,
+                sys::cusparseLtSparsity_t::CUSPARSELT_SPARSITY_50_PERCENT,
+            )
+        };
+        check(status, "cusparseLtStructuredDescriptorInit (cslt_compress)")?;
+
+        let mut compressed_size: usize = 0;
+        let mut scratch_size: usize = 0;
+        let status = unsafe {
+            sys::cusparseLtSpMMACompressedSize2(
+                handle.raw(),
+                &descriptor as *const _,
+                &mut compressed_size as *mut _,
+                &mut scratch_size as *mut _,
+            )
+        };
+        check(status, "cusparseLtSpMMACompressedSize2")?;
+
+        let row_bytes = rows
+            .checked_mul(dtype.elem_bytes())
+            .ok_or(GpuError::LengthMismatch {
+                a: rows,
+                b: dtype.elem_bytes(),
+            })?;
+        let packed_cols = compressed_size
+            .checked_add(row_bytes.saturating_sub(1))
+            .ok_or(GpuError::LengthMismatch {
+                a: compressed_size,
+                b: row_bytes,
+            })?
+            / row_bytes;
+        let packed_len = rows
+            .checked_mul(packed_cols)
+            .ok_or(GpuError::LengthMismatch {
+                a: rows,
+                b: packed_cols,
+            })?;
+
+        let mut packed = stream.alloc_zeros::<T>(packed_len)?;
+        let mut scratch = stream.alloc_zeros::<u8>(scratch_size.max(1))?;
+        {
+            let (input_ptr, _input_sync) = sparse_input.device_ptr(&stream);
+            let (packed_ptr, _packed_sync) = packed.device_ptr_mut(&stream);
+            let (scratch_ptr, _scratch_sync) = scratch.device_ptr_mut(&stream);
+            let status = unsafe {
+                sys::cusparseLtSpMMACompress2(
+                    handle.raw(),
+                    &descriptor as *const _,
+                    true,
+                    sys::cusparseOperation_t::CUSPARSE_OPERATION_NON_TRANSPOSE,
+                    input_ptr as *const std::ffi::c_void,
+                    packed_ptr as *mut std::ffi::c_void,
+                    scratch_ptr as *mut std::ffi::c_void,
+                    cu_stream,
+                )
+            };
+            check(status, "cusparseLtSpMMACompress2")?;
+        }
+        Ok(packed)
+    })();
+
+    unsafe {
+        let _ = sys::cusparseLtMatDescriptorDestroy(&mut descriptor as *mut _);
+    }
+
+    result
+}
+
+/// Pack a dense f32 CUDA matrix into cuSPARSELt's opaque compressed layout.
+pub fn gpu_cslt_compress<T>(
+    handle: &CusparseLtHandle,
+    sparse_input: &CudaBuffer<T>,
+    rows: usize,
+    cols: usize,
+    dtype: CuSpLtDType,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<T>>
+where
+    T: cudarc::driver::DeviceRepr + Default + Copy + 'static,
+{
+    let packed = gpu_cslt_compress_slices(handle, sparse_input.inner(), rows, cols, dtype, device)?;
+    let len = packed.len();
+    Ok(CudaBuffer {
+        data: Some(packed),
+        len,
+        alloc_len: len,
+        device_ordinal: device.ordinal(),
+        pool_fn: None,
+    })
+}
+
+/// u16 bit-pattern sibling for f16/bf16 cuSPARSELt compression.
+pub fn gpu_cslt_compress_u16(
+    handle: &CusparseLtHandle,
+    sparse_input: &CudaSlice<u16>,
+    rows: usize,
+    cols: usize,
+    dtype: CuSpLtDType,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    gpu_cslt_compress_slices(handle, sparse_input, rows, cols, dtype, device)
+}
+
+// ---------------------------------------------------------------------------
 // Structured matmul — generic over (sparse_b, dense_a) flavoured by dtype
 // ---------------------------------------------------------------------------
 

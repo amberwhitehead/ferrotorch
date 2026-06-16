@@ -210,6 +210,8 @@ pub mod roll;
 pub mod scatter_gather_kernels;
 #[cfg(feature = "cuda")]
 pub mod search;
+#[cfg(feature = "cuda")]
+pub mod semi_structured;
 mod shape_math;
 #[cfg(feature = "cuda")]
 pub mod sparse;

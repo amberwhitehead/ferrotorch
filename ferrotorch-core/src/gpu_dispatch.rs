@@ -6088,6 +6088,46 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// Convert a dense CUDA matrix into CUTLASS semi-structured sparse layout.
+    ///
+    /// The returned pair is `(values, metadata)`: `values` has the same dtype
+    /// tag as `dense` and shape `[rows, cols / 2]`; `metadata` is tagged
+    /// `DType::I16` and shape `[rows, cols / 16]` for f16/bf16 or
+    /// `[rows, cols / 8]` for f32. Implementations must keep both outputs on
+    /// CUDA and must not read the dense input back to host.
+    fn sparse_semi_structured_pack_cutlass(
+        &self,
+        _dense: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        Err(FerrotorchError::InvalidArgument {
+            message: "sparse_semi_structured_pack_cutlass GPU op not implemented for this backend"
+                .into(),
+        })
+    }
+
+    /// Convert a dense CUDA matrix into cuSPARSELt's opaque packed 2:4 layout.
+    ///
+    /// The returned pair is `(packed, indices)`: `packed` has the same dtype tag
+    /// as `dense` and stores cuSPARSELt's opaque
+    /// `[specified-values | metadata]` payload; `indices` is an on-device
+    /// `DType::I16` copy of the embedded metadata tail, matching PyTorch's
+    /// `SparseSemiStructuredTensorCUSPARSELT.indices()` surface without a host
+    /// readback.
+    fn sparse_semi_structured_pack_cusparselt(
+        &self,
+        _dense: &GpuBufferHandle,
+        _rows: usize,
+        _cols: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        Err(FerrotorchError::InvalidArgument {
+            message:
+                "sparse_semi_structured_pack_cusparselt GPU op not implemented for this backend"
+                    .into(),
+        })
+    }
+
     // -- bf16 → bf16 native dispatch (#17) -----------------------------------
     //
     // These trait methods stay in bf16 end-to-end (inputs *and* outputs are

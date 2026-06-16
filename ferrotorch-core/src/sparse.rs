@@ -18,8 +18,9 @@ use std::sync::Arc;
 
 use crate::autograd::no_grad::is_grad_enabled;
 use crate::device::Device;
-use crate::dtype::Float;
+use crate::dtype::{DType, Element, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
+use crate::int_tensor::IntTensor;
 use crate::shape::{checked_byte_count, checked_numel};
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
@@ -1621,6 +1622,293 @@ impl<T: Float> CsrTensor<T> {
 // ===========================================================================
 // SemiStructuredSparseTensor — 2:4 structured sparsity. CL-292.
 // ===========================================================================
+
+/// Backend layout for CUDA semi-structured sparse tensors.
+///
+/// Mirrors PyTorch's two public subclasses:
+/// `SparseSemiStructuredTensorCUTLASS` stores values and metadata separately,
+/// while `SparseSemiStructuredTensorCUSPARSELT` stores an opaque packed tensor
+/// whose tail is int16 metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemiStructuredSparseBackend {
+    /// CUTLASS layout: packed values plus a separate int16 metadata tensor.
+    Cutlass,
+    /// cuSPARSELt layout: one opaque packed tensor plus an int16 metadata view/copy.
+    CusparseLt,
+}
+
+impl SemiStructuredSparseBackend {
+    #[inline]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cutlass => "cutlass",
+            Self::CusparseLt => "cusparselt",
+        }
+    }
+}
+
+/// CUDA-resident PyTorch-style 2:4 semi-structured sparse tensor.
+///
+/// This is the `torch.sparse.to_sparse_semi_structured` analogue. It is
+/// intentionally separate from [`SemiStructuredSparseTensor`], whose storage is
+/// a CPU pruning-reference values/mask layout. All fields here are CUDA tensors
+/// produced by backend kernels; conversion never reads the dense input back to
+/// host.
+#[derive(Debug, Clone)]
+pub struct CudaSemiStructuredSparseTensor<T: Float> {
+    shape: Vec<usize>,
+    backend: SemiStructuredSparseBackend,
+    packed: Tensor<T>,
+    indices: IntTensor<i16>,
+    values_shape: Vec<usize>,
+    indices_shape: Vec<usize>,
+}
+
+impl<T: Float> CudaSemiStructuredSparseTensor<T> {
+    /// Original dense matrix shape.
+    #[inline]
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    /// Backend layout used for this tensor.
+    #[inline]
+    pub fn backend(&self) -> SemiStructuredSparseBackend {
+        self.backend
+    }
+
+    /// Raw packed payload.
+    ///
+    /// For CUTLASS this is the values tensor with shape `[rows, cols / 2]`.
+    /// For cuSPARSELt this is the opaque `[values | metadata]` allocation with
+    /// backend-determined second dimension, matching `torch._cslt_compress`.
+    #[inline]
+    pub fn packed(&self) -> &Tensor<T> {
+        &self.packed
+    }
+
+    /// Packed retained values.
+    ///
+    /// CUTLASS stores values directly in [`Self::packed`]. cuSPARSELt stores
+    /// values at the front of the opaque payload, so this returns a zero-copy
+    /// view of that prefix shaped as `[rows, cols / 2]`.
+    pub fn values(&self) -> FerrotorchResult<Tensor<T>> {
+        match self.backend {
+            SemiStructuredSparseBackend::Cutlass => Ok(self.packed.clone()),
+            SemiStructuredSparseBackend::CusparseLt => {
+                let value_len =
+                    checked_numel(&self.values_shape, "CudaSemiStructuredSparseTensor::values")?;
+                let flat = self.packed.view_reshape(vec![self.packed.numel()])?;
+                let prefix = flat.narrow(0, 0, value_len)?;
+                prefix.view_reshape(self.values_shape.clone())
+            }
+        }
+    }
+
+    /// Int16 semi-structured metadata / indices tensor.
+    #[inline]
+    pub fn indices(&self) -> &IntTensor<i16> {
+        &self.indices
+    }
+
+    /// Shape returned by [`Self::values`].
+    #[inline]
+    pub fn values_shape(&self) -> &[usize] {
+        &self.values_shape
+    }
+
+    /// Shape of [`Self::indices`].
+    #[inline]
+    pub fn indices_shape(&self) -> &[usize] {
+        &self.indices_shape
+    }
+}
+
+fn validate_cuda_semi_structured<T: Float>(
+    dense: &Tensor<T>,
+    backend: SemiStructuredSparseBackend,
+) -> FerrotorchResult<(usize, usize, DType)> {
+    let shape = dense.shape();
+    if shape.len() != 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "to_sparse_semi_structured: expected a 2-D dense tensor, got shape {shape:?}"
+            ),
+        });
+    }
+    if !dense.is_cuda() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "to_sparse_semi_structured: only CUDA tensors are supported, got {:?}",
+                dense.device()
+            ),
+        });
+    }
+    if !dense.is_contiguous() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "`SparseSemiStructuredTensor` only supports contiguous input tensors".into(),
+        });
+    }
+
+    let rows = shape[0];
+    let cols = shape[1];
+    let dtype = <T as Element>::dtype();
+    let (min_rows, min_cols) = match (backend, dtype) {
+        (SemiStructuredSparseBackend::CusparseLt, DType::F16 | DType::BF16) => (16, 16),
+        (SemiStructuredSparseBackend::CusparseLt, other) => {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "to_sparse_semi_structured: dtype {other} is not supported by the \
+                     cuSPARSELt backend (supported: F16, BF16)"
+                ),
+            });
+        }
+        (SemiStructuredSparseBackend::Cutlass, DType::F16 | DType::BF16) => (32, 64),
+        (SemiStructuredSparseBackend::Cutlass, DType::F32) => (32, 32),
+        (SemiStructuredSparseBackend::Cutlass, other) => {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "to_sparse_semi_structured: dtype {other} is not supported by the \
+                     CUTLASS backend (supported: F32, F16, BF16)"
+                ),
+            });
+        }
+    };
+    if rows < min_rows
+        || cols < min_cols
+        || !rows.is_multiple_of(min_rows)
+        || !cols.is_multiple_of(min_cols)
+    {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "to_sparse_semi_structured: shape {shape:?} is not supported by {}. \
+                 Both dimensions must be larger or equal than and a multiple of ({min_rows}, {min_cols})",
+                backend.as_str()
+            ),
+        });
+    }
+
+    Ok((rows, cols, dtype))
+}
+
+fn compact_cuda_dense<T: Float>(dense: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if dense.storage_offset() == 0 && dense.storage_len() == dense.numel() {
+        Ok(dense.clone())
+    } else {
+        crate::methods::contiguous_t(dense)
+    }
+}
+
+fn make_cuda_semi_structured<T: Float>(
+    dense: &Tensor<T>,
+    backend_kind: SemiStructuredSparseBackend,
+) -> FerrotorchResult<CudaSemiStructuredSparseTensor<T>> {
+    if is_grad_enabled() && dense.requires_grad() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "to_sparse_semi_structured: tracked CUDA conversion is not implemented in \
+                      ferrotorch yet. PyTorch CUTLASS propagates gradients through packed \
+                      values and cuSPARSELt raises during backward; ferrotorch rejects here \
+                      rather than creating a disconnected packed tensor. Trainable 2:4 \
+                      sparse weights are tracked in crosslink #1969."
+                .into(),
+        });
+    }
+
+    let (rows, cols, _dtype) = validate_cuda_semi_structured(dense, backend_kind)?;
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let compact = compact_cuda_dense(dense)?;
+    let dense_handle = compact.gpu_handle()?;
+
+    let values_shape = vec![rows, cols / 2];
+    let (packed_handle, indices_handle, packed_shape, indices_shape) = match backend_kind {
+        SemiStructuredSparseBackend::Cutlass => {
+            let (values, metadata) =
+                backend.sparse_semi_structured_pack_cutlass(dense_handle, rows, cols)?;
+            let indices_cols = if <T as Element>::dtype() == DType::F32 {
+                cols / 8
+            } else {
+                cols / 16
+            };
+            (
+                values,
+                metadata,
+                values_shape.clone(),
+                vec![rows, indices_cols],
+            )
+        }
+        SemiStructuredSparseBackend::CusparseLt => {
+            let (packed, metadata) =
+                backend.sparse_semi_structured_pack_cusparselt(dense_handle, rows, cols)?;
+            if !packed.len().is_multiple_of(rows) || !metadata.len().is_multiple_of(rows) {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "to_sparse_semi_structured: cuSPARSELt returned non-row-divisible \
+                         packed/meta lengths (packed={}, meta={}, rows={rows})",
+                        packed.len(),
+                        metadata.len()
+                    ),
+                });
+            }
+            let packed_cols = packed.len() / rows;
+            let metadata_cols = metadata.len() / rows;
+            (
+                packed,
+                metadata,
+                vec![rows, packed_cols],
+                vec![rows, metadata_cols],
+            )
+        }
+    };
+
+    let packed = Tensor::from_storage(TensorStorage::gpu(packed_handle), packed_shape, false)?;
+    let indices = IntTensor::from_gpu_handle(indices_handle, indices_shape.clone());
+    Ok(CudaSemiStructuredSparseTensor {
+        shape: vec![rows, cols],
+        backend: backend_kind,
+        packed,
+        indices,
+        values_shape,
+        indices_shape,
+    })
+}
+
+/// Convert a dense CUDA matrix into PyTorch-style semi-structured sparse layout.
+///
+/// f16/bf16 default to cuSPARSELt, matching PyTorch's public default when
+/// cuSPARSELt is available. f32 uses CUTLASS because PyTorch's cuSPARSELt
+/// subclass rejects f32 while its CUTLASS subclass supports it.
+pub fn to_sparse_semi_structured<T: Float>(
+    dense: &Tensor<T>,
+) -> FerrotorchResult<CudaSemiStructuredSparseTensor<T>> {
+    let dtype = <T as Element>::dtype();
+    let backend = match dtype {
+        DType::F16 | DType::BF16 => SemiStructuredSparseBackend::CusparseLt,
+        DType::F32 => SemiStructuredSparseBackend::Cutlass,
+        other => {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "to_sparse_semi_structured: dtype {other} is not supported \
+                     (supported: F32 through CUTLASS, F16/BF16 through cuSPARSELt or CUTLASS)"
+                ),
+            });
+        }
+    };
+    make_cuda_semi_structured(dense, backend)
+}
+
+/// Convert a dense CUDA matrix using the CUTLASS sparse semi-structured layout.
+pub fn to_sparse_semi_structured_cutlass<T: Float>(
+    dense: &Tensor<T>,
+) -> FerrotorchResult<CudaSemiStructuredSparseTensor<T>> {
+    make_cuda_semi_structured(dense, SemiStructuredSparseBackend::Cutlass)
+}
+
+/// Convert a dense CUDA matrix using the cuSPARSELt sparse semi-structured layout.
+pub fn to_sparse_semi_structured_cusparselt<T: Float>(
+    dense: &Tensor<T>,
+) -> FerrotorchResult<CudaSemiStructuredSparseTensor<T>> {
+    make_cuda_semi_structured(dense, SemiStructuredSparseBackend::CusparseLt)
+}
 
 /// A CPU/reference tensor stored as a 2:4 structured pruning layout.
 ///

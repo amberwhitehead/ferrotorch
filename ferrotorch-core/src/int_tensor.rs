@@ -1,7 +1,7 @@
 //! Integer-typed tensors for indexing, embedding lookups, and any other
 //! workload that needs first-class non-float storage. (#596)
 //!
-//! `IntTensor<I>` is a contiguous tensor of integers (`i32` or `i64`). It is
+//! `IntTensor<I>` is a contiguous tensor of integers (`i16`, `i32`, or `i64`). It is
 //! intentionally **not** generic over `Float` — the existing `Tensor<T: Float>`
 //! is the right type for differentiable float math. `IntTensor` is for indices
 //! and counts where autograd is a category error (mirroring PyTorch's runtime
@@ -14,7 +14,7 @@
 //! uploaded to CUDA and read back, reusing the Phase-0 DType-tagged raw-byte
 //! transport (`GpuBackend::cpu_to_gpu` / `gpu_to_cpu`) — exactly the machinery
 //! `Tensor<T>::to` uses. This is PyTorch's model: an integer tensor is ordinary
-//! raw-byte storage plus a `ScalarType` tag (`I32` / `I64`).
+//! raw-byte storage plus a `ScalarType` tag (`I16` / `I32` / `I64`).
 //!
 //! Phase 2a adds **no integer compute kernels** (that is Phase 2b). It only
 //! gives `IntTensor` a device, GPU storage, host↔device transfer, and handle
@@ -34,7 +34,7 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (IntElement trait, IntTensor<I>) | SHIPPED | trait `IntElement` at `int_tensor.rs:44`; `impl IntElement for i32 / i64` at `:57 / :74`; `pub struct IntTensor<I: IntElement>` at `:93`; consumer `grad_fns/quantize_grad.rs:139` `zero_point: &IntTensor<i64>`; `ops/phase2c.rs:115` `input: &IntTensor<I>` |
+//! | REQ-1 (IntElement trait, IntTensor<I>) | SHIPPED | trait `IntElement` at `int_tensor.rs:44`; `impl IntElement for i16 / i32 / i64`; `pub struct IntTensor<I: IntElement>` at `:93`; consumer `grad_fns/quantize_grad.rs:139` `zero_point: &IntTensor<i64>`; semi-structured sparse metadata uses `IntTensor<i16>` |
 //! | REQ-2 (constructors) | SHIPPED | `from_vec` at `int_tensor.rs:113`, `from_slice` at `:139`, `zeros` at `:144`, `arange` at `:159`, `scalar` at `:175`; consumer `grad_fns/reduction.rs:1463` `IntTensor::<i64>::scalar(best_idx)` for argmax; `ops/phase2c.rs:101, :109` `from_gpu_handle` / `from_vec` |
 //! | REQ-3 (device transfer) | SHIPPED | `device` at `int_tensor.rs:199`, `is_cuda` at `:205`, `to` at `:260`; consumer `ops/phase2c.rs` reads `input.device()` + `input.gpu_handle()` before argmax kernel launches; `// SAFETY:` D2H reinterpret at `:296-318` |
 //! | REQ-4 (cross-width cast) | SHIPPED | `cast<J>` at `int_tensor.rs:355` with `cast_gpu` fast path; consumer `ops/phase2c.rs` i32↔i64 cast kernel; test `cast_i64_to_i32_out_of_range_errors` at `:836` |
@@ -57,8 +57,9 @@ use crate::storage::TensorStorage;
 ///
 /// The [`Element`](crate::dtype::Element) bound (added in crosslink #1185 Phase
 /// 2a) is what lets a [`TensorStorage<I>`] hold integer data and tag the GPU
-/// handle with the right `ScalarType` (`i32` → `DType::I32`, `i64` →
-/// `DType::I64`). Both i32 and i64 already satisfy it via ferray.
+/// handle with the right `ScalarType` (`i16` → `DType::I16`, `i32` →
+/// `DType::I32`, `i64` → `DType::I64`). i16, i32, and i64 already satisfy it
+/// via ferray.
 pub trait IntElement:
     Element + Copy + Send + Sync + 'static + std::fmt::Debug + std::fmt::Display
 {
@@ -89,6 +90,23 @@ impl IntElement for i32 {
     }
 }
 
+impl IntElement for i16 {
+    const BITS: u32 = 16;
+    fn dtype_name() -> &'static str {
+        "i16"
+    }
+    fn try_from_i64(v: i64) -> Option<Self> {
+        if (i16::MIN as i64..=i16::MAX as i64).contains(&v) {
+            Some(v as i16)
+        } else {
+            None
+        }
+    }
+    fn to_i64(self) -> i64 {
+        self as i64
+    }
+}
+
 impl IntElement for i64 {
     const BITS: u32 = 64;
     fn dtype_name() -> &'static str {
@@ -102,7 +120,7 @@ impl IntElement for i64 {
     }
 }
 
-/// Contiguous tensor of integers (`i32` or `i64`), device-aware.
+/// Contiguous tensor of integers (`i16`, `i32`, or `i64`), device-aware.
 ///
 /// Data lives in a [`TensorStorage<I>`] (CPU `Vec<I>` or a CUDA
 /// [`GpuBufferHandle`]); the storage carries its own [`Device`]. CPU-resident
@@ -231,7 +249,7 @@ impl<I: IntElement> IntTensor<I> {
         self.storage.try_as_slice()
     }
 
-    /// Element type name (`"i32"` / `"i64"`).
+    /// Element type name (`"i16"` / `"i32"` / `"i64"`).
     pub fn dtype_name(&self) -> &'static str {
         I::dtype_name()
     }
@@ -255,7 +273,7 @@ impl<I: IntElement> IntTensor<I> {
     ///
     /// Reuses the same DType-tagged raw-byte transport as `Tensor<T>::to`:
     /// CPU→CUDA uploads via `GpuBackend::cpu_to_gpu` (handle tagged `I::dtype()`
-    /// = `DType::I32` / `I64`), CUDA→CPU reads back via `gpu_to_cpu`. Both are
+    /// = `DType::I16` / `I32` / `I64`), CUDA→CPU reads back via `gpu_to_cpu`. Both are
     /// bit-exact. On-device→same-device is a cheap storage clone.
     ///
     /// This is the **explicit** transfer entry point (PyTorch parity — like
@@ -326,7 +344,7 @@ impl<I: IntElement> IntTensor<I> {
                 // on the source, and the two allocations are distinct,
                 // satisfying `copy_nonoverlapping`'s no-overlap contract.
                 // After the copy the first `len` elements are fully
-                // initialized, and `I` is i32 or i64 — plain integer types
+                // initialized, and `I` is i16, i32, or i64 — plain integer types
                 // with no padding and no invalid bit patterns — so
                 // `set_len(len)` exposes only valid values. Nothing is
                 // assumed about `bytes`' alignment, capacity, or allocator.
@@ -433,7 +451,7 @@ impl<I: IntElement> IntTensor<I> {
 
     /// Construct a GPU-resident `IntTensor` from a CUDA buffer handle + shape.
     ///
-    /// The handle must carry the matching `DType` tag (`I32` / `I64`) — this
+    /// The handle must carry the matching `DType` tag (`I16` / `I32` / `I64`) — this
     /// is what every Phase-2b GPU op returns. Mirrors
     /// `Tensor::from_storage(TensorStorage::gpu(h), ...)`.
     pub(crate) fn from_gpu_handle(handle: GpuBufferHandle, shape: Vec<usize>) -> Self {
@@ -755,7 +773,7 @@ impl<I: IntElement> IntTensor<I> {
 }
 
 /// Wrapping integer add at the element type's width (matches the GPU
-/// `add.s{32,64}` kernel and PyTorch integer overflow semantics).
+/// `add.s{16,32,64}`-width semantics and PyTorch integer overflow behavior).
 ///
 /// CORE-101 (#1795): computing in i64 and converting back with
 /// `unwrap_or(x)` returned the unwrapped left operand whenever an i32
@@ -763,6 +781,7 @@ impl<I: IntElement> IntTensor<I> {
 /// happen at the concrete width, as [`int_wrapping_mul`] always did.
 fn int_wrapping_add<I: IntElement>(x: I, y: I) -> I {
     let v = match I::BITS {
+        16 => ((x.to_i64() as i16).wrapping_add(y.to_i64() as i16)) as i64,
         32 => ((x.to_i64() as i32).wrapping_add(y.to_i64() as i32)) as i64,
         _ => x.to_i64().wrapping_add(y.to_i64()),
     };
@@ -773,6 +792,7 @@ fn int_wrapping_add<I: IntElement>(x: I, y: I) -> I {
 /// [`int_wrapping_add`]; CORE-101 / #1795).
 fn int_wrapping_sub<I: IntElement>(x: I, y: I) -> I {
     let v = match I::BITS {
+        16 => ((x.to_i64() as i16).wrapping_sub(y.to_i64() as i16)) as i64,
         32 => ((x.to_i64() as i32).wrapping_sub(y.to_i64() as i32)) as i64,
         _ => x.to_i64().wrapping_sub(y.to_i64()),
     };
@@ -780,9 +800,10 @@ fn int_wrapping_sub<I: IntElement>(x: I, y: I) -> I {
 }
 
 /// Wrapping integer multiply at the element type's width (matches the GPU
-/// `mul.lo.s{32,64}` kernel, which truncates to the operand width).
+/// `mul.lo.s{16,32,64}`-width semantics, which truncate to the operand width).
 fn int_wrapping_mul<I: IntElement>(x: I, y: I) -> I {
     let prod = match I::BITS {
+        16 => (x.to_i64() as i16).wrapping_mul(y.to_i64() as i16) as i64,
         32 => (x.to_i64() as i32).wrapping_mul(y.to_i64() as i32) as i64,
         _ => x.to_i64().wrapping_mul(y.to_i64()),
     };
@@ -834,6 +855,7 @@ fn int_remainder_ref<I: IntElement>(x: I, y: I) -> I {
 /// CPU reference for bitwise NOT at the element's width.
 fn int_bitnot_ref<I: IntElement>(x: I) -> I {
     let v = match I::BITS {
+        16 => !(x.to_i64() as i16) as i64,
         32 => !(x.to_i64() as i32) as i64,
         _ => !x.to_i64(),
     };
@@ -845,6 +867,7 @@ fn int_bitnot_ref<I: IntElement>(x: I) -> I {
 fn int_shl_ref<I: IntElement>(x: I, y: I) -> I {
     let sh = (y.to_i64() as u32) & (I::BITS - 1);
     let v = match I::BITS {
+        16 => ((x.to_i64() as i16).wrapping_shl(sh)) as i64,
         32 => ((x.to_i64() as i32).wrapping_shl(sh)) as i64,
         _ => x.to_i64().wrapping_shl(sh),
     };
@@ -856,6 +879,7 @@ fn int_shl_ref<I: IntElement>(x: I, y: I) -> I {
 fn int_shr_ref<I: IntElement>(x: I, y: I) -> I {
     let sh = (y.to_i64() as u32) & (I::BITS - 1);
     let v = match I::BITS {
+        16 => ((x.to_i64() as i16).wrapping_shr(sh)) as i64,
         32 => ((x.to_i64() as i32).wrapping_shr(sh)) as i64,
         _ => x.to_i64().wrapping_shr(sh),
     };
@@ -954,9 +978,11 @@ mod tests {
     }
 
     #[test]
-    fn dtype_name_reports_i32_or_i64() {
+    fn dtype_name_reports_i16_i32_or_i64() {
+        let t16 = IntTensor::<i16>::scalar(0);
         let t32 = IntTensor::<i32>::scalar(0);
         let t64 = IntTensor::<i64>::scalar(0);
+        assert_eq!(t16.dtype_name(), "i16");
         assert_eq!(t32.dtype_name(), "i32");
         assert_eq!(t64.dtype_name(), "i64");
     }

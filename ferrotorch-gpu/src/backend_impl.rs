@@ -387,6 +387,50 @@ impl CudaBackendImpl {
             })
     }
 
+    /// Wrap a `CudaBuffer<i16>` into a type-erased [`GpuBufferHandle`] tagged
+    /// `DType::I16`.
+    ///
+    /// CUTLASS semi-structured sparse metadata is `torch.int16`; this wrapper
+    /// gives that metadata the same CUDA-resident storage invariants as i32/i64
+    /// integer tensors instead of smuggling it through a float or u16 dtype.
+    fn wrap_buffer_i16(buf: CudaBuffer<i16>, ordinal: usize) -> GpuBufferHandle {
+        let len = buf.len();
+        // SAFETY: `buf` is a `CudaBuffer<i16>`, `len` is its element count,
+        // and the handle tag names that same scalar type/device ordinal.
+        unsafe { GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::I16) }
+    }
+
+    /// Extract a `&CudaBuffer<i16>` from a [`GpuBufferHandle`], asserting the
+    /// `DType::I16` tag first.
+    fn unwrap_buffer_i16(handle: &GpuBufferHandle) -> FerrotorchResult<&CudaBuffer<i16>> {
+        if handle.dtype() != DType::I16 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("expected I16 buffer, handle is tagged {}", handle.dtype()),
+            });
+        }
+        handle
+            .downcast_ref::<CudaBuffer<i16>>()
+            .ok_or(FerrotorchError::InvalidArgument {
+                message: "GPU handle does not contain a CudaBuffer<i16>".into(),
+            })
+    }
+
+    /// Extract a `&mut CudaBuffer<i16>` from a [`GpuBufferHandle`].
+    fn unwrap_buffer_i16_mut(
+        handle: &mut GpuBufferHandle,
+    ) -> FerrotorchResult<&mut CudaBuffer<i16>> {
+        if handle.dtype() != DType::I16 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("expected I16 buffer, handle is tagged {}", handle.dtype()),
+            });
+        }
+        handle
+            .downcast_mut::<CudaBuffer<i16>>()
+            .ok_or(FerrotorchError::InvalidArgument {
+                message: "GPU handle does not contain a CudaBuffer<i16>".into(),
+            })
+    }
+
     /// Wrap a `CudaBuffer<i32>` into a type-erased [`GpuBufferHandle`] tagged
     /// `DType::I32`.
     ///
@@ -885,6 +929,9 @@ impl GpuBackend for CudaBackendImpl {
             // distinguished from bf16 only by the `DType::F16` tag.
             let (ptr, _sync) = slice.device_ptr(&stream);
             ptr as *const std::ffi::c_void
+        } else if let Ok(buf) = Self::unwrap_buffer_i16(handle) {
+            let (ptr, _sync) = buf.inner().device_ptr(&stream);
+            ptr as *const std::ffi::c_void
         } else if let Ok(buf) = Self::unwrap_buffer_i32(handle) {
             // i32 storage: real `CudaBuffer<i32>` (crosslink #1185 Phase 2a).
             let (ptr, _sync) = buf.inner().device_ptr(&stream);
@@ -918,6 +965,9 @@ impl GpuBackend for CudaBackendImpl {
             ptr as *mut std::ffi::c_void
         } else if let Some(slice) = handle.downcast_mut::<cudarc::driver::CudaSlice<u16>>() {
             let (ptr, _sync) = slice.device_ptr_mut(&stream);
+            ptr as *mut std::ffi::c_void
+        } else if let Ok(buf) = Self::unwrap_buffer_i16_mut(handle) {
+            let (ptr, _sync) = buf.inner_mut().device_ptr_mut(&stream);
             ptr as *mut std::ffi::c_void
         } else if let Some(buf) = handle.downcast_mut::<CudaBuffer<i32>>() {
             // i32 storage (crosslink #1185 Phase 2a).
@@ -1083,6 +1133,28 @@ impl GpuBackend for CudaBackendImpl {
                     .map_err(|e| Self::map_gpu_err(crate::error::GpuError::Driver(e)))?;
                 Ok(Self::wrap_buffer_f16(slice, device))
             }
+            DType::I16 => {
+                if !data.len().is_multiple_of(2) {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "cpu_to_gpu: byte length {} is not divisible by dtype I16 element size 2",
+                            data.len()
+                        ),
+                    });
+                }
+                let count = data.len() / 2;
+                // SAFETY:
+                // - Caller guarantees `data` is the byte serialisation of a
+                //   contiguous `&[i16]` with `data.len() == count * 2`.
+                // - i16 has size 2 and align 2; the source allocation is
+                //   2-byte-aligned and `data.as_ptr()` inherits that alignment.
+                // - The slice is consumed by `transfer::cpu_to_gpu` before this
+                //   frame returns; no borrowed reference escapes.
+                let i16_data: &[i16] =
+                    unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<i16>(), count) };
+                let buf = crate::transfer::cpu_to_gpu(i16_data, dev).map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_i16(buf, device))
+            }
             DType::I32 => {
                 // Integer device storage (crosslink #1185 Phase 2a). i32 has
                 // cudarc `DeviceRepr` natively — no `CudaSlice<u16>` bit-pattern
@@ -1147,7 +1219,7 @@ impl GpuBackend for CudaBackendImpl {
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "cpu_to_gpu: dtype {other} not supported on CUDA \
-                     (supported: F32, F64, BF16, F16, I32, I64, Bool)"
+                     (supported: F32, F64, BF16, F16, I16, I32, I64, Bool)"
                 ),
             }),
         }
@@ -1216,6 +1288,25 @@ impl GpuBackend for CudaBackendImpl {
                     crate::transfer::cpu_to_gpu_pinned(f64_data, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer_f64(buf, device))
             }
+            DType::I16 => {
+                if !data.len().is_multiple_of(2) {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "cpu_to_gpu_pinned: byte length {} is not divisible by dtype I16 element size 2",
+                            data.len()
+                        ),
+                    });
+                }
+                let count = data.len() / 2;
+                // SAFETY: identical invariants to the `cpu_to_gpu` I16 arm —
+                // `data` is a contiguous `&[i16]` byte serialisation, consumed
+                // immediately by the pinned transfer.
+                let i16_data: &[i16] =
+                    unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<i16>(), count) };
+                let buf =
+                    crate::transfer::cpu_to_gpu_pinned(i16_data, dev).map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_i16(buf, device))
+            }
             DType::I32 => {
                 // Integer pinned transport (crosslink #1185 Phase 2a). i32 has
                 // cudarc `DeviceRepr + ValidAsZeroBits + Copy`, so the generic
@@ -1257,7 +1348,7 @@ impl GpuBackend for CudaBackendImpl {
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "cpu_to_gpu_pinned: dtype {other} not supported on CUDA \
-                     (supported: F32, F64, I32, I64, Bool)"
+                     (supported: F32, F64, I16, I32, I64, Bool)"
                 ),
             }),
         }
@@ -1343,6 +1434,29 @@ impl GpuBackend for CudaBackendImpl {
                 Vec::from_raw_parts(ptr, len, cap)
             };
             Ok(bytes)
+        } else if let Ok(buf) = Self::unwrap_buffer_i16(handle) {
+            let i16_data = crate::transfer::gpu_to_cpu(buf, dev).map_err(Self::map_gpu_err)?;
+            let byte_len =
+                i16_data
+                    .len()
+                    .checked_mul(2)
+                    .ok_or_else(|| FerrotorchError::InvalidArgument {
+                        message: "gpu_to_cpu: i16 byte length overflow".into(),
+                    })?;
+            let mut bytes = vec![0u8; byte_len];
+            // SAFETY: `bytes` was freshly allocated for exactly
+            // `i16_data.len() * size_of::<i16>()` bytes. `i16_data` is fully
+            // initialized, and copying through `u8` imposes no source
+            // alignment requirement. The returned allocation remains an
+            // ordinary `Vec<u8>` as required by the core backend contract.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    i16_data.as_ptr().cast::<u8>(),
+                    bytes.as_mut_ptr(),
+                    byte_len,
+                );
+            }
+            Ok(bytes)
         } else if let Ok(buf) = Self::unwrap_buffer_i32(handle) {
             // i32 device storage (crosslink #1185 Phase 2a). Real
             // `CudaBuffer<i32>` (not a `CudaSlice<u16>` bit pattern), so the
@@ -1393,7 +1507,7 @@ impl GpuBackend for CudaBackendImpl {
             Err(FerrotorchError::InvalidArgument {
                 message: "gpu_to_cpu: handle is not a recognised dtype \
                           (expected CudaBuffer<f32>, CudaBuffer<f64>, \
-                          CudaSlice<u16> for bf16/f16, CudaBuffer<i32>/<i64>, \
+                          CudaSlice<u16> for bf16/f16, CudaBuffer<i16>/<i32>/<i64>, \
                           or CudaBuffer<u8> for bool)"
                     .into(),
             })
@@ -1472,6 +1586,18 @@ impl GpuBackend for CudaBackendImpl {
                 let cloned = slice.try_clone().map_err(map_drv)?;
                 Ok(Self::wrap_buffer_f16(cloned, ordinal))
             }
+            DType::I16 => {
+                let buf = Self::unwrap_buffer_i16(handle)?;
+                let slice = buf.inner().try_clone().map_err(map_drv)?;
+                let cloned = CudaBuffer {
+                    data: Some(slice),
+                    len: buf.len(),
+                    alloc_len: buf.alloc_len(),
+                    device_ordinal: ordinal,
+                    pool_fn: None,
+                };
+                Ok(Self::wrap_buffer_i16(cloned, ordinal))
+            }
             DType::I32 => {
                 let buf = Self::unwrap_buffer_i32(handle)?;
                 let slice = buf.inner().try_clone().map_err(map_drv)?;
@@ -1515,7 +1641,7 @@ impl GpuBackend for CudaBackendImpl {
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "clone_buffer: dtype {other} has no device-to-device copy \
-                     path on CUDA (supported: F32, F64, BF16, F16, I32, I64, Bool)"
+                     path on CUDA (supported: F32, F64, BF16, F16, I16, I32, I64, Bool)"
                 ),
             }),
         }
@@ -1573,6 +1699,11 @@ impl GpuBackend for CudaBackendImpl {
                 let buf = crate::transfer::alloc_zeros_f64(len, dev).map_err(Self::map_gpu_err)?;
                 Ok(Self::wrap_buffer_f64(buf, device))
             }
+            DType::I16 => {
+                let buf: CudaBuffer<i16> =
+                    crate::transfer::alloc_zeros(len, dev).map_err(Self::map_gpu_err)?;
+                Ok(Self::wrap_buffer_i16(buf, device))
+            }
             DType::I32 => {
                 // Integer zero-alloc (crosslink #1185 Phase 2a). i32 has cudarc
                 // `DeviceRepr + ValidAsZeroBits`; the generic (non-pooled)
@@ -1603,7 +1734,7 @@ impl GpuBackend for CudaBackendImpl {
             other => Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "alloc_zeros: dtype {other} not supported on CUDA \
-                     (supported: F32, F64, BF16, F16, I32, I64, Bool)"
+                     (supported: F32, F64, BF16, F16, I16, I32, I64, Bool)"
                 ),
             }),
         }
@@ -8588,6 +8719,155 @@ impl GpuBackend for CudaBackendImpl {
         )
         .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_bf16(out, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn sparse_semi_structured_pack_cutlass(
+        &self,
+        dense: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        let dev = self.device(dense.device_ordinal())?;
+        let ordinal = dense.device_ordinal();
+        match dense.dtype() {
+            DType::F32 => {
+                let (values, meta) = crate::semi_structured::pack_cutlass_f32(
+                    Self::unwrap_buffer(dense)?,
+                    rows,
+                    cols,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok((
+                    Self::wrap_buffer(values, ordinal),
+                    Self::wrap_buffer_i16(meta, ordinal),
+                ))
+            }
+            DType::F16 => {
+                let (values, meta) = crate::semi_structured::pack_cutlass_u16(
+                    Self::unwrap_buffer_f16(dense)?,
+                    rows,
+                    cols,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok((
+                    Self::wrap_buffer_f16(values, ordinal),
+                    Self::wrap_buffer_i16(meta, ordinal),
+                ))
+            }
+            DType::BF16 => {
+                let (values, meta) = crate::semi_structured::pack_cutlass_u16(
+                    Self::unwrap_buffer_bf16(dense)?,
+                    rows,
+                    cols,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok((
+                    Self::wrap_buffer_bf16(values, ordinal),
+                    Self::wrap_buffer_i16(meta, ordinal),
+                ))
+            }
+            other => Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "sparse_semi_structured_pack_cutlass: dtype {other} is not supported \
+                     (supported: F32, F16, BF16)"
+                ),
+            }),
+        }
+    }
+
+    #[cfg(all(feature = "cuda", feature = "cusparselt"))]
+    fn sparse_semi_structured_pack_cusparselt(
+        &self,
+        dense: &GpuBufferHandle,
+        rows: usize,
+        cols: usize,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle)> {
+        let dev = self.device(dense.device_ordinal())?;
+        let handle = self.cusparselt()?;
+        let ordinal = dense.device_ordinal();
+        match dense.dtype() {
+            DType::F16 => {
+                let packed = crate::cusparselt::gpu_cslt_compress_u16(
+                    handle,
+                    Self::unwrap_buffer_f16(dense)?,
+                    rows,
+                    cols,
+                    crate::cusparselt::CuSpLtDType::F16,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                let values_len =
+                    rows.checked_mul(cols / 2)
+                        .ok_or_else(|| FerrotorchError::InvalidArgument {
+                            message:
+                                "sparse_semi_structured_pack_cusparselt: values length overflow"
+                                    .into(),
+                        })?;
+                let meta_len = packed.len().checked_sub(values_len).ok_or_else(|| {
+                    FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "sparse_semi_structured_pack_cusparselt: packed length {} \
+                                 is smaller than values length {values_len}",
+                            packed.len()
+                        ),
+                    }
+                })?;
+                let indices = crate::semi_structured::copy_u16_tail_to_i16(
+                    &packed, values_len, meta_len, dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok((
+                    Self::wrap_buffer_f16(packed, ordinal),
+                    Self::wrap_buffer_i16(indices, ordinal),
+                ))
+            }
+            DType::BF16 => {
+                let packed = crate::cusparselt::gpu_cslt_compress_u16(
+                    handle,
+                    Self::unwrap_buffer_bf16(dense)?,
+                    rows,
+                    cols,
+                    crate::cusparselt::CuSpLtDType::Bf16,
+                    dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                let values_len =
+                    rows.checked_mul(cols / 2)
+                        .ok_or_else(|| FerrotorchError::InvalidArgument {
+                            message:
+                                "sparse_semi_structured_pack_cusparselt: values length overflow"
+                                    .into(),
+                        })?;
+                let meta_len = packed.len().checked_sub(values_len).ok_or_else(|| {
+                    FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "sparse_semi_structured_pack_cusparselt: packed length {} \
+                                 is smaller than values length {values_len}",
+                            packed.len()
+                        ),
+                    }
+                })?;
+                let indices = crate::semi_structured::copy_u16_tail_to_i16(
+                    &packed, values_len, meta_len, dev,
+                )
+                .map_err(Self::map_gpu_err)?;
+                Ok((
+                    Self::wrap_buffer_bf16(packed, ordinal),
+                    Self::wrap_buffer_i16(indices, ordinal),
+                ))
+            }
+            other => Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "sparse_semi_structured_pack_cusparselt: dtype {other} is not supported \
+                     by PyTorch's cuSPARSELt SparseSemiStructuredTensor surface \
+                     (supported: F16, BF16)"
+                ),
+            }),
+        }
     }
 
     // -- bf16 → bf16 native dispatch (#17) -----------------------------------
