@@ -8,8 +8,9 @@
 //! | REQ-4 | SHIPPED | validation guard in `magnitude_prune`; non-test consumer part of pub-function contract. |
 //! | REQ-5 | SHIPPED | differentiable mask multiplication via `apply_constant_mask` -> `grad_fns::arithmetic::mul` (`MulBackward` edge to the original parameter — CORE-082 -> #1776); non-test consumer sparse-finetune workflows. |
 
-use crate::dtype::Float;
+use crate::dtype::{DType, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
+use crate::gpu_dispatch::{GpuBackend, GpuBufferHandle};
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
 use crate::torch_topk_cpu::torch_cpu_topk_indices;
@@ -78,6 +79,10 @@ pub fn magnitude_prune<T: Float>(
         });
     }
 
+    if weights.is_cuda() {
+        return magnitude_prune_cuda(weights, sparsity);
+    }
+
     let data = weights.data()?;
     let numel = data.len();
     let n_prune = ((numel as f64) * sparsity).round_ties_even() as usize;
@@ -93,6 +98,27 @@ pub fn magnitude_prune<T: Float>(
     apply_constant_mask(weights, mask)
 }
 
+fn magnitude_prune_cuda<T: Float>(
+    weights: &Tensor<T>,
+    sparsity: f64,
+) -> FerrotorchResult<Tensor<T>> {
+    let numel = crate::shape::checked_numel(weights.shape(), "magnitude_prune")?;
+    let n_prune = ((numel as f64) * sparsity).round_ties_even() as usize;
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let ordinal = weights.gpu_handle()?.device_ordinal();
+
+    let mut mask = fill_cuda_mask::<T>(backend, numel, 1.0, ordinal)?;
+    if n_prune > 0 {
+        let weights_c = weights.contiguous()?;
+        let scores = abs_handle_cuda::<T>(backend, weights_c.gpu_handle()?)?;
+        let (_values, prune_indices) = backend.topk_nd(&scores, 1, numel, 1, n_prune, false)?;
+        mask =
+            scatter_zero_mask_cuda::<T>(backend, &mask, &prune_indices, &[numel], &[n_prune], 0)?;
+    }
+
+    apply_cuda_mask(weights, mask)
+}
+
 /// `weights * mask` with `mask` a constant (non-tracking) 0/1 tensor, via
 /// the real `mul` op so a `MulBackward` edge connects the output to the
 /// original parameter (torch's `weight = weight_orig * weight_mask`
@@ -101,6 +127,88 @@ pub fn magnitude_prune<T: Float>(
 /// preserved) and `NaN * 0.0 == NaN`.
 fn apply_constant_mask<T: Float>(weights: &Tensor<T>, mask: Vec<T>) -> FerrotorchResult<Tensor<T>> {
     let mask_t = Tensor::from_storage(TensorStorage::cpu(mask), weights.shape().to_vec(), false)?;
+    crate::grad_fns::arithmetic::mul(weights, &mask_t)
+}
+
+fn fill_cuda_mask<T: Float>(
+    backend: &dyn GpuBackend,
+    numel: usize,
+    value: f32,
+    ordinal: usize,
+) -> FerrotorchResult<GpuBufferHandle> {
+    match T::dtype() {
+        DType::F32 => backend.fill_f32(numel, value, ordinal),
+        DType::F64 => backend.fill_f64(numel, value as f64, ordinal),
+        DType::F16 => backend.fill_f16(numel, value, ordinal),
+        DType::BF16 => backend.fill_bf16_bf16(numel, value, ordinal),
+        dtype => Err(FerrotorchError::InvalidArgument {
+            message: format!("pruning CUDA mask: unsupported floating dtype {dtype}"),
+        }),
+    }
+}
+
+fn abs_handle_cuda<T: Float>(
+    backend: &dyn GpuBackend,
+    handle: &GpuBufferHandle,
+) -> FerrotorchResult<GpuBufferHandle> {
+    match T::dtype() {
+        DType::F32 => backend.abs_f32(handle),
+        DType::F64 => backend.abs_f64(handle),
+        DType::F16 => backend.abs_f16(handle),
+        DType::BF16 => backend.abs_bf16_bf16(handle),
+        dtype => Err(FerrotorchError::InvalidArgument {
+            message: format!("pruning CUDA abs: unsupported floating dtype {dtype}"),
+        }),
+    }
+}
+
+fn squared_scores_cuda<T: Float>(
+    backend: &dyn GpuBackend,
+    handle: &GpuBufferHandle,
+) -> FerrotorchResult<GpuBufferHandle> {
+    match T::dtype() {
+        DType::F32 => backend.mul_f32(handle, handle),
+        DType::F64 => backend.mul_f64(handle, handle),
+        DType::F16 => backend.mul_f16(handle, handle),
+        DType::BF16 => backend.mul_bf16_bf16(handle, handle),
+        dtype => Err(FerrotorchError::InvalidArgument {
+            message: format!("pruning CUDA squared scores: unsupported floating dtype {dtype}"),
+        }),
+    }
+}
+
+fn scatter_zero_mask_cuda<T: Float>(
+    backend: &dyn GpuBackend,
+    mask: &GpuBufferHandle,
+    indices: &GpuBufferHandle,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+) -> FerrotorchResult<GpuBufferHandle> {
+    match T::dtype() {
+        DType::F32 => {
+            backend.scatter_value_nd_f32(mask, indices, 0.0, input_shape, index_shape, dim)
+        }
+        DType::F64 => {
+            backend.scatter_value_nd_f64(mask, indices, 0.0, input_shape, index_shape, dim)
+        }
+        DType::F16 => {
+            backend.scatter_value_nd_f16(mask, indices, 0.0, input_shape, index_shape, dim)
+        }
+        DType::BF16 => {
+            backend.scatter_value_nd_bf16(mask, indices, 0.0, input_shape, index_shape, dim)
+        }
+        dtype => Err(FerrotorchError::InvalidArgument {
+            message: format!("pruning CUDA scatter mask: unsupported floating dtype {dtype}"),
+        }),
+    }
+}
+
+fn apply_cuda_mask<T: Float>(
+    weights: &Tensor<T>,
+    mask: GpuBufferHandle,
+) -> FerrotorchResult<Tensor<T>> {
+    let mask_t = Tensor::from_storage(TensorStorage::gpu(mask), weights.shape().to_vec(), false)?;
     crate::grad_fns::arithmetic::mul(weights, &mask_t)
 }
 
@@ -131,7 +239,6 @@ fn apply_constant_mask<T: Float>(weights: &Tensor<T>, mask: Vec<T>) -> Ferrotorc
 /// when the input requires grad, backward delivers `grad * mask` to the
 /// original parameter (CORE-082 -> #1776).
 pub fn apply_2_4_mask<T: Float>(weights: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let data = weights.data()?;
     let shape = weights.shape();
 
     let last_dim = *shape
@@ -151,6 +258,12 @@ pub fn apply_2_4_mask<T: Float>(weights: &Tensor<T>) -> FerrotorchResult<Tensor<
             ),
         });
     }
+
+    if weights.is_cuda() {
+        return apply_2_4_mask_cuda(weights, last_dim);
+    }
+
+    let data = weights.data()?;
 
     // Build the constant 0/1 mask. The storage is contiguous row-major and
     // `last_dim % 4 == 0`, so 4-element groups taken row by row are exactly
@@ -173,6 +286,41 @@ pub fn apply_2_4_mask<T: Float>(weights: &Tensor<T>) -> FerrotorchResult<Tensor<
     }
 
     apply_constant_mask(weights, mask)
+}
+
+fn apply_2_4_mask_cuda<T: Float>(
+    weights: &Tensor<T>,
+    last_dim: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    let numel = crate::shape::checked_numel(weights.shape(), "apply_2_4_mask")?;
+    let groups_per_row = last_dim / 4;
+    let row_count = numel.checked_div(last_dim).unwrap_or(0);
+    let num_groups = row_count
+        .checked_mul(groups_per_row)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!(
+                "apply_2_4_mask: row_count {row_count} * groups_per_row {groups_per_row} overflows usize"
+            ),
+        })?;
+
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let ordinal = weights.gpu_handle()?.device_ordinal();
+    let mut mask = fill_cuda_mask::<T>(backend, numel, 1.0, ordinal)?;
+    if num_groups > 0 {
+        let weights_c = weights.contiguous()?;
+        let scores = squared_scores_cuda::<T>(backend, weights_c.gpu_handle()?)?;
+        let (_values, prune_indices) = backend.topk_nd(&scores, num_groups, 4, 1, 2, false)?;
+        mask = scatter_zero_mask_cuda::<T>(
+            backend,
+            &mask,
+            &prune_indices,
+            &[num_groups, 4],
+            &[num_groups, 2],
+            1,
+        )?;
+    }
+
+    apply_cuda_mask(weights, mask)
 }
 
 /// Compute the sparsity ratio of a tensor: fraction of exact zeros.

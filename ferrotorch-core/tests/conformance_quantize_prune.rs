@@ -103,15 +103,14 @@
 //!   - #1910: `apply_2_4_mask` uses the same CPU `topk(largest=False)`
 //!     in-block tie selection as `WeightNormSparsifier`.
 //!
-//! GPU note (per the dispatch's most-likely-failure-mode):
-//! `quantize`, `dequantize`, `quantized_matmul`, `magnitude_prune` and
-//! `apply_2_4_mask` all consume `tensor.data()?` which returns
-//! `Err(GpuTensorNotAccessible)` for GPU-resident tensors. This is the
-//! PyTorch-parity behaviour (`torch.quantize_per_tensor` is a CPU op;
-//! attempting to call it on a CUDA tensor raises a `RuntimeError`). We
-//! assert this contract in `gpu_tensor_returns_error_for_quantize` so
-//! the policy is locked down. No `cascade_skip` references are needed
-//! because the conformance suite operates on CPU inputs by design.
+//! GPU note (per PyTorch parity):
+//! `quantize`, `dequantize`, and `quantized_matmul` remain CPU-domain APIs
+//! here; `torch.quantize_per_tensor` rejects CUDA tensors, and
+//! ferrotorch must surface a structured error instead of silently reading
+//! GPU memory back to the host. Pruning is different: PyTorch constructs
+//! masks with tensor ops (`ones_like`, `topk`, `scatter`) and applies
+//! `mask.to(dtype=orig.dtype) * orig`, so CUDA pruning must stay
+//! CUDA-resident and differentiable. The GPU tests below pin that contract.
 
 use std::path::PathBuf;
 
@@ -1303,13 +1302,11 @@ fn cuda_rng_next_seed_advances_state() {
 }
 
 // ---------------------------------------------------------------------------
-// GPU policy: quantize/prune are CPU-domain APIs (PyTorch parity).
-// Per `rust-gpu-discipline` §3 the contract for an unsupported op is a
-// structured error, not a silent fallback. ferrotorch's quantize call
-// reads `tensor.data()?` which returns `GpuTensorNotAccessible` for
-// CUDA-resident tensors — that IS the structured error here, and we
-// pin the contract so a future change can't accidentally reintroduce
-// a host-readback fallback.
+// GPU policy: quantize is CPU-domain, pruning is CUDA-domain.
+// Quantize must still reject CUDA tensors instead of silently host-reading
+// them. Pruning mirrors PyTorch's tensor-mask parametrization and therefore
+// must build/apply masks on-device and preserve the autograd edge to the
+// original parameter.
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "gpu")]
@@ -1327,6 +1324,79 @@ mod gpu {
         });
     }
 
+    fn upload_f32(data: &[f64], shape: &[usize], requires_grad: bool) -> Tensor<f32> {
+        make_cpu_f32(data, shape, false)
+            .to(Device::Cuda(0))
+            .expect("upload to cuda")
+            .requires_grad_(requires_grad)
+    }
+
+    fn upload_f16(data: &[f32], shape: &[usize], requires_grad: bool) -> Tensor<half::f16> {
+        let values: Vec<half::f16> = data.iter().copied().map(half::f16::from_f32).collect();
+        Tensor::from_storage(TensorStorage::cpu(values), shape.to_vec(), false)
+            .expect("make f16 CPU tensor")
+            .to(Device::Cuda(0))
+            .expect("upload f16 to cuda")
+            .requires_grad_(requires_grad)
+    }
+
+    fn upload_bf16(data: &[f32], shape: &[usize], requires_grad: bool) -> Tensor<half::bf16> {
+        let values: Vec<half::bf16> = data.iter().copied().map(half::bf16::from_f32).collect();
+        Tensor::from_storage(TensorStorage::cpu(values), shape.to_vec(), false)
+            .expect("make bf16 CPU tensor")
+            .to(Device::Cuda(0))
+            .expect("upload bf16 to cuda")
+            .requires_grad_(requires_grad)
+    }
+
+    fn read_cuda_f32(t: &Tensor<f32>, label: &str) -> Vec<f32> {
+        assert_eq!(t.device(), Device::Cuda(0), "{label}: tensor left CUDA");
+        t.cpu()
+            .unwrap_or_else(|e| panic!("{label}: copy to CPU: {e}"))
+            .data()
+            .unwrap_or_else(|e| panic!("{label}: CPU data: {e}"))
+            .to_vec()
+    }
+
+    fn read_cuda_f16(t: &Tensor<half::f16>, label: &str) -> Vec<f32> {
+        assert_eq!(t.device(), Device::Cuda(0), "{label}: tensor left CUDA");
+        t.cpu()
+            .unwrap_or_else(|e| panic!("{label}: copy to CPU: {e}"))
+            .data()
+            .unwrap_or_else(|e| panic!("{label}: CPU data: {e}"))
+            .iter()
+            .map(|v| v.to_f32())
+            .collect()
+    }
+
+    fn read_cuda_bf16(t: &Tensor<half::bf16>, label: &str) -> Vec<f32> {
+        assert_eq!(t.device(), Device::Cuda(0), "{label}: tensor left CUDA");
+        t.cpu()
+            .unwrap_or_else(|e| panic!("{label}: copy to CPU: {e}"))
+            .data()
+            .unwrap_or_else(|e| panic!("{label}: CPU data: {e}"))
+            .iter()
+            .map(|v| v.to_f32())
+            .collect()
+    }
+
+    fn assert_bits_eq(actual: &[f32], expected: &[f32], label: &str) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{label}: length mismatch (actual={}, expected={})",
+            actual.len(),
+            expected.len()
+        );
+        for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                e.to_bits(),
+                "{label}: index {i} bit mismatch (actual={a:?}, expected={e:?})"
+            );
+        }
+    }
+
     #[test]
     fn gpu_tensor_returns_error_for_quantize() {
         ensure_cuda_backend();
@@ -1342,26 +1412,206 @@ mod gpu {
     }
 
     #[test]
-    fn gpu_tensor_returns_error_for_magnitude_prune() {
+    fn gpu_magnitude_prune_stays_cuda_and_masks_backward() {
         ensure_cuda_backend();
-        let cpu = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0], &[4], false);
-        let gpu = cpu.to(Device::Cuda(0)).expect("upload to cuda");
-        let res = magnitude_prune(&gpu, 0.5);
-        assert!(
-            res.is_err(),
-            "magnitude_prune on a GPU tensor must return Err (PyTorch parity), got Ok"
+
+        // Live torch 2.11.0+cu130 oracle:
+        //   prune.l1_unstructured(m, "weight", amount=0.5)
+        //   m.weight.device == cuda:0
+        //   m.weight == [0., -4., 0., -3.]
+        //   m.weight_orig.grad == [0., 20., 0., 40.]
+        let x = upload_f32(&[1.0, -4.0, 2.0, -3.0], &[4], true);
+        let pruned = magnitude_prune(&x, 0.5).expect("magnitude_prune cuda");
+
+        assert_bits_eq(
+            &read_cuda_f32(&pruned, "magnitude_prune output"),
+            &[0.0, -4.0, 0.0, -3.0],
+            "magnitude_prune output",
+        );
+
+        let coeffs = upload_f32(&[10.0, 20.0, 30.0, 40.0], &[4], false);
+        let prod = ferrotorch_core::grad_fns::arithmetic::mul(&pruned, &coeffs)
+            .expect("magnitude_prune grad probe mul");
+        let loss = ferrotorch_core::grad_fns::reduction::sum(&prod)
+            .expect("magnitude_prune grad probe sum");
+        loss.backward().expect("magnitude_prune backward");
+
+        let grad = x
+            .grad()
+            .expect("grad access")
+            .expect("CUDA original leaf must receive masked gradient");
+        assert_bits_eq(
+            &read_cuda_f32(&grad, "magnitude_prune grad"),
+            &[0.0, 20.0, 0.0, 40.0],
+            "magnitude_prune grad",
         );
     }
 
     #[test]
-    fn gpu_tensor_returns_error_for_apply_2_4_mask() {
+    fn gpu_apply_2_4_mask_stays_cuda_and_masks_backward() {
         ensure_cuda_backend();
-        let cpu = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[8], false);
-        let gpu = cpu.to(Device::Cuda(0)).expect("upload to cuda");
-        let res = apply_2_4_mask(&gpu);
+
+        // Live torch 2.11.0+cu130 tensor-op oracle for sparse blocks:
+        //   scores = x.view(-1, 4) * x.view(-1, 4)
+        //   idx = torch.topk(scores, k=2, dim=1, largest=False).indices
+        //   mask = torch.ones_like(scores).scatter(1, idx, 0).view_as(x)
+        //   y = x * mask
+        //   y.device == cuda:0
+        //   y == [0., -4., 0., -3., 0., 0., 0.9, 0.8]
+        //   x.grad == [0., 20., 0., 40., 0., 0., 70., 80.]
+        let x = upload_f32(&[1.0, -4.0, 2.0, -3.0, 0.5, 0.1, 0.9, 0.8], &[8], true);
+        let masked = apply_2_4_mask(&x).expect("apply_2_4_mask cuda");
+
+        assert_bits_eq(
+            &read_cuda_f32(&masked, "apply_2_4_mask output"),
+            &[0.0, -4.0, 0.0, -3.0, 0.0, 0.0, 0.9, 0.8],
+            "apply_2_4_mask output",
+        );
+
+        let coeffs = upload_f32(
+            &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0],
+            &[8],
+            false,
+        );
+        let prod = ferrotorch_core::grad_fns::arithmetic::mul(&masked, &coeffs)
+            .expect("2:4 grad probe mul");
+        let loss = ferrotorch_core::grad_fns::reduction::sum(&prod).expect("2:4 grad probe sum");
+        loss.backward().expect("2:4 backward");
+
+        let grad = x
+            .grad()
+            .expect("grad access")
+            .expect("CUDA original leaf must receive 2:4 masked gradient");
+        assert_bits_eq(
+            &read_cuda_f32(&grad, "apply_2_4_mask grad"),
+            &[0.0, 20.0, 0.0, 40.0, 0.0, 0.0, 70.0, 80.0],
+            "apply_2_4_mask grad",
+        );
+    }
+
+    #[test]
+    fn gpu_pruning_edge_cases_match_torch_cuda_masks() {
+        ensure_cuda_backend();
+
+        // Live torch 2.11.0+cu130 CUDA oracle:
+        //   torch.nn.utils.prune.l1_unstructured([1,1,1,1], amount=0.5)
+        //   selects indices {0,1} on CUDA (CPU has a different tie set).
+        let tied = upload_f32(&[1.0, 1.0, 1.0, 1.0], &[4], false);
+        assert_bits_eq(
+            &read_cuda_f32(
+                &magnitude_prune(&tied, 0.5).expect("magnitude_prune tied cuda"),
+                "magnitude_prune tied",
+            ),
+            &[0.0, 0.0, 1.0, 1.0],
+            "magnitude_prune tied",
+        );
+
+        // PyTorch applies `orig * mask`, so a pruned -0.0 stays -0.0.
+        let signed_zero = upload_f32(&[0.0, -0.0, 1.0, -1.0], &[4], false);
+        assert_bits_eq(
+            &read_cuda_f32(
+                &magnitude_prune(&signed_zero, 0.5).expect("magnitude_prune signed zero cuda"),
+                "magnitude_prune signed zero",
+            ),
+            &[0.0, -0.0, 1.0, -1.0],
+            "magnitude_prune signed zero",
+        );
+
+        // NaN ranks last for largest=False topk, so finite small magnitudes
+        // are pruned first and NaN is kept; multiplying by a 1-mask preserves
+        // NaN.
+        let nan_case = upload_f32(&[f64::NAN, 1.0, 2.0, 3.0], &[4], false);
+        let nan_out = read_cuda_f32(
+            &magnitude_prune(&nan_case, 0.5).expect("magnitude_prune nan cuda"),
+            "magnitude_prune nan",
+        );
         assert!(
-            res.is_err(),
-            "apply_2_4_mask on a GPU tensor must return Err (PyTorch parity), got Ok"
+            nan_out[0].is_nan(),
+            "magnitude_prune nan: first slot should stay NaN, got {nan_out:?}"
+        );
+        assert_bits_eq(&nan_out[1..], &[0.0, 0.0, 3.0], "magnitude_prune nan tail");
+
+        // Same selected-set contract for 2:4 blocks: CUDA ties prune slots
+        // {0,1}; NaN is kept while finite smaller scores are zeroed.
+        let block = upload_f32(&[1.0, 1.0, 1.0, 1.0, f64::NAN, 1.0, 2.0, 3.0], &[8], false);
+        let block_out = read_cuda_f32(
+            &apply_2_4_mask(&block).expect("apply_2_4_mask edge cuda"),
+            "apply_2_4_mask edge",
+        );
+        assert_bits_eq(&block_out[..4], &[0.0, 0.0, 1.0, 1.0], "2:4 tied block");
+        assert!(
+            block_out[4].is_nan(),
+            "2:4 nan block: NaN slot should be kept, got {block_out:?}"
+        );
+        assert_bits_eq(&block_out[5..], &[0.0, 0.0, 3.0], "2:4 nan block tail");
+    }
+
+    #[test]
+    fn gpu_pruning_supports_half_and_bfloat16_without_host_fallback() {
+        ensure_cuda_backend();
+
+        let x_f16 = upload_f16(&[1.0, -4.0, 2.0, -3.0], &[4], true);
+        let pruned_f16 = magnitude_prune(&x_f16, 0.5).expect("magnitude_prune f16 cuda");
+        assert_eq!(
+            read_cuda_f16(&pruned_f16, "magnitude_prune f16"),
+            vec![0.0, -4.0, 0.0, -3.0]
+        );
+
+        let coeffs_f16 = upload_f16(&[10.0, 20.0, 30.0, 40.0], &[4], false);
+        let loss_f16 = ferrotorch_core::grad_fns::reduction::sum(
+            &ferrotorch_core::grad_fns::arithmetic::mul(&pruned_f16, &coeffs_f16)
+                .expect("magnitude_prune f16 grad probe mul"),
+        )
+        .expect("magnitude_prune f16 grad probe sum");
+        loss_f16.backward().expect("magnitude_prune f16 backward");
+        assert_eq!(
+            read_cuda_f16(
+                &x_f16
+                    .grad()
+                    .expect("f16 grad access")
+                    .expect("f16 original leaf grad"),
+                "magnitude_prune f16 grad"
+            ),
+            vec![0.0, 20.0, 0.0, 40.0]
+        );
+
+        let x_bf16 = upload_bf16(&[1.0, -4.0, 2.0, -3.0], &[4], true);
+        let pruned_bf16 = magnitude_prune(&x_bf16, 0.5).expect("magnitude_prune bf16 cuda");
+        assert_eq!(
+            read_cuda_bf16(&pruned_bf16, "magnitude_prune bf16"),
+            vec![0.0, -4.0, 0.0, -3.0]
+        );
+
+        let coeffs_bf16 = upload_bf16(&[10.0, 20.0, 30.0, 40.0], &[4], false);
+        let loss_bf16 = ferrotorch_core::grad_fns::reduction::sum(
+            &ferrotorch_core::grad_fns::arithmetic::mul(&pruned_bf16, &coeffs_bf16)
+                .expect("magnitude_prune bf16 grad probe mul"),
+        )
+        .expect("magnitude_prune bf16 grad probe sum");
+        loss_bf16.backward().expect("magnitude_prune bf16 backward");
+        assert_eq!(
+            read_cuda_bf16(
+                &x_bf16
+                    .grad()
+                    .expect("bf16 grad access")
+                    .expect("bf16 original leaf grad"),
+                "magnitude_prune bf16 grad"
+            ),
+            vec![0.0, 20.0, 0.0, 40.0]
+        );
+
+        let block_f16 = upload_f16(&[1.0, -4.0, 2.0, -3.0, 0.5, 0.25, 0.75, 1.0], &[8], false);
+        let masked_f16 = apply_2_4_mask(&block_f16).expect("apply_2_4_mask f16 cuda");
+        assert_eq!(
+            read_cuda_f16(&masked_f16, "apply_2_4_mask f16"),
+            vec![0.0, -4.0, 0.0, -3.0, 0.0, 0.0, 0.75, 1.0]
+        );
+
+        let block_bf16 = upload_bf16(&[1.0, -4.0, 2.0, -3.0, 0.5, 0.25, 0.75, 1.0], &[8], false);
+        let masked_bf16 = apply_2_4_mask(&block_bf16).expect("apply_2_4_mask bf16 cuda");
+        assert_eq!(
+            read_cuda_bf16(&masked_bf16, "apply_2_4_mask bf16"),
+            vec![0.0, -4.0, 0.0, -3.0, 0.0, 0.0, 0.75, 1.0]
         );
     }
 }
