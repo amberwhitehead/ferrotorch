@@ -30,10 +30,11 @@ package.
   differentiation. `params` are the tensors to differentiate w.r.t.
   Mirrors the pattern of DEQ / `torchdeq.solver.fixed_point`.
 - REQ-2: Forward pass iterates `x_{n+1} = f(x_n, params)` inside
-  `no_grad`, stopping when `||x_{n+1} - x_n||_1 < tol` or after
-  `max_iter` iterations. Returns the best estimate even if not
-  converged. The convergence check uses L1 norm (sum of absolute
-  differences).
+  `no_grad`, first rejecting `max_iter == 0` and non-finite or
+  negative `tol`. Each iterate must stay on the same device and keep
+  the same shape as the previous iterate. The loop stops when
+  `||x_{n+1} - x_n||_1 <= tol`; if no iterate converges, it returns an
+  error with the last residual instead of a best-effort tensor.
 - REQ-3: Skip-attach when no parameter requires grad — return the
   raw fixed point without a `grad_fn`.
 - REQ-4: `FixedPointBackward<T>` — internal `GradFn` impl that
@@ -47,7 +48,8 @@ package.
   * `v_{k+1} = grad_output + J_x^T @ v_k`
   computed via VJP through `f(x*, p)` with grad tracking on `x`.
   Converges because `f` is contractive (`spectral_radius(J_x) <
-  1`).
+  1`). If the capped Neumann solve does not meet tolerance, backward
+  returns a non-convergence error with the last residual.
 - REQ-6: Backward step 2 — for each parameter `p_i`, compute
   `grad_p_i = J_{p_i}^T @ v` via VJP through `f(x*, p)` with grad
   tracking on `p`.
@@ -75,7 +77,9 @@ package.
 `pub fn fixed_point<T, F>` at `fixed_point.rs:79-135`. Steps:
 
 1. Iterate fixed point inside `no_grad` at `:91-109`. Compute L1
-   norm at `:98-102`. Early-out at `:103-105` when `norm < tol`.
+   residual with tensor ops and a scalar readback. Early-out when
+   `residual <= tol`; reject invalid solver config, shape/device
+   mismatches, non-finite residuals, and non-convergence.
 2. Skip-attach at `:113-115` if no parameter requires grad.
 3. Build storage for `x*` and attach `FixedPointBackward` via
    `Tensor::from_operation` at `:121-131`.
@@ -83,10 +87,10 @@ package.
 ### REQ-2 forward iteration
 
 The forward loop at `fixed_point.rs:92-108` is purely numerical (no
-graph). The L1-norm computation at `:96-102` walks per-element
-absolute differences via `to_f64()` cast (acceptable: the convergence
-test only needs scalar magnitude comparison; full graph tracking is
-unnecessary).
+graph). The residual is computed by device-aware tensor operations
+(`sub`, `abs`, `sum`) and only the scalar residual is read back for
+the convergence decision. This keeps CUDA tensor payloads resident and
+prevents shape truncation bugs from host-side `zip` iteration.
 
 ### REQ-3 skip-attach
 
@@ -151,8 +155,9 @@ consumption.
 `parity_ops = []` — fixed-point AD is a graph-construction primitive.
 Behavioral parity vs upstream:
 
-- Forward iterates `x_{n+1} = f(x_n, params)` until convergence or
-  `max_iter`, matching DEQ / `torchdeq.solver.fixed_point` semantics.
+- Forward iterates `x_{n+1} = f(x_n, params)` until convergence and
+  reports non-convergence as an error rather than returning a tensor
+  that is not known to be a fixed point.
 - Backward uses Neumann series rather than direct linear solve,
   matching the DEQ literature's default and the
   `torch._higher_order_ops/` reference. Converges when `f` is
@@ -172,6 +177,8 @@ Tests in `fixed_point.rs:337-551`. Key tests:
 - `test_fixed_point_affine` (`test_fixed_point_affine in fixed_point.rs`)
 - `test_fixed_point_contractive_to_zero` (`test_fixed_point_contractive_to_zero in fixed_point.rs`)
 - `test_fixed_point_tolerance` (`test_fixed_point_tolerance in fixed_point.rs`)
+- `test_fixed_point_max_iter_reached` validates non-convergence errors.
+- Shape/device/config regression tests pin the compatibility checks.
 - Backward / gradient verification tests further down in the test
   module.
 

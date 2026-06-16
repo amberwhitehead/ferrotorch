@@ -89,6 +89,15 @@ fn run(
             ));
         }
         for (i, (&g, &r)) in got.iter().zip(reference.iter()).enumerate() {
+            if r.is_nan() {
+                if !g.is_nan() {
+                    return Err(format!("value[{i}] = {g}, reference NaN"));
+                }
+                continue;
+            }
+            if g.is_nan() {
+                return Err(format!("value[{i}] = NaN, reference {r}"));
+            }
             // ~1e-2 relative (f16 has a 10-bit mantissa ≈ 3 decimal digits);
             // add a small absolute floor for values near zero.
             let tol = 1e-2_f32 * r.abs().max(1.0) + 1e-2;
@@ -123,6 +132,18 @@ fn f16_op_sweep_gpu() {
     let n = 8usize;
     let a_src: Vec<f32> = (0..n).map(|i| 0.5 + (i as f32) * 0.1).collect();
     let b_src: Vec<f32> = (0..n).map(|i| 1.0 + (i as f32) * 0.05).collect();
+    let signed_src: Vec<f32> = vec![
+        -2.0,
+        -1.25,
+        -0.0,
+        0.0,
+        0.5,
+        1.0,
+        -3.5,
+        4.0,
+        f32::NAN,
+        f32::from_bits(0xffc0_0000),
+    ];
 
     let mut results = Vec::new();
 
@@ -160,6 +181,36 @@ fn f16_op_sweep_gpu() {
         let out = (-a)?;
         let r = a_src.iter().map(|x| -x).collect();
         Ok((out, r))
+    }));
+    results.push(run("abs", || {
+        let a = f16_cuda(&signed_src, &[signed_src.len()]);
+        let out = ferrotorch_core::grad_fns::arithmetic::abs(&a)?;
+        let r = signed_src.iter().map(|x| x.abs()).collect();
+        Ok((out, r))
+    }));
+    results.push(run("abs_backward", || {
+        let a = f16_cuda(&signed_src, &[signed_src.len()]).requires_grad_(true);
+        let out = ferrotorch_core::grad_fns::arithmetic::abs(&a)?;
+        let loss = ferrotorch_core::grad_fns::reduction::sum(&out)?;
+        ferrotorch_core::autograd::graph::backward(&loss)?;
+        let grad = a.grad()?.ok_or_else(|| FerrotorchError::Internal {
+            message: "abs_backward did not populate f16 CUDA grad".into(),
+        })?;
+        let r = signed_src
+            .iter()
+            .map(|&x| {
+                if x.is_nan() {
+                    0.0
+                } else if x > 0.0 {
+                    1.0
+                } else if x < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        Ok((grad, r))
     }));
 
     // ── Broadcast: [1, n] (op) [n, 1] -> [n, n] ──────────────────────────

@@ -52,6 +52,45 @@ fn bf16_cuda(data: &[f32], shape: &[usize]) -> Tensor<half::bf16> {
         .expect("Tensor<bf16>::to(Cuda) must succeed")
 }
 
+fn to_host_f32(t: &Tensor<half::bf16>) -> Result<Vec<f32>, String> {
+    if !t.is_cuda() {
+        return Err("result is NOT cuda-resident (silent CPU detour?)".into());
+    }
+    match t.device() {
+        Device::Cuda(0) => {}
+        other => return Err(format!("result device is {other:?}, expected Cuda(0)")),
+    }
+    let cpu = t.clone().to(Device::Cpu).map_err(|e| format!("{e}"))?;
+    let data = cpu.data().map_err(|e| format!("{e}"))?;
+    Ok(data.iter().map(|x| x.to_f32()).collect())
+}
+
+fn check_values(t: &Tensor<half::bf16>, expected: &[f32]) -> Result<(), String> {
+    let got = to_host_f32(t)?;
+    if got.len() != expected.len() {
+        return Err(format!(
+            "length mismatch: got {} values, expected {}",
+            got.len(),
+            expected.len()
+        ));
+    }
+    for (i, (&g, &e)) in got.iter().zip(expected.iter()).enumerate() {
+        if e.is_nan() {
+            if !g.is_nan() {
+                return Err(format!("value mismatch at {i}: got {g}, expected NaN"));
+            }
+            continue;
+        }
+        if g.is_nan() {
+            return Err(format!("value mismatch at {i}: got NaN, expected {e}"));
+        }
+        if (g - e).abs() > 0.02 {
+            return Err(format!("value mismatch at {i}: got {g}, expected {e}"));
+        }
+    }
+    Ok(())
+}
+
 /// Result of a single sweep entry — `Ok` is PASS, `Err` carries the
 /// reason it failed so we can categorise (A / B / C).
 struct OpResult {
@@ -91,10 +130,23 @@ fn bf16_op_sweep_gpu() {
     let n = 8;
     let data: Vec<f32> = (0..n).map(|i| 0.5 + (i as f32) * 0.1).collect();
     let data_b: Vec<f32> = (0..n).map(|i| 1.0 + (i as f32) * 0.05).collect();
+    let signed_data: Vec<f32> = vec![
+        -2.0,
+        -1.25,
+        -0.0,
+        0.0,
+        0.5,
+        1.0,
+        -3.5,
+        4.0,
+        f32::NAN,
+        f32::from_bits(0xffc0_0000),
+    ];
 
     // Reusable inputs.
     let a = bf16_cuda(&data, &[n]);
     let b = bf16_cuda(&data_b, &[n]);
+    let signed = bf16_cuda(&signed_data, &[signed_data.len()]);
 
     // For broadcast_add: a [1, n] + b [n, 1] → [n, n]
     let a_row = bf16_cuda(&data, &[1, n]);
@@ -125,6 +177,37 @@ fn bf16_op_sweep_gpu() {
     results.push(run("sub", || check(a.clone() - b.clone())));
     results.push(run("mul", || check(a.clone() * b.clone())));
     results.push(run("neg", || check(-a.clone())));
+    results.push(run("abs", || {
+        let out =
+            ferrotorch_core::grad_fns::arithmetic::abs(&signed).map_err(|e| format!("{e}"))?;
+        let expected: Vec<f32> = signed_data.iter().map(|x| x.abs()).collect();
+        check_values(&out, &expected)
+    }));
+    results.push(run("abs_backward", || {
+        let x = bf16_cuda(&signed_data, &[signed_data.len()]).requires_grad_(true);
+        let out = ferrotorch_core::grad_fns::arithmetic::abs(&x).map_err(|e| format!("{e}"))?;
+        let loss = ferrotorch_core::grad_fns::reduction::sum(&out).map_err(|e| format!("{e}"))?;
+        ferrotorch_core::autograd::graph::backward(&loss).map_err(|e| format!("{e}"))?;
+        let grad = x
+            .grad()
+            .map_err(|e| format!("{e}"))?
+            .ok_or_else(|| "abs_backward did not populate bf16 CUDA grad".to_string())?;
+        let expected: Vec<f32> = signed_data
+            .iter()
+            .map(|&x| {
+                if x.is_nan() {
+                    0.0
+                } else if x > 0.0 {
+                    1.0
+                } else if x < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        check_values(&grad, &expected)
+    }));
     results.push(run("broadcast_add", || {
         check(a_row.clone() + b_col.clone())
     }));
@@ -283,8 +366,8 @@ fn bf16_op_sweep_gpu() {
     println!("PASS: {pass}, FAIL: {fail}, TOTAL: {total}");
     println!("=========================================\n");
 
-    // The architect's audit looks at the printed line. We do NOT assert
-    // here — the test always prints and exits 0, so the architect can
-    // diff sweep output before/after the dispatch refactor mechanically.
-    // If you want to gate CI on this, add an assert in a separate test.
+    assert_eq!(
+        fail, 0,
+        "bf16 op sweep had {fail} failures (see table above)"
+    );
 }

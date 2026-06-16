@@ -3849,17 +3849,23 @@ impl<T: Float> GradFn<T> for AbsBackward<T> {
         use crate::gpu_dispatch::gpu_backend;
 
         let da = if self.a.requires_grad() {
-            // GPU-native path for f32/f64 when both tensors live on CUDA.
-            if grad_output.is_cuda() && self.a.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+            // GPU-native path for every CUDA floating dtype this crate stores.
+            if grad_output.is_cuda() && self.a.is_cuda() {
                 let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                 // #812 cluster: materialize non-contiguous CUDA views.
                 let go_c = ensure_contig_for_gpu(grad_output)?;
                 let a_c = ensure_contig_for_gpu(&self.a)?;
-                let handle = if is_f32::<T>() {
-                    backend.abs_backward_f32(go_c.gpu_handle()?, a_c.gpu_handle()?)?
-                } else {
-                    backend.abs_backward_f64(go_c.gpu_handle()?, a_c.gpu_handle()?)?
-                };
+                let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                    T,
+                    "AbsBackward",
+                    f32 => backend.abs_backward_f32(go_c.gpu_handle()?, a_c.gpu_handle()?),
+                    f64 => backend.abs_backward_f64(go_c.gpu_handle()?, a_c.gpu_handle()?),
+                    bf16 => backend.abs_backward_bf16_bf16(
+                        go_c.gpu_handle()?,
+                        a_c.gpu_handle()?
+                    ),
+                    f16 => backend.abs_backward_f16(go_c.gpu_handle()?, a_c.gpu_handle()?),
+                )?;
                 let grad_a = Tensor::from_storage(
                     TensorStorage::gpu(handle),
                     self.a.shape().to_vec(),
@@ -3919,16 +3925,19 @@ pub fn abs<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 }
 
 fn abs_inner<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if a.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    if a.is_cuda() {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         // #812 cluster: materialize non-contiguous CUDA views before kernel.
         let a_c = ensure_contig_for_gpu(a)?;
-        let handle = if is_f32::<T>() {
-            backend.abs_f32(a_c.gpu_handle()?)?
-        } else {
-            backend.abs_f64(a_c.gpu_handle()?)?
-        };
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "abs",
+            f32 => backend.abs_f32(a_c.gpu_handle()?),
+            f64 => backend.abs_f64(a_c.gpu_handle()?),
+            bf16 => backend.abs_bf16_bf16(a_c.gpu_handle()?),
+            f16 => backend.abs_f16(a_c.gpu_handle()?),
+        )?;
         let storage = TensorStorage::gpu(handle);
         let shape = a_c.shape().to_vec();
 

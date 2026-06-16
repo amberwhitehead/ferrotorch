@@ -1882,6 +1882,28 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, grad.device_ordinal()))
     }
 
+    #[cfg(feature = "cuda")]
+    fn abs_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_abs_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn abs_backward_bf16_bf16(
+        &self,
+        grad: &GpuBufferHandle,
+        input: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = Self::unwrap_buffer_bf16(grad)?;
+        let input_buf = Self::unwrap_buffer_bf16(input)?;
+        let dev = self.device(grad.device_ordinal())?;
+        let result = crate::bf16::gpu_abs_backward_bf16(grad_buf, input_buf, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, grad.device_ordinal()))
+    }
+
     fn sigmoid_backward_f64(
         &self,
         grad: &GpuBufferHandle,
@@ -8786,6 +8808,28 @@ impl GpuBackend for CudaBackendImpl {
         let dev = self.device(a.device_ordinal())?;
         let result = crate::f16::gpu_mul_f16(a_buf, b_buf, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn abs_f16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_abs_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn abs_backward_f16(
+        &self,
+        grad: &GpuBufferHandle,
+        input: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = Self::unwrap_buffer_f16(grad)?;
+        let input_buf = Self::unwrap_buffer_f16(input)?;
+        let dev = self.device(grad.device_ordinal())?;
+        let result = crate::f16::gpu_abs_backward_f16(grad_buf, input_buf, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, grad.device_ordinal()))
     }
 
     #[cfg(feature = "cuda")]

@@ -2246,6 +2246,24 @@ pub trait GpuBackend: Send + Sync {
             message: "abs_backward_f64 GPU op not yet implemented".into(),
         })
     }
+    fn abs_backward_bf16_bf16(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "abs_backward_bf16_bf16",
+        })
+    }
+    fn abs_backward_f16(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "abs_backward_f16",
+        })
+    }
     // fill: allocate an n-element device buffer filled with `scalar`.
     // Used by sum/mean backward so the grad is built entirely on-device.
     fn fill_f32(
@@ -4111,6 +4129,11 @@ pub trait GpuBackend: Send + Sync {
     fn abs_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::InvalidArgument {
             message: "abs_f64 GPU op not yet implemented".into(),
+        })
+    }
+    fn abs_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "abs_bf16_bf16",
         })
     }
     fn sigmoid_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
@@ -6341,6 +6364,11 @@ pub trait GpuBackend: Send + Sync {
     /// f16 elementwise `out = -a`.
     fn neg_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda { op: "neg_f16" })
+    }
+
+    /// f16 elementwise `out = abs(a)` by clearing the sign bit on-device.
+    fn abs_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "abs_f16" })
     }
 
     /// f16 multiply every element by an f32 scalar (`out = a * scale`).

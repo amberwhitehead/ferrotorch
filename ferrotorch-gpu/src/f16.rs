@@ -275,6 +275,102 @@ DONE:
 }
 ";
 
+const ABS_F16_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry abs_f16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %bits;
+    .reg .u64 %a, %out, %off;
+    .reg .pred %p;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.u16 %bits, [%a];
+    and.b32 %bits, %bits, 0x7fff;
+    st.global.u16 [%out], %bits;
+
+DONE:
+    ret;
+}
+";
+
+const ABS_BACKWARD_F16_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry abs_backward_f16_kernel(
+    .param .u64 grad_ptr,
+    .param .u64 input_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u32 %grad_bits, %input_bits, %input_mag, %input_sign;
+    .reg .u64 %grad, %input, %out, %off;
+    .reg .pred %p, %is_zero, %is_nan;
+
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %grad, %grad, %off;
+    add.u64 %input, %input, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.u16 %grad_bits, [%grad];
+    ld.global.u16 %input_bits, [%input];
+    and.b32 %input_mag, %input_bits, 0x7fff;
+    setp.eq.u32 %is_zero, %input_mag, 0;
+    @%is_zero bra STORE_ZERO;
+    setp.gt.u32 %is_nan, %input_mag, 0x7c00;
+    @%is_nan bra STORE_ZERO;
+
+    and.b32 %input_sign, %input_bits, 0x8000;
+    xor.b32 %grad_bits, %grad_bits, %input_sign;
+    st.global.u16 [%out], %grad_bits;
+    bra DONE;
+
+STORE_ZERO:
+    st.global.u16 [%out], 0;
+
+DONE:
+    ret;
+}
+";
+
 // ===========================================================================
 // Elementwise unary activation kernels (silu, relu, gelu)
 // ===========================================================================
@@ -828,6 +924,29 @@ pub fn gpu_div_f16(
     device: &GpuDevice,
 ) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
     launch_binary(a, b, device, DIV_F16_PTX, "div_f16_kernel")
+}
+
+/// Elementwise `out = abs(a)` on f16 (u16-stored) GPU buffers.
+pub fn gpu_abs_f16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_unary(a, device, ABS_F16_PTX, "abs_f16_kernel")
+}
+
+/// Backward for f16 `abs`: `out = grad * sign(input)`.
+pub fn gpu_abs_backward_f16(
+    grad: &cudarc::driver::CudaSlice<u16>,
+    input: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_binary(
+        grad,
+        input,
+        device,
+        ABS_BACKWARD_F16_PTX,
+        "abs_backward_f16_kernel",
+    )
 }
 
 /// Elementwise `out = silu(a) = a * sigmoid(a)` on f16 GPU buffers.

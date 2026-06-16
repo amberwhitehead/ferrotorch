@@ -43,7 +43,7 @@ use crate::autograd::higher_order::grad;
 use crate::autograd::no_grad::no_grad;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
-use crate::storage::TensorStorage;
+use crate::methods::contiguous_t;
 use crate::tensor::{GradFn, Tensor};
 
 /// Type alias for the fixed-point function f(x, params) -> x.
@@ -99,33 +99,38 @@ where
     T: Float,
     F: Fn(&Tensor<T>, &[&Tensor<T>]) -> FerrotorchResult<Tensor<T>> + Send + Sync + 'static,
 {
+    validate_fixed_point_config(max_iter, tol, "fixed_point")?;
+
     // 1. Find the fixed point by iteration (forward pass, no grad needed).
     let x_star = no_grad(|| -> FerrotorchResult<Tensor<T>> {
         let mut x = x0.clone();
-        for _ in 0..max_iter {
+        let mut last_residual = f64::INFINITY;
+        for iter in 0..max_iter {
             let x_next = f(&x, params)?;
-            // Compute L1 norm of the difference.
-            let x_data = x.data_vec()?;
-            let x_next_data = x_next.data_vec()?;
-            let norm: f64 = x_data
-                .iter()
-                .zip(x_next_data.iter())
-                .map(|(&a, &b)| (a - b).to_f64().unwrap().abs())
-                .sum();
-            if norm < tol {
+            validate_fixed_point_iterate("fixed_point forward", &x, &x_next)?;
+
+            let residual = fixed_point_residual_l1(&x, &x_next, "fixed_point forward")?;
+            validate_residual_is_finite(residual, iter, "fixed_point forward")?;
+            if residual <= tol {
                 return Ok::<Tensor<T>, FerrotorchError>(x_next);
             }
+            last_residual = residual;
             x = x_next;
         }
-        Ok(x) // Didn't converge but return best estimate.
+        Err(non_convergence_error(
+            "fixed_point forward",
+            max_iter,
+            last_residual,
+            tol,
+        ))
     })?;
 
     // 2. If any parameter requires grad, attach a FixedPointBackward node
     //    that uses implicit differentiation via the Neumann series.
     if params.iter().any(|p| p.requires_grad()) {
-        let x_star_data = x_star.data_vec()?;
-        let x_star_shape = x_star.shape().to_vec();
-        let storage = TensorStorage::cpu(x_star_data);
+        let x_star = contiguous_t(&x_star)?;
+        let backward_x_star = x_star.clone();
+        let (storage, x_star_shape) = x_star.into_storage_and_shape()?;
 
         // Clone params for storage in the backward node.
         let params_owned: Vec<Tensor<T>> = params.iter().map(|p| (*p).clone()).collect();
@@ -135,7 +140,7 @@ where
             x_star_shape,
             Arc::new(FixedPointBackward {
                 f_closure: Arc::new(f),
-                x_star: x_star.clone(),
+                x_star: backward_x_star,
                 params: params_owned,
                 backward_max_iter: max_iter.min(50), // Cap backward iterations.
                 backward_tol: tol,
@@ -144,6 +149,95 @@ where
     } else {
         Ok(x_star)
     }
+}
+
+fn validate_fixed_point_config(max_iter: usize, tol: f64, op: &str) -> FerrotorchResult<()> {
+    if max_iter == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: max_iter must be greater than zero"),
+        });
+    }
+    if !tol.is_finite() || tol < 0.0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: tol must be finite and non-negative, got {tol}"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_fixed_point_iterate<T: Float>(
+    op: &str,
+    expected: &Tensor<T>,
+    actual: &Tensor<T>,
+) -> FerrotorchResult<()> {
+    if expected.device() != actual.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: expected.device(),
+            got: actual.device(),
+        });
+    }
+    if expected.shape() != actual.shape() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "{op}: iterate shape mismatch: expected {:?}, got {:?}",
+                expected.shape(),
+                actual.shape()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_residual_is_finite(residual: f64, iter: usize, op: &str) -> FerrotorchResult<()> {
+    if residual.is_finite() {
+        Ok(())
+    } else {
+        Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: iteration {iter} produced non-finite residual {residual}"),
+        })
+    }
+}
+
+fn non_convergence_error(
+    op: &str,
+    max_iter: usize,
+    last_residual: f64,
+    tol: f64,
+) -> FerrotorchError {
+    FerrotorchError::InvalidArgument {
+        message: format!(
+            "{op}: failed to converge after {max_iter} iterations \
+             (last L1 residual {last_residual}, tolerance {tol})"
+        ),
+    }
+}
+
+fn tensor_scalar_to_f64<T: Float>(value: &Tensor<T>, op: &str) -> FerrotorchResult<f64> {
+    let host_value = if value.device().is_cpu() {
+        value.clone()
+    } else {
+        value.cpu()?
+    };
+    host_value
+        .item()?
+        .to_f64()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("{op}: scalar residual is not representable as f64"),
+        })
+}
+
+fn fixed_point_residual_l1<T: Float>(
+    prev: &Tensor<T>,
+    next: &Tensor<T>,
+    op: &str,
+) -> FerrotorchResult<f64> {
+    validate_fixed_point_iterate(op, prev, next)?;
+    let residual = no_grad(|| {
+        let diff = crate::grad_fns::arithmetic::sub(next, prev)?;
+        let abs = crate::grad_fns::arithmetic::abs(&diff)?;
+        crate::grad_fns::reduction::sum(&abs)
+    })?;
+    tensor_scalar_to_f64(&residual, op)
 }
 
 /// Backward node for fixed-point implicit differentiation.
@@ -183,8 +277,13 @@ impl<T: Float> fmt::Debug for FixedPointBackward<T> {
 
 impl<T: Float> GradFn<T> for FixedPointBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let n = self.x_star.numel();
         let num_params = self.params.len();
+        validate_fixed_point_config(
+            self.backward_max_iter,
+            self.backward_tol,
+            "FixedPointBackward",
+        )?;
+        validate_fixed_point_iterate("FixedPointBackward grad_output", &self.x_star, grad_output)?;
 
         // Step 1: Solve (I - J_x^T) v = grad_output via the Neumann series.
         //
@@ -195,65 +294,57 @@ impl<T: Float> GradFn<T> for FixedPointBackward<T> {
         //
         // We compute J_x^T @ v via a VJP: if y = f(x, p), then
         // VJP(y, x, v) = J_x^T @ v = grad(y, x, grad_output=v).
-        let go_data = grad_output.data_vec()?;
-        let go_shape = grad_output.shape().to_vec();
+        let mut v = grad_output.detach();
+        let mut converged = false;
+        let mut last_residual = f64::INFINITY;
 
-        let mut v_data = go_data.clone();
-
-        for _ in 0..self.backward_max_iter {
+        for iter in 0..self.backward_max_iter {
             // Create a fresh x* that requires grad so we can compute J_x^T @ v.
-            let x_fresh = Tensor::from_storage(
-                TensorStorage::cpu(self.x_star.data_vec()?),
-                self.x_star.shape().to_vec(),
-                true,
-            )?;
+            let x_fresh = self.x_star.detach().requires_grad_(true);
 
             // Detached params (we only want the Jacobian w.r.t. x here).
-            let params_detached: Vec<Tensor<T>> = self
-                .params
-                .iter()
-                .map(|p| {
-                    Tensor::from_storage(
-                        TensorStorage::cpu(p.data_vec().unwrap()),
-                        p.shape().to_vec(),
-                        false,
-                    )
-                    .unwrap()
-                })
-                .collect();
+            let params_detached: Vec<Tensor<T>> = self.params.iter().map(Tensor::detach).collect();
             let params_ref: Vec<&Tensor<T>> = params_detached.iter().collect();
 
             // Evaluate f(x*, params) with grad tracking on x.
             let y = (self.f_closure)(&x_fresh, &params_ref)?;
+            validate_fixed_point_iterate("FixedPointBackward Jx evaluation", &x_fresh, &y)?;
 
             // Compute VJP: J_x^T @ v via grad(y, x, grad_output=v).
             // We need to make y scalar to use grad(), so we use a dot product:
             // L = sum(y * v), then grad(L, x) = J_x^T @ v.
-            let v_tensor =
-                Tensor::from_storage(TensorStorage::cpu(v_data.clone()), go_shape.clone(), false)?;
-            let yv = elementwise_mul_sum(&y, &v_tensor)?;
+            let yv = elementwise_mul_sum(&y, &v)?;
 
             let grads = grad(&yv, &[&x_fresh], false, false)?;
 
-            let jt_v = match &grads[0] {
-                Some(g) => g.data_vec()?,
-                None => vec![<T as num_traits::Zero>::zero(); n],
+            let jt_v = match grads[0].as_ref() {
+                Some(g) => {
+                    validate_fixed_point_iterate("FixedPointBackward Jx VJP", &self.x_star, g)?;
+                    g.clone()
+                }
+                None => crate::creation::zeros_like(&self.x_star)?,
             };
 
             // v_new = grad_output + J_x^T @ v
-            let mut v_new = Vec::with_capacity(n);
-            let mut diff_norm: f64 = 0.0;
-            for i in 0..n {
-                let val =
-                    T::from(go_data[i].to_f64().unwrap() + jt_v[i].to_f64().unwrap()).unwrap();
-                diff_norm += (val.to_f64().unwrap() - v_data[i].to_f64().unwrap()).abs();
-                v_new.push(val);
-            }
-            v_data = v_new;
+            let v_new = no_grad(|| crate::grad_fns::arithmetic::add(grad_output, &jt_v))?;
+            validate_fixed_point_iterate("FixedPointBackward Neumann update", &v, &v_new)?;
+            let residual = fixed_point_residual_l1(&v, &v_new, "FixedPointBackward")?;
+            validate_residual_is_finite(residual, iter, "FixedPointBackward")?;
+            last_residual = residual;
+            v = v_new.detach();
 
-            if diff_norm < self.backward_tol {
+            if residual <= self.backward_tol {
+                converged = true;
                 break;
             }
+        }
+        if !converged {
+            return Err(non_convergence_error(
+                "FixedPointBackward",
+                self.backward_max_iter,
+                last_residual,
+                self.backward_tol,
+            ));
         }
 
         // Step 2: Compute gradients for each parameter.
@@ -265,33 +356,22 @@ impl<T: Float> GradFn<T> for FixedPointBackward<T> {
         // compute grad(L, params) where L = sum(y * v).
 
         // Create x* without grad (we don't need x gradients here).
-        let x_detached = Tensor::from_storage(
-            TensorStorage::cpu(self.x_star.data_vec()?),
-            self.x_star.shape().to_vec(),
-            false,
-        )?;
+        let x_detached = self.x_star.detach();
 
         // Create params with grad enabled.
         let params_with_grad: Vec<Tensor<T>> = self
             .params
             .iter()
-            .map(|p| {
-                Tensor::from_storage(
-                    TensorStorage::cpu(p.data_vec().unwrap()),
-                    p.shape().to_vec(),
-                    p.requires_grad(),
-                )
-                .unwrap()
-            })
+            .map(|p| p.detach().requires_grad_(p.requires_grad()))
             .collect();
         let params_ref: Vec<&Tensor<T>> = params_with_grad.iter().collect();
 
         // Evaluate f(x*, params).
         let y = (self.f_closure)(&x_detached, &params_ref)?;
+        validate_fixed_point_iterate("FixedPointBackward parameter evaluation", &x_detached, &y)?;
 
         // L = sum(y * v)
-        let v_tensor = Tensor::from_storage(TensorStorage::cpu(v_data), go_shape, false)?;
-        let loss = elementwise_mul_sum(&y, &v_tensor)?;
+        let loss = elementwise_mul_sum(&y, &v)?;
 
         // Compute grad(L, params).
         let grad_inputs: Vec<&Tensor<T>> = params_with_grad
@@ -350,6 +430,7 @@ fn elementwise_mul_sum<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResu
 mod tests {
     use super::*;
     use crate::autograd::graph::backward;
+    use crate::device::Device;
     use crate::storage::TensorStorage;
 
     /// Create a leaf scalar tensor.
@@ -449,7 +530,7 @@ mod tests {
         let x0 = leaf_scalar(0.0, false);
         let dummy_param = leaf_scalar(1.0, false);
 
-        let x_star = fixed_point(
+        let err = fixed_point(
             |x, _params| {
                 let scale = Tensor::from_storage(TensorStorage::cpu(vec![0.99f32]), vec![], false)?;
                 let bias = Tensor::from_storage(TensorStorage::cpu(vec![0.01f32]), vec![], false)?;
@@ -461,12 +542,84 @@ mod tests {
             5, // Very few iterations.
             1e-10,
         )
-        .unwrap();
+        .unwrap_err();
 
-        // Should return best estimate even though it didn't converge.
-        let val = x_star.item().unwrap();
-        assert!(val > 0.0, "should have made some progress from x0=0");
-        assert!(val < 1.0, "should not have reached x*=1 in 5 iterations");
+        let msg = format!("{err}");
+        assert!(msg.contains("failed to converge after 5 iterations"));
+        assert!(msg.contains("last L1 residual"));
+    }
+
+    #[test]
+    fn test_fixed_point_rejects_zero_max_iter() {
+        let x0 = leaf_scalar(0.0, false);
+        let dummy_param = leaf_scalar(1.0, false);
+
+        let err =
+            fixed_point(|x, _params| Ok(x.clone()), &x0, &[&dummy_param], 0, 1e-8).unwrap_err();
+
+        assert!(format!("{err}").contains("max_iter must be greater than zero"));
+    }
+
+    #[test]
+    fn test_fixed_point_rejects_invalid_tolerance() {
+        let x0 = leaf_scalar(0.0, false);
+        let dummy_param = leaf_scalar(1.0, false);
+
+        for tol in [-1.0, f64::NAN, f64::INFINITY] {
+            let err =
+                fixed_point(|x, _params| Ok(x.clone()), &x0, &[&dummy_param], 1, tol).unwrap_err();
+            assert!(
+                format!("{err}").contains("tol must be finite and non-negative"),
+                "unexpected error for tol={tol}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fixed_point_rejects_iterate_shape_mismatch() {
+        let x0 =
+            Tensor::from_storage(TensorStorage::cpu(vec![1.0f32, 2.0]), vec![2], false).unwrap();
+        let dummy_param = leaf_scalar(1.0, false);
+
+        let err = fixed_point(
+            |_x, _params| Tensor::from_storage(TensorStorage::cpu(vec![1.0f32]), vec![], false),
+            &x0,
+            &[&dummy_param],
+            4,
+            1e-8,
+        )
+        .unwrap_err();
+
+        let msg = format!("{err}");
+        assert!(msg.contains("shape mismatch"));
+        assert!(msg.contains("expected [2], got []"));
+    }
+
+    #[test]
+    fn test_fixed_point_rejects_iterate_device_mismatch() {
+        let x0 = leaf_scalar(0.0, false);
+        let dummy_param = leaf_scalar(1.0, false);
+
+        let err = fixed_point(
+            |x, _params| x.to(Device::Meta),
+            &x0,
+            &[&dummy_param],
+            4,
+            1e-8,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, FerrotorchError::DeviceMismatch { .. }));
+    }
+
+    #[test]
+    fn test_fixed_point_allows_exact_zero_tolerance_convergence() {
+        let x0 = leaf_scalar(3.0, false);
+        let dummy_param = leaf_scalar(1.0, false);
+
+        let x_star = fixed_point(|x, _params| Ok(x.clone()), &x0, &[&dummy_param], 1, 0.0).unwrap();
+
+        assert!((x_star.item().unwrap() - 3.0).abs() < 1e-12);
     }
 
     // -----------------------------------------------------------------------
