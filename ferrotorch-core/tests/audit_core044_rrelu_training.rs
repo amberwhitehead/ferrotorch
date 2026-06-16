@@ -24,6 +24,7 @@
 use ferrotorch_core::grad_fns::activation::rrelu;
 use ferrotorch_core::grad_fns::reduction::sum as reduce_sum;
 use ferrotorch_core::{Tensor, TensorStorage, manual_seed};
+use std::sync::{Mutex, MutexGuard};
 
 const LOWER: f64 = 0.125;
 const UPPER: f64 = 1.0 / 3.0;
@@ -36,11 +37,19 @@ fn cpu_f32(data: &[f32], shape: &[usize], rg: bool) -> Tensor<f32> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), rg).unwrap()
 }
 
+fn default_rng_test_lock() -> MutexGuard<'static, ()> {
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// CORE-044 core red test: training mode must be stochastic — two different
 /// seeds must produce different negative-branch outputs. Pre-fix, both calls
 /// returned the deterministic mean-slope output and this failed.
 #[test]
 fn rrelu_training_distinct_seeds_distinct_outputs() {
+    let _guard = default_rng_test_lock();
     let x = cpu_f64(&[-1.0, -2.0, 3.0], &[3], false);
     manual_seed(42);
     let a = rrelu(&x, LOWER, UPPER, true).unwrap().data_vec().unwrap();
@@ -55,6 +64,7 @@ fn rrelu_training_distinct_seeds_distinct_outputs() {
 /// Same seed, same input → identical output (manual_seed reproducibility).
 #[test]
 fn rrelu_training_manual_seed_reproducible() {
+    let _guard = default_rng_test_lock();
     let x = cpu_f64(&[-1.0, -2.0, 3.0, -0.5], &[4], false);
     manual_seed(1234);
     let a = rrelu(&x, LOWER, UPPER, true).unwrap().data_vec().unwrap();
@@ -79,6 +89,7 @@ fn rrelu_training_manual_seed_reproducible() {
 /// (torch 2.11.0+cu130, CPU)
 #[test]
 fn rrelu_training_matches_torch_seed42_bitexact_f64() {
+    let _guard = default_rng_test_lock();
     let x = cpu_f64(&[-1.0, -2.0, 3.0], &[3], false);
     manual_seed(42);
     let y = rrelu(&x, LOWER, UPPER, true).unwrap().data_vec().unwrap();
@@ -107,6 +118,7 @@ fn rrelu_training_matches_torch_seed42_bitexact_f64() {
 /// (torch 2.11.0+cu130, CPU)
 #[test]
 fn rrelu_training_matches_torch_seed42_bitexact_f32() {
+    let _guard = default_rng_test_lock();
     let x = cpu_f32(&[-1.0, -2.0, 3.0], &[3], false);
     manual_seed(42);
     let y = rrelu(&x, LOWER, UPPER, true).unwrap().data_vec().unwrap();
@@ -130,6 +142,7 @@ fn rrelu_training_matches_torch_seed42_bitexact_f32() {
 /// (torch 2.11.0+cu130, CPU; grad[i] == noise[i] == -out[i]/|x[i]|)
 #[test]
 fn rrelu_training_backward_applies_saved_noise() {
+    let _guard = default_rng_test_lock();
     let x = cpu_f64(&[-1.0, -2.0, 3.0], &[3], true);
     manual_seed(42);
     let out = rrelu(&x, LOWER, UPPER, true).unwrap();
@@ -165,6 +178,7 @@ fn rrelu_training_backward_applies_saved_noise() {
 /// (torch 2.11.0+cu130, CPU)
 #[test]
 fn rrelu_training_x_le_zero_draws_positive_passthrough() {
+    let _guard = default_rng_test_lock();
     let x = cpu_f64(&[0.0, -1.0, 5.0], &[3], true);
     manual_seed(7);
     let out = rrelu(&x, LOWER, UPPER, true).unwrap();
@@ -201,6 +215,7 @@ fn rrelu_training_x_le_zero_draws_positive_passthrough() {
 /// `(u-l)/sqrt(12*N) ≈ 6.02e-4`; we allow 5σ ≈ 3.01e-3.
 #[test]
 fn rrelu_training_slope_distribution_sanity() {
+    let _guard = default_rng_test_lock();
     const N: usize = 10_000;
     let data = vec![-1.0f64; N];
     let x = cpu_f64(&data, &[N], false);
@@ -236,6 +251,7 @@ fn rrelu_training_slope_distribution_sanity() {
 /// `(lower+upper)/2` per `aten/src/ATen/native/Activation.cpp:624-630`)
 #[test]
 fn rrelu_eval_matches_torch_mean_slope_exactly() {
+    let _guard = default_rng_test_lock();
     let x = cpu_f64(&[-1.0, -2.0, 3.0], &[3], false);
     // Eval must NOT consume RNG state: seed, draw eval, then check the next
     // training call still matches the seed-42 stream from element 0.

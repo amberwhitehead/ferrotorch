@@ -48,9 +48,17 @@
 
 use ferrotorch_core::grad_fns::activation::rrelu;
 use ferrotorch_core::{Tensor, TensorStorage, manual_seed};
+use std::sync::{Mutex, MutexGuard};
 
 const LOWER: f64 = 0.125;
 const UPPER: f64 = 1.0 / 3.0;
+
+fn default_rng_test_lock() -> MutexGuard<'static, ()> {
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Divergence: `rrelu_train` multiplies in `scalar_t` (bf16) instead of
 /// `opmath_t` (float) per `pytorch aten/src/ATen/native/Activation.cpp:598-599`.
@@ -59,6 +67,7 @@ const UPPER: f64 = 1.0 / 3.0;
 /// Tracking: #1953
 #[test]
 fn divergence_rrelu_train_bf16_opmath_multiply() {
+    let _guard = default_rng_test_lock();
     // Single negative element -> exactly one f64 draw, deterministic under seed.
     let x_in = half::bf16::from_f32(-2.1f32);
     assert_eq!(

@@ -4,7 +4,7 @@
 //! corresponds to one of the five claims in the dispatch prompt:
 //!
 //! 1. `manual_seed` actually mutates state -> `reproducibility_probe`
-//! 2. `rand`/`randn` consume the thread-local -> `reproducibility_probe`,
+//! 2. `rand`/`randn` consume the process default -> `reproducibility_probe`,
 //!    `randn_reproducibility_probe`
 //! 3. Reproducibility across in-process calls -> `reproducibility_probe`
 //! 4. Torch byte-exact parity -> `torch_parity_probe` (live cross-check)
@@ -22,6 +22,14 @@
 //!   0x3f19d447 0x3e835d78 0x3f4b2c14 0x3f70d666 0x3e0861e4
 
 use ferrotorch_core::{Generator, manual_seed, rand, randn};
+use std::sync::{Mutex, MutexGuard};
+
+fn default_rng_test_lock() -> MutexGuard<'static, ()> {
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Fixture: `python3 -c "import torch, struct; torch.manual_seed(42);
 /// [print(hex(struct.unpack('<I', struct.pack('<f', x))[0])) for x in
@@ -48,13 +56,14 @@ const TORCH_RAND_SEED_42_F32_BITS: [u32; 10] = [
 /// across calls. If `manual_seed` is a no-op (or stashes the seed into a
 /// field that `rand` never reads), calling `manual_seed(42)` twice and
 /// then `rand` will return DIFFERENT bit patterns the second time because
-/// the underlying thread-local has been advanced by the first call.
+/// the underlying default generator has been advanced by the first call.
 ///
 /// Failure mode caught: vocab-only `manual_seed` (the `_seed: u64` rename
 /// red flag) — i.e. function compiles, type-checks, but doesn't actually
 /// reseed the engine.
 #[test]
 fn reproducibility_probe() {
+    let _guard = default_rng_test_lock();
     manual_seed(42);
     let a = rand::<f32>(&[10]).unwrap();
     manual_seed(42);
@@ -73,12 +82,13 @@ fn reproducibility_probe() {
 }
 
 /// Probe 2: `manual_seed(s); randn(...)` must also be reproducible
-/// in-process. Catches a thread-local that resets the uniform engine on
+/// in-process. Catches a default generator that resets the uniform engine on
 /// `manual_seed` but forgets to drain the Box-Muller cache: the first
 /// post-seed `randn` would consume the leftover cached normal sample
 /// instead of a freshly-drawn pair.
 #[test]
 fn randn_reproducibility_probe() {
+    let _guard = default_rng_test_lock();
     manual_seed(123);
     let _ = rand::<f32>(&[1]).unwrap(); // advance state so cache differs
     let _ = randn::<f32>(&[1]).unwrap(); // poison Box-Muller cache
@@ -106,6 +116,7 @@ fn randn_reproducibility_probe() {
 /// transform divisor, or wrong mantissa mask.
 #[test]
 fn torch_parity_probe() {
+    let _guard = default_rng_test_lock();
     manual_seed(42);
     let t = rand::<f32>(&[10]).unwrap();
     let data = t.data().unwrap();
@@ -124,18 +135,20 @@ fn torch_parity_probe() {
 }
 
 /// Probe 4: an explicit `Generator` must produce an INDEPENDENT stream
-/// from the thread-local. Advancing the thread-local through `rand` must
-/// not affect a freshly-constructed `Generator::new(seed)`.
+/// from the process-default generator. Advancing the default through `rand`
+/// must not affect a freshly-constructed `Generator::new(seed)`.
 ///
 /// This also pins the "explicit generator threading" claim end-to-end:
 /// two `Generator::new(s)` instances with the same seed produce identical
 /// streams, and that stream is byte-exact with torch's seed-`s` stream.
 ///
 /// Failure mode caught: an init helper that takes `_generator: &mut
-/// Generator` but secretly samples from the thread-local instead.
+/// Generator` but secretly samples from the process-default generator instead.
 #[test]
 fn nn_init_generator_threading_probe() {
-    // First: thread-local stream advancement does not pollute an explicit
+    let _guard = default_rng_test_lock();
+
+    // First: process-default stream advancement does not pollute an explicit
     // Generator.
     manual_seed(7);
     let _ = rand::<f32>(&[100]).unwrap();
@@ -144,7 +157,7 @@ fn nn_init_generator_threading_probe() {
     assert_eq!(
         v_a.as_slice(),
         &TORCH_RAND_SEED_42_F32_BITS,
-        "explicit Generator(42) stream polluted by thread-local advancement"
+        "explicit Generator(42) stream polluted by default-generator advancement"
     );
 
     // Second: two explicit Generators with the same seed produce
@@ -185,9 +198,9 @@ fn nn_init_generator_threading_probe() {
 
 /// Probe 5 (covers claim 3, cross-process determinism approximation):
 /// the SECOND test in this binary, running AFTER probes 1-4 have
-/// advanced the thread-local state arbitrarily many times, must still
+/// advanced the default state arbitrarily many times, must still
 /// see byte-exact torch parity once it calls `manual_seed(42)`. This is
-/// "cross-test isolation" — the thread-local's previous state must not
+/// "cross-test isolation" — the default generator's previous state must not
 /// matter once `manual_seed` is called.
 ///
 /// Note: test execution order in Rust is non-deterministic by default,
@@ -196,7 +209,9 @@ fn nn_init_generator_threading_probe() {
 /// produce the canonical seed-42 stream.
 #[test]
 fn cross_test_isolation_probe() {
-    // Burn arbitrary thread-local state.
+    let _guard = default_rng_test_lock();
+
+    // Burn arbitrary default-generator state.
     manual_seed(0xdead_beef);
     for _ in 0..7 {
         let _ = rand::<f32>(&[13]).unwrap();
@@ -214,7 +229,7 @@ fn cross_test_isolation_probe() {
         assert_eq!(
             got.to_bits(),
             expected_bits,
-            "post-burn rand[{i}]: thread-local leaked across tests"
+            "post-burn rand[{i}]: default generator leaked across tests"
         );
     }
 }

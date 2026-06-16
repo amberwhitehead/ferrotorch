@@ -21,6 +21,14 @@
 //! the output bits must agree exactly.
 
 use ferrotorch_core::{Generator, manual_seed, rand, randn};
+use std::sync::{Mutex, MutexGuard};
+
+fn default_rng_test_lock() -> MutexGuard<'static, ()> {
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 // `torch.manual_seed(42); torch.rand(10)` — exact f32 bit patterns.
 const TORCH_RAND_SEED_42_F32_BITS: [u32; 10] = [
@@ -66,6 +74,7 @@ const TORCH_RANDN_SEED_42_F32_BITS_REFERENCE: [u32; 10] = [
 
 #[test]
 fn manual_seed_42_rand_byte_exact_vs_torch_f32() {
+    let _guard = default_rng_test_lock();
     manual_seed(42);
     let t = rand::<f32>(&[10]).unwrap();
     let data = t.data().unwrap();
@@ -85,6 +94,7 @@ fn manual_seed_42_rand_byte_exact_vs_torch_f32() {
 
 #[test]
 fn manual_seed_is_deterministic_across_calls() {
+    let _guard = default_rng_test_lock();
     manual_seed(12345);
     let a = rand::<f32>(&[20]).unwrap();
     manual_seed(12345);
@@ -98,6 +108,7 @@ fn manual_seed_is_deterministic_across_calls() {
 
 #[test]
 fn distinct_seeds_distinct_streams() {
+    let _guard = default_rng_test_lock();
     manual_seed(1);
     let a = rand::<f32>(&[5]).unwrap();
     manual_seed(2);
@@ -114,6 +125,7 @@ fn distinct_seeds_distinct_streams() {
 
 #[test]
 fn manual_seed_randn_is_deterministic_across_calls() {
+    let _guard = default_rng_test_lock();
     // randn does NOT byte-exact match torch (different code path for
     // size<16 vs >=16, SIMD libm vendoring, f64-acctype on the small
     // path). What ferrotorch DOES guarantee post-#1537: given the same
@@ -139,11 +151,12 @@ fn manual_seed_randn_is_deterministic_across_calls() {
 }
 
 #[test]
-fn explicit_generator_independent_of_thread_local() {
+fn explicit_generator_independent_of_process_default() {
+    let _guard = default_rng_test_lock();
     manual_seed(99);
-    let _ = rand::<f32>(&[3]).unwrap(); // advance thread-local
+    let _ = rand::<f32>(&[3]).unwrap(); // advance process-default generator
     let mut g = Generator::new(42);
-    // Explicit generator stream is independent of thread-local.
+    // Explicit generator stream is independent of process-default state.
     let v0 = g.next_uniform_f32();
     assert_eq!(v0.to_bits(), TORCH_RAND_SEED_42_F32_BITS[0]);
 }

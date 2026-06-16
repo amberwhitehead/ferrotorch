@@ -514,6 +514,7 @@ mod tests {
 
     #[test]
     fn test_checkpoint_preserves_cpu_uniform_rng_for_recompute() {
+        let _guard = crate::rng::default_rng_test_lock();
         crate::rng::manual_seed(123);
         let x = leaf_grad(&[1.0; 6], &[6]);
 
@@ -539,6 +540,7 @@ mod tests {
 
     #[test]
     fn test_checkpoint_preserves_cpu_normal_rng_cache_for_recompute() {
+        let _guard = crate::rng::default_rng_test_lock();
         crate::rng::manual_seed(456);
         // Prime the Box-Muller cache with one normal sample. A checkpoint
         // snapshot must include cached normal state, not just seed/counter.
@@ -567,6 +569,7 @@ mod tests {
 
     #[test]
     fn test_checkpoint_backward_does_not_advance_caller_cpu_rng_stream() {
+        let _guard = crate::rng::default_rng_test_lock();
         crate::rng::manual_seed(789);
         let x = leaf_grad(&[1.0; 6], &[6]);
 
@@ -670,6 +673,7 @@ mod tests {
 
     #[test]
     fn test_checkpoint_multi_preserves_cpu_uniform_rng_for_recompute() {
+        let _guard = crate::rng::default_rng_test_lock();
         crate::rng::manual_seed(321);
         let a = leaf_grad(&[1.0; 4], &[4]);
         let b = from_slice(&[0.0f32; 4], &[4]).unwrap();

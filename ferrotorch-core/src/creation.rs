@@ -261,9 +261,9 @@ pub fn linspace<T: Float>(start: T, end: T, num: usize) -> FerrotorchResult<Tens
 
 /// Create a tensor with random values uniformly distributed in [0, 1).
 ///
-/// Uses the thread-local [`crate::rng::Generator`] (MT19937), mirroring
-/// PyTorch CPU's `at::CPUGeneratorImpl` in
-/// `aten/src/ATen/CPUGeneratorImpl.cpp:226-228`. Call
+/// Uses the process-global default [`crate::rng::Generator`] (MT19937),
+/// mirroring PyTorch CPU's `default_generator` / `at::CPUGeneratorImpl` in
+/// `aten/src/ATen/CPUGeneratorImpl.cpp:52-57,226-228`. Call
 /// [`crate::manual_seed`] for reproducible output.
 ///
 /// # Byte-exact parity vs `torch.rand`
@@ -274,14 +274,12 @@ pub fn linspace<T: Float>(start: T, end: T, num: usize) -> FerrotorchResult<Tens
 /// (`aten/src/ATen/core/DistributionsHelper.h:106-113` `uniform_real<float>`
 /// transform: `(random() & ((1<<24)-1)) * (1.0 / (1<<24))`).
 ///
-/// # Thread-local RNG and rayon
+/// # Threading
 ///
-/// The RNG state is a per-thread `RefCell<Generator>`. Each rayon worker
-/// gets its own thread-local generator seeded from `SystemTime` + thread id
-/// unless [`crate::manual_seed`] is called on that worker. The randn f32
-/// parallel fast path (`numel >= 32_768`) derives per-chunk seeds from the
-/// main thread's generator so the result is still deterministic given a
-/// `manual_seed`.
+/// CPU random creation serializes access to one process-global default
+/// generator, like PyTorch's `GeneratorImpl::mutex_` convention. A
+/// `manual_seed` call in any thread resets the stream subsequently consumed by
+/// all threads.
 pub fn rand<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
     let numel = checked_numel(shape, "rand")?;
     let mut data: Vec<T> = Vec::with_capacity(numel);
@@ -304,8 +302,8 @@ pub fn rand<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
 
 /// Create a tensor with random values from a standard normal distribution.
 ///
-/// Uses the thread-local [`crate::rng::Generator`] (MT19937 + Box-Muller),
-/// mirroring `at::normal_distribution<T>(0, 1)` at
+/// Uses the process-global default [`crate::rng::Generator`] (MT19937 +
+/// Box-Muller), mirroring `at::normal_distribution<T>(0, 1)` at
 /// `aten/src/ATen/core/DistributionsHelper.h:172-201`. Call
 /// [`crate::manual_seed`] for reproducible output.
 ///
@@ -347,7 +345,7 @@ pub fn randn<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
 ///   `is_cuda()` tensor with no host round trip (R-CODE-4). Reproducible after
 ///   [`crate::manual_seed`] (which seeds the GPU generator too).
 /// - `Device::Cpu`: identical to [`rand`] (byte-exact with `torch.rand` for
-///   f32 via the thread-local MT19937).
+///   f32 via the process-global MT19937 default generator).
 /// - `Device::Meta`: falls back to the CPU path then `.to(Meta)`.
 pub fn rand_on_device<T: Float>(
     shape: &[usize],
@@ -699,6 +697,7 @@ mod tests {
 
     #[test]
     fn test_rand_shape() {
+        let _guard = crate::rng::default_rng_test_lock();
         let t: Tensor<f32> = rand(&[10, 20]).unwrap();
         assert_eq!(t.shape(), &[10, 20]);
         // Values should be in [0, 1).
@@ -707,6 +706,7 @@ mod tests {
 
     #[test]
     fn test_randn_shape() {
+        let _guard = crate::rng::default_rng_test_lock();
         let t: Tensor<f32> = randn(&[100]).unwrap();
         assert_eq!(t.shape(), &[100]);
         // Mean should be roughly 0 for 100 samples.
@@ -723,6 +723,7 @@ mod tests {
 
     #[test]
     fn test_zeros_like() {
+        let _guard = crate::rng::default_rng_test_lock();
         let t: Tensor<f32> = rand(&[3, 4]).unwrap();
         let z = zeros_like(&t).unwrap();
         assert_eq!(z.shape(), &[3, 4]);
@@ -750,6 +751,7 @@ mod tests {
 
     #[test]
     fn test_rand_like() {
+        let _guard = crate::rng::default_rng_test_lock();
         let t: Tensor<f32> = zeros(&[5, 6]).unwrap();
         let r = rand_like(&t).unwrap();
         assert_eq!(r.shape(), &[5, 6]);
@@ -758,6 +760,7 @@ mod tests {
 
     #[test]
     fn test_randn_like() {
+        let _guard = crate::rng::default_rng_test_lock();
         let t: Tensor<f32> = zeros(&[50]).unwrap();
         let r = randn_like(&t).unwrap();
         assert_eq!(r.shape(), &[50]);

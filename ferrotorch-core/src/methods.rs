@@ -581,7 +581,7 @@ impl<T: Float> Tensor<T> {
     /// consumer requirement (closes #1341 REQ-20).
     ///
     /// `training=true` draws a per-element slope from `Uniform[lower,
-    /// upper]` for every `x <= 0` element via the thread-local MT19937
+    /// upper]` for every `x <= 0` element via the process-default MT19937
     /// generator (seed with [`crate::manual_seed`]; bit-exact vs torch CPU)
     /// and the backward applies the saved per-element slopes.
     /// `training=false` applies the deterministic mean slope

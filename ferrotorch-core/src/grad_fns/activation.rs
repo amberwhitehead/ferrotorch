@@ -26,7 +26,7 @@
 //! | REQ-17 (`prelu`, scalar alpha) | SHIPPED | `prelu` + `PReluBackward` (fused dual VJP routing to input + alpha) consumed by `ferrotorch-nn/src/functional.rs` and the `PReLU` Module; full per-channel alpha is a follow-up. |
 //! | REQ-18 (`glu`) | SHIPPED | `glu` + `GluBackward` consumed by `ferrotorch-nn/src/functional.rs`. |
 //! | REQ-19 (`threshold`) | SHIPPED | `threshold` + `ThresholdBackward` consumed by `Tensor::threshold_t` in `methods.rs` (closes #1341 REQ-19). |
-//! | REQ-20 (`rrelu`) | SHIPPED | `rrelu` + `RReluBackward` (deterministic mean-slope inference path) and `RReluTrainBackward` (training mode: per-element `Uniform[lower, upper]` slopes drawn from the thread-local MT19937, bit-exact vs torch CPU under `manual_seed`, #1738) consumed by `Tensor::rrelu_t` in `methods.rs`. |
+//! | REQ-20 (`rrelu`) | SHIPPED | `rrelu` + `RReluBackward` (deterministic mean-slope inference path) and `RReluTrainBackward` (training mode: per-element `Uniform[lower, upper]` slopes drawn from the process-default MT19937, bit-exact vs torch CPU under `manual_seed`, #1738) consumed by `Tensor::rrelu_t` in `methods.rs`. |
 //! | REQ-21 (`celu`) | SHIPPED | `celu` + `CeluBackward` consumed by `Tensor::celu_t` in `methods.rs`. |
 //! | REQ-22 (`softmin` fused) | SHIPPED | `softmin` + `SoftminBackward` (fused single-`GradFn`) consumed by `Tensor::softmin_t` in `methods.rs`; the explicit-composition `neg -> softmax` route still ships in `ferrotorch-nn`. |
 //! | REQ-23 (autograd gating) | SHIPPED | every public forward checks `is_grad_enabled() && input.requires_grad()` before attaching a `*Backward` node; verified by the `test_*_no_grad` family. |
@@ -2825,7 +2825,7 @@ pub fn threshold<T: Float>(
 //   - inference (`training=false`): fused `RReluBackward` with the
 //     deterministic mean slope, mirroring the upstream `else` branch;
 //   - training (`training=true`): per-element slope drawn from
-//     `Uniform[lower, upper]` via the thread-local MT19937 generator
+//     `Uniform[lower, upper]` via the process-default MT19937 generator
 //     (`crate::rng::with_thread_rng`), saved as the `noise` buffer for the
 //     backward — mirroring `_rrelu_with_noise_train` exactly. The draw is
 //     `at::uniform_real_distribution<double>(lower, upper)` per
@@ -2960,7 +2960,7 @@ impl<T: Float> GradFn<T> for RReluTrainBackward<T> {
 ///   included), mirroring `_rrelu_with_noise_train` at
 ///   `aten/src/ATen/native/Activation.cpp:578-608`: the slope is drawn in
 ///   DOUBLE precision via `at::uniform_real_distribution<double>` from the
-///   thread-local MT19937 generator (`crate::manual_seed` controls it),
+///   process-default MT19937 generator (`crate::manual_seed` controls it),
 ///   saved as the `noise` buffer, and the backward applies `grad * noise`.
 ///   Bit-exact vs torch CPU under `manual_seed` (#1738 / CORE-044).
 pub fn rrelu<T: Float>(

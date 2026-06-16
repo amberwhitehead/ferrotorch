@@ -1,19 +1,20 @@
-//! Thread-local seeded random number generator state, mirroring
-//! `torch.manual_seed` / `torch.Generator`.
+//! Process-global default random number generator state, mirroring
+//! `torch.manual_seed` / `torch.default_generator`.
 //!
 //! ## REQ status (per `.design/ferrotorch-core/rng.md`)
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (MT19937 engine) | SHIPPED | `Mt19937` engine at `rng.rs` mirrors `aten/src/ATen/core/MT19937RNGEngine.h:110-150` (state array of 624 uint32, twist/temper bits identical); non-test consumer: `creation::rand`/`creation::randn` at `creation.rs:127,160` source bits from `with_thread_rng`. |
-//! | REQ-2 (`Generator` newtype) | SHIPPED | `pub struct Generator` exposes `new(seed)`, `manual_seed(seed)`, `next_uniform_f32/f64`, `next_normal_f32/f64`; non-test consumer: thread-local `Generator` used by `creation::rand` at `creation.rs:127`. |
-//! | REQ-3 (`manual_seed` top-level) | SHIPPED | `pub fn manual_seed(seed)` sets the current-thread `Generator`, mirroring `torch.manual_seed` at `torch/random.py:46`. Non-test consumer: re-exported at `lib.rs` as `ferrotorch_core::manual_seed`. |
-//! | REQ-4 (thread-local state) | SHIPPED | `THREAD_RNG: RefCell<Generator>` initialised lazily from `SystemTime` + `thread::id()` on first use; reseeded by `manual_seed`. Non-test consumer: `with_thread_rng` invoked by `creation::rand`/`randn`. |
+//! | REQ-1 (MT19937 engine) | SHIPPED | `Mt19937` engine mirrors `aten/src/ATen/core/MT19937RNGEngine.h:110-150` (state array of 624 uint32, twist/temper bits identical); non-test consumer: `creation::rand`/`creation::randn` source bits from `with_thread_rng`. |
+//! | REQ-2 (`Generator` newtype) | SHIPPED | `pub struct Generator` exposes `new(seed)`, `manual_seed(seed)`, `next_uniform_f32/f64`, `next_normal_f32/f64`; non-test consumer: process-default `Generator` used by `creation::rand`. |
+//! | REQ-3 (`manual_seed` top-level) | SHIPPED | `pub fn manual_seed(seed)` sets the process-global default CPU `Generator`, mirroring `torch.manual_seed` at `torch/random.py:46-86`. Non-test consumer: re-exported at `lib.rs` as `ferrotorch_core::manual_seed`. |
+//! | REQ-4 (default-generator state) | SHIPPED | `DEFAULT_RNG: Mutex<Generator>` is initialised once from entropy and serialized like PyTorch's `default_generator` mutex; `manual_seed` reaches all threads. Non-test consumer: `with_thread_rng` invoked by `creation::rand`/`randn`. |
 //! | REQ-5 (byte-exact parity for f32 rand) | SHIPPED | `Mt19937` reproduces `torch.manual_seed(42); torch.rand(10)` byte-for-byte; pinned by `ferrotorch-core/tests/divergence_manual_seed_parity.rs`. |
 
-use std::cell::RefCell;
+use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 // MT19937 constants — mirror `aten/src/ATen/core/MT19937RNGEngine.h:19-23`.
@@ -111,7 +112,7 @@ impl Mt19937 {
     }
 }
 
-/// Per-process / per-thread seeded RNG state, mirroring `torch.Generator`.
+/// Explicit seeded RNG state, mirroring `torch.Generator`.
 ///
 /// Construct with [`Generator::new`] (deterministic seed) or
 /// [`Generator::seed_from_entropy`] (`SystemTime` + thread id, matches the
@@ -248,28 +249,58 @@ impl Default for Generator {
     }
 }
 
+static DEFAULT_RNG: LazyLock<Mutex<Generator>> =
+    LazyLock::new(|| Mutex::new(Generator::seed_from_entropy()));
+
 thread_local! {
-    /// Per-thread default generator. Initialised lazily from `SystemTime` +
-    /// thread id on first use. `manual_seed` overrides this thread's state.
-    static THREAD_RNG: RefCell<Generator> = RefCell::new(Generator::seed_from_entropy());
+    /// Protects the public closure accessor from recursive use on one thread.
+    /// `std::sync::Mutex` is intentionally not reentrant; without this guard a
+    /// nested default-RNG call would hang instead of reporting the API misuse.
+    static DEFAULT_RNG_ACTIVE: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Set the current thread's default RNG seed — mirrors `torch.manual_seed`
-/// at `torch/random.py:46`.
-///
-/// Note: thread-local — to set every worker thread's seed in a rayon pool,
-/// call this from each thread (or use [`manual_seed_all_threads`] if you
-/// know you want a global broadcast, currently same-thread only).
+struct DefaultRngAccessGuard;
+
+impl DefaultRngAccessGuard {
+    fn enter(operation: &'static str) -> Self {
+        DEFAULT_RNG_ACTIVE.with(|active| {
+            assert!(
+                !active.get(),
+                "{operation}: default RNG is already mutably borrowed; use an explicit Generator \
+                 for nested random generation"
+            );
+            active.set(true);
+        });
+        Self
+    }
+}
+
+impl Drop for DefaultRngAccessGuard {
+    fn drop(&mut self) {
+        DEFAULT_RNG_ACTIVE.with(|active| active.set(false));
+    }
+}
+
+fn lock_default_rng() -> MutexGuard<'static, Generator> {
+    DEFAULT_RNG
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Set the process-global default CPU RNG seed — mirrors `torch.manual_seed`
+/// at `torch/random.py:46-86`.
 ///
 /// # Production consumer
 ///
-/// `crate::creation::rand`/`randn` now consume bits from the thread-local
-/// generator. Calling `manual_seed(42)` before `rand` makes subsequent
-/// calls deterministic.
+/// `crate::creation::rand`/`randn` consume bits from this shared default
+/// generator. Calling `manual_seed(42)` in any thread reseeds the stream seen
+/// by subsequently scheduled random creation on any thread, matching PyTorch's
+/// process-global CPU default generator.
 pub fn manual_seed(seed: u64) {
-    THREAD_RNG.with(|rng| {
-        rng.borrow_mut().manual_seed(seed);
-    });
+    {
+        let _access = DefaultRngAccessGuard::enter("manual_seed");
+        lock_default_rng().manual_seed(seed);
+    }
     // Mirror `torch.manual_seed`, which seeds BOTH the CPU and all CUDA
     // generators: `torch/random.py:67` calls `torch.cuda.manual_seed_all(seed)`
     // (`torch/cuda/random.py:112`). When a GPU backend is registered, forward
@@ -282,31 +313,47 @@ pub fn manual_seed(seed: u64) {
     }
 }
 
-/// Run a closure with mutable access to the current thread's default
-/// generator. Used by `creation::rand` / `creation::randn` and by
-/// `ferrotorch-nn` initialisers that don't take an explicit `Generator`.
+/// Run a closure with mutable access to the process-global default generator.
+///
+/// The historical name is retained for API compatibility. The semantics match
+/// PyTorch's default CPU generator: one process-wide stream serialized behind a
+/// mutex, not a per-thread RNG. Used by `creation::rand` / `creation::randn`
+/// and by `ferrotorch-nn` initialisers that don't take an explicit
+/// [`Generator`].
 pub fn with_thread_rng<R>(f: impl FnOnce(&mut Generator) -> R) -> R {
-    THREAD_RNG.with(|rng| f(&mut rng.borrow_mut()))
+    let _access = DefaultRngAccessGuard::enter("with_thread_rng");
+    let mut rng = lock_default_rng();
+    f(&mut rng)
 }
 
-/// Clone the current thread's full CPU RNG state, including cached normal
-/// samples. Checkpointing uses this to mirror `torch.get_rng_state()`.
+/// Clone the process-global CPU RNG state, including cached normal samples.
+/// Checkpointing uses this to mirror `torch.get_rng_state()`.
 pub(crate) fn thread_rng_state() -> Generator {
-    THREAD_RNG.with(|rng| rng.borrow().clone())
+    let _access = DefaultRngAccessGuard::enter("thread_rng_state");
+    lock_default_rng().clone()
 }
 
-/// Restore the current thread's full CPU RNG state. Checkpointing uses this
+/// Restore the process-global CPU RNG state. Checkpointing uses this
 /// inside a fork-style guard so stochastic recomputation sees the same stream
 /// as the original forward while the caller's surrounding stream is restored.
 pub(crate) fn set_thread_rng_state(state: Generator) {
-    THREAD_RNG.with(|rng| {
-        *rng.borrow_mut() = state;
-    });
+    let _access = DefaultRngAccessGuard::enter("set_thread_rng_state");
+    *lock_default_rng() = state;
+}
+
+#[cfg(test)]
+pub(crate) fn default_rng_test_lock() -> MutexGuard<'static, ()> {
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     /// `torch.manual_seed(42); torch.rand(10)` reference — captured from
     /// PyTorch 2.x CPU MT19937 as exact f32 bit patterns (see
@@ -340,7 +387,8 @@ mod tests {
     }
 
     #[test]
-    fn manual_seed_resets_thread_local() {
+    fn manual_seed_resets_default_generator() {
+        let _guard = default_rng_test_lock();
         manual_seed(42);
         let a: Vec<u32> = (0..5)
             .map(|_| with_thread_rng(|g| g.random_u32()))
@@ -354,11 +402,83 @@ mod tests {
 
     #[test]
     fn manual_seed_distinct_seeds_distinct_streams() {
+        let _guard = default_rng_test_lock();
         manual_seed(42);
         let a = with_thread_rng(|g| g.random_u32());
         manual_seed(43);
         let b = with_thread_rng(|g| g.random_u32());
         assert_ne!(a, b);
+    }
+
+    fn draw_default_uniform_bits(n: usize) -> Vec<u32> {
+        with_thread_rng(|g| (0..n).map(|_| g.next_uniform_f32().to_bits()).collect())
+    }
+
+    #[test]
+    fn manual_seed_reaches_fresh_worker_thread() {
+        let _guard = default_rng_test_lock();
+        manual_seed(42);
+
+        let worker = std::thread::spawn(|| draw_default_uniform_bits(10));
+        let got = worker.join().expect("fresh RNG worker should not panic");
+
+        assert_eq!(
+            got.as_slice(),
+            &TORCH_RAND_SEED_42_F32_BITS,
+            "manual_seed must seed the process default generator seen by a fresh worker thread"
+        );
+    }
+
+    #[test]
+    fn manual_seed_reaches_existing_worker_thread() {
+        let _guard = default_rng_test_lock();
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<()>(0);
+        let (go_tx, go_rx) = mpsc::sync_channel::<()>(0);
+        let (out_tx, out_rx) = mpsc::sync_channel::<Vec<u32>>(0);
+
+        let worker = std::thread::spawn(move || {
+            let _ = with_thread_rng(|g| g.random_u32());
+            ready_tx.send(()).expect("main should wait for ready");
+            go_rx.recv().expect("main should signal draw");
+            out_tx
+                .send(draw_default_uniform_bits(10))
+                .expect("main should receive output");
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker should initialize the default RNG");
+        manual_seed(42);
+        go_tx.send(()).expect("worker should still be waiting");
+        let got = out_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("worker should return seeded output");
+        worker.join().expect("existing RNG worker should not panic");
+
+        assert_eq!(
+            got.as_slice(),
+            &TORCH_RAND_SEED_42_F32_BITS,
+            "manual_seed must reseed the shared default generator even for an already-running worker"
+        );
+    }
+
+    #[test]
+    fn default_generator_stream_is_shared_across_threads() {
+        let _guard = default_rng_test_lock();
+        manual_seed(42);
+
+        let first_half = std::thread::spawn(|| draw_default_uniform_bits(5))
+            .join()
+            .expect("worker should draw first half");
+        let second_half = draw_default_uniform_bits(5);
+
+        let mut got = first_half;
+        got.extend(second_half);
+        assert_eq!(
+            got.as_slice(),
+            &TORCH_RAND_SEED_42_F32_BITS,
+            "worker and caller must advance one shared default stream, not independent streams"
+        );
     }
 
     #[test]

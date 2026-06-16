@@ -11,7 +11,7 @@ use ferrotorch_core::creation;
 use ferrotorch_core::dtype::Float;
 use ferrotorch_core::{Device, Tensor, manual_seed, rand_on_device, randn_on_device};
 use half::{bf16, f16};
-use std::sync::Once;
+use std::sync::{Mutex, MutexGuard, Once};
 
 static GPU_INIT: Once = Once::new();
 
@@ -20,6 +20,13 @@ fn ensure_cuda_backend() {
         ferrotorch_gpu::init_cuda_backend()
             .expect("CUDA backend must initialize for creation GPU conformance");
     });
+}
+
+fn default_rng_test_lock() -> MutexGuard<'static, ()> {
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn host_values<T: Float>(tensor: &Tensor<T>) -> Vec<f64> {
@@ -65,6 +72,7 @@ fn assert_cuda_normal<T: Float>(name: &str, tensor: Tensor<T>, shape: &[usize]) 
 
 #[test]
 fn creation_rand_on_device_cuda_float_dtypes_are_resident() {
+    let _guard = default_rng_test_lock();
     ensure_cuda_backend();
     manual_seed(1682);
     let shape = [17, 3];
@@ -93,6 +101,7 @@ fn creation_rand_on_device_cuda_float_dtypes_are_resident() {
 
 #[test]
 fn creation_randn_on_device_cuda_float_dtypes_are_resident() {
+    let _guard = default_rng_test_lock();
     ensure_cuda_backend();
     manual_seed(1683);
     let shape = [19, 2];
@@ -121,6 +130,7 @@ fn creation_randn_on_device_cuda_float_dtypes_are_resident() {
 
 #[test]
 fn top_level_rand_reexports_preserve_cuda_residency() {
+    let _guard = default_rng_test_lock();
     ensure_cuda_backend();
     manual_seed(1684);
 
