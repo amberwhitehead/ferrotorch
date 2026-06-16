@@ -132,8 +132,8 @@ pub fn reduce_all<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Option<Tensor
 /// - 2-D × 1-D → 1-D vector
 /// - 1-D × 2-D → 1-D vector
 /// - 2-D × 2-D → 2-D matrix
-/// - N-D × M-D → broadcast batch dims, contract last-two/first-two of the
-///   trailing pair
+/// - otherwise, promote 1-D operands to synthetic row/column matrices,
+///   broadcast the real batch dims, then squeeze those synthetic axes.
 pub fn matmul<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Option<Tensor<T>>> {
     match (a.is_meta(), b.is_meta()) {
         (false, false) => return Ok(None),
@@ -159,78 +159,44 @@ pub fn matmul<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Option
         });
     }
 
-    let out_shape: Vec<usize> = match (a_ndim, b_ndim) {
-        (1, 1) => {
-            // dot product → scalar
-            if a_shape[0] != b_shape[0] {
-                return Err(FerrotorchError::ShapeMismatch {
-                    message: format!(
-                        "meta_propagate::matmul: 1D dot dimension mismatch {} vs {}",
-                        a_shape[0], b_shape[0]
-                    ),
-                });
-            }
-            vec![]
-        }
-        (2, 1) => {
-            // [m, k] @ [k] → [m]
-            if a_shape[1] != b_shape[0] {
-                return Err(FerrotorchError::ShapeMismatch {
-                    message: format!(
-                        "meta_propagate::matmul: mv dim mismatch {} vs {}",
-                        a_shape[1], b_shape[0]
-                    ),
-                });
-            }
-            vec![a_shape[0]]
-        }
-        (1, 2) => {
-            // [k] @ [k, n] → [n]
-            if a_shape[0] != b_shape[0] {
-                return Err(FerrotorchError::ShapeMismatch {
-                    message: format!(
-                        "meta_propagate::matmul: vm dim mismatch {} vs {}",
-                        a_shape[0], b_shape[0]
-                    ),
-                });
-            }
-            vec![b_shape[1]]
-        }
-        (2, 2) => {
-            // [m, k] @ [k, n] → [m, n]
-            if a_shape[1] != b_shape[0] {
-                return Err(FerrotorchError::ShapeMismatch {
-                    message: format!(
-                        "meta_propagate::matmul: mm inner dim mismatch {} vs {}",
-                        a_shape[1], b_shape[0]
-                    ),
-                });
-            }
-            vec![a_shape[0], b_shape[1]]
-        }
-        _ => {
-            // Batched: broadcast leading dims, contract last two of the trailing pair.
-            // a: [..., m, k], b: [..., k, n]
-            let a_inner_k = a_shape[a_ndim - 1];
-            let b_inner_k = b_shape[b_ndim - 2];
-            if a_inner_k != b_inner_k {
-                return Err(FerrotorchError::ShapeMismatch {
-                    message: format!(
-                        "meta_propagate::matmul: batched inner dim mismatch {a_inner_k} vs {b_inner_k}"
-                    ),
-                });
-            }
-            let m = a_shape[a_ndim - 2];
-            let n = b_shape[b_ndim - 1];
-            // Broadcast batch dims (everything except the last 2 axes).
-            let a_batch = &a_shape[..a_ndim - 2];
-            let b_batch = &b_shape[..b_ndim - 2];
-            let mut batch = broadcast_shapes(a_batch, b_batch)?;
-            batch.push(m);
-            batch.push(n);
-            batch
-        }
+    // Mirrors PyTorch's `_matmul_impl` general shape rule: 1-D inputs
+    // contribute no batch dims and synthesize a row/column matrix axis only
+    // for the contraction. That synthetic axis is not emitted in `out_shape`.
+    let lhs_rows = if a_ndim > 1 { a_shape[a_ndim - 2] } else { 1 };
+    let lhs_contract = a_shape[a_ndim - 1];
+    let rhs_contract = if b_ndim > 1 {
+        b_shape[b_ndim - 2]
+    } else {
+        b_shape[0]
     };
+    let rhs_cols = if b_ndim > 1 { b_shape[b_ndim - 1] } else { 1 };
+
+    if lhs_contract != rhs_contract {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "meta_propagate::matmul: inner dimensions mismatch for shapes {a_shape:?} and {b_shape:?}: {lhs_contract} vs {rhs_contract}"
+            ),
+        });
+    }
+
+    let lhs_batch: &[usize] = if a_ndim > 1 {
+        &a_shape[..a_ndim - 2]
+    } else {
+        &[]
+    };
+    let rhs_batch: &[usize] = if b_ndim > 1 {
+        &b_shape[..b_ndim - 2]
+    } else {
+        &[]
+    };
+
+    let mut out_shape = broadcast_shapes(lhs_batch, rhs_batch)?;
+    if a_ndim > 1 {
+        out_shape.push(lhs_rows);
+    }
+    if b_ndim > 1 {
+        out_shape.push(rhs_cols);
+    }
 
     Ok(Some(creation::zeros_meta(&out_shape)?))
 }
@@ -417,6 +383,81 @@ mod tests {
     }
 
     #[test]
+    fn test_matmul_vector_batched_shapes_match_torch() {
+        // Shape oracles from torch.matmul on torch 2.11.0+cu130:
+        // (3,)@(2,3,4) -> (2,4)
+        // (2,3,4)@(4,) -> (2,3)
+        // (3,)@(5,2,3,4) -> (5,2,4)
+        // (5,2,3,4)@(4,) -> (5,2,3)
+        // (2,1,3,4)@(3,4,5) -> (2,3,3,5)
+        let cases: &[(&[usize], &[usize], &[usize])] = &[
+            (&[3], &[2, 3, 4], &[2, 4]),
+            (&[2, 3, 4], &[4], &[2, 3]),
+            (&[3], &[5, 2, 3, 4], &[5, 2, 4]),
+            (&[5, 2, 3, 4], &[4], &[5, 2, 3]),
+            (&[2, 1, 3, 4], &[3, 4, 5], &[2, 3, 3, 5]),
+        ];
+
+        for &(a_shape, b_shape, expected) in cases {
+            let a: Tensor<f32> = meta(a_shape);
+            let b: Tensor<f32> = meta(b_shape);
+            let out = matmul(&a, &b)
+                .unwrap_or_else(|err| panic!("matmul({a_shape:?}, {b_shape:?}) errored: {err}"))
+                .unwrap();
+            assert_eq!(
+                out.shape(),
+                expected,
+                "torch.matmul shape oracle for {a_shape:?} @ {b_shape:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_matmul_vector_batched_zero_dim_shapes_match_torch() {
+        // Shape oracles from torch.matmul on torch 2.11.0+cu130:
+        // (0,)@(2,0,4) -> (2,4)
+        // (2,3,0)@(0,) -> (2,3)
+        // (2,0,3,4)@(1,4,5) -> (2,0,3,5)
+        let cases: &[(&[usize], &[usize], &[usize])] = &[
+            (&[0], &[2, 0, 4], &[2, 4]),
+            (&[2, 3, 0], &[0], &[2, 3]),
+            (&[2, 0, 3, 4], &[1, 4, 5], &[2, 0, 3, 5]),
+        ];
+
+        for &(a_shape, b_shape, expected) in cases {
+            let a: Tensor<f32> = meta(a_shape);
+            let b: Tensor<f32> = meta(b_shape);
+            let out = matmul(&a, &b)
+                .unwrap_or_else(|err| panic!("matmul({a_shape:?}, {b_shape:?}) errored: {err}"))
+                .unwrap();
+            assert_eq!(
+                out.shape(),
+                expected,
+                "torch.matmul zero-dim shape oracle for {a_shape:?} @ {b_shape:?}"
+            );
+            assert_eq!(out.numel(), expected.iter().product::<usize>());
+        }
+    }
+
+    #[test]
+    fn test_matmul_vector_batched_invalid_shapes_error_not_panic() {
+        let cases: &[(&[usize], &[usize])] = &[
+            (&[3], &[2, 4, 5]),
+            (&[2, 3, 4], &[5]),
+            (&[2, 0, 3, 4], &[7, 4, 5]),
+        ];
+
+        for &(a_shape, b_shape) in cases {
+            let a: Tensor<f32> = meta(a_shape);
+            let b: Tensor<f32> = meta(b_shape);
+            assert!(
+                matmul(&a, &b).is_err(),
+                "invalid torch.matmul shape {a_shape:?} @ {b_shape:?} must error"
+            );
+        }
+    }
+
+    #[test]
     fn test_matmul_inner_dim_mismatch_errors() {
         let a: Tensor<f32> = meta(&[3, 5]);
         let b: Tensor<f32> = meta(&[6, 4]);
@@ -499,6 +540,23 @@ mod tests {
         let out = op_matmul(&a, &b).unwrap();
         assert!(out.is_meta());
         assert_eq!(out.shape(), &[8, 32]);
+    }
+
+    #[test]
+    fn test_e2e_meta_matmul_vector_batched() {
+        use crate::ops::linalg::matmul as op_matmul;
+
+        let vector_lhs: Tensor<f32> = meta(&[3]);
+        let batched_rhs: Tensor<f32> = meta(&[2, 3, 4]);
+        let out = op_matmul(&vector_lhs, &batched_rhs).unwrap();
+        assert!(out.is_meta());
+        assert_eq!(out.shape(), &[2, 4]);
+
+        let batched_lhs: Tensor<f32> = meta(&[2, 3, 4]);
+        let vector_rhs: Tensor<f32> = meta(&[4]);
+        let out = op_matmul(&batched_lhs, &vector_rhs).unwrap();
+        assert!(out.is_meta());
+        assert_eq!(out.shape(), &[2, 3]);
     }
 
     #[test]

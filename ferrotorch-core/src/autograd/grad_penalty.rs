@@ -361,6 +361,7 @@ mod tests {
 
     #[test]
     fn test_gradient_penalty_linear_discriminator() {
+        let _guard = crate::rng::default_rng_test_lock();
         // D(x) = sum(x). For any input of size n:
         //   grad(D(x), x) = [1, 1, ..., 1]
         //   ||grad||_2 = sqrt(n)
@@ -394,6 +395,7 @@ mod tests {
 
     #[test]
     fn test_gradient_penalty_scalar_input() {
+        let _guard = crate::rng::default_rng_test_lock();
         // D(x) = x^2 for scalar x.
         // grad(D(x), x) = 2x_interp
         // ||grad||_2 = |2 * x_interp|
@@ -427,6 +429,7 @@ mod tests {
 
     #[test]
     fn test_gradient_penalty_parameterless_linear_discriminator_is_detached() {
+        let _guard = crate::rng::default_rng_test_lock();
         // PyTorch parity: D(x)=sum(x) has a constant input gradient and no
         // captured learnable parameter, so create_graph=True does not invent
         // a fake outer-loop graph.
@@ -700,6 +703,7 @@ mod tests {
 
     #[test]
     fn test_gradient_penalty_create_graph_outer_loop() {
+        let _guard = crate::rng::default_rng_test_lock();
         // Verify that the gradient penalty result can be differentiated again
         // (i.e., it participates in the computation graph for outer-loop
         // optimization as required in WGAN-GP training).
