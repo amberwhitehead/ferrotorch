@@ -65,6 +65,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- Add CUDA-resident remainder/fmod/floor_divide kernels for floating tensors (#1982)
 - CORE-037: Backward on a gradient-tracking leaf silently does nothing (#1731)
 - CORE-036: Fixed-point solving accepts incompatible iterates and silent non-convergence (#1730)
 - CORE-023: Saved-tensor hooks are not connected to production autograd nodes (#1717)

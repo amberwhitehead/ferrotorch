@@ -93,11 +93,14 @@ fn extract_ptx_consts(src: &str) -> Vec<(String, String, String)> {
         // Find the assignment's opening quote: `... = "`
         // Look ahead a bounded window for `= "`.
         let window_end = (s + 80).min(bytes.len());
-        let window = &src[s..window_end];
-        if let Some(eqrel) = window.find('=') {
+        if let Some(eqrel) = bytes[s..window_end].iter().position(|&b| b == b'=') {
             let after_eq = s + eqrel + 1;
             // find the first `"` after `=`
-            if let Some(qrel) = src[after_eq..(after_eq + 40).min(bytes.len())].find('"') {
+            let quote_window_end = (after_eq + 40).min(bytes.len());
+            if let Some(qrel) = bytes[after_eq..quote_window_end]
+                .iter()
+                .position(|&b| b == b'"')
+            {
                 let q = after_eq + qrel;
                 if let Some((body, end)) = parse_string_literal(bytes, q + 1) {
                     if body.contains(".entry") {

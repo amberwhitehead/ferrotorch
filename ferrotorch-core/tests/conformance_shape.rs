@@ -65,10 +65,6 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 
-// Used unconditionally: the shared masked_fill runner pins the #1905 CUDA
-// backward contract with `FerrotorchError::GpuTensorNotAccessible`, and that
-// branch compiles (dead) in non-gpu builds too.
-use ferrotorch_core::FerrotorchError;
 use ferrotorch_core::grad_fns::indexing::{
     GatherBackward, IndexSelectBackward, MaskedFillBackward, ScatterAddBackward, ScatterBackward,
     WhereCondBackward, index_select_1d, index_select_1d_it, masked_fill, masked_fill_bt,
@@ -2312,6 +2308,13 @@ fn run_masked_fill_for_device(device_label: &str, device: Device) {
             "float32" => {
                 let a = upload_f32(make_cpu_f32(in_data, in_shape, false), device);
                 let r = masked_fill(&a, mask, value as f32).expect("masked_fill");
+                if matches!(device, Device::Cuda(_)) {
+                    assert!(
+                        r.is_cuda(),
+                        "{label} forward must stay CUDA-resident, got {:?}",
+                        r.device()
+                    );
+                }
                 check_f32(
                     &format!("{label} fwd"),
                     &read_back_f32(&r),
@@ -2321,32 +2324,21 @@ fn run_masked_fill_for_device(device_label: &str, device: Device) {
                 let a_g = upload_f32(make_cpu_f32(in_data, in_shape, true), device);
                 let r_g = masked_fill(&a_g, mask, value as f32).expect("masked_fill");
                 let loss = ferrotorch_core::grad_fns::reduction::sum(&r_g).expect("sum");
+                loss.backward().expect("backward");
+                let g = a_g.grad().unwrap().expect("grad");
                 if matches!(device, Device::Cuda(_)) {
-                    // #1905: masked_fill backward on CUDA is unimplemented —
-                    // the backward node reads through CPU-only `data()` and
-                    // fails with GpuTensorNotAccessible, while torch
-                    // differentiates masked_fill on CUDA. Pin the current
-                    // loud-error contract; when #1905 lands, this expect_err
-                    // fails and the pin is retired with live grad assertions
-                    // (R-DEFER-3).
-                    let err = loss
-                        .backward()
-                        .expect_err("#1905 fixed? retire this pin: assert CUDA grads instead");
                     assert!(
-                        matches!(err, FerrotorchError::GpuTensorNotAccessible),
-                        "#1905: expected GpuTensorNotAccessible from CUDA \
-                         masked_fill backward, got {err:?}"
-                    );
-                } else {
-                    loss.backward().expect("backward");
-                    let g = a_g.grad().unwrap().expect("grad");
-                    check_f32(
-                        &format!("{label} grad_a"),
-                        &read_back_f32(&g),
-                        grad_exp,
-                        tolerance::F32_BITEXACT,
+                        g.is_cuda(),
+                        "{label} backward gradient must stay CUDA-resident, got {:?}",
+                        g.device()
                     );
                 }
+                check_f32(
+                    &format!("{label} grad_a"),
+                    &read_back_f32(&g),
+                    grad_exp,
+                    tolerance::F32_BITEXACT,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(in_data, in_shape, false);

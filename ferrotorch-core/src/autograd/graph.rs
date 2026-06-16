@@ -569,6 +569,21 @@ pub fn backward_parallel<T: Float>(
     Ok(())
 }
 
+/// Pack a CUDA gradient before passing it to raw buffer elementwise kernels.
+///
+/// Shape/stride-contiguous views can still cover only part of a larger storage
+/// buffer after `split`/`select`/`squeeze`. Backend add kernels see raw storage
+/// length, so both operands must have backing buffers matching logical numel.
+fn pack_cuda_grad_for_add<T: Float>(grad: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if !grad.is_cuda() {
+        return Ok(grad.clone());
+    }
+    if grad.is_contiguous() && grad.storage_offset() == 0 && grad.storage_len() == grad.numel() {
+        return Ok(grad.clone());
+    }
+    crate::autograd::no_grad::no_grad(|| crate::methods::contiguous_t(grad))
+}
+
 /// Like `accumulate_non_leaf_grad` but caller holds the grads mutex.
 fn accumulate_non_leaf_grad_locked<T: Float>(
     grads: &mut HashMap<TensorId, Tensor<T>>,
@@ -603,6 +618,8 @@ fn accumulate_non_leaf_grad_locked<T: Float>(
         }
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let existing = pack_cuda_grad_for_add(&existing)?;
+        let grad = pack_cuda_grad_for_add(&grad)?;
         let a_handle = existing.gpu_handle()?;
         let b_handle = grad.gpu_handle()?;
         let sum_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
@@ -689,6 +706,8 @@ fn accumulate_non_leaf_grad<T: Float>(
         }
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let existing = pack_cuda_grad_for_add(&existing)?;
+        let grad = pack_cuda_grad_for_add(&grad)?;
         let a_handle = existing.gpu_handle()?;
         let b_handle = grad.gpu_handle()?;
         let result_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(

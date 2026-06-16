@@ -119,7 +119,7 @@ which is the standard Rust pattern (documented at `error.rs:46-69` with
 a runnable code sample). Production consumer: every callsite in
 `ferrotorch-core/src/grad_fns/*.rs` that returns
 `FerrotorchResult<GpuBufferHandle>` from backend dispatch arms (e.g.
-`grad_fns/arithmetic.rs:549, :583, :1302` `dispatch_floating_dtype!`
+`grad_fns/arithmetic.rs:721, :755, :1474` `dispatch_floating_dtype!`
 arms wrapping `GpuBackend::*` results — the underlying mapping happens in
 `gpu_dispatch.rs`'s `?` propagation).
 
@@ -138,7 +138,7 @@ Every non-test `.rs` file under `ferrotorch-core/src/` that returns
   `ops::indexing::masked_select(self, mask)` returns
   `FerrotorchResult<Tensor<T>>` and propagates via `?` through the
   `Tensor::masked_select` boundary method.
-- `ferrotorch-core/src/grad_fns/arithmetic.rs:549, :583, :1302` —
+- `ferrotorch-core/src/grad_fns/arithmetic.rs:721, :755, :1474` —
   `dispatch_floating_dtype!` arms return
   `FerrotorchResult<GpuBufferHandle>` and rely on `FerrotorchError::Gpu`
   for backend-error wrapping.

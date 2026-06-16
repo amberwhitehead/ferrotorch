@@ -1155,6 +1155,30 @@ pub trait GpuBackend: Send + Sync {
             op: "broadcast_div_rounding_f32",
         })
     }
+    fn broadcast_remainder_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_remainder_f32",
+        })
+    }
+    fn broadcast_fmod_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_fmod_f32",
+        })
+    }
     fn broadcast_div_f64(
         &self,
         _a: &GpuBufferHandle,
@@ -1178,6 +1202,30 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "broadcast_div_rounding_f64",
+        })
+    }
+    fn broadcast_remainder_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_remainder_f64",
+        })
+    }
+    fn broadcast_fmod_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_fmod_f64",
         })
     }
 
@@ -6202,6 +6250,49 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// bf16 broadcast division with PyTorch rounding mode: `trunc` or `floor`.
+    fn broadcast_div_rounding_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+        _rounding_mode: &str,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_div_rounding_bf16",
+        })
+    }
+
+    /// bf16 broadcast remainder with PyTorch divisor-sign semantics.
+    fn broadcast_remainder_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_remainder_bf16",
+        })
+    }
+
+    /// bf16 broadcast fmod with C99 dividend-sign semantics.
+    fn broadcast_fmod_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_fmod_bf16",
+        })
+    }
+
     /// bf16 sum-reduce to scalar. PyTorch parity: accumulator is f32, final
     /// store rounds back to bf16 with round-to-nearest-even.
     fn sum_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
@@ -6444,6 +6535,49 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "broadcast_div_f16",
+        })
+    }
+
+    /// f16 broadcast division with PyTorch rounding mode: `trunc` or `floor`.
+    fn broadcast_div_rounding_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+        _rounding_mode: &str,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_div_rounding_f16",
+        })
+    }
+
+    /// f16 broadcast remainder with PyTorch divisor-sign semantics.
+    fn broadcast_remainder_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_remainder_f16",
+        })
+    }
+
+    /// f16 broadcast fmod with C99 dividend-sign semantics.
+    fn broadcast_fmod_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _a_shape: &[usize],
+        _b_shape: &[usize],
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_fmod_f16",
         })
     }
 

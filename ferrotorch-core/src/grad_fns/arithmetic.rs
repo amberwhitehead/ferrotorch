@@ -12,22 +12,22 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:512`, `add_scaled` at `:950`, `add_out` at `:823`, `add_scaled_out` at `:873`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
-//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:1116` delegates to `sub_scaled` at `:1145` -> `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
+//! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:684`, `add_scaled` at `:1122`, `add_out` at `:995`, `add_scaled_out` at `:1045`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
+//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:1288` delegates to `sub_scaled` at `:1317` -> `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
 //! | REQ-3 (mul) | SHIPPED | `mul` + `MulBackward` in `arithmetic.rs`; parity `[mul] 72/72` (grep=1) |
 //! | REQ-4 (div) | SHIPPED | `div` + `DivBackward` in `arithmetic.rs`; parity `[div] 72/72` (grep=1) |
 //! | REQ-5 (neg) | SHIPPED | `neg` + `NegBackward`; parity `[neg] 8/8` (grep=1) |
 //! | REQ-6 (abs) | SHIPPED | `abs` + `AbsBackward`; parity `[abs] 8/8` (grep=1) |
 //! | REQ-7 (sqrt) | SHIPPED | `sqrt` + `SqrtBackward`; parity `[sqrt] 8/8` (grep=1) |
 //! | REQ-8 (pow scalar exponent) | SHIPPED | `pow` + `PowBackward` (scalar exp; tensor-exp overload returns `Ok(None)` and is skipped, not failed); parity `[pow] 24/72 passed 48 skipped` (grep=1) |
-//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:1197` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
-//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:2042` + `RsqrtBackward` at `:1950`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
-//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:2189` + `ReciprocalBackward` at `:2112`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
-//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:3031` + `FloorDivideBackward` at `:2874` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
-//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:2394` + `RemainderBackward` at `:2275`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
-//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:2701` + `FmodBackward` at `:2583`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
-//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:3395` + `AddcmulBackward` at `:3252`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
-//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:3710` + `AddcdivBackward` at `:3548`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
+//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:1369` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
+//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:2214` + `RsqrtBackward` at `:2122`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
+//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:2361` + `ReciprocalBackward` at `:2284`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
+//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:3206` + `FloorDivideBackward` at `:3050` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
+//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:2560` + `RemainderBackward` at `:2447`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
+//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:2869` + `FmodBackward` at `:2757`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
+//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:3588` + `AddcmulBackward` at `:3445`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
+//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:3903` + `AddcdivBackward` at `:3741`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -159,6 +159,178 @@ fn needs_grad<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> bool {
 #[inline]
 fn needs_grad_unary<T: Float>(a: &Tensor<T>) -> bool {
     is_grad_enabled() && a.requires_grad()
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CudaFloatBinaryOp {
+    Remainder,
+    Fmod,
+    DivTrunc,
+    DivFloor,
+}
+
+fn cuda_float_binary_storage<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    op: CudaFloatBinaryOp,
+) -> FerrotorchResult<Option<(TensorStorage<T>, Vec<usize>)>> {
+    if !(a.is_cuda() && b.is_cuda()) {
+        return Ok(None);
+    }
+    if !(is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()) {
+        return Ok(None);
+    }
+
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let a_c = ensure_contig_for_gpu(a)?;
+    let b_c = ensure_contig_for_gpu(b)?;
+    let out_shape = broadcast_shapes(a_c.shape(), b_c.shape())?;
+
+    let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+        T,
+        "cuda_float_binary_storage",
+        f32 => match op {
+            CudaFloatBinaryOp::Remainder => backend.broadcast_remainder_f32(
+                a_c.gpu_handle()?,
+                b_c.gpu_handle()?,
+                a_c.shape(),
+                b_c.shape(),
+                &out_shape,
+            ),
+            CudaFloatBinaryOp::Fmod => backend.broadcast_fmod_f32(
+                a_c.gpu_handle()?,
+                b_c.gpu_handle()?,
+                a_c.shape(),
+                b_c.shape(),
+                &out_shape,
+            ),
+            CudaFloatBinaryOp::DivTrunc => backend.broadcast_div_rounding_f32(
+                a_c.gpu_handle()?,
+                b_c.gpu_handle()?,
+                a_c.shape(),
+                b_c.shape(),
+                &out_shape,
+                "trunc",
+            ),
+            CudaFloatBinaryOp::DivFloor => backend.broadcast_div_rounding_f32(
+                a_c.gpu_handle()?,
+                b_c.gpu_handle()?,
+                a_c.shape(),
+                b_c.shape(),
+                &out_shape,
+                "floor",
+            ),
+        },
+        f64 => match op {
+            CudaFloatBinaryOp::Remainder => backend.broadcast_remainder_f64(
+                a_c.gpu_handle()?,
+                b_c.gpu_handle()?,
+                a_c.shape(),
+                b_c.shape(),
+                &out_shape,
+            ),
+            CudaFloatBinaryOp::Fmod => backend.broadcast_fmod_f64(
+                a_c.gpu_handle()?,
+                b_c.gpu_handle()?,
+                a_c.shape(),
+                b_c.shape(),
+                &out_shape,
+            ),
+            CudaFloatBinaryOp::DivTrunc => backend.broadcast_div_rounding_f64(
+                a_c.gpu_handle()?,
+                b_c.gpu_handle()?,
+                a_c.shape(),
+                b_c.shape(),
+                &out_shape,
+                "trunc",
+            ),
+            CudaFloatBinaryOp::DivFloor => backend.broadcast_div_rounding_f64(
+                a_c.gpu_handle()?,
+                b_c.gpu_handle()?,
+                a_c.shape(),
+                b_c.shape(),
+                &out_shape,
+                "floor",
+            ),
+        },
+        bf16 => match op {
+            CudaFloatBinaryOp::Remainder => backend.broadcast_remainder_bf16(
+                a_c.gpu_handle()?,
+                b_c.gpu_handle()?,
+                a_c.shape(),
+                b_c.shape(),
+                &out_shape,
+            ),
+            CudaFloatBinaryOp::Fmod => backend.broadcast_fmod_bf16(
+                a_c.gpu_handle()?,
+                b_c.gpu_handle()?,
+                a_c.shape(),
+                b_c.shape(),
+                &out_shape,
+            ),
+            CudaFloatBinaryOp::DivTrunc => backend.broadcast_div_rounding_bf16(
+                a_c.gpu_handle()?,
+                b_c.gpu_handle()?,
+                a_c.shape(),
+                b_c.shape(),
+                &out_shape,
+                "trunc",
+            ),
+            CudaFloatBinaryOp::DivFloor => backend.broadcast_div_rounding_bf16(
+                a_c.gpu_handle()?,
+                b_c.gpu_handle()?,
+                a_c.shape(),
+                b_c.shape(),
+                &out_shape,
+                "floor",
+            ),
+        },
+        f16 => match op {
+            CudaFloatBinaryOp::Remainder => backend.broadcast_remainder_f16(
+                a_c.gpu_handle()?,
+                b_c.gpu_handle()?,
+                a_c.shape(),
+                b_c.shape(),
+                &out_shape,
+            ),
+            CudaFloatBinaryOp::Fmod => backend.broadcast_fmod_f16(
+                a_c.gpu_handle()?,
+                b_c.gpu_handle()?,
+                a_c.shape(),
+                b_c.shape(),
+                &out_shape,
+            ),
+            CudaFloatBinaryOp::DivTrunc => backend.broadcast_div_rounding_f16(
+                a_c.gpu_handle()?,
+                b_c.gpu_handle()?,
+                a_c.shape(),
+                b_c.shape(),
+                &out_shape,
+                "trunc",
+            ),
+            CudaFloatBinaryOp::DivFloor => backend.broadcast_div_rounding_f16(
+                a_c.gpu_handle()?,
+                b_c.gpu_handle()?,
+                a_c.shape(),
+                b_c.shape(),
+                &out_shape,
+                "floor",
+            ),
+        },
+    )?;
+
+    Ok(Some((TensorStorage::gpu(handle), out_shape)))
+}
+
+fn div_rounding_trunc_tensor<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    if let Some((storage, shape)) = cuda_float_binary_storage(a, b, CudaFloatBinaryOp::DivTrunc)? {
+        return Tensor::from_storage(storage, shape, false);
+    }
+    let q = div(a, b)?;
+    unary_map(&q, |x| x.trunc())
 }
 
 #[inline]
@@ -2376,15 +2548,9 @@ impl<T: Float> GradFn<T> for RemainderBackward<T> {
 /// `if mod != 0 && (b<0) != (mod<0) { mod += b }` then matches upstream
 /// exactly.
 ///
-/// CPU-only in this commit. A GPU-resident `remainder_*` kernel would
-/// need new cubecl/cudarc launch code; the GPU consumer surfaces in op_db
-/// only as f32 CPU samples for now, so the parity contract is satisfied
-/// without it. When a CUDA consumer surfaces we'll wire a `backend
-/// .remainder_*` arm under a separate blocker; CUDA inputs currently flow
-/// through the CPU path via `data_vec()` (round-trip, but R-CODE-4 does
-/// NOT bind here because there is no `.cpu()` followed by `.cuda()`; the
-/// op simply isn't routed on-device yet, same as `pow_inner`'s bf16/f16
-/// fallthrough and `rsqrt_inner`'s GPU compose path).
+/// CUDA tensors use backend broadcast kernels for f32/f64/f16/bf16, matching
+/// PyTorch's CUDA dispatch surface. Unsupported future floating dtypes remain
+/// on the CPU path instead of silently reinterpreting storage.
 ///
 /// # Errors
 ///
@@ -2445,15 +2611,23 @@ fn remainder_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<T
 
     let out_shape = broadcast_shapes(a.shape(), b.shape())?;
 
-    // For the GPU case, route through host memory for now — no
-    // dedicated `remainder_*` GPU kernel exists yet. When a GPU
-    // consumer surfaces we can wire `backend.remainder_{f32,f64,...}`
-    // under a separate blocker. The host fallback is correct for any
-    // dtype that implements `Float`. R-CODE-4 does NOT bind here:
-    // there is no `.cpu()` followed by `.cuda()` round-trip — the data
-    // simply arrives on device, runs the elementwise kernel through
-    // host memory, and lands back on the same device. Same pattern as
-    // `pow_inner`'s bf16/f16 fallthrough.
+    if let Some((storage, out_shape)) =
+        cuda_float_binary_storage(a, b, CudaFloatBinaryOp::Remainder)?
+    {
+        return if needs_grad(a, b) {
+            Tensor::from_operation(
+                storage,
+                out_shape,
+                Arc::new(RemainderBackward {
+                    a: a.saved_for_backward()?,
+                    b: b.saved_for_backward()?,
+                }),
+            )
+        } else {
+            Tensor::from_storage(storage, out_shape, false)
+        };
+    }
+
     let device = a.device();
 
     // Materialize broadcast-iteration plans for a and b. We walk the
@@ -2605,8 +2779,7 @@ impl<T: Float> GradFn<T> for FmodBackward<T> {
         let db = if self.b.requires_grad() {
             let raw = no_grad(|| {
                 // trunc(a / b) as a tensor of the broadcast shape.
-                let q = div(&self.a, &self.b)?;
-                let trunc_q = unary_map(&q, |x| x.trunc())?;
+                let trunc_q = div_rounding_trunc_tensor(&self.a, &self.b)?;
                 // -grad * trunc(a / b)
                 let neg_go = neg(grad_output)?;
                 mul(&neg_go, &trunc_q)
@@ -2684,14 +2857,9 @@ impl<T: Float> GradFn<T> for FmodBackward<T> {
 /// walking loop, but the elementwise kernel is one operator instead of
 /// three (`%` + condition + add).
 ///
-/// CPU-only in this commit. A GPU-resident `fmod_*` kernel would need new
-/// cubecl/cudarc launch code; the GPU consumer surfaces in op_db only as
-/// f32 CPU samples for now, so the parity contract is satisfied without
-/// it. When a CUDA consumer surfaces we'll wire a `backend.fmod_*` arm
-/// under a separate blocker; CUDA inputs currently flow through the CPU
-/// path via `data_vec()` (no `.cpu()` followed by `.cuda()`, so R-CODE-4
-/// does NOT bind — same fallthrough as `remainder_inner` and
-/// `pow_inner`'s bf16/f16 path).
+/// CUDA tensors use backend broadcast kernels for f32/f64/f16/bf16, matching
+/// PyTorch's CUDA dispatch surface. Unsupported future floating dtypes remain
+/// on the CPU path instead of silently reinterpreting storage.
 ///
 /// # Errors
 ///
@@ -2744,13 +2912,21 @@ fn fmod_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor
 
     let out_shape = broadcast_shapes(a.shape(), b.shape())?;
 
-    // For the GPU case, route through host memory for now — no
-    // dedicated `fmod_*` GPU kernel exists yet. Same pattern as
-    // `remainder_inner` and `pow_inner`'s bf16/f16 fallthrough.
-    // R-CODE-4 does NOT bind: there is no `.cpu()` followed by `.cuda()`
-    // round-trip — the data simply arrives on device, runs the
-    // elementwise kernel through host memory, and lands back on the same
-    // device.
+    if let Some((storage, out_shape)) = cuda_float_binary_storage(a, b, CudaFloatBinaryOp::Fmod)? {
+        return if needs_grad(a, b) {
+            Tensor::from_operation(
+                storage,
+                out_shape,
+                Arc::new(FmodBackward {
+                    a: a.saved_for_backward()?,
+                    b: b.saved_for_backward()?,
+                }),
+            )
+        } else {
+            Tensor::from_storage(storage, out_shape, false)
+        };
+    }
+
     let device = a.device();
 
     let a_data = a.data_vec()?;
@@ -3018,10 +3194,9 @@ impl<T: Float> GradFn<T> for FloorDivideBackward<T> {
 /// `FloorDivideBackward` which errors on `.backward()` to mirror that
 /// contract.
 ///
-/// CPU-only in this commit. CUDA inputs flow through host-memory fallback
-/// — same pattern as `remainder_inner` / `fmod_inner` / `pow_inner`'s
-/// bf16/f16 fallthrough. No `.cpu()`-then-`.cuda()` round-trip is
-/// introduced, so R-CODE-4 does not bind.
+/// CUDA tensors use backend rounding-division kernels for f32/f64/f16/bf16,
+/// matching PyTorch's CUDA dispatch surface. Unsupported future floating
+/// dtypes remain on the CPU path instead of silently reinterpreting storage.
 ///
 /// # Errors
 ///
@@ -3136,11 +3311,29 @@ fn floor_divide_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResul
     // `num_traits::Float`.
     //
     // Broadcasting: walks the broadcast iteration order over the output
-    // shape, same loop pattern as `remainder_inner` / `fmod_inner`. CPU
-    // host-memory fallthrough for CUDA inputs (no dedicated GPU kernel
-    // yet; same pattern as siblings).
+    // shape, same loop pattern as `remainder_inner` / `fmod_inner` for CPU
+    // tensors. CUDA-supported float dtypes branch to backend kernels before
+    // any host materialisation.
 
     let out_shape = broadcast_shapes(a.shape(), b.shape())?;
+
+    if let Some((storage, out_shape)) =
+        cuda_float_binary_storage(a, b, CudaFloatBinaryOp::DivFloor)?
+    {
+        return if needs_grad(a, b) {
+            Tensor::from_operation(
+                storage,
+                out_shape,
+                Arc::new(FloorDivideBackward {
+                    a: a.clone(),
+                    b: b.clone(),
+                }),
+            )
+        } else {
+            Tensor::from_storage(storage, out_shape, false)
+        };
+    }
+
     let device = a.device();
 
     let a_data = a.data_vec()?;

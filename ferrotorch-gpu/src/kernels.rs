@@ -12759,12 +12759,13 @@ DONE:
 
 #[cfg(feature = "cuda")]
 const DIV_ROUNDING_EXTRA_F32_REGS: &str =
-    ".reg .f32 %va, %vb, %vr, %q, %trunc_q, %m, %divv, %floorv, %tmp;";
+    ".reg .f32 %va, %vb, %vr, %q, %trunc_q, %m, %divv, %floorv, %ftmp, %abs_a, %abs_b;";
 
 #[cfg(feature = "cuda")]
 const DIV_ROUNDING_EXTRA_PREDS: &str = ".reg .pred %p, %loop_p, %p_zero_b, %p_m_nonzero, \
      %p_b_neg, %p_m_neg, %p_b_nonneg, %p_m_nonneg, %p_sign_a, %p_sign_b, %p_adjust, \
-     %p_div_zero, %p_gt_half;";
+     %p_div_zero, %p_gt_half, %p_nan_a, %p_nan_b, %p_a_inf, %p_b_inf, %p_invalid, \
+     %p_a_nonzero;";
 
 #[cfg(feature = "cuda")]
 const DIV_ROUNDING_TRUNC_BLOCK: &str = "\
@@ -12778,11 +12779,24 @@ const DIV_ROUNDING_FLOOR_BLOCK: &str = "\
     @%p_zero_b mov.f32 %vr, %q;
     @%p_zero_b bra DIV_ROUNDING_DONE;
 
+    setp.nan.f32 %p_nan_a, %va, %va;
+    setp.nan.f32 %p_nan_b, %vb, %vb;
+    abs.f32 %abs_a, %va;
+    abs.f32 %abs_b, %vb;
+    setp.eq.f32 %p_a_inf, %abs_a, 0f7F800000;
+    or.pred %p_invalid, %p_nan_a, %p_nan_b;
+    or.pred %p_invalid, %p_invalid, %p_a_inf;
+    @%p_invalid mov.f32 %vr, 0f7FC00000;
+    @%p_invalid bra DIV_ROUNDING_DONE;
+
+    setp.eq.f32 %p_b_inf, %abs_b, 0f7F800000;
+    @%p_b_inf bra DIV_ROUNDING_B_INF;
+
     cvt.rzi.f32.f32 %trunc_q, %q;
-    neg.f32 %tmp, %trunc_q;
-    fma.rn.f32 %m, %tmp, %vb, %va;
-    sub.f32 %tmp, %va, %m;
-    div.rn.f32 %divv, %tmp, %vb;
+    neg.f32 %ftmp, %trunc_q;
+    fma.rn.f32 %m, %ftmp, %vb, %va;
+    sub.f32 %ftmp, %va, %m;
+    div.rn.f32 %divv, %ftmp, %vb;
 
     setp.ne.f32 %p_m_nonzero, %m, 0f00000000;
     setp.lt.f32 %p_b_neg, %vb, 0f00000000;
@@ -12800,10 +12814,24 @@ const DIV_ROUNDING_FLOOR_BLOCK: &str = "\
     @%p_div_zero bra DIV_ROUNDING_DONE;
 
     cvt.rmi.f32.f32 %floorv, %divv;
-    sub.f32 %tmp, %divv, %floorv;
-    setp.gt.f32 %p_gt_half, %tmp, 0f3F000000;
+    sub.f32 %ftmp, %divv, %floorv;
+    setp.gt.f32 %p_gt_half, %ftmp, 0f3F000000;
     @%p_gt_half add.f32 %floorv, %floorv, 0f3F800000;
     mov.f32 %vr, %floorv;
+    bra DIV_ROUNDING_DONE;
+
+DIV_ROUNDING_B_INF:
+    setp.ne.f32 %p_a_nonzero, %va, 0f00000000;
+    setp.lt.f32 %p_b_neg, %vb, 0f00000000;
+    setp.lt.f32 %p_m_neg, %va, 0f00000000;
+    not.pred %p_b_nonneg, %p_b_neg;
+    not.pred %p_m_nonneg, %p_m_neg;
+    and.pred %p_sign_a, %p_b_neg, %p_m_nonneg;
+    and.pred %p_sign_b, %p_b_nonneg, %p_m_neg;
+    or.pred %p_adjust, %p_sign_a, %p_sign_b;
+    and.pred %p_adjust, %p_adjust, %p_a_nonzero;
+    mul.f32 %vr, %q, 0f00000000;
+    @%p_adjust mov.f32 %vr, 0fBF800000;
 DIV_ROUNDING_DONE:";
 
 #[cfg(feature = "cuda")]
@@ -12821,8 +12849,93 @@ fn div_rounding_ptx(
             ".reg .pred %p;",
             ".reg .pred %p, %p_zero_b, %p_m_nonzero, \
              %p_b_neg, %p_m_neg, %p_b_nonneg, %p_m_nonneg, %p_sign_a, %p_sign_b, \
-             %p_adjust, %p_div_zero, %p_gt_half;",
+             %p_adjust, %p_div_zero, %p_gt_half, %p_nan_a, %p_nan_b, %p_a_inf, \
+             %p_b_inf, %p_invalid, %p_a_nonzero;",
         )
+        .replace("    div.rn.f32 %vr, %va, %vb;", op_block)
+}
+
+#[cfg(feature = "cuda")]
+const FLOAT_MOD_EXTRA_F32_REGS: &str =
+    ".reg .f32 %va, %vb, %vr, %q, %trunc_q, %m, %ftmp, %abs_a, %abs_b;";
+
+#[cfg(feature = "cuda")]
+const FLOAT_MOD_EXTRA_PREDS: &str = ".reg .pred %p, %loop_p, %p_zero_b, %p_nan_a, %p_nan_b, \
+     %p_a_inf, %p_b_inf, %p_invalid, %p_m_nonzero, %p_b_neg, %p_m_neg, %p_b_nonneg, \
+     %p_m_nonneg, %p_sign_a, %p_sign_b, %p_adjust;";
+
+#[cfg(feature = "cuda")]
+const FMOD_BLOCK: &str = "\
+    setp.eq.f32 %p_zero_b, %vb, 0f00000000;
+    setp.nan.f32 %p_nan_a, %va, %va;
+    setp.nan.f32 %p_nan_b, %vb, %vb;
+    abs.f32 %abs_a, %va;
+    abs.f32 %abs_b, %vb;
+    setp.eq.f32 %p_a_inf, %abs_a, 0f7F800000;
+    or.pred %p_invalid, %p_zero_b, %p_nan_a;
+    or.pred %p_invalid, %p_invalid, %p_nan_b;
+    or.pred %p_invalid, %p_invalid, %p_a_inf;
+    @%p_invalid mov.f32 %vr, 0f7FC00000;
+    @%p_invalid bra FLOAT_MOD_DONE;
+
+    setp.eq.f32 %p_b_inf, %abs_b, 0f7F800000;
+    @%p_b_inf mov.f32 %vr, %va;
+    @%p_b_inf bra FLOAT_MOD_DONE;
+
+    div.rn.f32 %q, %va, %vb;
+    cvt.rzi.f32.f32 %trunc_q, %q;
+    neg.f32 %ftmp, %trunc_q;
+    fma.rn.f32 %vr, %ftmp, %vb, %va;
+FLOAT_MOD_DONE:";
+
+#[cfg(feature = "cuda")]
+const REMAINDER_BLOCK: &str = "\
+    setp.eq.f32 %p_zero_b, %vb, 0f00000000;
+    setp.nan.f32 %p_nan_a, %va, %va;
+    setp.nan.f32 %p_nan_b, %vb, %vb;
+    abs.f32 %abs_a, %va;
+    abs.f32 %abs_b, %vb;
+    setp.eq.f32 %p_a_inf, %abs_a, 0f7F800000;
+    or.pred %p_invalid, %p_zero_b, %p_nan_a;
+    or.pred %p_invalid, %p_invalid, %p_nan_b;
+    or.pred %p_invalid, %p_invalid, %p_a_inf;
+    @%p_invalid mov.f32 %vr, 0f7FC00000;
+    @%p_invalid bra FLOAT_MOD_DONE;
+
+    setp.eq.f32 %p_b_inf, %abs_b, 0f7F800000;
+    @%p_b_inf mov.f32 %m, %va;
+    @%p_b_inf bra REMAINDER_SIGN;
+
+    div.rn.f32 %q, %va, %vb;
+    cvt.rzi.f32.f32 %trunc_q, %q;
+    neg.f32 %ftmp, %trunc_q;
+    fma.rn.f32 %m, %ftmp, %vb, %va;
+
+REMAINDER_SIGN:
+    setp.ne.f32 %p_m_nonzero, %m, 0f00000000;
+    setp.lt.f32 %p_b_neg, %vb, 0f00000000;
+    setp.lt.f32 %p_m_neg, %m, 0f00000000;
+    not.pred %p_b_nonneg, %p_b_neg;
+    not.pred %p_m_nonneg, %p_m_neg;
+    and.pred %p_sign_a, %p_b_neg, %p_m_nonneg;
+    and.pred %p_sign_b, %p_b_nonneg, %p_m_neg;
+    or.pred %p_adjust, %p_sign_a, %p_sign_b;
+    and.pred %p_adjust, %p_adjust, %p_m_nonzero;
+    @%p_adjust add.f32 %m, %m, %vb;
+    mov.f32 %vr, %m;
+FLOAT_MOD_DONE:";
+
+#[cfg(feature = "cuda")]
+fn floating_mod_ptx(
+    base_ptx: &str,
+    f32_kernel_name: &str,
+    mod_kernel_name: &str,
+    op_block: &str,
+) -> String {
+    base_ptx
+        .replace(f32_kernel_name, mod_kernel_name)
+        .replace(".reg .f32 %va, %vb, %vr;", FLOAT_MOD_EXTRA_F32_REGS)
+        .replace(".reg .pred %p, %loop_p;", FLOAT_MOD_EXTRA_PREDS)
         .replace("    div.rn.f32 %vr, %va, %vb;", op_block)
 }
 
@@ -15249,6 +15362,86 @@ pub fn gpu_broadcast_div_rounding(
         device,
         ptx,
         kernel_name,
+    )
+}
+
+/// Broadcast fmod: C99 dividend-sign remainder, matching `torch.fmod`.
+#[cfg(feature = "cuda")]
+pub fn gpu_broadcast_fmod(
+    a: &CudaBuffer<f32>,
+    b: &CudaBuffer<f32>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let a_str = broadcast_strides(a_shape, out_shape);
+    let b_str = broadcast_strides(b_shape, out_shape);
+    let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
+
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ptx = CACHE
+        .get_or_init(|| {
+            floating_mod_ptx(
+                BROADCAST_DIV_PTX,
+                "broadcast_div_kernel",
+                "broadcast_fmod_kernel",
+                FMOD_BLOCK,
+            )
+        })
+        .as_str();
+
+    try_launch_broadcast_binary(
+        a,
+        b,
+        &a_str,
+        &b_str,
+        &shape_u32,
+        out_numel,
+        device,
+        ptx,
+        "broadcast_fmod_kernel",
+    )
+}
+
+/// Broadcast remainder: Python/PyTorch divisor-sign remainder.
+#[cfg(feature = "cuda")]
+pub fn gpu_broadcast_remainder(
+    a: &CudaBuffer<f32>,
+    b: &CudaBuffer<f32>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    let a_str = broadcast_strides(a_shape, out_shape);
+    let b_str = broadcast_strides(b_shape, out_shape);
+    let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
+
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ptx = CACHE
+        .get_or_init(|| {
+            floating_mod_ptx(
+                BROADCAST_DIV_PTX,
+                "broadcast_div_kernel",
+                "broadcast_remainder_kernel",
+                REMAINDER_BLOCK,
+            )
+        })
+        .as_str();
+
+    try_launch_broadcast_binary(
+        a,
+        b,
+        &a_str,
+        &b_str,
+        &shape_u32,
+        out_numel,
+        device,
+        ptx,
+        "broadcast_remainder_kernel",
     )
 }
 
@@ -22652,6 +22845,96 @@ pub fn gpu_broadcast_div_rounding_f64(
         device,
         ptx,
         kernel_name,
+    )
+}
+
+/// Broadcast f64 fmod: C99 dividend-sign remainder.
+#[cfg(feature = "cuda")]
+pub fn gpu_broadcast_fmod_f64(
+    a: &CudaBuffer<f64>,
+    b: &CudaBuffer<f64>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    let a_str = broadcast_strides(a_shape, out_shape);
+    let b_str = broadcast_strides(b_shape, out_shape);
+    let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
+
+    static F32_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let f32_ptx = F32_CACHE.get_or_init(|| {
+        floating_mod_ptx(
+            BROADCAST_DIV_PTX,
+            "broadcast_div_kernel",
+            "broadcast_fmod_kernel",
+            FMOD_BLOCK,
+        )
+    });
+    static F64_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ptx = get_f64_ptx(
+        &F64_CACHE,
+        f32_ptx,
+        "broadcast_fmod_kernel",
+        "broadcast_fmod_f64_kernel",
+    );
+
+    try_launch_broadcast_binary_f64(
+        a,
+        b,
+        &a_str,
+        &b_str,
+        &shape_u32,
+        out_numel,
+        device,
+        ptx,
+        "broadcast_fmod_f64_kernel",
+    )
+}
+
+/// Broadcast f64 remainder: Python/PyTorch divisor-sign remainder.
+#[cfg(feature = "cuda")]
+pub fn gpu_broadcast_remainder_f64(
+    a: &CudaBuffer<f64>,
+    b: &CudaBuffer<f64>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    let a_str = broadcast_strides(a_shape, out_shape);
+    let b_str = broadcast_strides(b_shape, out_shape);
+    let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
+    let out_numel: usize = crate::shape_math::numel(out_shape);
+
+    static F32_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let f32_ptx = F32_CACHE.get_or_init(|| {
+        floating_mod_ptx(
+            BROADCAST_DIV_PTX,
+            "broadcast_div_kernel",
+            "broadcast_remainder_kernel",
+            REMAINDER_BLOCK,
+        )
+    });
+    static F64_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ptx = get_f64_ptx(
+        &F64_CACHE,
+        f32_ptx,
+        "broadcast_remainder_kernel",
+        "broadcast_remainder_f64_kernel",
+    );
+
+    try_launch_broadcast_binary_f64(
+        a,
+        b,
+        &a_str,
+        &b_str,
+        &shape_u32,
+        out_numel,
+        device,
+        ptx,
+        "broadcast_remainder_f64_kernel",
     )
 }
 

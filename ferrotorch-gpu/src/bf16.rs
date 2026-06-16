@@ -5659,6 +5659,148 @@ STORE_RESULT:"
         )
 }
 
+const BF16_FMOD_BLOCK: &str = "\
+    setp.eq.f32 %zero_b, %vb, 0f00000000;
+    setp.nan.f32 %nan_a, %va, %va;
+    setp.nan.f32 %nan_b, %vb, %vb;
+    abs.f32 %abs_a, %va;
+    abs.f32 %abs_b, %vb;
+    setp.eq.f32 %a_inf, %abs_a, 0f7F800000;
+    or.pred %store_nan, %zero_b, %nan_a;
+    or.pred %store_nan, %store_nan, %nan_b;
+    or.pred %store_nan, %store_nan, %a_inf;
+    @%store_nan bra STORE_NAN;
+
+    setp.eq.f32 %b_inf, %abs_b, 0f7F800000;
+    @%b_inf mov.f32 %vr, %va;
+    @%b_inf bra BF16_MOD_DONE;
+
+    div.rn.f32 %q, %va, %vb;
+    cvt.rzi.f32.f32 %trunc_q, %q;
+    neg.f32 %ftmp, %trunc_q;
+    fma.rn.f32 %vr, %ftmp, %vb, %va;
+BF16_MOD_DONE:";
+
+const BF16_REMAINDER_BLOCK: &str = "\
+    setp.eq.f32 %zero_b, %vb, 0f00000000;
+    setp.nan.f32 %nan_a, %va, %va;
+    setp.nan.f32 %nan_b, %vb, %vb;
+    abs.f32 %abs_a, %va;
+    abs.f32 %abs_b, %vb;
+    setp.eq.f32 %a_inf, %abs_a, 0f7F800000;
+    or.pred %store_nan, %zero_b, %nan_a;
+    or.pred %store_nan, %store_nan, %nan_b;
+    or.pred %store_nan, %store_nan, %a_inf;
+    @%store_nan bra STORE_NAN;
+
+    setp.eq.f32 %b_inf, %abs_b, 0f7F800000;
+    @%b_inf mov.f32 %m, %va;
+    @%b_inf bra BF16_REMAINDER_SIGN;
+
+    div.rn.f32 %q, %va, %vb;
+    cvt.rzi.f32.f32 %trunc_q, %q;
+    neg.f32 %ftmp, %trunc_q;
+    fma.rn.f32 %m, %ftmp, %vb, %va;
+
+BF16_REMAINDER_SIGN:
+    setp.ne.f32 %m_nonzero, %m, 0f00000000;
+    setp.lt.f32 %b_neg, %vb, 0f00000000;
+    setp.lt.f32 %m_neg, %m, 0f00000000;
+    not.pred %b_nonneg, %b_neg;
+    not.pred %m_nonneg, %m_neg;
+    and.pred %sign_a, %b_neg, %m_nonneg;
+    and.pred %sign_b, %b_nonneg, %m_neg;
+    or.pred %adjust, %sign_a, %sign_b;
+    and.pred %adjust, %adjust, %m_nonzero;
+    @%adjust add.f32 %m, %m, %vb;
+    mov.f32 %vr, %m;";
+
+const BF16_DIV_TRUNC_BLOCK: &str = "\
+    div.rn.f32 %q, %va, %vb;
+    cvt.rzi.f32.f32 %vr, %q;";
+
+const BF16_DIV_FLOOR_BLOCK: &str = "\
+    div.rn.f32 %q, %va, %vb;
+    setp.eq.f32 %zero_b, %vb, 0f00000000;
+    setp.eq.f32 %a_zero, %va, 0f00000000;
+    and.pred %zero_zero, %zero_b, %a_zero;
+    @%zero_zero bra STORE_NAN;
+    @%zero_b mov.f32 %vr, %q;
+    @%zero_b bra BF16_DIV_ROUNDING_DONE;
+
+    setp.nan.f32 %nan_a, %va, %va;
+    setp.nan.f32 %nan_b, %vb, %vb;
+    abs.f32 %abs_a, %va;
+    abs.f32 %abs_b, %vb;
+    setp.eq.f32 %a_inf, %abs_a, 0f7F800000;
+    or.pred %store_nan, %nan_a, %nan_b;
+    or.pred %store_nan, %store_nan, %a_inf;
+    @%store_nan bra STORE_NAN;
+
+    setp.eq.f32 %b_inf, %abs_b, 0f7F800000;
+    @%b_inf bra BF16_DIV_B_INF;
+
+    cvt.rzi.f32.f32 %trunc_q, %q;
+    neg.f32 %ftmp, %trunc_q;
+    fma.rn.f32 %m, %ftmp, %vb, %va;
+    sub.f32 %ftmp, %va, %m;
+    div.rn.f32 %divv, %ftmp, %vb;
+
+    setp.ne.f32 %m_nonzero, %m, 0f00000000;
+    setp.lt.f32 %b_neg, %vb, 0f00000000;
+    setp.lt.f32 %m_neg, %m, 0f00000000;
+    not.pred %b_nonneg, %b_neg;
+    not.pred %m_nonneg, %m_neg;
+    and.pred %sign_a, %b_neg, %m_nonneg;
+    and.pred %sign_b, %b_nonneg, %m_neg;
+    or.pred %adjust, %sign_a, %sign_b;
+    and.pred %adjust, %adjust, %m_nonzero;
+    @%adjust sub.f32 %divv, %divv, 0f3F800000;
+
+    setp.eq.f32 %div_zero, %divv, 0f00000000;
+    @%div_zero mul.f32 %vr, %q, 0f00000000;
+    @%div_zero bra BF16_DIV_ROUNDING_DONE;
+
+    cvt.rmi.f32.f32 %floorv, %divv;
+    sub.f32 %ftmp, %divv, %floorv;
+    setp.gt.f32 %gt_half, %ftmp, 0f3F000000;
+    @%gt_half add.f32 %floorv, %floorv, 0f3F800000;
+    mov.f32 %vr, %floorv;
+    bra BF16_DIV_ROUNDING_DONE;
+
+BF16_DIV_B_INF:
+    setp.ne.f32 %a_nonzero, %va, 0f00000000;
+    setp.lt.f32 %b_neg, %vb, 0f00000000;
+    setp.lt.f32 %m_neg, %va, 0f00000000;
+    not.pred %b_nonneg, %b_neg;
+    not.pred %m_nonneg, %m_neg;
+    and.pred %sign_a, %b_neg, %m_nonneg;
+    and.pred %sign_b, %b_nonneg, %m_neg;
+    or.pred %adjust, %sign_a, %sign_b;
+    and.pred %adjust, %adjust, %a_nonzero;
+    mul.f32 %vr, %q, 0f00000000;
+    @%adjust mov.f32 %vr, 0fBF800000;
+BF16_DIV_ROUNDING_DONE:";
+
+fn broadcast_div_like_bf16_ptx(kernel_name: &str, op_block: &str) -> String {
+    BROADCAST_DIV_BF16_PTX
+        .replace("broadcast_div_bf16_kernel", kernel_name)
+        .replace(
+            ".reg .f32 %va, %vb, %vr;",
+            ".reg .f32 %va, %vb, %vr, %q, %trunc_q, %m, %ftmp, %divv, %floorv, %abs_a, %abs_b;",
+        )
+        .replace(
+            ".reg .pred %p, %loop_p, %nan_a, %nan_b, %store_nan;",
+            ".reg .pred %p, %loop_p, %nan_a, %nan_b, %store_nan, %zero_b, %a_inf, %b_inf, \
+             %m_nonzero, %b_neg, %m_neg, %b_nonneg, %m_nonneg, %sign_a, %sign_b, \
+             %adjust, %div_zero, %gt_half, %a_nonzero, %a_zero, %zero_zero;",
+        )
+        .replace(
+            "    setp.nan.f32 %nan_a, %va, %va;\n    setp.nan.f32 %nan_b, %vb, %vb;\n    or.pred %store_nan, %nan_a, %nan_b;\n    @%store_nan bra STORE_NAN;\n    div.rn.f32 %vr, %va, %vb;",
+            op_block,
+        )
+}
+
 // Computes row-major contiguous strides for `shape`, with broadcast (0)
 // stride for dims of size 1. Mirrors the helper in `kernels.rs`.
 fn broadcast_strides_bf16(shape: &[usize], out_shape: &[usize]) -> Vec<u32> {
@@ -5837,6 +5979,107 @@ pub fn gpu_broadcast_div_bf16(
         device,
         BROADCAST_DIV_BF16_PTX,
         "broadcast_div_bf16_kernel",
+    )
+}
+
+/// Broadcast rounded div on bf16 buffers. `rounding_mode` is `trunc` or `floor`.
+pub fn gpu_broadcast_div_rounding_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    rounding_mode: &str,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let (ptx, kernel_name) = match rounding_mode {
+        "trunc" => {
+            static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            (
+                CACHE
+                    .get_or_init(|| {
+                        broadcast_div_like_bf16_ptx(
+                            "broadcast_div_trunc_bf16_kernel",
+                            BF16_DIV_TRUNC_BLOCK,
+                        )
+                    })
+                    .as_str(),
+                "broadcast_div_trunc_bf16_kernel",
+            )
+        }
+        "floor" => {
+            static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            (
+                CACHE
+                    .get_or_init(|| {
+                        broadcast_div_like_bf16_ptx(
+                            "broadcast_div_floor_bf16_kernel",
+                            BF16_DIV_FLOOR_BLOCK,
+                        )
+                    })
+                    .as_str(),
+                "broadcast_div_floor_bf16_kernel",
+            )
+        }
+        other => {
+            return Err(GpuError::InvalidState {
+                message: format!("unsupported bf16 div rounding_mode {other:?}"),
+            });
+        }
+    };
+
+    launch_broadcast_binary_bf16(a, b, a_shape, b_shape, out_shape, device, ptx, kernel_name)
+}
+
+/// Broadcast fmod `out[i] = fmod(a, b)` on bf16 buffers.
+pub fn gpu_broadcast_fmod_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ptx: &'static str = CACHE
+        .get_or_init(|| broadcast_div_like_bf16_ptx("broadcast_fmod_bf16_kernel", BF16_FMOD_BLOCK))
+        .as_str();
+    launch_broadcast_binary_bf16(
+        a,
+        b,
+        a_shape,
+        b_shape,
+        out_shape,
+        device,
+        ptx,
+        "broadcast_fmod_bf16_kernel",
+    )
+}
+
+/// Broadcast PyTorch remainder on bf16 buffers.
+pub fn gpu_broadcast_remainder_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ptx: &'static str = CACHE
+        .get_or_init(|| {
+            broadcast_div_like_bf16_ptx("broadcast_remainder_bf16_kernel", BF16_REMAINDER_BLOCK)
+        })
+        .as_str();
+    launch_broadcast_binary_bf16(
+        a,
+        b,
+        a_shape,
+        b_shape,
+        out_shape,
+        device,
+        ptx,
+        "broadcast_remainder_bf16_kernel",
     )
 }
 

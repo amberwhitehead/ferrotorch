@@ -25,6 +25,15 @@ fn cpu_t_f32(data: &[f32], shape: &[usize]) -> Tensor<f32> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), true).unwrap()
 }
 
+fn cuda_leaf_f32(data: &[f32], shape: &[usize]) -> Tensor<f32> {
+    Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false)
+        .unwrap()
+        .to(Device::Cuda(0))
+        .unwrap()
+        .detach()
+        .requires_grad_(true)
+}
+
 fn cpu_t_f64(data: &[f64], shape: &[usize]) -> Tensor<f64> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), true).unwrap()
 }
@@ -36,10 +45,12 @@ fn clamp_backward_f32_gpu_matches_cpu() {
     // Expected grad mask: [out-of-range, in-range (boundary), in-range,
     //                       in-range, in-range (boundary), out-of-range]
     let x_cpu = cpu_t_f32(&[-3.0, -1.0, 0.0, 0.5, 1.0, 2.0], &[6]);
-    let x_gpu = x_cpu.clone().to(Device::Cuda(0)).unwrap();
+    let x_gpu_source = cpu_t_f32(&[-3.0, -1.0, 0.0, 0.5, 1.0, 2.0], &[6]);
+    let x_gpu = x_gpu_source.to(Device::Cuda(0)).unwrap();
 
     let y_cpu = clamp(&x_cpu, -1.0, 1.0).unwrap();
     let y_gpu = clamp(&x_gpu, -1.0, 1.0).unwrap();
+    assert!(y_gpu.is_cuda(), "clamp forward must stay CUDA-resident");
 
     let s_cpu = y_cpu.sum_all().unwrap();
     let s_gpu = y_gpu.sum_all().unwrap();
@@ -47,9 +58,13 @@ fn clamp_backward_f32_gpu_matches_cpu() {
     s_gpu.backward().unwrap();
 
     let g_cpu = x_cpu.grad().unwrap().unwrap();
-    let g_gpu = x_gpu.grad().unwrap().unwrap();
+    assert!(
+        x_gpu.grad().unwrap().is_none(),
+        "like PyTorch, .to(cuda) creates a non-leaf whose .grad is not populated"
+    );
+    let g_gpu = x_gpu_source.grad().unwrap().unwrap();
     let g_cpu_data = g_cpu.data().unwrap().to_vec();
-    let g_gpu_data = g_gpu.cpu().unwrap().data().unwrap().to_vec();
+    let g_gpu_data = g_gpu.data().unwrap().to_vec();
 
     // Expected: 0 for out-of-range, 1 for in-range (sum's grad is 1 per element).
     let expected: Vec<f32> = vec![0.0, 1.0, 1.0, 1.0, 1.0, 0.0];
@@ -111,16 +126,15 @@ fn clamp_backward_f64_kernel_correctness() {
 fn clamp_backward_propagates_grad_through_chain() {
     // y = clamp(x, 0, 5); loss = sum(y * 2). dL/dx = 2 in-range, 0 out-of-range.
     ensure_cuda();
-    let x = Tensor::from_storage(
-        TensorStorage::cpu(vec![-1.0_f32, 1.0, 6.0, 3.0, 5.0]),
-        vec![5],
-        true,
-    )
-    .unwrap()
-    .to(Device::Cuda(0))
-    .unwrap();
+    let x = cuda_leaf_f32(&[-1.0_f32, 1.0, 6.0, 3.0, 5.0], &[5]);
+    assert!(x.is_cuda(), "test fixture must be a CUDA leaf");
+    assert!(
+        x.is_leaf(),
+        "test fixture must be a leaf so .grad is populated"
+    );
 
     let y = clamp(&x, 0.0, 5.0).unwrap();
+    assert!(y.is_cuda(), "clamp forward must stay CUDA-resident");
     // Multiply by 2 elementwise via add(y, y). (Skip — sum_all gives 1; we
     // can multiply manually with a constant via creation::scalar.)
     // Simpler: use sum_all directly, expected grad = 1.0 in-range, 0 else.
@@ -142,11 +156,14 @@ fn clamp_backward_large_input_gpu() {
     ensure_cuda();
     let n = 10_000;
     let host: Vec<f32> = (0..n).map(|i| (i as f32 - 5000.0) * 0.001).collect();
-    let x = Tensor::from_storage(TensorStorage::cpu(host.clone()), vec![n], true)
-        .unwrap()
-        .to(Device::Cuda(0))
-        .unwrap();
+    let x = cuda_leaf_f32(&host, &[n]);
+    assert!(x.is_cuda(), "test fixture must be a CUDA leaf");
+    assert!(
+        x.is_leaf(),
+        "test fixture must be a leaf so .grad is populated"
+    );
     let y = clamp(&x, -1.0, 1.0).unwrap();
+    assert!(y.is_cuda(), "clamp forward must stay CUDA-resident");
     let s = y.sum_all().unwrap();
     s.backward().unwrap();
     let g = x.grad().unwrap().unwrap().cpu().unwrap();

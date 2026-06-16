@@ -230,6 +230,42 @@ mod gpu {
         }
     }
 
+    /// First-class BoolTensor conditions follow torch's tensor device rule:
+    /// the condition must be on the same device as `x` and `y`. Only the
+    /// host-mask `where_t(&[bool], ...)` convenience entry uploads a raw mask.
+    ///
+    /// Live torch 2.11.0+cu130:
+    /// ```text
+    /// >>> torch.where(torch.tensor([True,False,True,False]),
+    /// ...             torch.tensor([1.,2.,3.,4.], device='cuda'),
+    /// ...             torch.tensor([10.,20.,30.,40.], device='cuda'))
+    /// RuntimeError: Expected all tensors to be on the same device, but found
+    /// at least two devices, cuda:0 and cpu!
+    /// ```
+    #[test]
+    fn where_bt_rejects_cpu_condition_with_cuda_operands() {
+        use ferrotorch_core::BoolTensor;
+
+        ensure_cuda_backend();
+        let x = t(&[1.0, 2.0, 3.0, 4.0], &[4]).to(Device::Cuda(0)).unwrap();
+        let y = t(&[10.0, 20.0, 30.0, 40.0], &[4])
+            .to(Device::Cuda(0))
+            .unwrap();
+        let cond =
+            BoolTensor::from_vec(vec![true, false, true, false], vec![4]).expect("condition");
+        let r = x.where_bt_t(&cond, &y);
+        match r {
+            Err(FerrotorchError::DeviceMismatch { expected, got }) => {
+                assert_eq!(expected, Device::Cuda(0));
+                assert_eq!(got, Device::Cpu);
+            }
+            other => panic!(
+                "where_bt with CPU condition and CUDA x/y must be DeviceMismatch \
+                 (torch: expected all tensors on same device); got {other:?}"
+            ),
+        }
+    }
+
     /// (f) Valid same-device CUDA call: correct values, result on CUDA
     /// (R-ORACLE-3 device assert). The host `&[bool]` mask entry performs a
     /// DOCUMENTED host round trip (R-LOUD-2; see the `where_` doc-comment).

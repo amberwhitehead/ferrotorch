@@ -102,6 +102,7 @@
 use ferrotorch_core::ops::indexing::scatter_value;
 use ferrotorch_core::{Device, Tensor, TensorStorage, gather, scatter, scatter_add};
 use ferrotorch_gpu::init_cuda_backend;
+use half::{bf16, f16};
 
 fn ensure_cuda() {
     use std::sync::Once;
@@ -121,12 +122,64 @@ fn cpu_f64(data: &[f64], shape: &[usize]) -> Tensor<f64> {
         .expect("cpu f64 tensor")
 }
 
+fn cpu_f16(data: &[f32], shape: &[usize], requires_grad: bool) -> Tensor<f16> {
+    Tensor::from_storage(
+        TensorStorage::cpu(data.iter().copied().map(f16::from_f32).collect()),
+        shape.to_vec(),
+        requires_grad,
+    )
+    .expect("cpu f16 tensor")
+}
+
+fn cpu_bf16(data: &[f32], shape: &[usize], requires_grad: bool) -> Tensor<bf16> {
+    Tensor::from_storage(
+        TensorStorage::cpu(data.iter().copied().map(bf16::from_f32).collect()),
+        shape.to_vec(),
+        requires_grad,
+    )
+    .expect("cpu bf16 tensor")
+}
+
 fn host_f32(t: &Tensor<f32>) -> Vec<f32> {
     t.cpu().expect("cpu()").data().unwrap().to_vec()
 }
 
 fn host_f64(t: &Tensor<f64>) -> Vec<f64> {
     t.cpu().expect("cpu()").data().unwrap().to_vec()
+}
+
+fn host_f16(t: &Tensor<f16>) -> Vec<f32> {
+    t.cpu()
+        .expect("cpu()")
+        .data()
+        .unwrap()
+        .iter()
+        .map(|v| v.to_f32())
+        .collect()
+}
+
+fn host_bf16(t: &Tensor<bf16>) -> Vec<f32> {
+    t.cpu()
+        .expect("cpu()")
+        .data()
+        .unwrap()
+        .iter()
+        .map(|v| v.to_f32())
+        .collect()
+}
+
+fn cuda_f16(data: &[f32], shape: &[usize], requires_grad: bool) -> Tensor<f16> {
+    cpu_f16(data, shape, false)
+        .to(Device::Cuda(0))
+        .expect("to cuda f16")
+        .requires_grad_(requires_grad)
+}
+
+fn cuda_bf16(data: &[f32], shape: &[usize], requires_grad: bool) -> Tensor<bf16> {
+    cpu_bf16(data, shape, false)
+        .to(Device::Cuda(0))
+        .expect("to cuda bf16")
+        .requires_grad_(requires_grad)
 }
 
 // ===========================================================================
@@ -592,28 +645,55 @@ fn gather_3d_nonsquare_each_axis_f32() {
     assert_eq!(host_f32(&o2), r2.data().unwrap().to_vec());
 }
 
-/// bf16/f16 CUDA must reject with NotImplementedOnCuda (no dim-aware kernel).
+/// PyTorch CUDA supports `gather` for f16 and bf16, including duplicate-index
+/// gradient accumulation. This used to be a stale rejection assertion from the
+/// pre-#1822 surface; keep it as a real parity guard so the CUDA half paths
+/// cannot regress or silently demote gradients to host.
 #[test]
-fn gather_bf16_f16_cuda_rejects() {
+fn gather_bf16_f16_cuda_forward_backward_matches_torch() {
     ensure_cuda();
-    use half::{bf16, f16};
-    let bf = Tensor::<bf16>::from_storage(
-        TensorStorage::cpu(vec![bf16::from_f32(1.0), bf16::from_f32(2.0)]),
-        vec![2],
-        false,
-    )
-    .unwrap()
-    .to(Device::Cuda(0))
-    .unwrap();
-    assert!(gather(&bf, 0, &[0usize], &[1]).is_err());
 
-    let hf = Tensor::<f16>::from_storage(
-        TensorStorage::cpu(vec![f16::from_f32(1.0), f16::from_f32(2.0)]),
-        vec![2],
-        false,
-    )
-    .unwrap()
-    .to(Device::Cuda(0))
-    .unwrap();
-    assert!(gather(&hf, 0, &[0usize], &[1]).is_err());
+    let f16_input = cuda_f16(&[1.0, 2.0, 3.0, 4.0], &[2, 2], true);
+    let bf16_input = cuda_bf16(&[1.0, 2.0, 3.0, 4.0], &[2, 2], true);
+    let index = [0usize, 0, 1, 0]; // torch.gather(x, 0, [[0,0],[1,0]])
+
+    let f16_out = gather(&f16_input, 0, &index, &[2, 2]).expect("f16 gather");
+    assert!(
+        f16_out.is_cuda(),
+        "f16 gather output must stay CUDA-resident"
+    );
+    assert_eq!(host_f16(&f16_out), vec![1.0, 2.0, 3.0, 2.0]);
+
+    let bf16_out = gather(&bf16_input, 0, &index, &[2, 2]).expect("bf16 gather");
+    assert!(
+        bf16_out.is_cuda(),
+        "bf16 gather output must stay CUDA-resident"
+    );
+    assert_eq!(host_bf16(&bf16_out), vec![1.0, 2.0, 3.0, 2.0]);
+
+    let f16_grad_out = cuda_f16(&[1.0; 4], &[2, 2], false);
+    let f16_grads = f16_out
+        .grad_fn()
+        .expect("tracked f16 gather must carry grad_fn")
+        .backward(&f16_grad_out)
+        .expect("f16 gather backward");
+    let f16_grad = f16_grads[0].as_ref().expect("f16 input grad");
+    assert!(
+        f16_grad.is_cuda(),
+        "f16 gather grad must stay CUDA-resident"
+    );
+    assert_eq!(host_f16(f16_grad), vec![1.0, 2.0, 1.0, 0.0]);
+
+    let bf16_grad_out = cuda_bf16(&[1.0; 4], &[2, 2], false);
+    let bf16_grads = bf16_out
+        .grad_fn()
+        .expect("tracked bf16 gather must carry grad_fn")
+        .backward(&bf16_grad_out)
+        .expect("bf16 gather backward");
+    let bf16_grad = bf16_grads[0].as_ref().expect("bf16 input grad");
+    assert!(
+        bf16_grad.is_cuda(),
+        "bf16 gather grad must stay CUDA-resident"
+    );
+    assert_eq!(host_bf16(bf16_grad), vec![1.0, 2.0, 1.0, 0.0]);
 }

@@ -940,8 +940,14 @@ fn run_where_for_device(device_label: &str, device: Device) {
                     tolerance::F32_ELEMENTWISE,
                 );
 
-                // where_bt with first-class BoolTensor wrapper.
-                let cond_bt = BoolTensor::from_vec(cond.clone(), x_shape.clone()).expect("bt");
+                // where_bt mirrors torch.where(Tensor condition, x, y): tensor
+                // operands must live on the same device. The host-slice
+                // where_ API above is the convenience path that uploads a
+                // raw &[bool] mask for CUDA operands.
+                let cond_bt = BoolTensor::from_vec(cond.clone(), x_shape.clone())
+                    .expect("bt")
+                    .to(device)
+                    .expect("condition upload");
                 let out_bt = where_bt(&cond_bt, &x, &y).expect("where_bt");
                 check_f32(
                     &format!("{label} where_bt fwd"),
@@ -981,7 +987,10 @@ fn run_where_for_device(device_label: &str, device: Device) {
                     tolerance::F64_ELEMENTWISE,
                 );
 
-                let cond_bt = BoolTensor::from_vec(cond.clone(), x_shape.clone()).expect("bt");
+                let cond_bt = BoolTensor::from_vec(cond.clone(), x_shape.clone())
+                    .expect("bt")
+                    .to(device)
+                    .expect("condition upload");
                 let out_bt = where_bt(&cond_bt, &x, &y).expect("where_bt");
                 check_f64(
                     &format!("{label} where_bt fwd"),

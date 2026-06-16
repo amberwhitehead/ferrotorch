@@ -144,7 +144,10 @@ fn core129_cuda_index_select_dim_backward_dst_offsets_above_2p24() {
         .to(Device::Cuda(0))
         .unwrap()
         .requires_grad_(true);
-    let idx = IntTensor::<i64>::from_slice(&[K as i64], &[1]).unwrap();
+    let idx = IntTensor::<i64>::from_slice(&[K as i64], &[1])
+        .unwrap()
+        .to(Device::Cuda(0))
+        .unwrap();
     let out = index_select_dim(&x, 1, &idx).unwrap();
     let g = Tensor::from_storage(TensorStorage::cpu(vec![5.0f32, 9.0]), vec![2, 1], false)
         .unwrap()
