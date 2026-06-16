@@ -32,7 +32,7 @@
 //! | REQ-9 | SHIPPED | `IntTensor::cast_gpu` at `ops/phase2c.rs:481`; consumer: `IntTensor::cast` in `int_tensor.rs` |
 
 use crate::device::Device;
-use crate::dtype::Float;
+use crate::dtype::{DType, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::int_tensor::{IntElement, IntTensor};
 use crate::shape::normalize_axis;
@@ -89,6 +89,46 @@ fn arg_reduce_ref<V: Copy>(
     out
 }
 
+fn arg_zero_output(
+    device: Device,
+    shape: Vec<usize>,
+    op: &'static str,
+) -> FerrotorchResult<IntTensor<i64>> {
+    let len = crate::shape::checked_numel(&shape, op)?;
+    match device {
+        Device::Cpu => IntTensor::<i64>::from_vec(vec![0; len], shape),
+        Device::Cuda(ordinal) => {
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let h = backend.alloc_zeros(len, DType::I64, ordinal)?;
+            Ok(IntTensor::from_gpu_handle(h, shape))
+        }
+        other => Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: output allocation is not implemented for device {other}"),
+        }),
+    }
+}
+
+fn check_arg_dim_non_empty(op: &'static str, dim: usize, dim_size: usize) -> FerrotorchResult<()> {
+    if dim_size == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}(): Expected reduction dim {dim} to have non-zero size."),
+        });
+    }
+    Ok(())
+}
+
+#[inline]
+fn float_arg_better<T: Float>(candidate: T, current: T, is_max: bool) -> bool {
+    !current.is_nan()
+        && (candidate.is_nan()
+            || if is_max {
+                candidate > current
+            } else {
+                candidate < current
+            })
+}
+
 /// Run argmax/argmin on a float `Tensor<T>`, returning `IntTensor<i64>`.
 /// `dim = None` reduces the flattened tensor to a 0-d scalar index.
 fn tensor_arg<T: Float>(
@@ -97,20 +137,38 @@ fn tensor_arg<T: Float>(
     is_max: bool,
 ) -> FerrotorchResult<IntTensor<i64>> {
     let op = if is_max { "argmax" } else { "argmin" };
-    if input.numel() == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!("{op}: cannot reduce an empty tensor"),
-        });
-    }
-    let input = input.contiguous()?;
     let (outer, dim_size, inner, out_shape) = match dim {
-        None => (1usize, input.numel(), 1usize, Vec::new()),
+        None => {
+            if input.numel() == 0 {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "{op}(): Expected reduction dim to be specified for input.numel() == 0."
+                    ),
+                });
+            }
+            (1usize, input.numel(), 1usize, Vec::new())
+        }
         Some(d) => {
+            if input.ndim() == 0 {
+                if d == 0 || d == -1 {
+                    return arg_zero_output(input.device(), Vec::new(), op);
+                }
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "Dimension out of range (expected to be in range of [-1, 0], but got {d})"
+                    ),
+                });
+            }
             let d = normalize_axis(d, input.ndim())?;
             let (o, ds, inn) = factor(input.shape(), d);
+            check_arg_dim_non_empty(op, d, ds)?;
             (o, ds, inn, shape_without(input.shape(), d))
         }
     };
+    if crate::shape::checked_numel(&out_shape, op)? == 0 {
+        return arg_zero_output(input.device(), out_shape, op);
+    }
+    let input = input.contiguous()?;
 
     if input.is_cuda() {
         let backend =
@@ -125,9 +183,13 @@ fn tensor_arg<T: Float>(
     } else {
         let data = input.data_vec()?;
         let out = if is_max {
-            arg_reduce_ref(&data, outer, dim_size, inner, |c, b| c > b)
+            arg_reduce_ref(&data, outer, dim_size, inner, |c, b| {
+                float_arg_better(c, b, true)
+            })
         } else {
-            arg_reduce_ref(&data, outer, dim_size, inner, |c, b| c < b)
+            arg_reduce_ref(&data, outer, dim_size, inner, |c, b| {
+                float_arg_better(c, b, false)
+            })
         };
         IntTensor::<i64>::from_vec(out, out_shape)
     }
@@ -140,19 +202,37 @@ fn inttensor_arg<I: IntElement>(
     is_max: bool,
 ) -> FerrotorchResult<IntTensor<i64>> {
     let op = if is_max { "argmax" } else { "argmin" };
-    if input.numel() == 0 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!("{op}: cannot reduce an empty tensor"),
-        });
-    }
     let (outer, dim_size, inner, out_shape) = match dim {
-        None => (1usize, input.numel(), 1usize, Vec::new()),
+        None => {
+            if input.numel() == 0 {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "{op}(): Expected reduction dim to be specified for input.numel() == 0."
+                    ),
+                });
+            }
+            (1usize, input.numel(), 1usize, Vec::new())
+        }
         Some(d) => {
+            if input.ndim() == 0 {
+                if d == 0 || d == -1 {
+                    return arg_zero_output(input.device(), Vec::new(), op);
+                }
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "Dimension out of range (expected to be in range of [-1, 0], but got {d})"
+                    ),
+                });
+            }
             let d = normalize_axis(d, input.ndim())?;
             let (o, ds, inn) = factor(input.shape(), d);
+            check_arg_dim_non_empty(op, d, ds)?;
             (o, ds, inn, shape_without(input.shape(), d))
         }
     };
+    if crate::shape::checked_numel(&out_shape, op)? == 0 {
+        return arg_zero_output(input.device(), out_shape, op);
+    }
 
     if input.is_cuda() {
         let backend =

@@ -878,6 +878,32 @@ mod tests {
     }
 
     #[test]
+    fn argmax_argmin_f32_nan_first_index() {
+        let d = dev();
+        let h = d
+            .stream()
+            .clone_htod(&vec![1.0f32, f32::NAN, f32::NAN, 5.0])
+            .unwrap();
+        let mx = gpu_argmax_f32(&h, 1, 4, 1, &d).unwrap();
+        let mn = gpu_argmin_f32(&h, 1, 4, 1, &d).unwrap();
+        assert_eq!(d.stream().clone_dtoh(&mx).unwrap(), vec![1i64]);
+        assert_eq!(d.stream().clone_dtoh(&mn).unwrap(), vec![1i64]);
+    }
+
+    #[test]
+    fn argmax_argmin_f64_nan_per_slice() {
+        let d = dev();
+        let h = d
+            .stream()
+            .clone_htod(&vec![1.0f64, f64::NAN, 3.0, f64::NAN, 5.0, f64::NAN])
+            .unwrap();
+        let mx = gpu_argmax_f64(&h, 2, 3, 1, &d).unwrap();
+        let mn = gpu_argmin_f64(&h, 2, 3, 1, &d).unwrap();
+        assert_eq!(d.stream().clone_dtoh(&mx).unwrap(), vec![1i64, 0i64]);
+        assert_eq!(d.stream().clone_dtoh(&mn).unwrap(), vec![1i64, 0i64]);
+    }
+
+    #[test]
     fn argmax_f32_along_dim() {
         let d = dev();
         // shape [2,3], argmax along dim=1 -> outer=2 dim=3 inner=1
@@ -930,5 +956,29 @@ mod tests {
         let hb = d.stream().clone_htod(&bf16bits).unwrap();
         let mx2 = gpu_argmax_bf16(&hb, 1, 3, 1, &d).unwrap();
         assert_eq!(d.stream().clone_dtoh(&mx2).unwrap(), vec![2i64]);
+    }
+
+    #[test]
+    fn argmax_argmin_f16_bf16_nan_first_index() {
+        let d = dev();
+        let f16bits: Vec<u16> = [1.0f32, f32::NAN, f32::NAN, 5.0]
+            .iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
+        let h16 = d.stream().clone_htod(&f16bits).unwrap();
+        let f16_mx = gpu_argmax_f16(&h16, 1, 4, 1, &d).unwrap();
+        let f16_mn = gpu_argmin_f16(&h16, 1, 4, 1, &d).unwrap();
+        assert_eq!(d.stream().clone_dtoh(&f16_mx).unwrap(), vec![1i64]);
+        assert_eq!(d.stream().clone_dtoh(&f16_mn).unwrap(), vec![1i64]);
+
+        let bf16bits: Vec<u16> = [1.0f32, f32::NAN, f32::NAN, 5.0]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v).to_bits())
+            .collect();
+        let hb = d.stream().clone_htod(&bf16bits).unwrap();
+        let bf16_mx = gpu_argmax_bf16(&hb, 1, 4, 1, &d).unwrap();
+        let bf16_mn = gpu_argmin_bf16(&hb, 1, 4, 1, &d).unwrap();
+        assert_eq!(d.stream().clone_dtoh(&bf16_mx).unwrap(), vec![1i64]);
+        assert_eq!(d.stream().clone_dtoh(&bf16_mn).unwrap(), vec![1i64]);
     }
 }
