@@ -1496,24 +1496,42 @@ pub fn prepare_qat(param_names: &[&str], dtype: QuantDtype) -> QatModel {
 /// Uses `Mutex` with graceful poisoning recovery to avoid panics
 /// when a thread panics while holding the lock.
 pub mod cuda_rng {
-    use std::sync::Mutex;
+    use std::{
+        cell::RefCell,
+        sync::{Mutex, MutexGuard},
+    };
 
     /// Global RNG state — a simple seed counter.
-    static RNG_STATE: Mutex<u64> = Mutex::new(0xdeadbeef_cafebabe);
+    static RNG_STATE: Mutex<CudaRngState> = Mutex::new(CudaRngState {
+        state: 0xdeadbeef_cafebabe,
+    });
 
-    /// Saved RNG states for fork/join.
-    static RNG_STACK: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+    thread_local! {
+        /// Saved RNG states for fork/join in the current caller thread.
+        ///
+        /// PyTorch's `fork_rng` stores saved states in the caller's context and
+        /// restores them on context exit. The CUDA default generator is shared,
+        /// but one thread must never pop another thread's saved snapshot.
+        static RNG_STACK: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    }
+
+    #[derive(Debug)]
+    struct CudaRngState {
+        state: u64,
+    }
+
+    fn lock_state() -> MutexGuard<'static, CudaRngState> {
+        RNG_STATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// Get the current RNG state, recovering gracefully from mutex poisoning.
     pub fn get_state() -> u64 {
-        let guard = RNG_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        *guard
+        lock_state().state
     }
 
     /// Set the RNG state.
     pub fn set_state(state: u64) {
-        let mut guard = RNG_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = state;
+        lock_state().state = state;
     }
 
     /// Save the current RNG state to a stack and set a new state.
@@ -1521,17 +1539,9 @@ pub mod cuda_rng {
     /// Uses `unwrap_or_else(|e| e.into_inner())` to handle poisoned mutexes
     /// gracefully instead of panicking.
     pub fn fork_rng(new_seed: u64) {
-        let current = {
-            let guard = RNG_STATE.lock().unwrap_or_else(|e| e.into_inner());
-            *guard
-        };
-
-        {
-            let mut stack = RNG_STACK.lock().unwrap_or_else(|e| e.into_inner());
-            stack.push(current);
-        }
-
-        set_state(new_seed);
+        let mut guard = lock_state();
+        RNG_STACK.with(|stack| stack.borrow_mut().push(guard.state));
+        guard.state = new_seed;
     }
 
     /// Restore the previously saved RNG state from the stack.
@@ -1539,22 +1549,18 @@ pub mod cuda_rng {
     /// Uses `unwrap_or_else(|e| e.into_inner())` to handle poisoned mutexes
     /// gracefully instead of panicking.
     pub fn join_rng() {
-        let saved = {
-            let mut stack = RNG_STACK.lock().unwrap_or_else(|e| e.into_inner());
-            stack.pop()
-        };
-
-        if let Some(state) = saved {
-            set_state(state);
+        let mut guard = lock_state();
+        if let Some(state) = RNG_STACK.with(|stack| stack.borrow_mut().pop()) {
+            guard.state = state;
         }
     }
 
     /// Advance the RNG state and return the new value.
     pub fn next_seed() -> u64 {
-        let mut guard = RNG_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = lock_state();
         // Simple splitmix64 step.
-        *guard = guard.wrapping_add(0x9e3779b97f4a7c15);
-        let mut z = *guard;
+        guard.state = guard.state.wrapping_add(0x9e3779b97f4a7c15);
+        let mut z = guard.state;
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
         z ^ (z >> 31)
@@ -2159,11 +2165,9 @@ mod tests {
 
     // ----- cuda_rng -----
     //
-    // The cuda_rng module exposes a process-global `Mutex<u64>` state plus
-    // a fork/join stack. Both tests below mutate that state and read it
-    // back; under cargo's default parallel test runner they race with each
-    // other. Serialise via a local static mutex (same pattern as the
-    // capture-lock used in #602 for the GPU-graph tests).
+    // The cuda_rng module exposes a process-global current state plus a
+    // per-thread fork/join stack. Tests that set the global current state still
+    // serialize under cargo's parallel runner.
     fn cuda_rng_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|p| p.into_inner())
@@ -2177,6 +2181,27 @@ mod tests {
         assert_eq!(cuda_rng::get_state(), 0x12345678);
         cuda_rng::join_rng();
         assert_eq!(cuda_rng::get_state(), initial);
+    }
+
+    #[test]
+    fn test_cuda_rng_nested_fork_join_lifo() {
+        let _g = cuda_rng_test_lock();
+        let initial = cuda_rng::get_state();
+        cuda_rng::set_state(0xaaaa_bbbb_cccc_dddd);
+
+        cuda_rng::fork_rng(0x1111_2222_3333_4444);
+        assert_eq!(cuda_rng::get_state(), 0x1111_2222_3333_4444);
+
+        cuda_rng::fork_rng(0x5555_6666_7777_8888);
+        assert_eq!(cuda_rng::get_state(), 0x5555_6666_7777_8888);
+
+        cuda_rng::join_rng();
+        assert_eq!(cuda_rng::get_state(), 0x1111_2222_3333_4444);
+
+        cuda_rng::join_rng();
+        assert_eq!(cuda_rng::get_state(), 0xaaaa_bbbb_cccc_dddd);
+
+        cuda_rng::set_state(initial);
     }
 
     #[test]

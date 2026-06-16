@@ -1500,9 +1500,9 @@ fn prepare_qat_skips_bias_only_layers() {
 // ---------------------------------------------------------------------------
 // cuda_rng module — fork/join semantics for reproducible GPU RNG state.
 //
-// Note: cuda_rng is process-global Mutex<u64> state. Two tests that both
-// mutate it would race under cargo's parallel runner. Serialise via a
-// local lock, mirroring the pattern used in src/quantize.rs's tests.
+// Note: cuda_rng has a process-global current state, while fork snapshots are
+// isolated per thread. Tests that set the global current state still serialize
+// under cargo's parallel runner.
 // ---------------------------------------------------------------------------
 
 fn cuda_rng_test_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -1528,6 +1528,116 @@ fn cuda_rng_fork_join_round_trip() {
     assert_eq!(cuda_rng::get_state(), 0x1234_5678);
     cuda_rng::join_rng();
     assert_eq!(cuda_rng::get_state(), initial);
+}
+
+#[test]
+fn cuda_rng_nested_fork_join_round_trip() {
+    let _g = cuda_rng_test_lock();
+    let initial = cuda_rng::get_state();
+    cuda_rng::set_state(0xaaaa_bbbb_cccc_dddd);
+
+    cuda_rng::fork_rng(0x1111_2222_3333_4444);
+    assert_eq!(cuda_rng::get_state(), 0x1111_2222_3333_4444);
+
+    cuda_rng::fork_rng(0x5555_6666_7777_8888);
+    assert_eq!(cuda_rng::get_state(), 0x5555_6666_7777_8888);
+
+    cuda_rng::join_rng();
+    assert_eq!(
+        cuda_rng::get_state(),
+        0x1111_2222_3333_4444,
+        "nested fork_rng must restore the previous inner state first"
+    );
+
+    cuda_rng::join_rng();
+    assert_eq!(
+        cuda_rng::get_state(),
+        0xaaaa_bbbb_cccc_dddd,
+        "outer join_rng must restore the pre-fork state"
+    );
+
+    cuda_rng::set_state(initial);
+}
+
+#[test]
+fn cuda_rng_overlapping_thread_forks_do_not_cross_pop() {
+    let _g = cuda_rng_test_lock();
+    let initial = cuda_rng::get_state();
+    let outer_state = 0xaaaa_bbbb_cccc_dddd;
+    let first_thread_seed = 0x1111_2222_3333_4444;
+    let second_thread_seed = 0x5555_6666_7777_8888;
+    let timeout = std::time::Duration::from_secs(5);
+
+    cuda_rng::set_state(outer_state);
+
+    let (a_entered_tx, a_entered_rx) = std::sync::mpsc::channel();
+    let (b_entered_tx, b_entered_rx) = std::sync::mpsc::channel();
+    let (a_joined_tx, a_joined_rx) = std::sync::mpsc::channel();
+    let (a_state_tx, a_state_rx) = std::sync::mpsc::channel();
+    let (b_state_tx, b_state_rx) = std::sync::mpsc::channel();
+
+    let thread_a = std::thread::spawn(move || -> Result<(), String> {
+        cuda_rng::fork_rng(first_thread_seed);
+        if cuda_rng::get_state() != first_thread_seed {
+            return Err("thread A did not install its fork seed".to_owned());
+        }
+
+        a_entered_tx.send(()).map_err(|err| err.to_string())?;
+        b_entered_rx
+            .recv_timeout(timeout)
+            .map_err(|err| err.to_string())?;
+
+        cuda_rng::join_rng();
+        a_state_tx
+            .send(cuda_rng::get_state())
+            .map_err(|err| err.to_string())?;
+        a_joined_tx.send(()).map_err(|err| err.to_string())?;
+        Ok(())
+    });
+
+    let thread_b = std::thread::spawn(move || -> Result<(), String> {
+        a_entered_rx
+            .recv_timeout(timeout)
+            .map_err(|err| err.to_string())?;
+
+        cuda_rng::fork_rng(second_thread_seed);
+        if cuda_rng::get_state() != second_thread_seed {
+            return Err("thread B did not install its fork seed".to_owned());
+        }
+
+        b_entered_tx.send(()).map_err(|err| err.to_string())?;
+        a_joined_rx
+            .recv_timeout(timeout)
+            .map_err(|err| err.to_string())?;
+
+        cuda_rng::join_rng();
+        b_state_tx
+            .send(cuda_rng::get_state())
+            .map_err(|err| err.to_string())?;
+        Ok(())
+    });
+
+    let a_restored = a_state_rx
+        .recv_timeout(timeout)
+        .expect("thread A should report the state after its join");
+    let b_restored = b_state_rx
+        .recv_timeout(timeout)
+        .expect("thread B should report the state after its join");
+
+    let thread_a_result = thread_a.join().expect("thread A should not panic");
+    let thread_b_result = thread_b.join().expect("thread B should not panic");
+    cuda_rng::set_state(initial);
+
+    thread_a_result.expect("thread A should complete fork/join orchestration");
+    thread_b_result.expect("thread B should complete fork/join orchestration");
+    assert_eq!(
+        a_restored, outer_state,
+        "thread A must restore its own saved state; a process-global stack pops thread B's frame here"
+    );
+    assert_eq!(
+        b_restored, first_thread_seed,
+        "thread B should restore the shared generator to the state it observed when it forked"
+    );
 }
 
 #[test]
