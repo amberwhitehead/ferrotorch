@@ -19,10 +19,13 @@ subgraph execution and sequential state accumulation under autograd.
 They mirror `torch._higher_order_ops` / `torch.cond` and the
 `torch.func.scan` / state-space-model patterns used by Mamba, S4,
 RWKV, etc. The implementation composes user-supplied step / branch
-functions and wraps each output with a thin `CondBackward` /
-`ScanBackward` that simply routes the upstream gradient to the
-target tensor's own grad-fn chain — the chain that the user's
-callback built on the forward pass.
+functions and wraps each autograd-tracked output with a thin zero-copy
+`CondBackward` / `ScanBackward` stride view on the original output
+storage. The backward node routes the upstream gradient to the target
+tensor's own grad-fn chain — the chain that the user's callback built
+on the forward pass — and also exposes explicit zero-gradient edges to
+the original control-flow inputs for detached targets, matching
+PyTorch's higher-order autograd invariant.
 
 ## Requirements
 
@@ -31,10 +34,12 @@ callback built on the forward pass.
   Only the taken branch is called. Mirrors `torch.cond`
   (`torch/_higher_order_ops/cond.py`).
 - REQ-2: `cond` autograd — gradients flow through the taken branch
-  ONLY. Wraps each branch output with `CondBackward { branch_output:
-  out.clone() }`. The branch's own grad_fn chain (built during the
-  forward callback) carries the per-operand VJP; `CondBackward`
-  simply forwards `grad_output` to it.
+  ONLY. When any operand requires grad, each branch output is wrapped
+  with a zero-copy `CondBackward` view that preserves the output's
+  storage, strides, offset, and device. The branch's own grad_fn chain
+  (built during the forward callback) carries real per-operand VJPs;
+  `CondBackward` forwards `grad_output` to it and returns zeros for
+  original operands that the branch output does not reach.
 - REQ-3: `validate_cond_branches(true_outputs, false_outputs)` —
   user-callable utility to eagerly check both branches return the
   same number of tensors with matching shapes. Required because
@@ -49,8 +54,9 @@ callback built on the forward pass.
   state-space models (Mamba, S4, RWKV) build on.
 - REQ-5: `scan` autograd — gradients flow through ALL steps via the
   per-step grad_fn chains built by `fn_step`. Each wrapped output /
-  final-carry attaches its own `ScanBackward` instance routing the
-  upstream gradient to the raw target.
+  final-carry attaches its own zero-copy `ScanBackward` view routing
+  the upstream gradient to the raw target and zeros to disconnected
+  `init` / `xs` inputs.
 - REQ-6: Predicate validation — `cond` errors with
   `InvalidArgument` if `pred.numel() != 1` (scalar requirement).
 
@@ -67,19 +73,20 @@ callback built on the forward pass.
   carry propagates gradients back to `init` and every `xs[i]`.
 - [x] AC-6: `validate_cond_branches` rejects mismatched output counts
   and shape mismatches.
+- [x] AC-7: CUDA `cond` / `scan` outputs and backward gradients remain
+  CUDA-resident when autograd is active; detached branch / step outputs
+  produce explicit zero gradients for the original inputs.
 
 ## Architecture
 
-`CondBackward<T>` at `ops/higher_order.rs:31-48` holds a single
-`branch_output: Tensor<T>`. Its `backward` forwards `grad_output.clone()`
-unchanged. Its `inputs()` returns `vec![&self.branch_output]` so the
-autograd engine traverses INTO the branch output's own grad-fn chain
-(which the user's callback already built during the forward pass) —
-that's where per-operand VJPs are produced. The earlier implementation
-held the raw operands and returned identity grads to each one,
-bypassing the branch's grad-fn chain; that produced wrong gradients
-for any branch that wasn't a pure pass-through. The current shape is
-documented in the in-line comment at `:26-30`.
+`CondBackward<T>` holds the raw `branch_output: Tensor<T>` plus the
+original `operands`. Its `backward` forwards `grad_output.clone()` to
+the branch output and returns `zeros_like(operand)` for each operand.
+Its `inputs()` returns the branch output followed by those operands, so
+the autograd engine traverses INTO the branch output's own grad-fn
+chain (which the user's callback already built during the forward
+pass), while detached outputs still materialise PyTorch-style zero
+operand gradients.
 
 `cond` at `:79-134` walks:
 
@@ -90,16 +97,19 @@ documented in the in-line comment at `:26-30`.
 4. If no operand requires grad / grad is disabled, return raw
    outputs.
 5. Otherwise, wrap each output with `CondBackward { branch_output:
-   out.clone() }` via `Tensor::from_operation` (`:122-131`).
+   out.clone(), operands }` through `wrap_control_flow_output`, which
+   attaches the grad node to a stride view sharing the output's
+   existing storage/device instead of copying through host memory.
 
 `validate_cond_branches` at `:142-169` is the eager validator —
 walks zipped output vectors, checking length match and per-position
 shape match. Returns `InvalidArgument` / `ShapeMismatch` errors.
 
-`ScanBackward<T>` at `:191-207` is analogous to `CondBackward`:
-holds a single `target: Tensor<T>` and routes grad through. Each
-wrapped step output / final carry gets its own `ScanBackward`
-instance.
+`ScanBackward<T>` is analogous to `CondBackward`: it holds the raw
+`target: Tensor<T>` and cloned zero-gradient inputs (`init` plus
+`xs`). Each wrapped step output / final carry gets its own
+`ScanBackward` instance, so real gradients flow through the target's
+step graph while disconnected scan inputs receive explicit zeros.
 
 `scan` at `:236-295` walks:
 
@@ -110,9 +120,10 @@ instance.
 3. Decide whether autograd is needed: `is_grad_enabled() &&
    (init.requires_grad() || any xs[i].requires_grad())`.
 4. If not, return `(current_carry, outputs)` raw.
-5. Otherwise, wrap the final carry with a `ScanBackward` routing
-   to the raw `current_carry` (`:272-278`), then wrap each step
-   output similarly (`:282-292`).
+5. Otherwise, wrap the final carry with a zero-copy `ScanBackward`
+   routing to the raw `current_carry`, then wrap each step output
+   similarly. The wrapper shares output storage/stride metadata and
+   never re-materialises CUDA tensors through CPU storage.
 
 The implementation has been refactored — earlier versions held
 `Vec<carries>`, `Vec<xs>`, `Vec<outputs>` plus an `OutputKind` enum
@@ -142,9 +153,15 @@ implementations.
 ## Verification
 
 `cargo test -p ferrotorch-core --lib ops::higher_order` exercises
-the local tests at `ops/higher_order.rs:300-...` (predicate
-validation, branch execution, scan empty-input early-return,
-autograd flow).
+the local tests at `ops/higher_order.rs` (predicate validation, branch
+execution, scan empty-input early-return, connected autograd flow, and
+detached-output zero-gradient semantics).
+
+`cargo test -p ferrotorch-core --features gpu --test
+audit_core116_117_higher_order_control_flow` exercises CPU and CUDA
+probes for PyTorch-style detached-output zero gradients, connected
+CUDA gradients, and non-contiguous CUDA branch outputs that must stay
+device-resident.
 
 ## REQ status table
 

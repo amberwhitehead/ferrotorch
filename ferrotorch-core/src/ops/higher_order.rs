@@ -9,18 +9,18 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 | SHIPPED | `cond` at `ops/higher_order.rs:79`; consumer: re-export `ferrotorch_core::autograd::cond` at `autograd/mod.rs:26` |
-//! | REQ-2 | SHIPPED | `CondBackward` at `ops/higher_order.rs:31` + wrap at `:122-131`; consumer: `cond` re-export |
+//! | REQ-2 | SHIPPED | `CondBackward` at `ops/higher_order.rs:31` + zero-copy wrap; consumer: `cond` re-export |
 //! | REQ-3 | SHIPPED | `validate_cond_branches` at `ops/higher_order.rs:142`; consumer: re-export at `autograd/mod.rs:26` |
 //! | REQ-4 | SHIPPED | `scan` at `ops/higher_order.rs:236`; consumer: re-export `ferrotorch_core::autograd::scan` at `autograd/mod.rs:26` |
-//! | REQ-5 | SHIPPED | `ScanBackward` at `ops/higher_order.rs:191` + wrap at `:282-292`; consumer: `scan` re-export |
+//! | REQ-5 | SHIPPED | `ScanBackward` at `ops/higher_order.rs:191` + zero-copy wrap; consumer: `scan` re-export |
 //! | REQ-6 | SHIPPED | `pred.numel() != 1` check at `ops/higher_order.rs:91`; consumer: `cond` entry |
 
 use std::sync::Arc;
 
 use crate::autograd::no_grad::is_grad_enabled;
+use crate::creation::zeros_like;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
-use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
 
 // ===========================================================================
@@ -30,32 +30,54 @@ use crate::tensor::{GradFn, Tensor};
 /// Backward node for `cond`.
 ///
 /// Holds the raw branch output (which already carries the branch function's
-/// grad_fn chain). Routes the upstream gradient to it; the autograd engine
-/// continues traversal through the branch's grad chain to compute per-operand
-/// gradients correctly — even for non-identity branches like
-/// `&ops[0] * &ops[1]`.
+/// grad_fn chain) and the original operands. Routes the upstream gradient to
+/// the branch output; the autograd engine continues traversal through the
+/// branch's grad chain to compute per-operand gradients correctly — even for
+/// non-identity branches like `&ops[0] * &ops[1]`.
 ///
-/// Earlier versions held the operands directly and returned identity grads to
-/// each one; that bypassed the branch function's grad_fn chain and produced
-/// wrong gradients for any branch that wasn't a pure pass-through. The dead
-/// `branch` and `operands` fields were the structural evidence of that gap.
+/// The operand list is retained only to mirror PyTorch's higher-order
+/// autograd invariant: tensor operands that are not reached through the
+/// branch output receive explicit zero gradients. This keeps detached branch
+/// outputs differentiable as `torch.cond` outputs while proving they are
+/// disconnected from the operands.
 #[derive(Debug)]
 struct CondBackward<T: Float> {
     branch_output: Tensor<T>,
+    operands: Vec<Tensor<T>>,
 }
 
 impl<T: Float> GradFn<T> for CondBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        Ok(vec![Some(grad_output.clone())])
+        let mut grads = Vec::with_capacity(1 + self.operands.len());
+        grads.push(Some(grad_output.clone()));
+        for operand in &self.operands {
+            grads.push(Some(zeros_like(operand)?));
+        }
+        Ok(grads)
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
-        vec![&self.branch_output]
+        let mut inputs = Vec::with_capacity(1 + self.operands.len());
+        inputs.push(&self.branch_output);
+        inputs.extend(self.operands.iter());
+        inputs
     }
 
     fn name(&self) -> &'static str {
         "CondBackward"
     }
+}
+
+fn wrap_control_flow_output<T: Float>(
+    out: &Tensor<T>,
+    grad_fn: Arc<dyn GradFn<T>>,
+) -> FerrotorchResult<Tensor<T>> {
+    out.try_stride_view_operation(
+        out.shape().to_vec(),
+        out.strides().to_vec(),
+        out.storage_offset(),
+        grad_fn,
+    )
 }
 
 /// Conditional subgraph execution.
@@ -126,19 +148,16 @@ where
         return Ok(branch_outputs);
     }
 
-    // Wrap each branch output with a CondBackward holding that output. The
-    // autograd engine, on backward, will traverse into the output's own
-    // grad_fn chain (whatever differentiable ops the branch composed) and
-    // route gradients back to the operands correctly.
+    // Wrap each branch output without copying or changing device. PyTorch's
+    // `CondAutogradOp` marks all tensor outputs differentiable when any tensor
+    // operand requires grad; disconnected operands receive explicit zero grads.
     let mut result = Vec::with_capacity(branch_outputs.len());
     for out in &branch_outputs {
-        let data = out.data_vec()?;
-        let shape = out.shape().to_vec();
         let grad_fn = Arc::new(CondBackward {
             branch_output: out.clone(),
+            operands: operands.to_vec(),
         });
-        let wrapped = Tensor::from_operation(TensorStorage::cpu(data), shape, grad_fn)?;
-        result.push(wrapped);
+        result.push(wrap_control_flow_output(out, grad_fn)?);
     }
 
     Ok(result)
@@ -185,14 +204,17 @@ pub fn validate_cond_branches<T: Float>(
 
 /// Backward node for one wrapped scan tensor — either a step output or the
 /// final carry. Holds the single raw tensor whose grad_fn chain the autograd
-/// engine should traverse.
+/// engine should traverse, plus the original scan inputs that must receive
+/// explicit zeros when the target is detached from them.
 ///
 /// Each wrapped output / final carry gets its own `ScanBackward` instance.
 /// The held `target` tensor was produced by the user's step function (e.g.
 /// `crate::grad_fns::arithmetic::add(carry, x)`) and so already carries the
 /// correct grad chain. We just route the upstream gradient to it; the
 /// engine's topo walk handles the rest, unrolling each step in reverse and
-/// ultimately reaching `init_carry` and every `xs[i]`.
+/// ultimately reaching `init_carry` and every `xs[i]`. Direct zero-grad edges
+/// mirror PyTorch scan's backward contract for tensor args with no path from a
+/// particular output.
 ///
 /// Earlier versions held `Vec<carries>`, `Vec<xs>`, `Vec<outputs>` plus an
 /// `OutputKind { FinalCarry, StepOutput(usize) }` enum to disambiguate which
@@ -201,15 +223,24 @@ pub fn validate_cond_branches<T: Float>(
 #[derive(Debug)]
 struct ScanBackward<T: Float> {
     target: Tensor<T>,
+    zero_grad_inputs: Vec<Tensor<T>>,
 }
 
 impl<T: Float> GradFn<T> for ScanBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        Ok(vec![Some(grad_output.clone())])
+        let mut grads = Vec::with_capacity(1 + self.zero_grad_inputs.len());
+        grads.push(Some(grad_output.clone()));
+        for input in &self.zero_grad_inputs {
+            grads.push(Some(zeros_like(input)?));
+        }
+        Ok(grads)
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
-        vec![&self.target]
+        let mut inputs = Vec::with_capacity(1 + self.zero_grad_inputs.len());
+        inputs.push(&self.target);
+        inputs.extend(self.zero_grad_inputs.iter());
+        inputs
     }
 
     fn name(&self) -> &'static str {
@@ -278,25 +309,31 @@ where
         return Ok((current_carry, outputs));
     }
 
-    // Wrap the final carry: route the gradient to the *raw* final carry
-    // (i.e. the new_carry produced by the last fn_step call), not to init.
-    let final_carry_wrapped = Tensor::from_operation(
-        TensorStorage::cpu(current_carry.data_vec()?),
-        current_carry.shape().to_vec(),
+    let mut zero_grad_inputs = Vec::with_capacity(1 + xs.len());
+    zero_grad_inputs.push(init.clone());
+    zero_grad_inputs.extend(xs.iter().cloned());
+
+    // Wrap the final carry without copying or changing device: route the
+    // gradient to the raw final carry produced by the last fn_step call, while
+    // also exposing PyTorch-style zero gradients for disconnected scan inputs.
+    let final_carry_wrapped = wrap_control_flow_output(
+        &current_carry,
         Arc::new(ScanBackward {
             target: current_carry.clone(),
+            zero_grad_inputs: zero_grad_inputs.clone(),
         }),
     )?;
 
-    // Wrap each step output: route the gradient to the raw step output. Its
-    // grad_fn chain (from `fn_step`) routes back through each step.
+    // Wrap each step output the same way; the output's own graph routes real
+    // gradients, and the direct scan inputs receive zeros if that graph is
+    // disconnected.
     let mut wrapped_outputs = Vec::with_capacity(outputs.len());
     for out in &outputs {
-        let wrapped = Tensor::from_operation(
-            TensorStorage::cpu(out.data_vec()?),
-            out.shape().to_vec(),
+        let wrapped = wrap_control_flow_output(
+            out,
             Arc::new(ScanBackward {
                 target: out.clone(),
+                zero_grad_inputs: zero_grad_inputs.clone(),
             }),
         )?;
         wrapped_outputs.push(wrapped);
@@ -313,6 +350,7 @@ where
 mod tests {
     use super::*;
     use crate::creation::{full, ones, zeros};
+    use crate::storage::TensorStorage;
 
     // -----------------------------------------------------------------------
     // cond tests
@@ -353,7 +391,7 @@ mod tests {
                     .unwrap(),
                 ]
             },
-            &[x],
+            std::slice::from_ref(&x),
         )
         .unwrap();
 
@@ -396,7 +434,7 @@ mod tests {
                     .unwrap(),
                 ]
             },
-            &[x],
+            std::slice::from_ref(&x),
         )
         .unwrap();
 
@@ -517,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cond_with_requires_grad() {
+    fn test_cond_detached_branch_output_tracks_cond_but_gives_zero_operand_grad() {
         let pred =
             Tensor::<f32>::from_storage(TensorStorage::cpu(vec![1.0]), vec![], false).unwrap();
 
@@ -540,13 +578,20 @@ mod tests {
                 ]
             },
             |_| vec![zeros::<f32>(&[3]).unwrap()],
-            &[x],
+            std::slice::from_ref(&x),
         )
         .unwrap();
 
-        // Result should have grad_fn attached since operand requires grad.
+        // PyTorch CondAutogradOp semantics: the higher-order result is
+        // differentiable when an operand requires grad, but a detached branch
+        // body contributes zeros to that operand.
         assert!(result[0].requires_grad());
         assert_eq!(result[0].data().unwrap(), &[2.0, 4.0, 6.0]);
+
+        let loss = crate::grad_fns::reduction::sum(&result[0]).unwrap();
+        loss.backward().unwrap();
+        let gx = x.grad().unwrap().expect("x gets an explicit zero grad");
+        assert_eq!(gx.data().unwrap(), &[0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -794,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_with_requires_grad() {
+    fn test_scan_detached_step_results_track_scan_but_give_zero_input_grad() {
         let init =
             Tensor::<f32>::from_storage(TensorStorage::cpu(vec![0.0]), vec![1], true).unwrap();
 
@@ -818,13 +863,22 @@ mod tests {
         )
         .unwrap();
 
-        // With requires_grad init, results should track gradients.
+        // PyTorch ScanAutogradOp semantics: scan outputs require grad when
+        // scan inputs do, but detached step results backpropagate zeros.
         assert!(final_carry.requires_grad());
         assert_eq!(final_carry.data().unwrap(), &[3.0]);
 
         assert_eq!(outputs.len(), 2);
         assert!(outputs[0].requires_grad());
         assert!(outputs[1].requires_grad());
+
+        let loss = crate::grad_fns::reduction::sum(&final_carry).unwrap();
+        loss.backward().unwrap();
+        let ginit = init
+            .grad()
+            .unwrap()
+            .expect("init gets an explicit zero grad");
+        assert_eq!(ginit.data().unwrap(), &[0.0]);
     }
 
     #[test]

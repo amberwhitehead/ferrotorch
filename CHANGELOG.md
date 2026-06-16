@@ -65,6 +65,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- Higher-order `cond`/`scan` autograd now preserves CUDA/output view residency and gives detached branch/step inputs PyTorch-style zero gradients (#1810, #1811)
 - Add CUDA-resident remainder/fmod/floor_divide kernels for floating tensors (#1982)
 - CORE-037: Backward on a gradient-tracking leaf silently does nothing (#1731)
 - CORE-036: Fixed-point solving accepts incompatible iterates and silent non-convergence (#1730)
