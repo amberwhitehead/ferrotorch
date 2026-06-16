@@ -84,6 +84,160 @@ fn is_bf16<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<half::bf16>()
 }
 
+fn ensure_same_device<T: Float>(expected: &Tensor<T>, got: &Tensor<T>) -> FerrotorchResult<()> {
+    if expected.device() != got.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: expected.device(),
+            got: got.device(),
+        });
+    }
+    Ok(())
+}
+
+fn ensure_rank<T: Float>(
+    op: &str,
+    name: &str,
+    tensor: &Tensor<T>,
+    expected: usize,
+) -> FerrotorchResult<()> {
+    if tensor.ndim() != expected {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "{op}: {name} must be {expected}-D, got shape {:?}",
+                tensor.shape()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_mm_operands<T: Float>(
+    op: &str,
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+) -> FerrotorchResult<(usize, usize, usize)> {
+    ensure_same_device(a, b)?;
+    ensure_rank(op, "mat1", a, 2)?;
+    ensure_rank(op, "mat2", b, 2)?;
+
+    let m = a.shape()[0];
+    let k = a.shape()[1];
+    let b_rows = b.shape()[0];
+    let n = b.shape()[1];
+    if k != b_rows {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "{op}: mat1 and mat2 shapes cannot be multiplied ({m}x{k} and {b_rows}x{n})"
+            ),
+        });
+    }
+    Ok((m, k, n))
+}
+
+fn validate_mm_bt_operands<T: Float>(
+    op: &str,
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+) -> FerrotorchResult<(usize, usize, usize)> {
+    ensure_same_device(a, b)?;
+    ensure_rank(op, "mat1", a, 2)?;
+    ensure_rank(op, "mat2", b, 2)?;
+
+    let m = a.shape()[0];
+    let k = a.shape()[1];
+    let n = b.shape()[0];
+    let b_k = b.shape()[1];
+    if k != b_k {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "{op}: mat1 and mat2^T shapes cannot be multiplied ({m}x{k} and {n}x{b_k})"
+            ),
+        });
+    }
+    Ok((m, k, n))
+}
+
+fn validate_mv_operands<T: Float>(
+    op: &str,
+    a: &Tensor<T>,
+    x: &Tensor<T>,
+) -> FerrotorchResult<(usize, usize)> {
+    ensure_same_device(a, x)?;
+    ensure_rank(op, "mat", a, 2)?;
+    ensure_rank(op, "vec", x, 1)?;
+
+    let m = a.shape()[0];
+    let k = a.shape()[1];
+    let x_len = x.shape()[0];
+    if x_len != k {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!("{op}: size mismatch, mat is ({m}x{k}), vec is ({x_len})"),
+        });
+    }
+    Ok((m, k))
+}
+
+fn validate_dot_operands<T: Float>(
+    op: &str,
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+) -> FerrotorchResult<usize> {
+    ensure_same_device(a, b)?;
+    ensure_rank(op, "input", a, 1)?;
+    ensure_rank(op, "other", b, 1)?;
+
+    let n = a.shape()[0];
+    let b_len = b.shape()[0];
+    if n != b_len {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "{op}: inconsistent tensor size, expected {n} elements but got {b_len}"
+            ),
+        });
+    }
+    Ok(n)
+}
+
+fn validate_linear_fused_operands<T: Float>(
+    input: &Tensor<T>,
+    weight: &Tensor<T>,
+    bias: Option<&Tensor<T>>,
+) -> FerrotorchResult<(usize, usize, usize)> {
+    ensure_same_device(input, weight)?;
+    if let Some(b) = bias {
+        ensure_same_device(input, b)?;
+    }
+
+    ensure_rank("linear_fused", "input", input, 2)?;
+    ensure_rank("linear_fused", "weight", weight, 2)?;
+
+    let m = input.shape()[0];
+    let k = input.shape()[1];
+    let n = weight.shape()[0];
+    let weight_k = weight.shape()[1];
+    if k != weight_k {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "linear_fused: input and weight shapes cannot be multiplied ({m}x{k} and {n}x{weight_k})"
+            ),
+        });
+    }
+
+    if let Some(b) = bias {
+        ensure_rank("linear_fused", "bias", b, 1)?;
+        let bias_len = b.shape()[0];
+        if bias_len != n {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "linear_fused: bias length {bias_len} does not match out_features {n}"
+                ),
+            });
+        }
+    }
+
+    Ok((m, k, n))
+}
+
 /// GPU-native matmul backward for f32 tensors.
 /// dA = grad_C @ B^T, dB = A^T @ grad_C — all on GPU, no CPU roundtrip.
 fn mm_backward_gpu<T: Float>(grad_output: &Tensor<T>, a: &Tensor<T>, b: &Tensor<T>) -> GradPair<T> {
@@ -895,12 +1049,7 @@ fn broadcast_matmul_backward<T: Float>(
 /// Differentiable matrix-matrix multiply. If either input requires grad and
 /// grad is enabled, attaches `MmBackward`.
 pub fn mm_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if a.device() != b.device() {
-        return Err(FerrotorchError::DeviceMismatch {
-            expected: a.device(),
-            got: b.device(),
-        });
-    }
+    let (m, k, n) = validate_mm_operands("mm", a, b)?;
 
     // Materialize non-contiguous views before linalg ops.
     let a = if a.is_contiguous() {
@@ -917,9 +1066,6 @@ pub fn mm_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchRe
     if a.is_cuda() {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let m = a.shape()[0];
-        let k = a.shape()[1];
-        let n = b.shape()[1];
         // Dtype-aware GPU dispatch (#800 + #23): bf16 routes to
         // `matmul_bf16_bf16` (cuBLAS GemmEx, f32 accumulator).
         let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
@@ -946,22 +1092,6 @@ pub fn mm_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchRe
             Tensor::from_storage(storage, shape, false)
         }
     } else {
-        let m = a.shape()[0];
-        let k = a.shape()[1];
-        let n = b.shape()[1];
-
-        if k != b.shape()[0] {
-            return Err(FerrotorchError::ShapeMismatch {
-                message: format!(
-                    "mm: inner dimensions mismatch: ({},{}) @ ({},{})",
-                    m,
-                    k,
-                    b.shape()[0],
-                    n
-                ),
-            });
-        }
-
         let a_data = a.data()?;
         let b_data = b.data()?;
 
@@ -1097,22 +1227,7 @@ impl<T: Float> GradFn<T> for MmBtBackward<T> {
 /// A: (M, K), B: (N, K) -> result: (M, N)
 /// Linear layer uses this: input @ weight^T where weight is (out, in).
 pub fn mm_bt_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let m = a.shape()[0];
-    let k = a.shape()[1];
-    let n = b.shape()[0];
-
-    if b.ndim() != 2 || b.shape()[1] != k {
-        return Err(FerrotorchError::ShapeMismatch {
-            message: format!(
-                "mm_bt: A is ({},{}) but B is {:?} (expected ({},{}))",
-                m,
-                k,
-                b.shape(),
-                n,
-                k
-            ),
-        });
-    }
+    let (m, k, n) = validate_mm_bt_operands("mm_bt", a, b)?;
 
     // GPU path: transpose B then matmul.
     if a.is_cuda() {
@@ -1336,9 +1451,7 @@ pub fn linear_fused<T: Float>(
     weight: &Tensor<T>,
     bias: Option<&Tensor<T>>,
 ) -> FerrotorchResult<Tensor<T>> {
-    let m = input.shape()[0];
-    let k = input.shape()[1];
-    let n = weight.shape()[0];
+    let (m, k, n) = validate_linear_fused_operands(input, weight, bias)?;
 
     // GPU path: transpose weight, matmul, broadcast_add bias.
     if input.is_cuda() {
@@ -1448,8 +1561,7 @@ pub fn linear_fused<T: Float>(
 /// Differentiable matrix-vector multiply. Attaches `MvBackward` when needed.
 pub fn mv_differentiable<T: Float>(a: &Tensor<T>, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let needs_grad = is_grad_enabled() && (a.requires_grad() || x.requires_grad());
-    let m = a.shape()[0];
-    let k = a.shape()[1];
+    let (m, k) = validate_mv_operands("mv", a, x)?;
 
     // GPU path (#817): route CUDA inputs through cuBLAS Sgemv/Dgemv. Pre-fix
     // the function unconditionally called `.data()?` and surfaced as
@@ -1532,6 +1644,7 @@ pub fn mv_differentiable<T: Float>(a: &Tensor<T>, x: &Tensor<T>) -> FerrotorchRe
 /// Differentiable dot product. Attaches `DotBackward` when needed.
 pub fn dot_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let needs_grad = is_grad_enabled() && (a.requires_grad() || b.requires_grad());
+    let n = validate_dot_operands("dot", a, b)?;
 
     // GPU path (#816): route CUDA inputs through cuBLAS Sdot/Ddot. Pre-fix
     // the function unconditionally called `.data()?` and surfaced as
@@ -1551,7 +1664,6 @@ pub fn dot_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchR
         } else {
             b.contiguous()?
         };
-        let n = a.shape().first().copied().unwrap_or(0);
         let handle = if is_f32::<T>() {
             backend.dot_f32(a.gpu_handle()?, b.gpu_handle()?, n)?
         } else if is_f64::<T>() {
@@ -1636,6 +1748,10 @@ pub fn matmul_differentiable<T: Float>(
         });
     }
 
+    if a.is_cuda() && a.ndim() == 2 && b.ndim() == 2 {
+        validate_mm_operands("matmul", a, b)?;
+    }
+
     // Materialize non-contiguous views before linalg ops.
     let a = if a.is_contiguous() {
         a.clone()
@@ -1681,11 +1797,9 @@ pub fn matmul_differentiable<T: Float>(
     }
 
     if a.is_cuda() && a.ndim() == 2 && b.ndim() == 2 {
+        let (m, k, n) = validate_mm_operands("matmul", &a, &b)?;
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let m = a.shape()[0];
-        let k = a.shape()[1];
-        let n = b.shape()[1];
         // Dtype-aware GPU dispatch (#800 + #23): bf16 now routes to
         // `matmul_bf16_bf16` (existing cuBLAS GemmEx path from #17).
         let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
@@ -1754,7 +1868,6 @@ pub fn matmul_differentiable<T: Float>(
             && b.ndim() >= 2
             && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>())
         {
-            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
             let a_nd = a.ndim();
             let b_nd = b.ndim();
             let m = a.shape()[a_nd - 2];
@@ -1802,6 +1915,7 @@ pub fn matmul_differentiable<T: Float>(
             let bf16_skip = is_bf16::<T>() && !(a_lead.is_empty() || a_lead == out_lead)
                 || is_bf16::<T>() && !(b_lead.is_empty() || b_lead == out_lead);
             if !bf16_skip {
+                let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                 let handle = if is_f32::<T>() {
                     backend.broadcast_bmm_f32(
                         a.gpu_handle()?,
