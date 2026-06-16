@@ -54,6 +54,97 @@ fn cuda_fill_scalar_f64<T: Float>(value: T, op: &str) -> FerrotorchResult<f64> {
     })
 }
 
+#[inline]
+fn is_higher_order_backward() -> bool {
+    crate::autograd::higher_order::is_create_graph_enabled()
+}
+
+fn scalar_tensor_on_device<T: Float>(
+    value: T,
+    device: crate::device::Device,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    if let crate::device::Device::Cuda(ordinal) = device {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "reduction_scalar_fill",
+            f32 => backend.fill_f32(1, cuda_fill_scalar_f32(value, op)?, ordinal),
+            f64 => backend.fill_f64(1, cuda_fill_scalar_f64(value, op)?, ordinal),
+            bf16 => backend.fill_bf16_bf16(1, cuda_fill_scalar_f32(value, op)?, ordinal),
+            f16 => backend.fill_f16(1, cuda_fill_scalar_f32(value, op)?, ordinal),
+        )?;
+        return Tensor::from_storage(TensorStorage::gpu(handle), vec![], false);
+    }
+
+    Tensor::from_storage(
+        TensorStorage::on_device(vec![value], device)?,
+        vec![],
+        false,
+    )
+}
+
+fn broadcast_scalar_grad_to_shape<T: Float>(
+    grad_output: &Tensor<T>,
+    input_shape: &[usize],
+) -> FerrotorchResult<Tensor<T>> {
+    if grad_output.numel() != 1 {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "reduction backward expected a single-element grad_output, got shape {:?}",
+                grad_output.shape()
+            ),
+        });
+    }
+    let strides = vec![0isize; input_shape.len()];
+    grad_output.as_strided(input_shape, &strides, Some(grad_output.storage_offset()))
+}
+
+fn broadcast_dim_grad_to_input<T: Float>(
+    grad_output: &Tensor<T>,
+    input_shape: &[usize],
+    dim: usize,
+    keepdim: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    if dim >= input_shape.len() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("reduction backward dim {dim} out of range for shape {input_shape:?}"),
+        });
+    }
+
+    let mut expected_shape = input_shape.to_vec();
+    expected_shape[dim] = 1;
+    if !keepdim {
+        expected_shape.remove(dim);
+    }
+    if grad_output.shape() != expected_shape.as_slice() {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "reduction backward grad_output shape {:?} does not match expected reduced shape {:?}",
+                grad_output.shape(),
+                expected_shape
+            ),
+        });
+    }
+
+    let mut strides = Vec::with_capacity(input_shape.len());
+    for axis in 0..input_shape.len() {
+        if axis == dim {
+            strides.push(0);
+        } else {
+            let grad_axis = if keepdim || axis < dim {
+                axis
+            } else {
+                axis - 1
+            };
+            strides.push(grad_output.strides()[grad_axis]);
+        }
+    }
+
+    grad_output.as_strided(input_shape, &strides, Some(grad_output.storage_offset()))
+}
+
 // ---------------------------------------------------------------------------
 // SumBackward
 // ---------------------------------------------------------------------------
@@ -68,6 +159,11 @@ pub struct SumBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for SumBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if is_higher_order_backward() {
+            let grad_input = broadcast_scalar_grad_to_shape(grad_output, self.input.shape())?;
+            return Ok(vec![Some(grad_input)]);
+        }
+
         // Extract the scalar value — works for both CPU and GPU by
         // transferring to CPU if needed (it's just one number).
         let go = if grad_output.is_cuda() {
@@ -192,6 +288,15 @@ pub struct MeanBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for MeanBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if is_higher_order_backward() {
+            let broadcast = broadcast_scalar_grad_to_shape(grad_output, self.input.shape())?;
+            let n = T::from(self.input.numel()).unwrap();
+            let inv_n = <T as num_traits::One>::one() / n;
+            let scale = scalar_tensor_on_device(inv_n, self.input.device(), "mean_backward_scale")?;
+            let grad_input = crate::grad_fns::arithmetic::mul(&broadcast, &scale)?;
+            return Ok(vec![Some(grad_input)]);
+        }
+
         let go = if grad_output.is_cuda() {
             let cpu = grad_output.cpu()?;
             cpu.data()?[0]
@@ -765,6 +870,12 @@ impl<T: Float> GradFn<T> for SumDimBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let input_shape = self.input.shape();
 
+        if is_higher_order_backward() {
+            let grad_input =
+                broadcast_dim_grad_to_input(grad_output, input_shape, self.dim, self.keepdim)?;
+            return Ok(vec![Some(grad_input)]);
+        }
+
         // GPU-native path: broadcast the upstream gradient along the reduced
         // dimension. This covers f32/f64/bf16/f16 without a CPU expansion.
         if self.input.is_cuda() {
@@ -1283,6 +1394,17 @@ impl<T: Float> GradFn<T> for MeanDimBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let input_shape = self.input.shape();
         let dim_size = input_shape[self.dim];
+
+        if is_higher_order_backward() {
+            let broadcast =
+                broadcast_dim_grad_to_input(grad_output, input_shape, self.dim, self.keepdim)?;
+            let n = T::from(dim_size).unwrap();
+            let inv_n = <T as num_traits::One>::one() / n;
+            let scale =
+                scalar_tensor_on_device(inv_n, self.input.device(), "mean_dim_backward_scale")?;
+            let grad_input = crate::grad_fns::arithmetic::mul(&broadcast, &scale)?;
+            return Ok(vec![Some(grad_input)]);
+        }
 
         // GPU path: native expand-and-scale via fill + broadcast_mul.
         // Conceptually grad_input[..., j, ...] = grad_output[..., 0, ...] / N

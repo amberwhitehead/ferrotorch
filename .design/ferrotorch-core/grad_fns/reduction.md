@@ -438,7 +438,12 @@ buffer directly. `pub fn sum` short-circuits through
 only inference), then dispatches `sum_inner` which branches on
 `is_cuda()` to call `backend.sum_{f32,f64,bf16_bf16,f16}` or
 `elementwise::sum` (CPU). The grad-fn attach happens only when
-`is_grad_enabled() && input.requires_grad()`.
+`is_grad_enabled() && input.requires_grad()`. In
+`grad(..., create_graph=true)`, `SumBackward` uses an autograd-aware
+zero-stride `as_strided` broadcast of `grad_output` instead of reading
+the scalar to host; with PyTorch's detached implicit seed this remains
+a detached constant gradient for `sum(x)`, while still preserving a
+real edge if a future explicit grad output itself tracks autograd.
 
 ### REQ-2 `mean` (`fn mean`, `struct MeanBackward`)
 
@@ -453,6 +458,10 @@ uses the `unsafe slice::from_raw_parts` pattern to coerce a one-
 element stack array into a byte slice for `backend.cpu_to_gpu` (well-
 documented in the function body — `f32`/`f64` have no padding so the
 4-byte / 8-byte coerce is sound, justified by the SAFETY comment).
+In higher-order mode, `MeanBackward` uses the same zero-stride
+`as_strided` broadcast followed by differentiable `arithmetic::mul`
+with a device-local scalar `1 / numel`, avoiding host reads and keeping
+nonconstant surrounding VJPs connected.
 
 ### REQ-3 `prod` (`fn prod`, `struct ProdBackward`)
 
@@ -491,16 +500,13 @@ surface it once the runner arm lands).
 
 `SumDimBackward<T>` saves `input`, `dim: usize`, `keepdim: bool`. The
 backward expands the grad along the reduced dim back to input shape.
-CUDA f32/f64 path uses `backend.repeat_along_dim_f32` /
-`repeat_along_dim_f64` with `(outer, repeat_count, inner)` strides
-computed from `input_shape[..dim].product()` / `input_shape[dim]` /
-`input_shape[dim+1..].product()`. Non-f32/f64 CUDA returns
-`NotImplementedOnCuda`. CPU path: if `keepdim=false`, the grad is
-first unsqueezed by inserting a size-1 dim at position `dim`; then a
-flat-index decompose loop maps each output coord to the grad coord
-(setting the reduced-dim coord to 0). `pub fn sum_dim` validates
-ndim != 0, normalizes negative dim (`(ndim + dim) as usize`), and
-errors on out-of-range dim. CUDA forward uses
+The regular CUDA path uses fill + `broadcast_mul` for f32/f64/bf16/f16
+so the expanded gradient stays resident; the CPU path does the
+decompose/recompose mapping. In higher-order mode, `SumDimBackward`
+constructs the expansion as an `as_strided` zero-stride view over
+`grad_output`, inserting the reduced dimension when `keepdim=false`.
+`pub fn sum_dim` validates ndim != 0, normalizes negative dim
+(`(ndim + dim) as usize`), and errors on out-of-range dim. CUDA forward uses
 `backend.sum_axis_{f32,f64,bf16_bf16,f16}` with the original
 `in_shape` and `norm_dim`; CPU forward uses an accum-into-keepdim-
 shape loop, then optionally squeezes via `out_shape.remove(norm_dim)`.
@@ -511,13 +517,14 @@ shape loop, then optionally squeezes via `out_shape.remove(norm_dim)`.
 and divides the grad by `dim_size = input_shape[dim]` while expanding.
 CUDA f32 path uses `backend.fill_f32(input_numel, 1/dim_size, 0)` +
 `backend.broadcast_mul_f32(ones, grad_keepdim, input_shape,
-grad_shape_keepdim, input_shape)`. CUDA f64 path uses
-`backend.repeat_along_dim_f64` + `backend.scale_f64(1/dim_size)`. CPU
-path: same decompose-recompose pattern as SumDim, with an extra `/n`
-divide on store. Forward CUDA path uses `sum_axis` + `scale`
-composition on f32/f64, fused `mean_axis_bf16_bf16` / `mean_axis_f16`
-on half-precision. CPU forward: accum into keepdim shape, then divide
-every element by `n`.
+grad_shape_keepdim, input_shape)`; f64/bf16/f16 use the same fill +
+broadcast multiply shape. CPU path: same decompose-recompose pattern
+as SumDim, with an extra `/n` divide on store. In higher-order mode,
+`MeanDimBackward` uses the differentiable `as_strided` expansion plus
+`arithmetic::mul` by a device-local scalar `1 / dim_size`. Forward CUDA
+path uses `sum_axis` + `scale` composition on f32/f64, fused
+`mean_axis_bf16_bf16` / `mean_axis_f16` on half-precision. CPU forward:
+accum into keepdim shape, then divide every element by `n`.
 
 ### REQ-7 backward VJP wiring
 

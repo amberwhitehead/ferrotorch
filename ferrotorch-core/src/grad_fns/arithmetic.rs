@@ -199,6 +199,84 @@ fn cuda_full_like_shape<T: Float>(
     Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), false)
 }
 
+#[inline]
+fn is_higher_order_backward() -> bool {
+    crate::autograd::higher_order::is_create_graph_enabled()
+}
+
+fn shape_to_isize(shape: &[usize], op: &'static str) -> FerrotorchResult<Vec<isize>> {
+    shape
+        .iter()
+        .map(|&dim| {
+            isize::try_from(dim).map_err(|_| FerrotorchError::InvalidArgument {
+                message: format!("{op}: dimension {dim} exceeds isize::MAX"),
+            })
+        })
+        .collect()
+}
+
+fn reduce_grad_to_shape_differentiable<T: Float>(
+    grad: &Tensor<T>,
+    target_shape: &[usize],
+) -> FerrotorchResult<Tensor<T>> {
+    if target_shape.is_empty() {
+        return crate::grad_fns::reduction::sum(grad);
+    }
+
+    let grad_numel = crate::shape::numel(grad.shape());
+    let target_numel = crate::shape::numel(target_shape);
+    if grad_numel == target_numel {
+        return crate::grad_fns::shape::reshape(
+            grad,
+            &shape_to_isize(target_shape, "reduce_grad_to_shape")?,
+        );
+    }
+
+    let target_ndim = target_shape.len();
+    let mut reduced = grad.clone();
+
+    while reduced.ndim() > target_ndim {
+        reduced = crate::grad_fns::reduction::sum_dim(&reduced, 0, false)?;
+    }
+
+    if reduced.ndim() < target_ndim {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "reduce_grad_to_shape: gradient has {} dim(s) but target has {target_ndim} dim(s) ({:?} -> {target_shape:?}). \
+                 Standard broadcasting backward requires grad_ndim >= target_ndim unless numel matches.",
+                reduced.ndim(),
+                grad.shape()
+            ),
+        });
+    }
+
+    for (axis, &target_dim) in target_shape.iter().enumerate() {
+        let current_dim = reduced.shape()[axis];
+        if current_dim == target_dim {
+            continue;
+        }
+        if target_dim == 1 && current_dim > 1 {
+            reduced = crate::grad_fns::reduction::sum_dim(&reduced, axis as i64, true)?;
+            continue;
+        }
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "reduce_grad_to_shape: cannot reduce gradient shape {:?} to target shape {target_shape:?}",
+                grad.shape()
+            ),
+        });
+    }
+
+    if reduced.shape() == target_shape {
+        Ok(reduced)
+    } else {
+        crate::grad_fns::shape::reshape(
+            &reduced,
+            &shape_to_isize(target_shape, "reduce_grad_to_shape")?,
+        )
+    }
+}
+
 /// Reduce a gradient tensor to a target shape by summing over broadcast
 /// dimensions.
 ///
@@ -224,6 +302,10 @@ pub(crate) fn reduce_grad_to_shape<T: Float>(
     // Fast path: shapes already match.
     if grad_shape == target_shape {
         return Ok(grad.clone());
+    }
+
+    if is_higher_order_backward() {
+        return reduce_grad_to_shape_differentiable(grad, target_shape);
     }
 
     // Scalar target: sum everything.
@@ -1137,7 +1219,7 @@ impl<T: Float> GradFn<T> for MulBackward<T> {
         // When grad_output requires_grad (i.e., create_graph=true), use
         // differentiable operations so the backward pass itself is recorded
         // in the computation graph for higher-order gradients.
-        if grad_output.requires_grad() || grad_output.grad_fn().is_some() {
+        if is_higher_order_backward() {
             // Higher-order: use differentiable ops so the backward pass
             // itself is recorded in the graph.
             let da = if self.a.requires_grad() {
@@ -1309,10 +1391,15 @@ struct DivBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for DivBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let higher_order = is_higher_order_backward();
         // Use op-level functions which handle broadcasting correctly.
         // da = grad / b
         let da = if self.a.requires_grad() {
-            let raw = no_grad(|| div(grad_output, &self.b))?;
+            let raw = if higher_order {
+                div(grad_output, &self.b)?
+            } else {
+                no_grad(|| div(grad_output, &self.b))?
+            };
             Some(reduce_grad_to_shape(&raw, self.a.shape())?)
         } else {
             None
@@ -1327,12 +1414,17 @@ impl<T: Float> GradFn<T> for DivBackward<T> {
         // subnormal and `inf` where torch is finite (CORE-180, crosslink
         // #1874).
         let db = if self.b.requires_grad() {
-            let raw = no_grad(|| {
+            let compute = || {
                 let neg_go = neg(grad_output)?;
                 let q = div(&self.a, &self.b)?;
                 let q_over_b = div(&q, &self.b)?;
                 mul(&neg_go, &q_over_b)
-            })?;
+            };
+            let raw = if higher_order {
+                compute()?
+            } else {
+                no_grad(compute)?
+            };
             Some(reduce_grad_to_shape(&raw, self.b.shape())?)
         } else {
             None
@@ -1582,7 +1674,7 @@ impl<T: Float> GradFn<T> for PowBackward<T> {
                         false,
                     )?)
                 }
-            } else if grad_output.requires_grad() || grad_output.grad_fn().is_some() {
+            } else if is_higher_order_backward() {
                 // When grad_output requires_grad (create_graph=true), use
                 // differentiable operations so the backward pass itself is
                 // tracked in the computation graph for higher-order gradients.

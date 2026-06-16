@@ -34,6 +34,11 @@ landed in the same commit closing umbrella #1338.
   `aten/src/ATen/native/Activation.cpp:514-517` (`return at::clamp_min(self, 0)`)
   and `torch.nn.functional.relu` at `torch/nn/functional.py:1718`. GPU path
   for f32/f64 via `backend.relu_f32` / `backend.relu_f64` PTX kernels.
+  Under `grad(..., create_graph=true)`, `ReluBackward` builds the mask as
+  usual but adds an input-connected zero term before multiplying by
+  `grad_output`; this matches PyTorch's behavior where the first
+  derivative can be differentiated again and the second derivative is zero
+  almost everywhere rather than disconnected.
 
 - REQ-2: `sigmoid(x) = 1 / (1 + exp(-x))` — forward + `SigmoidBackward`
   VJP `grad * s * (1 - s)` where `s = sigmoid(x)` (the output). Mirrors

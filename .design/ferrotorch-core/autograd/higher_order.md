@@ -30,13 +30,14 @@ helper API surface from `torch.autograd.functional`.
 - REQ-2: `outputs` must be scalar or single-element; otherwise return
   `BackwardNonScalar` error. The seed gradient is constructed inside
   `grad` (caller does not pass it).
-- REQ-3: `create_graph=true` mode — the seed gradient and all
-  intermediate accumulation tensors carry `requires_grad=true`, so
-  the gradient-computation graph itself is recorded for second-order
-  differentiation. Implemented by routing accumulation through
-  `differentiable_add` (which calls
-  `crate::grad_fns::arithmetic::add`) rather than raw Vec elementwise
-  add.
+- REQ-3: `create_graph=true` mode — backward formulas execute with
+  gradient tracking enabled so nonconstant VJPs build real higher-order
+  graph edges. The implicit seed stays detached, matching PyTorch:
+  constant gradients such as `d(x+x)/dx` remain non-differentiable,
+  while gradients such as `d(sum(x*x))/dx` carry history through the
+  saved input. Accumulation routes through `differentiable_add` (which
+  calls `crate::grad_fns::arithmetic::add`) rather than raw Vec
+  elementwise add.
 - REQ-4: Three-phase BFS + Kahn topo-sort backward — same algorithm
   as the engine in `graph.rs`, but with a per-call `grads` map and
   no leaf-accumulation. Recorded gradients are collected for the
@@ -87,10 +88,9 @@ helper API surface from `torch.autograd.functional`.
 ### REQ-1 / REQ-2 `grad` entry point
 
 `pub fn grad<T: Float>` at `higher_order.rs:56-240`. Validates
-scalar output at `grad in higher_order.rs` (`BackwardNonScalar` on failure). Builds
-the seed at `:76-91`: when `create_graph=true`, the seed has
-`requires_grad=true`; otherwise `false`. Same three-phase BFS as
-`graph.rs` (Phase 1 collect / Phase 2 topo-sort / Phase 3
+scalar output at `grad in higher_order.rs` (`BackwardNonScalar` on failure).
+Builds a detached implicit seed on the output device. Same three-phase
+BFS as `graph.rs` (Phase 1 collect / Phase 2 topo-sort / Phase 3
 backward).
 
 ### REQ-3 `create_graph=true` differentiable accumulation
@@ -106,11 +106,12 @@ branch at `:196-216` switches:
 - When `create_graph=false`: raw `Vec<T>` elementwise add at
   `:204-215` (cheaper, no graph nodes).
 
-The grad-tensor wrap at `:189-193` ensures
-that any grad_output returned by a non-differentiable backward
-(`Tensor::from_storage(... false)` produces non-graph tensors) gets
-`requires_grad_(true)` re-applied when `create_graph=true`, so
-downstream ops can record their own backward edges.
+`with_create_graph_backward` sets a thread-local create-graph context
+while each `GradFn::backward` formula executes. Backward formulas that
+mathematically depend on saved tensors select differentiable primitives
+under that context. The engine must never repair detached VJPs by
+calling `requires_grad_(true)`: that creates a leaf disconnected from
+the original forward inputs and is not PyTorch parity.
 
 ### REQ-4 three-phase backward
 
@@ -207,10 +208,11 @@ Key tests:
 - Jacobian / Hessian tests for elementwise and quadratic functions
   later in the test module.
 - CUDA regression tests in
-  `ferrotorch-gpu/tests/divergence_autograd_engine_utilities_cuda.rs`
-  cover `grad`, vector-output `jacobian`, scalar-output `jacobian`,
-  non-contiguous rank-2 `jacobian`, and `hessian` device/value parity
-  against live PyTorch 2.11.0+cu130 probes.
+  `ferrotorch-core/tests/audit_autograd_engine_utilities.rs` cover
+  constant create-graph gradients staying detached, real second
+  derivatives through `sum`, `mean`, dim reductions, broadcast
+  reductions, and ReLU, with CUDA-resident variants feature-gated under
+  `gpu`.
 
 All tests pass in the workspace gauntlet.
 

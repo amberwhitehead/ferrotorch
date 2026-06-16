@@ -7,8 +7,9 @@ use ferrotorch_core::autograd::gradcheck::gradcheck;
 use ferrotorch_core::autograd::graph::backward_parallel;
 use ferrotorch_core::autograd::higher_order::grad;
 use ferrotorch_core::autograd::hooks::HookHandle;
+use ferrotorch_core::grad_fns::activation::relu;
 use ferrotorch_core::grad_fns::arithmetic::{add, mul};
-use ferrotorch_core::grad_fns::reduction::sum;
+use ferrotorch_core::grad_fns::reduction::{mean, mean_dim, sum, sum_dim};
 use ferrotorch_core::tensor::GradFn;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Tensor, TensorStorage};
 
@@ -144,6 +145,275 @@ fn higher_order_grad_implicit_seed_preserves_singleton_output_shape() {
     let gx = grads[0].as_ref().expect("x grad");
     assert_eq!(gx.shape(), &[1]);
     assert_eq!(gx.data().expect("gx data"), &[4.0]);
+}
+
+#[test]
+fn create_graph_constant_add_gradient_is_not_fake_leaf() {
+    let x = leaf(&[2.0], &[1]);
+    let y = add(&x, &x).expect("add");
+    let s = sum(&y).expect("sum");
+
+    let grads = grad(&s, &[&x], true, true).expect("create_graph grad");
+    let gx = grads[0].as_ref().expect("x grad");
+
+    assert_eq!(gx.shape(), &[1]);
+    assert_eq!(gx.data().expect("gx data"), &[2.0]);
+    assert!(
+        !gx.requires_grad(),
+        "PyTorch leaves constant create_graph gradients detached; ferrotorch must not wrap them as fake leaves"
+    );
+    assert!(
+        gx.grad_fn().is_none(),
+        "constant gradients must not advertise disconnected higher-order history"
+    );
+}
+
+#[test]
+fn create_graph_sum_square_gradient_is_connected_to_input() {
+    let x = leaf(&[2.0, 3.0], &[2]);
+    let squared = mul(&x, &x).expect("mul");
+    let y = sum(&squared).expect("sum");
+
+    let grads = grad(&y, &[&x], true, true).expect("first grad");
+    let gx = grads[0].as_ref().expect("x grad");
+
+    assert_eq!(gx.shape(), &[2]);
+    assert_eq!(gx.data().expect("gx data"), &[4.0, 6.0]);
+    assert!(
+        gx.requires_grad(),
+        "sum(x * x) first derivative depends on x and must carry real history"
+    );
+    assert!(
+        gx.grad_fn().is_some(),
+        "connected first derivative must have an autograd node, not a fake leaf"
+    );
+
+    let gx_sum = sum(gx).expect("sum first grad");
+    let grads2 = grad(&gx_sum, &[&x], false, false).expect("second grad");
+    let g2 = grads2[0].as_ref().expect("second derivative");
+    assert_eq!(g2.shape(), &[2]);
+    assert_eq!(g2.data().expect("g2 data"), &[2.0, 2.0]);
+}
+
+#[test]
+fn create_graph_mean_square_gradient_is_connected_to_input() {
+    let x = leaf(&[2.0, 4.0], &[2]);
+    let squared = mul(&x, &x).expect("mul");
+    let y = mean(&squared).expect("mean");
+
+    let grads = grad(&y, &[&x], true, true).expect("first grad");
+    let gx = grads[0].as_ref().expect("x grad");
+
+    assert_eq!(gx.shape(), &[2]);
+    assert_eq!(gx.data().expect("gx data"), &[2.0, 4.0]);
+    assert!(
+        gx.requires_grad(),
+        "mean(x * x) first derivative depends on x and must carry real history"
+    );
+
+    let gx_sum = sum(gx).expect("sum first grad");
+    let grads2 = grad(&gx_sum, &[&x], false, false).expect("second grad");
+    let g2 = grads2[0].as_ref().expect("second derivative");
+    assert_eq!(g2.shape(), &[2]);
+    assert_eq!(g2.data().expect("g2 data"), &[1.0, 1.0]);
+}
+
+#[test]
+fn create_graph_broadcast_reduction_gradient_keeps_mixed_second_derivative() {
+    let x = leaf(&[2.0, 3.0], &[2, 1]);
+    let y = leaf(&[5.0, 7.0, 11.0, 13.0, 17.0, 19.0], &[2, 3]);
+    let prod = mul(&x, &y).expect("mul broadcast");
+    let loss = sum(&prod).expect("sum");
+
+    let grads = grad(&loss, &[&x], true, true).expect("first grad wrt x");
+    let gx = grads[0].as_ref().expect("x grad");
+
+    assert_eq!(gx.shape(), &[2, 1]);
+    assert_eq!(gx.data().expect("gx data"), &[23.0, 49.0]);
+    assert!(
+        gx.requires_grad(),
+        "broadcast-reduced gradient depends on the broadcast partner"
+    );
+
+    let gx_sum = sum(gx).expect("sum gx");
+    let mixed = grad(&gx_sum, &[&y], false, false).expect("mixed grad");
+    let gy = mixed[0].as_ref().expect("mixed derivative wrt y");
+    assert_eq!(gy.shape(), &[2, 3]);
+    assert_eq!(gy.data().expect("gy data"), &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+}
+
+#[test]
+fn create_graph_sum_dim_square_gradient_is_connected_to_input() {
+    let x = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+    let squared = mul(&x, &x).expect("mul");
+    let rows = sum_dim(&squared, 1, false).expect("sum_dim");
+    let loss = sum(&rows).expect("sum rows");
+
+    let grads = grad(&loss, &[&x], true, true).expect("first grad");
+    let gx = grads[0].as_ref().expect("x grad");
+    assert_eq!(gx.shape(), &[2, 3]);
+    assert_eq!(
+        gx.data().expect("gx data"),
+        &[2.0, 4.0, 6.0, 8.0, 10.0, 12.0]
+    );
+    assert!(gx.requires_grad());
+
+    let gx_sum = sum(gx).expect("sum first grad");
+    let grads2 = grad(&gx_sum, &[&x], false, false).expect("second grad");
+    let g2 = grads2[0].as_ref().expect("second derivative");
+    assert_eq!(g2.shape(), &[2, 3]);
+    assert_eq!(g2.data().expect("g2 data"), &[2.0, 2.0, 2.0, 2.0, 2.0, 2.0]);
+}
+
+#[test]
+fn create_graph_mean_dim_square_gradient_is_connected_to_input() {
+    let x = leaf(&[1.5, 3.0, 4.5, 6.0, 7.5, 9.0], &[2, 3]);
+    let squared = mul(&x, &x).expect("mul");
+    let rows = mean_dim(&squared, 1, false).expect("mean_dim");
+    let loss = sum(&rows).expect("sum rows");
+
+    let grads = grad(&loss, &[&x], true, true).expect("first grad");
+    let gx = grads[0].as_ref().expect("x grad");
+    assert_eq!(gx.shape(), &[2, 3]);
+    assert_eq!(gx.data().expect("gx data"), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    assert!(gx.requires_grad());
+
+    let gx_sum = sum(gx).expect("sum first grad");
+    let grads2 = grad(&gx_sum, &[&x], false, false).expect("second grad");
+    let g2 = grads2[0].as_ref().expect("second derivative");
+    assert_eq!(g2.shape(), &[2, 3]);
+    for &v in g2.data().expect("g2 data") {
+        assert!((v - 2.0 / 3.0).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn create_graph_relu_second_derivative_is_zero_not_disconnected() {
+    let x = leaf(&[-1.0, 0.0, 2.0], &[3]);
+    let y = sum(&relu(&x).expect("relu")).expect("sum relu");
+
+    let grads = grad(&y, &[&x], true, true).expect("first grad");
+    let gx = grads[0].as_ref().expect("x grad");
+    assert_eq!(gx.shape(), &[3]);
+    assert_eq!(gx.data().expect("gx data"), &[0.0, 0.0, 1.0]);
+    assert!(
+        gx.requires_grad(),
+        "PyTorch keeps ReLU first derivatives connected so gradgrad returns zeros"
+    );
+
+    let gx_sum = sum(gx).expect("sum relu grad");
+    let grads2 = grad(&gx_sum, &[&x], false, false).expect("second grad");
+    let g2 = grads2[0].as_ref().expect("relu second derivative");
+    assert_eq!(g2.shape(), &[3]);
+    assert_eq!(g2.data().expect("g2 data"), &[0.0, 0.0, 0.0]);
+}
+
+#[cfg(feature = "gpu")]
+mod cuda_create_graph {
+    use super::*;
+    use ferrotorch_core::Device;
+    use std::sync::Once;
+
+    static GPU_INIT: Once = Once::new();
+
+    fn ensure_cuda_backend() {
+        GPU_INIT.call_once(|| {
+            ferrotorch_gpu::init_cuda_backend()
+                .expect("CUDA backend must initialize for create_graph regressions");
+        });
+    }
+
+    fn cuda_leaf(data: &[f32], shape: &[usize]) -> Tensor<f32> {
+        ensure_cuda_backend();
+        Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false)
+            .expect("cpu tensor")
+            .to(Device::Cuda(0))
+            .expect("upload to cuda:0")
+            .requires_grad_(true)
+    }
+
+    fn read_cuda(t: &Tensor<f32>, label: &str) -> Vec<f32> {
+        assert_eq!(
+            t.device(),
+            Device::Cuda(0),
+            "{label}: expected CUDA-resident tensor, got {:?}",
+            t.device()
+        );
+        t.cpu()
+            .expect("D2H readback")
+            .data()
+            .expect("cpu data")
+            .to_vec()
+    }
+
+    #[test]
+    fn cuda_create_graph_constant_add_gradient_is_not_fake_leaf() {
+        let x = cuda_leaf(&[2.0], &[1]);
+        let y = add(&x, &x).expect("add");
+        let s = sum(&y).expect("sum");
+
+        let grads = grad(&s, &[&x], true, true).expect("create_graph grad");
+        let gx = grads[0].as_ref().expect("x grad");
+
+        assert_eq!(gx.shape(), &[1]);
+        assert_eq!(read_cuda(gx, "constant add grad"), &[2.0]);
+        assert!(!gx.requires_grad());
+        assert!(gx.grad_fn().is_none());
+    }
+
+    #[test]
+    fn cuda_create_graph_sum_square_second_derivative_stays_resident() {
+        let x = cuda_leaf(&[2.0, 3.0], &[2]);
+        let squared = mul(&x, &x).expect("mul");
+        let y = sum(&squared).expect("sum");
+
+        let grads = grad(&y, &[&x], true, true).expect("first grad");
+        let gx = grads[0].as_ref().expect("x grad");
+        assert_eq!(read_cuda(gx, "sum square first grad"), &[4.0, 6.0]);
+        assert!(gx.requires_grad());
+
+        let gx_sum = sum(gx).expect("sum first grad");
+        let grads2 = grad(&gx_sum, &[&x], false, false).expect("second grad");
+        let g2 = grads2[0].as_ref().expect("second derivative");
+        assert_eq!(read_cuda(g2, "sum square second grad"), &[2.0, 2.0]);
+    }
+
+    #[test]
+    fn cuda_create_graph_broadcast_mixed_second_derivative_stays_resident() {
+        let x = cuda_leaf(&[2.0, 3.0], &[2, 1]);
+        let y = cuda_leaf(&[5.0, 7.0, 11.0, 13.0, 17.0, 19.0], &[2, 3]);
+        let prod = mul(&x, &y).expect("mul broadcast");
+        let loss = sum(&prod).expect("sum");
+
+        let grads = grad(&loss, &[&x], true, true).expect("first grad wrt x");
+        let gx = grads[0].as_ref().expect("x grad");
+        assert_eq!(read_cuda(gx, "broadcast first grad"), &[23.0, 49.0]);
+        assert!(gx.requires_grad());
+
+        let gx_sum = sum(gx).expect("sum gx");
+        let mixed = grad(&gx_sum, &[&y], false, false).expect("mixed grad");
+        let gy = mixed[0].as_ref().expect("mixed derivative wrt y");
+        assert_eq!(
+            read_cuda(gy, "broadcast mixed derivative"),
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn cuda_create_graph_relu_second_derivative_is_zero_and_resident() {
+        let x = cuda_leaf(&[-1.0, 0.0, 2.0], &[3]);
+        let y = sum(&relu(&x).expect("relu")).expect("sum relu");
+
+        let grads = grad(&y, &[&x], true, true).expect("first grad");
+        let gx = grads[0].as_ref().expect("x grad");
+        assert_eq!(read_cuda(gx, "relu first grad"), &[0.0, 0.0, 1.0]);
+        assert!(gx.requires_grad());
+
+        let gx_sum = sum(gx).expect("sum relu grad");
+        let grads2 = grad(&gx_sum, &[&x], false, false).expect("second grad");
+        let g2 = grads2[0].as_ref().expect("relu second derivative");
+        assert_eq!(read_cuda(g2, "relu second derivative"), &[0.0, 0.0, 0.0]);
+    }
 }
 
 #[test]

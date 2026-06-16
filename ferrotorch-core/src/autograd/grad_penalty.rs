@@ -426,16 +426,22 @@ mod tests {
     }
 
     #[test]
-    fn test_gradient_penalty_has_grad_fn() {
-        // The returned penalty should be differentiable (has grad_fn).
+    fn test_gradient_penalty_parameterless_linear_discriminator_is_detached() {
+        // PyTorch parity: D(x)=sum(x) has a constant input gradient and no
+        // captured learnable parameter, so create_graph=True does not invent
+        // a fake outer-loop graph.
         let real = leaf_vec(&[1.0, 2.0], false);
         let fake = leaf_vec(&[0.5, 1.5], false);
 
         let penalty = gradient_penalty(sum, &real, &fake, 10.0).unwrap();
 
         assert!(
-            penalty.grad_fn().is_some(),
-            "gradient_penalty result should have grad_fn for outer optimization"
+            penalty.grad_fn().is_none(),
+            "constant gradient penalty must not advertise disconnected history"
+        );
+        assert!(
+            !penalty.requires_grad(),
+            "constant gradient penalty must remain detached like PyTorch"
         );
     }
 
@@ -705,8 +711,18 @@ mod tests {
         // We verify the penalty has a grad_fn, allowing backward through it.
         let real = leaf_vec(&[1.0, 2.0], false);
         let fake = leaf_vec(&[0.5, 1.5], false);
+        let w = leaf_vec(&[2.0, 3.0], true);
 
-        let penalty = gradient_penalty(sum, &real, &fake, 10.0).unwrap();
+        let penalty = gradient_penalty(
+            |x| {
+                let wx = mul(x, &w)?;
+                sum(&wx)
+            },
+            &real,
+            &fake,
+            10.0,
+        )
+        .unwrap();
 
         // The penalty tensor should be part of the computation graph.
         assert!(
@@ -717,5 +733,15 @@ mod tests {
             penalty.requires_grad(),
             "penalty must require grad for outer-loop optimization"
         );
+
+        let grads = crate::autograd::higher_order::grad(&penalty, &[&w], false, false)
+            .expect("outer grad wrt discriminator parameter");
+        let gw = grads[0].as_ref().expect("w grad");
+        let norm = 13.0_f32.sqrt();
+        let scale = 20.0 * (norm - 1.0) / norm;
+        let expected = [scale * 2.0, scale * 3.0];
+        for (&actual, &expected) in gw.data().expect("w grad data").iter().zip(expected.iter()) {
+            assert_approx(actual, expected, 1e-4, "gradient penalty d/dw");
+        }
     }
 }

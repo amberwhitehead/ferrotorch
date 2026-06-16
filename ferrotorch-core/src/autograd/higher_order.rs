@@ -23,6 +23,7 @@
 //! | REQ-9 | SHIPPED | `impl<T: Float> Tensor<T> pub fn `grad_wrt`` at `higher_order.rs:534-541`. Existing pub API — boundary-API grandfathering. |
 //!
 
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 
 use crate::device::Device;
@@ -30,6 +31,40 @@ use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
 use crate::tensor::{Tensor, TensorId};
+
+thread_local! {
+    static CREATE_GRAPH_BACKWARD_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Returns true while `grad(..., create_graph=true)` is executing backward
+/// formulas. Backward implementations use this to select differentiable VJP
+/// formulas without making the implicit gradient seed itself require grad.
+pub(crate) fn is_create_graph_enabled() -> bool {
+    CREATE_GRAPH_BACKWARD_DEPTH.with(|depth| depth.get() > 0)
+}
+
+fn with_create_graph_backward<F, R>(create_graph: bool, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    if !create_graph {
+        return f();
+    }
+
+    struct CreateGraphGuard;
+    impl Drop for CreateGraphGuard {
+        fn drop(&mut self) {
+            CREATE_GRAPH_BACKWARD_DEPTH.with(|depth| {
+                let current = depth.get();
+                depth.set(current.saturating_sub(1));
+            });
+        }
+    }
+
+    CREATE_GRAPH_BACKWARD_DEPTH.with(|depth| depth.set(depth.get() + 1));
+    let _guard = CreateGraphGuard;
+    crate::autograd::no_grad::enable_grad(f)
+}
 
 /// Compute gradients of `outputs` with respect to `inputs`.
 ///
@@ -45,9 +80,8 @@ use crate::tensor::{Tensor, TensorId};
 ///   can be differentiated again. If `false`, intermediate gradient data
 ///   may be dropped.
 /// - `create_graph`: If `true`, the gradient computation itself is recorded
-///   in the autograd graph, enabling higher-order gradients. The returned
-///   gradient tensors will have `requires_grad=true` and carry `grad_fn`
-///   nodes.
+///   in the autograd graph where the mathematical gradient depends on tracked
+///   inputs. Constant gradients remain detached, matching PyTorch.
 ///
 /// # Errors
 ///
@@ -96,7 +130,7 @@ pub fn grad<T: Float>(
             outputs.device(),
         )?,
         outputs.shape().to_vec(),
-        create_graph,
+        false,
     )?;
 
     // Phase 1: Collect all nodes and compute in-degree via BFS.
@@ -185,37 +219,27 @@ pub fn grad<T: Float>(
         }
 
         if let Some(grad_fn) = node.grad_fn() {
-            let input_grads = grad_fn.backward(&grad_output)?;
+            let input_grads =
+                with_create_graph_backward(create_graph, || grad_fn.backward(&grad_output))?;
             let fn_inputs = grad_fn.inputs();
 
             for (input, maybe_grad) in fn_inputs.iter().zip(input_grads) {
                 if let Some(ig) = maybe_grad
                     && input.requires_grad()
                 {
-                    // When create_graph=true, ensure the gradient tensor
-                    // participates in the computation graph. The GradFn::backward()
-                    // implementations that use raw Vec operations (non-differentiable)
-                    // produce tensors with requires_grad=false. We wrap them so
-                    // they can be differentiated again.
-                    let grad_tensor = if create_graph && !ig.requires_grad() {
-                        ig.requires_grad_(true)
-                    } else {
-                        ig
-                    };
-
                     // Accumulate into the grads map for the next iteration.
                     if let Some(existing) = grads.remove(&input.id()) {
                         if create_graph {
                             // Use differentiable addition so the accumulation
                             // is itself part of the computation graph.
-                            let summed = differentiable_add(&existing, &grad_tensor, create_graph)?;
+                            let summed = differentiable_add(&existing, &ig, create_graph)?;
                             grads.insert(input.id(), summed);
                         } else {
-                            let combined = add_non_differentiable_grad(&existing, &grad_tensor)?;
+                            let combined = add_non_differentiable_grad(&existing, &ig)?;
                             grads.insert(input.id(), combined);
                         }
                     } else {
-                        grads.insert(input.id(), grad_tensor);
+                        grads.insert(input.id(), ig);
                     }
                 }
             }

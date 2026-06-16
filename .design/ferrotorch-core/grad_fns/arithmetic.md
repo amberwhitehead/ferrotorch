@@ -28,6 +28,10 @@ saved-for-backward operands with a `pub fn <op>` forward that branches on
 delegated to `crate::shape::broadcast_shapes` on forward and to
 `reduce_grad_to_shape` on backward, which itself runs the GPU
 `sum_axis_{f32,f64}` reductions on-device when the gradient lives on CUDA.
+During `grad(..., create_graph=true)`, `reduce_grad_to_shape` routes
+broadcast-gradient reductions through differentiable `sum_dim` /
+`reshape` primitives instead of raw buffers, so mixed second
+derivatives through broadcasted arithmetic remain connected.
 The file additionally ships the PyTorch-parity `add_scaled` (alpha kwarg),
 `add_out` / `add_scaled_out` (out= kwarg) entry points and the
 `AddScaledBackward` autograd node — these were introduced by the
@@ -64,15 +68,17 @@ alpha=1, out=None)` signature gap.
 - REQ-3: `mul(a, b)` — forward `c = a * b` with broadcasting + autograd
   (`MulBackward` VJP returns `(grad*b, grad*a)` reduced). Mirrors `mul_stub`
   in BinaryOps.cpp:441 `TORCH_IMPL_FUNC(mul_out)`. `MulBackward::backward`
-  additionally implements the higher-order grad path (when `grad_output`
-  itself has `grad_fn` / `requires_grad`, it routes through the
-  differentiable `mul` ops so the backward pass is itself recorded in the
-  graph).
+  additionally implements the higher-order grad path under the
+  `create_graph` backward context, routing through differentiable `mul`
+  and differentiable broadcast reduction so the backward pass is itself
+  recorded when the gradient depends on saved operands.
 
 - REQ-4: `div(a, b)` — forward `c = a / b` with broadcasting + autograd
-  (`DivBackward` VJP `(grad/b, -grad*a/(b*b))` reduced). Mirrors
+  (`DivBackward` VJP `(grad/b, -grad*((a/b)/b))` reduced). Mirrors
   `div_true_stub` at BinaryOps.cpp:447 `TORCH_IMPL_FUNC(div_out)`. Division by
-  zero produces `±inf` / `NaN` per IEEE-754, matching torch.
+  zero produces `±inf` / `NaN` per IEEE-754, matching torch. Under
+  `create_graph`, `DivBackward` uses differentiable `div` / `neg` / `mul`
+  staging instead of the no-grad raw path.
 
 - REQ-5: `neg(a)` — forward `c = -a` with autograd (`NegBackward` VJP
   `-grad`). Mirrors `neg_stub` at UnaryOps.cpp:344 via

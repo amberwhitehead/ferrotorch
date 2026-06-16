@@ -63,6 +63,80 @@ fn is_f16<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<half::f16>()
 }
 
+#[inline]
+fn is_higher_order_backward() -> bool {
+    crate::autograd::higher_order::is_create_graph_enabled()
+}
+
+fn cuda_scalar_to_f32<T: Float>(value: T, op: &str) -> FerrotorchResult<f32> {
+    <T as num_traits::ToPrimitive>::to_f32(&value).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: format!("{op}: scalar is not representable as f32"),
+    })
+}
+
+fn cuda_scalar_to_f64<T: Float>(value: T, op: &str) -> FerrotorchResult<f64> {
+    <T as num_traits::ToPrimitive>::to_f64(&value).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: format!("{op}: scalar is not representable as f64"),
+    })
+}
+
+fn full_like_detached<T: Float>(
+    input: &Tensor<T>,
+    value: T,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    if let crate::device::Device::Cuda(ordinal) = input.device() {
+        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "activation_cuda_fill",
+            f32 => backend.fill_f32(input.numel(), cuda_scalar_to_f32(value, op)?, ordinal),
+            f64 => backend.fill_f64(input.numel(), cuda_scalar_to_f64(value, op)?, ordinal),
+            bf16 => backend.fill_bf16_bf16(input.numel(), cuda_scalar_to_f32(value, op)?, ordinal),
+            f16 => backend.fill_f16(input.numel(), cuda_scalar_to_f32(value, op)?, ordinal),
+        )?;
+        return Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false);
+    }
+
+    Tensor::from_storage(
+        TensorStorage::on_device(vec![value; input.numel()], input.device())?,
+        input.shape().to_vec(),
+        false,
+    )
+}
+
+fn relu_mask<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let one = <T as num_traits::One>::one();
+    let zero = <T as num_traits::Zero>::zero();
+
+    if input.is_cuda() {
+        if !(is_f32::<T>() || is_f64::<T>()) {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "relu backward",
+            });
+        }
+        let ones = full_like_detached(input, one, "relu_backward_mask_ones")?;
+        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let result_h = if is_f32::<T>() {
+            backend.relu_backward_f32(ones.gpu_handle()?, input.gpu_handle()?)?
+        } else {
+            backend.relu_backward_f64(ones.gpu_handle()?, input.gpu_handle()?)?
+        };
+        return Tensor::from_storage(TensorStorage::gpu(result_h), input.shape().to_vec(), false);
+    }
+
+    let input_data = input.data()?;
+    let mask: Vec<T> = input_data
+        .iter()
+        .map(|&x| if x > zero { one } else { zero })
+        .collect();
+    Tensor::from_storage(
+        TensorStorage::on_device(mask, input.device())?,
+        input.shape().to_vec(),
+        false,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // ReLU
 // ---------------------------------------------------------------------------
@@ -83,6 +157,25 @@ impl<T: Float> ReluBackward<T> {
 
 impl<T: Float> GradFn<T> for ReluBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if is_higher_order_backward() {
+            if grad_output.device() != self.input.device() {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected: self.input.device(),
+                    got: grad_output.device(),
+                });
+            }
+            let mask = relu_mask(&self.input)?;
+            let zero = full_like_detached(
+                &self.input,
+                <T as num_traits::Zero>::zero(),
+                "relu_backward_connected_zero",
+            )?;
+            let zero_edge = crate::grad_fns::arithmetic::mul(&self.input, &zero)?;
+            let connected_mask = crate::grad_fns::arithmetic::add(&mask, &zero_edge)?;
+            let grad_input = crate::grad_fns::arithmetic::mul(grad_output, &connected_mask)?;
+            return Ok(vec![Some(grad_input)]);
+        }
+
         // GPU-native path for f32/f64
         if grad_output.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
