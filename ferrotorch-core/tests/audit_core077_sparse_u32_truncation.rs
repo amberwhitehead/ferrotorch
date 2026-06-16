@@ -15,18 +15,23 @@
 //!
 //! Contract semantics (torch upstream): sparse indices are int64
 //! (`aten/src/ATen/native/sparse/SparseTensor.cpp` — COO/CSR indices are
-//! `kLong`); a backend lane that only supports 32-bit indices must
-//! reject, never wrap. ferrotorch post-fix: every sparse GPU dispatch
-//! site converts via a checked helper and returns a structured
-//! `InvalidArgument` naming the offending quantity; CPU lanes keep
-//! accepting 64-bit-class indices.
+//! `kLong`; compressed sparse indices are Int or Long in
+//! `SparseCsrTensor.cpp`); a backend lane that only supports signed
+//! 32-bit cuSPARSE indices must reject, never wrap. ferrotorch post-fix:
+//! every sparse GPU dispatch site converts via a checked helper and
+//! returns a structured `InvalidArgument` naming the offending quantity;
+//! CPU lanes keep accepting 64-bit-class indices.
 
 #![allow(clippy::unreadable_literal)]
 
 use ferrotorch_core::{CooTensor, CsrTensor};
 
-/// 2^33 + 1: wraps to 2 under `as u32`.
+/// 2^33 + 1: wraps to 1 under `as u32`.
 const BIG: usize = (1usize << 33) + 1;
+/// First value outside the signed 32-bit range used by
+/// `CUSPARSE_INDEX_32I`.
+#[cfg(feature = "gpu")]
+const BEYOND_I32: usize = (i32::MAX as usize) + 1;
 
 /// CPU lanes must keep accepting >u32 indices (the metadata is `usize`;
 /// only the 32-bit GPU descriptor lane is constrained).
@@ -58,6 +63,18 @@ mod gpu {
         });
     }
 
+    fn assert_sparse_index_limit_error(r: Result<(), FerrotorchError>) {
+        match r {
+            Err(FerrotorchError::InvalidArgument { ref message }) => {
+                assert!(
+                    message.contains("32-bit") && message.contains("i32::MAX"),
+                    "error must name the signed 32-bit index limit, got: {message}"
+                );
+            }
+            other => panic!("expected signed 32-bit sparse index rejection, got {other:?}"),
+        }
+    }
+
     /// `CsrTensor::from_coo_on(Cuda)` with a >u32 column index must
     /// return a structured error, not wrapped metadata. Pre-fix this
     /// returned `Ok` with the column index silently truncated.
@@ -67,18 +84,32 @@ mod gpu {
         let coo = CooTensor::<f32>::new(vec![0], vec![BIG], vec![7.0], 1, BIG + 1)
             .expect("valid COO metadata");
         let r = CsrTensor::from_coo_on(&coo, Device::Cuda(0));
-        match r {
-            Err(FerrotorchError::InvalidArgument { ref message }) => {
-                assert!(
-                    message.contains("u32"),
-                    "error must name the 32-bit index limit, got: {message}"
-                );
-            }
-            other => panic!(
-                "from_coo_on(Cuda) with col index {BIG} must reject (u32 wrap), got {:?}",
-                other.map(|c| (c.row_ptrs().to_vec(), c.col_indices().to_vec()))
-            ),
-        }
+        assert_sparse_index_limit_error(r.map(|_| ()));
+    }
+
+    /// The backend uses `CUSPARSE_INDEX_32I`, so values that fit `u32`
+    /// but exceed `i32::MAX` are still out of range. Pre-fix, this
+    /// interval passed the checked helper and could reach cuSPARSE as a
+    /// negative signed index / dimension.
+    #[test]
+    fn core077_gpu_from_coo_on_rejects_signed_32bit_boundary_col() {
+        ensure_cuda_backend();
+        let coo = CooTensor::<f32>::new(vec![0], vec![BEYOND_I32], vec![7.0], 1, BEYOND_I32 + 1)
+            .expect("valid CPU COO metadata above i32");
+        let r = CsrTensor::from_coo_on(&coo, Device::Cuda(0));
+        assert_sparse_index_limit_error(r.map(|_| ()));
+    }
+
+    /// Same signed-32-bit boundary for the compressed row dimension:
+    /// reject before the backend can allocate a row-pointer buffer or
+    /// pass an out-of-range row count to `cusparseXcoo2csr`.
+    #[test]
+    fn core077_gpu_from_coo_on_rejects_signed_32bit_boundary_row() {
+        ensure_cuda_backend();
+        let coo = CooTensor::<f32>::new(vec![BEYOND_I32], vec![0], vec![7.0], BEYOND_I32 + 1, 1)
+            .expect("valid CPU COO metadata above i32");
+        let r = CsrTensor::from_coo_on(&coo, Device::Cuda(0));
+        assert_sparse_index_limit_error(r.map(|_| ()));
     }
 
     /// `CscTensor::from_csr_on(Cuda)` with a >u32 column index in the
@@ -89,15 +120,7 @@ mod gpu {
         let csr = CsrTensor::<f32>::new(vec![0, 1], vec![BIG], vec![7.0], 1, BIG + 1)
             .expect("valid CSR metadata");
         let r = CscTensor::from_csr_on(&csr, Device::Cuda(0));
-        match r {
-            Err(FerrotorchError::InvalidArgument { ref message }) => {
-                assert!(message.contains("u32"), "got: {message}");
-            }
-            other => panic!(
-                "from_csr_on(Cuda) with col index {BIG} must reject, got {:?}",
-                other.map(|c| c.col_ptrs().len())
-            ),
-        }
+        assert_sparse_index_limit_error(r.map(|_| ()));
     }
 
     /// `CscTensor::to_csr_on(Cuda)` with a >u32 row index must reject
@@ -108,15 +131,7 @@ mod gpu {
         let csc = CscTensor::<f32>::new(vec![0, 1], vec![BIG], vec![7.0], BIG + 1, 1)
             .expect("valid CSC metadata");
         let r = csc.to_csr_on(Device::Cuda(0));
-        match r {
-            Err(FerrotorchError::InvalidArgument { ref message }) => {
-                assert!(message.contains("u32"), "got: {message}");
-            }
-            other => panic!(
-                "to_csr_on(Cuda) with row index {BIG} must reject, got {:?}",
-                other.map(|c| c.col_indices().to_vec())
-            ),
-        }
+        assert_sparse_index_limit_error(r.map(|_| ()));
     }
 
     /// In-range indices keep flowing through the checked conversions:

@@ -168,24 +168,35 @@ fn validate_compressed_layout(
 }
 
 /// Checked `usize` → `u32` conversion for cuSPARSE descriptor arrays
-/// (CORE-077 / #1771). The registered GPU sparse backend uses a 32-bit
-/// index ABI; torch stores sparse indices as int64
-/// (`aten/src/ATen/native/sparse/SparseTensor.cpp` — COO/CSR indices are
-/// `kLong`), so a valid public index above `u32::MAX` must be rejected
-/// with a structured error — never wrapped to an unrelated coordinate.
+/// (CORE-077 / #1771). The registered GPU sparse backend stores index
+/// buffers in `u32` slices but passes them to cuSPARSE as
+/// `CUSPARSE_INDEX_32I`, i.e. signed 32-bit integers. Torch stores COO
+/// indices as int64 and compressed sparse indices as Int or Long
+/// (`aten/src/ATen/SparseTensorImpl.cpp`,
+/// `aten/src/ATen/native/sparse/SparseCsrTensor.cpp`), so any public
+/// ferrotorch index that cannot be represented by this backend ABI must
+/// be rejected with a structured error — never wrapped to an unrelated
+/// coordinate.
 fn to_u32_checked(v: usize, what: &str) -> FerrotorchResult<u32> {
-    u32::try_from(v).map_err(|_| FerrotorchError::InvalidArgument {
+    let signed = i32::try_from(v).map_err(|_| FerrotorchError::InvalidArgument {
         message: format!(
-            "{what} = {v} exceeds the u32 limit of the GPU sparse backend's \
-             32-bit index ABI (CORE-077/#1771); use the CPU path for \
-             larger layouts"
+            "{what} = {v} exceeds the i32::MAX limit of the GPU sparse \
+             backend's signed 32-bit cuSPARSE index ABI \
+             (CUSPARSE_INDEX_32I; CORE-077/#1771); use the CPU path for \
+             larger layouts or add a 64-bit sparse-index backend"
         ),
-    })
+    })?;
+    Ok(signed as u32)
 }
 
 /// Vector form of [`to_u32_checked`].
 fn to_u32_vec_checked(vals: &[usize], what: &str) -> FerrotorchResult<Vec<u32>> {
     vals.iter().map(|&v| to_u32_checked(v, what)).collect()
+}
+
+fn check_sparse_gpu_dim(v: usize, what: &str) -> FerrotorchResult<()> {
+    let _ = to_u32_checked(v, what)?;
+    Ok(())
 }
 
 /// A sparse tensor in COO (Coordinate List) format.
@@ -313,6 +324,8 @@ impl<T: Float> SparseTensor<T> {
             let dense_handle = dense_contig.gpu_handle()?;
             let m = dense_contig.shape()[0];
             let n = dense_contig.shape()[1];
+            check_sparse_gpu_dim(m, "SparseTensor::from_dense: row count")?;
+            check_sparse_gpu_dim(n, "SparseTensor::from_dense: column count")?;
 
             let csr_opt: Option<(Vec<Vec<usize>>, Vec<T>)> =
                 if TypeId::of::<T>() == TypeId::of::<f32>() {
@@ -416,6 +429,8 @@ impl<T: Float> SparseTensor<T> {
             {
                 let m = self.shape[0];
                 let n = self.shape[1];
+                check_sparse_gpu_dim(m, "SparseTensor::to_dense_on: row count")?;
+                check_sparse_gpu_dim(n, "SparseTensor::to_dense_on: column count")?;
 
                 // Coalesce + CSR build (same as spmm).
                 let coalesced = self.coalesce();
@@ -648,6 +663,9 @@ impl<T: Float> SparseTensor<T> {
             // tensor by `.contiguous()` (which has its own GPU fast path).
             let dense_contig = dense.contiguous()?;
             let dense_handle = dense_contig.gpu_handle()?;
+            check_sparse_gpu_dim(m, "SparseTensor::spmm: row count")?;
+            check_sparse_gpu_dim(k_sparse, "SparseTensor::spmm: inner dimension")?;
+            check_sparse_gpu_dim(n, "SparseTensor::spmm: output column count")?;
 
             // Build CSR row offsets, column indices, and values from the
             // COO storage. Sort by (row, col) to coalesce duplicates and
@@ -1141,6 +1159,9 @@ impl<T: Float> CooTensor<T> {
                 || TypeId::of::<T>() == TypeId::of::<f64>())
             && let Some(backend) = crate::gpu_dispatch::gpu_backend()
         {
+            check_sparse_gpu_dim(self.nrows, "CooTensor::to_dense_on: row count")?;
+            check_sparse_gpu_dim(self.ncols, "CooTensor::to_dense_on: column count")?;
+
             // Coalesce + row-sort on host (cuSPARSE contract).
             let coalesced = self.coalesce();
             let row_u32 =
@@ -1456,6 +1477,9 @@ impl<T: Float> CsrTensor<T> {
                 || TypeId::of::<T>() == TypeId::of::<f64>())
             && let Some(backend) = crate::gpu_dispatch::gpu_backend()
         {
+            check_sparse_gpu_dim(self.nrows, "CsrTensor::to_dense_on: row count")?;
+            check_sparse_gpu_dim(self.ncols, "CsrTensor::to_dense_on: column count")?;
+
             let crow = to_u32_vec_checked(&self.row_ptrs, "CsrTensor::to_dense_on: row pointer")?;
             let col =
                 to_u32_vec_checked(&self.col_indices, "CsrTensor::to_dense_on: column index")?;
@@ -1531,6 +1555,9 @@ impl<T: Float> CsrTensor<T> {
                 || TypeId::of::<T>() == TypeId::of::<f64>())
             && let Some(backend) = crate::gpu_dispatch::gpu_backend()
         {
+            check_sparse_gpu_dim(coo.nrows, "CsrTensor::from_coo_on: row count")?;
+            check_sparse_gpu_dim(coo.ncols, "CsrTensor::from_coo_on: column count")?;
+
             // Coalesce on host so values are summed and rows arrive
             // sorted (cuSPARSE contract).
             let coalesced = coo.coalesce();
@@ -2230,6 +2257,9 @@ impl<T: Float> CscTensor<T> {
                 || TypeId::of::<T>() == TypeId::of::<f64>())
             && let Some(backend) = crate::gpu_dispatch::gpu_backend()
         {
+            check_sparse_gpu_dim(self.nrows, "CscTensor::to_dense_on: row count")?;
+            check_sparse_gpu_dim(self.ncols, "CscTensor::to_dense_on: column count")?;
+
             // Coalesce host-side before building the cuSPARSE descriptor:
             // cusparseSparseToDense overwrites duplicate coordinates (the
             // CORE-073 / #1767 probe observed first-duplicate-wins), but
@@ -2318,6 +2348,9 @@ impl<T: Float> CscTensor<T> {
                 || TypeId::of::<T>() == TypeId::of::<f64>())
             && let Some(backend) = crate::gpu_dispatch::gpu_backend()
         {
+            check_sparse_gpu_dim(csr.nrows, "CscTensor::from_csr_on: row count")?;
+            check_sparse_gpu_dim(csr.ncols, "CscTensor::from_csr_on: column count")?;
+
             let crow = to_u32_vec_checked(&csr.row_ptrs, "CscTensor::from_csr_on: row pointer")?;
             let col = to_u32_vec_checked(&csr.col_indices, "CscTensor::from_csr_on: column index")?;
 
@@ -2364,6 +2397,9 @@ impl<T: Float> CscTensor<T> {
                 || TypeId::of::<T>() == TypeId::of::<f64>())
             && let Some(backend) = crate::gpu_dispatch::gpu_backend()
         {
+            check_sparse_gpu_dim(self.nrows, "CscTensor::to_csr_on: row count")?;
+            check_sparse_gpu_dim(self.ncols, "CscTensor::to_csr_on: column count")?;
+
             // Dual: feed CSC-as-CSR-of-transpose to cusparseCsr2cscEx2,
             // which yields CSR-as-CSC-of-transpose = CSR of original.
             // Concretely: pass `col_ptrs` as `crow_indices`, `row_indices`
