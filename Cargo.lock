@@ -2506,6 +2506,7 @@ dependencies = [
  "ferray-window",
  "ferrotorch-gpu",
  "half",
+ "libloading 0.8.9",
  "num-traits",
  "once_cell",
  "quote",

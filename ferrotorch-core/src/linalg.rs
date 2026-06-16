@@ -50,8 +50,51 @@
 use crate::device::Device;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
+use crate::int_tensor::IntTensor;
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
+use libloading::Library;
+use std::ffi::OsString;
+use std::os::raw::{c_char, c_int};
+use std::sync::OnceLock;
+
+/// Return type for `torch.linalg.lstsq`-style calls.
+pub type LstsqResult<T> = (Tensor<T>, Tensor<T>, IntTensor<i64>, Tensor<T>);
+
+/// LAPACK/cuSOLVER driver selection for [`lstsq_with_driver`].
+///
+/// Mirrors `torch.linalg.lstsq(driver=...)`: CPU accepts all four LAPACK
+/// drivers, CUDA accepts only [`LstsqDriver::Gels`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LstsqDriver {
+    /// QR/LQ solve; assumes full-rank input. Does not compute rank or singular values.
+    Gels,
+    /// Complete orthogonal factorization with pivoting. PyTorch's CPU default.
+    Gelsy,
+    /// Divide-and-conquer SVD solve. Computes rank and singular values.
+    Gelsd,
+    /// Classic SVD solve. Computes rank and singular values.
+    Gelss,
+}
+
+impl LstsqDriver {
+    fn default_for_device(device: Device) -> Self {
+        if device.is_cuda() {
+            Self::Gels
+        } else {
+            Self::Gelsy
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Gels => "gels",
+            Self::Gelsy => "gelsy",
+            Self::Gelsd => "gelsd",
+            Self::Gelss => "gelss",
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Helper: convert Tensor<T> data to ferray Array<T, Ix2> or IxDyn
@@ -131,6 +174,193 @@ fn is_f32<T: Float>() -> bool {
 /// True when `T` is f64 (8-byte float).
 fn is_f64<T: Float>() -> bool {
     std::mem::size_of::<T>() == 8
+}
+
+const LAPACK_ROW_MAJOR: c_int = 101;
+
+type LapackeSgels = unsafe extern "C" fn(
+    c_int,
+    c_char,
+    c_int,
+    c_int,
+    c_int,
+    *mut f32,
+    c_int,
+    *mut f32,
+    c_int,
+) -> c_int;
+type LapackeDgels = unsafe extern "C" fn(
+    c_int,
+    c_char,
+    c_int,
+    c_int,
+    c_int,
+    *mut f64,
+    c_int,
+    *mut f64,
+    c_int,
+) -> c_int;
+type LapackeSgelsy = unsafe extern "C" fn(
+    c_int,
+    c_int,
+    c_int,
+    c_int,
+    *mut f32,
+    c_int,
+    *mut f32,
+    c_int,
+    *mut c_int,
+    f32,
+    *mut c_int,
+) -> c_int;
+type LapackeDgelsy = unsafe extern "C" fn(
+    c_int,
+    c_int,
+    c_int,
+    c_int,
+    *mut f64,
+    c_int,
+    *mut f64,
+    c_int,
+    *mut c_int,
+    f64,
+    *mut c_int,
+) -> c_int;
+type LapackeSgelsd = unsafe extern "C" fn(
+    c_int,
+    c_int,
+    c_int,
+    c_int,
+    *mut f32,
+    c_int,
+    *mut f32,
+    c_int,
+    *mut f32,
+    f32,
+    *mut c_int,
+) -> c_int;
+type LapackeDgelsd = unsafe extern "C" fn(
+    c_int,
+    c_int,
+    c_int,
+    c_int,
+    *mut f64,
+    c_int,
+    *mut f64,
+    c_int,
+    *mut f64,
+    f64,
+    *mut c_int,
+) -> c_int;
+type LapackeSgelss = LapackeSgelsd;
+type LapackeDgelss = LapackeDgelsd;
+
+struct LapackeBackend {
+    _lib: Library,
+    sgels: LapackeSgels,
+    dgels: LapackeDgels,
+    sgelsy: LapackeSgelsy,
+    dgelsy: LapackeDgelsy,
+    sgelsd: LapackeSgelsd,
+    dgelsd: LapackeDgelsd,
+    sgelss: LapackeSgelss,
+    dgelss: LapackeDgelss,
+}
+
+impl LapackeBackend {
+    fn load() -> Result<Self, String> {
+        let mut candidates: Vec<OsString> = Vec::new();
+        if let Some(path) = std::env::var_os("FERROTORCH_LAPACKE_LIB") {
+            candidates.push(path);
+        }
+        candidates.extend(
+            [
+                "libopenblas.so.0",
+                "libopenblas.so",
+                "libflexiblas.so.3",
+                "libflexiblas.so",
+                "liblapacke.so.3",
+                "liblapacke.so",
+                "libopenblas.dylib",
+                "/opt/homebrew/opt/openblas/lib/libopenblas.dylib",
+                "/usr/local/opt/openblas/lib/libopenblas.dylib",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        );
+
+        let mut errors = Vec::new();
+        for candidate in candidates {
+            let lib = match unsafe { Library::new(&candidate) } {
+                Ok(lib) => lib,
+                Err(err) => {
+                    errors.push(format!("{}: {err}", candidate.to_string_lossy()));
+                    continue;
+                }
+            };
+            match unsafe { Self::from_library(lib) } {
+                Ok(backend) => return Ok(backend),
+                Err(err) => errors.push(format!(
+                    "{}: missing required LAPACKE lstsq symbol: {err}",
+                    candidate.to_string_lossy()
+                )),
+            }
+        }
+
+        Err(format!(
+            "could not load LAPACKE lstsq symbols from OpenBLAS/FlexiBLAS/LAPACKE \
+             candidates. Set FERROTORCH_LAPACKE_LIB to a library exporting \
+             LAPACKE_sgels/LAPACKE_dgels/LAPACKE_sgelsy/LAPACKE_dgelsy/\
+             LAPACKE_sgelsd/LAPACKE_dgelsd/LAPACKE_sgelss/LAPACKE_dgelss. \
+             Attempts: {}",
+            errors.join("; ")
+        ))
+    }
+
+    unsafe fn from_library(lib: Library) -> Result<Self, String> {
+        let sgels = unsafe { Self::symbol::<LapackeSgels>(&lib, b"LAPACKE_sgels\0")? };
+        let dgels = unsafe { Self::symbol::<LapackeDgels>(&lib, b"LAPACKE_dgels\0")? };
+        let sgelsy = unsafe { Self::symbol::<LapackeSgelsy>(&lib, b"LAPACKE_sgelsy\0")? };
+        let dgelsy = unsafe { Self::symbol::<LapackeDgelsy>(&lib, b"LAPACKE_dgelsy\0")? };
+        let sgelsd = unsafe { Self::symbol::<LapackeSgelsd>(&lib, b"LAPACKE_sgelsd\0")? };
+        let dgelsd = unsafe { Self::symbol::<LapackeDgelsd>(&lib, b"LAPACKE_dgelsd\0")? };
+        let sgelss = unsafe { Self::symbol::<LapackeSgelss>(&lib, b"LAPACKE_sgelss\0")? };
+        let dgelss = unsafe { Self::symbol::<LapackeDgelss>(&lib, b"LAPACKE_dgelss\0")? };
+        Ok(Self {
+            _lib: lib,
+            sgels,
+            dgels,
+            sgelsy,
+            dgelsy,
+            sgelsd,
+            dgelsd,
+            sgelss,
+            dgelss,
+        })
+    }
+
+    unsafe fn symbol<T: Copy>(lib: &Library, name: &'static [u8]) -> Result<T, String> {
+        unsafe { lib.get::<T>(name) }
+            .map(|sym| *sym)
+            .map_err(|err| format!("{} ({err})", String::from_utf8_lossy(name)))
+    }
+}
+
+static LAPACKE_BACKEND: OnceLock<Result<LapackeBackend, String>> = OnceLock::new();
+
+fn lapacke_backend() -> FerrotorchResult<&'static LapackeBackend> {
+    match LAPACKE_BACKEND.get_or_init(LapackeBackend::load) {
+        Ok(backend) => Ok(backend),
+        Err(message) => Err(FerrotorchError::InvalidArgument {
+            message: format!("lstsq: LAPACKE backend unavailable: {message}"),
+        }),
+    }
+}
+
+fn checked_lapack_i32(value: usize, name: &str) -> FerrotorchResult<c_int> {
+    c_int::try_from(value).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!("lstsq: {name}={value} exceeds LP64 LAPACK i32 limit"),
+    })
 }
 
 /// Guard: linalg decompositions are CPU-only. Return an explicit error for
@@ -1614,18 +1844,22 @@ pub fn svdvals<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     }
 }
 
-/// Least-squares solution `X` minimizing `||A X - B||_F`. Just the
-/// solution — no residuals / rank / singular values. (#630)
-///
-/// On CUDA f32/f64, dispatches to cuSOLVER `cusolverDnSSgels` /
-/// `cusolverDnDDgels` (iterative refinement, no host bounce). CPU and
-/// other dtypes route through `ferray-linalg::lstsq` and discard the
-/// extra outputs. `A` is `[M, N]`; `B` is `[M, K]` (or `[M]` treated as
-/// `[M, 1]`); output is `[N, K]` (or `[N]` for the 1-D case).
-pub fn lstsq_solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+#[derive(Debug, Clone, Copy)]
+struct LstsqDims {
+    m: usize,
+    n: usize,
+    b_is_1d: bool,
+    nrhs: usize,
+}
+
+fn validate_lstsq_inputs<T: Float>(
+    op: &str,
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+) -> FerrotorchResult<LstsqDims> {
     if a.ndim() != 2 {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!("lstsq_solve: `a` must be 2-D, got {:?}", a.shape()),
+            message: format!("{op}: `a` must be 2-D, got {:?}", a.shape()),
         });
     }
     if a.device() != b.device() {
@@ -1642,12 +1876,528 @@ pub fn lstsq_solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<T
         _ => {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
-                    "lstsq_solve: `b` must be 1-D [{m}] or 2-D [{m}, K], got {:?}",
+                    "{op}: `b` must be 1-D [{m}] or 2-D [{m}, K], got {:?}",
                     b.shape()
                 ),
             });
         }
     };
+    Ok(LstsqDims {
+        m,
+        n,
+        b_is_1d,
+        nrhs,
+    })
+}
+
+fn empty_rank(device: Device) -> FerrotorchResult<IntTensor<i64>> {
+    let rank = IntTensor::<i64>::from_vec(Vec::new(), vec![0])?;
+    if device == Device::Cpu {
+        Ok(rank)
+    } else {
+        rank.to(device)
+    }
+}
+
+fn scalar_rank(rank: usize, device: Device) -> FerrotorchResult<IntTensor<i64>> {
+    let rank_i64 = i64::try_from(rank).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!("lstsq: rank {rank} does not fit in i64"),
+    })?;
+    let rank = IntTensor::<i64>::from_vec(vec![rank_i64], vec![])?;
+    if device == Device::Cpu {
+        Ok(rank)
+    } else {
+        rank.to(device)
+    }
+}
+
+fn empty_float_tensor<T: Float>(device: Device) -> FerrotorchResult<Tensor<T>> {
+    Tensor::from_storage(
+        TensorStorage::on_device(Vec::new(), device)?,
+        vec![0],
+        false,
+    )
+}
+
+fn default_lstsq_rcond<T: Float>(dims: LstsqDims) -> FerrotorchResult<f64> {
+    let eps = if is_f32::<T>() {
+        f32::EPSILON as f64
+    } else if is_f64::<T>() {
+        f64::EPSILON
+    } else {
+        return Err(FerrotorchError::InvalidArgument {
+            message: "linalg op requires f32 or f64".into(),
+        });
+    };
+    Ok(eps * dims.m.max(dims.n) as f64)
+}
+
+fn check_lapack_lstsq_info(info: c_int, driver: LstsqDriver) -> FerrotorchResult<()> {
+    if info == 0 {
+        return Ok(());
+    }
+    if info < 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "lstsq({}): LAPACKE reported illegal argument {}",
+                driver.name(),
+                -info
+            ),
+        });
+    }
+    let message = match driver {
+        LstsqDriver::Gels => format!(
+            "lstsq(gels): the least-squares solution could not be computed \
+             because the input matrix does not have full rank (error code: {info})"
+        ),
+        LstsqDriver::Gelsd | LstsqDriver::Gelss => format!(
+            "lstsq({}): SVD-based LAPACK driver failed to converge (error code: {info})",
+            driver.name()
+        ),
+        LstsqDriver::Gelsy => format!(
+            "lstsq(gelsy): complete orthogonal-factorization driver failed \
+             (error code: {info})"
+        ),
+    };
+    Err(FerrotorchError::InvalidArgument { message })
+}
+
+fn pack_b_f64<T: Float>(b: &Tensor<T>, dims: LstsqDims) -> FerrotorchResult<Vec<f64>> {
+    let b_data = b.data_vec()?;
+    let rows = dims.m.max(dims.n);
+    let mut out = vec![0.0; rows.saturating_mul(dims.nrhs)];
+    if dims.b_is_1d {
+        for i in 0..dims.m {
+            out[i * dims.nrhs] = b_data[i].to_f64().unwrap();
+        }
+    } else {
+        for i in 0..dims.m {
+            for j in 0..dims.nrhs {
+                out[i * dims.nrhs + j] = b_data[i * dims.nrhs + j].to_f64().unwrap();
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn pack_b_f32<T: Float>(b: &Tensor<T>, dims: LstsqDims) -> FerrotorchResult<Vec<f32>> {
+    let b_data = b.data_vec()?;
+    let rows = dims.m.max(dims.n);
+    let mut out = vec![0.0; rows.saturating_mul(dims.nrhs)];
+    if dims.b_is_1d {
+        for i in 0..dims.m {
+            out[i * dims.nrhs] = b_data[i].to_f64().unwrap() as f32;
+        }
+    } else {
+        for i in 0..dims.m {
+            for j in 0..dims.nrhs {
+                out[i * dims.nrhs + j] = b_data[i * dims.nrhs + j].to_f64().unwrap() as f32;
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn solution_shape(dims: LstsqDims) -> Vec<usize> {
+    if dims.b_is_1d {
+        vec![dims.n]
+    } else {
+        vec![dims.n, dims.nrhs]
+    }
+}
+
+fn residuals_f64<T: Float>(
+    b_work: &[f64],
+    dims: LstsqDims,
+    driver: LstsqDriver,
+    rank: Option<usize>,
+) -> FerrotorchResult<Tensor<T>> {
+    let compute = dims.m > dims.n
+        && driver != LstsqDriver::Gelsy
+        && (driver == LstsqDriver::Gels || rank == Some(dims.n));
+    let residuals = if compute {
+        let mut out = vec![0.0; dims.nrhs];
+        for col in 0..dims.nrhs {
+            for row in dims.n..dims.m {
+                let r = b_work[row * dims.nrhs + col];
+                out[col] += r * r;
+            }
+        }
+        out
+    } else {
+        Vec::new()
+    };
+    Tensor::from_storage(
+        TensorStorage::cpu(slice_to_vec::<T>(&residuals)),
+        vec![residuals.len()],
+        false,
+    )
+}
+
+fn residuals_f32<T: Float>(
+    b_work: &[f32],
+    dims: LstsqDims,
+    driver: LstsqDriver,
+    rank: Option<usize>,
+) -> FerrotorchResult<Tensor<T>> {
+    let compute = dims.m > dims.n
+        && driver != LstsqDriver::Gelsy
+        && (driver == LstsqDriver::Gels || rank == Some(dims.n));
+    let residuals = if compute {
+        let mut out = vec![0.0; dims.nrhs];
+        for col in 0..dims.nrhs {
+            for row in dims.n..dims.m {
+                let r = b_work[row * dims.nrhs + col];
+                out[col] += r * r;
+            }
+        }
+        out
+    } else {
+        Vec::new()
+    };
+    Tensor::from_storage(
+        TensorStorage::cpu(slice_f32_to_vec::<T>(&residuals)),
+        vec![residuals.len()],
+        false,
+    )
+}
+
+fn solution_from_b_f64<T: Float>(b_work: &[f64], dims: LstsqDims) -> FerrotorchResult<Tensor<T>> {
+    let mut out = vec![0.0; dims.n.saturating_mul(dims.nrhs)];
+    for row in 0..dims.n {
+        for col in 0..dims.nrhs {
+            out[row * dims.nrhs + col] = b_work[row * dims.nrhs + col];
+        }
+    }
+    Tensor::from_storage(
+        TensorStorage::cpu(slice_to_vec::<T>(&out)),
+        solution_shape(dims),
+        false,
+    )
+}
+
+fn solution_from_b_f32<T: Float>(b_work: &[f32], dims: LstsqDims) -> FerrotorchResult<Tensor<T>> {
+    let mut out = vec![0.0; dims.n.saturating_mul(dims.nrhs)];
+    for row in 0..dims.n {
+        for col in 0..dims.nrhs {
+            out[row * dims.nrhs + col] = b_work[row * dims.nrhs + col];
+        }
+    }
+    Tensor::from_storage(
+        TensorStorage::cpu(slice_f32_to_vec::<T>(&out)),
+        solution_shape(dims),
+        false,
+    )
+}
+
+fn lstsq_degenerate_f64<T: Float>(
+    b: &Tensor<T>,
+    dims: LstsqDims,
+    driver: LstsqDriver,
+) -> FerrotorchResult<LstsqResult<T>> {
+    let sol = Tensor::from_storage(
+        TensorStorage::cpu(vec![
+            <T as ferray_core::Element>::zero();
+            dims.n.saturating_mul(dims.nrhs)
+        ]),
+        solution_shape(dims),
+        false,
+    )?;
+    let b_work = pack_b_f64(b, dims)?;
+    let residuals = residuals_f64(&b_work, dims, driver, Some(0))?;
+    let rank = if driver == LstsqDriver::Gels {
+        empty_rank(Device::Cpu)?
+    } else {
+        scalar_rank(0, Device::Cpu)?
+    };
+    let sv_len = if matches!(driver, LstsqDriver::Gelsd | LstsqDriver::Gelss) {
+        dims.m.min(dims.n)
+    } else {
+        0
+    };
+    let sv = Tensor::from_storage(
+        TensorStorage::cpu(vec![<T as ferray_core::Element>::zero(); sv_len]),
+        vec![sv_len],
+        false,
+    )?;
+    Ok((sol, residuals, rank, sv))
+}
+
+fn lstsq_degenerate_f32<T: Float>(
+    b: &Tensor<T>,
+    dims: LstsqDims,
+    driver: LstsqDriver,
+) -> FerrotorchResult<LstsqResult<T>> {
+    let sol = Tensor::from_storage(
+        TensorStorage::cpu(vec![
+            <T as ferray_core::Element>::zero();
+            dims.n.saturating_mul(dims.nrhs)
+        ]),
+        solution_shape(dims),
+        false,
+    )?;
+    let b_work = pack_b_f32(b, dims)?;
+    let residuals = residuals_f32(&b_work, dims, driver, Some(0))?;
+    let rank = if driver == LstsqDriver::Gels {
+        empty_rank(Device::Cpu)?
+    } else {
+        scalar_rank(0, Device::Cpu)?
+    };
+    let sv_len = if matches!(driver, LstsqDriver::Gelsd | LstsqDriver::Gelss) {
+        dims.m.min(dims.n)
+    } else {
+        0
+    };
+    let sv = Tensor::from_storage(
+        TensorStorage::cpu(vec![<T as ferray_core::Element>::zero(); sv_len]),
+        vec![sv_len],
+        false,
+    )?;
+    Ok((sol, residuals, rank, sv))
+}
+
+fn cpu_lapack_lstsq_f64<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    dims: LstsqDims,
+    rcond: Option<f64>,
+    driver: LstsqDriver,
+) -> FerrotorchResult<LstsqResult<T>> {
+    if dims.m == 0 || dims.n == 0 {
+        return lstsq_degenerate_f64(b, dims, driver);
+    }
+    let backend = lapacke_backend()?;
+    let mut a_work: Vec<f64> = a.data_vec()?.iter().map(|v| v.to_f64().unwrap()).collect();
+    let mut b_work = pack_b_f64(b, dims)?;
+    let m = checked_lapack_i32(dims.m, "m")?;
+    let n = checked_lapack_i32(dims.n, "n")?;
+    let nrhs = checked_lapack_i32(dims.nrhs, "nrhs")?;
+    let lda = checked_lapack_i32(dims.n.max(1), "lda")?;
+    let ldb = checked_lapack_i32(dims.nrhs.max(1), "ldb")?;
+    let rcond = rcond.unwrap_or(default_lstsq_rcond::<T>(dims)?);
+    let trans = b'N' as c_char;
+
+    let mut rank_i32 = 0;
+    let mut singular_values = Vec::<f64>::new();
+    let info = unsafe {
+        match driver {
+            LstsqDriver::Gels => (backend.dgels)(
+                LAPACK_ROW_MAJOR,
+                trans,
+                m,
+                n,
+                nrhs,
+                a_work.as_mut_ptr(),
+                lda,
+                b_work.as_mut_ptr(),
+                ldb,
+            ),
+            LstsqDriver::Gelsy => {
+                let mut jpvt = vec![0 as c_int; dims.n];
+                (backend.dgelsy)(
+                    LAPACK_ROW_MAJOR,
+                    m,
+                    n,
+                    nrhs,
+                    a_work.as_mut_ptr(),
+                    lda,
+                    b_work.as_mut_ptr(),
+                    ldb,
+                    jpvt.as_mut_ptr(),
+                    rcond,
+                    std::ptr::addr_of_mut!(rank_i32),
+                )
+            }
+            LstsqDriver::Gelsd => {
+                singular_values.resize(dims.m.min(dims.n), 0.0);
+                (backend.dgelsd)(
+                    LAPACK_ROW_MAJOR,
+                    m,
+                    n,
+                    nrhs,
+                    a_work.as_mut_ptr(),
+                    lda,
+                    b_work.as_mut_ptr(),
+                    ldb,
+                    singular_values.as_mut_ptr(),
+                    rcond,
+                    std::ptr::addr_of_mut!(rank_i32),
+                )
+            }
+            LstsqDriver::Gelss => {
+                singular_values.resize(dims.m.min(dims.n), 0.0);
+                (backend.dgelss)(
+                    LAPACK_ROW_MAJOR,
+                    m,
+                    n,
+                    nrhs,
+                    a_work.as_mut_ptr(),
+                    lda,
+                    b_work.as_mut_ptr(),
+                    ldb,
+                    singular_values.as_mut_ptr(),
+                    rcond,
+                    std::ptr::addr_of_mut!(rank_i32),
+                )
+            }
+        }
+    };
+    check_lapack_lstsq_info(info, driver)?;
+
+    let rank = if driver == LstsqDriver::Gels {
+        None
+    } else {
+        Some(
+            usize::try_from(rank_i32).map_err(|_| FerrotorchError::InvalidArgument {
+                message: format!(
+                    "lstsq({}): LAPACK returned negative rank {rank_i32}",
+                    driver.name()
+                ),
+            })?,
+        )
+    };
+    let sol = solution_from_b_f64(&b_work, dims)?;
+    let residuals = residuals_f64(&b_work, dims, driver, rank)?;
+    let rank_tensor = match rank {
+        Some(rank) => scalar_rank(rank, Device::Cpu)?,
+        None => empty_rank(Device::Cpu)?,
+    };
+    let sv = Tensor::from_storage(
+        TensorStorage::cpu(slice_to_vec::<T>(&singular_values)),
+        vec![singular_values.len()],
+        false,
+    )?;
+    Ok((sol, residuals, rank_tensor, sv))
+}
+
+fn cpu_lapack_lstsq_f32<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    dims: LstsqDims,
+    rcond: Option<f64>,
+    driver: LstsqDriver,
+) -> FerrotorchResult<LstsqResult<T>> {
+    if dims.m == 0 || dims.n == 0 {
+        return lstsq_degenerate_f32(b, dims, driver);
+    }
+    let backend = lapacke_backend()?;
+    let mut a_work: Vec<f32> = a
+        .data_vec()?
+        .iter()
+        .map(|v| v.to_f64().unwrap() as f32)
+        .collect();
+    let mut b_work = pack_b_f32(b, dims)?;
+    let m = checked_lapack_i32(dims.m, "m")?;
+    let n = checked_lapack_i32(dims.n, "n")?;
+    let nrhs = checked_lapack_i32(dims.nrhs, "nrhs")?;
+    let lda = checked_lapack_i32(dims.n.max(1), "lda")?;
+    let ldb = checked_lapack_i32(dims.nrhs.max(1), "ldb")?;
+    let rcond = rcond.unwrap_or(default_lstsq_rcond::<T>(dims)?) as f32;
+    let trans = b'N' as c_char;
+
+    let mut rank_i32 = 0;
+    let mut singular_values = Vec::<f32>::new();
+    let info = unsafe {
+        match driver {
+            LstsqDriver::Gels => (backend.sgels)(
+                LAPACK_ROW_MAJOR,
+                trans,
+                m,
+                n,
+                nrhs,
+                a_work.as_mut_ptr(),
+                lda,
+                b_work.as_mut_ptr(),
+                ldb,
+            ),
+            LstsqDriver::Gelsy => {
+                let mut jpvt = vec![0 as c_int; dims.n];
+                (backend.sgelsy)(
+                    LAPACK_ROW_MAJOR,
+                    m,
+                    n,
+                    nrhs,
+                    a_work.as_mut_ptr(),
+                    lda,
+                    b_work.as_mut_ptr(),
+                    ldb,
+                    jpvt.as_mut_ptr(),
+                    rcond,
+                    std::ptr::addr_of_mut!(rank_i32),
+                )
+            }
+            LstsqDriver::Gelsd => {
+                singular_values.resize(dims.m.min(dims.n), 0.0);
+                (backend.sgelsd)(
+                    LAPACK_ROW_MAJOR,
+                    m,
+                    n,
+                    nrhs,
+                    a_work.as_mut_ptr(),
+                    lda,
+                    b_work.as_mut_ptr(),
+                    ldb,
+                    singular_values.as_mut_ptr(),
+                    rcond,
+                    std::ptr::addr_of_mut!(rank_i32),
+                )
+            }
+            LstsqDriver::Gelss => {
+                singular_values.resize(dims.m.min(dims.n), 0.0);
+                (backend.sgelss)(
+                    LAPACK_ROW_MAJOR,
+                    m,
+                    n,
+                    nrhs,
+                    a_work.as_mut_ptr(),
+                    lda,
+                    b_work.as_mut_ptr(),
+                    ldb,
+                    singular_values.as_mut_ptr(),
+                    rcond,
+                    std::ptr::addr_of_mut!(rank_i32),
+                )
+            }
+        }
+    };
+    check_lapack_lstsq_info(info, driver)?;
+
+    let rank = if driver == LstsqDriver::Gels {
+        None
+    } else {
+        Some(
+            usize::try_from(rank_i32).map_err(|_| FerrotorchError::InvalidArgument {
+                message: format!(
+                    "lstsq({}): LAPACK returned negative rank {rank_i32}",
+                    driver.name()
+                ),
+            })?,
+        )
+    };
+    let sol = solution_from_b_f32(&b_work, dims)?;
+    let residuals = residuals_f32(&b_work, dims, driver, rank)?;
+    let rank_tensor = match rank {
+        Some(rank) => scalar_rank(rank, Device::Cpu)?,
+        None => empty_rank(Device::Cpu)?,
+    };
+    let sv = Tensor::from_storage(
+        TensorStorage::cpu(slice_f32_to_vec::<T>(&singular_values)),
+        vec![singular_values.len()],
+        false,
+    )?;
+    Ok((sol, residuals, rank_tensor, sv))
+}
+
+/// Least-squares solution `X` minimizing `||A X - B||_F`. Just the
+/// solution — no residuals / rank / singular values. (#630)
+///
+/// On CUDA f32/f64, dispatches to cuSOLVER `cusolverDnSSgels` /
+/// `cusolverDnDDgels` (iterative refinement, no host bounce). CPU and
+/// other dtypes route through `ferray-linalg::lstsq` and discard the
+/// extra outputs. `A` is `[M, N]`; `B` is `[M, K]` (or `[M]` treated as
+/// `[M, 1]`); output is `[N, K]` (or `[N]` for the 1-D case).
+pub fn lstsq_solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let dims = validate_lstsq_inputs("lstsq_solve", a, b)?;
 
     if crate::autograd::no_grad::is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
         return crate::grad_fns::linalg::lstsq_solve_differentiable(a, b);
@@ -1657,11 +2407,11 @@ pub fn lstsq_solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<T
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let x_h = if is_f32::<T>() {
-            backend.lstsq_f32(a.gpu_handle()?, b.gpu_handle()?, m, n, nrhs)?
+            backend.lstsq_f32(a.gpu_handle()?, b.gpu_handle()?, dims.m, dims.n, dims.nrhs)?
         } else {
-            backend.lstsq_f64(a.gpu_handle()?, b.gpu_handle()?, m, n, nrhs)?
+            backend.lstsq_f64(a.gpu_handle()?, b.gpu_handle()?, dims.m, dims.n, dims.nrhs)?
         };
-        let out_shape = if b_is_1d { vec![n] } else { vec![n, nrhs] };
+        let out_shape = solution_shape(dims);
         return Tensor::from_storage(TensorStorage::gpu(x_h), out_shape, false);
     }
     if a.is_cuda() {
@@ -1673,81 +2423,71 @@ pub fn lstsq_solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<T
     Ok(sol)
 }
 
-/// Least-squares solution to `A x ≈ b`.
+/// Least-squares solution to `A x ≈ b` using PyTorch's default driver for the device.
 ///
 /// Returns `(solution, residuals, rank, singular_values)`. `rcond`
 /// controls the singular-value cutoff for rank determination; if `None`,
 /// uses a sensible default (`max(m, n) * eps`).
 ///
-/// Mirrors `torch.linalg.lstsq` for the crate's current 2-D, real-valued
-/// surface. CUDA f32/f64 uses the same `gels`-style solution path as PyTorch's
-/// CUDA default and returns differentiable residuals for overdetermined
-/// systems; rank and singular values are empty on CUDA, matching `gels`.
-#[allow(clippy::type_complexity)]
+/// Mirrors `torch.linalg.lstsq` for the crate's 2-D, real-valued surface:
+/// CPU defaults to `gelsy`, CUDA defaults to `gels`, and `rank` is an
+/// `IntTensor<i64>`.
 pub fn lstsq<T: Float>(
     a: &Tensor<T>,
     b: &Tensor<T>,
     rcond: Option<f64>,
-) -> FerrotorchResult<(Tensor<T>, Tensor<T>, Tensor<T>, Tensor<T>)> {
-    if a.ndim() != 2 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!("lstsq: `a` must be 2-D, got {:?}", a.shape()),
-        });
-    }
-    if a.device() != b.device() {
-        return Err(FerrotorchError::DeviceMismatch {
-            expected: a.device(),
-            got: b.device(),
-        });
-    }
+) -> FerrotorchResult<LstsqResult<T>> {
+    lstsq_with_driver(a, b, rcond, None)
+}
+
+/// Least-squares solution to `A x ≈ b` with explicit PyTorch-compatible driver
+/// selection.
+pub fn lstsq_with_driver<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    rcond: Option<f64>,
+    driver: Option<LstsqDriver>,
+) -> FerrotorchResult<LstsqResult<T>> {
+    let dims = validate_lstsq_inputs("lstsq", a, b)?;
+    let driver = driver.unwrap_or_else(|| LstsqDriver::default_for_device(a.device()));
 
     // Autograd path: delegate to the differentiable wrapper, which computes the
     // forward under `no_grad` (preventing re-entry here) and attaches
     // `LstsqBackward` to the differentiable `solution` and `residuals` outputs
     // (full-rank, via pinv_backward plus PyTorch's residual branch).
     if crate::autograd::no_grad::is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
-        return crate::grad_fns::linalg::lstsq_differentiable(a, b, rcond);
+        return crate::grad_fns::linalg::lstsq_differentiable(a, b, rcond, Some(driver));
     }
 
     if a.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
-        let m = a.shape()[0];
-        let n = a.shape()[1];
-        let b_is_1d = b.ndim() == 1;
+        if driver != LstsqDriver::Gels {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "torch.linalg.lstsq: `driver` other than `gels` is not supported on CUDA"
+                    .into(),
+            });
+        }
         let sol = lstsq_solve(a, b)?;
-        let residuals = if m > n {
-            let nrhs = if b_is_1d { 1 } else { b.shape()[1] };
-            let sol_m = if b_is_1d {
-                sol.view_reshape(vec![n, 1])?
+        let residuals = if dims.m > dims.n {
+            let sol_m = if dims.b_is_1d {
+                sol.view_reshape(vec![dims.n, 1])?
             } else {
                 sol.clone()
             };
-            let b_m = if b_is_1d {
-                b.view_reshape(vec![m, 1])?
+            let b_m = if dims.b_is_1d {
+                b.view_reshape(vec![dims.m, 1])?
             } else {
                 b.clone()
             };
             let r = a.mm(&sol_m)?.sub_t(&b_m)?;
             let r2 = r.mul_t(&r)?;
             let residuals = crate::grad_fns::reduction::sum_dim(&r2, 0, false)?;
-            debug_assert_eq!(residuals.shape(), &[nrhs]);
+            debug_assert_eq!(residuals.shape(), &[dims.nrhs]);
             residuals
         } else {
-            Tensor::from_storage(
-                TensorStorage::on_device(Vec::new(), a.device())?,
-                vec![0],
-                false,
-            )?
+            empty_float_tensor(a.device())?
         };
-        let rank = Tensor::from_storage(
-            TensorStorage::on_device(Vec::new(), a.device())?,
-            vec![0],
-            false,
-        )?;
-        let sv = Tensor::from_storage(
-            TensorStorage::on_device(Vec::new(), a.device())?,
-            vec![0],
-            false,
-        )?;
+        let rank = empty_rank(a.device())?;
+        let sv = empty_float_tensor(a.device())?;
         return Ok((sol, residuals, rank, sv));
     }
     if a.is_cuda() {
@@ -1757,60 +2497,9 @@ pub fn lstsq<T: Float>(
     require_cpu(b, "lstsq")?;
 
     if is_f32::<T>() {
-        let a_arr = tensor_to_array2_f32(a)?;
-        let b_arr = tensor_to_arraydyn_f32(b)?;
-        let (sol, resid, rank, sv) = ferray_linalg::lstsq(&a_arr, &b_arr, rcond.map(|r| r as f32))
-            .map_err(FerrotorchError::Ferray)?;
-        Ok((
-            Tensor::from_storage(
-                TensorStorage::cpu(slice_f32_to_vec::<T>(sol.as_slice().unwrap())),
-                sol.shape().to_vec(),
-                false,
-            )?,
-            Tensor::from_storage(
-                TensorStorage::cpu(slice_f32_to_vec::<T>(resid.as_slice().unwrap())),
-                resid.shape().to_vec(),
-                false,
-            )?,
-            // rank is a usize; encode as a length-0 (scalar) tensor of T.
-            Tensor::from_storage(
-                TensorStorage::cpu(vec![T::from(rank as f32).unwrap()]),
-                vec![],
-                false,
-            )?,
-            Tensor::from_storage(
-                TensorStorage::cpu(slice_f32_to_vec::<T>(sv.as_slice().unwrap())),
-                sv.shape().to_vec(),
-                false,
-            )?,
-        ))
+        cpu_lapack_lstsq_f32(a, b, dims, rcond, driver)
     } else if is_f64::<T>() {
-        let a_arr = tensor_to_array2_f64(a)?;
-        let b_arr = tensor_to_arraydyn_f64(b)?;
-        let (sol, resid, rank, sv) =
-            ferray_linalg::lstsq(&a_arr, &b_arr, rcond).map_err(FerrotorchError::Ferray)?;
-        Ok((
-            Tensor::from_storage(
-                TensorStorage::cpu(slice_to_vec::<T>(sol.as_slice().unwrap())),
-                sol.shape().to_vec(),
-                false,
-            )?,
-            Tensor::from_storage(
-                TensorStorage::cpu(slice_to_vec::<T>(resid.as_slice().unwrap())),
-                resid.shape().to_vec(),
-                false,
-            )?,
-            Tensor::from_storage(
-                TensorStorage::cpu(vec![T::from(rank as f64).unwrap()]),
-                vec![],
-                false,
-            )?,
-            Tensor::from_storage(
-                TensorStorage::cpu(slice_to_vec::<T>(sv.as_slice().unwrap())),
-                sv.shape().to_vec(),
-                false,
-            )?,
-        ))
+        cpu_lapack_lstsq_f64(a, b, dims, rcond, driver)
     } else {
         Err(FerrotorchError::InvalidArgument {
             message: "linalg op requires f32 or f64".into(),
@@ -4044,8 +4733,8 @@ mod tests {
         assert!((s[0] - 2.0).abs() < 1e-9, "slope = {}", s[0]);
         assert!((s[1] - 1.0).abs() < 1e-9, "intercept = {}", s[1]);
         // Rank 2 (full column rank).
-        assert!((rank.data().unwrap()[0] - 2.0).abs() < 1e-9);
-        assert_eq!(sv.shape(), &[2]);
+        assert_eq!(rank.data().unwrap(), &[2]);
+        assert_eq!(sv.shape(), &[0]);
     }
 
     // -----------------------------------------------------------------------

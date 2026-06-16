@@ -28,7 +28,7 @@
 //! | REQ-19 (`linalg.pinv`) | SHIPPED | `PinvBackward` + `pinv_differentiable` (PyTorch `pinv_backward` full-rank algebraic VJP) with a resident CUDA f32/f64 branch built from tensor `mm`/transpose/add/sub/neg; CUDA forward composes `svd` + resident `amax`/compare/where/diag so tracked `pinv` does not detach or host-round-trip. FD/CPU-vs-CUDA verified in `tests/audit_core146_linalg_autograd.rs`. |
 //! | REQ-20 (`linalg.det`) | SHIPPED | `LinalgDetBackward` + `det_differentiable` (VJP `dA = det * grad * inv(A)^T` per `FunctionsManual.cpp:4373` invertible branch); FD-verified `tests/divergence_linalg_grad_audit.rs:det_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"linalg.det"` arm. Blocker #1345. |
 //! | REQ-21 (`linalg.slogdet`) | SHIPPED | `SlogdetBackward` + `slogdet_differentiable` (real-case VJP `dA = grad_logabsdet * inv(A)^T`, attached to the differentiable `logabsdet` output; `sign` is non-diff) per `FunctionsManual.cpp:4471` + `derivatives.yaml:559`; FD-verified `grad_fns::linalg::tests::slogdet_backward_matches_finite_difference`; non-test consumer: the grad-aware `crate::linalg::slogdet` forward delegates here when grad is enabled. Blocker #1345. |
-//! | REQ-22 (`linalg.lstsq`) | SHIPPED | `LstsqBackward` + `lstsq_differentiable`/`lstsq_solve_differentiable` mirror `FunctionsManual.cpp:4012` for both differentiable outputs (`solution`, `residuals`; rank/singular values non-diff). CUDA f32/f64 solution and residuals stay resident; tests cover solution VJP vs CPU and residual VJP vs finite difference. API-level driver/rank-dtype parity gap is tracked separately in crosslink #1988. |
+//! | REQ-22 (`linalg.lstsq`) | SHIPPED | `LstsqBackward` + `lstsq_differentiable`/`lstsq_solve_differentiable` mirror `FunctionsManual.cpp:4012` for both differentiable outputs (`solution`, `residuals`; integer rank/singular values non-diff). CUDA f32/f64 solution and residuals stay resident; tests cover solution VJP vs CPU and residual VJP vs finite difference. Explicit CPU/CUDA driver contract mirrors `torch.linalg.lstsq`. |
 //! | REQ-23 (`linalg.norm`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-24 (`linalg.matrix_rank`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-25 (`linalg.cross`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
@@ -4598,9 +4598,10 @@ pub fn lstsq_differentiable<T: Float>(
     a: &Tensor<T>,
     b: &Tensor<T>,
     rcond: Option<f64>,
-) -> FerrotorchResult<(Tensor<T>, Tensor<T>, Tensor<T>, Tensor<T>)> {
+    driver: Option<linalg_fwd::LstsqDriver>,
+) -> FerrotorchResult<linalg_fwd::LstsqResult<T>> {
     let (sol, resid, rank, sv) =
-        crate::autograd::no_grad::no_grad(|| linalg_fwd::lstsq(a, b, rcond))?;
+        crate::autograd::no_grad::no_grad(|| linalg_fwd::lstsq_with_driver(a, b, rcond, driver))?;
     if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
         let pinv = crate::autograd::no_grad::no_grad(|| linalg_fwd::pinv(a))?;
         let sol_grad_fn = Arc::new(LstsqBackward {
