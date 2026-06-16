@@ -19,11 +19,11 @@
 //!     bridge the flat buffer to a `Tensor<T>` so callers can `.to(Cuda)`,
 //!     compose `Tensor + Tensor` (which dispatches to `add_f32` /
 //!     `add_f64` / `broadcast_add_*` on-device), and round-trip back.
-//!   * `SparseGrad::apply_sgd` on CUDA `f32`/`f64` params composes
-//!     `cpu_to_gpu(values)` + `cpu_to_gpu(indices_i64)` +
-//!     `scatter_add_segments_{f32,f64}` + `scale_*` + `sub_*`. Output
-//!     stays on CUDA. No host detour, and no float round-trip for sparse
-//!     row indices.
+//!   * `SparseGrad::apply_sgd` on CUDA `f32`/`f64`/`f16`/`bf16` params
+//!     composes `cpu_to_gpu(values)` + `cpu_to_gpu(indices_i64)` +
+//!     `scatter_add_segments_{f32,f64,f16,bf16}` + `scale_*` + `sub_*`.
+//!     Output stays on CUDA. No host detour, and no float round-trip for
+//!     sparse row indices.
 //!
 //! PyTorch parity (`rust-gpu-discipline` §3 composite-implicit-autograd):
 //! `optim.SGD` with `sparse=True` decomposes into the same scatter +

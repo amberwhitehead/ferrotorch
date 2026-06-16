@@ -23,9 +23,11 @@
 //! (-1.0, 0.0, 0.0)        # int64 indices: the EXACT row updates
 //! ```
 //!
-//! Post-fix contract: both CUDA lanes use the integer-index
-//! `scatter_add_segments_{f32,f64}` kernels (i64 per-row segment ids,
-//! the #1822/#1823 integer-ABI pattern); no float round-trip of indices.
+//! Post-fix contract: sparse-SGD CUDA lanes use the integer-index
+//! `scatter_add_segments_*` kernels (i64 per-row segment ids, the
+//! #1822/#1823 integer-ABI pattern); no float round-trip of indices.
+//! This CORE-079 sentinel exercises the f32/f64 lanes that exposed the
+//! original precision bug; CORE-080 covers the f16/bf16 sparse-SGD lanes.
 
 #![cfg(feature = "gpu")]
 

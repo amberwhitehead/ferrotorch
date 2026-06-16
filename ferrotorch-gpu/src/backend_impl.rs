@@ -286,6 +286,27 @@ impl CudaBackendImpl {
         unsafe { GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::BF16) }
     }
 
+    #[cfg(feature = "cuda")]
+    fn wrap_buffer_bf16_logical_len(
+        buf: cudarc::driver::CudaSlice<u16>,
+        ordinal: usize,
+        logical_len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        if logical_len > buf.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "BF16 GPU buffer logical length {logical_len} exceeds allocation length {}",
+                    buf.len()
+                ),
+            });
+        }
+        // SAFETY: the allocation contains at least `logical_len` u16 bf16
+        // elements. Some half/bfloat kernels allocate one guard element for
+        // CAS-pair safety on odd lengths; tensor metadata must expose the
+        // logical element count, not that private padding.
+        Ok(unsafe { GpuBufferHandle::new(Box::new(buf), ordinal, logical_len, DType::BF16) })
+    }
+
     /// Extract a `&CudaSlice<u16>` (bf16 bit-pattern storage) from a
     /// [`GpuBufferHandle`].
     #[cfg(feature = "cuda")]
@@ -318,6 +339,27 @@ impl CudaBackendImpl {
         // SAFETY: `buf` stores one u16 f16 bit pattern per logical element,
         // and the F16 tag is the authoritative scalar-type discriminator.
         unsafe { GpuBufferHandle::new(Box::new(buf), ordinal, len, DType::F16) }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn wrap_buffer_f16_logical_len(
+        buf: cudarc::driver::CudaSlice<u16>,
+        ordinal: usize,
+        logical_len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        if logical_len > buf.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "F16 GPU buffer logical length {logical_len} exceeds allocation length {}",
+                    buf.len()
+                ),
+            });
+        }
+        // SAFETY: the allocation contains at least `logical_len` u16 f16
+        // elements. Some half/bfloat kernels allocate one guard element for
+        // CAS-pair safety on odd lengths; tensor metadata must expose the
+        // logical element count, not that private padding.
+        Ok(unsafe { GpuBufferHandle::new(Box::new(buf), ordinal, logical_len, DType::F16) })
     }
 
     /// Extract a `&CudaSlice<u16>` (IEEE f16 bit-pattern storage) from a
@@ -11158,6 +11200,14 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let dev = self.device(src.device_ordinal())?;
         let ord = src.device_ordinal();
+        let logical_len =
+            dim_size
+                .checked_mul(d)
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "scatter_add_segments_f16: dim_size {dim_size} * d {d} overflows usize"
+                    ),
+                })?;
         let out = crate::scatter_gather_kernels::gpu_scatter_add_segments_f16(
             Self::unwrap_buffer_f16(src)?,
             Self::unwrap_buffer_i64(index)?.inner(),
@@ -11167,7 +11217,21 @@ impl GpuBackend for CudaBackendImpl {
             dev,
         )
         .map_err(Self::map_gpu_err)?;
-        Ok(Self::wrap_buffer_f16(out, ord))
+        if out.len() < logical_len {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "scatter_add_segments_f16: kernel returned {} elements for logical length {logical_len}",
+                    out.len()
+                ),
+            });
+        }
+        let out = if out.len() == logical_len {
+            out
+        } else {
+            crate::kernels::gpu_strided_copy_u16(&out, &[logical_len], &[1], 0, dev)
+                .map_err(Self::map_gpu_err)?
+        };
+        Self::wrap_buffer_f16_logical_len(out, ord, logical_len)
     }
 
     #[cfg(feature = "cuda")]
@@ -11181,6 +11245,14 @@ impl GpuBackend for CudaBackendImpl {
     ) -> FerrotorchResult<GpuBufferHandle> {
         let dev = self.device(src.device_ordinal())?;
         let ord = src.device_ordinal();
+        let logical_len =
+            dim_size
+                .checked_mul(d)
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "scatter_add_segments_bf16: dim_size {dim_size} * d {d} overflows usize"
+                    ),
+                })?;
         let out = crate::scatter_gather_kernels::gpu_scatter_add_segments_bf16(
             Self::unwrap_buffer_bf16(src)?,
             Self::unwrap_buffer_i64(index)?.inner(),
@@ -11190,7 +11262,21 @@ impl GpuBackend for CudaBackendImpl {
             dev,
         )
         .map_err(Self::map_gpu_err)?;
-        Ok(Self::wrap_buffer_bf16(out, ord))
+        if out.len() < logical_len {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "scatter_add_segments_bf16: kernel returned {} elements for logical length {logical_len}",
+                    out.len()
+                ),
+            });
+        }
+        let out = if out.len() == logical_len {
+            out
+        } else {
+            crate::kernels::gpu_strided_copy_u16(&out, &[logical_len], &[1], 0, dev)
+                .map_err(Self::map_gpu_err)?
+        };
+        Self::wrap_buffer_bf16_logical_len(out, ord, logical_len)
     }
 
     #[cfg(feature = "cuda")]

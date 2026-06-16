@@ -2398,10 +2398,11 @@ mod gpu {
     /// (P8 of #806). Pre-P8 the path called `param.data_vec()?` which
     /// returns `GpuTensorNotAccessible` for any CUDA-resident param,
     /// erroring out at every optimizer step against an embedding table on
-    /// CUDA. Post-P8/CORE-079 the f32/f64 lanes compose existing
-    /// primitives: `cpu_to_gpu(values)` + `cpu_to_gpu(indices_i64)` +
-    /// `scatter_add_segments_{f32,f64}` (assembles a dense gradient
-    /// on-device with exact int64 row ids) + `scale_*(_, lr)` +
+    /// CUDA. Post-P8/CORE-079/CORE-080 the f32/f64/f16/bf16 lanes compose
+    /// existing primitives: `cpu_to_gpu(values)` +
+    /// `cpu_to_gpu(indices_i64)` +
+    /// `scatter_add_segments_{f32,f64,f16,bf16}` (assembles a dense
+    /// gradient on-device with exact int64 row ids) + `scale_*(_, lr)` +
     /// `sub_*(param, _)`. Output stays on CUDA.
     ///
     /// PyTorch parity: `optim.SGD` step on a CUDA `nn.Embedding(sparse=True)`

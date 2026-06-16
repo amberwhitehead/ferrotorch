@@ -2627,19 +2627,21 @@ impl<T: Float> SparseGrad<T> {
     ///
     /// # GPU dispatch (P8 of #806; integer index ABI per CORE-079 / #1773)
     ///
-    /// When `param` lives on `Device::Cuda(_)` and `T ∈ {f32, f64}`, the
+    /// When `param` lives on `Device::Cuda(_)` and
+    /// `T ∈ {f32, f64, f16, bf16}`, the
     /// update runs entirely on device by composing existing `GpuBackend`
     /// primitives:
     ///
     /// 1. Upload `values` (typed) and `indices` as **i64** to CUDA —
     ///    torch stores sparse indices as int64; the previous f32 index
     ///    encoding rounded rows above 2^24 to a neighboring row.
-    /// 2. `scatter_add_segments_{f32,f64}` materialises a dense gradient
-    ///    buffer of shape `[leading, slab_size]` with the slabs scattered
-    ///    into the rows named by `indices` (duplicates accumulate
+    /// 2. `scatter_add_segments_{f32,f64,f16,bf16}` materialises a dense
+    ///    gradient buffer of shape `[leading, slab_size]` with the slabs
+    ///    scattered into the rows named by `indices` (duplicates accumulate
     ///    atomically, matching `coalesce` + scatter semantics).
-    /// 3. `scale_{f32,f64}(dense_grad, lr)` produces `lr * dense_grad`.
-    /// 4. `sub_{f32,f64}(param, scaled)` produces the updated param.
+    /// 3. `scale_*` produces `lr * dense_grad` (f16/bf16 scale in f32 and
+    ///    round back to the storage dtype, matching the crate's half kernels).
+    /// 4. `sub_*` produces the updated param.
     ///
     /// PyTorch parity (`rust-gpu-discipline` §3 composite-implicit-autograd):
     /// `optim.SGD` with `sparse=True` decomposes into the same scatter +
@@ -2691,10 +2693,10 @@ impl<T: Float> SparseGrad<T> {
         // -- CUDA fast path ---------------------------------------------------
         //
         // Composite of existing primitives (cpu_to_gpu +
-        // scatter_add_segments_{f32,f64} + scale_* + sub_*). Output stays
-        // on CUDA. The composite matches the CPU semantics including
-        // duplicate-index accumulation (the segments kernel sums rows
-        // with equal segment ids atomically).
+        // scatter_add_segments_{f32,f64,f16,bf16} + scale_* + sub_*). Output
+        // stays on CUDA. The composite matches PyTorch sparse-SGD semantics
+        // including duplicate-index accumulation (the segments kernel sums
+        // rows with equal segment ids atomically).
         //
         // Indices travel as i64 (CORE-079 / #1773, the #1822/#1823
         // integer-ABI pattern): the previous f32 index encoding rounded
@@ -2715,24 +2717,28 @@ impl<T: Float> SparseGrad<T> {
 
             let is_f32 = TypeId::of::<T>() == TypeId::of::<f32>();
             let is_f64 = TypeId::of::<T>() == TypeId::of::<f64>();
-            if is_f32 || is_f64 {
+            let is_f16 = TypeId::of::<T>() == TypeId::of::<half::f16>();
+            let is_bf16 = TypeId::of::<T>() == TypeId::of::<half::bf16>();
+            if is_f32 || is_f64 || is_f16 || is_bf16 {
                 let ordinal = param.gpu_handle()?.device_ordinal();
 
                 // 1. Upload values (the [nnz, slab_size] slab buffer).
-                // SAFETY: the TypeId guard establishes T == f32 (resp.
-                // f64); the byte reinterpret of `&[T]` is layout-
-                // preserving (no padding) and the borrow lives only for
-                // the cpu_to_gpu call.
+                // SAFETY: the TypeId guard establishes T is one of the
+                // supported plain-old-data float element types; the byte
+                // reinterpret of `&[T]` is layout-preserving (no padding)
+                // and the borrow lives only for the cpu_to_gpu call.
                 let values_bytes = unsafe {
                     std::slice::from_raw_parts(
                         self.values.as_ptr().cast::<u8>(),
                         std::mem::size_of_val(self.values.as_slice()),
                     )
                 };
-                let values_dtype = if is_f32 {
-                    crate::dtype::DType::F32
-                } else {
-                    crate::dtype::DType::F64
+                let values_dtype = match (is_f32, is_f64, is_f16, is_bf16) {
+                    (true, _, _, _) => crate::dtype::DType::F32,
+                    (_, true, _, _) => crate::dtype::DType::F64,
+                    (_, _, true, _) => crate::dtype::DType::F16,
+                    (_, _, _, true) => crate::dtype::DType::BF16,
+                    _ => unreachable!("guarded by supported sparse-SGD dtype check"),
                 };
                 let values_handle = backend.cpu_to_gpu(values_bytes, values_dtype, ordinal)?;
 
@@ -2785,7 +2791,7 @@ impl<T: Float> SparseGrad<T> {
                     })?;
                     let scaled = backend.scale_f32(&dense_grad, lr_f32)?;
                     backend.sub_f32(param_handle, &scaled)?
-                } else {
+                } else if is_f64 {
                     let dense_grad = backend.scatter_add_segments_f64(
                         &values_handle,
                         &idx_handle,
@@ -2800,6 +2806,36 @@ impl<T: Float> SparseGrad<T> {
                     })?;
                     let scaled = backend.scale_f64(&dense_grad, lr_f64)?;
                     backend.sub_f64(param_handle, &scaled)?
+                } else if is_f16 {
+                    let dense_grad = backend.scatter_add_segments_f16(
+                        &values_handle,
+                        &idx_handle,
+                        nnz,
+                        slab_size,
+                        leading,
+                    )?;
+                    let lr_f32: f32 = num_traits::ToPrimitive::to_f32(&lr).ok_or_else(|| {
+                        FerrotorchError::InvalidArgument {
+                            message: "SparseGrad::apply_sgd: lr not representable as f32".into(),
+                        }
+                    })?;
+                    let scaled = backend.scale_f16(&dense_grad, lr_f32)?;
+                    backend.sub_f16(param_handle, &scaled)?
+                } else {
+                    let dense_grad = backend.scatter_add_segments_bf16(
+                        &values_handle,
+                        &idx_handle,
+                        nnz,
+                        slab_size,
+                        leading,
+                    )?;
+                    let lr_f32: f32 = num_traits::ToPrimitive::to_f32(&lr).ok_or_else(|| {
+                        FerrotorchError::InvalidArgument {
+                            message: "SparseGrad::apply_sgd: lr not representable as f32".into(),
+                        }
+                    })?;
+                    let scaled = backend.scale_bf16_bf16(&dense_grad, lr_f32)?;
+                    backend.sub_bf16_bf16(param_handle, &scaled)?
                 };
 
                 // In-place landing (CORE-081 / #1775): route through the
@@ -2818,17 +2854,15 @@ impl<T: Float> SparseGrad<T> {
                 return Ok(());
             }
 
-            // Other dtypes: explicit boundary (CORE-080 / #1774).
+            // Other future Float dtypes: explicit boundary (CORE-080 / #1774).
             // `Tensor::data_vec` DOWNLOADS CUDA tensors, so falling
             // through to the CPU lane would silently complete the step
             // on CPU and reassign the param with CPU storage — a
             // successful optimizer step that demotes the device.
-            // R-LOUD-1: error instead. On-device f16/bf16 sparse SGD is
-            // tracked in #1966.
+            // R-LOUD-1: error instead.
             return Err(FerrotorchError::NotImplementedOnCuda {
-                op: "SparseGrad::apply_sgd: CUDA sparse SGD supports f32/f64 \
-                     only (on-device f16/bf16 lane tracked in #1966); the CPU \
-                     lane is not used for CUDA params because it would \
+                op: "SparseGrad::apply_sgd: unsupported CUDA sparse SGD dtype; \
+                     the CPU lane is not used for CUDA params because it would \
                      silently move the parameter to CPU",
             });
         }
