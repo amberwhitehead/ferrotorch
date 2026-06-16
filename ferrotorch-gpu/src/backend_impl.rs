@@ -2338,6 +2338,66 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
+    fn broadcast_addcmul_f64(
+        &self,
+        input: &GpuBufferHandle,
+        tensor1: &GpuBufferHandle,
+        tensor2: &GpuBufferHandle,
+        input_shape: &[usize],
+        tensor1_shape: &[usize],
+        tensor2_shape: &[usize],
+        out_shape: &[usize],
+        value: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f64(input)?;
+        let tensor1_buf = Self::unwrap_buffer_f64(tensor1)?;
+        let tensor2_buf = Self::unwrap_buffer_f64(tensor2)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::kernels::gpu_broadcast_addcmul_f64(
+            input_buf,
+            tensor1_buf,
+            tensor2_buf,
+            input_shape,
+            tensor1_shape,
+            tensor2_shape,
+            out_shape,
+            value,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, input.device_ordinal()))
+    }
+
+    fn broadcast_addcdiv_f64(
+        &self,
+        input: &GpuBufferHandle,
+        tensor1: &GpuBufferHandle,
+        tensor2: &GpuBufferHandle,
+        input_shape: &[usize],
+        tensor1_shape: &[usize],
+        tensor2_shape: &[usize],
+        out_shape: &[usize],
+        value: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f64(input)?;
+        let tensor1_buf = Self::unwrap_buffer_f64(tensor1)?;
+        let tensor2_buf = Self::unwrap_buffer_f64(tensor2)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::kernels::gpu_broadcast_addcdiv_f64(
+            input_buf,
+            tensor1_buf,
+            tensor2_buf,
+            input_shape,
+            tensor1_shape,
+            tensor2_shape,
+            out_shape,
+            value,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, input.device_ordinal()))
+    }
+
     fn broadcast_div_rounding_f64(
         &self,
         a: &GpuBufferHandle,
@@ -4171,6 +4231,66 @@ impl GpuBackend for CudaBackendImpl {
             crate::kernels::gpu_broadcast_div(a_buf, b_buf, a_shape, b_shape, out_shape, dev)
                 .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn broadcast_addcmul_f32(
+        &self,
+        input: &GpuBufferHandle,
+        tensor1: &GpuBufferHandle,
+        tensor2: &GpuBufferHandle,
+        input_shape: &[usize],
+        tensor1_shape: &[usize],
+        tensor2_shape: &[usize],
+        out_shape: &[usize],
+        value: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer(input)?;
+        let tensor1_buf = Self::unwrap_buffer(tensor1)?;
+        let tensor2_buf = Self::unwrap_buffer(tensor2)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::kernels::gpu_broadcast_addcmul(
+            input_buf,
+            tensor1_buf,
+            tensor2_buf,
+            input_shape,
+            tensor1_shape,
+            tensor2_shape,
+            out_shape,
+            value,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, input.device_ordinal()))
+    }
+
+    fn broadcast_addcdiv_f32(
+        &self,
+        input: &GpuBufferHandle,
+        tensor1: &GpuBufferHandle,
+        tensor2: &GpuBufferHandle,
+        input_shape: &[usize],
+        tensor1_shape: &[usize],
+        tensor2_shape: &[usize],
+        out_shape: &[usize],
+        value: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer(input)?;
+        let tensor1_buf = Self::unwrap_buffer(tensor1)?;
+        let tensor2_buf = Self::unwrap_buffer(tensor2)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::kernels::gpu_broadcast_addcdiv(
+            input_buf,
+            tensor1_buf,
+            tensor2_buf,
+            input_shape,
+            tensor1_shape,
+            tensor2_shape,
+            out_shape,
+            value,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, input.device_ordinal()))
     }
 
     fn broadcast_div_rounding_f32(
@@ -8727,6 +8847,68 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
+    fn broadcast_addcmul_bf16(
+        &self,
+        input: &GpuBufferHandle,
+        tensor1: &GpuBufferHandle,
+        tensor2: &GpuBufferHandle,
+        input_shape: &[usize],
+        tensor1_shape: &[usize],
+        tensor2_shape: &[usize],
+        out_shape: &[usize],
+        value: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_bf16(input)?;
+        let tensor1_buf = Self::unwrap_buffer_bf16(tensor1)?;
+        let tensor2_buf = Self::unwrap_buffer_bf16(tensor2)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::bf16::gpu_broadcast_addcmul_bf16(
+            input_buf,
+            tensor1_buf,
+            tensor2_buf,
+            input_shape,
+            tensor1_shape,
+            tensor2_shape,
+            out_shape,
+            value,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, input.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn broadcast_addcdiv_bf16(
+        &self,
+        input: &GpuBufferHandle,
+        tensor1: &GpuBufferHandle,
+        tensor2: &GpuBufferHandle,
+        input_shape: &[usize],
+        tensor1_shape: &[usize],
+        tensor2_shape: &[usize],
+        out_shape: &[usize],
+        value: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_bf16(input)?;
+        let tensor1_buf = Self::unwrap_buffer_bf16(tensor1)?;
+        let tensor2_buf = Self::unwrap_buffer_bf16(tensor2)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::bf16::gpu_broadcast_addcdiv_bf16(
+            input_buf,
+            tensor1_buf,
+            tensor2_buf,
+            input_shape,
+            tensor1_shape,
+            tensor2_shape,
+            out_shape,
+            value,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, input.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
     fn broadcast_div_rounding_bf16(
         &self,
         a: &GpuBufferHandle,
@@ -9151,6 +9333,68 @@ impl GpuBackend for CudaBackendImpl {
             crate::f16::gpu_broadcast_div_f16(a_buf, b_buf, a_shape, b_shape, out_shape, dev)
                 .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn broadcast_addcmul_f16(
+        &self,
+        input: &GpuBufferHandle,
+        tensor1: &GpuBufferHandle,
+        tensor2: &GpuBufferHandle,
+        input_shape: &[usize],
+        tensor1_shape: &[usize],
+        tensor2_shape: &[usize],
+        out_shape: &[usize],
+        value: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f16(input)?;
+        let tensor1_buf = Self::unwrap_buffer_f16(tensor1)?;
+        let tensor2_buf = Self::unwrap_buffer_f16(tensor2)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::f16::gpu_broadcast_addcmul_f16(
+            input_buf,
+            tensor1_buf,
+            tensor2_buf,
+            input_shape,
+            tensor1_shape,
+            tensor2_shape,
+            out_shape,
+            value,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, input.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn broadcast_addcdiv_f16(
+        &self,
+        input: &GpuBufferHandle,
+        tensor1: &GpuBufferHandle,
+        tensor2: &GpuBufferHandle,
+        input_shape: &[usize],
+        tensor1_shape: &[usize],
+        tensor2_shape: &[usize],
+        out_shape: &[usize],
+        value: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let input_buf = Self::unwrap_buffer_f16(input)?;
+        let tensor1_buf = Self::unwrap_buffer_f16(tensor1)?;
+        let tensor2_buf = Self::unwrap_buffer_f16(tensor2)?;
+        let dev = self.device(input.device_ordinal())?;
+        let result = crate::f16::gpu_broadcast_addcdiv_f16(
+            input_buf,
+            tensor1_buf,
+            tensor2_buf,
+            input_shape,
+            tensor1_shape,
+            tensor2_shape,
+            out_shape,
+            value,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, input.device_ordinal()))
     }
 
     #[cfg(feature = "cuda")]

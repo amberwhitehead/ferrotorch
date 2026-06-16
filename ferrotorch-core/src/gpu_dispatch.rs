@@ -1142,6 +1142,36 @@ pub trait GpuBackend: Send + Sync {
         b_shape: &[usize],
         out_shape: &[usize],
     ) -> FerrotorchResult<GpuBufferHandle>;
+    fn broadcast_addcmul_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _tensor1: &GpuBufferHandle,
+        _tensor2: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _tensor1_shape: &[usize],
+        _tensor2_shape: &[usize],
+        _out_shape: &[usize],
+        _value: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_addcmul_f32",
+        })
+    }
+    fn broadcast_addcdiv_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _tensor1: &GpuBufferHandle,
+        _tensor2: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _tensor1_shape: &[usize],
+        _tensor2_shape: &[usize],
+        _out_shape: &[usize],
+        _value: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_addcdiv_f32",
+        })
+    }
     fn broadcast_div_rounding_f32(
         &self,
         _a: &GpuBufferHandle,
@@ -1189,6 +1219,36 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::InvalidArgument {
             message: "broadcast_div_f64 GPU op not yet implemented".into(),
+        })
+    }
+    fn broadcast_addcmul_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _tensor1: &GpuBufferHandle,
+        _tensor2: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _tensor1_shape: &[usize],
+        _tensor2_shape: &[usize],
+        _out_shape: &[usize],
+        _value: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_addcmul_f64",
+        })
+    }
+    fn broadcast_addcdiv_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _tensor1: &GpuBufferHandle,
+        _tensor2: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _tensor1_shape: &[usize],
+        _tensor2_shape: &[usize],
+        _out_shape: &[usize],
+        _value: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_addcdiv_f64",
         })
     }
     fn broadcast_div_rounding_f64(
@@ -6250,6 +6310,42 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// bf16 fused broadcast addcmul. `value` is f32 because PyTorch CUDA
+    /// uses f32 opmath for reduced floating types.
+    fn broadcast_addcmul_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _tensor1: &GpuBufferHandle,
+        _tensor2: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _tensor1_shape: &[usize],
+        _tensor2_shape: &[usize],
+        _out_shape: &[usize],
+        _value: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_addcmul_bf16",
+        })
+    }
+
+    /// bf16 fused broadcast addcdiv. `value` is f32 because PyTorch CUDA
+    /// uses f32 opmath for reduced floating types.
+    fn broadcast_addcdiv_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _tensor1: &GpuBufferHandle,
+        _tensor2: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _tensor1_shape: &[usize],
+        _tensor2_shape: &[usize],
+        _out_shape: &[usize],
+        _value: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_addcdiv_bf16",
+        })
+    }
+
     /// bf16 broadcast division with PyTorch rounding mode: `trunc` or `floor`.
     fn broadcast_div_rounding_bf16(
         &self,
@@ -6535,6 +6631,42 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "broadcast_div_f16",
+        })
+    }
+
+    /// f16 fused broadcast addcmul. `value` is f32 because PyTorch CUDA
+    /// uses f32 opmath for reduced floating types.
+    fn broadcast_addcmul_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _tensor1: &GpuBufferHandle,
+        _tensor2: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _tensor1_shape: &[usize],
+        _tensor2_shape: &[usize],
+        _out_shape: &[usize],
+        _value: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_addcmul_f16",
+        })
+    }
+
+    /// f16 fused broadcast addcdiv. `value` is f32 because PyTorch CUDA
+    /// uses f32 opmath for reduced floating types.
+    fn broadcast_addcdiv_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _tensor1: &GpuBufferHandle,
+        _tensor2: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _tensor1_shape: &[usize],
+        _tensor2_shape: &[usize],
+        _out_shape: &[usize],
+        _value: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "broadcast_addcdiv_f16",
         })
     }
 

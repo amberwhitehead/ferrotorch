@@ -12,22 +12,22 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:684`, `add_scaled` at `:1122`, `add_out` at `:995`, `add_scaled_out` at `:1045`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
-//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:1288` delegates to `sub_scaled` at `:1317` -> `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
+//! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:812`, `add_scaled` at `:1250`, `add_out` at `:1123`, `add_scaled_out` at `:1173`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
+//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:1416` delegates to `sub_scaled` at `:1445` -> `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
 //! | REQ-3 (mul) | SHIPPED | `mul` + `MulBackward` in `arithmetic.rs`; parity `[mul] 72/72` (grep=1) |
 //! | REQ-4 (div) | SHIPPED | `div` + `DivBackward` in `arithmetic.rs`; parity `[div] 72/72` (grep=1) |
 //! | REQ-5 (neg) | SHIPPED | `neg` + `NegBackward`; parity `[neg] 8/8` (grep=1) |
 //! | REQ-6 (abs) | SHIPPED | `abs` + `AbsBackward`; parity `[abs] 8/8` (grep=1) |
 //! | REQ-7 (sqrt) | SHIPPED | `sqrt` + `SqrtBackward`; parity `[sqrt] 8/8` (grep=1) |
 //! | REQ-8 (pow scalar exponent) | SHIPPED | `pow` + `PowBackward` (scalar exp; tensor-exp overload returns `Ok(None)` and is skipped, not failed); parity `[pow] 24/72 passed 48 skipped` (grep=1) |
-//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:1369` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
-//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:2214` + `RsqrtBackward` at `:2122`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
-//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:2361` + `ReciprocalBackward` at `:2284`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
-//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:3206` + `FloorDivideBackward` at `:3050` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
-//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:2560` + `RemainderBackward` at `:2447`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
-//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:2869` + `FmodBackward` at `:2757`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
-//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:3588` + `AddcmulBackward` at `:3445`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
-//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:3903` + `AddcdivBackward` at `:3741`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
+//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:1497` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
+//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:2342` + `RsqrtBackward` at `:2250`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
+//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:2489` + `ReciprocalBackward` at `:2412`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
+//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:3334` + `FloorDivideBackward` at `:3178` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
+//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:2688` + `RemainderBackward` at `:2575`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
+//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:2997` + `FmodBackward` at `:2885`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
+//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:3751` + `AddcmulBackward` at `:3573`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
+//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:4119` + `AddcdivBackward` at `:3922`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -167,6 +167,12 @@ enum CudaFloatBinaryOp {
     Fmod,
     DivTrunc,
     DivFloor,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CudaFloatTernaryOp {
+    Addcmul,
+    Addcdiv,
 }
 
 fn cuda_float_binary_storage<T: Float>(
@@ -315,6 +321,128 @@ fn cuda_float_binary_storage<T: Float>(
                 b_c.shape(),
                 &out_shape,
                 "floor",
+            ),
+        },
+    )?;
+
+    Ok(Some((TensorStorage::gpu(handle), out_shape)))
+}
+
+fn cuda_float_ternary_storage<T: Float>(
+    input: &Tensor<T>,
+    tensor1: &Tensor<T>,
+    tensor2: &Tensor<T>,
+    value: f64,
+    op: CudaFloatTernaryOp,
+) -> FerrotorchResult<Option<(TensorStorage<T>, Vec<usize>)>> {
+    if !(input.is_cuda() && tensor1.is_cuda() && tensor2.is_cuda()) {
+        return Ok(None);
+    }
+    let op_name = match op {
+        CudaFloatTernaryOp::Addcmul => "addcmul",
+        CudaFloatTernaryOp::Addcdiv => "addcdiv",
+    };
+    if !(is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()) {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: op_name });
+    }
+
+    let backend = crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let input_c = ensure_contig_for_gpu(input)?;
+    let tensor1_c = ensure_contig_for_gpu(tensor1)?;
+    let tensor2_c = ensure_contig_for_gpu(tensor2)?;
+    let t12_shape = broadcast_shapes(tensor1_c.shape(), tensor2_c.shape())?;
+    let out_shape = broadcast_shapes(input_c.shape(), &t12_shape)?;
+    let value_f32 = value as f32;
+
+    let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+        T,
+        "cuda_float_ternary_storage",
+        f32 => match op {
+            CudaFloatTernaryOp::Addcmul => backend.broadcast_addcmul_f32(
+                input_c.gpu_handle()?,
+                tensor1_c.gpu_handle()?,
+                tensor2_c.gpu_handle()?,
+                input_c.shape(),
+                tensor1_c.shape(),
+                tensor2_c.shape(),
+                &out_shape,
+                value_f32,
+            ),
+            CudaFloatTernaryOp::Addcdiv => backend.broadcast_addcdiv_f32(
+                input_c.gpu_handle()?,
+                tensor1_c.gpu_handle()?,
+                tensor2_c.gpu_handle()?,
+                input_c.shape(),
+                tensor1_c.shape(),
+                tensor2_c.shape(),
+                &out_shape,
+                value_f32,
+            ),
+        },
+        f64 => match op {
+            CudaFloatTernaryOp::Addcmul => backend.broadcast_addcmul_f64(
+                input_c.gpu_handle()?,
+                tensor1_c.gpu_handle()?,
+                tensor2_c.gpu_handle()?,
+                input_c.shape(),
+                tensor1_c.shape(),
+                tensor2_c.shape(),
+                &out_shape,
+                value,
+            ),
+            CudaFloatTernaryOp::Addcdiv => backend.broadcast_addcdiv_f64(
+                input_c.gpu_handle()?,
+                tensor1_c.gpu_handle()?,
+                tensor2_c.gpu_handle()?,
+                input_c.shape(),
+                tensor1_c.shape(),
+                tensor2_c.shape(),
+                &out_shape,
+                value,
+            ),
+        },
+        bf16 => match op {
+            CudaFloatTernaryOp::Addcmul => backend.broadcast_addcmul_bf16(
+                input_c.gpu_handle()?,
+                tensor1_c.gpu_handle()?,
+                tensor2_c.gpu_handle()?,
+                input_c.shape(),
+                tensor1_c.shape(),
+                tensor2_c.shape(),
+                &out_shape,
+                value_f32,
+            ),
+            CudaFloatTernaryOp::Addcdiv => backend.broadcast_addcdiv_bf16(
+                input_c.gpu_handle()?,
+                tensor1_c.gpu_handle()?,
+                tensor2_c.gpu_handle()?,
+                input_c.shape(),
+                tensor1_c.shape(),
+                tensor2_c.shape(),
+                &out_shape,
+                value_f32,
+            ),
+        },
+        f16 => match op {
+            CudaFloatTernaryOp::Addcmul => backend.broadcast_addcmul_f16(
+                input_c.gpu_handle()?,
+                tensor1_c.gpu_handle()?,
+                tensor2_c.gpu_handle()?,
+                input_c.shape(),
+                tensor1_c.shape(),
+                tensor2_c.shape(),
+                &out_shape,
+                value_f32,
+            ),
+            CudaFloatTernaryOp::Addcdiv => backend.broadcast_addcdiv_f16(
+                input_c.gpu_handle()?,
+                tensor1_c.gpu_handle()?,
+                tensor2_c.gpu_handle()?,
+                input_c.shape(),
+                tensor1_c.shape(),
+                tensor2_c.shape(),
+                &out_shape,
+                value_f32,
             ),
         },
     )?;
@@ -3517,6 +3645,43 @@ impl<T: Float> GradFn<T> for AddcmulBackward<T> {
     }
 }
 
+#[inline]
+fn cpu_addcmul_value<T: Float>(
+    input: T,
+    tensor1: T,
+    tensor2: T,
+    value: f64,
+) -> FerrotorchResult<T> {
+    if is_f16::<T>() || is_bf16::<T>() {
+        let input_f = <T as num_traits::ToPrimitive>::to_f32(&input).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "addcmul: input value is not representable as f32".into(),
+            }
+        })?;
+        let tensor1_f = <T as num_traits::ToPrimitive>::to_f32(&tensor1).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "addcmul: tensor1 value is not representable as f32".into(),
+            }
+        })?;
+        let tensor2_f = <T as num_traits::ToPrimitive>::to_f32(&tensor2).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "addcmul: tensor2 value is not representable as f32".into(),
+            }
+        })?;
+        return T::from(input_f + (value as f32) * tensor1_f * tensor2_f).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "addcmul: f32 opmath result cannot be represented in the tensor dtype"
+                    .into(),
+            }
+        });
+    }
+
+    let value_t = T::from(value).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: format!("addcmul: value={value} cannot be represented in the tensor dtype"),
+    })?;
+    Ok(input + value_t * tensor1 * tensor2)
+}
+
 /// `torch.addcmul(input, tensor1, tensor2, *, value=1)` — fused
 /// `out = input + value * tensor1 * tensor2`.
 ///
@@ -3574,11 +3739,9 @@ impl<T: Float> GradFn<T> for AddcmulBackward<T> {
 /// - 3-way broadcasting: e.g. `addcmul(shape=[3], shape=[2,3], shape=[2,3])`
 ///   broadcasts `input` from `[3]` to `[2,3]`, producing shape `[2,3]`.
 ///
-/// CPU-only in this commit. CUDA inputs flow through host-memory fallback
-/// (same pattern as `remainder_inner` / `fmod_inner` / `floor_divide_inner`'s
-/// bf16/f16 fallthrough). A dedicated GPU kernel can land under a separate
-/// blocker when a routed GPU consumer surfaces — no `.cpu()`-then-`.cuda()`
-/// round-trip is introduced (R-CODE-4 unaffected).
+/// CUDA f32/f64/f16/bf16 inputs use fused broadcast ternary kernels. The
+/// reduced dtypes follow PyTorch CUDA's opmath contract: load as f16/bf16,
+/// compute the fused formula in f32, then round back to the storage dtype.
 ///
 /// # Errors
 ///
@@ -3623,6 +3786,28 @@ fn addcmul_inner<T: Float>(
     let t12_shape = broadcast_shapes(tensor1.shape(), tensor2.shape())?;
     let out_shape = broadcast_shapes(input.shape(), &t12_shape)?;
     let device = input.device();
+    let needs_g = is_grad_enabled()
+        && (input.requires_grad() || tensor1.requires_grad() || tensor2.requires_grad());
+
+    if let Some((storage, shape)) =
+        cuda_float_ternary_storage(input, tensor1, tensor2, value, CudaFloatTernaryOp::Addcmul)?
+    {
+        let out = Tensor::from_storage(storage, shape, false)?;
+        if needs_g {
+            let (storage, shape) = out.into_storage_and_shape()?;
+            return Tensor::from_operation(
+                storage,
+                shape,
+                Arc::new(AddcmulBackward {
+                    input: input.clone(),
+                    tensor1: tensor1.saved_for_backward()?,
+                    tensor2: tensor2.saved_for_backward()?,
+                    value,
+                }),
+            );
+        }
+        return Ok(out);
+    }
 
     let input_data = input.data_vec()?;
     let t1_data = tensor1.data_vec()?;
@@ -3651,13 +3836,6 @@ fn addcmul_inner<T: Float>(
     let t1_strides = strides_of(&t1_shape);
     let t2_strides = strides_of(&t2_shape);
 
-    // Convert scalar `value` to T once. Returns NaN if value is NaN (T::from
-    // succeeds for f32/f64); the upstream contract allows arbitrary
-    // floating-point `value` including 0, negatives, NaN, ±Inf.
-    let value_t = T::from(value).ok_or_else(|| FerrotorchError::InvalidArgument {
-        message: format!("addcmul: value={value} cannot be represented in the tensor dtype"),
-    })?;
-
     for i in 0..out_numel {
         // Decompose `i` into per-axis coords over `out_shape`.
         let mut rem_i = i;
@@ -3683,14 +3861,17 @@ fn addcmul_inner<T: Float>(
         let t2_flat = flatten(&t2_shape, &t2_strides, pad_t2);
 
         // Fused: out_i = input_i + value * tensor1_i * tensor2_i. R-DEV-1.
-        result[i] = input_data[i_flat] + value_t * t1_data[t1_flat] * t2_data[t2_flat];
+        result[i] = cpu_addcmul_value(
+            input_data[i_flat],
+            t1_data[t1_flat],
+            t2_data[t2_flat],
+            value,
+        )?;
     }
 
     let storage = TensorStorage::on_device(result, device)?;
     let out = Tensor::from_storage(storage, out_shape, false)?;
 
-    let needs_g = is_grad_enabled()
-        && (input.requires_grad() || tensor1.requires_grad() || tensor2.requires_grad());
     if needs_g {
         let (storage, shape) = out.into_storage_and_shape()?;
         Tensor::from_operation(
@@ -3821,6 +4002,43 @@ impl<T: Float> GradFn<T> for AddcdivBackward<T> {
     }
 }
 
+#[inline]
+fn cpu_addcdiv_value<T: Float>(
+    input: T,
+    tensor1: T,
+    tensor2: T,
+    value: f64,
+) -> FerrotorchResult<T> {
+    if is_f16::<T>() || is_bf16::<T>() {
+        let input_f = <T as num_traits::ToPrimitive>::to_f32(&input).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "addcdiv: input value is not representable as f32".into(),
+            }
+        })?;
+        let tensor1_f = <T as num_traits::ToPrimitive>::to_f32(&tensor1).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "addcdiv: tensor1 value is not representable as f32".into(),
+            }
+        })?;
+        let tensor2_f = <T as num_traits::ToPrimitive>::to_f32(&tensor2).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "addcdiv: tensor2 value is not representable as f32".into(),
+            }
+        })?;
+        return T::from(input_f + (value as f32) * tensor1_f / tensor2_f).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "addcdiv: f32 opmath result cannot be represented in the tensor dtype"
+                    .into(),
+            }
+        });
+    }
+
+    let value_t = T::from(value).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: format!("addcdiv: value={value} cannot be represented in the tensor dtype"),
+    })?;
+    Ok(input + value_t * tensor1 / tensor2)
+}
+
 /// `torch.addcdiv(input, tensor1, tensor2, *, value=1)` — fused
 /// `out = input + value * tensor1 / tensor2`.
 ///
@@ -3889,11 +4107,9 @@ impl<T: Float> GradFn<T> for AddcdivBackward<T> {
 /// - 3-way broadcasting: e.g. `addcdiv(shape=[3], shape=[2,3], shape=[2,3])`
 ///   broadcasts `input` from `[3]` to `[2,3]`, producing shape `[2,3]`.
 ///
-/// CPU-only in this commit. CUDA inputs flow through host-memory fallback
-/// (same pattern as `addcmul_inner` / `remainder_inner` / `fmod_inner`'s
-/// fallthrough). A dedicated GPU kernel can land under a separate blocker
-/// when a routed GPU consumer surfaces — no `.cpu()`-then-`.cuda()`
-/// round-trip is introduced (R-CODE-4 unaffected).
+/// CUDA f32/f64/f16/bf16 inputs use fused broadcast ternary kernels. The
+/// reduced dtypes follow PyTorch CUDA's opmath contract: load as f16/bf16,
+/// compute the fused formula in f32, then round back to the storage dtype.
 ///
 /// # Errors
 ///
@@ -3938,6 +4154,28 @@ fn addcdiv_inner<T: Float>(
     let t12_shape = broadcast_shapes(tensor1.shape(), tensor2.shape())?;
     let out_shape = broadcast_shapes(input.shape(), &t12_shape)?;
     let device = input.device();
+    let needs_g = is_grad_enabled()
+        && (input.requires_grad() || tensor1.requires_grad() || tensor2.requires_grad());
+
+    if let Some((storage, shape)) =
+        cuda_float_ternary_storage(input, tensor1, tensor2, value, CudaFloatTernaryOp::Addcdiv)?
+    {
+        let out = Tensor::from_storage(storage, shape, false)?;
+        if needs_g {
+            let (storage, shape) = out.into_storage_and_shape()?;
+            return Tensor::from_operation(
+                storage,
+                shape,
+                Arc::new(AddcdivBackward {
+                    input: input.clone(),
+                    tensor1: tensor1.saved_for_backward()?,
+                    tensor2: tensor2.saved_for_backward()?,
+                    value,
+                }),
+            );
+        }
+        return Ok(out);
+    }
 
     let input_data = input.data_vec()?;
     let t1_data = tensor1.data_vec()?;
@@ -3966,13 +4204,6 @@ fn addcdiv_inner<T: Float>(
     let t1_strides = strides_of(&t1_shape);
     let t2_strides = strides_of(&t2_shape);
 
-    // Convert scalar `value` to T once. Returns NaN if value is NaN (T::from
-    // succeeds for f32/f64); the upstream contract allows arbitrary
-    // floating-point `value` including 0, negatives, NaN, ±Inf.
-    let value_t = T::from(value).ok_or_else(|| FerrotorchError::InvalidArgument {
-        message: format!("addcdiv: value={value} cannot be represented in the tensor dtype"),
-    })?;
-
     for i in 0..out_numel {
         // Decompose `i` into per-axis coords over `out_shape`.
         let mut rem_i = i;
@@ -4000,14 +4231,17 @@ fn addcdiv_inner<T: Float>(
         // Fused: out_i = input_i + value * tensor1_i / tensor2_i. R-DEV-1.
         // IEEE-754 div-by-zero at tensor2_i=0 produces ±Inf (or NaN if
         // tensor1_i=0 too) — matches upstream byte-for-byte.
-        result[i] = input_data[i_flat] + value_t * t1_data[t1_flat] / t2_data[t2_flat];
+        result[i] = cpu_addcdiv_value(
+            input_data[i_flat],
+            t1_data[t1_flat],
+            t2_data[t2_flat],
+            value,
+        )?;
     }
 
     let storage = TensorStorage::on_device(result, device)?;
     let out = Tensor::from_storage(storage, out_shape, false)?;
 
-    let needs_g = is_grad_enabled()
-        && (input.requires_grad() || tensor1.requires_grad() || tensor2.requires_grad());
     if needs_g {
         let (storage, shape) = out.into_storage_and_shape()?;
         Tensor::from_operation(

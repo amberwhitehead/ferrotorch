@@ -3562,6 +3562,210 @@ DONE:
 }
 ";
 
+const BROADCAST_ADDCMUL_F16_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry broadcast_addcmul_f16_kernel(
+    .param .u64 input_ptr,
+    .param .u64 tensor1_ptr,
+    .param .u64 tensor2_ptr,
+    .param .u64 out_ptr,
+    .param .u64 input_strides_ptr,
+    .param .u64 tensor1_strides_ptr,
+    .param .u64 tensor2_strides_ptr,
+    .param .u64 out_shape_ptr,
+    .param .f32 value,
+    .param .u32 n,
+    .param .u32 ndim
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %ndim_reg;
+    .reg .u32 %remaining, %input_idx, %t1_idx, %t2_idx, %d;
+    .reg .u32 %shape_d, %input_str_d, %t1_str_d, %t2_str_d, %coord;
+    .reg .u64 %input, %t1, %t2, %out, %input_str, %t1_str, %t2_str, %oshape;
+    .reg .u64 %off, %off_a, %off_b, %off_out, %d64, %tmp;
+    .reg .b16 %input_h, %t1_h, %t2_h, %out_h;
+    .reg .f32 %vi, %v1, %v2, %vr, %value, %prod;
+    .reg .pred %p, %loop_p, %value_is_one;
+
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %t1, [tensor1_ptr];
+    ld.param.u64 %t2, [tensor2_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %input_str, [input_strides_ptr];
+    ld.param.u64 %t1_str, [tensor1_strides_ptr];
+    ld.param.u64 %t2_str, [tensor2_strides_ptr];
+    ld.param.u64 %oshape, [out_shape_ptr];
+    ld.param.f32 %value, [value];
+    ld.param.u32 %n_reg, [n];
+    ld.param.u32 %ndim_reg, [ndim];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    mov.u32 %remaining, %r_tid;
+    mov.u32 %input_idx, 0;
+    mov.u32 %t1_idx, 0;
+    mov.u32 %t2_idx, 0;
+    mov.u32 %d, %ndim_reg;
+LOOP:
+    setp.eq.u32 %loop_p, %d, 0;
+    @%loop_p bra END_LOOP;
+    sub.u32 %d, %d, 1;
+    cvt.u64.u32 %d64, %d;
+    shl.b64 %d64, %d64, 2;
+    add.u64 %tmp, %oshape, %d64;
+    ld.global.u32 %shape_d, [%tmp];
+    add.u64 %tmp, %input_str, %d64;
+    ld.global.u32 %input_str_d, [%tmp];
+    add.u64 %tmp, %t1_str, %d64;
+    ld.global.u32 %t1_str_d, [%tmp];
+    add.u64 %tmp, %t2_str, %d64;
+    ld.global.u32 %t2_str_d, [%tmp];
+    rem.u32 %coord, %remaining, %shape_d;
+    div.u32 %remaining, %remaining, %shape_d;
+    mad.lo.u32 %input_idx, %coord, %input_str_d, %input_idx;
+    mad.lo.u32 %t1_idx, %coord, %t1_str_d, %t1_idx;
+    mad.lo.u32 %t2_idx, %coord, %t2_str_d, %t2_idx;
+    bra LOOP;
+END_LOOP:
+    cvt.u64.u32 %off, %input_idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %input, %off;
+    ld.global.b16 %input_h, [%off];
+    cvt.u64.u32 %off_a, %t1_idx;
+    shl.b64 %off_a, %off_a, 1;
+    add.u64 %off_a, %t1, %off_a;
+    ld.global.b16 %t1_h, [%off_a];
+    cvt.u64.u32 %off_b, %t2_idx;
+    shl.b64 %off_b, %off_b, 1;
+    add.u64 %off_b, %t2, %off_b;
+    ld.global.b16 %t2_h, [%off_b];
+
+    cvt.f32.f16 %vi, %input_h;
+    cvt.f32.f16 %v1, %t1_h;
+    cvt.f32.f16 %v2, %t2_h;
+    setp.eq.f32 %value_is_one, %value, 0f3F800000;
+    @%value_is_one fma.rn.f32 %vr, %v1, %v2, %vi;
+    @%value_is_one bra STORE;
+    mul.f32 %prod, %v1, %v2;
+    fma.rn.f32 %vr, %value, %prod, %vi;
+STORE:
+    cvt.rn.f16.f32 %out_h, %vr;
+    cvt.u64.u32 %off_out, %r_tid;
+    shl.b64 %off_out, %off_out, 1;
+    add.u64 %off_out, %out, %off_out;
+    st.global.b16 [%off_out], %out_h;
+DONE:
+    ret;
+}
+";
+
+const BROADCAST_ADDCDIV_F16_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry broadcast_addcdiv_f16_kernel(
+    .param .u64 input_ptr,
+    .param .u64 tensor1_ptr,
+    .param .u64 tensor2_ptr,
+    .param .u64 out_ptr,
+    .param .u64 input_strides_ptr,
+    .param .u64 tensor1_strides_ptr,
+    .param .u64 tensor2_strides_ptr,
+    .param .u64 out_shape_ptr,
+    .param .f32 value,
+    .param .u32 n,
+    .param .u32 ndim
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %ndim_reg;
+    .reg .u32 %remaining, %input_idx, %t1_idx, %t2_idx, %d;
+    .reg .u32 %shape_d, %input_str_d, %t1_str_d, %t2_str_d, %coord;
+    .reg .u64 %input, %t1, %t2, %out, %input_str, %t1_str, %t2_str, %oshape;
+    .reg .u64 %off, %off_a, %off_b, %off_out, %d64, %tmp;
+    .reg .b16 %input_h, %t1_h, %t2_h, %out_h;
+    .reg .f32 %vi, %v1, %v2, %vr, %value, %quot;
+    .reg .pred %p, %loop_p;
+
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %t1, [tensor1_ptr];
+    ld.param.u64 %t2, [tensor2_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %input_str, [input_strides_ptr];
+    ld.param.u64 %t1_str, [tensor1_strides_ptr];
+    ld.param.u64 %t2_str, [tensor2_strides_ptr];
+    ld.param.u64 %oshape, [out_shape_ptr];
+    ld.param.f32 %value, [value];
+    ld.param.u32 %n_reg, [n];
+    ld.param.u32 %ndim_reg, [ndim];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    mov.u32 %remaining, %r_tid;
+    mov.u32 %input_idx, 0;
+    mov.u32 %t1_idx, 0;
+    mov.u32 %t2_idx, 0;
+    mov.u32 %d, %ndim_reg;
+LOOP:
+    setp.eq.u32 %loop_p, %d, 0;
+    @%loop_p bra END_LOOP;
+    sub.u32 %d, %d, 1;
+    cvt.u64.u32 %d64, %d;
+    shl.b64 %d64, %d64, 2;
+    add.u64 %tmp, %oshape, %d64;
+    ld.global.u32 %shape_d, [%tmp];
+    add.u64 %tmp, %input_str, %d64;
+    ld.global.u32 %input_str_d, [%tmp];
+    add.u64 %tmp, %t1_str, %d64;
+    ld.global.u32 %t1_str_d, [%tmp];
+    add.u64 %tmp, %t2_str, %d64;
+    ld.global.u32 %t2_str_d, [%tmp];
+    rem.u32 %coord, %remaining, %shape_d;
+    div.u32 %remaining, %remaining, %shape_d;
+    mad.lo.u32 %input_idx, %coord, %input_str_d, %input_idx;
+    mad.lo.u32 %t1_idx, %coord, %t1_str_d, %t1_idx;
+    mad.lo.u32 %t2_idx, %coord, %t2_str_d, %t2_idx;
+    bra LOOP;
+END_LOOP:
+    cvt.u64.u32 %off, %input_idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %off, %input, %off;
+    ld.global.b16 %input_h, [%off];
+    cvt.u64.u32 %off_a, %t1_idx;
+    shl.b64 %off_a, %off_a, 1;
+    add.u64 %off_a, %t1, %off_a;
+    ld.global.b16 %t1_h, [%off_a];
+    cvt.u64.u32 %off_b, %t2_idx;
+    shl.b64 %off_b, %off_b, 1;
+    add.u64 %off_b, %t2, %off_b;
+    ld.global.b16 %t2_h, [%off_b];
+
+    cvt.f32.f16 %vi, %input_h;
+    cvt.f32.f16 %v1, %t1_h;
+    cvt.f32.f16 %v2, %t2_h;
+    div.rn.f32 %quot, %v1, %v2;
+    fma.rn.f32 %vr, %value, %quot, %vi;
+    cvt.rn.f16.f32 %out_h, %vr;
+    cvt.u64.u32 %off_out, %r_tid;
+    shl.b64 %off_out, %off_out, 1;
+    add.u64 %off_out, %out, %off_out;
+    st.global.b16 [%off_out], %out_h;
+DONE:
+    ret;
+}
+";
+
 fn broadcast_extreme_f16_ptx(kernel_name: &str, instruction: &str) -> String {
     let op_block = format!(
         "\
@@ -3821,6 +4025,78 @@ fn launch_broadcast_binary_f16(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn launch_broadcast_ternary_f16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    tensor1: &cudarc::driver::CudaSlice<u16>,
+    tensor2: &cudarc::driver::CudaSlice<u16>,
+    input_shape: &[usize],
+    tensor1_shape: &[usize],
+    tensor2_shape: &[usize],
+    out_shape: &[usize],
+    value: f32,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel_name: &'static str,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let out_numel: usize = crate::shape_math::numel(out_shape);
+    let stream = device.stream();
+    if out_numel == 0 {
+        return Ok(stream.alloc_zeros::<u16>(0)?);
+    }
+    let input_str = broadcast_strides_f16(input_shape, out_shape);
+    let tensor1_str = broadcast_strides_f16(tensor1_shape, out_shape);
+    let tensor2_str = broadcast_strides_f16(tensor2_shape, out_shape);
+    let shape_u32: Vec<u32> = out_shape.iter().map(|&d| d as u32).collect();
+
+    let ctx = device.context();
+    let f = get_or_compile(ctx, ptx, kernel_name, device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: kernel_name,
+            source: e,
+        }
+    })?;
+    let input_str_buf = crate::transfer::cpu_to_gpu(&input_str, device)?;
+    let tensor1_str_buf = crate::transfer::cpu_to_gpu(&tensor1_str, device)?;
+    let tensor2_str_buf = crate::transfer::cpu_to_gpu(&tensor2_str, device)?;
+    let shape_buf = crate::transfer::cpu_to_gpu(&shape_u32, device)?;
+    let mut out = stream.alloc_zeros::<u16>(out_numel)?;
+    let cfg = launch_1d(out_numel);
+    let n_u32 = out_numel as u32;
+    let ndim_u32 = out_shape.len() as u32;
+
+    // SAFETY:
+    // - `f` resolves to a `broadcast_addc{mul,div}_f16_kernel` entry with
+    //   signature `(input, tensor1, tensor2, out, input_strides,
+    //   tensor1_strides, tensor2_strides, out_shape, value, n, ndim)`.
+    // - The three stride buffers and shape buffer were freshly uploaded from
+    //   slices of length `out_shape.len()` and are kept alive across launch.
+    // - The kernel reads f16 u16 storage only at row-major broadcast offsets
+    //   computed from those stride buffers, and writes exactly one f16 u16
+    //   element per output lane guarded by `tid < n`.
+    unsafe {
+        let _kp = &input_str_buf;
+        let _kp2 = &tensor1_str_buf;
+        let _kp3 = &tensor2_str_buf;
+        let _kp4 = &shape_buf;
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(tensor1)
+            .arg(tensor2)
+            .arg(&mut out)
+            .arg(input_str_buf.inner())
+            .arg(tensor1_str_buf.inner())
+            .arg(tensor2_str_buf.inner())
+            .arg(shape_buf.inner())
+            .arg(&value)
+            .arg(&n_u32)
+            .arg(&ndim_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
 /// Broadcast add `out[i] = a[bcast_a(i)] + b[bcast_b(i)]` on f16 buffers.
 pub fn gpu_broadcast_add_f16(
     a: &cudarc::driver::CudaSlice<u16>,
@@ -3902,6 +4178,62 @@ pub fn gpu_broadcast_div_f16(
         device,
         BROADCAST_DIV_F16_PTX,
         "broadcast_div_f16_kernel",
+    )
+}
+
+/// Broadcast addcmul on f16 buffers with f32 opmath.
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_broadcast_addcmul_f16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    tensor1: &cudarc::driver::CudaSlice<u16>,
+    tensor2: &cudarc::driver::CudaSlice<u16>,
+    input_shape: &[usize],
+    tensor1_shape: &[usize],
+    tensor2_shape: &[usize],
+    out_shape: &[usize],
+    value: f32,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_broadcast_ternary_f16(
+        input,
+        tensor1,
+        tensor2,
+        input_shape,
+        tensor1_shape,
+        tensor2_shape,
+        out_shape,
+        value,
+        device,
+        BROADCAST_ADDCMUL_F16_PTX,
+        "broadcast_addcmul_f16_kernel",
+    )
+}
+
+/// Broadcast addcdiv on f16 buffers with f32 opmath.
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_broadcast_addcdiv_f16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    tensor1: &cudarc::driver::CudaSlice<u16>,
+    tensor2: &cudarc::driver::CudaSlice<u16>,
+    input_shape: &[usize],
+    tensor1_shape: &[usize],
+    tensor2_shape: &[usize],
+    out_shape: &[usize],
+    value: f32,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_broadcast_ternary_f16(
+        input,
+        tensor1,
+        tensor2,
+        input_shape,
+        tensor1_shape,
+        tensor2_shape,
+        out_shape,
+        value,
+        device,
+        BROADCAST_ADDCDIV_F16_PTX,
+        "broadcast_addcdiv_f16_kernel",
     )
 }
 
