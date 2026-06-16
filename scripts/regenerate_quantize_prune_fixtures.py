@@ -42,8 +42,9 @@ re-implements a ferrotorch algorithm. The torch APIs used, per op family:
   sparsity_level=1.0, sparse_block_shape=(1, 4), zeros_per_block=2)` —
   the documented PyTorch 2:4 semi-structured pruning path (see the
   PyTorch tutorial "Accelerating BERT with semi-structured (2:4)
-  sparsity"). Shapes the sparsifier REJECTS (rows not a multiple of 4)
-  are recorded with `torch_error` instead of a `masked` expectation.
+  sparsity"). Shapes the public sparsifier REJECTS (non-2-D inputs,
+  empty dimensions, and rows not a multiple of 4) are recorded with
+  `torch_error` instead of a `masked` expectation.
 * sparsity_ratio: `(t == 0).float().mean()` evaluated by torch.
 
 Tie-magnitude cases are deliberately INCLUDED (they were previously
@@ -246,24 +247,27 @@ def torch_2_4_mask(data: list[float], shape: list[int]) -> torch.Tensor:
     2:4 semi-structured pruning configuration (see the PyTorch tutorial
     "Accelerating BERT with semi-structured (2:4) sparsity").
 
-    1-D inputs are presented to the sparsifier as a single row `[1, n]`
-    (the 2:4 pattern groups along the innermost dimension, so this is the
-    identity mapping for 1-D data). Raises whatever the sparsifier raises
-    for shapes it rejects (rows not a multiple of 4 wide)."""
+    Raises whatever the public sparsifier raises for shapes it rejects
+    (including non-2-D inputs, empty dimensions, and rows not a multiple
+    of 4 wide)."""
     import torch.nn as nn
     from torch.ao.pruning import WeightNormSparsifier
 
     t = torch.tensor(data, dtype=torch.float32).reshape(shape)
-    t2d = t.reshape(1, -1) if t.dim() == 1 else t
-    m = nn.Linear(t2d.shape[-1], t2d.shape[0])
-    m.weight = nn.Parameter(t2d.clone())
+
+    class _Module(nn.Module):
+        def __init__(self, weight: torch.Tensor):
+            super().__init__()
+            self.weight = nn.Parameter(weight.clone())
+
+    m = _Module(t)
     sparsifier = WeightNormSparsifier(
         sparsity_level=1.0, sparse_block_shape=(1, 4), zeros_per_block=2
     )
     sparsifier.prepare(m, [{"tensor_fqn": "weight"}])
     sparsifier.step()
     sparsifier.squash_mask()
-    return m.weight.detach().reshape(shape)
+    return m.weight.detach()
 
 
 def torch_zero_count(t: torch.Tensor) -> int:
@@ -588,14 +592,16 @@ def fixture_magnitude_prune() -> list[dict[str, Any]]:
 
 def fixture_apply_2_4_mask() -> list[dict[str, Any]]:
     """Oracle: `torch.ao.pruning.WeightNormSparsifier` 2:4 configuration
-    (see `torch_2_4_mask`). Shapes the sparsifier rejects (rows not a
-    multiple of 4 wide) carry `torch_error` instead of `masked`.
+    (see `torch_2_4_mask`). Shapes the public sparsifier rejects carry
+    `torch_error` instead of `masked`.
     In-group tie-magnitude cases are included on purpose."""
     out: list[dict[str, Any]] = []
     cases = [
         # (tag, shape, data)
-        ("group1", [4], [1.0, -4.0, 2.0, -3.0]),
-        ("group2", [8], [1.0, -4.0, 2.0, -3.0, 0.5, 0.1, 0.9, 0.8]),
+        ("group1", [1, 4], [1.0, -4.0, 2.0, -3.0]),
+        ("group2", [2, 4], [1.0, -4.0, 2.0, -3.0, 0.5, 0.1, 0.9, 0.8]),
+        # Public WeightNormSparsifier requires a 2-D tensor.
+        ("rank1_valid_width", [4], [1.0, -4.0, 2.0, -3.0]),
         # Trailing < 4 elements: torch's 2:4 sparsifier REJECTS this shape.
         ("trailing", [6], [1.0, -4.0, 2.0, -3.0, 0.5, 0.1]),
         # 2-D shape, 8 elements (preserves shape).
@@ -603,10 +609,15 @@ def fixture_apply_2_4_mask() -> list[dict[str, Any]]:
         # Rows 6 wide: torch's 2:4 sparsifier REJECTS this shape.
         ("rows_cross_2x6", [2, 6],
          [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]),
+        # Empty 2-D dimensions are rejected by the public unfold path.
+        ("empty_0x4", [0, 4], []),
+        ("empty_2x0", [2, 0], []),
+        # Rank > 2 is not a supported WeightNormSparsifier weight shape.
+        ("rank3_2x2x4", [2, 2, 4], [float(v) for v in range(16)]),
         # --- in-group tie-magnitude cases ---
-        ("tie_all_equal", [4], [2.0, 2.0, 2.0, 2.0]),
-        ("tie_three_equal", [4], [1.0, 3.0, 3.0, 3.0]),
-        ("tie_neg_pair", [4], [-2.0, 2.0, -2.0, 2.0]),
+        ("tie_all_equal", [1, 4], [2.0, 2.0, 2.0, 2.0]),
+        ("tie_three_equal", [1, 4], [1.0, 3.0, 3.0, 3.0]),
+        ("tie_neg_pair", [1, 4], [-2.0, 2.0, -2.0, 2.0]),
     ]
     for tag, shape, data in cases:
         row: dict[str, Any] = {

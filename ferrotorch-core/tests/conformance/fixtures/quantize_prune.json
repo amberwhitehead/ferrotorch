@@ -5,7 +5,7 @@
     "cuda_available": true,
     "python_executable": "/usr/sbin/python3",
     "python_platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.41",
-    "generated_at": "2026-06-11T05:09:28.155439+00:00",
+    "generated_at": "2026-06-16T06:18:41.057354+00:00",
     "rng_seed": 511565482750,
     "phase": "2.9-quantize-prune",
     "tracking_issue": "#771; oracle rewrite CORE-194 -> #1888",
@@ -1729,6 +1729,7 @@
       "op": "apply_2_4_mask",
       "tag": "group1",
       "shape": [
+        1,
         4
       ],
       "x_data": [
@@ -1750,7 +1751,8 @@
       "op": "apply_2_4_mask",
       "tag": "group2",
       "shape": [
-        8
+        2,
+        4
       ],
       "x_data": [
         1.0,
@@ -1777,6 +1779,21 @@
     },
     {
       "op": "apply_2_4_mask",
+      "tag": "rank1_valid_width",
+      "shape": [
+        4
+      ],
+      "x_data": [
+        1.0,
+        -4.0,
+        2.0,
+        -3.0
+      ],
+      "oracle": "torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0, sparse_block_shape=(1,4), zeros_per_block=2)",
+      "torch_error": "ValueError: not enough values to unpack (expected 2, got 1)"
+    },
+    {
+      "op": "apply_2_4_mask",
       "tag": "trailing",
       "shape": [
         6
@@ -1790,7 +1807,7 @@
         0.1
       ],
       "oracle": "torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0, sparse_block_shape=(1,4), zeros_per_block=2)",
-      "torch_error": "AssertionError: mask shape (torch.Size([1, 8])) must match x shape (torch.Size([1, 6]))"
+      "torch_error": "ValueError: not enough values to unpack (expected 2, got 1)"
     },
     {
       "op": "apply_2_4_mask",
@@ -1848,8 +1865,60 @@
     },
     {
       "op": "apply_2_4_mask",
+      "tag": "empty_0x4",
+      "shape": [
+        0,
+        4
+      ],
+      "x_data": [],
+      "oracle": "torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0, sparse_block_shape=(1,4), zeros_per_block=2)",
+      "torch_error": "RuntimeError: Expected 3D or 4D (batch mode) tensor with possibly 0 batch size and other non-zero dimensions for input, but got: [1, 1, 0, 4]"
+    },
+    {
+      "op": "apply_2_4_mask",
+      "tag": "empty_2x0",
+      "shape": [
+        2,
+        0
+      ],
+      "x_data": [],
+      "oracle": "torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0, sparse_block_shape=(1,4), zeros_per_block=2)",
+      "torch_error": "RuntimeError: Expected 3D or 4D (batch mode) tensor with possibly 0 batch size and other non-zero dimensions for input, but got: [1, 1, 2, 0]"
+    },
+    {
+      "op": "apply_2_4_mask",
+      "tag": "rank3_2x2x4",
+      "shape": [
+        2,
+        2,
+        4
+      ],
+      "x_data": [
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5.0,
+        6.0,
+        7.0,
+        8.0,
+        9.0,
+        10.0,
+        11.0,
+        12.0,
+        13.0,
+        14.0,
+        15.0
+      ],
+      "oracle": "torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0, sparse_block_shape=(1,4), zeros_per_block=2)",
+      "torch_error": "RuntimeError: expand(torch.FloatTensor{[2, 2, 4]}, size=[2, 4]): the number of sizes provided (2) must be greater or equal to the number of dimensions in the tensor (3)"
+    },
+    {
+      "op": "apply_2_4_mask",
       "tag": "tie_all_equal",
       "shape": [
+        1,
         4
       ],
       "x_data": [
@@ -1871,6 +1940,7 @@
       "op": "apply_2_4_mask",
       "tag": "tie_three_equal",
       "shape": [
+        1,
         4
       ],
       "x_data": [
@@ -1892,6 +1962,7 @@
       "op": "apply_2_4_mask",
       "tag": "tie_neg_pair",
       "shape": [
+        1,
         4
       ],
       "x_data": [

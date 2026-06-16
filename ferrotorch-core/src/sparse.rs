@@ -3547,12 +3547,13 @@ mod tests {
     fn semi24_compress_then_decompress_matches_apply_2_4_mask() {
         // Compressing + decompressing should yield the same result
         // as the existing `apply_2_4_mask` function (which also
-        // keeps the 2 largest-magnitude elements per group).
+        // keeps the 2 largest-magnitude elements per group for 2-D
+        // WeightNormSparsifier-shaped inputs).
         let t = mk(
             vec![
                 0.1, 0.9, 0.3, 0.5, -0.8, 0.2, 0.7, -0.4, 1.5, -2.0, 0.1, 0.3,
             ],
-            vec![12],
+            vec![3, 4],
         );
         let sp = SemiStructuredSparseTensor::compress(&t).unwrap();
         let sp_dense = sp.decompress().unwrap();

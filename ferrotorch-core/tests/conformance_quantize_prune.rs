@@ -87,8 +87,9 @@
 //!   - #1777 (CORE-083): magnitude_prune prunes EXACTLY n via torch CPU
 //!     topk selection order, ties included.
 //!   - #1778 (CORE-084): apply_2_4_mask groups along the final dimension
-//!     and rejects (structured `InvalidArgument`) shapes whose final dim
-//!     is not a multiple of 4, matching the torch sparsifier's rejection.
+//!     and rejects (structured `InvalidArgument`) shapes the public torch
+//!     sparsifier rejects: non-2-D inputs, empty dimensions, and rows whose
+//!     final dim is not a multiple of 4.
 //!   - #1909: pruning is a real mask multiplication (CORE-082 -> #1776),
 //!     so pruned negative slots carry torch's -0.0 sign bit.
 //!   - #1906: `compute_scale_zp` floors scale after division at `f32::EPSILON`
@@ -952,14 +953,16 @@ fn apply_2_4_mask_bit_exact_and_sparsity() {
         let shape = f.shape.as_ref().expect("shape");
         let x_data = f.x_data.as_ref().expect("x_data").as_slice();
 
-        // CORE-084 (#1778) pins RETIRED: torch's 2:4 sparsifier REJECTS
-        // shapes whose rows are not a multiple of 4 wide (the fixture
-        // records the torch rejection in `torch_error` and carries no
-        // `masked` expectation; live torch 2.11.0+cu130:
+        // CORE-084 (#1778) pins RETIRED: torch's public 2:4 sparsifier
+        // REJECTS non-2-D inputs, empty dimensions, and rows that are not
+        // a multiple of 4 wide (the fixture records the torch rejection in
+        // `torch_error` and carries no `masked` expectation; live torch
+        // 2.11.0+cu130:
+        // `[4]` -> `ValueError: not enough values to unpack`;
         // `AssertionError: mask shape (torch.Size([2, 8])) must match x
         // shape (torch.Size([2, 6]))`). ferrotorch now matches with a
         // structured `InvalidArgument` instead of silently flat-grouping
-        // across row boundaries.
+        // across row boundaries or reshaping rank-1 tensors.
         if let Some(torch_error) = &f.torch_error {
             assert!(
                 f.masked.is_none(),
@@ -1036,7 +1039,7 @@ fn sparsity_ratio_parity() {
 
 #[test]
 fn pruning_preserves_requires_grad() {
-    let t = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[8], true);
+    let t = make_cpu_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4], true);
     assert!(t.requires_grad());
 
     let pruned = magnitude_prune(&t, 0.5).expect("magnitude_prune");
@@ -1102,12 +1105,12 @@ fn apply_2_4_mask_backward_flows_masked_gradient_to_original_leaf() {
     // grad * mask): pruned slots get exact-zero gradient, kept slots pass
     // the upstream gradient through.
     // ferrotorch keeps idx {1,3} in group 0 and idx {2,3} in group 1.
-    let x = make_cpu_f32(&[1.0, -4.0, 2.0, -3.0, 0.5, 0.1, 0.9, 0.8], &[8], true);
+    let x = make_cpu_f32(&[1.0, -4.0, 2.0, -3.0, 0.5, 0.1, 0.9, 0.8], &[2, 4], true);
     let masked = apply_2_4_mask(&x).expect("apply_2_4_mask");
 
     let coeffs = make_cpu_f32(
         &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0],
-        &[8],
+        &[2, 4],
         false,
     );
     let prod = ferrotorch_core::grad_fns::arithmetic::mul(&masked, &coeffs).expect("mul");
@@ -1452,6 +1455,8 @@ mod gpu {
         ensure_cuda_backend();
 
         // Live torch 2.11.0+cu130 tensor-op oracle for sparse blocks:
+        //   x = torch.tensor([[1., -4., 2., -3.],
+        //                     [0.5, 0.1, 0.9, 0.8]], device="cuda")
         //   scores = x.view(-1, 4) * x.view(-1, 4)
         //   idx = torch.topk(scores, k=2, dim=1, largest=False).indices
         //   mask = torch.ones_like(scores).scatter(1, idx, 0).view_as(x)
@@ -1459,7 +1464,7 @@ mod gpu {
         //   y.device == cuda:0
         //   y == [0., -4., 0., -3., 0., 0., 0.9, 0.8]
         //   x.grad == [0., 20., 0., 40., 0., 0., 70., 80.]
-        let x = upload_f32(&[1.0, -4.0, 2.0, -3.0, 0.5, 0.1, 0.9, 0.8], &[8], true);
+        let x = upload_f32(&[1.0, -4.0, 2.0, -3.0, 0.5, 0.1, 0.9, 0.8], &[2, 4], true);
         let masked = apply_2_4_mask(&x).expect("apply_2_4_mask cuda");
 
         assert_bits_eq(
@@ -1470,7 +1475,7 @@ mod gpu {
 
         let coeffs = upload_f32(
             &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0],
-            &[8],
+            &[2, 4],
             false,
         );
         let prod = ferrotorch_core::grad_fns::arithmetic::mul(&masked, &coeffs)
@@ -1487,6 +1492,33 @@ mod gpu {
             &[0.0, 20.0, 0.0, 40.0, 0.0, 0.0, 70.0, 80.0],
             "apply_2_4_mask grad",
         );
+    }
+
+    #[test]
+    fn gpu_apply_2_4_mask_rejects_public_sparsifier_invalid_shapes() {
+        ensure_cuda_backend();
+
+        for (label, data, shape) in [
+            ("rank1", vec![1.0, -4.0, 2.0, -3.0], vec![4]),
+            (
+                "bad_width_2x6",
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0],
+                vec![2, 6],
+            ),
+            ("empty_rows", Vec::new(), vec![0, 4]),
+            ("empty_cols", Vec::new(), vec![2, 0]),
+            ("rank3", (0..16).map(|v| v as f64).collect(), vec![2, 2, 4]),
+        ] {
+            let t = upload_f32(&data, &shape, false);
+            let res = apply_2_4_mask(&t);
+            assert!(
+                matches!(
+                    res,
+                    Err(ferrotorch_core::FerrotorchError::InvalidArgument { .. })
+                ),
+                "{label}: CUDA apply_2_4_mask must reject torch-invalid shape {shape:?}, got {res:?}"
+            );
+        }
     }
 
     #[test]
@@ -1533,7 +1565,11 @@ mod gpu {
 
         // Same selected-set contract for 2:4 blocks: CUDA ties prune slots
         // {0,1}; NaN is kept while finite smaller scores are zeroed.
-        let block = upload_f32(&[1.0, 1.0, 1.0, 1.0, f64::NAN, 1.0, 2.0, 3.0], &[8], false);
+        let block = upload_f32(
+            &[1.0, 1.0, 1.0, 1.0, f64::NAN, 1.0, 2.0, 3.0],
+            &[2, 4],
+            false,
+        );
         let block_out = read_cuda_f32(
             &apply_2_4_mask(&block).expect("apply_2_4_mask edge cuda"),
             "apply_2_4_mask edge",
@@ -1600,14 +1636,22 @@ mod gpu {
             vec![0.0, 20.0, 0.0, 40.0]
         );
 
-        let block_f16 = upload_f16(&[1.0, -4.0, 2.0, -3.0, 0.5, 0.25, 0.75, 1.0], &[8], false);
+        let block_f16 = upload_f16(
+            &[1.0, -4.0, 2.0, -3.0, 0.5, 0.25, 0.75, 1.0],
+            &[2, 4],
+            false,
+        );
         let masked_f16 = apply_2_4_mask(&block_f16).expect("apply_2_4_mask f16 cuda");
         assert_eq!(
             read_cuda_f16(&masked_f16, "apply_2_4_mask f16"),
             vec![0.0, -4.0, 0.0, -3.0, 0.0, 0.0, 0.75, 1.0]
         );
 
-        let block_bf16 = upload_bf16(&[1.0, -4.0, 2.0, -3.0, 0.5, 0.25, 0.75, 1.0], &[8], false);
+        let block_bf16 = upload_bf16(
+            &[1.0, -4.0, 2.0, -3.0, 0.5, 0.25, 0.75, 1.0],
+            &[2, 4],
+            false,
+        );
         let masked_bf16 = apply_2_4_mask(&block_bf16).expect("apply_2_4_mask bf16 cuda");
         assert_eq!(
             read_cuda_bf16(&masked_bf16, "apply_2_4_mask bf16"),

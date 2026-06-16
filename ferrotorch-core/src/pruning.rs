@@ -3,7 +3,7 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 | SHIPPED | impl `magnitude_prune` (Python round-half-even prune count + torch CPU topk tie order — CORE-083 -> #1777, #1908); non-test consumer re-exported at `lib.rs:218` for `ferrotorch-nn` callers. |
-//! | REQ-2 | SHIPPED | impl `apply_2_4_mask` (final-dim grouping, `InvalidArgument` when last dim % 4 != 0 — CORE-084 -> #1778; torch CPU topk in-block tie order — #1910); non-test consumer cross-checked at `sparse.rs` + re-exported at `lib.rs:218`. |
+//! | REQ-2 | SHIPPED | impl `apply_2_4_mask` (public `WeightNormSparsifier` shape contract: non-empty 2-D, final-dim grouping, `InvalidArgument` when last dim % 4 != 0 — CORE-084 -> #1778; torch CPU topk in-block tie order — #1910); non-test consumer cross-checked at `sparse.rs` + re-exported at `lib.rs:218`. |
 //! | REQ-3 | SHIPPED | impl `sparsity_ratio`; non-test consumer re-exported at `lib.rs:218`. |
 //! | REQ-4 | SHIPPED | validation guard in `magnitude_prune`; non-test consumer part of pub-function contract. |
 //! | REQ-5 | SHIPPED | differentiable mask multiplication via `apply_constant_mask` -> `grad_fns::arithmetic::mul` (`MulBackward` edge to the original parameter — CORE-082 -> #1776); non-test consumer sparse-finetune workflows. |
@@ -214,20 +214,22 @@ fn apply_cuda_mask<T: Float>(
 
 /// Apply 2:4 structured sparsity mask.
 ///
-/// Groups of 4 are formed along the FINAL dimension only (the innermost-dim
-/// layout semi-structured sparse kernels require; groups never span row
-/// boundaries). For every group of 4, keeps the 2 with the largest
-/// magnitude and zeros the other 2.
+/// Groups of 4 are formed along the FINAL dimension of a 2-D weight matrix
+/// only (the innermost-dim layout semi-structured sparse kernels require;
+/// groups never span row boundaries). For every group of 4, keeps the 2
+/// with the largest magnitude and zeros the other 2.
 ///
 /// # Errors
 ///
-/// Returns `InvalidArgument` when the final dimension is not a multiple of
-/// 4 (including scalars). This matches the PyTorch oracle:
+/// Returns `InvalidArgument` when the input is not a non-empty 2-D tensor or
+/// when the final dimension is not a multiple of 4. This matches the public
+/// PyTorch oracle:
 /// `torch.ao.pruning.WeightNormSparsifier(sparsity_level=1.0,
 /// sparse_block_shape=(1,4), zeros_per_block=2)` rejects such shapes
-/// (live torch 2.11.0+cu130: `AssertionError: mask shape
-/// (torch.Size([2, 8])) must match x shape (torch.Size([2, 6]))`) —
-/// CORE-084 -> #1778.
+/// (live torch 2.11.0+cu130: 1-D `[4]` -> `ValueError: not enough values to
+/// unpack`; `[2,6]` -> `AssertionError: mask shape (torch.Size([2, 8])) must
+/// match x shape (torch.Size([2, 6]))`; empty dimensions are rejected by
+/// `unfold`) — CORE-084 -> #1778.
 ///
 /// # Arguments
 ///
@@ -241,13 +243,26 @@ fn apply_cuda_mask<T: Float>(
 pub fn apply_2_4_mask<T: Float>(weights: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let shape = weights.shape();
 
-    let last_dim = *shape
-        .last()
-        .ok_or_else(|| FerrotorchError::InvalidArgument {
-            message: "apply_2_4_mask: scalar (0-d) tensors cannot carry a 2:4 \
-                  sparsity pattern"
-                .to_string(),
-        })?;
+    if shape.len() != 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "apply_2_4_mask: PyTorch's WeightNormSparsifier 2:4 path \
+                 expects a 2-D weight tensor, got shape {shape:?}"
+            ),
+        });
+    }
+
+    let rows = shape[0];
+    let last_dim = shape[1];
+    if rows == 0 || last_dim == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "apply_2_4_mask: PyTorch's WeightNormSparsifier rejects empty \
+                 2:4 weight dimensions, got shape {shape:?}"
+            ),
+        });
+    }
+
     if !last_dim.is_multiple_of(4) {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
@@ -270,7 +285,7 @@ pub fn apply_2_4_mask<T: Float>(weights: &Tensor<T>) -> FerrotorchResult<Tensor<
     // the contiguous chunks of the flat buffer — but never crossing a row
     // boundary (CORE-084).
     let mut mask = vec![<T as num_traits::One>::one(); data.len()];
-    let row_count = data.len().checked_div(last_dim).unwrap_or(0);
+    let row_count = rows;
     for r in 0..row_count {
         let row = &data[r * last_dim..(r + 1) * last_dim];
         let mask_row = &mut mask[r * last_dim..(r + 1) * last_dim];
@@ -437,7 +452,7 @@ mod tests {
     fn test_apply_2_4_mask_nan_no_panic() {
         let t = make_tensor(
             vec![1.0, f32::NAN, 3.0, f32::NAN, 2.0, 4.0, 0.5, 0.1],
-            vec![8],
+            vec![2, 4],
         );
         // Should not panic even with NaN values.
         let result = apply_2_4_mask(&t);
@@ -453,7 +468,7 @@ mod tests {
     // the corresponding input literals, so equality is the right check.
     #[allow(clippy::float_cmp)]
     fn test_apply_2_4_mask_basic() {
-        let t = make_tensor(vec![1.0, -4.0, 2.0, -3.0, 0.5, 0.1, 0.9, 0.8], vec![8]);
+        let t = make_tensor(vec![1.0, -4.0, 2.0, -3.0, 0.5, 0.1, 0.9, 0.8], vec![2, 4]);
         let masked = apply_2_4_mask(&t).unwrap();
         let d = masked.data().unwrap();
 
@@ -473,20 +488,28 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_2_4_mask_rejects_final_dim_not_multiple_of_4() {
+    fn test_apply_2_4_mask_rejects_weight_norm_sparsifier_invalid_shapes() {
         // CORE-084 (#1778) regression: torch's WeightNormSparsifier
-        // (sparse_block_shape=(1,4)) REJECTS rows that are not a multiple
-        // of 4 wide — live torch 2.11.0+cu130:
+        // (sparse_block_shape=(1,4)) REJECTS non-2-D, empty, and rows
+        // that are not a multiple of 4 wide — live torch 2.11.0+cu130:
+        //   [4] -> ValueError: not enough values to unpack
         //   AssertionError: mask shape (torch.Size([2, 8])) must match
         //   x shape (torch.Size([2, 6]))
         // ferrotorch must return a structured error, never flat-group
-        // across row boundaries or leave a trailing remainder unchanged.
+        // across row boundaries, reshape 1-D behind the user's back, or
+        // leave a trailing remainder unchanged.
         let t2x6 = make_tensor(
             vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0],
             vec![2, 6],
         );
         assert!(matches!(
             apply_2_4_mask(&t2x6),
+            Err(FerrotorchError::InvalidArgument { .. })
+        ));
+
+        let t4 = make_tensor(vec![1.0, -4.0, 2.0, -3.0], vec![4]);
+        assert!(matches!(
+            apply_2_4_mask(&t4),
             Err(FerrotorchError::InvalidArgument { .. })
         ));
 
@@ -500,6 +523,24 @@ mod tests {
         let t0 = make_tensor(vec![1.0], vec![]);
         assert!(matches!(
             apply_2_4_mask(&t0),
+            Err(FerrotorchError::InvalidArgument { .. })
+        ));
+
+        let empty_rows = make_tensor(vec![], vec![0, 4]);
+        assert!(matches!(
+            apply_2_4_mask(&empty_rows),
+            Err(FerrotorchError::InvalidArgument { .. })
+        ));
+
+        let empty_cols = make_tensor(vec![], vec![2, 0]);
+        assert!(matches!(
+            apply_2_4_mask(&empty_cols),
+            Err(FerrotorchError::InvalidArgument { .. })
+        ));
+
+        let rank3 = make_tensor(vec![1.0; 16], vec![2, 2, 4]);
+        assert!(matches!(
+            apply_2_4_mask(&rank3),
             Err(FerrotorchError::InvalidArgument { .. })
         ));
     }
@@ -528,18 +569,18 @@ mod tests {
     #[test]
     fn test_apply_2_4_mask_ties_match_weight_norm_sparsifier() {
         // Live torch 2.11.0+cu130 WeightNormSparsifier oracle:
-        //   [2,2,2,2] -> [2,2,0,0]
-        let t = make_tensor(vec![2.0, 2.0, 2.0, 2.0], vec![4]);
+        //   [[2,2,2,2]] -> [[2,2,0,0]]
+        let t = make_tensor(vec![2.0, 2.0, 2.0, 2.0], vec![1, 4]);
         let masked = apply_2_4_mask(&t).unwrap();
         assert_eq!(masked.data().unwrap(), &[2.0, 2.0, 0.0, 0.0]);
 
-        //   [1,3,3,3] -> [0,3,0,3]
-        let t = make_tensor(vec![1.0, 3.0, 3.0, 3.0], vec![4]);
+        //   [[1,3,3,3]] -> [[0,3,0,3]]
+        let t = make_tensor(vec![1.0, 3.0, 3.0, 3.0], vec![1, 4]);
         let masked = apply_2_4_mask(&t).unwrap();
         assert_eq!(masked.data().unwrap(), &[0.0, 3.0, 0.0, 3.0]);
 
-        //   [-2,2,-2,2] -> [-2,2,-0,0]
-        let t = make_tensor(vec![-2.0, 2.0, -2.0, 2.0], vec![4]);
+        //   [[-2,2,-2,2]] -> [[-2,2,-0,0]]
+        let t = make_tensor(vec![-2.0, 2.0, -2.0, 2.0], vec![1, 4]);
         let masked = apply_2_4_mask(&t).unwrap();
         let d = masked.data().unwrap();
         let expected = [-2.0_f32, 2.0, -0.0, 0.0];
@@ -550,7 +591,7 @@ mod tests {
 
     #[test]
     fn test_apply_2_4_mask_preserves_requires_grad() {
-        let t = make_tensor_rg(vec![1.0, 2.0, 3.0, 4.0], vec![4]);
+        let t = make_tensor_rg(vec![1.0, 2.0, 3.0, 4.0], vec![1, 4]);
         assert!(t.requires_grad());
 
         let masked = apply_2_4_mask(&t).unwrap();
