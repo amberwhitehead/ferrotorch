@@ -68,6 +68,56 @@ fn is_higher_order_backward() -> bool {
     crate::autograd::higher_order::is_create_graph_enabled()
 }
 
+fn meta_unary_operation<T, F>(
+    input: &Tensor<T>,
+    make_grad_fn: F,
+) -> FerrotorchResult<Option<Tensor<T>>>
+where
+    T: Float,
+    F: FnOnce() -> Arc<dyn GradFn<T>>,
+{
+    if !input.is_meta() {
+        return Ok(None);
+    }
+    let shape = input.shape().to_vec();
+    if is_grad_enabled() && input.requires_grad() {
+        Ok(Some(crate::meta_propagate::meta_operation(
+            shape,
+            make_grad_fn(),
+        )?))
+    } else {
+        Ok(Some(crate::meta_propagate::meta_tensor(shape)?))
+    }
+}
+
+fn meta_unary_operation_saving_output<T, F>(
+    input: &Tensor<T>,
+    make_grad_fn: F,
+) -> FerrotorchResult<Option<Tensor<T>>>
+where
+    T: Float,
+    F: FnOnce(Tensor<T>) -> FerrotorchResult<Arc<dyn GradFn<T>>>,
+{
+    if !input.is_meta() {
+        return Ok(None);
+    }
+    let shape = input.shape().to_vec();
+    if is_grad_enabled() && input.requires_grad() {
+        Ok(Some(crate::meta_propagate::meta_operation_saving_output(
+            shape,
+            make_grad_fn,
+        )?))
+    } else {
+        Ok(Some(crate::meta_propagate::meta_tensor(shape)?))
+    }
+}
+
+fn meta_input_grad<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+    Ok(vec![Some(crate::meta_propagate::meta_tensor(
+        input.shape().to_vec(),
+    )?)])
+}
+
 fn cuda_scalar_to_f32<T: Float>(value: T, op: &str) -> FerrotorchResult<f32> {
     <T as num_traits::ToPrimitive>::to_f32(&value).ok_or_else(|| FerrotorchError::InvalidArgument {
         message: format!("{op}: scalar is not representable as f32"),
@@ -157,6 +207,9 @@ impl<T: Float> ReluBackward<T> {
 
 impl<T: Float> GradFn<T> for ReluBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.input.is_meta() {
+            return meta_input_grad(&self.input);
+        }
         if is_higher_order_backward() {
             if grad_output.device() != self.input.device() {
                 return Err(FerrotorchError::DeviceMismatch {
@@ -246,6 +299,9 @@ impl<T: Float> SigmoidBackward<T> {
 
 impl<T: Float> GradFn<T> for SigmoidBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.input.is_meta() {
+            return meta_input_grad(&self.input);
+        }
         // GPU-native path for f32/f64
         if grad_output.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -318,6 +374,9 @@ impl<T: Float> TanhBackward<T> {
 
 impl<T: Float> GradFn<T> for TanhBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.input.is_meta() {
+            return meta_input_grad(&self.input);
+        }
         // GPU-native path for f32/f64
         if grad_output.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -418,6 +477,9 @@ impl<T: Float> GeluBackward<T> {
 
 impl<T: Float> GradFn<T> for GeluBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.input.is_meta() {
+            return meta_input_grad(&self.input);
+        }
         // GPU-native path — all approximation modes have PTX kernels.
         if grad_output.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -554,6 +616,9 @@ impl<T: Float> SiluBackward<T> {
 
 impl<T: Float> GradFn<T> for SiluBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.input.is_meta() {
+            return meta_input_grad(&self.input);
+        }
         // GPU-native path for f32/f64
         if grad_output.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -630,6 +695,9 @@ impl<T: Float> SoftmaxBackward<T> {
 
 impl<T: Float> GradFn<T> for SoftmaxBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.input.is_meta() {
+            return meta_input_grad(&self.input);
+        }
         // GPU-native path for f32/f64
         if grad_output.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -813,7 +881,7 @@ impl<T: Float> GradFn<T> for LogSoftmaxBackward<T> {
 
 /// Compute `relu(x)`, attaching a backward node when gradients are enabled.
 pub fn relu<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::unary_same_shape(input)? {
+    if let Some(out) = meta_unary_operation(input, || Arc::new(ReluBackward::new(input.clone())))? {
         return Ok(out);
     }
     crate::profiler_hook::profile_op_scope("relu", "activation", &[input.shape()], || {
@@ -858,7 +926,9 @@ fn relu_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 
 /// Compute `sigmoid(x)`, attaching a backward node when gradients are enabled.
 pub fn sigmoid<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::unary_same_shape(input)? {
+    if let Some(out) = meta_unary_operation_saving_output(input, |output| {
+        Ok(Arc::new(SigmoidBackward::new(input.clone(), output)))
+    })? {
         return Ok(out);
     }
     crate::profiler_hook::profile_op_scope("sigmoid", "activation", &[input.shape()], || {
@@ -916,7 +986,9 @@ fn sigmoid_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 
 /// Compute `tanh(x)`, attaching a backward node when gradients are enabled.
 pub fn tanh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::unary_same_shape(input)? {
+    if let Some(out) = meta_unary_operation_saving_output(input, |output| {
+        Ok(Arc::new(TanhBackward::new(input.clone(), output)))
+    })? {
         return Ok(out);
     }
     crate::profiler_hook::profile_op_scope("tanh", "activation", &[input.shape()], || {
@@ -980,8 +1052,9 @@ pub fn gelu_with<T: Float>(
     input: &Tensor<T>,
     approximate: GeluApproximate,
 ) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::unary_same_shape(input)? {
-        let _ = approximate;
+    if let Some(out) = meta_unary_operation(input, || {
+        Arc::new(GeluBackward::new(input.clone(), approximate))
+    })? {
         return Ok(out);
     }
     // GPU fast path for all approximation modes (f32/f64).
@@ -1069,7 +1142,7 @@ pub fn gelu<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// Compute `silu(x) = x * sigmoid(x)`, attaching a backward node when
 /// gradients are enabled.
 pub fn silu<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::unary_same_shape(input)? {
+    if let Some(out) = meta_unary_operation(input, || Arc::new(SiluBackward::new(input.clone())))? {
         return Ok(out);
     }
     crate::profiler_hook::profile_op_scope("silu", "activation", &[input.shape()], || {
@@ -1127,7 +1200,9 @@ fn silu_inner<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// Compute `softmax(x)` along the last axis, attaching a backward node when
 /// gradients are enabled.
 pub fn softmax<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::unary_same_shape(input)? {
+    if let Some(out) = meta_unary_operation_saving_output(input, |output| {
+        Ok(Arc::new(SoftmaxBackward::new(input.clone(), output)))
+    })? {
         return Ok(out);
     }
     crate::profiler_hook::profile_op_scope("softmax", "activation", &[input.shape()], || {

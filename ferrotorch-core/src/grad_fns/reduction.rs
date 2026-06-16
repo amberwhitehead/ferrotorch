@@ -85,6 +85,22 @@ fn scalar_tensor_on_device<T: Float>(
     )
 }
 
+fn meta_reduction_operation<T, F>(
+    input: &Tensor<T>,
+    shape: Vec<usize>,
+    make_grad_fn: F,
+) -> FerrotorchResult<Tensor<T>>
+where
+    T: Float,
+    F: FnOnce() -> Arc<dyn GradFn<T>>,
+{
+    if is_grad_enabled() && input.requires_grad() {
+        crate::meta_propagate::meta_operation(shape, make_grad_fn())
+    } else {
+        crate::meta_propagate::meta_tensor(shape)
+    }
+}
+
 fn broadcast_scalar_grad_to_shape<T: Float>(
     grad_output: &Tensor<T>,
     input_shape: &[usize],
@@ -96,6 +112,9 @@ fn broadcast_scalar_grad_to_shape<T: Float>(
                 grad_output.shape()
             ),
         });
+    }
+    if grad_output.is_meta() {
+        return crate::meta_propagate::meta_tensor(input_shape.to_vec());
     }
     let strides = vec![0isize; input_shape.len()];
     grad_output.as_strided(input_shape, &strides, Some(grad_output.storage_offset()))
@@ -126,6 +145,9 @@ fn broadcast_dim_grad_to_input<T: Float>(
                 expected_shape
             ),
         });
+    }
+    if grad_output.is_meta() {
+        return crate::meta_propagate::meta_tensor(input_shape.to_vec());
     }
 
     let mut strides = Vec::with_capacity(input_shape.len());
@@ -159,6 +181,11 @@ pub struct SumBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for SumBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.input.is_meta() {
+            return Ok(vec![Some(crate::meta_propagate::meta_tensor(
+                self.input.shape().to_vec(),
+            )?)]);
+        }
         if is_higher_order_backward() {
             let grad_input = broadcast_scalar_grad_to_shape(grad_output, self.input.shape())?;
             return Ok(vec![Some(grad_input)]);
@@ -223,8 +250,12 @@ impl<T: Float> GradFn<T> for SumBackward<T> {
 /// When gradient tracking is enabled and the input requires grad, the returned
 /// tensor carries a [`SumBackward`] node.
 pub fn sum<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::reduce_all(input)? {
-        return Ok(out);
+    if input.is_meta() {
+        return meta_reduction_operation(input, vec![], || {
+            Arc::new(SumBackward {
+                input: input.clone(),
+            })
+        });
     }
     crate::profiler_hook::profile_op_scope("sum", "reduction", &[input.shape()], || {
         sum_inner(input)
@@ -288,6 +319,11 @@ pub struct MeanBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for MeanBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.input.is_meta() {
+            return Ok(vec![Some(crate::meta_propagate::meta_tensor(
+                self.input.shape().to_vec(),
+            )?)]);
+        }
         if is_higher_order_backward() {
             let broadcast = broadcast_scalar_grad_to_shape(grad_output, self.input.shape())?;
             let n = T::from(self.input.numel()).unwrap();
@@ -354,8 +390,12 @@ impl<T: Float> GradFn<T> for MeanBackward<T> {
 /// When gradient tracking is enabled and the input requires grad, the returned
 /// tensor carries a [`MeanBackward`] node.
 pub fn mean<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::reduce_all(input)? {
-        return Ok(out);
+    if input.is_meta() {
+        return meta_reduction_operation(input, vec![], || {
+            Arc::new(MeanBackward {
+                input: input.clone(),
+            })
+        });
     }
     crate::profiler_hook::profile_op_scope("mean", "reduction", &[input.shape()], || {
         mean_inner(input)
@@ -432,6 +472,11 @@ pub struct ProdBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for ProdBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.input.is_meta() {
+            return Ok(vec![Some(crate::meta_propagate::meta_tensor(
+                self.input.shape().to_vec(),
+            )?)]);
+        }
         // GPU fast path (#785): on-device prefix-suffix kernel handles
         // all zero cases (no zero, single zero, multi-zero) with a
         // single launch — no host detour for the gradient values.
@@ -524,8 +569,12 @@ impl<T: Float> GradFn<T> for ProdBackward<T> {
 /// When gradient tracking is enabled and the input requires grad, the returned
 /// tensor carries a [`ProdBackward`] node.
 pub fn prod<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::reduce_all(input)? {
-        return Ok(out);
+    if input.is_meta() {
+        return meta_reduction_operation(input, vec![], || {
+            Arc::new(ProdBackward {
+                input: input.clone(),
+            })
+        });
     }
     crate::profiler_hook::profile_op_scope("prod", "reduction", &[input.shape()], || {
         prod_inner(input)
@@ -869,6 +918,11 @@ pub struct SumDimBackward<T: Float> {
 impl<T: Float> GradFn<T> for SumDimBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let input_shape = self.input.shape();
+        if self.input.is_meta() {
+            return Ok(vec![Some(crate::meta_propagate::meta_tensor(
+                input_shape.to_vec(),
+            )?)]);
+        }
 
         if is_higher_order_backward() {
             let grad_input =
@@ -1011,8 +1065,38 @@ pub fn sum_dim<T: Float>(
     dim: i64,
     keepdim: bool,
 ) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::reduce_dim(input, dim, keepdim)? {
-        return Ok(out);
+    if input.is_meta() {
+        let ndim = input.ndim();
+        if ndim == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "meta_propagate::reduce_dim: cannot reduce a scalar tensor".into(),
+            });
+        }
+        let norm_dim = if dim < 0 {
+            (ndim as i64 + dim) as usize
+        } else {
+            dim as usize
+        };
+        if norm_dim >= ndim {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "meta_propagate::reduce_dim: dim {dim} out of bounds for tensor with {ndim} dimensions"
+                ),
+            });
+        }
+        let mut out_shape = input.shape().to_vec();
+        if keepdim {
+            out_shape[norm_dim] = 1;
+        } else {
+            out_shape.remove(norm_dim);
+        }
+        return meta_reduction_operation(input, out_shape, || {
+            Arc::new(SumDimBackward {
+                input: input.clone(),
+                dim: norm_dim,
+                keepdim,
+            })
+        });
     }
     crate::profiler_hook::profile_op_scope("sum_dim", "reduction", &[input.shape()], || {
         sum_dim_inner(input, dim, keepdim)
@@ -1407,6 +1491,11 @@ impl<T: Float> GradFn<T> for MeanDimBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let input_shape = self.input.shape();
         let dim_size = input_shape[self.dim];
+        if self.input.is_meta() {
+            return Ok(vec![Some(crate::meta_propagate::meta_tensor(
+                input_shape.to_vec(),
+            )?)]);
+        }
 
         if is_higher_order_backward() {
             let broadcast =
@@ -1572,8 +1661,38 @@ pub fn mean_dim<T: Float>(
     dim: i64,
     keepdim: bool,
 ) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::reduce_dim(input, dim, keepdim)? {
-        return Ok(out);
+    if input.is_meta() {
+        let ndim = input.ndim();
+        if ndim == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "meta_propagate::reduce_dim: cannot reduce a scalar tensor".into(),
+            });
+        }
+        let norm_dim = if dim < 0 {
+            (ndim as i64 + dim) as usize
+        } else {
+            dim as usize
+        };
+        if norm_dim >= ndim {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "meta_propagate::reduce_dim: dim {dim} out of bounds for tensor with {ndim} dimensions"
+                ),
+            });
+        }
+        let mut out_shape = input.shape().to_vec();
+        if keepdim {
+            out_shape[norm_dim] = 1;
+        } else {
+            out_shape.remove(norm_dim);
+        }
+        return meta_reduction_operation(input, out_shape, || {
+            Arc::new(MeanDimBackward {
+                input: input.clone(),
+                dim: norm_dim,
+                keepdim,
+            })
+        });
     }
     crate::profiler_hook::profile_op_scope("mean_dim", "reduction", &[input.shape()], || {
         mean_dim_inner(input, dim, keepdim)
@@ -1985,6 +2104,11 @@ pub struct LogsumexpBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for LogsumexpBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.input.is_meta() {
+            return Ok(vec![Some(crate::meta_propagate::meta_tensor(
+                self.input.shape().to_vec(),
+            )?)]);
+        }
         if self.input.is_cuda() {
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -2083,8 +2207,18 @@ impl<T: Float> GradFn<T> for LogsumexpBackward<T> {
 /// kernel is in `ops::elementwise::logsumexp` (max-subtraction for
 /// stability); the autograd VJP is `grad * exp(input - result)`.
 pub fn logsumexp<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::reduce_all(input)? {
-        return Ok(out);
+    if input.is_meta() {
+        let result = crate::meta_propagate::meta_tensor(vec![])?;
+        if is_grad_enabled() && input.requires_grad() {
+            return crate::meta_propagate::meta_operation(
+                vec![],
+                Arc::new(LogsumexpBackward {
+                    input: input.clone(),
+                    result,
+                }),
+            );
+        }
+        return Ok(result);
     }
     let result = if input.is_cuda() {
         let input_ref = if input.is_contiguous() {
@@ -2139,6 +2273,11 @@ pub struct LogsumexpDimBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for LogsumexpDimBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.input.is_meta() {
+            return Ok(vec![Some(crate::meta_propagate::meta_tensor(
+                self.input.shape().to_vec(),
+            )?)]);
+        }
         if self.input.is_cuda() {
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -2273,9 +2412,6 @@ pub fn logsumexp_dim<T: Float>(
     dim: i64,
     keepdim: bool,
 ) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::reduce_dim(input, dim, keepdim)? {
-        return Ok(out);
-    }
     let ndim = input.ndim();
     if ndim == 0 {
         if dim != 0 && dim != -1 {
@@ -2308,6 +2444,26 @@ pub fn logsumexp_dim<T: Float>(
                 "logsumexp_dim: dim {dim} is out of bounds for tensor with {ndim} dimensions"
             ),
         });
+    }
+    if input.is_meta() {
+        let mut keepdim_shape = input.shape().to_vec();
+        keepdim_shape[norm_dim] = 1;
+        let mut out_shape = keepdim_shape.clone();
+        if !keepdim {
+            out_shape.remove(norm_dim);
+        }
+        let result_keepdim = crate::meta_propagate::meta_tensor(keepdim_shape)?;
+        if is_grad_enabled() && input.requires_grad() {
+            return crate::meta_propagate::meta_operation(
+                out_shape,
+                Arc::new(LogsumexpDimBackward {
+                    input: input.clone(),
+                    result_keepdim,
+                    dim: norm_dim,
+                }),
+            );
+        }
+        return crate::meta_propagate::meta_tensor(out_shape);
     }
 
     // Always produce the keepdim form first; squeeze later if requested.
@@ -2586,6 +2742,11 @@ pub struct VarBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for VarBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.input.is_meta() {
+            return Ok(vec![Some(crate::meta_propagate::meta_tensor(
+                self.input.shape().to_vec(),
+            )?)]);
+        }
         if self.input.is_cuda() {
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -2727,6 +2888,11 @@ pub struct StdBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for StdBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.input.is_meta() {
+            return Ok(vec![Some(crate::meta_propagate::meta_tensor(
+                self.input.shape().to_vec(),
+            )?)]);
+        }
         if self.input.is_cuda() {
             let backend =
                 crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -2882,8 +3048,29 @@ fn var_inner<T: Float>(
     correction: f64,
     take_sqrt: bool,
 ) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::reduce_all(input)? {
-        return Ok(out);
+    if input.is_meta() {
+        if is_grad_enabled() && input.requires_grad() {
+            let zero = <T as num_traits::Zero>::zero();
+            let denom_f = (input.numel() as f64 - correction).max(0.0);
+            let grad_fn: Arc<dyn GradFn<T>> = if take_sqrt {
+                Arc::new(StdBackward {
+                    input: input.clone(),
+                    mean: zero,
+                    denom: denom_f,
+                    correction,
+                    result: zero,
+                })
+            } else {
+                Arc::new(VarBackward {
+                    input: input.clone(),
+                    mean: zero,
+                    denom: denom_f,
+                    correction,
+                })
+            };
+            return crate::meta_propagate::meta_operation(vec![], grad_fn);
+        }
+        return crate::meta_propagate::meta_tensor(vec![]);
     }
     if input.is_cuda() {
         let backend =

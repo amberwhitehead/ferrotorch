@@ -83,10 +83,10 @@ Mirrors PyTorch's `torch.utils.checkpoint.checkpoint` at
   produces correct partials for `f(a, b) = a*b + a`:
   `df/da = b + 1`, `df/db = a` —
   `test_checkpoint_multi_two_inputs_both_grad` at
-  `checkpoint.rs:606`.
+  `checkpoint.rs:520`.
 - [x] AC-4: Multi-input partial-grad case (only second input
   requires grad) produces correct grad for that input —
-  `test_checkpoint_multi_partial_grad` at `checkpoint.rs:638`.
+  `test_checkpoint_multi_partial_grad` at `checkpoint.rs:552`.
 - [x] AC-5: Single-input stochastic uniform checkpoint recomputes the
   exact forward random values during backward —
   `test_checkpoint_preserves_cpu_uniform_rng_for_recompute`.

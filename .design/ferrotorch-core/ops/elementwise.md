@@ -72,7 +72,7 @@ they are the building-blocks `grad_fns::*` modules use under
 
 ## Architecture
 
-`simd_*` ops at `ops/elementwise.rs:32-95` are the type-specific
+`simd_*` ops at `ops/elementwise.rs:67-144` are the type-specific
 f32/f64 wrappers around the SIMD-accelerated arithmetic. They take
 `Tensor<f32>` / `Tensor<f64>` directly (not generic) because the SIMD
 lane width depends on the type.
@@ -106,12 +106,12 @@ Reductions at `:1113-1342`:
   max` pattern; `logsumexp_dim` is the per-axis variant.
 
 **Non-test consumers**: `crate::grad_fns::arithmetic::add` / `mul` /
-`sub` / `div` at `grad_fns/arithmetic.rs:608`, `1361`, etc., call
+`sub` / `div` at `grad_fns/arithmetic.rs:950`, `1726`, etc., call
 `fast_add` / `fast_mul` / `fast_sub` / `crate::ops::elementwise::fast_div`
 directly. `crate::grad_fns::transcendental::exp` / `log` /
-`sin` / `cos` at `grad_fns/transcendental.rs:142,242,319,396` call
+`sin` / `cos` at `grad_fns/transcendental.rs:281,384,491,568` call
 `fast_exp`, `fast_log`, `fast_sin`, `fast_cos`. `grad_fns::activation::sigmoid`
-/ `tanh` at `grad_fns/activation.rs:772,827` call `fast_sigmoid` /
+/ `tanh` at `grad_fns/activation.rs:928,988` call `fast_sigmoid` /
 `fast_tanh`. The `unary_map` / `scalar_map` / `binary_map` are used
 by `grad_fns::arithmetic::scale_tensor` (`grad_fns/arithmetic.rs:38`
 import) and by every `crate::special::*` op (the polynomial families,
@@ -139,9 +139,9 @@ sweep coverage via `add` (88/88 passed), `mul` (72/72 passed),
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `simd_add_f32` at `ops/elementwise.rs:32` etc.; non-test consumer: `grad_fns::arithmetic::add_inner` calls into `fast_add` at `grad_fns/arithmetic.rs:608`, which routes to `simd_add_f32` for same-shape f32 inputs |
-| REQ-2 | SHIPPED | impl: `fast_add`/`fast_mul`/`fast_sub`/`fast_div` at `ops/elementwise.rs:185,266,351,437`; `fast_exp`/`fast_log`/`fast_sigmoid`/`fast_tanh`/`fast_sin`/`fast_cos` at `:610,653,750,789,836,884`; non-test consumer: `grad_fns::arithmetic::add_inner` at `grad_fns/arithmetic.rs:608` (`fast_add`), `grad_fns::arithmetic::mul_inner` at `:1361` (`fast_mul`), `grad_fns::transcendental::exp` at `grad_fns/transcendental.rs:282` (`fast_exp`), etc. |
-| REQ-3 | SHIPPED | impl: `unary_map`/`binary_map`/`scalar_map` at `ops/elementwise.rs:924,944,1027`; non-test consumer: `grad_fns::arithmetic::scale_tensor` at `grad_fns/arithmetic.rs:721` calls `scalar_map`; every `crate::special::*` op uses `unary_map` (`special.rs:676` etc.) |
+| REQ-1 | SHIPPED | impl: `simd_add_f32` at `ops/elementwise.rs:67` etc.; non-test consumer: `grad_fns::arithmetic::add_inner` calls into `fast_add` at `grad_fns/arithmetic.rs:950`, which routes to `simd_add_f32` for same-shape f32 inputs |
+| REQ-2 | SHIPPED | impl: `fast_add`/`fast_mul`/`fast_sub`/`fast_div` at `ops/elementwise.rs:185,266,351,437`; `fast_exp`/`fast_log`/`fast_sigmoid`/`fast_tanh`/`fast_sin`/`fast_cos` at `:610,649,742,782,830,878`; non-test consumer: `grad_fns::arithmetic::add_inner` at `grad_fns/arithmetic.rs:950` (`fast_add`), `grad_fns::arithmetic::mul_inner` at `:1726` (`fast_mul`), `grad_fns::transcendental::exp` at `grad_fns/transcendental.rs:281` (`fast_exp`), etc. |
+| REQ-3 | SHIPPED | impl: `unary_map`/`binary_map`/`scalar_map` at `ops/elementwise.rs:924,944,1027`; non-test consumer: `grad_fns::arithmetic::scale_tensor` at `grad_fns/arithmetic.rs:1123` calls `scalar_map`; every `crate::special::*` op uses `unary_map` (`special.rs:676` etc.) |
 | REQ-4 | SHIPPED | impl: `sum`/`sum_axis`/`mean`/`nansum`/`nanmean`/`logsumexp`/`logsumexp_dim` at `ops/elementwise.rs:1091,1101,1150,1167,1185,1211,1255`; non-test consumer: `grad_fns::reduction::sum` chains into `ops::elementwise::sum` for the CPU fallback path. The reduction surface is re-exported transitively via `grad_fns::reduction::*` |
 | REQ-5 | SHIPPED | impl: `logsumexp` numerical-stability flow at `ops/elementwise.rs:1233-1262`; non-test consumer: `grad_fns::reduction::logsumexp` at `grad_fns/reduction.rs` invokes this for the CPU path |
 | REQ-6 | SHIPPED | impl: `nansum`/`nanmean` at `ops/elementwise.rs:1189,1207`; non-test consumer: re-exported via `ferrotorch_core::ops::elementwise::{nansum, nanmean}` public path |

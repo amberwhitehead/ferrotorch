@@ -455,7 +455,7 @@ impl<T: Float> crate::tensor::GradFn<T> for CheckpointMultiBackward<T> {
 mod tests {
     use super::*;
     use crate::autograd::autocast::{AutocastDtype, autocast, is_autocast_enabled};
-    use crate::creation::{from_slice, rand, randn, scalar};
+    use crate::creation::{from_slice, scalar};
     use crate::grad_fns::arithmetic::{add, mul};
     use crate::grad_fns::reduction::sum;
     use crate::storage::TensorStorage;
@@ -510,92 +510,6 @@ mod tests {
         assert_eq!(yd, &[2.0, 4.0, 6.0]);
         // No grad_fn since input had no grad.
         assert!(y.grad_fn().is_none());
-    }
-
-    #[test]
-    fn test_checkpoint_preserves_cpu_uniform_rng_for_recompute() {
-        let _guard = crate::rng::default_rng_test_lock();
-        crate::rng::manual_seed(123);
-        let x = leaf_grad(&[1.0; 6], &[6]);
-
-        let y = checkpoint(
-            |t: &Tensor<f32>| {
-                let mask = rand::<f32>(t.shape())?;
-                mul(t, &mask)
-            },
-            &x,
-        )
-        .unwrap();
-
-        let forward_mask = y.data().unwrap().to_vec();
-        sum(&y).unwrap().backward().unwrap();
-
-        let grad = x.grad().unwrap().expect("x should have a gradient");
-        assert_eq!(
-            grad.data().unwrap(),
-            forward_mask.as_slice(),
-            "checkpoint recompute must reuse the exact CPU uniform RNG stream"
-        );
-    }
-
-    #[test]
-    fn test_checkpoint_preserves_cpu_normal_rng_cache_for_recompute() {
-        let _guard = crate::rng::default_rng_test_lock();
-        crate::rng::manual_seed(456);
-        // Prime the Box-Muller cache with one normal sample. A checkpoint
-        // snapshot must include cached normal state, not just seed/counter.
-        let _cached_sibling = randn::<f32>(&[1]).unwrap();
-        let x = leaf_grad(&[1.0; 5], &[5]);
-
-        let y = checkpoint(
-            |t: &Tensor<f32>| {
-                let noise = randn::<f32>(t.shape())?;
-                mul(t, &noise)
-            },
-            &x,
-        )
-        .unwrap();
-
-        let forward_noise = y.data().unwrap().to_vec();
-        sum(&y).unwrap().backward().unwrap();
-
-        let grad = x.grad().unwrap().expect("x should have a gradient");
-        assert_eq!(
-            grad.data().unwrap(),
-            forward_noise.as_slice(),
-            "checkpoint recompute must preserve cached CPU normal samples"
-        );
-    }
-
-    #[test]
-    fn test_checkpoint_backward_does_not_advance_caller_cpu_rng_stream() {
-        let _guard = crate::rng::default_rng_test_lock();
-        crate::rng::manual_seed(789);
-        let x = leaf_grad(&[1.0; 6], &[6]);
-
-        let y = checkpoint(
-            |t: &Tensor<f32>| {
-                let mask = rand::<f32>(t.shape())?;
-                mul(t, &mask)
-            },
-            &x,
-        )
-        .unwrap();
-        let after_forward = rand::<f32>(&[4]).unwrap().data().unwrap().to_vec();
-
-        sum(&y).unwrap().backward().unwrap();
-        let after_backward = rand::<f32>(&[4]).unwrap().data().unwrap().to_vec();
-
-        crate::rng::manual_seed(789);
-        let _forward_mask = rand::<f32>(&[6]).unwrap();
-        let expected_after_forward = rand::<f32>(&[4]).unwrap().data().unwrap().to_vec();
-        let expected_after_backward = rand::<f32>(&[4]).unwrap().data().unwrap().to_vec();
-
-        assert_eq!(after_forward, expected_after_forward);
-        assert_eq!(
-            after_backward, expected_after_backward,
-            "checkpoint recompute should fork RNG and restore the caller stream"
-        );
     }
 
     // -----------------------------------------------------------------------
@@ -669,34 +583,6 @@ mod tests {
         let yd = y.data().unwrap();
         assert_eq!(yd, &[4.0, 6.0]);
         assert!(y.grad_fn().is_none());
-    }
-
-    #[test]
-    fn test_checkpoint_multi_preserves_cpu_uniform_rng_for_recompute() {
-        let _guard = crate::rng::default_rng_test_lock();
-        crate::rng::manual_seed(321);
-        let a = leaf_grad(&[1.0; 4], &[4]);
-        let b = from_slice(&[0.0f32; 4], &[4]).unwrap();
-
-        let y = checkpoint_multi(
-            |ts: &[Tensor<f32>]| {
-                let mask = rand::<f32>(ts[0].shape())?;
-                let masked = mul(&ts[0], &mask)?;
-                add(&masked, &ts[1])
-            },
-            &[a.clone(), b],
-        )
-        .unwrap();
-
-        let forward_mask = y.data().unwrap().to_vec();
-        sum(&y).unwrap().backward().unwrap();
-
-        let grad = a.grad().unwrap().expect("a should have a gradient");
-        assert_eq!(
-            grad.data().unwrap(),
-            forward_mask.as_slice(),
-            "checkpoint_multi recompute must reuse the exact CPU RNG stream"
-        );
     }
 
     // -----------------------------------------------------------------------

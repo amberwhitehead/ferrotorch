@@ -35,17 +35,43 @@
 //! | REQ-4 | SHIPPED | impl `reduce_all`; non-test consumer `grad_fns::reduction::sum_all` + `mean_all`, `prod_all`. |
 //! | REQ-5 | SHIPPED | impl `matmul`; non-test consumer `ops::linalg::matmul`. |
 
-use crate::creation;
+use std::sync::Arc;
+
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
-use crate::shape::broadcast_shapes;
-use crate::tensor::Tensor;
+use crate::shape::{broadcast_shapes, checked_numel};
+use crate::storage::TensorStorage;
+use crate::tensor::{GradFn, Tensor};
+
+pub(crate) fn meta_tensor<T: Float>(shape: Vec<usize>) -> FerrotorchResult<Tensor<T>> {
+    let numel = checked_numel(&shape, "meta_propagate::meta_tensor")?;
+    Tensor::from_storage(TensorStorage::meta(numel), shape, false)
+}
+
+pub(crate) fn meta_operation<T: Float>(
+    shape: Vec<usize>,
+    grad_fn: Arc<dyn GradFn<T>>,
+) -> FerrotorchResult<Tensor<T>> {
+    let numel = checked_numel(&shape, "meta_propagate::meta_operation")?;
+    Tensor::from_operation(TensorStorage::meta(numel), shape, grad_fn)
+}
+
+pub(crate) fn meta_operation_saving_output<T: Float, F>(
+    shape: Vec<usize>,
+    make_grad_fn: F,
+) -> FerrotorchResult<Tensor<T>>
+where
+    F: FnOnce(Tensor<T>) -> FerrotorchResult<Arc<dyn GradFn<T>>>,
+{
+    let numel = checked_numel(&shape, "meta_propagate::meta_operation_saving_output")?;
+    Tensor::from_operation_saving_output(TensorStorage::meta(numel), shape, make_grad_fn)
+}
 
 /// Meta-device fast path for unary ops that produce an output of the same
 /// shape as the input (most elementwise activations, neg, abs, sqrt, etc.).
 pub fn unary_same_shape<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Option<Tensor<T>>> {
     if input.is_meta() {
-        Ok(Some(creation::zeros_meta(input.shape())?))
+        Ok(Some(meta_tensor(input.shape().to_vec())?))
     } else {
         Ok(None)
     }
@@ -64,7 +90,7 @@ pub fn binary_broadcast<T: Float>(
     match (a.is_meta(), b.is_meta()) {
         (true, true) => {
             let out_shape = broadcast_shapes(a.shape(), b.shape())?;
-            Ok(Some(creation::zeros_meta(&out_shape)?))
+            Ok(Some(meta_tensor(out_shape)?))
         }
         (false, false) => Ok(None),
         _ => Err(FerrotorchError::DeviceMismatch {
@@ -111,7 +137,7 @@ pub fn reduce_dim<T: Float>(
     } else {
         out_shape.remove(norm_dim);
     }
-    Ok(Some(creation::zeros_meta(&out_shape)?))
+    Ok(Some(meta_tensor(out_shape)?))
 }
 
 /// Meta-device fast path for full reductions (sum, mean, prod) that
@@ -119,7 +145,7 @@ pub fn reduce_dim<T: Float>(
 pub fn reduce_all<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Option<Tensor<T>>> {
     if input.is_meta() {
         // Scalar (0-D) shape.
-        Ok(Some(creation::zeros_meta(&[])?))
+        Ok(Some(meta_tensor(vec![])?))
     } else {
         Ok(None)
     }
@@ -198,13 +224,14 @@ pub fn matmul<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Option
         out_shape.push(rhs_cols);
     }
 
-    Ok(Some(creation::zeros_meta(&out_shape)?))
+    Ok(Some(meta_tensor(out_shape)?))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Tensor;
+    use crate::creation;
 
     fn meta<T: Float>(shape: &[usize]) -> Tensor<T> {
         creation::zeros_meta(shape).unwrap()

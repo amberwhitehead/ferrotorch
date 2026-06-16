@@ -12,22 +12,22 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:812`, `add_scaled` at `:1250`, `add_out` at `:1123`, `add_scaled_out` at `:1173`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
-//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:1416` delegates to `sub_scaled` at `:1445` -> `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
+//! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:928`, `add_scaled` at `:1377`, `add_out` at `:1250`, `add_scaled_out` at `:1300`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
+//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:1549` delegates to `sub_scaled` at `:1578` -> `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
 //! | REQ-3 (mul) | SHIPPED | `mul` + `MulBackward` in `arithmetic.rs`; parity `[mul] 72/72` (grep=1) |
 //! | REQ-4 (div) | SHIPPED | `div` + `DivBackward` in `arithmetic.rs`; parity `[div] 72/72` (grep=1) |
 //! | REQ-5 (neg) | SHIPPED | `neg` + `NegBackward`; parity `[neg] 8/8` (grep=1) |
 //! | REQ-6 (abs) | SHIPPED | `abs` + `AbsBackward`; parity `[abs] 8/8` (grep=1) |
 //! | REQ-7 (sqrt) | SHIPPED | `sqrt` + `SqrtBackward`; parity `[sqrt] 8/8` (grep=1) |
 //! | REQ-8 (pow scalar exponent) | SHIPPED | `pow` + `PowBackward` (scalar exp; tensor-exp overload returns `Ok(None)` and is skipped, not failed); parity `[pow] 24/72 passed 48 skipped` (grep=1) |
-//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:1497` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
-//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:2342` + `RsqrtBackward` at `:2250`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
-//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:2489` + `ReciprocalBackward` at `:2412`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
-//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:3334` + `FloorDivideBackward` at `:3178` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
-//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:2688` + `RemainderBackward` at `:2575`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
-//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:2997` + `FmodBackward` at `:2885`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
-//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:3751` + `AddcmulBackward` at `:3573`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
-//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:4119` + `AddcdivBackward` at `:3922`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
+//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:1630` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
+//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:2500` + `RsqrtBackward` at `:2405`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
+//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:2652` + `ReciprocalBackward` at `:2572`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
+//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:3509` + `FloorDivideBackward` at `:3353` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
+//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:2853` + `RemainderBackward` at `:2740`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
+//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:3167` + `FmodBackward` at `:3055`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
+//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:3931` + `AddcmulBackward` at `:3753`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
+//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:4299` + `AddcdivBackward` at `:4102`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
 
 use std::any::TypeId;
 use std::sync::Arc;
@@ -159,6 +159,90 @@ fn needs_grad<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> bool {
 #[inline]
 fn needs_grad_unary<T: Float>(a: &Tensor<T>) -> bool {
     is_grad_enabled() && a.requires_grad()
+}
+
+fn meta_unary_operation<T, F>(a: &Tensor<T>, make_grad_fn: F) -> FerrotorchResult<Option<Tensor<T>>>
+where
+    T: Float,
+    F: FnOnce() -> FerrotorchResult<Arc<dyn GradFn<T>>>,
+{
+    if !a.is_meta() {
+        return Ok(None);
+    }
+    let shape = a.shape().to_vec();
+    if needs_grad_unary(a) {
+        Ok(Some(crate::meta_propagate::meta_operation(
+            shape,
+            make_grad_fn()?,
+        )?))
+    } else {
+        Ok(Some(crate::meta_propagate::meta_tensor(shape)?))
+    }
+}
+
+fn meta_unary_operation_saving_output<T, F>(
+    a: &Tensor<T>,
+    make_grad_fn: F,
+) -> FerrotorchResult<Option<Tensor<T>>>
+where
+    T: Float,
+    F: FnOnce(Tensor<T>) -> FerrotorchResult<Arc<dyn GradFn<T>>>,
+{
+    if !a.is_meta() {
+        return Ok(None);
+    }
+    let shape = a.shape().to_vec();
+    if needs_grad_unary(a) {
+        Ok(Some(crate::meta_propagate::meta_operation_saving_output(
+            shape,
+            make_grad_fn,
+        )?))
+    } else {
+        Ok(Some(crate::meta_propagate::meta_tensor(shape)?))
+    }
+}
+
+fn meta_binary_operation<T, F>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    make_grad_fn: F,
+) -> FerrotorchResult<Option<Tensor<T>>>
+where
+    T: Float,
+    F: FnOnce() -> FerrotorchResult<Arc<dyn GradFn<T>>>,
+{
+    match (a.is_meta(), b.is_meta()) {
+        (false, false) => Ok(None),
+        (true, true) => {
+            let shape = broadcast_shapes(a.shape(), b.shape())?;
+            if needs_grad(a, b) {
+                Ok(Some(crate::meta_propagate::meta_operation(
+                    shape,
+                    make_grad_fn()?,
+                )?))
+            } else {
+                Ok(Some(crate::meta_propagate::meta_tensor(shape)?))
+            }
+        }
+        _ => Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        }),
+    }
+}
+
+fn meta_grad_like<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Option<Tensor<T>>> {
+    if input.requires_grad() {
+        Ok(Some(crate::meta_propagate::meta_tensor(
+            input.shape().to_vec(),
+        )?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn meta_unary_backward<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+    Ok(vec![meta_grad_like(input)?])
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -608,6 +692,38 @@ pub(crate) fn reduce_grad_to_shape<T: Float>(
         return reduce_grad_to_shape_differentiable(grad, target_shape);
     }
 
+    if grad.is_meta() {
+        let grad_numel: usize = crate::shape::numel(grad_shape);
+        let target_numel: usize = crate::shape::numel(target_shape);
+        if grad_numel == target_numel || target_shape.is_empty() {
+            return crate::meta_propagate::meta_tensor(target_shape.to_vec());
+        }
+
+        let grad_ndim = grad_shape.len();
+        let target_ndim = target_shape.len();
+        if grad_ndim < target_ndim {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "reduce_grad_to_shape: gradient has {grad_ndim} dim(s) but target has {target_ndim} dim(s) ({grad_shape:?} -> {target_shape:?}). \
+                     Standard broadcasting backward requires grad_ndim >= target_ndim."
+                ),
+            });
+        }
+
+        let offset = grad_ndim - target_ndim;
+        for (axis, &target_dim) in target_shape.iter().enumerate() {
+            let grad_dim = grad_shape[axis + offset];
+            if grad_dim != target_dim && target_dim != 1 {
+                return Err(FerrotorchError::ShapeMismatch {
+                    message: format!(
+                        "reduce_grad_to_shape: cannot reduce gradient shape {grad_shape:?} to target shape {target_shape:?}"
+                    ),
+                });
+            }
+        }
+        return crate::meta_propagate::meta_tensor(target_shape.to_vec());
+    }
+
     // Scalar target: sum everything.
     if target_shape.is_empty() {
         // Use the reduction forward op which already handles GPU.
@@ -817,7 +933,12 @@ pub fn add<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>
         });
     }
 
-    if let Some(out) = crate::meta_propagate::binary_broadcast(a, b)? {
+    if let Some(out) = meta_binary_operation(a, b, || {
+        Ok(Arc::new(AddBackward {
+            a: a.clone(),
+            b: b.clone(),
+        }))
+    })? {
         return Ok(out);
     }
 
@@ -945,6 +1066,12 @@ impl<T: Float> GradFn<T> for AddScaledBackward<T> {
             None
         };
         let db = if self.b.requires_grad() {
+            if grad_output.is_meta() {
+                return Ok(vec![
+                    da,
+                    Some(reduce_grad_to_shape(grad_output, self.b.shape())?),
+                ]);
+            }
             // db = alpha * grad. `T::from(self.alpha)` is infallible for the
             // Float types we support (f32/f64/bf16/f16) given a finite input;
             // a NaN/Inf alpha is preserved by the cast, matching PyTorch.
@@ -1269,7 +1396,13 @@ pub fn add_scaled<T: Float>(
             got: b.device(),
         });
     }
-    if let Some(out) = crate::meta_propagate::binary_broadcast(a, b)? {
+    if let Some(out) = meta_binary_operation(a, b, || {
+        Ok(Arc::new(AddScaledBackward {
+            a: a.clone(),
+            b: b.clone(),
+            alpha,
+        }))
+    })? {
         return Ok(out);
     }
     crate::profiler_hook::profile_op_scope(
@@ -1576,7 +1709,12 @@ pub fn mul<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>
         });
     }
 
-    if let Some(out) = crate::meta_propagate::binary_broadcast(a, b)? {
+    if let Some(out) = meta_binary_operation(a, b, || {
+        Ok(Arc::new(MulBackward {
+            a: a.saved_for_backward()?,
+            b: b.saved_for_backward()?,
+        }))
+    })? {
         return Ok(out);
     }
 
@@ -1754,7 +1892,12 @@ pub fn div<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>
         });
     }
 
-    if let Some(out) = crate::meta_propagate::binary_broadcast(a, b)? {
+    if let Some(out) = meta_binary_operation(a, b, || {
+        Ok(Arc::new(DivBackward {
+            a: a.saved_for_backward()?,
+            b: b.saved_for_backward()?,
+        }))
+    })? {
         return Ok(out);
     }
 
@@ -1889,7 +2032,7 @@ impl<T: Float> GradFn<T> for NegBackward<T> {
 
 /// Elementwise negation: `c = -a`.
 pub fn neg<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::unary_same_shape(a)? {
+    if let Some(out) = meta_unary_operation(a, || Ok(Arc::new(NegBackward { a: a.clone() })))? {
         return Ok(out);
     }
     crate::profiler_hook::profile_op_scope("neg", "tensor_op", &[a.shape()], || neg_inner(a))
@@ -1946,6 +2089,9 @@ struct PowBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for PowBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.a.is_meta() {
+            return meta_unary_backward(&self.a);
+        }
         let da = if self.a.requires_grad() {
             // exp == 0 special case (CORE-178, crosslink #1872): upstream
             // `pytorch/torch/csrc/autograd/FunctionsManual.cpp:537-540`
@@ -2057,8 +2203,12 @@ impl<T: Float> GradFn<T> for PowBackward<T> {
 
 /// Elementwise power: `c = a ^ exp` where `exp` is a scalar `f64`.
 pub fn pow<T: Float>(a: &Tensor<T>, exp: f64) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::unary_same_shape(a)? {
-        let _ = exp;
+    if let Some(out) = meta_unary_operation(a, || {
+        Ok(Arc::new(PowBackward {
+            a: a.saved_for_backward()?,
+            exp,
+        }))
+    })? {
         return Ok(out);
     }
     crate::profiler_hook::profile_op_scope("pow", "tensor_op", &[a.shape()], || pow_inner(a, exp))
@@ -2128,6 +2278,9 @@ struct SqrtBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for SqrtBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.a.is_meta() {
+            return meta_unary_backward(&self.a);
+        }
         let da = if self.a.requires_grad() {
             if grad_output.is_cuda() {
                 // GPU path: da = grad / (2 * c)
@@ -2177,7 +2330,9 @@ impl<T: Float> GradFn<T> for SqrtBackward<T> {
 
 /// Elementwise square root: `c = sqrt(a)`.
 pub fn sqrt<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::unary_same_shape(a)? {
+    if let Some(out) =
+        meta_unary_operation_saving_output(a, |c| Ok(Arc::new(SqrtBackward { a: a.clone(), c })))?
+    {
         return Ok(out);
     }
     crate::profiler_hook::profile_op_scope("sqrt", "tensor_op", &[a.shape()], || sqrt_inner(a))
@@ -2258,6 +2413,9 @@ struct RsqrtBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for RsqrtBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.a.is_meta() {
+            return meta_unary_backward(&self.a);
+        }
         let da = if self.a.requires_grad() {
             if grad_output.is_cuda() {
                 // GPU path: da = -0.5 * grad * c^3.
@@ -2340,7 +2498,9 @@ impl<T: Float> GradFn<T> for RsqrtBackward<T> {
 /// dedicated `rsqrt_*` GPU kernel exists yet — this matches the SqrtBackward
 /// GPU pattern which composes `mul(two_gpu, sqrt(a))` similarly.
 pub fn rsqrt<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::unary_same_shape(a)? {
+    if let Some(out) =
+        meta_unary_operation_saving_output(a, |c| Ok(Arc::new(RsqrtBackward { a: a.clone(), c })))?
+    {
         return Ok(out);
     }
     crate::profiler_hook::profile_op_scope("rsqrt", "tensor_op", &[a.shape()], || rsqrt_inner(a))
@@ -2420,6 +2580,9 @@ struct ReciprocalBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for ReciprocalBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if self.a.is_meta() {
+            return meta_unary_backward(&self.a);
+        }
         let da = if self.a.requires_grad() {
             if grad_output.is_cuda() {
                 // GPU path: da = -grad * c^2.
@@ -2487,7 +2650,9 @@ impl<T: Float> GradFn<T> for ReciprocalBackward<T> {
 /// yet — this matches the rsqrt GPU pattern which composes
 /// `div(ones, sqrt(a))` similarly.
 pub fn reciprocal<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::unary_same_shape(a)? {
+    if let Some(out) = meta_unary_operation_saving_output(a, |c| {
+        Ok(Arc::new(ReciprocalBackward { a: a.clone(), c }))
+    })? {
         return Ok(out);
     }
     crate::profiler_hook::profile_op_scope("reciprocal", "tensor_op", &[a.shape()], || {
@@ -2693,7 +2858,12 @@ pub fn remainder<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Ten
         });
     }
 
-    if let Some(out) = crate::meta_propagate::binary_broadcast(a, b)? {
+    if let Some(out) = meta_binary_operation(a, b, || {
+        Ok(Arc::new(RemainderBackward {
+            a: a.saved_for_backward()?,
+            b: b.saved_for_backward()?,
+        }))
+    })? {
         return Ok(out);
     }
 
@@ -3002,7 +3172,12 @@ pub fn fmod<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T
         });
     }
 
-    if let Some(out) = crate::meta_propagate::binary_broadcast(a, b)? {
+    if let Some(out) = meta_binary_operation(a, b, || {
+        Ok(Arc::new(FmodBackward {
+            a: a.saved_for_backward()?,
+            b: b.saved_for_backward()?,
+        }))
+    })? {
         return Ok(out);
     }
 
@@ -3339,7 +3514,12 @@ pub fn floor_divide<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<
         });
     }
 
-    if let Some(out) = crate::meta_propagate::binary_broadcast(a, b)? {
+    if let Some(out) = meta_binary_operation(a, b, || {
+        Ok(Arc::new(FloorDivideBackward {
+            a: a.clone(),
+            b: b.clone(),
+        }))
+    })? {
         return Ok(out);
     }
 
@@ -4275,6 +4455,10 @@ impl<T: Float> GradFn<T> for AbsBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         use crate::gpu_dispatch::gpu_backend;
 
+        if self.a.is_meta() {
+            return meta_unary_backward(&self.a);
+        }
+
         let da = if self.a.requires_grad() {
             // GPU-native path for every CUDA floating dtype this crate stores.
             if grad_output.is_cuda() && self.a.is_cuda() {
@@ -4345,7 +4529,11 @@ impl<T: Float> GradFn<T> for AbsBackward<T> {
 
 /// Elementwise absolute value: `c = |a|`.
 pub fn abs<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if let Some(out) = crate::meta_propagate::unary_same_shape(a)? {
+    if let Some(out) = meta_unary_operation(a, || {
+        Ok(Arc::new(AbsBackward {
+            a: a.saved_for_backward()?,
+        }))
+    })? {
         return Ok(out);
     }
     crate::profiler_hook::profile_op_scope("abs", "tensor_op", &[a.shape()], || abs_inner(a))
