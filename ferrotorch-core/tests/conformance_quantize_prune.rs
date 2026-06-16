@@ -124,7 +124,7 @@ use ferrotorch_core::quantize::{
     QatLayer, QatModel, QuantDtype, QuantScheme, QuantizedTensor, cuda_rng, dequantize,
     prepare_qat, quantize, quantize_named_tensors, quantized_matmul,
 };
-use ferrotorch_core::{Tensor, TensorStorage, fake_quantize_differentiable};
+use ferrotorch_core::{FerrotorchError, Tensor, TensorStorage, fake_quantize_differentiable};
 
 // ---------------------------------------------------------------------------
 // Tolerance helpers
@@ -1253,7 +1253,7 @@ fn per_channel_observer_shape_mismatch_errors() {
 
 #[test]
 fn histogram_observer_basic() {
-    let mut obs = HistogramObserver::new(64);
+    let mut obs = HistogramObserver::new(64).expect("valid positive bin count");
     obs.observe(&[0.0, 0.5, 1.0]);
     let qp = obs.calculate_qparams(QuantDtype::Int8);
     assert_eq!(qp.scale.len(), 1);
@@ -1262,6 +1262,37 @@ fn histogram_observer_basic() {
     obs.observe(&[2.0, 3.0]);
     let qp2 = obs.calculate_qparams(QuantDtype::Int8);
     assert_eq!(qp2.scale.len(), 1);
+}
+
+#[test]
+fn histogram_observer_zero_bins_errors_at_construction() {
+    let err = HistogramObserver::new(0).expect_err("zero histogram bins must be invalid");
+    match err {
+        FerrotorchError::InvalidArgument { message } => {
+            assert!(
+                message.contains("at least one histogram bin"),
+                "unexpected error message: {message}"
+            );
+        }
+        other => panic!("expected InvalidArgument for zero-bin histogram, got {other:?}"),
+    }
+}
+
+#[test]
+fn histogram_observer_one_bin_counts_finite_values() {
+    let mut obs = HistogramObserver::new(1).expect("one bin is valid like PyTorch");
+    obs.observe(&[]);
+    assert_eq!(obs.calculate_qparams(QuantDtype::Int8).scale, vec![1.0]);
+
+    obs.observe(&[f32::NAN, 1.0, f32::INFINITY, -1.0]);
+    obs.observe(&[0.0, 2.0]);
+
+    let qp = obs.calculate_qparams(QuantDtype::Int8);
+    assert_eq!(qp.scale.len(), 1);
+    assert!(
+        qp.scale[0] > 0.0,
+        "one-bin observer should still produce positive qparams"
+    );
 }
 
 // ---------------------------------------------------------------------------

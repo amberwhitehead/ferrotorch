@@ -118,13 +118,16 @@ The 1700+ LOC file is organised as:
   passed at construction.
 - **`PerChannelMinMaxObserver`** (`quantize.rs:747`): per-slice
   running min/max along `axis`.
-- **`HistogramObserver`** (`quantize.rs:866`): 2048-bin histogram
-  with KL-divergence-based threshold selection, mirrors
-  `torch.ao.quantization.HistogramObserver`.
-- **`FakeQuantize`** (`quantize.rs:1009`): forward quantize-then-
+- **`HistogramObserver`** (`quantize.rs:866`, constructor
+  `quantize.rs:882`): histogram observer with strictly positive bin
+  construction, NaN/Inf filtering, range expansion, and redistributed
+  counts. The zero-bin boundary differs from PyTorch's delayed
+  `torch.histogram` runtime error because ferrotorch's `Observer::observe`
+  is infallible; invalid bin counts are rejected by the constructor instead.
+- **`FakeQuantize`** (`quantize.rs:1031`): forward quantize-then-
   dequantize, backward STE (the gradient impl lives in
   `grad_fns/quantize_grad.rs`).
-- **`QatLayer`** (`quantize.rs:1097`) / **`QatModel`** (`quantize.rs:1111`) —
+- **`QatLayer`** (`quantize.rs:1119`) / **`QatModel`** (`quantize.rs:1133`) —
   per-param observer + fake-quantize bundles. `prepare_qat` is a factory.
 
 Non-test production consumers:
@@ -149,8 +152,9 @@ that module's REQ table). The PTQ flow (this file) is exercised by
 PyTorch observer and quantized tensor APIs. The conformance suite pins
 bit-exact integer codes, all-zero scale floors, affine zero-point
 rounding/clamping, unobserved observer defaults, symmetric scale
-denominators, dequantized round-trips, and quantized-matmul accumulator
-behavior at and just beyond the `i32` boundary.
+denominators, dequantized round-trips, quantized-matmul accumulator
+behavior at and just beyond the `i32` boundary, and histogram-observer
+zero/one-bin construction boundaries.
 
 ## Verification
 

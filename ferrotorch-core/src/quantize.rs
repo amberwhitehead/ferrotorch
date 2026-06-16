@@ -873,14 +873,26 @@ pub struct HistogramObserver {
 }
 
 impl HistogramObserver {
-    pub fn new(num_bins: usize) -> Self {
-        Self {
+    /// Create a histogram observer with a strictly positive bin count.
+    ///
+    /// PyTorch's underlying histogram kernel rejects `bins=0` when finite data
+    /// is observed. ferrotorch's `Observer::observe` API is infallible, so the
+    /// invalid configuration is rejected at construction instead of leaving a
+    /// later panic path.
+    pub fn new(num_bins: usize) -> FerrotorchResult<Self> {
+        if num_bins == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "HistogramObserver requires at least one histogram bin".to_string(),
+            });
+        }
+
+        Ok(Self {
             num_bins,
             bins: vec![0u64; num_bins],
             min_val: f32::INFINITY,
             max_val: f32::NEG_INFINITY,
             initialized: false,
-        }
+        })
     }
 
     /// Redistribute old bins into a new range via linear interpolation.
@@ -903,6 +915,9 @@ impl HistogramObserver {
         }
 
         let n = self.num_bins;
+        let Some(last_bin) = n.checked_sub(1) else {
+            return;
+        };
         let old_bins = self.bins.clone();
         self.bins.fill(0);
 
@@ -917,8 +932,10 @@ impl HistogramObserver {
             let old_center = old_min + (old_idx as f32 + 0.5) * old_bin_width;
             // Map to new bin index.
             let new_frac = (old_center - new_min) / new_bin_width;
-            let new_idx = (new_frac as usize).min(n - 1);
-            self.bins[new_idx] += old_count;
+            let new_idx = (new_frac as usize).min(last_bin);
+            if let Some(bin) = self.bins.get_mut(new_idx) {
+                *bin += old_count;
+            }
         }
 
         self.min_val = new_min;
@@ -972,13 +989,18 @@ impl Observer for HistogramObserver {
         // Insert new data into bins.
         let range = (self.max_val - self.min_val).max(f32::EPSILON);
         let n = self.num_bins;
+        let Some(last_bin) = n.checked_sub(1) else {
+            return;
+        };
         for &x in data {
             if !x.is_finite() {
                 continue;
             }
             let frac = (x - self.min_val) / range;
-            let idx = ((frac * n as f32) as usize).min(n - 1);
-            self.bins[idx] += 1;
+            let idx = ((frac * n as f32) as usize).min(last_bin);
+            if let Some(bin) = self.bins.get_mut(idx) {
+                *bin += 1;
+            }
         }
     }
 
@@ -1683,7 +1705,7 @@ mod tests {
 
     #[test]
     fn test_histogram_observer_basic() {
-        let mut obs = HistogramObserver::new(100);
+        let mut obs = HistogramObserver::new(100).expect("valid positive bin count");
         obs.observe(&[0.0, 0.5, 1.0]);
         let qp = obs.calculate_qparams(QuantDtype::Int8);
         assert_eq!(qp.scale.len(), 1);
@@ -1691,7 +1713,7 @@ mod tests {
 
     #[test]
     fn test_histogram_observer_range_expansion() {
-        let mut obs = HistogramObserver::new(100);
+        let mut obs = HistogramObserver::new(100).expect("valid positive bin count");
         obs.observe(&[0.0, 1.0]);
         // Initial range is [0, 1].
         let bins_after_first = obs.bins.clone();
@@ -1707,11 +1729,30 @@ mod tests {
 
     #[test]
     fn test_histogram_observer_filters_nan_inf() {
-        let mut obs = HistogramObserver::new(50);
+        let mut obs = HistogramObserver::new(50).expect("valid positive bin count");
         obs.observe(&[f32::NAN, 1.0, f32::INFINITY, 2.0]);
         let total: u64 = obs.bins.iter().sum();
         // Only 2 finite values should be counted.
         assert_eq!(total, 2);
+    }
+
+    #[test]
+    fn test_histogram_observer_zero_bins_rejected() {
+        assert!(matches!(
+            HistogramObserver::new(0),
+            Err(FerrotorchError::InvalidArgument { .. })
+        ));
+    }
+
+    #[test]
+    fn test_histogram_observer_one_bin_boundary() {
+        let mut obs = HistogramObserver::new(1).expect("one bin is valid");
+        obs.observe(&[1.0]);
+        obs.observe(&[-1.0, 2.0]);
+        assert_eq!(obs.bins, vec![3]);
+        let qp = obs.calculate_qparams(QuantDtype::Int8);
+        assert_eq!(qp.scale.len(), 1);
+        assert!(qp.scale[0] > 0.0);
     }
 
     // ----- FakeQuantize -----
