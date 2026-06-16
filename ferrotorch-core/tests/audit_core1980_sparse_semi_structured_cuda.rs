@@ -96,4 +96,134 @@ mod cuda {
             "metadata must match torch CUTLASS f32 encoding 0x4444"
         );
     }
+
+    #[cfg(feature = "cusparselt")]
+    mod cusparselt {
+        use ferrotorch_core::{to_sparse_semi_structured, to_sparse_semi_structured_cusparselt};
+        use half::{bf16, f16};
+
+        use super::*;
+
+        fn oracle_24_f32() -> Vec<f32> {
+            let mut data = vec![0.0_f32; 16 * 16];
+            for r in 0..16 {
+                for c in (0..16).step_by(4) {
+                    data[r * 16 + c] = (r * 100 + c + 1) as f32;
+                    data[r * 16 + c + 2] = (r * 100 + c + 3) as f32;
+                }
+            }
+            data
+        }
+
+        fn expected_values() -> Vec<f32> {
+            (0..16)
+                .flat_map(|r| {
+                    (0..16)
+                        .step_by(4)
+                        .flat_map(move |c| [r * 100 + c + 1, r * 100 + c + 3])
+                })
+                .map(|v| v as f32)
+                .collect()
+        }
+
+        fn expected_bf16_values() -> Vec<f32> {
+            expected_values()
+                .into_iter()
+                .map(|v| bf16::from_f32(v).to_f32())
+                .collect()
+        }
+
+        fn expected_indices() -> Vec<i16> {
+            (0..16)
+                .flat_map(|r| {
+                    if r < 8 {
+                        [
+                            -30_584_i16,
+                            -30_584,
+                            -4_370,
+                            -4_370,
+                            -4_370,
+                            -4_370,
+                            -4_370,
+                            -4_370,
+                        ]
+                    } else {
+                        [-4_370_i16; 8]
+                    }
+                })
+                .collect()
+        }
+
+        fn assert_cusparselt_common<T>(
+            sparse: &ferrotorch_core::CudaSemiStructuredSparseTensor<T>,
+            expected: &[f32],
+        ) where
+            T: ferrotorch_core::Float + Into<f32> + Copy,
+        {
+            assert_eq!(sparse.backend(), SemiStructuredSparseBackend::CusparseLt);
+            assert_eq!(sparse.shape(), &[16, 16]);
+            assert_eq!(sparse.packed().shape(), &[16, 16]);
+            assert_eq!(sparse.values_shape(), &[16, 8]);
+            assert_eq!(sparse.indices_shape(), &[16, 8]);
+            assert_eq!(sparse.packed().device(), Device::Cuda(0));
+            assert_eq!(sparse.indices().device(), Device::Cuda(0));
+
+            let values = sparse.values().expect("values view");
+            assert_eq!(values.device(), Device::Cuda(0));
+            assert_eq!(values.shape(), &[16, 8]);
+            let values_host: Vec<f32> = values
+                .to(Device::Cpu)
+                .expect("values -> cpu")
+                .data()
+                .expect("values data")
+                .iter()
+                .copied()
+                .map(Into::into)
+                .collect();
+            assert_eq!(values_host, expected);
+
+            let metadata_cpu = sparse.indices().to(Device::Cpu).expect("metadata -> cpu");
+            let metadata = metadata_cpu.data().expect("metadata data").to_vec();
+            assert_eq!(metadata, expected_indices());
+        }
+
+        #[test]
+        fn default_f16_pack_uses_cusparselt_and_matches_torch_prefix_tail_layout() {
+            ensure_cuda_backend();
+            let input: Vec<f16> = oracle_24_f32().into_iter().map(f16::from_f32).collect();
+            let dense_cpu = from_vec::<f16>(input, &[16, 16]).expect("cpu f16 dense");
+            let dense = dense_cpu.to(Device::Cuda(0)).expect("f16 dense -> cuda");
+
+            let sparse = to_sparse_semi_structured(&dense).expect("default f16 sparse pack");
+            assert_cusparselt_common(&sparse, &expected_values());
+        }
+
+        #[test]
+        fn explicit_bf16_cusparselt_pack_matches_torch_prefix_tail_layout() {
+            ensure_cuda_backend();
+            let input: Vec<bf16> = oracle_24_f32().into_iter().map(bf16::from_f32).collect();
+            let dense_cpu = from_vec::<bf16>(input, &[16, 16]).expect("cpu bf16 dense");
+            let dense = dense_cpu.to(Device::Cuda(0)).expect("bf16 dense -> cuda");
+
+            let sparse =
+                to_sparse_semi_structured_cusparselt(&dense).expect("explicit bf16 sparse pack");
+            assert_cusparselt_common(&sparse, &expected_bf16_values());
+        }
+
+        #[test]
+        fn explicit_cusparselt_rejects_f32_like_torch_public_subclass() {
+            ensure_cuda_backend();
+            let dense_cpu = from_vec::<f32>(vec![0.0; 16 * 16], &[16, 16]).expect("cpu f32 dense");
+            let dense = dense_cpu.to(Device::Cuda(0)).expect("f32 dense -> cuda");
+            let err = to_sparse_semi_structured_cusparselt(&dense)
+                .expect_err("cuSPARSELt public conversion rejects f32");
+            match err {
+                FerrotorchError::InvalidArgument { message } => assert!(
+                    message.contains("dtype float32 is not supported by the cuSPARSELt backend"),
+                    "unexpected f32 rejection: {message}"
+                ),
+                other => panic!("expected InvalidArgument, got {other:?}"),
+            }
+        }
+    }
 }

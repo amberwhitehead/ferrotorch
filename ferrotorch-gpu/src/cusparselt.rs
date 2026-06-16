@@ -37,8 +37,9 @@
 //! # Compute type
 //!
 //! For FP16 / BF16 inputs we pick `CUSPARSE_COMPUTE_32F` (FP32 accumulator
-//! on Tensor Cores). For FP32 inputs we pick `CUSPARSE_COMPUTE_TF32`,
-//! which is the only Tensor-Core-accelerated FP32 mode cuSPARSELt accepts.
+//! on Tensor Cores). cuSPARSELt 0.8 no longer exposes a distinct TF32
+//! compute enum; FP32 helpers request `CUSPARSE_COMPUTE_32F` and the
+//! caller falls back to dense CUDA if the SDK rejects that combination.
 //!
 //! ## REQ status (per `.design/ferrotorch-gpu/cusparselt.md`)
 //!
@@ -59,7 +60,7 @@
 #![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
 #![allow(dead_code)]
 
-use cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut};
+use cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut, ValidAsZeroBits};
 
 use crate::buffer::CudaBuffer;
 use crate::device::GpuDevice;
@@ -73,7 +74,13 @@ use crate::error::{GpuError, GpuResult};
 /// during the build script run.
 pub mod sys {
     #![allow(clippy::all)]
-    #![allow(unused, non_snake_case, non_camel_case_types, non_upper_case_globals)]
+    #![allow(
+        missing_docs,
+        unused,
+        non_snake_case,
+        non_camel_case_types,
+        non_upper_case_globals
+    )]
     include!(concat!(env!("OUT_DIR"), "/cusparselt_sys.rs"));
 }
 
@@ -160,11 +167,14 @@ impl Drop for CusparseLtHandle {
 
 /// Compile-time-distinct value types accepted by cuSPARSELt's structured
 /// matmul path. ferrotorch wires the three PyTorch parity covers — FP16,
-/// BF16, FP32 (TF32 mode).
+/// BF16, and FP32.
 #[derive(Debug, Clone, Copy)]
 pub enum CuSpLtDType {
+    /// IEEE FP16 payloads (`CUDA_R_16F`).
     F16,
+    /// Brain floating point 16 payloads (`CUDA_R_16BF`).
     Bf16,
+    /// IEEE FP32 payloads (`CUDA_R_32F`).
     F32,
 }
 
@@ -178,16 +188,10 @@ impl CuSpLtDType {
     }
 
     fn compute_type(self) -> sys::cusparseComputeType {
-        match self {
-            // FP16/BF16 tensor cores accumulate to FP32 by default; this
-            // matches PyTorch autocast semantics and the cuSPARSELt
-            // documentation's recommended mode.
-            CuSpLtDType::F16 | CuSpLtDType::Bf16 => sys::cusparseComputeType::CUSPARSE_COMPUTE_32F,
-            // The only Tensor-Core-accelerated FP32 mode cuSPARSELt
-            // exposes is TF32. Plain CUSPARSE_COMPUTE_32F on FP32 inputs
-            // is rejected by `cusparseLtMatmulDescriptorInit` on Ampere.
-            CuSpLtDType::F32 => sys::cusparseComputeType::CUSPARSE_COMPUTE_TF32,
-        }
+        // cuSPARSELt 0.5.2+ maps FP16, BF16, and FP32 through the same
+        // public compute enum. PyTorch's cuSPARSELt backend does the same.
+        let _ = self;
+        sys::cusparseComputeType::CUSPARSE_COMPUTE_32F
     }
 
     fn elem_bytes(self) -> usize {
@@ -226,7 +230,7 @@ fn gpu_cslt_compress_slices<T>(
     device: &GpuDevice,
 ) -> GpuResult<CudaSlice<T>>
 where
-    T: cudarc::driver::DeviceRepr + Default + Copy + 'static,
+    T: cudarc::driver::DeviceRepr + ValidAsZeroBits + Default + Copy + 'static,
 {
     let expected_len = rows
         .checked_mul(cols)
@@ -308,7 +312,7 @@ where
                 sys::cusparseLtSpMMACompress2(
                     handle.raw(),
                     &descriptor as *const _,
-                    true,
+                    1,
                     sys::cusparseOperation_t::CUSPARSE_OPERATION_NON_TRANSPOSE,
                     input_ptr as *const std::ffi::c_void,
                     packed_ptr as *mut std::ffi::c_void,
@@ -338,7 +342,7 @@ pub fn gpu_cslt_compress<T>(
     device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<T>>
 where
-    T: cudarc::driver::DeviceRepr + Default + Copy + 'static,
+    T: cudarc::driver::DeviceRepr + ValidAsZeroBits + Default + Copy + 'static,
 {
     let packed = gpu_cslt_compress_slices(handle, sparse_input.inner(), rows, cols, dtype, device)?;
     let len = packed.len();
@@ -379,7 +383,7 @@ fn gpu_sparse_matmul_24_slices<T>(
     device: &GpuDevice,
 ) -> GpuResult<CudaSlice<T>>
 where
-    T: cudarc::driver::DeviceRepr + Default + Copy + 'static,
+    T: cudarc::driver::DeviceRepr + ValidAsZeroBits + Default + Copy + 'static,
 {
     if a_dense.len() != m * k {
         return Err(GpuError::ShapeMismatch {
@@ -409,7 +413,10 @@ where
         CuSpLtDType::F16 | CuSpLtDType::Bf16 => 8,
         CuSpLtDType::F32 => 4,
     };
-    if k % elem_align != 0 || n % elem_align != 0 || m % elem_align != 0 {
+    if !k.is_multiple_of(elem_align)
+        || !n.is_multiple_of(elem_align)
+        || !m.is_multiple_of(elem_align)
+    {
         return Err(GpuError::InvalidState {
             message: format!(
                 "cusparselt::sparse_matmul_24: dims (m={m}, k={k}, n={n}) must each be a multiple of {elem_align} for dtype {dtype:?}"
@@ -686,7 +693,7 @@ pub fn gpu_sparse_matmul_24<T>(
     device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<T>>
 where
-    T: cudarc::driver::DeviceRepr + Default + Copy + 'static,
+    T: cudarc::driver::DeviceRepr + ValidAsZeroBits + Default + Copy + 'static,
 {
     let out = gpu_sparse_matmul_24_slices(
         handle,

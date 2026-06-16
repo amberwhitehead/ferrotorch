@@ -29,11 +29,13 @@
 //!   5. `/usr/local/cuda-12.8/include/cusparseLt.h`
 //!   6. `/usr/include/cusparseLt.h`
 //!   7. `/opt/nvidia/cusparselt/include/cusparseLt.h`
+//!   8. Python NVIDIA package installs such as
+//!      `$HOME/.local/lib/python*/site-packages/nvidia/cusparselt/include`
 //!
 //! NVIDIA distributes cuSPARSELt as a separate SDK from the CUDA
-//! toolkit (it ships in its own tarball / RPM); on systems without it
-//! installed the build script emits a `cargo::warning=` and aborts so
-//! the user sees a clear path to fix.
+//! toolkit (it ships in its own tarball / RPM and in PyTorch's NVIDIA
+//! wheel dependencies); on systems without it installed the build script
+//! emits a `cargo::warning=` and aborts so the user sees a clear path to fix.
 
 fn main() {
     // The script runs unconditionally — but every action below is gated
@@ -308,7 +310,7 @@ mod cuda_cusolver_compat {
 
 #[cfg(feature = "cusparselt")]
 mod cusparselt {
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     /// Header probe + bindgen run + link directives.
     pub fn generate() {
@@ -316,7 +318,7 @@ mod cusparselt {
             Some(p) => p,
             None => {
                 println!(
-                    "cargo:warning=cusparselt feature is enabled but `cusparseLt.h` was not found on this host. Set CUSPARSELT_INCLUDE_DIR to the directory containing cusparseLt.h, or install the NVIDIA cuSPARSELt SDK (https://docs.nvidia.com/cuda/cusparselt/getting_started.html). Searched: $CUSPARSELT_INCLUDE_DIR, $CUDA_PATH/include, /usr/local/cuda/include, /usr/local/cuda-12.*/include, /usr/include, /opt/nvidia/cusparselt/include."
+                    "cargo:warning=cusparselt feature is enabled but `cusparseLt.h` was not found on this host. Set CUSPARSELT_INCLUDE_DIR to the directory containing cusparseLt.h, or install the NVIDIA cuSPARSELt SDK / nvidia-cusparselt Python package. Searched: $CUSPARSELT_INCLUDE_DIR, $CUDA_PATH/include, /usr/local/cuda*/include, /usr/include, /opt/nvidia/cusparselt/include, and python*/site-packages/nvidia/cusparselt/include."
                 );
                 panic!(
                     "ferrotorch-gpu: cusparselt feature requires cusparseLt.h but none of the probed locations contained it. See cargo:warning above for resolution."
@@ -324,27 +326,7 @@ mod cusparselt {
             }
         };
 
-        // Tell rustc to link against `libcusparseLt.so`. The library
-        // search path defaults to the system loader path; the user can
-        // extend it via CUSPARSELT_LIB_DIR for non-default install
-        // prefixes (e.g. /opt/nvidia/cusparselt/lib64).
-        if let Ok(dir) = std::env::var("CUSPARSELT_LIB_DIR") {
-            println!("cargo:rustc-link-search=native={dir}");
-        }
-        // Common implicit search paths so `LD_LIBRARY_PATH` is not the
-        // only way to find the lib at runtime.
-        for candidate in [
-            "/usr/local/cuda/lib64",
-            "/usr/local/cuda-12.9/lib64",
-            "/usr/local/cuda-12.8/lib64",
-            "/usr/lib64",
-            "/opt/nvidia/cusparselt/lib64",
-        ] {
-            if Path::new(candidate).exists() {
-                println!("cargo:rustc-link-search=native={candidate}");
-            }
-        }
-        println!("cargo:rustc-link-lib=cusparseLt");
+        emit_link_directives();
 
         // Re-run if the located header changes.
         println!("cargo:rerun-if-changed={}", header.display());
@@ -352,6 +334,13 @@ mod cusparselt {
         let header_str = header.to_string_lossy().to_string();
         let mut builder = bindgen::Builder::default()
             .header(header_str.clone())
+            // cuSPARSELt's public header is C++-flavoured (`<cstddef>`,
+            // `alignas`) even though its API is `extern "C"`. Bindgen's
+            // default C parser mode cannot parse NVIDIA's pip-distributed
+            // header.
+            .clang_arg("-x")
+            .clang_arg("c++")
+            .clang_arg("-std=c++17")
             .allowlist_function("cusparseLt.*")
             .allowlist_type("cusparseLt.*")
             .allowlist_var("CUSPARSELT_.*")
@@ -376,7 +365,14 @@ mod cusparselt {
             builder = builder.clang_arg(format!("-I{}", parent.display()));
         }
         for path in cuda_include_dirs() {
-            builder = builder.clang_arg(format!("-I{}", path.display()));
+            builder = builder
+                .clang_arg("-isystem")
+                .clang_arg(path.to_string_lossy().to_string());
+        }
+        for path in cxx_include_dirs() {
+            builder = builder
+                .clang_arg("-isystem")
+                .clang_arg(path.to_string_lossy().to_string());
         }
 
         let bindings = builder
@@ -385,13 +381,15 @@ mod cusparselt {
 
         let out_path = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR set by cargo"))
             .join("cusparselt_sys.rs");
-        bindings
-            .write_to_file(&out_path)
-            .expect("failed to write cusparselt_sys.rs");
+        // bindgen 0.69 still emits `extern "C"` blocks. This workspace is
+        // edition 2024, where foreign blocks must be explicitly unsafe.
+        let mut bindings_src = bindings.to_string();
+        bindings_src = bindings_src.replace("\nextern \"C\" {", "\nunsafe extern \"C\" {");
+        std::fs::write(&out_path, bindings_src).expect("failed to write cusparselt_sys.rs");
     }
 
     fn locate_header() -> Option<PathBuf> {
-        let candidates: Vec<PathBuf> = [
+        let mut candidates: Vec<PathBuf> = [
             std::env::var_os("CUSPARSELT_INCLUDE_DIR").map(PathBuf::from),
             std::env::var_os("CUDA_PATH").map(|p| PathBuf::from(p).join("include")),
             Some(PathBuf::from("/usr/local/cuda/include")),
@@ -404,24 +402,200 @@ mod cusparselt {
         .flatten()
         .map(|d| d.join("cusparseLt.h"))
         .collect();
+        candidates.extend(python_cusparselt_dirs("include").map(|d| d.join("cusparseLt.h")));
         candidates.into_iter().find(|p| p.exists())
+    }
+
+    fn emit_link_directives() {
+        let mut dirs = Vec::new();
+        if let Ok(dir) = std::env::var("CUSPARSELT_LIB_DIR") {
+            dirs.push(PathBuf::from(dir));
+        }
+        for candidate in [
+            "/usr/local/cuda/lib64",
+            "/usr/local/cuda-12.9/lib64",
+            "/usr/local/cuda-12.8/lib64",
+            "/usr/lib64",
+            "/opt/nvidia/cusparselt/lib64",
+        ] {
+            dirs.push(PathBuf::from(candidate));
+        }
+        dirs.extend(python_cusparselt_dirs("lib"));
+
+        let mut saw_existing_dir = false;
+        for dir in dirs {
+            if !dir.exists() {
+                continue;
+            }
+            saw_existing_dir = true;
+            println!("cargo:rustc-link-search=native={}", dir.display());
+            let bare = dir.join("libcusparseLt.so");
+            if bare.exists() {
+                println!("cargo:rustc-link-lib=cusparseLt");
+                return;
+            }
+            let versioned = dir.join("libcusparseLt.so.0");
+            if versioned.exists() {
+                if let Some(link_dir) = emit_cusparselt_compat_symlink(&versioned) {
+                    println!("cargo:rustc-link-search=native={}", link_dir.display());
+                    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", link_dir.display());
+                }
+                println!("cargo:rustc-link-lib=cusparseLt");
+                return;
+            }
+        }
+
+        if !saw_existing_dir {
+            println!(
+                "cargo:warning=cuSPARSELt library directory was not found; relying on the system linker path for libcusparseLt"
+            );
+        }
+        println!("cargo:rustc-link-lib=cusparseLt");
+    }
+
+    fn emit_cusparselt_compat_symlink(versioned: &PathBuf) -> Option<PathBuf> {
+        let out_dir = PathBuf::from(std::env::var_os("OUT_DIR")?);
+        let compat_dir = out_dir.join("cusparselt-compat");
+        if let Err(e) = std::fs::create_dir_all(&compat_dir) {
+            println!(
+                "cargo:warning=cuSPARSELt library {} exists, but build.rs failed to create compat dir {}: {e}",
+                versioned.display(),
+                compat_dir.display()
+            );
+            return None;
+        }
+
+        #[cfg(unix)]
+        {
+            for name in ["libcusparseLt.so", "libcusparseLt.so.0"] {
+                let link = compat_dir.join(name);
+                let _ = std::fs::remove_file(&link);
+                if let Err(e) = std::os::unix::fs::symlink(versioned, &link) {
+                    println!(
+                        "cargo:warning=cuSPARSELt library {} exists, but build.rs failed to symlink {}: {e}",
+                        versioned.display(),
+                        link.display()
+                    );
+                    return None;
+                }
+            }
+            println!("cargo:rerun-if-changed={}", versioned.display());
+            Some(compat_dir)
+        }
+        #[cfg(not(unix))]
+        {
+            println!(
+                "cargo:warning=cuSPARSELt library {} exists, but this build script can only create a versioned-library compat symlink on Unix hosts",
+                versioned.display()
+            );
+            None
+        }
     }
 
     fn cuda_include_dirs() -> Vec<PathBuf> {
         let mut out = Vec::new();
         if let Some(p) = std::env::var_os("CUDA_PATH") {
-            out.push(PathBuf::from(p).join("include"));
+            let root = PathBuf::from(p);
+            out.push(root.join("include"));
+            out.push(root.join("targets/x86_64-linux/include"));
         }
         for c in [
             "/usr/local/cuda/include",
+            "/usr/local/cuda/targets/x86_64-linux/include",
             "/usr/local/cuda-12.9/include",
+            "/usr/local/cuda-12.9/targets/x86_64-linux/include",
             "/usr/local/cuda-12.8/include",
+            "/usr/local/cuda-12.8/targets/x86_64-linux/include",
+            "/usr/local/cuda-13.1/include",
+            "/usr/local/cuda-13.1/targets/x86_64-linux/include",
             "/usr/include",
         ] {
             let p = PathBuf::from(c);
             if p.exists() {
                 out.push(p);
             }
+        }
+        dedup_existing(out)
+    }
+
+    fn cxx_include_dirs() -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if let Ok(dir) = std::env::var("CXX_INCLUDE_DIR") {
+            out.push(PathBuf::from(dir));
+        }
+        out.extend(cxx_compiler_include_dirs());
+        dedup_existing(out)
+    }
+
+    fn cxx_compiler_include_dirs() -> Vec<PathBuf> {
+        for compiler in ["c++", "clang++", "g++"] {
+            let Ok(output) = std::process::Command::new(compiler)
+                .args(["-E", "-x", "c++", "-", "-v"])
+                .stdin(std::process::Stdio::null())
+                .output()
+            else {
+                continue;
+            };
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let mut capture = false;
+            let mut dirs = Vec::new();
+            for line in stderr.lines() {
+                if line.contains("#include <...> search starts here:") {
+                    capture = true;
+                    continue;
+                }
+                if line.contains("End of search list.") {
+                    break;
+                }
+                if capture {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        dirs.push(PathBuf::from(trimmed));
+                    }
+                }
+            }
+            if !dirs.is_empty() {
+                return dirs;
+            }
+        }
+        Vec::new()
+    }
+
+    fn python_cusparselt_dirs(kind: &str) -> impl Iterator<Item = PathBuf> {
+        let mut roots = Vec::new();
+        if let Some(home) = std::env::var_os("HOME") {
+            roots.push(PathBuf::from(home).join(".local/lib"));
+        }
+        roots.push(PathBuf::from("/usr/local/lib"));
+        roots.push(PathBuf::from("/usr/lib"));
+
+        let mut out = Vec::new();
+        for root in roots {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !name.starts_with("python") {
+                    continue;
+                }
+                let site_packages = entry.path().join("site-packages");
+                out.push(site_packages.join("nvidia/cusparselt").join(kind));
+                let dist_packages = entry.path().join("dist-packages");
+                out.push(dist_packages.join("nvidia/cusparselt").join(kind));
+            }
+        }
+        out.into_iter().filter(|p| p.exists())
+    }
+
+    fn dedup_existing(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for path in paths {
+            if !path.exists() || out.iter().any(|seen| seen == &path) {
+                continue;
+            }
+            out.push(path);
         }
         out
     }
