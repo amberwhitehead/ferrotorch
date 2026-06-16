@@ -753,6 +753,62 @@ fn quantized_matmul_shape_mismatch_errors() {
     assert!(quantized_matmul(&qa, &qb).is_err());
 }
 
+#[test]
+fn quantized_matmul_accumulator_crosses_i32_boundary_without_wrapping() {
+    // Quantizing an all-ones tensor to qint8 over the zero-extended [0, 1]
+    // range maps every entry to q=127 with zero_point=-128, so each centered
+    // multiplicand is 255 and each integer product is 65025. This reaches the
+    // i32 accumulator ceiling at K ~= 33k while the true real result remains K.
+    let product = 255_i64 * 255_i64;
+    let max_i32_safe_k = (i64::from(i32::MAX) / product) as usize;
+
+    for k in [max_i32_safe_k, max_i32_safe_k + 2] {
+        let a = make_cpu_f32(&vec![1.0; k], &[1, k], false);
+        let b = make_cpu_f32(&vec![1.0; k], &[k, 1], false);
+        let qa = quantize(&a, QuantScheme::PerTensor, QuantDtype::Int8).unwrap();
+        let qb = quantize(&b, QuantScheme::PerTensor, QuantDtype::Int8).unwrap();
+
+        let raw_acc = product * k as i64;
+        assert_eq!(k == max_i32_safe_k, raw_acc <= i64::from(i32::MAX));
+
+        let qc = quantized_matmul(&qa, &qb).expect("qmatmul should not overflow");
+        let c: Tensor<f32> = dequantize(&qc).expect("dequantize");
+        let got = c.data().expect("data")[0];
+        let expected = k as f32;
+        let allowed = qc.scale()[0].abs() * 0.5 + expected.abs() * 1e-6;
+        assert!(
+            (got - expected).abs() <= allowed,
+            "K={k}: quantized_matmul should produce real result {expected}, got {got}; \
+             raw centered accumulator was {raw_acc}"
+        );
+    }
+}
+
+#[test]
+fn quantized_matmul_negative_accumulator_crosses_i32_boundary_without_wrapping() {
+    let product = 255_i64 * -255_i64;
+    let k = (i64::from(i32::MAX) / product.abs()) as usize + 2;
+
+    let a = make_cpu_f32(&vec![1.0; k], &[1, k], false);
+    let b = make_cpu_f32(&vec![-1.0; k], &[k, 1], false);
+    let qa = quantize(&a, QuantScheme::PerTensor, QuantDtype::Int8).unwrap();
+    let qb = quantize(&b, QuantScheme::PerTensor, QuantDtype::Int8).unwrap();
+
+    let raw_acc = product * k as i64;
+    assert!(raw_acc < i64::from(i32::MIN));
+
+    let qc = quantized_matmul(&qa, &qb).expect("qmatmul should not overflow");
+    let c: Tensor<f32> = dequantize(&qc).expect("dequantize");
+    let got = c.data().expect("data")[0];
+    let expected = -(k as f32);
+    let allowed = qc.scale()[0].abs() * 0.5 + expected.abs() * 1e-6;
+    assert!(
+        (got - expected).abs() <= allowed,
+        "K={k}: quantized_matmul should produce real result {expected}, got {got}; \
+         raw centered accumulator was {raw_acc}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // quantize_named_tensors
 // ---------------------------------------------------------------------------

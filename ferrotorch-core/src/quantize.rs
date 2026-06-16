@@ -196,6 +196,22 @@ fn quantize_val(x: f32, scale: f32, zp: i32, qmin: i32, qmax: i32, is_unsigned: 
     }
 }
 
+/// f64 variant used by quantized matmul's post-accumulation requantization.
+#[inline]
+fn quantize_val_f64(x: f64, scale: f64, zp: i32, qmin: i32, qmax: i32) -> FerrotorchResult<i8> {
+    if !x.is_finite() || !scale.is_finite() || scale <= 0.0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "quantized_matmul cannot requantize non-finite value/scale: value={x}, scale={scale}"
+            ),
+        });
+    }
+
+    let q = (x * (1.0 / scale)).round_ties_even() + f64::from(zp);
+    let clamped = q.clamp(f64::from(qmin), f64::from(qmax));
+    Ok(clamped as i32 as i8)
+}
+
 /// Recover the i32 quantized value from the stored `i8`, accounting for
 /// unsigned dtypes where the bit pattern represents a `u8`.
 #[inline]
@@ -205,6 +221,43 @@ fn stored_to_i32(val: i8, is_unsigned: bool) -> i32 {
     } else {
         val as i32
     }
+}
+
+fn compute_scale_zp_f64(
+    min_val: f64,
+    max_val: f64,
+    dtype: QuantDtype,
+) -> FerrotorchResult<(f32, i32)> {
+    let qmin = dtype.qmin();
+    let qmax = dtype.qmax();
+
+    if min_val == f64::INFINITY && max_val == f64::NEG_INFINITY {
+        return Ok((1.0, 0));
+    }
+    if !min_val.is_finite() || !max_val.is_finite() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "quantized_matmul output range must be finite, got min={min_val}, max={max_val}"
+            ),
+        });
+    }
+
+    let min_val = min_val.min(0.0);
+    let max_val = max_val.max(0.0);
+    let range = max_val - min_val;
+    let scale = (range / f64::from(qmax - qmin)).max(f64::from(f32::EPSILON));
+    if !scale.is_finite() || scale > f64::from(f32::MAX) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "quantized_matmul output scale {scale} cannot be represented as finite f32"
+            ),
+        });
+    }
+
+    let zp = (f64::from(qmin) - (min_val / scale).round_ties_even())
+        .clamp(f64::from(qmin), f64::from(qmax)) as i32;
+
+    Ok((scale as f32, zp))
 }
 
 /// Map a linear flat index to per-channel parameters.
@@ -376,9 +429,10 @@ pub fn dequantize<T: Float>(qtensor: &QuantizedTensor) -> FerrotorchResult<Tenso
 
 /// Multiply two quantized 2-D matrices and return a quantized result.
 ///
-/// Strategy: accumulate in `i32` to avoid overflow, then rescale to the output
-/// quantized domain. This avoids a full dequantize-matmul-requantize round-trip
-/// while remaining numerically correct for INT8.
+/// Strategy: accumulate centered integer products in `i64`, then rescale to
+/// the output quantized domain. This avoids a full
+/// dequantize-matmul-requantize round-trip while remaining numerically correct
+/// for long INT8 inner dimensions whose raw accumulator exceeds `i32`.
 ///
 /// Both inputs must be 2-D, with compatible inner dimensions (standard matmul
 /// rules: `[M, K] x [K, N] -> [M, N]`).
@@ -409,6 +463,47 @@ pub fn quantized_matmul(
         });
     }
 
+    let a_expected = m
+        .checked_mul(k)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!(
+                "quantized_matmul input shape {:?} overflows element count",
+                a.shape
+            ),
+        })?;
+    let b_expected = k
+        .checked_mul(n)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!(
+                "quantized_matmul input shape {:?} overflows element count",
+                b.shape
+            ),
+        })?;
+    let out_numel = m
+        .checked_mul(n)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("quantized_matmul output shape [{m}, {n}] overflows element count"),
+        })?;
+
+    if a.data.len() != a_expected {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "quantized_matmul left data length {} does not match shape {:?} (expected {a_expected})",
+                a.data.len(),
+                a.shape
+            ),
+        });
+    }
+    if b.data.len() != b_expected {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "quantized_matmul right data length {} does not match shape {:?} (expected {b_expected})",
+                b.data.len(),
+                b.shape
+            ),
+        });
+    }
+
     // Both inputs must be PerTensor for the fast path.
     if a.scale.len() != 1 || b.scale.len() != 1 {
         return Err(FerrotorchError::InvalidArgument {
@@ -424,15 +519,28 @@ pub fn quantized_matmul(
     let a_unsigned = a.dtype == QuantDtype::Uint8;
     let b_unsigned = b.dtype == QuantDtype::Uint8;
 
-    // Accumulate in i32.
-    let mut acc = vec![0i32; m * n];
+    // Accumulate in i64. Centered INT8/UINT8 deltas can reach +/-255, so
+    // 65025*K exceeds i32 once K is only ~33k. PyTorch's optimized kernels
+    // expose int32 accumulators internally, but ferrotorch's public wrapper
+    // derives output qparams from the full result and must not panic in debug
+    // or wrap in release for ordinary long inner dimensions.
+    let mut acc = vec![0i64; out_numel];
     for i in 0..m {
         for j in 0..n {
-            let mut sum = 0i32;
+            let mut sum = 0i64;
             for p in 0..k {
-                let qa = stored_to_i32(a.data[i * k + p], a_unsigned) - a_zp;
-                let qb = stored_to_i32(b.data[p * n + j], b_unsigned) - b_zp;
-                sum += qa * qb;
+                let qa = i64::from(stored_to_i32(a.data[i * k + p], a_unsigned)) - i64::from(a_zp);
+                let qb = i64::from(stored_to_i32(b.data[p * n + j], b_unsigned)) - i64::from(b_zp);
+                let product = qa.checked_mul(qb).ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "quantized_matmul product overflow at output ({i}, {j}), inner index {p}"
+                    ),
+                })?;
+                sum = sum.checked_add(product).ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "quantized_matmul accumulator overflow at output ({i}, {j}), inner index {p}"
+                    ),
+                })?;
             }
             acc[i * n + j] = sum;
         }
@@ -440,13 +548,25 @@ pub fn quantized_matmul(
 
     // The real-valued result element is: acc[i,j] * a_scale * b_scale.
     // Requantize: pick INT8 output with its own scale/zp.
-    let combined_scale = a_scale * b_scale;
+    let combined_scale = f64::from(a_scale) * f64::from(b_scale);
+    if !combined_scale.is_finite() || combined_scale <= 0.0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "quantized_matmul requires finite positive input scales, got {a_scale} and {b_scale}"
+            ),
+        });
+    }
 
     // Find the real-valued min/max of the output.
-    let mut out_min = f32::INFINITY;
-    let mut out_max = f32::NEG_INFINITY;
+    let mut out_min = f64::INFINITY;
+    let mut out_max = f64::NEG_INFINITY;
     for &a_val in &acc {
-        let real = a_val as f32 * combined_scale;
+        let real = a_val as f64 * combined_scale;
+        if !real.is_finite() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("quantized_matmul output value {real} is not finite"),
+            });
+        }
         if real < out_min {
             out_min = real;
         }
@@ -456,17 +576,21 @@ pub fn quantized_matmul(
     }
 
     let out_dtype = QuantDtype::Int8;
-    let (out_scale, out_zp) = compute_scale_zp(out_min, out_max, out_dtype);
+    let (out_scale, out_zp) = compute_scale_zp_f64(out_min, out_max, out_dtype)?;
     let qmin = out_dtype.qmin();
     let qmax = out_dtype.qmax();
 
-    let qdata: Vec<i8> = acc
-        .iter()
-        .map(|&a_val| {
-            let real = a_val as f32 * combined_scale;
-            quantize_val(real, out_scale, out_zp, qmin, qmax, false)
-        })
-        .collect();
+    let mut qdata = Vec::with_capacity(out_numel);
+    for &a_val in &acc {
+        let real = a_val as f64 * combined_scale;
+        qdata.push(quantize_val_f64(
+            real,
+            f64::from(out_scale),
+            out_zp,
+            qmin,
+            qmax,
+        )?);
+    }
 
     Ok(QuantizedTensor {
         data: qdata,
