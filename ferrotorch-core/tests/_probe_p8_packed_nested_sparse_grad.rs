@@ -19,13 +19,11 @@
 //!     bridge the flat buffer to a `Tensor<T>` so callers can `.to(Cuda)`,
 //!     compose `Tensor + Tensor` (which dispatches to `add_f32` /
 //!     `add_f64` / `broadcast_add_*` on-device), and round-trip back.
-//!   * `SparseGrad::apply_sgd` on a CUDA `f32` param composes
-//!     `cpu_to_gpu(values)` + `cpu_to_gpu(indices_as_f32)` +
-//!     `scatter_add_rows_f32` + `scale_f32` + `sub_f32`. Output stays on
-//!     CUDA. No host detour. f64 takes the analogous f64 lane (gated on
-//!     the backend implementing `scatter_add_rows_f64`); when that
-//!     primitive is unavailable, the structured `InvalidArgument` error
-//!     surfaces verbatim — PyTorch parity for missing CUDA kernels.
+//!   * `SparseGrad::apply_sgd` on CUDA `f32`/`f64` params composes
+//!     `cpu_to_gpu(values)` + `cpu_to_gpu(indices_i64)` +
+//!     `scatter_add_segments_{f32,f64}` + `scale_*` + `sub_*`. Output
+//!     stays on CUDA. No host detour, and no float round-trip for sparse
+//!     row indices.
 //!
 //! PyTorch parity (`rust-gpu-discipline` §3 composite-implicit-autograd):
 //! `optim.SGD` with `sparse=True` decomposes into the same scatter +
@@ -387,11 +385,9 @@ fn p8_sparse_grad_apply_sgd_cuda_f32_index_out_of_bounds() {
 
 #[test]
 fn p8_sparse_grad_apply_sgd_cuda_f64_lane_via_backend() {
-    // f64 lane: when the backend implements scatter_add_rows_f64, the
-    // composite runs on-device. When it doesn't, the structured Err
-    // surfaces (PyTorch §3 parity: missing CUDA kernels surface errors).
-    // Either is acceptable; we check the *correctness* of the result when
-    // it succeeds.
+    // f64 lane: CORE-079 moved SparseGrad onto the integer-index
+    // scatter_add_segments_f64 composite. This is a required on-device
+    // CUDA path now, not an optional missing-kernel boundary.
     ensure_cuda_backend();
     let cpu_param = make_tensor_f64(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2]);
     let mut gpu_param = cpu_param.to(Device::Cuda(0)).unwrap();
@@ -401,23 +397,19 @@ fn p8_sparse_grad_apply_sgd_cuda_f64_lane_via_backend() {
     let lr = 0.5f64;
 
     grad.apply_sgd(&mut cpu_param_clone, lr).unwrap();
-    let gpu_res = grad.apply_sgd(&mut gpu_param, lr);
+    grad.apply_sgd(&mut gpu_param, lr)
+        .expect("f64 CUDA sparse SGD must run on device");
+    assert!(
+        gpu_param.is_cuda(),
+        "f64 sparse SGD must keep param on CUDA"
+    );
 
-    if let Ok(()) = gpu_res {
-        let gpu_data = gpu_param.cpu().unwrap().data().unwrap().to_vec();
-        let cpu_data = cpu_param_clone.data().unwrap();
-        for (i, (g, e)) in gpu_data.iter().zip(cpu_data.iter()).enumerate() {
-            assert!(
-                (g - e).abs() < F64_TOL,
-                "f64 apply_sgd elem {i}: gpu={g} cpu={e}"
-            );
-        }
-    } else {
-        // Backend doesn't implement scatter_add_rows_f64 — error is the
-        // §3-correct behaviour. Confirm it's a structured error, not a panic.
-        eprintln!(
-            "f64 GPU lane unsupported on this backend: {} (treated as PyTorch-parity §3 missing-kernel error)",
-            gpu_res.unwrap_err()
+    let gpu_data = gpu_param.cpu().unwrap().data().unwrap().to_vec();
+    let cpu_data = cpu_param_clone.data().unwrap();
+    for (i, (g, e)) in gpu_data.iter().zip(cpu_data.iter()).enumerate() {
+        assert!(
+            (g - e).abs() < F64_TOL,
+            "f64 apply_sgd elem {i}: gpu={g} cpu={e}"
         );
     }
 }
