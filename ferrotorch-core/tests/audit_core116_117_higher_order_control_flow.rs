@@ -215,7 +215,7 @@ mod cuda {
         let out = cond(
             &pred,
             |ops| vec![ops[0].t().expect("transpose")],
-            |ops| vec![ops[0].clone()],
+            |ops| vec![ops[0].t().expect("transpose")],
             std::slice::from_ref(&x),
         )
         .expect("cond");

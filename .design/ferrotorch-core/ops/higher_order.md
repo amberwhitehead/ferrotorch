@@ -29,13 +29,14 @@ PyTorch's higher-order autograd invariant.
 
 ## Requirements
 
-- REQ-1: `cond(pred, true_fn, false_fn, operands)` — evaluate
-  `true_fn(operands)` if `pred` is nonzero, else
+- REQ-1: `cond(pred, true_fn, false_fn, operands)` — evaluate both
+  branch callables once, validate their output metadata, and return the
+  tensors from `true_fn(operands)` if `pred` is nonzero, else from
   `false_fn(operands)`. A CUDA-resident scalar predicate is read by an
   explicit one-element synchronization; branch outputs and operands are
-  not moved by predicate evaluation. Only the taken branch is called.
-  Mirrors `torch.cond`
-  (`torch/_higher_order_ops/cond.py`).
+  not moved by predicate evaluation. Mirrors `torch.cond`
+  (`torch/_higher_order_ops/cond.py`), whose compile/tracing path
+  validates both branch output specs before selecting the result.
 - REQ-2: `cond` autograd — gradients flow through the taken branch
   ONLY. When any operand requires grad, each branch output is wrapped
   with a zero-copy `CondBackward` view that preserves the output's
@@ -45,9 +46,10 @@ PyTorch's higher-order autograd invariant.
   original operands that the branch output does not reach.
 - REQ-3: `validate_cond_branches(true_outputs, false_outputs)` —
   user-callable utility to eagerly check both branches return the
-  same number of tensors with matching shapes. Required because
-  `cond` only executes one branch at runtime; the shape mismatch
-  can't be detected by `cond` itself.
+  same number of tensors with matching static shapes, devices, strides,
+  and storage offsets. Dtype is fixed by the generic `Tensor<T>` output
+  type in this API and by storage tag invariants. `cond` calls this
+  helper internally after evaluating both branch callables.
 - REQ-4: `scan(fn_step, init, xs)` — sequential fold-with-outputs.
   Calls `fn_step(carry, x) -> (new_carry, output)` once per element
   of `xs`. Returns `(final_carry, [outputs...])`. Mirrors the
@@ -67,15 +69,18 @@ PyTorch's higher-order autograd invariant.
 
 - [x] AC-1: `cargo test -p ferrotorch-core --lib ops::higher_order`
   passes.
-- [x] AC-2: `cond` with `pred=1.0` calls `true_fn` only;
-  `pred=0.0` calls `false_fn` only.
+- [x] AC-2: `cond` with `pred=1.0` returns `true_fn` outputs;
+  `pred=0.0` returns `false_fn` outputs. The untaken branch callable is
+  still evaluated once for metadata validation, matching PyTorch's
+  branch-output contract.
 - [x] AC-3: `cond` predicate with `numel != 1` errors.
 - [x] AC-4: `scan` with empty `xs` returns
   `(init.clone(), Vec::new())`.
 - [x] AC-5: `scan` autograd — calling `.backward()` on the final
   carry propagates gradients back to `init` and every `xs[i]`.
-- [x] AC-6: `validate_cond_branches` rejects mismatched output counts
-  and shape mismatches.
+- [x] AC-6: `cond` / `validate_cond_branches` reject mismatched output
+  counts, static shapes, devices, strides, and storage offsets before
+  returning the selected branch result.
 - [x] AC-7: CUDA `cond` / `scan` outputs and backward gradients remain
   CUDA-resident when autograd is active; detached branch / step outputs
   produce explicit zero gradients for the original inputs.
@@ -102,18 +107,24 @@ operand gradients.
 3. Treat the predicate as true iff it is not exactly zero. This mirrors
    PyTorch tensor truthiness for float predicates: `0.25`, `0.5`,
    negative values, and `NaN` all take the true branch.
-4. Invoke `true_fn(operands)` or `false_fn(operands)` based on the
-   predicate.
-5. If no operand requires grad / grad is disabled, return raw
+4. Invoke both branch callables once and validate their output
+   metadata. This is the eager analogue of PyTorch's fake-tensor branch
+   spec validation. Branch callables are expected to be pure; side
+   effects in branch callables are outside the structured control-flow
+   contract.
+5. Select the true outputs when the predicate is true, otherwise the
+   false outputs. The unselected outputs are dropped after validation.
+6. If no operand requires grad / grad is disabled, return raw selected
    outputs.
-6. Otherwise, wrap each output with `CondBackward { branch_output:
+7. Otherwise, wrap each selected output with `CondBackward { branch_output:
    out.clone(), operands }` through `wrap_control_flow_output`, which
    attaches the grad node to a stride view sharing the output's
    existing storage/device instead of copying through host memory.
 
-`validate_cond_branches` at `:142-169` is the eager validator —
+`validate_cond_branches` at `:142-194` is the eager validator —
 walks zipped output vectors, checking length match and per-position
-shape match. Returns `InvalidArgument` / `ShapeMismatch` errors.
+shape, device, stride, and storage-offset match. Returns
+`InvalidArgument` / `ShapeMismatch` / `DeviceMismatch` errors.
 
 `ScanBackward<T>` is analogous to `CondBackward`: it holds the raw
 `target: Tensor<T>` and cloned zero-gradient inputs (`init` plus
@@ -178,6 +189,11 @@ audit_core119_cond_cuda_predicate` exercises CPU and CUDA predicate
 truthiness, including CUDA scalar predicates, f32/f64 branch execution,
 resident CUDA outputs, resident CUDA gradients, zero predicates, and
 NaN predicates.
+
+`cargo test -p ferrotorch-core --features gpu --test
+audit_core118_cond_branch_metadata` exercises PyTorch-style branch
+metadata validation for output count, static shape, device, stride, and
+storage offset mismatches, including CUDA device-residency probes.
 
 ## REQ status table
 

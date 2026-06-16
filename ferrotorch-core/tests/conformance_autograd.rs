@@ -2743,7 +2743,8 @@ fn cpu_cond_takes_true_branch() {
         &pred,
         |ops: &[Tensor<f32>]| vec![add(&ops[0], &ops[1]).expect("add")],
         |ops: &[Tensor<f32>]| {
-            // false branch should not run since pred=1.0 > 0.5
+            // false branch is evaluated for metadata validation; the true
+            // branch is the selected result for pred=1.0.
             vec![ops[0].clone()]
         },
         &[a, b],

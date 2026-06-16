@@ -84,7 +84,9 @@ fn wrap_control_flow_output<T: Float>(
 ///
 /// Evaluates `true_fn(operands)` if `pred` is nonzero, otherwise
 /// `false_fn(operands)`.
-/// Only the taken branch is executed — the other branch is never called.
+/// Both branch callables are evaluated once so their output metadata can be
+/// validated like `torch.cond`; only the selected branch's tensors are returned
+/// and only the selected branch contributes gradients.
 ///
 /// # Arguments
 ///
@@ -106,11 +108,13 @@ fn wrap_control_flow_output<T: Float>(
 /// - `pred` is not a scalar (more than 1 element)
 /// - The two branches return different numbers of tensors
 /// - The two branches return tensors with different shapes at corresponding positions
+/// - The two branches return tensors on different devices
+/// - The two branches return tensors with incompatible strides or storage offsets
 ///
 /// # Autograd
 ///
-/// Gradients flow only through the taken branch. The untaken branch contributes
-/// no gradients (it was never executed).
+/// Gradients flow only through the selected branch result. The other branch is
+/// evaluated only for metadata validation and its outputs are dropped.
 pub fn cond<T, TF, FF>(
     pred: &Tensor<T>,
     true_fn: TF,
@@ -124,10 +128,13 @@ where
 {
     let take_true = read_cond_predicate(pred)?;
 
+    let true_outputs = true_fn(operands);
+    let false_outputs = false_fn(operands);
+    validate_cond_branches(&true_outputs, &false_outputs)?;
     let branch_outputs = if take_true {
-        true_fn(operands)
+        true_outputs
     } else {
-        false_fn(operands)
+        false_outputs
     };
 
     // Check if any operand requires grad.
@@ -171,12 +178,12 @@ fn read_cond_predicate<T: Float>(pred: &Tensor<T>) -> FerrotorchResult<bool> {
     Ok(!values[0].is_zero())
 }
 
-/// Validate that two sets of outputs have matching shapes.
+/// Validate that two sets of outputs have matching tensor metadata.
 ///
 /// This is a utility for users who want to verify at trace time that both
-/// branches of a `cond` produce compatible outputs. Since `cond` only
-/// executes one branch, it cannot validate shape agreement at runtime.
-/// Call this function to eagerly validate both branches.
+/// branches of a `cond` produce compatible outputs. `cond` itself calls this
+/// after evaluating both branch callables, and the helper remains public for
+/// callers that want to preflight branch outputs directly.
 pub fn validate_cond_branches<T: Float>(
     true_outputs: &[Tensor<T>],
     false_outputs: &[Tensor<T>],
@@ -198,6 +205,30 @@ pub fn validate_cond_branches<T: Float>(
                     "cond: output[{i}] shape mismatch: true branch {:?} vs false branch {:?}",
                     t.shape(),
                     f.shape()
+                ),
+            });
+        }
+        if t.device() != f.device() {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected: t.device(),
+                got: f.device(),
+            });
+        }
+        if t.strides() != f.strides() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "cond: output[{i}] stride mismatch: true branch {:?} vs false branch {:?}",
+                    t.strides(),
+                    f.strides()
+                ),
+            });
+        }
+        if t.storage_offset() != f.storage_offset() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "cond: output[{i}] storage_offset mismatch: true branch {} vs false branch {}",
+                    t.storage_offset(),
+                    f.storage_offset()
                 ),
             });
         }
