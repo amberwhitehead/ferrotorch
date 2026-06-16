@@ -4,15 +4,15 @@
 //! decompositions, solvers, norms, and related functions. Each delegates to
 //! the corresponding ferray-linalg routine via the same Array bridge pattern.
 //!
-//! **Backward support**: `solve`, `det`, `inv`, `trace`, `outer` (here),
-//! `qr`, `cholesky`, `slogdet`, and `svd` are autograd-aware: when grad
-//! tracking is active they delegate to the matching
-//! `crate::grad_fns::linalg::*_differentiable` wrapper (most attach a
-//! closed-form `*Backward` VJP; `outer` mirrors PyTorch as a composite
-//! reshape-plus-mul graph). The remaining factorizations
-//! (eig/eigh/eigvals/eigvalsh/pinv/lstsq/lu/lu_factor/norm/matrix_rank/
-//! householder_product) return non-grad tensors (research-grade VJPs tracked
-//! under #1577/#1345).
+//! **Backward support**: `solve` is autograd-aware on CPU and CUDA. `det`,
+//! `inv`, `trace`, `outer`, `qr`, `cholesky`, `slogdet`, `svd`, `eig`,
+//! `eigvals`, `eigh`, `eigvalsh`, `pinv`, `lstsq`, `lu`, `lu_factor`,
+//! `vector_norm`, `matrix_norm`, and `householder_product` are autograd-aware
+//! on their implemented forward devices. `svdvals`, `matrix_power`,
+//! `tensorsolve`, and `tensorinv` compose existing differentiable primitives
+//! where those primitives exist; `matrix_power`/`tensorsolve`/`tensorinv` also
+//! run on CUDA for f32/f64 via resident `solve`/matmul. Remaining tracked
+//! forward-only paths return structured errors instead of detached tensors.
 //!
 //! ## REQ status (per `.design/ferrotorch-core/linalg.md`)
 //!
@@ -47,6 +47,7 @@
 //! | REQ-27 | SHIPPED | impl `trace` (sum of main diagonal; grad-aware: delegates to `grad_fns::linalg::trace_differentiable` when grad enabled). |
 //! | REQ-28 | SHIPPED | impl `outer` (1-D × 1-D outer product; grad-aware: delegates to `grad_fns::linalg::outer_differentiable` when grad enabled). |
 
+use crate::device::Device;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
@@ -146,6 +147,127 @@ fn require_cpu<T: Float>(t: &Tensor<T>, op: &str) -> FerrotorchResult<()> {
     Ok(())
 }
 
+fn tracking_enabled_for<T: Float>(tensors: &[&Tensor<T>]) -> bool {
+    crate::autograd::no_grad::is_grad_enabled() && tensors.iter().any(|t| t.requires_grad())
+}
+
+fn unsupported_linalg_autograd(op: &str) -> FerrotorchError {
+    FerrotorchError::InvalidArgument {
+        message: format!(
+            "{op}: autograd is not implemented for this path; refusing to return a detached tensor"
+        ),
+    }
+}
+
+fn reject_forward_only_autograd<T: Float>(
+    op: &str,
+    tensors: &[&Tensor<T>],
+) -> FerrotorchResult<()> {
+    if tracking_enabled_for(tensors) {
+        return Err(unsupported_linalg_autograd(op));
+    }
+    Ok(())
+}
+
+fn checked_product(dims: &[usize], op: &str) -> FerrotorchResult<usize> {
+    dims.iter().try_fold(1usize, |acc, &dim| {
+        acc.checked_mul(dim)
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!("{op}: shape product overflows usize for dims {dims:?}"),
+            })
+    })
+}
+
+fn eye_on_device<T: Float>(n: usize, device: Device) -> FerrotorchResult<Tensor<T>> {
+    let eye = crate::creation::eye::<T>(n)?;
+    if device == Device::Cpu {
+        Ok(eye)
+    } else {
+        eye.to(device)
+    }
+}
+
+fn full_like_on_device<T: Float>(
+    shape: &[usize],
+    value: T,
+    device: Device,
+    op: &str,
+) -> FerrotorchResult<Tensor<T>> {
+    let numel = checked_product(shape, op)?;
+    let t = Tensor::from_storage(
+        TensorStorage::cpu(vec![value; numel]),
+        shape.to_vec(),
+        false,
+    )?;
+    if device == Device::Cpu {
+        Ok(t)
+    } else {
+        t.to(device)
+    }
+}
+
+fn effective_triangular_for_solve<T: Float>(
+    a: &Tensor<T>,
+    upper: bool,
+    transpose: bool,
+    unit_diagonal: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    let n = a.shape()[0];
+    let effective = if unit_diagonal {
+        let strict = if upper {
+            crate::ops::tensor_ops::triu(a, 1)?
+        } else {
+            crate::ops::tensor_ops::tril(a, -1)?
+        };
+        let eye = eye_on_device(n, a.device())?;
+        strict.add_t(&eye)?
+    } else if upper {
+        crate::ops::tensor_ops::triu(a, 0)?
+    } else {
+        crate::ops::tensor_ops::tril(a, 0)?
+    };
+
+    if transpose {
+        effective.transpose(0, 1)?.contiguous()
+    } else {
+        effective.contiguous()
+    }
+}
+
+#[allow(
+    clippy::float_cmp,
+    reason = "p is a user-provided discrete norm selector; accepting near-2 values would diverge from torch"
+)]
+fn is_cond_svd_selector(p: f64) -> Option<bool> {
+    if p == 2.0 {
+        Some(false)
+    } else if p == -2.0 {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+#[allow(
+    clippy::float_cmp,
+    reason = "torch.linalg.cond accepts an exact discrete set of numeric norm selectors"
+)]
+fn validate_cond_selector(p: f64) -> FerrotorchResult<()> {
+    if p == 1.0
+        || p == -1.0
+        || p == 2.0
+        || p == -2.0
+        || p == f64::INFINITY
+        || p == f64::NEG_INFINITY
+    {
+        Ok(())
+    } else {
+        Err(FerrotorchError::InvalidArgument {
+            message: format!("linalg.cond got an invalid norm type: {p}"),
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Singular Value Decomposition
 // ---------------------------------------------------------------------------
@@ -169,10 +291,9 @@ pub fn svd<T: Float>(input: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T
         });
     }
 
-    // Autograd path (CPU): delegate to the differentiable wrapper, which
-    // computes the forward inside `no_grad` (preventing re-entry here) and
-    // attaches the split `SvdBackward{U,S,V}` nodes. CUDA stays forward-only.
-    if !input.is_cuda() && crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
+    // Autograd path: delegate to the differentiable wrapper. CUDA backward
+    // composes resident matmul, diag, and broadcast arithmetic.
+    if crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
         return crate::grad_fns::linalg::svd_differentiable(input);
     }
 
@@ -272,13 +393,9 @@ pub fn solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
         });
     }
 
-    // Autograd path (CPU): delegate to the differentiable wrapper, which
-    // computes the forward inside `no_grad` (preventing re-entry here) and
-    // attaches `LinalgSolveBackward`. CUDA stays forward-only.
-    if !a.is_cuda()
-        && crate::autograd::no_grad::is_grad_enabled()
-        && (a.requires_grad() || b.requires_grad())
-    {
+    // Autograd path: CPU and CUDA both route through the same wrapper. The
+    // wrapper's CUDA backward stays resident via cuSOLVER + CUDA mm_bt.
+    if crate::autograd::no_grad::is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
         return crate::grad_fns::linalg::solve_differentiable(a, b);
     }
 
@@ -436,10 +553,9 @@ pub fn qr<T: Float>(input: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>
         });
     }
 
-    // Autograd path (CPU): delegate to the differentiable wrapper, which
-    // computes the forward inside `no_grad` (preventing re-entry) and attaches
-    // the split `QrBackwardQ`/`QrBackwardR` nodes. CUDA stays forward-only.
-    if !input.is_cuda() && crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
+    // Autograd path: delegate to the differentiable wrapper. CUDA backward
+    // composes resident matmul, triangular masks, transpose, and solve.
+    if crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
         return crate::grad_fns::linalg::qr_differentiable(input);
     }
 
@@ -518,10 +634,9 @@ pub fn cholesky<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 
     let n = shape[0];
 
-    // Autograd path (CPU): delegate to the differentiable wrapper, which
-    // computes the forward inside `no_grad` (preventing re-entry here) and
-    // attaches `CholeskyBackward`. CUDA stays forward-only.
-    if !input.is_cuda() && crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
+    // Autograd path: delegate to the differentiable wrapper. CUDA backward
+    // stays resident by composing CUDA triangular masks, matmul, and solve.
+    if crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
         return crate::grad_fns::linalg::cholesky_differentiable(input);
     }
 
@@ -575,11 +690,14 @@ pub fn matrix_norm<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         });
     }
 
-    // Autograd path (CPU): delegate to the differentiable wrapper, which
-    // computes the forward under `no_grad` (preventing re-entry here) and
-    // attaches `NormBackward` (`dx = grad * x / ||x||_F`). CUDA stays
-    // forward-only.
-    if !input.is_cuda() && crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
+    // Autograd path: CPU keeps the existing closed-form wrapper. CUDA composes
+    // resident primitives (`sqrt(sum(x*x))`) so backward flows through the
+    // existing Mul/Sum/Sqrt CUDA nodes instead of saving a host scalar.
+    if crate::autograd::no_grad::is_grad_enabled() && input.requires_grad() {
+        if input.is_cuda() {
+            let squared = input.mul_t(input)?;
+            return squared.sum_all()?.sqrt_t();
+        }
         return crate::grad_fns::linalg::matrix_norm_differentiable(input);
     }
 
@@ -689,10 +807,9 @@ pub fn eigh<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)>
     }
     let n = shape[0];
 
-    // Autograd path (CPU): delegate to the differentiable wrapper, which
-    // computes the forward under `no_grad` (preventing re-entry here) and
-    // attaches the split `EighBackwardW` / `EighBackwardV` nodes.
-    if !a.is_cuda() && crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
+    // Autograd path: delegate to the differentiable wrapper. CUDA backward
+    // composes resident matmul, diag, broadcast arithmetic, and masks.
+    if crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
         return crate::grad_fns::linalg::eigh_differentiable(a);
     }
 
@@ -803,10 +920,9 @@ pub fn eigvalsh<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     }
     let n = shape[0];
 
-    // Autograd path (CPU): delegate to the differentiable wrapper, which
-    // computes the forward (and the eigenvector solve the VJP needs) under
-    // `no_grad` (preventing re-entry here) and attaches `EigvalshBackward`.
-    if !a.is_cuda() && crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
+    // Autograd path: delegate to the differentiable wrapper. CUDA backward
+    // composes resident matmul/diag kernels.
+    if crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
         return crate::grad_fns::linalg::eigvalsh_differentiable(a);
     }
 
@@ -1087,21 +1203,39 @@ pub fn eigvals<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// for non-involutory pivot sequences (any 3-cycle) the two conventions
 /// genuinely differ.
 ///
-/// Mirrors `torch.linalg.lu`. CPU-only today.
+/// Mirrors `torch.linalg.lu`. CPU uses ferray; CUDA f32/f64 uses cuSOLVER
+/// `getrf` through [`lu_factor`] and unpacks on device.
 pub fn lu<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>, Tensor<T>)> {
-    require_cpu(a, "lu")?;
     let shape = a.shape();
     if shape.len() != 2 {
         return Err(FerrotorchError::InvalidArgument {
             message: format!("lu requires a 2-D tensor, got {shape:?}"),
         });
     }
+    let (m, n) = (shape[0], shape[1]);
 
     // Autograd path: delegate to the differentiable wrapper, which computes the
     // forward under `no_grad` (preventing re-entry here) and attaches the split
-    // `LuBackwardL` / `LuBackwardU` nodes (square m == n case).
+    // `LuBackwardL` / `LuBackwardU` nodes.
     if crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
         return crate::grad_fns::linalg::lu_differentiable(a);
+    }
+
+    if a.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        let (lu_packed, pivots) = lu_factor(a)?;
+        return lu_unpack_from_factor(&lu_packed, &pivots);
+    }
+    if a.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "lu" });
+    }
+
+    if m == 0 || n == 0 {
+        let k = m.min(n);
+        return Ok((
+            rectangular_eye_on_device(m, m, Device::Cpu)?,
+            rectangular_eye_on_device(m, k, Device::Cpu)?,
+            full_like_on_device(&[k, n], <T as num_traits::Zero>::zero(), Device::Cpu, "lu")?,
+        ));
     }
 
     if is_f32::<T>() {
@@ -1137,6 +1271,115 @@ pub fn lu<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>, Te
     }
 }
 
+fn rectangular_eye_on_device<T: Float>(
+    rows: usize,
+    cols: usize,
+    device: Device,
+) -> FerrotorchResult<Tensor<T>> {
+    let numel = checked_product(&[rows, cols], "lu_unpack")?;
+    let mut data = vec![<T as num_traits::Zero>::zero(); numel];
+    let one = <T as num_traits::One>::one();
+    for i in 0..rows.min(cols) {
+        data[i * cols + i] = one;
+    }
+    Tensor::from_storage(
+        TensorStorage::on_device(data, device)?,
+        vec![rows, cols],
+        false,
+    )
+}
+
+fn permutation_from_lapack_pivots<T: Float>(
+    pivots: &[i32],
+    rows: usize,
+    device: Device,
+) -> FerrotorchResult<Tensor<T>> {
+    let numel = checked_product(&[rows, rows], "lu_unpack")?;
+    let mut p_f = vec![<T as num_traits::Zero>::zero(); numel];
+    let one = <T as num_traits::One>::one();
+    for i in 0..rows {
+        p_f[i * rows + i] = one;
+    }
+    for (i, &pivot) in pivots.iter().enumerate() {
+        if pivot <= 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("lu_unpack: pivot at index {i} is not 1-based positive: {pivot}"),
+            });
+        }
+        let j = (pivot - 1) as usize;
+        if i >= rows || j >= rows {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "lu_unpack: pivot at index {i} points to row {j}, outside {rows} rows"
+                ),
+            });
+        }
+        for col in 0..rows {
+            p_f.swap(i * rows + col, j * rows + col);
+        }
+    }
+
+    // LAPACK/cuSOLVER pivots encode P_f such that P_f @ A = L @ U. PyTorch's
+    // `torch.linalg.lu` returns P in the documented A = P @ L @ U convention,
+    // so expose P_f^T.
+    let mut p_torch = vec![<T as num_traits::Zero>::zero(); numel];
+    for r in 0..rows {
+        for c in 0..rows {
+            p_torch[r * rows + c] = p_f[c * rows + r];
+        }
+    }
+    Tensor::from_storage(
+        TensorStorage::on_device(p_torch, device)?,
+        vec![rows, rows],
+        false,
+    )
+}
+
+pub(crate) fn lu_unpack_from_factor<T: Float>(
+    lu_packed: &Tensor<T>,
+    pivots: &[i32],
+) -> FerrotorchResult<(Tensor<T>, Tensor<T>, Tensor<T>)> {
+    let shape = lu_packed.shape();
+    if shape.len() != 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("lu_unpack: LU must be 2-D, got {shape:?}"),
+        });
+    }
+    let (m, n) = (shape[0], shape[1]);
+    let k = m.min(n);
+    if pivots.len() != k {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "lu_unpack: expected {} pivots for LU shape {:?}, got {}",
+                k,
+                shape,
+                pivots.len()
+            ),
+        });
+    }
+    let device = lu_packed.device();
+    let p = permutation_from_lapack_pivots::<T>(pivots, m, device)?;
+
+    if k == 0 {
+        let l = rectangular_eye_on_device(m, k, device)?;
+        let u = full_like_on_device(
+            &[k, n],
+            <T as num_traits::Zero>::zero(),
+            device,
+            "lu_unpack",
+        )?;
+        return Ok((p, l, u));
+    }
+
+    let l_cols = lu_packed.narrow(1, 0, k)?;
+    let strict_l = crate::ops::tensor_ops::tril(&l_cols, -1)?;
+    let l = strict_l.add_t(&rectangular_eye_on_device(m, k, device)?)?;
+
+    let u_rows = lu_packed.narrow(0, 0, k)?;
+    let u = crate::ops::tensor_ops::triu(&u_rows, 0)?;
+    Ok((p, l, u))
+}
+
 /// Transpose an `n × n` row-major f32 slice into a `Vec<T>` (used to convert
 /// ferray's `P_f A = L U` permutation into torch's `A = P L U` one; a
 /// permutation matrix's inverse is its transpose). CORE-144 / #1838.
@@ -1162,46 +1405,56 @@ fn transpose_square_to_vec_f64<T: Float>(src: &[f64], n: usize) -> Vec<T> {
 }
 
 /// LU factorization in cuSOLVER's packed form: returns `(LU_packed, pivots)`
-/// where `LU_packed` is `n×n` row-major with the strict lower triangle = `L`
-/// (unit diagonal implicit) and the upper triangle = `U`, and `pivots` is a
-/// length-`n` host `Vec<i32>` of 1-based row-permutation indices (cuSOLVER /
+/// where `LU_packed` has the same `m×n` shape as `a`, the strict lower
+/// triangle stores `L` (unit diagonal implicit), the upper triangle stores
+/// `U`, and `pivots` is a length-`min(m, n)` host `Vec<i32>` of 1-based
+/// row-permutation indices (cuSOLVER /
 /// LAPACK convention). Mirrors `torch.linalg.lu_factor`. (#604)
 ///
 /// On CUDA f32/f64, dispatches to the native `gpu_lu_factor` kernel
 /// (cuSOLVER `getrf` with on-device row→col→row transpose). The LU matrix
-/// stays on device (O(n²) values); only the pivot vector (O(n) ints) is
+/// stays on device (O(mn) values); only the pivot vector (O(min(m,n)) ints) is
 /// downloaded to host as a `Vec<i32>` since `Tensor<T>` requires
 /// `T: Float`. Other dtypes and CPU inputs fall back to `ferray-linalg::lu`
 /// and pack the result locally.
 pub fn lu_factor<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Vec<i32>)> {
     let shape = a.shape();
-    if shape.len() != 2 || shape[0] != shape[1] {
+    if shape.len() != 2 {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!("lu_factor requires a square 2-D tensor, got {shape:?}"),
+            message: format!("lu_factor requires a 2-D tensor, got {shape:?}"),
         });
     }
-    let n = shape[0];
+    let (m, n) = (shape[0], shape[1]);
+    let k = m.min(n);
 
-    // Autograd path (CPU): delegate to the differentiable wrapper, which
-    // computes the forward under `no_grad` (preventing re-entry here) and
-    // attaches `LuFactorBackward` (the packed-LU square-case VJP). CUDA stays
-    // forward-only.
-    if !a.is_cuda() && crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
+    // Autograd path: delegate to the differentiable wrapper. The forward value
+    // still follows the resident CUDA or CPU path under `no_grad`.
+    if crate::autograd::no_grad::is_grad_enabled() && a.requires_grad() {
         return crate::grad_fns::linalg::lu_factor_differentiable(a);
+    }
+
+    if k == 0 {
+        let lu = full_like_on_device(
+            shape,
+            <T as num_traits::Zero>::zero(),
+            a.device(),
+            "lu_factor",
+        )?;
+        return Ok((lu, Vec::new()));
     }
 
     if a.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let (lu_h, ipiv) = if is_f32::<T>() {
-            backend.lu_factor_f32(a.gpu_handle()?, n)?
+            backend.lu_factor_f32(a.gpu_handle()?, m, n)?
         } else {
-            backend.lu_factor_f64(a.gpu_handle()?, n)?
+            backend.lu_factor_f64(a.gpu_handle()?, m, n)?
         };
         // The LU matrix stays on device; pivots are returned as a host
-        // Vec<i32> directly from the trait (O(n) ints, not worth a typed
-        // GPU int handle).
-        let lu = Tensor::from_storage(TensorStorage::gpu(lu_h), vec![n, n], false)?;
+        // Vec<i32> directly from the trait (O(min(m,n)) ints, not worth a
+        // typed GPU int handle).
+        let lu = Tensor::from_storage(TensorStorage::gpu(lu_h), vec![m, n], false)?;
         return Ok((lu, ipiv));
     }
     if a.is_cuda() {
@@ -1235,13 +1488,15 @@ pub fn lu_factor<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Vec<i3
     };
 
     // Build packed LU buffer: lower triangle = strict-L, upper = U (incl. diag).
-    let mut packed = vec![<T as num_traits::Zero>::zero(); n * n];
-    for i in 0..n {
+    let mut packed = vec![<T as num_traits::Zero>::zero(); m * n];
+    for i in 0..m {
         for j in 0..n {
-            packed[i * n + j] = if j < i {
-                l[i * n + j] // strict lower of L
-            } else {
+            packed[i * n + j] = if j < k && j < i {
+                l[i * k + j] // strict lower of L
+            } else if i < k {
                 u[i * n + j] // U upper triangle
+            } else {
+                <T as num_traits::Zero>::zero()
             };
         }
     }
@@ -1259,25 +1514,25 @@ pub fn lu_factor<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Vec<i3
     //      step `i`, the algorithm wants `perm[i]` at position `i`.
     //      Find where `perm[i]` lives in the running array `work`
     //      (originally identity), record the swap, and apply it.
-    let mut perm = vec![0_usize; n];
+    let mut perm = vec![0_usize; m];
     let one = T::from(1.0).unwrap();
-    for i in 0..n {
-        for j in 0..n {
-            if p[i * n + j] == one {
+    for i in 0..m {
+        for j in 0..m {
+            if p[i * m + j] == one {
                 perm[i] = j;
                 break;
             }
         }
     }
-    let mut work: Vec<usize> = (0..n).collect();
-    let mut ipiv = vec![0_i32; n];
-    for i in 0..n {
+    let mut work: Vec<usize> = (0..m).collect();
+    let mut ipiv = vec![0_i32; k];
+    for i in 0..k {
         let target = perm[i];
-        let j = (i..n).find(|&k| work[k] == target).unwrap_or(i);
+        let j = (i..m).find(|&row| work[row] == target).unwrap_or(i);
         ipiv[i] = (j + 1) as i32;
         work.swap(i, j);
     }
-    let lu = Tensor::from_storage(TensorStorage::cpu(packed), vec![n, n], false)?;
+    let lu = Tensor::from_storage(TensorStorage::cpu(packed), vec![m, n], false)?;
     Ok((lu, ipiv))
 }
 
@@ -1287,14 +1542,23 @@ pub fn lu_factor<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Vec<i3
 
 /// Singular values (descending) of a 2-D tensor.
 ///
-/// Mirrors `torch.linalg.svdvals`. CPU-only today.
+/// Mirrors `torch.linalg.svdvals`.
 pub fn svdvals<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    require_cpu(a, "svdvals")?;
     let shape = a.shape();
     if shape.len() != 2 {
         return Err(FerrotorchError::InvalidArgument {
             message: format!("svdvals requires a 2-D tensor, got {shape:?}"),
         });
+    }
+
+    if tracking_enabled_for(&[a]) {
+        let (_u, s, _vh) = svd(a)?;
+        return Ok(s);
+    }
+
+    if a.is_cuda() {
+        let (_u, s, _vh) = svd(a)?;
+        return Ok(s);
     }
 
     if is_f32::<T>() {
@@ -1460,14 +1724,17 @@ pub fn lstsq<T: Float>(
 /// Compute `A^n` for integer `n`. For `n >= 0`, uses repeated squaring;
 /// for `n < 0`, computes the inverse first.
 ///
-/// Mirrors `torch.linalg.matrix_power`. CPU-only today.
+/// Mirrors `torch.linalg.matrix_power`.
 pub fn matrix_power<T: Float>(a: &Tensor<T>, n: i64) -> FerrotorchResult<Tensor<T>> {
-    require_cpu(a, "matrix_power")?;
     let shape = a.shape();
     if shape.len() != 2 || shape[0] != shape[1] {
         return Err(FerrotorchError::InvalidArgument {
             message: format!("matrix_power requires a square 2-D tensor, got {shape:?}"),
         });
+    }
+
+    if tracking_enabled_for(&[a]) || a.is_cuda() {
+        return matrix_power_composite(a, n);
     }
 
     if is_f32::<T>() {
@@ -1487,12 +1754,110 @@ pub fn matrix_power<T: Float>(a: &Tensor<T>, n: i64) -> FerrotorchResult<Tensor<
     }
 }
 
+fn matrix_power_composite<T: Float>(a: &Tensor<T>, n: i64) -> FerrotorchResult<Tensor<T>> {
+    let shape = a.shape();
+    let dim = shape[0];
+    let device = a.device();
+    let zero = <T as num_traits::Zero>::zero();
+    let one = <T as num_traits::One>::one();
+
+    if n == 0 {
+        let zeros = full_like_on_device(shape, zero, device, "matrix_power")?;
+        let eye = eye_on_device(dim, device)?;
+        return a.mul_t(&zeros)?.add_t(&eye);
+    }
+    if n == 1 {
+        let ones = full_like_on_device(shape, one, device, "matrix_power")?;
+        return a.mul_t(&ones);
+    }
+
+    let mut exp = n
+        .checked_abs()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "matrix_power: exponent i64::MIN is not representable as a positive power"
+                .into(),
+        })? as u64;
+
+    let base = if n < 0 {
+        let eye = eye_on_device(dim, device)?;
+        solve(a, &eye)?
+    } else {
+        a.clone()
+    };
+
+    if exp == 1 {
+        return Ok(base);
+    }
+    if exp == 2 {
+        return base.mm(&base);
+    }
+    if exp == 3 {
+        return base.mm(&base)?.mm(&base);
+    }
+
+    let mut z: Option<Tensor<T>> = None;
+    let mut result: Option<Tensor<T>> = None;
+    while exp > 0 {
+        let bit = exp & 1;
+        exp >>= 1;
+        z = Some(match z {
+            Some(ref current) => current.mm(current)?,
+            None => base.clone(),
+        });
+        if bit == 1 {
+            let z_ref = z.as_ref().expect("z set before use");
+            result = Some(match result {
+                Some(ref current) => current.mm(z_ref)?,
+                None => z_ref.clone(),
+            });
+        }
+    }
+
+    result.ok_or_else(|| FerrotorchError::Internal {
+        message: "matrix_power: exponentiation produced no result".into(),
+    })
+}
+
 /// Solve `tensordot(a, x, axes) = b` for a tensor `x`.
 ///
-/// Mirrors `torch.linalg.tensorsolve`. CPU-only today.
+/// Mirrors `torch.linalg.tensorsolve` for the default `dims=None` case.
 pub fn tensorsolve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    require_cpu(a, "tensorsolve")?;
-    require_cpu(b, "tensorsolve")?;
+    if a.device() != b.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        });
+    }
+    if b.ndim() > a.ndim() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "tensorsolve: b rank {} cannot exceed a rank {}",
+                b.ndim(),
+                a.ndim()
+            ),
+        });
+    }
+    let result_shape = a.shape()[b.ndim()..].to_vec();
+    let result_product = checked_product(&result_shape, "tensorsolve")?;
+    let b_product = checked_product(b.shape(), "tensorsolve")?;
+    if result_product != b_product {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "tensorsolve: expected prod(a.shape[b.ndim():]) == prod(b.shape), got {result_product} != {b_product}"
+            ),
+        });
+    }
+
+    if tracking_enabled_for(&[a, b]) || a.is_cuda() {
+        let a_2d = crate::grad_fns::shape::reshape(
+            a,
+            &[result_product as isize, result_product as isize],
+        )?;
+        let b_flat = crate::grad_fns::shape::reshape(b, &[b_product as isize])?;
+        let x = solve(&a_2d, &b_flat)?;
+        let out_shape: Vec<isize> = result_shape.iter().map(|&d| d as isize).collect();
+        return crate::grad_fns::shape::reshape(&x, &out_shape);
+    }
 
     if is_f32::<T>() {
         let a_arr = tensor_to_arraydyn_f32(a)?;
@@ -1517,9 +1882,39 @@ pub fn tensorsolve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<T
 
 /// Tensor inverse with respect to the partition at `ind`.
 ///
-/// Mirrors `torch.linalg.tensorinv`. CPU-only today.
+/// Mirrors `torch.linalg.tensorinv`.
 pub fn tensorinv<T: Float>(a: &Tensor<T>, ind: usize) -> FerrotorchResult<Tensor<T>> {
-    require_cpu(a, "tensorinv")?;
+    let shape = a.shape();
+    if ind == 0 || ind > shape.len() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "tensorinv: expected 0 < ind <= ndim ({}), got {ind}",
+                shape.len()
+            ),
+        });
+    }
+    let left_shape = &shape[..ind];
+    let right_shape = &shape[ind..];
+    let left_product = checked_product(left_shape, "tensorinv")?;
+    let right_product = checked_product(right_shape, "tensorinv")?;
+    if left_product != right_product {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "tensorinv: expected prod(shape[..ind]) == prod(shape[ind..]), got {left_product} != {right_product}"
+            ),
+        });
+    }
+
+    if tracking_enabled_for(&[a]) || a.is_cuda() {
+        let a_2d =
+            crate::grad_fns::shape::reshape(a, &[right_product as isize, right_product as isize])?;
+        let eye = eye_on_device(right_product, a.device())?;
+        let inv_2d = solve(&a_2d, &eye)?;
+        let mut out_shape = right_shape.to_vec();
+        out_shape.extend_from_slice(left_shape);
+        let out_shape: Vec<isize> = out_shape.iter().map(|&d| d as isize).collect();
+        return crate::grad_fns::shape::reshape(&inv_2d, &out_shape);
+    }
 
     if is_f32::<T>() {
         let arr = tensor_to_arraydyn_f32(a)?;
@@ -1690,7 +2085,22 @@ pub fn cond<T: Float>(a: &Tensor<T>, p: f64) -> FerrotorchResult<Tensor<T>> {
             message: format!("cond requires a 2-D tensor, got {shape:?}"),
         });
     }
+    validate_cond_selector(p)?;
     let order = float_to_norm_order(p);
+
+    if tracking_enabled_for(&[a]) {
+        if let Some(invert_ratio) = is_cond_svd_selector(p) {
+            let s = svdvals(a)?;
+            let max = s.amax()?;
+            let min = s.amin()?;
+            return if invert_ratio {
+                min.div_t(&max)
+            } else {
+                max.div_t(&min)
+            };
+        }
+        reject_forward_only_autograd("cond", &[a])?;
+    }
 
     if is_f32::<T>() {
         let arr = tensor_to_array2_f32(a)?;
@@ -2217,8 +2627,9 @@ pub fn kron<T: Float>(self_: &Tensor<T>, other: &Tensor<T>) -> FerrotorchResult<
 /// `b` may be 1-D (`[n]`) for a single right-hand side or 2-D (`[n, k]`) for
 /// `k` simultaneous RHS columns. Output has the same shape as `b`.
 ///
-/// Mirrors `torch.linalg.solve_triangular`. CPU-only today (forward / back
-/// substitution in pure Rust at f64 internally).
+/// Mirrors `torch.linalg.solve_triangular`. CPU uses forward/back substitution
+/// in pure Rust at f64 internally; CUDA materializes the effective triangular
+/// system on device and solves it through the resident cuSOLVER path.
 pub fn solve_triangular<T: Float>(
     a: &Tensor<T>,
     b: &Tensor<T>,
@@ -2226,9 +2637,6 @@ pub fn solve_triangular<T: Float>(
     transpose: bool,
     unit_diagonal: bool,
 ) -> FerrotorchResult<Tensor<T>> {
-    require_cpu(a, "solve_triangular")?;
-    require_cpu(b, "solve_triangular")?;
-
     if a.ndim() != 2 || a.shape()[0] != a.shape()[1] {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
@@ -2257,6 +2665,32 @@ pub fn solve_triangular<T: Float>(
             });
         }
     };
+    if a.is_cuda() != b.is_cuda() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        });
+    }
+    if tracking_enabled_for(&[a, b]) {
+        return crate::grad_fns::linalg::solve_triangular_differentiable(
+            a,
+            b,
+            upper,
+            transpose,
+            unit_diagonal,
+        );
+    }
+
+    if a.is_cuda() {
+        if !(is_f32::<T>() || is_f64::<T>()) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "solve_triangular requires f32 or f64".into(),
+            });
+        }
+        let effective = effective_triangular_for_solve(a, upper, transpose, unit_diagonal)?;
+        let rhs = b.contiguous()?;
+        return solve(&effective, &rhs);
+    }
 
     // Materialize to f64 internally; the existing helpers use the same
     // strategy. Final cast back to T.
@@ -2346,6 +2780,7 @@ pub fn ldl_factor<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tenso
             message: format!("ldl_factor: a must be square 2-D, got {:?}", a.shape()),
         });
     }
+    reject_forward_only_autograd("ldl_factor", &[a])?;
     let n = a.shape()[0];
     let a_f64: Vec<f64> = a.data()?.iter().map(|&v| v.to_f64().unwrap()).collect();
 
@@ -2398,6 +2833,7 @@ pub fn ldl_solve<T: Float>(
     require_cpu(l, "ldl_solve")?;
     require_cpu(d, "ldl_solve")?;
     require_cpu(b, "ldl_solve")?;
+    reject_forward_only_autograd("ldl_solve", &[l, d, b])?;
     if l.ndim() != 2 || l.shape()[0] != l.shape()[1] {
         return Err(FerrotorchError::InvalidArgument {
             message: format!("ldl_solve: L must be square 2-D, got {:?}", l.shape()),
@@ -2529,6 +2965,7 @@ pub fn householder_product_full<T: Float>(
             message: format!("householder_product: k={k} must be ≤ m={m}"),
         });
     }
+    reject_forward_only_autograd("householder_product_full", &[v, tau])?;
 
     let v_f64: Vec<f64> = v.data()?.iter().map(|&x| x.to_f64().unwrap()).collect();
     let tau_f64: Vec<f64> = tau.data()?.iter().map(|&x| x.to_f64().unwrap()).collect();
@@ -2579,15 +3016,29 @@ pub fn householder_product_full<T: Float>(
 /// compute the Padé(13) approximation of `exp(A/2^s)`, then square `s`
 /// times to recover `exp(A)`. Mirrors `torch.linalg.matrix_exp`.
 ///
-/// CPU-only; works in f64 internally.
+/// CPU works in f64 internally. CUDA composes resident matmul/add/solve kernels
+/// and uses the same Padé(13) scaling-and-squaring algorithm.
 pub fn matrix_exp<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    require_cpu(a, "matrix_exp")?;
     if a.ndim() != 2 || a.shape()[0] != a.shape()[1] {
         return Err(FerrotorchError::InvalidArgument {
             message: format!("matrix_exp: a must be square 2-D, got {:?}", a.shape()),
         });
     }
+    if tracking_enabled_for(&[a]) {
+        return crate::grad_fns::linalg::matrix_exp_differentiable(a);
+    }
     let n = a.shape()[0];
+    if a.is_cuda() {
+        if !(is_f32::<T>() || is_f64::<T>()) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "matrix_exp requires f32 or f64".into(),
+            });
+        }
+        return matrix_exp_pade13_tensor(a);
+    }
+    if n == 0 {
+        return Tensor::from_storage(TensorStorage::cpu(Vec::<T>::new()), vec![0, 0], false);
+    }
     let a_data: Vec<f64> = a.data()?.iter().map(|&v| v.to_f64().unwrap()).collect();
     // Trivial 1x1 case mirrors upstream `linalg_matrix_exp` (pytorch
     // `aten/src/ATen/native/LinearAlgebra.cpp:2795`: `n == 1` returns
@@ -2646,6 +3097,104 @@ fn mat_axpby(a: &[f64], alpha: f64, b: &[f64], beta: f64) -> Vec<f64> {
         .zip(b.iter())
         .map(|(&x, &y)| alpha * x + beta * y)
         .collect()
+}
+
+fn tensor_scale<T: Float>(a: &Tensor<T>, alpha: f64) -> FerrotorchResult<Tensor<T>> {
+    let zeros = crate::creation::zeros_like(a)?;
+    crate::grad_fns::arithmetic::add_scaled(&zeros, a, alpha)
+}
+
+fn tensor_axpby<T: Float>(
+    a: &Tensor<T>,
+    alpha: f64,
+    b: &Tensor<T>,
+    beta: f64,
+) -> FerrotorchResult<Tensor<T>> {
+    let scaled_a = tensor_scale(a, alpha)?;
+    crate::grad_fns::arithmetic::add_scaled(&scaled_a, b, beta)
+}
+
+fn matrix_exp_pade13_tensor<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    const THETA13: f64 = 5.371920351148152;
+    let b: [f64; 14] = [
+        64764752532480000.0,
+        32382376266240000.0,
+        7771770303897600.0,
+        1187353796428800.0,
+        129060195264000.0,
+        10559470521600.0,
+        670442572800.0,
+        33522128640.0,
+        1323241920.0,
+        40840800.0,
+        960960.0,
+        16380.0,
+        182.0,
+        1.0,
+    ];
+
+    let n = a.shape()[0];
+    if n == 0 {
+        return a.contiguous();
+    }
+    if n == 1 {
+        return a.exp_t();
+    }
+
+    let norm_t = a.abs_t()?.sum_dim(1, false)?.amax()?;
+    let norm_data = norm_t.data_vec()?;
+    let norm = norm_data.first().and_then(|v| v.to_f64()).ok_or_else(|| {
+        FerrotorchError::InvalidArgument {
+            message: "matrix_exp: norm is not representable as f64".into(),
+        }
+    })?;
+    if norm.is_nan() || norm.is_infinite() {
+        let nan = T::from(f64::NAN).ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "matrix_exp: NaN is not representable in dtype".into(),
+        })?;
+        return full_like_on_device(a.shape(), nan, a.device(), "matrix_exp");
+    }
+
+    let s = if norm <= THETA13 {
+        0
+    } else {
+        ((norm / THETA13).log2().ceil() as i32).clamp(0, 1023)
+    };
+    let scale = 2f64.powi(s);
+    let a_scaled = tensor_scale(a, 1.0 / scale)?;
+    let id = eye_on_device(n, a.device())?;
+    let a2 = a_scaled.mm(&a_scaled)?;
+    let a4 = a2.mm(&a2)?;
+    let a6 = a4.mm(&a2)?;
+
+    let inner_u = {
+        let t1 = tensor_axpby(&a6, b[13], &a4, b[11])?;
+        let t2 = crate::grad_fns::arithmetic::add_scaled(&t1, &a2, b[9])?;
+        a6.mm(&t2)?
+    };
+    let mid_u = crate::grad_fns::arithmetic::add_scaled(&inner_u, &a6, b[7])?;
+    let mid_u = crate::grad_fns::arithmetic::add_scaled(&mid_u, &a4, b[5])?;
+    let mid_u = crate::grad_fns::arithmetic::add_scaled(&mid_u, &a2, b[3])?;
+    let mid_u = crate::grad_fns::arithmetic::add_scaled(&mid_u, &id, b[1])?;
+    let u = a_scaled.mm(&mid_u)?;
+
+    let inner_v = {
+        let t1 = tensor_axpby(&a6, b[12], &a4, b[10])?;
+        let t2 = crate::grad_fns::arithmetic::add_scaled(&t1, &a2, b[8])?;
+        a6.mm(&t2)?
+    };
+    let v = crate::grad_fns::arithmetic::add_scaled(&inner_v, &a6, b[6])?;
+    let v = crate::grad_fns::arithmetic::add_scaled(&v, &a4, b[4])?;
+    let v = crate::grad_fns::arithmetic::add_scaled(&v, &a2, b[2])?;
+    let v = crate::grad_fns::arithmetic::add_scaled(&v, &id, b[0])?;
+
+    let p = crate::grad_fns::arithmetic::add_scaled(&v, &u, -1.0)?;
+    let q = crate::grad_fns::arithmetic::add_scaled(&v, &u, 1.0)?;
+    let mut r = solve(&p, &q)?;
+    for _ in 0..s.max(0) {
+        r = r.mm(&r)?;
+    }
+    Ok(r)
 }
 
 /// Solve `(I - U)^{-1} (I + U)`-style linear system used in Padé approximant.

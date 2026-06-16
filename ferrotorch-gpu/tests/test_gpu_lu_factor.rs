@@ -30,32 +30,33 @@ fn cpu_t_f64(data: &[f64], shape: &[usize]) -> Tensor<f64> {
 /// without comparing element-by-element against a non-deterministic CPU
 /// reference (different LAPACK / ferray implementations may pick equivalent
 /// but distinct factorizations).
-fn reconstruct_from_lu_factor_f32(lu: &[f32], ipiv: &[i32], n: usize) -> Vec<f32> {
+fn reconstruct_from_lu_factor_f32(lu: &[f32], ipiv: &[i32], m: usize, n: usize) -> Vec<f32> {
+    let k = m.min(n);
     // L: strict lower triangle of LU + unit diagonal
-    let mut l = vec![0.0_f32; n * n];
-    for i in 0..n {
-        for j in 0..n {
+    let mut l = vec![0.0_f32; m * k];
+    for i in 0..m {
+        for j in 0..k {
             if i == j {
-                l[i * n + j] = 1.0;
+                l[i * k + j] = 1.0;
             } else if j < i {
-                l[i * n + j] = lu[i * n + j];
+                l[i * k + j] = lu[i * n + j];
             }
         }
     }
     // U: upper triangle (incl. diagonal) of LU
-    let mut u = vec![0.0_f32; n * n];
-    for i in 0..n {
+    let mut u = vec![0.0_f32; k * n];
+    for i in 0..k {
         for j in i..n {
             u[i * n + j] = lu[i * n + j];
         }
     }
     // L @ U
-    let mut lu_prod = vec![0.0_f32; n * n];
-    for i in 0..n {
+    let mut lu_prod = vec![0.0_f32; m * n];
+    for i in 0..m {
         for j in 0..n {
             let mut acc = 0.0;
-            for k in 0..n {
-                acc += l[i * n + k] * u[k * n + j];
+            for kk in 0..k {
+                acc += l[i * k + kk] * u[kk * n + j];
             }
             lu_prod[i * n + j] = acc;
         }
@@ -64,7 +65,7 @@ fn reconstruct_from_lu_factor_f32(lu: &[f32], ipiv: &[i32], n: usize) -> Vec<f32
     // ipiv[i] is the 1-based row that was swapped INTO row i during
     // factorization. To get A = P^{-1} (LU) we apply the swaps in reverse.
     let mut a = lu_prod;
-    for i in (0..n).rev() {
+    for i in (0..k).rev() {
         let p = (ipiv[i] - 1) as usize;
         if p != i {
             for j in 0..n {
@@ -75,35 +76,36 @@ fn reconstruct_from_lu_factor_f32(lu: &[f32], ipiv: &[i32], n: usize) -> Vec<f32
     a
 }
 
-fn reconstruct_from_lu_factor_f64(lu: &[f64], ipiv: &[i32], n: usize) -> Vec<f64> {
-    let mut l = vec![0.0_f64; n * n];
-    for i in 0..n {
-        for j in 0..n {
+fn reconstruct_from_lu_factor_f64(lu: &[f64], ipiv: &[i32], m: usize, n: usize) -> Vec<f64> {
+    let k = m.min(n);
+    let mut l = vec![0.0_f64; m * k];
+    for i in 0..m {
+        for j in 0..k {
             if i == j {
-                l[i * n + j] = 1.0;
+                l[i * k + j] = 1.0;
             } else if j < i {
-                l[i * n + j] = lu[i * n + j];
+                l[i * k + j] = lu[i * n + j];
             }
         }
     }
-    let mut u = vec![0.0_f64; n * n];
-    for i in 0..n {
+    let mut u = vec![0.0_f64; k * n];
+    for i in 0..k {
         for j in i..n {
             u[i * n + j] = lu[i * n + j];
         }
     }
-    let mut lu_prod = vec![0.0_f64; n * n];
-    for i in 0..n {
+    let mut lu_prod = vec![0.0_f64; m * n];
+    for i in 0..m {
         for j in 0..n {
             let mut acc = 0.0;
-            for k in 0..n {
-                acc += l[i * n + k] * u[k * n + j];
+            for kk in 0..k {
+                acc += l[i * k + kk] * u[kk * n + j];
             }
             lu_prod[i * n + j] = acc;
         }
     }
     let mut a = lu_prod;
-    for i in (0..n).rev() {
+    for i in (0..k).rev() {
         let p = (ipiv[i] - 1) as usize;
         if p != i {
             for j in 0..n {
@@ -134,7 +136,7 @@ fn lu_factor_f32_3x3_reconstructs_input() {
 
     // Reconstruct A from the factorization and compare element-wise.
     let lu_host = lu.cpu().unwrap().data().unwrap().to_vec();
-    let recon = reconstruct_from_lu_factor_f32(&lu_host, &ipiv, 3);
+    let recon = reconstruct_from_lu_factor_f32(&lu_host, &ipiv, 3, 3);
     for (i, (got, expected)) in recon.iter().zip(a_data.iter()).enumerate() {
         assert!(
             (got - expected).abs() < 1e-4,
@@ -162,7 +164,7 @@ fn lu_factor_f64_5x5_reconstructs_input() {
     assert_eq!(ipiv.len(), 5);
 
     let lu_host = lu.cpu().unwrap().data().unwrap().to_vec();
-    let recon = reconstruct_from_lu_factor_f64(&lu_host, &ipiv, 5);
+    let recon = reconstruct_from_lu_factor_f64(&lu_host, &ipiv, 5, 5);
     for (i, (got, expected)) in recon.iter().zip(a_data.iter()).enumerate() {
         assert!(
             (got - expected).abs() < 1e-9,
@@ -178,12 +180,12 @@ fn lu_factor_cpu_path_matches_gpu_via_reconstruction() {
     let a_cpu = cpu_t_f32(&a_data, &[3, 3]);
 
     let (cpu_lu, cpu_ipiv) = linalg::lu_factor(&a_cpu).unwrap();
-    let cpu_recon = reconstruct_from_lu_factor_f32(cpu_lu.data().unwrap(), &cpu_ipiv, 3);
+    let cpu_recon = reconstruct_from_lu_factor_f32(cpu_lu.data().unwrap(), &cpu_ipiv, 3, 3);
 
     let a_gpu = a_cpu.to(Device::Cuda(0)).unwrap();
     let (gpu_lu, gpu_ipiv) = linalg::lu_factor(&a_gpu).unwrap();
     let gpu_lu_host = gpu_lu.cpu().unwrap().data().unwrap().to_vec();
-    let gpu_recon = reconstruct_from_lu_factor_f32(&gpu_lu_host, &gpu_ipiv, 3);
+    let gpu_recon = reconstruct_from_lu_factor_f32(&gpu_lu_host, &gpu_ipiv, 3, 3);
 
     // Both reconstruct A even though the factorizations may differ in
     // pivot order — element-wise equality on the reconstructions is the
@@ -197,14 +199,21 @@ fn lu_factor_cpu_path_matches_gpu_via_reconstruction() {
 }
 
 #[test]
-fn lu_factor_rejects_non_square() {
+fn lu_factor_f32_rectangular_2x3_reconstructs_input() {
     ensure_cuda();
-    let a = cpu_t_f32(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
-        .to(Device::Cuda(0))
-        .unwrap();
-    let err = linalg::lu_factor(&a).unwrap_err();
-    let msg = format!("{err}");
-    assert!(msg.contains("square"), "got: {msg}");
+    let a_data = [1.0, 2.0, 3.0, 4.0, 7.0, 6.0];
+    let a = cpu_t_f32(&a_data, &[2, 3]).to(Device::Cuda(0)).unwrap();
+    let (lu, ipiv) = linalg::lu_factor(&a).unwrap();
+    assert_eq!(lu.shape(), &[2, 3]);
+    assert_eq!(ipiv.len(), 2);
+    let lu_host = lu.cpu().unwrap().data().unwrap().to_vec();
+    let recon = reconstruct_from_lu_factor_f32(&lu_host, &ipiv, 2, 3);
+    for (i, (got, expected)) in recon.iter().zip(a_data.iter()).enumerate() {
+        assert!(
+            (got - expected).abs() < 1e-4,
+            "rectangular mismatch at {i}: got {got}, expected {expected}"
+        );
+    }
 }
 
 #[test]
@@ -231,7 +240,7 @@ fn lu_factor_large_matrix_64x64_reconstructs() {
     assert_eq!(ipiv.len(), n);
 
     let lu_host = lu.cpu().unwrap().data().unwrap().to_vec();
-    let recon = reconstruct_from_lu_factor_f32(&lu_host, &ipiv, n);
+    let recon = reconstruct_from_lu_factor_f32(&lu_host, &ipiv, n, n);
     let mut max_err = 0.0_f32;
     for (g, c) in recon.iter().zip(a_data.iter()) {
         max_err = max_err.max((g - c).abs());

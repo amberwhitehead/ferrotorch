@@ -33,8 +33,8 @@
 //! | REQ-24 (`linalg.matrix_rank`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-25 (`linalg.cross`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-26 (`linalg.householder_product`) | SHIPPED | `HouseholderProductBackward` + `householder_product_differentiable` (real reflector-recursion VJP — `tril(V,-1)` unit-diag, `sigma_j=tau_j/(tau_j‖input[:,j]‖²-1)`, `K=Q_full@grad^T`, per-`i` `update_grad` + `K←H_{i+1}^{-1}KH_i` advance, `grad_V=tril(-1)`) per `FunctionsManual.cpp:5544`; verified vs LIVE torch 2.11.0 float64 by `grad_fns::linalg::tests::householder_product_backward_{square_3x3,tall_4x3,tall_4x2}_matches_torch` (V.grad + tau.grad at `1e-9`); non-test consumer: the now-`[m,k]`-shaped grad-aware `crate::linalg::householder_product` forward delegates here (with `crate::linalg::householder_product_full` giving the `[m,m]` reconstruction). Residual #1345 = eig/eigvals (complex). |
-//! | REQ-27 (`linalg.lu`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
-//! | REQ-28 (`linalg.lu_factor`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
+//! | REQ-27 (`linalg.lu`) | SHIPPED | `LuBackwardL`/`LuBackwardU` + `lu_differentiable` (PyTorch square/wide/tall block formulas per `FunctionsManual.cpp:6854`); FD-verified for CPU wide and CUDA-resident against CPU in `tests/audit_core146_linalg_autograd.rs`; non-test consumer: grad-aware `crate::linalg::lu` delegates here when grad is enabled. |
+//! | REQ-28 (`linalg.lu_factor`) | SHIPPED | `LuFactorBackward` + `lu_factor_differentiable` splits packed `LU` with `grad.narrow(-1,0,k)` / `grad.narrow(-2,0,k)` per `FunctionsManual.cpp:6960`; FD-verified for CPU tall and CUDA-resident against CPU in `tests/audit_core146_linalg_autograd.rs`; non-test consumer: grad-aware `crate::linalg::lu_factor` delegates here when grad is enabled. |
 //! | REQ-29 (`trace`) | SHIPPED | `TraceBackward` + `trace_differentiable` (VJP `dA = grad * I` per `derivatives.yaml:1785`), forward `crate::linalg::trace`; FD-verified `tests/divergence_linalg_grad_audit.rs:trace_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"trace"` arm (parity 8/8, 0 failed). Blocker #1345. |
 //! | REQ-30 (`diagonal`) | SHIPPED | `DiagonalBackward` + `diagonal_differentiable` (VJP scatters grad onto the offset-th diagonal per `derivatives.yaml:573` `diagonal_backward_symint`); FD-verified `grad_fns::linalg::tests::diagonal_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the now-grad-aware `crate::linalg::diagonal` forward delegates here. Closes #1583. |
 //! | REQ-31 (`diag`) | SHIPPED | `DiagBackward` + `diag_differentiable` (adjoint of the 0/1 selection: gather for 1-D, scatter for 2-D); FD-verified `grad_fns::linalg::tests::diag_extract_public_forward_is_grad_aware_and_matches_fd` + `diag_construct_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the now-grad-aware `crate::ops::tensor_ops::diag` forward delegates here. Closes #1583. |
@@ -1051,17 +1051,12 @@ fn broadcast_matmul_backward<T: Float>(
 pub fn mm_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let (m, k, n) = validate_mm_operands("mm", a, b)?;
 
-    // Materialize non-contiguous views before linalg ops.
-    let a = if a.is_contiguous() {
-        a.clone()
-    } else {
-        a.contiguous()?
-    };
-    let b = if b.is_contiguous() {
-        b.clone()
-    } else {
-        b.contiguous()?
-    };
+    // Materialize to exact packed storage before linalg ops. A narrow view can
+    // be logically contiguous with offset 0 while still sharing a larger base
+    // buffer; CUDA kernels receive only the raw handle and would see the base
+    // length instead of the logical shape.
+    let a = a.contiguous()?;
+    let b = b.contiguous()?;
 
     if a.is_cuda() {
         let backend =
@@ -1228,6 +1223,8 @@ impl<T: Float> GradFn<T> for MmBtBackward<T> {
 /// Linear layer uses this: input @ weight^T where weight is (out, in).
 pub fn mm_bt_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let (m, k, n) = validate_mm_bt_operands("mm_bt", a, b)?;
+    let a = a.contiguous()?;
+    let b = b.contiguous()?;
 
     // GPU path: transpose B then matmul.
     if a.is_cuda() {
@@ -1752,17 +1749,11 @@ pub fn matmul_differentiable<T: Float>(
         validate_mm_operands("matmul", a, b)?;
     }
 
-    // Materialize non-contiguous views before linalg ops.
-    let a = if a.is_contiguous() {
-        a.clone()
-    } else {
-        a.contiguous()?
-    };
-    let b = if b.is_contiguous() {
-        b.clone()
-    } else {
-        b.contiguous()?
-    };
+    // Materialize to exact packed storage before linalg ops. This is needed
+    // for CUDA raw-handle consumers even when shape/stride contiguity is true
+    // but the tensor aliases a larger storage.
+    let a = a.contiguous()?;
+    let b = b.contiguous()?;
 
     // GPU dispatch for 1D x 2D vector-matrix product (#818). Pre-fix this
     // shape fell through to `linalg::matmul`, which calls `.data()?` and
@@ -2521,6 +2512,10 @@ pub struct LinalgSolveBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for LinalgSolveBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() {
+            return self.backward_cuda(grad_output);
+        }
+
         // gB = A^{-T} @ gX, computed as solve(A^T, gX).
         let at = mat_transpose(&self.a)?;
         let gb = crate::autograd::no_grad::no_grad(|| linalg_fwd::solve(&at, grad_output))?;
@@ -2575,6 +2570,46 @@ impl<T: Float> GradFn<T> for LinalgSolveBackward<T> {
     }
 }
 
+impl<T: Float> LinalgSolveBackward<T> {
+    fn backward_cuda(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !(is_f32::<T>() || is_f64::<T>()) {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "LinalgSolveBackward",
+            });
+        }
+
+        // gB = A^{-T} @ gX. Materialise the transposed view on device before
+        // cuSOLVER, because the solve kernel consumes dense row-major storage.
+        let at = crate::autograd::no_grad::no_grad(|| self.a.transpose(0, 1)?.contiguous())?;
+        let gb = crate::autograd::no_grad::no_grad(|| linalg_fwd::solve(&at, grad_output))?;
+
+        let grad_b = if self.b.requires_grad() {
+            Some(gb.clone())
+        } else {
+            None
+        };
+
+        let grad_a = if self.a.requires_grad() {
+            // gA = -gB @ X^T. `mm_bt` is the resident A @ B^T path for f32/f64.
+            let (gb_m, x_m) = if self.vector_rhs {
+                let n = gb.shape()[0];
+                (
+                    gb.view_reshape(vec![n, 1])?,
+                    self.x.view_reshape(vec![self.x.shape()[0], 1])?,
+                )
+            } else {
+                (gb.clone(), self.x.clone())
+            };
+            let prod = crate::autograd::no_grad::no_grad(|| gb_m.mm_bt(&x_m))?;
+            Some(prod.neg_t()?)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_a, grad_b])
+    }
+}
+
 /// Differentiable `solve`. Attaches `LinalgSolveBackward` when grad is needed.
 ///
 /// Forward computed under `no_grad`: `linalg_fwd::solve` (the public
@@ -2593,6 +2628,313 @@ pub fn solve_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> Ferrotorc
         Tensor::from_operation(storage, shape, grad_fn)
     } else {
         Ok(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SolveTriangularBackward — X = triangular_solve(A, B)
+// ---------------------------------------------------------------------------
+
+/// Backward for `X = solve_triangular(A, B)`.
+///
+/// For the effective system `op(A) X = B`, PyTorch's VJP is the triangular
+/// specialization of `linalg.solve`:
+/// - `gB = op(A)^-T gX`
+/// - `g op(A) = -gB X^T`
+///
+/// The gradient for `A` is then transposed back when the forward used
+/// `transpose=true`, masked to the original declared triangle, and has a zero
+/// diagonal for `unit_diagonal=true` because those entries are ignored by the
+/// forward.
+#[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "stores torch.linalg.solve_triangular's boolean flags verbatim for backward"
+)]
+pub struct SolveTriangularBackward<T: Float> {
+    a: Tensor<T>,
+    b: Tensor<T>,
+    x: Tensor<T>,
+    upper: bool,
+    transpose: bool,
+    unit_diagonal: bool,
+    vector_rhs: bool,
+}
+
+impl<T: Float> GradFn<T> for SolveTriangularBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() {
+            return self.backward_cuda(grad_output);
+        }
+
+        let n = self.a.shape()[0];
+        let nrhs = if self.vector_rhs {
+            1
+        } else {
+            self.b.shape()[1]
+        };
+        let go = from_cpu(grad_output.data_vec()?, grad_output.shape().to_vec())?;
+
+        let grad_b_raw = crate::autograd::no_grad::no_grad(|| {
+            linalg_fwd::solve_triangular(
+                &self.a,
+                &go,
+                self.upper,
+                !self.transpose,
+                self.unit_diagonal,
+            )
+        })?;
+
+        let grad_b = if self.b.requires_grad() {
+            Some(grad_b_raw.clone())
+        } else {
+            None
+        };
+
+        let grad_a = if self.a.requires_grad() {
+            let gb = if self.vector_rhs {
+                from_cpu(grad_b_raw.data_vec()?, vec![n, 1])?
+            } else {
+                from_cpu(grad_b_raw.data_vec()?, vec![n, nrhs])?
+            };
+            let x = if self.vector_rhs {
+                from_cpu(self.x.data_vec()?, vec![n, 1])?
+            } else {
+                from_cpu(self.x.data_vec()?, vec![n, nrhs])?
+            };
+
+            let gb_data = gb.data_vec()?;
+            let x_data = x.data_vec()?;
+            let mut grad_effective = mm_bt_rows(&gb_data, &x_data, n, nrhs, n);
+            for v in &mut grad_effective {
+                *v = -*v;
+            }
+
+            let grad_original = if self.transpose {
+                transpose_rows(&grad_effective, n, n)
+            } else {
+                grad_effective
+            };
+
+            let zero = <T as num_traits::Zero>::zero();
+            let mut masked = vec![zero; n * n];
+            for r in 0..n {
+                for c in 0..n {
+                    if self.unit_diagonal && r == c {
+                        continue;
+                    }
+                    let keep = if self.upper { c >= r } else { r >= c };
+                    if keep {
+                        masked[r * n + c] = grad_original[r * n + c];
+                    }
+                }
+            }
+            Some(from_cpu(masked, vec![n, n])?)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_a, grad_b])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.a, &self.b]
+    }
+
+    fn name(&self) -> &'static str {
+        "SolveTriangularBackward"
+    }
+}
+
+impl<T: Float> SolveTriangularBackward<T> {
+    fn backward_cuda(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !(is_f32::<T>() || is_f64::<T>()) {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "SolveTriangularBackward",
+            });
+        }
+
+        let n = self.a.shape()[0];
+        let grad_b_raw = crate::autograd::no_grad::no_grad(|| {
+            linalg_fwd::solve_triangular(
+                &self.a,
+                grad_output,
+                self.upper,
+                !self.transpose,
+                self.unit_diagonal,
+            )
+        })?;
+
+        let grad_b = if self.b.requires_grad() {
+            Some(grad_b_raw.clone())
+        } else {
+            None
+        };
+
+        let grad_a = if self.a.requires_grad() {
+            let gb = if self.vector_rhs {
+                grad_b_raw.view_reshape(vec![n, 1])?
+            } else {
+                grad_b_raw.clone()
+            };
+            let x = if self.vector_rhs {
+                self.x.view_reshape(vec![n, 1])?
+            } else {
+                self.x.clone()
+            };
+
+            let grad_effective = crate::autograd::no_grad::no_grad(|| gb.mm_bt(&x))?.neg_t()?;
+            let grad_original = if self.transpose {
+                grad_effective.transpose(0, 1)?.contiguous()?
+            } else {
+                grad_effective
+            };
+            let diagonal = i64::from(self.unit_diagonal);
+            let masked = crate::autograd::no_grad::no_grad(|| {
+                if self.upper {
+                    crate::ops::tensor_ops::triu(&grad_original, diagonal)
+                } else {
+                    crate::ops::tensor_ops::tril(&grad_original, -diagonal)
+                }
+            })?;
+            Some(masked)
+        } else {
+            None
+        };
+
+        Ok(vec![grad_a, grad_b])
+    }
+}
+
+/// Differentiable `solve_triangular`. CPU and CUDA match the public forward.
+pub fn solve_triangular_differentiable<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    upper: bool,
+    transpose: bool,
+    unit_diagonal: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    let x = crate::autograd::no_grad::no_grad(|| {
+        linalg_fwd::solve_triangular(a, b, upper, transpose, unit_diagonal)
+    })?;
+    if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
+        let grad_fn = Arc::new(SolveTriangularBackward {
+            a: a.clone(),
+            b: b.clone(),
+            x: x.clone(),
+            upper,
+            transpose,
+            unit_diagonal,
+            vector_rhs: b.ndim() == 1,
+        });
+        let (storage, shape) = x.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, grad_fn)
+    } else {
+        Ok(x)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MatrixExpBackward — Y = expm(A)
+// ---------------------------------------------------------------------------
+
+/// Backward for `Y = matrix_exp(A)`.
+///
+/// Uses the Frechet derivative adjoint identity:
+/// `grad_A = L_exp(A^T, grad_Y)`, where `L_exp` is evaluated by the standard
+/// block-matrix trick. The upper-right block of
+/// `exp([[A^T, grad_Y], [0, A^T]])` is exactly the desired VJP.
+#[derive(Debug)]
+pub struct MatrixExpBackward<T: Float> {
+    a: Tensor<T>,
+}
+
+impl<T: Float> GradFn<T> for MatrixExpBackward<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() {
+            return self.backward_cuda(grad_output);
+        }
+
+        let n = self.a.shape()[0];
+        if n == 0 {
+            return Ok(vec![Some(from_cpu(Vec::new(), vec![0, 0])?)]);
+        }
+
+        let a_t = mat_transpose(&self.a)?;
+        let a_t_data = a_t.data_vec()?;
+        let g_data = grad_output.data_vec()?;
+        let block_n = 2 * n;
+        let zero = <T as num_traits::Zero>::zero();
+        let mut block = vec![zero; block_n * block_n];
+        for r in 0..n {
+            for c in 0..n {
+                block[r * block_n + c] = a_t_data[r * n + c];
+                block[r * block_n + (n + c)] = g_data[r * n + c];
+                block[(n + r) * block_n + (n + c)] = a_t_data[r * n + c];
+            }
+        }
+
+        let block = from_cpu(block, vec![block_n, block_n])?;
+        let exp_block = crate::autograd::no_grad::no_grad(|| linalg_fwd::matrix_exp(&block))?;
+        let exp_data = exp_block.data_vec()?;
+        let mut grad_a = vec![zero; n * n];
+        for r in 0..n {
+            for c in 0..n {
+                grad_a[r * n + c] = exp_data[r * block_n + (n + c)];
+            }
+        }
+        Ok(vec![Some(from_cpu(grad_a, vec![n, n])?)])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.a]
+    }
+
+    fn name(&self) -> &'static str {
+        "MatrixExpBackward"
+    }
+}
+
+impl<T: Float> MatrixExpBackward<T> {
+    fn backward_cuda(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !(is_f32::<T>() || is_f64::<T>()) {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "MatrixExpBackward",
+            });
+        }
+
+        let n = self.a.shape()[0];
+        if n == 0 {
+            return Ok(vec![Some(crate::creation::zeros_like(&self.a)?)]);
+        }
+
+        let a_t = crate::autograd::no_grad::no_grad(|| self.a.transpose(0, 1)?.contiguous())?;
+        let g = crate::autograd::no_grad::no_grad(|| grad_output.contiguous())?;
+        let zero = crate::creation::zeros_like(&a_t)?;
+        let top = crate::autograd::no_grad::no_grad(|| {
+            crate::grad_fns::shape::cat(&[a_t.clone(), g], 1)
+        })?;
+        let bottom =
+            crate::autograd::no_grad::no_grad(|| crate::grad_fns::shape::cat(&[zero, a_t], 1))?;
+        let block =
+            crate::autograd::no_grad::no_grad(|| crate::grad_fns::shape::cat(&[top, bottom], 0))?;
+        let exp_block = crate::autograd::no_grad::no_grad(|| linalg_fwd::matrix_exp(&block))?;
+        let grad_a = crate::autograd::no_grad::no_grad(|| {
+            exp_block.narrow(0, 0, n)?.narrow(1, n, n)?.contiguous()
+        })?;
+        Ok(vec![Some(grad_a)])
+    }
+}
+
+/// Differentiable `matrix_exp`. CPU and CUDA match the public forward.
+pub fn matrix_exp_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let y = crate::autograd::no_grad::no_grad(|| linalg_fwd::matrix_exp(a))?;
+    if is_grad_enabled() && a.requires_grad() {
+        let grad_fn = Arc::new(MatrixExpBackward { a: a.clone() });
+        let (storage, shape) = y.into_storage_and_shape()?;
+        Tensor::from_operation(storage, shape, grad_fn)
+    } else {
+        Ok(y)
     }
 }
 
@@ -2720,6 +3062,10 @@ pub struct CholeskyBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for CholeskyBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() {
+            return self.backward_cuda(grad_output);
+        }
+
         let n = self.l.shape()[0];
         let l = self.l.data()?;
         let gl = grad_output.data()?;
@@ -2782,6 +3128,46 @@ impl<T: Float> GradFn<T> for CholeskyBackward<T> {
 
     fn name(&self) -> &'static str {
         "CholeskyBackward"
+    }
+}
+
+impl<T: Float> CholeskyBackward<T> {
+    fn backward_cuda(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !(is_f32::<T>() || is_f64::<T>()) {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "CholeskyBackward",
+            });
+        }
+
+        let half = T::from(0.5).ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "cholesky backward: 0.5 is not representable in dtype".into(),
+        })?;
+
+        let grad_a = crate::autograd::no_grad::no_grad(|| {
+            // Step 1: P = tril(L^T @ gL).
+            let lt = self.l.transpose(0, 1)?.contiguous()?;
+            let ltgl = lt.mm(grad_output)?;
+            let p = crate::ops::tensor_ops::tril(&ltgl, 0)?;
+
+            // Step 2: S = 0.5 * (P + strictly_lower(P)^T).
+            let strict_lower = crate::ops::tensor_ops::tril(&p, -1)?;
+            let strict_lower_t = strict_lower.transpose(0, 1)?.contiguous()?;
+            let sym = p.add_t(&strict_lower_t)?;
+            let half_t = crate::creation::full_like(&sym, half)?;
+            let s = sym.mul_t(&half_t)?;
+
+            // Step 3: S <- L^{-T} @ S. Full cuSOLVER solve against the
+            // triangular factor keeps the path resident without a CPU
+            // triangular-solve fallback.
+            let s = linalg_fwd::solve(&lt, &s)?;
+
+            // Step 4: gA <- S @ L^{-1} = (L^{-T} @ S^T)^T.
+            let s_t = s.transpose(0, 1)?.contiguous()?;
+            let right = linalg_fwd::solve(&lt, &s_t)?;
+            right.transpose(0, 1)?.contiguous()
+        })?;
+
+        Ok(vec![Some(grad_a)])
     }
 }
 
@@ -2855,6 +3241,16 @@ fn triu_cpu<T: Float>(x: &[T], n: usize) -> Vec<T> {
     out
 }
 
+fn symmetrize_cuda<T: Float>(x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let half = T::from(0.5).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: "symmetric linalg backward: 0.5 is not representable in dtype".into(),
+    })?;
+    let x_t = x.transpose(0, 1)?.contiguous()?;
+    let sum = x.add_t(&x_t)?;
+    let half_t = crate::creation::full_like(&sum, half)?;
+    sum.mul_t(&half_t)
+}
+
 /// Shared backward for `(Q, R) = qr(A, 'reduced')`, real case `m >= n`.
 ///
 /// VJP (`torch/csrc/autograd/FunctionsManual.cpp:4166` `linalg_qr_backward`,
@@ -2879,6 +3275,27 @@ struct QrBackwardShared<T: Float> {
 }
 
 impl<T: Float> QrBackwardShared<T> {
+    fn reject_unsupported_cuda() -> FerrotorchResult<()> {
+        if !(is_f32::<T>() || is_f64::<T>()) {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "QrBackward" });
+        }
+        Ok(())
+    }
+
+    fn syminvadj_triu_cuda(x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        let upper = crate::ops::tensor_ops::triu(x, 0)?;
+        let strict_upper = crate::ops::tensor_ops::triu(&upper, 1)?;
+        let strict_upper_t = strict_upper.transpose(0, 1)?.contiguous()?;
+        upper.add_t(&strict_upper_t)
+    }
+
+    fn finish_right_solve_cuda(&self, rhs: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        Self::reject_unsupported_cuda()?;
+        let rhs_t = rhs.transpose(0, 1)?.contiguous()?;
+        let y = linalg_fwd::solve(&self.r, &rhs_t)?;
+        y.transpose(0, 1)?.contiguous()
+    }
+
     /// Compute `gA = solve_triangular(R^T, rhs, upper=false, left=false)` where
     /// `rhs` is the per-branch right-hand-side matrix shaped `[m, n]`.
     fn finish_right_solve(
@@ -2902,6 +3319,17 @@ impl<T: Float> QrBackwardShared<T> {
     /// `gQ`-only contribution to `gA` (set `gR = 0`):
     /// `M = -(Q^T @ gQ)`; `rhs = Q @ syminvadj(triu(M)) + gQ`.
     fn grad_a_from_gq(&self, gq: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        if gq.is_cuda() {
+            return crate::autograd::no_grad::no_grad(|| {
+                Self::reject_unsupported_cuda()?;
+                let qt = self.q.transpose(0, 1)?.contiguous()?;
+                let mmat = qt.mm(gq)?.neg_t()?;
+                let sym = Self::syminvadj_triu_cuda(&mmat)?;
+                let rhs = self.q.mm(&sym)?.add_t(gq)?;
+                self.finish_right_solve_cuda(&rhs)
+            });
+        }
+
         let m = self.q.shape()[0];
         let n = self.r.shape()[1];
         let q = self.q.data()?;
@@ -2939,6 +3367,16 @@ impl<T: Float> QrBackwardShared<T> {
     /// `gR`-only contribution to `gA` (set `gQ = 0`):
     /// `M = gR @ R^T`; `rhs = Q @ syminvadj(triu(M))`.
     fn grad_a_from_gr(&self, gr: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        if gr.is_cuda() {
+            return crate::autograd::no_grad::no_grad(|| {
+                Self::reject_unsupported_cuda()?;
+                let mmat = gr.mm_bt(&self.r)?;
+                let sym = Self::syminvadj_triu_cuda(&mmat)?;
+                let rhs = self.q.mm(&sym)?;
+                self.finish_right_solve_cuda(&rhs)
+            });
+        }
+
         let m = self.q.shape()[0];
         let n = self.r.shape()[1];
         let q = self.q.data()?;
@@ -3066,9 +3504,11 @@ pub fn qr_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>
 // subset). Each is a closed-form / algebraic VJP grounded in a named PyTorch
 // `file:line` and FD-verified in this file's `#[cfg(test)] mod tests`.
 //
-// All operate on dense f32/f64 CPU matrices via raw-slice GEMM helpers
-// (`mm_rows`/`mm_bt_rows`/`mm_at_rows`) and the existing `mat_transpose` /
-// `solve_triangular` / `linalg_fwd::*` forwards (computed under `no_grad`).
+// Older VJPs in this section operate on dense f32/f64 CPU matrices via
+// raw-slice GEMM helpers (`mm_rows`/`mm_bt_rows`/`mm_at_rows`) and the existing
+// `mat_transpose` / `solve_triangular` / `linalg_fwd::*` forwards. Newer LU
+// branches compose tensor operations directly so CUDA inputs remain resident.
+// All forward recomputation is guarded by `no_grad`.
 // ===========================================================================
 
 /// Transpose a row-major `r×c` matrix into a `c×r` matrix.
@@ -3105,6 +3545,10 @@ pub struct EigvalshBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for EigvalshBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if grad_output.is_cuda() {
+            return self.backward_cuda(grad_output);
+        }
+
         let n = self.u.shape()[0];
         let u = self.u.data()?;
         let gw = grad_output.data()?; // [n]
@@ -3134,6 +3578,24 @@ impl<T: Float> GradFn<T> for EigvalshBackward<T> {
 
     fn name(&self) -> &'static str {
         "EigvalshBackward"
+    }
+}
+
+impl<T: Float> EigvalshBackward<T> {
+    fn backward_cuda(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        if !(is_f32::<T>() || is_f64::<T>()) {
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "EigvalshBackward",
+            });
+        }
+
+        let grad_a = crate::autograd::no_grad::no_grad(|| {
+            let ret = crate::ops::tensor_ops::diag(grad_output, 0)?;
+            let tmp = self.u.mm(&ret)?;
+            let g = tmp.mm_bt(&self.u)?;
+            symmetrize_cuda(&g)
+        })?;
+        Ok(vec![Some(grad_a)])
     }
 }
 
@@ -3211,6 +3673,20 @@ struct EighBackwardShared<T: Float> {
 }
 
 impl<T: Float> EighBackwardShared<T> {
+    fn reject_unsupported_cuda() -> FerrotorchResult<()> {
+        if !(is_f32::<T>() || is_f64::<T>()) {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "EighBackward" });
+        }
+        Ok(())
+    }
+
+    fn conjugate_cuda(&self, ret: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        Self::reject_unsupported_cuda()?;
+        let tmp = self.u.mm(ret)?;
+        let g = tmp.mm_bt(&self.u)?;
+        symmetrize_cuda(&g)
+    }
+
     /// `gA = U @ ret @ U^T`, where `ret` is the `n×n` middle factor, then
     /// symmetrize `0.5*(gA + gA^T)`.
     fn conjugate(&self, ret: &[T], n: usize) -> FerrotorchResult<Tensor<T>> {
@@ -3229,6 +3705,13 @@ impl<T: Float> EighBackwardShared<T> {
 
     /// `gw`-only contribution: `ret = diag(gw)`, then conjugate.
     fn grad_a_from_gw(&self, gw: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        if gw.is_cuda() {
+            return crate::autograd::no_grad::no_grad(|| {
+                let ret = crate::ops::tensor_ops::diag(gw, 0)?;
+                self.conjugate_cuda(&ret)
+            });
+        }
+
         let n = self.u.shape()[0];
         let gwd = gw.data()?;
         let mut ret = vec![<T as num_traits::Zero>::zero(); n * n];
@@ -3241,6 +3724,30 @@ impl<T: Float> EighBackwardShared<T> {
     /// `gU`-only contribution: skew-project `U^T gU`, divide by `Econj`,
     /// then conjugate.
     fn grad_a_from_gu(&self, gu: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        if gu.is_cuda() {
+            return crate::autograd::no_grad::no_grad(|| {
+                Self::reject_unsupported_cuda()?;
+                let n = self.u.shape()[0];
+                let half = T::from(0.5).ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: "eigh backward: 0.5 is not representable in dtype".into(),
+                })?;
+                let u_t = self.u.transpose(0, 1)?.contiguous()?;
+                let vhgv = u_t.mm(gu)?;
+                let vhgv_t = vhgv.transpose(0, 1)?.contiguous()?;
+                let skew_raw = vhgv.sub_t(&vhgv_t)?;
+                let half_t = crate::creation::full_like(&skew_raw, half)?;
+                let skew = skew_raw.mul_t(&half_t)?;
+
+                let w_row = self.w.view_reshape(vec![1, n])?;
+                let w_col = self.w.view_reshape(vec![n, 1])?;
+                let gaps = w_row.sub_t(&w_col)?;
+                let eye = crate::creation::eye::<T>(n)?.to(self.w.device())?;
+                let denom = gaps.add_t(&eye)?;
+                let ret = skew.div_t(&denom)?;
+                self.conjugate_cuda(&ret)
+            });
+        }
+
         let n = self.u.shape()[0];
         let u = self.u.data()?;
         let gud = gu.data()?;
@@ -3410,6 +3917,30 @@ impl<T: Float> SvdBackwardShared<T> {
         self.s.shape()[0]
     }
 
+    fn reject_unsupported_cuda() -> FerrotorchResult<()> {
+        if !(is_f32::<T>() || is_f64::<T>()) {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "SvdBackward" });
+        }
+        Ok(())
+    }
+
+    fn e_matrix_cuda(&self) -> FerrotorchResult<Tensor<T>> {
+        Self::reject_unsupported_cuda()?;
+        let k = self.k();
+        let s2 = self.s.mul_t(&self.s)?;
+        let row = s2.view_reshape(vec![1, k])?;
+        let col = s2.view_reshape(vec![k, 1])?;
+        let gaps = row.sub_t(&col)?;
+        let eye = crate::creation::eye::<T>(k)?.to(self.s.device())?;
+        gaps.add_t(&eye)
+    }
+
+    fn conjugate_cuda(&self, ret: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        Self::reject_unsupported_cuda()?;
+        let uret = self.u.mm(ret)?;
+        uret.mm(&self.vh)
+    }
+
     /// `E[i,j] = S^2[j] - S^2[i]` off-diagonal, `1` on the diagonal — the
     /// singular-value-gap denominator (`FunctionsManual.cpp:3770-3777`).
     fn e_matrix(&self, s: &[T]) -> Vec<T> {
@@ -3441,6 +3972,31 @@ impl<T: Float> SvdBackwardShared<T> {
     /// plus, when `m > n`, the rectangular projector
     /// `(I_m - U U^T) gU S^{-1} V^T`.
     fn grad_a_from_gu(&self, gu: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        if gu.is_cuda() {
+            return crate::autograd::no_grad::no_grad(|| {
+                Self::reject_unsupported_cuda()?;
+                let (m, n, k) = (self.m(), self.n(), self.k());
+                let u_t = self.u.transpose(0, 1)?.contiguous()?;
+                let utgu = u_t.mm(gu)?;
+                let utgu_t = utgu.transpose(0, 1)?.contiguous()?;
+                let uhgu = utgu.sub_t(&utgu_t)?;
+                let e = self.e_matrix_cuda()?;
+                let s_row = self.s.view_reshape(vec![1, k])?;
+                let ret = uhgu.div_t(&e)?.mul_t(&s_row)?;
+
+                if m > n {
+                    let uret = self.u.mm(&ret)?;
+                    let gusinv = gu.div_t(&s_row)?;
+                    let utgusinv = u_t.mm(&gusinv)?;
+                    let proj = self.u.mm(&utgusinv)?;
+                    let inner = uret.add_t(&gusinv)?.sub_t(&proj)?;
+                    inner.mm(&self.vh)
+                } else {
+                    self.conjugate_cuda(&ret)
+                }
+            });
+        }
+
         let (m, n, k) = (self.m(), self.n(), self.k());
         let zero = <T as num_traits::Zero>::zero();
         let u = self.u.data()?; // [m,k]
@@ -3495,6 +4051,13 @@ impl<T: Float> SvdBackwardShared<T> {
     /// (`FunctionsManual.cpp:3738-3741` svdvals optimisation / the diagonal
     /// fill at `3790-3791`).
     fn grad_a_from_gs(&self, gs: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        if gs.is_cuda() {
+            return crate::autograd::no_grad::no_grad(|| {
+                let ret = crate::ops::tensor_ops::diag(gs, 0)?;
+                self.conjugate_cuda(&ret)
+            });
+        }
+
         let k = self.k();
         let zero = <T as num_traits::Zero>::zero();
         let gsd = gs.data()?;
@@ -3509,6 +4072,30 @@ impl<T: Float> SvdBackwardShared<T> {
     /// plus, when `m < n`, the rectangular projector
     /// `U S^{-1} (gV)^T (I_n - V V^T)`.
     fn grad_a_from_gvh(&self, gvh: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        if gvh.is_cuda() {
+            return crate::autograd::no_grad::no_grad(|| {
+                Self::reject_unsupported_cuda()?;
+                let (m, n, k) = (self.m(), self.n(), self.k());
+                let vgvt = self.vh.mm_bt(gvh)?;
+                let vgvt_t = vgvt.transpose(0, 1)?.contiguous()?;
+                let vhgv = vgvt.sub_t(&vgvt_t)?;
+                let e = self.e_matrix_cuda()?;
+                let s_col = self.s.view_reshape(vec![k, 1])?;
+                let ret = s_col.mul_t(&vhgv)?.div_t(&e)?;
+
+                if m < n {
+                    let retvh = ret.mm(&self.vh)?;
+                    let sinvgvh = gvh.div_t(&s_col)?;
+                    let sgvht = sinvgvh.mm_bt(&self.vh)?;
+                    let proj = sgvht.mm(&self.vh)?;
+                    let inner = retvh.add_t(&sinvgvh)?.sub_t(&proj)?;
+                    self.u.mm(&inner)
+                } else {
+                    self.conjugate_cuda(&ret)
+                }
+            });
+        }
+
         let (m, n, k) = (self.m(), self.n(), self.k());
         let zero = <T as num_traits::Zero>::zero();
         let u = self.u.data()?; // [m,k]
@@ -3893,15 +4480,13 @@ pub fn lstsq_differentiable<T: Float>(
 }
 
 // ---------------------------------------------------------------------------
-// LuBackward — (P, L, U) = lu(A)  /  (LU, pivots) = lu_factor(A)  (square)
+// LuBackward — (P, L, U) = lu(A)  /  (LU, pivots) = lu_factor(A)
 // ---------------------------------------------------------------------------
 
-/// Shared square-case (`m == n`) LU VJP, grounded in
+/// Shared LU VJP, grounded in
 /// `torch/csrc/autograd/FunctionsManual.cpp:6854` `linalg_lu_backward`:
-///   `M = tril(L^T @ gL, -1) + triu(gU @ U^T)`
-///   `M <- solve_triangular(U^T, M, upper=false, left=false)`  (right solve)
-///   `M <- solve_triangular(L^T, M, upper=true, left=true, unit=true)`
-///   `gA = P @ M`
+/// it handles the square, wide, and tall branches and composes tensor
+/// operations so CUDA inputs stay resident.
 ///
 /// The two outputs `L` and `U` are jointly linear in `gA`; the engine
 /// accumulates `LuBackwardL` (`gU=0`) and `LuBackwardU` (`gL=0`) into `A.grad`.
@@ -3915,108 +4500,189 @@ struct LuBackwardShared<T: Float> {
 }
 
 impl<T: Float> LuBackwardShared<T> {
-    /// Finish: `gA = P @ solve_L^T( solve_U^T_right( M ) )` for the assembled
-    /// middle matrix `M` (`n×n`).
-    fn finish(&self, mmat: Vec<T>, n: usize) -> FerrotorchResult<Tensor<T>> {
-        let m_t = from_cpu(mmat, vec![n, n])?;
-        // Right solve  X @ U^{-T} = M  i.e.  X = M @ U^{-T}.
-        // solve_triangular only does LEFT solves; transpose the relation:
-        // X @ U^{-T} = M  <=>  U @ X^T = M^T.  Solve U Y = M^T (Y = X^T) with
-        // (a=U, upper=true, transpose=false), then X = Y^T.
-        let m_tt = mat_transpose(&m_t)?; // M^T [n,n]
-        let y = crate::autograd::no_grad::no_grad(|| {
-            linalg_fwd::solve_triangular(&self.u, &m_tt, true, false, false)
-        })?; // U Y = M^T -> Y [n,n]
-        let step1 = mat_transpose(&y)?; // X = Y^T = M @ U^{-T} [n,n]
-        // Left solve  L^T Z = step1  with unit diagonal: (a=L, upper=false,
-        // transpose=true, unit=true) -> L^T Z = step1.
-        let z = crate::autograd::no_grad::no_grad(|| {
-            linalg_fwd::solve_triangular(&self.l, &step1, false, true, true)
-        })?; // [n,n]
-        // gA = P @ Z, exactly PyTorch's `linalg_lu_backward` final step
-        // `P.matmul(...)` (FunctionsManual.cpp:6873). The saved `P` is the
-        // forward's output, which since CORE-144 / #1838 follows torch's
-        // `A = P L U` convention (ferray's inverse-convention `P_f` is
-        // transposed inside `linalg_fwd::lu` before it ever reaches here).
-        // Pre-#1838 this multiplied by `P^T` — numerically the same product,
-        // because the saved matrix was `P_f = P^T`; the justifying comment,
-        // however, wrongly claimed ferray itself returned the `A = P L U`
-        // permutation (the audit-flagged misattribution). Torch-pinned by
-        // `lu_backward_three_cycle_pivot_matches_torch_1838` on a 3-cycle
-        // pivot, where the conventions genuinely differ.
-        let pd = self.p.data()?.to_vec();
-        let zd = z.data()?;
-        let zero = <T as num_traits::Zero>::zero();
-        let mut ga = vec![zero; n * n];
-        for i in 0..n {
-            for j in 0..n {
-                let mut acc = zero;
-                for k in 0..n {
-                    acc += pd[i * n + k] * zd[k * n + j];
-                }
-                ga[i * n + j] = acc;
-            }
-        }
-        from_cpu(ga, vec![n, n])
+    fn transpose_2d(t: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        t.transpose(0, 1)?.contiguous()
     }
 
-    /// `gL`-only contribution: `M = tril(L^T @ gL, -1)`.
-    fn grad_a_from_gl(&self, gl: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        let n = self.l.shape()[0];
-        let l = self.l.data()?;
-        let gld = gl.data()?;
-        // L^T @ gL: [n,n].
-        let lt_gl = mm_at_rows(l, gld, n, n, n);
-        // tril(., -1): strict lower triangle.
-        let zero = <T as num_traits::Zero>::zero();
-        let mut mmat = vec![zero; n * n];
-        for r in 0..n {
-            for c in 0..r {
-                mmat[r * n + c] = lt_gl[r * n + c];
-            }
-        }
-        self.finish(mmat, n)
+    fn zeros_like_shape(&self, shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
+        let numel = crate::shape::checked_numel(shape, "lu_backward")?;
+        Tensor::from_storage(
+            TensorStorage::on_device(
+                vec![<T as num_traits::Zero>::zero(); numel],
+                self.l.device(),
+            )?,
+            shape.to_vec(),
+            false,
+        )
     }
 
-    /// `gU`-only contribution: `M = triu(gU @ U^T)`.
-    fn grad_a_from_gu(&self, gu: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        let n = self.u.shape()[0];
-        let u = self.u.data()?;
-        let gud = gu.data()?;
-        // gU @ U^T: [n,n].
-        let gu_ut = mm_bt_rows(gud, u, n, n, n);
-        // triu(.): upper triangle incl. diagonal.
-        let zero = <T as num_traits::Zero>::zero();
-        let mut mmat = vec![zero; n * n];
-        for r in 0..n {
-            for c in r..n {
-                mmat[r * n + c] = gu_ut[r * n + c];
-            }
-        }
-        self.finish(mmat, n)
+    fn add_optional(lhs: Option<Tensor<T>>, rhs: Tensor<T>) -> FerrotorchResult<Option<Tensor<T>>> {
+        Ok(Some(if let Some(lhs) = lhs {
+            lhs.add_t(&rhs)?
+        } else {
+            rhs
+        }))
     }
 
-    /// Combined contribution (both `gL` and `gU` present), for the packed
-    /// `lu_factor` output: `M = tril(L^T gL, -1) + triu(gU U^T)`.
-    fn grad_a_combined(&self, gl: &Tensor<T>, gu: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        let n = self.l.shape()[0];
-        let l = self.l.data()?;
-        let u = self.u.data()?;
-        let gld = gl.data()?;
-        let gud = gu.data()?;
-        let lt_gl = mm_at_rows(l, gld, n, n, n);
-        let gu_ut = mm_bt_rows(gud, u, n, n, n);
-        let zero = <T as num_traits::Zero>::zero();
-        let mut mmat = vec![zero; n * n];
-        for r in 0..n {
-            for c in 0..r {
-                mmat[r * n + c] = lt_gl[r * n + c];
-            }
-            for c in r..n {
-                mmat[r * n + c] = gu_ut[r * n + c];
-            }
+    fn sub_optional(
+        lhs: Option<Tensor<T>>,
+        rhs: &Tensor<T>,
+    ) -> FerrotorchResult<Option<Tensor<T>>> {
+        let neg_rhs = rhs.neg_t()?;
+        Self::add_optional(lhs, neg_rhs)
+    }
+
+    fn right_solve_triangular(
+        a: &Tensor<T>,
+        b: &Tensor<T>,
+        upper: bool,
+        unit_diagonal: bool,
+    ) -> FerrotorchResult<Tensor<T>> {
+        // PyTorch's formula uses `left=false` solves. This crate exposes only
+        // left solves, so solve X @ A = B by transposing to
+        // A^T @ X^T = B^T and transposing the result back.
+        let b_t = Self::transpose_2d(b)?;
+        let y = linalg_fwd::solve_triangular(a, &b_t, upper, true, unit_diagonal)?;
+        Self::transpose_2d(&y)
+    }
+
+    fn cat(tensors: &[Tensor<T>], axis: isize) -> FerrotorchResult<Tensor<T>> {
+        crate::grad_fns::shape::cat(tensors, axis)
+    }
+
+    fn finish_with_pivot(&self, a_grad: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+        // Saved P follows torch's A = P @ L @ U convention (CORE-144 / #1838),
+        // so the final adjoint is exactly PyTorch's `P.matmul(A_grad)`.
+        self.p.mm(a_grad)
+    }
+
+    fn grad_a(
+        &self,
+        gl: Option<&Tensor<T>>,
+        gu: Option<&Tensor<T>>,
+    ) -> FerrotorchResult<Tensor<T>> {
+        crate::autograd::no_grad::no_grad(|| self.grad_a_impl(gl, gu))
+    }
+
+    fn grad_a_impl(
+        &self,
+        gl: Option<&Tensor<T>>,
+        gu: Option<&Tensor<T>>,
+    ) -> FerrotorchResult<Tensor<T>> {
+        let m = self.l.shape()[0];
+        let k = self.l.shape()[1];
+        let n = self.u.shape()[1];
+        if k == 0 {
+            return self.zeros_like_shape(&[m, n]);
         }
-        self.finish(mmat, n)
+
+        if m == n {
+            return self.grad_a_square(gl, gu, m);
+        }
+        if m < n {
+            self.grad_a_wide(gl, gu, m, n, k)
+        } else {
+            self.grad_a_tall(gl, gu, m, n, k)
+        }
+    }
+
+    fn grad_a_square(
+        &self,
+        gl: Option<&Tensor<T>>,
+        gu: Option<&Tensor<T>>,
+        n: usize,
+    ) -> FerrotorchResult<Tensor<T>> {
+        let mut core: Option<Tensor<T>> = None;
+        if let Some(gl) = gl {
+            let lt = Self::transpose_2d(&self.l)?;
+            core = Self::add_optional(core, crate::ops::tensor_ops::tril(&lt.mm(gl)?, -1)?)?;
+        }
+        if let Some(gu) = gu {
+            let ut = Self::transpose_2d(&self.u)?;
+            core = Self::add_optional(core, crate::ops::tensor_ops::triu(&gu.mm(&ut)?, 0)?)?;
+        }
+        let core = core.unwrap_or(self.zeros_like_shape(&[n, n])?);
+        let ut = Self::transpose_2d(&self.u)?;
+        let step1 = Self::right_solve_triangular(&ut, &core, false, false)?;
+        let lt = Self::transpose_2d(&self.l)?;
+        let step2 = linalg_fwd::solve_triangular(&lt, &step1, true, false, true)?;
+        self.finish_with_pivot(&step2)
+    }
+
+    fn grad_a_wide(
+        &self,
+        gl: Option<&Tensor<T>>,
+        gu: Option<&Tensor<T>>,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> FerrotorchResult<Tensor<T>> {
+        let mut core: Option<Tensor<T>> = None;
+        if let Some(gl) = gl {
+            let lt = Self::transpose_2d(&self.l)?;
+            core = Self::add_optional(core, lt.mm(gl)?)?;
+        }
+        if let Some(gu) = gu {
+            let gu_upper = crate::ops::tensor_ops::triu(gu, 0)?;
+            let ut = Self::transpose_2d(&self.u)?;
+            core = Self::sub_optional(core, &gu_upper.mm(&ut)?)?;
+        }
+        let core = core.unwrap_or(self.zeros_like_shape(&[k, k])?);
+        let core_lower = crate::ops::tensor_ops::tril(&core, -1)?;
+        let u1_t = Self::transpose_2d(&self.u.narrow(1, 0, k)?)?;
+        let solved = Self::right_solve_triangular(&u1_t, &core_lower, false, false)?;
+
+        let block = if let Some(gu) = gu {
+            let gu1 = crate::ops::tensor_ops::triu(&gu.narrow(1, 0, k)?, 0)?;
+            let left = solved.add_t(&gu1)?;
+            let right = gu.narrow(1, k, n - k)?;
+            Self::cat(&[left, right], 1)?
+        } else {
+            let right = self.zeros_like_shape(&[m, n - k])?;
+            Self::cat(&[solved, right], 1)?
+        };
+
+        let lt = Self::transpose_2d(&self.l)?;
+        let solved_l = linalg_fwd::solve_triangular(&lt, &block, true, false, true)?;
+        self.finish_with_pivot(&solved_l)
+    }
+
+    fn grad_a_tall(
+        &self,
+        gl: Option<&Tensor<T>>,
+        gu: Option<&Tensor<T>>,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> FerrotorchResult<Tensor<T>> {
+        let mut core: Option<Tensor<T>> = None;
+        if let Some(gu) = gu {
+            let ut = Self::transpose_2d(&self.u)?;
+            core = Self::add_optional(core, gu.mm(&ut)?)?;
+        }
+        if let Some(gl) = gl {
+            let gl_lower = crate::ops::tensor_ops::tril(gl, -1)?;
+            let lt = Self::transpose_2d(&self.l)?;
+            core = Self::sub_optional(core, &lt.mm(&gl_lower)?)?;
+        }
+        let core = core.unwrap_or(self.zeros_like_shape(&[k, k])?);
+        let core_upper = crate::ops::tensor_ops::triu(&core, 0)?;
+        let l1_t = Self::transpose_2d(&self.l.narrow(0, 0, k)?)?;
+        let solved = linalg_fwd::solve_triangular(&l1_t, &core_upper, true, false, true)?;
+
+        let block = if let Some(gl) = gl {
+            let gl1 = crate::ops::tensor_ops::tril(&gl.narrow(0, 0, k)?, -1)?;
+            let top = solved.add_t(&gl1)?;
+            let bottom = gl.narrow(0, k, m - k)?;
+            Self::cat(&[top, bottom], 0)?
+        } else {
+            let bottom = self.zeros_like_shape(&[m - k, n])?;
+            Self::cat(&[solved, bottom], 0)?
+        };
+
+        let ut = Self::transpose_2d(&self.u)?;
+        let solved_u = Self::right_solve_triangular(&ut, &block, false, false)?;
+        self.finish_with_pivot(&solved_u)
     }
 }
 
@@ -4029,7 +4695,7 @@ struct LuBackwardL<T: Float> {
 
 impl<T: Float> GradFn<T> for LuBackwardL<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        Ok(vec![Some(self.shared.grad_a_from_gl(grad_output)?)])
+        Ok(vec![Some(self.shared.grad_a(Some(grad_output), None)?)])
     }
     fn inputs(&self) -> Vec<&Tensor<T>> {
         vec![&self.input]
@@ -4048,7 +4714,7 @@ struct LuBackwardU<T: Float> {
 
 impl<T: Float> GradFn<T> for LuBackwardU<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        Ok(vec![Some(self.shared.grad_a_from_gu(grad_output)?)])
+        Ok(vec![Some(self.shared.grad_a(None, Some(grad_output))?)])
     }
     fn inputs(&self) -> Vec<&Tensor<T>> {
         vec![&self.input]
@@ -4058,13 +4724,12 @@ impl<T: Float> GradFn<T> for LuBackwardU<T> {
     }
 }
 
-/// Differentiable `lu` (square `m == n`). Returns `(P, L, U)`; `P` is a
+/// Differentiable `lu`. Returns `(P, L, U)`; `P` is a
 /// non-differentiable permutation matrix (returned plain). Attaches the split
 /// `LuBackwardL` / `LuBackwardU` nodes when grad is needed.
 ///
-/// Forward computed under `no_grad` (re-entry guard). The `m != n` rectangular
-/// case is rejected — its wide/tall VJP (`get_U1`/`get_L1` block solves) is
-/// tracked as residual follow-up.
+/// Forward computed under `no_grad` (re-entry guard). The VJP follows
+/// PyTorch's square, wide, and tall branches.
 pub fn lu_differentiable<T: Float>(
     a: &Tensor<T>,
 ) -> FerrotorchResult<(Tensor<T>, Tensor<T>, Tensor<T>)> {
@@ -4072,17 +4737,6 @@ pub fn lu_differentiable<T: Float>(
     let needs_grad = is_grad_enabled() && a.requires_grad();
     if !needs_grad {
         return Ok((p, l, u));
-    }
-    let m = a.shape()[0];
-    let n = a.shape()[1];
-    if m != n {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "lu backward is implemented for square m == n only; got A shape \
-                 [{m}, {n}] (the rectangular wide/tall block-solve branch is a \
-                 residual follow-up under #1577)"
-            ),
-        });
     }
     let l_node = Arc::new(LuBackwardL {
         input: a.clone(),
@@ -4107,7 +4761,7 @@ pub fn lu_differentiable<T: Float>(
     Ok((p, l, u))
 }
 
-/// Backward for the single packed `LU` output of `lu_factor(A)` (square).
+/// Backward for the single packed `LU` output of `lu_factor(A)`.
 ///
 /// The packed `LU` matrix holds `strict-lower(L)` (unit diagonal implicit) and
 /// `upper(U)`. So the incoming `grad` decomposes as `gL = tril(grad, -1)` (with
@@ -4124,23 +4778,10 @@ pub struct LuFactorBackward<T: Float> {
 
 impl<T: Float> GradFn<T> for LuFactorBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let n = self.shared.l.shape()[0];
-        let g = grad_output.data()?;
-        let zero = <T as num_traits::Zero>::zero();
-        // gL = strict-lower(grad); gU = upper(grad).
-        let mut gl = vec![zero; n * n];
-        let mut gu = vec![zero; n * n];
-        for r in 0..n {
-            for c in 0..r {
-                gl[r * n + c] = g[r * n + c];
-            }
-            for c in r..n {
-                gu[r * n + c] = g[r * n + c];
-            }
-        }
-        let gl = from_cpu(gl, vec![n, n])?;
-        let gu = from_cpu(gu, vec![n, n])?;
-        Ok(vec![Some(self.shared.grad_a_combined(&gl, &gu)?)])
+        let k = self.shared.l.shape()[1];
+        let gl = grad_output.narrow(1, 0, k)?;
+        let gu = grad_output.narrow(0, 0, k)?;
+        Ok(vec![Some(self.shared.grad_a(Some(&gl), Some(&gu))?)])
     }
     fn inputs(&self) -> Vec<&Tensor<T>> {
         vec![&self.input]
@@ -4150,12 +4791,12 @@ impl<T: Float> GradFn<T> for LuFactorBackward<T> {
     }
 }
 
-/// Differentiable `lu_factor` (square `m == n`). Returns `(LU_packed, pivots)`;
+/// Differentiable `lu_factor`. Returns `(LU_packed, pivots)`;
 /// the pivot `Vec<i32>` is non-differentiable. Attaches `LuFactorBackward` to
 /// the packed `LU` output when grad is needed.
 ///
 /// Forward computed under `no_grad` (re-entry guard); the `P`/`L`/`U` matrices
-/// the VJP needs are obtained from `linalg_fwd::lu` (also under `no_grad`).
+/// the VJP needs are unpacked from the same LU factorization.
 pub fn lu_factor_differentiable<T: Float>(
     a: &Tensor<T>,
 ) -> FerrotorchResult<(Tensor<T>, Vec<i32>)> {
@@ -4164,18 +4805,8 @@ pub fn lu_factor_differentiable<T: Float>(
     if !needs_grad {
         return Ok((lu, pivots));
     }
-    let m = a.shape()[0];
-    let n = a.shape()[1];
-    if m != n {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "lu_factor backward is implemented for square m == n only; got A \
-                 shape [{m}, {n}] (rectangular case is a residual follow-up under \
-                 #1577)"
-            ),
-        });
-    }
-    let (p, l, u) = crate::autograd::no_grad::no_grad(|| linalg_fwd::lu(a))?;
+    let (p, l, u) =
+        crate::autograd::no_grad::no_grad(|| linalg_fwd::lu_unpack_from_factor(&lu, &pivots))?;
     let node = Arc::new(LuFactorBackward {
         input: a.clone(),
         shared: LuBackwardShared { p, l, u },

@@ -5046,16 +5046,17 @@ pub trait GpuBackend: Send + Sync {
     }
 
     /// LU factorization in cuSOLVER's packed form: returns
-    /// `(LU_packed, pivots)` where `LU_packed` is an `n×n` row-major GPU
+    /// `(LU_packed, pivots)` where `LU_packed` is an `m×n` row-major GPU
     /// tensor handle (strict lower = `L`, upper = `U`), and `pivots` is a
-    /// host `Vec<i32>` of length `n` (1-based row-permutation indices,
-    /// LAPACK convention). The pivot vector is small (O(n)) and inherently
-    /// host-readable, so we return it materialized on host rather than
-    /// inventing a typed-int GPU handle. Mirrors `torch.linalg.lu_factor`.
+    /// host `Vec<i32>` of length `min(m, n)` (1-based row-permutation indices,
+    /// LAPACK convention). The pivot vector is small (O(min(m,n))) and
+    /// inherently host-readable, so we return it materialized on host rather
+    /// than inventing a typed-int GPU handle. Mirrors `torch.linalg.lu_factor`.
     /// (#604)
     fn lu_factor_f32(
         &self,
         _a: &GpuBufferHandle,
+        _m: usize,
         _n: usize,
     ) -> FerrotorchResult<(GpuBufferHandle, Vec<i32>)> {
         Err(FerrotorchError::InvalidArgument {
@@ -5067,6 +5068,7 @@ pub trait GpuBackend: Send + Sync {
     fn lu_factor_f64(
         &self,
         _a: &GpuBufferHandle,
+        _m: usize,
         _n: usize,
     ) -> FerrotorchResult<(GpuBufferHandle, Vec<i32>)> {
         Err(FerrotorchError::InvalidArgument {
