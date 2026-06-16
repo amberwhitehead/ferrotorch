@@ -20,7 +20,7 @@ use crate::autograd::no_grad::is_grad_enabled;
 use crate::device::Device;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
-use crate::shape::checked_byte_count;
+use crate::shape::{checked_byte_count, checked_numel};
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
 
@@ -2515,8 +2515,17 @@ impl<T: Float> SparseGrad<T> {
         values: Vec<T>,
         slab_shape: Vec<usize>,
     ) -> FerrotorchResult<Self> {
-        let slab_size: usize = crate::shape::numel(&slab_shape);
-        if values.len() != indices.len() * slab_size {
+        let slab_size: usize = checked_numel(&slab_shape, "SparseGrad::new")?;
+        let expected_values_len = indices.len().checked_mul(slab_size).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: format!(
+                    "SparseGrad::new: indices.len()={} * slab_size={} overflows usize",
+                    indices.len(),
+                    slab_size
+                ),
+            }
+        })?;
+        if values.len() != expected_values_len {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
                     "SparseGrad: values.len()={} != indices.len()={} * slab_size={}",

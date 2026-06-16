@@ -93,6 +93,7 @@ use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use ferrotorch_core::nested::{
     NestedTensor, PackedNestedTensor, nested_scaled_dot_product_attention,
 };
+use ferrotorch_core::shape::checked_numel;
 use ferrotorch_core::sparse::{
     CooTensor, CscTensor, CsrTensor, SemiStructuredSparseTensor, SparseGrad, SparseTensor,
     sparse_matmul_24,
@@ -1651,7 +1652,10 @@ fn cpu_sparse_grad_coalesce_and_apply_sgd() {
                 assert_eq!(sg.nnz(), expected_nnz);
                 assert_eq!(sg.indices(), indices.as_slice());
                 assert_eq!(sg.slab_shape(), slab_shape.as_slice());
-                assert_eq!(sg.slab_size(), slab_shape.iter().product::<usize>().max(1));
+                assert_eq!(
+                    sg.slab_size(),
+                    checked_numel(&slab_shape, "SparseGrad conformance slab_shape").unwrap()
+                );
 
                 // values() length == nnz * slab_size.
                 let expected_values_len = expected_nnz * sg.slab_size();

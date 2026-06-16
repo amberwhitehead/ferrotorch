@@ -105,3 +105,66 @@ fn core078_scalar_slab_unaffected() {
     assert!((d[1] - 2.0).abs() < 1e-6);
     assert!((d[2] - (3.0 - 20.0)).abs() < 1e-6);
 }
+
+/// Oversized dense slab metadata is still user input. Construction must
+/// return a structured error instead of panicking through `numel`.
+#[test]
+fn core078_constructor_rejects_slab_numel_overflow() {
+    let err = SparseGrad::<f32>::new(vec![0], vec![], vec![usize::MAX, 2]).unwrap_err();
+    assert!(
+        matches!(err, FerrotorchError::InvalidArgument { .. }),
+        "overflowing slab_shape product must be InvalidArgument, got {err:?}"
+    );
+}
+
+/// Even when the slab product itself fits, `nnz * slab_size` can overflow.
+/// That must be caught before length validation so release builds never wrap.
+#[test]
+fn core078_constructor_rejects_expected_value_len_overflow() {
+    let err = SparseGrad::<f32>::new(vec![0, 1], vec![], vec![usize::MAX]).unwrap_err();
+    assert!(
+        matches!(err, FerrotorchError::InvalidArgument { .. }),
+        "overflowing nnz * slab_size must be InvalidArgument, got {err:?}"
+    );
+}
+
+#[cfg(feature = "gpu")]
+mod gpu {
+    use super::*;
+    use std::sync::Once;
+
+    static GPU_INIT: Once = Once::new();
+
+    fn ensure_cuda_backend() {
+        GPU_INIT.call_once(|| {
+            ferrotorch_gpu::init_cuda_backend()
+                .expect("CUDA backend must initialize for CORE-078 GPU audit")
+        });
+    }
+
+    /// Zero-width sparse gradients are no-ops on CUDA too, and must not route
+    /// through CPU storage or demote the parameter.
+    #[test]
+    fn core078_cuda_zero_slab_grad_applies_as_noop_and_stays_cuda() {
+        ensure_cuda_backend();
+
+        let mut param = Tensor::<f32>::from_storage(TensorStorage::cpu(vec![]), vec![2, 0], false)
+            .expect("zero-width cpu param")
+            .to(ferrotorch_core::Device::Cuda(0))
+            .expect("param->cuda");
+        assert!(param.is_cuda(), "setup must create a CUDA parameter");
+
+        let g = SparseGrad::<f32>::new(vec![1, 1], vec![], vec![0])
+            .expect("valid zero-width sparse grad");
+        g.apply_sgd(&mut param, 0.1)
+            .expect("zero-width CUDA update is a no-op");
+
+        assert!(
+            param.is_cuda(),
+            "zero-width sparse SGD must keep CUDA parameters on CUDA"
+        );
+        assert_eq!(param.shape(), &[2, 0]);
+        let host = param.cpu().expect("cuda zero-width param -> cpu");
+        assert_eq!(host.numel(), 0);
+    }
+}
