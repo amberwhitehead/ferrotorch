@@ -88,13 +88,13 @@ The 1700+ LOC file is organised as:
 - **`QuantizedTensor`** (`quantize.rs:88`): owns the i8 data plus
   the per-channel scale/zp vectors. The `Int4` dtype packs two
   4-bit values per `i8` storage byte (low 4 bits significant).
-- **Quantize / dequantize** (`quantize.rs:288`, `quantize.rs:399`):
+- **Quantize / dequantize** (`quantize.rs:301`, `quantize.rs:412`):
   - `quantize(input, scheme, dtype)` — computes per-tensor or
     per-channel min/max, derives `(scale, zp)` with
     `MinMaxObserver._calculate_qparams` parity, then rounds via
     inverse-scale multiply plus nearest-even rounding and clips.
   - `dequantize(q)` — inverse using `(q - zp) * scale` per element.
-- **`quantized_matmul`** (`quantize.rs:439`) — validates 2-D
+- **`quantized_matmul`** (`quantize.rs:452`) — validates 2-D
   per-tensor quantized inputs, accumulates centered integer products
   in `i64`, computes the real output range in `f64`, derives INT8
   output qparams, and requantizes back to a `QuantizedTensor`.
@@ -106,28 +106,31 @@ The 1700+ LOC file is organised as:
   `int32_t` implementation detail because this API derives output
   qparams from the full result and must not debug-panic or release-wrap
   on ordinary long INT8 inner dimensions (CORE-086 / #1780).
-- **`quantize_named_tensors`** (`quantize.rs:615`) — bulk
+- **`quantize_named_tensors`** (`quantize.rs:628`) — bulk
   state-dict path; one entry per `(name, scheme, dtype)`.
-- **`QParams`** (`quantize.rs:634`) — `(scale, zp)` bundle plus
+- **`QParams`** (`quantize.rs:647`) — `(scale, zp)` bundle plus
   the qmin/qmax for downstream consumers.
-- **`trait Observer`** (`quantize.rs:675`) — `observe(tensor)`
+- **`trait Observer`** (`quantize.rs:688`) — `observe(tensor)`
   updates internal state; `calculate_qparams()` returns the
   `QParams`.
-- **`MinMaxObserver`** (`quantize.rs:692`): scalar running min /
+- **`MinMaxObserver`** (`quantize.rs:705`): scalar running min /
   max. Per-tensor symmetric / asymmetric supported via `QuantScheme`
   passed at construction.
-- **`PerChannelMinMaxObserver`** (`quantize.rs:747`): per-slice
+- **`PerChannelMinMaxObserver`** (`quantize.rs:760`): per-slice
   running min/max along `axis`.
-- **`HistogramObserver`** (`quantize.rs:866`, constructor
-  `quantize.rs:882`): histogram observer with strictly positive bin
-  construction, NaN/Inf filtering, range expansion, and redistributed
-  counts. The zero-bin boundary differs from PyTorch's delayed
-  `torch.histogram` runtime error because ferrotorch's `Observer::observe`
-  is infallible; invalid bin counts are rejected by the constructor instead.
-- **`FakeQuantize`** (`quantize.rs:1031`): forward quantize-then-
+- **`HistogramObserver`** (`quantize.rs:879`, constructor
+  `quantize.rs:895`): histogram observer with strictly positive bin
+  construction, NaN/Inf filtering, PyTorch-style `histc` binning
+  (`quantize.rs:911`), range expansion through 16x upsampled
+  redistribution (`quantize.rs:1000`), and PyTorch's non-linear L2
+  qparam search (`quantize.rs:1094`). The zero-bin boundary differs from
+  PyTorch's delayed `torch.histogram` runtime error because ferrotorch's
+  `Observer::observe` is infallible; invalid bin counts are rejected by
+  the constructor instead.
+- **`FakeQuantize`** (`quantize.rs:1258`): forward quantize-then-
   dequantize, backward STE (the gradient impl lives in
   `grad_fns/quantize_grad.rs`).
-- **`QatLayer`** (`quantize.rs:1119`) / **`QatModel`** (`quantize.rs:1133`) —
+- **`QatLayer`** (`quantize.rs:1346`) / **`QatModel`** (`quantize.rs:1360`) —
   per-param observer + fake-quantize bundles. `prepare_qat` is a factory.
 
 Non-test production consumers:
@@ -154,7 +157,9 @@ bit-exact integer codes, all-zero scale floors, affine zero-point
 rounding/clamping, unobserved observer defaults, symmetric scale
 denominators, dequantized round-trips, quantized-matmul accumulator
 behavior at and just beyond the `i32` boundary, and histogram-observer
-zero/one-bin construction boundaries.
+zero/one-bin construction boundaries plus histogram-based clipping
+qparams for PyTorch probe cases (`bins=3` over `[2, 8]`, sparse outlier
+`bins=16` over `[0, 100]`).
 
 ## Verification
 
@@ -174,9 +179,9 @@ Expected: PyTorch fixture conformance, round-trip, and observer tests pass.
 | REQ-2 | SHIPPED | impl: `QuantizedTensor in ferrotorch-core/src/quantize.rs`; non-test consumer: re-exported at `lib.rs`; threaded through `quantize_named_tensors`'s return type and bulk state-dict callers. |
 | REQ-3 | SHIPPED | impl: `quantize in ferrotorch-core/src/quantize.rs`; non-test consumer: re-exported at `quantize in lib.rs`; called by `quantize_named_tensors` at `quantize in lib.rs` and by `FakeQuantize::forward` (transitively, via `forward in grad_fns/quantize_grad.rs`). |
 | REQ-4 | SHIPPED | impl: `dequantize in ferrotorch-core/src/quantize.rs`; non-test consumer: re-exported at `lib.rs`; called by `quantized_matmul` at `lib.rs` and by `FakeQuantize::forward`. |
-| REQ-5 | SHIPPED | impl: `quantized_matmul` at `ferrotorch-core/src/quantize.rs:439`; non-test consumer: re-exported at `lib.rs:219-227`. Accumulator parity/safety: public conformance tests `quantized_matmul_accumulator_crosses_i32_boundary_without_wrapping` and `quantized_matmul_negative_accumulator_crosses_i32_boundary_without_wrapping` prove long-inner-dimension centered INT8 products do not debug-panic or release-wrap at the i32 boundary. |
+| REQ-5 | SHIPPED | impl: `quantized_matmul` at `ferrotorch-core/src/quantize.rs:452`; non-test consumer: re-exported at `lib.rs:219-227`. Accumulator parity/safety: public conformance tests `quantized_matmul_accumulator_crosses_i32_boundary_without_wrapping` and `quantized_matmul_negative_accumulator_crosses_i32_boundary_without_wrapping` prove long-inner-dimension centered INT8 products do not debug-panic or release-wrap at the i32 boundary. |
 | REQ-6 | SHIPPED | impl: `QParams in ferrotorch-core/src/quantize.rs`; non-test consumer: re-exported at `lib.rs`; produced by every observer and consumed by `QatModel.step()`. |
 | REQ-7 | SHIPPED | impl: `trait Observer` at `MinMaxObserver in ferrotorch-core/src/quantize.rs`, `MinMaxObserver in ferrotorch-core/src/quantize.rs`, `PerChannelMinMaxObserver in ferrotorch-core/src/quantize.rs`, `HistogramObserver in ferrotorch-core/src/quantize.rs`; non-test consumer: re-exported at `lib.rs`; threaded through `QatLayer` at `lib.rs`. |
 | REQ-8 | SHIPPED | impl: `FakeQuantize in ferrotorch-core/src/quantize.rs`; non-test consumer: `FakeQuantize in grad_fns/quantize_grad.rs` (`FakeQuantizeBackward` attaches via the forward op) — production autograd graph. Consumer chain `Tensor::fake_quantize_per_tensor_affine_t` at `fake_quantize_per_tensor_affine_t in methods.rs`. |
 | REQ-9 | SHIPPED | impl: `QatLayer in ferrotorch-core/src/quantize.rs`, `QatModel in ferrotorch-core/src/quantize.rs`, `prepare_qat in ferrotorch-core/src/quantize.rs`; non-test consumer: re-exported at `lib.rs`; entrypoint for the QAT training-loop API. |
-| REQ-10 | SHIPPED | impl: `quantize_named_tensors` at `ferrotorch-core/src/quantize.rs:615`; non-test consumer: re-exported at `lib.rs:219-227`; called by state-dict-save flows that emit a quantized checkpoint. |
+| REQ-10 | SHIPPED | impl: `quantize_named_tensors` at `ferrotorch-core/src/quantize.rs:628`; non-test consumer: re-exported at `lib.rs:219-227`; called by state-dict-save flows that emit a quantized checkpoint. |

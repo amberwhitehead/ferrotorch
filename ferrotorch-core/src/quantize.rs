@@ -150,6 +150,19 @@ impl QuantizedTensor {
 // Helpers
 // ---------------------------------------------------------------------------
 
+const HISTOGRAM_UPSAMPLE_RATE: usize = 16;
+const HISTOGRAM_SEARCH_STEP: f64 = 1.0e-5;
+
+#[inline]
+fn f32_values_equal(a: f32, b: f32) -> bool {
+    a.partial_cmp(&b) == Some(std::cmp::Ordering::Equal)
+}
+
+#[inline]
+fn f64_count_is_zero(x: f64) -> bool {
+    x.to_bits() == 0
+}
+
 /// Compute scale and zero_point for a given (min, max) range and target dtype.
 ///
 /// Mirrors PyTorch's `MinMaxObserver._calculate_qparams` affine branch:
@@ -865,7 +878,7 @@ impl Observer for PerChannelMinMaxObserver {
 #[derive(Debug, Clone)]
 pub struct HistogramObserver {
     num_bins: usize,
-    bins: Vec<u64>,
+    bins: Vec<f64>,
     min_val: f32,
     max_val: f32,
     /// Whether we've seen any data yet.
@@ -888,70 +901,283 @@ impl HistogramObserver {
 
         Ok(Self {
             num_bins,
-            bins: vec![0u64; num_bins],
+            bins: vec![0.0; num_bins],
             min_val: f32::INFINITY,
             max_val: f32::NEG_INFINITY,
             initialized: false,
         })
     }
 
-    /// Redistribute old bins into a new range via linear interpolation.
-    fn redistribute(&mut self, new_min: f32, new_max: f32) {
-        if !self.initialized || self.bins.iter().all(|&c| c == 0) {
-            self.min_val = new_min;
-            self.max_val = new_max;
-            return;
+    fn histc(data: &[f32], bins: usize, min_val: f32, max_val: f32) -> Vec<f64> {
+        let mut counts = vec![0.0; bins];
+        if data.is_empty() || bins == 0 || !min_val.is_finite() || !max_val.is_finite() {
+            return counts;
         }
 
-        let old_min = self.min_val;
-        let old_max = self.max_val;
-        let old_range = old_max - old_min;
-        let new_range = new_max - new_min;
-
-        if old_range <= 0.0 || new_range <= 0.0 {
-            self.min_val = new_min;
-            self.max_val = new_max;
-            return;
+        if f32_values_equal(min_val, max_val) {
+            let idx = bins / 2;
+            for &x in data {
+                if x.is_finite() && f32_values_equal(x, min_val) {
+                    counts[idx] += 1.0;
+                }
+            }
+            return counts;
         }
 
-        let n = self.num_bins;
-        let Some(last_bin) = n.checked_sub(1) else {
-            return;
-        };
-        let old_bins = self.bins.clone();
-        self.bins.fill(0);
+        let width = f64::from(max_val - min_val) / bins as f64;
+        if width <= 0.0 || !width.is_finite() {
+            return counts;
+        }
 
-        let old_bin_width = old_range / n as f32;
-        let new_bin_width = new_range / n as f32;
-
-        for (old_idx, &old_count) in old_bins.iter().enumerate().take(n) {
-            if old_count == 0 {
+        for &x in data {
+            if !x.is_finite() || x < min_val || x > max_val {
                 continue;
             }
-            // Center of the old bin in value space.
-            let old_center = old_min + (old_idx as f32 + 0.5) * old_bin_width;
-            // Map to new bin index.
-            let new_frac = (old_center - new_min) / new_bin_width;
-            let new_idx = (new_frac as usize).min(last_bin);
-            if let Some(bin) = self.bins.get_mut(new_idx) {
-                *bin += old_count;
+            let raw = ((f64::from(x) - f64::from(min_val)) / width).floor();
+            let idx = if raw.is_sign_negative() {
+                0
+            } else {
+                (raw as usize).min(bins - 1)
+            };
+            counts[idx] += 1.0;
+        }
+
+        counts
+    }
+
+    fn reset_histogram(&mut self, data: &[f32], min_val: f32, max_val: f32) {
+        self.min_val = min_val;
+        self.max_val = max_val;
+        self.bins = Self::histc(data, self.num_bins, min_val, max_val);
+        self.initialized = true;
+    }
+
+    fn upscale_histogram(
+        &self,
+        orig_hist: &[f64],
+        orig_min: f32,
+        orig_max: f32,
+        update_min: f32,
+        update_max: f32,
+    ) -> Vec<f64> {
+        let mut transformed = vec![0.0; self.num_bins];
+        if self.num_bins == 0 || f32_values_equal(orig_min, orig_max) {
+            return transformed;
+        }
+
+        let fine_bins = self.num_bins.saturating_mul(HISTOGRAM_UPSAMPLE_RATE);
+        if fine_bins == 0 {
+            return transformed;
+        }
+
+        let bin_size = f64::from(orig_max - orig_min) / fine_bins as f64;
+        let new_width = f64::from(update_max - update_min) / self.num_bins as f64;
+        if bin_size <= 0.0 || new_width <= 0.0 || !bin_size.is_finite() || !new_width.is_finite() {
+            return transformed;
+        }
+
+        for (old_idx, &count) in orig_hist.iter().enumerate().take(self.num_bins) {
+            if f64_count_is_zero(count) {
+                continue;
+            }
+            let weight = count / HISTOGRAM_UPSAMPLE_RATE as f64;
+            for sub_idx in 0..HISTOGRAM_UPSAMPLE_RATE {
+                let fine_idx = old_idx * HISTOGRAM_UPSAMPLE_RATE + sub_idx;
+                let midpoint = f64::from(orig_min) + (fine_idx as f64 + 0.5) * bin_size;
+                let raw_bucket = ((midpoint - f64::from(update_min)) / new_width).floor();
+                let bucket = if raw_bucket.is_sign_negative() {
+                    0
+                } else {
+                    (raw_bucket as usize).min(self.num_bins - 1)
+                };
+                transformed[bucket] += weight;
             }
         }
 
-        self.min_val = new_min;
-        self.max_val = new_max;
+        transformed
+    }
+
+    fn combine_histograms(
+        &self,
+        orig_hist: &[f64],
+        orig_min: f32,
+        orig_max: f32,
+        update_hist: &[f64],
+        update_min: f32,
+        update_max: f32,
+    ) -> Vec<f64> {
+        if f32_values_equal(update_min, orig_min) && f32_values_equal(update_max, orig_max) {
+            return orig_hist
+                .iter()
+                .zip(update_hist.iter())
+                .map(|(&orig, &update)| orig + update)
+                .collect();
+        }
+
+        let transformed_orig = if f32_values_equal(orig_min, orig_max) {
+            let bin_value: f64 = orig_hist.iter().sum();
+            Self::histc(&[orig_min], self.num_bins, update_min, update_max)
+                .into_iter()
+                .map(|count| count * bin_value)
+                .collect()
+        } else {
+            self.upscale_histogram(orig_hist, orig_min, orig_max, update_min, update_max)
+        };
+
+        transformed_orig
+            .iter()
+            .zip(update_hist.iter())
+            .map(|(&orig, &update)| orig + update)
+            .collect()
+    }
+
+    fn quantization_error(
+        &self,
+        next_start_bin: usize,
+        next_end_bin: usize,
+        dst_nbins: f64,
+    ) -> f64 {
+        if self.num_bins == 0 || f32_values_equal(self.max_val, self.min_val) {
+            return 0.0;
+        }
+
+        let bin_width = f64::from(self.max_val - self.min_val) / self.num_bins as f64;
+        if bin_width <= 0.0 || !bin_width.is_finite() {
+            return 0.0;
+        }
+
+        let dst_bin_width = bin_width * (next_end_bin - next_start_bin + 1) as f64 / dst_nbins;
+        if dst_bin_width == 0.0 || !dst_bin_width.is_finite() {
+            return 0.0;
+        }
+
+        let max_dst_bin = dst_nbins - 1.0;
+        let full_bin_norm = Self::norm(-dst_bin_width / 2.0, dst_bin_width / 2.0, 1.0);
+        let mut total = 0.0;
+
+        for (src_idx, &count) in self.bins.iter().enumerate().take(self.num_bins) {
+            if f64_count_is_zero(count) {
+                continue;
+            }
+
+            let density = count / bin_width;
+            let src_bin_begin = (src_idx as isize - next_start_bin as isize) as f64 * bin_width;
+            let src_bin_end = src_bin_begin + bin_width;
+
+            let dst_begin = (src_bin_begin / dst_bin_width)
+                .floor()
+                .clamp(0.0, max_dst_bin);
+            let dst_begin_center = (dst_begin + 0.5) * dst_bin_width;
+            let dst_end = (src_bin_end / dst_bin_width)
+                .floor()
+                .clamp(0.0, max_dst_bin);
+            let dst_end_center = dst_end * dst_bin_width + dst_bin_width / 2.0;
+
+            let left = Self::norm(
+                src_bin_begin - dst_begin_center,
+                dst_bin_width / 2.0,
+                density,
+            );
+            let middle = (dst_end - dst_begin - 1.0) * full_bin_norm * density;
+            let right = Self::norm(-dst_bin_width / 2.0, src_bin_end - dst_end_center, density);
+            total += left + middle + right;
+        }
+
+        total
+    }
+
+    #[inline]
+    fn norm(delta_begin: f64, delta_end: f64, density: f64) -> f64 {
+        density * (delta_end.powi(3) - delta_begin.powi(3)) / 3.0
+    }
+
+    fn non_linear_param_search(&self, dtype: QuantDtype) -> Option<(f32, f32)> {
+        if !self.initialized
+            || self.bins.len() != self.num_bins
+            || self.num_bins == 0
+            || self.max_val < self.min_val
+        {
+            return None;
+        }
+
+        let total: f64 = self.bins.iter().sum();
+        if total <= 0.0 {
+            return Some((self.min_val, self.max_val));
+        }
+
+        let bin_width = f64::from(self.max_val - self.min_val) / self.num_bins as f64;
+        if !bin_width.is_finite() || bin_width <= 0.0 {
+            return Some((self.min_val, self.max_val));
+        }
+
+        let mut cumulative = Vec::with_capacity(self.num_bins);
+        let mut running = 0.0;
+        for &count in &self.bins {
+            running += count;
+            cumulative.push(running);
+        }
+
+        let mut alpha = 0.0;
+        let mut beta = 1.0;
+        let mut start_bin = 0usize;
+        let mut end_bin = self.num_bins - 1;
+        let mut norm_min = f64::INFINITY;
+        let dst_nbins = f64::from(dtype.qmax() - dtype.qmin() + 1);
+
+        while alpha < beta {
+            let next_alpha = alpha + HISTOGRAM_SEARCH_STEP;
+            let next_beta = beta - HISTOGRAM_SEARCH_STEP;
+
+            let mut left = start_bin;
+            while left < end_bin && cumulative[left] < next_alpha * total {
+                left += 1;
+            }
+
+            let mut right = end_bin;
+            while right > start_bin && cumulative[right] > next_beta * total {
+                right -= 1;
+            }
+
+            let mut next_start_bin = start_bin;
+            let mut next_end_bin = end_bin;
+            if left - start_bin > end_bin - right {
+                next_start_bin = left;
+                alpha = next_alpha;
+            } else {
+                next_end_bin = right;
+                beta = next_beta;
+            }
+
+            if next_start_bin == start_bin && next_end_bin == end_bin {
+                continue;
+            }
+
+            let norm = self.quantization_error(next_start_bin, next_end_bin, dst_nbins);
+            if norm > norm_min {
+                break;
+            }
+            norm_min = norm;
+            start_bin = next_start_bin;
+            end_bin = next_end_bin;
+        }
+
+        let new_min = f64::from(self.min_val) + bin_width * start_bin as f64;
+        let new_max = f64::from(self.min_val) + bin_width * (end_bin + 1) as f64;
+        Some((new_min as f32, new_max as f32))
     }
 }
 
 impl Observer for HistogramObserver {
     fn observe(&mut self, data: &[f32]) {
         // First pass: find min/max of new data, filtering NaN/Inf.
+        let mut finite = Vec::new();
         let mut batch_min = f32::INFINITY;
         let mut batch_max = f32::NEG_INFINITY;
         for &x in data {
             if !x.is_finite() {
                 continue;
             }
+            finite.push(x);
             if x < batch_min {
                 batch_min = x;
             }
@@ -977,39 +1203,40 @@ impl Observer for HistogramObserver {
             batch_max
         };
 
-        if self.initialized && (new_min < self.min_val || new_max > self.max_val) {
-            // Range expanded — redistribute existing counts into new layout.
-            self.redistribute(new_min, new_max);
-        } else if !self.initialized {
+        if !self.initialized {
+            self.reset_histogram(&finite, new_min, new_max);
+            return;
+        }
+
+        let update_histogram = Self::histc(&finite, self.num_bins, new_min, new_max);
+        if f32_values_equal(new_min, self.min_val) && f32_values_equal(new_max, self.max_val) {
+            for (bin, update) in self.bins.iter_mut().zip(update_histogram.iter()) {
+                *bin += update;
+            }
+        } else {
+            self.bins = self.combine_histograms(
+                &self.bins,
+                self.min_val,
+                self.max_val,
+                &update_histogram,
+                new_min,
+                new_max,
+            );
             self.min_val = new_min;
             self.max_val = new_max;
             self.initialized = true;
         }
-
-        // Insert new data into bins.
-        let range = (self.max_val - self.min_val).max(f32::EPSILON);
-        let n = self.num_bins;
-        let Some(last_bin) = n.checked_sub(1) else {
-            return;
-        };
-        for &x in data {
-            if !x.is_finite() {
-                continue;
-            }
-            let frac = (x - self.min_val) / range;
-            let idx = ((frac * n as f32) as usize).min(last_bin);
-            if let Some(bin) = self.bins.get_mut(idx) {
-                *bin += 1;
-            }
-        }
     }
 
     fn calculate_qparams(&self, dtype: QuantDtype) -> QParams {
-        QParams::asymmetric(self.min_val, self.max_val, dtype)
+        let (min_val, max_val) = self
+            .non_linear_param_search(dtype)
+            .unwrap_or((self.min_val, self.max_val));
+        QParams::asymmetric(min_val, max_val, dtype)
     }
 
     fn reset(&mut self) {
-        self.bins.fill(0);
+        self.bins.fill(0.0);
         self.min_val = f32::INFINITY;
         self.max_val = f32::NEG_INFINITY;
         self.initialized = false;
@@ -1717,23 +1944,23 @@ mod tests {
         obs.observe(&[0.0, 1.0]);
         // Initial range is [0, 1].
         let bins_after_first = obs.bins.clone();
-        let total_first: u64 = bins_after_first.iter().sum();
-        assert_eq!(total_first, 2);
+        let total_first: f64 = bins_after_first.iter().sum();
+        assert!((total_first - 2.0).abs() < 1e-12);
 
         obs.observe(&[-1.0, 2.0]);
         // Range expanded to [-1, 2]. Old counts should be redistributed, not zeroed.
-        let total_second: u64 = obs.bins.iter().sum();
+        let total_second: f64 = obs.bins.iter().sum();
         // Should have 4 total counts (2 original redistributed + 2 new).
-        assert_eq!(total_second, 4);
+        assert!((total_second - 4.0).abs() < 1e-12);
     }
 
     #[test]
     fn test_histogram_observer_filters_nan_inf() {
         let mut obs = HistogramObserver::new(50).expect("valid positive bin count");
         obs.observe(&[f32::NAN, 1.0, f32::INFINITY, 2.0]);
-        let total: u64 = obs.bins.iter().sum();
+        let total: f64 = obs.bins.iter().sum();
         // Only 2 finite values should be counted.
-        assert_eq!(total, 2);
+        assert!((total - 2.0).abs() < 1e-12);
     }
 
     #[test]
@@ -1749,10 +1976,23 @@ mod tests {
         let mut obs = HistogramObserver::new(1).expect("one bin is valid");
         obs.observe(&[1.0]);
         obs.observe(&[-1.0, 2.0]);
-        assert_eq!(obs.bins, vec![3]);
+        assert_eq!(obs.bins, vec![3.0]);
         let qp = obs.calculate_qparams(QuantDtype::Int8);
         assert_eq!(qp.scale.len(), 1);
         assert!(qp.scale[0] > 0.0);
+    }
+
+    #[test]
+    fn test_histogram_observer_basic3_matches_pytorch_histogram_and_qparams() {
+        let mut obs = HistogramObserver::new(3).expect("valid positive bin count");
+        obs.observe(&[2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(obs.bins, vec![1.0, 1.0, 2.0]);
+        obs.observe(&[5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(obs.bins, vec![2.0, 3.0, 3.0]);
+
+        let qp = obs.calculate_qparams(QuantDtype::Int8);
+        assert!((qp.scale[0] - 0.023529412).abs() < 1e-6);
+        assert_eq!(qp.zero_point, vec![-128]);
     }
 
     // ----- FakeQuantize -----

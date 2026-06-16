@@ -1295,6 +1295,54 @@ fn histogram_observer_one_bin_counts_finite_values() {
     );
 }
 
+#[test]
+fn histogram_observer_qparams_use_histogram_search_basic3() {
+    let mut obs = HistogramObserver::new(3).expect("valid positive bin count");
+    obs.observe(&[2.0, 3.0, 4.0, 5.0]);
+    obs.observe(&[5.0, 6.0, 7.0, 8.0]);
+
+    let hist_qp = obs.calculate_qparams(QuantDtype::Int8);
+    let mut minmax = MinMaxObserver::new();
+    minmax.observe(&[2.0, 3.0, 4.0, 5.0]);
+    minmax.observe(&[5.0, 6.0, 7.0, 8.0]);
+    let minmax_qp = minmax.calculate_qparams(QuantDtype::Int8);
+
+    // PyTorch HistogramObserver(bins=3, qint8, affine) clips [2, 8] to [2, 6],
+    // giving scale 6/255 and zero_point -128. MinMaxObserver uses [0, 8].
+    tolerance::assert_close_f32(
+        &hist_qp.scale,
+        &[0.023529412],
+        tolerance::F32_REDUCTION,
+        "histogram basic3 scale",
+    );
+    assert_eq!(hist_qp.zero_point, vec![-128]);
+    assert!(
+        hist_qp.scale[0] < minmax_qp.scale[0],
+        "histogram qparams must use the histogram search, not raw min/max"
+    );
+}
+
+#[test]
+fn histogram_observer_qparams_clip_sparse_outlier_like_pytorch() {
+    let mut data = vec![0.0; 256];
+    data.extend(std::iter::repeat_n(1.0, 256));
+    data.push(100.0);
+
+    let mut obs = HistogramObserver::new(16).expect("valid positive bin count");
+    obs.observe(&data);
+    let qp = obs.calculate_qparams(QuantDtype::Int8);
+
+    // PyTorch HistogramObserver(bins=16, qint8, affine) clips the final range
+    // from [0, 100] to [0, 93.75], giving 93.75/255.
+    tolerance::assert_close_f32(
+        &qp.scale,
+        &[0.36764705],
+        tolerance::F32_REDUCTION,
+        "histogram sparse-outlier scale",
+    );
+    assert_eq!(qp.zero_point, vec![-128]);
+}
+
 // ---------------------------------------------------------------------------
 // FakeQuantize, QatLayer, QatModel, prepare_qat — QAT wrapper family.
 // ---------------------------------------------------------------------------
