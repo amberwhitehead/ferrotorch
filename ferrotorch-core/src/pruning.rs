@@ -83,7 +83,7 @@ pub fn magnitude_prune<T: Float>(
         return magnitude_prune_cuda(weights, sparsity);
     }
 
-    let data = weights.data()?;
+    let data = weights.data_vec()?;
     let numel = data.len();
     let n_prune = ((numel as f64) * sparsity).round_ties_even() as usize;
 
@@ -278,7 +278,7 @@ pub fn apply_2_4_mask<T: Float>(weights: &Tensor<T>) -> FerrotorchResult<Tensor<
         return apply_2_4_mask_cuda(weights, last_dim);
     }
 
-    let data = weights.data()?;
+    let data = weights.data_vec()?;
 
     // Build the constant 0/1 mask. The storage is contiguous row-major and
     // `last_dim % 4 == 0`, so 4-element groups taken row by row are exactly
@@ -340,7 +340,7 @@ fn apply_2_4_mask_cuda<T: Float>(
 
 /// Compute the sparsity ratio of a tensor: fraction of exact zeros.
 pub fn sparsity_ratio<T: Float>(tensor: &Tensor<T>) -> FerrotorchResult<f64> {
-    let data = tensor.data()?;
+    let data = tensor.data_vec()?;
     let zeros = data
         .iter()
         .filter(|&&v| v == <T as num_traits::Zero>::zero())

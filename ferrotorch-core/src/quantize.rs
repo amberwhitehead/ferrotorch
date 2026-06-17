@@ -303,9 +303,21 @@ pub fn quantize<T: Float>(
     scheme: QuantScheme,
     dtype: QuantDtype,
 ) -> FerrotorchResult<QuantizedTensor> {
-    let data = tensor.data()?;
+    let device = tensor.device();
+    if device.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "quantize" });
+    }
+    if !device.is_cpu() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "quantize is a CPU-domain API in ferrotorch-core; got tensor on {device}"
+            ),
+        });
+    }
+
+    let data = tensor.data_vec()?;
     let shape = tensor.shape().to_vec();
-    let numel = tensor.numel();
+    let numel = data.len();
     let qmin = dtype.qmin();
     let qmax = dtype.qmax();
 
@@ -316,7 +328,7 @@ pub fn quantize<T: Float>(
             // Global min/max.
             let mut min_val = f32::INFINITY;
             let mut max_val = f32::NEG_INFINITY;
-            for &v in data {
+            for &v in &data {
                 let f = v.to_f32().unwrap();
                 if f < min_val {
                     min_val = f;
