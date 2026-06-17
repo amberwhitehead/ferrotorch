@@ -1934,7 +1934,7 @@ fn einsum_nary_pairwise<T: Float>(
             chars_to_string(rhs_subs),
             chars_to_string(&pair_out)
         );
-        let next = einsum(&equation, &[&current, inputs[operand_idx]])?;
+        let next = einsum_forward(&equation, &[&current, inputs[operand_idx]])?;
         current = next;
         current_subs = pair_out;
     }
@@ -1948,36 +1948,16 @@ fn einsum_nary_pairwise<T: Float>(
         chars_to_string(&current_subs),
         chars_to_string(&parsed.output_subscripts)
     );
-    einsum(&equation, &[&current])
+    einsum_forward(&equation, &[&current])
 }
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Einstein summation.
-///
-/// Evaluates the contraction specified by `equation` on the given `inputs`.
-///
-/// # Examples
-///
-/// ```ignore
-/// // Matrix multiply: (M,K) @ (K,N) -> (M,N)
-/// let c = einsum("ij,jk->ik", &[&a, &b])?;
-///
-/// // Batched matrix multiply
-/// let c = einsum("bij,bjk->bik", &[&a, &b])?;
-///
-/// // Trace
-/// let t = einsum("ii->", &[&a])?;
-///
-/// // Outer product
-/// let o = einsum("i,j->ij", &[&a, &b])?;
-///
-/// // Transpose
-/// let t = einsum("ij->ji", &[&a])?;
-/// ```
-pub fn einsum<T: Float>(equation: &str, inputs: &[&Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
+// Raw forward implementation. Public callers use `einsum`, which mirrors
+// `torch.einsum` by attaching autograd when inputs require gradients.
+fn einsum_forward<T: Float>(equation: &str, inputs: &[&Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
     if inputs.is_empty() {
         return Err(FerrotorchError::InvalidArgument {
             message: "einsum: expected at least one input tensor, got 0".into(),
@@ -2005,6 +1985,34 @@ pub fn einsum<T: Float>(equation: &str, inputs: &[&Tensor<T>]) -> FerrotorchResu
     Ok(result)
 }
 
+/// Einstein summation.
+///
+/// Evaluates the contraction specified by `equation` on the given `inputs`.
+/// Like `torch.einsum`, this public entry point participates in autograd when
+/// any input requires gradients.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Matrix multiply: (M,K) @ (K,N) -> (M,N)
+/// let c = einsum("ij,jk->ik", &[&a, &b])?;
+///
+/// // Batched matrix multiply
+/// let c = einsum("bij,bjk->bik", &[&a, &b])?;
+///
+/// // Trace
+/// let t = einsum("ii->", &[&a])?;
+///
+/// // Outer product
+/// let o = einsum("i,j->ij", &[&a, &b])?;
+///
+/// // Transpose
+/// let t = einsum("ij->ji", &[&a])?;
+/// ```
+pub fn einsum<T: Float>(equation: &str, inputs: &[&Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
+    einsum_differentiable(equation, inputs)
+}
+
 /// Differentiable Einstein summation. If any input requires grad and grad
 /// is enabled, attaches [`EinsumBackward`].
 ///
@@ -2015,7 +2023,7 @@ pub fn einsum_differentiable<T: Float>(
 ) -> FerrotorchResult<Tensor<T>> {
     autocast_guard("einsum");
 
-    let result = einsum(equation, inputs)?;
+    let result = einsum_forward(equation, inputs)?;
 
     let any_requires_grad = inputs.iter().any(|t| t.requires_grad());
 
@@ -2025,7 +2033,7 @@ pub fn einsum_differentiable<T: Float>(
         // re-parse it by hand and previously panicked on torch-legal
         // spaced equations ("ii -> i", CORE-163 / #1857) and treated
         // implicit-mode outputs as empty (CORE-164 / #1858). The
-        // re-parse here cannot fail: `einsum` above already parsed the
+        // re-parse here cannot fail: `einsum_forward` above already parsed the
         // same string for the same input count.
         let input_shapes: Vec<&[usize]> = inputs.iter().map(|tensor| tensor.shape()).collect();
         let canonical = canonical_equation(&parse_equation(equation, &input_shapes)?);
@@ -2449,12 +2457,12 @@ impl<T: Float> EinsumBackwardTwo<T> {
             .collect();
         let present_str: String = present.iter().collect();
         let g = if target == 0 {
-            einsum(
+            einsum_forward(
                 &format!("{rhs},{o_str}->{present_str}"),
                 &[grad_output, other],
             )?
         } else {
-            einsum(
+            einsum_forward(
                 &format!("{o_str},{rhs}->{present_str}"),
                 &[other, grad_output],
             )?
@@ -2658,7 +2666,7 @@ impl<T: Float> EinsumBackwardN<T> {
             }
         }
 
-        let g = einsum(&derived_equation, &operands)?;
+        let g = einsum_forward(&derived_equation, &operands)?;
         let g = reduce_and_expand_gradient_to_target(g, &present, &x_dedup, size_of)?;
 
         if !has_duplicate_chars(&x_subs) {
