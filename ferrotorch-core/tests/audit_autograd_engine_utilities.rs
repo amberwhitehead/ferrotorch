@@ -482,6 +482,38 @@ mod cuda_create_graph {
         let g2 = grads2[0].as_ref().expect("relu second derivative");
         assert_eq!(read_cuda(g2, "relu second derivative"), &[0.0, 0.0, 0.0]);
     }
+
+    #[test]
+    fn gradcheck_cuda_finite_difference_inputs_preserve_device() {
+        let x = cuda_leaf(&[1.5, 2.5], &[2]);
+        let seen_devices = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&seen_devices);
+        let func = move |inputs: &[Tensor<f32>]| -> FerrotorchResult<Tensor<f32>> {
+            seen.lock().expect("record device").push(inputs[0].device());
+            let squared = mul(&inputs[0], &inputs[0])?;
+            sum(&squared)
+        };
+
+        assert!(
+            gradcheck(
+                func,
+                std::slice::from_ref(&x),
+                Some(1.0e-2),
+                Some(1.0e-2),
+                Some(1.0e-2)
+            )
+            .expect("CUDA gradcheck")
+        );
+        let devices = seen_devices.lock().expect("devices");
+        assert!(
+            devices.len() >= 5,
+            "expected analytical plus finite-difference calls, got {devices:?}"
+        );
+        assert!(
+            devices.iter().all(|&device| device == Device::Cuda(0)),
+            "gradcheck must preserve CUDA inputs for every function call, got {devices:?}"
+        );
+    }
 }
 
 #[test]
