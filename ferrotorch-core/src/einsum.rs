@@ -30,13 +30,14 @@
 //! ## Repeated-index extension (#821)
 //!
 //! Single-input equations with repeated indices (`"ii->"` trace, `"ii->i"`
-//! diagonal, `"ii"` implicit trace) are decomposed on-device by building
-//! a strided view of the diagonal — shape `[N]` with stride `[N+1]` over
-//! the original `[N, N]` tensor — and materialising it through the
-//! existing `strided_copy_f{32,64}` GPU kernels (via `as_strided_copy`).
-//! For trace, the diagonal is then reduced with `sum_dim`. No new GPU
-//! primitive is introduced; the existing CL-496 strided_copy surface is
-//! the on-device decomposition target.
+//! diagonal, `"iij->j"` mixed repeated/free projections, `"ii"` implicit
+//! trace) are decomposed on-device by building a strided view that walks each
+//! repeated-label diagonal while preserving free axes, then materialising it
+//! through the existing `strided_copy_f{32,64}` GPU kernels (via
+//! `as_strided_copy`). Reductions and permutations after diagonalisation are
+//! handled by the usual resident GPU composite path. No new GPU primitive is
+//! introduced; the existing CL-496 strided_copy surface is the on-device
+//! decomposition target.
 //!
 //! ## Multi-axis 2-input extension (#822)
 //!
@@ -667,9 +668,9 @@ fn einsum_single_gpu<T: Float>(
 /// GPU implementation of repeated-index single-input einsum (#821, #824).
 ///
 /// Handles the patterns where one or more input indices repeat — i.e.
-/// `"ii->"` (trace), `"ii->i"` (diagonal extraction), `"ii"` (implicit
-/// trace). The decomposition is purely composite over existing GPU
-/// primitives:
+/// `"ii->"` (trace), `"ii->i"` (diagonal extraction), `"iij->j"` and
+/// `"ijki->jk"` (mixed repeated/free projections), `"ii"` (implicit trace).
+/// The decomposition is purely composite over existing GPU primitives:
 ///
 /// 1. Construct a strided view that selects only the positions where the
 ///    repeated indices coincide. For `"ii"` over an `[N, N]` tensor this
@@ -683,12 +684,10 @@ fn einsum_single_gpu<T: Float>(
 ///    `[N]` diagonal vector with `sum_dim`. Otherwise return the diagonal
 ///    directly (e.g. `"ii->i"` produces an `[N]` vector).
 ///
-/// Restrictions: the output may contain at most one of the repeated
-/// chars (i.e. `"ii->i"` is allowed, but `"ii->ii"` is not — that asks
-/// for the original matrix back, which is not a valid einsum). Mixed
-/// repeats with other free indices (e.g. `"iij->j"`) are not yet handled
-/// here and fall through to `Err(NotImplementedOnCuda)` so they surface
-/// as a sub-cascade rather than silently producing wrong results.
+/// Restrictions: repeated output labels remain invalid (`"ii->ii"` is not
+/// a legal PyTorch einsum). Mixed repeated/free inputs are handled by the
+/// same diagonalisation helper; unsupported structures must error rather
+/// than silently producing CPU results.
 fn einsum_single_repeated_gpu<T: Float>(
     in_subs: &[char],
     out_subs: &[char],
@@ -2098,138 +2097,22 @@ impl<T: Float> GradFn<T> for EinsumBackwardSingle<T> {
         let in_subs: Vec<char> = lhs.chars().collect();
         let out_subs: Vec<char> = rhs.chars().collect();
 
-        // Repeated input indices (e.g. "ii->" trace, "ii->i" diagonal):
-        // the gradient is nonzero only on the diagonal slice the
-        // forward op picked. Keep the existing element-wise CPU
-        // construction for these — there is no GPU primitive for
-        // diagonal-extract today, and the projection rewrite below
-        // does NOT cover them (the structural assumption "lhs and rhs
-        // are sets of distinct chars" fails). This branch is unchanged
-        // from the pre-#791 behaviour.
+        // Repeated input indices (e.g. "ii->" trace, "iij->j" mixed
+        // diagonal projection) are the VJP of PyTorch's
+        // `op.diagonal(...).movedim(...)` forward decomposition: first
+        // compute the VJP for the deduped diagonalized tensor, then embed it
+        // back into the input by zeroing off-diagonal positions.
         if has_duplicate_chars(&in_subs) {
             return self.backward_repeated_index(grad_output, &in_subs, &out_subs);
         }
 
-        // Projection / axis-sum / full-reduce / pure permutation
-        // (#791): when set(out_subs) ⊆ set(in_subs) and in_subs has no
-        // repeats, the forward is exactly:
-        //   1. Permute the input axes from in_subs order to (out_subs ++ dropped)
-        //   2. Sum over the dropped axes.
-        // The vector-Jacobian product is its transpose:
-        //   1. View grad_output (shape = out_shape) with size-1 axes
-        //      inserted for every dropped axis, in the (out_subs ++
-        //      dropped) order.
-        //   2. expand to the full permuted shape (broadcasting the
-        //      gradient along the dropped axes).
-        //   3. permute back to in_subs order.
-        //
-        // This is the structural fix: it replaces the fragile
-        // `format!("{rhs}->{lhs}")` reverse-equation pattern (which
-        // produced equations like "i->ij" that have indices on the
-        // RHS that don't appear on the LHS — rejected by the
-        // einsum equation parser, hence the #791 crash).
-        //
-        // Validate that out_subs ⊆ in_subs (caller ought to have
-        // already, but be defensive — invalid equations should be
-        // rejected here, not when we're partway through expanding).
-        for &c in &out_subs {
-            if !in_subs.contains(&c) {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: format!(
-                        "einsum backward: output index '{c}' does not appear in input subscripts"
-                    ),
-                });
-            }
-        }
-
-        // Build the "intermediate" axis order: [out_subs..., dropped...]
-        // where `dropped` are the axes summed away.
         let in_shape = self.input.shape();
-        let dropped_chars: Vec<char> = in_subs
-            .iter()
-            .filter(|c| !out_subs.contains(c))
-            .copied()
-            .collect();
-        let intermediate_chars: Vec<char> = out_subs
-            .iter()
-            .chain(dropped_chars.iter())
-            .copied()
-            .collect();
-
-        // Step 1: reshape grad_output so it has size-1 placeholders
-        // for the dropped axes — match the intermediate axis order
-        // exactly. `intermediate_shape` matches `intermediate_chars`.
-        let dim_size = |c: char| -> usize {
-            // in_subs is the same length as in_shape because
-            // `build_dim_map` validated this on the forward call.
-            for (axis, &ic) in in_subs.iter().enumerate() {
-                if ic == c {
-                    return in_shape[axis];
-                }
-            }
-            unreachable!("dim_size called for char not in in_subs")
-        };
-        let intermediate_shape: Vec<usize> =
-            intermediate_chars.iter().map(|&c| dim_size(c)).collect();
-
-        // grad_output has shape matching out_subs (its axis count
-        // is `out_subs.len()`). Insert size-1 axes for the dropped
-        // chars at the trailing positions to get an unsqueezed
-        // shape matching `intermediate_shape` modulo size-1 axes.
-        let unsqueezed_shape: Vec<usize> = (0..intermediate_chars.len())
-            .map(|i| {
-                if i < out_subs.len() {
-                    intermediate_shape[i]
-                } else {
-                    1
-                }
-            })
-            .collect();
-
-        // Use reshape (view_reshape) — grad_output is contiguous
-        // (it came from a forward op or .backward() entry-point).
-        let grad_unsq = if grad_output.shape() == unsqueezed_shape.as_slice() {
-            grad_output.clone()
-        } else if grad_output.is_contiguous() {
-            grad_output.view_reshape(unsqueezed_shape.clone())?
-        } else {
-            grad_output
-                .contiguous()?
-                .view_reshape(unsqueezed_shape.clone())?
-        };
-
-        // Step 2: expand to the full intermediate shape. `expand`
-        // is GPU-aware (broadcast_add path on CUDA, CPU loop
-        // otherwise) — no silent CPU detour.
-        let grad_expanded = if intermediate_shape.is_empty()
-            || grad_unsq.shape() == intermediate_shape.as_slice()
-        {
-            // out_subs covers all of in_subs (pure permutation) — no
-            // expansion needed.
-            grad_unsq
-        } else {
-            crate::grad_fns::shape::expand(&grad_unsq, &intermediate_shape)?
-        };
-
-        // Step 3: permute from `intermediate_chars` order back to
-        // `in_subs` order.
-        if intermediate_chars == in_subs {
-            // Already in input order — make sure the result is
-            // contiguous so downstream grad accumulation isn't
-            // surprised by stride views.
-            return Ok(vec![Some(crate::methods::contiguous_t(&grad_expanded)?)]);
-        }
-        let perm: Vec<usize> = in_subs
-            .iter()
-            .map(|c| {
-                intermediate_chars
-                    .iter()
-                    .position(|ic| ic == c)
-                    .expect("in_subs char must exist in intermediate_chars")
-            })
-            .collect();
-        let permuted = crate::methods::permute_t(&grad_expanded, &perm)?;
-        let grad_input = crate::methods::contiguous_t(&permuted)?;
+        let grad_input = single_input_distinct_backward(grad_output, &in_subs, &out_subs, |c| {
+            in_subs
+                .iter()
+                .position(|&ic| ic == c)
+                .map(|axis| in_shape[axis])
+        })?;
         Ok(vec![Some(grad_input)])
     }
 
@@ -2243,70 +2126,164 @@ impl<T: Float> GradFn<T> for EinsumBackwardSingle<T> {
 }
 
 impl<T: Float> EinsumBackwardSingle<T> {
-    /// Backward path for the rare repeated-input-index cases (`"ii->"`
-    /// trace, `"ii->i"` diagonal). Element-wise CPU construction; the
-    /// projection-rewrite path above does not cover this because its
-    /// structural assumption (in_subs is a set of distinct chars)
-    /// fails. CUDA inputs are routed through `.cpu()` because the
-    /// forward path itself returns `NotImplementedOnCuda` for these
-    /// cases (#803 — no on-device diagonal kernel today).
+    /// Backward path for repeated-input-index cases (`"ii->"` trace,
+    /// `"ii->i"` diagonal, `"iij->j"` mixed repeats). PyTorch implements the
+    /// forward by taking diagonal views for repeated labels; the VJP is the
+    /// corresponding diagonal embed. This implementation keeps the dynamic
+    /// gradient math on the tensor device: compute the deduped VJP with
+    /// reshape/expand/permute, then mask off non-diagonal coordinates on the
+    /// original input device.
     fn backward_repeated_index(
         &self,
         grad_output: &Tensor<T>,
         in_subs: &[char],
         out_subs: &[char],
     ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let in_shape: Vec<usize> = self.input.shape().to_vec();
-        let in_numel = self.input.numel();
-        let mut grad_data = vec![<T as num_traits::Zero>::zero(); in_numel];
-        let grad_out_data = grad_output.data_vec()?;
+        let in_shape = self.input.shape();
+        let x_dedup = dedup_first_occurrence(in_subs);
 
-        let out_strides = row_major_strides(grad_output.shape());
+        let g = single_input_distinct_backward(grad_output, &x_dedup, out_subs, |c| {
+            in_subs
+                .iter()
+                .position(|&ic| ic == c)
+                .map(|axis| in_shape[axis])
+        })?;
 
-        for (flat, grad_elem) in grad_data.iter_mut().enumerate().take(in_numel) {
-            // Decode flat to multi-index for input.
-            let mut multi = vec![0usize; in_subs.len()];
-            {
-                let mut rem = flat;
-                for i in (0..in_subs.len()).rev() {
-                    multi[i] = rem % in_shape[i];
-                    rem /= in_shape[i];
-                }
-            }
-
-            // All occurrences of the same char must have the same value.
-            let mut char_val: BTreeMap<char, usize> = BTreeMap::new();
-            let mut valid = true;
-            for (axis, &c) in in_subs.iter().enumerate() {
-                match char_val.get(&c) {
-                    Some(&prev) if prev != multi[axis] => {
-                        valid = false;
-                        break;
+        let view_shape: Vec<isize> = {
+            let mut seen = Vec::new();
+            in_subs
+                .iter()
+                .map(|&c| {
+                    if seen.contains(&c) {
+                        1
+                    } else {
+                        seen.push(c);
+                        in_subs
+                            .iter()
+                            .position(|&ic| ic == c)
+                            .map(|axis| in_shape[axis] as isize)
+                            .expect("deduped repeated index must exist")
                     }
-                    _ => {
-                        char_val.insert(c, multi[axis]);
-                    }
-                }
-            }
-            if !valid {
-                continue;
-            }
-
-            let mut out_flat = 0usize;
-            for (oi, &oc) in out_subs.iter().enumerate() {
-                out_flat += char_val[&oc] * out_strides[oi];
-            }
-
-            *grad_elem = if out_subs.is_empty() {
-                grad_out_data[0]
-            } else {
-                grad_out_data[out_flat]
-            };
-        }
-
-        let grad_tensor = Tensor::from_storage(TensorStorage::cpu(grad_data), in_shape, false)?;
+                })
+                .collect()
+        };
+        let g_contig = crate::methods::contiguous_t(&g)?;
+        let g_view = crate::grad_fns::shape::reshape(&g_contig, &view_shape)?;
+        let g_full = if g_view.shape() == in_shape {
+            g_view
+        } else {
+            crate::grad_fns::shape::expand(&g_view, in_shape)?
+        };
+        let mask = diagonal_mask::<T>(in_subs, in_shape)?;
+        let mask = if self.input.is_cuda() {
+            mask.to(self.input.device())?
+        } else {
+            mask
+        };
+        let grad_tensor = crate::grad_fns::arithmetic::mul(&g_full, &mask)?;
         Ok(vec![Some(grad_tensor)])
     }
+}
+
+fn dedup_first_occurrence(subs: &[char]) -> Vec<char> {
+    let mut dedup = Vec::with_capacity(subs.len());
+    for &c in subs {
+        if !dedup.contains(&c) {
+            dedup.push(c);
+        }
+    }
+    dedup
+}
+
+fn single_input_distinct_backward<T, F>(
+    grad_output: &Tensor<T>,
+    in_subs: &[char],
+    out_subs: &[char],
+    size_of: F,
+) -> FerrotorchResult<Tensor<T>>
+where
+    T: Float,
+    F: Fn(char) -> Option<usize>,
+{
+    if has_duplicate_chars(in_subs) {
+        return Err(FerrotorchError::Internal {
+            message: "einsum backward: distinct-input VJP received repeated subscripts".to_string(),
+        });
+    }
+    for &c in out_subs {
+        if !in_subs.contains(&c) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "einsum backward: output index '{c}' does not appear in input subscripts"
+                ),
+            });
+        }
+    }
+
+    // Projection / axis-sum / full-reduce / pure permutation (#791):
+    // forward over distinct labels is permute-to-output-order followed by
+    // reductions over dropped axes. The VJP inserts singleton dropped axes,
+    // expands them, then permutes back to input order.
+    let dropped_chars: Vec<char> = in_subs
+        .iter()
+        .filter(|c| !out_subs.contains(c))
+        .copied()
+        .collect();
+    let intermediate_chars: Vec<char> = out_subs
+        .iter()
+        .chain(dropped_chars.iter())
+        .copied()
+        .collect();
+    let intermediate_shape: Vec<usize> = intermediate_chars
+        .iter()
+        .map(|&c| {
+            size_of(c).ok_or_else(|| FerrotorchError::Internal {
+                message: format!("einsum backward: no saved size for label '{c}'"),
+            })
+        })
+        .collect::<FerrotorchResult<Vec<_>>>()?;
+
+    let unsqueezed_shape: Vec<usize> = (0..intermediate_chars.len())
+        .map(|i| {
+            if i < out_subs.len() {
+                intermediate_shape[i]
+            } else {
+                1
+            }
+        })
+        .collect();
+
+    let grad_unsq = if grad_output.shape() == unsqueezed_shape.as_slice() {
+        grad_output.clone()
+    } else if grad_output.is_contiguous() {
+        grad_output.view_reshape(unsqueezed_shape.clone())?
+    } else {
+        grad_output
+            .contiguous()?
+            .view_reshape(unsqueezed_shape.clone())?
+    };
+
+    let grad_expanded =
+        if intermediate_shape.is_empty() || grad_unsq.shape() == intermediate_shape.as_slice() {
+            grad_unsq
+        } else {
+            crate::grad_fns::shape::expand(&grad_unsq, &intermediate_shape)?
+        };
+
+    if intermediate_chars == in_subs {
+        return crate::methods::contiguous_t(&grad_expanded);
+    }
+    let perm: Vec<usize> = in_subs
+        .iter()
+        .map(|c| {
+            intermediate_chars
+                .iter()
+                .position(|ic| ic == c)
+                .expect("in_subs char must exist in intermediate_chars")
+        })
+        .collect();
+    let permuted = crate::methods::permute_t(&grad_expanded, &perm)?;
+    crate::methods::contiguous_t(&permuted)
 }
 
 fn reduce_and_expand_gradient_to_target<T, F>(
