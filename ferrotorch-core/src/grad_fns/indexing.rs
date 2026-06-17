@@ -2351,6 +2351,26 @@ fn cuda_full<T: Float>(
     Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), false)
 }
 
+fn zeros_on_device<T: Float>(
+    shape: &[usize],
+    device: Device,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let numel = crate::shape::checked_numel(shape, op)?;
+    match device {
+        Device::Cuda(ordinal) => {
+            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let handle = backend.alloc_zeros(numel, T::dtype(), ordinal)?;
+            Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), false)
+        }
+        _ => Tensor::from_storage(
+            TensorStorage::on_device(vec![<T as num_traits::Zero>::zero(); numel], device)?,
+            shape.to_vec(),
+            false,
+        ),
+    }
+}
+
 fn cuda_gather_index_shape<T: Float>(
     src: &Tensor<T>,
     idx_handle: &GpuBufferHandle,
@@ -2482,15 +2502,6 @@ fn validate_scatter_reduce_shapes<T: Float>(
     src: &Tensor<T>,
 ) -> FerrotorchResult<usize> {
     let ndim = input_shape.len();
-    if index_shape.len() != ndim {
-        return Err(FerrotorchError::ShapeMismatch {
-            message: format!(
-                "scatter_reduce: index ndim {} != input ndim {}",
-                index_shape.len(),
-                ndim
-            ),
-        });
-    }
     let index_numel = checked_shape_numel("scatter_reduce", index_shape)?;
     if index.len() != index_numel {
         return Err(FerrotorchError::ShapeMismatch {
@@ -2499,6 +2510,18 @@ fn validate_scatter_reduce_shapes<T: Float>(
                 index.len(),
                 index_shape,
                 index_numel
+            ),
+        });
+    }
+    if index_numel == 0 {
+        return Ok(index_numel);
+    }
+    if index_shape.len() != ndim {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "scatter_reduce: index ndim {} != input ndim {}",
+                index_shape.len(),
+                ndim
             ),
         });
     }
@@ -2546,6 +2569,86 @@ fn validate_scatter_reduce_shapes<T: Float>(
         }
     }
     Ok(index_numel)
+}
+
+struct ScalarScatterReduceShape {
+    index_numel: usize,
+    effective_index_shape: Vec<usize>,
+}
+
+fn nonempty_shape(shape: &[usize]) -> Vec<usize> {
+    if shape.is_empty() {
+        vec![1]
+    } else {
+        shape.to_vec()
+    }
+}
+
+fn validate_scalar_scatter_reduce<T: Float>(
+    index: &[usize],
+    index_shape: &[usize],
+    src: &Tensor<T>,
+) -> FerrotorchResult<ScalarScatterReduceShape> {
+    let index_numel = checked_shape_numel("scatter_reduce", index_shape)?;
+    if index.len() != index_numel {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "scatter_reduce: index slice has {} elements but index_shape {:?} implies {}",
+                index.len(),
+                index_shape,
+                index_numel
+            ),
+        });
+    }
+    let effective_index_shape = nonempty_shape(index_shape);
+    let effective_src_shape = nonempty_shape(src.shape());
+    if index_numel == 0 {
+        return Ok(ScalarScatterReduceShape {
+            index_numel,
+            effective_index_shape,
+        });
+    }
+    if effective_index_shape.len() != 1 {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "scatter_reduce: index ndim {} != effective scalar input ndim 1",
+                index_shape.len()
+            ),
+        });
+    }
+    if effective_src_shape.len() != 1 {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "scatter_reduce: index tensor must have the same number of dimensions as src \
+                 tensor (index_shape {index_shape:?} has effective rank 1, src shape {:?} has \
+                 effective rank {})",
+                src.shape(),
+                effective_src_shape.len()
+            ),
+        });
+    }
+    if effective_index_shape[0] > effective_src_shape[0] {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "scatter_reduce: expected index {index_shape:?} to be no larger than self [] \
+                 apart from dimension 0 and to be no larger size than src {:?}",
+                src.shape()
+            ),
+        });
+    }
+    for &idx in index {
+        if idx >= 1 {
+            return Err(FerrotorchError::IndexOutOfBounds {
+                index: idx,
+                axis: 0,
+                size: 1,
+            });
+        }
+    }
+    Ok(ScalarScatterReduceShape {
+        index_numel,
+        effective_index_shape,
+    })
 }
 
 fn cuda_src_prefix_slab_for_index<T: Float>(
@@ -2844,49 +2947,106 @@ impl<T: Float> ScatterReduceBackward<T> {
 
     /// VJP for the 0-d input degenerate case (input is a single scalar).
     fn backward_0d(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        let go_data = grad_output.data_vec()?;
-        let zero = <T as num_traits::Zero>::zero();
-        let one = <T as num_traits::One>::one();
-        let mut scale = one;
-        if self.reduce == ScatterReduce::Mean {
-            let mut count = if self.include_self { one } else { zero };
-            for _ in &self.index {
-                count += one;
-            }
-            if count != zero {
-                scale = count;
-            }
+        if grad_output.numel() != 1 {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "ScatterReduceBackward: scalar output gradient must have one element, got {}",
+                    grad_output.numel()
+                ),
+            });
         }
-        let mut grad_input_data: Vec<T> = go_data.iter().map(|&g| g / scale).collect();
-        if !self.include_self && !self.index.is_empty() {
-            grad_input_data[0] = zero;
+        same_device(self.input.device(), grad_output.device())?;
+        same_device(self.input.device(), self.src.device())?;
+
+        let index_numel = checked_shape_numel("ScatterReduceBackward", &self.index_shape)?;
+        if self.index.len() != index_numel {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "ScatterReduceBackward: saved index length {} != index_shape {:?} numel {}",
+                    self.index.len(),
+                    self.index_shape,
+                    index_numel
+                ),
+            });
         }
-        let grad_input = if self.input.requires_grad() {
-            Some(Tensor::from_storage(
-                // CORE-048 (#1742): gradient on the input leaf's device.
-                TensorStorage::on_device(grad_input_data, self.input.device())?,
-                vec![],
-                false,
-            )?)
-        } else {
-            None
-        };
-        let grad_src = if self.src.requires_grad() {
-            let grad_src_data: Vec<T> = if self.reduce == ScatterReduce::Mean {
-                vec![go_data[0] / scale; self.src.numel()]
+
+        if index_numel == 0 {
+            let grad_input = if self.input.requires_grad() {
+                Some(grad_output.contiguous()?.view_reshape(vec![])?)
             } else {
-                go_data
+                None
             };
-            Some(Tensor::from_storage(
-                // CORE-048 (#1742): gradient on the src leaf's device.
-                TensorStorage::on_device(grad_src_data, self.src.device())?,
-                self.src.shape().to_vec(),
-                false,
-            )?)
+            let grad_src = if self.src.requires_grad() {
+                if !self.src.shape().is_empty() && self.src.shape() != self.index_shape.as_slice() {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "scatter_reduce backward: empty scalar-index gradient for src is \
+                             index-shaped ({:?}) and is only compatible with scalar src or \
+                             src.shape == index.shape; got src.shape {:?}",
+                            self.index_shape,
+                            self.src.shape()
+                        ),
+                    });
+                }
+                Some(zeros_on_device(
+                    self.src.shape(),
+                    self.src.device(),
+                    "ScatterReduceBackward",
+                )?)
+            } else {
+                None
+            };
+            return Ok(vec![grad_input, grad_src]);
+        }
+
+        if self.src.requires_grad()
+            && !self.src.shape().is_empty()
+            && self.src.shape() != self.index_shape.as_slice()
+        {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "scatter_reduce backward: scalar source gradient is index-shaped ({:?}) \
+                     except for scalar src; got src.shape {:?}",
+                    self.index_shape,
+                    self.src.shape()
+                ),
+            });
+        }
+
+        let effective_index_shape = nonempty_shape(&self.index_shape);
+        let effective_src = if self.src.shape().is_empty() {
+            self.src.view_reshape(vec![1])?
         } else {
-            None
+            self.src.clone()
         };
-        Ok(vec![grad_input, grad_src])
+        let effective = ScatterReduceBackward {
+            input: self.input.view_reshape(vec![1])?,
+            src: effective_src,
+            dim: 0,
+            index: self.index.clone(),
+            index_shape: effective_index_shape,
+            reduce: self.reduce,
+            include_self: self.include_self,
+            result: self.result.view_reshape(vec![1])?,
+        };
+
+        let grad_1d = grad_output.view_reshape(vec![1])?;
+        let mut grads = match self.reduce {
+            ScatterReduce::Sum => effective.backward_sum(&grad_1d)?,
+            ScatterReduce::Mean => effective.backward_mean(&grad_1d)?,
+            ScatterReduce::Prod => effective.backward_prod(&grad_1d)?,
+            ScatterReduce::Amax | ScatterReduce::Amin => effective.backward_amax_amin(&grad_1d)?,
+        };
+
+        if let Some(grad_input) = grads[0].take() {
+            grads[0] = Some(grad_input.view_reshape(vec![])?);
+        }
+        if self.src.shape().is_empty()
+            && let Some(grad_src) = grads[1].take()
+        {
+            grads[1] = Some(grad_src.view_reshape(vec![])?);
+        }
+        Ok(grads)
     }
 
     /// VJP for `reduce='mean'` per upstream
@@ -3681,26 +3841,67 @@ pub fn scatter_reduce<T: Float>(
 
     let input_shape = input.shape();
     let ndim = input_shape.len();
+    let effective_ndim = ndim.max(1);
+    let dim_usize = crate::shape::normalize_axis(dim as isize, effective_ndim)?;
     if ndim == 0 {
-        // op_db emits 0-d input + 0-d index samples for scatter_reduce — the
-        // upstream impl handles this via the C++ unsqueeze path. ferrotorch
-        // returns the input as-is (no-op for empty index) or applies the
-        // single scalar reduction.
+        // PyTorch validates scalar scatter/scatter_reduce through
+        // `ensure_nonempty_dim`: 0-D self behaves as a 1-element tensor for
+        // shape and bounds checks, but the output shape remains scalar.
+        let scalar_shapes = validate_scalar_scatter_reduce(index, index_shape, src)?;
+        if input.is_cuda() || src.is_cuda() {
+            if !input.is_cuda() || !src.is_cuda() || !cuda_f32_f64::<T>() {
+                return Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "scatter_reduce",
+                });
+            }
+            let input_1d = input.view_reshape(vec![1])?;
+            let src_1d = if src.shape().is_empty() {
+                src.view_reshape(vec![1])?
+            } else {
+                src.clone()
+            };
+            let output_1d = if scalar_shapes.index_numel == 0 {
+                input_1d
+            } else {
+                scatter_reduce_cuda_forward(
+                    &input_1d,
+                    dim_usize,
+                    index,
+                    &scalar_shapes.effective_index_shape,
+                    &src_1d,
+                    reduce,
+                    include_self,
+                )?
+            };
+            let output = output_1d.view_reshape(vec![])?;
+            return attach_scatter_reduce_grad(
+                output,
+                input,
+                src,
+                dim_usize,
+                index,
+                index_shape,
+                reduce,
+                include_self,
+            );
+        }
+
         let in_data = input.data_vec()?;
         let src_data = src.data_vec()?;
         let zero = <T as num_traits::Zero>::zero();
         let one = <T as num_traits::One>::one();
         let mut out = in_data[0];
         let mut mean_count = if include_self { one } else { zero };
-        if !include_self && !index.is_empty() {
+        if !include_self && scalar_shapes.index_numel != 0 {
             out = match reduce {
                 ScatterReduce::Sum | ScatterReduce::Mean => zero,
                 ScatterReduce::Prod => one,
                 ScatterReduce::Amax | ScatterReduce::Amin => src_data[0],
             };
         }
-        for (i, &_idx) in index.iter().enumerate() {
-            let s = src_data[i.min(src_data.len() - 1)];
+        for i in 0..scalar_shapes.index_numel {
+            let src_flat = if src.shape().is_empty() { 0 } else { i };
+            let s = src_data[src_flat];
             out = apply_reduce(reduce, out, s);
             if reduce == ScatterReduce::Mean {
                 mean_count += one;
@@ -3728,16 +3929,6 @@ pub fn scatter_reduce<T: Float>(
             include_self,
         );
     }
-
-    // Normalize negative dim per `at::maybe_wrap_dim` at `:2362`.
-    let ndim_i64 = ndim as i64;
-    let dim_norm = if dim < 0 { dim + ndim_i64 } else { dim };
-    if !(0..ndim_i64).contains(&dim_norm) {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!("scatter_reduce: dim {dim} out of range for input ndim {ndim}"),
-        });
-    }
-    let dim_usize = dim_norm as usize;
 
     let index_numel =
         validate_scatter_reduce_shapes(input_shape, dim_usize, index, index_shape, src)?;
