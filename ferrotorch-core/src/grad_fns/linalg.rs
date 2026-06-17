@@ -175,6 +175,28 @@ fn cuda_broadcast_add_same_dtype<T: Float>(
     }
 }
 
+fn cuda_broadcast_mul_same_dtype<T: Float>(
+    backend: &dyn GpuBackend,
+    a: &GpuBufferHandle,
+    b: &GpuBufferHandle,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    op: &'static str,
+) -> FerrotorchResult<GpuBufferHandle> {
+    if is_f32::<T>() {
+        backend.broadcast_mul_f32(a, b, a_shape, b_shape, out_shape)
+    } else if is_f64::<T>() {
+        backend.broadcast_mul_f64(a, b, a_shape, b_shape, out_shape)
+    } else if is_bf16::<T>() {
+        backend.broadcast_mul_bf16(a, b, a_shape, b_shape, out_shape)
+    } else if is_f16::<T>() {
+        backend.broadcast_mul_f16(a, b, a_shape, b_shape, out_shape)
+    } else {
+        Err(FerrotorchError::NotImplementedOnCuda { op })
+    }
+}
+
 fn cuda_sum_axis_same_dtype<T: Float>(
     backend: &dyn GpuBackend,
     a: &GpuBufferHandle,
@@ -349,28 +371,18 @@ fn validate_linear_fused_operands<T: Float>(
     Ok((m, k, n))
 }
 
-/// GPU-native matmul backward for f32 tensors.
+/// GPU-native matmul backward for all CUDA floating dtypes supported by `mm`.
 /// dA = grad_C @ B^T, dB = A^T @ grad_C — all on GPU, no CPU roundtrip.
 fn mm_backward_gpu<T: Float>(grad_output: &Tensor<T>, a: &Tensor<T>, b: &Tensor<T>) -> GradPair<T> {
     let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
     let go_h = grad_output.gpu_handle()?;
     let m = grad_output.shape()[0];
     let n = grad_output.shape()[1];
-    let f64_path = is_f64::<T>();
 
     let grad_a = if a.requires_grad() {
         let k = b.shape()[0];
         let b_h = b.gpu_handle()?;
-        let (bt_h, result_h) = if f64_path {
-            let bt = backend.transpose_2d_f64(b_h, k, n)?;
-            let r = backend.matmul_f64(go_h, &bt, m, n, k)?;
-            (bt, r)
-        } else {
-            let bt = backend.transpose_2d_f32(b_h, k, n)?;
-            let r = backend.matmul_f32(go_h, &bt, m, n, k)?;
-            (bt, r)
-        };
-        let _ = bt_h;
+        let result_h = cuda_matmul_nt_same_dtype::<T>(backend, go_h, b_h, m, n, k, "MmBackward")?;
         Some(Tensor::from_storage(
             TensorStorage::gpu(result_h),
             vec![m, k],
@@ -383,16 +395,8 @@ fn mm_backward_gpu<T: Float>(grad_output: &Tensor<T>, a: &Tensor<T>, b: &Tensor<
     let grad_b = if b.requires_grad() {
         let k = a.shape()[1];
         let a_h = a.gpu_handle()?;
-        let (at_h, result_h) = if f64_path {
-            let at = backend.transpose_2d_f64(a_h, m, k)?;
-            let r = backend.matmul_f64(&at, go_h, k, m, n)?;
-            (at, r)
-        } else {
-            let at = backend.transpose_2d_f32(a_h, m, k)?;
-            let r = backend.matmul_f32(&at, go_h, k, m, n)?;
-            (at, r)
-        };
-        let _ = at_h;
+        let at_h = cuda_transpose_2d_same_dtype::<T>(backend, a_h, m, k, "MmBackward")?;
+        let result_h = cuda_matmul_same_dtype::<T>(backend, &at_h, go_h, k, m, n, "MmBackward")?;
         Some(Tensor::from_storage(
             TensorStorage::gpu(result_h),
             vec![k, n],
@@ -428,14 +432,12 @@ impl<T: Float> MmBackward<T> {
 
 impl<T: Float> GradFn<T> for MmBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        // GPU-native path for f32/f64.
-        if grad_output.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        // GPU-native path for every dtype that `mm_differentiable` forwards
+        // through cuBLAS. PyTorch keeps f16/bf16 VJPs resident and returns
+        // same-dtype CUDA gradients.
+        if grad_output.is_cuda() {
             let (ga, gb) = mm_backward_gpu(grad_output, &self.a, &self.b)?;
             return Ok(vec![ga, gb]);
-        }
-
-        if grad_output.is_cuda() {
-            return Err(FerrotorchError::NotImplementedOnCuda { op: "MmBackward" });
         }
 
         // CPU path.
@@ -507,23 +509,19 @@ impl<T: Float> MvBackward<T> {
 impl<T: Float> GradFn<T> for MvBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         // §3 GPU-native path (PyTorch parity: backward runs on same device as forward).
-        // dA = outer(grad_y, x) = matmul(grad_y.reshape(m,1), x.reshape(1,k)) — rank-1 mm on GPU.
-        // dx = A^T @ grad_y  — cuBLAS gemv with transpose flag via mv_f32/f64.
-        if grad_output.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        // dA = outer(grad_y, x) = matmul(grad_y.reshape(m,1), x.reshape(1,k)).
+        // dx = A^T @ grad_y = matmul(A^T, grad_y.reshape(m,1)).
+        if grad_output.is_cuda() {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
             let m = self.a.shape()[0];
             let k = self.a.shape()[1];
-            let f64_path = is_f64::<T>();
 
             let grad_a = if self.a.requires_grad() {
                 let go_h = grad_output.gpu_handle()?;
                 let x_h = self.x.gpu_handle()?;
                 // outer(grad_y, x): treat grad_y as (m,1) and x as (1,k) → matmul gives (m,k).
-                let result_h = if f64_path {
-                    backend.matmul_f64(go_h, x_h, m, 1, k)?
-                } else {
-                    backend.matmul_f32(go_h, x_h, m, 1, k)?
-                };
+                let result_h =
+                    cuda_matmul_same_dtype::<T>(backend, go_h, x_h, m, 1, k, "MvBackward")?;
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
                     vec![m, k],
@@ -536,18 +534,12 @@ impl<T: Float> GradFn<T> for MvBackward<T> {
             let grad_x = if self.x.requires_grad() {
                 let a_h = self.a.gpu_handle()?;
                 let go_h = grad_output.gpu_handle()?;
-                // dx = A^T @ grad_y: transpose A (m,k) → (k,m), then mv((k,m), grad_y[m]) → (k,).
-                let at_h = if f64_path {
-                    backend.transpose_2d_f64(a_h, m, k)?
-                } else {
-                    backend.transpose_2d_f32(a_h, m, k)?
-                };
-                // mv_f32/f64(at, grad_y, rows=k, cols=m): y[k] = at[k,m] @ grad_y[m].
-                let result_h = if f64_path {
-                    backend.mv_f64(&at_h, go_h, k, m)?
-                } else {
-                    backend.mv_f32(&at_h, go_h, k, m)?
-                };
+                // dx = A^T @ grad_y: transpose A (m,k) → (k,m), then multiply
+                // by grad_y treated as (m,1). The output storage is (k,1),
+                // which is the same contiguous layout as the vector shape (k).
+                let at_h = cuda_transpose_2d_same_dtype::<T>(backend, a_h, m, k, "MvBackward")?;
+                let result_h =
+                    cuda_matmul_same_dtype::<T>(backend, &at_h, go_h, k, m, 1, "MvBackward")?;
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
                     vec![k],
@@ -558,10 +550,6 @@ impl<T: Float> GradFn<T> for MvBackward<T> {
             };
 
             return Ok(vec![grad_a, grad_x]);
-        }
-
-        if grad_output.is_cuda() {
-            return Err(FerrotorchError::NotImplementedOnCuda { op: "MvBackward" });
         }
 
         // grad_output is shape (M,) — the upstream gradient on y.
@@ -629,25 +617,24 @@ impl<T: Float> DotBackward<T> {
 
 impl<T: Float> GradFn<T> for DotBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        // §3 GPU-native path: da = grad_s * b, db = grad_s * a — elementwise scale on GPU.
-        // grad_s is a scalar (1-element buffer); scale_f32/f64 broadcasts it via PTX.
-        if grad_output.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        // §3 GPU-native path: da = grad_s * b, db = grad_s * a. Use the
+        // broadcast-multiply kernels so even scalar cotangents stay resident.
+        if grad_output.is_cuda() {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            // Extract scalar from the 1-element GPU buffer via D2H transfer.
-            // `.item()` calls `.data()` which returns GpuTensorNotAccessible for CUDA
-            // tensors; we must copy the 1-element scalar to CPU first.
-            let s: T = grad_output.cpu()?.item()?;
-            let f64_path = is_f64::<T>();
+            let go_h = grad_output.gpu_handle()?;
+            let scalar_shape: [usize; 0] = [];
 
             let grad_a = if self.a.requires_grad() {
                 let b_h = self.b.gpu_handle()?;
-                let result_h = if f64_path {
-                    let s64 = <T as num_traits::ToPrimitive>::to_f64(&s).unwrap();
-                    backend.scale_f64(b_h, s64)?
-                } else {
-                    let s32 = <T as num_traits::ToPrimitive>::to_f32(&s).unwrap();
-                    backend.scale_f32(b_h, s32)?
-                };
+                let result_h = cuda_broadcast_mul_same_dtype::<T>(
+                    backend,
+                    go_h,
+                    b_h,
+                    &scalar_shape,
+                    self.b.shape(),
+                    self.b.shape(),
+                    "DotBackward",
+                )?;
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
                     self.a.shape().to_vec(),
@@ -659,13 +646,15 @@ impl<T: Float> GradFn<T> for DotBackward<T> {
 
             let grad_b = if self.b.requires_grad() {
                 let a_h = self.a.gpu_handle()?;
-                let result_h = if f64_path {
-                    let s64 = <T as num_traits::ToPrimitive>::to_f64(&s).unwrap();
-                    backend.scale_f64(a_h, s64)?
-                } else {
-                    let s32 = <T as num_traits::ToPrimitive>::to_f32(&s).unwrap();
-                    backend.scale_f32(a_h, s32)?
-                };
+                let result_h = cuda_broadcast_mul_same_dtype::<T>(
+                    backend,
+                    go_h,
+                    a_h,
+                    &scalar_shape,
+                    self.a.shape(),
+                    self.a.shape(),
+                    "DotBackward",
+                )?;
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
                     self.b.shape().to_vec(),
@@ -676,10 +665,6 @@ impl<T: Float> GradFn<T> for DotBackward<T> {
             };
 
             return Ok(vec![grad_a, grad_b]);
-        }
-
-        if grad_output.is_cuda() {
-            return Err(FerrotorchError::NotImplementedOnCuda { op: "DotBackward" });
         }
 
         let s = grad_output.item()?;
@@ -822,23 +807,26 @@ impl<T: Float> GradFn<T> for MatmulBackward<T> {
             }
             (1, 2) => {
                 // vm: y = a @ B where a is (K,), B is (K,N), y is (N,)
-                // §3 GPU-native path: da = mv(B, grad_y) via mv; dB = outer(a, grad_y) via matmul.
-                if grad_output.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+                // §3 GPU-native path: da = B @ grad_y via GEMM; dB = outer(a, grad_y) via GEMM.
+                if grad_output.is_cuda() {
                     let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
                     let k = self.a.numel();
                     let n = grad_output.numel();
-                    let f64_path = is_f64::<T>();
 
                     let grad_a = if self.a.requires_grad() {
-                        // da = B @ grad_y: B is (K,N), grad_y is (N,) → result (K,).
-                        // mv_f32/f64(B, grad_y, rows=K, cols=N).
+                        // da = B @ grad_y: treat grad_y as (1,N) and use the
+                        // fused NT GEMM to produce contiguous (K,1) storage.
                         let b_h = self.b.gpu_handle()?;
                         let go_h = grad_output.gpu_handle()?;
-                        let result_h = if f64_path {
-                            backend.mv_f64(b_h, go_h, k, n)?
-                        } else {
-                            backend.mv_f32(b_h, go_h, k, n)?
-                        };
+                        let result_h = cuda_matmul_nt_same_dtype::<T>(
+                            backend,
+                            b_h,
+                            go_h,
+                            k,
+                            n,
+                            1,
+                            "MatmulBackward(vm)",
+                        )?;
                         Some(Tensor::from_storage(
                             TensorStorage::gpu(result_h),
                             vec![k],
@@ -853,11 +841,15 @@ impl<T: Float> GradFn<T> for MatmulBackward<T> {
                         // Compose as matmul((K,1), (1,N)) = rank-1 mm.
                         let a_h = self.a.gpu_handle()?;
                         let go_h = grad_output.gpu_handle()?;
-                        let result_h = if f64_path {
-                            backend.matmul_f64(a_h, go_h, k, 1, n)?
-                        } else {
-                            backend.matmul_f32(a_h, go_h, k, 1, n)?
-                        };
+                        let result_h = cuda_matmul_same_dtype::<T>(
+                            backend,
+                            a_h,
+                            go_h,
+                            k,
+                            1,
+                            n,
+                            "MatmulBackward(vm)",
+                        )?;
                         Some(Tensor::from_storage(
                             TensorStorage::gpu(result_h),
                             vec![k, n],
@@ -868,12 +860,6 @@ impl<T: Float> GradFn<T> for MatmulBackward<T> {
                     };
 
                     return Ok(vec![grad_a, grad_b]);
-                }
-
-                if grad_output.is_cuda() || self.a.is_cuda() || self.b.is_cuda() {
-                    return Err(FerrotorchError::NotImplementedOnCuda {
-                        op: "MatmulBackward(vm)",
-                    });
                 }
 
                 let grad_a = if self.a.requires_grad() {
@@ -1682,7 +1668,9 @@ pub fn mv_differentiable<T: Float>(a: &Tensor<T>, x: &Tensor<T>) -> FerrotorchRe
         } else if is_f64::<T>() {
             backend.mv_f64(a.gpu_handle()?, x.gpu_handle()?, m, k)?
         } else {
-            return Err(FerrotorchError::NotImplementedOnCuda { op: "mv" });
+            // Reduced-precision CUDA mv has the same storage layout as
+            // [m,k] @ [k,1]. Keep it resident through the dtype-specific GEMM.
+            cuda_matmul_same_dtype::<T>(backend, a.gpu_handle()?, x.gpu_handle()?, m, k, 1, "mv")?
         };
         let storage = TensorStorage::gpu(handle);
         let shape = vec![m];
@@ -1763,7 +1751,8 @@ pub fn dot_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchR
         } else if is_f64::<T>() {
             backend.dot_f64(a.gpu_handle()?, b.gpu_handle()?, n)?
         } else {
-            return Err(FerrotorchError::NotImplementedOnCuda { op: "dot" });
+            // Dot is [1,n] @ [n,1] with a scalar-shaped output.
+            cuda_matmul_same_dtype::<T>(backend, a.gpu_handle()?, b.gpu_handle()?, 1, n, 1, "dot")?
         };
         let storage = TensorStorage::gpu(handle);
         let shape: Vec<usize> = vec![];
@@ -1813,9 +1802,8 @@ pub fn dot_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchR
 /// Uses the GPU-aware `bmm()` for the forward pass (dispatches to cuBLAS on
 /// GPU, CPU loops otherwise), then attaches `BmmBackward` for autograd.
 pub fn bmm_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    // Record autocast decision. Actual f16 dispatch for bmm will be added
-    // when the batched f16 GEMM kernel lands; for now the guard ensures the
-    // policy is tracked.
+    // Record autocast decision. f32 autocast routes through the mixed f16
+    // Tensor Core path; real f16/bf16 tensors use same-dtype resident output.
     let _autocast_cat = autocast_guard("bmm");
     let result = bmm(a, b)?;
 
@@ -1872,7 +1860,18 @@ pub fn matmul_differentiable<T: Float>(
         } else if is_f64::<T>() {
             backend.vm_f64(a.gpu_handle()?, b.gpu_handle()?, k, n)?
         } else {
-            return Err(FerrotorchError::NotImplementedOnCuda { op: "matmul" });
+            // Reduced-precision CUDA vm is [1,k] @ [k,n]. The resulting
+            // one-row storage is the same contiguous layout as the vector
+            // output shape [n].
+            cuda_matmul_same_dtype::<T>(
+                backend,
+                a.gpu_handle()?,
+                b.gpu_handle()?,
+                1,
+                k,
+                n,
+                "matmul",
+            )?
         };
         let storage = TensorStorage::gpu(handle);
         let shape = vec![n];
@@ -1921,7 +1920,7 @@ pub fn matmul_differentiable<T: Float>(
         //
         // GPU shape coverage (#801): 2D x 2D is handled above; 3D x 3D with
         // matching batch dim routes to `bmm_differentiable` which has GPU
-        // f32/f64 dispatch (#800). 1D x 1D / 2D x 1D / 1D x 2D vector cases
+        // dispatch (#800). 1D x 1D / 2D x 1D / 1D x 2D vector cases
         // are handled by `dot_differentiable` / `mv_differentiable` and the
         // `vm_*` GPU branch above (#816 / #817 / #818).
         //
@@ -1944,17 +1943,10 @@ pub fn matmul_differentiable<T: Float>(
         // regression on the ViT shape — see
         // `tests/divergence_gh25_gpu_bf16_matmul_precision.rs`).
         //
-        // bf16 lands here for the "single-run" broadcast patterns only —
-        // those where each lead is either empty (fully broadcast) or matches
-        // `out_lead` exactly. That covers every shape the dispatcher routes
-        // here today (3D × 2D, 2D × 3D, ND × ND with matching leads). For
-        // less-uniform broadcasts the bf16 backend returns
-        // `InvalidArgument`; we detect that and fall through to the CPU
-        // path (same behaviour as today — no regression).
         if a.is_cuda()
             && a.ndim() >= 2
             && b.ndim() >= 2
-            && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>())
+            && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>())
         {
             let a_nd = a.ndim();
             let b_nd = b.ndim();
@@ -1996,64 +1988,62 @@ pub fn matmul_differentiable<T: Float>(
                     });
                 }
             }
-            // bf16 single-run guard: the bf16 backend only encodes broadcasts
-            // where each lead is empty or matches `out_lead` exactly. For
-            // anything else, skip the GPU path and let the CPU fallback
-            // handle it — no regression vs. pre-fix behaviour.
-            let bf16_skip = is_bf16::<T>() && !(a_lead.is_empty() || a_lead == out_lead)
-                || is_bf16::<T>() && !(b_lead.is_empty() || b_lead == out_lead);
-            if !bf16_skip {
-                let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-                let handle = if is_f32::<T>() {
-                    backend.broadcast_bmm_f32(
-                        a.gpu_handle()?,
-                        b.gpu_handle()?,
-                        &a_lead,
-                        &b_lead,
-                        &out_lead,
-                        m,
-                        k_a,
-                        n,
-                    )?
-                } else if is_f64::<T>() {
-                    backend.broadcast_bmm_f64(
-                        a.gpu_handle()?,
-                        b.gpu_handle()?,
-                        &a_lead,
-                        &b_lead,
-                        &out_lead,
-                        m,
-                        k_a,
-                        n,
-                    )?
-                } else {
-                    // bf16 path (#1543 / GH#25 fix). Routes through cuBLAS
-                    // `gemm_strided_batched_ex` with CUDA_R_16BF in/out and
-                    // CUBLAS_COMPUTE_32F accumulator — the standard
-                    // ~1.5e-3 cuBLAS bf16+f32-accum floor that the
-                    // upstream issue expects.
-                    backend.broadcast_bmm_bf16(
-                        a.gpu_handle()?,
-                        b.gpu_handle()?,
-                        &a_lead,
-                        &b_lead,
-                        &out_lead,
-                        m,
-                        k_a,
-                        n,
-                    )?
-                };
-                let mut shape = out_lead;
-                shape.push(m);
-                shape.push(n);
-                let storage = TensorStorage::gpu(handle);
-                return if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
-                    let grad_fn = Arc::new(MatmulBackward::new(a.clone(), b.clone()));
-                    Tensor::from_operation(storage, shape, grad_fn)
-                } else {
-                    Tensor::from_storage(storage, shape, false)
-                };
-            }
+            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let handle = if is_f32::<T>() {
+                backend.broadcast_bmm_f32(
+                    a.gpu_handle()?,
+                    b.gpu_handle()?,
+                    &a_lead,
+                    &b_lead,
+                    &out_lead,
+                    m,
+                    k_a,
+                    n,
+                )?
+            } else if is_f64::<T>() {
+                backend.broadcast_bmm_f64(
+                    a.gpu_handle()?,
+                    b.gpu_handle()?,
+                    &a_lead,
+                    &b_lead,
+                    &out_lead,
+                    m,
+                    k_a,
+                    n,
+                )?
+            } else if is_bf16::<T>() {
+                backend.broadcast_bmm_bf16(
+                    a.gpu_handle()?,
+                    b.gpu_handle()?,
+                    &a_lead,
+                    &b_lead,
+                    &out_lead,
+                    m,
+                    k_a,
+                    n,
+                )?
+            } else {
+                backend.broadcast_bmm_f16(
+                    a.gpu_handle()?,
+                    b.gpu_handle()?,
+                    &a_lead,
+                    &b_lead,
+                    &out_lead,
+                    m,
+                    k_a,
+                    n,
+                )?
+            };
+            let mut shape = out_lead;
+            shape.push(m);
+            shape.push(n);
+            let storage = TensorStorage::gpu(handle);
+            return if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
+                let grad_fn = Arc::new(MatmulBackward::new(a.clone(), b.clone()));
+                Tensor::from_operation(storage, shape, grad_fn)
+            } else {
+                Tensor::from_storage(storage, shape, false)
+            };
         }
 
         // Fallback for other shapes — still goes through linalg::matmul.
@@ -2128,8 +2118,7 @@ pub fn bmm<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>
     {
         // Dtype-aware GPU dispatch (#800): the f32-only path returned
         // "GPU handle does not contain a CudaBuffer<f32>" for f64 inputs.
-        // Forward must branch on `is_f64::<T>()` and use `bmm_f64` (cuBLAS
-        // dgemm strided-batched) for f64 tensors.
+        // Forward must branch by dtype and keep CUDA tensors resident.
         let handle = if is_f32::<T>() {
             // Use f16 Tensor Core path when autocast selects ReducedPrecision.
             if autocast_guard("bmm") == Some(AutocastCategory::ReducedPrecision) {
@@ -2139,6 +2128,10 @@ pub fn bmm<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>
             }
         } else if is_f64::<T>() {
             backend.bmm_f64(a.gpu_handle()?, b.gpu_handle()?, batch, m, k, n)?
+        } else if is_bf16::<T>() {
+            backend.bmm_bf16_bf16(a.gpu_handle()?, b.gpu_handle()?, batch, m, k, n)?
+        } else if is_f16::<T>() {
+            backend.bmm_f16_f16(a.gpu_handle()?, b.gpu_handle()?, batch, m, k, n)?
         } else {
             return Err(FerrotorchError::NotImplementedOnCuda { op: "bmm" });
         };

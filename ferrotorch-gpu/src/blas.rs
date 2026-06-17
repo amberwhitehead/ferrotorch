@@ -3580,6 +3580,367 @@ pub fn gpu_matmul_bf16_bf16_strided_batched(
     Err(GpuError::NoCudaFeature)
 }
 
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn gpu_matmul_u16_u16_strided_batched(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    m: usize,
+    k: usize,
+    n: usize,
+    batch_count: usize,
+    stride_a_elems: usize,
+    stride_b_elems: usize,
+    alpha: f32,
+    dtype: cudarc::cublas::sys::cudaDataType_t,
+    op: &'static str,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    use core::ffi::c_void;
+    use cudarc::cublas::{result as cublas_result, sys as cublas_sys};
+    use cudarc::driver::{DevicePtr, DevicePtrMut};
+
+    let a_extent = b_mat_extent_f32(batch_count, stride_a_elems as i64, m * k);
+    let b_extent = b_mat_extent_f32(batch_count, stride_b_elems as i64, k * n);
+    if a.len() < a_extent {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![a_extent],
+            got: vec![a.len()],
+        });
+    }
+    if b.len() < b_extent {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![b_extent],
+            got: vec![b.len()],
+        });
+    }
+    if batch_count == 0 || m == 0 || k == 0 || n == 0 {
+        return Ok(device.stream().alloc_zeros::<u16>(batch_count * m * n)?);
+    }
+
+    let m_i32 = i32::try_from(m).map_err(|_| GpuError::ShapeMismatch {
+        op,
+        expected: vec![i32::MAX as usize],
+        got: vec![m],
+    })?;
+    let k_i32 = i32::try_from(k).map_err(|_| GpuError::ShapeMismatch {
+        op,
+        expected: vec![i32::MAX as usize],
+        got: vec![k],
+    })?;
+    let n_i32 = i32::try_from(n).map_err(|_| GpuError::ShapeMismatch {
+        op,
+        expected: vec![i32::MAX as usize],
+        got: vec![n],
+    })?;
+    let batch_i32 = i32::try_from(batch_count).map_err(|_| GpuError::ShapeMismatch {
+        op,
+        expected: vec![i32::MAX as usize],
+        got: vec![batch_count],
+    })?;
+
+    let mut c = device.stream().alloc_zeros::<u16>(batch_count * m * n)?;
+    let beta: f32 = 0.0;
+    let blas = device.blas();
+    let stream = device.stream();
+
+    {
+        let (a_ptr, _ra) = a.device_ptr(&stream);
+        let (b_ptr, _rb) = b.device_ptr(&stream);
+        let (c_ptr, _rc) = c.device_ptr_mut(&stream);
+
+        // SAFETY: the validated strided extents cover every operand read; `c`
+        // is freshly allocated and sized to the cuBLAS write footprint. The
+        // row-major operand swap is the same one used by the f32/f64 batched
+        // kernels in this module.
+        unsafe {
+            cublas_result::gemm_strided_batched_ex(
+                *blas.handle(),
+                cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                n_i32,
+                m_i32,
+                k_i32,
+                (&alpha) as *const f32 as *const c_void,
+                b_ptr as *const c_void,
+                dtype,
+                n_i32,
+                stride_b_elems as i64,
+                a_ptr as *const c_void,
+                dtype,
+                k_i32,
+                stride_a_elems as i64,
+                (&beta) as *const f32 as *const c_void,
+                c_ptr as *mut c_void,
+                dtype,
+                n_i32,
+                (m * n) as i64,
+                batch_i32,
+                cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+            )?;
+        }
+    }
+
+    Ok(c)
+}
+
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+/// Batched row-major f16 GEMM with f16 output and f32 accumulation.
+///
+/// Computes `C[b] = A[b] @ B[b] * alpha` for `batch_count` matrices using
+/// `cublasGemmStridedBatchedEx` with `CUDA_R_16F` operands/output and
+/// `CUBLAS_COMPUTE_32F`. Strides are counted in f16 elements (`u16` bit
+/// patterns), not bytes.
+pub fn gpu_matmul_f16_f16_strided_batched(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    m: usize,
+    k: usize,
+    n: usize,
+    batch_count: usize,
+    stride_a_elems: usize,
+    stride_b_elems: usize,
+    alpha: f32,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    gpu_matmul_u16_u16_strided_batched(
+        a,
+        b,
+        m,
+        k,
+        n,
+        batch_count,
+        stride_a_elems,
+        stride_b_elems,
+        alpha,
+        cudarc::cublas::sys::cudaDataType_t::CUDA_R_16F,
+        "matmul_f16_f16_strided_batched",
+        device,
+    )
+}
+
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn gpu_broadcast_bmm_u16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    a_lead: &[usize],
+    b_lead: &[usize],
+    out_lead: &[usize],
+    m: usize,
+    k: usize,
+    n: usize,
+    dtype: cudarc::cublas::sys::cudaDataType_t,
+    op: &'static str,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    use core::ffi::c_void;
+    use cudarc::cublas::{result as cublas_result, sys as cublas_sys};
+    use cudarc::driver::{DevicePtr, DevicePtrMut};
+
+    validate_broadcast_shapes(op, a_lead, b_lead, out_lead, a.len(), b.len(), m, k, n)?;
+    let total: usize = crate::shape_math::numel(out_lead);
+    let out_numel = total * m * n;
+    if total == 0 || m == 0 || k == 0 || n == 0 {
+        return Ok(device.stream().alloc_zeros::<u16>(out_numel)?);
+    }
+
+    let m_i32 = i32::try_from(m).map_err(|_| GpuError::ShapeMismatch {
+        op,
+        expected: vec![i32::MAX as usize],
+        got: vec![m],
+    })?;
+    let k_i32 = i32::try_from(k).map_err(|_| GpuError::ShapeMismatch {
+        op,
+        expected: vec![i32::MAX as usize],
+        got: vec![k],
+    })?;
+    let n_i32 = i32::try_from(n).map_err(|_| GpuError::ShapeMismatch {
+        op,
+        expected: vec![i32::MAX as usize],
+        got: vec![n],
+    })?;
+
+    let runs = compute_stride_runs(a_lead, b_lead, out_lead, m, k, n);
+    let mut c = device.stream().alloc_zeros::<u16>(out_numel)?;
+    let blas = device.blas();
+    let stream = device.stream();
+    let alpha: f32 = 1.0;
+    let beta: f32 = 0.0;
+
+    for run in &runs {
+        let batch_i32 = i32::try_from(run.batch).map_err(|_| GpuError::ShapeMismatch {
+            op,
+            expected: vec![i32::MAX as usize],
+            got: vec![run.batch],
+        })?;
+        let b_extent = b_mat_extent_f32(run.batch, run.stride_b, k * n);
+        let a_extent = b_mat_extent_f32(run.batch, run.stride_a, m * k);
+        let c_extent = b_mat_extent_f32(run.batch, run.stride_c, m * n);
+
+        let a_view = a.slice(run.a_start..(run.a_start + a_extent));
+        let b_view = b.slice(run.b_start..(run.b_start + b_extent));
+        let mut c_view = c.slice_mut(run.c_start..(run.c_start + c_extent));
+
+        let (a_ptr, _ra) = a_view.device_ptr(&stream);
+        let (b_ptr, _rb) = b_view.device_ptr(&stream);
+        let (c_ptr, _rc) = c_view.device_ptr_mut(&stream);
+
+        // SAFETY: the per-run slices cover the exact strided-batched read and
+        // write windows, and the view lifetimes keep CUDA sync records alive
+        // through the cuBLAS call. Operand order/dims mirror f32 broadcast bmm.
+        unsafe {
+            cublas_result::gemm_strided_batched_ex(
+                *blas.handle(),
+                cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                cublas_sys::cublasOperation_t::CUBLAS_OP_N,
+                n_i32,
+                m_i32,
+                k_i32,
+                (&alpha) as *const f32 as *const c_void,
+                b_ptr as *const c_void,
+                dtype,
+                n_i32,
+                run.stride_b,
+                a_ptr as *const c_void,
+                dtype,
+                k_i32,
+                run.stride_a,
+                (&beta) as *const f32 as *const c_void,
+                c_ptr as *mut c_void,
+                dtype,
+                n_i32,
+                run.stride_c,
+                batch_i32,
+                cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                cublas_sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+            )?;
+        }
+    }
+
+    Ok(c)
+}
+
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+/// Broadcasted row-major bf16 batched GEMM with bf16 output.
+///
+/// Supports the same leading-dimension broadcasting as `gpu_broadcast_bmm_f32`
+/// by grouping flat output batches into strided-batched cuBLAS runs. Operands
+/// and output are resident bf16 bit-pattern buffers; dot products accumulate in
+/// f32 and round once to bf16 on store.
+pub fn gpu_broadcast_bmm_bf16_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    a_lead: &[usize],
+    b_lead: &[usize],
+    out_lead: &[usize],
+    m: usize,
+    k: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    gpu_broadcast_bmm_u16(
+        a,
+        b,
+        a_lead,
+        b_lead,
+        out_lead,
+        m,
+        k,
+        n,
+        cudarc::cublas::sys::cudaDataType_t::CUDA_R_16BF,
+        "broadcast_bmm_bf16",
+        device,
+    )
+}
+
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+/// Broadcasted row-major f16 batched GEMM with f16 output.
+///
+/// This is the f16 sibling of [`gpu_broadcast_bmm_bf16_bf16`], using
+/// `CUDA_R_16F` operands/output with f32 accumulation and the same run-grouped
+/// broadcast lowering as the f32/f64 kernels.
+pub fn gpu_broadcast_bmm_f16_f16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    b: &cudarc::driver::CudaSlice<u16>,
+    a_lead: &[usize],
+    b_lead: &[usize],
+    out_lead: &[usize],
+    m: usize,
+    k: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    gpu_broadcast_bmm_u16(
+        a,
+        b,
+        a_lead,
+        b_lead,
+        out_lead,
+        m,
+        k,
+        n,
+        cudarc::cublas::sys::cudaDataType_t::CUDA_R_16F,
+        "broadcast_bmm_f16",
+        device,
+    )
+}
+
+#[cfg(not(feature = "cuda"))]
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_matmul_f16_f16_strided_batched(
+    _a: &(),
+    _b: &(),
+    _m: usize,
+    _k: usize,
+    _n: usize,
+    _batch_count: usize,
+    _stride_a_elems: usize,
+    _stride_b_elems: usize,
+    _alpha: f32,
+    _device: &GpuDevice,
+) -> GpuResult<()> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_broadcast_bmm_bf16_bf16(
+    _a: &(),
+    _b: &(),
+    _a_lead: &[usize],
+    _b_lead: &[usize],
+    _out_lead: &[usize],
+    _m: usize,
+    _k: usize,
+    _n: usize,
+    _device: &GpuDevice,
+) -> GpuResult<()> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_broadcast_bmm_f16_f16(
+    _a: &(),
+    _b: &(),
+    _a_lead: &[usize],
+    _b_lead: &[usize],
+    _out_lead: &[usize],
+    _m: usize,
+    _k: usize,
+    _n: usize,
+    _device: &GpuDevice,
+) -> GpuResult<()> {
+    Err(GpuError::NoCudaFeature)
+}
+
 // ---------------------------------------------------------------------------
 // CPU fallback implementations
 // ---------------------------------------------------------------------------

@@ -240,8 +240,9 @@ pub use blas::gpu_bmm_f32;
 pub use blas::{gpu_bmm_f32_into, gpu_matmul_f32_into};
 #[cfg(feature = "cuda")]
 pub use blas::{
-    gpu_matmul_bf16_bf16, gpu_matmul_bf16_bf16_nt, gpu_matmul_bf16_bf16_strided_batched,
-    gpu_matmul_bf16_bf16_strided_batched_nt,
+    gpu_broadcast_bmm_bf16_bf16, gpu_broadcast_bmm_f16_f16, gpu_matmul_bf16_bf16,
+    gpu_matmul_bf16_bf16_nt, gpu_matmul_bf16_bf16_strided_batched,
+    gpu_matmul_bf16_bf16_strided_batched_nt, gpu_matmul_f16_f16_strided_batched,
 };
 pub use blas::{gpu_matmul_f32, gpu_matmul_f32_nt, gpu_matmul_f64, gpu_matmul_f64_nt};
 pub use bool_kernels::gpu_broadcast_bool;
