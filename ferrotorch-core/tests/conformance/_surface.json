@@ -293,7 +293,7 @@
     { "path": "ferrotorch_core::cpu_pool::pool_alloc_cpu", "kind": "fn", "signature": "fn pool_alloc_cpu < T : Default + Clone + 'static > (len : usize) -> Vec < T >" },
     { "path": "ferrotorch_core::cpu_pool::pool_alloc_cpu_uninit_f32", "kind": "fn", "signature": "fn pool_alloc_cpu_uninit_f32 (len : usize) -> Vec < f32 >" },
     { "path": "ferrotorch_core::cpu_pool::pool_alloc_cpu_uninit_f64", "kind": "fn", "signature": "fn pool_alloc_cpu_uninit_f64 (len : usize) -> Vec < f64 >" },
-    { "path": "ferrotorch_core::cpu_pool::pool_return_cpu", "kind": "fn", "signature": "fn pool_return_cpu < T : 'static > (mut v : Vec < T >)" },
+    { "path": "ferrotorch_core::cpu_pool::pool_return_cpu", "kind": "fn", "signature": "fn pool_return_cpu < T : 'static > (v : Vec < T >)" },
     { "path": "ferrotorch_core::cpu_pool::reset_cpu_pool_stats", "kind": "fn", "signature": "fn reset_cpu_pool_stats ()" },
     { "path": "ferrotorch_core::creation::arange", "kind": "fn", "signature": "fn arange < T : Float > (start : T , end : T , step : T) -> FerrotorchResult < Tensor < T > >" },
     { "path": "ferrotorch_core::creation::eye", "kind": "fn", "signature": "fn eye < T : Float > (n : usize) -> FerrotorchResult < Tensor < T > >" },

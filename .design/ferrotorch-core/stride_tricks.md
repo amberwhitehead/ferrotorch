@@ -137,7 +137,7 @@ overlap multiplicity division, gather through the input geometry);
 Non-test production consumers:
 
 - `crate::einsum` references `as_strided_copy` at
-  `einsum.rs:324, 357, 385, 425, 473` for diagonal extraction and
+  `ferrotorch-core/src/einsum.rs:832-833` for diagonal extraction and
   Einstein-summation kernel reuse (this is real production code,
   not a test).
 - `Tensor::masked_fill` / `Tensor::masked_select` (via
@@ -176,8 +176,8 @@ Expected: ~17 tests pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `Tensor::as_strided` at `ferrotorch-core/src/stride_tricks.rs:452` mirrors `aten/src/ATen/native/TensorShape.cpp::Tensor::as_strided`; non-test consumer: `crate::einsum` calls `as_strided` directly for Einstein-summation diagonal extraction (`ferrotorch-core/src/einsum.rs:511`). |
-| REQ-2 | SHIPPED | impl: `Tensor::as_strided_copy` at `ferrotorch-core/src/stride_tricks.rs:493` mirrors `aten/src/ATen/native/AsStridedCopy.cpp::as_strided_copy`; non-test consumer: `crate::einsum` calls `as_strided_copy` for materialising diagonals on CUDA (`ferrotorch-core/src/einsum.rs:324, 357`). |
+| REQ-1 | SHIPPED | impl: `Tensor::as_strided` at `as_strided in ferrotorch-core/src/stride_tricks.rs` mirrors `aten/src/ATen/native/TensorShape.cpp::Tensor::as_strided`; non-test consumer: `crate::einsum` calls `as_strided` directly for Einstein-summation diagonal extraction (`ferrotorch-core/src/einsum.rs:832`). |
+| REQ-2 | SHIPPED | impl: `Tensor::as_strided_copy` at `as_strided_copy in ferrotorch-core/src/stride_tricks.rs` mirrors `aten/src/ATen/native/AsStridedCopy.cpp::as_strided_copy`; non-test consumer: `crate::einsum` calls `as_strided_copy` for materialising diagonals (`ferrotorch-core/src/einsum.rs:833`). |
 | REQ-3 | SHIPPED | impl: `Tensor::as_strided_scatter` at `ferrotorch-core/src/stride_tricks.rs:545` mirrors `aten/src/ATen/native/TensorAdvancedIndexing.cpp::as_strided_scatter`; non-test consumer: `AsStridedScatterBackward::backward` calls `grad.as_strided_scatter(&zeros_src, ...)` to mask the base gradient in production autograd (#1754). |
 | REQ-4 | SHIPPED | impl: `validate_bounds` at `ferrotorch-core/src/stride_tricks.rs:217` with `stride_extent` helper at `:141`; non-test consumer: invoked from `Tensor::as_strided` at `:461` and `Tensor::as_strided_scatter` at `:1033` — every public call validates before constructing the view. |
 | REQ-5 | SHIPPED | impl: `AsStridedBackward in ferrotorch-core/src/stride_tricks.rs` with `impl GradFn::backward` at `backward in ferrotorch-core/src/stride_tricks.rs`; non-test consumer: `Tensor::as_strided` attaches it when `requires_grad` is set (`requires_grad in ferrotorch-core/src/stride_tricks.rs`) — production autograd graph routes through this when stride ops appear in a differentiable function. |

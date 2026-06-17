@@ -62,13 +62,13 @@ plus `mem::transmute` over `Arc<dyn Fn>` (each transmute carrying a
 
 ## Acceptance Criteria
 
-- [x] AC-1: No-hooks pack/unpack are identity — `test_pack_unpack_identity`
-  at `saved_tensors.rs:383-394`.
+- [x] AC-1: No-hooks pack/unpack are identity —
+  `test_pack_unpack_identity in saved_tensors.rs`.
 - [x] AC-2: A pack hook that doubles, paired with an unpack hook
   that halves, round-trips correctly —
-  `test_saved_tensors_hooks_transform` at `saved_tensors.rs:396-427`.
+  `test_saved_tensors_hooks_transform in saved_tensors.rs`.
 - [x] AC-3: Hooks are cleared after scope exit —
-  `test_hooks_cleared_after_scope` at `saved_tensors.rs:429-437`.
+  `test_hooks_cleared_after_scope in saved_tensors.rs`.
 
 ## Architecture
 
@@ -83,28 +83,30 @@ function pointers).
 
 ### REQ-3 `saved_tensors_hooks` — scope guard with type dispatch
 
-`pub fn saved_tensors_hooks<T, F, R>` at `saved_tensors.rs:84-129`.
-Two parallel thread-locals at `:55-64`:
+`pub fn saved_tensors_hooks<T, F, R>` at `saved_tensors_hooks in saved_tensors.rs`.
+Supported dtype-specific thread-locals:
 
 - `HOOKS_F32: RefCell<Option<(PackHook<f32>, UnpackHook<f32>)>>`
 - `HOOKS_F64: RefCell<Option<(PackHook<f64>, UnpackHook<f64>)>>`
+- `HOOKS_BF16: RefCell<Option<(PackHook<half::bf16>, UnpackHook<half::bf16>)>>`
+- `HOOKS_F16: RefCell<Option<(PackHook<half::f16>, UnpackHook<half::f16>)>>`
 
-The dispatch at `:71-104` switches on `TypeId::of::<T>()`:
+The dispatch in `saved_tensors_hooks in saved_tensors.rs` switches on
+`TypeId::of::<T>()`:
 
 1. `T == f32` branch (`PackHook in saved_tensors.rs`): cast `PackHook<T>` →
-   `PackHook<f32>` via `mem::transmute`. SAFETY comment at `:72-77`
-   documents the type-equality precondition that justifies the
-   transmute. Save prior `HOOKS_F32`, install new, run `f()`,
-   restore. Same shape for unpack.
+   `PackHook<f32>` via `mem::transmute`. SAFETY comments document the
+   type-equality precondition that justifies the transmute. Save prior
+   `HOOKS_F32`, install new, run `f()`, restore. Same shape for unpack.
 2. `T == f64` branch (`saved_tensors.rs`): symmetric.
-3. Other types (`f in saved_tensors.rs`): run `f()` without installing hooks —
-   ferrotorch only supports f32 / f64 dtype today, so other `T`s
-   are unreachable in practice.
+3. `T == half::bf16` and `T == half::f16` branches: symmetric.
+4. Other `Float` implementors (`f in saved_tensors.rs`): run `f()` without
+   installing hooks.
 
-The two `SAFETY:` comment blocks at `:72-77` (pack) and `:79-80`
-(unpack), plus the f64 variants, each document the same invariant:
-`TypeId::of::<T>() == TypeId::of::<f32>()` (or f64) at the comparison
-point proves `T == f32` (or f64) as a concrete type, so
+The `SAFETY:` comment blocks in `saved_tensors_hooks in saved_tensors.rs`
+document the same invariant for every supported dtype:
+`TypeId::of::<T>() == TypeId::of::<f32>()` (or f64/bf16/f16) at the comparison
+point proves `T` is that concrete type, so
 `PackHook<T>` and `PackHook<f32>` are layout-identical
 (`Arc<dyn Fn(Tensor<T>) -> ...>` vs `Arc<dyn Fn(Tensor<f32>) -> ...>`
 with `T == f32`), making the transmute a no-op vtable+data pointer
@@ -113,20 +115,21 @@ double-free risk.
 
 ### REQ-4 / REQ-5 `pack_saved_tensor` / `unpack_saved_tensor`
 
-`pub fn pack_saved_tensor<T: Float>` at `saved_tensors.rs:231-297` is
+`pub fn pack_saved_tensor<T: Float>` at `pack_saved_tensor in saved_tensors.rs` is
 the same type-dispatch pattern: check `TypeId::of::<T>()`, transmute
-`tensor: Tensor<T>` → `Tensor<f32>` (or f64), call the registered
-hook, transmute the result back. SAFETY comments at `:243-247,
-:259-263, :273-277, :287-291` justify each transmute.
+`tensor: Tensor<T>` to the concrete dtype branch (`f32`, `f64`, `bf16`,
+or `f16`), call the registered hook, then transmute the result back.
+Each branch has a local `SAFETY:` comment tying the transmute to its
+`TypeId` guard.
 
-`pub fn unpack_saved_tensor<T: Float>` at `saved_tensors.rs:303-369` is symmetric.
+`pub fn unpack_saved_tensor<T: Float>` at `unpack_saved_tensor in saved_tensors.rs`
+is symmetric.
 
 ### REQ-6 `has_saved_tensor_hooks`
 
 `pub fn has_saved_tensor_hooks() -> bool` at `has_saved_tensor_hooks in saved_tensors.rs`:
-`HOOKS_F32.with(|h| h.borrow().is_some()) || HOOKS_F64.with(|h|
-h.borrow().is_some())`. Used by `GradFn` constructors and tests to
-short-circuit the pack/unpack call when no hooks are registered.
+checks all four dtype thread-locals. Used by `GradFn` constructors and tests
+to short-circuit the pack/unpack call when no hooks are registered.
 
 ## Parity contract
 
@@ -137,28 +140,30 @@ Behavioral parity:
 - Nestable; inner scope's hooks override outer's for the duration of
   the inner scope, then outer's hooks restore.
 - No-hooks identity passthrough.
-- Type dispatch on `f32` / `f64` only — other dtypes (e.g. `bf16`,
-  `i64`) bypass the hook path. Upstream PyTorch supports more dtypes
-  but ferrotorch's `Float` trait is restricted to f32/f64; this
-  matches the current crate-wide dtype coverage.
+- Type dispatch on `f32`, `f64`, `bf16`, and `f16`; unsupported
+  `Float` implementors bypass the hook path. Upstream PyTorch is
+  runtime-typed; ferrotorch keeps the same user-visible hook shape through
+  explicit dtype branches.
 
 The `mem::transmute` machinery is an R-DEV-4 deviation —
 Python/C++ use dynamic dispatch through `PyObject*` and
 `at::Tensor` (which are runtime-typed), while Rust requires
 compile-time type parameters. The transmute is the bridge between
-the per-`T` generic API and the per-`f32` / per-`f64` thread-local
+the per-`T` generic API and the concrete dtype thread-local
 storage; the `TypeId` check is the runtime guard that makes the
 transmute sound.
 
 ## Verification
 
-Tests in `saved_tensors.rs:197-263` (3 tests):
+Tests in `saved_tensors.rs`:
 
 - `test_pack_unpack_identity` (`test_pack_unpack_identity in saved_tensors.rs`)
 - `test_saved_tensors_hooks_transform` (`test_saved_tensors_hooks_transform in saved_tensors.rs`)
 - `test_hooks_cleared_after_scope` (`test_hooks_cleared_after_scope in saved_tensors.rs`)
+- `test_hooks_cleared_after_panic_f32` (`test_hooks_cleared_after_panic_f32 in saved_tensors.rs`)
+- `test_hooks_cleared_after_panic_f64` (`test_hooks_cleared_after_panic_f64 in saved_tensors.rs`)
 
-All 3 pass in the workspace gauntlet.
+All pass in the workspace gauntlet.
 
 ## REQ status table
 
@@ -171,4 +176,4 @@ All 3 pass in the workspace gauntlet.
 | REQ-5 | SHIPPED | impl: `pub fn unpack_saved_tensor<T: Float>` at `saved_tensors.rs:303-369`; non-test production consumer: every `GradFn::backward` implementation that reads a saved tensor will call this. Existing pub API — boundary-API grandfathering. |
 | REQ-6 | SHIPPED | impl: `pub fn has_saved_tensor_hooks() -> bool` at `has_saved_tensor_hooks in saved_tensors.rs`; non-test production consumer: `pack_saved_tensor` / `unpack_saved_tensor` short-circuit when no hooks are active (the early-return inside the closures at `, , , `). Existing pub API — boundary-API grandfathering. |
 | REQ-7 | SHIPPED | impl: the no-hooks branches at `saved_tensors.rs:247 Ok(tensor)`, `:263 Ok(tensor)`, `:317 Ok(tensor)`, `:333 Ok(tensor)` return the input unchanged when no hook is registered; non-test production consumer: every GradFn save/load cycle in the absence of hooks (the common case) routes through this identity passthrough. |
-| REQ-8 | SHIPPED | impl: the scope-guard's restore-on-exit at `saved_tensors.rs:109, :123` (`HOOKS_F32.with(|h| *h.borrow_mut() = prev;)`); the test `test_hooks_cleared_after_scope` at `:429-437` verifies the behavior; non-test production consumer: every nested `saved_tensors_hooks(...)` call relies on the restore-prior-on-exit guarantee. |
+| REQ-8 | SHIPPED | impl: the scope-guard's restore-on-exit at `restore_hooks_f32 in saved_tensors.rs` and sibling dtype restore helpers; the test `test_hooks_cleared_after_scope in saved_tensors.rs` verifies the behavior; non-test production consumer: every nested `saved_tensors_hooks(...)` call relies on the restore-prior-on-exit guarantee. |

@@ -110,6 +110,34 @@ fn parallel_failure_graph() -> Tensor<f32> {
     .unwrap()
 }
 
+fn run_exact_child_before_timeout(test_name: &str, env_key: &str, failure_message: &str) {
+    let exe = env::current_exe().expect("current test binary");
+    let mut child = Command::new(exe)
+        .arg("--exact")
+        .arg(test_name)
+        .arg("--nocapture")
+        .env(env_key, "1")
+        .spawn()
+        .expect("spawn child test");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.try_wait().expect("poll child") {
+            assert!(
+                status.success(),
+                "child test {test_name} exited with {status}"
+            );
+            return;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{failure_message}");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn backward_parallel_implicit_seed_preserves_singleton_root_shape() {
     let x = leaf(&[2.0], &[1]);
@@ -151,28 +179,11 @@ fn backward_parallel_implicit_seed_preserves_2d_singleton_root_shape() {
 
 #[test]
 fn backward_parallel_error_path_returns_before_timeout() {
-    let exe = env::current_exe().expect("current test binary");
-    let mut child = Command::new(exe)
-        .arg("--exact")
-        .arg("backward_parallel_error_path_child")
-        .arg("--nocapture")
-        .env("FERROTORCH_CORE021_CHILD", "1")
-        .spawn()
-        .expect("spawn CORE-021 child test");
-
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(status) = child.try_wait().expect("poll child") {
-            assert!(status.success(), "CORE-021 child exited with {status}");
-            return;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("backward_parallel did not return after a worker failure");
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
+    run_exact_child_before_timeout(
+        "backward_parallel_error_path_child",
+        "FERROTORCH_CORE021_CHILD",
+        "backward_parallel did not return after a worker failure",
+    );
 }
 
 #[test]
@@ -527,6 +538,19 @@ fn post_accumulate_hook_rejects_non_leaf_tensor() {
 
 #[test]
 fn post_accumulate_hook_can_remove_itself_during_callback() {
+    run_exact_child_before_timeout(
+        "post_accumulate_hook_can_remove_itself_during_callback_child",
+        "FERROTORCH_CORE025_POST_REMOVE_SELF_CHILD",
+        "post-accumulate hook self-removal deadlocked the backward pass",
+    );
+}
+
+#[test]
+fn post_accumulate_hook_can_remove_itself_during_callback_child() {
+    if env::var_os("FERROTORCH_CORE025_POST_REMOVE_SELF_CHILD").is_none() {
+        return;
+    }
+
     let x = leaf(&[3.0], &[1]);
     let w = constant(&[2.0], &[1]);
     let calls = Arc::new(AtomicUsize::new(0));
@@ -557,4 +581,249 @@ fn post_accumulate_hook_can_remove_itself_during_callback() {
         .expect("backward 2");
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn gradient_hook_can_mutate_hook_list_during_callback() {
+    run_exact_child_before_timeout(
+        "gradient_hook_can_mutate_hook_list_during_callback_child",
+        "FERROTORCH_CORE025_GRAD_MUTATE_CHILD",
+        "gradient hook list mutation deadlocked the backward pass",
+    );
+}
+
+#[test]
+fn gradient_hook_can_mutate_hook_list_during_callback_child() {
+    if env::var_os("FERROTORCH_CORE025_GRAD_MUTATE_CHILD").is_none() {
+        return;
+    }
+
+    let x = leaf(&[3.0], &[1]);
+    let w = constant(&[2.0], &[1]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_in_hook = Arc::clone(&calls);
+    let x_in_hook = x.clone();
+
+    x.register_hook(move |_g| {
+        calls_in_hook.fetch_add(1, Ordering::SeqCst);
+        let handle = x_in_hook
+            .register_hook(|_g| None)
+            .expect("reentrant register_hook");
+        assert!(
+            x_in_hook
+                .remove_hook(handle)
+                .expect("reentrant remove_hook")
+        );
+        None
+    })
+    .expect("register_hook");
+
+    sum(&mul(&x, &w).expect("mul"))
+        .expect("sum")
+        .backward()
+        .expect("backward");
+
+    let grad = x.grad().expect("grad lookup").expect("x grad");
+    assert_eq!(grad.data().expect("grad data"), &[2.0]);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn post_accumulate_hook_can_mutate_hook_list_during_callback() {
+    run_exact_child_before_timeout(
+        "post_accumulate_hook_can_mutate_hook_list_during_callback_child",
+        "FERROTORCH_CORE025_POST_MUTATE_CHILD",
+        "post-accumulate hook list mutation deadlocked the backward pass",
+    );
+}
+
+#[test]
+fn post_accumulate_hook_can_mutate_hook_list_during_callback_child() {
+    if env::var_os("FERROTORCH_CORE025_POST_MUTATE_CHILD").is_none() {
+        return;
+    }
+
+    let x = leaf(&[3.0], &[1]);
+    let w = constant(&[2.0], &[1]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_in_hook = Arc::clone(&calls);
+
+    x.register_post_accumulate_grad_hook(move |t| {
+        calls_in_hook.fetch_add(1, Ordering::SeqCst);
+        let handle = t
+            .register_post_accumulate_grad_hook(|_t| {})
+            .expect("reentrant register_post_accumulate_grad_hook");
+        assert!(t.remove_hook(handle).expect("reentrant remove_hook"));
+    })
+    .expect("register_post_accumulate_grad_hook");
+
+    sum(&mul(&x, &w).expect("mul"))
+        .expect("sum")
+        .backward()
+        .expect("backward");
+
+    let grad = x.grad().expect("grad lookup").expect("x grad");
+    assert_eq!(grad.data().expect("grad data"), &[2.0]);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn hook_list_mutations_affect_next_backward_only() {
+    run_exact_child_before_timeout(
+        "hook_list_mutations_affect_next_backward_only_child",
+        "FERROTORCH_CORE025_SNAPSHOT_CHILD",
+        "hook-list snapshot mutation semantics deadlocked the backward pass",
+    );
+}
+
+#[test]
+fn hook_list_mutations_affect_next_backward_only_child() {
+    if env::var_os("FERROTORCH_CORE025_SNAPSHOT_CHILD").is_none() {
+        return;
+    }
+
+    let x = leaf(&[3.0], &[1]);
+    let w = constant(&[2.0], &[1]);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let second_handle: Arc<Mutex<Option<HookHandle>>> = Arc::new(Mutex::new(None));
+    let x_for_first_hook = x.clone();
+    let calls_for_first_hook = Arc::clone(&calls);
+    let second_handle_for_first_hook = Arc::clone(&second_handle);
+
+    x.register_hook(move |_g| {
+        calls_for_first_hook.lock().expect("calls lock").push("g1");
+        if let Some(handle) = second_handle_for_first_hook
+            .lock()
+            .expect("handle lock")
+            .take()
+        {
+            assert!(x_for_first_hook.remove_hook(handle).expect("remove g2"));
+        }
+        None
+    })
+    .expect("register g1");
+    let calls_for_second_hook = Arc::clone(&calls);
+    let handle = x
+        .register_hook(move |_g| {
+            calls_for_second_hook.lock().expect("calls lock").push("g2");
+            None
+        })
+        .expect("register g2");
+    *second_handle.lock().expect("handle lock") = Some(handle);
+
+    sum(&mul(&x, &w).expect("mul 1"))
+        .expect("sum 1")
+        .backward()
+        .expect("backward 1");
+    x.zero_grad().expect("zero grad 1");
+    sum(&mul(&x, &w).expect("mul 2"))
+        .expect("sum 2")
+        .backward()
+        .expect("backward 2");
+    assert_eq!(&*calls.lock().expect("calls lock"), &["g1", "g2", "g1"]);
+
+    let y = leaf(&[4.0], &[1]);
+    let w = constant(&[5.0], &[1]);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let registered = Arc::new(Mutex::new(false));
+    let y_for_first_hook = y.clone();
+    let calls_for_first_hook = Arc::clone(&calls);
+    let registered_for_first_hook = Arc::clone(&registered);
+
+    y.register_hook(move |_g| {
+        calls_for_first_hook.lock().expect("calls lock").push("ga");
+        let mut registered = registered_for_first_hook.lock().expect("registered lock");
+        if !*registered {
+            let calls_for_new_hook = Arc::clone(&calls_for_first_hook);
+            y_for_first_hook
+                .register_hook(move |_g| {
+                    calls_for_new_hook.lock().expect("calls lock").push("gb");
+                    None
+                })
+                .expect("register gb");
+            *registered = true;
+        }
+        None
+    })
+    .expect("register ga");
+
+    sum(&mul(&y, &w).expect("mul 3"))
+        .expect("sum 3")
+        .backward()
+        .expect("backward 3");
+    y.zero_grad().expect("zero grad 2");
+    sum(&mul(&y, &w).expect("mul 4"))
+        .expect("sum 4")
+        .backward()
+        .expect("backward 4");
+    assert_eq!(&*calls.lock().expect("calls lock"), &["ga", "ga", "gb"]);
+
+    let z = leaf(&[3.0], &[1]);
+    let w = constant(&[2.0], &[1]);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let second_handle: Arc<Mutex<Option<HookHandle>>> = Arc::new(Mutex::new(None));
+    let calls_for_first_hook = Arc::clone(&calls);
+    let second_handle_for_first_hook = Arc::clone(&second_handle);
+
+    z.register_post_accumulate_grad_hook(move |t| {
+        calls_for_first_hook.lock().expect("calls lock").push("p1");
+        if let Some(handle) = second_handle_for_first_hook
+            .lock()
+            .expect("handle lock")
+            .take()
+        {
+            assert!(t.remove_hook(handle).expect("remove p2"));
+        }
+    })
+    .expect("register p1");
+    let calls_for_second_hook = Arc::clone(&calls);
+    let handle = z
+        .register_post_accumulate_grad_hook(move |_t| {
+            calls_for_second_hook.lock().expect("calls lock").push("p2");
+        })
+        .expect("register p2");
+    *second_handle.lock().expect("handle lock") = Some(handle);
+
+    sum(&mul(&z, &w).expect("mul 5"))
+        .expect("sum 5")
+        .backward()
+        .expect("backward 5");
+    z.zero_grad().expect("zero grad 3");
+    sum(&mul(&z, &w).expect("mul 6"))
+        .expect("sum 6")
+        .backward()
+        .expect("backward 6");
+    assert_eq!(&*calls.lock().expect("calls lock"), &["p1", "p2", "p1"]);
+
+    let q = leaf(&[4.0], &[1]);
+    let w = constant(&[5.0], &[1]);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let registered = Arc::new(Mutex::new(false));
+    let calls_for_first_hook = Arc::clone(&calls);
+    let registered_for_first_hook = Arc::clone(&registered);
+
+    q.register_post_accumulate_grad_hook(move |t| {
+        calls_for_first_hook.lock().expect("calls lock").push("pa");
+        let mut registered = registered_for_first_hook.lock().expect("registered lock");
+        if !*registered {
+            let calls_for_new_hook = Arc::clone(&calls_for_first_hook);
+            t.register_post_accumulate_grad_hook(move |_t| {
+                calls_for_new_hook.lock().expect("calls lock").push("pb");
+            })
+            .expect("register pb");
+            *registered = true;
+        }
+    })
+    .expect("register pa");
+
+    sum(&mul(&q, &w).expect("mul 7"))
+        .expect("sum 7")
+        .backward()
+        .expect("backward 7");
+    q.zero_grad().expect("zero grad 4");
+    sum(&mul(&q, &w).expect("mul 8"))
+        .expect("sum 8")
+        .backward()
+        .expect("backward 8");
+    assert_eq!(&*calls.lock().expect("calls lock"), &["pa", "pa", "pb"]);
 }
