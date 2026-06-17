@@ -69,6 +69,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- masked_fill backward on CUDA fails with GpuTensorNotAccessible (forward works) (#1905)
 - CUDA fft gaps pinned by gpu conformance fixtures: rfft/irfft n-resize + odd-length, fft/ifft differentiable backward (#1904)
 - CORE-187: `det`/`slogdet` forward fails on singular matrices only when gradients are enabled (#1881)
 - CORE-179: Most arithmetic backward nodes and the broadcast gradient reducer are non-differentiable, silently breaking `create_graph` (#1873)
