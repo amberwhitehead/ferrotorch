@@ -59,6 +59,8 @@ use crate::tensor::{GradFn, Tensor};
 /// Returns `Ok(())` if the tensor is eligible, or an error describing why
 /// the operation was rejected.
 fn check_inplace_allowed<T: Float>(tensor: &Tensor<T>, op_name: &str) -> FerrotorchResult<()> {
+    tensor.check_view_creation_meta_write(op_name)?;
+
     if tensor.grad_fn().is_some() {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
@@ -69,7 +71,7 @@ fn check_inplace_allowed<T: Float>(tensor: &Tensor<T>, op_name: &str) -> Ferroto
         });
     }
 
-    if tensor.requires_grad() && tensor.is_leaf() {
+    if is_grad_enabled() && tensor.requires_grad() && tensor.is_leaf() {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
                 "in-place operation '{op_name}' not allowed on a leaf tensor \
@@ -86,7 +88,9 @@ fn check_binary_inplace_allowed<T: Float>(
     tensor: &Tensor<T>,
     op_name: &str,
 ) -> FerrotorchResult<()> {
-    if tensor.requires_grad() && tensor.is_leaf() {
+    tensor.check_view_creation_meta_write(op_name)?;
+
+    if is_grad_enabled() && tensor.requires_grad() && tensor.is_leaf() {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
                 "in-place operation '{op_name}' not allowed on a leaf tensor \

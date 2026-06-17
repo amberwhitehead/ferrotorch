@@ -66,7 +66,7 @@ fn implicit_seed_like<T: Float>(root: &Tensor<T>) -> FerrotorchResult<Tensor<T>>
 
 fn validate_backward_root<T: Float>(root: &Tensor<T>) -> FerrotorchResult<()> {
     let has_grad_fn = root.grad_fn().is_some();
-    if !root.requires_grad() && !has_grad_fn {
+    if !root.accepts_grad() && !has_grad_fn {
         return Err(FerrotorchError::InvalidArgument {
             message: "element 0 of tensors does not require grad and does not have a grad_fn"
                 .into(),
@@ -255,7 +255,7 @@ pub fn backward_with_grad<T: Float>(
 ) -> FerrotorchResult<()> {
     let seed = backward_seed(root, gradient)?;
 
-    if root.is_leaf() && root.requires_grad() {
+    if root.is_leaf() && root.accepts_grad() {
         return accumulate_leaf_grad(root, seed);
     }
     let seed = run_tensor_grad_hooks(root, seed)?;
@@ -373,7 +373,7 @@ pub fn backward_with_grad<T: Float>(
                         output_index,
                         forward_backtrace.as_ref(),
                     )?;
-                    if input.requires_grad() {
+                    if input.accepts_grad() {
                         if input.is_leaf() {
                             // Leaf tensor: accumulate gradient on the tensor itself.
                             accumulate_leaf_grad(input, grad)?;
@@ -412,7 +412,7 @@ pub fn backward_parallel<T: Float>(
 
     let seed = backward_seed(root, gradient)?;
 
-    if root.is_leaf() && root.requires_grad() {
+    if root.is_leaf() && root.accepts_grad() {
         return accumulate_leaf_grad(root, seed);
     }
 
@@ -575,7 +575,7 @@ pub fn backward_parallel<T: Float>(
                                                 output_index,
                                                 forward_backtrace.as_ref(),
                                             )?;
-                                            if input.requires_grad() {
+                                            if input.accepts_grad() {
                                                 if input.is_leaf() {
                                                     accumulate_leaf_grad(input, grad)?;
                                                 } else {

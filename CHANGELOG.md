@@ -48,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- CORE: no_grad/inference views of normal grad tensors drop requires_grad flag (#2002)
 - CORE-024: Saved-tensor hooks remain installed after panic unwind (#1718)
 - CORE-022: Parallel and sequential backward use different implicit-gradient shapes (#1716)
 - CORE-016: CPU buffer pool's memory limit ignores allocation capacity (#1710)

@@ -24,7 +24,7 @@
 //! | REQ-20 | SHIPPED | impl `enum MemoryFormat`; non-test consumer `Tensor::to_memory_format`, `ferrotorch-nn::Conv2d`. |
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use once_cell::sync::OnceCell;
@@ -170,10 +170,51 @@ struct TensorInner<T: Float> {
     grad_fn: Mutex<Option<Arc<dyn GradFn<T>>>>,
     forward_backtrace: Mutex<Option<ForwardBacktrace>>,
     requires_grad: AtomicBool,
+    accepts_grad: AtomicBool,
+    inherited_requires_grad: AtomicBool,
     is_leaf: AtomicBool,
     is_inference: AtomicBool,
+    view_creation_meta: AtomicU8,
     /// Hook storage for gradient hooks and post-accumulate-grad hooks.
     hooks: Mutex<crate::autograd::hooks::HookStorage<T>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewCreationMeta {
+    Default = 0,
+    NoGradMode = 1,
+    InferenceMode = 2,
+}
+
+impl ViewCreationMeta {
+    #[inline]
+    fn current() -> Self {
+        if crate::autograd::no_grad::is_inference_mode() {
+            Self::InferenceMode
+        } else if !crate::autograd::no_grad::is_grad_enabled() {
+            Self::NoGradMode
+        } else {
+            Self::Default
+        }
+    }
+
+    #[inline]
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::NoGradMode,
+            2 => Self::InferenceMode,
+            _ => Self::Default,
+        }
+    }
+
+    #[inline]
+    fn propagate(prev: Self, new: Self) -> Self {
+        if new == Self::Default || prev == Self::InferenceMode {
+            prev
+        } else {
+            new
+        }
+    }
 }
 
 struct SavedTensorHookState<T: Float> {
@@ -243,8 +284,11 @@ impl<T: Float> Tensor<T> {
                 grad_fn: Mutex::new(None),
                 forward_backtrace: Mutex::new(None),
                 requires_grad: AtomicBool::new(requires_grad),
+                accepts_grad: AtomicBool::new(requires_grad),
+                inherited_requires_grad: AtomicBool::new(false),
                 is_leaf: AtomicBool::new(true),
                 is_inference: AtomicBool::new(crate::autograd::no_grad::is_inference_mode()),
+                view_creation_meta: AtomicU8::new(ViewCreationMeta::Default as u8),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -284,6 +328,8 @@ impl<T: Float> Tensor<T> {
             });
         }
         let strides = checked_c_contiguous_strides(&new_shape, "view_reshape")?;
+        let inherited_requires_grad = !self.is_inference() && self.requires_grad();
+        let view_creation_meta = self.alias_view_creation_meta();
         Ok(Self {
             inner: Arc::new(TensorInner {
                 id: TensorId::next(),
@@ -294,9 +340,12 @@ impl<T: Float> Tensor<T> {
                 grad: Mutex::new(None),
                 grad_fn: Mutex::new(None),
                 forward_backtrace: Mutex::new(None),
-                requires_grad: AtomicBool::new(false),
+                requires_grad: AtomicBool::new(inherited_requires_grad),
+                accepts_grad: AtomicBool::new(false),
+                inherited_requires_grad: AtomicBool::new(inherited_requires_grad),
                 is_leaf: AtomicBool::new(true),
                 is_inference: AtomicBool::new(self.is_inference()),
+                view_creation_meta: AtomicU8::new(view_creation_meta as u8),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -356,8 +405,14 @@ impl<T: Float> Tensor<T> {
                 grad_fn: Mutex::new(Some(grad_fn)),
                 forward_backtrace: Mutex::new(ForwardBacktrace::capture_if_enabled()),
                 requires_grad: AtomicBool::new(true),
+                accepts_grad: AtomicBool::new(true),
+                inherited_requires_grad: AtomicBool::new(self.requires_grad()),
                 is_leaf: AtomicBool::new(false),
                 is_inference: AtomicBool::new(false),
+                view_creation_meta: AtomicU8::new(ViewCreationMeta::propagate(
+                    self.view_creation_meta(),
+                    ViewCreationMeta::current(),
+                ) as u8),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -412,6 +467,10 @@ impl<T: Float> Tensor<T> {
         let grad_fn = if self.is_inference() { None } else { grad_fn };
         let requires_grad = grad_fn.is_some();
         let is_leaf = grad_fn.is_none();
+        let inherited_requires_grad = !self.is_inference() && self.requires_grad();
+        let public_requires_grad = requires_grad || inherited_requires_grad;
+        let accepts_grad = requires_grad;
+        let view_creation_meta = self.alias_view_creation_meta();
         let forward_backtrace = if requires_grad {
             ForwardBacktrace::capture_if_enabled()
         } else {
@@ -427,9 +486,12 @@ impl<T: Float> Tensor<T> {
                 grad: Mutex::new(None),
                 grad_fn: Mutex::new(grad_fn),
                 forward_backtrace: Mutex::new(forward_backtrace),
-                requires_grad: AtomicBool::new(requires_grad),
+                requires_grad: AtomicBool::new(public_requires_grad),
+                accepts_grad: AtomicBool::new(accepts_grad),
+                inherited_requires_grad: AtomicBool::new(inherited_requires_grad),
                 is_leaf: AtomicBool::new(is_leaf),
                 is_inference: AtomicBool::new(self.is_inference()),
+                view_creation_meta: AtomicU8::new(view_creation_meta as u8),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -514,8 +576,11 @@ impl<T: Float> Tensor<T> {
                 grad_fn: Mutex::new(Some(grad_fn)),
                 forward_backtrace: Mutex::new(ForwardBacktrace::capture_if_enabled()),
                 requires_grad: AtomicBool::new(true),
+                accepts_grad: AtomicBool::new(true),
+                inherited_requires_grad: AtomicBool::new(false),
                 is_leaf: AtomicBool::new(false),
                 is_inference: AtomicBool::new(false),
+                view_creation_meta: AtomicU8::new(ViewCreationMeta::Default as u8),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -566,8 +631,11 @@ impl<T: Float> Tensor<T> {
                 grad_fn: Mutex::new(None),
                 forward_backtrace: Mutex::new(None),
                 requires_grad: AtomicBool::new(false),
+                accepts_grad: AtomicBool::new(false),
+                inherited_requires_grad: AtomicBool::new(false),
                 is_leaf: AtomicBool::new(true),
                 is_inference: AtomicBool::new(false),
+                view_creation_meta: AtomicU8::new(ViewCreationMeta::Default as u8),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -588,8 +656,11 @@ impl<T: Float> Tensor<T> {
                 grad_fn: Mutex::new(Some(grad_fn)),
                 forward_backtrace: Mutex::new(forward_backtrace),
                 requires_grad: AtomicBool::new(true),
+                accepts_grad: AtomicBool::new(true),
+                inherited_requires_grad: AtomicBool::new(false),
                 is_leaf: AtomicBool::new(false),
                 is_inference: AtomicBool::new(false),
+                view_creation_meta: AtomicU8::new(ViewCreationMeta::Default as u8),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -882,6 +953,16 @@ impl<T: Float> Tensor<T> {
     }
 
     #[inline]
+    pub(crate) fn accepts_grad(&self) -> bool {
+        self.inner.accepts_grad.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    fn inherited_requires_grad(&self) -> bool {
+        self.inner.inherited_requires_grad.load(Ordering::Acquire)
+    }
+
+    #[inline]
     pub fn is_leaf(&self) -> bool {
         self.inner.is_leaf.load(Ordering::Acquire)
     }
@@ -896,6 +977,49 @@ impl<T: Float> Tensor<T> {
     #[inline]
     pub fn is_inference(&self) -> bool {
         self.inner.is_inference.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    fn view_creation_meta(&self) -> ViewCreationMeta {
+        ViewCreationMeta::from_u8(self.inner.view_creation_meta.load(Ordering::Acquire))
+    }
+
+    #[inline]
+    fn alias_view_creation_meta(&self) -> ViewCreationMeta {
+        if self.is_inference() {
+            ViewCreationMeta::Default
+        } else {
+            ViewCreationMeta::propagate(self.view_creation_meta(), ViewCreationMeta::current())
+        }
+    }
+
+    pub(crate) fn check_view_creation_meta_write(&self, op: &str) -> FerrotorchResult<()> {
+        if !self.requires_grad() {
+            return Ok(());
+        }
+        match self.view_creation_meta() {
+            ViewCreationMeta::NoGradMode if crate::autograd::no_grad::is_grad_enabled() => {
+                Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "{op}: A view was created in no_grad mode and is being modified inplace \
+                         with grad mode enabled. Given that this use case is ambiguous and \
+                         error-prone, it is forbidden. Move both the view and the inplace either \
+                         both inside the no_grad block or both outside."
+                    ),
+                })
+            }
+            ViewCreationMeta::InferenceMode if !crate::autograd::no_grad::is_inference_mode() => {
+                Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "{op}: A view was created in inference mode and is being modified inplace \
+                         in normal mode. Given that this use case is ambiguous and error-prone, \
+                         it is forbidden. Move both the view and the inplace either both inside \
+                         the inference_mode block or both outside."
+                    ),
+                })
+            }
+            _ => Ok(()),
+        }
     }
 
     #[inline]
@@ -931,8 +1055,11 @@ impl<T: Float> Tensor<T> {
                 grad_fn: Mutex::new(self.grad_fn()),
                 forward_backtrace: Mutex::new(self.forward_backtrace()),
                 requires_grad: AtomicBool::new(self.requires_grad()),
+                accepts_grad: AtomicBool::new(self.accepts_grad()),
+                inherited_requires_grad: AtomicBool::new(self.inherited_requires_grad()),
                 is_leaf: AtomicBool::new(self.is_leaf()),
                 is_inference: AtomicBool::new(self.is_inference()),
+                view_creation_meta: AtomicU8::new(self.view_creation_meta() as u8),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -954,6 +1081,7 @@ impl<T: Float> Tensor<T> {
                     .into(),
             });
         }
+        let has_grad_fn = grad_fn.is_some();
         {
             let mut guard =
                 self.inner
@@ -977,6 +1105,12 @@ impl<T: Float> Tensor<T> {
         self.inner
             .requires_grad
             .store(requires_grad, Ordering::Release);
+        self.inner
+            .accepts_grad
+            .store(requires_grad || has_grad_fn, Ordering::Release);
+        self.inner
+            .inherited_requires_grad
+            .store(false, Ordering::Release);
         self.inner.is_leaf.store(is_leaf, Ordering::Release);
         if !is_leaf {
             self.set_grad(None)?;
@@ -1966,6 +2100,7 @@ impl<T: Float> Tensor<T> {
                 message: "data_mut requires a contiguous tensor".into(),
             });
         }
+        self.check_view_creation_meta_write("data_mut")?;
         // Returns Err(GpuTensorNotAccessible) for GPU/Cubecl/Meta storage —
         // the deprecated `as_mut_slice` panicked here. Optimizer step
         // implementations now get a clean error path for misuse against
@@ -2024,6 +2159,7 @@ impl<T: Float> Tensor<T> {
     /// `step()` methods satisfy this by running inside `no_grad()` with
     /// `&mut self`.
     pub unsafe fn update_data(&self, new_data: &[T]) -> FerrotorchResult<()> {
+        self.check_view_creation_meta_write("update_data")?;
         let numel = self.numel();
         if new_data.len() != numel {
             return Err(FerrotorchError::ShapeMismatch {
@@ -2136,6 +2272,7 @@ impl<T: Float> Tensor<T> {
         new_storage: TensorStorage<T>,
         new_shape: Vec<usize>,
     ) -> FerrotorchResult<()> {
+        self.check_view_creation_meta_write("update_storage_and_shape")?;
         let new_numel = checked_numel(&new_shape, "update_storage_and_shape")?;
         if new_storage.len() != new_numel {
             return Err(FerrotorchError::ShapeMismatch {
@@ -2277,6 +2414,7 @@ impl<T: Float> Tensor<T> {
     /// outstanding borrow of the storage's data (from this tensor or any
     /// clone/view) is *used* after the call.
     pub unsafe fn update_storage(&self, new_storage: TensorStorage<T>) -> FerrotorchResult<()> {
+        self.check_view_creation_meta_write("update_storage")?;
         let numel = self.numel();
         if new_storage.len() != numel {
             return Err(FerrotorchError::ShapeMismatch {
@@ -2532,8 +2670,11 @@ impl<T: Float> Tensor<T> {
                 grad_fn: Mutex::new(None),
                 forward_backtrace: Mutex::new(None),
                 requires_grad: AtomicBool::new(false),
+                accepts_grad: AtomicBool::new(false),
+                inherited_requires_grad: AtomicBool::new(false),
                 is_leaf: AtomicBool::new(true),
                 is_inference: AtomicBool::new(self.is_inference()),
+                view_creation_meta: AtomicU8::new(ViewCreationMeta::Default as u8),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -2563,6 +2704,9 @@ impl<T: Float> Tensor<T> {
                     .into(),
             });
         }
+        let view_creation_meta = self.view_creation_meta();
+        let inherited_requires_grad = self.inherited_requires_grad();
+        let public_requires_grad = requires_grad || inherited_requires_grad;
         // Must create a new inner since Arc<TensorInner> is immutable.
         Ok(Self {
             inner: Arc::new(TensorInner {
@@ -2574,9 +2718,12 @@ impl<T: Float> Tensor<T> {
                 grad: Mutex::new(None),
                 grad_fn: Mutex::new(self.grad_fn()),
                 forward_backtrace: Mutex::new(self.forward_backtrace()),
-                requires_grad: AtomicBool::new(requires_grad),
+                requires_grad: AtomicBool::new(public_requires_grad),
+                accepts_grad: AtomicBool::new(requires_grad),
+                inherited_requires_grad: AtomicBool::new(inherited_requires_grad),
                 is_leaf: AtomicBool::new(self.is_leaf()),
                 is_inference: AtomicBool::new(self.is_inference()),
+                view_creation_meta: AtomicU8::new(view_creation_meta as u8),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -2722,8 +2869,11 @@ impl<T: Float> Tensor<T> {
                 grad_fn: Mutex::new(grad_fn),
                 forward_backtrace: Mutex::new(forward_backtrace),
                 requires_grad: AtomicBool::new(track),
+                accepts_grad: AtomicBool::new(track),
+                inherited_requires_grad: AtomicBool::new(false),
                 is_leaf: AtomicBool::new(!track),
                 is_inference: AtomicBool::new(crate::autograd::no_grad::is_inference_mode()),
+                view_creation_meta: AtomicU8::new(ViewCreationMeta::Default as u8),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
