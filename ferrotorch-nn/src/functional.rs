@@ -35,11 +35,12 @@ use std::sync::Arc;
 use ferrotorch_core::autograd::no_grad::is_grad_enabled;
 use ferrotorch_core::grad_fns::activation as act;
 use ferrotorch_core::grad_fns::arithmetic;
-use ferrotorch_core::grad_fns::linalg::mm_differentiable;
+use ferrotorch_core::grad_fns::linalg::{linear_fused, matmul_differentiable};
 use ferrotorch_core::grad_fns::reduction as red;
-use ferrotorch_core::grad_fns::shape::transpose_2d;
+use ferrotorch_core::grad_fns::shape::{reshape, transpose_2d};
 use ferrotorch_core::grad_fns::transcendental as trans;
 use ferrotorch_core::ops::elementwise::{binary_map, mean as elem_mean};
+use ferrotorch_core::shape::broadcast_shapes;
 use ferrotorch_core::tensor::GradFn;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 
@@ -54,10 +55,12 @@ use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorSt
 ///
 /// # Shapes
 ///
-/// - `input`: `[B, in_features]`
-/// - `weight`: `[out_features, in_features]`
-/// - `bias` (optional): `[out_features]`
-/// - **returns**: `[B, out_features]`
+/// - `input`: `[..., in_features]`
+/// - `weight`: `[out_features, in_features]` or `[in_features]`
+/// - `bias` (optional): broadcastable to the selected PyTorch execution path
+/// - **returns**:
+///   - `[..., out_features]` for 2-D weight
+///   - `[...]` for 1-D weight
 ///
 /// # Examples
 ///
@@ -69,27 +72,34 @@ pub fn linear<T: Float>(
     weight: &Tensor<T>,
     bias: Option<&Tensor<T>>,
 ) -> FerrotorchResult<Tensor<T>> {
-    // Validate input shape.
-    if input.ndim() != 2 {
+    if input.ndim() == 0 || weight.ndim() == 0 {
         return Err(FerrotorchError::ShapeMismatch {
             message: format!(
-                "functional::linear expects 2D input [B, in_features], got shape {:?}",
-                input.shape()
+                "both arguments to linear need to be at least 1D, but they are {}D and {}D",
+                input.ndim(),
+                weight.ndim()
             ),
         });
     }
 
-    // Validate weight shape.
-    if weight.ndim() != 2 {
-        return Err(FerrotorchError::ShapeMismatch {
+    match weight.ndim() {
+        1 => linear_weight_1d(input, weight, bias),
+        2 => linear_weight_2d(input, weight, bias),
+        _ => Err(FerrotorchError::ShapeMismatch {
             message: format!(
-                "functional::linear expects 2D weight [out, in], got shape {:?}",
-                weight.shape()
+                "functional::linear expects weight with <= 2 dimensions, got shape {:?}",
+                weight.shape(),
             ),
-        });
+        }),
     }
+}
 
-    let in_features = input.shape()[1];
+fn linear_weight_2d<T: Float>(
+    input: &Tensor<T>,
+    weight: &Tensor<T>,
+    bias: Option<&Tensor<T>>,
+) -> FerrotorchResult<Tensor<T>> {
+    let in_features = input.shape()[input.ndim() - 1];
     let weight_in = weight.shape()[1];
     let out_features = weight.shape()[0];
 
@@ -102,35 +112,149 @@ pub fn linear<T: Float>(
         });
     }
 
-    // weight^T: [in_features, out_features]
-    let weight_t = transpose_2d(weight)?;
+    let input_shape = input.shape();
+    let flattened_rows = flattened_linear_rows(input_shape);
+    let output_shape = linear_2d_output_shape(input_shape, out_features);
 
-    // input @ weight^T: [B, out_features]
-    let output = mm_differentiable(input, &weight_t)?;
+    if bias.is_some()
+        && (input.ndim() == 2 || bias.is_some_and(bias_is_likely_fusable) && input.is_contiguous())
+    {
+        let input_2d = if input.ndim() == 2 {
+            input.clone()
+        } else {
+            reshape(input, &[flattened_rows as isize, in_features as isize])?
+        };
+        let output_2d = linear_fused_with_general_bias(
+            &input_2d,
+            weight,
+            bias,
+            &[flattened_rows, out_features],
+        )?;
 
-    // Add bias if present.
-    match bias {
-        Some(b) => {
-            if b.ndim() != 1 || b.shape()[0] != out_features {
-                return Err(FerrotorchError::ShapeMismatch {
-                    message: format!(
-                        "functional::linear: bias shape {:?} does not match out_features {}",
-                        b.shape(),
-                        out_features,
-                    ),
-                });
-            }
-            // Reshape bias to [1, out_features] for broadcast addition.
-            let bias_data = b.data()?;
-            let bias_2d = Tensor::from_storage(
-                TensorStorage::cpu(bias_data.to_vec()),
-                vec![1, out_features],
-                b.requires_grad(),
-            )?;
-            arithmetic::add(&output, &bias_2d)
-        }
-        None => Ok(output),
+        return if input.ndim() == 2 {
+            Ok(output_2d)
+        } else {
+            reshape_to_usize_shape(&output_2d, &output_shape)
+        };
     }
+
+    if bias.is_none() && input.is_contiguous() {
+        let input_2d = if input.ndim() == 2 {
+            input.clone()
+        } else {
+            reshape(input, &[flattened_rows as isize, in_features as isize])?
+        };
+        let output_2d = linear_fused(&input_2d, weight, None)?;
+
+        return if input.ndim() == 2 {
+            Ok(output_2d)
+        } else {
+            reshape_to_usize_shape(&output_2d, &output_shape)
+        };
+    }
+
+    let weight_t = transpose_2d(weight)?;
+    let output = matmul_differentiable(input, &weight_t)?;
+    add_bias_without_expanding_output(&output, bias)
+}
+
+fn linear_weight_1d<T: Float>(
+    input: &Tensor<T>,
+    weight: &Tensor<T>,
+    bias: Option<&Tensor<T>>,
+) -> FerrotorchResult<Tensor<T>> {
+    let in_features = input.shape()[input.ndim() - 1];
+    let weight_in = weight.shape()[0];
+    if in_features != weight_in {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "functional::linear: input has {in_features} features but weight expects {weight_in}"
+            ),
+        });
+    }
+
+    if bias.is_some()
+        && (input.ndim() == 2 || bias.is_some_and(bias_is_likely_fusable) && input.is_contiguous())
+    {
+        return Err(FerrotorchError::ShapeMismatch {
+            message: "functional::linear: mat2 must be a matrix, got 1-D tensor".into(),
+        });
+    }
+
+    let output = matmul_differentiable(input, weight)?;
+    add_bias_without_expanding_output(&output, bias)
+}
+
+fn flattened_linear_rows(shape: &[usize]) -> usize {
+    shape[..shape.len() - 1].iter().product()
+}
+
+fn linear_2d_output_shape(input_shape: &[usize], out_features: usize) -> Vec<usize> {
+    let mut output_shape = input_shape[..input_shape.len() - 1].to_vec();
+    output_shape.push(out_features);
+    output_shape
+}
+
+fn bias_is_likely_fusable<T: Float>(bias: &Tensor<T>) -> bool {
+    bias.ndim() == 1 || bias.shape().iter().filter(|&&dim| dim != 1).count() == 1
+}
+
+fn ensure_bias_broadcasts_exactly_to<T: Float>(
+    target_shape: &[usize],
+    bias: &Tensor<T>,
+) -> FerrotorchResult<()> {
+    let broadcast = broadcast_shapes(target_shape, bias.shape())?;
+    if broadcast == target_shape {
+        Ok(())
+    } else {
+        Err(FerrotorchError::ShapeMismatch {
+            message: format!(
+                "functional::linear: bias shape {:?} would expand output shape {:?} to {:?}",
+                bias.shape(),
+                target_shape,
+                broadcast
+            ),
+        })
+    }
+}
+
+fn add_bias_without_expanding_output<T: Float>(
+    output: &Tensor<T>,
+    bias: Option<&Tensor<T>>,
+) -> FerrotorchResult<Tensor<T>> {
+    if let Some(b) = bias {
+        ensure_bias_broadcasts_exactly_to(output.shape(), b)?;
+        arithmetic::add(output, b)
+    } else {
+        Ok(output.clone())
+    }
+}
+
+fn linear_fused_with_general_bias<T: Float>(
+    input_2d: &Tensor<T>,
+    weight: &Tensor<T>,
+    bias: Option<&Tensor<T>>,
+    target_shape: &[usize],
+) -> FerrotorchResult<Tensor<T>> {
+    let Some(b) = bias else {
+        return linear_fused(input_2d, weight, None);
+    };
+
+    ensure_bias_broadcasts_exactly_to(target_shape, b)?;
+    if b.ndim() == 1 && b.shape()[0] == target_shape[1] {
+        linear_fused(input_2d, weight, Some(b))
+    } else {
+        let output = linear_fused(input_2d, weight, None)?;
+        arithmetic::add(&output, b)
+    }
+}
+
+fn reshape_to_usize_shape<T: Float>(
+    input: &Tensor<T>,
+    shape: &[usize],
+) -> FerrotorchResult<Tensor<T>> {
+    let shape: Vec<isize> = shape.iter().map(|&dim| dim as isize).collect();
+    reshape(input, &shape)
 }
 
 // ===========================================================================
@@ -1370,17 +1494,113 @@ mod tests {
     }
 
     #[test]
-    fn test_linear_wrong_input_dims() {
-        let weight = leaf(&[1.0; 6], &[2, 3], false);
-        let input_1d = leaf(&[1.0, 2.0, 3.0], &[3], false);
-        assert!(linear(&input_1d, &weight, None).is_err());
+    fn test_linear_accepts_1d_input_like_torch() {
+        let weight = leaf(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0], &[2, 3], false);
+        let bias = leaf(&[10.0, 20.0], &[2], false);
+        let input = leaf(&[1.0, 2.0, 3.0], &[3], false);
+
+        let output = linear(&input, &weight, Some(&bias)).unwrap();
+        assert_eq!(output.shape(), &[2]);
+        assert_close(output.data().unwrap(), &[11.0, 22.0], 1e-6);
+    }
+
+    #[test]
+    fn test_linear_accepts_nd_input_like_torch() {
+        let weight = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false);
+        let bias = leaf(&[10.0, 20.0], &[2], false);
+        let input: Vec<f32> = (0..24).map(|v| v as f32).collect();
+        let input = leaf(&input, &[2, 4, 3], false);
+
+        let output = linear(&input, &weight, Some(&bias)).unwrap();
+        assert_eq!(output.shape(), &[2, 4, 2]);
+        assert_close(
+            output.data().unwrap(),
+            &[
+                18.0, 37.0, 36.0, 82.0, 54.0, 127.0, 72.0, 172.0, 90.0, 217.0, 108.0, 262.0, 126.0,
+                307.0, 144.0, 352.0,
+            ],
+            1e-6,
+        );
+    }
+
+    #[test]
+    fn test_linear_accepts_general_bias_broadcast_like_torch() {
+        let weight = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], false);
+        let bias = leaf(&[0.0, 1.0, 2.0, 3.0], &[2, 2], false);
+        let input = leaf(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3], false);
+
+        let output = linear(&input, &weight, Some(&bias)).unwrap();
+        assert_eq!(output.shape(), &[2, 2]);
+        assert_close(output.data().unwrap(), &[8.0, 18.0, 28.0, 65.0], 1e-6);
+    }
+
+    #[test]
+    fn test_linear_bias_gradient_reaches_original_bias() {
+        let weight = leaf(&[1.0, 0.0, 0.0, 1.0], &[2, 2], true);
+        let bias = leaf(&[10.0, 20.0], &[2], true);
+        let input = leaf(&[1.0, 2.0, 3.0, 4.0], &[2, 2], true);
+
+        let output = linear(&input, &weight, Some(&bias)).unwrap();
+        red::sum(&output).unwrap().backward().unwrap();
+
+        assert_close(
+            bias.grad().unwrap().unwrap().data().unwrap(),
+            &[2.0, 2.0],
+            1e-6,
+        );
     }
 
     #[test]
     fn test_linear_wrong_weight_dims() {
-        let weight = leaf(&[1.0; 6], &[6], false);
-        let input = leaf(&[1.0; 6], &[2, 3], false);
+        let weight = leaf(&[1.0; 8], &[2, 2, 2], false);
+        let input = leaf(&[1.0; 4], &[2, 2], false);
         assert!(linear(&input, &weight, None).is_err());
+    }
+
+    #[test]
+    fn test_linear_scalar_input_errors() {
+        let weight = leaf(&[1.0, 2.0], &[2], false);
+        let input = leaf(&[1.0], &[], false);
+        assert!(linear(&input, &weight, None).is_err());
+    }
+
+    #[test]
+    fn test_linear_accepts_1d_weight_dot_semantics() {
+        let weight = leaf(&[1.0, 2.0, 3.0], &[3], false);
+        let input = leaf(&[0.0, 1.0, 2.0], &[3], false);
+
+        let output = linear(&input, &weight, None).unwrap();
+        assert_eq!(output.shape(), &[]);
+        assert_close(output.data().unwrap(), &[8.0], 1e-6);
+    }
+
+    #[test]
+    fn test_linear_1d_weight_nd_input_scalar_bias_like_torch() {
+        let weight = leaf(&[1.0, 2.0, 3.0], &[3], false);
+        let bias = leaf(&[10.0], &[], false);
+        let input: Vec<f32> = (0..24).map(|v| v as f32).collect();
+        let input = leaf(&input, &[2, 4, 3], false);
+
+        let output = linear(&input, &weight, Some(&bias)).unwrap();
+        assert_eq!(output.shape(), &[2, 4]);
+        assert_close(
+            output.data().unwrap(),
+            &[18.0, 36.0, 54.0, 72.0, 90.0, 108.0, 126.0, 144.0],
+            1e-6,
+        );
+    }
+
+    #[test]
+    fn test_linear_1d_weight_2d_input_with_bias_matches_torch_error() {
+        let weight = leaf(&[1.0, 2.0, 3.0], &[3], false);
+        let bias = leaf(&[10.0], &[], false);
+        let input = leaf(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3], false);
+
+        let err = linear(&input, &weight, Some(&bias)).unwrap_err();
+        assert!(
+            err.to_string().contains("mat2 must be a matrix"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
