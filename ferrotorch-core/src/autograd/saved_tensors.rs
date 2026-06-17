@@ -34,7 +34,7 @@
 //! | REQ-5 | SHIPPED | `pub fn `unpack_saved_tensor`<T: Float>` at `saved_tensors.rs:154-190`. Existing pub API — boundary-API grandfathering. |
 //! | REQ-6 | SHIPPED | `pub fn `has_saved_tensor_hooks`` at `saved_tensors.rs:193-195`; consumer: short-circuits at `:114, :129, :155, :172`. |
 //! | REQ-7 | SHIPPED | No-hooks identity passthrough at `saved_tensors.rs:125, :142, :167, :184`; consumer: every GradFn save/load cycle without registered hooks. |
-//! | REQ-8 | SHIPPED | Restore-prior-on-exit at `saved_tensors.rs:84, :98`; consumer: every nested `saved_tensors_hooks(...)` call. |
+//! | REQ-8 | SHIPPED | Restore-prior-on-exit/unwind via `SavedTensorHooksGuard`; consumer: every nested `saved_tensors_hooks(...)` call. |
 //!
 
 use std::cell::RefCell;
@@ -50,28 +50,65 @@ pub type PackHook<T> = Arc<dyn Fn(Tensor<T>) -> FerrotorchResult<Tensor<T>> + Se
 /// An unpack hook transforms a tensor when it is retrieved during backward.
 pub type UnpackHook<T> = Arc<dyn Fn(Tensor<T>) -> FerrotorchResult<Tensor<T>> + Send + Sync>;
 
+type HookPair<T> = (PackHook<T>, UnpackHook<T>);
+type HookState<T> = Option<HookPair<T>>;
+type HookRestore<T> = fn(HookState<T>);
+
 // Thread-local saved-tensors hook state for f32.
 thread_local! {
-    static HOOKS_F32: RefCell<Option<(PackHook<f32>, UnpackHook<f32>)>> =
+    static HOOKS_F32: RefCell<HookState<f32>> =
         const { RefCell::new(None) };
 }
 
 // Thread-local saved-tensors hook state for f64.
 thread_local! {
-    static HOOKS_F64: RefCell<Option<(PackHook<f64>, UnpackHook<f64>)>> =
+    static HOOKS_F64: RefCell<HookState<f64>> =
         const { RefCell::new(None) };
 }
 
 // Thread-local saved-tensors hook state for bfloat16.
 thread_local! {
-    static HOOKS_BF16: RefCell<Option<(PackHook<half::bf16>, UnpackHook<half::bf16>)>> =
+    static HOOKS_BF16: RefCell<HookState<half::bf16>> =
         const { RefCell::new(None) };
 }
 
 // Thread-local saved-tensors hook state for IEEE float16.
 thread_local! {
-    static HOOKS_F16: RefCell<Option<(PackHook<half::f16>, UnpackHook<half::f16>)>> =
+    static HOOKS_F16: RefCell<HookState<half::f16>> =
         const { RefCell::new(None) };
+}
+
+struct SavedTensorHooksGuard<T: Float> {
+    prev: HookState<T>,
+    restore: HookRestore<T>,
+}
+
+impl<T: Float> SavedTensorHooksGuard<T> {
+    fn new(prev: HookState<T>, restore: HookRestore<T>) -> Self {
+        Self { prev, restore }
+    }
+}
+
+impl<T: Float> Drop for SavedTensorHooksGuard<T> {
+    fn drop(&mut self) {
+        (self.restore)(self.prev.take());
+    }
+}
+
+fn restore_hooks_f32(prev: HookState<f32>) {
+    HOOKS_F32.with(|h| *h.borrow_mut() = prev);
+}
+
+fn restore_hooks_f64(prev: HookState<f64>) {
+    HOOKS_F64.with(|h| *h.borrow_mut() = prev);
+}
+
+fn restore_hooks_bf16(prev: HookState<half::bf16>) {
+    HOOKS_BF16.with(|h| *h.borrow_mut() = prev);
+}
+
+fn restore_hooks_f16(prev: HookState<half::f16>) {
+    HOOKS_F16.with(|h| *h.borrow_mut() = prev);
 }
 
 /// Run a closure with saved-tensors hooks active on the current thread.
@@ -105,9 +142,8 @@ where
         let unpack_f32: UnpackHook<f32> = unsafe { std::mem::transmute(unpack) };
 
         let prev = HOOKS_F32.with(|h| h.borrow_mut().replace((pack_f32, unpack_f32)));
-        let result = f();
-        HOOKS_F32.with(|h| *h.borrow_mut() = prev);
-        result
+        let _guard = SavedTensorHooksGuard::new(prev, restore_hooks_f32);
+        f()
     } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>() {
         // SAFETY: TypeId equality above proves T == f64 at runtime, so
         // PackHook<T> and PackHook<f64> are the same concrete type. The
@@ -119,9 +155,8 @@ where
         let unpack_f64: UnpackHook<f64> = unsafe { std::mem::transmute(unpack) };
 
         let prev = HOOKS_F64.with(|h| h.borrow_mut().replace((pack_f64, unpack_f64)));
-        let result = f();
-        HOOKS_F64.with(|h| *h.borrow_mut() = prev);
-        result
+        let _guard = SavedTensorHooksGuard::new(prev, restore_hooks_f64);
+        f()
     } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<half::bf16>() {
         // SAFETY: TypeId equality above proves T == half::bf16; see the f32
         // arm for the ownership/layout argument.
@@ -130,9 +165,8 @@ where
         let unpack_bf16: UnpackHook<half::bf16> = unsafe { std::mem::transmute(unpack) };
 
         let prev = HOOKS_BF16.with(|h| h.borrow_mut().replace((pack_bf16, unpack_bf16)));
-        let result = f();
-        HOOKS_BF16.with(|h| *h.borrow_mut() = prev);
-        result
+        let _guard = SavedTensorHooksGuard::new(prev, restore_hooks_bf16);
+        f()
     } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<half::f16>() {
         // SAFETY: TypeId equality above proves T == half::f16; see the f32
         // arm for the ownership/layout argument.
@@ -141,9 +175,8 @@ where
         let unpack_f16: UnpackHook<half::f16> = unsafe { std::mem::transmute(unpack) };
 
         let prev = HOOKS_F16.with(|h| h.borrow_mut().replace((pack_f16, unpack_f16)));
-        let result = f();
-        HOOKS_F16.with(|h| *h.borrow_mut() = prev);
-        result
+        let _guard = SavedTensorHooksGuard::new(prev, restore_hooks_f16);
+        f()
     } else {
         // No hooks for other types — just run the closure.
         f()
@@ -377,6 +410,7 @@ pub fn has_saved_tensor_hooks() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::FerrotorchError;
     use crate::storage::TensorStorage;
 
     #[test]
@@ -438,6 +472,93 @@ mod tests {
         .unwrap();
 
         // Hooks should be cleared after scope.
+        assert!(!has_saved_tensor_hooks());
+    }
+
+    #[test]
+    fn test_hooks_cleared_after_panic_f32() {
+        assert!(!has_saved_tensor_hooks());
+
+        let result = std::panic::catch_unwind(|| {
+            let _ = saved_tensors_hooks(
+                |t: Tensor<f32>| Ok(t),
+                |t: Tensor<f32>| Ok(t),
+                || -> FerrotorchResult<()> {
+                    assert!(has_saved_tensor_hooks());
+                    panic!("saved tensor hook panic scope");
+                },
+            );
+        });
+
+        assert!(result.is_err());
+        assert!(
+            !has_saved_tensor_hooks(),
+            "saved tensor hooks must be restored during panic unwind"
+        );
+    }
+
+    #[test]
+    fn test_hooks_cleared_after_panic_f64() {
+        assert!(!has_saved_tensor_hooks());
+
+        let result = std::panic::catch_unwind(|| {
+            let _ = saved_tensors_hooks(
+                |t: Tensor<f64>| Ok(t),
+                |t: Tensor<f64>| Ok(t),
+                || -> FerrotorchResult<()> {
+                    assert!(has_saved_tensor_hooks());
+                    panic!("saved tensor hook panic scope");
+                },
+            );
+        });
+
+        assert!(result.is_err());
+        assert!(
+            !has_saved_tensor_hooks(),
+            "saved tensor hooks must be restored during panic unwind"
+        );
+    }
+
+    #[test]
+    fn test_nested_hooks_restore_outer_after_inner_panic() {
+        let result = saved_tensors_hooks(
+            |t: Tensor<f32>| {
+                let data: Vec<f32> = t.data_vec()?.iter().map(|&x| x * 3.0).collect();
+                Tensor::from_storage(TensorStorage::cpu(data), t.shape().to_vec(), false)
+            },
+            |t: Tensor<f32>| Ok(t),
+            || {
+                let panic_result = std::panic::catch_unwind(|| {
+                    let _ = saved_tensors_hooks(
+                        |t: Tensor<f32>| {
+                            let data: Vec<f32> = t.data_vec()?.iter().map(|&x| x * 5.0).collect();
+                            Tensor::from_storage(
+                                TensorStorage::cpu(data),
+                                t.shape().to_vec(),
+                                false,
+                            )
+                        },
+                        |t: Tensor<f32>| Ok(t),
+                        || -> FerrotorchResult<()> {
+                            assert!(has_saved_tensor_hooks());
+                            panic!("inner saved tensor hook panic scope");
+                        },
+                    );
+                });
+                assert!(panic_result.is_err());
+
+                let t = Tensor::from_storage(TensorStorage::cpu(vec![2.0f32]), vec![1], false)?;
+                let packed = pack_saved_tensor(t)?;
+                assert_eq!(
+                    packed.data_vec()?,
+                    vec![6.0],
+                    "inner panic must restore the still-active outer hook"
+                );
+                Ok::<(), FerrotorchError>(())
+            },
+        );
+
+        result.unwrap();
         assert!(!has_saved_tensor_hooks());
     }
 }
