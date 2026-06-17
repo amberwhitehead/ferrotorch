@@ -434,19 +434,58 @@ impl<T: Float> GradFn<T> for MaskedFillBackward<T> {
             return Ok(vec![None]);
         }
 
+        if grad_output.shape() != self.input.shape() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "MaskedFillBackward: grad_output shape {:?} does not match input shape {:?}",
+                    grad_output.shape(),
+                    self.input.shape()
+                ),
+            });
+        }
+        if self.mask.numel() != self.input.numel() {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "MaskedFillBackward: mask numel {} does not match input numel {}",
+                    self.mask.numel(),
+                    self.input.numel()
+                ),
+            });
+        }
+
         // GPU-resident path (crosslink #1187 Phase 3d): grad_input = masked_fill(
         // grad_output, mask, 0) — zero the gradient where the forward filled a
         // constant. Both grad and the bool mask stay on the device; the resident
         // `masked_fill_dt` kernel is dtype-generic (f32/f64/bf16/f16). NO mask
         // host crossing, NO float-mask upload.
-        if grad_output.is_cuda() && self.mask.is_cuda() {
-            if grad_output.device() != self.mask.device() {
+        if self.input.is_cuda() || grad_output.is_cuda() || self.mask.is_cuda() {
+            let expected = self.input.device();
+            if !expected.is_cuda() {
+                let got = if grad_output.is_cuda() {
+                    grad_output.device()
+                } else {
+                    self.mask.device()
+                };
+                return Err(FerrotorchError::DeviceMismatch { expected, got });
+            }
+            if self.mask.device() != expected {
                 return Err(FerrotorchError::DeviceMismatch {
-                    expected: grad_output.device(),
+                    expected,
                     got: self.mask.device(),
                 });
             }
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let grad_output = if grad_output.device() == expected {
+                grad_output.clone()
+            } else {
+                grad_output.to(expected)?
+            };
+            // `.contiguous()` is required even when the shape/stride layout is
+            // logically contiguous: a CUDA view can carry a non-zero
+            // storage_offset or share a larger base buffer. Backend kernels only
+            // see raw handles, so materialize the logical gradient on-device
+            // before comparing it with the resident mask length.
+            let grad_output = grad_output.contiguous()?;
             let result_handle =
                 backend.masked_fill_dt(grad_output.gpu_handle()?, self.mask.gpu_handle()?, 0.0)?;
             let grad_tensor = Tensor::from_storage(
@@ -456,12 +495,12 @@ impl<T: Float> GradFn<T> for MaskedFillBackward<T> {
             )?;
             Ok(vec![Some(grad_tensor)])
         } else {
-            // CPU path: direct mask zeroing. `self.mask.data()?` borrows the host
-            // bool slice (errors if the mask is GPU-resident while grad is on
-            // host — the correct device-mismatch signal).
-            let go_data = grad_output.data()?;
+            // CPU path: direct mask zeroing. Use `data_vec()` so direct
+            // `GradFn::backward` calls with CPU views get the same logical-order
+            // treatment the autograd engine gives non-contiguous gradients.
+            let go_data = grad_output.data_vec()?;
             let mask_h = self.mask.data()?;
-            let mut grad_input: Vec<T> = go_data.to_vec();
+            let mut grad_input = go_data;
             for (i, &m) in mask_h.iter().enumerate() {
                 if m {
                     grad_input[i] = <T as num_traits::Zero>::zero();
@@ -1339,7 +1378,11 @@ pub fn masked_fill_bt<T: Float>(
             });
         }
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let value_f64 = num_traits::ToPrimitive::to_f64(&value).unwrap_or(0.0);
+        let value_f64 = num_traits::ToPrimitive::to_f64(&value).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "masked_fill_bt: value not representable as f64".into(),
+            }
+        })?;
         // #1661: a row-narrowed CUDA view (e.g. `.narrow(0,1,3)`) reports its
         // logical numel but is backed by a larger base buffer carrying a non-zero
         // `storage_offset`. Reading `input.gpu_handle()` raw makes `masked_fill_dt`
