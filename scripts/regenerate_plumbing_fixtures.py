@@ -581,6 +581,32 @@ def fixture_meta_propagate() -> list[dict[str, Any]]:
             "expected_out_shape": expected,
         })
 
+    # ternary_broadcast: PyTorch TensorIterator shape via addcmul on meta.
+    ternary_cases = [
+        ([5, 1, 7], [3, 1], [1, 3, 1]),
+        ([2, 0, 3], [], [1, 3]),
+        ([1], [2, 3, 1], [3, 1]),
+    ]
+    for a_shape, b_shape, c_shape in ternary_cases:
+        expected = list(
+            torch.addcmul(
+                torch.empty(a_shape, device="meta"),
+                torch.empty(b_shape, device="meta"),
+                torch.empty(c_shape, device="meta"),
+            ).shape
+        )
+        out.append({
+            "op": "meta_ternary_broadcast",
+            "tag": "_".join(
+                "x".join(str(d) for d in s) or "scalar"
+                for s in (a_shape, b_shape, c_shape)
+            ),
+            "a_shape": a_shape,
+            "b_shape": b_shape,
+            "c_shape": c_shape,
+            "expected_out_shape": expected,
+        })
+
     # reduce_dim: shape with axis dropped (or kept at size 1).
     for in_shape, dim, keepdim, expected in [
         ([2, 3, 4], 1, False, [2, 4]),
@@ -606,16 +632,31 @@ def fixture_meta_propagate() -> list[dict[str, Any]]:
             "expected_out_shape": [],
         })
 
-    # matmul: PyTorch shape rules.
+    # matmul: PyTorch shape rules, including batched vector promotion and
+    # zero-sized dimensions.
     matmul_cases = [
-        ([5], [5], []),                  # 1D x 1D → scalar
-        ([3, 5], [5], [3]),              # 2D x 1D → 1D
-        ([5], [5, 4], [4]),              # 1D x 2D → 1D
-        ([3, 5], [5, 4], [3, 4]),        # 2D x 2D → 2D
-        ([2, 3, 5], [2, 5, 4], [2, 3, 4]),
-        ([1, 3, 5], [4, 5, 7], [4, 3, 7]),
+        ([5], [5]),
+        ([3, 5], [5]),
+        ([5], [5, 4]),
+        ([3, 5], [5, 4]),
+        ([2, 3, 5], [2, 5, 4]),
+        ([1, 3, 5], [4, 5, 7]),
+        ([3], [2, 3, 4]),
+        ([2, 3, 4], [4]),
+        ([3], [5, 2, 3, 4]),
+        ([5, 2, 3, 4], [4]),
+        ([2, 1, 3, 4], [3, 4, 5]),
+        ([0], [2, 0, 4]),
+        ([2, 3, 0], [0]),
+        ([2, 0, 3, 4], [1, 4, 5]),
     ]
-    for a_shape, b_shape, expected in matmul_cases:
+    for a_shape, b_shape in matmul_cases:
+        expected = list(
+            torch.matmul(
+                torch.empty(a_shape, device="meta"),
+                torch.empty(b_shape, device="meta"),
+            ).shape
+        )
         out.append({
             "op": "meta_matmul",
             "tag": "_".join("x".join(str(d) for d in s) for s in (a_shape, b_shape)),
@@ -649,6 +690,7 @@ def main() -> int:
     FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with FIXTURE_PATH.open("w") as f:
         json.dump(payload, f, indent=2)
+        f.write("\n")
     print(f"wrote {len(fixtures)} fixtures to {FIXTURE_PATH}")
     return 0
 

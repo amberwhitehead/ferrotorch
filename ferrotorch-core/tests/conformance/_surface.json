@@ -1115,6 +1115,7 @@
     { "path": "ferrotorch_core::meta_propagate::matmul", "kind": "fn", "signature": "fn matmul < T : Float > (a : & Tensor < T > , b : & Tensor < T >) -> FerrotorchResult < Option < Tensor < T > > >" },
     { "path": "ferrotorch_core::meta_propagate::reduce_all", "kind": "fn", "signature": "fn reduce_all < T : Float > (input : & Tensor < T >) -> FerrotorchResult < Option < Tensor < T > > >" },
     { "path": "ferrotorch_core::meta_propagate::reduce_dim", "kind": "fn", "signature": "fn reduce_dim < T : Float > (input : & Tensor < T > , dim : i64 , keepdim : bool ,) -> FerrotorchResult < Option < Tensor < T > > >" },
+    { "path": "ferrotorch_core::meta_propagate::ternary_broadcast", "kind": "fn", "signature": "fn ternary_broadcast < T : Float > (a : & Tensor < T > , b : & Tensor < T > , c : & Tensor < T > ,) -> FerrotorchResult < Option < Tensor < T > > >" },
     { "path": "ferrotorch_core::meta_propagate::unary_same_shape", "kind": "fn", "signature": "fn unary_same_shape < T : Float > (input : & Tensor < T >) -> FerrotorchResult < Option < Tensor < T > > >" },
     { "path": "ferrotorch_core::min_with_dim", "kind": "re-export", "signature": "pub use grad_fns::reduction::min_with_dim;" },
     { "path": "ferrotorch_core::modified_bessel_k0", "kind": "re-export", "signature": "pub use special::modified_bessel_k0;" },

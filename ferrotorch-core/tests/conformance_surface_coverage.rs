@@ -2,11 +2,11 @@
 //!
 //! Tracking issue: <https://github.com/dollspace-gay/ferrotorch/issues/759>.
 //!
-//! Loads `tests/conformance/_surface.json` (produced by
-//! `conformance_surface_inventory.rs`) and scans committed integration test
-//! code for references to each `pub` item. Fails the build if any inventory
-//! item is neither (a) referenced by a production integration test, nor
-//! (b) explicitly excluded in `_surface_exclusions.toml`.
+//! Recomputes the current public surface from `src/`, verifies the committed
+//! `tests/conformance/_surface.json` snapshot is current, and scans committed
+//! integration test code for references to each `pub` item. Fails the build
+//! if any inventory item is neither (a) referenced by a production integration
+//! test, nor (b) explicitly excluded in `_surface_exclusions.toml`.
 //!
 //! Exclusion contract (CORE-195 / #1889): every exclusion carries a `kind`:
 //!
@@ -30,28 +30,19 @@
 //! This is the project's signal: we do not add a public API to ferrotorch-core
 //! without proving its contract against PyTorch parity.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
-struct Surface {
-    items: Vec<SurfaceItem>,
-}
+#[path = "common/surface_inventory.rs"]
+mod surface_inventory;
 
-#[derive(Debug, Deserialize)]
-struct SurfaceItem {
-    path: String,
-    kind: String,
-    #[allow(
-        dead_code,
-        reason = "deserialized for forward-compat with future filters / reporting"
-    )]
-    signature: String,
-}
+use surface_inventory::{
+    SurfaceItem, collect_surface_items, out_path, read_surface_json, render_json,
+};
 
 #[derive(Debug, Deserialize)]
 struct ExclusionsFile {
@@ -104,16 +95,15 @@ fn tests_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests")
 }
 
-fn read_surface() -> Surface {
-    let p = conformance_dir().join("_surface.json");
-    let bytes = fs::read(&p).unwrap_or_else(|e| {
+fn read_committed_surface_json() -> String {
+    let p = out_path();
+    fs::read_to_string(&p).unwrap_or_else(|e| {
         panic!(
             "read {} failed: {e}. Run `cargo test -p ferrotorch-core --test \
              conformance_surface_inventory` first to (re)generate it.",
             p.display()
         )
-    });
-    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", p.display()))
+    })
 }
 
 fn read_exclusions() -> Vec<Exclusion> {
@@ -430,8 +420,32 @@ fn stripper_removes_comments_and_strings_but_keeps_code() {
 }
 
 #[test]
+fn committed_surface_inventory_matches_current_source() {
+    let committed_json = read_committed_surface_json();
+    let fresh_items = collect_surface_items();
+    let fresh_json = render_json(&fresh_items);
+
+    if committed_json != fresh_json {
+        let committed = read_surface_json(&committed_json, "_surface.json");
+        let committed_paths: BTreeSet<&str> =
+            committed.items.iter().map(|i| i.path.as_str()).collect();
+        let fresh_paths: BTreeSet<&str> = fresh_items.iter().map(|i| i.path.as_str()).collect();
+        let missing_from_committed: Vec<&str> =
+            fresh_paths.difference(&committed_paths).copied().collect();
+        let stale_in_committed: Vec<&str> =
+            committed_paths.difference(&fresh_paths).copied().collect();
+        panic!(
+            "tests/conformance/_surface.json is stale relative to ferrotorch-core/src. \
+             Regenerate it with:\n  cargo test -p ferrotorch-core --test conformance_surface_inventory\n\
+             missing from committed inventory: {missing_from_committed:?}\n\
+             stale in committed inventory: {stale_in_committed:?}"
+        );
+    }
+}
+
+#[test]
 fn every_public_item_has_a_conformance_reference_or_tracking_issue() {
-    let surface = read_surface();
+    let surface_items = collect_surface_items();
     let exclusions = read_exclusions();
 
     // Validate exclusion entries before using them. A malformed entry is a
@@ -477,7 +491,7 @@ fn every_public_item_has_a_conformance_reference_or_tracking_issue() {
     let mut excluded: Vec<&str> = Vec::new();
     let mut uncovered: Vec<&SurfaceItem> = Vec::new();
 
-    for item in &surface.items {
+    for item in &surface_items {
         // Glob re-exports (`pub use foo::*`) are never auto-coverable;
         // require an explicit exclusion. The inventory writer stores them
         // with a `path` ending in `::*`.
@@ -508,7 +522,7 @@ fn every_public_item_has_a_conformance_reference_or_tracking_issue() {
     eprintln!(
         "covered {}/{} (excluded: {}; uncovered: {})",
         covered.len(),
-        surface.items.len(),
+        surface_items.len(),
         excluded.len(),
         uncovered.len()
     );
@@ -533,8 +547,7 @@ fn every_public_item_has_a_conformance_reference_or_tracking_issue() {
     // Stale-exclusion guard: an exclusion for an item that no longer exists
     // is suspect (probably the item was renamed or removed and the exclusion
     // was forgotten).
-    let surface_paths: std::collections::BTreeSet<&str> =
-        surface.items.iter().map(|i| i.path.as_str()).collect();
+    let surface_paths: BTreeSet<&str> = surface_items.iter().map(|i| i.path.as_str()).collect();
     let stale: Vec<&str> = exclusion_set
         .keys()
         .filter(|k| !surface_paths.contains(k.as_str()))

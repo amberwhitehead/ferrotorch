@@ -12,22 +12,22 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:1041`, `add_scaled` at `:1569`, `add_out` at `:1442`, `add_scaled_out` at `:1492`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
-//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:1741` delegates to `sub_scaled` at `:1770` -> `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
+//! | REQ-1 (add / add_scaled / add_out / add_scaled_out) | SHIPPED | `add` at `arithmetic.rs:1094`, `add_scaled` at `:1622`, `add_out` at `:1495`, `add_scaled_out` at `:1545`; consumer `Tensor::add_t` in `methods.rs`; parity `[add] 88/88` (grep=1) |
+//! | REQ-2 (sub / sub_scaled) | SHIPPED | `sub` at `arithmetic.rs:1794` delegates to `sub_scaled` at `:1823` -> `add_scaled(a,b,-alpha)`; parity `[sub] 88/88` (grep=1) |
 //! | REQ-3 (mul) | SHIPPED | `mul` + `MulBackward` in `arithmetic.rs`; parity `[mul] 72/72` (grep=1) |
 //! | REQ-4 (div) | SHIPPED | `div` + `DivBackward` in `arithmetic.rs`; parity `[div] 72/72` (grep=1) |
 //! | REQ-5 (neg) | SHIPPED | `neg` + `NegBackward`; parity `[neg] 8/8` (grep=1) |
 //! | REQ-6 (abs) | SHIPPED | `abs` + `AbsBackward`; parity `[abs] 8/8` (grep=1) |
 //! | REQ-7 (sqrt) | SHIPPED | `sqrt` + `SqrtBackward`; parity `[sqrt] 8/8` (grep=1) |
 //! | REQ-8 (pow scalar exponent) | SHIPPED | `pow` + `PowBackward` (scalar exp; CUDA f32/f64/bf16/f16 resident kernels; tensor-exp overload returns `Ok(None)` and is skipped, not failed) |
-//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:1822` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
-//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:2712` + `RsqrtBackward` at `:2610`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
-//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:2867` + `ReciprocalBackward` at `:2784`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
-//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:3647` + `FloorDivideBackward` at `:3491` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
-//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:3065` + `RemainderBackward` at `:2955`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
-//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:3343` + `FmodBackward` at `:3229`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
-//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:4038` + `AddcmulBackward` at `:3854`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
-//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:4382` + `AddcdivBackward` at `:4177`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
+//! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:1875` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
+//! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:2771` + `RsqrtBackward` at `:2669`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
+//! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:2926` + `ReciprocalBackward` at `:2843`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
+//! | REQ-12 (floor_divide) | SHIPPED | `floor_divide` at `arithmetic.rs:3706` + `FloorDivideBackward` at `:3550` (errors on `.backward()` mirroring upstream's `<NotImplemented>` grad_fn); consumer `Tensor::floor_divide_t` in `methods.rs`; parity `[floor_divide] 72/72` (grep=1) |
+//! | REQ-13 (remainder) | SHIPPED | `remainder` at `arithmetic.rs:3124` + `RemainderBackward` at `:3014`; consumer `Tensor::remainder_t` in `methods.rs`; parity `[remainder] 72/72` (grep=1) |
+//! | REQ-14 (fmod) | SHIPPED | `fmod` at `arithmetic.rs:3402` + `FmodBackward` at `:3288`; consumer `Tensor::fmod_t` in `methods.rs`; parity `[fmod] 72/72` (grep=1) |
+//! | REQ-15 (addcmul) | SHIPPED | `addcmul` at `arithmetic.rs:4097` + `AddcmulBackward` at `:3913`; consumer `Tensor::addcmul_t` in `methods.rs`; parity `[addcmul] 96/96` (grep=1) |
+//! | REQ-16 (addcdiv) | SHIPPED | `addcdiv` at `arithmetic.rs:4452` + `AddcdivBackward` at `:4247`; consumer `Tensor::addcdiv_t` in `methods.rs`; parity `[addcdiv]` (grep=1) |
 
 use std::any::TypeId;
 use std::sync::Arc;

@@ -135,8 +135,9 @@ directly outside `#[cfg(test)]`):
   `crate::grad_fns::cumulative::cummin(&view, 1)?`
 - `ferrotorch-core/src/meta_propagate.rs` —
   `use crate::grad_fns::arithmetic::{add, mul, neg, sqrt}`
-- `ferrotorch-core/src/meta_propagate.rs:545` —
-  `use crate::grad_fns::reduction::{mean_dim, sum, sum_dim}`
+- `ferrotorch-core/src/methods.rs:707` and `:715` —
+  `Tensor::sum_dim` / `Tensor::mean_dim` delegate to
+  `crate::grad_fns::reduction::{sum_dim, mean_dim}`
 - `ferrotorch-core/src/meta_propagate.rs:591` —
   `use crate::grad_fns::activation::{gelu, relu, sigmoid, silu, softmax, tanh}`
 - `ferrotorch-core/src/tensor.rs:1131` —

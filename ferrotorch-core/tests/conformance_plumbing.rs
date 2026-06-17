@@ -416,6 +416,8 @@ struct Fixture {
     #[serde(default)]
     b_shape: Option<Vec<usize>>,
     #[serde(default)]
+    c_shape: Option<Vec<usize>>,
+    #[serde(default)]
     expected_out_shape: Option<Vec<usize>>,
 }
 
@@ -1830,6 +1832,37 @@ fn meta_binary_broadcast_shapes() {
     );
     // Mixed → Err.
     let r = meta_propagate::binary_broadcast(&meta_t(&[2, 3]), &cpu_t(&[2, 3]));
+    assert!(r.is_err(), "mixed meta+cpu must error");
+}
+
+#[test]
+fn meta_ternary_broadcast_shapes() {
+    let file = load_fixtures();
+    let cases = cases_for(&file, "meta_ternary_broadcast");
+    assert!(!cases.is_empty(), "no fixtures for meta_ternary_broadcast");
+    for f in cases {
+        let label = format!("meta_ternary_broadcast tag={:?}", f.tag);
+        let a_shape = f.a_shape.as_ref().expect("a_shape");
+        let b_shape = f.b_shape.as_ref().expect("b_shape");
+        let c_shape = f.c_shape.as_ref().expect("c_shape");
+        let expected = f.expected_out_shape.as_ref().expect("expected_out_shape");
+        let out =
+            meta_propagate::ternary_broadcast(&meta_t(a_shape), &meta_t(b_shape), &meta_t(c_shape))
+                .expect("ok")
+                .expect("Some");
+        assert_eq!(out.shape(), expected.as_slice(), "{label}");
+    }
+    // CPU inputs -> None.
+    let a = cpu_t(&[2, 3]);
+    let b = cpu_t(&[2, 3]);
+    let c = cpu_t(&[2, 3]);
+    assert!(
+        meta_propagate::ternary_broadcast(&a, &b, &c)
+            .expect("ok")
+            .is_none()
+    );
+    // Mixed -> Err.
+    let r = meta_propagate::ternary_broadcast(&meta_t(&[2, 3]), &cpu_t(&[2, 3]), &meta_t(&[2, 3]));
     assert!(r.is_err(), "mixed meta+cpu must error");
 }
 
