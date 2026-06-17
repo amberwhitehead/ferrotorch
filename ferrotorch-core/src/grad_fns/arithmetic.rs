@@ -254,6 +254,84 @@ enum CudaFloatBinaryOp {
 }
 
 #[derive(Debug, Clone, Copy)]
+enum DivRoundingMode {
+    Floor,
+    Trunc,
+}
+
+impl DivRoundingMode {
+    fn cuda_op(self) -> CudaFloatBinaryOp {
+        match self {
+            Self::Floor => CudaFloatBinaryOp::DivFloor,
+            Self::Trunc => CudaFloatBinaryOp::DivTrunc,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Floor => "DivFloorModeBackward",
+            Self::Trunc => "DivTruncModeBackward",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DivRoundingModeZeroBackward<T: Float> {
+    a: Tensor<T>,
+    b: Tensor<T>,
+    mode: DivRoundingMode,
+}
+
+impl<T: Float> GradFn<T> for DivRoundingModeZeroBackward<T> {
+    fn backward(&self, _grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let da = if self.a.requires_grad() {
+            Some(crate::creation::zeros_like(&self.a)?)
+        } else {
+            None
+        };
+        let db = if self.b.requires_grad() {
+            Some(crate::creation::zeros_like(&self.b)?)
+        } else {
+            None
+        };
+        Ok(vec![da, db])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.a, &self.b]
+    }
+
+    fn name(&self) -> &'static str {
+        self.mode.name()
+    }
+}
+
+#[derive(Debug)]
+struct UnaryZeroBackward<T: Float> {
+    input: Tensor<T>,
+    name: &'static str,
+}
+
+impl<T: Float> GradFn<T> for UnaryZeroBackward<T> {
+    fn backward(&self, _grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let grad = if self.input.requires_grad() {
+            Some(crate::creation::zeros_like(&self.input)?)
+        } else {
+            None
+        };
+        Ok(vec![grad])
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        vec![&self.input]
+    }
+
+    fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 enum CudaFloatTernaryOp {
     Addcmul,
     Addcdiv,
@@ -543,6 +621,37 @@ fn div_rounding_trunc_tensor<T: Float>(
     }
     let q = div(a, b)?;
     unary_map(&q, |x| x.trunc())
+}
+
+fn div_rounding_mode_zero_grad<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    mode: DivRoundingMode,
+) -> FerrotorchResult<Tensor<T>> {
+    let out = no_grad(|| {
+        if let Some((storage, shape)) = cuda_float_binary_storage(a, b, mode.cuda_op())? {
+            return Tensor::from_storage(storage, shape, false);
+        }
+        match mode {
+            DivRoundingMode::Floor => floor_divide_inner(a, b),
+            DivRoundingMode::Trunc => div_rounding_trunc_tensor(a, b),
+        }
+    })?;
+
+    if needs_grad(a, b) {
+        let (storage, shape) = out.into_storage_and_shape()?;
+        Tensor::from_operation(
+            storage,
+            shape,
+            Arc::new(DivRoundingModeZeroBackward {
+                a: a.clone(),
+                b: b.clone(),
+                mode,
+            }),
+        )
+    } else {
+        Ok(out)
+    }
 }
 
 #[inline]
@@ -1083,7 +1192,11 @@ impl<T: Float> GradFn<T> for AddScaledBackward<T> {
                     ),
                 }
             })?;
-            let scaled = no_grad(|| scale_tensor(grad_output, alpha_t))?;
+            let scaled = if is_higher_order_backward() {
+                scale_tensor_differentiable(grad_output, alpha_t, "AddScaledBackward")?
+            } else {
+                no_grad(|| scale_tensor(grad_output, alpha_t))?
+            };
             Some(reduce_grad_to_shape(&scaled, self.b.shape())?)
         } else {
             None
@@ -1146,6 +1259,81 @@ fn scale_tensor<T: Float>(t: &Tensor<T>, alpha: T) -> FerrotorchResult<Tensor<T>
         Tensor::from_storage(TensorStorage::gpu(handle), tc.shape().to_vec(), false)
     } else {
         scalar_map(t, alpha, |x, s| x * s)
+    }
+}
+
+fn scalar_tensor_on_device<T: Float>(
+    value: T,
+    like: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    Tensor::from_storage(
+        TensorStorage::on_device(vec![value], like.device()).map_err(|err| {
+            FerrotorchError::InvalidArgument {
+                message: format!(
+                    "{op}: failed to create scalar tensor on {:?}: {err}",
+                    like.device()
+                ),
+            }
+        })?,
+        vec![],
+        false,
+    )
+}
+
+fn scale_tensor_differentiable<T: Float>(
+    t: &Tensor<T>,
+    alpha: T,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let one = <T as num_traits::One>::one();
+    if alpha == one {
+        return Ok(t.clone());
+    }
+    if alpha == -one {
+        return neg(t);
+    }
+    let scale = scalar_tensor_on_device(alpha, t, op)?;
+    mul(t, &scale)
+}
+
+fn sign_zero_grad<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let input_c = ensure_contig_for_gpu(input)?;
+        let one = <T as num_traits::One>::one();
+        let ones = cuda_full_like_shape(
+            input_c.shape(),
+            input_c.numel(),
+            one,
+            input_c.device(),
+            "sign_zero_grad_fill",
+        )?;
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "sign_zero_grad",
+            f32 => backend.abs_backward_f32(ones.gpu_handle()?, input_c.gpu_handle()?),
+            f64 => backend.abs_backward_f64(ones.gpu_handle()?, input_c.gpu_handle()?),
+            bf16 => backend.abs_backward_bf16_bf16(ones.gpu_handle()?, input_c.gpu_handle()?),
+            f16 => backend.abs_backward_f16(ones.gpu_handle()?, input_c.gpu_handle()?),
+        )?;
+        let storage = TensorStorage::gpu(handle);
+        let shape = input_c.shape().to_vec();
+        if input.requires_grad() && is_grad_enabled() {
+            Tensor::from_operation(
+                storage,
+                shape,
+                Arc::new(UnaryZeroBackward {
+                    input: input.clone(),
+                    name: "SignBackward",
+                }),
+            )
+        } else {
+            Tensor::from_storage(storage, shape, false)
+        }
+    } else {
+        crate::grad_fns::transcendental::sign(input)
     }
 }
 
@@ -2014,7 +2202,12 @@ struct NegBackward<T: Float> {
 impl<T: Float> GradFn<T> for NegBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let da = if self.a.requires_grad() {
-            Some(no_grad(|| neg(grad_output))?)
+            let raw = if is_higher_order_backward() {
+                neg(grad_output)?
+            } else {
+                no_grad(|| neg(grad_output))?
+            };
+            Some(raw)
         } else {
             None
         };
@@ -2282,7 +2475,15 @@ impl<T: Float> GradFn<T> for SqrtBackward<T> {
             return meta_unary_backward(&self.a);
         }
         let da = if self.a.requires_grad() {
-            if grad_output.is_cuda() {
+            if is_higher_order_backward() {
+                let two_t = T::from(2.0).ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: "SqrtBackward: 2.0 not representable in tensor dtype".into(),
+                })?;
+                let c = sqrt(&self.a)?;
+                let two = scalar_tensor_on_device(two_t, &c, "SqrtBackward")?;
+                let denom = mul(&two, &c)?;
+                Some(div(grad_output, &denom)?)
+            } else if grad_output.is_cuda() {
                 // GPU path: da = grad / (2 * c)
                 let da = no_grad(|| {
                     let two_t = T::from(2.0).unwrap();
@@ -2417,14 +2618,21 @@ impl<T: Float> GradFn<T> for RsqrtBackward<T> {
             return meta_unary_backward(&self.a);
         }
         let da = if self.a.requires_grad() {
-            if grad_output.is_cuda() {
+            if is_higher_order_backward() {
+                let neg_half = T::from(-0.5).ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: "RsqrtBackward: -0.5 not representable in tensor dtype".into(),
+                })?;
+                let c = rsqrt(&self.a)?;
+                let c_sq = mul(&c, &c)?;
+                let c_cu = mul(&c_sq, &c)?;
+                let neg_half_c_cu = scale_tensor_differentiable(&c_cu, neg_half, "RsqrtBackward")?;
+                Some(mul(grad_output, &neg_half_c_cu)?)
+            } else if grad_output.is_cuda() {
                 // GPU path: da = -0.5 * grad * c^3.
                 // Build `-0.5` as a tensor of the right dtype + device,
-                // compute `c*c*c`, multiply, and we're done. Wrap in
-                // `no_grad` so the backward ops themselves do not enter
-                // the graph (higher-order rsqrt is not exercised by op_db;
-                // the standard non-higher-order path is acceptable for
-                // the current rsqrt parity contract).
+                // compute `c*c*c`, multiply, and wrap the ordinary backward
+                // path in `no_grad`. The create_graph path above uses the same
+                // formula without detaching.
                 let da = no_grad(|| {
                     let neg_half =
                         T::from(-0.5).ok_or_else(|| FerrotorchError::InvalidArgument {
@@ -2584,14 +2792,17 @@ impl<T: Float> GradFn<T> for ReciprocalBackward<T> {
             return meta_unary_backward(&self.a);
         }
         let da = if self.a.requires_grad() {
-            if grad_output.is_cuda() {
+            if is_higher_order_backward() {
+                let c = reciprocal(&self.a)?;
+                let c_sq = mul(&c, &c)?;
+                let neg_go = neg(grad_output)?;
+                Some(mul(&neg_go, &c_sq)?)
+            } else if grad_output.is_cuda() {
                 // GPU path: da = -grad * c^2.
                 // Build the `c*c` product on-device, negate `grad_output`,
-                // multiply, and we're done. Wrap in `no_grad` so the
-                // backward ops themselves do not enter the graph
-                // (higher-order reciprocal is not exercised by op_db; the
-                // standard non-higher-order path is acceptable for the
-                // current reciprocal parity contract).
+                // multiply, and wrap the ordinary backward path in `no_grad`.
+                // The create_graph path above uses the same formula without
+                // detaching.
                 let da = no_grad(|| {
                     let c_sq = mul(&self.c, &self.c)?;
                     let neg_go = neg(grad_output)?;
@@ -2754,25 +2965,22 @@ impl<T: Float> GradFn<T> for RemainderBackward<T> {
         // db = -grad * div(a, b, rounding_mode="floor"), reduced to
         // b.shape() under broadcasting.
         //
-        // The floor-quotient term routes through `floor_divide`, i.e. the
-        // shared `div_floor_floating` kernel
-        // (`pytorch/c10/util/generic_math.h:34-58`) — NOT a naive
-        // `floor(a / b)` chain, whose single-rounded quotient diverges at
-        // integer boundaries (e.g. a=-7, b=0.7: naive -10, exact -11) and
-        // underflows to ±0 for tiny quotients (CORE-181, crosslink #1875).
-        // We then multiply by `-grad` and reduce. The whole step runs under
-        // `no_grad` so the backward intermediates do not enter the graph
-        // (higher-order remainder is not exercised by op_db;
-        // non-higher-order backward parity is what this commit ships).
+        // The floor-quotient term mirrors `self.div(other, rounding_mode="floor")`,
+        // not public `torch.floor_divide`: PyTorch gives rounded `div` a
+        // zero-gradient rule while public `floor_divide` still errors on backward.
         let db = if self.b.requires_grad() {
-            let raw = no_grad(|| {
-                // div(a, b, rounding_mode="floor") as a tensor of the
-                // broadcast shape, on a/b's device.
-                let floor_q = floor_divide(&self.a, &self.b)?;
-                // -grad * div_floor(a, b)
+            let raw = if is_higher_order_backward() {
+                let floor_q =
+                    div_rounding_mode_zero_grad(&self.a, &self.b, DivRoundingMode::Floor)?;
                 let neg_go = neg(grad_output)?;
                 mul(&neg_go, &floor_q)
-            })?;
+            } else {
+                no_grad(|| {
+                    let floor_q = floor_divide(&self.a, &self.b)?;
+                    let neg_go = neg(grad_output)?;
+                    mul(&neg_go, &floor_q)
+                })
+            }?;
             Some(reduce_grad_to_shape(&raw, self.b.shape())?)
         } else {
             None
@@ -3068,20 +3276,22 @@ impl<T: Float> GradFn<T> for FmodBackward<T> {
 
         // db = -grad * trunc(a / b), reduced to b.shape() under broadcasting.
         //
-        // The `trunc(a / b)` term is computed elementwise with broadcasting
-        // and saved into a fresh tensor; we then multiply by `-grad` and
-        // reduce. The whole step runs under `no_grad` so the backward
-        // intermediates do not enter the graph (higher-order fmod is
-        // not exercised by op_db; non-higher-order backward parity is what
-        // this commit ships — same scope as `RemainderBackward`).
+        // The trunc quotient mirrors `self.div(other, rounding_mode="trunc")`.
+        // Rounded `div` participates in create_graph and returns zero second
+        // derivatives through the quotient.
         let db = if self.b.requires_grad() {
-            let raw = no_grad(|| {
-                // trunc(a / b) as a tensor of the broadcast shape.
-                let trunc_q = div_rounding_trunc_tensor(&self.a, &self.b)?;
-                // -grad * trunc(a / b)
+            let raw = if is_higher_order_backward() {
+                let trunc_q =
+                    div_rounding_mode_zero_grad(&self.a, &self.b, DivRoundingMode::Trunc)?;
                 let neg_go = neg(grad_output)?;
                 mul(&neg_go, &trunc_q)
-            })?;
+            } else {
+                no_grad(|| {
+                    let trunc_q = div_rounding_trunc_tensor(&self.a, &self.b)?;
+                    let neg_go = neg(grad_output)?;
+                    mul(&neg_go, &trunc_q)
+                })
+            }?;
             Some(reduce_grad_to_shape(&raw, self.b.shape())?)
         } else {
             None
@@ -3768,10 +3978,6 @@ impl<T: Float> GradFn<T> for AddcmulBackward<T> {
 
         // d_tensor1 = grad * value * tensor2 (reduced to tensor1.shape()).
         // d_tensor2 = grad * value * tensor1 (reduced to tensor2.shape()).
-        //
-        // The chain runs under `no_grad` so the backward intermediates do not
-        // enter the graph (higher-order addcmul is not exercised by op_db;
-        // non-higher-order backward parity is what this commit ships).
         // `value` is scalar (no grad wrt it).
         let value_t = T::from(self.value).ok_or_else(|| FerrotorchError::InvalidArgument {
             message: format!(
@@ -3784,30 +3990,40 @@ impl<T: Float> GradFn<T> for AddcmulBackward<T> {
             // d_tensor1 = grad * value * tensor2. We compute it as
             // `mul(grad, tensor2)` (handles broadcasting) then scale by
             // `value` via a 0-d tensor multiply.
-            let computed = no_grad(|| {
+            let computed = if is_higher_order_backward() {
                 let g_t2 = mul(grad_output, &self.tensor2)?;
-                let scale = Tensor::from_storage(
-                    TensorStorage::on_device(vec![value_t], grad_output.device())?,
-                    vec![],
-                    false,
-                )?;
-                mul(&g_t2, &scale)
-            })?;
+                scale_tensor_differentiable(&g_t2, value_t, "addcmul backward")
+            } else {
+                no_grad(|| {
+                    let g_t2 = mul(grad_output, &self.tensor2)?;
+                    let scale = Tensor::from_storage(
+                        TensorStorage::on_device(vec![value_t], grad_output.device())?,
+                        vec![],
+                        false,
+                    )?;
+                    mul(&g_t2, &scale)
+                })
+            }?;
             Some(reduce_grad_to_shape(&computed, self.tensor1.shape())?)
         } else {
             None
         };
 
         let d_tensor2 = if self.tensor2.requires_grad() {
-            let computed = no_grad(|| {
+            let computed = if is_higher_order_backward() {
                 let g_t1 = mul(grad_output, &self.tensor1)?;
-                let scale = Tensor::from_storage(
-                    TensorStorage::on_device(vec![value_t], grad_output.device())?,
-                    vec![],
-                    false,
-                )?;
-                mul(&g_t1, &scale)
-            })?;
+                scale_tensor_differentiable(&g_t1, value_t, "addcmul backward")
+            } else {
+                no_grad(|| {
+                    let g_t1 = mul(grad_output, &self.tensor1)?;
+                    let scale = Tensor::from_storage(
+                        TensorStorage::on_device(vec![value_t], grad_output.device())?,
+                        vec![],
+                        false,
+                    )?;
+                    mul(&g_t1, &scale)
+                })
+            }?;
             Some(reduce_grad_to_shape(&computed, self.tensor2.shape())?)
         } else {
             None
@@ -4117,12 +4333,7 @@ impl<T: Float> GradFn<T> for AddcdivBackward<T> {
 
         // d_tensor1 = grad * value / tensor2 (reduced to tensor1.shape()).
         // d_tensor2 = -grad * value * tensor1 / (tensor2 * tensor2) (reduced
-        // to tensor2.shape()).
-        //
-        // The chain runs under `no_grad` so the backward intermediates do not
-        // enter the graph (higher-order addcdiv is not exercised by op_db;
-        // non-higher-order backward parity is what this commit ships).
-        // `value` is scalar (no grad wrt it).
+        // to tensor2.shape()). `value` is scalar (no grad wrt it).
         let value_t = T::from(self.value).ok_or_else(|| FerrotorchError::InvalidArgument {
             message: format!(
                 "addcdiv backward: value={} cannot be represented in the tensor dtype",
@@ -4134,15 +4345,20 @@ impl<T: Float> GradFn<T> for AddcdivBackward<T> {
             // d_tensor1 = grad * value / tensor2.
             // Compute `div(grad, tensor2)` (handles broadcasting) then scale
             // by `value` via a 0-d tensor multiply.
-            let computed = no_grad(|| {
+            let computed = if is_higher_order_backward() {
                 let g_over_t2 = div(grad_output, &self.tensor2)?;
-                let scale = Tensor::from_storage(
-                    TensorStorage::on_device(vec![value_t], grad_output.device())?,
-                    vec![],
-                    false,
-                )?;
-                mul(&g_over_t2, &scale)
-            })?;
+                scale_tensor_differentiable(&g_over_t2, value_t, "addcdiv backward")
+            } else {
+                no_grad(|| {
+                    let g_over_t2 = div(grad_output, &self.tensor2)?;
+                    let scale = Tensor::from_storage(
+                        TensorStorage::on_device(vec![value_t], grad_output.device())?,
+                        vec![],
+                        false,
+                    )?;
+                    mul(&g_over_t2, &scale)
+                })
+            }?;
             Some(reduce_grad_to_shape(&computed, self.tensor1.shape())?)
         } else {
             None
@@ -4153,18 +4369,26 @@ impl<T: Float> GradFn<T> for AddcdivBackward<T> {
             // Composed as: neg(grad) * tensor1 / tensor2 / tensor2 * value.
             // (Two single-tensor divisions avoid materializing `tensor2^2`
             // separately and let broadcasting flow naturally.)
-            let computed = no_grad(|| {
+            let computed = if is_higher_order_backward() {
                 let neg_g = neg(grad_output)?;
                 let neg_g_t1 = mul(&neg_g, &self.tensor1)?;
                 let step1 = div(&neg_g_t1, &self.tensor2)?;
                 let step2 = div(&step1, &self.tensor2)?;
-                let scale = Tensor::from_storage(
-                    TensorStorage::on_device(vec![value_t], grad_output.device())?,
-                    vec![],
-                    false,
-                )?;
-                mul(&step2, &scale)
-            })?;
+                scale_tensor_differentiable(&step2, value_t, "addcdiv backward")
+            } else {
+                no_grad(|| {
+                    let neg_g = neg(grad_output)?;
+                    let neg_g_t1 = mul(&neg_g, &self.tensor1)?;
+                    let step1 = div(&neg_g_t1, &self.tensor2)?;
+                    let step2 = div(&step1, &self.tensor2)?;
+                    let scale = Tensor::from_storage(
+                        TensorStorage::on_device(vec![value_t], grad_output.device())?,
+                        vec![],
+                        false,
+                    )?;
+                    mul(&step2, &scale)
+                })
+            }?;
             Some(reduce_grad_to_shape(&computed, self.tensor2.shape())?)
         } else {
             None
@@ -4460,6 +4684,11 @@ impl<T: Float> GradFn<T> for AbsBackward<T> {
         }
 
         let da = if self.a.requires_grad() {
+            if is_higher_order_backward() {
+                let sign_a = sign_zero_grad(&self.a)?;
+                return Ok(vec![Some(mul(grad_output, &sign_a)?)]);
+            }
+
             // GPU-native path for every CUDA floating dtype this crate stores.
             if grad_output.is_cuda() && self.a.is_cuda() {
                 let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
