@@ -644,6 +644,20 @@ pub fn dot<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>
         });
     }
 
+    // PyTorch's dot kernel consumes strides directly. This raw CPU path
+    // operates on packed slices, so gather non-contiguous views into logical
+    // order before indexing.
+    let a = if a.is_contiguous() {
+        a.clone()
+    } else {
+        a.contiguous()?
+    };
+    let b = if b.is_contiguous() {
+        b.clone()
+    } else {
+        b.contiguous()?
+    };
+
     let a_data = a.data()?;
     let b_data = b.data()?;
     // CORE-140 (#1834): f16/bf16 accumulate in the f32 opmath type with a
@@ -1807,6 +1821,19 @@ pub fn mv<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>>
         });
     }
 
+    // PyTorch accepts strided matrices/vectors for mv. Materialize CPU views
+    // into logical row-major order before the packed-slice loop below.
+    let a = if a.is_contiguous() {
+        a.clone()
+    } else {
+        a.contiguous()?
+    };
+    let b = if b.is_contiguous() {
+        b.clone()
+    } else {
+        b.contiguous()?
+    };
+
     let a_data = a.data()?;
     let b_data = b.data()?;
     let mut result = vec![<T as num_traits::Zero>::zero(); m];
@@ -1849,6 +1876,19 @@ fn vm<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
             ),
         });
     }
+
+    // Vector-matrix multiply is the 1-D @ 2-D matmul arm. PyTorch accepts
+    // strided operands; this packed loop needs a logical-order materialization.
+    let a = if a.is_contiguous() {
+        a.clone()
+    } else {
+        a.contiguous()?
+    };
+    let b = if b.is_contiguous() {
+        b.clone()
+    } else {
+        b.contiguous()?
+    };
 
     let a_data = a.data()?;
     let b_data = b.data()?;
@@ -1919,6 +1959,19 @@ pub fn bmm<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>
         });
     }
 
+    // PyTorch bmm accepts batched strided views, including attention-style
+    // transpose(1, 2) operands. Pack CPU views before slab indexing.
+    let a = if a.is_contiguous() {
+        a.clone()
+    } else {
+        a.contiguous()?
+    };
+    let b = if b.is_contiguous() {
+        b.clone()
+    } else {
+        b.contiguous()?
+    };
+
     let a_data = a.data()?;
     let b_data = b.data()?;
     let slice_a = m * k;
@@ -1974,6 +2027,11 @@ pub fn transpose<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 
     let m = input.shape()[0];
     let n = input.shape()[1];
+    let input = if input.is_contiguous() {
+        input.clone()
+    } else {
+        input.contiguous()?
+    };
     let data = input.data()?;
     let mut result = vec![<T as num_traits::Zero>::zero(); m * n];
 
