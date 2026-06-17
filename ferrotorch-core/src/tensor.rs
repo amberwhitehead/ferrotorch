@@ -171,6 +171,7 @@ struct TensorInner<T: Float> {
     forward_backtrace: Mutex<Option<ForwardBacktrace>>,
     requires_grad: AtomicBool,
     is_leaf: AtomicBool,
+    is_inference: AtomicBool,
     /// Hook storage for gradient hooks and post-accumulate-grad hooks.
     hooks: Mutex<crate::autograd::hooks::HookStorage<T>>,
 }
@@ -243,6 +244,7 @@ impl<T: Float> Tensor<T> {
                 forward_backtrace: Mutex::new(None),
                 requires_grad: AtomicBool::new(requires_grad),
                 is_leaf: AtomicBool::new(true),
+                is_inference: AtomicBool::new(crate::autograd::no_grad::is_inference_mode()),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -294,6 +296,7 @@ impl<T: Float> Tensor<T> {
                 forward_backtrace: Mutex::new(None),
                 requires_grad: AtomicBool::new(false),
                 is_leaf: AtomicBool::new(true),
+                is_inference: AtomicBool::new(self.is_inference()),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -322,6 +325,9 @@ impl<T: Float> Tensor<T> {
         // The caller-supplied `grad_fn` references the ORIGINAL input, so
         // discarding the materialized intermediate from the graph is sound:
         // the copy is the identity on values.
+        if self.is_inference() {
+            return self.view_reshape(new_shape);
+        }
         if !self.is_contiguous() {
             return self.contiguous()?.view_operation(new_shape, grad_fn);
         }
@@ -351,6 +357,7 @@ impl<T: Float> Tensor<T> {
                 forward_backtrace: Mutex::new(ForwardBacktrace::capture_if_enabled()),
                 requires_grad: AtomicBool::new(true),
                 is_leaf: AtomicBool::new(false),
+                is_inference: AtomicBool::new(false),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -402,6 +409,7 @@ impl<T: Float> Tensor<T> {
         new_offset: usize,
         grad_fn: Option<Arc<dyn GradFn<T>>>,
     ) -> Self {
+        let grad_fn = if self.is_inference() { None } else { grad_fn };
         let requires_grad = grad_fn.is_some();
         let is_leaf = grad_fn.is_none();
         let forward_backtrace = if requires_grad {
@@ -421,6 +429,7 @@ impl<T: Float> Tensor<T> {
                 forward_backtrace: Mutex::new(forward_backtrace),
                 requires_grad: AtomicBool::new(requires_grad),
                 is_leaf: AtomicBool::new(is_leaf),
+                is_inference: AtomicBool::new(self.is_inference()),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -506,6 +515,7 @@ impl<T: Float> Tensor<T> {
                 forward_backtrace: Mutex::new(ForwardBacktrace::capture_if_enabled()),
                 requires_grad: AtomicBool::new(true),
                 is_leaf: AtomicBool::new(false),
+                is_inference: AtomicBool::new(false),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -557,6 +567,7 @@ impl<T: Float> Tensor<T> {
                 forward_backtrace: Mutex::new(None),
                 requires_grad: AtomicBool::new(false),
                 is_leaf: AtomicBool::new(true),
+                is_inference: AtomicBool::new(false),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -578,6 +589,7 @@ impl<T: Float> Tensor<T> {
                 forward_backtrace: Mutex::new(forward_backtrace),
                 requires_grad: AtomicBool::new(true),
                 is_leaf: AtomicBool::new(false),
+                is_inference: AtomicBool::new(false),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -775,6 +787,16 @@ impl<T: Float> Tensor<T> {
     /// hook result separately; accessors lazily unpack that payload when the
     /// backward formula reads tensor data.
     pub(crate) fn saved_for_backward(&self) -> FerrotorchResult<Self> {
+        if self.is_inference() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "Inference tensors cannot be saved for backward. Please do not use \
+                          Tensors created in inference mode in computation tracked by autograd. \
+                          To work around this, you can make a clone to get a normal tensor and \
+                          use it in autograd, or use `no_grad()` instead of `inference_mode()`."
+                    .into(),
+            });
+        }
+
         let saved_version = self.storage_version();
         let saved = Self {
             inner: Arc::clone(&self.inner),
@@ -864,6 +886,18 @@ impl<T: Float> Tensor<T> {
         self.inner.is_leaf.load(Ordering::Acquire)
     }
 
+    /// Returns whether this tensor was created in inference mode.
+    ///
+    /// Inference tensors keep this identity flag after leaving the
+    /// `inference_mode` scope. Storage-sharing aliases such as views and
+    /// `detach()` preserve it; fresh copies created outside inference mode do
+    /// not. Matching PyTorch, setting `requires_grad = true` on an inference
+    /// tensor is only allowed while inference mode is currently active.
+    #[inline]
+    pub fn is_inference(&self) -> bool {
+        self.inner.is_inference.load(Ordering::Acquire)
+    }
+
     #[inline]
     pub fn grad_fn(&self) -> Option<Arc<dyn GradFn<T>>> {
         let guard = self
@@ -898,6 +932,7 @@ impl<T: Float> Tensor<T> {
                 forward_backtrace: Mutex::new(self.forward_backtrace()),
                 requires_grad: AtomicBool::new(self.requires_grad()),
                 is_leaf: AtomicBool::new(self.is_leaf()),
+                is_inference: AtomicBool::new(self.is_inference()),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -912,6 +947,13 @@ impl<T: Float> Tensor<T> {
         grad_fn: Option<Arc<dyn GradFn<T>>>,
         forward_backtrace: Option<ForwardBacktrace>,
     ) -> FerrotorchResult<()> {
+        if requires_grad && self.is_inference() && !crate::autograd::no_grad::is_inference_mode() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "Setting requires_grad=True on inference tensor outside InferenceMode is \
+                          not allowed."
+                    .into(),
+            });
+        }
         {
             let mut guard =
                 self.inner
@@ -2491,6 +2533,7 @@ impl<T: Float> Tensor<T> {
                 forward_backtrace: Mutex::new(None),
                 requires_grad: AtomicBool::new(false),
                 is_leaf: AtomicBool::new(true),
+                is_inference: AtomicBool::new(self.is_inference()),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -2499,9 +2542,29 @@ impl<T: Float> Tensor<T> {
     }
 
     /// Return a new tensor with `requires_grad` set.
+    #[track_caller]
     pub fn requires_grad_(self, requires_grad: bool) -> Self {
+        self.try_requires_grad_(requires_grad)
+            .expect("Tensor::requires_grad_ invalid requires_grad state")
+    }
+
+    /// Fallible form of [`Self::requires_grad_`].
+    ///
+    /// PyTorch raises when callers try to enable gradients on an inference
+    /// tensor after leaving inference mode. Rust callers that want structured
+    /// error handling should use this method; [`Self::requires_grad_`] keeps
+    /// the existing infallible convenience API and panics on the same invalid
+    /// state.
+    pub fn try_requires_grad_(self, requires_grad: bool) -> FerrotorchResult<Self> {
+        if requires_grad && self.is_inference() && !crate::autograd::no_grad::is_inference_mode() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "Setting requires_grad=True on inference tensor outside InferenceMode is \
+                          not allowed."
+                    .into(),
+            });
+        }
         // Must create a new inner since Arc<TensorInner> is immutable.
-        Self {
+        Ok(Self {
             inner: Arc::new(TensorInner {
                 id: self.inner.id,
                 storage: Arc::clone(&self.inner.storage),
@@ -2513,11 +2576,12 @@ impl<T: Float> Tensor<T> {
                 forward_backtrace: Mutex::new(self.forward_backtrace()),
                 requires_grad: AtomicBool::new(requires_grad),
                 is_leaf: AtomicBool::new(self.is_leaf()),
+                is_inference: AtomicBool::new(self.is_inference()),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
             saved_hook_state: None,
-        }
+        })
     }
 
     /// Whether this tensor is contiguous in memory (C-order).
@@ -2659,6 +2723,7 @@ impl<T: Float> Tensor<T> {
                 forward_backtrace: Mutex::new(forward_backtrace),
                 requires_grad: AtomicBool::new(track),
                 is_leaf: AtomicBool::new(!track),
+                is_inference: AtomicBool::new(crate::autograd::no_grad::is_inference_mode()),
                 hooks: Mutex::new(crate::autograd::hooks::HookStorage::new()),
             }),
             saved_version: None,
@@ -2985,6 +3050,7 @@ impl<T: Float> fmt::Debug for Tensor<T> {
             .field("device", &self.device())
             .field("requires_grad", &self.requires_grad())
             .field("is_leaf", &self.is_leaf())
+            .field("is_inference", &self.is_inference())
             .field("grad_fn", &self.grad_fn().as_ref().map(|gf| gf.name()))
             .field("saved_version", &self.saved_version)
             .field("saved_hook_state", &self.saved_hook_state)
