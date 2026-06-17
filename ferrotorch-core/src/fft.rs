@@ -403,6 +403,158 @@ fn c2r_guard_empty_axis<T: Float>(
     Ok(None)
 }
 
+#[derive(Clone, Copy)]
+enum NdC2rDefaultAxes {
+    AllOrShapeLen,
+    LastTwo,
+}
+
+fn wrap_fft_axis(axis: isize, signal_ndim: usize) -> Option<usize> {
+    if axis >= 0 && (axis as usize) < signal_ndim {
+        Some(axis as usize)
+    } else if axis < 0 && axis >= -(signal_ndim as isize) {
+        Some((axis + signal_ndim as isize) as usize)
+    } else {
+        None
+    }
+}
+
+fn invalid_data_points(op: &'static str, n: i128) -> FerrotorchError {
+    FerrotorchError::InvalidArgument {
+        message: format!("{op}: Invalid number of data points ({n}) specified"),
+    }
+}
+
+/// Guard N-D c2r wrappers (`irfftn`/`irfft2`/`hfftn`/`hfft2`) before ferray's
+/// eager default-size arithmetic can underflow on an empty half-spectrum axis.
+///
+/// This mirrors PyTorch's two-stage path:
+/// `canonicalize_fft_shape_and_dim_args` validates `s`/`dim` and rejects zero
+/// transform shapes first, then `canonicalize_fft_c2r_shape_and_dim_args`
+/// derives the real length of the final transform axis. With explicit valid
+/// `s`, empty input spectra are resized as all-zero spectra and produce all-zero
+/// real outputs with the requested shape.
+fn c2r_guard_empty_axis_nd<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    op: &'static str,
+    default_axes: NdC2rDefaultAxes,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    let shape = input.shape();
+    let ndim = shape.len();
+    if ndim < 2 || shape.last() != Some(&2) {
+        return Ok(None);
+    }
+
+    let signal_shape = &shape[..ndim - 1];
+    let signal_ndim = signal_shape.len();
+    if signal_ndim == 0 {
+        return Ok(None);
+    }
+
+    let dims: Vec<usize> = match axes {
+        Some(raw_axes) => {
+            if let Some(sizes) = s
+                && raw_axes.len() != sizes.len()
+            {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "{op}: When given, dim and shape arguments must have the same length"
+                    ),
+                });
+            }
+            let mut resolved = Vec::with_capacity(raw_axes.len());
+            for &axis in raw_axes {
+                let Some(axis) = wrap_fft_axis(axis, signal_ndim) else {
+                    return Ok(None);
+                };
+                resolved.push(axis);
+            }
+            resolved
+        }
+        None => match default_axes {
+            NdC2rDefaultAxes::AllOrShapeLen => {
+                let transform_ndim = s.map_or(signal_ndim, |sizes| sizes.len());
+                if transform_ndim > signal_ndim {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "{op}: Got shape with {transform_ndim} values but input tensor only has {signal_ndim} dimensions."
+                        ),
+                    });
+                }
+                ((signal_ndim - transform_ndim)..signal_ndim).collect()
+            }
+            NdC2rDefaultAxes::LastTwo => {
+                if let Some(sizes) = s
+                    && sizes.len() != 2
+                {
+                    return Err(FerrotorchError::InvalidArgument {
+                        message: format!(
+                            "{op}: When given, dim and shape arguments must have the same length"
+                        ),
+                    });
+                }
+                if signal_ndim < 2 {
+                    return Ok(None);
+                }
+                vec![signal_ndim - 2, signal_ndim - 1]
+            }
+        },
+    };
+
+    if dims.is_empty() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op} must transform at least one axis"),
+        });
+    }
+
+    let mut sorted_dims = dims.clone();
+    sorted_dims.sort_unstable();
+    if sorted_dims.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: FFT dims must be unique"),
+        });
+    }
+
+    let transform_shape: Vec<usize> = match s {
+        Some(sizes) => sizes.to_vec(),
+        None => dims.iter().map(|&axis| signal_shape[axis]).collect(),
+    };
+
+    for &n in &transform_shape {
+        if n == 0 {
+            return Err(invalid_data_points(op, 0));
+        }
+    }
+
+    let last_axis = *dims.last().expect("non-empty dims checked above");
+    let last_dim_size = match s {
+        Some(sizes) => *sizes.last().expect("non-empty shape checked above") as i128,
+        None => 2 * (signal_shape[last_axis] as i128 - 1),
+    };
+    if last_dim_size < 1 {
+        return Err(invalid_data_points(op, last_dim_size));
+    }
+
+    if s.is_some() && signal_shape.contains(&0) {
+        let mut out_shape = signal_shape.to_vec();
+        for (&axis, &size) in dims.iter().zip(transform_shape.iter()) {
+            out_shape[axis] = size;
+        }
+        out_shape[last_axis] = last_dim_size as usize;
+        let zeros = crate::creation::full_on_device(
+            &out_shape,
+            <T as num_traits::Zero>::zero(),
+            input.device(),
+            op,
+        )?;
+        return Ok(Some(zeros));
+    }
+
+    Ok(None)
+}
+
 /// 1-D inverse FFT along the last dimension (default `norm`).
 ///
 /// Input has shape `[..., n, 2]` (complex). Returns complex output of the
@@ -1245,6 +1397,11 @@ pub fn irfftn_norm<T: Float>(
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
     reject_half_cpu_fft::<T>("irfftn")?;
+    if let Some(short_circuit) =
+        c2r_guard_empty_axis_nd(input, s, axes, "irfftn", NdC2rDefaultAxes::AllOrShapeLen)?
+    {
+        return Ok(short_circuit);
+    }
     let arr = tensor_to_complex_array(input, "irfftn")?;
     // #808: ferray-fft 0.3.8 now performs the Hermitian projection
     // internally inside its c2r path (matches PyTorch's `aten::_fft_c2r`
@@ -1316,6 +1473,11 @@ pub fn irfft2_norm<T: Float>(
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
     reject_half_cpu_fft::<T>("irfft2")?;
+    if let Some(short_circuit) =
+        c2r_guard_empty_axis_nd(input, s, axes, "irfft2", NdC2rDefaultAxes::LastTwo)?
+    {
+        return Ok(short_circuit);
+    }
     let arr = tensor_to_complex_array(input, "irfft2")?;
     let result =
         ferray_fft::irfft2(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
@@ -1494,6 +1656,11 @@ pub fn hfft2_norm<T: Float>(
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
     reject_half_cpu_fft::<T>("hfft2")?;
+    if let Some(short_circuit) =
+        c2r_guard_empty_axis_nd(input, s, axes, "hfft2", NdC2rDefaultAxes::LastTwo)?
+    {
+        return Ok(short_circuit);
+    }
     let arr = tensor_to_complex_array(input, "hfft2")?;
     let result =
         ferray_fft::hfft2(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
@@ -1559,6 +1726,11 @@ pub fn hfftn_norm<T: Float>(
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
     reject_half_cpu_fft::<T>("hfftn")?;
+    if let Some(short_circuit) =
+        c2r_guard_empty_axis_nd(input, s, axes, "hfftn", NdC2rDefaultAxes::AllOrShapeLen)?
+    {
+        return Ok(short_circuit);
+    }
     let arr = tensor_to_complex_array(input, "hfftn")?;
     let result =
         ferray_fft::hfftn(&arr, s, axes, norm).map_err(|e| FerrotorchError::InvalidArgument {
