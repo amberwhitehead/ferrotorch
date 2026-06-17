@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 
-use crate::dtype::Float;
+use crate::dtype::{DType, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
@@ -236,6 +236,47 @@ fn stored_to_i32(val: i8, is_unsigned: bool) -> i32 {
     }
 }
 
+#[inline]
+fn torch_float_dtype_name(dtype: DType) -> &'static str {
+    match dtype {
+        DType::F32 => "Float",
+        DType::F64 => "Double",
+        DType::F16 => "Half",
+        DType::BF16 => "BFloat16",
+        _ => "NonFloat",
+    }
+}
+
+fn ensure_torch_quantize_input_dtype<T: Float>(scheme: QuantScheme) -> FerrotorchResult<()> {
+    let dtype = T::dtype();
+    if dtype == DType::F32 {
+        return Ok(());
+    }
+
+    let name = torch_float_dtype_name(dtype);
+    let message = match scheme {
+        QuantScheme::PerTensor => format!("Quantize only works on Float Tensor, got {name}"),
+        QuantScheme::PerChannel(_) => {
+            format!("quantize_tensor_per_channel_affine expects a Float Tensor, got {name}")
+        }
+    };
+    Err(FerrotorchError::InvalidArgument { message })
+}
+
+fn ensure_torch_dequantize_output_dtype<T: Float>() -> FerrotorchResult<()> {
+    let dtype = T::dtype();
+    if dtype == DType::F32 {
+        return Ok(());
+    }
+
+    Err(FerrotorchError::InvalidArgument {
+        message: format!(
+            "dequantize returns a Float Tensor in PyTorch; requested {}",
+            torch_float_dtype_name(dtype)
+        ),
+    })
+}
+
 fn compute_scale_zp_f64(
     min_val: f64,
     max_val: f64,
@@ -288,7 +329,12 @@ fn channel_index(flat_index: usize, shape: &[usize], axis: usize) -> usize {
 // Quantize
 // ---------------------------------------------------------------------------
 
-/// Quantize a floating-point tensor.
+/// Quantize an `f32` tensor.
+///
+/// PyTorch's quantized tensor constructors reject `Double`, `Half`, and
+/// `BFloat16` inputs (`Quantize only works on Float Tensor`), so this public
+/// wrapper is intentionally f32-only even though `Tensor<T>` itself supports
+/// other floating dtypes.
 ///
 /// # Per-tensor
 ///
@@ -303,6 +349,8 @@ pub fn quantize<T: Float>(
     scheme: QuantScheme,
     dtype: QuantDtype,
 ) -> FerrotorchResult<QuantizedTensor> {
+    ensure_torch_quantize_input_dtype::<T>(scheme)?;
+
     let device = tensor.device();
     if device.is_cuda() {
         return Err(FerrotorchError::NotImplementedOnCuda { op: "quantize" });
@@ -418,10 +466,16 @@ pub fn quantize<T: Float>(
 // Dequantize
 // ---------------------------------------------------------------------------
 
-/// Dequantize back to a floating-point tensor.
+/// Dequantize back to an `f32` tensor.
+///
+/// PyTorch's quantized `dequantize()` allocates a `kFloat` result, so this
+/// helper rejects other requested output dtypes instead of silently widening
+/// through an API PyTorch does not expose.
 ///
 /// Applies the inverse mapping: `x = (q - zero_point) * scale`.
 pub fn dequantize<T: Float>(qtensor: &QuantizedTensor) -> FerrotorchResult<Tensor<T>> {
+    ensure_torch_dequantize_output_dtype::<T>()?;
+
     let numel = qtensor.numel();
     let mut result = Vec::with_capacity(numel);
     let is_unsigned = qtensor.dtype == QuantDtype::Uint8;
@@ -1841,22 +1895,16 @@ mod tests {
     }
 
     #[test]
-    fn test_dequantize_f64() {
+    fn test_dequantize_rejects_f64_output_like_pytorch() {
         let data = vec![1.0f32, 2.0, 3.0, 4.0];
         let t = crate::from_slice(&data, &[4]).unwrap();
         let qt = quantize(&t, QuantScheme::PerTensor, QuantDtype::Int8).unwrap();
-        let rt: Tensor<f64> = dequantize(&qt).unwrap();
-
-        assert_eq!(rt.shape(), &[4]);
-        let recovered = rt.data().unwrap();
-        for (i, &r) in recovered.iter().enumerate() {
-            let expected = data[i] as f64;
-            let err = (expected - r).abs();
-            assert!(
-                err < 0.05,
-                "element {i}: expected={expected}, recovered={r}, error={err}"
-            );
-        }
+        let err = dequantize::<f64>(&qt).expect_err("PyTorch dequantize returns Float only");
+        assert!(
+            matches!(err, FerrotorchError::InvalidArgument { ref message }
+                if message.contains("requested Double")),
+            "unexpected f64 dequantize error: {err:?}"
+        );
     }
 
     #[test]

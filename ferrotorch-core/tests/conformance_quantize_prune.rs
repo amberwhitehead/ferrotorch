@@ -17,7 +17,7 @@
 //!
 //! Scope per the dispatch:
 //!
-//! * **Quantize forwards** (CPU; integer-domain → bit-exact codes,
+//! * **Quantize forwards** (CPU f32; integer-domain → bit-exact codes,
 //!   dequant under `F32_REDUCTION` tolerance):
 //!   - `quantize` per-tensor / per-channel for INT8, UINT8, INT4
 //!   - `dequantize` (round-trip parity within one quantization step)
@@ -104,13 +104,14 @@
 //!   - #1910: `apply_2_4_mask` uses the same CPU `topk(largest=False)`
 //!     in-block tie selection as `WeightNormSparsifier`.
 //!
-//! GPU note (per PyTorch parity):
+//! Dtype/device note (per PyTorch parity):
 //! `quantize`, `dequantize`, and `quantized_matmul` remain CPU-domain APIs
-//! here; `torch.quantize_per_tensor` rejects CUDA tensors, and
-//! ferrotorch must surface a structured error instead of silently reading
-//! GPU memory back to the host. Pruning is different: PyTorch constructs
-//! masks with tensor ops (`ones_like`, `topk`, `scatter`) and applies
-//! `mask.to(dtype=orig.dtype) * orig`, so CUDA pruning must stay
+//! here. `torch.quantize_per_tensor` accepts f32 CPU tensors and rejects
+//! CUDA, f64, f16, and bf16 inputs; `dequantize()` returns f32. ferrotorch
+//! must surface structured errors instead of silently reading GPU memory
+//! back to the host or narrowing unsupported dtypes. Pruning is different:
+//! PyTorch constructs masks with tensor ops (`ones_like`, `topk`, `scatter`)
+//! and applies `mask.to(dtype=orig.dtype) * orig`, so CUDA pruning must stay
 //! CUDA-resident and differentiable. The GPU tests below pin that contract.
 
 use std::path::PathBuf;
