@@ -48,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- Audit remaining CUDA C/C++ source emitters and FFI build paths for pure-Rust boundary (#1993)
 - JIT CUDA C/NVRTC f64 codegen must be replaced with Rust-owned PTX (#1992)
 - CORE: unary_map CUDA branch documents CPU detour but cannot read CUDA storage (#1991)
 - CORE-170: Every special function silently detaches autograd (#1864)
