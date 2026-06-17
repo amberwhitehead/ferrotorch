@@ -132,7 +132,7 @@ mod gpu {
             .unwrap()
             .to(Device::Cuda(0))
             .unwrap();
-        let n = m.not();
+        let n = m.not().expect("bool not");
         assert!(
             n.is_cuda(),
             "bool_not kernel output must stay CUDA-resident (got {:?})",

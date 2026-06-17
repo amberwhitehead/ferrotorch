@@ -229,7 +229,7 @@
     { "path": "ferrotorch_core::bool_tensor::BoolTensor::ndim", "kind": "method", "signature": "fn ndim (& self) -> usize" },
     { "path": "ferrotorch_core::bool_tensor::BoolTensor::ne", "kind": "method", "signature": "fn ne < T : Float > (a : & Tensor < T > , b : & Tensor < T >) -> FerrotorchResult < Self >" },
     { "path": "ferrotorch_core::bool_tensor::BoolTensor::ne_int", "kind": "method", "signature": "fn ne_int < I : crate :: int_tensor :: IntElement > (a : & crate :: int_tensor :: IntTensor < I > , b : & crate :: int_tensor :: IntTensor < I > ,) -> FerrotorchResult < Self >" },
-    { "path": "ferrotorch_core::bool_tensor::BoolTensor::not", "kind": "method", "signature": "fn not (& self) -> Self" },
+    { "path": "ferrotorch_core::bool_tensor::BoolTensor::not", "kind": "method", "signature": "fn not (& self) -> FerrotorchResult < Self >" },
     { "path": "ferrotorch_core::bool_tensor::BoolTensor::numel", "kind": "method", "signature": "fn numel (& self) -> usize" },
     { "path": "ferrotorch_core::bool_tensor::BoolTensor::ones", "kind": "method", "signature": "fn ones (shape : & [usize]) -> Self" },
     { "path": "ferrotorch_core::bool_tensor::BoolTensor::or", "kind": "method", "signature": "fn or (& self , other : & Self) -> FerrotorchResult < Self >" },

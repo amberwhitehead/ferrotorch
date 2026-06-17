@@ -288,7 +288,7 @@ fn check_logical(pass: &mut usize, fail: &mut usize) {
             "and" => a_g.and(&b_g).unwrap(),
             "or" => a_g.or(&b_g).unwrap(),
             "xor" => a_g.xor(&b_g).unwrap(),
-            "not(a)" => a_g.not(),
+            "not(a)" => a_g.not().unwrap(),
             _ => unreachable!(),
         };
         let resident = r.is_cuda();

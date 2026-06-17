@@ -698,7 +698,7 @@ fn bool_not_pointwise() {
         let shape = f.shape.as_ref().expect("shape");
         let a_data = f.bool_a_data.as_ref().expect("bool_a_data");
         let a = BoolTensor::from_vec(a_data.clone(), shape.clone()).expect("from_vec");
-        let n = a.not();
+        let n = a.not().expect("bool not");
         let expected = f.out_bool_data.as_ref().expect("out_bool_data");
         assert_bool_eq(n.data().expect("data"), expected, &label);
     }

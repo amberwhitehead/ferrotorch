@@ -340,25 +340,15 @@ impl BoolTensor {
     }
 
     /// Pointwise NOT. GPU path (resident) when CUDA-resident, else CPU.
-    pub fn not(&self) -> Self {
+    pub fn not(&self) -> FerrotorchResult<Self> {
         if self.is_cuda() {
-            // GPU path: a CUDA NOT failure is a programmer/driver error here
-            // (the kernel is unconditional), so unwrap into a panic rather than
-            // silently degrading — `not` has the infallible `-> Self` signature.
-            return self
-                .unary_gpu(|b, h| b.bool_not(h))
-                .expect("BoolTensor::not GPU kernel");
+            return self.unary_gpu(|b, h| b.bool_not(h));
         }
-        let out: Vec<bool> = self
-            .data()
-            .expect("CPU BoolTensor data")
-            .iter()
-            .map(|&b| !b)
-            .collect();
-        Self {
+        let out: Vec<bool> = self.data()?.iter().map(|&b| !b).collect();
+        Ok(Self {
             storage: Arc::new(TensorStorage::cpu(out)),
             shape: self.shape.clone(),
-        }
+        })
     }
 
     /// Pointwise AND, broadcasting compatible shapes (mirrors
@@ -913,8 +903,28 @@ mod tests {
     #[test]
     fn pointwise_not() {
         let m = BoolTensor::from_vec(vec![true, false, true], vec![3]).unwrap();
-        let n = m.not();
+        let n = m.not().unwrap();
         assert_eq!(n.data().unwrap(), &[false, true, false]);
+    }
+
+    #[test]
+    fn pointwise_not_cuda_backend_absence_is_structured_error() {
+        // A CUDA-resident BoolTensor can exist at the core storage boundary
+        // even before a backend is registered. `not()` must propagate that
+        // ordinary backend error instead of panicking.
+        let handle = unsafe {
+            // SAFETY: this test never passes the erased allocation to a real
+            // backend. It only uses the handle metadata to select the CUDA path
+            // and verify missing-backend error propagation.
+            GpuBufferHandle::new(
+                Box::new(vec![1_u8, 0, 1]),
+                0,
+                3,
+                <bool as crate::dtype::Element>::dtype(),
+            )
+        };
+        let m = BoolTensor::from_gpu_handle(handle, vec![3]).unwrap();
+        assert!(matches!(m.not(), Err(FerrotorchError::DeviceUnavailable)));
     }
 
     #[test]
