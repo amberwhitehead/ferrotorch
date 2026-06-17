@@ -14,24 +14,26 @@ upstream-paths:
 `ferrotorch-core/src/einsum.rs` implements `einsum` and the
 differentiable wrapper `einsum_differentiable` — the Rust mirror of
 `torch.einsum` (`torch/functional.py:einsum`). The forward parser
-accepts both explicit (`"ij,jk->ik"`) and implicit (`"ij,jk"`)
-notation. Single-input equations (transpose, axis-sum, trace,
-diagonal extraction) and two-input contractions (matmul, batched
-matmul, generic permute+reshape+matmul) lower to GPU-aware primitives
-under crosslink #803 / #821 / #822 — pure CPU detours for CUDA
-operands are explicitly rejected via
-`FerrotorchError::NotImplementedOnCuda` when no decomposition exists.
+accepts explicit (`"ij,jk->ik"`) and implicit (`"ij,jk"`) notation,
+ASCII uppercase/lowercase labels, ellipsis, shared-label size-1/zero
+broadcasting, and one or more operands. Single-input equations
+(transpose, axis-sum, trace, diagonal extraction), two-input
+contractions (matmul, batched matmul, generic permute+reshape+matmul),
+and n-ary contractions lower to Rust/GPU-aware primitive composites
+under crosslink #803 / #821 / #822 / #1861 — pure CPU detours for CUDA
+operands are forbidden.
 
 ## Requirements
 
 - REQ-1: `einsum(equation, &[&Tensor<T>])` — forward einsum. Accepts
-  1 or 2 inputs; rejects 0 or >2 with `InvalidArgument`. Mirrors
-  `torch.einsum` (`torch/functional.py:einsum`).
+  one or more inputs and rejects zero inputs with `InvalidArgument`.
+  Mirrors `torch.einsum` (`torch/functional.py:einsum`).
 - REQ-2: Equation parser — explicit `"lhs->rhs"` and implicit
-  `"lhs"` (output = sorted unique single-occurrence indices). Mirrors
-  `torch.einsum` parsing in
-  `torch/functional.py:einsum` and the C++ `at::native::einsum`
-  (`aten/src/ATen/native/Linear.cpp`).
+  `"lhs"` (output = ellipsis axes first, then sorted unique
+  single-occurrence labels). Supports `[A-Za-z]`, ellipsis, explicit
+  ellipsis output, and ellipsis reduction. Mirrors `torch.einsum`
+  parsing in `torch/functional.py:einsum` and the C++
+  `at::native::einsum` (`aten/src/ATen/native/Linear.cpp`).
 - REQ-3: Single-input ops — pure permutation (e.g. `"ij->ji"`), axis
   sum / projection (`"ij->i"`), full reduction (`"ij->"`), and the
   repeated-index extension (`"ii->"` trace, `"ii->i"` diagonal,
@@ -44,13 +46,15 @@ operands are explicitly rejected via
   contractions (#822). Mirrors `at::native::einsum` two-operand
   contraction path.
 - REQ-5: `einsum_differentiable(equation, inputs)` — wraps the
-  forward result with `EinsumBackwardSingle` / `EinsumBackwardTwo`
-  when grad is enabled and any input requires grad. Participates in
-  autocast (classified `ReducedPrecision` via
+  forward result with `EinsumBackwardSingle`, `EinsumBackwardTwo`, or
+  `EinsumBackwardN` when grad is enabled and any input requires grad.
+  Participates in autocast (classified `ReducedPrecision` via
   `autocast_guard("einsum")`).
 - REQ-6: Dimension-map consistency check — `build_dim_map` validates
-  every repeated index resolves to the same size across all inputs;
-  output indices must reference known dims.
+  every repeated index inside one operand resolves to the same size,
+  and shared labels across operands are PyTorch-broadcast-compatible
+  (`same`, `1`, or `0`/`1` zero contraction cases); output indices
+  must reference known dims.
 - REQ-7: GPU dispatch discipline — `Err(NotImplementedOnCuda)` for
   equations whose structure cannot be lowered to existing GPU
   primitives. No silent CPU detour.
@@ -70,24 +74,26 @@ operands are explicitly rejected via
   sample — SHIPPED 2026-05-26 (closes #1532). Runner arm at
   `tools/parity-sweep/runner/src/main.rs` decodes op_db's
   `[List[Tensor], equation: str]` envelope and dispatches through
-  `ferrotorch_core::einsum::einsum_differentiable`. Current sweep
-  reports `[einsum] 64/88 passed (24 skipped, 0 failed)` — the 24
-  skips correspond to equations exercising the ellipsis / uppercase
-  / whitespace parser extensions that ferrotorch's REQ-2 narrower
-  parser deliberately rejects (legitimate-skip, not divergences).
+  `ferrotorch_core::einsum::einsum_differentiable`.
+- [x] AC-6: CORE-167 coverage proves uppercase labels, ellipsis
+  permutation/reduction, shared-label size-1 broadcasting, and n-ary
+  forward/backward against live PyTorch-derived oracles.
 
 ## Architecture
 
-The parser at `einsum.rs:72-142` splits on `->`, validates only ASCII
-lowercase characters, and (in implicit mode) builds the output as
-sorted-unique single-occurrence indices via a `BTreeMap<char,
-usize>`. `build_dim_map` at `:149-199` walks every (subscripts,
-tensor) pair, asserting matching ndim and consistent index→size
-mapping; output indices must be present in the dim map.
+The parser at `einsum.rs` splits on `->`, tokenises labels and
+ellipsis, expands ellipsis to private internal labels, and (in
+implicit mode) builds the output as ellipsis axes followed by
+sorted-unique single-occurrence labels via a `BTreeMap<char, usize>`.
+`build_dim_map` walks every (subscripts, tensor) pair, asserting
+matching ndim, exact repeated-label sizes within one operand, and
+PyTorch-compatible broadcast sizes across operands; output indices
+must be present in the dim map.
 
-`einsum` at `:1517` is the eager forward entry. It dispatches to
-`einsum_single` (1 input) or `einsum_two` (2 inputs). For single-
-input equations the handler distinguishes pure permutation, axis
+`einsum` is the eager forward entry. It dispatches to `einsum_single`
+(1 input), `einsum_two` (2 inputs), or left-to-right pairwise
+contraction for n-ary inputs. For single-input equations the handler
+distinguishes pure permutation, axis
 reduction, full reduction, and the repeated-index diagonal/trace
 extension (#821). For two-input equations it identifies the
 contracting indices (present in BOTH inputs but NOT in output),
@@ -98,11 +104,12 @@ operand to `[batch_dims, free_dims, contract_dims]` for A and
 `[batch, M, K]` / `[batch, K, N]`, applies `bmm`, then reshapes +
 permutes back (#822).
 
-`einsum_differentiable` at `:1543` wraps the forward result. It runs
+`einsum_differentiable` wraps the forward result. It runs
 `autocast_guard("einsum")` (classified as `ReducedPrecision` in the
 autocast policy), runs forward, and — if grad is enabled and any
 input requires grad — attaches `EinsumBackwardSingle { equation,
-input }` or `EinsumBackwardTwo { equation, a, b }`. The backward
+input }`, `EinsumBackwardTwo { equation, a, b }`, or
+`EinsumBackwardN { equation, inputs }`. The backward
 implementation recursively builds the partner-input einsum needed
 for the VJP: for two-input contractions, `dL/dA = einsum("dL/dC, B
 indices on conjugate side", grad_output, b)` and symmetric for `B`.
@@ -124,32 +131,28 @@ as `pub use einsum::{einsum, einsum_differentiable}`.
 `torch.einsum` op_db samples and compares against
 `ferrotorch_core::einsum_differentiable`. As of 2026-05-26 (#1532
 closed) the runner has an `einsum` dispatch arm at
-`tools/parity-sweep/runner/src/main.rs`'s `dispatch_f32` and the
-smoke command reports `[einsum] 64/88 passed (24 skipped, 0
-failed)`. The 24 skips correspond to op_db samples that exercise
-the ellipsis (`'i...->...'`), uppercase (`'ij,Ab->ijAb'`), or
-whitespace (`'...ik, ...j -> ij'`) parser extensions that
-ferrotorch's REQ-2 narrower parser deliberately rejects. No
-failing samples — every dispatched equation matches torch
-byte-for-byte at the default rtol=1e-5 envelope.
+`tools/parity-sweep/runner/src/main.rs`'s `dispatch_f32`. CORE-167
+removes the former ellipsis / uppercase / n-ary parser-surface reason
+for skips; the runner skip table must not treat those equation classes
+as legitimate exclusions.
 
 ## Verification
 
 `cargo test -p ferrotorch-core --lib einsum::tests` covers parser,
 single-input, two-input, repeated-index, and autograd paths.
-`./target/release/parity-sweep sweep --op einsum --seeds 8` reports
-`64/88 passed (24 skipped, 0 failed)` post-#1532. The 24 skips are
-parser-narrower legitimate skips (ellipsis / uppercase /
-whitespace); no divergences.
+`cargo test -p ferrotorch-core --test audit_core167_einsum_surface`
+covers the CORE-167 PyTorch surface: uppercase labels, ellipsis
+permutation/reduction, size-1 shared-label broadcasting, n-ary
+forward, and n-ary backward.
 
 ## REQ status table
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `einsum` at `einsum.rs:1517` mirrors `torch.einsum` (`torch/functional.py:einsum`); non-test consumer: `Tensor::einsum` at `methods.rs:638` invokes `einsum_differentiable` which routes to `einsum` |
+| REQ-1 | SHIPPED | impl: `einsum` in `einsum.rs` mirrors `torch.einsum` (`torch/functional.py:einsum`); non-test consumer: `Tensor::einsum` at `methods.rs:638` invokes `einsum_differentiable` which routes to `einsum` |
 | REQ-2 | SHIPPED | impl: `parse_equation` at `einsum in einsum.rs`; non-test consumer: every call into `einsum_differentiable` → `einsum` triggers `parse_equation` first |
 | REQ-3 | SHIPPED | impl: `einsum_single` (referenced at `einsum_single in einsum.rs`), repeated-index decomposition through `crate::stride_tricks::as_strided_copy` (#821 path) inside `einsum_single`; non-test consumer: `Tensor::einsum` at `einsum in methods.rs` |
 | REQ-4 | SHIPPED | impl: `einsum_two` (referenced at `:1532`); non-test consumer: `Tensor::einsum` at `methods.rs:638` |
-| REQ-5 | SHIPPED | impl: `einsum_differentiable` at `einsum.rs:1543` with `EinsumBackwardSingle`/`EinsumBackwardTwo` wrap; non-test consumer: `Tensor::einsum` at `methods.rs:641` invokes `einsum_differentiable` (the method-surface boundary IS the public API per goal.md S5) |
+| REQ-5 | SHIPPED | impl: `einsum_differentiable` in `einsum.rs` with `EinsumBackwardSingle`/`EinsumBackwardTwo`/`EinsumBackwardN` wrap; non-test consumer: `Tensor::einsum` at `methods.rs:641` invokes `einsum_differentiable` (the method-surface boundary IS the public API per goal.md S5) |
 | REQ-6 | SHIPPED | impl: `build_dim_map` at `einsum.rs:149`; non-test consumer: every call into `einsum_differentiable` → `einsum` → `build_dim_map` |
 | REQ-7 | SHIPPED | impl: documented in the module-level `//!` comment at `einsum in einsum.rs` and the `Err(NotImplementedOnCuda)` returns inside `einsum_two` for non-decomposable equations; non-test consumer: `Tensor::einsum` |

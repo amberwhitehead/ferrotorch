@@ -1,8 +1,11 @@
 //! Einstein summation (`einsum`) for ferrotorch tensors.
 //!
-//! Supports both explicit (`"ij,jk->ik"`) and implicit (`"ij,jk"`) notation.
-//! Handles single-input operations (trace, transpose, axis-sum) and two-input
-//! contractions via the TTGT (transpose-transpose-GEMM-transpose) algorithm.
+//! Supports both explicit (`"ij,jk->ik"`) and implicit (`"ij,jk"`) notation,
+//! ASCII uppercase/lowercase labels, ellipsis, PyTorch-style shared-label
+//! broadcasting, and one or more operands. Handles single-input operations
+//! (trace, transpose, axis-sum), optimized two-input contractions via TTGT
+//! (transpose-transpose-GEMM-transpose), and n-ary contractions through
+//! left-to-right pairwise contraction.
 //!
 //! ## Device dispatch (#803)
 //!
@@ -18,10 +21,11 @@
 //! * Two-input matmul (`"ij,jk->ik"`): `grad_fns::linalg::matmul_differentiable`.
 //! * Two-input batched matmul (`"bij,bjk->bik"`): `grad_fns::linalg::bmm`.
 //!
-//! Equations whose structure does not map onto the existing GPU primitives
-//! return [`FerrotorchError::NotImplementedOnCuda`] rather than silently
-//! materialising the operands on CPU. Per `rust-gpu-discipline` §3, no
-//! silent CPU detour is permitted in a non-autograd path.
+//! Equations whose optimized two-input structure does not map onto the existing
+//! matmul/bmm primitives fall back to a resident GPU composite over
+//! `permute_t`/`reshape`/`expand`/`mul`/`sum_dim`; they do not silently
+//! materialise the operands on CPU. Per `rust-gpu-discipline` §3, no silent CPU
+//! detour is permitted in a non-autograd path.
 //!
 //! ## Repeated-index extension (#821)
 //!
@@ -54,8 +58,8 @@
 //! | REQ-1 | SHIPPED | `einsum` at `einsum.rs:1517`; consumer: `Tensor::einsum` at `methods.rs:638` invokes `einsum_differentiable` |
 //! | REQ-2 | SHIPPED | `parse_equation` at `einsum.rs:72`; consumer: every `einsum` call |
 //! | REQ-3 | SHIPPED | `einsum_single` referenced at `einsum.rs:1531`; consumer: `Tensor::einsum` at `methods.rs:638` |
-//! | REQ-4 | SHIPPED | `einsum_two` referenced at `einsum.rs:1532`; consumer: `Tensor::einsum` at `methods.rs:638` |
-//! | REQ-5 | SHIPPED | `einsum_differentiable` at `einsum.rs:1543`; consumer: `Tensor::einsum` at `methods.rs:641` |
+//! | REQ-4 | SHIPPED | `einsum_two` / n-ary pairwise contraction in this module; consumer: `Tensor::einsum` at `methods.rs:638` |
+//! | REQ-5 | SHIPPED | `einsum_differentiable` with single/two/n-ary backward nodes; consumer: `Tensor::einsum` at `methods.rs:641` |
 //! | REQ-6 | SHIPPED | `build_dim_map` at `einsum.rs:149`; consumer: every `einsum` call |
 //! | REQ-7 | SHIPPED | documented in `//!` at `einsum.rs:8-24`; parity-sweep runner gap tracked by #1532 |
 
@@ -80,60 +84,79 @@ struct ParsedEquation {
     output_subscripts: Vec<char>,
 }
 
-/// Parse an einsum equation string like `"ij,jk->ik"` or `"ij,jk"`.
-fn parse_equation(equation: &str, n_inputs: usize) -> FerrotorchResult<ParsedEquation> {
-    let equation = equation.replace(' ', "");
+const ELLIPSIS_LABEL_BASE: u32 = 0xE000;
 
-    let (lhs, output_subscripts) = if let Some((lhs, rhs)) = equation.split_once("->") {
-        // Explicit output.
-        let out: Vec<char> = rhs.chars().collect();
-        // Validate: output indices must all be alphabetic.
-        for &c in &out {
-            if !c.is_ascii_lowercase() {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: format!("einsum: invalid character '{c}' in output subscripts"),
-                });
-            }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubscriptToken {
+    Label(char),
+    Ellipsis,
+}
+
+fn ellipsis_label(index: usize) -> char {
+    char::from_u32(ELLIPSIS_LABEL_BASE + index as u32)
+        .expect("private-use ellipsis label must be valid Unicode")
+}
+
+fn is_ellipsis_label(c: char) -> bool {
+    let code = c as u32;
+    (ELLIPSIS_LABEL_BASE..ELLIPSIS_LABEL_BASE + 1024).contains(&code)
+}
+
+fn is_named_label(c: char) -> bool {
+    c.is_ascii_alphabetic() || is_ellipsis_label(c)
+}
+
+fn parse_subscript_tokens(part: &str, role: &str) -> FerrotorchResult<Vec<SubscriptToken>> {
+    let chars: Vec<char> = part.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
         }
-        // Reject repeated output subscripts (CORE-165 / #1859). torch:
-        // `einsum(): output subscript i appears more than once in the
-        // output` (aten einsum sumproduct_pair path). Accepting them
-        // silently overwrites coordinates on CPU and panics or errors on
-        // other paths.
-        let mut seen = std::collections::HashSet::new();
-        for &c in &out {
-            if !seen.insert(c) {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: format!(
-                        "einsum: output subscript '{c}' appears more than once in the output"
-                    ),
-                });
-            }
-        }
-        (lhs.to_string(), out)
-    } else {
-        // Implicit mode: output is sorted unique indices that appear exactly once.
-        let lhs = equation.clone();
-        let mut counts: BTreeMap<char, usize> = BTreeMap::new();
-        for c in lhs.chars() {
-            if c == ',' {
+        if c == '.' {
+            if i + 2 < chars.len() && chars[i + 1] == '.' && chars[i + 2] == '.' {
+                out.push(SubscriptToken::Ellipsis);
+                i += 3;
                 continue;
             }
-            if !c.is_ascii_lowercase() {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: format!("einsum: invalid character '{c}' in subscripts"),
-                });
-            }
-            *counts.entry(c).or_insert(0) += 1;
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("einsum: found '.' in {role} that is not part of an ellipsis"),
+            });
         }
-        // Indices appearing exactly once, sorted alphabetically (BTreeMap is already sorted).
-        let out: Vec<char> = counts
-            .into_iter()
-            .filter(|&(_, count)| count == 1)
-            .map(|(c, _)| c)
-            .collect();
-        (lhs, out)
-    };
+        if !is_named_label(c) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("einsum: invalid character '{c}' in {role} subscripts"),
+            });
+        }
+        out.push(SubscriptToken::Label(c));
+        i += 1;
+    }
+    Ok(out)
+}
+
+fn count_explicit_labels(tokens: &[SubscriptToken]) -> usize {
+    tokens
+        .iter()
+        .filter(|&&token| matches!(token, SubscriptToken::Label(_)))
+        .count()
+}
+
+fn has_ellipsis(tokens: &[SubscriptToken]) -> bool {
+    tokens
+        .iter()
+        .any(|&token| matches!(token, SubscriptToken::Ellipsis))
+}
+
+/// Parse an einsum equation string like `"ij,jk->ik"` or `"ij,jk"`.
+fn parse_equation(equation: &str, input_shapes: &[&[usize]]) -> FerrotorchResult<ParsedEquation> {
+    let n_inputs = input_shapes.len();
+
+    let (lhs, rhs) = equation
+        .split_once("->")
+        .map_or((equation, None), |(l, r)| (l, Some(r)));
 
     // Parse input subscripts.
     let input_parts: Vec<&str> = lhs.split(',').collect();
@@ -147,20 +170,128 @@ fn parse_equation(equation: &str, n_inputs: usize) -> FerrotorchResult<ParsedEqu
         });
     }
 
-    let input_subscripts: Vec<Vec<char>> = input_parts
+    let input_tokens: Vec<Vec<SubscriptToken>> = input_parts
         .iter()
-        .map(|part| {
-            let chars: Vec<char> = part.chars().collect();
-            for &c in &chars {
-                if !c.is_ascii_lowercase() {
-                    return Err(FerrotorchError::InvalidArgument {
-                        message: format!("einsum: invalid character '{c}' in input subscripts"),
-                    });
+        .map(|part| parse_subscript_tokens(part, "input"))
+        .collect::<FerrotorchResult<Vec<_>>>()?;
+
+    let mut label_counts: BTreeMap<char, usize> = BTreeMap::new();
+    let mut ellipsis_rank = 0usize;
+    for (operand, (tokens, shape)) in input_tokens.iter().zip(input_shapes.iter()).enumerate() {
+        if tokens
+            .iter()
+            .filter(|&&token| matches!(token, SubscriptToken::Ellipsis))
+            .count()
+            > 1
+        {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("einsum: operand {operand} has more than one ellipsis"),
+            });
+        }
+
+        let explicit = count_explicit_labels(tokens);
+        let has_ell = has_ellipsis(tokens);
+        if has_ell {
+            if explicit > shape.len() {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "einsum: input {operand} has {explicit} explicit subscripts but tensor has {} dimensions",
+                        shape.len()
+                    ),
+                });
+            }
+            ellipsis_rank = ellipsis_rank.max(shape.len() - explicit);
+        } else if explicit != shape.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "einsum: input {operand} has {explicit} subscripts but tensor has {} dimensions",
+                    shape.len()
+                ),
+            });
+        }
+
+        for &token in tokens {
+            if let SubscriptToken::Label(c) = token {
+                *label_counts.entry(c).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let input_subscripts: Vec<Vec<char>> = input_tokens
+        .iter()
+        .zip(input_shapes.iter())
+        .map(|(tokens, shape)| {
+            let explicit = count_explicit_labels(tokens);
+            let covered = if has_ellipsis(tokens) {
+                shape.len() - explicit
+            } else {
+                0
+            };
+            let ellipsis_start = ellipsis_rank - covered;
+            let mut labels = Vec::with_capacity(shape.len());
+            for &token in tokens {
+                match token {
+                    SubscriptToken::Label(c) => labels.push(c),
+                    SubscriptToken::Ellipsis => {
+                        labels.extend((ellipsis_start..ellipsis_rank).map(ellipsis_label));
+                    }
                 }
             }
-            Ok(chars)
+            labels
         })
-        .collect::<FerrotorchResult<Vec<_>>>()?;
+        .collect();
+
+    let output_subscripts = if let Some(rhs) = rhs {
+        let output_tokens = parse_subscript_tokens(rhs, "output")?;
+        if output_tokens
+            .iter()
+            .filter(|&&token| matches!(token, SubscriptToken::Ellipsis))
+            .count()
+            > 1
+        {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "einsum: output has more than one ellipsis".into(),
+            });
+        }
+        let mut out = Vec::new();
+        for token in output_tokens {
+            match token {
+                SubscriptToken::Label(c) => {
+                    if !label_counts.contains_key(&c) {
+                        return Err(FerrotorchError::InvalidArgument {
+                            message: format!(
+                                "einsum: output index '{c}' does not appear in any input subscripts"
+                            ),
+                        });
+                    }
+                    out.push(c);
+                }
+                SubscriptToken::Ellipsis => {
+                    out.extend((0..ellipsis_rank).map(ellipsis_label));
+                }
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        for &c in &out {
+            if !seen.insert(c) {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "einsum: output subscript '{c}' appears more than once in the output"
+                    ),
+                });
+            }
+        }
+        out
+    } else {
+        let mut out: Vec<char> = (0..ellipsis_rank).map(ellipsis_label).collect();
+        out.extend(
+            label_counts
+                .into_iter()
+                .filter(|&(_, count)| count == 1)
+                .map(|(c, _)| c),
+        );
+        out
+    };
 
     Ok(ParsedEquation {
         input_subscripts,
@@ -214,18 +345,38 @@ fn build_dim_map<T: Float>(
                 ),
             });
         }
+        let mut local_sizes: BTreeMap<char, usize> = BTreeMap::new();
         for (axis, &c) in subs.iter().enumerate() {
             let size = tensor.shape()[axis];
-            if let Some(&existing) = dim_map.get(&c) {
+            if let Some(&existing) = local_sizes.get(&c) {
                 if existing != size {
                     return Err(FerrotorchError::ShapeMismatch {
                         message: format!(
-                            "einsum: index '{c}' has inconsistent sizes: {existing} vs {size}"
+                            "einsum: repeated index '{c}' in operand {i} has inconsistent sizes: {existing} vs {size}"
                         ),
                     });
                 }
-            } else {
-                dim_map.insert(c, size);
+                continue;
+            }
+            local_sizes.insert(c, size);
+        }
+
+        for (c, size) in local_sizes {
+            match dim_map.get(&c).copied() {
+                Some(existing) if existing == size => {}
+                Some(existing) if size == 1 => {
+                    dim_map.insert(c, existing);
+                }
+                Some(1) | None => {
+                    dim_map.insert(c, size);
+                }
+                Some(existing) => {
+                    return Err(FerrotorchError::ShapeMismatch {
+                        message: format!(
+                            "einsum: index '{c}' has size {size} for operand {i} which does not broadcast with previously seen size {existing}"
+                        ),
+                    });
+                }
             }
         }
     }
@@ -242,6 +393,164 @@ fn build_dim_map<T: Float>(
     }
 
     Ok(dim_map)
+}
+
+fn validate_same_device<T: Float>(op: &str, inputs: &[&Tensor<T>]) -> FerrotorchResult<()> {
+    let Some(first) = inputs.first() else {
+        return Ok(());
+    };
+    let expected = first.device();
+    for tensor in inputs.iter().skip(1) {
+        if tensor.device() != expected {
+            return Err(FerrotorchError::DeviceMismatch {
+                expected,
+                got: tensor.device(),
+            });
+        }
+    }
+    if expected.is_xpu() || expected.is_mps() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: device {expected} is not implemented for einsum"),
+        });
+    }
+    Ok(())
+}
+
+fn needs_operand_broadcast<T: Float>(
+    parsed: &ParsedEquation,
+    inputs: &[&Tensor<T>],
+    dim_map: &BTreeMap<char, usize>,
+) -> bool {
+    parsed
+        .input_subscripts
+        .iter()
+        .zip(inputs.iter())
+        .any(|(subs, tensor)| {
+            subs.iter()
+                .enumerate()
+                .any(|(axis, &c)| tensor.shape()[axis] != dim_map[&c])
+        })
+}
+
+fn chars_to_string(chars: &[char]) -> String {
+    chars.iter().collect()
+}
+
+fn first_occurrence_union(lhs: &[char], rhs: &[char]) -> Vec<char> {
+    let mut out = Vec::with_capacity(lhs.len() + rhs.len());
+    for &c in lhs.iter().chain(rhs.iter()) {
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn nary_pair_output_subscripts(
+    lhs: &[char],
+    rhs: &[char],
+    remaining: &[Vec<char>],
+    final_output: &[char],
+) -> Vec<char> {
+    first_occurrence_union(lhs, rhs)
+        .into_iter()
+        .filter(|c| final_output.contains(c) || remaining.iter().any(|subs| subs.contains(c)))
+        .collect()
+}
+
+fn full_product_order(parsed: &ParsedEquation, dim_map: &BTreeMap<char, usize>) -> Vec<char> {
+    let mut order = parsed.output_subscripts.clone();
+    for &c in dim_map.keys() {
+        if !order.contains(&c) {
+            order.push(c);
+        }
+    }
+    order
+}
+
+fn align_operand_for_product<T: Float>(
+    subs: &[char],
+    tensor: &Tensor<T>,
+    full_order: &[char],
+    full_shape: &[usize],
+) -> FerrotorchResult<Tensor<T>> {
+    let (dedup_subs, diagonalised) = diagonalize_repeats_gpu(subs, tensor)?;
+    let present: Vec<char> = full_order
+        .iter()
+        .copied()
+        .filter(|c| dedup_subs.contains(c))
+        .collect();
+
+    let ordered = if present == dedup_subs || present.is_empty() {
+        diagonalised
+    } else {
+        let perm: Vec<usize> = present
+            .iter()
+            .map(|c| {
+                dedup_subs
+                    .iter()
+                    .position(|dc| dc == c)
+                    .ok_or_else(|| FerrotorchError::Internal {
+                        message: format!("einsum product align: missing operand label '{c}'"),
+                    })
+            })
+            .collect::<FerrotorchResult<Vec<_>>>()?;
+        let view = crate::methods::permute_t(&diagonalised, &perm)?;
+        crate::methods::contiguous_t(&view)?
+    };
+
+    let mut reshape_shape = Vec::with_capacity(full_order.len());
+    for &c in full_order {
+        if let Some(axis) = present.iter().position(|&pc| pc == c) {
+            reshape_shape.push(ordered.shape()[axis] as isize);
+        } else {
+            reshape_shape.push(1);
+        }
+    }
+    let reshaped = crate::grad_fns::shape::reshape(&ordered, &reshape_shape)?;
+    if reshaped.shape() == full_shape {
+        Ok(reshaped)
+    } else {
+        crate::grad_fns::shape::expand(&reshaped, full_shape)
+    }
+}
+
+fn einsum_product_composite<T: Float>(
+    parsed: &ParsedEquation,
+    inputs: &[&Tensor<T>],
+    dim_map: &BTreeMap<char, usize>,
+) -> FerrotorchResult<Tensor<T>> {
+    validate_same_device("einsum", inputs)?;
+    no_grad(|| {
+        let full_order = full_product_order(parsed, dim_map);
+        let full_shape: Vec<usize> = full_order.iter().map(|c| dim_map[c]).collect();
+        let mut aligned = Vec::with_capacity(inputs.len());
+        for (subs, tensor) in parsed.input_subscripts.iter().zip(inputs.iter()) {
+            aligned.push(align_operand_for_product(
+                subs,
+                tensor,
+                &full_order,
+                &full_shape,
+            )?);
+        }
+
+        let mut product =
+            aligned
+                .first()
+                .cloned()
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: "einsum: expected at least one input tensor".into(),
+                })?;
+        for operand in aligned.iter().skip(1) {
+            product = crate::grad_fns::arithmetic::mul(&product, operand)?;
+        }
+
+        let mut reduced = product;
+        for axis in (parsed.output_subscripts.len()..full_order.len()).rev() {
+            reduced = crate::grad_fns::reduction::sum_dim(&reduced, axis as i64, false)?;
+        }
+        crate::methods::contiguous_t(&reduced)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1235,7 +1544,12 @@ fn einsum_two<T: Float>(
                 got: b.device(),
             });
         }
-        return einsum_two_gpu(parsed, a, b, dim_map);
+        return match einsum_two_gpu(parsed, a, b, dim_map) {
+            Err(FerrotorchError::NotImplementedOnCuda { .. }) => {
+                einsum_product_composite(parsed, &[a, b], dim_map)
+            }
+            other => other,
+        };
     }
 
     let a_subs = &parsed.input_subscripts[0];
@@ -1404,27 +1718,35 @@ fn einsum_two<T: Float>(
         contract_chars: &[char],
         contract_vals: &[usize],
         a_char_to_axis: &BTreeMap<char, Vec<usize>>,
+        a_shape: &[usize],
         a_strides: &[usize],
     ) -> usize {
         let mut flat = 0usize;
         for (i, &c) in batch_chars.iter().enumerate() {
             if let Some(axes) = a_char_to_axis.get(&c) {
                 for &ax in axes {
-                    flat += batch_vals[i] * a_strides[ax];
+                    let v = if a_shape[ax] == 1 { 0 } else { batch_vals[i] };
+                    flat += v * a_strides[ax];
                 }
             }
         }
         for (i, &c) in free_a_chars.iter().enumerate() {
             if let Some(axes) = a_char_to_axis.get(&c) {
                 for &ax in axes {
-                    flat += free_a_vals[i] * a_strides[ax];
+                    let v = if a_shape[ax] == 1 { 0 } else { free_a_vals[i] };
+                    flat += v * a_strides[ax];
                 }
             }
         }
         for (i, &c) in contract_chars.iter().enumerate() {
             if let Some(axes) = a_char_to_axis.get(&c) {
                 for &ax in axes {
-                    flat += contract_vals[i] * a_strides[ax];
+                    let v = if a_shape[ax] == 1 {
+                        0
+                    } else {
+                        contract_vals[i]
+                    };
+                    flat += v * a_strides[ax];
                 }
             }
         }
@@ -1441,27 +1763,35 @@ fn einsum_two<T: Float>(
         contract_chars: &[char],
         contract_vals: &[usize],
         b_char_to_axis: &BTreeMap<char, Vec<usize>>,
+        b_shape: &[usize],
         b_strides: &[usize],
     ) -> usize {
         let mut flat = 0usize;
         for (i, &c) in batch_chars.iter().enumerate() {
             if let Some(axes) = b_char_to_axis.get(&c) {
                 for &ax in axes {
-                    flat += batch_vals[i] * b_strides[ax];
+                    let v = if b_shape[ax] == 1 { 0 } else { batch_vals[i] };
+                    flat += v * b_strides[ax];
                 }
             }
         }
         for (i, &c) in contract_chars.iter().enumerate() {
             if let Some(axes) = b_char_to_axis.get(&c) {
                 for &ax in axes {
-                    flat += contract_vals[i] * b_strides[ax];
+                    let v = if b_shape[ax] == 1 {
+                        0
+                    } else {
+                        contract_vals[i]
+                    };
+                    flat += v * b_strides[ax];
                 }
             }
         }
         for (i, &c) in free_b_chars.iter().enumerate() {
             if let Some(axes) = b_char_to_axis.get(&c) {
                 for &ax in axes {
-                    flat += free_b_vals[i] * b_strides[ax];
+                    let v = if b_shape[ax] == 1 { 0 } else { free_b_vals[i] };
+                    flat += v * b_strides[ax];
                 }
             }
         }
@@ -1490,6 +1820,7 @@ fn einsum_two<T: Float>(
                         &contract_chars,
                         &contract_vals,
                         &a_char_to_axis,
+                        a_shape,
                         &a_strides,
                     );
                     let b_flat = compute_b_flat(
@@ -1500,6 +1831,7 @@ fn einsum_two<T: Float>(
                         &contract_chars,
                         &contract_vals,
                         &b_char_to_axis,
+                        b_shape,
                         &b_strides,
                     );
                     acc += a_data[a_flat] * b_data[b_flat];
@@ -1580,6 +1912,46 @@ fn row_major_strides(shape: &[usize]) -> Vec<usize> {
     strides
 }
 
+fn einsum_nary_pairwise<T: Float>(
+    parsed: &ParsedEquation,
+    inputs: &[&Tensor<T>],
+) -> FerrotorchResult<Tensor<T>> {
+    validate_same_device("einsum", inputs)?;
+    let mut current = inputs[0].clone();
+    let mut current_subs = parsed.input_subscripts[0].clone();
+
+    for operand_idx in 1..inputs.len() {
+        let rhs_subs = &parsed.input_subscripts[operand_idx];
+        let remaining = &parsed.input_subscripts[operand_idx + 1..];
+        let pair_out = nary_pair_output_subscripts(
+            &current_subs,
+            rhs_subs,
+            remaining,
+            &parsed.output_subscripts,
+        );
+        let equation = format!(
+            "{},{}->{}",
+            chars_to_string(&current_subs),
+            chars_to_string(rhs_subs),
+            chars_to_string(&pair_out)
+        );
+        let next = einsum(&equation, &[&current, inputs[operand_idx]])?;
+        current = next;
+        current_subs = pair_out;
+    }
+
+    if current_subs == parsed.output_subscripts {
+        return Ok(current);
+    }
+
+    let equation = format!(
+        "{}->{}",
+        chars_to_string(&current_subs),
+        chars_to_string(&parsed.output_subscripts)
+    );
+    einsum(&equation, &[&current])
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -1607,22 +1979,28 @@ fn row_major_strides(shape: &[usize]) -> Vec<usize> {
 /// let t = einsum("ij->ji", &[&a])?;
 /// ```
 pub fn einsum<T: Float>(equation: &str, inputs: &[&Tensor<T>]) -> FerrotorchResult<Tensor<T>> {
-    if inputs.is_empty() || inputs.len() > 2 {
+    if inputs.is_empty() {
         return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "einsum: expected 1 or 2 input tensors, got {}",
-                inputs.len()
-            ),
+            message: "einsum: expected at least one input tensor, got 0".into(),
         });
     }
 
-    let parsed = parse_equation(equation, inputs.len())?;
+    let input_shapes: Vec<&[usize]> = inputs.iter().map(|tensor| tensor.shape()).collect();
+    let parsed = parse_equation(equation, &input_shapes)?;
     let dim_map = build_dim_map(&parsed, inputs)?;
 
-    let result = match inputs.len() {
-        1 => einsum_single(&parsed, inputs[0], &dim_map)?,
-        2 => einsum_two(&parsed, inputs[0], inputs[1], &dim_map)?,
-        _ => unreachable!(),
+    let result = if inputs.len() > 2 {
+        einsum_nary_pairwise(&parsed, inputs)?
+    } else if inputs.iter().any(|tensor| tensor.is_cuda())
+        && needs_operand_broadcast(&parsed, inputs, &dim_map)
+    {
+        einsum_product_composite(&parsed, inputs, &dim_map)?
+    } else {
+        match inputs.len() {
+            1 => einsum_single(&parsed, inputs[0], &dim_map)?,
+            2 => einsum_two(&parsed, inputs[0], inputs[1], &dim_map)?,
+            _ => unreachable!(),
+        }
     };
 
     Ok(result)
@@ -1650,7 +2028,8 @@ pub fn einsum_differentiable<T: Float>(
         // implicit-mode outputs as empty (CORE-164 / #1858). The
         // re-parse here cannot fail: `einsum` above already parsed the
         // same string for the same input count.
-        let canonical = canonical_equation(&parse_equation(equation, inputs.len())?);
+        let input_shapes: Vec<&[usize]> = inputs.iter().map(|tensor| tensor.shape()).collect();
+        let canonical = canonical_equation(&parse_equation(equation, &input_shapes)?);
         let wrapped = match inputs.len() {
             1 => {
                 let grad_fn = Arc::new(EinsumBackwardSingle {
@@ -1675,7 +2054,14 @@ pub fn einsum_differentiable<T: Float>(
                 let (storage, shape) = result.into_storage_and_shape()?;
                 Tensor::from_operation(storage, shape, grad_fn)
             }
-            _ => Ok(result),
+            _ => {
+                let grad_fn = Arc::new(EinsumBackwardN {
+                    equation: canonical,
+                    inputs: inputs.iter().map(|tensor| (*tensor).clone()).collect(),
+                });
+                let (storage, shape) = result.into_storage_and_shape()?;
+                Tensor::from_operation(storage, shape, grad_fn)
+            }
         }?;
         Ok(wrapped)
     } else {
@@ -1709,7 +2095,7 @@ impl<T: Float> GradFn<T> for EinsumBackwardSingle<T> {
             .split_once("->")
             .unwrap_or((&self.equation, ""));
 
-        let in_subs: Vec<char> = lhs.chars().filter(|c| c.is_ascii_lowercase()).collect();
+        let in_subs: Vec<char> = lhs.chars().collect();
         let out_subs: Vec<char> = rhs.chars().collect();
 
         // Repeated input indices (e.g. "ii->" trace, "ii->i" diagonal):
@@ -1923,6 +2309,63 @@ impl<T: Float> EinsumBackwardSingle<T> {
     }
 }
 
+fn reduce_and_expand_gradient_to_target<T, F>(
+    g: Tensor<T>,
+    present: &[char],
+    target_dedup: &[char],
+    size_of: F,
+) -> FerrotorchResult<Tensor<T>>
+where
+    T: Float,
+    F: Fn(char) -> usize,
+{
+    if g.ndim() != present.len() {
+        return Err(FerrotorchError::Internal {
+            message: format!(
+                "einsum backward: derived gradient has {} dims but {} present labels",
+                g.ndim(),
+                present.len()
+            ),
+        });
+    }
+
+    let mut reduced = g;
+    for axis in (0..present.len()).rev() {
+        let c = present[axis];
+        let current = reduced.shape()[axis];
+        let target = size_of(c);
+        if current == target {
+            continue;
+        }
+        if target == 1 {
+            reduced = crate::grad_fns::reduction::sum_dim(&reduced, axis as i64, true)?;
+        } else if current != 1 {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "einsum backward: label '{c}' gradient size {current} cannot be reduced or expanded to target size {target}"
+                ),
+            });
+        }
+    }
+
+    let mut unsq_shape = Vec::with_capacity(target_dedup.len());
+    for &c in target_dedup {
+        if let Some(axis) = present.iter().position(|&pc| pc == c) {
+            unsq_shape.push(reduced.shape()[axis] as isize);
+        } else {
+            unsq_shape.push(1);
+        }
+    }
+    let full_shape: Vec<usize> = target_dedup.iter().map(|&c| size_of(c)).collect();
+    let reshaped = crate::grad_fns::shape::reshape(&reduced, &unsq_shape)?;
+    if reshaped.shape() == full_shape.as_slice() {
+        crate::methods::contiguous_t(&reshaped)
+    } else {
+        let expanded = crate::grad_fns::shape::expand(&reshaped, &full_shape)?;
+        crate::methods::contiguous_t(&expanded)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Backward: two-input
 // ---------------------------------------------------------------------------
@@ -2040,30 +2483,15 @@ impl<T: Float> EinsumBackwardTwo<T> {
             )?
         };
 
-        // Step 3: broadcast back along lone (forward-summed) chars.
-        let g = if present.len() == x_dedup.len() {
-            g
-        } else {
-            let unsq_shape: Vec<isize> = x_dedup
-                .iter()
-                .map(|&c| {
-                    if present.contains(&c) {
-                        size_of(c) as isize
-                    } else {
-                        1
-                    }
-                })
-                .collect();
-            let full_shape: Vec<usize> = x_dedup.iter().map(|&c| size_of(c)).collect();
-            let g_unsq = crate::grad_fns::shape::reshape(&g, &unsq_shape)?;
-            crate::grad_fns::shape::expand(&g_unsq, &full_shape)?
-        };
+        // Step 3: reduce or expand every recoverable char back to the target
+        // operand's deduped shape. This covers both lone chars (insert a
+        // size-1 axis then expand) and shared-label broadcasting (sum when the
+        // target carried size 1, expand when the other operand carried size 1).
+        let g = reduce_and_expand_gradient_to_target(g, &present, &x_dedup, size_of)?;
 
         // Step 4: diagonal-embed for repeated subscripts.
         if !has_duplicate_chars(&x_subs) {
-            // Materialise stride views (from `expand`) so downstream grad
-            // accumulation sees a contiguous buffer.
-            return crate::methods::contiguous_t(&g);
+            return Ok(g);
         }
         // View `g` (shape per x_dedup) over the operand's full rank with
         // size-1 axes at every non-first occurrence of a repeated char,
@@ -2152,6 +2580,156 @@ impl<T: Float> GradFn<T> for EinsumBackwardTwo<T> {
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
         vec![&self.a, &self.b]
+    }
+
+    fn name(&self) -> &'static str {
+        "EinsumBackward"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backward: n-input
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct EinsumBackwardN<T: Float> {
+    equation: String,
+    inputs: Vec<Tensor<T>>,
+}
+
+impl<T: Float> EinsumBackwardN<T> {
+    fn grad_for_target(
+        &self,
+        target: usize,
+        grad_output: &Tensor<T>,
+    ) -> FerrotorchResult<Tensor<T>> {
+        let (lhs, rhs) =
+            self.equation
+                .split_once("->")
+                .ok_or_else(|| FerrotorchError::Internal {
+                    message: format!(
+                        "EinsumBackwardN: stored equation '{}' is not canonical (no '->')",
+                        self.equation
+                    ),
+                })?;
+        let parts: Vec<&str> = lhs.split(',').collect();
+        if parts.len() != self.inputs.len() {
+            return Err(FerrotorchError::Internal {
+                message: format!(
+                    "EinsumBackwardN: stored equation '{}' has {} inputs but backward stored {} tensors",
+                    self.equation,
+                    parts.len(),
+                    self.inputs.len()
+                ),
+            });
+        }
+        if target >= self.inputs.len() {
+            return Err(FerrotorchError::Internal {
+                message: format!(
+                    "EinsumBackwardN: target {target} out of range for {} tensors",
+                    self.inputs.len()
+                ),
+            });
+        }
+
+        let x_str = parts[target];
+        let x_subs: Vec<char> = x_str.chars().collect();
+        let out_subs: Vec<char> = rhs.chars().collect();
+        let x = &self.inputs[target];
+        let x_shape = x.shape();
+        let size_of = |c: char| -> usize {
+            x_subs
+                .iter()
+                .position(|&xc| xc == c)
+                .map_or(1, |axis| x_shape[axis])
+        };
+
+        let mut x_dedup: Vec<char> = Vec::with_capacity(x_subs.len());
+        for &c in &x_subs {
+            if !x_dedup.contains(&c) {
+                x_dedup.push(c);
+            }
+        }
+
+        let present: Vec<char> = x_dedup
+            .iter()
+            .copied()
+            .filter(|c| {
+                out_subs.contains(c)
+                    || parts
+                        .iter()
+                        .enumerate()
+                        .any(|(idx, part)| idx != target && part.chars().any(|oc| oc == *c))
+            })
+            .collect();
+        let present_str = chars_to_string(&present);
+
+        let mut lhs_parts = Vec::with_capacity(parts.len());
+        lhs_parts.push(rhs.to_string());
+        for (idx, part) in parts.iter().enumerate() {
+            if idx != target {
+                lhs_parts.push((*part).to_string());
+            }
+        }
+        let derived_equation = format!("{}->{}", lhs_parts.join(","), present_str);
+
+        let mut operands: Vec<&Tensor<T>> = Vec::with_capacity(parts.len());
+        operands.push(grad_output);
+        for (idx, input) in self.inputs.iter().enumerate() {
+            if idx != target {
+                operands.push(input);
+            }
+        }
+
+        let g = einsum(&derived_equation, &operands)?;
+        let g = reduce_and_expand_gradient_to_target(g, &present, &x_dedup, size_of)?;
+
+        if !has_duplicate_chars(&x_subs) {
+            return Ok(g);
+        }
+
+        let view_shape: Vec<isize> = {
+            let mut seen: Vec<char> = Vec::new();
+            x_subs
+                .iter()
+                .map(|&c| {
+                    if seen.contains(&c) {
+                        1
+                    } else {
+                        seen.push(c);
+                        size_of(c) as isize
+                    }
+                })
+                .collect()
+        };
+        let g_contig = crate::methods::contiguous_t(&g)?;
+        let g_view = crate::grad_fns::shape::reshape(&g_contig, &view_shape)?;
+        let g_full = crate::grad_fns::shape::expand(&g_view, x_shape)?;
+        let mask = diagonal_mask::<T>(&x_subs, x_shape)?;
+        let mask = if x.is_cuda() {
+            mask.to(x.device())?
+        } else {
+            mask
+        };
+        crate::grad_fns::arithmetic::mul(&g_full, &mask)
+    }
+}
+
+impl<T: Float> GradFn<T> for EinsumBackwardN<T> {
+    fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+        let mut grads = Vec::with_capacity(self.inputs.len());
+        for idx in 0..self.inputs.len() {
+            if self.inputs[idx].requires_grad() {
+                grads.push(Some(self.grad_for_target(idx, grad_output)?));
+            } else {
+                grads.push(None);
+            }
+        }
+        Ok(grads)
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<T>> {
+        self.inputs.iter().collect()
     }
 
     fn name(&self) -> &'static str {
@@ -2430,8 +3008,13 @@ mod tests {
         let a = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
         let b = t(&[5.0, 6.0, 7.0, 8.0], &[2, 2]);
 
-        // Wrong number of inputs.
+        // Wrong number of inputs for the equation.
         assert!(einsum("ij,jk,kl->il", &[&a, &b]).is_err());
+
+        // Three-input contractions are valid and contract left-to-right.
+        let eye = t(&[1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let three = einsum("ij,jk,kl->il", &[&a, &b, &eye]).unwrap();
+        assert_close(three.data().unwrap(), &[19.0, 22.0, 43.0, 50.0], 1e-6);
 
         // Subscript count mismatch with tensor dims.
         assert!(einsum("ijk,jk->ik", &[&a, &b]).is_err());

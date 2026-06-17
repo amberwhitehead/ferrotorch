@@ -1128,11 +1128,11 @@ fn einops_reduction_variants_cover_every_discriminator() {
 }
 
 // ---------------------------------------------------------------------------
-// Negative-shape coverage: einsum errors on >2 inputs (per source comment).
+// Einsum n-ary coverage: torch-compatible >2 input contractions.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn einsum_rejects_more_than_two_inputs() {
+fn einsum_accepts_more_than_two_inputs() {
     let a = Tensor::from_storage(
         TensorStorage::cpu(vec![1.0_f32, 2.0, 3.0, 4.0]),
         vec![2, 2],
@@ -1152,9 +1152,13 @@ fn einsum_rejects_more_than_two_inputs() {
     )
     .expect("build c");
     let r = einsum::<f32>("ij,jk,kl->il", &[&a, &b, &c]);
-    assert!(
-        r.is_err(),
-        "einsum with 3 inputs must error (ferrotorch's einsum is 1-or-2-input only)"
+    let r = r.expect("3-input einsum");
+    assert_eq!(r.shape(), &[2, 2]);
+    tolerance::assert_close_f32(
+        r.data().expect("read 3-input einsum"),
+        &[19.0, 22.0, 43.0, 50.0],
+        1e-6,
+        "3-input einsum",
     );
 }
 

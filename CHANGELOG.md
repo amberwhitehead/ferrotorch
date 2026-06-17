@@ -48,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- CORE-167: Torch-legal einsum surface rejected: ellipsis, uppercase labels, size-1 broadcasting, n-ary contraction (#1861)
 - Audit remaining CUDA C/C++ source emitters and FFI build paths for pure-Rust boundary (#1993)
 - JIT CUDA C/NVRTC f64 codegen must be replaced with Rust-owned PTX (#1992)
 - CORE: unary_map CUDA branch documents CPU detour but cannot read CUDA storage (#1991)
