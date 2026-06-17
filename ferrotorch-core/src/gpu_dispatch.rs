@@ -6986,6 +6986,18 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// bf16 elementwise scalar exponent pow. PyTorch CUDA converts the scalar
+    /// exponent to bf16 first, then performs f32 opmath and bf16 RNE store.
+    fn pow_bf16_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _exponent: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "pow_bf16_bf16",
+        })
+    }
+
     // ── IEEE float16 (f16) ops — crosslink #1185 Phase 1 ─────────────────────
     //
     // f16 storage is `CudaSlice<u16>` (same width as bf16) but the
@@ -7290,6 +7302,12 @@ pub trait GpuBackend: Send + Sync {
     /// f16 elementwise `out = sqrt(a)`. f32 internal, f16 RNE store.
     fn sqrt_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda { op: "sqrt_f16" })
+    }
+
+    /// f16 elementwise scalar exponent pow. PyTorch CUDA converts the scalar
+    /// exponent to f16 first, then performs f32 opmath and f16 RNE store.
+    fn pow_f16(&self, _a: &GpuBufferHandle, _exponent: f32) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "pow_f16" })
     }
 
     /// f16 elementwise ReLU `max(0, a)`.

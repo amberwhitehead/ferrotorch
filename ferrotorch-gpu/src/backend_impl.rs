@@ -10058,6 +10058,18 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
     }
 
+    #[cfg(feature = "cuda")]
+    fn pow_bf16_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        exponent: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_pow_bf16(buf, exponent, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
     // ── IEEE float16 (f16) ops — crosslink #1185 Phase 1 ─────────────────────
     //
     // Each unwraps with `unwrap_buffer_f16` (asserts the F16 tag, rejecting a
@@ -10597,6 +10609,14 @@ impl GpuBackend for CudaBackendImpl {
         let buf = Self::unwrap_buffer_f16(a)?;
         let dev = self.device(a.device_ordinal())?;
         let result = crate::f16::gpu_sqrt_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn pow_f16(&self, a: &GpuBufferHandle, exponent: f32) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_pow_f16(buf, exponent, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
     }
 

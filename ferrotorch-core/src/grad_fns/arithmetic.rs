@@ -19,7 +19,7 @@
 //! | REQ-5 (neg) | SHIPPED | `neg` + `NegBackward`; parity `[neg] 8/8` (grep=1) |
 //! | REQ-6 (abs) | SHIPPED | `abs` + `AbsBackward`; parity `[abs] 8/8` (grep=1) |
 //! | REQ-7 (sqrt) | SHIPPED | `sqrt` + `SqrtBackward`; parity `[sqrt] 8/8` (grep=1) |
-//! | REQ-8 (pow scalar exponent) | SHIPPED | `pow` + `PowBackward` (scalar exp; tensor-exp overload returns `Ok(None)` and is skipped, not failed); parity `[pow] 24/72 passed 48 skipped` (grep=1) |
+//! | REQ-8 (pow scalar exponent) | SHIPPED | `pow` + `PowBackward` (scalar exp; CUDA f32/f64/bf16/f16 resident kernels; tensor-exp overload returns `Ok(None)` and is skipped, not failed) |
 //! | REQ-9 (rsub) | SHIPPED | `rsub` at `arithmetic.rs:1822` delegates to `sub_scaled(b,a,alpha)`; consumer `Tensor::rsub_t` in `methods.rs`; parity `[rsub]` (grep=1) |
 //! | REQ-10 (rsqrt) | SHIPPED | `rsqrt` at `arithmetic.rs:2712` + `RsqrtBackward` at `:2610`; consumer `Tensor::rsqrt_t` in `methods.rs`; parity `[rsqrt] 24/24` (grep=1) |
 //! | REQ-11 (reciprocal) | SHIPPED | `reciprocal` at `arithmetic.rs:2867` + `ReciprocalBackward` at `:2784`; consumer `Tensor::reciprocal_t` in `methods.rs`; parity `[reciprocal] 24/24` (grep=1) |
@@ -62,6 +62,20 @@ fn is_bf16<T: Float>() -> bool {
 #[inline]
 fn is_f16<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<half::f16>()
+}
+
+fn scalar_exponent_to_dtype_f32<T: Float>(
+    exp: f64,
+    dtype_name: &'static str,
+) -> FerrotorchResult<f32> {
+    let rounded = T::from(exp).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: format!("pow exponent {exp} cannot be represented as {dtype_name}"),
+    })?;
+    rounded
+        .to_f32()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("pow exponent {exp} cannot be converted from {dtype_name} to f32"),
+        })
 }
 
 /// Materialize a CUDA tensor into a fresh buffer whose backing storage
@@ -2412,15 +2426,21 @@ pub fn pow<T: Float>(a: &Tensor<T>, exp: f64) -> FerrotorchResult<Tensor<T>> {
 }
 
 fn pow_inner<T: Float>(a: &Tensor<T>, exp: f64) -> FerrotorchResult<Tensor<T>> {
-    if a.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+    if a.is_cuda() && (is_f32::<T>() || is_f64::<T>() || is_bf16::<T>() || is_f16::<T>()) {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         // #812 cluster: materialize non-contiguous CUDA views before kernel.
         let a_c = ensure_contig_for_gpu(a)?;
         let handle = if is_f32::<T>() {
             backend.pow_f32(a_c.gpu_handle()?, exp as f32)?
-        } else {
+        } else if is_f64::<T>() {
             backend.pow_f64(a_c.gpu_handle()?, exp)?
+        } else if is_bf16::<T>() {
+            let exp_f32 = scalar_exponent_to_dtype_f32::<T>(exp, "bf16")?;
+            backend.pow_bf16_bf16(a_c.gpu_handle()?, exp_f32)?
+        } else {
+            let exp_f32 = scalar_exponent_to_dtype_f32::<T>(exp, "f16")?;
+            backend.pow_f16(a_c.gpu_handle()?, exp_f32)?
         };
         let storage = TensorStorage::gpu(handle);
         let shape = a_c.shape().to_vec();

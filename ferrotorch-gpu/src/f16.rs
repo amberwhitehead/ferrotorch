@@ -892,6 +892,78 @@ fn launch_unary(
     Ok(out)
 }
 
+fn pow_f16_ptx() -> String {
+    crate::kernels::POW_PTX
+        .replace("pow_kernel", "pow_f16_kernel")
+        .replace(".target sm_52", ".target sm_53")
+        .replace(
+            ".reg .u64 %a, %out, %off;",
+            ".reg .u64 %a, %out, %off;\n    .reg .b16 %a_b16, %out_h;",
+        )
+        .replace("shl.b64 %off, %off, 2;", "shl.b64 %off, %off, 1;")
+        .replace(
+            "ld.global.f32 %va, [%a];",
+            "ld.global.b16 %a_b16, [%a];\n    cvt.f32.f16 %va, %a_b16;",
+        )
+        .replace(
+            "STORE_SQRT:\n    sqrt.rn.f32 %vr, %va;",
+            "STORE_SQRT:\n    setp.lt.f32 %p, %va, 0f00000000;\n    @%p bra STORE_NAN;\n    sqrt.rn.f32 %vr, %va;",
+        )
+        .replace(
+            "STORE_RSQRT:\n    sqrt.rn.f32 %vr, %va;",
+            "STORE_RSQRT:\n    setp.lt.f32 %p, %va, 0f00000000;\n    @%p bra STORE_NAN;\n    sqrt.rn.f32 %vr, %va;",
+        )
+        .replace(
+            "st.global.f32 [%out], %vr;",
+            "cvt.rn.f16.f32 %out_h, %vr;\n    st.global.b16 [%out], %out_h;",
+        )
+}
+
+fn launch_pow_scalar(
+    a: &cudarc::driver::CudaSlice<u16>,
+    exponent: f32,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let n = a.len();
+    if n == 0 {
+        return Ok(device.stream().alloc_zeros::<u16>(0)?);
+    }
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let ptx: &'static str = CACHE.get_or_init(pow_f16_ptx).as_str();
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = get_or_compile(ctx, ptx, "pow_f16_kernel", device.ordinal() as u32).map_err(|e| {
+        GpuError::PtxCompileFailed {
+            kernel: "pow_f16_kernel",
+            source: e,
+        }
+    })?;
+    let mut out = stream.alloc_zeros::<u16>(n)?;
+    let cfg = launch_1d(n);
+    let n_u32 = n as u32;
+    // SAFETY:
+    // - `f` resolves to `pow_f16_kernel`, generated from the audited f32
+    //   scalar-exponent `pow_kernel` with only entry-name, f16 load/store, and
+    //   2-byte stride substitutions. ABI remains `(a_ptr, out_ptr, exponent,
+    //   n)`, matching the four arguments pushed below.
+    // - `a` is the caller's f16 input buffer of length `n`; the PTX bound
+    //   check skips threads with `tid >= n`.
+    // - `out` is freshly allocated with `n` u16 elements and cannot alias `a`.
+    // - `exponent` is the dtype-rounded scalar exponent expressed as f32, with
+    //   lifetime covering the launch call.
+    // - `n_u32` is the same cast used by `launch_1d(n)`.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a)
+            .arg(&mut out)
+            .arg(&exponent)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
 fn launch_clamp(
     a: &cudarc::driver::CudaSlice<u16>,
     min_val: f32,
@@ -1604,6 +1676,17 @@ pub fn gpu_sqrt_f16(
     device: &GpuDevice,
 ) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
     launch_unary(a, device, SQRT_F16_PTX, "sqrt_f16_kernel")
+}
+
+/// Elementwise `out = a.pow(exponent)` on f16 GPU buffers. The exponent is
+/// already rounded to f16 by the core dispatcher, matching PyTorch CUDA's
+/// `exp_scalar.to<scalar_t>()` tensor-scalar pow path.
+pub fn gpu_pow_f16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    exponent: f32,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_pow_scalar(a, exponent, device)
 }
 
 // ===========================================================================
