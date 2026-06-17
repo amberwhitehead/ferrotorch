@@ -287,12 +287,10 @@ fn lock_default_rng() -> MutexGuard<'static, Generator> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-#[cfg(debug_assertions)]
 struct DefaultRngTestSerialGuard {
     guard: Option<MutexGuard<'static, ()>>,
 }
 
-#[cfg(debug_assertions)]
 impl Drop for DefaultRngTestSerialGuard {
     fn drop(&mut self) {
         if self.guard.is_some() {
@@ -301,12 +299,10 @@ impl Drop for DefaultRngTestSerialGuard {
     }
 }
 
-#[cfg(debug_assertions)]
 thread_local! {
     static DEFAULT_RNG_TEST_SERIAL_ACTIVE: Cell<bool> = const { Cell::new(false) };
 }
 
-#[cfg(debug_assertions)]
 fn default_rng_test_serial_guard() -> DefaultRngTestSerialGuard {
     if DEFAULT_RNG_TEST_SERIAL_ACTIVE.with(|active| active.get()) {
         return DefaultRngTestSerialGuard { guard: None };
@@ -320,13 +316,12 @@ fn default_rng_test_serial_guard() -> DefaultRngTestSerialGuard {
     DefaultRngTestSerialGuard { guard: Some(guard) }
 }
 
-/// Run a debug/test-only critical section over the process-global default RNG.
+/// Run a test-only critical section over the process-global default RNG.
 ///
 /// This is for tests that need `manual_seed(seed)` and one or more following
 /// random operations to be observed as one deterministic transaction under the
-/// parallel Rust test harness. Release builds do not expose or pay for this
-/// helper.
-#[cfg(debug_assertions)]
+/// parallel Rust test harness. The normal release RNG paths still avoid this
+/// extra serialization unless a test calls this hidden helper directly.
 #[doc(hidden)]
 pub fn with_default_rng_test_lock<R>(f: impl FnOnce() -> R) -> R {
     let _guard = default_rng_test_serial_guard();

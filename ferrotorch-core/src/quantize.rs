@@ -753,7 +753,7 @@ impl QParams {
 /// Trait for quantization observers that collect data statistics.
 pub trait Observer {
     /// Update the observer with a batch of floating-point values.
-    fn observe(&mut self, data: &[f32]);
+    fn observe(&mut self, data: &[f32]) -> FerrotorchResult<()>;
     /// Calculate quantization parameters from collected statistics.
     fn calculate_qparams(&self, dtype: QuantDtype) -> QParams;
     /// Reset the observer state.
@@ -780,16 +780,8 @@ impl MinMaxObserver {
             max_val: f32::NEG_INFINITY,
         }
     }
-}
 
-impl Default for MinMaxObserver {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Observer for MinMaxObserver {
-    fn observe(&mut self, data: &[f32]) {
+    fn observe_finite(&mut self, data: &[f32]) {
         for &x in data {
             if !x.is_finite() {
                 continue;
@@ -801,6 +793,19 @@ impl Observer for MinMaxObserver {
                 self.max_val = x;
             }
         }
+    }
+}
+
+impl Default for MinMaxObserver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Observer for MinMaxObserver {
+    fn observe(&mut self, data: &[f32]) -> FerrotorchResult<()> {
+        self.observe_finite(data);
+        Ok(())
     }
 
     fn calculate_qparams(&self, dtype: QuantDtype) -> QParams {
@@ -820,8 +825,8 @@ impl Observer for MinMaxObserver {
 /// Tracks per-channel running min/max of observed values.
 ///
 /// Filters out NaN and Inf values before updating min/max.
-/// Logs a warning and returns an error when the channel count of incoming
-/// data doesn't match the configured number of channels.
+/// Returns structured errors when the configured channel count or incoming
+/// flat/shape data cannot describe a dense tensor.
 #[derive(Debug, Clone)]
 pub struct PerChannelMinMaxObserver {
     num_channels: usize,
@@ -835,13 +840,19 @@ impl PerChannelMinMaxObserver {
     ///
     /// * `num_channels` — expected number of channels.
     /// * `axis` — the axis along which channels are sliced.
-    pub fn new(num_channels: usize, axis: usize) -> Self {
-        Self {
+    pub fn new(num_channels: usize, axis: usize) -> FerrotorchResult<Self> {
+        if num_channels == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "PerChannelMinMaxObserver requires at least one channel".to_string(),
+            });
+        }
+
+        Ok(Self {
             num_channels,
             axis,
             min_vals: vec![f32::INFINITY; num_channels],
             max_vals: vec![f32::NEG_INFINITY; num_channels],
-        }
+        })
     }
 
     /// Observe a tensor's data with the given shape.
@@ -869,6 +880,17 @@ impl PerChannelMinMaxObserver {
                 ),
             });
         }
+        let expected_len = crate::shape::checked_numel(shape, "PerChannelMinMaxObserver")?;
+        if data.len() != expected_len {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "PerChannelMinMaxObserver expected {} values for shape {:?}, got {}",
+                    expected_len,
+                    shape,
+                    data.len()
+                ),
+            });
+        }
 
         for (i, &x) in data.iter().enumerate() {
             if !x.is_finite() {
@@ -887,14 +909,24 @@ impl PerChannelMinMaxObserver {
 }
 
 impl Observer for PerChannelMinMaxObserver {
-    fn observe(&mut self, data: &[f32]) {
+    fn observe(&mut self, data: &[f32]) -> FerrotorchResult<()> {
         // Without shape info, we treat data as [num_channels, N] where N = len / num_channels.
-        // If `data` isn't divisible by `num_channels`, skip silently — the
-        // caller can use the shape-aware `observe_with_shape` if they need a
-        // reportable error. The previous `eprintln!` was unactionable noise
-        // and is forbidden by `rust-quality` §4 (`print_stderr` lint).
+        // A non-divisible flat slice cannot be a valid dense tensor in this
+        // layout, so report the malformed observation instead of preserving a
+        // silent no-op path.
+        if self.num_channels == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "PerChannelMinMaxObserver requires at least one channel".to_string(),
+            });
+        }
         if !data.len().is_multiple_of(self.num_channels) {
-            return;
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "PerChannelMinMaxObserver expected flat data length divisible by {} channels, got {}",
+                    self.num_channels,
+                    data.len()
+                ),
+            });
         }
         let per_channel = data.len() / self.num_channels;
         for (i, &x) in data.iter().enumerate() {
@@ -912,6 +944,7 @@ impl Observer for PerChannelMinMaxObserver {
                 self.max_vals[ch] = x;
             }
         }
+        Ok(())
     }
 
     fn calculate_qparams(&self, dtype: QuantDtype) -> QParams {
@@ -955,9 +988,8 @@ impl HistogramObserver {
     /// Create a histogram observer with a strictly positive bin count.
     ///
     /// PyTorch's underlying histogram kernel rejects `bins=0` when finite data
-    /// is observed. ferrotorch's `Observer::observe` API is infallible, so the
-    /// invalid configuration is rejected at construction instead of leaving a
-    /// later panic path.
+    /// is observed. ferrotorch rejects the invalid configuration at construction
+    /// instead of leaving a later panic path.
     pub fn new(num_bins: usize) -> FerrotorchResult<Self> {
         if num_bins == 0 {
             return Err(FerrotorchError::InvalidArgument {
@@ -1234,7 +1266,7 @@ impl HistogramObserver {
 }
 
 impl Observer for HistogramObserver {
-    fn observe(&mut self, data: &[f32]) {
+    fn observe(&mut self, data: &[f32]) -> FerrotorchResult<()> {
         // First pass: find min/max of new data, filtering NaN/Inf.
         let mut finite = Vec::new();
         let mut batch_min = f32::INFINITY;
@@ -1254,7 +1286,7 @@ impl Observer for HistogramObserver {
 
         if batch_min > batch_max {
             // No finite values in this batch.
-            return;
+            return Ok(());
         }
 
         // Check if range needs expanding.
@@ -1271,7 +1303,7 @@ impl Observer for HistogramObserver {
 
         if !self.initialized {
             self.reset_histogram(&finite, new_min, new_max);
-            return;
+            return Ok(());
         }
 
         let update_histogram = Self::histc(&finite, self.num_bins, new_min, new_max);
@@ -1292,6 +1324,7 @@ impl Observer for HistogramObserver {
             self.max_val = new_max;
             self.initialized = true;
         }
+        Ok(())
     }
 
     fn calculate_qparams(&self, dtype: QuantDtype) -> QParams {
@@ -1377,7 +1410,7 @@ impl FakeQuantize {
     /// The mask is 1.0 for in-range values and 0.0 for out-of-range values.
     pub fn forward(&mut self, data: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let observed_qparams = if self.observer_enabled {
-            self.observer.observe(data);
+            self.observer.observe_finite(data);
             let qp = self.calculate_qparams();
             self.qparams = Some(qp.clone());
             Some(qp)
@@ -1956,8 +1989,8 @@ mod tests {
     #[test]
     fn test_minmax_observer() {
         let mut obs = MinMaxObserver::new();
-        obs.observe(&[1.0, 2.0, 3.0]);
-        obs.observe(&[-1.0, 5.0]);
+        obs.observe(&[1.0, 2.0, 3.0]).unwrap();
+        obs.observe(&[-1.0, 5.0]).unwrap();
         let qp = obs.calculate_qparams(QuantDtype::Int8);
         // Range includes zero: min=-1, max=5.
         assert_eq!(qp.scale.len(), 1);
@@ -1975,7 +2008,8 @@ mod tests {
     #[test]
     fn test_minmax_observer_filters_nan_inf() {
         let mut obs = MinMaxObserver::new();
-        obs.observe(&[1.0, f32::NAN, 2.0, f32::INFINITY, -1.0, f32::NEG_INFINITY]);
+        obs.observe(&[1.0, f32::NAN, 2.0, f32::INFINITY, -1.0, f32::NEG_INFINITY])
+            .unwrap();
         let qp = obs.calculate_qparams(QuantDtype::Int8);
         // Should only see range [-1, 2], NaN/Inf filtered.
         let expected_range = 2.0 - (-1.0); // = 3.0
@@ -1987,7 +2021,7 @@ mod tests {
 
     #[test]
     fn test_per_channel_observer_with_shape() {
-        let mut obs = PerChannelMinMaxObserver::new(2, 0);
+        let mut obs = PerChannelMinMaxObserver::new(2, 0).expect("valid channel count");
         // Shape [2, 3]: channel 0 = [0, 1, 2], channel 1 = [10, 20, 30]
         obs.observe_with_shape(&[0.0, 1.0, 2.0, 10.0, 20.0, 30.0], &[2, 3])
             .unwrap();
@@ -1998,7 +2032,7 @@ mod tests {
 
     #[test]
     fn test_per_channel_observer_shape_mismatch() {
-        let mut obs = PerChannelMinMaxObserver::new(3, 0);
+        let mut obs = PerChannelMinMaxObserver::new(3, 0).expect("valid channel count");
         // Shape [2, 3] has 2 channels on axis 0, but observer expects 3.
         let result = obs.observe_with_shape(&[1.0; 6], &[2, 3]);
         assert!(result.is_err());
@@ -2006,7 +2040,7 @@ mod tests {
 
     #[test]
     fn test_per_channel_observer_axis() {
-        let mut obs = PerChannelMinMaxObserver::new(3, 1);
+        let mut obs = PerChannelMinMaxObserver::new(3, 1).expect("valid channel count");
         // Shape [2, 3]: axis 1 has 3 channels.
         obs.observe_with_shape(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
             .unwrap();
@@ -2016,7 +2050,7 @@ mod tests {
 
     #[test]
     fn test_per_channel_observer_filters_nan_inf() {
-        let mut obs = PerChannelMinMaxObserver::new(2, 0);
+        let mut obs = PerChannelMinMaxObserver::new(2, 0).expect("valid channel count");
         obs.observe_with_shape(&[f32::NAN, 1.0, 2.0, 10.0, f32::INFINITY, 30.0], &[2, 3])
             .unwrap();
         // Channel 0 should only see [1, 2], channel 1 should only see [10, 30].
@@ -2024,12 +2058,46 @@ mod tests {
         assert_eq!(qp.scale.len(), 2);
     }
 
+    #[test]
+    fn test_per_channel_observer_zero_channels_rejected() {
+        assert!(matches!(
+            PerChannelMinMaxObserver::new(0, 0),
+            Err(FerrotorchError::InvalidArgument { .. })
+        ));
+    }
+
+    #[test]
+    fn test_per_channel_observer_flat_malformed_length_errors() {
+        let mut obs = PerChannelMinMaxObserver::new(2, 0).expect("valid channel count");
+        let err = obs
+            .observe(&[1.0, 2.0, 3.0])
+            .expect_err("flat per-channel observation length must be divisible by channels");
+        assert!(matches!(
+            err,
+            FerrotorchError::InvalidArgument { ref message }
+                if message.contains("divisible by 2 channels")
+        ));
+    }
+
+    #[test]
+    fn test_per_channel_observer_shape_length_mismatch_errors() {
+        let mut obs = PerChannelMinMaxObserver::new(2, 0).expect("valid channel count");
+        let err = obs
+            .observe_with_shape(&[1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3])
+            .expect_err("shape-aware observation must match shape product");
+        assert!(matches!(
+            err,
+            FerrotorchError::InvalidArgument { ref message }
+                if message.contains("expected 6 values")
+        ));
+    }
+
     // ----- HistogramObserver -----
 
     #[test]
     fn test_histogram_observer_basic() {
         let mut obs = HistogramObserver::new(100).expect("valid positive bin count");
-        obs.observe(&[0.0, 0.5, 1.0]);
+        obs.observe(&[0.0, 0.5, 1.0]).unwrap();
         let qp = obs.calculate_qparams(QuantDtype::Int8);
         assert_eq!(qp.scale.len(), 1);
     }
@@ -2037,13 +2105,13 @@ mod tests {
     #[test]
     fn test_histogram_observer_range_expansion() {
         let mut obs = HistogramObserver::new(100).expect("valid positive bin count");
-        obs.observe(&[0.0, 1.0]);
+        obs.observe(&[0.0, 1.0]).unwrap();
         // Initial range is [0, 1].
         let bins_after_first = obs.bins.clone();
         let total_first: f64 = bins_after_first.iter().sum();
         assert!((total_first - 2.0).abs() < 1e-12);
 
-        obs.observe(&[-1.0, 2.0]);
+        obs.observe(&[-1.0, 2.0]).unwrap();
         // Range expanded to [-1, 2]. Old counts should be redistributed, not zeroed.
         let total_second: f64 = obs.bins.iter().sum();
         // Should have 4 total counts (2 original redistributed + 2 new).
@@ -2053,7 +2121,7 @@ mod tests {
     #[test]
     fn test_histogram_observer_filters_nan_inf() {
         let mut obs = HistogramObserver::new(50).expect("valid positive bin count");
-        obs.observe(&[f32::NAN, 1.0, f32::INFINITY, 2.0]);
+        obs.observe(&[f32::NAN, 1.0, f32::INFINITY, 2.0]).unwrap();
         let total: f64 = obs.bins.iter().sum();
         // Only 2 finite values should be counted.
         assert!((total - 2.0).abs() < 1e-12);
@@ -2070,8 +2138,8 @@ mod tests {
     #[test]
     fn test_histogram_observer_one_bin_boundary() {
         let mut obs = HistogramObserver::new(1).expect("one bin is valid");
-        obs.observe(&[1.0]);
-        obs.observe(&[-1.0, 2.0]);
+        obs.observe(&[1.0]).unwrap();
+        obs.observe(&[-1.0, 2.0]).unwrap();
         assert_eq!(obs.bins, vec![3.0]);
         let qp = obs.calculate_qparams(QuantDtype::Int8);
         assert_eq!(qp.scale.len(), 1);
@@ -2081,9 +2149,9 @@ mod tests {
     #[test]
     fn test_histogram_observer_basic3_matches_pytorch_histogram_and_qparams() {
         let mut obs = HistogramObserver::new(3).expect("valid positive bin count");
-        obs.observe(&[2.0, 3.0, 4.0, 5.0]);
+        obs.observe(&[2.0, 3.0, 4.0, 5.0]).unwrap();
         assert_eq!(obs.bins, vec![1.0, 1.0, 2.0]);
-        obs.observe(&[5.0, 6.0, 7.0, 8.0]);
+        obs.observe(&[5.0, 6.0, 7.0, 8.0]).unwrap();
         assert_eq!(obs.bins, vec![2.0, 3.0, 3.0]);
 
         let qp = obs.calculate_qparams(QuantDtype::Int8);

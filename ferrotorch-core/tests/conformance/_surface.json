@@ -1298,7 +1298,7 @@
     { "path": "ferrotorch_core::quantize::MinMaxObserver::new", "kind": "method", "signature": "fn new () -> Self" },
     { "path": "ferrotorch_core::quantize::Observer", "kind": "trait", "signature": "pub trait Observer" },
     { "path": "ferrotorch_core::quantize::PerChannelMinMaxObserver", "kind": "struct", "signature": "# [derive (Debug , Clone)] pub struct PerChannelMinMaxObserver" },
-    { "path": "ferrotorch_core::quantize::PerChannelMinMaxObserver::new", "kind": "method", "signature": "fn new (num_channels : usize , axis : usize) -> Self" },
+    { "path": "ferrotorch_core::quantize::PerChannelMinMaxObserver::new", "kind": "method", "signature": "fn new (num_channels : usize , axis : usize) -> FerrotorchResult < Self >" },
     { "path": "ferrotorch_core::quantize::PerChannelMinMaxObserver::observe_with_shape", "kind": "method", "signature": "fn observe_with_shape (& mut self , data : & [f32] , shape : & [usize]) -> FerrotorchResult < () >" },
     { "path": "ferrotorch_core::quantize::QParams", "kind": "struct", "signature": "# [derive (Debug , Clone)] pub struct QParams" },
     { "path": "ferrotorch_core::quantize::QParams::asymmetric", "kind": "method", "signature": "fn asymmetric (min_val : f32 , max_val : f32 , dtype : QuantDtype) -> Self" },

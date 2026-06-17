@@ -115,30 +115,30 @@ The 1700+ LOC file is organised as:
 - **`QParams`** (`quantize.rs:713`) — `(scale, zp)` bundle plus
   the qmin/qmax for downstream consumers.
 - **`trait Observer`** (`quantize.rs:754`) — `observe(tensor)`
-  updates internal state; `calculate_qparams()` returns the
+  updates internal state through a `FerrotorchResult<()>`, so malformed
+  observations are structured errors; `calculate_qparams()` returns the
   `QParams`.
 - **`MinMaxObserver`** (`quantize.rs:771`): scalar running min /
   max. Per-tensor symmetric / asymmetric supported via `QuantScheme`
   passed at construction.
-- **`PerChannelMinMaxObserver`** (`quantize.rs:826`): per-slice
+- **`PerChannelMinMaxObserver`** (`quantize.rs:831`): per-slice
   running min/max along `axis`.
-- **`HistogramObserver`** (`quantize.rs:945`, constructor
-  `quantize.rs:954`): histogram observer with strictly positive bin
+- **`HistogramObserver`** (`quantize.rs:978`, constructor
+  `quantize.rs:993`): histogram observer with strictly positive bin
   construction, NaN/Inf filtering, PyTorch-style `histc` binning
-  (`quantize.rs:911`), range expansion through 16x upsampled
-  redistribution (`quantize.rs:1000`), and PyTorch's non-linear L2
-  qparam search (`quantize.rs:1094`). The zero-bin boundary differs from
-  PyTorch's delayed `torch.histogram` runtime error because ferrotorch's
-  `Observer::observe` is infallible; invalid bin counts are rejected by
-  the constructor instead.
-- **`FakeQuantize`** (`quantize.rs:1324`): PyTorch-default qparams
+  (`quantize.rs:1009`), range expansion through 16x upsampled
+  redistribution (`quantize.rs:1053`), and PyTorch's non-linear L2
+  qparam search (`quantize.rs:1192`). The zero-bin boundary differs from
+  PyTorch's delayed `torch.histogram` runtime error because invalid bin counts
+  are rejected by the constructor instead of being left as a later panic path.
+- **`FakeQuantize`** (`quantize.rs:1357`): PyTorch-default qparams
   cache (`scale=1`, `zero_point=0`), independent enable/disable helpers
   for fake quantization and observation, `calculate_qparams`
-  (`quantize.rs:1370`), and `forward` (`quantize.rs:1378`) that observes
+  (`quantize.rs:1403`), and `forward` (`quantize.rs:1411`) that observes
   before the fake-quant branch.
   Numerical fake quant is quantize-then-dequantize; backward STE lives in
   `grad_fns/quantize_grad.rs`.
-- **`QatLayer`** (`quantize.rs:1442`) / **`QatModel`** (`quantize.rs:1456`) —
+- **`QatLayer`** (`quantize.rs:1475`) / **`QatModel`** (`quantize.rs:1489`) —
   per-param observer + fake-quantize bundles. `prepare_qat` is a factory.
 
 Non-test production consumers:

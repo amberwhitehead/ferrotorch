@@ -1196,8 +1196,8 @@ fn apply_2_4_mask_backward_flows_masked_gradient_to_original_leaf() {
 #[test]
 fn minmax_observer_calculates_qparams_for_int8() {
     let mut obs: MinMaxObserver = MinMaxObserver::new();
-    obs.observe(&[1.0, 2.0, 3.0]);
-    obs.observe(&[-1.0, 5.0]);
+    obs.observe(&[1.0, 2.0, 3.0]).expect("observe");
+    obs.observe(&[-1.0, 5.0]).expect("observe");
     let qp = <MinMaxObserver as Observer>::calculate_qparams(&obs, QuantDtype::Int8);
     assert_eq!(qp.scale.len(), 1);
     assert_eq!(qp.zero_point.len(), 1);
@@ -1213,7 +1213,8 @@ fn minmax_observer_calculates_qparams_for_int8() {
 #[test]
 fn minmax_observer_filters_nan_inf() {
     let mut obs = MinMaxObserver::new();
-    obs.observe(&[1.0, f32::NAN, 2.0, f32::INFINITY, -1.0, f32::NEG_INFINITY]);
+    obs.observe(&[1.0, f32::NAN, 2.0, f32::INFINITY, -1.0, f32::NEG_INFINITY])
+        .expect("observe");
     let qp = obs.calculate_qparams(QuantDtype::Int8);
     let expected_scale = 3.0_f32 / 255.0;
     assert!((qp.scale[0] - expected_scale).abs() < 1e-5);
@@ -1230,7 +1231,7 @@ fn minmax_observer_filters_nan_inf() {
 fn per_channel_minmax_observer_with_shape() {
     // Exercises PerChannelMinMaxObserver::new and
     // PerChannelMinMaxObserver::observe_with_shape.
-    let mut obs = PerChannelMinMaxObserver::new(2, 0);
+    let mut obs = PerChannelMinMaxObserver::new(2, 0).expect("valid channel count");
     // axis=0, num_channels=2, shape [2, 3]:
     //   channel 0 = [0, 1, 2]
     //   channel 1 = [10, 20, 30]
@@ -1247,20 +1248,68 @@ fn per_channel_minmax_observer_with_shape() {
 
 #[test]
 fn per_channel_observer_shape_mismatch_errors() {
-    let mut obs = PerChannelMinMaxObserver::new(3, 0);
+    let mut obs = PerChannelMinMaxObserver::new(3, 0).expect("valid channel count");
     let res = obs.observe_with_shape(&[1.0; 6], &[2, 3]);
     assert!(res.is_err(), "channel-count mismatch should error");
 }
 
 #[test]
+fn per_channel_observer_zero_channels_errors_at_construction() {
+    let err = PerChannelMinMaxObserver::new(0, 0).expect_err("zero channels must be invalid");
+    match err {
+        FerrotorchError::InvalidArgument { message } => {
+            assert!(
+                message.contains("at least one channel"),
+                "unexpected error message: {message}"
+            );
+        }
+        other => panic!("expected InvalidArgument for zero-channel observer, got {other:?}"),
+    }
+}
+
+#[test]
+fn per_channel_observer_flat_malformed_length_errors() {
+    let mut obs = PerChannelMinMaxObserver::new(2, 0).expect("valid channel count");
+    let err = obs
+        .observe(&[1.0, 2.0, 3.0])
+        .expect_err("flat observation with trailing partial channel must error");
+    match err {
+        FerrotorchError::InvalidArgument { message } => {
+            assert!(
+                message.contains("divisible by 2 channels"),
+                "unexpected error message: {message}"
+            );
+        }
+        other => panic!("expected InvalidArgument for malformed flat observation, got {other:?}"),
+    }
+}
+
+#[test]
+fn per_channel_observer_shape_product_mismatch_errors() {
+    let mut obs = PerChannelMinMaxObserver::new(2, 0).expect("valid channel count");
+    let err = obs
+        .observe_with_shape(&[1.0; 5], &[2, 3])
+        .expect_err("shape-aware observation data length must match shape product");
+    match err {
+        FerrotorchError::InvalidArgument { message } => {
+            assert!(
+                message.contains("expected 6 values"),
+                "unexpected error message: {message}"
+            );
+        }
+        other => panic!("expected InvalidArgument for shape product mismatch, got {other:?}"),
+    }
+}
+
+#[test]
 fn histogram_observer_basic() {
     let mut obs = HistogramObserver::new(64).expect("valid positive bin count");
-    obs.observe(&[0.0, 0.5, 1.0]);
+    obs.observe(&[0.0, 0.5, 1.0]).expect("observe");
     let qp = obs.calculate_qparams(QuantDtype::Int8);
     assert_eq!(qp.scale.len(), 1);
     // Reset zeros bins.
     obs.reset();
-    obs.observe(&[2.0, 3.0]);
+    obs.observe(&[2.0, 3.0]).expect("observe");
     let qp2 = obs.calculate_qparams(QuantDtype::Int8);
     assert_eq!(qp2.scale.len(), 1);
 }
@@ -1282,11 +1331,12 @@ fn histogram_observer_zero_bins_errors_at_construction() {
 #[test]
 fn histogram_observer_one_bin_counts_finite_values() {
     let mut obs = HistogramObserver::new(1).expect("one bin is valid like PyTorch");
-    obs.observe(&[]);
+    obs.observe(&[]).expect("empty observe");
     assert_eq!(obs.calculate_qparams(QuantDtype::Int8).scale, vec![1.0]);
 
-    obs.observe(&[f32::NAN, 1.0, f32::INFINITY, -1.0]);
-    obs.observe(&[0.0, 2.0]);
+    obs.observe(&[f32::NAN, 1.0, f32::INFINITY, -1.0])
+        .expect("observe finite subset");
+    obs.observe(&[0.0, 2.0]).expect("observe");
 
     let qp = obs.calculate_qparams(QuantDtype::Int8);
     assert_eq!(qp.scale.len(), 1);
@@ -1299,13 +1349,13 @@ fn histogram_observer_one_bin_counts_finite_values() {
 #[test]
 fn histogram_observer_qparams_use_histogram_search_basic3() {
     let mut obs = HistogramObserver::new(3).expect("valid positive bin count");
-    obs.observe(&[2.0, 3.0, 4.0, 5.0]);
-    obs.observe(&[5.0, 6.0, 7.0, 8.0]);
+    obs.observe(&[2.0, 3.0, 4.0, 5.0]).expect("observe");
+    obs.observe(&[5.0, 6.0, 7.0, 8.0]).expect("observe");
 
     let hist_qp = obs.calculate_qparams(QuantDtype::Int8);
     let mut minmax = MinMaxObserver::new();
-    minmax.observe(&[2.0, 3.0, 4.0, 5.0]);
-    minmax.observe(&[5.0, 6.0, 7.0, 8.0]);
+    minmax.observe(&[2.0, 3.0, 4.0, 5.0]).expect("observe");
+    minmax.observe(&[5.0, 6.0, 7.0, 8.0]).expect("observe");
     let minmax_qp = minmax.calculate_qparams(QuantDtype::Int8);
 
     // PyTorch HistogramObserver(bins=3, qint8, affine) clips [2, 8] to [2, 6],
@@ -1330,7 +1380,7 @@ fn histogram_observer_qparams_clip_sparse_outlier_like_pytorch() {
     data.push(100.0);
 
     let mut obs = HistogramObserver::new(16).expect("valid positive bin count");
-    obs.observe(&data);
+    obs.observe(&data).expect("observe");
     let qp = obs.calculate_qparams(QuantDtype::Int8);
 
     // PyTorch HistogramObserver(bins=16, qint8, affine) clips the final range
