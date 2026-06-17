@@ -2,8 +2,8 @@
 //! — the `as_strided` autograd family in `ferrotorch-core/src/stride_tricks.rs`.
 //!
 //! - CORE-058 (CLASS-V): `AsStridedBackward` used overwrite-scatter, so
-//!   overlapping views (sliding windows, zero strides, negative strides)
-//!   returned last-write-wins gradients instead of SUMMED gradients.
+//!   overlapping views (sliding windows, zero strides) returned
+//!   last-write-wins gradients instead of SUMMED gradients.
 //! - CORE-059 (CLASS-S/U): the backward allocated its gradient base with
 //!   CPU-only `creation::zeros` (CUDA grad_output -> DeviceMismatch) and
 //!   treated the saved absolute storage_offset as an offset into a fresh
@@ -81,26 +81,34 @@ fn core058_zero_stride_broadcast_backward_sums_multiplicity() {
     assert_eq!(grad_of(&x), vec![0.0, 5.0, 0.0]);
 }
 
-/// Negative strides: torch's `as_strided` rejects them ("Negative strides
-/// are not supported at the moment"), so the oracle is the equivalent
-/// composite — `y = x.flip(0)` (y\[k\] = x\[4-k\]) followed by a positive-
-/// stride overlapping view. ferrotorch's `x.as_strided([2,3],[-1,-1], 4)`
-/// reads storage\[4-(i+j)\], element-for-element identical to
-/// `x.flip(0).as_strided([2,3],[1,1],0)`.
-///
 /// torch oracle:
 /// ```python
 /// x = torch.arange(1., 6., dtype=torch.float64, requires_grad=True)
-/// x.flip(0).as_strided([2,3],[1,1],0).sum().backward()
-/// x.grad  # tensor([0., 1., 2., 2., 1.], dtype=torch.float64)
+/// x.as_strided([2,3],[-1,-1],4)
+/// # RuntimeError: as_strided: Negative strides are not supported at the moment
 /// ```
 #[test]
-fn core058_negative_stride_overlapping_backward() {
+fn core058_negative_stride_rejected_before_backward_node() {
     let x = leaf_f64(&[1.0, 2.0, 3.0, 4.0, 5.0], &[5], true);
-    let v = x.as_strided(&[2, 3], &[-1, -1], Some(4)).unwrap();
-    let s = v.contiguous().unwrap().sum_all().unwrap();
-    backward(&s).unwrap();
-    assert_eq!(grad_of(&x), vec![0.0, 1.0, 2.0, 2.0, 1.0]);
+    let err = x.as_strided(&[2, 3], &[-1, -1], Some(4)).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ferrotorch_core::FerrotorchError::InvalidArgument { .. }
+        ),
+        "negative strides must reject before autograd metadata escapes, got {err:?}"
+    );
+    let ferrotorch_core::FerrotorchError::InvalidArgument { message } = err else {
+        unreachable!()
+    };
+    assert!(
+        message.contains("Negative strides are not supported"),
+        "unexpected message: {message}"
+    );
+    assert!(
+        x.grad().expect("grad handle").is_none(),
+        "failed as_strided must not attach a backward node or accumulate gradients"
+    );
 }
 
 // ===========================================================================

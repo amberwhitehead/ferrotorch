@@ -2,8 +2,9 @@
 //!
 //! Mirrors `torch.Tensor.as_strided`, `torch.as_strided_copy`, and
 //! `torch.as_strided_scatter`. Strides are given in *element* units (matching
-//! torch and ferrotorch's existing `Tensor::strides`), not bytes. A stride
-//! may be zero (broadcast-style replication) or negative (reverse iteration).
+//! torch and ferrotorch's existing `Tensor::strides`), not bytes. Zero strides
+//! are allowed for broadcast-style replication; negative strides are rejected,
+//! matching PyTorch's current public `as_strided` contract.
 //!
 //! # Operations
 //!
@@ -16,8 +17,8 @@
 //!   error with [`FerrotorchError::NotImplementedOnCuda`] until a kernel
 //!   lands.
 //! - [`as_strided_scatter`] is the inverse of `as_strided`: returns a copy
-//!   of `self` with the strided positions overwritten by `src`. CPU only
-//!   today; CUDA support is tracked separately.
+//!   of `self` with the strided positions overwritten by `src`. CPU and CUDA
+//!   paths exist.
 //!
 //! # Autograd
 //!
@@ -33,9 +34,7 @@
 //!   may overlap, then gather back out through the input's own
 //!   (shape, strides, offset) geometry. Offsets are handled as deltas
 //!   against the shared minimum reachable offset, so offset / transposed /
-//!   chained input views are correct, and negative strides (which torch
-//!   rejects in the forward) size the base buffer from the signed
-//!   reachable span.
+//!   chained input views are correct.
 //! - [`as_strided_scatter`] attaches [`AsStridedScatterBackward`]:
 //!   `d/d src` is the upstream gradient gathered at the view geometry
 //!   (matches torch); `d/d self` is the upstream gradient with the view
@@ -221,6 +220,13 @@ pub(crate) fn validate_bounds(
             ),
         });
     }
+    if stride.iter().any(|&s| s < 0) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "as_strided: Negative strides are not supported at the moment, got strides: {stride:?}"
+            ),
+        });
+    }
     for (axis, &dim) in shape.iter().enumerate() {
         if dim > i64::MAX as usize {
             return Err(FerrotorchError::InvalidArgument {
@@ -292,9 +298,10 @@ pub(crate) fn validate_bounds(
 /// `torch/csrc/autograd/FunctionsManual.cpp` (sort the size>1 dims by
 /// stride; each stride must exceed the maximum offset addressable by all
 /// smaller-stride dims). Extensions over torch (which never sees them
-/// here): a zero stride on a size>1 dim always overlaps; a negative stride
-/// is conservatively treated as maybe-overlapping — correctness is
-/// preserved because the divide-by-count step computes exact multiplicity.
+/// here): a zero stride on a size>1 dim always overlaps. Negative strides
+/// are rejected by public `as_strided` entry points before this helper, but
+/// are still conservatively treated as maybe-overlapping if legacy/internal
+/// metadata reaches backward.
 fn maybe_overlapping_memory(shape: &[usize], stride: &[isize]) -> bool {
     let mut dims: Vec<(usize, isize)> = shape
         .iter()
@@ -694,9 +701,7 @@ impl<T: Float> Tensor<T> {
 ///    and the OUTPUT geometry (`size/stride/storage_offset`). Offsets are
 ///    rebased as deltas against the shared minimum reachable offset
 ///    (torch's `shared_offset` trick), so nonzero-offset input views
-///    (narrow, chained `as_strided`) are handled, and negative strides
-///    (rejected by torch's forward but supported here) size the buffer
-///    from the signed span (CORE-059 / #1753).
+///    (narrow, chained `as_strided`) are handled.
 /// 2. Scatter-ADD `grad_output` into the base at the output geometry —
 ///    overlapping view positions (sliding windows, zero strides) SUM their
 ///    upstream gradients instead of keeping the last write
@@ -1392,12 +1397,17 @@ mod tests {
     }
 
     #[test]
-    fn as_strided_negative_stride_reverses() {
-        // Reverse a 1-D tensor: start at the end, stride -1.
+    fn as_strided_rejects_negative_stride_like_torch() {
         let a = t(&[1.0, 2.0, 3.0, 4.0], &[4]);
-        // storage_offset = 3 (last element), stride = -1, size = 4.
-        let v = a.as_strided(&[4], &[-1], Some(3)).unwrap();
-        assert_eq!(v.data_vec().unwrap(), vec![4.0, 3.0, 2.0, 1.0]);
+        let err = a.as_strided(&[4], &[-1], Some(3)).unwrap_err();
+        assert!(
+            matches!(&err, FerrotorchError::InvalidArgument { .. }),
+            "expected InvalidArgument, got {err:?}"
+        );
+        let FerrotorchError::InvalidArgument { message } = err else {
+            unreachable!()
+        };
+        assert!(message.contains("Negative strides are not supported"));
     }
 
     #[test]
@@ -1426,7 +1436,7 @@ mod tests {
     #[test]
     fn as_strided_rejects_negative_reach() {
         let a = t(&[1.0, 2.0, 3.0], &[3]);
-        // stride -1 from offset 1 reaches -1 on the second step.
+        // PyTorch rejects negative strides before storage reach is considered.
         let err = a.as_strided(&[3], &[-1], Some(1)).unwrap_err();
         assert!(matches!(err, FerrotorchError::InvalidArgument { .. }));
     }

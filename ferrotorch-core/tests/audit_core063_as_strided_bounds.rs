@@ -121,8 +121,8 @@ fn as_strided_rejects_positive_extent_signed_overflow_1757() {
 fn as_strided_rejects_negative_stride_extent_overflow_1757() {
     let x = scalar();
     expect_invalid_contains(
-        "as_strided negative stride extent overflow",
+        "as_strided negative stride rejected before extent overflow",
         x.as_strided(&[3], &[isize::MIN], Some(0)),
-        "overflow signed offset range",
+        "Negative strides are not supported",
     );
 }
