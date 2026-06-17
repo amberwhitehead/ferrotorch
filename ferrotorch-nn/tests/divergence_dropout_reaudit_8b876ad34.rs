@@ -21,8 +21,16 @@
 //!   torch.manual_seed(s); F.dropout3d / nn.FeatureAlphaDropout(p).train() /
 //!   F.dropout on the exact arange/ones inputs reconstructed below.
 
+#![allow(clippy::excessive_precision)]
+
 use ferrotorch_core::{Tensor, TensorStorage};
 use ferrotorch_nn::{Dropout, Dropout2d, Dropout3d, FeatureAlphaDropout, Module};
+use std::sync::{Mutex, MutexGuard};
+
+fn dropout_rng_lock() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn arange(shape: Vec<usize>) -> Tensor<f32> {
     let n: usize = shape.iter().product();
@@ -48,6 +56,7 @@ fn approx(got: &[f32], want: &[f32], tol: f32, ctx: &str) {
 /// N=1,C=2,spatial=8. Both channels survive at this seed -> scale 2.0.
 #[test]
 fn dropout3d_1x2x2x2x2_arange_seed1_p05_matches_torch() {
+    let _rng = dropout_rng_lock();
     let want: [f32; 16] = [
         2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0,
     ];
@@ -67,6 +76,7 @@ fn dropout3d_1x2x2x2x2_arange_seed1_p05_matches_torch() {
 /// Kept -> a*x+alpha*a*p; dropped -> constant -0.7791939 over the whole slice.
 #[test]
 fn feature_alpha_dropout_1x4x2x2_arange_seed7_p05_matches_torch() {
+    let _rng = dropout_rng_lock();
     let want: [f32; 16] = [
         1.6655989, 2.5520036, 3.4384084, 4.3248134, // ch0 keep
         5.2112184, 6.0976229, 6.9840279, 7.8704329, // ch1 keep
@@ -89,6 +99,7 @@ fn feature_alpha_dropout_1x4x2x2_arange_seed7_p05_matches_torch() {
 /// NOT reproduce). Regression-guards the MT19937 rewire.
 #[test]
 fn dropout2d_manual_seed_is_deterministic() {
+    let _rng = dropout_rng_lock();
     let layer = Dropout2d::<f32>::new(0.5).unwrap();
 
     ferrotorch_core::rng::manual_seed(42);
@@ -113,6 +124,7 @@ fn dropout2d_manual_seed_is_deterministic() {
 /// Per-ELEMENT (not per-channel) Bernoulli stream, keep iff u<0.5, scale 2.0.
 #[test]
 fn plain_dropout_seed42_p05_no_regression_matches_torch() {
+    let _rng = dropout_rng_lock();
     let want: [f32; 10] = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0, 0.0, 0.0, 2.0, 2.0];
     ferrotorch_core::rng::manual_seed(42);
     let layer = Dropout::<f32>::new(0.5).unwrap();

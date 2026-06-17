@@ -28,8 +28,16 @@
 //!   nn.FeatureAlphaDropout(p).train(), on the exact `arange`/`ones` inputs
 //!   reconstructed below.
 
+#![allow(clippy::excessive_precision)]
+
 use ferrotorch_core::{Tensor, TensorStorage};
 use ferrotorch_nn::Module;
+use std::sync::{Mutex, MutexGuard};
+
+fn dropout_rng_lock() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn arange(shape: Vec<usize>) -> Tensor<f32> {
     let n: usize = shape.iter().product();
@@ -65,6 +73,7 @@ fn approx(got: &[f32], want: &[f32], tol: f32, ctx: &str) {
 /// [keep,keep,keep,keep, DROP,keep,DROP,DROP] broadcast over each 3x3 slice.
 #[test]
 fn dropout2d_multidim_arange_seed42_p05_matches_torch() {
+    let _rng = dropout_rng_lock();
     let want: [f32; 72] = [
         2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, // ch0 keep
         20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0, 36.0, // ch1 keep
@@ -91,6 +100,7 @@ fn dropout2d_multidim_arange_seed42_p05_matches_torch() {
 /// [keep,keep,DROP,keep,DROP,DROP,keep,keep].
 #[test]
 fn dropout2d_multidim_arange_seed7_p03_matches_torch() {
+    let _rng = dropout_rng_lock();
     let want: [f32; 72] = [
         1.428571, 2.857143, 4.285714, 5.714286, 7.142858, 8.571428, 10.0, 11.428572, 12.857143,
         14.285715, 15.714286, 17.142857, 18.571428, 20.0, 21.428572, 22.857143, 24.285715,
@@ -116,6 +126,7 @@ fn dropout2d_multidim_arange_seed7_p03_matches_torch() {
 /// per-channel scaled value (first spatial element of each channel):
 #[test]
 fn dropout2d_3x5_ones_seed123_p05_per_channel_matches_torch() {
+    let _rng = dropout_rng_lock();
     // torch.manual_seed(123); F.dropout2d(ones(3,5,2,2),0.5,True)[:,:,0,0]
     let want_per_chan: [f32; 15] = [
         2.0, 2.0, 0.0, 2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 2.0, 2.0, 2.0, 2.0,
@@ -142,6 +153,7 @@ fn dropout2d_3x5_ones_seed123_p05_per_channel_matches_torch() {
 /// N=2,C=3,L=4. Keep pattern over flat [N,C]=6 stream: [k,k,k,k,DROP,k].
 #[test]
 fn dropout1d_multidim_arange_seed42_p05_matches_torch() {
+    let _rng = dropout_rng_lock();
     let want: [f32; 24] = [
         2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0,
         0.0, 0.0, 0.0, 0.0, 42.0, 44.0, 46.0, 48.0,
@@ -161,6 +173,7 @@ fn dropout1d_multidim_arange_seed42_p05_matches_torch() {
 /// N=2,C=3,spatial=8. Keep pattern over flat [N,C]=6: [k,k,k,k,DROP,k].
 #[test]
 fn dropout3d_multidim_arange_seed42_p05_matches_torch() {
+    let _rng = dropout_rng_lock();
     let want: [f32; 48] = [
         2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0,
         34.0, 36.0, 38.0, 40.0, 42.0, 44.0, 46.0, 48.0, 50.0, 52.0, 54.0, 56.0, 58.0, 60.0, 62.0,
@@ -189,6 +202,7 @@ fn dropout3d_multidim_arange_seed42_p05_matches_torch() {
 /// must match torch for each p.
 #[test]
 fn alpha_dropout_affine_across_p_matches_torch() {
+    let _rng = dropout_rng_lock();
     let cases: &[(f64, [f32; 10])] = &[
         (
             0.1,
@@ -239,6 +253,7 @@ fn alpha_dropout_affine_across_p_matches_torch() {
 /// dropped channels -> constant -0.7791939 across the whole 2x2 slice.
 #[test]
 fn feature_alpha_dropout_multidim_arange_seed7_p05_matches_torch() {
+    let _rng = dropout_rng_lock();
     let want: [f32; 24] = [
         1.6655989, 2.5520036, 3.4384084, 4.3248134, // ch0 keep (x=1..4)
         5.2112184, 6.0976229, 6.9840279, 7.8704329, // ch1 keep (x=5..8)
@@ -263,6 +278,7 @@ fn feature_alpha_dropout_multidim_arange_seed7_p05_matches_torch() {
 /// affine. Pins the kept-affine on multi-dim (distinct from the dropped case).
 #[test]
 fn feature_alpha_dropout_multidim_arange_seed42_p03_matches_torch() {
+    let _rng = dropout_rng_lock();
     let want: [f32; 24] = [
         1.3150446, 2.1759973, 3.0369499, 3.8979025, 4.7588549, 5.6198077, 6.4807606, 7.341713,
         8.2026653, 9.0636177, 9.924571, 10.7855234, 11.6464758, 12.5074291, 13.3683815, 14.2293339,
@@ -313,7 +329,7 @@ fn feature_and_alpha_eval_and_p0_are_identity() {
     let x1 = ones_shape(vec![10]);
     approx(
         &ad.forward(&x1).unwrap().data_vec().unwrap(),
-        &vec![1.0f32; 10],
+        &[1.0f32; 10],
         0.0,
         "AlphaDropout eval",
     );
@@ -329,7 +345,7 @@ fn feature_and_alpha_eval_and_p0_are_identity() {
     let ad_p0 = ferrotorch_nn::AlphaDropout::<f32>::new(0.0).unwrap();
     approx(
         &ad_p0.forward(&x1).unwrap().data_vec().unwrap(),
-        &vec![1.0f32; 10],
+        &[1.0f32; 10],
         0.0,
         "AlphaDropout p0",
     );
