@@ -1,18 +1,13 @@
 //! Regression tests for audit finding CORE-045 (crosslink #1739).
 //!
 //! `hardtanh`/`relu6`, `hardsigmoid`, `hardswish`, `selu`, `softsign`, and
-//! `prelu` computed their CUDA forward through `unary_map` (host round trip,
-//! output restored to CUDA) but, when the input required gradients, rebuilt
-//! the output storage via the CPU-only `output.data()` — so the SAME valid
-//! forward failed with `GpuTensorNotAccessible` solely because
-//! `requires_grad` was enabled. Their backwards likewise called `data()`
-//! unconditionally.
+//! `prelu` used to depend on CPU-only closure paths for CUDA forwards or
+//! backwards. Once `unary_map` correctly rejected CUDA tensors, those paths
+//! failed with `NotImplementedOnCuda`/`GpuTensorNotAccessible`.
 //!
-//! Post-fix contract (the `leaky_relu` pattern at `activation.rs`): the
-//! grad-enabled forward consumes `unary_map`'s device-resident storage, and
-//! the backward builds the derivative mask via `unary_map` (documented host
-//! round trip per R-LOUD-2) multiplied by `grad_output` with the CUDA-aware
-//! `arithmetic::mul`.
+//! Post-fix contract: f32/f64 CUDA forwards and VJPs below are resident CUDA
+//! dispatches. No derivative mask is built through `unary_map`, and PReLU's
+//! alpha VJP is a device-side map-reduce.
 //!
 //! Every expectation below is from a live torch session (R-ORACLE-1(b)):
 //!
@@ -34,7 +29,7 @@ use ferrotorch_core::grad_fns::activation::{
     hardsigmoid, hardswish, hardtanh, prelu, relu6, selu, softsign,
 };
 use ferrotorch_core::grad_fns::reduction::sum as reduce_sum;
-use ferrotorch_core::{Device, FerrotorchResult, Tensor, TensorStorage};
+use ferrotorch_core::{Device, FerrotorchError, FerrotorchResult, Tensor, TensorStorage};
 
 static GPU_INIT: Once = Once::new();
 
@@ -56,7 +51,11 @@ const X: [f64; 6] = [-2.0, -0.5, 0.0, 0.5, 2.0, 4.0];
 /// they need a real CUDA leaf — torch's
 /// `x.to('cuda').detach().requires_grad_(True)` idiom.
 fn cuda_f64(data: &[f64], rg: bool) -> Tensor<f64> {
-    Tensor::from_storage(TensorStorage::cpu(data.to_vec()), vec![data.len()], false)
+    cuda_f64_shape(data, &[data.len()], rg)
+}
+
+fn cuda_f64_shape(data: &[f64], shape: &[usize], rg: bool) -> Tensor<f64> {
+    Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false)
         .unwrap()
         .to(Device::Cuda(0))
         .expect("upload to cuda:0")
@@ -76,12 +75,9 @@ fn read_back(t: &Tensor<f64>, what: &str) -> Vec<f64> {
 fn assert_close(actual: &[f64], expected: &[f64], label: &str) {
     assert_eq!(actual.len(), expected.len(), "{label}: length mismatch");
     for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
-        // Tolerance rationale (R-ORACLE-5): hardtanh/relu6/hardsigmoid/
-        // hardswish/softsign/prelu are pure rational arithmetic — but the
-        // values transit one f64 D2H/H2D round trip (lossless) and selu's
-        // negative branch evaluates `exp` once (CPU libm on the host round
-        // trip, ≤ 1 ulp ≈ 2.3e-16 relative at |x| ≤ 4.3). 1e-12 absolute
-        // gives > 3 orders of margin on these O(1) magnitudes.
+        // Tolerance rationale (R-ORACLE-5): most ops here are branch/rational
+        // arithmetic; SELU uses one `exp`; Hardsigmoid/Hardswish CUDA f64
+        // intentionally mirror PyTorch's f32-rounded one-sixth constant.
         assert!(
             (a - e).abs() < 1e-12,
             "{label}: index {i} diverges (actual={a:.17}, expected={e:.17})"
@@ -145,27 +141,25 @@ fn cuda_grad_relu6() {
 
 /// ```python
 /// >>> o = F.hardsigmoid(t)
-/// [0.16666666666666666, 0.4166666666666667, 0.5, 0.5833333333333334,
-///  0.8333333333333334, 1.0]
-/// >>> t.grad  # f64 grads are exactly 1/6 inside (-3, 3)
-/// [1/6, 1/6, 1/6, 1/6, 1/6, 0.0]
+/// [0.1666666716337204, 0.416666679084301, 0.5000000149011612,
+///  0.5833333507180214, 0.833333358168602, 1.0000000298023224]
+/// >>> t.grad
+/// [0.1666666716337204, 0.1666666716337204, 0.1666666716337204,
+///  0.1666666716337204, 0.1666666716337204, 0.0]
 /// ```
-/// (torch's printed f64 grad is the f32-rounded 0.1666666716337204 — a
-/// documented upstream artifact, see closed #795; ferrotorch computes the
-/// exact 1/6, inside the 1e-12 band vs 1.0/6.0.)
 #[test]
 fn cuda_grad_hardsigmoid() {
-    let sixth = 1.0 / 6.0;
+    let sixth = 0.166_666_671_633_720_4;
     run_cuda_grad_lane(
         "hardsigmoid",
         hardsigmoid,
         &[
-            0.166_666_666_666_666_66,
-            0.416_666_666_666_666_7,
-            0.5,
-            0.583_333_333_333_333_4,
-            0.833_333_333_333_333_4,
-            1.0,
+            0.166_666_671_633_720_4,
+            0.416_666_679_084_301,
+            0.500_000_014_901_161_2,
+            0.583_333_350_718_021_4,
+            0.833_333_358_168_602,
+            1.000_000_029_802_322_4,
         ],
         &[sixth, sixth, sixth, sixth, sixth, 0.0],
     );
@@ -173,8 +167,8 @@ fn cuda_grad_hardsigmoid() {
 
 /// ```python
 /// >>> o = F.hardswish(t)
-/// [-0.3333333333333333, -0.20833333333333334, 0.0, 0.2916666666666667,
-///  1.6666666666666667, 4.0]
+/// [-0.3333333432674408, -0.2083333395421505, 0.0, 0.2916666753590107,
+///  1.666666716337204, 4.0000001192092896]
 /// [-0.16666666666666663, 0.33333333333333337, 0.5, 0.6666666666666666,
 ///  1.1666666666666665, 1.0]
 /// ```
@@ -184,12 +178,12 @@ fn cuda_grad_hardswish() {
         "hardswish",
         hardswish,
         &[
-            -0.333_333_333_333_333_3,
-            -0.208_333_333_333_333_34,
+            -0.333_333_343_267_440_8,
+            -0.208_333_339_542_150_5,
             0.0,
-            0.291_666_666_666_666_7,
-            1.666_666_666_666_666_7,
-            4.0,
+            0.291_666_675_359_010_7,
+            1.666_666_716_337_204,
+            4.000_000_119_209_289_6,
         ],
         &[
             -0.166_666_666_666_666_63,
@@ -304,33 +298,88 @@ fn cuda_grad_prelu_dual_vjp() {
     );
 }
 
-/// prelu with a CPU-resident scalar alpha and CUDA input: grad_x stays on
-/// CUDA, grad_alpha lands on alpha's own (CPU) device.
+/// PyTorch per-channel PReLU accepts a 1D weight matching channel dim 1:
+/// ```python
+/// >>> x = torch.tensor([...], device='cuda', dtype=torch.float64,
+/// ...                  requires_grad=True).reshape(2, 3, 2)
+/// >>> w = torch.tensor([0.1, 0.2, 0.3], device='cuda', dtype=torch.float64,
+/// ...                  requires_grad=True)
+/// >>> y = F.prelu(x, w); y.sum().backward()
+/// fwd    = [-0.2, 1.0, -0.6, 4.0, 0.0, -1.5,
+///           6.0, -0.7, -1.6, 9.0, 10.0, -3.3]
+/// grad_x = [0.1, 1.0, 0.2, 1.0, 0.3, 0.3,
+///           1.0, 0.1, 0.2, 1.0, 1.0, 0.3]
+/// grad_w = [-9.0, -11.0, -16.0]
+/// ```
+#[test]
+fn cuda_grad_prelu_channel_dual_vjp() {
+    ensure_cuda_backend();
+    let x = cuda_f64_shape(
+        &[
+            -2.0, 1.0, -3.0, 4.0, 0.0, -5.0, 6.0, -7.0, -8.0, 9.0, 10.0, -11.0,
+        ],
+        &[2, 3, 2],
+        true,
+    );
+    let alpha = cuda_f64(&[0.1, 0.2, 0.3], true);
+    let out = prelu(&x, &alpha).unwrap_or_else(|e| {
+        panic!("prelu channel: CUDA forward with requires_grad=true failed: {e:?}")
+    });
+    assert_close(
+        &read_back(&out, "prelu channel fwd"),
+        &[
+            -0.2, 1.0, -0.6, 4.0, 0.0, -1.5, 6.0, -0.7, -1.6, 9.0, 10.0, -3.3,
+        ],
+        "prelu channel fwd",
+    );
+
+    reduce_sum(&out).expect("sum").backward().expect("backward");
+    let gx = x.grad().unwrap().expect("grad_x must reach the CUDA leaf");
+    assert_close(
+        &read_back(&gx, "prelu channel grad_x"),
+        &[0.1, 1.0, 0.2, 1.0, 0.3, 0.3, 1.0, 0.1, 0.2, 1.0, 1.0, 0.3],
+        "prelu channel grad_x",
+    );
+    let ga = alpha
+        .grad()
+        .unwrap()
+        .expect("grad_alpha must reach the CUDA alpha leaf");
+    assert_close(
+        &read_back(&ga, "prelu channel grad_alpha"),
+        &[-9.0, -11.0, -16.0],
+        "prelu channel grad_alpha",
+    );
+}
+
+#[test]
+fn cuda_grad_prelu_scalar_alpha_nan_matches_torch_branch() {
+    ensure_cuda_backend();
+    let x = cuda_f64(&[f64::NAN, -2.0, 1.0, 0.0], true);
+    let alpha = cuda_f64(&[0.5], true);
+    let out = prelu(&x, &alpha).expect("prelu scalar nan forward");
+    reduce_sum(&out).expect("sum").backward().expect("backward");
+    let ga = alpha
+        .grad()
+        .unwrap()
+        .expect("grad_alpha must reach the CUDA alpha leaf");
+    let got = read_back(&ga, "prelu scalar nan grad_alpha");
+    assert!(
+        got[0].is_nan(),
+        "torch prelu backward treats NaN input as the false x>0 branch"
+    );
+}
+
+/// PyTorch requires PReLU input and weight on the same device. A CPU-resident
+/// scalar alpha with CUDA input must be rejected rather than handled through a
+/// host readback.
 #[test]
 fn cuda_grad_prelu_cpu_alpha() {
     ensure_cuda_backend();
     let x = cuda_f64(&X, true);
     let alpha = Tensor::from_storage(TensorStorage::cpu(vec![0.25f64]), vec![1], true).unwrap();
-    let out = prelu(&x, &alpha).unwrap_or_else(|e| {
-        panic!("prelu (cpu alpha): CUDA forward with requires_grad=true failed: {e:?}")
-    });
-    assert_close(
-        &read_back(&out, "prelu fwd"),
-        &[-0.5, -0.125, 0.0, 0.5, 2.0, 4.0],
-        "prelu fwd",
+    let err = prelu(&x, &alpha).expect_err("cpu alpha with cuda input must fail");
+    assert!(
+        matches!(err, FerrotorchError::DeviceMismatch { .. }),
+        "expected DeviceMismatch for mixed-device PReLU, got {err:?}"
     );
-    reduce_sum(&out).expect("sum").backward().expect("backward");
-    let gx = x.grad().unwrap().expect("grad_x must reach the CUDA leaf");
-    assert_close(
-        &read_back(&gx, "prelu grad_x"),
-        &[0.25, 0.25, 0.25, 1.0, 1.0, 1.0],
-        "prelu grad_x",
-    );
-    let ga = alpha.grad().unwrap().expect("grad_alpha must reach alpha");
-    assert_eq!(
-        ga.device(),
-        Device::Cpu,
-        "grad_alpha must live on alpha's device (CPU)"
-    );
-    assert_close(&ga.data_vec().unwrap(), &[-2.5], "prelu grad_alpha");
 }

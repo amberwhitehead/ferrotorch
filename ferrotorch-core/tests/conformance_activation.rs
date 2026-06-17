@@ -468,17 +468,11 @@ fn check_f64(label: &str, actual: &[f64], expected: &[f64], tol: f64) {
 ///   the row exercises what its fixture was generated for. Breaking-change
 ///   note: callers relying on the historical fast-sigmoid default must
 ///   spell `gelu_with(GeluApproximate::Sigmoid)` explicitly.
-/// - #795 (closed): hardsigmoid f64 backward — ferrotorch is *more* precise
-///   than PyTorch (PyTorch rounds 1/6 to f32 internally even for f64
-///   input). The fixture's expected grad is `f32(1/6)` cast back to f64
-///   (≈ 0.16666667163372…), while ferrotorch returns the exact f64 `1/6`
-///   (≈ 0.16666666666666…). The two differ by `|1/6 − f32(1/6)| ≈ 5e-9` —
-///   below 1 ULP at f32 magnitudes but above the workspace
-///   `F64_TRANSCENDENTAL = 1e-10`. Closed by per-op tolerance relaxation
-///   in `tol_overrides()` (5e-8, ~10× the analytical worst case) instead
-///   of degrading ferrotorch's precision to match PyTorch's bug.
-/// - #796: sin/cos/leaky_relu/softplus autograd-on-CUDA fail with
-///   `GpuTensorNotAccessible` — backward saves a CPU vec via .data()?.
+/// - #795 (closed): hardsigmoid/hardswish f64 CUDA mirror PyTorch's CUDA
+///   artifact: one-sixth is rounded as f32 before promotion, so f64 forward
+///   and hardsigmoid backward observe ≈ 0.1666666716337204.
+/// - #796 (closed): sin/cos/leaky_relu/softplus autograd-on-CUDA previously
+///   failed with `GpuTensorNotAccessible` because backward saved/read CPU vecs.
 /// - #797: fixed — `EXP_F64_PTX` referenced undeclared `%ln2_hi` / `%ln2_lo`
 ///   registers; dead `mov` writes dropped. JIT compiles, runs live within
 ///   F64_TRANSCENDENTAL. (Same family as #781 / #784.)
@@ -1367,9 +1361,55 @@ fn run_prelu_for_device(device_label: &str, device: Device) {
     }
 }
 
+fn run_prelu_channel_for_device(device_label: &str, device: Device) {
+    let x_data = [
+        -2.0, 1.0, -3.0, 4.0, 0.0, -5.0, 6.0, -7.0, -8.0, 9.0, 10.0, -11.0,
+    ];
+    let alpha_data = [0.1, 0.2, 0.3];
+    let fwd_expected = [
+        -0.2, 1.0, -0.6, 4.0, 0.0, -1.5, 6.0, -0.7, -1.6, 9.0, 10.0, -3.3,
+    ];
+    let grad_x_expected = [0.1, 1.0, 0.2, 1.0, 0.3, 0.3, 1.0, 0.1, 0.2, 1.0, 1.0, 0.3];
+    let grad_alpha_expected = [-9.0, -11.0, -16.0];
+
+    let x = upload_f64(make_cpu_f64(&x_data, &[2, 3, 2], false), device);
+    let alpha = upload_f64(make_cpu_f64(&alpha_data, &[3], false), device);
+    let out = prelu(&x, &alpha).expect("prelu channel");
+    check_f64(
+        &format!("prelu channel {device_label} fwd"),
+        &read_back_f64(&out, device),
+        &fwd_expected,
+        tolerance::F64_TRANSCENDENTAL,
+    );
+
+    let x = upload_f64(make_cpu_f64(&x_data, &[2, 3, 2], true), device);
+    let alpha = upload_f64(make_cpu_f64(&alpha_data, &[3], true), device);
+    let out = prelu(&x, &alpha).expect("prelu channel grad");
+    reduce_sum(&out).expect("sum").backward().expect("backward");
+    let gx = x.grad().unwrap().expect("grad_x");
+    check_f64(
+        &format!("prelu channel {device_label} grad_x"),
+        &read_back_f64(&gx, device),
+        &grad_x_expected,
+        tolerance::F64_TRANSCENDENTAL,
+    );
+    let ga = alpha.grad().unwrap().expect("grad_alpha");
+    check_f64(
+        &format!("prelu channel {device_label} grad_alpha"),
+        &read_back_f64(&ga, device),
+        &grad_alpha_expected,
+        tolerance::F64_TRANSCENDENTAL,
+    );
+}
+
 #[test]
 fn cpu_prelu() {
     run_prelu_for_device("cpu", Device::Cpu);
+}
+
+#[test]
+fn cpu_prelu_channel() {
+    run_prelu_channel_for_device("cpu", Device::Cpu);
 }
 
 // ---------------------------------------------------------------------------
@@ -2629,9 +2669,8 @@ mod gpu {
         );
     }
 
-    // ----- Cat A — activations CUDA-functional via the documented
-    // `unary_map` host round trip (post-#1739 / CORE-045: the grad-enabled
-    // forward keeps the CUDA storage and the backward is device-aware) -----
+    // ----- Cat A — resident CUDA activation forwards/VJPs added after
+    // #1739 / CORE-045 exposed the old CPU-closure path -----
 
     #[test]
     fn gpu_relu6() {
@@ -2715,6 +2754,12 @@ mod gpu {
         let file = load_fixtures();
         require_cuda_fixtures(&file);
         run_prelu_for_device("cuda:0", Device::Cuda(0));
+    }
+
+    #[test]
+    fn gpu_prelu_channel() {
+        ensure_cuda_backend();
+        run_prelu_channel_for_device("cuda:0", Device::Cuda(0));
     }
 
     // ----- Cat A — transcendentals on GPU -----

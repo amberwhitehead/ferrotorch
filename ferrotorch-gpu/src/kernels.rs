@@ -199,6 +199,13 @@ pub(crate) fn ptx_f32_to_f64(
         .replace("0f3F800000", "0d3FF0000000000000") // 1.0
         .replace("0fBF800000", "0dBFF0000000000000") // -1.0
         .replace("0f40000000", "0d4000000000000000") // 2.0
+        .replace("0fC0400000", "0dC008000000000000") // -3.0
+        .replace("0f40400000", "0d4008000000000000") // 3.0
+        .replace("0f40C00000", "0d4018000000000000") // 6.0
+        // PyTorch's CUDA hardsigmoid/hardswish kernels spell one-sixth as
+        // `1.0f / 6.0f` before promoting to `opmath_t`, so f64 CUDA observes
+        // the f32-rounded value 0.1666666716337204 rather than exact 1/6.
+        .replace("0f3E2AAAAB", "0d3FC5555560000000") // f32-rounded 1/6
         .replace("0f3F000000", "0d3FE0000000000000") // 0.5
         .replace("0fFF800000", "0dFFF0000000000000") // -inf
         .replace("0f7F800000", "0d7FF0000000000000") // +inf
@@ -3720,6 +3727,815 @@ pub(crate) const CLAMP_PTX: &str = "\
     max.f32 %result, %x, %mn;
     min.f32 %result, %result, %mx;
     st.global.f32 [%out], %result;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for `leaky_relu_kernel`: `out[i] = x > 0 ? x : slope * x`.
+#[cfg(feature = "cuda")]
+pub(crate) const LEAKY_RELU_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry leaky_relu_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n,
+    .param .f32 slope
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %in, %out, %off;
+    .reg .f32 %x, %slope, %neg, %zero, %result;
+    .reg .pred %p, %pos;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+    ld.param.f32 %slope, [slope];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %in, %in, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f32 %x, [%in];
+    mov.f32 %zero, 0f00000000;
+    mul.f32 %neg, %x, %slope;
+    setp.gt.f32 %pos, %x, %zero;
+    selp.f32 %result, %x, %neg, %pos;
+    st.global.f32 [%out], %result;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for `leaky_relu_backward_kernel`:
+/// `out[i] = x > 0 ? grad[i] : slope * grad[i]`.
+#[cfg(feature = "cuda")]
+pub(crate) const LEAKY_RELU_BACKWARD_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry leaky_relu_backward_kernel(
+    .param .u64 grad_ptr,
+    .param .u64 input_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n,
+    .param .f32 slope
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %grad, %input, %out, %off;
+    .reg .f32 %g, %x, %slope, %neg, %zero, %result;
+    .reg .pred %p, %pos;
+
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+    ld.param.f32 %slope, [slope];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %grad, %grad, %off;
+    add.u64 %input, %input, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f32 %g, [%grad];
+    ld.global.f32 %x, [%input];
+    mov.f32 %zero, 0f00000000;
+    mul.f32 %neg, %g, %slope;
+    setp.gt.f32 %pos, %x, %zero;
+    selp.f32 %result, %g, %neg, %pos;
+    st.global.f32 [%out], %result;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for `hardtanh_backward_kernel`.
+/// PyTorch hardtanh uses strict interior derivatives: `min < x < max`.
+#[cfg(feature = "cuda")]
+pub(crate) const HARDTANH_BACKWARD_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry hardtanh_backward_kernel(
+    .param .u64 grad_ptr,
+    .param .u64 input_ptr,
+    .param .u64 out_ptr,
+    .param .f32 min_val,
+    .param .f32 max_val,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %grad, %input, %out, %off;
+    .reg .f32 %g, %x, %min, %max, %zero, %result;
+    .reg .pred %p, %ple, %pge, %pedge;
+
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.f32 %min, [min_val];
+    ld.param.f32 %max, [max_val];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %grad, %grad, %off;
+    add.u64 %input, %input, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f32 %g, [%grad];
+    ld.global.f32 %x, [%input];
+    mov.f32 %zero, 0f00000000;
+    setp.le.f32 %ple, %x, %min;
+    setp.ge.f32 %pge, %x, %max;
+    or.pred %pedge, %ple, %pge;
+    selp.f32 %result, %zero, %g, %pedge;
+    st.global.f32 [%out], %result;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for `hardsigmoid_kernel`.
+/// Mirrors PyTorch CUDA's `min(max(x + 3, 0), 6) * (1.0f / 6.0f)`.
+#[cfg(feature = "cuda")]
+pub(crate) const HARDSIGMOID_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry hardsigmoid_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %in, %out, %off;
+    .reg .f32 %x, %v, %zero, %three, %six, %one_sixth;
+    .reg .pred %p;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %in, %in, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f32 %x, [%in];
+    mov.f32 %zero, 0f00000000;
+    mov.f32 %three, 0f40400000;
+    mov.f32 %six, 0f40C00000;
+    mov.f32 %one_sixth, 0f3E2AAAAB;
+    add.f32 %v, %x, %three;
+    max.f32 %v, %v, %zero;
+    min.f32 %v, %v, %six;
+    mul.f32 %v, %v, %one_sixth;
+    st.global.f32 [%out], %v;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for `hardsigmoid_backward_kernel`.
+#[cfg(feature = "cuda")]
+pub(crate) const HARDSIGMOID_BACKWARD_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry hardsigmoid_backward_kernel(
+    .param .u64 grad_ptr,
+    .param .u64 input_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %grad, %input, %out, %off;
+    .reg .f32 %g, %x, %zero, %neg_three, %three, %one_sixth, %scaled, %result;
+    .reg .pred %p, %pgt, %plt, %pin;
+
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %grad, %grad, %off;
+    add.u64 %input, %input, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f32 %g, [%grad];
+    ld.global.f32 %x, [%input];
+    mov.f32 %zero, 0f00000000;
+    mov.f32 %neg_three, 0fC0400000;
+    mov.f32 %three, 0f40400000;
+    mov.f32 %one_sixth, 0f3E2AAAAB;
+    setp.gt.f32 %pgt, %x, %neg_three;
+    setp.lt.f32 %plt, %x, %three;
+    and.pred %pin, %pgt, %plt;
+    mul.f32 %scaled, %g, %one_sixth;
+    selp.f32 %result, %scaled, %zero, %pin;
+    st.global.f32 [%out], %result;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for `hardswish_kernel`.
+#[cfg(feature = "cuda")]
+pub(crate) const HARDSWISH_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry hardswish_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %in, %out, %off;
+    .reg .f32 %x, %v, %zero, %three, %six, %one_sixth;
+    .reg .pred %p;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %in, %in, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f32 %x, [%in];
+    mov.f32 %zero, 0f00000000;
+    mov.f32 %three, 0f40400000;
+    mov.f32 %six, 0f40C00000;
+    mov.f32 %one_sixth, 0f3E2AAAAB;
+    add.f32 %v, %x, %three;
+    max.f32 %v, %v, %zero;
+    min.f32 %v, %v, %six;
+    mul.f32 %v, %v, %x;
+    mul.f32 %v, %v, %one_sixth;
+    st.global.f32 [%out], %v;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for `hardswish_backward_kernel`.
+#[cfg(feature = "cuda")]
+pub(crate) const HARDSWISH_BACKWARD_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry hardswish_backward_kernel(
+    .param .u64 grad_ptr,
+    .param .u64 input_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %grad, %input, %out, %off;
+    .reg .f32 %g, %x, %zero, %neg_three, %three, %half, %mid, %result;
+    .reg .pred %p, %ple, %plt;
+
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %grad, %grad, %off;
+    add.u64 %input, %input, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f32 %g, [%grad];
+    ld.global.f32 %x, [%input];
+    mov.f32 %zero, 0f00000000;
+    mov.f32 %neg_three, 0fC0400000;
+    mov.f32 %three, 0f40400000;
+    mov.f32 %half, 0f3F000000;
+    setp.le.f32 %ple, %x, %neg_three;
+    setp.lt.f32 %plt, %x, %three;
+    div.rn.f32 %mid, %x, %three;
+    add.f32 %mid, %mid, %half;
+    mul.f32 %mid, %mid, %g;
+    selp.f32 %result, %mid, %g, %plt;
+    selp.f32 %result, %zero, %result, %ple;
+    st.global.f32 [%out], %result;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for `softsign_kernel`: `out[i] = x / (1 + abs(x))`.
+#[cfg(feature = "cuda")]
+pub(crate) const SOFTSIGN_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry softsign_kernel(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %in, %out, %off;
+    .reg .f32 %x, %denom, %one, %result;
+    .reg .pred %p;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %in, %in, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f32 %x, [%in];
+    mov.f32 %one, 0f3F800000;
+    abs.f32 %denom, %x;
+    add.f32 %denom, %denom, %one;
+    div.rn.f32 %result, %x, %denom;
+    st.global.f32 [%out], %result;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for `softsign_backward_kernel`:
+/// `out[i] = grad[i] / (1 + abs(x))^2`.
+#[cfg(feature = "cuda")]
+pub(crate) const SOFTSIGN_BACKWARD_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry softsign_backward_kernel(
+    .param .u64 grad_ptr,
+    .param .u64 input_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %grad, %input, %out, %off;
+    .reg .f32 %g, %x, %denom, %one, %result;
+    .reg .pred %p;
+
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %grad, %grad, %off;
+    add.u64 %input, %input, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f32 %g, [%grad];
+    ld.global.f32 %x, [%input];
+    mov.f32 %one, 0f3F800000;
+    abs.f32 %denom, %x;
+    add.f32 %denom, %denom, %one;
+    mul.f32 %denom, %denom, %denom;
+    div.rn.f32 %result, %g, %denom;
+    st.global.f32 [%out], %result;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for scalar-weight PReLU forward.
+#[cfg(feature = "cuda")]
+pub(crate) const PRELU_SCALAR_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry prelu_scalar_kernel(
+    .param .u64 input_ptr,
+    .param .u64 alpha_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %input, %alpha, %out, %off;
+    .reg .f32 %x, %a, %neg, %zero, %result;
+    .reg .pred %p, %pos;
+
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %alpha, [alpha_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %input, %input, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f32 %x, [%input];
+    ld.global.f32 %a, [%alpha];
+    mov.f32 %zero, 0f00000000;
+    mul.f32 %neg, %a, %x;
+    setp.gt.f32 %pos, %x, %zero;
+    selp.f32 %result, %x, %neg, %pos;
+    st.global.f32 [%out], %result;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for scalar-weight PReLU input VJP.
+#[cfg(feature = "cuda")]
+pub(crate) const PRELU_SCALAR_BACKWARD_INPUT_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry prelu_scalar_backward_input_kernel(
+    .param .u64 grad_ptr,
+    .param .u64 input_ptr,
+    .param .u64 alpha_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %grad, %input, %alpha, %out, %off;
+    .reg .f32 %g, %x, %a, %neg, %zero, %result;
+    .reg .pred %p, %pos;
+
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %alpha, [alpha_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %grad, %grad, %off;
+    add.u64 %input, %input, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f32 %g, [%grad];
+    ld.global.f32 %x, [%input];
+    ld.global.f32 %a, [%alpha];
+    mov.f32 %zero, 0f00000000;
+    mul.f32 %neg, %a, %g;
+    setp.gt.f32 %pos, %x, %zero;
+    selp.f32 %result, %g, %neg, %pos;
+    st.global.f32 [%out], %result;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for scalar-weight PReLU alpha-gradient terms.
+/// A subsequent resident reduction sums the returned terms.
+#[cfg(feature = "cuda")]
+pub(crate) const PRELU_SCALAR_BACKWARD_ALPHA_TERMS_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry prelu_scalar_backward_alpha_terms_kernel(
+    .param .u64 grad_ptr,
+    .param .u64 input_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %grad, %input, %out, %off;
+    .reg .f32 %g, %x, %term, %zero;
+    .reg .pred %p, %pos;
+
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %grad, %grad, %off;
+    add.u64 %input, %input, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f32 %g, [%grad];
+    ld.global.f32 %x, [%input];
+    mov.f32 %zero, 0f00000000;
+    mul.f32 %term, %g, %x;
+    setp.gt.f32 %pos, %x, %zero;
+    selp.f32 %term, %zero, %term, %pos;
+    st.global.f32 [%out], %term;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for channel-weight PReLU forward.
+///
+/// Input is contiguous row-major with channels on dim 1. `inner` is the
+/// product of dims after channel, so `channel = (linear / inner) % channels`.
+#[cfg(feature = "cuda")]
+pub(crate) const PRELU_CHANNEL_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry prelu_channel_kernel(
+    .param .u64 input_ptr,
+    .param .u64 alpha_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n,
+    .param .u32 channels,
+    .param .u32 inner
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %channels, %inner, %q, %ch;
+    .reg .u64 %input, %alpha, %out, %off, %off_a, %alpha_addr;
+    .reg .f32 %x, %a, %neg, %zero, %result;
+    .reg .pred %p, %pos;
+
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %alpha, [alpha_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+    ld.param.u32 %channels, [channels];
+    ld.param.u32 %inner, [inner];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %input, %input, %off;
+    add.u64 %out, %out, %off;
+
+    div.u32 %q, %r_tid, %inner;
+    rem.u32 %ch, %q, %channels;
+    cvt.u64.u32 %off_a, %ch;
+    shl.b64 %off_a, %off_a, 2;
+    add.u64 %alpha_addr, %alpha, %off_a;
+
+    ld.global.f32 %x, [%input];
+    ld.global.f32 %a, [%alpha_addr];
+    mov.f32 %zero, 0f00000000;
+    mul.f32 %neg, %a, %x;
+    setp.gt.f32 %pos, %x, %zero;
+    selp.f32 %result, %x, %neg, %pos;
+    st.global.f32 [%out], %result;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for channel-weight PReLU input VJP.
+#[cfg(feature = "cuda")]
+pub(crate) const PRELU_CHANNEL_BACKWARD_INPUT_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry prelu_channel_backward_input_kernel(
+    .param .u64 grad_ptr,
+    .param .u64 input_ptr,
+    .param .u64 alpha_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n,
+    .param .u32 channels,
+    .param .u32 inner
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %channels, %inner, %q, %ch;
+    .reg .u64 %grad, %input, %alpha, %out, %off, %off_a, %alpha_addr;
+    .reg .f32 %g, %x, %a, %neg, %zero, %result;
+    .reg .pred %p, %pos;
+
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %alpha, [alpha_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+    ld.param.u32 %channels, [channels];
+    ld.param.u32 %inner, [inner];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %grad, %grad, %off;
+    add.u64 %input, %input, %off;
+    add.u64 %out, %out, %off;
+
+    div.u32 %q, %r_tid, %inner;
+    rem.u32 %ch, %q, %channels;
+    cvt.u64.u32 %off_a, %ch;
+    shl.b64 %off_a, %off_a, 2;
+    add.u64 %alpha_addr, %alpha, %off_a;
+
+    ld.global.f32 %g, [%grad];
+    ld.global.f32 %x, [%input];
+    ld.global.f32 %a, [%alpha_addr];
+    mov.f32 %zero, 0f00000000;
+    mul.f32 %neg, %a, %g;
+    setp.gt.f32 %pos, %x, %zero;
+    selp.f32 %result, %g, %neg, %pos;
+    st.global.f32 [%out], %result;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for channel-weight PReLU alpha VJP.
+///
+/// PyTorch's backward branch is `input > 0 ? 0 : input * grad`; NaN input
+/// therefore contributes NaN because `input > 0` is false.
+#[cfg(feature = "cuda")]
+pub(crate) const PRELU_CHANNEL_BACKWARD_ALPHA_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry prelu_channel_backward_alpha_kernel(
+    .param .u64 grad_ptr,
+    .param .u64 input_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n,
+    .param .u32 channels,
+    .param .u32 inner
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %channels, %inner, %q, %ch;
+    .reg .u64 %grad, %input, %out, %off, %off_a, %alpha_out_addr;
+    .reg .f32 %g, %x, %term, %zero, %old;
+    .reg .pred %p, %pos;
+
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+    ld.param.u32 %channels, [channels];
+    ld.param.u32 %inner, [inner];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %grad, %grad, %off;
+    add.u64 %input, %input, %off;
+
+    div.u32 %q, %r_tid, %inner;
+    rem.u32 %ch, %q, %channels;
+    cvt.u64.u32 %off_a, %ch;
+    shl.b64 %off_a, %off_a, 2;
+    add.u64 %alpha_out_addr, %out, %off_a;
+
+    ld.global.f32 %g, [%grad];
+    ld.global.f32 %x, [%input];
+    mov.f32 %zero, 0f00000000;
+    mul.f32 %term, %g, %x;
+    setp.gt.f32 %pos, %x, %zero;
+    selp.f32 %term, %zero, %term, %pos;
+    atom.global.add.f32 %old, [%alpha_out_addr], %term;
 
 DONE:
     ret;
@@ -22956,12 +23772,689 @@ pub fn gpu_clamp_backward(
     Ok(out)
 }
 
+/// Elementwise LeakyReLU: `x > 0 ? x : x * negative_slope`.
+#[cfg(feature = "cuda")]
+pub fn gpu_leaky_relu(
+    input: &CudaBuffer<f32>,
+    negative_slope: f32,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_unary(input, device)?;
+
+    let n = input.len();
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        LEAKY_RELU_PTX,
+        "leaky_relu_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "leaky_relu_kernel",
+                source: e,
+            });
+        }
+    };
+    let mut out = alloc_zeros_f32(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .arg(&negative_slope)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// LeakyReLU VJP: `grad * (input > 0 ? 1 : negative_slope)`.
+#[cfg(feature = "cuda")]
+pub fn gpu_leaky_relu_backward(
+    grad: &CudaBuffer<f32>,
+    input: &CudaBuffer<f32>,
+    negative_slope: f32,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_binary(grad, input, device)?;
+
+    let n = grad.len();
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        LEAKY_RELU_BACKWARD_PTX,
+        "leaky_relu_backward_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "leaky_relu_backward_kernel",
+                source: e,
+            });
+        }
+    };
+    let mut out = alloc_zeros_f32(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(grad.inner())
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .arg(&negative_slope)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Hardtanh VJP with PyTorch's strict interior derivative:
+/// `grad` when `min < input < max`, otherwise zero.
+#[cfg(feature = "cuda")]
+pub fn gpu_hardtanh_backward(
+    grad: &CudaBuffer<f32>,
+    input: &CudaBuffer<f32>,
+    min_val: f32,
+    max_val: f32,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_binary(grad, input, device)?;
+
+    let n = grad.len();
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        HARDTANH_BACKWARD_PTX,
+        "hardtanh_backward_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "hardtanh_backward_kernel",
+                source: e,
+            });
+        }
+    };
+    let mut out = alloc_zeros_f32(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(grad.inner())
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&min_val)
+            .arg(&max_val)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Hardsigmoid forward. CUDA intentionally follows PyTorch's f32 one-sixth
+/// literal even for the mechanically promoted f64 template.
+#[cfg(feature = "cuda")]
+pub fn gpu_hardsigmoid(input: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    validate_unary(input, device)?;
+    try_launch_unary(input, device, HARDSIGMOID_PTX, "hardsigmoid_kernel")
+}
+
+/// Hardsigmoid VJP.
+#[cfg(feature = "cuda")]
+pub fn gpu_hardsigmoid_backward(
+    grad: &CudaBuffer<f32>,
+    input: &CudaBuffer<f32>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    validate_binary(grad, input, device)?;
+    try_launch_binary(
+        grad,
+        input,
+        device,
+        HARDSIGMOID_BACKWARD_PTX,
+        "hardsigmoid_backward_kernel",
+    )
+}
+
+/// Hardswish forward.
+#[cfg(feature = "cuda")]
+pub fn gpu_hardswish(input: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    validate_unary(input, device)?;
+    try_launch_unary(input, device, HARDSWISH_PTX, "hardswish_kernel")
+}
+
+/// Hardswish VJP.
+#[cfg(feature = "cuda")]
+pub fn gpu_hardswish_backward(
+    grad: &CudaBuffer<f32>,
+    input: &CudaBuffer<f32>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    validate_binary(grad, input, device)?;
+    try_launch_binary(
+        grad,
+        input,
+        device,
+        HARDSWISH_BACKWARD_PTX,
+        "hardswish_backward_kernel",
+    )
+}
+
+/// Softsign forward.
+#[cfg(feature = "cuda")]
+pub fn gpu_softsign(input: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    validate_unary(input, device)?;
+    try_launch_unary(input, device, SOFTSIGN_PTX, "softsign_kernel")
+}
+
+/// Softsign VJP.
+#[cfg(feature = "cuda")]
+pub fn gpu_softsign_backward(
+    grad: &CudaBuffer<f32>,
+    input: &CudaBuffer<f32>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    validate_binary(grad, input, device)?;
+    try_launch_binary(
+        grad,
+        input,
+        device,
+        SOFTSIGN_BACKWARD_PTX,
+        "softsign_backward_kernel",
+    )
+}
+
+/// Scalar-weight PReLU forward. `alpha` must contain exactly one element.
+#[cfg(feature = "cuda")]
+pub fn gpu_prelu_scalar(
+    input: &CudaBuffer<f32>,
+    alpha: &CudaBuffer<f32>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_unary(input, device)?;
+    validate_device(alpha, device)?;
+    if alpha.len() != 1 {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_prelu_scalar",
+            expected: vec![1],
+            got: vec![alpha.len()],
+        });
+    }
+
+    let n = input.len();
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        PRELU_SCALAR_PTX,
+        "prelu_scalar_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "prelu_scalar_kernel",
+                source: e,
+            });
+        }
+    };
+    let mut out = alloc_zeros_f32(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(alpha.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Scalar-weight PReLU input VJP.
+#[cfg(feature = "cuda")]
+pub fn gpu_prelu_scalar_backward_input(
+    grad: &CudaBuffer<f32>,
+    input: &CudaBuffer<f32>,
+    alpha: &CudaBuffer<f32>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_binary(grad, input, device)?;
+    validate_device(alpha, device)?;
+    if alpha.len() != 1 {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_prelu_scalar_backward_input",
+            expected: vec![1],
+            got: vec![alpha.len()],
+        });
+    }
+
+    let n = grad.len();
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        PRELU_SCALAR_BACKWARD_INPUT_PTX,
+        "prelu_scalar_backward_input_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "prelu_scalar_backward_input_kernel",
+                source: e,
+            });
+        }
+    };
+    let mut out = alloc_zeros_f32(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(grad.inner())
+            .arg(input.inner())
+            .arg(alpha.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Scalar-weight PReLU alpha VJP as a resident map-reduce.
+#[cfg(feature = "cuda")]
+pub fn gpu_prelu_scalar_backward_alpha(
+    grad: &CudaBuffer<f32>,
+    input: &CudaBuffer<f32>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    validate_binary(grad, input, device)?;
+    let terms = try_launch_binary(
+        grad,
+        input,
+        device,
+        PRELU_SCALAR_BACKWARD_ALPHA_TERMS_PTX,
+        "prelu_scalar_backward_alpha_terms_kernel",
+    )?;
+    gpu_reduce_sum(&terms, device)
+}
+
+fn validate_prelu_channel_dims(
+    op: &'static str,
+    n: usize,
+    alpha_len: usize,
+    channels: usize,
+    inner: usize,
+) -> GpuResult<()> {
+    if alpha_len != channels {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![channels],
+            got: vec![alpha_len],
+        });
+    }
+    if n == 0 {
+        return Ok(());
+    }
+    if channels == 0 || inner == 0 {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![1],
+            got: vec![channels, inner],
+        });
+    }
+    let channel_block = channels.checked_mul(inner).ok_or(GpuError::ShapeMismatch {
+        op,
+        expected: vec![usize::MAX],
+        got: vec![channels, inner],
+    })?;
+    if !n.is_multiple_of(channel_block) {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![channel_block],
+            got: vec![n],
+        });
+    }
+    Ok(())
+}
+
+/// Channel-weight PReLU forward. `channels` is input dim 1, `inner` is the
+/// product of dims after dim 1.
+#[cfg(feature = "cuda")]
+pub fn gpu_prelu_channel(
+    input: &CudaBuffer<f32>,
+    alpha: &CudaBuffer<f32>,
+    channels: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_unary(input, device)?;
+    validate_device(alpha, device)?;
+    validate_prelu_channel_dims(
+        "gpu_prelu_channel",
+        input.len(),
+        alpha.len(),
+        channels,
+        inner,
+    )?;
+    let n = input.len();
+    let mut out = alloc_zeros_f32(n, device)?;
+    if n == 0 {
+        return Ok(out);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        PRELU_CHANNEL_PTX,
+        "prelu_channel_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "prelu_channel_kernel",
+        source: e,
+    })?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    let channels_u32 = channels as u32;
+    let inner_u32 = inner as u32;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(alpha.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .arg(&channels_u32)
+            .arg(&inner_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Channel-weight PReLU input VJP.
+#[cfg(feature = "cuda")]
+pub fn gpu_prelu_channel_backward_input(
+    grad: &CudaBuffer<f32>,
+    input: &CudaBuffer<f32>,
+    alpha: &CudaBuffer<f32>,
+    channels: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_binary(grad, input, device)?;
+    validate_device(alpha, device)?;
+    validate_prelu_channel_dims(
+        "gpu_prelu_channel_backward_input",
+        grad.len(),
+        alpha.len(),
+        channels,
+        inner,
+    )?;
+    let n = grad.len();
+    let mut out = alloc_zeros_f32(n, device)?;
+    if n == 0 {
+        return Ok(out);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        PRELU_CHANNEL_BACKWARD_INPUT_PTX,
+        "prelu_channel_backward_input_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "prelu_channel_backward_input_kernel",
+        source: e,
+    })?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    let channels_u32 = channels as u32;
+    let inner_u32 = inner as u32;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(grad.inner())
+            .arg(input.inner())
+            .arg(alpha.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .arg(&channels_u32)
+            .arg(&inner_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Channel-weight PReLU alpha VJP as resident atomic accumulation.
+#[cfg(feature = "cuda")]
+pub fn gpu_prelu_channel_backward_alpha(
+    grad: &CudaBuffer<f32>,
+    input: &CudaBuffer<f32>,
+    channels: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_binary(grad, input, device)?;
+    validate_prelu_channel_dims(
+        "gpu_prelu_channel_backward_alpha",
+        grad.len(),
+        channels,
+        channels,
+        inner,
+    )?;
+    let mut out = alloc_zeros_f32(channels, device)?;
+    let n = grad.len();
+    if n == 0 || channels == 0 {
+        return Ok(out);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        PRELU_CHANNEL_BACKWARD_ALPHA_PTX,
+        "prelu_channel_backward_alpha_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "prelu_channel_backward_alpha_kernel",
+        source: e,
+    })?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    let channels_u32 = channels as u32;
+    let inner_u32 = inner as u32;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(grad.inner())
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .arg(&channels_u32)
+            .arg(&inner_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
 #[cfg(not(feature = "cuda"))]
 pub fn gpu_clamp_backward(
     _grad: &CudaBuffer<f32>,
     _input: &CudaBuffer<f32>,
     _min_val: f32,
     _max_val: f32,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_leaky_relu(
+    _input: &CudaBuffer<f32>,
+    _negative_slope: f32,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_leaky_relu_backward(
+    _grad: &CudaBuffer<f32>,
+    _input: &CudaBuffer<f32>,
+    _negative_slope: f32,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_hardtanh_backward(
+    _grad: &CudaBuffer<f32>,
+    _input: &CudaBuffer<f32>,
+    _min_val: f32,
+    _max_val: f32,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_hardsigmoid(
+    _input: &CudaBuffer<f32>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_hardsigmoid_backward(
+    _grad: &CudaBuffer<f32>,
+    _input: &CudaBuffer<f32>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_hardswish(_input: &CudaBuffer<f32>, _device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_hardswish_backward(
+    _grad: &CudaBuffer<f32>,
+    _input: &CudaBuffer<f32>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_softsign(_input: &CudaBuffer<f32>, _device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_softsign_backward(
+    _grad: &CudaBuffer<f32>,
+    _input: &CudaBuffer<f32>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_prelu_scalar(
+    _input: &CudaBuffer<f32>,
+    _alpha: &CudaBuffer<f32>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_prelu_channel(
+    _input: &CudaBuffer<f32>,
+    _alpha: &CudaBuffer<f32>,
+    _channels: usize,
+    _inner: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_prelu_scalar_backward_input(
+    _grad: &CudaBuffer<f32>,
+    _input: &CudaBuffer<f32>,
+    _alpha: &CudaBuffer<f32>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_prelu_channel_backward_input(
+    _grad: &CudaBuffer<f32>,
+    _input: &CudaBuffer<f32>,
+    _alpha: &CudaBuffer<f32>,
+    _channels: usize,
+    _inner: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_prelu_scalar_backward_alpha(
+    _grad: &CudaBuffer<f32>,
+    _input: &CudaBuffer<f32>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_prelu_channel_backward_alpha(
+    _grad: &CudaBuffer<f32>,
+    _input: &CudaBuffer<f32>,
+    _channels: usize,
+    _inner: usize,
     _device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<f32>> {
     Err(GpuError::NoCudaFeature)
@@ -31465,12 +32958,809 @@ pub fn gpu_clamp_backward_f64(
     }
 }
 
+/// Elementwise LeakyReLU for f64.
+#[cfg(feature = "cuda")]
+pub fn gpu_leaky_relu_f64(
+    input: &CudaBuffer<f64>,
+    negative_slope: f64,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    validate_device(input, device)?;
+
+    let n = input.len();
+    let ctx = device.context();
+    let stream = device.stream();
+    let ptx = get_f64_ptx(
+        &CACHE,
+        LEAKY_RELU_PTX,
+        "leaky_relu_kernel",
+        "leaky_relu_f64_kernel",
+    );
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "leaky_relu_f64_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "leaky_relu_f64_kernel",
+                source: e,
+            });
+        }
+    };
+    let mut out = alloc_zeros_f64(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .arg(&negative_slope)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// LeakyReLU VJP for f64.
+#[cfg(feature = "cuda")]
+pub fn gpu_leaky_relu_backward_f64(
+    grad: &CudaBuffer<f64>,
+    input: &CudaBuffer<f64>,
+    negative_slope: f64,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    validate_device(grad, device)?;
+    validate_device(input, device)?;
+    if grad.len() != input.len() {
+        return Err(GpuError::LengthMismatch {
+            a: grad.len(),
+            b: input.len(),
+        });
+    }
+
+    let n = grad.len();
+    let ctx = device.context();
+    let stream = device.stream();
+    let ptx = get_f64_ptx(
+        &CACHE,
+        LEAKY_RELU_BACKWARD_PTX,
+        "leaky_relu_backward_kernel",
+        "leaky_relu_backward_f64_kernel",
+    );
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "leaky_relu_backward_f64_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "leaky_relu_backward_f64_kernel",
+                source: e,
+            });
+        }
+    };
+    let mut out = alloc_zeros_f64(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(grad.inner())
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .arg(&negative_slope)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Hardtanh VJP for f64, using PyTorch's strict interior derivative.
+#[cfg(feature = "cuda")]
+pub fn gpu_hardtanh_backward_f64(
+    grad: &CudaBuffer<f64>,
+    input: &CudaBuffer<f64>,
+    min_val: f64,
+    max_val: f64,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    validate_device(grad, device)?;
+    validate_device(input, device)?;
+    if grad.len() != input.len() {
+        return Err(GpuError::LengthMismatch {
+            a: grad.len(),
+            b: input.len(),
+        });
+    }
+
+    let n = grad.len();
+    let ctx = device.context();
+    let stream = device.stream();
+    let ptx = get_f64_ptx(
+        &CACHE,
+        HARDTANH_BACKWARD_PTX,
+        "hardtanh_backward_kernel",
+        "hardtanh_backward_f64_kernel",
+    );
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "hardtanh_backward_f64_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "hardtanh_backward_f64_kernel",
+                source: e,
+            });
+        }
+    };
+    let mut out = alloc_zeros_f64(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(grad.inner())
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&min_val)
+            .arg(&max_val)
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Hardsigmoid forward for f64.
+#[cfg(feature = "cuda")]
+pub fn gpu_hardsigmoid_f64(
+    input: &CudaBuffer<f64>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    validate_device(input, device)?;
+    let ptx = get_f64_ptx(
+        &CACHE,
+        HARDSIGMOID_PTX,
+        "hardsigmoid_kernel",
+        "hardsigmoid_f64_kernel",
+    );
+    try_launch_unary_f64(input, device, ptx, "hardsigmoid_f64_kernel")
+}
+
+/// Hardsigmoid VJP for f64.
+#[cfg(feature = "cuda")]
+pub fn gpu_hardsigmoid_backward_f64(
+    grad: &CudaBuffer<f64>,
+    input: &CudaBuffer<f64>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    validate_device(grad, device)?;
+    validate_device(input, device)?;
+    if grad.len() != input.len() {
+        return Err(GpuError::LengthMismatch {
+            a: grad.len(),
+            b: input.len(),
+        });
+    }
+    let ptx = get_f64_ptx(
+        &CACHE,
+        HARDSIGMOID_BACKWARD_PTX,
+        "hardsigmoid_backward_kernel",
+        "hardsigmoid_backward_f64_kernel",
+    );
+    try_launch_binary_f64(grad, input, device, ptx, "hardsigmoid_backward_f64_kernel")
+}
+
+/// Hardswish forward for f64.
+#[cfg(feature = "cuda")]
+pub fn gpu_hardswish_f64(
+    input: &CudaBuffer<f64>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    validate_device(input, device)?;
+    let ptx = get_f64_ptx(
+        &CACHE,
+        HARDSWISH_PTX,
+        "hardswish_kernel",
+        "hardswish_f64_kernel",
+    );
+    try_launch_unary_f64(input, device, ptx, "hardswish_f64_kernel")
+}
+
+/// Hardswish VJP for f64.
+#[cfg(feature = "cuda")]
+pub fn gpu_hardswish_backward_f64(
+    grad: &CudaBuffer<f64>,
+    input: &CudaBuffer<f64>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    validate_device(grad, device)?;
+    validate_device(input, device)?;
+    if grad.len() != input.len() {
+        return Err(GpuError::LengthMismatch {
+            a: grad.len(),
+            b: input.len(),
+        });
+    }
+    let ptx = get_f64_ptx(
+        &CACHE,
+        HARDSWISH_BACKWARD_PTX,
+        "hardswish_backward_kernel",
+        "hardswish_backward_f64_kernel",
+    );
+    try_launch_binary_f64(grad, input, device, ptx, "hardswish_backward_f64_kernel")
+}
+
+/// Softsign forward for f64.
+#[cfg(feature = "cuda")]
+pub fn gpu_softsign_f64(input: &CudaBuffer<f64>, device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    validate_device(input, device)?;
+    let ptx = get_f64_ptx(
+        &CACHE,
+        SOFTSIGN_PTX,
+        "softsign_kernel",
+        "softsign_f64_kernel",
+    );
+    try_launch_unary_f64(input, device, ptx, "softsign_f64_kernel")
+}
+
+/// Softsign VJP for f64.
+#[cfg(feature = "cuda")]
+pub fn gpu_softsign_backward_f64(
+    grad: &CudaBuffer<f64>,
+    input: &CudaBuffer<f64>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    validate_device(grad, device)?;
+    validate_device(input, device)?;
+    if grad.len() != input.len() {
+        return Err(GpuError::LengthMismatch {
+            a: grad.len(),
+            b: input.len(),
+        });
+    }
+    let ptx = get_f64_ptx(
+        &CACHE,
+        SOFTSIGN_BACKWARD_PTX,
+        "softsign_backward_kernel",
+        "softsign_backward_f64_kernel",
+    );
+    try_launch_binary_f64(grad, input, device, ptx, "softsign_backward_f64_kernel")
+}
+
+/// Scalar-weight PReLU forward for f64.
+#[cfg(feature = "cuda")]
+pub fn gpu_prelu_scalar_f64(
+    input: &CudaBuffer<f64>,
+    alpha: &CudaBuffer<f64>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    validate_device(input, device)?;
+    validate_device(alpha, device)?;
+    if alpha.len() != 1 {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_prelu_scalar_f64",
+            expected: vec![1],
+            got: vec![alpha.len()],
+        });
+    }
+
+    let n = input.len();
+    let ctx = device.context();
+    let stream = device.stream();
+    let ptx = get_f64_ptx(
+        &CACHE,
+        PRELU_SCALAR_PTX,
+        "prelu_scalar_kernel",
+        "prelu_scalar_f64_kernel",
+    );
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "prelu_scalar_f64_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "prelu_scalar_f64_kernel",
+                source: e,
+            });
+        }
+    };
+    let mut out = alloc_zeros_f64(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(alpha.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Channel-weight PReLU forward for f64.
+#[cfg(feature = "cuda")]
+pub fn gpu_prelu_channel_f64(
+    input: &CudaBuffer<f64>,
+    alpha: &CudaBuffer<f64>,
+    channels: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    validate_device(input, device)?;
+    validate_device(alpha, device)?;
+    validate_prelu_channel_dims(
+        "gpu_prelu_channel_f64",
+        input.len(),
+        alpha.len(),
+        channels,
+        inner,
+    )?;
+    let n = input.len();
+    let mut out = alloc_zeros_f64(n, device)?;
+    if n == 0 {
+        return Ok(out);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let ptx = get_f64_ptx(
+        &CACHE,
+        PRELU_CHANNEL_PTX,
+        "prelu_channel_kernel",
+        "prelu_channel_f64_kernel",
+    );
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "prelu_channel_f64_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "prelu_channel_f64_kernel",
+        source: e,
+    })?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    let channels_u32 = channels as u32;
+    let inner_u32 = inner as u32;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(alpha.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .arg(&channels_u32)
+            .arg(&inner_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Scalar-weight PReLU input VJP for f64.
+#[cfg(feature = "cuda")]
+pub fn gpu_prelu_scalar_backward_input_f64(
+    grad: &CudaBuffer<f64>,
+    input: &CudaBuffer<f64>,
+    alpha: &CudaBuffer<f64>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    validate_device(grad, device)?;
+    validate_device(input, device)?;
+    validate_device(alpha, device)?;
+    if grad.len() != input.len() {
+        return Err(GpuError::LengthMismatch {
+            a: grad.len(),
+            b: input.len(),
+        });
+    }
+    if alpha.len() != 1 {
+        return Err(GpuError::ShapeMismatch {
+            op: "gpu_prelu_scalar_backward_input_f64",
+            expected: vec![1],
+            got: vec![alpha.len()],
+        });
+    }
+
+    let n = grad.len();
+    let ctx = device.context();
+    let stream = device.stream();
+    let ptx = get_f64_ptx(
+        &CACHE,
+        PRELU_SCALAR_BACKWARD_INPUT_PTX,
+        "prelu_scalar_backward_input_kernel",
+        "prelu_scalar_backward_input_f64_kernel",
+    );
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "prelu_scalar_backward_input_f64_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "prelu_scalar_backward_input_f64_kernel",
+                source: e,
+            });
+        }
+    };
+    let mut out = alloc_zeros_f64(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(grad.inner())
+            .arg(input.inner())
+            .arg(alpha.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Channel-weight PReLU input VJP for f64.
+#[cfg(feature = "cuda")]
+pub fn gpu_prelu_channel_backward_input_f64(
+    grad: &CudaBuffer<f64>,
+    input: &CudaBuffer<f64>,
+    alpha: &CudaBuffer<f64>,
+    channels: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    validate_device(grad, device)?;
+    validate_device(input, device)?;
+    validate_device(alpha, device)?;
+    if grad.len() != input.len() {
+        return Err(GpuError::LengthMismatch {
+            a: grad.len(),
+            b: input.len(),
+        });
+    }
+    validate_prelu_channel_dims(
+        "gpu_prelu_channel_backward_input_f64",
+        grad.len(),
+        alpha.len(),
+        channels,
+        inner,
+    )?;
+    let n = grad.len();
+    let mut out = alloc_zeros_f64(n, device)?;
+    if n == 0 {
+        return Ok(out);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let ptx = get_f64_ptx(
+        &CACHE,
+        PRELU_CHANNEL_BACKWARD_INPUT_PTX,
+        "prelu_channel_backward_input_kernel",
+        "prelu_channel_backward_input_f64_kernel",
+    );
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "prelu_channel_backward_input_f64_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "prelu_channel_backward_input_f64_kernel",
+        source: e,
+    })?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    let channels_u32 = channels as u32;
+    let inner_u32 = inner as u32;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(grad.inner())
+            .arg(input.inner())
+            .arg(alpha.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .arg(&channels_u32)
+            .arg(&inner_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Scalar-weight PReLU alpha VJP for f64 as a resident map-reduce.
+#[cfg(feature = "cuda")]
+pub fn gpu_prelu_scalar_backward_alpha_f64(
+    grad: &CudaBuffer<f64>,
+    input: &CudaBuffer<f64>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    validate_device(grad, device)?;
+    validate_device(input, device)?;
+    if grad.len() != input.len() {
+        return Err(GpuError::LengthMismatch {
+            a: grad.len(),
+            b: input.len(),
+        });
+    }
+    let ptx = get_f64_ptx(
+        &CACHE,
+        PRELU_SCALAR_BACKWARD_ALPHA_TERMS_PTX,
+        "prelu_scalar_backward_alpha_terms_kernel",
+        "prelu_scalar_backward_alpha_terms_f64_kernel",
+    );
+    let terms = try_launch_binary_f64(
+        grad,
+        input,
+        device,
+        ptx,
+        "prelu_scalar_backward_alpha_terms_f64_kernel",
+    )?;
+    gpu_reduce_sum_f64(&terms, device)
+}
+
+/// Channel-weight PReLU alpha VJP for f64 as resident atomic accumulation.
+#[cfg(feature = "cuda")]
+pub fn gpu_prelu_channel_backward_alpha_f64(
+    grad: &CudaBuffer<f64>,
+    input: &CudaBuffer<f64>,
+    channels: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    validate_device(grad, device)?;
+    validate_device(input, device)?;
+    if grad.len() != input.len() {
+        return Err(GpuError::LengthMismatch {
+            a: grad.len(),
+            b: input.len(),
+        });
+    }
+    validate_prelu_channel_dims(
+        "gpu_prelu_channel_backward_alpha_f64",
+        grad.len(),
+        channels,
+        channels,
+        inner,
+    )?;
+    let mut out = alloc_zeros_f64(channels, device)?;
+    let n = grad.len();
+    if n == 0 || channels == 0 {
+        return Ok(out);
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let ptx = get_f64_ptx(
+        &CACHE,
+        PRELU_CHANNEL_BACKWARD_ALPHA_PTX,
+        "prelu_channel_backward_alpha_kernel",
+        "prelu_channel_backward_alpha_f64_kernel",
+    );
+    let f = crate::module_cache::get_or_compile(
+        ctx,
+        ptx,
+        "prelu_channel_backward_alpha_f64_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "prelu_channel_backward_alpha_f64_kernel",
+        source: e,
+    })?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+    let channels_u32 = channels as u32;
+    let inner_u32 = inner as u32;
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(grad.inner())
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .arg(&channels_u32)
+            .arg(&inner_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
 #[cfg(not(feature = "cuda"))]
 pub fn gpu_clamp_backward_f64(
     _grad: &CudaBuffer<f64>,
     _input: &CudaBuffer<f64>,
     _min: f64,
     _max: f64,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_leaky_relu_f64(
+    _input: &CudaBuffer<f64>,
+    _negative_slope: f64,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_leaky_relu_backward_f64(
+    _grad: &CudaBuffer<f64>,
+    _input: &CudaBuffer<f64>,
+    _negative_slope: f64,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_hardtanh_backward_f64(
+    _grad: &CudaBuffer<f64>,
+    _input: &CudaBuffer<f64>,
+    _min_val: f64,
+    _max_val: f64,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_hardsigmoid_f64(
+    _input: &CudaBuffer<f64>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_hardsigmoid_backward_f64(
+    _grad: &CudaBuffer<f64>,
+    _input: &CudaBuffer<f64>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_hardswish_f64(
+    _input: &CudaBuffer<f64>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_hardswish_backward_f64(
+    _grad: &CudaBuffer<f64>,
+    _input: &CudaBuffer<f64>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_softsign_f64(
+    _input: &CudaBuffer<f64>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_softsign_backward_f64(
+    _grad: &CudaBuffer<f64>,
+    _input: &CudaBuffer<f64>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_prelu_scalar_f64(
+    _input: &CudaBuffer<f64>,
+    _alpha: &CudaBuffer<f64>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_prelu_channel_f64(
+    _input: &CudaBuffer<f64>,
+    _alpha: &CudaBuffer<f64>,
+    _channels: usize,
+    _inner: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_prelu_scalar_backward_input_f64(
+    _grad: &CudaBuffer<f64>,
+    _input: &CudaBuffer<f64>,
+    _alpha: &CudaBuffer<f64>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_prelu_channel_backward_input_f64(
+    _grad: &CudaBuffer<f64>,
+    _input: &CudaBuffer<f64>,
+    _alpha: &CudaBuffer<f64>,
+    _channels: usize,
+    _inner: usize,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_prelu_scalar_backward_alpha_f64(
+    _grad: &CudaBuffer<f64>,
+    _input: &CudaBuffer<f64>,
+    _device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_prelu_channel_backward_alpha_f64(
+    _grad: &CudaBuffer<f64>,
+    _input: &CudaBuffer<f64>,
+    _channels: usize,
+    _inner: usize,
     _device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<f64>> {
     Err(GpuError::NoCudaFeature)

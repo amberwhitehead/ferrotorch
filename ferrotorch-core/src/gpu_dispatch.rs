@@ -3928,6 +3928,277 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    // Scalar/tail activations used by `grad_fns::activation`.
+    fn leaky_relu_f32(
+        &self,
+        _a: &GpuBufferHandle,
+        _negative_slope: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "leaky_relu_f32",
+        })
+    }
+    fn leaky_relu_f64(
+        &self,
+        _a: &GpuBufferHandle,
+        _negative_slope: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "leaky_relu_f64",
+        })
+    }
+    fn leaky_relu_backward_f32(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+        _negative_slope: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "leaky_relu_backward_f32",
+        })
+    }
+    fn leaky_relu_backward_f64(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+        _negative_slope: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "leaky_relu_backward_f64",
+        })
+    }
+
+    fn hardtanh_backward_f32(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+        _min_val: f32,
+        _max_val: f32,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "hardtanh_backward_f32",
+        })
+    }
+    fn hardtanh_backward_f64(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+        _min_val: f64,
+        _max_val: f64,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "hardtanh_backward_f64",
+        })
+    }
+
+    fn hardsigmoid_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "hardsigmoid_f32",
+        })
+    }
+    fn hardsigmoid_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "hardsigmoid_f64",
+        })
+    }
+    fn hardsigmoid_backward_f32(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "hardsigmoid_backward_f32",
+        })
+    }
+    fn hardsigmoid_backward_f64(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "hardsigmoid_backward_f64",
+        })
+    }
+
+    fn hardswish_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "hardswish_f32",
+        })
+    }
+    fn hardswish_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "hardswish_f64",
+        })
+    }
+    fn hardswish_backward_f32(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "hardswish_backward_f32",
+        })
+    }
+    fn hardswish_backward_f64(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "hardswish_backward_f64",
+        })
+    }
+
+    fn softsign_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "softsign_f32" })
+    }
+    fn softsign_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "softsign_f64" })
+    }
+    fn softsign_backward_f32(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "softsign_backward_f32",
+        })
+    }
+    fn softsign_backward_f64(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "softsign_backward_f64",
+        })
+    }
+
+    fn prelu_scalar_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _alpha: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prelu_scalar_f32",
+        })
+    }
+    fn prelu_scalar_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _alpha: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prelu_scalar_f64",
+        })
+    }
+    fn prelu_channel_f32(
+        &self,
+        _input: &GpuBufferHandle,
+        _alpha: &GpuBufferHandle,
+        _channels: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prelu_channel_f32",
+        })
+    }
+    fn prelu_channel_f64(
+        &self,
+        _input: &GpuBufferHandle,
+        _alpha: &GpuBufferHandle,
+        _channels: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prelu_channel_f64",
+        })
+    }
+    fn prelu_scalar_backward_input_f32(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+        _alpha: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prelu_scalar_backward_input_f32",
+        })
+    }
+    fn prelu_scalar_backward_input_f64(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+        _alpha: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prelu_scalar_backward_input_f64",
+        })
+    }
+    fn prelu_channel_backward_input_f32(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+        _alpha: &GpuBufferHandle,
+        _channels: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prelu_channel_backward_input_f32",
+        })
+    }
+    fn prelu_channel_backward_input_f64(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+        _alpha: &GpuBufferHandle,
+        _channels: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prelu_channel_backward_input_f64",
+        })
+    }
+    fn prelu_scalar_backward_alpha_f32(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prelu_scalar_backward_alpha_f32",
+        })
+    }
+    fn prelu_scalar_backward_alpha_f64(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prelu_scalar_backward_alpha_f64",
+        })
+    }
+    fn prelu_channel_backward_alpha_f32(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+        _channels: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prelu_channel_backward_alpha_f32",
+        })
+    }
+    fn prelu_channel_backward_alpha_f64(
+        &self,
+        _grad: &GpuBufferHandle,
+        _input: &GpuBufferHandle,
+        _channels: usize,
+        _inner: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "prelu_channel_backward_alpha_f64",
+        })
+    }
+
     // LogSoftmax: out[i] = x[i] - log(sum(exp(x))) (row-wise)
     fn log_softmax_f32(
         &self,

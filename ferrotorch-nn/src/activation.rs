@@ -614,8 +614,7 @@ impl_activation_module!(Mish);
 ///
 /// `PReLU(x) = max(0, x) + alpha * min(0, x)`
 ///
-/// where `alpha` is a learnable [`Parameter`]. This is equivalent to
-/// `(1 - alpha) * relu(x) + alpha * x` for differentiable composition.
+/// where `alpha` is a learnable scalar or per-channel [`Parameter`].
 #[derive(Debug, Clone)]
 pub struct PReLU<T: Float> {
     /// Learnable negative slope parameter.
@@ -626,8 +625,15 @@ pub struct PReLU<T: Float> {
 impl<T: Float> PReLU<T> {
     /// Create a new `PReLU` module with the given initial negative slope.
     pub fn new(init_alpha: f64) -> FerrotorchResult<Self> {
+        Self::with_num_parameters(1, init_alpha)
+    }
+
+    /// Create a new `PReLU` with `num_parameters` learnable slopes, matching
+    /// PyTorch's `nn.PReLU(num_parameters, init)`.
+    pub fn with_num_parameters(num_parameters: usize, init_alpha: f64) -> FerrotorchResult<Self> {
         let alpha_val = T::from(init_alpha).unwrap();
-        let alpha_tensor = ferrotorch_core::from_slice(&[alpha_val], &[1])?;
+        let alpha_values = vec![alpha_val; num_parameters];
+        let alpha_tensor = ferrotorch_core::from_slice(&alpha_values, &[num_parameters])?;
         Ok(Self {
             alpha: Parameter::new(alpha_tensor),
             training: true,
@@ -639,11 +645,6 @@ impl<T: Float> PReLU<T> {
     /// Computes `prelu(x, alpha) = max(0, x) + alpha * min(0, x)` via the
     /// native fused [`act::prelu`] op (single forward, single backward).
     pub fn forward(&self, input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-        if self.alpha.tensor().is_cuda() {
-            return Err(
-                ferrotorch_core::error::FerrotorchError::NotImplementedOnCuda { op: "PReLU" },
-            );
-        }
         act::prelu(input, self.alpha.tensor())
     }
 }
@@ -1936,6 +1937,20 @@ mod tests {
         let named = m.named_parameters();
         assert_eq!(named.len(), 1);
         assert_eq!(named[0].0, "alpha");
+    }
+
+    #[test]
+    fn test_prelu_with_num_parameters_forward() {
+        let m = PReLU::<f64>::with_num_parameters(3, 0.25).unwrap();
+        assert_eq!(m.alpha.tensor().shape(), &[3]);
+        let x = Tensor::from_storage(
+            ferrotorch_core::storage::TensorStorage::cpu(vec![-2.0_f64, 1.0, -3.0, 4.0, 0.0, -5.0]),
+            vec![1, 3, 2],
+            false,
+        )
+        .unwrap();
+        let y = m.forward(&x).unwrap();
+        assert_eq!(y.data().unwrap(), &[-0.5, 1.0, -0.75, 4.0, 0.0, -1.25]);
     }
 
     #[test]
