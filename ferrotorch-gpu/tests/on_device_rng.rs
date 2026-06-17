@@ -9,7 +9,7 @@
 //! PyTorch parity anchor: `torch.rand(size, device='cuda')` =
 //! `at::empty(size, options).uniform_(0, 1)`
 //! (`aten/src/ATen/native/TensorFactories.cpp:1075-1076`); the tensor is
-//! created on the CUDA device and filled by the on-device curand/Philox
+//! created on the CUDA device and filled by the on-device Philox
 //! kernel. `torch.manual_seed` seeds BOTH the CPU and all CUDA generators
 //! (`torch/random.py:67` -> `torch.cuda.manual_seed_all`,
 //! `torch/cuda/random.py:112`).

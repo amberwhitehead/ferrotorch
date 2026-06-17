@@ -75,6 +75,17 @@ type OwnedModuleCache = HashMap<OwnedModuleCacheKey, CudaFunction>;
 static OWNED_MODULE_CACHE: LazyLock<Mutex<OwnedModuleCache>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[cfg(feature = "cuda")]
+fn hash_key(ptx_src: &str, kernel_name: &str, device_ordinal: u32) -> OwnedModuleCacheKey {
+    let mut ptx_hasher = std::collections::hash_map::DefaultHasher::new();
+    ptx_src.hash(&mut ptx_hasher);
+    let ptx_hash = ptx_hasher.finish();
+    let mut name_hasher = std::collections::hash_map::DefaultHasher::new();
+    kernel_name.hash(&mut name_hasher);
+    let name_hash = name_hasher.finish();
+    (ptx_hash, name_hash, device_ordinal)
+}
+
 /// Get a compiled kernel function, compiling the PTX only on first use.
 ///
 /// On the first call for a given `(kernel_name, device_ordinal)` pair, this
@@ -164,17 +175,7 @@ pub fn get_or_compile_owned(
     kernel_name: String,
     device_ordinal: u32,
 ) -> Result<CudaFunction, DriverError> {
-    // Compute the cache key from the PTX hash. The hasher is the std
-    // `DefaultHasher`; collisions only matter for adversarial inputs,
-    // and the cache lives entirely inside a single process's trust
-    // boundary.
-    let mut ptx_hasher = std::collections::hash_map::DefaultHasher::new();
-    ptx_src.hash(&mut ptx_hasher);
-    let ptx_hash = ptx_hasher.finish();
-    let mut name_hasher = std::collections::hash_map::DefaultHasher::new();
-    kernel_name.hash(&mut name_hasher);
-    let name_hash = name_hasher.finish();
-    let key = (ptx_hash, name_hash, device_ordinal);
+    let key = hash_key(&ptx_src, &kernel_name, device_ordinal);
 
     let mut cache = OWNED_MODULE_CACHE.lock().unwrap();
     if let Some(func) = cache.get(&key) {

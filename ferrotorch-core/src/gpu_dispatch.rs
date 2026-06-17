@@ -4224,6 +4224,18 @@ pub trait GpuBackend: Send + Sync {
             message: "log_f64 GPU op not yet implemented".into(),
         })
     }
+    fn sin_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "sin_f32" })
+    }
+    fn sin_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "sin_f64" })
+    }
+    fn cos_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cos_f32" })
+    }
+    fn cos_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cos_f64" })
+    }
     fn sqrt_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::InvalidArgument {
             message: "sqrt_f32 GPU op not yet implemented".into(),
@@ -4928,7 +4940,7 @@ pub trait GpuBackend: Send + Sync {
     /// PyTorch parity: `torch.rand(size, device='cuda')` lowers to
     /// `at::empty(size, options).uniform_(0, 1)`
     /// (`aten/src/ATen/native/TensorFactories.cpp:1075-1076`); the tensor is
-    /// created ON the CUDA device and filled by the on-device curand/Philox
+    /// created ON the CUDA device and filled by the on-device Philox
     /// kernel — there is no CPU generate-then-upload. This trait slot is the
     /// on-device equivalent: the backend produces a `DType::F32` GPU buffer of
     /// `numel` uniform values without any host round trip (R-CODE-4).
@@ -6576,6 +6588,20 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// bf16 elementwise sine. f32 internal, bf16 RNE store.
+    fn sin_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "sin_bf16_bf16",
+        })
+    }
+
+    /// bf16 elementwise cosine. f32 internal, bf16 RNE store.
+    fn cos_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "cos_bf16_bf16",
+        })
+    }
+
     /// bf16 elementwise tanh. f32 internal via `(e^(2x) - 1)/(e^(2x) + 1)`,
     /// bf16 RNE store back.
     fn tanh_bf16_bf16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
@@ -6878,6 +6904,16 @@ pub trait GpuBackend: Send + Sync {
     /// f16 elementwise `out = ln(a)`. f32 internal, f16 RNE store.
     fn log_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda { op: "log_f16" })
+    }
+
+    /// f16 elementwise sine. f32 internal, f16 RNE store.
+    fn sin_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "sin_f16" })
+    }
+
+    /// f16 elementwise cosine. f32 internal, f16 RNE store.
+    fn cos_f16(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "cos_f16" })
     }
 
     /// f16 elementwise tanh. f32 internal, f16 RNE store.

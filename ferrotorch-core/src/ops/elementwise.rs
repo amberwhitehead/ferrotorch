@@ -20,10 +20,12 @@
 use crate::cpu_pool::{pool_alloc_cpu_uninit_f32, pool_alloc_cpu_uninit_f64};
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
+use crate::gpu_dispatch::{GpuBackend, GpuBufferHandle, gpu_backend};
 use crate::shape::broadcast_shapes;
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
 use rayon::prelude::*;
+use std::any::TypeId;
 
 /// Minimum number of elements before switching to rayon parallelism.
 /// 1M f32s = 4 MiB — below this the per-element SIMD kernel is fast enough
@@ -61,6 +63,36 @@ fn logical_contiguous<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>
     } else {
         input.contiguous()
     }
+}
+
+fn cuda_fast_unary<T: Float, F32, F64, BF16, F16>(
+    input: &Tensor<T>,
+    op: &'static str,
+    f32_op: F32,
+    f64_op: F64,
+    bf16_op: BF16,
+    f16_op: F16,
+) -> FerrotorchResult<Tensor<T>>
+where
+    F32: FnOnce(&dyn GpuBackend, &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle>,
+    F64: FnOnce(&dyn GpuBackend, &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle>,
+    BF16: FnOnce(&dyn GpuBackend, &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle>,
+    F16: FnOnce(&dyn GpuBackend, &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle>,
+{
+    let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+    let input = input.contiguous()?;
+    let handle = if TypeId::of::<T>() == TypeId::of::<f32>() {
+        f32_op(backend, input.gpu_handle()?)
+    } else if TypeId::of::<T>() == TypeId::of::<f64>() {
+        f64_op(backend, input.gpu_handle()?)
+    } else if TypeId::of::<T>() == TypeId::of::<half::bf16>() {
+        bf16_op(backend, input.gpu_handle()?)
+    } else if TypeId::of::<T>() == TypeId::of::<half::f16>() {
+        f16_op(backend, input.gpu_handle()?)
+    } else {
+        Err(FerrotorchError::NotImplementedOnCuda { op })
+    }?;
+    Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)
 }
 
 /// SIMD-accelerated add for same-shape f32 tensors.
@@ -608,6 +640,16 @@ fn vlog_f32(x: f32) -> f32 {
 /// Uses a vectorizable polynomial kernel (vexp_f32) that LLVM auto-vectorizes
 /// to AVX2/SSE SIMD instructions, instead of scalar libm expf.
 pub fn fast_exp<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        return cuda_fast_unary(
+            input,
+            "exp",
+            |backend, handle| backend.exp_f32(handle),
+            |backend, handle| backend.exp_f64(handle),
+            |backend, handle| backend.exp_bf16_bf16(handle),
+            |backend, handle| backend.exp_f16(handle),
+        );
+    }
     let input = logical_contiguous(input)?;
     let data = input.data()?;
     let n = data.len();
@@ -647,6 +689,16 @@ pub fn fast_exp<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 ///
 /// Uses a vectorizable polynomial kernel (vlog_f32) that LLVM auto-vectorizes.
 pub fn fast_log<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        return cuda_fast_unary(
+            input,
+            "log",
+            |backend, handle| backend.log_f32(handle),
+            |backend, handle| backend.log_f64(handle),
+            |backend, handle| backend.log_bf16_bf16(handle),
+            |backend, handle| backend.log_f16(handle),
+        );
+    }
     let input = logical_contiguous(input)?;
     let data = input.data()?;
     let n = data.len();
@@ -740,6 +792,16 @@ fn fast_log_f32(x: f32) -> f32 {
 /// With `target-cpu=native`, the inner loop auto-vectorizes to AVX2 (8-wide).
 /// For large tensors (>= PARALLEL_THRESHOLD), work is split across rayon threads.
 pub fn fast_sigmoid<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        return cuda_fast_unary(
+            input,
+            "sigmoid",
+            |backend, handle| backend.sigmoid_f32(handle),
+            |backend, handle| backend.sigmoid_f64(handle),
+            |backend, handle| backend.sigmoid_bf16_bf16(handle),
+            |backend, handle| backend.sigmoid_f16(handle),
+        );
+    }
     let input = logical_contiguous(input)?;
     let data = input.data()?;
     let n = data.len();
@@ -780,6 +842,16 @@ pub fn fast_sigmoid<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> 
 ///
 /// No intermediate allocations — each element computed in registers.
 pub fn fast_tanh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        return cuda_fast_unary(
+            input,
+            "tanh",
+            |backend, handle| backend.tanh_f32(handle),
+            |backend, handle| backend.tanh_f64(handle),
+            |backend, handle| backend.tanh_bf16_bf16(handle),
+            |backend, handle| backend.tanh_f16(handle),
+        );
+    }
     let input = logical_contiguous(input)?;
     let data = input.data()?;
     let n = data.len();
@@ -828,13 +900,15 @@ pub fn fast_tanh<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// LLVM may auto-vectorize the inner loop via SLEEF-style lowering when
 /// compiled with `target-cpu=native`.
 pub fn fast_sin<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    // CUDA tensors take the unary_map tier-2 dispatch (CPU detour then
-    // re-upload). Pre-fix this fn unconditionally called `input.data()?`,
-    // which returns `Err(GpuTensorNotAccessible)` on CUDA and broke
-    // both forward (`sin(cuda_tensor)`) and the SinBackward composite
-    // path (which recurses into `cos(cuda_tensor)`). #796.
     if input.is_cuda() {
-        return unary_map(input, |x| x.sin());
+        return cuda_fast_unary(
+            input,
+            "sin",
+            |backend, handle| backend.sin_f32(handle),
+            |backend, handle| backend.sin_f64(handle),
+            |backend, handle| backend.sin_bf16_bf16(handle),
+            |backend, handle| backend.sin_f16(handle),
+        );
     }
     let input = logical_contiguous(input)?;
     let data = input.data()?;
@@ -876,13 +950,15 @@ pub fn fast_sin<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// range reduction for moderate inputs and Payne-Hanek for |x| > ~10^5.
 /// See [`fast_sin`] for details on the reduction algorithm and accuracy.
 pub fn fast_cos<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    // CUDA tensors take the unary_map tier-2 dispatch (CPU detour then
-    // re-upload). Pre-fix this fn unconditionally called `input.data()?`,
-    // which returns `Err(GpuTensorNotAccessible)` on CUDA and broke
-    // both forward (`cos(cuda_tensor)`) and the CosBackward composite
-    // path (which recurses into `sin(cuda_tensor)`). #796.
     if input.is_cuda() {
-        return unary_map(input, |x| x.cos());
+        return cuda_fast_unary(
+            input,
+            "cos",
+            |backend, handle| backend.cos_f32(handle),
+            |backend, handle| backend.cos_f64(handle),
+            |backend, handle| backend.cos_bf16_bf16(handle),
+            |backend, handle| backend.cos_f16(handle),
+        );
     }
     let input = logical_contiguous(input)?;
     let data = input.data()?;
@@ -922,18 +998,25 @@ pub fn fast_cos<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 
 /// Apply a unary function elementwise, producing a new tensor.
 pub fn unary_map<T: Float>(input: &Tensor<T>, f: impl Fn(T) -> T) -> FerrotorchResult<Tensor<T>> {
-    let device = input.device();
-    if device.is_cuda() {
-        // GPU path: transfer to CPU, compute, transfer back.
-        let data = input.data_vec()?;
-        let result: Vec<T> = data.iter().map(|&x| f(x)).collect();
-        let out = Tensor::from_storage(TensorStorage::cpu(result), input.shape().to_vec(), false)?;
-        out.to(device)
-    } else {
-        let data = input.data_vec()?;
-        let result: Vec<T> = data.iter().map(|&x| f(x)).collect();
-        Tensor::from_storage(TensorStorage::cpu(result), input.shape().to_vec(), false)
+    unary_map_named(input, "unary_map", f)
+}
+
+/// Apply a named unary CPU closure elementwise.
+///
+/// This helper is intentionally CPU-only. A Rust closure cannot be lowered into
+/// a resident CUDA kernel by this crate, and CUDA storage is not host-readable.
+/// CUDA callers must route through named backend kernels instead.
+pub fn unary_map_named<T: Float>(
+    input: &Tensor<T>,
+    op: &'static str,
+    f: impl Fn(T) -> T,
+) -> FerrotorchResult<Tensor<T>> {
+    if input.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op });
     }
+    let data = input.data_vec()?;
+    let result: Vec<T> = data.iter().map(|&x| f(x)).collect();
+    Tensor::from_storage(TensorStorage::cpu(result), input.shape().to_vec(), false)
 }
 
 /// Apply a binary function elementwise on two tensors with broadcasting.

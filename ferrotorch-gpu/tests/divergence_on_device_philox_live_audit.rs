@@ -44,6 +44,11 @@ fn to_host(t: &ferrotorch_core::Tensor<f32>) -> Vec<f32> {
     cpu.data().expect("cpu data").to_vec()
 }
 
+fn to_host_f64(t: &ferrotorch_core::Tensor<f64>) -> Vec<f64> {
+    let cpu = t.to(Device::Cpu).expect("tensor.to(Cpu)");
+    cpu.data().expect("cpu data").to_vec()
+}
+
 /// PROBE 1+3 — UNIFORM on-device, boundary lengths (n not divisible by 4).
 /// Reference: CPU PhiloxGenerator (byte-exact-with-torch). A correct kernel is
 /// bit-identical at the awkward 4-lane boundaries n = 5, 7, 4097.
@@ -172,4 +177,85 @@ fn normal_gpu_moments_standard_normal() {
         (kurt - 3.0).abs() < 0.1,
         "on-device normal kurtosis {kurt} != ~3 (approx-transcendental tail distortion)"
     );
+}
+
+/// F64 UNIFORM uses Rust-generated PTX, not CUDA C/NVRTC/libdevice. Exercise
+/// odd lengths so both lanes of the two-u32 -> f64 packing and the last-lane
+/// guard run through the public backend API.
+#[test]
+fn uniform_f64_gpu_stays_resident_and_in_unit_interval() {
+    ensure_init();
+    for &n in &[1usize, 2, 3, 7, 4097] {
+        let t = {
+            let _g = SEED_LOCK.lock().unwrap();
+            manual_seed(2026);
+            rand_on_device::<f64>(&[n], Device::Cuda(0)).expect("gpu f64 uniform")
+        };
+        assert_eq!(t.device(), Device::Cuda(0), "f64 uniform must stay CUDA");
+        let v = to_host_f64(&t);
+        assert_eq!(v.len(), n, "f64 uniform wrong length at n={n}");
+        for (i, &x) in v.iter().enumerate() {
+            assert!(
+                x.is_finite() && (0.0..1.0).contains(&x),
+                "f64 uniform value[{i}]={x} outside [0, 1) at n={n}"
+            );
+        }
+    }
+}
+
+/// F64 NORMAL mirrors PyTorch's double Box-Muller structure: two 32-bit Philox
+/// lanes per uniform, double log/sqrt/sincos math, two outputs per thread with
+/// a guarded odd tail. The math is emitted as Rust-owned PTX.
+#[test]
+fn normal_f64_gpu_odd_tail_and_moments() {
+    ensure_init();
+    for &n in &[1usize, 7, 4097] {
+        let t = {
+            let _g = SEED_LOCK.lock().unwrap();
+            manual_seed(41);
+            randn_on_device::<f64>(&[n], Device::Cuda(0)).expect("gpu f64 normal")
+        };
+        assert_eq!(t.device(), Device::Cuda(0), "f64 normal must stay CUDA");
+        let v = to_host_f64(&t);
+        assert_eq!(v.len(), n, "f64 normal wrong length at n={n}");
+        for (i, &x) in v.iter().enumerate() {
+            assert!(
+                x.is_finite(),
+                "f64 normal value[{i}]={x} not finite at n={n}"
+            );
+        }
+    }
+
+    let n = 200_000usize;
+    let t = {
+        let _g = SEED_LOCK.lock().unwrap();
+        manual_seed(43);
+        randn_on_device::<f64>(&[n], Device::Cuda(0)).expect("gpu f64 normal moments")
+    };
+    assert_eq!(
+        t.device(),
+        Device::Cuda(0),
+        "f64 normal moments must stay CUDA"
+    );
+    let v = to_host_f64(&t);
+    assert_eq!(v.len(), n);
+
+    let nf = n as f64;
+    let mean = v
+        .iter()
+        .inspect(|&&x| assert!(x.is_finite(), "f64 normal value not finite: {x}"))
+        .sum::<f64>()
+        / nf;
+    let variance = v
+        .iter()
+        .map(|&x| {
+            let d = x - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / nf;
+    let std = variance.sqrt();
+
+    assert!(mean.abs() < 0.015, "f64 normal mean {mean} != ~0");
+    assert!((std - 1.0).abs() < 0.015, "f64 normal std {std} != ~1");
 }

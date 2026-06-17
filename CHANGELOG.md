@@ -48,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- CORE: unary_map CUDA branch documents CPU detour but cannot read CUDA storage (#1991)
 - CORE-170: Every special function silently detaches autograd (#1864)
 - CORE-075: 2:4 compression validates total size instead of the innermost dimension (#1769)
 - CORE-074: Sparse operations on dense tensors silently sever autograd (#1768)

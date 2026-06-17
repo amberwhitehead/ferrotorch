@@ -4009,7 +4009,7 @@ mod tests {
     }
 
     // bf16 elementwise / embedding / rmsnorm / softmax / rope tests now
-    // live in `ferrotorch-gpu/src/bf16.rs` (nvrtc-compiled CUDA C++).
+    // live in `ferrotorch-gpu/src/bf16.rs` (Rust-owned PTX).
 
     #[test]
     fn matmul_bf16_bf16_nt_basic_2x3_2x3() {

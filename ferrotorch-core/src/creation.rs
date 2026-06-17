@@ -335,7 +335,7 @@ pub fn randn<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
 /// `at::empty(size, options).uniform_(0, 1)`
 /// (`aten/src/ATen/native/TensorFactories.cpp:1075-1076`). The tensor is
 /// created ON the requested device and filled in place — for a CUDA device
-/// the fill runs as an on-device curand/Philox kernel, with NO CPU
+/// the fill runs as an on-device Philox kernel, with NO CPU
 /// generate-then-upload.
 ///
 /// # Behaviour by device / dtype

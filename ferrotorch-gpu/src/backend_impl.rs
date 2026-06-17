@@ -1850,6 +1850,20 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
+    fn sin_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::kernels::gpu_sin(a_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
+    fn cos_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::kernels::gpu_cos(a_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, a.device_ordinal()))
+    }
+
     fn sqrt_f32(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(a.device_ordinal())?;
@@ -2013,6 +2027,20 @@ impl GpuBackend for CudaBackendImpl {
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(a.device_ordinal())?;
         let result = crate::kernels::gpu_log_f64(a_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    fn sin_f64(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::kernels::gpu_sin_f64(a_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
+    }
+
+    fn cos_f64(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f64(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::kernels::gpu_cos_f64(a_buf, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
@@ -9494,6 +9522,22 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
+    fn sin_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_sin_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cos_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_cos_bf16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
     fn tanh_bf16_bf16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
         let buf = Self::unwrap_buffer_bf16(a)?;
         let dev = self.device(a.device_ordinal())?;
@@ -10016,6 +10060,22 @@ impl GpuBackend for CudaBackendImpl {
         let buf = Self::unwrap_buffer_f16(a)?;
         let dev = self.device(a.device_ordinal())?;
         let result = crate::f16::gpu_log_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn sin_f16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_sin_f16(buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cos_f16(&self, a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_cos_f16(buf, dev).map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
     }
 

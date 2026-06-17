@@ -19,8 +19,9 @@
 //!
 //! - `philox_uniform_kernel` — fills a buffer with uniform f32 in [0, 1)
 //! - `philox_normal_kernel` — fills with standard normal f32 (Box-Muller)
-//! - dtype conversion kernels narrow/widen those CUDA-resident f32 streams for
-//!   f64/f16/bf16 factory requests without staging through host memory.
+//! - f64 uniform/normal kernels generate double-precision samples directly on
+//!   device; f16/bf16 conversion kernels narrow CUDA-resident f32 streams
+//!   without staging through host memory.
 //!
 //! # Fork/join for data parallelism
 //!
@@ -1214,53 +1215,337 @@ DONE:
 ";
 
 #[cfg(feature = "cuda")]
-const PHILOX_F64_CUDA: &str = r#"
-#include <curand_kernel.h>
+static PHILOX_UNIFORM_F64_PTX: LazyLock<String> = LazyLock::new(build_philox_uniform_f64_ptx);
 
-extern "C" __global__ void philox_uniform_f64_kernel(
-    double* out,
-    unsigned int n,
-    unsigned long long seed,
-    unsigned long long base_counter
-) {
-    unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int idx0 = gid * 2;
-    if (idx0 >= n) {
-        return;
-    }
+#[cfg(feature = "cuda")]
+static PHILOX_NORMAL_F64_PTX: LazyLock<String> = LazyLock::new(build_philox_normal_f64_ptx);
 
-    curandStatePhilox4_32_10_t state;
-    curand_init(seed, base_counter + (unsigned long long)gid, 0ULL, &state);
-    double2 v = curand_uniform2_double(&state);
-    out[idx0] = v.x;
-    unsigned int idx1 = idx0 + 1;
-    if (idx1 < n) {
-        out[idx1] = v.y;
-    }
-}
-
-extern "C" __global__ void philox_normal_f64_kernel(
-    double* out,
-    unsigned int n,
-    unsigned long long seed,
-    unsigned long long base_counter
-) {
-    unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int idx0 = gid * 2;
-    if (idx0 >= n) {
-        return;
-    }
-
-    curandStatePhilox4_32_10_t state;
-    curand_init(seed, base_counter + (unsigned long long)gid, 0ULL, &state);
-    double2 v = curand_normal2_double(&state);
-    out[idx0] = v.x;
-    unsigned int idx1 = idx0 + 1;
-    if (idx1 < n) {
-        out[idx1] = v.y;
+#[cfg(feature = "cuda")]
+fn push_philox_rounds_ptx(ptx: &mut String) {
+    for round in 0..10 {
+        ptx.push_str(
+            r"
+    mul.wide.u32 %prod, %c0, 0xD2511F53;
+    cvt.u32.u64 %lo_val, %prod;
+    shr.u64 %prod, %prod, 32;
+    cvt.u32.u64 %hi_val, %prod;
+    mul.wide.u32 %prod, %c2, 0xCD9E8D57;
+    cvt.u32.u64 %t2, %prod;
+    shr.u64 %prod, %prod, 32;
+    cvt.u32.u64 %t3, %prod;
+    xor.b32 %t0, %t3, %c1;
+    xor.b32 %t0, %t0, %k0;
+    mov.u32 %t1, %t2;
+    xor.b32 %t2, %hi_val, %c3;
+    xor.b32 %t2, %t2, %k1;
+    mov.u32 %t3, %lo_val;
+    mov.u32 %c0, %t0;
+    mov.u32 %c1, %t1;
+    mov.u32 %c2, %t2;
+    mov.u32 %c3, %t3;
+",
+        );
+        if round != 9 {
+            ptx.push_str(
+                r"
+    add.u32 %k0, %k0, 0x9E3779B9;
+    add.u32 %k1, %k1, 0xBB67AE85;
+",
+            );
+        }
     }
 }
-"#;
+
+#[cfg(feature = "cuda")]
+fn push_f64_from_two_u32_ptx(
+    ptx: &mut String,
+    hi: &str,
+    lo: &str,
+    out: &str,
+    ensure_nonzero: bool,
+) {
+    ptx.push_str("    cvt.u64.u32 %hi64, ");
+    ptx.push_str(hi);
+    ptx.push_str(";\n");
+    ptx.push_str("    shl.b64 %hi64, %hi64, 32;\n");
+    ptx.push_str("    cvt.u64.u32 %lo64, ");
+    ptx.push_str(lo);
+    ptx.push_str(";\n");
+    ptx.push_str("    or.b64 %bits, %hi64, %lo64;\n");
+    ptx.push_str("    shr.u64 %mant, %bits, 11;\n");
+    if ensure_nonzero {
+        ptx.push_str("    setp.eq.u64 %p_zero, %mant, 0;\n");
+        ptx.push_str("    @%p_zero mov.u64 %mant, 1;\n");
+    }
+    ptx.push_str("    cvt.rn.f64.u64 ");
+    ptx.push_str(out);
+    ptx.push_str(", %mant;\n");
+    ptx.push_str("    mov.f64 %scale, 0d3CA0000000000000;\n");
+    ptx.push_str("    mul.rn.f64 ");
+    ptx.push_str(out);
+    ptx.push_str(", ");
+    ptx.push_str(out);
+    ptx.push_str(", %scale;\n");
+}
+
+#[cfg(feature = "cuda")]
+fn push_box_muller_f64_uniform_ptx(ptx: &mut String, hi: &str, lo: &str, out: &str) {
+    ptx.push_str("    cvt.rn.f64.u32 %u_tmp0, ");
+    ptx.push_str(lo);
+    ptx.push_str(";\n");
+    ptx.push_str("    fma.rn.f64 %u_tmp1, %u_tmp0, 0d3BF0000000000000, 0d3BE0000000000000;\n");
+    ptx.push_str("    cvt.rn.f64.u32 %u_tmp0, ");
+    ptx.push_str(hi);
+    ptx.push_str(";\n");
+    ptx.push_str("    fma.rn.f64 ");
+    ptx.push_str(out);
+    ptx.push_str(", %u_tmp0, 0d3DF0000000000000, %u_tmp1;\n");
+}
+
+#[cfg(feature = "cuda")]
+fn build_philox_uniform_f64_ptx() -> String {
+    let mut ptx = String::from(
+        r".version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry philox_uniform_f64_kernel(
+    .param .u64 out_ptr,
+    .param .u32 n,
+    .param .u32 seed_lo,
+    .param .u32 seed_hi,
+    .param .u32 counter_lo,
+    .param .u32 counter_hi
+) {
+    .reg .u32 %ltid, %bid, %bdim, %gid, %n_reg;
+    .reg .u32 %slo, %shi, %clo, %chi;
+    .reg .u32 %group, %sub, %hi_word, %lo_word;
+    .reg .u32 %c0, %c1, %c2, %c3, %k0, %k1;
+    .reg .u32 %hi_val, %lo_val, %t0, %t1, %t2, %t3;
+    .reg .u64 %prod, %out, %off, %hi64, %lo64, %bits, %mant;
+    .reg .f64 %fval, %scale;
+    .reg .pred %p, %p_sub, %p_zero;
+
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+    ld.param.u32 %slo, [seed_lo];
+    ld.param.u32 %shi, [seed_hi];
+    ld.param.u32 %clo, [counter_lo];
+    ld.param.u32 %chi, [counter_hi];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %ltid, %tid.x;
+    mad.lo.u32 %gid, %bid, %bdim, %ltid;
+
+    setp.ge.u32 %p, %gid, %n_reg;
+    @%p bra DONE;
+
+    shr.u32 %group, %gid, 1;
+    and.b32 %sub, %gid, 1;
+
+    add.cc.u32 %c0, %clo, %group;
+    addc.u32 %c1, %chi, 0;
+    mov.u32 %c2, 0;
+    mov.u32 %c3, 0;
+    mov.u32 %k0, %slo;
+    mov.u32 %k1, %shi;
+",
+    );
+    push_philox_rounds_ptx(&mut ptx);
+    ptx.push_str(
+        r"
+    mov.u32 %hi_word, %c0;
+    mov.u32 %lo_word, %c1;
+    setp.eq.u32 %p_sub, %sub, 1;
+    @%p_sub mov.u32 %hi_word, %c2;
+    @%p_sub mov.u32 %lo_word, %c3;
+",
+    );
+    push_f64_from_two_u32_ptx(&mut ptx, "%hi_word", "%lo_word", "%fval", false);
+    ptx.push_str(
+        r"
+    cvt.u64.u32 %off, %gid;
+    shl.b64 %off, %off, 3;
+    add.u64 %out, %out, %off;
+    st.global.f64 [%out], %fval;
+
+DONE:
+    ret;
+}
+",
+    );
+    ptx
+}
+
+#[cfg(feature = "cuda")]
+fn build_philox_normal_f64_ptx() -> String {
+    let mut ptx = String::from(
+        r".version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry philox_normal_f64_kernel(
+    .param .u64 out_ptr,
+    .param .u32 n,
+    .param .u32 seed_lo,
+    .param .u32 seed_hi,
+    .param .u32 counter_lo,
+    .param .u32 counter_hi
+) {
+    .reg .u32 %ltid, %bid, %bdim, %gid, %n_reg;
+    .reg .u32 %slo, %shi, %clo, %chi;
+    .reg .u32 %c0, %c1, %c2, %c3, %k0, %k1;
+    .reg .u32 %hi_val, %lo_val, %t0, %t1, %t2, %t3;
+    .reg .u32 %idx0, %idx1;
+    .reg .u64 %prod, %out, %off, %xbits, %mantissa_bits, %bias_bits, %q;
+    .reg .s64 %exp64, %n_i;
+    .reg .b64 %n_bits;
+    .reg .f64 %u1, %u2, %u_tmp0, %u_tmp1, %ln_u1, %radius, %theta, %z0, %z1;
+    .reg .f64 %m, %log_f, %log_f2, %log_s, %log_poly, %ln2_hi, %ln2_lo;
+    .reg .f64 %one, %two, %sqrt2, %half_const, %nf;
+    .reg .f64 %theta_y, %theta_nf, %theta_r, %theta_r2, %sin_poly, %cos_poly;
+    .reg .f64 %sin_r, %cos_r, %neg_sin, %neg_cos, %sin_theta, %cos_theta;
+    .reg .pred %p, %p2, %p_shift, %p_q;
+
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+    ld.param.u32 %slo, [seed_lo];
+    ld.param.u32 %shi, [seed_hi];
+    ld.param.u32 %clo, [counter_lo];
+    ld.param.u32 %chi, [counter_hi];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %ltid, %tid.x;
+    mad.lo.u32 %gid, %bid, %bdim, %ltid;
+
+    shl.b32 %idx0, %gid, 1;
+    setp.ge.u32 %p, %idx0, %n_reg;
+    @%p bra DONE;
+    add.u32 %idx1, %idx0, 1;
+
+    add.cc.u32 %c0, %clo, %gid;
+    addc.u32 %c1, %chi, 0;
+    mov.u32 %c2, 0;
+    mov.u32 %c3, 0;
+    mov.u32 %k0, %slo;
+    mov.u32 %k1, %shi;
+",
+    );
+    push_philox_rounds_ptx(&mut ptx);
+    push_box_muller_f64_uniform_ptx(&mut ptx, "%c0", "%c1", "%u1");
+    push_box_muller_f64_uniform_ptx(&mut ptx, "%c2", "%c3", "%u2");
+    ptx.push_str(
+        r"
+    // ln(u1), matching the f64 log kernel's half-step argument reduction.
+    mov.f64 %ln2_hi, 0d3FE62E42FEFA3800;
+    mov.f64 %ln2_lo, 0d3D2EF35793C76730;
+    mov.f64 %one, 0d3FF0000000000000;
+    mov.f64 %two, 0d4000000000000000;
+    mov.b64 %xbits, %u1;
+    shr.u64 %exp64, %xbits, 52;
+    and.b64 %exp64, %exp64, 2047;
+    sub.s64 %exp64, %exp64, 1023;
+    cvt.rn.f64.s64 %nf, %exp64;
+
+    mov.u64 %bias_bits, 0x3FF0000000000000;
+    and.b64 %mantissa_bits, %xbits, 0x000FFFFFFFFFFFFF;
+    or.b64 %mantissa_bits, %mantissa_bits, %bias_bits;
+    mov.b64 %m, %mantissa_bits;
+
+    mov.f64 %sqrt2, 0d3FF6A09E667F3BCD;
+    mov.f64 %half_const, 0d3FE0000000000000;
+    setp.gt.f64 %p_shift, %m, %sqrt2;
+    @%p_shift mul.f64 %m, %m, %half_const;
+    @%p_shift add.f64 %nf, %nf, %one;
+
+    sub.f64 %log_f, %m, %one;
+    add.f64 %log_s, %m, %one;
+    div.rn.f64 %log_f, %log_f, %log_s;
+    mul.f64 %log_f2, %log_f, %log_f;
+    mov.f64 %log_poly, 0d3FB1111111111111;
+    fma.rn.f64 %log_poly, %log_poly, %log_f2, 0d3FB3B13B13B13B14;
+    fma.rn.f64 %log_poly, %log_poly, %log_f2, 0d3FB745D1745D1746;
+    fma.rn.f64 %log_poly, %log_poly, %log_f2, 0d3FBC71C71C71C71C;
+    fma.rn.f64 %log_poly, %log_poly, %log_f2, 0d3FC2492492492492;
+    fma.rn.f64 %log_poly, %log_poly, %log_f2, 0d3FC999999999999A;
+    fma.rn.f64 %log_poly, %log_poly, %log_f2, 0d3FD5555555555555;
+    fma.rn.f64 %log_poly, %log_poly, %log_f2, %one;
+    mul.f64 %log_poly, %log_poly, %log_f;
+    add.f64 %log_poly, %log_poly, %log_poly;
+    fma.rn.f64 %ln_u1, %nf, %ln2_hi, %log_poly;
+    fma.rn.f64 %ln_u1, %nf, %ln2_lo, %ln_u1;
+
+    mul.rn.f64 %radius, 0dC000000000000000, %ln_u1;
+    sqrt.rn.f64 %radius, %radius;
+
+    mul.rn.f64 %theta, 0d401921FB54442D18, %u2;
+
+    // sincos(theta) with the same f64 polynomial/reduction path used by
+    // the standalone CUDA sin/cos kernels.
+    mul.rn.f64 %theta_y, %theta, 0d3FE45F306DC9C883;
+    cvt.rni.s64.f64 %n_i, %theta_y;
+    cvt.rn.f64.s64 %theta_nf, %n_i;
+    fma.rn.f64 %theta_r, %theta_nf, 0dBFF921FB54400000, %theta;
+    fma.rn.f64 %theta_r, %theta_nf, 0dBDD0B46000000000, %theta_r;
+    mul.rn.f64 %theta_r2, %theta_r, %theta_r;
+
+    mov.f64 %sin_poly, 0d3DE6124613A86D09;
+    fma.rn.f64 %sin_poly, %sin_poly, %theta_r2, 0dBE5AE64567F544E4;
+    fma.rn.f64 %sin_poly, %sin_poly, %theta_r2, 0d3EC71DE3A556C734;
+    fma.rn.f64 %sin_poly, %sin_poly, %theta_r2, 0dBF2A01A01A01A01A;
+    fma.rn.f64 %sin_poly, %sin_poly, %theta_r2, 0d3F81111111111111;
+    fma.rn.f64 %sin_poly, %sin_poly, %theta_r2, 0dBFC5555555555555;
+    mul.rn.f64 %sin_poly, %sin_poly, %theta_r2;
+    fma.rn.f64 %sin_r, %sin_poly, %theta_r, %theta_r;
+
+    mov.f64 %cos_poly, 0d3E21EED8EFF8D898;
+    fma.rn.f64 %cos_poly, %cos_poly, %theta_r2, 0dBE927E4FB7789F5C;
+    fma.rn.f64 %cos_poly, %cos_poly, %theta_r2, 0d3EFA01A01A01A01A;
+    fma.rn.f64 %cos_poly, %cos_poly, %theta_r2, 0dBF56C16C16C16C17;
+    fma.rn.f64 %cos_poly, %cos_poly, %theta_r2, 0d3FA5555555555555;
+    fma.rn.f64 %cos_poly, %cos_poly, %theta_r2, 0dBFE0000000000000;
+    fma.rn.f64 %cos_r, %cos_poly, %theta_r2, %one;
+
+    neg.f64 %neg_sin, %sin_r;
+    neg.f64 %neg_cos, %cos_r;
+    mov.f64 %sin_theta, %sin_r;
+    mov.f64 %cos_theta, %cos_r;
+    mov.b64 %n_bits, %n_i;
+    and.b64 %q, %n_bits, 3;
+    setp.eq.u64 %p_q, %q, 1;
+    @%p_q mov.f64 %sin_theta, %cos_r;
+    @%p_q mov.f64 %cos_theta, %neg_sin;
+    setp.eq.u64 %p_q, %q, 2;
+    @%p_q mov.f64 %sin_theta, %neg_sin;
+    @%p_q mov.f64 %cos_theta, %neg_cos;
+    setp.eq.u64 %p_q, %q, 3;
+    @%p_q mov.f64 %sin_theta, %neg_cos;
+    @%p_q mov.f64 %cos_theta, %sin_r;
+
+    mul.rn.f64 %z0, %radius, %cos_theta;
+    mul.rn.f64 %z1, %radius, %sin_theta;
+
+    cvt.u64.u32 %off, %idx0;
+    shl.b64 %off, %off, 3;
+    add.u64 %off, %out, %off;
+    st.global.f64 [%off], %z0;
+
+    setp.ge.u32 %p2, %idx1, %n_reg;
+    @%p2 bra DONE;
+    cvt.u64.u32 %off, %idx1;
+    shl.b64 %off, %off, 3;
+    add.u64 %off, %out, %off;
+    st.global.f64 [%off], %z1;
+
+DONE:
+    ret;
+}
+",
+    );
+    ptx
+}
 
 #[cfg(feature = "cuda")]
 const RNG_UNIFORM_F32_TO_F16_PTX: &str = "\
@@ -1419,55 +1704,13 @@ fn cast_uniform_rng_f32_to_u16(
 }
 
 #[cfg(feature = "cuda")]
-fn cuda_include_paths() -> Vec<String> {
-    let mut paths = Vec::new();
-    for var in ["CUDA_HOME", "CUDA_PATH"] {
-        if let Ok(root) = std::env::var(var) {
-            paths.push(format!("{root}/include"));
-            paths.push(format!("{root}/targets/x86_64-linux/include"));
-            paths.push(format!("{root}/targets/x86_64-linux/include/cccl"));
-        }
-    }
-    paths.extend([
-        "/usr/local/cuda/include".to_string(),
-        "/usr/local/cuda/targets/x86_64-linux/include".to_string(),
-        "/usr/local/cuda/targets/x86_64-linux/include/cccl".to_string(),
-        "/usr/local/cuda-13.1/include".to_string(),
-        "/usr/local/cuda-13.1/targets/x86_64-linux/include".to_string(),
-        "/usr/local/cuda-13.1/targets/x86_64-linux/include/cccl".to_string(),
-    ]);
-    paths
-        .into_iter()
-        .filter(|p| {
-            let path = std::path::Path::new(p);
-            path.join("curand_kernel.h").exists() || path.join("cuda/std/type_traits").exists()
-        })
-        .collect()
-}
-
-#[cfg(feature = "cuda")]
-fn compile_philox_f64_ptx() -> GpuResult<String> {
-    use cudarc::nvrtc::{CompileOptions, compile_ptx_with_opts};
-
-    let ptx = compile_ptx_with_opts(
-        PHILOX_F64_CUDA,
-        CompileOptions {
-            arch: Some("compute_75"),
-            include_paths: cuda_include_paths(),
-            ..Default::default()
-        },
-    )
-    .map_err(|e| GpuError::InvalidState {
-        message: format!("NVRTC compile failed for philox f64 curand kernels: {e}"),
-    })?;
-    Ok(ptx.to_src())
-}
-
-#[cfg(feature = "cuda")]
-fn gpu_philox_f64_curand(
+fn gpu_philox_f64(
     n: usize,
     device: &GpuDevice,
     kernel_name: &'static str,
+    ptx_src: String,
+    counters_needed: u64,
+    threads_needed: usize,
 ) -> GpuResult<CudaBuffer<f64>> {
     use cudarc::driver::PushKernelArg;
 
@@ -1483,15 +1726,13 @@ fn gpu_philox_f64_curand(
             })?;
         let rng_gen = mgr.generator(device.ordinal());
         let state = rng_gen.get_state();
-        rng_gen.advance(n.div_ceil(2) as u64);
+        rng_gen.advance(counters_needed);
         state
     };
 
-    let ptx = compile_philox_f64_ptx()?;
-    let ptx = format!("// ferrotorch rng entry: {kernel_name}\n{ptx}");
     let f = crate::module_cache::get_or_compile_owned(
         device.context(),
-        ptx,
+        ptx_src,
         kernel_name.to_string(),
         device.ordinal() as u32,
     )
@@ -1501,11 +1742,12 @@ fn gpu_philox_f64_curand(
     })?;
 
     let mut out = alloc_zeros_f64(n, device)?;
-    let num_threads = n.div_ceil(2);
-    let cfg = rng_launch_cfg(num_threads)?;
+    let cfg = rng_launch_cfg(threads_needed)?;
     let n_u32 = n as u32;
-    let seed = state.seed;
-    let counter = state.counter;
+    let seed_lo = state.seed as u32;
+    let seed_hi = (state.seed >> 32) as u32;
+    let counter_lo = state.counter as u32;
+    let counter_hi = (state.counter >> 32) as u32;
 
     unsafe {
         device
@@ -1513,8 +1755,10 @@ fn gpu_philox_f64_curand(
             .launch_builder(&f)
             .arg(out.inner_mut())
             .arg(&n_u32)
-            .arg(&seed)
-            .arg(&counter)
+            .arg(&seed_lo)
+            .arg(&seed_hi)
+            .arg(&counter_lo)
+            .arg(&counter_hi)
             .launch(cfg)?;
     }
 
@@ -1665,13 +1909,27 @@ pub fn gpu_philox_normal(n: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<f
 /// Fill a GPU buffer with uniform f64 values without host staging.
 #[cfg(feature = "cuda")]
 pub fn gpu_philox_uniform_f64(n: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
-    gpu_philox_f64_curand(n, device, "philox_uniform_f64_kernel")
+    gpu_philox_f64(
+        n,
+        device,
+        "philox_uniform_f64_kernel",
+        PHILOX_UNIFORM_F64_PTX.clone(),
+        n.div_ceil(2) as u64,
+        n,
+    )
 }
 
 /// Fill a GPU buffer with standard-normal f64 values without host staging.
 #[cfg(feature = "cuda")]
 pub fn gpu_philox_normal_f64(n: usize, device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
-    gpu_philox_f64_curand(n, device, "philox_normal_f64_kernel")
+    gpu_philox_f64(
+        n,
+        device,
+        "philox_normal_f64_kernel",
+        PHILOX_NORMAL_F64_PTX.clone(),
+        n.div_ceil(2) as u64,
+        n.div_ceil(2),
+    )
 }
 
 /// Fill a GPU buffer with uniform f16 values without host staging.

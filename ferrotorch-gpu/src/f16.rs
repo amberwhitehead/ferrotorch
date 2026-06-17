@@ -1272,6 +1272,116 @@ DONE:
 }
 ";
 
+const SIN_F16_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry sin_f16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %out, %off;
+    .reg .b16 %a_b16, %out_h;
+    .reg .f32 %va, %vr, %abs;
+    .reg .pred %p, %is_nan, %is_inf, %special;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.b16 %a_b16, [%a];
+    cvt.f32.f16 %va, %a_b16;
+    setp.nan.f32 %is_nan, %va, %va;
+    abs.f32 %abs, %va;
+    setp.eq.f32 %is_inf, %abs, 0f7F800000;
+    or.pred %special, %is_nan, %is_inf;
+    @%special bra SIN_NAN;
+    sin.approx.f32 %vr, %va;
+    bra SIN_STORE;
+
+SIN_NAN:
+    mov.f32 %vr, 0f7FC00000;
+
+SIN_STORE:
+    cvt.rn.f16.f32 %out_h, %vr;
+    st.global.b16 [%out], %out_h;
+
+DONE:
+    ret;
+}
+";
+
+const COS_F16_PTX: &str = "\
+.version 7.0
+.target sm_53
+.address_size 64
+
+.visible .entry cos_f16_kernel(
+    .param .u64 a_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %out, %off;
+    .reg .b16 %a_b16, %out_h;
+    .reg .f32 %va, %vr, %abs;
+    .reg .pred %p, %is_nan, %is_inf, %special;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.b16 %a_b16, [%a];
+    cvt.f32.f16 %va, %a_b16;
+    setp.nan.f32 %is_nan, %va, %va;
+    abs.f32 %abs, %va;
+    setp.eq.f32 %is_inf, %abs, 0f7F800000;
+    or.pred %special, %is_nan, %is_inf;
+    @%special bra COS_NAN;
+    cos.approx.f32 %vr, %va;
+    bra COS_STORE;
+
+COS_NAN:
+    mov.f32 %vr, 0f7FC00000;
+
+COS_STORE:
+    cvt.rn.f16.f32 %out_h, %vr;
+    st.global.b16 [%out], %out_h;
+
+DONE:
+    ret;
+}
+";
+
 // tanh(x) = (e^(2x) - 1) / (e^(2x) + 1). Uses ex2.approx.f32 internally.
 const TANH_F16_PTX: &str = "\
 .version 7.0
@@ -1454,6 +1564,22 @@ pub fn gpu_log_f16(
     device: &GpuDevice,
 ) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
     launch_unary(a, device, LOG_F16_PTX, "log_f16_kernel")
+}
+
+/// Elementwise `out = sin(a)` on f16 GPU buffers.
+pub fn gpu_sin_f16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_unary(a, device, SIN_F16_PTX, "sin_f16_kernel")
+}
+
+/// Elementwise `out = cos(a)` on f16 GPU buffers.
+pub fn gpu_cos_f16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    launch_unary(a, device, COS_F16_PTX, "cos_f16_kernel")
 }
 
 /// Elementwise `out = tanh(a)` on f16 (u16-stored) GPU buffers.

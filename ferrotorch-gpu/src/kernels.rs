@@ -13509,6 +13509,318 @@ DONE:
 }
 ";
 
+/// PTX source for `sin_kernel`: `out[i] = sin(a[i])` (f32).
+#[cfg(feature = "cuda")]
+pub(crate) const SIN_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry sin_kernel(
+    .param .u64 a_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %out, %off;
+    .reg .f32 %va, %vr, %abs;
+    .reg .pred %p, %is_nan, %is_inf, %special;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f32 %va, [%a];
+    setp.nan.f32 %is_nan, %va, %va;
+    abs.f32 %abs, %va;
+    setp.eq.f32 %is_inf, %abs, 0f7F800000;
+    or.pred %special, %is_nan, %is_inf;
+    @%special bra SIN_NAN;
+    sin.approx.f32 %vr, %va;
+    bra SIN_STORE;
+
+SIN_NAN:
+    mov.f32 %vr, 0f7FC00000;
+
+SIN_STORE:
+    st.global.f32 [%out], %vr;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for `cos_kernel`: `out[i] = cos(a[i])` (f32).
+#[cfg(feature = "cuda")]
+pub(crate) const COS_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry cos_kernel(
+    .param .u64 a_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %out, %off;
+    .reg .f32 %va, %vr, %abs;
+    .reg .pred %p, %is_nan, %is_inf, %special;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 2;
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f32 %va, [%a];
+    setp.nan.f32 %is_nan, %va, %va;
+    abs.f32 %abs, %va;
+    setp.eq.f32 %is_inf, %abs, 0f7F800000;
+    or.pred %special, %is_nan, %is_inf;
+    @%special bra COS_NAN;
+    cos.approx.f32 %vr, %va;
+    bra COS_STORE;
+
+COS_NAN:
+    mov.f32 %vr, 0f7FC00000;
+
+COS_STORE:
+    st.global.f32 [%out], %vr;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for `sin_f64_kernel`: `out[i] = sin(a[i])` (f64).
+#[cfg(feature = "cuda")]
+pub(crate) const SIN_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry sin_f64_kernel(
+    .param .u64 a_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %out, %off;
+    .reg .s64 %n_i;
+    .reg .b64 %n_bits;
+    .reg .u64 %q;
+    .reg .f64 %x, %vr, %absx, %y, %nf, %r, %r2, %sin_poly, %cos_poly;
+    .reg .f64 %sin_r, %cos_r, %neg_sin, %neg_cos, %sin_out, %cos_out;
+    .reg .pred %p, %is_nan, %is_inf, %special, %p_q;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 3;
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f64 %x, [%a];
+    setp.nan.f64 %is_nan, %x, %x;
+    abs.f64 %absx, %x;
+    setp.eq.f64 %is_inf, %absx, 0d7FF0000000000000;
+    or.pred %special, %is_nan, %is_inf;
+    @%special bra SIN_F64_NAN;
+
+    // n = round(x * 2/pi), r = x - n*pi/2 with a split pi/2.
+    mul.rn.f64 %y, %x, 0d3FE45F306DC9C883;
+    cvt.rni.s64.f64 %n_i, %y;
+    cvt.rn.f64.s64 %nf, %n_i;
+    fma.rn.f64 %r, %nf, 0dBFF921FB54400000, %x;
+    fma.rn.f64 %r, %nf, 0dBDD0B46000000000, %r;
+    mul.rn.f64 %r2, %r, %r;
+
+    // sin(r) = r + r*r^2*P(r^2), |r| <= pi/4 after reduction.
+    mov.f64 %sin_poly, 0d3DE6124613A86D09;
+    fma.rn.f64 %sin_poly, %sin_poly, %r2, 0dBE5AE64567F544E4;
+    fma.rn.f64 %sin_poly, %sin_poly, %r2, 0d3EC71DE3A556C734;
+    fma.rn.f64 %sin_poly, %sin_poly, %r2, 0dBF2A01A01A01A01A;
+    fma.rn.f64 %sin_poly, %sin_poly, %r2, 0d3F81111111111111;
+    fma.rn.f64 %sin_poly, %sin_poly, %r2, 0dBFC5555555555555;
+    mul.rn.f64 %sin_poly, %sin_poly, %r2;
+    fma.rn.f64 %sin_r, %sin_poly, %r, %r;
+
+    // cos(r) = 1 + r^2*Q(r^2).
+    mov.f64 %cos_poly, 0d3E21EED8EFF8D898;
+    fma.rn.f64 %cos_poly, %cos_poly, %r2, 0dBE927E4FB7789F5C;
+    fma.rn.f64 %cos_poly, %cos_poly, %r2, 0d3EFA01A01A01A01A;
+    fma.rn.f64 %cos_poly, %cos_poly, %r2, 0dBF56C16C16C16C17;
+    fma.rn.f64 %cos_poly, %cos_poly, %r2, 0d3FA5555555555555;
+    fma.rn.f64 %cos_poly, %cos_poly, %r2, 0dBFE0000000000000;
+    fma.rn.f64 %cos_r, %cos_poly, %r2, 0d3FF0000000000000;
+
+    neg.f64 %neg_sin, %sin_r;
+    neg.f64 %neg_cos, %cos_r;
+    mov.f64 %sin_out, %sin_r;
+    mov.f64 %cos_out, %cos_r;
+    mov.b64 %n_bits, %n_i;
+    and.b64 %q, %n_bits, 3;
+    setp.eq.u64 %p_q, %q, 1;
+    @%p_q mov.f64 %sin_out, %cos_r;
+    @%p_q mov.f64 %cos_out, %neg_sin;
+    setp.eq.u64 %p_q, %q, 2;
+    @%p_q mov.f64 %sin_out, %neg_sin;
+    @%p_q mov.f64 %cos_out, %neg_cos;
+    setp.eq.u64 %p_q, %q, 3;
+    @%p_q mov.f64 %sin_out, %neg_cos;
+    @%p_q mov.f64 %cos_out, %sin_r;
+
+    mov.f64 %vr, %sin_out;
+    bra SIN_F64_STORE;
+
+SIN_F64_NAN:
+    mov.f64 %vr, 0d7FF8000000000000;
+
+SIN_F64_STORE:
+    st.global.f64 [%out], %vr;
+
+DONE:
+    ret;
+}
+";
+
+/// PTX source for `cos_f64_kernel`: `out[i] = cos(a[i])` (f64).
+#[cfg(feature = "cuda")]
+pub(crate) const COS_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry cos_f64_kernel(
+    .param .u64 a_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u64 %a, %out, %off;
+    .reg .s64 %n_i;
+    .reg .b64 %n_bits;
+    .reg .u64 %q;
+    .reg .f64 %x, %vr, %absx, %y, %nf, %r, %r2, %sin_poly, %cos_poly;
+    .reg .f64 %sin_r, %cos_r, %neg_sin, %neg_cos, %sin_out, %cos_out;
+    .reg .pred %p, %is_nan, %is_inf, %special, %p_q;
+
+    ld.param.u64 %a, [a_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 3;
+    add.u64 %a, %a, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f64 %x, [%a];
+    setp.nan.f64 %is_nan, %x, %x;
+    abs.f64 %absx, %x;
+    setp.eq.f64 %is_inf, %absx, 0d7FF0000000000000;
+    or.pred %special, %is_nan, %is_inf;
+    @%special bra COS_F64_NAN;
+
+    // n = round(x * 2/pi), r = x - n*pi/2 with a split pi/2.
+    mul.rn.f64 %y, %x, 0d3FE45F306DC9C883;
+    cvt.rni.s64.f64 %n_i, %y;
+    cvt.rn.f64.s64 %nf, %n_i;
+    fma.rn.f64 %r, %nf, 0dBFF921FB54400000, %x;
+    fma.rn.f64 %r, %nf, 0dBDD0B46000000000, %r;
+    mul.rn.f64 %r2, %r, %r;
+
+    // sin(r) = r + r*r^2*P(r^2), |r| <= pi/4 after reduction.
+    mov.f64 %sin_poly, 0d3DE6124613A86D09;
+    fma.rn.f64 %sin_poly, %sin_poly, %r2, 0dBE5AE64567F544E4;
+    fma.rn.f64 %sin_poly, %sin_poly, %r2, 0d3EC71DE3A556C734;
+    fma.rn.f64 %sin_poly, %sin_poly, %r2, 0dBF2A01A01A01A01A;
+    fma.rn.f64 %sin_poly, %sin_poly, %r2, 0d3F81111111111111;
+    fma.rn.f64 %sin_poly, %sin_poly, %r2, 0dBFC5555555555555;
+    mul.rn.f64 %sin_poly, %sin_poly, %r2;
+    fma.rn.f64 %sin_r, %sin_poly, %r, %r;
+
+    // cos(r) = 1 + r^2*Q(r^2).
+    mov.f64 %cos_poly, 0d3E21EED8EFF8D898;
+    fma.rn.f64 %cos_poly, %cos_poly, %r2, 0dBE927E4FB7789F5C;
+    fma.rn.f64 %cos_poly, %cos_poly, %r2, 0d3EFA01A01A01A01A;
+    fma.rn.f64 %cos_poly, %cos_poly, %r2, 0dBF56C16C16C16C17;
+    fma.rn.f64 %cos_poly, %cos_poly, %r2, 0d3FA5555555555555;
+    fma.rn.f64 %cos_poly, %cos_poly, %r2, 0dBFE0000000000000;
+    fma.rn.f64 %cos_r, %cos_poly, %r2, 0d3FF0000000000000;
+
+    neg.f64 %neg_sin, %sin_r;
+    neg.f64 %neg_cos, %cos_r;
+    mov.f64 %sin_out, %sin_r;
+    mov.f64 %cos_out, %cos_r;
+    mov.b64 %n_bits, %n_i;
+    and.b64 %q, %n_bits, 3;
+    setp.eq.u64 %p_q, %q, 1;
+    @%p_q mov.f64 %sin_out, %cos_r;
+    @%p_q mov.f64 %cos_out, %neg_sin;
+    setp.eq.u64 %p_q, %q, 2;
+    @%p_q mov.f64 %sin_out, %neg_sin;
+    @%p_q mov.f64 %cos_out, %neg_cos;
+    setp.eq.u64 %p_q, %q, 3;
+    @%p_q mov.f64 %sin_out, %neg_cos;
+    @%p_q mov.f64 %cos_out, %sin_r;
+
+    mov.f64 %vr, %cos_out;
+    bra COS_F64_STORE;
+
+COS_F64_NAN:
+    mov.f64 %vr, 0d7FF8000000000000;
+
+COS_F64_STORE:
+    st.global.f64 [%out], %vr;
+
+DONE:
+    ret;
+}
+";
+
 /// PTX source for `pow_kernel`: `out[i] = a[i] ^ exponent`.
 /// Uses the identity: x^e = 2^(e * log2(x)).
 #[cfg(feature = "cuda")]
@@ -22627,6 +22939,20 @@ pub fn gpu_log(a: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<
     try_launch_unary(a, device, LOG_PTX, "log_kernel")
 }
 
+/// Elementwise sine: `out[i] = sin(a[i])`.
+#[cfg(feature = "cuda")]
+pub fn gpu_sin(a: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    validate_unary(a, device)?;
+    try_launch_unary(a, device, SIN_PTX, "sin_kernel")
+}
+
+/// Elementwise cosine: `out[i] = cos(a[i])`.
+#[cfg(feature = "cuda")]
+pub fn gpu_cos(a: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    validate_unary(a, device)?;
+    try_launch_unary(a, device, COS_PTX, "cos_kernel")
+}
+
 /// Elementwise square root: `out[i] = sqrt(a[i])`.
 #[cfg(feature = "cuda")]
 pub fn gpu_sqrt(a: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
@@ -23123,6 +23449,20 @@ pub fn gpu_exp_f64(a: &CudaBuffer<f64>, device: &GpuDevice) -> GpuResult<CudaBuf
 #[cfg(feature = "cuda")]
 pub fn gpu_log_f64(a: &CudaBuffer<f64>, device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
     try_launch_unary_f64(a, device, LOG_F64_PTX, "log_f64_kernel")
+}
+
+/// Elementwise f64 sine: `out[i] = sin(a[i])`.
+#[cfg(feature = "cuda")]
+pub fn gpu_sin_f64(a: &CudaBuffer<f64>, device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
+    validate_device(a, device)?;
+    try_launch_unary_f64(a, device, SIN_F64_PTX, "sin_f64_kernel")
+}
+
+/// Elementwise f64 cosine: `out[i] = cos(a[i])`.
+#[cfg(feature = "cuda")]
+pub fn gpu_cos_f64(a: &CudaBuffer<f64>, device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
+    validate_device(a, device)?;
+    try_launch_unary_f64(a, device, COS_F64_PTX, "cos_f64_kernel")
 }
 
 /// Elementwise f64 sqrt: `out[i] = sqrt(a[i])`.
@@ -29244,6 +29584,18 @@ pub fn gpu_log(_a: &CudaBuffer<f32>, _device: &GpuDevice) -> GpuResult<CudaBuffe
 
 /// Stub -- always returns [`GpuError::NoCudaFeature`].
 #[cfg(not(feature = "cuda"))]
+pub fn gpu_sin(_a: &CudaBuffer<f32>, _device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+/// Stub -- always returns [`GpuError::NoCudaFeature`].
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_cos(_a: &CudaBuffer<f32>, _device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+/// Stub -- always returns [`GpuError::NoCudaFeature`].
+#[cfg(not(feature = "cuda"))]
 pub fn gpu_sqrt(_a: &CudaBuffer<f32>, _device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
     Err(GpuError::NoCudaFeature)
 }
@@ -30023,6 +30375,14 @@ pub fn gpu_exp_f64(_a: &CudaBuffer<f64>, _device: &GpuDevice) -> GpuResult<CudaB
 }
 #[cfg(not(feature = "cuda"))]
 pub fn gpu_log_f64(_a: &CudaBuffer<f64>, _device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_sin_f64(_a: &CudaBuffer<f64>, _device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_cos_f64(_a: &CudaBuffer<f64>, _device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
     Err(GpuError::NoCudaFeature)
 }
 #[cfg(not(feature = "cuda"))]
