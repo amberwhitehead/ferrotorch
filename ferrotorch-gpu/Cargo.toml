@@ -16,14 +16,10 @@ readme = "README.md"
 default = ["cuda"]
 cuda = ["dep:cudarc"]
 # Opt-in cuSPARSELt support for 2:4 structured sparse matmul on Ampere+
-# Tensor Cores. Authored against NVIDIA cuSPARSELt
-# (https://docs.nvidia.com/cuda/cusparselt). Activating this feature
-# pulls in `bindgen` as a build-dep and runs `build.rs` to generate raw
-# FFI bindings against `cusparseLt.h`. The cuSPARSELt SDK
-# (`cusparseLt.h` + `libcusparseLt.so`) must be installed at build and
-# runtime respectively. Default builds do NOT require these to be
-# present.
-cusparselt = ["cuda", "dep:bindgen"]
+# Tensor Cores. Activating this feature links against `libcusparseLt.so`;
+# the ABI subset is hand-authored Rust in `src/cusparselt.rs`, so no
+# `bindgen`, header parse, libclang, or C/C++ toolchain is required.
+cusparselt = ["cuda"]
 
 [dependencies]
 ferrotorch-core = { workspace = true }
@@ -32,13 +28,6 @@ half = { workspace = true }
 num-traits = { workspace = true }
 thiserror = { workspace = true }
 tracing.workspace = true
-
-[build-dependencies]
-# `bindgen` only runs when the `cusparselt` feature is enabled (the
-# build script gates every call on `CARGO_FEATURE_CUSPARSELT`). It is
-# kept as an optional build-dep so the default workspace build does not
-# pull libclang.
-bindgen = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde = { workspace = true }

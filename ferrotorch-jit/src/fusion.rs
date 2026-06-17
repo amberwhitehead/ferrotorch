@@ -3,7 +3,9 @@
 //!
 //! The fusion engine intercepts tensor operations, buffers sequences of
 //! elementwise ops, and executes them as a single fused operation on the CPU
-//! via [`FusedChain::execute_cpu`]. PTX code generators are also provided:
+//! via [`FusedChain::execute_cpu`]. Inspectable Rust source generation is
+//! available through [`FusedChain::generate_rust`] and
+//! [`generate_reduction_rust`]. PTX code generators are also provided:
 //! [`FusedChain::generate_ptx`] / [`FusedChain::generate_ptx_named`] for f32
 //! and [`FusedChain::generate_ptx_f64_named`] for f64. The f64 path emits
 //! Rust-owned PTX math fragments directly; it does not compile CUDA C.
@@ -40,11 +42,11 @@
 //! | REQ-3 | SHIPPED | `pub fn execute_cpu` on `impl FusedChain`; consumer: `pub fn apply_fused` in this file calls `chain.execute_cpu(data)?` in the CPU arm. |
 //! | REQ-4 | SHIPPED | `pub fn generate_ptx` + `pub fn generate_ptx_named`; consumer: `fusion_gpu.rs:117` `let ptx = chain.generate_ptx_named(FUSED_F32_KERNEL_NAME)?;` in the f32 GPU path. |
 //! | REQ-5 | SHIPPED | `pub fn generate_ptx_f64_named`; consumer: `fusion_gpu.rs` f64 GPU path. |
-//! | REQ-6 | SHIPPED | `pub fn generate_c`; consumer: re-export at `lib.rs:103-107` (grandfathered boundary public API per goal.md S5). |
+//! | REQ-6 | SHIPPED | `pub fn generate_rust`; inspectable Rust source artifact for fused unary chains. |
 //! | REQ-7 | SHIPPED | `pub fn apply_fused`; consumer: re-export at `lib.rs:103-107` — canonical tensor-level entry point. |
 //! | REQ-8 | SHIPPED | `pub fn with_fusion` + `pub fn is_fusion_enabled` + thread-local `FUSION_ENABLED`; consumer: re-export at `lib.rs:103-107`. |
-//! | REQ-9 | SHIPPED | `pub enum ReductionKind` + `pub fn generate_reduction_c` + `pub fn generate_reduction_ptx`; consumer: re-export at `lib.rs:103-107`. |
-//! | REQ-10 | SHIPPED | `fn validate_identifier`; consumer: invoked by every public emitter in this file (`generate_ptx_named`, `generate_ptx_f64_named`, `generate_c`, `generate_reduction_c`, `generate_reduction_ptx`). |
+//! | REQ-9 | SHIPPED | `pub enum ReductionKind` + `pub fn generate_reduction_rust` + `pub fn generate_reduction_ptx`; consumer: re-export at `lib.rs:103-107`. |
+//! | REQ-10 | SHIPPED | `fn validate_identifier`; consumer: invoked by every public emitter in this file (`generate_ptx_named`, `generate_ptx_f64_named`, `generate_rust`, `generate_reduction_rust`, `generate_reduction_ptx`). |
 //! | REQ-11 | SHIPPED | `pub fn estimate_numel_for_inputs` + `pub fn estimate_matmul_dims`; consumer: re-export at `lib.rs:103-107`. |
 
 use std::cell::Cell;
@@ -57,10 +59,12 @@ use ferrotorch_core::tensor::Tensor;
 use num_traits;
 
 use crate::codegen_gpu::{
-    emit_ptx_f64_exp_inplace, emit_ptx_f64_gelu_tanh_inplace, emit_ptx_f64_log_inplace,
+    GpuCodegen, emit_ptx_f64_exp_inplace, emit_ptx_f64_gelu_tanh_inplace, emit_ptx_f64_log_inplace,
     emit_ptx_f64_math_reg_decls, emit_ptx_f64_pow_const, emit_ptx_f64_sigmoid_inplace,
     emit_ptx_f64_silu_inplace, emit_ptx_f64_tanh_inplace, ptx_f64_const_literal,
 };
+use crate::codegen_ir::{BinOpKind, Expr, LoopIR};
+use crate::graph::Dtype;
 
 // ---------------------------------------------------------------------------
 // Thread-local fusion flag
@@ -184,16 +188,6 @@ pub enum ReductionKind {
     Prod,
     /// Mean reduction: identity = 0, op = +, then divide by n.
     Mean,
-}
-
-impl ReductionKind {
-    /// The identity element for this reduction (as an f32 bit pattern).
-    fn identity_f32_bits(self) -> u32 {
-        match self {
-            ReductionKind::Sum | ReductionKind::Mean => 0x0000_0000, // 0.0
-            ReductionKind::Prod => 0x3F80_0000,                      // 1.0
-        }
-    }
 }
 
 impl fmt::Display for ReductionKind {
@@ -662,27 +656,28 @@ DONE:
     }
 
     // -------------------------------------------------------------------
-    // C codegen
+    // Rust source generation
     // -------------------------------------------------------------------
 
-    /// Generate a C function that applies this fused chain elementwise.
+    /// Generate a standalone Rust function that applies this fused chain
+    /// elementwise.
+    ///
+    /// The generated function is generic over `f32` and `f64` through a small
+    /// emitted `FusedFloat` trait, so the inspectable source artifact covers
+    /// both scalar widths without relying on CUDA C, C headers, OpenMP pragmas,
+    /// or a foreign toolchain.
     ///
     /// The generated function signature is:
     ///
-    /// ```c
-    /// void <fn_name>(const float* __restrict__ in, float* __restrict__ out, int n)
+    /// ```text
+    /// pub fn <fn_name><T: FusedFloat>(input: &[T], output: &mut [T])
     /// ```
-    ///
-    /// The loop is annotated with `#pragma omp simd` for auto-vectorization.
-    /// Reduction loops (containing accumulate semantics) use the
-    /// appropriate `#pragma omp simd reduction(...)` clause to avoid
-    /// loop-carried dependency violations.
     ///
     /// # Errors
     ///
     /// Returns an error if the chain contains unsupported binary ops, or
-    /// if `fn_name` is not a valid C identifier.
-    pub fn generate_c(&self, fn_name: &str) -> FerrotorchResult<String> {
+    /// if `fn_name` is not a valid Rust identifier.
+    pub fn generate_rust(&self, fn_name: &str) -> FerrotorchResult<String> {
         validate_identifier(fn_name)?;
 
         // Reject unsupported binary ops.
@@ -693,8 +688,8 @@ DONE:
             ) {
                 return Err(ferrotorch_core::error::FerrotorchError::InvalidArgument {
                     message: format!(
-                        "generate_c: binary op '{op}' in unary FusedChain requires a \
-                         second input and cannot be lowered to a single-input C loop"
+                        "generate_rust: binary op '{op}' in unary FusedChain requires a \
+                         second input and cannot be lowered to a single-input Rust loop"
                     ),
                 });
             }
@@ -707,122 +702,195 @@ DONE:
                     unreachable!("binary ops rejected above");
                 }
                 FusedOp::Neg => {
-                    body_lines.push("        val = -val;".into());
+                    body_lines.push("        val = T::zero() - val;".into());
                 }
                 FusedOp::Relu => {
-                    body_lines.push("        val = fmaxf(val, 0.0f);".into());
+                    body_lines.push(
+                        "        val = if val > T::zero() { val } else { T::zero() };".into(),
+                    );
                 }
                 FusedOp::Sigmoid => {
-                    body_lines.push("        val = 1.0f / (1.0f + expf(-val));".into());
+                    body_lines.push(
+                        "        val = T::one() / (T::one() + (T::zero() - val).exp());".into(),
+                    );
                 }
                 FusedOp::Tanh => {
-                    body_lines.push("        val = tanhf(val);".into());
+                    body_lines.push("        val = val.tanh();".into());
                 }
                 FusedOp::Gelu => {
                     // Tanh-based GELU approximation (matches all backends).
                     body_lines.push("        {".into());
-                    body_lines.push("            float x3 = val * val * val;".into());
+                    body_lines.push("            let x3 = val * val * val;".into());
                     body_lines.push(
-                        "            float inner = 0.7978845608f * (val + 0.044715f * x3);".into(),
+                        "            let inner = T::from_f64(0.7978845608028654) * (val + T::from_f64(0.044715) * x3);".into(),
                     );
-                    body_lines.push("            val = val * 0.5f * (1.0f + tanhf(inner));".into());
+                    body_lines.push(
+                        "            val = val * T::from_f64(0.5) * (T::one() + inner.tanh());"
+                            .into(),
+                    );
                     body_lines.push("        }".into());
                 }
                 FusedOp::Silu => {
                     body_lines.push(
-                        "        { float s = 1.0f / (1.0f + expf(-val)); val = val * s; }".into(),
+                        "        { let s = T::one() / (T::one() + (T::zero() - val).exp()); val = val * s; }".into(),
                     );
                 }
                 FusedOp::Sqrt => {
-                    body_lines.push("        val = sqrtf(val);".into());
+                    body_lines.push("        val = val.sqrt();".into());
                 }
                 FusedOp::Abs => {
-                    body_lines.push("        val = fabsf(val);".into());
+                    body_lines.push("        val = val.abs();".into());
                 }
                 FusedOp::Exp => {
-                    body_lines.push("        val = expf(val);".into());
+                    body_lines.push("        val = val.exp();".into());
                 }
                 FusedOp::Log => {
-                    body_lines.push("        val = logf(val);".into());
+                    body_lines.push("        val = val.ln();".into());
                 }
                 FusedOp::Pow(p) => {
-                    body_lines.push(format!("        val = powf(val, {p:.17}f);"));
+                    body_lines.push(format!(
+                        "        val = val.powf(T::from_f64({}));",
+                        rust_f64_literal(*p)
+                    ));
                 }
                 FusedOp::ScalarMul(s) => {
-                    body_lines.push(format!("        val = val * {s:.17}f;"));
+                    body_lines.push(format!(
+                        "        val = val * T::from_f64({});",
+                        rust_f64_literal(*s)
+                    ));
                 }
                 FusedOp::ScalarAdd(s) => {
-                    body_lines.push(format!("        val = val + {s:.17}f;"));
+                    body_lines.push(format!(
+                        "        val = val + T::from_f64({});",
+                        rust_f64_literal(*s)
+                    ));
                 }
             }
         }
         let body = body_lines.join("\n");
 
-        // Elementwise loops use plain `#pragma omp simd` — no loop-carried
-        // dependencies since each iteration is independent.
         Ok(format!(
-            "\
-#include <math.h>
+            "{prelude}
 
-void {fn_name}(const float* __restrict__ in, float* __restrict__ out, int n) {{
-    #pragma omp simd
-    for (int i = 0; i < n; i++) {{
-        float val = in[i];
+pub fn {fn_name}<T: FusedFloat>(input: &[T], output: &mut [T]) {{
+    assert!(
+        output.len() >= input.len(),
+        \"{fn_name}: output length must be at least input length\"
+    );
+    for (i, &x) in input.iter().enumerate() {{
+        let mut val = x;
 {body}
-        out[i] = val;
+        output[i] = val;
     }}
 }}
-"
+",
+            prelude = rust_float_prelude(),
         ))
     }
 }
 
-/// Generate a C function that performs a reduction.
+/// Generate a standalone Rust function that performs a reduction.
 ///
-/// Unlike elementwise loops, reduction loops have a loop-carried dependency.
-/// The generated code uses `#pragma omp simd reduction(+:acc)` (for sum/mean)
-/// or `#pragma omp simd reduction(*:acc)` (for prod) to correctly handle
-/// SIMD vectorization without data races.
+/// The generated source is generic over `f32` and `f64` through the same
+/// emitted `FusedFloat` trait used by [`FusedChain::generate_rust`].
 ///
-/// For [`ReductionKind::Mean`], the sum is divided by `n` after the loop.
-pub fn generate_reduction_c(kind: ReductionKind, fn_name: &str) -> FerrotorchResult<String> {
+/// For [`ReductionKind::Mean`], empty input returns `NaN`, matching `PyTorch`'s
+/// floating mean semantics and the old `0.0 / 0.0` C behavior without relying
+/// on a divide-by-zero expression.
+pub fn generate_reduction_rust(kind: ReductionKind, fn_name: &str) -> FerrotorchResult<String> {
     validate_identifier(fn_name)?;
 
-    let (identity, omp_clause, accumulate_expr, finalize) = match kind {
-        ReductionKind::Sum => (
-            "0.0f",
-            "#pragma omp simd reduction(+:acc)",
-            "acc += in[i];",
-            "",
-        ),
-        ReductionKind::Prod => (
-            "1.0f",
-            "#pragma omp simd reduction(*:acc)",
-            "acc *= in[i];",
-            "",
-        ),
+    let (identity, accumulate_expr, finalize) = match kind {
+        ReductionKind::Sum => ("T::zero()", "acc = acc + x;", ""),
+        ReductionKind::Prod => ("T::one()", "acc = acc * x;", ""),
         ReductionKind::Mean => (
-            "0.0f",
-            "#pragma omp simd reduction(+:acc)",
-            "acc += in[i];",
-            "    acc = acc / (float)n;\n",
+            "T::zero()",
+            "acc = acc + x;",
+            "\n    if input.is_empty() {\n        T::nan()\n    } else {\n        acc / T::from_f64(input.len() as f64)\n    }",
         ),
     };
 
-    Ok(format!(
-        "\
-#include <math.h>
+    let return_expr = if kind == ReductionKind::Mean {
+        finalize
+    } else {
+        "\n    acc"
+    };
 
-void {fn_name}(const float* __restrict__ in, float* __restrict__ out, int n) {{
-    float acc = {identity};
-    {omp_clause}
-    for (int i = 0; i < n; i++) {{
+    Ok(format!(
+        "{prelude}
+
+pub fn {fn_name}<T: FusedFloat>(input: &[T]) -> T {{
+    let mut acc = {identity};
+    for &x in input {{
         {accumulate_expr}
     }}
-{finalize}    out[0] = acc;
+{return_expr}
 }}
-"
+",
+        prelude = rust_float_prelude(),
     ))
+}
+
+fn rust_float_prelude() -> &'static str {
+    "\
+#[allow(dead_code)]
+pub trait FusedFloat:
+    Copy
+    + PartialOrd
+    + std::ops::Add<Output = Self>
+    + std::ops::Sub<Output = Self>
+    + std::ops::Mul<Output = Self>
+    + std::ops::Div<Output = Self>
+{
+    fn zero() -> Self;
+    fn one() -> Self;
+    fn nan() -> Self;
+    fn from_f64(value: f64) -> Self;
+    fn exp(self) -> Self;
+    fn ln(self) -> Self;
+    fn sqrt(self) -> Self;
+    fn abs(self) -> Self;
+    fn tanh(self) -> Self;
+    fn powf(self, exponent: Self) -> Self;
+}
+
+impl FusedFloat for f32 {
+    fn zero() -> Self { 0.0 }
+    fn one() -> Self { 1.0 }
+    fn nan() -> Self { f32::NAN }
+    fn from_f64(value: f64) -> Self { value as f32 }
+    fn exp(self) -> Self { f32::exp(self) }
+    fn ln(self) -> Self { f32::ln(self) }
+    fn sqrt(self) -> Self { f32::sqrt(self) }
+    fn abs(self) -> Self { f32::abs(self) }
+    fn tanh(self) -> Self { f32::tanh(self) }
+    fn powf(self, exponent: Self) -> Self { f32::powf(self, exponent) }
+}
+
+impl FusedFloat for f64 {
+    fn zero() -> Self { 0.0 }
+    fn one() -> Self { 1.0 }
+    fn nan() -> Self { f64::NAN }
+    fn from_f64(value: f64) -> Self { value }
+    fn exp(self) -> Self { f64::exp(self) }
+    fn ln(self) -> Self { f64::ln(self) }
+    fn sqrt(self) -> Self { f64::sqrt(self) }
+    fn abs(self) -> Self { f64::abs(self) }
+    fn tanh(self) -> Self { f64::tanh(self) }
+    fn powf(self, exponent: Self) -> Self { f64::powf(self, exponent) }
+}"
+}
+
+fn rust_f64_literal(value: f64) -> String {
+    if value.is_nan() {
+        "f64::NAN".into()
+    } else if value == f64::INFINITY {
+        "f64::INFINITY".into()
+    } else if value == f64::NEG_INFINITY {
+        "f64::NEG_INFINITY".into()
+    } else {
+        format!("{value:.17}")
+    }
 }
 
 impl Default for FusedChain {
@@ -835,15 +903,17 @@ impl Default for FusedChain {
 // Reduction PTX generation
 // ---------------------------------------------------------------------------
 
-/// Generate a PTX kernel that performs a single-pass parallel reduction.
+/// Generate a PTX module that performs a parallel f32 reduction.
 ///
-/// The generated kernel uses shared-memory block-level reduction and
-/// `atomicAdd` (for Sum/Mean) or iterative `atomicCAS` (for Prod) to
-/// accumulate partial results from each block into `output[0]`.
+/// The generated module is the same Rust-owned PTX reduction path used by
+/// [`GpuCodegen::generate_ptx_source`]: callers launch `<kernel_name>_init`
+/// first, then `<kernel_name>`, and for [`ReductionKind::Mean`] launch
+/// `<kernel_name>_finalize`. The reduction entry uses grid-stride loads,
+/// shared-memory block reduction, `atom.global.add.f32` for sum/mean, and an
+/// `atom.global.cas.b32` loop for product.
 ///
-/// For [`ReductionKind::Mean`], the final division by `n` is performed
-/// by thread 0 of block 0 **after** a global memory fence, ensuring the
-/// result is correct regardless of block scheduling order.
+/// Empty reductions match `PyTorch` floating semantics: sum -> `0.0`,
+/// prod -> `1.0`, and mean -> `NaN`.
 ///
 /// # Errors
 ///
@@ -851,156 +921,50 @@ impl Default for FusedChain {
 pub fn generate_reduction_ptx(kind: ReductionKind, kernel_name: &str) -> FerrotorchResult<String> {
     validate_identifier(kernel_name)?;
 
-    let identity_bits = kind.identity_f32_bits();
-    let (reduce_op, is_prod) = match kind {
-        ReductionKind::Sum | ReductionKind::Mean => ("add.f32", false),
-        ReductionKind::Prod => ("mul.f32", true),
+    let loop_body = match kind {
+        ReductionKind::Sum | ReductionKind::Mean => vec![LoopIR::Accumulate {
+            var: "acc".into(),
+            value: Expr::index("in0", Expr::var("i")),
+        }],
+        ReductionKind::Prod => vec![LoopIR::Assign {
+            var: "acc".into(),
+            value: Expr::bin(
+                BinOpKind::Mul,
+                Expr::var("acc"),
+                Expr::index("in0", Expr::var("i")),
+            ),
+        }],
     };
-    let is_mean = kind == ReductionKind::Mean;
-
-    // For sum/mean we use atom.global.add.f32 which atomically adds the
-    // block partial sum to output[0].
-    // For prod we use a CAS loop since there is no atomic multiply.
-    let atomic_section = if is_prod {
-        // CAS loop for atomic multiply:
-        //   old = *addr;
-        //   do { expected = old; new = old * partial; old = CAS(addr, expected, new); }
-        //   while (old != expected);
-        "\
-    // Atomic multiply via CAS loop
-    ld.global.f32 %old, [%out];
-CAS_LOOP:
-    mov.f32 %expected, %old;
-    mul.f32 %new_val, %old, %val;
-    // Reinterpret floats as u32 for CAS
-    mov.b32 %old_bits, %expected;
-    mov.b32 %new_bits, %new_val;
-    atom.global.cas.b32 %result_bits, [%out], %old_bits, %new_bits;
-    mov.b32 %old, %result_bits;
-    setp.ne.f32 %cas_p, %old, %expected;
-    @%cas_p bra CAS_LOOP;"
+    let store_value = if kind == ReductionKind::Mean {
+        Expr::bin(BinOpKind::Div, Expr::var("acc"), Expr::constant(1.0))
     } else {
-        "    atom.global.add.f32 %val, [%out], %val;"
+        Expr::var("acc")
     };
-
-    // Extra registers for prod CAS loop
-    let extra_regs = if is_prod {
-        "\n    .reg .f32 %old, %expected, %new_val;\n    .reg .u32 %old_bits, %new_bits, %result_bits;\n    .reg .pred %cas_p;"
+    let init = if kind == ReductionKind::Prod {
+        1.0
     } else {
-        ""
+        0.0
     };
+    let loops = vec![
+        LoopIR::Let {
+            var: "acc".into(),
+            value: Expr::constant(init),
+        },
+        LoopIR::Loop {
+            var: "i".into(),
+            start: Expr::int(0),
+            end: Expr::int(1),
+            body: loop_body,
+        },
+        LoopIR::Store {
+            buffer: "out".into(),
+            index: Expr::int(0),
+            value: store_value,
+        },
+    ];
 
-    // Mean: after all blocks have contributed, thread 0 of block 0 divides by n.
-    // We use a second kernel launch or a global flag for synchronization.
-    // Simpler approach: emit a second entry point that does the division.
-    let mean_finalize = if is_mean {
-        format!(
-            "\n\
-.visible .entry {kernel_name}_finalize(
-    .param .u64 out_ptr_f,
-    .param .u32 n_f
-) {{
-    .reg .u64 %out_f;
-    .reg .u32 %n_f;
-    .reg .f32 %sum_val, %n_float, %mean_val;
-
-    ld.param.u64 %out_f, [out_ptr_f];
-    ld.param.u32 %n_f, [n_f];
-
-    ld.global.f32 %sum_val, [%out_f];
-    cvt.rn.f32.u32 %n_float, %n_f;
-    div.approx.f32 %mean_val, %sum_val, %n_float;
-    st.global.f32 [%out_f], %mean_val;
-
-    ret;
-}}\n"
-        )
-    } else {
-        String::new()
-    };
-
-    Ok(format!(
-        "\
-.version 7.0
-.target sm_52
-.address_size 64
-
-.visible .entry {kernel_name}(
-    .param .u64 in_ptr,
-    .param .u64 out_ptr,
-    .param .u32 n
-) {{
-    .reg .u32 %r_tid, %bid, %bdim, %gid, %n_reg, %s;
-    .reg .u64 %in, %out, %off;
-    .reg .f32 %val, %shared_val;
-    .reg .pred %p, %p2;{extra_regs}
-
-    .shared .align 4 .f32 sdata[1024];
-
-    ld.param.u64 %in, [in_ptr];
-    ld.param.u64 %out, [out_ptr];
-    ld.param.u32 %n_reg, [n];
-
-    mov.u32 %bid, %ctaid.x;
-    mov.u32 %bdim, %ntid.x;
-    mov.u32 %r_tid, %tid.x;
-    mad.lo.u32 %gid, %bid, %bdim, %r_tid;
-
-    // Load element or identity if out of bounds
-    setp.lt.u32 %p, %gid, %n_reg;
-    mov.f32 %val, 0f{identity_bits:08X};
-    @!%p bra SKIP_LOAD;
-
-    cvt.u64.u32 %off, %gid;
-    shl.b64 %off, %off, 2;
-    add.u64 %in, %in, %off;
-    ld.global.f32 %val, [%in];
-
-SKIP_LOAD:
-    // Store to shared memory
-    cvt.u64.u32 %off, %r_tid;
-    shl.b64 %off, %off, 2;
-    st.shared.f32 [sdata + %off], %val;
-    bar.sync 0;
-
-    // Tree reduction in shared memory
-    shr.u32 %s, %bdim, 1;
-REDUCE_LOOP:
-    setp.eq.u32 %p2, %s, 0;
-    @%p2 bra REDUCE_DONE;
-
-    setp.lt.u32 %p, %r_tid, %s;
-    @!%p bra REDUCE_SKIP;
-
-    // Load partner value
-    add.u32 %gid, %r_tid, %s;
-    cvt.u64.u32 %off, %gid;
-    shl.b64 %off, %off, 2;
-    ld.shared.f32 %shared_val, [sdata + %off];
-    cvt.u64.u32 %off, %r_tid;
-    shl.b64 %off, %off, 2;
-    ld.shared.f32 %val, [sdata + %off];
-    {reduce_op} %val, %val, %shared_val;
-    st.shared.f32 [sdata + %off], %val;
-
-REDUCE_SKIP:
-    bar.sync 0;
-    shr.u32 %s, %s, 1;
-    bra REDUCE_LOOP;
-
-REDUCE_DONE:
-    // Thread 0 of each block atomically adds its partial result to output[0]
-    setp.ne.u32 %p, %r_tid, 0;
-    @%p bra BLOCK_DONE;
-
-    ld.shared.f32 %val, [sdata];
-{atomic_section}
-
-BLOCK_DONE:
-    ret;
-}}
-{mean_finalize}"
-    ))
+    GpuCodegen::generate_ptx_source(&loops, kernel_name, 256, 1, Dtype::F32)
+        .map_err(ferrotorch_core::error::FerrotorchError::from)
 }
 
 // ---------------------------------------------------------------------------

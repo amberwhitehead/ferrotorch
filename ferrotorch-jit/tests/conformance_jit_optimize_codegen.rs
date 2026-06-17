@@ -3,11 +3,11 @@
 //! Covers all 9 modules in scope:
 //!   1. optimize     — constant folding, DCE, pattern fusion, elementwise fusion,
 //!      idempotency
-//!   2. fusion       — FusedChain CPU execution, PTX/C codegen, fusion flag
+//!   2. fusion       — FusedChain CPU execution, PTX/Rust codegen, fusion flag
 //!   3. dag_fusion   — fusion group discovery, group kinds, fuse_dag lowering
 //!   4. codegen      — Codegen trait, InterpreterBackend, NativeBackend, CompiledGraph
 //!   5. codegen_cpu  — CpuCodegen::generate_rust_source structural properties
-//!   6. codegen_gpu  — GpuCodegen::generate_cuda_source / generate_ptx_source
+//!   6. codegen_gpu  — GpuCodegen::generate_ptx_source
 //!   7. codegen_jit  — cranelift JIT: compile_loop_ir_kernel, jit_supports,
 //!      JitCompiledKernel::execute
 //!   8. autotune     — Autotuner, AutotuneKey, AutotuneResult, cache behavior
@@ -60,7 +60,7 @@ use ferrotorch_jit::codegen_ir;
 use ferrotorch_jit::codegen_jit::compile_loop_ir_kernel;
 use ferrotorch_jit::dag_fusion::{FusionGroupKind, find_fusion_groups, fuse_dag};
 use ferrotorch_jit::fusion::{
-    FusedChain, FusedOp, ReductionKind, generate_reduction_c, generate_reduction_ptx,
+    FusedChain, FusedOp, ReductionKind, generate_reduction_ptx, generate_reduction_rust,
     is_fusion_enabled, with_fusion,
 };
 use ferrotorch_jit::graph::{Dtype, IrGraph, IrOpKind};
@@ -69,6 +69,8 @@ use ferrotorch_jit::optimize::{
     OptimizationConfig, constant_fold, dead_code_eliminate, fuse_elementwise, optimize,
     pattern_fuse,
 };
+use std::fs;
+use std::process::Command;
 
 /// True when the output value of `graph` is produced by a Constant node.
 /// This is the canonical conformance check for constant_fold: after folding,
@@ -690,60 +692,132 @@ fn fusion_ptx_generation_binary_op_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// MODULE: fusion — C codegen structural properties
+// MODULE: fusion — Rust source generation structural and compile probes
 // ---------------------------------------------------------------------------
 
 #[test]
-fn fusion_c_codegen_header_structure() {
-    // Fixture: c_codegen_header_structure
+fn fusion_rust_codegen_structure() {
+    // Fixture: rust_codegen_structure
     let mut chain = FusedChain::new();
     chain.push(FusedOp::Relu);
     chain.push(FusedOp::Neg);
-    let c = chain.generate_c("fused_relu_neg").unwrap();
+    let src = chain.generate_rust("fused_relu_neg").unwrap();
 
     assert!(
-        c.contains("#include <math.h>"),
-        "C code must include math.h"
+        src.contains("pub trait FusedFloat"),
+        "Rust code must include the local f32/f64 trait"
     );
     assert!(
-        c.contains("void fused_relu_neg("),
-        "C code must have correct function name"
+        src.contains("pub fn fused_relu_neg<T: FusedFloat>(input: &[T], output: &mut [T])"),
+        "Rust code must have correct function signature"
     );
     assert!(
-        c.contains("#pragma omp simd"),
-        "C code must have SIMD pragma"
+        src.contains("for (i, &x) in input.iter().enumerate()"),
+        "Rust code must iterate over input"
     );
-    assert!(c.contains("for (int i = 0"), "C code must have a loop");
     assert!(
-        c.contains("out[i] = val;"),
-        "C code must store result to out[i]"
+        src.contains("output[i] = val;"),
+        "Rust code must store result to output[i]"
+    );
+    assert!(
+        !src.contains("#include")
+            && !src.contains("#pragma")
+            && !src.contains("void ")
+            && !src.contains("float*"),
+        "Rust generator must not emit C source:\n{src}"
     );
 }
 
 #[test]
-fn fusion_generate_reduction_c_sum() {
-    let c = generate_reduction_c(ReductionKind::Sum, "reduce_sum").unwrap();
+fn fusion_generate_reduction_rust_sum() {
+    let src = generate_reduction_rust(ReductionKind::Sum, "reduce_sum").unwrap();
     assert!(
-        c.contains("float acc = 0.0f"),
-        "sum reduction must init acc to 0"
+        src.contains("let mut acc = T::zero()"),
+        "sum reduction must init acc to zero"
     );
-    assert!(c.contains("acc += in[i]"), "sum reduction must accumulate");
     assert!(
-        c.contains("out[0] = acc"),
-        "sum reduction must store to out[0]"
+        src.contains("acc = acc + x"),
+        "sum reduction must accumulate"
+    );
+    assert!(
+        src.contains("pub fn reduce_sum<T: FusedFloat>(input: &[T]) -> T"),
+        "sum reduction must return the scalar result"
     );
 }
 
 #[test]
-fn fusion_generate_reduction_c_mean() {
-    let c = generate_reduction_c(ReductionKind::Mean, "reduce_mean").unwrap();
-    assert!(c.contains("acc = acc /"), "mean reduction must divide by n");
+fn fusion_generate_reduction_rust_mean() {
+    let src = generate_reduction_rust(ReductionKind::Mean, "reduce_mean").unwrap();
+    assert!(
+        src.contains("if input.is_empty()"),
+        "mean reduction must define empty input behavior"
+    );
+    assert!(
+        src.contains("T::nan()"),
+        "empty mean must return NaN, matching PyTorch floating mean semantics"
+    );
+    assert!(
+        src.contains("acc / T::from_f64(input.len() as f64)"),
+        "mean reduction must divide by input length"
+    );
+}
+
+#[test]
+fn fusion_generated_rust_compiles_for_f32_and_f64() {
+    let mut chain = FusedChain::new();
+    chain.push(FusedOp::Gelu);
+    chain.push(FusedOp::Silu);
+    chain.push(FusedOp::Pow(2.0));
+    let fused_src = chain.generate_rust("fused_gelu_silu_pow").unwrap();
+    let reduce_src = generate_reduction_rust(ReductionKind::Mean, "reduce_mean").unwrap();
+
+    let source = format!(
+        "{fused_src}\n\nmod reduction {{\n{reduce_src}\n}}\n\n\
+         fn main() {{\n\
+             let xs32 = [1.0_f32, -2.0, 3.0];\n\
+             let mut out32 = [0.0_f32; 3];\n\
+             fused_gelu_silu_pow(&xs32, &mut out32);\n\
+             let _m32 = reduction::reduce_mean(&out32);\n\
+             let xs64 = [1.0_f64, -2.0, 3.0];\n\
+             let mut out64 = [0.0_f64; 3];\n\
+             fused_gelu_silu_pow(&xs64, &mut out64);\n\
+             let _m64 = reduction::reduce_mean(&out64);\n\
+             let empty: [f32; 0] = [];\n\
+             assert!(reduction::reduce_mean(&empty).is_nan());\n\
+         }}\n"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let src_path = dir.path().join("generated_fusion.rs");
+    let bin_path = dir.path().join("generated_fusion_probe");
+    fs::write(&src_path, source).unwrap();
+
+    let status = Command::new("rustc")
+        .arg("--edition=2024")
+        .arg(&src_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .status()
+        .expect("rustc should be available to compile generated fusion Rust");
+    assert!(status.success(), "generated Rust source must compile");
+
+    let status = Command::new(&bin_path)
+        .status()
+        .expect("compiled generated fusion probe should run");
+    assert!(
+        status.success(),
+        "generated Rust probe must run successfully"
+    );
 }
 
 #[test]
 fn fusion_generate_reduction_ptx_sum_uses_atom_add() {
     // Fixture: generate_reduction_ptx_sum_uses_atom_add
     let ptx = generate_reduction_ptx(ReductionKind::Sum, "reduce_sum").unwrap();
+    assert!(
+        ptx.contains("reduce_sum_init"),
+        "sum reduction PTX must expose init entry"
+    );
     assert!(
         ptx.contains("atom.global.add.f32"),
         "sum reduction PTX must use atom.global.add.f32"
@@ -755,13 +829,14 @@ fn fusion_generate_reduction_ptx_mean_has_finalize_entry() {
     // Fixture: generate_reduction_ptx_mean_has_finalize_entry
     let ptx = generate_reduction_ptx(ReductionKind::Mean, "reduce_mean").unwrap();
     assert!(
+        ptx.contains("reduce_mean_init"),
+        "mean reduction PTX must expose init entry"
+    );
+    assert!(
         ptx.contains("reduce_mean_finalize"),
         "mean reduction PTX must have _finalize entry"
     );
-    assert!(
-        ptx.contains("div.approx.f32"),
-        "mean finalize must divide by n"
-    );
+    assert!(ptx.contains("div.rn.f32"), "mean finalize must divide by n");
 }
 
 // ---------------------------------------------------------------------------
@@ -1158,42 +1233,65 @@ fn codegen_cpu_log_uses_ln() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn codegen_gpu_cuda_source_neg_f32_has_global_kernel() {
-    // Fixture: generate_cuda_source_neg_f32_has_global_kernel
+fn codegen_gpu_ptx_source_neg_f32_has_cuda_thread_mapping() {
+    // Fixture: generate_ptx_source_neg_f32_has_cuda_thread_mapping
     let loops = loops_for(&[IrOpKind::Neg], &["in0"], 4);
-    let src = GpuCodegen::generate_cuda_source(&loops, "cuda_neg", 1, Dtype::F32).unwrap();
+    let src = GpuCodegen::generate_ptx_source(&loops, "gpu_neg", 256, 1, Dtype::F32).unwrap();
 
     assert!(
-        src.contains("__global__ void cuda_neg"),
-        "must declare __global__ kernel"
+        src.contains(".visible .entry gpu_neg"),
+        "must declare PTX entry"
     );
     assert!(
-        src.contains("float* __restrict__"),
-        "f32 dtype must use float*"
+        src.contains(".reg .f32 %val"),
+        "f32 dtype must use f32 registers"
     );
-    assert!(src.contains("blockIdx.x"), "must use blockIdx.x");
-    assert!(src.contains("threadIdx.x"), "must use threadIdx.x");
+    assert!(
+        src.contains("mov.u32 %bid, %ctaid.x"),
+        "must use CUDA block id"
+    );
+    assert!(
+        src.contains("mov.u32 %r_tid, %tid.x"),
+        "must use CUDA thread id"
+    );
+    assert!(!src.contains("__global__"), "must not emit CUDA C kernels");
+    assert!(!src.contains("#include"), "must not emit CUDA C headers");
 }
 
 #[test]
-fn codegen_gpu_cuda_source_add_f32_two_input_pointers() {
-    // Fixture: generate_cuda_source_add_f32_has_two_input_pointers
+fn codegen_gpu_ptx_source_add_f32_two_input_pointers() {
+    // Fixture: generate_ptx_source_add_f32_has_two_input_pointers
     let loops = loops_for(&[IrOpKind::Add], &["in0", "in1"], 8);
-    let src = GpuCodegen::generate_cuda_source(&loops, "cuda_add", 2, Dtype::F32).unwrap();
+    let src = GpuCodegen::generate_ptx_source(&loops, "gpu_add", 256, 2, Dtype::F32).unwrap();
 
-    assert!(src.contains("in0"), "CUDA source must name in0 parameter");
-    assert!(src.contains("in1"), "CUDA source must name in1 parameter");
+    assert!(
+        src.contains("in0_ptr"),
+        "PTX source must name in0 parameter"
+    );
+    assert!(
+        src.contains("in1_ptr"),
+        "PTX source must name in1 parameter"
+    );
+    assert!(!src.contains("float*"), "must not emit CUDA C pointers");
 }
 
 #[test]
-fn codegen_gpu_cuda_source_sum_has_shared_memory() {
-    // Fixture: generate_cuda_source_sum_reduction_uses_shared_memory
+fn codegen_gpu_ptx_source_sum_has_shared_memory() {
+    // Fixture: generate_ptx_source_sum_reduction_uses_shared_memory
     let loops = loops_for(&[IrOpKind::Sum], &["in0"], 8);
-    let src = GpuCodegen::generate_cuda_source(&loops, "cuda_sum", 1, Dtype::F32).unwrap();
+    let src = GpuCodegen::generate_ptx_source(&loops, "gpu_sum", 256, 1, Dtype::F32).unwrap();
 
     assert!(
-        src.contains("__shared__"),
-        "sum reduction CUDA source must use __shared__ memory"
+        src.contains(".shared .align 4 .f32 sdata"),
+        "sum reduction PTX source must use shared memory"
+    );
+    assert!(
+        src.contains("atom.global.add.f32"),
+        "sum reduction must accumulate on device"
+    );
+    assert!(
+        !src.contains("__shared__"),
+        "must not emit CUDA C shared memory"
     );
 }
 
@@ -1212,14 +1310,18 @@ fn codegen_gpu_ptx_source_f32_neg_has_header() {
 }
 
 #[test]
-fn codegen_gpu_cuda_source_f64_uses_double_type() {
-    // Fixture: generate_cuda_source_f64_neg_uses_double
+fn codegen_gpu_ptx_source_f64_uses_f64_registers() {
+    // Fixture: generate_ptx_source_f64_neg_uses_f64_registers
     let loops = loops_for(&[IrOpKind::Neg], &["in0"], 4);
-    let src = GpuCodegen::generate_cuda_source(&loops, "cuda_neg_f64", 1, Dtype::F64).unwrap();
+    let src = GpuCodegen::generate_ptx_source(&loops, "gpu_neg_f64", 256, 1, Dtype::F64).unwrap();
 
     assert!(
-        src.contains("double"),
-        "f64 dtype CUDA source must use 'double'"
+        src.contains(".reg .f64 %val") && src.contains("neg.f64"),
+        "f64 dtype PTX source must use f64 registers and ops"
+    );
+    assert!(
+        !src.contains("double"),
+        "must not emit CUDA C double declarations"
     );
 }
 

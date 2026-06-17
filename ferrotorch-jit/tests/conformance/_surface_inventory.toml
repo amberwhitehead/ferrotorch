@@ -689,11 +689,6 @@ kind = "struct"
 c7_phase = "C7.3"
 
 [[item]]
-path = "ferrotorch_jit::codegen_gpu::GpuCodegen::generate_cuda_source"
-kind = "method"
-c7_phase = "C7.3"
-
-[[item]]
 path = "ferrotorch_jit::codegen_gpu::GpuCodegen::generate_ptx_source"
 kind = "method"
 c7_phase = "C7.3"
@@ -792,7 +787,7 @@ kind = "method"
 c7_phase = "C7.3"
 
 [[item]]
-path = "ferrotorch_jit::fusion::FusedChain::generate_c"
+path = "ferrotorch_jit::fusion::FusedChain::generate_rust"
 kind = "method"
 c7_phase = "C7.3"
 
@@ -807,7 +802,7 @@ kind = "fn"
 c7_phase = "C7.3"
 
 [[item]]
-path = "ferrotorch_jit::fusion::generate_reduction_c"
+path = "ferrotorch_jit::fusion::generate_reduction_rust"
 kind = "fn"
 c7_phase = "C7.3"
 

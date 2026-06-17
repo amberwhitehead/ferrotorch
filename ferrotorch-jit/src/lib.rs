@@ -111,7 +111,7 @@ pub use export::{
 };
 pub use fusion::{
     FusedChain, FusedOp, ReductionKind, apply_fused, estimate_matmul_dims,
-    estimate_numel_for_inputs, generate_reduction_c, generate_reduction_ptx, is_fusion_enabled,
+    estimate_numel_for_inputs, generate_reduction_ptx, generate_reduction_rust, is_fusion_enabled,
     with_fusion,
 };
 pub use graph_break::{GraphSegment, SegmentedModule, TraceResult, trace_with_breaks};

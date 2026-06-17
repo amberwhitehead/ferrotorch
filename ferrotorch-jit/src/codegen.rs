@@ -19,7 +19,7 @@
 //! | REQ-3 | SHIPPED | `pub struct InterpreterBackend` + `impl Codegen for InterpreterBackend`; consumer: re-export at `lib.rs:89-92` + internal fallback target for `NativeBackend::compile` and `InductorBackend::compile_with_status`. |
 //! | REQ-4 | SHIPPED | `pub struct NativeBackend` + `impl Codegen for NativeBackend` + `fn try_compile_native`; consumer: re-export at `lib.rs:89-92`. |
 //! | REQ-5 | SHIPPED | `pub enum InductorTarget`; consumer: re-export at `lib.rs:89-92`. |
-//! | REQ-6 | SHIPPED | `pub struct InductorBackend` + `impl Codegen` + `generate`; consumer: re-export at `lib.rs:89-92`; calls `codegen_cpu::CpuCodegen::generate_rust_source`, `codegen_gpu::GpuCodegen::generate_{cuda,ptx}_source`, `codegen_jit::compile_loop_ir_kernel` internally. |
+//! | REQ-6 | SHIPPED | `pub struct InductorBackend` + `impl Codegen` + `generate`; consumer: re-export at `lib.rs:89-92`; calls `codegen_cpu::CpuCodegen::generate_rust_source`, `codegen_gpu::GpuCodegen::generate_ptx_source`, `codegen_jit::compile_loop_ir_kernel` internally. |
 //! | REQ-7 | SHIPPED | `pub enum InductorCompileStatus` + `compile_with_status`; consumer: re-export at `lib.rs:89-92`. |
 //! | REQ-8 | SHIPPED | `fn resolve_group_dtype` returning `Err(JitError::CodegenError)`; consumer: every GPU group's `InductorBackend::generate` call invokes it before lowering. |
 
@@ -775,7 +775,7 @@ pub enum InductorTarget {
     CpuRust,
     /// Emit PTX assembly targeting `sm_52`.
     GpuPtx,
-    /// Emit CUDA C source code.
+    /// Emit PTX source for CUDA-driver execution.
     GpuCuda,
 }
 
@@ -787,7 +787,7 @@ pub enum InductorTarget {
 ///
 /// 1. Discovers fusion groups across the entire DAG (via [`dag_fusion`]).
 /// 2. Lowers each group to loop-level IR ([`codegen_ir::LoopIR`]).
-/// 3. Emits target-specific source code (Rust, C, CUDA, or PTX).
+/// 3. Emits target-specific source code (Rust or PTX).
 ///
 /// For `CpuRust` targets, the generated source is returned as a string
 /// inside a `CompiledGraph` whose `execute` falls back to the interpreter
@@ -863,18 +863,16 @@ impl InductorBackend {
                 InductorTarget::CpuRust => {
                     crate::codegen_cpu::CpuCodegen::generate_rust_source(loops, &fn_name)
                 }
-                InductorTarget::GpuCuda => crate::codegen_gpu::GpuCodegen::generate_cuda_source(
-                    loops, &fn_name, num_inputs, dtype,
-                )
-                .map_err(FerrotorchError::from)?,
-                InductorTarget::GpuPtx => crate::codegen_gpu::GpuCodegen::generate_ptx_source(
-                    loops,
-                    &fn_name,
-                    self.block_size,
-                    num_inputs,
-                    dtype,
-                )
-                .map_err(FerrotorchError::from)?,
+                InductorTarget::GpuCuda | InductorTarget::GpuPtx => {
+                    crate::codegen_gpu::GpuCodegen::generate_ptx_source(
+                        loops,
+                        &fn_name,
+                        self.block_size,
+                        num_inputs,
+                        dtype,
+                    )
+                    .map_err(FerrotorchError::from)?
+                }
             };
 
             sources.push(source);
@@ -896,21 +894,16 @@ impl InductorBackend {
                 InductorTarget::CpuRust => {
                     crate::codegen_cpu::CpuCodegen::generate_rust_source(&[], "kernel_identity")
                 }
-                InductorTarget::GpuCuda => crate::codegen_gpu::GpuCodegen::generate_cuda_source(
-                    &[],
-                    "kernel_identity",
-                    num_graph_inputs.max(1),
-                    dtype,
-                )
-                .map_err(FerrotorchError::from)?,
-                InductorTarget::GpuPtx => crate::codegen_gpu::GpuCodegen::generate_ptx_source(
-                    &[],
-                    "kernel_identity",
-                    self.block_size,
-                    num_graph_inputs.max(1),
-                    dtype,
-                )
-                .map_err(FerrotorchError::from)?,
+                InductorTarget::GpuCuda | InductorTarget::GpuPtx => {
+                    crate::codegen_gpu::GpuCodegen::generate_ptx_source(
+                        &[],
+                        "kernel_identity",
+                        self.block_size,
+                        num_graph_inputs.max(1),
+                        dtype,
+                    )
+                    .map_err(FerrotorchError::from)?
+                }
             };
             sources.push(source);
         }
@@ -922,7 +915,7 @@ impl InductorBackend {
 /// Resolve the scalar dtype for a fusion group's emitted GPU kernel.
 ///
 /// As of #729, GPU codegen dispatches on `Dtype` per-kernel. Each fusion
-/// group lowers to a single PTX/CUDA-C kernel that loads, computes, and
+/// group lowers to a single PTX kernel that loads, computes, and
 /// stores at one scalar width — mixed-dtype kernels are out of scope
 /// (`PyTorch`'s Inductor analogously decomposes mixed-dtype graphs across
 /// multiple kernels). This helper returns the uniform dtype of all IR
@@ -1057,8 +1050,8 @@ impl InductorBackend {
             return Ok(InductorCompileStatus::Compiled(compiled));
         }
 
-        // GPU targets: ferrotorch-jit generates GPU source strings (CUDA C /
-        // PTX) but does not yet wire them to a real GPU runtime executor.
+        // GPU targets: ferrotorch-jit generates PTX source strings but does
+        // not yet wire them to a real GPU runtime executor.
         // Silently routing GPU-targeted compile() to the CPU interpreter
         // violates rust-gpu-discipline §3 (PyTorch parity): PyTorch's Inductor
         // falls back to eager-GPU, not to a CPU interpreter.
@@ -1113,8 +1106,8 @@ impl Codegen for InductorBackend {
             return Ok(compiled);
         }
 
-        // GPU targets: ferrotorch-jit generates GPU source strings (CUDA C /
-        // PTX) but does not yet wire them to a real GPU runtime executor.
+        // GPU targets: ferrotorch-jit generates PTX source strings but does
+        // not yet wire them to a real GPU runtime executor.
         // Silently routing GPU-targeted compile() to the CPU interpreter
         // violates rust-gpu-discipline §3 (PyTorch parity): PyTorch's Inductor
         // falls back to eager-GPU, not to a CPU interpreter.  Since we have no
@@ -1892,9 +1885,12 @@ mod tests {
 
         assert!(!sources.is_empty());
         let src = &sources[0];
-        assert!(src.contains("__global__"));
-        assert!(src.contains("blockIdx"));
-        assert!(src.contains("threadIdx"));
+        assert!(src.contains(".version 7.0"));
+        assert!(src.contains(".visible .entry kernel_0"));
+        assert!(src.contains("mov.u32 %bid, %ctaid.x"));
+        assert!(src.contains("mov.u32 %r_tid, %tid.x"));
+        assert!(!src.contains("__global__"));
+        assert!(!src.contains("#include"));
     }
 
     #[test]
@@ -2245,12 +2241,12 @@ mod tests {
     //
     // Replaces the prior #721-A guard that hard-rejected all non-F32 graphs.
     // Per #729 and `rust-gpu-discipline` §3, F64 graphs lower to native f64
-    // PTX/CUDA emission. F64 transcendentals use Rust-owned PTX math fragments
-    // and no longer require a runtime compiler.
+    // PTX emission. F64 transcendentals use Rust-owned PTX math fragments and
+    // no longer require a runtime compiler or CUDA C source.
     // -----------------------------------------------------------------------
 
-    /// F64 graph on `GpuCuda` target lowers to CUDA C with `double`
-    /// declarations and unsuffixed math calls — no rejection.
+    /// F64 graph on `GpuCuda` target lowers to PTX for CUDA-driver execution,
+    /// not CUDA C.
     #[test]
     fn test_inductor_gpu_cuda_accepts_f64_graph() {
         let mut g = IrGraph::new();
@@ -2262,11 +2258,20 @@ mod tests {
         let backend = InductorBackend::new(InductorTarget::GpuCuda);
         let sources = backend
             .generate(&g)
-            .expect("F64 CUDA C generation should succeed");
+            .expect("F64 PTX generation for GpuCuda should succeed");
         let combined = sources.join("\n");
         assert!(
-            combined.contains("const double*") || combined.contains("double*"),
-            "expected `double` declarations in F64 CUDA C; got:\n{combined}"
+            combined.contains(".visible .entry")
+                && combined.contains(".reg .f64")
+                && combined.contains("max.f64"),
+            "expected native f64 PTX for GpuCuda; got:\n{combined}"
+        );
+        assert!(
+            !combined.contains("__global__")
+                && !combined.contains("#include")
+                && !combined.contains("blockIdx")
+                && !combined.contains("double*"),
+            "GpuCuda generation must not emit CUDA C; got:\n{combined}"
         );
     }
 
@@ -2346,11 +2351,20 @@ mod tests {
         g.set_outputs(vec![relu_outs[0]]);
 
         let backend = InductorBackend::new(InductorTarget::GpuCuda);
-        let result = backend.generate(&g);
+        let sources = backend
+            .generate(&g)
+            .expect("F32 graph should still generate PTX for GpuCuda");
+        let combined = sources.join("\n");
         assert!(
-            result.is_ok(),
-            "F32 graph should still generate, got: {:?}",
-            result.err()
+            combined.contains(".visible .entry") && combined.contains(".reg .f32"),
+            "expected f32 PTX for GpuCuda; got:\n{combined}"
+        );
+        assert!(
+            !combined.contains("__global__")
+                && !combined.contains("#include")
+                && !combined.contains("blockIdx")
+                && !combined.contains("float* __restrict__"),
+            "GpuCuda generation must not emit CUDA C; got:\n{combined}"
         );
     }
 

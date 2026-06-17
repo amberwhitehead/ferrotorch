@@ -99,11 +99,6 @@ reason = "structural"
 note = "Internal function called by optimizer pass. Exercised transitively."
 
 [[exclusion]]
-path = "ferrotorch_jit::fusion::generate_reduction_c"
-reason = "live-env"
-note = "C codegen helper; requires a C compiler toolchain in the environment. Out of scope for pure-Rust CI."
-
-[[exclusion]]
 path = "ferrotorch_jit::fusion::generate_reduction_ptx"
 reason = "live-env"
 note = "PTX codegen helper; output only meaningful with a CUDA toolkit. Out of scope for default CI."

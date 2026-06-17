@@ -1,24 +1,22 @@
-//! GPU code generators: emit CUDA C and PTX source from [`LoopIR`].
+//! GPU code generator: emit PTX source from [`LoopIR`].
 //!
-//! Two code generators are provided:
+//! [`GpuCodegen::generate_ptx_source`] emits PTX assembly targeting `sm_52`
+//! with hand-scheduled register allocation, f32 hardware approximations, and
+//! Rust-owned f64 polynomial math sequences.
 //!
-//! - [`GpuCodegen::generate_cuda_source`] — emits CUDA C with `__global__`
-//!   kernels, `blockIdx`/`threadIdx` mapping, and shared memory for reductions.
-//! - [`GpuCodegen::generate_ptx_source`] — emits PTX assembly targeting
-//!   `sm_52` with hand-scheduled register allocation, f32 hardware
-//!   approximations, and Rust-owned f64 polynomial math sequences.
-//!
-//! Both generators convert the outermost loop of a `LoopIR` program into
+//! The generator converts the outermost loop of a `LoopIR` program into
 //! thread-parallel GPU execution while keeping inner loops as thread-local
-//! serial computation.
+//! serial computation. `InductorTarget::GpuCuda` is a CUDA-driver execution
+//! target, but its generated source is still PTX; this crate does not emit
+//! CUDA C, call NVRTC, or require a CUDA C/C++ toolchain.
 //!
 //! # Dtype dispatch (#729)
 //!
-//! Both generators dispatch on a [`Dtype`] parameter (currently `F32` or
-//! `F64`) at every site where the emission differs between scalar widths:
-//! CUDA `float`/`double` declarations, PTX `.f32`/`.f64` suffixes, register
-//! declarations, load/store widths, and constant literal encoding (`0f...`
-//! 8 hex digits for f32; `0d...` 16 hex digits for f64).
+//! The generator dispatches on a [`Dtype`] parameter (currently `F32` or `F64`)
+//! at every site where the emission differs between scalar widths: PTX
+//! `.f32`/`.f64` suffixes, register declarations, load/store widths, and
+//! constant literal encoding (`0f...` 8 hex digits for f32; `0d...` 16 hex
+//! digits for f64).
 //!
 //! Transcendentals (`exp`, `log`, `sqrt`, `tanh`, `sigmoid`, `relu`, `abs`,
 //! `gelu`, `silu`, `pow`) on the PTX path use direct hardware approximation
@@ -33,489 +31,21 @@
 //!
 //! | REQ | Status | Evidence |
 //! |---|---|---|
-//! | REQ-1 | SHIPPED | `pub struct GpuCodegen`; consumer: re-export at `ferrotorch-jit/src/lib.rs:94` + `ferrotorch-jit/src/codegen.rs:853` `crate::codegen_gpu::GpuCodegen::generate_cuda_source(...)`. |
-//! | REQ-2 | SHIPPED | `pub fn generate_cuda_source`; consumer: `codegen.rs:853` (GpuCuda arm) + `codegen.rs:886` (identity-graph fallback). |
-//! | REQ-3 | SHIPPED | `pub fn generate_ptx_source`; consumer: `codegen.rs:857` (GpuPtx arm) + `codegen.rs:893` (identity-graph fallback). |
-//! | REQ-4 | SHIPPED | per-dtype emission helpers switched on `Dtype`; consumer: every emission via `codegen.rs:853` / `codegen.rs:857` passes the resolved group dtype. |
-//! | REQ-5 | SHIPPED | f64 transcendental PTX lowering inside `emit_ptx_unary_op` / `emit_ptx_f64_*`; consumer: `codegen.rs:857` propagates via `.map_err(FerrotorchError::from)`. |
-//! | REQ-6 | SHIPPED | `fn emit_cuda_reduction` + PTX shared-memory tree reduction; consumer: transitively via `codegen.rs:853` / `codegen.rs:857`. |
-//! | REQ-7 | SHIPPED | `tid` mapping + sequential `output[tid]` write pattern in `fn emit_cuda_elementwise`; consumer: transitively via `codegen.rs:853`. |
-//! | REQ-8 | SHIPPED | `pub fn generate_ptx_source(..., block_size, ...)` parameter; consumer: `codegen.rs:857` passes `self.block_size` from `InductorBackend::with_block_size`. |
+//! | REQ-1 | SHIPPED | `pub struct GpuCodegen`; consumer: re-export at `ferrotorch-jit/src/lib.rs:94` + `ferrotorch-jit/src/codegen.rs` `GpuCuda`/`GpuPtx` arms. |
+//! | REQ-2 | SHIPPED | `pub fn generate_ptx_source`; consumer: `codegen.rs` (`GpuCuda` and `GpuPtx` arms, including identity-graph fallback). |
+//! | REQ-3 | SHIPPED | per-dtype emission helpers switched on `Dtype`; consumer: every GPU emission passes the resolved group dtype. |
+//! | REQ-4 | SHIPPED | f64 transcendental PTX lowering inside `emit_ptx_unary_op` / `emit_ptx_f64_*`; consumer: `codegen.rs` propagates via `.map_err(FerrotorchError::from)`. |
+//! | REQ-5 | SHIPPED | PTX shared-memory tree reduction; consumer: transitively via `codegen.rs`. |
+//! | REQ-6 | SHIPPED | PTX `tid` mapping + sequential `output[tid]` write pattern in `emit_ptx_elementwise_body`; consumer: transitively via `codegen.rs`. |
+//! | REQ-7 | SHIPPED | `pub fn generate_ptx_source(..., block_size, ...)` parameter; consumer: `InductorBackend::with_block_size`. |
 
 use crate::codegen_ir::{BinOpKind, Expr, LoopIR, UnaryOpKind};
 use crate::error::JitError;
 use crate::graph::Dtype;
 
-/// A GPU code generator targeting CUDA C and PTX output.
+/// A GPU code generator targeting PTX output.
 #[derive(Debug)]
 pub struct GpuCodegen;
-
-// ===========================================================================
-// CUDA C code generation
-// ===========================================================================
-
-impl GpuCodegen {
-    /// Generate a CUDA C kernel from a `LoopIR` program.
-    ///
-    /// The outermost loop is parallelized across GPU threads. Inner loops
-    /// remain serial per-thread.  Reductions use shared memory with a
-    /// tree-reduction pattern.
-    ///
-    /// The emitted code includes:
-    /// - `__global__` kernel with `blockIdx.x * blockDim.x + threadIdx.x` indexing
-    /// - Bounds checking against `n`
-    /// - Shared memory declarations for reductions
-    /// - Coalesced memory access patterns (sequential thread -> sequential address)
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err(JitError::Unsupported { op, dtype })` is reserved for
-    /// future cases; the CUDA C path lowers transcendentals via the host
-    /// math headers (`expf`/`exp`, `logf`/`log`, etc.), which work for both
-    /// f32 and f64. The result is wrapped in `Result` for shape symmetry
-    /// with [`GpuCodegen::generate_ptx_source`].
-    pub fn generate_cuda_source(
-        loops: &[LoopIR],
-        fn_name: &str,
-        num_inputs: usize,
-        dtype: Dtype,
-    ) -> Result<String, JitError> {
-        let mut out = String::new();
-        let scalar = cuda_scalar_name(dtype);
-
-        out.push_str("#include <math.h>\n\n");
-
-        // Detect if this is a reduction (has accumulate statements)
-        let has_reduction = loops_contain_accumulate(loops);
-
-        // Build function signature
-        out.push_str(&format!("__global__ void {fn_name}(\n"));
-        for i in 0..num_inputs {
-            out.push_str(&format!("    const {scalar}* __restrict__ in{i},\n"));
-        }
-        out.push_str(&format!("    {scalar}* __restrict__ output,\n"));
-        out.push_str("    int n\n");
-        out.push_str(") {\n");
-
-        // Thread index computation
-        out.push_str("    int tid = blockIdx.x * blockDim.x + threadIdx.x;\n");
-
-        if has_reduction {
-            emit_cuda_reduction(&mut out, loops, num_inputs, dtype);
-        } else {
-            // Elementwise / matmul: each thread handles one element of the
-            // outermost loop
-            emit_cuda_elementwise(&mut out, loops, dtype);
-        }
-
-        out.push_str("}\n");
-        Ok(out)
-    }
-}
-
-/// Emit CUDA code for elementwise operations where the outer loop maps to threads.
-fn emit_cuda_elementwise(out: &mut String, loops: &[LoopIR], dtype: Dtype) {
-    out.push_str("    if (tid >= n) return;\n\n");
-
-    for stmt in loops {
-        match stmt {
-            LoopIR::Loop { var, body, .. } => {
-                // The outermost loop variable becomes `tid`
-                out.push_str(&format!("    // outer loop var '{var}' -> tid\n"));
-                for s in body {
-                    emit_cuda_stmt_with_var_replace(out, s, var, "tid", 1, dtype);
-                }
-            }
-            other => {
-                emit_cuda_stmt(out, other, 1, dtype);
-            }
-        }
-    }
-}
-
-/// Emit CUDA code for reduction operations using shared memory.
-fn emit_cuda_reduction(out: &mut String, loops: &[LoopIR], _num_inputs: usize, dtype: Dtype) {
-    let scalar = cuda_scalar_name(dtype);
-    let zero_lit = cuda_zero_literal(dtype);
-
-    out.push_str(&format!("    extern __shared__ {scalar} sdata[];\n"));
-    out.push_str("    int local_tid = threadIdx.x;\n\n");
-
-    // Each thread computes a partial result, then we tree-reduce in shared memory
-    out.push_str("    // Load phase: each thread accumulates elements stride-apart\n");
-    out.push_str(&format!("    {scalar} thread_acc = {zero_lit};\n"));
-    out.push_str("    for (int idx = tid; idx < n; idx += blockDim.x * gridDim.x) {\n");
-
-    // Find the accumulation expression
-    let acc_expr = find_accumulate_expr(loops);
-    match acc_expr {
-        Some(expr) => {
-            let val = emit_cuda_expr_replace(&expr, "i", "idx", dtype);
-            out.push_str(&format!("        thread_acc += {val};\n"));
-        }
-        None => {
-            out.push_str("        thread_acc += in0[idx];\n");
-        }
-    }
-
-    out.push_str("    }\n\n");
-
-    // Store to shared memory
-    out.push_str("    sdata[local_tid] = thread_acc;\n");
-    out.push_str("    __syncthreads();\n\n");
-
-    // Tree reduction in shared memory
-    out.push_str("    // Tree reduction in shared memory\n");
-    out.push_str("    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {\n");
-    out.push_str("        if (local_tid < s) {\n");
-    out.push_str("            sdata[local_tid] += sdata[local_tid + s];\n");
-    out.push_str("        }\n");
-    out.push_str("        __syncthreads();\n");
-    out.push_str("    }\n\n");
-
-    // Write final result (thread 0 of each block writes to output)
-    out.push_str("    if (local_tid == 0) {\n");
-
-    // Check for mean: divide by n
-    let is_mean = find_mean_divisor(loops);
-    match is_mean {
-        Some(_) => {
-            out.push_str(&format!(
-                "        atomicAdd(&output[0], sdata[0] / ({scalar})n);\n"
-            ));
-        }
-        None => {
-            out.push_str("        atomicAdd(&output[0], sdata[0]);\n");
-        }
-    }
-
-    out.push_str("    }\n");
-}
-
-/// Emit a CUDA C statement at the given indentation.
-fn emit_cuda_stmt(out: &mut String, stmt: &LoopIR, indent: usize, dtype: Dtype) {
-    let pad = "    ".repeat(indent);
-    let scalar = cuda_scalar_name(dtype);
-
-    match stmt {
-        LoopIR::Loop {
-            var,
-            start,
-            end,
-            body,
-        } => {
-            let start_s = emit_cuda_expr(start, dtype);
-            let end_s = emit_cuda_expr(end, dtype);
-            out.push_str(&format!(
-                "{pad}for (int {var} = {start_s}; {var} < {end_s}; {var}++) {{\n"
-            ));
-            for s in body {
-                emit_cuda_stmt(out, s, indent + 1, dtype);
-            }
-            out.push_str(&format!("{pad}}}\n"));
-        }
-
-        LoopIR::Store {
-            buffer,
-            index,
-            value,
-        } => {
-            let idx = emit_cuda_expr(index, dtype);
-            let val = emit_cuda_expr(value, dtype);
-            let buf = cuda_buffer_name(buffer);
-            out.push_str(&format!("{pad}{buf}[{idx}] = {val};\n"));
-        }
-
-        LoopIR::Let { var, value } => {
-            let val = emit_cuda_expr(value, dtype);
-            out.push_str(&format!("{pad}{scalar} {var} = {val};\n"));
-        }
-
-        LoopIR::Assign { var, value } => {
-            let val = emit_cuda_expr(value, dtype);
-            out.push_str(&format!("{pad}{var} = {val};\n"));
-        }
-
-        LoopIR::Accumulate { var, value } => {
-            let val = emit_cuda_expr(value, dtype);
-            out.push_str(&format!("{pad}{var} += {val};\n"));
-        }
-
-        LoopIR::If {
-            condition,
-            then_body,
-            else_body,
-        } => {
-            let cond = emit_cuda_expr(condition, dtype);
-            out.push_str(&format!("{pad}if ({cond}) {{\n"));
-            for s in then_body {
-                emit_cuda_stmt(out, s, indent + 1, dtype);
-            }
-            if !else_body.is_empty() {
-                out.push_str(&format!("{pad}}} else {{\n"));
-                for s in else_body {
-                    emit_cuda_stmt(out, s, indent + 1, dtype);
-                }
-            }
-            out.push_str(&format!("{pad}}}\n"));
-        }
-
-        LoopIR::Comment(text) => {
-            out.push_str(&format!("{pad}/* {text} */\n"));
-        }
-    }
-}
-
-/// Emit a CUDA statement, replacing occurrences of `old_var` with `new_var`
-/// in all expressions.
-fn emit_cuda_stmt_with_var_replace(
-    out: &mut String,
-    stmt: &LoopIR,
-    old_var: &str,
-    new_var: &str,
-    indent: usize,
-    dtype: Dtype,
-) {
-    let pad = "    ".repeat(indent);
-    let scalar = cuda_scalar_name(dtype);
-
-    match stmt {
-        LoopIR::Loop {
-            var,
-            start,
-            end,
-            body,
-        } => {
-            let start_s = emit_cuda_expr_replace(start, old_var, new_var, dtype);
-            let end_s = emit_cuda_expr_replace(end, old_var, new_var, dtype);
-            out.push_str(&format!(
-                "{pad}for (int {var} = {start_s}; {var} < {end_s}; {var}++) {{\n"
-            ));
-            for s in body {
-                emit_cuda_stmt_with_var_replace(out, s, old_var, new_var, indent + 1, dtype);
-            }
-            out.push_str(&format!("{pad}}}\n"));
-        }
-
-        LoopIR::Store {
-            buffer,
-            index,
-            value,
-        } => {
-            let idx = emit_cuda_expr_replace(index, old_var, new_var, dtype);
-            let val = emit_cuda_expr_replace(value, old_var, new_var, dtype);
-            let buf = cuda_buffer_name(buffer);
-            out.push_str(&format!("{pad}{buf}[{idx}] = {val};\n"));
-        }
-
-        LoopIR::Let { var, value } => {
-            let val = emit_cuda_expr_replace(value, old_var, new_var, dtype);
-            out.push_str(&format!("{pad}{scalar} {var} = {val};\n"));
-        }
-
-        LoopIR::Assign { var, value } => {
-            let val = emit_cuda_expr_replace(value, old_var, new_var, dtype);
-            let actual_var = if var == old_var {
-                new_var
-            } else {
-                var.as_str()
-            };
-            out.push_str(&format!("{pad}{actual_var} = {val};\n"));
-        }
-
-        LoopIR::Accumulate { var, value } => {
-            let val = emit_cuda_expr_replace(value, old_var, new_var, dtype);
-            let actual_var = if var == old_var {
-                new_var
-            } else {
-                var.as_str()
-            };
-            out.push_str(&format!("{pad}{actual_var} += {val};\n"));
-        }
-
-        LoopIR::If {
-            condition,
-            then_body,
-            else_body,
-        } => {
-            let cond = emit_cuda_expr_replace(condition, old_var, new_var, dtype);
-            out.push_str(&format!("{pad}if ({cond}) {{\n"));
-            for s in then_body {
-                emit_cuda_stmt_with_var_replace(out, s, old_var, new_var, indent + 1, dtype);
-            }
-            if !else_body.is_empty() {
-                out.push_str(&format!("{pad}}} else {{\n"));
-                for s in else_body {
-                    emit_cuda_stmt_with_var_replace(out, s, old_var, new_var, indent + 1, dtype);
-                }
-            }
-            out.push_str(&format!("{pad}}}\n"));
-        }
-
-        LoopIR::Comment(text) => {
-            out.push_str(&format!("{pad}/* {text} */\n"));
-        }
-    }
-}
-
-/// Emit a CUDA expression.
-fn emit_cuda_expr(expr: &Expr, dtype: Dtype) -> String {
-    emit_cuda_expr_replace(expr, "", "", dtype)
-}
-
-/// Emit a CUDA expression, replacing variable references.
-fn emit_cuda_expr_replace(expr: &Expr, old_var: &str, new_var: &str, dtype: Dtype) -> String {
-    match expr {
-        Expr::Var(name) => {
-            if name == old_var && !old_var.is_empty() {
-                new_var.to_string()
-            } else {
-                name.clone()
-            }
-        }
-        Expr::Const(v) => format_cuda_const(*v, dtype),
-        Expr::IntConst(v) => format!("{v}"),
-        Expr::BinOp { op, lhs, rhs } => {
-            let l = emit_cuda_expr_replace(lhs, old_var, new_var, dtype);
-            let r = emit_cuda_expr_replace(rhs, old_var, new_var, dtype);
-            format!("({l} {op} {r})")
-        }
-        Expr::UnaryOp { op, operand } => {
-            let inner = emit_cuda_expr_replace(operand, old_var, new_var, dtype);
-            // CUDA C math header offers both single-precision (suffix `f`,
-            // e.g. `expf`) and double-precision (no suffix, e.g. `exp`)
-            // overloads. Pick the right family per dtype.
-            let (exp_fn, log_fn, sqrt_fn, abs_fn, tanh_fn, fmax_fn) = match dtype {
-                Dtype::F32 => ("expf", "logf", "sqrtf", "fabsf", "tanhf", "fmaxf"),
-                Dtype::F64 => ("exp", "log", "sqrt", "fabs", "tanh", "fmax"),
-            };
-            // Suffixes on numeric literals: `1.0f` for f32, `1.0` for f64.
-            let one = cuda_one_literal(dtype);
-            let zero = cuda_zero_literal(dtype);
-            let half = cuda_const_literal(0.5, dtype);
-            let gelu_a = cuda_const_literal(0.797_884_560_8, dtype);
-            let gelu_b = cuda_const_literal(0.044_715, dtype);
-            match op {
-                UnaryOpKind::Neg => format!("(-{inner})"),
-                UnaryOpKind::Exp => format!("{exp_fn}({inner})"),
-                UnaryOpKind::Log => format!("{log_fn}({inner})"),
-                UnaryOpKind::Sqrt => format!("{sqrt_fn}({inner})"),
-                UnaryOpKind::Abs => format!("{abs_fn}({inner})"),
-                UnaryOpKind::Tanh => format!("{tanh_fn}({inner})"),
-                UnaryOpKind::Sigmoid => {
-                    format!("({one} / ({one} + {exp_fn}(-{inner})))")
-                }
-                UnaryOpKind::Relu => {
-                    format!("{fmax_fn}({inner}, {zero})")
-                }
-                UnaryOpKind::Gelu => {
-                    format!(
-                        "({inner} * {half} * ({one} + {tanh_fn}({gelu_a} * ({inner} + {gelu_b} * {inner} * {inner} * {inner}))))"
-                    )
-                }
-                UnaryOpKind::Silu => {
-                    format!("({inner} / ({one} + {exp_fn}(-{inner})))")
-                }
-            }
-        }
-        Expr::FnCall { name, args } => {
-            let args_s: Vec<String> = args
-                .iter()
-                .map(|a| emit_cuda_expr_replace(a, old_var, new_var, dtype))
-                .collect();
-            // CUDA `powf` is f32-only; the f64 form is `pow`.
-            let pow_name = match dtype {
-                Dtype::F32 => "powf",
-                Dtype::F64 => "pow",
-            };
-            match name.as_str() {
-                "powf" => format!("{pow_name}({})", args_s.join(", ")),
-                _ => format!("{}({})", name, args_s.join(", ")),
-            }
-        }
-        Expr::Index { buffer, index } => {
-            let idx = emit_cuda_expr_replace(index, old_var, new_var, dtype);
-            let buf = cuda_buffer_name(buffer);
-            format!("{buf}[{idx}]")
-        }
-        Expr::Cast {
-            target_type,
-            operand,
-        } => {
-            let inner = emit_cuda_expr_replace(operand, old_var, new_var, dtype);
-            format!("(({target_type}){inner})")
-        }
-    }
-}
-
-/// Map a [`Dtype`] to its CUDA C scalar type name.
-fn cuda_scalar_name(dtype: Dtype) -> &'static str {
-    match dtype {
-        Dtype::F32 => "float",
-        Dtype::F64 => "double",
-    }
-}
-
-/// Canonical CUDA C literal for `0.0` at the given precision.
-fn cuda_zero_literal(dtype: Dtype) -> &'static str {
-    match dtype {
-        Dtype::F32 => "0.0f",
-        Dtype::F64 => "0.0",
-    }
-}
-
-/// Canonical CUDA C literal for `1.0` at the given precision.
-fn cuda_one_literal(dtype: Dtype) -> &'static str {
-    match dtype {
-        Dtype::F32 => "1.0f",
-        Dtype::F64 => "1.0",
-    }
-}
-
-/// Format an arbitrary scalar `v` as a CUDA C literal of the given dtype
-/// (no special-case handling — used for inline math constants where the
-/// numeric value is fixed at codegen time).
-fn cuda_const_literal(v: f64, dtype: Dtype) -> String {
-    match dtype {
-        Dtype::F32 => format!("{v}f"),
-        Dtype::F64 => format!("{v}"),
-    }
-}
-
-/// Format a scalar value as a CUDA literal of the given dtype. Picks
-/// canonical short forms for `0.0`, `1.0`, `±INFINITY`, and `NAN`; emits a
-/// plain decimal literal with a suffix matching `dtype` otherwise.
-//
-// Exact float comparison is intentional: only bit-identical `0.0` / `1.0`
-// emit the canonical short literal.
-#[allow(clippy::float_cmp)]
-fn format_cuda_const(v: f64, dtype: Dtype) -> String {
-    let (zero_lit, one_lit, suffix) = match dtype {
-        Dtype::F32 => ("0.0f", "1.0f", "f"),
-        Dtype::F64 => ("0.0", "1.0", ""),
-    };
-    if v == 0.0 {
-        zero_lit.into()
-    } else if v == 1.0 {
-        one_lit.into()
-    } else if v.is_infinite() && v > 0.0 {
-        "INFINITY".into()
-    } else if v.is_infinite() {
-        "(-INFINITY)".into()
-    } else if v.is_nan() {
-        "NAN".into()
-    } else {
-        format!("{v}{suffix}")
-    }
-}
-
-/// Map a buffer name to a CUDA identifier.
-fn cuda_buffer_name(name: &str) -> String {
-    if name == "out" || name == "output" {
-        return "output".into();
-    }
-    name.into()
-}
 
 // ===========================================================================
 // PTX code generation
@@ -557,6 +87,10 @@ impl GpuCodegen {
         num_inputs: usize,
         dtype: Dtype,
     ) -> Result<String, JitError> {
+        if let Some(reduction) = detect_ptx_reduction(loops, num_inputs) {
+            return generate_ptx_reduction_source(reduction, fn_name, block_size, dtype);
+        }
+
         let mut out = String::new();
         let dn = dtype.name(); // "f32" or "f64"
         // PTX register width and address-shift width. f32 = 4-byte stride;
@@ -670,6 +204,470 @@ impl GpuCodegen {
 
         Ok(out)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PtxReductionKind {
+    Sum,
+    Mean,
+    Prod,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PtxReduction {
+    kind: PtxReductionKind,
+}
+
+#[derive(Default)]
+struct ReductionFacts {
+    saw_add_update: bool,
+    saw_mul_update: bool,
+    input_buffer: Option<String>,
+    invalid_input_buffer: bool,
+}
+
+fn detect_ptx_reduction(loops: &[LoopIR], num_inputs: usize) -> Option<PtxReduction> {
+    if num_inputs != 1 {
+        return None;
+    }
+
+    let final_store = find_final_store(loops)?;
+    let final_kind = match final_store {
+        LoopIR::Store {
+            buffer,
+            index,
+            value,
+        } if buffer == "out" && matches!(index, Expr::IntConst(0)) => {
+            if matches!(value, Expr::Var(v) if v == "acc") {
+                None
+            } else if matches!(
+                value,
+                Expr::BinOp {
+                    op: BinOpKind::Div,
+                    lhs,
+                    rhs
+                } if matches!(lhs.as_ref(), Expr::Var(v) if v == "acc")
+                    && matches!(rhs.as_ref(), Expr::Const(_))
+            ) {
+                Some(PtxReductionKind::Mean)
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+
+    let mut facts = ReductionFacts::default();
+    collect_reduction_facts(loops, &mut facts);
+    if facts.invalid_input_buffer || facts.input_buffer.as_deref() != Some("in0") {
+        return None;
+    }
+
+    let kind = match final_kind {
+        Some(PtxReductionKind::Mean) if facts.saw_add_update && !facts.saw_mul_update => {
+            PtxReductionKind::Mean
+        }
+        None if facts.saw_add_update && !facts.saw_mul_update => PtxReductionKind::Sum,
+        None if facts.saw_mul_update && !facts.saw_add_update => PtxReductionKind::Prod,
+        _ => return None,
+    };
+
+    Some(PtxReduction { kind })
+}
+
+fn find_final_store(stmts: &[LoopIR]) -> Option<&LoopIR> {
+    stmts.iter().rev().find(|stmt| {
+        !matches!(
+            stmt,
+            LoopIR::Comment(_) | LoopIR::Let { .. } | LoopIR::Assign { .. }
+        )
+    })
+}
+
+fn collect_reduction_facts(stmts: &[LoopIR], facts: &mut ReductionFacts) {
+    for stmt in stmts {
+        match stmt {
+            LoopIR::Loop { body, .. } => collect_reduction_facts(body, facts),
+            LoopIR::Accumulate { value, .. } => {
+                facts.saw_add_update = true;
+                record_index_buffers(value, facts);
+            }
+            LoopIR::Assign { var, value } if is_self_mul_update(var, value) => {
+                facts.saw_mul_update = true;
+                record_index_buffers(value, facts);
+            }
+            LoopIR::Let { var, value } if var == "acc" => {
+                if let Some(op) = reduction_combine_op(value) {
+                    match op {
+                        BinOpKind::Add => facts.saw_add_update = true,
+                        BinOpKind::Mul => facts.saw_mul_update = true,
+                        _ => {}
+                    }
+                }
+            }
+            LoopIR::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_reduction_facts(then_body, facts);
+                collect_reduction_facts(else_body, facts);
+            }
+            LoopIR::Store { .. }
+            | LoopIR::Let { .. }
+            | LoopIR::Assign { .. }
+            | LoopIR::Comment(_) => {}
+        }
+    }
+}
+
+fn is_self_mul_update(var: &str, value: &Expr) -> bool {
+    match value {
+        Expr::BinOp {
+            op: BinOpKind::Mul,
+            lhs,
+            rhs,
+        } => {
+            (matches!(lhs.as_ref(), Expr::Var(v) if v == var) && expr_contains_index(rhs))
+                || (matches!(rhs.as_ref(), Expr::Var(v) if v == var) && expr_contains_index(lhs))
+        }
+        _ => false,
+    }
+}
+
+fn reduction_combine_op(expr: &Expr) -> Option<BinOpKind> {
+    match expr {
+        Expr::Var(name) if name == "acc" || name.starts_with("acc") => None,
+        Expr::BinOp { op, lhs, rhs } if matches!(op, BinOpKind::Add | BinOpKind::Mul) => {
+            let lhs_op = reduction_combine_op(lhs);
+            let rhs_op = reduction_combine_op(rhs);
+            match (lhs_op, rhs_op) {
+                (None, None) => Some(*op),
+                (Some(a), None) | (None, Some(a)) if a == *op => Some(*op),
+                (Some(a), Some(b)) if a == *op && b == *op => Some(*op),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn expr_contains_index(expr: &Expr) -> bool {
+    match expr {
+        Expr::Index { .. } => true,
+        Expr::BinOp { lhs, rhs, .. } => expr_contains_index(lhs) || expr_contains_index(rhs),
+        Expr::UnaryOp { operand, .. } | Expr::Cast { operand, .. } => expr_contains_index(operand),
+        Expr::FnCall { args, .. } => args.iter().any(expr_contains_index),
+        Expr::Var(_) | Expr::Const(_) | Expr::IntConst(_) => false,
+    }
+}
+
+fn record_index_buffers(expr: &Expr, facts: &mut ReductionFacts) {
+    match expr {
+        Expr::Index { buffer, index } => {
+            match facts.input_buffer.as_deref() {
+                None => facts.input_buffer = Some(buffer.clone()),
+                Some(existing) if existing == buffer => {}
+                Some(_) => facts.invalid_input_buffer = true,
+            }
+            record_index_buffers(index, facts);
+        }
+        Expr::BinOp { lhs, rhs, .. } => {
+            record_index_buffers(lhs, facts);
+            record_index_buffers(rhs, facts);
+        }
+        Expr::UnaryOp { operand, .. } | Expr::Cast { operand, .. } => {
+            record_index_buffers(operand, facts);
+        }
+        Expr::FnCall { args, .. } => {
+            for arg in args {
+                record_index_buffers(arg, facts);
+            }
+        }
+        Expr::Var(_) | Expr::Const(_) | Expr::IntConst(_) => {}
+    }
+}
+
+fn generate_ptx_reduction_source(
+    reduction: PtxReduction,
+    fn_name: &str,
+    block_size: usize,
+    dtype: Dtype,
+) -> Result<String, JitError> {
+    validate_reduction_block_size(block_size)?;
+
+    let dn = dtype.name();
+    let align = scalar_align(dtype);
+    let shl = scalar_shift(dtype);
+    let identity = match reduction.kind {
+        PtxReductionKind::Prod => ptx_const_literal(1.0, dtype),
+        PtxReductionKind::Sum | PtxReductionKind::Mean => ptx_const_literal(0.0, dtype),
+    };
+    let empty = match reduction.kind {
+        PtxReductionKind::Mean => ptx_const_literal(f64::NAN, dtype),
+        PtxReductionKind::Prod => ptx_const_literal(1.0, dtype),
+        PtxReductionKind::Sum => ptx_const_literal(0.0, dtype),
+    };
+    let combine = match reduction.kind {
+        PtxReductionKind::Prod => format!("mul.{dn}"),
+        PtxReductionKind::Sum | PtxReductionKind::Mean => format!("add.{dn}"),
+    };
+    let atomic_regs = reduction_atomic_regs(reduction.kind, dtype);
+    let atomic_section = reduction_atomic_section(reduction.kind, dtype);
+    let finalize = if reduction.kind == PtxReductionKind::Mean {
+        mean_finalize_entry(fn_name, dtype)
+    } else {
+        String::new()
+    };
+    let init = reduction_init_entry(fn_name, dtype, &identity, &empty, reduction.kind);
+    let half = block_size / 2;
+
+    Ok(format!(
+        "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.shared .align {align} .{dn} sdata[{block_size}];
+
+// {fn_name}_init must be launched before {fn_name} on the same stream.
+// For mean, launch {fn_name}_finalize after {fn_name}. The reduction entry
+// itself performs only device-resident work: grid-stride loads, shared-memory
+// block reduction, and global atomic/CAS accumulation.
+{init}
+.visible .entry {fn_name}(
+    .param .u64 in0_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {{
+    .reg .u32 %r_tid, %bid, %bdim, %gdim, %idx, %stride, %half, %n_reg, %peer;
+    .reg .u64 %in, %out, %off, %addr, %sbase, %saddr;
+    .reg .{dn} %acc, %other;
+    .reg .pred %p, %p_tid;{atomic_regs}
+
+    ld.param.u64 %in, [in0_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    setp.eq.u32 %p, %n_reg, 0;
+    @%p bra REDUCE_DONE;
+
+    mov.u32 %r_tid, %tid.x;
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %gdim, %nctaid.x;
+    mov.u64 %sbase, sdata;
+
+    mad.lo.u32 %idx, %bid, %bdim, %r_tid;
+    mul.lo.u32 %stride, %bdim, %gdim;
+    mov.{dn} %acc, {identity};
+
+GRID_LOOP:
+    setp.ge.u32 %p, %idx, %n_reg;
+    @%p bra GRID_DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, {shl};
+    add.u64 %addr, %in, %off;
+    ld.global.{dn} %other, [%addr];
+    {combine} %acc, %acc, %other;
+    add.u32 %idx, %idx, %stride;
+    bra GRID_LOOP;
+
+GRID_DONE:
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, {shl};
+    add.u64 %saddr, %sbase, %off;
+    st.shared.{dn} [%saddr], %acc;
+    bar.sync 0;
+
+    mov.u32 %half, {half};
+TREE_LOOP:
+    setp.eq.u32 %p, %half, 0;
+    @%p bra TREE_DONE;
+
+    setp.ge.u32 %p_tid, %r_tid, %half;
+    @%p_tid bra TREE_SKIP;
+
+    add.u32 %peer, %r_tid, %half;
+    cvt.u64.u32 %off, %peer;
+    shl.b64 %off, %off, {shl};
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.{dn} %other, [%saddr];
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, {shl};
+    add.u64 %saddr, %sbase, %off;
+    ld.shared.{dn} %acc, [%saddr];
+    {combine} %acc, %acc, %other;
+    st.shared.{dn} [%saddr], %acc;
+
+TREE_SKIP:
+    bar.sync 0;
+    shr.u32 %half, %half, 1;
+    bra TREE_LOOP;
+
+TREE_DONE:
+    setp.ne.u32 %p_tid, %r_tid, 0;
+    @%p_tid bra REDUCE_DONE;
+
+    mov.u64 %saddr, sdata;
+    ld.shared.{dn} %acc, [%saddr];
+{atomic_section}
+
+REDUCE_DONE:
+    ret;
+}}
+{finalize}"
+    ))
+}
+
+fn validate_reduction_block_size(block_size: usize) -> Result<(), JitError> {
+    if !(1..=1024).contains(&block_size) || !block_size.is_power_of_two() {
+        return Err(JitError::CodegenError {
+            message: format!(
+                "PTX reduction block_size must be a power of two in 1..=1024, got {block_size}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn scalar_align(dtype: Dtype) -> usize {
+    match dtype {
+        Dtype::F32 => 4,
+        Dtype::F64 => 8,
+    }
+}
+
+fn scalar_shift(dtype: Dtype) -> usize {
+    match dtype {
+        Dtype::F32 => 2,
+        Dtype::F64 => 3,
+    }
+}
+
+fn reduction_init_entry(
+    fn_name: &str,
+    dtype: Dtype,
+    identity: &str,
+    empty: &str,
+    kind: PtxReductionKind,
+) -> String {
+    let dn = dtype.name();
+    let mean_init = if kind == PtxReductionKind::Mean {
+        format!(
+            "\
+    mov.{dn} %init, {identity};
+    setp.eq.u32 %p, %n_reg, 0;
+    @%p mov.{dn} %init, {empty};
+"
+        )
+    } else {
+        format!("    mov.{dn} %init, {identity};\n")
+    };
+
+    format!(
+        "\
+.visible .entry {fn_name}_init(
+    .param .u64 out_ptr,
+    .param .u32 n
+) {{
+    .reg .u64 %out;
+    .reg .u32 %n_reg;
+    .reg .{dn} %init;
+    .reg .pred %p;
+
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+{mean_init}    st.global.{dn} [%out], %init;
+    ret;
+}}
+
+"
+    )
+}
+
+fn mean_finalize_entry(fn_name: &str, dtype: Dtype) -> String {
+    let dn = dtype.name();
+    let div_op = match dtype {
+        Dtype::F32 => "div.rn.f32",
+        Dtype::F64 => "div.rn.f64",
+    };
+    let cvt_op = match dtype {
+        Dtype::F32 => "cvt.rn.f32.u32",
+        Dtype::F64 => "cvt.rn.f64.u32",
+    };
+
+    format!(
+        "\n\
+.visible .entry {fn_name}_finalize(
+    .param .u64 out_ptr,
+    .param .u32 n
+) {{
+    .reg .u64 %out;
+    .reg .u32 %n_reg;
+    .reg .{dn} %sum, %count;
+    .reg .pred %p;
+
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+    setp.eq.u32 %p, %n_reg, 0;
+    @%p bra FINALIZE_DONE;
+
+    ld.global.{dn} %sum, [%out];
+    {cvt_op} %count, %n_reg;
+    {div_op} %sum, %sum, %count;
+    st.global.{dn} [%out], %sum;
+
+FINALIZE_DONE:
+    ret;
+}}
+"
+    )
+}
+
+fn reduction_atomic_regs(kind: PtxReductionKind, dtype: Dtype) -> &'static str {
+    match (kind, dtype) {
+        (PtxReductionKind::Sum | PtxReductionKind::Mean, Dtype::F32) => {
+            "\n    .reg .f32 %atomic_old;"
+        }
+        (_, Dtype::F32) => {
+            "\n    .reg .f32 %old_val, %new_val;\n    .reg .u32 %old_bits, %assumed_bits, %new_bits;\n    .reg .pred %p_cas;"
+        }
+        (_, Dtype::F64) => {
+            "\n    .reg .f64 %old_val, %new_val;\n    .reg .u64 %old_bits, %assumed_bits, %new_bits;\n    .reg .pred %p_cas;"
+        }
+    }
+}
+
+fn reduction_atomic_section(kind: PtxReductionKind, dtype: Dtype) -> String {
+    match (kind, dtype) {
+        (PtxReductionKind::Sum | PtxReductionKind::Mean, Dtype::F32) => {
+            "    atom.global.add.f32 %atomic_old, [%out], %acc;\n".into()
+        }
+        (PtxReductionKind::Prod, Dtype::F32) => reduction_cas_section("mul.f32", "u32", "b32"),
+        (PtxReductionKind::Sum | PtxReductionKind::Mean, Dtype::F64) => {
+            reduction_cas_section("add.f64", "u64", "b64")
+        }
+        (PtxReductionKind::Prod, Dtype::F64) => reduction_cas_section("mul.f64", "u64", "b64"),
+    }
+}
+
+fn reduction_cas_section(op: &str, int_ty: &str, bit_ty: &str) -> String {
+    format!(
+        "\
+    ld.global.{int_ty} %old_bits, [%out];
+ATOMIC_CAS_LOOP:
+    mov.{int_ty} %assumed_bits, %old_bits;
+    mov.{bit_ty} %old_val, %assumed_bits;
+    {op} %new_val, %old_val, %acc;
+    mov.{bit_ty} %new_bits, %new_val;
+    atom.global.cas.{bit_ty} %old_bits, [%out], %assumed_bits, %new_bits;
+    setp.ne.{int_ty} %p_cas, %old_bits, %assumed_bits;
+    @%p_cas bra ATOMIC_CAS_LOOP;
+"
+    )
 }
 
 /// Analysis result for PTX register and instruction needs.
@@ -1445,67 +1443,6 @@ fn ptx_const_literal(v: f64, dtype: Dtype) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers for reduction detection
-// ---------------------------------------------------------------------------
-
-/// Check if any statements contain an Accumulate operation.
-fn loops_contain_accumulate(stmts: &[LoopIR]) -> bool {
-    for stmt in stmts {
-        match stmt {
-            LoopIR::Accumulate { .. } => return true,
-            LoopIR::Loop { body, .. } if loops_contain_accumulate(body) => {
-                return true;
-            }
-            LoopIR::If {
-                then_body,
-                else_body,
-                ..
-            } if (loops_contain_accumulate(then_body) || loops_contain_accumulate(else_body)) => {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-/// Find the expression being accumulated in a reduction.
-fn find_accumulate_expr(stmts: &[LoopIR]) -> Option<Expr> {
-    for stmt in stmts {
-        match stmt {
-            LoopIR::Accumulate { value, .. } => return Some(value.clone()),
-            LoopIR::Loop { body, .. } => {
-                if let Some(expr) = find_accumulate_expr(body) {
-                    return Some(expr);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Check if the loops represent a mean reduction (divide by count).
-fn find_mean_divisor(stmts: &[LoopIR]) -> Option<f64> {
-    for stmt in stmts {
-        if let LoopIR::Store {
-            value:
-                Expr::BinOp {
-                    op: BinOpKind::Div,
-                    rhs,
-                    ..
-                },
-            ..
-        } = stmt
-            && let Expr::Const(divisor) = rhs.as_ref()
-        {
-            return Some(*divisor);
-        }
-    }
-    None
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1516,93 +1453,107 @@ mod tests {
     use crate::graph::IrOpKind;
 
     // -----------------------------------------------------------------------
-    // CUDA codegen tests (F32)
+    // PTX-only boundary tests (F32)
     // -----------------------------------------------------------------------
 
+    fn assert_no_cuda_c_source(src: &str) {
+        for marker in [
+            "__global__",
+            "#include",
+            "blockIdx",
+            "threadIdx",
+            "float*",
+            "double*",
+            "__shared__",
+            "atomicAdd",
+            "expf(",
+            "tanhf(",
+            "fmaxf(",
+        ] {
+            assert!(
+                !src.contains(marker),
+                "PTX generator leaked CUDA C marker `{marker}`:\n{src}"
+            );
+        }
+    }
+
     #[test]
-    fn test_cuda_simple_neg() {
+    fn test_ptx_boundary_simple_neg() {
         let loops = codegen_ir::lower_to_loops(&[IrOpKind::Neg], &["in0"], "out", 1024);
-        let src = GpuCodegen::generate_cuda_source(&loops, "kernel_neg", 1, Dtype::F32).unwrap();
-
-        assert!(src.contains("__global__ void kernel_neg"));
-        assert!(src.contains("blockIdx.x * blockDim.x + threadIdx.x"));
-        assert!(src.contains("if (tid >= n) return"));
-        assert!(src.contains("const float* __restrict__ in0"));
-        assert!(src.contains("float* __restrict__ output"));
-    }
-
-    #[test]
-    fn test_cuda_binary_add() {
-        let loops = codegen_ir::lower_to_loops(&[IrOpKind::Add], &["in0", "in1"], "out", 1024);
-        let src = GpuCodegen::generate_cuda_source(&loops, "kernel_add", 2, Dtype::F32).unwrap();
-
-        assert!(src.contains("const float* __restrict__ in0"));
-        assert!(src.contains("const float* __restrict__ in1"));
-        assert!(src.contains('+'));
-    }
-
-    #[test]
-    fn test_cuda_sigmoid() {
-        let loops = codegen_ir::lower_to_loops(&[IrOpKind::Sigmoid], &["in0"], "out", 1024);
         let src =
-            GpuCodegen::generate_cuda_source(&loops, "kernel_sigmoid", 1, Dtype::F32).unwrap();
+            GpuCodegen::generate_ptx_source(&loops, "kernel_neg", 256, 1, Dtype::F32).unwrap();
 
-        assert!(src.contains("expf("));
-        assert!(src.contains("1.0f"));
+        assert!(src.contains(".visible .entry kernel_neg"));
+        assert!(src.contains("mov.u32 %bid, %ctaid.x"));
+        assert!(src.contains("mov.u32 %r_tid, %tid.x"));
+        assert!(src.contains("setp.ge.u32 %p, %r_tid, %n_reg"));
+        assert!(src.contains("ld.global.f32"));
+        assert!(src.contains("st.global.f32"));
+        assert_no_cuda_c_source(&src);
     }
 
     #[test]
-    fn test_cuda_relu() {
-        let loops = codegen_ir::lower_to_loops(&[IrOpKind::Relu], &["in0"], "out", 1024);
-        let src = GpuCodegen::generate_cuda_source(&loops, "kernel_relu", 1, Dtype::F32).unwrap();
+    fn test_ptx_boundary_binary_add_inputs() {
+        let loops = codegen_ir::lower_to_loops(&[IrOpKind::Add], &["in0", "in1"], "out", 1024);
+        let src =
+            GpuCodegen::generate_ptx_source(&loops, "kernel_add", 256, 2, Dtype::F32).unwrap();
 
-        assert!(src.contains("fmaxf("));
+        assert!(src.contains("in0_ptr"));
+        assert!(src.contains("in1_ptr"));
+        assert!(src.contains("add.f32"));
+        assert_no_cuda_c_source(&src);
     }
 
     #[test]
-    fn test_cuda_reduction_sum() {
-        let loops = codegen_ir::lower_to_loops(&[IrOpKind::Sum], &["in0"], "out", 1024);
-        let src = GpuCodegen::generate_cuda_source(&loops, "kernel_sum", 1, Dtype::F32).unwrap();
+    fn test_ptx_boundary_sigmoid_relu_reduction_and_fusion() {
+        let sigmoid = codegen_ir::lower_to_loops(&[IrOpKind::Sigmoid], &["in0"], "out", 1024);
+        let src = GpuCodegen::generate_ptx_source(&sigmoid, "kernel_sigmoid", 256, 1, Dtype::F32)
+            .unwrap();
+        assert!(src.contains("ex2.approx.f32"));
+        assert!(src.contains("rcp.approx.f32"));
+        assert_no_cuda_c_source(&src);
 
-        assert!(src.contains("__shared__"));
-        assert!(src.contains("__syncthreads"));
-        assert!(src.contains("atomicAdd"));
+        let relu = codegen_ir::lower_to_loops(&[IrOpKind::Relu], &["in0"], "out", 1024);
+        let src =
+            GpuCodegen::generate_ptx_source(&relu, "kernel_relu", 256, 1, Dtype::F32).unwrap();
+        assert!(src.contains("max.f32"));
+        assert_no_cuda_c_source(&src);
+
+        let sum = codegen_ir::lower_to_loops(&[IrOpKind::Sum], &["in0"], "out", 1024);
+        let src = GpuCodegen::generate_ptx_source(&sum, "kernel_sum", 256, 1, Dtype::F32).unwrap();
+        assert!(src.contains(".shared .align 4 .f32 sdata"));
+        assert!(src.contains("atom.global.add.f32"));
+        assert_no_cuda_c_source(&src);
+
+        let mean = codegen_ir::lower_to_loops(&[IrOpKind::Mean], &["in0"], "out", 100);
+        let src =
+            GpuCodegen::generate_ptx_source(&mean, "kernel_mean", 256, 1, Dtype::F32).unwrap();
+        assert!(src.contains("div.rn.f32"));
+        assert_no_cuda_c_source(&src);
+
+        let fused = vec![IrOpKind::Neg, IrOpKind::Relu];
+        let loops = codegen_ir::lower_to_loops(&fused, &["in0"], "out", 1024);
+        let src =
+            GpuCodegen::generate_ptx_source(&loops, "kernel_fused", 256, 1, Dtype::F32).unwrap();
+        assert!(src.contains("neg.f32"));
+        assert!(src.contains("max.f32"));
+        assert_no_cuda_c_source(&src);
     }
 
     #[test]
-    fn test_cuda_reduction_mean() {
-        let loops = codegen_ir::lower_to_loops(&[IrOpKind::Mean], &["in0"], "out", 100);
-        let src = GpuCodegen::generate_cuda_source(&loops, "kernel_mean", 1, Dtype::F32).unwrap();
+    fn test_ptx_boundary_gelu_silu() {
+        let gelu = codegen_ir::lower_to_loops(&[IrOpKind::Gelu], &["in0"], "out", 1024);
+        let src =
+            GpuCodegen::generate_ptx_source(&gelu, "kernel_gelu", 256, 1, Dtype::F32).unwrap();
+        assert!(src.contains("3FD9F16C"));
+        assert!(src.contains("rcp.approx.f32"));
+        assert_no_cuda_c_source(&src);
 
-        assert!(src.contains("__shared__"));
-        assert!(src.contains("(float)n"));
-    }
-
-    #[test]
-    fn test_cuda_fused_chain() {
-        let ops = vec![IrOpKind::Neg, IrOpKind::Relu];
-        let loops = codegen_ir::lower_to_loops(&ops, &["in0"], "out", 1024);
-        let src = GpuCodegen::generate_cuda_source(&loops, "kernel_fused", 1, Dtype::F32).unwrap();
-
-        assert!(src.contains("__global__"));
-        assert!(src.contains("tid"));
-    }
-
-    #[test]
-    fn test_cuda_gelu() {
-        let loops = codegen_ir::lower_to_loops(&[IrOpKind::Gelu], &["in0"], "out", 1024);
-        let src = GpuCodegen::generate_cuda_source(&loops, "kernel_gelu", 1, Dtype::F32).unwrap();
-
-        assert!(src.contains("tanhf("));
-        assert!(src.contains("0.044715"));
-    }
-
-    #[test]
-    fn test_cuda_silu() {
-        let loops = codegen_ir::lower_to_loops(&[IrOpKind::Silu], &["in0"], "out", 1024);
-        let src = GpuCodegen::generate_cuda_source(&loops, "kernel_silu", 1, Dtype::F32).unwrap();
-
-        assert!(src.contains("expf("));
+        let silu = codegen_ir::lower_to_loops(&[IrOpKind::Silu], &["in0"], "out", 1024);
+        let src =
+            GpuCodegen::generate_ptx_source(&silu, "kernel_silu", 256, 1, Dtype::F32).unwrap();
+        assert!(src.contains("rcp.approx.f32"));
+        assert_no_cuda_c_source(&src);
     }
 
     // -----------------------------------------------------------------------
@@ -1742,46 +1693,25 @@ mod tests {
         assert!(src.contains("abs.f32"));
     }
 
-    #[test]
-    fn test_format_cuda_const_f32_values() {
-        assert_eq!(format_cuda_const(0.0, Dtype::F32), "0.0f");
-        assert_eq!(format_cuda_const(1.0, Dtype::F32), "1.0f");
-        assert_eq!(format_cuda_const(f64::INFINITY, Dtype::F32), "INFINITY");
-        assert_eq!(
-            format_cuda_const(f64::NEG_INFINITY, Dtype::F32),
-            "(-INFINITY)"
-        );
-        assert_eq!(format_cuda_const(f64::NAN, Dtype::F32), "NAN");
-    }
-
     // -----------------------------------------------------------------------
     // F64 dispatch tests (#729)
     // -----------------------------------------------------------------------
 
-    /// CUDA C: F64 elementwise neg emits `double` declarations and a `-x`
-    /// expression, with no `f`-suffix on numeric literals.
+    /// PTX: F64 elementwise neg emits native f64 registers and arithmetic,
+    /// without CUDA C `double` declarations.
     #[test]
-    fn test_cuda_f64_simple_neg() {
+    fn test_ptx_f64_simple_neg_no_cuda_c() {
         let loops = codegen_ir::lower_to_loops(&[IrOpKind::Neg], &["in0"], "out", 1024);
-        let src = GpuCodegen::generate_cuda_source(&loops, "kernel_neg_f64", 1, Dtype::F64)
-            .expect("F64 neg should generate CUDA C");
+        let src = GpuCodegen::generate_ptx_source(&loops, "kernel_neg_f64", 256, 1, Dtype::F64)
+            .expect("F64 neg should generate PTX");
 
         assert!(
-            src.contains("const double* __restrict__ in0"),
-            "expected double input declaration; got:\n{src}"
+            src.contains(".reg .f64 %val") && src.contains("neg.f64"),
+            "expected native f64 PTX; got:\n{src}"
         );
         assert!(
-            src.contains("double* __restrict__ output"),
-            "expected double output declaration; got:\n{src}"
-        );
-        // No f-suffixed `float` declarations should sneak in.
-        assert!(
-            !src.contains("const float*"),
-            "F64 path leaked an f32 input decl:\n{src}"
-        );
-        assert!(
-            !src.contains("float* __restrict__ output"),
-            "F64 path leaked an f32 output decl:\n{src}"
+            !src.contains("double") && !src.contains("__global__") && !src.contains("#include"),
+            "F64 PTX path leaked CUDA C source:\n{src}"
         );
     }
 
@@ -1972,14 +1902,20 @@ mod tests {
         );
     }
 
-    /// CUDA C: F64 transcendentals lower to host-math doubles (`exp`, `tanh`)
-    /// and don't use the `f` suffix. CUDA C path supports both dtypes.
+    /// PTX: F64 transcendentals never lower to CUDA C math calls.
     #[test]
-    fn test_cuda_f64_transcendental_ok() {
+    fn test_ptx_f64_transcendental_has_no_cuda_c_math_calls() {
         let loops = codegen_ir::lower_to_loops(&[IrOpKind::Sigmoid], &["in0"], "out", 4);
-        let src = GpuCodegen::generate_cuda_source(&loops, "k", 1, Dtype::F64)
-            .expect("CUDA C f64 sigmoid should generate");
-        assert!(src.contains("exp("), "expected double exp; got:\n{src}");
-        assert!(!src.contains("expf("), "F64 path leaked expf:\n{src}");
+        let src = GpuCodegen::generate_ptx_source(&loops, "k", 256, 1, Dtype::F64)
+            .expect("f64 sigmoid should generate Rust-owned PTX");
+        assert!(
+            src.contains("fma.rn.f64"),
+            "expected f64 PTX math; got:\n{src}"
+        );
+        assert!(!src.contains("exp("), "PTX path leaked C exp call:\n{src}");
+        assert!(
+            !src.contains("expf("),
+            "PTX path leaked C expf call:\n{src}"
+        );
     }
 }

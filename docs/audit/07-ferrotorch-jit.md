@@ -24,12 +24,12 @@ ferrotorch-jit covers **a subset of all four**, in a single crate.
 | `module` | `TracedModule`, `AotCompiledModule`, `compile`, `compile_with_config` | `torch.jit.ScriptModule`, `torch.compile()` |
 | `aot_autograd` | Joint forward+backward compilation, `AotGraphPair`, `decompose_forward_backward` | `torch._functorch.aot_autograd` |
 | `optimize` | Graph optimization passes | `torch.fx.passes` |
-| `fusion` | Fused op patterns (FusedChain, FusedOp, ReductionKind, generate_reduction_c, generate_reduction_ptx) | Inductor fusion |
+| `fusion` | Fused op patterns (FusedChain, FusedOp, ReductionKind, generate_reduction_rust, generate_reduction_ptx) | Inductor fusion |
 | `dag_fusion` | DAG-based fusion grouping (FusionGroup, FusionGroupKind) | Inductor scheduler |
 | `codegen` | Backend abstraction (Codegen, CompiledGraph, InductorBackend, InductorTarget, NativeBackend, InterpreterBackend) | `torch._inductor` |
-| `codegen_cpu` | CpuCodegen (C++/OpenMP-style) | Inductor C++ backend |
-| `codegen_gpu` | GpuCodegen (CUDA/PTX) | Inductor Triton backend |
-| `codegen_jit` | JIT C kernel compile (`compile_c_kernel`, `JitCompiledKernel`) | Inductor jit caching |
+| `codegen_cpu` | CpuCodegen (Rust source) | Inductor C++ backend analogue |
+| `codegen_gpu` | GpuCodegen (Rust-owned PTX) | Inductor Triton backend analogue |
+| `codegen_jit` | Cranelift JIT (`compile_loop_ir_kernel`, `JitCompiledKernel`) | Inductor jit caching |
 | `codegen_ir` | Lower-level loop IR (Expr, LoopIR, BinOpKind, UnaryOpKind) | Inductor IR / Halide |
 | `autotune` | AutotuneCandidate, AutotuneKey, AutotuneResult, Autotuner | `torch._inductor.autotune_process` |
 | `memory_plan` | MemoryPlan, plan_memory | Inductor memory planning / `torch._functorch` activation reuse |
@@ -105,7 +105,7 @@ in Rust would be CubeCL kernels which `ferrotorch-cubecl` already provides
 |---|---|---|
 | `FusedChain`, `FusedOp`, `apply_fused`, `with_fusion`, `is_fusion_enabled` | scheduler fusion | ✅ |
 | `FusionGroup`, `FusionGroupKind` (in `dag_fusion.rs`) | DAG-based scheduling | ✅ |
-| `ReductionKind`, `generate_reduction_c`, `generate_reduction_ptx`, `estimate_matmul_dims`, `estimate_numel_for_inputs` | reduction codegen | ✅ |
+| `ReductionKind`, `generate_reduction_rust`, `generate_reduction_ptx`, `estimate_matmul_dims`, `estimate_numel_for_inputs` | reduction codegen | ✅ |
 
 ### Export
 

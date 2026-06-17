@@ -30,11 +30,11 @@ These 9 modules implement ferrotorch's JIT optimization and code generation
 pipeline:
 
   optimize        — constant folding, DCE, operator fusion, memory planning
-  fusion          — FusedChain PTX/C codegen, with_fusion context
+  fusion          — FusedChain PTX/Rust codegen, with_fusion context
   dag_fusion      — DAG-level fusion group discovery and lowering
   codegen         — Codegen trait: InterpreterBackend, NativeBackend, InductorBackend
   codegen_cpu     — CpuCodegen::generate_rust_source (LoopIR -> Rust)
-  codegen_gpu     — GpuCodegen::generate_cuda_source / generate_ptx_source
+  codegen_gpu     — GpuCodegen::generate_ptx_source
   codegen_jit     — cranelift JIT: compile_loop_ir_kernel, jit_supports
   autotune        — Autotuner: tune(), cache, candidate selection
   memory_plan     — plan_memory: buffer slot allocation via liveness analysis
@@ -532,25 +532,49 @@ def build_fixtures() -> list[dict]:
         }
     )
 
-    # C codegen structural properties
+    # Rust source generation structural properties
     fixtures.append(
         {
             "module": "fusion",
-            "case": "c_codegen_header_structure",
+            "case": "rust_codegen_structure",
             "description": (
-                "FusedChain::generate_c must emit valid C: #include <math.h>, "
-                "void <fn_name>(...), #pragma omp simd, and the correct loop pattern."
+                "FusedChain::generate_rust must emit standalone Rust source with a "
+                "f32/f64 FusedFloat trait, a generic function signature, a slice loop, "
+                "and no C markers."
             ),
             "fn_name": "fused_relu_neg",
             "chain_ops": [{"op": "Relu"}, {"op": "Neg"}],
-            "expected_c_contains": [
-                "#include <math.h>",
-                "void fused_relu_neg(",
-                "#pragma omp simd",
-                "for (int i = 0",
-                "out[i] = val;",
+            "expected_rust_contains": [
+                "pub trait FusedFloat",
+                "pub fn fused_relu_neg<T: FusedFloat>(input: &[T], output: &mut [T])",
+                "for (i, &x) in input.iter().enumerate()",
+                "output[i] = val;",
             ],
-            "property": "c_structural",
+            "expected_rust_excludes": [
+                "#include",
+                "#pragma",
+                "void ",
+                "float*",
+            ],
+            "property": "rust_structural",
+        }
+    )
+
+    fixtures.append(
+        {
+            "module": "fusion",
+            "case": "generated_rust_compiles_for_f32_and_f64",
+            "description": (
+                "Generated fusion Rust source and generated reduction Rust source must "
+                "compile and run for f32 and f64 instantiations."
+            ),
+            "chain_ops": [
+                {"op": "Gelu"},
+                {"op": "Silu"},
+                {"op": "Pow", "exponent": 2.0},
+            ],
+            "reduction": "Mean",
+            "property": "rustc_compile_and_run_probe",
         }
     )
 
@@ -559,12 +583,12 @@ def build_fixtures() -> list[dict]:
             "module": "fusion",
             "case": "generate_reduction_ptx_sum_uses_atom_add",
             "description": (
-                "generate_reduction_ptx(Sum) must emit atom.global.add.f32 "
-                "for atomic accumulation."
+                "generate_reduction_ptx(Sum) must emit an init entry and "
+                "atom.global.add.f32 for atomic accumulation."
             ),
             "reduction_kind": "Sum",
             "kernel_name": "reduce_sum",
-            "expected_ptx_contains": ["atom.global.add.f32"],
+            "expected_ptx_contains": ["reduce_sum_init", "atom.global.add.f32"],
             "property": "ptx_structural",
         }
     )
@@ -574,14 +598,15 @@ def build_fixtures() -> list[dict]:
             "module": "fusion",
             "case": "generate_reduction_ptx_mean_has_finalize_entry",
             "description": (
-                "generate_reduction_ptx(Mean) must emit a second .entry "
-                "named <kernel_name>_finalize that divides the sum by n."
+                "generate_reduction_ptx(Mean) must emit init and finalize "
+                "entries; finalize divides the sum by n."
             ),
             "reduction_kind": "Mean",
             "kernel_name": "reduce_mean",
             "expected_ptx_contains": [
+                "reduce_mean_init",
                 "reduce_mean_finalize",
-                "div.approx.f32",
+                "div.rn.f32",
             ],
             "property": "ptx_structural",
         }
@@ -969,57 +994,69 @@ def build_fixtures() -> list[dict]:
     fixtures.append(
         {
             "module": "codegen_gpu",
-            "case": "generate_cuda_source_neg_f32_has_global_kernel",
+            "case": "generate_ptx_source_neg_f32_has_cuda_thread_mapping",
             "description": (
-                "GpuCodegen::generate_cuda_source for Neg with dtype=F32 must emit "
-                "__global__ void <fn_name>, float* __restrict__, and "
-                "int tid = blockIdx.x * blockDim.x + threadIdx.x."
+                "GpuCodegen::generate_ptx_source for Neg with dtype=F32 must emit "
+                "a PTX entry, f32 registers, and CUDA lane/block special-register "
+                "reads without emitting CUDA C."
             ),
             "graph_ops": ["Neg"],
-            "fn_name": "cuda_neg",
+            "fn_name": "gpu_neg",
             "dtype": "F32",
             "num_inputs": 1,
-            "expected_source_contains": [
-                "__global__ void cuda_neg",
-                "float* __restrict__",
-                "blockIdx.x",
-                "threadIdx.x",
+            "block_size": 256,
+            "expected_ptx_contains": [
+                ".visible .entry gpu_neg",
+                ".reg .f32 %val",
+                "mov.u32 %bid, %ctaid.x",
+                "mov.u32 %r_tid, %tid.x",
             ],
-            "property": "cuda_structural",
+            "expected_ptx_excludes": [
+                "__global__",
+                "#include",
+            ],
+            "property": "ptx_structural",
         }
     )
 
     fixtures.append(
         {
             "module": "codegen_gpu",
-            "case": "generate_cuda_source_add_f32_has_two_input_pointers",
+            "case": "generate_ptx_source_add_f32_has_two_input_pointers",
             "description": (
-                "GpuCodegen::generate_cuda_source for Add with 2 inputs must emit "
-                "in0 and in1 parameter names."
+                "GpuCodegen::generate_ptx_source for Add with 2 inputs must emit "
+                "in0_ptr and in1_ptr parameter names without CUDA C pointer declarations."
             ),
             "graph_ops": ["Add"],
-            "fn_name": "cuda_add",
+            "fn_name": "gpu_add",
             "dtype": "F32",
             "num_inputs": 2,
-            "expected_source_contains": ["in0", "in1"],
-            "property": "cuda_structural",
+            "block_size": 256,
+            "expected_ptx_contains": ["in0_ptr", "in1_ptr"],
+            "expected_ptx_excludes": ["float*"],
+            "property": "ptx_structural",
         }
     )
 
     fixtures.append(
         {
             "module": "codegen_gpu",
-            "case": "generate_cuda_source_sum_reduction_uses_shared_memory",
+            "case": "generate_ptx_source_sum_reduction_uses_shared_memory",
             "description": (
-                "GpuCodegen::generate_cuda_source for Sum must emit __shared__ for "
-                "block-level reduction."
+                "GpuCodegen::generate_ptx_source for Sum must emit PTX shared memory "
+                "and device atomics without CUDA C shared-memory syntax."
             ),
             "graph_ops": ["Sum"],
-            "fn_name": "cuda_sum",
+            "fn_name": "gpu_sum",
             "dtype": "F32",
             "num_inputs": 1,
-            "expected_source_contains": ["__shared__"],
-            "property": "cuda_structural",
+            "block_size": 256,
+            "expected_ptx_contains": [
+                ".shared .align 4 .f32 sdata",
+                "atom.global.add.f32",
+            ],
+            "expected_ptx_excludes": ["__shared__"],
+            "property": "ptx_structural",
         }
     )
 
@@ -1048,42 +1085,39 @@ def build_fixtures() -> list[dict]:
     fixtures.append(
         {
             "module": "codegen_gpu",
-            "case": "generate_ptx_source_f64_transcendental_unsupported_without_cuda_feature",
+            "case": "generate_ptx_source_f64_transcendental_uses_rust_ptx",
             "description": (
-                "GpuCodegen::generate_ptx_source for Exp with dtype=F64 must return "
-                "Err(JitError::Unsupported) when the 'cuda' feature is disabled. "
-                "This is the PyTorch-parity device-error policy: NotImplementedError for "
-                "unsupported (op, dtype) combinations."
+                "GpuCodegen::generate_ptx_source for Exp with dtype=F64 must emit "
+                "Rust-owned f64 PTX math without depending on the cuda feature, NVRTC, "
+                "libdevice, or f32 demote-promote."
             ),
             "graph_ops": ["Exp"],
             "fn_name": "ptx_exp_f64",
             "dtype": "F64",
             "num_inputs": 1,
             "block_size": 256,
-            "expected_error_kind": "JitError::Unsupported",
-            "property": "error_contract",
-            "cascade_skip": (
-                "cascade: GPU-dtype dispatch returns wrong variant on some builds — "
-                "see issue TBD"
-            ),
+            "expected_ptx_contains": ["fma.rn.f64"],
+            "expected_ptx_excludes": ["ex2.approx.f32", "cvt.f32.f64"],
+            "property": "ptx_structural",
         }
     )
 
     fixtures.append(
         {
             "module": "codegen_gpu",
-            "case": "generate_cuda_source_f64_neg_uses_double",
+            "case": "generate_ptx_source_f64_neg_uses_f64_registers",
             "description": (
-                "GpuCodegen::generate_cuda_source for Neg with dtype=F64 must emit "
-                "'double' instead of 'float' in parameter declarations."
+                "GpuCodegen::generate_ptx_source for Neg with dtype=F64 must emit "
+                "f64 registers and f64 arithmetic without CUDA C double declarations."
             ),
             "graph_ops": ["Neg"],
-            "fn_name": "cuda_neg_f64",
+            "fn_name": "gpu_neg_f64",
             "dtype": "F64",
             "num_inputs": 1,
-            "expected_source_contains": ["double"],
-            "expected_source_not_contains": [],
-            "property": "cuda_structural",
+            "block_size": 256,
+            "expected_ptx_contains": [".reg .f64 %val", "neg.f64"],
+            "expected_ptx_excludes": ["double"],
+            "property": "ptx_structural",
         }
     )
 

@@ -25,7 +25,7 @@ CUDA GPU backend for ferrotorch — BLAS, cuSPARSE, cuFFT, FlashAttention-2, bf1
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `cuda`  | **yes** | Links against CUDA driver API via cudarc |
-| `cusparselt` | no | Opt-in 2:4 structured sparse matmul (`gpu_sparse_matmul_24`) via NVIDIA cuSPARSELt; pulls in `bindgen` and requires the cuSPARSELt SDK at build/runtime |
+| `cusparselt` | no | Opt-in 2:4 structured sparse matmul (`gpu_sparse_matmul_24`) via NVIDIA cuSPARSELt; uses hand-authored Rust FFI and links `libcusparseLt.so` when enabled |
 
 ## Quick start
 

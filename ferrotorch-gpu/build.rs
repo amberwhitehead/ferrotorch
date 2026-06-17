@@ -3,11 +3,10 @@
 //! Two responsibilities, both opt-in / no-op when their preconditions
 //! are absent:
 //!
-//! 1. When the `cusparselt` feature is enabled, locate `cusparseLt.h` on
-//!    the host, run `bindgen` to emit `cusparselt_sys.rs` into `OUT_DIR`,
-//!    and instruct cargo to link against `libcusparseLt.so`. When the
-//!    feature is **off**, this is a no-op — the default workspace build
-//!    does not require libclang or the cuSPARSELt SDK.
+//! 1. When the `cusparselt` feature is enabled, instruct cargo to link
+//!    against `libcusparseLt.so`. The cuSPARSELt FFI is hand-authored Rust
+//!    in `src/cusparselt.rs`; the build no longer runs bindgen, parses
+//!    `cusparseLt.h`, or requires a C/C++ toolchain.
 //!
 //! 2. When the `cuda` feature is enabled on Linux, force the CUDA-12.x
 //!    cuSOLVER (`libcusolver.so.11`) to be the one resolved at runtime
@@ -21,21 +20,17 @@
 //!    the bare `libcusolver.so` to the system CUDA 13.x lib and the first
 //!    cuSOLVER call panics with `undefined symbol: cusolverDnGeqrf`.
 //!
-//! Probe order for the cuSPARSELt SDK header:
-//!   1. `$CUSPARSELT_INCLUDE_DIR/cusparseLt.h`
-//!   2. `$CUDA_PATH/include/cusparseLt.h`
-//!   3. `/usr/local/cuda/include/cusparseLt.h`
-//!   4. `/usr/local/cuda-12.9/include/cusparseLt.h`
-//!   5. `/usr/local/cuda-12.8/include/cusparseLt.h`
-//!   6. `/usr/include/cusparseLt.h`
-//!   7. `/opt/nvidia/cusparselt/include/cusparseLt.h`
-//!   8. Python NVIDIA package installs such as
-//!      `$HOME/.local/lib/python*/site-packages/nvidia/cusparselt/include`
+//! Probe order for the cuSPARSELt shared library:
+//!   1. `$CUSPARSELT_LIB_DIR`
+//!   2. `/usr/local/cuda*/lib64`, `/usr/lib64`,
+//!      `/opt/nvidia/cusparselt/lib64`
+//!   3. Python NVIDIA package installs such as
+//!      `$HOME/.local/lib/python*/site-packages/nvidia/cusparselt/lib`
 //!
-//! NVIDIA distributes cuSPARSELt as a separate SDK from the CUDA
-//! toolkit (it ships in its own tarball / RPM and in PyTorch's NVIDIA
-//! wheel dependencies); on systems without it installed the build script
-//! emits a `cargo::warning=` and aborts so the user sees a clear path to fix.
+//! NVIDIA distributes cuSPARSELt as a separate SDK from the CUDA toolkit
+//! (it ships in its own tarball / RPM and in PyTorch's NVIDIA wheel
+//! dependencies). A `cusparselt` build still needs the shared library for
+//! linking/runtime, but it does not need the header.
 
 fn main() {
     // The script runs unconditionally — but every action below is gated
@@ -45,7 +40,6 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CUSPARSELT");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CUDA");
-    println!("cargo:rerun-if-env-changed=CUSPARSELT_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=CUSPARSELT_LIB_DIR");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDARC_CUDA_VERSION");
@@ -95,51 +89,19 @@ fn main() {
     }
 }
 
-/// Resolve the CUDA version cudarc will build against and report whether
-/// it is `>= min` (using cudarc's `MAJOR<MINOR:02d><PATCH:02d>` encoding,
-/// e.g. `13020` for CUDA 13.0.20). Mirrors cudarc's own resolution order:
-/// the `CUDARC_CUDA_VERSION` env var wins; otherwise probe `nvcc --version`
-/// ("release 13.0, V13.0.88"). Defaults to false when neither is available,
-/// so cfgs gated on this are never emitted by accident.
+/// Resolve the CUDA version cudarc will build against and report whether it is
+/// `>= min` using cudarc's `MAJOR<MINOR:02d><PATCH:02d>` encoding, e.g. `13020`
+/// for CUDA 13.0.20.
+///
+/// The workspace supplies a default `CUDARC_CUDA_VERSION` in `.cargo/config.toml`.
+/// Keep this build script independent of `nvcc` or any CUDA C/C++ toolchain: if
+/// the env var is absent or malformed, fail closed and do not emit CUDA-version
+/// cfgs by accident.
 fn cuda_version_at_least(min: u32) -> bool {
     if let Ok(v) = std::env::var("CUDARC_CUDA_VERSION")
         && let Ok(n) = v.trim().parse::<u32>()
     {
         return n >= min;
-    }
-    // nvcc fallback: parse "release MAJOR.MINOR, VMAJOR.MINOR.PATCH" out of
-    // the second line of `nvcc --version`. The V-line is the authoritative
-    // patch number; the "release" line only gives MAJOR.MINOR.
-    if let Ok(out) = std::process::Command::new("nvcc").arg("--version").output()
-        && let Ok(s) = String::from_utf8(out.stdout)
-    {
-        // Try the V-line first (e.g. "V13.0.88"): gives full M.N.P.
-        if let Some(i) = s.find(", V")
-            && let Some(rest) = s.get(i + 3..)
-            && let Some(end) = rest.find(char::is_whitespace)
-            && let Some(version) = rest.get(..end)
-        {
-            let parts: Vec<&str> = version.split('.').collect();
-            if let (Some(maj), Some(min_), Some(pat)) = (parts.first(), parts.get(1), parts.get(2))
-                && let (Ok(m), Ok(n_), Ok(p)) =
-                    (maj.parse::<u32>(), min_.parse::<u32>(), pat.parse::<u32>())
-            {
-                return m * 1000 + n_ * 100 + p >= min;
-            }
-        }
-        // Fallback: just MAJOR.MINOR from "release X.Y" line (patch = 0).
-        if let Some(i) = s.find("release ")
-            && let Some(rest) = s.get(i + 8..)
-            && let Some(comma) = rest.find(',')
-            && let Some(version) = rest.get(..comma)
-        {
-            let parts: Vec<&str> = version.split('.').collect();
-            if let (Some(maj), Some(min_)) = (parts.first(), parts.get(1))
-                && let (Ok(m), Ok(n_)) = (maj.parse::<u32>(), min_.parse::<u32>())
-            {
-                return m * 1000 + n_ * 100 >= min;
-            }
-        }
     }
     false
 }
@@ -312,98 +274,9 @@ mod cuda_cusolver_compat {
 mod cusparselt {
     use std::path::PathBuf;
 
-    /// Header probe + bindgen run + link directives.
+    /// Library probe + link directives.
     pub fn generate() {
-        let header = match locate_header() {
-            Some(p) => p,
-            None => {
-                println!(
-                    "cargo:warning=cusparselt feature is enabled but `cusparseLt.h` was not found on this host. Set CUSPARSELT_INCLUDE_DIR to the directory containing cusparseLt.h, or install the NVIDIA cuSPARSELt SDK / nvidia-cusparselt Python package. Searched: $CUSPARSELT_INCLUDE_DIR, $CUDA_PATH/include, /usr/local/cuda*/include, /usr/include, /opt/nvidia/cusparselt/include, and python*/site-packages/nvidia/cusparselt/include."
-                );
-                panic!(
-                    "ferrotorch-gpu: cusparselt feature requires cusparseLt.h but none of the probed locations contained it. See cargo:warning above for resolution."
-                );
-            }
-        };
-
         emit_link_directives();
-
-        // Re-run if the located header changes.
-        println!("cargo:rerun-if-changed={}", header.display());
-
-        let header_str = header.to_string_lossy().to_string();
-        let mut builder = bindgen::Builder::default()
-            .header(header_str.clone())
-            // cuSPARSELt's public header is C++-flavoured (`<cstddef>`,
-            // `alignas`) even though its API is `extern "C"`. Bindgen's
-            // default C parser mode cannot parse NVIDIA's pip-distributed
-            // header.
-            .clang_arg("-x")
-            .clang_arg("c++")
-            .clang_arg("-std=c++17")
-            .allowlist_function("cusparseLt.*")
-            .allowlist_type("cusparseLt.*")
-            .allowlist_var("CUSPARSELT_.*")
-            .allowlist_var("CUSPARSE_.*")
-            .allowlist_type("cudaDataType.*")
-            .allowlist_type("cudaStream_t")
-            .allowlist_type("cusparseStatus_t")
-            .allowlist_type("cusparseOperation_t")
-            .allowlist_type("cusparseComputeType.*")
-            .allowlist_type("cusparseOrder_t")
-            .default_enum_style(bindgen::EnumVariation::Rust {
-                non_exhaustive: false,
-            })
-            .derive_default(true)
-            .derive_debug(true)
-            .layout_tests(false)
-            .generate_comments(false);
-
-        // Add include path containing the header so bindgen finds the
-        // CUDA toolkit headers it transitively depends on.
-        if let Some(parent) = header.parent() {
-            builder = builder.clang_arg(format!("-I{}", parent.display()));
-        }
-        for path in cuda_include_dirs() {
-            builder = builder
-                .clang_arg("-isystem")
-                .clang_arg(path.to_string_lossy().to_string());
-        }
-        for path in cxx_include_dirs() {
-            builder = builder
-                .clang_arg("-isystem")
-                .clang_arg(path.to_string_lossy().to_string());
-        }
-
-        let bindings = builder
-            .generate()
-            .expect("bindgen failed to generate cusparseLt bindings");
-
-        let out_path = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR set by cargo"))
-            .join("cusparselt_sys.rs");
-        // bindgen 0.69 still emits `extern "C"` blocks. This workspace is
-        // edition 2024, where foreign blocks must be explicitly unsafe.
-        let mut bindings_src = bindings.to_string();
-        bindings_src = bindings_src.replace("\nextern \"C\" {", "\nunsafe extern \"C\" {");
-        std::fs::write(&out_path, bindings_src).expect("failed to write cusparselt_sys.rs");
-    }
-
-    fn locate_header() -> Option<PathBuf> {
-        let mut candidates: Vec<PathBuf> = [
-            std::env::var_os("CUSPARSELT_INCLUDE_DIR").map(PathBuf::from),
-            std::env::var_os("CUDA_PATH").map(|p| PathBuf::from(p).join("include")),
-            Some(PathBuf::from("/usr/local/cuda/include")),
-            Some(PathBuf::from("/usr/local/cuda-12.9/include")),
-            Some(PathBuf::from("/usr/local/cuda-12.8/include")),
-            Some(PathBuf::from("/usr/include")),
-            Some(PathBuf::from("/opt/nvidia/cusparselt/include")),
-        ]
-        .into_iter()
-        .flatten()
-        .map(|d| d.join("cusparseLt.h"))
-        .collect();
-        candidates.extend(python_cusparselt_dirs("include").map(|d| d.join("cusparseLt.h")));
-        candidates.into_iter().find(|p| p.exists())
     }
 
     fn emit_link_directives() {
@@ -492,75 +365,6 @@ mod cusparselt {
         }
     }
 
-    fn cuda_include_dirs() -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        if let Some(p) = std::env::var_os("CUDA_PATH") {
-            let root = PathBuf::from(p);
-            out.push(root.join("include"));
-            out.push(root.join("targets/x86_64-linux/include"));
-        }
-        for c in [
-            "/usr/local/cuda/include",
-            "/usr/local/cuda/targets/x86_64-linux/include",
-            "/usr/local/cuda-12.9/include",
-            "/usr/local/cuda-12.9/targets/x86_64-linux/include",
-            "/usr/local/cuda-12.8/include",
-            "/usr/local/cuda-12.8/targets/x86_64-linux/include",
-            "/usr/local/cuda-13.1/include",
-            "/usr/local/cuda-13.1/targets/x86_64-linux/include",
-            "/usr/include",
-        ] {
-            let p = PathBuf::from(c);
-            if p.exists() {
-                out.push(p);
-            }
-        }
-        dedup_existing(out)
-    }
-
-    fn cxx_include_dirs() -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        if let Ok(dir) = std::env::var("CXX_INCLUDE_DIR") {
-            out.push(PathBuf::from(dir));
-        }
-        out.extend(cxx_compiler_include_dirs());
-        dedup_existing(out)
-    }
-
-    fn cxx_compiler_include_dirs() -> Vec<PathBuf> {
-        for compiler in ["c++", "clang++", "g++"] {
-            let Ok(output) = std::process::Command::new(compiler)
-                .args(["-E", "-x", "c++", "-", "-v"])
-                .stdin(std::process::Stdio::null())
-                .output()
-            else {
-                continue;
-            };
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let mut capture = false;
-            let mut dirs = Vec::new();
-            for line in stderr.lines() {
-                if line.contains("#include <...> search starts here:") {
-                    capture = true;
-                    continue;
-                }
-                if line.contains("End of search list.") {
-                    break;
-                }
-                if capture {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        dirs.push(PathBuf::from(trimmed));
-                    }
-                }
-            }
-            if !dirs.is_empty() {
-                return dirs;
-            }
-        }
-        Vec::new()
-    }
-
     fn python_cusparselt_dirs(kind: &str) -> impl Iterator<Item = PathBuf> {
         let mut roots = Vec::new();
         if let Some(home) = std::env::var_os("HOME") {
@@ -587,16 +391,5 @@ mod cusparselt {
             }
         }
         out.into_iter().filter(|p| p.exists())
-    }
-
-    fn dedup_existing(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        for path in paths {
-            if !path.exists() || out.iter().any(|seen| seen == &path) {
-                continue;
-            }
-            out.push(path);
-        }
-        out
     }
 }
