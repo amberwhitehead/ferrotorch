@@ -441,44 +441,44 @@ impl<T: Float> Module<T> for Dropout<T> {
         // GPU fast path: run dropout kernel entirely on device using the
         // Philox CBRNG. This integrates with the global GPU RNG state so
         // that gradient checkpointing can reproduce identical masks.
-        if input.is_cuda() {
-            if let Some(backend) = ferrotorch_core::gpu_dispatch::gpu_backend() {
-                let threshold = (self.p * u32::MAX as f64) as u32;
-                let scale_f32 = 1.0f32 / (1.0 - self.p as f32);
+        if input.is_cuda()
+            && let Some(backend) = ferrotorch_core::gpu_dispatch::gpu_backend()
+        {
+            let threshold = (self.p * u32::MAX as f64) as u32;
+            let scale_f32 = 1.0f32 / (1.0 - self.p as f32);
 
-                let (handle, rng_state) =
-                    backend.dropout_philox_f32(input.gpu_handle()?, threshold, scale_f32)?;
+            let (handle, rng_state) =
+                backend.dropout_philox_f32(input.gpu_handle()?, threshold, scale_f32)?;
 
-                // For backward, we need the mask. Regenerate it from the saved
-                // Philox RNG state using the same deterministic hash that the
-                // GPU kernel uses. This is reproducible across checkpoint
-                // save/restore because the Philox state is deterministic.
-                if is_grad_enabled() && input.requires_grad() {
-                    let scaled_mask_vec = philox_dropout_mask(numel, threshold, scale, &rng_state);
-                    // Upload the mask to the input's device so the
-                    // backward `mul` runs on-device without a CPU
-                    // round-trip.
-                    let mask_cpu = Tensor::from_storage(
-                        TensorStorage::cpu(scaled_mask_vec),
-                        input.shape().to_vec(),
-                        false,
-                    )?;
-                    let scaled_mask = mask_cpu.to(input.device())?;
-                    return Tensor::from_operation(
-                        TensorStorage::gpu(handle),
-                        input.shape().to_vec(),
-                        Arc::new(DropoutBackward {
-                            input: input.clone(),
-                            scaled_mask,
-                        }),
-                    );
-                } else {
-                    return Tensor::from_storage(
-                        TensorStorage::gpu(handle),
-                        input.shape().to_vec(),
-                        false,
-                    );
-                }
+            // For backward, we need the mask. Regenerate it from the saved
+            // Philox RNG state using the same deterministic hash that the
+            // GPU kernel uses. This is reproducible across checkpoint
+            // save/restore because the Philox state is deterministic.
+            if is_grad_enabled() && input.requires_grad() {
+                let scaled_mask_vec = philox_dropout_mask(numel, threshold, scale, &rng_state);
+                // Upload the mask to the input's device so the
+                // backward `mul` runs on-device without a CPU
+                // round-trip.
+                let mask_cpu = Tensor::from_storage(
+                    TensorStorage::cpu(scaled_mask_vec),
+                    input.shape().to_vec(),
+                    false,
+                )?;
+                let scaled_mask = mask_cpu.to(input.device())?;
+                return Tensor::from_operation(
+                    TensorStorage::gpu(handle),
+                    input.shape().to_vec(),
+                    Arc::new(DropoutBackward {
+                        input: input.clone(),
+                        scaled_mask,
+                    }),
+                );
+            } else {
+                return Tensor::from_storage(
+                    TensorStorage::gpu(handle),
+                    input.shape().to_vec(),
+                    false,
+                );
             }
         }
 
@@ -2555,47 +2555,55 @@ mod tests {
     /// [keep,keep,keep,keep,DROP,keep,DROP,DROP].
     #[test]
     fn test_dropout2d_seed42_matches_torch() {
-        let want = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0, 0.0, 0.0];
-        ferrotorch_core::rng::manual_seed(42);
-        let d = Dropout2d::<f32>::new(0.5).unwrap();
-        let y = d.forward(&ones_shape_t(&[1, 8, 1, 1])).unwrap();
-        assert_eq!(y.data().unwrap(), &want);
+        ferrotorch_core::rng::with_default_rng_test_lock(|| {
+            let want = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0, 0.0, 0.0];
+            ferrotorch_core::rng::manual_seed(42);
+            let d = Dropout2d::<f32>::new(0.5).unwrap();
+            let y = d.forward(&ones_shape_t(&[1, 8, 1, 1])).unwrap();
+            assert_eq!(y.data().unwrap(), &want);
+        });
     }
 
     /// `torch.manual_seed(42); F.dropout1d(ones(1,6,3),0.5,True)` per-channel
     /// -> [2,2,2,2,0,2], broadcast over the length-3 dim.
     #[test]
     fn test_dropout1d_seed42_matches_torch() {
-        let want = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0];
-        ferrotorch_core::rng::manual_seed(42);
-        let d = Dropout1d::<f32>::new(0.5).unwrap();
-        let y = d.forward(&ones_shape_t(&[1, 6, 3])).unwrap();
-        let data = y.data().unwrap();
-        let per_chan: Vec<f32> = (0..6).map(|c| data[c * 3]).collect();
-        assert_eq!(per_chan.as_slice(), &want);
+        ferrotorch_core::rng::with_default_rng_test_lock(|| {
+            let want = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0];
+            ferrotorch_core::rng::manual_seed(42);
+            let d = Dropout1d::<f32>::new(0.5).unwrap();
+            let y = d.forward(&ones_shape_t(&[1, 6, 3])).unwrap();
+            let data = y.data().unwrap();
+            let per_chan: Vec<f32> = (0..6).map(|c| data[c * 3]).collect();
+            assert_eq!(per_chan.as_slice(), &want);
+        });
     }
 
     /// `torch.manual_seed(42); F.dropout3d(ones(1,6,1,1,1),0.5,True)` per-channel
     /// -> [2,2,2,2,0,2].
     #[test]
     fn test_dropout3d_seed42_matches_torch() {
-        let want = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0];
-        ferrotorch_core::rng::manual_seed(42);
-        let d = Dropout3d::<f32>::new(0.5).unwrap();
-        let y = d.forward(&ones_shape_t(&[1, 6, 1, 1, 1])).unwrap();
-        assert_eq!(y.data().unwrap(), &want);
+        ferrotorch_core::rng::with_default_rng_test_lock(|| {
+            let want = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0];
+            ferrotorch_core::rng::manual_seed(42);
+            let d = Dropout3d::<f32>::new(0.5).unwrap();
+            let y = d.forward(&ones_shape_t(&[1, 6, 1, 1, 1])).unwrap();
+            assert_eq!(y.data().unwrap(), &want);
+        });
     }
 
     /// Two seeded `Dropout2d` forwards under the SAME `manual_seed(42)` produce
     /// the SAME mask (MT19937 reset on manual_seed; no system-time entropy).
     #[test]
     fn test_dropout2d_reproducible_under_manual_seed() {
-        let d = Dropout2d::<f32>::new(0.5).unwrap();
-        ferrotorch_core::rng::manual_seed(42);
-        let y1 = d.forward(&ones_shape_t(&[1, 64, 1, 1])).unwrap();
-        ferrotorch_core::rng::manual_seed(42);
-        let y2 = d.forward(&ones_shape_t(&[1, 64, 1, 1])).unwrap();
-        assert_eq!(y1.data().unwrap(), y2.data().unwrap());
+        ferrotorch_core::rng::with_default_rng_test_lock(|| {
+            let d = Dropout2d::<f32>::new(0.5).unwrap();
+            ferrotorch_core::rng::manual_seed(42);
+            let y1 = d.forward(&ones_shape_t(&[1, 64, 1, 1])).unwrap();
+            ferrotorch_core::rng::manual_seed(42);
+            let y2 = d.forward(&ones_shape_t(&[1, 64, 1, 1])).unwrap();
+            assert_eq!(y1.data().unwrap(), y2.data().unwrap());
+        });
     }
 
     /// `torch.manual_seed(42); nn.AlphaDropout(0.5).train()(ones(10))`
@@ -2604,32 +2612,36 @@ mod tests {
     /// alpha = 1.7580993408473766.
     #[test]
     fn test_alpha_dropout_seed42_matches_torch() {
-        let want = [
-            1.6655989, 1.6655989, 1.6655989, 1.6655989, -0.7791939, 1.6655989, -0.7791939,
-            -0.7791939, 1.6655989, 1.6655989,
-        ];
-        ferrotorch_core::rng::manual_seed(42);
-        let d = AlphaDropout::<f32>::new(0.5).unwrap();
-        let y = d.forward(&ones_shape_t(&[10])).unwrap();
-        let got = y.data().unwrap();
-        for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
-            assert!((g - w).abs() < 1e-4, "elem {i}: got {g} want {w}");
-        }
+        ferrotorch_core::rng::with_default_rng_test_lock(|| {
+            let want = [
+                1.6655989, 1.6655989, 1.6655989, 1.6655989, -0.7791939, 1.6655989, -0.7791939,
+                -0.7791939, 1.6655989, 1.6655989,
+            ];
+            ferrotorch_core::rng::manual_seed(42);
+            let d = AlphaDropout::<f32>::new(0.5).unwrap();
+            let y = d.forward(&ones_shape_t(&[10])).unwrap();
+            let got = y.data().unwrap();
+            for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+                assert!((g - w).abs() < 1e-4, "elem {i}: got {g} want {w}");
+            }
+        });
     }
 
     /// `torch.manual_seed(42); nn.FeatureAlphaDropout(0.5).train()(ones(1,6,1,1))`
     /// per-channel -> [1.6655989 ×4, -0.7791939, 1.6655989].
     #[test]
     fn test_feature_alpha_dropout_seed42_matches_torch() {
-        let want = [
-            1.6655989, 1.6655989, 1.6655989, 1.6655989, -0.7791939, 1.6655989,
-        ];
-        ferrotorch_core::rng::manual_seed(42);
-        let d = FeatureAlphaDropout::<f32>::new(0.5).unwrap();
-        let y = d.forward(&ones_shape_t(&[1, 6, 1, 1])).unwrap();
-        let got = y.data().unwrap();
-        for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
-            assert!((g - w).abs() < 1e-4, "elem {i}: got {g} want {w}");
-        }
+        ferrotorch_core::rng::with_default_rng_test_lock(|| {
+            let want = [
+                1.6655989, 1.6655989, 1.6655989, 1.6655989, -0.7791939, 1.6655989,
+            ];
+            ferrotorch_core::rng::manual_seed(42);
+            let d = FeatureAlphaDropout::<f32>::new(0.5).unwrap();
+            let y = d.forward(&ones_shape_t(&[1, 6, 1, 1])).unwrap();
+            let got = y.data().unwrap();
+            for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+                assert!((g - w).abs() < 1e-4, "elem {i}: got {g} want {w}");
+            }
+        });
     }
 }

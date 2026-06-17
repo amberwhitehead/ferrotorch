@@ -968,7 +968,7 @@ impl GLU {
         }
 
         let last_dim = shape[ndim - 1];
-        if last_dim % 2 != 0 {
+        if !last_dim.is_multiple_of(2) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "GLU requires the last dimension to be even, got {}",

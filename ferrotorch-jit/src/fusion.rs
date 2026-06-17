@@ -3,20 +3,18 @@
 //!
 //! The fusion engine intercepts tensor operations, buffers sequences of
 //! elementwise ops, and executes them as a single fused operation on the CPU
-//! via [`FusedChain::execute_cpu`]. PTX code generators are also provided —
+//! via [`FusedChain::execute_cpu`]. PTX code generators are also provided:
 //! [`FusedChain::generate_ptx`] / [`FusedChain::generate_ptx_named`] for f32
-//! (direct PTX emission with `.f32` arithmetic and `*.approx.f32`
-//! transcendentals) and [`FusedChain::generate_cuda_source_f64_named`] for
-//! f64 (CUDA C source compiled via NVRTC + libdevice at apply time, since
-//! PTX has no `*.approx.f64` hardware instructions).
+//! and [`FusedChain::generate_ptx_f64_named`] for f64. The f64 path emits
+//! Rust-owned PTX math fragments directly; it does not compile CUDA C.
 //!
 //! Tensor-level [`apply_fused`] runs on the CPU by default and — when the
 //! `cuda` feature is enabled — dispatches CUDA inputs through
 //! [`fusion_gpu::apply_fused_gpu`](crate::fusion_gpu::apply_fused_gpu),
-//! which compiles the chain's PTX (f32 directly or f64 via NVRTC),
-//! caches the resulting `CudaFunction` in `ferrotorch-gpu::module_cache`,
-//! launches it on the input's device, and returns a device-resident
-//! Tensor. Without the `cuda` feature, CUDA inputs return
+//! which loads the chain's Rust-generated PTX, caches the resulting
+//! `CudaFunction` in `ferrotorch-gpu::module_cache`, launches it on the
+//! input's device, and returns a device-resident Tensor. Without the `cuda`
+//! feature, CUDA inputs return
 //! [`FerrotorchError::NotImplementedOnCuda`](ferrotorch_core::error::FerrotorchError::NotImplementedOnCuda)
 //! with an op message asking the caller to build with `--features cuda`.
 //!
@@ -41,12 +39,12 @@
 //! | REQ-2 | SHIPPED | `pub struct FusedChain`; consumer: re-export at `lib.rs:103-107` + `fusion_gpu.rs:38` (every `apply_fused_gpu` takes `&FusedChain`). |
 //! | REQ-3 | SHIPPED | `pub fn execute_cpu` on `impl FusedChain`; consumer: `pub fn apply_fused` in this file calls `chain.execute_cpu(data)?` in the CPU arm. |
 //! | REQ-4 | SHIPPED | `pub fn generate_ptx` + `pub fn generate_ptx_named`; consumer: `fusion_gpu.rs:117` `let ptx = chain.generate_ptx_named(FUSED_F32_KERNEL_NAME)?;` in the f32 GPU path. |
-//! | REQ-5 | SHIPPED | `pub fn generate_cuda_source_f64_named`; consumer: `fusion_gpu.rs:196` `let cuda_source = chain.generate_cuda_source_f64_named(FUSED_F64_KERNEL_NAME)?;` in the f64 GPU path. |
+//! | REQ-5 | SHIPPED | `pub fn generate_ptx_f64_named`; consumer: `fusion_gpu.rs` f64 GPU path. |
 //! | REQ-6 | SHIPPED | `pub fn generate_c`; consumer: re-export at `lib.rs:103-107` (grandfathered boundary public API per goal.md S5). |
 //! | REQ-7 | SHIPPED | `pub fn apply_fused`; consumer: re-export at `lib.rs:103-107` — canonical tensor-level entry point. |
 //! | REQ-8 | SHIPPED | `pub fn with_fusion` + `pub fn is_fusion_enabled` + thread-local `FUSION_ENABLED`; consumer: re-export at `lib.rs:103-107`. |
 //! | REQ-9 | SHIPPED | `pub enum ReductionKind` + `pub fn generate_reduction_c` + `pub fn generate_reduction_ptx`; consumer: re-export at `lib.rs:103-107`. |
-//! | REQ-10 | SHIPPED | `fn validate_identifier`; consumer: invoked by every public emitter in this file (`generate_ptx_named`, `generate_cuda_source_f64_named`, `generate_c`, `generate_reduction_c`, `generate_reduction_ptx`). |
+//! | REQ-10 | SHIPPED | `fn validate_identifier`; consumer: invoked by every public emitter in this file (`generate_ptx_named`, `generate_ptx_f64_named`, `generate_c`, `generate_reduction_c`, `generate_reduction_ptx`). |
 //! | REQ-11 | SHIPPED | `pub fn estimate_numel_for_inputs` + `pub fn estimate_matmul_dims`; consumer: re-export at `lib.rs:103-107`. |
 
 use std::cell::Cell;
@@ -57,6 +55,12 @@ use ferrotorch_core::error::FerrotorchResult;
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::Tensor;
 use num_traits;
+
+use crate::codegen_gpu::{
+    emit_ptx_f64_exp_inplace, emit_ptx_f64_gelu_tanh_inplace, emit_ptx_f64_log_inplace,
+    emit_ptx_f64_math_reg_decls, emit_ptx_f64_pow_const, emit_ptx_f64_sigmoid_inplace,
+    emit_ptx_f64_silu_inplace, emit_ptx_f64_tanh_inplace, ptx_f64_const_literal,
+};
 
 // ---------------------------------------------------------------------------
 // Thread-local fusion flag
@@ -338,7 +342,7 @@ impl FusedChain {
 
         // Register declarations.
         let mut reg_decls = String::from(
-            "    .reg .u32 %tid, %bid, %bdim, %n_reg;\n\
+            "    .reg .u32 %r_tid, %bid, %bdim, %n_reg;\n\
              \x20   .reg .u64 %in, %out, %off;\n\
              \x20   .reg .f32 %val;\n\
              \x20   .reg .pred %p;",
@@ -501,13 +505,13 @@ impl FusedChain {
 
     mov.u32 %bid, %ctaid.x;
     mov.u32 %bdim, %ntid.x;
-    mov.u32 %tid, %tid.x;
-    mad.lo.u32 %tid, %bid, %bdim, %tid;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
 
-    setp.ge.u32 %p, %tid, %n_reg;
+    setp.ge.u32 %p, %r_tid, %n_reg;
     @%p bra DONE;
 
-    cvt.u64.u32 %off, %tid;
+    cvt.u64.u32 %off, %r_tid;
     shl.b64 %off, %off, 2;
 
     add.u64 %in, %in, %off;
@@ -526,30 +530,11 @@ DONE:
         ))
     }
 
-    /// Generate a CUDA C `__global__` kernel that applies this fused chain
-    /// elementwise on `double` (f64) inputs. The kernel signature is:
-    ///
-    /// ```c
-    /// __global__ void <kernel_name>(const double* in, double* out, int n)
-    /// ```
-    ///
-    /// This is the source string consumed by the f64 GPU path
-    /// (`fusion_gpu::apply_fused_gpu_f64_internal`). It is compiled to PTX
-    /// at apply time by [`crate::nvrtc::compile_cuda_source_to_ptx`], which
-    /// links libdevice (`__nv_exp`, `__nv_log`, `__nv_tanh`, ...) — PTX has
-    /// no `*.approx.f64` hardware instructions for transcendentals, so
-    /// emitting raw f64 PTX would be invalid; NVRTC + libdevice is the
-    /// correct lowering (precedent: [`crate::codegen_gpu`]'s f64
-    /// transcendental path, #748 / #749).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ferrotorch_core::error::FerrotorchError::InvalidArgument`]
-    /// if the chain contains a binary op (Add/Sub/Mul/Div) or if
-    /// `kernel_name` is not a valid C identifier.
-    pub fn generate_cuda_source_f64_named(&self, kernel_name: &str) -> FerrotorchResult<String> {
+    /// Like [`generate_ptx_named`](Self::generate_ptx_named), but emits an
+    /// f64 PTX kernel. Transcendentals are Rust-owned PTX math fragments rather
+    /// than CUDA C or NVRTC output.
+    pub fn generate_ptx_f64_named(&self, kernel_name: &str) -> FerrotorchResult<String> {
         validate_identifier(kernel_name)?;
-
         for op in &self.ops {
             if matches!(
                 op,
@@ -557,84 +542,120 @@ DONE:
             ) {
                 return Err(ferrotorch_core::error::FerrotorchError::InvalidArgument {
                     message: format!(
-                        "generate_cuda_source_f64_named: binary op '{op}' in unary FusedChain \
-                         requires a second input pointer and cannot be lowered to a \
-                         single-input kernel"
+                        "generate_ptx_f64_named: binary op '{op}' in unary FusedChain requires a \
+                         second input pointer and cannot be lowered to a single-input PTX kernel"
                     ),
                 });
             }
         }
 
-        let mut body_lines: Vec<String> = Vec::new();
+        let needs_math = self.ops.iter().any(|op| {
+            matches!(
+                op,
+                FusedOp::Sigmoid
+                    | FusedOp::Tanh
+                    | FusedOp::Gelu
+                    | FusedOp::Silu
+                    | FusedOp::Exp
+                    | FusedOp::Log
+                    | FusedOp::Pow(_)
+            )
+        });
+        let needs_zero = self.ops.iter().any(|op| matches!(op, FusedOp::Relu));
+
+        let mut reg_decls = String::from(
+            "    .reg .u32 %r_tid, %bid, %bdim, %n_reg;\n\
+             \x20   .reg .u64 %in, %out, %off;\n\
+             \x20   .reg .f64 %val;\n\
+             \x20   .reg .pred %p;\n",
+        );
+        if needs_zero {
+            reg_decls.push_str("    .reg .f64 %zero;\n");
+        }
+        if needs_math {
+            emit_ptx_f64_math_reg_decls(&mut reg_decls);
+        }
+
+        let mut body = String::new();
+        if needs_zero {
+            body.push_str("    mov.f64 %zero, 0d0000000000000000;\n");
+        }
         for op in &self.ops {
             match op {
                 FusedOp::Add | FusedOp::Sub | FusedOp::Mul | FusedOp::Div => {
                     unreachable!("binary ops rejected by early validation");
                 }
                 FusedOp::Neg => {
-                    body_lines.push("        val = -val;".into());
+                    body.push_str("    neg.f64 %val, %val;\n");
                 }
                 FusedOp::Relu => {
-                    // fmax(double, double) — libdevice resolves under NVRTC.
-                    body_lines.push("        val = (val > 0.0) ? val : 0.0;".into());
+                    body.push_str("    max.f64 %val, %val, %zero;\n");
                 }
-                FusedOp::Sigmoid => {
-                    body_lines.push("        val = 1.0 / (1.0 + exp(-val));".into());
-                }
-                FusedOp::Tanh => {
-                    body_lines.push("        val = tanh(val);".into());
-                }
-                FusedOp::Gelu => {
-                    // Tanh-based GELU approximation, matching the CPU and
-                    // f32 PTX paths for cross-backend bit-stability.
-                    body_lines.push("        {".into());
-                    body_lines.push("            double x3 = val * val * val;".into());
-                    body_lines.push(
-                        "            double inner = 0.7978845608028654 * (val + 0.044715 * x3);"
-                            .into(),
-                    );
-                    body_lines.push("            val = val * 0.5 * (1.0 + tanh(inner));".into());
-                    body_lines.push("        }".into());
-                }
-                FusedOp::Silu => {
-                    body_lines.push(
-                        "        { double s = 1.0 / (1.0 + exp(-val)); val = val * s; }".into(),
-                    );
-                }
+                FusedOp::Sigmoid => emit_ptx_f64_sigmoid_inplace(&mut body, "%val"),
+                FusedOp::Tanh => emit_ptx_f64_tanh_inplace(&mut body, "%val"),
+                FusedOp::Gelu => emit_ptx_f64_gelu_tanh_inplace(&mut body, "%val"),
+                FusedOp::Silu => emit_ptx_f64_silu_inplace(&mut body, "%val"),
                 FusedOp::Sqrt => {
-                    body_lines.push("        val = sqrt(val);".into());
+                    body.push_str("    sqrt.rn.f64 %val, %val;\n");
                 }
                 FusedOp::Abs => {
-                    body_lines.push("        val = fabs(val);".into());
+                    body.push_str("    abs.f64 %val, %val;\n");
                 }
-                FusedOp::Exp => {
-                    body_lines.push("        val = exp(val);".into());
-                }
-                FusedOp::Log => {
-                    body_lines.push("        val = log(val);".into());
-                }
-                FusedOp::Pow(p) => {
-                    body_lines.push(format!("        val = pow(val, {p:.17});"));
-                }
+                FusedOp::Exp => emit_ptx_f64_exp_inplace(&mut body, "%val"),
+                FusedOp::Log => emit_ptx_f64_log_inplace(&mut body, "%val"),
+                FusedOp::Pow(p) => emit_ptx_f64_pow_const(&mut body, "%val", *p),
                 FusedOp::ScalarMul(s) => {
-                    body_lines.push(format!("        val = val * {s:.17};"));
+                    body.push_str(&format!(
+                        "    mul.f64 %val, %val, {};\n",
+                        ptx_f64_const_literal(*s)
+                    ));
                 }
                 FusedOp::ScalarAdd(s) => {
-                    body_lines.push(format!("        val = val + {s:.17};"));
+                    body.push_str(&format!(
+                        "    add.f64 %val, %val, {};\n",
+                        ptx_f64_const_literal(*s)
+                    ));
                 }
             }
         }
-        let body = body_lines.join("\n");
 
         Ok(format!(
             "\
-__global__ void {kernel_name}(const double* in, double* out, int n) {{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {{
-        double val = in[i];
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry {kernel_name}(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 n
+) {{
+{reg_decls}
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %n_reg, [n];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %n_reg;
+    @%p bra DONE;
+
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 3;
+
+    add.u64 %in, %in, %off;
+    add.u64 %out, %out, %off;
+
+    ld.global.f64 %val, [%in];
+
 {body}
-        out[i] = val;
-    }}
+    st.global.f64 [%out], %val;
+
+DONE:
+    ret;
 }}
 "
         ))
@@ -909,7 +930,7 @@ CAS_LOOP:
     .param .u64 out_ptr,
     .param .u32 n
 ) {{
-    .reg .u32 %tid, %bid, %bdim, %gid, %n_reg, %s;
+    .reg .u32 %r_tid, %bid, %bdim, %gid, %n_reg, %s;
     .reg .u64 %in, %out, %off;
     .reg .f32 %val, %shared_val;
     .reg .pred %p, %p2;{extra_regs}
@@ -922,8 +943,8 @@ CAS_LOOP:
 
     mov.u32 %bid, %ctaid.x;
     mov.u32 %bdim, %ntid.x;
-    mov.u32 %tid, %tid.x;
-    mad.lo.u32 %gid, %bid, %bdim, %tid;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %gid, %bid, %bdim, %r_tid;
 
     // Load element or identity if out of bounds
     setp.lt.u32 %p, %gid, %n_reg;
@@ -937,7 +958,7 @@ CAS_LOOP:
 
 SKIP_LOAD:
     // Store to shared memory
-    cvt.u64.u32 %off, %tid;
+    cvt.u64.u32 %off, %r_tid;
     shl.b64 %off, %off, 2;
     st.shared.f32 [sdata + %off], %val;
     bar.sync 0;
@@ -948,15 +969,15 @@ REDUCE_LOOP:
     setp.eq.u32 %p2, %s, 0;
     @%p2 bra REDUCE_DONE;
 
-    setp.lt.u32 %p, %tid, %s;
+    setp.lt.u32 %p, %r_tid, %s;
     @!%p bra REDUCE_SKIP;
 
     // Load partner value
-    add.u32 %gid, %tid, %s;
+    add.u32 %gid, %r_tid, %s;
     cvt.u64.u32 %off, %gid;
     shl.b64 %off, %off, 2;
     ld.shared.f32 %shared_val, [sdata + %off];
-    cvt.u64.u32 %off, %tid;
+    cvt.u64.u32 %off, %r_tid;
     shl.b64 %off, %off, 2;
     ld.shared.f32 %val, [sdata + %off];
     {reduce_op} %val, %val, %shared_val;
@@ -969,7 +990,7 @@ REDUCE_SKIP:
 
 REDUCE_DONE:
     // Thread 0 of each block atomically adds its partial result to output[0]
-    setp.ne.u32 %p, %tid, 0;
+    setp.ne.u32 %p, %r_tid, 0;
     @%p bra BLOCK_DONE;
 
     ld.shared.f32 %val, [sdata];
@@ -1230,10 +1251,9 @@ pub fn estimate_matmul_dims(
 /// [`fusion_gpu::apply_fused_gpu`](crate::fusion_gpu::apply_fused_gpu),
 /// which:
 ///
-/// 1. Generates the chain's PTX — f32 directly via
+/// 1. Generates the chain's PTX — f32 via
 ///    [`FusedChain::generate_ptx_named`], f64 via
-///    [`FusedChain::generate_cuda_source_f64_named`] + NVRTC-libdevice
-///    (`crate::nvrtc::compile_cuda_source_to_ptx`).
+///    [`FusedChain::generate_ptx_f64_named`].
 /// 2. Compiles + caches the resulting `CudaFunction` via
 ///    `ferrotorch-gpu::module_cache::get_or_compile_owned` (keyed on
 ///    PTX hash × device ordinal so each unique chain pays the
@@ -1252,8 +1272,7 @@ pub fn estimate_matmul_dims(
 ///   but the crate was built without the `cuda` feature, or the chain's
 ///   dtype is neither f32 nor f64.
 /// - [`FerrotorchError::InvalidArgument`]: chain contains a binary op
-///   (Add/Sub/Mul/Div) on the GPU path, or CUDA launch / NVRTC compile
-///   failure.
+///   (Add/Sub/Mul/Div) on the GPU path, or CUDA PTX load / launch failure.
 /// - Propagates any error from [`FusedChain::execute_cpu`] or
 ///   [`Tensor::from_storage`] on the CPU path (including the
 ///   `GpuTensorNotAccessible` / `InvalidArgument` errors `Tensor::data`
@@ -1548,6 +1567,64 @@ mod tests {
         let ptx = chain.generate_ptx().unwrap();
         assert!(ptx.contains("lg2.approx.f32"));
         assert!(ptx.contains("ex2.approx.f32"));
+    }
+
+    #[test]
+    fn test_ptx_generation_f64_transcendentals_are_rust_ptx() {
+        let mut chain = FusedChain::new();
+        chain.push(FusedOp::Exp);
+        chain.push(FusedOp::Log);
+        chain.push(FusedOp::Sigmoid);
+        chain.push(FusedOp::Tanh);
+        chain.push(FusedOp::Gelu);
+        chain.push(FusedOp::Silu);
+        chain.push(FusedOp::Pow(3.0));
+
+        let ptx = chain
+            .generate_ptx_f64_named("fused_chain_f64_test")
+            .unwrap();
+
+        assert!(ptx.contains(".visible .entry fused_chain_f64_test"));
+        assert!(ptx.contains("ld.global.f64 %val"));
+        assert!(ptx.contains("st.global.f64 [%out], %val;"));
+        assert!(
+            ptx.contains("fma.rn.f64"),
+            "f64 PTX must contain inlined polynomial math:\n{ptx}"
+        );
+        assert!(
+            !ptx.contains("__global__")
+                && !ptx.contains("exp(")
+                && !ptx.contains("tanh(")
+                && !ptx.contains(".extern")
+                && !ptx.contains("call"),
+            "f64 FusedChain must not emit CUDA C or external libdevice callouts:\n{ptx}"
+        );
+        assert!(
+            !ptx.contains("ex2.approx.f32")
+                && !ptx.contains("lg2.approx.f32")
+                && !ptx.contains("cvt.f32.f64")
+                && !ptx.contains("cvt.f64.f32"),
+            "f64 FusedChain PTX must not demote through f32:\n{ptx}"
+        );
+    }
+
+    #[test]
+    fn test_ptx_generation_f64_rejects_binary_op_chain() {
+        let mut chain = FusedChain::new();
+        chain.push(FusedOp::Add);
+
+        let err = chain
+            .generate_ptx_f64_named("fused_chain_f64_bad")
+            .expect_err("binary op chain must be rejected before PTX generation");
+        match err {
+            ferrotorch_core::error::FerrotorchError::InvalidArgument { message } => {
+                assert!(
+                    message.contains("binary op"),
+                    "error must explain binary op rejection; got: {message}"
+                );
+            }
+            other => panic!("expected InvalidArgument for binary op chain, got {other:?}"),
+        }
     }
 
     // -- apply_fused (tensor-level) -------------------------------------------

@@ -84,14 +84,13 @@ fn emit_rust_stmt(out: &mut String, stmt: &LoopIR, indent: usize) {
             }
 
             // Add parallelism hint for large outer loops
-            if let Expr::IntConst(n) = end {
-                if *n as usize >= PARALLEL_THRESHOLD
-                    && body.iter().any(|s| matches!(s, LoopIR::Loop { .. }))
-                {
-                    out.push_str(&format!(
-                        "{pad}// NOTE: candidate for rayon par_iter (n={n})\n"
-                    ));
-                }
+            if let Expr::IntConst(n) = end
+                && *n as usize >= PARALLEL_THRESHOLD
+                && body.iter().any(|s| matches!(s, LoopIR::Loop { .. }))
+            {
+                out.push_str(&format!(
+                    "{pad}// NOTE: candidate for rayon par_iter (n={n})\n"
+                ));
             }
 
             out.push_str(&format!(
@@ -223,10 +222,10 @@ fn emit_rust_expr(expr: &Expr) -> String {
 /// A buffer named `out` or `output` maps to `output`.
 /// Anything else is used verbatim.
 fn rust_buffer_access(name: &str) -> String {
-    if let Some(suffix) = name.strip_prefix("in") {
-        if let Ok(idx) = suffix.parse::<usize>() {
-            return format!("inputs[{idx}]");
-        }
+    if let Some(suffix) = name.strip_prefix("in")
+        && let Ok(idx) = suffix.parse::<usize>()
+    {
+        return format!("inputs[{idx}]");
     }
     if name == "out" || name == "output" {
         return "output".into();

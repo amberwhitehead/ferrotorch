@@ -9,10 +9,9 @@
 //!
 //! Closes the f32-and-f64 `apply_fused` GPU dispatch loop:
 //!
-//! 1. Generate the chain's PTX — f32 directly via
+//! 1. Generate the chain's PTX — f32 via
 //!    [`crate::fusion::FusedChain::generate_ptx_named`], f64 via
-//!    [`crate::fusion::FusedChain::generate_cuda_source_f64_named`] →
-//!    [`crate::nvrtc::compile_cuda_source_to_ptx`].
+//!    [`crate::fusion::FusedChain::generate_ptx_f64_named`].
 //! 2. Cache / compile the resulting `CudaFunction` via
 //!    [`ferrotorch_gpu::module_cache::get_or_compile_owned`].
 //! 3. Launch the kernel on the input tensor's stream and wrap the result
@@ -28,11 +27,11 @@
 //! |---|---|---|
 //! | REQ-1 | SHIPPED | `pub fn apply_fused_gpu`; consumer: `ferrotorch-jit/src/fusion.rs:1253` `return crate::fusion_gpu::apply_fused_gpu(input, chain);` inside `pub fn apply_fused` (gated `#[cfg(feature = "cuda")]`). |
 //! | REQ-2 | SHIPPED | `fn apply_fused_gpu_f32_internal` + `const FUSED_F32_KERNEL_NAME`; consumer: invoked by `apply_fused_gpu` when `TypeId::of::<T>() == TypeId::of::<f32>()`; that public fn is called from `fusion.rs:1253`. |
-//! | REQ-3 | SHIPPED | `fn apply_fused_gpu_f64_internal` + `const FUSED_F64_KERNEL_NAME` + `n <= i32::MAX` check; consumer: invoked by `apply_fused_gpu` for f64; called from `fusion.rs:1253`. |
+//! | REQ-3 | SHIPPED | `fn apply_fused_gpu_f64_internal` + `const FUSED_F64_KERNEL_NAME`; consumer: invoked by `apply_fused_gpu` for f64; called from `fusion.rs`. |
 //! | REQ-4 | SHIPPED | `module_cache::get_or_compile_owned(...)` calls in both internal dispatchers; consumer: every `apply_fused_gpu` call (via `fusion.rs:1253`) routes through this cache (keyed on PTX hash and device ordinal). |
 //! | REQ-5 | SHIPPED | `#![allow(unsafe_code)]` at module top + per-block `// SAFETY:` comments; consumer: every launch flows through one of the two SAFETY-documented `unsafe { ... }` blocks. |
 //! | REQ-6 | SHIPPED | `fn wrap_output_f32` + `fn wrap_output_f64` building `GpuBufferHandle::new(..., device_ordinal, ..., DType::F32 or DType::F64)`; consumer: invoked at the end of each internal dispatcher; the result is what `fusion.rs:1253` returns. |
-//! | REQ-7 | SHIPPED | binary-op rejection inside `generate_ptx_named` / `generate_cuda_source_f64_named` propagated through both internal dispatchers; consumer: callers receive via `fusion.rs:1253`. |
+//! | REQ-7 | SHIPPED | binary-op rejection inside `generate_ptx_named` / `generate_ptx_f64_named` propagated through both internal dispatchers; consumer: callers receive via `fusion.rs`. |
 //! | REQ-8 | SHIPPED | `fn launch_cfg` with `BLOCK = 256` + `n > u32::MAX` check; consumer: invoked by both internal dispatchers. |
 
 use std::any::TypeId;
@@ -70,7 +69,7 @@ use crate::fusion::FusedChain;
 /// - [`FerrotorchError::InvalidArgument`] on:
 ///   - chain validation failures (binary ops in a unary chain) raised by
 ///     the PTX generators, or
-///   - cudarc driver / NVRTC errors during launch.
+///   - cudarc driver errors during PTX load or launch.
 ///
 /// # Caller contract
 ///
@@ -159,7 +158,7 @@ fn apply_fused_gpu_f32_internal<T: Float>(
     //   and cannot alias `buffer`; we hold its only `&mut` reference.
     // - `n_u32` is `n as u32`. `launch_cfg(n)` returns Err if `n` would
     //   overflow u32, so the cast cannot wrap.
-    // - The kernel's PTX bound check (`setp.ge.u32 %p, %tid, %n_reg; @%p
+    // - The kernel's PTX bound check (`setp.ge.u32 %p, %r_tid, %n_reg; @%p
     //   bra DONE;`) skips threads beyond `n`, so every read of `buffer[i]`
     //   and every write of `out_buf[i]` stays within `[0, n)`.
     // - All three arg references live for the duration of the
@@ -205,12 +204,7 @@ fn apply_fused_gpu_f64_internal<T: Float>(
 
     let device = GpuDevice::new(handle.device_ordinal()).map_err(|e| map_gpu_err(&e))?;
 
-    // Generate CUDA C source then compile to PTX via NVRTC + libdevice.
-    let cuda_source = chain.generate_cuda_source_f64_named(FUSED_F64_KERNEL_NAME)?;
-    let ptx = crate::nvrtc::compile_cuda_source_to_ptx(&cuda_source, FUSED_F64_KERNEL_NAME)
-        .map_err(|e| FerrotorchError::InvalidArgument {
-            message: format!("apply_fused: NVRTC compile of f64 chain failed: {e}"),
-        })?;
+    let ptx = chain.generate_ptx_f64_named(FUSED_F64_KERNEL_NAME)?;
 
     let func = module_cache::get_or_compile_owned(
         device.context(),
@@ -226,31 +220,18 @@ fn apply_fused_gpu_f64_internal<T: Float>(
 
     let cfg = launch_cfg(n)?;
     let stream = device.stream();
-    // NVRTC-emitted f64 kernel signature is `(const double*, double*,
-    // int)` from `FusedChain::generate_cuda_source_f64_named`; the `int n`
-    // parameter is fed by `n as i32`.  `launch_cfg(n)` already enforces
-    // `n <= u32::MAX`; we further check the i32 range here so the
-    // signed-int parameter does not wrap.
-    if n > i32::MAX as usize {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "apply_fused: f64 chain length {n} exceeds i32::MAX; \
-                 split the tensor or extend the kernel signature"
-            ),
-        });
-    }
-    let n_i32 = n as i32;
+    let n_u32 = n as u32;
 
     // SAFETY:
-    // - `func` was just compiled from CUDA C whose `__global__` signature
-    //   is `(const double* in, double* out, int n)` (see
-    //   `FusedChain::generate_cuda_source_f64_named`); `extern "C"` in
-    //   the NVRTC preprocessing keeps the entry-point name unmangled
-    //   (see `crate::nvrtc::compile_cuda_source_to_ptx`).
+    // - `func` was just loaded from Rust-generated PTX whose entry-point ABI
+    //   is `(in_ptr: u64, out_ptr: u64, n: u32)` as fixed by
+    //   `FusedChain::generate_ptx_f64_named`.
     // - `buffer` is a non-null `CudaBuffer<f64>` of length `n` on
     //   `device`.
     // - `out_buf` was freshly allocated and exclusively borrowed.
-    // - The kernel guards every load/store with `if (i < n)`.
+    // - `n_u32` is `n as u32`. `launch_cfg(n)` returns Err if `n` would
+    //   overflow u32, so the cast cannot wrap.
+    // - The kernel guards every load/store with a PTX `tid >= n` branch.
     // - All arg references live for the duration of `.launch(cfg)?`.
     unsafe {
         use cudarc::driver::PushKernelArg;
@@ -258,7 +239,7 @@ fn apply_fused_gpu_f64_internal<T: Float>(
             .launch_builder(&func)
             .arg(buffer.inner())
             .arg(out_buf.inner_mut())
-            .arg(&n_i32)
+            .arg(&n_u32)
             .launch(cfg)
             .map_err(|e| FerrotorchError::InvalidArgument {
                 message: format!("apply_fused: f64 kernel launch failed: {e}"),
@@ -306,7 +287,9 @@ fn wrap_output_f32<T: Float>(
 ) -> FerrotorchResult<Tensor<T>> {
     debug_assert_eq!(TypeId::of::<T>(), TypeId::of::<f32>());
     let len = buf.len();
-    let handle = GpuBufferHandle::new(Box::new(buf), device_ordinal, len, DType::F32);
+    // SAFETY: `buf` is a `CudaBuffer<f32>`, `len` is its element count,
+    // and the handle tag names that same scalar type/device ordinal.
+    let handle = unsafe { GpuBufferHandle::new(Box::new(buf), device_ordinal, len, DType::F32) };
     let storage: TensorStorage<T> = TensorStorage::gpu(handle);
     Tensor::from_storage(storage, shape, false)
 }
@@ -319,7 +302,9 @@ fn wrap_output_f64<T: Float>(
 ) -> FerrotorchResult<Tensor<T>> {
     debug_assert_eq!(TypeId::of::<T>(), TypeId::of::<f64>());
     let len = buf.len();
-    let handle = GpuBufferHandle::new(Box::new(buf), device_ordinal, len, DType::F64);
+    // SAFETY: `buf` is a `CudaBuffer<f64>`, `len` is its element count,
+    // and the handle tag names that same scalar type/device ordinal.
+    let handle = unsafe { GpuBufferHandle::new(Box::new(buf), device_ordinal, len, DType::F64) };
     let storage: TensorStorage<T> = TensorStorage::gpu(handle);
     Tensor::from_storage(storage, shape, false)
 }
@@ -438,7 +423,7 @@ mod tests {
 
     #[test]
     fn apply_fused_gpu_f64_with_transcendentals() {
-        // Same chain on f64: routed through NVRTC + libdevice.
+        // Same chain on f64: routed through Rust-owned PTX math fragments.
         let input_data: Vec<f64> = vec![0.5, 1.0, 2.0, 3.0, 0.25];
         let Some(cuda_tensor) = cuda_or_skip::<f64>(input_data.clone(), vec![5]) else {
             return;
@@ -453,8 +438,8 @@ mod tests {
         let host_out = gpu_out.cpu().expect("readback").data().unwrap().to_vec();
         let expected = cpu_reference::<f64>(&input_data, &chain);
 
-        // libdevice's f64 transcendentals are IEEE-accurate to within
-        // a few ULPs; tight tolerance is fine.
+        // The f64 PTX path keeps all math in f64 registers and avoids
+        // demote-promote; keep the tolerance tight enough to catch f32 leaks.
         for (i, (g, e)) in host_out.iter().zip(expected.iter()).enumerate() {
             assert!(
                 (g - e).abs() < 1e-9,

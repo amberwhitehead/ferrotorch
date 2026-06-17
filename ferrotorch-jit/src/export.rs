@@ -242,25 +242,25 @@ impl ExportedProgram {
                                 ),
                             });
                         }
-                        if let Some(min_v) = min {
-                            if actual < *min_v {
-                                return Err(FerrotorchError::InvalidArgument {
-                                    message: format!(
-                                        "ExportedProgram guard: input {i} dim {dim_idx} \
-                                         ('{name}') = {actual} is below declared min {min_v}"
-                                    ),
-                                });
-                            }
+                        if let Some(min_v) = min
+                            && actual < *min_v
+                        {
+                            return Err(FerrotorchError::InvalidArgument {
+                                message: format!(
+                                    "ExportedProgram guard: input {i} dim {dim_idx} \
+                                     ('{name}') = {actual} is below declared min {min_v}"
+                                ),
+                            });
                         }
-                        if let Some(max_v) = max {
-                            if actual > *max_v {
-                                return Err(FerrotorchError::InvalidArgument {
-                                    message: format!(
-                                        "ExportedProgram guard: input {i} dim {dim_idx} \
-                                         ('{name}') = {actual} is above declared max {max_v}"
-                                    ),
-                                });
-                            }
+                        if let Some(max_v) = max
+                            && actual > *max_v
+                        {
+                            return Err(FerrotorchError::InvalidArgument {
+                                message: format!(
+                                    "ExportedProgram guard: input {i} dim {dim_idx} \
+                                     ('{name}') = {actual} is above declared max {max_v}"
+                                ),
+                            });
                         }
                     }
                 }
@@ -744,15 +744,15 @@ pub fn export_with_dynamic_shapes<T: Float, M: Module<T>>(
         for (dim_idx, (dim_spec, &example_dim)) in
             spec.shape.iter().zip(example.shape().iter()).enumerate()
         {
-            if let DimSpec::Static(s) = dim_spec {
-                if *s != example_dim {
-                    return Err(FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "export_with_dynamic_shapes: input {i} dim {dim_idx} \
-                             DimSpec::Static({s}) != example dim {example_dim}"
-                        ),
-                    });
-                }
+            if let DimSpec::Static(s) = dim_spec
+                && *s != example_dim
+            {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "export_with_dynamic_shapes: input {i} dim {dim_idx} \
+                         DimSpec::Static({s}) != example dim {example_dim}"
+                    ),
+                });
             }
         }
     }

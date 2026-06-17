@@ -442,7 +442,7 @@ impl<T: Float> RotaryPositionEmbedding<T> {
         convention: RoPEConvention,
         scaling: RoPEScaling,
     ) -> FerrotorchResult<Self> {
-        if dim == 0 || dim % 2 != 0 {
+        if dim == 0 || !dim.is_multiple_of(2) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!("RoPE dim must be even and positive, got {dim}"),
             });
@@ -455,12 +455,11 @@ impl<T: Float> RotaryPositionEmbedding<T> {
         if let RoPEScaling::Linear { factor }
         | RoPEScaling::NtkAware { factor, .. }
         | RoPEScaling::Yarn { factor, .. } = scaling
+            && !(factor.is_finite() && factor > 0.0)
         {
-            if !(factor.is_finite() && factor > 0.0) {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: format!("RoPE scaling factor must be finite and > 0, got {factor}"),
-                });
-            }
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("RoPE scaling factor must be finite and > 0, got {factor}"),
+            });
         }
 
         let half_dim = dim / 2;

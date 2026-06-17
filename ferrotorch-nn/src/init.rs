@@ -616,7 +616,7 @@ pub fn dirac_<T: Float>(param: &mut Parameter<T>, groups: usize) -> FerrotorchRe
     let out_channels = shape[0];
     let in_channels_per_group = shape[1];
 
-    if out_channels % groups != 0 {
+    if !out_channels.is_multiple_of(groups) {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
                 "dirac_: out_channels ({out_channels}) must be divisible by groups ({groups})"

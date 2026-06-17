@@ -653,10 +653,10 @@ impl<T: Float> Optimizer<T> for Muon<T> {
                 let tensor = Tensor::from_storage(TensorStorage::cpu(cast_data), shape, false)?;
                 self.momentum_buffers.insert(key.clone(), tensor);
             }
-            if let Some(step_data) = entry.get("step") {
-                if let Some(&step_val) = step_data.first() {
-                    self.step_count.insert(key.clone(), step_val as u64);
-                }
+            if let Some(step_data) = entry.get("step")
+                && let Some(&step_val) = step_data.first()
+            {
+                self.step_count.insert(key.clone(), step_val as u64);
             }
         }
         Ok(())

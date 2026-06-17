@@ -37,7 +37,7 @@ note = "Internal ID allocator; exercised implicitly by every add_input / add_con
 [[exclusion]]
 path = "ferrotorch_jit::codegen_gpu::GpuCodegen"
 reason = "live-env"
-note = "GPU codegen requires the `cuda` feature and an NVIDIA device. Covered in f64_libdevice_correctness.rs under #[cfg(feature = \"cuda\")]."
+note = "Live GPU execution requires the `cuda` feature and an NVIDIA device. Covered in f64_rust_ptx_correctness.rs under #[cfg(feature = \"cuda\")]."
 
 [[exclusion]]
 path = "ferrotorch_jit::codegen_jit::JitCompiledKernel"

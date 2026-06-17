@@ -241,25 +241,25 @@ impl Guard {
                                 ),
                             });
                         }
-                        if let Some(min) = sd.min {
-                            if g < min {
-                                return Err(FerrotorchError::InvalidArgument {
-                                    message: format!(
-                                        "SymbolicTracedModule guard: input {i} dim {dim} = {g} \
-                                         is below min {min}"
-                                    ),
-                                });
-                            }
+                        if let Some(min) = sd.min
+                            && g < min
+                        {
+                            return Err(FerrotorchError::InvalidArgument {
+                                message: format!(
+                                    "SymbolicTracedModule guard: input {i} dim {dim} = {g} \
+                                     is below min {min}"
+                                ),
+                            });
                         }
-                        if let Some(max) = sd.max {
-                            if g > max {
-                                return Err(FerrotorchError::InvalidArgument {
-                                    message: format!(
-                                        "SymbolicTracedModule guard: input {i} dim {dim} = {g} \
-                                         is above max {max}"
-                                    ),
-                                });
-                            }
+                        if let Some(max) = sd.max
+                            && g > max
+                        {
+                            return Err(FerrotorchError::InvalidArgument {
+                                message: format!(
+                                    "SymbolicTracedModule guard: input {i} dim {dim} = {g} \
+                                     is above max {max}"
+                                ),
+                            });
                         }
                     }
                     None => {
@@ -351,10 +351,10 @@ pub fn patch_reshape_for_symbolic_dims(
     let mut symbolic_values: Vec<usize> = Vec::new();
     for (i, shape) in trace_shapes.iter().enumerate() {
         for sd in signature.symbolic_dims_for(i) {
-            if let Some(&v) = shape.get(sd.dim_index) {
-                if !symbolic_values.contains(&v) {
-                    symbolic_values.push(v);
-                }
+            if let Some(&v) = shape.get(sd.dim_index)
+                && !symbolic_values.contains(&v)
+            {
+                symbolic_values.push(v);
             }
         }
     }

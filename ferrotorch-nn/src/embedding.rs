@@ -501,13 +501,11 @@ impl<T: Float> GradFn<T> for EmbeddingBagSumWeightedBackward<T> {
             // weight-grad scale: psw, optionally divided by torch's sorted-neighbour
             // frequency divisor (EmbeddingBag.cpp:1569-1571).
             let mut w_scale = psw_i;
-            if let Some(d) = &divisor_of_index {
-                if let Some(&div) = d.get(&idx) {
-                    if div > 0 {
-                        w_scale =
-                            w_scale / T::from(div).unwrap_or_else(<T as num_traits::One>::one);
-                    }
-                }
+            if let Some(d) = &divisor_of_index
+                && let Some(&div) = d.get(&idx)
+                && div > 0
+            {
+                w_scale = w_scale / T::from(div).unwrap_or_else(<T as num_traits::One>::one);
             }
             let gw_row = &mut grad_weight[idx * dim..(idx + 1) * dim];
             for (gw, &go) in gw_row.iter_mut().zip(go_row.iter()) {
@@ -625,14 +623,14 @@ impl<T: Float> Embedding<T> {
         padding_idx: Option<usize>,
     ) -> FerrotorchResult<Self> {
         // Validate padding_idx.
-        if let Some(idx) = padding_idx {
-            if idx >= num_embeddings {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: format!(
-                        "padding_idx {idx} is out of range for num_embeddings {num_embeddings}"
-                    ),
-                });
-            }
+        if let Some(idx) = padding_idx
+            && idx >= num_embeddings
+        {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "padding_idx {idx} is out of range for num_embeddings {num_embeddings}"
+                ),
+            });
         }
 
         // Initialize weight from N(0, 1).
@@ -686,14 +684,14 @@ impl<T: Float> Embedding<T> {
         let num_embeddings = weight.shape()[0];
         let embedding_dim = weight.shape()[1];
 
-        if let Some(idx) = padding_idx {
-            if idx >= num_embeddings {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: format!(
-                        "padding_idx {idx} is out of range for num_embeddings {num_embeddings}"
-                    ),
-                });
-            }
+        if let Some(idx) = padding_idx
+            && idx >= num_embeddings
+        {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "padding_idx {idx} is out of range for num_embeddings {num_embeddings}"
+                ),
+            });
         }
 
         Ok(Self {
@@ -1170,14 +1168,14 @@ impl<T: Float> EmbeddingBag<T> {
         mode: EmbeddingBagMode,
         padding_idx: Option<usize>,
     ) -> FerrotorchResult<Self> {
-        if let Some(idx) = padding_idx {
-            if idx >= num_embeddings {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: format!(
-                        "padding_idx {idx} must be within num_embeddings {num_embeddings}"
-                    ),
-                });
-            }
+        if let Some(idx) = padding_idx
+            && idx >= num_embeddings
+        {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "padding_idx {idx} must be within num_embeddings {num_embeddings}"
+                ),
+            });
         }
 
         let mut weight = Parameter::zeros(&[num_embeddings, embedding_dim])?;

@@ -242,9 +242,10 @@ impl Dtype {
 /// `Dtype::F32` vs `Dtype::F64`. Each fusion group lowers to a kernel of a
 /// single scalar width; mixed-dtype groups are rejected.
 ///
-/// PTX transcendentals (`exp`, `log`, `sqrt`, `tanh`, `sigmoid`, `gelu`,
-/// `silu`) remain f32-only because PTX has no `*.approx.f64` instructions.
-/// F64 transcendentals via libdevice are tracked as a Phase-2 follow-up.
+/// PTX f32 transcendentals use `*.approx.f32` instructions. F64
+/// transcendentals (`exp`, `log`, `sqrt`, `tanh`, `sigmoid`, `gelu`, `silu`)
+/// lower through Rust-owned f64 PTX math fragments instead of demoting to f32
+/// or invoking a runtime compiler.
 ///
 /// `#[non_exhaustive]` reserves the right to add fields without a
 /// major-version bump. External crates must construct values through the

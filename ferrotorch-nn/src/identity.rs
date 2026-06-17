@@ -394,7 +394,12 @@ impl ChannelShuffle {
 
         let shape = input.shape();
         let channels = shape[1];
-        if channels % self.groups != 0 {
+        if self.groups == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "ChannelShuffle: groups must be positive".into(),
+            });
+        }
+        if !channels.is_multiple_of(self.groups) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "ChannelShuffle: channels ({}) must be divisible by groups ({})",

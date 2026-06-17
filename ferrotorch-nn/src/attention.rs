@@ -134,14 +134,14 @@ impl<T: Float> MultiheadAttention<T> {
                 message: "embed_dim, num_heads, num_kv_heads must be positive".into(),
             });
         }
-        if embed_dim % num_heads != 0 {
+        if !embed_dim.is_multiple_of(num_heads) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})"
                 ),
             });
         }
-        if num_heads % num_kv_heads != 0 {
+        if !num_heads.is_multiple_of(num_kv_heads) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"

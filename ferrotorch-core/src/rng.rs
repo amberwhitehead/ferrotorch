@@ -287,6 +287,52 @@ fn lock_default_rng() -> MutexGuard<'static, Generator> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[cfg(debug_assertions)]
+struct DefaultRngTestSerialGuard {
+    guard: Option<MutexGuard<'static, ()>>,
+}
+
+#[cfg(debug_assertions)]
+impl Drop for DefaultRngTestSerialGuard {
+    fn drop(&mut self) {
+        if self.guard.is_some() {
+            DEFAULT_RNG_TEST_SERIAL_ACTIVE.with(|active| active.set(false));
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static DEFAULT_RNG_TEST_SERIAL_ACTIVE: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(debug_assertions)]
+fn default_rng_test_serial_guard() -> DefaultRngTestSerialGuard {
+    if DEFAULT_RNG_TEST_SERIAL_ACTIVE.with(|active| active.get()) {
+        return DefaultRngTestSerialGuard { guard: None };
+    }
+
+    static TEST_SERIAL_LOCK: Mutex<()> = Mutex::new(());
+    let guard = TEST_SERIAL_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    DEFAULT_RNG_TEST_SERIAL_ACTIVE.with(|active| active.set(true));
+    DefaultRngTestSerialGuard { guard: Some(guard) }
+}
+
+/// Run a debug/test-only critical section over the process-global default RNG.
+///
+/// This is for tests that need `manual_seed(seed)` and one or more following
+/// random operations to be observed as one deterministic transaction under the
+/// parallel Rust test harness. Release builds do not expose or pay for this
+/// helper.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn with_default_rng_test_lock<R>(f: impl FnOnce() -> R) -> R {
+    let _guard = default_rng_test_serial_guard();
+    f()
+}
+
 /// Set the process-global default CPU RNG seed — mirrors `torch.manual_seed`
 /// at `torch/random.py:46-86`.
 ///
@@ -297,6 +343,9 @@ fn lock_default_rng() -> MutexGuard<'static, Generator> {
 /// by subsequently scheduled random creation on any thread, matching PyTorch's
 /// process-global CPU default generator.
 pub fn manual_seed(seed: u64) {
+    #[cfg(debug_assertions)]
+    let _serial = default_rng_test_serial_guard();
+
     {
         let _access = DefaultRngAccessGuard::enter("manual_seed");
         lock_default_rng().manual_seed(seed);
@@ -321,6 +370,9 @@ pub fn manual_seed(seed: u64) {
 /// and by `ferrotorch-nn` initialisers that don't take an explicit
 /// [`Generator`].
 pub fn with_thread_rng<R>(f: impl FnOnce(&mut Generator) -> R) -> R {
+    #[cfg(debug_assertions)]
+    let _serial = default_rng_test_serial_guard();
+
     let _access = DefaultRngAccessGuard::enter("with_thread_rng");
     let mut rng = lock_default_rng();
     f(&mut rng)
@@ -329,6 +381,9 @@ pub fn with_thread_rng<R>(f: impl FnOnce(&mut Generator) -> R) -> R {
 /// Clone the process-global CPU RNG state, including cached normal samples.
 /// Checkpointing uses this to mirror `torch.get_rng_state()`.
 pub(crate) fn thread_rng_state() -> Generator {
+    #[cfg(debug_assertions)]
+    let _serial = default_rng_test_serial_guard();
+
     let _access = DefaultRngAccessGuard::enter("thread_rng_state");
     lock_default_rng().clone()
 }
@@ -337,6 +392,9 @@ pub(crate) fn thread_rng_state() -> Generator {
 /// inside a fork-style guard so stochastic recomputation sees the same stream
 /// as the original forward while the caller's surrounding stream is restored.
 pub(crate) fn set_thread_rng_state(state: Generator) {
+    #[cfg(debug_assertions)]
+    let _serial = default_rng_test_serial_guard();
+
     let _access = DefaultRngAccessGuard::enter("set_thread_rng_state");
     *lock_default_rng() = state;
 }

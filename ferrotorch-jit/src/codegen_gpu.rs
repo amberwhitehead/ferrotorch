@@ -5,8 +5,8 @@
 //! - [`GpuCodegen::generate_cuda_source`] — emits CUDA C with `__global__`
 //!   kernels, `blockIdx`/`threadIdx` mapping, and shared memory for reductions.
 //! - [`GpuCodegen::generate_ptx_source`] — emits PTX assembly targeting
-//!   `sm_52` with hand-scheduled register allocation and approximate
-//!   transcendental instructions (f32 only — see below).
+//!   `sm_52` with hand-scheduled register allocation, f32 hardware
+//!   approximations, and Rust-owned f64 polynomial math sequences.
 //!
 //! Both generators convert the outermost loop of a `LoopIR` program into
 //! thread-parallel GPU execution while keeping inner loops as thread-local
@@ -23,22 +23,11 @@
 //! Transcendentals (`exp`, `log`, `sqrt`, `tanh`, `sigmoid`, `relu`, `abs`,
 //! `gelu`, `silu`, `pow`) on the PTX path use direct hardware approximation
 //! instructions (`ex2.approx.f32`, `lg2.approx.f32`, `rcp.approx.f32`,
-//! `sqrt.approx.f32`) for f32. PTX has no `*.approx.f64` instructions, so
-//! emitting them on f64 is invalid; demote-promote silently loses precision.
-//!
-//! For f64 transcendentals the codegen routes through NVRTC, which links
-//! libdevice (`__nv_exp`, `__nv_log`, `__nv_sqrt`, `__nv_tanh`, `__nv_pow`,
-//! ...) and returns a PTX module with libdevice's polynomial expansions
-//! inlined. The CUDA C frontend already supports f64 transcendentals via
-//! the host math headers (`exp(double)`, `tanh(double)`, ...), so the f64
-//! transcendental PTX path is implemented as `generate_cuda_source` →
-//! NVRTC-compile → PTX — gated behind the `cuda` feature flag (default
-//! off). Without the feature, f64 transcendentals still return
-//! `Err(JitError::Unsupported { op, dtype })` per `rust-gpu-discipline` §3
-//! (`PyTorch` parity: structured `NotImplementedError`-like error).
-//!
-//! See `nvrtc_libdevice` below for the integration; closes #748 follow-up
-//! to #729.
+//! `sqrt.approx.f32`) for f32. PTX has no `*.approx.f64` instructions, so f64
+//! lowers through Rust-owned PTX sequences: `sqrt.rn.f64` for square root and
+//! inline Cody-Waite / Horner f64 `exp` and `log` fragments for the composite
+//! ops. The f64 path never demotes to f32 and never routes through CUDA C or
+//! NVRTC.
 //!
 //! ## REQ status (per `.design/ferrotorch-jit/codegen_gpu.md`)
 //!
@@ -48,7 +37,7 @@
 //! | REQ-2 | SHIPPED | `pub fn generate_cuda_source`; consumer: `codegen.rs:853` (GpuCuda arm) + `codegen.rs:886` (identity-graph fallback). |
 //! | REQ-3 | SHIPPED | `pub fn generate_ptx_source`; consumer: `codegen.rs:857` (GpuPtx arm) + `codegen.rs:893` (identity-graph fallback). |
 //! | REQ-4 | SHIPPED | per-dtype emission helpers switched on `Dtype`; consumer: every emission via `codegen.rs:853` / `codegen.rs:857` passes the resolved group dtype. |
-//! | REQ-5 | SHIPPED | f64-transcendental rejection inside `pub fn generate_ptx_source`; consumer: `codegen.rs:857` propagates via `.map_err(FerrotorchError::from)`. |
+//! | REQ-5 | SHIPPED | f64 transcendental PTX lowering inside `emit_ptx_unary_op` / `emit_ptx_f64_*`; consumer: `codegen.rs:857` propagates via `.map_err(FerrotorchError::from)`. |
 //! | REQ-6 | SHIPPED | `fn emit_cuda_reduction` + PTX shared-memory tree reduction; consumer: transitively via `codegen.rs:853` / `codegen.rs:857`. |
 //! | REQ-7 | SHIPPED | `tid` mapping + sequential `output[tid]` write pattern in `fn emit_cuda_elementwise`; consumer: transitively via `codegen.rs:853`. |
 //! | REQ-8 | SHIPPED | `pub fn generate_ptx_source(..., block_size, ...)` parameter; consumer: `codegen.rs:857` passes `self.block_size` from `InductorBackend::with_block_size`. |
@@ -541,11 +530,10 @@ impl GpuCodegen {
     ///
     /// The kernel operates on values of `dtype` (currently `f32` or `f64`);
     /// arithmetic, load/store, register declarations, and constant emission
-    /// all dispatch on `dtype`. Transcendentals
-    /// (`exp`/`log`/`sqrt`/`tanh`/`sigmoid`/`relu`/`abs`/`gelu`/`silu`)
-    /// use approximate instructions (`ex2.approx.f32`, `lg2.approx.f32`,
-    /// etc.) which exist only for f32 in PTX — see the module-level docs
-    /// for the policy.
+    /// all dispatch on `dtype`. F32 transcendentals use the existing hardware
+    /// approximation instructions (`ex2.approx.f32`, `lg2.approx.f32`, etc.).
+    /// F64 transcendentals lower to Rust-owned PTX math fragments and remain
+    /// fully device-resident.
     ///
     /// # Arguments
     ///
@@ -559,18 +547,9 @@ impl GpuCodegen {
     ///
     /// # Errors
     ///
-    /// When `dtype` is `F64` and the program contains a transcendental op:
-    /// - With the `cuda` feature enabled, the f64 path delegates to NVRTC
-    ///   which links libdevice (`__nv_exp`/`__nv_log`/...) and returns a
-    ///   PTX module with libdevice's polynomial expansions inlined.
-    /// - Without the `cuda` feature, returns
-    ///   `Err(JitError::Unsupported { op, dtype })` with a message naming
-    ///   the missing feature. This preserves the `rust-gpu-discipline` §3
-    ///   structured-rejection contract on builds without a CUDA toolkit.
-    ///
-    /// PTX itself has no `*.approx.f64` instructions, so the hand-written
-    /// f64 path always routes through NVRTC + libdevice when transcendentals
-    /// are present.
+    /// Returns [`JitError`] only for structurally unsupported IR. F64
+    /// transcendentals are emitted directly as PTX and do not require the
+    /// `cuda` feature because no runtime compiler is involved.
     pub fn generate_ptx_source(
         loops: &[LoopIR],
         fn_name: &str,
@@ -578,18 +557,6 @@ impl GpuCodegen {
         num_inputs: usize,
         dtype: Dtype,
     ) -> Result<String, JitError> {
-        // f64 transcendentals: PTX has no `*.approx.f64` hardware
-        // instructions, so the only correct path is libdevice (`__nv_exp`,
-        // `__nv_log`, ...). NVRTC handles libdevice resolution
-        // automatically when compiling CUDA C source. When the `cuda`
-        // feature is on we delegate; otherwise we return a structured
-        // error per rust-gpu-discipline §3.
-        if dtype == Dtype::F64 {
-            if let Some(op) = find_transcendental_op(loops) {
-                return f64_transcendental_ptx(loops, fn_name, num_inputs, op);
-            }
-        }
-
         let mut out = String::new();
         let dn = dtype.name(); // "f32" or "f64"
         // PTX register width and address-shift width. f32 = 4-byte stride;
@@ -614,10 +581,10 @@ impl GpuCodegen {
         out.push_str(") {\n");
 
         // Analyze what registers and operations we need
-        let needs = analyze_ptx_needs(loops);
+        let needs = analyze_ptx_needs(loops, dtype);
 
         // Register declarations
-        out.push_str("    .reg .u32 %tid, %bid, %bdim, %n_reg;\n");
+        out.push_str("    .reg .u32 %r_tid, %bid, %bdim, %n_reg;\n");
         out.push_str("    .reg .u64 %off;\n");
         for i in 0..num_inputs {
             out.push_str(&format!("    .reg .u64 %in{i};\n"));
@@ -639,6 +606,9 @@ impl GpuCodegen {
         if needs.needs_zero {
             out.push_str(&format!("    .reg .{dn} %zero;\n"));
         }
+        if needs.needs_f64_math {
+            emit_ptx_f64_math_reg_decls(&mut out);
+        }
 
         out.push('\n');
 
@@ -652,15 +622,15 @@ impl GpuCodegen {
         // Thread index: tid = ctaid.x * ntid.x + tid.x
         out.push_str("    mov.u32 %bid, %ctaid.x;\n");
         out.push_str("    mov.u32 %bdim, %ntid.x;\n");
-        out.push_str("    mov.u32 %tid, %tid.x;\n");
-        out.push_str("    mad.lo.u32 %tid, %bid, %bdim, %tid;\n\n");
+        out.push_str("    mov.u32 %r_tid, %tid.x;\n");
+        out.push_str("    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;\n\n");
 
         // Bounds check
-        out.push_str("    setp.ge.u32 %p, %tid, %n_reg;\n");
+        out.push_str("    setp.ge.u32 %p, %r_tid, %n_reg;\n");
         out.push_str("    @%p bra DONE;\n\n");
 
         // Compute byte offset (shift by log2(sizeof(scalar)))
-        out.push_str("    cvt.u64.u32 %off, %tid;\n");
+        out.push_str("    cvt.u64.u32 %off, %r_tid;\n");
         out.push_str(&format!("    shl.b64 %off, %off, {shl};\n\n"));
 
         // Add offset to base pointers
@@ -707,41 +677,60 @@ struct PtxNeeds {
     extra_scratch_regs: usize,
     needs_loop_regs: bool,
     needs_zero: bool,
+    needs_f64_math: bool,
 }
 
 /// Analyze the loop IR to determine what PTX registers are needed.
-fn analyze_ptx_needs(loops: &[LoopIR]) -> PtxNeeds {
+fn analyze_ptx_needs(loops: &[LoopIR], dtype: Dtype) -> PtxNeeds {
     let mut extra = 0usize;
     let mut needs_loop = false;
     let mut needs_zero = false;
+    let mut needs_f64_math = false;
 
-    analyze_ptx_needs_recursive(loops, &mut extra, &mut needs_loop, &mut needs_zero);
+    analyze_ptx_needs_recursive(
+        loops,
+        dtype,
+        &mut extra,
+        &mut needs_loop,
+        &mut needs_zero,
+        &mut needs_f64_math,
+    );
 
     PtxNeeds {
         extra_scratch_regs: extra,
         needs_loop_regs: needs_loop,
         needs_zero,
+        needs_f64_math,
     }
 }
 
 fn analyze_ptx_needs_recursive(
     stmts: &[LoopIR],
+    dtype: Dtype,
     extra: &mut usize,
     needs_loop: &mut bool,
     needs_zero: &mut bool,
+    needs_f64_math: &mut bool,
 ) {
     for stmt in stmts {
         match stmt {
             LoopIR::Loop { body, .. } => {
                 // Inner loops in PTX need loop registers
                 *needs_loop = true;
-                analyze_ptx_needs_recursive(body, extra, needs_loop, needs_zero);
+                analyze_ptx_needs_recursive(
+                    body,
+                    dtype,
+                    extra,
+                    needs_loop,
+                    needs_zero,
+                    needs_f64_math,
+                );
             }
             LoopIR::Store { value, .. }
             | LoopIR::Assign { value, .. }
             | LoopIR::Let { value, .. }
             | LoopIR::Accumulate { value, .. } => {
-                count_expr_regs(value, extra, needs_zero);
+                count_expr_regs(value, dtype, extra, needs_zero, needs_f64_math);
             }
             LoopIR::If {
                 condition,
@@ -749,16 +738,36 @@ fn analyze_ptx_needs_recursive(
                 else_body,
                 ..
             } => {
-                count_expr_regs(condition, extra, needs_zero);
-                analyze_ptx_needs_recursive(then_body, extra, needs_loop, needs_zero);
-                analyze_ptx_needs_recursive(else_body, extra, needs_loop, needs_zero);
+                count_expr_regs(condition, dtype, extra, needs_zero, needs_f64_math);
+                analyze_ptx_needs_recursive(
+                    then_body,
+                    dtype,
+                    extra,
+                    needs_loop,
+                    needs_zero,
+                    needs_f64_math,
+                );
+                analyze_ptx_needs_recursive(
+                    else_body,
+                    dtype,
+                    extra,
+                    needs_loop,
+                    needs_zero,
+                    needs_f64_math,
+                );
             }
             LoopIR::Comment(_) => {}
         }
     }
 }
 
-fn count_expr_regs(expr: &Expr, extra: &mut usize, needs_zero: &mut bool) {
+fn count_expr_regs(
+    expr: &Expr,
+    dtype: Dtype,
+    extra: &mut usize,
+    needs_zero: &mut bool,
+    needs_f64_math: &mut bool,
+) {
     match expr {
         Expr::UnaryOp { op, operand } => {
             match op {
@@ -774,21 +783,37 @@ fn count_expr_regs(expr: &Expr, extra: &mut usize, needs_zero: &mut bool) {
                 }
                 _ => {}
             }
-            count_expr_regs(operand, extra, needs_zero);
+            if dtype == Dtype::F64
+                && matches!(
+                    op,
+                    UnaryOpKind::Exp
+                        | UnaryOpKind::Log
+                        | UnaryOpKind::Sigmoid
+                        | UnaryOpKind::Tanh
+                        | UnaryOpKind::Gelu
+                        | UnaryOpKind::Silu
+                )
+            {
+                *needs_f64_math = true;
+            }
+            count_expr_regs(operand, dtype, extra, needs_zero, needs_f64_math);
         }
         Expr::BinOp { lhs, rhs, .. } => {
             *extra = (*extra).max(1);
-            count_expr_regs(lhs, extra, needs_zero);
-            count_expr_regs(rhs, extra, needs_zero);
+            count_expr_regs(lhs, dtype, extra, needs_zero, needs_f64_math);
+            count_expr_regs(rhs, dtype, extra, needs_zero, needs_f64_math);
         }
         Expr::FnCall { args, .. } => {
             *extra = (*extra).max(1);
+            if dtype == Dtype::F64 {
+                *needs_f64_math = true;
+            }
             for a in args {
-                count_expr_regs(a, extra, needs_zero);
+                count_expr_regs(a, dtype, extra, needs_zero, needs_f64_math);
             }
         }
         Expr::Index { index, .. } => {
-            count_expr_regs(index, extra, needs_zero);
+            count_expr_regs(index, dtype, extra, needs_zero, needs_f64_math);
         }
         _ => {}
     }
@@ -812,14 +837,11 @@ fn emit_ptx_body(out: &mut String, stmts: &[LoopIR], dtype: Dtype) {
                     match value {
                         Expr::Index { buffer, .. } => {
                             // If loading from a non-primary input, emit the load
-                            if buffer != "in0" {
-                                if let Some(idx) = buffer.strip_prefix("in") {
-                                    if idx.parse::<usize>().is_ok() {
-                                        out.push_str(&format!(
-                                            "    ld.global.{dn} %val, [%{buffer}];\n"
-                                        ));
-                                    }
-                                }
+                            if buffer != "in0"
+                                && let Some(idx) = buffer.strip_prefix("in")
+                                && idx.parse::<usize>().is_ok()
+                            {
+                                out.push_str(&format!("    ld.global.{dn} %val, [%{buffer}];\n"));
                             }
                             // else: primary input already loaded
                         }
@@ -930,19 +952,23 @@ fn emit_ptx_expr_to_reg(out: &mut String, expr: &Expr, dest: &str, dtype: Dtype)
         }
         Expr::FnCall { name, args } => {
             if name == "powf" && args.len() == 2 {
-                // x^p = 2^(p * log2(x)) — uses ex2/lg2 .approx instructions
-                // which exist only for .f32. f64 powf would have been
-                // rejected up front by `find_transcendental_op`.
-                debug_assert_eq!(
-                    dtype,
-                    Dtype::F32,
-                    "powf reached emission with non-f32 dtype despite f64 reject guard",
-                );
                 emit_ptx_expr_to_reg(out, &args[0], dest, dtype);
-                emit_ptx_expr_to_reg(out, &args[1], "%t0", dtype);
-                out.push_str(&format!("    lg2.approx.f32 %t1, {dest};\n"));
-                out.push_str("    mul.f32 %t1, %t1, %t0;\n");
-                out.push_str(&format!("    ex2.approx.f32 {dest}, %t1;\n"));
+                match dtype {
+                    Dtype::F32 => {
+                        emit_ptx_expr_to_reg(out, &args[1], "%t0", dtype);
+                        out.push_str(&format!("    lg2.approx.f32 %t1, {dest};\n"));
+                        out.push_str("    mul.f32 %t1, %t1, %t0;\n");
+                        out.push_str(&format!("    ex2.approx.f32 {dest}, %t1;\n"));
+                    }
+                    Dtype::F64 => {
+                        if let Expr::Const(exponent) = &args[1] {
+                            emit_ptx_f64_pow_const(out, dest, *exponent);
+                        } else {
+                            emit_ptx_expr_to_reg(out, &args[1], "%t0", dtype);
+                            emit_ptx_f64_pow_dynamic(out, dest, "%t0");
+                        }
+                    }
+                }
             } else {
                 // Generic: just put the first arg in dest
                 if let Some(arg) = args.first() {
@@ -954,13 +980,280 @@ fn emit_ptx_expr_to_reg(out: &mut String, expr: &Expr, dest: &str, dtype: Dtype)
     }
 }
 
+/// Emit the scratch-register block used by Rust-owned f64 PTX math fragments.
+pub(crate) fn emit_ptx_f64_math_reg_decls(out: &mut String) {
+    out.push_str(
+        "    .reg .f64 %f64_saved, %f64_hold, %f64_x, %f64_y, %f64_z, %f64_tmp, %f64_tmp2, %f64_tmp3, %f64_res;\n",
+    );
+    out.push_str("    .reg .f64 %f64_exp_nf, %f64_exp_r, %f64_exp_p, %f64_exp_scale;\n");
+    out.push_str(
+        "    .reg .f64 %f64_log_m, %f64_log_f, %f64_log_f2, %f64_log_s, %f64_log_p, %f64_log_nf;\n",
+    );
+    out.push_str("    .reg .s32 %f64_exp_ni;\n");
+    out.push_str("    .reg .s64 %f64_exp_ni64, %f64_exp_bits, %f64_log_exp64, %f64_pow_i64;\n");
+    out.push_str("    .reg .u64 %f64_xbits, %f64_mantissa_bits, %f64_bias_bits, %f64_sign_bits;\n");
+    out.push_str(
+        "    .reg .pred %f64_p_shift, %f64_p_nan, %f64_p_zero, %f64_p_neg, %f64_p_pos_inf, %f64_p_over, %f64_p_under, %f64_p_sub, %f64_p_pos, %f64_p_sign, %f64_p_int, %f64_p_odd;\n",
+    );
+}
+
+/// Format an f64 value as a PTX binary64 immediate.
+pub(crate) fn ptx_f64_const_literal(v: f64) -> String {
+    format!("0d{:016X}", v.to_bits())
+}
+
+fn f64_bits_eq(value: f64, expected: f64) -> bool {
+    value.to_bits() == expected.to_bits()
+}
+
+fn finite_integral_i64(value: f64) -> Option<i64> {
+    if !value.is_finite() || value.abs() > i64::MAX as f64 {
+        return None;
+    }
+    let truncated = value.trunc();
+    if truncated.to_bits() == value.to_bits() {
+        Some(value as i64)
+    } else {
+        None
+    }
+}
+
+/// Emit an in-place f64 `exp` approximation for `reg`.
+pub(crate) fn emit_ptx_f64_exp_inplace(out: &mut String, reg: &str) {
+    out.push_str(&format!("    setp.nan.f64 %f64_p_nan, {reg}, {reg};\n"));
+    out.push_str(&format!(
+        "    setp.gt.f64 %f64_p_over, {reg}, 0d40862E42FEFA39EF;\n"
+    ));
+    out.push_str(&format!(
+        "    setp.lt.f64 %f64_p_under, {reg}, 0dC0874910D52D3051;\n"
+    ));
+    out.push_str(&format!(
+        "    fma.rn.f64 %f64_exp_nf, {reg}, 0d3FF71547652B82FE, 0d3FE0000000000000;\n"
+    ));
+    out.push_str("    cvt.rmi.f64.f64 %f64_exp_nf, %f64_exp_nf;\n");
+    out.push_str("    cvt.rni.s32.f64 %f64_exp_ni, %f64_exp_nf;\n");
+    out.push_str(&format!(
+        "    fma.rn.f64 %f64_exp_r, %f64_exp_nf, 0dBFE62E42FEFA3800, {reg};\n"
+    ));
+    out.push_str("    fma.rn.f64 %f64_exp_r, %f64_exp_nf, 0dBD2EF35793C76730, %f64_exp_r;\n");
+    out.push_str("    mov.f64 %f64_exp_p, 0d3E5AE64567F544E4;\n");
+    out.push_str("    fma.rn.f64 %f64_exp_p, %f64_exp_p, %f64_exp_r, 0d3E927E4FB7789F5C;\n");
+    out.push_str("    fma.rn.f64 %f64_exp_p, %f64_exp_p, %f64_exp_r, 0d3EC71DE3A556C734;\n");
+    out.push_str("    fma.rn.f64 %f64_exp_p, %f64_exp_p, %f64_exp_r, 0d3EFA01A01A01A01A;\n");
+    out.push_str("    fma.rn.f64 %f64_exp_p, %f64_exp_p, %f64_exp_r, 0d3F2A01A01A01A01A;\n");
+    out.push_str("    fma.rn.f64 %f64_exp_p, %f64_exp_p, %f64_exp_r, 0d3F56C16C16C16C17;\n");
+    out.push_str("    fma.rn.f64 %f64_exp_p, %f64_exp_p, %f64_exp_r, 0d3F81111111111111;\n");
+    out.push_str("    fma.rn.f64 %f64_exp_p, %f64_exp_p, %f64_exp_r, 0d3FA5555555555555;\n");
+    out.push_str("    fma.rn.f64 %f64_exp_p, %f64_exp_p, %f64_exp_r, 0d3FC5555555555555;\n");
+    out.push_str("    fma.rn.f64 %f64_exp_p, %f64_exp_p, %f64_exp_r, 0d3FE0000000000000;\n");
+    out.push_str("    fma.rn.f64 %f64_exp_p, %f64_exp_p, %f64_exp_r, 0d3FF0000000000000;\n");
+    out.push_str(&format!(
+        "    fma.rn.f64 {reg}, %f64_exp_p, %f64_exp_r, 0d3FF0000000000000;\n"
+    ));
+    out.push_str("    cvt.s64.s32 %f64_exp_ni64, %f64_exp_ni;\n");
+    out.push_str("    add.s64 %f64_exp_ni64, %f64_exp_ni64, 1023;\n");
+    out.push_str("    shl.b64 %f64_exp_bits, %f64_exp_ni64, 52;\n");
+    out.push_str("    mov.b64 %f64_exp_scale, %f64_exp_bits;\n");
+    out.push_str(&format!("    mul.f64 {reg}, {reg}, %f64_exp_scale;\n"));
+    out.push_str(&format!(
+        "    @%f64_p_over mov.f64 {reg}, 0d7FF0000000000000;\n"
+    ));
+    out.push_str(&format!(
+        "    @%f64_p_under mov.f64 {reg}, 0d0000000000000000;\n"
+    ));
+    out.push_str(&format!(
+        "    @%f64_p_nan mov.f64 {reg}, 0d7FF8000000000000;\n"
+    ));
+}
+
+/// Emit an in-place f64 natural-log approximation for `reg`.
+pub(crate) fn emit_ptx_f64_log_inplace(out: &mut String, reg: &str) {
+    out.push_str(&format!("    mov.f64 %f64_saved, {reg};\n"));
+    out.push_str("    setp.nan.f64 %f64_p_nan, %f64_saved, %f64_saved;\n");
+    out.push_str("    setp.eq.f64 %f64_p_zero, %f64_saved, 0d0000000000000000;\n");
+    out.push_str("    setp.lt.f64 %f64_p_neg, %f64_saved, 0d0000000000000000;\n");
+    out.push_str("    setp.eq.f64 %f64_p_pos_inf, %f64_saved, 0d7FF0000000000000;\n");
+    out.push_str("    setp.gt.f64 %f64_p_pos, %f64_saved, 0d0000000000000000;\n");
+    out.push_str("    mov.f64 %f64_x, %f64_saved;\n");
+    out.push_str("    mov.b64 %f64_xbits, %f64_x;\n");
+    out.push_str("    shr.u64 %f64_log_exp64, %f64_xbits, 52;\n");
+    out.push_str("    and.b64 %f64_log_exp64, %f64_log_exp64, 2047;\n");
+    out.push_str("    setp.eq.s64 %f64_p_sub, %f64_log_exp64, 0;\n");
+    out.push_str("    and.pred %f64_p_sub, %f64_p_sub, %f64_p_pos;\n");
+    out.push_str("    @%f64_p_sub mul.f64 %f64_x, %f64_x, 0d4330000000000000;\n");
+    out.push_str("    mov.b64 %f64_xbits, %f64_x;\n");
+    out.push_str("    shr.u64 %f64_log_exp64, %f64_xbits, 52;\n");
+    out.push_str("    and.b64 %f64_log_exp64, %f64_log_exp64, 2047;\n");
+    out.push_str("    sub.s64 %f64_log_exp64, %f64_log_exp64, 1023;\n");
+    out.push_str("    @%f64_p_sub sub.s64 %f64_log_exp64, %f64_log_exp64, 52;\n");
+    out.push_str("    cvt.rn.f64.s64 %f64_log_nf, %f64_log_exp64;\n");
+    out.push_str("    mov.u64 %f64_bias_bits, 0x3FF0000000000000;\n");
+    out.push_str("    and.b64 %f64_mantissa_bits, %f64_xbits, 0x000FFFFFFFFFFFFF;\n");
+    out.push_str("    or.b64 %f64_mantissa_bits, %f64_mantissa_bits, %f64_bias_bits;\n");
+    out.push_str("    mov.b64 %f64_log_m, %f64_mantissa_bits;\n");
+    out.push_str("    setp.gt.f64 %f64_p_shift, %f64_log_m, 0d3FF6A09E667F3BCD;\n");
+    out.push_str("    @%f64_p_shift mul.f64 %f64_log_m, %f64_log_m, 0d3FE0000000000000;\n");
+    out.push_str("    @%f64_p_shift add.f64 %f64_log_nf, %f64_log_nf, 0d3FF0000000000000;\n");
+    out.push_str("    sub.f64 %f64_log_f, %f64_log_m, 0d3FF0000000000000;\n");
+    out.push_str("    add.f64 %f64_log_s, %f64_log_m, 0d3FF0000000000000;\n");
+    out.push_str("    div.rn.f64 %f64_log_f, %f64_log_f, %f64_log_s;\n");
+    out.push_str("    mul.f64 %f64_log_f2, %f64_log_f, %f64_log_f;\n");
+    out.push_str("    mov.f64 %f64_log_p, 0d3FB1111111111111;\n");
+    out.push_str("    fma.rn.f64 %f64_log_p, %f64_log_p, %f64_log_f2, 0d3FB3B13B13B13B14;\n");
+    out.push_str("    fma.rn.f64 %f64_log_p, %f64_log_p, %f64_log_f2, 0d3FB745D1745D1746;\n");
+    out.push_str("    fma.rn.f64 %f64_log_p, %f64_log_p, %f64_log_f2, 0d3FBC71C71C71C71C;\n");
+    out.push_str("    fma.rn.f64 %f64_log_p, %f64_log_p, %f64_log_f2, 0d3FC2492492492492;\n");
+    out.push_str("    fma.rn.f64 %f64_log_p, %f64_log_p, %f64_log_f2, 0d3FC999999999999A;\n");
+    out.push_str("    fma.rn.f64 %f64_log_p, %f64_log_p, %f64_log_f2, 0d3FD5555555555555;\n");
+    out.push_str("    fma.rn.f64 %f64_log_p, %f64_log_p, %f64_log_f2, 0d3FF0000000000000;\n");
+    out.push_str("    mul.f64 %f64_log_p, %f64_log_p, %f64_log_f;\n");
+    out.push_str("    add.f64 %f64_log_p, %f64_log_p, %f64_log_p;\n");
+    out.push_str(&format!(
+        "    fma.rn.f64 {reg}, %f64_log_nf, 0d3FE62E42FEFA3800, %f64_log_p;\n"
+    ));
+    out.push_str(&format!(
+        "    fma.rn.f64 {reg}, %f64_log_nf, 0d3D2EF35793C76730, {reg};\n"
+    ));
+    out.push_str(&format!(
+        "    @%f64_p_zero mov.f64 {reg}, 0dFFF0000000000000;\n"
+    ));
+    out.push_str(&format!(
+        "    @%f64_p_neg mov.f64 {reg}, 0d7FF8000000000000;\n"
+    ));
+    out.push_str(&format!(
+        "    @%f64_p_pos_inf mov.f64 {reg}, 0d7FF0000000000000;\n"
+    ));
+    out.push_str(&format!(
+        "    @%f64_p_nan mov.f64 {reg}, 0d7FF8000000000000;\n"
+    ));
+}
+
+/// Emit an in-place f64 sigmoid for `reg`.
+pub(crate) fn emit_ptx_f64_sigmoid_inplace(out: &mut String, reg: &str) {
+    out.push_str(&format!("    mov.f64 %f64_saved, {reg};\n"));
+    out.push_str("    abs.f64 %f64_tmp, %f64_saved;\n");
+    out.push_str("    neg.f64 %f64_tmp, %f64_tmp;\n");
+    emit_ptx_f64_exp_inplace(out, "%f64_tmp");
+    out.push_str("    add.f64 %f64_tmp2, 0d3FF0000000000000, %f64_tmp;\n");
+    out.push_str("    div.rn.f64 %f64_res, 0d3FF0000000000000, %f64_tmp2;\n");
+    out.push_str("    div.rn.f64 %f64_tmp, %f64_tmp, %f64_tmp2;\n");
+    out.push_str("    setp.lt.f64 %f64_p_sign, %f64_saved, 0d0000000000000000;\n");
+    out.push_str(&format!(
+        "    selp.f64 {reg}, %f64_tmp, %f64_res, %f64_p_sign;\n"
+    ));
+    out.push_str("    setp.nan.f64 %f64_p_nan, %f64_saved, %f64_saved;\n");
+    out.push_str(&format!(
+        "    @%f64_p_nan mov.f64 {reg}, 0d7FF8000000000000;\n"
+    ));
+}
+
+/// Emit an in-place f64 hyperbolic tangent for `reg`.
+pub(crate) fn emit_ptx_f64_tanh_inplace(out: &mut String, reg: &str) {
+    out.push_str(&format!("    mov.f64 %f64_saved, {reg};\n"));
+    out.push_str("    abs.f64 %f64_tmp, %f64_saved;\n");
+    out.push_str("    neg.f64 %f64_tmp, %f64_tmp;\n");
+    out.push_str("    add.f64 %f64_tmp, %f64_tmp, %f64_tmp;\n");
+    emit_ptx_f64_exp_inplace(out, "%f64_tmp");
+    out.push_str("    sub.f64 %f64_res, 0d3FF0000000000000, %f64_tmp;\n");
+    out.push_str("    add.f64 %f64_tmp2, 0d3FF0000000000000, %f64_tmp;\n");
+    out.push_str("    div.rn.f64 %f64_res, %f64_res, %f64_tmp2;\n");
+    out.push_str("    setp.lt.f64 %f64_p_sign, %f64_saved, 0d0000000000000000;\n");
+    out.push_str(&format!(
+        "    @%f64_p_sign neg.f64 %f64_res, %f64_res;\n    mov.f64 {reg}, %f64_res;\n"
+    ));
+    out.push_str("    setp.nan.f64 %f64_p_nan, %f64_saved, %f64_saved;\n");
+    out.push_str(&format!(
+        "    @%f64_p_nan mov.f64 {reg}, 0d7FF8000000000000;\n"
+    ));
+}
+
+/// Emit in-place tanh-approximate f64 GELU for `reg`.
+pub(crate) fn emit_ptx_f64_gelu_tanh_inplace(out: &mut String, reg: &str) {
+    out.push_str(&format!("    mov.f64 %f64_hold, {reg};\n"));
+    out.push_str("    mul.f64 %f64_tmp, %f64_hold, %f64_hold;\n");
+    out.push_str("    mul.f64 %f64_tmp, %f64_tmp, %f64_hold;\n");
+    out.push_str("    mul.f64 %f64_tmp, %f64_tmp, 0d3FA6E4E26D4801F7;\n");
+    out.push_str("    add.f64 %f64_tmp, %f64_hold, %f64_tmp;\n");
+    out.push_str(&format!(
+        "    mul.f64 {reg}, %f64_tmp, 0d3FE9884533D43651;\n"
+    ));
+    emit_ptx_f64_tanh_inplace(out, reg);
+    out.push_str(&format!("    add.f64 {reg}, {reg}, 0d3FF0000000000000;\n"));
+    out.push_str(&format!("    mul.f64 {reg}, {reg}, 0d3FE0000000000000;\n"));
+    out.push_str(&format!("    mul.f64 {reg}, {reg}, %f64_hold;\n"));
+}
+
+/// Emit in-place f64 `SiLU` for `reg`.
+pub(crate) fn emit_ptx_f64_silu_inplace(out: &mut String, reg: &str) {
+    out.push_str(&format!("    mov.f64 %f64_hold, {reg};\n"));
+    emit_ptx_f64_sigmoid_inplace(out, reg);
+    out.push_str(&format!("    mul.f64 {reg}, {reg}, %f64_hold;\n"));
+}
+
+/// Emit in-place f64 power for a compile-time scalar exponent.
+pub(crate) fn emit_ptx_f64_pow_const(out: &mut String, reg: &str, exponent: f64) {
+    if f64_bits_eq(exponent, 0.0) {
+        out.push_str(&format!("    mov.f64 {reg}, 0d3FF0000000000000;\n"));
+        return;
+    }
+    if f64_bits_eq(exponent, 1.0) {
+        return;
+    }
+    out.push_str(&format!("    mov.f64 %f64_hold, {reg};\n"));
+    out.push_str(&format!("    abs.f64 {reg}, {reg};\n"));
+    emit_ptx_f64_log_inplace(out, reg);
+    out.push_str(&format!(
+        "    mul.f64 {reg}, {reg}, {};\n",
+        ptx_f64_const_literal(exponent)
+    ));
+    emit_ptx_f64_exp_inplace(out, reg);
+
+    if let Some(integral_exponent) = finite_integral_i64(exponent) {
+        if integral_exponent.rem_euclid(2) == 1 {
+            out.push_str("    mov.b64 %f64_xbits, %f64_hold;\n");
+            out.push_str("    and.b64 %f64_sign_bits, %f64_xbits, 0x8000000000000000;\n");
+            out.push_str("    setp.ne.u64 %f64_p_sign, %f64_sign_bits, 0;\n");
+            out.push_str(&format!("    @%f64_p_sign neg.f64 {reg}, {reg};\n"));
+        }
+    } else {
+        out.push_str("    setp.lt.f64 %f64_p_neg, %f64_hold, 0d0000000000000000;\n");
+        out.push_str(&format!(
+            "    @%f64_p_neg mov.f64 {reg}, 0d7FF8000000000000;\n"
+        ));
+    }
+}
+
+/// Emit in-place f64 power for a runtime scalar exponent.
+pub(crate) fn emit_ptx_f64_pow_dynamic(out: &mut String, reg: &str, exponent_reg: &str) {
+    out.push_str(&format!("    mov.f64 %f64_hold, {reg};\n"));
+    out.push_str(&format!("    abs.f64 {reg}, {reg};\n"));
+    emit_ptx_f64_log_inplace(out, reg);
+    out.push_str(&format!("    mul.f64 {reg}, {reg}, {exponent_reg};\n"));
+    emit_ptx_f64_exp_inplace(out, reg);
+    out.push_str("    setp.lt.f64 %f64_p_neg, %f64_hold, 0d0000000000000000;\n");
+    out.push_str(&format!(
+        "    cvt.rzi.s64.f64 %f64_pow_i64, {exponent_reg};\n"
+    ));
+    out.push_str("    cvt.rn.f64.s64 %f64_tmp3, %f64_pow_i64;\n");
+    out.push_str(&format!(
+        "    setp.eq.f64 %f64_p_int, %f64_tmp3, {exponent_reg};\n"
+    ));
+    out.push_str("    mov.b64 %f64_xbits, %f64_pow_i64;\n");
+    out.push_str("    and.b64 %f64_sign_bits, %f64_xbits, 1;\n");
+    out.push_str("    setp.ne.u64 %f64_p_odd, %f64_sign_bits, 0;\n");
+    out.push_str("    and.pred %f64_p_sign, %f64_p_neg, %f64_p_int;\n");
+    out.push_str("    and.pred %f64_p_sign, %f64_p_sign, %f64_p_odd;\n");
+    out.push_str(&format!("    @%f64_p_sign neg.f64 {reg}, {reg};\n"));
+    out.push_str(&format!(
+        "    setp.ne.f64 %f64_p_int, %f64_tmp3, {exponent_reg};\n"
+    ));
+    out.push_str("    and.pred %f64_p_neg, %f64_p_neg, %f64_p_int;\n");
+    out.push_str(&format!(
+        "    @%f64_p_neg mov.f64 {reg}, 0d7FF8000000000000;\n"
+    ));
+}
+
 /// Emit PTX for a unary operation on a register.
-///
-/// All transcendentals here use `*.approx.f32` instructions. F64 graphs
-/// containing transcendentals are rejected up-front by
-/// [`find_transcendental_op`] before this function is reached, so the f32
-/// codepath is the only one that needs to exist. (Hardware-arithmetic
-/// unaries — `neg`, `abs` — work for both dtypes and dispatch on `dtype`.)
 fn emit_ptx_unary_op(out: &mut String, op: UnaryOpKind, reg: &str, dtype: Dtype) {
     let dn = dtype.name();
     match op {
@@ -972,71 +1265,96 @@ fn emit_ptx_unary_op(out: &mut String, op: UnaryOpKind, reg: &str, dtype: Dtype)
             // Hardware `abs` exists for both .f32 and .f64.
             out.push_str(&format!("    abs.{dn} {reg}, {reg};\n"));
         }
-        // Everything below this line uses `*.approx.f32` instructions and
-        // is unreachable for f64 (caller filters with `find_transcendental_op`).
         UnaryOpKind::Sqrt => {
-            debug_assert_eq!(dtype, Dtype::F32, "sqrt: f64 should have been rejected");
-            out.push_str(&format!("    sqrt.approx.f32 {reg}, {reg};\n"));
+            let op = match dtype {
+                Dtype::F32 => "sqrt.approx.f32",
+                Dtype::F64 => "sqrt.rn.f64",
+            };
+            out.push_str(&format!("    {op} {reg}, {reg};\n"));
         }
         UnaryOpKind::Exp => {
-            debug_assert_eq!(dtype, Dtype::F32, "exp: f64 should have been rejected");
-            // exp(x) = 2^(x * log2(e))
-            out.push_str(&format!("    mul.f32 {reg}, {reg}, 0f3FB8AA3B;\n")); // log2(e)
-            out.push_str(&format!("    ex2.approx.f32 {reg}, {reg};\n"));
+            match dtype {
+                Dtype::F32 => {
+                    // exp(x) = 2^(x * log2(e))
+                    out.push_str(&format!("    mul.f32 {reg}, {reg}, 0f3FB8AA3B;\n")); // log2(e)
+                    out.push_str(&format!("    ex2.approx.f32 {reg}, {reg};\n"));
+                }
+                Dtype::F64 => emit_ptx_f64_exp_inplace(out, reg),
+            }
         }
         UnaryOpKind::Log => {
-            debug_assert_eq!(dtype, Dtype::F32, "log: f64 should have been rejected");
-            // log(x) = log2(x) / log2(e) = log2(x) * ln(2)
-            out.push_str(&format!("    lg2.approx.f32 {reg}, {reg};\n"));
-            out.push_str(&format!("    mul.f32 {reg}, {reg}, 0f3F317218;\n")); // ln(2)
+            match dtype {
+                Dtype::F32 => {
+                    // log(x) = log2(x) / log2(e) = log2(x) * ln(2)
+                    out.push_str(&format!("    lg2.approx.f32 {reg}, {reg};\n"));
+                    out.push_str(&format!("    mul.f32 {reg}, {reg}, 0f3F317218;\n")); // ln(2)
+                }
+                Dtype::F64 => emit_ptx_f64_log_inplace(out, reg),
+            }
         }
         UnaryOpKind::Relu => {
             // `max.f32` / `max.f64` both exist as hardware ops.
             out.push_str(&format!("    max.{dn} {reg}, {reg}, %zero;\n"));
         }
         UnaryOpKind::Sigmoid => {
-            debug_assert_eq!(dtype, Dtype::F32, "sigmoid: f64 should have been rejected");
-            // sigmoid(x) = 1 / (1 + exp(-x))
-            out.push_str(&format!("    neg.f32 %t0, {reg};\n"));
-            out.push_str("    mul.f32 %t0, %t0, 0f3FB8AA3B;\n"); // * log2(e)
-            out.push_str("    ex2.approx.f32 %t0, %t0;\n");
-            out.push_str("    add.f32 %t0, %t0, 0f3F800000;\n"); // + 1.0
-            out.push_str(&format!("    rcp.approx.f32 {reg}, %t0;\n"));
+            match dtype {
+                Dtype::F32 => {
+                    // sigmoid(x) = 1 / (1 + exp(-x))
+                    out.push_str(&format!("    neg.f32 %t0, {reg};\n"));
+                    out.push_str("    mul.f32 %t0, %t0, 0f3FB8AA3B;\n"); // * log2(e)
+                    out.push_str("    ex2.approx.f32 %t0, %t0;\n");
+                    out.push_str("    add.f32 %t0, %t0, 0f3F800000;\n"); // + 1.0
+                    out.push_str(&format!("    rcp.approx.f32 {reg}, %t0;\n"));
+                }
+                Dtype::F64 => emit_ptx_f64_sigmoid_inplace(out, reg),
+            }
         }
         UnaryOpKind::Tanh => {
-            debug_assert_eq!(dtype, Dtype::F32, "tanh: f64 should have been rejected");
-            // tanh(x) = 2*sigmoid(2x) - 1
-            out.push_str(&format!("    add.f32 {reg}, {reg}, {reg};\n")); // 2x
-            out.push_str(&format!("    neg.f32 %t0, {reg};\n"));
-            out.push_str("    mul.f32 %t0, %t0, 0f3FB8AA3B;\n");
-            out.push_str("    ex2.approx.f32 %t0, %t0;\n");
-            out.push_str("    add.f32 %t0, %t0, 0f3F800000;\n");
-            out.push_str(&format!("    rcp.approx.f32 {reg}, %t0;\n"));
-            out.push_str(&format!("    add.f32 {reg}, {reg}, {reg};\n")); // 2*sigmoid(2x)
-            out.push_str(&format!("    sub.f32 {reg}, {reg}, 0f3F800000;\n")); // -1
+            match dtype {
+                Dtype::F32 => {
+                    // tanh(x) = 2*sigmoid(2x) - 1
+                    out.push_str(&format!("    add.f32 {reg}, {reg}, {reg};\n")); // 2x
+                    out.push_str(&format!("    neg.f32 %t0, {reg};\n"));
+                    out.push_str("    mul.f32 %t0, %t0, 0f3FB8AA3B;\n");
+                    out.push_str("    ex2.approx.f32 %t0, %t0;\n");
+                    out.push_str("    add.f32 %t0, %t0, 0f3F800000;\n");
+                    out.push_str(&format!("    rcp.approx.f32 {reg}, %t0;\n"));
+                    out.push_str(&format!("    add.f32 {reg}, {reg}, {reg};\n")); // 2*sigmoid(2x)
+                    out.push_str(&format!("    sub.f32 {reg}, {reg}, 0f3F800000;\n")); // -1
+                }
+                Dtype::F64 => emit_ptx_f64_tanh_inplace(out, reg),
+            }
         }
         UnaryOpKind::Gelu => {
-            debug_assert_eq!(dtype, Dtype::F32, "gelu: f64 should have been rejected");
-            // GELU approx: x * sigmoid(1.702 * x)
-            out.push_str(&format!("    mov.f32 %t2, {reg};\n")); // save x
-            out.push_str("    mul.f32 %t0, %t2, 0f3FD9F16C;\n"); // 1.702 * x
-            out.push_str("    neg.f32 %t0, %t0;\n");
-            out.push_str("    mul.f32 %t0, %t0, 0f3FB8AA3B;\n");
-            out.push_str("    ex2.approx.f32 %t0, %t0;\n");
-            out.push_str("    add.f32 %t0, %t0, 0f3F800000;\n");
-            out.push_str("    rcp.approx.f32 %t0, %t0;\n"); // sigmoid(1.702*x)
-            out.push_str(&format!("    mul.f32 {reg}, %t2, %t0;\n")); // x * sigmoid(1.702*x)
+            match dtype {
+                Dtype::F32 => {
+                    // GELU approx: x * sigmoid(1.702 * x)
+                    out.push_str(&format!("    mov.f32 %t2, {reg};\n")); // save x
+                    out.push_str("    mul.f32 %t0, %t2, 0f3FD9F16C;\n"); // 1.702 * x
+                    out.push_str("    neg.f32 %t0, %t0;\n");
+                    out.push_str("    mul.f32 %t0, %t0, 0f3FB8AA3B;\n");
+                    out.push_str("    ex2.approx.f32 %t0, %t0;\n");
+                    out.push_str("    add.f32 %t0, %t0, 0f3F800000;\n");
+                    out.push_str("    rcp.approx.f32 %t0, %t0;\n"); // sigmoid(1.702*x)
+                    out.push_str(&format!("    mul.f32 {reg}, %t2, %t0;\n")); // x * sigmoid(1.702*x)
+                }
+                Dtype::F64 => emit_ptx_f64_gelu_tanh_inplace(out, reg),
+            }
         }
         UnaryOpKind::Silu => {
-            debug_assert_eq!(dtype, Dtype::F32, "silu: f64 should have been rejected");
-            // SiLU: x * sigmoid(x)
-            out.push_str(&format!("    mov.f32 %t2, {reg};\n")); // save x
-            out.push_str(&format!("    neg.f32 %t0, {reg};\n"));
-            out.push_str("    mul.f32 %t0, %t0, 0f3FB8AA3B;\n");
-            out.push_str("    ex2.approx.f32 %t0, %t0;\n");
-            out.push_str("    add.f32 %t0, %t0, 0f3F800000;\n");
-            out.push_str("    rcp.approx.f32 %t0, %t0;\n"); // sigmoid(x)
-            out.push_str(&format!("    mul.f32 {reg}, %t2, %t0;\n")); // x * sigmoid(x)
+            match dtype {
+                Dtype::F32 => {
+                    // SiLU: x * sigmoid(x)
+                    out.push_str(&format!("    mov.f32 %t2, {reg};\n")); // save x
+                    out.push_str(&format!("    neg.f32 %t0, {reg};\n"));
+                    out.push_str("    mul.f32 %t0, %t0, 0f3FB8AA3B;\n");
+                    out.push_str("    ex2.approx.f32 %t0, %t0;\n");
+                    out.push_str("    add.f32 %t0, %t0, 0f3F800000;\n");
+                    out.push_str("    rcp.approx.f32 %t0, %t0;\n"); // sigmoid(x)
+                    out.push_str(&format!("    mul.f32 {reg}, %t2, %t0;\n")); // x * sigmoid(x)
+                }
+                Dtype::F64 => emit_ptx_f64_silu_inplace(out, reg),
+            }
         }
     }
 }
@@ -1077,16 +1395,23 @@ fn emit_ptx_op(out: &mut String, expr: &Expr, dtype: Dtype) {
         }
         Expr::FnCall { name, args } => {
             if name == "powf" && args.len() == 2 {
-                debug_assert_eq!(
-                    dtype,
-                    Dtype::F32,
-                    "powf reached emission with non-f32 dtype despite f64 reject guard",
-                );
-                // x^p = 2^(p * log2(x)) — f32-only path.
-                emit_ptx_expr_to_reg(out, &args[1], "%t0", dtype);
-                out.push_str("    lg2.approx.f32 %t1, %val;\n");
-                out.push_str("    mul.f32 %t1, %t1, %t0;\n");
-                out.push_str("    ex2.approx.f32 %val, %t1;\n");
+                match dtype {
+                    Dtype::F32 => {
+                        // x^p = 2^(p * log2(x)) — f32 approximate path.
+                        emit_ptx_expr_to_reg(out, &args[1], "%t0", dtype);
+                        out.push_str("    lg2.approx.f32 %t1, %val;\n");
+                        out.push_str("    mul.f32 %t1, %t1, %t0;\n");
+                        out.push_str("    ex2.approx.f32 %val, %t1;\n");
+                    }
+                    Dtype::F64 => {
+                        if let Expr::Const(exponent) = &args[1] {
+                            emit_ptx_f64_pow_const(out, "%val", *exponent);
+                        } else {
+                            emit_ptx_expr_to_reg(out, &args[1], "%t0", dtype);
+                            emit_ptx_f64_pow_dynamic(out, "%val", "%t0");
+                        }
+                    }
+                }
             }
         }
         _ => {
@@ -1118,155 +1443,6 @@ fn ptx_const_literal(v: f64, dtype: Dtype) -> String {
         Dtype::F64 => format!("0d{:016X}", v.to_bits()),
     }
 }
-
-/// Human-readable name of a unary op for diagnostics.
-///
-/// Used by the `JitError::Unsupported` rejection path for f64
-/// transcendentals when the `cuda` feature is not enabled, and by the
-/// non-cuda-feature reject test. Tagged `cfg_attr(..., allow(dead_code))`
-/// because with the `cuda` feature on the rejection path is unreachable
-/// — NVRTC handles every transcendental — but the tests in this module
-/// still reference it under one cfg branch or the other.
-#[cfg_attr(feature = "cuda", allow(dead_code))]
-fn ptx_unary_op_name(op: UnaryOpKind) -> &'static str {
-    match op {
-        UnaryOpKind::Neg => "neg",
-        UnaryOpKind::Exp => "exp",
-        UnaryOpKind::Log => "log",
-        UnaryOpKind::Sqrt => "sqrt",
-        UnaryOpKind::Abs => "abs",
-        UnaryOpKind::Sigmoid => "sigmoid",
-        UnaryOpKind::Tanh => "tanh",
-        UnaryOpKind::Relu => "relu",
-        UnaryOpKind::Gelu => "gelu",
-        UnaryOpKind::Silu => "silu",
-    }
-}
-
-/// Walk `stmts` looking for the first transcendental op. Returns `Some(op)`
-/// if found, `None` otherwise.
-///
-/// "Transcendental" here means any unary that the PTX backend lowers via
-/// `*.approx.f32` instructions (no f64 hardware equivalent), plus `powf`
-/// which is implemented via `lg2/ex2` on f32. Pure arithmetic unaries
-/// (`neg`, `abs`) and hardware `max` (`relu`) are not included because
-/// they have direct .f64 hardware support.
-fn find_transcendental_op(stmts: &[LoopIR]) -> Option<UnaryOpKind> {
-    fn walk_expr(expr: &Expr) -> Option<UnaryOpKind> {
-        match expr {
-            Expr::UnaryOp { op, operand } => {
-                if matches!(
-                    op,
-                    UnaryOpKind::Exp
-                        | UnaryOpKind::Log
-                        | UnaryOpKind::Sqrt
-                        | UnaryOpKind::Sigmoid
-                        | UnaryOpKind::Tanh
-                        | UnaryOpKind::Gelu
-                        | UnaryOpKind::Silu
-                ) {
-                    return Some(*op);
-                }
-                walk_expr(operand)
-            }
-            Expr::BinOp { lhs, rhs, .. } => walk_expr(lhs).or_else(|| walk_expr(rhs)),
-            Expr::FnCall { name, args } => {
-                if name == "powf" {
-                    // Bucket `powf` under `Exp` since it uses ex2/lg2 internally.
-                    return Some(UnaryOpKind::Exp);
-                }
-                args.iter().find_map(walk_expr)
-            }
-            Expr::Index { index, .. } => walk_expr(index),
-            Expr::Cast { operand, .. } => walk_expr(operand),
-            _ => None,
-        }
-    }
-
-    for stmt in stmts {
-        let hit = match stmt {
-            LoopIR::Loop { body, .. } => find_transcendental_op(body),
-            LoopIR::Store { value, index, .. } => walk_expr(value).or_else(|| walk_expr(index)),
-            LoopIR::Let { value, .. }
-            | LoopIR::Assign { value, .. }
-            | LoopIR::Accumulate { value, .. } => walk_expr(value),
-            LoopIR::If {
-                condition,
-                then_body,
-                else_body,
-            } => walk_expr(condition)
-                .or_else(|| find_transcendental_op(then_body))
-                .or_else(|| find_transcendental_op(else_body)),
-            LoopIR::Comment(_) => None,
-        };
-        if hit.is_some() {
-            return hit;
-        }
-    }
-    None
-}
-
-// ---------------------------------------------------------------------------
-// F64 transcendental PTX via NVRTC + libdevice
-// ---------------------------------------------------------------------------
-
-/// Lower an f64 program containing a transcendental op to PTX by routing
-/// through NVRTC.
-///
-/// PTX has no `*.approx.f64` hardware instructions for `exp`/`log`/`sqrt`/
-/// `tanh`/etc. The correct lowering is libdevice (`__nv_exp(double)`,
-/// `__nv_log(double)`, ...), which NVRTC links automatically when
-/// compiling CUDA C source. So the f64 transcendental path is implemented
-/// as: emit CUDA C source via [`emit_cuda_source`] (which already supports
-/// f64 transcendentals via the host math headers), invoke NVRTC, and
-/// return the resulting PTX text.
-///
-/// Behind the `cuda` feature flag because NVRTC requires linking against
-/// the CUDA toolkit. Without the feature we return a structured error
-/// per `rust-gpu-discipline` §3 (PyTorch-parity `NotImplementedError` shape).
-///
-/// # Arguments
-///
-/// * `loops` — the IR program (already verified to contain an f64
-///   transcendental op by the caller).
-/// * `fn_name` — kernel entry point name.
-/// * `num_inputs` — number of input buffers.
-/// * `failing_op` — the op that triggered the f64-transcendental dispatch;
-///   used in the error variant when the `cuda` feature is not enabled.
-fn f64_transcendental_ptx(
-    loops: &[LoopIR],
-    fn_name: &str,
-    num_inputs: usize,
-    #[cfg_attr(feature = "cuda", allow(unused_variables))] failing_op: UnaryOpKind,
-) -> Result<String, JitError> {
-    // Generate CUDA C source — the existing path supports f64
-    // transcendentals via host math headers (`exp`, `log`, `tanh`,
-    // `sqrt`, `pow` for double overloads). NVRTC inlines libdevice's
-    // implementations of those when it lowers to PTX.
-    let cuda_source = GpuCodegen::generate_cuda_source(loops, fn_name, num_inputs, Dtype::F64)?;
-
-    #[cfg(feature = "cuda")]
-    {
-        crate::nvrtc::compile_cuda_source_to_ptx(&cuda_source, fn_name)
-    }
-
-    #[cfg(not(feature = "cuda"))]
-    {
-        // The cuda feature is the only thing standing between us and a
-        // working f64 transcendental kernel; surface that explicitly so
-        // callers know to enable it. The CUDA C source we generated would
-        // compile cleanly under NVRTC.
-        let _ = cuda_source; // silence unused-binding warning on this cfg
-        Err(JitError::Unsupported {
-            op: ptx_unary_op_name(failing_op).to_string(),
-            dtype: Dtype::F64.name().to_string(),
-        })
-    }
-}
-
-// NVRTC compile helper moved to `crate::nvrtc::compile_cuda_source_to_ptx`
-// so both this f64-transcendental path (#748/#749) and the FusedChain
-// runtime executor can share a single implementation.
 
 // ---------------------------------------------------------------------------
 // Helpers for reduction detection
@@ -1321,10 +1497,9 @@ fn find_mean_divisor(stmts: &[LoopIR]) -> Option<f64> {
                 },
             ..
         } = stmt
+            && let Expr::Const(divisor) = rhs.as_ref()
         {
-            if let Expr::Const(divisor) = rhs.as_ref() {
-                return Some(*divisor);
-            }
+            return Some(*divisor);
         }
     }
     None
@@ -1690,49 +1865,9 @@ mod tests {
         assert!(!src.contains("abs.f32"), "F64 path leaked abs.f32:\n{src}");
     }
 
-    /// PTX: F64 graphs containing transcendentals are rejected with
-    /// `JitError::Unsupported` when the `cuda` feature is *not* enabled.
-    /// Covers exp/log/sqrt/tanh/sigmoid/gelu/silu.
-    ///
-    /// With the `cuda` feature ON the f64 path delegates to NVRTC + libdevice
-    /// and returns valid PTX — see [`test_ptx_f64_transcendental_succeeds`].
-    /// This test only exercises the off-by-default fallback and is therefore
-    /// only meaningful in builds without `--features cuda`.
-    #[cfg(not(feature = "cuda"))]
-    #[test]
-    fn test_ptx_f64_transcendental_rejected_without_cuda_feature() {
-        for (op_kind, expected_name) in [
-            (IrOpKind::Exp, "exp"),
-            (IrOpKind::Log, "log"),
-            (IrOpKind::Sqrt, "sqrt"),
-            (IrOpKind::Tanh, "tanh"),
-            (IrOpKind::Sigmoid, "sigmoid"),
-            (IrOpKind::Gelu, "gelu"),
-            (IrOpKind::Silu, "silu"),
-        ] {
-            let loops =
-                codegen_ir::lower_to_loops(std::slice::from_ref(&op_kind), &["in0"], "out", 4);
-            let err = GpuCodegen::generate_ptx_source(&loops, "k", 256, 1, Dtype::F64).expect_err(
-                &format!("f64 {expected_name} must reject without `cuda` feature"),
-            );
-            match err {
-                JitError::Unsupported { op, dtype } => {
-                    assert_eq!(op, expected_name, "wrong op name in error");
-                    assert_eq!(dtype, "f64", "wrong dtype name in error");
-                }
-                other => panic!("expected JitError::Unsupported, got {other:?}"),
-            }
-        }
-    }
-
-    /// PTX: F64 graphs containing transcendentals succeed when the
-    /// `cuda` feature is enabled, by routing through NVRTC + libdevice
-    /// (#748). Verifies the resulting PTX is non-empty and contains the
-    /// expected `.entry` for the kernel — meaning NVRTC successfully
-    /// compiled the CUDA C source we generated, libdevice's f64 math
-    /// expansions are inlined, and the result is a valid module the
-    /// driver can load.
-    #[cfg(feature = "cuda")]
+    /// PTX: F64 graphs containing transcendentals are emitted as Rust-owned
+    /// PTX in every build. No CUDA feature, CUDA C source, or NVRTC compiler
+    /// is required.
     #[test]
     fn test_ptx_f64_transcendental_succeeds() {
         for (op_kind, expected_name) in [
@@ -1748,51 +1883,48 @@ mod tests {
                 codegen_ir::lower_to_loops(std::slice::from_ref(&op_kind), &["in0"], "out", 4);
             let kernel_name = format!("k_f64_{expected_name}");
             let ptx = GpuCodegen::generate_ptx_source(&loops, &kernel_name, 256, 1, Dtype::F64)
-                .unwrap_or_else(|e| panic!("f64 {expected_name} via NVRTC must succeed: {e:?}"));
+                .unwrap_or_else(|e| panic!("f64 {expected_name} PTX must succeed: {e:?}"));
 
             assert!(
                 ptx.contains(".version"),
                 "f64 {expected_name} PTX missing `.version` header:\n{ptx}",
             );
             assert!(
-                ptx.contains(".target sm_70")
-                    || ptx.contains(".target sm_7")
-                    || ptx.contains(".target sm_8")
-                    || ptx.contains(".target sm_9"),
-                "f64 {expected_name} PTX missing expected target arch:\n{ptx}",
+                ptx.contains(".target sm_52"),
+                "f64 {expected_name} PTX must stay on the Rust-owned sm_52 path:\n{ptx}",
             );
             assert!(
                 ptx.contains(&format!(".entry {kernel_name}")),
                 "f64 {expected_name} PTX missing entry point '{kernel_name}':\n{ptx}",
             );
-            // NVRTC lowers each f64 transcendental to a libdevice
-            // expansion (polynomial fma chains for exp/log/tanh/sigmoid/
-            // gelu/silu, direct hardware for sqrt). At least ONE f64
-            // hardware op must appear — `fma.rn.f64`, `mul.f64`,
-            // `add.f64`, `sqrt.rn.f64`, `div.rn.f64`, or `sub.f64`.
             assert!(
                 ptx.contains("fma.rn.f64")
                     || ptx.contains("mul.f64")
                     || ptx.contains("add.f64")
                     || ptx.contains("sqrt.rn.f64")
-                    || ptx.contains("sqrt.approx.f64")
                     || ptx.contains("div.rn.f64")
                     || ptx.contains("sub.f64"),
                 "f64 {expected_name} PTX missing f64 hardware ops:\n{ptx}",
             );
+            assert!(
+                !ptx.contains("ex2.approx.f32")
+                    && !ptx.contains("lg2.approx.f32")
+                    && !ptx.contains("cvt.f32.f64")
+                    && !ptx.contains("cvt.f64.f32"),
+                "f64 {expected_name} PTX leaked f32 demote-promote machinery:\n{ptx}",
+            );
         }
     }
 
-    /// PTX: F64 powf via NVRTC + libdevice. Separate test from the unary
-    /// transcendentals because powf takes two operands and goes through
-    /// the `FnCall` path rather than `UnaryOp`.
-    #[cfg(feature = "cuda")]
+    /// PTX: F64 powf via Rust-owned PTX. Separate test from the unary
+    /// transcendentals because powf takes two operands and goes through the
+    /// `FnCall` path rather than `UnaryOp`.
     #[test]
     fn test_ptx_f64_powf_succeeds() {
         let loops =
             codegen_ir::lower_to_loops(&[IrOpKind::Pow { exponent: 2.5 }], &["in0"], "out", 4);
         let ptx = GpuCodegen::generate_ptx_source(&loops, "k_f64_pow", 256, 1, Dtype::F64)
-            .expect("f64 pow via NVRTC must succeed");
+            .expect("f64 pow PTX must succeed");
         assert!(
             ptx.contains(".entry k_f64_pow"),
             "f64 pow PTX missing entry point:\n{ptx}",
@@ -1800,6 +1932,10 @@ mod tests {
         assert!(
             ptx.contains("fma.rn.f64") || ptx.contains("mul.f64"),
             "f64 pow PTX missing f64 hardware ops:\n{ptx}",
+        );
+        assert!(
+            !ptx.contains("ex2.approx.f32") && !ptx.contains("lg2.approx.f32"),
+            "f64 pow must not use f32 approximate transcendentals:\n{ptx}",
         );
     }
 

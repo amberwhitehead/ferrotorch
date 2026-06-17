@@ -10,7 +10,7 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 | SHIPPED | `#[derive(Debug, thiserror::Error)] #[non_exhaustive] pub enum JitError` in `error.rs`; consumer: 42 `JitError::...` constructor sites across the crate |
-//! | REQ-2 | SHIPPED | all 12 variants (`TracingError` / `DataDependentControlFlow` / `UnsupportedOp` / `ShapeMismatch` / `CodegenError` / `SerializationError` / `GraphBreak` / `ExportError` / `ParameterError` / `RecompilationError` / `GpuBackendUnavailable` / `Unsupported`) in `error.rs`; consumer: each is constructed at one or more sites in `codegen_*.rs`, `fusion*.rs`, `interpreter.rs`, `nvrtc.rs`, `graph_break.rs`, `export.rs` |
+//! | REQ-2 | SHIPPED | all 12 variants (`TracingError` / `DataDependentControlFlow` / `UnsupportedOp` / `ShapeMismatch` / `CodegenError` / `SerializationError` / `GraphBreak` / `ExportError` / `ParameterError` / `RecompilationError` / `GpuBackendUnavailable` / `Unsupported`) in `error.rs`; consumer: each is constructed at one or more sites in `codegen_*.rs`, `fusion*.rs`, `interpreter.rs`, `graph_break.rs`, `export.rs` |
 //! | REQ-3 | SHIPPED | per-variant struct payload (`DataDependentControlFlow { op }`, `ShapeMismatch { traced, actual }`, `Unsupported { op, dtype }`, ...) in `error.rs`; consumer: matching field-init at each construction site |
 //! | REQ-4 | SHIPPED | `impl From<JitError> for FerrotorchError` in `error.rs`; consumer: every `?` in `module.rs`/`trace.rs`/`export.rs` that converts a JitError |
 //! | REQ-5 | SHIPPED | per-variant rustdoc verified by `#![deny(missing_docs)]`; consumer: `cargo doc -p ferrotorch-jit --no-deps` renders the variants |
@@ -129,22 +129,16 @@ pub enum JitError {
     /// This is the structured analog of `PyTorch`'s `NotImplementedError`
     /// for unsupported (op, dtype, device) combinations. As of #729, GPU
     /// codegen dispatches on `Dtype` for arithmetic, load/store, register
-    /// declarations, and constant emission. As of #748 (closing the
-    /// Phase-2 follow-up to #729), f64 transcendentals — `exp`, `log`,
-    /// `sqrt`, `tanh`, `sigmoid`, `gelu`, `silu`, and `pow` — are
-    /// supported on the PTX path *with the `cuda` feature enabled* by
-    /// routing through NVRTC + libdevice. Without the `cuda` feature, f64
-    /// transcendentals still surface this variant since NVRTC isn't
-    /// linked at runtime.
+    /// declarations, and constant emission. F64 transcendentals — `exp`,
+    /// `log`, `sqrt`, `tanh`, `sigmoid`, `gelu`, `silu`, and `pow` — are
+    /// supported on the PTX path by Rust-owned PTX math fragments and do not
+    /// use this variant.
     ///
     /// This variant is also the right return for any future (op, dtype)
     /// combination the codegen genuinely cannot lower — keep messages
     /// pointing at the missing feature flag or follow-up issue so callers
     /// can act on them.
-    #[error(
-        "ferrotorch-jit GPU codegen does not support op '{op}' on dtype `{dtype}'; \
-         enable the `cuda` feature on ferrotorch-jit for f64 transcendentals via libdevice"
-    )]
+    #[error("ferrotorch-jit GPU codegen does not support op '{op}' on dtype `{dtype}'")]
     Unsupported {
         /// Name of the unsupported op (e.g. `"exp"`, `"tanh"`).
         op: String,

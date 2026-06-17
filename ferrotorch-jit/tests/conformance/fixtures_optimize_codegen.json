@@ -971,8 +971,8 @@
     },
     {
       "module": "codegen_gpu",
-      "case": "generate_ptx_source_f64_transcendental_unsupported_without_cuda_feature",
-      "description": "GpuCodegen::generate_ptx_source for Exp with dtype=F64 must return Err(JitError::Unsupported) when the 'cuda' feature is disabled. This is the PyTorch-parity device-error policy: NotImplementedError for unsupported (op, dtype) combinations.",
+      "case": "generate_ptx_source_f64_transcendental_uses_rust_ptx",
+      "description": "GpuCodegen::generate_ptx_source for Exp with dtype=F64 must emit Rust-owned f64 PTX math without depending on the cuda feature, NVRTC, libdevice, or f32 demote-promote.",
       "graph_ops": [
         "Exp"
       ],
@@ -980,9 +980,14 @@
       "dtype": "F64",
       "num_inputs": 1,
       "block_size": 256,
-      "expected_error_kind": "JitError::Unsupported",
-      "property": "error_contract",
-      "cascade_skip": "cascade: GPU-dtype dispatch returns wrong variant on some builds \u2014 see issue TBD"
+      "expected_ptx_contains": [
+        "fma.rn.f64"
+      ],
+      "expected_ptx_excludes": [
+        "ex2.approx.f32",
+        "cvt.f32.f64"
+      ],
+      "property": "ptx_structural"
     },
     {
       "module": "codegen_gpu",

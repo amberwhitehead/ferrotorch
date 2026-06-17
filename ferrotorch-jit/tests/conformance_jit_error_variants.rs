@@ -22,11 +22,9 @@
 //! This fires unconditionally — no physical GPU is required — making it
 //! exercisable in default CI.
 //!
-//! Tests that **require the `cuda` feature** (NVRTC f64 transcendental path)
-//! are gated `#[cfg(feature = "cuda")]`. Tests that must run on the
-//! **default (no-cuda) build** are gated `#[cfg(not(feature = "cuda"))]`.
-//! The `GpuBackendUnavailable` path itself is unconditional and tested
-//! without any feature gate.
+//! F64 PTX codegen is Rust-owned and works without the `cuda` feature. The
+//! `GpuBackendUnavailable` path itself is unconditional and tested without any
+//! feature gate.
 
 use ferrotorch_core::error::FerrotorchError;
 use ferrotorch_jit::codegen::{Codegen, InductorBackend, InductorTarget};
@@ -310,19 +308,18 @@ fn gpu_backend_unavailable_opt_in_cpu_fallback_pattern() {
 }
 
 // ===========================================================================
-// #884 — GpuBackendUnavailable: with `cuda` feature (f64 transcendental path)
+// #884 — GpuBackendUnavailable: f64 transcendental PTX path
 //
-// When the `cuda` feature is enabled, NVRTC produces valid PTX for f64
-// transcendentals. `compile()` still raises GpuBackendUnavailable because
-// the Inductor compile() step does not launch kernels — the runtime is
-// separately wired in ferrotorch-gpu.
+// Rust-owned PTX codegen produces valid PTX for f64 transcendentals in every
+// build. `compile()` still raises GpuBackendUnavailable because the Inductor
+// compile() step does not launch kernels — the runtime is separately wired in
+// ferrotorch-gpu.
 // ===========================================================================
 
-/// With `cuda` feature, compile() on a f64-transcendental PTX graph still
-/// raises GpuBackendUnavailable (codegen succeeds, runtime is not wired).
-#[cfg(feature = "cuda")]
+/// Compile on a f64-transcendental PTX graph raises GpuBackendUnavailable
+/// after codegen succeeds.
 #[test]
-fn inductor_compile_gpu_ptx_f64_transcendental_with_cuda_raises_gpu_backend_unavailable() {
+fn inductor_compile_gpu_ptx_f64_transcendental_raises_gpu_backend_unavailable() {
     let mut g = IrGraph::new();
     let x = g.add_input_with_dtype(vec![4], Dtype::F64);
     let (_, tanh_outs) =
@@ -331,43 +328,18 @@ fn inductor_compile_gpu_ptx_f64_transcendental_with_cuda_raises_gpu_backend_unav
 
     let backend = InductorBackend::new(InductorTarget::GpuPtx);
     let err = backend.compile(&g).expect_err(
-        "compile() with cuda feature must still fail: codegen succeeds via NVRTC \
-         but no GPU runtime executor is wired in ferrotorch-jit",
+        "compile() must still fail: codegen succeeds but no GPU runtime executor is wired in ferrotorch-jit",
     );
     let msg = err.to_string();
-    // With `cuda` on, the rejection is at the runtime layer, not the
-    // codegen layer — no "does not support" / "Unsupported" any more.
+    // The rejection is at the runtime layer, not the codegen layer.
     assert!(
         !msg.contains("does not support") && !msg.contains("Unsupported"),
-        "f64 tanh should not reject at codegen with cuda feature; got: {msg}"
+        "f64 tanh should not reject at codegen; got: {msg}"
     );
     assert!(
         msg.contains("GPU backend unavailable")
             || msg.contains("runtime")
             || msg.contains("not yet wire"),
-        "expected runtime-unavailable diagnostic with cuda feature; got: {msg}"
-    );
-}
-
-/// Without `cuda` feature, compile() on a f64-transcendental PTX graph
-/// surfaces `JitError::Unsupported` before ever reaching the GPU-runtime
-/// check — the codegen layer rejects first.
-#[cfg(not(feature = "cuda"))]
-#[test]
-fn inductor_compile_gpu_ptx_f64_transcendental_without_cuda_raises_unsupported() {
-    let mut g = IrGraph::new();
-    let x = g.add_input_with_dtype(vec![4], Dtype::F64);
-    let (_, exp_outs) =
-        g.add_node_with_dtype(IrOpKind::Tanh, vec![x], vec![vec![4]], &[Dtype::F64]);
-    g.set_outputs(vec![exp_outs[0]]);
-
-    let backend = InductorBackend::new(InductorTarget::GpuPtx);
-    let err = backend.compile(&g).expect_err(
-        "compile() on f64 transcendental without cuda feature must return Err (Unsupported)",
-    );
-    let msg = err.to_string();
-    assert!(
-        msg.contains("tanh") || msg.contains("does not support") || msg.contains("f64"),
-        "expected Unsupported diagnosis naming the op or dtype; got: {msg}"
+        "expected runtime-unavailable diagnostic; got: {msg}"
     );
 }

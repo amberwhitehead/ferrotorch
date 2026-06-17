@@ -204,7 +204,7 @@ impl HfTransformerConfig {
                     .into(),
             });
         }
-        if self.hidden_size % self.num_attention_heads != 0 {
+        if !self.hidden_size.is_multiple_of(self.num_attention_heads) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "HfTransformerConfig: hidden_size ({}) must be divisible by \
@@ -219,7 +219,7 @@ impl HfTransformerConfig {
                 message: "HfTransformerConfig: num_key_value_heads must be positive".into(),
             });
         }
-        if self.num_attention_heads % kv != 0 {
+        if !self.num_attention_heads.is_multiple_of(kv) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "HfTransformerConfig: num_attention_heads ({}) must be divisible \

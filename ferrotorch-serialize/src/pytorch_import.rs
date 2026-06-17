@@ -676,10 +676,10 @@ fn find_dict_entries(value: &PickleValue) -> FerrotorchResult<Vec<(PickleValue, 
             PickleValue::List(items) => {
                 let mut entries = Vec::new();
                 for item in items {
-                    if let PickleValue::Tuple(pair) = item {
-                        if pair.len() == 2 {
-                            entries.push((pair[0].clone(), pair[1].clone()));
-                        }
+                    if let PickleValue::Tuple(pair) = item
+                        && pair.len() == 2
+                    {
+                        entries.push((pair[0].clone(), pair[1].clone()));
                     }
                 }
                 if !entries.is_empty() {
@@ -692,10 +692,10 @@ fn find_dict_entries(value: &PickleValue) -> FerrotorchResult<Vec<(PickleValue, 
                 if let PickleValue::List(inner) = &items[0] {
                     let mut entries = Vec::new();
                     for item in inner {
-                        if let PickleValue::Tuple(pair) = item {
-                            if pair.len() == 2 {
-                                entries.push((pair[0].clone(), pair[1].clone()));
-                            }
+                        if let PickleValue::Tuple(pair) = item
+                            && pair.len() == 2
+                        {
+                            entries.push((pair[0].clone(), pair[1].clone()));
                         }
                     }
                     return Ok(entries);
@@ -709,10 +709,10 @@ fn find_dict_entries(value: &PickleValue) -> FerrotorchResult<Vec<(PickleValue, 
 
         PickleValue::Tuple(items) => {
             for item in items {
-                if let Ok(entries) = find_dict_entries(item) {
-                    if !entries.is_empty() {
-                        return Ok(entries);
-                    }
+                if let Ok(entries) = find_dict_entries(item)
+                    && !entries.is_empty()
+                {
+                    return Ok(entries);
                 }
             }
             Ok(Vec::new())

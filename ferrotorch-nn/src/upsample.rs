@@ -1858,7 +1858,7 @@ pub fn fold<T: Float>(
     let [h_out, w_out] = output_size;
     let k_area = kernel_size[0] * kernel_size[1];
 
-    if k % k_area != 0 {
+    if !k.is_multiple_of(k_area) {
         return Err(FerrotorchError::InvalidArgument {
             message: format!("fold: dim 1 ({k}) must be divisible by kH*kW ({})", k_area),
         });

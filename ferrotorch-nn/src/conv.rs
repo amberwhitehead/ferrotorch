@@ -482,14 +482,14 @@ impl<T: Float> Conv2d<T> {
                 message: "Conv2d::new_full: groups must be > 0".into(),
             });
         }
-        if in_channels % groups != 0 {
+        if !in_channels.is_multiple_of(groups) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "Conv2d::new_full: groups={groups} must divide in_channels={in_channels}"
                 ),
             });
         }
-        if out_channels % groups != 0 {
+        if !out_channels.is_multiple_of(groups) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "Conv2d::new_full: groups={groups} must divide out_channels={out_channels}"
@@ -654,16 +654,16 @@ impl<T: Float> Conv2d<T> {
         let out_channels = weight.shape()[0];
         let in_channels = weight.shape()[1];
         let kernel_size = (weight.shape()[2], weight.shape()[3]);
-        if let Some(b) = &bias {
-            if b.ndim() != 1 || b.shape()[0] != out_channels {
-                return Err(FerrotorchError::ShapeMismatch {
-                    message: format!(
-                        "Conv2d::from_parts: bias shape {:?} != [{}]",
-                        b.shape(),
-                        out_channels
-                    ),
-                });
-            }
+        if let Some(b) = &bias
+            && (b.ndim() != 1 || b.shape()[0] != out_channels)
+        {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "Conv2d::from_parts: bias shape {:?} != [{}]",
+                    b.shape(),
+                    out_channels
+                ),
+            });
         }
         Ok(Self {
             weight: Parameter::new(weight),
@@ -869,74 +869,72 @@ impl<T: Float> Module<T> for Conv2d<T> {
         // in that shape (see `Conv2d::new_full` for the `in_per_group =
         // in_channels / groups` slice).
         let is_f32 = std::mem::size_of::<T>() == 4;
-        if is_f32 && input.is_cuda() {
-            if let Some(backend) = ferrotorch_core::gpu_dispatch::gpu_backend() {
-                let bias_handle = self
-                    .bias
-                    .as_ref()
-                    .and_then(|b| b.tensor().gpu_handle().ok());
-                let weight_shape = self.weight.tensor().shape();
-                let weight_dim4: [usize; 4] = [
-                    weight_shape[0],
-                    weight_shape[1],
-                    weight_shape[2],
-                    weight_shape[3],
-                ];
-                let (out_handle, out_shape) = backend.conv2d_f32(
-                    input.gpu_handle()?,
-                    self.weight.tensor().gpu_handle()?,
-                    bias_handle,
-                    [batch, c_in, h, w],
-                    weight_dim4,
-                    self.stride,
-                    self.padding,
-                    self.dilation,
-                    groups,
-                )?;
+        if is_f32
+            && input.is_cuda()
+            && let Some(backend) = ferrotorch_core::gpu_dispatch::gpu_backend()
+        {
+            let bias_handle = self
+                .bias
+                .as_ref()
+                .and_then(|b| b.tensor().gpu_handle().ok());
+            let weight_shape = self.weight.tensor().shape();
+            let weight_dim4: [usize; 4] = [
+                weight_shape[0],
+                weight_shape[1],
+                weight_shape[2],
+                weight_shape[3],
+            ];
+            let (out_handle, out_shape) = backend.conv2d_f32(
+                input.gpu_handle()?,
+                self.weight.tensor().gpu_handle()?,
+                bias_handle,
+                [batch, c_in, h, w],
+                weight_dim4,
+                self.stride,
+                self.padding,
+                self.dilation,
+                groups,
+            )?;
 
-                let result = Tensor::from_storage(
-                    TensorStorage::gpu(out_handle),
+            let result =
+                Tensor::from_storage(TensorStorage::gpu(out_handle), out_shape.to_vec(), false)?;
+
+            // For backward, fall through to CPU path if gradients needed
+            // (GPU backward not yet implemented — stores input for recomputation)
+            if is_grad_enabled()
+                && (input.requires_grad()
+                    || self.weight.requires_grad()
+                    || self.bias.as_ref().is_some_and(|b| b.requires_grad()))
+            {
+                // Download cols for backward (CPU backward path).
+                let input_data = input.data_vec()?;
+                let (cols, col_rows, col_cols) =
+                    im2col(&input_data, batch, c_in, h, w, kh, kw, sh, sw, ph, pw);
+                let grad_fn = Arc::new(Conv2dBackward {
+                    input: input.clone(),
+                    weight: self.weight.tensor().clone(),
+                    bias: self.bias.as_ref().map(|b| b.tensor().clone()),
+                    in_channels: self.in_channels,
+                    out_channels: self.out_channels,
+                    kernel_size: self.kernel_size,
+                    stride: self.stride,
+                    padding: self.padding,
+                    dilation: self.dilation,
+                    groups: self.groups,
+                    cols,
+                    col_rows,
+                    col_cols,
+                    h_out,
+                    w_out,
+                });
+                return Tensor::from_operation(
+                    result.into_storage_and_shape()?.0,
                     out_shape.to_vec(),
-                    false,
-                )?;
-
-                // For backward, fall through to CPU path if gradients needed
-                // (GPU backward not yet implemented — stores input for recomputation)
-                if is_grad_enabled()
-                    && (input.requires_grad()
-                        || self.weight.requires_grad()
-                        || self.bias.as_ref().is_some_and(|b| b.requires_grad()))
-                {
-                    // Download cols for backward (CPU backward path).
-                    let input_data = input.data_vec()?;
-                    let (cols, col_rows, col_cols) =
-                        im2col(&input_data, batch, c_in, h, w, kh, kw, sh, sw, ph, pw);
-                    let grad_fn = Arc::new(Conv2dBackward {
-                        input: input.clone(),
-                        weight: self.weight.tensor().clone(),
-                        bias: self.bias.as_ref().map(|b| b.tensor().clone()),
-                        in_channels: self.in_channels,
-                        out_channels: self.out_channels,
-                        kernel_size: self.kernel_size,
-                        stride: self.stride,
-                        padding: self.padding,
-                        dilation: self.dilation,
-                        groups: self.groups,
-                        cols,
-                        col_rows,
-                        col_cols,
-                        h_out,
-                        w_out,
-                    });
-                    return Tensor::from_operation(
-                        result.into_storage_and_shape()?.0,
-                        out_shape.to_vec(),
-                        grad_fn,
-                    );
-                }
-
-                return Ok(result);
+                    grad_fn,
+                );
             }
+
+            return Ok(result);
         }
 
         // ---- CPU path (handles dense, dilated, grouped, and grouped+dilated) ----
@@ -1555,14 +1553,14 @@ impl<T: Float> Conv1d<T> {
         }
         // `torch/nn/modules/conv.py:107-110`: `in_channels % groups != 0`
         // and `out_channels % groups != 0` each raise ValueError.
-        if in_channels % groups != 0 {
+        if !in_channels.is_multiple_of(groups) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "Conv1d::new_full: groups={groups} must divide in_channels={in_channels}"
                 ),
             });
         }
-        if out_channels % groups != 0 {
+        if !out_channels.is_multiple_of(groups) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "Conv1d::new_full: groups={groups} must divide out_channels={out_channels}"
@@ -1692,16 +1690,16 @@ impl<T: Float> Conv1d<T> {
         let out_channels = weight.shape()[0];
         let in_channels = weight.shape()[1];
         let kernel_size = weight.shape()[2];
-        if let Some(b) = &bias {
-            if b.ndim() != 1 || b.shape()[0] != out_channels {
-                return Err(FerrotorchError::ShapeMismatch {
-                    message: format!(
-                        "Conv1d::from_parts: bias shape {:?} != [{}]",
-                        b.shape(),
-                        out_channels
-                    ),
-                });
-            }
+        if let Some(b) = &bias
+            && (b.ndim() != 1 || b.shape()[0] != out_channels)
+        {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "Conv1d::from_parts: bias shape {:?} != [{}]",
+                    b.shape(),
+                    out_channels
+                ),
+            });
         }
         Ok(Self {
             weight: Parameter::new(weight),
@@ -2455,14 +2453,14 @@ impl<T: Float> ConvTranspose2d<T> {
                 message: "groups must be a positive integer".into(),
             });
         }
-        if in_channels % groups != 0 {
+        if !in_channels.is_multiple_of(groups) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "in_channels ({in_channels}) must be divisible by groups ({groups})"
                 ),
             });
         }
-        if out_channels % groups != 0 {
+        if !out_channels.is_multiple_of(groups) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "out_channels ({out_channels}) must be divisible by groups ({groups})"
@@ -2574,16 +2572,16 @@ impl<T: Float> ConvTranspose2d<T> {
                 message: "output_padding must be strictly less than stride".into(),
             });
         }
-        if let Some(b) = &bias {
-            if b.ndim() != 1 || b.shape()[0] != out_channels {
-                return Err(FerrotorchError::ShapeMismatch {
-                    message: format!(
-                        "ConvTranspose2d::from_parts: bias shape {:?} != [{}]",
-                        b.shape(),
-                        out_channels
-                    ),
-                });
-            }
+        if let Some(b) = &bias
+            && (b.ndim() != 1 || b.shape()[0] != out_channels)
+        {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "ConvTranspose2d::from_parts: bias shape {:?} != [{}]",
+                    b.shape(),
+                    out_channels
+                ),
+            });
         }
         Ok(Self {
             weight: Parameter::new(weight),
@@ -3579,14 +3577,14 @@ impl<T: Float> Conv3d<T> {
         }
         // `torch/nn/modules/conv.py:107-110`: `in_channels % groups != 0`
         // and `out_channels % groups != 0` each raise ValueError.
-        if in_channels % groups != 0 {
+        if !in_channels.is_multiple_of(groups) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "Conv3d::new_full: groups={groups} must divide in_channels={in_channels}"
                 ),
             });
         }
-        if out_channels % groups != 0 {
+        if !out_channels.is_multiple_of(groups) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "Conv3d::new_full: groups={groups} must divide out_channels={out_channels}"
@@ -3725,16 +3723,16 @@ impl<T: Float> Conv3d<T> {
         let out_channels = weight.shape()[0];
         let in_channels = weight.shape()[1];
         let kernel_size = (weight.shape()[2], weight.shape()[3], weight.shape()[4]);
-        if let Some(b) = &bias {
-            if b.ndim() != 1 || b.shape()[0] != out_channels {
-                return Err(FerrotorchError::ShapeMismatch {
-                    message: format!(
-                        "Conv3d::from_parts: bias shape {:?} != [{}]",
-                        b.shape(),
-                        out_channels
-                    ),
-                });
-            }
+        if let Some(b) = &bias
+            && (b.ndim() != 1 || b.shape()[0] != out_channels)
+        {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "Conv3d::from_parts: bias shape {:?} != [{}]",
+                    b.shape(),
+                    out_channels
+                ),
+            });
         }
         Ok(Self {
             weight: Parameter::new(weight),
@@ -4529,14 +4527,14 @@ impl<T: Float> ConvTranspose1d<T> {
                 message: "groups must be a positive integer".into(),
             });
         }
-        if in_channels % groups != 0 {
+        if !in_channels.is_multiple_of(groups) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "in_channels ({in_channels}) must be divisible by groups ({groups})"
                 ),
             });
         }
-        if out_channels % groups != 0 {
+        if !out_channels.is_multiple_of(groups) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "out_channels ({out_channels}) must be divisible by groups ({groups})"
@@ -4640,16 +4638,16 @@ impl<T: Float> ConvTranspose1d<T> {
                 message: "output_padding must be strictly less than stride".into(),
             });
         }
-        if let Some(b) = &bias {
-            if b.ndim() != 1 || b.shape()[0] != out_channels {
-                return Err(FerrotorchError::ShapeMismatch {
-                    message: format!(
-                        "ConvTranspose1d::from_parts: bias shape {:?} != [{}]",
-                        b.shape(),
-                        out_channels
-                    ),
-                });
-            }
+        if let Some(b) = &bias
+            && (b.ndim() != 1 || b.shape()[0] != out_channels)
+        {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "ConvTranspose1d::from_parts: bias shape {:?} != [{}]",
+                    b.shape(),
+                    out_channels
+                ),
+            });
         }
         Ok(Self {
             weight: Parameter::new(weight),
@@ -5181,14 +5179,14 @@ impl<T: Float> ConvTranspose3d<T> {
                 message: "groups must be a positive integer".into(),
             });
         }
-        if in_channels % groups != 0 {
+        if !in_channels.is_multiple_of(groups) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "in_channels ({in_channels}) must be divisible by groups ({groups})"
                 ),
             });
         }
-        if out_channels % groups != 0 {
+        if !out_channels.is_multiple_of(groups) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "out_channels ({out_channels}) must be divisible by groups ({groups})"
@@ -5305,16 +5303,16 @@ impl<T: Float> ConvTranspose3d<T> {
                     .into(),
             });
         }
-        if let Some(b) = &bias {
-            if b.ndim() != 1 || b.shape()[0] != out_channels {
-                return Err(FerrotorchError::ShapeMismatch {
-                    message: format!(
-                        "ConvTranspose3d::from_parts: bias shape {:?} != [{}]",
-                        b.shape(),
-                        out_channels
-                    ),
-                });
-            }
+        if let Some(b) = &bias
+            && (b.ndim() != 1 || b.shape()[0] != out_channels)
+        {
+            return Err(FerrotorchError::ShapeMismatch {
+                message: format!(
+                    "ConvTranspose3d::from_parts: bias shape {:?} != [{}]",
+                    b.shape(),
+                    out_channels
+                ),
+            });
         }
         Ok(Self {
             weight: Parameter::new(weight),

@@ -467,31 +467,32 @@ impl<T: Float> Module<T> for LayerNorm<T> {
         let batch_size = input.numel() / norm_size;
 
         // GPU fast path: native LayerNorm kernel.
-        if input.is_cuda() && self.elementwise_affine {
-            if let Some(backend) = ferrotorch_core::gpu_dispatch::gpu_backend() {
-                let eps_f32 = self.eps as f32;
-                let handle = backend.layernorm_f32(
-                    input.gpu_handle()?,
-                    self.weight.tensor().gpu_handle()?,
-                    self.bias.tensor().gpu_handle()?,
-                    batch_size,
-                    norm_size,
-                    eps_f32,
-                )?;
-                return if is_grad_enabled() && input.requires_grad() {
-                    let grad_fn = Arc::new(LayerNormBackward {
-                        input: input.clone(),
-                        weight: self.weight.tensor().clone(),
-                        bias: self.bias.tensor().clone(),
-                        normalized_shape: self.normalized_shape.clone(),
-                        eps: self.eps,
-                        elementwise_affine: self.elementwise_affine,
-                    });
-                    Tensor::from_operation(TensorStorage::gpu(handle), shape, grad_fn)
-                } else {
-                    Tensor::from_storage(TensorStorage::gpu(handle), shape, false)
-                };
-            }
+        if input.is_cuda()
+            && self.elementwise_affine
+            && let Some(backend) = ferrotorch_core::gpu_dispatch::gpu_backend()
+        {
+            let eps_f32 = self.eps as f32;
+            let handle = backend.layernorm_f32(
+                input.gpu_handle()?,
+                self.weight.tensor().gpu_handle()?,
+                self.bias.tensor().gpu_handle()?,
+                batch_size,
+                norm_size,
+                eps_f32,
+            )?;
+            return if is_grad_enabled() && input.requires_grad() {
+                let grad_fn = Arc::new(LayerNormBackward {
+                    input: input.clone(),
+                    weight: self.weight.tensor().clone(),
+                    bias: self.bias.tensor().clone(),
+                    normalized_shape: self.normalized_shape.clone(),
+                    eps: self.eps,
+                    elementwise_affine: self.elementwise_affine,
+                });
+                Tensor::from_operation(TensorStorage::gpu(handle), shape, grad_fn)
+            } else {
+                Tensor::from_storage(TensorStorage::gpu(handle), shape, false)
+            };
         }
 
         // CPU path — CUDA inputs without a GPU backend are rejected above.
@@ -619,60 +620,59 @@ impl<T: Float> GradFn<T> for LayerNormBackward<T> {
         let batch_size = self.input.numel() / norm_size;
 
         // GPU-native fast path for f32/f64 with elementwise affine
-        if self.input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) && self.elementwise_affine {
-            if let Some(backend) = gpu_backend() {
-                let (gi_h, gw_h, gb_h) = if is_f64::<T>() {
-                    backend.layernorm_backward_f64(
-                        self.input.gpu_handle()?,
-                        grad_output.gpu_handle()?,
-                        self.weight.gpu_handle()?,
-                        batch_size,
-                        norm_size,
-                        self.eps,
-                    )?
-                } else {
-                    backend.layernorm_backward_f32(
-                        self.input.gpu_handle()?,
-                        grad_output.gpu_handle()?,
-                        self.weight.gpu_handle()?,
-                        batch_size,
-                        norm_size,
-                        self.eps as f32,
-                    )?
-                };
+        if self.input.is_cuda()
+            && (is_f32::<T>() || is_f64::<T>())
+            && self.elementwise_affine
+            && let Some(backend) = gpu_backend()
+        {
+            let (gi_h, gw_h, gb_h) = if is_f64::<T>() {
+                backend.layernorm_backward_f64(
+                    self.input.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                    self.weight.gpu_handle()?,
+                    batch_size,
+                    norm_size,
+                    self.eps,
+                )?
+            } else {
+                backend.layernorm_backward_f32(
+                    self.input.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                    self.weight.gpu_handle()?,
+                    batch_size,
+                    norm_size,
+                    self.eps as f32,
+                )?
+            };
 
-                let grad_input_tensor = Tensor::from_storage(
-                    TensorStorage::gpu(gi_h),
-                    self.input.shape().to_vec(),
+            let grad_input_tensor =
+                Tensor::from_storage(TensorStorage::gpu(gi_h), self.input.shape().to_vec(), false)?;
+
+            let grad_weight_out = if self.weight.requires_grad() {
+                Some(Tensor::from_storage(
+                    TensorStorage::gpu(gw_h),
+                    self.normalized_shape.clone(),
                     false,
-                )?;
+                )?)
+            } else {
+                None
+            };
 
-                let grad_weight_out = if self.weight.requires_grad() {
-                    Some(Tensor::from_storage(
-                        TensorStorage::gpu(gw_h),
-                        self.normalized_shape.clone(),
-                        false,
-                    )?)
-                } else {
-                    None
-                };
+            let grad_bias_out = if self.bias.requires_grad() {
+                Some(Tensor::from_storage(
+                    TensorStorage::gpu(gb_h),
+                    self.normalized_shape.clone(),
+                    false,
+                )?)
+            } else {
+                None
+            };
 
-                let grad_bias_out = if self.bias.requires_grad() {
-                    Some(Tensor::from_storage(
-                        TensorStorage::gpu(gb_h),
-                        self.normalized_shape.clone(),
-                        false,
-                    )?)
-                } else {
-                    None
-                };
-
-                return Ok(vec![
-                    Some(grad_input_tensor),
-                    grad_weight_out,
-                    grad_bias_out,
-                ]);
-            }
+            return Ok(vec![
+                Some(grad_input_tensor),
+                grad_weight_out,
+                grad_bias_out,
+            ]);
         }
 
         // CPU-only path — CUDA inputs without a GPU backend are rejected above.
@@ -841,7 +841,7 @@ impl<T: Float> GroupNorm<T> {
                 message: "num_channels must be positive".into(),
             });
         }
-        if num_channels % num_groups != 0 {
+        if !num_channels.is_multiple_of(num_groups) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "num_channels ({num_channels}) must be divisible by num_groups ({num_groups})"
@@ -1283,28 +1283,28 @@ impl<T: Float> Module<T> for RMSNorm<T> {
         let batch_size = input.numel() / norm_size;
 
         // GPU fast path: native RMSNorm kernel.
-        if input.is_cuda() {
-            if let Some(backend) = ferrotorch_core::gpu_dispatch::gpu_backend() {
-                let eps_f32 = self.eps as f32;
-                let handle = backend.rmsnorm_f32(
-                    input.gpu_handle()?,
-                    self.weight.tensor().gpu_handle()?,
-                    batch_size,
-                    norm_size,
-                    eps_f32,
-                )?;
-                return if is_grad_enabled() && input.requires_grad() {
-                    let grad_fn = Arc::new(RMSNormBackward {
-                        input: input.clone(),
-                        weight: self.weight.tensor().clone(),
-                        normalized_shape: self.normalized_shape.clone(),
-                        eps: self.eps,
-                    });
-                    Tensor::from_operation(TensorStorage::gpu(handle), shape, grad_fn)
-                } else {
-                    Tensor::from_storage(TensorStorage::gpu(handle), shape, false)
-                };
-            }
+        if input.is_cuda()
+            && let Some(backend) = ferrotorch_core::gpu_dispatch::gpu_backend()
+        {
+            let eps_f32 = self.eps as f32;
+            let handle = backend.rmsnorm_f32(
+                input.gpu_handle()?,
+                self.weight.tensor().gpu_handle()?,
+                batch_size,
+                norm_size,
+                eps_f32,
+            )?;
+            return if is_grad_enabled() && input.requires_grad() {
+                let grad_fn = Arc::new(RMSNormBackward {
+                    input: input.clone(),
+                    weight: self.weight.tensor().clone(),
+                    normalized_shape: self.normalized_shape.clone(),
+                    eps: self.eps,
+                });
+                Tensor::from_operation(TensorStorage::gpu(handle), shape, grad_fn)
+            } else {
+                Tensor::from_storage(TensorStorage::gpu(handle), shape, false)
+            };
         }
 
         // CPU path — CUDA inputs without a GPU backend are rejected above.
@@ -1435,46 +1435,44 @@ impl<T: Float> GradFn<T> for RMSNormBackward<T> {
         let batch_size = self.input.numel() / norm_size;
 
         // GPU-native fast path for f32/f64
-        if self.input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
-            if let Some(backend) = gpu_backend() {
-                let (gi_h, gw_h) = if is_f64::<T>() {
-                    backend.rmsnorm_backward_f64(
-                        self.input.gpu_handle()?,
-                        grad_output.gpu_handle()?,
-                        self.weight.gpu_handle()?,
-                        batch_size,
-                        norm_size,
-                        self.eps,
-                    )?
-                } else {
-                    backend.rmsnorm_backward_f32(
-                        self.input.gpu_handle()?,
-                        grad_output.gpu_handle()?,
-                        self.weight.gpu_handle()?,
-                        batch_size,
-                        norm_size,
-                        self.eps as f32,
-                    )?
-                };
+        if self.input.is_cuda()
+            && (is_f32::<T>() || is_f64::<T>())
+            && let Some(backend) = gpu_backend()
+        {
+            let (gi_h, gw_h) = if is_f64::<T>() {
+                backend.rmsnorm_backward_f64(
+                    self.input.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                    self.weight.gpu_handle()?,
+                    batch_size,
+                    norm_size,
+                    self.eps,
+                )?
+            } else {
+                backend.rmsnorm_backward_f32(
+                    self.input.gpu_handle()?,
+                    grad_output.gpu_handle()?,
+                    self.weight.gpu_handle()?,
+                    batch_size,
+                    norm_size,
+                    self.eps as f32,
+                )?
+            };
 
-                let grad_input_tensor = Tensor::from_storage(
-                    TensorStorage::gpu(gi_h),
-                    self.input.shape().to_vec(),
+            let grad_input_tensor =
+                Tensor::from_storage(TensorStorage::gpu(gi_h), self.input.shape().to_vec(), false)?;
+
+            let grad_weight_out = if self.weight.requires_grad() {
+                Some(Tensor::from_storage(
+                    TensorStorage::gpu(gw_h),
+                    self.normalized_shape.clone(),
                     false,
-                )?;
+                )?)
+            } else {
+                None
+            };
 
-                let grad_weight_out = if self.weight.requires_grad() {
-                    Some(Tensor::from_storage(
-                        TensorStorage::gpu(gw_h),
-                        self.normalized_shape.clone(),
-                        false,
-                    )?)
-                } else {
-                    None
-                };
-
-                return Ok(vec![Some(grad_input_tensor), grad_weight_out]);
-            }
+            return Ok(vec![Some(grad_input_tensor), grad_weight_out]);
         }
 
         // CPU-only path — CUDA inputs without a GPU backend are rejected above.

@@ -303,7 +303,7 @@ impl<T: Float> PagedKVCache<T> {
                 ),
             });
         }
-        if key.len() % stride != 0 {
+        if !key.len().is_multiple_of(stride) {
             return Err(FerrotorchError::InvalidArgument {
                 message: format!(
                     "PagedKVCache::append: key len ({}) is not divisible by \
@@ -509,10 +509,10 @@ impl<T: Float> PagedAttentionManager<T> {
 
     /// Remove a sequence, freeing all of its pages back to the pool.
     pub fn remove_sequence(&mut self, seq_id: usize) {
-        if let Some(slot) = self.sequences.get_mut(seq_id) {
-            if let Some(mut cache) = slot.take() {
-                cache.free_all(&mut self.pool);
-            }
+        if let Some(slot) = self.sequences.get_mut(seq_id)
+            && let Some(mut cache) = slot.take()
+        {
+            cache.free_all(&mut self.pool);
         }
     }
 

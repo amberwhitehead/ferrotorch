@@ -535,16 +535,16 @@ pub fn flex_attention<T: Float>(
     }
 
     // Validate block_mask dimensions if provided.
-    if let Some(bm) = block_mask {
-        if bm.n_q != n_q || bm.n_k != n_k {
-            return Err(FerrotorchError::InvalidArgument {
-                message: format!(
-                    "flex_attention: BlockMask dimensions (n_q={}, n_k={}) \
+    if let Some(bm) = block_mask
+        && (bm.n_q != n_q || bm.n_k != n_k)
+    {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "flex_attention: BlockMask dimensions (n_q={}, n_k={}) \
                      don't match input (n_q={n_q}, n_k={n_k})",
-                    bm.n_q, bm.n_k
-                ),
-            });
-        }
+                bm.n_q, bm.n_k
+            ),
+        });
     }
 
     let scale = T::from(1.0 / (d as f64).sqrt()).unwrap();
@@ -571,11 +571,11 @@ pub fn flex_attention<T: Float>(
         for i in 0..n_q {
             for j in 0..n_k {
                 // Check block mask.
-                if let Some(bm) = block_mask {
-                    if !bm.allows_position(i, j) {
-                        scores[i * n_k + j] = neg_inf;
-                        continue;
-                    }
+                if let Some(bm) = block_mask
+                    && !bm.allows_position(i, j)
+                {
+                    scores[i * n_k + j] = neg_inf;
+                    continue;
                 }
 
                 let mut dot = zero;
@@ -591,10 +591,10 @@ pub fn flex_attention<T: Float>(
             for i in 0..n_q {
                 for j in 0..n_k {
                     // Skip masked positions.
-                    if let Some(bm) = block_mask {
-                        if !bm.allows_position(i, j) {
-                            continue;
-                        }
+                    if let Some(bm) = block_mask
+                        && !bm.allows_position(i, j)
+                    {
+                        continue;
                     }
 
                     let score_val = scores[i * n_k + j];

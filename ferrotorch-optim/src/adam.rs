@@ -726,33 +726,31 @@ impl<T: Float> Optimizer<T> for Adam<T> {
             entry.insert("step_count".to_string(), vec![pstate.step_count as f64]);
 
             // For GPU state, download moments to CPU f64 for serialization.
-            if let (Some(gpu_m), Some(gpu_v)) = (&pstate.gpu_exp_avg, &pstate.gpu_exp_avg_sq) {
-                if let Some(backend) = gpu_backend() {
-                    if let (Ok(m_bytes), Ok(v_bytes)) =
-                        (backend.gpu_to_cpu(gpu_m), backend.gpu_to_cpu(gpu_v))
-                    {
-                        // Decode bytes -> f32 -> f64 without `unsafe`.
-                        // The raw `slice::from_raw_parts` reinterpretation
-                        // we used to do here had two distinct hazards
-                        // (alignment of the byte buffer and partial-length
-                        // truncation) that `f32::from_ne_bytes` over fixed
-                        // 4-byte windows sidesteps entirely; this also
-                        // matches PyTorch's behavior of native-endian f32
-                        // serialization.
-                        let m_f64: Vec<f64> = m_bytes
-                            .chunks_exact(4)
-                            .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]) as f64)
-                            .collect();
-                        let v_f64: Vec<f64> = v_bytes
-                            .chunks_exact(4)
-                            .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]) as f64)
-                            .collect();
-                        entry.insert("exp_avg".to_string(), m_f64);
-                        entry.insert("exp_avg_sq".to_string(), v_f64);
-                        out.insert(key_str, entry);
-                        continue;
-                    }
-                }
+            if let (Some(gpu_m), Some(gpu_v)) = (&pstate.gpu_exp_avg, &pstate.gpu_exp_avg_sq)
+                && let Some(backend) = gpu_backend()
+                && let (Ok(m_bytes), Ok(v_bytes)) =
+                    (backend.gpu_to_cpu(gpu_m), backend.gpu_to_cpu(gpu_v))
+            {
+                // Decode bytes -> f32 -> f64 without `unsafe`.
+                // The raw `slice::from_raw_parts` reinterpretation
+                // we used to do here had two distinct hazards
+                // (alignment of the byte buffer and partial-length
+                // truncation) that `f32::from_ne_bytes` over fixed
+                // 4-byte windows sidesteps entirely; this also
+                // matches PyTorch's behavior of native-endian f32
+                // serialization.
+                let m_f64: Vec<f64> = m_bytes
+                    .chunks_exact(4)
+                    .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]) as f64)
+                    .collect();
+                let v_f64: Vec<f64> = v_bytes
+                    .chunks_exact(4)
+                    .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]) as f64)
+                    .collect();
+                entry.insert("exp_avg".to_string(), m_f64);
+                entry.insert("exp_avg_sq".to_string(), v_f64);
+                out.insert(key_str, entry);
+                continue;
             }
 
             entry.insert("exp_avg".to_string(), pstate.exp_avg.clone());

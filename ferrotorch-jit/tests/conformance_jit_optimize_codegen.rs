@@ -1225,27 +1225,17 @@ fn codegen_gpu_cuda_source_f64_uses_double_type() {
 
 #[test]
 fn codegen_gpu_ptx_f64_transcendental_without_cuda_feature() {
-    // Fixture: generate_ptx_source_f64_transcendental_unsupported_without_cuda_feature
-    // When the 'cuda' feature is disabled, generate_ptx_source for f64 Exp
-    // must return Err(JitError::Unsupported).
-    // This test is active only when the 'cuda' feature is off.
-    #[cfg(not(feature = "cuda"))]
-    {
-        let loops = loops_for(&[IrOpKind::Exp], &["in0"], 4);
-        let result = GpuCodegen::generate_ptx_source(&loops, "ptx_exp_f64", 256, 1, Dtype::F64);
-        assert!(
-            result.is_err(),
-            "f64 transcendental PTX without cuda feature must return an error"
-        );
-    }
-    // When cuda feature is on, the call may succeed — that's correct too.
-    #[cfg(feature = "cuda")]
-    {
-        // Feature is on: either Err or Ok is acceptable (depends on nvrtc availability).
-        // We just assert the function is callable without panic.
-        let loops = loops_for(&[IrOpKind::Exp], &["in0"], 4);
-        let _result = GpuCodegen::generate_ptx_source(&loops, "ptx_exp_f64", 256, 1, Dtype::F64);
-    }
+    // Fixture: generate_ptx_source_f64_transcendental_uses_rust_ptx
+    // F64 Exp must emit Rust-owned PTX in both cuda and no-cuda builds; codegen
+    // cannot depend on NVRTC or libdevice.
+    let loops = loops_for(&[IrOpKind::Exp], &["in0"], 4);
+    let ptx = GpuCodegen::generate_ptx_source(&loops, "ptx_exp_f64", 256, 1, Dtype::F64)
+        .expect("f64 transcendental PTX must be generated without NVRTC");
+    assert!(ptx.contains("fma.rn.f64"), "expected f64 polynomial PTX");
+    assert!(
+        !ptx.contains("ex2.approx.f32") && !ptx.contains("cvt.f32.f64"),
+        "f64 PTX must not demote through f32:\n{ptx}"
+    );
 }
 
 // ---------------------------------------------------------------------------

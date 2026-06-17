@@ -13,7 +13,7 @@
 //! | REQ-1 | SHIPPED | crate doc-comment in `lib.rs`; consumer: every `use ferrotorch_jit::...` resolves through this file |
 //! | REQ-2 | SHIPPED | `#![warn(clippy::all, clippy::pedantic)]` + `#![deny(unsafe_code, missing_docs, ...)]` block in `lib.rs`; consumer: workspace clippy gauntlet |
 //! | REQ-3 | SHIPPED | every `pub mod` decl in `lib.rs`; consumer: downstream crates plus JIT-internal `use crate::<mod>::...` |
-//! | REQ-4 | SHIPPED | `#[cfg(feature = "cuda")] pub mod fusion_gpu;` in `lib.rs`; consumer: `fusion.rs:1220` references `crate::nvrtc::compile_cuda_source_to_ptx` |
+//! | REQ-4 | SHIPPED | `#[cfg(feature = "cuda")] pub mod fusion_gpu;` in `lib.rs`; consumer: CUDA fused execution routes through Rust-generated PTX |
 //! | REQ-5 | SHIPPED | `pub use trace::trace; pub use module::{...}; pub use export::...; pub use graph_break::...; ...` re-export blocks in `lib.rs`; consumer: every downstream user imports through these |
 
 #![warn(clippy::all, clippy::pedantic)]
@@ -81,7 +81,6 @@ pub mod graph_break;
 pub mod interpreter;
 pub mod memory_plan;
 pub mod module;
-pub mod nvrtc;
 pub mod optimize;
 pub mod serialize;
 pub mod symbolic;

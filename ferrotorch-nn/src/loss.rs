@@ -1326,11 +1326,11 @@ impl NLLLoss {
             let target_idx = targets_data[b].to_isize().unwrap_or(0);
 
             // Check ignore_index.
-            if let Some(ignore) = self.ignore_index {
-                if target_idx == ignore {
-                    // This sample is ignored (loss = 0, not counted).
-                    continue;
-                }
+            if let Some(ignore) = self.ignore_index
+                && target_idx == ignore
+            {
+                // This sample is ignored (loss = 0, not counted).
+                continue;
             }
 
             let target_class = target_idx as usize;
@@ -1434,10 +1434,10 @@ impl<T: Float> GradFn<T> for NLLBackward<T> {
         for b in 0..batch {
             let target_idx = targets_data[b].to_isize().unwrap_or(0);
 
-            if let Some(ignore) = self.ignore_index {
-                if target_idx == ignore {
-                    continue;
-                }
+            if let Some(ignore) = self.ignore_index
+                && target_idx == ignore
+            {
+                continue;
             }
 
             let target_class = target_idx as usize;

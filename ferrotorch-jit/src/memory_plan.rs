@@ -137,10 +137,10 @@ pub fn plan_memory(graph: &IrGraph) -> MemoryPlan {
             None => continue,
         };
         for &input_val in &node.inputs {
-            if let Some(interval) = live_intervals.get_mut(&input_val) {
-                if node_topo > interval.last_use {
-                    interval.last_use = node_topo;
-                }
+            if let Some(interval) = live_intervals.get_mut(&input_val)
+                && node_topo > interval.last_use
+            {
+                interval.last_use = node_topo;
             }
         }
     }

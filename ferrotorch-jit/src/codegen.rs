@@ -286,11 +286,11 @@ fn try_compile_native(graph: &IrGraph) -> Option<CompiledGraph> {
 
             IrOpKind::Output => {
                 // Pass through.
-                if let Some(&input_id) = node.inputs.first() {
-                    if let Some(kind) = value_kinds.get(&input_id).cloned() {
-                        for &out_id in &node.outputs {
-                            value_kinds.insert(out_id, kind.clone());
-                        }
+                if let Some(&input_id) = node.inputs.first()
+                    && let Some(kind) = value_kinds.get(&input_id).cloned()
+                {
+                    for &out_id in &node.outputs {
+                        value_kinds.insert(out_id, kind.clone());
                     }
                 }
             }
@@ -829,9 +829,9 @@ impl InductorBackend {
     /// - Returns `Err(JitError::CodegenError)` for GPU targets if a fusion
     ///   group contains values of mixed dtypes (mixed-dtype kernels are not
     ///   supported; one kernel = one scalar dtype).
-    /// - Returns `Err(JitError::Unsupported)` for GPU PTX targets if an f64
-    ///   graph contains a transcendental op (no `*.approx.f64` instructions
-    ///   exist; tracked as a Phase-2 follow-up).
+    /// - Returns `Err(JitError::Unsupported)` only for genuinely unsupported
+    ///   `(op, dtype)` combinations; f64 PTX transcendentals are supported via
+    ///   Rust-owned math fragments.
     pub fn generate(&self, graph: &IrGraph) -> FerrotorchResult<Vec<String>> {
         let groups = crate::dag_fusion::find_fusion_groups(graph);
         let loops_per_group = crate::dag_fusion::fuse_dag(&groups, graph);
@@ -1051,10 +1051,10 @@ impl InductorBackend {
         // mapped executable pages, then dispatch to it on every `execute`
         // call. Graphs that are a single elementwise fusion group are fully
         // JIT'd; anything else falls back to the interpreter.
-        if self.target == InductorTarget::CpuRust {
-            if let Some(compiled) = try_jit_compile_cpu_rust(graph)? {
-                return Ok(InductorCompileStatus::Compiled(compiled));
-            }
+        if self.target == InductorTarget::CpuRust
+            && let Some(compiled) = try_jit_compile_cpu_rust(graph)?
+        {
+            return Ok(InductorCompileStatus::Compiled(compiled));
         }
 
         // GPU targets: ferrotorch-jit generates GPU source strings (CUDA C /
@@ -1066,9 +1066,8 @@ impl InductorBackend {
             self.target,
             InductorTarget::GpuCuda | InductorTarget::GpuPtx
         ) {
-            // #729: Validate per-group dtype uniformity (and surface
-            // unsupported f64 transcendentals on PTX) before declaring the
-            // GPU runtime unavailable. This gives callers the more precise
+            // Validate per-group dtype uniformity before declaring the GPU
+            // runtime unavailable. This gives callers the more precise
             // diagnosis when both apply.
             let _ = self.generate(graph)?;
         }
@@ -1108,10 +1107,10 @@ impl Codegen for InductorBackend {
         // mapped executable pages, then dispatch to it on every `execute`
         // call. Graphs that are a single elementwise fusion group are fully
         // JIT'd; anything else falls back to the interpreter.
-        if self.target == InductorTarget::CpuRust {
-            if let Some(compiled) = try_jit_compile_cpu_rust(graph)? {
-                return Ok(compiled);
-            }
+        if self.target == InductorTarget::CpuRust
+            && let Some(compiled) = try_jit_compile_cpu_rust(graph)?
+        {
+            return Ok(compiled);
         }
 
         // GPU targets: ferrotorch-jit generates GPU source strings (CUDA C /
@@ -1129,9 +1128,8 @@ impl Codegen for InductorBackend {
             self.target,
             InductorTarget::GpuCuda | InductorTarget::GpuPtx
         ) {
-            // #729: Validate per-group dtype uniformity (and surface
-            // unsupported f64 transcendentals on PTX) before declaring the
-            // GPU runtime unavailable. This gives callers the more precise
+            // Validate per-group dtype uniformity before declaring the GPU
+            // runtime unavailable. This gives callers the more precise
             // diagnosis when both apply.
             //
             // We invoke `generate()` purely for its validation side effects
@@ -2247,9 +2245,8 @@ mod tests {
     //
     // Replaces the prior #721-A guard that hard-rejected all non-F32 graphs.
     // Per #729 and `rust-gpu-discipline` §3, F64 graphs lower to native f64
-    // PTX/CUDA emission; F64 graphs containing transcendentals on PTX
-    // return `JitError::Unsupported` (no `*.approx.f64` PTX instructions
-    // exist; libdevice path is Phase-2).
+    // PTX/CUDA emission. F64 transcendentals use Rust-owned PTX math fragments
+    // and no longer require a runtime compiler.
     // -----------------------------------------------------------------------
 
     /// F64 graph on `GpuCuda` target lowers to CUDA C with `double`
@@ -2294,43 +2291,10 @@ mod tests {
         );
     }
 
-    /// F64 graph on `GpuPtx` target containing a transcendental
-    /// (sigmoid here): without the `cuda` feature, returns
-    /// `JitError::Unsupported`. With the `cuda` feature on, the f64
-    /// transcendental path delegates to NVRTC + libdevice and succeeds —
-    /// see [`test_inductor_gpu_ptx_accepts_f64_transcendental_with_cuda`]
-    /// for the matching positive case.
-    #[cfg(not(feature = "cuda"))]
+    /// F64 graph on `GpuPtx` target containing a transcendental (sigmoid here)
+    /// lowers to Rust-owned PTX without requiring the `cuda` feature.
     #[test]
-    fn test_inductor_gpu_ptx_rejects_f64_transcendental() {
-        let mut g = IrGraph::new();
-        let x = g.add_input_with_dtype(vec![4], Dtype::F64);
-        let (_, sig_outs) =
-            g.add_node_with_dtype(IrOpKind::Sigmoid, vec![x], vec![vec![4]], &[Dtype::F64]);
-        g.set_outputs(vec![sig_outs[0]]);
-
-        let backend = InductorBackend::new(InductorTarget::GpuPtx);
-        let err = backend.generate(&g).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("sigmoid")
-                || msg.contains("Unsupported")
-                || msg.contains("does not support"),
-            "expected Unsupported diagnostic for f64 sigmoid; got: {msg}"
-        );
-        assert!(
-            msg.contains("f64"),
-            "expected dtype name `f64` in error message; got: {msg}"
-        );
-    }
-
-    /// With the `cuda` feature on, an f64 graph on `GpuPtx` target
-    /// containing a transcendental (sigmoid here) compiles cleanly via
-    /// NVRTC + libdevice — closes #748. Counter-test to the no-feature
-    /// rejection above.
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn test_inductor_gpu_ptx_accepts_f64_transcendental_with_cuda() {
+    fn test_inductor_gpu_ptx_accepts_f64_transcendental() {
         let mut g = IrGraph::new();
         let x = g.add_input_with_dtype(vec![4], Dtype::F64);
         let (_, sig_outs) =
@@ -2340,26 +2304,23 @@ mod tests {
         let backend = InductorBackend::new(InductorTarget::GpuPtx);
         let sources = backend
             .generate(&g)
-            .expect("f64 sigmoid via NVRTC must succeed with cuda feature");
+            .expect("f64 sigmoid PTX must succeed without NVRTC");
         assert!(!sources.is_empty(), "expected at least one PTX source");
         let combined = sources.join("\n");
         assert!(
-            combined.contains(".entry"),
-            "expected NVRTC-compiled PTX with .entry; got:\n{combined}",
+            combined.contains(".entry") && combined.contains("fma.rn.f64"),
+            "expected Rust-owned f64 PTX with polynomial math; got:\n{combined}",
+        );
+        assert!(
+            !combined.contains("ex2.approx.f32") && !combined.contains("cvt.f32.f64"),
+            "f64 PTX must not demote through f32:\n{combined}",
         );
     }
 
-    /// `compile()` on a F64 PTX graph with a transcendental: without the
-    /// `cuda` feature, surfaces the `Unsupported` diagnosis before the
-    /// `GpuBackendUnavailable` runtime-not-wired error.
-    ///
-    /// With the `cuda` feature on, NVRTC produces valid PTX so the
-    /// `compile()` failure mode shifts to `GpuBackendUnavailable` (the
-    /// driver isn't wired into `compile()` itself; that's `module::compile`).
-    /// We exercise both shapes below.
-    #[cfg(not(feature = "cuda"))]
+    /// `compile()` on a F64 PTX graph with a transcendental reaches the
+    /// runtime-not-wired error after codegen succeeds.
     #[test]
-    fn test_inductor_gpu_compile_rejects_f64_transcendental() {
+    fn test_inductor_gpu_compile_f64_transcendental_runtime_unavailable() {
         let mut g = IrGraph::new();
         let x = g.add_input_with_dtype(vec![4], Dtype::F64);
         let (_, sig_outs) =
@@ -2370,44 +2331,8 @@ mod tests {
         let err = backend.compile(&g).unwrap_err();
         let msg = format!("{err}");
         assert!(
-            msg.contains("sigmoid") || msg.contains("does not support"),
-            "expected unsupported-op message in compile path; got: {msg}"
-        );
-    }
-
-    /// With the `cuda` feature on, `compile()` on an f64 PTX graph with
-    /// a transcendental no longer rejects on dtype/op grounds — it now
-    /// surfaces the existing `GpuBackendUnavailable` "runtime not wired"
-    /// error, since the inductor `compile()` doesn't itself launch
-    /// kernels. The failure mode is preserved (errors are still loud)
-    /// but the *cause* shifts to the runtime-unwired layer rather than
-    /// the codegen layer.
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn test_inductor_gpu_compile_f64_transcendental_with_cuda_runtime_block() {
-        let mut g = IrGraph::new();
-        let x = g.add_input_with_dtype(vec![4], Dtype::F64);
-        let (_, sig_outs) =
-            g.add_node_with_dtype(IrOpKind::Sigmoid, vec![x], vec![vec![4]], &[Dtype::F64]);
-        g.set_outputs(vec![sig_outs[0]]);
-
-        let backend = InductorBackend::new(InductorTarget::GpuPtx);
-        let err = backend.compile(&g).unwrap_err();
-        let msg = format!("{err}");
-        // The error is no longer "unsupported op" — it's the
-        // GPU-runtime-not-wired error from the existing inductor
-        // pipeline. Assert that the codegen layer isn't the rejection
-        // source any more (no "does not support" / "Unsupported"), and
-        // that the runtime-block message surfaces instead.
-        assert!(
-            !msg.contains("does not support") && !msg.contains("Unsupported"),
-            "f64 sigmoid should no longer reject at codegen with cuda feature; got: {msg}"
-        );
-        assert!(
-            msg.contains("GPU backend unavailable")
-                || msg.contains("runtime")
-                || msg.contains("not yet wire"),
-            "expected runtime-unwired diagnostic; got: {msg}"
+            msg.contains("GPU backend unavailable") || msg.contains("runtime"),
+            "expected runtime-unavailable message in compile path; got: {msg}"
         );
     }
 

@@ -1,21 +1,18 @@
-//! End-to-end numerical correctness for f64 transcendentals via libdevice
-//! (#748 / #749).
+//! End-to-end numerical correctness for Rust-owned f64 PTX transcendentals.
 //!
 //! Each test in this file:
 //! 1. Lowers a single-op IR program (`exp`, `log`, `sqrt`, `tanh`,
 //!    `sigmoid`, `gelu`, `silu`, `pow`) to PTX via
-//!    [`GpuCodegen::generate_ptx_source`] with `Dtype::F64`. With the
-//!    `cuda` feature enabled this routes through NVRTC + libdevice.
+//!    [`GpuCodegen::generate_ptx_source`] with `Dtype::F64`. The codegen path
+//!    emits Rust-owned PTX math fragments directly.
 //! 2. Loads the PTX into a real CUDA context and launches the kernel
 //!    over a small input array.
 //! 3. Compares the GPU result against an `f64` libm reference at every
 //!    input.
 //!
-//! The tolerance is `1e-12`. libdevice's IEEE-correct polynomial
-//! expansions for f64 transcendentals match libm to within a few ULP at
-//! double precision; `1e-12` gives both a meaningful headroom against
-//! ULP-scale rounding and confidence that we did not accidentally lose
-//! precision via an f32 demote-promote.
+//! The tolerance is `1e-10`. The Rust-owned f64 polynomial fragments should
+//! stay close to libm for the exercised range while still rejecting any silent
+//! f32 demote-promote.
 //!
 //! Gated behind the `cuda` feature. Without it, the file compiles to a
 //! no-op (the `#![cfg]` attribute below).
@@ -23,20 +20,21 @@
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::{CudaContext, LaunchConfig, PushKernelArg};
+// cudarc exposes a `nvrtc::Ptx` newtype for driver module loading. This test
+// uses it only as a PTX source wrapper; it does not call NVRTC.
 use cudarc::nvrtc::Ptx;
 use ferrotorch_jit::codegen_gpu::GpuCodegen;
 use ferrotorch_jit::codegen_ir;
 use ferrotorch_jit::graph::{Dtype, IrOpKind};
 
-/// Tolerance for f64 GPU vs CPU reference comparison. libdevice's f64
-/// transcendentals are IEEE-correct (within a few ULP); `1e-12` rejects
-/// any silent f32 demote-promote.
-const TOL: f64 = 1e-12;
+/// Tolerance for f64 GPU vs CPU reference comparison. This rejects silent f32
+/// demote-promote while allowing the hand-written PTX polynomial error bound.
+const TOL: f64 = 1e-10;
 
 /// Run an f64 single-input kernel on GPU and return the host-side result.
 ///
-/// Parameter order in the generated CUDA C is `(const double* in0,
-/// double* output, int n)`, matching `generate_cuda_source`'s emission.
+/// Parameter order in the generated PTX is `(in0_ptr: u64, out_ptr: u64,
+/// n: u32)`, matching `generate_ptx_source`'s emission.
 fn run_kernel_f64(op_kind: IrOpKind, kernel_name: &str, input: &[f64]) -> Vec<f64> {
     let n = input.len();
     let loops = codegen_ir::lower_to_loops(std::slice::from_ref(&op_kind), &["in0"], "out", n);
@@ -48,7 +46,7 @@ fn run_kernel_f64(op_kind: IrOpKind, kernel_name: &str, input: &[f64]) -> Vec<f6
 
     let module = ctx
         .load_module(Ptx::from_src(ptx))
-        .expect("driver must accept the NVRTC-compiled PTX");
+        .expect("driver must accept the Rust-generated PTX");
     let func = module
         .load_function(kernel_name)
         .expect("entry point must be present in the loaded module");
@@ -62,7 +60,7 @@ fn run_kernel_f64(op_kind: IrOpKind, kernel_name: &str, input: &[f64]) -> Vec<f6
             .launch_builder(&func)
             .arg(&in_dev)
             .arg(&mut out_dev)
-            .arg(&(n as i32))
+            .arg(&(n as u32))
             .launch(cfg)
             .expect("kernel launch")
     };
@@ -76,8 +74,7 @@ fn assert_close(name: &str, got: &[f64], expected: &[f64]) {
     for (i, (g, e)) in got.iter().zip(expected).enumerate() {
         let abs_err = (g - e).abs();
         // Use an absolute tolerance for values near zero and a relative
-        // tolerance otherwise. libdevice's expansions are IEEE-correct;
-        // a stricter mixed bound catches both demote-promote regressions
+        // tolerance otherwise. The mixed bound catches demote-promote regressions
         // (which would blow the absolute bound by ~1e-7) and wrong-op
         // dispatch (e.g. accidentally computing log instead of exp,
         // which fails the relative bound massively).
@@ -126,7 +123,7 @@ fn f64_tanh_matches_libm() {
 fn f64_sigmoid_matches_libm() {
     let xs: Vec<f64> = (-50..=50).map(|i| f64::from(i) * 0.1).collect();
     let got = run_kernel_f64(IrOpKind::Sigmoid, "k_sig_f64", &xs);
-    // sigmoid(x) = 1 / (1 + exp(-x)) — same expansion as the CUDA C path.
+    // sigmoid(x) = 1 / (1 + exp(-x)) — same expansion as the Rust PTX path.
     let expected: Vec<f64> = xs
         .iter()
         .copied()
@@ -137,7 +134,7 @@ fn f64_sigmoid_matches_libm() {
 
 #[test]
 fn f64_gelu_matches_cpu_reference() {
-    // CUDA C codegen emits GELU as `x * 0.5 * (1 + tanh(0.7978845608 *
+    // The PTX codegen emits GELU as `x * 0.5 * (1 + tanh(0.7978845608 *
     // (x + 0.044715 * x^3)))`. We mirror that on CPU rather than libm's
     // `erf`-based form so the comparison stays apples-to-apples.
     let xs: Vec<f64> = (-30..=30).map(|i| f64::from(i) * 0.1).collect();
@@ -162,20 +159,20 @@ fn f64_silu_matches_cpu_reference() {
     assert_close("silu", &got, &expected);
 }
 
-/// Quoted PTX inspection: prove the f64 exp PTX has libdevice-style
+/// Quoted PTX inspection: prove the f64 exp PTX has Rust-owned
 /// `fma.rn.f64` expansions (vs. an f32 demote-promote that would emit
 /// `cvt.f64.f32`/`cvt.f32.f64` pairs). This is the "quoted PTX evidence"
 /// asked for in the dispatch's verification list.
 #[test]
-fn f64_exp_ptx_uses_libdevice_polynomials() {
+fn f64_exp_ptx_uses_rust_owned_polynomials() {
     let loops = codegen_ir::lower_to_loops(&[IrOpKind::Exp], &["in0"], "out", 4);
     let ptx = GpuCodegen::generate_ptx_source(&loops, "k_exp_f64_quote", 256, 1, Dtype::F64)
-        .expect("f64 exp PTX must compile via NVRTC");
+        .expect("f64 exp PTX must be generated directly");
 
-    // libdevice's f64 exp lowers to a chain of fma.rn.f64 polynomial
-    // evaluations with mov.f64 of polynomial coefficients. If the path
-    // had silently demoted to f32 and then re-promoted, we'd see
-    // ex2.approx.f32 / cvt.f64.f32 instead.
+    // The f64 exp emitter lowers to a chain of fma.rn.f64 polynomial
+    // evaluations with mov.f64 of polynomial coefficients. If the path had
+    // silently demoted to f32 and then re-promoted, we'd see ex2.approx.f32 /
+    // cvt.f64.f32 instead.
     assert!(
         ptx.contains("fma.rn.f64"),
         "f64 exp PTX does not contain fma.rn.f64 — silent f32 demote suspected:\n{ptx}",
@@ -188,6 +185,10 @@ fn f64_exp_ptx_uses_libdevice_polynomials() {
         !ptx.contains("cvt.f32.f64") && !ptx.contains("cvt.f64.f32"),
         "f64 exp PTX has f32<->f64 conversions — demote-promote suspected:\n{ptx}",
     );
+    assert!(
+        !ptx.contains(".extern") && !ptx.contains("call"),
+        "f64 exp PTX must be self-contained Rust-owned PTX, not a libdevice callout:\n{ptx}",
+    );
 
     // Also assert the PTX has the expected entry point — a regression
     // catch if mangling resurfaces.
@@ -196,7 +197,7 @@ fn f64_exp_ptx_uses_libdevice_polynomials() {
         "f64 exp PTX missing entry point (mangling regression?):\n{ptx}",
     );
     eprintln!(
-        "f64_exp_ptx_uses_libdevice_polynomials: {} bytes of PTX with libdevice-resolved exp",
+        "f64_exp_ptx_uses_rust_owned_polynomials: {} bytes of self-contained PTX",
         ptx.len()
     );
 }

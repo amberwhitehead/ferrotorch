@@ -599,10 +599,10 @@ fn build_ir_graph_from_run<T: Float>(
     }
 
     // The last op in the run is the segment output.
-    if let Some(last_op) = run.last() {
-        if let Some(&ir_val) = tensor_to_ir.get(&last_op.output_id) {
-            graph.set_outputs(vec![ir_val]);
-        }
+    if let Some(last_op) = run.last()
+        && let Some(&ir_val) = tensor_to_ir.get(&last_op.output_id)
+    {
+        graph.set_outputs(vec![ir_val]);
     }
 
     Ok(graph)

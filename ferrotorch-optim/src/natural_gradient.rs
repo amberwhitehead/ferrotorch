@@ -758,10 +758,10 @@ impl<T: Float> Optimizer<T> for Kfac<T> {
 
     fn load_state_dict(&mut self, state: &OptimizerState) -> FerrotorchResult<()> {
         // Restore step count.
-        if let Some(meta) = state.get("__kfac_meta__") {
-            if let Some(sc) = meta.get("step_count").and_then(|v| v.first()) {
-                self.step_count = *sc as usize;
-            }
+        if let Some(meta) = state.get("__kfac_meta__")
+            && let Some(sc) = meta.get("step_count").and_then(|v| v.first())
+        {
+            self.step_count = *sc as usize;
         }
 
         // Restore factors.

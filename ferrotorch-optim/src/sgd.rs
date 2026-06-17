@@ -558,10 +558,10 @@ impl<T: Float> Optimizer<T> for Sgd<T> {
                     .collect::<FerrotorchResult<Vec<T>>>()?;
                 self.momentum_buffers.insert(key.clone(), buf);
             }
-            if let Some(step_data) = entry.get("step") {
-                if let Some(&step_val) = step_data.first() {
-                    self.step_count.insert(key.clone(), step_val as u64);
-                }
+            if let Some(step_data) = entry.get("step")
+                && let Some(&step_val) = step_data.first()
+            {
+                self.step_count.insert(key.clone(), step_val as u64);
             }
         }
         Ok(())

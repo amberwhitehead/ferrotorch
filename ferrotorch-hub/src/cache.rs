@@ -182,12 +182,12 @@ impl HubCache {
         // Ensure the parent of `path` exists. `name` may contain `/` for
         // sharded HF downloads (e.g. "meta-llama/Llama-3-8B/config.json"),
         // so we mkdir -p the parent before writing.
-        if let Some(parent) = path.parent() {
-            if parent != self.cache_dir {
-                std::fs::create_dir_all(parent).map_err(|e| FerrotorchError::InvalidArgument {
-                    message: format!("failed to create cache subdir {parent:?}: {e}"),
-                })?;
-            }
+        if let Some(parent) = path.parent()
+            && parent != self.cache_dir
+        {
+            std::fs::create_dir_all(parent).map_err(|e| FerrotorchError::InvalidArgument {
+                message: format!("failed to create cache subdir {parent:?}: {e}"),
+            })?;
         }
         std::fs::write(&path, data).map_err(|e| FerrotorchError::InvalidArgument {
             message: format!("failed to write cache file {path:?}: {e}"),

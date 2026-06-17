@@ -847,19 +847,17 @@ impl Emitter<'_, '_> {
         if name == "out" || name == "output" {
             return self.output_ptr;
         }
-        if let Some(suffix) = name.strip_prefix("in") {
-            if let Ok(idx) = suffix.parse::<usize>() {
-                let elem_size = std::mem::size_of::<*const f64>() as i32;
-                let off = (idx as i32)
-                    .checked_mul(elem_size)
-                    .expect("input index byte offset overflow");
-                return self.builder.ins().load(
-                    self.ptr_ty,
-                    MemFlags::trusted(),
-                    self.inputs_ptr,
-                    off,
-                );
-            }
+        if let Some(suffix) = name.strip_prefix("in")
+            && let Ok(idx) = suffix.parse::<usize>()
+        {
+            let elem_size = std::mem::size_of::<*const f64>() as i32;
+            let off = (idx as i32)
+                .checked_mul(elem_size)
+                .expect("input index byte offset overflow");
+            return self
+                .builder
+                .ins()
+                .load(self.ptr_ty, MemFlags::trusted(), self.inputs_ptr, off);
         }
         panic!("ferrotorch-jit: unknown buffer name `{name}`");
     }

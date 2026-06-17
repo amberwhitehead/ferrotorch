@@ -985,6 +985,17 @@ fn channel_shuffle_groups2() {
 }
 
 #[test]
+fn channel_shuffle_zero_groups_errors_at_forward() {
+    let cs = ChannelShuffle::new(0);
+    let x = cpu_tensor_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 4, 1, 1]);
+    let err = Module::<f32>::forward(&cs, &x).unwrap_err();
+    assert!(
+        err.to_string().contains("groups must be positive"),
+        "ChannelShuffle(0) should mirror PyTorch's forward-time groups error, got: {err}"
+    );
+}
+
+#[test]
 fn cosine_similarity_orthogonal_zero() {
     let cs = CosineSimilarity::new(1, 1e-8);
     let x1 = cpu_tensor_f64(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0], &[2, 3]);
