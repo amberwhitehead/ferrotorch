@@ -51,7 +51,7 @@ use ferrotorch_core::ops::elementwise::{
     binary_map, fast_add, fast_cos, fast_div, fast_exp, fast_log, fast_mul, fast_sigmoid, fast_sin,
     fast_sub, fast_tanh, logsumexp, logsumexp_dim, mean, nanmean, nansum, scalar_map, simd_add_f32,
     simd_add_f64, simd_exp_f32, simd_exp_f64, simd_log_f32, simd_mul_f32, simd_mul_f64,
-    simd_sqrt_f32, sum, sum_axis, unary_map,
+    simd_sqrt_f32, sum, sum_axis, unary_map, unary_map_named,
 };
 use ferrotorch_core::{BoolTensor, Device, FerrotorchError, Tensor, TensorStorage};
 use serde::Deserialize;
@@ -1154,6 +1154,14 @@ fn cpu_unary_map_higher_order() {
                     exp,
                     tolerance::F32_TRANSCENDENTAL,
                 );
+                let out_named =
+                    unary_map_named(&a, "unary_map_tan", |x| x.tan()).expect("unary_map_named");
+                check_f32(
+                    &format!("{label} named"),
+                    &read_back_f32(&out_named),
+                    exp,
+                    tolerance::F32_TRANSCENDENTAL,
+                );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
@@ -1161,6 +1169,14 @@ fn cpu_unary_map_higher_order() {
                 check_f64(
                     &label,
                     &read_back_f64(&out),
+                    exp,
+                    tolerance::F64_TRANSCENDENTAL,
+                );
+                let out_named =
+                    unary_map_named(&a, "unary_map_tan", |x| x.tan()).expect("unary_map_named");
+                check_f64(
+                    &format!("{label} named"),
+                    &read_back_f64(&out_named),
                     exp,
                     tolerance::F64_TRANSCENDENTAL,
                 );

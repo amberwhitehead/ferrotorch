@@ -388,6 +388,38 @@ pub trait GpuBackend: Send + Sync {
         self.cpu_to_gpu(data, dtype, device)
     }
     fn clone_buffer(&self, handle: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle>;
+
+    /// Clone a contiguous logical element range from a GPU buffer.
+    ///
+    /// The default implementation preserves compatibility for non-CUDA
+    /// backends: full-range clone delegates to [`Self::clone_buffer`], while a
+    /// proper subregion returns a structured error. Backends that own a
+    /// device-to-device slice copy primitive should override this method so
+    /// storage/view materialization never stages through host memory.
+    fn clone_buffer_region(
+        &self,
+        handle: &GpuBufferHandle,
+        offset: usize,
+        len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let end = offset
+            .checked_add(len)
+            .filter(|&end| end <= handle.len())
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!(
+                    "clone_buffer_region: range {offset}..{} exceeds buffer length {}",
+                    offset.saturating_add(len),
+                    handle.len()
+                ),
+            })?;
+        if offset == 0 && end == handle.len() {
+            return self.clone_buffer(handle);
+        }
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "clone_buffer_region",
+        })
+    }
+
     /// Allocate a zero-initialised device buffer of `len` elements, tagged
     /// with `dtype`. Element size is derived via `dtype.size_of()`.
     fn alloc_zeros(

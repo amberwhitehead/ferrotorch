@@ -989,105 +989,47 @@ impl<T: Element> TensorStorage<T> {
 
     /// Clone a contiguous sub-region `[offset..offset+numel]` of this storage.
     ///
-    /// For CPU, slices the `Vec` directly. For CUDA/XPU, round-trips through the
-    /// host to extract the sub-region. Returns an error instead of panicking
-    /// on backend failures.
+    /// Bounds are validated before any slice or backend access. CPU slices the
+    /// buffer directly; CUDA dispatches to the backend's device-to-device
+    /// region clone primitive so valid subregions stay resident. XPU currently
+    /// has no core-owned upload-slice primitive, so valid partial ranges are a
+    /// structured error rather than a host staging fallback.
     pub fn try_clone_subregion(
         &self,
         offset: usize,
         numel: usize,
     ) -> crate::error::FerrotorchResult<Self> {
-        if offset == 0 && numel == self.len() {
+        let storage_len = self.len();
+        let end = offset
+            .checked_add(numel)
+            .filter(|&end| end <= storage_len)
+            .ok_or_else(|| crate::error::FerrotorchError::InvalidArgument {
+                message: format!(
+                    "try_clone_subregion: range {offset}..{} exceeds buffer length {storage_len}",
+                    offset.saturating_add(numel),
+                ),
+            })?;
+
+        if offset == 0 && end == storage_len {
             return self.try_clone();
         }
         match self.buffer() {
             StorageBuffer::Cpu(v) => {
-                let end = offset
-                    .checked_add(numel)
-                    .filter(|&end| end <= v.len())
-                    .ok_or_else(|| crate::error::FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "try_clone_subregion: range {offset}..{} exceeds buffer \
-                             length {}",
-                            offset.saturating_add(numel),
-                            v.len(),
-                        ),
-                    })?;
                 let slice = &v.as_slice()[offset..end];
                 Ok(Self::cpu(slice.to_vec()))
             }
             StorageBuffer::Gpu(h) => {
                 let backend = crate::gpu_dispatch::gpu_backend()
                     .ok_or(crate::error::FerrotorchError::DeviceUnavailable)?;
-                let bytes = backend.gpu_to_cpu(h)?;
-                let elem_size = std::mem::size_of::<T>();
-                let elem_end = offset
-                    .checked_add(numel)
-                    .filter(|&end| end <= h.len())
-                    .ok_or_else(|| crate::error::FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "try_clone_subregion: range {offset}..{} exceeds buffer \
-                             length {}",
-                            offset.saturating_add(numel),
-                            h.len(),
-                        ),
-                    })?;
-                let start = offset.checked_mul(elem_size).ok_or_else(|| {
-                    crate::error::FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "try_clone_subregion: byte offset {offset} * {elem_size} overflows"
-                        ),
-                    }
-                })?;
-                let end = elem_end.checked_mul(elem_size).ok_or_else(|| {
-                    crate::error::FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "try_clone_subregion: byte end {elem_end} * {elem_size} overflows"
-                        ),
-                    }
-                })?;
-                // Re-upload the sliced bytes under the *source handle's* dtype
-                // tag so the subregion preserves the original ScalarType.
-                let handle =
-                    backend.cpu_to_gpu(&bytes[start..end], h.dtype(), h.device_ordinal())?;
+                let handle = backend.clone_buffer_region(h, offset, numel)?;
                 Self::try_gpu(handle)
             }
-            StorageBuffer::Cubecl(h) => {
-                // D2H readback, slice, then re-upload via a new handle.
-                // The new handle reuses the same runtime (held by the original
-                // handle's Arc<CubeRuntime>).
-                let all = h.read_to_host()?;
-                let end = offset
-                    .checked_add(numel)
-                    .filter(|&end| end <= all.len())
-                    .ok_or_else(|| crate::error::FerrotorchError::InvalidArgument {
-                        message: format!(
-                            "try_clone_subregion: range {offset}..{} exceeds CubeCL buffer \
-                             length {}",
-                            offset.saturating_add(numel),
-                            all.len(),
-                        ),
-                    })?;
-                let slice = all[offset..end].to_vec();
-                // Re-upload: the concrete impl's `clone_handle` clones the full
-                // buffer; for sub-regions we go through host for now (correct,
-                // can be optimised later with a device-side copy).
-                // We need a new handle wrapping just `slice` — but
-                // `CubeStorageHandle` doesn't expose an upload method (that
-                // lives in ferrotorch-cubecl). Return an error directing the
-                // caller to use `.cpu()` for sub-region reads instead.
-                //
-                // This path is only hit for non-contiguous XPU tensors, which
-                // are rare in practice. If this becomes a bottleneck, add an
-                // `upload_slice` method to `CubeStorageHandle`. Issue #673.
-                let _ = slice;
-                Err(crate::error::FerrotorchError::InvalidArgument {
-                    message: format!(
-                        "try_clone_subregion on XPU storage is not yet supported \
+            StorageBuffer::Cubecl(_) => Err(crate::error::FerrotorchError::InvalidArgument {
+                message: format!(
+                    "try_clone_subregion on XPU storage is not yet supported \
                          (offset={offset}, numel={numel}); call .cpu() first. Issue #673."
-                    ),
-                })
-            }
+                ),
+            }),
             StorageBuffer::Meta { .. } => Ok(Self::meta(numel)),
         }
     }

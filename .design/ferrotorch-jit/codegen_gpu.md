@@ -120,7 +120,7 @@ itself.
 
 ### Reductions (REQ-6)
 
-`fn emit_cuda_reduction` at `fn emit_cuda_reduction in codegen_gpu.rs`
+`fn generate_ptx_reduction_source` at `fn generate_ptx_reduction_source in codegen_gpu.rs`
 emits the tree-reduction pattern:
 1. Each thread accumulates strided elements into `thread_acc`.
 2. Threads write `thread_acc` into `sdata[local_tid]` and
@@ -203,6 +203,6 @@ Expected: all tests pass.
 | REQ-3 | SHIPPED | impl: `pub fn generate_ptx_source` in `codegen_gpu.rs`; non-test consumer: `generate_ptx_source in codegen.rs` (`GpuPtx` arm of `InductorBackend::generate`) + `codegen in codegen.rs` (identity-graph `GpuPtx` fallback). |
 | REQ-4 | SHIPPED | impl: `cuda_scalar_name` + `cuda_zero_literal` + `ptx_dtype_suffix` helpers in `codegen_gpu.rs` switched on the `Dtype` parameter; non-test consumer: every emission path through `codegen in codegen.rs` / `codegen in codegen.rs` passes the resolved group `dtype` from `resolve_group_dtype`. |
 | REQ-5 | SHIPPED | impl: f64 transcendental check inside `pub fn generate_ptx_source` returning `Err(JitError::Unsupported { ... })` in `codegen_gpu.rs`; non-test consumer: `codegen in codegen.rs` propagates the error via `.map_err(FerrotorchError::from)` so callers see the structured Unsupported diagnosis. |
-| REQ-6 | SHIPPED | impl: `fn emit_cuda_reduction` (CUDA path) + the PTX `.shared` + `bar.sync 0;` block inside `pub fn generate_ptx_source` in `codegen_gpu.rs`; non-test consumer: transitively via `codegen in codegen.rs` / `codegen in codegen.rs` for any fusion group containing Sum/Mean/Prod. |
+| REQ-6 | SHIPPED | impl: `fn generate_ptx_reduction_source` (PTX path) + the PTX `.shared` + `bar.sync 0;` block inside `pub fn generate_ptx_source` in `codegen_gpu.rs`; non-test consumer: transitively via `codegen in codegen.rs` / `codegen in codegen.rs` for any fusion group containing Sum/Mean/Prod. |
 | REQ-7 | SHIPPED | impl: `tid = blockIdx.x * blockDim.x + threadIdx.x;` + sequential `output[tid]` write pattern in `fn emit_cuda_elementwise` (`codegen_gpu.rs`); non-test consumer: transitively via `codegen in codegen.rs`. |
 | REQ-8 | SHIPPED | impl: `pub fn generate_ptx_source(..., block_size, ...)` parameter in `codegen_gpu.rs`; non-test consumer: `codegen in codegen.rs` passes `self.block_size` from `InductorBackend::with_block_size`. |

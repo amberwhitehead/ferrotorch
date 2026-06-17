@@ -58,6 +58,9 @@ struct MockBuf {
     /// byte length that is not a multiple of the element size (a malformed
     /// backend reply that must surface as a structured `Err`).
     pad_bytes: usize,
+    /// When true, `gpu_to_cpu` returns a sentinel error. Region-clone tests use
+    /// this to prove storage subregion cloning does not stage through host.
+    readback_forbidden: bool,
 }
 
 /// Uploads addressed to this (fake) ordinal get one stray byte appended on
@@ -92,6 +95,7 @@ impl GpuBackend for MockByteBackend {
                     bytes: data.to_vec(),
                     extra_capacity: 0,
                     pad_bytes: usize::from(device == CORRUPT_ORDINAL),
+                    readback_forbidden: false,
                 }),
                 device,
                 data.len() / elem,
@@ -106,6 +110,11 @@ impl GpuBackend for MockByteBackend {
             .ok_or(FerrotorchError::InvalidArgument {
                 message: "MockByteBackend: foreign handle".into(),
             })?;
+        if buf.readback_forbidden {
+            return Err(FerrotorchError::Internal {
+                message: "MockByteBackend: gpu_to_cpu was forbidden for this handle".into(),
+            });
+        }
         // A NORMALLY allocated Vec<u8>: allocated under Layout::array::<u8>
         // (alignment 1), filled by memcpy. `extra_capacity` lets a test force
         // `capacity % size_of::<T>() != 0`, which the pre-fix from_raw_parts
@@ -131,9 +140,66 @@ impl GpuBackend for MockByteBackend {
                     bytes: buf.bytes.clone(),
                     extra_capacity: buf.extra_capacity,
                     pad_bytes: buf.pad_bytes,
+                    readback_forbidden: buf.readback_forbidden,
                 }),
                 handle.device_ordinal(),
                 handle.len(),
+                handle.dtype(),
+            )
+        })
+    }
+
+    fn clone_buffer_region(
+        &self,
+        handle: &GpuBufferHandle,
+        offset: usize,
+        len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let buf = handle
+            .downcast_ref::<MockBuf>()
+            .ok_or(FerrotorchError::InvalidArgument {
+                message: "MockByteBackend: foreign handle".into(),
+            })?;
+        let end = offset
+            .checked_add(len)
+            .filter(|&end| end <= handle.len())
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!(
+                    "MockByteBackend::clone_buffer_region: range {offset}..{} exceeds buffer \
+                     length {}",
+                    offset.saturating_add(len),
+                    handle.len()
+                ),
+            })?;
+        let elem = handle.dtype().size_of().max(1);
+        let byte_start =
+            offset
+                .checked_mul(elem)
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "MockByteBackend::clone_buffer_region: byte offset {offset} * {elem} \
+                     overflows"
+                    ),
+                })?;
+        let byte_end = end
+            .checked_mul(elem)
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!(
+                    "MockByteBackend::clone_buffer_region: byte end {end} * {elem} overflows"
+                ),
+            })?;
+        let mut bytes = Vec::with_capacity(len * elem);
+        bytes.extend_from_slice(&buf.bytes[byte_start..byte_end]);
+        Ok(unsafe {
+            GpuBufferHandle::new(
+                Box::new(MockBuf {
+                    bytes,
+                    extra_capacity: 0,
+                    pad_bytes: 0,
+                    readback_forbidden: buf.readback_forbidden,
+                }),
+                handle.device_ordinal(),
+                len,
                 handle.dtype(),
             )
         })
@@ -153,6 +219,7 @@ impl GpuBackend for MockByteBackend {
                     bytes: vec![0u8; len * dtype.size_of().max(1)],
                     extra_capacity: 0,
                     pad_bytes: 0,
+                    readback_forbidden: false,
                 }),
                 device,
                 len,
@@ -505,6 +572,32 @@ fn mock_gpu_tensor_f32(values: &[f32], shape: &[usize], extra_capacity: usize) -
                 bytes,
                 extra_capacity,
                 pad_bytes: 0,
+                readback_forbidden: false,
+            }),
+            0,
+            values.len(),
+            DType::F32,
+        )
+    };
+    Tensor::from_storage(TensorStorage::gpu(handle), shape.to_vec(), false)
+        .expect("mock gpu tensor")
+}
+
+/// Build a mock CUDA Tensor<f32> whose backend rejects D2H readback. Storage
+/// subregion cloning must still work because the backend can clone the region
+/// directly.
+fn mock_gpu_tensor_f32_forbid_readback(values: &[f32], shape: &[usize]) -> Tensor<f32> {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    for v in values {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    let handle = unsafe {
+        GpuBufferHandle::new(
+            Box::new(MockBuf {
+                bytes,
+                extra_capacity: 0,
+                pad_bytes: 0,
+                readback_forbidden: true,
             }),
             0,
             values.len(),
@@ -611,6 +704,7 @@ fn truncated_byte_count_is_structured_err_f32() {
                 bytes,
                 extra_capacity: 0,
                 pad_bytes: 0,
+                readback_forbidden: false,
             }),
             0,
             6,
@@ -656,4 +750,75 @@ fn truncated_byte_count_is_structured_err_i32() {
         Err(other) => panic!("expected InvalidArgument, got different error: {other:?}"),
         Ok(_) => panic!("expected structured Err on a 9-byte readback for 2 i32 elements"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// CORE-005 / #1699: subregion cloning is fallible and device-resident
+// ---------------------------------------------------------------------------
+
+#[test]
+fn try_clone_subregion_invalid_cpu_ranges_are_structured_errors() {
+    let storage = TensorStorage::cpu(vec![1.0_f32, 2.0, 3.0]);
+
+    for (offset, numel) in [(4, 0), (2, 2), (usize::MAX, 1)] {
+        match storage.try_clone_subregion(offset, numel) {
+            Err(FerrotorchError::InvalidArgument { message }) => {
+                assert!(
+                    message.contains("try_clone_subregion: range"),
+                    "error must name the invalid subregion, got: {message}"
+                );
+            }
+            Err(other) => panic!("expected InvalidArgument, got {other:?}"),
+            Ok(_) => panic!("expected invalid CPU subregion {offset} + {numel} to fail"),
+        }
+    }
+}
+
+#[test]
+fn try_clone_subregion_invalid_cuda_range_rejects_before_readback() {
+    ensure_mock();
+    let gpu = mock_gpu_tensor_f32_forbid_readback(&[1.0, 2.0, 3.0], &[3]);
+
+    match gpu.storage().try_clone_subregion(2, 2) {
+        Err(FerrotorchError::InvalidArgument { message }) => {
+            assert!(
+                message.contains("try_clone_subregion: range 2..4 exceeds buffer length 3"),
+                "invalid range must be rejected in core before backend access, got: {message}"
+            );
+        }
+        Err(other) => panic!("expected InvalidArgument, got {other:?}"),
+        Ok(_) => panic!("expected invalid CUDA subregion to fail before backend readback"),
+    }
+}
+
+#[test]
+fn try_clone_subregion_cuda_uses_backend_region_clone_not_readback() {
+    ensure_mock();
+    let gpu = mock_gpu_tensor_f32_forbid_readback(&[10.0, 20.0, 30.0, 40.0], &[4]);
+
+    let sub = gpu
+        .storage()
+        .try_clone_subregion(1, 2)
+        .expect("CUDA subregion clone should use backend region copy");
+    assert_eq!(sub.device(), Device::Cuda(0));
+
+    let sub_tensor = Tensor::from_storage(sub, vec![2], false).expect("sub tensor");
+    match sub_tensor.to(Device::Cpu) {
+        Err(FerrotorchError::Internal { message }) => {
+            assert!(
+                message.contains("gpu_to_cpu was forbidden"),
+                "the cloned handle should preserve the readback sentinel, got: {message}"
+            );
+        }
+        other => panic!(
+            "test precondition failed: the mock subregion handle should still forbid readback, \
+             got {other:?}"
+        ),
+    }
+
+    let sub_storage = sub_tensor.storage().try_clone_subregion(0, 2).expect(
+        "full-range clone of the subregion should still be device-side and preserve metadata",
+    );
+    assert_eq!(sub_storage.device(), Device::Cuda(0));
+    assert_eq!(sub_storage.len(), 2);
 }

@@ -234,7 +234,7 @@ and `meta_propagate.rs`.
   NOT implemented as a free fn; the ingredients
   (`shape::broadcast_shapes` + `grad_fns::shape::expand`) are
   available individually and used in
-  `grad_fns/indexing.rs:2092/2169/2206/5331` to assemble the same
+  `grad_fns/indexing.rs:2229/2268/2269/5387` to assemble the same
   contract ad-hoc, but the named bundled op does not exist.
 
 - REQ-27: `broadcast_to(input, shape)` — `torch.broadcast_to(input,
@@ -457,7 +457,7 @@ input flat-index, with size-1 dims clamped to 0). `ExpandBackward`
 `super::arithmetic::reduce_grad_to_shape(grad_output,
 &self.input_shape)` to sum-reduce the gradient over every
 broadcast axis — the shared backward primitive with arithmetic ops.
-**Non-test consumers**: `grad_fns/indexing.rs:2092/1826/1851/3577`
+**Non-test consumers**: `grad_fns/indexing.rs:2229/2268/2269/5387`
 (masked-fill/where prep), `einsum.rs:1725` (sum-grad expand).
 
 ### REQ-15 — `cat`

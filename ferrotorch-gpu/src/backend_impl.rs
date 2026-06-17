@@ -926,6 +926,41 @@ impl CudaBackendImpl {
             message: format!("{e}"),
         }
     }
+
+    #[cfg(feature = "cuda")]
+    fn clone_cuda_buffer_region<T>(
+        buf: &CudaBuffer<T>,
+        offset: usize,
+        end: usize,
+        ordinal: usize,
+    ) -> FerrotorchResult<CudaBuffer<T>>
+    where
+        T: cudarc::driver::DeviceRepr,
+    {
+        let len = end - offset;
+        let view =
+            buf.inner()
+                .try_slice(offset..end)
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "clone_buffer_region: range {offset}..{end} exceeds CUDA buffer \
+                         length {}",
+                        buf.len()
+                    ),
+                })?;
+        let cloned = buf
+            .inner()
+            .stream()
+            .clone_dtod(&view)
+            .map_err(|e| Self::map_gpu_err(crate::error::GpuError::Driver(e)))?;
+        Ok(CudaBuffer {
+            data: Some(cloned),
+            len,
+            alloc_len: len,
+            device_ordinal: ordinal,
+            pool_fn: None,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1580,6 +1615,136 @@ impl GpuBackend for CudaBackendImpl {
                      path on CUDA (supported: F32, F64, BF16, F16, I16, I32, I64, Bool)"
                 ),
             }),
+        }
+    }
+
+    fn clone_buffer_region(
+        &self,
+        handle: &GpuBufferHandle,
+        offset: usize,
+        len: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        #[cfg(not(feature = "cuda"))]
+        {
+            let _ = (handle, offset, len);
+            return Err(FerrotorchError::NotImplementedOnCuda {
+                op: "clone_buffer_region",
+            });
+        }
+
+        #[cfg(feature = "cuda")]
+        {
+            let end = offset
+                .checked_add(len)
+                .filter(|&end| end <= handle.len())
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "clone_buffer_region: range {offset}..{} exceeds buffer length {}",
+                        offset.saturating_add(len),
+                        handle.len()
+                    ),
+                })?;
+            if offset == 0 && end == handle.len() {
+                return self.clone_buffer(handle);
+            }
+
+            let ordinal = handle.device_ordinal();
+            match handle.dtype() {
+                DType::F32 => Ok(Self::wrap_buffer(
+                    Self::clone_cuda_buffer_region(
+                        Self::unwrap_buffer(handle)?,
+                        offset,
+                        end,
+                        ordinal,
+                    )?,
+                    ordinal,
+                )),
+                DType::F64 => Ok(Self::wrap_buffer_f64(
+                    Self::clone_cuda_buffer_region(
+                        Self::unwrap_buffer_f64(handle)?,
+                        offset,
+                        end,
+                        ordinal,
+                    )?,
+                    ordinal,
+                )),
+                DType::BF16 => {
+                    let slice = Self::unwrap_buffer_bf16(handle)?;
+                    let view = slice.try_slice(offset..end).ok_or_else(|| {
+                        FerrotorchError::InvalidArgument {
+                            message: format!(
+                                "clone_buffer_region: range {offset}..{end} exceeds CUDA bf16 \
+                                 buffer length {}",
+                                slice.len()
+                            ),
+                        }
+                    })?;
+                    let cloned = slice
+                        .stream()
+                        .clone_dtod(&view)
+                        .map_err(|e| Self::map_gpu_err(crate::error::GpuError::Driver(e)))?;
+                    Ok(Self::wrap_buffer_bf16(cloned, ordinal))
+                }
+                DType::F16 => {
+                    let slice = Self::unwrap_buffer_f16(handle)?;
+                    let view = slice.try_slice(offset..end).ok_or_else(|| {
+                        FerrotorchError::InvalidArgument {
+                            message: format!(
+                                "clone_buffer_region: range {offset}..{end} exceeds CUDA f16 \
+                                 buffer length {}",
+                                slice.len()
+                            ),
+                        }
+                    })?;
+                    let cloned = slice
+                        .stream()
+                        .clone_dtod(&view)
+                        .map_err(|e| Self::map_gpu_err(crate::error::GpuError::Driver(e)))?;
+                    Ok(Self::wrap_buffer_f16(cloned, ordinal))
+                }
+                DType::I16 => Ok(Self::wrap_buffer_i16(
+                    Self::clone_cuda_buffer_region(
+                        Self::unwrap_buffer_i16(handle)?,
+                        offset,
+                        end,
+                        ordinal,
+                    )?,
+                    ordinal,
+                )),
+                DType::I32 => Ok(Self::wrap_buffer_i32(
+                    Self::clone_cuda_buffer_region(
+                        Self::unwrap_buffer_i32(handle)?,
+                        offset,
+                        end,
+                        ordinal,
+                    )?,
+                    ordinal,
+                )),
+                DType::I64 => Ok(Self::wrap_buffer_i64(
+                    Self::clone_cuda_buffer_region(
+                        Self::unwrap_buffer_i64(handle)?,
+                        offset,
+                        end,
+                        ordinal,
+                    )?,
+                    ordinal,
+                )),
+                DType::Bool => Ok(Self::wrap_buffer_bool(
+                    Self::clone_cuda_buffer_region(
+                        Self::unwrap_buffer_bool(handle)?,
+                        offset,
+                        end,
+                        ordinal,
+                    )?,
+                    ordinal,
+                )),
+                other => Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "clone_buffer_region: dtype {other} has no device-to-device region \
+                         copy path on CUDA (supported: F32, F64, BF16, F16, I16, I32, I64, Bool)"
+                    ),
+                }),
+            }
         }
     }
 
@@ -13867,6 +14032,22 @@ mod tests {
         values.iter().flat_map(|v| v.to_ne_bytes()).collect()
     }
 
+    fn u16_bytes(values: &[u16]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_ne_bytes()).collect()
+    }
+
+    fn i16_bytes(values: &[i16]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_ne_bytes()).collect()
+    }
+
+    fn i32_bytes(values: &[i32]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_ne_bytes()).collect()
+    }
+
+    fn i64_bytes(values: &[i64]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_ne_bytes()).collect()
+    }
+
     fn f32_vec(bytes: &[u8]) -> Vec<f32> {
         assert!(
             bytes.len().is_multiple_of(4),
@@ -13888,6 +14069,42 @@ mod tests {
         bytes
             .chunks_exact(2)
             .map(|chunk| u16::from_ne_bytes(chunk.try_into().expect("u16 chunk")))
+            .collect()
+    }
+
+    fn i16_vec(bytes: &[u8]) -> Vec<i16> {
+        assert!(
+            bytes.len().is_multiple_of(2),
+            "i16 byte slice length {} is not divisible by 2",
+            bytes.len()
+        );
+        bytes
+            .chunks_exact(2)
+            .map(|chunk| i16::from_ne_bytes(chunk.try_into().expect("i16 chunk")))
+            .collect()
+    }
+
+    fn i32_vec(bytes: &[u8]) -> Vec<i32> {
+        assert!(
+            bytes.len().is_multiple_of(4),
+            "i32 byte slice length {} is not divisible by 4",
+            bytes.len()
+        );
+        bytes
+            .chunks_exact(4)
+            .map(|chunk| i32::from_ne_bytes(chunk.try_into().expect("i32 chunk")))
+            .collect()
+    }
+
+    fn i64_vec(bytes: &[u8]) -> Vec<i64> {
+        assert!(
+            bytes.len().is_multiple_of(8),
+            "i64 byte slice length {} is not divisible by 8",
+            bytes.len()
+        );
+        bytes
+            .chunks_exact(8)
+            .map(|chunk| i64::from_ne_bytes(chunk.try_into().expect("i64 chunk")))
             .collect()
     }
 
@@ -14129,6 +14346,178 @@ mod tests {
                 "element {i}: got {got}, expected {exp}",
             );
         }
+    }
+
+    #[test]
+    fn clone_buffer_region_copies_cuda_subregion_for_all_storage_dtypes() {
+        ensure_init();
+        let backend = gpu_dispatch::gpu_backend().expect("backend registered");
+
+        let f32_handle = backend
+            .cpu_to_gpu(&f32_bytes(&[1.0, 2.0, 3.0, 4.0]), DType::F32, 0)
+            .expect("cpu_to_gpu f32");
+        let f32_sub = backend
+            .clone_buffer_region(&f32_handle, 1, 2)
+            .expect("clone_buffer_region f32");
+        assert_eq!(f32_sub.dtype(), DType::F32);
+        assert_eq!(f32_sub.len(), 2);
+        assert_eq!(f32_sub.device_ordinal(), 0);
+        assert_eq!(
+            f32_vec(&backend.gpu_to_cpu(&f32_sub).expect("readback f32")),
+            vec![2.0, 3.0]
+        );
+
+        let f64_handle = backend
+            .cpu_to_gpu(&f64_bytes(&[1.0, 2.0, 3.0, 4.0]), DType::F64, 0)
+            .expect("cpu_to_gpu f64");
+        let f64_sub = backend
+            .clone_buffer_region(&f64_handle, 1, 2)
+            .expect("clone_buffer_region f64");
+        assert_eq!(f64_sub.dtype(), DType::F64);
+        assert_eq!(f64_sub.len(), 2);
+        assert_eq!(
+            f64_sub.device_ordinal(),
+            f64_handle.device_ordinal(),
+            "region clone must preserve device ordinal"
+        );
+        let f64_back = backend.gpu_to_cpu(&f64_sub).expect("readback f64");
+        let f64_values: Vec<f64> = f64_back
+            .chunks_exact(8)
+            .map(|chunk| f64::from_ne_bytes(chunk.try_into().expect("f64 chunk")))
+            .collect();
+        assert_eq!(f64_values, vec![2.0, 3.0]);
+
+        let bf16_host: Vec<u16> = [0.0_f32, 1.0, -2.0, 3.5]
+            .iter()
+            .map(|&v| half::bf16::from_f32(v).to_bits())
+            .collect();
+        let bf16_handle = backend
+            .cpu_to_gpu(&u16_bytes(&bf16_host), DType::BF16, 0)
+            .expect("cpu_to_gpu bf16");
+        let bf16_sub = backend
+            .clone_buffer_region(&bf16_handle, 1, 2)
+            .expect("clone_buffer_region bf16");
+        assert_eq!(bf16_sub.dtype(), DType::BF16);
+        assert_eq!(bf16_sub.len(), 2);
+        assert_eq!(
+            u16_vec(&backend.gpu_to_cpu(&bf16_sub).expect("readback bf16")),
+            bf16_host[1..3]
+        );
+
+        let f16_host: Vec<u16> = [0.0_f32, 1.0, -2.0, 3.5]
+            .iter()
+            .map(|&v| half::f16::from_f32(v).to_bits())
+            .collect();
+        let f16_handle = backend
+            .cpu_to_gpu(&u16_bytes(&f16_host), DType::F16, 0)
+            .expect("cpu_to_gpu f16");
+        let f16_sub = backend
+            .clone_buffer_region(&f16_handle, 1, 2)
+            .expect("clone_buffer_region f16");
+        assert_eq!(f16_sub.dtype(), DType::F16);
+        assert_eq!(f16_sub.len(), 2);
+        assert_eq!(
+            u16_vec(&backend.gpu_to_cpu(&f16_sub).expect("readback f16")),
+            f16_host[1..3]
+        );
+
+        let i16_host = [-7_i16, -1, 0, 5, 9];
+        let i16_handle = backend
+            .cpu_to_gpu(&i16_bytes(&i16_host), DType::I16, 0)
+            .expect("cpu_to_gpu i16");
+        let i16_sub = backend
+            .clone_buffer_region(&i16_handle, 1, 3)
+            .expect("clone_buffer_region i16");
+        assert_eq!(i16_sub.dtype(), DType::I16);
+        assert_eq!(i16_sub.len(), 3);
+        assert_eq!(
+            i16_vec(&backend.gpu_to_cpu(&i16_sub).expect("readback i16")),
+            i16_host[1..4]
+        );
+
+        let i32_host = [-10_i32, -1, 0, 7, 11];
+        let i32_handle = backend
+            .cpu_to_gpu(&i32_bytes(&i32_host), DType::I32, 0)
+            .expect("cpu_to_gpu i32");
+        let i32_sub = backend
+            .clone_buffer_region(&i32_handle, 1, 3)
+            .expect("clone_buffer_region i32");
+        assert_eq!(i32_sub.dtype(), DType::I32);
+        assert_eq!(i32_sub.len(), 3);
+        assert_eq!(
+            i32_vec(&backend.gpu_to_cpu(&i32_sub).expect("readback i32")),
+            i32_host[1..4]
+        );
+
+        let i64_host = [-20_i64, -1, 0, 7, 11];
+        let i64_handle = backend
+            .cpu_to_gpu(&i64_bytes(&i64_host), DType::I64, 0)
+            .expect("cpu_to_gpu i64");
+        let i64_sub = backend
+            .clone_buffer_region(&i64_handle, 1, 3)
+            .expect("clone_buffer_region i64");
+        assert_eq!(i64_sub.dtype(), DType::I64);
+        assert_eq!(i64_sub.len(), 3);
+        assert_eq!(
+            i64_vec(&backend.gpu_to_cpu(&i64_sub).expect("readback i64")),
+            i64_host[1..4]
+        );
+
+        let bool_host = [0_u8, 1, 0, 1, 1];
+        let bool_handle = backend
+            .cpu_to_gpu(&bool_host, DType::Bool, 0)
+            .expect("cpu_to_gpu bool");
+        let bool_sub = backend
+            .clone_buffer_region(&bool_handle, 1, 3)
+            .expect("clone_buffer_region bool");
+        assert_eq!(bool_sub.dtype(), DType::Bool);
+        assert_eq!(bool_sub.len(), 3);
+        assert_eq!(
+            backend.gpu_to_cpu(&bool_sub).expect("readback bool"),
+            bool_host[1..4]
+        );
+    }
+
+    #[test]
+    fn clone_buffer_region_cuda_rejects_invalid_ranges_and_allows_empty_regions() {
+        ensure_init();
+        let backend = gpu_dispatch::gpu_backend().expect("backend registered");
+        let handle = backend
+            .cpu_to_gpu(&f32_bytes(&[1.0, 2.0, 3.0]), DType::F32, 0)
+            .expect("cpu_to_gpu f32");
+
+        let err = backend
+            .clone_buffer_region(&handle, 2, 2)
+            .expect_err("invalid region must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("clone_buffer_region: range 2..4 exceeds buffer length 3"),
+            "invalid range error must name the rejected range and buffer length, got: {msg}"
+        );
+
+        let empty_mid = backend
+            .clone_buffer_region(&handle, 1, 0)
+            .expect("empty middle region");
+        assert_eq!(empty_mid.dtype(), DType::F32);
+        assert_eq!(empty_mid.len(), 0);
+        assert!(
+            backend
+                .gpu_to_cpu(&empty_mid)
+                .expect("readback empty middle")
+                .is_empty()
+        );
+
+        let empty_tail = backend
+            .clone_buffer_region(&handle, handle.len(), 0)
+            .expect("empty tail region");
+        assert_eq!(empty_tail.dtype(), DType::F32);
+        assert_eq!(empty_tail.len(), 0);
+        assert!(
+            backend
+                .gpu_to_cpu(&empty_tail)
+                .expect("readback empty tail")
+                .is_empty()
+        );
     }
 
     #[test]

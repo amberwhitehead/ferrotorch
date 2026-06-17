@@ -204,6 +204,7 @@ use ferrotorch_core::numeric_cast::cast;
 use ferrotorch_core::profiler_hook::{
     OpProfiler, current as profiler_current, profile_op_scope, set_current as profiler_set_current,
 };
+use ferrotorch_core::rng::with_default_rng_test_lock;
 use ferrotorch_core::storage::{CubeStorageHandle, StorageBuffer, TensorStorage};
 use ferrotorch_core::tensor::{GradFn, MemoryFormat, Tensor, TensorId};
 use ferrotorch_core::{DType, Element, creation};
@@ -1557,6 +1558,20 @@ fn gpu_rng_state_construction_and_accessors() {
     assert_eq!(s, c);
     let other = GpuRngState::new(0, 456, 789, 1);
     assert_ne!(s, other);
+}
+
+#[test]
+fn default_rng_test_lock_runs_closure_and_returns_value() {
+    let mut touched = false;
+    let value = with_default_rng_test_lock(|| {
+        touched = true;
+        42_u64
+    });
+    assert!(
+        touched,
+        "closure must execute under the default RNG test lock"
+    );
+    assert_eq!(value, 42);
 }
 
 #[test]

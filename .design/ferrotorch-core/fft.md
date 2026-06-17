@@ -187,7 +187,7 @@ correctness.
 | REQ-2 | SHIPPED | impl: `ifft` at `fft.rs:200`; non-test consumer: `ComplexTensor::ifft` at `complex_tensor.rs:336` invokes `crate::fft::ifft` |
 | REQ-3 | SHIPPED | impl: `rfft`/`irfft` at `fft.rs:289,370`; non-test consumer: re-exported as `ferrotorch_core::rfft`/`irfft` at `lib.rs:154-155`, used in `ferrotorch_core::grad_fns::fft::rfft_differentiable` (the differentiable wrapper) at `grad_fns/fft.rs` |
 | REQ-4 | SHIPPED | impl: `fft2`/`ifft2` at `fft.rs:472,516`; non-test consumer: `ComplexTensor::fft2` at `complex_tensor.rs:343`, `ComplexTensor::ifft2` at `complex_tensor.rs:350` |
-| REQ-5 | SHIPPED | impl: `fftn`/`ifftn`/`rfftn`/`irfftn` at `fft.rs:735,848,948,967`; non-test consumer: re-exported at `lib.rs:153-155` as `ferrotorch_core::fftn`/`ifftn`/`rfftn`/`irfftn`. The N-D variants are the public surface |
+| REQ-5 | SHIPPED | impl: `fftn`/`ifftn`/`rfftn`/`irfftn` at `fft.rs:1103,1234,1351,1382`; non-test consumer: re-exported at `lib.rs:153-155` as `ferrotorch_core::fftn`/`ifftn`/`rfftn`/`irfftn`. The N-D variants are the public surface |
 | REQ-6 | SHIPPED | impl: `hfft`/`ihfft` at `fft.rs:1000,1048`; non-test consumer: re-exported as `ferrotorch_core::hfft`/`ihfft` at `lib.rs:154` |
 | REQ-7 | SHIPPED | impl: `fftfreq`/`rfftfreq` at `fft.rs:1093,1105`; non-test consumer: re-exported as `ferrotorch_core::fftfreq`/`rfftfreq` at `lib.rs:153-155` |
 | REQ-8 | SHIPPED | impl: `fftshift`/`ifftshift` at `fft.rs:1122,1141`; non-test consumer: re-exported as `ferrotorch_core::fftshift`/`ifftshift` at `lib.rs:153-155` |

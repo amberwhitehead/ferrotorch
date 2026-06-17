@@ -65,13 +65,17 @@ use serde::Deserialize;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 
 use ferrotorch_core::grad_fns::linalg::{
-    bmm as gf_bmm, bmm_differentiable, dot_differentiable, linear_fused, matmul_differentiable,
-    mm_bt_differentiable, mm_differentiable, mv_differentiable, permute_0213,
+    MatrixExpBackward, SolveTriangularBackward, bmm as gf_bmm, bmm_differentiable,
+    dot_differentiable, linear_fused, lstsq_solve_differentiable, matmul_differentiable,
+    matrix_exp_differentiable, mm_bt_differentiable, mm_differentiable, mv_differentiable,
+    permute_0213, solve_triangular_differentiable,
 };
 use ferrotorch_core::linalg::{
-    cholesky, cholesky_ex, cond, cross, det, diagonal, eig, eigh, eigvals, eigvalsh,
-    householder_product, inv, inv_ex, ldl_factor, ldl_solve, lstsq, lstsq_solve, lu, lu_factor,
-    matrix_exp, matrix_norm, matrix_power, matrix_rank, multi_dot, pinv, qr, slogdet, solve,
+    LstsqDriver, LstsqResult, MatrixRankOptions, MatrixRankTolerance, cholesky, cholesky_ex, cond,
+    cross, det, diagonal, eig, eigh, eigvals, eigvalsh, householder_product, inv, inv_ex,
+    ldl_factor, ldl_solve, lstsq, lstsq_solve, lstsq_with_driver, lu, lu_factor, matrix_exp,
+    matrix_norm, matrix_power, matrix_rank, matrix_rank_atol_rtol, matrix_rank_atol_rtol_tensors,
+    matrix_rank_tol_tensor, matrix_rank_with_options, multi_dot, pinv, qr, slogdet, solve,
     solve_ex, solve_triangular, svd, svdvals, tensorinv, tensorsolve, vector_norm,
 };
 use ferrotorch_core::ops::linalg::{
@@ -2287,6 +2291,82 @@ fn cpu_lstsq() {
 }
 
 #[test]
+fn cpu_lstsq_result_alias_and_differentiable_solution_grad() {
+    let a = make_cpu_f64(&[1.0, 0.0, 0.0, 1.0], &[2, 2], false);
+    let b = make_cpu_f64(&[2.0, 3.0], &[2], false);
+    let result: LstsqResult<f64> = lstsq(&a, &b, None).expect("lstsq result alias");
+    let (solution, residuals, rank, singular_values) = result;
+    check_f64(
+        "lstsq identity solution",
+        &read_back_f64(&solution, Device::Cpu),
+        &[2.0, 3.0],
+        tolerance::F64_SOLVE,
+    );
+    assert_eq!(
+        residuals.numel(),
+        0,
+        "exact square solve has empty residuals"
+    );
+    assert_eq!(rank.data().expect("rank data"), &[2_i64]);
+    assert_eq!(
+        singular_values.numel(),
+        0,
+        "default CPU gelsy driver returns an empty singular_values tensor"
+    );
+
+    let (gels_solution, _, gels_rank, gels_singular_values) =
+        lstsq_with_driver(&a, &b, None, Some(LstsqDriver::Gels)).expect("lstsq gels");
+    check_f64(
+        "lstsq gels identity solution",
+        &read_back_f64(&gels_solution, Device::Cpu),
+        &[2.0, 3.0],
+        tolerance::F64_SOLVE,
+    );
+    assert_eq!(gels_rank.numel(), 0, "gels does not compute rank");
+    assert_eq!(
+        gels_singular_values.numel(),
+        0,
+        "gels does not compute singular values"
+    );
+
+    let (gelsd_solution, _, gelsd_rank, gelsd_singular_values) =
+        lstsq_with_driver(&a, &b, None, Some(LstsqDriver::Gelsd)).expect("lstsq gelsd");
+    check_f64(
+        "lstsq gelsd identity solution",
+        &read_back_f64(&gelsd_solution, Device::Cpu),
+        &[2.0, 3.0],
+        tolerance::F64_SOLVE,
+    );
+    assert_eq!(gelsd_rank.data().expect("gelsd rank data"), &[2_i64]);
+    check_f64(
+        "lstsq gelsd singular values",
+        gelsd_singular_values.data().expect("gelsd singular values"),
+        &[1.0_f64, 1.0],
+        tolerance::F64_SOLVE,
+    );
+
+    let b = make_cpu_f64(&[2.0, 3.0], &[2], true);
+    let solution = lstsq_solve_differentiable(&a, &b).expect("lstsq_solve_differentiable identity");
+    check_f64(
+        "lstsq_solve_differentiable identity solution",
+        &read_back_f64(&solution, Device::Cpu),
+        &[2.0, 3.0],
+        tolerance::F64_SOLVE,
+    );
+    ferrotorch_core::grad_fns::reduction::sum(&solution)
+        .expect("sum")
+        .backward()
+        .expect("backward through lstsq_solve_differentiable");
+    let grad_b = b.grad().expect("grad lookup").expect("grad_b");
+    check_f64(
+        "lstsq_solve_differentiable grad_b for identity A",
+        &read_back_f64(&grad_b, Device::Cpu),
+        &[1.0, 1.0],
+        tolerance::F64_SOLVE,
+    );
+}
+
+#[test]
 fn cpu_solve_triangular() {
     let file = load_fixtures();
     for f in cases_for(&file, "solve_triangular", "cpu") {
@@ -2329,6 +2409,50 @@ fn cpu_solve_triangular() {
             _ => unreachable!(),
         }
     }
+}
+
+#[test]
+fn cpu_solve_triangular_differentiable_backward_matches_diagonal_system() {
+    let a = make_cpu_f64(&[2.0, 0.0, 0.0, 4.0], &[2, 2], true);
+    let b = make_cpu_f64(&[2.0, 8.0], &[2], true);
+
+    let x = solve_triangular_differentiable(
+        &a, &b, /* upper */ false, /* transpose */ false, /* unit_diagonal */ false,
+    )
+    .expect("solve_triangular_differentiable");
+    assert_eq!(
+        x.grad_fn().expect("grad_fn").name(),
+        "SolveTriangularBackward"
+    );
+    assert!(
+        std::any::type_name::<SolveTriangularBackward<f64>>().contains("SolveTriangularBackward"),
+        "public SolveTriangularBackward type name must remain stable"
+    );
+    check_f64(
+        "solve_triangular_differentiable forward",
+        &read_back_f64(&x, Device::Cpu),
+        &[1.0, 2.0],
+        tolerance::F64_SOLVE,
+    );
+
+    ferrotorch_core::grad_fns::reduction::sum(&x)
+        .expect("sum")
+        .backward()
+        .expect("backward through solve_triangular_differentiable");
+    let grad_b = b.grad().expect("grad lookup").expect("grad_b");
+    check_f64(
+        "solve_triangular_differentiable grad_b",
+        &read_back_f64(&grad_b, Device::Cpu),
+        &[0.5, 0.25],
+        tolerance::F64_SOLVE,
+    );
+    let grad_a = a.grad().expect("grad lookup").expect("grad_a");
+    check_f64(
+        "solve_triangular_differentiable lower-triangle grad_a",
+        &read_back_f64(&grad_a, Device::Cpu),
+        &[-0.5, 0.0, -0.25, -0.5],
+        tolerance::F64_SOLVE,
+    );
 }
 
 #[test]
@@ -2905,6 +3029,63 @@ fn cpu_matrix_rank() {
 }
 
 #[test]
+fn cpu_matrix_rank_with_options_scalar_and_tensor_tolerances() {
+    let a = make_cpu_f64(&[3.0, 0.0, 0.0, 1.0e-3], &[2, 2], false);
+
+    let legacy: MatrixRankOptions<'_, f64> = MatrixRankOptions::legacy_tol(Some(1.0e-2), false);
+    let rank = matrix_rank_with_options(&a, legacy).expect("matrix_rank legacy tol");
+    assert_eq!(
+        rank.data().expect("rank data"),
+        &[1_i64],
+        "legacy absolute tolerance should drop the small singular value"
+    );
+
+    let rank = matrix_rank_atol_rtol(&a, Some(1.0e-2), Some(0.0), false)
+        .expect("matrix_rank scalar atol/rtol overload");
+    assert_eq!(
+        rank.data().expect("rank data"),
+        &[1_i64],
+        "scalar atol/rtol overload should drop the small singular value"
+    );
+
+    let tol = make_cpu_f64(&[1.0e-2], &[], false);
+    let tensor_options: MatrixRankOptions<'_, f64> = MatrixRankOptions {
+        atol: Some(MatrixRankTolerance::Tensor(&tol)),
+        rtol: Some(MatrixRankTolerance::Scalar(0.0)),
+        hermitian: false,
+    };
+    let rank = matrix_rank_with_options(&a, tensor_options).expect("matrix_rank tensor atol");
+    assert_eq!(
+        rank.data().expect("rank data"),
+        &[1_i64],
+        "scalar tensor tolerance should broadcast like torch.linalg.matrix_rank"
+    );
+
+    let rank = matrix_rank_tol_tensor(&a, &tol, false).expect("matrix_rank tol tensor overload");
+    assert_eq!(
+        rank.data().expect("rank data"),
+        &[1_i64],
+        "tensor tol overload should drop the small singular value"
+    );
+
+    let rank = matrix_rank_atol_rtol_tensors(&a, Some(&tol), None, false)
+        .expect("matrix_rank tensor atol/rtol overload");
+    assert_eq!(
+        rank.data().expect("rank data"),
+        &[1_i64],
+        "tensor atol overload should broadcast like torch.linalg.matrix_rank"
+    );
+
+    let no_tol = matrix_rank_with_options(&a, MatrixRankOptions::<f64>::default())
+        .expect("matrix_rank default options");
+    assert_eq!(
+        no_tol.data().expect("rank data"),
+        &[2_i64],
+        "default tolerance should keep both non-zero singular values"
+    );
+}
+
+#[test]
 fn cpu_cond() {
     let file = load_fixtures();
     for f in cases_for(&file, "cond", "cpu") {
@@ -3272,6 +3453,36 @@ fn cpu_matrix_exp() {
             _ => unreachable!(),
         }
     }
+}
+
+#[test]
+fn cpu_matrix_exp_differentiable_backward_matches_scalar_exponential() {
+    let a = make_cpu_f64(&[1.25], &[1, 1], true);
+    let y = matrix_exp_differentiable(&a).expect("matrix_exp_differentiable");
+    assert_eq!(y.grad_fn().expect("grad_fn").name(), "MatrixExpBackward");
+    assert!(
+        std::any::type_name::<MatrixExpBackward<f64>>().contains("MatrixExpBackward"),
+        "public MatrixExpBackward type name must remain stable"
+    );
+
+    let expected = 1.25_f64.exp();
+    check_f64(
+        "matrix_exp_differentiable 1x1 forward",
+        &read_back_f64(&y, Device::Cpu),
+        &[expected],
+        tolerance::F64_RECON,
+    );
+    ferrotorch_core::grad_fns::reduction::sum(&y)
+        .expect("sum")
+        .backward()
+        .expect("backward through matrix_exp_differentiable");
+    let grad_a = a.grad().expect("grad lookup").expect("grad_a");
+    check_f64(
+        "matrix_exp_differentiable 1x1 grad",
+        &read_back_f64(&grad_a, Device::Cpu),
+        &[expected],
+        tolerance::F64_RECON,
+    );
 }
 
 /// CORE-148 / #1842 — `matrix_exp` for extreme infinity-norms. Pre-fix

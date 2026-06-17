@@ -171,11 +171,11 @@ hits (compile itself is in the millisecond range).
 
 - `pub use codegen_jit::{JitCompiledKernel, compile_loop_ir_kernel}`
   at `ferrotorch-jit/src/lib.rs:96` — grandfathered public API.
-- `ferrotorch-jit/src/codegen.rs:1302` (inside
+- `ferrotorch-jit/src/codegen.rs:1306` (inside
   `try_jit_compile_cpu_rust`) `crate::codegen_jit::jit_supports(
   kernel_loops)` — the gate that short-circuits to the interpreter
   for unsupported shapes.
-- `ferrotorch-jit/src/codegen.rs:1306` (inside
+- `ferrotorch-jit/src/codegen.rs:1310` (inside
   `try_jit_compile_cpu_rust`) `crate::codegen_jit::
   compile_loop_ir_kernel(kernel_loops, num_inputs, output_len)?`
   — the JIT-compile call that produces the kernel

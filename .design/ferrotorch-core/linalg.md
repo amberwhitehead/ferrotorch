@@ -126,7 +126,7 @@ Non-test production consumers:
   `ferrotorch_core::linalg` and calls `linalg::cholesky` and
   `linalg::solve` to construct the multivariate normal distribution's
   Cholesky factor.
-- `ferray_linalg::svd` callsite at `linalg.rs:156, 170` is the
+- `ferray_linalg::svd` callsite inside `linalg.rs:579` is the
   CPU dispatch for both SVD and `svdvals`.
 
 ## Parity contract
@@ -156,13 +156,13 @@ Expected: round-trip tests for each decomposition pass.
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: `svd` at `ferrotorch-core/src/linalg.rs:121` delegating to `ferray_linalg::svd` (`:156, 170`); non-test consumer: re-exported in `lib.rs`; called by `pinv`, `svdvals`, `matrix_rank`, `cond` siblings within this same file (e.g. `cond` at `:1313` runs SVD). |
+| REQ-1 | SHIPPED | impl: `svd` at `ferrotorch-core/src/linalg.rs:579` delegating to `ferray_linalg::svd`; non-test consumer: re-exported in `lib.rs`; called by `pinv`, `svdvals`, `matrix_rank`, `cond` siblings within this same file (e.g. `cond` at `:3232` runs SVD). |
 | REQ-2 | SHIPPED | impl: `solve` at `ferrotorch-core/src/linalg.rs:200`; non-test consumer: `ferrotorch-distributions/src/multivariate_normal.rs:44` imports `ferrotorch_core::linalg` and calls `linalg::solve`. |
 | REQ-3 | SHIPPED | impl: `det in ferrotorch-core/src/linalg.rs`; non-test consumer: pub API; used by `slogdet` in the same file. |
 | REQ-4 | SHIPPED | impl: `inv` at `ferrotorch-core/src/linalg.rs:310`; non-test consumer: `inv_ex` at `:2139` delegates to `inv` for the success path; production callsite via `lib.rs` re-export. |
 | REQ-5 | SHIPPED | impl: `qr in ferrotorch-core/src/linalg.rs`; non-test consumer: pub API surface used by linear-regression / least-squares helpers downstream. |
 | REQ-6 | SHIPPED | impl: `cholesky in ferrotorch-core/src/linalg.rs`; non-test consumer: `ferrotorch-distributions/src/multivariate_normal.rs` calls `linalg::cholesky` for the MVN covariance factor. |
-| REQ-7 | SHIPPED | impl: `matrix_norm` at `ferrotorch-core/src/linalg.rs:471`; non-test consumer: pub API surface. |
+| REQ-7 | SHIPPED | impl: `matrix_norm` at `ferrotorch-core/src/linalg.rs:987`; non-test consumer: pub API surface. |
 | REQ-8 | SHIPPED | impl: `pinv` at `ferrotorch-core/src/linalg.rs:530`; non-test consumer: pub API; composes with `svd` (this file). |
 | REQ-9 | SHIPPED | impl: `eigh in ferrotorch-core/src/linalg.rs`, `eigvalsh in ferrotorch-core/src/linalg.rs`; non-test consumer: pub API; used by `matrix_norm` / `cond` for spectral computations on symmetric matrices. |
 | REQ-10 | SHIPPED | impl: `eig` at `ferrotorch-core/src/linalg.rs:677`, `eigvals` at `:735`; non-test consumer: pub API. |
