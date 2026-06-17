@@ -42,6 +42,36 @@ use crate::error::GpuResult;
 #[cfg(feature = "cuda")]
 use crate::sparse::CusparseHandle;
 
+fn host_vec_to_byte_vec<T>(data: Vec<T>, dtype: DType) -> FerrotorchResult<Vec<u8>> {
+    let elem_size = std::mem::size_of::<T>();
+    if elem_size == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("gpu_to_cpu: dtype {dtype} has zero-sized host element type"),
+        });
+    }
+    if elem_size != dtype.size_of() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "gpu_to_cpu: dtype {dtype} expected element size {}, got host element size {elem_size}",
+                dtype.size_of()
+            ),
+        });
+    }
+    let byte_len =
+        data.len()
+            .checked_mul(elem_size)
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!(
+                    "gpu_to_cpu: byte length overflow for {} elements of dtype {dtype}",
+                    data.len()
+                ),
+            })?;
+    // Return a real byte allocation. Reinterpreting the Vec<T> allocation as
+    // Vec<u8> would make the caller drop it with the wrong allocator layout.
+    let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), byte_len) };
+    Ok(bytes.to_vec())
+}
+
 // ---------------------------------------------------------------------------
 // CudaBackendImpl
 // ---------------------------------------------------------------------------
@@ -1357,37 +1387,16 @@ impl GpuBackend for CudaBackendImpl {
     fn gpu_to_cpu(&self, handle: &GpuBufferHandle) -> FerrotorchResult<Vec<u8>> {
         let dev = self.device(handle.device_ordinal())?;
 
-        // Try f32 first, then f64, then bf16 (CudaSlice<u16> bit pattern).
+        // D2H transfer returns typed host vectors. The public backend
+        // contract returns an ordinary byte vector, so every typed arm copies
+        // into a fresh Vec<u8> allocation rather than stealing the typed
+        // allocation with a raw-parts conversion.
         if let Ok(buf) = Self::unwrap_buffer(handle) {
             let f32_data = crate::transfer::gpu_to_cpu(buf, dev).map_err(Self::map_gpu_err)?;
-
-            // Reinterpret Vec<f32> as Vec<u8> without copying.
-            // SAFETY: f32 has alignment 4 and size 4. We adjust len and capacity
-            // accordingly. The original Vec is consumed via ManuallyDrop so its
-            // destructor won't free the allocation.
-            let bytes = unsafe {
-                let mut v = std::mem::ManuallyDrop::new(f32_data);
-                let ptr = v.as_mut_ptr() as *mut u8;
-                let len = v.len() * 4;
-                let cap = v.capacity() * 4;
-                Vec::from_raw_parts(ptr, len, cap)
-            };
-            Ok(bytes)
+            host_vec_to_byte_vec(f32_data, DType::F32)
         } else if let Ok(buf) = Self::unwrap_buffer_f64(handle) {
             let f64_data = crate::transfer::gpu_to_cpu(buf, dev).map_err(Self::map_gpu_err)?;
-
-            // Reinterpret Vec<f64> as Vec<u8> without copying.
-            // SAFETY: f64 has alignment 8 and size 8. We adjust len and capacity
-            // accordingly. The original Vec is consumed via ManuallyDrop so its
-            // destructor won't free the allocation.
-            let bytes = unsafe {
-                let mut v = std::mem::ManuallyDrop::new(f64_data);
-                let ptr = v.as_mut_ptr() as *mut u8;
-                let len = v.len() * 8;
-                let cap = v.capacity() * 8;
-                Vec::from_raw_parts(ptr, len, cap)
-            };
-            Ok(bytes)
+            host_vec_to_byte_vec(f64_data, DType::F64)
         } else if let Ok(slice) = Self::unwrap_buffer_bf16(handle) {
             // bf16 storage: raw `CudaSlice<u16>` (no `CudaBuffer<T>` wrapper).
             // `clone_dtoh` copies the whole slice including any rounded-up
@@ -1397,21 +1406,7 @@ impl GpuBackend for CudaBackendImpl {
                 .stream()
                 .clone_dtoh(slice)
                 .map_err(|e| Self::map_gpu_err(crate::error::GpuError::Driver(e)))?;
-
-            // Reinterpret Vec<u16> as Vec<u8> without copying.
-            // SAFETY: u16 has alignment 2 and size 2. We adjust len and capacity
-            // accordingly; the original Vec is consumed via ManuallyDrop so its
-            // destructor never runs and the allocation stays live under its
-            // new u8-typed handle (Layout::array::<u16>(cap) and
-            // Layout::array::<u8>(cap*2) describe the same byte range).
-            let bytes = unsafe {
-                let mut v = std::mem::ManuallyDrop::new(u16_data);
-                let ptr = v.as_mut_ptr() as *mut u8;
-                let len = v.len() * 2;
-                let cap = v.capacity() * 2;
-                Vec::from_raw_parts(ptr, len, cap)
-            };
-            Ok(bytes)
+            host_vec_to_byte_vec(u16_data, DType::BF16)
         } else if let Ok(slice) = Self::unwrap_buffer_f16(handle) {
             // f16 storage: raw `CudaSlice<u16>` tagged `DType::F16`. Same
             // dtoh path as bf16 (byte-identical width); the tag check in
@@ -1420,80 +1415,21 @@ impl GpuBackend for CudaBackendImpl {
                 .stream()
                 .clone_dtoh(slice)
                 .map_err(|e| Self::map_gpu_err(crate::error::GpuError::Driver(e)))?;
-
-            // Reinterpret Vec<u16> as Vec<u8> without copying.
-            // SAFETY: u16 has alignment 2 and size 2; len/capacity adjusted
-            // accordingly. The original Vec is consumed via ManuallyDrop so
-            // its destructor never runs and the allocation stays live under
-            // its new u8-typed handle.
-            let bytes = unsafe {
-                let mut v = std::mem::ManuallyDrop::new(u16_data);
-                let ptr = v.as_mut_ptr() as *mut u8;
-                let len = v.len() * 2;
-                let cap = v.capacity() * 2;
-                Vec::from_raw_parts(ptr, len, cap)
-            };
-            Ok(bytes)
+            host_vec_to_byte_vec(u16_data, DType::F16)
         } else if let Ok(buf) = Self::unwrap_buffer_i16(handle) {
             let i16_data = crate::transfer::gpu_to_cpu(buf, dev).map_err(Self::map_gpu_err)?;
-            let byte_len =
-                i16_data
-                    .len()
-                    .checked_mul(2)
-                    .ok_or_else(|| FerrotorchError::InvalidArgument {
-                        message: "gpu_to_cpu: i16 byte length overflow".into(),
-                    })?;
-            let mut bytes = vec![0u8; byte_len];
-            // SAFETY: `bytes` was freshly allocated for exactly
-            // `i16_data.len() * size_of::<i16>()` bytes. `i16_data` is fully
-            // initialized, and copying through `u8` imposes no source
-            // alignment requirement. The returned allocation remains an
-            // ordinary `Vec<u8>` as required by the core backend contract.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    i16_data.as_ptr().cast::<u8>(),
-                    bytes.as_mut_ptr(),
-                    byte_len,
-                );
-            }
-            Ok(bytes)
+            host_vec_to_byte_vec(i16_data, DType::I16)
         } else if let Ok(buf) = Self::unwrap_buffer_i32(handle) {
             // i32 device storage (crosslink #1185 Phase 2a). Real
             // `CudaBuffer<i32>` (not a `CudaSlice<u16>` bit pattern), so the
             // generic `transfer::gpu_to_cpu` D2H path applies directly.
             let i32_data = crate::transfer::gpu_to_cpu(buf, dev).map_err(Self::map_gpu_err)?;
-
-            // Reinterpret Vec<i32> as Vec<u8> without copying.
-            // SAFETY: i32 has alignment 4 and size 4; len/capacity adjusted
-            // accordingly. The original Vec is consumed via ManuallyDrop so its
-            // destructor never runs and the allocation stays live under its new
-            // u8-typed handle (the byte ranges Layout::array::<i32>(cap) and
-            // Layout::array::<u8>(cap*4) describe are identical).
-            let bytes = unsafe {
-                let mut v = std::mem::ManuallyDrop::new(i32_data);
-                let ptr = v.as_mut_ptr() as *mut u8;
-                let len = v.len() * 4;
-                let cap = v.capacity() * 4;
-                Vec::from_raw_parts(ptr, len, cap)
-            };
-            Ok(bytes)
+            host_vec_to_byte_vec(i32_data, DType::I32)
         } else if let Ok(buf) = Self::unwrap_buffer_i64(handle) {
             // i64 device storage (crosslink #1185 Phase 2a). Real
             // `CudaBuffer<i64>`; generic D2H path applies.
             let i64_data = crate::transfer::gpu_to_cpu(buf, dev).map_err(Self::map_gpu_err)?;
-
-            // Reinterpret Vec<i64> as Vec<u8> without copying.
-            // SAFETY: i64 has alignment 8 and size 8; len/capacity adjusted
-            // accordingly. ManuallyDrop keeps the allocation live under the new
-            // u8-typed handle (identical byte range to the i64 Vec).
-            let bytes = unsafe {
-                let mut v = std::mem::ManuallyDrop::new(i64_data);
-                let ptr = v.as_mut_ptr() as *mut u8;
-                let len = v.len() * 8;
-                let cap = v.capacity() * 8;
-                Vec::from_raw_parts(ptr, len, cap)
-            };
-            Ok(bytes)
+            host_vec_to_byte_vec(i64_data, DType::I64)
         } else if let Ok(buf) = Self::unwrap_buffer_bool(handle) {
             // bool device storage (crosslink #1185 Phase 3a). Real
             // `CudaBuffer<u8>`; the D2H readback is already a `Vec<u8>`, and the
@@ -13931,6 +13867,30 @@ mod tests {
         values.iter().flat_map(|v| v.to_ne_bytes()).collect()
     }
 
+    fn f32_vec(bytes: &[u8]) -> Vec<f32> {
+        assert!(
+            bytes.len().is_multiple_of(4),
+            "f32 byte slice length {} is not divisible by 4",
+            bytes.len()
+        );
+        bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_ne_bytes(chunk.try_into().expect("f32 chunk")))
+            .collect()
+    }
+
+    fn u16_vec(bytes: &[u8]) -> Vec<u16> {
+        assert!(
+            bytes.len().is_multiple_of(2),
+            "u16 byte slice length {} is not divisible by 2",
+            bytes.len()
+        );
+        bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_ne_bytes(chunk.try_into().expect("u16 chunk")))
+            .collect()
+    }
+
     fn scalar_f32(bytes: &[u8]) -> f32 {
         f32::from_ne_bytes(bytes.try_into().expect("one f32 scalar"))
     }
@@ -14063,6 +14023,21 @@ mod tests {
     }
 
     #[test]
+    fn gpu_to_cpu_body_never_steals_typed_allocations() {
+        let source = include_str!("backend_impl.rs");
+        let body = source
+            .split_once("    fn gpu_to_cpu(&self, handle: &GpuBufferHandle)")
+            .and_then(|(_, rest)| rest.split_once("    fn clone_buffer(&self"))
+            .map(|(body, _)| body)
+            .expect("locate gpu_to_cpu body");
+        assert!(
+            !body.contains("Vec::from_raw_parts") && !body.contains("ManuallyDrop"),
+            "gpu_to_cpu must return a Vec<u8> allocated as bytes, not a typed Vec allocation \
+             reinterpreted through Vec::from_raw_parts"
+        );
+    }
+
+    #[test]
     fn test_roundtrip_cpu_gpu_cpu() {
         ensure_init();
         let backend = gpu_dispatch::gpu_backend().expect("backend registered");
@@ -14098,25 +14073,8 @@ mod tests {
         assert_eq!(handle.device_ordinal(), 0);
 
         let back_bytes = backend.gpu_to_cpu(&handle).expect("gpu_to_cpu");
-        // SAFETY:
-        // - `back_bytes` is a `Vec<u8>` returned by `gpu_to_cpu` (line 245)
-        //   which constructs it via `Vec::from_raw_parts` from a
-        //   `Vec<f32>::ManuallyDrop` (see line 256-262 in this file). The
-        //   resulting `Vec<u8>` therefore inherits f32's 4-byte alignment
-        //   on the original allocation pointer.
-        // - `back_bytes.len() / 4` is the original f32 element count (the
-        //   byte length is `host.len() * 4 == 20`, so divided by 4 yields
-        //   `5`, the original `host.len()`).
-        // - Every u32 bit pattern is a valid f32 (including all NaN
-        //   payloads) — the round-trip CUDA memcpy preserves bytes exactly,
-        //   so reinterpreting the bytes as f32 yields the original values.
-        // - Lifetime: `&[f32]` is bound to `&back_bytes`; both are dropped
-        //   at end of scope after the `assert_eq!` on line 3184.
-        // - No `&mut` aliases: `back_bytes` is read via `as_ptr()` only.
-        let back: &[f32] = unsafe {
-            std::slice::from_raw_parts(back_bytes.as_ptr() as *const f32, back_bytes.len() / 4)
-        };
-        assert_eq!(back, &host[..]);
+        let back = f32_vec(&back_bytes);
+        assert_eq!(back, host);
     }
 
     #[test]
@@ -14163,24 +14121,7 @@ mod tests {
         assert_eq!(result.len(), 4);
 
         let result_bytes = backend.gpu_to_cpu(&result).expect("gpu_to_cpu");
-        // SAFETY:
-        // - `result_bytes` is a `Vec<u8>` constructed by `gpu_to_cpu` (line
-        //   245) via `Vec::from_raw_parts` from a `Vec<f32>::ManuallyDrop`
-        //   so its allocation pointer inherits 4-byte alignment from the
-        //   original f32 allocation.
-        // - `result_bytes.len() / 4` is the original f32 element count
-        //   (`add_f32` produces 4 f32s → 16 bytes / 4 = 4 elements), so the
-        //   reinterpreted slice covers exactly the f32 region.
-        // - Every u32 bit pattern is a valid f32 (the bytes that
-        //   `gpu_to_cpu` returned are exactly those produced by the GPU
-        //   `gpu_add` kernel, so each 4-byte word is a valid IEEE 754 f32).
-        // - Lifetime: `&[f32]` is bound by `&result_bytes`; the iterator on
-        //   line 3212 consumes the slice within the same scope.
-        // - No `&mut` aliases: `result_bytes` is accessed only via shared
-        //   `as_ptr()`.
-        let result_f32: &[f32] = unsafe {
-            std::slice::from_raw_parts(result_bytes.as_ptr() as *const f32, result_bytes.len() / 4)
-        };
+        let result_f32 = f32_vec(&result_bytes);
 
         for (i, (&got, &exp)) in result_f32.iter().zip(expected.iter()).enumerate() {
             assert!(
@@ -14241,23 +14182,7 @@ mod tests {
         assert_eq!(result.len(), 4);
 
         let result_bytes = backend.gpu_to_cpu(&result).expect("gpu_to_cpu");
-        // SAFETY:
-        // - `result_bytes` is a `Vec<u8>` returned by `gpu_to_cpu` (line
-        //   245), constructed via `Vec::from_raw_parts` from a
-        //   `ManuallyDrop<Vec<f32>>` (lines 256-262), so its underlying
-        //   allocation has f32's 4-byte alignment.
-        // - `result_bytes.len() / 4` is the original f32 element count
-        //   (matmul produces a 2×2 matrix → 4 f32 → 16 bytes; 16/4 = 4).
-        // - Every u32 bit pattern is a valid f32; the bytes were produced
-        //   by the cuBLAS GEMM kernel (so each 4-byte word is a finite
-        //   IEEE 754 f32 modulo NaN, all of which are valid f32 values).
-        // - Lifetime: `&[f32]` is bound by `&result_bytes`; the iterator on
-        //   line 3284 consumes the slice in the same scope and `result_bytes`
-        //   outlives it.
-        // - No `&mut` aliases: shared `as_ptr()` only.
-        let result_f32: &[f32] = unsafe {
-            std::slice::from_raw_parts(result_bytes.as_ptr() as *const f32, result_bytes.len() / 4)
-        };
+        let result_f32 = f32_vec(&result_bytes);
 
         for (i, (&got, &exp)) in result_f32.iter().zip(expected.iter()).enumerate() {
             assert!(
@@ -14305,29 +14230,16 @@ mod tests {
 
         let back_bytes = backend.gpu_to_cpu(&handle).expect("gpu_to_cpu bf16");
         assert_eq!(back_bytes.len(), host.len() * 2);
-
-        // SAFETY:
-        // - `back_bytes` was constructed by `gpu_to_cpu` (bf16 branch) via
-        //   `Vec::from_raw_parts` from a `ManuallyDrop<Vec<u16>>`; the
-        //   allocation pointer inherits u16's 2-byte alignment.
-        // - `back_bytes.len() / 2 == host.len()` covers exactly the u16
-        //   byte extent.
-        // - Every u16 bit pattern is a valid u16 — the bytes are unchanged
-        //   by the CUDA memcpy.
-        let back: &[u16] = unsafe {
-            std::slice::from_raw_parts(back_bytes.as_ptr() as *const u16, back_bytes.len() / 2)
-        };
-        assert_eq!(back, &host[..]);
+        let back = u16_vec(&back_bytes);
+        assert_eq!(back, host);
 
         // clone_buffer must also work on bf16 handles (#15 / #18 ask for
         // a full round-trip including device-side clones).
         let cloned = backend.clone_buffer(&handle).expect("clone_buffer bf16");
         assert_eq!(cloned.len(), host.len());
         let cloned_bytes = backend.gpu_to_cpu(&cloned).expect("gpu_to_cpu cloned");
-        let cloned_back: &[u16] = unsafe {
-            std::slice::from_raw_parts(cloned_bytes.as_ptr() as *const u16, cloned_bytes.len() / 2)
-        };
-        assert_eq!(cloned_back, &host[..]);
+        let cloned_back = u16_vec(&cloned_bytes);
+        assert_eq!(cloned_back, host);
     }
 
     /// Round-trip f16 (IEEE float16) through the type-erased dispatcher and
@@ -14368,12 +14280,8 @@ mod tests {
 
         // f16 round-trips bit-exact through the F16 gpu_to_cpu branch.
         let back_bytes = backend.gpu_to_cpu(&f16_handle).expect("gpu_to_cpu f16");
-        // SAFETY: `back_bytes` came from `gpu_to_cpu` via from_raw_parts on a
-        // `ManuallyDrop<Vec<u16>>` (2-byte aligned); `len / 2 == host.len()`.
-        let back: &[u16] = unsafe {
-            std::slice::from_raw_parts(back_bytes.as_ptr() as *const u16, back_bytes.len() / 2)
-        };
-        assert_eq!(back, &host[..], "f16 round-trip must be bit-exact");
+        let back = u16_vec(&back_bytes);
+        assert_eq!(back, host, "f16 round-trip must be bit-exact");
 
         // (2) Feed the F16-tagged handle to a *bf16* backend op. The bf16
         // path unwraps via `unwrap_buffer_bf16`, whose tag check must reject
@@ -14490,12 +14398,7 @@ mod tests {
         assert_eq!(backend.buffer_elem_size(&result), 2);
 
         let result_bytes = backend.gpu_to_cpu(&result).expect("gpu_to_cpu result");
-        // SAFETY: result was wrapped as CudaSlice<u16>; gpu_to_cpu's bf16
-        // branch returns a u16-aligned byte buffer of length 8 (4 elements
-        // × 2 bytes), and every u16 bit pattern is a valid bf16.
-        let result_bf16: &[u16] = unsafe {
-            std::slice::from_raw_parts(result_bytes.as_ptr() as *const u16, result_bytes.len() / 2)
-        };
+        let result_bf16 = u16_vec(&result_bytes);
 
         // Convert bf16 → f32 for comparison; bf16's 8-bit mantissa puts the
         // ULP at this scale (~58..154) around 0.5, so tolerance 1.0 is
