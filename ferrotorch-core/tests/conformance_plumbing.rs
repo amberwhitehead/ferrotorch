@@ -2055,6 +2055,29 @@ fn cpu_pool_empty_clears_buckets() {
     assert_eq!(v2.len(), 100);
 }
 
+#[test]
+fn tensor_storage_drop_does_not_cache_capacity_heavy_cpu_vec() {
+    empty_cpu_pool();
+
+    let mut data = Vec::<f32>::with_capacity(1024);
+    data.resize(4, 1.0);
+    assert!(
+        data.capacity() > data.len(),
+        "test setup must create a capacity-heavy storage Vec"
+    );
+
+    let storage = TensorStorage::cpu(data);
+    drop(storage);
+
+    let reused = pool_alloc_cpu::<f32>(4);
+    assert_eq!(reused.len(), 4);
+    assert_eq!(
+        reused.capacity(),
+        4,
+        "TensorStorage drop must not cache oversized CPU allocations under logical length"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // GPU conformance — gated on the `gpu` feature, NOT `#[ignore]`d.
 // ---------------------------------------------------------------------------

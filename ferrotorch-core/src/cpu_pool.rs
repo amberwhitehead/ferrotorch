@@ -16,7 +16,9 @@
 //!
 //! - **Size-exact**: we only reuse buffers with exactly the same capacity.
 //!   This avoids wasting memory on oversized buffers and matches training
-//!   workloads where the same tensor shapes repeat every iteration.
+//!   workloads where the same tensor shapes repeat every iteration. Returned
+//!   `Vec`s whose logical length is smaller than their allocation capacity are
+//!   dropped instead of being cached under the short length.
 //!
 //! - **Bounded**: each size bucket holds at most `MAX_PER_BUCKET` buffers.
 //!   Total cached memory is bounded by `MAX_CACHED_BYTES`. Excess buffers
@@ -38,7 +40,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Maximum buffers per (len, type) bucket.
+/// Maximum buffers per (capacity, type) bucket.
 const MAX_PER_BUCKET: usize = 8;
 
 /// Maximum total cached bytes across all buckets (per thread).
@@ -73,7 +75,7 @@ pub fn reset_cpu_pool_stats() {
 // Thread-local pool
 // ---------------------------------------------------------------------------
 
-type PoolKey = (usize, TypeId); // (element_count, type)
+type PoolKey = (usize, TypeId); // (allocation_capacity_in_elements, type)
 
 struct CpuPoolState {
     free: HashMap<PoolKey, Vec<Box<dyn Any>>>,
@@ -91,6 +93,45 @@ thread_local! {
 // Public API
 // ---------------------------------------------------------------------------
 
+#[inline]
+fn cached_allocation_bytes<T>(capacity: usize) -> Option<usize> {
+    let elem_size = std::mem::size_of::<T>();
+    if elem_size == 0 {
+        return None;
+    }
+    capacity.checked_mul(elem_size)
+}
+
+#[inline]
+fn pool_take_exact_capacity<T: 'static>(len: usize) -> Option<Vec<T>> {
+    let key = (len, TypeId::of::<T>());
+
+    CPU_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        loop {
+            let boxed = {
+                let bucket = pool.free.get_mut(&key)?;
+                bucket.pop()
+            };
+            let boxed = boxed?;
+            let Ok(v) = boxed.downcast::<Vec<T>>() else {
+                continue;
+            };
+
+            let v = *v;
+            if let Some(byte_size) = cached_allocation_bytes::<T>(v.capacity()) {
+                pool.cached_bytes = pool.cached_bytes.saturating_sub(byte_size);
+            }
+
+            if v.capacity() == len {
+                return Some(v);
+            }
+            // Drop stale or internally malformed entries instead of reusing an
+            // allocation whose retained capacity does not match this bucket.
+        }
+    })
+}
+
 /// Allocate a `Vec<T>` of exactly `len` elements, initialized to zero.
 ///
 /// Checks the thread-local pool first. On a hit, the returned `Vec` has
@@ -102,26 +143,12 @@ pub fn pool_alloc_cpu<T: Default + Clone + 'static>(len: usize) -> Vec<T> {
         return Vec::new();
     }
 
-    let key = (len, TypeId::of::<T>());
-    let elem_size = std::mem::size_of::<T>();
-
-    let maybe = CPU_POOL.with(|pool| {
-        let mut pool = pool.borrow_mut();
-        if let Some(bucket) = pool.free.get_mut(&key)
-            && let Some(boxed) = bucket.pop()
-        {
-            pool.cached_bytes -= len * elem_size;
-            return Some(boxed);
-        }
-        None
-    });
-
-    if let Some(boxed) = maybe {
+    if let Some(mut v) = pool_take_exact_capacity::<T>(len) {
         POOL_HITS.fetch_add(1, Ordering::Relaxed);
-        let mut v: Vec<T> = *boxed.downcast::<Vec<T>>().unwrap();
         // Zero the buffer so the caller gets clean memory.
         v.fill(T::default());
         debug_assert_eq!(v.len(), len);
+        debug_assert_eq!(v.capacity(), len);
         v
     } else {
         POOL_MISSES.fetch_add(1, Ordering::Relaxed);
@@ -141,23 +168,10 @@ pub fn pool_alloc_cpu_uninit_f32(len: usize) -> Vec<f32> {
         return Vec::new();
     }
 
-    let key = (len, TypeId::of::<f32>());
-
-    let maybe = CPU_POOL.with(|pool| {
-        let mut pool = pool.borrow_mut();
-        if let Some(bucket) = pool.free.get_mut(&key)
-            && let Some(boxed) = bucket.pop()
-        {
-            pool.cached_bytes -= len * 4;
-            return Some(boxed);
-        }
-        None
-    });
-
-    if let Some(boxed) = maybe {
+    if let Some(v) = pool_take_exact_capacity::<f32>(len) {
         POOL_HITS.fetch_add(1, Ordering::Relaxed);
-        let v: Vec<f32> = *boxed.downcast::<Vec<f32>>().unwrap();
         debug_assert_eq!(v.len(), len);
+        debug_assert_eq!(v.capacity(), len);
         v
     } else {
         POOL_MISSES.fetch_add(1, Ordering::Relaxed);
@@ -172,23 +186,10 @@ pub fn pool_alloc_cpu_uninit_f64(len: usize) -> Vec<f64> {
         return Vec::new();
     }
 
-    let key = (len, TypeId::of::<f64>());
-
-    let maybe = CPU_POOL.with(|pool| {
-        let mut pool = pool.borrow_mut();
-        if let Some(bucket) = pool.free.get_mut(&key)
-            && let Some(boxed) = bucket.pop()
-        {
-            pool.cached_bytes -= len * 8;
-            return Some(boxed);
-        }
-        None
-    });
-
-    if let Some(boxed) = maybe {
+    if let Some(v) = pool_take_exact_capacity::<f64>(len) {
         POOL_HITS.fetch_add(1, Ordering::Relaxed);
-        let v: Vec<f64> = *boxed.downcast::<Vec<f64>>().unwrap();
         debug_assert_eq!(v.len(), len);
+        debug_assert_eq!(v.capacity(), len);
         v
     } else {
         POOL_MISSES.fetch_add(1, Ordering::Relaxed);
@@ -200,21 +201,26 @@ pub fn pool_alloc_cpu_uninit_f64(len: usize) -> Vec<f64> {
 ///
 /// If the pool is full (per-bucket or total bytes limit), the `Vec` is
 /// dropped normally.
-pub fn pool_return_cpu<T: 'static>(mut v: Vec<T>) {
+pub fn pool_return_cpu<T: 'static>(v: Vec<T>) {
     let len = v.len();
     if len == 0 {
         return;
     }
 
-    let elem_size = std::mem::size_of::<T>();
-    let byte_size = len * elem_size;
-    let key = (len, TypeId::of::<T>());
+    let capacity = v.capacity();
+    if capacity != len {
+        return;
+    }
+
+    let Some(byte_size) = cached_allocation_bytes::<T>(capacity) else {
+        return;
+    };
+    let key = (capacity, TypeId::of::<T>());
 
     CPU_POOL.with(|pool| {
         let mut pool = pool.borrow_mut();
 
-        // Check total memory limit.
-        if pool.cached_bytes + byte_size > MAX_CACHED_BYTES {
+        if byte_size > MAX_CACHED_BYTES || pool.cached_bytes > MAX_CACHED_BYTES - byte_size {
             return; // Drop the Vec normally.
         }
 
@@ -222,19 +228,6 @@ pub fn pool_return_cpu<T: 'static>(mut v: Vec<T>) {
         if bucket.len() >= MAX_PER_BUCKET {
             return; // Bucket full, drop normally.
         }
-
-        // Keep the allocation, ensure correct length for reuse.
-        // SAFETY: `len = v.len()` was captured at function entry (line above
-        // the early return), so this is a no-op when the caller hasn't
-        // changed v's length, and a defensive restore otherwise. The pool's
-        // bucket key is `(len, TypeId::of::<T>())`, so consumers that pop
-        // this Vec receive exactly `len` elements; they were initialized
-        // either by the original `vec![T::default(); len]` allocation in
-        // pool_alloc_cpu (or `vec![0.0; len]` in the f32/f64 variants) or
-        // by user writes via `as_mut_slice` while the Vec was outstanding.
-        // `len <= v.capacity()` because v was originally allocated with
-        // capacity == len and capacity never shrinks below in-use length.
-        unsafe { v.set_len(len) };
 
         bucket.push(Box::new(v));
         pool.cached_bytes += byte_size;
@@ -349,5 +342,49 @@ mod tests {
         // Same size — should hit.
         let v3: Vec<f32> = pool_alloc_cpu(100);
         assert_eq!(v3.len(), 100);
+    }
+
+    #[test]
+    fn test_oversized_capacity_return_is_not_cached_for_short_len() {
+        empty_cpu_pool();
+
+        let mut oversized = Vec::<f32>::with_capacity(1024);
+        oversized.resize(4, 1.0);
+        assert!(
+            oversized.capacity() > oversized.len(),
+            "test setup must create a capacity-heavy Vec"
+        );
+
+        pool_return_cpu(oversized);
+
+        let reused = pool_alloc_cpu::<f32>(4);
+        assert_eq!(reused.len(), 4);
+        assert_eq!(
+            reused.capacity(),
+            4,
+            "pool must not retain capacity-heavy Vecs under their short logical length"
+        );
+    }
+
+    #[test]
+    fn test_over_limit_capacity_return_is_not_cached_as_one_byte() {
+        empty_cpu_pool();
+
+        let mut oversized = Vec::<u8>::with_capacity(MAX_CACHED_BYTES + 1);
+        oversized.push(7);
+        assert!(
+            oversized.capacity() > MAX_CACHED_BYTES,
+            "test setup must exceed the documented cache byte bound"
+        );
+
+        pool_return_cpu(oversized);
+
+        let reused = pool_alloc_cpu::<u8>(1);
+        assert_eq!(reused.len(), 1);
+        assert_eq!(
+            reused.capacity(),
+            1,
+            "pool must account retained allocation capacity, not logical len"
+        );
     }
 }

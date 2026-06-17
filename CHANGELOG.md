@@ -48,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- CORE-016: CPU buffer pool's memory limit ignores allocation capacity (#1710)
 - CORE-168: The re-exported free `einsum` silently detaches autograd (#1862)
 - CORE-166: Repeated-index einsum backward returns CPU gradients for CUDA inputs (#1860)
 - CORE-167: Torch-legal einsum surface rejected: ellipsis, uppercase labels, size-1 broadcasting, n-ary contraction (#1861)
