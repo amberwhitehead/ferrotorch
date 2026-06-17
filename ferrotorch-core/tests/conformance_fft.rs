@@ -567,64 +567,6 @@ fn cascade_skip(
         });
     }
 
-    // Issue #1904 (found running the gpu-feature lane for the first time
-    // under CORE-191/#1885 — these tests were red from birth, no CI ever
-    // executed them):
-    //   rfft: the CUDA fast path in `rfft_norm` gates on `n == input_n`;
-    //     n-resize (pad/truncate) falls through to the ferray-fft CPU
-    //     bridge, which rejects CUDA tensors with
-    //     NotImplementedOnCuda { op: "rfft" } (probed at HEAD).
-    //   irfft: the CUDA gate covers only `half_n == output_n / 2 + 1`
-    //     (the canonical Hermitian half-size, even AND odd defaults);
-    //     n-resize falls through to the CPU bridge, which rejects CUDA
-    //     with NotImplementedOnCuda { op: "irfft" } (probed at HEAD).
-    //     The original `len_7_default` entry is RETIRED: the odd-length
-    //     default now satisfies the gate and was probed bit-identical to
-    //     the torch fixture on cuda:0 (f64 exact, f32 at f32 precision),
-    //     so it runs live below.
-    //   fft/ifft differentiable: forward CUDA fast paths work, but
-    //     FftBackward/IfftBackward route the VJP through the CPU bridge,
-    //     which rejects CUDA grads at the `.backward()` stage with
-    //     NotImplementedOnCuda { op: "ifft" } (FftBackward applies `ifft`
-    //     to the incoming grad) / { op: "fft" } (IfftBackward applies
-    //     `fft`) — probed at HEAD.
-    // torch.fft computes and differentiates all of these on CUDA. Per
-    // R-DEFER-3 this skip block only retires when #1904 lands the CUDA
-    // paths and the tags below run live.
-    if _device_label == "cuda:0" {
-        if _op == "rfft"
-            && let Some("len_8_pad_to_16" | "len_8_truncate_to_4") = _tag
-        {
-            return Some(PinnedSkip {
-                issue: "#1904",
-                reason: "rfft n-resize not GPU-accelerated; CPU bridge rejects CUDA",
-                expected_err_op: "rfft",
-            });
-        }
-        if _op == "irfft"
-            && let Some("len_8_pad_to_16" | "len_8_truncate_to_4") = _tag
-        {
-            return Some(PinnedSkip {
-                issue: "#1904",
-                reason: "irfft n-resize not GPU-accelerated; CPU bridge rejects CUDA",
-                expected_err_op: "irfft",
-            });
-        }
-        if _op == "fft_differentiable" || _op == "ifft_differentiable" {
-            return Some(PinnedSkip {
-                issue: "#1904",
-                reason: "FftBackward/IfftBackward route the VJP through the \
-                         CPU ferray-fft bridge, which rejects CUDA grads at \
-                         the .backward() stage (forward runs live)",
-                expected_err_op: if _op == "fft_differentiable" {
-                    "ifft"
-                } else {
-                    "fft"
-                },
-            });
-        }
-    }
-
     None
 }
 

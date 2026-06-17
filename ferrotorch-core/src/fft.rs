@@ -29,11 +29,13 @@
 //!
 //! # GPU note
 //!
-//! cuFFT fast paths exist for f32/f64 on the *default* last-axis /
-//! `norm="backward"` case (#579 / #605 / #634 / #636); explicit `dim`,
-//! non-default `norm`, or per-axis `s` fall through to the ferray_fft CPU
-//! path. bf16/f16 GPU lowering is tracked under #1545. GPU tensors never
-//! silently bounce through host memory on the cuFFT-capable paths.
+//! cuFFT fast paths exist for f32/f64 on the last-axis complex and
+//! real/Hermitian 1-D transforms (#579 / #605 / #634 / #636). They honor
+//! PyTorch's `norm` modes with on-device post-scaling and perform last-axis
+//! resize staging on device. Non-last-axis `dim` and multi-axis `s` still use
+//! the ferray_fft CPU path. bf16/f16 GPU lowering is tracked under #1545. GPU
+//! tensors never silently bounce through host memory on the cuFFT-capable
+//! paths.
 //!
 //! ## REQ status (per `.design/ferrotorch-core/fft.md`)
 //!
@@ -194,15 +196,9 @@ pub fn fft_norm<T: Float>(
         });
     }
 
-    // GPU fast path: only the default last-axis / backward-norm case is
-    // expressible via cuFFT here. Anything else (explicit `dim`, non-default
-    // `norm`) goes through the ferray_fft CPU path; cuFFT would require a
-    // pre-permute + post-scale not yet wired.
-    if input.is_cuda()
-        && (is_f32::<T>() || is_f64::<T>())
-        && norm == FftNorm::Backward
-        && is_last_signal_axis(dim, ndim - 1)
-    {
+    // GPU fast path: last-axis C2C via cuFFT. Resize and normalization are
+    // staged on device so CUDA inputs do not fall through to the CPU bridge.
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) && is_last_signal_axis(dim, ndim - 1) {
         let input_n = shape[ndim - 2];
         let fft_n = n.unwrap_or(input_n);
         if fft_n == 0 {
@@ -216,7 +212,8 @@ pub fn fft_norm<T: Float>(
         // when `fft_n != input_n` (#605). Fully on-device — no host bounce.
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let buf = input.gpu_handle()?;
+        let input_contiguous = crate::autograd::no_grad::no_grad(|| input.contiguous())?;
+        let buf = input_contiguous.gpu_handle()?;
 
         // Optional pad/truncate to fft_n.
         let (transformed_handle, owned);
@@ -237,6 +234,7 @@ pub fn fft_norm<T: Float>(
         } else {
             backend.fft_c2c_f64(buf_for_fft, batch_size, fft_n, false)?
         };
+        let h = scale_cuda_fft_output::<T>(backend, h, cuda_forward_norm_scale(norm, fft_n))?;
         let mut out_shape = batch_shape.to_vec();
         out_shape.push(fft_n);
         out_shape.push(2);
@@ -265,6 +263,70 @@ fn is_last_signal_axis(dim: Option<isize>, signal_ndim: usize) -> bool {
             resolved == signal_ndim as isize - 1
         }
     }
+}
+
+#[inline]
+fn cuda_forward_norm_scale(norm: FftNorm, n: usize) -> f64 {
+    match norm {
+        FftNorm::Backward => 1.0,
+        FftNorm::Forward => 1.0 / n as f64,
+        FftNorm::Ortho => 1.0 / (n as f64).sqrt(),
+    }
+}
+
+#[inline]
+fn cuda_inverse_norm_scale(norm: FftNorm, n: usize) -> f64 {
+    match norm {
+        // The cuFFT inverse wrappers already apply PyTorch's backward-mode
+        // inverse scale (1 / n). Forward/ortho are recovered by multiplying
+        // the resident result, matching SpectralOps.cpp norm_from_string.
+        FftNorm::Backward => 1.0,
+        FftNorm::Forward => n as f64,
+        FftNorm::Ortho => (n as f64).sqrt(),
+    }
+}
+
+fn scale_cuda_fft_output<T: Float>(
+    backend: &dyn crate::gpu_dispatch::GpuBackend,
+    handle: crate::gpu_dispatch::GpuBufferHandle,
+    scale: f64,
+) -> FerrotorchResult<crate::gpu_dispatch::GpuBufferHandle> {
+    if scale.to_bits() == 1.0f64.to_bits() {
+        return Ok(handle);
+    }
+    if is_f32::<T>() {
+        backend.scale_f32(&handle, scale as f32)
+    } else if is_f64::<T>() {
+        backend.scale_f64(&handle, scale)
+    } else {
+        Err(FerrotorchError::InvalidArgument {
+            message: "CUDA FFT scaling requires f32 or f64".into(),
+        })
+    }
+}
+
+fn resize_last_axis_real_cuda<T: Float>(
+    input: &Tensor<T>,
+    target_n: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    let ndim = input.shape().len();
+    let input_n = input.shape()[ndim - 1];
+    if input_n == target_n {
+        return input.contiguous();
+    }
+    if input_n > target_n {
+        return input.narrow(ndim - 1, 0, target_n)?.contiguous();
+    }
+
+    let mut pad_shape = input.shape().to_vec();
+    pad_shape[ndim - 1] = target_n - input_n;
+    let zeros = crate::creation::full_on_device(
+        &pad_shape,
+        <T as num_traits::Zero>::zero(),
+        input.device(),
+        "rfft resize padding",
+    )?;
+    crate::grad_fns::shape::cat(&[input.clone(), zeros], (ndim - 1) as isize)?.contiguous()
 }
 
 /// Output-length validation + empty-frequency-axis short circuit for the
@@ -379,11 +441,7 @@ pub fn ifft_norm<T: Float>(
         });
     }
 
-    if input.is_cuda()
-        && (is_f32::<T>() || is_f64::<T>())
-        && norm == FftNorm::Backward
-        && is_last_signal_axis(dim, ndim - 1)
-    {
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) && is_last_signal_axis(dim, ndim - 1) {
         let input_n = shape[ndim - 2];
         let fft_n = n.unwrap_or(input_n);
         if fft_n == 0 {
@@ -397,7 +455,8 @@ pub fn ifft_norm<T: Float>(
         // `fft_n != input_n` (#605).
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let buf = input.gpu_handle()?;
+        let input_contiguous = crate::autograd::no_grad::no_grad(|| input.contiguous())?;
+        let buf = input_contiguous.gpu_handle()?;
 
         let (transformed_handle, owned);
         let buf_for_fft: &crate::gpu_dispatch::GpuBufferHandle = if fft_n == input_n {
@@ -417,6 +476,7 @@ pub fn ifft_norm<T: Float>(
         } else {
             backend.fft_c2c_f64(buf_for_fft, batch_size, fft_n, true)?
         };
+        let h = scale_cuda_fft_output::<T>(backend, h, cuda_inverse_norm_scale(norm, fft_n))?;
         let mut out_shape = batch_shape.to_vec();
         out_shape.push(fft_n);
         out_shape.push(2);
@@ -461,18 +521,23 @@ pub fn rfft_norm<T: Float>(
     let ndim = shape.len();
     let input_n = shape[ndim - 1];
 
-    // GPU fast path: default last-axis / backward-norm / no-resize only.
-    if input.is_cuda()
-        && norm == FftNorm::Backward
-        && is_last_signal_axis(dim, ndim)
-        && n.unwrap_or(input_n) == input_n
-    {
-        let fft_n = input_n;
+    // GPU fast path: last-axis R2C via cuFFT. PyTorch resizes `n` by slicing
+    // or zero-padding before `_fft_r2c`; do that on-device rather than
+    // falling through to the CPU ferray bridge.
+    if input.is_cuda() && is_last_signal_axis(dim, ndim) {
+        let fft_n = n.unwrap_or(input_n);
+        if fft_n == 0 {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "rfft: n must be > 0".into(),
+            });
+        }
         let batch_shape = &shape[..ndim - 1];
         let batch_size: usize = crate::shape::numel(batch_shape).max(1);
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let buf = input.gpu_handle()?;
+        let resized =
+            crate::autograd::no_grad::no_grad(|| resize_last_axis_real_cuda(input, fft_n))?;
+        let buf = resized.gpu_handle()?;
         let h = if is_f32::<T>() {
             backend.rfft_r2c_f32(buf, batch_size, fft_n)?
         } else if is_f64::<T>() {
@@ -482,6 +547,7 @@ pub fn rfft_norm<T: Float>(
                 message: "rfft requires f32 or f64".into(),
             });
         };
+        let h = scale_cuda_fft_output::<T>(backend, h, cuda_forward_norm_scale(norm, fft_n))?;
         let half_n = fft_n / 2 + 1;
         let mut out_shape = batch_shape.to_vec();
         out_shape.push(half_n);
@@ -546,8 +612,10 @@ pub fn irfft_norm<T: Float>(
 
     let half_n = shape[ndim - 2];
 
-    // GPU fast path: default last-axis / backward-norm / canonical-half only.
-    if input.is_cuda() && norm == FftNorm::Backward && is_last_signal_axis(dim, ndim - 1) {
+    // GPU fast path: last-axis C2R via cuFFT. PyTorch resizes the Hermitian
+    // input to `n / 2 + 1` when `n` is explicit; do the same with the
+    // existing on-device complex pad/truncate kernels.
+    if input.is_cuda() && is_last_signal_axis(dim, ndim - 1) {
         // Past `c2r_guard_empty_axis` the last-axis case has `half_n >= 1`
         // and the requested length is `>= 1`, so the lazy default cannot
         // underflow and `output_n >= 1` (CORE-155 / #1849).
@@ -555,25 +623,42 @@ pub fn irfft_norm<T: Float>(
             Some(v) => v,
             None => 2 * (half_n - 1),
         };
-        if half_n == output_n / 2 + 1 {
-            let batch_shape = &shape[..ndim - 2];
-            let batch_size: usize = crate::shape::numel(batch_shape).max(1);
-            let backend =
-                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-            let buf = input.gpu_handle()?;
-            let h = if is_f32::<T>() {
-                backend.irfft_c2r_f32(buf, batch_size, output_n)?
-            } else if is_f64::<T>() {
-                backend.irfft_c2r_f64(buf, batch_size, output_n)?
-            } else {
-                return Err(FerrotorchError::InvalidArgument {
-                    message: "irfft requires f32 or f64".into(),
-                });
-            };
-            let mut out_shape = batch_shape.to_vec();
-            out_shape.push(output_n);
-            return Tensor::from_storage(TensorStorage::gpu(h), out_shape, false);
-        }
+        let target_half_n = output_n / 2 + 1;
+        let batch_shape = &shape[..ndim - 2];
+        let batch_size: usize = crate::shape::numel(batch_shape).max(1);
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let input_contiguous = crate::autograd::no_grad::no_grad(|| input.contiguous())?;
+        let buf = input_contiguous.gpu_handle()?;
+        let (transformed_handle, owned);
+        let buf_for_fft: &crate::gpu_dispatch::GpuBufferHandle = if half_n == target_half_n {
+            buf
+        } else if is_f32::<T>() {
+            owned = backend.pad_truncate_complex_f32(buf, batch_size, half_n, target_half_n)?;
+            transformed_handle = &owned;
+            transformed_handle
+        } else if is_f64::<T>() {
+            owned = backend.pad_truncate_complex_f64(buf, batch_size, half_n, target_half_n)?;
+            transformed_handle = &owned;
+            transformed_handle
+        } else {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "irfft requires f32 or f64".into(),
+            });
+        };
+        let h = if is_f32::<T>() {
+            backend.irfft_c2r_f32(buf_for_fft, batch_size, output_n)?
+        } else if is_f64::<T>() {
+            backend.irfft_c2r_f64(buf_for_fft, batch_size, output_n)?
+        } else {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "irfft requires f32 or f64".into(),
+            });
+        };
+        let h = scale_cuda_fft_output::<T>(backend, h, cuda_inverse_norm_scale(norm, output_n))?;
+        let mut out_shape = batch_shape.to_vec();
+        out_shape.push(output_n);
+        return Tensor::from_storage(TensorStorage::gpu(h), out_shape, false);
     }
 
     // CPU path: ferray_fft 0.3.8 performs the Hermitian projection + the

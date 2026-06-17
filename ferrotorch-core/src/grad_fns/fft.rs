@@ -74,6 +74,122 @@ fn adjoint_norm(norm: FftNorm) -> FftNorm {
     }
 }
 
+#[inline]
+fn gpu_f32<T: Float>() -> bool {
+    std::mem::size_of::<T>() == 4
+}
+
+#[inline]
+fn gpu_f64<T: Float>() -> bool {
+    std::mem::size_of::<T>() == 8
+}
+
+fn resize_last_axis_real_tensor<T: Float>(
+    input: &Tensor<T>,
+    target_n: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    let ndim = input.shape().len();
+    let input_n = input.shape()[ndim - 1];
+    if input_n == target_n {
+        return input.contiguous();
+    }
+    if input_n > target_n {
+        return input.narrow(ndim - 1, 0, target_n)?.contiguous();
+    }
+
+    let mut pad_shape = input.shape().to_vec();
+    pad_shape[ndim - 1] = target_n - input_n;
+    let zeros = crate::creation::full_on_device(
+        &pad_shape,
+        <T as num_traits::Zero>::zero(),
+        input.device(),
+        "rfft backward resize padding",
+    )?;
+    crate::grad_fns::shape::cat(&[input.clone(), zeros], (ndim - 1) as isize)?.contiguous()
+}
+
+fn resize_last_axis_complex_tensor<T: Float>(
+    input: &Tensor<T>,
+    target_n: usize,
+) -> FerrotorchResult<Tensor<T>> {
+    let shape = input.shape();
+    if shape.len() < 2 || shape.last() != Some(&2) {
+        return Err(crate::error::FerrotorchError::InvalidArgument {
+            message: format!(
+                "complex resize: input must have trailing complex pair, got {shape:?}"
+            ),
+        });
+    }
+    let ndim = shape.len();
+    let input_n = shape[ndim - 2];
+    if input_n == target_n {
+        return input.contiguous();
+    }
+
+    if input.is_cuda() {
+        let batch_shape = &shape[..ndim - 2];
+        let batch_size = crate::shape::numel(batch_shape).max(1);
+        let backend = crate::gpu_dispatch::gpu_backend()
+            .ok_or(crate::error::FerrotorchError::DeviceUnavailable)?;
+        let contiguous = input.contiguous()?;
+        let buf = contiguous.gpu_handle()?;
+        let handle = if gpu_f32::<T>() {
+            backend.pad_truncate_complex_f32(buf, batch_size, input_n, target_n)?
+        } else if gpu_f64::<T>() {
+            backend.pad_truncate_complex_f64(buf, batch_size, input_n, target_n)?
+        } else {
+            return Err(crate::error::FerrotorchError::NotImplementedOnCuda {
+                op: "complex_resize",
+            });
+        };
+        let mut out_shape = batch_shape.to_vec();
+        out_shape.push(target_n);
+        out_shape.push(2);
+        return Tensor::from_storage(TensorStorage::gpu(handle), out_shape, false);
+    }
+
+    if input_n > target_n {
+        return input.narrow(ndim - 2, 0, target_n)?.contiguous();
+    }
+    let mut pad_shape = shape.to_vec();
+    pad_shape[ndim - 2] = target_n - input_n;
+    let zeros = crate::creation::full_on_device(
+        &pad_shape,
+        <T as num_traits::Zero>::zero(),
+        input.device(),
+        "irfft backward spectrum padding",
+    )?;
+    crate::grad_fns::shape::cat(&[input.clone(), zeros], (ndim - 2) as isize)?.contiguous()
+}
+
+fn scale_cuda_tensor<T: Float>(input: &Tensor<T>, scale: T) -> FerrotorchResult<Tensor<T>> {
+    let contiguous = input.contiguous()?;
+    let backend = crate::gpu_dispatch::gpu_backend()
+        .ok_or(crate::error::FerrotorchError::DeviceUnavailable)?;
+    let handle = if gpu_f32::<T>() {
+        let scale = <T as num_traits::ToPrimitive>::to_f32(&scale).ok_or_else(|| {
+            crate::error::FerrotorchError::InvalidArgument {
+                message: "CUDA FFT scale is not representable as f32".into(),
+            }
+        })?;
+        backend.scale_f32(contiguous.gpu_handle()?, scale)?
+    } else if gpu_f64::<T>() {
+        let scale = <T as num_traits::ToPrimitive>::to_f64(&scale).ok_or_else(|| {
+            crate::error::FerrotorchError::InvalidArgument {
+                message: "CUDA FFT scale is not representable as f64".into(),
+            }
+        })?;
+        backend.scale_f64(contiguous.gpu_handle()?, scale)?
+    } else {
+        return Err(crate::error::FerrotorchError::NotImplementedOnCuda { op: "fft_scale" });
+    };
+    Tensor::from_storage(
+        TensorStorage::gpu(handle),
+        contiguous.shape().to_vec(),
+        false,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // FftBackward
 // ---------------------------------------------------------------------------
@@ -123,16 +239,11 @@ impl<T: Float> FftBackward<T> {
 impl<T: Float> GradFn<T> for FftBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
-            let device = grad_output.device();
             // Adjoint of forward `fft(norm)` is `ifft(adjoint_norm(norm))`
             // (same mode int, flipped direction — derivatives.yaml:2960-2961).
             // The `n` resize is re-applied so grad shape matches the input.
             let inv = fft::ifft_norm(grad_output, self.n, self.dim, adjoint_norm(self.norm))?;
-            Some(if device.is_cuda() {
-                inv.to(device)?
-            } else {
-                inv
-            })
+            Some(inv)
         } else {
             None
         };
@@ -184,14 +295,9 @@ impl<T: Float> IfftBackward<T> {
 impl<T: Float> GradFn<T> for IfftBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
-            let device = grad_output.device();
             // Adjoint of forward `ifft(norm)` is `fft(adjoint_norm(norm))`.
             let fwd = fft::fft_norm(grad_output, self.n, self.dim, adjoint_norm(self.norm))?;
-            Some(if device.is_cuda() {
-                fwd.to(device)?
-            } else {
-                fwd
-            })
+            Some(fwd)
         } else {
             None
         };
@@ -255,7 +361,6 @@ impl<T: Float> RfftBackward<T> {
 impl<T: Float> GradFn<T> for RfftBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
-            let device = grad_output.device();
             // Zero-pad grad_Y from [..., K, 2] to [..., N, 2] along the freq axis.
             let go_shape = grad_output.shape();
             if go_shape.len() < 2 || go_shape[go_shape.len() - 1] != 2 {
@@ -269,6 +374,23 @@ impl<T: Float> GradFn<T> for RfftBackward<T> {
             let n = self.fft_n;
             let batch_shape = &go_shape[..go_shape.len() - 2];
             let batch_size: usize = crate::shape::numel(batch_shape).max(1);
+
+            if grad_output.device().is_cuda() {
+                let original_n = *self.input.shape().last().unwrap();
+                let grad = crate::autograd::no_grad::no_grad(|| {
+                    let padded = resize_last_axis_complex_tensor(grad_output, n)?;
+                    // `FftNorm::Forward` cancels the cuFFT inverse wrapper's
+                    // 1/n scale, matching PyTorch's unnormalized C2C adjoint.
+                    let inv = fft::ifft_norm(&padded, Some(n), None, FftNorm::Forward)?;
+                    let real_singleton = inv.narrow(inv.shape().len() - 1, 0, 1)?.contiguous()?;
+                    let mut resized_shape = batch_shape.to_vec();
+                    resized_shape.push(n);
+                    let grad_resized = real_singleton.view_reshape(resized_shape)?;
+                    resize_last_axis_real_tensor(&grad_resized, original_n)
+                })?;
+                return Ok(vec![Some(grad)]);
+            }
+
             let go_data = grad_output.data_vec()?;
 
             let mut padded = vec![T::from(0.0).unwrap(); batch_size * n * 2];
@@ -300,7 +422,10 @@ impl<T: Float> GradFn<T> for RfftBackward<T> {
             let mut out_shape = batch_shape.to_vec();
             out_shape.push(n);
             let t = Tensor::from_storage(TensorStorage::cpu(grad_x_data), out_shape, false)?;
-            Some(if device.is_cuda() { t.to(device)? } else { t })
+            let original_n = *self.input.shape().last().unwrap();
+            Some(crate::autograd::no_grad::no_grad(|| {
+                resize_last_axis_real_tensor(&t, original_n)
+            })?)
         } else {
             None
         };
@@ -373,9 +498,48 @@ impl<T: Float> IrfftBackward<T> {
 impl<T: Float> GradFn<T> for IrfftBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
-            let device = grad_output.device();
             let n = self.output_n;
             let k = n / 2 + 1;
+
+            if grad_output.device().is_cuda() {
+                let input_shape = self.input.shape();
+                let original_half_n = input_shape[input_shape.len() - 2];
+                let grad = crate::autograd::no_grad::no_grad(|| {
+                    // rfft(grad_y, N) returns shape [..., K, 2]. Scale by
+                    // 1/N, then double only Hermitian-interior frequencies.
+                    let f = fft::rfft(grad_output, Some(n))?;
+                    let inv_n = T::from(1.0).unwrap() / T::from(n).unwrap();
+                    let scaled = scale_cuda_tensor(&f, inv_n)?;
+                    let axis = scaled.shape().len() - 2;
+                    let k = scaled.shape()[axis];
+
+                    let mut pieces = Vec::with_capacity(3);
+                    pieces.push(scaled.narrow(axis, 0, 1)?.contiguous()?);
+
+                    let interior_len = if n.is_multiple_of(2) {
+                        k.saturating_sub(2)
+                    } else {
+                        k.saturating_sub(1)
+                    };
+                    if interior_len > 0 {
+                        let interior = scaled.narrow(axis, 1, interior_len)?.contiguous()?;
+                        pieces.push(scale_cuda_tensor(&interior, T::from(2.0).unwrap())?);
+                    }
+
+                    if n.is_multiple_of(2) && k > 1 {
+                        pieces.push(scaled.narrow(axis, k - 1, 1)?.contiguous()?);
+                    }
+
+                    let corrected = if pieces.len() == 1 {
+                        pieces.remove(0)
+                    } else {
+                        crate::grad_fns::shape::cat(&pieces, axis as isize)?.contiguous()?
+                    };
+                    resize_last_axis_complex_tensor(&corrected, original_half_n)
+                })?;
+                return Ok(vec![Some(grad)]);
+            }
+
             // rfft(grad_y, N) returns shape [..., K, 2] — same shape as x.
             let f = fft::rfft(grad_output, Some(n))?;
             let f_shape = f.shape().to_vec();
@@ -396,7 +560,11 @@ impl<T: Float> GradFn<T> for IrfftBackward<T> {
                 }
             }
             let t = Tensor::from_storage(TensorStorage::cpu(out), f_shape, false)?;
-            Some(if device.is_cuda() { t.to(device)? } else { t })
+            let input_shape = self.input.shape();
+            let original_half_n = input_shape[input_shape.len() - 2];
+            Some(crate::autograd::no_grad::no_grad(|| {
+                resize_last_axis_complex_tensor(&t, original_half_n)
+            })?)
         } else {
             None
         };
@@ -428,6 +596,15 @@ fn resolve_signal_axis(dim: Option<isize>, signal_ndim: usize) -> usize {
     }
 }
 
+fn tensor_from_fft_operation<T: Float, G: GradFn<T> + 'static>(
+    result: Tensor<T>,
+    grad_fn: Arc<G>,
+) -> FerrotorchResult<Tensor<T>> {
+    let (storage, shape) = result.into_storage_and_shape()?;
+    let grad_fn: Arc<dyn GradFn<T>> = grad_fn;
+    Tensor::from_operation(storage, shape, grad_fn)
+}
+
 /// Differentiable 1-D FFT (default `dim`/`norm`). Attaches `FftBackward`.
 pub fn fft_differentiable<T: Float>(
     input: &Tensor<T>,
@@ -444,13 +621,11 @@ pub fn fft_differentiable_norm<T: Float>(
     dim: Option<isize>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
-    let device = input.device();
     let result = fft::fft_norm(input, n, dim, norm)?;
 
     if is_grad_enabled() && input.requires_grad() {
         let grad_fn = Arc::new(FftBackward::new_norm(input.clone(), n, dim, norm));
-        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
-        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+        tensor_from_fft_operation(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -471,13 +646,11 @@ pub fn ifft_differentiable_norm<T: Float>(
     dim: Option<isize>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
-    let device = input.device();
     let result = fft::ifft_norm(input, n, dim, norm)?;
 
     if is_grad_enabled() && input.requires_grad() {
         let grad_fn = Arc::new(IfftBackward::new_norm(input.clone(), n, dim, norm));
-        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
-        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+        tensor_from_fft_operation(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -488,15 +661,13 @@ pub fn rfft_differentiable<T: Float>(
     input: &Tensor<T>,
     n: Option<usize>,
 ) -> FerrotorchResult<Tensor<T>> {
-    let device = input.device();
     let input_n = *input.shape().last().unwrap();
     let fft_n = n.unwrap_or(input_n);
     let result = fft::rfft(input, n)?;
 
     if is_grad_enabled() && input.requires_grad() {
         let grad_fn = Arc::new(RfftBackward::new(input.clone(), n, fft_n));
-        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
-        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+        tensor_from_fft_operation(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -521,7 +692,6 @@ pub fn rfft_differentiable_norm<T: Float>(
     if norm == FftNorm::Backward && axis == in_shape.len() - 1 {
         return rfft_differentiable(input, n);
     }
-    let device = input.device();
     let result = fft::rfft_norm(input, n, dim, norm)?;
 
     if is_grad_enabled() && input.requires_grad() {
@@ -540,8 +710,7 @@ pub fn rfft_differentiable_norm<T: Float>(
             last_axis_n,
             norm,
         ));
-        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
-        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+        tensor_from_fft_operation(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -552,7 +721,6 @@ pub fn irfft_differentiable<T: Float>(
     input: &Tensor<T>,
     n: Option<usize>,
 ) -> FerrotorchResult<Tensor<T>> {
-    let device = input.device();
     let shape = input.shape();
     let half_n = shape[shape.len() - 2];
     let output_n = n.unwrap_or(2 * (half_n - 1));
@@ -560,8 +728,7 @@ pub fn irfft_differentiable<T: Float>(
 
     if is_grad_enabled() && input.requires_grad() {
         let grad_fn = Arc::new(IrfftBackward::new(input.clone(), n, output_n));
-        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
-        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+        tensor_from_fft_operation(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -588,7 +755,6 @@ pub fn irfft_differentiable_norm<T: Float>(
     if norm == FftNorm::Backward && axis == real_ndim.saturating_sub(1) {
         return irfft_differentiable(input, n);
     }
-    let device = input.device();
     let result = fft::irfft_norm(input, n, dim, norm)?;
 
     if is_grad_enabled() && input.requires_grad() {
@@ -603,8 +769,7 @@ pub fn irfft_differentiable_norm<T: Float>(
             output_n,
             norm,
         ));
-        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
-        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+        tensor_from_fft_operation(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -671,7 +836,6 @@ impl<T: Float> FftnBackward<T> {
 impl<T: Float> GradFn<T> for FftnBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
-            let device = grad_output.device();
             // Adjoint of `fftn(norm)` is `ifftn(adjoint_norm(norm))`.
             let inv = fft::ifftn_norm(
                 grad_output,
@@ -679,11 +843,7 @@ impl<T: Float> GradFn<T> for FftnBackward<T> {
                 self.axes.as_deref(),
                 adjoint_norm(self.norm),
             )?;
-            Some(if device.is_cuda() {
-                inv.to(device)?
-            } else {
-                inv
-            })
+            Some(inv)
         } else {
             None
         };
@@ -745,7 +905,6 @@ impl<T: Float> IfftnBackward<T> {
 impl<T: Float> GradFn<T> for IfftnBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let grad_input = if self.input.requires_grad() {
-            let device = grad_output.device();
             // Adjoint of `ifftn(norm)` is `fftn(adjoint_norm(norm))`.
             let fwd = fft::fftn_norm(
                 grad_output,
@@ -753,11 +912,7 @@ impl<T: Float> GradFn<T> for IfftnBackward<T> {
                 self.axes.as_deref(),
                 adjoint_norm(self.norm),
             )?;
-            Some(if device.is_cuda() {
-                fwd.to(device)?
-            } else {
-                fwd
-            })
+            Some(fwd)
         } else {
             None
         };
@@ -1425,7 +1580,6 @@ pub fn fftn_differentiable_norm<T: Float>(
     axes: Option<&[isize]>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
-    let device = input.device();
     let result = fft::fftn_norm(input, s, axes, norm)?;
 
     if is_grad_enabled() && input.requires_grad() {
@@ -1437,8 +1591,7 @@ pub fn fftn_differentiable_norm<T: Float>(
             norm_n,
             norm,
         ));
-        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
-        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+        tensor_from_fft_operation(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -1460,7 +1613,6 @@ pub fn ifftn_differentiable_norm<T: Float>(
     axes: Option<&[isize]>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
-    let device = input.device();
     let result = fft::ifftn_norm(input, s, axes, norm)?;
 
     if is_grad_enabled() && input.requires_grad() {
@@ -1472,8 +1624,7 @@ pub fn ifftn_differentiable_norm<T: Float>(
             norm_n,
             norm,
         ));
-        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
-        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+        tensor_from_fft_operation(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -1496,7 +1647,6 @@ pub fn rfftn_differentiable_norm<T: Float>(
     axes: Option<&[isize]>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
-    let device = input.device();
     let _ = rfftn_norm_n::<T>; // keep helper available for symmetry; not needed in fwd
     let result = fft::rfftn_norm(input, s, axes, norm)?;
 
@@ -1550,8 +1700,7 @@ pub fn rfftn_differentiable_norm<T: Float>(
             norm_n,
             norm,
         ));
-        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
-        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+        tensor_from_fft_operation(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -1574,7 +1723,6 @@ pub fn irfftn_differentiable_norm<T: Float>(
     axes: Option<&[isize]>,
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
-    let device = input.device();
     let result = fft::irfftn_norm(input, s, axes, norm)?;
 
     if is_grad_enabled() && input.requires_grad() {
@@ -1615,8 +1763,7 @@ pub fn irfftn_differentiable_norm<T: Float>(
             norm_n,
             norm,
         ));
-        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
-        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+        tensor_from_fft_operation(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -1628,7 +1775,6 @@ pub fn hfft_differentiable<T: Float>(
     input: &Tensor<T>,
     n: Option<usize>,
 ) -> FerrotorchResult<Tensor<T>> {
-    let device = input.device();
     let shape = input.shape();
     let input_n = shape[shape.len() - 2];
     let result = fft::hfft(input, n)?;
@@ -1638,8 +1784,7 @@ pub fn hfft_differentiable<T: Float>(
 
     if is_grad_enabled() && input.requires_grad() {
         let grad_fn = Arc::new(HfftBackward::new(input.clone(), input_n, output_n));
-        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
-        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+        tensor_from_fft_operation(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -1651,7 +1796,6 @@ pub fn ihfft_differentiable<T: Float>(
     input: &Tensor<T>,
     n: Option<usize>,
 ) -> FerrotorchResult<Tensor<T>> {
-    let device = input.device();
     let shape = input.shape();
     // FFT length N: defaults to the input's last dim (real signal length).
     // When `n` is supplied, ihfft truncates/pads the input before the
@@ -1661,8 +1805,7 @@ pub fn ihfft_differentiable<T: Float>(
 
     if is_grad_enabled() && input.requires_grad() {
         let grad_fn = Arc::new(IhfftBackward::new(input.clone(), input_n));
-        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
-        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+        tensor_from_fft_operation(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -1706,10 +1849,17 @@ impl<T: Float> GradFn<T> for Fft2Backward<T> {
             let device = grad_output.device();
             let inv = fft::ifft2(grad_output)?;
             let scale = T::from(self.norm_n).unwrap();
-            let inv_data = inv.data_vec()?;
-            let scaled: Vec<T> = inv_data.iter().map(|&v| v * scale).collect();
-            let t = Tensor::from_storage(TensorStorage::cpu(scaled), inv.shape().to_vec(), false)?;
-            Some(if device.is_cuda() { t.to(device)? } else { t })
+            if device.is_cuda() {
+                Some(crate::autograd::no_grad::no_grad(|| {
+                    scale_cuda_tensor(&inv, scale)
+                })?)
+            } else {
+                let inv_data = inv.data_vec()?;
+                let scaled: Vec<T> = inv_data.iter().map(|&v| v * scale).collect();
+                let t =
+                    Tensor::from_storage(TensorStorage::cpu(scaled), inv.shape().to_vec(), false)?;
+                Some(t)
+            }
         } else {
             None
         };
@@ -1745,10 +1895,17 @@ impl<T: Float> GradFn<T> for Ifft2Backward<T> {
             let device = grad_output.device();
             let fwd = fft::fft2(grad_output)?;
             let scale = T::from(1.0).unwrap() / T::from(self.norm_n).unwrap();
-            let fwd_data = fwd.data_vec()?;
-            let scaled: Vec<T> = fwd_data.iter().map(|&v| v * scale).collect();
-            let t = Tensor::from_storage(TensorStorage::cpu(scaled), fwd.shape().to_vec(), false)?;
-            Some(if device.is_cuda() { t.to(device)? } else { t })
+            if device.is_cuda() {
+                Some(crate::autograd::no_grad::no_grad(|| {
+                    scale_cuda_tensor(&fwd, scale)
+                })?)
+            } else {
+                let fwd_data = fwd.data_vec()?;
+                let scaled: Vec<T> = fwd_data.iter().map(|&v| v * scale).collect();
+                let t =
+                    Tensor::from_storage(TensorStorage::cpu(scaled), fwd.shape().to_vec(), false)?;
+                Some(t)
+            }
         } else {
             None
         };
@@ -1778,14 +1935,12 @@ fn fft2_norm_n<T: Float>(input: &Tensor<T>) -> usize {
 
 /// Differentiable 2-D FFT (default `s`/`dim`/`norm`). Attaches `Fft2Backward`.
 pub fn fft2_differentiable<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let device = input.device();
     let result = fft::fft2(input)?;
 
     if is_grad_enabled() && input.requires_grad() {
         let norm_n = fft2_norm_n(input);
         let grad_fn = Arc::new(Fft2Backward::new(input.clone(), norm_n));
-        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
-        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+        tensor_from_fft_operation(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -1816,14 +1971,12 @@ pub fn fft2_differentiable_norm<T: Float>(
 
 /// Differentiable 2-D inverse FFT (default `s`/`dim`/`norm`). Attaches `Ifft2Backward`.
 pub fn ifft2_differentiable<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let device = input.device();
     let result = fft::ifft2(input)?;
 
     if is_grad_enabled() && input.requires_grad() {
         let norm_n = fft2_norm_n(input);
         let grad_fn = Arc::new(Ifft2Backward::new(input.clone(), norm_n));
-        let storage = TensorStorage::on_device(result.data_vec()?, device)?;
-        Tensor::from_operation(storage, result.shape().to_vec(), grad_fn)
+        tensor_from_fft_operation(result, grad_fn)
     } else {
         Ok(result)
     }
