@@ -5092,6 +5092,38 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
+    #[cfg(feature = "cuda")]
+    fn permute_0213_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        d0: usize,
+        d1: usize,
+        d2: usize,
+        d3: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::kernels::gpu_permute_0213_u16(a_buf, d0, d1, d2, d3, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn permute_0213_f16(
+        &self,
+        a: &GpuBufferHandle,
+        d0: usize,
+        d1: usize,
+        d2: usize,
+        d3: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::kernels::gpu_permute_0213_u16(a_buf, d0, d1, d2, d3, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
     fn bmm_f32(
         &self,
         a: &GpuBufferHandle,

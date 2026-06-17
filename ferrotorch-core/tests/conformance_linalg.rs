@@ -1575,21 +1575,6 @@ fn run_permute_0213_for_device(device_label: &str, device: Device) {
                     tolerance::F64_MATMUL_CPU
                 };
                 let a = upload_f64(make_cpu_f64(a_data, a_shape, false), device);
-                if on_gpu {
-                    // #1884 pin (CORE-190): `permute_0213` dispatches the
-                    // f32 kernel for every dtype, so an f64 CUDA input
-                    // fails the typed-buffer downcast instead of permuting.
-                    // torch.permute works on every dtype + device. Retire
-                    // this pin (drop the branch; assert a CUDA-resident
-                    // result like the f32 arm) when #1884 lands the f64
-                    // kernel dispatch.
-                    let err = permute_0213(&a).expect_err(
-                        "permute_0213(f64) on CUDA succeeded — #1884 appears \
-                         fixed; retire this pin and assert a CUDA result",
-                    );
-                    eprintln!("{label}: pinned to #1884 — got expected Err: {err}");
-                    continue;
-                }
                 let c = permute_0213(&a).expect("permute_0213");
                 check_f64(&label, &read_back_f64(&c, device), expected, tol);
             }

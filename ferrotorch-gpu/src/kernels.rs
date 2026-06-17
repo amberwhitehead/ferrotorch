@@ -945,6 +945,81 @@ DONE:\n\
 }\n\
 ";
 
+/// PTX for 4D `[d0,d1,d2,d3] -> [d0,d2,d1,d3]` over raw 16-bit payloads.
+///
+/// Used by f16/bf16 buffers; the kernel is a pure bit-preserving copy and the
+/// semantic dtype is carried by the caller's `GpuBufferHandle` tag.
+#[cfg(feature = "cuda")]
+pub(crate) const PERMUTE_0213_U16_PTX: &str = "\
+.version 7.0\n\
+.target sm_52\n\
+.address_size 64\n\
+\n\
+.visible .entry permute_0213_u16_kernel(\n\
+    .param .u64 in_ptr,\n\
+    .param .u64 out_ptr,\n\
+    .param .u32 d0,\n\
+    .param .u32 d1,\n\
+    .param .u32 d2,\n\
+    .param .u32 d3,\n\
+    .param .u32 total\n\
+) {\n\
+    .reg .u32 %r_tid, %bid, %bdim, %total_reg;\n\
+    .reg .u32 %d0r, %d1r, %d2r, %d3r;\n\
+    .reg .u32 %i0, %i1, %i2, %i3, %rem, %in_idx;\n\
+    .reg .u32 %s_out2, %s_out1, %s_in1;\n\
+    .reg .u64 %in, %out, %off_in, %off_out;\n\
+    .reg .u16 %val;\n\
+    .reg .pred %p;\n\
+\n\
+    ld.param.u64 %in, [in_ptr];\n\
+    ld.param.u64 %out, [out_ptr];\n\
+    ld.param.u32 %d0r, [d0];\n\
+    ld.param.u32 %d1r, [d1];\n\
+    ld.param.u32 %d2r, [d2];\n\
+    ld.param.u32 %d3r, [d3];\n\
+    ld.param.u32 %total_reg, [total];\n\
+\n\
+    mov.u32 %bid, %ctaid.x;\n\
+    mov.u32 %bdim, %ntid.x;\n\
+    mov.u32 %r_tid, %tid.x;\n\
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;\n\
+\n\
+    setp.ge.u32 %p, %r_tid, %total_reg;\n\
+    @%p bra DONE;\n\
+\n\
+    mul.lo.u32 %s_out2, %d1r, %d3r;\n\
+    mul.lo.u32 %s_out1, %s_out2, %d2r;\n\
+\n\
+    div.u32 %i0, %r_tid, %s_out1;\n\
+    rem.u32 %rem, %r_tid, %s_out1;\n\
+    div.u32 %i2, %rem, %s_out2;\n\
+    rem.u32 %rem, %rem, %s_out2;\n\
+    div.u32 %i1, %rem, %d3r;\n\
+    rem.u32 %i3, %rem, %d3r;\n\
+\n\
+    mul.lo.u32 %s_in1, %d2r, %d3r;\n\
+    mul.lo.u32 %in_idx, %i0, %d1r;\n\
+    add.u32 %in_idx, %in_idx, %i1;\n\
+    mul.lo.u32 %in_idx, %in_idx, %s_in1;\n\
+    mad.lo.u32 %in_idx, %i2, %d3r, %in_idx;\n\
+    add.u32 %in_idx, %in_idx, %i3;\n\
+\n\
+    cvt.u64.u32 %off_in, %in_idx;\n\
+    shl.b64 %off_in, %off_in, 1;\n\
+    add.u64 %off_in, %in, %off_in;\n\
+    ld.global.u16 %val, [%off_in];\n\
+\n\
+    cvt.u64.u32 %off_out, %r_tid;\n\
+    shl.b64 %off_out, %off_out, 1;\n\
+    add.u64 %off_out, %out, %off_out;\n\
+    st.global.u16 [%off_out], %val;\n\
+\n\
+DONE:\n\
+    ret;\n\
+}\n\
+";
+
 // ---------------------------------------------------------------------------
 // f32-to-f16 conversion PTX kernel: out_f16[i] = float2half(in_f32[i])
 // ---------------------------------------------------------------------------
@@ -23178,6 +23253,112 @@ pub fn gpu_permute_0213(
     Ok(out)
 }
 
+/// Permute a 4D f16/bf16 payload buffer from `[d0, d1, d2, d3]` to
+/// `[d0, d2, d1, d3]` on GPU.
+///
+/// This is a raw u16 bit-copy kernel. The numeric dtype is not inferred from
+/// the buffer; callers must wrap the returned allocation with the original
+/// f16/bf16 `GpuBufferHandle` dtype tag.
+#[cfg(feature = "cuda")]
+pub fn gpu_permute_0213_u16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    d0: usize,
+    d1: usize,
+    d2: usize,
+    d3: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    use cudarc::driver::PushKernelArg;
+
+    let total = d0
+        .checked_mul(d1)
+        .and_then(|n| n.checked_mul(d2))
+        .and_then(|n| n.checked_mul(d3))
+        .ok_or_else(|| GpuError::ShapeMismatch {
+            op: "permute_0213_u16",
+            expected: vec![usize::MAX],
+            got: vec![d0, d1, d2, d3],
+        })?;
+    if input.len() < total {
+        return Err(GpuError::ShapeMismatch {
+            op: "permute_0213_u16",
+            expected: vec![d0, d1, d2, d3],
+            got: vec![input.len()],
+        });
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        PERMUTE_0213_U16_PTX,
+        "permute_0213_u16_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "permute_0213_u16_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = stream.alloc_zeros::<u16>(total)?;
+    let cfg = launch_cfg(total)?;
+    let d0_u32 = u32::try_from(d0).map_err(|_| GpuError::ShapeMismatch {
+        op: "permute_0213_u16",
+        expected: vec![u32::MAX as usize],
+        got: vec![d0],
+    })?;
+    let d1_u32 = u32::try_from(d1).map_err(|_| GpuError::ShapeMismatch {
+        op: "permute_0213_u16",
+        expected: vec![u32::MAX as usize],
+        got: vec![d1],
+    })?;
+    let d2_u32 = u32::try_from(d2).map_err(|_| GpuError::ShapeMismatch {
+        op: "permute_0213_u16",
+        expected: vec![u32::MAX as usize],
+        got: vec![d2],
+    })?;
+    let d3_u32 = u32::try_from(d3).map_err(|_| GpuError::ShapeMismatch {
+        op: "permute_0213_u16",
+        expected: vec![u32::MAX as usize],
+        got: vec![d3],
+    })?;
+    let total_u32 = u32::try_from(total).map_err(|_| GpuError::ShapeMismatch {
+        op: "permute_0213_u16",
+        expected: vec![u32::MAX as usize],
+        got: vec![total],
+    })?;
+
+    // SAFETY:
+    // - `f` is the PTX `permute_0213_u16_kernel` entry compiled above; ABI is
+    //   `(in_ptr, out_ptr, d0, d1, d2, d3, total)`.
+    // - `input.len() >= d0*d1*d2*d3` is checked above; `out` is freshly
+    //   allocated with exactly `total` u16 elements and mutably borrowed only
+    //   for this launch.
+    // - Thread `t in [0,total)` decodes an output coordinate in
+    //   `[d0,d2,d1,d3]` and reads the corresponding input coordinate in
+    //   `[d0,d1,d2,d3]`; both linear indices are within `[0,total)`.
+    // - The kernel uses only `ld.global.u16`/`st.global.u16`, preserving
+    //   f16/bf16 bits exactly.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(&mut out)
+            .arg(&d0_u32)
+            .arg(&d1_u32)
+            .arg(&d2_u32)
+            .arg(&d3_u32)
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // Public API -- Small matmul (bypasses cuBLAS JIT)
 // ---------------------------------------------------------------------------
@@ -31376,6 +31557,7 @@ pub fn precompile_decode_kernels(device: &GpuDevice) -> GpuResult<()> {
     compile(SOFTMAX_PTX, "softmax_kernel")?;
     compile(LAYERNORM_PTX, "layernorm_kernel")?;
     compile(PERMUTE_0213_PTX, "permute_0213_kernel")?;
+    compile(PERMUTE_0213_U16_PTX, "permute_0213_u16_kernel")?;
     compile(EMBED_LOOKUP_PTX, "embed_lookup_kernel")?;
     compile(EMBED_LOOKUP_BATCH_PTX, "embed_lookup_batch_kernel")?;
     compile(SCATTER_ADD_ROWS_PTX, "scatter_add_rows_kernel")?;
@@ -36409,6 +36591,32 @@ mod tests {
         let out =
             gpu_strided_copy(&input, &shape, &[12, 4, 2, 1], 0, &dev).expect("strided_copy 4d");
         assert_buf_eq(&out, &dev, &data);
+    }
+
+    #[test]
+    fn permute_0213_u16_raw_bits() {
+        let dev = GpuDevice::new(0).expect("CUDA device 0");
+        let (d0, d1, d2, d3) = (2usize, 3usize, 4usize, 5usize);
+        let data: Vec<u16> = (0..(d0 * d1 * d2 * d3))
+            .map(|i| 0x4000u16.wrapping_add(i as u16))
+            .collect();
+        let input = dev.stream().clone_htod(&data).expect("clone_htod u16");
+        let out = gpu_permute_0213_u16(&input, d0, d1, d2, d3, &dev).expect("gpu_permute_0213_u16");
+        let actual = dev.stream().clone_dtoh(&out).expect("clone_dtoh u16");
+
+        let mut expected = vec![0u16; data.len()];
+        for i0 in 0..d0 {
+            for i1 in 0..d1 {
+                for i2 in 0..d2 {
+                    for i3 in 0..d3 {
+                        let src = ((i0 * d1 + i1) * d2 + i2) * d3 + i3;
+                        let dst = ((i0 * d2 + i2) * d1 + i1) * d3 + i3;
+                        expected[dst] = data[src];
+                    }
+                }
+            }
+        }
+        assert_eq!(actual, expected);
     }
 
     #[test]

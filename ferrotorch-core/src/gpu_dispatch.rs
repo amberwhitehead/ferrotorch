@@ -1698,6 +1698,30 @@ pub trait GpuBackend: Send + Sync {
             message: "permute_0213_f64 GPU op not yet implemented".into(),
         })
     }
+    fn permute_0213_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _d0: usize,
+        _d1: usize,
+        _d2: usize,
+        _d3: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "permute_0213_bf16",
+        })
+    }
+    fn permute_0213_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _d0: usize,
+        _d1: usize,
+        _d2: usize,
+        _d3: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "permute_0213_f16",
+        })
+    }
 
     // Batched matmul f32: C[i] = A[i] @ B[i] for i in 0..batch
     fn bmm_f32(

@@ -153,6 +153,28 @@ fn cuda_transpose_2d_same_dtype<T: Float>(
     }
 }
 
+fn cuda_permute_0213_same_dtype<T: Float>(
+    backend: &dyn GpuBackend,
+    a: &GpuBufferHandle,
+    d0: usize,
+    d1: usize,
+    d2: usize,
+    d3: usize,
+    op: &'static str,
+) -> FerrotorchResult<GpuBufferHandle> {
+    if is_f32::<T>() {
+        backend.permute_0213_f32(a, d0, d1, d2, d3)
+    } else if is_f64::<T>() {
+        backend.permute_0213_f64(a, d0, d1, d2, d3)
+    } else if is_bf16::<T>() {
+        backend.permute_0213_bf16(a, d0, d1, d2, d3)
+    } else if is_f16::<T>() {
+        backend.permute_0213_f16(a, d0, d1, d2, d3)
+    } else {
+        Err(FerrotorchError::NotImplementedOnCuda { op })
+    }
+}
+
 fn cuda_broadcast_add_same_dtype<T: Float>(
     backend: &dyn GpuBackend,
     a: &GpuBufferHandle,
@@ -2193,7 +2215,15 @@ pub fn permute_0213<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> 
     if input.is_cuda()
         && let Some(backend) = crate::gpu_dispatch::gpu_backend()
     {
-        let handle = backend.permute_0213_f32(input.gpu_handle()?, d0, d1, d2, d3)?;
+        let handle = cuda_permute_0213_same_dtype::<T>(
+            backend,
+            input.gpu_handle()?,
+            d0,
+            d1,
+            d2,
+            d3,
+            "permute_0213",
+        )?;
         return Tensor::from_storage(TensorStorage::gpu(handle), out_shape, false);
     }
 
