@@ -69,6 +69,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- lgamma returns large finite garbage at negative-integer poles (rounded-pi reflection); torch returns +inf (#1946)
 - CORE-092: Generic f64 quantization silently narrows all values and qparams to f32 (#1786)
 - CORE-085: Quantization and pruning reject valid non-contiguous CPU views (#1779)
 - CORE-053: Broadcast arithmetic panics for tensors with more than 16 dimensions (#1747)

@@ -11,7 +11,7 @@
 //! | REQ-1 | SHIPPED | `erf` at `special.rs:675`; consumer: `grad_fns::activation::erf_for_gelu` at `grad_fns/activation.rs:413` invokes `special::erf_scalar` |
 //! | REQ-2 | SHIPPED | `erfc` at `special.rs:684`; consumer: re-export at `lib.rs:187` |
 //! | REQ-3 | SHIPPED | `erfinv` at `special.rs:692`; consumer: re-export at `lib.rs:187` |
-//! | REQ-4 | SHIPPED | `lgamma` at `special.rs:699`; consumer: re-export at `lib.rs:187` |
+//! | REQ-4 | SHIPPED | `lgamma` / `gammaln` alias at `special.rs`; consumer: re-export at `lib.rs` |
 //! | REQ-5 | SHIPPED | `digamma` at `special.rs:707`; consumer: re-export at `lib.rs:187` |
 //! | REQ-6 | SHIPPED | `log1p`/`expm1` at `special.rs:714,721`; consumer: re-export at `lib.rs:187` |
 //! | REQ-7 | SHIPPED | `sinc` at `special.rs:726`; consumer: re-export at `lib.rs:187` |
@@ -621,15 +621,24 @@ fn lgamma_scalar<T: Float>(x: T) -> T {
         return T::infinity();
     }
     let one = nt_one::<T>();
+    let zero = nt_zero::<T>();
     let half = T::from(0.5).unwrap();
     let half_ln_2pi = T::from(0.9189385332046727).unwrap(); // 0.5 * ln(2*pi)
     let g = T::from(LANCZOS_G).unwrap();
+
+    // Exact non-positive integer poles must be caught before the reflection
+    // formula. Computing sin(pi * x) with rounded pi misses values such as
+    // -1.0 because sin(-pi) is a tiny finite residual, whereas torch's
+    // std::lgamma-backed kernels return +inf at every pole.
+    if x <= zero && x == x.floor() {
+        return T::infinity();
+    }
 
     // Handle negative values via reflection formula.
     if x < half {
         let pi = T::from(std::f64::consts::PI).unwrap();
         let sin_pi_x = (pi * x).sin();
-        if sin_pi_x == nt_zero::<T>() {
+        if sin_pi_x == zero {
             return T::infinity();
         }
         return (pi / sin_pi_x.abs()).ln() - lgamma_scalar(one - x);
@@ -3195,10 +3204,8 @@ fn beta_f64(a: f64, b: f64) -> f64 {
         // Γ(a+b) pole in the DENOMINATOR: |B| is exactly 0; the zero's sign
         // is the numerator sign product (live scipy 1.17.1:
         // `beta(-2.5, 0.5) = -0.0`, `beta(-0.5, -0.5) = +0.0`). Computed
-        // explicitly rather than through `exp(... - lgamma(a+b))` because
-        // `lgamma_scalar` at negative-integer poles returns large finite
-        // values instead of `+inf` (rounded-π reflection — same defect
-        // family as audit CORE-173; tracked as crosslink #1946).
+        // explicitly rather than relying on `exp(... - inf)` to preserve the
+        // signed zero required by the scipy beta contract.
         return lgam_sgn_sign_f64(a) * lgam_sgn_sign_f64(b) * 0.0;
     }
     // ±1 factors, so dividing by sgn(Γ(a+b)) equals multiplying by it.
@@ -3310,6 +3317,11 @@ pub fn erfinv<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 pub fn lgamma<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let output = unary_map(input, lgamma_scalar)?;
     wrap_special_unary(output, input, SpecialUnaryKind::Lgamma)
+}
+
+/// Alias for [`lgamma`] — mirrors `torch.special.gammaln(input)`.
+pub fn gammaln<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    lgamma(input)
 }
 
 /// Digamma function: psi(x) = d/dx ln(Gamma(x)).

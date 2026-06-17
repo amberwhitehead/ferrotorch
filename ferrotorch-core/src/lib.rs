@@ -230,10 +230,10 @@ pub use sparse::{
     to_sparse_semi_structured_cutlass,
 };
 pub use special::{
-    airy_ai, beta, digamma, entr, erf, erfc, erfinv, expm1, gammainc, gammaincc, gammaln_sign, i0,
-    i0e, i1, i1e, lgamma, log_beta, log1p, modified_bessel_k0, modified_bessel_k1, multigammaln,
-    mvlgamma, ndtr, ndtri, scaled_modified_bessel_k0, scaled_modified_bessel_k1, sinc,
-    spherical_bessel_j0, xlogy, zeta,
+    airy_ai, beta, digamma, entr, erf, erfc, erfinv, expm1, gammainc, gammaincc, gammaln,
+    gammaln_sign, i0, i0e, i1, i1e, lgamma, log_beta, log1p, modified_bessel_k0,
+    modified_bessel_k1, multigammaln, mvlgamma, ndtr, ndtri, scaled_modified_bessel_k0,
+    scaled_modified_bessel_k1, sinc, spherical_bessel_j0, xlogy, zeta,
 };
 pub use storage::{StorageBuffer, TensorStorage};
 pub use stride_tricks::{AsStridedBackward, as_strided, as_strided_copy, as_strided_scatter};
