@@ -69,6 +69,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CUDA pow kernels diverge from torch on negative bases: f32 NaN, f64 silently drops the sign (#1926)
 - Audit spillover from CORE-155/#1849: N-D c2r wrappers (irfftn/irfft2/hfftn/hfft2) debug-panic on zero-length c2r axis (ferray-fft real.rs:426 underflow); torch raises 'Invalid number of data points (0) specified' (#1940)
 - masked_fill backward on CUDA fails with GpuTensorNotAccessible (forward works) (#1905)
 - CUDA fft gaps pinned by gpu conformance fixtures: rfft/irfft n-resize + odd-length, fft/ifft differentiable backward (#1904)
