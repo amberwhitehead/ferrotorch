@@ -2,8 +2,10 @@
 //!
 //! When all inputs to an operation are on `Device::Meta`, the op produces
 //! a meta tensor with the correct output shape and skips the data
-//! computation entirely. When inputs are mixed (some meta, some real),
-//! the op returns an error since meta tensors carry no data.
+//! computation entirely. Most operations error when inputs are mixed (some
+//! meta, some real), since meta tensors carry no data. Composite operations
+//! whose upstream PyTorch decomposition defines mixed meta/real behavior
+//! document and implement that behavior explicitly.
 //!
 //! Each helper returns:
 //! - `Ok(Some(t))` — the inputs were all meta, here is the meta result
@@ -38,7 +40,8 @@
 
 use std::sync::Arc;
 
-use crate::dtype::Float;
+use crate::device::Device;
+use crate::dtype::{Element, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::shape::{broadcast_shapes, checked_numel};
 use crate::storage::TensorStorage;
@@ -47,6 +50,34 @@ use crate::tensor::{GradFn, Tensor};
 pub(crate) fn meta_tensor<T: Float>(shape: Vec<usize>) -> FerrotorchResult<Tensor<T>> {
     let numel = checked_numel(&shape, "meta_propagate::meta_tensor")?;
     Tensor::from_storage(TensorStorage::meta(numel), shape, false)
+}
+
+pub(crate) fn placeholder_tensor<T: Float>(
+    shape: Vec<usize>,
+    device: Device,
+) -> FerrotorchResult<Tensor<T>> {
+    let numel = checked_numel(&shape, "meta_propagate::placeholder_tensor")?;
+    let storage = match device {
+        Device::Meta => TensorStorage::meta(numel),
+        Device::Cpu => TensorStorage::cpu(vec![<T as num_traits::Zero>::zero(); numel]),
+        Device::Cuda(ordinal) => {
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let handle = backend.alloc_zeros(numel, <T as Element>::dtype(), ordinal)?;
+            TensorStorage::gpu(handle)
+        }
+        Device::Xpu(_) => {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "meta_propagate::placeholder_tensor: XPU placeholder allocation is not wired in ferrotorch-core".into(),
+            });
+        }
+        Device::Mps(_) => {
+            return Err(FerrotorchError::InvalidArgument {
+                message: "meta_propagate::placeholder_tensor: MPS placeholder allocation is not wired in ferrotorch-core".into(),
+            });
+        }
+    };
+    Tensor::from_storage(storage, shape, false)
 }
 
 pub(crate) fn meta_operation<T: Float>(
@@ -191,7 +222,7 @@ pub fn reduce_all<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Option<Tensor
 }
 
 /// Meta-device fast path for matmul-style ops following PyTorch's
-/// shape rules:
+/// shape and device rules:
 ///
 /// - 1-D × 1-D → scalar (dot product)
 /// - 2-D × 1-D → 1-D vector
@@ -199,16 +230,15 @@ pub fn reduce_all<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Option<Tensor
 /// - 2-D × 2-D → 2-D matrix
 /// - otherwise, promote 1-D operands to synthetic row/column matrices,
 ///   broadcast the real batch dims, then squeeze those synthetic axes.
+///
+/// Mixed meta/real behavior mirrors PyTorch's `CompositeImplicitAutograd`
+/// `matmul` decomposition (`aten/src/ATen/native/LinearAlgebra.cpp`):
+/// `dot` and `mv` mixed-device arms reject, `mm` output uses the left
+/// operand's options, `bmm` output uses the right operand's options, and the
+/// `should_fold` optimization decides which lower-level op owns the output.
 pub fn matmul<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Option<Tensor<T>>> {
-    match (a.is_meta(), b.is_meta()) {
-        (false, false) => return Ok(None),
-        (true, true) => {}
-        _ => {
-            return Err(FerrotorchError::DeviceMismatch {
-                expected: a.device(),
-                got: b.device(),
-            });
-        }
+    if !a.is_meta() && !b.is_meta() {
+        return Ok(None);
     }
 
     let a_shape = a.shape();
@@ -263,7 +293,130 @@ pub fn matmul<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Option
         out_shape.push(rhs_cols);
     }
 
-    Ok(Some(meta_tensor(out_shape)?))
+    let out_device = matmul_meta_output_device(a, b)?;
+    Ok(Some(placeholder_tensor(out_shape, out_device)?))
+}
+
+fn matmul_meta_output_device<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Device> {
+    match (a.ndim(), b.ndim()) {
+        // PyTorch dispatches these to dot/mv, both of which require the
+        // matrix/vector operands to share a device even under meta dispatch.
+        (1 | 2, 1) if a.device() != b.device() => Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        }),
+        // The remaining low-rank arms lower to dot/mv/mm; after the mixed
+        // dot/mv checks above, their output owns the left/self options.
+        (1 | 2, 1 | 2) => Ok(a.device()),
+        _ => {
+            if matmul_should_fold(a, b) {
+                let transpose = b.ndim() > a.ndim();
+                let t1_device = if transpose { b.device() } else { a.device() };
+                let t2_device = if transpose { a.device() } else { b.device() };
+                let t2_is_matrix = if transpose {
+                    a.ndim() == 2
+                } else {
+                    b.ndim() == 2
+                };
+                if t2_is_matrix {
+                    // Folded `mm`: output owns t1/self's options.
+                    Ok(t1_device)
+                } else if t1_device == t2_device {
+                    Ok(t1_device)
+                } else {
+                    // Folded `mv`: mixed matrix/vector devices reject before
+                    // any placeholder output is created.
+                    Err(FerrotorchError::DeviceMismatch {
+                        expected: t1_device,
+                        got: t2_device,
+                    })
+                }
+            } else {
+                if a.ndim() == 3 && b.ndim() == 3 && a.shape()[0] != b.shape()[0] {
+                    if a.shape()[0] == 1 && a.requires_grad() {
+                        // PyTorch recursively squeezes a grad-tracked
+                        // broadcasted left batch into the 2D @ 3D arm.
+                        return Ok(b.device());
+                    }
+                    if b.shape()[0] == 1 && b.requires_grad() {
+                        // Symmetric recursive squeeze into the 3D @ 2D arm.
+                        return Ok(a.device());
+                    }
+                }
+                // Expanded `bmm`: meta kernel output uses batch2/mat2's
+                // options.
+                Ok(b.device())
+            }
+        }
+    }
+}
+
+fn matmul_should_fold<T: Float>(tensor1: &Tensor<T>, tensor2: &Tensor<T>) -> bool {
+    let dim_tensor1 = tensor1.ndim();
+    let dim_tensor2 = tensor2.ndim();
+    let tensor1_larger = dim_tensor1 >= dim_tensor2;
+    let dim_t1 = if tensor1_larger {
+        dim_tensor1
+    } else {
+        dim_tensor2
+    };
+    let dim_t2 = if tensor1_larger {
+        dim_tensor2
+    } else {
+        dim_tensor1
+    };
+
+    if !(dim_t1 >= 3 && dim_t2 <= 2) {
+        return false;
+    }
+
+    let t2_requires_grad = if tensor1_larger {
+        tensor2.requires_grad()
+    } else {
+        tensor1.requires_grad()
+    };
+    if t2_requires_grad {
+        return true;
+    }
+
+    if dim_tensor1 == 2 {
+        return false;
+    }
+
+    let t1_numel = if tensor1_larger {
+        tensor1.numel()
+    } else {
+        tensor2.numel()
+    };
+    if t1_numel == 0 {
+        return true;
+    }
+
+    if tensor1_larger {
+        leading_dims_are_foldable(tensor1.shape(), tensor1.strides())
+    } else {
+        let mut shape = tensor2.shape().to_vec();
+        let mut strides = tensor2.strides().to_vec();
+        let last = shape.len() - 1;
+        shape.swap(last - 1, last);
+        strides.swap(last - 1, last);
+        leading_dims_are_foldable(&shape, &strides)
+    }
+}
+
+fn leading_dims_are_foldable(shape: &[usize], strides: &[isize]) -> bool {
+    for i in 0..shape.len() - 2 {
+        let Ok(next_dim) = isize::try_from(shape[i + 1]) else {
+            return false;
+        };
+        let Some(expected_stride) = strides[i + 1].checked_mul(next_dim) else {
+            return false;
+        };
+        if strides[i] != expected_stride {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -591,9 +744,18 @@ mod tests {
     }
 
     #[test]
-    fn test_matmul_mixed_meta_errors() {
+    fn test_matmul_mixed_meta_mm_uses_left_device_like_torch() {
         let a: Tensor<f32> = meta(&[3, 5]);
         let b: Tensor<f32> = cpu(&[5, 4]);
+        let out = matmul(&a, &b).unwrap().unwrap();
+        assert_eq!(out.shape(), &[3, 4]);
+        assert_eq!(out.device(), Device::Meta);
+    }
+
+    #[test]
+    fn test_matmul_mixed_meta_dot_still_errors_like_torch() {
+        let a: Tensor<f32> = meta(&[5]);
+        let b: Tensor<f32> = cpu(&[5]);
         assert!(matmul(&a, &b).is_err());
     }
 

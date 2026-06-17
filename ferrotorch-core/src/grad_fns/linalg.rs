@@ -1845,6 +1845,15 @@ pub fn matmul_differentiable<T: Float>(
     a: &Tensor<T>,
     b: &Tensor<T>,
 ) -> FerrotorchResult<Tensor<T>> {
+    if let Some(result) = crate::meta_propagate::matmul(a, b)? {
+        if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
+            let grad_fn = Arc::new(MatmulBackward::new(a.clone(), b.clone()));
+            let (storage, shape) = result.into_storage_and_shape()?;
+            return Tensor::from_operation(storage, shape, grad_fn);
+        }
+        return Ok(result);
+    }
+
     if a.device() != b.device() {
         return Err(FerrotorchError::DeviceMismatch {
             expected: a.device(),
