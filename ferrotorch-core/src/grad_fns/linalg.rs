@@ -26,8 +26,8 @@
 //! | REQ-17 (`linalg.cholesky`) | SHIPPED | `CholeskyBackward` + `cholesky_differentiable` (Phi-symmetrisation VJP `L^{-T} Φ(tril(L^T gL)) L^{-1}`) per `FunctionsManual.cpp:2048`; FD-verified `grad_fns::linalg::tests::cholesky_backward_matches_finite_difference` (symmetric-FD + symmetry check); non-test consumer: the grad-aware `crate::linalg::cholesky` forward delegates here when grad is enabled. Blocker #1345. |
 //! | REQ-18 (`linalg.inv`) | SHIPPED | `LinalgInvBackward` + `inv_differentiable` (VJP `dA = -Y^T @ grad @ Y^T` per `derivatives.yaml:917`); FD-verified `tests/divergence_linalg_grad_audit.rs:inv_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"linalg.inv"` arm. Blocker #1345. |
 //! | REQ-19 (`linalg.pinv`) | SHIPPED | `PinvBackward` + `pinv_differentiable` (PyTorch `pinv_backward` full-rank algebraic VJP) with a resident CUDA f32/f64 branch built from tensor `mm`/transpose/add/sub/neg; CUDA forward composes `svd` + resident `amax`/compare/where/diag so tracked `pinv` does not detach or host-round-trip. FD/CPU-vs-CUDA verified in `tests/audit_core146_linalg_autograd.rs`. |
-//! | REQ-20 (`linalg.det`) | SHIPPED | `LinalgDetBackward` + `det_differentiable` (VJP `dA = det * grad * inv(A)^T` per `FunctionsManual.cpp:4373` invertible branch); FD-verified `tests/divergence_linalg_grad_audit.rs:det_backward_matches_finite_difference`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"linalg.det"` arm. Blocker #1345. |
-//! | REQ-21 (`linalg.slogdet`) | SHIPPED | `SlogdetBackward` + `slogdet_differentiable` (real-case VJP `dA = grad_logabsdet * inv(A)^T`, attached to the differentiable `logabsdet` output; `sign` is non-diff) per `FunctionsManual.cpp:4471` + `derivatives.yaml:559`; FD-verified `grad_fns::linalg::tests::slogdet_backward_matches_finite_difference`; non-test consumer: the grad-aware `crate::linalg::slogdet` forward delegates here when grad is enabled. Blocker #1345. |
+//! | REQ-20 (`linalg.det`) | SHIPPED | `LinalgDetBackward` + `det_differentiable` (forward stores only `A` + `det(A)`, then lazily computes the VJP so singular tracked forwards match PyTorch; ordinary singular backward follows the LU-perturbed zero branch, `create_graph` uses an adjugate/cofactor fallback) per `FunctionsManual.cpp:4373`; FD-verified `tests/divergence_linalg_grad_audit.rs:det_backward_matches_finite_difference` and singular parity in `tests/audit_core187_det_slogdet_singular.rs`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"linalg.det"` arm. Blocker #1345. |
+//! | REQ-21 (`linalg.slogdet`) | SHIPPED | `SlogdetBackward` + `slogdet_differentiable` (forward stores only `A`, so singular tracked forwards return `(0, -inf)` like PyTorch; real-case VJP lazily computes `grad_logabsdet * inv(A)^T`, with nonsmooth singular fallback only in ordinary backward) per `FunctionsManual.cpp:4471` + `derivatives.yaml:559`; FD-verified `grad_fns::linalg::tests::slogdet_backward_matches_finite_difference` and singular forward parity in `tests/audit_core187_det_slogdet_singular.rs`; non-test consumer: the grad-aware `crate::linalg::slogdet` forward delegates here when grad is enabled. Blocker #1345. |
 //! | REQ-22 (`linalg.lstsq`) | SHIPPED | `LstsqBackward` + `lstsq_differentiable`/`lstsq_solve_differentiable` mirror `FunctionsManual.cpp:4012` for both differentiable outputs (`solution`, `residuals`; integer rank/singular values non-diff). CUDA f32/f64 solution and residuals stay resident; tests cover solution VJP vs CPU and residual VJP vs finite difference. Explicit CPU/CUDA driver contract mirrors `torch.linalg.lstsq`. |
 //! | REQ-23 (`linalg.norm`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-24 (`linalg.matrix_rank`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
@@ -2410,15 +2410,109 @@ pub fn inv_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>
 // LinalgDetBackward — d = det(A)   (2D square -> scalar)
 // ---------------------------------------------------------------------------
 
+#[allow(
+    clippy::float_cmp,
+    reason = "matrix rank pivots intentionally test exact zero pivots to mirror LU singular handling"
+)]
+fn det_cofactor_minor<T: Float>(data: &[T], n: usize) -> T {
+    if n == 0 {
+        return <T as num_traits::One>::one();
+    }
+    if n == 1 {
+        return data[0];
+    }
+
+    let zero = <T as num_traits::Zero>::zero();
+    let mut a = data.to_vec();
+    let mut sign = <T as num_traits::One>::one();
+    let mut det = <T as num_traits::One>::one();
+
+    for col in 0..n {
+        let mut pivot_row = col;
+        let mut pivot_abs = a[col * n + col].abs();
+        for row in (col + 1)..n {
+            let candidate = a[row * n + col].abs();
+            if candidate > pivot_abs {
+                pivot_abs = candidate;
+                pivot_row = row;
+            }
+        }
+
+        if pivot_abs == zero {
+            return zero;
+        }
+
+        if pivot_row != col {
+            for j in 0..n {
+                a.swap(col * n + j, pivot_row * n + j);
+            }
+            sign = -sign;
+        }
+
+        let pivot = a[col * n + col];
+        det = det * pivot;
+        for row in (col + 1)..n {
+            let factor = a[row * n + col] / pivot;
+            a[row * n + col] = zero;
+            for j in (col + 1)..n {
+                a[row * n + j] = a[row * n + j] - factor * a[col * n + j];
+            }
+        }
+    }
+
+    sign * det
+}
+
+fn det_cofactor_matrix<T: Float>(data: &[T], n: usize) -> Vec<T> {
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        return vec![<T as num_traits::One>::one()];
+    }
+
+    let zero = <T as num_traits::Zero>::zero();
+    let mut cofactors = vec![zero; n * n];
+    let mut minor = Vec::with_capacity((n - 1) * (n - 1));
+    for row in 0..n {
+        for col in 0..n {
+            minor.clear();
+            for r in 0..n {
+                if r == row {
+                    continue;
+                }
+                for c in 0..n {
+                    if c != col {
+                        minor.push(data[r * n + c]);
+                    }
+                }
+            }
+            let sign = if (row + col) % 2 == 0 {
+                <T as num_traits::One>::one()
+            } else {
+                -<T as num_traits::One>::one()
+            };
+            cofactors[row * n + col] = sign * det_cofactor_minor(&minor, n - 1);
+        }
+    }
+    cofactors
+}
+
 /// Backward for `d = det(A)`.
 ///
 /// VJP (`torch/csrc/autograd/FunctionsManual.cpp:4373` `linalg_det_backward`,
-/// invertible branch — the gradient solving `A^T G = det * grad * I`):
-/// `dA = grad_d * det(A) * inv(A)^T`.
+/// ordinary and higher-order branches):
+/// - invertible: `dA = grad_d * det(A) * inv(A)^T`
+/// - ordinary singular: PyTorch solves against a perturbed LU with RHS
+///   `det(A) * grad`, which is zero for singular matrices except the explicit
+///   1x1 special case.
+/// - higher-order singular: PyTorch switches to the adjugate/cofactor formula.
 #[derive(Debug)]
 pub struct LinalgDetBackward<T: Float> {
-    /// Retained inverse-transpose of `A`.
-    inv_t: Tensor<T>,
+    /// Retained input. Inverting during forward incorrectly rejects singular
+    /// tracked inputs; PyTorch stores LU metadata and defers solve work to
+    /// backward, so ferrotorch stores the input edge and computes lazily.
+    input: Tensor<T>,
     /// Retained scalar determinant value.
     det: T,
 }
@@ -2426,14 +2520,35 @@ pub struct LinalgDetBackward<T: Float> {
 impl<T: Float> GradFn<T> for LinalgDetBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         let g: T = grad_output.item()?;
-        let scale = g * self.det;
-        let data = self.inv_t.data()?;
-        let scaled: Vec<T> = data.iter().map(|&v| scale * v).collect();
-        let grad_a = Tensor::from_storage(
-            TensorStorage::cpu(scaled),
-            self.inv_t.shape().to_vec(),
-            false,
-        )?;
+        let n = self.input.shape()[0];
+        let grad_a = if n == 0 {
+            Tensor::from_storage(TensorStorage::cpu(Vec::new()), vec![0, 0], false)?
+        } else if n == 1 {
+            Tensor::from_storage(TensorStorage::cpu(vec![g]), vec![1, 1], false)?
+        } else {
+            match crate::autograd::no_grad::no_grad(|| linalg_fwd::inv(&self.input)) {
+                Ok(inv) => {
+                    let inv_t = mat_transpose(&inv)?;
+                    let scale = g * self.det;
+                    let data = inv_t.data_vec()?;
+                    let scaled: Vec<T> = data.iter().map(|&v| scale * v).collect();
+                    Tensor::from_storage(TensorStorage::cpu(scaled), inv_t.shape().to_vec(), false)?
+                }
+                Err(_) if crate::autograd::higher_order::is_create_graph_enabled() => {
+                    let data = self.input.data_vec()?;
+                    let scaled: Vec<T> = det_cofactor_matrix(&data, n)
+                        .into_iter()
+                        .map(|v| g * v)
+                        .collect();
+                    Tensor::from_storage(TensorStorage::cpu(scaled), vec![n, n], false)?
+                }
+                Err(_) => Tensor::from_storage(
+                    TensorStorage::cpu(vec![<T as num_traits::Zero>::zero(); n * n]),
+                    vec![n, n],
+                    false,
+                )?,
+            }
+        };
         Ok(vec![Some(grad_a)])
     }
 
@@ -2475,12 +2590,10 @@ pub fn det_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tensor<T>
     let result = crate::autograd::no_grad::no_grad(|| linalg_fwd::det(a))?;
     if is_grad_enabled() && a.requires_grad() {
         let det_val: T = result.item()?;
-        let inv = crate::autograd::no_grad::no_grad(|| linalg_fwd::inv(a))?;
-        let inv_t = mat_transpose(&inv)?;
         let grad_fn = Arc::new(DetForward {
             input: a.clone(),
             inner: LinalgDetBackward {
-                inv_t,
+                input: a.clone(),
                 det: det_val,
             },
         });
@@ -2960,27 +3073,43 @@ pub fn matrix_exp_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Te
 /// output only.
 #[derive(Debug)]
 pub struct SlogdetBackward<T: Float> {
-    /// Retained inverse-transpose of `A` (`inv(A)^T`).
-    inv_t: Tensor<T>,
+    /// Retained input. PyTorch's `_linalg_slogdet` stores LU metadata, not an
+    /// eager inverse; singular tracked forwards must still produce `(0,-inf)`.
+    input: Tensor<T>,
 }
 
 impl<T: Float> GradFn<T> for SlogdetBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         // grad_output is the upstream gradient on `logabsdet` (a scalar).
         let g: T = grad_output.item()?;
-        let data = self.inv_t.data()?;
-        let scaled: Vec<T> = data.iter().map(|&v| g * v).collect();
-        let grad_a = Tensor::from_storage(
-            TensorStorage::cpu(scaled),
-            self.inv_t.shape().to_vec(),
-            false,
-        )?;
+        let grad_a = match crate::autograd::no_grad::no_grad(|| linalg_fwd::inv(&self.input)) {
+            Ok(inv) => {
+                let inv_t = mat_transpose(&inv)?;
+                let data = inv_t.data_vec()?;
+                let scaled: Vec<T> = data.iter().map(|&v| g * v).collect();
+                Tensor::from_storage(TensorStorage::cpu(scaled), inv_t.shape().to_vec(), false)?
+            }
+            Err(err) if crate::autograd::higher_order::is_create_graph_enabled() => {
+                // PyTorch's higher-order slogdet branch recomputes a solve and
+                // raises on singular matrices; do not hide that nonsmooth case.
+                return Err(err);
+            }
+            Err(_) => {
+                let n = self.input.shape()[0];
+                let data = self.input.data_vec()?;
+                let det =
+                    crate::autograd::no_grad::no_grad(|| linalg_fwd::det(&self.input))?.item()?;
+                let scaled: Vec<T> = det_cofactor_matrix(&data, n)
+                    .into_iter()
+                    .map(|v| g * (v / det))
+                    .collect();
+                Tensor::from_storage(TensorStorage::cpu(scaled), vec![n, n], false)?
+            }
+        };
         Ok(vec![Some(grad_a)])
     }
 
     fn inputs(&self) -> Vec<&Tensor<T>> {
-        // VJP closes over the retained inverse-transpose only; the graph edge
-        // to the leaf `A` is carried by `SlogdetForward`.
         vec![]
     }
 
@@ -3017,11 +3146,9 @@ pub fn slogdet_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tens
     // here when grad is enabled, so the guard prevents infinite re-entry.
     let (sign, logabsdet) = crate::autograd::no_grad::no_grad(|| linalg_fwd::slogdet(a))?;
     if is_grad_enabled() && a.requires_grad() {
-        let inv = crate::autograd::no_grad::no_grad(|| linalg_fwd::inv(a))?;
-        let inv_t = mat_transpose(&inv)?;
         let grad_fn = Arc::new(SlogdetForward {
             input: a.clone(),
-            inner: SlogdetBackward { inv_t },
+            inner: SlogdetBackward { input: a.clone() },
         });
         let (storage, shape) = logabsdet.into_storage_and_shape()?;
         let logabsdet = Tensor::from_operation(storage, shape, grad_fn)?;
