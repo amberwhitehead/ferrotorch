@@ -41,6 +41,39 @@ impl GradFn<f32> for PassThroughBackward {
 }
 
 #[derive(Debug)]
+struct RequireGradOutputShape {
+    inputs: Vec<Tensor<f32>>,
+    expected_shape: Vec<usize>,
+}
+
+impl GradFn<f32> for RequireGradOutputShape {
+    fn backward(&self, grad_output: &Tensor<f32>) -> FerrotorchResult<Vec<Option<Tensor<f32>>>> {
+        if grad_output.shape() != self.expected_shape.as_slice() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "expected upstream gradient shape {:?}, got {:?}",
+                    self.expected_shape,
+                    grad_output.shape()
+                ),
+            });
+        }
+
+        let mut grads = Vec::with_capacity(self.inputs.len());
+        grads.push(Some(grad_output.clone()));
+        grads.resize_with(self.inputs.len(), || None);
+        Ok(grads)
+    }
+
+    fn inputs(&self) -> Vec<&Tensor<f32>> {
+        self.inputs.iter().collect()
+    }
+
+    fn name(&self) -> &'static str {
+        "RequireGradOutputShape"
+    }
+}
+
+#[derive(Debug)]
 struct IntentionalFailBackward {
     inputs: Vec<Tensor<f32>>,
 }
@@ -90,6 +123,30 @@ fn backward_parallel_implicit_seed_preserves_singleton_root_shape() {
     let grad = x.grad().expect("grad lookup").expect("x grad");
     assert_eq!(grad.shape(), &[1]);
     assert_eq!(grad.data().expect("grad data"), &[9.0]);
+}
+
+#[test]
+fn backward_parallel_implicit_seed_preserves_2d_singleton_root_shape() {
+    let x = leaf(&[2.0], &[1, 1]);
+    let mut inputs = vec![x.clone()];
+    for idx in 0..8 {
+        inputs.push(constant(&[idx as f32], &[1]));
+    }
+    let y = Tensor::from_operation(
+        TensorStorage::cpu(vec![2.0]),
+        vec![1, 1],
+        Arc::new(RequireGradOutputShape {
+            inputs,
+            expected_shape: vec![1, 1],
+        }),
+    )
+    .expect("shape-checking root");
+
+    backward_parallel(&y, None, 2).expect("backward_parallel");
+
+    let grad = x.grad().expect("grad lookup").expect("x grad");
+    assert_eq!(grad.shape(), &[1, 1]);
+    assert_eq!(grad.data().expect("grad data"), &[1.0]);
 }
 
 #[test]
