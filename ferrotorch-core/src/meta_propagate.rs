@@ -31,9 +31,10 @@
 //! |---|---|---|
 //! | REQ-1 | SHIPPED | impl `unary_same_shape`; non-test consumer `grad_fns::activation::{relu, sigmoid, tanh, gelu, silu, softmax}`. |
 //! | REQ-2 | SHIPPED | impl `binary_broadcast`; non-test consumer `grad_fns::arithmetic::add` + every binary broadcast op. |
-//! | REQ-3 | SHIPPED | impl `reduce_dim`; non-test consumer `grad_fns::reduction::sum_dim` + `mean_dim`. |
-//! | REQ-4 | SHIPPED | impl `reduce_all`; non-test consumer `grad_fns::reduction::sum_all` + `mean_all`, `prod_all`. |
-//! | REQ-5 | SHIPPED | impl `matmul`; non-test consumer `ops::linalg::matmul`. |
+//! | REQ-3 | SHIPPED | impl `ternary_broadcast_shape` / `ternary_broadcast`; non-test consumer `grad_fns::arithmetic::{addcmul, addcdiv}`. |
+//! | REQ-4 | SHIPPED | impl `reduce_dim`; non-test consumer `grad_fns::reduction::sum_dim` + `mean_dim`. |
+//! | REQ-5 | SHIPPED | impl `reduce_all`; non-test consumer `grad_fns::reduction::sum_all` + `mean_all`, `prod_all`. |
+//! | REQ-6 | SHIPPED | impl `matmul`; non-test consumer `ops::linalg::matmul`. |
 
 use std::sync::Arc;
 
@@ -97,6 +98,44 @@ pub fn binary_broadcast<T: Float>(
             expected: a.device(),
             got: b.device(),
         }),
+    }
+}
+
+pub(crate) fn ternary_broadcast_shape<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    c: &Tensor<T>,
+) -> FerrotorchResult<Vec<usize>> {
+    let bc_shape = broadcast_shapes(b.shape(), c.shape())?;
+    broadcast_shapes(a.shape(), &bc_shape)
+}
+
+/// Meta-device fast path for ternary broadcast ops (`addcmul`, `addcdiv`,
+/// `where`, etc.).
+///
+/// Returns the broadcast meta output when all inputs are meta. Errors when
+/// exactly some inputs are meta, matching PyTorch's device checks: a real
+/// tensor cannot provide data for a meta-only computation and a meta tensor
+/// cannot be read by a real-data kernel.
+pub fn ternary_broadcast<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    c: &Tensor<T>,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    match (a.is_meta(), b.is_meta(), c.is_meta()) {
+        (true, true, true) => {
+            let out_shape = ternary_broadcast_shape(a, b, c)?;
+            Ok(Some(meta_tensor(out_shape)?))
+        }
+        (false, false, false) => Ok(None),
+        _ => {
+            let expected = crate::device::Device::Meta;
+            let got = [a.device(), b.device(), c.device()]
+                .into_iter()
+                .find(|device| *device != expected)
+                .unwrap_or(expected);
+            Err(FerrotorchError::DeviceMismatch { expected, got })
+        }
     }
 }
 
@@ -294,6 +333,58 @@ mod tests {
         let a: Tensor<f32> = meta(&[3, 4]);
         let b: Tensor<f32> = meta(&[5, 6]);
         let result = binary_broadcast(&a, &b);
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // ternary_broadcast
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ternary_broadcast_all_meta_returns_broadcasted() {
+        let a: Tensor<f32> = meta(&[5, 1, 7]);
+        let b: Tensor<f32> = meta(&[3, 1]);
+        let c: Tensor<f32> = meta(&[1, 3, 1]);
+        let out = ternary_broadcast(&a, &b, &c).unwrap().unwrap();
+        assert!(out.is_meta());
+        assert_eq!(out.shape(), &[5, 3, 7]);
+    }
+
+    #[test]
+    fn test_ternary_broadcast_all_cpu_returns_none() {
+        let a = cpu(&[2, 3]);
+        let b = cpu(&[2, 3]);
+        let c = cpu(&[2, 3]);
+        let out = ternary_broadcast(&a, &b, &c).unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn test_ternary_broadcast_mixed_meta_errors() {
+        let a: Tensor<f32> = meta(&[2, 3]);
+        let b = cpu(&[2, 3]);
+        let c: Tensor<f32> = meta(&[2, 3]);
+        let result = ternary_broadcast(&a, &b, &c);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ternary_broadcast_zero_size_shapes_match_torch() {
+        let a: Tensor<f32> = meta(&[]);
+        let b: Tensor<f32> = meta(&[2, 0, 3]);
+        let c: Tensor<f32> = meta(&[1, 3]);
+        let out = ternary_broadcast(&a, &b, &c).unwrap().unwrap();
+        assert!(out.is_meta());
+        assert_eq!(out.shape(), &[2, 0, 3]);
+        assert_eq!(out.numel(), 0);
+    }
+
+    #[test]
+    fn test_ternary_broadcast_shape_mismatch_errors() {
+        let a: Tensor<f32> = meta(&[2, 3]);
+        let b: Tensor<f32> = meta(&[4, 3]);
+        let c: Tensor<f32> = meta(&[2, 3]);
+        let result = ternary_broadcast(&a, &b, &c);
         assert!(result.is_err());
     }
 

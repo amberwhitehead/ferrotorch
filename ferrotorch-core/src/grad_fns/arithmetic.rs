@@ -169,6 +169,12 @@ fn needs_grad<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> bool {
     is_grad_enabled() && (a.requires_grad() || b.requires_grad())
 }
 
+/// Whether at least one of three tensors requires grad (and grad is enabled).
+#[inline]
+fn needs_grad_ternary<T: Float>(a: &Tensor<T>, b: &Tensor<T>, c: &Tensor<T>) -> bool {
+    is_grad_enabled() && (a.requires_grad() || b.requires_grad() || c.requires_grad())
+}
+
 /// Whether a single tensor requires grad (and grad is enabled).
 #[inline]
 fn needs_grad_unary<T: Float>(a: &Tensor<T>) -> bool {
@@ -241,6 +247,39 @@ where
         _ => Err(FerrotorchError::DeviceMismatch {
             expected: a.device(),
             got: b.device(),
+        }),
+    }
+}
+
+fn meta_ternary_operation<T, F>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    c: &Tensor<T>,
+    make_grad_fn: F,
+) -> FerrotorchResult<Option<Tensor<T>>>
+where
+    T: Float,
+    F: FnOnce() -> FerrotorchResult<Arc<dyn GradFn<T>>>,
+{
+    match (a.is_meta(), b.is_meta(), c.is_meta()) {
+        (false, false, false) => Ok(None),
+        (true, true, true) => {
+            let shape = crate::meta_propagate::ternary_broadcast_shape(a, b, c)?;
+            if needs_grad_ternary(a, b, c) {
+                Ok(Some(crate::meta_propagate::meta_operation(
+                    shape,
+                    make_grad_fn()?,
+                )?))
+            } else {
+                Ok(Some(crate::meta_propagate::meta_tensor(shape)?))
+            }
+        }
+        _ => Err(FerrotorchError::DeviceMismatch {
+            expected: crate::device::Device::Meta,
+            got: [a.device(), b.device(), c.device()]
+                .into_iter()
+                .find(|device| *device != crate::device::Device::Meta)
+                .unwrap_or(crate::device::Device::Meta),
         }),
     }
 }
@@ -4088,6 +4127,17 @@ fn addcmul_inner<T: Float>(
     tensor2: &Tensor<T>,
     value: f64,
 ) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) = meta_ternary_operation(input, tensor1, tensor2, || {
+        Ok(Arc::new(AddcmulBackward {
+            input: input.clone(),
+            tensor1: tensor1.saved_for_backward()?,
+            tensor2: tensor2.saved_for_backward()?,
+            value,
+        }))
+    })? {
+        return Ok(out);
+    }
+
     // 3-way broadcast: first broadcast tensor1 with tensor2, then with
     // input. `broadcast_shapes` is binary, so we chain two calls.
     let t12_shape = broadcast_shapes(tensor1.shape(), tensor2.shape())?;
@@ -4432,6 +4482,17 @@ fn addcdiv_inner<T: Float>(
     tensor2: &Tensor<T>,
     value: f64,
 ) -> FerrotorchResult<Tensor<T>> {
+    if let Some(out) = meta_ternary_operation(input, tensor1, tensor2, || {
+        Ok(Arc::new(AddcdivBackward {
+            input: input.clone(),
+            tensor1: tensor1.saved_for_backward()?,
+            tensor2: tensor2.saved_for_backward()?,
+            value,
+        }))
+    })? {
+        return Ok(out);
+    }
+
     // 3-way broadcast: first broadcast tensor1 with tensor2, then with
     // input. `broadcast_shapes` is binary, so we chain two calls.
     let t12_shape = broadcast_shapes(tensor1.shape(), tensor2.shape())?;
