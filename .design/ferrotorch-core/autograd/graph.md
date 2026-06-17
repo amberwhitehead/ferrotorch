@@ -94,19 +94,26 @@ PyTorch ships under the same `Engine` class.
   roots. Hooks registered on non-leaf roots must also run on the initial
   seed before the root's `grad_fn` executes, so hook replacements affect
   downstream gradients exactly as in PyTorch.
+- REQ-13: Structured parallel-worker failure reporting —
+  `backward_parallel` MUST return the first ordinary node error, worker
+  panic, or poisoned internal synchronization state as a
+  `FerrotorchError` instead of panicking or sleeping forever. This
+  mirrors PyTorch's `Engine::thread_main` behavior, which catches
+  per-node exceptions, records the graph task error, and wakes the
+  owner/waiting workers.
 
 ## Acceptance Criteria
 
 - [x] AC-1: `c.backward()` on a 2-input addition `c = a + b` populates
   `a.grad() = 1.0`, `b.grad() = 1.0` — `test_backward_simple_add` at
-  `graph.rs:955`.
+  `test_backward_simple_add in graph.rs`.
 - [x] AC-2: Multiplication backward yields the upstream partial
-  derivatives — `test_backward_mul` at `graph.rs:981`.
+  derivatives — `test_backward_mul` at `test_backward_mul in graph.rs`.
 - [x] AC-3: Shared inputs accumulate correctly: `c = a + a` →
   `a.grad() = 2.0` — `test_backward_shared_input` at
-  `graph.rs:1007`.
+  `test_backward_shared_input in graph.rs`.
 - [x] AC-4: Chained graphs (3+ ops) produce correct partials —
-  `test_backward_chain` at `graph.rs:1030`.
+  `test_backward_chain` at `test_backward_chain in graph.rs`.
 - [x] AC-5: `backward()` on a non-scalar tensor errors with
   `FerrotorchError::BackwardNonScalar` — `test_backward_non_scalar_error`
   at `test_backward_non_scalar_error in graph.rs`.
@@ -116,13 +123,13 @@ PyTorch ships under the same `Engine` class.
   `test_backward_one_element_tensor_seed_has_same_shape in graph.rs`.
 - [x] AC-7: `pow` + `add` chain on `[1]`-shape produces correct
   partials — `test_backward_one_element_through_pow_and_add` at
-  `graph.rs:1289`.
+  `test_backward_one_element_through_pow_and_add in graph.rs`.
 - [x] AC-8: `reduce_grad_to_shape` reshapes `[] -> [1]` when the
   numel matches — `test_reduce_grad_to_shape_reshape_when_same_numel`
   at `test_reduce_grad_to_shape_reshape_when_same_numel in graph.rs`.
 - [x] AC-9: `reduce_grad_to_shape` errors cleanly (does NOT panic) on
   `[] -> [2]` numel mismatch — `test_reduce_grad_to_shape_returns_error_on_numel_mismatch_underflow`
-  at `graph.rs:1322`.
+  at `test_reduce_grad_to_shape_returns_error_on_numel_mismatch_underflow in graph.rs`.
 - [x] AC-10: `backward()` directly on a scalar `requires_grad` leaf
   accumulates a scalar seed grad of `1` — `test_backward_leaf_scalar_accumulates_seed`.
 - [x] AC-11: `backward()` directly on a single-element shaped
@@ -146,6 +153,11 @@ PyTorch ships under the same `Engine` class.
   sequential engine and the non-fallback parallel engine —
   `test_backward_non_leaf_root_runs_hook_on_seed` and
   `test_backward_parallel_non_leaf_root_runs_hook_on_seed`.
+- [x] AC-17: The non-fallback parallel engine returns structured
+  errors for both normal `GradFn::backward` failures and worker panics,
+  cancels the remaining graph, and does not fabricate leaf gradients —
+  `test_backward_parallel_node_error_returns_structured_error` and
+  `test_backward_parallel_worker_panic_returns_structured_error`.
 
 ## Architecture
 
@@ -207,6 +219,14 @@ worker pulls a ready node, runs its backward, accumulates gradients
 `:497-565` for non-leafs), and decrements input in-degrees with
 `fetch_sub(1, AcqRel)`. The condvar wakes other workers when new
 nodes become ready or when total nodes have been processed.
+
+Parallel worker failures follow PyTorch's `GraphTask::set_exception`
+contract in Rust form: every ready-queue/gradient-map/first-error lock
+and condvar wait is converted to `FerrotorchError::LockPoisoned` on
+poison, each worker body is wrapped in `catch_unwind`, and the first
+error wins. Recording an error sets the cancellation flag and notifies
+all waiting workers so dependencies that will never become ready cannot
+deadlock the engine.
 
 ### REQ-11 — convenience methods
 
@@ -307,3 +327,4 @@ workspace verification.
 | REQ-10 | SHIPPED | impl: shape-preserving seed at `graph.rs:48-60`; CL-498 fix; non-test consumer: every user call to `Tensor::backward()` on a 1-D `[1]`-shape loss (e.g. AdamW convergence with single-element loss); regression-tested by `test_backward_one_element_tensor_seed_has_same_shape` (production path is the same `Tensor::backward` entry). |
 | REQ-11 | SHIPPED | impl: `impl<T: Float> Tensor<T>` with `pub fn backward(&self)` at `backward in graph.rs` and `pub fn backward_with_gradient(&self, gradient)` at `backward_with_gradient in graph.rs`; mirrors `tensor.backward()` per `torch/_tensor.py:594` Python tensor method; non-test consumer: `tensor in ferrotorch-core/src/stride_tricks.rs backward(&loss)`, `tensor in ferrotorch-core/src/grad_fns/quantize_grad.rs` etc. — every production backward call site uses these convenience methods. |
 | REQ-12 | SHIPPED | impl: `backward_seed`, `validate_backward_root`, `run_tensor_grad_hooks`, and `accumulate_leaf_grad` in `graph.rs`; used by both `backward_with_grad` and `backward_parallel`. Mirrors PyTorch root behavior: scalar and `[1]` leaves get seed grad `1`, vector leaves accept explicit cotangents, non-tracking roots error, hooks on leaf and non-leaf roots fire on the initial seed, repeated backward accumulates, and CUDA leaf roots keep `.grad()` on CUDA. Tests: `test_backward_leaf_*`, `test_backward_non_tracking_leaf_*`, `test_backward_non_leaf_root_runs_hook_on_seed`, `test_backward_parallel_*root*`, and `audit_core037_leaf_backward_cuda`. |
+| REQ-13 | SHIPPED | impl: `lock_parallel_state`, `wait_parallel_state`, `record_parallel_error`, `take_parallel_error`, and the `catch_unwind` worker boundary in `backward_parallel`; mirrors PyTorch `torch/csrc/autograd/engine.cpp` `thread_main` / `thread_on_exception` / `GraphTask::set_exception`; tests: `test_backward_parallel_node_error_returns_structured_error` and `test_backward_parallel_worker_panic_returns_structured_error`. |

@@ -14,10 +14,12 @@
 //! | REQ-10 | SHIPPED | Shape-preserving seed at `graph.rs:48-60`; consumer: every `Tensor::backward()` on a `[1]`-shape loss (regression test at `:990-1003`). |
 //! | REQ-11 | SHIPPED | `impl<T: Float> Tensor<T>` with `pub fn `backward`` at `graph.rs:721-723` and `pub fn `backward_with_gradient`` at `:731-733`; consumer: `stride_tricks.rs:672`, `grad_fns/quantize_grad.rs:793`. |
 //! | REQ-12 | SHIPPED | Root validation + root-seed hook handling via `backward_seed`, `validate_backward_root`, `run_tensor_grad_hooks`, and `accumulate_leaf_grad`; consumer: `backward_with_grad` and `backward_parallel`, matching PyTorch scalar/[1]/external-gradient leaf root and non-leaf root-hook semantics. |
+//! | REQ-13 | SHIPPED | `backward_parallel` routes node errors, worker panics, and poisoned internal synchronization through structured `FerrotorchError`s via `lock_parallel_state`, `wait_parallel_state`, `record_parallel_error`, and the worker `catch_unwind` boundary; regressions: `test_backward_parallel_node_error_returns_structured_error` and `test_backward_parallel_worker_panic_returns_structured_error`. |
 //!
 
 use rustc_hash::FxHashMap as HashMap;
 use std::collections::VecDeque;
+use std::sync::{Condvar, Mutex, MutexGuard};
 
 use crate::autograd::anomaly::{AnomalyMode, check_backward_output_anomaly};
 use crate::autograd::hooks::{run_grad_hooks, run_post_accumulate_hooks};
@@ -151,6 +153,79 @@ impl Drop for ScopedAnomalyMode {
         } else {
             AnomalyMode::disable();
         }
+    }
+}
+
+fn lock_parallel_state<'a, T>(
+    mutex: &'a Mutex<T>,
+    label: &'static str,
+) -> FerrotorchResult<MutexGuard<'a, T>> {
+    mutex.lock().map_err(|e| FerrotorchError::LockPoisoned {
+        message: format!("parallel backward {label}: {e}"),
+    })
+}
+
+fn wait_parallel_state<'a, T>(
+    condvar: &Condvar,
+    guard: MutexGuard<'a, T>,
+    label: &'static str,
+) -> FerrotorchResult<MutexGuard<'a, T>> {
+    condvar
+        .wait(guard)
+        .map_err(|e| FerrotorchError::LockPoisoned {
+            message: format!("parallel backward {label}: {e}"),
+        })
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".into()
+    }
+}
+
+fn autograd_worker_panic_error(payload: &(dyn std::any::Any + Send)) -> FerrotorchError {
+    FerrotorchError::Internal {
+        message: format!(
+            "autograd worker panicked: {}",
+            panic_payload_message(payload)
+        ),
+    }
+}
+
+fn record_parallel_error(first_error: &Mutex<Option<FerrotorchError>>, error: FerrotorchError) {
+    let mut guard = first_error
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.is_none() {
+        *guard = Some(error);
+    }
+}
+
+fn take_parallel_error(
+    first_error: std::sync::Arc<Mutex<Option<FerrotorchError>>>,
+) -> Option<FerrotorchError> {
+    match std::sync::Arc::try_unwrap(first_error) {
+        Ok(mutex) => match mutex.into_inner() {
+            Ok(error) => error,
+            Err(poisoned) => {
+                let message = format!("parallel backward first-error state: {poisoned}");
+                poisoned
+                    .into_inner()
+                    .or(Some(FerrotorchError::LockPoisoned { message }))
+            }
+        },
+        Err(arc) => match arc.lock() {
+            Ok(mut guard) => std::mem::take(&mut *guard),
+            Err(poisoned) => {
+                let message = format!("parallel backward first-error state: {poisoned}");
+                let mut guard = poisoned.into_inner();
+                std::mem::take(&mut *guard).or(Some(FerrotorchError::LockPoisoned { message }))
+            }
+        },
     }
 }
 
@@ -332,8 +407,8 @@ pub fn backward_parallel<T: Float>(
     gradient: Option<&Tensor<T>>,
     num_workers: usize,
 ) -> FerrotorchResult<()> {
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Condvar, Mutex};
 
     let seed = backward_seed(root, gradient)?;
 
@@ -395,7 +470,7 @@ pub fn backward_parallel<T: Float>(
 
     // Seed the ready queue with all in-degree 0 nodes.
     {
-        let mut rq = ready.lock().unwrap();
+        let mut rq = lock_parallel_state(&ready, "ready queue seed")?;
         for (&id, deg) in in_degrees.iter() {
             if deg.load(Ordering::Relaxed) == 0 {
                 rq.push_back(id);
@@ -430,138 +505,141 @@ pub fn backward_parallel<T: Float>(
             s.spawn(move || {
                 let _anomaly_guard = ScopedAnomalyMode::set(anomaly_enabled);
                 loop {
-                    // Pull a ready node.
-                    let id = {
-                        let mut rq = ready.lock().unwrap();
-                        loop {
-                            if cancelled.load(Ordering::Acquire) {
-                                return;
-                            }
-                            if let Some(id) = rq.pop_front() {
-                                break id;
-                            }
-                            if processed.load(Ordering::Relaxed) >= total_nodes {
-                                return;
-                            }
-                            rq = condvar.wait(rq).unwrap();
-                            if cancelled.load(Ordering::Acquire)
-                                || processed.load(Ordering::Relaxed) >= total_nodes
-                            {
-                                return;
-                            }
-                        }
-                    };
-                    if cancelled.load(Ordering::Acquire) {
-                        return;
-                    }
-
-                    // Process this node.
-                    let result = (|| -> FerrotorchResult<()> {
-                        let node = match node_map_ref.get(&id) {
-                            Some(n) => n,
-                            None => return Ok(()),
-                        };
-
-                        let grad_output = {
-                            let mut g = grads.lock().unwrap();
-                            match g.remove(&id) {
-                                Some(go) => go,
-                                None => return Ok(()),
-                            }
-                        };
-
-                        if let Some(grad_fn) = node.grad_fn() {
-                            let grad_output = if grad_output.is_contiguous() {
-                                grad_output
-                            } else {
-                                crate::methods::contiguous_t(&grad_output)?
-                            };
-
-                            let input_grads = grad_fn.backward(&grad_output)?;
-                            let inputs = grad_fn.inputs();
-
-                            if input_grads.len() != inputs.len() {
-                                return Err(FerrotorchError::InvalidArgument {
-                                    message: format!(
-                                        "backward returned {} gradients but expected {}",
-                                        input_grads.len(),
-                                        inputs.len(),
-                                    ),
-                                });
-                            }
-
-                            let forward_backtrace = node.forward_backtrace();
-                            for (output_index, (input, maybe_grad)) in
-                                inputs.iter().zip(input_grads).enumerate()
-                            {
-                                if let Some(grad) = maybe_grad {
-                                    check_backward_output_anomaly(
-                                        &grad,
-                                        grad_fn.name(),
-                                        output_index,
-                                        forward_backtrace.as_ref(),
-                                    )?;
-                                    if input.requires_grad() {
-                                        if input.is_leaf() {
-                                            accumulate_leaf_grad(input, grad)?;
-                                        } else {
-                                            let mut g = grads.lock().unwrap();
-                                            accumulate_non_leaf_grad_locked(&mut g, input, grad)?;
-                                        }
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        || -> FerrotorchResult<bool> {
+                            // Pull a ready node.
+                            let id = {
+                                let mut rq = lock_parallel_state(&ready, "ready queue")?;
+                                loop {
+                                    if cancelled.load(Ordering::Acquire) {
+                                        return Ok(false);
+                                    }
+                                    if let Some(id) = rq.pop_front() {
+                                        break id;
+                                    }
+                                    if processed.load(Ordering::Relaxed) >= total_nodes {
+                                        return Ok(false);
+                                    }
+                                    rq = wait_parallel_state(&condvar, rq, "ready queue wait")?;
+                                    if cancelled.load(Ordering::Acquire)
+                                        || processed.load(Ordering::Relaxed) >= total_nodes
+                                    {
+                                        return Ok(false);
                                     }
                                 }
+                            };
+                            if cancelled.load(Ordering::Acquire) {
+                                return Ok(false);
                             }
 
-                            // Decrement in-degrees of inputs; push newly ready.
-                            // If another worker has already failed, do not
-                            // schedule more work: waiters will observe
-                            // `cancelled` and return after `notify_all`.
-                            if !cancelled.load(Ordering::Acquire) {
-                                for input in grad_fn.inputs() {
-                                    if let Some(deg) = in_degrees.get(&input.id()) {
-                                        let prev = deg.fetch_sub(1, Ordering::AcqRel);
-                                        if prev == 1 {
-                                            let mut rq = ready.lock().unwrap();
-                                            if !cancelled.load(Ordering::Acquire) {
-                                                rq.push_back(input.id());
-                                                condvar.notify_one();
+                            // Process this node. Missing nodes or missing
+                            // gradients are still counted as processed below,
+                            // matching the sequential engine's skip behavior.
+                            if let Some(node) = node_map_ref.get(&id) {
+                                let grad_output = {
+                                    let mut g =
+                                        lock_parallel_state(&grads, "gradient accumulator")?;
+                                    g.remove(&id)
+                                };
+
+                                if let Some(grad_output) = grad_output
+                                    && let Some(grad_fn) = node.grad_fn()
+                                {
+                                    let grad_output = if grad_output.is_contiguous() {
+                                        grad_output
+                                    } else {
+                                        crate::methods::contiguous_t(&grad_output)?
+                                    };
+
+                                    let input_grads = grad_fn.backward(&grad_output)?;
+                                    let inputs = grad_fn.inputs();
+
+                                    if input_grads.len() != inputs.len() {
+                                        return Err(FerrotorchError::InvalidArgument {
+                                            message: format!(
+                                                "backward returned {} gradients but expected {}",
+                                                input_grads.len(),
+                                                inputs.len(),
+                                            ),
+                                        });
+                                    }
+
+                                    let forward_backtrace = node.forward_backtrace();
+                                    for (output_index, (input, maybe_grad)) in
+                                        inputs.iter().zip(input_grads).enumerate()
+                                    {
+                                        if let Some(grad) = maybe_grad {
+                                            check_backward_output_anomaly(
+                                                &grad,
+                                                grad_fn.name(),
+                                                output_index,
+                                                forward_backtrace.as_ref(),
+                                            )?;
+                                            if input.requires_grad() {
+                                                if input.is_leaf() {
+                                                    accumulate_leaf_grad(input, grad)?;
+                                                } else {
+                                                    let mut g = lock_parallel_state(
+                                                        &grads,
+                                                        "gradient accumulator",
+                                                    )?;
+                                                    accumulate_non_leaf_grad_locked(
+                                                        &mut g, input, grad,
+                                                    )?;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Decrement in-degrees of inputs; push newly ready.
+                                    // If another worker has already failed, do not
+                                    // schedule more work: waiters will observe
+                                    // `cancelled` and return after `notify_all`.
+                                    if !cancelled.load(Ordering::Acquire) {
+                                        for input in grad_fn.inputs() {
+                                            if let Some(deg) = in_degrees.get(&input.id()) {
+                                                let prev = deg.fetch_sub(1, Ordering::AcqRel);
+                                                if prev == 1 {
+                                                    let mut rq = lock_parallel_state(
+                                                        &ready,
+                                                        "ready queue push",
+                                                    )?;
+                                                    if !cancelled.load(Ordering::Acquire) {
+                                                        rq.push_back(input.id());
+                                                        condvar.notify_one();
+                                                    }
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
 
-                        Ok(())
-                    })();
-
-                    if let Err(e) = result {
-                        {
-                            let mut err = first_error.lock().unwrap();
-                            if err.is_none() {
-                                *err = Some(e);
+                            let prev = processed.fetch_add(1, Ordering::AcqRel);
+                            if prev + 1 >= total_nodes {
+                                condvar.notify_all();
                             }
-                        }
-                        cancelled.store(true, Ordering::Release);
-                        condvar.notify_all();
-                    }
+                            Ok(true)
+                        },
+                    ))
+                    .unwrap_or_else(|payload| Err(autograd_worker_panic_error(payload.as_ref())));
 
-                    let prev = processed.fetch_add(1, Ordering::AcqRel);
-                    if prev + 1 >= total_nodes || cancelled.load(Ordering::Acquire) {
-                        condvar.notify_all();
+                    match result {
+                        Ok(true) => {}
+                        Ok(false) => return,
+                        Err(e) => {
+                            record_parallel_error(&first_error, e);
+                            cancelled.store(true, Ordering::Release);
+                            condvar.notify_all();
+                            return;
+                        }
                     }
                 }
             });
         }
     });
 
-    let err = match Arc::try_unwrap(first_error) {
-        Ok(mutex) => mutex.into_inner().unwrap(),
-        Err(arc) => {
-            let mut guard = arc.lock().unwrap();
-            std::mem::take(&mut *guard)
-        }
-    };
+    let err = take_parallel_error(first_error);
     if let Some(e) = err {
         return Err(e);
     }
@@ -835,6 +913,33 @@ mod tests {
     use crate::tensor::GradFn;
     use std::sync::{Arc, Mutex};
 
+    static PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
+
+    type TestPanicHook =
+        Box<dyn for<'a> Fn(&std::panic::PanicHookInfo<'a>) + Sync + Send + 'static>;
+
+    struct PanicHookGuard {
+        previous: Option<TestPanicHook>,
+    }
+
+    impl PanicHookGuard {
+        fn suppress() -> Self {
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            Self {
+                previous: Some(previous),
+            }
+        }
+    }
+
+    impl Drop for PanicHookGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::panic::set_hook(previous);
+            }
+        }
+    }
+
     /// A simple grad_fn for testing: output = a + b.
     /// backward: d(a+b)/da = 1, d(a+b)/db = 1.
     #[derive(Debug)]
@@ -883,6 +988,46 @@ mod tests {
         }
         fn name(&self) -> &'static str {
             "MulBackward"
+        }
+    }
+
+    #[derive(Debug)]
+    struct PanicBackward<T: Float> {
+        input: Tensor<T>,
+    }
+
+    impl<T: Float> GradFn<T> for PanicBackward<T> {
+        fn backward(&self, _grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+            panic!("test autograd worker failure");
+        }
+
+        fn inputs(&self) -> Vec<&Tensor<T>> {
+            vec![&self.input]
+        }
+
+        fn name(&self) -> &'static str {
+            "PanicBackward"
+        }
+    }
+
+    #[derive(Debug)]
+    struct ErrorBackward<T: Float> {
+        input: Tensor<T>,
+    }
+
+    impl<T: Float> GradFn<T> for ErrorBackward<T> {
+        fn backward(&self, _grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
+            Err(FerrotorchError::InvalidArgument {
+                message: "test autograd node failure".into(),
+            })
+        }
+
+        fn inputs(&self) -> Vec<&Tensor<T>> {
+            vec![&self.input]
+        }
+
+        fn name(&self) -> &'static str {
+            "ErrorBackward"
         }
     }
 
@@ -1208,6 +1353,77 @@ mod tests {
         let grad = x.grad().unwrap().expect("source leaf grad");
         assert!((grad.item().unwrap() - 768.0).abs() < 1e-4);
         assert_eq!(*grad_hook_seen.lock().unwrap(), vec![1.0]);
+    }
+
+    #[test]
+    fn test_backward_parallel_node_error_returns_structured_error() {
+        let x = leaf_scalar(2.0, true);
+        let mut y = x.clone();
+        for _ in 0..8 {
+            let one = leaf_scalar(1.0, false);
+            y = crate::grad_fns::arithmetic::mul(&y, &one).unwrap();
+        }
+
+        let root = Tensor::from_operation(
+            TensorStorage::cpu(vec![2.0]),
+            vec![],
+            Arc::new(ErrorBackward { input: y }),
+        )
+        .unwrap();
+
+        let err = backward_parallel(&root, None, 4)
+            .expect_err("worker node error must be returned to caller");
+        match err {
+            FerrotorchError::InvalidArgument { message } => {
+                assert_eq!(message, "test autograd node failure");
+            }
+            other => panic!("expected InvalidArgument from failing node, got {other:?}"),
+        }
+
+        assert!(
+            x.grad().unwrap().is_none(),
+            "cancelled backward should not silently produce leaf gradients"
+        );
+    }
+
+    #[test]
+    fn test_backward_parallel_worker_panic_returns_structured_error() {
+        let x = leaf_scalar(2.0, true);
+        let mut y = x.clone();
+        for _ in 0..8 {
+            let one = leaf_scalar(1.0, false);
+            y = crate::grad_fns::arithmetic::mul(&y, &one).unwrap();
+        }
+
+        let root = Tensor::from_operation(
+            TensorStorage::cpu(vec![2.0]),
+            vec![],
+            Arc::new(PanicBackward { input: y }),
+        )
+        .unwrap();
+
+        let _panic_hook_lock = PANIC_HOOK_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _panic_hook_guard = PanicHookGuard::suppress();
+        let err =
+            backward_parallel(&root, None, 4).expect_err("worker panic must not escape as panic");
+        match err {
+            FerrotorchError::Internal { message } => {
+                assert!(
+                    message.contains("autograd worker panicked"),
+                    "unexpected internal error message: {message}"
+                );
+                assert!(
+                    message.contains("test autograd worker failure"),
+                    "panic payload should be preserved in error message: {message}"
+                );
+            }
+            other => panic!("expected Internal autograd worker panic error, got {other:?}"),
+        }
+
+        assert!(
+            x.grad().unwrap().is_none(),
+            "cancelled backward should not silently produce leaf gradients"
+        );
     }
 
     #[test]
