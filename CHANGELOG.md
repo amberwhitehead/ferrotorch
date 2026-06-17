@@ -69,6 +69,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-179: Most arithmetic backward nodes and the broadcast gradient reducer are non-differentiable, silently breaking `create_graph` (#1873)
 - Add PyTorch-style batched/hermitian/tensor-tolerance matrix_rank for CPU and CUDA (#1990)
 - Add resident CUDA linalg norm/rank/cond paths and PyTorch-style matrix_rank int64 output (#1989)
 - Implement real torch.sparse.to_sparse_semi_structured CUDA packed layout (#1980)
