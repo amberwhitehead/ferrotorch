@@ -54,6 +54,7 @@ use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::gpu_dispatch::{CompareOp, GpuBufferHandle};
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
+use std::sync::Arc;
 
 /// Contiguous tensor of booleans, device-aware.
 ///
@@ -62,17 +63,17 @@ use crate::tensor::Tensor;
 /// behaviour is byte-identical to the pre-Phase-3a `Arc<Vec<bool>>` design.
 #[derive(Debug)]
 pub struct BoolTensor {
-    storage: TensorStorage<bool>,
+    storage: Arc<TensorStorage<bool>>,
     shape: Vec<usize>,
 }
 
 impl Clone for BoolTensor {
-    /// Clone the tensor. For CPU storage this clones the `Vec`; for GPU storage
-    /// it allocates a new device buffer with the same contents (via the
-    /// backend's `clone_buffer`). Delegates to [`TensorStorage::clone`].
+    /// Clone the tensor handle. This is a shallow metadata/storage-handle copy:
+    /// the returned tensor aliases the same [`TensorStorage`] through an
+    /// `Arc`, matching `Tensor<T>` and PyTorch tensor handle semantics.
     fn clone(&self) -> Self {
         Self {
-            storage: self.storage.clone(),
+            storage: Arc::clone(&self.storage),
             shape: self.shape.clone(),
         }
     }
@@ -96,7 +97,7 @@ impl BoolTensor {
             });
         }
         Ok(Self {
-            storage: TensorStorage::cpu(data),
+            storage: Arc::new(TensorStorage::cpu(data)),
             shape,
         })
     }
@@ -111,7 +112,7 @@ impl BoolTensor {
         // shape=[] -> 0-d scalar (numel 1); shape=[0] -> empty (numel 0). (#805)
         let total = crate::shape::numel(shape);
         Self {
-            storage: TensorStorage::cpu(vec![false; total]),
+            storage: Arc::new(TensorStorage::cpu(vec![false; total])),
             shape: shape.to_vec(),
         }
     }
@@ -121,7 +122,7 @@ impl BoolTensor {
         // shape=[] -> 0-d scalar (numel 1); shape=[0] -> empty (numel 0). (#805)
         let total = crate::shape::numel(shape);
         Self {
-            storage: TensorStorage::cpu(vec![true; total]),
+            storage: Arc::new(TensorStorage::cpu(vec![true; total])),
             shape: shape.to_vec(),
         }
     }
@@ -269,7 +270,7 @@ impl BoolTensor {
             });
         }
         Ok(Self {
-            storage: TensorStorage::gpu(handle),
+            storage: Arc::new(TensorStorage::gpu(handle)),
             shape,
         })
     }
@@ -280,7 +281,8 @@ impl BoolTensor {
     /// [`Tensor::to`](crate::tensor::Tensor) / `IntTensor::to`: CPU→CUDA uploads
     /// via `GpuBackend::cpu_to_gpu` (handle tagged `DType::Bool`), CUDA→CPU reads
     /// back via `gpu_to_cpu`. Both are bit-exact. On-device→same-device is a
-    /// cheap storage clone.
+    /// shallow handle clone that aliases storage, matching PyTorch's no-op
+    /// same-device `.to(...)` behavior.
     ///
     /// This is the **explicit** transfer entry point (PyTorch parity — like
     /// `.cuda()` / `.cpu()`). The host-readback inside the CUDA→CPU arm is the
@@ -301,7 +303,7 @@ impl BoolTensor {
                 let data = self.data()?.to_vec();
                 let storage = TensorStorage::on_device(data, device)?;
                 Ok(Self {
-                    storage,
+                    storage: Arc::new(storage),
                     shape: self.shape.clone(),
                 })
             }
@@ -319,7 +321,7 @@ impl BoolTensor {
                 // pattern.
                 let data: Vec<bool> = bytes.iter().map(|&b| b != 0).collect();
                 Ok(Self {
-                    storage: TensorStorage::cpu(data),
+                    storage: Arc::new(TensorStorage::cpu(data)),
                     shape: self.shape.clone(),
                 })
             }
@@ -354,7 +356,7 @@ impl BoolTensor {
             .map(|&b| !b)
             .collect();
         Self {
-            storage: TensorStorage::cpu(out),
+            storage: Arc::new(TensorStorage::cpu(out)),
             shape: self.shape.clone(),
         }
     }
@@ -450,7 +452,7 @@ impl BoolTensor {
                 .map(|(&a, &b)| f(a, b))
                 .collect();
             return Ok(Self {
-                storage: TensorStorage::cpu(out),
+                storage: Arc::new(TensorStorage::cpu(out)),
                 shape: common,
             });
         }
@@ -470,8 +472,9 @@ impl BoolTensor {
         Self::from_vec(out, common)
     }
 
-    /// Reshape (must preserve numel). Metadata-only; the storage is cloned
-    /// (cheap for CPU; a `clone_buffer` for GPU — no host readback).
+    /// Reshape (must preserve numel). Metadata-only; the returned tensor aliases
+    /// the same storage through a shallow `Arc` clone, matching PyTorch view
+    /// reshape semantics for contiguous tensors.
     pub fn reshape(&self, shape: &[usize]) -> FerrotorchResult<Self> {
         // shape=[] -> 0-d scalar (numel 1); shape=[0,...] -> empty (numel 0). (#805)
         let new_total = crate::shape::checked_numel(shape, "BoolTensor::reshape")?;
@@ -484,7 +487,7 @@ impl BoolTensor {
             });
         }
         Ok(Self {
-            storage: self.storage.clone(),
+            storage: Arc::clone(&self.storage),
             shape: shape.to_vec(),
         })
     }
@@ -964,6 +967,10 @@ mod tests {
         let r = m.reshape(&[2, 3]).unwrap();
         assert_eq!(r.shape(), &[2, 3]);
         assert_eq!(r.data().unwrap(), m.data().unwrap());
+        assert!(
+            Arc::ptr_eq(&m.storage, &r.storage),
+            "BoolTensor::reshape must be metadata-only and share storage"
+        );
     }
 
     #[test]
@@ -991,6 +998,21 @@ mod tests {
         let m2 = m.clone();
         assert_eq!(m2.data().unwrap(), &[true, false, true, true, false]);
         assert_eq!(m2.device(), Device::Cpu);
+        assert!(
+            Arc::ptr_eq(&m.storage, &m2.storage),
+            "BoolTensor::clone must be a shallow handle copy"
+        );
+    }
+
+    #[test]
+    fn same_device_to_aliases_storage() {
+        let m = BoolTensor::from_vec(vec![true, false, true], vec![3]).unwrap();
+        let m2 = m.to(Device::Cpu).unwrap();
+        assert_eq!(m2.data().unwrap(), &[true, false, true]);
+        assert!(
+            Arc::ptr_eq(&m.storage, &m2.storage),
+            "BoolTensor::to(Device::Cpu) on a CPU tensor must be a no-op handle copy"
+        );
     }
 
     // -----------------------------------------------------------------------

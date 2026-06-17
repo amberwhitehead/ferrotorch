@@ -51,13 +51,13 @@ plus the `at::Tensor` storage-ownership pattern in
   `gpu_handle_mut`, `cubecl_handle`.
 - REQ-6: `try_clone` — fallible deep-clone. CPU clones the Vec; GPU
   routes through `backend.clone_buffer`; Cubecl uses
-  `handle.clone_handle`; Meta clones the descriptor. `Clone::clone`
-  delegates to `try_clone` and panics on backend failure (documented).
+  `handle.clone_handle`; Meta clones the descriptor. `TensorStorage`
+  intentionally does not implement `Clone`: tensor handle copies alias
+  storage through `Arc<TensorStorage<_>>`, while deep copies can fail.
 - REQ-7: `try_clone_subregion(offset, numel)` — clone a contiguous
-  sub-slice for narrow / select views. CPU slices the Vec
-  zero-copy-ish; GPU goes through D2H + H2D under the source handle's
-  dtype tag; Cubecl currently errors (sub-region upload not
-  implemented).
+  sub-slice for narrow / select views. CPU slices the Vec; CUDA routes
+  through `backend.clone_buffer_region` so valid subregions stay
+  resident; Cubecl currently errors (sub-region upload not implemented).
 - REQ-8: `Drop` impl returns CPU `Vec` to `cpu_pool::pool_return_cpu`
   (`storage.rs:517-528`); GPU / Cubecl handles cleanup via their own
   Drop chain.
@@ -86,8 +86,8 @@ plus the `at::Tensor` storage-ownership pattern in
 The file is ~540 LOC, mostly variant dispatch and SAFETY-block
 documentation.
 
-- `TensorStorage<T>` is a 2-field struct: `data: StorageBuffer<T>` +
-  `device: Device`. The device is redundant when the variant is CPU
+- `TensorStorage<T>` stores `data: UnsafeCell<StorageBuffer<T>>`,
+  `device: Device`, and a version counter. The device is redundant when the variant is CPU
   / Gpu / Meta (recoverable from the buffer), but explicit for XPU
   where the handle alone doesn't tell you the ordinal in a way the
   outer machinery wants.
@@ -150,7 +150,7 @@ without failure.
 | REQ-3 | SHIPPED | impl: constructors at `cpu in ferrotorch-core/src/storage.rs` (`cpu`), `cpu in ferrotorch-core/src/storage.rs` (`meta`), `meta in ferrotorch-core/src/storage.rs` (`meta_filled`), `meta_filled in ferrotorch-core/src/storage.rs` (`on_device`), `on_device in ferrotorch-core/src/storage.rs` (`on_device_pinned`), `on_device_pinned in ferrotorch-core/src/storage.rs` (`xpu_from_handle`), `xpu_from_handle in ferrotorch-core/src/storage.rs` (`gpu`); non-test consumers: `meta_filled in creation.rs, 17, 24, 29, 34` and many `tensor.rs` sites construct via these. |
 | REQ-4 | SHIPPED | impl: `try_as_slice` at `ferrotorch-core/src/storage.rs:317`, `try_as_mut_slice` at `:333`; non-test consumer: `Tensor::data` at `data in tensor.rs` and `Tensor::data_mut` at `data_mut in tensor.rs` route through these — every CPU element-access call hits this path. |
 | REQ-5 | SHIPPED | impl: `is_cpu in ferrotorch-core/src/storage.rs`, `is_gpu in ferrotorch-core/src/storage.rs`, `is_cubecl in ferrotorch-core/src/storage.rs`, `is_meta in ferrotorch-core/src/storage.rs`, `gpu_handle in ferrotorch-core/src/storage.rs`, `gpu_handle_mut in ferrotorch-core/src/storage.rs`, `cubecl_handle in ferrotorch-core/src/storage.rs`; non-test consumer: every CUDA-dispatched op tests `is_gpu` or calls `gpu_handle` (e.g. `gpu_handle in tensor.rs` in `to(Device::Cpu)`). |
-| REQ-6 | SHIPPED | impl: `try_clone` at `ferrotorch-core/src/storage.rs:397`, `Clone::clone` at `:506`; non-test consumer: `Tensor::clone` and any deep-clone path in autograd accumulation (`tensor.rs:565`) flow through this. |
+| REQ-6 | SHIPPED | impl: explicit deep-copy `try_clone` in `ferrotorch-core/src/storage.rs`; non-test consumers that need fresh storage call it directly, while tensor-handle clones alias through `Arc<TensorStorage<_>>`. |
 | REQ-7 | SHIPPED | impl: `try_clone_subregion` at `ferrotorch-core/src/storage.rs:434`; non-test consumer: `Tensor::into_storage_and_shape` at `tensor.rs:763, 768, 776` calls `try_clone_subregion(offset, numel)` to materialise narrow/select views before returning ownership. |
 | REQ-8 | SHIPPED | impl: `Drop for TensorStorage<T>` at `ferrotorch-core/src/storage.rs`; non-test consumer: every temporary CPU tensor that goes out of scope in any op hits this drop. The CPU pool hit-rate test at `cpu_pool in cpu_pool.rs` pins the integration. |
 | REQ-9 | SHIPPED | impl: `meta_filled` at `ferrotorch-core/src/storage.rs:116`, `meta_fill_value` at `:129`; non-test consumer: `Tensor::meta_fill_value` at `tensor.rs:1089` exposes the value to `creation::full_meta` callers — production user surface for meta-tensor inspection. |

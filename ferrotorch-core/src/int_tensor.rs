@@ -52,6 +52,7 @@ use crate::dtype::Element;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::gpu_dispatch::GpuBufferHandle;
 use crate::storage::TensorStorage;
+use std::sync::Arc;
 
 /// Element types supported by [`IntTensor`].
 ///
@@ -127,17 +128,17 @@ impl IntElement for i64 {
 /// behaviour is byte-identical to the pre-Phase-2a `Arc<Vec<I>>` design.
 #[derive(Debug)]
 pub struct IntTensor<I: IntElement> {
-    storage: TensorStorage<I>,
+    storage: Arc<TensorStorage<I>>,
     shape: Vec<usize>,
 }
 
 impl<I: IntElement> Clone for IntTensor<I> {
-    /// Clone the tensor. For CPU storage this clones the `Vec`; for GPU storage
-    /// it allocates a new device buffer with the same contents (via the
-    /// backend's `clone_buffer`). Delegates to [`TensorStorage::clone`].
+    /// Clone the tensor handle. This is a shallow metadata/storage-handle copy:
+    /// the returned tensor aliases the same [`TensorStorage`] through an
+    /// `Arc`, matching `Tensor<T>` and PyTorch tensor handle semantics.
     fn clone(&self) -> Self {
         Self {
-            storage: self.storage.clone(),
+            storage: Arc::clone(&self.storage),
             shape: self.shape.clone(),
         }
     }
@@ -162,7 +163,7 @@ impl<I: IntElement> IntTensor<I> {
             });
         }
         Ok(Self {
-            storage: TensorStorage::cpu(data),
+            storage: Arc::new(TensorStorage::cpu(data)),
             shape,
         })
     }
@@ -178,7 +179,7 @@ impl<I: IntElement> IntTensor<I> {
         let total = crate::shape::numel(shape);
         let zero = I::try_from_i64(0).expect("0 fits in any IntElement");
         Self {
-            storage: TensorStorage::cpu(vec![zero; total]),
+            storage: Arc::new(TensorStorage::cpu(vec![zero; total])),
             shape: shape.to_vec(),
         }
     }
@@ -202,7 +203,7 @@ impl<I: IntElement> IntTensor<I> {
     /// 0-d scalar (CPU-resident).
     pub fn scalar(v: I) -> Self {
         Self {
-            storage: TensorStorage::cpu(vec![v]),
+            storage: Arc::new(TensorStorage::cpu(vec![v])),
             shape: Vec::new(),
         }
     }
@@ -274,7 +275,8 @@ impl<I: IntElement> IntTensor<I> {
     /// Reuses the same DType-tagged raw-byte transport as `Tensor<T>::to`:
     /// CPU→CUDA uploads via `GpuBackend::cpu_to_gpu` (handle tagged `I::dtype()`
     /// = `DType::I16` / `I32` / `I64`), CUDA→CPU reads back via `gpu_to_cpu`. Both are
-    /// bit-exact. On-device→same-device is a cheap storage clone.
+    /// bit-exact. On-device→same-device is a shallow handle clone that aliases
+    /// storage, matching PyTorch's no-op same-device `.to(...)` behavior.
     ///
     /// This is the **explicit** transfer entry point (PyTorch parity — like
     /// `.cuda()` / `.cpu()`). The host-readback inside the CUDA→CPU arm is the
@@ -287,8 +289,7 @@ impl<I: IntElement> IntTensor<I> {
     ///   (XPU / MPS are not wired for `IntTensor` in Phase 2a).
     pub fn to(&self, device: Device) -> FerrotorchResult<IntTensor<I>> {
         if self.device() == device {
-            // Same device: clone the storage (CPU Vec clone, or GPU
-            // clone_buffer). No transfer.
+            // Same device: shallow handle clone, no data movement.
             return Ok(self.clone());
         }
 
@@ -300,7 +301,7 @@ impl<I: IntElement> IntTensor<I> {
                 let data = self.data()?.to_vec();
                 let storage = TensorStorage::on_device(data, device)?;
                 Ok(Self {
-                    storage,
+                    storage: Arc::new(storage),
                     shape: self.shape.clone(),
                 })
             }
@@ -357,7 +358,7 @@ impl<I: IntElement> IntTensor<I> {
                     data.set_len(len);
                 }
                 Ok(Self {
-                    storage: TensorStorage::cpu(data),
+                    storage: Arc::new(TensorStorage::cpu(data)),
                     shape: self.shape.clone(),
                 })
             }
@@ -416,11 +417,9 @@ impl<I: IntElement> IntTensor<I> {
         IntTensor::<J>::from_vec(out, self.shape.clone())
     }
 
-    /// Reshape (must preserve numel; no data copy on CPU).
-    ///
-    /// Works for any device residency: the reshape is metadata-only, and the
-    /// storage is cloned (cheap for CPU; a `clone_buffer` for GPU, matching the
-    /// existing `Clone` semantics — no host readback).
+    /// Reshape (must preserve numel). Metadata-only; the returned tensor aliases
+    /// the same storage through a shallow `Arc` clone, matching PyTorch view
+    /// reshape semantics for contiguous tensors.
     pub fn reshape(&self, shape: &[usize]) -> FerrotorchResult<Self> {
         // shape=[] -> 0-d scalar (numel 1); shape=[0,...] -> empty (numel 0). (#805)
         let new_total = crate::shape::checked_numel(shape, "IntTensor::reshape")?;
@@ -433,7 +432,7 @@ impl<I: IntElement> IntTensor<I> {
             });
         }
         Ok(Self {
-            storage: self.storage.clone(),
+            storage: Arc::clone(&self.storage),
             shape: shape.to_vec(),
         })
     }
@@ -461,7 +460,7 @@ impl<I: IntElement> IntTensor<I> {
             "from_gpu_handle: handle dtype tag must match IntElement"
         );
         Self {
-            storage: TensorStorage::gpu(handle),
+            storage: Arc::new(TensorStorage::gpu(handle)),
             shape,
         }
     }
@@ -960,6 +959,10 @@ mod tests {
         let r = t.reshape(&[2, 3]).unwrap();
         assert_eq!(r.shape(), &[2, 3]);
         assert_eq!(r.data().unwrap(), &[1, 2, 3, 4, 5, 6]);
+        assert!(
+            Arc::ptr_eq(&t.storage, &r.storage),
+            "IntTensor::reshape must be metadata-only and share storage"
+        );
     }
 
     #[test]
@@ -1005,5 +1008,20 @@ mod tests {
         let t2 = t.clone();
         assert_eq!(t2.data().unwrap(), &[0, 1, 2, 3]);
         assert_eq!(t2.device(), Device::Cpu);
+        assert!(
+            Arc::ptr_eq(&t.storage, &t2.storage),
+            "IntTensor::clone must be a shallow handle copy"
+        );
+    }
+
+    #[test]
+    fn same_device_to_aliases_storage() {
+        let t = IntTensor::<i32>::arange(4).unwrap();
+        let t2 = t.to(Device::Cpu).unwrap();
+        assert_eq!(t2.data().unwrap(), &[0, 1, 2, 3]);
+        assert!(
+            Arc::ptr_eq(&t.storage, &t2.storage),
+            "IntTensor::to(Device::Cpu) on a CPU tensor must be a no-op handle copy"
+        );
     }
 }

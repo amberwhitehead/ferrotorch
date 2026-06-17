@@ -95,15 +95,17 @@ awareness + GPU kernels) + #615 (comparison constructors).
 
 ```rust
 pub struct BoolTensor {
-    storage: TensorStorage<bool>,
+    storage: Arc<TensorStorage<bool>>,
     shape: Vec<usize>,
 }
 ```
 
+`Clone` is a shallow tensor-handle copy: it clones the `Arc` and aliases the
+same storage, matching `Tensor<T>` and PyTorch tensor handle semantics.
 `TensorStorage<bool>` is the ferrotorch storage primitive — either
-`Cpu(Vec<bool>)` or `Gpu(GpuBufferHandle tagged DType::Bool)`. On
-device a `bool` is stored as a `u8` (cudarc has no `DeviceRepr` for
-`bool`; each byte is 0 or 1, byte-identical to the host `&[bool]`).
+`Cpu(Vec<bool>)` or `Gpu(GpuBufferHandle tagged DType::Bool)`. On device a
+`bool` is stored as a `u8` (cudarc has no `DeviceRepr` for `bool`; each byte is
+0 or 1, byte-identical to the host `&[bool]`).
 
 ### Constructors (`bool_tensor.rs:82-139`)
 

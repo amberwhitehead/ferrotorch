@@ -7,7 +7,7 @@
 //! | REQ-3 | SHIPPED | constructors `cpu`, `gpu`, `xpu_from_handle`, `meta`, `meta_filled`, `on_device`, `on_device_pinned`; non-test consumers across `creation::*` and `Tensor::to`. |
 //! | REQ-4 | SHIPPED | impl `try_as_slice`, `try_as_mut_slice` (+ crate-internal `try_as_mut_slice_aliased` post-CORE-001); non-test consumer `Tensor::data` (`try_as_slice`), `Tensor::data_mut` (`try_as_mut_slice_aliased`). |
 //! | REQ-5 | SHIPPED | impl variant predicates + handle accessors; non-test consumer every CUDA-dispatched op via `is_gpu` / `gpu_handle`. |
-//! | REQ-6 | SHIPPED | impl `try_clone` + `Clone`; non-test consumer `Tensor::accumulate_grad`. |
+//! | REQ-6 | SHIPPED | impl explicit deep-copy `try_clone`; non-test consumer `Tensor::accumulate_grad`. |
 //! | REQ-7 | SHIPPED | impl `try_clone_subregion`; non-test consumer `Tensor::into_storage_and_shape`. |
 //! | REQ-8 | SHIPPED | impl `Drop`; non-test consumer every CPU temp tensor returning Vec to `cpu_pool::pool_return_cpu`. |
 //! | REQ-9 | SHIPPED | impl `meta_fill_value`; non-test consumer `Tensor::meta_fill_value` for `creation::full_meta` round-trip. |
@@ -947,8 +947,13 @@ impl<T: Element> TensorStorage<T> {
         unsafe { std::ptr::read(this.data.get()) }
     }
 
-    /// Fallible clone — same as `Clone::clone` but returns `Result` instead
-    /// of panicking when a backend call fails.
+    /// Explicit deep copy of the storage contents.
+    ///
+    /// `TensorStorage` deliberately does not implement [`Clone`]: tensor handle
+    /// copies alias storage through `Arc<TensorStorage<_>>` (matching PyTorch's
+    /// intrusive-pointer tensor handles), while deep copies may allocate device
+    /// memory and can fail. Callers that need a fresh allocation must use this
+    /// fallible API and propagate the error.
     ///
     /// Reads the source buffer, so it falls under the type-level
     /// synchronization contract: cloning concurrently with an unsynchronized
@@ -1031,27 +1036,6 @@ impl<T: Element> TensorStorage<T> {
                 ),
             }),
             StorageBuffer::Meta { .. } => Ok(Self::meta(numel)),
-        }
-    }
-}
-
-impl<T: Element> Clone for TensorStorage<T> {
-    /// Clone the storage. Delegates to [`Self::try_clone`] so the GPU/CubeCL
-    /// branches share one fallible-clone implementation.
-    ///
-    /// # Panics
-    /// Panics with a structured message naming the underlying [`crate::error::FerrotorchError`]
-    /// (most commonly [`crate::error::FerrotorchError::DeviceUnavailable`] when no GPU backend
-    /// is registered, or a backend `clone_buffer` failure). Use
-    /// [`Self::try_clone`] when you need to handle the failure explicitly
-    /// instead of panicking.
-    fn clone(&self) -> Self {
-        match self.try_clone() {
-            Ok(cloned) => cloned,
-            Err(e) => panic!(
-                "TensorStorage::clone failed: {e}. \
-                 Use TensorStorage::try_clone() to handle this case explicitly."
-            ),
         }
     }
 }

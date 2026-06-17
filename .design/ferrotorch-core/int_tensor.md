@@ -117,14 +117,15 @@ used by every cross-width op.
 
 ```rust
 pub struct IntTensor<I: IntElement> {
-    storage: TensorStorage<I>,
+    storage: Arc<TensorStorage<I>>,
     shape: Vec<usize>,
 }
 ```
 
-`Clone` (`clone in int_tensor.rs`) delegates to `TensorStorage::clone` — cheap
-for CPU `Vec<I>`, allocates a fresh device buffer for GPU (via
-`clone_buffer`).
+`Clone` is a shallow tensor-handle copy: it clones the `Arc` and aliases the
+same storage, matching `Tensor<T>` and PyTorch tensor handle semantics. Explicit
+fresh storage copies use `TensorStorage::try_clone`, which is fallible because
+device allocation/copy can fail.
 
 ### Device residency (`int_tensor.rs:260-343`)
 
