@@ -809,6 +809,61 @@ DONE:\n\
 }\n\
 ";
 
+/// PTX for 2D matrix transpose over raw 16-bit payloads. Used by f16/bf16
+/// buffers, where the numeric interpretation is carried by the surrounding
+/// `GpuBufferHandle` dtype tag; this kernel is a pure bit copy.
+#[cfg(feature = "cuda")]
+pub(crate) const TRANSPOSE_2D_U16_PTX: &str = "\
+.version 7.0\n\
+.target sm_52\n\
+.address_size 64\n\
+\n\
+.visible .entry transpose_2d_u16_kernel(\n\
+    .param .u64 in_ptr,\n\
+    .param .u64 out_ptr,\n\
+    .param .u32 M,\n\
+    .param .u32 N,\n\
+    .param .u32 total\n\
+) {\n\
+    .reg .u32 %r_tid, %bid, %bdim, %total_reg, %M_reg, %N_reg;\n\
+    .reg .u32 %out_row, %out_col, %in_idx;\n\
+    .reg .u64 %in, %out, %off_in, %off_out;\n\
+    .reg .u16 %val;\n\
+    .reg .pred %p;\n\
+\n\
+    ld.param.u64 %in, [in_ptr];\n\
+    ld.param.u64 %out, [out_ptr];\n\
+    ld.param.u32 %M_reg, [M];\n\
+    ld.param.u32 %N_reg, [N];\n\
+    ld.param.u32 %total_reg, [total];\n\
+\n\
+    mov.u32 %bid, %ctaid.x;\n\
+    mov.u32 %bdim, %ntid.x;\n\
+    mov.u32 %r_tid, %tid.x;\n\
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;\n\
+\n\
+    setp.ge.u32 %p, %r_tid, %total_reg;\n\
+    @%p bra DONE;\n\
+\n\
+    div.u32 %out_row, %r_tid, %M_reg;\n\
+    rem.u32 %out_col, %r_tid, %M_reg;\n\
+    mad.lo.u32 %in_idx, %out_col, %N_reg, %out_row;\n\
+\n\
+    cvt.u64.u32 %off_in, %in_idx;\n\
+    shl.b64 %off_in, %off_in, 1;\n\
+    add.u64 %off_in, %in, %off_in;\n\
+    ld.global.u16 %val, [%off_in];\n\
+\n\
+    cvt.u64.u32 %off_out, %r_tid;\n\
+    shl.b64 %off_out, %off_out, 1;\n\
+    add.u64 %off_out, %out, %off_out;\n\
+    st.global.u16 [%off_out], %val;\n\
+\n\
+DONE:\n\
+    ret;\n\
+}\n\
+";
+
 // ---------------------------------------------------------------------------
 // 4D permute (0,2,1,3) PTX kernel — swap dims 1 and 2
 // ---------------------------------------------------------------------------
@@ -22948,6 +23003,89 @@ pub fn gpu_transpose_2d(
             .launch_builder(&f)
             .arg(input.inner())
             .arg(out.inner_mut())
+            .arg(&m_u32)
+            .arg(&n_u32)
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+
+    Ok(out)
+}
+
+/// 2D matrix transpose on GPU for raw u16 payloads: `[M, N]` -> `[N, M]`.
+#[cfg(feature = "cuda")]
+pub fn gpu_transpose_2d_u16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    m: usize,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    use cudarc::driver::PushKernelArg;
+
+    let total = m.checked_mul(n).ok_or_else(|| GpuError::ShapeMismatch {
+        op: "transpose_2d_u16",
+        expected: vec![usize::MAX],
+        got: vec![m, n],
+    })?;
+    if input.len() < total {
+        return Err(GpuError::ShapeMismatch {
+            op: "transpose_2d_u16",
+            expected: vec![m, n],
+            got: vec![input.len()],
+        });
+    }
+
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        TRANSPOSE_2D_U16_PTX,
+        "transpose_2d_u16_kernel",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "transpose_2d_u16_kernel",
+                source: e,
+            });
+        }
+    };
+
+    let mut out = stream.alloc_zeros::<u16>(total)?;
+    let cfg = launch_cfg(total)?;
+    let m_u32 = u32::try_from(m).map_err(|_| GpuError::ShapeMismatch {
+        op: "transpose_2d_u16",
+        expected: vec![u32::MAX as usize],
+        got: vec![m],
+    })?;
+    let n_u32 = u32::try_from(n).map_err(|_| GpuError::ShapeMismatch {
+        op: "transpose_2d_u16",
+        expected: vec![u32::MAX as usize],
+        got: vec![n],
+    })?;
+    let total_u32 = u32::try_from(total).map_err(|_| GpuError::ShapeMismatch {
+        op: "transpose_2d_u16",
+        expected: vec![u32::MAX as usize],
+        got: vec![total],
+    })?;
+
+    // SAFETY:
+    // - `f` is the PTX `transpose_2d_u16_kernel` entry compiled above; ABI is
+    //   `(in_ptr, out_ptr, M, N, total)`.
+    // - `input.len() >= m*n` is checked above; `out` is freshly allocated with
+    //   exactly `m*n` u16 elements and is mutably borrowed only for this launch.
+    // - Thread `t in [0,total)` maps to output `[N,M]` index
+    //   `(row=t/M, col=t%M)` and reads input `[M,N]` index `col*N + row`, both
+    //   bounded by `total - 1`. The PTX bound check skips excess grid threads.
+    // - The kernel uses only `ld.global.u16`/`st.global.u16`, so it preserves
+    //   f16/bf16 payload bits exactly; dtype tags are restored by backend
+    //   wrappers, not inferred here.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(&mut out)
             .arg(&m_u32)
             .arg(&n_u32)
             .arg(&total_u32)

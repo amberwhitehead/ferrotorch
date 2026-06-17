@@ -5049,6 +5049,34 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer(result, a.device_ordinal()))
     }
 
+    #[cfg(feature = "cuda")]
+    fn transpose_2d_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        m: usize,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::kernels::gpu_transpose_2d_u16(a_buf, m, n, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn transpose_2d_f16(
+        &self,
+        a: &GpuBufferHandle,
+        m: usize,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result =
+            crate::kernels::gpu_transpose_2d_u16(a_buf, m, n, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
     fn permute_0213_f32(
         &self,
         a: &GpuBufferHandle,
@@ -10706,6 +10734,23 @@ impl GpuBackend for CudaBackendImpl {
         let b_buf = Self::unwrap_buffer_f16(b)?;
         let dev = self.device(a.device_ordinal())?;
         let result = crate::blas::gpu_matmul_f16_f16(a_buf, b_buf, m, k, n, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn matmul_f16_f16_nt(
+        &self,
+        a: &GpuBufferHandle,
+        b: &GpuBufferHandle,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let a_buf = Self::unwrap_buffer_f16(a)?;
+        let b_buf = Self::unwrap_buffer_f16(b)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::blas::gpu_matmul_f16_f16_nt(a_buf, b_buf, m, k, n, dev)
             .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
     }

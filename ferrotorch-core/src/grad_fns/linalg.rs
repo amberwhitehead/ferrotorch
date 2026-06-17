@@ -50,7 +50,7 @@ use crate::autograd::autocast_ops::{AutocastCategory, autocast_guard};
 use crate::autograd::no_grad::is_grad_enabled;
 use crate::dtype::{DType, Element, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
-use crate::gpu_dispatch::gpu_backend;
+use crate::gpu_dispatch::{GpuBackend, GpuBufferHandle, gpu_backend};
 use crate::linalg as linalg_fwd;
 use crate::ops::linalg::{self, mm, transpose};
 use crate::storage::TensorStorage;
@@ -87,6 +87,112 @@ fn is_bf16<T: Float>() -> bool {
 #[inline]
 fn is_f16<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<half::f16>()
+}
+
+fn cuda_matmul_same_dtype<T: Float>(
+    backend: &dyn GpuBackend,
+    a: &GpuBufferHandle,
+    b: &GpuBufferHandle,
+    m: usize,
+    k: usize,
+    n: usize,
+    op: &'static str,
+) -> FerrotorchResult<GpuBufferHandle> {
+    if is_f32::<T>() {
+        backend.matmul_f32(a, b, m, k, n)
+    } else if is_f64::<T>() {
+        backend.matmul_f64(a, b, m, k, n)
+    } else if is_bf16::<T>() {
+        backend.matmul_bf16_bf16(a, b, m, k, n)
+    } else if is_f16::<T>() {
+        backend.matmul_f16_f16(a, b, m, k, n)
+    } else {
+        Err(FerrotorchError::NotImplementedOnCuda { op })
+    }
+}
+
+fn cuda_matmul_nt_same_dtype<T: Float>(
+    backend: &dyn GpuBackend,
+    a: &GpuBufferHandle,
+    b: &GpuBufferHandle,
+    m: usize,
+    k: usize,
+    n: usize,
+    op: &'static str,
+) -> FerrotorchResult<GpuBufferHandle> {
+    if is_f32::<T>() {
+        backend.matmul_f32_nt(a, b, m, k, n)
+    } else if is_f64::<T>() {
+        backend.matmul_f64_nt(a, b, m, k, n)
+    } else if is_bf16::<T>() {
+        backend.matmul_bf16_bf16_nt(a, b, m, k, n)
+    } else if is_f16::<T>() {
+        backend.matmul_f16_f16_nt(a, b, m, k, n)
+    } else {
+        Err(FerrotorchError::NotImplementedOnCuda { op })
+    }
+}
+
+fn cuda_transpose_2d_same_dtype<T: Float>(
+    backend: &dyn GpuBackend,
+    a: &GpuBufferHandle,
+    m: usize,
+    n: usize,
+    op: &'static str,
+) -> FerrotorchResult<GpuBufferHandle> {
+    if is_f32::<T>() {
+        backend.transpose_2d_f32(a, m, n)
+    } else if is_f64::<T>() {
+        backend.transpose_2d_f64(a, m, n)
+    } else if is_bf16::<T>() {
+        backend.transpose_2d_bf16(a, m, n)
+    } else if is_f16::<T>() {
+        backend.transpose_2d_f16(a, m, n)
+    } else {
+        Err(FerrotorchError::NotImplementedOnCuda { op })
+    }
+}
+
+fn cuda_broadcast_add_same_dtype<T: Float>(
+    backend: &dyn GpuBackend,
+    a: &GpuBufferHandle,
+    b: &GpuBufferHandle,
+    a_shape: &[usize],
+    b_shape: &[usize],
+    out_shape: &[usize],
+    op: &'static str,
+) -> FerrotorchResult<GpuBufferHandle> {
+    if is_f32::<T>() {
+        backend.broadcast_add_f32(a, b, a_shape, b_shape, out_shape)
+    } else if is_f64::<T>() {
+        backend.broadcast_add_f64(a, b, a_shape, b_shape, out_shape)
+    } else if is_bf16::<T>() {
+        backend.broadcast_add_bf16(a, b, a_shape, b_shape, out_shape)
+    } else if is_f16::<T>() {
+        backend.broadcast_add_f16(a, b, a_shape, b_shape, out_shape)
+    } else {
+        Err(FerrotorchError::NotImplementedOnCuda { op })
+    }
+}
+
+fn cuda_sum_axis_same_dtype<T: Float>(
+    backend: &dyn GpuBackend,
+    a: &GpuBufferHandle,
+    shape: &[usize],
+    axis: usize,
+    op: &'static str,
+) -> FerrotorchResult<GpuBufferHandle> {
+    if is_f32::<T>() {
+        backend.sum_axis_f32(a, shape, axis)
+    } else if is_f64::<T>() {
+        backend.sum_axis_f64(a, shape, axis)
+    } else if is_bf16::<T>() {
+        backend.sum_axis_bf16_bf16(a, shape, axis)
+    } else if is_f16::<T>() {
+        backend.sum_axis_f16(a, shape, axis)
+    } else {
+        Err(FerrotorchError::NotImplementedOnCuda { op })
+    }
 }
 
 fn ensure_same_device<T: Float>(expected: &Tensor<T>, got: &Tensor<T>) -> FerrotorchResult<()> {
@@ -1134,22 +1240,19 @@ impl<T: Float> MmBtBackward<T> {
 
 impl<T: Float> GradFn<T> for MmBtBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        // GPU-native path for f32/f64.
-        if grad_output.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        // GPU-native path for f32/f64/bf16/f16. PyTorch keeps half/bfloat
+        // attention and linear VJPs resident on CUDA; no CPU fallback here.
+        if grad_output.is_cuda() {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
             let go_h = grad_output.gpu_handle()?;
             let m = grad_output.shape()[0];
             let n = grad_output.shape()[1];
-            let f64_path = is_f64::<T>();
 
             let grad_a = if self.a.requires_grad() {
                 let k = self.b.shape()[1];
                 let b_h = self.b.gpu_handle()?;
-                let result_h = if f64_path {
-                    backend.matmul_f64(go_h, b_h, m, n, k)?
-                } else {
-                    backend.matmul_f32(go_h, b_h, m, n, k)?
-                };
+                let result_h =
+                    cuda_matmul_same_dtype::<T>(backend, go_h, b_h, m, n, k, "MmBtBackward")?;
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
                     vec![m, k],
@@ -1162,16 +1265,9 @@ impl<T: Float> GradFn<T> for MmBtBackward<T> {
             let grad_b = if self.b.requires_grad() {
                 let k = self.a.shape()[1];
                 let a_h = self.a.gpu_handle()?;
-                let (got_h, result_h) = if f64_path {
-                    let got = backend.transpose_2d_f64(go_h, m, n)?;
-                    let r = backend.matmul_f64(&got, a_h, n, m, k)?;
-                    (got, r)
-                } else {
-                    let got = backend.transpose_2d_f32(go_h, m, n)?;
-                    let r = backend.matmul_f32(&got, a_h, n, m, k)?;
-                    (got, r)
-                };
-                let _ = got_h;
+                let got_h = cuda_transpose_2d_same_dtype::<T>(backend, go_h, m, n, "MmBtBackward")?;
+                let result_h =
+                    cuda_matmul_same_dtype::<T>(backend, &got_h, a_h, n, m, k, "MmBtBackward")?;
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
                     vec![n, k],
@@ -1182,10 +1278,6 @@ impl<T: Float> GradFn<T> for MmBtBackward<T> {
             };
 
             return Ok(vec![grad_a, grad_b]);
-        }
-
-        if grad_output.is_cuda() {
-            return Err(FerrotorchError::NotImplementedOnCuda { op: "MmBtBackward" });
         }
 
         let grad_a = if self.a.requires_grad() {
@@ -1231,22 +1323,21 @@ pub fn mm_bt_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> Ferrotorc
     let a = a.contiguous()?;
     let b = b.contiguous()?;
 
-    // GPU path: transpose B then matmul.
+    // GPU path: fused-transpose matmul. This is the natural layout for
+    // attention `Q @ K^T` and linear weights `[out, in]`, and it avoids a
+    // temporary transpose for every dtype.
     if a.is_cuda() {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        // Dtype-aware GPU dispatch (#800): mirror the backward, which already
-        // branches on `is_f64::<T>()`. The previous unconditional f32 path
-        // returned "GPU handle does not contain a CudaBuffer<f32>" for f64.
-        let handle = if is_f32::<T>() {
-            let bt = backend.transpose_2d_f32(b.gpu_handle()?, n, k)?;
-            backend.matmul_f32(a.gpu_handle()?, &bt, m, k, n)?
-        } else if is_f64::<T>() {
-            let bt = backend.transpose_2d_f64(b.gpu_handle()?, n, k)?;
-            backend.matmul_f64(a.gpu_handle()?, &bt, m, k, n)?
-        } else {
-            return Err(FerrotorchError::NotImplementedOnCuda { op: "mm_bt" });
-        };
+        let handle = cuda_matmul_nt_same_dtype::<T>(
+            backend,
+            a.gpu_handle()?,
+            b.gpu_handle()?,
+            m,
+            k,
+            n,
+            "mm_bt",
+        )?;
         let storage = TensorStorage::gpu(handle);
         let shape = vec![m, n];
 
@@ -1291,20 +1382,23 @@ impl<T: Float> GradFn<T> for LinearFusedBackward<T> {
         let m = grad_output.shape()[0];
         let n = grad_output.shape()[1];
 
-        // GPU-native path for f32/f64 tensors.
-        if grad_output.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
+        // GPU-native path for f32/f64/bf16/f16 tensors.
+        if grad_output.is_cuda() {
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
             let go_h = grad_output.gpu_handle()?;
-            let f64_path = is_f64::<T>();
 
             let grad_input = if self.input.requires_grad() {
                 let k = self.weight.shape()[1];
                 let w_h = self.weight.gpu_handle()?;
-                let result_h = if f64_path {
-                    backend.matmul_f64(go_h, w_h, m, n, k)?
-                } else {
-                    backend.matmul_f32(go_h, w_h, m, n, k)?
-                };
+                let result_h = cuda_matmul_same_dtype::<T>(
+                    backend,
+                    go_h,
+                    w_h,
+                    m,
+                    n,
+                    k,
+                    "LinearFusedBackward",
+                )?;
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
                     vec![m, k],
@@ -1317,13 +1411,17 @@ impl<T: Float> GradFn<T> for LinearFusedBackward<T> {
             let grad_weight = if self.weight.requires_grad() {
                 let k = self.input.shape()[1];
                 let inp_h = self.input.gpu_handle()?;
-                let result_h = if f64_path {
-                    let got_h = backend.transpose_2d_f64(go_h, m, n)?;
-                    backend.matmul_f64(&got_h, inp_h, n, m, k)?
-                } else {
-                    let got_h = backend.transpose_2d_f32(go_h, m, n)?;
-                    backend.matmul_f32(&got_h, inp_h, n, m, k)?
-                };
+                let got_h =
+                    cuda_transpose_2d_same_dtype::<T>(backend, go_h, m, n, "LinearFusedBackward")?;
+                let result_h = cuda_matmul_same_dtype::<T>(
+                    backend,
+                    &got_h,
+                    inp_h,
+                    n,
+                    m,
+                    k,
+                    "LinearFusedBackward",
+                )?;
                 Some(Tensor::from_storage(
                     TensorStorage::gpu(result_h),
                     vec![n, k],
@@ -1337,11 +1435,13 @@ impl<T: Float> GradFn<T> for LinearFusedBackward<T> {
                 if let Some(ref b) = self.bias {
                     if b.requires_grad() {
                         let go_shape = &[m, n];
-                        let summed = if f64_path {
-                            backend.sum_axis_f64(go_h, go_shape, 0)?
-                        } else {
-                            backend.sum_axis_f32(go_h, go_shape, 0)?
-                        };
+                        let summed = cuda_sum_axis_same_dtype::<T>(
+                            backend,
+                            go_h,
+                            go_shape,
+                            0,
+                            "LinearFusedBackward",
+                        )?;
                         Some(Tensor::from_storage(
                             TensorStorage::gpu(summed),
                             vec![n],
@@ -1362,12 +1462,6 @@ impl<T: Float> GradFn<T> for LinearFusedBackward<T> {
                 grads.push(grad_bias);
             }
             return Ok(grads);
-        }
-
-        if grad_output.is_cuda() {
-            return Err(FerrotorchError::NotImplementedOnCuda {
-                op: "LinearFusedBackward",
-            });
         }
 
         // CPU path.
@@ -1459,18 +1553,20 @@ pub fn linear_fused<T: Float>(
     if input.is_cuda() {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        // Dtype-aware GPU dispatch (#800): forward must branch on f32 vs. f64
-        // just as the backward already does. Calling `*_f32` kernels on f64
-        // handles surfaces "GPU handle does not contain a CudaBuffer<f32>".
+        // Dtype-aware GPU dispatch: every supported floating CUDA dtype has a
+        // resident `input @ weight^T` path. f32 autocast keeps its existing
+        // reduced-precision f32-output route; f16/bf16 tensors use resident
+        // f16/bf16 output, matching PyTorch parameter/activation dtype.
         let mut result_handle = if is_f32::<T>() {
             // C = input @ weight^T. weight is row-major [n=out, k=in], input is
             // [m, k]. The fused-transpose matmul folds weight's transpose into
             // the cuBLAS `transb` flag, so we drop the per-forward
             // `transpose_2d_f32(weight)` kernel launch + buffer alloc (#1679).
             if autocast_guard("linear") == Some(AutocastCategory::ReducedPrecision) {
-                // ReducedPrecision keeps the explicit-transpose + f16-accumulate
-                // path: there is no f16 fused-transpose kernel, and the f16
-                // matmul takes a [k, n] right operand (the transposed weight).
+                // ReducedPrecision keeps the explicit-transpose +
+                // f16-accumulate/f32-output path: there is no f32-input
+                // autocast fused-transpose kernel, and `matmul_f16_f32` takes a
+                // [k, n] right operand (the transposed weight).
                 let wt_handle = backend.transpose_2d_f32(weight.gpu_handle()?, n, k)?;
                 backend.matmul_f16_f32(input.gpu_handle()?, &wt_handle, m, k, n)?
             } else {
@@ -1478,6 +1574,10 @@ pub fn linear_fused<T: Float>(
             }
         } else if is_f64::<T>() {
             backend.matmul_f64_nt(input.gpu_handle()?, weight.gpu_handle()?, m, k, n)?
+        } else if is_bf16::<T>() {
+            backend.matmul_bf16_bf16_nt(input.gpu_handle()?, weight.gpu_handle()?, m, k, n)?
+        } else if is_f16::<T>() {
+            backend.matmul_f16_f16_nt(input.gpu_handle()?, weight.gpu_handle()?, m, k, n)?
         } else {
             return Err(FerrotorchError::NotImplementedOnCuda { op: "linear_fused" });
         };
@@ -1485,23 +1585,15 @@ pub fn linear_fused<T: Float>(
         if let Some(b) = bias {
             let out_shape = vec![m, n];
             let b_shape = vec![n];
-            result_handle = if is_f32::<T>() {
-                backend.broadcast_add_f32(
-                    &result_handle,
-                    b.gpu_handle()?,
-                    &out_shape,
-                    &b_shape,
-                    &out_shape,
-                )?
-            } else {
-                backend.broadcast_add_f64(
-                    &result_handle,
-                    b.gpu_handle()?,
-                    &out_shape,
-                    &b_shape,
-                    &out_shape,
-                )?
-            };
+            result_handle = cuda_broadcast_add_same_dtype::<T>(
+                backend,
+                &result_handle,
+                b.gpu_handle()?,
+                &out_shape,
+                &b_shape,
+                &out_shape,
+                "linear_fused",
+            )?;
         }
         let storage = TensorStorage::gpu(result_handle);
         let shape = vec![m, n];

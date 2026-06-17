@@ -1658,6 +1658,30 @@ pub trait GpuBackend: Send + Sync {
             message: "transpose_2d_f64 GPU op not yet implemented".into(),
         })
     }
+    /// 2D transpose for bf16-resident buffers. The backend must preserve the
+    /// `DType::BF16` handle tag while copying the raw u16 payload.
+    fn transpose_2d_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _m: usize,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "transpose_2d_bf16",
+        })
+    }
+    /// 2D transpose for f16-resident buffers. The backend must preserve the
+    /// `DType::F16` handle tag while copying the raw u16 payload.
+    fn transpose_2d_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _m: usize,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "transpose_2d_f16",
+        })
+    }
 
     // 4D permute (0,2,1,3) f32 — swap dims 1 and 2
     fn permute_0213_f32(
@@ -7298,6 +7322,24 @@ pub trait GpuBackend: Send + Sync {
     ) -> FerrotorchResult<GpuBufferHandle> {
         Err(FerrotorchError::NotImplementedOnCuda {
             op: "matmul_f16_f16",
+        })
+    }
+
+    /// f16-resident fused-transpose matmul `C = A @ B^T` (cuBLAS GemmEx,
+    /// `CUDA_R_16F` operands, f32 compute). `A: [m, k]`, `B: [n, k]`,
+    /// `C: [m, n]`. This is the f16 sibling of
+    /// [`Self::matmul_bf16_bf16_nt`] and is the natural layout for attention
+    /// `Q @ K^T` and `nn.Linear` weights stored `[out, in]`.
+    fn matmul_f16_f16_nt(
+        &self,
+        _a: &GpuBufferHandle,
+        _b: &GpuBufferHandle,
+        _m: usize,
+        _k: usize,
+        _n: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "matmul_f16_f16_nt",
         })
     }
 
