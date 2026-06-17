@@ -69,6 +69,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-053: Broadcast arithmetic panics for tensors with more than 16 dimensions (#1747)
 - as_strided accepts negative strides that torch rejects (#1970)
 - NN functional linear rejects PyTorch-valid 1D and ND inputs (#1973)
 - CUDA pow kernels diverge from torch on negative bases: f32 NaN, f64 silently drops the sign (#1926)
