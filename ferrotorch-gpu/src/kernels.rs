@@ -13822,7 +13822,14 @@ DONE:
 ";
 
 /// PTX source for `pow_kernel`: `out[i] = a[i] ^ exponent`.
-/// Uses the identity: x^e = 2^(e * log2(x)).
+///
+/// Mirrors PyTorch's CUDA scalar-exponent dispatch:
+/// * `0.5`, `-0.5`, `-1`, `2`, `3`, and `-2` use the same specialised
+///   algebraic branches as `PowKernel.cu`.
+/// * The generic branch computes `abs(x)^e` and reapplies the negative sign
+///   only when `e` is an odd integral f32 value. Finite negative bases with
+///   finite non-integral exponents return NaN, while infinite exponents follow
+///   the magnitude-only CUDA `std::pow` behavior.
 #[cfg(feature = "cuda")]
 pub(crate) const POW_PTX: &str = "\
 .version 7.0
@@ -13835,15 +13842,22 @@ pub(crate) const POW_PTX: &str = "\
     .param .f32 exponent,
     .param .u32 n
 ) {
-    .reg .u32 %r_tid, %bid, %bdim, %n_reg;
+    .reg .u32 %r_tid, %bid, %bdim, %n_reg, %bits, %sign, %odd_bits;
+    .reg .s32 %exp_i;
     .reg .u64 %a, %out, %off;
-    .reg .f32 %va, %vr, %exp, %lg;
-    .reg .pred %p;
+    .reg .f32 %va, %vr, %exp, %lg, %abs_va, %abs_exp, %one, %exp_i_f;
+    .reg .pred %p, %exp_zero, %base_pos_one, %base_nan, %base_abs_one, %base_abs_inf, %base_abs_zero;
+    .reg .pred %exp_half, %exp_neg_half, %exp_neg_one, %exp_two, %exp_three, %exp_neg_two;
+    .reg .pred %neg_strict, %sign_set, %exp_nan, %exp_inf, %exp_nonfinite, %exp_finite, %exp_pos, %exp_neg;
+    .reg .pred %exp_int, %exp_small, %exp_odd, %not_exp_int, %base_not_inf, %nan_domain, %negate_result;
+    .reg .pred %base_inf_pos, %base_inf_neg, %base_zero_pos, %base_zero_neg;
+    .reg .pred %abs_gt_one, %abs_lt_one, %exp_pos_inf, %exp_neg_inf, %inf_exp_to_inf, %inf_exp_to_zero;
 
     ld.param.u64 %a, [a_ptr];
     ld.param.u64 %out, [out_ptr];
     ld.param.f32 %exp, [exponent];
     ld.param.u32 %n_reg, [n];
+    mov.f32 %one, 0f3F800000;
 
     mov.u32 %bid, %ctaid.x;
     mov.u32 %bdim, %ntid.x;
@@ -13860,10 +13874,147 @@ pub(crate) const POW_PTX: &str = "\
     add.u64 %out, %out, %off;
 
     ld.global.f32 %va, [%a];
-    // x^e = 2^(e * log2(x))
-    lg2.approx.f32 %lg, %va;
+
+    // PyTorch special cases from `pow_tensor_scalar_kernel`.
+    setp.eq.f32 %exp_zero, %exp, 0f00000000;
+    @%exp_zero bra STORE_ONE;
+    setp.eq.f32 %base_pos_one, %va, 0f3F800000;
+    @%base_pos_one bra STORE_ONE;
+    setp.nan.f32 %base_nan, %va, %va;
+    @%base_nan bra STORE_NAN;
+    setp.eq.f32 %exp_half, %exp, 0f3F000000;
+    @%exp_half bra STORE_SQRT;
+    setp.eq.f32 %exp_neg_half, %exp, 0fBF000000;
+    @%exp_neg_half bra STORE_RSQRT;
+    setp.eq.f32 %exp_neg_one, %exp, 0fBF800000;
+    @%exp_neg_one bra STORE_RECIP;
+    setp.eq.f32 %exp_two, %exp, 0f40000000;
+    @%exp_two bra STORE_SQUARE;
+    setp.eq.f32 %exp_three, %exp, 0f40400000;
+    @%exp_three bra STORE_CUBE;
+    setp.eq.f32 %exp_neg_two, %exp, 0fC0000000;
+    @%exp_neg_two bra STORE_INV_SQUARE;
+
+    abs.f32 %abs_va, %va;
+    setp.eq.f32 %base_abs_one, %abs_va, 0f3F800000;
+    abs.f32 %abs_exp, %exp;
+    setp.eq.f32 %exp_inf, %abs_exp, 0f7F800000;
+    and.pred %p, %base_abs_one, %exp_inf;
+    @%p bra STORE_ONE;
+
+    mov.b32 %bits, %va;
+    and.b32 %sign, %bits, 0x80000000;
+    setp.ne.u32 %sign_set, %sign, 0;
+    setp.lt.f32 %neg_strict, %va, 0f00000000;
+
+    setp.nan.f32 %exp_nan, %exp, %exp;
+    or.pred %exp_nonfinite, %exp_nan, %exp_inf;
+    not.pred %exp_finite, %exp_nonfinite;
+    cvt.rzi.s32.f32 %exp_i, %exp;
+    cvt.rn.f32.s32 %exp_i_f, %exp_i;
+    setp.eq.f32 %exp_int, %exp, %exp_i_f;
+    setp.lt.f32 %exp_small, %abs_exp, 0f4B800000;
+    and.pred %exp_int, %exp_int, %exp_small;
+    and.b32 %odd_bits, %exp_i, 1;
+    setp.ne.u32 %exp_odd, %odd_bits, 0;
+    and.pred %exp_odd, %exp_odd, %exp_int;
+
+    setp.eq.f32 %base_abs_inf, %abs_va, 0f7F800000;
+    and.pred %p, %base_abs_inf, %exp_nan;
+    @%p bra STORE_NAN;
+    setp.gt.f32 %exp_pos, %exp, 0f00000000;
+    and.pred %base_inf_pos, %base_abs_inf, %exp_pos;
+    @%base_inf_pos bra STORE_BASE_INF_POS;
+    setp.lt.f32 %exp_neg, %exp, 0f00000000;
+    and.pred %base_inf_neg, %base_abs_inf, %exp_neg;
+    @%base_inf_neg bra STORE_BASE_INF_NEG;
+    setp.eq.f32 %base_abs_zero, %abs_va, 0f00000000;
+    and.pred %p, %base_abs_zero, %exp_nan;
+    @%p bra STORE_NAN;
+    and.pred %base_zero_pos, %base_abs_zero, %exp_pos;
+    @%base_zero_pos bra STORE_BASE_ZERO_POS;
+    and.pred %base_zero_neg, %base_abs_zero, %exp_neg;
+    @%base_zero_neg bra STORE_BASE_ZERO_NEG;
+    and.pred %exp_pos_inf, %exp_inf, %exp_pos;
+    and.pred %exp_neg_inf, %exp_inf, %exp_neg;
+    setp.gt.f32 %abs_gt_one, %abs_va, 0f3F800000;
+    setp.lt.f32 %abs_lt_one, %abs_va, 0f3F800000;
+    and.pred %inf_exp_to_inf, %exp_pos_inf, %abs_gt_one;
+    @%inf_exp_to_inf bra STORE_POS_INF;
+    and.pred %inf_exp_to_zero, %exp_pos_inf, %abs_lt_one;
+    @%inf_exp_to_zero bra STORE_POS_ZERO;
+    and.pred %inf_exp_to_zero, %exp_neg_inf, %abs_gt_one;
+    @%inf_exp_to_zero bra STORE_POS_ZERO;
+    and.pred %inf_exp_to_inf, %exp_neg_inf, %abs_lt_one;
+    @%inf_exp_to_inf bra STORE_POS_INF;
+    not.pred %not_exp_int, %exp_int;
+    not.pred %base_not_inf, %base_abs_inf;
+    and.pred %nan_domain, %neg_strict, %not_exp_int;
+    and.pred %nan_domain, %nan_domain, %exp_finite;
+    and.pred %nan_domain, %nan_domain, %base_not_inf;
+    @%nan_domain bra STORE_NAN;
+
+    // Generic branch: |x|^e = 2^(e * log2(|x|)).
+    lg2.approx.f32 %lg, %abs_va;
     mul.f32 %lg, %lg, %exp;
     ex2.approx.f32 %vr, %lg;
+    and.pred %negate_result, %sign_set, %exp_odd;
+    @%negate_result neg.f32 %vr, %vr;
+    bra STORE;
+
+STORE_SQRT:
+    sqrt.rn.f32 %vr, %va;
+    bra STORE;
+STORE_RSQRT:
+    sqrt.rn.f32 %vr, %va;
+    div.rn.f32 %vr, %one, %vr;
+    bra STORE;
+STORE_RECIP:
+    div.rn.f32 %vr, %one, %va;
+    bra STORE;
+STORE_SQUARE:
+    mul.f32 %vr, %va, %va;
+    bra STORE;
+STORE_CUBE:
+    mul.f32 %vr, %va, %va;
+    mul.f32 %vr, %vr, %va;
+    bra STORE;
+STORE_INV_SQUARE:
+    mul.f32 %vr, %va, %va;
+    div.rn.f32 %vr, %one, %vr;
+    bra STORE;
+STORE_ONE:
+    mov.f32 %vr, 0f3F800000;
+    bra STORE;
+STORE_BASE_INF_POS:
+    mov.f32 %vr, 0f7F800000;
+    and.pred %negate_result, %sign_set, %exp_odd;
+    @%negate_result neg.f32 %vr, %vr;
+    bra STORE;
+STORE_BASE_INF_NEG:
+    mov.f32 %vr, 0f00000000;
+    and.pred %negate_result, %sign_set, %exp_odd;
+    @%negate_result neg.f32 %vr, %vr;
+    bra STORE;
+STORE_BASE_ZERO_POS:
+    mov.f32 %vr, 0f00000000;
+    and.pred %negate_result, %sign_set, %exp_odd;
+    @%negate_result neg.f32 %vr, %vr;
+    bra STORE;
+STORE_BASE_ZERO_NEG:
+    mov.f32 %vr, 0f7F800000;
+    and.pred %negate_result, %sign_set, %exp_odd;
+    @%negate_result neg.f32 %vr, %vr;
+    bra STORE;
+STORE_POS_INF:
+    mov.f32 %vr, 0f7F800000;
+    bra STORE;
+STORE_POS_ZERO:
+    mov.f32 %vr, 0f00000000;
+    bra STORE;
+STORE_NAN:
+    mov.f32 %vr, 0f7FC00000;
+STORE:
     st.global.f32 [%out], %vr;
 
 DONE:
@@ -13873,6 +14024,12 @@ DONE:
 
 /// PTX source for `pow_f64_kernel`: `out[i] = a[i] ^ exponent` (f64).
 /// Full f64 precision: x^e = exp(e * ln(x)).
+///
+/// Negative-base handling mirrors PyTorch's CUDA scalar-exponent kernel: the
+/// specialised scalar exponents use direct algebra, while the generic branch
+/// computes `abs(x)^e` and reapplies a negative sign only for odd integral
+/// f64 exponents. Finite negative bases with finite non-integral exponents
+/// produce NaN instead of silently dropping the sign bit.
 /// Uses inline f64 log (half-step argument reduction + degree-7 odd-power
 /// series + 2-double ln(2) reconstruction) and inline f64 exp
 /// (Cody-Waite + degree-11 Horner).
@@ -13899,7 +14056,9 @@ pub(crate) const POW_F64_PTX: &str = "\
 ) {
     .reg .u32 %r_tid, %bid, %bdim, %n_reg;
     .reg .u64 %a, %out, %off;
-    .reg .f64 %va, %vr, %exp64, %one, %two;
+    .reg .u64 %bits, %sign, %odd_bits;
+    .reg .s64 %exp_i64;
+    .reg .f64 %va, %vr, %exp64, %one, %two, %abs_va, %abs_exp, %exp_i_f;
     // log registers
     .reg .u64 %l_xbits, %l_mbits, %l_bias;
     .reg .s64 %l_exp64;
@@ -13910,7 +14069,12 @@ pub(crate) const POW_F64_PTX: &str = "\
     .reg .f64 %e_z, %e_nf, %e_r, %e_p, %e_half;
     .reg .s32 %e_ni;
     .reg .s64 %e_ni64, %e_bits;
-    .reg .pred %p;
+    .reg .pred %p, %exp_zero, %base_pos_one, %base_nan, %base_abs_one, %base_abs_inf, %base_abs_zero;
+    .reg .pred %exp_half, %exp_neg_half, %exp_neg_one, %exp_two, %exp_three, %exp_neg_two;
+    .reg .pred %neg_strict, %sign_set, %exp_nan, %exp_inf, %exp_nonfinite, %exp_finite, %exp_pos, %exp_neg;
+    .reg .pred %exp_int, %exp_small, %exp_odd, %not_exp_int, %base_not_inf, %nan_domain, %negate_result;
+    .reg .pred %base_inf_pos, %base_inf_neg, %base_zero_pos, %base_zero_neg;
+    .reg .pred %abs_gt_one, %abs_lt_one, %exp_pos_inf, %exp_neg_inf, %inf_exp_to_inf, %inf_exp_to_zero;
 
     ld.param.u64 %a, [a_ptr];
     ld.param.u64 %out, [out_ptr];
@@ -13935,11 +14099,90 @@ pub(crate) const POW_F64_PTX: &str = "\
     mov.f64 %one, 0d3FF0000000000000;
     mov.f64 %two, 0d4000000000000000;
 
+    // PyTorch special cases from `pow_tensor_scalar_kernel`.
+    setp.eq.f64 %exp_zero, %exp64, 0d0000000000000000;
+    @%exp_zero bra STORE_ONE_F64;
+    setp.eq.f64 %base_pos_one, %va, 0d3FF0000000000000;
+    @%base_pos_one bra STORE_ONE_F64;
+    setp.nan.f64 %base_nan, %va, %va;
+    @%base_nan bra STORE_NAN_F64;
+    setp.eq.f64 %exp_half, %exp64, 0d3FE0000000000000;
+    @%exp_half bra STORE_SQRT_F64;
+    setp.eq.f64 %exp_neg_half, %exp64, 0dBFE0000000000000;
+    @%exp_neg_half bra STORE_RSQRT_F64;
+    setp.eq.f64 %exp_neg_one, %exp64, 0dBFF0000000000000;
+    @%exp_neg_one bra STORE_RECIP_F64;
+    setp.eq.f64 %exp_two, %exp64, 0d4000000000000000;
+    @%exp_two bra STORE_SQUARE_F64;
+    setp.eq.f64 %exp_three, %exp64, 0d4008000000000000;
+    @%exp_three bra STORE_CUBE_F64;
+    setp.eq.f64 %exp_neg_two, %exp64, 0dC000000000000000;
+    @%exp_neg_two bra STORE_INV_SQUARE_F64;
+
+    abs.f64 %abs_va, %va;
+    setp.eq.f64 %base_abs_one, %abs_va, 0d3FF0000000000000;
+    abs.f64 %abs_exp, %exp64;
+    setp.eq.f64 %exp_inf, %abs_exp, 0d7FF0000000000000;
+    and.pred %p, %base_abs_one, %exp_inf;
+    @%p bra STORE_ONE_F64;
+
+    mov.b64 %bits, %va;
+    and.b64 %sign, %bits, 0x8000000000000000;
+    setp.ne.u64 %sign_set, %sign, 0;
+    setp.lt.f64 %neg_strict, %va, 0d0000000000000000;
+
+    setp.nan.f64 %exp_nan, %exp64, %exp64;
+    or.pred %exp_nonfinite, %exp_nan, %exp_inf;
+    not.pred %exp_finite, %exp_nonfinite;
+    cvt.rzi.s64.f64 %exp_i64, %exp64;
+    cvt.rn.f64.s64 %exp_i_f, %exp_i64;
+    setp.eq.f64 %exp_int, %exp64, %exp_i_f;
+    setp.lt.f64 %exp_small, %abs_exp, 0d4340000000000000;
+    and.pred %exp_int, %exp_int, %exp_small;
+    and.b64 %odd_bits, %exp_i64, 1;
+    setp.ne.u64 %exp_odd, %odd_bits, 0;
+    and.pred %exp_odd, %exp_odd, %exp_int;
+
+    setp.eq.f64 %base_abs_inf, %abs_va, 0d7FF0000000000000;
+    and.pred %p, %base_abs_inf, %exp_nan;
+    @%p bra STORE_NAN_F64;
+    setp.gt.f64 %exp_pos, %exp64, 0d0000000000000000;
+    and.pred %base_inf_pos, %base_abs_inf, %exp_pos;
+    @%base_inf_pos bra STORE_BASE_INF_POS_F64;
+    setp.lt.f64 %exp_neg, %exp64, 0d0000000000000000;
+    and.pred %base_inf_neg, %base_abs_inf, %exp_neg;
+    @%base_inf_neg bra STORE_BASE_INF_NEG_F64;
+    setp.eq.f64 %base_abs_zero, %abs_va, 0d0000000000000000;
+    and.pred %p, %base_abs_zero, %exp_nan;
+    @%p bra STORE_NAN_F64;
+    and.pred %base_zero_pos, %base_abs_zero, %exp_pos;
+    @%base_zero_pos bra STORE_BASE_ZERO_POS_F64;
+    and.pred %base_zero_neg, %base_abs_zero, %exp_neg;
+    @%base_zero_neg bra STORE_BASE_ZERO_NEG_F64;
+    and.pred %exp_pos_inf, %exp_inf, %exp_pos;
+    and.pred %exp_neg_inf, %exp_inf, %exp_neg;
+    setp.gt.f64 %abs_gt_one, %abs_va, 0d3FF0000000000000;
+    setp.lt.f64 %abs_lt_one, %abs_va, 0d3FF0000000000000;
+    and.pred %inf_exp_to_inf, %exp_pos_inf, %abs_gt_one;
+    @%inf_exp_to_inf bra STORE_POS_INF_F64;
+    and.pred %inf_exp_to_zero, %exp_pos_inf, %abs_lt_one;
+    @%inf_exp_to_zero bra STORE_POS_ZERO_F64;
+    and.pred %inf_exp_to_zero, %exp_neg_inf, %abs_gt_one;
+    @%inf_exp_to_zero bra STORE_POS_ZERO_F64;
+    and.pred %inf_exp_to_inf, %exp_neg_inf, %abs_lt_one;
+    @%inf_exp_to_inf bra STORE_POS_INF_F64;
+    not.pred %not_exp_int, %exp_int;
+    not.pred %base_not_inf, %base_abs_inf;
+    and.pred %nan_domain, %neg_strict, %not_exp_int;
+    and.pred %nan_domain, %nan_domain, %exp_finite;
+    and.pred %nan_domain, %nan_domain, %base_not_inf;
+    @%nan_domain bra STORE_NAN_F64;
+
     // === ln(va) via argument reduction ===
     // Decompose va = 2^n * m, m in [1,2). Then half-step reduce: if
     // m > sqrt(2), set m <- m/2 and n <- n+1, so m ends up in
     // [sqrt(2)/2, sqrt(2)) and |f| = |(m-1)/(m+1)| <= ~0.172.
-    mov.b64 %l_xbits, %va;
+    mov.b64 %l_xbits, %abs_va;
     shr.u64 %l_exp64, %l_xbits, 52;
     and.b64 %l_exp64, %l_exp64, 2047;
     sub.s64 %l_exp64, %l_exp64, 1023;
@@ -14015,7 +14258,63 @@ pub(crate) const POW_F64_PTX: &str = "\
     shl.b64 %e_bits, %e_ni64, 52;
     mov.b64 %e_nf, %e_bits;
     mul.f64 %vr, %vr, %e_nf;
+    and.pred %negate_result, %sign_set, %exp_odd;
+    @%negate_result neg.f64 %vr, %vr;
+    bra STORE_F64;
 
+STORE_SQRT_F64:
+    sqrt.rn.f64 %vr, %va;
+    bra STORE_F64;
+STORE_RSQRT_F64:
+    sqrt.rn.f64 %vr, %va;
+    div.rn.f64 %vr, %one, %vr;
+    bra STORE_F64;
+STORE_RECIP_F64:
+    div.rn.f64 %vr, %one, %va;
+    bra STORE_F64;
+STORE_SQUARE_F64:
+    mul.f64 %vr, %va, %va;
+    bra STORE_F64;
+STORE_CUBE_F64:
+    mul.f64 %vr, %va, %va;
+    mul.f64 %vr, %vr, %va;
+    bra STORE_F64;
+STORE_INV_SQUARE_F64:
+    mul.f64 %vr, %va, %va;
+    div.rn.f64 %vr, %one, %vr;
+    bra STORE_F64;
+STORE_ONE_F64:
+    mov.f64 %vr, 0d3FF0000000000000;
+    bra STORE_F64;
+STORE_BASE_INF_POS_F64:
+    mov.f64 %vr, 0d7FF0000000000000;
+    and.pred %negate_result, %sign_set, %exp_odd;
+    @%negate_result neg.f64 %vr, %vr;
+    bra STORE_F64;
+STORE_BASE_INF_NEG_F64:
+    mov.f64 %vr, 0d0000000000000000;
+    and.pred %negate_result, %sign_set, %exp_odd;
+    @%negate_result neg.f64 %vr, %vr;
+    bra STORE_F64;
+STORE_BASE_ZERO_POS_F64:
+    mov.f64 %vr, 0d0000000000000000;
+    and.pred %negate_result, %sign_set, %exp_odd;
+    @%negate_result neg.f64 %vr, %vr;
+    bra STORE_F64;
+STORE_BASE_ZERO_NEG_F64:
+    mov.f64 %vr, 0d7FF0000000000000;
+    and.pred %negate_result, %sign_set, %exp_odd;
+    @%negate_result neg.f64 %vr, %vr;
+    bra STORE_F64;
+STORE_POS_INF_F64:
+    mov.f64 %vr, 0d7FF0000000000000;
+    bra STORE_F64;
+STORE_POS_ZERO_F64:
+    mov.f64 %vr, 0d0000000000000000;
+    bra STORE_F64;
+STORE_NAN_F64:
+    mov.f64 %vr, 0d7FF8000000000000;
+STORE_F64:
     st.global.f64 [%out], %vr;
 
 DONE:

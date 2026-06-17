@@ -3318,17 +3318,9 @@ mod gpu {
 
     /// loss = sum(x^3); grad = 3x^2 (PowBackward on CUDA).
     ///
-    /// #1926 pin (found by this CORE-204/#1898 lane): the CUDA pow kernels
-    /// diverge from torch for NEGATIVE bases. `POW_PTX` (f32) computes
-    /// x^e = 2^(e*log2(x)) — NaN for x < 0; `POW_F64_PTX` runs its inline
-    /// ln on the magnitude bits — the sign is silently dropped (|x|^e).
-    /// torch on cuda:0: (-1.5)**3.0 == -3.375 (the fixture value), grad
-    /// 6.75. Until #1926 lands a sign-correct kernel, this test pins the
-    /// CURRENT divergent values (single contract, R-ORACLE-4): f32 fwd/grad
-    /// are NaN at negative-base elements, f64 fwd is |fixture| (the f64
-    /// grad 3x^2 happens to match torch because exp-1 is even). When #1926
-    /// is fixed the pinned expectations mismatch loudly — retire the pin by
-    /// asserting the raw fixture values.
+    /// #1926: CUDA pow must match torch for negative bases with an integral
+    /// scalar exponent. torch on cuda:0: `(-1.5)**3.0 == -3.375` and
+    /// `d/dx x^3 = 3x^2 == 6.75` at `x = -1.5`.
     #[test]
     fn gpu_backward_pow() {
         ensure_cuda_backend();
@@ -3351,25 +3343,13 @@ mod gpu {
             );
             match f.dtype.as_str() {
                 "float32" => {
-                    // #1926 pin: NaN at negative-base elements (torch: the
-                    // fixture values out_exp/grad_exp). Retire when fixed.
-                    let pinned_fwd: Vec<f64> = out_exp
-                        .iter()
-                        .zip(a_data)
-                        .map(|(&o, &a)| if a < 0.0 { f64::NAN } else { o })
-                        .collect();
-                    let pinned_grad: Vec<f64> = grad_exp
-                        .iter()
-                        .zip(a_data)
-                        .map(|(&g, &a)| if a < 0.0 { f64::NAN } else { g })
-                        .collect();
                     let a = upload_f32(make_cpu_f32(a_data, shape, true));
                     let y = pow(&a, 3.0)
                         .unwrap_or_else(|e| panic!("{label}: forward on CUDA failed: {e}"));
                     check_f32(
-                        &format!("{label} fwd (#1926 pin — retire when fixed)"),
+                        &format!("{label} fwd"),
                         &read_back_f32(&y, Device::Cuda(0), &format!("{label} fwd")),
-                        &pinned_fwd,
+                        out_exp,
                         tolerance::F32_GRAD_GPU,
                     );
                     let s = sum(&y).expect("sum");
@@ -3377,35 +3357,26 @@ mod gpu {
                         .unwrap_or_else(|e| panic!("{label}: backward on CUDA failed: {e}"));
                     let ga = a.grad().expect("grad lookup").expect("grad_a present");
                     check_f32(
-                        &format!("{label} grad_a (#1926 pin — retire when fixed)"),
+                        &format!("{label} grad_a"),
                         &read_back_f32(&ga, Device::Cuda(0), &format!("{label} grad_a")),
-                        &pinned_grad,
+                        grad_exp,
                         tolerance::F32_GRAD_GPU,
                     );
                 }
                 "float64" => {
-                    // #1926 pin: the f64 kernel computes |x|^e, so the
-                    // negative-base element comes back sign-flipped:
-                    // |fixture| (torch: out_exp verbatim, i.e. -3.375).
-                    // |x^3| == |x|^3, so mapping abs over the fixture IS the
-                    // currently-produced value. Retire when fixed.
-                    let pinned_fwd: Vec<f64> = out_exp.iter().map(|&o| o.abs()).collect();
                     let a = upload_f64(make_cpu_f64(a_data, shape, true));
                     let y = pow(&a, 3.0)
                         .unwrap_or_else(|e| panic!("{label}: forward on CUDA failed: {e}"));
                     check_f64(
-                        &format!("{label} fwd (#1926 pin — retire when fixed)"),
+                        &format!("{label} fwd"),
                         &read_back_f64(&y, Device::Cuda(0), &format!("{label} fwd")),
-                        &pinned_fwd,
+                        out_exp,
                         tolerance::F64_GRAD_GPU,
                     );
                     let s = sum(&y).expect("sum");
                     s.backward()
                         .unwrap_or_else(|e| panic!("{label}: backward on CUDA failed: {e}"));
                     let ga = a.grad().expect("grad lookup").expect("grad_a present");
-                    // grad = 3x^2: even power of the base, so the sign loss
-                    // in the kernel is invisible here and the torch fixture
-                    // value asserts verbatim (not a pin).
                     check_f64(
                         &format!("{label} grad_a"),
                         &read_back_f64(&ga, Device::Cuda(0), &format!("{label} grad_a")),
