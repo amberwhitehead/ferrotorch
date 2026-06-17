@@ -8,7 +8,7 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 (`matmul` shape dispatcher) | SHIPPED | mirrors `Tensor matmul` and the six-arm dispatch in `_matmul_impl`; non-test consumer is the CPU fallback `linalg::matmul` invocation inside `grad_fns::linalg::matmul_differentiable` after the GPU branches are exhausted; in-file tests cover AC-1..AC-10. |
-//! | REQ-2 (`broadcast_matmul`) | SHIPPED-with-known-drift | mirrors the `expand_batch_product` + `bmm` path; reached from `matmul` for the `_ => broadcast_matmul(a, b)` (>=3D) arm; known drift vs PyTorch BLAS (~1.5e-5 on f32 k=10) tracked under blocker #1347; the plan routes per-batch slices through `mm_raw`. |
+//! | REQ-2 (`broadcast_matmul`) | SHIPPED | mirrors the `expand_batch_product` + `bmm` path; reached from `matmul` for the `_ => broadcast_matmul(a, b)` (>=3D) arm; CPU routes per-batch slabs through `mm_raw`; CUDA f32/f64/f16/bf16 routes to the registered backend's resident `broadcast_bmm_*` kernels (CORE-141 / #1835), so raw linalg no longer downloads operands for broadcast matmul. |
 //! | REQ-3 (`bmm`) | SHIPPED-with-known-drift | mirrors `TORCH_IMPL_FUNC(bmm_out_cpu)`; carries the same accumulation-drift property as REQ-2; reached from `matmul`'s `broadcast_matmul` path; the autograd wrapper `bmm_differentiable` reimplements the CPU triple loop inline today — the planned #1347 fix routes BOTH `broadcast_matmul` and that fallback through `mm_raw`; indirect parity `[bmm] 8/8 passed`. |
 //! | REQ-4 (`mm`) | SHIPPED | mirrors `TORCH_IMPL_FUNC(mm_out_cpu)`; non-test consumers `complex_tensor::matmul` and the `matmul` dispatcher's `(2, 2) => mm(a, b)` arm; indirect parity via the `grad_fns` runner arm. |
 //! | REQ-5 (`mm_raw`) | SHIPPED | the BLAS-routed workhorse; non-test consumers `mm` itself, `grad_fns::linalg::mm_differentiable`, and `MmBackward`; mirrors upstream's gemm-via-cpublas size-gated dispatch. |
@@ -415,6 +415,12 @@ pub fn matmul<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor
     if let Some(out) = crate::meta_propagate::matmul(a, b)? {
         return Ok(out);
     }
+    if a.device() != b.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        });
+    }
     crate::profiler_hook::profile_op_scope("matmul", "linalg", &[a.shape(), b.shape()], || {
         match (a.ndim(), b.ndim()) {
             (0, _) | (_, 0) => Err(FerrotorchError::InvalidArgument {
@@ -532,6 +538,82 @@ fn broadcast_matmul<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<
     let b_mat_size = k * n;
     let c_mat_size = m * n;
 
+    // Output shape = batch_shape + [m, n], then squeeze promoted dims.
+    let mut out_shape = batch_shape.clone();
+    out_shape.push(m);
+    out_shape.push(n);
+
+    if squeeze_row {
+        // Remove the m=1 dimension (second-to-last).
+        let pos = out_shape.len() - 2;
+        out_shape.remove(pos);
+    }
+    if squeeze_col {
+        // Remove the n=1 dimension (last).
+        out_shape.pop();
+    }
+
+    if device.is_cuda() {
+        let a = a.contiguous()?;
+        let b = b.contiguous()?;
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let handle = if is_f32::<T>() {
+            backend.broadcast_bmm_f32(
+                a.gpu_handle()?,
+                b.gpu_handle()?,
+                a_batch,
+                b_batch,
+                &batch_shape,
+                m,
+                k,
+                n,
+            )?
+        } else if is_f64::<T>() {
+            backend.broadcast_bmm_f64(
+                a.gpu_handle()?,
+                b.gpu_handle()?,
+                a_batch,
+                b_batch,
+                &batch_shape,
+                m,
+                k,
+                n,
+            )?
+        } else if is_bf16::<T>() {
+            backend.broadcast_bmm_bf16(
+                a.gpu_handle()?,
+                b.gpu_handle()?,
+                a_batch,
+                b_batch,
+                &batch_shape,
+                m,
+                k,
+                n,
+            )?
+        } else if is_f16::<T>() {
+            backend.broadcast_bmm_f16(
+                a.gpu_handle()?,
+                b.gpu_handle()?,
+                a_batch,
+                b_batch,
+                &batch_shape,
+                m,
+                k,
+                n,
+            )?
+        } else {
+            return Err(FerrotorchError::NotImplementedOnCuda { op: "matmul" });
+        };
+        return Tensor::from_storage(TensorStorage::gpu(handle), out_shape, false);
+    }
+
+    if !device.is_cpu() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("matmul: broadcast matmul is not implemented for device {device}"),
+        });
+    }
+
     let a_data = a.data_vec()?;
     let b_data = b.data_vec()?;
     let mut result = vec![<T as num_traits::Zero>::zero(); batch_size * c_mat_size];
@@ -559,23 +641,7 @@ fn broadcast_matmul<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<
         result[c_off..c_off + c_mat_size].copy_from_slice(&c_slab);
     }
 
-    // Output shape = batch_shape + [m, n], then squeeze promoted dims.
-    let mut out_shape = batch_shape;
-    out_shape.push(m);
-    out_shape.push(n);
-
-    if squeeze_row {
-        // Remove the m=1 dimension (second-to-last).
-        let pos = out_shape.len() - 2;
-        out_shape.remove(pos);
-    }
-    if squeeze_col {
-        // Remove the n=1 dimension (last).
-        out_shape.pop();
-    }
-
-    let t = Tensor::from_storage(TensorStorage::cpu(result), out_shape, false)?;
-    Ok(if device.is_cuda() { t.to(device)? } else { t })
+    Tensor::from_storage(TensorStorage::cpu(result), out_shape, false)
 }
 
 /// Compute the strides needed to map a flat index in the broadcast shape
@@ -684,6 +750,20 @@ pub fn dot<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>
 /// Threshold for switching from direct ikj loop to faer.
 /// For matrices at or below this size, the naive loop avoids faer overhead.
 const DIRECT_MM_THRESHOLD: usize = 128;
+
+/// Whether `T` is `f32`.
+#[allow(clippy::inline_always)] // reason: trivial TypeId compare; must inline to constant-fold the f32 dispatch in hot matmul
+#[inline(always)]
+fn is_f32<T: 'static>() -> bool {
+    std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>()
+}
+
+/// Whether `T` is `f64`.
+#[allow(clippy::inline_always)] // reason: trivial TypeId compare; must inline to constant-fold the f64 dispatch in hot matmul
+#[inline(always)]
+fn is_f64<T: 'static>() -> bool {
+    std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>()
+}
 
 /// Whether `T` is `half::bf16`. Used to route bf16 kernels through an
 /// f32 accumulator to avoid the catastrophic precision loss of summing
