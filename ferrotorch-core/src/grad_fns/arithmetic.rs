@@ -708,6 +708,44 @@ fn shape_to_isize(shape: &[usize], op: &'static str) -> FerrotorchResult<Vec<isi
         .collect()
 }
 
+fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
+    let mut strides = vec![1usize; shape.len()];
+    for d in (0..shape.len().saturating_sub(1)).rev() {
+        strides[d] = strides[d + 1] * shape[d + 1];
+    }
+    strides
+}
+
+fn broadcast_source_flat_index(
+    out_flat: usize,
+    out_shape: &[usize],
+    source_shape: &[usize],
+    source_strides: &[usize],
+) -> usize {
+    debug_assert!(out_shape.len() >= source_shape.len());
+    debug_assert_eq!(source_shape.len(), source_strides.len());
+
+    if source_shape.is_empty() {
+        return 0;
+    }
+
+    let pad = out_shape.len() - source_shape.len();
+    let mut rem = out_flat;
+    let mut source_flat = 0usize;
+    for out_dim in (0..out_shape.len()).rev() {
+        let coord = rem % out_shape[out_dim];
+        rem /= out_shape[out_dim];
+        if out_dim < pad {
+            continue;
+        }
+        let source_dim = out_dim - pad;
+        if source_shape[source_dim] != 1 {
+            source_flat += coord * source_strides[source_dim];
+        }
+    }
+    source_flat
+}
+
 fn reduce_grad_to_shape_differentiable<T: Float>(
     grad: &Tensor<T>,
     target_shape: &[usize],
@@ -927,48 +965,14 @@ pub(crate) fn reduce_grad_to_shape<T: Float>(
         });
     }
 
-    // Left-pad target_shape with 1s to match grad_ndim.
-    let padded_target: Vec<usize> = if target_ndim < grad_ndim {
-        let mut p = vec![1usize; grad_ndim - target_ndim];
-        p.extend_from_slice(target_shape);
-        p
-    } else {
-        target_shape.to_vec()
-    };
-
     let out_numel: usize = crate::shape::numel(target_shape);
     let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
 
     // Precompute target strides for flat index calculation.
-    let mut target_strides = vec![1usize; target_ndim];
-    for td in (0..target_ndim.saturating_sub(1)).rev() {
-        target_strides[td] = target_strides[td + 1] * target_shape[td + 1];
-    }
-
-    let offset = grad_ndim - target_ndim; // number of leading 1-padded dims
+    let target_strides = contiguous_strides(target_shape);
 
     for (i, &grad_val) in grad_data.iter().enumerate() {
-        // Decompose grad flat index into per-axis coordinates.
-        let mut coords = [0usize; 16]; // support up to 16 dims
-        let mut rem = i;
-        for d in (0..grad_ndim).rev() {
-            coords[d] = rem % grad_shape[d];
-            rem /= grad_shape[d];
-        }
-
-        // Compute flat index in target by mapping each grad coord to
-        // the corresponding target coord (collapsing broadcast dims).
-        let mut flat = 0usize;
-        for (td, &target_stride) in target_strides.iter().enumerate() {
-            let gd = td + offset;
-            let coord = if padded_target[gd] == 1 {
-                0
-            } else {
-                coords[gd]
-            };
-            flat += coord * target_stride;
-        }
-
+        let flat = broadcast_source_flat_index(i, grad_shape, target_shape, &target_strides);
         result[flat] += grad_val;
     }
 
@@ -3147,51 +3151,13 @@ fn remainder_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<T
 
     let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
 
-    // Precompute c-contiguous strides for the input shapes (broadcast-
-    // aware: padded with leading 1-dims if rank is less than out_shape's).
-    let out_ndim = out_shape.len();
-    let pad_a = out_ndim - a_shape.len();
-    let pad_b = out_ndim - b_shape.len();
-
-    let a_strides: Vec<usize> = {
-        let mut s = vec![1usize; a_shape.len()];
-        for d in (0..a_shape.len().saturating_sub(1)).rev() {
-            s[d] = s[d + 1] * a_shape[d + 1];
-        }
-        s
-    };
-    let b_strides: Vec<usize> = {
-        let mut s = vec![1usize; b_shape.len()];
-        for d in (0..b_shape.len().saturating_sub(1)).rev() {
-            s[d] = s[d + 1] * b_shape[d + 1];
-        }
-        s
-    };
+    let a_strides = contiguous_strides(&a_shape);
+    let b_strides = contiguous_strides(&b_shape);
 
     let zero = <T as num_traits::Zero>::zero();
     for i in 0..out_numel {
-        // Decompose `i` into per-axis coords over `out_shape`.
-        let mut rem_i = i;
-        let mut coords = [0usize; 16];
-        for d in (0..out_ndim).rev() {
-            coords[d] = rem_i % out_shape[d];
-            rem_i /= out_shape[d];
-        }
-
-        // Map output coords to a-flat / b-flat indices with broadcast
-        // collapsing (`size == 1` axes -> coord 0).
-        let mut a_flat = 0usize;
-        for (d, &s) in a_strides.iter().enumerate() {
-            let oc = coords[d + pad_a];
-            let coord = if a_shape[d] == 1 { 0 } else { oc };
-            a_flat += coord * s;
-        }
-        let mut b_flat = 0usize;
-        for (d, &s) in b_strides.iter().enumerate() {
-            let oc = coords[d + pad_b];
-            let coord = if b_shape[d] == 1 { 0 } else { oc };
-            b_flat += coord * s;
-        }
+        let a_flat = broadcast_source_flat_index(i, &out_shape, &a_shape, &a_strides);
+        let b_flat = broadcast_source_flat_index(i, &out_shape, &b_shape, &b_strides);
 
         let av = a_data[a_flat];
         let bv = b_data[b_flat];
@@ -3450,50 +3416,12 @@ fn fmod_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor
 
     let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
 
-    // Precompute c-contiguous strides for the input shapes (broadcast-
-    // aware: padded with leading 1-dims if rank is less than out_shape's).
-    let out_ndim = out_shape.len();
-    let pad_a = out_ndim - a_shape.len();
-    let pad_b = out_ndim - b_shape.len();
-
-    let a_strides: Vec<usize> = {
-        let mut s = vec![1usize; a_shape.len()];
-        for d in (0..a_shape.len().saturating_sub(1)).rev() {
-            s[d] = s[d + 1] * a_shape[d + 1];
-        }
-        s
-    };
-    let b_strides: Vec<usize> = {
-        let mut s = vec![1usize; b_shape.len()];
-        for d in (0..b_shape.len().saturating_sub(1)).rev() {
-            s[d] = s[d + 1] * b_shape[d + 1];
-        }
-        s
-    };
+    let a_strides = contiguous_strides(&a_shape);
+    let b_strides = contiguous_strides(&b_shape);
 
     for i in 0..out_numel {
-        // Decompose `i` into per-axis coords over `out_shape`.
-        let mut rem_i = i;
-        let mut coords = [0usize; 16];
-        for d in (0..out_ndim).rev() {
-            coords[d] = rem_i % out_shape[d];
-            rem_i /= out_shape[d];
-        }
-
-        // Map output coords to a-flat / b-flat indices with broadcast
-        // collapsing (`size == 1` axes -> coord 0).
-        let mut a_flat = 0usize;
-        for (d, &s) in a_strides.iter().enumerate() {
-            let oc = coords[d + pad_a];
-            let coord = if a_shape[d] == 1 { 0 } else { oc };
-            a_flat += coord * s;
-        }
-        let mut b_flat = 0usize;
-        for (d, &s) in b_strides.iter().enumerate() {
-            let oc = coords[d + pad_b];
-            let coord = if b_shape[d] == 1 { 0 } else { oc };
-            b_flat += coord * s;
-        }
+        let a_flat = broadcast_source_flat_index(i, &out_shape, &a_shape, &a_strides);
+        let b_flat = broadcast_source_flat_index(i, &out_shape, &b_shape, &b_strides);
 
         let av = a_data[a_flat];
         let bv = b_data[b_flat];
@@ -3862,49 +3790,12 @@ fn floor_divide_inner<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResul
 
     let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
 
-    // Precompute c-contiguous strides for input shapes (broadcast-padded).
-    let out_ndim = out_shape.len();
-    let pad_a = out_ndim - a_shape.len();
-    let pad_b = out_ndim - b_shape.len();
-
-    let a_strides: Vec<usize> = {
-        let mut s = vec![1usize; a_shape.len()];
-        for d in (0..a_shape.len().saturating_sub(1)).rev() {
-            s[d] = s[d + 1] * a_shape[d + 1];
-        }
-        s
-    };
-    let b_strides: Vec<usize> = {
-        let mut s = vec![1usize; b_shape.len()];
-        for d in (0..b_shape.len().saturating_sub(1)).rev() {
-            s[d] = s[d + 1] * b_shape[d + 1];
-        }
-        s
-    };
+    let a_strides = contiguous_strides(&a_shape);
+    let b_strides = contiguous_strides(&b_shape);
 
     for i in 0..out_numel {
-        // Decompose `i` into per-axis coords over `out_shape`.
-        let mut rem_i = i;
-        let mut coords = [0usize; 16];
-        for d in (0..out_ndim).rev() {
-            coords[d] = rem_i % out_shape[d];
-            rem_i /= out_shape[d];
-        }
-
-        // Map output coords to a-flat / b-flat indices with broadcast
-        // collapsing (`size == 1` axes -> coord 0).
-        let mut a_flat = 0usize;
-        for (d, &s) in a_strides.iter().enumerate() {
-            let oc = coords[d + pad_a];
-            let coord = if a_shape[d] == 1 { 0 } else { oc };
-            a_flat += coord * s;
-        }
-        let mut b_flat = 0usize;
-        for (d, &s) in b_strides.iter().enumerate() {
-            let oc = coords[d + pad_b];
-            let coord = if b_shape[d] == 1 { 0 } else { oc };
-            b_flat += coord * s;
-        }
+        let a_flat = broadcast_source_flat_index(i, &out_shape, &a_shape, &a_strides);
+        let b_flat = broadcast_source_flat_index(i, &out_shape, &b_shape, &b_strides);
 
         let av = a_data[a_flat];
         let bv = b_data[b_flat];
@@ -4215,46 +4106,14 @@ fn addcmul_inner<T: Float>(
 
     let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
 
-    // C-contiguous strides for each operand (broadcast-padded to out_ndim).
-    let out_ndim = out_shape.len();
-    let pad_input = out_ndim - input_shape.len();
-    let pad_t1 = out_ndim - t1_shape.len();
-    let pad_t2 = out_ndim - t2_shape.len();
-
-    let strides_of = |shape: &[usize]| -> Vec<usize> {
-        let mut s = vec![1usize; shape.len()];
-        for d in (0..shape.len().saturating_sub(1)).rev() {
-            s[d] = s[d + 1] * shape[d + 1];
-        }
-        s
-    };
-    let input_strides = strides_of(&input_shape);
-    let t1_strides = strides_of(&t1_shape);
-    let t2_strides = strides_of(&t2_shape);
+    let input_strides = contiguous_strides(&input_shape);
+    let t1_strides = contiguous_strides(&t1_shape);
+    let t2_strides = contiguous_strides(&t2_shape);
 
     for i in 0..out_numel {
-        // Decompose `i` into per-axis coords over `out_shape`.
-        let mut rem_i = i;
-        let mut coords = [0usize; 16];
-        for d in (0..out_ndim).rev() {
-            coords[d] = rem_i % out_shape[d];
-            rem_i /= out_shape[d];
-        }
-
-        // Map output coords to per-operand flat indices, collapsing
-        // broadcast (size==1) axes to coord 0.
-        let flatten = |shape: &[usize], strides: &[usize], pad: usize| -> usize {
-            let mut flat = 0usize;
-            for (d, &s) in strides.iter().enumerate() {
-                let oc = coords[d + pad];
-                let coord = if shape[d] == 1 { 0 } else { oc };
-                flat += coord * s;
-            }
-            flat
-        };
-        let i_flat = flatten(&input_shape, &input_strides, pad_input);
-        let t1_flat = flatten(&t1_shape, &t1_strides, pad_t1);
-        let t2_flat = flatten(&t2_shape, &t2_strides, pad_t2);
+        let i_flat = broadcast_source_flat_index(i, &out_shape, &input_shape, &input_strides);
+        let t1_flat = broadcast_source_flat_index(i, &out_shape, &t1_shape, &t1_strides);
+        let t2_flat = broadcast_source_flat_index(i, &out_shape, &t2_shape, &t2_strides);
 
         // Fused: out_i = input_i + value * tensor1_i * tensor2_i. R-DEV-1.
         result[i] = cpu_addcmul_value(
@@ -4591,46 +4450,14 @@ fn addcdiv_inner<T: Float>(
 
     let mut result = vec![<T as num_traits::Zero>::zero(); out_numel.max(1)];
 
-    // C-contiguous strides for each operand (broadcast-padded to out_ndim).
-    let out_ndim = out_shape.len();
-    let pad_input = out_ndim - input_shape.len();
-    let pad_t1 = out_ndim - t1_shape.len();
-    let pad_t2 = out_ndim - t2_shape.len();
-
-    let strides_of = |shape: &[usize]| -> Vec<usize> {
-        let mut s = vec![1usize; shape.len()];
-        for d in (0..shape.len().saturating_sub(1)).rev() {
-            s[d] = s[d + 1] * shape[d + 1];
-        }
-        s
-    };
-    let input_strides = strides_of(&input_shape);
-    let t1_strides = strides_of(&t1_shape);
-    let t2_strides = strides_of(&t2_shape);
+    let input_strides = contiguous_strides(&input_shape);
+    let t1_strides = contiguous_strides(&t1_shape);
+    let t2_strides = contiguous_strides(&t2_shape);
 
     for i in 0..out_numel {
-        // Decompose `i` into per-axis coords over `out_shape`.
-        let mut rem_i = i;
-        let mut coords = [0usize; 16];
-        for d in (0..out_ndim).rev() {
-            coords[d] = rem_i % out_shape[d];
-            rem_i /= out_shape[d];
-        }
-
-        // Map output coords to per-operand flat indices, collapsing
-        // broadcast (size==1) axes to coord 0.
-        let flatten = |shape: &[usize], strides: &[usize], pad: usize| -> usize {
-            let mut flat = 0usize;
-            for (d, &s) in strides.iter().enumerate() {
-                let oc = coords[d + pad];
-                let coord = if shape[d] == 1 { 0 } else { oc };
-                flat += coord * s;
-            }
-            flat
-        };
-        let i_flat = flatten(&input_shape, &input_strides, pad_input);
-        let t1_flat = flatten(&t1_shape, &t1_strides, pad_t1);
-        let t2_flat = flatten(&t2_shape, &t2_strides, pad_t2);
+        let i_flat = broadcast_source_flat_index(i, &out_shape, &input_shape, &input_strides);
+        let t1_flat = broadcast_source_flat_index(i, &out_shape, &t1_shape, &t1_strides);
+        let t2_flat = broadcast_source_flat_index(i, &out_shape, &t2_shape, &t2_strides);
 
         // Fused: out_i = input_i + value * tensor1_i / tensor2_i. R-DEV-1.
         // IEEE-754 div-by-zero at tensor2_i=0 produces ±Inf (or NaN if
