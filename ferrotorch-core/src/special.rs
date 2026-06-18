@@ -3716,6 +3716,505 @@ fn calc_igammac_f64(a: f64, x: f64) -> f64 {
     igamc_interior_f64(a, x)
 }
 
+fn igam_cuda_machep<T: Float>() -> f64 {
+    if poly_is_f32::<T>() {
+        5.960_464_477_539_063e-8
+    } else {
+        IGAM_MACHEP
+    }
+}
+
+fn igam_cuda_maxlog<T: Float>() -> f64 {
+    if poly_is_f32::<T>() {
+        88.722_839_052_068_35
+    } else {
+        7.097_827_128_933_84E2
+    }
+}
+
+fn horner_const_tensor_rev<T: Float>(
+    x: &Tensor<T>,
+    coeffs: &[f64],
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let mut iter = coeffs.iter().rev();
+    let first = *iter
+        .next()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("{op}: horner polynomial requires at least one coefficient"),
+        })?;
+    let mut acc = full_like_scalar(x, first, op)?;
+    for &coeff in iter {
+        let prod = crate::grad_fns::arithmetic::mul(&acc, x)?;
+        acc = add_const_like(&prod, coeff, op)?;
+    }
+    Ok(acc)
+}
+
+fn lanczos_sum_expg_scaled_cuda<T: Float>(
+    x: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let abs_x = crate::grad_fns::arithmetic::abs(x)?;
+    let one = full_like_scalar(x, 1.0, op)?;
+    let large = BoolTensor::gt(&abs_x, &one)?;
+    let inv_x = div_const_by_tensor(1.0, x, op)?;
+
+    let num_small = horner_const_tensor(x, &LANCZOS_SUM_EXPG_SCALED_NUM, op)?;
+    let denom_small = horner_const_tensor(x, &LANCZOS_SUM_EXPG_SCALED_DENOM, op)?;
+    let small = crate::grad_fns::arithmetic::div(&num_small, &denom_small)?;
+
+    let num_large = horner_const_tensor_rev(&inv_x, &LANCZOS_SUM_EXPG_SCALED_NUM, op)?;
+    let denom_large = horner_const_tensor_rev(&inv_x, &LANCZOS_SUM_EXPG_SCALED_DENOM, op)?;
+    let large_value = crate::grad_fns::arithmetic::div(&num_large, &denom_large)?;
+    crate::grad_fns::comparison::where_bt(&large, &large_value, &small)
+}
+
+fn pow_positive_tensor_cuda<T: Float>(
+    base: &Tensor<T>,
+    exponent: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    let log_base = crate::grad_fns::transcendental::log(base)?;
+    let scaled = crate::grad_fns::arithmetic::mul(exponent, &log_base)?;
+    crate::grad_fns::transcendental::exp(&scaled)
+}
+
+fn igam_helper_fac_cuda<T: Float>(
+    a: &Tensor<T>,
+    x: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    #[allow(clippy::approx_constant)]
+    const EXP1: f64 = 2.718_281_828_459_045;
+    #[allow(clippy::excessive_precision)]
+    const LANCZOS_G_EXPG: f64 = 6.024_680_040_776_729_583_740_234_375;
+    const FAC_SHIFT: f64 = LANCZOS_G_EXPG - 0.5;
+
+    let a_minus_x = crate::grad_fns::arithmetic::sub(a, x)?;
+    let abs_a_minus_x = crate::grad_fns::arithmetic::abs(&a_minus_x)?;
+    let abs_a = crate::grad_fns::arithmetic::abs(a)?;
+    let far_threshold = mul_const_like(&abs_a, 0.4, op)?;
+    let far_from_ridge = BoolTensor::gt(&abs_a_minus_x, &far_threshold)?;
+
+    let log_x = crate::grad_fns::transcendental::log(x)?;
+    let a_log_x = crate::grad_fns::arithmetic::mul(a, &log_x)?;
+    let a_log_x_minus_x = crate::grad_fns::arithmetic::sub(&a_log_x, x)?;
+    let lgamma_a = lgamma(a)?;
+    let far_ax = crate::grad_fns::arithmetic::sub(&a_log_x_minus_x, &lgamma_a)?;
+    let too_small = BoolTensor::lt(
+        &far_ax,
+        &full_like_scalar(&far_ax, -igam_cuda_maxlog::<T>(), op)?,
+    )?;
+    let far_exp = crate::grad_fns::transcendental::exp(&far_ax)?;
+    let zero = full_like_scalar(&far_exp, 0.0, op)?;
+    let far_value = crate::grad_fns::comparison::where_bt(&too_small, &zero, &far_exp)?;
+
+    let fac = add_const_like(a, FAC_SHIFT, op)?;
+    let fac_over_e = mul_const_like(&fac, 1.0 / EXP1, op)?;
+    let sqrt_fac = crate::grad_fns::arithmetic::sqrt(&fac_over_e)?;
+    let lanczos = lanczos_sum_expg_scaled_cuda(a, op)?;
+    let res0 = crate::grad_fns::arithmetic::div(&sqrt_fac, &lanczos)?;
+
+    let a_lt_200 = BoolTensor::lt(a, &full_like_scalar(a, 200.0, op)?)?;
+    let x_lt_200 = BoolTensor::lt(x, &full_like_scalar(x, 200.0, op)?)?;
+    let small_branch = a_lt_200.and(&x_lt_200)?;
+
+    let exp_a_minus_x = crate::grad_fns::transcendental::exp(&a_minus_x)?;
+    let x_over_fac = crate::grad_fns::arithmetic::div(x, &fac)?;
+    let pow_x_fac = pow_positive_tensor_cuda(&x_over_fac, a)?;
+    let small_scale = crate::grad_fns::arithmetic::mul(&exp_a_minus_x, &pow_x_fac)?;
+
+    let num = crate::grad_fns::arithmetic::sub(x, a)?;
+    let num = add_const_like(&num, -FAC_SHIFT, op)?;
+    let numfac = crate::grad_fns::arithmetic::div(&num, &fac)?;
+    let log1p_numfac = crate::grad_fns::transcendental::log1p(&numfac)?;
+    let log1p_minus_numfac = crate::grad_fns::arithmetic::sub(&log1p_numfac, &numfac)?;
+    let first = crate::grad_fns::arithmetic::mul(a, &log1p_minus_numfac)?;
+    let x_scaled = mul_const_like(x, 0.5 - LANCZOS_G_EXPG, op)?;
+    let second = crate::grad_fns::arithmetic::div(&x_scaled, &fac)?;
+    let exponent = crate::grad_fns::arithmetic::add(&first, &second)?;
+    let large_scale = crate::grad_fns::transcendental::exp(&exponent)?;
+
+    let scale = crate::grad_fns::comparison::where_bt(&small_branch, &small_scale, &large_scale)?;
+    let ridge_value = crate::grad_fns::arithmetic::mul(&res0, &scale)?;
+    crate::grad_fns::comparison::where_bt(&far_from_ridge, &far_value, &ridge_value)
+}
+
+fn igam_helper_series_cuda<T: Float>(
+    a: &Tensor<T>,
+    x: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let ax = igam_helper_fac_cuda(a, x, op)?;
+    let mut r = a.clone();
+    let mut c = full_like_scalar(x, 1.0, op)?;
+    let mut ans = full_like_scalar(x, 1.0, op)?;
+    for _ in 0..2000 {
+        r = add_const_like(&r, 1.0, op)?;
+        let ratio = crate::grad_fns::arithmetic::div(x, &r)?;
+        c = crate::grad_fns::arithmetic::mul(&c, &ratio)?;
+        ans = crate::grad_fns::arithmetic::add(&ans, &c)?;
+    }
+    let numerator = crate::grad_fns::arithmetic::mul(&ans, &ax)?;
+    let raw = crate::grad_fns::arithmetic::div(&numerator, a)?;
+    let zero = full_like_scalar(&raw, 0.0, op)?;
+    let ax_zero = BoolTensor::eq_t(&ax, &zero)?;
+    crate::grad_fns::comparison::where_bt(&ax_zero, &zero, &raw)
+}
+
+fn igamc_helper_series_cuda<T: Float>(
+    a: &Tensor<T>,
+    x: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let mut fac = full_like_scalar(x, 1.0, op)?;
+    let mut sum = full_like_scalar(x, 0.0, op)?;
+    let neg_x = crate::grad_fns::arithmetic::neg(x)?;
+    for n in 1..2000 {
+        let scaled = mul_const_like(&neg_x, 1.0 / n as f64, op)?;
+        fac = crate::grad_fns::arithmetic::mul(&fac, &scaled)?;
+        let denom = add_const_like(a, n as f64, op)?;
+        let term = crate::grad_fns::arithmetic::div(&fac, &denom)?;
+        sum = crate::grad_fns::arithmetic::add(&sum, &term)?;
+    }
+
+    let logx = crate::grad_fns::transcendental::log(x)?;
+    let a_logx = crate::grad_fns::arithmetic::mul(a, &logx)?;
+    let one_plus_a = add_const_like(a, 1.0, op)?;
+    let lgamma_one_plus_a = lgamma(&one_plus_a)?;
+    let first_exp_arg = crate::grad_fns::arithmetic::sub(&a_logx, &lgamma_one_plus_a)?;
+    let first =
+        crate::grad_fns::arithmetic::neg(&crate::grad_fns::transcendental::expm1(&first_exp_arg)?)?;
+
+    let lgamma_a = lgamma(a)?;
+    let second_exp_arg = crate::grad_fns::arithmetic::sub(&a_logx, &lgamma_a)?;
+    let second_exp = crate::grad_fns::transcendental::exp(&second_exp_arg)?;
+    let second = crate::grad_fns::arithmetic::mul(&second_exp, &sum)?;
+    crate::grad_fns::arithmetic::sub(&first, &second)
+}
+
+fn igam_helper_asymptotic_series_cuda<T: Float>(
+    a: &Tensor<T>,
+    x: &Tensor<T>,
+    lower: bool,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let sgn = if lower { -1.0 } else { 1.0 };
+    let one = full_like_scalar(a, 1.0, op)?;
+    let zero = full_like_scalar(a, 0.0, op)?;
+
+    let lambda = crate::grad_fns::arithmetic::div(x, a)?;
+    let sigma_num = crate::grad_fns::arithmetic::sub(x, a)?;
+    let sigma = crate::grad_fns::arithmetic::div(&sigma_num, a)?;
+    let log1p_sigma = crate::grad_fns::transcendental::log1p(&sigma)?;
+    let eta_inner = crate::grad_fns::arithmetic::sub(&log1p_sigma, &sigma)?;
+    let eta_inner = mul_const_like(&eta_inner, -2.0, op)?;
+    let eta_abs = crate::grad_fns::arithmetic::sqrt(&eta_inner)?;
+    let eta_neg = crate::grad_fns::arithmetic::neg(&eta_abs)?;
+    let lambda_gt_one = BoolTensor::gt(&lambda, &one)?;
+    let lambda_lt_one = BoolTensor::lt(&lambda, &one)?;
+    let eta_lower = crate::grad_fns::comparison::where_bt(&lambda_lt_one, &eta_neg, &zero)?;
+    let eta = crate::grad_fns::comparison::where_bt(&lambda_gt_one, &eta_abs, &eta_lower)?;
+
+    let half_a = mul_const_like(a, 0.5, op)?;
+    let sqrt_half_a = crate::grad_fns::arithmetic::sqrt(&half_a)?;
+    let erfc_arg = crate::grad_fns::arithmetic::mul(&eta, &sqrt_half_a)?;
+    let erfc_arg = mul_const_like(&erfc_arg, sgn, op)?;
+    let erfc_val = erfc(&erfc_arg)?;
+    let mut res = mul_const_like(&erfc_val, 0.5, op)?;
+
+    let mut etapows = Vec::with_capacity(25);
+    etapows.push(full_like_scalar(&eta, 1.0, op)?);
+    for n in 1..25 {
+        let next = crate::grad_fns::arithmetic::mul(&etapows[n - 1], &eta)?;
+        etapows.push(next);
+    }
+
+    let mut sum = full_like_scalar(a, 0.0, op)?;
+    let mut afac = full_like_scalar(a, 1.0, op)?;
+    let mut absoldterm = full_like_scalar(a, f64::INFINITY, op)?;
+    let mut active = BoolTensor::eq_t(a, a)?;
+    let machep = full_like_scalar(a, igam_cuda_machep::<T>(), op)?;
+
+    for row in &IGAM_ASYMPTOTIC_D {
+        let mut ck = full_like_scalar(a, row[0], op)?;
+        for (n, &coeff) in row.iter().enumerate().skip(1) {
+            let term = mul_const_like(&etapows[n], coeff, op)?;
+            ck = crate::grad_fns::arithmetic::add(&ck, &term)?;
+        }
+        let term = crate::grad_fns::arithmetic::mul(&ck, &afac)?;
+        let absterm = crate::grad_fns::arithmetic::abs(&term)?;
+        let not_increasing = BoolTensor::le(&absterm, &absoldterm)?;
+        let add_term = active.and(&not_increasing)?;
+        let masked_term = crate::grad_fns::comparison::where_bt(&add_term, &term, &zero)?;
+        sum = crate::grad_fns::arithmetic::add(&sum, &masked_term)?;
+
+        let abs_sum = crate::grad_fns::arithmetic::abs(&sum)?;
+        let conv_threshold = crate::grad_fns::arithmetic::mul(&machep, &abs_sum)?;
+        let converged = BoolTensor::lt(&absterm, &conv_threshold)?;
+        let still_active = add_term.and(&converged.not()?)?;
+        absoldterm = crate::grad_fns::comparison::where_bt(&add_term, &absterm, &absoldterm)?;
+        afac = crate::grad_fns::arithmetic::div(&afac, a)?;
+        active = still_active;
+    }
+
+    let eta2 = crate::grad_fns::arithmetic::mul(&eta, &eta)?;
+    let scaled_eta2 = crate::grad_fns::arithmetic::mul(a, &eta2)?;
+    let scaled_eta2 = mul_const_like(&scaled_eta2, -0.5, op)?;
+    let exp_term = crate::grad_fns::transcendental::exp(&scaled_eta2)?;
+    let numerator = crate::grad_fns::arithmetic::mul(&exp_term, &sum)?;
+    let numerator = mul_const_like(&numerator, sgn, op)?;
+    let denom_arg = mul_const_like(a, 2.0 * f64::from(std::f32::consts::PI), op)?;
+    let denom = crate::grad_fns::arithmetic::sqrt(&denom_arg)?;
+    let correction = crate::grad_fns::arithmetic::div(&numerator, &denom)?;
+    res = crate::grad_fns::arithmetic::add(&res, &correction)?;
+    Ok(res)
+}
+
+fn igamc_helper_continued_fraction_cuda<T: Float>(
+    a: &Tensor<T>,
+    x: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let ax = igam_helper_fac_cuda(a, x, op)?;
+    let big = if poly_is_f32::<T>() {
+        16_777_216.0
+    } else {
+        4.503_599_627_370_496e15
+    };
+    let biginv = if poly_is_f32::<T>() {
+        5.960_464_477_539_063e-8
+    } else {
+        2.220_446_049_250_313e-16
+    };
+
+    let zero = full_like_scalar(x, 0.0, op)?;
+    let one = full_like_scalar(x, 1.0, op)?;
+    let mut y = crate::grad_fns::arithmetic::sub(&one, a)?;
+    let mut z = crate::grad_fns::arithmetic::add(x, &y)?;
+    z = add_const_like(&z, 1.0, op)?;
+    let mut c = full_like_scalar(x, 0.0, op)?;
+    let mut pkm2 = full_like_scalar(x, 1.0, op)?;
+    let mut qkm2 = x.clone();
+    let mut pkm1 = add_const_like(x, 1.0, op)?;
+    let mut qkm1 = crate::grad_fns::arithmetic::mul(&z, x)?;
+    let mut ans = crate::grad_fns::arithmetic::div(&pkm1, &qkm1)?;
+    let mut active = BoolTensor::eq_t(a, a)?;
+    let machep = full_like_scalar(x, igam_cuda_machep::<T>(), op)?;
+    let big_t = full_like_scalar(x, big, op)?;
+
+    for _ in 0..2000 {
+        c = add_const_like(&c, 1.0, op)?;
+        y = add_const_like(&y, 1.0, op)?;
+        z = add_const_like(&z, 2.0, op)?;
+        let yc = crate::grad_fns::arithmetic::mul(&y, &c)?;
+        let pk_left = crate::grad_fns::arithmetic::mul(&pkm1, &z)?;
+        let pk_right = crate::grad_fns::arithmetic::mul(&pkm2, &yc)?;
+        let pk = crate::grad_fns::arithmetic::sub(&pk_left, &pk_right)?;
+        let qk_left = crate::grad_fns::arithmetic::mul(&qkm1, &z)?;
+        let qk_right = crate::grad_fns::arithmetic::mul(&qkm2, &yc)?;
+        let qk = crate::grad_fns::arithmetic::sub(&qk_left, &qk_right)?;
+
+        let qk_zero = BoolTensor::eq_t(&qk, &zero)?;
+        let r = crate::grad_fns::arithmetic::div(&pk, &qk)?;
+        let ans_minus_r = crate::grad_fns::arithmetic::sub(&ans, &r)?;
+        let rel = crate::grad_fns::arithmetic::div(&ans_minus_r, &r)?;
+        let t_raw = crate::grad_fns::arithmetic::abs(&rel)?;
+        let t = crate::grad_fns::comparison::where_bt(&qk_zero, &one, &t_raw)?;
+        let next_ans = crate::grad_fns::comparison::where_bt(&qk_zero, &ans, &r)?;
+        ans = crate::grad_fns::comparison::where_bt(&active, &next_ans, &ans)?;
+
+        let pk_abs = crate::grad_fns::arithmetic::abs(&pk)?;
+        let rescale = BoolTensor::gt(&pk_abs, &big_t)?;
+        let pkm2_next = crate::grad_fns::comparison::where_bt(&active, &pkm1, &pkm2)?;
+        let pkm1_next = crate::grad_fns::comparison::where_bt(&active, &pk, &pkm1)?;
+        let qkm2_next = crate::grad_fns::comparison::where_bt(&active, &qkm1, &qkm2)?;
+        let qkm1_next = crate::grad_fns::comparison::where_bt(&active, &qk, &qkm1)?;
+        pkm2 = crate::grad_fns::comparison::where_bt(
+            &rescale,
+            &mul_const_like(&pkm2_next, biginv, op)?,
+            &pkm2_next,
+        )?;
+        pkm1 = crate::grad_fns::comparison::where_bt(
+            &rescale,
+            &mul_const_like(&pkm1_next, biginv, op)?,
+            &pkm1_next,
+        )?;
+        qkm2 = crate::grad_fns::comparison::where_bt(
+            &rescale,
+            &mul_const_like(&qkm2_next, biginv, op)?,
+            &qkm2_next,
+        )?;
+        qkm1 = crate::grad_fns::comparison::where_bt(
+            &rescale,
+            &mul_const_like(&qkm1_next, biginv, op)?,
+            &qkm1_next,
+        )?;
+
+        let converged = BoolTensor::le(&t, &machep)?;
+        active = active.and(&converged.not()?)?;
+    }
+
+    let raw = crate::grad_fns::arithmetic::mul(&ans, &ax)?;
+    let ax_zero = BoolTensor::eq_t(&ax, &zero)?;
+    crate::grad_fns::comparison::where_bt(&ax_zero, &zero, &raw)
+}
+
+fn igamc_interior_cuda<T: Float>(
+    a: &Tensor<T>,
+    x: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let small = full_like_scalar(a, 20.0, op)?;
+    let large = full_like_scalar(a, 200.0, op)?;
+    let abs_x_minus_a = crate::grad_fns::arithmetic::abs(&crate::grad_fns::arithmetic::sub(x, a)?)?;
+    let absxma_a = crate::grad_fns::arithmetic::div(&abs_x_minus_a, a)?;
+    let smallratio = full_like_scalar(&absxma_a, 0.3, op)?;
+    let largeratio = full_like_scalar(&absxma_a, 4.5, op)?;
+    let sqrt_a = crate::grad_fns::arithmetic::sqrt(a)?;
+    let largeratio_over_sqrt = crate::grad_fns::arithmetic::div(&largeratio, &sqrt_a)?;
+
+    let a_gt_small = BoolTensor::gt(a, &small)?;
+    let a_lt_large = BoolTensor::lt(a, &large)?;
+    let near_small = BoolTensor::lt(&absxma_a, &smallratio)?;
+    let asym_mid = a_gt_small.and(&a_lt_large)?.and(&near_small)?;
+    let a_gt_large = BoolTensor::gt(a, &large)?;
+    let asym_large = a_gt_large.and(&BoolTensor::lt(&absxma_a, &largeratio_over_sqrt)?)?;
+    let use_asymptotic = asym_mid.or(&asym_large)?;
+
+    let asym = igam_helper_asymptotic_series_cuda(a, x, false, op)?;
+    let series = igam_helper_series_cuda(a, x, op)?;
+    let one = full_like_scalar(&series, 1.0, op)?;
+    let one_minus_series = crate::grad_fns::arithmetic::sub(&one, &series)?;
+    let cseries = igamc_helper_series_cuda(a, x, op)?;
+    let cf = igamc_helper_continued_fraction_cuda(a, x, op)?;
+
+    let x_gt_1_1 = BoolTensor::gt(x, &full_like_scalar(x, 1.1, op)?)?;
+    let x_lt_a = BoolTensor::lt(x, a)?;
+    let x_le_0_5 = BoolTensor::le(x, &full_like_scalar(x, 0.5, op)?)?;
+    let log_x = crate::grad_fns::transcendental::log(x)?;
+    let neg_04 = full_like_scalar(x, -0.4, op)?;
+    let threshold = crate::grad_fns::arithmetic::div(&neg_04, &log_x)?;
+    let threshold_lt_a = BoolTensor::lt(&threshold, a)?;
+    let x_times_1_1 = mul_const_like(x, 1.1, op)?;
+    let x_times_1_1_lt_a = BoolTensor::lt(&x_times_1_1, a)?;
+
+    let branch_x_gt_1_1 = crate::grad_fns::comparison::where_bt(&x_lt_a, &one_minus_series, &cf)?;
+    let branch_x_le_0_5 =
+        crate::grad_fns::comparison::where_bt(&threshold_lt_a, &one_minus_series, &cseries)?;
+    let branch_else =
+        crate::grad_fns::comparison::where_bt(&x_times_1_1_lt_a, &one_minus_series, &cseries)?;
+    let non_asym =
+        crate::grad_fns::comparison::where_bt(&x_le_0_5, &branch_x_le_0_5, &branch_else)?;
+    let non_asym = crate::grad_fns::comparison::where_bt(&x_gt_1_1, &branch_x_gt_1_1, &non_asym)?;
+    crate::grad_fns::comparison::where_bt(&use_asymptotic, &asym, &non_asym)
+}
+
+fn igam_interior_cuda<T: Float>(
+    a: &Tensor<T>,
+    x: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let small = full_like_scalar(a, 20.0, op)?;
+    let large = full_like_scalar(a, 200.0, op)?;
+    let abs_x_minus_a = crate::grad_fns::arithmetic::abs(&crate::grad_fns::arithmetic::sub(x, a)?)?;
+    let absxma_a = crate::grad_fns::arithmetic::div(&abs_x_minus_a, a)?;
+    let smallratio = full_like_scalar(&absxma_a, 0.3, op)?;
+    let largeratio = full_like_scalar(&absxma_a, 4.5, op)?;
+    let sqrt_a = crate::grad_fns::arithmetic::sqrt(a)?;
+    let largeratio_over_sqrt = crate::grad_fns::arithmetic::div(&largeratio, &sqrt_a)?;
+
+    let a_gt_small = BoolTensor::gt(a, &small)?;
+    let a_lt_large = BoolTensor::lt(a, &large)?;
+    let near_small = BoolTensor::lt(&absxma_a, &smallratio)?;
+    let asym_mid = a_gt_small.and(&a_lt_large)?.and(&near_small)?;
+    let a_gt_large = BoolTensor::gt(a, &large)?;
+    let asym_large = a_gt_large.and(&BoolTensor::lt(&absxma_a, &largeratio_over_sqrt)?)?;
+    let use_asymptotic = asym_mid.or(&asym_large)?;
+
+    let asym = igam_helper_asymptotic_series_cuda(a, x, true, op)?;
+    let series = igam_helper_series_cuda(a, x, op)?;
+    let q = igamc_interior_cuda(a, x, op)?;
+    let one = full_like_scalar(&q, 1.0, op)?;
+    let one_minus_q = crate::grad_fns::arithmetic::sub(&one, &q)?;
+    let x_gt_one = BoolTensor::gt(x, &full_like_scalar(x, 1.0, op)?)?;
+    let x_gt_a = BoolTensor::gt(x, a)?;
+    let use_q = x_gt_one.and(&x_gt_a)?;
+    let non_asym = crate::grad_fns::comparison::where_bt(&use_q, &one_minus_q, &series)?;
+    crate::grad_fns::comparison::where_bt(&use_asymptotic, &asym, &non_asym)
+}
+
+fn gammainc_cuda_composed<T: Float>(
+    a: &Tensor<T>,
+    x: &Tensor<T>,
+    upper: bool,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    let op = if upper { "gammaincc" } else { "gammainc" };
+    if !cuda_binary_composed_precheck(a, x, op)? {
+        return Ok(None);
+    }
+
+    no_grad(|| {
+        let zero_a = full_like_scalar(a, 0.0, op)?;
+        let zero_x = full_like_scalar(x, 0.0, op)?;
+        let pos_inf_a = full_like_scalar(a, f64::INFINITY, op)?;
+        let pos_inf_x = full_like_scalar(x, f64::INFINITY, op)?;
+        let nan = full_like_scalar(a, f64::NAN, op)?;
+
+        let interior = if upper {
+            igamc_interior_cuda(a, x, op)?
+        } else {
+            igam_interior_cuda(a, x, op)?
+        };
+
+        let x_negative = BoolTensor::lt(x, &zero_x)?;
+        let a_negative = BoolTensor::lt(a, &zero_a)?;
+        let any_negative = x_negative.or(&a_negative)?;
+        let a_zero = BoolTensor::eq_t(a, &zero_a)?;
+        let x_zero = BoolTensor::eq_t(x, &zero_x)?;
+        let x_positive = BoolTensor::gt(x, &zero_x)?;
+        let a_inf = BoolTensor::eq_t(a, &pos_inf_a)?;
+        let x_inf = BoolTensor::eq_t(x, &pos_inf_x)?;
+        let both_inf = a_inf.and(&x_inf)?;
+        let any_nan = BoolTensor::ne(a, a)?.or(&BoolTensor::ne(x, x)?)?;
+
+        let zero_result = full_like_scalar(&interior, 0.0, op)?;
+        let one_result = full_like_scalar(&interior, 1.0, op)?;
+
+        let a_zero_value = if upper {
+            zero_result.clone()
+        } else {
+            one_result.clone()
+        };
+        let x_zero_value = if upper {
+            one_result.clone()
+        } else {
+            zero_result.clone()
+        };
+        let a_inf_value = if upper {
+            one_result.clone()
+        } else {
+            zero_result.clone()
+        };
+        let x_inf_value = if upper {
+            zero_result.clone()
+        } else {
+            one_result.clone()
+        };
+
+        let a_zero_branch =
+            crate::grad_fns::comparison::where_bt(&x_positive, &a_zero_value, &nan)?;
+        let mut out = crate::grad_fns::comparison::where_bt(&x_zero, &x_zero_value, &interior)?;
+        out = crate::grad_fns::comparison::where_bt(&a_zero, &a_zero_branch, &out)?;
+        out = crate::grad_fns::comparison::where_bt(&a_inf, &a_inf_value, &out)?;
+        out = crate::grad_fns::comparison::where_bt(&x_inf, &x_inf_value, &out)?;
+        out = crate::grad_fns::comparison::where_bt(&both_inf, &nan, &out)?;
+        out = crate::grad_fns::comparison::where_bt(&any_negative, &nan, &out)?;
+        out = crate::grad_fns::comparison::where_bt(&any_nan, &nan, &out)?;
+        Ok(Some(out))
+    })
+}
+
 /// Log-beta `lnB(a, b) = lgamma(a) + lgamma(b) - lgamma(a + b)`.
 ///
 /// Mirrors `torch.special.gammaln`-built `lbeta` / `scipy.special.betaln`.
@@ -4377,8 +4876,11 @@ pub fn airy_ai<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// result is `NaN` (matching `aten/src/ATen/native/Math.h:1144 calc_igamma`).
 /// `input = 0, other > 0 → 1`; `input > 0, other = 0 → 0`; `other → ∞ → 1`.
 pub fn gammainc<T: Float>(input: &Tensor<T>, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    reject_cuda_binary(input, other, "gammainc")?;
-    let output = binary_map(input, other, gammainc_scalar)?;
+    let output = if let Some(output) = gammainc_cuda_composed(input, other, false)? {
+        output
+    } else {
+        binary_map(input, other, gammainc_scalar)?
+    };
     finish_special_binary(output, input, other, |_| {
         Ok(Arc::new(GammaIncBackward {
             a: input.saved_for_backward()?,
@@ -4397,8 +4899,11 @@ pub fn gammainc<T: Float>(input: &Tensor<T>, other: &Tensor<T>) -> FerrotorchRes
 /// `input = 0, other > 0 → 0`; `input > 0, other = 0 → 1`; `other → ∞ → 0`
 /// (matching `aten/src/ATen/native/Math.h calc_igammac`).
 pub fn gammaincc<T: Float>(input: &Tensor<T>, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    reject_cuda_binary(input, other, "gammaincc")?;
-    let output = binary_map(input, other, gammaincc_scalar)?;
+    let output = if let Some(output) = gammainc_cuda_composed(input, other, true)? {
+        output
+    } else {
+        binary_map(input, other, gammaincc_scalar)?
+    };
     finish_special_binary(output, input, other, |_| {
         Ok(Arc::new(GammaIncBackward {
             a: input.saved_for_backward()?,
@@ -4770,18 +5275,6 @@ fn special_gpu_binary_broadcast<T: Float>(
         };
         Ok(Some(poly_gpu_output::<T>(out_handle, out_shape)?))
     })
-}
-
-fn reject_cuda_binary<T: Float>(
-    a: &Tensor<T>,
-    b: &Tensor<T>,
-    op: &'static str,
-) -> FerrotorchResult<()> {
-    if a.is_cuda() || b.is_cuda() {
-        Err(FerrotorchError::NotImplementedOnCuda { op })
-    } else {
-        Ok(())
-    }
 }
 
 /// Chebyshev-family GPU dispatch (T/U/V/W + shifted), selecting the kind via

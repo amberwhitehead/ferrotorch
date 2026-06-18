@@ -2,11 +2,8 @@
 
 use std::sync::Once;
 
-use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::grad_fns::reduction::sum as reduce_sum;
-use ferrotorch_core::{
-    Device, Tensor, TensorStorage, expm1, gammainc, gammaincc, log1p, sinc, xlogy,
-};
+use ferrotorch_core::{Device, Tensor, TensorStorage, expm1, log1p, sinc, xlogy};
 
 static GPU_INIT: Once = Once::new();
 
@@ -92,16 +89,6 @@ fn assert_close_or_nan_f64(actual: &[f64], expected: &[f64], tol: f64, label: &s
                 "{label}[{i}]: expected {e:?}, got {a:?}"
             );
         }
-    }
-}
-
-fn assert_not_implemented<T>(label: &str, result: FerrotorchResult<T>, expected_op: &'static str) {
-    match result {
-        Err(FerrotorchError::NotImplementedOnCuda { op }) => {
-            assert_eq!(op, expected_op, "{label}: wrong CUDA op name");
-        }
-        Err(other) => panic!("{label}: expected NotImplementedOnCuda, got {other:?}"),
-        Ok(_) => panic!("{label}: expected NotImplementedOnCuda"),
     }
 }
 
@@ -210,15 +197,4 @@ fn cuda_special_log1p_expm1_sinc_aliases_use_resident_transcendental_paths() {
         1e-4,
         "sinc alias",
     );
-}
-
-#[test]
-fn cuda_unimplemented_special_ops_return_named_notimplemented_not_storage_errors() {
-    ensure_cuda_backend();
-
-    let x = cuda_f32(vec![0.5, 1.5], &[2], false);
-    let y = cuda_f32(vec![1.0, 2.0], &[2], false);
-
-    assert_not_implemented("gammainc", gammainc(&x, &y), "gammainc");
-    assert_not_implemented("gammaincc", gammaincc(&x, &y), "gammaincc");
 }
