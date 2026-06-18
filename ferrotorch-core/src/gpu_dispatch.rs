@@ -4055,6 +4055,26 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// Error function `torch.special.erf(x)` forward, f32.
+    fn erf_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "erf" })
+    }
+
+    /// Error function `torch.special.erf(x)` forward, f64.
+    fn erf_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "erf" })
+    }
+
+    /// Complementary error function `torch.special.erfc(x)` forward, f32.
+    fn erfc_f32(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "erfc" })
+    }
+
+    /// Complementary error function `torch.special.erfc(x)` forward, f64.
+    fn erfc_f64(&self, _a: &GpuBufferHandle) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "erfc" })
+    }
+
     /// `torch.special.xlogy(x, y)` forward, f32. Both buffers must be
     /// equal-length and already broadcast/materialized by the caller.
     fn xlogy_f32(

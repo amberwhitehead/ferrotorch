@@ -3241,6 +3241,11 @@ fn gammaln_sign_scalar<T: Float>(x: T) -> T {
 /// (meets F64_TRANSCENDENTAL = 1e-10). f32/bf16 path: Abramowitz & Stegun
 /// 7.1.26 polynomial, |epsilon| <= 1.5e-7 (meets F32_TRANSCENDENTAL = 1e-5).
 pub fn erf<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) =
+        special_gpu_simple(input, "erf", |b, h| b.erf_f32(h), |b, h| b.erf_f64(h))?
+    {
+        return wrap_special_unary(output, input, SpecialUnaryKind::Erf);
+    }
     let output = unary_map_named(input, "erf", erf_scalar)?;
     wrap_special_unary(output, input, SpecialUnaryKind::Erf)
 }
@@ -3251,6 +3256,11 @@ pub fn erf<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// right-tail (large positive x) avoids the catastrophic 1 - erf(x)
 /// cancellation. f32/bf16 path: literal `1 - erf_scalar(x)`.
 pub fn erfc<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) =
+        special_gpu_simple(input, "erfc", |b, h| b.erfc_f32(h), |b, h| b.erfc_f64(h))?
+    {
+        return wrap_special_unary(output, input, SpecialUnaryKind::Erfc);
+    }
     let output = unary_map_named(input, "erfc", erfc_scalar)?;
     wrap_special_unary(output, input, SpecialUnaryKind::Erfc)
 }

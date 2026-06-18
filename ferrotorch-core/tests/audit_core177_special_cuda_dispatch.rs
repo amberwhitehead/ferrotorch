@@ -5,8 +5,8 @@ use std::sync::Once;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
 use ferrotorch_core::grad_fns::reduction::sum as reduce_sum;
 use ferrotorch_core::{
-    Device, Tensor, TensorStorage, beta, digamma, erf, erfc, erfinv, expm1, gammainc, gammaincc,
-    gammaln_sign, lgamma, log_beta, log1p, multigammaln, sinc, xlogy,
+    Device, Tensor, TensorStorage, beta, digamma, erfinv, expm1, gammainc, gammaincc, gammaln_sign,
+    lgamma, log_beta, log1p, multigammaln, sinc, xlogy,
 };
 
 static GPU_INIT: Once = Once::new();
@@ -220,8 +220,6 @@ fn cuda_unimplemented_special_ops_return_named_notimplemented_not_storage_errors
     let x = cuda_f32(vec![0.5, 1.5], &[2], false);
     let y = cuda_f32(vec![1.0, 2.0], &[2], false);
 
-    assert_not_implemented("erf", erf(&x), "erf");
-    assert_not_implemented("erfc", erfc(&x), "erfc");
     assert_not_implemented("erfinv", erfinv(&x), "erfinv");
     assert_not_implemented("lgamma", lgamma(&x), "lgamma");
     assert_not_implemented("digamma", digamma(&x), "digamma");

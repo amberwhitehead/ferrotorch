@@ -5284,6 +5284,40 @@ fn launch_elementwise_f32(
     Ok(out)
 }
 
+/// f64 counterpart of [`launch_elementwise_f32`].
+#[cfg(feature = "cuda")]
+fn launch_elementwise_f64(
+    input: &CudaBuffer<f64>,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel: &'static str,
+) -> GpuResult<CudaBuffer<f64>> {
+    let total = check_input(input, device, kernel)?;
+    let mut out = alloc_zeros_f64(total, device)?;
+    if total == 0 {
+        return Ok(out);
+    }
+    let f =
+        crate::module_cache::get_or_compile(device.context(), ptx, kernel, device.ordinal() as u32)
+            .map_err(|e| GpuError::PtxCompileFailed { kernel, source: e })?;
+    let total_u32 = total as u32;
+    let cfg = launch_cfg(total_u32);
+    // SAFETY: `f` is `kernel` (a `(in,out,total)`-ABI elementwise f64 entry);
+    // the launch args match the PTX `.entry` order. `input` is on `device`
+    // with `total` f64 elements, `out` is fresh and non-aliasing, every
+    // thread is bounds-guarded by the PTX head, and `total` fits u32.
+    unsafe {
+        device
+            .stream()
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
 /// Entropy `entr(x)` forward on an f32 buffer (on-device, no host round-trip).
 ///
 /// # Errors
@@ -5414,6 +5448,697 @@ pub fn gpu_scaled_modified_bessel_k1_f32(
 pub fn gpu_airy_ai_f32(input: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
     launch_elementwise_f32(input, device, AIRY_AI_F32_PTX, "airy_ai_f32")
 }
+
+/// `torch.special.erf(x)` forward on an f32 buffer (on-device).
+#[cfg(feature = "cuda")]
+pub fn gpu_erf_f32(input: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    launch_elementwise_f32(input, device, ERF_F32_PTX, "erf_f32")
+}
+
+/// `torch.special.erfc(x)` forward on an f32 buffer (on-device).
+#[cfg(feature = "cuda")]
+pub fn gpu_erfc_f32(input: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    launch_elementwise_f32(input, device, ERFC_F32_PTX, "erfc_f32")
+}
+
+/// `torch.special.erf(x)` forward on an f64 buffer (on-device).
+#[cfg(feature = "cuda")]
+pub fn gpu_erf_f64(input: &CudaBuffer<f64>, device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
+    launch_elementwise_f64(input, device, ERF_F64_PTX, "erf_f64")
+}
+
+/// `torch.special.erfc(x)` forward on an f64 buffer (on-device).
+#[cfg(feature = "cuda")]
+pub fn gpu_erfc_f64(input: &CudaBuffer<f64>, device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
+    launch_elementwise_f64(input, device, ERFC_F64_PTX, "erfc_f64")
+}
+
+/// `torch.special.erf(x)` forward, f32.
+///
+/// Mirrors the crate's CPU f32 path: Abramowitz-Stegun 7.1.26 polynomial with
+/// explicit zero preservation and the usual IEEE NaN/inf propagation from PTX
+/// arithmetic. PyTorch CUDA dispatches this through libdevice `erf`; this
+/// polynomial is within the crate's f32 transcendental tolerance while keeping
+/// the implementation pure Rust/PTX and resident on device.
+#[cfg(feature = "cuda")]
+pub(crate) const ERF_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry erf_f32(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r;
+    .reg .u64 %in_p, %out_p, %off, %addr_in, %addr_out;
+    .reg .f32 %x, %ax, %sign, %one, %p, %t, %poly, %exp_arg, %exp_v, %r;
+    .reg .f32 %a1, %a2, %a3, %a4, %a5, %log2e;
+    .reg .pred %oob, %x_zero, %x_neg;
+
+    ld.param.u64 %in_p,    [in_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %oob, %idx, %total_r;
+    @%oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr_in, %in_p, %off;
+    add.u64 %addr_out, %out_p, %off;
+    ld.global.f32 %x, [%addr_in];
+
+    setp.eq.f32 %x_zero, %x, 0f00000000;
+    @%x_zero bra STORE_INPUT;
+
+    mov.f32 %one, 0f3F800000;
+    mov.f32 %log2e, 0f3FB8AA3B;
+    abs.f32 %ax, %x;
+    setp.lt.f32 %x_neg, %x, 0f00000000;
+    mov.f32 %sign, %one;
+    @%x_neg neg.f32 %sign, %sign;
+
+    mov.f32 %p, 0f3EA7BA05;
+    fma.rn.f32 %t, %p, %ax, %one;
+    rcp.approx.f32 %t, %t;
+
+    mov.f32 %a5, 0f3F87DC22;
+    mov.f32 %a4, 0fBFBA00E3;
+    mov.f32 %a3, 0f3FB5F0E3;
+    mov.f32 %a2, 0fBE91A98E;
+    mov.f32 %a1, 0f3E827906;
+    fma.rn.f32 %poly, %t, %a5, %a4;
+    fma.rn.f32 %poly, %poly, %t, %a3;
+    fma.rn.f32 %poly, %poly, %t, %a2;
+    fma.rn.f32 %poly, %poly, %t, %a1;
+    mul.f32 %poly, %poly, %t;
+
+    mul.f32 %exp_arg, %ax, %ax;
+    neg.f32 %exp_arg, %exp_arg;
+    mul.f32 %exp_arg, %exp_arg, %log2e;
+    ex2.approx.f32 %exp_v, %exp_arg;
+    mul.f32 %r, %poly, %exp_v;
+    sub.f32 %r, %one, %r;
+    mul.f32 %r, %r, %sign;
+    bra STORE;
+
+STORE_INPUT:
+    mov.f32 %r, %x;
+    bra STORE;
+
+STORE:
+    st.global.f32 [%addr_out], %r;
+DONE:
+    ret;
+}
+";
+
+/// `torch.special.erfc(x)` forward, f32.
+#[cfg(feature = "cuda")]
+pub(crate) const ERFC_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry erfc_f32(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r;
+    .reg .u64 %in_p, %out_p, %off, %addr_in, %addr_out;
+    .reg .f32 %x, %ax, %sign, %one, %p, %t, %poly, %exp_arg, %exp_v, %erf_v, %r;
+    .reg .f32 %a1, %a2, %a3, %a4, %a5, %log2e;
+    .reg .pred %oob, %x_zero, %x_neg;
+
+    ld.param.u64 %in_p,    [in_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %oob, %idx, %total_r;
+    @%oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr_in, %in_p, %off;
+    add.u64 %addr_out, %out_p, %off;
+    ld.global.f32 %x, [%addr_in];
+
+    mov.f32 %one, 0f3F800000;
+    setp.eq.f32 %x_zero, %x, 0f00000000;
+    @%x_zero bra STORE_ONE;
+
+    mov.f32 %log2e, 0f3FB8AA3B;
+    abs.f32 %ax, %x;
+    setp.lt.f32 %x_neg, %x, 0f00000000;
+    mov.f32 %sign, %one;
+    @%x_neg neg.f32 %sign, %sign;
+
+    mov.f32 %p, 0f3EA7BA05;
+    fma.rn.f32 %t, %p, %ax, %one;
+    rcp.approx.f32 %t, %t;
+
+    mov.f32 %a5, 0f3F87DC22;
+    mov.f32 %a4, 0fBFBA00E3;
+    mov.f32 %a3, 0f3FB5F0E3;
+    mov.f32 %a2, 0fBE91A98E;
+    mov.f32 %a1, 0f3E827906;
+    fma.rn.f32 %poly, %t, %a5, %a4;
+    fma.rn.f32 %poly, %poly, %t, %a3;
+    fma.rn.f32 %poly, %poly, %t, %a2;
+    fma.rn.f32 %poly, %poly, %t, %a1;
+    mul.f32 %poly, %poly, %t;
+
+    mul.f32 %exp_arg, %ax, %ax;
+    neg.f32 %exp_arg, %exp_arg;
+    mul.f32 %exp_arg, %exp_arg, %log2e;
+    ex2.approx.f32 %exp_v, %exp_arg;
+    mul.f32 %erf_v, %poly, %exp_v;
+    sub.f32 %erf_v, %one, %erf_v;
+    mul.f32 %erf_v, %erf_v, %sign;
+    sub.f32 %r, %one, %erf_v;
+    bra STORE;
+
+STORE_ONE:
+    mov.f32 %r, %one;
+
+STORE:
+    st.global.f32 [%addr_out], %r;
+DONE:
+    ret;
+}
+";
+
+/// `torch.special.erf(x)` forward, f64.
+///
+/// Direct SunPro/fdlibm-style rational regions, matching the high-precision
+/// ferrotorch CPU f64 path instead of the lower-precision f32 polynomial.
+#[cfg(feature = "cuda")]
+pub(crate) const ERF_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry erf_f64(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r;
+    .reg .u64 %in_p, %out_p, %off, %addr_in, %addr_out;
+    .reg .s32 %e_ni;
+    .reg .s64 %e_ni64, %e_bits, %ax_bits, %mask_hi, %adj64;
+    .reg .f64 %x, %ax, %one, %r, %s, %num, %den, %tmp, %z32, %dx, %arg, %exp_v;
+    .reg .f64 %e_log2e, %e_nf, %e_r, %e_p, %e_scale, %half;
+    .reg .pred %oob, %pred_small, %pred_mid, %pred_far, %pred_ra, %pred_neg;
+    .reg .pred %e_nan, %e_overflow, %e_underflow, %e_high, %e_subnormal;
+
+    ld.param.u64 %in_p,    [in_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %oob, %idx, %total_r;
+    @%oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr_in, %in_p, %off;
+    add.u64 %addr_out, %out_p, %off;
+    ld.global.f64 %x, [%addr_in];
+
+    mov.f64 %one, 0d3FF0000000000000;
+    mov.f64 %half, 0d3FE0000000000000;
+    abs.f64 %ax, %x;
+
+    setp.lt.f64 %pred_small, %ax, 0d3FEB000000000000;
+    setp.lt.f64 %pred_mid, %ax, 0d3FF4000000000000;
+    setp.ge.f64 %pred_far, %ax, 0d4018000000000000;
+    @%pred_small bra ERF_SMALL;
+    @%pred_mid bra ERF_MID;
+    @%pred_far bra ERF_FAR;
+    bra ERF_TAIL;
+
+ERF_SMALL:
+    mul.f64 %s, %x, %x;
+    mov.f64 %num, 0dBEF8EAD6120016AC;
+    fma.rn.f64 %num, %num, %s, 0dBF77A291236668E4;
+    fma.rn.f64 %num, %num, %s, 0dBF9D2A51DBD7194F;
+    fma.rn.f64 %num, %num, %s, 0dBFD4CD7D691CB913;
+    fma.rn.f64 %num, %num, %s, 0d3FC06EBA8214DB68;
+    mov.f64 %den, 0dBED09C4342A26120;
+    fma.rn.f64 %den, %den, %s, 0d3F215DC9221C1A10;
+    fma.rn.f64 %den, %den, %s, 0d3F74D022C4D36B0F;
+    fma.rn.f64 %den, %den, %s, 0d3FB0A54C5536CEBA;
+    fma.rn.f64 %den, %den, %s, 0d3FD97779CDDADC09;
+    fma.rn.f64 %den, %den, %s, %one;
+    div.rn.f64 %r, %num, %den;
+    fma.rn.f64 %r, %x, %r, %x;
+    bra STORE;
+
+ERF_MID:
+    sub.f64 %s, %ax, %one;
+    mov.f64 %num, 0dBF61BF380A96073F;
+    fma.rn.f64 %num, %num, %s, 0d3FA22A36599795EB;
+    fma.rn.f64 %num, %num, %s, 0dBFBC63983D3E28EC;
+    fma.rn.f64 %num, %num, %s, 0d3FD45FCA805120E4;
+    fma.rn.f64 %num, %num, %s, 0dBFD7D240FBB8C3F1;
+    fma.rn.f64 %num, %num, %s, 0d3FDA8D00AD92B34D;
+    fma.rn.f64 %num, %num, %s, 0dBF6359B8BEF77538;
+    mov.f64 %den, 0d3F888B545735151D;
+    fma.rn.f64 %den, %den, %s, 0d3F8BEDC26B51DD1C;
+    fma.rn.f64 %den, %den, %s, 0d3FC02660E763351F;
+    fma.rn.f64 %den, %den, %s, 0d3FB2635CD99FE9A7;
+    fma.rn.f64 %den, %den, %s, 0d3FE14AF092EB6F33;
+    fma.rn.f64 %den, %den, %s, 0d3FBB3E6618EEE323;
+    fma.rn.f64 %den, %den, %s, %one;
+    div.rn.f64 %r, %num, %den;
+    add.f64 %r, %r, 0d3FEB0AC160000000;
+    setp.lt.f64 %pred_neg, %x, 0d0000000000000000;
+    @%pred_neg neg.f64 %r, %r;
+    bra STORE;
+
+ERF_FAR:
+    mov.f64 %r, %one;
+    setp.lt.f64 %pred_neg, %x, 0d0000000000000000;
+    @%pred_neg neg.f64 %r, %r;
+    bra STORE;
+
+ERF_TAIL:
+    mul.f64 %s, %ax, %ax;
+    div.rn.f64 %s, %one, %s;
+    setp.lt.f64 %pred_ra, %ax, 0d4006DB6DB6DB6DB7;
+    @%pred_ra bra ERF_TAIL_RA;
+
+    mov.f64 %num, 0dC07E384E9BDC383F;
+    fma.rn.f64 %num, %num, %s, 0dC09004616A2E5992;
+    fma.rn.f64 %num, %num, %s, 0dC083EC881375F228;
+    fma.rn.f64 %num, %num, %s, 0dC064145D43C5ED98;
+    fma.rn.f64 %num, %num, %s, 0dC031C209555F995A;
+    fma.rn.f64 %num, %num, %s, 0dBFE993BA70C285DE;
+    fma.rn.f64 %num, %num, %s, 0dBF84341239E86F4A;
+    mov.f64 %den, 0dC03670E242712D62;
+    fma.rn.f64 %den, %den, %s, 0d407DA874E79FE763;
+    fma.rn.f64 %den, %den, %s, 0d40A3F219CEDF3BE6;
+    fma.rn.f64 %den, %den, %s, 0d40A8FFB7688C246A;
+    fma.rn.f64 %den, %den, %s, 0d409802EB189D5118;
+    fma.rn.f64 %den, %den, %s, 0d40745CAE221B9F0A;
+    fma.rn.f64 %den, %den, %s, 0d403E568B261D5190;
+    fma.rn.f64 %den, %den, %s, %one;
+    bra ERF_TAIL_RS_DONE;
+
+ERF_TAIL_RA:
+    mov.f64 %num, 0dC023A0EFC69AC25C;
+    fma.rn.f64 %num, %num, %s, 0dC054526557E4D2F2;
+    fma.rn.f64 %num, %num, %s, 0dC067135CEBCCABB2;
+    fma.rn.f64 %num, %num, %s, 0dC0644CB184282266;
+    fma.rn.f64 %num, %num, %s, 0dC04F300AE4CBA38D;
+    fma.rn.f64 %num, %num, %s, 0dC0251E0441B0E726;
+    fma.rn.f64 %num, %num, %s, 0dBFE63416E4BA7360;
+    fma.rn.f64 %num, %num, %s, 0dBF843412600D6435;
+    mov.f64 %den, 0dBFAEEFF2EE749A62;
+    fma.rn.f64 %den, %den, %s, 0d401A47EF8E484A93;
+    fma.rn.f64 %den, %den, %s, 0d405B28A3EE48AE2C;
+    fma.rn.f64 %den, %den, %s, 0d407AD02157700314;
+    fma.rn.f64 %den, %den, %s, 0d40842B1921EC2868;
+    fma.rn.f64 %den, %den, %s, 0d407B290DD58A1A71;
+    fma.rn.f64 %den, %den, %s, 0d4061350C526AE721;
+    fma.rn.f64 %den, %den, %s, 0d4033A6B9BD707687;
+    fma.rn.f64 %den, %den, %s, %one;
+
+ERF_TAIL_RS_DONE:
+    div.rn.f64 %s, %num, %den;
+    mov.b64 %ax_bits, %ax;
+    mov.s64 %mask_hi, -4294967296;
+    and.b64 %ax_bits, %ax_bits, %mask_hi;
+    mov.b64 %z32, %ax_bits;
+    mul.f64 %arg, %z32, %z32;
+    neg.f64 %arg, %arg;
+    sub.f64 %arg, %arg, 0d3FE2000000000000;
+    sub.f64 %dx, %ax, %z32;
+    add.f64 %tmp, %ax, %z32;
+    mul.f64 %dx, %dx, %tmp;
+    neg.f64 %dx, %dx;
+    add.f64 %tmp, %dx, %s;
+    add.f64 %arg, %arg, %tmp;
+    bra EXP_EVAL;
+
+EXP_RETURN:
+    div.rn.f64 %tmp, %exp_v, %ax;
+    sub.f64 %r, %one, %tmp;
+    setp.lt.f64 %pred_neg, %x, 0d0000000000000000;
+    @%pred_neg sub.f64 %r, %tmp, %one;
+    bra STORE;
+
+EXP_EVAL:
+    setp.nan.f64 %e_nan, %arg, %arg;
+    @%e_nan bra EXP_STORE_INPUT;
+    setp.gt.f64 %e_overflow, %arg, 0d40862E42FEFA39EF;
+    @%e_overflow bra EXP_STORE_INF;
+    setp.lt.f64 %e_underflow, %arg, 0dC0874385446D71C3;
+    @%e_underflow bra EXP_STORE_ZERO;
+    mov.f64 %e_log2e, 0d3FF71547652B82FE;
+    mul.f64 %e_nf, %arg, %e_log2e;
+    cvt.rni.f64.f64 %e_nf, %e_nf;
+    cvt.rni.s32.f64 %e_ni, %e_nf;
+    fma.rn.f64 %e_r, %e_nf, 0dBFE62E42FEFA3800, %arg;
+    fma.rn.f64 %e_r, %e_nf, 0dBD2EF35793C76730, %e_r;
+    mov.f64 %e_p, 0d3E5AE64567F544E4;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3E927E4FB7789F5C;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3EC71DE3A556C734;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3EFA01A01A01A01A;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F2A01A01A01A01A;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F56C16C16C16C17;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F81111111111111;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3FA5555555555555;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3FC5555555555555;
+    fma.rn.f64 %e_p, %e_p, %e_r, %half;
+    fma.rn.f64 %e_p, %e_p, %e_r, %one;
+    fma.rn.f64 %exp_v, %e_p, %e_r, %one;
+    cvt.s64.s32 %e_ni64, %e_ni;
+    setp.gt.s64 %e_high, %e_ni64, 1023;
+    @%e_high bra EXP_SCALE_HIGH;
+    setp.lt.s64 %e_subnormal, %e_ni64, -1022;
+    @%e_subnormal bra EXP_SCALE_SUBNORMAL;
+EXP_SCALE_NORMAL:
+    add.s64 %e_ni64, %e_ni64, 1023;
+    shl.b64 %e_bits, %e_ni64, 52;
+    mov.b64 %e_scale, %e_bits;
+    mul.f64 %exp_v, %exp_v, %e_scale;
+    bra EXP_RETURN;
+EXP_SCALE_HIGH:
+    sub.s64 %adj64, %e_ni64, 1023;
+    add.s64 %e_bits, %adj64, 1023;
+    shl.b64 %e_bits, %e_bits, 52;
+    mov.b64 %e_scale, %e_bits;
+    mul.f64 %exp_v, %exp_v, %e_scale;
+    mov.u64 %e_bits, 0x7FE0000000000000;
+    mov.b64 %e_scale, %e_bits;
+    mul.f64 %exp_v, %exp_v, %e_scale;
+    bra EXP_RETURN;
+EXP_SCALE_SUBNORMAL:
+    setp.lt.s64 %e_underflow, %e_ni64, -1075;
+    @%e_underflow bra EXP_STORE_ZERO;
+    add.s64 %adj64, %e_ni64, 1022;
+    add.s64 %e_bits, %adj64, 1023;
+    shl.b64 %e_bits, %e_bits, 52;
+    mov.b64 %e_scale, %e_bits;
+    mul.f64 %exp_v, %exp_v, %e_scale;
+    mov.u64 %e_bits, 0x0010000000000000;
+    mov.b64 %e_scale, %e_bits;
+    mul.f64 %exp_v, %exp_v, %e_scale;
+    bra EXP_RETURN;
+EXP_STORE_INPUT:
+    mov.f64 %exp_v, %arg;
+    bra EXP_RETURN;
+EXP_STORE_INF:
+    mov.f64 %exp_v, 0d7FF0000000000000;
+    bra EXP_RETURN;
+EXP_STORE_ZERO:
+    mov.f64 %exp_v, 0d0000000000000000;
+    bra EXP_RETURN;
+
+STORE:
+    st.global.f64 [%addr_out], %r;
+DONE:
+    ret;
+}
+";
+
+/// `torch.special.erfc(x)` forward, f64, computed directly to preserve the
+/// positive tail that `1 - erf(x)` would cancel.
+#[cfg(feature = "cuda")]
+pub(crate) const ERFC_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry erfc_f64(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r;
+    .reg .u64 %in_p, %out_p, %off, %addr_in, %addr_out;
+    .reg .s32 %e_ni;
+    .reg .s64 %e_ni64, %e_bits, %ax_bits, %mask_hi, %adj64;
+    .reg .f64 %x, %ax, %one, %two, %half, %r, %s, %num, %den, %tmp, %z32, %dx, %arg, %exp_v;
+    .reg .f64 %e_log2e, %e_nf, %e_r, %e_p, %e_scale;
+    .reg .pred %oob, %x_nan, %pred_small, %pred_tiny, %pred_quarter, %pred_mid, %pred_tail, %pred_ra, %pred_neg;
+    .reg .pred %e_nan, %e_overflow, %e_underflow, %e_high, %e_subnormal;
+
+    ld.param.u64 %in_p,    [in_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %oob, %idx, %total_r;
+    @%oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr_in, %in_p, %off;
+    add.u64 %addr_out, %out_p, %off;
+    ld.global.f64 %x, [%addr_in];
+
+    mov.f64 %one, 0d3FF0000000000000;
+    mov.f64 %two, 0d4000000000000000;
+    mov.f64 %half, 0d3FE0000000000000;
+    abs.f64 %ax, %x;
+
+    setp.nan.f64 %x_nan, %x, %x;
+    @%x_nan bra ERFC_NAN;
+    setp.lt.f64 %pred_small, %ax, 0d3FEB000000000000;
+    setp.lt.f64 %pred_mid, %ax, 0d3FF4000000000000;
+    setp.lt.f64 %pred_tail, %ax, 0d403C000000000000;
+    @%pred_small bra ERFC_SMALL;
+    @%pred_mid bra ERFC_MID;
+    @%pred_tail bra ERFC_TAIL;
+    bra ERFC_FAR;
+
+ERFC_SMALL:
+    setp.lt.f64 %pred_tiny, %ax, 0d3C70000000000000;
+    @%pred_tiny bra ERFC_TINY;
+    mul.f64 %s, %x, %x;
+    mov.f64 %num, 0dBEF8EAD6120016AC;
+    fma.rn.f64 %num, %num, %s, 0dBF77A291236668E4;
+    fma.rn.f64 %num, %num, %s, 0dBF9D2A51DBD7194F;
+    fma.rn.f64 %num, %num, %s, 0dBFD4CD7D691CB913;
+    fma.rn.f64 %num, %num, %s, 0d3FC06EBA8214DB68;
+    mov.f64 %den, 0dBED09C4342A26120;
+    fma.rn.f64 %den, %den, %s, 0d3F215DC9221C1A10;
+    fma.rn.f64 %den, %den, %s, 0d3F74D022C4D36B0F;
+    fma.rn.f64 %den, %den, %s, 0d3FB0A54C5536CEBA;
+    fma.rn.f64 %den, %den, %s, 0d3FD97779CDDADC09;
+    fma.rn.f64 %den, %den, %s, %one;
+    div.rn.f64 %tmp, %num, %den;
+    mul.f64 %tmp, %x, %tmp;
+    add.f64 %tmp, %x, %tmp;
+    setp.lt.f64 %pred_quarter, %ax, 0d3FD0000000000000;
+    @!%pred_quarter bra ERFC_SMALL_REASSOC;
+    sub.f64 %r, %one, %tmp;
+    bra STORE;
+ERFC_SMALL_REASSOC:
+    sub.f64 %tmp, %tmp, %half;
+    sub.f64 %r, %half, %tmp;
+    bra STORE;
+ERFC_TINY:
+    sub.f64 %r, %one, %x;
+    bra STORE;
+
+ERFC_MID:
+    sub.f64 %s, %ax, %one;
+    mov.f64 %num, 0dBF61BF380A96073F;
+    fma.rn.f64 %num, %num, %s, 0d3FA22A36599795EB;
+    fma.rn.f64 %num, %num, %s, 0dBFBC63983D3E28EC;
+    fma.rn.f64 %num, %num, %s, 0d3FD45FCA805120E4;
+    fma.rn.f64 %num, %num, %s, 0dBFD7D240FBB8C3F1;
+    fma.rn.f64 %num, %num, %s, 0d3FDA8D00AD92B34D;
+    fma.rn.f64 %num, %num, %s, 0dBF6359B8BEF77538;
+    mov.f64 %den, 0d3F888B545735151D;
+    fma.rn.f64 %den, %den, %s, 0d3F8BEDC26B51DD1C;
+    fma.rn.f64 %den, %den, %s, 0d3FC02660E763351F;
+    fma.rn.f64 %den, %den, %s, 0d3FB2635CD99FE9A7;
+    fma.rn.f64 %den, %den, %s, 0d3FE14AF092EB6F33;
+    fma.rn.f64 %den, %den, %s, 0d3FBB3E6618EEE323;
+    fma.rn.f64 %den, %den, %s, %one;
+    div.rn.f64 %tmp, %num, %den;
+    setp.lt.f64 %pred_neg, %x, 0d0000000000000000;
+    @%pred_neg bra ERFC_MID_NEG;
+    sub.f64 %r, %one, 0d3FEB0AC160000000;
+    sub.f64 %r, %r, %tmp;
+    bra STORE;
+ERFC_MID_NEG:
+    add.f64 %r, %tmp, 0d3FEB0AC160000000;
+    add.f64 %r, %one, %r;
+    bra STORE;
+
+ERFC_FAR:
+    setp.lt.f64 %pred_neg, %x, 0d0000000000000000;
+    mov.f64 %r, 0d0000000000000000;
+    @%pred_neg mov.f64 %r, %two;
+    bra STORE;
+
+ERFC_NAN:
+    mov.f64 %r, %x;
+    bra STORE;
+
+ERFC_TAIL:
+    mul.f64 %s, %ax, %ax;
+    div.rn.f64 %s, %one, %s;
+    setp.lt.f64 %pred_ra, %ax, 0d4006DB6DB6DB6DB7;
+    @%pred_ra bra ERFC_TAIL_RA;
+
+    mov.f64 %num, 0dC07E384E9BDC383F;
+    fma.rn.f64 %num, %num, %s, 0dC09004616A2E5992;
+    fma.rn.f64 %num, %num, %s, 0dC083EC881375F228;
+    fma.rn.f64 %num, %num, %s, 0dC064145D43C5ED98;
+    fma.rn.f64 %num, %num, %s, 0dC031C209555F995A;
+    fma.rn.f64 %num, %num, %s, 0dBFE993BA70C285DE;
+    fma.rn.f64 %num, %num, %s, 0dBF84341239E86F4A;
+    mov.f64 %den, 0dC03670E242712D62;
+    fma.rn.f64 %den, %den, %s, 0d407DA874E79FE763;
+    fma.rn.f64 %den, %den, %s, 0d40A3F219CEDF3BE6;
+    fma.rn.f64 %den, %den, %s, 0d40A8FFB7688C246A;
+    fma.rn.f64 %den, %den, %s, 0d409802EB189D5118;
+    fma.rn.f64 %den, %den, %s, 0d40745CAE221B9F0A;
+    fma.rn.f64 %den, %den, %s, 0d403E568B261D5190;
+    fma.rn.f64 %den, %den, %s, %one;
+    bra ERFC_TAIL_RS_DONE;
+
+ERFC_TAIL_RA:
+    mov.f64 %num, 0dC023A0EFC69AC25C;
+    fma.rn.f64 %num, %num, %s, 0dC054526557E4D2F2;
+    fma.rn.f64 %num, %num, %s, 0dC067135CEBCCABB2;
+    fma.rn.f64 %num, %num, %s, 0dC0644CB184282266;
+    fma.rn.f64 %num, %num, %s, 0dC04F300AE4CBA38D;
+    fma.rn.f64 %num, %num, %s, 0dC0251E0441B0E726;
+    fma.rn.f64 %num, %num, %s, 0dBFE63416E4BA7360;
+    fma.rn.f64 %num, %num, %s, 0dBF843412600D6435;
+    mov.f64 %den, 0dBFAEEFF2EE749A62;
+    fma.rn.f64 %den, %den, %s, 0d401A47EF8E484A93;
+    fma.rn.f64 %den, %den, %s, 0d405B28A3EE48AE2C;
+    fma.rn.f64 %den, %den, %s, 0d407AD02157700314;
+    fma.rn.f64 %den, %den, %s, 0d40842B1921EC2868;
+    fma.rn.f64 %den, %den, %s, 0d407B290DD58A1A71;
+    fma.rn.f64 %den, %den, %s, 0d4061350C526AE721;
+    fma.rn.f64 %den, %den, %s, 0d4033A6B9BD707687;
+    fma.rn.f64 %den, %den, %s, %one;
+
+ERFC_TAIL_RS_DONE:
+    div.rn.f64 %s, %num, %den;
+    mov.b64 %ax_bits, %ax;
+    mov.s64 %mask_hi, -4294967296;
+    and.b64 %ax_bits, %ax_bits, %mask_hi;
+    mov.b64 %z32, %ax_bits;
+    mul.f64 %arg, %z32, %z32;
+    neg.f64 %arg, %arg;
+    sub.f64 %arg, %arg, 0d3FE2000000000000;
+    sub.f64 %dx, %ax, %z32;
+    add.f64 %tmp, %ax, %z32;
+    mul.f64 %dx, %dx, %tmp;
+    neg.f64 %dx, %dx;
+    add.f64 %tmp, %dx, %s;
+    add.f64 %arg, %arg, %tmp;
+    bra EXP_EVAL;
+
+EXP_RETURN:
+    div.rn.f64 %tmp, %exp_v, %ax;
+    setp.lt.f64 %pred_neg, %x, 0d0000000000000000;
+    mov.f64 %r, %tmp;
+    @%pred_neg sub.f64 %r, %two, %tmp;
+    bra STORE;
+
+EXP_EVAL:
+    setp.nan.f64 %e_nan, %arg, %arg;
+    @%e_nan bra EXP_STORE_INPUT;
+    setp.gt.f64 %e_overflow, %arg, 0d40862E42FEFA39EF;
+    @%e_overflow bra EXP_STORE_INF;
+    setp.lt.f64 %e_underflow, %arg, 0dC0874385446D71C3;
+    @%e_underflow bra EXP_STORE_ZERO;
+    mov.f64 %e_log2e, 0d3FF71547652B82FE;
+    mul.f64 %e_nf, %arg, %e_log2e;
+    cvt.rni.f64.f64 %e_nf, %e_nf;
+    cvt.rni.s32.f64 %e_ni, %e_nf;
+    fma.rn.f64 %e_r, %e_nf, 0dBFE62E42FEFA3800, %arg;
+    fma.rn.f64 %e_r, %e_nf, 0dBD2EF35793C76730, %e_r;
+    mov.f64 %e_p, 0d3E5AE64567F544E4;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3E927E4FB7789F5C;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3EC71DE3A556C734;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3EFA01A01A01A01A;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F2A01A01A01A01A;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F56C16C16C16C17;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3F81111111111111;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3FA5555555555555;
+    fma.rn.f64 %e_p, %e_p, %e_r, 0d3FC5555555555555;
+    fma.rn.f64 %e_p, %e_p, %e_r, %half;
+    fma.rn.f64 %e_p, %e_p, %e_r, %one;
+    fma.rn.f64 %exp_v, %e_p, %e_r, %one;
+    cvt.s64.s32 %e_ni64, %e_ni;
+    setp.gt.s64 %e_high, %e_ni64, 1023;
+    @%e_high bra EXP_SCALE_HIGH;
+    setp.lt.s64 %e_subnormal, %e_ni64, -1022;
+    @%e_subnormal bra EXP_SCALE_SUBNORMAL;
+EXP_SCALE_NORMAL:
+    add.s64 %e_ni64, %e_ni64, 1023;
+    shl.b64 %e_bits, %e_ni64, 52;
+    mov.b64 %e_scale, %e_bits;
+    mul.f64 %exp_v, %exp_v, %e_scale;
+    bra EXP_RETURN;
+EXP_SCALE_HIGH:
+    sub.s64 %adj64, %e_ni64, 1023;
+    add.s64 %e_bits, %adj64, 1023;
+    shl.b64 %e_bits, %e_bits, 52;
+    mov.b64 %e_scale, %e_bits;
+    mul.f64 %exp_v, %exp_v, %e_scale;
+    mov.u64 %e_bits, 0x7FE0000000000000;
+    mov.b64 %e_scale, %e_bits;
+    mul.f64 %exp_v, %exp_v, %e_scale;
+    bra EXP_RETURN;
+EXP_SCALE_SUBNORMAL:
+    setp.lt.s64 %e_underflow, %e_ni64, -1075;
+    @%e_underflow bra EXP_STORE_ZERO;
+    add.s64 %adj64, %e_ni64, 1022;
+    add.s64 %e_bits, %adj64, 1023;
+    shl.b64 %e_bits, %e_bits, 52;
+    mov.b64 %e_scale, %e_bits;
+    mul.f64 %exp_v, %exp_v, %e_scale;
+    mov.u64 %e_bits, 0x0010000000000000;
+    mov.b64 %e_scale, %e_bits;
+    mul.f64 %exp_v, %exp_v, %e_scale;
+    bra EXP_RETURN;
+EXP_STORE_INPUT:
+    mov.f64 %exp_v, %arg;
+    bra EXP_RETURN;
+EXP_STORE_INF:
+    mov.f64 %exp_v, 0d7FF0000000000000;
+    bra EXP_RETURN;
+EXP_STORE_ZERO:
+    mov.f64 %exp_v, 0d0000000000000000;
+    bra EXP_RETURN;
+
+STORE:
+    st.global.f64 [%addr_out], %r;
+DONE:
+    ret;
+}
+";
 
 /// `torch.special.xlogy(x, y)` forward, f32.
 ///
