@@ -239,6 +239,94 @@ fn is_bf16<T: Float>() -> bool {
     TypeId::of::<T>() == TypeId::of::<half::bf16>()
 }
 
+fn cholesky_non_positive_definite(minor: usize) -> FerrotorchError {
+    FerrotorchError::Ferray(ferray_core::FerrayError::SingularMatrix {
+        message: format!(
+            "matrix is not positive definite (leading minor of order {minor} is not positive-definite)"
+        ),
+    })
+}
+
+fn cholesky_lower_f64(data: &[f64], n: usize) -> FerrotorchResult<Vec<f64>> {
+    let len = n
+        .checked_mul(n)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "cholesky matrix size overflows usize".into(),
+        })?;
+    if data.len() != len {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "cholesky data length mismatch: expected {}, got {}",
+                len,
+                data.len()
+            ),
+        });
+    }
+
+    let mut l = vec![0.0_f64; len];
+    for j in 0..n {
+        let mut diag = data[j * n + j];
+        for k in 0..j {
+            let ljk = l[j * n + k];
+            diag -= ljk * ljk;
+        }
+        if diag <= 0.0 || diag.is_nan() {
+            return Err(cholesky_non_positive_definite(j + 1));
+        }
+        let ljj = diag.sqrt();
+        l[j * n + j] = ljj;
+
+        for i in (j + 1)..n {
+            let mut v = data[i * n + j];
+            for k in 0..j {
+                v -= l[i * n + k] * l[j * n + k];
+            }
+            l[i * n + j] = v / ljj;
+        }
+    }
+    Ok(l)
+}
+
+fn cholesky_lower_f32(data: &[f32], n: usize) -> FerrotorchResult<Vec<f32>> {
+    let len = n
+        .checked_mul(n)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "cholesky matrix size overflows usize".into(),
+        })?;
+    if data.len() != len {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "cholesky data length mismatch: expected {}, got {}",
+                len,
+                data.len()
+            ),
+        });
+    }
+
+    let mut l = vec![0.0_f32; len];
+    for j in 0..n {
+        let mut diag = data[j * n + j];
+        for k in 0..j {
+            let ljk = l[j * n + k];
+            diag -= ljk * ljk;
+        }
+        if diag <= 0.0 || diag.is_nan() {
+            return Err(cholesky_non_positive_definite(j + 1));
+        }
+        let ljj = diag.sqrt();
+        l[j * n + j] = ljj;
+
+        for i in (j + 1)..n {
+            let mut v = data[i * n + j];
+            for k in 0..j {
+                v -= l[i * n + k] * l[j * n + k];
+            }
+            l[i * n + j] = v / ljj;
+        }
+    }
+    Ok(l)
+}
+
 const LAPACK_ROW_MAJOR: c_int = 101;
 
 type LapackeSgels = unsafe extern "C" fn(
@@ -958,14 +1046,22 @@ pub fn cholesky<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     }
 
     if is_f32::<T>() {
-        let arr = tensor_to_array2_f32(input)?;
-        let l = ferray_linalg::cholesky(&arr).map_err(FerrotorchError::Ferray)?;
-        let data = slice_f32_to_vec::<T>(l.as_slice().unwrap());
+        let input_data: Vec<f32> = input
+            .data_vec()?
+            .into_iter()
+            .map(|v| v.to_f64().unwrap() as f32)
+            .collect();
+        let l = cholesky_lower_f32(&input_data, n)?;
+        let data = slice_f32_to_vec::<T>(&l);
         Tensor::from_storage(TensorStorage::cpu(data), vec![n, n], false)
     } else if is_f64::<T>() {
-        let arr = tensor_to_array2_f64(input)?;
-        let l = ferray_linalg::cholesky(&arr).map_err(FerrotorchError::Ferray)?;
-        let data = slice_to_vec::<T>(l.as_slice().unwrap());
+        let input_data: Vec<f64> = input
+            .data_vec()?
+            .into_iter()
+            .map(|v| v.to_f64().unwrap())
+            .collect();
+        let l = cholesky_lower_f64(&input_data, n)?;
+        let data = slice_to_vec::<T>(&l);
         Tensor::from_storage(TensorStorage::cpu(data), vec![n, n], false)
     } else {
         Err(FerrotorchError::InvalidArgument {
@@ -4601,12 +4697,12 @@ fn matrix_exp_pade13(a: &[f64], n: usize) -> FerrotorchResult<Vec<f64>> {
 /// — torch's `_ex` variants still raise on those (CORE-145 / #1839).
 ///
 /// `info` provenance:
-/// - **CPU**: ferray-linalg reports `FerrayError::SingularMatrix` for both
-///   not-positive-definite (`cholesky`) and singular (`inv`/`solve`)
-///   inputs. Probed at ferray-linalg 0.4.9: the error carries NO
-///   minor/pivot index ("matrix is not positive definite"), so CPU `info`
-///   is the documented constant `1` (#1944 tracks surfacing the true
-///   LAPACK index; torch reports e.g. `2` for a minor-2 failure).
+/// - **CPU**: `cholesky` uses a POTRF-style pure-Rust factorization and
+///   embeds the failing leading-minor order in its `SingularMatrix`
+///   message, so `cholesky_ex` reports the same positive `info` class as
+///   torch. Older ferray-originated singular errors (`inv`/`solve`) still
+///   carry no pivot index and fall back to the documented constant `1`
+///   (#1944 tracks those remaining `_ex` info-index gaps).
 /// - **CUDA**: cuSOLVER `devInfo` failures surface as
 ///   `InvalidArgument` whose message ferrotorch-gpu's `map_gpu_err` builds
 ///   from `GpuError::ShapeMismatch { op: "gpu_…", got: vec![devInfo] }`
@@ -4620,7 +4716,9 @@ fn matrix_exp_pade13(a: &[f64], n: usize) -> FerrotorchResult<Vec<f64>> {
 ///   conformance tests (`gpu_*_1839`) pin this contract on real hardware.
 fn ex_numerical_info(err: &FerrotorchError) -> Option<i32> {
     match err {
-        FerrotorchError::Ferray(ferray_core::FerrayError::SingularMatrix { .. }) => Some(1),
+        FerrotorchError::Ferray(ferray_core::FerrayError::SingularMatrix { message }) => {
+            parse_leading_minor_info(message).or(Some(1))
+        }
         FerrotorchError::InvalidArgument { message }
             if (message.starts_with("gpu_cholesky")
                 && (message.contains("not positive definite")
@@ -4632,6 +4730,13 @@ fn ex_numerical_info(err: &FerrotorchError) -> Option<i32> {
         }
         _ => None,
     }
+}
+
+fn parse_leading_minor_info(message: &str) -> Option<i32> {
+    let (_, rest) = message.split_once("leading minor of order ")?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let info = digits.parse().ok()?;
+    (info > 0).then_some(info)
 }
 
 /// Recover the cuSOLVER `devInfo` value from a `map_gpu_err`-formatted
@@ -4683,8 +4788,7 @@ fn ex_zeros_like<T: Float>(shape: Vec<usize>, like: &Tensor<T>) -> FerrotorchRes
 /// device, missing backend) PROPAGATE as `Err`, exactly like
 /// `torch.linalg.cholesky_ex` raises (CORE-145 / #1839).
 ///
-/// `info` index: the true cuSOLVER failing-minor index on CUDA; the
-/// documented constant `1` on CPU (ferray carries no index — #1944).
+/// `info` index: the failing leading-minor index on CPU and CUDA.
 /// Returned as a `T`-typed 0-d scalar on the input device (torch: `int32`).
 ///
 /// Mirrors `torch.linalg.cholesky_ex`.
@@ -4984,6 +5088,80 @@ mod tests {
                 a_data[i]
             );
         }
+    }
+
+    #[test]
+    fn cholesky_rejects_rank_deficient_psd_f64() {
+        #[rustfmt::skip]
+        let a = t(
+            &[
+                7.440577224463293, -4.315064949171669, -7.604007741248055, 1.9745380330848012,
+                -4.315064949171669, 11.707813815803068, 5.21771779023879, 4.195214363095837,
+                -7.604007741248055, 5.21771779023879, 7.841928004530735, -1.549234657699997,
+                1.9745380330848012, 4.195214363095837, -1.549234657699997, 3.6220857657915597,
+            ],
+            &[4, 4],
+        );
+
+        let err = match cholesky(&a) {
+            Ok(_) => panic!("rank-deficient PSD is not positive-definite"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("leading minor of order 4"),
+            "rank-deficient PSD should fail at PyTorch's leading minor 4, got: {message}"
+        );
+    }
+
+    #[test]
+    fn cholesky_ex_reports_rank_deficient_psd_minor_f64() {
+        #[rustfmt::skip]
+        let a = t(
+            &[
+                7.440577224463293, -4.315064949171669, -7.604007741248055, 1.9745380330848012,
+                -4.315064949171669, 11.707813815803068, 5.21771779023879, 4.195214363095837,
+                -7.604007741248055, 5.21771779023879, 7.841928004530735, -1.549234657699997,
+                1.9745380330848012, 4.195214363095837, -1.549234657699997, 3.6220857657915597,
+            ],
+            &[4, 4],
+        );
+
+        let (l, info) = cholesky_ex(&a).expect("numerical failure stays Ok");
+        assert!(
+            l.data().unwrap().iter().all(|v| *v == 0.0),
+            "undefined L output is represented as deterministic zeros"
+        );
+        assert_eq!(info.data().unwrap()[0] as i32, 4);
+    }
+
+    #[test]
+    fn cholesky_accepts_noncontiguous_symmetric_cpu_view() {
+        let a = spd_3x3()
+            .transpose(0, 1)
+            .expect("transpose view remains symmetric but non-contiguous");
+        assert!(
+            !a.is_contiguous(),
+            "transpose of this square matrix should be a non-contiguous view"
+        );
+
+        let l = cholesky(&a).expect("cholesky accepts non-contiguous CPU inputs");
+        let l_data = l.data().unwrap();
+        assert!((l_data[0] - 6.0_f64.sqrt()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cholesky_reads_lower_triangle_like_torch() {
+        // PyTorch lower-mode cholesky ignores the upper triangle. The lower
+        // triangle here represents [[4, 2], [2, 3]], while A[0,1] is junk.
+        let a = t(&[4.0, 999.0, 2.0, 3.0], &[2, 2]);
+
+        let l = cholesky(&a).expect("lower triangle is positive-definite");
+        let l_data = l.data().unwrap();
+        assert!((l_data[0] - 2.0).abs() < 1e-12);
+        assert!(l_data[1].abs() < 1e-12);
+        assert!((l_data[2] - 1.0).abs() < 1e-12);
+        assert!((l_data[3] - 2.0_f64.sqrt()).abs() < 1e-12);
     }
 
     #[test]

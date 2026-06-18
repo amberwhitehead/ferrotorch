@@ -2818,19 +2818,19 @@ fn cpu_ex_family_structural_errors_propagate_1839() {
 /// 2                        # first zero pivot
 /// ```
 ///
-/// CPU `info` is pinned to the documented constant 1: ferray-linalg 0.4.9
-/// reports `SingularMatrix` with NO index ("matrix is not positive
-/// definite"). #1944 tracks surfacing the true LAPACK index on CPU; the
-/// torch-side expected values are quoted above (R-ORACLE-4). The CUDA
-/// lane DOES report the true cuSOLVER devInfo index — see the `gpu`
-/// module's `_1839` tests.
+/// CPU `cholesky_ex` reports the failing leading-minor index from the
+/// pure-Rust POTRF-style path. CPU `inv_ex`/`solve_ex` still pin the
+/// documented constant 1 because their ferray-originated singular errors
+/// carry no pivot index; #1944 tracks those remaining `_ex` info gaps.
+/// The CUDA lane also reports the true cuSOLVER devInfo index — see the
+/// `gpu` module's `_1839` tests.
 ///
 /// The fallback value tensor is same-shape zeros: torch documents the
 /// value output as UNDEFINED when `info != 0` (it returns the partial
 /// factor), so all-zeros is a legal, deterministic choice.
 #[test]
 fn cpu_ex_family_numerical_failure_info_1839() {
-    // Non-PD (minor 2 fails; torch info=2, CPU pinned 1 per #1944).
+    // Non-PD (minor 2 fails; torch info=2).
     let a = make_cpu_f64(
         &[1.0, 2.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0, 1.0],
         &[3, 3],
@@ -2840,8 +2840,8 @@ fn cpu_ex_family_numerical_failure_info_1839() {
     let info_v = read_back_f64(&info, Device::Cpu);
     assert_eq!(
         info_v,
-        vec![1.0],
-        "cholesky_ex CPU info pins the documented constant 1 (#1944; torch: 2)"
+        vec![2.0],
+        "cholesky_ex CPU info should report the failing leading minor"
     );
     let l_v = read_back_f64(&l, Device::Cpu);
     assert_eq!(l_v.len(), 9, "fallback L keeps the [3,3] shape");
@@ -3704,20 +3704,8 @@ fn cpu_non_spd_cholesky_returns_err() {
     for f in cases_for(&file, "cholesky_singular", "cpu") {
         let a_shape = f.a_shape.as_ref().unwrap();
         let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
-        // #1933 pin (found via CORE-199 / #1893 stress lanes): torch's
-        // cholesky raises for positive-SEMI-definite input (zero pivot);
-        // ferrotorch only rejects NEGATIVE pivots and silently accepts the
-        // rank-deficient PSD case. Pin the current Ok for exactly that row;
-        // when #1933 lands this assert fails — retire the pin and let the
-        // is_err branch cover every row.
-        let pinned_psd_ok = f.tag.as_deref() == Some("stress_psd_rankdef_4x4");
         match f.dtype.as_str() {
             "float32" => {
-                // The f32 lane of the PSD rank-deficient row happens to Err
-                // already: f32 rounding drives the zero pivot slightly
-                // negative, tripping the negative-pivot check. That matches
-                // torch, so it takes the normal is_err assertion — only the
-                // f64 lane (true zero pivot) carries the #1933 pin.
                 let a = make_cpu_f32(a_data, a_shape, false);
                 assert!(
                     cholesky(&a).is_err(),
@@ -3726,18 +3714,10 @@ fn cpu_non_spd_cholesky_returns_err() {
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
-                if pinned_psd_ok {
-                    assert!(
-                        cholesky(&a).is_ok(),
-                        "cholesky(PSD rank-deficient) now returns Err — \
-                         #1933 appears fixed; retire this pin"
-                    );
-                } else {
-                    assert!(
-                        cholesky(&a).is_err(),
-                        "cholesky on non-SPD matrix must return Err",
-                    );
-                }
+                assert!(
+                    cholesky(&a).is_err(),
+                    "cholesky on non-SPD matrix must return Err",
+                );
             }
             _ => unreachable!(),
         }
