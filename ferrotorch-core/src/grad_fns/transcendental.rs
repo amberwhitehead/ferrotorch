@@ -2883,10 +2883,173 @@ struct Atan2Backward<T: Float> {
 
 impl<T: Float> GradFn<T> for Atan2Backward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        if grad_output.is_cuda() || self.y.is_cuda() || self.x.is_cuda() {
-            return Err(FerrotorchError::NotImplementedOnCuda {
-                op: "atan2 backward",
-            });
+        if self.y.is_cuda() || self.x.is_cuda() {
+            if !grad_output.is_cuda() {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected: self.y.device(),
+                    got: grad_output.device(),
+                });
+            }
+            if self.y.device() != self.x.device() {
+                return Err(FerrotorchError::DeviceMismatch {
+                    expected: self.y.device(),
+                    got: self.x.device(),
+                });
+            }
+            let out_shape = broadcast_shapes(self.y.shape(), self.x.shape())?;
+            if grad_output.shape() != out_shape.as_slice() {
+                return Err(FerrotorchError::ShapeMismatch {
+                    message: format!(
+                        "atan2 backward: grad_output shape {:?} does not match result shape {out_shape:?}",
+                        grad_output.shape()
+                    ),
+                });
+            }
+            let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+
+            let da = if self.y.requires_grad() {
+                let raw_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                    T,
+                    "atan2_backward",
+                    f32 => backend.atan2_backward_f32(
+                        grad_output.gpu_handle()?,
+                        self.y.gpu_handle()?,
+                        self.x.gpu_handle()?,
+                        grad_output.strides(),
+                        grad_output.storage_offset(),
+                        self.y.shape(),
+                        self.y.strides(),
+                        self.y.storage_offset(),
+                        self.x.shape(),
+                        self.x.strides(),
+                        self.x.storage_offset(),
+                        &out_shape,
+                        true,
+                    ),
+                    f64 => backend.atan2_backward_f64(
+                        grad_output.gpu_handle()?,
+                        self.y.gpu_handle()?,
+                        self.x.gpu_handle()?,
+                        grad_output.strides(),
+                        grad_output.storage_offset(),
+                        self.y.shape(),
+                        self.y.strides(),
+                        self.y.storage_offset(),
+                        self.x.shape(),
+                        self.x.strides(),
+                        self.x.storage_offset(),
+                        &out_shape,
+                        true,
+                    ),
+                    bf16 => backend.atan2_backward_bf16(
+                        grad_output.gpu_handle()?,
+                        self.y.gpu_handle()?,
+                        self.x.gpu_handle()?,
+                        grad_output.strides(),
+                        grad_output.storage_offset(),
+                        self.y.shape(),
+                        self.y.strides(),
+                        self.y.storage_offset(),
+                        self.x.shape(),
+                        self.x.strides(),
+                        self.x.storage_offset(),
+                        &out_shape,
+                        true,
+                    ),
+                    f16 => backend.atan2_backward_f16(
+                        grad_output.gpu_handle()?,
+                        self.y.gpu_handle()?,
+                        self.x.gpu_handle()?,
+                        grad_output.strides(),
+                        grad_output.storage_offset(),
+                        self.y.shape(),
+                        self.y.strides(),
+                        self.y.storage_offset(),
+                        self.x.shape(),
+                        self.x.strides(),
+                        self.x.storage_offset(),
+                        &out_shape,
+                        true,
+                    ),
+                )?;
+                let raw =
+                    Tensor::from_storage(TensorStorage::gpu(raw_handle), out_shape.clone(), false)?;
+                Some(reduce_grad_to_shape(&raw, self.y.shape())?)
+            } else {
+                None
+            };
+
+            let db = if self.x.requires_grad() {
+                let raw_handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+                    T,
+                    "atan2_backward",
+                    f32 => backend.atan2_backward_f32(
+                        grad_output.gpu_handle()?,
+                        self.y.gpu_handle()?,
+                        self.x.gpu_handle()?,
+                        grad_output.strides(),
+                        grad_output.storage_offset(),
+                        self.y.shape(),
+                        self.y.strides(),
+                        self.y.storage_offset(),
+                        self.x.shape(),
+                        self.x.strides(),
+                        self.x.storage_offset(),
+                        &out_shape,
+                        false,
+                    ),
+                    f64 => backend.atan2_backward_f64(
+                        grad_output.gpu_handle()?,
+                        self.y.gpu_handle()?,
+                        self.x.gpu_handle()?,
+                        grad_output.strides(),
+                        grad_output.storage_offset(),
+                        self.y.shape(),
+                        self.y.strides(),
+                        self.y.storage_offset(),
+                        self.x.shape(),
+                        self.x.strides(),
+                        self.x.storage_offset(),
+                        &out_shape,
+                        false,
+                    ),
+                    bf16 => backend.atan2_backward_bf16(
+                        grad_output.gpu_handle()?,
+                        self.y.gpu_handle()?,
+                        self.x.gpu_handle()?,
+                        grad_output.strides(),
+                        grad_output.storage_offset(),
+                        self.y.shape(),
+                        self.y.strides(),
+                        self.y.storage_offset(),
+                        self.x.shape(),
+                        self.x.strides(),
+                        self.x.storage_offset(),
+                        &out_shape,
+                        false,
+                    ),
+                    f16 => backend.atan2_backward_f16(
+                        grad_output.gpu_handle()?,
+                        self.y.gpu_handle()?,
+                        self.x.gpu_handle()?,
+                        grad_output.strides(),
+                        grad_output.storage_offset(),
+                        self.y.shape(),
+                        self.y.strides(),
+                        self.y.storage_offset(),
+                        self.x.shape(),
+                        self.x.strides(),
+                        self.x.storage_offset(),
+                        &out_shape,
+                        false,
+                    ),
+                )?;
+                let raw = Tensor::from_storage(TensorStorage::gpu(raw_handle), out_shape, false)?;
+                Some(reduce_grad_to_shape(&raw, self.x.shape())?)
+            } else {
+                None
+            };
+            return Ok(vec![da, db]);
         }
         // Build broadcast-shape recip mask = 1/(y^2+x^2), with 0 where denom==0.
         let out_shape = broadcast_shapes(self.y.shape(), self.x.shape())?;
@@ -2957,22 +3120,96 @@ impl<T: Float> GradFn<T> for Atan2Backward<T> {
 ///   `grad_y = grad * x / (y^2 + x^2)`; `grad_x = -grad * y / (y^2 + x^2)`,
 /// with the `denom == 0 -> 0` masked guard for the trivial (0,0) input.
 pub fn atan2<T: Float>(y: &Tensor<T>, x: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if y.is_cuda() || x.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "atan2" });
+    if y.device() != x.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: y.device(),
+            got: x.device(),
+        });
     }
-    let output = binary_map(y, x, |yy, xx| yy.atan2(xx))?;
-    if needs_grad_binary(y, x) {
-        let (storage, shape) = output.into_storage_and_shape()?;
-        Tensor::from_operation(
-            storage,
-            shape,
-            Arc::new(Atan2Backward {
-                y: y.saved_for_backward()?,
-                x: x.saved_for_backward()?,
-            }),
-        )
+
+    if let Some(out) = crate::meta_propagate::binary_broadcast(y, x)? {
+        return Ok(out);
+    }
+
+    if y.is_cuda() {
+        let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let out_shape = broadcast_shapes(y.shape(), x.shape())?;
+        let handle: crate::gpu_dispatch::GpuBufferHandle = crate::dispatch_floating_dtype!(
+            T,
+            "atan2",
+            f32 => backend.atan2_f32(
+                y.gpu_handle()?,
+                x.gpu_handle()?,
+                y.shape(),
+                y.strides(),
+                y.storage_offset(),
+                x.shape(),
+                x.strides(),
+                x.storage_offset(),
+                &out_shape,
+            ),
+            f64 => backend.atan2_f64(
+                y.gpu_handle()?,
+                x.gpu_handle()?,
+                y.shape(),
+                y.strides(),
+                y.storage_offset(),
+                x.shape(),
+                x.strides(),
+                x.storage_offset(),
+                &out_shape,
+            ),
+            bf16 => backend.atan2_bf16(
+                y.gpu_handle()?,
+                x.gpu_handle()?,
+                y.shape(),
+                y.strides(),
+                y.storage_offset(),
+                x.shape(),
+                x.strides(),
+                x.storage_offset(),
+                &out_shape,
+            ),
+            f16 => backend.atan2_f16(
+                y.gpu_handle()?,
+                x.gpu_handle()?,
+                y.shape(),
+                y.strides(),
+                y.storage_offset(),
+                x.shape(),
+                x.strides(),
+                x.storage_offset(),
+                &out_shape,
+            ),
+        )?;
+        let storage = TensorStorage::gpu(handle);
+        if needs_grad_binary(y, x) {
+            Tensor::from_operation(
+                storage,
+                out_shape,
+                Arc::new(Atan2Backward {
+                    y: y.saved_for_backward()?,
+                    x: x.saved_for_backward()?,
+                }),
+            )
+        } else {
+            Tensor::from_storage(storage, out_shape, false)
+        }
     } else {
-        Ok(output)
+        let output = binary_map(y, x, |yy, xx| yy.atan2(xx))?;
+        if needs_grad_binary(y, x) {
+            let (storage, shape) = output.into_storage_and_shape()?;
+            Tensor::from_operation(
+                storage,
+                shape,
+                Arc::new(Atan2Backward {
+                    y: y.saved_for_backward()?,
+                    x: x.saved_for_backward()?,
+                }),
+            )
+        } else {
+            Ok(output)
+        }
     }
 }
 

@@ -1463,6 +1463,150 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    fn atan2_f32(
+        &self,
+        _y: &GpuBufferHandle,
+        _x: &GpuBufferHandle,
+        _y_shape: &[usize],
+        _y_strides: &[isize],
+        _y_offset: usize,
+        _x_shape: &[usize],
+        _x_strides: &[isize],
+        _x_offset: usize,
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "atan2_f32" })
+    }
+
+    fn atan2_f64(
+        &self,
+        _y: &GpuBufferHandle,
+        _x: &GpuBufferHandle,
+        _y_shape: &[usize],
+        _y_strides: &[isize],
+        _y_offset: usize,
+        _x_shape: &[usize],
+        _x_strides: &[isize],
+        _x_offset: usize,
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "atan2_f64" })
+    }
+
+    fn atan2_bf16(
+        &self,
+        _y: &GpuBufferHandle,
+        _x: &GpuBufferHandle,
+        _y_shape: &[usize],
+        _y_strides: &[isize],
+        _y_offset: usize,
+        _x_shape: &[usize],
+        _x_strides: &[isize],
+        _x_offset: usize,
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "atan2_bf16" })
+    }
+
+    fn atan2_f16(
+        &self,
+        _y: &GpuBufferHandle,
+        _x: &GpuBufferHandle,
+        _y_shape: &[usize],
+        _y_strides: &[isize],
+        _y_offset: usize,
+        _x_shape: &[usize],
+        _x_strides: &[isize],
+        _x_offset: usize,
+        _out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "atan2_f16" })
+    }
+
+    fn atan2_backward_f32(
+        &self,
+        _grad_output: &GpuBufferHandle,
+        _y: &GpuBufferHandle,
+        _x: &GpuBufferHandle,
+        _grad_strides: &[isize],
+        _grad_offset: usize,
+        _y_shape: &[usize],
+        _y_strides: &[isize],
+        _y_offset: usize,
+        _x_shape: &[usize],
+        _x_strides: &[isize],
+        _x_offset: usize,
+        _out_shape: &[usize],
+        _wrt_y: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "atan2_backward_f32",
+        })
+    }
+
+    fn atan2_backward_f64(
+        &self,
+        _grad_output: &GpuBufferHandle,
+        _y: &GpuBufferHandle,
+        _x: &GpuBufferHandle,
+        _grad_strides: &[isize],
+        _grad_offset: usize,
+        _y_shape: &[usize],
+        _y_strides: &[isize],
+        _y_offset: usize,
+        _x_shape: &[usize],
+        _x_strides: &[isize],
+        _x_offset: usize,
+        _out_shape: &[usize],
+        _wrt_y: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "atan2_backward_f64",
+        })
+    }
+
+    fn atan2_backward_bf16(
+        &self,
+        _grad_output: &GpuBufferHandle,
+        _y: &GpuBufferHandle,
+        _x: &GpuBufferHandle,
+        _grad_strides: &[isize],
+        _grad_offset: usize,
+        _y_shape: &[usize],
+        _y_strides: &[isize],
+        _y_offset: usize,
+        _x_shape: &[usize],
+        _x_strides: &[isize],
+        _x_offset: usize,
+        _out_shape: &[usize],
+        _wrt_y: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "atan2_backward_bf16",
+        })
+    }
+
+    fn atan2_backward_f16(
+        &self,
+        _grad_output: &GpuBufferHandle,
+        _y: &GpuBufferHandle,
+        _x: &GpuBufferHandle,
+        _grad_strides: &[isize],
+        _grad_offset: usize,
+        _y_shape: &[usize],
+        _y_strides: &[isize],
+        _y_offset: usize,
+        _x_shape: &[usize],
+        _x_strides: &[isize],
+        _x_offset: usize,
+        _out_shape: &[usize],
+        _wrt_y: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "atan2_backward_f16",
+        })
+    }
+
     fn copysign_f32(
         &self,
         _magnitude: &GpuBufferHandle,

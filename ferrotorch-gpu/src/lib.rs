@@ -154,6 +154,8 @@
 //! | REQ-5 (cuSPARSE symbol-resolution probe) | SHIPPED | `mod cusparse_smoke in lib.rs` binds `cudarc::cusparse::sys::cusparseHandle_t = std::ptr::null_mut()`; consumer `ferrotorch-gpu/src/sparse.rs` (the real cuSPARSE SpMM caller) requires the symbol to resolve at compile time |
 
 pub mod allocator;
+#[cfg(feature = "cuda")]
+pub mod atan2;
 pub mod backend_impl;
 #[cfg(feature = "cuda")]
 pub mod bf16;

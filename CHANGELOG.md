@@ -48,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- CUDA atan2 forward/backward is missing despite PyTorch support (#2010)
 - CUDA complex FFT non-innermost axes and s-resize are unimplemented (#2004)
 - backward_parallel worker failure can hang audit_autograd_engine_utilities (#2009)
 - CUDA graph capture default and tests diverge from PyTorch (#2012)

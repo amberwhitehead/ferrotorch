@@ -3041,6 +3041,258 @@ impl GpuBackend for CudaBackendImpl {
         Ok(Self::wrap_buffer_f64(result, a.device_ordinal()))
     }
 
+    fn atan2_f32(
+        &self,
+        y: &GpuBufferHandle,
+        x: &GpuBufferHandle,
+        y_shape: &[usize],
+        y_strides: &[isize],
+        y_offset: usize,
+        x_shape: &[usize],
+        x_strides: &[isize],
+        x_offset: usize,
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let y_buf = Self::unwrap_buffer(y)?;
+        let x_buf = Self::unwrap_buffer(x)?;
+        let dev = self.device(y.device_ordinal())?;
+        let result = crate::atan2::gpu_atan2_f32(
+            y_buf, x_buf, y_shape, y_strides, y_offset, x_shape, x_strides, x_offset, out_shape,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, y.device_ordinal()))
+    }
+
+    fn atan2_f64(
+        &self,
+        y: &GpuBufferHandle,
+        x: &GpuBufferHandle,
+        y_shape: &[usize],
+        y_strides: &[isize],
+        y_offset: usize,
+        x_shape: &[usize],
+        x_strides: &[isize],
+        x_offset: usize,
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let y_buf = Self::unwrap_buffer_f64(y)?;
+        let x_buf = Self::unwrap_buffer_f64(x)?;
+        let dev = self.device(y.device_ordinal())?;
+        let result = crate::atan2::gpu_atan2_f64(
+            y_buf, x_buf, y_shape, y_strides, y_offset, x_shape, x_strides, x_offset, out_shape,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, y.device_ordinal()))
+    }
+
+    fn atan2_bf16(
+        &self,
+        y: &GpuBufferHandle,
+        x: &GpuBufferHandle,
+        y_shape: &[usize],
+        y_strides: &[isize],
+        y_offset: usize,
+        x_shape: &[usize],
+        x_strides: &[isize],
+        x_offset: usize,
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let y_buf = Self::unwrap_buffer_bf16(y)?;
+        let x_buf = Self::unwrap_buffer_bf16(x)?;
+        let dev = self.device(y.device_ordinal())?;
+        let result = crate::atan2::gpu_atan2_bf16(
+            y_buf, x_buf, y_shape, y_strides, y_offset, x_shape, x_strides, x_offset, out_shape,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, y.device_ordinal()))
+    }
+
+    fn atan2_f16(
+        &self,
+        y: &GpuBufferHandle,
+        x: &GpuBufferHandle,
+        y_shape: &[usize],
+        y_strides: &[isize],
+        y_offset: usize,
+        x_shape: &[usize],
+        x_strides: &[isize],
+        x_offset: usize,
+        out_shape: &[usize],
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let y_buf = Self::unwrap_buffer_f16(y)?;
+        let x_buf = Self::unwrap_buffer_f16(x)?;
+        let dev = self.device(y.device_ordinal())?;
+        let result = crate::atan2::gpu_atan2_f16(
+            y_buf, x_buf, y_shape, y_strides, y_offset, x_shape, x_strides, x_offset, out_shape,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, y.device_ordinal()))
+    }
+
+    fn atan2_backward_f32(
+        &self,
+        grad_output: &GpuBufferHandle,
+        y: &GpuBufferHandle,
+        x: &GpuBufferHandle,
+        grad_strides: &[isize],
+        grad_offset: usize,
+        y_shape: &[usize],
+        y_strides: &[isize],
+        y_offset: usize,
+        x_shape: &[usize],
+        x_strides: &[isize],
+        x_offset: usize,
+        out_shape: &[usize],
+        wrt_y: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = Self::unwrap_buffer(grad_output)?;
+        let y_buf = Self::unwrap_buffer(y)?;
+        let x_buf = Self::unwrap_buffer(x)?;
+        let dev = self.device(grad_output.device_ordinal())?;
+        let out = crate::atan2::gpu_atan2_backward_f32(
+            grad_buf,
+            y_buf,
+            x_buf,
+            grad_strides,
+            grad_offset,
+            y_shape,
+            y_strides,
+            y_offset,
+            x_shape,
+            x_strides,
+            x_offset,
+            out_shape,
+            wrt_y,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(out, grad_output.device_ordinal()))
+    }
+
+    fn atan2_backward_f64(
+        &self,
+        grad_output: &GpuBufferHandle,
+        y: &GpuBufferHandle,
+        x: &GpuBufferHandle,
+        grad_strides: &[isize],
+        grad_offset: usize,
+        y_shape: &[usize],
+        y_strides: &[isize],
+        y_offset: usize,
+        x_shape: &[usize],
+        x_strides: &[isize],
+        x_offset: usize,
+        out_shape: &[usize],
+        wrt_y: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = Self::unwrap_buffer_f64(grad_output)?;
+        let y_buf = Self::unwrap_buffer_f64(y)?;
+        let x_buf = Self::unwrap_buffer_f64(x)?;
+        let dev = self.device(grad_output.device_ordinal())?;
+        let out = crate::atan2::gpu_atan2_backward_f64(
+            grad_buf,
+            y_buf,
+            x_buf,
+            grad_strides,
+            grad_offset,
+            y_shape,
+            y_strides,
+            y_offset,
+            x_shape,
+            x_strides,
+            x_offset,
+            out_shape,
+            wrt_y,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(out, grad_output.device_ordinal()))
+    }
+
+    fn atan2_backward_bf16(
+        &self,
+        grad_output: &GpuBufferHandle,
+        y: &GpuBufferHandle,
+        x: &GpuBufferHandle,
+        grad_strides: &[isize],
+        grad_offset: usize,
+        y_shape: &[usize],
+        y_strides: &[isize],
+        y_offset: usize,
+        x_shape: &[usize],
+        x_strides: &[isize],
+        x_offset: usize,
+        out_shape: &[usize],
+        wrt_y: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = Self::unwrap_buffer_bf16(grad_output)?;
+        let y_buf = Self::unwrap_buffer_bf16(y)?;
+        let x_buf = Self::unwrap_buffer_bf16(x)?;
+        let dev = self.device(grad_output.device_ordinal())?;
+        let out = crate::atan2::gpu_atan2_backward_bf16(
+            grad_buf,
+            y_buf,
+            x_buf,
+            grad_strides,
+            grad_offset,
+            y_shape,
+            y_strides,
+            y_offset,
+            x_shape,
+            x_strides,
+            x_offset,
+            out_shape,
+            wrt_y,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(out, grad_output.device_ordinal()))
+    }
+
+    fn atan2_backward_f16(
+        &self,
+        grad_output: &GpuBufferHandle,
+        y: &GpuBufferHandle,
+        x: &GpuBufferHandle,
+        grad_strides: &[isize],
+        grad_offset: usize,
+        y_shape: &[usize],
+        y_strides: &[isize],
+        y_offset: usize,
+        x_shape: &[usize],
+        x_strides: &[isize],
+        x_offset: usize,
+        out_shape: &[usize],
+        wrt_y: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let grad_buf = Self::unwrap_buffer_f16(grad_output)?;
+        let y_buf = Self::unwrap_buffer_f16(y)?;
+        let x_buf = Self::unwrap_buffer_f16(x)?;
+        let dev = self.device(grad_output.device_ordinal())?;
+        let out = crate::atan2::gpu_atan2_backward_f16(
+            grad_buf,
+            y_buf,
+            x_buf,
+            grad_strides,
+            grad_offset,
+            y_shape,
+            y_strides,
+            y_offset,
+            x_shape,
+            x_strides,
+            x_offset,
+            out_shape,
+            wrt_y,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(out, grad_output.device_ordinal()))
+    }
+
     fn copysign_f32(
         &self,
         magnitude: &GpuBufferHandle,
