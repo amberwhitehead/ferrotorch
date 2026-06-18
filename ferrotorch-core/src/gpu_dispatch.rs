@@ -4055,6 +4055,25 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// `torch.special.xlogy(x, y)` forward, f32. Both buffers must be
+    /// equal-length and already broadcast/materialized by the caller.
+    fn xlogy_f32(
+        &self,
+        _x: &GpuBufferHandle,
+        _y: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "xlogy" })
+    }
+
+    /// `torch.special.xlogy(x, y)` forward, f64.
+    fn xlogy_f64(
+        &self,
+        _x: &GpuBufferHandle,
+        _y: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "xlogy" })
+    }
+
     // Clamp: out[i] = max(min_val, min(max_val, x[i]))
     fn clamp_f32(
         &self,

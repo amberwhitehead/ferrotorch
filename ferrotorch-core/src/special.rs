@@ -33,7 +33,7 @@ use crate::bool_tensor::BoolTensor;
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::grad_fns::arithmetic::reduce_grad_to_shape;
-use crate::ops::elementwise::{binary_map, unary_map};
+use crate::ops::elementwise::{binary_map, unary_map, unary_map_named};
 use crate::storage::TensorStorage;
 use crate::tensor::{GradFn, Tensor};
 
@@ -810,20 +810,6 @@ fn trigamma_scalar<T: Float>(mut x: T) -> T {
     sign * result
 }
 
-/// Compute sinc(x) = sin(pi*x) / (pi*x), with sinc(0) = 1.
-fn sinc_scalar<T: Float>(x: T) -> T {
-    let zero = nt_zero::<T>();
-    let one = nt_one::<T>();
-
-    if x == zero {
-        return one;
-    }
-
-    let pi = T::from(std::f64::consts::PI).unwrap();
-    let pi_x = pi * x;
-    pi_x.sin() / pi_x
-}
-
 /// Compute x * log(y) with the convention that 0 * log(y) = 0 — UNLESS y is
 /// NaN. Mirrors `xlogy_kernel`
 /// (`aten/src/ATen/native/cpu/BinaryOpsKernel.cpp:1288-1300`): the
@@ -851,9 +837,6 @@ enum SpecialUnaryKind {
     Erfinv,
     Lgamma,
     Digamma,
-    Log1p,
-    Expm1,
-    Sinc,
     Entr,
     Ndtr,
     Ndtri,
@@ -872,9 +855,6 @@ impl SpecialUnaryKind {
             Self::Erfinv => "ErfinvBackward",
             Self::Lgamma => "LgammaBackward",
             Self::Digamma => "DigammaBackward",
-            Self::Log1p => "Log1pBackward",
-            Self::Expm1 => "Expm1Backward",
-            Self::Sinc => "SincBackward",
             Self::Entr => "SpecialEntrBackward",
             Self::Ndtr => "SpecialNdtrBackward",
             Self::Ndtri => "SpecialNdtriBackward",
@@ -893,9 +873,6 @@ impl SpecialUnaryKind {
             Self::Erfinv => "erfinv_backward",
             Self::Lgamma => "lgamma_backward",
             Self::Digamma => "digamma_backward",
-            Self::Log1p => "log1p_backward",
-            Self::Expm1 => "expm1_backward",
-            Self::Sinc => "sinc_backward",
             Self::Entr => "entr_backward",
             Self::Ndtr => "ndtr_backward",
             Self::Ndtri => "ndtri_backward",
@@ -966,7 +943,6 @@ fn special_unary_backward_cpu<T: Float>(
     let zero = nt_zero::<T>();
     let one = nt_one::<T>();
     let half = T::from(0.5).unwrap();
-    let pi = T::from(std::f64::consts::PI).unwrap();
     let sqrt_pi = T::from(std::f64::consts::PI.sqrt()).unwrap();
     let two_over_sqrt_pi = T::from(2.0 / std::f64::consts::PI.sqrt()).unwrap();
     let inv_sqrt_2pi = T::from(1.0 / (2.0 * std::f64::consts::PI).sqrt()).unwrap();
@@ -984,17 +960,6 @@ fn special_unary_backward_cpu<T: Float>(
                 SpecialUnaryKind::Erfinv => half * sqrt_pi * (y * y).exp(),
                 SpecialUnaryKind::Lgamma => digamma_scalar(x),
                 SpecialUnaryKind::Digamma => trigamma_scalar(x),
-                SpecialUnaryKind::Log1p => one / (one + x),
-                SpecialUnaryKind::Expm1 => y + one,
-                SpecialUnaryKind::Sinc => {
-                    if x == zero {
-                        zero
-                    } else {
-                        let self_pi = pi * x;
-                        let self_squared_pi = x * x * pi;
-                        (self_pi * self_pi.cos() - self_pi.sin()) / self_squared_pi
-                    }
-                }
                 SpecialUnaryKind::Entr => -(one + x.ln()),
                 SpecialUnaryKind::Ndtr => inv_sqrt_2pi * (-(x * x) * half).exp(),
                 SpecialUnaryKind::Ndtri => sqrt_2pi * ((y * y) * half).exp(),
@@ -1052,15 +1017,6 @@ fn add_const_like<T: Float>(
     crate::grad_fns::arithmetic::add(input, &c)
 }
 
-fn reciprocal_const_add<T: Float>(
-    input: &Tensor<T>,
-    value: f64,
-    op: &'static str,
-) -> FerrotorchResult<Tensor<T>> {
-    let denom = add_const_like(input, value, op)?;
-    crate::grad_fns::arithmetic::reciprocal(&denom)
-}
-
 fn sgn_tensor<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
     let zero = full_like_scalar(input, 0.0, "sgn_tensor")?;
     let one = full_like_scalar(input, 1.0, "sgn_tensor")?;
@@ -1108,8 +1064,6 @@ fn special_unary_backward_cuda<T: Float>(
             let exp = crate::grad_fns::transcendental::exp(&y2)?;
             mul_const_like(&exp, 0.5 * std::f64::consts::PI.sqrt(), kind.op())?
         }
-        SpecialUnaryKind::Log1p => reciprocal_const_add(input, 1.0, kind.op())?,
-        SpecialUnaryKind::Expm1 => add_const_like(output, 1.0, kind.op())?,
         SpecialUnaryKind::Entr => {
             let log_x = crate::grad_fns::transcendental::log(input)?;
             let one_plus = add_const_like(&log_x, 1.0, kind.op())?;
@@ -1155,7 +1109,6 @@ fn special_unary_backward_cuda<T: Float>(
         }
         SpecialUnaryKind::Lgamma
         | SpecialUnaryKind::Digamma
-        | SpecialUnaryKind::Sinc
         | SpecialUnaryKind::Multigammaln { .. } => {
             return Err(FerrotorchError::NotImplementedOnCuda { op: kind.op() });
         }
@@ -1174,7 +1127,7 @@ impl<T: Float> GradFn<T> for XlogyBackward<T> {
     fn backward(&self, grad_output: &Tensor<T>) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
         no_grad(|| {
             let dx = if self.x.requires_grad() {
-                let raw = binary_map(grad_output, &self.y, xlogy_scalar)?;
+                let raw = xlogy(grad_output, &self.y)?;
                 let zero_x = full_like_scalar(&self.x, 0.0, "xlogy_backward")?;
                 let zero_y = full_like_scalar(&self.y, 0.0, "xlogy_backward")?;
                 let x_is_zero = BoolTensor::eq_t(&self.x, &zero_x)?;
@@ -3288,7 +3241,7 @@ fn gammaln_sign_scalar<T: Float>(x: T) -> T {
 /// (meets F64_TRANSCENDENTAL = 1e-10). f32/bf16 path: Abramowitz & Stegun
 /// 7.1.26 polynomial, |epsilon| <= 1.5e-7 (meets F32_TRANSCENDENTAL = 1e-5).
 pub fn erf<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let output = unary_map(input, erf_scalar)?;
+    let output = unary_map_named(input, "erf", erf_scalar)?;
     wrap_special_unary(output, input, SpecialUnaryKind::Erf)
 }
 
@@ -3298,7 +3251,7 @@ pub fn erf<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// right-tail (large positive x) avoids the catastrophic 1 - erf(x)
 /// cancellation. f32/bf16 path: literal `1 - erf_scalar(x)`.
 pub fn erfc<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let output = unary_map(input, erfc_scalar)?;
+    let output = unary_map_named(input, "erfc", erfc_scalar)?;
     wrap_special_unary(output, input, SpecialUnaryKind::Erfc)
 }
 
@@ -3307,7 +3260,7 @@ pub fn erfc<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// Uses the Winitzki (2008) rational approximation. Returns `inf` for
 /// input = 1, `-inf` for input = -1, and `NaN` for |input| > 1.
 pub fn erfinv<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let output = unary_map(input, erfinv_scalar)?;
+    let output = unary_map_named(input, "erfinv", erfinv_scalar)?;
     wrap_special_unary(output, input, SpecialUnaryKind::Erfinv)
 }
 
@@ -3315,7 +3268,7 @@ pub fn erfinv<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 ///
 /// Uses the Lanczos approximation (g = 7, n = 9 coefficients).
 pub fn lgamma<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let output = unary_map(input, lgamma_scalar)?;
+    let output = unary_map_named(input, "lgamma", lgamma_scalar)?;
     wrap_special_unary(output, input, SpecialUnaryKind::Lgamma)
 }
 
@@ -3329,7 +3282,7 @@ pub fn gammaln<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// Uses the recurrence relation to shift the argument above 6, then
 /// applies the asymptotic expansion.
 pub fn digamma<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let output = unary_map(input, digamma_scalar)?;
+    let output = unary_map_named(input, "digamma", digamma_scalar)?;
     wrap_special_unary(output, input, SpecialUnaryKind::Digamma)
 }
 
@@ -3337,28 +3290,39 @@ pub fn digamma<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 ///
 /// Delegates to `num_traits::Float::ln_1p()`.
 pub fn log1p<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let output = unary_map(input, |x| x.ln_1p())?;
-    wrap_special_unary(output, input, SpecialUnaryKind::Log1p)
+    crate::grad_fns::transcendental::log1p(input)
 }
 
 /// exp(x) - 1 -- numerically stable for small x.
 ///
 /// Delegates to `num_traits::Float::exp_m1()`.
 pub fn expm1<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let output = unary_map(input, |x| x.exp_m1())?;
-    wrap_special_unary(output, input, SpecialUnaryKind::Expm1)
+    crate::grad_fns::transcendental::expm1(input)
 }
 
 /// Normalized sinc function: sinc(x) = sin(pi*x) / (pi*x), with sinc(0) = 1.
 pub fn sinc<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let output = unary_map(input, sinc_scalar)?;
-    wrap_special_unary(output, input, SpecialUnaryKind::Sinc)
+    crate::grad_fns::transcendental::sinc(input)
 }
 
 /// x * log(y), with the convention that xlogy(0, y) = 0 for any y.
 ///
 /// This is useful for entropy computations where 0 * log(0) should be 0.
 pub fn xlogy<T: Float>(x: &Tensor<T>, y: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = special_gpu_binary_broadcast(
+        x,
+        y,
+        "xlogy",
+        |b, xh, yh| b.xlogy_f32(xh, yh),
+        |b, xh, yh| b.xlogy_f64(xh, yh),
+    )? {
+        return finish_special_binary(output, x, y, |_| {
+            Ok(Arc::new(XlogyBackward {
+                x: x.saved_for_backward()?,
+                y: y.saved_for_backward()?,
+            }))
+        });
+    }
     let output = binary_map(x, y, xlogy_scalar)?;
     finish_special_binary(output, x, y, |_| {
         Ok(Arc::new(XlogyBackward {
@@ -3686,6 +3650,7 @@ pub fn airy_ai<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 /// result is `NaN` (matching `aten/src/ATen/native/Math.h:1144 calc_igamma`).
 /// `input = 0, other > 0 → 1`; `input > 0, other = 0 → 0`; `other → ∞ → 1`.
 pub fn gammainc<T: Float>(input: &Tensor<T>, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    reject_cuda_binary(input, other, "gammainc")?;
     let output = binary_map(input, other, gammainc_scalar)?;
     finish_special_binary(output, input, other, |_| {
         Ok(Arc::new(GammaIncBackward {
@@ -3705,6 +3670,7 @@ pub fn gammainc<T: Float>(input: &Tensor<T>, other: &Tensor<T>) -> FerrotorchRes
 /// `input = 0, other > 0 → 0`; `input > 0, other = 0 → 1`; `other → ∞ → 0`
 /// (matching `aten/src/ATen/native/Math.h calc_igammac`).
 pub fn gammaincc<T: Float>(input: &Tensor<T>, other: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    reject_cuda_binary(input, other, "gammaincc")?;
     let output = binary_map(input, other, gammaincc_scalar)?;
     finish_special_binary(output, input, other, |_| {
         Ok(Arc::new(GammaIncBackward {
@@ -3722,6 +3688,7 @@ pub fn gammaincc<T: Float>(input: &Tensor<T>, other: &Tensor<T>) -> FerrotorchRe
 /// `torch.lgamma`. The accumulation runs in f64 then narrows to `T` so the
 /// three-way lgamma subtraction does not lose bits in the f32 path.
 pub fn log_beta<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    reject_cuda_binary(a, b, "log_beta")?;
     let output = binary_map(a, b, log_beta_scalar)?;
     finish_special_binary(output, a, b, |output| {
         Ok(Arc::new(BetaBackward {
@@ -3738,6 +3705,7 @@ pub fn log_beta<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tens
 ///
 /// Mirrors `scipy.special.beta`.
 pub fn beta<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    reject_cuda_binary(a, b, "beta")?;
     let output = binary_map(a, b, beta_scalar)?;
     finish_special_binary(output, a, b, |output| {
         Ok(Arc::new(BetaBackward {
@@ -3769,7 +3737,8 @@ pub fn multigammaln<T: Float>(input: &Tensor<T>, p: usize) -> FerrotorchResult<T
             message: "multigammaln: p has to be greater than or equal to 1".to_string(),
         });
     }
-    let output = unary_map(input, move |x| multigammaln_scalar(x, p))?;
+    reject_cuda_unary(input, "multigammaln")?;
+    let output = unary_map_named(input, "multigammaln", move |x| multigammaln_scalar(x, p))?;
     wrap_special_unary(output, input, SpecialUnaryKind::Multigammaln { p })
 }
 
@@ -3785,7 +3754,8 @@ pub fn mvlgamma<T: Float>(input: &Tensor<T>, p: usize) -> FerrotorchResult<Tenso
 /// Mirrors `scipy.special.gammasgn`: `+1` for `x > 0`; `NaN` for negative
 /// integers (poles of Γ); `(-1)^floor(x)` for `x < 0` non-integer.
 pub fn gammaln_sign<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    unary_map(input, gammaln_sign_scalar)
+    reject_cuda_unary(input, "gammaln_sign")?;
+    unary_map_named(input, "gammaln_sign", gammaln_sign_scalar)
 }
 
 // ===========================================================================
@@ -3999,6 +3969,89 @@ fn special_gpu_binary<T: Float>(
         f64_call(backend, xh, qh)?
     };
     Ok(Some(poly_gpu_output::<T>(out_handle, x.shape().to_vec())?))
+}
+
+/// Broadcast-aware CUDA binary helper for resident special kernels whose
+/// PyTorch contract supports broadcasting. Unlike `special_gpu_binary` (kept
+/// strict for zeta), this materializes broadcasted operands on-device via
+/// `expand(...).contiguous()` before launching the equal-length kernel.
+fn special_gpu_binary_broadcast<T: Float>(
+    x: &Tensor<T>,
+    y: &Tensor<T>,
+    op: &'static str,
+    f32_call: impl Fn(
+        &dyn crate::gpu_dispatch::GpuBackend,
+        &crate::gpu_dispatch::GpuBufferHandle,
+        &crate::gpu_dispatch::GpuBufferHandle,
+    ) -> FerrotorchResult<crate::gpu_dispatch::GpuBufferHandle>,
+    f64_call: impl Fn(
+        &dyn crate::gpu_dispatch::GpuBackend,
+        &crate::gpu_dispatch::GpuBufferHandle,
+        &crate::gpu_dispatch::GpuBufferHandle,
+    ) -> FerrotorchResult<crate::gpu_dispatch::GpuBufferHandle>,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !x.is_cuda() && !y.is_cuda() {
+        return Ok(None);
+    }
+    if x.is_cuda() != y.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op });
+    }
+    if x.device() != y.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: x.device(),
+            got: y.device(),
+        });
+    }
+    if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
+        return Err(FerrotorchError::NotImplementedOnCuda { op });
+    }
+
+    no_grad(|| {
+        let out_shape = crate::shape::broadcast_shapes(x.shape(), y.shape())?;
+        let x_expanded = if x.shape() == out_shape.as_slice() {
+            x.clone()
+        } else {
+            crate::grad_fns::shape::expand(x, &out_shape)?
+        };
+        let y_expanded = if y.shape() == out_shape.as_slice() {
+            y.clone()
+        } else {
+            crate::grad_fns::shape::expand(y, &out_shape)?
+        };
+
+        let backend =
+            crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+        let x = x_expanded.contiguous()?;
+        let y = y_expanded.contiguous()?;
+        let xh = x.gpu_handle()?;
+        let yh = y.gpu_handle()?;
+        let out_handle = if poly_is_f32::<T>() {
+            f32_call(backend, xh, yh)?
+        } else {
+            f64_call(backend, xh, yh)?
+        };
+        Ok(Some(poly_gpu_output::<T>(out_handle, out_shape)?))
+    })
+}
+
+fn reject_cuda_unary<T: Float>(input: &Tensor<T>, op: &'static str) -> FerrotorchResult<()> {
+    if input.is_cuda() {
+        Err(FerrotorchError::NotImplementedOnCuda { op })
+    } else {
+        Ok(())
+    }
+}
+
+fn reject_cuda_binary<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<()> {
+    if a.is_cuda() || b.is_cuda() {
+        Err(FerrotorchError::NotImplementedOnCuda { op })
+    } else {
+        Ok(())
+    }
 }
 
 /// Chebyshev-family GPU dispatch (T/U/V/W + shifted), selecting the kind via

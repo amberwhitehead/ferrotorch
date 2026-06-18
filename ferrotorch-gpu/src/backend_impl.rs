@@ -7727,6 +7727,30 @@ impl GpuBackend for CudaBackendImpl {
         Err(FerrotorchError::NotImplementedOnCuda { op: "zeta_f64" })
     }
 
+    fn xlogy_f32(
+        &self,
+        x: &GpuBufferHandle,
+        y: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let x_buf = Self::unwrap_buffer(x)?;
+        let y_buf = Self::unwrap_buffer(y)?;
+        let dev = self.device(x.device_ordinal())?;
+        let result = crate::special::gpu_xlogy_f32(x_buf, y_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer(result, x.device_ordinal()))
+    }
+
+    fn xlogy_f64(
+        &self,
+        x: &GpuBufferHandle,
+        y: &GpuBufferHandle,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let x_buf = Self::unwrap_buffer_f64(x)?;
+        let y_buf = Self::unwrap_buffer_f64(y)?;
+        let dev = self.device(x.device_ordinal())?;
+        let result = crate::special::gpu_xlogy_f64(x_buf, y_buf, dev).map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f64(result, x.device_ordinal()))
+    }
+
     fn clamp_f32(
         &self,
         a: &GpuBufferHandle,

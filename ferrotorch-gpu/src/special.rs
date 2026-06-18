@@ -5415,6 +5415,143 @@ pub fn gpu_airy_ai_f32(input: &CudaBuffer<f32>, device: &GpuDevice) -> GpuResult
     launch_elementwise_f32(input, device, AIRY_AI_F32_PTX, "airy_ai_f32")
 }
 
+/// `torch.special.xlogy(x, y)` forward, f32.
+///
+/// Branch order mirrors PyTorch's CUDA kernel:
+/// `isnan(y) -> NaN`, then `x == 0 -> 0`, otherwise `x * log(y)`.
+#[cfg(feature = "cuda")]
+pub(crate) const XLOGY_F32_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry xlogy_f32(
+    .param .u64 x_ptr,
+    .param .u64 y_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r;
+    .reg .u64 %x_p, %y_p, %out_p, %off, %addr_x, %addr_y, %addr_out;
+    .reg .f32 %x, %y, %r, %log2_y, %ln2;
+    .reg .pred %oob, %y_nan, %x_zero;
+
+    ld.param.u64 %x_p,     [x_ptr];
+    ld.param.u64 %y_p,     [y_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %oob, %idx, %total_r;
+    @%oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 2;
+    add.u64 %addr_x, %x_p, %off;
+    add.u64 %addr_y, %y_p, %off;
+    add.u64 %addr_out, %out_p, %off;
+    ld.global.f32 %x, [%addr_x];
+    ld.global.f32 %y, [%addr_y];
+
+    setp.nan.f32 %y_nan, %y, %y;
+    @%y_nan bra STORE_NAN;
+    setp.eq.f32 %x_zero, %x, 0f00000000;
+    @%x_zero bra STORE_ZERO;
+
+    lg2.approx.f32 %log2_y, %y;
+    mov.f32 %ln2, 0f3F317218;
+    mul.f32 %r, %log2_y, %ln2;
+    mul.f32 %r, %x, %r;
+    bra STORE;
+
+STORE_NAN:
+    mov.f32 %r, 0f7FC00000;
+    bra STORE;
+
+STORE_ZERO:
+    mov.f32 %r, 0f00000000;
+
+STORE:
+    st.global.f32 [%addr_out], %r;
+DONE:
+    ret;
+}
+";
+
+/// `torch.special.xlogy(x, y)` forward, f64.
+///
+/// The logarithm follows the crate's existing f64 CUDA policy in
+/// `gpu_log_f64`: downcast to f32 for the PTX `lg2.approx.f32` operation,
+/// then widen back to f64 for storage. This keeps `xlogy_f64` consistent with
+/// the rest of the current f64 CUDA transcendental backend.
+#[cfg(feature = "cuda")]
+pub(crate) const XLOGY_F64_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry xlogy_f64(
+    .param .u64 x_ptr,
+    .param .u64 y_ptr,
+    .param .u64 out_ptr,
+    .param .u32 total
+) {
+    .reg .u32 %tid_r, %bid_r, %bdim_r, %idx, %total_r;
+    .reg .u64 %x_p, %y_p, %out_p, %off, %addr_x, %addr_y, %addr_out;
+    .reg .f64 %x, %y, %r, %log_y64;
+    .reg .f32 %y32, %log2_y, %log_y32, %ln2;
+    .reg .pred %oob, %y_nan, %x_zero;
+
+    ld.param.u64 %x_p,     [x_ptr];
+    ld.param.u64 %y_p,     [y_ptr];
+    ld.param.u64 %out_p,   [out_ptr];
+    ld.param.u32 %total_r, [total];
+
+    mov.u32 %tid_r,  %tid.x;
+    mov.u32 %bid_r,  %ctaid.x;
+    mov.u32 %bdim_r, %ntid.x;
+    mad.lo.u32 %idx, %bid_r, %bdim_r, %tid_r;
+    setp.ge.u32 %oob, %idx, %total_r;
+    @%oob bra DONE;
+
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 3;
+    add.u64 %addr_x, %x_p, %off;
+    add.u64 %addr_y, %y_p, %off;
+    add.u64 %addr_out, %out_p, %off;
+    ld.global.f64 %x, [%addr_x];
+    ld.global.f64 %y, [%addr_y];
+
+    setp.nan.f64 %y_nan, %y, %y;
+    @%y_nan bra STORE_NAN;
+    setp.eq.f64 %x_zero, %x, 0d0000000000000000;
+    @%x_zero bra STORE_ZERO;
+
+    cvt.rn.f32.f64 %y32, %y;
+    lg2.approx.f32 %log2_y, %y32;
+    mov.f32 %ln2, 0f3F317218;
+    mul.f32 %log_y32, %log2_y, %ln2;
+    cvt.f64.f32 %log_y64, %log_y32;
+    mul.rn.f64 %r, %x, %log_y64;
+    bra STORE;
+
+STORE_NAN:
+    mov.f64 %r, 0d7FF8000000000000;
+    bra STORE;
+
+STORE_ZERO:
+    mov.f64 %r, 0d0000000000000000;
+
+STORE:
+    st.global.f64 [%addr_out], %r;
+DONE:
+    ret;
+}
+";
+
 /// Launch a two-input elementwise kernel whose ABI is `(in_x, in_q, out,
 /// total)` on a pair of equal-length f32 buffers (Hurwitz zeta). The result
 /// stays on-device (no host round-trip, R-CODE-4).
@@ -5467,6 +5604,51 @@ fn launch_binary_elementwise_f32(
     Ok(out)
 }
 
+/// f64 counterpart of [`launch_binary_elementwise_f32`].
+#[cfg(feature = "cuda")]
+fn launch_binary_elementwise_f64(
+    x: &CudaBuffer<f64>,
+    y: &CudaBuffer<f64>,
+    device: &GpuDevice,
+    ptx: &'static str,
+    kernel: &'static str,
+) -> GpuResult<CudaBuffer<f64>> {
+    let total = check_input(x, device, kernel)?;
+    let total_y = check_input(y, device, kernel)?;
+    if total != total_y {
+        return Err(GpuError::ShapeMismatch {
+            op: kernel,
+            expected: vec![total],
+            got: vec![total_y],
+        });
+    }
+    let mut out = alloc_zeros_f64(total, device)?;
+    if total == 0 {
+        return Ok(out);
+    }
+    let f =
+        crate::module_cache::get_or_compile(device.context(), ptx, kernel, device.ordinal() as u32)
+            .map_err(|e| GpuError::PtxCompileFailed { kernel, source: e })?;
+    let total_u32 = total as u32;
+    let cfg = launch_cfg(total_u32);
+    // SAFETY: `f` is `kernel` (a `(x,y,out,total)`-ABI two-input elementwise
+    // entry); the four launch args match the PTX `.entry` order. `x` and `y`
+    // are on `device` with exactly `total` f64 elements each (validated by
+    // `check_input` + equal-length check); `out` is fresh and non-aliasing;
+    // the PTX head bounds-checks every thread; `total` fits u32.
+    unsafe {
+        device
+            .stream()
+            .launch_builder(&f)
+            .arg(x.inner())
+            .arg(y.inner())
+            .arg(out.inner_mut())
+            .arg(&total_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
 /// Hurwitz zeta `zeta(x, q)` forward on a pair of equal-length f32 buffers
 /// (on-device, no host round-trip). `x` is the exponent buffer, `q` the shift.
 ///
@@ -5480,6 +5662,26 @@ pub fn gpu_zeta_f32(
     device: &GpuDevice,
 ) -> GpuResult<CudaBuffer<f32>> {
     launch_binary_elementwise_f32(x, q, device, ZETA_F32_PTX, "zeta_f32")
+}
+
+/// `torch.special.xlogy(x, y)` forward on equal-length f32 buffers.
+#[cfg(feature = "cuda")]
+pub fn gpu_xlogy_f32(
+    x: &CudaBuffer<f32>,
+    y: &CudaBuffer<f32>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f32>> {
+    launch_binary_elementwise_f32(x, y, device, XLOGY_F32_PTX, "xlogy_f32")
+}
+
+/// `torch.special.xlogy(x, y)` forward on equal-length f64 buffers.
+#[cfg(feature = "cuda")]
+pub fn gpu_xlogy_f64(
+    x: &CudaBuffer<f64>,
+    y: &CudaBuffer<f64>,
+    device: &GpuDevice,
+) -> GpuResult<CudaBuffer<f64>> {
+    launch_binary_elementwise_f64(x, y, device, XLOGY_F64_PTX, "xlogy_f64")
 }
 
 #[cfg(all(test, feature = "cuda"))]
