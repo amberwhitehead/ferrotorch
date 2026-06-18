@@ -5,7 +5,7 @@ use std::sync::Once;
 use ferrotorch_core::Tensor;
 use ferrotorch_core::bool_tensor::BoolTensor;
 use ferrotorch_core::device::Device;
-use ferrotorch_core::grad_fns::indexing::{MaskedFillBackward, masked_fill_bt};
+use ferrotorch_core::grad_fns::indexing::{MaskedFillBackward, masked_fill, masked_fill_bt};
 use ferrotorch_core::storage::TensorStorage;
 use ferrotorch_core::tensor::GradFn;
 use half::{bf16, f16};
@@ -86,6 +86,69 @@ fn read_bf16_as_f32(t: &Tensor<bf16>) -> Vec<f32> {
         .iter()
         .map(|v| v.to_f32())
         .collect()
+}
+
+#[test]
+fn legacy_host_mask_masked_fill_cuda_float_dtypes_are_resident() {
+    ensure_cuda_backend();
+
+    let host_mask = [false, true, false, true];
+
+    let f32_out = masked_fill(
+        &cuda_f32(&[1.0, 2.0, 3.0, 4.0], &[4], false),
+        &host_mask,
+        -8.0,
+    )
+    .expect("legacy host-mask masked_fill f32");
+    assert!(f32_out.is_cuda(), "f32 output must stay CUDA-resident");
+    assert_eq!(read_f32(&f32_out), vec![1.0, -8.0, 3.0, -8.0]);
+
+    let f64_out = masked_fill(
+        &cuda_f64(&[1.0, 2.0, 3.0, 4.0], &[4], false),
+        &host_mask,
+        -8.0,
+    )
+    .expect("legacy host-mask masked_fill f64");
+    assert!(f64_out.is_cuda(), "f64 output must stay CUDA-resident");
+    assert_eq!(read_f64(&f64_out), vec![1.0, -8.0, 3.0, -8.0]);
+
+    let f16_out = masked_fill(
+        &cuda_f16(&[1.0, 2.0, 3.0, 4.0], &[4], false),
+        &host_mask,
+        f16::from_f32(-8.0),
+    )
+    .expect("legacy host-mask masked_fill f16");
+    assert!(f16_out.is_cuda(), "f16 output must stay CUDA-resident");
+    assert_eq!(read_f16_as_f32(&f16_out), vec![1.0, -8.0, 3.0, -8.0]);
+
+    let bf16_out = masked_fill(
+        &cuda_bf16(&[1.0, 2.0, 3.0, 4.0], &[4], false),
+        &host_mask,
+        bf16::from_f32(-8.0),
+    )
+    .expect("legacy host-mask masked_fill bf16");
+    assert!(bf16_out.is_cuda(), "bf16 output must stay CUDA-resident");
+    assert_eq!(read_bf16_as_f32(&bf16_out), vec![1.0, -8.0, 3.0, -8.0]);
+}
+
+#[test]
+fn legacy_host_mask_masked_fill_cuda_f64_backward_is_resident() {
+    ensure_cuda_backend();
+
+    let input = cuda_f64(&[1.0, 2.0, 3.0, 4.0], &[4], true);
+    let out = masked_fill(&input, &[false, true, false, true], -8.0)
+        .expect("legacy host-mask masked_fill f64");
+    assert!(out.is_cuda(), "f64 output must stay CUDA-resident");
+
+    out.backward_with_gradient(&cuda_f64(&[10.0, 20.0, 30.0, 40.0], &[4], false))
+        .expect("legacy host-mask masked_fill f64 backward");
+
+    let grad = input.grad().expect("grad result").expect("leaf grad");
+    assert!(
+        grad.is_cuda(),
+        "f64 gradient from legacy host-mask masked_fill must stay CUDA-resident"
+    );
+    assert_eq!(read_f64(&grad), vec![10.0, 0.0, 30.0, 0.0]);
 }
 
 #[test]

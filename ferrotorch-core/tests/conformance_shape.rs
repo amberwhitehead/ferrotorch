@@ -2341,12 +2341,37 @@ fn run_masked_fill_for_device(device_label: &str, device: Device) {
                 );
             }
             "float64" => {
-                let a = make_cpu_f64(in_data, in_shape, false);
+                let a = upload_f64(make_cpu_f64(in_data, in_shape, false), device);
                 let r = masked_fill(&a, mask, value).expect("masked_fill");
+                if matches!(device, Device::Cuda(_)) {
+                    assert!(
+                        r.is_cuda(),
+                        "{label} forward must stay CUDA-resident, got {:?}",
+                        r.device()
+                    );
+                }
                 check_f64(
                     &format!("{label} fwd"),
                     &read_back_f64(&r),
                     expected,
+                    tolerance::F64_BITEXACT,
+                );
+                let a_g = upload_f64(make_cpu_f64(in_data, in_shape, true), device);
+                let r_g = masked_fill(&a_g, mask, value).expect("masked_fill");
+                let loss = ferrotorch_core::grad_fns::reduction::sum(&r_g).expect("sum");
+                loss.backward().expect("backward");
+                let g = a_g.grad().unwrap().expect("grad");
+                if matches!(device, Device::Cuda(_)) {
+                    assert!(
+                        g.is_cuda(),
+                        "{label} backward gradient must stay CUDA-resident, got {:?}",
+                        g.device()
+                    );
+                }
+                check_f64(
+                    &format!("{label} grad_a"),
+                    &read_back_f64(&g),
+                    grad_exp,
                     tolerance::F64_BITEXACT,
                 );
             }
