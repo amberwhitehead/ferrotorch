@@ -19,6 +19,7 @@ use std::sync::Once;
 
 use ferrotorch_core::grad_fns::arithmetic::pow;
 use ferrotorch_core::grad_fns::reduction::sum;
+use ferrotorch_core::grad_fns::transcendental::exp;
 use ferrotorch_core::{Device, Tensor, TensorStorage};
 
 static GPU_INIT: Once = Once::new();
@@ -207,6 +208,89 @@ fn cuda_pow_half_exponent_uses_sqrt_domain_and_signed_zero_like_torch() {
         &host_f64(&pow(&xd, -0.5).expect("f64 pow neg half")),
         &[f64::NAN, f64::NAN, f64::NEG_INFINITY, f64::INFINITY, 0.5],
         "f64 pow -0.5",
+    );
+}
+
+#[test]
+fn cuda_pow_reciprocal_special_exponents_preserve_signed_zero_like_torch() {
+    ensure_cuda_backend();
+
+    let xf = cuda_f32(
+        &[
+            -0.0,
+            0.0,
+            -4.0,
+            4.0,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+            f32::NAN,
+        ],
+        false,
+    );
+    assert_f32_bits(
+        &host_f32(&pow(&xf, -1.0).expect("f32 pow -1")),
+        &[
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+            -0.25,
+            0.25,
+            -0.0,
+            0.0,
+            f32::NAN,
+        ],
+        "f32 pow -1 reciprocal branch",
+    );
+    assert_f32_bits(
+        &host_f32(&pow(&xf, -2.0).expect("f32 pow -2")),
+        &[
+            f32::INFINITY,
+            f32::INFINITY,
+            0.0625,
+            0.0625,
+            0.0,
+            0.0,
+            f32::NAN,
+        ],
+        "f32 pow -2 inverse-square branch",
+    );
+
+    let xd = cuda_f64(
+        &[
+            -0.0,
+            0.0,
+            -4.0,
+            4.0,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NAN,
+        ],
+        false,
+    );
+    assert_f64_bits(
+        &host_f64(&pow(&xd, -1.0).expect("f64 pow -1")),
+        &[
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            -0.25,
+            0.25,
+            -0.0,
+            0.0,
+            f64::NAN,
+        ],
+        "f64 pow -1 reciprocal branch",
+    );
+    assert_f64_bits(
+        &host_f64(&pow(&xd, -2.0).expect("f64 pow -2")),
+        &[
+            f64::INFINITY,
+            f64::INFINITY,
+            0.0625,
+            0.0625,
+            0.0,
+            0.0,
+            f64::NAN,
+        ],
+        "f64 pow -2 inverse-square branch",
     );
 }
 
@@ -424,4 +508,99 @@ fn cuda_pow_special_value_table_matches_torch_scalar_exponents() {
             &format!("f64 pow {exponent:?}"),
         );
     }
+}
+
+#[test]
+fn cuda_pow_large_integral_exponents_and_subnormals_match_torch() {
+    ensure_cuda_backend();
+
+    // PyTorch CUDA treats finite f32 exponents with |exp| >= 2^24 as integral
+    // and non-odd because all representable values in that range are even.
+    let xf = cuda_f32(&[-2.0, -0.5, -1.0001, -0.0, 0.0], false);
+    assert_f32_bits(
+        &host_f32(&pow(&xf, 16_777_216.0).expect("f32 pow 2^24")),
+        &[f32::INFINITY, 0.0, f32::INFINITY, 0.0, 0.0],
+        "f32 pow large positive integral",
+    );
+    assert_f32_bits(
+        &host_f32(&pow(&xf, -16_777_216.0).expect("f32 pow -2^24")),
+        &[0.0, f32::INFINITY, 0.0, f32::INFINITY, f32::INFINITY],
+        "f32 pow large negative integral",
+    );
+
+    // Same rule for f64 at 2^53, plus exact subnormal/overflow behavior from
+    // torch 2.11 CUDA for powers of two.
+    let xd = cuda_f64(&[-2.0, -0.5, -1.0001, -0.0, 0.0], false);
+    assert_f64_bits(
+        &host_f64(&pow(&xd, 9_007_199_254_740_992.0).expect("f64 pow 2^53")),
+        &[f64::INFINITY, 0.0, f64::INFINITY, 0.0, 0.0],
+        "f64 pow large positive integral",
+    );
+    assert_f64_bits(
+        &host_f64(&pow(&xd, -9_007_199_254_740_992.0).expect("f64 pow -2^53")),
+        &[0.0, f64::INFINITY, 0.0, f64::INFINITY, f64::INFINITY],
+        "f64 pow large negative integral",
+    );
+
+    let powers = cuda_f64(&[0.5, -0.5, 2.0, -2.0], false);
+    let subnormal_cases: &[(f64, &[f64])] = &[
+        (
+            1073.0,
+            &[
+                f64::from_bits(0x0000_0000_0000_0002),
+                f64::from_bits(0x8000_0000_0000_0002),
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            ],
+        ),
+        (
+            1074.0,
+            &[
+                f64::from_bits(0x0000_0000_0000_0001),
+                f64::from_bits(0x0000_0000_0000_0001),
+                f64::INFINITY,
+                f64::INFINITY,
+            ],
+        ),
+        (1075.0, &[0.0, -0.0, f64::INFINITY, f64::NEG_INFINITY]),
+        (-1075.0, &[f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.0]),
+    ];
+    for &(exponent, expected) in subnormal_cases {
+        assert_f64_bits(
+            &host_f64(&pow(&powers, exponent).expect("f64 pow subnormal edge")),
+            expected,
+            &format!("f64 pow subnormal edge {exponent}"),
+        );
+    }
+}
+
+#[test]
+fn cuda_exp_f64_extreme_edges_match_torch() {
+    ensure_cuda_backend();
+
+    let x = cuda_f64(
+        &[
+            f64::NEG_INFINITY,
+            -746.0,
+            -744.4400719213812,
+            0.0,
+            710.0,
+            f64::INFINITY,
+            f64::NAN,
+        ],
+        false,
+    );
+    assert_f64_bits(
+        &host_f64(&exp(&x).expect("f64 exp extreme edges")),
+        &[
+            0.0,
+            0.0,
+            f64::from_bits(0x0000_0000_0000_0001),
+            1.0,
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NAN,
+        ],
+        "f64 exp extreme edges",
+    );
 }

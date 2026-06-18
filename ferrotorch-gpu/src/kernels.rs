@@ -14180,12 +14180,12 @@ pub(crate) const EXP_F64_PTX: &str = "\
 ) {
     .reg .u32 %r_tid, %bid, %bdim, %n_reg;
     .reg .u64 %a, %out, %off;
-    .reg .f64 %x, %vr;
+    .reg .f64 %x, %vr, %scale;
     .reg .f64 %log2e, %nf, %r;
     .reg .f64 %p, %one, %half;
     .reg .s32 %ni;
-    .reg .s64 %ni64, %exp_bits;
-    .reg .pred %p_bounds, %p_tid;
+    .reg .s64 %ni64, %exp_bits, %adj64;
+    .reg .pred %p_bounds, %p_tid, %p_nan, %p_overflow, %p_underflow, %p_high, %p_subnormal;
 
     ld.param.u64 %a, [a_ptr];
     ld.param.u64 %out, [out_ptr];
@@ -14205,6 +14205,13 @@ pub(crate) const EXP_F64_PTX: &str = "\
     add.u64 %out, %out, %off;
 
     ld.global.f64 %x, [%a];
+
+    setp.nan.f64 %p_nan, %x, %x;
+    @%p_nan bra EXP_STORE_INPUT;
+    setp.gt.f64 %p_overflow, %x, 0d40862E42FEFA39EF;
+    @%p_overflow bra EXP_STORE_INF;
+    setp.lt.f64 %p_underflow, %x, 0dC0874385446D71C3;
+    @%p_underflow bra EXP_STORE_ZERO;
 
     // Constants
     mov.f64 %log2e, 0d3FF71547652B82FE;   // log2(e) = 1.4426950408889634
@@ -14240,15 +14247,52 @@ pub(crate) const EXP_F64_PTX: &str = "\
     fma.rn.f64 %p, %p, %r, %one;   // p = r*p + 1
     fma.rn.f64 %vr, %p, %r, %one;  // vr = p*r + 1 = exp(r)
 
-    // Scale by 2^n: multiply by constructing the f64 bit pattern for 2^n.
-    // IEEE 754 f64: 2^n has exponent field = n + 1023, no mantissa bits.
-    // Bit pattern: (n + 1023) << 52.
     cvt.s64.s32 %ni64, %ni;
+    setp.gt.s64 %p_high, %ni64, 1023;
+    @%p_high bra EXP_SCALE_HIGH;
+    setp.lt.s64 %p_subnormal, %ni64, -1022;
+    @%p_subnormal bra EXP_SCALE_SUBNORMAL;
+
+EXP_SCALE_NORMAL:
     add.s64 %ni64, %ni64, 1023;
     shl.b64 %exp_bits, %ni64, 52;
-    mov.b64 %nf, %exp_bits;        // reinterpret as f64 = 2^n
-    mul.f64 %vr, %vr, %nf;
+    mov.b64 %scale, %exp_bits;
+    mul.f64 %vr, %vr, %scale;
+    bra EXP_STORE;
 
+EXP_SCALE_HIGH:
+    sub.s64 %adj64, %ni64, 1023;
+    add.s64 %exp_bits, %adj64, 1023;
+    shl.b64 %exp_bits, %exp_bits, 52;
+    mov.b64 %scale, %exp_bits;
+    mul.f64 %vr, %vr, %scale;
+    mov.u64 %exp_bits, 0x7FE0000000000000;
+    mov.b64 %scale, %exp_bits;
+    mul.f64 %vr, %vr, %scale;
+    bra EXP_STORE;
+
+EXP_SCALE_SUBNORMAL:
+    setp.lt.s64 %p_underflow, %ni64, -1075;
+    @%p_underflow bra EXP_STORE_ZERO;
+    add.s64 %adj64, %ni64, 1022;
+    add.s64 %exp_bits, %adj64, 1023;
+    shl.b64 %exp_bits, %exp_bits, 52;
+    mov.b64 %scale, %exp_bits;
+    mul.f64 %vr, %vr, %scale;
+    mov.u64 %exp_bits, 0x0010000000000000;
+    mov.b64 %scale, %exp_bits;
+    mul.f64 %vr, %vr, %scale;
+    bra EXP_STORE;
+
+EXP_STORE_INPUT:
+    mov.f64 %vr, %x;
+    bra EXP_STORE;
+EXP_STORE_INF:
+    mov.f64 %vr, 0d7FF0000000000000;
+    bra EXP_STORE;
+EXP_STORE_ZERO:
+    mov.f64 %vr, 0d0000000000000000;
+EXP_STORE:
     st.global.f64 [%out], %vr;
 
 DONE:
@@ -14795,7 +14839,7 @@ pub(crate) const POW_PTX: &str = "\
     .reg .pred %p, %exp_zero, %base_pos_one, %base_nan, %base_abs_one, %base_abs_inf, %base_abs_zero;
     .reg .pred %exp_half, %exp_neg_half, %exp_neg_one, %exp_two, %exp_three, %exp_neg_two;
     .reg .pred %neg_strict, %sign_set, %exp_nan, %exp_inf, %exp_nonfinite, %exp_finite, %exp_pos, %exp_neg;
-    .reg .pred %exp_int, %exp_small, %exp_odd, %not_exp_int, %base_not_inf, %nan_domain, %negate_result;
+    .reg .pred %exp_int, %exp_small, %exp_large_integral, %exp_odd, %not_exp_int, %base_not_inf, %nan_domain, %negate_result;
     .reg .pred %base_inf_pos, %base_inf_neg, %base_zero_pos, %base_zero_neg;
     .reg .pred %abs_gt_one, %abs_lt_one, %exp_pos_inf, %exp_neg_inf, %inf_exp_to_inf, %inf_exp_to_zero;
 
@@ -14861,9 +14905,13 @@ pub(crate) const POW_PTX: &str = "\
     setp.eq.f32 %exp_int, %exp, %exp_i_f;
     setp.lt.f32 %exp_small, %abs_exp, 0f4B800000;
     and.pred %exp_int, %exp_int, %exp_small;
+    setp.ge.f32 %exp_large_integral, %abs_exp, 0f4B800000;
+    and.pred %exp_large_integral, %exp_large_integral, %exp_finite;
+    or.pred %exp_int, %exp_int, %exp_large_integral;
     and.b32 %odd_bits, %exp_i, 1;
     setp.ne.u32 %exp_odd, %odd_bits, 0;
     and.pred %exp_odd, %exp_odd, %exp_int;
+    and.pred %exp_odd, %exp_odd, %exp_small;
 
     setp.eq.f32 %base_abs_inf, %abs_va, 0f7F800000;
     and.pred %p, %base_abs_inf, %exp_nan;
@@ -15014,13 +15062,14 @@ pub(crate) const POW_F64_PTX: &str = "\
     // exp registers
     .reg .f64 %e_z, %e_nf, %e_r, %e_p, %e_half;
     .reg .s32 %e_ni;
-    .reg .s64 %e_ni64, %e_bits;
+    .reg .s64 %e_ni64, %e_bits, %e_adj64;
     .reg .pred %p, %exp_zero, %base_pos_one, %base_nan, %base_abs_one, %base_abs_inf, %base_abs_zero;
     .reg .pred %exp_half, %exp_neg_half, %exp_neg_one, %exp_two, %exp_three, %exp_neg_two;
     .reg .pred %neg_strict, %sign_set, %exp_nan, %exp_inf, %exp_nonfinite, %exp_finite, %exp_pos, %exp_neg;
-    .reg .pred %exp_int, %exp_small, %exp_odd, %not_exp_int, %base_not_inf, %nan_domain, %negate_result;
+    .reg .pred %exp_int, %exp_small, %exp_large_integral, %exp_odd, %not_exp_int, %base_not_inf, %nan_domain, %negate_result;
     .reg .pred %base_inf_pos, %base_inf_neg, %base_zero_pos, %base_zero_neg;
     .reg .pred %abs_gt_one, %abs_lt_one, %exp_pos_inf, %exp_neg_inf, %inf_exp_to_inf, %inf_exp_to_zero;
+    .reg .pred %pow_exp_nan, %pow_exp_overflow, %pow_exp_underflow, %scale_high, %scale_subnormal;
 
     ld.param.u64 %a, [a_ptr];
     ld.param.u64 %out, [out_ptr];
@@ -15085,9 +15134,13 @@ pub(crate) const POW_F64_PTX: &str = "\
     setp.eq.f64 %exp_int, %exp64, %exp_i_f;
     setp.lt.f64 %exp_small, %abs_exp, 0d4340000000000000;
     and.pred %exp_int, %exp_int, %exp_small;
+    setp.ge.f64 %exp_large_integral, %abs_exp, 0d4340000000000000;
+    and.pred %exp_large_integral, %exp_large_integral, %exp_finite;
+    or.pred %exp_int, %exp_int, %exp_large_integral;
     and.b64 %odd_bits, %exp_i64, 1;
     setp.ne.u64 %exp_odd, %odd_bits, 0;
     and.pred %exp_odd, %exp_odd, %exp_int;
+    and.pred %exp_odd, %exp_odd, %exp_small;
 
     setp.eq.f64 %base_abs_inf, %abs_va, 0d7FF0000000000000;
     and.pred %p, %base_abs_inf, %exp_nan;
@@ -15180,6 +15233,12 @@ pub(crate) const POW_F64_PTX: &str = "\
 
     // === exp(exponent * ln(x)) ===
     mul.f64 %e_z, %exp64, %l_lnx;
+    setp.nan.f64 %pow_exp_nan, %e_z, %e_z;
+    @%pow_exp_nan bra STORE_NAN_F64;
+    setp.gt.f64 %pow_exp_overflow, %e_z, 0d40862E42FEFA39EF;
+    @%pow_exp_overflow bra STORE_MAG_INF_F64;
+    setp.lt.f64 %pow_exp_underflow, %e_z, 0dC0874385446D71C3;
+    @%pow_exp_underflow bra STORE_MAG_ZERO_F64;
 
     mov.f64 %e_half, 0d3FE0000000000000;
     fma.rn.f64 %e_nf, %e_z, 0d3FF71547652B82FE, %e_half;
@@ -15200,10 +15259,42 @@ pub(crate) const POW_F64_PTX: &str = "\
     fma.rn.f64 %e_p, %e_p, %e_r, %one;
     fma.rn.f64 %vr, %e_p, %e_r, %one;
     cvt.s64.s32 %e_ni64, %e_ni;
+    setp.gt.s64 %scale_high, %e_ni64, 1023;
+    @%scale_high bra SCALE_HIGH_F64;
+    setp.lt.s64 %scale_subnormal, %e_ni64, -1022;
+    @%scale_subnormal bra SCALE_SUBNORMAL_F64;
+
+SCALE_NORMAL_F64:
     add.s64 %e_ni64, %e_ni64, 1023;
     shl.b64 %e_bits, %e_ni64, 52;
     mov.b64 %e_nf, %e_bits;
     mul.f64 %vr, %vr, %e_nf;
+    bra APPLY_SIGN_F64;
+
+SCALE_HIGH_F64:
+    sub.s64 %e_adj64, %e_ni64, 1023;
+    add.s64 %e_bits, %e_adj64, 1023;
+    shl.b64 %e_bits, %e_bits, 52;
+    mov.b64 %e_nf, %e_bits;
+    mul.f64 %vr, %vr, %e_nf;
+    mov.u64 %e_bits, 0x7FE0000000000000;
+    mov.b64 %e_nf, %e_bits;
+    mul.f64 %vr, %vr, %e_nf;
+    bra APPLY_SIGN_F64;
+
+SCALE_SUBNORMAL_F64:
+    setp.lt.s64 %pow_exp_underflow, %e_ni64, -1075;
+    @%pow_exp_underflow bra STORE_MAG_ZERO_F64;
+    add.s64 %e_adj64, %e_ni64, 1022;
+    add.s64 %e_bits, %e_adj64, 1023;
+    shl.b64 %e_bits, %e_bits, 52;
+    mov.b64 %e_nf, %e_bits;
+    mul.f64 %vr, %vr, %e_nf;
+    mov.u64 %e_bits, 0x0010000000000000;
+    mov.b64 %e_nf, %e_bits;
+    mul.f64 %vr, %vr, %e_nf;
+
+APPLY_SIGN_F64:
     and.pred %negate_result, %sign_set, %exp_odd;
     @%negate_result neg.f64 %vr, %vr;
     bra STORE_F64;
@@ -15257,6 +15348,16 @@ STORE_POS_INF_F64:
     bra STORE_F64;
 STORE_POS_ZERO_F64:
     mov.f64 %vr, 0d0000000000000000;
+    bra STORE_F64;
+STORE_MAG_INF_F64:
+    mov.f64 %vr, 0d7FF0000000000000;
+    and.pred %negate_result, %sign_set, %exp_odd;
+    @%negate_result neg.f64 %vr, %vr;
+    bra STORE_F64;
+STORE_MAG_ZERO_F64:
+    mov.f64 %vr, 0d0000000000000000;
+    and.pred %negate_result, %sign_set, %exp_odd;
+    @%negate_result neg.f64 %vr, %vr;
     bra STORE_F64;
 STORE_NAN_F64:
     mov.f64 %vr, 0d7FF8000000000000;
