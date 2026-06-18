@@ -1498,6 +1498,264 @@ fn gammaln_sign_cuda_composed<T: Float>(input: &Tensor<T>) -> FerrotorchResult<O
     })
 }
 
+fn cuda_binary_composed_precheck<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<bool> {
+    if !a.is_cuda() && !b.is_cuda() {
+        return Ok(false);
+    }
+    if a.is_cuda() != b.is_cuda() {
+        return Err(FerrotorchError::NotImplementedOnCuda { op });
+    }
+    if a.device() != b.device() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        });
+    }
+    if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
+        return Err(FerrotorchError::NotImplementedOnCuda { op });
+    }
+    Ok(true)
+}
+
+fn log_beta_raw_composed<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let sum = crate::grad_fns::arithmetic::add(a, b)?;
+    let lg_a = lgamma(a)?;
+    let lg_b = lgamma(b)?;
+    let lg_sum = lgamma(&sum)?;
+    let numerator = crate::grad_fns::arithmetic::add(&lg_a, &lg_b)?;
+    crate::grad_fns::arithmetic::sub(&numerator, &lg_sum)
+        .and_then(|base| log_beta_apply_infinite_ladder(a, b, &base, op))
+}
+
+fn log_beta_apply_infinite_ladder<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    base: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let zero_a = full_like_scalar(a, 0.0, op)?;
+    let zero_b = full_like_scalar(b, 0.0, op)?;
+    let pos_inf_a = full_like_scalar(a, f64::INFINITY, op)?;
+    let pos_inf_b = full_like_scalar(b, f64::INFINITY, op)?;
+    let neg_inf_a = full_like_scalar(a, f64::NEG_INFINITY, op)?;
+    let neg_inf_b = full_like_scalar(b, f64::NEG_INFINITY, op)?;
+    let pos_inf = full_like_scalar(base, f64::INFINITY, op)?;
+    let neg_inf = full_like_scalar(base, f64::NEG_INFINITY, op)?;
+    let nan = full_like_scalar(base, f64::NAN, op)?;
+
+    let a_nan = BoolTensor::ne(a, a)?;
+    let b_nan = BoolTensor::ne(b, b)?;
+    let any_nan = a_nan.or(&b_nan)?;
+    let a_neg_inf = BoolTensor::eq_t(a, &neg_inf_a)?;
+    let b_neg_inf = BoolTensor::eq_t(b, &neg_inf_b)?;
+    let any_neg_inf = a_neg_inf.or(&b_neg_inf)?;
+    let a_pos_inf = BoolTensor::eq_t(a, &pos_inf_a)?;
+    let b_pos_inf = BoolTensor::eq_t(b, &pos_inf_b)?;
+    let both_pos_inf = a_pos_inf.and(&b_pos_inf)?;
+
+    let a_pos_inf_branch = {
+        let other_positive = BoolTensor::gt(b, &zero_b)?;
+        crate::grad_fns::comparison::where_bt(&other_positive, &neg_inf, &pos_inf)?
+    };
+    let b_pos_inf_branch = {
+        let other_positive = BoolTensor::gt(a, &zero_a)?;
+        crate::grad_fns::comparison::where_bt(&other_positive, &neg_inf, &pos_inf)?
+    };
+
+    let out = crate::grad_fns::comparison::where_bt(&b_pos_inf, &b_pos_inf_branch, base)?;
+    let out = crate::grad_fns::comparison::where_bt(&a_pos_inf, &a_pos_inf_branch, &out)?;
+    let out = crate::grad_fns::comparison::where_bt(&both_pos_inf, &nan, &out)?;
+    let out = crate::grad_fns::comparison::where_bt(&any_nan, &nan, &out)?;
+    crate::grad_fns::comparison::where_bt(&any_neg_inf, &pos_inf, &out)
+}
+
+fn log_beta_cuda_composed<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !cuda_binary_composed_precheck(a, b, "log_beta")? {
+        return Ok(None);
+    }
+    no_grad(|| Ok(Some(log_beta_raw_composed(a, b, "log_beta")?)))
+}
+
+fn is_non_positive_integer_cuda<T: Float>(
+    input: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<BoolTensor> {
+    let zero = full_like_scalar(input, 0.0, op)?;
+    let floor = crate::grad_fns::transcendental::floor(input)?;
+    let non_positive = BoolTensor::le(input, &zero)?;
+    let integer = BoolTensor::eq_t(input, &floor)?;
+    non_positive.and(&integer)
+}
+
+fn lgam_sgn_sign_cuda<T: Float>(
+    input: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let zero = full_like_scalar(input, 0.0, op)?;
+    let one = full_like_scalar(input, 1.0, op)?;
+    let neg_one = full_like_scalar(input, -1.0, op)?;
+    let two = full_like_scalar(input, 2.0, op)?;
+    let positive = BoolTensor::gt(input, &zero)?;
+    let floor_x = crate::grad_fns::transcendental::floor(input)?;
+    let integer = BoolTensor::eq_t(input, &floor_x)?;
+    let floor_half = crate::grad_fns::arithmetic::div(&floor_x, &two)?;
+    let floor_half = crate::grad_fns::transcendental::floor(&floor_half)?;
+    let twice_floor_half = mul_const_like(&floor_half, 2.0, op)?;
+    let parity = crate::grad_fns::arithmetic::sub(&floor_x, &twice_floor_half)?;
+    let even_floor = BoolTensor::eq_t(&parity, &zero)?;
+    let positive_or_integer = positive.or(&integer)?;
+    let positive_integer_or_even = positive_or_integer.or(&even_floor)?;
+    crate::grad_fns::comparison::where_bt(&positive_integer_or_even, &one, &neg_one)
+}
+
+fn integer_parity_sign_cuda<T: Float>(
+    input: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let zero = full_like_scalar(input, 0.0, op)?;
+    let one = full_like_scalar(input, 1.0, op)?;
+    let neg_one = full_like_scalar(input, -1.0, op)?;
+    let two = full_like_scalar(input, 2.0, op)?;
+    let floor_half = crate::grad_fns::arithmetic::div(input, &two)?;
+    let floor_half = crate::grad_fns::transcendental::floor(&floor_half)?;
+    let twice_floor_half = mul_const_like(&floor_half, 2.0, op)?;
+    let parity = crate::grad_fns::arithmetic::sub(input, &twice_floor_half)?;
+    let even = BoolTensor::eq_t(&parity, &zero)?;
+    crate::grad_fns::comparison::where_bt(&even, &one, &neg_one)
+}
+
+fn beta_negint_branch_cuda<T: Float>(
+    pole_arg: &Tensor<T>,
+    other: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let zero = full_like_scalar(other, 0.0, op)?;
+    let one = full_like_scalar(pole_arg, 1.0, op)?;
+    let pos_inf = full_like_scalar(pole_arg, f64::INFINITY, op)?;
+
+    let other_floor = crate::grad_fns::transcendental::floor(other)?;
+    let other_integer = BoolTensor::eq_t(other, &other_floor)?;
+    let other_positive = BoolTensor::gt(other, &zero)?;
+    let one_minus_pole = crate::grad_fns::arithmetic::sub(&one, pole_arg)?;
+    let limit_arg = crate::grad_fns::arithmetic::sub(&one_minus_pole, other)?;
+    let limit_positive = BoolTensor::gt(&limit_arg, &full_like_scalar(&limit_arg, 0.0, op)?)?;
+    let finite_limit = other_integer.and(&other_positive)?.and(&limit_positive)?;
+
+    let log_abs = log_beta_raw_composed(&limit_arg, other, op)?;
+    let abs_value = crate::grad_fns::transcendental::exp(&log_abs)?;
+    let sign = integer_parity_sign_cuda(other, op)?;
+    let signed_value = crate::grad_fns::arithmetic::mul(&sign, &abs_value)?;
+    crate::grad_fns::comparison::where_bt(&finite_limit, &signed_value, &pos_inf)
+}
+
+fn beta_positive_infinity_branch_cuda<T: Float>(
+    other: &Tensor<T>,
+    base: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let zero = full_like_scalar(other, 0.0, op)?;
+    let pos_inf = full_like_scalar(base, f64::INFINITY, op)?;
+    let pos_zero = full_like_scalar(base, 0.0, op)?;
+    let other_positive = BoolTensor::gt(other, &zero)?;
+
+    let other_floor = crate::grad_fns::transcendental::floor(other)?;
+    let other_integer = BoolTensor::eq_t(other, &other_floor)?;
+    let other_negative = BoolTensor::lt(other, &zero)?;
+    let other_noninteger = other_integer.not()?;
+    let negative_noninteger = other_negative.and(&other_noninteger)?;
+    let sign = lgam_sgn_sign_cuda(other, op)?;
+    let signed_inf = crate::grad_fns::arithmetic::mul(&sign, &pos_inf)?;
+    let nonpositive =
+        crate::grad_fns::comparison::where_bt(&negative_noninteger, &signed_inf, &pos_inf)?;
+    crate::grad_fns::comparison::where_bt(&other_positive, &pos_zero, &nonpositive)
+}
+
+fn beta_raw_composed<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let sum = crate::grad_fns::arithmetic::add(a, b)?;
+    let log_abs = log_beta_raw_composed(a, b, op)?;
+    let abs_value = crate::grad_fns::transcendental::exp(&log_abs)?;
+
+    let sign_a = lgam_sgn_sign_cuda(a, op)?;
+    let sign_b = lgam_sgn_sign_cuda(b, op)?;
+    let sign_sum = lgam_sgn_sign_cuda(&sum, op)?;
+    let sign_ab = crate::grad_fns::arithmetic::mul(&sign_a, &sign_b)?;
+    let sign = crate::grad_fns::arithmetic::mul(&sign_ab, &sign_sum)?;
+    let signed = crate::grad_fns::arithmetic::mul(&sign, &abs_value)?;
+
+    let a_negint = is_non_positive_integer_cuda(a, op)?;
+    let b_negint = is_non_positive_integer_cuda(b, op)?;
+    let sum_negint = is_non_positive_integer_cuda(&sum, op)?;
+    let zero = full_like_scalar(&signed, 0.0, op)?;
+    let numerator_sign = crate::grad_fns::arithmetic::mul(&sign_a, &sign_b)?;
+    let signed_zero = crate::grad_fns::arithmetic::mul(&numerator_sign, &zero)?;
+    let base = crate::grad_fns::comparison::where_bt(&sum_negint, &signed_zero, &signed)?;
+
+    let a_branch = beta_negint_branch_cuda(a, b, op)?;
+    let b_branch = beta_negint_branch_cuda(b, a, op)?;
+    let with_b = crate::grad_fns::comparison::where_bt(&b_negint, &b_branch, &base)?;
+    let finite = crate::grad_fns::comparison::where_bt(&a_negint, &a_branch, &with_b)?;
+
+    beta_apply_infinite_ladder(a, b, &finite, op)
+}
+
+fn beta_apply_infinite_ladder<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    base: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let pos_inf_a = full_like_scalar(a, f64::INFINITY, op)?;
+    let pos_inf_b = full_like_scalar(b, f64::INFINITY, op)?;
+    let neg_inf_a = full_like_scalar(a, f64::NEG_INFINITY, op)?;
+    let neg_inf_b = full_like_scalar(b, f64::NEG_INFINITY, op)?;
+    let pos_inf = full_like_scalar(base, f64::INFINITY, op)?;
+    let nan = full_like_scalar(base, f64::NAN, op)?;
+
+    let a_nan = BoolTensor::ne(a, a)?;
+    let b_nan = BoolTensor::ne(b, b)?;
+    let any_nan = a_nan.or(&b_nan)?;
+    let a_neg_inf = BoolTensor::eq_t(a, &neg_inf_a)?;
+    let b_neg_inf = BoolTensor::eq_t(b, &neg_inf_b)?;
+    let any_neg_inf = a_neg_inf.or(&b_neg_inf)?;
+    let a_pos_inf = BoolTensor::eq_t(a, &pos_inf_a)?;
+    let b_pos_inf = BoolTensor::eq_t(b, &pos_inf_b)?;
+    let both_pos_inf = a_pos_inf.and(&b_pos_inf)?;
+
+    let a_pos_inf_branch = beta_positive_infinity_branch_cuda(b, base, op)?;
+    let b_pos_inf_branch = beta_positive_infinity_branch_cuda(a, base, op)?;
+
+    let out = crate::grad_fns::comparison::where_bt(&b_pos_inf, &b_pos_inf_branch, base)?;
+    let out = crate::grad_fns::comparison::where_bt(&a_pos_inf, &a_pos_inf_branch, &out)?;
+    let out = crate::grad_fns::comparison::where_bt(&both_pos_inf, &nan, &out)?;
+    let out = crate::grad_fns::comparison::where_bt(&any_nan, &nan, &out)?;
+    crate::grad_fns::comparison::where_bt(&any_neg_inf, &pos_inf, &out)
+}
+
+fn beta_cuda_composed<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !cuda_binary_composed_precheck(a, b, "beta")? {
+        return Ok(None);
+    }
+    no_grad(|| Ok(Some(beta_raw_composed(a, b, "beta")?)))
+}
+
 #[derive(Debug)]
 struct XlogyBackward<T: Float> {
     x: Tensor<T>,
@@ -3466,8 +3724,38 @@ fn calc_igammac_f64(a: f64, x: f64) -> f64 {
 fn log_beta_scalar<T: Float>(a: T, b: T) -> T {
     let af = <T as num_traits::ToPrimitive>::to_f64(&a).unwrap_or(f64::NAN);
     let bf = <T as num_traits::ToPrimitive>::to_f64(&b).unwrap_or(f64::NAN);
-    let r = lgamma_scalar(af) + lgamma_scalar(bf) - lgamma_scalar(af + bf);
+    let r = log_beta_f64(af, bf);
     T::from(r).unwrap_or_else(|| T::from(f64::NAN).unwrap())
+}
+
+/// f64 log-beta following scipy.special.betaln, including the infinite-input
+/// limits that the raw `lgamma(a) + lgamma(b) - lgamma(a+b)` expression cannot
+/// distinguish (`inf - inf`).
+fn log_beta_f64(a: f64, b: f64) -> f64 {
+    if a == f64::NEG_INFINITY || b == f64::NEG_INFINITY {
+        return f64::INFINITY;
+    }
+    if a.is_nan() || b.is_nan() {
+        return f64::NAN;
+    }
+    if a == f64::INFINITY && b == f64::INFINITY {
+        return f64::NAN;
+    }
+    if a == f64::INFINITY {
+        return if b > 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+    }
+    if b == f64::INFINITY {
+        return if a > 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+    }
+    lgamma_scalar(a) + lgamma_scalar(b) - lgamma_scalar(a + b)
 }
 
 /// Sign of `Γ(x)` under cephes `lgam_sgn` semantics: `+1` for `x > 0` AND at
@@ -3524,8 +3812,20 @@ fn beta_negint_f64(n: f64, other: f64) -> f64 {
     reason = "exact integer-pole tests mirror cephes beta.c's `a == floor(a)` exact-equality branches"
 )]
 fn beta_f64(a: f64, b: f64) -> f64 {
+    if a == f64::NEG_INFINITY || b == f64::NEG_INFINITY {
+        return f64::INFINITY;
+    }
     if a.is_nan() || b.is_nan() {
         return f64::NAN;
+    }
+    if a == f64::INFINITY && b == f64::INFINITY {
+        return f64::NAN;
+    }
+    if a == f64::INFINITY {
+        return beta_posinf_f64(b);
+    }
+    if b == f64::INFINITY {
+        return beta_posinf_f64(a);
     }
     if a <= 0.0 && a == a.floor() {
         return beta_negint_f64(a, b);
@@ -3544,8 +3844,22 @@ fn beta_f64(a: f64, b: f64) -> f64 {
     }
     // ±1 factors, so dividing by sgn(Γ(a+b)) equals multiplying by it.
     let sign = lgam_sgn_sign_f64(a) * lgam_sgn_sign_f64(b) * lgam_sgn_sign_f64(s);
-    let y = lgamma_scalar(a) + lgamma_scalar(b) - lgamma_scalar(s);
+    let y = log_beta_f64(a, b);
     sign * y.exp()
+}
+
+#[allow(
+    clippy::float_cmp,
+    reason = "exact integer-pole test mirrors cephes beta.c branches; epsilon tests would misclassify near-pole values"
+)]
+fn beta_posinf_f64(other: f64) -> f64 {
+    if other > 0.0 {
+        return 0.0;
+    }
+    if other < 0.0 && other != other.floor() {
+        return lgam_sgn_sign_f64(other) * f64::INFINITY;
+    }
+    f64::INFINITY
 }
 
 /// Beta function `B(a, b) = sgn·exp(lnB(a, b))` — see [`beta_f64`].
@@ -4101,8 +4415,11 @@ pub fn gammaincc<T: Float>(input: &Tensor<T>, other: &Tensor<T>) -> FerrotorchRe
 /// `torch.lgamma`. The accumulation runs in f64 then narrows to `T` so the
 /// three-way lgamma subtraction does not lose bits in the f32 path.
 pub fn log_beta<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    reject_cuda_binary(a, b, "log_beta")?;
-    let output = binary_map(a, b, log_beta_scalar)?;
+    let output = if let Some(output) = log_beta_cuda_composed(a, b)? {
+        output
+    } else {
+        binary_map(a, b, log_beta_scalar)?
+    };
     finish_special_binary(output, a, b, |output| {
         Ok(Arc::new(BetaBackward {
             a: a.saved_for_backward()?,
@@ -4118,8 +4435,11 @@ pub fn log_beta<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tens
 ///
 /// Mirrors `scipy.special.beta`.
 pub fn beta<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    reject_cuda_binary(a, b, "beta")?;
-    let output = binary_map(a, b, beta_scalar)?;
+    let output = if let Some(output) = beta_cuda_composed(a, b)? {
+        output
+    } else {
+        binary_map(a, b, beta_scalar)?
+    };
     finish_special_binary(output, a, b, |output| {
         Ok(Arc::new(BetaBackward {
             a: a.saved_for_backward()?,
@@ -5795,6 +6115,46 @@ mod tests {
         );
         // B(3,2) = 1/12 -> ln(1/12).
         assert!((d[1] - (1.0f64 / 12.0).ln()).abs() < 1e-12, "got {}", d[1]);
+    }
+
+    #[test]
+    fn log_beta_and_beta_infinite_arguments_match_scipy_limits() {
+        let a = t(
+            &[
+                f64::INFINITY,
+                1.0,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::INFINITY,
+            ],
+            &[7],
+        );
+        let b = t(
+            &[1.0, f64::INFINITY, f64::INFINITY, f64::NAN, -0.5, -1.5, 0.0],
+            &[7],
+        );
+
+        let lb = log_beta(&a, &b).unwrap();
+        let beta = beta(&a, &b).unwrap();
+        let lb = lb.data().unwrap();
+        let beta = beta.data().unwrap();
+
+        assert_eq!(lb[0], f64::NEG_INFINITY, "betaln(inf, 1)");
+        assert_eq!(beta[0], 0.0, "beta(inf, 1)");
+        assert_eq!(lb[1], f64::NEG_INFINITY, "betaln(1, inf)");
+        assert_eq!(beta[1], 0.0, "beta(1, inf)");
+        assert!(lb[2].is_nan(), "betaln(inf, inf)");
+        assert!(beta[2].is_nan(), "beta(inf, inf)");
+        assert_eq!(lb[3], f64::INFINITY, "betaln(-inf, nan)");
+        assert_eq!(beta[3], f64::INFINITY, "beta(-inf, nan)");
+        assert_eq!(lb[4], f64::INFINITY, "betaln(inf, -0.5)");
+        assert_eq!(beta[4], f64::NEG_INFINITY, "beta(inf, -0.5)");
+        assert_eq!(lb[5], f64::INFINITY, "betaln(inf, -1.5)");
+        assert_eq!(beta[5], f64::INFINITY, "beta(inf, -1.5)");
+        assert_eq!(lb[6], f64::INFINITY, "betaln(inf, 0)");
+        assert_eq!(beta[6], f64::INFINITY, "beta(inf, 0)");
     }
 
     // ---------------------------------------------------------------------
