@@ -611,12 +611,9 @@ pub fn repeat<T: Float>(
 ///
 /// One differentiable composition for every pattern (see the body comment):
 /// tracked inputs receive a backward chain reaching the original leaf for
-/// Sum/Mean (any device) and Max/Min (CPU). Max/Min backward on CUDA
-/// surfaces `CummaxBackward`/`CumminBackward`'s structured
-/// `Err(NotImplementedOnCuda)` — loud, never a silent detach (tracked
-/// follow-up: #1962). Max/Min gradient ties follow cummax/cummin (full
-/// gradient to the recorded occurrence), diverging from torch `amax`/`amin`
-/// even-split ONLY on exact ties (tracked follow-up: #1963).
+/// Sum/Mean/Max/Min on CPU and CUDA. Max/Min lowers to dim-keyed
+/// `amax`/`amin`, whose backward splits gradients evenly across tied
+/// extrema just like torch/einops.
 pub fn reduce<T: Float>(
     input: &Tensor<T>,
     pattern: &str,
@@ -666,7 +663,7 @@ pub fn reduce<T: Float>(
     //   reshape(left elementary)                       — split
     //   → permute(kept-in-RIGHT-order ++ reduced)      — reorder by axis name
     //   → reshape([right_elem..., reduce_count])       — collapse reduced run
-    //   → sum_dim / sum_dim·(1/N) / cummax / cummin    — reduce trailing dim
+    //   → sum_dim / sum_dim·(1/N) / amax_dim / amin_dim — reduce trailing dim
     //   → reshape(out_shape)                           — merge groups
     //
     // Coordinate mapping is BY AXIS NAME (CORE-062 / #1756): the permutation
@@ -675,11 +672,8 @@ pub fn reduce<T: Float>(
     //
     // All steps run on the input's native device. For Mean, sum_dim is
     // followed by a scalar multiply by 1/reduce_count (`mul` is GPU-aware;
-    // `mean_dim` is not). For Max/Min, the running cummax/cummin's last slice
-    // is the global extremum; its backward (`CummaxBackward`/`CumminBackward`)
-    // routes gradients to the recorded extremum positions on CPU and returns
-    // a structured `Err(NotImplementedOnCuda)` on CUDA — loud, never a
-    // silent detach (R-LOUD-1).
+    // `mean_dim` is not). For Max/Min, dim-keyed `amax`/`amin` preserves
+    // PyTorch's even gradient split across tied extrema on both CPU and CUDA.
     // ----------------------------------------------------------------------
     let reduced_left_positions: Vec<usize> = left_names
         .iter()
@@ -743,19 +737,8 @@ pub fn reduce<T: Float>(
             let scale_t = crate::creation::scalar(n_recip)?.to(input.device())?;
             crate::grad_fns::arithmetic::mul(&summed, &scale_t)?
         }
-        EinopsReduction::Max => {
-            // The running max ends with the global max along that axis.
-            let cmax = crate::grad_fns::cumulative::cummax(&grouped, last_dim)?;
-            cmax.values
-                .narrow(right_elem_shape.len(), reduce_count - 1, 1)?
-                .squeeze_t(last_dim as isize)?
-        }
-        EinopsReduction::Min => {
-            let cmin = crate::grad_fns::cumulative::cummin(&grouped, last_dim)?;
-            cmin.values
-                .narrow(right_elem_shape.len(), reduce_count - 1, 1)?
-                .squeeze_t(last_dim as isize)?
-        }
+        EinopsReduction::Max => crate::grad_fns::reduction::amax_dim(&grouped, last_dim, false)?,
+        EinopsReduction::Min => crate::grad_fns::reduction::amin_dim(&grouped, last_dim, false)?,
     };
 
     // 5. Merge groups into the final output shape.
@@ -1038,7 +1021,7 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // GPU-aware fast-path tests (run on CPU but exercise the same code path
-    // that is taken on CUDA — verifies the view_reshape / sum_dim / cummax
+    // that is taken on CUDA — verifies the view_reshape / reduction
     // compositions are correct).
     // -----------------------------------------------------------------------
 
@@ -1102,7 +1085,7 @@ mod tests {
 
     #[test]
     fn test_reduce_max_axis_aligned_fast_path() {
-        // Reduced axis is contiguous — hits cummax fast path.
+        // Reduced axis is contiguous — hits the dim-keyed amax composition.
         let data = vec![1.0f32, 5.0, 3.0, 2.0, 4.0, 6.0];
         let t = leaf(&data, &[3, 2]);
         let r = reduce(&t, "b c -> c", EinopsReduction::Max).unwrap();

@@ -19,7 +19,7 @@
 //! | REQ-10 (chunk / split) | SHIPPED | `chunk / split` delegate to `chunk_t / split_t` (zero-copy `narrow`-style views, `SplitBackward` autograd); consumers in `ferrotorch-diffusion` (`vae_encoder.rs`, `attention.rs`). |
 //! | REQ-11 (`size` / `dim` aliases) | NOT-STARTED | aliases compile; all in-tree callers are inside `#[cfg(test)]` modules. Blocker #1222. |
 //! | REQ-12 (`print` utility) | NOT-STARTED | emits a `tracing::info!` event; the only invocation is the in-file test. Blocker #1223. |
-//! | REQ-13 (cumulative methods) | SHIPPED | `cumsum_t / cumprod_t / logcumsumexp_t` delegate to `crate::grad_fns::cumulative::*`; these methods themselves close the R-DEFER-1 consumer requirement for the previously vocabulary-only `lib.rs` re-exports of the three ops; parity `[cumsum] 32/32 / [cumprod] 80/80 / [logcumsumexp] 48/48 passed`; closes #1232. `cummax_t / cummin_t` intentionally excluded (the tuple-form callers in `einops.rs` are the existing consumer, and the underlying ops remain NOT-STARTED behind #1231). |
+//! | REQ-13 (cumulative methods) | SHIPPED | `cumsum_t / cumprod_t / cummax_t / cummin_t / logcumsumexp_t` delegate to `crate::grad_fns::cumulative::*`; these methods themselves close the R-DEFER-1 consumer requirement for the previously vocabulary-only `lib.rs` re-exports of the cumulative ops; parity `[cumsum] 32/32 / [cumprod] 80/80 / [cummax] 24/24 / [cummin] 24/24 / [logcumsumexp] 48/48 passed`. |
 
 use crate::dtype::Float;
 use crate::error::{FerrotorchError, FerrotorchResult};
@@ -328,6 +328,30 @@ impl<T: Float> Tensor<T> {
     /// (blocker #1232).
     pub fn cumprod_t(&self, dim: i64) -> FerrotorchResult<Tensor<T>> {
         crate::grad_fns::cumulative::cumprod(self, dim)
+    }
+
+    /// `torch.Tensor.cummax(dim)` — cumulative maximum values plus indices.
+    ///
+    /// Mirrors `torch.cummax(input, dim, *, out=None)` per the `torch.Tensor`
+    /// method surface and `aten/src/ATen/native/ReduceOps.cpp:860-865`.
+    /// Autograd uses the saved index tensor and upstream's
+    /// `cummaxmin_backward(grad, self, indices, dim)` rule from
+    /// `tools/autograd/derivatives.yaml:533-535`.
+    ///
+    /// ferrotorch returns [`crate::CumExtremeResult`] as the Rust equivalent
+    /// of PyTorch's `(values, indices)` namedtuple, preserving both
+    /// differentiable values and the resident `IntTensor<i64>` index result.
+    pub fn cummax_t(&self, dim: i64) -> FerrotorchResult<crate::CumExtremeResult<T>> {
+        crate::grad_fns::cumulative::cummax(self, dim)
+    }
+
+    /// `torch.Tensor.cummin(dim)` — cumulative minimum values plus indices.
+    ///
+    /// Symmetric to [`Self::cummax_t`]. Mirrors `torch.cummin(input, dim,
+    /// *, out=None)` and `aten/src/ATen/native/ReduceOps.cpp:899-904`, with
+    /// the same `cummaxmin_backward` VJP as PyTorch.
+    pub fn cummin_t(&self, dim: i64) -> FerrotorchResult<crate::CumExtremeResult<T>> {
+        crate::grad_fns::cumulative::cummin(self, dim)
     }
 
     /// `torch.Tensor.logcumsumexp(dim)` — numerically stable
@@ -2372,6 +2396,66 @@ mod tests {
         for i in 0..3 {
             assert_eq!(m[i], f[i], "cumprod_t and free fn disagree at {i}");
         }
+    }
+
+    #[test]
+    // reason: cummax/cummin of small exact floats has bit-exact values.
+    // Indices are integer identity data, and the tie cases below are copied
+    // from PyTorch's documented later-index cumulative extrema semantics:
+    // `std::greater_equal` / `std::less_equal` in ReduceOps.cpp.
+    #[allow(clippy::float_cmp)]
+    fn test_method_cummax_cummin_t_values_indices_and_backward_ties() {
+        let max_input = Tensor::from_storage(
+            TensorStorage::cpu(vec![1.0f32, 3.0, 3.0, 2.0]),
+            vec![4],
+            true,
+        )
+        .unwrap();
+        let max_method = max_input.cummax_t(0).unwrap();
+        let max_free = crate::grad_fns::cumulative::cummax(&max_input, 0).unwrap();
+        assert_eq!(max_method.values.data().unwrap(), &[1.0, 3.0, 3.0, 3.0]);
+        assert_eq!(max_method.indices_tensor.data().unwrap(), &[0, 1, 2, 2]);
+        assert_eq!(
+            max_method.values.data().unwrap(),
+            max_free.values.data().unwrap()
+        );
+        assert_eq!(
+            max_method.indices_tensor.data().unwrap(),
+            max_free.indices_tensor.data().unwrap()
+        );
+
+        crate::grad_fns::reduction::sum(&max_method.values)
+            .unwrap()
+            .backward()
+            .unwrap();
+        let max_grad = max_input.grad().unwrap().expect("cummax_t grad");
+        assert_eq!(max_grad.data().unwrap(), &[1.0, 1.0, 2.0, 0.0]);
+
+        let min_input = Tensor::from_storage(
+            TensorStorage::cpu(vec![5.0f32, 2.0, 2.0, 3.0]),
+            vec![4],
+            true,
+        )
+        .unwrap();
+        let min_method = min_input.cummin_t(0).unwrap();
+        let min_free = crate::grad_fns::cumulative::cummin(&min_input, 0).unwrap();
+        assert_eq!(min_method.values.data().unwrap(), &[5.0, 2.0, 2.0, 2.0]);
+        assert_eq!(min_method.indices_tensor.data().unwrap(), &[0, 1, 2, 2]);
+        assert_eq!(
+            min_method.values.data().unwrap(),
+            min_free.values.data().unwrap()
+        );
+        assert_eq!(
+            min_method.indices_tensor.data().unwrap(),
+            min_free.indices_tensor.data().unwrap()
+        );
+
+        crate::grad_fns::reduction::sum(&min_method.values)
+            .unwrap()
+            .backward()
+            .unwrap();
+        let min_grad = min_input.grad().unwrap().expect("cummin_t grad");
+        assert_eq!(min_grad.data().unwrap(), &[1.0, 1.0, 2.0, 0.0]);
     }
 
     #[test]

@@ -4343,9 +4343,7 @@ fn amin_amax_dim_backward<T: Float>(
     dim: usize,
     keepdim: bool,
 ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-    let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
-    let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
-    if input.is_cuda() && (is_f32 || is_f64) {
+    if input.is_cuda() {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let grad_output = if grad_output.is_cuda() {
@@ -4353,31 +4351,44 @@ fn amin_amax_dim_backward<T: Float>(
         } else {
             grad_output.to(input.device())?.contiguous()?
         };
-        let handle = if is_f32 {
-            backend.extreme_axis_backward_f32(
+        let handle = match T::dtype() {
+            DType::F32 => backend.extreme_axis_backward_f32(
                 input.gpu_handle()?,
                 result.gpu_handle()?,
                 grad_output.gpu_handle()?,
                 input.shape(),
                 dim,
-            )?
-        } else {
-            backend.extreme_axis_backward_f64(
+            )?,
+            DType::F64 => backend.extreme_axis_backward_f64(
                 input.gpu_handle()?,
                 result.gpu_handle()?,
                 grad_output.gpu_handle()?,
                 input.shape(),
                 dim,
-            )?
+            )?,
+            DType::F16 => backend.extreme_axis_backward_f16(
+                input.gpu_handle()?,
+                result.gpu_handle()?,
+                grad_output.gpu_handle()?,
+                input.shape(),
+                dim,
+            )?,
+            DType::BF16 => backend.extreme_axis_backward_bf16(
+                input.gpu_handle()?,
+                result.gpu_handle()?,
+                grad_output.gpu_handle()?,
+                input.shape(),
+                dim,
+            )?,
+            _ => {
+                return Err(FerrotorchError::NotImplementedOnCuda {
+                    op: "amin/amax_dim backward",
+                });
+            }
         };
         let grad_input =
             Tensor::from_storage(TensorStorage::gpu(handle), input.shape().to_vec(), false)?;
         return Ok(vec![Some(grad_input)]);
-    }
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda {
-            op: "amin/amax_dim backward",
-        });
     }
     let input_data = input.data_vec()?;
     let result_data = result.data()?;
@@ -4559,10 +4570,7 @@ pub fn amin_dim<T: Float>(
     }
     let norm_dim = normalize_reduction_dim(dim, ndim, "amin_dim")?;
     ensure_value_selecting_dim_non_empty("amin", norm_dim, input.shape()[norm_dim])?;
-    let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
-    let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
-
-    if input.is_cuda() && (is_f32 || is_f64) {
+    if input.is_cuda() {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let input = input.contiguous()?;
@@ -4572,10 +4580,14 @@ pub fn amin_dim<T: Float>(
         } else {
             out_shape.remove(norm_dim);
         }
-        let handle = if is_f32 {
-            backend.min_axis_f32(input.gpu_handle()?, input.shape(), norm_dim)?
-        } else {
-            backend.min_axis_f64(input.gpu_handle()?, input.shape(), norm_dim)?
+        let handle = match T::dtype() {
+            DType::F32 => backend.min_axis_f32(input.gpu_handle()?, input.shape(), norm_dim)?,
+            DType::F64 => backend.min_axis_f64(input.gpu_handle()?, input.shape(), norm_dim)?,
+            DType::F16 => backend.min_axis_f16(input.gpu_handle()?, input.shape(), norm_dim)?,
+            DType::BF16 => backend.min_axis_bf16(input.gpu_handle()?, input.shape(), norm_dim)?,
+            _ => {
+                return Err(FerrotorchError::NotImplementedOnCuda { op: "amin_dim" });
+            }
         };
         let compact_result =
             Tensor::from_storage(TensorStorage::gpu(handle), out_shape.clone(), false)?;
@@ -4590,9 +4602,6 @@ pub fn amin_dim<T: Float>(
             return Tensor::from_operation(s, sh, grad_fn);
         }
         return Ok(compact_result);
-    }
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "amin_dim" });
     }
 
     let (result, norm_dim, out_shape) = amin_amax_dim_forward(input, dim, keepdim, false)?;
@@ -4623,10 +4632,7 @@ pub fn amax_dim<T: Float>(
     }
     let norm_dim = normalize_reduction_dim(dim, ndim, "amax_dim")?;
     ensure_value_selecting_dim_non_empty("amax", norm_dim, input.shape()[norm_dim])?;
-    let is_f32 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f32>();
-    let is_f64 = std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>();
-
-    if input.is_cuda() && (is_f32 || is_f64) {
+    if input.is_cuda() {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let input = input.contiguous()?;
@@ -4636,10 +4642,14 @@ pub fn amax_dim<T: Float>(
         } else {
             out_shape.remove(norm_dim);
         }
-        let handle = if is_f32 {
-            backend.max_axis_f32(input.gpu_handle()?, input.shape(), norm_dim)?
-        } else {
-            backend.max_axis_f64(input.gpu_handle()?, input.shape(), norm_dim)?
+        let handle = match T::dtype() {
+            DType::F32 => backend.max_axis_f32(input.gpu_handle()?, input.shape(), norm_dim)?,
+            DType::F64 => backend.max_axis_f64(input.gpu_handle()?, input.shape(), norm_dim)?,
+            DType::F16 => backend.max_axis_f16(input.gpu_handle()?, input.shape(), norm_dim)?,
+            DType::BF16 => backend.max_axis_bf16(input.gpu_handle()?, input.shape(), norm_dim)?,
+            _ => {
+                return Err(FerrotorchError::NotImplementedOnCuda { op: "amax_dim" });
+            }
         };
         let compact_result =
             Tensor::from_storage(TensorStorage::gpu(handle), out_shape.clone(), false)?;
@@ -4654,9 +4664,6 @@ pub fn amax_dim<T: Float>(
             return Tensor::from_operation(s, sh, grad_fn);
         }
         return Ok(compact_result);
-    }
-    if input.is_cuda() {
-        return Err(FerrotorchError::NotImplementedOnCuda { op: "amax_dim" });
     }
 
     let (result, norm_dim, out_shape) = amin_amax_dim_forward(input, dim, keepdim, true)?;
@@ -4678,8 +4685,7 @@ pub fn amax_dim<T: Float>(
 /// Helper: 0-D scalar passes through `amin`/`amax_dim` unchanged
 /// (matches torch's `amin(scalar, dim=0)` returning the scalar).
 fn grad_clone<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let data = input.data()?.to_vec();
-    Tensor::from_storage(TensorStorage::cpu(data), input.shape().to_vec(), false)
+    crate::grad_fns::shape::reshape(input, &[])
 }
 
 // ---------------------------------------------------------------------------

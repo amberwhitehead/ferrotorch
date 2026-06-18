@@ -38,7 +38,7 @@
 //! | REQ-2 (unary activations) | SHIPPED | `pub fn gpu_silu_bf16 / gpu_relu_bf16 / gpu_fatrelu_bf16 / gpu_gelu_bf16 / gpu_exp_bf16 / gpu_log_bf16 / gpu_tanh_bf16 / gpu_sigmoid_bf16 / gpu_sqrt_bf16 / gpu_neg_bf16 in bf16.rs`; consumer the bf16 arm of activation/arithmetic dispatchers in `backend_impl.rs` |
 //! | REQ-3 (`gpu_scale_bf16` / `gpu_fill_bf16`) | SHIPPED | `pub fn gpu_scale_bf16 / gpu_fill_bf16 in bf16.rs`; consumers `CudaBackendImpl::scale_bf16 / fill_bf16_bf16 in backend_impl.rs` |
 //! | REQ-4 (broadcast binary) | SHIPPED | `pub fn gpu_broadcast_add_bf16 / gpu_broadcast_sub_bf16 / gpu_broadcast_mul_bf16 / gpu_broadcast_div_bf16 in bf16.rs`; consumer the bf16 broadcast arms in `backend_impl.rs` |
-//! | REQ-5 (reductions) | SHIPPED | `pub fn gpu_sum_bf16 / gpu_mean_bf16 / gpu_prod_bf16 / gpu_sum_axis_bf16_bf16 / gpu_mean_axis_bf16_bf16 / gpu_prod_axis_bf16 in bf16.rs`; consumer bf16 reduction arms in `backend_impl.rs` |
+//! | REQ-5 (reductions) | SHIPPED | `pub fn gpu_sum_bf16 / gpu_mean_bf16 / gpu_prod_bf16 / gpu_sum_axis_bf16_bf16 / gpu_mean_axis_bf16_bf16 / gpu_prod_axis_bf16 / gpu_extreme_axis_bf16 / gpu_extreme_axis_backward_bf16 in bf16.rs`; consumer bf16 reduction arms in `backend_impl.rs` |
 //! | REQ-6 (norm/softmax) | SHIPPED | `pub fn gpu_layernorm_bf16 / gpu_rmsnorm_bf16 / gpu_softmax_bf16 in bf16.rs`; consumer bf16 softmax/layernorm dispatchers in `backend_impl.rs` (rmsnorm via the bf16-dtype rmsnorm arm) |
 //! | REQ-7 (attention building blocks) | SHIPPED | `pub fn gpu_embedding_gather_bf16 / gpu_rope_half_bf16 / gpu_transpose_to_heads_bf16 / gpu_transpose_from_heads_bf16 / gpu_repeat_kv_bf16 / gpu_causal_mask_bf16 in bf16.rs` (six working primitives); consumer `fn forward_core in ferrotorch-llama/src/gpu.rs` — the bf16 Llama forward path uses all six primitives every token-pass |
 //! | REQ-7b (cross-dtype bf16→f32 embedding gather) | NOT-STARTED | `pub fn gpu_embedding_gather_bf16_to_f32 in bf16.rs` exists as vocabulary but workspace-wide audit (`ferrotorch-gpu/tests/divergence_bf16_req7_embedding_gather_to_f32.rs`) finds ZERO non-test consumers. Blocked on #1361 |
@@ -5107,6 +5107,212 @@ DONE:
 }
 ";
 
+const EXTREME_AXIS_BF16_PTX: &str = "\
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry extreme_axis_bf16_kernel(
+    .param .u64 input_ptr,
+    .param .u64 output_ptr,
+    .param .u32 outer,
+    .param .u32 axis_size,
+    .param .u32 inner,
+    .param .u32 total_output,
+    .param .u32 is_max
+) {
+    .reg .u32 %r_tid, %bid, %bdim, %outer_r, %axis_r, %inner_r, %total_r, %is_max_r;
+    .reg .u32 %oi, %ii, %k, %base, %idx, %bits, %round, %lsb;
+    .reg .u64 %input, %out, %off, %addr;
+    .reg .b16 %raw, %zero16;
+    .reg .f32 %best, %val;
+    .reg .pred %p, %lp, %other_nan, %best_nan, %best_ok, %ismaxp, %gt, %lt, %cmp, %take;
+
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %out, [output_ptr];
+    ld.param.u32 %outer_r, [outer];
+    ld.param.u32 %axis_r, [axis_size];
+    ld.param.u32 %inner_r, [inner];
+    ld.param.u32 %total_r, [total_output];
+    ld.param.u32 %is_max_r, [is_max];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %r_tid, %tid.x;
+    mad.lo.u32 %r_tid, %bid, %bdim, %r_tid;
+
+    setp.ge.u32 %p, %r_tid, %total_r;
+    @%p bra DONE;
+
+    div.u32 %oi, %r_tid, %inner_r;
+    rem.u32 %ii, %r_tid, %inner_r;
+    mul.lo.u32 %base, %oi, %axis_r;
+    mul.lo.u32 %base, %base, %inner_r;
+    add.u32 %base, %base, %ii;
+
+    mov.b16 %zero16, 0;
+    cvt.u64.u32 %off, %base;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %input, %off;
+    ld.global.b16 %raw, [%addr];
+    mov.b32 %bits, {%zero16, %raw};
+    mov.b32 %best, %bits;
+
+    mov.u32 %k, 1;
+LOOP:
+    setp.ge.u32 %lp, %k, %axis_r;
+    @%lp bra STORE;
+
+    mul.lo.u32 %idx, %k, %inner_r;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %input, %off;
+    ld.global.b16 %raw, [%addr];
+    mov.b32 %bits, {%zero16, %raw};
+    mov.b32 %val, %bits;
+
+    setp.nan.f32 %other_nan, %val, %val;
+    setp.nan.f32 %best_nan, %best, %best;
+    not.pred %best_ok, %best_nan;
+    setp.ne.u32 %ismaxp, %is_max_r, 0;
+    setp.gt.f32 %gt, %val, %best;
+    setp.lt.f32 %lt, %val, %best;
+    and.pred %gt, %gt, %ismaxp;
+    not.pred %ismaxp, %ismaxp;
+    and.pred %lt, %lt, %ismaxp;
+    or.pred %cmp, %gt, %lt;
+    and.pred %cmp, %cmp, %best_ok;
+    or.pred %take, %other_nan, %cmp;
+    @%take mov.f32 %best, %val;
+
+    add.u32 %k, %k, 1;
+    bra LOOP;
+
+STORE:
+    mov.b32 %bits, %best;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    cvt.u64.u32 %off, %r_tid;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %out, %off;
+    st.global.u16 [%addr], %bits;
+
+DONE:
+    ret;
+}
+
+.visible .entry extreme_axis_backward_bf16_kernel(
+    .param .u64 input_ptr,
+    .param .u64 result_ptr,
+    .param .u64 grad_ptr,
+    .param .u64 out_ptr,
+    .param .u32 outer,
+    .param .u32 axis_size,
+    .param .u32 inner,
+    .param .u32 total_input
+) {
+    .reg .u32 %t, %bid, %bdim, %tid_r, %outer_r, %axis_r, %inner_r, %total_r;
+    .reg .u32 %slice_extent, %oi, %within, %di, %ii, %slice_idx, %base, %k, %idx, %count_u;
+    .reg .u32 %bits, %round, %lsb;
+    .reg .u64 %input, %res, %grad, %out, %off, %addr, %addr_out;
+    .reg .b16 %raw, %zero16;
+    .reg .f32 %target, %val, %go, %count_f, %zero, %scale, %result;
+    .reg .pred %p, %lp, %match, %zero_count;
+
+    ld.param.u64 %input, [input_ptr];
+    ld.param.u64 %res, [result_ptr];
+    ld.param.u64 %grad, [grad_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u32 %outer_r, [outer];
+    ld.param.u32 %axis_r, [axis_size];
+    ld.param.u32 %inner_r, [inner];
+    ld.param.u32 %total_r, [total_input];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %tid_r, %tid.x;
+    mad.lo.u32 %t, %bid, %bdim, %tid_r;
+
+    setp.ge.u32 %p, %t, %total_r;
+    @%p bra BWD_DONE;
+
+    mul.lo.u32 %slice_extent, %axis_r, %inner_r;
+    div.u32 %oi, %t, %slice_extent;
+    rem.u32 %within, %t, %slice_extent;
+    div.u32 %di, %within, %inner_r;
+    rem.u32 %ii, %within, %inner_r;
+    mad.lo.u32 %slice_idx, %oi, %inner_r, %ii;
+    mul.lo.u32 %base, %oi, %slice_extent;
+    add.u32 %base, %base, %ii;
+
+    mov.b16 %zero16, 0;
+    cvt.u64.u32 %off, %slice_idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %res, %off;
+    ld.global.b16 %raw, [%addr];
+    mov.b32 %bits, {%zero16, %raw};
+    mov.b32 %target, %bits;
+    add.u64 %addr, %grad, %off;
+    ld.global.b16 %raw, [%addr];
+    mov.b32 %bits, {%zero16, %raw};
+    mov.b32 %go, %bits;
+
+    mov.u32 %count_u, 0;
+    mov.u32 %k, 0;
+COUNT_LOOP:
+    setp.ge.u32 %lp, %k, %axis_r;
+    @%lp bra COUNT_DONE;
+
+    mul.lo.u32 %idx, %k, %inner_r;
+    add.u32 %idx, %base, %idx;
+    cvt.u64.u32 %off, %idx;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %input, %off;
+    ld.global.b16 %raw, [%addr];
+    mov.b32 %bits, {%zero16, %raw};
+    mov.b32 %val, %bits;
+    setp.eq.f32 %match, %val, %target;
+    @%match add.u32 %count_u, %count_u, 1;
+
+    add.u32 %k, %k, 1;
+    bra COUNT_LOOP;
+
+COUNT_DONE:
+    mov.f32 %zero, 0f00000000;
+    setp.eq.u32 %zero_count, %count_u, 0;
+    cvt.rn.f32.u32 %count_f, %count_u;
+    div.rn.f32 %scale, %go, %count_f;
+    @%zero_count div.rn.f32 %scale, %zero, %zero;
+
+    cvt.u64.u32 %off, %t;
+    shl.b64 %off, %off, 1;
+    add.u64 %addr, %input, %off;
+    ld.global.b16 %raw, [%addr];
+    mov.b32 %bits, {%zero16, %raw};
+    mov.b32 %val, %bits;
+    setp.eq.f32 %match, %val, %target;
+    mov.f32 %result, %zero;
+    @%match mov.f32 %result, %scale;
+    @%zero_count mov.f32 %result, %scale;
+
+    mov.b32 %bits, %result;
+    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %bits, %round, 16;
+    add.u64 %addr_out, %out, %off;
+    st.global.u16 [%addr_out], %bits;
+
+BWD_DONE:
+    ret;
+}
+";
+
 fn validate_prod_axis_dims_bf16(
     op: &'static str,
     input_len: usize,
@@ -5143,6 +5349,67 @@ fn validate_prod_axis_dims_bf16(
             expected: vec![total_output],
             got: vec![len],
         });
+    }
+    Ok((total_input, total_output))
+}
+
+fn validate_axis_extreme_dims_bf16(
+    op: &'static str,
+    input_len: usize,
+    result_len: usize,
+    grad_output_len: Option<usize>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+) -> GpuResult<(usize, usize)> {
+    if axis_size == 0 {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![1],
+            got: vec![axis_size],
+        });
+    }
+    let total_input = crate::shape_math::checked_mul3(outer, axis_size, inner, op)?;
+    let total_output = outer.checked_mul(inner).ok_or(GpuError::ShapeMismatch {
+        op,
+        expected: vec![outer, inner],
+        got: vec![usize::MAX],
+    })?;
+    if input_len != total_input {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![total_input],
+            got: vec![input_len],
+        });
+    }
+    if result_len != total_output {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![total_output],
+            got: vec![result_len],
+        });
+    }
+    if let Some(len) = grad_output_len
+        && len != total_output
+    {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![total_output],
+            got: vec![len],
+        });
+    }
+    for (name, value) in [
+        ("outer", outer),
+        ("axis_size", axis_size),
+        ("inner", inner),
+        ("input", total_input),
+        ("result", total_output),
+    ] {
+        if value > u32::MAX as usize {
+            return Err(GpuError::InvalidState {
+                message: format!("{op}: {name}={value} exceeds CUDA kernel u32 indexing limit"),
+            });
+        }
     }
     Ok((total_input, total_output))
 }
@@ -5263,6 +5530,136 @@ pub fn gpu_mean_axis_bf16_bf16(
             .arg(&axis_u32)
             .arg(&inner_u32)
             .arg(&do_mean)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Axis `amin`/`amax`: bf16 [outer, axis, inner] -> bf16 [outer, inner].
+/// Comparisons are performed in f32 registers with PyTorch NaN propagation.
+pub fn gpu_extreme_axis_bf16(
+    a: &cudarc::driver::CudaSlice<u16>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    find_max: bool,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let expected_result_len = outer.saturating_mul(inner);
+    let (_, total) = validate_axis_extreme_dims_bf16(
+        "extreme_axis_bf16",
+        a.len(),
+        expected_result_len,
+        None,
+        outer,
+        axis_size,
+        inner,
+    )?;
+    let stream = device.stream();
+    if total == 0 {
+        return Ok(stream.alloc_zeros::<u16>(0)?);
+    }
+    let ctx = device.context();
+    let f = get_or_compile(
+        ctx,
+        EXTREME_AXIS_BF16_PTX,
+        "extreme_axis_bf16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "extreme_axis_bf16_kernel",
+        source: e,
+    })?;
+    let mut out = stream.alloc_zeros::<u16>(total)?;
+    let cfg = launch_1d(total);
+    let outer_u32 = outer as u32;
+    let axis_u32 = axis_size as u32;
+    let inner_u32 = inner as u32;
+    let total_u32 = total as u32;
+    let is_max = u32::from(find_max);
+    // SAFETY:
+    // - `f` is `extreme_axis_bf16_kernel` with args
+    //   (input, output, outer, axis_size, inner, total_output, is_max).
+    // - `validate_axis_extreme_dims_bf16` proves the input is exactly
+    //   `[outer, axis_size, inner]`, `axis_size > 0`, and all indices fit
+    //   the kernel's u32 arithmetic.
+    // - `out` is a fresh `[outer, inner]` bf16 allocation; each thread writes
+    //   one output element.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a)
+            .arg(&mut out)
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
+            .arg(&is_max)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Backward for bf16 axis `amin`/`amax`.
+///
+/// The saved per-slice result and upstream gradient are `[outer, inner]`;
+/// each tied extremum receives `grad / count`, matching torch `amin`/`amax`.
+pub fn gpu_extreme_axis_backward_bf16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    result: &cudarc::driver::CudaSlice<u16>,
+    grad_output: &cudarc::driver::CudaSlice<u16>,
+    outer: usize,
+    axis_size: usize,
+    inner: usize,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaSlice<u16>> {
+    let (total_input, _) = validate_axis_extreme_dims_bf16(
+        "extreme_axis_backward_bf16",
+        input.len(),
+        result.len(),
+        Some(grad_output.len()),
+        outer,
+        axis_size,
+        inner,
+    )?;
+    let stream = device.stream();
+    if total_input == 0 {
+        return Ok(stream.alloc_zeros::<u16>(0)?);
+    }
+    let ctx = device.context();
+    let f = get_or_compile(
+        ctx,
+        EXTREME_AXIS_BF16_PTX,
+        "extreme_axis_backward_bf16_kernel",
+        device.ordinal() as u32,
+    )
+    .map_err(|e| GpuError::PtxCompileFailed {
+        kernel: "extreme_axis_backward_bf16_kernel",
+        source: e,
+    })?;
+    let mut out = stream.alloc_zeros::<u16>(total_input)?;
+    let cfg = launch_1d(total_input);
+    let outer_u32 = outer as u32;
+    let axis_u32 = axis_size as u32;
+    let inner_u32 = inner as u32;
+    let total_u32 = total_input as u32;
+    // SAFETY:
+    // - `f` is `extreme_axis_backward_bf16_kernel` with args
+    //   (input, result, grad_output, grad_input, outer, axis, inner, total).
+    // - Validation proves `[outer, axis, inner]` input and `[outer, inner]`
+    //   result/grad buffers. The kernel writes one input-position gradient.
+    // - The output allocation is fresh and non-aliased with all inputs.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(input)
+            .arg(result)
+            .arg(grad_output)
+            .arg(&mut out)
+            .arg(&outer_u32)
+            .arg(&axis_u32)
+            .arg(&inner_u32)
+            .arg(&total_u32)
             .launch(cfg)?;
     }
     Ok(out)

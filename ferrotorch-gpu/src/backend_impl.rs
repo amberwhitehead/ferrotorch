@@ -10292,6 +10292,80 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
+    fn min_axis_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        shape: &[usize],
+        axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        if axis >= shape.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("min_axis_bf16: axis {axis} out of bounds for shape {shape:?}"),
+            });
+        }
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
+        let axis_size = shape[axis];
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_extreme_axis_bf16(buf, outer, axis_size, inner, false, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn max_axis_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        shape: &[usize],
+        axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        if axis >= shape.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("max_axis_bf16: axis {axis} out of bounds for shape {shape:?}"),
+            });
+        }
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
+        let axis_size = shape[axis];
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
+        let buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::bf16::gpu_extreme_axis_bf16(buf, outer, axis_size, inner, true, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn extreme_axis_backward_bf16(
+        &self,
+        input: &GpuBufferHandle,
+        result: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+        shape: &[usize],
+        axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        if axis >= shape.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "extreme_axis_backward_bf16: axis {axis} out of bounds for shape {shape:?}"
+                ),
+            });
+        }
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
+        let axis_size = shape[axis];
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
+        let input_buf = Self::unwrap_buffer_bf16(input)?;
+        let result_buf = Self::unwrap_buffer_bf16(result)?;
+        let grad_buf = Self::unwrap_buffer_bf16(grad_output)?;
+        let dev = self.device(input.device_ordinal())?;
+        let out = crate::bf16::gpu_extreme_axis_backward_bf16(
+            input_buf, result_buf, grad_buf, outer, axis_size, inner, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(out, input.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
     fn prod_axis_bf16_bf16(
         &self,
         a: &GpuBufferHandle,
@@ -10814,6 +10888,80 @@ impl GpuBackend for CudaBackendImpl {
         let result = crate::f16::gpu_mean_axis_f16(buf, outer, axis_size, inner, dev)
             .map_err(Self::map_gpu_err)?;
         Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn min_axis_f16(
+        &self,
+        a: &GpuBufferHandle,
+        shape: &[usize],
+        axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        if axis >= shape.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("min_axis_f16: axis {axis} out of bounds for shape {shape:?}"),
+            });
+        }
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
+        let axis_size = shape[axis];
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_extreme_axis_f16(buf, outer, axis_size, inner, false, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn max_axis_f16(
+        &self,
+        a: &GpuBufferHandle,
+        shape: &[usize],
+        axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        if axis >= shape.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("max_axis_f16: axis {axis} out of bounds for shape {shape:?}"),
+            });
+        }
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
+        let axis_size = shape[axis];
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
+        let buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(a.device_ordinal())?;
+        let result = crate::f16::gpu_extreme_axis_f16(buf, outer, axis_size, inner, true, dev)
+            .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(result, a.device_ordinal()))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn extreme_axis_backward_f16(
+        &self,
+        input: &GpuBufferHandle,
+        result: &GpuBufferHandle,
+        grad_output: &GpuBufferHandle,
+        shape: &[usize],
+        axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        if axis >= shape.len() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "extreme_axis_backward_f16: axis {axis} out of bounds for shape {shape:?}"
+                ),
+            });
+        }
+        let outer: usize = crate::shape_math::numel(&shape[..axis]);
+        let axis_size = shape[axis];
+        let inner: usize = crate::shape_math::numel(&shape[axis + 1..]);
+        let input_buf = Self::unwrap_buffer_f16(input)?;
+        let result_buf = Self::unwrap_buffer_f16(result)?;
+        let grad_buf = Self::unwrap_buffer_f16(grad_output)?;
+        let dev = self.device(input.device_ordinal())?;
+        let out = crate::f16::gpu_extreme_axis_backward_f16(
+            input_buf, result_buf, grad_buf, outer, axis_size, inner, dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(out, input.device_ordinal()))
     }
 
     #[cfg(feature = "cuda")]

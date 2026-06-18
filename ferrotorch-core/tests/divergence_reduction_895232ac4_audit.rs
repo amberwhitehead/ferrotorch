@@ -116,14 +116,9 @@ fn divergence_argmin_dim_nan_propagation_per_slice() {
 //   torch.amin(torch.tensor([[1.0, nan, 3.0], [4.0, 5.0, 6.0]]), dim=1)
 //      == [nan, 4.0]
 //   torch.amax(...) == [nan, 6.0]
-// ferrotorch (reduction.rs `amin_amax_dim_forward`): `best = in_data[base]`,
-// then `take = v < best` for each v. If best is NaN (data[0]), NaN > NaN is
-// false, never replaced; matches upstream IFF NaN is in position 0. But
-// when NaN is in position 1 with data[0]=1.0, ferrotorch keeps 1.0 (NaN<1.0
-// is false), losing the NaN.
-//
-// The design doc admits this divergence for the FULL-reduction amin/amax
-// (REQ-4) but the new amin_dim / amax_dim ships the SAME bug per-slice.
+// Historical audit note: this used to catch a per-slice NaN propagation bug
+// in `amin_dim` / `amax_dim`. It remains as a regression oracle: NaN in any
+// reduced position must poison the slice, not only NaN at position 0.
 // ============================================================================
 
 #[test]

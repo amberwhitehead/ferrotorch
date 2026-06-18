@@ -129,10 +129,10 @@ directly outside `#[cfg(test)]`):
   `crate::grad_fns::reduction::sum_dim(&view, 1, false)?`
 - `ferrotorch-core/src/einops.rs:791` —
   `crate::grad_fns::arithmetic::mul(&summed, &scale_t)?`
-- `ferrotorch-core/src/einops.rs:796` —
-  `crate::grad_fns::cumulative::cummax(&view, 1)?`
-- `ferrotorch-core/src/einops.rs:802` —
-  `crate::grad_fns::cumulative::cummin(&view, 1)?`
+- `ferrotorch-core/src/methods.rs` —
+  `Tensor::cummax_t` delegates to `crate::grad_fns::cumulative::cummax`
+- `ferrotorch-core/src/methods.rs` —
+  `Tensor::cummin_t` delegates to `crate::grad_fns::cumulative::cummin`
 - `ferrotorch-core/src/meta_propagate.rs` —
   `use crate::grad_fns::arithmetic::{add, mul, neg, sqrt}`
 - `ferrotorch-core/src/methods.rs:707` and `:715` —
@@ -218,5 +218,5 @@ Both should pass on `mod.rs` trivially (no executable code).
 
 | REQ | Status | Evidence |
 |---|---|---|
-| REQ-1 | SHIPPED | impl: the 11 `pub mod <name>;` declarations at `ferrotorch-core/src/grad_fns/mod.rs` (lines 1-11) declare every per-area submodule and make `crate::grad_fns::<area>::<op>` reachable. Non-test production consumers exercising the re-export surface include `add in ferrotorch-core/src/vmap.rs` (`use crate::grad_fns::arithmetic::add`), `cummax in ferrotorch-core/src/einops.rs` (`crate::grad_fns::cumulative::cummax(&view, 1)?`), `add in ferrotorch-core/src/meta_propagate.rs` (`use crate::grad_fns::arithmetic::{add, mul, neg, sqrt}`), `add in ferrotorch-core/src/meta_propagate.rs` (`use crate::grad_fns::activation::{gelu, relu, sigmoid, silu, softmax, tanh}`), `add in ferrotorch-core/src/tensor.rs` (`crate::grad_fns::indexing::masked_fill_bt(self, mask, value)`), `masked_fill_bt in ferrotorch-core/src/tensor.rs` (`use crate::grad_fns::shape::FlattenBackward`), `add in ferrotorch-core/src/autograd/grad_penalty.rs` (multiple `arithmetic::{pow, sqrt, sub, mul}` + `reduction::sum` calls), and `add in ferrotorch-core/src/ops_trait.rs` (`use crate::grad_fns::arithmetic` powering the `let c = &a + &b` operator-overload surface). No parity-sweep op is owned at this level (route's `parity_ops` field is empty). |
+| REQ-1 | SHIPPED | impl: the 11 `pub mod <name>;` declarations at `ferrotorch-core/src/grad_fns/mod.rs` (lines 1-11) declare every per-area submodule and make `crate::grad_fns::<area>::<op>` reachable. Non-test production consumers exercising the re-export surface include `add in ferrotorch-core/src/vmap.rs` (`use crate::grad_fns::arithmetic::add`), `cummax_t / cummin_t in ferrotorch-core/src/methods.rs` (delegating to `crate::grad_fns::cumulative::{cummax, cummin}`), `add in ferrotorch-core/src/meta_propagate.rs` (`use crate::grad_fns::arithmetic::{add, mul, neg, sqrt}`), `add in ferrotorch-core/src/meta_propagate.rs` (`use crate::grad_fns::activation::{gelu, relu, sigmoid, silu, softmax, tanh}`), `add in ferrotorch-core/src/tensor.rs` (`crate::grad_fns::indexing::masked_fill_bt(self, mask, value)`), `masked_fill_bt in ferrotorch-core/src/tensor.rs` (`use crate::grad_fns::shape::FlattenBackward`), `add in ferrotorch-core/src/autograd/grad_penalty.rs` (multiple `arithmetic::{pow, sqrt, sub, mul}` + `reduction::sum` calls), and `add in ferrotorch-core/src/ops_trait.rs` (`use crate::grad_fns::arithmetic` powering the `let c = &a + &b` operator-overload surface). No parity-sweep op is owned at this level (route's `parity_ops` field is empty). |
 | REQ-2 | SHIPPED | impl: the per-area split is enforced by file structure — each of the 11 submodules has a sibling design doc under `.design/ferrotorch-core/grad_fns/` (`activation.md`, `arithmetic.md`, `comparison.md`, `cumulative.md`, `fft.md`, `indexing.md`, `linalg.md`, `quantize_grad.md`, `reduction.md`, `shape.md`, `transcendental.md`) and each design doc names its specific upstream `aten/src/ATen/native/<file>.cpp` translation unit(s) in its `upstream-paths:` frontmatter. The split is auditable: changing `mod.rs` to add or drop a `pub mod` requires authoring or retiring the matching design doc and route, which is the structural signal that the area surface has changed. Non-test production consumer: every consumer cited under REQ-1 implicitly relies on this split being stable — a renamed or merged area would break `use crate::grad_fns::<area>::*` at every site. |

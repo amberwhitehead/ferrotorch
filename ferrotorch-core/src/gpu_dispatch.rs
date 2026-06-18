@@ -5361,6 +5361,80 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// Axis `amin` for f16. Uses f32 opmath and returns f16 storage.
+    fn min_axis_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _shape: &[usize],
+        _axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "min_axis_f16" })
+    }
+
+    /// Axis `amax` for f16. Uses f32 opmath and returns f16 storage.
+    fn max_axis_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _shape: &[usize],
+        _axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "max_axis_f16" })
+    }
+
+    /// Axis `amin`/`amax` backward for f16. Splits grad over every tied
+    /// extremum, matching torch `amin`/`amax` rather than `min`/`max` indices.
+    fn extreme_axis_backward_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _result: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _shape: &[usize],
+        _axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "extreme_axis_backward_f16",
+        })
+    }
+
+    /// Axis `amin` for bf16. Uses f32 opmath and returns bf16 storage.
+    fn min_axis_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _shape: &[usize],
+        _axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "min_axis_bf16",
+        })
+    }
+
+    /// Axis `amax` for bf16. Uses f32 opmath and returns bf16 storage.
+    fn max_axis_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _shape: &[usize],
+        _axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "max_axis_bf16",
+        })
+    }
+
+    /// Axis `amin`/`amax` backward for bf16. Splits grad over every tied
+    /// extremum, matching torch `amin`/`amax` rather than `min`/`max` indices.
+    fn extreme_axis_backward_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _result: &GpuBufferHandle,
+        _grad_output: &GpuBufferHandle,
+        _shape: &[usize],
+        _axis: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "extreme_axis_backward_bf16",
+        })
+    }
+
     // Strided split: extract a sub-tensor along one axis entirely on GPU.
     fn strided_split_f32(
         &self,

@@ -47,6 +47,10 @@ fn grad_leaf(shape: &[usize]) -> Tensor<f32> {
     Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), true).unwrap()
 }
 
+fn grad_leaf_from_data(data: &[f32], shape: &[usize]) -> Tensor<f32> {
+    Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), true).unwrap()
+}
+
 /// `loss = (y * w).sum()` with `w = 1..=numel` reshaped to `y.shape`, then
 /// backward. Mirrors the oracle snippet in the module doc.
 fn weighted_backward(y: &Tensor<f32>) {
@@ -308,6 +312,37 @@ fn reduce_min_reorder_backward() {
     assert_grad(&x, &expected, "reduce min 'a b c -> c a'");
 }
 
+/// PyTorch/einops lowers reduce(max) to `torch.amax`, whose backward divides
+/// each output gradient evenly across all tied maxima. A cummax-based VJP
+/// would put the full gradient on one recorded index.
+#[test]
+fn reduce_max_ties_split_grad_like_torch_amax() {
+    let x = grad_leaf_from_data(&[1., 1., 0., 2., 2., 2.], &[2, 3]);
+    let y = reduce(&x, "a b -> a", EinopsReduction::Max).unwrap();
+    weighted_backward(&y);
+    assert_grad_close(
+        &x,
+        &[0.5, 0.5, 0., 2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0],
+        1e-6,
+        "reduce max ties split like torch.amax",
+    );
+}
+
+/// Symmetric tie oracle for `torch.amin`: all tied minima receive
+/// `grad / count`, not the single-index `cummin` VJP.
+#[test]
+fn reduce_min_ties_split_grad_like_torch_amin() {
+    let x = grad_leaf_from_data(&[-1., -1., 0., 3., 2., 2.], &[2, 3]);
+    let y = reduce(&x, "a b -> a", EinopsReduction::Min).unwrap();
+    weighted_backward(&y);
+    assert_grad_close(
+        &x,
+        &[0.5, 0.5, 0., 0., 1., 1.],
+        1e-6,
+        "reduce min ties split like torch.amin",
+    );
+}
+
 /// R-LOUD-3: untracked inputs stay honestly untracked on every path.
 #[test]
 fn untracked_inputs_stay_untracked() {
@@ -358,6 +393,78 @@ mod gpu {
             .requires_grad_(true)
     }
 
+    fn cuda_grad_leaf_from_data(data: &[f32], shape: &[usize]) -> Tensor<f32> {
+        Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false)
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap()
+            .requires_grad_(true)
+    }
+
+    fn cuda_f16_grad_leaf(data: &[f32], shape: &[usize]) -> Tensor<half::f16> {
+        let data: Vec<half::f16> = data.iter().copied().map(half::f16::from_f32).collect();
+        Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap()
+            .requires_grad_(true)
+    }
+
+    fn cuda_bf16_grad_leaf(data: &[f32], shape: &[usize]) -> Tensor<half::bf16> {
+        let data: Vec<half::bf16> = data.iter().copied().map(half::bf16::from_f32).collect();
+        Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap()
+            .requires_grad_(true)
+    }
+
+    fn assert_f16_grad_close(leaf: &Tensor<half::f16>, expected: &[f32], tol: f32, label: &str) {
+        let g = leaf
+            .grad()
+            .unwrap()
+            .unwrap_or_else(|| panic!("{label}: no gradient reached the leaf"));
+        assert_eq!(g.device(), leaf.device(), "{label}: gradient device");
+        let actual: Vec<f32> = g
+            .cpu()
+            .expect("f16 grad D2H")
+            .data()
+            .expect("f16 grad data")
+            .iter()
+            .map(|v| v.to_f32())
+            .collect();
+        assert_eq!(actual.len(), expected.len(), "{label}: grad numel");
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= tol,
+                "{label}: grad[{i}] = {a} vs oracle {e} (tol {tol})"
+            );
+        }
+    }
+
+    fn assert_bf16_grad_close(leaf: &Tensor<half::bf16>, expected: &[f32], tol: f32, label: &str) {
+        let g = leaf
+            .grad()
+            .unwrap()
+            .unwrap_or_else(|| panic!("{label}: no gradient reached the leaf"));
+        assert_eq!(g.device(), leaf.device(), "{label}: gradient device");
+        let actual: Vec<f32> = g
+            .cpu()
+            .expect("bf16 grad D2H")
+            .data()
+            .expect("bf16 grad data")
+            .iter()
+            .map(|v| v.to_f32())
+            .collect();
+        assert_eq!(actual.len(), expected.len(), "{label}: grad numel");
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= tol,
+                "{label}: grad[{i}] = {a} vs oracle {e} (tol {tol})"
+            );
+        }
+    }
+
     /// Oracle values identical to the CPU lanes (same quoted torch session).
     #[test]
     fn gpu_rearrange_reorder_backward() {
@@ -397,8 +504,8 @@ mod gpu {
         assert_grad(&x, &expected, "gpu reduce sum 'a b c -> c a'");
     }
 
-    /// CUDA Max backward routes through the cumulative-extreme scatter-add VJP
-    /// and must match the same torch oracle as the CPU lane.
+    /// CUDA Max backward routes through axis `amax`, whose tie semantics must
+    /// match the same torch oracle as the CPU lane.
     #[test]
     fn gpu_reduce_max_backward_matches_torch_oracle() {
         ensure_cuda_backend();
@@ -415,5 +522,59 @@ mod gpu {
             6., 8.,
         ];
         assert_grad(&x, &expected, "gpu reduce max 'a b c -> c a'");
+    }
+
+    #[test]
+    fn gpu_reduce_max_ties_split_grad_like_torch_amax() {
+        ensure_cuda_backend();
+        let x = cuda_grad_leaf_from_data(&[1., 1., 0., 2., 2., 2.], &[2, 3]);
+        let y = reduce(&x, "a b -> a", EinopsReduction::Max).unwrap();
+        assert_eq!(y.device(), Device::Cuda(0), "forward stays on device");
+        weighted_backward(&y);
+        assert_grad_close(
+            &x,
+            &[0.5, 0.5, 0., 2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0],
+            1e-6,
+            "gpu reduce max ties split like torch.amax",
+        );
+    }
+
+    #[test]
+    fn gpu_reduce_min_ties_split_grad_like_torch_amin() {
+        ensure_cuda_backend();
+        let x = cuda_grad_leaf_from_data(&[-1., -1., 0., 3., 2., 2.], &[2, 3]);
+        let y = reduce(&x, "a b -> a", EinopsReduction::Min).unwrap();
+        assert_eq!(y.device(), Device::Cuda(0), "forward stays on device");
+        weighted_backward(&y);
+        assert_grad_close(
+            &x,
+            &[0.5, 0.5, 0., 0., 1., 1.],
+            1e-6,
+            "gpu reduce min ties split like torch.amin",
+        );
+    }
+
+    #[test]
+    fn gpu_reduce_max_ties_split_grad_for_f16_and_bf16() {
+        ensure_cuda_backend();
+        let expected = [0.5, 0.5, 0., 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0];
+
+        let x = cuda_f16_grad_leaf(&[1., 1., 0., 2., 2., 2.], &[2, 3]);
+        let y = reduce(&x, "a b -> a", EinopsReduction::Max).unwrap();
+        assert_eq!(y.device(), Device::Cuda(0), "f16 forward stays on device");
+        sum(&y)
+            .expect("sum f16 max output")
+            .backward()
+            .expect("f16 max backward");
+        assert_f16_grad_close(&x, &expected, 1e-3, "f16 reduce max ties split");
+
+        let x = cuda_bf16_grad_leaf(&[1., 1., 0., 2., 2., 2.], &[2, 3]);
+        let y = reduce(&x, "a b -> a", EinopsReduction::Max).unwrap();
+        assert_eq!(y.device(), Device::Cuda(0), "bf16 forward stays on device");
+        sum(&y)
+            .expect("sum bf16 max output")
+            .backward()
+            .expect("bf16 max backward");
+        assert_bf16_grad_close(&x, &expected, 5e-3, "bf16 reduce max ties split");
     }
 }

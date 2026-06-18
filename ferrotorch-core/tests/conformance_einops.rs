@@ -14,11 +14,11 @@
 //! * **Cat A — Forwards**: `rearrange`, `rearrange_with`, `reduce`, `repeat`,
 //!   `einsum`. `EinopsReduction` is exercised transitively via every `reduce`
 //!   case (Sum / Mean / Max / Min discriminators).
-//! * **Cat B — Backwards**: `einsum_differentiable` is the only autograd-
-//!   integrated entry point in this phase. `rearrange` / `repeat` / `reduce`
-//!   in `einops.rs` do not register grad_fns (their CPU loops produce
-//!   `requires_grad=false` outputs by construction); per the dispatch's
-//!   "implicit-coverage" exclusion, no separate `*_backward` covers them.
+//! * **Cat B — Backwards**: `einsum_differentiable` was the only autograd-
+//!   integrated entry point when this conformance fixture was written.
+//!   `rearrange` / `repeat` / `reduce` now compose differentiable tensor
+//!   primitives; dedicated autograd regression coverage lives in
+//!   `audit_core061_einops_autograd.rs`.
 //!
 //! ## Tolerances
 //!
@@ -37,8 +37,9 @@
 //! * `rearrange` / `rearrange_with` on CUDA: identity-permutation patterns
 //!   take a zero-copy `view_reshape` GPU fast path; permutation patterns
 //!   currently CPU-detour through `data_vec()` → `to(device)` (issue #496).
-//! * `reduce` on CUDA: axis-aligned-fast-path composes GPU-aware `sum_dim` /
-//!   `cummax` / `cummin`; the reorder-fallback CPU-detours.
+//! * `reduce` on CUDA: composes GPU-aware `sum_dim`, scalar multiply for mean,
+//!   and dim-keyed `amax` / `amin` for extrema. Max/Min gradients split evenly
+//!   across tied extrema, matching torch/einops `amax` / `amin`.
 //! * `einsum` / `einsum_differentiable` on CUDA: results are device-resident
 //!   (the GPU dispatch decomposes into on-device primitives per #803 / #821 /
 //!   #822 / #824 / #825) and every GPU readback in this suite asserts CUDA
@@ -476,14 +477,11 @@ fn cascade_skip(
     // Issue #790 (CLOSED in Bugfix Batch 6 / Dispatch A1): the symptom
     // (GPU `reduce(Max/Min)` returning the first row instead of the
     // column-wise extremum) was a downstream consequence of the strided-
-    // view-readback bug fixed under #802 (Bugfix Batch 1) — the
-    // `cummax → narrow(last) → squeeze → view_reshape` chain on CUDA
-    // produced a tensor with non-zero `storage_offset`, and pre-#802
-    // `gpu_to_cpu` discarded the offset so `.cpu()` read the first slice
-    // of the buffer rather than the narrowed view. With #802's on-device
-    // strided-copy materialization in place the cummax / narrow / squeeze
-    // primitives all return correct values; see
-    // `tests/_probe_b6_a1_reduce_max_min_gpu.rs` for the verifying probes.
+    // view-readback bug fixed under #802 (Bugfix Batch 1). The current
+    // extrema path uses dim-keyed `amax` / `amin`, but the residency
+    // invariant remains the same: GPU reduction views must be read through
+    // storage-offset-aware device materialization before any host oracle
+    // comparison.
 
     None
 }
