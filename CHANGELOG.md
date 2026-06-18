@@ -89,6 +89,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-087: The advertised packed INT4 format stores one byte per element (#1781)
 - CORE-081: Sparse SGD replaces tensor identity and leaves aliases stale (#1775)
 - Add CUDA real/Hermitian FFT support for non-last and multi-axis transforms (#2003)
 - CORE-029: Inference-mode tensors are not actually inference-only (#1723)
