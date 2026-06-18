@@ -49,6 +49,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- torch.fft.fftfreq/rfftfreq lack dtype/device factory parity (#2022)
 - einops reduce Max/Min now split tied extrema gradients like torch/einops amax/amin (#1963)
 - fast_log (vlog_f32) returns wrong finite values for subnormal f32 inputs (#1931)
 - CUDA randn Philox kernels lack torch.cuda byte-exact normal math (#2017)

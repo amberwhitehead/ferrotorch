@@ -473,6 +473,32 @@ pub trait GpuBackend: Send + Sync {
         device: usize,
     ) -> FerrotorchResult<GpuBufferHandle>;
 
+    /// Device-resident `torch.fft.fftfreq` factory.
+    ///
+    /// Implementations must allocate and fill the result on `device`; callers
+    /// use this slot specifically to avoid CPU-generate-then-upload factory
+    /// fallbacks.
+    fn fftfreq(
+        &self,
+        _n: usize,
+        _d: f64,
+        _dtype: DType,
+        _device: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "fftfreq" })
+    }
+
+    /// Device-resident `torch.fft.rfftfreq` factory.
+    fn rfftfreq(
+        &self,
+        _n: usize,
+        _d: f64,
+        _dtype: DType,
+        _device: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda { op: "rfftfreq" })
+    }
+
     // Elementwise f32
     fn add_f32(
         &self,

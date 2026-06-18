@@ -168,11 +168,11 @@ pub use named_tensor::NamedTensor;
 // already declared `pub mod linalg;` above.
 pub use dispatch::{DispatchKey, DispatchKeySet, Dispatcher, Kernel};
 pub use fft::{
-    FftNorm, fft, fft_norm, fft2, fft2_norm, fftfreq, fftn, fftn_norm, fftshift, hfft, hfft_norm,
-    hfft2, hfft2_norm, hfftn, hfftn_norm, ifft, ifft_norm, ifft2, ifft2_norm, ifftn, ifftn_norm,
-    ifftshift, ihfft, ihfft_norm, ihfft2, ihfft2_norm, ihfftn, ihfftn_norm, irfft, irfft_norm,
-    irfft2, irfft2_norm, irfftn, irfftn_norm, rfft, rfft_norm, rfft2, rfft2_norm, rfftfreq, rfftn,
-    rfftn_norm,
+    FftNorm, fft, fft_norm, fft2, fft2_norm, fftfreq, fftfreq_on_device, fftn, fftn_norm, fftshift,
+    hfft, hfft_norm, hfft2, hfft2_norm, hfftn, hfftn_norm, ifft, ifft_norm, ifft2, ifft2_norm,
+    ifftn, ifftn_norm, ifftshift, ihfft, ihfft_norm, ihfft2, ihfft2_norm, ihfftn, ihfftn_norm,
+    irfft, irfft_norm, irfft2, irfft2_norm, irfftn, irfftn_norm, rfft, rfft_norm, rfft2,
+    rfft2_norm, rfftfreq, rfftfreq_on_device, rfftn, rfftn_norm,
 };
 pub use flex_attention::flex_attention;
 pub use grad_fns::activation::{GeluApproximate, gelu, gelu_with, sigmoid, tanh};

@@ -57,8 +57,10 @@ use ferray_core::IxDyn as FerrayIxDyn;
 pub use ferray_fft::FftNorm;
 use rustfft::num_complex::Complex;
 
+use crate::device::Device;
 use crate::dtype::{DType, Element, Float};
 use crate::error::{FerrotorchError, FerrotorchResult};
+use crate::shape::checked_byte_count;
 use crate::storage::TensorStorage;
 use crate::tensor::Tensor;
 
@@ -2528,19 +2530,21 @@ pub fn ihfftn_norm<T: Float>(
 /// centers in cycles per unit of the sample spacing `d`. Matches
 /// `torch.fft.fftfreq`, including `n == 0` and IEEE `d == 0` edge cases.
 pub fn fftfreq(n: usize, d: f64) -> FerrotorchResult<Tensor<f64>> {
-    let scale = 1.0 / ((n as f64) * d);
-    let negative_start = n.div_ceil(2);
-    let data: Vec<f64> = (0..n)
-        .map(|i| {
-            let bin = if i < negative_start {
-                i as f64
-            } else {
-                i as f64 - n as f64
-            };
-            bin * scale
-        })
-        .collect();
-    Tensor::from_storage(TensorStorage::cpu(data), vec![n], false)
+    fftfreq_on_device::<f64>(n, d, Device::Cpu)
+}
+
+/// Device-aware Discrete Fourier Transform sample frequencies.
+///
+/// Mirrors `torch.fft.fftfreq(n, d, dtype=..., device=...)` for ferrotorch's
+/// floating dtypes. CUDA outputs are filled on-device through the registered
+/// GPU backend; unsupported accelerator devices return an error instead of
+/// silently staging through CPU.
+pub fn fftfreq_on_device<T: Float>(
+    n: usize,
+    d: f64,
+    device: Device,
+) -> FerrotorchResult<Tensor<T>> {
+    frequency_tensor_on_device::<T>(n, n, d, device, "fftfreq", true)
 }
 
 /// Sample frequencies for `rfft` (non-negative half).
@@ -2548,10 +2552,76 @@ pub fn fftfreq(n: usize, d: f64) -> FerrotorchResult<Tensor<f64>> {
 /// Returns a length-`n/2 + 1` `Tensor<f64>` on CPU. Matches
 /// `torch.fft.rfftfreq`, including `n == 0` and IEEE `d == 0` edge cases.
 pub fn rfftfreq(n: usize, d: f64) -> FerrotorchResult<Tensor<f64>> {
+    rfftfreq_on_device::<f64>(n, d, Device::Cpu)
+}
+
+/// Device-aware sample frequencies for `rfft` (non-negative half).
+///
+/// Mirrors `torch.fft.rfftfreq(n, d, dtype=..., device=...)` for ferrotorch's
+/// floating dtypes.
+pub fn rfftfreq_on_device<T: Float>(
+    n: usize,
+    d: f64,
+    device: Device,
+) -> FerrotorchResult<Tensor<T>> {
+    frequency_tensor_on_device::<T>(n / 2 + 1, n, d, device, "rfftfreq", false)
+}
+
+fn frequency_tensor_on_device<T: Float>(
+    len: usize,
+    n: usize,
+    d: f64,
+    device: Device,
+    op: &'static str,
+    has_negative_bins: bool,
+) -> FerrotorchResult<Tensor<T>> {
+    checked_byte_count(len, T::dtype().size_of(), op)?;
+    match device {
+        Device::Cpu => {
+            let data = frequency_data::<T>(len, n, d, has_negative_bins, op)?;
+            Tensor::from_storage(TensorStorage::cpu(data), vec![len], false)
+        }
+        Device::Meta => Tensor::from_storage(TensorStorage::meta(len), vec![len], false),
+        Device::Cuda(ordinal) => {
+            let backend =
+                crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
+            let handle = if has_negative_bins {
+                backend.fftfreq(n, d, T::dtype(), ordinal)?
+            } else {
+                backend.rfftfreq(n, d, T::dtype(), ordinal)?
+            };
+            Tensor::from_storage(TensorStorage::gpu(handle), vec![len], false)
+        }
+        Device::Xpu(_) | Device::Mps(_) => Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: device-native frequency factory is not wired for {device}; \
+                 refusing to return a CPU fallback"
+            ),
+        }),
+    }
+}
+
+fn frequency_data<T: Float>(
+    len: usize,
+    n: usize,
+    d: f64,
+    has_negative_bins: bool,
+    op: &'static str,
+) -> FerrotorchResult<Vec<T>> {
     let scale = 1.0 / ((n as f64) * d);
-    let len = n / 2 + 1;
-    let data: Vec<f64> = (0..len).map(|i| i as f64 * scale).collect();
-    Tensor::from_storage(TensorStorage::cpu(data), vec![len], false)
+    let negative_start = n.div_ceil(2);
+    (0..len)
+        .map(|i| {
+            let bin = if !has_negative_bins || i < negative_start {
+                i as f64
+            } else {
+                i as f64 - n as f64
+            };
+            T::from(bin * scale).ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!("{op}: frequency value at index {i} is not representable"),
+            })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

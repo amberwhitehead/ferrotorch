@@ -196,6 +196,8 @@ pub mod flash_attention;
 #[cfg(feature = "cuda")]
 pub mod flip;
 #[cfg(feature = "cuda")]
+pub mod frequency;
+#[cfg(feature = "cuda")]
 pub mod gather_int;
 pub mod graph;
 #[cfg(feature = "cuda")]

@@ -1855,6 +1855,68 @@ impl GpuBackend for CudaBackendImpl {
         }
     }
 
+    fn fftfreq(
+        &self,
+        n: usize,
+        d: f64,
+        dtype: DType,
+        device: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(device)?;
+        match dtype {
+            DType::F32 => Ok(Self::wrap_buffer(
+                crate::frequency::gpu_fftfreq_f32(n, d, dev).map_err(Self::map_gpu_err)?,
+                device,
+            )),
+            DType::F64 => Ok(Self::wrap_buffer_f64(
+                crate::frequency::gpu_fftfreq_f64(n, d, dev).map_err(Self::map_gpu_err)?,
+                device,
+            )),
+            DType::F16 => Ok(Self::wrap_buffer_f16(
+                crate::frequency::gpu_fftfreq_f16(n, d, dev).map_err(Self::map_gpu_err)?,
+                device,
+            )),
+            DType::BF16 => Ok(Self::wrap_buffer_bf16(
+                crate::frequency::gpu_fftfreq_bf16(n, d, dev).map_err(Self::map_gpu_err)?,
+                device,
+            )),
+            other => Err(FerrotorchError::InvalidArgument {
+                message: format!("fftfreq: unsupported floating dtype {other}"),
+            }),
+        }
+    }
+
+    fn rfftfreq(
+        &self,
+        n: usize,
+        d: f64,
+        dtype: DType,
+        device: usize,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(device)?;
+        match dtype {
+            DType::F32 => Ok(Self::wrap_buffer(
+                crate::frequency::gpu_rfftfreq_f32(n, d, dev).map_err(Self::map_gpu_err)?,
+                device,
+            )),
+            DType::F64 => Ok(Self::wrap_buffer_f64(
+                crate::frequency::gpu_rfftfreq_f64(n, d, dev).map_err(Self::map_gpu_err)?,
+                device,
+            )),
+            DType::F16 => Ok(Self::wrap_buffer_f16(
+                crate::frequency::gpu_rfftfreq_f16(n, d, dev).map_err(Self::map_gpu_err)?,
+                device,
+            )),
+            DType::BF16 => Ok(Self::wrap_buffer_bf16(
+                crate::frequency::gpu_rfftfreq_bf16(n, d, dev).map_err(Self::map_gpu_err)?,
+                device,
+            )),
+            other => Err(FerrotorchError::InvalidArgument {
+                message: format!("rfftfreq: unsupported floating dtype {other}"),
+            }),
+        }
+    }
+
     // -- Elementwise f32 ------------------------------------------------------
 
     fn add_f32(
