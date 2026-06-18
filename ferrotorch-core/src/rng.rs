@@ -6,7 +6,7 @@
 //! | REQ | Status | Evidence |
 //! |---|---|---|
 //! | REQ-1 (MT19937 engine) | SHIPPED | `Mt19937` engine mirrors `aten/src/ATen/core/MT19937RNGEngine.h:110-150` (state array of 624 uint32, twist/temper bits identical); non-test consumer: `creation::rand`/`creation::randn` source bits from `with_thread_rng`. |
-//! | REQ-2 (`Generator` newtype) | SHIPPED | `pub struct Generator` exposes `new(seed)`, `manual_seed(seed)`, `next_uniform_f32/f64`, `next_normal_f32/f64`; non-test consumer: process-default `Generator` used by `creation::rand`. |
+//! | REQ-2 (`Generator` newtype) | SHIPPED | `pub struct Generator` exposes `new(seed)`, `manual_seed(seed)`, dtype-specific uniform helpers, scalar `next_normal_f32/f64`, and PyTorch tensor `randn` fill helpers; non-test consumer: process-default `Generator` used by `creation::rand` / `creation::randn`. |
 //! | REQ-3 (`manual_seed` top-level) | SHIPPED | `pub fn manual_seed(seed) -> FerrotorchResult<()>` seeds registered GPU generators before reseeding the process-global CPU `Generator`, mirroring `torch.manual_seed` at `torch/random.py:49-86`; real backend failures are surfaced. Non-test consumer: re-exported at `lib.rs` as `ferrotorch_core::manual_seed`. |
 //! | REQ-4 (default-generator state) | SHIPPED | `DEFAULT_RNG: Mutex<Generator>` is initialised once from entropy and serialized like PyTorch's `default_generator` mutex; `manual_seed` reaches all threads and nested default-RNG access returns `InvalidArgument` instead of panicking or deadlocking. Non-test consumer: `with_thread_rng` invoked by `creation::rand`/`randn`. |
 //! | REQ-5 (byte-exact parity for f32 rand) | SHIPPED | `Mt19937` reproduces `torch.manual_seed(42); torch.rand(10)` byte-for-byte; pinned by `ferrotorch-core/tests/divergence_manual_seed_parity.rs`. |
@@ -119,9 +119,8 @@ impl Mt19937 {
 /// [`Generator::seed_from_entropy`] (`SystemTime` + thread id, matches the
 /// pre-#1537 default behaviour of `creation::rand`).
 ///
-/// Holds an MT19937 engine plus the Box-Muller cache slots so the
-/// normal-distribution stream agrees byte-for-byte with PyTorch
-/// (`aten/src/ATen/core/DistributionsHelper.h:171-202`).
+/// Holds an MT19937 engine plus the Box-Muller cache slots used by PyTorch's
+/// scalar normal distributions (`aten/src/ATen/core/DistributionsHelper.h`).
 #[derive(Clone)]
 pub struct Generator {
     engine: Mt19937,
@@ -202,6 +201,28 @@ impl Generator {
         (v as f32) * DIVISOR
     }
 
+    /// Uniform-`[0,1)` f16, byte-identical to
+    /// `at::uniform_real_distribution<Half>(0,1)(gen)`: PyTorch masks to
+    /// `numeric_limits<Half>::digits == 11` random bits, scales in f32
+    /// distribution accumulator precision, then casts to Half.
+    pub fn next_uniform_f16(&mut self) -> half::f16 {
+        const MASK: u32 = (1u32 << 11) - 1;
+        const DIVISOR: f32 = 1.0f32 / ((1u32 << 11) as f32);
+        let v = self.engine.random_u32() & MASK;
+        half::f16::from_f32((v as f32) * DIVISOR)
+    }
+
+    /// Uniform-`[0,1)` bf16, byte-identical to
+    /// `at::uniform_real_distribution<BFloat16>(0,1)(gen)`: PyTorch masks to
+    /// `numeric_limits<BFloat16>::digits == 8` random bits, scales in f32
+    /// distribution accumulator precision, then casts to BFloat16.
+    pub fn next_uniform_bf16(&mut self) -> half::bf16 {
+        const MASK: u32 = (1u32 << 8) - 1;
+        const DIVISOR: f32 = 1.0f32 / ((1u32 << 8) as f32);
+        let v = self.engine.random_u32() & MASK;
+        half::bf16::from_f32((v as f32) * DIVISOR)
+    }
+
     /// Uniform-`[0,1)` f64, byte-identical to `at::uniform_real_distribution<double>(0,1)(gen)`:
     /// `((random64() & ((1u<<53)-1)) as f64) * (1.0 / (1u<<53) as f64)`.
     pub fn next_uniform_f64(&mut self) -> f64 {
@@ -242,6 +263,442 @@ impl Generator {
         self.next_double_normal = Some(r * sin_t);
         r * cos_t
     }
+
+    /// Values for `torch.randn(..., dtype=float32, device=cpu)`.
+    ///
+    /// PyTorch's CPU `normal_kernel` has two distinct paths:
+    ///
+    /// - `numel < 16`: scalar `normal_distribution<double>` and cast to f32.
+    /// - `numel >= 16`: `normal_fill<float>`, which fills uniform f32 values
+    ///   into the output buffer, applies 16-wide Box-Muller blocks, and
+    ///   recomputes the final 16 values for non-multiple-of-16 tails.
+    ///
+    /// The large path intentionally does not read or clear cached scalar
+    /// normal samples, matching `DistributionTemplates.h:168-235`.
+    pub(crate) fn torch_randn_f32_values(&mut self, numel: usize) -> Vec<f32> {
+        if numel < 16 {
+            return (0..numel).map(|_| self.next_normal_f64() as f32).collect();
+        }
+
+        let mut data: Vec<f32> = (0..numel).map(|_| self.next_uniform_f32()).collect();
+        for start in (0..=(numel - 16)).step_by(16) {
+            normal_fill16_f32(&mut data[start..start + 16]);
+        }
+        if !numel.is_multiple_of(16) {
+            let start = numel - 16;
+            for slot in &mut data[start..start + 16] {
+                *slot = self.next_uniform_f32();
+            }
+            normal_fill16_f32(&mut data[start..start + 16]);
+        }
+        data
+    }
+
+    /// Values for `torch.randn(..., dtype=float64, device=cpu)`.
+    ///
+    /// Mirrors the same scalar-vs-`normal_fill<double>` split described in
+    /// [`Self::torch_randn_f32_values`], but using f64 uniforms and scalar
+    /// libm for the 16-wide transform.
+    pub(crate) fn torch_randn_f64_values(&mut self, numel: usize) -> Vec<f64> {
+        if numel < 16 {
+            return (0..numel).map(|_| self.next_normal_f64()).collect();
+        }
+
+        let mut data: Vec<f64> = (0..numel).map(|_| self.next_uniform_f64()).collect();
+        for start in (0..=(numel - 16)).step_by(16) {
+            normal_fill16_f64(&mut data[start..start + 16]);
+        }
+        if !numel.is_multiple_of(16) {
+            let start = numel - 16;
+            for slot in &mut data[start..start + 16] {
+                *slot = self.next_uniform_f64();
+            }
+            normal_fill16_f64(&mut data[start..start + 16]);
+        }
+        data
+    }
+
+    /// Values for `torch.randn(..., dtype=float16, device=cpu)`.
+    ///
+    /// PyTorch 2.11 routes non-float CPU dtypes through scalar
+    /// `normal_fill<scalar_t>` for contiguous tensors with at least 16 elements:
+    /// uniforms are first rounded to f16 and every named intermediate in the
+    /// 16-wide Box-Muller transform is assigned back to f16 before the final
+    /// store. Small tensors still use scalar `normal_distribution<double>` and
+    /// cast through f32 into f16.
+    pub(crate) fn torch_randn_f16_values(&mut self, numel: usize) -> Vec<half::f16> {
+        if numel < 16 {
+            return (0..numel)
+                .map(|_| half::f16::from_f32(self.next_normal_f64() as f32))
+                .collect();
+        }
+
+        let mut data: Vec<half::f16> = (0..numel).map(|_| self.next_uniform_f16()).collect();
+        for start in (0..=(numel - 16)).step_by(16) {
+            normal_fill16_f16(&mut data[start..start + 16]);
+        }
+        if !numel.is_multiple_of(16) {
+            let start = numel - 16;
+            for slot in &mut data[start..start + 16] {
+                *slot = self.next_uniform_f16();
+            }
+            normal_fill16_f16(&mut data[start..start + 16]);
+        }
+        data
+    }
+
+    /// Values for `torch.randn(..., dtype=bfloat16, device=cpu)`.
+    ///
+    /// Mirrors [`Self::torch_randn_f16_values`] with bfloat16 uniform and
+    /// intermediate rounding (`numeric_limits<BFloat16>::digits == 8`).
+    pub(crate) fn torch_randn_bf16_values(&mut self, numel: usize) -> Vec<half::bf16> {
+        if numel < 16 {
+            return (0..numel)
+                .map(|_| half::bf16::from_f32(self.next_normal_f64() as f32))
+                .collect();
+        }
+
+        let mut data: Vec<half::bf16> = (0..numel).map(|_| self.next_uniform_bf16()).collect();
+        for start in (0..=(numel - 16)).step_by(16) {
+            normal_fill16_bf16(&mut data[start..start + 16]);
+        }
+        if !numel.is_multiple_of(16) {
+            let start = numel - 16;
+            for slot in &mut data[start..start + 16] {
+                *slot = self.next_uniform_bf16();
+            }
+            normal_fill16_bf16(&mut data[start..start + 16]);
+        }
+        data
+    }
+}
+
+fn normal_fill16_f64(data: &mut [f64]) {
+    debug_assert_eq!(data.len(), 16);
+    for j in 0..8 {
+        let u1 = 1.0 - data[j];
+        let u2 = data[j + 8];
+        let radius = (-2.0 * u1.ln()).sqrt();
+        let theta = 2.0 * std::f64::consts::PI * u2;
+        data[j] = radius * theta.cos();
+        data[j + 8] = radius * theta.sin();
+    }
+}
+
+fn normal_fill16_f32(data: &mut [f32]) {
+    debug_assert_eq!(data.len(), 16);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            // SAFETY: runtime feature detection proves AVX2/FMA support, and
+            // the debug assertion above pins the 16-f32 block size required by
+            // the unaligned loads/stores below.
+            unsafe {
+                normal_fill16_f32_avx2(data);
+            }
+            return;
+        }
+    }
+
+    for j in 0..8 {
+        let u1 = 1.0 - data[j];
+        let u2 = data[j + 8];
+        let radius = (-2.0 * avx_mathfun_log_f32(u1)).sqrt();
+        let theta = (2.0 * std::f64::consts::PI) as f32 * u2;
+        let (sin_t, cos_t) = avx_mathfun_sincos_f32(theta);
+        data[j] = radius * cos_t;
+        data[j + 8] = radius * sin_t;
+    }
+}
+
+fn normal_fill16_f16(data: &mut [half::f16]) {
+    debug_assert_eq!(data.len(), 16);
+    let mean = half::f16::from_f32(0.0);
+    let std = half::f16::from_f32(1.0);
+    let one = half::f16::from_f32(1.0);
+    let minus_two = half::f16::from_f32(-2.0);
+    for j in 0..8 {
+        let u1 = half::f16::from_f32(one.to_f32() - data[j].to_f32());
+        let u2 = data[j + 8];
+        let log_u1 = half::f16::from_f32(u1.to_f32().ln());
+        let scaled_log = half::f16::from_f32(minus_two.to_f32() * log_u1.to_f32());
+        let radius = half::f16::from_f32(scaled_log.to_f32().sqrt());
+        let theta =
+            half::f16::from_f32((2.0_f64 * std::f64::consts::PI * (u2.to_f32() as f64)) as f32);
+        let (sin_theta, cos_theta) = theta.to_f32().sin_cos();
+        let sin_theta = half::f16::from_f32(sin_theta);
+        let cos_theta = half::f16::from_f32(cos_theta);
+
+        let out1 = half::f16::from_f32(radius.to_f32() * cos_theta.to_f32());
+        let out1 = half::f16::from_f32(out1.to_f32() * std.to_f32());
+        data[j] = half::f16::from_f32(out1.to_f32() + mean.to_f32());
+
+        let out2 = half::f16::from_f32(radius.to_f32() * sin_theta.to_f32());
+        let out2 = half::f16::from_f32(out2.to_f32() * std.to_f32());
+        data[j + 8] = half::f16::from_f32(out2.to_f32() + mean.to_f32());
+    }
+}
+
+fn normal_fill16_bf16(data: &mut [half::bf16]) {
+    debug_assert_eq!(data.len(), 16);
+    let mean = half::bf16::from_f32(0.0);
+    let std = half::bf16::from_f32(1.0);
+    let one = half::bf16::from_f32(1.0);
+    let minus_two = half::bf16::from_f32(-2.0);
+    for j in 0..8 {
+        let u1 = half::bf16::from_f32(one.to_f32() - data[j].to_f32());
+        let u2 = data[j + 8];
+        let log_u1 = half::bf16::from_f32(u1.to_f32().ln());
+        let scaled_log = half::bf16::from_f32(minus_two.to_f32() * log_u1.to_f32());
+        let radius = half::bf16::from_f32(scaled_log.to_f32().sqrt());
+        let theta =
+            half::bf16::from_f32((2.0_f64 * std::f64::consts::PI * (u2.to_f32() as f64)) as f32);
+        let (sin_theta, cos_theta) = theta.to_f32().sin_cos();
+        let sin_theta = half::bf16::from_f32(sin_theta);
+        let cos_theta = half::bf16::from_f32(cos_theta);
+
+        let out1 = half::bf16::from_f32(radius.to_f32() * cos_theta.to_f32());
+        let out1 = half::bf16::from_f32(out1.to_f32() * std.to_f32());
+        data[j] = half::bf16::from_f32(out1.to_f32() + mean.to_f32());
+
+        let out2 = half::bf16::from_f32(radius.to_f32() * sin_theta.to_f32());
+        let out2 = half::bf16::from_f32(out2.to_f32() * std.to_f32());
+        data[j + 8] = half::bf16::from_f32(out2.to_f32() + mean.to_f32());
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::wildcard_imports)]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn normal_fill16_f32_avx2(data: &mut [f32]) {
+    use std::arch::x86_64::*;
+
+    let ptr = data.as_mut_ptr();
+    let one = _mm256_set1_ps(1.0);
+    let minus_two = _mm256_set1_ps(-2.0);
+    let mean = _mm256_setzero_ps();
+    let std = _mm256_set1_ps(1.0);
+    let two_pi = _mm256_set1_ps((2.0 * std::f64::consts::PI) as f32);
+
+    let u1 = _mm256_sub_ps(one, unsafe { _mm256_loadu_ps(ptr) });
+    let u2 = unsafe { _mm256_loadu_ps(ptr.add(8)) };
+    let radius = _mm256_sqrt_ps(_mm256_mul_ps(minus_two, avx2_log256_ps(u1)));
+    let theta = _mm256_mul_ps(two_pi, u2);
+    let (sin_theta, cos_theta) = avx2_sincos256_ps(theta);
+    let out1 = _mm256_fmadd_ps(_mm256_mul_ps(radius, cos_theta), std, mean);
+    let out2 = _mm256_fmadd_ps(_mm256_mul_ps(radius, sin_theta), std, mean);
+    unsafe {
+        _mm256_storeu_ps(ptr, out1);
+        _mm256_storeu_ps(ptr.add(8), out2);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::excessive_precision, clippy::wildcard_imports)]
+#[inline(never)]
+#[target_feature(enable = "avx2")]
+fn avx2_log256_ps(mut x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+    use std::arch::x86_64::*;
+
+    let one = _mm256_set1_ps(1.0);
+    let invalid_mask = _mm256_cmp_ps(x, _mm256_setzero_ps(), _CMP_LE_OS);
+    x = _mm256_max_ps(x, _mm256_castsi256_ps(_mm256_set1_epi32(0x0080_0000)));
+
+    let mut imm0 = _mm256_srli_epi32(_mm256_castps_si256(x), 23);
+    x = _mm256_and_ps(
+        x,
+        _mm256_castsi256_ps(_mm256_set1_epi32(!0x7f80_0000u32 as i32)),
+    );
+    x = _mm256_or_ps(x, _mm256_set1_ps(0.5));
+
+    imm0 = _mm256_sub_epi32(imm0, _mm256_set1_epi32(0x7f));
+    let mut e = _mm256_cvtepi32_ps(imm0);
+    e = _mm256_add_ps(e, one);
+
+    let mask = _mm256_cmp_ps(x, _mm256_set1_ps(0.707_106_77), _CMP_LT_OS);
+    let tmp = _mm256_and_ps(x, mask);
+    x = _mm256_sub_ps(x, one);
+    e = _mm256_sub_ps(e, _mm256_and_ps(one, mask));
+    x = _mm256_add_ps(x, tmp);
+
+    let z = _mm256_mul_ps(x, x);
+    let mut y = _mm256_set1_ps(7.037_683_629_2e-2);
+    y = _mm256_add_ps(_mm256_mul_ps(y, x), _mm256_set1_ps(-1.151_461_031_0e-1));
+    y = _mm256_add_ps(_mm256_mul_ps(y, x), _mm256_set1_ps(1.167_699_874_0e-1));
+    y = _mm256_add_ps(_mm256_mul_ps(y, x), _mm256_set1_ps(-1.242_014_084_6e-1));
+    y = _mm256_add_ps(_mm256_mul_ps(y, x), _mm256_set1_ps(1.424_932_278_7e-1));
+    y = _mm256_add_ps(_mm256_mul_ps(y, x), _mm256_set1_ps(-1.666_805_766_5e-1));
+    y = _mm256_add_ps(_mm256_mul_ps(y, x), _mm256_set1_ps(2.000_071_476_5e-1));
+    y = _mm256_add_ps(_mm256_mul_ps(y, x), _mm256_set1_ps(-2.499_999_399_3e-1));
+    y = _mm256_add_ps(_mm256_mul_ps(y, x), _mm256_set1_ps(3.333_333_117_4e-1));
+    y = _mm256_mul_ps(y, x);
+    y = _mm256_mul_ps(y, z);
+    y = _mm256_add_ps(y, _mm256_mul_ps(e, _mm256_set1_ps(-2.121_944_4e-4)));
+    y = _mm256_sub_ps(y, _mm256_mul_ps(z, _mm256_set1_ps(0.5)));
+    x = _mm256_add_ps(x, y);
+    x = _mm256_add_ps(x, _mm256_mul_ps(e, _mm256_set1_ps(0.693_359_4)));
+    _mm256_or_ps(x, invalid_mask)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::wildcard_imports)]
+#[inline(never)]
+#[target_feature(enable = "avx2", enable = "fma")]
+fn avx2_sincos256_ps(
+    mut x: std::arch::x86_64::__m256,
+) -> (std::arch::x86_64::__m256, std::arch::x86_64::__m256) {
+    use std::arch::x86_64::*;
+
+    let inv_sign_mask = _mm256_castsi256_ps(_mm256_set1_epi32(!0x8000_0000u32 as i32));
+    let sign_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x8000_0000u32 as i32));
+    let mut sign_bit_sin = _mm256_and_ps(x, sign_mask);
+    x = _mm256_and_ps(x, inv_sign_mask);
+
+    let mut y = _mm256_mul_ps(x, _mm256_set1_ps(1.273_239_5));
+    let mut imm2 = _mm256_cvttps_epi32(y);
+    imm2 = _mm256_add_epi32(imm2, _mm256_set1_epi32(1));
+    imm2 = _mm256_and_si256(imm2, _mm256_set1_epi32(!1));
+    y = _mm256_cvtepi32_ps(imm2);
+    let mut imm4 = imm2;
+
+    let mut imm0 = _mm256_and_si256(imm2, _mm256_set1_epi32(4));
+    imm0 = _mm256_slli_epi32(imm0, 29);
+    imm2 = _mm256_and_si256(imm2, _mm256_set1_epi32(2));
+    imm2 = _mm256_cmpeq_epi32(imm2, _mm256_setzero_si256());
+
+    let swap_sign_bit_sin = _mm256_castsi256_ps(imm0);
+    let poly_mask = _mm256_castsi256_ps(imm2);
+
+    let xmm1 = _mm256_mul_ps(y, _mm256_set1_ps(-0.785_156_25));
+    let xmm2 = _mm256_mul_ps(y, _mm256_set1_ps(-2.418_756_5e-4));
+    let xmm3 = _mm256_mul_ps(y, _mm256_set1_ps(-3.774_895e-8));
+    x = _mm256_add_ps(x, xmm1);
+    x = _mm256_add_ps(x, xmm2);
+    x = _mm256_add_ps(x, xmm3);
+
+    imm4 = _mm256_sub_epi32(imm4, _mm256_set1_epi32(2));
+    imm4 = _mm256_andnot_si256(imm4, _mm256_set1_epi32(4));
+    imm4 = _mm256_slli_epi32(imm4, 29);
+    let sign_bit_cos = _mm256_castsi256_ps(imm4);
+    sign_bit_sin = _mm256_xor_ps(sign_bit_sin, swap_sign_bit_sin);
+
+    let z = _mm256_mul_ps(x, x);
+    let mut y_cos = _mm256_set1_ps(2.443_315_7e-5);
+    y_cos = _mm256_fmadd_ps(y_cos, z, _mm256_set1_ps(-1.388_731_6e-3));
+    y_cos = _mm256_fmadd_ps(y_cos, z, _mm256_set1_ps(4.166_664_6e-2));
+    y_cos = _mm256_mul_ps(y_cos, z);
+    y_cos = _mm256_mul_ps(y_cos, z);
+    y_cos = _mm256_sub_ps(y_cos, _mm256_mul_ps(z, _mm256_set1_ps(0.5)));
+    y_cos = _mm256_add_ps(y_cos, _mm256_set1_ps(1.0));
+
+    let mut y_sin = _mm256_set1_ps(-1.951_529_6e-4);
+    y_sin = _mm256_fmadd_ps(y_sin, z, _mm256_set1_ps(8.332_161e-3));
+    y_sin = _mm256_fmadd_ps(y_sin, z, _mm256_set1_ps(-1.666_665_5e-1));
+    y_sin = _mm256_mul_ps(y_sin, z);
+    y_sin = _mm256_fmadd_ps(y_sin, x, x);
+
+    let ysin2 = _mm256_and_ps(poly_mask, y_sin);
+    let ysin1 = _mm256_andnot_ps(poly_mask, y_cos);
+    y_sin = _mm256_sub_ps(y_sin, ysin2);
+    y_cos = _mm256_sub_ps(y_cos, ysin1);
+
+    let sin_v = _mm256_xor_ps(_mm256_add_ps(ysin1, ysin2), sign_bit_sin);
+    let cos_v = _mm256_xor_ps(_mm256_add_ps(y_cos, y_sin), sign_bit_cos);
+    (sin_v, cos_v)
+}
+
+/// Scalarized lane of PyTorch's AVX2 `log256_ps` (`avx_mathfun.h`).
+///
+/// `normal_fill<float>` uses this approximation on AVX2 builds. Each lane is
+/// independent for the Box-Muller inputs, so preserving the polynomial and
+/// operation order is enough to reproduce PyTorch's per-element bits on the
+/// local AVX2 CPU without introducing C/C++ code.
+#[allow(clippy::excessive_precision)]
+fn avx_mathfun_log_f32(mut x: f32) -> f32 {
+    let invalid = x <= 0.0;
+    x = x.max(f32::from_bits(0x0080_0000));
+
+    let bits = x.to_bits();
+    let exponent = ((bits >> 23) as i32) - 0x7f;
+    x = f32::from_bits((bits & !0x7f80_0000) | 0x3f00_0000);
+
+    let mut e = exponent as f32;
+    e += 1.0;
+
+    let mask = x < 0.707_106_77_f32;
+    let tmp = if mask { x } else { 0.0 };
+    x -= 1.0;
+    if mask {
+        e -= 1.0;
+    }
+    x += tmp;
+
+    let z = x * x;
+    let mut y = 7.037_683_629_2e-2_f32;
+    y = y * x + -1.151_461_031_0e-1_f32;
+    y = y * x + 1.167_699_874_0e-1_f32;
+    y = y * x + -1.242_014_084_6e-1_f32;
+    y = y * x + 1.424_932_278_7e-1_f32;
+    y = y * x + -1.666_805_766_5e-1_f32;
+    y = y * x + 2.000_071_476_5e-1_f32;
+    y = y * x + -2.499_999_399_3e-1_f32;
+    y = y * x + 3.333_333_117_4e-1_f32;
+    y *= x;
+    y *= z;
+    y += e * -2.121_944_4e-4_f32;
+    y -= z * 0.5;
+    x += y;
+    x += e * 0.693_359_4_f32;
+
+    if invalid { f32::NAN } else { x }
+}
+
+/// Scalarized lane of PyTorch's AVX2 `sincos256_ps` (`avx_mathfun.h`).
+fn avx_mathfun_sincos_f32(x: f32) -> (f32, f32) {
+    let sign_bit_sin = x.to_bits() & 0x8000_0000;
+    let mut x = f32::from_bits(x.to_bits() & !0x8000_0000);
+
+    let y = x * 1.273_239_5_f32;
+    let mut imm2 = y as i32;
+    imm2 = (imm2 + 1) & !1;
+    let y = imm2 as f32;
+    let imm4 = imm2;
+
+    let swap_sign_bit_sin = ((imm2 & 4) as u32) << 29;
+    let poly_mask = (imm2 & 2) == 0;
+
+    x += y * -0.785_156_25_f32;
+    x += y * -2.418_756_5e-4_f32;
+    x += y * -3.774_895e-8_f32;
+
+    let imm4 = imm4.wrapping_sub(2);
+    let sign_bit_cos = (((!imm4) & 4) as u32) << 29;
+    let sign_bit_sin = sign_bit_sin ^ swap_sign_bit_sin;
+
+    let z = x * x;
+    let mut y_cos = 2.443_315_7e-5_f32;
+    y_cos = y_cos * z + -1.388_731_6e-3_f32;
+    y_cos = y_cos * z + 4.166_664_6e-2_f32;
+    y_cos *= z;
+    y_cos *= z;
+    y_cos -= z * 0.5;
+    y_cos += 1.0;
+
+    let mut y_sin = -1.951_529_6e-4_f32;
+    y_sin = y_sin * z + 8.332_161e-3_f32;
+    y_sin = y_sin * z + -1.666_665_5e-1_f32;
+    y_sin *= z;
+    y_sin *= x;
+    y_sin += x;
+
+    let ysin2 = if poly_mask { y_sin } else { 0.0 };
+    let ysin1 = if poly_mask { 0.0 } else { y_cos };
+    y_sin -= ysin2;
+    y_cos -= ysin1;
+
+    let sin_v = f32::from_bits((ysin1 + ysin2).to_bits() ^ sign_bit_sin);
+    let cos_v = f32::from_bits((y_cos + y_sin).to_bits() ^ sign_bit_cos);
+    (sin_v, cos_v)
 }
 
 impl Default for Generator {

@@ -1362,6 +1362,8 @@
     { "path": "ferrotorch_core::rng::Generator::new", "kind": "method", "signature": "fn new (seed : u64) -> Self" },
     { "path": "ferrotorch_core::rng::Generator::next_normal_f32", "kind": "method", "signature": "fn next_normal_f32 (& mut self) -> f32" },
     { "path": "ferrotorch_core::rng::Generator::next_normal_f64", "kind": "method", "signature": "fn next_normal_f64 (& mut self) -> f64" },
+    { "path": "ferrotorch_core::rng::Generator::next_uniform_bf16", "kind": "method", "signature": "fn next_uniform_bf16 (& mut self) -> half :: bf16" },
+    { "path": "ferrotorch_core::rng::Generator::next_uniform_f16", "kind": "method", "signature": "fn next_uniform_f16 (& mut self) -> half :: f16" },
     { "path": "ferrotorch_core::rng::Generator::next_uniform_f32", "kind": "method", "signature": "fn next_uniform_f32 (& mut self) -> f32" },
     { "path": "ferrotorch_core::rng::Generator::next_uniform_f64", "kind": "method", "signature": "fn next_uniform_f64 (& mut self) -> f64" },
     { "path": "ferrotorch_core::rng::Generator::random_u32", "kind": "method", "signature": "fn random_u32 (& mut self) -> u32" },

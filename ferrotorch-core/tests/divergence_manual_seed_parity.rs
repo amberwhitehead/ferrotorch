@@ -49,15 +49,9 @@ const TORCH_RAND_SEED_42_F32_BITS: [u32; 10] = [
 // `cpu_serial_kernel { normal_distribution<double>(...)(gen) }` at
 // `aten/src/ATen/native/cpu/DistributionTemplates.h:222-235` — Box-Muller
 // in `f64` acctype then cast down to `f32`. For size >= 16 it uses
-// `normal_fill` which fills uniform samples in the OUTPUT BUFFER first
-// then runs vectorised Box-Muller on 16-element blocks pairing element
-// `i` with element `i+8` (different algorithm + different ordering).
-//
-// Byte-exact parity for randn would require BOTH paths plus SIMD libm
-// agreement (torch uses `sincos256_ps` from avx_mathfun.h). Ferrotorch
-// pins `manual_seed` determinism + uniform-rand byte-exact parity (#1537);
-// randn byte-exact parity is documented as separate divergence #2014
-// (cross-platform libm + algorithmic split).
+// `normal_fill`, which fills uniform samples in the output buffer first and
+// runs 16-element Box-Muller blocks pairing element `i` with element `i+8`.
+// CORE-2014 pins both modes in `audit_core2014_randn_cpu_parity.rs`.
 #[allow(dead_code)]
 const TORCH_RANDN_SEED_42_F32_BITS_REFERENCE: [u32; 10] = [
     0x3eac_62ae,

@@ -284,17 +284,28 @@ pub fn rand<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
     let numel = checked_numel(shape, "rand")?;
     let mut data: Vec<T> = Vec::with_capacity(numel);
 
-    let is_f32 = std::mem::size_of::<T>() == 4;
-    with_thread_rng(|g| {
-        if is_f32 {
+    with_thread_rng(|g| match <T as Element>::dtype() {
+        DType::F32 => {
             for _ in 0..numel {
                 data.push(T::from(g.next_uniform_f32()).unwrap());
             }
-        } else {
+        }
+        DType::F64 => {
             for _ in 0..numel {
                 data.push(T::from(g.next_uniform_f64()).unwrap());
             }
         }
+        DType::F16 => {
+            for _ in 0..numel {
+                data.push(T::from(g.next_uniform_f16().to_f32()).unwrap());
+            }
+        }
+        DType::BF16 => {
+            for _ in 0..numel {
+                data.push(T::from(g.next_uniform_bf16().to_f32()).unwrap());
+            }
+        }
+        dtype => unreachable!("rand<T: Float> called with non-floating dtype {dtype}"),
     })?;
 
     Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)
@@ -302,28 +313,38 @@ pub fn rand<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
 
 /// Create a tensor with random values from a standard normal distribution.
 ///
-/// Uses the process-global default [`crate::rng::Generator`] (MT19937 +
-/// Box-Muller), mirroring `at::normal_distribution<T>(0, 1)` at
-/// `aten/src/ATen/core/DistributionsHelper.h:172-201`. Call
+/// Uses the process-global default [`crate::rng::Generator`] (MT19937), mirroring
+/// PyTorch CPU `normal_kernel`: tensors with fewer than 16 elements use scalar
+/// `normal_distribution<double>` and tensors with 16 or more contiguous elements
+/// use `normal_fill`'s 16-wide uniform-buffer Box-Muller transform
+/// (`aten/src/ATen/native/cpu/DistributionTemplates.h:168-235`). Call
 /// [`crate::manual_seed`] for reproducible output.
-///
-/// The Box-Muller pair (`r * cos(theta)`, `r * sin(theta)`) order matches
-/// torch CPU: `cos` is returned, `sin` is cached for the next call.
 pub fn randn<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
     let numel = checked_numel(shape, "randn")?;
     let mut data: Vec<T> = Vec::with_capacity(numel);
 
-    let is_f32 = std::mem::size_of::<T>() == 4;
-    with_thread_rng(|g| {
-        if is_f32 {
-            for _ in 0..numel {
-                data.push(T::from(g.next_normal_f32()).unwrap());
-            }
-        } else {
-            for _ in 0..numel {
-                data.push(T::from(g.next_normal_f64()).unwrap());
+    with_thread_rng(|g| match <T as Element>::dtype() {
+        DType::F32 => {
+            for value in g.torch_randn_f32_values(numel) {
+                data.push(T::from(value).unwrap());
             }
         }
+        DType::F64 => {
+            for value in g.torch_randn_f64_values(numel) {
+                data.push(T::from(value).unwrap());
+            }
+        }
+        DType::F16 => {
+            for value in g.torch_randn_f16_values(numel) {
+                data.push(T::from(value.to_f32()).unwrap());
+            }
+        }
+        DType::BF16 => {
+            for value in g.torch_randn_bf16_values(numel) {
+                data.push(T::from(value.to_f32()).unwrap());
+            }
+        }
+        dtype => unreachable!("randn<T: Float> called with non-floating dtype {dtype}"),
     })?;
 
     Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)

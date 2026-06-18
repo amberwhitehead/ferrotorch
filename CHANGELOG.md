@@ -48,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- CORE: CPU randn is deterministic but not byte-exact with PyTorch normal_fill (#2014)
 - NN: Parameter device transfer creates non-leaf CUDA parameters (#2016)
 - CORE: non-leaf gradient accumulation rejects valid strided gradients (#2015)
 - CORE-095: `manual_seed` silently discards GPU seeding failures (#1789)
