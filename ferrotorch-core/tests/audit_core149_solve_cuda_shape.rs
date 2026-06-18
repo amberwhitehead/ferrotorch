@@ -68,7 +68,7 @@ fn cpu_solve_rejects_incompatible_rhs_length_before_factorization() {
 fn cpu_solve_rejects_rank3_rhs_for_unbatched_contract() {
     let a = cpu_f32(&[1.0, 0.0, 0.0, 1.0], &[2, 2], false);
     let b = cpu_f32(&[1.0, 2.0], &[2, 1, 1], false);
-    assert_invalid_tensor(solve(&a, &b), "b must be 1-D or 2-D");
+    assert_invalid_tensor(solve(&a, &b), "incompatible shapes");
 }
 
 #[cfg(feature = "gpu")]
@@ -108,7 +108,7 @@ mod gpu {
         let a = cuda_f32(&[1.0, 0.0, 0.0, 1.0], &[2, 2], false);
         let b = cuda_f32(&[1.0, 2.0], &[2, 1, 1], false);
 
-        assert_invalid_tensor(solve(&a, &b), "b must be 1-D or 2-D");
+        assert_invalid_tensor(solve(&a, &b), "incompatible shapes");
     }
 
     #[test]

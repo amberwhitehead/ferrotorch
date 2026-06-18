@@ -707,6 +707,203 @@ fn solve_rhs_shape(
     }
 }
 
+#[derive(Debug, Clone)]
+struct SolveContract {
+    n: usize,
+    nrhs: usize,
+    vector_rhs: bool,
+    result_shape: Vec<usize>,
+    batch_shape: Vec<usize>,
+    a_expanded_shape: Vec<usize>,
+    b_expanded_shape: Vec<usize>,
+}
+
+impl SolveContract {
+    fn is_single_system(&self, a_shape: &[usize]) -> bool {
+        a_shape.len() == 2 && self.batch_shape.is_empty()
+    }
+
+    fn batch_size(&self, op: &str) -> FerrotorchResult<usize> {
+        checked_product(&self.batch_shape, op)
+    }
+}
+
+fn linalg_solve_is_vector_rhs(a_shape: &[usize], b_shape: &[usize]) -> bool {
+    b_shape.len() == 1
+        || (a_shape.len().saturating_sub(1) == b_shape.len()
+            && b_shape == &a_shape[..a_shape.len() - 1])
+}
+
+fn solve_contract(
+    a_shape: &[usize],
+    b_shape: &[usize],
+    op: &str,
+) -> FerrotorchResult<SolveContract> {
+    if a_shape.len() < 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: `a` must be at least 2-D, got {a_shape:?}"),
+        });
+    }
+
+    let n = a_shape[a_shape.len() - 1];
+    let rows = a_shape[a_shape.len() - 2];
+    if rows != n {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: `a` must be square, got {rows}x{n}"),
+        });
+    }
+
+    let vector_rhs = linalg_solve_is_vector_rhs(a_shape, b_shape);
+    let mut b_matrix_shape = b_shape.to_vec();
+    if vector_rhs {
+        b_matrix_shape.push(1);
+    }
+
+    if b_matrix_shape.len() < 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: `b` must be at least 2-D unless it is a vector RHS, got {b_shape:?}"
+            ),
+        });
+    }
+
+    let b_rows = b_matrix_shape[b_matrix_shape.len() - 2];
+    let nrhs = b_matrix_shape[b_matrix_shape.len() - 1];
+    if b_rows != n {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: incompatible shapes for A ({n}x{n}) and B ({b_rows}x{nrhs})"),
+        });
+    }
+
+    let a_batch = &a_shape[..a_shape.len() - 2];
+    let b_batch = &b_matrix_shape[..b_matrix_shape.len() - 2];
+    let batch_shape = crate::shape::broadcast_shapes(a_batch, b_batch).map_err(|e| {
+        FerrotorchError::ShapeMismatch {
+            message: format!(
+                "{op}: batch dimensions cannot be broadcast for A {a_shape:?} and B {b_shape:?}: {e}"
+            ),
+        }
+    })?;
+
+    let mut a_expanded_shape = batch_shape.clone();
+    a_expanded_shape.extend_from_slice(&[n, n]);
+
+    let mut b_expanded_shape = batch_shape.clone();
+    b_expanded_shape.extend_from_slice(&[n, nrhs]);
+
+    let mut result_shape = if vector_rhs {
+        let mut shape = batch_shape.clone();
+        shape.push(n);
+        shape
+    } else {
+        b_expanded_shape.clone()
+    };
+
+    if vector_rhs && batch_shape.is_empty() && b_shape.len() == 1 {
+        result_shape = vec![n];
+    }
+
+    Ok(SolveContract {
+        n,
+        nrhs,
+        vector_rhs,
+        result_shape,
+        batch_shape,
+        a_expanded_shape,
+        b_expanded_shape,
+    })
+}
+
+fn checked_isize_dim(value: usize, op: &str, name: &str) -> FerrotorchResult<isize> {
+    isize::try_from(value).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!("{op}: {name} dimension {value} does not fit in isize"),
+    })
+}
+
+fn unravel_batch_index(mut flat: usize, shape: &[usize]) -> Vec<usize> {
+    let mut coords = vec![0usize; shape.len()];
+    for dim in (0..shape.len()).rev() {
+        coords[dim] = flat % shape[dim];
+        flat /= shape[dim];
+    }
+    coords
+}
+
+fn source_batch_flat_index(
+    coords: &[usize],
+    source_shape: &[usize],
+    broadcast_shape: &[usize],
+) -> usize {
+    if source_shape.is_empty() {
+        return 0;
+    }
+
+    let offset = broadcast_shape.len() - source_shape.len();
+    let mut flat = 0usize;
+    for (axis, &dim) in source_shape.iter().enumerate() {
+        let coord = if dim == 1 { 0 } else { coords[offset + axis] };
+        flat = flat * dim + coord;
+    }
+    flat
+}
+
+fn batch_matrix_slice<T: Float>(
+    input: &Tensor<T>,
+    batch_shape: &[usize],
+    flat_batch: usize,
+    op: &str,
+) -> FerrotorchResult<Tensor<T>> {
+    let coords = unravel_batch_index(flat_batch, batch_shape);
+    let mut view = input.clone();
+    for (dim, &coord) in coords.iter().enumerate() {
+        view = crate::methods::narrow_t(&view, dim, coord, 1)?;
+    }
+
+    let rows = input.shape()[batch_shape.len()];
+    let cols = input.shape()[batch_shape.len() + 1];
+    crate::grad_fns::shape::reshape(
+        &view,
+        &[
+            checked_isize_dim(rows, op, "matrix row")?,
+            checked_isize_dim(cols, op, "matrix column")?,
+        ],
+    )
+}
+
+fn add_empty_solve_a_edge<T: Float>(
+    result: Tensor<T>,
+    a: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    if !crate::autograd::no_grad::is_grad_enabled() || !a.requires_grad() {
+        return Ok(result);
+    }
+
+    let zero =
+        crate::creation::full_on_device(&[], <T as num_traits::Zero>::zero(), a.device(), op)?;
+    let a_zero = crate::grad_fns::reduction::sum(a)?.mul_t(&zero)?;
+    result.add_t(&a_zero)
+}
+
+fn empty_batched_solve_result<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    contract: &SolveContract,
+) -> FerrotorchResult<Tensor<T>> {
+    let b_matrix = if contract.vector_rhs {
+        crate::grad_fns::shape::unsqueeze(b, -1)?
+    } else {
+        b.clone()
+    };
+    let expanded = crate::grad_fns::shape::expand(&b_matrix, &contract.b_expanded_shape)?;
+    let result = if contract.vector_rhs {
+        crate::grad_fns::shape::squeeze(&expanded, -1)?
+    } else {
+        expanded
+    };
+    add_empty_solve_a_edge(result, a, "solve")
+}
+
 /// Pure-Rust LAPACK GETRS-style solve for a square LU factorization.
 #[allow(clippy::float_cmp)]
 fn cpu_lu_solve<T: Float>(
@@ -978,43 +1175,51 @@ pub fn svd<T: Float>(input: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T
 
 /// Solve the linear system `A @ x = b`.
 ///
-/// `a` must be a square 2-D tensor. `b` can be 1-D (single RHS) or 2-D
-/// (multiple RHS columns).
+/// `a` must be square in its last two dimensions. `b` follows PyTorch's
+/// `torch.linalg.solve` contract:
+/// - vector RHS when `b` is 1-D or exactly `a.shape()[..a.ndim() - 1]`;
+/// - matrix RHS otherwise, with leading batch dimensions broadcast against
+///   `a`'s leading batch dimensions.
 ///
 /// # Backward
-/// Autograd-aware (CPU): when grad tracking is active for `a` or `b`, this
-/// routes through `crate::grad_fns::linalg::solve_differentiable` (the real
-/// `linalg_solve_backward` VJP: `gB = A^{-T} @ gX`, `gA = -gB @ X^T`). The
-/// CUDA forward stays forward-only.
+/// Autograd-aware on CPU and CUDA. Single 2-D systems use the direct
+/// `linalg_solve_backward` VJP (`gB = A^{-T} @ gX`, `gA = -gB @ X^T`).
+/// Batched/broadcasted systems decompose into differentiable expand/narrow,
+/// per-slab 2-D solves, cat, and reshape/squeeze, so broadcasted gradients
+/// reduce through the same primitives PyTorch uses for view-like operations.
 pub fn solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    if a.ndim() != 2 {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!("solve: `a` must be 2-D, got {:?}", a.shape()),
-        });
-    }
-    if a.shape()[0] != a.shape()[1] {
-        return Err(FerrotorchError::InvalidArgument {
-            message: format!(
-                "solve: `a` must be square, got {}x{}",
-                a.shape()[0],
-                a.shape()[1]
-            ),
-        });
-    }
     if a.is_cuda() != b.is_cuda() {
         return Err(FerrotorchError::DeviceMismatch {
             expected: a.device(),
             got: b.device(),
         });
     }
-    let n = a.shape()[0];
-    let (out_shape, nrhs) = solve_rhs_shape(n, b.shape(), "solve")?;
+
+    let contract = solve_contract(a.shape(), b.shape(), "solve")?;
 
     // Autograd path: CPU and CUDA both route through the same wrapper. The
     // wrapper's CUDA backward stays resident via cuSOLVER + CUDA mm_bt.
     if crate::autograd::no_grad::is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
-        return crate::grad_fns::linalg::solve_differentiable(a, b);
+        if contract.is_single_system(a.shape()) {
+            return crate::grad_fns::linalg::solve_differentiable(a, b);
+        }
+        return solve_batched_composed(a, b, &contract);
     }
+
+    if !contract.is_single_system(a.shape()) {
+        return solve_batched_composed(a, b, &contract);
+    }
+
+    solve_single_system(a, b, &contract)
+}
+
+fn solve_single_system<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    contract: &SolveContract,
+) -> FerrotorchResult<Tensor<T>> {
+    let n = contract.n;
+    let nrhs = contract.nrhs;
 
     if a.is_cuda() {
         let backend =
@@ -1030,7 +1235,11 @@ pub fn solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
                 message: "solve requires f32 or f64".into(),
             });
         };
-        return Tensor::from_storage(TensorStorage::gpu(x_h), out_shape, false);
+        return Tensor::from_storage(
+            TensorStorage::gpu(x_h),
+            contract.result_shape.clone(),
+            false,
+        );
     }
 
     if is_f32::<T>() || is_f64::<T>() {
@@ -1039,6 +1248,49 @@ pub fn solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
         Err(FerrotorchError::InvalidArgument {
             message: "linalg op requires f32 or f64".into(),
         })
+    }
+}
+
+fn solve_batched_composed<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    contract: &SolveContract,
+) -> FerrotorchResult<Tensor<T>> {
+    let batch_size = contract.batch_size("solve")?;
+    if batch_size == 0 || contract.n == 0 {
+        return empty_batched_solve_result(a, b, contract);
+    }
+
+    let a_expanded = crate::grad_fns::shape::expand(a, &contract.a_expanded_shape)?;
+    let b_matrix = if contract.vector_rhs {
+        crate::grad_fns::shape::unsqueeze(b, -1)?
+    } else {
+        b.clone()
+    };
+    let b_expanded = crate::grad_fns::shape::expand(&b_matrix, &contract.b_expanded_shape)?;
+
+    let mut solved = Vec::with_capacity(batch_size);
+    for flat_batch in 0..batch_size {
+        let a_slab = batch_matrix_slice(&a_expanded, &contract.batch_shape, flat_batch, "solve")?;
+        let b_slab = batch_matrix_slice(&b_expanded, &contract.batch_shape, flat_batch, "solve")?;
+        let x_slab = solve(&a_slab, &b_slab)?;
+        solved.push(crate::grad_fns::shape::unsqueeze(&x_slab, 0)?);
+    }
+
+    let stacked = crate::grad_fns::shape::cat(&solved, 0)?;
+    let mut matrix_shape = contract.batch_shape.clone();
+    matrix_shape.extend_from_slice(&[contract.n, contract.nrhs]);
+    let matrix_shape: Vec<isize> = matrix_shape
+        .iter()
+        .enumerate()
+        .map(|(idx, &dim)| checked_isize_dim(dim, "solve", &format!("result axis {idx}")))
+        .collect::<FerrotorchResult<_>>()?;
+    let result_matrix = crate::grad_fns::shape::reshape(&stacked, &matrix_shape)?;
+
+    if contract.vector_rhs {
+        crate::grad_fns::shape::squeeze(&result_matrix, -1)
+    } else {
+        Ok(result_matrix)
     }
 }
 
@@ -4899,16 +5151,15 @@ fn parse_trailing_dev_info(message: &str) -> Option<i32> {
 /// `info` is a `T`-typed 0-d tensor — a documented deviation from torch's
 /// `int32` (`Tensor<T>` is the only tensor type this signature can carry).
 fn ex_info_scalar<T: Float>(value: i32, like: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    let t = Tensor::from_storage(
-        TensorStorage::cpu(vec![T::from(value).unwrap()]),
-        vec![],
-        false,
-    )?;
-    if like.is_cuda() {
-        t.to(like.device())
-    } else {
-        Ok(t)
-    }
+    ex_info_tensor(value, &[], like)
+}
+
+fn ex_info_tensor<T: Float>(
+    value: i32,
+    shape: &[usize],
+    like: &Tensor<T>,
+) -> FerrotorchResult<Tensor<T>> {
+    crate::creation::full_on_device(shape, T::from(value).unwrap(), like.device(), "solve_ex")
 }
 
 /// Build an all-zeros fallback value tensor of `shape` on `like`'s device.
@@ -4987,16 +5238,106 @@ pub fn solve_ex<T: Float>(
     a: &Tensor<T>,
     b: &Tensor<T>,
 ) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
-    match solve(a, b) {
-        Ok(x) => Ok((x, ex_info_scalar(0, b)?)),
-        Err(e) => match ex_numerical_info(&e) {
-            Some(info) => Ok((
-                ex_zeros_like(b.shape().to_vec(), b)?,
-                ex_info_scalar(info, b)?,
-            )),
-            None => Err(e),
-        },
+    if a.is_cuda() != b.is_cuda() {
+        return Err(FerrotorchError::DeviceMismatch {
+            expected: a.device(),
+            got: b.device(),
+        });
     }
+    let contract = solve_contract(a.shape(), b.shape(), "solve_ex")?;
+    let a_batch_shape = a.shape()[..a.ndim() - 2].to_vec();
+
+    if contract.is_single_system(a.shape()) {
+        return match solve(a, b) {
+            Ok(x) => Ok((x, ex_info_tensor(0, &a_batch_shape, a)?)),
+            Err(e) => match ex_numerical_info(&e) {
+                Some(info) => Ok((
+                    ex_zeros_like(contract.result_shape, b)?,
+                    ex_info_tensor(info, &a_batch_shape, a)?,
+                )),
+                None => Err(e),
+            },
+        };
+    }
+
+    solve_ex_batched_composed(a, b, &contract, &a_batch_shape)
+}
+
+fn solve_ex_batched_composed<T: Float>(
+    a: &Tensor<T>,
+    b: &Tensor<T>,
+    contract: &SolveContract,
+    a_batch_shape: &[usize],
+) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
+    let batch_size = contract.batch_size("solve_ex")?;
+    let info_len = checked_product(a_batch_shape, "solve_ex")?;
+
+    if batch_size == 0 || contract.n == 0 {
+        let x = empty_batched_solve_result(a, b, contract)?;
+        let info = ex_info_tensor(0, a_batch_shape, a)?;
+        return Ok((x, info));
+    }
+
+    let a_expanded = crate::grad_fns::shape::expand(a, &contract.a_expanded_shape)?;
+    let b_matrix = if contract.vector_rhs {
+        crate::grad_fns::shape::unsqueeze(b, -1)?
+    } else {
+        b.clone()
+    };
+    let b_expanded = crate::grad_fns::shape::expand(&b_matrix, &contract.b_expanded_shape)?;
+
+    let mut info_data = vec![<T as num_traits::Zero>::zero(); info_len];
+    let mut solved = Vec::with_capacity(batch_size);
+    for flat_batch in 0..batch_size {
+        let coords = unravel_batch_index(flat_batch, &contract.batch_shape);
+        let info_idx = source_batch_flat_index(&coords, a_batch_shape, &contract.batch_shape);
+        let a_slab =
+            batch_matrix_slice(&a_expanded, &contract.batch_shape, flat_batch, "solve_ex")?;
+        let b_slab =
+            batch_matrix_slice(&b_expanded, &contract.batch_shape, flat_batch, "solve_ex")?;
+
+        let x_slab = match solve(&a_slab, &b_slab) {
+            Ok(x) => x,
+            Err(e) => match ex_numerical_info(&e) {
+                Some(info) => {
+                    if info_idx < info_data.len() {
+                        info_data[info_idx] = T::from(info).unwrap();
+                    }
+                    crate::creation::full_on_device(
+                        &[contract.n, contract.nrhs],
+                        <T as num_traits::Zero>::zero(),
+                        b.device(),
+                        "solve_ex",
+                    )?
+                }
+                None => return Err(e),
+            },
+        };
+        solved.push(crate::grad_fns::shape::unsqueeze(&x_slab, 0)?);
+    }
+
+    let stacked = crate::grad_fns::shape::cat(&solved, 0)?;
+    let mut matrix_shape = contract.batch_shape.clone();
+    matrix_shape.extend_from_slice(&[contract.n, contract.nrhs]);
+    let matrix_shape: Vec<isize> = matrix_shape
+        .iter()
+        .enumerate()
+        .map(|(idx, &dim)| checked_isize_dim(dim, "solve_ex", &format!("result axis {idx}")))
+        .collect::<FerrotorchResult<_>>()?;
+    let result_matrix = crate::grad_fns::shape::reshape(&stacked, &matrix_shape)?;
+    let result = if contract.vector_rhs {
+        crate::grad_fns::shape::squeeze(&result_matrix, -1)?
+    } else {
+        result_matrix
+    };
+
+    let info = Tensor::from_storage(TensorStorage::cpu(info_data), a_batch_shape.to_vec(), false)?;
+    let info = if a.is_cuda() {
+        info.to(a.device())?
+    } else {
+        info
+    };
+    Ok((result, info))
 }
 
 // ===========================================================================

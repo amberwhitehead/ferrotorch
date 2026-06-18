@@ -99,6 +99,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- torch.linalg.solve batched A/B broadcasting parity missing (#2021)
 - CORE-149: CUDA `solve` dispatches without validating the right-hand side's shape (#1843)
 - CORE-154: `narrow` bounds validation can be bypassed by usize overflow (#1848)
 - On-device GPU rand: Philox kernel subsequence layout diverges from torch.cuda curand (byte-parity follow-up, #1682) (#1683)

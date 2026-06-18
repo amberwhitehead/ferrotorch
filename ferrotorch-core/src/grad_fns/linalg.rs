@@ -2857,6 +2857,15 @@ impl<T: Float> LinalgSolveBackward<T> {
 /// `crate::linalg::solve` forward) delegates back here when grad is enabled, so
 /// the guard prevents infinite re-entry.
 pub fn solve_differentiable<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    // The direct VJP below is the 2-D formula. Batched/broadcasted
+    // `torch.linalg.solve` is implemented in the public forward by composing
+    // expand/narrow/per-slab solve/cat/reshape; route through that path so
+    // each primitive contributes its own backward edge instead of attaching a
+    // single-system backward to a batched result.
+    if a.ndim() != 2 || b.ndim() > 2 {
+        return linalg_fwd::solve(a, b);
+    }
+
     let result = crate::autograd::no_grad::no_grad(|| linalg_fwd::solve(a, b))?;
     if is_grad_enabled() && (a.requires_grad() || b.requires_grad()) {
         let grad_fn = Arc::new(LinalgSolveBackward {
