@@ -12,10 +12,12 @@
 //! well-conditioned V, nor (b) a MIXED matrix with one complex-conjugate
 //! eigenvalue pair AND one real eigenvalue (V has both real and complex columns,
 //! Econj is a genuinely mixed complex matrix), nor (c) an ASYMMETRIC complex
-//! pair. Those exercise `c_inverse` (Gauss-Jordan partial pivot) on a non-trivial
-//! complex V^H, the full `ret @ V^H` conjugation, the Econj index orientation
-//! and per-column phase-gauge handling in regimes the builder's narrow inputs
-//! mask.
+//! pair. Those exercise the complex solve on a non-trivial `V^H`, the full
+//! `ret @ V^H` conjugation, the Econj index orientation and per-column
+//! phase-gauge handling in regimes the builder's narrow inputs mask. CORE-189
+//! later replaced the explicit inverse in that solve with a direct LU solve, so
+//! these cases still pin the production VJP without relying on special matrix
+//! structure.
 //!
 //! Per R-CHAR-3 every expected value below is the `.grad` of a LIVE torch
 //! float64 run (torch 2.11.0+cu130). Reproduction:
@@ -41,7 +43,15 @@ fn leaf(data: &[f64], shape: &[usize]) -> Tensor<f64> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), true).unwrap()
 }
 
+fn leaf32(data: &[f32], shape: &[usize]) -> Tensor<f32> {
+    Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), true).unwrap()
+}
+
 fn no_grad_leaf(data: &[f64], shape: &[usize]) -> Tensor<f64> {
+    Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false).unwrap()
+}
+
+fn no_grad_leaf32(data: &[f32], shape: &[usize]) -> Tensor<f32> {
     Tensor::from_storage(TensorStorage::cpu(data.to_vec()), shape.to_vec(), false).unwrap()
 }
 
@@ -53,6 +63,17 @@ fn assert_close(actual: &[f64], expected: &[f64], tol: f64, label: &str) {
         actual.len(),
         expected.len()
     );
+    for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (a - e).abs() < tol,
+            "{label}[{i}]: ferrotorch={a}, torch={e}, diff={}",
+            (a - e).abs()
+        );
+    }
+}
+
+fn assert_close32(actual: &[f32], expected: &[f32], tol: f32, label: &str) {
+    assert_eq!(actual.len(), expected.len(), "{label}: length mismatch");
     for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
         assert!(
             (a - e).abs() < tol,
@@ -74,6 +95,17 @@ fn eigval_linear_loss(w: &Tensor<f64>, cr: &[f64], ci: &[f64]) -> Tensor<f64> {
     reduce_sum(&mul(w, &wts).unwrap()).unwrap()
 }
 
+fn eigval_linear_loss32(w: &Tensor<f32>, cr: &[f32], ci: &[f32]) -> Tensor<f32> {
+    let n = cr.len();
+    let mut wt = vec![0.0; n * 2];
+    for k in 0..n {
+        wt[2 * k] = cr[k];
+        wt[2 * k + 1] = ci[k];
+    }
+    let wts = no_grad_leaf32(&wt, &[n, 2]);
+    reduce_sum(&mul(w, &wts).unwrap()).unwrap()
+}
+
 /// `sum((re^2+im^2)*MR[i,j])` on the complex `[n,n,2]` eigenvectors (phase-inv).
 fn eigvec_phase_invariant_loss(v: &Tensor<f64>, mr: &[f64], n: usize) -> Tensor<f64> {
     let mut wt = vec![0.0; n * n * 2];
@@ -91,6 +123,15 @@ fn eigvals_grad(a_data: &[f64], n: usize, cr: &[f64], ci: &[f64]) -> Vec<f64> {
     let w = linalg_fwd::eigvals(&a).unwrap();
     assert!(w.grad_fn().is_some(), "eigvals must attach grad_fn");
     let loss = eigval_linear_loss(&w, cr, ci);
+    loss.backward().unwrap();
+    a.grad().unwrap().unwrap().data().unwrap().to_vec()
+}
+
+fn eigvals_grad32(a_data: &[f32], n: usize, cr: &[f32], ci: &[f32]) -> Vec<f32> {
+    let a = leaf32(a_data, &[n, n]);
+    let w = linalg_fwd::eigvals(&a).unwrap();
+    assert!(w.grad_fn().is_some(), "eigvals must attach grad_fn");
+    let loss = eigval_linear_loss32(&w, cr, ci);
     loss.backward().unwrap();
     a.grad().unwrap().unwrap().data().unwrap().to_vec()
 }
@@ -168,7 +209,7 @@ fn eig_backward_general_dense_3x3_matches_torch() {
 //     one REAL eigenvalue (4.0259). The essential genuinely-complex case at
 //     n=3 — V has two complex (conjugate) columns and one real column; Econj is
 //     a fully complex 3x3 with a degenerate-diagonal structure (1 on diag).
-//     Stresses c_inverse on a complex V^H and the Econj index orientation.
+//     Stresses the complex solve on V^H and the Econj index orientation.
 // ===========================================================================
 const A_MIX: [f64; 9] = [1.0, -1.0, 0.3, 1.0, 1.0, 0.5, 0.2, 0.1, 4.0];
 
@@ -246,7 +287,7 @@ fn eig_backward_v_only_mixed_complex_real_3x3_matches_torch() {
 // ===========================================================================
 // (3) ASYMMETRIC 2x2 complex pair [[2,-3],[1,0]] -> eigenvalues 1 ± i*sqrt(2).
 //     Not the symmetric [[1,-1],[1,1]] the builder tested; eigenvectors are
-//     not "balanced", stressing the c_inverse pivot + normalization.
+//     not "balanced", stressing the solve pivoting + normalization.
 // ===========================================================================
 const A_ASYM: [f64; 4] = [2.0, -3.0, 1.0, 0.0];
 
@@ -283,4 +324,50 @@ fn eig_backward_asymmetric_complex_2x2_matches_torch() {
         1e-6,
         "eig asymmetric complex 2x2 A.grad vs torch",
     );
+}
+
+// ===========================================================================
+// (4) ILL-CONDITIONED eigenvectors: upper-triangular 2x2 with eigenvalues
+//     separated by 1e-4. The eigenvector matrix columns are nearly collinear,
+//     so `solve(V^H, rhs)` amplifies rounding. This is the CORE-189 regime that
+//     explicit inverse formation handles poorly.
+// ===========================================================================
+const A_ILL: [f64; 4] = [1.0, 1.0, 0.0, 1.0001];
+const A_ILL32: [f32; 4] = [1.0, 1.0, 0.0, 1.0001];
+
+#[test]
+fn eigvals_backward_ill_conditioned_v_matches_torch() {
+    let g = eigvals_grad(&A_ILL, 2, &[1.3, -0.7], &[0.4, 0.6]);
+    let torch = [1.3, 0.0, -20_000.000_000_002_197, -0.7];
+    assert_close(
+        &g,
+        &torch,
+        1e-5,
+        "eigvals ill-conditioned V A.grad vs torch",
+    );
+}
+
+#[test]
+fn eigvals_backward_ill_conditioned_v_f32_matches_torch() {
+    let g = eigvals_grad32(&A_ILL32, 2, &[1.3, -0.7], &[0.4, 0.6]);
+    let torch: [f32; 4] = [1.3, 0.0, -19_996.682, -0.7];
+    assert_close32(
+        &g,
+        &torch,
+        5e-2,
+        "eigvals ill-conditioned V f32 A.grad vs torch",
+    );
+}
+
+#[test]
+fn eig_backward_ill_conditioned_v_matches_torch() {
+    let mr = [0.5, -0.3, 0.2, 0.8];
+    let g = eig_grad(&A_ILL, 2, &mr, &[1.3, -0.7], &[0.4, 0.6]);
+    let torch = [
+        1.299_780_000_003_991_4,
+        -0.000_000_021_999_999_600_864_42,
+        -19_997.800_000_042_113,
+        -0.699_780_000_003_991_2,
+    ];
+    assert_close(&g, &torch, 1e-5, "eig ill-conditioned V A.grad vs torch");
 }

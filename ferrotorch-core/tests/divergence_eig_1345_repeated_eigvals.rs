@@ -22,7 +22,7 @@
 //!
 //! These assert ferrotorch's `EigvalsBackward` matches torch on repeated
 //! diagonalizable inputs. If ferray's `eig` returns a singular/non-invertible V
-//! for `2*I` (or orders/normalizes the degenerate column badly so `c_inverse`
+//! for `2*I` (or orders/normalizes the degenerate column badly so `c_solve`
 //! reports SingularMatrix), this FAILS — exposing a regime the builder declared
 //! out-of-scope but torch supports.
 

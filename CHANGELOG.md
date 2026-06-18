@@ -100,6 +100,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- CORE-189: `eig`/`eigvals` backward solves via explicit Gauss-Jordan inverse (#1883)
 - CORE-159: `fftn`/`ifftn` CUDA axes-set construction underflows for over-long axis lists (#1853)
 - CORE-158: CUDA FFT fast paths promote zero-sized batches to batch 1 (#1852)
 - CORE-160: `fftfreq`/`rfftfreq` reject `n = 0` and `d = 0` edge cases PyTorch defines (#1854)

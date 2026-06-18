@@ -18,7 +18,7 @@
 //! | REQ-9 (`addr`) | SHIPPED | `AddrBackward` + `addr_differentiable` (per `derivatives.yaml:273`); FD-verified `grad_fns::linalg::tests::addr_public_forward_is_grad_aware_and_matches_fd`; non-test consumer: the grad-aware `crate::linalg::addr` forward delegates here. Closes #1583. |
 //! | REQ-10 (`linalg.solve`) | SHIPPED | `LinalgSolveBackward` + `solve_differentiable` (VJP `gB = A^-T @ gX`, `gA = -gB @ X^T` per `FunctionsManual.cpp:6160`); FD-verified `tests/divergence_linalg_grad_audit.rs:solve_backward_*`; non-test consumer `tools/parity-sweep/runner/src/main.rs` `"linalg.solve"` arm (parity 24/24 non-skipped, 0 failed). Blocker #1345. |
 //! | REQ-11 (`linalg.svd`) | SHIPPED | `SvdBackwardU`/`SvdBackwardS`/`SvdBackwardV` + `svd_differentiable` (real reduced-SVD VJP, F-matrix `E[i,j]=S²[j]-S²[i]` + symmetrized core + rectangular `m!=n` projectors, split across the U/S/Vh outputs and accumulated into `A.grad`) per `FunctionsManual.cpp:3605` (E `3770-3777`, core `3767-3797`, projectors `3799-3815`); verified vs LIVE torch float64 by `grad_fns::linalg::tests::svd_backward_{square_3x3,tall_4x3,wide_3x4,s_only_square_3x3,s_only_tall_4x3}_matches_torch`; non-test consumer: the grad-aware `crate::linalg::svd` forward delegates here when grad is enabled. Gauge caveat mirrors eigh #1584. Blocker #1577. |
-//! | REQ-12 (`linalg.eig`) | SHIPPED | `EigBackwardW`/`EigBackwardV` + `eig_differentiable` (non-Hermitian complex VJP on the `[.,2]` real/imag layout via the private `c_matmul`/`c_conj_transpose`/`c_inverse`/`c_solve`/`c_econj_gap` toolkit: `VhgV=V^H gV`, unit-norm tangent proj `-V^H(V·real(diag VhgV))`, `Econj[i,j]=conj(L_j)-conj(L_i)`, `gA=real(solve(V^H,(diag(gL)+VhgV/Econj)V^H))`, split across the L/V outputs and accumulated into `A.grad`) per `FunctionsManual.cpp:3820` (`handle_r_to_c` real-part `derivatives.yaml:1740`); verified vs LIVE torch 2.11.0 float64 by `grad_fns::linalg::tests::{eig_backward_real_3x3,eig_backward_complex_pair_2x2,eig_backward_v_only_complex_pair_2x2}_matches_torch` at `1e-6`; non-test consumer: the grad-aware `crate::linalg::eig` forward (which also unit-norm-normalizes ferray's eigenvector columns to match torch's contract) delegates here when grad is enabled. EXACT for diagonalizable A; phase-invariant-loss gauge note (R-DEV-1) in `EigBackwardShared`. Closes #1345. |
+//! | REQ-12 (`linalg.eig`) | SHIPPED | `EigBackwardW`/`EigBackwardV` + `eig_differentiable` (non-Hermitian complex VJP on the `[.,2]` real/imag layout via the private `c_matmul`/`c_conj_transpose`/`c_solve` LU toolkit/`c_econj_gap`: `VhgV=V^H gV`, unit-norm tangent proj `-V^H(V·real(diag VhgV))`, `Econj[i,j]=conj(L_j)-conj(L_i)`, `gA=real(solve(V^H,(diag(gL)+VhgV/Econj)V^H))`, split across the L/V outputs and accumulated into `A.grad`) per `FunctionsManual.cpp:3820` (`handle_r_to_c` real-part `derivatives.yaml:1740`); verified vs LIVE torch 2.11.0 float64 by `grad_fns::linalg::tests::{eig_backward_real_3x3,eig_backward_complex_pair_2x2,eig_backward_v_only_complex_pair_2x2}_matches_torch` at `1e-6`; non-test consumer: the grad-aware `crate::linalg::eig` forward (which also unit-norm-normalizes ferray's eigenvector columns to match torch's contract) delegates here when grad is enabled. EXACT for diagonalizable A; phase-invariant-loss gauge note (R-DEV-1) in `EigBackwardShared`. Closes #1345. |
 //! | REQ-13 (`linalg.eigh`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
 //! | REQ-14 (`linalg.eigvals`) | SHIPPED | `EigvalsBackward` + `eigvals_differentiable` (non-Hermitian eigenvalues-only complex VJP `gA=real(solve(V^H, diag(gL) V^H))` — the `!gV.defined()` shortcut of `linalg_eig_backward`, on the `[.,2]` layout via the private complex toolkit) per `FunctionsManual.cpp:3857-3862` (`handle_r_to_c` real-part `derivatives.yaml:1740`); verified vs LIVE torch 2.11.0 float64 by `grad_fns::linalg::tests::{eigvals_backward_real_3x3,eigvals_backward_complex_pair_2x2}_matches_torch` at `1e-6`; non-test consumer: the grad-aware `crate::linalg::eigvals` forward delegates here when grad is enabled (eigenvectors from `crate::linalg::eig` under `no_grad`). EXACT for diagonalizable A. Closes #1345. |
 //! | REQ-15 (`linalg.eigvalsh`) | NOT-STARTED | forward exists; no backward. Blocker #1345. |
@@ -7283,9 +7283,9 @@ pub fn householder_product_differentiable<T: Float>(
 // `[..., 2]` = `[re, im]` (matching `crate::fft`'s convention). The
 // `linalg_eig_backward` VJP (`FunctionsManual.cpp:3820`) is entirely COMPLEX
 // arithmetic, so this section provides a small private complex-matrix toolkit
-// (matmul, conjugate-transpose, inverse-via-Gaussian-elimination, solve) on the
-// flat `[re, im]` layout. This is BOUNDED plumbing for one op family — NOT a
-// general complex-dtype subsystem.
+// (matmul, conjugate-transpose, direct LU solve) on the flat `[re, im]` layout.
+// This is BOUNDED plumbing for one op family — NOT a general complex-dtype
+// subsystem.
 //
 // A complex `r×c` matrix is held as `Vec<(T, T)>` of length `r*c` in row-major
 // order, `(re, im)` per element.
@@ -7361,84 +7361,155 @@ fn c_conj_transpose<T: Float>(a: &[(T, T)], r: usize, c: usize) -> Vec<(T, T)> {
     out
 }
 
-/// Invert an `n×n` complex matrix by Gauss-Jordan elimination with partial
-/// pivoting (by magnitude). Returns `Err(SingularMatrix)` if no nonzero pivot
-/// is found (the eig backward only inverts `V^H` for a diagonalizable `A`, so
-/// `V` — hence `V^H` — is invertible by construction).
-fn c_inverse<T: Float>(a: &[(T, T)], n: usize) -> FerrotorchResult<Vec<(T, T)>> {
-    let zero = <T as num_traits::Zero>::zero();
-    let one = <T as num_traits::One>::one();
-    // Augmented [A | I], row-major, n×(2n).
-    let w = 2 * n;
-    let mut aug = vec![(zero, zero); n * w];
-    for i in 0..n {
-        for j in 0..n {
-            aug[i * w + j] = a[i * n + j];
-        }
-        aug[i * w + n + i] = (one, zero);
+type Complex64Pair = (f64, f64);
+
+fn c_abs2_f64(z: Complex64Pair) -> f64 {
+    z.0 * z.0 + z.1 * z.1
+}
+
+fn to_c64<T: Float>(z: (T, T), op: &'static str) -> FerrotorchResult<Complex64Pair> {
+    let re =
+        z.0.to_f64()
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!("{op}: complex solve input cannot be represented as f64"),
+            })?;
+    let im =
+        z.1.to_f64()
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!("{op}: complex solve input cannot be represented as f64"),
+            })?;
+    Ok((re, im))
+}
+
+fn from_c64<T: Float>(z: Complex64Pair, op: &'static str) -> FerrotorchResult<(T, T)> {
+    let re = T::from(z.0).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: format!("{op}: complex solve result cannot be represented in output dtype"),
+    })?;
+    let im = T::from(z.1).ok_or_else(|| FerrotorchError::InvalidArgument {
+        message: format!("{op}: complex solve result cannot be represented in output dtype"),
+    })?;
+    Ok((re, im))
+}
+
+fn c_lu_solve_f64(
+    m: &[Complex64Pair],
+    b: &[Complex64Pair],
+    n: usize,
+    nrhs: usize,
+    op: &'static str,
+) -> FerrotorchResult<Vec<Complex64Pair>> {
+    if m.len() != n * n || b.len() != n * nrhs {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: complex solve shape mismatch, got matrix len {} and rhs len {} for {n}x{n} solve with {nrhs} RHS columns",
+                m.len(),
+                b.len()
+            ),
+        });
     }
+
+    let mut lu = m.to_vec();
+    let mut pivots: Vec<usize> = (0..n).collect();
+
     for col in 0..n {
-        // Partial pivot: row with largest |aug[row, col]|.
         let mut best_row = col;
-        let mut best_mag = zero;
+        let mut best_mag = 0.0;
         for row in col..n {
-            let e = aug[row * w + col];
-            let mag = e.0 * e.0 + e.1 * e.1;
+            let mag = c_abs2_f64(lu[row * n + col]);
             if mag > best_mag {
                 best_mag = mag;
                 best_row = row;
             }
         }
-        if best_mag == zero {
+        if best_mag == 0.0 {
             return Err(FerrotorchError::InvalidArgument {
-                message: "complex inverse: singular matrix (defective eig?)".into(),
+                message: format!("{op}: complex solve singular matrix (defective eig?)"),
             });
         }
+        pivots[col] = best_row;
         if best_row != col {
-            for j in 0..w {
-                aug.swap(col * w + j, best_row * w + j);
+            for j in 0..n {
+                lu.swap(col * n + j, best_row * n + j);
             }
         }
-        // Normalize pivot row so the pivot becomes 1.
-        let pivot = aug[col * w + col];
-        for j in 0..w {
-            aug[col * w + j] = c_div(aug[col * w + j], pivot);
-        }
-        // Eliminate the column in all other rows.
-        for row in 0..n {
-            if row == col {
-                continue;
-            }
-            let factor = aug[row * w + col];
-            if factor.0 == zero && factor.1 == zero {
-                continue;
-            }
-            for j in 0..w {
-                let sub = c_mul(factor, aug[col * w + j]);
-                aug[row * w + j] = c_sub(aug[row * w + j], sub);
+
+        let pivot = lu[col * n + col];
+        for row in (col + 1)..n {
+            let factor = c_div(lu[row * n + col], pivot);
+            lu[row * n + col] = factor;
+            for j in (col + 1)..n {
+                let update = c_mul(factor, lu[col * n + j]);
+                lu[row * n + j] = c_sub(lu[row * n + j], update);
             }
         }
     }
-    // Extract the right half (the inverse).
-    let mut inv = vec![(zero, zero); n * n];
-    for i in 0..n {
-        for j in 0..n {
-            inv[i * n + j] = aug[i * w + n + j];
+
+    let mut x = b.to_vec();
+    for (col, &pivot_row) in pivots.iter().enumerate() {
+        if pivot_row != col {
+            for rhs_col in 0..nrhs {
+                x.swap(col * nrhs + rhs_col, pivot_row * nrhs + rhs_col);
+            }
         }
     }
-    Ok(inv)
+
+    for row in 0..n {
+        for pivot_col in 0..row {
+            let factor = lu[row * n + pivot_col];
+            if factor == (0.0, 0.0) {
+                continue;
+            }
+            for rhs_col in 0..nrhs {
+                let update = c_mul(factor, x[pivot_col * nrhs + rhs_col]);
+                x[row * nrhs + rhs_col] = c_sub(x[row * nrhs + rhs_col], update);
+            }
+        }
+    }
+
+    for row in (0..n).rev() {
+        for upper_col in (row + 1)..n {
+            let factor = lu[row * n + upper_col];
+            if factor == (0.0, 0.0) {
+                continue;
+            }
+            for rhs_col in 0..nrhs {
+                let update = c_mul(factor, x[upper_col * nrhs + rhs_col]);
+                x[row * nrhs + rhs_col] = c_sub(x[row * nrhs + rhs_col], update);
+            }
+        }
+        let pivot = lu[row * n + row];
+        for rhs_col in 0..nrhs {
+            x[row * nrhs + rhs_col] = c_div(x[row * nrhs + rhs_col], pivot);
+        }
+    }
+
+    Ok(x)
 }
 
-/// Complex solve `X = M^{-1} @ B` for `M` `n×n` and `B` `n×c`, via explicit
-/// complex inverse (small `n`; matches torch's `at::linalg_solve(V^H, ...)`).
+/// Complex solve `M X = B` for `M` `n×n` and `B` `n×c`, using direct LU
+/// factorization with partial pivoting and forward/back substitution. The
+/// elimination runs in f64 even for f32 tensors, matching the intent of
+/// PyTorch's `at::linalg_solve(V^H, ...)` path more closely than forming
+/// `M^{-1}` and multiplying by `B`.
 fn c_solve<T: Float>(
     m: &[(T, T)],
     b: &[(T, T)],
     n: usize,
     c: usize,
 ) -> FerrotorchResult<Vec<(T, T)>> {
-    let minv = c_inverse(m, n)?;
-    Ok(c_matmul(&minv, b, n, n, c))
+    const OP: &str = "linalg_eig_backward";
+    let m64: Vec<_> = m
+        .iter()
+        .map(|&z| to_c64(z, OP))
+        .collect::<FerrotorchResult<_>>()?;
+    let b64: Vec<_> = b
+        .iter()
+        .map(|&z| to_c64(z, OP))
+        .collect::<FerrotorchResult<_>>()?;
+    c_lu_solve_f64(&m64, &b64, n, c, OP)?
+        .into_iter()
+        .map(|z| from_c64(z, OP))
+        .collect()
 }
 
 /// `Econj[i,j] = conj(L_j) - conj(L_i)` off-diagonal, `1` on the diagonal — the
@@ -7491,9 +7562,9 @@ fn complex_real_part<T: Float>(a: &[(T, T)]) -> Vec<T> {
 /// (`handle_r_to_c`, `derivatives.yaml:1740`).
 ///
 /// EXACT for DIAGONALIZABLE `A` (distinct eigenvalues ⇒ `V` invertible). On a
-/// defective / repeated-eigenvalue input `V` is singular and `c_inverse`
-/// returns `SingularMatrix` — torch likewise has no defined gradient there (it
-/// divides through a degenerate `V`).
+/// defective / repeated-eigenvalue input `V` is singular and `c_solve` returns
+/// `SingularMatrix` — torch likewise has no defined gradient there (it divides
+/// through a degenerate `V`).
 #[derive(Debug)]
 pub struct EigvalsBackward<T: Float> {
     input: Tensor<T>,
@@ -7599,7 +7670,7 @@ pub fn eigvals_differentiable<T: Float>(a: &Tensor<T>) -> FerrotorchResult<Tenso
 /// into `A.grad` — the same split-node strategy `eigh` / `svd` / `qr` use.
 ///
 /// EXACT for DIAGONALIZABLE `A` (distinct eigenvalues). On a defective input `V`
-/// is singular (`c_inverse` ⇒ `SingularMatrix`) and on a repeated eigenvalue the
+/// is singular (`c_solve` ⇒ `SingularMatrix`) and on a repeated eigenvalue the
 /// `Econj` off-diagonal `1/(conj(L_j)-conj(L_i))` diverges exactly as torch's
 /// does (torch does not special-case degeneracy).
 #[derive(Debug)]
