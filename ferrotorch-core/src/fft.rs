@@ -425,6 +425,92 @@ fn invalid_data_points(op: &'static str, n: i128) -> FerrotorchError {
     }
 }
 
+fn fft_dim_out_of_range(op: &'static str, dim: isize, signal_ndim: usize) -> FerrotorchError {
+    if signal_ndim == 0 {
+        return FerrotorchError::InvalidArgument {
+            message: format!("{op}: Dimension specified as {dim} but tensor has no dimensions"),
+        };
+    }
+    FerrotorchError::InvalidArgument {
+        message: format!(
+            "{op}: Dimension out of range (expected to be in range of [{}, {}], but got {dim})",
+            -(signal_ndim as isize),
+            signal_ndim as isize - 1
+        ),
+    }
+}
+
+fn validate_c2c_nd_fft_args<T: Float>(
+    input: &Tensor<T>,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+    op: &'static str,
+) -> FerrotorchResult<Vec<usize>> {
+    let shape = input.shape();
+    if shape.is_empty() || *shape.last().unwrap() != 2 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: input must have trailing dimension 2 (complex), got shape {shape:?}"
+            ),
+        });
+    }
+
+    let signal_ndim = shape.len() - 1;
+    let resolved_axes = if let Some(raw_axes) = axes {
+        if let Some(sizes) = s
+            && sizes.len() != raw_axes.len()
+        {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "{op}: When given, dim and shape arguments must have the same length"
+                ),
+            });
+        }
+
+        let mut resolved = Vec::with_capacity(raw_axes.len());
+        for &axis in raw_axes {
+            let Some(axis) = wrap_fft_axis(axis, signal_ndim) else {
+                return Err(fft_dim_out_of_range(op, axis, signal_ndim));
+            };
+            resolved.push(axis);
+        }
+        resolved
+    } else {
+        let transform_ndim = s.map_or(signal_ndim, |sizes| sizes.len());
+        if transform_ndim > signal_ndim {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "{op}: Got shape with {transform_ndim} values but input tensor only has {signal_ndim} dimensions."
+                ),
+            });
+        }
+        ((signal_ndim - transform_ndim)..signal_ndim).collect()
+    };
+
+    if let Some(sizes) = s {
+        for &n in sizes {
+            if n == 0 {
+                return Err(invalid_data_points(op, 0));
+            }
+        }
+    }
+
+    let mut sorted_axes = resolved_axes.clone();
+    sorted_axes.sort_unstable();
+    if sorted_axes.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: FFT dims must be unique"),
+        });
+    }
+
+    Ok(resolved_axes)
+}
+
+fn empty_c2c_fft_identity<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    let contiguous = crate::autograd::no_grad::no_grad(|| input.contiguous())?;
+    Ok(contiguous.detach())
+}
+
 /// Guard N-D c2r wrappers (`irfftn`/`irfft2`/`hfftn`/`hfft2`) before ferray's
 /// eager default-size arithmetic can underflow on an empty half-spectrum axis.
 ///
@@ -1120,6 +1206,10 @@ pub fn fftn_norm<T: Float>(
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
     reject_half_cpu_fft::<T>("fftn")?;
+    let resolved_axes = validate_c2c_nd_fft_args(input, s, axes, "fftn")?;
+    if resolved_axes.is_empty() {
+        return empty_c2c_fft_identity(input);
+    }
     // GPU fast paths (#636, #966):
     // - axes=None, s=None: dispatch by rank (rank-2 -> cufftPlanMany rank=2,
     //   rank-3 -> cufftPlan3d).
@@ -1163,18 +1253,10 @@ pub fn fftn_norm<T: Float>(
                     };
                     return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
                 }
-            } else if let Some(ax) = axes {
-                // Axes-override path (#966): normalize isize axes to usize.
-                let norm_axes: Vec<usize> = ax
-                    .iter()
-                    .map(|&a| {
-                        if a < 0 {
-                            (spatial_ndim as isize + a) as usize
-                        } else {
-                            a as usize
-                        }
-                    })
-                    .collect();
+            } else if axes.is_some() {
+                // Axes-override path (#966): use the PyTorch-canonicalized
+                // non-negative axes validated above.
+                let norm_axes = resolved_axes.clone();
                 // cufftPlanMany with inembed=NULL, istride=1 is only correct
                 // when the transform axes are the innermost (last) spatial
                 // dimensions in contiguous order. For other axes layouts
@@ -1250,6 +1332,10 @@ pub fn ifftn_norm<T: Float>(
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
     reject_half_cpu_fft::<T>("ifftn")?;
+    let resolved_axes = validate_c2c_nd_fft_args(input, s, axes, "ifftn")?;
+    if resolved_axes.is_empty() {
+        return empty_c2c_fft_identity(input);
+    }
     // GPU fast paths (#636, #966): mirrors fftn dispatch logic exactly,
     // with inverse=true for all cuFFT calls.
     if input.is_cuda()
@@ -1286,17 +1372,8 @@ pub fn ifftn_norm<T: Float>(
                     };
                     return Tensor::from_storage(TensorStorage::gpu(h_out), shape.to_vec(), false);
                 }
-            } else if let Some(ax) = axes {
-                let norm_axes: Vec<usize> = ax
-                    .iter()
-                    .map(|&a| {
-                        if a < 0 {
-                            (spatial_ndim as isize + a) as usize
-                        } else {
-                            a as usize
-                        }
-                    })
-                    .collect();
+            } else if axes.is_some() {
+                let norm_axes = resolved_axes.clone();
                 // Same innermost-axes restriction as fftn: GPU path only when
                 // axes form the last r spatial dimensions (cufftPlanMany
                 // inembed=NULL, istride=1 contract).
@@ -1920,6 +1997,17 @@ mod tests {
         }
     }
 
+    fn assert_invalid_argument(label: &str, result: FerrotorchResult<Tensor<f64>>) {
+        match result {
+            Err(FerrotorchError::InvalidArgument { .. }) => {}
+            Err(other) => panic!("{label}: expected InvalidArgument, got {other:?}"),
+            Ok(tensor) => panic!(
+                "{label}: expected InvalidArgument, got Ok with shape {:?}",
+                tensor.shape()
+            ),
+        }
+    }
+
     /// Build a complex tensor of shape [n, 2] from a slice of (re, im) pairs.
     fn complex_tensor(pairs: &[(f64, f64)]) -> Tensor<f64> {
         let mut data = Vec::with_capacity(pairs.len() * 2);
@@ -2340,6 +2428,54 @@ mod tests {
     // -----------------------------------------------------------------------
     // fftn / ifftn round-trip — agrees with 1-D fft for 1 axis
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn c2c_nd_axis_validation_matches_torch() {
+        let matrix = t(
+            &[1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 0.0, 5.0, 0.0, 6.0, 0.0],
+            &[2, 3, 2],
+        );
+
+        for output in [
+            fftn(&matrix, None, Some(&[])).unwrap(),
+            ifftn(&matrix, None, Some(&[])).unwrap(),
+            fftn(&matrix, Some(&[]), None).unwrap(),
+            ifftn(&matrix, Some(&[]), None).unwrap(),
+        ] {
+            assert_eq!(output.shape(), matrix.shape());
+            assert_close(output.data().unwrap(), matrix.data().unwrap(), 1e-12);
+        }
+
+        assert_invalid_argument("fftn out-of-range axis", fftn(&matrix, None, Some(&[2])));
+        assert_invalid_argument("ifftn out-of-range axis", ifftn(&matrix, None, Some(&[2])));
+        assert_invalid_argument("fftn duplicate axes", fftn(&matrix, None, Some(&[0, 0])));
+        assert_invalid_argument("ifftn duplicate axes", ifftn(&matrix, None, Some(&[0, 0])));
+        assert_invalid_argument(
+            "fftn shape/dim length mismatch",
+            fftn(&matrix, Some(&[2]), Some(&[])),
+        );
+        assert_invalid_argument("fftn zero shape", fftn(&matrix, Some(&[0]), Some(&[0])));
+
+        let scalar = t(&[1.0, 0.0], &[2]);
+        for output in [
+            fftn(&scalar, None, None).unwrap(),
+            ifftn(&scalar, None, None).unwrap(),
+            fftn(&scalar, Some(&[]), None).unwrap(),
+            ifftn(&scalar, None, Some(&[])).unwrap(),
+        ] {
+            assert_eq!(output.shape(), scalar.shape());
+            assert_close(output.data().unwrap(), scalar.data().unwrap(), 1e-12);
+        }
+        assert_invalid_argument("fftn scalar explicit axis", fftn(&scalar, None, Some(&[0])));
+        assert_invalid_argument(
+            "ifftn scalar explicit axis",
+            ifftn(&scalar, None, Some(&[-1])),
+        );
+        assert_invalid_argument(
+            "fftn scalar oversized shape",
+            fftn(&scalar, Some(&[1]), None),
+        );
+    }
 
     #[test]
     fn fftn_matches_fft_1d() {

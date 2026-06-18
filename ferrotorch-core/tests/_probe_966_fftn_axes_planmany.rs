@@ -77,6 +77,51 @@ fn read_back_f64(t: &Tensor<f64>) -> Vec<f64> {
     }
 }
 
+#[test]
+fn p966_empty_axes_identity_stays_cuda_and_validates_axes_f64() {
+    ensure_cuda_backend();
+
+    let shape = [2usize, 3, 2];
+    let data: Vec<f64> = (0..shape.iter().product::<usize>())
+        .map(|i| {
+            if i % 2 == 0 {
+                i as f64 * 0.25
+            } else {
+                -(i as f64) * 0.125
+            }
+        })
+        .collect();
+    let gpu_tensor = to_cuda_f64(make_cpu_f64(&data, &shape));
+
+    let fft_empty_axes = fftn(&gpu_tensor, None, Some(&[])).expect("fftn empty axes");
+    assert!(
+        fft_empty_axes.is_cuda(),
+        "empty-axis fftn identity must stay CUDA-resident"
+    );
+    check_f64(
+        "fftn empty axes identity",
+        &read_back_f64(&fft_empty_axes),
+        &data,
+    );
+
+    let ifft_empty_shape = ifftn(&gpu_tensor, Some(&[]), None).expect("ifftn empty shape");
+    assert!(
+        ifft_empty_shape.is_cuda(),
+        "empty-shape ifftn identity must stay CUDA-resident"
+    );
+    check_f64(
+        "ifftn empty shape identity",
+        &read_back_f64(&ifft_empty_shape),
+        &data,
+    );
+
+    let duplicate_err = fftn(&gpu_tensor, None, Some(&[0, 0])).unwrap_err();
+    assert!(
+        format!("{duplicate_err}").contains("FFT dims must be unique"),
+        "duplicate axes must reject before dispatch, got {duplicate_err}"
+    );
+}
+
 fn check_f32(label: &str, got: &[f32], expected: &[f32]) {
     assert_eq!(got.len(), expected.len(), "{label}: length mismatch");
     for (i, (&g, &e)) in got.iter().zip(expected.iter()).enumerate() {

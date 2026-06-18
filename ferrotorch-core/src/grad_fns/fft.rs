@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use crate::autograd::no_grad::is_grad_enabled;
 use crate::dtype::Float;
-use crate::error::FerrotorchResult;
+use crate::error::{FerrotorchError, FerrotorchResult};
 use crate::fft;
 use crate::fft::FftNorm;
 use crate::storage::TensorStorage;
@@ -588,20 +588,101 @@ impl<T: Float> GradFn<T> for IrfftBackward<T> {
 /// non-negative axis. Used to translate the 1-D `dim` into the `axes=[dim]`
 /// list the N-D rfft/irfft backward path consumes.
 #[inline]
-fn resolve_signal_axis(dim: Option<isize>, signal_ndim: usize) -> usize {
-    match dim {
-        None => signal_ndim.saturating_sub(1),
-        Some(d) if d < 0 => (signal_ndim as isize + d).max(0) as usize,
-        Some(d) => d as usize,
+fn fft_dim_out_of_range(op: &'static str, dim: isize, signal_ndim: usize) -> FerrotorchError {
+    if signal_ndim == 0 {
+        return FerrotorchError::InvalidArgument {
+            message: format!("{op}: Dimension specified as {dim} but tensor has no dimensions"),
+        };
     }
+    FerrotorchError::InvalidArgument {
+        message: format!(
+            "{op}: Dimension out of range (expected to be in range of [{}, {}], but got {dim})",
+            -(signal_ndim as isize),
+            signal_ndim as isize - 1
+        ),
+    }
+}
+
+#[inline]
+fn resolve_signal_axis_checked(
+    op: &'static str,
+    dim: Option<isize>,
+    signal_ndim: usize,
+) -> FerrotorchResult<usize> {
+    let dim = dim.unwrap_or(-1);
+    if dim >= 0 && (dim as usize) < signal_ndim {
+        Ok(dim as usize)
+    } else if dim < 0 && dim >= -(signal_ndim as isize) {
+        Ok((signal_ndim as isize + dim) as usize)
+    } else {
+        Err(fft_dim_out_of_range(op, dim, signal_ndim))
+    }
+}
+
+fn resolve_fft_axes_checked(
+    op: &'static str,
+    signal_ndim: usize,
+    s: Option<&[usize]>,
+    axes: Option<&[isize]>,
+) -> FerrotorchResult<Vec<usize>> {
+    if let Some(raw_axes) = axes {
+        if raw_axes.is_empty() {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("{op} must transform at least one axis"),
+            });
+        }
+        if let Some(sizes) = s
+            && sizes.len() != raw_axes.len()
+        {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!(
+                    "{op}: When given, dim and shape arguments must have the same length"
+                ),
+            });
+        }
+        let mut resolved = Vec::with_capacity(raw_axes.len());
+        for &axis in raw_axes {
+            resolved.push(resolve_signal_axis_checked(op, Some(axis), signal_ndim)?);
+        }
+        let mut sorted = resolved.clone();
+        sorted.sort_unstable();
+        if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(FerrotorchError::InvalidArgument {
+                message: format!("{op}: FFT dims must be unique"),
+            });
+        }
+        return Ok(resolved);
+    }
+
+    let transform_ndim = s.map_or(signal_ndim, |sizes| sizes.len());
+    if transform_ndim == 0 {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("{op} must transform at least one axis"),
+        });
+    }
+    if transform_ndim > signal_ndim {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: Got shape with {transform_ndim} values but input tensor only has {signal_ndim} dimensions."
+            ),
+        });
+    }
+    Ok(((signal_ndim - transform_ndim)..signal_ndim).collect())
 }
 
 fn tensor_from_fft_operation<T: Float, G: GradFn<T> + 'static>(
     result: Tensor<T>,
     grad_fn: Arc<G>,
 ) -> FerrotorchResult<Tensor<T>> {
-    let (storage, shape) = result.into_storage_and_shape()?;
     let grad_fn: Arc<dyn GradFn<T>> = grad_fn;
+    tensor_from_fft_operation_dyn(result, grad_fn)
+}
+
+fn tensor_from_fft_operation_dyn<T: Float>(
+    result: Tensor<T>,
+    grad_fn: Arc<dyn GradFn<T>>,
+) -> FerrotorchResult<Tensor<T>> {
+    let (storage, shape) = result.into_storage_and_shape()?;
     Tensor::from_operation(storage, shape, grad_fn)
 }
 
@@ -625,7 +706,7 @@ pub fn fft_differentiable_norm<T: Float>(
 
     if is_grad_enabled() && input.requires_grad() {
         let grad_fn = Arc::new(FftBackward::new_norm(input.clone(), n, dim, norm));
-        tensor_from_fft_operation(result, grad_fn)
+        tensor_from_fft_operation_dyn(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -650,7 +731,7 @@ pub fn ifft_differentiable_norm<T: Float>(
 
     if is_grad_enabled() && input.requires_grad() {
         let grad_fn = Arc::new(IfftBackward::new_norm(input.clone(), n, dim, norm));
-        tensor_from_fft_operation(result, grad_fn)
+        tensor_from_fft_operation_dyn(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -661,13 +742,14 @@ pub fn rfft_differentiable<T: Float>(
     input: &Tensor<T>,
     n: Option<usize>,
 ) -> FerrotorchResult<Tensor<T>> {
-    let input_n = *input.shape().last().unwrap();
-    let fft_n = n.unwrap_or(input_n);
+    let axis = resolve_signal_axis_checked("rfft", None, input.shape().len())?;
     let result = fft::rfft(input, n)?;
 
     if is_grad_enabled() && input.requires_grad() {
+        let input_n = input.shape()[axis];
+        let fft_n = n.unwrap_or(input_n);
         let grad_fn = Arc::new(RfftBackward::new(input.clone(), n, fft_n));
-        tensor_from_fft_operation(result, grad_fn)
+        tensor_from_fft_operation_dyn(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -687,20 +769,22 @@ pub fn rfft_differentiable_norm<T: Float>(
     norm: FftNorm,
 ) -> FerrotorchResult<Tensor<T>> {
     let in_shape = input.shape();
-    let axis = resolve_signal_axis(dim, in_shape.len());
-    // Fast path: default last-axis backward-norm → cheap 1-D backward.
-    if norm == FftNorm::Backward && axis == in_shape.len() - 1 {
-        return rfft_differentiable(input, n);
-    }
+    let axis = resolve_signal_axis_checked("rfft", dim, in_shape.len())?;
     let result = fft::rfft_norm(input, n, dim, norm)?;
 
+    // Fast path: default last-axis backward-norm → cheap 1-D backward.
     if is_grad_enabled() && input.requires_grad() {
         let last_axis_n = n.unwrap_or(in_shape[axis]);
+        if norm == FftNorm::Backward && axis == in_shape.len() - 1 {
+            let grad_fn: Arc<dyn GradFn<T>> =
+                Arc::new(RfftBackward::new(input.clone(), n, last_axis_n));
+            return tensor_from_fft_operation_dyn(result, grad_fn);
+        }
         let s_back = vec![last_axis_n];
         let axes_back = vec![axis as isize];
         let out_shape = result.shape().to_vec();
         // last_axis_logical in the rfft output (trailing 2 excluded) is `axis`.
-        let grad_fn = Arc::new(RfftnBackward::new_norm(
+        let grad_fn: Arc<dyn GradFn<T>> = Arc::new(RfftnBackward::new_norm(
             input.clone(),
             Some(s_back),
             Some(axes_back),
@@ -710,7 +794,7 @@ pub fn rfft_differentiable_norm<T: Float>(
             last_axis_n,
             norm,
         ));
-        tensor_from_fft_operation(result, grad_fn)
+        tensor_from_fft_operation_dyn(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -721,14 +805,17 @@ pub fn irfft_differentiable<T: Float>(
     input: &Tensor<T>,
     n: Option<usize>,
 ) -> FerrotorchResult<Tensor<T>> {
-    let shape = input.shape();
-    let half_n = shape[shape.len() - 2];
-    let output_n = n.unwrap_or(2 * (half_n - 1));
     let result = fft::irfft(input, n)?;
 
     if is_grad_enabled() && input.requires_grad() {
+        let output_n = *result
+            .shape()
+            .last()
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "irfft: Dimension specified as -1 but tensor has no dimensions".into(),
+            })?;
         let grad_fn = Arc::new(IrfftBackward::new(input.clone(), n, output_n));
-        tensor_from_fft_operation(result, grad_fn)
+        tensor_from_fft_operation_dyn(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -748,19 +835,38 @@ pub fn irfft_differentiable_norm<T: Float>(
     let in_shape = input.shape();
     // The complex input's freq axis lives in the real-output layout; resolve
     // `dim` against the real-output ndim (= input ndim - 1, trailing 2 dropped).
-    let real_ndim = in_shape.len().saturating_sub(1);
-    let axis = resolve_signal_axis(dim, real_ndim);
-    let half_n = in_shape[axis];
-    let output_n = n.unwrap_or(2 * (half_n.saturating_sub(1)));
-    if norm == FftNorm::Backward && axis == real_ndim.saturating_sub(1) {
-        return irfft_differentiable(input, n);
-    }
+    let real_ndim =
+        in_shape
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: format!(
+                    "irfft: input must have trailing dimension 2 (complex), got shape {in_shape:?}"
+                ),
+            })?;
+    let axis = resolve_signal_axis_checked("irfft", dim, real_ndim)?;
     let result = fft::irfft_norm(input, n, dim, norm)?;
 
     if is_grad_enabled() && input.requires_grad() {
+        let output_n =
+            result
+                .shape()
+                .get(axis)
+                .copied()
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "irfft: output shape {:?} has no axis {axis}",
+                        result.shape()
+                    ),
+                })?;
+        if norm == FftNorm::Backward && axis == real_ndim - 1 {
+            let grad_fn: Arc<dyn GradFn<T>> =
+                Arc::new(IrfftBackward::new(input.clone(), n, output_n));
+            return tensor_from_fft_operation_dyn(result, grad_fn);
+        }
         let s_back = vec![output_n];
         let axes_back = vec![axis as isize];
-        let grad_fn = Arc::new(IrfftnBackward::new_norm(
+        let grad_fn: Arc<dyn GradFn<T>> = Arc::new(IrfftnBackward::new_norm(
             input.clone(),
             Some(s_back),
             Some(axes_back),
@@ -769,7 +875,7 @@ pub fn irfft_differentiable_norm<T: Float>(
             output_n,
             norm,
         ));
-        tensor_from_fft_operation(result, grad_fn)
+        tensor_from_fft_operation_dyn(result, grad_fn)
     } else {
         Ok(result)
     }
@@ -1653,37 +1759,21 @@ pub fn rfftn_differentiable_norm<T: Float>(
     if is_grad_enabled() && input.requires_grad() {
         // Backward needs the original real-input shape along the transform
         // axes. We pass the input's shape segment so irfftn can reconstruct.
+        let shape = input.shape();
+        let axes_back_resolved = resolve_fft_axes_checked("rfftn", shape.len(), s, axes)?;
         let s_back: Vec<usize> = match (s, axes) {
             (Some(s_slice), _) => s_slice.to_vec(),
-            (None, Some(axes_slice)) => {
-                let shape = input.shape();
-                axes_slice
-                    .iter()
-                    .map(|&a| {
-                        let resolved = if a < 0 {
-                            (shape.len() as isize + a) as usize
-                        } else {
-                            a as usize
-                        };
-                        shape[resolved]
-                    })
-                    .collect()
-            }
+            (None, Some(_)) => axes_back_resolved.iter().map(|&axis| shape[axis]).collect(),
             (None, None) => input.shape().to_vec(),
         };
         // Resolve the last transform axis (logical, in real-input space).
         let in_shape = input.shape();
-        let last_axis_logical = match axes {
-            Some(axes_slice) => {
-                let a = *axes_slice.last().unwrap();
-                if a < 0 {
-                    (in_shape.len() as isize + a) as usize
-                } else {
-                    a as usize
-                }
-            }
-            None => in_shape.len() - 1,
-        };
+        let last_axis_logical =
+            *axes_back_resolved
+                .last()
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: "rfftn must transform at least one axis".into(),
+                })?;
         let last_axis_n = s_back
             .last()
             .copied()
@@ -1737,17 +1827,13 @@ pub fn irfftn_differentiable_norm<T: Float>(
         // output (`result`), the last freq axis is the last entry of `axes`
         // (or the last axis if `axes` is `None`).
         let res_shape = result.shape();
-        let last_axis_logical_real = match axes {
-            Some(axes_slice) => {
-                let a = *axes_slice.last().unwrap();
-                if a < 0 {
-                    (res_shape.len() as isize + a) as usize
-                } else {
-                    a as usize
-                }
-            }
-            None => res_shape.len() - 1,
-        };
+        let axes_back_resolved = resolve_fft_axes_checked("irfftn", res_shape.len(), s, axes)?;
+        let last_axis_logical_real =
+            *axes_back_resolved
+                .last()
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: "irfftn must transform at least one axis".into(),
+                })?;
         // For the input (`x` to irfftn), the half-spectrum axis is at the
         // same logical index since irfftn's input layout is `[..., 2]` and
         // the freq axis maps 1:1 with the real output's last transform axis.
@@ -1775,14 +1861,20 @@ pub fn hfft_differentiable<T: Float>(
     input: &Tensor<T>,
     n: Option<usize>,
 ) -> FerrotorchResult<Tensor<T>> {
-    let shape = input.shape();
-    let input_n = shape[shape.len() - 2];
     let result = fft::hfft(input, n)?;
     // hfft output's last dim is the real-signal length N. Persist it so the
     // backward can detect Nyquist parity (boundary vs. interior k).
-    let output_n = *result.shape().last().unwrap();
 
     if is_grad_enabled() && input.requires_grad() {
+        let shape = input.shape();
+        let axis = resolve_signal_axis_checked("hfft", None, shape.len().saturating_sub(1))?;
+        let input_n = shape[axis];
+        let output_n = *result
+            .shape()
+            .last()
+            .ok_or_else(|| FerrotorchError::InvalidArgument {
+                message: "hfft: Dimension specified as -1 but tensor has no dimensions".into(),
+            })?;
         let grad_fn = Arc::new(HfftBackward::new(input.clone(), input_n, output_n));
         tensor_from_fft_operation(result, grad_fn)
     } else {
@@ -1796,14 +1888,14 @@ pub fn ihfft_differentiable<T: Float>(
     input: &Tensor<T>,
     n: Option<usize>,
 ) -> FerrotorchResult<Tensor<T>> {
-    let shape = input.shape();
-    // FFT length N: defaults to the input's last dim (real signal length).
-    // When `n` is supplied, ihfft truncates/pads the input before the
-    // transform — the backward reconstructs grad over that same `N`.
-    let input_n = n.unwrap_or(*shape.last().unwrap());
+    let axis = resolve_signal_axis_checked("ihfft", None, input.shape().len())?;
     let result = fft::ihfft(input, n)?;
 
     if is_grad_enabled() && input.requires_grad() {
+        // FFT length N: defaults to the input's last dim (real signal length).
+        // When `n` is supplied, ihfft truncates/pads the input before the
+        // transform — the backward reconstructs grad over that same `N`.
+        let input_n = n.unwrap_or(input.shape()[axis]);
         let grad_fn = Arc::new(IhfftBackward::new(input.clone(), input_n));
         tensor_from_fft_operation(result, grad_fn)
     } else {
@@ -2031,6 +2123,17 @@ mod tests {
         }
     }
 
+    fn assert_invalid_argument(label: &str, result: FerrotorchResult<Tensor<f64>>) {
+        match result {
+            Err(FerrotorchError::InvalidArgument { .. }) => {}
+            Err(other) => panic!("{label}: expected InvalidArgument, got {other:?}"),
+            Ok(tensor) => panic!(
+                "{label}: expected InvalidArgument, got Ok with shape {:?}",
+                tensor.shape()
+            ),
+        }
+    }
+
     #[test]
     fn fft_differentiable_attaches_grad_fn() {
         // Complex input [4, 2] with requires_grad.
@@ -2194,6 +2297,133 @@ mod tests {
         let result = ihfft_differentiable(&input, None).unwrap();
         assert!(result.grad_fn().is_some());
         assert_eq!(result.grad_fn().unwrap().name(), "IhfftBackward");
+    }
+
+    #[test]
+    fn differentiable_real_fft_invalid_inputs_return_errors_not_panics() {
+        let scalar = leaf(&[1.0], &[]);
+        let vector = leaf(&[1.0, 2.0, 3.0, 4.0], &[4]);
+
+        assert_invalid_argument("rfft scalar", rfft_differentiable(&scalar, None));
+        assert_invalid_argument("rfft n=0", rfft_differentiable(&vector, Some(0)));
+        assert_invalid_argument(
+            "rfft dim below range",
+            rfft_differentiable_norm(&vector, None, Some(-2), FftNorm::Backward),
+        );
+        assert_invalid_argument(
+            "rfft dim above range",
+            rfft_differentiable_norm(&vector, None, Some(1), FftNorm::Backward),
+        );
+
+        assert_invalid_argument("ihfft scalar", ihfft_differentiable(&scalar, None));
+        assert_invalid_argument("ihfft n=0", ihfft_differentiable(&vector, Some(0)));
+    }
+
+    #[test]
+    fn differentiable_complex_to_real_fft_invalid_inputs_return_errors_not_panics() {
+        let complex_scalar = leaf(&[1.0, 0.0], &[2]);
+        let complex_vector = leaf(&[1.0, 0.0, 2.0, 0.0, 3.0, 0.0], &[3, 2]);
+
+        assert_invalid_argument(
+            "irfft complex scalar",
+            irfft_differentiable(&complex_scalar, None),
+        );
+        assert_invalid_argument(
+            "hfft complex scalar",
+            hfft_differentiable(&complex_scalar, None),
+        );
+        assert_invalid_argument("irfft n=0", irfft_differentiable(&complex_vector, Some(0)));
+        assert_invalid_argument("hfft n=0", hfft_differentiable(&complex_vector, Some(0)));
+        assert_invalid_argument(
+            "irfft dim below range",
+            irfft_differentiable_norm(&complex_vector, None, Some(-2), FftNorm::Backward),
+        );
+        assert_invalid_argument(
+            "irfft dim above range",
+            irfft_differentiable_norm(&complex_vector, None, Some(1), FftNorm::Backward),
+        );
+    }
+
+    #[test]
+    fn differentiable_nd_complex_fft_invalid_axes_return_errors_not_panics() {
+        let complex_matrix = leaf(
+            &[1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 0.0, 5.0, 0.0, 6.0, 0.0],
+            &[2, 3, 2],
+        );
+
+        let fft_empty_axes = fftn_differentiable(&complex_matrix, None, Some(&[])).unwrap();
+        assert_eq!(fft_empty_axes.shape(), complex_matrix.shape());
+        assert_close(
+            fft_empty_axes.data().unwrap(),
+            complex_matrix.data().unwrap(),
+            1e-12,
+        );
+        let ifft_empty_axes = ifftn_differentiable(&complex_matrix, None, Some(&[])).unwrap();
+        assert_eq!(ifft_empty_axes.shape(), complex_matrix.shape());
+        assert_close(
+            ifft_empty_axes.data().unwrap(),
+            complex_matrix.data().unwrap(),
+            1e-12,
+        );
+
+        assert_invalid_argument(
+            "fftn out-of-range axis",
+            fftn_differentiable(&complex_matrix, None, Some(&[2])),
+        );
+        assert_invalid_argument(
+            "ifftn out-of-range axis",
+            ifftn_differentiable(&complex_matrix, None, Some(&[2])),
+        );
+        assert_invalid_argument(
+            "fftn duplicate axes",
+            fftn_differentiable(&complex_matrix, None, Some(&[0, 0])),
+        );
+        assert_invalid_argument(
+            "ifftn duplicate axes",
+            ifftn_differentiable(&complex_matrix, None, Some(&[0, 0])),
+        );
+    }
+
+    #[test]
+    fn differentiable_nd_real_fft_invalid_axes_return_errors_not_panics() {
+        let real_matrix = leaf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let complex_matrix = leaf(
+            &[1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 0.0, 5.0, 0.0, 6.0, 0.0],
+            &[2, 3, 2],
+        );
+
+        assert_invalid_argument(
+            "rfftn empty axes",
+            rfftn_differentiable(&real_matrix, None, Some(&[])),
+        );
+        assert_invalid_argument(
+            "rfftn empty shape",
+            rfftn_differentiable(&real_matrix, Some(&[]), None),
+        );
+        assert_invalid_argument(
+            "rfftn out-of-range axis",
+            rfftn_differentiable(&real_matrix, None, Some(&[2])),
+        );
+        assert_invalid_argument(
+            "rfftn duplicate axes",
+            rfftn_differentiable(&real_matrix, None, Some(&[0, 0])),
+        );
+        assert_invalid_argument(
+            "irfftn empty axes",
+            irfftn_differentiable(&complex_matrix, None, Some(&[])),
+        );
+        assert_invalid_argument(
+            "irfftn empty shape",
+            irfftn_differentiable(&complex_matrix, Some(&[]), None),
+        );
+        assert_invalid_argument(
+            "irfftn out-of-range axis",
+            irfftn_differentiable(&complex_matrix, None, Some(&[2])),
+        );
+        assert_invalid_argument(
+            "irfftn duplicate axes",
+            irfftn_differentiable(&complex_matrix, None, Some(&[0, 0])),
+        );
     }
 
     #[test]

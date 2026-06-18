@@ -48,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- CORE-039: Differentiable FFT wrappers panic before fallible input validation (#1733)
 - CORE-033: `gradcheck` can report success for invalid or non-finite comparisons (#1727)
 - CORE-040: Scalar `scatter_reduce` bypasses validation and can panic on empty source (#1734)
 - CORE: no_grad/inference views of normal grad tensors drop requires_grad flag (#2002)
