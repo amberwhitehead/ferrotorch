@@ -1109,8 +1109,14 @@ fn special_unary_backward_cuda<T: Float>(
             let half = full_like_scalar(input, 0.5, kind.op())?;
             crate::grad_fns::comparison::where_bt(&not_tiny, &gradx, &half)?
         }
-        SpecialUnaryKind::Multigammaln { .. } => {
-            return Err(FerrotorchError::NotImplementedOnCuda { op: kind.op() });
+        SpecialUnaryKind::Multigammaln { p } => {
+            let mut acc = full_like_scalar(input, 0.0, kind.op())?;
+            for i in 1..=p {
+                let shift = add_const_like(input, (1.0 - i as f64) * 0.5, kind.op())?;
+                let dig = digamma(&shift)?;
+                acc = crate::grad_fns::arithmetic::add(&acc, &dig)?;
+            }
+            acc
         }
     };
 
@@ -1418,6 +1424,78 @@ fn trigamma_cuda_composed<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tenso
     let unsigned = crate::grad_fns::arithmetic::add(&result, &tail)?;
     let neg_unsigned = crate::grad_fns::arithmetic::neg(&unsigned)?;
     crate::grad_fns::comparison::where_bt(&reflect, &neg_unsigned, &unsigned)
+}
+
+fn multigammaln_cuda_composed<T: Float>(
+    input: &Tensor<T>,
+    p: usize,
+) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !input.is_cuda() {
+        return Ok(None);
+    }
+    if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "multigammaln" });
+    }
+
+    no_grad(|| {
+        let op = "multigammaln";
+        let pf = p as f64;
+        let c = (pf * (pf - 1.0) * 0.25) * std::f64::consts::PI.ln();
+        let mut acc = full_like_scalar(input, c, op)?;
+        for i in 1..=p {
+            let shifted = add_const_like(input, (1.0 - i as f64) * 0.5, op)?;
+            let term = lgamma(&shifted)?;
+            acc = crate::grad_fns::arithmetic::add(&acc, &term)?;
+        }
+        Ok(Some(acc))
+    })
+}
+
+fn gammaln_sign_cuda_composed<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !input.is_cuda() {
+        return Ok(None);
+    }
+    if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "gammaln_sign" });
+    }
+
+    no_grad(|| {
+        let op = "gammaln_sign";
+        let zero = full_like_scalar(input, 0.0, op)?;
+        let one = full_like_scalar(input, 1.0, op)?;
+        let neg_one = full_like_scalar(input, -1.0, op)?;
+        let two = full_like_scalar(input, 2.0, op)?;
+        let inf = full_like_scalar(input, f64::INFINITY, op)?;
+        let nan = full_like_scalar(input, f64::NAN, op)?;
+
+        let sign_negative = crate::grad_fns::transcendental::signbit(input)?;
+        let is_nan = BoolTensor::ne(input, input)?;
+        let abs_x = crate::grad_fns::arithmetic::abs(input)?;
+        let is_infinite = BoolTensor::eq_t(&abs_x, &inf)?;
+        let is_negative_infinite = is_infinite.and(&sign_negative)?;
+        let is_zero = BoolTensor::eq_t(input, &zero)?;
+        let is_negative = BoolTensor::lt(input, &zero)?;
+
+        let floor_x = crate::grad_fns::transcendental::floor(input)?;
+        let is_integer = BoolTensor::eq_t(input, &floor_x)?;
+        let is_negative_integer = is_negative.and(&is_integer)?;
+
+        let floor_half = crate::grad_fns::arithmetic::div(&floor_x, &two)?;
+        let floor_half = crate::grad_fns::transcendental::floor(&floor_half)?;
+        let twice_floor_half = mul_const_like(&floor_half, 2.0, op)?;
+        let parity = crate::grad_fns::arithmetic::sub(&floor_x, &twice_floor_half)?;
+        let even_floor = BoolTensor::eq_t(&parity, &zero)?;
+        let negative_noninteger_sign =
+            crate::grad_fns::comparison::where_bt(&even_floor, &one, &neg_one)?;
+        let zero_sign = crate::grad_fns::comparison::where_bt(&sign_negative, &neg_one, &one)?;
+
+        let base =
+            crate::grad_fns::comparison::where_bt(&is_negative, &negative_noninteger_sign, &one)?;
+        let with_zero = crate::grad_fns::comparison::where_bt(&is_zero, &zero_sign, &base)?;
+        let bad = is_nan.or(&is_negative_infinite)?.or(&is_negative_integer)?;
+        let output = crate::grad_fns::comparison::where_bt(&bad, &nan, &with_zero)?;
+        Ok(Some(output))
+    })
 }
 
 #[derive(Debug)]
@@ -3516,6 +3594,13 @@ fn gammaln_sign_scalar<T: Float>(x: T) -> T {
     if x.is_nan() {
         return x;
     }
+    if x.is_infinite() {
+        return if x.is_sign_negative() {
+            T::from(f64::NAN).unwrap()
+        } else {
+            one
+        };
+    }
     // Positive (including +0.0) → +1.
     if x > zero {
         return one;
@@ -4052,8 +4137,9 @@ pub fn beta<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<T
 ///
 /// Mirrors `torch.special.multigammaln(input, p)` /
 /// `torch.mvlgamma(input, p)` (`aten/src/ATen/native/UnaryOps.cpp:887`). The
-/// documented domain is `a > (p - 1)/2` (`torch/special/__init__.py:862`);
-/// elements outside it yield `NaN`.
+/// mathematical domain is `a > (p - 1)/2`, but PyTorch does not pre-mask
+/// element values; it composes shifted `lgamma` terms and returns the resulting
+/// finite values, `+inf` poles, or `NaN`s elementwise.
 ///
 /// # Errors
 ///
@@ -4065,7 +4151,9 @@ pub fn multigammaln<T: Float>(input: &Tensor<T>, p: usize) -> FerrotorchResult<T
             message: "multigammaln: p has to be greater than or equal to 1".to_string(),
         });
     }
-    reject_cuda_unary(input, "multigammaln")?;
+    if let Some(output) = multigammaln_cuda_composed(input, p)? {
+        return wrap_special_unary(output, input, SpecialUnaryKind::Multigammaln { p });
+    }
     let output = unary_map_named(input, "multigammaln", move |x| multigammaln_scalar(x, p))?;
     wrap_special_unary(output, input, SpecialUnaryKind::Multigammaln { p })
 }
@@ -4082,7 +4170,9 @@ pub fn mvlgamma<T: Float>(input: &Tensor<T>, p: usize) -> FerrotorchResult<Tenso
 /// Mirrors `scipy.special.gammasgn`: `+1` for `x > 0`; `NaN` for negative
 /// integers (poles of Γ); `(-1)^floor(x)` for `x < 0` non-integer.
 pub fn gammaln_sign<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
-    reject_cuda_unary(input, "gammaln_sign")?;
+    if let Some(output) = gammaln_sign_cuda_composed(input)? {
+        return Ok(output);
+    }
     unary_map_named(input, "gammaln_sign", gammaln_sign_scalar)
 }
 
@@ -4360,14 +4450,6 @@ fn special_gpu_binary_broadcast<T: Float>(
         };
         Ok(Some(poly_gpu_output::<T>(out_handle, out_shape)?))
     })
-}
-
-fn reject_cuda_unary<T: Float>(input: &Tensor<T>, op: &'static str) -> FerrotorchResult<()> {
-    if input.is_cuda() {
-        Err(FerrotorchError::NotImplementedOnCuda { op })
-    } else {
-        Ok(())
-    }
 }
 
 fn reject_cuda_binary<T: Float>(
@@ -5806,6 +5888,7 @@ mod tests {
     //   gammasgn(-6.5) = -1.0
     //   gammasgn(-2.0) = NaN    (negative integer = pole)
     //   gammasgn( 0.0) = +1.0
+    //   gammasgn(-inf) = NaN; gammasgn(+inf) = +1.0
     // ---------------------------------------------------------------------
 
     #[test]
@@ -5847,6 +5930,15 @@ mod tests {
         for &v in r.data().unwrap() {
             assert_eq!(v, 1.0);
         }
+    }
+
+    #[test]
+    fn gammaln_sign_infinities_match_scipy_gammasgn() {
+        let input = t(&[f64::NEG_INFINITY, f64::INFINITY], &[2]);
+        let r = gammaln_sign(&input).unwrap();
+        let d = r.data().unwrap();
+        assert!(d[0].is_nan(), "gammasgn(-inf) must be NaN, got {}", d[0]);
+        assert_eq!(d[1], 1.0, "gammasgn(+inf) must be +1, got {}", d[1]);
     }
 
     #[test]
