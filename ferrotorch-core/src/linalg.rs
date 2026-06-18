@@ -514,6 +514,12 @@ fn checked_lapack_i32(value: usize, name: &str) -> FerrotorchResult<c_int> {
     })
 }
 
+fn checked_linalg_i32(value: usize, op: &str, name: &str) -> FerrotorchResult<i32> {
+    i32::try_from(value).map_err(|_| FerrotorchError::InvalidArgument {
+        message: format!("{op}: {name}={value} exceeds LAPACK i32 limit"),
+    })
+}
+
 /// Guard: linalg decompositions are CPU-only. Return an explicit error for
 /// GPU tensors instead of silently downloading data to host.
 fn require_cpu<T: Float>(t: &Tensor<T>, op: &str) -> FerrotorchResult<()> {
@@ -585,6 +591,234 @@ fn full_like_on_device<T: Float>(
     } else {
         t.to(device)
     }
+}
+
+#[derive(Debug, Clone)]
+struct CpuLuFactor<T: Float> {
+    packed: Vec<T>,
+    pivots: Vec<i32>,
+    info: i32,
+}
+
+fn lu_zero_pivot_error(op: &str, info: i32) -> FerrotorchError {
+    FerrotorchError::Ferray(ferray_core::FerrayError::SingularMatrix {
+        message: format!(
+            "{op}: U[{info},{info}] is zero (zero pivot at index {info}); \
+             the matrix is singular"
+        ),
+    })
+}
+
+fn parse_zero_pivot_info(message: &str) -> Option<i32> {
+    let (_, rest) = message.split_once("zero pivot at index ")?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let info: i32 = digits.parse().ok()?;
+    (info > 0).then_some(info)
+}
+
+/// Pure-Rust LAPACK GETRF-style factorization in row-major logical order.
+///
+/// Returns packed LU, 1-based row-swap pivots, and LAPACK-compatible `info`.
+/// `info > 0` means the first exact zero U diagonal was found at that
+/// 1-based pivot. The factorization still continues after recording `info`,
+/// matching LAPACK/PyTorch behavior; NaNs are not classified as zero pivots.
+#[allow(clippy::float_cmp)]
+fn cpu_lu_factor_packed<T: Float>(
+    data: Vec<T>,
+    m: usize,
+    n: usize,
+    op: &str,
+) -> FerrotorchResult<CpuLuFactor<T>> {
+    let expected = checked_product(&[m, n], op)?;
+    if data.len() != expected {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: LU input length mismatch: expected {expected}, got {}",
+                data.len()
+            ),
+        });
+    }
+
+    let k = m.min(n);
+    let mut packed = data;
+    let mut pivots = vec![0_i32; k];
+    let mut info = 0_i32;
+
+    for j in 0..k {
+        let mut pivot_row = j;
+        let mut pivot_abs = packed[j * n + j].abs();
+        for row in (j + 1)..m {
+            let candidate = packed[row * n + j].abs();
+            if candidate > pivot_abs {
+                pivot_abs = candidate;
+                pivot_row = row;
+            }
+        }
+
+        pivots[j] = checked_linalg_i32(pivot_row + 1, op, "pivot")?;
+
+        if pivot_row != j {
+            for col in 0..n {
+                packed.swap(j * n + col, pivot_row * n + col);
+            }
+        }
+
+        let pivot = packed[j * n + j];
+        if pivot == <T as num_traits::Zero>::zero() {
+            if info == 0 {
+                info = checked_linalg_i32(j + 1, op, "info")?;
+            }
+            continue;
+        }
+
+        for row in (j + 1)..m {
+            let multiplier = packed[row * n + j] / pivot;
+            packed[row * n + j] = multiplier;
+            for col in (j + 1)..n {
+                packed[row * n + col] = packed[row * n + col] - multiplier * packed[j * n + col];
+            }
+        }
+    }
+
+    Ok(CpuLuFactor {
+        packed,
+        pivots,
+        info,
+    })
+}
+
+fn solve_rhs_shape(
+    a_n: usize,
+    b_shape: &[usize],
+    op: &str,
+) -> FerrotorchResult<(Vec<usize>, usize)> {
+    match b_shape {
+        [rows] if *rows == a_n => Ok((vec![a_n], 1)),
+        [rows] => Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: incompatible shapes for A ({a_n}x{a_n}) and b ({rows}x1)"),
+        }),
+        [rows, nrhs] if *rows == a_n => Ok((vec![a_n, *nrhs], *nrhs)),
+        [rows, nrhs] => Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: incompatible shapes for A ({a_n}x{a_n}) and b ({rows}x{nrhs})"),
+        }),
+        _ => Err(FerrotorchError::InvalidArgument {
+            message: format!("{op}: b must be 1-D or 2-D, got {b_shape:?}"),
+        }),
+    }
+}
+
+/// Pure-Rust LAPACK GETRS-style solve for a square LU factorization.
+#[allow(clippy::float_cmp)]
+fn cpu_lu_solve<T: Float>(
+    factor: &CpuLuFactor<T>,
+    b: &[T],
+    n: usize,
+    nrhs: usize,
+    op: &str,
+) -> FerrotorchResult<Vec<T>> {
+    if factor.packed.len() != checked_product(&[n, n], op)? {
+        return Err(FerrotorchError::Internal {
+            message: format!("{op}: LU factor length mismatch for n={n}"),
+        });
+    }
+    if factor.pivots.len() != n {
+        return Err(FerrotorchError::Internal {
+            message: format!(
+                "{op}: expected {n} LU pivots for square solve, got {}",
+                factor.pivots.len()
+            ),
+        });
+    }
+    let expected_b = checked_product(&[n, nrhs], op)?;
+    if b.len() != expected_b {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: RHS length mismatch: expected {expected_b}, got {}",
+                b.len()
+            ),
+        });
+    }
+
+    let mut x = b.to_vec();
+
+    for (row, &pivot) in factor.pivots.iter().enumerate() {
+        if pivot <= 0 {
+            return Err(FerrotorchError::Internal {
+                message: format!("{op}: LU pivot at index {row} is not positive: {pivot}"),
+            });
+        }
+        let pivot_row = usize::try_from(pivot - 1).map_err(|_| FerrotorchError::Internal {
+            message: format!("{op}: LU pivot at index {row} is out of range: {pivot}"),
+        })?;
+        if pivot_row >= n {
+            return Err(FerrotorchError::Internal {
+                message: format!("{op}: LU pivot at index {row} points outside n={n}: {pivot}"),
+            });
+        }
+        if pivot_row != row {
+            for rhs in 0..nrhs {
+                x.swap(row * nrhs + rhs, pivot_row * nrhs + rhs);
+            }
+        }
+    }
+
+    for row in 0..n {
+        for rhs in 0..nrhs {
+            let mut sum = x[row * nrhs + rhs];
+            for col in 0..row {
+                sum = sum - factor.packed[row * n + col] * x[col * nrhs + rhs];
+            }
+            x[row * nrhs + rhs] = sum;
+        }
+    }
+
+    for row in (0..n).rev() {
+        let diag = factor.packed[row * n + row];
+        if diag == <T as num_traits::Zero>::zero() {
+            return Err(lu_zero_pivot_error(
+                op,
+                checked_linalg_i32(row + 1, op, "info")?,
+            ));
+        }
+        for rhs in 0..nrhs {
+            let mut sum = x[row * nrhs + rhs];
+            for col in (row + 1)..n {
+                sum = sum - factor.packed[row * n + col] * x[col * nrhs + rhs];
+            }
+            x[row * nrhs + rhs] = sum / diag;
+        }
+    }
+
+    Ok(x)
+}
+
+fn cpu_solve_lu<T: Float>(a: &Tensor<T>, b: &Tensor<T>, op: &str) -> FerrotorchResult<Tensor<T>> {
+    let n = a.shape()[0];
+    let (out_shape, nrhs) = solve_rhs_shape(n, b.shape(), op)?;
+    let a_data = a.data_vec()?;
+    let b_data = b.data_vec()?;
+    let factor = cpu_lu_factor_packed(a_data, n, n, op)?;
+    if factor.info > 0 {
+        return Err(lu_zero_pivot_error(op, factor.info));
+    }
+    let x = cpu_lu_solve(&factor, &b_data, n, nrhs, op)?;
+    Tensor::from_storage(TensorStorage::cpu(x), out_shape, false)
+}
+
+fn cpu_inv_lu<T: Float>(input: &Tensor<T>, op: &str) -> FerrotorchResult<Tensor<T>> {
+    let n = input.shape()[0];
+    let a_data = input.data_vec()?;
+    let factor = cpu_lu_factor_packed(a_data, n, n, op)?;
+    if factor.info > 0 {
+        return Err(lu_zero_pivot_error(op, factor.info));
+    }
+
+    let mut eye = vec![<T as num_traits::Zero>::zero(); checked_product(&[n, n], op)?];
+    for i in 0..n {
+        eye[i * n + i] = <T as num_traits::One>::one();
+    }
+    let inv_data = cpu_lu_solve(&factor, &eye, n, n, op)?;
+    Tensor::from_storage(TensorStorage::cpu(inv_data), vec![n, n], false)
 }
 
 fn effective_triangular_for_solve<T: Float>(
@@ -803,20 +1037,8 @@ pub fn solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
         return Tensor::from_storage(TensorStorage::gpu(x_h), out_shape, false);
     }
 
-    if is_f32::<T>() {
-        let a_arr = tensor_to_array2_f32(a)?;
-        let b_arr = tensor_to_arraydyn_f32(b)?;
-        let x = ferray_linalg::solve(&a_arr, &b_arr).map_err(FerrotorchError::Ferray)?;
-        let x_data = slice_f32_to_vec::<T>(x.as_slice().unwrap());
-        let x_shape = x.shape().to_vec();
-        Tensor::from_storage(TensorStorage::cpu(x_data), x_shape, false)
-    } else if is_f64::<T>() {
-        let a_arr = tensor_to_array2_f64(a)?;
-        let b_arr = tensor_to_arraydyn_f64(b)?;
-        let x = ferray_linalg::solve(&a_arr, &b_arr).map_err(FerrotorchError::Ferray)?;
-        let x_data = slice_to_vec::<T>(x.as_slice().unwrap());
-        let x_shape = x.shape().to_vec();
-        Tensor::from_storage(TensorStorage::cpu(x_data), x_shape, false)
+    if is_f32::<T>() || is_f64::<T>() {
+        cpu_solve_lu(a, b, "solve")
     } else {
         Err(FerrotorchError::InvalidArgument {
             message: "linalg op requires f32 or f64".into(),
@@ -906,16 +1128,8 @@ pub fn inv<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
         return solve(input, &eye);
     }
 
-    if is_f32::<T>() {
-        let arr = tensor_to_array2_f32(input)?;
-        let r = ferray_linalg::inv(&arr).map_err(FerrotorchError::Ferray)?;
-        let data = slice_f32_to_vec::<T>(r.as_slice().unwrap());
-        Tensor::from_storage(TensorStorage::cpu(data), vec![n, n], false)
-    } else if is_f64::<T>() {
-        let arr = tensor_to_array2_f64(input)?;
-        let r = ferray_linalg::inv(&arr).map_err(FerrotorchError::Ferray)?;
-        let data = slice_to_vec::<T>(r.as_slice().unwrap());
-        Tensor::from_storage(TensorStorage::cpu(data), vec![n, n], false)
+    if is_f32::<T>() || is_f64::<T>() {
+        cpu_inv_lu(input, "inv")
     } else {
         Err(FerrotorchError::InvalidArgument {
             message: "linalg op requires f32 or f64".into(),
@@ -1849,8 +2063,8 @@ fn transpose_square_to_vec_f64<T: Float>(src: &[f64], n: usize) -> Vec<T> {
 /// (cuSOLVER `getrf` with on-device row→col→row transpose). The LU matrix
 /// stays on device (O(mn) values); only the pivot vector (O(min(m,n)) ints) is
 /// downloaded to host as a `Vec<i32>` since `Tensor<T>` requires
-/// `T: Float`. Other dtypes and CPU inputs fall back to `ferray-linalg::lu`
-/// and pack the result locally.
+/// `T: Float`. CPU f32/f64 uses the same LAPACK GETRF-style packed layout in
+/// pure Rust and raises on singular input, matching `torch.linalg.lu_factor`.
 pub fn lu_factor<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Vec<i32>)> {
     let shape = a.shape();
     if shape.len() != 2 {
@@ -1895,79 +2109,18 @@ pub fn lu_factor<T: Float>(a: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Vec<i3
         return Err(FerrotorchError::NotImplementedOnCuda { op: "lu_factor" });
     }
 
-    // CPU fallback: get full PLU from ferray-linalg, then collapse to packed
-    // LU + pivots (the cuSOLVER convention). The packed form is L's strict
-    // lower triangle plus U's upper triangle (incl. diagonal); ipiv comes
-    // from the row permutation P encoded as 1-based indices.
-    let (p, l, u) = if is_f32::<T>() {
-        let arr = tensor_to_array2_f32(a)?;
-        let (p, l, u) = ferray_linalg::lu(&arr).map_err(FerrotorchError::Ferray)?;
-        (
-            slice_f32_to_vec::<T>(p.as_slice().unwrap()),
-            slice_f32_to_vec::<T>(l.as_slice().unwrap()),
-            slice_f32_to_vec::<T>(u.as_slice().unwrap()),
-        )
-    } else if is_f64::<T>() {
-        let arr = tensor_to_array2_f64(a)?;
-        let (p, l, u) = ferray_linalg::lu(&arr).map_err(FerrotorchError::Ferray)?;
-        (
-            slice_to_vec::<T>(p.as_slice().unwrap()),
-            slice_to_vec::<T>(l.as_slice().unwrap()),
-            slice_to_vec::<T>(u.as_slice().unwrap()),
-        )
-    } else {
+    if !(is_f32::<T>() || is_f64::<T>()) {
         return Err(FerrotorchError::InvalidArgument {
             message: "lu_factor requires f32 or f64".into(),
         });
-    };
+    }
 
-    // Build packed LU buffer: lower triangle = strict-L, upper = U (incl. diag).
-    let mut packed = vec![<T as num_traits::Zero>::zero(); m * n];
-    for i in 0..m {
-        for j in 0..n {
-            packed[i * n + j] = if j < k && j < i {
-                l[i * k + j] // strict lower of L
-            } else if i < k {
-                u[i * n + j] // U upper triangle
-            } else {
-                <T as num_traits::Zero>::zero()
-            };
-        }
+    let factor = cpu_lu_factor_packed(a.data_vec()?, m, n, "lu_factor")?;
+    if factor.info > 0 {
+        return Err(lu_zero_pivot_error("lu_factor", factor.info));
     }
-    // Convert P (an n×n permutation matrix) to ipiv in cuSOLVER /
-    // LAPACK swap-sequence form so the CPU and GPU paths produce
-    // interchangeable output. cuSOLVER's `ipiv[i]` (1-based) is the
-    // index of the row swapped INTO position `i` at step `i` of the
-    // factorization.
-    //
-    // Two-step conversion:
-    //   1. Read P as a permutation vector `perm` where `perm[i]` is the
-    //      column with a 1 in row `i` of P (i.e. row `i` of `P @ A`
-    //      equals row `perm[i]` of `A`).
-    //   2. Convert `perm` → swap-sequence by replaying the swaps. At
-    //      step `i`, the algorithm wants `perm[i]` at position `i`.
-    //      Find where `perm[i]` lives in the running array `work`
-    //      (originally identity), record the swap, and apply it.
-    let mut perm = vec![0_usize; m];
-    let one = T::from(1.0).unwrap();
-    for i in 0..m {
-        for j in 0..m {
-            if p[i * m + j] == one {
-                perm[i] = j;
-                break;
-            }
-        }
-    }
-    let mut work: Vec<usize> = (0..m).collect();
-    let mut ipiv = vec![0_i32; k];
-    for i in 0..k {
-        let target = perm[i];
-        let j = (i..m).find(|&row| work[row] == target).unwrap_or(i);
-        ipiv[i] = (j + 1) as i32;
-        work.swap(i, j);
-    }
-    let lu = Tensor::from_storage(TensorStorage::cpu(packed), vec![m, n], false)?;
-    Ok((lu, ipiv))
+    let lu = Tensor::from_storage(TensorStorage::cpu(factor.packed), vec![m, n], false)?;
+    Ok((lu, factor.pivots))
 }
 
 // ===========================================================================
@@ -4698,11 +4851,9 @@ fn matrix_exp_pade13(a: &[f64], n: usize) -> FerrotorchResult<Vec<f64>> {
 ///
 /// `info` provenance:
 /// - **CPU**: `cholesky` uses a POTRF-style pure-Rust factorization and
-///   embeds the failing leading-minor order in its `SingularMatrix`
-///   message, so `cholesky_ex` reports the same positive `info` class as
-///   torch. Older ferray-originated singular errors (`inv`/`solve`) still
-///   carry no pivot index and fall back to the documented constant `1`
-///   (#1944 tracks those remaining `_ex` info-index gaps).
+///   `inv`/`solve` use a GETRF/GETRS-style pure-Rust factorization. Both
+///   embed the failing LAPACK-style positive `info` index in
+///   `SingularMatrix`, so `_ex` reports PyTorch-compatible numerical info.
 /// - **CUDA**: cuSOLVER `devInfo` failures surface as
 ///   `InvalidArgument` whose message ferrotorch-gpu's `map_gpu_err` builds
 ///   from `GpuError::ShapeMismatch { op: "gpu_…", got: vec![devInfo] }`
@@ -4717,7 +4868,7 @@ fn matrix_exp_pade13(a: &[f64], n: usize) -> FerrotorchResult<Vec<f64>> {
 fn ex_numerical_info(err: &FerrotorchError) -> Option<i32> {
     match err {
         FerrotorchError::Ferray(ferray_core::FerrayError::SingularMatrix { message }) => {
-            parse_leading_minor_info(message).or(Some(1))
+            parse_leading_minor_info(message).or_else(|| parse_zero_pivot_info(message))
         }
         FerrotorchError::InvalidArgument { message }
             if (message.starts_with("gpu_cholesky")
@@ -4813,8 +4964,8 @@ pub fn cholesky_ex<T: Float>(input: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, 
 /// `inv` that doesn't error on singular input: returns `(A^{-1}, info)`;
 /// on a NUMERICAL (singular) failure the value is same-shape zeros and
 /// `info != 0`. Structural errors PROPAGATE (torch raises) — CORE-145 /
-/// #1839. CPU `info` is the documented constant `1` (#1944); torch
-/// reports the first zero pivot. Mirrors `torch.linalg.inv_ex`.
+/// #1839. CPU and CUDA both report the first zero pivot. Mirrors
+/// `torch.linalg.inv_ex`.
 pub fn inv_ex<T: Float>(input: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tensor<T>)> {
     match inv(input) {
         Ok(out) => Ok((out, ex_info_scalar(0, input)?)),
@@ -4835,8 +4986,7 @@ pub fn inv_ex<T: Float>(input: &Tensor<T>) -> FerrotorchResult<(Tensor<T>, Tenso
 /// NUMERICAL (singular) failure `x` is zeros shaped like `b` and
 /// `info != 0`. Structural errors — including `DeviceMismatch` —
 /// PROPAGATE (torch raises) — CORE-145 / #1839. `info` is the true
-/// cuSOLVER getrf pivot index on CUDA, the documented constant `1` on CPU
-/// (#1944). Mirrors `torch.linalg.solve_ex`.
+/// GETRF pivot index on CPU and CUDA. Mirrors `torch.linalg.solve_ex`.
 pub fn solve_ex<T: Float>(
     a: &Tensor<T>,
     b: &Tensor<T>,
@@ -5340,6 +5490,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn lu_factor_cpu_matches_getrf_pivots_and_packed_lu() {
+        // PyTorch torch.linalg.lu_factor_ex([[1,2],[3,4]]) emits
+        // LU=[[3,4],[1/3,2/3]], pivots=[2,2], info=0.
+        let a = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        let (lu_packed, pivots) = lu_factor(&a).unwrap();
+        assert_eq!(pivots, vec![2, 2]);
+        let d = lu_packed.data().unwrap();
+        assert!((d[0] - 3.0).abs() < 1e-12);
+        assert!((d[1] - 4.0).abs() < 1e-12);
+        assert!((d[2] - (1.0 / 3.0)).abs() < 1e-12);
+        assert!((d[3] - (2.0 / 3.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn lu_factor_cpu_reports_singular_pivot_index() {
+        let a = t(&[1.0, 2.0, 2.0, 4.0], &[2, 2]);
+        let err = lu_factor(&a).expect_err("torch.linalg.lu_factor raises on singular input");
+        assert_eq!(ex_numerical_info(&err), Some(2));
+    }
+
+    #[test]
+    fn solve_cpu_pivots_zero_top_left_when_nonsingular() {
+        let a = t(&[0.0, 1.0, 1.0, 0.0], &[2, 2]);
+        let b = t(&[1.0, 2.0], &[2]);
+        let x = solve(&a, &b).unwrap();
+        let d = x.data().unwrap();
+        assert!((d[0] - 2.0).abs() < 1e-12);
+        assert!((d[1] - 1.0).abs() < 1e-12);
+
+        let (_x, info) = solve_ex(&a, &b).unwrap();
+        assert!(info.data().unwrap()[0].abs() < 1e-12);
+    }
+
     // -----------------------------------------------------------------------
     // svdvals / lstsq
     // -----------------------------------------------------------------------
@@ -5806,6 +5990,17 @@ mod tests {
     }
 
     #[test]
+    fn inv_ex_reports_first_zero_pivot_like_torch() {
+        let second_pivot = t(&[1.0, 2.0, 2.0, 4.0], &[2, 2]);
+        let (_inv_a, info) = inv_ex(&second_pivot).unwrap();
+        assert!((info.data().unwrap()[0] - 2.0).abs() < 1e-12);
+
+        let first_pivot = t(&[0.0, 1.0, 0.0, 2.0], &[2, 2]);
+        let (_inv_a, info) = inv_ex(&first_pivot).unwrap();
+        assert!((info.data().unwrap()[0] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
     fn solve_ex_succeeds() {
         let a = t(&[1.0, 0.0, 0.0, 2.0], &[2, 2]);
         let b = t(&[3.0, 4.0], &[2]);
@@ -5822,6 +6017,41 @@ mod tests {
         let b = t(&[1.0, 2.0], &[2]);
         let (_x, info) = solve_ex(&a, &b).unwrap();
         assert!(info.data().unwrap()[0] != 0.0);
+    }
+
+    #[test]
+    fn solve_ex_reports_first_zero_pivot_like_torch() {
+        let b = t(&[1.0, 1.0], &[2]);
+
+        let second_pivot = t(&[1.0, 2.0, 2.0, 4.0], &[2, 2]);
+        let (_x, info) = solve_ex(&second_pivot, &b).unwrap();
+        assert!((info.data().unwrap()[0] - 2.0).abs() < 1e-12);
+
+        let first_pivot = t(&[0.0, 1.0, 0.0, 2.0], &[2, 2]);
+        let (_x, info) = solve_ex(&first_pivot, &b).unwrap();
+        assert!((info.data().unwrap()[0] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn solve_and_inv_accept_noncontiguous_cpu_views() {
+        let base = t(&[1.0, 3.0, 2.0, 4.0], &[2, 2]);
+        let a = base
+            .transpose(0, 1)
+            .expect("transpose produces logical [[1,2],[3,4]] view");
+        assert!(!a.is_contiguous());
+
+        let b = t(&[3.0, 7.0], &[2]);
+        let x = solve(&a, &b).expect("solve accepts non-contiguous CPU A");
+        let x_data = x.data().unwrap();
+        assert!((x_data[0] - 1.0).abs() < 1e-12);
+        assert!((x_data[1] - 1.0).abs() < 1e-12);
+
+        let inv_a = inv(&a).expect("inv accepts non-contiguous CPU A");
+        let d = inv_a.data().unwrap();
+        assert!((d[0] + 2.0).abs() < 1e-12);
+        assert!((d[1] - 1.0).abs() < 1e-12);
+        assert!((d[2] - 1.5).abs() < 1e-12);
+        assert!((d[3] + 0.5).abs() < 1e-12);
     }
 
     #[test]

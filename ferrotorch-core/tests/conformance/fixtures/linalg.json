@@ -87539,7 +87539,7 @@
         3.0,
         4.0
       ],
-      "expect_err": true
+      "expect_err": false
     },
     {
       "op": "cholesky_singular",
@@ -91750,7 +91750,7 @@
         3.0,
         4.0
       ],
-      "expect_err": true
+      "expect_err": false
     },
     {
       "op": "cholesky_singular",

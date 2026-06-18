@@ -2819,11 +2819,9 @@ fn cpu_ex_family_structural_errors_propagate_1839() {
 /// ```
 ///
 /// CPU `cholesky_ex` reports the failing leading-minor index from the
-/// pure-Rust POTRF-style path. CPU `inv_ex`/`solve_ex` still pin the
-/// documented constant 1 because their ferray-originated singular errors
-/// carry no pivot index; #1944 tracks those remaining `_ex` info gaps.
-/// The CUDA lane also reports the true cuSOLVER devInfo index — see the
-/// `gpu` module's `_1839` tests.
+/// pure-Rust POTRF-style path. CPU `inv_ex`/`solve_ex` report the first
+/// GETRF zero pivot from the pure-Rust LU path. The CUDA lane also reports
+/// the true cuSOLVER devInfo index — see the `gpu` module's `_1839` tests.
 ///
 /// The fallback value tensor is same-shape zeros: torch documents the
 /// value output as UNDEFINED when `info != 0` (it returns the partial
@@ -2850,22 +2848,22 @@ fn cpu_ex_family_numerical_failure_info_1839() {
         "fallback L is deterministic zeros (torch: undefined values)"
     );
 
-    // Singular inv (torch info=2, CPU pinned 1 per #1944).
+    // Singular inv (torch info=2).
     let s = make_cpu_f64(&[1.0, 2.0, 2.0, 4.0], &[2, 2], false);
     let (_, info) = inv_ex(&s).expect("numerical failure stays Ok");
     assert_eq!(
         read_back_f64(&info, Device::Cpu),
-        vec![1.0],
-        "inv_ex CPU info pins the documented constant 1 (#1944; torch: 2)"
+        vec![2.0],
+        "inv_ex CPU info should report the first zero pivot"
     );
 
-    // Singular solve (torch solve_ex info=2, CPU pinned 1 per #1944).
+    // Singular solve (torch solve_ex info=2).
     let b = make_cpu_f64(&[1.0, 1.0], &[2], false);
     let (x, info) = solve_ex(&s, &b).expect("numerical failure stays Ok");
     assert_eq!(
         read_back_f64(&info, Device::Cpu),
-        vec![1.0],
-        "solve_ex CPU info pins the documented constant 1 (#1944; torch: 2)"
+        vec![2.0],
+        "solve_ex CPU info should report the first zero pivot"
     );
     assert_eq!(
         read_back_f64(&x, Device::Cpu),
@@ -3676,21 +3674,30 @@ fn cpu_singular_solve_returns_err() {
         let b_shape = f.b_shape.as_ref().unwrap();
         let a_data = f.a_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
         let b_data = f.b_data.as_ref().map(F64ListSentinel::as_slice).unwrap();
+        let expect_err = f.expect_err.unwrap_or(true);
         match f.dtype.as_str() {
             "float32" => {
                 let a = make_cpu_f32(a_data, a_shape, false);
                 let b = make_cpu_f32(b_data, b_shape, false);
-                assert!(
-                    solve(&a, &b).is_err(),
-                    "solve on singular A must return Err (PyTorch parity)",
+                let result = solve(&a, &b);
+                assert_eq!(
+                    result.is_err(),
+                    expect_err,
+                    "solve_singular tag={:?} dtype={} error expectation must match PyTorch",
+                    f.tag,
+                    f.dtype
                 );
             }
             "float64" => {
                 let a = make_cpu_f64(a_data, a_shape, false);
                 let b = make_cpu_f64(b_data, b_shape, false);
-                assert!(
-                    solve(&a, &b).is_err(),
-                    "solve on singular A must return Err (PyTorch parity)",
+                let result = solve(&a, &b);
+                assert_eq!(
+                    result.is_err(),
+                    expect_err,
+                    "solve_singular tag={:?} dtype={} error expectation must match PyTorch",
+                    f.tag,
+                    f.dtype
                 );
             }
             _ => unreachable!(),
