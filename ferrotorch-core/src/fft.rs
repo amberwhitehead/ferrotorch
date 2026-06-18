@@ -192,25 +192,26 @@ pub fn fft_norm<T: Float>(
     }
 
     let ndim = shape.len();
+    let signal_ndim = ndim - 1;
     // Signal length is the second-to-last dim.
     if ndim < 2 {
         return Err(FerrotorchError::InvalidArgument {
             message: "fft: input must have at least 2 dimensions ([..., n, 2])".into(),
         });
     }
+    let axis = resolve_fft_axis(dim, signal_ndim, "fft")?;
+    let fft_n = n.unwrap_or(shape[axis]);
+    if fft_n == 0 {
+        return Err(invalid_data_points("fft", 0));
+    }
+    reject_zero_fft_batch(&shape[..signal_ndim], &[axis], "fft")?;
 
     // GPU fast path: last-axis C2C via cuFFT. Resize and normalization are
     // staged on device so CUDA inputs do not fall through to the CPU bridge.
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) && is_last_signal_axis(dim, ndim - 1) {
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) && axis == signal_ndim - 1 {
         let input_n = shape[ndim - 2];
-        let fft_n = n.unwrap_or(input_n);
-        if fft_n == 0 {
-            return Err(FerrotorchError::InvalidArgument {
-                message: "fft: n must be > 0".into(),
-            });
-        }
         let batch_shape = &shape[..ndim - 2];
-        let batch_size: usize = crate::shape::numel(batch_shape).max(1);
+        let batch_size: usize = crate::shape::numel(batch_shape);
         // GPU C2C dispatch via cuFFT (#579), with on-device pad/truncate
         // when `fft_n != input_n` (#605). Fully on-device — no host bounce.
         let backend =
@@ -423,6 +424,7 @@ fn c2r_guard_empty_axis<T: Float>(
             message: format!("{op}: Invalid number of data points ({n_eff}) specified"),
         });
     }
+    reject_zero_fft_batch(&shape[..signal_ndim], &[axis], op)?;
     if m == 0 {
         let mut out_shape: Vec<usize> = shape[..signal_ndim].to_vec();
         out_shape[axis] = n_eff as usize;
@@ -464,6 +466,33 @@ fn invalid_data_points(op: &'static str, n: i128) -> FerrotorchError {
     FerrotorchError::InvalidArgument {
         message: format!("{op}: Invalid number of data points ({n}) specified"),
     }
+}
+
+fn reject_zero_fft_batch(
+    signal_shape: &[usize],
+    axes: &[usize],
+    op: &'static str,
+) -> FerrotorchResult<()> {
+    let mut is_transform_axis = vec![false; signal_shape.len()];
+    for &axis in axes {
+        if let Some(slot) = is_transform_axis.get_mut(axis) {
+            *slot = true;
+        }
+    }
+
+    if signal_shape
+        .iter()
+        .enumerate()
+        .any(|(axis, &size)| size == 0 && !is_transform_axis[axis])
+    {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: zero-sized batch dimensions are not supported by torch.fft backends"
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 fn fft_dim_out_of_range(op: &'static str, dim: isize, signal_ndim: usize) -> FerrotorchError {
@@ -597,6 +626,9 @@ fn canonicalize_nd_c2c_args(
             return Err(invalid_data_points(op, 0));
         }
     }
+    if !resolved_axes.is_empty() {
+        reject_zero_fft_batch(signal_shape, &resolved_axes, op)?;
+    }
 
     Ok(NdC2cSpec {
         axes: resolved_axes,
@@ -688,6 +720,7 @@ fn canonicalize_nd_r2c_args(
             return Err(invalid_data_points(op, 0));
         }
     }
+    reject_zero_fft_batch(input_shape, &resolved_axes, op)?;
 
     Ok(NdR2cSpec {
         axes: resolved_axes,
@@ -1277,7 +1310,13 @@ fn c2r_guard_empty_axis_nd<T: Float>(
         return Err(invalid_data_points(op, last_dim_size));
     }
 
-    if s.is_some() && signal_shape.contains(&0) {
+    reject_zero_fft_batch(signal_shape, &dims, op)?;
+
+    if s.is_some()
+        && dims
+            .iter()
+            .any(|&axis| signal_shape.get(axis).copied() == Some(0))
+    {
         let mut out_shape = signal_shape.to_vec();
         for (&axis, &size) in dims.iter().zip(transform_shape.iter()) {
             out_shape[axis] = size;
@@ -1327,22 +1366,23 @@ pub fn ifft_norm<T: Float>(
     }
 
     let ndim = shape.len();
+    let signal_ndim = ndim - 1;
     if ndim < 2 {
         return Err(FerrotorchError::InvalidArgument {
             message: "ifft: input must have at least 2 dimensions ([..., n, 2])".into(),
         });
     }
+    let axis = resolve_fft_axis(dim, signal_ndim, "ifft")?;
+    let fft_n = n.unwrap_or(shape[axis]);
+    if fft_n == 0 {
+        return Err(invalid_data_points("ifft", 0));
+    }
+    reject_zero_fft_batch(&shape[..signal_ndim], &[axis], "ifft")?;
 
-    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) && is_last_signal_axis(dim, ndim - 1) {
+    if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) && axis == signal_ndim - 1 {
         let input_n = shape[ndim - 2];
-        let fft_n = n.unwrap_or(input_n);
-        if fft_n == 0 {
-            return Err(FerrotorchError::InvalidArgument {
-                message: "ifft: n must be > 0".into(),
-            });
-        }
         let batch_shape = &shape[..ndim - 2];
-        let batch_size: usize = crate::shape::numel(batch_shape).max(1);
+        let batch_size: usize = crate::shape::numel(batch_shape);
         // GPU C2C dispatch via cuFFT, with on-device pad/truncate when
         // `fft_n != input_n` (#605).
         let backend =
@@ -1411,20 +1451,20 @@ pub fn rfft_norm<T: Float>(
     }
 
     let ndim = shape.len();
-    let input_n = shape[ndim - 1];
+    let axis = resolve_fft_axis(dim, ndim, "rfft")?;
+    let input_n = shape[axis];
+    let fft_n = n.unwrap_or(input_n);
+    if fft_n == 0 {
+        return Err(invalid_data_points("rfft", 0));
+    }
+    reject_zero_fft_batch(shape, &[axis], "rfft")?;
 
     // GPU fast path: last-axis R2C via cuFFT. PyTorch resizes `n` by slicing
     // or zero-padding before `_fft_r2c`; do that on-device rather than
     // falling through to the CPU ferray bridge.
-    if input.is_cuda() && is_last_signal_axis(dim, ndim) {
-        let fft_n = n.unwrap_or(input_n);
-        if fft_n == 0 {
-            return Err(FerrotorchError::InvalidArgument {
-                message: "rfft: n must be > 0".into(),
-            });
-        }
+    if input.is_cuda() && axis == ndim - 1 {
         let batch_shape = &shape[..ndim - 1];
-        let batch_size: usize = crate::shape::numel(batch_shape).max(1);
+        let batch_size: usize = crate::shape::numel(batch_shape);
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let resized =
@@ -1536,7 +1576,7 @@ pub fn irfft_norm<T: Float>(
         };
         let target_half_n = output_n / 2 + 1;
         let batch_shape = &shape[..ndim - 2];
-        let batch_size: usize = crate::shape::numel(batch_shape).max(1);
+        let batch_size: usize = crate::shape::numel(batch_shape);
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let input_contiguous = crate::autograd::no_grad::no_grad(|| input.contiguous())?;
@@ -2223,7 +2263,7 @@ pub fn hfft_norm<T: Float>(
         };
         let target_half = n_out / 2 + 1;
         let batch_shape = &shape[..ndim - 2];
-        let batch_size: usize = crate::shape::numel(batch_shape).max(1);
+        let batch_size: usize = crate::shape::numel(batch_shape);
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let input_contiguous = crate::autograd::no_grad::no_grad(|| input.contiguous())?;
@@ -2293,11 +2333,18 @@ pub fn ihfft_norm<T: Float>(
             message: "ihfft: input must have at least 1 dimension".into(),
         });
     }
+    let ndim = shape.len();
+    let axis = resolve_fft_axis(dim, ndim, "ihfft")?;
+    let input_n = shape[axis];
+    let fft_n = n.unwrap_or(input_n);
+    if fft_n == 0 {
+        return Err(invalid_data_points("ihfft", 0));
+    }
+    reject_zero_fft_batch(shape, &[axis], "ihfft")?;
+
     // GPU fast path (#636/#2003): ihfft = conj(R2C(raw, x)) plus
     // direction-specific normalization, fully on-device.
     if input.is_cuda() && (is_f32::<T>() || is_f64::<T>()) {
-        let ndim = shape.len();
-        let axis = resolve_fft_axis(dim, ndim, "ihfft")?;
         if axis != ndim - 1 {
             let s_buf;
             let s_slice = if let Some(n) = n {
@@ -2319,15 +2366,8 @@ pub fn ihfft_norm<T: Float>(
             }
         }
 
-        let input_n = shape[ndim - 1];
-        let fft_n = n.unwrap_or(input_n);
-        if fft_n == 0 {
-            return Err(FerrotorchError::InvalidArgument {
-                message: "ihfft: n must be > 0".into(),
-            });
-        }
         let batch_shape = &shape[..ndim - 1];
-        let batch_size: usize = crate::shape::numel(batch_shape).max(1);
+        let batch_size: usize = crate::shape::numel(batch_shape);
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let resized =
