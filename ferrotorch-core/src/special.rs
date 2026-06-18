@@ -1117,6 +1117,102 @@ fn special_unary_backward_cuda<T: Float>(
     crate::grad_fns::arithmetic::mul(grad_output, &factor)
 }
 
+fn horner_const_tensor<T: Float>(
+    x: &Tensor<T>,
+    coeffs: &[f64],
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let (&first, rest) = coeffs
+        .split_first()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("{op}: horner polynomial requires at least one coefficient"),
+        })?;
+    let mut acc = full_like_scalar(x, first, op)?;
+    for &coeff in rest {
+        let prod = crate::grad_fns::arithmetic::mul(&acc, x)?;
+        acc = add_const_like(&prod, coeff, op)?;
+    }
+    Ok(acc)
+}
+
+fn erfinv_cuda_composed<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !input.is_cuda() {
+        return Ok(None);
+    }
+    if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "erfinv" });
+    }
+
+    no_grad(|| {
+        let op = "erfinv";
+        let one = full_like_scalar(input, 1.0, op)?;
+        let neg_one = full_like_scalar(input, -1.0, op)?;
+        let pos_inf = full_like_scalar(input, f64::INFINITY, op)?;
+        let neg_inf = full_like_scalar(input, f64::NEG_INFINITY, op)?;
+        let nan = full_like_scalar(input, f64::NAN, op)?;
+
+        let abs_y = crate::grad_fns::arithmetic::abs(input)?;
+        let out_of_domain = BoolTensor::gt(&abs_y, &one)?;
+        let is_pos_one = BoolTensor::eq_t(input, &one)?;
+        let is_neg_one = BoolTensor::eq_t(input, &neg_one)?;
+        let central = BoolTensor::le(&abs_y, &full_like_scalar(input, 0.7, op)?)?;
+
+        let y2 = crate::grad_fns::arithmetic::mul(input, input)?;
+        let central_num = horner_const_tensor(
+            &y2,
+            &[-0.140_543_331, 0.914_624_893, -1.645_349_621, 0.886_226_899],
+            op,
+        )?;
+        let central_den = horner_const_tensor(
+            &y2,
+            &[
+                0.012_229_801,
+                -0.329_097_515,
+                1.442_710_462,
+                -2.118_377_725,
+                1.0,
+            ],
+            op,
+        )?;
+        let central_scaled = crate::grad_fns::arithmetic::mul(input, &central_num)?;
+        let central_x = crate::grad_fns::arithmetic::div(&central_scaled, &central_den)?;
+
+        let one_minus_abs = crate::grad_fns::arithmetic::sub(&one, &abs_y)?;
+        let half_tail_arg = mul_const_like(&one_minus_abs, 0.5, op)?;
+        let log_tail_arg = crate::grad_fns::transcendental::log(&half_tail_arg)?;
+        let neg_log_tail_arg = crate::grad_fns::arithmetic::neg(&log_tail_arg)?;
+        let tail_z = crate::grad_fns::arithmetic::sqrt(&neg_log_tail_arg)?;
+        let tail_num = horner_const_tensor(
+            &tail_z,
+            &[1.641_345_311, 3.429_567_803, -1.624_906_493, -1.970_840_454],
+            op,
+        )?;
+        let tail_den = horner_const_tensor(&tail_z, &[1.637_067_800, 3.543_889_200, 1.0], op)?;
+        let tail_abs = crate::grad_fns::arithmetic::div(&tail_num, &tail_den)?;
+        let tail_sign = sgn_tensor(input)?;
+        let tail_x = crate::grad_fns::arithmetic::mul(&tail_abs, &tail_sign)?;
+
+        let mut x = crate::grad_fns::comparison::where_bt(&central, &central_x, &tail_x)?;
+        let two_over_sqrt_pi = 2.0 / std::f64::consts::PI.sqrt();
+        for _ in 0..2 {
+            let erf_x = erf(&x)?;
+            let resid = crate::grad_fns::arithmetic::sub(&erf_x, input)?;
+            let x2 = crate::grad_fns::arithmetic::mul(&x, &x)?;
+            let neg_x2 = crate::grad_fns::arithmetic::neg(&x2)?;
+            let exp_neg_x2 = crate::grad_fns::transcendental::exp(&neg_x2)?;
+            let denom = mul_const_like(&exp_neg_x2, two_over_sqrt_pi, op)?;
+            let step = crate::grad_fns::arithmetic::div(&resid, &denom)?;
+            x = crate::grad_fns::arithmetic::sub(&x, &step)?;
+        }
+
+        let with_pos_inf = crate::grad_fns::comparison::where_bt(&is_pos_one, &pos_inf, &x)?;
+        let with_signed_inf =
+            crate::grad_fns::comparison::where_bt(&is_neg_one, &neg_inf, &with_pos_inf)?;
+        let output = crate::grad_fns::comparison::where_bt(&out_of_domain, &nan, &with_signed_inf)?;
+        Ok(Some(output))
+    })
+}
+
 #[derive(Debug)]
 struct XlogyBackward<T: Float> {
     x: Tensor<T>,
@@ -3267,9 +3363,14 @@ pub fn erfc<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 
 /// Inverse error function: erfinv(erf(x)) = x.
 ///
-/// Uses the Winitzki (2008) rational approximation. Returns `inf` for
-/// input = 1, `-inf` for input = -1, and `NaN` for |input| > 1.
+/// CPU uses a Winitzki seed refined against the high-precision f64 `erf`.
+/// CUDA f32/f64 mirrors PyTorch's central/tail rational seed plus two Newton
+/// corrections, all resident on device. Returns `inf` for input = 1, `-inf`
+/// for input = -1, and `NaN` for |input| > 1.
 pub fn erfinv<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = erfinv_cuda_composed(input)? {
+        return wrap_special_unary(output, input, SpecialUnaryKind::Erfinv);
+    }
     let output = unary_map_named(input, "erfinv", erfinv_scalar)?;
     wrap_special_unary(output, input, SpecialUnaryKind::Erfinv)
 }
