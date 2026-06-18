@@ -48,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- CUDA randn Philox kernels lack torch.cuda byte-exact normal math (#2017)
 - CUDA dropout_philox derives seed instead of using Philox mask stream (#2018)
 - CORE: CPU randn is deterministic but not byte-exact with PyTorch normal_fill (#2014)
 - NN: Parameter device transfer creates non-leaf CUDA parameters (#2016)

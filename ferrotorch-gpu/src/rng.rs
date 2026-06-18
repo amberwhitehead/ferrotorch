@@ -1081,8 +1081,7 @@ fn push_store_normal_f32_pair_ptx(
     ptx.push_str(y_word);
     ptx.push_str(";\n");
     ptx.push_str("    fma.rn.f32 %theta, %u2, 0f30C90FDB, 0f30490FDB;\n");
-    ptx.push_str("    lg2.approx.f32 %ln_u1, %u1;\n");
-    ptx.push_str("    mul.f32 %ln_u1, %ln_u1, 0f3F317218;\n");
+    push_libdevice_logf_ptx(ptx, "%u1", "%ln_u1", pair);
     ptx.push_str("    mul.f32 %radius, %ln_u1, 0fC0000000;\n");
     ptx.push_str("    sqrt.rn.f32 %radius, %radius;\n");
     ptx.push_str("    sin.approx.f32 %sin_val, %theta;\n");
@@ -1121,6 +1120,337 @@ fn push_store_normal_f32_pair_ptx(
 }
 
 #[cfg(feature = "cuda")]
+fn push_libdevice_logf_ptx(ptx: &mut String, input: &str, output: &str, label_suffix: usize) {
+    // Transcribed from libdevice `__nv_logf`. The RNG module loads raw PTX
+    // through `module_cache`, so keeping this inline avoids CUDA C++/NVRTC while
+    // matching cuRAND's normal transform.
+    let normal = format!("LOGF_NORMAL_{label_suffix}");
+    let finite = format!("LOGF_FINITE_{label_suffix}");
+    let done = format!("LOGF_DONE_{label_suffix}");
+
+    ptx.push_str("    mov.f32 %f38, ");
+    ptx.push_str(input);
+    ptx.push_str(
+        r";
+    setp.geu.f32 %p1, %f38, 0f00800000;
+    mov.f32 %f39, 0f00000000;
+    @%p1 bra ",
+    );
+    ptx.push_str(&normal);
+    ptx.push_str(
+        r";
+    mul.rn.f32 %f38, %f38, 0f4B000000;
+    mov.f32 %f39, 0fC1B80000;
+",
+    );
+    ptx.push_str(&normal);
+    ptx.push_str(
+        r":
+    mov.b32 %r1, %f38;
+    add.s32 %r2, %r1, -1059760811;
+    and.b32 %r3, %r2, -8388608;
+    sub.s32 %r4, %r1, %r3;
+    mov.b32 %f11, %r4;
+    cvt.rn.f32.s32 %f12, %r3;
+    mov.f32 %f13, 0f34000000;
+    fma.rn.f32 %f14, %f12, %f13, %f39;
+    add.rn.f32 %f15, %f11, 0fBF800000;
+    mov.f32 %f16, 0f3E1039F6;
+    mov.f32 %f17, 0fBE055027;
+    fma.rn.f32 %f18, %f17, %f15, %f16;
+    mov.f32 %f19, 0fBDF8CDCC;
+    fma.rn.f32 %f20, %f18, %f15, %f19;
+    mov.f32 %f21, 0f3E0F2955;
+    fma.rn.f32 %f22, %f20, %f15, %f21;
+    mov.f32 %f23, 0fBE2AD8B9;
+    fma.rn.f32 %f24, %f22, %f15, %f23;
+    mov.f32 %f25, 0f3E4CED0B;
+    fma.rn.f32 %f26, %f24, %f15, %f25;
+    mov.f32 %f27, 0fBE7FFF22;
+    fma.rn.f32 %f28, %f26, %f15, %f27;
+    mov.f32 %f29, 0f3EAAAA78;
+    fma.rn.f32 %f30, %f28, %f15, %f29;
+    mov.f32 %f31, 0fBF000000;
+    fma.rn.f32 %f32, %f30, %f15, %f31;
+    mul.rn.f32 %f33, %f32, %f15;
+    fma.rn.f32 %f34, %f33, %f15, %f15;
+    mov.f32 %f35, 0f3F317218;
+    fma.rn.f32 %f41, %f14, %f35, %f34;
+    setp.lt.u32 %p2, %r1, 2139095040;
+    @%p2 bra ",
+    );
+    ptx.push_str(&finite);
+    ptx.push_str(
+        r";
+    mov.f32 %f36, 0f7F800000;
+    fma.rn.f32 %f41, %f38, %f36, %f36;
+",
+    );
+    ptx.push_str(&finite);
+    ptx.push_str(
+        r":
+    setp.neu.f32 %p3, %f38, 0f00000000;
+    @%p3 bra ",
+    );
+    ptx.push_str(&done);
+    ptx.push_str(
+        r";
+    mov.f32 %f41, 0fFF800000;
+",
+    );
+    ptx.push_str(&done);
+    ptx.push_str(
+        r":
+    mov.f32 ",
+    );
+    ptx.push_str(output);
+    ptx.push_str(", %f41;\n");
+}
+
+#[cfg(feature = "cuda")]
+fn push_libdevice_log_f64_ptx(ptx: &mut String, input: &str, output: &str) {
+    // Transcribed from libdevice `__nv_log`; emitted once in the f64 normal
+    // kernel to match `curand_normal2_double`.
+    ptx.push_str("    mov.f64 %fd56, ");
+    ptx.push_str(input);
+    ptx.push_str(
+        r";
+    {
+    .reg .b32 %temp;
+    mov.b64 {%temp, %r23}, %fd56;
+    }
+    {
+    .reg .b32 %temp;
+    mov.b64 {%r24, %temp}, %fd56;
+    }
+    setp.gt.s32 %p1, %r23, 1048575;
+    mov.b32 %r25, -1023;
+    @%p1 bra LOG_F64_NORMAL_EXP;
+    mul.rn.f64 %fd56, %fd56, 0d4350000000000000;
+    {
+    .reg .b32 %temp;
+    mov.b64 {%temp, %r23}, %fd56;
+    }
+    {
+    .reg .b32 %temp;
+    mov.b64 {%r24, %temp}, %fd56;
+    }
+    mov.b32 %r25, -1077;
+LOG_F64_NORMAL_EXP:
+    setp.lt.s32 %p2, %r23, 1;
+    @%p2 bra LOG_F64_SPECIAL;
+    setp.gt.s32 %p3, %r23, 2146435071;
+    @%p3 bra LOG_F64_SPECIAL;
+    shr.u32 %r14, %r23, 20;
+    add.s32 %r26, %r25, %r14;
+    and.b32 %r15, %r23, -2146435073;
+    or.b32 %r16, %r15, 1072693248;
+    mov.b64 %fd57, {%r24, %r16};
+    setp.lt.s32 %p5, %r16, 1073127583;
+    @%p5 bra LOG_F64_REDUCED;
+    {
+    .reg .b32 %temp;
+    mov.b64 {%r17, %temp}, %fd57;
+    }
+    {
+    .reg .b32 %temp;
+    mov.b64 {%temp, %r18}, %fd57;
+    }
+    add.s32 %r19, %r18, -1048576;
+    mov.b64 %fd57, {%r17, %r19};
+    add.s32 %r26, %r26, 1;
+LOG_F64_REDUCED:
+    sub.rn.f64 %fd12, %fd57, 0d3FF0000000000000;
+    add.rn.f64 %fd13, %fd57, 0d3FF0000000000000;
+    rcp.approx.ftz.f64 %fd14, %fd13;
+    neg.f64 %fd15, %fd13;
+    mov.f64 %fd16, 0d3FF0000000000000;
+    fma.rn.f64 %fd17, %fd15, %fd14, %fd16;
+    fma.rn.f64 %fd18, %fd17, %fd17, %fd17;
+    fma.rn.f64 %fd19, %fd18, %fd14, %fd14;
+    mul.rn.f64 %fd20, %fd12, %fd19;
+    add.rn.f64 %fd21, %fd20, %fd20;
+    mul.rn.f64 %fd22, %fd21, %fd21;
+    mov.f64 %fd23, 0d3ED0EE258B7A8B04;
+    mov.f64 %fd24, 0d3EB1380B3AE80F1E;
+    fma.rn.f64 %fd25, %fd24, %fd22, %fd23;
+    mov.f64 %fd26, 0d3EF3B2669F02676F;
+    fma.rn.f64 %fd27, %fd25, %fd22, %fd26;
+    mov.f64 %fd28, 0d3F1745CBA9AB0956;
+    fma.rn.f64 %fd29, %fd27, %fd22, %fd28;
+    mov.f64 %fd30, 0d3F3C71C72D1B5154;
+    fma.rn.f64 %fd31, %fd29, %fd22, %fd30;
+    mov.f64 %fd32, 0d3F624924923BE72D;
+    fma.rn.f64 %fd33, %fd31, %fd22, %fd32;
+    mov.f64 %fd34, 0d3F8999999999A3C4;
+    fma.rn.f64 %fd35, %fd33, %fd22, %fd34;
+    mov.f64 %fd36, 0d3FB5555555555554;
+    fma.rn.f64 %fd37, %fd35, %fd22, %fd36;
+    sub.rn.f64 %fd38, %fd12, %fd21;
+    add.rn.f64 %fd39, %fd38, %fd38;
+    neg.f64 %fd40, %fd21;
+    fma.rn.f64 %fd41, %fd40, %fd12, %fd39;
+    mul.rn.f64 %fd42, %fd19, %fd41;
+    mul.rn.f64 %fd43, %fd37, %fd22;
+    fma.rn.f64 %fd44, %fd43, %fd21, %fd42;
+    xor.b32 %r20, %r26, -2147483648;
+    mov.b32 %r21, 1127219200;
+    mov.b64 %fd45, {%r20, %r21};
+    mov.b32 %r22, -2147483648;
+    mov.b64 %fd46, {%r22, %r21};
+    sub.rn.f64 %fd47, %fd45, %fd46;
+    mov.f64 %fd48, 0d3FE62E42FEFA39EF;
+    fma.rn.f64 %fd49, %fd47, %fd48, %fd21;
+    neg.f64 %fd50, %fd47;
+    fma.rn.f64 %fd51, %fd50, %fd48, %fd49;
+    sub.rn.f64 %fd52, %fd51, %fd21;
+    sub.rn.f64 %fd53, %fd44, %fd52;
+    mov.f64 %fd54, 0d3C7ABC9E3B39803F;
+    fma.rn.f64 %fd55, %fd47, %fd54, %fd53;
+    add.rn.f64 %fd58, %fd49, %fd55;
+    bra.uni LOG_F64_DONE;
+LOG_F64_SPECIAL:
+    mov.f64 %fd10, 0d7FF0000000000000;
+    fma.rn.f64 %fd58, %fd56, %fd10, %fd10;
+    {
+    .reg .b32 %temp;
+    mov.b64 {%temp, %r13}, %fd56;
+    }
+    mov.b32 %f1, %r13;
+    setp.neu.f32 %p4, %f1, 0f00000000;
+    @%p4 bra LOG_F64_DONE;
+    mov.f64 %fd58, 0dFFF0000000000000;
+LOG_F64_DONE:
+    mov.f64 ",
+    );
+    ptx.push_str(output);
+    ptx.push_str(", %fd58;\n");
+}
+
+#[cfg(feature = "cuda")]
+fn push_libdevice_sincospi_f64_ptx(ptx: &mut String, input: &str, sin_out: &str, cos_out: &str) {
+    // Transcribed from libdevice `__nv_sincospi`; emitted once in the f64
+    // normal kernel because cuRAND computes sin/cos on a pi-scaled argument.
+    ptx.push_str("    mov.f64 %fd55, ");
+    ptx.push_str(input);
+    ptx.push_str(
+        r";
+    {
+    .reg .b32 %temp;
+    mov.b64 {%temp, %r2}, %fd55;
+    }
+    add.s32 %r3, %r2, %r2;
+    setp.lt.u32 %p1, %r3, -2038431743;
+    mov.f64 %fd16, 0d0000000000000000;
+    @%p1 bra SINCOSPI_REDUCE;
+    mul.rn.f64 %fd55, %fd55, %fd16;
+SINCOSPI_REDUCE:
+    {
+    .reg .b32 %temp;
+    mov.b64 {%r4, %temp}, %fd55;
+    }
+    {
+    .reg .b32 %temp;
+    mov.b64 {%temp, %r5}, %fd55;
+    }
+    add.s32 %r6, %r5, 1048576;
+    mov.b64 %fd17, {%r4, %r6};
+    cvt.rni.f64.f64 %fd18, %fd17;
+    cvt.rzi.s64.f64 %rd3, %fd18;
+    cvt.u32.u64 %r1, %rd3;
+    neg.f64 %fd19, %fd18;
+    mov.f64 %fd20, 0d3FE0000000000000;
+    fma.rn.f64 %fd21, %fd19, %fd20, %fd55;
+    mul.rn.f64 %fd22, %fd21, 0d3CA1A62633145C07;
+    mov.f64 %fd23, 0d400921FB54442D18;
+    fma.rn.f64 %fd24, %fd21, %fd23, %fd22;
+    mul.rn.f64 %fd25, %fd24, %fd24;
+    mov.f64 %fd26, 0d3E21EEA7C1EF8528;
+    mov.f64 %fd27, 0dBDA8FF8320FD8164;
+    fma.rn.f64 %fd28, %fd27, %fd25, %fd26;
+    mov.f64 %fd29, 0dBE927E4F8E06E6D9;
+    fma.rn.f64 %fd30, %fd28, %fd25, %fd29;
+    mov.f64 %fd31, 0d3EFA01A019DDBCE9;
+    fma.rn.f64 %fd32, %fd30, %fd25, %fd31;
+    mov.f64 %fd33, 0dBF56C16C16C15D47;
+    fma.rn.f64 %fd34, %fd32, %fd25, %fd33;
+    mov.f64 %fd35, 0d3FA5555555555551;
+    fma.rn.f64 %fd36, %fd34, %fd25, %fd35;
+    mov.f64 %fd37, 0dBFE0000000000000;
+    fma.rn.f64 %fd38, %fd36, %fd25, %fd37;
+    mov.f64 %fd39, 0d3FF0000000000000;
+    fma.rn.f64 %fd59, %fd38, %fd25, %fd39;
+    mov.f64 %fd40, 0dBE5AE5F12CB0D246;
+    mov.f64 %fd41, 0d3DE5DB65F9785EBA;
+    fma.rn.f64 %fd42, %fd41, %fd25, %fd40;
+    mov.f64 %fd43, 0d3EC71DE369ACE392;
+    fma.rn.f64 %fd44, %fd42, %fd25, %fd43;
+    mov.f64 %fd45, 0dBF2A01A019DB62A1;
+    fma.rn.f64 %fd46, %fd44, %fd25, %fd45;
+    mov.f64 %fd47, 0d3F81111111110818;
+    fma.rn.f64 %fd48, %fd46, %fd25, %fd47;
+    mov.f64 %fd49, 0dBFC5555555555554;
+    fma.rn.f64 %fd50, %fd48, %fd25, %fd49;
+    fma.rn.f64 %fd52, %fd50, %fd25, %fd16;
+    fma.rn.f64 %fd58, %fd52, %fd24, %fd24;
+    and.b64 %rd4, %rd3, 1;
+    setp.eq.b64 %p2, %rd4, 1;
+    not.pred %p3, %p2;
+    @%p3 bra SINCOSPI_NO_ODD_SWAP;
+    {
+    .reg .b32 %temp;
+    mov.b64 {%temp, %r7}, %fd58;
+    }
+    {
+    .reg .b32 %temp;
+    mov.b64 {%r8, %temp}, %fd58;
+    }
+    xor.b32 %r9, %r7, -2147483648;
+    mov.b64 %fd5, {%r8, %r9};
+    mov.f64 %fd58, %fd59;
+    mov.f64 %fd59, %fd5;
+SINCOSPI_NO_ODD_SWAP:
+    and.b32 %r10, %r1, 2;
+    setp.eq.s32 %p4, %r10, 0;
+    @%p4 bra SINCOSPI_NO_SIGN_FLIP;
+    {
+    .reg .b32 %temp;
+    mov.b64 {%temp, %r11}, %fd58;
+    }
+    {
+    .reg .b32 %temp;
+    mov.b64 {%r12, %temp}, %fd58;
+    }
+    xor.b32 %r13, %r11, -2147483648;
+    mov.b64 %fd58, {%r12, %r13};
+    {
+    .reg .b32 %temp;
+    mov.b64 {%temp, %r14}, %fd59;
+    }
+    {
+    .reg .b32 %temp;
+    mov.b64 {%r15, %temp}, %fd59;
+    }
+    xor.b32 %r16, %r14, -2147483648;
+    mov.b64 %fd59, {%r15, %r16};
+SINCOSPI_NO_SIGN_FLIP:
+    mov.f64 %fd53, 0d0000000000000000;
+    add.rn.f64 %fd12, %fd59, %fd53;
+    cvt.rzi.f64.f64 %fd54, %fd55;
+    setp.neu.f64 %p5, %fd55, %fd54;
+    @%p5 bra SINCOSPI_DONE;
+    mul.rn.f64 %fd58, %fd55, %fd53;
+SINCOSPI_DONE:
+    mov.f64 ",
+    );
+    ptx.push_str(sin_out);
+    ptx.push_str(", %fd58;\n");
+    ptx.push_str("    mov.f64 ");
+    ptx.push_str(cos_out);
+    ptx.push_str(", %fd12;\n");
+}
+
+#[cfg(feature = "cuda")]
 fn build_philox_normal_f32_ptx() -> String {
     let mut ptx = String::from(
         r".version 7.0
@@ -1141,9 +1471,12 @@ fn build_philox_normal_f32_ptx() -> String {
     .reg .u32 %ctr_add_lo, %ctr_add_hi;
     .reg .u32 %c0, %c1, %c2, %c3, %k0, %k1;
     .reg .u32 %hi_val, %lo_val, %t0, %t1, %t2, %t3;
+    .reg .u32 %r<5>;
     .reg .u64 %gid64, %tmp64, %ctr_add, %n_reg, %stride_reg, %linear, %step, %store_idx;
     .reg .u64 %prod, %out, %off;
+    .reg .f32 %f<42>;
     .reg .f32 %u1, %u2, %theta, %ln_u1, %radius, %sin_val, %cos_val;
+    .reg .pred %p<4>;
     .reg .pred %p_done, %p_store;
 
     ld.param.u64 %out, [out_ptr];
@@ -1350,16 +1683,21 @@ fn build_philox_normal_f64_ptx() -> String {
     .reg .u32 %ctr_add_lo, %ctr_add_hi;
     .reg .u32 %c0, %c1, %c2, %c3, %k0, %k1;
     .reg .u32 %hi_val, %lo_val, %t0, %t1, %t2, %t3;
+    .reg .u32 %r<27>;
     .reg .u64 %gid64, %tmp64, %ctr_add, %n_reg, %stride_reg, %linear, %step, %store_idx;
     .reg .u64 %prod, %out, %off, %xbits, %mantissa_bits, %bias_bits, %q;
+    .reg .u64 %rd<5>;
     .reg .u64 %hi64, %lo64, %mant;
     .reg .s64 %exp64, %n_i;
     .reg .b64 %n_bits;
+    .reg .f32 %f<2>;
+    .reg .f64 %fd<61>;
     .reg .f64 %u1, %u2, %u_tmp0, %u_tmp1, %ln_u1, %radius, %theta, %z0, %z1;
     .reg .f64 %m, %log_f, %log_f2, %log_s, %log_poly, %ln2_hi, %ln2_lo;
     .reg .f64 %one, %two, %sqrt2, %half_const, %nf;
     .reg .f64 %theta_y, %theta_nf, %theta_r, %theta_r2, %sin_poly, %cos_poly;
     .reg .f64 %sin_r, %cos_r, %neg_sin, %neg_cos, %sin_theta, %cos_theta;
+    .reg .pred %p<6>;
     .reg .pred %p_done, %p_store, %p_shift, %p_q;
 
     ld.param.u64 %out, [out_ptr];
@@ -1398,93 +1736,17 @@ LOOP_NORMAL_F64:
     push_philox_rounds_ptx(&mut ptx);
     push_box_muller_f64_uniform_ptx(&mut ptx, "%c0", "%c1", "%u1");
     push_box_muller_f64_uniform_ptx(&mut ptx, "%c2", "%c3", "%u2");
+    push_libdevice_log_f64_ptx(&mut ptx, "%u1", "%ln_u1");
     ptx.push_str(
         r"
-    // ln(u1), matching the f64 log kernel's half-step argument reduction.
-    mov.f64 %ln2_hi, 0d3FE62E42FEFA3800;
-    mov.f64 %ln2_lo, 0d3D2EF35793C76730;
-    mov.f64 %one, 0d3FF0000000000000;
-    mov.f64 %two, 0d4000000000000000;
-    mov.b64 %xbits, %u1;
-    shr.u64 %exp64, %xbits, 52;
-    and.b64 %exp64, %exp64, 2047;
-    sub.s64 %exp64, %exp64, 1023;
-    cvt.rn.f64.s64 %nf, %exp64;
-
-    mov.u64 %bias_bits, 0x3FF0000000000000;
-    and.b64 %mantissa_bits, %xbits, 0x000FFFFFFFFFFFFF;
-    or.b64 %mantissa_bits, %mantissa_bits, %bias_bits;
-    mov.b64 %m, %mantissa_bits;
-
-    mov.f64 %sqrt2, 0d3FF6A09E667F3BCD;
-    mov.f64 %half_const, 0d3FE0000000000000;
-    setp.gt.f64 %p_shift, %m, %sqrt2;
-    @%p_shift mul.f64 %m, %m, %half_const;
-    @%p_shift add.f64 %nf, %nf, %one;
-
-    sub.f64 %log_f, %m, %one;
-    add.f64 %log_s, %m, %one;
-    div.rn.f64 %log_f, %log_f, %log_s;
-    mul.f64 %log_f2, %log_f, %log_f;
-    mov.f64 %log_poly, 0d3FB1111111111111;
-    fma.rn.f64 %log_poly, %log_poly, %log_f2, 0d3FB3B13B13B13B14;
-    fma.rn.f64 %log_poly, %log_poly, %log_f2, 0d3FB745D1745D1746;
-    fma.rn.f64 %log_poly, %log_poly, %log_f2, 0d3FBC71C71C71C71C;
-    fma.rn.f64 %log_poly, %log_poly, %log_f2, 0d3FC2492492492492;
-    fma.rn.f64 %log_poly, %log_poly, %log_f2, 0d3FC999999999999A;
-    fma.rn.f64 %log_poly, %log_poly, %log_f2, 0d3FD5555555555555;
-    fma.rn.f64 %log_poly, %log_poly, %log_f2, %one;
-    mul.f64 %log_poly, %log_poly, %log_f;
-    add.f64 %log_poly, %log_poly, %log_poly;
-    fma.rn.f64 %ln_u1, %nf, %ln2_hi, %log_poly;
-    fma.rn.f64 %ln_u1, %nf, %ln2_lo, %ln_u1;
-
     mul.rn.f64 %radius, 0dC000000000000000, %ln_u1;
     sqrt.rn.f64 %radius, %radius;
-
-    mul.rn.f64 %theta, 0d401921FB54442D18, %u2;
-
-    // sincos(theta) with the same f64 polynomial/reduction path used by
-    // the standalone CUDA sin/cos kernels.
-    mul.rn.f64 %theta_y, %theta, 0d3FE45F306DC9C883;
-    cvt.rni.s64.f64 %n_i, %theta_y;
-    cvt.rn.f64.s64 %theta_nf, %n_i;
-    fma.rn.f64 %theta_r, %theta_nf, 0dBFF921FB54400000, %theta;
-    fma.rn.f64 %theta_r, %theta_nf, 0dBDD0B46000000000, %theta_r;
-    mul.rn.f64 %theta_r2, %theta_r, %theta_r;
-
-    mov.f64 %sin_poly, 0d3DE6124613A86D09;
-    fma.rn.f64 %sin_poly, %sin_poly, %theta_r2, 0dBE5AE64567F544E4;
-    fma.rn.f64 %sin_poly, %sin_poly, %theta_r2, 0d3EC71DE3A556C734;
-    fma.rn.f64 %sin_poly, %sin_poly, %theta_r2, 0dBF2A01A01A01A01A;
-    fma.rn.f64 %sin_poly, %sin_poly, %theta_r2, 0d3F81111111111111;
-    fma.rn.f64 %sin_poly, %sin_poly, %theta_r2, 0dBFC5555555555555;
-    mul.rn.f64 %sin_poly, %sin_poly, %theta_r2;
-    fma.rn.f64 %sin_r, %sin_poly, %theta_r, %theta_r;
-
-    mov.f64 %cos_poly, 0d3E21EED8EFF8D898;
-    fma.rn.f64 %cos_poly, %cos_poly, %theta_r2, 0dBE927E4FB7789F5C;
-    fma.rn.f64 %cos_poly, %cos_poly, %theta_r2, 0d3EFA01A01A01A01A;
-    fma.rn.f64 %cos_poly, %cos_poly, %theta_r2, 0dBF56C16C16C16C17;
-    fma.rn.f64 %cos_poly, %cos_poly, %theta_r2, 0d3FA5555555555555;
-    fma.rn.f64 %cos_poly, %cos_poly, %theta_r2, 0dBFE0000000000000;
-    fma.rn.f64 %cos_r, %cos_poly, %theta_r2, %one;
-
-    neg.f64 %neg_sin, %sin_r;
-    neg.f64 %neg_cos, %cos_r;
-    mov.f64 %sin_theta, %sin_r;
-    mov.f64 %cos_theta, %cos_r;
-    mov.b64 %n_bits, %n_i;
-    and.b64 %q, %n_bits, 3;
-    setp.eq.u64 %p_q, %q, 1;
-    @%p_q mov.f64 %sin_theta, %cos_r;
-    @%p_q mov.f64 %cos_theta, %neg_sin;
-    setp.eq.u64 %p_q, %q, 2;
-    @%p_q mov.f64 %sin_theta, %neg_sin;
-    @%p_q mov.f64 %cos_theta, %neg_cos;
-    setp.eq.u64 %p_q, %q, 3;
-    @%p_q mov.f64 %sin_theta, %neg_cos;
-    @%p_q mov.f64 %cos_theta, %sin_r;
+    add.rn.f64 %theta, %u2, %u2;
+",
+    );
+    push_libdevice_sincospi_f64_ptx(&mut ptx, "%theta", "%sin_theta", "%cos_theta");
+    ptx.push_str(
+        r"
 
     mul.rn.f64 %z0, %radius, %sin_theta;
     mul.rn.f64 %z1, %radius, %cos_theta;

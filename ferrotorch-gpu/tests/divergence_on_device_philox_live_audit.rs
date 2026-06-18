@@ -14,9 +14,10 @@
 //! directly instead of comparing to Ferrotorch's CPU `PhiloxGenerator`, whose
 //! contiguous-counter stream was the bug tracked by #1683.
 //!
-//! The normal kernel uses .approx PTX transcendentals so it is NOT bit-identical
-//! to the libm CPU Box-Muller; for it we assert distribution moments against the
-//! analytic standard-normal values plus exact element count/finiteness.
+//! Normal byte parity is checked against a live torch CUDA oracle because
+//! PyTorch delegates float/half/bfloat to `curand_normal4` and double to
+//! `curand_normal2_double` (`DistributionTemplates.h:443-453`), whose log/sincos
+//! math is libdevice-specific rather than host-libm equivalent.
 //!
 //! SERIALIZATION: the CUDA RNG manager is a process-global singleton. Tests that
 //! seed-then-sample (and especially the multi-call stream-continuity probe) hold
@@ -30,6 +31,8 @@
 
 use ferrotorch_core::{Device, manual_seed, rand_on_device, randn_on_device};
 use ferrotorch_gpu::{GpuDevice, init_cuda_backend};
+use half::{bf16, f16};
+use std::process::Command;
 use std::sync::Mutex;
 
 static SEED_LOCK: Mutex<()> = Mutex::new(());
@@ -48,6 +51,123 @@ fn to_host(t: &ferrotorch_core::Tensor<f32>) -> Vec<f32> {
 fn to_host_f64(t: &ferrotorch_core::Tensor<f64>) -> Vec<f64> {
     let cpu = t.to(Device::Cpu).expect("tensor.to(Cpu)");
     cpu.data().expect("cpu data").to_vec()
+}
+
+fn to_host_f16_bits(t: &ferrotorch_core::Tensor<f16>) -> Vec<u64> {
+    let cpu = t.to(Device::Cpu).expect("f16 tensor.to(Cpu)");
+    cpu.data()
+        .expect("cpu f16 data")
+        .iter()
+        .map(|x| x.to_bits() as u64)
+        .collect()
+}
+
+fn to_host_bf16_bits(t: &ferrotorch_core::Tensor<bf16>) -> Vec<u64> {
+    let cpu = t.to(Device::Cpu).expect("bf16 tensor.to(Cpu)");
+    cpu.data()
+        .expect("cpu bf16 data")
+        .iter()
+        .map(|x| x.to_bits() as u64)
+        .collect()
+}
+
+fn f32_bits(xs: &[f32]) -> Vec<u64> {
+    xs.iter().map(|x| x.to_bits() as u64).collect()
+}
+
+fn f64_bits(xs: &[f64]) -> Vec<u64> {
+    xs.iter().map(|x| x.to_bits()).collect()
+}
+
+fn select_bits(bits: &[u64], indices: &[usize]) -> Vec<u64> {
+    indices.iter().map(|&i| bits[i]).collect()
+}
+
+fn grid_boundary_indices(n: usize, stride: u64, lanes: u64) -> Vec<usize> {
+    let mut indices = Vec::new();
+    for lane in 0..lanes {
+        let base = stride * lane;
+        for raw in [base.saturating_sub(1), base, base + 1] {
+            if raw < n as u64 {
+                indices.push(raw as usize);
+            }
+        }
+    }
+    indices.extend([0usize, 1, n - 1]);
+    indices.sort_unstable();
+    indices.dedup();
+    indices
+}
+
+fn torch_cuda_randn_bits(
+    dtype: &str,
+    n: usize,
+    seed: u64,
+    skip_calls: usize,
+    indices: &[usize],
+) -> Vec<u64> {
+    let index_arg = indices
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let script = r#"
+import sys
+import torch
+
+dtype_name = sys.argv[1]
+n = int(sys.argv[2])
+seed = int(sys.argv[3])
+skip_calls = int(sys.argv[4])
+indices = [int(x) for x in sys.argv[5].split(",") if x]
+
+if not torch.cuda.is_available():
+    raise SystemExit("torch CUDA oracle unavailable")
+
+dtypes = {
+    "f32": torch.float32,
+    "f64": torch.float64,
+    "f16": torch.float16,
+    "bf16": torch.bfloat16,
+}
+dtype = dtypes[dtype_name]
+torch.cuda.manual_seed_all(seed)
+for _ in range(skip_calls):
+    torch.randn((n,), device="cuda", dtype=dtype)
+x = torch.randn((n,), device="cuda", dtype=dtype).cpu()
+torch.cuda.synchronize()
+if dtype_name == "bf16":
+    arr = x.view(torch.int16).numpy().view("uint16")
+elif dtype_name == "f16":
+    arr = x.numpy().view("uint16")
+elif dtype_name == "f32":
+    arr = x.numpy().view("uint32")
+else:
+    arr = x.numpy().view("uint64")
+print(" ".join(format(int(arr[i]), "x") for i in indices))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(dtype)
+        .arg(n.to_string())
+        .arg(seed.to_string())
+        .arg(skip_calls.to_string())
+        .arg(index_arg)
+        .output()
+        .expect("launch python3 torch oracle");
+    assert!(
+        output.status.success(),
+        "torch CUDA randn oracle failed: status={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("torch oracle stdout utf8")
+        .split_whitespace()
+        .map(|hex| u64::from_str_radix(hex, 16).expect("hex oracle bit pattern"))
+        .collect()
 }
 
 const PHILOX_M0: u32 = 0xD251_1F53;
@@ -173,6 +293,213 @@ fn calls_per_thread(n: usize, unroll_factor: u64) -> u64 {
     ((n as u64 - 1) / (stride * unroll_factor)) + 1
 }
 
+#[test]
+fn normal_f32_gpu_bit_exact_with_torch_cuda_small_and_tail_lengths() {
+    ensure_init();
+    let seed = 123u64;
+    for &n in &[1usize, 2, 3, 7, 4097] {
+        let indices: Vec<usize> = (0..n).collect();
+        let expected = torch_cuda_randn_bits("f32", n, seed, 0, &indices);
+        let got = {
+            let _g = SEED_LOCK.lock().unwrap();
+            manual_seed(seed).unwrap();
+            let t = randn_on_device::<f32>(&[n], Device::Cuda(0)).expect("gpu f32 normal");
+            assert_eq!(t.device(), Device::Cuda(0), "f32 normal must stay CUDA");
+            f32_bits(&to_host(&t))
+        };
+        assert_eq!(
+            got, expected,
+            "f32 normal bit pattern diverges from torch.cuda at n={n}"
+        );
+    }
+}
+
+#[test]
+fn normal_f64_gpu_bit_exact_with_torch_cuda_small_and_tail_lengths() {
+    ensure_init();
+    let seed = 124u64;
+    for &n in &[1usize, 2, 3, 7, 4097] {
+        let indices: Vec<usize> = (0..n).collect();
+        let expected = torch_cuda_randn_bits("f64", n, seed, 0, &indices);
+        let got = {
+            let _g = SEED_LOCK.lock().unwrap();
+            manual_seed(seed).unwrap();
+            let t = randn_on_device::<f64>(&[n], Device::Cuda(0)).expect("gpu f64 normal");
+            assert_eq!(t.device(), Device::Cuda(0), "f64 normal must stay CUDA");
+            f64_bits(&to_host_f64(&t))
+        };
+        assert_eq!(
+            got, expected,
+            "f64 normal bit pattern diverges from torch.cuda at n={n}"
+        );
+    }
+}
+
+#[test]
+fn normal_half_and_bfloat_gpu_bit_exact_with_torch_cuda_small_and_tail_lengths() {
+    ensure_init();
+    let seed = 125u64;
+    for &n in &[1usize, 2, 3, 7, 4097] {
+        let indices: Vec<usize> = (0..n).collect();
+
+        let expected_f16 = torch_cuda_randn_bits("f16", n, seed, 0, &indices);
+        let got_f16 = {
+            let _g = SEED_LOCK.lock().unwrap();
+            manual_seed(seed).unwrap();
+            let t = randn_on_device::<f16>(&[n], Device::Cuda(0)).expect("gpu f16 normal");
+            assert_eq!(t.device(), Device::Cuda(0), "f16 normal must stay CUDA");
+            to_host_f16_bits(&t)
+        };
+        assert_eq!(
+            got_f16, expected_f16,
+            "f16 normal bit pattern diverges from torch.cuda at n={n}"
+        );
+
+        let expected_bf16 = torch_cuda_randn_bits("bf16", n, seed, 0, &indices);
+        let got_bf16 = {
+            let _g = SEED_LOCK.lock().unwrap();
+            manual_seed(seed).unwrap();
+            let t = randn_on_device::<bf16>(&[n], Device::Cuda(0)).expect("gpu bf16 normal");
+            assert_eq!(t.device(), Device::Cuda(0), "bf16 normal must stay CUDA");
+            to_host_bf16_bits(&t)
+        };
+        assert_eq!(
+            got_bf16, expected_bf16,
+            "bf16 normal bit pattern diverges from torch.cuda at n={n}"
+        );
+    }
+}
+
+#[test]
+fn normal_gpu_bit_exact_with_torch_cuda_consecutive_call_offsets() {
+    ensure_init();
+    let n = 7usize;
+    let seed = 77u64;
+    let indices: Vec<usize> = (0..n).collect();
+
+    let expected_f32_second = torch_cuda_randn_bits("f32", n, seed, 1, &indices);
+    let expected_f64_second = torch_cuda_randn_bits("f64", n, seed, 1, &indices);
+    let expected_f16_second = torch_cuda_randn_bits("f16", n, seed, 1, &indices);
+    let expected_bf16_second = torch_cuda_randn_bits("bf16", n, seed, 1, &indices);
+
+    let (got_f32_second, got_f64_second, got_f16_second, got_bf16_second) = {
+        let _g = SEED_LOCK.lock().unwrap();
+
+        manual_seed(seed).unwrap();
+        let _ = randn_on_device::<f32>(&[n], Device::Cuda(0)).expect("first f32 normal");
+        let got_f32_second = f32_bits(&to_host(
+            &randn_on_device::<f32>(&[n], Device::Cuda(0)).expect("second f32 normal"),
+        ));
+
+        manual_seed(seed).unwrap();
+        let _ = randn_on_device::<f64>(&[n], Device::Cuda(0)).expect("first f64 normal");
+        let got_f64_second = f64_bits(&to_host_f64(
+            &randn_on_device::<f64>(&[n], Device::Cuda(0)).expect("second f64 normal"),
+        ));
+
+        manual_seed(seed).unwrap();
+        let _ = randn_on_device::<f16>(&[n], Device::Cuda(0)).expect("first f16 normal");
+        let got_f16_second = to_host_f16_bits(
+            &randn_on_device::<f16>(&[n], Device::Cuda(0)).expect("second f16 normal"),
+        );
+
+        manual_seed(seed).unwrap();
+        let _ = randn_on_device::<bf16>(&[n], Device::Cuda(0)).expect("first bf16 normal");
+        let got_bf16_second = to_host_bf16_bits(
+            &randn_on_device::<bf16>(&[n], Device::Cuda(0)).expect("second bf16 normal"),
+        );
+
+        (
+            got_f32_second,
+            got_f64_second,
+            got_f16_second,
+            got_bf16_second,
+        )
+    };
+
+    assert_eq!(
+        got_f32_second, expected_f32_second,
+        "f32 second normal call did not continue torch.cuda Philox offset"
+    );
+    assert_eq!(
+        got_f64_second, expected_f64_second,
+        "f64 second normal call did not continue torch.cuda Philox offset"
+    );
+    assert_eq!(
+        got_f16_second, expected_f16_second,
+        "f16 second normal call did not continue torch.cuda Philox offset"
+    );
+    assert_eq!(
+        got_bf16_second, expected_bf16_second,
+        "bf16 second normal call did not continue torch.cuda Philox offset"
+    );
+}
+
+#[test]
+fn normal_gpu_bit_exact_with_torch_cuda_grid_stride_lanes() {
+    ensure_init();
+
+    let seed = 2028u64;
+    let f32_stride = torch_distribution_stride(1_000_000, 4);
+    let f32_n = (f32_stride * 4 + 17) as usize;
+    let f32_indices = grid_boundary_indices(f32_n, f32_stride, 4);
+    let expected_f32 = torch_cuda_randn_bits("f32", f32_n, seed, 0, &f32_indices);
+    let expected_f16 = torch_cuda_randn_bits("f16", f32_n, seed, 0, &f32_indices);
+    let expected_bf16 = torch_cuda_randn_bits("bf16", f32_n, seed, 0, &f32_indices);
+
+    let f64_stride = torch_distribution_stride(1_000_000, 2);
+    let f64_n = (f64_stride * 2 + 11) as usize;
+    let f64_indices = grid_boundary_indices(f64_n, f64_stride, 2);
+    let expected_f64 = torch_cuda_randn_bits("f64", f64_n, seed, 0, &f64_indices);
+
+    let (got_f32, got_f16, got_bf16, got_f64) = {
+        let _g = SEED_LOCK.lock().unwrap();
+
+        manual_seed(seed).unwrap();
+        let got_f32_all = f32_bits(&to_host(
+            &randn_on_device::<f32>(&[f32_n], Device::Cuda(0)).expect("grid f32 normal"),
+        ));
+        let got_f32 = select_bits(&got_f32_all, &f32_indices);
+
+        manual_seed(seed).unwrap();
+        let got_f16_all = to_host_f16_bits(
+            &randn_on_device::<f16>(&[f32_n], Device::Cuda(0)).expect("grid f16 normal"),
+        );
+        let got_f16 = select_bits(&got_f16_all, &f32_indices);
+
+        manual_seed(seed).unwrap();
+        let got_bf16_all = to_host_bf16_bits(
+            &randn_on_device::<bf16>(&[f32_n], Device::Cuda(0)).expect("grid bf16 normal"),
+        );
+        let got_bf16 = select_bits(&got_bf16_all, &f32_indices);
+
+        manual_seed(seed).unwrap();
+        let got_f64_all = f64_bits(&to_host_f64(
+            &randn_on_device::<f64>(&[f64_n], Device::Cuda(0)).expect("grid f64 normal"),
+        ));
+        let got_f64 = select_bits(&got_f64_all, &f64_indices);
+
+        (got_f32, got_f16, got_bf16, got_f64)
+    };
+
+    assert_eq!(
+        got_f32, expected_f32,
+        "f32 normal grid-stride lane boundaries diverge from torch.cuda"
+    );
+    assert_eq!(
+        got_f16, expected_f16,
+        "f16 normal grid-stride lane boundaries diverge from torch.cuda"
+    );
+    assert_eq!(
+        got_bf16, expected_bf16,
+        "bf16 normal grid-stride lane boundaries diverge from torch.cuda"
+    );
+    assert_eq!(
+        got_f64, expected_f64,
+        "f64 normal grid-stride lane boundaries diverge from torch.cuda"
+    );
+}
+
 /// PROBE 1+3 — UNIFORM on-device, boundary lengths (n not divisible by 4).
 /// Reference: PyTorch CUDA distribution layout. A correct kernel is
 /// bit-identical at awkward lane boundaries n = 5, 7, 4097.
@@ -255,9 +582,8 @@ fn uniform_gpu_consecutive_calls_continue_torch_cuda_offset() {
     );
 }
 
-/// PROBE 4 — NORMAL on-device, ODD n: each thread writes idx0=2*gid,
-/// idx1=2*gid+1 guarded idx1<n (rng.rs:1199-1205). For odd n exactly n finite
-/// values must be written.
+/// PROBE 4 — NORMAL on-device, ODD n: each thread writes grid-stride lanes with
+/// per-lane bounds guards. For odd n exactly n finite values must be written.
 #[test]
 fn normal_gpu_odd_length_finite_count() {
     ensure_init();
@@ -277,9 +603,9 @@ fn normal_gpu_odd_length_finite_count() {
     }
 }
 
-/// PROBE 2 — NORMAL distribution moments from the on-device kernel. 1M samples:
-/// mean~0, std~1, |skew|~0, kurtosis~3. The .approx transcendentals must not
-/// skew the distribution. Targets are the analytic standard-normal moments.
+/// PROBE 2 — NORMAL distribution moments from the on-device kernel. The
+/// bit-exact tests above prove PyTorch CUDA parity; this keeps a broad
+/// standard-normal sanity check over a larger sample.
 #[test]
 fn normal_gpu_moments_standard_normal() {
     ensure_init();
@@ -318,7 +644,7 @@ fn normal_gpu_moments_standard_normal() {
     assert!(skew.abs() < 0.05, "on-device normal skew {skew} != ~0");
     assert!(
         (kurt - 3.0).abs() < 0.1,
-        "on-device normal kurtosis {kurt} != ~3 (approx-transcendental tail distortion)"
+        "on-device normal kurtosis {kurt} != ~3"
     );
 }
 
