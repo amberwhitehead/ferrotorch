@@ -514,6 +514,43 @@ mod cuda_create_graph {
             "gradcheck must preserve CUDA inputs for every function call, got {devices:?}"
         );
     }
+
+    #[test]
+    fn gradcheck_cuda_preserves_preexisting_leaf_grad() {
+        let x = cuda_leaf(&[1.5, 2.5], &[2]);
+        let prior_grad =
+            Tensor::from_storage(TensorStorage::cpu(vec![13.0, -17.0]), vec![2], false)
+                .expect("cpu prior grad")
+                .to(Device::Cuda(0))
+                .expect("upload prior grad");
+        x.set_grad(Some(prior_grad)).expect("set existing grad");
+
+        let func = |inputs: &[Tensor<f32>]| -> FerrotorchResult<Tensor<f32>> {
+            let squared = mul(&inputs[0], &inputs[0])?;
+            sum(&squared)
+        };
+
+        assert!(
+            gradcheck(
+                func,
+                std::slice::from_ref(&x),
+                Some(1.0e-2),
+                Some(1.0e-2),
+                Some(1.0e-2)
+            )
+            .expect("CUDA gradcheck")
+        );
+
+        let preserved_grad = x
+            .grad()
+            .expect("grad lookup")
+            .expect("preexisting grad must remain set");
+        assert_eq!(preserved_grad.shape(), &[2]);
+        assert_eq!(
+            read_cuda(&preserved_grad, "preserved CUDA grad"),
+            &[13.0, -17.0]
+        );
+    }
 }
 
 #[test]
@@ -533,6 +570,29 @@ fn gradcheck_is_functional_and_repeatable() {
     assert!(
         x.grad().expect("grad lookup").is_none(),
         "repeated gradcheck must remain side-effect free"
+    );
+}
+
+#[test]
+fn gradcheck_preserves_preexisting_leaf_grad() {
+    let x = leaf(&[1.0, 2.0, 3.0], &[3]);
+    x.set_grad(Some(constant(&[13.0, -17.0, 19.0], &[3])))
+        .expect("set existing grad");
+    let func = |inputs: &[Tensor<f32>]| -> FerrotorchResult<Tensor<f32>> {
+        let squared = mul(&inputs[0], &inputs[0])?;
+        sum(&squared)
+    };
+
+    assert!(gradcheck(func, std::slice::from_ref(&x), None, None, None).expect("gradcheck"));
+
+    let preserved_grad = x
+        .grad()
+        .expect("grad lookup")
+        .expect("preexisting grad must remain set");
+    assert_eq!(preserved_grad.shape(), &[3]);
+    assert_eq!(
+        preserved_grad.data().expect("preserved grad data"),
+        &[13.0, -17.0, 19.0]
     );
 }
 
