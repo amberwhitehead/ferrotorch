@@ -89,16 +89,18 @@ The 1700+ LOC file is organised as:
 - **Enums** (`quantize.rs:36-65`): `QuantScheme`, `QuantDtype`. The
   dtype carries `qmin()` / `qmax()` accessors for the per-dtype int
   range.
-- **`QuantizedTensor`** (`quantize.rs:88`): owns the i8 data plus
+- **`QuantizedTensor`** (`quantize.rs:88`): owns the i8 storage plus
   the per-channel scale/zp vectors. The `Int4` dtype packs two
-  4-bit values per `i8` storage byte (low 4 bits significant).
-- **Quantize / dequantize** (`quantize.rs:301`, `quantize.rs:412`):
+  signed 4-bit logical codes per `i8` storage byte, first code in the
+  low nibble; `QuantizedTensor::logical_data` unpacks one code per
+  tensor element.
+- **Quantize / dequantize** (`quantize.rs:456`, `quantize.rs:585`):
   - `quantize(input, scheme, dtype)` — computes per-tensor or
     per-channel min/max, derives `(scale, zp)` with
     `MinMaxObserver._calculate_qparams` parity, then rounds via
     inverse-scale multiply plus nearest-even rounding and clips.
   - `dequantize(q)` — inverse using `(q - zp) * scale` per element.
-- **`quantized_matmul`** (`quantize.rs:518`) — validates 2-D
+- **`quantized_matmul`** (`quantize.rs:627`) — validates 2-D
   per-tensor quantized inputs, accumulates centered integer products
   in `i64`, computes the real output range in `f64`, derives INT8
   output qparams, and requantizes back to a `QuantizedTensor`.
@@ -110,35 +112,35 @@ The 1700+ LOC file is organised as:
   `int32_t` implementation detail because this API derives output
   qparams from the full result and must not debug-panic or release-wrap
   on ordinary long INT8 inner dimensions (CORE-086 / #1780).
-- **`quantize_named_tensors`** (`quantize.rs:694`) — bulk
+- **`quantize_named_tensors`** (`quantize.rs:804`) — bulk
   state-dict path; one entry per `(name, scheme, dtype)`.
-- **`QParams`** (`quantize.rs:713`) — `(scale, zp)` bundle plus
+- **`QParams`** (`quantize.rs:823`) — `(scale, zp)` bundle plus
   the qmin/qmax for downstream consumers.
-- **`trait Observer`** (`quantize.rs:754`) — `observe(tensor)`
+- **`trait Observer`** (`quantize.rs:864`) — `observe(tensor)`
   updates internal state through a `FerrotorchResult<()>`, so malformed
   observations are structured errors; `calculate_qparams()` returns the
   `QParams`.
-- **`MinMaxObserver`** (`quantize.rs:771`): scalar running min /
+- **`MinMaxObserver`** (`quantize.rs:881`): scalar running min /
   max. Per-tensor symmetric / asymmetric supported via `QuantScheme`
   passed at construction.
-- **`PerChannelMinMaxObserver`** (`quantize.rs:831`): per-slice
+- **`PerChannelMinMaxObserver`** (`quantize.rs:941`): per-slice
   running min/max along `axis`.
-- **`HistogramObserver`** (`quantize.rs:978`, constructor
-  `quantize.rs:993`): histogram observer with strictly positive bin
+- **`HistogramObserver`** (`quantize.rs:1088`, constructor
+  `quantize.rs:1103`): histogram observer with strictly positive bin
   construction, NaN/Inf filtering, PyTorch-style `histc` binning
-  (`quantize.rs:1009`), range expansion through 16x upsampled
-  redistribution (`quantize.rs:1053`), and PyTorch's non-linear L2
-  qparam search (`quantize.rs:1192`). The zero-bin boundary differs from
+  (`quantize.rs:1119`), range expansion through 16x upsampled
+  redistribution (`quantize.rs:1163`), and PyTorch's non-linear L2
+  qparam search (`quantize.rs:1302`). The zero-bin boundary differs from
   PyTorch's delayed `torch.histogram` runtime error because invalid bin counts
   are rejected by the constructor instead of being left as a later panic path.
-- **`FakeQuantize`** (`quantize.rs:1357`): PyTorch-default qparams
+- **`FakeQuantize`** (`quantize.rs:1467`): PyTorch-default qparams
   cache (`scale=1`, `zero_point=0`), independent enable/disable helpers
   for fake quantization and observation, `calculate_qparams`
-  (`quantize.rs:1403`), and `forward` (`quantize.rs:1411`) that observes
+  (`quantize.rs:1513`), and `forward` (`quantize.rs:1521`) that observes
   before the fake-quant branch.
   Numerical fake quant is quantize-then-dequantize; backward STE lives in
   `grad_fns/quantize_grad.rs`.
-- **`QatLayer`** (`quantize.rs:1475`) / **`QatModel`** (`quantize.rs:1489`) —
+- **`QatLayer`** (`quantize.rs:1585`) / **`QatModel`** (`quantize.rs:1599`) —
   per-param observer + fake-quantize bundles. `prepare_qat` is a factory.
 
 Non-test production consumers:

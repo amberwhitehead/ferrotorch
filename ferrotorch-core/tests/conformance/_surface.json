@@ -1316,6 +1316,7 @@
     { "path": "ferrotorch_core::quantize::QuantScheme", "kind": "enum", "signature": "pub enum QuantScheme" },
     { "path": "ferrotorch_core::quantize::QuantizedTensor", "kind": "struct", "signature": "# [derive (Debug , Clone)] pub struct QuantizedTensor" },
     { "path": "ferrotorch_core::quantize::QuantizedTensor::data", "kind": "method", "signature": "fn data (& self) -> & [i8]" },
+    { "path": "ferrotorch_core::quantize::QuantizedTensor::logical_data", "kind": "method", "signature": "fn logical_data (& self) -> FerrotorchResult < Vec < i8 > >" },
     { "path": "ferrotorch_core::quantize::QuantizedTensor::numel", "kind": "method", "signature": "fn numel (& self) -> usize" },
     { "path": "ferrotorch_core::quantize::QuantizedTensor::qdtype", "kind": "method", "signature": "fn qdtype (& self) -> QuantDtype" },
     { "path": "ferrotorch_core::quantize::QuantizedTensor::scale", "kind": "method", "signature": "fn scale (& self) -> & [f32]" },

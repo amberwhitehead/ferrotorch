@@ -45,7 +45,7 @@ pub enum QuantScheme {
 pub enum QuantDtype {
     /// Signed 8-bit: [-128, 127].
     Int8,
-    /// Signed 4-bit: [-8, 7].  Stored packed in `i8` values.
+    /// Signed 4-bit: [-8, 7]. Stored two logical codes per byte.
     Int4,
     /// Unsigned 8-bit: [0, 255].
     Uint8,
@@ -86,9 +86,14 @@ impl QuantDtype {
 /// * `shape[axis]` for `PerChannel(axis)`
 #[derive(Debug, Clone)]
 pub struct QuantizedTensor {
-    /// Quantized values stored as `i8` regardless of logical dtype.
+    /// Quantized storage bytes represented as `i8`.
+    ///
     /// For `Uint8`, the stored `i8` is reinterpreted as `u8` via
-    /// wrapping cast; for `Int4` only the low 4 bits are significant.
+    /// wrapping cast. For `Int4`, this is packed storage: two signed
+    /// four-bit two's-complement logical codes per byte, with the first
+    /// logical element in the low nibble and an odd final element padded
+    /// by a zero high nibble. This mirrors PyTorch's `quint4x2` storage
+    /// layout while preserving ferrotorch's signed Int4 logical range.
     data: Vec<i8>,
     /// Per-tensor or per-channel scales.
     scale: Vec<f32>,
@@ -115,10 +120,24 @@ impl QuantizedTensor {
         &self.shape
     }
 
-    /// Borrow the quantized data.
+    /// Borrow the quantized storage bytes.
+    ///
+    /// For `Int4`, this slice is packed and its length is
+    /// `(numel + 1) / 2`, not `numel`. Use [`Self::logical_data`] when
+    /// callers need one logical quantized code per tensor element.
     #[inline]
     pub fn data(&self) -> &[i8] {
         &self.data
+    }
+
+    /// Return one logical quantized code per tensor element.
+    ///
+    /// `Int8` and `Uint8` tensors return their byte storage unchanged
+    /// (with `Uint8` still represented by the original byte pattern in an
+    /// `i8`). `Int4` tensors are unpacked from the two-codes-per-byte
+    /// storage returned by [`Self::data`].
+    pub fn logical_data(&self) -> FerrotorchResult<Vec<i8>> {
+        unpack_quantized_storage(self)
     }
 
     /// Borrow the scale vector.
@@ -225,14 +244,104 @@ fn quantize_val_f64(x: f64, scale: f64, zp: i32, qmin: i32, qmax: i32) -> Ferrot
     Ok(clamped as i32 as i8)
 }
 
-/// Recover the i32 quantized value from the stored `i8`, accounting for
-/// unsigned dtypes where the bit pattern represents a `u8`.
 #[inline]
-fn stored_to_i32(val: i8, is_unsigned: bool) -> i32 {
-    if is_unsigned {
-        (val as u8) as i32
+fn storage_len_for(dtype: QuantDtype, numel: usize) -> usize {
+    match dtype {
+        QuantDtype::Int4 => numel.div_ceil(2),
+        QuantDtype::Int8 | QuantDtype::Uint8 => numel,
+    }
+}
+
+#[inline]
+fn int4_code_to_nibble(code: i8) -> u8 {
+    debug_assert!(
+        (-8..=7).contains(&code),
+        "Int4 logical code outside [-8, 7]: {code}"
+    );
+    (code as u8) & 0x0f
+}
+
+#[inline]
+fn int4_nibble_to_code(nibble: u8) -> i8 {
+    let value = nibble & 0x0f;
+    if value >= 8 {
+        (value as i8) - 16
     } else {
-        val as i32
+        value as i8
+    }
+}
+
+fn pack_int4_codes(codes: &[i8]) -> Vec<i8> {
+    let mut packed = Vec::with_capacity(codes.len().div_ceil(2));
+    for pair in codes.chunks(2) {
+        let low = int4_code_to_nibble(pair[0]);
+        let high = pair.get(1).map_or(0, |&code| int4_code_to_nibble(code));
+        packed.push(((high << 4) | low) as i8);
+    }
+    packed
+}
+
+fn pack_quantized_codes(codes: Vec<i8>, dtype: QuantDtype) -> Vec<i8> {
+    match dtype {
+        QuantDtype::Int4 => pack_int4_codes(&codes),
+        QuantDtype::Int8 | QuantDtype::Uint8 => codes,
+    }
+}
+
+fn validate_quantized_storage_len(qtensor: &QuantizedTensor, op: &str) -> FerrotorchResult<()> {
+    let numel = qtensor.numel();
+    let expected = storage_len_for(qtensor.dtype, numel);
+    if qtensor.data.len() != expected {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: {:?} storage length {} does not match shape {:?} with {numel} logical elements (expected {expected})",
+                qtensor.dtype,
+                qtensor.data.len(),
+                qtensor.shape
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn quantized_code_at(qtensor: &QuantizedTensor, logical_index: usize) -> FerrotorchResult<i32> {
+    if logical_index >= qtensor.numel() {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!(
+                "quantized_code_at: logical index {logical_index} out of bounds for shape {:?}",
+                qtensor.shape
+            ),
+        });
+    }
+
+    match qtensor.dtype {
+        QuantDtype::Int4 => {
+            let byte = qtensor.data[logical_index / 2] as u8;
+            let nibble = if logical_index.is_multiple_of(2) {
+                byte & 0x0f
+            } else {
+                (byte >> 4) & 0x0f
+            };
+            Ok(i32::from(int4_nibble_to_code(nibble)))
+        }
+        QuantDtype::Uint8 => Ok(i32::from(qtensor.data[logical_index] as u8)),
+        QuantDtype::Int8 => Ok(i32::from(qtensor.data[logical_index])),
+    }
+}
+
+fn unpack_quantized_storage(qtensor: &QuantizedTensor) -> FerrotorchResult<Vec<i8>> {
+    validate_quantized_storage_len(qtensor, "QuantizedTensor::logical_data")?;
+    let numel = qtensor.numel();
+
+    match qtensor.dtype {
+        QuantDtype::Int4 => {
+            let mut codes = Vec::with_capacity(numel);
+            for i in 0..numel {
+                codes.push(quantized_code_at(qtensor, i)? as i8);
+            }
+            Ok(codes)
+        }
+        QuantDtype::Int8 | QuantDtype::Uint8 => Ok(qtensor.data.clone()),
     }
 }
 
@@ -388,13 +497,13 @@ pub fn quantize<T: Float>(
 
             let (scale, zp) = compute_scale_zp(min_val, max_val, dtype);
 
-            let qdata: Vec<i8> = data
+            let qcodes: Vec<i8> = data
                 .iter()
                 .map(|&v| quantize_val(v.to_f32().unwrap(), scale, zp, qmin, qmax, is_unsigned))
                 .collect();
 
             Ok(QuantizedTensor {
-                data: qdata,
+                data: pack_quantized_codes(qcodes, dtype),
                 scale: vec![scale],
                 zero_point: vec![zp],
                 shape,
@@ -437,10 +546,10 @@ pub fn quantize<T: Float>(
             let scales: Vec<f32> = params.iter().map(|&(s, _)| s).collect();
             let zps: Vec<i32> = params.iter().map(|&(_, z)| z).collect();
 
-            let mut qdata = Vec::with_capacity(numel);
+            let mut qcodes = Vec::with_capacity(numel);
             for (i, &v) in data.iter().enumerate() {
                 let ch = channel_index(i, &shape, axis);
-                qdata.push(quantize_val(
+                qcodes.push(quantize_val(
                     v.to_f32().unwrap(),
                     scales[ch],
                     zps[ch],
@@ -451,7 +560,7 @@ pub fn quantize<T: Float>(
             }
 
             Ok(QuantizedTensor {
-                data: qdata,
+                data: pack_quantized_codes(qcodes, dtype),
                 scale: scales,
                 zero_point: zps,
                 shape,
@@ -475,24 +584,24 @@ pub fn quantize<T: Float>(
 /// Applies the inverse mapping: `x = (q - zero_point) * scale`.
 pub fn dequantize<T: Float>(qtensor: &QuantizedTensor) -> FerrotorchResult<Tensor<T>> {
     ensure_torch_dequantize_output_dtype::<T>()?;
+    validate_quantized_storage_len(qtensor, "dequantize")?;
 
     let numel = qtensor.numel();
     let mut result = Vec::with_capacity(numel);
-    let is_unsigned = qtensor.dtype == QuantDtype::Uint8;
 
     match qtensor.scheme {
         QuantScheme::PerTensor => {
             let scale = qtensor.scale[0];
             let zp = qtensor.zero_point[0];
-            for &q in &qtensor.data {
-                let val = (stored_to_i32(q, is_unsigned) - zp) as f32 * scale;
+            for i in 0..numel {
+                let val = (quantized_code_at(qtensor, i)? - zp) as f32 * scale;
                 result.push(T::from(val).unwrap());
             }
         }
         QuantScheme::PerChannel(axis) => {
-            for (i, &q) in qtensor.data.iter().enumerate() {
+            for i in 0..numel {
                 let ch = channel_index(i, &qtensor.shape, axis);
-                let val = (stored_to_i32(q, is_unsigned) - qtensor.zero_point[ch]) as f32
+                let val = (quantized_code_at(qtensor, i)? - qtensor.zero_point[ch]) as f32
                     * qtensor.scale[ch];
                 result.push(T::from(val).unwrap());
             }
@@ -564,19 +673,23 @@ pub fn quantized_matmul(
             message: format!("quantized_matmul output shape [{m}, {n}] overflows element count"),
         })?;
 
-    if a.data.len() != a_expected {
+    let a_storage_expected = storage_len_for(a.dtype, a_expected);
+    let b_storage_expected = storage_len_for(b.dtype, b_expected);
+    if a.data.len() != a_storage_expected {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
-                "quantized_matmul left data length {} does not match shape {:?} (expected {a_expected})",
+                "quantized_matmul left {:?} storage length {} does not match shape {:?} with {a_expected} logical elements (expected {a_storage_expected})",
+                a.dtype,
                 a.data.len(),
                 a.shape
             ),
         });
     }
-    if b.data.len() != b_expected {
+    if b.data.len() != b_storage_expected {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
-                "quantized_matmul right data length {} does not match shape {:?} (expected {b_expected})",
+                "quantized_matmul right {:?} storage length {} does not match shape {:?} with {b_expected} logical elements (expected {b_storage_expected})",
+                b.dtype,
                 b.data.len(),
                 b.shape
             ),
@@ -595,9 +708,6 @@ pub fn quantized_matmul(
     let b_scale = b.scale[0];
     let b_zp = b.zero_point[0];
 
-    let a_unsigned = a.dtype == QuantDtype::Uint8;
-    let b_unsigned = b.dtype == QuantDtype::Uint8;
-
     // Accumulate in i64. Centered INT8/UINT8 deltas can reach +/-255, so
     // 65025*K exceeds i32 once K is only ~33k. PyTorch's optimized kernels
     // expose int32 accumulators internally, but ferrotorch's public wrapper
@@ -608,8 +718,8 @@ pub fn quantized_matmul(
         for j in 0..n {
             let mut sum = 0i64;
             for p in 0..k {
-                let qa = i64::from(stored_to_i32(a.data[i * k + p], a_unsigned)) - i64::from(a_zp);
-                let qb = i64::from(stored_to_i32(b.data[p * n + j], b_unsigned)) - i64::from(b_zp);
+                let qa = i64::from(quantized_code_at(a, i * k + p)?) - i64::from(a_zp);
+                let qb = i64::from(quantized_code_at(b, p * n + j)?) - i64::from(b_zp);
                 let product = qa.checked_mul(qb).ok_or_else(|| FerrotorchError::InvalidArgument {
                     message: format!(
                         "quantized_matmul product overflow at output ({i}, {j}), inner index {p}"

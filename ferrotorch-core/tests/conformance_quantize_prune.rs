@@ -67,8 +67,8 @@
 //! Every expectation in `fixtures/quantize_prune.json` is computed by a
 //! REAL PyTorch API (R-ORACLE-2): `MinMaxObserver`/`PerChannelMinMaxObserver`
 //! `.calculate_qparams()` for scales/zero-points, `torch.quantize_per_tensor`
-//! / `torch.quantize_per_channel` (`.int_repr()`, `.dequantize()`) for codes
-//! (decomposed ops for INT4), `torch.nn.utils.prune.l1_unstructured` for
+//! / `torch.quantize_per_channel` (`.int_repr()`, `.dequantize()`) for
+//! logical codes (decomposed ops for signed INT4), `torch.nn.utils.prune.l1_unstructured` for
 //! magnitude pruning, and `torch.ao.pruning.WeightNormSparsifier` (the
 //! documented 2:4 configuration) for the 2:4 mask. Each fixture row carries
 //! the torch API in its `oracle` field. The previous generation of this
@@ -401,9 +401,10 @@ fn parse_qdtype(name: &str) -> QuantDtype {
     }
 }
 
-/// Reverse of ferrotorch's `stored_to_i32`: turn the stored `i8` back into
-/// the i32-domain code that the fixtures encode. For Uint8 the stored byte
-/// is reinterpreted as `u8` first (0..=255 instead of -128..=127).
+/// Reverse of ferrotorch's storage byte representation for one logical
+/// quantized code. For Uint8 the byte is reinterpreted as `u8` first
+/// (0..=255 instead of -128..=127). For Int4, callers pass unpacked logical
+/// codes from `QuantizedTensor::logical_data`, not packed storage bytes.
 fn stored_to_code(stored: i8, qdtype: QuantDtype) -> i32 {
     match qdtype {
         QuantDtype::Uint8 => i32::from(stored as u8),
@@ -455,8 +456,9 @@ fn quantize_per_tensor_bit_exact_codes() {
         assert_eq!(actual_zp.len(), 1, "{label}: per-tensor zp len != 1");
         assert_eq!(actual_zp[0], expected_zp, "{label}: zero_point mismatch");
 
-        // Bit-exact integer codes.
-        let stored = qt.data();
+        // Bit-exact logical integer codes. For Int4, `data()` is packed
+        // storage, so compare through `logical_data()`.
+        let stored = qt.logical_data().expect("logical qcodes");
         assert_eq!(
             stored.len(),
             expected_codes.len(),
@@ -470,6 +472,31 @@ fn quantize_per_tensor_bit_exact_codes() {
             );
         }
     }
+}
+
+#[test]
+fn int4_quantize_data_is_nibble_packed_low_nibble_first() {
+    // PyTorch storage convention for 4-bit quantized tensors:
+    // `torch.quint4x2` packs two logical 4-bit values into one byte in
+    // row-major order, with the first value in the low nibble and an odd
+    // final value padded by a zero high nibble. Ferrotorch's logical Int4
+    // range is signed [-8, 7], so each signed code is stored as its 4-bit
+    // two's-complement nibble.
+    let input: Vec<f32> = (-8..=7).map(|v| v as f32).chain([0.0]).collect();
+    let t = Tensor::from_storage(TensorStorage::cpu(input.clone()), vec![17], false).unwrap();
+
+    let qt = quantize(&t, QuantScheme::PerTensor, QuantDtype::Int4).expect("int4 quantize");
+
+    assert_eq!(qt.shape(), &[17]);
+    assert_eq!(qt.numel(), 17);
+    assert_eq!(
+        qt.data().iter().map(|&byte| byte as u8).collect::<Vec<_>>(),
+        vec![0x98, 0xBA, 0xDC, 0xFE, 0x10, 0x32, 0x54, 0x76, 0x00],
+        "Int4 data() must expose packed storage bytes, not one i8 per element"
+    );
+
+    let rt: Tensor<f32> = dequantize(&qt).expect("dequantize packed int4");
+    assert_eq!(rt.data().unwrap(), input.as_slice());
 }
 
 #[test]
@@ -551,8 +578,15 @@ fn quantize_per_channel_bit_exact_codes() {
             assert_eq!(actual, expected, "{label}: channel {i} zero_point mismatch");
         }
 
-        // Bit-exact codes in the original flat order.
-        for (i, (&stored, &expected)) in qt.data().iter().zip(expected_codes.iter()).enumerate() {
+        // Bit-exact logical codes in the original flat order. For Int4,
+        // `data()` is packed storage, so compare through `logical_data()`.
+        let stored = qt.logical_data().expect("logical qcodes");
+        assert_eq!(
+            stored.len(),
+            expected_codes.len(),
+            "{label}: code length mismatch"
+        );
+        for (i, (&stored, &expected)) in stored.iter().zip(expected_codes.iter()).enumerate() {
             let actual = stored_to_code(stored, qdtype);
             assert_eq!(actual, expected, "{label}: index {i} code mismatch");
         }
@@ -752,6 +786,36 @@ fn quantized_matmul_shape_mismatch_errors() {
     let qa = quantize(&a, QuantScheme::PerTensor, QuantDtype::Int8).unwrap();
     let qb = quantize(&b, QuantScheme::PerTensor, QuantDtype::Int8).unwrap();
     assert!(quantized_matmul(&qa, &qb).is_err());
+}
+
+#[test]
+fn quantized_matmul_reads_odd_length_packed_int4_operands() {
+    // A [1, 3] x [3, 1] product gives each Int4 input an odd logical
+    // element count. Packed storage is ceil(3 / 2) = 2 bytes; the matmul
+    // path must index logical codes, not raw bytes.
+    let a = make_cpu_f32(&[-1.0, 0.0, 1.0], &[1, 3], false);
+    let b = make_cpu_f32(&[2.0, -2.0, 3.0], &[3, 1], false);
+    let qa = quantize(&a, QuantScheme::PerTensor, QuantDtype::Int4).unwrap();
+    let qb = quantize(&b, QuantScheme::PerTensor, QuantDtype::Int4).unwrap();
+
+    assert_eq!(qa.data().len(), 2);
+    assert_eq!(qb.data().len(), 2);
+    assert_eq!(qa.logical_data().unwrap().len(), 3);
+    assert_eq!(qb.logical_data().unwrap().len(), 3);
+
+    let qc = quantized_matmul(&qa, &qb).expect("packed int4 matmul");
+    let c: Tensor<f32> = dequantize(&qc).expect("dequantized result");
+    let got = c.data().expect("data")[0];
+
+    // Dequantized inputs are:
+    // A = [-0.9333334, 0.0, 0.9333334], B = [2.0, -2.0, 3.0].
+    // The real product is 14 / 15. The requantized single-output result
+    // includes zero in its range and dequantizes back to the same value
+    // within f32 multiplication/rounding error.
+    assert!(
+        (got - (14.0 / 15.0)).abs() <= 2.0e-6,
+        "packed int4 matmul result {got} diverged from expected 14/15"
+    );
 }
 
 #[test]
