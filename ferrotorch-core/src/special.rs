@@ -1064,6 +1064,8 @@ fn special_unary_backward_cuda<T: Float>(
             let exp = crate::grad_fns::transcendental::exp(&y2)?;
             mul_const_like(&exp, 0.5 * std::f64::consts::PI.sqrt(), kind.op())?
         }
+        SpecialUnaryKind::Lgamma => digamma(input)?,
+        SpecialUnaryKind::Digamma => trigamma_cuda_composed(input)?,
         SpecialUnaryKind::Entr => {
             let log_x = crate::grad_fns::transcendental::log(input)?;
             let one_plus = add_const_like(&log_x, 1.0, kind.op())?;
@@ -1107,9 +1109,7 @@ fn special_unary_backward_cuda<T: Float>(
             let half = full_like_scalar(input, 0.5, kind.op())?;
             crate::grad_fns::comparison::where_bt(&not_tiny, &gradx, &half)?
         }
-        SpecialUnaryKind::Lgamma
-        | SpecialUnaryKind::Digamma
-        | SpecialUnaryKind::Multigammaln { .. } => {
+        SpecialUnaryKind::Multigammaln { .. } => {
             return Err(FerrotorchError::NotImplementedOnCuda { op: kind.op() });
         }
     };
@@ -1211,6 +1211,213 @@ fn erfinv_cuda_composed<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Option<
         let output = crate::grad_fns::comparison::where_bt(&out_of_domain, &nan, &with_signed_inf)?;
         Ok(Some(output))
     })
+}
+
+fn div_const_by_tensor<T: Float>(
+    value: f64,
+    denom: &Tensor<T>,
+    op: &'static str,
+) -> FerrotorchResult<Tensor<T>> {
+    let numerator = full_like_scalar(denom, value, op)?;
+    crate::grad_fns::arithmetic::div(&numerator, denom)
+}
+
+fn lgamma_lanczos_cuda<T: Float>(x: &Tensor<T>, op: &'static str) -> FerrotorchResult<Tensor<T>> {
+    let one = full_like_scalar(x, 1.0, op)?;
+    let half = full_like_scalar(x, 0.5, op)?;
+    let z = crate::grad_fns::arithmetic::sub(x, &one)?;
+
+    let mut sum = full_like_scalar(x, LANCZOS_COEFFICIENTS[0], op)?;
+    for (i, &coeff) in LANCZOS_COEFFICIENTS.iter().enumerate().skip(1) {
+        let denom = add_const_like(&z, i as f64, op)?;
+        let term = div_const_by_tensor(coeff, &denom, op)?;
+        sum = crate::grad_fns::arithmetic::add(&sum, &term)?;
+    }
+
+    let t = add_const_like(&z, LANCZOS_G + 0.5, op)?;
+    let z_plus_half = crate::grad_fns::arithmetic::add(&z, &half)?;
+    let log_t = crate::grad_fns::transcendental::log(&t)?;
+    let log_sum = crate::grad_fns::transcendental::log(&sum)?;
+    let log_t_scaled = crate::grad_fns::arithmetic::mul(&log_t, &z_plus_half)?;
+    let minus_t = crate::grad_fns::arithmetic::sub(&log_t_scaled, &t)?;
+    let with_const = add_const_like(&minus_t, 0.918_938_533_204_672_7, op)?;
+    crate::grad_fns::arithmetic::add(&with_const, &log_sum)
+}
+
+fn lgamma_cuda_composed<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !input.is_cuda() {
+        return Ok(None);
+    }
+    if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "lgamma" });
+    }
+
+    no_grad(|| {
+        let op = "lgamma";
+        let zero = full_like_scalar(input, 0.0, op)?;
+        let half = full_like_scalar(input, 0.5, op)?;
+        let one = full_like_scalar(input, 1.0, op)?;
+        let inf = full_like_scalar(input, f64::INFINITY, op)?;
+
+        let floor_x = crate::grad_fns::transcendental::floor(input)?;
+        let is_integer = BoolTensor::eq_t(input, &floor_x)?;
+        let non_positive = BoolTensor::le(input, &zero)?;
+        let is_pole = non_positive.and(&is_integer)?;
+        let abs_x = crate::grad_fns::arithmetic::abs(input)?;
+        let is_infinite = BoolTensor::eq_t(&abs_x, &inf)?;
+
+        let use_reflection = BoolTensor::lt(input, &half)?;
+        let one_minus_x = crate::grad_fns::arithmetic::sub(&one, input)?;
+        let positive_arg =
+            crate::grad_fns::comparison::where_bt(&use_reflection, &one_minus_x, input)?;
+        let positive = lgamma_lanczos_cuda(&positive_arg, op)?;
+
+        let frac_x = crate::grad_fns::transcendental::frac(input)?;
+        let pi_frac = mul_const_like(&frac_x, std::f64::consts::PI, op)?;
+        let sin_pi_frac = crate::grad_fns::transcendental::sin(&pi_frac)?;
+        let abs_sin = crate::grad_fns::arithmetic::abs(&sin_pi_frac)?;
+        let pi_over_sin = div_const_by_tensor(std::f64::consts::PI, &abs_sin, op)?;
+        let log_reflect = crate::grad_fns::transcendental::log(&pi_over_sin)?;
+        let reflected = crate::grad_fns::arithmetic::sub(&log_reflect, &positive)?;
+
+        let raw = crate::grad_fns::comparison::where_bt(&use_reflection, &reflected, &positive)?;
+        let with_poles = crate::grad_fns::comparison::where_bt(&is_pole, &inf, &raw)?;
+        let output = crate::grad_fns::comparison::where_bt(&is_infinite, &inf, &with_poles)?;
+        Ok(Some(output))
+    })
+}
+
+fn digamma_cuda_composed<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Option<Tensor<T>>> {
+    if !input.is_cuda() {
+        return Ok(None);
+    }
+    if !(poly_is_f32::<T>() || poly_is_f64::<T>()) {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "digamma" });
+    }
+
+    no_grad(|| {
+        let op = "digamma";
+        let zero = full_like_scalar(input, 0.0, op)?;
+        let one = full_like_scalar(input, 1.0, op)?;
+        let ten = full_like_scalar(input, 10.0, op)?;
+        let pos_inf = full_like_scalar(input, f64::INFINITY, op)?;
+        let neg_inf = full_like_scalar(input, f64::NEG_INFINITY, op)?;
+        let nan = full_like_scalar(input, f64::NAN, op)?;
+
+        let is_zero = BoolTensor::eq_t(input, &zero)?;
+        let is_negative = BoolTensor::lt(input, &zero)?;
+        let sign_negative = crate::grad_fns::transcendental::signbit(input)?;
+        let abs_x = crate::grad_fns::arithmetic::abs(input)?;
+        let is_infinite = BoolTensor::eq_t(&abs_x, &pos_inf)?;
+        let is_positive_infinite = is_infinite.and(&sign_negative.not()?)?;
+        let is_neg_zero = is_zero.and(&sign_negative)?;
+        let zero_value = crate::grad_fns::comparison::where_bt(&is_neg_zero, &pos_inf, &neg_inf)?;
+
+        let floor_x = crate::grad_fns::transcendental::floor(input)?;
+        let is_integer = BoolTensor::eq_t(input, &floor_x)?;
+        let is_negative_integer = is_negative.and(&is_integer)?;
+
+        let frac_x = crate::grad_fns::transcendental::frac(input)?;
+        let pi_frac = mul_const_like(&frac_x, std::f64::consts::PI, op)?;
+        let tan_pi_frac = crate::grad_fns::transcendental::tan(&pi_frac)?;
+        let pi_over_tan = div_const_by_tensor(std::f64::consts::PI, &tan_pi_frac, op)?;
+        let reflected = crate::grad_fns::arithmetic::neg(&pi_over_tan)?;
+        let one_minus_x = crate::grad_fns::arithmetic::sub(&one, input)?;
+
+        let mut x = crate::grad_fns::comparison::where_bt(&is_negative, &one_minus_x, input)?;
+        let mut result = crate::grad_fns::comparison::where_bt(&is_negative, &reflected, &zero)?;
+
+        for _ in 0..10 {
+            let needs_shift = BoolTensor::lt(&x, &ten)?;
+            let inv_x = div_const_by_tensor(1.0, &x, op)?;
+            let neg_inv_x = crate::grad_fns::arithmetic::neg(&inv_x)?;
+            let term = crate::grad_fns::comparison::where_bt(&needs_shift, &neg_inv_x, &zero)?;
+            result = crate::grad_fns::arithmetic::add(&result, &term)?;
+            let increment = crate::grad_fns::comparison::where_bt(&needs_shift, &one, &zero)?;
+            x = crate::grad_fns::arithmetic::add(&x, &increment)?;
+        }
+
+        let exact_ten = BoolTensor::eq_t(&x, &ten)?;
+        let shifted_psi_10 = add_const_like(&result, 2.251_752_589_066_721, op)?;
+
+        let x2 = crate::grad_fns::arithmetic::mul(&x, &x)?;
+        let z = div_const_by_tensor(1.0, &x2, op)?;
+        let polevl = horner_const_tensor(
+            &z,
+            &[
+                8.333_333_333_333_333e-2,
+                -2.109_279_609_279_609e-2,
+                7.575_757_575_757_576e-3,
+                -4.166_666_666_666_667e-3,
+                3.968_253_968_253_968e-3,
+                -8.333_333_333_333_333e-3,
+                8.333_333_333_333_333e-2,
+            ],
+            op,
+        )?;
+        let y = crate::grad_fns::arithmetic::mul(&z, &polevl)?;
+        let log_x = crate::grad_fns::transcendental::log(&x)?;
+        let half_over_x = div_const_by_tensor(0.5, &x, op)?;
+        let log_minus_half = crate::grad_fns::arithmetic::sub(&log_x, &half_over_x)?;
+        let asym_no_result = crate::grad_fns::arithmetic::sub(&log_minus_half, &y)?;
+        let asym = crate::grad_fns::arithmetic::add(&asym_no_result, &result)?;
+        let base = crate::grad_fns::comparison::where_bt(&exact_ten, &shifted_psi_10, &asym)?;
+
+        let with_pos_inf =
+            crate::grad_fns::comparison::where_bt(&is_positive_infinite, &pos_inf, &base)?;
+        let with_zero =
+            crate::grad_fns::comparison::where_bt(&is_zero, &zero_value, &with_pos_inf)?;
+        let output = crate::grad_fns::comparison::where_bt(&is_negative_integer, &nan, &with_zero)?;
+        Ok(Some(output))
+    })
+}
+
+fn trigamma_cuda_composed<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if !(input.is_cuda() && (poly_is_f32::<T>() || poly_is_f64::<T>())) {
+        return Err(FerrotorchError::NotImplementedOnCuda { op: "digamma" });
+    }
+
+    let op = "digamma_backward";
+    let zero = full_like_scalar(input, 0.0, op)?;
+    let one = full_like_scalar(input, 1.0, op)?;
+    let half = full_like_scalar(input, 0.5, op)?;
+    let reflect = BoolTensor::lt(input, &half)?;
+
+    let pi_x = mul_const_like(input, std::f64::consts::PI, op)?;
+    let sin_pi_x = crate::grad_fns::transcendental::sin(&pi_x)?;
+    let sin2 = crate::grad_fns::arithmetic::mul(&sin_pi_x, &sin_pi_x)?;
+    let refl_mag = div_const_by_tensor(std::f64::consts::PI * std::f64::consts::PI, &sin2, op)?;
+    let refl_term = crate::grad_fns::arithmetic::neg(&refl_mag)?;
+    let one_minus_x = crate::grad_fns::arithmetic::sub(&one, input)?;
+
+    let mut x = crate::grad_fns::comparison::where_bt(&reflect, &one_minus_x, input)?;
+    let mut result = crate::grad_fns::comparison::where_bt(&reflect, &refl_term, &zero)?;
+
+    for _ in 0..6 {
+        let x2 = crate::grad_fns::arithmetic::mul(&x, &x)?;
+        let inv_x2 = div_const_by_tensor(1.0, &x2, op)?;
+        result = crate::grad_fns::arithmetic::add(&result, &inv_x2)?;
+        x = crate::grad_fns::arithmetic::add(&x, &one)?;
+    }
+
+    let x2 = crate::grad_fns::arithmetic::mul(&x, &x)?;
+    let ixx = div_const_by_tensor(1.0, &x2, op)?;
+    let inner = add_const_like(
+        &crate::grad_fns::arithmetic::mul(&ixx, &full_like_scalar(input, -1.0 / 42.0, op)?)?,
+        1.0 / 30.0,
+        op,
+    )?;
+    let middle = crate::grad_fns::arithmetic::mul(&ixx, &inner)?;
+    let one_sixth_minus =
+        crate::grad_fns::arithmetic::sub(&full_like_scalar(input, 1.0 / 6.0, op)?, &middle)?;
+    let ixx_scaled = crate::grad_fns::arithmetic::mul(&ixx, &one_sixth_minus)?;
+    let half_over_x = div_const_by_tensor(0.5, &x, op)?;
+    let numerator_tail = crate::grad_fns::arithmetic::add(&one, &half_over_x)?;
+    let numerator_tail = crate::grad_fns::arithmetic::add(&numerator_tail, &ixx_scaled)?;
+    let tail = crate::grad_fns::arithmetic::div(&numerator_tail, &x)?;
+    let unsigned = crate::grad_fns::arithmetic::add(&result, &tail)?;
+    let neg_unsigned = crate::grad_fns::arithmetic::neg(&unsigned)?;
+    crate::grad_fns::comparison::where_bt(&reflect, &neg_unsigned, &unsigned)
 }
 
 #[derive(Debug)]
@@ -3377,8 +3584,13 @@ pub fn erfinv<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 
 /// Log-gamma function: lgamma(x) = log(|Gamma(x)|).
 ///
-/// Uses the Lanczos approximation (g = 7, n = 9 coefficients).
+/// CPU uses the Lanczos approximation (g = 7, n = 9 coefficients). CUDA
+/// f32/f64 evaluates the same Lanczos/reflection formula resident on device,
+/// preserving PyTorch pole, infinity, and NaN behavior without host fallback.
 pub fn lgamma<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = lgamma_cuda_composed(input)? {
+        return wrap_special_unary(output, input, SpecialUnaryKind::Lgamma);
+    }
     let output = unary_map_named(input, "lgamma", lgamma_scalar)?;
     wrap_special_unary(output, input, SpecialUnaryKind::Lgamma)
 }
@@ -3390,9 +3602,14 @@ pub fn gammaln<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
 
 /// Digamma function: psi(x) = d/dx ln(Gamma(x)).
 ///
-/// Uses the recurrence relation to shift the argument above 6, then
-/// applies the asymptotic expansion.
+/// CPU uses the recurrence relation to shift the argument above 6, then
+/// applies the asymptotic expansion. CUDA f32/f64 mirrors PyTorch's
+/// `calc_digamma` edge ladder, shift-to-10 recurrence, and Cephes asymptotic
+/// polynomial resident on device.
 pub fn digamma<T: Float>(input: &Tensor<T>) -> FerrotorchResult<Tensor<T>> {
+    if let Some(output) = digamma_cuda_composed(input)? {
+        return wrap_special_unary(output, input, SpecialUnaryKind::Digamma);
+    }
     let output = unary_map_named(input, "digamma", digamma_scalar)?;
     wrap_special_unary(output, input, SpecialUnaryKind::Digamma)
 }
