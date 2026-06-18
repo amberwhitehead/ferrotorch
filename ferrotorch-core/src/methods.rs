@@ -1636,14 +1636,18 @@ pub fn narrow_t<T: Float>(
         });
     }
     let dim_size = input.shape()[dim];
-    if start + length > dim_size {
+
+    let Some(max_start) = dim_size.checked_sub(length) else {
+        return Err(FerrotorchError::InvalidArgument {
+            message: format!("narrow: length({length}) exceeds dim size {dim_size}"),
+        });
+    };
+    if start > max_start {
+        let end = start.checked_add(length);
+        let end_msg = end.map_or_else(|| "overflow".to_string(), |end| end.to_string());
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
-                "narrow: start({}) + length({}) = {} exceeds dim size {}",
-                start,
-                length,
-                start + length,
-                dim_size,
+                "narrow: start({start}) + length({length}) = {end_msg} exceeds dim size {dim_size}"
             ),
         });
     }
@@ -1932,7 +1936,12 @@ pub fn split_t<T: Float>(
         });
     }
 
-    let total: usize = split_sizes.iter().sum();
+    let total = split_sizes
+        .iter()
+        .try_fold(0usize, |acc, &size| acc.checked_add(size))
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: "split: split_sizes sum overflows usize".into(),
+        })?;
     if total != shape[dim] {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
@@ -1969,7 +1978,11 @@ pub fn split_t<T: Float>(
             input.try_stride_view(chunk_shape, strides.clone(), chunk_offset)?
         };
         results.push(t);
-        offset_along_dim += split_size;
+        offset_along_dim = offset_along_dim.checked_add(split_size).ok_or_else(|| {
+            FerrotorchError::InvalidArgument {
+                message: "split: split offset overflows usize".into(),
+            }
+        })?;
     }
 
     Ok(results)
