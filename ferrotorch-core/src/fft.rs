@@ -495,6 +495,29 @@ fn reject_zero_fft_batch(
     Ok(())
 }
 
+fn checked_suffix_axis_start(
+    signal_ndim: usize,
+    transform_rank: usize,
+    op: &'static str,
+) -> FerrotorchResult<usize> {
+    signal_ndim
+        .checked_sub(transform_rank)
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!(
+                "{op}: transform rank {transform_rank} exceeds input tensor rank {signal_ndim}"
+            ),
+        })
+}
+
+fn checked_suffix_axes(
+    signal_ndim: usize,
+    transform_rank: usize,
+    op: &'static str,
+) -> FerrotorchResult<Vec<usize>> {
+    let start = checked_suffix_axis_start(signal_ndim, transform_rank, op)?;
+    Ok((start..signal_ndim).collect())
+}
+
 fn fft_dim_out_of_range(op: &'static str, dim: isize, signal_ndim: usize) -> FerrotorchError {
     if signal_ndim == 0 {
         return FerrotorchError::InvalidArgument {
@@ -918,7 +941,7 @@ fn cuda_c2c_axes_raw<T: Float>(
                     message: format!("{op}: complex input must have at least one signal dimension"),
                 })?;
         let transform_rank = chunk.len();
-        let suffix_axes: Vec<usize> = (signal_ndim - transform_rank..signal_ndim).collect();
+        let suffix_axes = checked_suffix_axes(signal_ndim, transform_rank, op)?;
         let spatial_shape = &packed.shape()[..signal_ndim];
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -997,7 +1020,7 @@ fn rfftn_cuda_impl<T: Float>(
     let mut out = rfft_norm(&packed, None, None, FftNorm::Backward)?;
     if transform_rank > 1 {
         let signal_ndim = packed.ndim();
-        let c2c_start = signal_ndim - transform_rank;
+        let c2c_start = checked_suffix_axis_start(signal_ndim, transform_rank, op)?;
         let c2c_axes: Vec<usize> = (c2c_start..(signal_ndim - 1)).collect();
         out = cuda_c2c_axes_raw(&out, &c2c_axes, false, op)?;
     }
@@ -1038,8 +1061,14 @@ fn irfftn_cuda_impl<T: Float>(
 
     let mut current = packed;
     if transform_rank > 1 {
-        let signal_ndim = current.ndim() - 1;
-        let c2c_start = signal_ndim - transform_rank;
+        let signal_ndim =
+            current
+                .ndim()
+                .checked_sub(1)
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!("{op}: complex input must have at least one signal dimension"),
+                })?;
+        let c2c_start = checked_suffix_axis_start(signal_ndim, transform_rank, op)?;
         let c2c_axes: Vec<usize> = (c2c_start..(signal_ndim - 1)).collect();
         current = cuda_c2c_axes_raw(&current, &c2c_axes, true, op)?;
     }
@@ -1081,8 +1110,14 @@ fn hfftn_cuda_impl<T: Float>(
 
     let mut current = packed;
     if transform_rank > 1 {
-        let signal_ndim = current.ndim() - 1;
-        let c2c_start = signal_ndim - transform_rank;
+        let signal_ndim =
+            current
+                .ndim()
+                .checked_sub(1)
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!("{op}: complex input must have at least one signal dimension"),
+                })?;
+        let c2c_start = checked_suffix_axis_start(signal_ndim, transform_rank, op)?;
         let c2c_axes: Vec<usize> = (c2c_start..(signal_ndim - 1)).collect();
         current = cuda_c2c_axes_raw(&current, &c2c_axes, false, op)?;
     }
@@ -1116,7 +1151,7 @@ fn ihfftn_cuda_impl<T: Float>(
     let mut out = ihfft_norm(&packed, None, None, FftNorm::Forward)?;
     if transform_rank > 1 {
         let signal_ndim = packed.ndim();
-        let c2c_start = signal_ndim - transform_rank;
+        let c2c_start = checked_suffix_axis_start(signal_ndim, transform_rank, op)?;
         let c2c_axes: Vec<usize> = (c2c_start..(signal_ndim - 1)).collect();
         out = cuda_c2c_axes_raw(&out, &c2c_axes, true, op)?;
     }
