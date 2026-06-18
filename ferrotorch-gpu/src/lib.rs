@@ -13,6 +13,17 @@
 // to `deny` as part of the workspace-wide rustdoc pass (#703).
 #![allow(missing_debug_implementations)]
 #![deny(missing_docs)]
+// Host-only builds compile the same public GPU taxonomy as no-op stubs so
+// downstream crates can typecheck without CUDA. Those stubs mirror the
+// documented CUDA APIs and intentionally return `GpuError::NoCudaFeature`.
+#![cfg_attr(
+    not(feature = "cuda"),
+    allow(
+        missing_docs,
+        dead_code,
+        reason = "host-only builds expose documented CUDA APIs as NoCudaFeature stubs"
+    )
+)]
 // Pedantic lints we explicitly accept across this crate. Each allow names a
 // concrete reason — the alternative would be churn-for-zero-benefit or a
 // worse API. Mirrors the ferrotorch-core baseline; add to this list only with
@@ -248,6 +259,7 @@ pub use blas::{
     gpu_matmul_bf16_bf16_strided_batched_nt, gpu_matmul_f16_f16_strided_batched,
 };
 pub use blas::{gpu_matmul_f32, gpu_matmul_f32_nt, gpu_matmul_f64, gpu_matmul_f64_nt};
+#[cfg(feature = "cuda")]
 pub use bool_kernels::gpu_broadcast_bool;
 pub use buffer::CudaBuffer;
 pub use conv::gpu_conv2d_f32;
@@ -272,7 +284,12 @@ pub use group_norm::gpu_group_norm_f32;
 pub use group_norm::{
     gpu_batch_norm_backward_f32, gpu_local_response_norm_backward_f32, gpu_local_response_norm_f32,
 };
-pub use kernels::{gpu_add, gpu_div_rounding, gpu_mul, gpu_neg, gpu_relu, gpu_sub};
+#[cfg(feature = "cuda")]
+pub use kernels::gpu_broadcast_div_rounding;
+#[cfg(feature = "cuda")]
+pub use kernels::gpu_div_rounding;
+pub use kernels::{gpu_add, gpu_mul, gpu_neg, gpu_relu, gpu_sub};
+#[cfg(feature = "cuda")]
 pub use kernels::{
     gpu_add_into, gpu_add_into_on_stream, gpu_embed_lookup_into, gpu_gelu_into, gpu_layernorm_into,
     gpu_mul_into, gpu_permute_0213_into, gpu_scale_into, gpu_slice_read_into,
@@ -280,14 +297,15 @@ pub use kernels::{
 };
 #[cfg(feature = "cuda")]
 pub use kernels::{gpu_add_scaled_f32, gpu_add_scaled_f64};
-pub use kernels::{
-    gpu_broadcast_add, gpu_broadcast_div_rounding, gpu_broadcast_mul, gpu_broadcast_sub,
-};
+pub use kernels::{gpu_broadcast_add, gpu_broadcast_mul, gpu_broadcast_sub};
+#[cfg(feature = "cuda")]
 pub use kernels::{gpu_causal_mask_indirect, gpu_slice_write_indirect};
 pub use kernels::{
     gpu_dropout, gpu_embed_lookup, gpu_gelu, gpu_layernorm, gpu_permute_0213, gpu_slice_read,
-    gpu_slice_write, gpu_small_bmm, gpu_small_matmul, gpu_softmax, gpu_transpose_2d,
+    gpu_slice_write, gpu_softmax, gpu_transpose_2d,
 };
+#[cfg(feature = "cuda")]
+pub use kernels::{gpu_small_bmm, gpu_small_matmul};
 pub use memory_guard::{
     MemoryGuard, MemoryGuardBuilder, MemoryGuardedDevice, MemoryHook, MemoryPressureListener,
     MemoryReservation, MemoryStats, MemoryWatchdog, OomPolicy, PressureLevel,

@@ -603,7 +603,10 @@ impl CudaAllocator {
             .unwrap_or(0);
         self.allocated_bytes_atomic
             .fetch_sub(bytes, Ordering::Relaxed);
+        #[cfg(feature = "cuda")]
         drop(buffer);
+        #[cfg(not(feature = "cuda"))]
+        let _ = buffer;
     }
 
     // ------------------------------------------------------------------

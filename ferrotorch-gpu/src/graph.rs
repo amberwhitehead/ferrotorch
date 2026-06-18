@@ -1386,7 +1386,7 @@ pub fn end_capture_with_pool<T>(
 /// Stub `GraphCaptureGuard` when the cuda feature is not enabled. CL-454.
 #[cfg(not(feature = "cuda"))]
 pub struct GraphCaptureGuard {
-    _never: core::convert::Infallible,
+    never: core::convert::Infallible,
 }
 
 #[cfg(not(feature = "cuda"))]
@@ -1412,11 +1412,11 @@ impl GraphCaptureGuard {
     }
 
     pub fn finish(self) -> GpuResult<CapturedGraph> {
-        match self._never {}
+        match self.never {}
     }
 
     pub fn status(&self) -> GpuResult<CaptureStatus> {
-        match self._never {}
+        match self.never {}
     }
 }
 

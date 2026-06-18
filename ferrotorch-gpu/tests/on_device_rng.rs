@@ -14,10 +14,15 @@
 //! (`torch/random.py:67` -> `torch.cuda.manual_seed_all`,
 //! `torch/cuda/random.py:112`).
 
-use ferrotorch_core::{Device, manual_seed, rand_on_device, randn_on_device};
+#[cfg(feature = "cuda")]
+use ferrotorch_core::randn_on_device;
+use ferrotorch_core::{Device, manual_seed, rand_on_device};
+#[cfg(feature = "cuda")]
 use ferrotorch_gpu::init_cuda_backend;
+#[cfg(feature = "cuda")]
 use half::{bf16, f16};
 
+#[cfg(feature = "cuda")]
 fn ensure_init() {
     if !ferrotorch_core::gpu_dispatch::has_gpu_backend() {
         init_cuda_backend().expect("init_cuda_backend");
@@ -25,11 +30,13 @@ fn ensure_init() {
 }
 
 /// Move a CUDA tensor to CPU and read its values for statistical checks.
+#[cfg(feature = "cuda")]
 fn to_host(t: &ferrotorch_core::Tensor<f32>) -> Vec<f32> {
     let cpu = t.to(Device::Cpu).expect("tensor.to(Cpu)");
     cpu.data().expect("cpu data").to_vec()
 }
 
+#[cfg(feature = "cuda")]
 fn to_host_f64<T: ferrotorch_core::dtype::Float>(t: &ferrotorch_core::Tensor<T>) -> Vec<f64> {
     let cpu = t.to(Device::Cpu).expect("tensor.to(Cpu)");
     cpu.data()
@@ -39,6 +46,7 @@ fn to_host_f64<T: ferrotorch_core::dtype::Float>(t: &ferrotorch_core::Tensor<T>)
         .collect()
 }
 
+#[cfg(feature = "cuda")]
 #[test]
 fn rand_on_device_cuda_is_on_device() {
     ensure_init();
@@ -51,6 +59,7 @@ fn rand_on_device_cuda_is_on_device() {
     assert_eq!(t.device(), Device::Cuda(0));
 }
 
+#[cfg(feature = "cuda")]
 #[test]
 fn randn_on_device_cuda_is_on_device() {
     ensure_init();
@@ -62,6 +71,7 @@ fn randn_on_device_cuda_is_on_device() {
     assert_eq!(t.shape(), &[256]);
 }
 
+#[cfg(feature = "cuda")]
 #[test]
 fn rand_on_device_cuda_non_f32_dtypes_are_on_device() {
     ensure_init();
@@ -79,6 +89,7 @@ fn rand_on_device_cuda_non_f32_dtypes_are_on_device() {
     assert_eq!(bf16_t.device(), Device::Cuda(0));
 }
 
+#[cfg(feature = "cuda")]
 #[test]
 fn randn_on_device_cuda_non_f32_dtypes_are_on_device() {
     ensure_init();
@@ -96,6 +107,7 @@ fn randn_on_device_cuda_non_f32_dtypes_are_on_device() {
     assert_eq!(bf16_t.device(), Device::Cuda(0));
 }
 
+#[cfg(feature = "cuda")]
 #[test]
 fn rand_on_device_uniform_distribution() {
     ensure_init();
@@ -127,6 +139,7 @@ fn rand_on_device_uniform_distribution() {
     assert!(max > 0.99, "uniform max {max} should be near 1");
 }
 
+#[cfg(feature = "cuda")]
 #[test]
 fn rand_on_device_non_f32_uniform_distribution() {
     ensure_init();
@@ -168,6 +181,7 @@ fn rand_on_device_non_f32_uniform_distribution() {
     }
 }
 
+#[cfg(feature = "cuda")]
 #[test]
 fn randn_on_device_normal_distribution() {
     ensure_init();
@@ -193,6 +207,7 @@ fn randn_on_device_normal_distribution() {
     assert!((std - 1.0).abs() < 0.05, "normal std {std} should be ~= 1");
 }
 
+#[cfg(feature = "cuda")]
 #[test]
 fn randn_on_device_non_f32_normal_distribution() {
     ensure_init();
@@ -237,6 +252,7 @@ fn randn_on_device_non_f32_normal_distribution() {
     }
 }
 
+#[cfg(feature = "cuda")]
 #[test]
 fn f64_rand_then_randn_uses_distinct_cuda_kernels() {
     ensure_init();
@@ -251,6 +267,7 @@ fn f64_rand_then_randn_uses_distinct_cuda_kernels() {
     );
 }
 
+#[cfg(feature = "cuda")]
 #[test]
 fn rand_on_device_reproducible_same_seed() {
     ensure_init();
@@ -268,6 +285,7 @@ fn rand_on_device_reproducible_same_seed() {
     );
 }
 
+#[cfg(feature = "cuda")]
 #[test]
 fn rand_on_device_differs_with_different_seed() {
     ensure_init();
@@ -285,6 +303,7 @@ fn rand_on_device_differs_with_different_seed() {
     );
 }
 
+#[cfg(feature = "cuda")]
 #[test]
 fn randn_on_device_reproducible_same_seed() {
     ensure_init();

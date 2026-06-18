@@ -26,6 +26,8 @@
 //! default multi-threaded test runner (the failure is a harness race, not a
 //! kernel divergence — verified: it passes in isolation / single-threaded).
 
+#![cfg(feature = "cuda")]
+
 use ferrotorch_core::{Device, manual_seed, rand_on_device, randn_on_device};
 use ferrotorch_gpu::init_cuda_backend;
 use ferrotorch_gpu::rng::PhiloxGenerator;

@@ -39,6 +39,7 @@
 //! | REQ-5 (on-device throughout) | SHIPPED | all three phases (im2col, GEMM, bias) launch on-device in `conv.rs`; result `CudaBuffer<f32>` never touches host; consumer `backend_impl.rs` keeps the resulting buffer on-device |
 //! | REQ-6 (host-only stub) | SHIPPED | `#[cfg(not(feature = "cuda"))] pub fn gpu_conv2d_f32 in conv.rs` returns `Err(GpuError::NoCudaFeature)`; consumer same `backend_impl.rs` arm under no-cuda compile path |
 
+#[cfg(feature = "cuda")]
 use crate::blas::gpu_matmul_f32;
 use crate::buffer::CudaBuffer;
 use crate::device::GpuDevice;

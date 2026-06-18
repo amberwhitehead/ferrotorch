@@ -28,13 +28,15 @@
 //! | REQ-7 (`map_gpu_err`) | SHIPPED | `fn map_gpu_err in backend_impl.rs`; consumer every `.map_err(Self::map_gpu_err)?` site in trait-method bodies (hundreds) |
 //! | REQ-8 (`gather_or_select`) | SHIPPED | `fn gather_or_select in backend_impl.rs` IS the `GpuBackend::gather_or_select` trait method body; consumer ferrotorch-core's `Tensor::index_select / Tensor::gather` dispatch through it via the trait when source is CUDA-resident |
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+#[cfg(feature = "cuda")]
+use std::sync::OnceLock;
 
 use ferrotorch_core::dtype::DType;
 use ferrotorch_core::error::{FerrotorchError, FerrotorchResult};
-use ferrotorch_core::gpu_dispatch::{
-    GpuBackend, GpuBufferHandle, GpuRngState, GpuScatterReduce, GpuUnaryOp,
-};
+use ferrotorch_core::gpu_dispatch::GpuBufferHandle;
+#[cfg(feature = "cuda")]
+use ferrotorch_core::gpu_dispatch::{GpuBackend, GpuRngState, GpuScatterReduce, GpuUnaryOp};
 
 use crate::buffer::CudaBuffer;
 #[cfg(all(feature = "cuda", feature = "cusparselt"))]
@@ -107,6 +109,7 @@ impl CudaBackendImpl {
     ///
     /// Returns [`FerrotorchError::InvalidArgument`] if CUDA initialization fails
     /// (e.g. no GPU available, driver not loaded).
+    #[cfg(feature = "cuda")]
     pub fn new() -> FerrotorchResult<Self> {
         let device = Arc::new(
             GpuDevice::new(0).map_err(|e| FerrotorchError::InvalidArgument {
@@ -119,6 +122,14 @@ impl CudaBackendImpl {
             cusparse_handle: OnceLock::new(),
             #[cfg(all(feature = "cuda", feature = "cusparselt"))]
             cusparselt_handle: OnceLock::new(),
+        })
+    }
+
+    /// Return the host-only build error when the `cuda` feature is disabled.
+    #[cfg(not(feature = "cuda"))]
+    pub fn new() -> FerrotorchResult<Self> {
+        Err(FerrotorchError::Gpu {
+            source: Box::new(crate::error::GpuError::NoCudaFeature),
         })
     }
 
@@ -969,6 +980,7 @@ impl CudaBackendImpl {
 // GpuBackend implementation
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "cuda")]
 impl GpuBackend for CudaBackendImpl {
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -14347,6 +14359,7 @@ impl GpuBackend for CudaBackendImpl {
 /// ensuring all kernel modules and cuBLAS handles are shared. Creating a
 /// second `GpuDevice` via `GpuDevice::new(0)` would create a separate
 /// CUDA context with its own module cache, which is not interoperable.
+#[cfg(feature = "cuda")]
 pub fn get_cuda_device() -> FerrotorchResult<Arc<GpuDevice>> {
     let backend =
         ferrotorch_core::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -14373,6 +14386,7 @@ pub fn get_cuda_device() -> FerrotorchResult<Arc<GpuDevice>> {
 ///
 /// - [`FerrotorchError::InvalidArgument`] if CUDA initialization fails.
 /// - [`FerrotorchError::InvalidArgument`] if a GPU backend is already registered.
+#[cfg(feature = "cuda")]
 pub fn init_cuda_backend() -> FerrotorchResult<()> {
     // Idempotent: if already registered, return Ok silently.
     if ferrotorch_core::gpu_dispatch::has_gpu_backend() {
@@ -14386,9 +14400,55 @@ pub fn init_cuda_backend() -> FerrotorchResult<()> {
     Ok(())
 }
 
+/// Host-only build stub for [`get_cuda_device`].
+#[cfg(not(feature = "cuda"))]
+pub fn get_cuda_device() -> FerrotorchResult<Arc<GpuDevice>> {
+    Err(FerrotorchError::Gpu {
+        source: Box::new(crate::error::GpuError::NoCudaFeature),
+    })
+}
+
+/// Host-only build stub for [`init_cuda_backend`].
+#[cfg(not(feature = "cuda"))]
+pub fn init_cuda_backend() -> FerrotorchResult<()> {
+    Err(FerrotorchError::Gpu {
+        source: Box::new(crate::error::GpuError::NoCudaFeature),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[cfg(not(feature = "cuda"))]
+mod host_only_tests {
+    use super::*;
+
+    fn assert_no_cuda_feature<T>(result: FerrotorchResult<T>) {
+        match result {
+            Err(FerrotorchError::Gpu { source }) => {
+                assert!(
+                    matches!(
+                        source.downcast_ref::<crate::error::GpuError>(),
+                        Some(crate::error::GpuError::NoCudaFeature)
+                    ),
+                    "expected GpuError::NoCudaFeature source, got {source}"
+                );
+            }
+            Err(err) => panic!("expected GPU no-cuda feature error, got {err}"),
+            Ok(_) => panic!("expected host-only backend entrypoint to fail"),
+        }
+    }
+
+    #[test]
+    fn host_only_backend_entrypoints_return_no_cuda_feature() {
+        assert_no_cuda_feature(CudaBackendImpl::new());
+        assert_no_cuda_feature(init_cuda_backend());
+        assert_no_cuda_feature(get_cuda_device());
+        assert!(!ferrotorch_core::gpu_dispatch::has_gpu_backend());
+    }
+}
 
 #[cfg(test)]
 #[cfg(feature = "cuda")]

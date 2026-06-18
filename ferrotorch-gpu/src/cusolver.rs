@@ -35,7 +35,6 @@ use cudarc::cusolver as cusolver_safe;
 #[cfg(feature = "cuda")]
 use cudarc::driver::{DevicePtr, DevicePtrMut, PushKernelArg};
 
-#[cfg(feature = "cuda")]
 use crate::buffer::CudaBuffer;
 #[cfg(feature = "cuda")]
 use crate::device::GpuDevice;

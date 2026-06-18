@@ -50,9 +50,7 @@ use std::sync::{LazyLock, Mutex};
 #[cfg(feature = "cuda")]
 use cudarc::driver::LaunchConfig;
 
-#[cfg(feature = "cuda")]
 use crate::buffer::CudaBuffer;
-#[cfg(feature = "cuda")]
 use crate::device::GpuDevice;
 use crate::error::{GpuError, GpuResult};
 #[cfg(feature = "cuda")]
@@ -1988,13 +1986,25 @@ pub fn gpu_philox_normal_bf16(
 
 /// Stub -- always returns [`GpuError::NoCudaFeature`].
 #[cfg(not(feature = "cuda"))]
-pub fn gpu_philox_uniform(_n: usize) -> GpuResult<()> {
+pub fn gpu_philox_uniform(_n: usize, _device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
     Err(GpuError::NoCudaFeature)
 }
 
 /// Stub -- always returns [`GpuError::NoCudaFeature`].
 #[cfg(not(feature = "cuda"))]
-pub fn gpu_philox_normal(_n: usize) -> GpuResult<()> {
+pub fn gpu_philox_normal(_n: usize, _device: &GpuDevice) -> GpuResult<CudaBuffer<f32>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+/// Stub -- always returns [`GpuError::NoCudaFeature`].
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_philox_uniform_f64(_n: usize, _device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
+    Err(GpuError::NoCudaFeature)
+}
+
+/// Stub -- always returns [`GpuError::NoCudaFeature`].
+#[cfg(not(feature = "cuda"))]
+pub fn gpu_philox_normal_f64(_n: usize, _device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
     Err(GpuError::NoCudaFeature)
 }
 

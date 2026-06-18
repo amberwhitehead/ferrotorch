@@ -625,9 +625,7 @@ impl MemoryGuard {
     pub fn release_reservation(&self) -> usize {
         let mut lock = self.reservation.lock().unwrap();
         if let Some(res) = lock.take() {
-            let bytes = res.reserved_bytes;
-            drop(res);
-            bytes
+            res.reserved_bytes
         } else {
             0
         }
@@ -724,7 +722,10 @@ impl MemoryGuard {
                 Some(current.saturating_sub(1))
             })
             .ok();
+        #[cfg(feature = "cuda")]
         drop(buffer);
+        #[cfg(not(feature = "cuda"))]
+        let _ = buffer;
         self.notify_pressure_change();
     }
 

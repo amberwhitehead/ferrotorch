@@ -26939,22 +26939,6 @@ pub fn gpu_masked_reduce_max_f64(
 }
 
 #[cfg(not(feature = "cuda"))]
-pub fn gpu_masked_reduce_min(
-    _d: &CudaBuffer<f32>,
-    _m: &CudaBuffer<f32>,
-    _device: &GpuDevice,
-) -> GpuResult<CudaBuffer<f32>> {
-    Err(GpuError::NoCudaFeature)
-}
-#[cfg(not(feature = "cuda"))]
-pub fn gpu_masked_reduce_max(
-    _d: &CudaBuffer<f32>,
-    _m: &CudaBuffer<f32>,
-    _device: &GpuDevice,
-) -> GpuResult<CudaBuffer<f32>> {
-    Err(GpuError::NoCudaFeature)
-}
-#[cfg(not(feature = "cuda"))]
 pub fn gpu_masked_reduce_min_f64(
     _d: &CudaBuffer<f64>,
     _m: &CudaBuffer<f64>,
@@ -32229,11 +32213,6 @@ pub fn gpu_strided_cat(
 ) -> GpuResult<()> {
     Err(GpuError::NoCudaFeature)
 }
-
-/// Maximum rank stub for feature-disabled builds. Kept in sync with
-/// the cuda-enabled definition above.
-#[cfg(not(feature = "cuda"))]
-pub const STRIDED_COPY_MAX_DIMS: usize = 8;
 
 /// Stub -- always returns [`GpuError::NoCudaFeature`].
 #[cfg(not(feature = "cuda"))]
