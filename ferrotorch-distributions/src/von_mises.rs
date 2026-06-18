@@ -420,12 +420,12 @@ mod tests {
         // Closes #1432: with a fixed manual_seed, two independent samples
         // should match byte-for-byte because we now route through
         // creation::rand (which honours the workspace RNG).
-        ferrotorch_core::manual_seed(0xC0FFEE);
+        ferrotorch_core::manual_seed(0xC0FFEE).unwrap();
         let d1 = VonMises::new(scalar(0.0), scalar(2.0)).unwrap();
         let s1 = d1.sample(&[50]).unwrap();
         let v1 = s1.data().unwrap().to_vec();
 
-        ferrotorch_core::manual_seed(0xC0FFEE);
+        ferrotorch_core::manual_seed(0xC0FFEE).unwrap();
         let d2 = VonMises::new(scalar(0.0), scalar(2.0)).unwrap();
         let s2 = d2.sample(&[50]).unwrap();
         let v2 = s2.data().unwrap().to_vec();

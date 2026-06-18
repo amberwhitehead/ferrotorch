@@ -187,7 +187,7 @@ fn save_checkpoint_rng_state<T: Float>(
     }
 
     Ok(CheckpointRngState {
-        cpu: crate::rng::thread_rng_state(),
+        cpu: crate::rng::thread_rng_state()?,
         gpu: save_gpu_rng_states(&cuda_devices)?,
     })
 }
@@ -242,13 +242,13 @@ impl CheckpointRngGuard {
     fn activate(saved: &CheckpointRngState) -> FerrotorchResult<Self> {
         let devices: Vec<usize> = saved.gpu.iter().map(|state| state.device()).collect();
         let previous = CheckpointRngState {
-            cpu: crate::rng::thread_rng_state(),
+            cpu: crate::rng::thread_rng_state()?,
             gpu: save_gpu_rng_states(&devices)?,
         };
 
-        crate::rng::set_thread_rng_state(saved.cpu.clone());
+        crate::rng::set_thread_rng_state(saved.cpu.clone())?;
         if let Err(err) = restore_gpu_rng_states(&saved.gpu) {
-            crate::rng::set_thread_rng_state(previous.cpu.clone());
+            let _ = crate::rng::set_thread_rng_state(previous.cpu.clone());
             let _ = restore_gpu_rng_states(&previous.gpu);
             return Err(err);
         }
@@ -263,7 +263,7 @@ impl CheckpointRngGuard {
         if self.restored {
             return Ok(());
         }
-        crate::rng::set_thread_rng_state(self.previous.cpu.clone());
+        crate::rng::set_thread_rng_state(self.previous.cpu.clone())?;
         restore_gpu_rng_states(&self.previous.gpu)?;
         self.restored = true;
         Ok(())

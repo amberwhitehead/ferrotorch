@@ -255,28 +255,72 @@ fn lstm_batched_projection_matches_perstep_fwd_bwd() {
     sum(&or_).unwrap().backward().unwrap();
     let p = lstm.parameters();
     assert_close(
-        p[0].tensor().grad().unwrap().unwrap().data().unwrap(),
-        wr.grad().unwrap().unwrap().data().unwrap(),
+        p[0].tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        wr.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "LSTM wih.grad",
     );
     assert_close(
-        p[1].tensor().grad().unwrap().unwrap().data().unwrap(),
-        hr.grad().unwrap().unwrap().data().unwrap(),
+        p[1].tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        hr.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "LSTM whh.grad",
     );
     assert_close(
-        p[2].tensor().grad().unwrap().unwrap().data().unwrap(),
-        br.grad().unwrap().unwrap().data().unwrap(),
+        p[2].tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        br.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "LSTM bih.grad",
     );
     assert_close(
-        p[3].tensor().grad().unwrap().unwrap().data().unwrap(),
-        bhr.grad().unwrap().unwrap().data().unwrap(),
+        p[3].tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        bhr.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "LSTM bhh.grad",
     );
     assert_close(
-        xp.grad().unwrap().unwrap().data().unwrap(),
-        xr.grad().unwrap().unwrap().data().unwrap(),
+        xp.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        xr.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "LSTM input.grad",
     );
 }
@@ -330,28 +374,72 @@ fn gru_batched_projection_matches_perstep_fwd_bwd() {
     sum(&or_).unwrap().backward().unwrap();
     let p = gru.parameters();
     assert_close(
-        p[0].tensor().grad().unwrap().unwrap().data().unwrap(),
-        wr.grad().unwrap().unwrap().data().unwrap(),
+        p[0].tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        wr.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "GRU wih.grad",
     );
     assert_close(
-        p[1].tensor().grad().unwrap().unwrap().data().unwrap(),
-        hr.grad().unwrap().unwrap().data().unwrap(),
+        p[1].tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        hr.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "GRU whh.grad",
     );
     assert_close(
-        p[2].tensor().grad().unwrap().unwrap().data().unwrap(),
-        br.grad().unwrap().unwrap().data().unwrap(),
+        p[2].tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        br.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "GRU bih.grad",
     );
     assert_close(
-        p[3].tensor().grad().unwrap().unwrap().data().unwrap(),
-        bhr.grad().unwrap().unwrap().data().unwrap(),
+        p[3].tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        bhr.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "GRU bhh.grad",
     );
     assert_close(
-        xp.grad().unwrap().unwrap().data().unwrap(),
-        xr.grad().unwrap().unwrap().data().unwrap(),
+        xp.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        xr.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "GRU input.grad",
     );
 }
@@ -409,28 +497,72 @@ fn run_rnn_batched_eq(nonlin: RNNNonlinearity, name: &str) {
     sum(&or_).unwrap().backward().unwrap();
     let p = rnn.parameters();
     assert_close(
-        p[0].tensor().grad().unwrap().unwrap().data().unwrap(),
-        wr.grad().unwrap().unwrap().data().unwrap(),
+        p[0].tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        wr.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         &format!("{name} wih.grad"),
     );
     assert_close(
-        p[1].tensor().grad().unwrap().unwrap().data().unwrap(),
-        hr.grad().unwrap().unwrap().data().unwrap(),
+        p[1].tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        hr.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         &format!("{name} whh.grad"),
     );
     assert_close(
-        p[2].tensor().grad().unwrap().unwrap().data().unwrap(),
-        br.grad().unwrap().unwrap().data().unwrap(),
+        p[2].tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        br.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         &format!("{name} bih.grad"),
     );
     assert_close(
-        p[3].tensor().grad().unwrap().unwrap().data().unwrap(),
-        bhr.grad().unwrap().unwrap().data().unwrap(),
+        p[3].tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        bhr.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         &format!("{name} bhh.grad"),
     );
     assert_close(
-        xp.grad().unwrap().unwrap().data().unwrap(),
-        xr.grad().unwrap().unwrap().data().unwrap(),
+        xp.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        xr.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         &format!("{name} input.grad"),
     );
 }

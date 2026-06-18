@@ -567,10 +567,10 @@ impl ProfileReport {
 /// feature that doesn't need exact hostnames.
 fn detect_hostname() -> String {
     for var in &["HOSTNAME", "COMPUTERNAME", "HOST"] {
-        if let Ok(h) = std::env::var(var) {
-            if !h.is_empty() {
-                return h;
-            }
+        if let Ok(h) = std::env::var(var)
+            && !h.is_empty()
+        {
+            return h;
         }
     }
     "localhost".to_string()

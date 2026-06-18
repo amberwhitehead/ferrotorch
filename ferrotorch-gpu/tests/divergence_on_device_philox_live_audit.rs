@@ -60,7 +60,7 @@ fn uniform_gpu_bit_exact_with_philox_reference_boundaries() {
     for &n in &[1usize, 4, 5, 7, 8, 4096, 4097] {
         let seed = 2024u64;
         let _g = SEED_LOCK.lock().unwrap();
-        manual_seed(seed);
+        manual_seed(seed).unwrap();
         let gpu = to_host(&rand_on_device::<f32>(&[n], Device::Cuda(0)).expect("gpu uniform"));
         let cpu = PhiloxGenerator::new(seed).generate_uniform(n);
         assert_eq!(gpu.len(), n, "gpu uniform wrong length at n={n}");
@@ -77,7 +77,7 @@ fn uniform_gpu_strict_unit_interval() {
     ensure_init();
     let v = {
         let _g = SEED_LOCK.lock().unwrap();
-        manual_seed(11);
+        manual_seed(11).unwrap();
         to_host(&rand_on_device::<f32>(&[1_000_000], Device::Cuda(0)).expect("gpu uniform"))
     };
     for &x in &v {
@@ -100,7 +100,7 @@ fn uniform_gpu_consecutive_calls_continue_philox_stream() {
     let seed = 77u64;
     let (a, b) = {
         let _g = SEED_LOCK.lock().unwrap();
-        manual_seed(seed);
+        manual_seed(seed).unwrap();
         let a = to_host(&rand_on_device::<f32>(&[n], Device::Cuda(0)).expect("a"));
         let b = to_host(&rand_on_device::<f32>(&[n], Device::Cuda(0)).expect("b"));
         (a, b)
@@ -123,7 +123,7 @@ fn normal_gpu_odd_length_finite_count() {
     for &n in &[1usize, 7, 4097] {
         let gpu = {
             let _g = SEED_LOCK.lock().unwrap();
-            manual_seed(5);
+            manual_seed(5).unwrap();
             to_host(&randn_on_device::<f32>(&[n], Device::Cuda(0)).expect("gpu normal"))
         };
         assert_eq!(gpu.len(), n, "gpu normal wrong length at n={n}");
@@ -145,7 +145,7 @@ fn normal_gpu_moments_standard_normal() {
     let n = 1_000_000usize;
     let v = {
         let _g = SEED_LOCK.lock().unwrap();
-        manual_seed(13);
+        manual_seed(13).unwrap();
         to_host(&randn_on_device::<f32>(&[n], Device::Cuda(0)).expect("gpu normal"))
     };
     assert_eq!(v.len(), n);
@@ -190,7 +190,7 @@ fn uniform_f64_gpu_stays_resident_and_in_unit_interval() {
     for &n in &[1usize, 2, 3, 7, 4097] {
         let t = {
             let _g = SEED_LOCK.lock().unwrap();
-            manual_seed(2026);
+            manual_seed(2026).unwrap();
             rand_on_device::<f64>(&[n], Device::Cuda(0)).expect("gpu f64 uniform")
         };
         assert_eq!(t.device(), Device::Cuda(0), "f64 uniform must stay CUDA");
@@ -214,7 +214,7 @@ fn normal_f64_gpu_odd_tail_and_moments() {
     for &n in &[1usize, 7, 4097] {
         let t = {
             let _g = SEED_LOCK.lock().unwrap();
-            manual_seed(41);
+            manual_seed(41).unwrap();
             randn_on_device::<f64>(&[n], Device::Cuda(0)).expect("gpu f64 normal")
         };
         assert_eq!(t.device(), Device::Cuda(0), "f64 normal must stay CUDA");
@@ -231,7 +231,7 @@ fn normal_f64_gpu_odd_tail_and_moments() {
     let n = 200_000usize;
     let t = {
         let _g = SEED_LOCK.lock().unwrap();
-        manual_seed(43);
+        manual_seed(43).unwrap();
         randn_on_device::<f64>(&[n], Device::Cuda(0)).expect("gpu f64 normal moments")
     };
     assert_eq!(

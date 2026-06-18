@@ -332,7 +332,7 @@ impl<T: Float> Distribution<T> for Dirichlet<T> {
         let n_value_rows = xs.len() / k;
         // The value's batch rows must align with the concentration's batch
         // rows (broadcast leading sample dims share the same b-cycle).
-        if n_value_rows % b != 0 {
+        if !n_value_rows.is_multiple_of(b) {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
                     "Dirichlet log_prob: value batch rows {n_value_rows} not a multiple \

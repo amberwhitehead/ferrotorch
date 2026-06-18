@@ -3614,7 +3614,7 @@ fn rrelu_train<T: Float>(input: &Tensor<T>, lower: f64, upper: f64) -> Ferrotorc
             }
         }
         Ok(())
-    })?;
+    })??;
     let shape = input.shape().to_vec();
     if is_grad_enabled() && input.requires_grad() {
         Tensor::from_operation(

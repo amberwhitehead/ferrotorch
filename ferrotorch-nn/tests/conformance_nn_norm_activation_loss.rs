@@ -1978,8 +1978,20 @@ fn utils_clip_grad_norm_matches_pytorch() {
         let params: Vec<&Parameter<f32>> = vec![&p1, &p2];
         clip_grad_norm_(&params, max_norm as f64, 2.0).unwrap();
 
-        let clipped_g1 = p1.tensor().grad().unwrap().unwrap().data_vec().unwrap();
-        let clipped_g2 = p2.tensor().grad().unwrap().unwrap().data_vec().unwrap();
+        let clipped_g1 = p1
+            .tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data_vec()
+            .unwrap();
+        let clipped_g2 = p2
+            .tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data_vec()
+            .unwrap();
 
         assert_close_f32(
             &clipped_g1,
@@ -2021,7 +2033,13 @@ fn utils_clip_grad_value_matches_pytorch() {
         let params: Vec<&Parameter<f32>> = vec![&p1];
         clip_grad_value_(&params, clip_value as f64).unwrap();
 
-        let clipped = p1.tensor().grad().unwrap().unwrap().data_vec().unwrap();
+        let clipped = p1
+            .tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data_vec()
+            .unwrap();
         assert_close_f32(
             &clipped,
             &expected_g1,

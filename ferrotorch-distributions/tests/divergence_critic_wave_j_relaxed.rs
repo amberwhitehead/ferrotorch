@@ -78,7 +78,7 @@ fn relaxed_bernoulli_forward_fixed_u_matches_sigmoid_logit_formula() {
     let temp = 2.0_f32;
 
     // Recover the exact uniform stream the rsample will consume.
-    ferrotorch_core::manual_seed(SEED);
+    ferrotorch_core::manual_seed(SEED).unwrap();
     let u = ferrotorch_core::creation::rand::<f32>(&[1]).unwrap();
     let u0 = u.data_vec().unwrap()[0];
 
@@ -89,7 +89,7 @@ fn relaxed_bernoulli_forward_fixed_u_matches_sigmoid_logit_formula() {
         1.0 / (1.0 + (-y).exp())
     };
 
-    ferrotorch_core::manual_seed(SEED);
+    ferrotorch_core::manual_seed(SEED).unwrap();
     let probs = leaf(&[p_val], &[1]);
     let d = RelaxedBernoulli::new(temp, probs).unwrap();
     let z = d.rsample(&[1]).unwrap();
@@ -116,7 +116,7 @@ fn relaxed_bernoulli_rsample_grad_matches_finite_difference() {
 
     for &(p_val, temp) in &points {
         // Analytic grad d z0 / d p.
-        ferrotorch_core::manual_seed(SEED);
+        ferrotorch_core::manual_seed(SEED).unwrap();
         let probs = leaf(&[p_val], &[1]);
         let d = RelaxedBernoulli::new(temp, probs.clone()).unwrap();
         let z = d.rsample(&[1]).unwrap();
@@ -131,7 +131,7 @@ fn relaxed_bernoulli_rsample_grad_matches_finite_difference() {
 
         // Central finite-difference of the SAME forward map with the SAME noise.
         let forward = |p: f32| -> f32 {
-            ferrotorch_core::manual_seed(SEED);
+            ferrotorch_core::manual_seed(SEED).unwrap();
             let probs = plain(&[p], &[1]);
             let d = RelaxedBernoulli::new(temp, probs).unwrap();
             // sample() (not rsample) avoids building a graph; identical math/noise.
@@ -156,7 +156,7 @@ fn relaxed_bernoulli_rsample_grad_matches_finite_difference() {
 /// Forward: the Gumbel-softmax draw lies on the simplex (sums to 1).
 #[test]
 fn relaxed_one_hot_rsample_on_simplex() {
-    ferrotorch_core::manual_seed(SEED);
+    ferrotorch_core::manual_seed(SEED).unwrap();
     let probs = leaf(&[0.2, 0.3, 0.5], &[3]);
     let d = RelaxedOneHotCategorical::new(0.5_f32, probs).unwrap();
     let z = d.rsample(&[1]).unwrap();
@@ -179,7 +179,7 @@ fn check_relaxed_one_hot_jacobian(p: &[f32], temp: f32) {
     // Analytic Jacobian J[i][m] = d z_i / d p_m.
     let mut analytic = vec![vec![0.0_f32; k]; k];
     for (i, row) in analytic.iter_mut().enumerate() {
-        ferrotorch_core::manual_seed(SEED);
+        ferrotorch_core::manual_seed(SEED).unwrap();
         let probs = leaf(p, &[k]);
         let d = RelaxedOneHotCategorical::new(temp, probs.clone()).unwrap();
         let z = d.rsample(&[1]).unwrap();
@@ -195,7 +195,7 @@ fn check_relaxed_one_hot_jacobian(p: &[f32], temp: f32) {
     }
 
     let forward = |pp: &[f32]| -> Vec<f32> {
-        ferrotorch_core::manual_seed(SEED);
+        ferrotorch_core::manual_seed(SEED).unwrap();
         let probs = plain(pp, &[k]);
         let d = RelaxedOneHotCategorical::new(temp, probs).unwrap();
         d.sample(&[1]).unwrap().data_vec().unwrap()
@@ -243,7 +243,7 @@ fn relaxed_one_hot_rsample_jacobian_matches_finite_difference() {
 ///   scores = (logits + gumbels)/temp; return scores - scores.logsumexp(-1).
 #[test]
 fn exp_relaxed_rsample_is_log_simplex() {
-    ferrotorch_core::manual_seed(SEED);
+    ferrotorch_core::manual_seed(SEED).unwrap();
     let probs = leaf(&[0.2, 0.3, 0.5], &[3]);
     let d = ExpRelaxedCategorical::new(0.5_f32, probs).unwrap();
     let log_z = d.rsample(&[1]).unwrap();
@@ -272,7 +272,7 @@ fn check_exp_relaxed_jacobian(p: &[f32], temp: f32) {
 
     let mut analytic = vec![vec![0.0_f32; k]; k];
     for (i, row) in analytic.iter_mut().enumerate() {
-        ferrotorch_core::manual_seed(SEED);
+        ferrotorch_core::manual_seed(SEED).unwrap();
         let probs = leaf(p, &[k]);
         let d = ExpRelaxedCategorical::new(temp, probs.clone()).unwrap();
         let log_z = d.rsample(&[1]).unwrap();
@@ -288,7 +288,7 @@ fn check_exp_relaxed_jacobian(p: &[f32], temp: f32) {
     }
 
     let forward = |pp: &[f32]| -> Vec<f32> {
-        ferrotorch_core::manual_seed(SEED);
+        ferrotorch_core::manual_seed(SEED).unwrap();
         let probs = plain(pp, &[k]);
         let d = ExpRelaxedCategorical::new(temp, probs).unwrap();
         d.sample(&[1]).unwrap().data_vec().unwrap()
@@ -334,7 +334,7 @@ fn relaxed_one_hot_batched_shapes_independence_and_grad() {
     let p = [1.0_f32, 1.0, 1.0, 1.0, 1.0, 8.0];
     let temp = 0.5_f32;
 
-    ferrotorch_core::manual_seed(SEED);
+    ferrotorch_core::manual_seed(SEED).unwrap();
     let probs = leaf(&p, &[2, 3]);
     let d = RelaxedOneHotCategorical::new(temp, probs).unwrap();
 
@@ -366,7 +366,7 @@ fn relaxed_one_hot_batched_shapes_independence_and_grad() {
     // Per-row gradient FD: perturbing a parameter in row 1 must NOT move row 0's
     // sample (cross-row gradient must be 0). Pick output element z[0,0]; its grad
     // w.r.t. p[1,*] (indices 3,4,5) must be ~0.
-    ferrotorch_core::manual_seed(SEED);
+    ferrotorch_core::manual_seed(SEED).unwrap();
     let probs2 = leaf(&p, &[2, 3]);
     let d2 = RelaxedOneHotCategorical::new(temp, probs2.clone()).unwrap();
     let z2 = d2.rsample(&[1]).unwrap();
@@ -387,7 +387,7 @@ fn relaxed_one_hot_batched_shapes_independence_and_grad() {
     // And the within-row gradient (indices 0,1,2) must finite-diff-match.
     let eps = 1e-3_f32;
     let forward_z00 = |pp: &[f32]| -> f32 {
-        ferrotorch_core::manual_seed(SEED);
+        ferrotorch_core::manual_seed(SEED).unwrap();
         let probs = plain(pp, &[2, 3]);
         let d = RelaxedOneHotCategorical::new(temp, probs).unwrap();
         d.sample(&[1]).unwrap().data_vec().unwrap()[0]

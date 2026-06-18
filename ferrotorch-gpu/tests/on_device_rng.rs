@@ -273,10 +273,10 @@ fn rand_on_device_reproducible_same_seed() {
     ensure_init();
     let n = 4096usize;
 
-    manual_seed(42);
+    manual_seed(42).unwrap();
     let a = to_host(&rand_on_device::<f32>(&[n], Device::Cuda(0)).expect("rand a"));
 
-    manual_seed(42);
+    manual_seed(42).unwrap();
     let b = to_host(&rand_on_device::<f32>(&[n], Device::Cuda(0)).expect("rand b"));
 
     assert_eq!(
@@ -291,10 +291,10 @@ fn rand_on_device_differs_with_different_seed() {
     ensure_init();
     let n = 4096usize;
 
-    manual_seed(42);
+    manual_seed(42).unwrap();
     let a = to_host(&rand_on_device::<f32>(&[n], Device::Cuda(0)).expect("rand a"));
 
-    manual_seed(1337);
+    manual_seed(1337).unwrap();
     let b = to_host(&rand_on_device::<f32>(&[n], Device::Cuda(0)).expect("rand b"));
 
     assert_ne!(
@@ -309,10 +309,10 @@ fn randn_on_device_reproducible_same_seed() {
     ensure_init();
     let n = 4096usize;
 
-    manual_seed(7);
+    manual_seed(7).unwrap();
     let a = to_host(&randn_on_device::<f32>(&[n], Device::Cuda(0)).expect("randn a"));
 
-    manual_seed(7);
+    manual_seed(7).unwrap();
     let b = to_host(&randn_on_device::<f32>(&[n], Device::Cuda(0)).expect("randn b"));
 
     assert_eq!(
@@ -325,9 +325,9 @@ fn randn_on_device_reproducible_same_seed() {
 fn rand_on_device_cpu_matches_plain_rand() {
     // For Device::Cpu, rand_on_device must be identical to the existing
     // byte-exact-with-torch CPU `rand` (no behaviour change on the CPU path).
-    manual_seed(99);
+    manual_seed(99).unwrap();
     let a = rand_on_device::<f32>(&[1000], Device::Cpu).expect("rand_on_device cpu");
-    manual_seed(99);
+    manual_seed(99).unwrap();
     let b = ferrotorch_core::rand::<f32>(&[1000]).expect("rand cpu");
     assert!(!a.is_cuda());
     assert_eq!(

@@ -221,20 +221,34 @@ fn run_lstm_check(
         );
     }
     assert_close(
-        x.grad().unwrap().unwrap().data().unwrap(),
+        x.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         xgrad_ref,
         &format!("{name} input.grad"),
     );
     if let Some(hg) = h0grad_ref {
         assert_close(
-            h0.unwrap().grad().unwrap().unwrap().data().unwrap(),
+            h0.unwrap()
+                .grad()
+                .unwrap()
+                .expect("gradient should be populated")
+                .data()
+                .unwrap(),
             hg,
             &format!("{name} h0.grad"),
         );
     }
     if let Some(cg) = c0grad_ref {
         assert_close(
-            c0.unwrap().grad().unwrap().unwrap().data().unwrap(),
+            c0.unwrap()
+                .grad()
+                .unwrap()
+                .expect("gradient should be populated")
+                .data()
+                .unwrap(),
             cg,
             &format!("{name} c0.grad"),
         );
@@ -467,13 +481,22 @@ fn run_gru_check(
         );
     }
     assert_close(
-        x.grad().unwrap().unwrap().data().unwrap(),
+        x.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         xgrad_ref,
         &format!("{name} input.grad"),
     );
     if let Some(hg) = h0grad_ref {
         assert_close(
-            h0.unwrap().grad().unwrap().unwrap().data().unwrap(),
+            h0.unwrap()
+                .grad()
+                .unwrap()
+                .expect("gradient should be populated")
+                .data()
+                .unwrap(),
             hg,
             &format!("{name} h0.grad"),
         );
@@ -666,13 +689,22 @@ fn run_rnn_check(
         );
     }
     assert_close(
-        x.grad().unwrap().unwrap().data().unwrap(),
+        x.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         xgrad_ref,
         &format!("{name} input.grad"),
     );
     if let Some(hg) = h0grad_ref {
         assert_close(
-            h0.unwrap().grad().unwrap().unwrap().data().unwrap(),
+            h0.unwrap()
+                .grad()
+                .unwrap()
+                .expect("gradient should be populated")
+                .data()
+                .unwrap(),
             hg,
             &format!("{name} h0.grad"),
         );

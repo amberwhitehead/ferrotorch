@@ -255,125 +255,133 @@ fn main() -> FerrotorchResult<()> {
         randn_like(&tpl).unwrap()
     });
 
-    // ========== GPU Benchmarks ==========
-    println!("\n{}", "=".repeat(60));
-    println!("GPU BENCHMARKS");
-    println!("{}", "=".repeat(60));
+    #[cfg(feature = "gpu")]
+    {
+        // ========== GPU Benchmarks ==========
+        println!("\n{}", "=".repeat(60));
+        println!("GPU BENCHMARKS");
+        println!("{}", "=".repeat(60));
 
-    if ferrotorch_core::gpu_dispatch::gpu_backend().is_none() {
-        // Try to initialize the GPU backend.
-        #[cfg(feature = "gpu")]
-        {
+        if ferrotorch_core::gpu_dispatch::gpu_backend().is_none() {
+            // Try to initialize the GPU backend.
             let _ = ferrotorch_gpu::init_cuda_backend();
+        }
+
+        if ferrotorch_core::gpu_dispatch::gpu_backend().is_some() {
+            // Tensor creation on GPU
+            println!("\n--- GPU Tensor Creation ---");
+            bench_gpu("GPU zeros [1000,1000]", 5, 100, || {
+                let t = zeros::<f32>(&[1000, 1000]).unwrap();
+                t.cuda().unwrap()
+            });
+            // On-device generation (no CPU-gen + upload): rand_on_device dispatches
+            // to the Philox uniform kernel and wraps the result as a CUDA tensor.
+            bench_gpu("GPU rand [1000,1000]", 5, 100, || {
+                rand_on_device::<f32>(&[1000, 1000], Device::Cuda(0)).unwrap()
+            });
+
+            // Elementwise on GPU
+            println!("\n--- GPU Elementwise Ops ---");
+            let ga = rand::<f32>(&[1000, 1000])?.cuda()?;
+            let gb = rand::<f32>(&[1000, 1000])?.cuda()?;
+            bench_gpu("GPU add [1000,1000]", 10, 100, || (&ga + &gb).unwrap());
+            bench_gpu("GPU mul [1000,1000]", 10, 100, || (&ga * &gb).unwrap());
+            bench_gpu("GPU sub [1000,1000]", 10, 100, || (&ga - &gb).unwrap());
+            bench_gpu("GPU div [1000,1000]", 10, 100, || (&ga / &gb).unwrap());
+
+            // Unary on GPU
+            println!("\n--- GPU Unary Ops ---");
+            let gt = rand::<f32>(&[1000, 1000])?.cuda()?;
+            bench_gpu("GPU relu [1000,1000]", 10, 100, || {
+                ferrotorch_core::grad_fns::activation::relu(&gt).unwrap()
+            });
+            bench_gpu("GPU sigmoid [1000,1000]", 10, 100, || {
+                ferrotorch_core::grad_fns::activation::sigmoid(&gt).unwrap()
+            });
+            bench_gpu("GPU tanh [1000,1000]", 10, 100, || {
+                ferrotorch_core::grad_fns::activation::tanh(&gt).unwrap()
+            });
+            bench_gpu("GPU exp [1000,1000]", 10, 100, || {
+                ferrotorch_core::grad_fns::transcendental::exp(&gt).unwrap()
+            });
+            bench_gpu("GPU log [1000,1000]", 10, 100, || {
+                ferrotorch_core::grad_fns::transcendental::log(&gt).unwrap()
+            });
+            bench_gpu("GPU neg [1000,1000]", 10, 100, || {
+                ferrotorch_core::grad_fns::arithmetic::neg(&gt).unwrap()
+            });
+
+            // Matmul on GPU — use the GPU backend directly
+            println!("\n--- GPU Matrix Multiply ---");
+            for &size in &[64usize, 256, 1024, 4096] {
+                let ga = rand::<f32>(&[size, size])?.cuda()?;
+                let gb = rand::<f32>(&[size, size])?.cuda()?;
+                let iters = if size >= 4096 { 20 } else { 100 };
+                let backend = ferrotorch_core::gpu_dispatch::gpu_backend().unwrap();
+                bench_gpu(&format!("GPU matmul [{size},{size}]"), 10, iters, || {
+                    backend
+                        .matmul_f32(
+                            ga.gpu_handle().unwrap(),
+                            gb.gpu_handle().unwrap(),
+                            size,
+                            size,
+                            size,
+                        )
+                        .unwrap()
+                });
+            }
+
+            // Reduction on GPU
+            println!("\n--- GPU Reduction Ops ---");
+            let gr = rand::<f32>(&[1000, 1000])?.cuda()?;
+            bench_gpu("GPU sum_all [1000,1000]", 10, 100, || {
+                ferrotorch_core::grad_fns::reduction::sum(&gr).unwrap()
+            });
+            bench_gpu("GPU sum dim=0 [1000,1000]", 10, 100, || {
+                ferrotorch_core::grad_fns::reduction::sum_dim(&gr, 0, false).unwrap()
+            });
+            bench_gpu("GPU mean [1000,1000]", 10, 100, || {
+                ferrotorch_core::grad_fns::reduction::mean(&gr).unwrap()
+            });
+
+            // Forward/backward on GPU
+            println!("\n--- GPU Forward/Backward (MLP 784->256->10) ---");
+            let mut mlp_gpu = Sequential::new(vec![
+                Box::new(Linear::<f32>::new(784, 256, true)?),
+                Box::new(ReLU::new()),
+                Box::new(Linear::<f32>::new(256, 10, true)?),
+            ]);
+            mlp_gpu.to_device(ferrotorch_core::device::Device::Cuda(0))?;
+
+            let x_gpu = rand::<f32>(&[32, 784])?.cuda()?;
+            bench_gpu("GPU MLP forward B=32", 10, 100, || {
+                mlp_gpu.forward(&x_gpu).unwrap()
+            });
+
+            // Host<->Device transfer
+            println!("\n--- Host <-> Device Transfer ---");
+            let h = rand::<f32>(&[1000, 1000])?;
+            let d = h.cuda()?;
+            bench_gpu("CPU->GPU [1000,1000]", 5, 100, || h.cuda().unwrap());
+            bench_gpu("GPU->CPU [1000,1000]", 5, 100, || d.cpu().unwrap());
+
+            // Softmax/LayerNorm on GPU
+            println!("\n--- GPU Normalization ---");
+            let gn = rand::<f32>(&[64, 256])?.cuda()?;
+            bench_gpu("GPU softmax [64,256]", 10, 100, || {
+                ferrotorch_core::grad_fns::activation::softmax(&gn).unwrap()
+            });
+        } else {
+            println!("\n  (no GPU backend available — skipping GPU benchmarks)");
         }
     }
 
-    if ferrotorch_core::gpu_dispatch::gpu_backend().is_some() {
-        // Tensor creation on GPU
-        println!("\n--- GPU Tensor Creation ---");
-        bench_gpu("GPU zeros [1000,1000]", 5, 100, || {
-            let t = zeros::<f32>(&[1000, 1000]).unwrap();
-            t.cuda().unwrap()
-        });
-        // On-device generation (no CPU-gen + upload): rand_on_device dispatches
-        // to the Philox uniform kernel and wraps the result as a CUDA tensor.
-        bench_gpu("GPU rand [1000,1000]", 5, 100, || {
-            rand_on_device::<f32>(&[1000, 1000], Device::Cuda(0)).unwrap()
-        });
-
-        // Elementwise on GPU
-        println!("\n--- GPU Elementwise Ops ---");
-        let ga = rand::<f32>(&[1000, 1000])?.cuda()?;
-        let gb = rand::<f32>(&[1000, 1000])?.cuda()?;
-        bench_gpu("GPU add [1000,1000]", 10, 100, || (&ga + &gb).unwrap());
-        bench_gpu("GPU mul [1000,1000]", 10, 100, || (&ga * &gb).unwrap());
-        bench_gpu("GPU sub [1000,1000]", 10, 100, || (&ga - &gb).unwrap());
-        bench_gpu("GPU div [1000,1000]", 10, 100, || (&ga / &gb).unwrap());
-
-        // Unary on GPU
-        println!("\n--- GPU Unary Ops ---");
-        let gt = rand::<f32>(&[1000, 1000])?.cuda()?;
-        bench_gpu("GPU relu [1000,1000]", 10, 100, || {
-            ferrotorch_core::grad_fns::activation::relu(&gt).unwrap()
-        });
-        bench_gpu("GPU sigmoid [1000,1000]", 10, 100, || {
-            ferrotorch_core::grad_fns::activation::sigmoid(&gt).unwrap()
-        });
-        bench_gpu("GPU tanh [1000,1000]", 10, 100, || {
-            ferrotorch_core::grad_fns::activation::tanh(&gt).unwrap()
-        });
-        bench_gpu("GPU exp [1000,1000]", 10, 100, || {
-            ferrotorch_core::grad_fns::transcendental::exp(&gt).unwrap()
-        });
-        bench_gpu("GPU log [1000,1000]", 10, 100, || {
-            ferrotorch_core::grad_fns::transcendental::log(&gt).unwrap()
-        });
-        bench_gpu("GPU neg [1000,1000]", 10, 100, || {
-            ferrotorch_core::grad_fns::arithmetic::neg(&gt).unwrap()
-        });
-
-        // Matmul on GPU — use the GPU backend directly
-        println!("\n--- GPU Matrix Multiply ---");
-        for &size in &[64usize, 256, 1024, 4096] {
-            let ga = rand::<f32>(&[size, size])?.cuda()?;
-            let gb = rand::<f32>(&[size, size])?.cuda()?;
-            let iters = if size >= 4096 { 20 } else { 100 };
-            let backend = ferrotorch_core::gpu_dispatch::gpu_backend().unwrap();
-            bench_gpu(&format!("GPU matmul [{size},{size}]"), 10, iters, || {
-                backend
-                    .matmul_f32(
-                        ga.gpu_handle().unwrap(),
-                        gb.gpu_handle().unwrap(),
-                        size,
-                        size,
-                        size,
-                    )
-                    .unwrap()
-            });
-        }
-
-        // Reduction on GPU
-        println!("\n--- GPU Reduction Ops ---");
-        let gr = rand::<f32>(&[1000, 1000])?.cuda()?;
-        bench_gpu("GPU sum_all [1000,1000]", 10, 100, || {
-            ferrotorch_core::grad_fns::reduction::sum(&gr).unwrap()
-        });
-        bench_gpu("GPU sum dim=0 [1000,1000]", 10, 100, || {
-            ferrotorch_core::grad_fns::reduction::sum_dim(&gr, 0, false).unwrap()
-        });
-        bench_gpu("GPU mean [1000,1000]", 10, 100, || {
-            ferrotorch_core::grad_fns::reduction::mean(&gr).unwrap()
-        });
-
-        // Forward/backward on GPU
-        println!("\n--- GPU Forward/Backward (MLP 784->256->10) ---");
-        let mut mlp_gpu = Sequential::new(vec![
-            Box::new(Linear::<f32>::new(784, 256, true)?),
-            Box::new(ReLU::new()),
-            Box::new(Linear::<f32>::new(256, 10, true)?),
-        ]);
-        mlp_gpu.to_device(ferrotorch_core::device::Device::Cuda(0))?;
-
-        let x_gpu = rand::<f32>(&[32, 784])?.cuda()?;
-        bench_gpu("GPU MLP forward B=32", 10, 100, || {
-            mlp_gpu.forward(&x_gpu).unwrap()
-        });
-
-        // Host<->Device transfer
-        println!("\n--- Host <-> Device Transfer ---");
-        let h = rand::<f32>(&[1000, 1000])?;
-        let d = h.cuda()?;
-        bench_gpu("CPU->GPU [1000,1000]", 5, 100, || h.cuda().unwrap());
-        bench_gpu("GPU->CPU [1000,1000]", 5, 100, || d.cpu().unwrap());
-
-        // Softmax/LayerNorm on GPU
-        println!("\n--- GPU Normalization ---");
-        let gn = rand::<f32>(&[64, 256])?.cuda()?;
-        bench_gpu("GPU softmax [64,256]", 10, 100, || {
-            ferrotorch_core::grad_fns::activation::softmax(&gn).unwrap()
-        });
-    } else {
-        println!("\n  (no GPU backend available — skipping GPU benchmarks)");
+    #[cfg(not(feature = "gpu"))]
+    {
+        println!("\n{}", "=".repeat(60));
+        println!("GPU BENCHMARKS");
+        println!("{}", "=".repeat(60));
+        println!("\n  (enable the `gpu` feature to build GPU benchmarks)");
     }
 
     println!("\n{}", "=".repeat(60));

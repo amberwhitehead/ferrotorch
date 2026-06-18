@@ -48,6 +48,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- NN: Parameter device transfer creates non-leaf CUDA parameters (#2016)
+- CORE: non-leaf gradient accumulation rejects valid strided gradients (#2015)
+- CORE-095: `manual_seed` silently discards GPU seeding failures (#1789)
+- CORE-094: Reentrant use of the public thread-RNG accessor panics (#1788)
 - ferrotorch-gpu no-default-features stub build is broken (#2013)
 - CUDA atan2 forward/backward is missing despite PyTorch support (#2010)
 - CUDA complex FFT non-innermost axes and s-resize are unimplemented (#2004)

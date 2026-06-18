@@ -829,7 +829,7 @@ fn accumulate_non_leaf_grad<T: Float>(
                 op: "accumulate_grad",
             });
         }
-        let grad_data = grad.data()?;
+        let grad_data = grad.data_vec()?;
         if existing_slice.len() != grad_data.len() {
             return Err(FerrotorchError::ShapeMismatch {
                 message: format!(
@@ -852,8 +852,8 @@ fn accumulate_non_leaf_grad<T: Float>(
             op: "accumulate_grad",
         });
     }
-    let mut existing_data = existing.data()?.to_vec();
-    let grad_data = grad.data()?;
+    let mut existing_data = existing.data_vec()?;
+    let grad_data = grad.data_vec()?;
     if existing_data.len() != grad_data.len() {
         return Err(FerrotorchError::ShapeMismatch {
             message: format!(

@@ -51,9 +51,9 @@ fn default_rng_test_lock() -> MutexGuard<'static, ()> {
 fn rrelu_training_distinct_seeds_distinct_outputs() {
     let _guard = default_rng_test_lock();
     let x = cpu_f64(&[-1.0, -2.0, 3.0], &[3], false);
-    manual_seed(42);
+    manual_seed(42).unwrap();
     let a = rrelu(&x, LOWER, UPPER, true).unwrap().data_vec().unwrap();
-    manual_seed(43);
+    manual_seed(43).unwrap();
     let b = rrelu(&x, LOWER, UPPER, true).unwrap().data_vec().unwrap();
     assert_ne!(
         a, b,
@@ -66,9 +66,9 @@ fn rrelu_training_distinct_seeds_distinct_outputs() {
 fn rrelu_training_manual_seed_reproducible() {
     let _guard = default_rng_test_lock();
     let x = cpu_f64(&[-1.0, -2.0, 3.0, -0.5], &[4], false);
-    manual_seed(1234);
+    manual_seed(1234).unwrap();
     let a = rrelu(&x, LOWER, UPPER, true).unwrap().data_vec().unwrap();
-    manual_seed(1234);
+    manual_seed(1234).unwrap();
     let b = rrelu(&x, LOWER, UPPER, true).unwrap().data_vec().unwrap();
     let a_bits: Vec<u64> = a.iter().map(|v| v.to_bits()).collect();
     let b_bits: Vec<u64> = b.iter().map(|v| v.to_bits()).collect();
@@ -91,7 +91,7 @@ fn rrelu_training_manual_seed_reproducible() {
 fn rrelu_training_matches_torch_seed42_bitexact_f64() {
     let _guard = default_rng_test_lock();
     let x = cpu_f64(&[-1.0, -2.0, 3.0], &[3], false);
-    manual_seed(42);
+    manual_seed(42).unwrap();
     let y = rrelu(&x, LOWER, UPPER, true).unwrap().data_vec().unwrap();
     let got: Vec<u64> = y.iter().map(|v| v.to_bits()).collect();
     let expected: Vec<u64> = vec![
@@ -120,7 +120,7 @@ fn rrelu_training_matches_torch_seed42_bitexact_f64() {
 fn rrelu_training_matches_torch_seed42_bitexact_f32() {
     let _guard = default_rng_test_lock();
     let x = cpu_f32(&[-1.0, -2.0, 3.0], &[3], false);
-    manual_seed(42);
+    manual_seed(42).unwrap();
     let y = rrelu(&x, LOWER, UPPER, true).unwrap().data_vec().unwrap();
     let got: Vec<u32> = y.iter().map(|v| v.to_bits()).collect();
     let expected: Vec<u32> = vec![0xbe0c_6803, 0xbe8d_6bbc, 0x4040_0000];
@@ -144,7 +144,7 @@ fn rrelu_training_matches_torch_seed42_bitexact_f32() {
 fn rrelu_training_backward_applies_saved_noise() {
     let _guard = default_rng_test_lock();
     let x = cpu_f64(&[-1.0, -2.0, 3.0], &[3], true);
-    manual_seed(42);
+    manual_seed(42).unwrap();
     let out = rrelu(&x, LOWER, UPPER, true).unwrap();
     let loss = reduce_sum(&out).unwrap();
     loss.backward().unwrap();
@@ -180,7 +180,7 @@ fn rrelu_training_backward_applies_saved_noise() {
 fn rrelu_training_x_le_zero_draws_positive_passthrough() {
     let _guard = default_rng_test_lock();
     let x = cpu_f64(&[0.0, -1.0, 5.0], &[3], true);
-    manual_seed(7);
+    manual_seed(7).unwrap();
     let out = rrelu(&x, LOWER, UPPER, true).unwrap();
     let fwd = out.data_vec().unwrap();
     let fwd_bits: Vec<u64> = fwd.iter().map(|v| v.to_bits()).collect();
@@ -219,7 +219,7 @@ fn rrelu_training_slope_distribution_sanity() {
     const N: usize = 10_000;
     let data = vec![-1.0f64; N];
     let x = cpu_f64(&data, &[N], false);
-    manual_seed(99);
+    manual_seed(99).unwrap();
     let y = rrelu(&x, LOWER, UPPER, true).unwrap().data_vec().unwrap();
     // slope_i = out_i / x_i = -out_i for x_i = -1.
     let slopes: Vec<f64> = y.iter().map(|&v| -v).collect();
@@ -255,7 +255,7 @@ fn rrelu_eval_matches_torch_mean_slope_exactly() {
     let x = cpu_f64(&[-1.0, -2.0, 3.0], &[3], false);
     // Eval must NOT consume RNG state: seed, draw eval, then check the next
     // training call still matches the seed-42 stream from element 0.
-    manual_seed(42);
+    manual_seed(42).unwrap();
     let y = rrelu(&x, LOWER, UPPER, false).unwrap().data_vec().unwrap();
     let got: Vec<u64> = y.iter().map(|v| v.to_bits()).collect();
     let expected: Vec<u64> = vec![

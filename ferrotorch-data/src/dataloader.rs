@@ -1102,17 +1102,17 @@ where
 
         // Serve out-of-order results from the reorder buffer first.
         loop {
-            if let Some(top) = self.reorder_buf.peek() {
-                if top.seq == self.next_yield_seq {
-                    // SAFETY: peek() returned Some, so pop() cannot return
-                    // None — the heap is non-empty.
-                    let entry = self
-                        .reorder_buf
-                        .pop()
-                        .expect("invariant: heap non-empty after peek");
-                    self.next_yield_seq += 1;
-                    return Some(entry.batch);
-                }
+            if let Some(top) = self.reorder_buf.peek()
+                && top.seq == self.next_yield_seq
+            {
+                // SAFETY: peek() returned Some, so pop() cannot return
+                // None — the heap is non-empty.
+                let entry = self
+                    .reorder_buf
+                    .pop()
+                    .expect("invariant: heap non-empty after peek");
+                self.next_yield_seq += 1;
+                return Some(entry.batch);
             }
             // Not in buffer yet — receive the next completion.
             // The receiver is only `None` after `Drop::drop` has taken

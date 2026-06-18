@@ -202,17 +202,29 @@ fn run_lstm(
 
     check_layer_grads(&lstm.parameters(), grads, name);
     assert_close(
-        x.grad().unwrap().unwrap().data().unwrap(),
+        x.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         xgrad,
         &format!("{name} input.grad"),
     );
     assert_close(
-        h0.grad().unwrap().unwrap().data().unwrap(),
+        h0.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         h0grad,
         &format!("{name} h0.grad"),
     );
     assert_close(
-        c0.grad().unwrap().unwrap().data().unwrap(),
+        c0.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         c0grad,
         &format!("{name} c0.grad"),
     );
@@ -314,12 +326,20 @@ fn run_gru(
 
     check_layer_grads(&gru.parameters(), grads, name);
     assert_close(
-        x.grad().unwrap().unwrap().data().unwrap(),
+        x.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         xgrad,
         &format!("{name} input.grad"),
     );
     assert_close(
-        h0.grad().unwrap().unwrap().data().unwrap(),
+        h0.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         h0grad,
         &format!("{name} h0.grad"),
     );
@@ -416,12 +436,20 @@ fn run_rnn(
 
     check_layer_grads(&rnn.parameters(), grads, name);
     assert_close(
-        x.grad().unwrap().unwrap().data().unwrap(),
+        x.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         xgrad,
         &format!("{name} input.grad"),
     );
     assert_close(
-        h0.grad().unwrap().unwrap().data().unwrap(),
+        h0.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         h0grad,
         &format!("{name} h0.grad"),
     );

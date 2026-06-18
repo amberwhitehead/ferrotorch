@@ -52,7 +52,7 @@ const TORCH_RAND_SEED_42_F32_BITS: [u32; 10] = [
     0x3e08_61e4,
 ];
 
-/// Probe 1: `manual_seed(s); rand(...)` must be reproducible IN-PROCESS
+/// Probe 1: `manual_seed(s).unwrap(); rand(...)` must be reproducible IN-PROCESS
 /// across calls. If `manual_seed` is a no-op (or stashes the seed into a
 /// field that `rand` never reads), calling `manual_seed(42)` twice and
 /// then `rand` will return DIFFERENT bit patterns the second time because
@@ -64,9 +64,9 @@ const TORCH_RAND_SEED_42_F32_BITS: [u32; 10] = [
 #[test]
 fn reproducibility_probe() {
     let _guard = default_rng_test_lock();
-    manual_seed(42);
+    manual_seed(42).unwrap();
     let a = rand::<f32>(&[10]).unwrap();
-    manual_seed(42);
+    manual_seed(42).unwrap();
     let b = rand::<f32>(&[10]).unwrap();
     let ad = a.data().unwrap();
     let bd = b.data().unwrap();
@@ -81,7 +81,7 @@ fn reproducibility_probe() {
     }
 }
 
-/// Probe 2: `manual_seed(s); randn(...)` must also be reproducible
+/// Probe 2: `manual_seed(s).unwrap(); randn(...)` must also be reproducible
 /// in-process. Catches a default generator that resets the uniform engine on
 /// `manual_seed` but forgets to drain the Box-Muller cache: the first
 /// post-seed `randn` would consume the leftover cached normal sample
@@ -89,12 +89,12 @@ fn reproducibility_probe() {
 #[test]
 fn randn_reproducibility_probe() {
     let _guard = default_rng_test_lock();
-    manual_seed(123);
+    manual_seed(123).unwrap();
     let _ = rand::<f32>(&[1]).unwrap(); // advance state so cache differs
     let _ = randn::<f32>(&[1]).unwrap(); // poison Box-Muller cache
-    manual_seed(123);
+    manual_seed(123).unwrap();
     let a = randn::<f32>(&[10]).unwrap();
-    manual_seed(123);
+    manual_seed(123).unwrap();
     let b = randn::<f32>(&[10]).unwrap();
     let ad = a.data().unwrap();
     let bd = b.data().unwrap();
@@ -107,7 +107,7 @@ fn randn_reproducibility_probe() {
     }
 }
 
-/// Probe 3: `manual_seed(42); rand(&[10])` must agree BYTE-EXACT with
+/// Probe 3: `manual_seed(42).unwrap(); rand(&[10])` must agree BYTE-EXACT with
 /// `torch.manual_seed(42); torch.rand(10)`. This is the headline claim of
 /// #1537. The fixture is captured from live PyTorch.
 ///
@@ -117,7 +117,7 @@ fn randn_reproducibility_probe() {
 #[test]
 fn torch_parity_probe() {
     let _guard = default_rng_test_lock();
-    manual_seed(42);
+    manual_seed(42).unwrap();
     let t = rand::<f32>(&[10]).unwrap();
     let data = t.data().unwrap();
     for (i, (&got, &expected_bits)) in data
@@ -150,7 +150,7 @@ fn nn_init_generator_threading_probe() {
 
     // First: process-default stream advancement does not pollute an explicit
     // Generator.
-    manual_seed(7);
+    manual_seed(7).unwrap();
     let _ = rand::<f32>(&[100]).unwrap();
     let mut g_a = Generator::new(42);
     let v_a: Vec<u32> = (0..10).map(|_| g_a.next_uniform_f32().to_bits()).collect();
@@ -212,13 +212,13 @@ fn cross_test_isolation_probe() {
     let _guard = default_rng_test_lock();
 
     // Burn arbitrary default-generator state.
-    manual_seed(0xdead_beef);
+    manual_seed(0xdead_beef).unwrap();
     for _ in 0..7 {
         let _ = rand::<f32>(&[13]).unwrap();
         let _ = randn::<f32>(&[5]).unwrap();
     }
     // After re-seeding, the canonical stream must reappear.
-    manual_seed(42);
+    manual_seed(42).unwrap();
     let t = rand::<f32>(&[10]).unwrap();
     let data = t.data().unwrap();
     for (i, (&got, &expected_bits)) in data

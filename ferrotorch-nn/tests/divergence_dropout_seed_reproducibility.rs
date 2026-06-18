@@ -32,10 +32,10 @@ fn ones(n: usize) -> Tensor<f32> {
 /// zeroed, same `1/(1-p)` scale on survivors.
 #[test]
 fn divergence_dropout_seed0_mask_matches_torch() {
-    // Live-torch reference for manual_seed(0); F.dropout(ones(10),0.5,True).
+    // Live-torch reference for torch.manual_seed(0); F.dropout(ones(10),0.5,True).
     let torch_seed0: [f32; 10] = [0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0, 2.0, 0.0, 2.0];
 
-    ferrotorch_core::rng::manual_seed(0);
+    ferrotorch_core::rng::manual_seed(0).unwrap();
     let y = ferrotorch_nn::functional::dropout(&ones(10), 0.5, true).unwrap();
     let got = y.data_vec().unwrap();
 
@@ -51,7 +51,7 @@ fn divergence_dropout_seed0_mask_matches_torch() {
 fn divergence_dropout_seed1_mask_matches_torch() {
     let torch_seed1: [f32; 10] = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0, 2.0, 0.0, 0.0, 2.0];
 
-    ferrotorch_core::rng::manual_seed(1);
+    ferrotorch_core::rng::manual_seed(1).unwrap();
     let y = ferrotorch_nn::functional::dropout(&ones(10), 0.5, true).unwrap();
     let got = y.data_vec().unwrap();
 
@@ -72,7 +72,7 @@ fn dropout_module_seed0_mask_matches_torch() {
 
     let torch_seed0: [f32; 10] = [0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0, 2.0, 0.0, 2.0];
 
-    ferrotorch_core::rng::manual_seed(0);
+    ferrotorch_core::rng::manual_seed(0).unwrap();
     let layer = ferrotorch_nn::Dropout::<f32>::new(0.5).unwrap();
     let y = layer.forward(&ones(10)).unwrap();
     let got = y.data_vec().unwrap();
@@ -92,7 +92,7 @@ fn dropout_module_seed0_mask_matches_torch() {
 /// This test PASSES today and must keep passing.
 #[test]
 fn dropout_structural_inverted_scale_holds() {
-    ferrotorch_core::rng::manual_seed(0);
+    ferrotorch_core::rng::manual_seed(0).unwrap();
     let p = 0.25_f64;
     let y = ferrotorch_nn::functional::dropout(&ones(64), p, true).unwrap();
     let scale = (1.0 / (1.0 - p)) as f32;

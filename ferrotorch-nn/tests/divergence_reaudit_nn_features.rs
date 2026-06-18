@@ -170,7 +170,7 @@ fn embedding_max_norm_clips_output_rows() {
 /// a*x+b with a single (a,b). Per-element dropout would break this.
 #[test]
 fn feature_alpha_dropout_drops_whole_channels() {
-    ferrotorch_core::manual_seed(7);
+    ferrotorch_core::manual_seed(7).unwrap();
     let c = 8usize;
     let hw = 4usize;
     let mut data = Vec::with_capacity(c * hw);
@@ -215,13 +215,13 @@ fn feature_alpha_dropout_drops_whole_channels() {
 #[test]
 fn functional_dropout_deterministic_under_manual_seed() {
     let x = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32; 64]), vec![64], false).unwrap();
-    ferrotorch_core::manual_seed(123);
+    ferrotorch_core::manual_seed(123).unwrap();
     let a = ferrotorch_nn::functional::dropout(&x, 0.5, true)
         .unwrap()
         .data()
         .unwrap()
         .to_vec();
-    ferrotorch_core::manual_seed(123);
+    ferrotorch_core::manual_seed(123).unwrap();
     let b = ferrotorch_nn::functional::dropout(&x, 0.5, true)
         .unwrap()
         .data()
@@ -231,7 +231,7 @@ fn functional_dropout_deterministic_under_manual_seed() {
         a, b,
         "functional::dropout not deterministic under manual_seed"
     );
-    ferrotorch_core::manual_seed(999);
+    ferrotorch_core::manual_seed(999).unwrap();
     let c = ferrotorch_nn::functional::dropout(&x, 0.5, true)
         .unwrap()
         .data()

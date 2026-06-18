@@ -60,7 +60,7 @@ fn dropout3d_1x2x2x2x2_arange_seed1_p05_matches_torch() {
     let want: [f32; 16] = [
         2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0,
     ];
-    ferrotorch_core::rng::manual_seed(1);
+    ferrotorch_core::rng::manual_seed(1).unwrap();
     let layer = Dropout3d::<f32>::new(0.5).unwrap();
     let y = layer.forward(&arange(vec![1, 2, 2, 2, 2])).unwrap();
     approx(
@@ -83,7 +83,7 @@ fn feature_alpha_dropout_1x4x2x2_arange_seed7_p05_matches_torch() {
         -0.7791939, -0.7791939, -0.7791939, -0.7791939, // ch2 DROP
         -0.7791939, -0.7791939, -0.7791939, -0.7791939, // ch3 DROP
     ];
-    ferrotorch_core::rng::manual_seed(7);
+    ferrotorch_core::rng::manual_seed(7).unwrap();
     let layer = FeatureAlphaDropout::<f32>::new(0.5).unwrap();
     let y = layer.forward(&arange(vec![1, 4, 2, 2])).unwrap();
     approx(
@@ -102,14 +102,14 @@ fn dropout2d_manual_seed_is_deterministic() {
     let _rng = dropout_rng_lock();
     let layer = Dropout2d::<f32>::new(0.5).unwrap();
 
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let y1 = layer
         .forward(&arange(vec![2, 4, 3, 3]))
         .unwrap()
         .data_vec()
         .unwrap();
 
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let y2 = layer
         .forward(&arange(vec![2, 4, 3, 3]))
         .unwrap()
@@ -126,7 +126,7 @@ fn dropout2d_manual_seed_is_deterministic() {
 fn plain_dropout_seed42_p05_no_regression_matches_torch() {
     let _rng = dropout_rng_lock();
     let want: [f32; 10] = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0, 0.0, 0.0, 2.0, 2.0];
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let layer = Dropout::<f32>::new(0.5).unwrap();
     let y = layer.forward(&ones(10)).unwrap();
     approx(

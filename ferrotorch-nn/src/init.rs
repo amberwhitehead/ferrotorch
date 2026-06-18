@@ -105,7 +105,7 @@ pub fn ones<T: Float>(param: &mut Parameter<T>) -> FerrotorchResult<()> {
 /// [`ferrotorch_core::manual_seed`] before this function, or use
 /// [`uniform_with_generator`] to pass an explicit [`Generator`].
 pub fn uniform<T: Float>(param: &mut Parameter<T>, low: f64, high: f64) -> FerrotorchResult<()> {
-    with_thread_rng(|g| uniform_with_generator(param, low, high, g))
+    with_thread_rng(|g| uniform_with_generator(param, low, high, g))?
 }
 
 /// Same as [`uniform`] but uses the caller-supplied [`Generator`] — mirrors
@@ -131,7 +131,7 @@ pub fn uniform_with_generator<T: Float>(
 /// Uses the thread-local generator. See [`normal_with_generator`] for the
 /// explicit-`Generator` variant.
 pub fn normal<T: Float>(param: &mut Parameter<T>, mean: f64, std: f64) -> FerrotorchResult<()> {
-    with_thread_rng(|g| normal_with_generator(param, mean, std, g))
+    with_thread_rng(|g| normal_with_generator(param, mean, std, g))?
 }
 
 /// Same as [`normal`] but uses the caller-supplied [`Generator`] — mirrors
@@ -156,7 +156,7 @@ pub fn normal_with_generator<T: Float>(
 ///
 /// Fills with values from U(-limit, limit) where limit = sqrt(6 / (fan_in + fan_out)).
 pub fn xavier_uniform<T: Float>(param: &mut Parameter<T>) -> FerrotorchResult<()> {
-    with_thread_rng(|g| xavier_uniform_with_generator(param, g))
+    with_thread_rng(|g| xavier_uniform_with_generator(param, g))?
 }
 
 /// Same as [`xavier_uniform`] but uses the caller-supplied [`Generator`].
@@ -173,7 +173,7 @@ pub fn xavier_uniform_with_generator<T: Float>(
 ///
 /// Fills with values from N(0, std) where std = sqrt(2 / (fan_in + fan_out)).
 pub fn xavier_normal<T: Float>(param: &mut Parameter<T>) -> FerrotorchResult<()> {
-    with_thread_rng(|g| xavier_normal_with_generator(param, g))
+    with_thread_rng(|g| xavier_normal_with_generator(param, g))?
 }
 
 /// Same as [`xavier_normal`] but uses the caller-supplied [`Generator`].
@@ -194,7 +194,7 @@ pub fn kaiming_uniform<T: Float>(
     param: &mut Parameter<T>,
     nonlinearity: NonLinearity,
 ) -> FerrotorchResult<()> {
-    with_thread_rng(|g| kaiming_uniform_with_generator(param, nonlinearity, g))
+    with_thread_rng(|g| kaiming_uniform_with_generator(param, nonlinearity, g))?
 }
 
 /// Same as [`kaiming_uniform`] but uses the caller-supplied [`Generator`].
@@ -218,7 +218,7 @@ pub fn kaiming_uniform_with_fan_mode<T: Float>(
     nonlinearity: NonLinearity,
     mode: FanMode,
 ) -> FerrotorchResult<()> {
-    with_thread_rng(|g| kaiming_uniform_with_fan_mode_and_generator(param, nonlinearity, mode, g))
+    with_thread_rng(|g| kaiming_uniform_with_fan_mode_and_generator(param, nonlinearity, mode, g))?
 }
 
 /// Same as [`kaiming_uniform_with_fan_mode`] but uses the caller-supplied
@@ -249,7 +249,7 @@ pub fn kaiming_normal<T: Float>(
     param: &mut Parameter<T>,
     nonlinearity: NonLinearity,
 ) -> FerrotorchResult<()> {
-    with_thread_rng(|g| kaiming_normal_with_generator(param, nonlinearity, g))
+    with_thread_rng(|g| kaiming_normal_with_generator(param, nonlinearity, g))?
 }
 
 /// Same as [`kaiming_normal`] but uses the caller-supplied [`Generator`].
@@ -272,7 +272,7 @@ pub fn kaiming_normal_with_fan_mode<T: Float>(
     nonlinearity: NonLinearity,
     mode: FanMode,
 ) -> FerrotorchResult<()> {
-    with_thread_rng(|g| kaiming_normal_with_fan_mode_and_generator(param, nonlinearity, mode, g))
+    with_thread_rng(|g| kaiming_normal_with_fan_mode_and_generator(param, nonlinearity, mode, g))?
 }
 
 /// Same as [`kaiming_normal_with_fan_mode`] but uses the caller-supplied
@@ -320,7 +320,7 @@ pub fn trunc_normal_<T: Float>(
     a: f64,
     b: f64,
 ) -> FerrotorchResult<()> {
-    with_thread_rng(|g| trunc_normal_with_generator(param, mean, std, a, b, g))
+    with_thread_rng(|g| trunc_normal_with_generator(param, mean, std, a, b, g))?
 }
 
 /// Same as [`trunc_normal_`] but uses the caller-supplied [`Generator`] —
@@ -385,7 +385,7 @@ pub fn trunc_normal_with_generator<T: Float>(
 /// Matches `torch.nn.init.orthogonal_`. Uses the thread-local generator;
 /// see [`orthogonal_with_generator`] for the explicit-`Generator` variant.
 pub fn orthogonal_<T: Float>(param: &mut Parameter<T>, gain: f64) -> FerrotorchResult<()> {
-    with_thread_rng(|g| orthogonal_with_generator(param, gain, g))
+    with_thread_rng(|g| orthogonal_with_generator(param, gain, g))?
 }
 
 /// Same as [`orthogonal_`] but uses the caller-supplied [`Generator`] —
@@ -519,7 +519,7 @@ pub fn sparse_<T: Float>(
     sparsity: f64,
     std: f64,
 ) -> FerrotorchResult<()> {
-    with_thread_rng(|g| sparse_with_generator(param, sparsity, std, g))
+    with_thread_rng(|g| sparse_with_generator(param, sparsity, std, g))?
 }
 
 /// Same as [`sparse_`] but uses the caller-supplied [`Generator`] — mirrors

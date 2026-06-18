@@ -165,7 +165,7 @@ fn cuda_checkpoint_backward_keeps_grad_on_cuda() {
 fn cuda_checkpoint_preserves_rng_for_stochastic_recompute() {
     let _rng_lock = cuda_checkpoint_rng_test_lock();
     ensure_cuda();
-    manual_seed(2026);
+    manual_seed(2026).unwrap();
     let x = cuda_leaf(&[1.0; 6], &[6]);
 
     let y = checkpoint(
@@ -192,7 +192,7 @@ fn cuda_checkpoint_preserves_rng_for_stochastic_recompute() {
     let after_backward =
         host(&rand_on_device::<f32>(&[4], Device::Cuda(0)).expect("after backward"));
 
-    manual_seed(2026);
+    manual_seed(2026).unwrap();
     let expected_forward = host(&rand_on_device::<f32>(&[6], Device::Cuda(0)).expect("forward"));
     let expected_after_forward =
         host(&rand_on_device::<f32>(&[4], Device::Cuda(0)).expect("expected after forward"));

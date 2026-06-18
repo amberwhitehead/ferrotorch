@@ -508,7 +508,7 @@ impl<T: Float> Module<T> for Dropout<T> {
                     }
                 })
                 .collect()
-        });
+        })?;
 
         let input_data = input.data()?;
         let output_data: Vec<T> = input_data
@@ -683,7 +683,7 @@ impl<T: Float> Module<T> for Dropout2d<T> {
             (0..batch * channels)
                 .map(|_| g.next_uniform_f64() < keep_prob)
                 .collect()
-        });
+        })?;
 
         // Expand channel mask to full element mask.
         let scaled_mask: Vec<T> = {
@@ -854,7 +854,7 @@ impl<T: Float> Module<T> for Dropout1d<T> {
             (0..batch * channels)
                 .map(|_| g.next_uniform_f64() < keep_prob)
                 .collect()
-        });
+        })?;
 
         let scaled_mask: Vec<T> = {
             let mut mask = Vec::with_capacity(numel);
@@ -1022,7 +1022,7 @@ impl<T: Float> Module<T> for Dropout3d<T> {
             (0..batch * channels)
                 .map(|_| g.next_uniform_f64() < keep_prob)
                 .collect()
-        });
+        })?;
 
         let scaled_mask: Vec<T> = {
             let mut mask = Vec::with_capacity(numel);
@@ -1278,7 +1278,7 @@ impl<T: Float> Module<T> for AlphaDropout<T> {
             (0..numel)
                 .map(|_| g.next_uniform_f64() < keep_prob)
                 .collect()
-        });
+        })?;
 
         let input_data = input.data()?;
         let mut output_data = Vec::with_capacity(numel);
@@ -1528,7 +1528,7 @@ impl<T: Float> Module<T> for FeatureAlphaDropout<T> {
             (0..batch * channels)
                 .map(|_| g.next_uniform_f64() < keep_prob)
                 .collect()
-        });
+        })?;
 
         let input_data = input.data_vec()?;
         let mut output_data = Vec::with_capacity(numel);
@@ -1715,7 +1715,10 @@ mod tests {
         .unwrap();
         loss.backward().unwrap();
 
-        let grad = input.grad().unwrap().unwrap();
+        let grad = input
+            .grad()
+            .unwrap()
+            .expect("input gradient should be populated");
         let grad_data = grad.data().unwrap();
 
         // Every gradient element should be either 0 (dropped) or 1/(1-p) = 2.0 (survived).
@@ -1886,7 +1889,10 @@ mod tests {
         .unwrap();
         loss.backward().unwrap();
 
-        let grad = input.grad().unwrap().unwrap();
+        let grad = input
+            .grad()
+            .unwrap()
+            .expect("input gradient should be populated");
         let grad_data = grad.data().unwrap();
         let out_data = output.data().unwrap();
 
@@ -2202,7 +2208,10 @@ mod tests {
         .unwrap();
         loss.backward().unwrap();
 
-        let grad = input.grad().unwrap().unwrap();
+        let grad = input
+            .grad()
+            .unwrap()
+            .expect("input gradient should be populated");
         let grad_data = grad.data().unwrap();
 
         // Gradient should have two types of values: 0 for dropped, `a` for kept.
@@ -2381,7 +2390,10 @@ mod tests {
         loss.backward().unwrap();
 
         // Gradient flows back to the leaf `x` through the out-of-place dropout.
-        let grad = x.grad().unwrap().unwrap();
+        let grad = x
+            .grad()
+            .unwrap()
+            .expect("leaf gradient should be populated");
         let grad_data = grad.data().unwrap();
         for &g in grad_data {
             assert!(
@@ -2557,7 +2569,7 @@ mod tests {
     fn test_dropout2d_seed42_matches_torch() {
         ferrotorch_core::rng::with_default_rng_test_lock(|| {
             let want = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0, 0.0, 0.0];
-            ferrotorch_core::rng::manual_seed(42);
+            ferrotorch_core::rng::manual_seed(42).unwrap();
             let d = Dropout2d::<f32>::new(0.5).unwrap();
             let y = d.forward(&ones_shape_t(&[1, 8, 1, 1])).unwrap();
             assert_eq!(y.data().unwrap(), &want);
@@ -2570,7 +2582,7 @@ mod tests {
     fn test_dropout1d_seed42_matches_torch() {
         ferrotorch_core::rng::with_default_rng_test_lock(|| {
             let want = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0];
-            ferrotorch_core::rng::manual_seed(42);
+            ferrotorch_core::rng::manual_seed(42).unwrap();
             let d = Dropout1d::<f32>::new(0.5).unwrap();
             let y = d.forward(&ones_shape_t(&[1, 6, 3])).unwrap();
             let data = y.data().unwrap();
@@ -2585,7 +2597,7 @@ mod tests {
     fn test_dropout3d_seed42_matches_torch() {
         ferrotorch_core::rng::with_default_rng_test_lock(|| {
             let want = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0];
-            ferrotorch_core::rng::manual_seed(42);
+            ferrotorch_core::rng::manual_seed(42).unwrap();
             let d = Dropout3d::<f32>::new(0.5).unwrap();
             let y = d.forward(&ones_shape_t(&[1, 6, 1, 1, 1])).unwrap();
             assert_eq!(y.data().unwrap(), &want);
@@ -2598,9 +2610,9 @@ mod tests {
     fn test_dropout2d_reproducible_under_manual_seed() {
         ferrotorch_core::rng::with_default_rng_test_lock(|| {
             let d = Dropout2d::<f32>::new(0.5).unwrap();
-            ferrotorch_core::rng::manual_seed(42);
+            ferrotorch_core::rng::manual_seed(42).unwrap();
             let y1 = d.forward(&ones_shape_t(&[1, 64, 1, 1])).unwrap();
-            ferrotorch_core::rng::manual_seed(42);
+            ferrotorch_core::rng::manual_seed(42).unwrap();
             let y2 = d.forward(&ones_shape_t(&[1, 64, 1, 1])).unwrap();
             assert_eq!(y1.data().unwrap(), y2.data().unwrap());
         });
@@ -2617,7 +2629,7 @@ mod tests {
                 1.6655989, 1.6655989, 1.6655989, 1.6655989, -0.7791939, 1.6655989, -0.7791939,
                 -0.7791939, 1.6655989, 1.6655989,
             ];
-            ferrotorch_core::rng::manual_seed(42);
+            ferrotorch_core::rng::manual_seed(42).unwrap();
             let d = AlphaDropout::<f32>::new(0.5).unwrap();
             let y = d.forward(&ones_shape_t(&[10])).unwrap();
             let got = y.data().unwrap();
@@ -2635,7 +2647,7 @@ mod tests {
             let want = [
                 1.6655989, 1.6655989, 1.6655989, 1.6655989, -0.7791939, 1.6655989,
             ];
-            ferrotorch_core::rng::manual_seed(42);
+            ferrotorch_core::rng::manual_seed(42).unwrap();
             let d = FeatureAlphaDropout::<f32>::new(0.5).unwrap();
             let y = d.forward(&ones_shape_t(&[1, 6, 1, 1])).unwrap();
             let got = y.data().unwrap();

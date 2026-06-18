@@ -201,10 +201,10 @@ fn bilinear_sample_with_fill(data: &[f64], h: usize, w: usize, y: f64, x: f64, f
 fn nearest_sample(data: &[f64], h: usize, w: usize, y: f64, x: f64, fill: Option<f64>) -> f64 {
     let xr = x.round();
     let yr = y.round();
-    if let Some(f) = fill {
-        if xr < 0.0 || yr < 0.0 || xr > (w - 1) as f64 || yr > (h - 1) as f64 {
-            return f;
-        }
+    if let Some(f) = fill
+        && (xr < 0.0 || yr < 0.0 || xr > (w - 1) as f64 || yr > (h - 1) as f64)
+    {
+        return f;
     }
     let xi = xr.clamp(0.0, (w - 1) as f64) as usize;
     let yi = yr.clamp(0.0, (h - 1) as f64) as usize;

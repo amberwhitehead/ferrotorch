@@ -78,7 +78,13 @@ fn audit_1427_df_gradient_sign_matches_variance_monotonicity() {
     let sq = ferrotorch_core::grad_fns::arithmetic::mul(&s, &s).unwrap();
     sq.sum_all().unwrap().backward().unwrap();
 
-    let g = df.grad().unwrap().unwrap().item().unwrap() / 40_000.0;
+    let g = df
+        .grad()
+        .unwrap()
+        .expect("gradient should be populated")
+        .item()
+        .unwrap()
+        / 40_000.0;
     assert!(
         g < 0.0,
         "d/d(df) E[t^2] should be negative (variance decreases in df), got {g}"

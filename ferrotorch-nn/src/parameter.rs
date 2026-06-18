@@ -97,7 +97,11 @@ impl<T: Float> Parameter<T> {
 
     /// Move this parameter to a device.
     pub fn to(&self, device: Device) -> FerrotorchResult<Self> {
-        Ok(Self::new(self.data.to(device)?))
+        let requires_grad = self.data.requires_grad();
+        let moved = ferrotorch_core::autograd::no_grad::no_grad(|| self.data.to(device))?
+            .detach()
+            .requires_grad_(requires_grad);
+        Ok(Self { data: moved })
     }
 }
 
@@ -141,6 +145,23 @@ mod tests {
         assert_eq!(p2.shape(), &[3]);
         assert_eq!(p2.data().unwrap(), &[1.0, 2.0, 3.0]);
         assert!(p2.requires_grad());
+        assert!(p2.is_leaf(), "Parameter::to must return a leaf parameter");
+        assert!(
+            p2.grad_fn().is_none(),
+            "Module/Parameter transfer must not create a differentiable to-copy edge"
+        );
+    }
+
+    #[test]
+    fn test_parameter_to_preserves_frozen_state() {
+        let mut p = Parameter::<f32>::from_slice(&[1.0, 2.0], &[2]).unwrap();
+        p.set_requires_grad(false);
+
+        let moved = p.to(ferrotorch_core::Device::Cpu).unwrap();
+
+        assert!(!moved.requires_grad());
+        assert!(moved.is_leaf());
+        assert!(moved.grad_fn().is_none());
     }
 
     #[test]
@@ -148,5 +169,33 @@ mod tests {
         let p = Parameter::<f32>::zeros(&[2]).unwrap();
         let result = p.to(ferrotorch_core::Device::Cuda(0));
         assert!(result.is_err());
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_parameter_to_cuda_stays_leaf_and_receives_grad() {
+        if ferrotorch_gpu::init_cuda_backend().is_err() {
+            return;
+        }
+
+        let p = Parameter::<f32>::from_slice(&[1.0, 2.0, 3.0], &[3])
+            .unwrap()
+            .to(ferrotorch_core::Device::Cuda(0))
+            .unwrap();
+
+        assert!(
+            p.is_leaf(),
+            "CUDA-transferred parameters must remain leaves"
+        );
+        assert!(p.grad_fn().is_none());
+        let loss = ferrotorch_core::grad_fns::reduction::sum(p.tensor()).unwrap();
+        loss.backward().unwrap();
+
+        let grad = p
+            .grad()
+            .unwrap()
+            .expect("CUDA parameter grad should be populated");
+        assert_eq!(grad.device(), ferrotorch_core::Device::Cuda(0));
+        assert_eq!(grad.data_vec().unwrap(), vec![1.0, 1.0, 1.0]);
     }
 }

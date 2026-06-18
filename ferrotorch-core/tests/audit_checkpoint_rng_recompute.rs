@@ -11,7 +11,7 @@ fn leaf_grad(data: &[f32], shape: &[usize]) -> Tensor<f32> {
 
 #[test]
 fn checkpoint_cpu_rng_recompute_and_restore_are_deterministic() {
-    manual_seed(123);
+    manual_seed(123).unwrap();
     let x = leaf_grad(&[1.0; 6], &[6]);
     let y = checkpoint(
         |t: &Tensor<f32>| {
@@ -30,7 +30,7 @@ fn checkpoint_cpu_rng_recompute_and_restore_are_deterministic() {
         "checkpoint recompute must reuse the exact CPU uniform RNG stream"
     );
 
-    manual_seed(456);
+    manual_seed(456).unwrap();
     let _cached_sibling = randn::<f32>(&[1]).unwrap();
     let x = leaf_grad(&[1.0; 5], &[5]);
     let y = checkpoint(
@@ -50,7 +50,7 @@ fn checkpoint_cpu_rng_recompute_and_restore_are_deterministic() {
         "checkpoint recompute must preserve cached CPU normal samples"
     );
 
-    manual_seed(789);
+    manual_seed(789).unwrap();
     let x = leaf_grad(&[1.0; 6], &[6]);
     let y = checkpoint(
         |t: &Tensor<f32>| {
@@ -64,7 +64,7 @@ fn checkpoint_cpu_rng_recompute_and_restore_are_deterministic() {
     sum(&y).unwrap().backward().unwrap();
     let after_backward = rand::<f32>(&[4]).unwrap().data().unwrap().to_vec();
 
-    manual_seed(789);
+    manual_seed(789).unwrap();
     let _forward_mask = rand::<f32>(&[6]).unwrap();
     let expected_after_forward = rand::<f32>(&[4]).unwrap().data().unwrap().to_vec();
     let expected_after_backward = rand::<f32>(&[4]).unwrap().data().unwrap().to_vec();
@@ -74,7 +74,7 @@ fn checkpoint_cpu_rng_recompute_and_restore_are_deterministic() {
         "checkpoint recompute should fork RNG and restore the caller stream"
     );
 
-    manual_seed(321);
+    manual_seed(321).unwrap();
     let a = leaf_grad(&[1.0; 4], &[4]);
     let b = from_slice(&[0.0f32; 4], &[4]).unwrap();
     let y = checkpoint_multi(

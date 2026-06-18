@@ -194,7 +194,7 @@ impl<T: Float> Callback<T> for ProgressLogger {
     }
 
     fn on_batch_end(&mut self, batch: usize, loss: f64) {
-        if self.log_every_n_batches > 0 && batch % self.log_every_n_batches == 0 {
+        if self.log_every_n_batches > 0 && batch.is_multiple_of(self.log_every_n_batches) {
             tracing::info!(
                 target: "ferrotorch::progress",
                 batch,

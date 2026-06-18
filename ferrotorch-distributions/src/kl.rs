@@ -214,10 +214,10 @@ pub fn kl_divergence_dyn<T: Float>(
 ) -> FerrotorchResult<Tensor<T>> {
     // Recursion-based pairs first (they cannot be matched by `Any::downcast_ref`
     // because `Independent<T, D>` is generic over the erased base type `D`).
-    if let (Some(pr), Some(qr)) = (p.kl_recurse(), q.kl_recurse()) {
-        if let Some(result) = kl_recurse_pair(&pr, &qr)? {
-            return result;
-        }
+    if let (Some(pr), Some(qr)) = (p.kl_recurse(), q.kl_recurse())
+        && let Some(result) = kl_recurse_pair(&pr, &qr)?
+    {
+        return result;
     }
     // Concrete `(P, Q)` arms next.
     match kl_dispatch::<T>(p.as_dist_any(), q.as_dist_any()) {

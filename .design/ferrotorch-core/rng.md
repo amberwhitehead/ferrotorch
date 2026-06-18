@@ -20,13 +20,14 @@ mirrors `torch.manual_seed` / `torch.default_generator`, plus explicit
 
 - `pub struct Generator` — owns an MT19937 (Mersenne Twister 32-bit)
   engine + cached Box-Muller normal-distribution samples for f32 / f64.
-- `pub fn manual_seed(seed: u64)` — top-level reseed of the process-global
-  default CPU generator, mirroring `torch.manual_seed` at
-  `torch/random.py:46-86`.
-- `pub fn with_thread_rng<R>(f)` — closure-accessor over the
-  process-global default generator; consumed by `creation::rand` /
-  `creation::randn` and by the `ferrotorch-nn::init` helpers. The historical
-  name is retained for API compatibility.
+- `pub fn manual_seed(seed: u64) -> FerrotorchResult<()>` — top-level
+  all-device reseed. It mirrors `torch.manual_seed` at `torch/random.py:49-86`
+  by seeding registered device generators before reseeding the process-global
+  CPU default generator; a real backend seeding failure is surfaced.
+- `pub fn with_thread_rng<R>(f) -> FerrotorchResult<R>` —
+  closure-accessor over the process-global default generator; consumed by
+  `creation::rand` / `creation::randn` and by the `ferrotorch-nn::init`
+  helpers. The historical name is retained for API compatibility.
 
 The internal MT19937 engine is byte-identical to PyTorch CPU's
 `at::mt19937_engine` (`aten/src/ATen/core/MT19937RNGEngine.h:110-150`):
@@ -45,16 +46,17 @@ algorithm at `init_with_uint32` (`:155-164`) is the well-known
   `manual_seed(seed)`, `seed()`, `random_u32`/`random_u64`,
   `next_uniform_f32`/`f64`, `next_normal_f32`/`f64`. Implement
   `Clone + Debug + Default` (Default = `seed_from_entropy`).
-- REQ-3 (`manual_seed` top-level): `pub fn manual_seed(seed: u64)` is
-  the analogue of `torch.manual_seed` — reseeds the process-global default
-  CPU generator and forwards to the registered GPU backend. Re-exported at
-  `ferrotorch_core::manual_seed`.
+- REQ-3 (`manual_seed` top-level): `pub fn manual_seed(seed: u64) ->
+  FerrotorchResult<()>` is the analogue of `torch.manual_seed` — forwards to
+  registered device backends first and then reseeds the process-global default
+  CPU generator. Re-exported at `ferrotorch_core::manual_seed`.
 - REQ-4 (default-generator state): `DEFAULT_RNG: Mutex<Generator>` is
   initialized once from entropy and serialized for every default-generator
   consumer, matching PyTorch's `GeneratorImpl::mutex_` convention.
   `with_thread_rng` borrows this shared default generator mutably for callers.
-  `manual_seed` reaches both fresh and already-running worker threads because
-  there is no per-thread CPU default state.
+  Nested default-generator access returns `InvalidArgument` instead of panicking
+  or self-deadlocking. `manual_seed` reaches both fresh and already-running
+  worker threads because there is no per-thread CPU default state.
 - REQ-5 (byte-exact parity for f32 rand): after
   `ferrotorch_core::manual_seed(s)`, `creation::rand::<f32>(&[N])`
   agrees with `torch.manual_seed(s); torch.rand(N)` byte-for-byte
@@ -78,6 +80,13 @@ algorithm at `init_with_uint32` (`:155-164`) is the well-known
 - [x] AC-4: `ferrotorch-nn::init` initialisers expose
   `*_with_generator` variants taking `&mut Generator`. Default
   variants forward to `with_thread_rng`.
+- [x] AC-5: Nested public default-RNG access (`with_thread_rng` inside
+  `with_thread_rng`, `rand` inside `with_thread_rng`, and `manual_seed` inside
+  `with_thread_rng`) returns a structured `InvalidArgument` instead of panicking
+  or deadlocking.
+- [x] AC-6: `manual_seed` propagates registered GPU backend seeding failures
+  and leaves the CPU default generator unchanged when device seeding fails,
+  matching PyTorch's device-first seeding order.
 
 ## Architecture
 
@@ -108,11 +117,13 @@ u1; sample = r * sin(theta) cached; return r * cos(theta)`. The
 `DEFAULT_RNG: Mutex<Generator>` is lazy-initialised from `SystemTime` +
 thread id on first use. This mirrors PyTorch's default CPU generator: one
 process-wide running state for random operations that do not receive an
-explicit generator. `manual_seed(s)` reseeds that shared default state, so a
-subsequent random creation call in a fresh worker or an already-running worker
-observes the seeded stream. The mutex prevents concurrent consumers from
-mutating the MT19937 state unsafely. A thread-local reentry guard turns nested
-default-generator access into an immediate panic instead of a self-deadlock.
+explicit generator. `manual_seed(s)` first forwards to registered device
+generators and then reseeds that shared CPU default state, so a subsequent
+random creation call in a fresh worker or an already-running worker observes
+the seeded stream only after all-device seeding succeeded. The mutex prevents
+concurrent consumers from mutating the MT19937 state unsafely. A thread-local
+reentry guard turns nested default-generator access into a structured
+`InvalidArgument` instead of a panic or self-deadlock.
 
 **Non-test consumers**:
 - `crate::creation::rand` at `creation.rs:288` invokes
@@ -141,13 +152,14 @@ Box-Muller over 16-element blocks pairing element `i` with element
 `i+8` (`aten/src/ATen/native/cpu/DistributionTemplates.h:91-218`). The
 SIMD path additionally vendors `sincos256_ps` from `avx_mathfun.h` so
 that even matching torch's algorithm bit-perfectly would still require
-linking the same libm. Tracked as a follow-up.
+linking the same libm. Tracked as #2014.
 
 ## Verification
 
 ```bash
 cargo test -p ferrotorch-core --lib rng::tests
 cargo test -p ferrotorch-core --test divergence_manual_seed_parity
+cargo test -p ferrotorch-core --test audit_core095_manual_seed_gpu_error
 ```
 
 Plus the standard gauntlet (clippy + fmt).
@@ -158,6 +170,6 @@ Plus the standard gauntlet (clippy + fmt).
 |---|---|---|
 | REQ-1 | SHIPPED | impl: `Mt19937` engine at `rng.rs:27-113` mirrors `aten/src/ATen/core/MT19937RNGEngine.h:110-150` (state/twist/temper bit-identical); non-test consumer: `Generator::new` at `rng.rs:141-151` constructs the engine. Byte-exact prefix verified by `rng::tests::mt19937_seed_42_matches_torch_rand_f32`. |
 | REQ-2 | SHIPPED | impl: `pub struct Generator` + methods at `rng.rs:125-243`; non-test consumer: `ferrotorch_nn::init::uniform_with_generator` at `ferrotorch-nn/src/init.rs:101-115` accepts `&mut Generator`. |
-| REQ-3 | SHIPPED | impl: `pub fn manual_seed(seed)` at `rng.rs:345-362` mirrors `torch.manual_seed` (`torch/random.py:46-86`) by reseeding the CPU default generator and registered GPU backend. Non-test consumer: re-exported at `ferrotorch-core/src/lib.rs:154-156` as `ferrotorch_core::manual_seed`. |
-| REQ-4 | SHIPPED | impl: shared default state is initialized at `rng.rs:252-253`, and `with_thread_rng` at `rng.rs:316-327` serializes one process-global default stream. Non-test consumer: `creation::rand`/`randn` at `ferrotorch-core/src/creation.rs:288,317` invoke `with_thread_rng`. Worker-thread parity is pinned by `rng::tests::manual_seed_reaches_fresh_worker_thread` and `rng::tests::manual_seed_reaches_existing_worker_thread`. |
+| REQ-3 | SHIPPED | impl: `pub fn manual_seed(seed) -> FerrotorchResult<()>` at `rng.rs:345-362` mirrors `torch.manual_seed` (`torch/random.py:49-86`) by seeding registered GPU backends before reseeding the CPU default generator. Non-test consumer: re-exported at `ferrotorch-core/src/lib.rs:224` as `ferrotorch_core::manual_seed`. Backend failure propagation is pinned by `ferrotorch-core/tests/audit_core095_manual_seed_gpu_error.rs`. |
+| REQ-4 | SHIPPED | impl: shared default state is initialized at `rng.rs:253-254`, and `with_thread_rng` at `rng.rs:372-379` serializes one process-global default stream with a structured reentry guard at `rng.rs:263-284`. Non-test consumer: `creation::rand`/`randn` at `ferrotorch-core/src/creation.rs:288,317` invoke `with_thread_rng`. Worker-thread parity and nested-access errors are pinned by `rng::tests::manual_seed_reaches_fresh_worker_thread`, `rng::tests::manual_seed_reaches_existing_worker_thread`, and the `*_returns_structured_error` tests. |
 | REQ-5 | SHIPPED | impl: `Generator::next_uniform_f32` at `rng.rs:194-202` applies `(random_u32() & ((1<<24)-1)) * (1.0/(1<<24))` mirroring `aten/src/ATen/core/TransformationHelper.h:84-89`. Non-test consumer: `creation::rand` at `creation.rs:288`. Byte-exact agreement with `torch.manual_seed(42); torch.rand(10)` pinned by `ferrotorch-core/tests/divergence_manual_seed_parity.rs:manual_seed_42_rand_byte_exact_vs_torch_f32`. |

@@ -82,8 +82,22 @@ fn audit_1383_kumaraswamy_rsample_grad_flows() {
     assert!(r.requires_grad());
     let loss = r.sum_all().unwrap();
     loss.backward().unwrap();
-    assert!(a.grad().unwrap().unwrap().item().unwrap().is_finite());
-    assert!(b.grad().unwrap().unwrap().item().unwrap().is_finite());
+    assert!(
+        a.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .item()
+            .unwrap()
+            .is_finite()
+    );
+    assert!(
+        b.grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .item()
+            .unwrap()
+            .is_finite()
+    );
 }
 
 #[test]
@@ -162,8 +176,18 @@ fn audit_1395_pareto_rsample_grad_flows() {
     assert!(r.requires_grad());
     let loss = r.sum_all().unwrap();
     loss.backward().unwrap();
-    let gs = scale.grad().unwrap().unwrap().item().unwrap();
-    let ga = alpha.grad().unwrap().unwrap().item().unwrap();
+    let gs = scale
+        .grad()
+        .unwrap()
+        .expect("gradient should be populated")
+        .item()
+        .unwrap();
+    let ga = alpha
+        .grad()
+        .unwrap()
+        .expect("gradient should be populated")
+        .item()
+        .unwrap();
     assert!(gs.is_finite() && gs > 0.0, "dscale > 0 (sample ↑ in scale)");
     assert!(ga.is_finite(), "dalpha must be finite");
 }
@@ -325,8 +349,18 @@ fn audit_1435_weibull_rsample_grad_flows() {
     assert!(r.requires_grad());
     let loss = r.sum_all().unwrap();
     loss.backward().unwrap();
-    let gs = scale.grad().unwrap().unwrap().item().unwrap();
-    let gk = conc.grad().unwrap().unwrap().item().unwrap();
+    let gs = scale
+        .grad()
+        .unwrap()
+        .expect("gradient should be populated")
+        .item()
+        .unwrap();
+    let gk = conc
+        .grad()
+        .unwrap()
+        .expect("gradient should be populated")
+        .item()
+        .unwrap();
     assert!(gs.is_finite() && gs > 0.0, "dscale > 0 expected");
     assert!(gk.is_finite());
 }

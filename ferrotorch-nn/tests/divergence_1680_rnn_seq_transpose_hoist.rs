@@ -224,28 +224,82 @@ fn lstm_hoist_matches_old_pertimestep_with_state() {
 
     let params = lstm.parameters(); // [wih, whh, bih, bhh]
     assert_close(
-        params[0].tensor().grad().unwrap().unwrap().data().unwrap(),
-        wih_ref.grad().unwrap().unwrap().data().unwrap(),
+        params[0]
+            .tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        wih_ref
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "weight_ih.grad",
     );
     assert_close(
-        params[1].tensor().grad().unwrap().unwrap().data().unwrap(),
-        whh_ref.grad().unwrap().unwrap().data().unwrap(),
+        params[1]
+            .tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        whh_ref
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "weight_hh.grad",
     );
     assert_close(
-        params[2].tensor().grad().unwrap().unwrap().data().unwrap(),
-        bih_ref.grad().unwrap().unwrap().data().unwrap(),
+        params[2]
+            .tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        bih_ref
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "bias_ih.grad",
     );
     assert_close(
-        params[3].tensor().grad().unwrap().unwrap().data().unwrap(),
-        bhh_ref.grad().unwrap().unwrap().data().unwrap(),
+        params[3]
+            .tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        bhh_ref
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "bias_hh.grad",
     );
     assert_close(
-        input_prod.grad().unwrap().unwrap().data().unwrap(),
-        input_ref.grad().unwrap().unwrap().data().unwrap(),
+        input_prod
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        input_ref
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "input.grad",
     );
 }
@@ -307,13 +361,35 @@ fn lstm_hoist_matches_old_pertimestep_zero_state_long_seq() {
 
     let params = lstm.parameters();
     assert_close(
-        params[0].tensor().grad().unwrap().unwrap().data().unwrap(),
-        wih_ref.grad().unwrap().unwrap().data().unwrap(),
+        params[0]
+            .tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        wih_ref
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "weight_ih.grad (zero state)",
     );
     assert_close(
-        params[1].tensor().grad().unwrap().unwrap().data().unwrap(),
-        whh_ref.grad().unwrap().unwrap().data().unwrap(),
+        params[1]
+            .tensor()
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
+        whh_ref
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap(),
         "weight_hh.grad (zero state)",
     );
 }
@@ -338,7 +414,11 @@ fn lstm_multilayer_hoist_grads_finite_and_deterministic() {
 
     // Every parameter (2 layers x 4) must receive a finite grad.
     for (i, p) in lstm.parameters().iter().enumerate() {
-        let g = p.tensor().grad().unwrap().unwrap();
+        let g = p
+            .tensor()
+            .grad()
+            .unwrap()
+            .expect("parameter gradient should be populated");
         for (j, &v) in g.data().unwrap().iter().enumerate() {
             assert!(v.is_finite(), "param {i} grad[{j}] non-finite: {v}");
         }

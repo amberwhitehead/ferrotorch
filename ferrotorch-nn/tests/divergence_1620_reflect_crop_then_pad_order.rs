@@ -253,7 +253,10 @@ fn regression_reflect_crop1_pad2_matches() {
     );
     let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
     ferrotorch_core::backward(&sum).unwrap();
-    let g = x.grad().unwrap().unwrap();
+    let g = x
+        .grad()
+        .unwrap()
+        .expect("input gradient should be populated");
     assert_close(
         g.data().unwrap(),
         &[0.0, 2.0, 2.0, 1.0],
@@ -278,7 +281,10 @@ fn regression_replicate_crop2_pad3_matches() {
     );
     let sum = ferrotorch_core::grad_fns::reduction::sum(&y).unwrap();
     ferrotorch_core::backward(&sum).unwrap();
-    let g = x.grad().unwrap().unwrap();
+    let g = x
+        .grad()
+        .unwrap()
+        .expect("input gradient should be populated");
     assert_close(
         g.data().unwrap(),
         &[0.0, 0.0, 1.0, 4.0],

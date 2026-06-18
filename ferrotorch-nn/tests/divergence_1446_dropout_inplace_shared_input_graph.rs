@@ -90,7 +90,10 @@ fn divergence_inplace_dropout_corrupts_shared_branch_grad() {
     match loss.backward() {
         Err(_) => { /* acceptable: matches torch's RuntimeError contract */ }
         Ok(()) => {
-            let g = x.grad().unwrap().unwrap();
+            let g = x
+                .grad()
+                .unwrap()
+                .expect("input gradient should be populated");
             let g = g.data().unwrap().to_vec();
             let expected: Vec<f32> = xs.iter().map(|&xi| 4.0 * xi * xi * xi).collect();
             for (i, (&got, &exp)) in g.iter().zip(expected.iter()).enumerate() {

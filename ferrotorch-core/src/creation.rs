@@ -9,7 +9,7 @@
 //! | REQ-3 | SHIPPED | `eye` at `creation.rs:49`; consumer: re-export at `lib.rs:138` |
 //! | REQ-4 | SHIPPED | `arange` at `creation.rs:58`; consumer: re-export at `lib.rs:138` |
 //! | REQ-5 | SHIPPED | `linspace` at `creation.rs:81`; consumer: re-export at `lib.rs:138` |
-//! | REQ-6 | SHIPPED | `rand`/`randn` at `creation.rs:112,145`; consumer: `autograd::grad_penalty::grad_penalty` at `grad_penalty.rs:81`. Prereq blocker #1537 tracks `torch.manual_seed` |
+//! | REQ-6 | SHIPPED | `rand`/`randn` at `creation.rs:283,312` draw from the process-global MT19937 default generator through `rng::with_thread_rng`; consumer: `autograd::grad_penalty::grad_penalty` at `grad_penalty.rs:81`. `manual_seed` covers CPU plus registered GPU generators. |
 //! | REQ-7 | SHIPPED | `*_like` family at `creation.rs:288-314`; consumer: `grad_fns::cumulative` at `cumulative.rs:501` |
 //! | REQ-8 | SHIPPED | `zeros_meta`/`ones_meta`/`full_meta`/`meta_like` at `creation.rs:253-289`; consumer: `tensor::Tensor::meta_fill_value` at `tensor.rs:1078` (CL-395) |
 
@@ -295,7 +295,7 @@ pub fn rand<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
                 data.push(T::from(g.next_uniform_f64()).unwrap());
             }
         }
-    });
+    })?;
 
     Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)
 }
@@ -324,7 +324,7 @@ pub fn randn<T: Float>(shape: &[usize]) -> FerrotorchResult<Tensor<T>> {
                 data.push(T::from(g.next_normal_f64()).unwrap());
             }
         }
-    });
+    })?;
 
     Tensor::from_storage(TensorStorage::cpu(data), shape.to_vec(), false)
 }

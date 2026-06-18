@@ -360,10 +360,10 @@ fn functional_dropout_deterministic_under_manual_seed() {
     let n = 256usize;
     let input = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32; n]), vec![n], false).unwrap();
 
-    ferrotorch_core::rng::manual_seed(12345);
+    ferrotorch_core::rng::manual_seed(12345).unwrap();
     let a = functional::dropout(&input, 0.5, true).unwrap();
 
-    ferrotorch_core::rng::manual_seed(12345);
+    ferrotorch_core::rng::manual_seed(12345).unwrap();
     let b = functional::dropout(&input, 0.5, true).unwrap();
 
     let da = a.data().unwrap();
@@ -385,10 +385,10 @@ fn functional_dropout_distinct_seeds_distinct_masks() {
     let n = 512usize;
     let input = Tensor::from_storage(TensorStorage::cpu(vec![1.0f32; n]), vec![n], false).unwrap();
 
-    ferrotorch_core::rng::manual_seed(1);
+    ferrotorch_core::rng::manual_seed(1).unwrap();
     let a = functional::dropout(&input, 0.5, true).unwrap();
 
-    ferrotorch_core::rng::manual_seed(2);
+    ferrotorch_core::rng::manual_seed(2).unwrap();
     let b = functional::dropout(&input, 0.5, true).unwrap();
 
     let da = a.data().unwrap();

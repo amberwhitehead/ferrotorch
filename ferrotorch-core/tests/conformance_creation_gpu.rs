@@ -74,7 +74,7 @@ fn assert_cuda_normal<T: Float>(name: &str, tensor: Tensor<T>, shape: &[usize]) 
 fn creation_rand_on_device_cuda_float_dtypes_are_resident() {
     let _guard = default_rng_test_lock();
     ensure_cuda_backend();
-    manual_seed(1682);
+    manual_seed(1682).unwrap();
     let shape = [17, 3];
 
     assert_cuda_uniform(
@@ -103,7 +103,7 @@ fn creation_rand_on_device_cuda_float_dtypes_are_resident() {
 fn creation_randn_on_device_cuda_float_dtypes_are_resident() {
     let _guard = default_rng_test_lock();
     ensure_cuda_backend();
-    manual_seed(1683);
+    manual_seed(1683).unwrap();
     let shape = [19, 2];
 
     assert_cuda_normal(
@@ -132,7 +132,7 @@ fn creation_randn_on_device_cuda_float_dtypes_are_resident() {
 fn top_level_rand_reexports_preserve_cuda_residency() {
     let _guard = default_rng_test_lock();
     ensure_cuda_backend();
-    manual_seed(1684);
+    manual_seed(1684).unwrap();
 
     assert_cuda_uniform(
         "rand_on_device re-export",

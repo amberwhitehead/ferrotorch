@@ -336,10 +336,10 @@ fn scan_class_dirs<F: Fn(&Path) -> bool>(
             if !path.is_file() {
                 continue;
             }
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with('.') {
-                    continue;
-                }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.starts_with('.')
+            {
+                continue;
             }
             if !extensions.is_empty() && !has_extension_ci(&path, extensions) {
                 continue;

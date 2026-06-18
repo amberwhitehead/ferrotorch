@@ -118,7 +118,7 @@ fn divergence_gamma_rsample_conc_grad_sign_contradicts_torch_pathwise() {
     // negative while the torch pathwise gradient stays positive.
     let threshold = 1.95_f64;
     for seed in 0..512u64 {
-        ferrotorch_core::manual_seed(seed);
+        ferrotorch_core::manual_seed(seed).unwrap();
         let conc = ferrotorch_core::from_vec(vec![alpha], &[])
             .unwrap()
             .requires_grad_(true);
@@ -130,7 +130,12 @@ fn divergence_gamma_rsample_conc_grad_sign_contradicts_torch_pathwise() {
             continue;
         }
         s.backward().unwrap();
-        let grad_conc = conc.grad().unwrap().unwrap().data().unwrap()[0];
+        let grad_conc = conc
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .data()
+            .unwrap()[0];
         // Torch pathwise gradient d(sample)/d(concentration) for Gamma(>=1) is
         // strictly positive everywhere (live-torch universal property). The
         // shipped score-function value is negative in this region.

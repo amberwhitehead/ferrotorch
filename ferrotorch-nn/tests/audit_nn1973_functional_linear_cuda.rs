@@ -62,7 +62,13 @@ fn functional_linear_cuda_nd_forward_and_backward_match_torch() {
 
     assert_close(
         "input grad",
-        &host(&input.grad().unwrap().unwrap(), "input grad"),
+        &host(
+            &input
+                .grad()
+                .unwrap()
+                .expect("input gradient should be populated"),
+            "input grad",
+        ),
         &[
             5.0, 7.0, 9.0, 5.0, 7.0, 9.0, 5.0, 7.0, 9.0, 5.0, 7.0, 9.0, 5.0, 7.0, 9.0, 5.0, 7.0,
             9.0, 5.0, 7.0, 9.0, 5.0, 7.0, 9.0,
@@ -70,12 +76,24 @@ fn functional_linear_cuda_nd_forward_and_backward_match_torch() {
     );
     assert_close(
         "weight grad",
-        &host(&weight.grad().unwrap().unwrap(), "weight grad"),
+        &host(
+            &weight
+                .grad()
+                .unwrap()
+                .expect("weight gradient should be populated"),
+            "weight grad",
+        ),
         &[84.0, 92.0, 100.0, 84.0, 92.0, 100.0],
     );
     assert_close(
         "bias grad",
-        &host(&bias.grad().unwrap().unwrap(), "bias grad"),
+        &host(
+            &bias
+                .grad()
+                .unwrap()
+                .expect("bias gradient should be populated"),
+            "bias grad",
+        ),
         &[8.0, 8.0],
     );
 }

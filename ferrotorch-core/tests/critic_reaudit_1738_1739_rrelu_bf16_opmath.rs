@@ -77,7 +77,7 @@ fn divergence_rrelu_train_bf16_opmath_multiply() {
     );
     let x = Tensor::from_storage(TensorStorage::cpu(vec![x_in]), vec![1], false).unwrap();
 
-    manual_seed(2);
+    manual_seed(2).unwrap();
     let y = rrelu(&x, LOWER, UPPER, true).expect("rrelu training bf16 forward");
     let out = y.data().expect("cpu bf16 output");
 

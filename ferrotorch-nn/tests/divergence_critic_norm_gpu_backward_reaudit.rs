@@ -121,7 +121,14 @@ fn divergence_bn2d_gpu_train_backward_general_reduction_vs_torch() {
         .unwrap();
     assert!(gw.is_cuda());
     assert_close("BN2d train grad_weight", &gw.data_vec().unwrap(), &BNG_GW);
-    let gb = bn.bias.as_ref().unwrap().tensor().grad().unwrap().unwrap();
+    let gb = bn
+        .bias
+        .as_ref()
+        .unwrap()
+        .tensor()
+        .grad()
+        .unwrap()
+        .expect("grad_bias populated");
     assert_close("BN2d train grad_bias", &gb.data_vec().unwrap(), &BNG_GB);
 }
 
@@ -471,6 +478,13 @@ fn divergence_bn3d_gpu_train_backward_vs_torch() {
         .unwrap()
         .unwrap();
     assert_close("BN3d train grad_weight", &gw.data_vec().unwrap(), &BN3D_GW);
-    let gb = bn.bias.as_ref().unwrap().tensor().grad().unwrap().unwrap();
+    let gb = bn
+        .bias
+        .as_ref()
+        .unwrap()
+        .tensor()
+        .grad()
+        .unwrap()
+        .expect("grad_bias populated");
     assert_close("BN3d train grad_bias", &gb.data_vec().unwrap(), &BN3D_GB);
 }

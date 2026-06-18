@@ -504,7 +504,7 @@ pub fn dropout<T: Float>(input: &Tensor<T>, p: f64, training: bool) -> Ferrotorc
                 if u < keep_prob { scale } else { zero }
             })
             .collect()
-    });
+    })?;
 
     // Forward: element-wise multiply input by scaled mask.
     let device = input.device();

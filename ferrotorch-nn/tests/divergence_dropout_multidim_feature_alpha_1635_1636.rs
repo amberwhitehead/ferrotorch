@@ -84,7 +84,7 @@ fn dropout2d_multidim_arange_seed42_p05_matches_torch() {
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // ch6 DROP
         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // ch7 DROP
     ];
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let layer = ferrotorch_nn::Dropout2d::<f32>::new(0.5).unwrap();
     let y = layer.forward(&arange(vec![2, 4, 3, 3])).unwrap();
     approx(
@@ -110,7 +110,7 @@ fn dropout2d_multidim_arange_seed7_p03_matches_torch() {
         82.857147, 84.285713, 85.714287, 87.14286, 88.571434, 90.0, 91.428574, 92.857147,
         94.285713, 95.714287, 97.14286, 98.571434, 100.0, 101.428574, 102.857147,
     ];
-    ferrotorch_core::rng::manual_seed(7);
+    ferrotorch_core::rng::manual_seed(7).unwrap();
     let layer = ferrotorch_nn::Dropout2d::<f32>::new(0.3).unwrap();
     let y = layer.forward(&arange(vec![2, 4, 3, 3])).unwrap();
     approx(
@@ -131,7 +131,7 @@ fn dropout2d_3x5_ones_seed123_p05_per_channel_matches_torch() {
     let want_per_chan: [f32; 15] = [
         2.0, 2.0, 0.0, 2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 2.0, 2.0, 2.0, 2.0,
     ];
-    ferrotorch_core::rng::manual_seed(123);
+    ferrotorch_core::rng::manual_seed(123).unwrap();
     let layer = ferrotorch_nn::Dropout2d::<f32>::new(0.5).unwrap();
     let y = layer.forward(&ones_shape(vec![3, 5, 2, 2])).unwrap();
     let data = y.data_vec().unwrap();
@@ -158,7 +158,7 @@ fn dropout1d_multidim_arange_seed42_p05_matches_torch() {
         2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0,
         0.0, 0.0, 0.0, 0.0, 42.0, 44.0, 46.0, 48.0,
     ];
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let layer = ferrotorch_nn::Dropout1d::<f32>::new(0.5).unwrap();
     let y = layer.forward(&arange(vec![2, 3, 4])).unwrap();
     approx(
@@ -180,7 +180,7 @@ fn dropout3d_multidim_arange_seed42_p05_matches_torch() {
         64.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 82.0, 84.0, 86.0, 88.0, 90.0, 92.0, 94.0,
         96.0,
     ];
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let layer = ferrotorch_nn::Dropout3d::<f32>::new(0.5).unwrap();
     let y = layer.forward(&arange(vec![2, 3, 2, 2, 2])).unwrap();
     approx(
@@ -227,7 +227,7 @@ fn alpha_dropout_affine_across_p_matches_torch() {
         ),
     ];
     for (p, want) in cases {
-        ferrotorch_core::rng::manual_seed(42);
+        ferrotorch_core::rng::manual_seed(42).unwrap();
         let layer = ferrotorch_nn::AlphaDropout::<f32>::new(*p).unwrap();
         let x = Tensor::<f32>::from_storage(TensorStorage::cpu(vec![1.0f32; 10]), vec![10], false)
             .unwrap();
@@ -262,7 +262,7 @@ fn feature_alpha_dropout_multidim_arange_seed7_p05_matches_torch() {
         -0.7791939, -0.7791939, -0.7791939, -0.7791939, // ch4 DROP
         -0.7791939, -0.7791939, -0.7791939, -0.7791939, // ch5 DROP
     ];
-    ferrotorch_core::rng::manual_seed(7);
+    ferrotorch_core::rng::manual_seed(7).unwrap();
     let layer = ferrotorch_nn::FeatureAlphaDropout::<f32>::new(0.5).unwrap();
     let y = layer.forward(&arange(vec![2, 3, 2, 2])).unwrap();
     approx(
@@ -285,7 +285,7 @@ fn feature_alpha_dropout_multidim_arange_seed42_p03_matches_torch() {
         15.0902863, 15.9512386, 16.812191, 17.6731434, 18.5340977, 19.39505, 20.2560024,
         21.1169548,
     ];
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let layer = ferrotorch_nn::FeatureAlphaDropout::<f32>::new(0.3).unwrap();
     let y = layer.forward(&arange(vec![2, 3, 2, 2])).unwrap();
     approx(

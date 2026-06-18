@@ -182,7 +182,7 @@ fn studentt_df_grad_endtoend_matches_independent_oracle() {
     let scale_v = 1.4_f64;
     for &df_v in &[1.6_f64, 3.0, 5.0, 20.0] {
         // Production end-to-end.
-        manual_seed(20260526);
+        manual_seed(20260526).unwrap();
         let df = scalar(df_v).unwrap().requires_grad_(true);
         let loc = scalar(0.0_f64).unwrap();
         let scale = scalar(scale_v).unwrap();
@@ -190,10 +190,15 @@ fn studentt_df_grad_endtoend_matches_independent_oracle() {
         let s = dist.rsample(&[1]).unwrap();
         let sample_val = s.item().unwrap();
         s.sum_all().unwrap().backward().unwrap();
-        let prod_df_grad = df.grad().unwrap().unwrap().item().unwrap();
+        let prod_df_grad = df
+            .grad()
+            .unwrap()
+            .expect("gradient should be populated")
+            .item()
+            .unwrap();
 
         // Recover z and chi2 by replaying the exact RNG sequence rsample used.
-        manual_seed(20260526);
+        manual_seed(20260526).unwrap();
         let (z, chi2) = replay_z_and_chi2(df_v);
 
         // Sanity: sample = loc + scale*z*sqrt(df/chi2) must equal the production

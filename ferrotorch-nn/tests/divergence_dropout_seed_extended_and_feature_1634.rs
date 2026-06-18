@@ -72,7 +72,7 @@ fn approx(got: &[f32], want: &[f32], tol: f32, ctx: &str) {
 #[test]
 fn plain_dropout_seed42_p075_matches_torch() {
     let torch_seed42_p075: [f32; 10] = [4.0, 4.0, 4.0, 4.0, 0.0, 0.0, 0.0, 0.0, 4.0, 4.0];
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let y = ferrotorch_nn::functional::dropout(&ones(10), 0.75, true).unwrap();
     approx(
         &y.data_vec().unwrap(),
@@ -116,7 +116,7 @@ fn plain_dropout_seed_p_grid_matches_torch() {
         ),
     ];
     for &(s, p, want) in cases {
-        ferrotorch_core::rng::manual_seed(s);
+        ferrotorch_core::rng::manual_seed(s).unwrap();
         let y = ferrotorch_nn::functional::dropout(&ones(10), p, true).unwrap();
         approx(
             &y.data_vec().unwrap(),
@@ -132,7 +132,7 @@ fn plain_dropout_seed_p_grid_matches_torch() {
 #[test]
 fn plain_dropout_nonround_size_matches_torch() {
     let want: [f32; 7] = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0, 0.0];
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let y = ferrotorch_nn::functional::dropout(&ones(7), 0.5, true).unwrap();
     approx(&y.data_vec().unwrap(), &want, 1e-5, "seed42 p0.5 N7");
 }
@@ -143,7 +143,7 @@ fn plain_dropout_nonround_size_matches_torch() {
 #[test]
 fn plain_dropout_2d_draw_order_matches_torch() {
     let want: [f32; 10] = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0, 0.0, 0.0, 2.0, 2.0];
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let y = ferrotorch_nn::functional::dropout(&ones_shape(vec![2, 5]), 0.5, true).unwrap();
     approx(
         &y.data_vec().unwrap(),
@@ -158,7 +158,7 @@ fn plain_dropout_2d_draw_order_matches_torch() {
 #[test]
 fn plain_dropout_module_seed42_p075_matches_torch() {
     let want: [f32; 10] = [4.0, 4.0, 4.0, 4.0, 0.0, 0.0, 0.0, 0.0, 4.0, 4.0];
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let layer = ferrotorch_nn::Dropout::<f32>::new(0.75).unwrap();
     let y = layer.forward(&ones(10)).unwrap();
     approx(&y.data_vec().unwrap(), &want, 1e-5, "module seed42 p0.75");
@@ -207,7 +207,7 @@ fn plain_dropout_p0_is_identity() {
 fn dropout2d_seed42_per_channel_matches_torch() {
     // torch.manual_seed(42); F.dropout2d(ones(1,8,1,1),0.5,True), per-channel val.
     let want: [f32; 8] = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0, 0.0, 0.0];
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let layer = ferrotorch_nn::Dropout2d::<f32>::new(0.5).unwrap();
     let y = layer.forward(&ones_shape(vec![1, 8, 1, 1])).unwrap();
     // collapse [1,8,1,1] -> per-channel (each channel is a single element here)
@@ -227,7 +227,7 @@ fn dropout2d_seed42_per_channel_matches_torch() {
 fn dropout1d_seed42_per_channel_matches_torch() {
     // torch.manual_seed(42); F.dropout1d(ones(1,6,3),0.5,True), per-channel val.
     let want: [f32; 6] = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0];
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let layer = ferrotorch_nn::Dropout1d::<f32>::new(0.5).unwrap();
     let y = layer.forward(&ones_shape(vec![1, 6, 3])).unwrap();
     // first element of each length-3 channel
@@ -244,7 +244,7 @@ fn dropout1d_seed42_per_channel_matches_torch() {
 fn dropout3d_seed42_per_channel_matches_torch() {
     // torch.manual_seed(42); F.dropout3d(ones(1,6,1,1,1),0.5,True), per-channel.
     let want: [f32; 6] = [2.0, 2.0, 2.0, 2.0, 0.0, 2.0];
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let layer = ferrotorch_nn::Dropout3d::<f32>::new(0.5).unwrap();
     let y = layer.forward(&ones_shape(vec![1, 6, 1, 1, 1])).unwrap();
     approx(
@@ -266,9 +266,9 @@ fn dropout3d_seed42_per_channel_matches_torch() {
 fn dropout2d_reproducible_under_manual_seed() {
     let layer = ferrotorch_nn::Dropout2d::<f32>::new(0.5).unwrap();
 
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let y1 = layer.forward(&ones_shape(vec![1, 64, 1, 1])).unwrap();
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let y2 = layer.forward(&ones_shape(vec![1, 64, 1, 1])).unwrap();
 
     assert_eq!(
@@ -308,7 +308,7 @@ fn alpha_dropout_seed42_matches_torch() {
         1.6655989, 1.6655989, 1.6655989, 1.6655989, -0.7791939, 1.6655989, -0.7791939, -0.7791939,
         1.6655989, 1.6655989,
     ];
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let layer = ferrotorch_nn::AlphaDropout::<f32>::new(0.5).unwrap();
     let y = layer.forward(&ones(10)).unwrap();
     approx(
@@ -331,7 +331,7 @@ fn feature_alpha_dropout_seed42_matches_torch() {
     let want: [f32; 6] = [
         1.6655989, 1.6655989, 1.6655989, 1.6655989, -0.7791939, 1.6655989,
     ];
-    ferrotorch_core::rng::manual_seed(42);
+    ferrotorch_core::rng::manual_seed(42).unwrap();
     let layer = ferrotorch_nn::FeatureAlphaDropout::<f32>::new(0.5).unwrap();
     let y = layer.forward(&ones_shape(vec![1, 6, 1, 1])).unwrap();
     approx(

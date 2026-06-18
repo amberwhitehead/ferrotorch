@@ -613,7 +613,10 @@ mod tests {
     /// Constructs the gradient on CPU then transfers it via `.to(Device::Cuda(0))`.
     #[cfg(feature = "cuda")]
     fn param_with_gpu_grad(shape: &[usize], grad_data: &[f32]) -> Parameter<f32> {
-        let p = Parameter::<f32>::zeros(shape).unwrap();
+        let p = Parameter::<f32>::zeros(shape)
+            .unwrap()
+            .to(Device::Cuda(0))
+            .unwrap();
         let grad_cpu = Tensor::from_storage(
             TensorStorage::cpu(grad_data.to_vec()),
             shape.to_vec(),
@@ -677,7 +680,10 @@ mod tests {
 
         // Build a GPU f64 parameter by promoting f32 data.
         let p_gpu = {
-            let p = Parameter::<f64>::zeros(&[3]).unwrap();
+            let p = Parameter::<f64>::zeros(&[3])
+                .unwrap()
+                .to(Device::Cuda(0))
+                .unwrap();
             let grad_cpu = Tensor::<f64>::from_storage(
                 TensorStorage::cpu(vec![1.0_f64, 2.0, 2.0]),
                 vec![3],

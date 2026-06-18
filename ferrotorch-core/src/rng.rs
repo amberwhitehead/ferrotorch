@@ -7,10 +7,11 @@
 //! |---|---|---|
 //! | REQ-1 (MT19937 engine) | SHIPPED | `Mt19937` engine mirrors `aten/src/ATen/core/MT19937RNGEngine.h:110-150` (state array of 624 uint32, twist/temper bits identical); non-test consumer: `creation::rand`/`creation::randn` source bits from `with_thread_rng`. |
 //! | REQ-2 (`Generator` newtype) | SHIPPED | `pub struct Generator` exposes `new(seed)`, `manual_seed(seed)`, `next_uniform_f32/f64`, `next_normal_f32/f64`; non-test consumer: process-default `Generator` used by `creation::rand`. |
-//! | REQ-3 (`manual_seed` top-level) | SHIPPED | `pub fn manual_seed(seed)` sets the process-global default CPU `Generator`, mirroring `torch.manual_seed` at `torch/random.py:46-86`. Non-test consumer: re-exported at `lib.rs` as `ferrotorch_core::manual_seed`. |
-//! | REQ-4 (default-generator state) | SHIPPED | `DEFAULT_RNG: Mutex<Generator>` is initialised once from entropy and serialized like PyTorch's `default_generator` mutex; `manual_seed` reaches all threads. Non-test consumer: `with_thread_rng` invoked by `creation::rand`/`randn`. |
+//! | REQ-3 (`manual_seed` top-level) | SHIPPED | `pub fn manual_seed(seed) -> FerrotorchResult<()>` seeds registered GPU generators before reseeding the process-global CPU `Generator`, mirroring `torch.manual_seed` at `torch/random.py:49-86`; real backend failures are surfaced. Non-test consumer: re-exported at `lib.rs` as `ferrotorch_core::manual_seed`. |
+//! | REQ-4 (default-generator state) | SHIPPED | `DEFAULT_RNG: Mutex<Generator>` is initialised once from entropy and serialized like PyTorch's `default_generator` mutex; `manual_seed` reaches all threads and nested default-RNG access returns `InvalidArgument` instead of panicking or deadlocking. Non-test consumer: `with_thread_rng` invoked by `creation::rand`/`randn`. |
 //! | REQ-5 (byte-exact parity for f32 rand) | SHIPPED | `Mt19937` reproduces `torch.manual_seed(42); torch.rand(10)` byte-for-byte; pinned by `ferrotorch-core/tests/divergence_manual_seed_parity.rs`. |
 
+use crate::error::{FerrotorchError, FerrotorchResult};
 use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -262,16 +263,20 @@ thread_local! {
 struct DefaultRngAccessGuard;
 
 impl DefaultRngAccessGuard {
-    fn enter(operation: &'static str) -> Self {
-        DEFAULT_RNG_ACTIVE.with(|active| {
-            assert!(
-                !active.get(),
-                "{operation}: default RNG is already mutably borrowed; use an explicit Generator \
-                 for nested random generation"
-            );
+    fn enter(operation: &'static str) -> FerrotorchResult<Self> {
+        DEFAULT_RNG_ACTIVE.with(|active| -> FerrotorchResult<()> {
+            if active.get() {
+                return Err(FerrotorchError::InvalidArgument {
+                    message: format!(
+                        "{operation}: default RNG is already mutably borrowed; use an explicit \
+                         Generator for nested random generation"
+                    ),
+                });
+            }
             active.set(true);
-        });
-        Self
+            Ok(())
+        })?;
+        Ok(Self)
     }
 }
 
@@ -328,33 +333,35 @@ pub fn with_default_rng_test_lock<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
-/// Set the process-global default CPU RNG seed — mirrors `torch.manual_seed`
-/// at `torch/random.py:46-86`.
+/// Set the process-global default RNG seed — mirrors `torch.manual_seed`
+/// at `torch/random.py:49-86`.
 ///
 /// # Production consumer
 ///
 /// `crate::creation::rand`/`randn` consume bits from this shared default
-/// generator. Calling `manual_seed(42)` in any thread reseeds the stream seen
-/// by subsequently scheduled random creation on any thread, matching PyTorch's
-/// process-global CPU default generator.
-pub fn manual_seed(seed: u64) {
+/// generator. Calling `manual_seed(42)` in any thread seeds registered GPU
+/// generators, then reseeds the CPU default stream seen by subsequently
+/// scheduled random creation on any thread, matching PyTorch's all-device
+/// ordering. A registered backend seeding failure is returned before CPU state
+/// is changed.
+pub fn manual_seed(seed: u64) -> FerrotorchResult<()> {
     #[cfg(debug_assertions)]
     let _serial = default_rng_test_serial_guard();
 
-    {
-        let _access = DefaultRngAccessGuard::enter("manual_seed");
-        lock_default_rng().manual_seed(seed);
-    }
+    let _access = DefaultRngAccessGuard::enter("manual_seed")?;
     // Mirror `torch.manual_seed`, which seeds BOTH the CPU and all CUDA
     // generators: `torch/random.py:67` calls `torch.cuda.manual_seed_all(seed)`
     // (`torch/cuda/random.py:112`). When a GPU backend is registered, forward
     // the seed to its per-device Philox manager so that
     // `creation::rand_on_device(.., Cuda)` after `manual_seed` is reproducible.
-    // No-op (and no error surfaced) when CUDA is unavailable, matching torch's
-    // "silently ignored if CUDA is not available" contract.
+    // No-op when CUDA is unavailable, matching torch's "silently ignored if
+    // CUDA is not available" contract. If a registered backend reports a real
+    // seeding failure, propagate it instead of claiming deterministic parity.
     if let Some(backend) = crate::gpu_dispatch::gpu_backend() {
-        let _ = backend.manual_seed_gpu(seed);
+        backend.manual_seed_gpu(seed)?;
     }
+    lock_default_rng().manual_seed(seed);
+    Ok(())
 }
 
 /// Run a closure with mutable access to the process-global default generator.
@@ -364,34 +371,35 @@ pub fn manual_seed(seed: u64) {
 /// mutex, not a per-thread RNG. Used by `creation::rand` / `creation::randn`
 /// and by `ferrotorch-nn` initialisers that don't take an explicit
 /// [`Generator`].
-pub fn with_thread_rng<R>(f: impl FnOnce(&mut Generator) -> R) -> R {
+pub fn with_thread_rng<R>(f: impl FnOnce(&mut Generator) -> R) -> FerrotorchResult<R> {
     #[cfg(debug_assertions)]
     let _serial = default_rng_test_serial_guard();
 
-    let _access = DefaultRngAccessGuard::enter("with_thread_rng");
+    let _access = DefaultRngAccessGuard::enter("with_thread_rng")?;
     let mut rng = lock_default_rng();
-    f(&mut rng)
+    Ok(f(&mut rng))
 }
 
 /// Clone the process-global CPU RNG state, including cached normal samples.
 /// Checkpointing uses this to mirror `torch.get_rng_state()`.
-pub(crate) fn thread_rng_state() -> Generator {
+pub(crate) fn thread_rng_state() -> FerrotorchResult<Generator> {
     #[cfg(debug_assertions)]
     let _serial = default_rng_test_serial_guard();
 
-    let _access = DefaultRngAccessGuard::enter("thread_rng_state");
-    lock_default_rng().clone()
+    let _access = DefaultRngAccessGuard::enter("thread_rng_state")?;
+    Ok(lock_default_rng().clone())
 }
 
 /// Restore the process-global CPU RNG state. Checkpointing uses this
 /// inside a fork-style guard so stochastic recomputation sees the same stream
 /// as the original forward while the caller's surrounding stream is restored.
-pub(crate) fn set_thread_rng_state(state: Generator) {
+pub(crate) fn set_thread_rng_state(state: Generator) -> FerrotorchResult<()> {
     #[cfg(debug_assertions)]
     let _serial = default_rng_test_serial_guard();
 
-    let _access = DefaultRngAccessGuard::enter("set_thread_rng_state");
+    let _access = DefaultRngAccessGuard::enter("set_thread_rng_state")?;
     *lock_default_rng() = state;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -442,13 +450,13 @@ mod tests {
     #[test]
     fn manual_seed_resets_default_generator() {
         let _guard = default_rng_test_lock();
-        manual_seed(42);
+        manual_seed(42).unwrap();
         let a: Vec<u32> = (0..5)
-            .map(|_| with_thread_rng(|g| g.random_u32()))
+            .map(|_| with_thread_rng(|g| g.random_u32()).unwrap())
             .collect();
-        manual_seed(42);
+        manual_seed(42).unwrap();
         let b: Vec<u32> = (0..5)
-            .map(|_| with_thread_rng(|g| g.random_u32()))
+            .map(|_| with_thread_rng(|g| g.random_u32()).unwrap())
             .collect();
         assert_eq!(a, b);
     }
@@ -456,21 +464,21 @@ mod tests {
     #[test]
     fn manual_seed_distinct_seeds_distinct_streams() {
         let _guard = default_rng_test_lock();
-        manual_seed(42);
-        let a = with_thread_rng(|g| g.random_u32());
-        manual_seed(43);
-        let b = with_thread_rng(|g| g.random_u32());
+        manual_seed(42).unwrap();
+        let a = with_thread_rng(|g| g.random_u32()).unwrap();
+        manual_seed(43).unwrap();
+        let b = with_thread_rng(|g| g.random_u32()).unwrap();
         assert_ne!(a, b);
     }
 
     fn draw_default_uniform_bits(n: usize) -> Vec<u32> {
-        with_thread_rng(|g| (0..n).map(|_| g.next_uniform_f32().to_bits()).collect())
+        with_thread_rng(|g| (0..n).map(|_| g.next_uniform_f32().to_bits()).collect()).unwrap()
     }
 
     #[test]
     fn manual_seed_reaches_fresh_worker_thread() {
         let _guard = default_rng_test_lock();
-        manual_seed(42);
+        manual_seed(42).unwrap();
 
         let worker = std::thread::spawn(|| draw_default_uniform_bits(10));
         let got = worker.join().expect("fresh RNG worker should not panic");
@@ -490,7 +498,7 @@ mod tests {
         let (out_tx, out_rx) = mpsc::sync_channel::<Vec<u32>>(0);
 
         let worker = std::thread::spawn(move || {
-            let _ = with_thread_rng(|g| g.random_u32());
+            let _ = with_thread_rng(|g| g.random_u32()).unwrap();
             ready_tx.send(()).expect("main should wait for ready");
             go_rx.recv().expect("main should signal draw");
             out_tx
@@ -501,7 +509,7 @@ mod tests {
         ready_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("worker should initialize the default RNG");
-        manual_seed(42);
+        manual_seed(42).unwrap();
         go_tx.send(()).expect("worker should still be waiting");
         let got = out_rx
             .recv_timeout(Duration::from_secs(5))
@@ -518,7 +526,7 @@ mod tests {
     #[test]
     fn default_generator_stream_is_shared_across_threads() {
         let _guard = default_rng_test_lock();
-        manual_seed(42);
+        manual_seed(42).unwrap();
 
         let first_half = std::thread::spawn(|| draw_default_uniform_bits(5))
             .join()
@@ -532,6 +540,76 @@ mod tests {
             &TORCH_RAND_SEED_42_F32_BITS,
             "worker and caller must advance one shared default stream, not independent streams"
         );
+    }
+
+    fn assert_reentrant_error(err: FerrotorchError, operation: &str) {
+        match err {
+            FerrotorchError::InvalidArgument { message } => {
+                assert!(
+                    message.contains(operation),
+                    "error should name {operation}, got {message}"
+                );
+                assert!(
+                    message.contains("already mutably borrowed"),
+                    "error should explain the active default RNG borrow, got {message}"
+                );
+                assert!(
+                    message.contains("explicit Generator"),
+                    "error should direct callers to explicit Generator, got {message}"
+                );
+            }
+            other => panic!("expected InvalidArgument for reentrant RNG access, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_with_thread_rng_returns_structured_error() {
+        let _guard = default_rng_test_lock();
+        manual_seed(7).unwrap();
+
+        let nested = with_thread_rng(|g| {
+            let first = g.random_u32();
+            let nested = with_thread_rng(|inner| inner.random_u32());
+            (first, nested)
+        })
+        .expect("outer access should succeed");
+
+        assert_reentrant_error(
+            nested.1.expect_err("nested access must fail"),
+            "with_thread_rng",
+        );
+        let after = with_thread_rng(|g| g.random_u32()).expect("guard should release after error");
+        assert_ne!(nested.0, after, "outer draw must still advance the stream");
+    }
+
+    #[test]
+    fn rand_inside_with_thread_rng_returns_structured_error() {
+        let _guard = default_rng_test_lock();
+        manual_seed(8).unwrap();
+
+        let nested = with_thread_rng(|_| crate::creation::rand::<f32>(&[1]))
+            .expect("outer access should succeed");
+
+        assert_reentrant_error(
+            nested.expect_err("nested rand must fail"),
+            "with_thread_rng",
+        );
+        let after = crate::creation::rand::<f32>(&[1]).expect("guard should release after error");
+        assert_eq!(after.shape(), &[1]);
+    }
+
+    #[test]
+    fn manual_seed_inside_with_thread_rng_returns_structured_error() {
+        let _guard = default_rng_test_lock();
+        manual_seed(9).unwrap();
+
+        let nested = with_thread_rng(|_| manual_seed(10)).expect("outer access should succeed");
+
+        assert_reentrant_error(
+            nested.expect_err("nested manual_seed must fail"),
+            "manual_seed",
+        );
+        manual_seed(10).expect("guard should release after error");
     }
 
     #[test]

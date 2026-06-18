@@ -157,7 +157,7 @@ pub(crate) fn polygamma_scalar<T: Float>(n: u32, x: T) -> T {
 
     let one = <T as num_traits::One>::one();
     // Sign of polygamma(n, x) for x>0 is (-1)^(n+1).
-    let sign = if n % 2 == 0 {
+    let sign = if n.is_multiple_of(2) {
         -<T as num_traits::One>::one()
     } else {
         <T as num_traits::One>::one()

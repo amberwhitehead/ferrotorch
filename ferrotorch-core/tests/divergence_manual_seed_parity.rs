@@ -2,7 +2,7 @@
 //! with `torch.manual_seed`.
 //!
 //! Closes #1537 (creation.rs per-call xorshift PRNG) by pinning
-//! `ferrotorch_core::manual_seed(s); ferrotorch_core::rand(...)` to
+//! `ferrotorch_core::manual_seed(s).unwrap(); ferrotorch_core::rand(...)` to
 //! `torch.manual_seed(s); torch.rand(...)` at the f32 bit-pattern level.
 //!
 //! The fixture bit patterns below come from running:
@@ -56,8 +56,8 @@ const TORCH_RAND_SEED_42_F32_BITS: [u32; 10] = [
 // Byte-exact parity for randn would require BOTH paths plus SIMD libm
 // agreement (torch uses `sincos256_ps` from avx_mathfun.h). Ferrotorch
 // pins `manual_seed` determinism + uniform-rand byte-exact parity (#1537);
-// randn byte-exact parity is documented as a separate divergence
-// (cross-platform libm + algorithmic split) to be tracked in a follow-up.
+// randn byte-exact parity is documented as separate divergence #2014
+// (cross-platform libm + algorithmic split).
 #[allow(dead_code)]
 const TORCH_RANDN_SEED_42_F32_BITS_REFERENCE: [u32; 10] = [
     0x3eac_62ae,
@@ -75,7 +75,7 @@ const TORCH_RANDN_SEED_42_F32_BITS_REFERENCE: [u32; 10] = [
 #[test]
 fn manual_seed_42_rand_byte_exact_vs_torch_f32() {
     let _guard = default_rng_test_lock();
-    manual_seed(42);
+    manual_seed(42).unwrap();
     let t = rand::<f32>(&[10]).unwrap();
     let data = t.data().unwrap();
     for (i, (&got, &expected_bits)) in data
@@ -95,9 +95,9 @@ fn manual_seed_42_rand_byte_exact_vs_torch_f32() {
 #[test]
 fn manual_seed_is_deterministic_across_calls() {
     let _guard = default_rng_test_lock();
-    manual_seed(12345);
+    manual_seed(12345).unwrap();
     let a = rand::<f32>(&[20]).unwrap();
-    manual_seed(12345);
+    manual_seed(12345).unwrap();
     let b = rand::<f32>(&[20]).unwrap();
     let ad = a.data().unwrap();
     let bd = b.data().unwrap();
@@ -109,9 +109,9 @@ fn manual_seed_is_deterministic_across_calls() {
 #[test]
 fn distinct_seeds_distinct_streams() {
     let _guard = default_rng_test_lock();
-    manual_seed(1);
+    manual_seed(1).unwrap();
     let a = rand::<f32>(&[5]).unwrap();
-    manual_seed(2);
+    manual_seed(2).unwrap();
     let b = rand::<f32>(&[5]).unwrap();
     let ad = a.data().unwrap();
     let bd = b.data().unwrap();
@@ -131,9 +131,9 @@ fn manual_seed_randn_is_deterministic_across_calls() {
     // path). What ferrotorch DOES guarantee post-#1537: given the same
     // seed, randn produces the same output across runs and across calls
     // within the same run.
-    manual_seed(42);
+    manual_seed(42).unwrap();
     let a = randn::<f32>(&[10]).unwrap();
-    manual_seed(42);
+    manual_seed(42).unwrap();
     let b = randn::<f32>(&[10]).unwrap();
     let ad = a.data().unwrap();
     let bd = b.data().unwrap();
@@ -153,7 +153,7 @@ fn manual_seed_randn_is_deterministic_across_calls() {
 #[test]
 fn explicit_generator_independent_of_process_default() {
     let _guard = default_rng_test_lock();
-    manual_seed(99);
+    manual_seed(99).unwrap();
     let _ = rand::<f32>(&[3]).unwrap(); // advance process-default generator
     let mut g = Generator::new(42);
     // Explicit generator stream is independent of process-default state.

@@ -110,7 +110,7 @@ pub fn decode_per_class<T: Float>(
         });
     }
     let deltas_shape = deltas.shape();
-    if deltas_shape.len() != 2 || deltas_shape[0] != n || deltas_shape[1] % 4 != 0 {
+    if deltas_shape.len() != 2 || deltas_shape[0] != n || !deltas_shape[1].is_multiple_of(4) {
         return Err(FerrotorchError::InvalidArgument {
             message: format!(
                 "decode_per_class: deltas must be [N, num_classes * 4] with N={n}, got {:?}",

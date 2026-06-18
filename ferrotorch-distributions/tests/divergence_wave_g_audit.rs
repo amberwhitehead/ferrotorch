@@ -213,12 +213,12 @@ fn audit_1422_relaxed_one_hot_logits_match_log_normalized() {
 /// REQ-11 / #1432: VonMises::sample must honour `ferrotorch_core::manual_seed`.
 #[test]
 fn audit_1432_von_mises_sample_honours_manual_seed() {
-    ferrotorch_core::manual_seed(0xC0FFEE);
+    ferrotorch_core::manual_seed(0xC0FFEE).unwrap();
     let d1 = VonMises::new(cpu_tensor_f64(&[0.0], &[1]), cpu_tensor_f64(&[2.0], &[1])).unwrap();
     let s1 = d1.sample(&[50]).unwrap();
     let v1 = s1.data().unwrap().to_vec();
 
-    ferrotorch_core::manual_seed(0xC0FFEE);
+    ferrotorch_core::manual_seed(0xC0FFEE).unwrap();
     let d2 = VonMises::new(cpu_tensor_f64(&[0.0], &[1]), cpu_tensor_f64(&[2.0], &[1])).unwrap();
     let s2 = d2.sample(&[50]).unwrap();
     let v2 = s2.data().unwrap().to_vec();
