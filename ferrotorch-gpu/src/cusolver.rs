@@ -284,6 +284,173 @@ DONE:\n\
 }\n\
 ";
 
+/// PTX: canonicalize row-major eigh eigenvector column signs in place (f32).
+///
+/// One CUDA thread owns one eigenvector column. It mirrors
+/// `ferrotorch_core::linalg::canonicalize_eigenvector_signs`: scan the column
+/// with a strict `abs(v) > best_abs` comparison so first ties win, then multiply
+/// the column by -1 only when the chosen pivot entry is negative.
+#[cfg(feature = "cuda")]
+const CANONICALIZE_EIGH_SIGNS_F32_PTX: &str = "\
+.version 7.0\n\
+.target sm_52\n\
+.address_size 64\n\
+\n\
+.visible .entry canonicalize_eigh_signs_rowmaj_f32(\n\
+    .param .u64 q_ptr,\n\
+    .param .u32 N\n\
+) {\n\
+    .reg .u32 %r_tid, %bid, %bdim, %col, %r_n, %row, %best_row;\n\
+    .reg .u64 %q, %row64, %n64, %col64, %idx64, %off;\n\
+    .reg .f32 %val, %abs_val, %best_abs, %pivot;\n\
+    .reg .pred %p_oob, %p_done, %p_better, %p_flip;\n\
+\n\
+    ld.param.u64 %q, [q_ptr];\n\
+    ld.param.u32 %r_n, [N];\n\
+\n\
+    mov.u32 %bid, %ctaid.x;\n\
+    mov.u32 %bdim, %ntid.x;\n\
+    mov.u32 %r_tid, %tid.x;\n\
+    mad.lo.u32 %col, %bid, %bdim, %r_tid;\n\
+\n\
+    setp.ge.u32 %p_oob, %col, %r_n;\n\
+    @%p_oob bra DONE;\n\
+\n\
+    cvt.u64.u32 %n64, %r_n;\n\
+    cvt.u64.u32 %col64, %col;\n\
+    mov.u32 %best_row, 0;\n\
+    mov.f32 %best_abs, 0f00000000;\n\
+    mov.u32 %row, 0;\n\
+\n\
+SCAN_LOOP:\n\
+    setp.ge.u32 %p_done, %row, %r_n;\n\
+    @%p_done bra SCAN_DONE;\n\
+\n\
+    cvt.u64.u32 %row64, %row;\n\
+    mul.lo.u64 %idx64, %row64, %n64;\n\
+    add.u64 %idx64, %idx64, %col64;\n\
+    shl.b64 %off, %idx64, 2;\n\
+    add.u64 %off, %q, %off;\n\
+    ld.global.f32 %val, [%off];\n\
+    abs.f32 %abs_val, %val;\n\
+    setp.gt.f32 %p_better, %abs_val, %best_abs;\n\
+    @%p_better mov.f32 %best_abs, %abs_val;\n\
+    @%p_better mov.u32 %best_row, %row;\n\
+    add.u32 %row, %row, 1;\n\
+    bra.uni SCAN_LOOP;\n\
+\n\
+SCAN_DONE:\n\
+    cvt.u64.u32 %row64, %best_row;\n\
+    mul.lo.u64 %idx64, %row64, %n64;\n\
+    add.u64 %idx64, %idx64, %col64;\n\
+    shl.b64 %off, %idx64, 2;\n\
+    add.u64 %off, %q, %off;\n\
+    ld.global.f32 %pivot, [%off];\n\
+    setp.lt.f32 %p_flip, %pivot, 0f00000000;\n\
+    @!%p_flip bra DONE;\n\
+\n\
+    mov.u32 %row, 0;\n\
+FLIP_LOOP:\n\
+    setp.ge.u32 %p_done, %row, %r_n;\n\
+    @%p_done bra DONE;\n\
+\n\
+    cvt.u64.u32 %row64, %row;\n\
+    mul.lo.u64 %idx64, %row64, %n64;\n\
+    add.u64 %idx64, %idx64, %col64;\n\
+    shl.b64 %off, %idx64, 2;\n\
+    add.u64 %off, %q, %off;\n\
+    ld.global.f32 %val, [%off];\n\
+    neg.f32 %val, %val;\n\
+    st.global.f32 [%off], %val;\n\
+    add.u32 %row, %row, 1;\n\
+    bra.uni FLIP_LOOP;\n\
+\n\
+DONE:\n\
+    ret;\n\
+}\n\
+";
+
+/// PTX: canonicalize row-major eigh eigenvector column signs in place (f64).
+#[cfg(feature = "cuda")]
+const CANONICALIZE_EIGH_SIGNS_F64_PTX: &str = "\
+.version 7.0\n\
+.target sm_60\n\
+.address_size 64\n\
+\n\
+.visible .entry canonicalize_eigh_signs_rowmaj_f64(\n\
+    .param .u64 q_ptr,\n\
+    .param .u32 N\n\
+) {\n\
+    .reg .u32 %r_tid, %bid, %bdim, %col, %r_n, %row, %best_row;\n\
+    .reg .u64 %q, %row64, %n64, %col64, %idx64, %off;\n\
+    .reg .f64 %val, %abs_val, %best_abs, %pivot;\n\
+    .reg .pred %p_oob, %p_done, %p_better, %p_flip;\n\
+\n\
+    ld.param.u64 %q, [q_ptr];\n\
+    ld.param.u32 %r_n, [N];\n\
+\n\
+    mov.u32 %bid, %ctaid.x;\n\
+    mov.u32 %bdim, %ntid.x;\n\
+    mov.u32 %r_tid, %tid.x;\n\
+    mad.lo.u32 %col, %bid, %bdim, %r_tid;\n\
+\n\
+    setp.ge.u32 %p_oob, %col, %r_n;\n\
+    @%p_oob bra DONE;\n\
+\n\
+    cvt.u64.u32 %n64, %r_n;\n\
+    cvt.u64.u32 %col64, %col;\n\
+    mov.u32 %best_row, 0;\n\
+    mov.f64 %best_abs, 0d0000000000000000;\n\
+    mov.u32 %row, 0;\n\
+\n\
+SCAN_LOOP:\n\
+    setp.ge.u32 %p_done, %row, %r_n;\n\
+    @%p_done bra SCAN_DONE;\n\
+\n\
+    cvt.u64.u32 %row64, %row;\n\
+    mul.lo.u64 %idx64, %row64, %n64;\n\
+    add.u64 %idx64, %idx64, %col64;\n\
+    shl.b64 %off, %idx64, 3;\n\
+    add.u64 %off, %q, %off;\n\
+    ld.global.f64 %val, [%off];\n\
+    abs.f64 %abs_val, %val;\n\
+    setp.gt.f64 %p_better, %abs_val, %best_abs;\n\
+    @%p_better mov.f64 %best_abs, %abs_val;\n\
+    @%p_better mov.u32 %best_row, %row;\n\
+    add.u32 %row, %row, 1;\n\
+    bra.uni SCAN_LOOP;\n\
+\n\
+SCAN_DONE:\n\
+    cvt.u64.u32 %row64, %best_row;\n\
+    mul.lo.u64 %idx64, %row64, %n64;\n\
+    add.u64 %idx64, %idx64, %col64;\n\
+    shl.b64 %off, %idx64, 3;\n\
+    add.u64 %off, %q, %off;\n\
+    ld.global.f64 %pivot, [%off];\n\
+    setp.lt.f64 %p_flip, %pivot, 0d0000000000000000;\n\
+    @!%p_flip bra DONE;\n\
+\n\
+    mov.u32 %row, 0;\n\
+FLIP_LOOP:\n\
+    setp.ge.u32 %p_done, %row, %r_n;\n\
+    @%p_done bra DONE;\n\
+\n\
+    cvt.u64.u32 %row64, %row;\n\
+    mul.lo.u64 %idx64, %row64, %n64;\n\
+    add.u64 %idx64, %idx64, %col64;\n\
+    shl.b64 %off, %idx64, 3;\n\
+    add.u64 %off, %q, %off;\n\
+    ld.global.f64 %val, [%off];\n\
+    neg.f64 %val, %val;\n\
+    st.global.f64 [%off], %val;\n\
+    add.u32 %row, %row, 1;\n\
+    bra.uni FLIP_LOOP;\n\
+\n\
+DONE:\n\
+    ret;\n\
+}\n\
+";
+
 // ---------------------------------------------------------------------------
 // Helpers that launch the above kernels
 // ---------------------------------------------------------------------------
@@ -510,6 +677,125 @@ fn gpu_extract_cols_f64(
     }
 
     Ok(out)
+}
+
+#[cfg(feature = "cuda")]
+fn checked_square_len(op: &'static str, supplied_len: usize, n: usize) -> GpuResult<usize> {
+    let expected = n.checked_mul(n).ok_or(GpuError::ShapeMismatch {
+        op,
+        expected: vec![n, n],
+        got: vec![supplied_len],
+    })?;
+    if supplied_len != expected {
+        return Err(GpuError::ShapeMismatch {
+            op,
+            expected: vec![expected],
+            got: vec![supplied_len],
+        });
+    }
+    Ok(expected)
+}
+
+#[cfg(feature = "cuda")]
+fn checked_cusolver_n(op: &'static str, n: usize) -> GpuResult<i32> {
+    i32::try_from(n).map_err(|_| GpuError::ShapeMismatch {
+        op,
+        expected: vec![i32::MAX as usize],
+        got: vec![n],
+    })
+}
+
+#[cfg(feature = "cuda")]
+fn canonicalize_eigh_signs_f32(
+    q: &mut CudaBuffer<f32>,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<()> {
+    checked_square_len("canonicalize_eigh_signs_f32", q.len(), n)?;
+    if n == 0 {
+        return Ok(());
+    }
+
+    let n_i32 = checked_cusolver_n("canonicalize_eigh_signs_f32", n)?;
+    let n_u32 = n_i32 as u32;
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        CANONICALIZE_EIGH_SIGNS_F32_PTX,
+        "canonicalize_eigh_signs_rowmaj_f32",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "canonicalize_eigh_signs_rowmaj_f32",
+                source: e,
+            });
+        }
+    };
+    let cfg = qr_launch_cfg(n)?;
+
+    // SAFETY:
+    // - `f` is compiled from CANONICALIZE_EIGH_SIGNS_F32_PTX with ABI
+    //   (q_ptr: u64, N: u32).
+    // - `checked_square_len` proves `q` contains exactly `n*n` row-major f32
+    //   elements. Thread `col < n` only reads/writes `row*n + col` for
+    //   `row in 0..n`, so every access is in bounds.
+    // - Each thread owns one distinct column. Threads write disjoint offsets
+    //   because `(row, col)` is unique per `col`; there are no same-address
+    //   races across columns.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(q.inner_mut())
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+fn canonicalize_eigh_signs_f64(
+    q: &mut CudaBuffer<f64>,
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<()> {
+    checked_square_len("canonicalize_eigh_signs_f64", q.len(), n)?;
+    if n == 0 {
+        return Ok(());
+    }
+
+    let n_i32 = checked_cusolver_n("canonicalize_eigh_signs_f64", n)?;
+    let n_u32 = n_i32 as u32;
+    let ctx = device.context();
+    let stream = device.stream();
+    let f = match crate::module_cache::get_or_compile(
+        ctx,
+        CANONICALIZE_EIGH_SIGNS_F64_PTX,
+        "canonicalize_eigh_signs_rowmaj_f64",
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: "canonicalize_eigh_signs_rowmaj_f64",
+                source: e,
+            });
+        }
+    };
+    let cfg = qr_launch_cfg(n)?;
+
+    // SAFETY: same obligations as canonicalize_eigh_signs_f32; f64 element
+    // size is encoded in the PTX's 3-bit offset shifts.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(q.inner_mut())
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -3934,6 +4220,7 @@ pub fn gpu_eigh_f32(
 ) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<f32>)> {
     use cudarc::cusolver::sys as csys;
 
+    checked_square_len("gpu_eigh_f32", input.len(), n)?;
     if n == 0 {
         // Empty matrix — return empty eigenvalue + zero-sized eigenvector
         // buffers rather than calling cuSOLVER.
@@ -3942,6 +4229,7 @@ pub fn gpu_eigh_f32(
             crate::transfer::alloc_zeros_f32(0, device)?,
         ));
     }
+    let n_i32 = checked_cusolver_n("gpu_eigh_f32", n)?;
 
     let stream = device.stream();
     let dn = cusolver_safe::DnHandle::new(stream.clone())?;
@@ -3990,9 +4278,9 @@ pub fn gpu_eigh_f32(
             dn.cu(),
             jobz,
             uplo,
-            n as i32,
+            n_i32,
             d_a.inner().device_ptr(&stream).0 as *const f32,
-            n as i32,
+            n_i32,
             d_w.inner().device_ptr(&stream).0 as *const f32,
             &mut lwork,
         )
@@ -4034,9 +4322,9 @@ pub fn gpu_eigh_f32(
             dn.cu(),
             jobz,
             uplo,
-            n as i32,
+            n_i32,
             a_ptr as *mut f32,
-            n as i32,
+            n_i32,
             w_ptr as *mut f32,
             work_ptr as *mut f32,
             lwork,
@@ -4058,7 +4346,8 @@ pub fn gpu_eigh_f32(
     // d_a now holds the eigenvectors in column-major (each column is an
     // eigenvector). Transpose back to row-major so column `j` of the
     // returned tensor (in row-major) is the `j`-th eigenvector.
-    let v_rm = crate::kernels::gpu_transpose_2d(&d_a, n, n, device)?;
+    let mut v_rm = crate::kernels::gpu_transpose_2d(&d_a, n, n, device)?;
+    canonicalize_eigh_signs_f32(&mut v_rm, n, device)?;
 
     Ok((d_w, v_rm))
 }
@@ -4072,12 +4361,14 @@ pub fn gpu_eigh_f64(
 ) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<f64>)> {
     use cudarc::cusolver::sys as csys;
 
+    checked_square_len("gpu_eigh_f64", input.len(), n)?;
     if n == 0 {
         return Ok((
             crate::transfer::alloc_zeros_f64(0, device)?,
             crate::transfer::alloc_zeros_f64(0, device)?,
         ));
     }
+    let n_i32 = checked_cusolver_n("gpu_eigh_f64", n)?;
 
     let stream = device.stream();
     let dn = cusolver_safe::DnHandle::new(stream.clone())?;
@@ -4114,9 +4405,9 @@ pub fn gpu_eigh_f64(
             dn.cu(),
             jobz,
             uplo,
-            n as i32,
+            n_i32,
             d_a.inner().device_ptr(&stream).0 as *const f64,
-            n as i32,
+            n_i32,
             d_w.inner().device_ptr(&stream).0 as *const f64,
             &mut lwork,
         )
@@ -4154,9 +4445,9 @@ pub fn gpu_eigh_f64(
             dn.cu(),
             jobz,
             uplo,
-            n as i32,
+            n_i32,
             a_ptr as *mut f64,
-            n as i32,
+            n_i32,
             w_ptr as *mut f64,
             work_ptr as *mut f64,
             lwork,
@@ -4175,7 +4466,8 @@ pub fn gpu_eigh_f64(
         });
     }
 
-    let v_rm = crate::kernels::gpu_transpose_2d_f64(&d_a, n, n, device)?;
+    let mut v_rm = crate::kernels::gpu_transpose_2d_f64(&d_a, n, n, device)?;
+    canonicalize_eigh_signs_f64(&mut v_rm, n, device)?;
     Ok((d_w, v_rm))
 }
 
@@ -5597,6 +5889,74 @@ mod tests {
 
     fn device() -> GpuDevice {
         GpuDevice::new(0).expect("CUDA device 0")
+    }
+
+    fn assert_close_f32(actual: &[f32], expected: &[f32], tol: f32, label: &str) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{label}: length mismatch actual={} expected={}",
+            actual.len(),
+            expected.len()
+        );
+        for (i, (&a, &e)) in actual.iter().zip(expected).enumerate() {
+            assert!((a - e).abs() <= tol, "{label}[{i}] actual={a} expected={e}");
+        }
+    }
+
+    fn assert_close_f64(actual: &[f64], expected: &[f64], tol: f64, label: &str) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{label}: length mismatch actual={} expected={}",
+            actual.len(),
+            expected.len()
+        );
+        for (i, (&a, &e)) in actual.iter().zip(expected).enumerate() {
+            assert!((a - e).abs() <= tol, "{label}[{i}] actual={a} expected={e}");
+        }
+    }
+
+    #[test]
+    fn canonicalize_eigh_signs_f32_flips_negative_pivots_and_keeps_first_tie() {
+        let dev = device();
+        let input = [
+            -0.5f32, 0.1, 0.0, //
+            0.2, -0.9, 0.0, //
+            -0.5, 0.3, 0.0,
+        ];
+        let expected = [
+            0.5f32, -0.1, 0.0, //
+            -0.2, 0.9, 0.0, //
+            0.5, -0.3, 0.0,
+        ];
+        let mut q = crate::transfer::cpu_to_gpu(&input, &dev).expect("upload q");
+
+        canonicalize_eigh_signs_f32(&mut q, 3, &dev).expect("canonicalize f32");
+
+        let actual = crate::transfer::gpu_to_cpu(&q, &dev).expect("download q");
+        assert_close_f32(&actual, &expected, 0.0, "canonicalized f32 q");
+    }
+
+    #[test]
+    fn canonicalize_eigh_signs_f64_flips_negative_pivots_and_keeps_first_tie() {
+        let dev = device();
+        let input = [
+            -0.5f64, 0.1, 0.0, //
+            0.2, -0.9, 0.0, //
+            -0.5, 0.3, 0.0,
+        ];
+        let expected = [
+            0.5f64, -0.1, 0.0, //
+            -0.2, 0.9, 0.0, //
+            0.5, -0.3, 0.0,
+        ];
+        let mut q = crate::transfer::cpu_to_gpu(&input, &dev).expect("upload q");
+
+        canonicalize_eigh_signs_f64(&mut q, 3, &dev).expect("canonicalize f64");
+
+        let actual = crate::transfer::gpu_to_cpu(&q, &dev).expect("download q");
+        assert_close_f64(&actual, &expected, 0.0, "canonicalized f64 q");
     }
 
     // -- SVD tests --
