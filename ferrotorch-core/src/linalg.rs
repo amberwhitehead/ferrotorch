@@ -1007,6 +1007,8 @@ pub fn solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
             got: b.device(),
         });
     }
+    let n = a.shape()[0];
+    let (out_shape, nrhs) = solve_rhs_shape(n, b.shape(), "solve")?;
 
     // Autograd path: CPU and CUDA both route through the same wrapper. The
     // wrapper's CUDA backward stays resident via cuSOLVER + CUDA mm_bt.
@@ -1017,22 +1019,16 @@ pub fn solve<T: Float>(a: &Tensor<T>, b: &Tensor<T>) -> FerrotorchResult<Tensor<
     if a.is_cuda() {
         let backend =
             crate::gpu_dispatch::gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-        let n = a.shape()[0];
-        // b can be [n] (single RHS) or [n, nrhs].
-        let nrhs = if b.ndim() == 1 { 1 } else { b.shape()[1] };
+        let a_packed = a.contiguous()?;
+        let b_packed = b.contiguous()?;
         let x_h = if is_f32::<T>() {
-            backend.solve_f32(a.gpu_handle()?, b.gpu_handle()?, n, nrhs)?
+            backend.solve_f32(a_packed.gpu_handle()?, b_packed.gpu_handle()?, n, nrhs)?
         } else if is_f64::<T>() {
-            backend.solve_f64(a.gpu_handle()?, b.gpu_handle()?, n, nrhs)?
+            backend.solve_f64(a_packed.gpu_handle()?, b_packed.gpu_handle()?, n, nrhs)?
         } else {
             return Err(FerrotorchError::InvalidArgument {
                 message: "solve requires f32 or f64".into(),
             });
-        };
-        let out_shape: Vec<usize> = if b.ndim() == 1 {
-            vec![n]
-        } else {
-            vec![n, nrhs]
         };
         return Tensor::from_storage(TensorStorage::gpu(x_h), out_shape, false);
     }
