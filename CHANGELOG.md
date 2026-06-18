@@ -100,6 +100,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - GammaRsampleBackward implicit-reparam gradient formula is mathematically incorrect (#1555)
 
 ### Changed
+- GPU: replace f64 CUDA transcendental downcast log policy (#2024)
 - CORE-177: `special.rs` CUDA dispatch policy is three-way inconsistent (#1871)
 - CORE-189: `eig`/`eigvals` backward solves via explicit Gauss-Jordan inverse (#1883)
 - CORE-159: `fftn`/`ifftn` CUDA axes-set construction underflows for over-long axis lists (#1853)

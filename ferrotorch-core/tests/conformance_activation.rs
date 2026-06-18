@@ -2847,7 +2847,7 @@ mod gpu {
 
     /// VERIFICATION DEBT lane: `gpu_log_f64` over [1e-10, 1e10] at
     /// F64_TRANSCENDENTAL = 1e-10. Surfaces any residuals of the Dispatch C
-    /// polynomial-cluster sweep on `LOG_F64_PTX`.
+    /// polynomial-cluster sweep on the generated f64 CUDA log kernel.
     #[test]
     fn gpu_log_f64_wide_range_verif_debt() {
         run_verif_debt_lane("gpu_log_f64_wide_range");

@@ -229,6 +229,127 @@ pub(crate) fn get_f64_ptx<'a>(
 }
 
 #[cfg(feature = "cuda")]
+pub(crate) fn push_libdevice_log_f64_ptx(ptx: &mut String, input: &str, output: &str) {
+    // Transcribed from libdevice `__nv_log`. This fragment is used by f64
+    // kernels that need PyTorch-compatible log handling for specials and
+    // subnormals without a CPU round trip or C/C++/NVRTC dependency.
+    ptx.push_str("    mov.f64 %fd56, ");
+    ptx.push_str(input);
+    ptx.push_str(
+        r";
+    {
+    .reg .b32 %temp;
+    mov.b64 {%temp, %r23}, %fd56;
+    }
+    {
+    .reg .b32 %temp;
+    mov.b64 {%r24, %temp}, %fd56;
+    }
+    setp.gt.s32 %p1, %r23, 1048575;
+    mov.b32 %r25, -1023;
+    @%p1 bra LOG_F64_NORMAL_EXP;
+    mul.rn.f64 %fd56, %fd56, 0d4350000000000000;
+    {
+    .reg .b32 %temp;
+    mov.b64 {%temp, %r23}, %fd56;
+    }
+    {
+    .reg .b32 %temp;
+    mov.b64 {%r24, %temp}, %fd56;
+    }
+    mov.b32 %r25, -1077;
+LOG_F64_NORMAL_EXP:
+    setp.lt.s32 %p2, %r23, 1;
+    @%p2 bra LOG_F64_SPECIAL;
+    setp.gt.s32 %p3, %r23, 2146435071;
+    @%p3 bra LOG_F64_SPECIAL;
+    shr.u32 %r14, %r23, 20;
+    add.s32 %r26, %r25, %r14;
+    and.b32 %r15, %r23, -2146435073;
+    or.b32 %r16, %r15, 1072693248;
+    mov.b64 %fd57, {%r24, %r16};
+    setp.lt.s32 %p5, %r16, 1073127583;
+    @%p5 bra LOG_F64_REDUCED;
+    {
+    .reg .b32 %temp;
+    mov.b64 {%r17, %temp}, %fd57;
+    }
+    {
+    .reg .b32 %temp;
+    mov.b64 {%temp, %r18}, %fd57;
+    }
+    add.s32 %r19, %r18, -1048576;
+    mov.b64 %fd57, {%r17, %r19};
+    add.s32 %r26, %r26, 1;
+LOG_F64_REDUCED:
+    sub.rn.f64 %fd12, %fd57, 0d3FF0000000000000;
+    add.rn.f64 %fd13, %fd57, 0d3FF0000000000000;
+    rcp.approx.ftz.f64 %fd14, %fd13;
+    neg.f64 %fd15, %fd13;
+    mov.f64 %fd16, 0d3FF0000000000000;
+    fma.rn.f64 %fd17, %fd15, %fd14, %fd16;
+    fma.rn.f64 %fd18, %fd17, %fd17, %fd17;
+    fma.rn.f64 %fd19, %fd18, %fd14, %fd14;
+    mul.rn.f64 %fd20, %fd12, %fd19;
+    add.rn.f64 %fd21, %fd20, %fd20;
+    mul.rn.f64 %fd22, %fd21, %fd21;
+    mov.f64 %fd23, 0d3ED0EE258B7A8B04;
+    mov.f64 %fd24, 0d3EB1380B3AE80F1E;
+    fma.rn.f64 %fd25, %fd24, %fd22, %fd23;
+    mov.f64 %fd26, 0d3EF3B2669F02676F;
+    fma.rn.f64 %fd27, %fd25, %fd22, %fd26;
+    mov.f64 %fd28, 0d3F1745CBA9AB0956;
+    fma.rn.f64 %fd29, %fd27, %fd22, %fd28;
+    mov.f64 %fd30, 0d3F3C71C72D1B5154;
+    fma.rn.f64 %fd31, %fd29, %fd22, %fd30;
+    mov.f64 %fd32, 0d3F624924923BE72D;
+    fma.rn.f64 %fd33, %fd31, %fd22, %fd32;
+    mov.f64 %fd34, 0d3F8999999999A3C4;
+    fma.rn.f64 %fd35, %fd33, %fd22, %fd34;
+    mov.f64 %fd36, 0d3FB5555555555554;
+    fma.rn.f64 %fd37, %fd35, %fd22, %fd36;
+    sub.rn.f64 %fd38, %fd12, %fd21;
+    add.rn.f64 %fd39, %fd38, %fd38;
+    neg.f64 %fd40, %fd21;
+    fma.rn.f64 %fd41, %fd40, %fd12, %fd39;
+    mul.rn.f64 %fd42, %fd19, %fd41;
+    mul.rn.f64 %fd43, %fd37, %fd22;
+    fma.rn.f64 %fd44, %fd43, %fd21, %fd42;
+    xor.b32 %r20, %r26, -2147483648;
+    mov.b32 %r21, 1127219200;
+    mov.b64 %fd45, {%r20, %r21};
+    mov.b32 %r22, -2147483648;
+    mov.b64 %fd46, {%r22, %r21};
+    sub.rn.f64 %fd47, %fd45, %fd46;
+    mov.f64 %fd48, 0d3FE62E42FEFA39EF;
+    fma.rn.f64 %fd49, %fd47, %fd48, %fd21;
+    neg.f64 %fd50, %fd47;
+    fma.rn.f64 %fd51, %fd50, %fd48, %fd49;
+    sub.rn.f64 %fd52, %fd51, %fd21;
+    sub.rn.f64 %fd53, %fd44, %fd52;
+    mov.f64 %fd54, 0d3C7ABC9E3B39803F;
+    fma.rn.f64 %fd55, %fd47, %fd54, %fd53;
+    add.rn.f64 %fd58, %fd49, %fd55;
+    bra.uni LOG_F64_DONE;
+LOG_F64_SPECIAL:
+    mov.f64 %fd10, 0d7FF0000000000000;
+    fma.rn.f64 %fd58, %fd56, %fd10, %fd10;
+    {
+    .reg .b32 %temp;
+    mov.b64 {%temp, %r13}, %fd56;
+    }
+    mov.b32 %f1, %r13;
+    setp.neu.f32 %p4, %f1, 0f00000000;
+    @%p4 bra LOG_F64_DONE;
+    mov.f64 %fd58, 0dFFF0000000000000;
+LOG_F64_DONE:
+    mov.f64 ",
+    );
+    ptx.push_str(output);
+    ptx.push_str(", %fd58;\n");
+}
+
+#[cfg(feature = "cuda")]
 fn ptx_f32_copy_to_u16(f32_ptx: &str, f32_kernel_name: &str, u16_kernel_name: &str) -> String {
     f32_ptx
         .replace(f32_kernel_name, u16_kernel_name)
@@ -14347,20 +14468,10 @@ DONE:
 }
 ";
 
-/// PTX source for `log_f64_kernel`: `out[i] = ln(a[i])` (f64).
-/// Uses f32 `lg2.approx` via downcast for the transcendental, then upcasts back.
-/// Accurate to f32 precision (~7 decimal digits), sufficient for deep learning.
 #[cfg(feature = "cuda")]
-/// f64 log with full double precision via argument reduction + rational
-/// approximation.
-///
-/// Algorithm: decompose x = 2^n * m (1 <= m < 2), then
-///   ln(x) = n*ln(2) + ln(m)
-/// where ln(m) is computed via f = (m-1)/(m+1), ln(m) = 2*f*(1 + f^2/3 + f^4/5 + ...)
-///
-/// Accuracy: < 2 ULP across the full f64 range.
-pub(crate) const LOG_F64_PTX: &str = "\
-.version 7.0
+fn build_log_f64_ptx() -> String {
+    let mut ptx = String::from(
+        r".version 7.0
 .target sm_52
 .address_size 64
 
@@ -14371,13 +14482,10 @@ pub(crate) const LOG_F64_PTX: &str = "\
 ) {
     .reg .u32 %r_tid, %bid, %bdim, %n_reg;
     .reg .u64 %a, %out, %off;
-    .reg .u64 %xbits, %mantissa_bits, %bias_bits;
-    .reg .f64 %x, %vr, %m, %f, %f2, %s, %p;
-    .reg .f64 %ln2_hi, %ln2_lo, %one, %two, %sqrt2, %half_const;
-    .reg .s32 %exp_i;
-    .reg .s64 %exp64;
-    .reg .f64 %nf;
-    .reg .pred %p_tid, %p_shift;
+    .reg .b32 %r<27>;
+    .reg .f32 %f1;
+    .reg .f64 %x, %vr, %fd<59>;
+    .reg .pred %p_tid, %p1, %p2, %p3, %p4, %p5;
 
     ld.param.u64 %a, [a_ptr];
     ld.param.u64 %out, [out_ptr];
@@ -14397,63 +14505,19 @@ pub(crate) const LOG_F64_PTX: &str = "\
     add.u64 %out, %out, %off;
 
     ld.global.f64 %x, [%a];
-
-    mov.f64 %ln2_hi, 0d3FE62E42FEFA3800;    // hi of ln(2) Cody-Waite split
-    mov.f64 %ln2_lo, 0d3D2EF35793C76730;    // lo of ln(2) Cody-Waite split
-    mov.f64 %one, 0d3FF0000000000000;
-    mov.f64 %two, 0d4000000000000000;
-
-    // Extract exponent: n = exponent_field - 1023
-    mov.b64 %xbits, %x;
-    shr.u64 %exp64, %xbits, 52;
-    and.b64 %exp64, %exp64, 2047;   // 11-bit exponent field
-    sub.s64 %exp64, %exp64, 1023;
-    cvt.rn.f64.s64 %nf, %exp64;     // n as f64
-
-    // Extract mantissa m: set exponent to 1023 (so m is in [1, 2))
-    mov.u64 %bias_bits, 0x3FF0000000000000;  // exponent = 1023
-    and.b64 %mantissa_bits, %xbits, 0x000FFFFFFFFFFFFF;  // mantissa bits
-    or.b64 %mantissa_bits, %mantissa_bits, %bias_bits;
-    mov.b64 %m, %mantissa_bits;      // m in [1.0, 2.0)
-
-    // Half-step: if m > sqrt(2), halve m and bump n by 1 to restrict
-    // m to [sqrt(2)/2, sqrt(2)) and |f| <= ~0.172.
-    mov.f64 %sqrt2, 0d3FF6A09E667F3BCD;
-    mov.f64 %half_const, 0d3FE0000000000000;
-    setp.gt.f64 %p_shift, %m, %sqrt2;
-    @%p_shift mul.f64 %m, %m, %half_const;
-    @%p_shift add.f64 %nf, %nf, %one;
-
-    // f = (m - 1) / (m + 1), |f| <= ~0.172 after half-step
-    sub.f64 %f, %m, %one;
-    add.f64 %s, %m, %one;
-    div.rn.f64 %f, %f, %s;
-
-    // Degree-7 odd-power Horner (extra 1/13, 1/15 vs degree-5).
-    mul.f64 %f2, %f, %f;
-    mov.f64 %p, 0d3FB1111111111111;          // 1/15
-    fma.rn.f64 %p, %p, %f2, 0d3FB3B13B13B13B14;  // 1/13
-    fma.rn.f64 %p, %p, %f2, 0d3FB745D1745D1746;  // 1/11
-    fma.rn.f64 %p, %p, %f2, 0d3FBC71C71C71C71C;  // 1/9
-    fma.rn.f64 %p, %p, %f2, 0d3FC2492492492492;  // 1/7
-    fma.rn.f64 %p, %p, %f2, 0d3FC999999999999A;  // 1/5
-    fma.rn.f64 %p, %p, %f2, 0d3FD5555555555555;  // 1/3
-    fma.rn.f64 %p, %p, %f2, %one;
-
-    // ln(m) = 2*f*p
-    mul.f64 %p, %p, %f;
-    add.f64 %p, %p, %p;   // * 2
-
-    // ln(x) = n*ln(2) + ln(m), with 2-double ln(2) for the n term.
-    fma.rn.f64 %vr, %nf, %ln2_hi, %p;
-    fma.rn.f64 %vr, %nf, %ln2_lo, %vr;
-
-    st.global.f64 [%out], %vr;
+",
+    );
+    push_libdevice_log_f64_ptx(&mut ptx, "%x", "%vr");
+    ptx.push_str(
+        r"    st.global.f64 [%out], %vr;
 
 DONE:
     ret;
 }
-";
+",
+    );
+    ptx
+}
 
 /// PTX source for `sqrt_kernel`: `out[i] = sqrt(a[i])`.
 #[cfg(feature = "cuda")]
@@ -16753,6 +16817,55 @@ fn try_launch_unary_f64(
     // - `n_u32 = n as u32` fits in u32 because `launch_cfg(n)?`
     //   (definition at line 10523) returns `Err` when
     //   `n > u32::MAX`.
+    unsafe {
+        stream
+            .launch_builder(&f)
+            .arg(a.inner())
+            .arg(out.inner_mut())
+            .arg(&n_u32)
+            .launch(cfg)?;
+    }
+    Ok(out)
+}
+
+/// Try to launch a generated unary f64 PTX kernel.
+#[cfg(feature = "cuda")]
+fn try_launch_unary_f64_owned(
+    a: &CudaBuffer<f64>,
+    device: &GpuDevice,
+    ptx_src: String,
+    kernel_name: &'static str,
+) -> GpuResult<CudaBuffer<f64>> {
+    use cudarc::driver::PushKernelArg;
+
+    let n = a.len();
+    let ctx = device.context();
+    let stream = device.stream();
+
+    let f = match crate::module_cache::get_or_compile_owned(
+        ctx,
+        ptx_src,
+        kernel_name.to_string(),
+        device.ordinal() as u32,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(GpuError::PtxCompileFailed {
+                kernel: kernel_name,
+                source: e,
+            });
+        }
+    };
+
+    let mut out = alloc_zeros_f64(n, device)?;
+    let cfg = launch_cfg(n)?;
+    let n_u32 = n as u32;
+
+    // SAFETY: `f` is compiled from a generated `(in_ptr, out_ptr, n)` f64
+    // unary PTX entry named by `kernel_name`; `a` and `out` are same-device
+    // f64 buffers of length `n`, `out` is freshly allocated, and the PTX head
+    // bounds-checks every thread before any global memory access. `n_u32` is
+    // proven by `launch_cfg(n)?` to fit the kernel's u32 ABI.
     unsafe {
         stream
             .launch_builder(&f)
@@ -25660,7 +25773,7 @@ pub fn gpu_exp_f64(a: &CudaBuffer<f64>, device: &GpuDevice) -> GpuResult<CudaBuf
 /// Elementwise f64 log: `out[i] = ln(a[i])`.
 #[cfg(feature = "cuda")]
 pub fn gpu_log_f64(a: &CudaBuffer<f64>, device: &GpuDevice) -> GpuResult<CudaBuffer<f64>> {
-    try_launch_unary_f64(a, device, LOG_F64_PTX, "log_f64_kernel")
+    try_launch_unary_f64_owned(a, device, build_log_f64_ptx(), "log_f64_kernel")
 }
 
 /// Elementwise f64 sine: `out[i] = sin(a[i])`.
