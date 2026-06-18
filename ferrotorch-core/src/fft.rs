@@ -2526,25 +2526,31 @@ pub fn ihfftn_norm<T: Float>(
 ///
 /// Returns a length-`n` `Tensor<f64>` on CPU containing the frequency bin
 /// centers in cycles per unit of the sample spacing `d`. Matches
-/// `torch.fft.fftfreq` and `numpy.fft.fftfreq`.
+/// `torch.fft.fftfreq`, including `n == 0` and IEEE `d == 0` edge cases.
 pub fn fftfreq(n: usize, d: f64) -> FerrotorchResult<Tensor<f64>> {
-    let arr = ferray_fft::fftfreq(n, d).map_err(|e| FerrotorchError::InvalidArgument {
-        message: format!("fftfreq: {e}"),
-    })?;
-    let data: Vec<f64> = arr.iter().copied().collect();
+    let scale = 1.0 / ((n as f64) * d);
+    let negative_start = n.div_ceil(2);
+    let data: Vec<f64> = (0..n)
+        .map(|i| {
+            let bin = if i < negative_start {
+                i as f64
+            } else {
+                i as f64 - n as f64
+            };
+            bin * scale
+        })
+        .collect();
     Tensor::from_storage(TensorStorage::cpu(data), vec![n], false)
 }
 
 /// Sample frequencies for `rfft` (non-negative half).
 ///
 /// Returns a length-`n/2 + 1` `Tensor<f64>` on CPU. Matches
-/// `torch.fft.rfftfreq`.
+/// `torch.fft.rfftfreq`, including `n == 0` and IEEE `d == 0` edge cases.
 pub fn rfftfreq(n: usize, d: f64) -> FerrotorchResult<Tensor<f64>> {
-    let arr = ferray_fft::rfftfreq(n, d).map_err(|e| FerrotorchError::InvalidArgument {
-        message: format!("rfftfreq: {e}"),
-    })?;
-    let len = arr.shape()[0];
-    let data: Vec<f64> = arr.iter().copied().collect();
+    let scale = 1.0 / ((n as f64) * d);
+    let len = n / 2 + 1;
+    let data: Vec<f64> = (0..len).map(|i| i as f64 * scale).collect();
     Tensor::from_storage(TensorStorage::cpu(data), vec![len], false)
 }
 
