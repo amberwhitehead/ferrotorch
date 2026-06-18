@@ -1785,41 +1785,49 @@ pub trait GpuBackend: Send + Sync {
 
     /// Dropout using the Philox CBRNG for deterministic, reproducible mask generation.
     ///
-    /// Instead of a simple u32 seed, this takes a `GpuRngState` that specifies the
-    /// exact Philox counter and key to use. This enables gradient checkpointing to
-    /// reproduce identical dropout masks by restoring the RNG state.
+    /// CUDA backends must generate the forward output and the saved backward mask
+    /// from the same resident Philox/cuRAND stream, mirroring PyTorch's
+    /// `native_dropout_cuda`: one kernel returns both `ret` and `mask`, then the
+    /// generator advances by the number of 4x32 Philox counter groups reserved
+    /// by the launch policy. The returned mask is already scaled by
+    /// `1 / keep_probability`, so dropout backward is a dtype-native elementwise
+    /// multiply with no host-side mask regeneration or device round trip.
     ///
-    /// The method also advances the global GPU RNG state by `ceil(n/4)` counters.
-    ///
-    /// Returns the dropped-out buffer and the Philox state that was used (for
-    /// backward mask regeneration).
+    /// Returns `(output, scaled_mask, rng_state_used)`.
     fn dropout_philox_f32(
         &self,
-        a: &GpuBufferHandle,
-        threshold: u32,
-        scale: f32,
-    ) -> FerrotorchResult<(GpuBufferHandle, GpuRngState)> {
-        // Default: fall back to the non-Philox version with a dummy seed.
-        // The returned state has device=0 as a placeholder.
-        let result = self.dropout_f32(a, threshold, scale, 0)?;
-        Ok((
-            result,
-            GpuRngState {
-                counter: 0,
-                seed: 0,
-                offset: 0,
-                device: 0,
-            },
-        ))
+        _a: &GpuBufferHandle,
+        _keep_probability: f64,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuRngState)> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "dropout_philox_f32",
+        })
     }
     fn dropout_philox_f64(
         &self,
         _a: &GpuBufferHandle,
-        _threshold: u32,
-        _scale: f64,
-    ) -> FerrotorchResult<(GpuBufferHandle, GpuRngState)> {
-        Err(FerrotorchError::InvalidArgument {
-            message: "dropout_philox_f64 GPU op not yet implemented".into(),
+        _keep_probability: f64,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuRngState)> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "dropout_philox_f64",
+        })
+    }
+    fn dropout_philox_bf16(
+        &self,
+        _a: &GpuBufferHandle,
+        _keep_probability: f64,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuRngState)> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "dropout_philox_bf16",
+        })
+    }
+    fn dropout_philox_f16(
+        &self,
+        _a: &GpuBufferHandle,
+        _keep_probability: f64,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuRngState)> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "dropout_philox_f16",
         })
     }
 

@@ -48,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   softmax (#17).
 
 ### Fixed
+- CUDA dropout_philox derives seed instead of using Philox mask stream (#2018)
 - CORE: CPU randn is deterministic but not byte-exact with PyTorch normal_fill (#2014)
 - NN: Parameter device transfer creates non-leaf CUDA parameters (#2016)
 - CORE: non-leaf gradient accumulation rejects valid strided gradients (#2015)

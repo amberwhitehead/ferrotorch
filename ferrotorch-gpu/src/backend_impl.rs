@@ -5227,42 +5227,14 @@ impl GpuBackend for CudaBackendImpl {
     fn dropout_philox_f32(
         &self,
         a: &GpuBufferHandle,
-        threshold: u32,
-        scale: f32,
-    ) -> FerrotorchResult<(GpuBufferHandle, GpuRngState)> {
+        keep_probability: f64,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuRngState)> {
         let device_ordinal = a.device_ordinal();
-        let n = a.len();
-
-        // Snapshot the current RNG state and advance it.
-        let rng_state = {
-            let mut mgr = crate::rng::cuda_rng_manager().lock().map_err(|_| {
-                FerrotorchError::InvalidArgument {
-                    message: "failed to lock CUDA RNG manager".into(),
-                }
-            })?;
-            let philox_gen = mgr.generator(device_ordinal);
-            let state = philox_gen.get_state();
-            // Advance by ceil(n/4) counters (each counter produces 4 u32 values)
-            let counters_needed = n.div_ceil(4);
-            philox_gen.advance(counters_needed as u64);
-            state
-        };
-
-        // Use the Philox state as the seed for the dropout kernel.
-        // We encode the Philox counter+seed into a u32 seed that the existing
-        // dropout kernel can use. For full correctness on GPU, we should use
-        // the Philox uniform kernel to generate the mask, then apply it.
-        // However, for consistency between GPU forward and CPU backward mask
-        // regeneration, we use the Philox state to deterministically derive a
-        // seed for the existing kernel.
         let a_buf = Self::unwrap_buffer(a)?;
         let dev = self.device(device_ordinal)?;
-
-        // Use the Philox counter XOR seed as the dropout kernel's seed.
-        // This gives us deterministic behavior tied to the Philox state.
-        let derived_seed = (rng_state.counter ^ rng_state.seed) as u32;
-        let result = crate::kernels::gpu_dropout(a_buf, threshold, scale, derived_seed, dev)
-            .map_err(Self::map_gpu_err)?;
+        let (result, mask, rng_state) =
+            crate::rng::gpu_philox_dropout_f32(a_buf, keep_probability, dev)
+                .map_err(Self::map_gpu_err)?;
 
         let gpu_rng_state = GpuRngState::new(
             rng_state.counter,
@@ -5271,7 +5243,11 @@ impl GpuBackend for CudaBackendImpl {
             device_ordinal,
         );
 
-        Ok((Self::wrap_buffer(result, device_ordinal), gpu_rng_state))
+        Ok((
+            Self::wrap_buffer(result, device_ordinal),
+            Self::wrap_buffer(mask, device_ordinal),
+            gpu_rng_state,
+        ))
     }
 
     fn dropout_f64(
@@ -5291,30 +5267,14 @@ impl GpuBackend for CudaBackendImpl {
     fn dropout_philox_f64(
         &self,
         a: &GpuBufferHandle,
-        threshold: u32,
-        scale: f64,
-    ) -> FerrotorchResult<(GpuBufferHandle, GpuRngState)> {
+        keep_probability: f64,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuRngState)> {
         let device_ordinal = a.device_ordinal();
-        let n = a.len();
-
-        let rng_state = {
-            let mut mgr = crate::rng::cuda_rng_manager().lock().map_err(|_| {
-                FerrotorchError::InvalidArgument {
-                    message: "failed to lock CUDA RNG manager".into(),
-                }
-            })?;
-            let philox_gen = mgr.generator(device_ordinal);
-            let state = philox_gen.get_state();
-            let counters_needed = n.div_ceil(4);
-            philox_gen.advance(counters_needed as u64);
-            state
-        };
-
         let a_buf = Self::unwrap_buffer_f64(a)?;
         let dev = self.device(device_ordinal)?;
-        let derived_seed = (rng_state.counter ^ rng_state.seed) as u32;
-        let result = crate::kernels::gpu_dropout_f64(a_buf, threshold, scale, derived_seed, dev)
-            .map_err(Self::map_gpu_err)?;
+        let (result, mask, rng_state) =
+            crate::rng::gpu_philox_dropout_f64(a_buf, keep_probability, dev)
+                .map_err(Self::map_gpu_err)?;
 
         let gpu_rng_state = GpuRngState::new(
             rng_state.counter,
@@ -5323,7 +5283,63 @@ impl GpuBackend for CudaBackendImpl {
             device_ordinal,
         );
 
-        Ok((Self::wrap_buffer_f64(result, device_ordinal), gpu_rng_state))
+        Ok((
+            Self::wrap_buffer_f64(result, device_ordinal),
+            Self::wrap_buffer_f64(mask, device_ordinal),
+            gpu_rng_state,
+        ))
+    }
+
+    fn dropout_philox_bf16(
+        &self,
+        a: &GpuBufferHandle,
+        keep_probability: f64,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuRngState)> {
+        let device_ordinal = a.device_ordinal();
+        let a_buf = Self::unwrap_buffer_bf16(a)?;
+        let dev = self.device(device_ordinal)?;
+        let (result, mask, rng_state) =
+            crate::rng::gpu_philox_dropout_bf16(a_buf, a.len(), keep_probability, dev)
+                .map_err(Self::map_gpu_err)?;
+
+        let gpu_rng_state = GpuRngState::new(
+            rng_state.counter,
+            rng_state.seed,
+            rng_state.offset,
+            device_ordinal,
+        );
+
+        Ok((
+            Self::wrap_buffer_bf16_logical_len(result, device_ordinal, a.len())?,
+            Self::wrap_buffer_bf16_logical_len(mask, device_ordinal, a.len())?,
+            gpu_rng_state,
+        ))
+    }
+
+    fn dropout_philox_f16(
+        &self,
+        a: &GpuBufferHandle,
+        keep_probability: f64,
+    ) -> FerrotorchResult<(GpuBufferHandle, GpuBufferHandle, GpuRngState)> {
+        let device_ordinal = a.device_ordinal();
+        let a_buf = Self::unwrap_buffer_f16(a)?;
+        let dev = self.device(device_ordinal)?;
+        let (result, mask, rng_state) =
+            crate::rng::gpu_philox_dropout_f16(a_buf, a.len(), keep_probability, dev)
+                .map_err(Self::map_gpu_err)?;
+
+        let gpu_rng_state = GpuRngState::new(
+            rng_state.counter,
+            rng_state.seed,
+            rng_state.offset,
+            device_ordinal,
+        );
+
+        Ok((
+            Self::wrap_buffer_f16_logical_len(result, device_ordinal, a.len())?,
+            Self::wrap_buffer_f16_logical_len(mask, device_ordinal, a.len())?,
+            gpu_rng_state,
+        ))
     }
 
     fn transpose_2d_f32(

@@ -40,7 +40,7 @@
 //! | REQ-2 (`PhiloxGenerator`) | SHIPPED | `pub struct PhiloxGenerator in rng.rs` with Philox 4x32-10 constants; consumer `CudaRngManager.generators in rng.rs` map stores instances; production callers via `backend_impl.rs` |
 //! | REQ-3 (`CudaRngManager` + global accessor) | SHIPPED | `pub struct CudaRngManager in rng.rs` + `pub fn cuda_rng_manager` singleton; consumer four `crate::rng::cuda_rng_manager().lock()` sites in `backend_impl.rs` |
 //! | REQ-4 (`fork_rng` / `join_rng`) | SHIPPED | `pub fn fork_rng / pub fn join_rng in rng.rs`; consumer re-exported at `lib.rs`; `ferrotorch-core/src/quantize.rs` defines parallel `cuda_rng::fork_rng / join_rng` Python-API surface wrapping these |
-//! | REQ-5 (`gpu_philox_uniform`) | SHIPPED | `build_philox_uniform_f32_ptx` / `build_philox_uniform_f64_ptx` emit resident PyTorch-layout Philox kernels; consumer dropout-philox path in `CudaBackendImpl::dropout_philox_f32 in backend_impl.rs` derives a seed from the manager and launches the dropout kernel |
+//! | REQ-5 (`gpu_philox_uniform`) | SHIPPED | `build_philox_uniform_f32_ptx` / `build_philox_uniform_f64_ptx` emit resident PyTorch-layout Philox kernels; consumers include `CudaBackendImpl::rand_uniform_*` and the resident dropout Philox kernels in this module |
 //! | REQ-6 (`gpu_philox_normal`) | SHIPPED | `build_philox_normal_f32_ptx` / `build_philox_normal_f64_ptx` emit resident PyTorch-layout Philox kernels; consumer re-exported through `lib.rs`, consumed by `ferrotorch-distributions` Normal sampling path on GPU |
 //! | REQ-7 (Manager↔backend wiring) | SHIPPED | `use crate::rng` import sites in `backend_impl.rs` inside dropout-philox / stochastic-rounding `CudaBackendImpl` methods; ferrotorch-core dispatches `Tensor::dropout` through `GpuBackend::dropout_philox_f32` |
 
@@ -572,6 +572,56 @@ static PHILOX_UNIFORM_F32_PTX: LazyLock<String> = LazyLock::new(build_philox_uni
 static PHILOX_NORMAL_F32_PTX: LazyLock<String> = LazyLock::new(build_philox_normal_f32_ptx);
 
 #[cfg(feature = "cuda")]
+#[derive(Debug, Clone, Copy)]
+enum DropoutStorage {
+    F32,
+    F64,
+    F16,
+    BF16,
+}
+
+#[cfg(feature = "cuda")]
+impl DropoutStorage {
+    fn entry_prefix(self) -> &'static str {
+        match self {
+            Self::F32 => "philox_dropout_f32",
+            Self::F64 => "philox_dropout_f64",
+            Self::F16 => "philox_dropout_f16",
+            Self::BF16 => "philox_dropout_bf16",
+        }
+    }
+
+    fn max_vector_size(self) -> u32 {
+        match self {
+            Self::F32 => 4,
+            Self::F64 => 2,
+            Self::F16 | Self::BF16 => 8,
+        }
+    }
+
+    fn element_shift(self) -> u32 {
+        match self {
+            Self::F32 => 2,
+            Self::F64 => 3,
+            Self::F16 | Self::BF16 => 1,
+        }
+    }
+
+    fn uses_f64_accumulator(self) -> bool {
+        matches!(self, Self::F64)
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn torch_dropout_vector_size(n: usize, storage: DropoutStorage) -> u32 {
+    let mut vector_size = storage.max_vector_size();
+    while vector_size > 1 && !n.is_multiple_of(vector_size as usize) {
+        vector_size /= 2;
+    }
+    vector_size
+}
+
+#[cfg(feature = "cuda")]
 fn push_philox_rounds_ptx(ptx: &mut String) {
     for round in 0..10 {
         ptx.push_str(
@@ -644,6 +694,298 @@ fn push_store_f32_lane_ptx(ptx: &mut String, lane: usize, word: &str) {
     ptx.push_str("    st.global.f32 [%off], %fval;\n");
     ptx.push_str(&label);
     ptx.push_str(":\n");
+}
+
+#[cfg(feature = "cuda")]
+fn push_dropout_store_index_ptx(ptx: &mut String, lane: usize, vector_size: u32) {
+    if vector_size == 1 {
+        if lane == 0 {
+            ptx.push_str("    mov.u64 %store_idx, %linear;\n");
+        } else {
+            ptx.push_str("    add.u64 %store_idx, %linear, %stride_reg;\n");
+            for _ in 1..lane {
+                ptx.push_str("    add.u64 %store_idx, %store_idx, %stride_reg;\n");
+            }
+        }
+    } else if lane == 0 {
+        ptx.push_str("    mov.u64 %store_idx, %linear;\n");
+    } else {
+        ptx.push_str("    add.u64 %store_idx, %linear, ");
+        ptx.push_str(&lane.to_string());
+        ptx.push_str(";\n");
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn push_bf16_store_from_f32_ptx(ptx: &mut String, f32_reg: &str, addr_reg: &str) {
+    ptx.push_str("    mov.b32 %bits, ");
+    ptx.push_str(f32_reg);
+    ptx.push_str(";\n");
+    ptx.push_str(
+        r"    shr.u32 %lsb, %bits, 16;
+    and.b32 %lsb, %lsb, 1;
+    add.u32 %round, %bits, 0x7FFF;
+    add.u32 %round, %round, %lsb;
+    shr.u32 %raw32, %round, 16;
+    st.global.u16 [",
+    );
+    ptx.push_str(addr_reg);
+    ptx.push_str("], %raw32;\n");
+}
+
+#[cfg(feature = "cuda")]
+fn push_store_dropout_lane_ptx(
+    ptx: &mut String,
+    storage: DropoutStorage,
+    vector_size: u32,
+    lane: usize,
+    word: &str,
+) {
+    let label = format!("SKIP_DROPOUT_{}_LANE_{lane}", storage.entry_prefix());
+    push_dropout_store_index_ptx(ptx, lane, vector_size);
+    ptx.push_str("    setp.ge.u64 %p_store, %store_idx, %n_reg;\n");
+    ptx.push_str("    @%p_store bra ");
+    ptx.push_str(&label);
+    ptx.push_str(";\n");
+    push_curand_uniform_f32_ptx(ptx, word, "%u");
+
+    if storage.uses_f64_accumulator() {
+        ptx.push_str(
+            r"    cvt.f64.f32 %u64f, %u;
+    setp.lt.f64 %p_keep, %u64f, %keep64;
+",
+        );
+    } else {
+        ptx.push_str("    setp.lt.f32 %p_keep, %u, %keep32;\n");
+    }
+
+    ptx.push_str("    shl.b64 %off, %store_idx, ");
+    ptx.push_str(&storage.element_shift().to_string());
+    ptx.push_str(
+        r";
+    add.u64 %addr_in, %in, %off;
+    add.u64 %addr_out, %out, %off;
+    add.u64 %addr_mask, %mask, %off;
+",
+    );
+
+    match storage {
+        DropoutStorage::F32 => {
+            ptx.push_str(
+                r"    ld.global.f32 %val32, [%addr_in];
+    mul.f32 %out32, %val32, %scale32;
+    selp.f32 %out32, %out32, %zero32, %p_keep;
+    selp.f32 %mask32, %scale32, %zero32, %p_keep;
+    st.global.f32 [%addr_out], %out32;
+    st.global.f32 [%addr_mask], %mask32;
+",
+            );
+        }
+        DropoutStorage::F64 => {
+            ptx.push_str(
+                r"    ld.global.f64 %val64, [%addr_in];
+    mul.rn.f64 %out64, %val64, %scale64;
+    selp.f64 %out64, %out64, %zero64, %p_keep;
+    selp.f64 %mask64, %scale64, %zero64, %p_keep;
+    st.global.f64 [%addr_out], %out64;
+    st.global.f64 [%addr_mask], %mask64;
+",
+            );
+        }
+        DropoutStorage::F16 => {
+            ptx.push_str(
+                r"    ld.global.b16 %hraw, [%addr_in];
+    cvt.f32.f16 %val32, %hraw;
+    mul.f32 %out32, %val32, %scale32;
+    selp.f32 %out32, %out32, %zero32, %p_keep;
+    selp.f32 %mask32, %scale32, %zero32, %p_keep;
+    cvt.rn.f16.f32 %hout, %out32;
+    cvt.rn.f16.f32 %hmask, %mask32;
+    st.global.b16 [%addr_out], %hout;
+    st.global.b16 [%addr_mask], %hmask;
+",
+            );
+        }
+        DropoutStorage::BF16 => {
+            ptx.push_str(
+                r"    ld.global.u16 %raw16, [%addr_in];
+    cvt.u32.u16 %bits, %raw16;
+    shl.b32 %bits, %bits, 16;
+    mov.b32 %val32, %bits;
+    mul.f32 %out32, %val32, %scale32;
+    selp.f32 %out32, %out32, %zero32, %p_keep;
+    selp.f32 %mask32, %scale32, %zero32, %p_keep;
+",
+            );
+            push_bf16_store_from_f32_ptx(ptx, "%out32", "%addr_out");
+            push_bf16_store_from_f32_ptx(ptx, "%mask32", "%addr_mask");
+        }
+    }
+
+    ptx.push_str(&label);
+    ptx.push_str(":\n");
+}
+
+#[cfg(feature = "cuda")]
+fn build_philox_dropout_ptx(storage: DropoutStorage, vector_size: u32, entry_name: &str) -> String {
+    let keep_param = if storage.uses_f64_accumulator() {
+        ".f64"
+    } else {
+        ".f32"
+    };
+    let mut ptx = format!(
+        r".version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry {entry_name}(
+    .param .u64 input_ptr,
+    .param .u64 output_ptr,
+    .param .u64 mask_ptr,
+    .param .u64 n,
+    .param {keep_param} keep_probability,
+    .param {keep_param} scale,
+    .param .u32 seed_lo,
+    .param .u32 seed_hi,
+    .param .u32 counter_lo,
+    .param .u32 counter_hi,
+    .param .u64 stride
+) {{
+    .reg .u32 %ltid, %bid, %bdim, %gid;
+    .reg .u32 %slo, %shi, %clo, %chi;
+    .reg .u32 %ctr_add_lo, %ctr_add_hi;
+    .reg .u32 %c0, %c1, %c2, %c3, %k0, %k1;
+    .reg .u32 %hi_val, %lo_val, %t0, %t1, %t2, %t3;
+    .reg .u32 %bits, %round, %lsb, %raw32;
+    .reg .u16 %raw16;
+    .reg .b16 %hraw, %hout, %hmask;
+    .reg .u64 %gid64, %tmp64, %ctr_add, %n_reg, %stride_reg, %linear, %step, %store_idx;
+    .reg .u64 %prod, %in, %out, %mask, %off, %addr_in, %addr_out, %addr_mask;
+    .reg .f32 %u, %keep32, %scale32, %zero32, %val32, %out32, %mask32;
+    .reg .f64 %u64f, %keep64, %scale64, %zero64, %val64, %out64, %mask64;
+    .reg .pred %p_done, %p_store, %p_keep;
+
+    ld.param.u64 %in, [input_ptr];
+    ld.param.u64 %out, [output_ptr];
+    ld.param.u64 %mask, [mask_ptr];
+    ld.param.u64 %n_reg, [n];
+",
+    );
+
+    if storage.uses_f64_accumulator() {
+        ptx.push_str(
+            r"    ld.param.f64 %keep64, [keep_probability];
+    ld.param.f64 %scale64, [scale];
+    mov.f64 %zero64, 0d0000000000000000;
+",
+        );
+    } else {
+        ptx.push_str(
+            r"    ld.param.f32 %keep32, [keep_probability];
+    ld.param.f32 %scale32, [scale];
+    mov.f32 %zero32, 0f00000000;
+",
+        );
+    }
+
+    ptx.push_str(
+        r"    ld.param.u32 %slo, [seed_lo];
+    ld.param.u32 %shi, [seed_hi];
+    ld.param.u32 %clo, [counter_lo];
+    ld.param.u32 %chi, [counter_hi];
+    ld.param.u64 %stride_reg, [stride];
+
+    mov.u32 %bid, %ctaid.x;
+    mov.u32 %bdim, %ntid.x;
+    mov.u32 %ltid, %tid.x;
+    mad.lo.u32 %gid, %bid, %bdim, %ltid;
+    cvt.u64.u32 %gid64, %gid;
+",
+    );
+
+    if vector_size == 1 {
+        ptx.push_str(
+            r"    mov.u64 %linear, %gid64;
+    mul.lo.u64 %step, %stride_reg, 4;
+",
+        );
+    } else {
+        ptx.push_str("    mul.lo.u64 %linear, %gid64, ");
+        ptx.push_str(&vector_size.to_string());
+        ptx.push_str(";\n    mul.lo.u64 %step, %stride_reg, ");
+        ptx.push_str(&vector_size.to_string());
+        ptx.push_str(";\n");
+    }
+
+    let groups_per_iter = if vector_size == 1 {
+        1
+    } else {
+        vector_size.div_ceil(4)
+    };
+    let lanes_per_iter = if vector_size == 1 { 4 } else { vector_size };
+
+    ptx.push_str(
+        r"    mov.u64 %ctr_add, 0;
+
+LOOP_DROPOUT:
+    setp.ge.u64 %p_done, %linear, %n_reg;
+    @%p_done bra DONE;
+",
+    );
+
+    for group in 0..groups_per_iter {
+        if group == 0 {
+            ptx.push_str("    mov.u64 %tmp64, %ctr_add;\n");
+        } else {
+            ptx.push_str("    add.u64 %tmp64, %ctr_add, ");
+            ptx.push_str(&group.to_string());
+            ptx.push_str(";\n");
+        }
+        ptx.push_str(
+            r"    cvt.u32.u64 %ctr_add_lo, %tmp64;
+    shr.u64 %tmp64, %tmp64, 32;
+    cvt.u32.u64 %ctr_add_hi, %tmp64;
+    add.cc.u32 %c0, %clo, %ctr_add_lo;
+    addc.u32 %c1, %chi, %ctr_add_hi;
+    cvt.u32.u64 %c2, %gid64;
+    shr.u64 %tmp64, %gid64, 32;
+    cvt.u32.u64 %c3, %tmp64;
+    mov.u32 %k0, %slo;
+    mov.u32 %k1, %shi;
+",
+        );
+        push_philox_rounds_ptx(&mut ptx);
+
+        let first_lane = (group * 4) as usize;
+        let last_lane = lanes_per_iter.min((group + 1) * 4) as usize;
+        let words = ["%c0", "%c1", "%c2", "%c3"];
+        for lane in first_lane..last_lane {
+            push_store_dropout_lane_ptx(
+                &mut ptx,
+                storage,
+                vector_size,
+                lane,
+                words[lane - first_lane],
+            );
+        }
+    }
+
+    ptx.push_str(
+        r"    add.u64 %linear, %linear, %step;
+    add.u64 %ctr_add, %ctr_add, ",
+    );
+    ptx.push_str(&groups_per_iter.to_string());
+    ptx.push_str(
+        r";
+    bra LOOP_DROPOUT;
+
+DONE:
+    ret;
+}
+",
+    );
+
+    ptx
 }
 
 #[cfg(feature = "cuda")]
@@ -1458,6 +1800,337 @@ fn gpu_philox_f64(
     }
 
     Ok(out)
+}
+
+#[cfg(feature = "cuda")]
+fn validate_dropout_keep_probability(keep_probability: f64) -> GpuResult<()> {
+    if keep_probability.is_finite() && keep_probability > 0.0 && keep_probability <= 1.0 {
+        Ok(())
+    } else {
+        Err(GpuError::InvalidState {
+            message: format!(
+                "dropout keep_probability must be finite and in (0, 1], got {keep_probability}"
+            ),
+        })
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn reserve_dropout_philox_state(
+    n: usize,
+    device: &GpuDevice,
+) -> GpuResult<(PhiloxState, TorchDistributionPolicy)> {
+    let policy = torch_distribution_policy(n, 4, device)?;
+    let state = {
+        let mut mgr = CUDA_RNG_MANAGER
+            .lock()
+            .map_err(|e| GpuError::InvalidState {
+                message: format!("CUDA RNG manager mutex poisoned: {e}"),
+            })?;
+        let rng_gen = mgr.generator(device.ordinal());
+        let state = rng_gen.get_state();
+        if state.offset() != 0 {
+            return Err(GpuError::InvalidState {
+                message: format!(
+                    "CUDA dropout requires a 4x32-aligned Philox state, got offset {}",
+                    state.offset()
+                ),
+            });
+        }
+        rng_gen.advance(policy.counter_advance);
+        state
+    };
+    Ok((state, policy))
+}
+
+#[cfg(feature = "cuda")]
+fn dropout_kernel_error_name(storage: DropoutStorage) -> &'static str {
+    match storage {
+        DropoutStorage::F32 => "philox_dropout_f32_kernel",
+        DropoutStorage::F64 => "philox_dropout_f64_kernel",
+        DropoutStorage::F16 => "philox_dropout_f16_kernel",
+        DropoutStorage::BF16 => "philox_dropout_bf16_kernel",
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn dropout_entry_name(storage: DropoutStorage, vector_size: u32) -> String {
+    format!("{}_v{vector_size}_kernel", storage.entry_prefix())
+}
+
+#[cfg(feature = "cuda")]
+fn compile_dropout_kernel(
+    storage: DropoutStorage,
+    vector_size: u32,
+    device: &GpuDevice,
+) -> GpuResult<cudarc::driver::CudaFunction> {
+    let entry = dropout_entry_name(storage, vector_size);
+    let ptx = build_philox_dropout_ptx(storage, vector_size, &entry);
+    crate::module_cache::get_or_compile_owned(device.context(), ptx, entry, device.ordinal() as u32)
+        .map_err(|e| GpuError::PtxCompileFailed {
+            kernel: dropout_kernel_error_name(storage),
+            source: e,
+        })
+}
+
+#[cfg(feature = "cuda")]
+fn launch_dropout_f32_like(
+    input: &CudaBuffer<f32>,
+    keep_probability: f64,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<f32>, PhiloxState)> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_dropout_keep_probability(keep_probability)?;
+    let n = input.len();
+    if n == 0 {
+        let state = {
+            let mut mgr = CUDA_RNG_MANAGER
+                .lock()
+                .map_err(|e| GpuError::InvalidState {
+                    message: format!("CUDA RNG manager mutex poisoned: {e}"),
+                })?;
+            mgr.generator(device.ordinal()).get_state()
+        };
+        return Ok((
+            alloc_zeros_f32(0, device)?,
+            alloc_zeros_f32(0, device)?,
+            state,
+        ));
+    }
+
+    let (state, policy) = reserve_dropout_philox_state(n, device)?;
+    let vector_size = torch_dropout_vector_size(n, DropoutStorage::F32);
+    let f = compile_dropout_kernel(DropoutStorage::F32, vector_size, device)?;
+
+    let mut out = alloc_zeros_f32(n, device)?;
+    let mut mask = alloc_zeros_f32(n, device)?;
+    let n_u64 = n as u64;
+    let keep = keep_probability as f32;
+    let scale = (1.0 / keep_probability) as f32;
+    let seed_lo = state.seed as u32;
+    let seed_hi = (state.seed >> 32) as u32;
+    let counter_lo = state.counter as u32;
+    let counter_hi = (state.counter >> 32) as u32;
+    let stride = policy.stride;
+
+    unsafe {
+        device
+            .stream()
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(mask.inner_mut())
+            .arg(&n_u64)
+            .arg(&keep)
+            .arg(&scale)
+            .arg(&seed_lo)
+            .arg(&seed_hi)
+            .arg(&counter_lo)
+            .arg(&counter_hi)
+            .arg(&stride)
+            .launch(policy.launch)?;
+    }
+
+    Ok((out, mask, state))
+}
+
+#[cfg(feature = "cuda")]
+fn launch_dropout_f64_like(
+    input: &CudaBuffer<f64>,
+    keep_probability: f64,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<f64>, PhiloxState)> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_dropout_keep_probability(keep_probability)?;
+    let n = input.len();
+    if n == 0 {
+        let state = {
+            let mut mgr = CUDA_RNG_MANAGER
+                .lock()
+                .map_err(|e| GpuError::InvalidState {
+                    message: format!("CUDA RNG manager mutex poisoned: {e}"),
+                })?;
+            mgr.generator(device.ordinal()).get_state()
+        };
+        return Ok((
+            alloc_zeros_f64(0, device)?,
+            alloc_zeros_f64(0, device)?,
+            state,
+        ));
+    }
+
+    let (state, policy) = reserve_dropout_philox_state(n, device)?;
+    let vector_size = torch_dropout_vector_size(n, DropoutStorage::F64);
+    let f = compile_dropout_kernel(DropoutStorage::F64, vector_size, device)?;
+
+    let mut out = alloc_zeros_f64(n, device)?;
+    let mut mask = alloc_zeros_f64(n, device)?;
+    let n_u64 = n as u64;
+    let keep = keep_probability;
+    let scale = 1.0 / keep_probability;
+    let seed_lo = state.seed as u32;
+    let seed_hi = (state.seed >> 32) as u32;
+    let counter_lo = state.counter as u32;
+    let counter_hi = (state.counter >> 32) as u32;
+    let stride = policy.stride;
+
+    unsafe {
+        device
+            .stream()
+            .launch_builder(&f)
+            .arg(input.inner())
+            .arg(out.inner_mut())
+            .arg(mask.inner_mut())
+            .arg(&n_u64)
+            .arg(&keep)
+            .arg(&scale)
+            .arg(&seed_lo)
+            .arg(&seed_hi)
+            .arg(&counter_lo)
+            .arg(&counter_hi)
+            .arg(&stride)
+            .launch(policy.launch)?;
+    }
+
+    Ok((out, mask, state))
+}
+
+#[cfg(feature = "cuda")]
+fn launch_dropout_u16_like(
+    input: &cudarc::driver::CudaSlice<u16>,
+    logical_len: usize,
+    keep_probability: f64,
+    storage: DropoutStorage,
+    device: &GpuDevice,
+) -> GpuResult<(
+    cudarc::driver::CudaSlice<u16>,
+    cudarc::driver::CudaSlice<u16>,
+    PhiloxState,
+)> {
+    use cudarc::driver::PushKernelArg;
+
+    validate_dropout_keep_probability(keep_probability)?;
+    if logical_len > input.len() {
+        return Err(GpuError::ShapeMismatch {
+            op: "philox_dropout_u16",
+            expected: vec![input.len()],
+            got: vec![logical_len],
+        });
+    }
+    if logical_len == 0 {
+        let state = {
+            let mut mgr = CUDA_RNG_MANAGER
+                .lock()
+                .map_err(|e| GpuError::InvalidState {
+                    message: format!("CUDA RNG manager mutex poisoned: {e}"),
+                })?;
+            mgr.generator(device.ordinal()).get_state()
+        };
+        return Ok((
+            device.stream().alloc_zeros::<u16>(0)?,
+            device.stream().alloc_zeros::<u16>(0)?,
+            state,
+        ));
+    }
+
+    let (state, policy) = reserve_dropout_philox_state(logical_len, device)?;
+    let vector_size = torch_dropout_vector_size(logical_len, storage);
+    let f = compile_dropout_kernel(storage, vector_size, device)?;
+
+    let mut out = device.stream().alloc_zeros::<u16>(logical_len)?;
+    let mut mask = device.stream().alloc_zeros::<u16>(logical_len)?;
+    let n_u64 = logical_len as u64;
+    let keep = keep_probability as f32;
+    let scale = (1.0 / keep_probability) as f32;
+    let seed_lo = state.seed as u32;
+    let seed_hi = (state.seed >> 32) as u32;
+    let counter_lo = state.counter as u32;
+    let counter_hi = (state.counter >> 32) as u32;
+    let stride = policy.stride;
+
+    unsafe {
+        device
+            .stream()
+            .launch_builder(&f)
+            .arg(input)
+            .arg(&mut out)
+            .arg(&mut mask)
+            .arg(&n_u64)
+            .arg(&keep)
+            .arg(&scale)
+            .arg(&seed_lo)
+            .arg(&seed_hi)
+            .arg(&counter_lo)
+            .arg(&counter_hi)
+            .arg(&stride)
+            .launch(policy.launch)?;
+    }
+
+    Ok((out, mask, state))
+}
+
+/// Apply PyTorch-layout Philox dropout to a contiguous f32 CUDA buffer.
+#[cfg(feature = "cuda")]
+pub fn gpu_philox_dropout_f32(
+    input: &CudaBuffer<f32>,
+    keep_probability: f64,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f32>, CudaBuffer<f32>, PhiloxState)> {
+    launch_dropout_f32_like(input, keep_probability, device)
+}
+
+/// Apply PyTorch-layout Philox dropout to a contiguous f64 CUDA buffer.
+#[cfg(feature = "cuda")]
+pub fn gpu_philox_dropout_f64(
+    input: &CudaBuffer<f64>,
+    keep_probability: f64,
+    device: &GpuDevice,
+) -> GpuResult<(CudaBuffer<f64>, CudaBuffer<f64>, PhiloxState)> {
+    launch_dropout_f64_like(input, keep_probability, device)
+}
+
+/// Apply PyTorch-layout Philox dropout to a contiguous IEEE f16 CUDA buffer.
+#[cfg(feature = "cuda")]
+pub fn gpu_philox_dropout_f16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    logical_len: usize,
+    keep_probability: f64,
+    device: &GpuDevice,
+) -> GpuResult<(
+    cudarc::driver::CudaSlice<u16>,
+    cudarc::driver::CudaSlice<u16>,
+    PhiloxState,
+)> {
+    launch_dropout_u16_like(
+        input,
+        logical_len,
+        keep_probability,
+        DropoutStorage::F16,
+        device,
+    )
+}
+
+/// Apply PyTorch-layout Philox dropout to a contiguous bf16 CUDA buffer.
+#[cfg(feature = "cuda")]
+pub fn gpu_philox_dropout_bf16(
+    input: &cudarc::driver::CudaSlice<u16>,
+    logical_len: usize,
+    keep_probability: f64,
+    device: &GpuDevice,
+) -> GpuResult<(
+    cudarc::driver::CudaSlice<u16>,
+    cudarc::driver::CudaSlice<u16>,
+    PhiloxState,
+)> {
+    launch_dropout_u16_like(
+        input,
+        logical_len,
+        keep_probability,
+        DropoutStorage::BF16,
+        device,
+    )
 }
 
 /// Fill a GPU buffer with uniform random f32 values in [0, 1) using the

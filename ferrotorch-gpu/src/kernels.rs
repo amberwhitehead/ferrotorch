@@ -37,7 +37,7 @@
 //! | REQ-12 (strided ops) | SHIPPED | strided ops section in `kernels.rs`; consumer `CudaBackendImpl::strided_split / strided_cat / transpose_2d / permute_0213` in `backend_impl.rs` |
 //! | REQ-13 (embedding / KV cache) | SHIPPED | embedding / KV-cache section in `kernels.rs`; consumer `CudaBackendImpl::embed_lookup_* / slice_write_* / slice_read_*` f32+f64 in `backend_impl.rs` |
 //! | REQ-14 (matmul / pool / batchnorm small) | SHIPPED | `pub fn gpu_small_matmul + MaxPool2d/AvgPool2d + BatchNorm2d in kernels.rs`; consumer `CudaBackendImpl::matmul_f32 / conv2d_f32 / pooling / batchnorm` trait methods |
-//! | REQ-15 (dropout) | SHIPPED | `pub fn gpu_dropout in kernels.rs` (dropout section); consumer `CudaBackendImpl::dropout_f32 / dropout_philox_f32 in backend_impl.rs` |
+//! | REQ-15 (dropout) | SHIPPED | legacy explicit-seed `pub fn gpu_dropout in kernels.rs` (dropout section); production Philox dropout lives in `rng.rs` and is consumed by `CudaBackendImpl::dropout_philox_*` |
 //! | REQ-16 (bf16 dispatch wrappers) | SHIPPED | bf16 binary / axis-reduction / activation PTX + dispatch functions in `kernels.rs`; consumer `CudaBackendImpl::add_bf16_f32` + broader bf16 trait method block in `backend_impl.rs` |
 //! | REQ-17 (fused Adam / GRU cell) | SHIPPED | `pub fn gpu_fused_adam_step` + fused GRU cell in `kernels.rs`; consumer `ferrotorch-optim` Adam optimizer routes via fused Adam trait method on `GpuBackend` for CUDA |
 //! | REQ-18 (`_into` zero-alloc helpers) | SHIPPED | `_into` helpers section in `kernels.rs` covering 10+ ops; consumer `ferrotorch-core/src/inplace.rs` op dispatch + graph-capture-safe variants in `backend_impl.rs` |
@@ -12526,9 +12526,9 @@ DONE:\n\
 // drop decisions (a comparison against `threshold`, dominated by the
 // high bits) were bit-identical — every dropout call drew the SAME mask
 // (ferrotorch-paged #43). The fmix32 multiplications avalanche the seed
-// into all 32 bits. Mirror: `philox_dropout_mask` in
-// ferrotorch-nn/src/dropout.rs regenerates this exact sequence on CPU
-// for the backward pass — any change here must change there in lockstep.
+// into all 32 bits. This legacy explicit-seed helper is still pinned for
+// direct kernel callers; production `nn::Dropout` uses the resident
+// PyTorch-layout Philox output+mask kernels in `rng.rs` instead.
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "cuda")]
@@ -22846,14 +22846,14 @@ pub fn gpu_softmax(
 /// mix (the original xorshift) made the drop decision invariant under
 /// the small seed deltas produced by consecutive Philox counter
 /// snapshots, so every dropout call reused one mask (ferrotorch-paged
-/// #43). Reproduced byte-exactly on CPU by `philox_dropout_mask` in
-/// ferrotorch-nn/src/dropout.rs for backward-mask regeneration — keep
-/// the two in lockstep.
+/// #43). This explicit-seed helper is retained for direct low-level callers
+/// and conformance coverage; `ferrotorch-nn::Dropout` uses the resident
+/// PyTorch-layout Philox output+scaled-mask kernels in `rng.rs`, so autograd
+/// no longer regenerates this mask on CPU.
 ///
-/// **Known limitation**: still not the full Philox 4x32-10
-/// counter-based RNG that PyTorch uses; a proper Philox dropout kernel
-/// would generate the mask via `philox_uniform_kernel` and threshold
-/// it, for strict statistical properties and cross-device parity.
+/// **Known limitation**: this seed-based helper is not PyTorch CUDA dropout.
+/// Use `crate::rng::gpu_philox_dropout_*` for the production Philox/cuRAND
+/// stream contract.
 #[cfg(feature = "cuda")]
 pub fn gpu_dropout(
     input: &CudaBuffer<f32>,

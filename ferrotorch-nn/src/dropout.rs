@@ -42,103 +42,11 @@
 use std::sync::Arc;
 
 use ferrotorch_core::autograd::no_grad::is_grad_enabled;
-use ferrotorch_core::gpu_dispatch::GpuRngState;
 use ferrotorch_core::tensor::GradFn;
 use ferrotorch_core::{FerrotorchError, FerrotorchResult, Float, Tensor, TensorStorage};
 
 use crate::module::Module;
 use crate::parameter::Parameter;
-
-// ---------------------------------------------------------------------------
-// Philox 4x32-10 for CPU-side mask regeneration
-// ---------------------------------------------------------------------------
-// We need the Philox algorithm on CPU to regenerate dropout masks during
-// backward for GPU tensors (the forward mask was generated on GPU using
-// the Philox state). This is a copy of the core algorithm from
-// ferrotorch-gpu/src/rng.rs to avoid a dependency on the GPU crate.
-
-#[allow(dead_code)]
-const PHILOX_M0: u32 = 0xD2511F53;
-#[allow(dead_code)]
-const PHILOX_M1: u32 = 0xCD9E8D57;
-#[allow(dead_code)]
-const PHILOX_W0: u32 = 0x9E3779B9;
-#[allow(dead_code)]
-const PHILOX_W1: u32 = 0xBB67AE85;
-
-#[allow(dead_code)]
-#[inline]
-fn philox_round(c0: u32, c1: u32, c2: u32, c3: u32, k0: u32, k1: u32) -> (u32, u32, u32, u32) {
-    let prod0 = (PHILOX_M0 as u64) * (c0 as u64);
-    let hi0 = (prod0 >> 32) as u32;
-    let lo0 = prod0 as u32;
-
-    let prod1 = (PHILOX_M1 as u64) * (c2 as u64);
-    let hi1 = (prod1 >> 32) as u32;
-    let lo1 = prod1 as u32;
-
-    let new_c0 = hi1 ^ c1 ^ k0;
-    let new_c1 = lo1;
-    let new_c2 = hi0 ^ c3 ^ k1;
-    let new_c3 = lo0;
-
-    (new_c0, new_c1, new_c2, new_c3)
-}
-
-/// Philox 4x32-10: produces 4 uniform u32 values from (counter, key).
-#[allow(dead_code)]
-fn philox_4x32_10(counter: u64, key: u64) -> [u32; 4] {
-    let mut c0 = counter as u32;
-    let mut c1 = (counter >> 32) as u32;
-    let mut c2 = 0u32;
-    let mut c3 = 0u32;
-
-    let mut k0 = key as u32;
-    let mut k1 = (key >> 32) as u32;
-
-    for _ in 0..9 {
-        (c0, c1, c2, c3) = philox_round(c0, c1, c2, c3, k0, k1);
-        k0 = k0.wrapping_add(PHILOX_W0);
-        k1 = k1.wrapping_add(PHILOX_W1);
-    }
-    // Round 10 (final, no key advance)
-    (c0, c1, c2, c3) = philox_round(c0, c1, c2, c3, k0, k1);
-
-    [c0, c1, c2, c3]
-}
-
-/// Regenerate the GPU dropout mask on CPU, byte-exactly mirroring the
-/// `dropout_kernel` PTX in ferrotorch-gpu/src/kernels.rs: derived u32 seed
-/// `(counter ^ seed)`, per-element hash `fmix32(i * 2654435761 ^ seed)`
-/// (murmur3 finalizer), drop when `hash < threshold`.
-///
-/// This ensures the backward mask matches the forward mask generated on
-/// GPU. The fmix32 multiplications are load-bearing: a GF(2)-linear mix
-/// here (the original xorshift) made masks invariant under consecutive
-/// Philox counter deltas, so every dropout call drew the same mask
-/// (ferrotorch-paged #43). Any change here must change the PTX in
-/// lockstep.
-fn philox_dropout_mask<T: Float>(
-    numel: usize,
-    threshold: u32,
-    scale: T,
-    rng_state: &GpuRngState,
-) -> Vec<T> {
-    let zero = <T as num_traits::Zero>::zero();
-    let derived_seed = (rng_state.counter() ^ rng_state.seed()) as u32;
-
-    (0..numel)
-        .map(|i| {
-            let mut r = (i as u32).wrapping_mul(2654435761) ^ derived_seed;
-            r ^= r >> 16;
-            r = r.wrapping_mul(0x85eb_ca6b);
-            r ^= r >> 13;
-            r = r.wrapping_mul(0xc2b2_ae35);
-            r ^= r >> 16;
-            if r < threshold { zero } else { scale }
-        })
-        .collect()
-}
 
 // ---------------------------------------------------------------------------
 // In-place storage write
@@ -444,27 +352,30 @@ impl<T: Float> Module<T> for Dropout<T> {
         if input.is_cuda()
             && let Some(backend) = ferrotorch_core::gpu_dispatch::gpu_backend()
         {
-            let threshold = (self.p * u32::MAX as f64) as u32;
-            let scale_f32 = 1.0f32 / (1.0 - self.p as f32);
+            let keep_probability = 1.0 - self.p;
+            let input_c = input.contiguous()?;
+            let (handle, mask_handle, _rng_state): (
+                ferrotorch_core::gpu_dispatch::GpuBufferHandle,
+                ferrotorch_core::gpu_dispatch::GpuBufferHandle,
+                ferrotorch_core::gpu_dispatch::GpuRngState,
+            ) = ferrotorch_core::dispatch_floating_dtype!(
+                T,
+                "Dropout",
+                f32 => backend.dropout_philox_f32(input_c.gpu_handle()?, keep_probability),
+                f64 => backend.dropout_philox_f64(input_c.gpu_handle()?, keep_probability),
+                bf16 => backend.dropout_philox_bf16(input_c.gpu_handle()?, keep_probability),
+                f16 => backend.dropout_philox_f16(input_c.gpu_handle()?, keep_probability),
+            )?;
 
-            let (handle, rng_state) =
-                backend.dropout_philox_f32(input.gpu_handle()?, threshold, scale_f32)?;
-
-            // For backward, we need the mask. Regenerate it from the saved
-            // Philox RNG state using the same deterministic hash that the
-            // GPU kernel uses. This is reproducible across checkpoint
-            // save/restore because the Philox state is deterministic.
+            // The CUDA backend returns the same scaled mask produced by the
+            // forward Philox kernel. Saving that resident tensor keeps backward
+            // as a single dtype-native GPU multiply with no CPU regeneration.
             if is_grad_enabled() && input.requires_grad() {
-                let scaled_mask_vec = philox_dropout_mask(numel, threshold, scale, &rng_state);
-                // Upload the mask to the input's device so the
-                // backward `mul` runs on-device without a CPU
-                // round-trip.
-                let mask_cpu = Tensor::from_storage(
-                    TensorStorage::cpu(scaled_mask_vec),
+                let scaled_mask = Tensor::from_storage(
+                    TensorStorage::gpu(mask_handle),
                     input.shape().to_vec(),
                     false,
                 )?;
-                let scaled_mask = mask_cpu.to(input.device())?;
                 return Tensor::from_operation(
                     TensorStorage::gpu(handle),
                     input.shape().to_vec(),

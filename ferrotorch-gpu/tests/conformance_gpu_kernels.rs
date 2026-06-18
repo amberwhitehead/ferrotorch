@@ -1389,11 +1389,9 @@ fn kernel_dropout_shape_and_sparsity() {
 /// gpu_dropout: nearby seeds MUST produce different masks.
 ///
 /// Regression for ferrotorch-paged #43: the original GF(2)-linear
-/// xorshift hash made the drop decision invariant under small seed
-/// deltas — `dropout_philox_f32` derives consecutive seeds from Philox
-/// counter snapshots (0, 256, 512, …), so every dropout call drew the
-/// SAME mask and MC-dropout ensembles had zero variance. Seed 256 is the
-/// exact delta two back-to-back 1024-element calls produce.
+/// xorshift hash made the drop decision invariant under small explicit seed
+/// deltas, so direct callers could draw structurally identical masks. Seed
+/// 256 is the historical delta that exposed the old low-level helper bug.
 #[test]
 fn kernel_dropout_mask_varies_with_nearby_seeds() {
     ensure_cuda();
@@ -1468,11 +1466,9 @@ fn kernel_dropout_f64_mask_varies_with_nearby_seeds() {
 /// gpu_dropout: the kernel hash is pinned bit-exactly to
 /// `fmix32(i * 2654435761 ^ seed)` (murmur3 finalizer).
 ///
-/// ferrotorch-nn's `philox_dropout_mask` regenerates this sequence on
-/// CPU to build the backward mask for autograd; if the kernel and that
-/// mirror drift apart, gradients silently use a different mask than the
-/// forward pass. This test IS the spec: any PTX hash change must update
-/// this test AND the nn-side mirror in the same commit.
+/// This legacy explicit-seed helper is not used by `ferrotorch-nn::Dropout`;
+/// the production module path uses resident Philox output+mask kernels. This
+/// test remains the low-level spec for direct callers of `gpu_dropout`.
 #[test]
 fn kernel_dropout_mask_matches_fmix32_spec() {
     ensure_cuda();
@@ -1501,8 +1497,7 @@ fn kernel_dropout_mask_matches_fmix32_spec() {
         assert_eq!(
             v, expected,
             "dropout kernel diverged from the fmix32 spec at element {i} \
-             (got {v}, expected {expected}) — if the PTX hash changed, \
-             ferrotorch-nn::philox_dropout_mask must change in lockstep"
+             (got {v}, expected {expected})"
         );
     }
 }
