@@ -72,8 +72,11 @@ fn increment_coords(coords: &mut [usize], shape: &[usize]) -> bool {
 }
 
 #[inline]
-fn cuda_f32_f64<T: Float>() -> bool {
-    matches!(T::dtype(), DType::F32 | DType::F64)
+fn cuda_float_dtype<T: Float>() -> bool {
+    matches!(
+        T::dtype(),
+        DType::F32 | DType::F64 | DType::F16 | DType::BF16
+    )
 }
 
 fn cuda_ordinal(device: Device, op: &'static str) -> FerrotorchResult<usize> {
@@ -140,6 +143,11 @@ fn scale_cuda_tensor<T: Float>(
             message: format!("{op}: alpha {alpha} not representable in target dtype"),
         }
     })?;
+    let alpha_f32 = alpha_t
+        .to_f32()
+        .ok_or_else(|| FerrotorchError::InvalidArgument {
+            message: format!("{op}: alpha {alpha} not representable as f32"),
+        })?;
     let input_c = no_grad(|| input.contiguous())?;
     if alpha_t == <T as num_traits::One>::one() {
         return Ok(input_c);
@@ -147,14 +155,7 @@ fn scale_cuda_tensor<T: Float>(
 
     let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
     let handle = match T::dtype() {
-        DType::F32 => backend.scale_f32(
-            input_c.gpu_handle()?,
-            alpha_t
-                .to_f32()
-                .ok_or_else(|| FerrotorchError::InvalidArgument {
-                    message: format!("{op}: alpha {alpha} not representable as f32"),
-                })?,
-        )?,
+        DType::F32 => backend.scale_f32(input_c.gpu_handle()?, alpha_f32)?,
         DType::F64 => backend.scale_f64(
             input_c.gpu_handle()?,
             alpha_t
@@ -163,6 +164,8 @@ fn scale_cuda_tensor<T: Float>(
                     message: format!("{op}: alpha {alpha} not representable as f64"),
                 })?,
         )?,
+        DType::F16 => backend.scale_f16(input_c.gpu_handle()?, alpha_f32)?,
+        DType::BF16 => backend.scale_bf16_bf16(input_c.gpu_handle()?, alpha_f32)?,
         _ => {
             return Err(FerrotorchError::NotImplementedOnCuda { op });
         }
@@ -2298,8 +2301,8 @@ pub fn where_cond_bcast<T: Float>(
 // outputs on that device and deliver gradients on the leaves' devices.
 // ferrotorch surfaces the structured `DeviceMismatch` equivalent at entry
 // (R-LOUD-1) and preserves residency where kernels exist: `take`/`put` run
-// dim-aware CUDA kernels for f32/f64 flat gathers/scatters, and `index_add`/
-// `index_copy` run resident f32/f64 dim-aware scatter paths. Remaining
+// dim-aware CUDA kernels for f32/f64/f16/bf16 flat gathers/scatters, and
+// `index_add`/`index_copy` run resident f32/f64/f16/bf16 dim-aware scatter paths. Remaining
 // unsupported CUDA dtype/operation combinations surface `NotImplementedOnCuda`
 // rather than silently detouring through host code; see each op's doc-comment.
 // ---------------------------------------------------------------------------
@@ -2321,7 +2324,7 @@ fn cuda_full<T: Float>(
     device: Device,
     op: &'static str,
 ) -> FerrotorchResult<Tensor<T>> {
-    if !cuda_f32_f64::<T>() {
+    if !cuda_float_dtype::<T>() {
         return Err(FerrotorchError::NotImplementedOnCuda { op });
     }
     let ordinal = cuda_ordinal(device, op)?;
@@ -2343,6 +2346,24 @@ fn cuda_full<T: Float>(
                 .to_f64()
                 .ok_or_else(|| FerrotorchError::InvalidArgument {
                     message: format!("{op}: value is not representable as f64"),
+                })?,
+            ordinal,
+        )?,
+        DType::F16 => backend.fill_f16(
+            numel,
+            value
+                .to_f32()
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!("{op}: value is not representable as f32"),
+                })?,
+            ordinal,
+        )?,
+        DType::BF16 => backend.fill_bf16_bf16(
+            numel,
+            value
+                .to_f32()
+                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                    message: format!("{op}: value is not representable as f32"),
                 })?,
             ordinal,
         )?,
@@ -2378,7 +2399,7 @@ fn cuda_gather_index_shape<T: Float>(
     index_shape: &[usize],
     dim: usize,
 ) -> FerrotorchResult<Tensor<T>> {
-    if !cuda_f32_f64::<T>() {
+    if !cuda_float_dtype::<T>() {
         return Err(FerrotorchError::NotImplementedOnCuda {
             op: "ScatterReduceBackward",
         });
@@ -2402,7 +2423,7 @@ fn cuda_scatter_zero_at_index<T: Float>(
     index_shape: &[usize],
     dim: usize,
 ) -> FerrotorchResult<Tensor<T>> {
-    if !cuda_f32_f64::<T>() {
+    if !cuda_float_dtype::<T>() {
         return Err(FerrotorchError::NotImplementedOnCuda {
             op: "ScatterReduceBackward",
         });
@@ -2419,6 +2440,22 @@ fn cuda_scatter_zero_at_index<T: Float>(
             dim,
         )?,
         DType::F64 => backend.scatter_value_nd_f64(
+            input_c.gpu_handle()?,
+            idx_handle,
+            0.0,
+            input_shape,
+            index_shape,
+            dim,
+        )?,
+        DType::F16 => backend.scatter_value_nd_f16(
+            input_c.gpu_handle()?,
+            idx_handle,
+            0.0,
+            input_shape,
+            index_shape,
+            dim,
+        )?,
+        DType::BF16 => backend.scatter_value_nd_bf16(
             input_c.gpu_handle()?,
             idx_handle,
             0.0,
@@ -2678,7 +2715,7 @@ fn scatter_reduce_cuda_forward<T: Float>(
     reduce: ScatterReduce,
     include_self: bool,
 ) -> FerrotorchResult<Tensor<T>> {
-    if !cuda_f32_f64::<T>() {
+    if !cuda_float_dtype::<T>() {
         return Err(FerrotorchError::NotImplementedOnCuda {
             op: "scatter_reduce",
         });
@@ -2723,6 +2760,26 @@ fn scatter_reduce_cuda_forward<T: Float>(
             include_self,
         )?,
         DType::F64 => backend.scatter_reduce_nd_f64(
+            input_c.gpu_handle()?,
+            &idx_handle,
+            src_slab.gpu_handle()?,
+            input_c.shape(),
+            index_shape,
+            dim,
+            gpu_reduce,
+            include_self,
+        )?,
+        DType::F16 => backend.scatter_reduce_nd_f16(
+            input_c.gpu_handle()?,
+            &idx_handle,
+            src_slab.gpu_handle()?,
+            input_c.shape(),
+            index_shape,
+            dim,
+            gpu_reduce,
+            include_self,
+        )?,
+        DType::BF16 => backend.scatter_reduce_nd_bf16(
             input_c.gpu_handle()?,
             &idx_handle,
             src_slab.gpu_handle()?,
@@ -3111,7 +3168,7 @@ impl<T: Float> ScatterReduceBackward<T> {
         &self,
         grad_output: &Tensor<T>,
     ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        if !cuda_f32_f64::<T>() {
+        if !cuda_float_dtype::<T>() {
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "ScatterReduceBackward",
             });
@@ -3175,7 +3232,7 @@ impl<T: Float> ScatterReduceBackward<T> {
         let zero = <T as num_traits::Zero>::zero();
 
         if grad_output.is_cuda() {
-            if !cuda_f32_f64::<T>() {
+            if !cuda_float_dtype::<T>() {
                 return Err(FerrotorchError::NotImplementedOnCuda {
                     op: "ScatterReduceBackward",
                 });
@@ -3190,38 +3247,19 @@ impl<T: Float> ScatterReduceBackward<T> {
             let go_handle = go_c.gpu_handle()?;
 
             let grad_input = if self.input.requires_grad() {
-                let result_h = if self.include_self {
-                    backend.clone_buffer(go_handle)?
+                let gi = if self.include_self {
+                    let result_h = backend.clone_buffer(go_handle)?;
+                    Tensor::from_storage(TensorStorage::gpu(result_h), input_shape.to_vec(), false)?
                 } else {
-                    match T::dtype() {
-                        DType::F32 => backend.scatter_value_nd_f32(
-                            go_handle,
-                            &idx_handle,
-                            0.0,
-                            input_shape,
-                            &self.index_shape,
-                            self.dim,
-                        )?,
-                        DType::F64 => backend.scatter_value_nd_f64(
-                            go_handle,
-                            &idx_handle,
-                            0.0,
-                            input_shape,
-                            &self.index_shape,
-                            self.dim,
-                        )?,
-                        _ => {
-                            return Err(FerrotorchError::NotImplementedOnCuda {
-                                op: "ScatterReduceBackward",
-                            });
-                        }
-                    }
+                    cuda_scatter_zero_at_index(
+                        &go_c,
+                        &idx_handle,
+                        input_shape,
+                        &self.index_shape,
+                        self.dim,
+                    )?
                 };
-                Some(Tensor::from_storage(
-                    TensorStorage::gpu(result_h),
-                    input_shape.to_vec(),
-                    false,
-                )?)
+                Some(gi)
             } else {
                 None
             };
@@ -3405,7 +3443,7 @@ impl<T: Float> ScatterReduceBackward<T> {
         &self,
         grad_output: &Tensor<T>,
     ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        if !cuda_f32_f64::<T>() {
+        if !cuda_float_dtype::<T>() {
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "ScatterReduceBackward",
             });
@@ -3663,7 +3701,7 @@ impl<T: Float> ScatterReduceBackward<T> {
         &self,
         grad_output: &Tensor<T>,
     ) -> FerrotorchResult<Vec<Option<Tensor<T>>>> {
-        if !cuda_f32_f64::<T>() {
+        if !cuda_float_dtype::<T>() {
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "ScatterReduceBackward",
             });
@@ -3822,7 +3860,7 @@ impl<T: Float> ScatterReduceBackward<T> {
 ///
 /// `src` must live on `input`'s device — a mix returns
 /// [`FerrotorchError::DeviceMismatch`] (torch: "Expected all tensors to be
-/// on the same device, but got ..."). CUDA f32/f64 operands lower through
+/// on the same device, but got ..."). CUDA f32/f64/f16/bf16 operands lower through
 /// resident kernels/composites for every shipped reduce mode (`sum`, `mean`,
 /// `prod`, `amax`, `amin`); unsupported CUDA dtypes return
 /// `NotImplementedOnCuda` instead of falling through to a host fold. Gradients
@@ -3849,7 +3887,7 @@ pub fn scatter_reduce<T: Float>(
         // shape and bounds checks, but the output shape remains scalar.
         let scalar_shapes = validate_scalar_scatter_reduce(index, index_shape, src)?;
         if input.is_cuda() || src.is_cuda() {
-            if !input.is_cuda() || !src.is_cuda() || !cuda_f32_f64::<T>() {
+            if !input.is_cuda() || !src.is_cuda() || !cuda_float_dtype::<T>() {
                 return Err(FerrotorchError::NotImplementedOnCuda {
                     op: "scatter_reduce",
                 });
@@ -3934,7 +3972,7 @@ pub fn scatter_reduce<T: Float>(
         validate_scatter_reduce_shapes(input_shape, dim_usize, index, index_shape, src)?;
 
     if input.is_cuda() || src.is_cuda() {
-        if !input.is_cuda() || !src.is_cuda() || !cuda_f32_f64::<T>() {
+        if !input.is_cuda() || !src.is_cuda() || !cuda_float_dtype::<T>() {
             return Err(FerrotorchError::NotImplementedOnCuda {
                 op: "scatter_reduce",
             });
@@ -4408,7 +4446,7 @@ impl<T: Float> GradFn<T> for IndexAddBackward<T> {
         }
         let input_shape = self.input.shape();
         let ndim = input_shape.len();
-        let gpu_fast = grad_output.is_cuda() && cuda_f32_f64::<T>();
+        let gpu_fast = grad_output.is_cuda() && cuda_float_dtype::<T>();
 
         // grad for input: identity.
         let grad_input = if self.input.requires_grad() {
@@ -4553,13 +4591,13 @@ impl<T: Float> GradFn<T> for IndexAddBackward<T> {
 /// `index` and `source` must live on `input`'s device — a mix returns
 /// [`FerrotorchError::DeviceMismatch`] (torch: "Expected all tensors to be
 /// on the same device, but got index is on cpu, different from other
-/// tensors on cuda:0"). CUDA f32/f64 operands run resident: source is
+/// tensors on cuda:0"). CUDA f32/f64/f16/bf16 operands run resident: source is
 /// alpha-scaled on-device when needed, the 1-D index is expanded to the
 /// dim-aware kernel layout, and `scatter_add_dim_*` accumulates without
 /// downloading input/source values. Unsupported CUDA dtypes return
 /// `NotImplementedOnCuda` instead of falling through to a host walk.
-/// Gradients are delivered on the leaves' devices; f32/f64 CUDA backward uses
-/// resident clone/gather/scale kernels.
+/// Gradients are delivered on the leaves' devices; CUDA backward uses resident
+/// clone/gather/scale kernels for the same dtype set.
 pub fn index_add<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -4571,7 +4609,7 @@ pub fn index_add<T: Float>(
     same_device(input.device(), index.device())?;
     same_device(input.device(), source.device())?;
     // CUDA index values are copied to host for bounds/shape validation; tensor
-    // payloads stay resident on the f32/f64 CUDA fast path.
+    // payloads stay resident on the CUDA fast path.
     let index_host;
     let index: &IntTensor<i64> = if index.is_cuda() {
         index_host = index.to(Device::Cpu)?;
@@ -4656,7 +4694,7 @@ pub fn index_add<T: Float>(
         }
 
         if input.is_cuda() || source.is_cuda() {
-            if !cuda_f32_f64::<T>() {
+            if !cuda_float_dtype::<T>() {
                 return Err(FerrotorchError::NotImplementedOnCuda { op: "index_add" });
             }
             let input_c = no_grad(|| input.contiguous())?;
@@ -4668,6 +4706,21 @@ pub fn index_add<T: Float>(
                 }
                 DType::F64 => {
                     backend.add_scaled_f64(input_c.gpu_handle()?, source_c.gpu_handle()?, alpha)?
+                }
+                DType::F16 | DType::BF16 => {
+                    let source_scaled = if alpha_t == <T as num_traits::One>::one() {
+                        source_c
+                    } else {
+                        scale_cuda_tensor(&source_c, alpha, "index_add")?
+                    };
+                    match T::dtype() {
+                        DType::F16 => {
+                            backend.add_f16(input_c.gpu_handle()?, source_scaled.gpu_handle()?)?
+                        }
+                        DType::BF16 => backend
+                            .add_bf16_bf16(input_c.gpu_handle()?, source_scaled.gpu_handle()?)?,
+                        _ => unreachable!("outer dtype arm restricted to f16/bf16"),
+                    }
                 }
                 _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "index_add" }),
             };
@@ -4738,7 +4791,7 @@ pub fn index_add<T: Float>(
         source_shape[dim_usize]
     };
 
-    if input.is_cuda() && source.is_cuda() && cuda_f32_f64::<T>() {
+    if input.is_cuda() && source.is_cuda() && cuda_float_dtype::<T>() {
         let output_shape = input_shape.to_vec();
         let input_c = no_grad(|| input.contiguous())?;
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -4753,27 +4806,17 @@ pub fn index_add<T: Float>(
             };
             let ordinal = cuda_ordinal(input_c.device(), "index_add")?;
             let idx_handle = upload_expanded_dim_indices(&idx_usize, outer, inner, ordinal)?;
-            match T::dtype() {
-                DType::F32 => backend.scatter_add_dim_f32(
-                    input_c.gpu_handle()?,
-                    &idx_handle,
-                    source_scaled.gpu_handle()?,
-                    outer,
-                    in_dim_size,
-                    src_dim_size,
-                    inner,
-                )?,
-                DType::F64 => backend.scatter_add_dim_f64(
-                    input_c.gpu_handle()?,
-                    &idx_handle,
-                    source_scaled.gpu_handle()?,
-                    outer,
-                    in_dim_size,
-                    src_dim_size,
-                    inner,
-                )?,
-                _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "index_add" }),
-            }
+            scatter_dim_cuda_handle::<T>(
+                input_c.gpu_handle()?,
+                &idx_handle,
+                source_scaled.gpu_handle()?,
+                outer,
+                in_dim_size,
+                src_dim_size,
+                inner,
+                true,
+                "index_add",
+            )?
         };
         let storage = TensorStorage::gpu(handle);
         if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {
@@ -4871,7 +4914,7 @@ impl<T: Float> GradFn<T> for IndexCopyBackward<T> {
         let input_shape = self.input.shape();
         let ndim = input_shape.len();
         let zero = <T as num_traits::Zero>::zero();
-        let gpu_fast = grad_output.is_cuda() && cuda_f32_f64::<T>();
+        let gpu_fast = grad_output.is_cuda() && cuda_float_dtype::<T>();
 
         // grad for input: zero positions the copy overwrote.
         let grad_input = if self.input.requires_grad() {
@@ -4881,15 +4924,7 @@ impl<T: Float> GradFn<T> for IndexCopyBackward<T> {
                 } else if ndim == 0 {
                     let ordinal = cuda_ordinal(grad_output.device(), "IndexCopyBackward")?;
                     let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
-                    let handle = match T::dtype() {
-                        DType::F32 => backend.fill_f32(1, 0.0, ordinal)?,
-                        DType::F64 => backend.fill_f64(1, 0.0, ordinal)?,
-                        _ => {
-                            return Err(FerrotorchError::NotImplementedOnCuda {
-                                op: "IndexCopyBackward",
-                            });
-                        }
-                    };
+                    let handle = backend.alloc_zeros(1, T::dtype(), ordinal)?;
                     Some(Tensor::from_storage(
                         TensorStorage::gpu(handle),
                         input_shape.to_vec(),
@@ -4923,6 +4958,29 @@ impl<T: Float> GradFn<T> for IndexCopyBackward<T> {
                             self.index.len(),
                             inner,
                         )?,
+                        DType::F16 | DType::BF16 => {
+                            let zero_len = outer
+                                .checked_mul(self.index.len())
+                                .and_then(|n| n.checked_mul(inner))
+                                .ok_or_else(|| FerrotorchError::InvalidArgument {
+                                    message: format!(
+                                        "IndexCopyBackward: zero scatter source overflow for outer={outer}, index={}, inner={inner}",
+                                        self.index.len()
+                                    ),
+                                })?;
+                            let zeros = backend.alloc_zeros(zero_len, T::dtype(), ordinal)?;
+                            scatter_dim_cuda_handle::<T>(
+                                go_c.gpu_handle()?,
+                                &idx_handle,
+                                &zeros,
+                                outer,
+                                dim_size,
+                                self.index.len(),
+                                inner,
+                                false,
+                                "IndexCopyBackward",
+                            )?
+                        }
                         _ => {
                             return Err(FerrotorchError::NotImplementedOnCuda {
                                 op: "IndexCopyBackward",
@@ -5074,12 +5132,12 @@ impl<T: Float> GradFn<T> for IndexCopyBackward<T> {
 /// `index` and `source` must live on `input`'s device — a mix returns
 /// [`FerrotorchError::DeviceMismatch`] (torch: "Expected all tensors to be
 /// on the same device, but got source is on cpu, different from other
-/// tensors on cuda:0"). CUDA f32/f64 operands run resident via the existing
+/// tensors on cuda:0"). CUDA f32/f64/f16/bf16 operands run resident via the existing
 /// dim-aware `scatter_dim_*` kernels after expanding the 1-D index to the
 /// per-element kernel layout. Unsupported CUDA dtypes return
 /// `NotImplementedOnCuda` instead of falling through to a host walk.
-/// Gradients are delivered on the leaves' devices; f32/f64 CUDA backward uses
-/// resident scatter-zero/gather kernels.
+/// Gradients are delivered on the leaves' devices; CUDA backward uses resident
+/// scatter-zero/gather kernels for the same dtype set.
 pub fn index_copy<T: Float>(
     input: &Tensor<T>,
     dim: i64,
@@ -5090,7 +5148,7 @@ pub fn index_copy<T: Float>(
     same_device(input.device(), index.device())?;
     same_device(input.device(), source.device())?;
     // CUDA index values are copied to host for bounds/shape validation; tensor
-    // payloads stay resident on the f32/f64 CUDA fast path.
+    // payloads stay resident on the CUDA fast path.
     let index_host;
     let index: &IntTensor<i64> = if index.is_cuda() {
         index_host = index.to(Device::Cpu)?;
@@ -5169,7 +5227,7 @@ pub fn index_copy<T: Float>(
         }
 
         if input.is_cuda() || source.is_cuda() {
-            if !cuda_f32_f64::<T>() {
+            if !cuda_float_dtype::<T>() {
                 return Err(FerrotorchError::NotImplementedOnCuda { op: "index_copy" });
             }
             let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
@@ -5231,37 +5289,34 @@ pub fn index_copy<T: Float>(
         source_shape[dim_usize]
     };
 
-    if input.is_cuda() && source.is_cuda() && cuda_f32_f64::<T>() {
+    if input.is_cuda() && source.is_cuda() && cuda_float_dtype::<T>() {
         let output_shape = input_shape.to_vec();
         let input_c = no_grad(|| input.contiguous())?;
         let backend = gpu_backend().ok_or(FerrotorchError::DeviceUnavailable)?;
         let handle = if idx_usize.is_empty() || outer == 0 || inner == 0 || input.numel() == 0 {
             backend.clone_buffer(input_c.gpu_handle()?)?
         } else {
-            let source_c = no_grad(|| source.contiguous())?;
+            let source_c = if source_shape.is_empty() {
+                no_grad(|| {
+                    crate::grad_fns::shape::broadcast_to(source, &[outer, src_dim_size, inner])?
+                        .contiguous()
+                })?
+            } else {
+                no_grad(|| source.contiguous())?
+            };
             let ordinal = cuda_ordinal(input_c.device(), "index_copy")?;
             let idx_handle = upload_expanded_dim_indices(&idx_usize, outer, inner, ordinal)?;
-            match T::dtype() {
-                DType::F32 => backend.scatter_dim_f32(
-                    input_c.gpu_handle()?,
-                    &idx_handle,
-                    source_c.gpu_handle()?,
-                    outer,
-                    in_dim_size,
-                    src_dim_size,
-                    inner,
-                )?,
-                DType::F64 => backend.scatter_dim_f64(
-                    input_c.gpu_handle()?,
-                    &idx_handle,
-                    source_c.gpu_handle()?,
-                    outer,
-                    in_dim_size,
-                    src_dim_size,
-                    inner,
-                )?,
-                _ => return Err(FerrotorchError::NotImplementedOnCuda { op: "index_copy" }),
-            }
+            scatter_dim_cuda_handle::<T>(
+                input_c.gpu_handle()?,
+                &idx_handle,
+                source_c.gpu_handle()?,
+                outer,
+                in_dim_size,
+                src_dim_size,
+                inner,
+                false,
+                "index_copy",
+            )?
         };
         let storage = TensorStorage::gpu(handle);
         if (input.requires_grad() || source.requires_grad()) && is_grad_enabled() {

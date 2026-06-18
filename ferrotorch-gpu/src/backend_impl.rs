@@ -12937,6 +12937,66 @@ impl GpuBackend for CudaBackendImpl {
     }
 
     #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_reduce_nd_f16(
+        &self,
+        input: &GpuBufferHandle,
+        index: &GpuBufferHandle,
+        src: &GpuBufferHandle,
+        input_shape: &[usize],
+        index_shape: &[usize],
+        dim: usize,
+        reduce: GpuScatterReduce,
+        include_self: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let out = crate::scatter_gather_kernels::gpu_scatter_reduce_nd_f16(
+            Self::unwrap_buffer_f16(input)?,
+            Self::unwrap_buffer_i64(index)?.inner(),
+            Self::unwrap_buffer_f16(src)?,
+            input_shape,
+            index_shape,
+            dim,
+            reduce.as_u32(),
+            include_self,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_f16(out, ord))
+    }
+
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_reduce_nd_bf16(
+        &self,
+        input: &GpuBufferHandle,
+        index: &GpuBufferHandle,
+        src: &GpuBufferHandle,
+        input_shape: &[usize],
+        index_shape: &[usize],
+        dim: usize,
+        reduce: GpuScatterReduce,
+        include_self: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        let dev = self.device(input.device_ordinal())?;
+        let ord = input.device_ordinal();
+        let out = crate::scatter_gather_kernels::gpu_scatter_reduce_nd_bf16(
+            Self::unwrap_buffer_bf16(input)?,
+            Self::unwrap_buffer_i64(index)?.inner(),
+            Self::unwrap_buffer_bf16(src)?,
+            input_shape,
+            index_shape,
+            dim,
+            reduce.as_u32(),
+            include_self,
+            dev,
+        )
+        .map_err(Self::map_gpu_err)?;
+        Ok(Self::wrap_buffer_bf16(out, ord))
+    }
+
+    #[cfg(feature = "cuda")]
     fn scatter_add_segments_f32(
         &self,
         src: &GpuBufferHandle,

@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- CUDA on-device kernels for index_add / index_copy / scatter_reduce (CORE-048 #1742 follow-up) (#1954)
 - CummaxBackward/CumminBackward return NotImplementedOnCuda — einops reduce Max/Min CUDA backward errors loudly instead of producing gradients (#1962)
 - GPU on-device RNG: wire ferray-random Philox into a GPU kernel so rand/randn generate on-device (not CPU-gen + upload) (#1682)
 - ptx_compile_guard test: JIT-compiles every static `*_PTX` const (312) on the live GPU via the production driver path, so a kernel that fails to compile (the silent-CPU-fallback / hard-error class behind #1684/#1685) is caught at test time instead of shipping dead (#1686)

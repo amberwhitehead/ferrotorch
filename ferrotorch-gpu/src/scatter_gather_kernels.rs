@@ -842,6 +842,149 @@ DONE:
     };
 }
 
+macro_rules! scatter_reduce_nd_16_ptx {
+    (
+        $kname:literal, $version:literal, $target:literal,
+        $decode_acc:literal, $decode_v:literal, $encode_acc:literal
+    ) => {
+        concat!(
+            ".version ",
+            $version,
+            "\n.target ",
+            $target,
+            "\n.address_size 64\n",
+            ".visible .entry ",
+            $kname,
+            "(
+    .param .u64 in_ptr, .param .u64 idx_ptr, .param .u64 src_ptr,
+    .param .u64 out_ptr,
+    .param .u64 input_strides_ptr, .param .u64 index_shape_ptr,
+    .param .u32 rank, .param .u32 dim,
+    .param .u32 input_total, .param .u32 index_total,
+    .param .u32 reduce, .param .u32 include_self
+) {
+    .reg .u32 %gtid, %bid, %bdim, %rank, %dim, %in_tot, %idx_tot, %red, %inc;
+    .reg .u32 %j, %axis, %rem, %size, %coord, %sel, %stride, %dstelem, %touched;
+    .reg .u64 %in, %idx, %src, %out, %istr, %ishape, %off, %addr;
+    .reg .s64 %selv;
+    .reg .b16 %acc_h, %v_h, %zero16;
+    .reg .b32 %acc_bits, %v_bits;
+    .reg .f32 %acc, %v;
+    .reg .pred %p, %p_match, %p_first, %p_mode, %p_cmp;
+
+    ld.param.u64 %in, [in_ptr];
+    ld.param.u64 %idx, [idx_ptr];
+    ld.param.u64 %src, [src_ptr];
+    ld.param.u64 %out, [out_ptr];
+    ld.param.u64 %istr, [input_strides_ptr];
+    ld.param.u64 %ishape, [index_shape_ptr];
+    ld.param.u32 %rank, [rank];
+    ld.param.u32 %dim, [dim];
+    ld.param.u32 %in_tot, [input_total];
+    ld.param.u32 %idx_tot, [index_total];
+    ld.param.u32 %red, [reduce];
+    ld.param.u32 %inc, [include_self];
+
+    mov.b16 %zero16, 0;
+    mov.u32 %bid, %ctaid.x; mov.u32 %bdim, %ntid.x; mov.u32 %gtid, %tid.x;
+    mad.lo.u32 %gtid, %bid, %bdim, %gtid;
+    setp.ge.u32 %p, %gtid, %in_tot; @%p bra DONE;
+
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, 1; add.u64 %addr, %in, %off;
+    ld.global.b16 %acc_h, [%addr];
+",
+            $decode_acc,
+            "
+
+    mov.u32 %touched, 0;
+    mov.u32 %j, 0;
+
+J_LOOP:
+    setp.ge.u32 %p, %j, %idx_tot; @%p bra STORE;
+
+    mov.u32 %axis, %rank;
+    mov.u32 %rem, %j;
+    mov.u32 %dstelem, 0;
+AXIS_LOOP:
+    setp.eq.u32 %p, %axis, 0; @%p bra AXIS_DONE;
+    sub.u32 %axis, %axis, 1;
+
+    cvt.u64.u32 %off, %axis; shl.b64 %off, %off, 2; add.u64 %addr, %ishape, %off;
+    ld.global.u32 %size, [%addr];
+    rem.u32 %coord, %rem, %size;
+    div.u32 %rem, %rem, %size;
+
+    setp.ne.u32 %p, %axis, %dim; @%p bra USE_INDEX_COORD;
+    cvt.u64.u32 %off, %j; shl.b64 %off, %off, 3; add.u64 %addr, %idx, %off;
+    ld.global.s64 %selv, [%addr];
+    cvt.u32.s64 %sel, %selv;
+    mov.u32 %coord, %sel;
+USE_INDEX_COORD:
+    cvt.u64.u32 %off, %axis; shl.b64 %off, %off, 2; add.u64 %addr, %istr, %off;
+    ld.global.u32 %stride, [%addr];
+    mad.lo.u32 %dstelem, %coord, %stride, %dstelem;
+    bra AXIS_LOOP;
+
+AXIS_DONE:
+    setp.eq.u32 %p_match, %dstelem, %gtid;
+    @!%p_match bra NEXT_J;
+
+    cvt.u64.u32 %off, %j; shl.b64 %off, %off, 1; add.u64 %addr, %src, %off;
+    ld.global.b16 %v_h, [%addr];
+",
+            $decode_v,
+            "
+
+    setp.ne.u32 %p_first, %inc, 0;
+    @%p_first bra DO_REDUCE;
+    setp.ne.u32 %p_first, %touched, 0;
+    @%p_first bra DO_REDUCE;
+    mov.f32 %acc, %v;
+    mov.u32 %touched, 1;
+    bra NEXT_J;
+
+DO_REDUCE:
+    mov.u32 %touched, 1;
+    setp.eq.u32 %p_mode, %red, 0;
+    @%p_mode bra RED_SUM;
+    setp.eq.u32 %p_mode, %red, 1;
+    @%p_mode bra RED_PROD;
+    setp.eq.u32 %p_mode, %red, 2;
+    @%p_mode bra RED_AMAX;
+    bra RED_AMIN;
+
+RED_SUM:
+    add.rn.f32 %acc, %acc, %v;
+    bra NEXT_J;
+RED_PROD:
+    mul.rn.f32 %acc, %acc, %v;
+    bra NEXT_J;
+RED_AMAX:
+    setp.lt.f32 %p_cmp, %acc, %v;
+    @%p_cmp mov.f32 %acc, %v;
+    bra NEXT_J;
+RED_AMIN:
+    setp.lt.f32 %p_cmp, %v, %acc;
+    @%p_cmp mov.f32 %acc, %v;
+
+NEXT_J:
+    add.u32 %j, %j, 1;
+    bra J_LOOP;
+
+STORE:
+",
+            $encode_acc,
+            "
+    cvt.u64.u32 %off, %gtid; shl.b64 %off, %off, 1; add.u64 %addr, %out, %off;
+    st.global.b16 [%addr], %acc_h;
+DONE:
+    ret;
+}
+"
+        )
+    };
+}
+
 macro_rules! scatter_value_nd_ptx {
     ($kname:literal, $wsh:literal, $stv:literal, $vreg:literal, $ptype:literal, $ldp:literal) => {
         concat!(
@@ -1193,6 +1336,22 @@ const SCATTER_REDUCE_ND_F64_PTX: &str = scatter_reduce_nd_ptx!(
     "add.rn.f64",
     "mul.rn.f64",
     "setp.lt.f64"
+);
+const SCATTER_REDUCE_ND_F16_PTX: &str = scatter_reduce_nd_16_ptx!(
+    "scatter_reduce_nd_f16_kernel",
+    "7.0",
+    "sm_60",
+    "    cvt.f32.f16 %acc, %acc_h;",
+    "    cvt.f32.f16 %v, %v_h;",
+    "    cvt.rn.f16.f32 %acc_h, %acc;"
+);
+const SCATTER_REDUCE_ND_BF16_PTX: &str = scatter_reduce_nd_16_ptx!(
+    "scatter_reduce_nd_bf16_kernel",
+    "7.8",
+    "sm_80",
+    "    mov.b32 %acc_bits, {%zero16, %acc_h}; mov.b32 %acc, %acc_bits;",
+    "    mov.b32 %v_bits, {%zero16, %v_h}; mov.b32 %v, %v_bits;",
+    "    cvt.rn.bf16.f32 %acc_h, %acc;"
 );
 
 // ===========================================================================
@@ -2373,6 +2532,71 @@ pub fn gpu_scatter_reduce_nd_f64(
         device,
         SCATTER_REDUCE_ND_F64_PTX,
         "scatter_reduce_nd_f64_kernel",
+    )?;
+    Ok(out)
+}
+
+/// f16 rank-aware `scatter_reduce`; companion of
+/// [`gpu_scatter_reduce_nd_f32`]. Values are decoded to f32 for the local
+/// fold and rounded once to f16 at the output store.
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_scatter_reduce_nd_f16(
+    input: &CudaSlice<u16>,
+    idx: &CudaSlice<i64>,
+    src: &CudaSlice<u16>,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    reduce: u32,
+    include_self: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let mut out = clone_u16(input, input.len(), false, device)?;
+    launch_scatter_reduce_nd(
+        input,
+        idx,
+        src,
+        &mut out,
+        input_shape,
+        index_shape,
+        dim,
+        reduce,
+        include_self,
+        device,
+        SCATTER_REDUCE_ND_F16_PTX,
+        "scatter_reduce_nd_f16_kernel",
+    )?;
+    Ok(out)
+}
+
+/// bf16 rank-aware `scatter_reduce`; companion of
+/// [`gpu_scatter_reduce_nd_f16`].
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_scatter_reduce_nd_bf16(
+    input: &CudaSlice<u16>,
+    idx: &CudaSlice<i64>,
+    src: &CudaSlice<u16>,
+    input_shape: &[usize],
+    index_shape: &[usize],
+    dim: usize,
+    reduce: u32,
+    include_self: bool,
+    device: &GpuDevice,
+) -> GpuResult<CudaSlice<u16>> {
+    let mut out = clone_u16(input, input.len(), false, device)?;
+    launch_scatter_reduce_nd(
+        input,
+        idx,
+        src,
+        &mut out,
+        input_shape,
+        index_shape,
+        dim,
+        reduce,
+        include_self,
+        device,
+        SCATTER_REDUCE_ND_BF16_PTX,
+        "scatter_reduce_nd_bf16_kernel",
     )?;
     Ok(out)
 }

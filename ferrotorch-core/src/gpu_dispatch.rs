@@ -8557,6 +8557,45 @@ pub trait GpuBackend: Send + Sync {
         })
     }
 
+    /// Rank-aware f16 `scatter_reduce`; companion of
+    /// [`Self::scatter_reduce_nd_f32`]. CUDA backends keep input/index/src and
+    /// result resident while accumulating in f32 and rounding back to f16.
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_reduce_nd_f16(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+        _reduce: GpuScatterReduce,
+        _include_self: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_reduce_nd_f16",
+        })
+    }
+
+    /// Rank-aware bf16 `scatter_reduce`; companion of
+    /// [`Self::scatter_reduce_nd_f16`].
+    #[allow(clippy::too_many_arguments)]
+    fn scatter_reduce_nd_bf16(
+        &self,
+        _input: &GpuBufferHandle,
+        _index: &GpuBufferHandle,
+        _src: &GpuBufferHandle,
+        _input_shape: &[usize],
+        _index_shape: &[usize],
+        _dim: usize,
+        _reduce: GpuScatterReduce,
+        _include_self: bool,
+    ) -> FerrotorchResult<GpuBufferHandle> {
+        Err(FerrotorchError::NotImplementedOnCuda {
+            op: "scatter_reduce_nd_bf16",
+        })
+    }
+
     /// f32 segmented row-scatter-add (GNN message passing —
     /// `ops::scatter::scatter_add_segments`). `src` is `[e, d]`; `index` is a
     /// resident `i64` per-ROW segment id (length `e`); the result is a fresh
